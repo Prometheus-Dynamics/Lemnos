@@ -370,7 +370,10 @@ fn parallel_worker_count_honors_max_parallel_override() {
     let context = DiscoveryContext::new()
         .with_inline_probe_threshold(0)
         .with_max_parallel_probe_workers(3);
-    assert_eq!(parallel_worker_count(&context, 8), 3);
+    let available_parallelism = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    assert_eq!(parallel_worker_count(&context, 8), 3.min(available_parallelism));
 }
 
 #[test]

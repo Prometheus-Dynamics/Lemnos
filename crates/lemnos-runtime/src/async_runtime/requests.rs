@@ -3,7 +3,7 @@ use crate::async_runtime::sync::{lock, read_lock, write_lock};
 
 impl AsyncRuntime {
     pub async fn bind(&self, device_id: DeviceId) -> AsyncRuntimeResult<()> {
-        let started_at = std::time::Instant::now();
+        let _started_at = std::time::Instant::now();
         let bind_lock = self.bind_lock(&device_id);
         let inner = Arc::clone(&self.inner);
 
@@ -49,7 +49,7 @@ impl AsyncRuntime {
             })
             .await?
         };
-        let (result, failure) = self
+        let (result, _failure) = self
             .run_blocking({
                 let device_id = device_id.clone();
                 move |runtime| {
@@ -67,11 +67,11 @@ impl AsyncRuntime {
             })
             .await?;
         match result {
-            Ok(stored_binding) => {
+            Ok(_stored_binding) => {
                 runtime_info_async!(
                     device_id = ?device_id,
-                    stored_binding = stored_binding,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    stored_binding = _stored_binding,
+                    elapsed_ms = _started_at.elapsed().as_millis() as u64,
                     "async runtime device bound"
                 );
                 Ok(())
@@ -79,9 +79,9 @@ impl AsyncRuntime {
             Err(error) => {
                 runtime_warn_async!(
                     device_id = ?device_id,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    category = ?failure.as_ref().map(|failure| failure.category),
-                    driver_id = ?failure.as_ref().and_then(|failure| failure.driver_id.as_ref().map(|driver_id| driver_id.as_str())),
+                    elapsed_ms = _started_at.elapsed().as_millis() as u64,
+                    category = ?_failure.as_ref().map(|failure| failure.category),
+                    driver_id = ?_failure.as_ref().and_then(|failure| failure.driver_id.as_ref().map(|driver_id| driver_id.as_str())),
                     error = %error,
                     "async runtime device bind failed"
                 );
@@ -179,7 +179,7 @@ impl AsyncRuntime {
     }
 
     pub async fn request(&self, request: DeviceRequest) -> AsyncRuntimeResult<DeviceResponse> {
-        let started_at = std::time::Instant::now();
+        let _started_at = std::time::Instant::now();
         let device_id = request.device_id.clone();
         let interaction_name = crate::runtime::interaction_name_owned(&request.interaction);
         let was_bound = self
@@ -192,7 +192,7 @@ impl AsyncRuntime {
         let inner = Arc::clone(&self.inner);
 
         struct RequestDispatch {
-            attempted_auto_bind: bool,
+            _attempted_auto_bind: bool,
             result: RuntimeResult<(
                 lemnos_core::InteractionResponse,
                 Option<DeviceStateSnapshot>,
@@ -202,7 +202,7 @@ impl AsyncRuntime {
 
         let dispatch = {
             let device_id = device_id.clone();
-            let interaction_name_for_dispatch = interaction_name.clone();
+            let _interaction_name_for_dispatch = interaction_name.clone();
             tokio::task::spawn_blocking(move || {
                 let mut attempted_auto_bind = false;
                 let bind_guard = bind_lock.as_ref().map(|bind_lock| lock(bind_lock));
@@ -212,7 +212,7 @@ impl AsyncRuntime {
                         let runtime = read_lock(&inner);
                         runtime_debug_async!(
                             device_id = ?device_id,
-                            interaction = %interaction_name_for_dispatch,
+                            interaction = %_interaction_name_for_dispatch,
                             auto_bind_on_request = runtime.config().auto_bind_on_request,
                             already_bound = runtime.is_bound(&device_id),
                             "async runtime request dispatch starting"
@@ -304,11 +304,11 @@ impl AsyncRuntime {
                 })();
                 match result {
                     Ok((response, state, auto_bound, attempted_auto_bind)) => RequestDispatch {
-                        attempted_auto_bind,
+                        _attempted_auto_bind: attempted_auto_bind,
                         result: Ok((response, state, auto_bound)),
                     },
                     Err(error) => RequestDispatch {
-                        attempted_auto_bind,
+                        _attempted_auto_bind: attempted_auto_bind,
                         result: Err(error),
                     },
                 }
@@ -316,7 +316,7 @@ impl AsyncRuntime {
             .await?
         };
 
-        let (result, failure) = self
+        let (result, _failure) = self
             .run_blocking({
                 let device_id = device_id.clone();
                 move |runtime| {
@@ -342,13 +342,13 @@ impl AsyncRuntime {
             })
             .await?;
         match result {
-            Ok((interaction, auto_bound)) => {
+            Ok((interaction, _auto_bound)) => {
                 let response = DeviceResponse::new(device_id.clone(), interaction);
                 runtime_info_async!(
                     device_id = ?response.device_id,
                     interaction = %interaction_name,
-                    auto_bound = auto_bound,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    auto_bound = _auto_bound,
+                    elapsed_ms = _started_at.elapsed().as_millis() as u64,
                     "async runtime request completed"
                 );
                 Ok(response)
@@ -356,12 +356,12 @@ impl AsyncRuntime {
             Err(error) => {
                 runtime_warn_async!(
                     device_id = ?device_id,
-                    category = ?failure.as_ref().map(|failure| failure.category),
-                    driver_id = ?failure.as_ref().and_then(|failure| failure.driver_id.as_ref().map(|driver_id| driver_id.as_str())),
+                    category = ?_failure.as_ref().map(|failure| failure.category),
+                    driver_id = ?_failure.as_ref().and_then(|failure| failure.driver_id.as_ref().map(|driver_id| driver_id.as_str())),
                     interaction = %interaction_name,
                     error = %error,
-                    auto_bound = dispatch.attempted_auto_bind,
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    auto_bound = dispatch._attempted_auto_bind,
+                    elapsed_ms = _started_at.elapsed().as_millis() as u64,
                     "async runtime request failed"
                 );
                 Err(AsyncRuntimeError::from(error))
@@ -415,14 +415,14 @@ impl AsyncRuntime {
 }
 
 fn close_prepared_binding_output(
-    device_id: &DeviceId,
+    _device_id: &DeviceId,
     output: crate::runtime::PreparedBindingOutput,
 ) {
     let mut bound = output.bound;
-    if let Err(error) = bound.close() {
+    if let Err(_error) = bound.close() {
         runtime_warn_async!(
-            device_id = ?device_id,
-            error = %error,
+            device_id = ?_device_id,
+            error = %_error,
             "async runtime failed to close discarded prepared binding"
         );
     }

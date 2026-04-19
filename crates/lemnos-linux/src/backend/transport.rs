@@ -74,12 +74,13 @@ impl BusBackend for LinuxBackend {
     }
 
     fn supports_device(&self, device: &DeviceDescriptor) -> bool {
-        gpio::supports_descriptor(device)
-            || optional_support!("pwm", pwm::supports_descriptor(device))
-            || optional_support!("i2c", i2c::supports_descriptor(device))
-            || optional_support!("spi", spi::supports_descriptor(device))
-            || optional_support!("uart", uart::supports_descriptor(device))
-            || optional_support!("usb", usb::supports_descriptor(device))
+        let mut supported = gpio::supports_descriptor(device);
+        supported |= optional_support!("pwm", pwm::supports_descriptor(device));
+        supported |= optional_support!("i2c", i2c::supports_descriptor(device));
+        supported |= optional_support!("spi", spi::supports_descriptor(device));
+        supported |= optional_support!("uart", uart::supports_descriptor(device));
+        supported |= optional_support!("usb", usb::supports_descriptor(device));
+        supported
     }
 }
 
