@@ -1,0 +1,23 @@
+[package]
+name = "lemnos-driver-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Driver authoring SDK for built-in and external Lemnos drivers"
+documentation = "https://docs.rs/lemnos-driver-sdk"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["driver", "sdk", "hardware", "embedded", "linux"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-bus.workspace = true
+lemnos-core.workspace = true
+lemnos-driver-manifest.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Typed bus and session contracts for Lemnos hardware interaction"
+documentation = "https://docs.rs/lemnos-bus"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["hardware", "gpio", "i2c", "spi", "usb"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core.workspace = true
+thiserror.workspace = true

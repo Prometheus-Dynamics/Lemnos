@@ -1,0 +1,27 @@
+[package]
+name = "lemnos-driver-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Driver metadata and compatibility manifest types for Lemnos"
+documentation = "https://docs.rs/lemnos-driver-manifest"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["driver", "manifest", "hardware", "compatibility", "embedded"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+serde = ["dep:serde", "dep:serde_json", "lemnos-core/serde"]
+
+[dependencies]
+lemnos-core.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror.workspace = true

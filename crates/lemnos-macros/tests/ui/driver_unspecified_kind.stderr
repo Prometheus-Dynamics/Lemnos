@@ -1,0 +1,5 @@
+error: `#[driver(kind = Unspecified)]` is not supported; omit `kind` instead
+ --> tests/ui/driver_unspecified_kind.rs:5:12
+  |
+5 |     kind = Unspecified
+  |            ^^^^^^^^^^^

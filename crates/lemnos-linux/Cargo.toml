@@ -1,0 +1,43 @@
+[package]
+name = "lemnos-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Linux-specific discovery, transport, and hotplug backends for Lemnos"
+documentation = "https://docs.rs/lemnos-linux"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["linux", "gpio", "i2c", "spi", "usb"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+full = ["gpio", "pwm", "i2c", "spi", "uart", "usb", "gpio-cdev", "hotplug"]
+gpio = []
+pwm = []
+i2c = ["dep:i2cdev"]
+spi = ["dep:spidev"]
+uart = ["dep:serialport"]
+usb = ["dep:rusb"]
+hotplug = ["dep:inotify"]
+gpio-sysfs = []
+gpio-cdev = ["gpio", "dep:gpio-cdev"]
+tracing = ["dep:tracing"]
+
+[dependencies]
+gpio-cdev = { workspace = true, optional = true }
+i2cdev = { workspace = true, optional = true }
+inotify = { workspace = true, optional = true }
+lemnos-bus.workspace = true
+lemnos-core.workspace = true
+lemnos-discovery.workspace = true
+rusb = { workspace = true, optional = true }
+serialport = { workspace = true, optional = true }
+spidev = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }

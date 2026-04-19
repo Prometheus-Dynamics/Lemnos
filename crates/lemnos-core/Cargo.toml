@@ -1,0 +1,29 @@
+[package]
+name = "lemnos-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared model and stable vocabulary for the Lemnos workspace"
+documentation = "https://docs.rs/lemnos-core"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["hardware", "device", "inventory", "driver", "embedded"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+serde = ["dep:serde", "ordered-float/serde", "serde/rc"]
+
+[dependencies]
+ordered-float.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

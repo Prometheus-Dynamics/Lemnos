@@ -1,0 +1,120 @@
+[package]
+name = "lemnos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Consumer-facing facade crate for the Lemnos hardware workspace"
+documentation = "https://docs.rs/lemnos"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["hardware", "gpio", "i2c", "spi", "usb"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+full = ["builtin-drivers", "linux", "macros", "mock"]
+builtin-drivers = [
+    "dep:lemnos-drivers-gpio",
+    "dep:lemnos-drivers-i2c",
+    "dep:lemnos-drivers-pwm",
+    "dep:lemnos-drivers-spi",
+    "dep:lemnos-drivers-uart",
+    "dep:lemnos-drivers-usb",
+]
+linux-backend = ["dep:lemnos-linux"]
+linux = [
+    "linux-backend",
+    "linux-gpio",
+    "linux-pwm",
+    "linux-i2c",
+    "linux-spi",
+    "linux-uart",
+    "linux-usb",
+    "linux-gpio-cdev",
+    "linux-hotplug",
+]
+linux-gpio = ["linux-backend", "lemnos-linux/gpio"]
+linux-pwm = ["linux-backend", "lemnos-linux/pwm"]
+linux-i2c = ["linux-backend", "lemnos-linux/i2c"]
+linux-spi = ["linux-backend", "lemnos-linux/spi"]
+linux-uart = ["linux-backend", "lemnos-linux/uart"]
+linux-usb = ["linux-backend", "lemnos-linux/usb"]
+linux-hotplug = ["linux-backend", "lemnos-linux/hotplug"]
+linux-gpio-cdev = ["linux-gpio", "lemnos-linux/gpio-cdev"]
+linux-gpio-sysfs = ["linux-gpio", "lemnos-linux/gpio-sysfs"]
+macros = ["dep:lemnos-macros"]
+mock = ["dep:lemnos-mock"]
+tracing = ["lemnos-runtime/tracing", "lemnos-linux?/tracing"]
+tokio = ["lemnos-runtime/tokio", "dep:tokio"]
+
+[dependencies]
+lemnos-bus.workspace = true
+lemnos-core.workspace = true
+lemnos-discovery.workspace = true
+lemnos-driver-manifest.workspace = true
+lemnos-driver-sdk.workspace = true
+lemnos-drivers-gpio = { workspace = true, optional = true }
+lemnos-drivers-i2c = { workspace = true, optional = true }
+lemnos-drivers-pwm = { workspace = true, optional = true }
+lemnos-drivers-spi = { workspace = true, optional = true }
+lemnos-drivers-uart = { workspace = true, optional = true }
+lemnos-drivers-usb = { workspace = true, optional = true }
+lemnos-linux = { workspace = true, optional = true, default-features = false }
+lemnos-macros = { workspace = true, optional = true }
+lemnos-mock = { workspace = true, optional = true }
+lemnos-runtime.workspace = true
+tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+lemnos-mock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[[example]]
+name = "linux_device_validator"
+required-features = ["builtin-drivers", "linux", "macros"]
+
+[[example]]
+name = "linux_hwmon_fan_driver"
+required-features = ["linux"]
+
+[[example]]
+name = "linux_led_class_driver"
+required-features = ["linux"]
+
+[[example]]
+name = "mock_bmi088_driver"
+required-features = ["mock", "macros"]
+
+[[example]]
+name = "mock_bmm150_driver"
+required-features = ["mock", "macros"]
+
+[[example]]
+name = "mock_gpio"
+required-features = ["mock", "builtin-drivers"]
+
+[[example]]
+name = "mock_gpio_async"
+required-features = ["mock", "builtin-drivers", "tokio"]
+
+[[example]]
+name = "mock_gpio_explicit_backend"
+required-features = ["mock", "builtin-drivers"]
+
+[[example]]
+name = "mock_ina226_driver"
+required-features = ["mock", "macros"]
+
+[[example]]
+name = "mock_power_sensor_driver"
+required-features = ["mock", "builtin-drivers"]
+
+[[example]]
+name = "mock_usb_hotplug"
+required-features = ["mock", "builtin-drivers"]

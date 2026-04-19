@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-mock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Mock discovery and fake hardware helpers for Lemnos testing"
+documentation = "https://docs.rs/lemnos-mock"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["mock", "testing", "hardware", "embedded", "driver"]
+categories = ["embedded", "development-tools::testing"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-bus.workspace = true
+lemnos-core.workspace = true
+lemnos-discovery.workspace = true

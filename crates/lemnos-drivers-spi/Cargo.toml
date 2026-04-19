@@ -1,0 +1,26 @@
+[package]
+name = "lemnos-drivers-spi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Built-in generic SPI driver support for Lemnos"
+documentation = "https://docs.rs/lemnos-drivers-spi"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["spi", "driver", "hardware", "embedded", "lemnos"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-bus.workspace = true
+lemnos-core.workspace = true
+lemnos-driver-manifest.workspace = true
+lemnos-driver-sdk.workspace = true
+
+[dev-dependencies]
+lemnos-mock.workspace = true

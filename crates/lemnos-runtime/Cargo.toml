@@ -1,0 +1,45 @@
+[package]
+name = "lemnos-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Embeddable runtime surfaces for discovery, binding, and state in Lemnos"
+documentation = "https://docs.rs/lemnos-runtime"
+readme = "README.md"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["runtime", "hardware", "driver", "embedded", "linux"]
+categories = ["embedded", "hardware-support"]
+
+[lints]
+workspace = true
+
+[features]
+gpio-cdev = ["lemnos-linux/gpio-cdev"]
+tracing = ["dep:tracing"]
+tokio = ["dep:tokio"]
+
+[dependencies]
+lemnos-bus.workspace = true
+lemnos-core.workspace = true
+lemnos-discovery.workspace = true
+lemnos-registry.workspace = true
+lemnos-driver-sdk.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+lemnos-driver-manifest.workspace = true
+lemnos-drivers-gpio.workspace = true
+lemnos-drivers-i2c.workspace = true
+lemnos-drivers-pwm.workspace = true
+lemnos-drivers-spi.workspace = true
+lemnos-drivers-uart.workspace = true
+lemnos-drivers-usb.workspace = true
+lemnos-linux = { workspace = true, default-features = false, features = ["gpio", "gpio-sysfs", "pwm", "i2c", "spi", "uart", "usb", "hotplug"] }
+lemnos-mock.workspace = true
+serialport.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

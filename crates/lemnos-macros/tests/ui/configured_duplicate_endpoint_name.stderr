@@ -1,0 +1,5 @@
+error: duplicate configured endpoint name `sensor`
+ --> tests/ui/configured_duplicate_endpoint_name.rs:9:5
+  |
+9 |     gyro_address: u16,
+  |     ^^^^^^^^^^^^

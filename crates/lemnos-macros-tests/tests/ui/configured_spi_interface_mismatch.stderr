@@ -1,0 +1,5 @@
+error: configured bus annotation must match the configured device interface
+  --> tests/ui/configured_spi_interface_mismatch.rs:12:5
+   |
+12 |     bus: u32,
+   |     ^^^

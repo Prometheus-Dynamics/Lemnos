@@ -1,0 +1,5 @@
+error: driver kind `GpioLine` does not match interface `I2c`
+  --> tests/ui/driver_kind_interface_mismatch.rs:12:12
+   |
+12 |     kind = GpioLine
+   |            ^^^^^^^^
