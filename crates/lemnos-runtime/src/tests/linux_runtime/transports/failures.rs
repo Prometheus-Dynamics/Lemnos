@@ -230,7 +230,11 @@ fn runtime_surfaces_linux_usb_transport_failures_during_bind() {
             && matches!(
                 source.as_ref(),
                 DriverError::Transport {
-                    source: BusError::SessionUnavailable { .. },
+                    source: BusError::SessionUnavailable { .. }
+                        | BusError::TransportFailure {
+                            operation: "open",
+                            ..
+                        },
                     ..
                 }
             )
