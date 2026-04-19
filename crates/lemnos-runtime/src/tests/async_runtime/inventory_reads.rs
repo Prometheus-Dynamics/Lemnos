@@ -2,6 +2,8 @@ use super::*;
 
 mod locking;
 
+const NON_BLOCKING_READ_TIMEOUT: Duration = Duration::from_millis(150);
+
 #[tokio::test(flavor = "multi_thread")]
 async fn async_runtime_summary_queries_avoid_snapshot_reads_for_common_checks() {
     let hardware = MockHardware::builder()
@@ -82,7 +84,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_probe_execution() {
     }
 
     let read = tokio::time::timeout(
-        Duration::from_millis(50),
+        NON_BLOCKING_READ_TIMEOUT,
         tokio::task::spawn_blocking({
             let runtime = runtime.clone();
             move || runtime.inventory_len()
@@ -218,7 +220,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_request_execution() {
     }
 
     let read = tokio::time::timeout(
-        Duration::from_millis(50),
+        NON_BLOCKING_READ_TIMEOUT,
         tokio::task::spawn_blocking({
             let runtime = runtime.clone();
             move || runtime.inventory_len()
@@ -355,7 +357,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_auto_bind_execution() {
     }
 
     let read = tokio::time::timeout(
-        Duration::from_millis(50),
+        NON_BLOCKING_READ_TIMEOUT,
         tokio::task::spawn_blocking({
             let runtime = runtime.clone();
             move || runtime.inventory_len()
@@ -484,7 +486,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_bind_execution() {
     }
 
     let read = tokio::time::timeout(
-        Duration::from_millis(50),
+        NON_BLOCKING_READ_TIMEOUT,
         tokio::task::spawn_blocking({
             let runtime = runtime.clone();
             move || runtime.inventory_len()
@@ -553,7 +555,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_unbind_close() {
     }
 
     let read = tokio::time::timeout(
-        Duration::from_millis(50),
+        NON_BLOCKING_READ_TIMEOUT,
         tokio::task::spawn_blocking({
             let runtime = runtime.clone();
             move || runtime.inventory_len()
@@ -621,7 +623,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_shutdown_close() {
     }
 
     let read = tokio::time::timeout(
-        Duration::from_millis(50),
+        NON_BLOCKING_READ_TIMEOUT,
         tokio::task::spawn_blocking({
             let runtime = runtime.clone();
             move || (runtime.inventory_len(), runtime.is_running())

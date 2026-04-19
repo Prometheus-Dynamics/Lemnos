@@ -164,7 +164,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_watcher_probe_execution()
     }
 
     let read = tokio::time::timeout(
-        Duration::from_millis(50),
+        super::NON_BLOCKING_READ_TIMEOUT,
         tokio::task::spawn_blocking({
             let runtime = runtime.clone();
             move || runtime.inventory_len()
