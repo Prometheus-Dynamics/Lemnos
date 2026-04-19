@@ -161,7 +161,7 @@ impl CompletedWatchRefresh {
         refresh: RuntimeRefreshReport,
     ) -> RuntimeWatchedRefreshReport {
         #[cfg(not(feature = "tracing"))]
-        let _ = watcher_name;
+        let _ = (watcher_name, scoped_probe_count, started_at);
 
         if refresh.discovery.has_probe_failures() || refresh.discovery.has_enrichment_failures() {
             match mode {
