@@ -373,7 +373,10 @@ fn parallel_worker_count_honors_max_parallel_override() {
     let available_parallelism = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
-    assert_eq!(parallel_worker_count(&context, 8), 3.min(available_parallelism));
+    assert_eq!(
+        parallel_worker_count(&context, 8),
+        3.min(available_parallelism)
+    );
 }
 
 #[test]
