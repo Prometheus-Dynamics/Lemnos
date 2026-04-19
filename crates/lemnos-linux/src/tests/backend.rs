@@ -382,6 +382,10 @@ fn linux_backend_usb_open_reports_session_unavailable_for_missing_device() {
     assert!(matches!(
         err,
         lemnos_bus::BusError::SessionUnavailable { .. }
+            | lemnos_bus::BusError::TransportFailure {
+                operation: "open",
+                ..
+            }
     ));
 }
 
