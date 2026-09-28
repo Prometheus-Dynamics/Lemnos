@@ -99,13 +99,6 @@ fn build_hwmon_descriptor(
             path.display()
         )
     })?;
-    let rpm = read_u32(&path.join("fan1_input")).map_err(|error| {
-        format!(
-            "failed to read Linux hwmon fan1_input for '{}' at '{}': {error}",
-            hwmon_name,
-            path.display()
-        )
-    })?;
     let driver = read_link_name(&path.join("device").join("driver")).map_err(|error| {
         format!(
             "failed to read Linux hwmon driver for '{}' at '{}': {error}",
@@ -153,19 +146,13 @@ fn build_hwmon_descriptor(
     if let Some(name) = name {
         builder = builder.property("hwmon.name", name);
     }
-    if let Some(pwm) = pwm {
-        builder = builder.property("fan.pwm", u64::from(pwm));
-    } else {
+    // Live pwm/mode/rpm readings belong in the bound driver's state
+    // telemetry. Publishing them as descriptor properties would make every
+    // refresh that observes a speed change report the fan as changed.
+    if pwm.is_none() || pwm_mode.is_none() {
         builder = builder.health(DeviceHealth::Degraded);
     }
-    if let Some(pwm_mode) = pwm_mode {
-        builder = builder.property("fan.pwm_mode", u64::from(pwm_mode));
-    } else {
-        builder = builder.health(DeviceHealth::Degraded);
-    }
-    if let Some(rpm) = rpm {
-        builder = builder.property("fan.rpm", u64::from(rpm));
-    }
+    builder = builder.property("fan.has_tachometer", path.join("fan1_input").exists());
     if let Some(device_name) = device_name {
         builder = builder.property("linux.device", device_name);
     }

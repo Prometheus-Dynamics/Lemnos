@@ -20,6 +20,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - `RuntimeRebindReport` also lists devices bound by the bind policy. Policy bind failures are recorded as `RuntimeFailureOperation::Bind`.
 - `BuiltInDriverBundle::DRIVER_IDS` now has seven entries.
+- The Linux hwmon probe no longer publishes live `fan.pwm`, `fan.pwm_mode`, or `fan.rpm` descriptor properties, so speed changes no longer mark the fan as changed on refresh. Read them from the bound driver's telemetry. Descriptors now carry a static `fan.has_tachometer` flag.
 
 ## [1.0.0] - 2026-04-19
 

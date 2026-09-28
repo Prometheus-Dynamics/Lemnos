@@ -51,13 +51,11 @@ fn hwmon_probe_discovers_linux_pwm_fan_device() {
         Some(&Value::from("pwm-fan"))
     );
     assert_eq!(
-        device.properties.get("fan.pwm"),
-        Some(&Value::from(120_u64))
+        device.properties.get("fan.has_tachometer"),
+        Some(&Value::from(true))
     );
-    assert_eq!(
-        device.properties.get("fan.rpm"),
-        Some(&Value::from(4321_u64))
-    );
+    assert_eq!(device.properties.get("fan.pwm"), None);
+    assert_eq!(device.properties.get("fan.rpm"), None);
     assert_eq!(
         device.control_surface,
         Some(DeviceControlSurface::LinuxClass {
@@ -67,6 +65,17 @@ fn hwmon_probe_discovers_linux_pwm_fan_device() {
                 .display()
                 .to_string(),
         })
+    );
+
+    root.write("sys/class/hwmon/hwmon3/pwm1", "255\n");
+    root.write("sys/class/hwmon/hwmon3/fan1_input", "9000\n");
+    let rediscovered = probe
+        .discover(&DiscoveryContext::new())
+        .expect("rediscover hwmon devices");
+    assert_eq!(
+        rediscovered.devices.first(),
+        Some(device),
+        "fan speed changes must not change the descriptor"
     );
 }
 
