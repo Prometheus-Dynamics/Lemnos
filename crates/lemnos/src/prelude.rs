@@ -3,7 +3,7 @@ pub use crate::AsyncLemnos;
 #[cfg(feature = "builtin-drivers")]
 pub use crate::BuiltInDriverBundle;
 pub use crate::core::{
-    DeviceRequest, DeviceResponse, DeviceStateSnapshot, GpioDirection, GpioLevel,
+    DeviceRequest, DeviceResponse, DeviceStateSnapshot, DeviceStatus, GpioDirection, GpioLevel,
     GpioLineConfiguration, GpioRequest, GpioResponse, I2cOperation, I2cRequest, I2cResponse,
     InteractionRequest, InteractionResponse, InterfaceKind, PwmConfiguration, PwmRequest,
     PwmResponse, SpiConfiguration, SpiRequest, SpiResponse, StandardRequest, StandardResponse,
@@ -20,6 +20,6 @@ pub use lemnos_runtime::{
     AsyncRuntimeResult, SharedDiscoveryProbe,
 };
 pub use lemnos_runtime::{
-    DriverId, RuntimeBackends, RuntimeConfig, RuntimeError, RuntimeEventCursor,
+    DriverId, RuntimeBackends, RuntimeBindPolicy, RuntimeConfig, RuntimeError, RuntimeEventCursor,
     RuntimeEventSubscription, RuntimeResult, RuntimeWatchRefreshMode,
 };

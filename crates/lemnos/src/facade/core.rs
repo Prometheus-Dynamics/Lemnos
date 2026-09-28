@@ -42,6 +42,17 @@ impl Lemnos {
         self.runtime.set_config(config);
     }
 
+    pub fn bind_policy(&self) -> &RuntimeBindPolicy {
+        self.runtime.bind_policy()
+    }
+
+    /// Replaces the refresh bind policy. See [`Runtime::set_bind_policy`].
+    ///
+    /// [`Runtime::set_bind_policy`]: lemnos_runtime::Runtime::set_bind_policy
+    pub fn set_bind_policy(&mut self, policy: RuntimeBindPolicy) {
+        self.runtime.set_bind_policy(policy);
+    }
+
     pub fn set_backends(&mut self, backends: RuntimeBackends) {
         self.runtime.set_backends(backends);
     }
@@ -70,6 +81,14 @@ impl Lemnos {
 
     pub fn has_state(&self, device_id: &DeviceId) -> bool {
         self.runtime.has_state(device_id)
+    }
+
+    /// Summarizes a device's condition without binding it. See
+    /// [`Runtime::device_status`].
+    ///
+    /// [`Runtime::device_status`]: lemnos_runtime::Runtime::device_status
+    pub fn device_status(&self, device_id: &DeviceId) -> Option<DeviceStatus> {
+        self.runtime.device_status(device_id)
     }
 
     pub fn is_bound(&self, device_id: &DeviceId) -> bool {

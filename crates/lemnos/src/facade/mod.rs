@@ -6,9 +6,9 @@ use lemnos_bus::{
 };
 use lemnos_core::{
     CustomInteractionRequest, DeviceId, DeviceRequest, DeviceResponse, DeviceStateSnapshot,
-    GpioLevel, GpioLineConfiguration, GpioRequest, I2cRequest, InteractionId, InteractionRequest,
-    LemnosEvent, PwmConfiguration, PwmRequest, SpiRequest, StandardRequest, UartRequest,
-    UsbRequest, Value,
+    DeviceStatus, GpioLevel, GpioLineConfiguration, GpioRequest, I2cRequest, InteractionId,
+    InteractionRequest, LemnosEvent, PwmConfiguration, PwmRequest, SpiRequest, StandardRequest,
+    UartRequest, UsbRequest, Value,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryProbe, InventorySnapshot, InventoryWatcher};
 #[cfg(all(feature = "linux", feature = "linux-hotplug"))]
@@ -18,7 +18,7 @@ use lemnos_linux::{LinuxBackend, LinuxPaths, LinuxTransportConfig};
 #[cfg(feature = "mock")]
 use lemnos_mock::MockHardware;
 use lemnos_runtime::{
-    DriverId, Runtime, RuntimeBackends, RuntimeConfig, RuntimeEventCursor,
+    DriverId, Runtime, RuntimeBackends, RuntimeBindPolicy, RuntimeConfig, RuntimeEventCursor,
     RuntimeEventRetentionStats, RuntimeEventSubscription, RuntimeFailureRecord,
     RuntimeRefreshReport, RuntimeResult, RuntimeWatchedRefreshReport,
 };

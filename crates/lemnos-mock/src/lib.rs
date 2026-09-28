@@ -3,6 +3,7 @@
 mod faults;
 mod gpio;
 mod hardware;
+mod hwmon;
 mod i2c;
 mod pwm;
 mod spi;
@@ -12,6 +13,7 @@ mod usb;
 pub use faults::{MockFaultScript, MockFaultStep};
 pub use gpio::MockGpioLine;
 pub use hardware::{MockHardware, MockHardwareBuilder};
+pub use hwmon::MockHwmonFan;
 pub use i2c::MockI2cDevice;
 pub use pwm::MockPwmChannel;
 pub use spi::MockSpiDevice;

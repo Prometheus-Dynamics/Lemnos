@@ -3,6 +3,7 @@
 #[cfg(feature = "tokio")]
 mod async_runtime;
 mod backends;
+mod bind_policy;
 mod config;
 mod diagnostics;
 mod error;
@@ -15,6 +16,7 @@ pub use async_runtime::{
     AsyncRuntimeResult, SharedDiscoveryProbe,
 };
 pub use backends::RuntimeBackends;
+pub use bind_policy::RuntimeBindPolicy;
 pub use config::{RuntimeConfig, RuntimeWatchRefreshMode};
 pub use diagnostics::{RuntimeFailureCategory, RuntimeFailureOperation, RuntimeFailureRecord};
 pub use error::{RuntimeError, RuntimeResult};

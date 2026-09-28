@@ -104,6 +104,62 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Renders a scalar value as a flat label string.
+    ///
+    /// Bytes render as lowercase `0x`-prefixed hex. `Null`, lists, and maps
+    /// have no scalar form and return `None`; use [`Value::flatten_labels`]
+    /// for nested values.
+    pub fn to_label_string(&self) -> Option<String> {
+        match self {
+            Self::Null | Self::List(_) | Self::Map(_) => None,
+            Self::Bool(value) => Some(value.to_string()),
+            Self::I64(value) => Some(value.to_string()),
+            Self::U64(value) => Some(value.to_string()),
+            Self::F64(value) => Some(value.to_string()),
+            Self::String(value) => Some(value.clone()),
+            Self::Bytes(bytes) => {
+                let mut out = String::with_capacity(2 + bytes.len() * 2);
+                out.push_str("0x");
+                for byte in bytes {
+                    use std::fmt::Write as _;
+                    let _ = write!(out, "{byte:02x}");
+                }
+                Some(out)
+            }
+        }
+    }
+
+    /// Flattens this value into `(key, label)` string pairs rooted at `key`.
+    ///
+    /// Scalars produce a single pair. Maps recurse as `key.child` and lists as
+    /// `key.0`, `key.1`, and so on. `Null` values are skipped. This is the
+    /// shape string-only label stores (resource labels, metrics tags) expect.
+    pub fn flatten_labels(&self, key: impl Into<String>) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        self.flatten_labels_into(key.into(), &mut out);
+        out
+    }
+
+    fn flatten_labels_into(&self, key: String, out: &mut Vec<(String, String)>) {
+        match self {
+            Self::Map(values) => {
+                for (child, value) in values {
+                    value.flatten_labels_into(format!("{key}.{child}"), out);
+                }
+            }
+            Self::List(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    value.flatten_labels_into(format!("{key}.{index}"), out);
+                }
+            }
+            scalar => {
+                if let Some(label) = scalar.to_label_string() {
+                    out.push((key, label));
+                }
+            }
+        }
+    }
 }
 
 impl From<bool> for Value {
@@ -176,5 +232,49 @@ mod tests {
         let value = Value::from(500_u64);
         assert_eq!(value.as_u64(), Some(500));
         assert_eq!(value.as_bool(), None);
+    }
+
+    #[test]
+    fn renders_scalar_label_strings() {
+        assert_eq!(Value::from(true).to_label_string().as_deref(), Some("true"));
+        assert_eq!(Value::from(-3_i64).to_label_string().as_deref(), Some("-3"));
+        assert_eq!(
+            Value::from(1.5_f64).to_label_string().as_deref(),
+            Some("1.5")
+        );
+        assert_eq!(
+            Value::from(vec![0x0a_u8, 0xff])
+                .to_label_string()
+                .as_deref(),
+            Some("0x0aff")
+        );
+        assert_eq!(Value::Null.to_label_string(), None);
+        assert_eq!(Value::from(ValueMap::new()).to_label_string(), None);
+    }
+
+    #[test]
+    fn flattens_nested_values_into_dotted_labels() {
+        let mut inner = ValueMap::new();
+        inner.insert("rpm".into(), Value::from(1200_u64));
+        inner.insert("skipped".into(), Value::Null);
+        let mut outer = ValueMap::new();
+        outer.insert("fan".into(), Value::from(inner));
+        outer.insert(
+            "modes".into(),
+            Value::from(vec![Value::from("auto"), Value::from("manual")]),
+        );
+
+        assert_eq!(
+            Value::from(outer).flatten_labels("telemetry"),
+            vec![
+                ("telemetry.fan.rpm".to_string(), "1200".to_string()),
+                ("telemetry.modes.0".to_string(), "auto".to_string()),
+                ("telemetry.modes.1".to_string(), "manual".to_string()),
+            ]
+        );
+        assert_eq!(
+            Value::from(7_u64).flatten_labels("pwm"),
+            vec![("pwm".to_string(), "7".to_string())]
+        );
     }
 }

@@ -30,3 +30,17 @@ pub enum RegistryError {
         driver_ids: Vec<DriverId>,
     },
 }
+
+impl RegistryError {
+    pub fn kind(&self) -> lemnos_core::ErrorKind {
+        use lemnos_core::ErrorKind;
+        match self {
+            Self::UnknownPreferredDriver { .. } => ErrorKind::NotFound,
+            Self::NoMatchingDriver { .. } => ErrorKind::Unsupported,
+            Self::DuplicateDriverId { .. }
+            | Self::InvalidManifest { .. }
+            | Self::PreferredDriverDidNotMatch { .. }
+            | Self::ConflictingMatches { .. } => ErrorKind::Configuration,
+        }
+    }
+}

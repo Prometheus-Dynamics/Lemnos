@@ -2,6 +2,7 @@ use super::*;
 use lemnos_bus::{
     GpioBusBackend, I2cBusBackend, PwmBusBackend, SpiBusBackend, UartBusBackend, UsbBusBackend,
 };
+use lemnos_core::DeviceStatus;
 
 impl Runtime {
     pub fn new() -> Self {
@@ -23,6 +24,20 @@ impl Runtime {
         runtime_debug!(config = ?config, "runtime config updated");
         self.config = config;
         self.enforce_event_retention();
+    }
+
+    pub fn bind_policy(&self) -> &RuntimeBindPolicy {
+        &self.bind_policy
+    }
+
+    /// Replaces the refresh bind policy.
+    ///
+    /// The policy applies to devices later refreshes add or change; devices
+    /// already in the inventory are not bound retroactively. Set it before the
+    /// first refresh to cover the initial inventory.
+    pub fn set_bind_policy(&mut self, policy: RuntimeBindPolicy) {
+        runtime_debug!(policy = ?policy, "runtime bind policy updated");
+        self.bind_policy = policy;
     }
 
     pub fn is_running(&self) -> bool {
@@ -141,6 +156,24 @@ impl Runtime {
 
     pub fn has_state(&self, device_id: &DeviceId) -> bool {
         self.states.contains_key(device_id)
+    }
+
+    /// Summarizes a device's condition without binding it.
+    ///
+    /// Returns `None` for devices outside the current inventory. A cached state
+    /// snapshot, from a bound driver, decides the status when present.
+    /// Otherwise a recorded bind or request failure reports
+    /// [`DeviceStatus::Faulted`] and a plain discovered device reports
+    /// [`DeviceStatus::Available`].
+    pub fn device_status(&self, device_id: &DeviceId) -> Option<DeviceStatus> {
+        if !self.inventory.contains(device_id) {
+            return None;
+        }
+        Some(match self.states.get(device_id) {
+            Some(state) => state.status(),
+            None if self.failures.contains_key(device_id) => DeviceStatus::Faulted,
+            None => DeviceStatus::Available,
+        })
     }
 
     pub fn is_bound(&self, device_id: &DeviceId) -> bool {

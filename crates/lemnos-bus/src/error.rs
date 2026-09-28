@@ -1,4 +1,4 @@
-use lemnos_core::{DeviceId, InterfaceKind};
+use lemnos_core::{DeviceId, ErrorKind, InterfaceKind};
 use thiserror::Error;
 
 pub type BusResult<T> = Result<T, BusError>;
@@ -46,4 +46,22 @@ pub enum BusError {
         operation: &'static str,
         reason: String,
     },
+}
+
+impl BusError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::UnsupportedInterface { .. } | Self::UnsupportedDevice { .. } => {
+                ErrorKind::Unsupported
+            }
+            Self::AccessConflict { .. } => ErrorKind::Busy,
+            Self::SessionUnavailable { .. } | Self::Disconnected { .. } => ErrorKind::Unavailable,
+            Self::TransportFailure { .. } => ErrorKind::Failed,
+            Self::Timeout { .. } => ErrorKind::Timeout,
+            Self::InvalidRequest { .. } | Self::InvalidConfiguration { .. } => {
+                ErrorKind::InvalidInput
+            }
+            Self::PermissionDenied { .. } => ErrorKind::PermissionDenied,
+        }
+    }
 }

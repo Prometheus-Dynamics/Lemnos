@@ -33,3 +33,10 @@ pub enum ManifestError {
         source: CoreError,
     },
 }
+
+impl ManifestError {
+    /// Manifest errors are driver definition mistakes.
+    pub fn kind(&self) -> lemnos_core::ErrorKind {
+        lemnos_core::ErrorKind::Configuration
+    }
+}

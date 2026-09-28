@@ -41,6 +41,26 @@ pub enum DeviceLifecycleState {
     Faulted,
 }
 
+/// Coarse single-value summary of a device's condition.
+///
+/// Collapses [`Availability`], [`DeviceHealth`], and [`DeviceLifecycleState`]
+/// into the one status most consumers publish. Variants are ordered from best
+/// to worst, so `max` picks the worse of two statuses.
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DeviceStatus {
+    /// Present and usable.
+    #[default]
+    Available,
+    /// Present but running with warnings or incomplete information.
+    Degraded,
+    /// Present but its driver or last operation failed.
+    Faulted,
+    /// Removed, offline, or otherwise not reachable.
+    Missing,
+}
+
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -181,12 +201,59 @@ impl DeviceStateSnapshot {
         self.last_operation = Some(record);
         self
     }
+    /// Summarizes availability, health, and lifecycle as one [`DeviceStatus`].
+    ///
+    /// Precedence: missing (absent, removed, or offline) beats faulted (failed
+    /// health or faulted lifecycle), which beats degraded (degraded or unknown
+    /// health, unknown availability).
+    pub fn status(&self) -> DeviceStatus {
+        if self.availability == Availability::Missing
+            || self.lifecycle == DeviceLifecycleState::Removed
+            || self.health == DeviceHealth::Offline
+        {
+            DeviceStatus::Missing
+        } else if self.health == DeviceHealth::Failed
+            || self.lifecycle == DeviceLifecycleState::Faulted
+        {
+            DeviceStatus::Faulted
+        } else if matches!(self.health, DeviceHealth::Degraded | DeviceHealth::Unknown)
+            || self.availability == Availability::Unknown
+        {
+            DeviceStatus::Degraded
+        } else {
+            DeviceStatus::Available
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{DeviceId, IssueCategory, IssueSeverity};
+
+    #[test]
+    fn status_summarizes_with_missing_over_faulted_over_degraded() {
+        let base = DeviceStateSnapshot::new(DeviceId::new("dev").expect("device id"));
+        assert_eq!(base.status(), DeviceStatus::Available);
+
+        let degraded = base.clone().with_health(DeviceHealth::Unknown);
+        assert_eq!(degraded.status(), DeviceStatus::Degraded);
+
+        let faulted = degraded
+            .clone()
+            .with_lifecycle(DeviceLifecycleState::Faulted);
+        assert_eq!(faulted.status(), DeviceStatus::Faulted);
+
+        let mut missing = faulted.clone();
+        missing.availability = Availability::Missing;
+        assert_eq!(missing.status(), DeviceStatus::Missing);
+        assert_eq!(
+            base.clone().with_health(DeviceHealth::Offline).status(),
+            DeviceStatus::Missing
+        );
+        assert!(DeviceStatus::Missing > DeviceStatus::Faulted);
+        assert!(DeviceStatus::Faulted > DeviceStatus::Degraded);
+    }
 
     #[test]
     fn state_snapshot_collects_issue_and_operation_data() {

@@ -6,6 +6,7 @@ use lemnos_discovery::{DiscoveryError, DiscoveryResult, InventoryWatchEvent, Inv
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 const WATCHER_NAME: &str = "linux.hotplug";
@@ -207,12 +208,39 @@ impl InventoryWatcher for LinuxHotplugWatcher {
     }
 
     fn poll(&mut self) -> DiscoveryResult<Vec<InventoryWatchEvent>> {
+        match self.read_batch() {
+            Ok(events) => Ok(events),
+            Err(ReadBatchError::WouldBlock) => Ok(Vec::new()),
+            Err(ReadBatchError::Failed(error)) => Err(error),
+        }
+    }
+}
+
+/// Outcome of a single non-blocking inotify read that failed to produce a
+/// batch. `WouldBlock` means the kernel queue is drained, which async callers
+/// need to distinguish from "read events, none relevant" before clearing
+/// readiness.
+pub(crate) enum ReadBatchError {
+    WouldBlock,
+    Failed(DiscoveryError),
+}
+
+impl From<DiscoveryError> for ReadBatchError {
+    fn from(error: DiscoveryError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl LinuxHotplugWatcher {
+    pub(crate) fn read_batch(&mut self) -> Result<Vec<InventoryWatchEvent>, ReadBatchError> {
         self.sync_pwm_chip_watches()?;
 
         let events = match self.inotify.read_events(&mut self.buffer) {
             Ok(events) => events.map(|event| event.to_owned()).collect::<Vec<_>>(),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(Vec::new()),
-            Err(error) => return Err(watch_error(self.name(), error)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Err(ReadBatchError::WouldBlock);
+            }
+            Err(error) => return Err(watch_error(WATCHER_NAME, error).into()),
         };
 
         if events.is_empty() {
@@ -264,10 +292,25 @@ impl InventoryWatcher for LinuxHotplugWatcher {
         );
 
         Ok(vec![InventoryWatchEvent::new(
-            self.name(),
+            WATCHER_NAME,
             interfaces.into_iter().collect(),
             paths.into_iter().collect(),
         )])
+    }
+}
+
+impl AsFd for LinuxHotplugWatcher {
+    /// The underlying non-blocking inotify descriptor. It becomes readable when
+    /// [`InventoryWatcher::poll`] has events to report, so callers can wait on
+    /// it with `poll(2)`, `epoll`, or an async reactor instead of sleeping.
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.inotify.as_fd()
+    }
+}
+
+impl AsRawFd for LinuxHotplugWatcher {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inotify.as_raw_fd()
     }
 }
 

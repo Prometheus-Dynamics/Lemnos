@@ -1,5 +1,5 @@
 use crate::{
-    Runtime, RuntimeBackends, RuntimeConfig, RuntimeError, RuntimeEventCursor,
+    Runtime, RuntimeBackends, RuntimeBindPolicy, RuntimeConfig, RuntimeError, RuntimeEventCursor,
     RuntimeEventRetentionStats, RuntimeEventSubscription, RuntimeFailureRecord,
     RuntimeRefreshReport, RuntimeResult, RuntimeWatchedRefreshReport,
     runtime::{CompletedWatchRefresh, RefreshMode, WatchedRefreshMode, prepare_watch_refresh},
@@ -7,7 +7,9 @@ use crate::{
 use lemnos_bus::{
     GpioBusBackend, I2cBusBackend, PwmBusBackend, SpiBusBackend, UartBusBackend, UsbBusBackend,
 };
-use lemnos_core::{DeviceId, DeviceRequest, DeviceResponse, DeviceStateSnapshot, LemnosEvent};
+use lemnos_core::{
+    DeviceId, DeviceRequest, DeviceResponse, DeviceStateSnapshot, DeviceStatus, LemnosEvent,
+};
 use lemnos_discovery::{
     DiscoveryContext, DiscoveryProbe, InventorySnapshot, InventoryWatcher, run_probes,
 };
@@ -52,6 +54,18 @@ pub enum AsyncRuntimeError {
     Runtime(#[from] RuntimeError),
     #[error("tokio blocking task failed: {0}")]
     Join(#[from] JoinError),
+}
+
+impl AsyncRuntimeError {
+    /// Classifies the error. A failed blocking task is [`ErrorKind::Failed`].
+    ///
+    /// [`ErrorKind::Failed`]: lemnos_core::ErrorKind::Failed
+    pub fn kind(&self) -> lemnos_core::ErrorKind {
+        match self {
+            Self::Runtime(source) => source.kind(),
+            Self::Join(_) => lemnos_core::ErrorKind::Failed,
+        }
+    }
 }
 
 /// Tokio-backed adapter over the synchronous [`Runtime`].

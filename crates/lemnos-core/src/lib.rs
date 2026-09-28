@@ -4,6 +4,7 @@ mod capability;
 mod configured;
 mod descriptor;
 mod error;
+mod error_kind;
 mod event;
 mod ids;
 mod interface;
@@ -28,6 +29,7 @@ pub use descriptor::{
     DeviceLink, DeviceRelation, MatchHints,
 };
 pub use error::{CoreError, CoreResult};
+pub use error_kind::ErrorKind;
 pub use event::{DeviceEvent, InventoryEvent, LemnosEvent, StateEvent};
 pub use ids::{CapabilityId, DeviceId, InteractionId, IssueCode, LocalDeviceId};
 pub use interface::InterfaceKind;
@@ -43,8 +45,8 @@ pub use request::{
     UsbRecipient, UsbRequest, UsbRequestType, UsbResponse,
 };
 pub use state::{
-    Availability, DeviceHealth, DeviceLifecycleState, DeviceStateSnapshot, OperationRecord,
-    OperationStatus,
+    Availability, DeviceHealth, DeviceLifecycleState, DeviceStateSnapshot, DeviceStatus,
+    OperationRecord, OperationStatus,
 };
 pub use time::TimestampMs;
 pub use value::{Value, ValueKind, ValueMap};

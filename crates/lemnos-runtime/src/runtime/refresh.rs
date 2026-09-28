@@ -13,7 +13,7 @@ pub(crate) struct PreparedRefreshCommit {
     retained_prior_inventory: bool,
     diff: InventoryDiff,
     detached: Vec<DetachedBoundDevice>,
-    rebind_targets: Vec<DeviceId>,
+    rebind_targets: Vec<RefreshBindTarget>,
     snapshot: Arc<InventorySnapshot>,
 }
 
@@ -22,7 +22,7 @@ impl PreparedRefreshCommit {
         std::mem::take(&mut self.detached)
     }
 
-    pub(crate) fn take_rebind_targets(&mut self) -> Vec<DeviceId> {
+    pub(crate) fn take_rebind_targets(&mut self) -> Vec<RefreshBindTarget> {
         std::mem::take(&mut self.rebind_targets)
     }
 
@@ -233,26 +233,47 @@ impl Runtime {
         &self,
         diff: &InventoryDiff,
         invalidated_bindings: &BTreeSet<DeviceId>,
-    ) -> Vec<DeviceId> {
-        if !self.config.auto_rebind_on_refresh {
-            return Vec::new();
-        }
+    ) -> Vec<RefreshBindTarget> {
+        // Added devices, plus changed devices that are unbound or whose
+        // binding the change invalidated.
+        let candidates =
+            diff.added
+                .iter()
+                .chain(
+                    diff.changed
+                        .iter()
+                        .map(|changed| &changed.current)
+                        .filter(|device| {
+                            invalidated_bindings.contains(&device.id)
+                                || !self.bindings.contains_key(&device.id)
+                        }),
+                );
 
-        let mut targets = BTreeSet::new();
-        for device in &diff.added {
-            if self.desired_bindings.contains(&device.id) {
-                targets.insert(device.id.clone());
+        let mut targets = BTreeMap::new();
+        for device in candidates {
+            if self.config.auto_rebind_on_refresh && self.desired_bindings.contains(&device.id) {
+                targets.insert(device.id.clone(), RuntimeFailureOperation::Rebind);
+            } else if self.matches_bind_policy(device) {
+                targets.insert(device.id.clone(), RuntimeFailureOperation::Bind);
             }
         }
-        for changed in &diff.changed {
-            if self.desired_bindings.contains(&changed.current.id)
-                && (invalidated_bindings.contains(&changed.current.id)
-                    || !self.bindings.contains_key(&changed.current.id))
-            {
-                targets.insert(changed.current.id.clone());
-            }
+        targets
+            .into_iter()
+            .map(|(device_id, operation)| RefreshBindTarget {
+                device_id,
+                operation,
+            })
+            .collect()
+    }
+
+    fn matches_bind_policy(&self, device: &lemnos_core::DeviceDescriptor) -> bool {
+        if self.bind_policy.is_empty() {
+            return false;
         }
-        targets.into_iter().collect()
+        match self.registry.resolve(device) {
+            Ok(candidate) => self.bind_policy.matches(device, &candidate.driver_id),
+            Err(_) => false,
+        }
     }
 
     fn binding_requires_rebind(&self, changed: &lemnos_discovery::ChangedDevice) -> bool {
@@ -281,17 +302,22 @@ impl Runtime {
 
     pub(crate) fn rebind_tracked_devices(
         &mut self,
-        device_ids: Vec<DeviceId>,
+        targets: Vec<RefreshBindTarget>,
     ) -> RuntimeRebindReport {
         let mut report = RuntimeRebindReport::default();
 
-        for device_id in device_ids {
+        for RefreshBindTarget {
+            device_id,
+            operation,
+        } in targets
+        {
             report.attempted.push(device_id.clone());
-            runtime_debug!(device_id = ?device_id, "runtime attempting rebind");
+            runtime_debug!(device_id = ?device_id, operation = ?operation, "runtime attempting refresh bind");
             let result = self.bind_device_by_id(&device_id);
-            self.complete_operation(device_id.clone(), RuntimeFailureOperation::Rebind, &result);
+            self.complete_operation(device_id.clone(), operation, &result);
             if result.is_ok() {
-                runtime_info!(device_id = ?device_id, "runtime device rebound");
+                runtime_info!(device_id = ?device_id, operation = ?operation, "runtime device bound by refresh");
+                self.desired_bindings.insert(device_id.clone());
                 report.rebound.push(device_id);
             } else {
                 if let Err(_error) = &result {
@@ -323,6 +349,14 @@ impl Runtime {
             Ok((*discovery.snapshot).clone())
         }
     }
+}
+
+/// A device a refresh will bind, and whether that is a rebind of a device a
+/// caller bound before or a first bind requested by the bind policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefreshBindTarget {
+    device_id: DeviceId,
+    operation: RuntimeFailureOperation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

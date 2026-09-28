@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "hotplug", feature = "tokio"))]
+mod async_watch;
 mod backend;
 mod discovery;
 mod metadata;
@@ -9,6 +11,8 @@ mod util;
 #[cfg(feature = "hotplug")]
 mod watch;
 
+#[cfg(all(feature = "hotplug", feature = "tokio"))]
+pub use async_watch::AsyncLinuxHotplugWatcher;
 pub use backend::LinuxBackend;
 pub use backend::LinuxTransportConfig;
 #[cfg(feature = "i2c")]

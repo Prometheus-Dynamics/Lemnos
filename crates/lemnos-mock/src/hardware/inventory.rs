@@ -78,6 +78,10 @@ impl MockHardware {
             state.faults.clear_device(device_id);
             return true;
         }
+        if state.hwmon_fans.remove(device_id).is_some() {
+            state.faults.clear_device(device_id);
+            return true;
+        }
 
         let Some(owner_id) = state.usb_descriptor_owners.get(device_id).cloned() else {
             return false;
@@ -184,6 +188,7 @@ impl MockHardware {
                     .values()
                     .map(|port| port.descriptor.clone()),
             )
+            .chain(state.hwmon_fans.values().map(|fan| fan.descriptor.clone()))
             .chain(state.usb_devices.values().flat_map(|device| {
                 std::iter::once(device.device_descriptor.clone())
                     .chain(device.interface_descriptors.iter().cloned())

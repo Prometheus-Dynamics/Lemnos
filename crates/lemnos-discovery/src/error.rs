@@ -1,4 +1,4 @@
-use lemnos_core::{CoreError, DeviceId};
+use lemnos_core::{CoreError, DeviceId, ErrorKind};
 use thiserror::Error;
 
 pub type DiscoveryResult<T> = Result<T, DiscoveryError>;
@@ -18,4 +18,15 @@ pub enum DiscoveryError {
     },
     #[error("discovery produced duplicate device id '{device_id}'")]
     DuplicateDeviceId { device_id: DeviceId },
+}
+
+impl DiscoveryError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::ProbeFailed { .. } | Self::WatchFailed { .. } => ErrorKind::Failed,
+            Self::InvalidDescriptor { .. } | Self::DuplicateDeviceId { .. } => {
+                ErrorKind::Configuration
+            }
+        }
+    }
 }

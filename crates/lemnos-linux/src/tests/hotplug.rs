@@ -51,3 +51,38 @@ fn linux_hotplug_watcher_reports_pwm_chip_child_changes() {
             .any(|path| path.to_string_lossy().contains("pwm1"))
     );
 }
+
+#[cfg(feature = "tokio")]
+#[tokio::test(flavor = "current_thread")]
+async fn async_linux_hotplug_watcher_wakes_on_gpio_root_changes() {
+    use std::time::Duration;
+
+    let root = TestRoot::new();
+    create_watch_roots(&root);
+
+    let backend = LinuxBackend::with_paths(root.paths());
+    let mut watcher = backend
+        .async_hotplug_watcher()
+        .expect("create async hotplug watcher");
+
+    let idle = tokio::time::timeout(Duration::from_millis(50), watcher.next_events()).await;
+    assert!(idle.is_err(), "watcher must park while nothing changes");
+
+    root.create_dir("sys/class/gpio/gpiochip9");
+
+    let events = tokio::time::timeout(Duration::from_secs(5), watcher.next_events())
+        .await
+        .expect("watcher wakes on change")
+        .expect("read watch events");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].touches(InterfaceKind::Gpio));
+    assert!(
+        events[0]
+            .paths
+            .iter()
+            .any(|path| path.to_string_lossy().contains("gpiochip9"))
+    );
+
+    let drained = tokio::time::timeout(Duration::from_millis(50), watcher.next_events()).await;
+    assert!(drained.is_err(), "watcher must park again once drained");
+}

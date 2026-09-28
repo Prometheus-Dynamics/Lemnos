@@ -1,5 +1,6 @@
 use crate::faults::{MockFaultRegistry, MockFaultScript};
 use crate::gpio::{MockGpioLine, MockGpioLineState, MockGpioSession};
+use crate::hwmon::{MockHwmonFan, MockHwmonFanState};
 use crate::i2c::{MockI2cControllerSession, MockI2cDevice, MockI2cDeviceState, MockI2cSession};
 use crate::pwm::{MockPwmChannel, MockPwmChannelState, MockPwmSession};
 use crate::spi::{MockSpiDevice, MockSpiDeviceState, MockSpiSession};
@@ -22,6 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 mod backends;
 mod builder;
+mod hwmon;
 mod inventory;
 
 pub(crate) const MOCK_BACKEND_NAME: &str = "mock-hardware";
@@ -43,6 +45,7 @@ pub(crate) struct MockHardwareState {
     pub uart_ports: BTreeMap<DeviceId, MockUartPortState>,
     pub usb_devices: BTreeMap<DeviceId, MockUsbDeviceState>,
     pub usb_descriptor_owners: BTreeMap<DeviceId, DeviceId>,
+    pub hwmon_fans: BTreeMap<DeviceId, MockHwmonFanState>,
     pub faults: MockFaultRegistry,
 }
 
@@ -54,6 +57,7 @@ pub struct MockHardwareBuilder {
     spi_devices: Vec<MockSpiDevice>,
     uart_ports: Vec<MockUartPort>,
     usb_devices: Vec<MockUsbDevice>,
+    hwmon_fans: Vec<MockHwmonFan>,
 }
 
 #[derive(Clone, Default)]

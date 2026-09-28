@@ -104,6 +104,22 @@ impl AsyncLemnos {
         self.runtime.set_config_async(config).await
     }
 
+    pub fn bind_policy(&self) -> RuntimeBindPolicy {
+        self.runtime.bind_policy()
+    }
+
+    pub async fn bind_policy_async(&self) -> AsyncRuntimeResult<RuntimeBindPolicy> {
+        self.runtime.bind_policy_async().await
+    }
+
+    pub fn set_bind_policy(&self, policy: RuntimeBindPolicy) {
+        self.runtime.set_bind_policy(policy);
+    }
+
+    pub async fn set_bind_policy_async(&self, policy: RuntimeBindPolicy) -> AsyncRuntimeResult<()> {
+        self.runtime.set_bind_policy_async(policy).await
+    }
+
     pub fn set_backends(&self, backends: RuntimeBackends) {
         self.runtime.set_backends(backends);
     }
@@ -186,6 +202,17 @@ impl AsyncLemnos {
 
     pub async fn has_state_async(&self, device_id: DeviceId) -> AsyncRuntimeResult<bool> {
         self.runtime.has_state_async(device_id).await
+    }
+
+    pub fn device_status(&self, device_id: &DeviceId) -> Option<DeviceStatus> {
+        self.runtime.device_status(device_id)
+    }
+
+    pub async fn device_status_async(
+        &self,
+        device_id: DeviceId,
+    ) -> AsyncRuntimeResult<Option<DeviceStatus>> {
+        self.runtime.device_status_async(device_id).await
     }
 
     pub fn is_bound(&self, device_id: &DeviceId) -> bool {

@@ -1,5 +1,5 @@
 use lemnos_bus::BusError;
-use lemnos_core::{CoreError, DeviceId, InterfaceKind};
+use lemnos_core::{CoreError, DeviceId, ErrorKind, InterfaceKind};
 use std::io;
 use thiserror::Error;
 
@@ -64,4 +64,19 @@ pub enum DriverError {
     },
     #[error("driver '{driver_id}' does not implement '{action}'")]
     NotImplemented { driver_id: String, action: String },
+}
+
+impl DriverError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::MissingBackend { .. }
+            | Self::BindRejected { .. }
+            | Self::UnsupportedAction { .. }
+            | Self::NotImplemented { .. } => ErrorKind::Unsupported,
+            Self::BindFailed { .. } | Self::InvariantViolation { .. } => ErrorKind::Failed,
+            Self::InvalidRequest { source, .. } => source.kind(),
+            Self::Transport { source, .. } => source.kind(),
+            Self::HostIo { source, .. } => ErrorKind::from_io(source.kind()),
+        }
+    }
 }

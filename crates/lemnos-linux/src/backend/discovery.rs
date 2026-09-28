@@ -117,4 +117,12 @@ impl LinuxBackend {
     pub fn hotplug_watcher(&self) -> DiscoveryResult<LinuxHotplugWatcher> {
         LinuxHotplugWatcher::new(self.paths.clone())
     }
+
+    /// Creates a hotplug watcher registered with the current Tokio reactor.
+    ///
+    /// Must be called from within a Tokio runtime with IO enabled.
+    #[cfg(all(feature = "hotplug", feature = "tokio"))]
+    pub fn async_hotplug_watcher(&self) -> DiscoveryResult<crate::AsyncLinuxHotplugWatcher> {
+        crate::AsyncLinuxHotplugWatcher::new(self.hotplug_watcher()?)
+    }
 }

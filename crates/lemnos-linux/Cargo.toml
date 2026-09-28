@@ -29,6 +29,8 @@ hotplug = ["dep:inotify"]
 gpio-sysfs = []
 gpio-cdev = ["gpio", "dep:gpio-cdev"]
 tracing = ["dep:tracing"]
+# Reactor-driven async hotplug watching; takes effect together with `hotplug`.
+tokio = ["dep:tokio"]
 
 [dependencies]
 gpio-cdev = { workspace = true, optional = true }
@@ -40,4 +42,8 @@ lemnos-discovery.workspace = true
 rusb = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }
 spidev = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["net"] }
 tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

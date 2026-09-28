@@ -1,4 +1,4 @@
-use lemnos_core::{CoreError, DeviceId};
+use lemnos_core::{CoreError, DeviceId, ErrorKind};
 use lemnos_discovery::DiscoveryError;
 use lemnos_driver_sdk::DriverError;
 use lemnos_registry::RegistryError;
@@ -41,5 +41,20 @@ impl From<DiscoveryError> for RuntimeError {
 impl From<RegistryError> for RuntimeError {
     fn from(error: RegistryError) -> Self {
         Self::Registry(Box::new(error))
+    }
+}
+
+impl RuntimeError {
+    /// Classifies the error, delegating to the wrapped driver, discovery, or
+    /// registry error where there is one.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::NotRunning | Self::DeviceNotBound { .. } => ErrorKind::Unavailable,
+            Self::UnknownDevice { .. } => ErrorKind::NotFound,
+            Self::InvalidRequest { source, .. } => source.kind(),
+            Self::Driver { source, .. } => source.kind(),
+            Self::Discovery(source) => source.kind(),
+            Self::Registry(source) => source.kind(),
+        }
     }
 }

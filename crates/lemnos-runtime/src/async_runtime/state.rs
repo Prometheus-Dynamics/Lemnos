@@ -109,6 +109,27 @@ impl AsyncRuntime {
         Ok(())
     }
 
+    pub fn bind_policy(&self) -> RuntimeBindPolicy {
+        read_lock(&self.inner).bind_policy().clone()
+    }
+
+    pub async fn bind_policy_async(&self) -> AsyncRuntimeResult<RuntimeBindPolicy> {
+        self.run_read_blocking(|runtime| runtime.bind_policy().clone())
+            .await
+    }
+
+    /// Synchronously replaces the refresh bind policy under the runtime write
+    /// lock. See [`Runtime::set_bind_policy`].
+    pub fn set_bind_policy(&self, policy: RuntimeBindPolicy) {
+        write_lock(&self.inner).set_bind_policy(policy);
+    }
+
+    pub async fn set_bind_policy_async(&self, policy: RuntimeBindPolicy) -> AsyncRuntimeResult<()> {
+        self.run_blocking(move |runtime| runtime.set_bind_policy(policy))
+            .await?;
+        Ok(())
+    }
+
     /// Synchronously replaces the backend set under the runtime write lock.
     ///
     /// This is intended for initialization and tests. Use
@@ -206,6 +227,19 @@ impl AsyncRuntime {
 
     pub async fn has_state_async(&self, device_id: DeviceId) -> AsyncRuntimeResult<bool> {
         self.run_read_blocking(move |runtime| runtime.has_state(&device_id))
+            .await
+    }
+
+    /// See [`Runtime::device_status`].
+    pub fn device_status(&self, device_id: &DeviceId) -> Option<DeviceStatus> {
+        read_lock(&self.inner).device_status(device_id)
+    }
+
+    pub async fn device_status_async(
+        &self,
+        device_id: DeviceId,
+    ) -> AsyncRuntimeResult<Option<DeviceStatus>> {
+        self.run_read_blocking(move |runtime| runtime.device_status(&device_id))
             .await
     }
 

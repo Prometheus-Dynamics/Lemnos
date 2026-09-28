@@ -10,6 +10,13 @@ impl LemnosBuilder {
         self
     }
 
+    /// Sets which devices refreshes bind on their own. See
+    /// [`RuntimeBindPolicy`].
+    pub fn with_bind_policy(mut self, policy: RuntimeBindPolicy) -> Self {
+        self.runtime.set_bind_policy(policy);
+        self
+    }
+
     pub fn with_backends(mut self, backends: RuntimeBackends) -> Self {
         self.runtime.set_backends(backends);
         self

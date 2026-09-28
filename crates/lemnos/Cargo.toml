@@ -51,7 +51,7 @@ linux-gpio-sysfs = ["linux-gpio", "lemnos-linux/gpio-sysfs"]
 macros = ["dep:lemnos-macros"]
 mock = ["dep:lemnos-mock"]
 tracing = ["lemnos-runtime/tracing", "lemnos-linux?/tracing"]
-tokio = ["lemnos-runtime/tokio", "dep:tokio"]
+tokio = ["lemnos-runtime/tokio", "lemnos-linux?/tokio", "dep:tokio"]
 
 [dependencies]
 lemnos-bus.workspace = true

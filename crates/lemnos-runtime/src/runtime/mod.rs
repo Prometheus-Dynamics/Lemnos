@@ -1,6 +1,6 @@
 use crate::{
-    RuntimeBackends, RuntimeConfig, RuntimeError, RuntimeFailureOperation, RuntimeFailureRecord,
-    RuntimeResult,
+    RuntimeBackends, RuntimeBindPolicy, RuntimeConfig, RuntimeError, RuntimeFailureOperation,
+    RuntimeFailureRecord, RuntimeResult,
 };
 use lemnos_core::{DeviceId, DeviceRequest, DeviceResponse, DeviceStateSnapshot, LemnosEvent};
 use lemnos_discovery::{
@@ -100,7 +100,9 @@ pub struct RuntimeWatchedRefreshReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-/// Summary of auto-rebind attempts performed after a refresh.
+/// Summary of the binds a refresh performed on its own: rebinds of devices
+/// callers previously bound, plus devices matched by the
+/// [`RuntimeBindPolicy`].
 pub struct RuntimeRebindReport {
     pub attempted: Vec<DeviceId>,
     pub rebound: Vec<DeviceId>,
@@ -122,6 +124,7 @@ pub struct RuntimeEventRetentionStats {
 /// retained event/state tracking.
 pub struct Runtime {
     config: RuntimeConfig,
+    bind_policy: RuntimeBindPolicy,
     running: bool,
     inventory: Arc<InventorySnapshot>,
     registry: DriverRegistry,
@@ -141,6 +144,7 @@ impl Default for Runtime {
     fn default() -> Self {
         Self {
             config: RuntimeConfig::default(),
+            bind_policy: RuntimeBindPolicy::default(),
             running: true,
             inventory: Arc::new(InventorySnapshot::default()),
             registry: DriverRegistry::default(),

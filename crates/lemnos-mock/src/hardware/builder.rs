@@ -31,6 +31,11 @@ impl MockHardwareBuilder {
         self
     }
 
+    pub fn with_hwmon_fan(mut self, fan: MockHwmonFan) -> Self {
+        self.hwmon_fans.push(fan);
+        self
+    }
+
     pub fn build(self) -> MockHardware {
         let gpio_lines = build_state_map(self.gpio_lines, MockGpioLineState::from, |line| {
             &line.descriptor.id
@@ -47,6 +52,9 @@ impl MockHardwareBuilder {
         });
         let uart_ports = build_state_map(self.uart_ports, MockUartPortState::from, |port| {
             &port.descriptor.id
+        });
+        let hwmon_fans = build_state_map(self.hwmon_fans, MockHwmonFanState::from, |fan| {
+            &fan.descriptor.id
         });
         let usb_devices = self
             .usb_devices
@@ -75,6 +83,7 @@ impl MockHardwareBuilder {
                 uart_ports,
                 usb_devices,
                 usb_descriptor_owners,
+                hwmon_fans,
                 faults: MockFaultRegistry::default(),
             })),
         }
