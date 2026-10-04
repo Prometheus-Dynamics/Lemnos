@@ -123,34 +123,44 @@ fn msg_len(len: usize) -> io::Result<u16> {
     Ok(len as u16)
 }
 
-/// Builds the kernel message array for `messages` to `addr`. The returned
-/// structs borrow the buffers in `messages` through raw pointers; the caller
-/// keeps `messages` alive and unmoved while they are used.
-fn build_messages(addr: u16, messages: &mut [Message<'_>]) -> io::Result<Vec<I2cMsg>> {
+/// Builds the kernel message array for `messages` to `addr` on the stack (no
+/// allocation: transfers run per camera frame). The structs borrow the buffers
+/// in `messages` through raw pointers; the caller keeps `messages` alive and
+/// unmoved while they are used. Returns the array and the count used.
+fn build_messages(
+    addr: u16,
+    messages: &mut [Message<'_>],
+) -> io::Result<([I2cMsg; MAX_MESSAGES], usize)> {
     if messages.is_empty() || messages.len() > MAX_MESSAGES {
         return Err(invalid(format!(
             "{} messages in one transfer (1..={MAX_MESSAGES})",
             messages.len()
         )));
     }
-    messages
-        .iter_mut()
-        .map(|m| match m {
-            Message::Write(data) => Ok(I2cMsg {
+    let mut msgs = [I2cMsg {
+        addr: 0,
+        flags: 0,
+        len: 0,
+        buf: std::ptr::null_mut(),
+    }; MAX_MESSAGES];
+    for (slot, m) in msgs.iter_mut().zip(messages.iter_mut()) {
+        *slot = match m {
+            Message::Write(data) => I2cMsg {
                 addr,
                 flags: 0,
                 len: msg_len(data.len())?,
                 // The kernel only reads write buffers.
                 buf: data.as_ptr().cast_mut(),
-            }),
-            Message::Read(buf) => Ok(I2cMsg {
+            },
+            Message::Read(buf) => I2cMsg {
                 addr,
                 flags: I2C_M_RD,
                 len: msg_len(buf.len())?,
                 buf: buf.as_mut_ptr(),
-            }),
-        })
-        .collect()
+            },
+        };
+    }
+    Ok((msgs, messages.len()))
 }
 
 /// The adapter's `I2C_FUNC_*` bits (see [`func`]).
@@ -175,19 +185,18 @@ pub fn set_target(fd: BorrowedFd<'_>, addr: u16) -> io::Result<()> {
 /// Runs `messages` to `addr` as one combined transfer (`I2C_RDWR`: repeated
 /// starts between messages, one stop).
 pub fn transfer(fd: BorrowedFd<'_>, addr: u16, messages: &mut [Message<'_>]) -> io::Result<()> {
-    let mut msgs = build_messages(addr, messages)?;
+    let (mut msgs, n) = build_messages(addr, messages)?;
     let mut data = I2cRdwrData {
         msgs: msgs.as_mut_ptr(),
-        nmsgs: msgs.len() as u32,
+        nmsgs: n as u32,
     };
     // SAFETY: `data` points at `msgs`, whose buffers point into `messages`; all
     // stay alive and unmoved for the duration of the call, and read buffers
     // are exclusively borrowed.
     let done = unsafe { ioctl_ptr(fd, I2C_RDWR, &mut data) }?;
-    if done as usize != msgs.len() {
+    if done as usize != n {
         return Err(io::Error::other(format!(
-            "I2C transfer completed {done} of {} messages",
-            msgs.len()
+            "I2C transfer completed {done} of {n} messages"
         )));
     }
     Ok(())
@@ -308,8 +317,8 @@ mod tests {
         let addr = [0x30, 0x0a];
         let mut out = [0u8; 2];
         let mut messages = [Message::Write(&addr), Message::Read(&mut out)];
-        let msgs = build_messages(0x60, &mut messages).unwrap();
-        assert_eq!(msgs.len(), 2);
+        let (msgs, n) = build_messages(0x60, &mut messages).unwrap();
+        assert_eq!(n, 2);
         assert_eq!((msgs[0].addr, msgs[0].flags, msgs[0].len), (0x60, 0, 2));
         assert_eq!(
             (msgs[1].addr, msgs[1].flags, msgs[1].len),

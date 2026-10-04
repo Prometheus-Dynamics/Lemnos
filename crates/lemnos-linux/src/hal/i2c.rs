@@ -154,6 +154,20 @@ impl I2cBus {
             return Ok(());
         }
         let address = u16::from(address);
+        let n = operations.len();
+        if alternates(operations) && n <= STACK_MESSAGES {
+            // The common case (register reads and writes, every camera frame):
+            // one message per operation, built on the stack.
+            let mut messages: [I2cMessage<'_>; STACK_MESSAGES] =
+                std::array::from_fn(|_| I2cMessage::Write(&[]));
+            for (m, op) in messages.iter_mut().zip(operations.iter_mut()) {
+                *m = match op {
+                    Operation::Write(data) => I2cMessage::Write(data),
+                    Operation::Read(buf) => I2cMessage::Read(buf),
+                };
+            }
+            return self.transfer(address, &mut messages[..n]);
+        }
         let plan = Plan::new(operations);
         if plan.is_identity() {
             let mut messages: Vec<I2cMessage<'_>> = operations
@@ -183,6 +197,17 @@ impl I2cBus {
         plan.scatter(operations, &buffers);
         Ok(())
     }
+}
+
+/// Messages of a transaction built on the stack (longer ones allocate).
+const STACK_MESSAGES: usize = 8;
+
+/// Whether no two adjacent operations go the same direction (each is its own
+/// message), without allocating.
+fn alternates(operations: &[Operation<'_>]) -> bool {
+    operations
+        .windows(2)
+        .all(|w| matches!(w[0], Operation::Read(_)) != matches!(w[1], Operation::Read(_)))
 }
 
 /// Which operations of a transaction share a message.
@@ -319,6 +344,7 @@ mod tests {
         let plan = Plan::new(&ops);
         assert_eq!(plan.runs, [0, 2]);
         assert!(!plan.is_identity());
+        assert!(!alternates(&ops));
         let mut buffers = plan.buffers(&ops);
         assert_eq!(buffers[0], (false, vec![1, 2, 3]));
         assert_eq!(buffers[1], (true, vec![0, 0, 0]));
@@ -327,6 +353,7 @@ mod tests {
         assert_eq!((r1, r2), ([7, 8], [9]));
         let single = [Operation::Write(&a), Operation::Read(&mut [0u8; 1])];
         assert!(Plan::new(&single).is_identity());
+        assert!(alternates(&single));
     }
 
     #[test]
