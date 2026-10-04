@@ -21,6 +21,7 @@ default = []
 serde = ["dep:serde", "ordered-float/serde", "serde/rc"]
 
 [dependencies]
+lemnos-hal = { workspace = true, features = ["std"] }
 ordered-float.workspace = true
 serde = { workspace = true, features = ["derive"], optional = true }
 thiserror.workspace = true

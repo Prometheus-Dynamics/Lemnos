@@ -1,0 +1,27 @@
+[package]
+name = "lemnos-hal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std hardware vocabulary for Lemnos: embedded-hal 1.0, register maps over I2C/SPI, regulators, clocks, and portable error kinds"
+documentation = "https://docs.rs/lemnos-hal"
+readme = "README.md"
+keywords = ["embedded-hal", "no-std", "i2c", "spi", "register"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# `ErrorKind::from_io` and `From<std::io::ErrorKind>`.
+std = []
+# In-memory I2C/SPI/pin/delay/regulator/clock doubles for tests (needs `alloc`).
+mock = []
+
+[dependencies]
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true

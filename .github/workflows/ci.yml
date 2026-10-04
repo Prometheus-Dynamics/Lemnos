@@ -136,6 +136,25 @@ jobs:
       - name: Build docs
         run: cargo doc --workspace --no-deps
 
+  nostd:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: thumbv7em-none-eabihf, riscv32imac-unknown-none-elf, wasm32-unknown-unknown
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build and lint no_std crates
+        run: ./scripts/check-nostd.sh
+
   package-surface:
     runs-on: ubuntu-latest
 

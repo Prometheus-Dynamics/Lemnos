@@ -2,6 +2,7 @@
 members = [
     "crates/lemnos",
     "crates/lemnos-core",
+    "crates/lemnos-hal",
     "crates/lemnos-bus",
     "crates/lemnos-discovery",
     "crates/lemnos-driver-sdk",
@@ -33,6 +34,7 @@ homepage = "https://github.com/Prometheus-Dynamics/Lemnos"
 lemnos = { version = "1.0.0", path = "crates/lemnos" }
 lemnos-bus = { version = "1.0.0", path = "crates/lemnos-bus" }
 lemnos-core = { version = "1.0.0", path = "crates/lemnos-core" }
+lemnos-hal = { version = "1.0.0", path = "crates/lemnos-hal" }
 lemnos-discovery = { version = "1.0.0", path = "crates/lemnos-discovery" }
 lemnos-driver-manifest = { version = "1.0.0", path = "crates/lemnos-driver-manifest" }
 lemnos-driver-sdk = { version = "1.0.0", path = "crates/lemnos-driver-sdk" }
@@ -47,6 +49,8 @@ lemnos-macros = { version = "1.0.0", path = "crates/lemnos-macros" }
 lemnos-mock = { version = "1.0.0", path = "crates/lemnos-mock" }
 lemnos-registry = { version = "1.0.0", path = "crates/lemnos-registry" }
 lemnos-runtime = { version = "1.0.0", path = "crates/lemnos-runtime" }
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
 gpio-cdev = "0.6.0"
 i2cdev = "0.6.2"
 inotify = { version = "0.11.1", default-features = false }

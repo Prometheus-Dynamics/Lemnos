@@ -47,6 +47,11 @@ run_docs_and_lints() {
   cargo doc --workspace --no-deps
 }
 
+run_nostd() {
+  echo "==> [nostd] Building no_std crates for embedded and wasm targets"
+  "$root_dir/scripts/check-nostd.sh"
+}
+
 run_package_surface() {
   echo "==> [package-surface] Validating package surface"
   cargo package --workspace --allow-dirty --no-verify
@@ -54,7 +59,7 @@ run_package_surface() {
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/ci.sh [workspace|docs-and-lints|package-surface|all]
+Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|package-surface|all]
 
 Defaults to `all`, which mirrors the non-matrix jobs in `.github/workflows/ci.yml`.
 EOF
@@ -69,12 +74,16 @@ case "$mode" in
   docs-and-lints)
     run_docs_and_lints
     ;;
+  nostd)
+    run_nostd
+    ;;
   package-surface)
     run_package_surface
     ;;
   all)
     run_workspace
     run_docs_and_lints
+    run_nostd
     run_package_surface
     ;;
   -h|--help|help)
