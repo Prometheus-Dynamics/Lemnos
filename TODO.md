@@ -33,9 +33,17 @@ for the user-facing summary of finished work.
       `lemnos-drivers-vcm`; hotplug uses `lemnos_linux::uevent`; then delete
       `styx-kernel::bus::{i2c, gpio, ioctl}`, `uevent`, `regbus.rs` and the
       VCM code from Styx.
-- [ ] Sensor drivers as `no_std` crates over embedded-hal (BMI088, BMM150,
-      INA226/INA238; today only in `crates/lemnos/examples/support`), reached
-      from the runtime through `lemnos_bus::hal`.
+- [x] Sensor drivers as `no_std` crates over embedded-hal:
+      `lemnos-drivers-bmi088`, `lemnos-drivers-bmm150`,
+      `lemnos-drivers-ina2xx` (INA226/INA238/INA260), reached from the runtime
+      through `lemnos_bus::hal` (see `tests/nostd_driver_in_runtime.rs`).
+- [ ] Board validator example drivers
+      (`crates/lemnos/examples/support/board_validator/drivers/`) still carry
+      their own register code; switch them to the new crates. Needs a hardware
+      run on the board. Note the validator also accepts the BMI055, which
+      `lemnos-drivers-bmi088` does not support.
+- [ ] Runtime adapter drivers for the sensor crates (configured devices plus
+      `HalI2cBus`), so HeliOS can bind them from `sensors.toml`.
 - [ ] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`.
 - [ ] Linux regulators and clocks behind `Regulator`/`ClockOutput` (regulator
       userspace-consumer and clock sysfs where the kernel exposes them).

@@ -21,6 +21,7 @@ The repository is split into small crates so applications, custom drivers, Linux
 - `crates/lemnos-linux-sys`: the only crate with `unsafe`: Linux uAPI structs and safe syscall wrappers
 - `crates/lemnos-drivers-*`: built-in generic runtime drivers for common bus classes
 - `crates/lemnos-drivers-vcm`: `no_std` voice-coil motor (camera focus) drivers over embedded-hal
+- `crates/lemnos-drivers-bmi088`, `crates/lemnos-drivers-bmm150`, `crates/lemnos-drivers-ina2xx`: `no_std` IMU, magnetometer and power monitor drivers over embedded-hal
 - `crates/lemnos-macros`: proc macros for configured devices and driver boilerplate
 - `crates/lemnos-mock`: fake hardware for tests and examples
 

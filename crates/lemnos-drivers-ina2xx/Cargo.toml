@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-drivers-ina2xx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std Texas Instruments power monitor drivers for Lemnos over embedded-hal I2C: INA226, INA238, INA260"
+documentation = "https://docs.rs/lemnos-drivers-ina2xx"
+readme = "README.md"
+keywords = ["embedded-hal", "no-std", "ina226", "ina238", "power-monitor"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+lemnos-hal.workspace = true
+
+[dev-dependencies]
+lemnos-hal = { workspace = true, features = ["mock"] }

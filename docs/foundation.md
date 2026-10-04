@@ -20,7 +20,7 @@ here and is later deleted from Styx.
                    hotplug (netlink uevent, inotify fallback)
  lemnos-linux-sys  ioctls, sockets, inotify, #[repr(C)] uAPI structs         std, the only unsafe
  ───────────────────────────────────────────────────────────────────────────────────────────
- lemnos-drivers-vcm (and future device drivers): generic over embedded-hal   no_std, no alloc
+ lemnos-drivers-{vcm,bmi088,bmm150,ina2xx}: device drivers over embedded-hal no_std, no alloc
  lemnos-core, lemnos-driver-manifest: descriptors, values, requests          no_std + alloc
  lemnos-hal        embedded-hal 1.0 + embedded-hal-async (re-exported),      no_std, no alloc
                    RegisterBus (I2C/SPI register maps, blocking + async),
@@ -62,7 +62,7 @@ Rules:
 | `SensorPins::{set_gpio, set_clock, set_supply}` (generic halves) | `OutputPin`, `lemnos_hal::{Regulator, ClockOutput}`; `GpioRegulator`, `FixedClock` |
 
 Later (not in this change): `crates/kernel/src/usbfs.rs` replaces `rusb` in the USB transport;
-sensor drivers (BMI088, BMM150, INA2xx) become no_std drivers.
+sensor drivers (BMI088, BMM150, INA2xx) become no_std drivers (done: `lemnos-drivers-bmi088`, `lemnos-drivers-bmm150`, `lemnos-drivers-ina2xx`).
 
 ## What stays in Styx
 
@@ -130,7 +130,7 @@ expected beyond the version.
    `lemnos_drivers_vcm`, hotplug through `lemnos_linux::uevent`.
 4. Delete `styx-kernel::bus::{i2c, gpio, ioctl}`, `uevent`, `regbus.rs` and the VCM code from
    Styx. `styx-kernel` keeps V4L2/media/subdev/dma-heap/bridge.
-5. Port `usbfs` into `lemnos-linux` and drop `rusb`; port the sensor drivers.
+5. Port `usbfs` into `lemnos-linux` and drop `rusb`. (The sensor drivers are ported.)
 
 ## How Styx consumes Lemnos
 
@@ -150,6 +150,7 @@ lens.move_to(512)?;
 
 On an MCU, the firmware's HAL supplies the `I2c` (e.g. `embassy-stm32`'s async I2C) and the
 same `I2cRegisters` and `Vcm` run over it with `default-features = false`; nothing from the
-std crates is linked. CI builds `lemnos-hal`, `lemnos-core`, `lemnos-driver-manifest` and
-`lemnos-drivers-vcm` for `thumbv7em-none-eabihf`, `riscv32imac-unknown-none-elf` and
+std crates is linked. CI builds `lemnos-hal`, `lemnos-core`, `lemnos-driver-manifest`,
+`lemnos-drivers-vcm`, `lemnos-drivers-bmi088`, `lemnos-drivers-bmm150` and
+`lemnos-drivers-ina2xx` for `thumbv7em-none-eabihf`, `riscv32imac-unknown-none-elf` and
 `wasm32-unknown-unknown`.

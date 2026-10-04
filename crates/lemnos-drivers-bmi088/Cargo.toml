@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-drivers-bmi088"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std Bosch BMI088 IMU (accelerometer + gyroscope) driver for Lemnos over embedded-hal I2C"
+documentation = "https://docs.rs/lemnos-drivers-bmi088"
+readme = "README.md"
+keywords = ["embedded-hal", "no-std", "bmi088", "imu", "bosch"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+lemnos-hal.workspace = true
+
+[dev-dependencies]
+lemnos-hal = { workspace = true, features = ["mock"] }

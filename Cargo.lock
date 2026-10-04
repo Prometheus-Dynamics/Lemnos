@@ -121,11 +121,13 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "lemnos"
 version = "2.0.0"
 dependencies = [
+ "embedded-hal",
  "lemnos-bus",
  "lemnos-core",
  "lemnos-discovery",
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
+ "lemnos-drivers-bmi088",
  "lemnos-drivers-gpio",
  "lemnos-drivers-i2c",
  "lemnos-drivers-pwm",
@@ -190,6 +192,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-bmi088"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-async",
+ "lemnos-hal",
+]
+
+[[package]]
+name = "lemnos-drivers-bmm150"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-async",
+ "lemnos-hal",
+]
+
+[[package]]
 name = "lemnos-drivers-gpio"
 version = "2.0.0"
 dependencies = [
@@ -208,6 +228,15 @@ dependencies = [
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
  "lemnos-mock",
+]
+
+[[package]]
+name = "lemnos-drivers-ina2xx"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-async",
+ "lemnos-hal",
 ]
 
 [[package]]

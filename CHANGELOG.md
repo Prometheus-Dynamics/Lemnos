@@ -6,6 +6,15 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Added
+
+- `no_std`, allocation-free sensor drivers over embedded-hal I2C, blocking and async, in SI units:
+  - `lemnos-drivers-bmi088`: Bosch BMI088 IMU (both dies on one bus; ranges, data rates, die temperature).
+  - `lemnos-drivers-bmm150`: Bosch BMM150 magnetometer with factory-trim compensation to µT and repetition presets.
+  - `lemnos-drivers-ina2xx`: TI INA226, INA238 and INA260 power monitors with calibration from shunt and maximum current.
+- Each driver has `resume` (or, for INA2xx, a bus-free `new`) so a runtime adapter can rebuild it around a borrowed `lemnos_bus::hal::HalI2cBus` per operation; `crates/lemnos/tests/nostd_driver_in_runtime.rs` shows the pattern.
+- `scripts/check-nostd.sh` builds the three crates for the embedded and wasm targets.
+
 ## [2.0.0]
 
 Lemnos becomes the hardware foundation under Styx: embedded-hal 1.0 is the bus vocabulary,

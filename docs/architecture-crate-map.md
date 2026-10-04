@@ -29,6 +29,7 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 - `lemnos-linux-sys` holds the workspace's only `unsafe` code: Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs, each block with a `// SAFETY:` comment.
 - `lemnos-drivers-gpio`, `-pwm`, `-i2c`, `-spi`, `-uart`, `-usb` provide generic runtime drivers and manifests for common interface kinds (std).
 - `lemnos-drivers-vcm` is a `no_std` device driver crate (camera focus VCMs) over embedded-hal; future device drivers follow it.
+- `lemnos-drivers-bmi088` (IMU), `lemnos-drivers-bmm150` (magnetometer) and `lemnos-drivers-ina2xx` (power monitors) are `no_std` sensor drivers in the same style.
 
 ## Authoring And Test Support
 
