@@ -21,4 +21,6 @@ pub use uart::MockUartPort;
 pub use usb::MockUsbDevice;
 
 #[cfg(test)]
+mod hal_tests;
+#[cfg(test)]
 mod tests;

@@ -20,3 +20,7 @@ workspace = true
 lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
+
+[dev-dependencies]
+embedded-hal.workspace = true
+lemnos-hal.workspace = true

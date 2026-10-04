@@ -198,7 +198,9 @@ dependencies = [
 name = "lemnos-bus"
 version = "1.0.0"
 dependencies = [
+ "embedded-hal",
  "lemnos-core",
+ "lemnos-hal",
  "thiserror",
 ]
 
@@ -356,9 +358,11 @@ dependencies = [
 name = "lemnos-mock"
 version = "1.0.0"
 dependencies = [
+ "embedded-hal",
  "lemnos-bus",
  "lemnos-core",
  "lemnos-discovery",
+ "lemnos-hal",
 ]
 
 [[package]]

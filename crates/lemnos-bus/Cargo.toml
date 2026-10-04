@@ -17,5 +17,7 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [dependencies]
+embedded-hal.workspace = true
+lemnos-hal.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 thiserror.workspace = true

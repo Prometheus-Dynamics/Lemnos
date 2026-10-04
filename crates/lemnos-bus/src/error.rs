@@ -65,3 +65,33 @@ impl BusError {
         }
     }
 }
+
+impl embedded_hal::i2c::Error for BusError {
+    fn kind(&self) -> embedded_hal::i2c::ErrorKind {
+        BusError::kind(self).to_i2c()
+    }
+}
+
+impl embedded_hal::spi::Error for BusError {
+    fn kind(&self) -> embedded_hal::spi::ErrorKind {
+        BusError::kind(self).to_spi()
+    }
+}
+
+impl embedded_hal::digital::Error for BusError {
+    fn kind(&self) -> embedded_hal::digital::ErrorKind {
+        embedded_hal::digital::ErrorKind::Other
+    }
+}
+
+impl embedded_hal::pwm::Error for BusError {
+    fn kind(&self) -> embedded_hal::pwm::ErrorKind {
+        embedded_hal::pwm::ErrorKind::Other
+    }
+}
+
+impl lemnos_hal::HalError for BusError {
+    fn kind(&self) -> ErrorKind {
+        BusError::kind(self)
+    }
+}

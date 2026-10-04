@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod contract;
+pub mod hal;
 
 mod backend;
 mod error;
