@@ -19,6 +19,7 @@ members = [
     "crates/lemnos-drivers-spi",
     "crates/lemnos-drivers-uart",
     "crates/lemnos-drivers-usb",
+    "crates/lemnos-drivers-vcm",
     "crates/lemnos-mock",
 ]
 resolver = "3"
@@ -45,6 +46,7 @@ lemnos-drivers-pwm = { version = "1.0.0", path = "crates/lemnos-drivers-pwm" }
 lemnos-drivers-spi = { version = "1.0.0", path = "crates/lemnos-drivers-spi" }
 lemnos-drivers-uart = { version = "1.0.0", path = "crates/lemnos-drivers-uart" }
 lemnos-drivers-usb = { version = "1.0.0", path = "crates/lemnos-drivers-usb" }
+lemnos-drivers-vcm = { version = "1.0.0", path = "crates/lemnos-drivers-vcm" }
 lemnos-linux = { version = "1.0.0", path = "crates/lemnos-linux", default-features = false }
 lemnos-linux-sys = { version = "1.0.0", path = "crates/lemnos-linux-sys" }
 lemnos-macros = { version = "1.0.0", path = "crates/lemnos-macros" }

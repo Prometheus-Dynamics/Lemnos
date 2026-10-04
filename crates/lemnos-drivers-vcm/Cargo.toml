@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-drivers-vcm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std voice-coil motor (camera focus lens) drivers for Lemnos over embedded-hal I2C: DW9714, DW9807, DW9817, AK7375"
+documentation = "https://docs.rs/lemnos-drivers-vcm"
+readme = "README.md"
+keywords = ["embedded-hal", "no-std", "camera", "focus", "vcm"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+lemnos-hal.workspace = true
+
+[dev-dependencies]
+lemnos-hal = { workspace = true, features = ["mock"] }

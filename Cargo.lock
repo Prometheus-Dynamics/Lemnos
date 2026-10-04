@@ -255,6 +255,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-vcm"
+version = "1.0.0"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-async",
+ "lemnos-hal",
+]
+
+[[package]]
 name = "lemnos-hal"
 version = "1.0.0"
 dependencies = [
@@ -315,6 +324,7 @@ dependencies = [
  "lemnos-bus",
  "lemnos-core",
  "lemnos-discovery",
+ "lemnos-drivers-vcm",
  "lemnos-hal",
 ]
 

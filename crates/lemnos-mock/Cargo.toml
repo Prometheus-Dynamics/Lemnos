@@ -23,4 +23,5 @@ lemnos-discovery.workspace = true
 
 [dev-dependencies]
 embedded-hal.workspace = true
-lemnos-hal.workspace = true
+lemnos-hal = { workspace = true, features = ["mock"] }
+lemnos-drivers-vcm.workspace = true

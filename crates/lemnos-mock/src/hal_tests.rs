@@ -126,3 +126,29 @@ fn spi_sessions_are_devices() {
     let mut regs = SpiRegisters::new(HalSpiDevice::new(session.as_mut()), AddressWidth::Bits8);
     assert_eq!(regs.read8(0x00).unwrap(), 0x1E);
 }
+
+#[test]
+fn no_std_vcm_driver_runs_on_a_runtime_session() {
+    use lemnos_drivers_vcm::Vcm;
+    use lemnos_hal::mock::MockDelay;
+
+    let hardware = MockHardware::builder()
+        .with_i2c_device(MockI2cDevice::new(10, 0x0c))
+        .build();
+    let device = hardware
+        .descriptors()
+        .into_iter()
+        .find(|device| device.interface == InterfaceKind::I2c)
+        .expect("vcm");
+    let mut session = hardware
+        .open_i2c(&device, SessionAccess::Exclusive)
+        .expect("open i2c");
+    let mut lens = Vcm::dw9807(HalI2cDevice::new(session.as_mut()));
+    lens.power_up(&mut MockDelay::new()).unwrap();
+    lens.move_to(0x2a5).unwrap();
+    // DW9807: control register 0x02 = 0 (on), position in 0x03-0x04.
+    assert_eq!(
+        hardware.i2c_bytes(&device.id, 0x02, 3),
+        Some(vec![0x00, 0x02, 0xa5])
+    );
+}
