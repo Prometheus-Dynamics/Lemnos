@@ -6,7 +6,22 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+## [2.0.0]
+
+Lemnos becomes the hardware foundation under Styx: embedded-hal 1.0 is the bus vocabulary,
+device drivers are `no_std`, and Linux is reached through one pure-Rust implementation. See
+[docs/foundation.md](docs/foundation.md).
+
 ### Added
+
+- `lemnos-hal` (`no_std`, no allocation): re-exports `embedded-hal` 1.0 and `embedded-hal-async` 1.0; `RegisterBus` and `asynch::RegisterBus` with `I2cRegisters` and `SpiRegisters` (8/16-bit addresses, 1-4 byte values, big/little endian, bursts, read-back, read-modify-write); `Regulator`, `ClockOutput`, `GpioRegulator`, `FixedClock`; `HalError`; a `mock` feature with I2C/SPI/pin/delay/regulator/clock doubles. Re-exported by the facade as `lemnos::hal`.
+- `lemnos-linux-sys`: the workspace's only `unsafe` code, with safe wrappers over i2c-dev (incl. SMBus), spidev, GPIO uAPI v2, netlink uevent sockets, inotify and `poll`, and layout tests against the kernel headers.
+- `lemnos_linux::hal`: `I2cBus`, `Spidev`, `GpioChip`/`GpioLines`/`GpioLine`, `StdDelay`, `IoError` implementing embedded-hal (and embedded-hal-async for I2C/SPI). `lemnos_linux::uevent`: `UeventSocket`, `Uevent`.
+- `lemnos_bus::hal`: `HalI2cBus`, `HalI2cDevice`, `HalSpiDevice`, `HalPin`, `HalPwm` adapt sessions to embedded-hal; `BusError` implements the embedded-hal error traits.
+- `lemnos-drivers-vcm`: `no_std` VCM drivers (DW9714, DW9807, DW9817, AK7375, custom formats), blocking and async.
+- Linux GPIO cdev sessions support bias and debounce, and `open_gpio_edge_stream` streams edge events.
+- `LinuxHotplugWatcher::{with_uevents, with_inotify, source}` and `HotplugSource`.
+- `linux_hal_probe` example; `scripts/check-nostd.sh` and a `nostd` CI job.
 
 - `AsyncLinuxHotplugWatcher` (`lemnos-linux` `tokio` feature, enabled by the facade's `tokio` feature) waits on the inotify descriptor through Tokio's reactor instead of timer polling. `LinuxHotplugWatcher` now implements `AsFd`/`AsRawFd`.
 - `RuntimeBindPolicy` lets refreshes bind matching devices (by interface, kind, or resolved driver id) on their own. Set it with `LemnosBuilder::with_bind_policy` or `set_bind_policy`. The default binds nothing.
@@ -18,6 +33,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- Breaking: `lemnos-core` and `lemnos-driver-manifest` are `no_std` + `alloc` with a default `std` feature; the workspace dependency entries set `default-features = false`.
+- Breaking: `ErrorKind` moved to `lemnos-hal` (still `lemnos_core::ErrorKind`) and gained `Nack` and `Overrun` (both transient). `ErrorKind::from_errno` classifies Linux errnos.
+- Breaking: the `i2cdev`, `spidev`, `gpio-cdev` and `inotify` dependencies are gone. The `gpio-cdev` feature keeps its name and now uses GPIO uAPI v2 (Linux 5.10+); cdev sessions take a line over as-is instead of re-requesting it with a default level.
+- `LinuxHotplugWatcher::new` listens to netlink uevents on the real `/sys` and uses inotify for other roots or when the socket is refused.
+- Linux I2C session transactions run as one combined `I2C_RDWR` transfer (repeated starts) when the adapter supports plain I2C.
+- `thiserror`, `serde` and `serde_json` are workspace dependencies without default features.
 - `RuntimeRebindReport` also lists devices bound by the bind policy. Policy bind failures are recorded as `RuntimeFailureOperation::Bind`.
 - `BuiltInDriverBundle::DRIVER_IDS` now has seven entries.
 - The Linux hwmon probe no longer publishes live `fan.pwm`, `fan.pwm_mode`, or `fan.rpm` descriptor properties, so speed changes no longer mark the fan as changed on refresh. Read them from the bound driver's telemetry. Descriptors now carry a static `fan.has_tachometer` flag.

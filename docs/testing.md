@@ -16,6 +16,10 @@ Important coverage areas:
 - integration tests such as `crates/lemnos/tests/*`
 - macro compile-time coverage in `crates/lemnos-macros-tests/tests/*`
 
+## no_std Builds
+
+`./scripts/check-nostd.sh` builds and lints the `no_std` crates (`lemnos-hal`, `lemnos-core`, `lemnos-driver-manifest`, `lemnos-drivers-vcm`) for `thumbv7em-none-eabihf`, `riscv32imac-unknown-none-elf` and `wasm32-unknown-unknown`. Their host tests run against `lemnos-hal`'s embedded-hal mocks.
+
 ## Mock-Based Validation
 
 The `lemnos` examples exercise realistic flows without touching host hardware:
@@ -42,6 +46,8 @@ Repository helper assets live under `testing/`:
 - `testing/device/*.env`
 
 The `linux_device_validator` example under `crates/lemnos/examples/` wires together Linux probes plus example drivers and is the main end-to-end Linux validation entry point.
+
+`linux_hal_probe` exercises the pure-Rust Linux layer on a board: `discover` (inventory), `gpio-info [chip]` (GPIO v2 chip and line info), `gpio-read CHIP OFFSET` (reads a line without changing it), `i2c-read BUS ADDR REG LEN [8|16]` (register read; claims the address, never forces), `hotplug SECONDS` (prints watch events and the source in use). Cross-compile with `--target aarch64-unknown-linux-gnu`. The `lemnos-linux-sys` and `lemnos-linux` test binaries also run on the target (struct layouts, present chips and buses, the uevent socket).
 
 ## Practical Workflow
 

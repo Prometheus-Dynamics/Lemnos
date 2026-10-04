@@ -2,20 +2,25 @@
 
 Lemnos is a Rust workspace for hardware discovery, driver matching, and runtime interaction across GPIO, PWM, I2C, SPI, UART, and USB surfaces.
 
+Lemnos 2.0 is also the hardware foundation underneath [Styx](https://github.com/Prometheus-Dynamics/Styx): `embedded-hal` 1.0 is the bus vocabulary, device drivers are `no_std` and run on Linux and microcontrollers alike, and Linux is reached through one pure-Rust implementation with no C libraries. See [docs/foundation.md](docs/foundation.md).
+
 The repository is split into small crates so applications, custom drivers, Linux backends, built-in generic drivers, and test helpers can evolve independently.
 
 ## Workspace Layout
 
 - `crates/lemnos`: consumer-facing facade and builder API
-- `crates/lemnos-core`: shared types, requests, state, and descriptors
+- `crates/lemnos-hal`: `no_std` hardware vocabulary: embedded-hal 1.0 (re-exported), register maps over I2C/SPI, regulators, clocks, `ErrorKind`, mocks
+- `crates/lemnos-core`: shared types, requests, state, and descriptors (`no_std` + `alloc`)
 - `crates/lemnos-bus`: typed bus/session traits for hardware access
 - `crates/lemnos-discovery`: discovery probes, inventory snapshots, and diffing
 - `crates/lemnos-driver-manifest`: driver metadata and matching rules
 - `crates/lemnos-driver-sdk`: driver authoring helpers and bind-time utilities
 - `crates/lemnos-registry`: driver registration, ranking, and selection
 - `crates/lemnos-runtime`: embeddable runtime for refresh, bind, and state
-- `crates/lemnos-linux`: Linux discovery and transport backends
-- `crates/lemnos-drivers-*`: built-in generic drivers for common bus classes
+- `crates/lemnos-linux`: Linux discovery, transports, hotplug, and embedded-hal implementations (i2c-dev, spidev, GPIO v2), in pure Rust
+- `crates/lemnos-linux-sys`: the only crate with `unsafe`: Linux uAPI structs and safe syscall wrappers
+- `crates/lemnos-drivers-*`: built-in generic runtime drivers for common bus classes
+- `crates/lemnos-drivers-vcm`: `no_std` voice-coil motor (camera focus) drivers over embedded-hal
 - `crates/lemnos-macros`: proc macros for configured devices and driver boilerplate
 - `crates/lemnos-mock`: fake hardware for tests and examples
 
@@ -27,7 +32,7 @@ Add the facade crate for most applications:
 
 ```toml
 [dependencies]
-lemnos = "1.0.0"
+lemnos = "2.0.0"
 ```
 
 Typical feature sets:
@@ -43,8 +48,23 @@ Example:
 
 ```toml
 [dependencies]
-lemnos = { version = "1.0.0", features = ["builtin-drivers", "linux", "macros"] }
+lemnos = { version = "2.0.0", features = ["builtin-drivers", "linux", "macros"] }
 ```
+
+## Device Drivers On embedded-hal
+
+Device drivers depend on `lemnos-hal` (or plain `embedded-hal`) only and build without `std`:
+
+```rust
+use lemnos_hal::{AddressWidth, I2cRegisters, RegisterBus};
+
+// On Linux: lemnos::linux::hal::I2cBus::open(10)?; on an MCU: the HAL's I2C.
+fn chip_id<I: lemnos_hal::i2c::I2c>(i2c: I) -> Option<u32> {
+    I2cRegisters::new(i2c, 0x60, AddressWidth::Bits16).read(0x300a, 2).ok()
+}
+```
+
+Inside the runtime, `lemnos::bus::hal` turns any session into an embedded-hal bus or pin, so the same drivers run on whatever backend the runtime opened.
 
 ## Examples
 
@@ -54,6 +74,7 @@ The facade crate includes examples for both mock and Linux-backed flows:
 - `cargo run -p lemnos --example mock_gpio_async --features "mock builtin-drivers tokio"`
 - `cargo run -p lemnos --example linux_led_class_driver --features "linux"`
 - `cargo run -p lemnos --example linux_device_validator --features "builtin-drivers linux macros"`
+- `cargo run -p lemnos --example linux_hal_probe --features linux -- discover` (also `gpio-info`, `gpio-read`, `i2c-read`, `hotplug`)
 
 ## Development
 
@@ -65,6 +86,7 @@ Common workspace commands:
 cargo test --workspace
 cargo clippy --workspace --all-targets --all-features
 cargo doc --workspace --no-deps
+./scripts/check-nostd.sh   # no_std crates for thumbv7em, riscv32imac, wasm32
 ```
 
 Targeted helper scripts live under `testing/`.

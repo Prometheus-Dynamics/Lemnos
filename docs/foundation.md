@@ -1,6 +1,6 @@
 # Lemnos 2.0: the hardware foundation under Styx
 
-Status: decided; implemented on branch `foundation`. Lemnos owns every generic driver and
+Status: decided and implemented (branch `foundation`, Lemnos 2.0.0); verified on the CM5. Lemnos owns every generic driver and
 communication layer (buses, pins, power, hotplug, discovery). Styx keeps cameras only and
 consumes Lemnos, on Linux and on microcontrollers. Generic code that grew up in Styx moves
 here and is later deleted from Styx.
@@ -78,7 +78,7 @@ UVC, the ISPs and 3A. Styx's time `Clock` stays in `styx-hal`; Lemnos's clock tr
 
 - **`lemnos-hal` (new).** `#![no_std]`, no alloc. Re-exports `embedded_hal` and
   `embedded_hal_async`. `ErrorKind` (moved from `lemnos-core`, plus `Nack` and
-  `Disconnected`), the `HalError` trait, conversions from embedded-hal's I2C/SPI/digital error
+  `Overrun`), the `HalError` trait, conversions from embedded-hal's I2C/SPI/digital error
   kinds and (feature `std`) from `std::io::ErrorKind`. `register`: `RegisterBus` and
   `asynch::RegisterBus`, `I2cRegisters`, `SpiRegisters`, `RegWrite`, encoders. `power`:
   `Regulator`, `ClockOutput`, `GpioRegulator`, `FixedClock`. `mock` (feature, alloc): I2C
@@ -142,7 +142,7 @@ use lemnos_linux::hal::{I2cBus, StdDelay};
 
 // /dev/i2c-10; each target address is claimed with I2C_SLAVE (never _FORCE) before use.
 let mut sensor = I2cRegisters::new(I2cBus::open(10)?, 0x60, AddressWidth::Bits16).with_bursts(32);
-let id = sensor.read(0x300a, 2)?;                       // 0x9782 (OV9782)
+let id = sensor.read(0x300a, 2)?;                       // chip id: 0x9281 on the CM5 module
 let mut lens = lemnos_drivers_vcm::Vcm::dw9817(I2cBus::open(10)?);
 lens.power_up(&mut StdDelay)?;
 lens.move_to(512)?;

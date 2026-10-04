@@ -1,14 +1,56 @@
 # TODO
 
 Tracks Lemnos work driven by its integration into HeliOS
-(`HeliOS-architecture-overhaul`, `backend/src/helios/peripherals`). See
-[CHANGELOG.md](CHANGELOG.md) for the user-facing summary of finished work.
+(`HeliOS-architecture-overhaul`, `backend/src/helios/peripherals`) and by
+Lemnos 2.0 becoming the hardware foundation under Styx
+([docs/foundation.md](docs/foundation.md)). See [CHANGELOG.md](CHANGELOG.md)
+for the user-facing summary of finished work.
+
+## Foundation (2.0)
+
+### Done
+
+- [x] Design: [docs/foundation.md](docs/foundation.md).
+- [x] `lemnos-hal`: embedded-hal 1.0 + async re-exported; `RegisterBus`
+      (blocking + async), `I2cRegisters`, `SpiRegisters`; `Regulator`,
+      `ClockOutput`, `GpioRegulator`, `FixedClock`; `ErrorKind` (moved from
+      `lemnos-core`); mocks. CI builds for thumbv7em, riscv32imac, wasm32.
+- [x] `lemnos-core` and `lemnos-driver-manifest` build as `no_std` + `alloc`.
+- [x] `lemnos_bus::hal`: sessions as embedded-hal buses and pins.
+- [x] `lemnos-linux-sys` + `lemnos_linux::hal`: i2c-dev, spidev, GPIO uAPI v2,
+      netlink uevents, inotify, poll in pure Rust; sessions and hotplug run on
+      them; `i2cdev`, `spidev`, `gpio-cdev`, `inotify` dropped.
+- [x] `lemnos-drivers-vcm`: DW9714, DW9807, DW9817, AK7375 (blocking + async).
+- [x] Verified on the CM5: discovery, GPIO v2 line info and reads, I2C chip-id
+      read of the camera sensor on bus 10, uevent hotplug on a USB
+      `authorized` toggle, the Linux test suites on aarch64.
+
+### Next
+
+- [ ] Styx switch-over (Styx repo): `styx-sensor`'s `RegisterBus` becomes
+      `lemnos_hal::RegisterBus`; `I2cRegisterBus` becomes
+      `I2cRegisters<lemnos_linux::hal::I2cBus>`; lenses use
+      `lemnos-drivers-vcm`; hotplug uses `lemnos_linux::uevent`; then delete
+      `styx-kernel::bus::{i2c, gpio, ioctl}`, `uevent`, `regbus.rs` and the
+      VCM code from Styx.
+- [ ] Sensor drivers as `no_std` crates over embedded-hal (BMI088, BMM150,
+      INA226/INA238; today only in `crates/lemnos/examples/support`), reached
+      from the runtime through `lemnos_bus::hal`.
+- [ ] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`.
+- [ ] Linux regulators and clocks behind `Regulator`/`ClockOutput` (regulator
+      userspace-consumer and clock sysfs where the kernel exposes them).
+- [ ] GPIO discovery from the character devices (line names, consumers) when
+      `/sys/class/gpio` is absent (`CONFIG_GPIO_SYSFS=n`).
+- [ ] `embedded_hal_async::digital::Wait` for `GpioLine` through a reactor;
+      `SetDutyCycle` directly on sysfs PWM (today via `lemnos_bus::hal::HalPwm`).
+- [ ] Publish 2.0.0 (crates.io order: hal, linux-sys, core, ...).
 
 ## Done
 
 - [x] Async hotplug: `AsyncLinuxHotplugWatcher` (`lemnos-linux` `tokio`
-      feature) waits on inotify through Tokio's reactor; `LinuxHotplugWatcher`
-      implements `AsFd`/`AsRawFd`.
+      feature) waits on the watcher's descriptor (uevent socket or inotify)
+      through Tokio's reactor; `LinuxHotplugWatcher` implements
+      `AsFd`/`AsRawFd`.
 - [x] Bind policy: `RuntimeBindPolicy` binds matching devices on refresh
       (interface, kind, or driver id). Default binds nothing; failed binds are
       not retried until the device changes.
@@ -41,9 +83,8 @@ Tracks Lemnos work driven by its integration into HeliOS
 ## Release (do last)
 
 - [ ] Merge `dev` into `main`.
-- [ ] Bump to 1.1.0. The new API is additive, but `BuiltInDriverBundle::DRIVER_IDS`
-      grew, refresh reports include policy binds, and hwmon descriptor
-      properties changed.
+- [x] Version: 2.0.0 (the foundation work is breaking; it also carries the
+      HeliOS additions that were planned as 1.1.0).
 - [ ] Tag the release; optionally publish to crates.io.
 - [ ] HeliOS pins Lemnos to the tag instead of `branch = "main"`.
 

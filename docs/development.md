@@ -18,7 +18,10 @@ cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo doc --workspace --no-deps
+./scripts/check-nostd.sh
 ```
+
+`unsafe` is forbidden workspace-wide; `lemnos-linux-sys` is the single exception (its own lint table, every block documented with `// SAFETY:`).
 
 Feature-matrix and Docker-specific validation are documented in [`testing/README.md`](../testing/README.md).
 
