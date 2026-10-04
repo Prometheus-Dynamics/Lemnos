@@ -7,7 +7,7 @@
 //! - [`register`] adds register maps over I2C and SPI (blocking and async).
 //! - [`power`] adds regulators and clock outputs.
 //! - [`ErrorKind`] and [`HalError`] classify failures portably.
-//! - [`mock`] (feature `mock`) provides in-memory doubles for tests.
+//! - `mock` (feature `mock`) provides in-memory doubles for tests.
 //!
 //! [embedded-hal]: https://docs.rs/embedded-hal
 //! [embedded-hal-async]: https://docs.rs/embedded-hal-async

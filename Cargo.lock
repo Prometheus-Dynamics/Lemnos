@@ -21,12 +21,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "cc"
 version = "1.2.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -41,12 +35,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "cfg_aliases"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "core-foundation"
@@ -98,33 +86,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
-name = "gpio-cdev"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09831ec59b80be69e75d29cf36e16afbbe5fd1af9c1bf4689ad91c77db5aa6a6"
-dependencies = [
- "bitflags 2.11.1",
- "libc",
- "nix 0.27.1",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
-
-[[package]]
-name = "i2cdev"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b940f7497c4f95b863b21cd34c3737b53a67d80d94cf29055d7f7eeca6ffdb4"
-dependencies = [
- "bitflags 2.11.1",
- "byteorder",
- "libc",
- "nix 0.26.4",
-]
 
 [[package]]
 name = "indexmap"
@@ -134,26 +99,6 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown",
-]
-
-[[package]]
-name = "inotify"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd5b3eaf1a28b758ac0faa5a4254e8ab2705605496f1b1f3fbbc3988ad73d199"
-dependencies = [
- "bitflags 2.11.1",
- "inotify-sys",
- "libc",
-]
-
-[[package]]
-name = "inotify-sys"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -187,6 +132,7 @@ dependencies = [
  "lemnos-drivers-spi",
  "lemnos-drivers-uart",
  "lemnos-drivers-usb",
+ "lemnos-hal",
  "lemnos-linux",
  "lemnos-macros",
  "lemnos-mock",
@@ -320,17 +266,24 @@ dependencies = [
 name = "lemnos-linux"
 version = "1.0.0"
 dependencies = [
- "gpio-cdev",
- "i2cdev",
- "inotify",
+ "embedded-hal",
+ "embedded-hal-async",
  "lemnos-bus",
  "lemnos-core",
  "lemnos-discovery",
+ "lemnos-hal",
+ "lemnos-linux-sys",
  "rusb",
  "serialport",
- "spidev",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lemnos-linux-sys"
+version = "1.0.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -451,29 +404,6 @@ checksum = "598beaf3cc6fdd9a5dfb1630c2800c7acd31df7aaf0f565796fba2b53ca1af1b"
 dependencies = [
  "bitflags 1.3.2",
  "cfg-if",
- "libc",
-]
-
-[[package]]
-name = "nix"
-version = "0.27.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
-dependencies = [
- "bitflags 2.11.1",
- "cfg-if",
- "libc",
-]
-
-[[package]]
-name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.11.1",
- "cfg-if",
- "cfg_aliases",
  "libc",
 ]
 
@@ -632,7 +562,7 @@ dependencies = [
  "core-foundation-sys",
  "io-kit-sys",
  "mach2",
- "nix 0.26.4",
+ "nix",
  "scopeguard",
  "unescaper",
  "windows-sys 0.52.0",
@@ -652,17 +582,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "spidev"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f611021817865236902d15bdf8d729b0bd232141b568d56bb88409a8dc27397"
-dependencies = [
- "bitflags 2.11.1",
- "libc",
- "nix 0.29.0",
 ]
 
 [[package]]

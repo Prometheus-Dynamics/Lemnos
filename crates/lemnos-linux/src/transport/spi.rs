@@ -1,5 +1,6 @@
 use crate::LinuxPaths;
 use crate::backend::BACKEND_NAME;
+use crate::hal::{SpiMode as HalSpiMode, SpiTransfer, Spidev};
 use crate::metadata::descriptor_devnode;
 use crate::transport;
 use crate::transport::session;
@@ -11,9 +12,6 @@ use lemnos_core::DeviceAddress;
 use lemnos_core::{
     DeviceDescriptor, DeviceKind, InterfaceKind, SpiBitOrder, SpiConfiguration, SpiMode,
 };
-use spidev::spidevioctl::{get_bits_per_word, get_lsb_first, get_max_speed_hz, get_mode};
-use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
-use std::os::fd::AsRawFd;
 
 pub(crate) fn supports_descriptor(device: &DeviceDescriptor) -> bool {
     device.interface == InterfaceKind::Spi
@@ -168,7 +166,7 @@ struct LinuxKernelSpiTransport {
 
 impl LinuxKernelSpiTransport {
     fn new(device_id: lemnos_core::DeviceId, devnode: &str) -> BusResult<Self> {
-        let spi = Spidev::open(devnode)
+        let spi = Spidev::open_path(devnode)
             .map_err(|error| classify_open_error(&device_id, devnode, &error))?;
         let configuration =
             read_kernel_configuration(&device_id, &spi).map_err(|error| match error {
@@ -248,8 +246,13 @@ impl SpiTransport for LinuxKernelSpiTransport {
         }
 
         let mut read = vec![0; write.len()];
-        let mut transfer = SpidevTransfer::read_write(write, &mut read);
-        self.spi.transfer(&mut transfer).map_err(|error| {
+        let segment = SpiTransfer::duplex(&mut read, write).map_err(|error| {
+            self.transport_failure(
+                "spi.transfer",
+                format!("Linux SPI transfer failed: {error}"),
+            )
+        })?;
+        self.spi.transfer(&mut [segment]).map_err(|error| {
             self.transport_failure(
                 "spi.transfer",
                 format!("Linux SPI transfer failed: {error}"),
@@ -263,16 +266,17 @@ impl SpiTransport for LinuxKernelSpiTransport {
             return Err(self.invalid_request("spi.write", "write payload must not be empty"));
         }
 
-        std::io::Write::write_all(&mut self.spi, bytes).map_err(|error| {
-            self.transport_failure("spi.write", format!("Linux SPI write failed: {error}"))
-        })
+        self.spi
+            .transfer(&mut [SpiTransfer::write(bytes)])
+            .map_err(|error| {
+                self.transport_failure("spi.write", format!("Linux SPI write failed: {error}"))
+            })
     }
 
     fn configure(&mut self, configuration: &SpiConfiguration) -> BusResult<()> {
         validate_configuration(&self.device_id, configuration)?;
 
-        let options = to_spidev_options(configuration);
-        self.spi.configure(&options).map_err(|error| {
+        apply_configuration(&mut self.spi, configuration).map_err(|error| {
             self.transport_failure(
                 "spi.configure",
                 format!("Linux SPI configure failed: {error}"),
@@ -314,70 +318,53 @@ fn read_kernel_configuration(
     device_id: &lemnos_core::DeviceId,
     spi: &Spidev,
 ) -> BusResult<SpiConfiguration> {
-    let fd = spi.inner().as_raw_fd();
-    let mode_bits = get_mode(fd).map_err(|error| BusError::TransportFailure {
+    let failure = |what: &str, error: std::io::Error| BusError::TransportFailure {
         device_id: device_id.clone(),
         operation: "spi.get_configuration",
-        reason: format!("failed to read Linux SPI mode: {error}"),
-    })?;
-    let bits_per_word = get_bits_per_word(fd).map_err(|error| BusError::TransportFailure {
-        device_id: device_id.clone(),
-        operation: "spi.get_configuration",
-        reason: format!("failed to read Linux SPI bits per word: {error}"),
-    })?;
-    let max_speed_hz = get_max_speed_hz(fd).map_err(|error| BusError::TransportFailure {
-        device_id: device_id.clone(),
-        operation: "spi.get_configuration",
-        reason: format!("failed to read Linux SPI max speed: {error}"),
-    })?;
-    let lsb_first = get_lsb_first(fd).map_err(|error| BusError::TransportFailure {
-        device_id: device_id.clone(),
-        operation: "spi.get_configuration",
-        reason: format!("failed to read Linux SPI bit order: {error}"),
-    })?;
-
+        reason: format!("failed to read Linux SPI {what}: {error}"),
+    };
+    let mode = spi.mode().map_err(|error| failure("mode", error))?;
+    let bits_per_word = spi
+        .bits_per_word()
+        .map_err(|error| failure("bits per word", error))?;
+    let max_speed_hz = spi
+        .max_speed_hz()
+        .map_err(|error| failure("max speed", error))?;
+    let lsb_first = spi
+        .lsb_first()
+        .map_err(|error| failure("bit order", error))?;
     Ok(SpiConfiguration {
-        mode: mode_from_bits(mode_bits),
+        mode: match mode {
+            HalSpiMode::Mode0 => SpiMode::Mode0,
+            HalSpiMode::Mode1 => SpiMode::Mode1,
+            HalSpiMode::Mode2 => SpiMode::Mode2,
+            HalSpiMode::Mode3 => SpiMode::Mode3,
+        },
         max_frequency_hz: (max_speed_hz != 0).then_some(max_speed_hz),
-        bits_per_word: Some(if bits_per_word == 0 { 8 } else { bits_per_word }),
-        bit_order: if lsb_first == 0 {
-            SpiBitOrder::MsbFirst
-        } else {
+        bits_per_word: Some(bits_per_word),
+        bit_order: if lsb_first {
             SpiBitOrder::LsbFirst
+        } else {
+            SpiBitOrder::MsbFirst
         },
     })
 }
 
-fn to_spidev_options(configuration: &SpiConfiguration) -> SpidevOptions {
-    let mut options = SpidevOptions::new();
+fn apply_configuration(spi: &mut Spidev, configuration: &SpiConfiguration) -> std::io::Result<()> {
+    spi.set_mode(match configuration.mode {
+        SpiMode::Mode0 => HalSpiMode::Mode0,
+        SpiMode::Mode1 => HalSpiMode::Mode1,
+        SpiMode::Mode2 => HalSpiMode::Mode2,
+        SpiMode::Mode3 => HalSpiMode::Mode3,
+    })?;
+    spi.set_lsb_first(matches!(configuration.bit_order, SpiBitOrder::LsbFirst))?;
     if let Some(bits_per_word) = configuration.bits_per_word {
-        options.bits_per_word(bits_per_word);
+        spi.set_bits_per_word(bits_per_word)?;
     }
     if let Some(max_frequency_hz) = configuration.max_frequency_hz {
-        options.max_speed_hz(max_frequency_hz);
+        spi.set_max_speed_hz(max_frequency_hz)?;
     }
-    options
-        .lsb_first(matches!(configuration.bit_order, SpiBitOrder::LsbFirst))
-        .mode(mode_to_flags(configuration.mode));
-    options.build()
-}
-
-fn mode_to_flags(mode: SpiMode) -> SpiModeFlags {
-    match mode {
-        SpiMode::Mode0 => SpiModeFlags::SPI_MODE_0,
-        SpiMode::Mode1 => SpiModeFlags::SPI_MODE_1,
-        SpiMode::Mode2 => SpiModeFlags::SPI_MODE_2,
-        SpiMode::Mode3 => SpiModeFlags::SPI_MODE_3,
-    }
-}
-
-fn mode_from_bits(bits: u8) -> SpiMode {
-    match bits & 0x03 {
-        0x00 => SpiMode::Mode0,
-        0x01 => SpiMode::Mode1,
-        0x02 => SpiMode::Mode2,
-        _ => SpiMode::Mode3,
-    }
+    Ok(())
 }
 
 #[cfg(test)]

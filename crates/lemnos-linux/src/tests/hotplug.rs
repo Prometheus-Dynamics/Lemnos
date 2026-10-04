@@ -86,3 +86,42 @@ async fn async_linux_hotplug_watcher_wakes_on_gpio_root_changes() {
     let drained = tokio::time::timeout(Duration::from_millis(50), watcher.next_events()).await;
     assert!(drained.is_err(), "watcher must park again once drained");
 }
+
+#[test]
+fn hotplug_watcher_uses_inotify_on_test_roots_and_uevents_on_the_system() {
+    use crate::{HotplugSource, LinuxHotplugWatcher, LinuxPaths};
+
+    let root = TestRoot::new();
+    create_watch_roots(&root);
+    let watcher = LinuxHotplugWatcher::new(root.paths()).expect("watcher");
+    assert_eq!(watcher.source(), HotplugSource::Inotify);
+
+    // The real root prefers netlink uevents where the sandbox allows them.
+    if let Ok(mut system) = LinuxHotplugWatcher::with_uevents(LinuxPaths::default()) {
+        assert_eq!(system.source(), HotplugSource::Uevent);
+        assert!(system.poll().is_ok());
+        let auto = LinuxHotplugWatcher::new(LinuxPaths::default()).expect("system watcher");
+        assert_eq!(auto.source(), HotplugSource::Uevent);
+    }
+}
+
+#[test]
+fn uevents_map_to_interfaces() {
+    use crate::uevent::Uevent;
+    use crate::watch::uevent_interface;
+
+    let event = |subsystem: &str| Uevent {
+        action: "add".into(),
+        devpath: "/devices/x".into(),
+        vars: vec![("SUBSYSTEM".into(), subsystem.into())],
+    };
+    assert_eq!(uevent_interface(&event("usb")), Some(InterfaceKind::Usb));
+    assert_eq!(
+        uevent_interface(&event("i2c-dev")),
+        Some(InterfaceKind::I2c)
+    );
+    assert_eq!(uevent_interface(&event("hwmon")), Some(InterfaceKind::Pwm));
+    assert_eq!(uevent_interface(&event("gpio")), Some(InterfaceKind::Gpio));
+    assert_eq!(uevent_interface(&event("tty")), Some(InterfaceKind::Uart));
+    assert_eq!(uevent_interface(&event("video4linux")), None);
+}

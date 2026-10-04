@@ -1,0 +1,34 @@
+[package]
+name = "lemnos-linux-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The unsafe edge of lemnos-linux: Linux uAPI structs and safe wrappers over the i2c-dev, spidev, GPIO v2, netlink uevent, inotify and poll system calls"
+documentation = "https://docs.rs/lemnos-linux-sys"
+readme = "README.md"
+keywords = ["linux", "ioctl", "i2c", "spi", "gpio"]
+categories = ["embedded", "hardware-support", "os::linux-apis"]
+
+# The only Lemnos crate allowed to use `unsafe` (the workspace forbids it), so
+# it keeps its own lint table: every unsafe block must carry a `// SAFETY:`
+# comment, and unsafe operations inside unsafe fns need their own block.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_lifetimes = "deny"
+unused_attributes = "deny"
+missing_docs = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+todo = "deny"
+unimplemented = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[dependencies]
+libc.workspace = true

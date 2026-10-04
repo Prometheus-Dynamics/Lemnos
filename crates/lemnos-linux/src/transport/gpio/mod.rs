@@ -67,6 +67,24 @@ pub(crate) fn open_session(
     })
 }
 
+/// An edge-event stream on a GPIO line (GPIO character device only): the line
+/// is requested as an input with events on both edges.
+pub(crate) fn open_edge_stream(
+    paths: &LinuxPaths,
+    device: &DeviceDescriptor,
+    access: SessionAccess,
+) -> BusResult<Box<dyn lemnos_bus::GpioEdgeStreamSession>> {
+    #[cfg(feature = "gpio-cdev")]
+    if supports_descriptor(device) && cdev::can_use_transport(paths, device) {
+        return cdev::open_edge_stream(paths, device, access);
+    }
+    let _ = (paths, access);
+    Err(BusError::UnsupportedDevice {
+        backend: BACKEND_NAME.to_string(),
+        device_id: device.id.clone(),
+    })
+}
+
 #[cfg(any(feature = "gpio-cdev", feature = "gpio-sysfs"))]
 fn gpio_line_address(device: &DeviceDescriptor) -> Option<(&str, u32)> {
     match &device.address {

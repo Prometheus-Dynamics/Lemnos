@@ -84,13 +84,32 @@ impl BusBackend for LinuxBackend {
     }
 }
 
-impl_session_backend!(
-    GpioBusBackend::open_gpio => GpioSession,
-    "gpio",
-    |backend: &LinuxBackend, device: &DeviceDescriptor, access: SessionAccess| {
-        gpio::open_session(&backend.paths, &backend.transport_config, device, access)
+impl GpioBusBackend for LinuxBackend {
+    fn open_gpio(
+        &self,
+        device: &DeviceDescriptor,
+        access: SessionAccess,
+    ) -> BusResult<Box<dyn GpioSession>> {
+        backend_debug!(
+            device_id = ?device.id,
+            access = ?access,
+            "linux gpio session open starting"
+        );
+        let result = gpio::open_session(&self.paths, &self.transport_config, device, access);
+        log_open_result("gpio", device, access, &result);
+        result
     }
-);
+
+    fn open_gpio_edge_stream(
+        &self,
+        device: &DeviceDescriptor,
+        access: SessionAccess,
+    ) -> BusResult<Box<dyn lemnos_bus::GpioEdgeStreamSession>> {
+        let result = gpio::open_edge_stream(&self.paths, device, access);
+        log_open_result("gpio-edge", device, access, &result);
+        result
+    }
+}
 
 impl_session_backend!(
     #[cfg(feature = "pwm")]

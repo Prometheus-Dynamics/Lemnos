@@ -19,6 +19,7 @@ pub use lemnos_runtime::DriverId;
 pub use lemnos_bus as bus;
 pub use lemnos_core as core;
 pub use lemnos_discovery as discovery;
+pub use lemnos_hal as hal;
 #[cfg(feature = "linux-backend")]
 pub use lemnos_linux as linux;
 #[cfg(feature = "mock")]

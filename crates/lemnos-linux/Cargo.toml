@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Linux-specific discovery, transport, and hotplug backends for Lemnos"
+description = "Linux discovery, transports, hotplug, and embedded-hal implementations for Lemnos, in pure Rust"
 documentation = "https://docs.rs/lemnos-linux"
 readme = "README.md"
 exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
@@ -21,27 +21,28 @@ default = []
 full = ["gpio", "pwm", "i2c", "spi", "uart", "usb", "gpio-cdev", "hotplug"]
 gpio = []
 pwm = []
-i2c = ["dep:i2cdev"]
-spi = ["dep:spidev"]
+i2c = []
+spi = []
 uart = ["dep:serialport"]
 usb = ["dep:rusb"]
-hotplug = ["dep:inotify"]
+hotplug = []
 gpio-sysfs = []
-gpio-cdev = ["gpio", "dep:gpio-cdev"]
+# GPIO character device, uAPI v2 (Linux 5.10+).
+gpio-cdev = ["gpio"]
 tracing = ["dep:tracing"]
 # Reactor-driven async hotplug watching; takes effect together with `hotplug`.
 tokio = ["dep:tokio"]
 
 [dependencies]
-gpio-cdev = { workspace = true, optional = true }
-i2cdev = { workspace = true, optional = true }
-inotify = { workspace = true, optional = true }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
 lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
+lemnos-hal = { workspace = true, features = ["std"] }
+lemnos-linux-sys.workspace = true
 rusb = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }
-spidev = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["net"] }
 tracing = { workspace = true, optional = true }
 

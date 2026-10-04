@@ -1,22 +1,50 @@
 use super::*;
 use crate::metadata::descriptor_devnode;
-use i2cdev::core::I2CDevice;
-use i2cdev::linux::LinuxI2CError;
-use i2cdev::mock::MockI2CDevice;
 use lemnos_bus::{BusSession, I2cControllerSession, SessionAccess};
 use lemnos_core::{DeviceDescriptor, I2cOperation};
 use std::collections::BTreeMap;
 use std::io;
 
+/// An 8-bit register map with an auto-incrementing pointer: a write sets the
+/// pointer from its first byte and stores the rest; a read continues from it.
+struct RegisterMap {
+    registers: [u8; 256],
+    pointer: u8,
+}
+
+impl RegisterMap {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<()> {
+        for byte in buffer {
+            *byte = self.registers[usize::from(self.pointer)];
+            self.pointer = self.pointer.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if let Some((register, values)) = bytes.split_first() {
+            self.pointer = *register;
+            for value in values {
+                self.registers[usize::from(self.pointer)] = *value;
+                self.pointer = self.pointer.wrapping_add(1);
+            }
+        }
+        Ok(())
+    }
+}
+
 struct MockTransport {
     device_id: lemnos_core::DeviceId,
-    inner: MockI2CDevice,
+    inner: RegisterMap,
 }
 
 impl MockTransport {
     fn new(device_id: lemnos_core::DeviceId) -> Self {
-        let mut inner = MockI2CDevice::new();
-        inner.regmap.write_regs(0x10, &[0xAA, 0xBB, 0xCC]);
+        let mut inner = RegisterMap {
+            registers: [0; 256],
+            pointer: 0,
+        };
+        inner.registers[0x10..0x13].copy_from_slice(&[0xAA, 0xBB, 0xCC]);
         Self { device_id, inner }
     }
 
@@ -282,38 +310,7 @@ impl SmbusFallbackDevice {
     }
 }
 
-impl I2CDevice for SmbusFallbackDevice {
-    type Error = io::Error;
-
-    fn read(&mut self, data: &mut [u8]) -> io::Result<()> {
-        for byte in data.iter_mut() {
-            *byte = self.registers[self.pointer as usize];
-            self.pointer = self.pointer.wrapping_add(1);
-        }
-        Ok(())
-    }
-
-    fn write(&mut self, data: &[u8]) -> io::Result<()> {
-        if let Some((register, values)) = data.split_first() {
-            self.pointer = *register;
-            for (offset, value) in values.iter().enumerate() {
-                self.registers[register.wrapping_add(offset as u8) as usize] = *value;
-            }
-            self.pointer = register.wrapping_add(values.len() as u8);
-        }
-        Ok(())
-    }
-
-    fn smbus_write_quick(&mut self, _bit: bool) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn smbus_read_byte(&mut self) -> io::Result<u8> {
-        let value = self.registers[self.pointer as usize];
-        self.pointer = self.pointer.wrapping_add(1);
-        Ok(value)
-    }
-
+impl smbus::SmbusDevice for SmbusFallbackDevice {
     fn smbus_write_byte(&mut self, value: u8) -> io::Result<()> {
         self.pointer = value;
         Ok(())
@@ -326,13 +323,6 @@ impl I2CDevice for SmbusFallbackDevice {
     fn smbus_write_byte_data(&mut self, register: u8, value: u8) -> io::Result<()> {
         self.registers[register as usize] = value;
         Ok(())
-    }
-
-    fn smbus_read_block_data(&mut self, _register: u8) -> io::Result<Vec<u8>> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SMBus block read not implemented in test mock",
-        ))
     }
 
     fn smbus_read_i2c_block_data(&mut self, register: u8, len: u8) -> io::Result<Vec<u8>> {
@@ -348,13 +338,6 @@ impl I2CDevice for SmbusFallbackDevice {
         Ok(self.registers[start..end].to_vec())
     }
 
-    fn smbus_write_block_data(&mut self, _register: u8, _values: &[u8]) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SMBus block write not implemented in test mock",
-        ))
-    }
-
     fn smbus_write_i2c_block_data(&mut self, register: u8, values: &[u8]) -> io::Result<()> {
         if !self.supports_block_write {
             return Err(io::Error::new(
@@ -367,13 +350,6 @@ impl I2CDevice for SmbusFallbackDevice {
         let end = start + values.len();
         self.registers[start..end].copy_from_slice(values);
         Ok(())
-    }
-
-    fn smbus_process_block(&mut self, _register: u8, _values: &[u8]) -> io::Result<Vec<u8>> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SMBus process block is unsupported",
-        ))
     }
 }
 
@@ -528,8 +504,12 @@ fn classify_open_error_reports_access_conflict_for_kernel_owned_i2c_device() {
     .build()
     .expect("descriptor");
 
-    let error =
-        kernel::classify_open_error(&device, "/dev/i2c-16", 0x50, &LinuxI2CError::Errno(16));
+    let error = kernel::classify_open_error(
+        &device,
+        "/dev/i2c-16",
+        0x50,
+        &io::Error::from_raw_os_error(16),
+    );
 
     assert!(matches!(
         error,
@@ -546,7 +526,7 @@ fn classify_open_error_reports_permission_denied_for_i2c_devnode_access() {
         &device,
         "/dev/i2c-1",
         0x50,
-        &LinuxI2CError::Io(io::Error::from_raw_os_error(13)),
+        &io::Error::from_raw_os_error(13),
     );
 
     assert!(matches!(
@@ -562,7 +542,12 @@ fn classify_open_error_reports_permission_denied_for_i2c_devnode_access() {
 #[test]
 fn classify_open_error_reports_session_unavailable_for_missing_or_detached_target() {
     let device = test_device();
-    let error = kernel::classify_open_error(&device, "/dev/i2c-1", 0x50, &LinuxI2CError::Errno(6));
+    let error = kernel::classify_open_error(
+        &device,
+        "/dev/i2c-1",
+        0x50,
+        &io::Error::from_raw_os_error(6),
+    );
 
     assert!(matches!(
         error,

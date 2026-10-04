@@ -1,20 +1,49 @@
+use super::smbus::SmbusTarget;
 use super::{
     BusError, BusResult, DeviceDescriptor, I2cControllerTransport, I2cOperation, I2cTransport,
 };
 use super::{invalid_i2c_request, transport_i2c_failure};
+use crate::hal::{I2cBus, I2cMessage};
 use crate::metadata::descriptor_driver;
-use i2cdev::core::{I2CDevice, I2CMessage, I2CTransfer};
-use i2cdev::linux::{LinuxI2CDevice, LinuxI2CError, LinuxI2CMessage};
+use std::io;
+
+/// One target on an i2c-dev bus, claimed with `I2C_SLAVE`.
+pub(super) struct Target {
+    bus: I2cBus,
+    address: u16,
+}
+
+impl Target {
+    fn open(devnode: &str, address: u16) -> io::Result<Self> {
+        let mut bus = I2cBus::open_path(devnode)?;
+        bus.claim(address)?;
+        Ok(Self { bus, address })
+    }
+
+    fn transfer(&mut self, messages: &mut [I2cMessage<'_>]) -> io::Result<()> {
+        if !self.bus.supports_i2c() {
+            return Err(io::Error::from_raw_os_error(95));
+        }
+        self.bus.transfer(self.address, messages)
+    }
+
+    fn smbus(&mut self) -> SmbusTarget<'_> {
+        SmbusTarget {
+            bus: &mut self.bus,
+            address: self.address,
+        }
+    }
+}
 
 pub(super) struct LinuxKernelI2cTransport {
     device_id: lemnos_core::DeviceId,
-    device: LinuxI2CDevice,
+    device: Target,
 }
 
 impl LinuxKernelI2cTransport {
     pub(super) fn new(device: &DeviceDescriptor, devnode: &str, address: u16) -> BusResult<Self> {
         let device_id = device.id.clone();
-        let device = LinuxI2CDevice::new(devnode, address)
+        let device = Target::open(devnode, address)
             .map_err(|error| classify_open_error(device, devnode, address, &error))?;
 
         Ok(Self { device_id, device })
@@ -50,8 +79,7 @@ impl I2cTransport for LinuxKernelI2cTransport {
 pub(super) struct LinuxKernelI2cControllerTransport {
     owner_id: lemnos_core::DeviceId,
     devnode: String,
-    device: Option<LinuxI2CDevice>,
-    current_address: Option<u16>,
+    device: Option<Target>,
 }
 
 impl LinuxKernelI2cControllerTransport {
@@ -60,18 +88,13 @@ impl LinuxKernelI2cControllerTransport {
             owner_id: owner.id.clone(),
             devnode,
             device: None,
-            current_address: None,
         }
     }
 
-    fn ensure_address(
-        &mut self,
-        address: u16,
-        operation: &'static str,
-    ) -> BusResult<&mut LinuxI2CDevice> {
+    fn ensure_address(&mut self, address: u16, operation: &'static str) -> BusResult<&mut Target> {
         if let Some(device) = self.device.as_mut() {
-            if self.current_address != Some(address) {
-                device.set_slave_address(address).map_err(|error| {
+            if device.address != address {
+                device.bus.claim(address).map_err(|error| {
                     classify_controller_address_error(
                         &self.owner_id,
                         &self.devnode,
@@ -80,10 +103,10 @@ impl LinuxKernelI2cControllerTransport {
                         &error,
                     )
                 })?;
-                self.current_address = Some(address);
+                device.address = address;
             }
         } else {
-            let device = LinuxI2CDevice::new(&self.devnode, address).map_err(|error| {
+            let device = Target::open(&self.devnode, address).map_err(|error| {
                 classify_controller_address_error(
                     &self.owner_id,
                     &self.devnode,
@@ -93,7 +116,6 @@ impl LinuxKernelI2cControllerTransport {
                 )
             })?;
             self.device = Some(device);
-            self.current_address = Some(address);
         }
 
         self.device
@@ -151,7 +173,7 @@ impl I2cControllerTransport for LinuxKernelI2cControllerTransport {
 
 pub(super) fn linux_i2c_read(
     device_id: &lemnos_core::DeviceId,
-    device: &mut LinuxI2CDevice,
+    device: &mut Target,
     length: u32,
 ) -> BusResult<Vec<u8>> {
     if length == 0 {
@@ -169,7 +191,7 @@ pub(super) fn linux_i2c_read(
 
 pub(super) fn linux_i2c_read_into(
     device_id: &lemnos_core::DeviceId,
-    device: &mut LinuxI2CDevice,
+    device: &mut Target,
     buffer: &mut [u8],
 ) -> BusResult<()> {
     if buffer.is_empty() {
@@ -180,19 +202,21 @@ pub(super) fn linux_i2c_read_into(
         ));
     }
 
-    device.read(buffer).map_err(|error| {
-        transport_i2c_failure(
-            device_id,
-            "i2c.read",
-            format!("Linux I2C read failed: {error}"),
-        )
-    })?;
+    device
+        .transfer(&mut [I2cMessage::Read(buffer)])
+        .map_err(|error| {
+            transport_i2c_failure(
+                device_id,
+                "i2c.read",
+                format!("Linux I2C read failed: {error}"),
+            )
+        })?;
     Ok(())
 }
 
 pub(super) fn linux_i2c_write(
     device_id: &lemnos_core::DeviceId,
-    device: &mut LinuxI2CDevice,
+    device: &mut Target,
     bytes: &[u8],
 ) -> BusResult<()> {
     if bytes.is_empty() {
@@ -203,9 +227,9 @@ pub(super) fn linux_i2c_write(
         ));
     }
 
-    device.write(bytes).or_else(|error| {
+    device.transfer(&mut [I2cMessage::Write(bytes)]).or_else(|error| {
         if should_try_smbus_fallback(&error) {
-            super::smbus::smbus_write_fallback(device, bytes).map_err(|fallback_error| {
+            super::smbus::smbus_write_fallback(&mut device.smbus(), bytes).map_err(|fallback_error| {
                 transport_i2c_failure(
                     device_id,
                     "i2c.write",
@@ -226,7 +250,7 @@ pub(super) fn linux_i2c_write(
 
 pub(super) fn linux_i2c_write_read(
     device_id: &lemnos_core::DeviceId,
-    device: &mut LinuxI2CDevice,
+    device: &mut Target,
     write: &[u8],
     read_length: u32,
 ) -> BusResult<Vec<u8>> {
@@ -252,7 +276,7 @@ pub(super) fn linux_i2c_write_read(
 
 pub(super) fn linux_i2c_write_read_into(
     device_id: &lemnos_core::DeviceId,
-    device: &mut LinuxI2CDevice,
+    device: &mut Target,
     write: &[u8],
     read: &mut [u8],
 ) -> BusResult<()> {
@@ -271,20 +295,20 @@ pub(super) fn linux_i2c_write_read_into(
         ));
     }
 
-    let mut messages = [LinuxI2CMessage::write(write), LinuxI2CMessage::read(read)];
-    device.transfer(&mut messages).map(|_| ()).or_else(|error| {
+    let result = device.transfer(&mut [I2cMessage::Write(write), I2cMessage::Read(read)]);
+    result.or_else(|error| {
         if should_try_smbus_fallback(&error) {
-            super::smbus::smbus_write_read_fallback(device, write, read.len() as u32)
+            super::smbus::smbus_write_read_fallback(&mut device.smbus(), write, read.len() as u32)
                 .and_then(|bytes| {
                     if bytes.len() != read.len() {
-                        return Err(LinuxI2CError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
                             format!(
                                 "SMBus fallback returned {} bytes, expected {}",
                                 bytes.len(),
                                 read.len()
                             ),
-                        )));
+                        ));
                     }
                     read.copy_from_slice(&bytes);
                     Ok(())
@@ -310,7 +334,7 @@ pub(super) fn linux_i2c_write_read_into(
 
 pub(super) fn linux_i2c_transaction(
     device_id: &lemnos_core::DeviceId,
-    device: &mut LinuxI2CDevice,
+    device: &mut Target,
     operations: &[I2cOperation],
 ) -> BusResult<Vec<Vec<u8>>> {
     if operations.is_empty() {
@@ -319,6 +343,46 @@ pub(super) fn linux_i2c_transaction(
             "i2c.transaction",
             "transaction operations must not be empty",
         ));
+    }
+
+    // One combined transfer (repeated starts, one stop) when the adapter does
+    // plain I2C; otherwise each operation on its own (SMBus fallbacks).
+    if device.bus.supports_i2c() && operations.len() <= lemnos_linux_sys::i2c::MAX_MESSAGES {
+        let mut results: Vec<Vec<u8>> = operations
+            .iter()
+            .map(|op| match op {
+                I2cOperation::Read { length } => vec![0u8; *length as usize],
+                I2cOperation::Write { .. } => Vec::new(),
+            })
+            .collect();
+        if operations.iter().any(|op| match op {
+            I2cOperation::Read { length } => *length == 0,
+            I2cOperation::Write { bytes } => bytes.is_empty(),
+        }) {
+            return Err(invalid_i2c_request(
+                device_id,
+                "i2c.transaction",
+                "transaction operations must not be empty",
+            ));
+        }
+        {
+            let mut messages: Vec<I2cMessage<'_>> = operations
+                .iter()
+                .zip(results.iter_mut())
+                .map(|(op, out)| match op {
+                    I2cOperation::Read { .. } => I2cMessage::Read(out.as_mut_slice()),
+                    I2cOperation::Write { bytes } => I2cMessage::Write(bytes.as_slice()),
+                })
+                .collect();
+            device.transfer(&mut messages).map_err(|error| {
+                transport_i2c_failure(
+                    device_id,
+                    "i2c.transaction",
+                    format!("Linux I2C combined transfer failed: {error}"),
+                )
+            })?;
+        }
+        return Ok(results);
     }
 
     let mut results = Vec::with_capacity(operations.len());
@@ -336,22 +400,21 @@ pub(super) fn linux_i2c_transaction(
     Ok(results)
 }
 
-fn should_try_smbus_fallback(error: &LinuxI2CError) -> bool {
-    let (kind, raw_os_error) = linux_i2c_error_kind_and_errno(error);
-    super::smbus::is_smbus_unsupported_kind_or_errno(kind, raw_os_error)
+fn should_try_smbus_fallback(error: &io::Error) -> bool {
+    super::smbus::is_smbus_unsupported_kind_or_errno(error.kind(), error.raw_os_error())
 }
 
 pub(super) fn classify_open_error(
     device: &DeviceDescriptor,
     devnode: &str,
     address: u16,
-    error: &LinuxI2CError,
+    error: &io::Error,
 ) -> BusError {
-    let (kind, raw_os_error) = linux_i2c_error_kind_and_errno(error);
+    let (kind, raw_os_error) = (error.kind(), error.raw_os_error());
     let device_id = device.id.clone();
     let address_note = format!("Linux I2C address 0x{address:04x} on '{devnode}'");
 
-    if kind == std::io::ErrorKind::PermissionDenied || matches!(raw_os_error, Some(1 | 13)) {
+    if kind == io::ErrorKind::PermissionDenied || matches!(raw_os_error, Some(1 | 13)) {
         return BusError::PermissionDenied {
             device_id,
             operation: "open",
@@ -368,7 +431,7 @@ pub(super) fn classify_open_error(
         return BusError::AccessConflict { device_id, reason };
     }
 
-    if kind == std::io::ErrorKind::NotFound || matches!(raw_os_error, Some(6 | 19)) {
+    if kind == io::ErrorKind::NotFound || matches!(raw_os_error, Some(6 | 19)) {
         return BusError::SessionUnavailable {
             device_id,
             reason: format!("{address_note} is not currently available: {error}"),
@@ -387,12 +450,12 @@ fn classify_controller_address_error(
     devnode: &str,
     address: u16,
     operation: &'static str,
-    error: &LinuxI2CError,
+    error: &io::Error,
 ) -> BusError {
-    let (kind, raw_os_error) = linux_i2c_error_kind_and_errno(error);
+    let (kind, raw_os_error) = (error.kind(), error.raw_os_error());
     let address_note = format!("Linux I2C address 0x{address:04x} on '{devnode}'");
 
-    if kind == std::io::ErrorKind::PermissionDenied || matches!(raw_os_error, Some(1 | 13)) {
+    if kind == io::ErrorKind::PermissionDenied || matches!(raw_os_error, Some(1 | 13)) {
         return BusError::PermissionDenied {
             device_id: owner_id.clone(),
             operation,
@@ -409,7 +472,7 @@ fn classify_controller_address_error(
         };
     }
 
-    if kind == std::io::ErrorKind::NotFound || matches!(raw_os_error, Some(6 | 19)) {
+    if kind == io::ErrorKind::NotFound || matches!(raw_os_error, Some(6 | 19)) {
         return BusError::SessionUnavailable {
             device_id: owner_id.clone(),
             reason: format!("{address_note} is not currently available: {error}"),
@@ -420,15 +483,5 @@ fn classify_controller_address_error(
         device_id: owner_id.clone(),
         operation,
         reason: format!("failed to select {address_note}: {error}"),
-    }
-}
-
-fn linux_i2c_error_kind_and_errno(error: &LinuxI2CError) -> (std::io::ErrorKind, Option<i32>) {
-    match error {
-        LinuxI2CError::Errno(errno) => {
-            let io_error = std::io::Error::from_raw_os_error(*errno);
-            (io_error.kind(), Some(*errno))
-        }
-        LinuxI2CError::Io(io_error) => (io_error.kind(), io_error.raw_os_error()),
     }
 }

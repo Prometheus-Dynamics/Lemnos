@@ -4,9 +4,11 @@
 mod async_watch;
 mod backend;
 mod discovery;
+pub mod hal;
 mod metadata;
 mod paths;
 mod transport;
+pub mod uevent;
 mod util;
 #[cfg(feature = "hotplug")]
 mod watch;
@@ -28,7 +30,7 @@ pub use discovery::{GpioDiscoveryProbe, LedDiscoveryProbe};
 pub use discovery::{HwmonDiscoveryProbe, PwmDiscoveryProbe};
 pub use paths::LinuxPaths;
 #[cfg(feature = "hotplug")]
-pub use watch::LinuxHotplugWatcher;
+pub use watch::{HotplugSource, LinuxHotplugWatcher};
 
 #[cfg(test)]
 mod tests;

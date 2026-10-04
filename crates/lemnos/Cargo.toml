@@ -59,6 +59,7 @@ lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
 lemnos-driver-manifest = { workspace = true, features = ["std"] }
 lemnos-driver-sdk.workspace = true
+lemnos-hal.workspace = true
 lemnos-drivers-gpio = { workspace = true, optional = true }
 lemnos-drivers-i2c = { workspace = true, optional = true }
 lemnos-drivers-pwm = { workspace = true, optional = true }
@@ -78,6 +79,10 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 [[example]]
 name = "linux_device_validator"
 required-features = ["builtin-drivers", "linux", "macros"]
+
+[[example]]
+name = "linux_hal_probe"
+required-features = ["linux"]
 
 [[example]]
 name = "linux_hwmon_fan_driver"

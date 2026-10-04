@@ -10,6 +10,7 @@ members = [
     "crates/lemnos-registry",
     "crates/lemnos-runtime",
     "crates/lemnos-linux",
+    "crates/lemnos-linux-sys",
     "crates/lemnos-macros",
     "crates/lemnos-macros-tests",
     "crates/lemnos-drivers-gpio",
@@ -45,15 +46,14 @@ lemnos-drivers-spi = { version = "1.0.0", path = "crates/lemnos-drivers-spi" }
 lemnos-drivers-uart = { version = "1.0.0", path = "crates/lemnos-drivers-uart" }
 lemnos-drivers-usb = { version = "1.0.0", path = "crates/lemnos-drivers-usb" }
 lemnos-linux = { version = "1.0.0", path = "crates/lemnos-linux", default-features = false }
+lemnos-linux-sys = { version = "1.0.0", path = "crates/lemnos-linux-sys" }
 lemnos-macros = { version = "1.0.0", path = "crates/lemnos-macros" }
 lemnos-mock = { version = "1.0.0", path = "crates/lemnos-mock" }
 lemnos-registry = { version = "1.0.0", path = "crates/lemnos-registry" }
 lemnos-runtime = { version = "1.0.0", path = "crates/lemnos-runtime" }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-gpio-cdev = "0.6.0"
-i2cdev = "0.6.2"
-inotify = { version = "0.11.1", default-features = false }
+libc = "0.2.185"
 ordered-float = { version = "5.3.0", default-features = false }
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
@@ -61,7 +61,6 @@ rusb = "0.9.4"
 serde = { version = "1.0.228", default-features = false }
 serde_json = { version = "1.0.149", default-features = false, features = ["alloc"] }
 serialport = { version = "4.9.0", default-features = false }
-spidev = "0.7.1"
 syn = { version = "2.0.117", features = ["full"] }
 thiserror = { version = "2.0.18", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
