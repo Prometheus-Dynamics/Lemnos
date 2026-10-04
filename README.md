@@ -75,6 +75,7 @@ Targeted helper scripts live under `testing/`.
 - [docs/development.md](docs/development.md): repo layout, commands, and validation conventions
 - [docs/architecture-crate-map.md](docs/architecture-crate-map.md): crate responsibilities and relationships
 - [docs/testing.md](docs/testing.md): test surfaces, scripts, and example validation flows
+- [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the Styx migration
 - [CHANGELOG.md](CHANGELOG.md): release history and notable workspace changes
 - [testing/README.md](testing/README.md): local and CI validation entry points
 - [scripts/ci.sh](scripts/ci.sh): shared local CI entry point

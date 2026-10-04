@@ -7,6 +7,7 @@ This directory holds repository-level documentation for the Lemnos workspace.
 - [development.md](development.md): repository layout, validation commands, and CI expectations
 - [architecture-crate-map.md](architecture-crate-map.md): explains how the workspace crates fit together
 - [testing.md](testing.md): describes test entry points, helper scripts, and validation flows
+- [foundation.md](foundation.md): Lemnos 2.0 layering (embedded-hal, `lemnos-hal`, one Linux implementation) and the Styx migration
 
 ## Where To Start
 
