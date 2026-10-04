@@ -17,13 +17,15 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [features]
-default = []
+default = ["std"]
+# Host conveniences: `ErrorKind::from_io` and serde's std support.
+std = ["lemnos-hal/std", "serde?/std"]
 serde = ["dep:serde", "ordered-float/serde", "serde/rc"]
 
 [dependencies]
-lemnos-hal = { workspace = true, features = ["std"] }
+lemnos-hal.workspace = true
 ordered-float.workspace = true
-serde = { workspace = true, features = ["derive"], optional = true }
+serde = { workspace = true, features = ["derive", "alloc"], optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]

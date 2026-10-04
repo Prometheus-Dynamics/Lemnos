@@ -17,11 +17,12 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [features]
-default = []
+default = ["std"]
+std = ["lemnos-core/std", "serde?/std", "serde_json?/std"]
 serde = ["dep:serde", "dep:serde_json", "lemnos-core/serde"]
 
 [dependencies]
 lemnos-core.workspace = true
-serde = { workspace = true, features = ["derive"], optional = true }
+serde = { workspace = true, features = ["derive", "alloc"], optional = true }
 serde_json = { workspace = true, optional = true }
 thiserror.workspace = true

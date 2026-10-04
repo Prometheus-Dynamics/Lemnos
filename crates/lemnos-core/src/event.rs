@@ -2,9 +2,11 @@ use crate::{
     DeviceDescriptor, DeviceHealth, DeviceId, DeviceIssue, DeviceLifecycleState,
     DeviceStateSnapshot, TimestampMs,
 };
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]

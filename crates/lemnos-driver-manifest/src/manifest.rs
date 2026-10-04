@@ -2,6 +2,10 @@ use crate::{
     InteractionManifest, ManifestError, ManifestMatch, ManifestResult, MatchRule,
     validation::validate_driver_id, version::DriverVersion,
 };
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use lemnos_core::{DeviceDescriptor, DeviceKind, InterfaceKind};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};

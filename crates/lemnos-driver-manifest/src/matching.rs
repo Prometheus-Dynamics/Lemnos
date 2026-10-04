@@ -1,4 +1,8 @@
 use crate::{ManifestError, ManifestResult};
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 use lemnos_core::{CapabilityId, DeviceDescriptor, DeviceKind, InterfaceKind, Value};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};

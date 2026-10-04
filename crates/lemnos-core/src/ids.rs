@@ -1,7 +1,9 @@
 use crate::{CoreError, CoreResult};
+use alloc::string::String;
+use alloc::string::ToString;
+use core::fmt;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 const EXTRA_IDENTIFIER_CHARS: &[char] = &['.', '_', '-', ':', '/', '+', '#'];
 

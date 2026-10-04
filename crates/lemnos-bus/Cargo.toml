@@ -17,5 +17,5 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [dependencies]
-lemnos-core.workspace = true
+lemnos-core = { workspace = true, features = ["std"] }
 thiserror.workspace = true

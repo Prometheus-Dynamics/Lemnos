@@ -37,7 +37,7 @@ gpio-cdev = { workspace = true, optional = true }
 i2cdev = { workspace = true, optional = true }
 inotify = { workspace = true, optional = true }
 lemnos-bus.workspace = true
-lemnos-core.workspace = true
+lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
 rusb = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }

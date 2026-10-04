@@ -2,6 +2,10 @@ use crate::{
     CapabilityAccess, CapabilityDescriptor, CoreResult, DeviceAddress, DeviceDescriptor,
     DeviceDescriptorBuilder, DeviceId, DeviceKind, DeviceLink, DeviceRelation, GpioEdge,
 };
+use alloc::borrow::ToOwned;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 

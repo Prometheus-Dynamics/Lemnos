@@ -1,8 +1,10 @@
 use crate::{ManifestError, ManifestResult};
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::string::ToString;
 use lemnos_core::{InteractionId, Value};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]

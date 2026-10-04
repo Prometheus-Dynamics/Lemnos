@@ -1,7 +1,11 @@
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 use ordered_float::OrderedFloat;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 pub type ValueMap = BTreeMap<String, Value>;
 
@@ -122,7 +126,7 @@ impl Value {
                 let mut out = String::with_capacity(2 + bytes.len() * 2);
                 out.push_str("0x");
                 for byte in bytes {
-                    use std::fmt::Write as _;
+                    use core::fmt::Write as _;
                     let _ = write!(out, "{byte:02x}");
                 }
                 Some(out)
@@ -219,6 +223,7 @@ impl From<ValueMap> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn reports_value_kind() {

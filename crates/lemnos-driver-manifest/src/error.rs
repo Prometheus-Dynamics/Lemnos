@@ -1,3 +1,4 @@
+use alloc::string::String;
 use lemnos_core::CoreError;
 use thiserror::Error;
 

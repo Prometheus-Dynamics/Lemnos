@@ -1,4 +1,5 @@
 use crate::{IssueCode, TimestampMs, ValueMap};
+use alloc::string::String;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 

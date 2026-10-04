@@ -3,9 +3,11 @@ use crate::{
     CapabilityDescriptor, CoreError, CoreResult, DeviceHealth, DeviceId, InterfaceKind,
     LocalDeviceId, Value, ValueMap,
 };
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]

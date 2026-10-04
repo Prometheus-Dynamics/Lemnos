@@ -1,7 +1,9 @@
 use crate::InterfaceKind;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]

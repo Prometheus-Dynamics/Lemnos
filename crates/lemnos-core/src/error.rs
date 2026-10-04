@@ -1,4 +1,5 @@
 use crate::{DeviceAddress, DeviceKind, InterfaceKind};
+use alloc::string::String;
 use thiserror::Error;
 
 pub type CoreResult<T> = Result<T, CoreError>;

@@ -1,4 +1,7 @@
 use crate::{DriverManifest, DriverPriority, DriverVersion, MatchCondition, MatchRule};
+use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use lemnos_core::Value;
 use lemnos_core::{

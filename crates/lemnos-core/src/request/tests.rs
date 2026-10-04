@@ -1,5 +1,6 @@
 use super::*;
 use crate::DeviceDescriptor;
+use alloc::vec::Vec;
 
 #[test]
 fn standard_request_reports_interface_and_name() {

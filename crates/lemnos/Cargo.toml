@@ -55,9 +55,9 @@ tokio = ["lemnos-runtime/tokio", "lemnos-linux?/tokio", "dep:tokio"]
 
 [dependencies]
 lemnos-bus.workspace = true
-lemnos-core.workspace = true
+lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
-lemnos-driver-manifest.workspace = true
+lemnos-driver-manifest = { workspace = true, features = ["std"] }
 lemnos-driver-sdk.workspace = true
 lemnos-drivers-gpio = { workspace = true, optional = true }
 lemnos-drivers-i2c = { workspace = true, optional = true }

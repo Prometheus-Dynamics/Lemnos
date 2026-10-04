@@ -1,5 +1,6 @@
 #[cfg(feature = "serde")]
 use crate::request_serde::*;
+use alloc::vec::Vec;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]

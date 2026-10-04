@@ -1,4 +1,5 @@
 use crate::{ManifestError, ManifestResult};
+use alloc::string::ToString;
 
 pub(crate) fn validate_driver_id(id: &str) -> ManifestResult<()> {
     if id.is_empty() {

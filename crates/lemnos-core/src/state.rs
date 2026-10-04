@@ -1,4 +1,6 @@
 use crate::{DeviceId, DeviceIssue, TimestampMs, ValueMap};
+use alloc::string::String;
+use alloc::vec::Vec;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
