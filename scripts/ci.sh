@@ -52,6 +52,11 @@ run_nostd() {
   "$root_dir/scripts/check-nostd.sh"
 }
 
+run_sizes() {
+  echo "==> [sizes] Checking binary sizes against the baseline"
+  "$root_dir/scripts/check-sizes.sh"
+}
+
 run_package_surface() {
   echo "==> [package-surface] Validating package surface"
   cargo package --workspace --allow-dirty --no-verify
@@ -59,7 +64,7 @@ run_package_surface() {
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|package-surface|all]
+Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|sizes|package-surface|all]
 
 Defaults to `all`, which mirrors the non-matrix jobs in `.github/workflows/ci.yml`.
 EOF
@@ -77,6 +82,9 @@ case "$mode" in
   nostd)
     run_nostd
     ;;
+  sizes)
+    run_sizes
+    ;;
   package-surface)
     run_package_surface
     ;;
@@ -84,6 +92,7 @@ case "$mode" in
     run_workspace
     run_docs_and_lints
     run_nostd
+    run_sizes
     run_package_surface
     ;;
   -h|--help|help)

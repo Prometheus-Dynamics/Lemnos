@@ -1,0 +1,35 @@
+[package]
+name = "lemnos-size-firmware"
+publish = false
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+embedded-hal = "1.0.0"
+lemnos-hal = { path = "../../../crates/lemnos-hal", default-features = false }
+lemnos-drivers-bmi088 = { path = "../../../crates/lemnos-drivers-bmi088", optional = true, default-features = false }
+lemnos-drivers-bmm150 = { path = "../../../crates/lemnos-drivers-bmm150", optional = true, default-features = false }
+lemnos-drivers-ina2xx = { path = "../../../crates/lemnos-drivers-ina2xx", optional = true, default-features = false }
+lemnos-drivers-vcm = { path = "../../../crates/lemnos-drivers-vcm", optional = true }
+
+[features]
+regs = []
+bmi088 = ["dep:lemnos-drivers-bmi088"]
+bmm150 = ["dep:lemnos-drivers-bmm150"]
+ina2xx = ["dep:lemnos-drivers-ina2xx"]
+vcm = ["dep:lemnos-drivers-vcm"]
+float = ["lemnos-drivers-bmi088?/float", "lemnos-drivers-bmm150?/float", "lemnos-drivers-ina2xx?/float"]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.speed]
+inherits = "release"
+opt-level = 3
+
+# Not a workspace member: built only by scripts/check-sizes.sh.
+[workspace]

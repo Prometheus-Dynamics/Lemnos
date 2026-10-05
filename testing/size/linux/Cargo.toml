@@ -1,0 +1,23 @@
+[package]
+name = "lemnos-size-linux"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+lemnos = { path = "../../../crates/lemnos", default-features = false }
+
+[features]
+linux = ["lemnos/linux-backend"]
+builtin = ["lemnos/builtin-drivers"]
+
+# Size-optimized, as a constrained Linux image would be built.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Not a workspace member: built only by scripts/check-sizes.sh.
+[workspace]

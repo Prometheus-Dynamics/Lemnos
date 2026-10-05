@@ -160,6 +160,25 @@ jobs:
       - name: Build and lint no_std crates
         run: ./scripts/check-nostd.sh
 
+  sizes:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+          targets: thumbv7em-none-eabihf, riscv32imac-unknown-none-elf
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check binary sizes against the baseline
+        run: ./scripts/check-sizes.sh
+
   package-surface:
     runs-on: ubuntu-latest
 

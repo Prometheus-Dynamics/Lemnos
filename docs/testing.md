@@ -18,7 +18,9 @@ Important coverage areas:
 
 ## no_std Builds
 
-`./scripts/check-nostd.sh` builds and lints the `no_std` crates (`lemnos-hal`, `lemnos-core`, `lemnos-driver-manifest`, `lemnos-drivers-vcm`) for `thumbv7em-none-eabihf`, `riscv32imac-unknown-none-elf` and `wasm32-unknown-unknown`. Their host tests run against `lemnos-hal`'s embedded-hal mocks.
+`./scripts/check-nostd.sh` builds and lints the `no_std` crates (`lemnos-hal`, `lemnos-core`, `lemnos-driver-manifest` and the device driver crates, with and without `float`) for `thumbv7em-none-eabihf`, `riscv32imac-unknown-none-elf` and `wasm32-unknown-unknown`. Their host tests run against `lemnos-hal`'s embedded-hal mocks.
+
+`./scripts/check-sizes.sh` tracks what Lemnos costs small targets: bare-metal firmware images using the device drivers (`testing/size/firmware`, Cortex-M4F and FPU-less RISC-V, with and without `float`) and stripped, size-optimized Linux binaries using the facade (`testing/size/linux`). It compares them with `testing/size/baseline.txt` and fails when an image grows beyond noise (max of 64 bytes and 1%; 5% for Linux binaries, whose linker and libc vary by host). There are no absolute budgets: when a change grows an image on purpose, or shrinks it, run `./scripts/check-sizes.sh --update` and commit the new baseline with the change.
 
 ## Mock-Based Validation
 
