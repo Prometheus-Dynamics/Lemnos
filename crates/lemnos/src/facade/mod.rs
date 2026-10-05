@@ -11,9 +11,9 @@ use lemnos_core::{
     UartRequest, UsbRequest, Value,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryProbe, InventorySnapshot, InventoryWatcher};
-#[cfg(all(feature = "linux", feature = "linux-hotplug"))]
+#[cfg(all(feature = "linux-backend", feature = "linux-hotplug"))]
 use lemnos_linux::{LinuxBackend, LinuxHotplugWatcher, LinuxPaths, LinuxTransportConfig};
-#[cfg(all(feature = "linux", not(feature = "linux-hotplug")))]
+#[cfg(all(feature = "linux-backend", not(feature = "linux-hotplug")))]
 use lemnos_linux::{LinuxBackend, LinuxPaths, LinuxTransportConfig};
 #[cfg(feature = "mock")]
 use lemnos_mock::MockHardware;
@@ -182,27 +182,27 @@ macro_rules! impl_mock_backend_methods {
 
 macro_rules! impl_linux_backend_methods {
     (sync) => {
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_backend(&mut self, backend: LinuxBackend) {
             self.set_shared_backend(backend);
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_backend_ref(&mut self, backend: &LinuxBackend) {
             self.set_linux_backend(backend.clone());
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_paths(&mut self, paths: LinuxPaths) {
             self.set_linux_backend(LinuxBackend::with_paths(paths));
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_transport_config(&mut self, transport_config: LinuxTransportConfig) {
             self.set_linux_backend(LinuxBackend::with_config(transport_config));
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_paths_and_config(
             &mut self,
             paths: LinuxPaths,
@@ -212,27 +212,27 @@ macro_rules! impl_linux_backend_methods {
         }
     };
     (async) => {
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_backend(&self, backend: LinuxBackend) {
             self.set_shared_backend(backend);
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_backend_ref(&self, backend: &LinuxBackend) {
             self.set_linux_backend(backend.clone());
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_paths(&self, paths: LinuxPaths) {
             self.set_linux_backend(LinuxBackend::with_paths(paths));
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_transport_config(&self, transport_config: LinuxTransportConfig) {
             self.set_linux_backend(LinuxBackend::with_config(transport_config));
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn set_linux_paths_and_config(
             &self,
             paths: LinuxPaths,
@@ -242,27 +242,27 @@ macro_rules! impl_linux_backend_methods {
         }
     };
     (builder) => {
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn with_linux_backend(self, backend: LinuxBackend) -> Self {
             self.with_shared_backend(backend)
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn with_linux_backend_ref(self, backend: &LinuxBackend) -> Self {
             self.with_linux_backend(backend.clone())
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn with_linux_paths(self, paths: LinuxPaths) -> Self {
             self.with_linux_backend(LinuxBackend::with_paths(paths))
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn with_linux_transport_config(self, transport_config: LinuxTransportConfig) -> Self {
             self.with_linux_backend(LinuxBackend::with_config(transport_config))
         }
 
-        #[cfg(feature = "linux")]
+        #[cfg(feature = "linux-backend")]
         pub fn with_linux_paths_and_config(
             self,
             paths: LinuxPaths,

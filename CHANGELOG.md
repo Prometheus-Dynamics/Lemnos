@@ -15,6 +15,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Each driver has `resume` (or, for INA2xx, a bus-free `new`) so a runtime adapter can rebuild it around a borrowed `lemnos_bus::hal::HalI2cBus` per operation; `crates/lemnos/tests/nostd_driver_in_runtime.rs` shows the pattern.
 - `scripts/check-nostd.sh` builds the three crates for the embedded and wasm targets.
 
+### Fixed
+
+- The facade's Linux API (`with_linux_backend*`, `refresh_with_linux`, hotplug helpers) now needs only `linux-backend` instead of the umbrella `linux` feature, and `LinuxBackend` implements every bus backend trait in every build (compiled-out buses return `BusError::UnsupportedInterface`). Builds can leave out `linux-usb` (libusb, a C toolchain) and `linux-uart` (serialport, nix); a `lemnos linux lite` CI matrix entry keeps that working.
+
 ## [2.0.0]
 
 Lemnos becomes the hardware foundation under Styx: embedded-hal 1.0 is the bus vocabulary,

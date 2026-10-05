@@ -10,16 +10,13 @@ use crate::transport::spi;
 use crate::transport::uart;
 #[cfg(feature = "usb")]
 use crate::transport::usb;
-use lemnos_bus::{BusBackend, BusResult, GpioBusBackend, GpioSession, SessionAccess};
 #[cfg(feature = "i2c")]
-use lemnos_bus::{I2cBusBackend, I2cControllerSession, I2cSession};
-#[cfg(feature = "pwm")]
+use lemnos_bus::I2cControllerSession;
+use lemnos_bus::{BusBackend, BusResult, GpioBusBackend, GpioSession, SessionAccess};
+use lemnos_bus::{I2cBusBackend, I2cSession};
 use lemnos_bus::{PwmBusBackend, PwmSession};
-#[cfg(feature = "spi")]
 use lemnos_bus::{SpiBusBackend, SpiSession};
-#[cfg(feature = "uart")]
 use lemnos_bus::{UartBusBackend, UartSession};
-#[cfg(feature = "usb")]
 use lemnos_bus::{UsbBusBackend, UsbSession};
 use lemnos_core::DeviceDescriptor;
 
@@ -35,6 +32,33 @@ macro_rules! optional_support {
         }
     }};
 }
+
+/// Implements a bus backend trait for a bus compiled out of this build: every
+/// open fails with `UnsupportedInterface`, so `LinuxBackend` still satisfies
+/// callers that need all six traits (such as the `lemnos` facade).
+macro_rules! impl_disabled_backend {
+    ($feature:literal, $trait_name:ident::$method_name:ident => $session_trait:ident, $interface:ident) => {
+        #[cfg(not(feature = $feature))]
+        impl $trait_name for LinuxBackend {
+            fn $method_name(
+                &self,
+                _device: &DeviceDescriptor,
+                _access: SessionAccess,
+            ) -> BusResult<Box<dyn $session_trait>> {
+                Err(lemnos_bus::BusError::UnsupportedInterface {
+                    backend: BACKEND_NAME.to_string(),
+                    interface: lemnos_core::InterfaceKind::$interface,
+                })
+            }
+        }
+    };
+}
+
+impl_disabled_backend!("pwm", PwmBusBackend::open_pwm => PwmSession, Pwm);
+impl_disabled_backend!("i2c", I2cBusBackend::open_i2c => I2cSession, I2c);
+impl_disabled_backend!("spi", SpiBusBackend::open_spi => SpiSession, Spi);
+impl_disabled_backend!("uart", UartBusBackend::open_uart => UartSession, Uart);
+impl_disabled_backend!("usb", UsbBusBackend::open_usb => UsbSession, Usb);
 
 macro_rules! impl_session_backend {
     (

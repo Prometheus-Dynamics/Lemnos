@@ -77,6 +77,11 @@ jobs:
             check: cargo check -p lemnos --no-default-features --features linux-gpio,linux-hotplug
             test: cargo test -p lemnos --no-default-features --features linux-gpio,linux-hotplug
             clippy: cargo clippy -p lemnos --all-targets --no-default-features --features linux-gpio,linux-hotplug -- -D warnings
+          # Linux without USB (libusb, C) and UART (serialport): the facade's Linux API must still exist.
+          - name: lemnos linux lite
+            check: cargo check -p lemnos --no-default-features --features linux-gpio,linux-gpio-cdev,linux-pwm,linux-i2c,linux-spi,linux-hotplug,builtin-drivers,tokio
+            test: cargo test -p lemnos --no-default-features --features linux-gpio,linux-gpio-cdev,linux-pwm,linux-i2c,linux-spi,linux-hotplug,builtin-drivers,tokio
+            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features linux-gpio,linux-gpio-cdev,linux-pwm,linux-i2c,linux-spi,linux-hotplug,builtin-drivers,tokio -- -D warnings
           - name: lemnos-core serde
             check: cargo check -p lemnos-core --no-default-features --features serde
             test: cargo test -p lemnos-core --no-default-features --features serde

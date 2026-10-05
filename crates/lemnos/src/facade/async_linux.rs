@@ -1,5 +1,5 @@
 use super::*;
-#[cfg(any(feature = "linux", feature = "mock"))]
+#[cfg(any(feature = "linux-backend", feature = "mock"))]
 use lemnos_runtime::AsyncRuntimeResult;
 
 impl AsyncLemnos {
@@ -42,7 +42,7 @@ impl AsyncLemnos {
             .await
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub async fn refresh_with_linux(
         &self,
         context: DiscoveryContext,
@@ -56,7 +56,7 @@ impl AsyncLemnos {
             .await
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub async fn refresh_with_linux_default(
         &self,
         backend: &LinuxBackend,
@@ -65,7 +65,7 @@ impl AsyncLemnos {
             .await
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub async fn refresh_incremental_with_linux(
         &self,
         context: DiscoveryContext,
@@ -79,7 +79,7 @@ impl AsyncLemnos {
             .await
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub async fn refresh_incremental_with_linux_default(
         &self,
         backend: &LinuxBackend,
@@ -88,7 +88,7 @@ impl AsyncLemnos {
             .await
     }
 
-    #[cfg(all(feature = "linux", feature = "linux-hotplug"))]
+    #[cfg(all(feature = "linux-backend", feature = "linux-hotplug"))]
     pub async fn poll_watcher_and_refresh_with_linux(
         &self,
         context: DiscoveryContext,
@@ -107,7 +107,7 @@ impl AsyncLemnos {
             .await
     }
 
-    #[cfg(all(feature = "linux", feature = "linux-hotplug"))]
+    #[cfg(all(feature = "linux-backend", feature = "linux-hotplug"))]
     pub async fn poll_watcher_and_refresh_incremental_with_linux(
         &self,
         context: DiscoveryContext,

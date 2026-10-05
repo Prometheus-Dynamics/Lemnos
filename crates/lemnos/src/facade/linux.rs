@@ -131,7 +131,7 @@ impl Lemnos {
         self.refresh_incremental_with_mock(&DiscoveryContext::new(), hardware)
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub fn refresh_with_linux(
         &mut self,
         context: &DiscoveryContext,
@@ -140,7 +140,7 @@ impl Lemnos {
         backend.with_probes(|probes| self.runtime.refresh(context, &probes))
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub fn refresh_with_linux_default(
         &mut self,
         backend: &LinuxBackend,
@@ -148,7 +148,7 @@ impl Lemnos {
         self.refresh_with_linux(&DiscoveryContext::new(), backend)
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub fn refresh_incremental_with_linux(
         &mut self,
         context: &DiscoveryContext,
@@ -157,7 +157,7 @@ impl Lemnos {
         backend.with_probes(|probes| self.runtime.refresh_incremental(context, &probes))
     }
 
-    #[cfg(feature = "linux")]
+    #[cfg(feature = "linux-backend")]
     pub fn refresh_incremental_with_linux_default(
         &mut self,
         backend: &LinuxBackend,
@@ -165,7 +165,7 @@ impl Lemnos {
         self.refresh_incremental_with_linux(&DiscoveryContext::new(), backend)
     }
 
-    #[cfg(all(feature = "linux", feature = "linux-hotplug"))]
+    #[cfg(all(feature = "linux-backend", feature = "linux-hotplug"))]
     pub fn poll_watcher_and_refresh_with_linux(
         &mut self,
         context: &DiscoveryContext,
@@ -178,7 +178,7 @@ impl Lemnos {
         })
     }
 
-    #[cfg(all(feature = "linux", feature = "linux-hotplug"))]
+    #[cfg(all(feature = "linux-backend", feature = "linux-hotplug"))]
     pub fn poll_watcher_and_refresh_incremental_with_linux(
         &mut self,
         context: &DiscoveryContext,
