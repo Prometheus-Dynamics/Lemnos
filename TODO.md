@@ -44,16 +44,22 @@ for the user-facing summary of finished work.
       `lemnos-drivers-bmi088` does not support.
 - [ ] Runtime adapter drivers for the sensor crates (configured devices plus
       `HalI2cBus`), so HeliOS can bind them from `sensors.toml`.
-- [ ] Slimmer runtime for small Linux targets. Measured (x86_64, stripped,
-      `opt-level = "z"`, LTO, `panic = "abort"`): facade + Linux backend
-      without USB/UART is 617 KiB, of which an empty std `main` is 282 KiB
-      (mostly std's backtrace/symbolize code and unwind tables). Lemnos adds
-      ~335 KiB: `lemnos-linux` ~78, `lemnos-core` ~62, `lemnos-runtime` ~31,
-      `lemnos-discovery` ~22, `lemnos-registry` ~7 KiB of code, plus generic
-      std instantiations (sorts, `BTreeMap<String, Value>`) and formatting.
-      Levers: nightly `build-std` + `panic_immediate_abort` for the std share;
-      fewer monomorphized sorts/maps, less `format!`, and feature-gated
-      runtime extras (event retention, diagnostics) for the Lemnos share.
+- [ ] Slimmer runtime for small Linux targets (no fixed budget: as small as
+      reasonably possible; `scripts/check-sizes.sh` tracks it). Linux lite
+      facade consumer, stripped at `opt-level = "z"`: 640 KB -> 575 KB after
+      removing sort instantiations and making threaded probing optional.
+      - Toolchain lever (no code change): nightly `-Z build-std` with
+        `-Cpanic=immediate-abort` and `-Cforce-unwind-tables=no` takes an
+        empty std `main` from 282 KB to 14 KB and Linux lite to 234 KB.
+        Worth documenting as the recommended build for constrained images.
+      - What remains is structural: `Runtime::finish_refresh` (~28 KB, the
+        inlined diff/event/retention/rebind pipeline), six Linux probes
+        (~5 KB each, building `String`-keyed descriptors), and ~39 KB of
+        `BTreeMap<String, Value>`/`BTreeMap<String, String>` code. Next step
+        is the compact device model (`no_std`, no `String` keys) with today's
+        descriptors layered on top, plus a lite runtime (static device
+        table, no discovery/registry/event log) that MCUs and small SoCs can
+        share. Design before refactoring `lemnos-core`.
 - [ ] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`.
 - [ ] Linux regulators and clocks behind `Regulator`/`ClockOutput` (regulator
       userspace-consumer and clock sysfs where the kernel exposes them).
