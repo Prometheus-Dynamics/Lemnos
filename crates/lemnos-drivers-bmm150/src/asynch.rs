@@ -1,7 +1,7 @@
 //! The async BMM150 driver, over embedded-hal-async I2C.
 
 use crate::{
-    CHIP_ID, Config, Error, MagneticField, POWER_ON_US, REG_CHIP_ID, REG_DATA, REG_OP_MODE,
+    CHIP_ID, Config, Error, MagneticFieldFixed, POWER_ON_US, REG_CHIP_ID, REG_DATA, REG_OP_MODE,
     REG_POWER, REG_REP_XY, REG_REP_Z, REG_TRIM_X1, REG_TRIM_Z2, REG_TRIM_Z4, RawSample, Trim,
 };
 use embedded_hal_async::delay::DelayNs;
@@ -75,7 +75,13 @@ impl<I2C: I2c> Bmm150<I2C> {
         Ok(RawSample::from_registers(bytes))
     }
 
-    pub async fn read(&mut self) -> Result<MagneticField, Error<I2C::Error>> {
+    pub async fn read_fixed(&mut self) -> Result<MagneticFieldFixed, Error<I2C::Error>> {
+        let trim = self.trim.ok_or(Error::NotInitialized)?;
+        Ok(trim.compensate_fixed(self.read_raw().await?))
+    }
+
+    #[cfg(feature = "float")]
+    pub async fn read(&mut self) -> Result<crate::MagneticField, Error<I2C::Error>> {
         let trim = self.trim.ok_or(Error::NotInitialized)?;
         Ok(trim.compensate(self.read_raw().await?))
     }

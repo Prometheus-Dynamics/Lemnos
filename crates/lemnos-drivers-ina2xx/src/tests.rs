@@ -238,3 +238,44 @@ fn async_driver_matches_blocking() {
     close(block_on(ina.read()).unwrap().current_a, 1.0);
     assert_eq!(ina.release().register16(0x02), 2000);
 }
+
+#[test]
+fn fixed_readings_use_exact_integer_units() {
+    let i2c = bus(0xfe, 0xff, 0x2260)
+        .with16(0x01, 4000)
+        .with16(0x02, 9600)
+        .with16(0x03, 3840)
+        .with16(0x04, 16000);
+    let config = Config::from_micro(10_000, 8_192_000);
+    let mut ina = Ina::new(i2c, DEFAULT_ADDRESS, Model::Ina226, config).unwrap();
+    ina.init().unwrap();
+    assert_eq!(
+        ina.read_fixed().unwrap(),
+        ReadingFixed {
+            bus_voltage_uv: 12_000_000,
+            shunt_voltage_nv: 10_000_000,
+            current_na: 4_000_000_000,
+            power_nw: 24_000_000_000,
+            die_temperature_mc: None,
+        }
+    );
+
+    let i2c = bus(0x3e, 0x3f, 0x2381)
+        .with16(0x06, 200 << 4)
+        .with16(0x07, -16384i16 as u16)
+        .with(0x08, &[0x0f, 0x00, 0x00]);
+    let mut ina = Ina::new(
+        i2c,
+        DEFAULT_ADDRESS,
+        Model::Ina238,
+        Config::from_micro(10_000, 2_000_000),
+    )
+    .unwrap();
+    ina.init().unwrap();
+    let reading = ina.read_fixed().unwrap();
+    // 2 A / 2^15 = 61035.16 nA, rounded to 61035 nA.
+    assert_eq!(reading.current_na, -16384 * 61_035);
+    assert_eq!(reading.power_nw, 0x0f_0000 * 61_035 / 5);
+    assert_eq!(reading.die_temperature_mc, Some(25_000));
+    assert_eq!(ina.release().register16(0x02), 2000);
+}

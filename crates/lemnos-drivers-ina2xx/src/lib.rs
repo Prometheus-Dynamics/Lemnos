@@ -2,13 +2,17 @@
 //! embedded-hal I2C, without `std` or allocation.
 //!
 //! [`Ina`] verifies the chip, programs continuous conversion and the current
-//! calibration, and reads bus voltage, shunt voltage, current and power in SI
-//! units (plus die temperature on the INA238). [`asynch::Ina`] is the same over
+//! calibration, and reads bus voltage, shunt voltage, current and power (plus
+//! die temperature on the INA238) in integer units ([`ReadingFixed`]) or, with
+//! the default `float` feature, in SI units (`Reading`). Calibration is integer
+//! arithmetic either way, so leaving `float` off keeps software float routines
+//! out of images for MCUs without an FPU. [`asynch::Ina`] is the same over
 //! embedded-hal-async.
 //!
-//! The calibration follows the datasheets: the current LSB is
-//! `max_current_a / 2^15`, and the INA238 picks its ±40.96 mV shunt range
-//! whenever `max_current_a × shunt_ohms` fits, for four times the resolution.
+//! The calibration follows the datasheets: the current LSB is the maximum
+//! current / 2^15 (rounded to whole nanoamperes), and the INA238 picks its
+//! ±40.96 mV shunt range whenever maximum current × shunt fits, for four times
+//! the resolution.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -17,6 +21,20 @@ pub mod asynch;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn div_u64_matches_native_division() {
+    for (n, d) in [
+        (0, 1),
+        (7, 7),
+        (u64::MAX, 3),
+        (5_120_000_000_000, 610_350_000),
+        (1 << 40, 10_000_000_000),
+    ] {
+        assert_eq!(div_u64(n, d), n / d);
+    }
+}
 
 use core::fmt;
 use embedded_hal::i2c::I2c;
@@ -75,20 +93,30 @@ impl Model {
 }
 
 /// The external shunt and the largest current to measure.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Config {
-    /// Shunt resistance in ohms.
-    pub shunt_ohms: f32,
-    /// Largest expected current in amperes; sets the current resolution.
-    pub max_current_a: f32,
+    /// Shunt resistance in micro-ohms.
+    pub shunt_micro_ohms: u32,
+    /// Largest expected current in microamperes; sets the current resolution.
+    pub max_current_micro_amps: u32,
 }
 
 impl Config {
-    pub const fn new(shunt_ohms: f32, max_current_a: f32) -> Self {
+    pub const fn from_micro(shunt_micro_ohms: u32, max_current_micro_amps: u32) -> Self {
         Self {
-            shunt_ohms,
-            max_current_a,
+            shunt_micro_ohms,
+            max_current_micro_amps,
         }
+    }
+
+    /// From ohms and amperes. NaN, negative and zero values become 0, which
+    /// [`Ina::new`] rejects.
+    #[cfg(feature = "float")]
+    pub const fn new(shunt_ohms: f32, max_current_a: f32) -> Self {
+        Self::from_micro(
+            (shunt_ohms * 1e6 + 0.5) as u32,
+            (max_current_a * 1e6 + 0.5) as u32,
+        )
     }
 }
 
@@ -110,7 +138,19 @@ impl HalError for ConfigError {
     }
 }
 
+/// One measurement in integer units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadingFixed {
+    pub bus_voltage_uv: u32,
+    pub shunt_voltage_nv: i32,
+    pub current_na: i64,
+    pub power_nw: u64,
+    /// Only the INA238 measures it.
+    pub die_temperature_mc: Option<i32>,
+}
+
 /// One measurement, in SI units.
+#[cfg(feature = "float")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Reading {
     pub bus_voltage_v: f32,
@@ -169,13 +209,13 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
 impl<E: fmt::Debug> core::error::Error for Error<E> {}
 
 /// Register writes and scale factors derived from a model and [`Config`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Setup {
     pub(crate) model: Model,
     writes: [RegWrite; 3],
     len: usize,
-    current_lsb: f32,
-    shunt_lsb: f32,
+    current_lsb_na: u32,
+    shunt_lsb_nv: u32,
 }
 
 /// INA226 config: 16-sample averaging, 1.1 ms conversions, continuous shunt and bus.
@@ -185,25 +225,32 @@ const INA260_CONFIG: u16 = 0x6527;
 /// INA238 ADC config: continuous shunt, bus and temperature, 1052 µs, 16 samples.
 const INA238_ADC_CONFIG: u16 = 0xfb6a;
 const INA238_ADCRANGE: u16 = 1 << 4;
-const CAL_MAX: f32 = 0x7fff as f32;
+/// INA238 shunt ranges, in picovolts (µA × µΩ).
+const INA238_RANGE_PV: u64 = 163_840_000_000;
+const INA238_LOW_RANGE_PV: u64 = 40_960_000_000;
+/// INA260 integrated shunt: 1.25 mA per count.
+const INA260_CURRENT_LSB_NA: u32 = 1_250_000;
 
 impl Setup {
     pub(crate) fn new(model: Model, config: Config) -> Result<Self, ConfigError> {
         // Unused slots stay as no-op padding; `len` says how many to send.
         const PAD: RegWrite = RegWrite::word(0, 0);
-        let calibrated = || {
-            let positive = |value: f32| value.is_finite() && value > 0.0;
-            if !positive(config.shunt_ohms) || !positive(config.max_current_a) {
+        let shunt = u64::from(config.shunt_micro_ohms);
+        // max / 2^15, from µA to nA, rounded.
+        let current_lsb = || {
+            let lsb = (u64::from(config.max_current_micro_amps) * 1000 + (1 << 14)) >> 15;
+            if shunt == 0 || lsb == 0 {
                 return Err(ConfigError(
-                    "shunt_ohms and max_current_a must be positive and finite",
+                    "shunt and maximum current must be positive (at least 33 µA)",
                 ));
             }
-            Ok(config.max_current_a / 32768.0)
+            u32::try_from(lsb).map_err(|_| ConfigError("maximum current too large"))
         };
-        let (writes, len, current_lsb, shunt_lsb) = match model {
+        let (writes, len, current_lsb_na, shunt_lsb_nv) = match model {
             Model::Ina226 => {
-                let current_lsb = calibrated()?;
-                let cal = round_cal(0.00512 / (current_lsb * config.shunt_ohms))?;
+                let lsb = current_lsb()?;
+                // CAL = 0.00512 / (LSB_A × R_Ω) = 5.12e12 / (LSB_nA × R_µΩ).
+                let cal = round_cal(5_120_000_000_000, u64::from(lsb) * shunt)?;
                 (
                     [
                         RegWrite::word(0x00, INA226_CONFIG),
@@ -211,21 +258,22 @@ impl Setup {
                         PAD,
                     ],
                     2,
-                    current_lsb,
-                    2.5e-6,
+                    lsb,
+                    2_500,
                 )
             }
             Model::Ina238 => {
-                let current_lsb = calibrated()?;
-                let full_scale = config.max_current_a * config.shunt_ohms;
-                if full_scale > 0.16384 {
+                let lsb = current_lsb()?;
+                let full_scale = u64::from(config.max_current_micro_amps) * shunt;
+                if full_scale > INA238_RANGE_PV {
                     return Err(ConfigError(
-                        "max_current_a × shunt_ohms exceeds the 163.84 mV shunt range",
+                        "maximum current × shunt exceeds the 163.84 mV shunt range",
                     ));
                 }
-                let low_range = full_scale <= 0.04096;
-                let gain = if low_range { 4.0 } else { 1.0 };
-                let cal = round_cal(819.2e6 * current_lsb * config.shunt_ohms * gain)?;
+                let low_range = full_scale <= INA238_LOW_RANGE_PV;
+                let gain = if low_range { 4 } else { 1 };
+                // CAL = 819.2e6 × LSB_A × R_Ω × gain = LSB_nA × R_µΩ × gain × 8192 / 1e10.
+                let cal = round_cal(u64::from(lsb) * shunt * gain * 8192, 10_000_000_000)?;
                 (
                     [
                         RegWrite::word(0x00, if low_range { INA238_ADCRANGE } else { 0 }),
@@ -233,23 +281,24 @@ impl Setup {
                         RegWrite::word(0x02, cal),
                     ],
                     3,
-                    current_lsb,
-                    if low_range { 1.25e-6 } else { 5.0e-6 },
+                    lsb,
+                    if low_range { 1_250 } else { 5_000 },
                 )
             }
+            // The integrated 2 mΩ shunt: 1.25 mA × 2 mΩ = 2.5 µV per current count.
             Model::Ina260 => (
                 [RegWrite::word(0x00, INA260_CONFIG), PAD, PAD],
                 1,
-                1.25e-3,
-                0.0,
+                INA260_CURRENT_LSB_NA,
+                2_500,
             ),
         };
         Ok(Self {
             model,
             writes,
             len,
-            current_lsb,
-            shunt_lsb,
+            current_lsb_na,
+            shunt_lsb_nv,
         })
     }
 
@@ -257,7 +306,7 @@ impl Setup {
         &self.writes[..self.len]
     }
 
-    /// The registers [`Setup::reading`] needs, in read order.
+    /// The registers the readings need, in read order.
     pub(crate) fn registers(&self) -> &'static [(u16, u8)] {
         match self.model {
             // shunt, bus, power, current
@@ -270,33 +319,64 @@ impl Setup {
     }
 
     /// Converts raw register values, in [`Setup::registers`] order.
+    pub(crate) fn reading_fixed(&self, raw: &[u32]) -> ReadingFixed {
+        let signed = |value: u32| i64::from(value as u16 as i16);
+        let lsb = i64::from(self.current_lsb_na);
+        let shunt = |value: u32| (signed(value) * i64::from(self.shunt_lsb_nv)) as i32;
+        match self.model {
+            Model::Ina226 => ReadingFixed {
+                shunt_voltage_nv: shunt(raw[0]),
+                bus_voltage_uv: raw[1] * 1_250,
+                power_nw: u64::from(raw[2]) * 25 * lsb as u64,
+                current_na: signed(raw[3]) * lsb,
+                die_temperature_mc: None,
+            },
+            Model::Ina238 => ReadingFixed {
+                shunt_voltage_nv: shunt(raw[0]),
+                bus_voltage_uv: raw[1] * 3_125,
+                die_temperature_mc: Some(i32::from((raw[2] as u16 as i16) >> 4) * 125),
+                current_na: signed(raw[3]) * lsb,
+                // POWER × 0.2 × current LSB.
+                power_nw: div_u64(u64::from(raw[4]) * lsb as u64, 5),
+            },
+            Model::Ina260 => ReadingFixed {
+                current_na: signed(raw[0]) * lsb,
+                shunt_voltage_nv: shunt(raw[0]),
+                bus_voltage_uv: raw[1] * 1_250,
+                power_nw: u64::from(raw[2]) * 10_000_000,
+                die_temperature_mc: None,
+            },
+        }
+    }
+
+    /// Converts raw register values to SI units, in [`Setup::registers`] order.
+    #[cfg(feature = "float")]
     pub(crate) fn reading(&self, raw: &[u32]) -> Reading {
         let signed = |value: u32| value as u16 as i16 as f32;
+        let current_lsb = self.current_lsb_na as f32 * 1e-9;
+        let shunt_lsb = self.shunt_lsb_nv as f32 * 1e-9;
         match self.model {
             Model::Ina226 => Reading {
-                shunt_voltage_v: signed(raw[0]) * self.shunt_lsb,
+                shunt_voltage_v: signed(raw[0]) * shunt_lsb,
                 bus_voltage_v: raw[1] as f32 * 1.25e-3,
-                power_w: raw[2] as f32 * 25.0 * self.current_lsb,
-                current_a: signed(raw[3]) * self.current_lsb,
+                power_w: raw[2] as f32 * 25.0 * current_lsb,
+                current_a: signed(raw[3]) * current_lsb,
                 die_temperature_c: None,
             },
             Model::Ina238 => Reading {
-                shunt_voltage_v: signed(raw[0]) * self.shunt_lsb,
+                shunt_voltage_v: signed(raw[0]) * shunt_lsb,
                 bus_voltage_v: raw[1] as f32 * 3.125e-3,
                 die_temperature_c: Some(((raw[2] as u16 as i16) >> 4) as f32 * 0.125),
-                current_a: signed(raw[3]) * self.current_lsb,
-                power_w: raw[4] as f32 * 0.2 * self.current_lsb,
+                current_a: signed(raw[3]) * current_lsb,
+                power_w: raw[4] as f32 * 0.2 * current_lsb,
             },
-            Model::Ina260 => {
-                let current_a = signed(raw[0]) * self.current_lsb;
-                Reading {
-                    current_a,
-                    bus_voltage_v: raw[1] as f32 * 1.25e-3,
-                    power_w: raw[2] as f32 * 10.0e-3,
-                    shunt_voltage_v: current_a * 0.002,
-                    die_temperature_c: None,
-                }
-            }
+            Model::Ina260 => Reading {
+                current_a: signed(raw[0]) * current_lsb,
+                shunt_voltage_v: signed(raw[0]) * shunt_lsb,
+                bus_voltage_v: raw[1] as f32 * 1.25e-3,
+                power_w: raw[2] as f32 * 10.0e-3,
+                die_temperature_c: None,
+            },
         }
     }
 
@@ -313,13 +393,40 @@ impl Setup {
     }
 }
 
-fn round_cal(cal: f32) -> Result<u16, ConfigError> {
-    if !(1.0..=CAL_MAX).contains(&cal) {
-        return Err(ConfigError(
-            "calibration out of range; adjust shunt_ohms or max_current_a",
-        ));
+/// `n / d` for `d != 0`. On 32-bit targets a shift-and-subtract loop of a
+/// few dozen bytes stands in for the compiler's 64-bit division routine
+/// (about 800 bytes on Cortex-M); 64-bit targets divide natively.
+fn div_u64(n: u64, d: u64) -> u64 {
+    #[cfg(target_pointer_width = "64")]
+    {
+        n / d
     }
-    Ok((cal + 0.5) as u16)
+    #[cfg(not(target_pointer_width = "64"))]
+    {
+        let (mut quotient, mut remainder) = (0u64, 0u64);
+        for bit in (0..64).rev() {
+            remainder = (remainder << 1) | ((n >> bit) & 1);
+            if remainder >= d {
+                remainder -= d;
+                quotient |= 1 << bit;
+            }
+        }
+        quotient
+    }
+}
+
+/// `numerator / denominator`, rounded, as a 15-bit calibration register.
+fn round_cal(numerator: u64, denominator: u64) -> Result<u16, ConfigError> {
+    let cal = match numerator.checked_add(denominator / 2) {
+        Some(n) if denominator != 0 => div_u64(n, denominator),
+        _ => 0,
+    };
+    match u16::try_from(cal) {
+        Ok(cal @ 1..=0x7fff) => Ok(cal),
+        _ => Err(ConfigError(
+            "calibration out of range; adjust the shunt or maximum current",
+        )),
+    }
 }
 
 /// An INA2xx over a blocking I2C bus.
@@ -345,8 +452,13 @@ impl<I2C: I2c> Ina<I2C> {
 
     /// An INA260 at 7-bit `address`.
     pub fn ina260(i2c: I2C, address: u8) -> Self {
-        Self::new(i2c, address, Model::Ina260, Config::new(0.002, 1.0))
-            .expect("the INA260 needs no calibration")
+        Self::new(
+            i2c,
+            address,
+            Model::Ina260,
+            Config::from_micro(2_000, 1_000_000),
+        )
+        .expect("the INA260 needs no calibration")
     }
 
     pub fn model(&self) -> Model {
@@ -377,19 +489,34 @@ impl<I2C: I2c> Ina<I2C> {
         let (manufacturer, device) = self.ids()?;
         self.setup.check_ids(manufacturer, device)?;
         let setup = self.setup;
-        self.registers().write_sequence(setup.writes())?;
+        // One register per transfer: `write_sequence` would link the burst packer.
+        for w in setup.writes() {
+            self.registers().write(w.address, w.bytes, w.value)?;
+        }
         Ok(())
     }
 
-    /// Reads the latest conversion.
-    pub fn read(&mut self) -> Result<Reading, Error<I2C::Error>> {
-        let setup = self.setup;
+    fn read_registers(&mut self) -> Result<[u32; 5], Error<I2C::Error>> {
+        let registers = self.setup.registers();
         let mut raw = [0u32; 5];
         let mut regs = self.registers();
-        for (slot, (register, bytes)) in raw.iter_mut().zip(setup.registers()) {
+        for (slot, (register, bytes)) in raw.iter_mut().zip(registers) {
             *slot = regs.read(*register, *bytes)?;
         }
-        Ok(setup.reading(&raw))
+        Ok(raw)
+    }
+
+    /// Reads the latest conversion in integer units.
+    pub fn read_fixed(&mut self) -> Result<ReadingFixed, Error<I2C::Error>> {
+        let raw = self.read_registers()?;
+        Ok(self.setup.reading_fixed(&raw))
+    }
+
+    /// Reads the latest conversion in SI units.
+    #[cfg(feature = "float")]
+    pub fn read(&mut self) -> Result<Reading, Error<I2C::Error>> {
+        let raw = self.read_registers()?;
+        Ok(self.setup.reading(&raw))
     }
 
     /// Gives the bus back.

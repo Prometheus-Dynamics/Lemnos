@@ -15,6 +15,12 @@ categories = ["embedded", "hardware-support", "no-std"]
 [lints]
 workspace = true
 
+[features]
+default = ["float"]
+# SI-unit `f32` readings. Off: integer readings only (`read_fixed`), which keeps
+# software float routines out of images for MCUs without an FPU.
+float = []
+
 [dependencies]
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true

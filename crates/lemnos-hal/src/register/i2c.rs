@@ -1,6 +1,6 @@
 use super::{
     AddressWidth, Endian, MAX_BURST, RegWrite, RegisterBus, RegisterError, RegisterResult, asynch,
-    encode_address, pack_run,
+    encode_address, encode_write, pack_run,
 };
 use embedded_hal::i2c::{I2c, Operation};
 
@@ -134,6 +134,15 @@ impl<I2C: I2c> RegisterBus for I2cRegisters<I2C> {
             .map_err(RegisterError::i2c)
     }
 
+    /// One register value: address and data go out from a 6-byte buffer,
+    /// skipping the burst buffer `write_burst` needs.
+    fn write(&mut self, address: u16, bytes: u8, value: u32) -> RegisterResult<(), I2C::Error> {
+        let (buf, len) = encode_write(address, bytes, value, self.width, self.endian)?;
+        self.i2c
+            .write(self.address, &buf[..len])
+            .map_err(RegisterError::i2c)
+    }
+
     fn write_sequence(&mut self, writes: &[RegWrite]) -> RegisterResult<(), I2C::Error> {
         let mut buf = [0u8; 2 + MAX_BURST];
         let mut i = 0;
@@ -181,6 +190,19 @@ impl<I2C: embedded_hal_async::i2c::I2c> asynch::RegisterBus for I2cRegisters<I2C
                     embedded_hal_async::i2c::Operation::Write(data),
                 ],
             )
+            .await
+            .map_err(RegisterError::i2c)
+    }
+
+    async fn write(
+        &mut self,
+        address: u16,
+        bytes: u8,
+        value: u32,
+    ) -> RegisterResult<(), I2C::Error> {
+        let (buf, len) = encode_write(address, bytes, value, self.width, self.endian)?;
+        self.i2c
+            .write(self.address, &buf[..len])
             .await
             .map_err(RegisterError::i2c)
     }

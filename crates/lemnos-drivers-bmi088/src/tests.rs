@@ -134,3 +134,28 @@ fn resume_reads_without_reinitializing() {
     close(bmi.read().unwrap().gyro_radps[1], 125.0_f32.to_radians());
     assert_eq!(bmi.release().register(ACCEL_ADDRESS, ACC_SOFTRESET), 0);
 }
+
+#[test]
+fn fixed_point_matches_float() {
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([16384, -16384, 1]))
+        .with_registers(GYRO_ADDRESS, GYR_DATA, &axes([16384, -32768, 7]));
+    let config = Config {
+        accel_range: AccelRange::G24,
+        ..Config::default()
+    };
+    let mut bmi = Bmi088::resume(i2c, ACCEL_ADDRESS, GYRO_ADDRESS, config);
+    let fixed = bmi.read_fixed().unwrap();
+    assert_eq!(fixed.accel_mg, [12_000, -12_000, 0]);
+    // 7 × 2_000_000 / 32768 = 427.2 → 427.
+    assert_eq!(fixed.gyro_mdps, [1_000_000, -2_000_000, 427]);
+    let float = bmi.read().unwrap();
+    for axis in 0..2 {
+        close(
+            fixed.accel_mg[axis] as f32 / 1000.0 * STANDARD_GRAVITY,
+            float.accel_mps2[axis],
+        );
+    }
+    assert_eq!(decode_temperature_mc(0xff, 0xe0), 22_875);
+    assert_eq!(bmi.temperature_mc().unwrap(), 23_000);
+}

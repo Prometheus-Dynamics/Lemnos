@@ -11,7 +11,9 @@ embedded-hal 1.0 I2C bus, blocking (`Ina`) and async (`asynch::Ina`):
 
 `init` checks the manufacturer and device IDs, then programs continuous conversion and the
 current calibration from the shunt resistance and the largest expected current
-(`current LSB = max_current_a / 2^15`). Readings are in volts, amperes, watts and °C.
+(`current LSB = max current / 2^15`), all in integer arithmetic. `read_fixed` returns
+µV, nV, nA, nW and m°C; with the default `float` feature, `read` returns V, A, W and °C
+and `Config::new` takes ohms and amperes (`Config::from_micro` takes µΩ and µA).
 
 ```rust
 use lemnos_drivers_ina2xx::{Config, DEFAULT_ADDRESS, Ina, Model};

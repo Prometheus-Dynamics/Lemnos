@@ -1,6 +1,6 @@
 //! The async INA2xx driver, over embedded-hal-async I2C.
 
-use crate::{Config, ConfigError, Error, Model, Reading, Setup};
+use crate::{Config, ConfigError, Error, Model, ReadingFixed, Setup};
 use embedded_hal_async::i2c::I2c;
 use lemnos_hal::asynch::RegisterBus;
 use lemnos_hal::register::{AddressWidth, I2cRegisters};
@@ -39,19 +39,33 @@ impl<I2C: I2c> Ina<I2C> {
         let manufacturer = regs.read16(setup.model.manufacturer_register()).await?;
         let device = regs.read16(setup.model.device_register()).await?;
         setup.check_ids(manufacturer, device)?;
-        regs.write_sequence(setup.writes()).await?;
+        for w in setup.writes() {
+            regs.write(w.address, w.bytes, w.value).await?;
+        }
         Ok(())
     }
 
-    /// Reads the latest conversion.
-    pub async fn read(&mut self) -> Result<Reading, Error<I2C::Error>> {
-        let setup = self.setup;
+    async fn read_registers(&mut self) -> Result<[u32; 5], Error<I2C::Error>> {
+        let registers = self.setup.registers();
         let mut raw = [0u32; 5];
         let mut regs = self.registers();
-        for (slot, (register, bytes)) in raw.iter_mut().zip(setup.registers()) {
+        for (slot, (register, bytes)) in raw.iter_mut().zip(registers) {
             *slot = regs.read(*register, *bytes).await?;
         }
-        Ok(setup.reading(&raw))
+        Ok(raw)
+    }
+
+    /// Reads the latest conversion in integer units.
+    pub async fn read_fixed(&mut self) -> Result<ReadingFixed, Error<I2C::Error>> {
+        let raw = self.read_registers().await?;
+        Ok(self.setup.reading_fixed(&raw))
+    }
+
+    /// Reads the latest conversion in SI units.
+    #[cfg(feature = "float")]
+    pub async fn read(&mut self) -> Result<crate::Reading, Error<I2C::Error>> {
+        let raw = self.read_registers().await?;
+        Ok(self.setup.reading(&raw))
     }
 
     /// Gives the bus back.

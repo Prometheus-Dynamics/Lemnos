@@ -4,7 +4,11 @@
 //! The BMI088 is two dies on one bus: an accelerometer (0x18/0x19) and a
 //! gyroscope (0x68/0x69). [`Bmi088`] owns the bus, verifies both chip IDs,
 //! soft-resets both dies, takes the accelerometer out of its power-on suspend
-//! mode, applies a [`Config`], and reads [`ImuSample`]s in m/s² and rad/s.
+//! mode, applies a [`Config`], and reads samples in fixed point
+//! ([`ImuFixed`]: milli-g and milli-degrees per second) or, with the default
+//! `float` feature, in SI units (`ImuSample`: m/s² and rad/s). Leave `float`
+//! off on MCUs without an FPU to keep software float routines out of the
+//! image.
 //! [`asynch::Bmi088`] is the same over embedded-hal-async.
 
 #![no_std]
@@ -15,6 +19,7 @@ pub mod asynch;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "float")]
 use core::f32::consts::PI;
 use core::fmt;
 use embedded_hal::delay::DelayNs;
@@ -29,6 +34,7 @@ pub const GYRO_ADDRESS: u8 = 0x68;
 pub const ACCEL_CHIP_ID: u8 = 0x1e;
 pub const GYRO_CHIP_ID: u8 = 0x0f;
 /// Standard gravity, for converting g to m/s².
+#[cfg(feature = "float")]
 pub const STANDARD_GRAVITY: f32 = 9.806_65;
 
 pub(crate) const ACC_CHIP_ID: u16 = 0x00;
@@ -75,7 +81,18 @@ impl AccelRange {
         }
     }
 
+    /// Full scale in milli-g.
+    pub fn full_scale_mg(self) -> i32 {
+        match self {
+            Self::G3 => 3_000,
+            Self::G6 => 6_000,
+            Self::G12 => 12_000,
+            Self::G24 => 24_000,
+        }
+    }
+
     /// Full scale in g.
+    #[cfg(feature = "float")]
     pub fn full_scale_g(self) -> f32 {
         match self {
             Self::G3 => 3.0,
@@ -140,7 +157,19 @@ impl GyroRange {
         }
     }
 
+    /// Full scale in milli-degrees per second.
+    pub fn full_scale_mdps(self) -> i32 {
+        match self {
+            Self::Dps2000 => 2_000_000,
+            Self::Dps1000 => 1_000_000,
+            Self::Dps500 => 500_000,
+            Self::Dps250 => 250_000,
+            Self::Dps125 => 125_000,
+        }
+    }
+
     /// Full scale in degrees per second.
+    #[cfg(feature = "float")]
     pub fn full_scale_dps(self) -> f32 {
         match self {
             Self::Dps2000 => 2000.0,
@@ -208,7 +237,21 @@ impl Config {
         ]
     }
 
+    /// Converts raw counts with this configuration's ranges, in integers
+    /// (rounded toward negative infinity).
+    pub fn fixed(self, accel: [i16; 3], gyro: [i16; 3]) -> ImuFixed {
+        let mg = self.accel_range.full_scale_mg();
+        let mdps = i64::from(self.gyro_range.full_scale_mdps());
+        ImuFixed {
+            accel_mg: accel.map(|v| (i32::from(v) * mg) >> 15),
+            gyro_mdps: gyro.map(|v| ((i64::from(v) * mdps) >> 15) as i32),
+            accel_raw: accel,
+            gyro_raw: gyro,
+        }
+    }
+
     /// Converts raw counts with this configuration's ranges.
+    #[cfg(feature = "float")]
     pub fn sample(self, accel: [i16; 3], gyro: [i16; 3]) -> ImuSample {
         let g = self.accel_range.full_scale_g() / 32768.0 * STANDARD_GRAVITY;
         let rad = self.gyro_range.full_scale_dps() / 32768.0 * PI / 180.0;
@@ -221,7 +264,19 @@ impl Config {
     }
 }
 
+/// One accelerometer + gyroscope reading in integer units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ImuFixed {
+    /// X, Y, Z acceleration in milli-g.
+    pub accel_mg: [i32; 3],
+    /// X, Y, Z angular rate in milli-degrees per second.
+    pub gyro_mdps: [i32; 3],
+    pub accel_raw: [i16; 3],
+    pub gyro_raw: [i16; 3],
+}
+
 /// One accelerometer + gyroscope reading.
+#[cfg(feature = "float")]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ImuSample {
     /// X, Y, Z acceleration in m/s².
@@ -240,16 +295,22 @@ pub(crate) fn decode_axes(bytes: [u8; 6]) -> [i16; 3] {
     ]
 }
 
-/// Decodes `TEMP_MSB`, `TEMP_LSB`: an 11-bit two's complement value in
-/// 0.125 °C steps, offset by 23 °C.
-pub fn decode_temperature(msb: u8, lsb: u8) -> f32 {
+/// Decodes `TEMP_MSB`, `TEMP_LSB` to milli-degrees Celsius: an 11-bit two's
+/// complement value in 0.125 °C steps, offset by 23 °C.
+pub fn decode_temperature_mc(msb: u8, lsb: u8) -> i32 {
     let raw = (u16::from(msb) << 3) | u16::from(lsb >> 5);
     let raw = if raw > 1023 {
         i32::from(raw) - 2048
     } else {
         i32::from(raw)
     };
-    raw as f32 * 0.125 + 23.0
+    raw * 125 + 23_000
+}
+
+/// Decodes `TEMP_MSB`, `TEMP_LSB` to degrees Celsius.
+#[cfg(feature = "float")]
+pub fn decode_temperature(msb: u8, lsb: u8) -> f32 {
+    decode_temperature_mc(msb, lsb) as f32 / 1000.0
 }
 
 /// The error of a BMI088 operation.
@@ -373,8 +434,13 @@ impl<I2C: I2c> Bmi088<I2C> {
         self.accel().write8(ACC_PWR_CTRL, 0x04)?;
         delay.delay_us(ACC_POWER_ON_US);
 
-        self.accel().write_sequence(&config.accel_writes())?;
-        self.gyro().write_sequence(&config.gyro_writes())?;
+        // One register per transfer: `write_sequence` would link the burst packer.
+        for w in config.accel_writes() {
+            self.accel().write(w.address, w.bytes, w.value)?;
+        }
+        for w in config.gyro_writes() {
+            self.gyro().write(w.address, w.bytes, w.value)?;
+        }
         self.config = Some(config);
         Ok(())
     }
@@ -393,17 +459,31 @@ impl<I2C: I2c> Bmi088<I2C> {
         Ok(decode_axes(bytes))
     }
 
+    /// Reads both dies, converted to milli-g and milli-degrees per second.
+    pub fn read_fixed(&mut self) -> Result<ImuFixed, Error<I2C::Error>> {
+        let config = self.config.ok_or(Error::NotInitialized)?;
+        Ok(config.fixed(self.read_accel_raw()?, self.read_gyro_raw()?))
+    }
+
     /// Reads both dies and converts to SI units.
+    #[cfg(feature = "float")]
     pub fn read(&mut self) -> Result<ImuSample, Error<I2C::Error>> {
         let config = self.config.ok_or(Error::NotInitialized)?;
         Ok(config.sample(self.read_accel_raw()?, self.read_gyro_raw()?))
     }
 
-    /// The accelerometer die temperature in °C (updated every 1.28 s).
-    pub fn temperature_c(&mut self) -> Result<f32, Error<I2C::Error>> {
+    /// The accelerometer die temperature in milli-degrees Celsius (updated
+    /// every 1.28 s).
+    pub fn temperature_mc(&mut self) -> Result<i32, Error<I2C::Error>> {
         let mut bytes = [0u8; 2];
         self.accel().read_burst(ACC_TEMP, &mut bytes)?;
-        Ok(decode_temperature(bytes[0], bytes[1]))
+        Ok(decode_temperature_mc(bytes[0], bytes[1]))
+    }
+
+    /// The accelerometer die temperature in °C.
+    #[cfg(feature = "float")]
+    pub fn temperature_c(&mut self) -> Result<f32, Error<I2C::Error>> {
+        Ok(self.temperature_mc()? as f32 / 1000.0)
     }
 
     /// Gives the bus back.

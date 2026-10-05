@@ -14,6 +14,13 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
   - `lemnos-drivers-ina2xx`: TI INA226, INA238 and INA260 power monitors with calibration from shunt and maximum current.
 - Each driver has `resume` (or, for INA2xx, a bus-free `new`) so a runtime adapter can rebuild it around a borrowed `lemnos_bus::hal::HalI2cBus` per operation; `crates/lemnos/tests/nostd_driver_in_runtime.rs` shows the pattern.
 - `scripts/check-nostd.sh` builds the three crates for the embedded and wasm targets.
+- The sensor drivers read in integers (`read_fixed`: milli-g, milli-°/s, 1/16 µT, µV/nV/nA/nW, m°C) and gate their `f32` APIs behind a default `float` feature. Without it, an image for an FPU-less MCU links no software float routines: all four device drivers take 5.6 KB of flash on `riscv32imac` (9.9 KB with floats) and 5.3 KB on a Cortex-M4F.
+- `lemnos-drivers-bmm150` gains Bosch's integer trim compensation; `lemnos-drivers-ina2xx` calibrates in integers (`Config::from_micro`).
+
+### Changed
+
+- `I2cRegisters::write` sends one register straight from a 6-byte buffer instead of going through the burst packer, and the drivers write registers one at a time, so images that never enable bursts do not link the packer.
+- `lemnos_drivers_ina2xx::Config` holds µΩ and µA (`Config::new(ohms, amps)` still exists with `float`).
 
 ### Fixed
 

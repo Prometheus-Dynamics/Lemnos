@@ -3,8 +3,8 @@
 use crate::{
     ACC_CHIP_ID, ACC_DATA, ACC_POWER_ON_US, ACC_PWR_CONF, ACC_PWR_CTRL, ACC_RESET_US,
     ACC_SOFTRESET, ACC_SUSPEND_WRITE_US, ACC_TEMP, ACCEL_ADDRESS, ACCEL_CHIP_ID, Config, Error,
-    GYR_CHIP_ID, GYR_DATA, GYR_RESET_US, GYR_SOFTRESET, GYRO_ADDRESS, GYRO_CHIP_ID, ImuSample,
-    SOFTRESET, decode_axes, decode_temperature,
+    GYR_CHIP_ID, GYR_DATA, GYR_RESET_US, GYR_SOFTRESET, GYRO_ADDRESS, GYRO_CHIP_ID, ImuFixed,
+    SOFTRESET, decode_axes, decode_temperature_mc,
 };
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
@@ -83,8 +83,12 @@ impl<I2C: I2c> Bmi088<I2C> {
         self.accel().write8(ACC_PWR_CTRL, 0x04).await?;
         delay.delay_us(ACC_POWER_ON_US).await;
 
-        self.accel().write_sequence(&config.accel_writes()).await?;
-        self.gyro().write_sequence(&config.gyro_writes()).await?;
+        for w in config.accel_writes() {
+            self.accel().write(w.address, w.bytes, w.value).await?;
+        }
+        for w in config.gyro_writes() {
+            self.gyro().write(w.address, w.bytes, w.value).await?;
+        }
         self.config = Some(config);
         Ok(())
     }
@@ -101,17 +105,30 @@ impl<I2C: I2c> Bmi088<I2C> {
         Ok(decode_axes(bytes))
     }
 
-    pub async fn read(&mut self) -> Result<ImuSample, Error<I2C::Error>> {
+    pub async fn read_fixed(&mut self) -> Result<ImuFixed, Error<I2C::Error>> {
+        let config = self.config.ok_or(Error::NotInitialized)?;
+        let accel = self.read_accel_raw().await?;
+        let gyro = self.read_gyro_raw().await?;
+        Ok(config.fixed(accel, gyro))
+    }
+
+    #[cfg(feature = "float")]
+    pub async fn read(&mut self) -> Result<crate::ImuSample, Error<I2C::Error>> {
         let config = self.config.ok_or(Error::NotInitialized)?;
         let accel = self.read_accel_raw().await?;
         let gyro = self.read_gyro_raw().await?;
         Ok(config.sample(accel, gyro))
     }
 
-    pub async fn temperature_c(&mut self) -> Result<f32, Error<I2C::Error>> {
+    pub async fn temperature_mc(&mut self) -> Result<i32, Error<I2C::Error>> {
         let mut bytes = [0u8; 2];
         self.accel().read_burst(ACC_TEMP, &mut bytes).await?;
-        Ok(decode_temperature(bytes[0], bytes[1]))
+        Ok(decode_temperature_mc(bytes[0], bytes[1]))
+    }
+
+    #[cfg(feature = "float")]
+    pub async fn temperature_c(&mut self) -> Result<f32, Error<I2C::Error>> {
+        Ok(self.temperature_mc().await? as f32 / 1000.0)
     }
 
     pub fn release(self) -> I2C {

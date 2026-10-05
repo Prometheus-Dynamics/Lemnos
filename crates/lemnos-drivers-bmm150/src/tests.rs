@@ -131,3 +131,90 @@ fn resume_reads_with_a_saved_trim() {
     let mut mag = Bmm150::resume(i2c, DEFAULT_ADDRESS, trim);
     close(mag.read().unwrap().x_ut.unwrap(), 50.0);
 }
+
+/// A small deterministic generator, so the comparison covers many trims
+/// without a dependency.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) as u32
+    }
+
+    fn range(&mut self, low: i32, high: i32) -> i32 {
+        low + (self.next() % (high - low + 1) as u32) as i32
+    }
+}
+
+#[test]
+fn fixed_compensation_tracks_float_across_trims_and_samples() {
+    let mut rng = Lcg(0x5eed);
+    let mut worst = 0.0f32;
+    for _ in 0..20_000 {
+        // Ranges seen in BMM150 trim tables, and the full sample ranges.
+        let trim = Trim {
+            x1: rng.range(-10, 10) as i8,
+            y1: rng.range(-10, 10) as i8,
+            x2: rng.range(-30, 30) as i8,
+            y2: rng.range(-30, 30) as i8,
+            z1: rng.range(20_000, 26_000) as u16,
+            z2: rng.range(400, 900) as i16,
+            z3: rng.range(-300, 300) as i16,
+            z4: rng.range(-50, 50) as i16,
+            xy1: rng.range(0, 40) as u8,
+            xy2: rng.range(-10, 10) as i8,
+            xyz1: rng.range(6_000, 7_500) as u16,
+        };
+        let raw = RawSample {
+            x: rng.range(-4095, 4095) as i16,
+            y: rng.range(-4095, 4095) as i16,
+            z: rng.range(-16383, 16383) as i16,
+            rhall: rng.range(5_000, 8_000) as u16,
+            data_ready: true,
+        };
+        let fixed = trim.compensate_fixed(raw);
+        let float = trim.compensate(raw);
+        for (f, x) in [
+            (fixed.x_ut16, float.x_ut),
+            (fixed.y_ut16, float.y_ut),
+            (fixed.z_ut16, float.z_ut),
+        ] {
+            let (f, x) = (f.unwrap(), x.unwrap());
+            let error = (f as f32 / 16.0 - x).abs();
+            // Bosch's integer Z gain rounds to about 3e-4 relative, which only
+            // shows on fields beyond the sensor's range.
+            assert!(
+                error <= 0.25 + x.abs() * 5e-4,
+                "{f}/16 vs {x}, trim {trim:?}, raw {raw:?}"
+            );
+            // The sensor measures ±1300 µT (X/Y) and ±2500 µT (Z).
+            if x.abs() <= 2500.0 {
+                worst = worst.max(error);
+            }
+        }
+    }
+    // Within the sensor's range: under two sensor LSBs (it resolves ~0.3 µT).
+    // Measured worst case over these 20 000 cases: 0.35 µT, from the Z gain.
+    assert!(worst < 0.5, "worst in-range error {worst} µT");
+}
+
+#[test]
+fn fixed_read_matches_known_values() {
+    let i2c = chip().with_registers(DEFAULT_ADDRESS, REG_DATA, &data(160, -320, 1000, XYZ1));
+    let mut mag = Bmm150::new(i2c, DEFAULT_ADDRESS);
+    mag.init(&mut MockDelay::new(), Config::default()).unwrap();
+    let field = mag.read_fixed().unwrap();
+    // 50 µT and -100 µT exactly, in 1/16 µT.
+    assert_eq!(field.x_ut16, Some(800));
+    assert_eq!(field.y_ut16, Some(-1600));
+    let overflow = Trim::default().compensate_fixed(RawSample {
+        x: RawSample::XY_OVERFLOW,
+        z: RawSample::Z_OVERFLOW,
+        ..RawSample::default()
+    });
+    assert_eq!((overflow.x_ut16, overflow.z_ut16), (None, None));
+}

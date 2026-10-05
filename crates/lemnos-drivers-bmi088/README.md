@@ -7,8 +7,11 @@ The BMI088 is two dies on one bus: the accelerometer (0x18/0x19) and the gyrosco
 (0x68/0x69). `init` checks both chip IDs before writing anything, soft-resets both dies,
 takes the accelerometer out of its power-on suspend mode, and applies the ranges and data
 rates in `Config` (defaults match the chip's reset values: ±6 g at 100 Hz, ±2000 °/s at
-2000 Hz). `read` returns acceleration in m/s² and angular rate in rad/s, alongside the raw
-counts; `temperature_c` reads the accelerometer die temperature. `resume` rebuilds a driver
+2000 Hz). `read_fixed` returns acceleration in milli-g and angular rate in milli-degrees per
+second as integers; with the default `float` feature, `read` returns m/s² and rad/s.
+`temperature_mc` (and `temperature_c` with `float`) reads the accelerometer die
+temperature. Leave `float` off on MCUs without an FPU: the image then links no software
+float routines. `resume` rebuilds a driver
 around an already initialized chip, which is how a Lemnos runtime adapter drives it over a
 borrowed `lemnos_bus::hal::HalI2cBus`.
 

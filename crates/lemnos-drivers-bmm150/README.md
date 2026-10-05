@@ -5,8 +5,10 @@ embedded-hal 1.0 I2C bus, blocking (`Bmm150`) and async (`asynch::Bmm150`).
 
 `init` leaves suspend mode, checks the chip ID, reads the factory trim registers, and starts
 normal mode with a repetition `Preset` (low power, regular, enhanced, high accuracy) and a
-`DataRate` (2-30 Hz). `read` returns the field in µT using Bosch's floating-point
-compensation; an axis that overflowed reads as `None`. `resume` rebuilds a driver around an
+`DataRate` (2-30 Hz). `read_fixed` returns the field in 1/16 µT using Bosch's integer
+compensation (within about 0.35 µT, one sensor LSB, of the float version); with the
+default `float` feature, `read` returns µT from the floating-point compensation. An axis
+that overflowed reads as `None`. `resume` rebuilds a driver around an
 already initialized chip from its saved `Trim`.
 
 ```rust

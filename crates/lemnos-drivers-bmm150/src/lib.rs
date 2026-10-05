@@ -3,8 +3,10 @@
 //!
 //! [`Bmm150`] powers the chip up, verifies its ID, reads its factory trim
 //! registers, sets the repetition [`Preset`] and [`DataRate`], and returns
-//! [`MagneticField`] readings in µT using Bosch's floating-point
-//! compensation. [`asynch::Bmm150`] is the same over embedded-hal-async.
+//! trim-compensated readings: [`MagneticFieldFixed`] in 1/16 µT from Bosch's
+//! integer compensation, or, with the default `float` feature,
+//! `MagneticField` in µT from the floating-point one. Leave `float` off on
+//! MCUs without an FPU. [`asynch::Bmm150`] is the same over embedded-hal-async.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -141,14 +143,62 @@ impl Trim {
         }
     }
 
-    fn compensate_xy(&self, raw: i16, rhall: u16, a1: i8, a2: i8) -> Option<f32> {
+    /// The Hall resistance X/Y compensation divides by: the sample's, or the
+    /// trim reference when the sample has none.
+    fn xy_reference(&self, raw: i16, rhall: u16) -> Option<u16> {
         if raw == RawSample::XY_OVERFLOW {
             return None;
         }
         let r0 = if rhall != 0 { rhall } else { self.xyz1 };
-        if r0 == 0 {
+        (r0 != 0).then_some(r0)
+    }
+
+    fn z_compensable(&self, raw: i16, rhall: u16) -> bool {
+        raw != RawSample::Z_OVERFLOW && self.z1 != 0 && self.z2 != 0 && self.xyz1 != 0 && rhall != 0
+    }
+
+    /// Bosch's integer X/Y compensation without its final `/ 16`, so the
+    /// result keeps 1/16 µT resolution. Every intermediate fits `i32`.
+    fn compensate_xy_fixed(&self, raw: i16, rhall: u16, a1: i8, a2: i8) -> Option<i32> {
+        let r0 = self.xy_reference(raw, rhall)?;
+        let r = i32::from(
+            ((i32::from(self.xyz1) * 16384 / i32::from(r0)) as u16).wrapping_sub(0x4000) as i16,
+        );
+        let sensitivity =
+            (i32::from(self.xy2) * (r * r / 128) + r * i32::from(self.xy1) * 128) / 512 + 0x10_0000;
+        let gain = sensitivity * (i32::from(a2) + 0xa0) / 4096;
+        Some(i32::from(raw) * gain / 8192 + i32::from(a1) * 8)
+    }
+
+    /// Bosch's integer Z compensation without its final `/ 16`.
+    fn compensate_z_fixed(&self, raw: i16, rhall: u16) -> Option<i32> {
+        if !self.z_compensable(raw, rhall) {
             return None;
         }
+        let hall = i32::from(self.z3) * (i32::from(rhall) - i32::from(self.xyz1)) / 4;
+        let offset = (i32::from(raw) - i32::from(self.z4)) * 32768;
+        let gain =
+            i32::from(self.z2) + (i32::from(self.z1) * (i32::from(rhall) * 2) + 32768) / 65536;
+        (gain != 0).then(|| (offset - hall) / gain)
+    }
+
+    /// Converts a raw sample to 1/16 µT with integer arithmetic only. An axis
+    /// is `None` when it overflowed or the trim cannot compensate it.
+    ///
+    /// Agrees with [`compensate`](Self::compensate) to within about 0.35 µT
+    /// over the sensor's range (roughly one sensor LSB); the difference is the
+    /// integer rounding of Bosch's Z gain.
+    pub fn compensate_fixed(&self, raw: RawSample) -> MagneticFieldFixed {
+        MagneticFieldFixed {
+            x_ut16: self.compensate_xy_fixed(raw.x, raw.rhall, self.x1, self.x2),
+            y_ut16: self.compensate_xy_fixed(raw.y, raw.rhall, self.y1, self.y2),
+            z_ut16: self.compensate_z_fixed(raw.z, raw.rhall),
+        }
+    }
+
+    #[cfg(feature = "float")]
+    fn compensate_xy(&self, raw: i16, rhall: u16, a1: i8, a2: i8) -> Option<f32> {
+        let r0 = self.xy_reference(raw, rhall)?;
         let r = f32::from(self.xyz1) * 16384.0 / f32::from(r0) - 16384.0;
         let sensitivity =
             f32::from(self.xy2) * (r * r / 268_435_456.0) + r * f32::from(self.xy1) / 16384.0;
@@ -156,13 +206,9 @@ impl Trim {
         Some((scaled / 8192.0 + f32::from(a1) * 8.0) / 16.0)
     }
 
+    #[cfg(feature = "float")]
     fn compensate_z(&self, raw: i16, rhall: u16) -> Option<f32> {
-        if raw == RawSample::Z_OVERFLOW
-            || self.z1 == 0
-            || self.z2 == 0
-            || self.xyz1 == 0
-            || rhall == 0
-        {
+        if !self.z_compensable(raw, rhall) {
             return None;
         }
         let offset = f32::from(raw) - f32::from(self.z4);
@@ -173,6 +219,7 @@ impl Trim {
 
     /// Converts a raw sample to µT. An axis is `None` when it overflowed or the
     /// trim cannot compensate it.
+    #[cfg(feature = "float")]
     pub fn compensate(&self, raw: RawSample) -> MagneticField {
         MagneticField {
             x_ut: self.compensate_xy(raw.x, raw.rhall, self.x1, self.x2),
@@ -215,7 +262,16 @@ impl RawSample {
     }
 }
 
+/// A compensated field reading in 1/16 µT (divide by 16 for µT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MagneticFieldFixed {
+    pub x_ut16: Option<i32>,
+    pub y_ut16: Option<i32>,
+    pub z_ut16: Option<i32>,
+}
+
 /// A compensated field reading in µT.
+#[cfg(feature = "float")]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MagneticField {
     pub x_ut: Option<f32>,
@@ -341,7 +397,14 @@ impl<I2C: I2c> Bmm150<I2C> {
         Ok(RawSample::from_registers(bytes))
     }
 
-    /// Reads and compensates the latest measurement.
+    /// Reads and compensates the latest measurement in 1/16 µT.
+    pub fn read_fixed(&mut self) -> Result<MagneticFieldFixed, Error<I2C::Error>> {
+        let trim = self.trim.ok_or(Error::NotInitialized)?;
+        Ok(trim.compensate_fixed(self.read_raw()?))
+    }
+
+    /// Reads and compensates the latest measurement in µT.
+    #[cfg(feature = "float")]
     pub fn read(&mut self) -> Result<MagneticField, Error<I2C::Error>> {
         let trim = self.trim.ok_or(Error::NotInitialized)?;
         Ok(trim.compensate(self.read_raw()?))

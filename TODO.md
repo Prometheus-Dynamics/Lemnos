@@ -44,6 +44,16 @@ for the user-facing summary of finished work.
       `lemnos-drivers-bmi088` does not support.
 - [ ] Runtime adapter drivers for the sensor crates (configured devices plus
       `HalI2cBus`), so HeliOS can bind them from `sensors.toml`.
+- [ ] Slimmer runtime for small Linux targets. Measured (x86_64, stripped,
+      `opt-level = "z"`, LTO, `panic = "abort"`): facade + Linux backend
+      without USB/UART is 617 KiB, of which an empty std `main` is 282 KiB
+      (mostly std's backtrace/symbolize code and unwind tables). Lemnos adds
+      ~335 KiB: `lemnos-linux` ~78, `lemnos-core` ~62, `lemnos-runtime` ~31,
+      `lemnos-discovery` ~22, `lemnos-registry` ~7 KiB of code, plus generic
+      std instantiations (sorts, `BTreeMap<String, Value>`) and formatting.
+      Levers: nightly `build-std` + `panic_immediate_abort` for the std share;
+      fewer monomorphized sorts/maps, less `format!`, and feature-gated
+      runtime extras (event retention, diagnostics) for the Lemnos share.
 - [ ] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`.
 - [ ] Linux regulators and clocks behind `Regulator`/`ClockOutput` (regulator
       userspace-consumer and clock sysfs where the kernel exposes them).
