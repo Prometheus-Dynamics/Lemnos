@@ -152,12 +152,11 @@ impl ProbeInventoryIndex {
     }
 
     pub fn record_run(&mut self, run: &DiscoveryRunReport) {
-        let devices = run
-            .snapshot
-            .devices
-            .iter()
-            .map(|device| (&device.id, device.interface))
-            .collect::<BTreeMap<_, _>>();
+        // Built by insertion rather than `collect`, which would link a sort.
+        let mut devices = BTreeMap::new();
+        for device in &run.snapshot.devices {
+            devices.insert(&device.id, device.interface);
+        }
 
         for report in &run.probe_reports {
             if !report.succeeded() {

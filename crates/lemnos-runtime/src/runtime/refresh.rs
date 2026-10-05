@@ -222,11 +222,14 @@ impl Runtime {
     }
 
     fn collect_invalidated_bindings(&self, diff: &InventoryDiff) -> BTreeSet<DeviceId> {
-        diff.changed
-            .iter()
-            .filter(|changed| self.binding_requires_rebind(changed))
-            .map(|changed| changed.current.id.clone())
-            .collect()
+        // Inserted one by one: `collect` into a set links a sort.
+        let mut invalidated = BTreeSet::new();
+        for changed in &diff.changed {
+            if self.binding_requires_rebind(changed) {
+                invalidated.insert(changed.current.id.clone());
+            }
+        }
+        invalidated
     }
 
     fn collect_rebind_targets(

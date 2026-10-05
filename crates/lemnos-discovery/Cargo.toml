@@ -17,7 +17,10 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [features]
-default = []
+default = ["parallel"]
+# Run probes on scoped threads when a refresh selects several. Off: probes run
+# in order on the caller's thread and no thread code is linked.
+parallel = []
 test-utils = []
 
 [dependencies]

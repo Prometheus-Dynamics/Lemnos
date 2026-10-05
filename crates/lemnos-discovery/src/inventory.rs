@@ -10,6 +10,17 @@ pub struct InventorySnapshot {
     pub devices: Vec<DeviceDescriptor>,
 }
 
+/// Devices keyed by ID. Built by insertion: collecting into a `BTreeMap`
+/// sorts a `Vec` first, which links a whole sort implementation per element
+/// type.
+fn index_by_id(devices: &[DeviceDescriptor]) -> BTreeMap<&DeviceId, &DeviceDescriptor> {
+    let mut map = BTreeMap::new();
+    for device in devices {
+        map.insert(&device.id, device);
+    }
+    map
+}
+
 impl InventorySnapshot {
     pub fn new(devices: Vec<DeviceDescriptor>) -> DiscoveryResult<Self> {
         Self::with_observed_at(devices, None)
@@ -92,16 +103,8 @@ impl InventorySnapshot {
     /// `Vec<DeviceDescriptor>` avoids maintaining a hidden secondary index that
     /// would add complexity and extra sync work to every snapshot mutation.
     pub fn diff(&self, next: &InventorySnapshot) -> InventoryDiff {
-        let current = self
-            .devices
-            .iter()
-            .map(|device| (&device.id, device))
-            .collect::<BTreeMap<_, _>>();
-        let updated = next
-            .devices
-            .iter()
-            .map(|device| (&device.id, device))
-            .collect::<BTreeMap<_, _>>();
+        let current = index_by_id(&self.devices);
+        let updated = index_by_id(&next.devices);
 
         let mut added = Vec::new();
         let mut changed = Vec::new();

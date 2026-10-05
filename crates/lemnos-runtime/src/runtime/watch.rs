@@ -1,5 +1,6 @@
 use super::{Runtime, RuntimeRefreshReport, RuntimeWatchedRefreshReport};
 use crate::{RuntimeConfig, RuntimeResult, RuntimeWatchRefreshMode};
+use lemnos_core::InterfaceKind;
 use lemnos_discovery::{DiscoveryContext, DiscoveryProbe, InventoryWatchEvent, InventoryWatcher};
 use std::collections::BTreeSet;
 
@@ -288,13 +289,19 @@ impl CompletedWatchRefresh {
     }
 }
 
+/// The interfaces any watch event touched. Built by insertion: `collect`
+/// into a set links a sort.
+fn touched_interfaces(events: &[InventoryWatchEvent]) -> BTreeSet<InterfaceKind> {
+    let mut interfaces = BTreeSet::new();
+    for event in events {
+        interfaces.extend(event.interfaces.iter().copied());
+    }
+    interfaces
+}
+
 #[cfg(feature = "tracing")]
 fn touched_interface_count(events: &[InventoryWatchEvent]) -> usize {
-    events
-        .iter()
-        .flat_map(|event| event.interfaces.iter().copied())
-        .collect::<BTreeSet<_>>()
-        .len()
+    touched_interfaces(events).len()
 }
 
 #[cfg(feature = "tracing")]
@@ -318,10 +325,7 @@ fn watch_refresh_scope<'a>(
         return Some((context.clone(), probes.to_vec()));
     }
 
-    let touched_interfaces = watch_events
-        .iter()
-        .flat_map(|event| event.interfaces.iter().copied())
-        .collect::<BTreeSet<_>>();
+    let touched_interfaces = touched_interfaces(watch_events);
 
     if touched_interfaces.is_empty() {
         super::runtime_debug!(

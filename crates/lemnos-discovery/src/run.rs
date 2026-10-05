@@ -4,6 +4,7 @@ use crate::{
 };
 use lemnos_core::InterfaceKind;
 use std::sync::Arc;
+#[cfg(feature = "parallel")]
 use std::thread;
 
 pub const DEFAULT_INLINE_PROBE_THRESHOLD: usize = 2;
@@ -156,6 +157,7 @@ fn selected_interfaces(
         .collect()
 }
 
+#[cfg(feature = "parallel")]
 struct IndexedSelectedProbe<'a> {
     index: usize,
     selected_probe: SelectedProbe<'a>,
@@ -193,28 +195,32 @@ fn run_selected_probes<'a>(
     context: &DiscoveryContext,
     selected_probes: Vec<SelectedProbe<'a>>,
 ) -> Vec<ProbeRunResult<'a>> {
-    let worker_count = parallel_worker_count(context, selected_probes.len());
-    if worker_count <= 1 {
-        return selected_probes
-            .into_iter()
-            .enumerate()
-            .map(|(index, selected_probe)| {
-                let discovery = selected_probe.probe.discover(context);
-                (index, selected_probe, discovery)
-            })
-            .collect();
+    #[cfg(feature = "parallel")]
+    {
+        let worker_count = parallel_worker_count(context, selected_probes.len());
+        if worker_count > 1 {
+            return run_selected_probes_parallel(context, selected_probes, worker_count);
+        }
     }
-
-    run_selected_probes_parallel(context, selected_probes, worker_count)
+    selected_probes
+        .into_iter()
+        .enumerate()
+        .map(|(index, selected_probe)| {
+            let discovery = selected_probe.probe.discover(context);
+            (index, selected_probe, discovery)
+        })
+        .collect()
 }
 
+#[cfg(feature = "parallel")]
 fn run_selected_probes_parallel<'a>(
     context: &DiscoveryContext,
     selected_probes: Vec<SelectedProbe<'a>>,
     worker_count: usize,
 ) -> Vec<ProbeRunResult<'a>> {
+    let probe_count = selected_probes.len();
     let batches = build_probe_batches(selected_probes, worker_count);
-    let mut results = thread::scope(|scope| {
+    let results = thread::scope(|scope| {
         let mut handles = Vec::with_capacity(worker_count);
         for batch in batches {
             handles.push(scope.spawn(move || run_probe_batch(context, batch)));
@@ -228,10 +234,17 @@ fn run_selected_probes_parallel<'a>(
             })
             .collect::<Vec<_>>()
     });
-    results.sort_by_key(|(index, _, _)| *index);
-    results
+    // Back into probe order by index, without linking a sort.
+    let mut slots = Vec::with_capacity(probe_count);
+    slots.resize_with(probe_count, || None);
+    for result in results {
+        let index = result.0;
+        slots[index] = Some(result);
+    }
+    slots.into_iter().flatten().collect()
 }
 
+#[cfg(feature = "parallel")]
 fn build_probe_batches<'a>(
     selected_probes: Vec<SelectedProbe<'a>>,
     worker_count: usize,
@@ -250,6 +263,7 @@ fn build_probe_batches<'a>(
     batches
 }
 
+#[cfg(feature = "parallel")]
 fn run_probe_batch<'a>(
     context: &DiscoveryContext,
     batch: Vec<IndexedSelectedProbe<'a>>,
@@ -263,6 +277,8 @@ fn run_probe_batch<'a>(
         .collect()
 }
 
+/// How many threads a refresh fans probes out to (feature `parallel`).
+#[cfg(feature = "parallel")]
 pub(crate) fn parallel_worker_count(
     context: &DiscoveryContext,
     selected_probe_count: usize,

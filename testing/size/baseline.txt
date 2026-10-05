@@ -14,5 +14,5 @@ firmware/thumbv7em-none-eabihf/vcm 428
 firmware/thumbv7em-none-eabihf/vcm,ina2xx,bmm150,bmi088 5404
 firmware/thumbv7em-none-eabihf/vcm,ina2xx,bmm150,bmi088,float 5658
 linux/x86_64-unknown-linux-gnu/facade 304064
-linux/x86_64-unknown-linux-gnu/linux-lite 639944
-linux/x86_64-unknown-linux-gnu/linux-lite-builtin 750920
+linux/x86_64-unknown-linux-gnu/linux-lite 575040
+linux/x86_64-unknown-linux-gnu/linux-lite-builtin 687280

@@ -1,3 +1,4 @@
+#[cfg(feature = "parallel")]
 use crate::run::parallel_worker_count;
 use crate::*;
 use lemnos_core::{
@@ -325,6 +326,7 @@ fn run_probes_can_force_sequential_execution_via_context() {
     assert_eq!(max_inflight.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(feature = "parallel")]
 #[test]
 fn run_probes_can_force_parallel_execution_via_context() {
     let inflight = Arc::new(AtomicUsize::new(0));
@@ -355,6 +357,7 @@ fn run_probes_can_force_parallel_execution_via_context() {
     assert_eq!(max_inflight.load(Ordering::SeqCst), 2);
 }
 
+#[cfg(feature = "parallel")]
 #[test]
 fn parallel_worker_count_uses_inline_threshold_before_fanning_out() {
     let context = DiscoveryContext::new();
@@ -365,6 +368,7 @@ fn parallel_worker_count_uses_inline_threshold_before_fanning_out() {
     assert!(parallel_worker_count(&context, DEFAULT_INLINE_PROBE_THRESHOLD + 1) >= 1);
 }
 
+#[cfg(feature = "parallel")]
 #[test]
 fn parallel_worker_count_honors_max_parallel_override() {
     let context = DiscoveryContext::new()

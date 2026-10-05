@@ -18,7 +18,7 @@ workspace = true
 
 [features]
 default = []
-full = ["builtin-drivers", "linux", "macros", "mock"]
+full = ["builtin-drivers", "linux", "macros", "mock", "parallel-discovery"]
 builtin-drivers = [
     "dep:lemnos-drivers-gpio",
     "dep:lemnos-drivers-i2c",
@@ -30,6 +30,7 @@ builtin-drivers = [
 linux-backend = ["dep:lemnos-linux"]
 linux = [
     "linux-backend",
+    "parallel-discovery",
     "linux-gpio",
     "linux-pwm",
     "linux-i2c",
@@ -49,6 +50,8 @@ linux-hotplug = ["linux-backend", "lemnos-linux/hotplug"]
 linux-gpio-cdev = ["linux-gpio", "lemnos-linux/gpio-cdev"]
 linux-gpio-sysfs = ["linux-gpio", "lemnos-linux/gpio-sysfs"]
 macros = ["dep:lemnos-macros"]
+# Probe several interfaces on threads during a refresh (part of `linux`).
+parallel-discovery = ["lemnos-discovery/parallel"]
 mock = ["dep:lemnos-mock"]
 tracing = ["lemnos-runtime/tracing", "lemnos-linux?/tracing"]
 tokio = ["lemnos-runtime/tokio", "lemnos-linux?/tokio", "dep:tokio"]
