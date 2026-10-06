@@ -61,19 +61,19 @@ lemnos-registry = { version = "2.0.0", path = "crates/lemnos-registry" }
 lemnos-runtime = { version = "2.0.0", path = "crates/lemnos-runtime" }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-libc = "0.2.185"
-ordered-float = { version = "5.3.0", default-features = false }
-proc-macro2 = "1.0.106"
-quote = "1.0.45"
+libc = "0.2.190"
+ordered-float = { version = "5.5.0", default-features = false }
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
 rusb = "0.9.4"
-serde = { version = "1.0.228", default-features = false }
-serde_json = { version = "1.0.149", default-features = false, features = ["alloc"] }
-serialport = { version = "4.9.0", default-features = false }
-syn = { version = "2.0.117", features = ["full"] }
-thiserror = { version = "2.0.18", default-features = false }
+serde = { version = "1.0.229", default-features = false }
+serde_json = { version = "1.0.151", default-features = false, features = ["alloc"] }
+serialport = { version = "4.10.1", default-features = false }
+syn = { version = "3.0.6", features = ["full"] }
+thiserror = { version = "2.0.21", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-trybuild = "1.0.116"
-tokio = { version = "1.52.1", default-features = false }
+trybuild = "1.0.121"
+tokio = { version = "1.53.2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

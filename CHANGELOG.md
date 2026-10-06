@@ -19,6 +19,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- Toolchain pin moved to Rust 1.99.0 (MSRV stays 1.94). Dependencies upgraded to their newest releases (`syn` 3, `serialport` 4.10, `ordered-float` 5.5, `tokio` 1.53, `libc` 0.2.190, ...). No API changes. The size baseline is refreshed for 1.99 codegen.
 - `I2cRegisters::write` sends one register straight from a 6-byte buffer instead of going through the burst packer, and the drivers write registers one at a time, so images that never enable bursts do not link the packer.
 - `lemnos_drivers_ina2xx::Config` holds µΩ and µA (`Config::new(ohms, amps)` still exists with `float`).
 
