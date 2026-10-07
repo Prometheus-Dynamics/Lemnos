@@ -4,7 +4,8 @@
 //!   re-exported here ([`i2c`], [`spi`], [`digital`], [`delay`], [`pwm`],
 //!   [`asynch`]). Lemnos device drivers are written against them, so they run
 //!   on Linux (`lemnos-linux`) and on microcontrollers alike.
-//! - [`register`] adds register maps over I2C and SPI (blocking and async).
+//! - [`register`] adds register maps over I2C and SPI (blocking and async);
+//!   [`asynch::Blocking`] runs async driver code over blocking buses and maps.
 //! - [`power`] adds regulators and clock outputs.
 //! - [`ErrorKind`] and [`HalError`] classify failures portably; [`erased`]
 //!   reduces a bus's errors to `ErrorKind` so buses of different types fit
@@ -17,6 +18,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod blocking;
 pub mod erased;
 mod error;
 #[cfg(any(test, feature = "mock"))]
@@ -33,8 +35,10 @@ pub use register::{
     AddressWidth, Endian, I2cRegisters, RegWrite, RegisterBus, RegisterError, SpiRegisters,
 };
 
-/// The async bus traits ([`embedded_hal_async`]).
+/// The async bus traits ([`embedded_hal_async`]), and [`Blocking`](asynch::Blocking)
+/// to use a blocking implementation through them.
 pub mod asynch {
+    pub use crate::blocking::Blocking;
     pub use crate::register::asynch::RegisterBus;
     pub use embedded_hal_async::{delay, digital, i2c, spi};
 }

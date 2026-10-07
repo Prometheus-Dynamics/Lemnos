@@ -15,11 +15,20 @@ categories = ["embedded", "hardware-support", "no-std"]
 [lints]
 workspace = true
 
+[features]
+default = []
+# `OwnedVcmFormat`, a command format that owns its power sequences.
+alloc = ["serde?/alloc"]
+# `serde` for `VcmChip` (and, with `alloc`, `OwnedVcmFormat`).
+serde = ["dep:serde"]
+
 [dependencies]
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 lemnos-device.workspace = true
 lemnos-hal.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }
 
 [dev-dependencies]
 lemnos-hal = { workspace = true, features = ["mock"] }
+serde_json.workspace = true

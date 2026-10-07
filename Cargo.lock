@@ -347,6 +347,8 @@ dependencies = [
  "embedded-hal-async",
  "lemnos-device",
  "lemnos-hal",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

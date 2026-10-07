@@ -13,6 +13,12 @@ pub struct Vcm<'a, I2C> {
 
 impl<I2C: I2c> Vcm<'static, I2C> {
     /// A built-in chip at [`DEFAULT_ADDRESS`].
+    ///
+    /// # Panics
+    ///
+    /// For [`VcmChip::Custom`], which has no built-in format: use
+    /// [`Vcm::new`] with its format.
+    #[track_caller]
     pub fn chip(i2c: I2C, chip: VcmChip) -> Self {
         Self {
             i2c,

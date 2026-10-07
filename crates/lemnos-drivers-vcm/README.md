@@ -10,8 +10,11 @@ lenses, over any embedded-hal 1.0 I2C bus, blocking (`Vcm`) and async (`asynch::
 | Dongwoon DW9817 (Raspberry Pi Camera Module 3) | as DW9807 | 10 bits | as DW9807 |
 | Asahi Kasei AK7375 | register 0x00-0x01: `position << 4` | 12 bits | control register 0x02: 0 active, 0x40 standby |
 
-Other chips are described with a `VcmFormat` (register, width, shift, constant bits, power
-sequences). The command formats come from Styx (`styx-sensor`'s lens descriptions), with its
+Other chips (`VcmChip::Custom`) are described with a `VcmFormat` (register, width, shift,
+constant bits, power sequences). Features: `alloc` adds `OwnedVcmFormat`, a format that owns
+its power sequences (loaded at run time, lent as a `VcmFormat` without allocating); `serde`
+(de)serializes `VcmChip` by name (`"dw9817"`, `"custom"`) and, with `alloc`, `OwnedVcmFormat`,
+so a sensor description can name its lens chip or spell out its format. The command formats come from Styx (`styx-sensor`'s lens descriptions), with its
 tests. VCMs report no position; frame-exact lens scheduling stays in Styx.
 
 ```rust

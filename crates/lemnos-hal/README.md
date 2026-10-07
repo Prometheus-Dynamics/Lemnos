@@ -8,11 +8,16 @@
 - `register`: register maps over I2C and SPI (8/16-bit addresses, 1-4 byte values, big- or
   little-endian, burst/auto-increment writes, read-back verification, read-modify-write),
   blocking (`RegisterBus`) and async (`asynch::RegisterBus`), with no allocation.
+  `asynch::Blocking` wraps a blocking register map, I2C bus, SPI device or delay so async
+  driver code runs over it (every future completes in its first poll).
 - `power`: `Regulator` and `ClockOutput` traits plus `GpioRegulator` and `FixedClock`.
 - `ErrorKind` / `HalError`: one portable classification of failures, shared with the rest of
   Lemnos (`lemnos_core::ErrorKind` is this type).
 - `mock` (feature): in-memory I2C targets, SPI, pins, delay, regulators and clocks for tests,
-  implementing both the blocking and the async traits.
+  implementing both the blocking and the async traits. `MockI2c` clones share the bus (behind a
+  mutex with `std`, so it is `Send + Sync`; a `RefCell` without), async transfers can be made
+  to return `Pending` first (`with_pending_polls`), and a target can stop acknowledging
+  (`set_dead`).
 
 ```rust
 use lemnos_hal::register::{AddressWidth, I2cRegisters, RegisterBus};

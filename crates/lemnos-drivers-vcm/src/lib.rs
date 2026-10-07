@@ -2,7 +2,11 @@
 //! without `std` or allocation.
 //!
 //! [`Vcm`] drives a chip through its [`VcmFormat`]: the built-in
-//! [`VcmChip`]s (DW9714, DW9807, DW9817, AK7375) or a custom format.
+//! [`VcmChip`]s (DW9714, DW9807, DW9817, AK7375) or a custom format
+//! ([`VcmChip::Custom`]). With `alloc`, `OwnedVcmFormat` holds a format
+//! loaded at run time; with `serde`, [`VcmChip`] (and with both, the owned
+//! format) (de)serialize, so descriptions can name the chip or spell out its
+//! format.
 //! [`asynch::Vcm`] is the same over embedded-hal-async. Ported from Styx
 //! (`styx-sensor/src/lens.rs` command formats, `styx-native`'s `I2cVcm`).
 //!
@@ -11,15 +15,22 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 pub mod asynch;
 mod device;
 mod format;
+#[cfg(feature = "alloc")]
+mod owned;
 
 #[cfg(test)]
 mod tests;
 
 pub use device::info_for_bits;
-pub use format::{FormatError, VcmChip, VcmFormat};
+pub use format::{FormatError, MAX_VCM_WRITES, VcmChip, VcmFormat};
+#[cfg(feature = "alloc")]
+pub use owned::{OwnedVcmFormat, VcmFormatRefs};
 
 use core::fmt;
 use embedded_hal::delay::DelayNs;
@@ -88,6 +99,12 @@ pub struct Vcm<'a, I2C> {
 
 impl<I2C: I2c> Vcm<'static, I2C> {
     /// A built-in chip at [`DEFAULT_ADDRESS`].
+    ///
+    /// # Panics
+    ///
+    /// For [`VcmChip::Custom`], which has no built-in format: use
+    /// [`Vcm::new`] with its format.
+    #[track_caller]
     pub fn chip(i2c: I2C, chip: VcmChip) -> Self {
         Self {
             i2c,

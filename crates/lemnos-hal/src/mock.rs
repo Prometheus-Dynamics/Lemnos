@@ -4,6 +4,8 @@
 //! uses [`ErrorKind`] as its error, so failures can be injected by kind.
 
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 use crate::ErrorKind;
 use crate::power::{ClockOutput, Regulator};
@@ -16,8 +18,9 @@ use embedded_hal::digital::{ErrorType as PinErrorType, InputPin, OutputPin, Stat
 use embedded_hal::i2c::{ErrorType as I2cErrorType, I2c, Operation as I2cOperation};
 use embedded_hal::spi::{ErrorType as SpiErrorType, Operation as SpiOperation, SpiDevice};
 
-/// Runs a future that completes without waiting on real events (the mocks
-/// here never return `Pending`) to completion.
+/// Runs a future that completes without waiting on real events to
+/// completion (it polls again whenever the future returns `Pending`, as the
+/// mocks do when asked to with [`MockI2c::with_pending_polls`]).
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = core::pin::pin!(future);
     let mut cx = Context::from_waker(Waker::noop());
@@ -60,16 +63,29 @@ pub struct MockI2cTarget {
     pub width: Option<AddressWidth>,
     /// Every contiguous write run, as the target saw it.
     pub raw_writes: Vec<Vec<u8>>,
+    /// The target stopped answering: transfers to it are not acknowledged.
+    pub dead: bool,
     pointer: u16,
 }
 
-/// An I2C bus with register-file targets that auto-increment their register
-/// pointer, as most sensors do. Unknown addresses do not acknowledge.
-#[derive(Debug, Clone, Default)]
-pub struct MockI2c {
+#[derive(Debug, Default)]
+struct I2cState {
     targets: BTreeMap<u8, MockI2cTarget>,
     log: Vec<I2cTransfer>,
     fail: VecDeque<ErrorKind>,
+    pending_polls: u32,
+}
+
+/// An I2C bus with register-file targets that auto-increment their register
+/// pointer, as most sensors do. Unknown and dead addresses do not
+/// acknowledge.
+///
+/// Clones share the bus: a test keeps one to inspect what a driver did with
+/// another. With the `std` feature the state sits behind a mutex (the bus is
+/// `Send + Sync`); without it, behind a `RefCell` (single-threaded).
+#[derive(Debug, Clone, Default)]
+pub struct MockI2c {
+    state: Shared<I2cState>,
 }
 
 impl MockI2c {
@@ -79,63 +95,107 @@ impl MockI2c {
     }
 
     /// Adds a register-file target with `width` register addresses.
-    pub fn with_target(mut self, address: u8, width: AddressWidth) -> Self {
-        self.targets.insert(
-            address,
-            MockI2cTarget {
-                width: Some(width),
-                ..MockI2cTarget::default()
-            },
-        );
+    pub fn with_target(self, address: u8, width: AddressWidth) -> Self {
+        with(&self.state, |s| {
+            s.targets.insert(
+                address,
+                MockI2cTarget {
+                    width: Some(width),
+                    ..MockI2cTarget::default()
+                },
+            )
+        });
         self
     }
 
     /// Adds a target without registers (e.g. a DW9714 VCM).
-    pub fn with_raw_target(mut self, address: u8) -> Self {
-        self.targets.insert(address, MockI2cTarget::default());
+    pub fn with_raw_target(self, address: u8) -> Self {
+        with(&self.state, |s| {
+            s.targets.insert(address, MockI2cTarget::default())
+        });
         self
     }
 
     /// Presets consecutive registers of a target.
-    pub fn with_registers(mut self, address: u8, register: u16, bytes: &[u8]) -> Self {
-        let target = self.targets.entry(address).or_default();
-        for (i, b) in bytes.iter().enumerate() {
-            target.registers.insert(register.wrapping_add(i as u16), *b);
-        }
+    pub fn with_registers(self, address: u8, register: u16, bytes: &[u8]) -> Self {
+        with(&self.state, |s| {
+            let target = s.targets.entry(address).or_default();
+            for (i, b) in bytes.iter().enumerate() {
+                target.registers.insert(register.wrapping_add(i as u16), *b);
+            }
+        });
         self
     }
 
-    /// The target at `address`.
-    pub fn target(&self, address: u8) -> Option<&MockI2cTarget> {
-        self.targets.get(&address)
+    /// Async transfers return `Pending` this many times (waking themselves)
+    /// before completing, so callers are tested across await points.
+    pub fn with_pending_polls(self, polls: u32) -> Self {
+        self.set_pending_polls(polls);
+        self
+    }
+
+    /// Sets how many times async transfers return `Pending` first.
+    pub fn set_pending_polls(&self, polls: u32) {
+        with(&self.state, |s| s.pending_polls = polls);
+    }
+
+    /// Makes the target at `address` stop (or resume) acknowledging, like a
+    /// sensor that lost power or was unplugged. Its registers are kept.
+    pub fn set_dead(&self, address: u8, dead: bool) {
+        with(&self.state, |s| {
+            s.targets.entry(address).or_default().dead = dead
+        });
+    }
+
+    /// The target at `address` (a snapshot).
+    pub fn target(&self, address: u8) -> Option<MockI2cTarget> {
+        with(&self.state, |s| s.targets.get(&address).cloned())
     }
 
     /// A register's value (0 if unset or no such target).
     pub fn register(&self, address: u8, register: u16) -> u8 {
-        self.targets
-            .get(&address)
-            .and_then(|t| t.registers.get(&register).copied())
-            .unwrap_or(0)
+        with(&self.state, |s| {
+            s.targets
+                .get(&address)
+                .and_then(|t| t.registers.get(&register).copied())
+                .unwrap_or(0)
+        })
     }
 
-    /// Every transaction so far.
-    pub fn transfers(&self) -> &[I2cTransfer] {
-        &self.log
+    /// `bytes` (1 to 4) consecutive registers from `register` as one value,
+    /// most significant byte first.
+    pub fn value(&self, address: u8, register: u16, bytes: u8) -> u32 {
+        (0..u16::from(bytes.min(4))).fold(0u32, |acc, i| {
+            (acc << 8) | u32::from(self.register(address, register.wrapping_add(i)))
+        })
+    }
+
+    /// Every transaction so far (a snapshot).
+    pub fn transfers(&self) -> Vec<I2cTransfer> {
+        with(&self.state, |s| s.log.clone())
     }
 
     /// Forgets recorded transactions (register contents stay).
-    pub fn clear_log(&mut self) {
-        self.log.clear();
-        for t in self.targets.values_mut() {
-            t.raw_writes.clear();
-        }
+    pub fn clear_log(&self) {
+        with(&self.state, |s| {
+            s.log.clear();
+            for t in s.targets.values_mut() {
+                t.raw_writes.clear();
+            }
+        });
     }
 
     /// The next transaction fails with `kind` (queued; one per call).
-    pub fn fail_next(&mut self, kind: ErrorKind) {
-        self.fail.push_back(kind);
+    pub fn fail_next(&self, kind: ErrorKind) {
+        with(&self.state, |s| s.fail.push_back(kind));
     }
 
+    fn run(&self, address: u8, operations: &mut [I2cOperation<'_>]) -> Result<(), ErrorKind> {
+        with(&self.state, |s| s.run(address, operations))
+    }
+}
+
+impl I2cState {
     fn run(&mut self, address: u8, operations: &mut [I2cOperation<'_>]) -> Result<(), ErrorKind> {
         self.log.push(I2cTransfer {
             address,
@@ -150,7 +210,11 @@ impl MockI2c {
         if let Some(kind) = self.fail.pop_front() {
             return Err(kind);
         }
-        let target = self.targets.get_mut(&address).ok_or(ErrorKind::Nack)?;
+        let target = self
+            .targets
+            .get_mut(&address)
+            .filter(|t| !t.dead)
+            .ok_or(ErrorKind::Nack)?;
         let mut previous_write = false;
         for op in operations.iter_mut() {
             match op {
@@ -212,8 +276,43 @@ impl embedded_hal_async::i2c::I2c for MockI2c {
         address: u8,
         operations: &mut [I2cOperation<'_>],
     ) -> Result<(), Self::Error> {
+        yield_times(with(&self.state, |s| s.pending_polls)).await;
         self.run(address, operations)
     }
+}
+
+/// Returns `Pending` `n` times (waking itself each time), then `Ready`.
+async fn yield_times(n: u32) {
+    let mut left = n;
+    core::future::poll_fn(|cx| {
+        if left == 0 {
+            Poll::Ready(())
+        } else {
+            left -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// State that clones of a mock share.
+#[cfg(feature = "std")]
+type Shared<T> = alloc::sync::Arc<std::sync::Mutex<T>>;
+#[cfg(not(feature = "std"))]
+type Shared<T> = alloc::rc::Rc<core::cell::RefCell<T>>;
+
+#[cfg(feature = "std")]
+fn with<T, R>(shared: &Shared<T>, f: impl FnOnce(&mut T) -> R) -> R {
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&mut guard)
+}
+
+#[cfg(not(feature = "std"))]
+fn with<T, R>(shared: &Shared<T>, f: impl FnOnce(&mut T) -> R) -> R {
+    f(&mut shared.borrow_mut())
 }
 
 /// An SPI device that records transactions and clocks out queued response
@@ -473,5 +572,66 @@ impl ClockOutput for MockClock {
         }
         self.rate_hz = rate_hz;
         Ok(rate_hz)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::I2cRegisters;
+    use crate::asynch::{Blocking, RegisterBus as _};
+    use embedded_hal_async::i2c::I2c as AsyncI2c;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_std_bus_is_send_and_sync() {
+        fn check<T: Send + Sync>() {}
+        check::<MockI2c>();
+    }
+
+    #[test]
+    fn clones_share_the_bus() {
+        let bus = MockI2c::new().with_target(0x18, AddressWidth::Bits8);
+        let mut regs = I2cRegisters::new(bus.clone(), 0x18, AddressWidth::Bits8);
+        crate::RegisterBus::write(&mut regs, 0x10, 2, 0xbeef).unwrap();
+        assert_eq!(bus.value(0x18, 0x10, 2), 0xbeef);
+        assert_eq!(bus.transfers().len(), 1);
+        bus.clear_log();
+        assert!(crate::RegisterBus::read(&mut regs, 0x10, 1).is_ok());
+        assert_eq!(bus.transfers().len(), 1);
+    }
+
+    #[test]
+    fn pending_polls_suspend_async_transfers() {
+        let mut bus = MockI2c::new()
+            .with_registers(0x10, 0x00, &[0x32])
+            .with_pending_polls(3);
+        let mut polls = 0;
+        let mut buf = [0u8; 1];
+        {
+            let mut future =
+                core::pin::pin!(AsyncI2c::write_read(&mut bus, 0x10, &[0x00], &mut buf));
+            let mut cx = Context::from_waker(Waker::noop());
+            while future.as_mut().poll(&mut cx).is_pending() {
+                polls += 1;
+            }
+        }
+        assert_eq!((polls, buf), (3, [0x32]));
+        bus.set_pending_polls(0);
+        assert_eq!(block_on(AsyncI2c::write(&mut bus, 0x10, &[0x00])), Ok(()));
+    }
+
+    #[test]
+    fn dead_targets_do_not_acknowledge() {
+        let bus = MockI2c::new()
+            .with_target(0x0c, AddressWidth::Bits8)
+            .with_registers(0x0c, 0x01, &[7]);
+        let mut regs = Blocking(I2cRegisters::new(bus.clone(), 0x0c, AddressWidth::Bits8));
+        assert_eq!(block_on(regs.read8(0x01)), Ok(7));
+        bus.set_dead(0x0c, true);
+        assert!(block_on(regs.read8(0x01)).is_err());
+        bus.set_dead(0x0c, false);
+        assert_eq!(block_on(regs.read8(0x01)), Ok(7));
+        assert!(bus.target(0x0c).is_some_and(|t| !t.dead));
     }
 }

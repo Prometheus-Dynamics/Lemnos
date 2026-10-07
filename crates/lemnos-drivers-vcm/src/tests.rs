@@ -179,3 +179,75 @@ fn device_model_position_control() {
     assert_eq!(block_on(Control::set(&mut lens, 0, 4095)), Ok(4095));
     assert_eq!(block_on(Control::get(&mut lens, 0)), Ok(4095));
 }
+
+#[test]
+fn custom_chip_has_no_builtin_format() {
+    assert_eq!(VcmChip::Custom.builtin_format(), None);
+    assert_eq!(VcmChip::from_name("custom"), Some(VcmChip::Custom));
+    assert_eq!(VcmChip::Custom.format().check(), Err(FormatError::Unset));
+    assert!(matches!(
+        Vcm::new(MockI2c::new(), 0x0c, VcmChip::Custom.format()),
+        Err(FormatError::Unset)
+    ));
+    for chip in VcmChip::BUILTIN {
+        assert_eq!(VcmChip::from_name(chip.name()), Some(chip));
+        assert_eq!(chip.builtin_format(), Some(chip.format()));
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn owned_formats_lend_a_format() {
+    let owned = OwnedVcmFormat::for_chip(VcmChip::Dw9807).unwrap();
+    assert_eq!(OwnedVcmFormat::for_chip(VcmChip::Custom), None);
+    owned.check().unwrap();
+    assert_eq!(owned.max_position(), 1023);
+    let refs = owned.refs();
+    assert_eq!(refs.format(), VcmChip::Dw9807.format());
+    let i2c = MockI2c::new().with_raw_target(0x0c);
+    let mut lens = Vcm::new(i2c.clone(), 0x0c, refs.format()).unwrap();
+    lens.power_up(&mut MockDelay::new()).unwrap();
+    assert_eq!(lens.move_to(0x2a5).unwrap(), 0x2a5);
+    assert_eq!(
+        writes(&i2c),
+        [(0x0c, vec![0x02, 0x00]), (0x0c, vec![0x03, 0x02, 0xa5])]
+    );
+
+    let too_many = OwnedVcmFormat {
+        power_up: vec![vec![0]; MAX_VCM_WRITES + 1],
+        ..OwnedVcmFormat::default()
+    };
+    assert_eq!(too_many.check(), Err(FormatError::TooManyWrites));
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn chips_serialize_by_name() {
+    assert_eq!(
+        serde_json::to_string(&VcmChip::Dw9817).unwrap(),
+        "\"dw9817\""
+    );
+    let chip: VcmChip = serde_json::from_str("\"custom\"").unwrap();
+    assert_eq!(chip, VcmChip::Custom);
+    assert!(serde_json::from_str::<VcmChip>("\"imx708\"").is_err());
+}
+
+#[cfg(all(feature = "serde", feature = "alloc"))]
+#[test]
+fn owned_formats_deserialize_with_defaults() {
+    let format: OwnedVcmFormat =
+        serde_json::from_str(r#"{"register": 3, "power_up": [[2, 0]], "power_down": [[2, 1]]}"#)
+            .unwrap();
+    assert_eq!(format.bytes, 2);
+    assert_eq!(format.bits, 10);
+    assert_eq!(
+        format.refs().format().power_up,
+        VcmChip::Dw9807.format().power_up
+    );
+    let json = serde_json::to_string(&format).unwrap();
+    assert_eq!(
+        serde_json::from_str::<OwnedVcmFormat>(&json).unwrap(),
+        format
+    );
+    assert!(serde_json::from_str::<OwnedVcmFormat>(r#"{"width": 2}"#).is_err());
+}
