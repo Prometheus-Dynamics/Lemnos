@@ -39,6 +39,7 @@
 
 mod buses;
 mod error;
+mod light;
 mod registry;
 mod schema;
 
@@ -47,8 +48,9 @@ mod tests;
 
 #[cfg(feature = "linux")]
 pub use buses::LinuxBuses;
-pub use buses::{Buses, DynI2c};
+pub use buses::{Buses, DynI2c, DynInputPin, DynOutputPin, GpioRef};
 pub use error::BoardError;
+pub use light::{LIGHT_KEYS, light_defaults, strip_config};
 pub use registry::{Build, DriverEntry, DriverRegistry, Interface};
 pub use schema::{
     Backend, BoardDefinition, BoardInfo, BusRef, ConfigValue, DeviceSpec, FORMAT, SCHEMA_VERSION,

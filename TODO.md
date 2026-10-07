@@ -16,7 +16,15 @@ for the user-facing summary of finished work.
       (`lemnos-board`, facade `board`); hwmon fan and thermal zones as L1 devices; generic
       IIO/hwmon binding; HeliOS can bind the Raze sensors from `sensors.toml`
       ([docs/board-definition.md](docs/board-definition.md)).
-- [ ] Phase 4: `lemnosd` (see `docs/system-service.md`).
+- [x] Phase 4: `lemnosd`, `lemnos-ipc`, `lemnos-light`, `lemnos-drivers-ws2812`, packaging
+      ([docs/system-service.md](docs/system-service.md)).
+- [ ] `lemnosd` on the CM5: run the Raze board definition against the real ring, fan and
+      sensors; check the ring's `wire` (the Atlas manifest says RGBW) and the fan's
+      `restore_mode`; measure the aarch64 binary.
+- [ ] Composite devices and the fan controller: design only
+      ([docs/composite-devices.md](docs/composite-devices.md)), waiting for a decision.
+- [ ] IIO buffered reads (`/dev/iio:deviceN`, IRQ timestamps) in the generic kernel
+      binding.
 - [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
       shared probe code).
 

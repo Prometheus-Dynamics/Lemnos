@@ -143,7 +143,7 @@ fn raze_definition_parses_validates_and_round_trips() {
     let board = BoardDefinition::from_toml_str(RAZE).unwrap();
     board.validate(&DriverRegistry::builtin()).unwrap();
     assert_eq!(board.board.id, "raze");
-    assert_eq!(board.devices.len(), 5);
+    assert_eq!(board.devices.len(), 7);
     let imu = board.device("imu").unwrap();
     assert_eq!(imu.bus, Some(BusRef::I2c(1)));
     assert_eq!(imu.address, Some(0x18));

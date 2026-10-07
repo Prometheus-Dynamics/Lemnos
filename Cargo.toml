@@ -5,7 +5,10 @@ members = [
     "crates/lemnos-hal",
     "crates/lemnos-device",
     "crates/lemnos-lite",
+    "crates/lemnos-light",
     "crates/lemnos-board",
+    "crates/lemnos-ipc",
+    "crates/lemnosd",
     "crates/lemnos-bus",
     "crates/lemnos-discovery",
     "crates/lemnos-driver-sdk",
@@ -27,6 +30,7 @@ members = [
     "crates/lemnos-drivers-bmm150",
     "crates/lemnos-drivers-bmi088",
     "crates/lemnos-drivers-linux",
+    "crates/lemnos-drivers-ws2812",
     "crates/lemnos-mock",
 ]
 resolver = "3"
@@ -46,7 +50,9 @@ lemnos-core = { version = "2.0.0", path = "crates/lemnos-core", default-features
 lemnos-hal = { version = "2.0.0", path = "crates/lemnos-hal", default-features = false }
 lemnos-device = { version = "2.0.0", path = "crates/lemnos-device", default-features = false }
 lemnos-lite = { version = "2.0.0", path = "crates/lemnos-lite" }
+lemnos-light = { version = "2.0.0", path = "crates/lemnos-light" }
 lemnos-board = { version = "2.0.0", path = "crates/lemnos-board" }
+lemnos-ipc = { version = "2.0.0", path = "crates/lemnos-ipc" }
 lemnos-discovery = { version = "2.0.0", path = "crates/lemnos-discovery", default-features = false }
 lemnos-driver-manifest = { version = "2.0.0", path = "crates/lemnos-driver-manifest", default-features = false }
 lemnos-driver-sdk = { version = "2.0.0", path = "crates/lemnos-driver-sdk" }
@@ -61,6 +67,7 @@ lemnos-drivers-ina2xx = { version = "2.0.0", path = "crates/lemnos-drivers-ina2x
 lemnos-drivers-bmm150 = { version = "2.0.0", path = "crates/lemnos-drivers-bmm150" }
 lemnos-drivers-bmi088 = { version = "2.0.0", path = "crates/lemnos-drivers-bmi088" }
 lemnos-drivers-linux = { version = "2.0.0", path = "crates/lemnos-drivers-linux" }
+lemnos-drivers-ws2812 = { version = "2.0.0", path = "crates/lemnos-drivers-ws2812" }
 lemnos-linux = { version = "2.0.0", path = "crates/lemnos-linux", default-features = false }
 lemnos-linux-sys = { version = "2.0.0", path = "crates/lemnos-linux-sys" }
 lemnos-macros = { version = "2.0.0", path = "crates/lemnos-macros" }
@@ -96,3 +103,13 @@ print_stderr = "deny"
 print_stdout = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+# lemnosd and lemnos-ctl as shipped: small, static, no unwinding (the panic
+# hook still runs: it hands fans back to the kernel before the abort).
+[profile.service]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

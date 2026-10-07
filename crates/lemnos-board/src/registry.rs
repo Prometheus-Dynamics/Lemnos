@@ -107,7 +107,8 @@ impl DriverRegistry {
     }
 
     /// The built-in drivers: `bmi088`, `bmm150`, `ina226`, `ina238`,
-    /// `ina260`, `vcm`, `hwmon-fan`, `thermal-zone`.
+    /// `ina260`, `vcm`, `hwmon-fan`, `thermal-zone`, `ws2812`,
+    /// `gpio-output`, `gpio-input`.
     pub fn builtin() -> Self {
         Self {
             entries: BUILTIN.to_vec(),
@@ -329,7 +330,9 @@ const BUILTIN: &[DriverEntry] = &[
         class: DeviceClass::Fan,
         interface: Interface::Platform,
         default_address: None,
-        config_keys: &[],
+        // `restore_mode`: the `pwm1_enable` value that hands the fan back to
+        // the kernel when a host stops (2 on most drivers).
+        config_keys: &["restore_mode"],
         match_keys: &["name"],
         kernel: true,
         userspace: false,
@@ -346,6 +349,42 @@ const BUILTIN: &[DriverEntry] = &[
         kernel: true,
         userspace: false,
         build: build_thermal_zone,
+    },
+    DriverEntry {
+        name: "ws2812",
+        summary: "WS2812/SK6812 LED strip or ring (Raspberry Pi RP1 ws2812-pio device)",
+        class: DeviceClass::Light,
+        interface: Interface::Platform,
+        default_address: None,
+        config_keys: crate::light::LIGHT_KEYS,
+        match_keys: &[],
+        kernel: true,
+        userspace: false,
+        build: build_ws2812,
+    },
+    DriverEntry {
+        name: "gpio-output",
+        summary: "GPIO output line",
+        class: DeviceClass::Gpio,
+        interface: Interface::Platform,
+        default_address: None,
+        config_keys: &["chip", "line", "active_low", "initial"],
+        match_keys: &[],
+        kernel: false,
+        userspace: true,
+        build: build_gpio_output,
+    },
+    DriverEntry {
+        name: "gpio-input",
+        summary: "GPIO input line",
+        class: DeviceClass::Gpio,
+        interface: Interface::Platform,
+        default_address: None,
+        config_keys: &["chip", "line", "active_low"],
+        match_keys: &[],
+        kernel: false,
+        userspace: true,
+        build: build_gpio_input,
     },
 ];
 
@@ -590,4 +629,57 @@ fn build_thermal_zone(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedD
         (None, None) => return Err(bad(spec, "needs `path` or `match.type`")),
     };
     Ok(BoxedDevice::sensor(zone))
+}
+
+fn build_ws2812(spec: &DeviceSpec, _buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
+    let config = crate::light::strip_config(spec)?;
+    // Check the look settings now, so a bad colour fails validation-time builds.
+    crate::light::light_defaults(spec)?;
+    let path = spec.path.clone().unwrap_or_else(|| "/dev/leds0".into());
+    Ok(BoxedDevice::light(lemnos_drivers_linux::Ws2812Pio::new(
+        path, config,
+    )))
+}
+
+fn gpio_ref(spec: &DeviceSpec) -> Result<crate::GpioRef, BoardError> {
+    let chip = spec
+        .config
+        .get("chip")
+        .and_then(ConfigValue::as_str)
+        .ok_or_else(|| bad(spec, "needs config.chip (gpiochipN or a chip label)"))?
+        .to_string();
+    let line = integer(spec, "line")?
+        .and_then(|l| u32::try_from(l).ok())
+        .ok_or_else(|| bad(spec, "needs config.line (the offset on the chip)"))?;
+    let active_low = spec
+        .config
+        .get("active_low")
+        .and_then(ConfigValue::as_bool)
+        .unwrap_or(false);
+    Ok(crate::GpioRef {
+        chip,
+        line,
+        active_low,
+    })
+}
+
+fn build_gpio_output(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
+    let line = gpio_ref(spec)?;
+    let initial = spec
+        .config
+        .get("initial")
+        .and_then(ConfigValue::as_bool)
+        .unwrap_or(false);
+    let pin = buses.gpio_output(&line, initial)?;
+    Ok(BoxedDevice::both(lemnos_device::gpio::OutputLine::new(
+        pin, initial,
+    )))
+}
+
+fn build_gpio_input(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
+    let line = gpio_ref(spec)?;
+    let pin = buses.gpio_input(&line)?;
+    Ok(BoxedDevice::sensor(lemnos_device::gpio::InputLine::new(
+        pin,
+    )))
 }

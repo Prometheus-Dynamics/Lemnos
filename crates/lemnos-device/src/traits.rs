@@ -91,6 +91,56 @@ pub trait Control: Device {
     fn get(&mut self, index: usize) -> Result<i32, DeviceError<Self::Error>>;
 }
 
+/// One LED's colour: red, green, blue and (for RGBW parts) white.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Rgbw {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub w: u8,
+}
+
+impl Rgbw {
+    pub const OFF: Self = Self::new(0, 0, 0, 0);
+
+    pub const fn new(r: u8, g: u8, b: u8, w: u8) -> Self {
+        Self { r, g, b, w }
+    }
+
+    /// A colour from `0xRRGGBB` (white 0).
+    pub const fn rgb(rgb: u32) -> Self {
+        Self::new((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 0)
+    }
+
+    /// `0xRRGGBB`.
+    pub const fn to_rgb(self) -> u32 {
+        (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
+    }
+
+    /// Every component scaled by `level / 255`.
+    pub const fn scaled(self, level: u8) -> Self {
+        const fn s(c: u8, level: u8) -> u8 {
+            ((c as u16 * level as u16 + 127) / 255) as u8
+        }
+        Self::new(
+            s(self.r, level),
+            s(self.g, level),
+            s(self.b, level),
+            s(self.w, level),
+        )
+    }
+}
+
+/// A device that shows a frame of colours: an LED or an addressable strip.
+pub trait Pixels: Device {
+    /// How many LEDs.
+    fn pixel_count(&self) -> usize;
+
+    /// Shows `pixels` (index 0 is the first logical LED); LEDs past the end
+    /// of `pixels` turn off.
+    fn show(&mut self, pixels: &[Rgbw]) -> Result<(), DeviceError<Self::Error>>;
+}
+
 /// Checks a control write against `info`: the index exists and the value is
 /// in range.
 pub fn check_control<E>(info: &DeviceInfo, index: usize, value: i32) -> Result<(), DeviceError<E>> {

@@ -71,8 +71,20 @@ Unknown fields are errors, so a typo does not silently fall back to a default.
 | `ina226`, `ina238` | `power-monitor` | I2C, default 0x40 | `shunt_micro_ohms` or `shunt_ohms`, `max_current_micro_amps` or `max_current_amps` (required) | `bus_voltage`, `shunt_voltage` V, `current` A, `power` W, (`ina238`) `die_temperature` °C |
 | `ina260` | `power-monitor` | I2C, default 0x40 | none (integrated shunt) | as `ina226` |
 | `vcm` | `lens` | I2C, default 0x0c | `chip` (`dw9714` `dw9807` `dw9817` `ak7375`, required) | control `position` |
-| `hwmon-fan` | `fan` | `match.name` or `path` | none | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
+| `hwmon-fan` | `fan` | `match.name` or `path` | `restore_mode`: the `pwm1_enable` value that hands the fan back to the kernel when a host stops (2 on most drivers) | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
 | `thermal-zone` | `temperature` | `match.type` or `path` | none | `temperature` °C |
+| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1), `gpio` (informational), and the look defaults below | controls `brightness`, `color`; frames |
+| `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
+| `gpio-input` | `gpio` | `config.chip` + `config.line` | `chip`, `line`, `active_low` | `level` |
+
+A light's look defaults (used by `lemnosd`'s LED intents; any intent can override them):
+`fade_ms`, `easing` (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`,
+`cubic-bezier(x1, y1, x2, y2)`), `status_effect` and `error_effect` (`solid`, `blink`,
+`breathe`), `locate_effect` (`breathe`, `blink`, `chase`), `breathe_period_ms`,
+`breathe_depth` (0..1), `blink_period_ms`, `blink_duty` (0..1), `spinner_period_ms`,
+`spinner_tail` (LEDs), and colours (`0xRRGGBB` or `"#rrggbb"`): `ok`, `warn`, `error`,
+`busy`, `locate`, `idle`, `progress`, `progress_background`, `updating`, `verifying`,
+`writing`, `staged`, `booting`, `rebooting`, `failed`.
 
 Hosts can register more drivers (`DriverRegistry::register`); a `DriverEntry` names the
 config keys it accepts so validation stays strict.
@@ -123,11 +135,24 @@ id = "cpu-thermal"
 driver = "thermal-zone"
 match = { type = "cpu-thermal" }
 poll_ms = 1000
+
+[[devices]]
+id = "status-ring"
+driver = "ws2812"
+path = "/dev/leds0"
+config = { count = 16, wire = "rgb", offset = 5, direction = "cw", gpio = 13, fade_ms = 250, easing = "ease-in-out", status_effect = "breathe" }
+
+[[devices]]
+id = "usb-a-power"
+driver = "gpio-output"
+config = { chip = "pinctrl-rp1", line = 20, initial = true }
 ```
 
 The bus number, addresses and shunt value are the board's; check them against the
 schematic before deploying (the example's are placeholders where the Raze's are unknown to
-this repository).
+this repository). The ring is a 16-LED SK6812 on GPIO 13 with logical LED 0 at physical LED
+5; Atlas's manifest records it as RGBW (`rgbw = true`, matching the `ws2812-pio` overlay's
+`rgbw` parameter), so check on hardware which `wire` shows true colours.
 
 ## Generating it
 

@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 lemnos-device.workspace = true
+lemnos-drivers-ws2812.workspace = true
 lemnos-hal = { workspace = true, features = ["std"] }
 embedded-hal.workspace = true
 

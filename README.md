@@ -14,6 +14,10 @@ The repository is split into small crates so applications, custom drivers, Linux
 - `crates/lemnos-lite`: `no_std` static device table with status and polling, for firmware and small Linux images
 - `crates/lemnos-board`: board definitions (TOML/JSON) and the factories that build device-model drivers from them
 - `crates/lemnos-drivers-linux`: device-model drivers over Linux kernel interfaces (hwmon fans, thermal zones, a generic IIO/hwmon binding)
+- `crates/lemnos-light`: `no_std` light rendering: easing, effects, gauges, spinners, system animations, intent arbitration
+- `crates/lemnos-drivers-ws2812`: `no_std` WS2812/SK6812 strip model and encoders (RP1 PIO device, SPI)
+- `crates/lemnos-ipc`: the `lemnosd` socket protocol and its clients (`DeviceClient`, `LedClient`)
+- `crates/lemnosd`: the board's hardware service and `lemnos-ctl`
 - `crates/lemnos-core`: shared types, requests, state, and descriptors (`no_std` + `alloc`)
 - `crates/lemnos-bus`: typed bus/session traits for hardware access
 - `crates/lemnos-discovery`: discovery probes, inventory snapshots, and diffing
@@ -91,6 +95,20 @@ The facade crate includes examples for both mock and Linux-backed flows:
 - `cargo run -p lemnos --example linux_device_validator --features "builtin-drivers linux macros"`
 - `cargo run -p lemnos --example linux_hal_probe --features linux -- discover` (also `gpio-info`, `gpio-read`, `i2c-read`, `hotplug`)
 
+## The hardware service
+
+`lemnosd` hosts a board definition's devices and serves them over a local socket, so every
+application on a board shares the same drivers; `lemnos-ctl` is its command-line client:
+
+```bash
+lemnos-ctl list
+lemnos-ctl read imu
+lemnos-ctl led status warn --effect breathe
+lemnos-ctl led progress 0.4
+```
+
+See [docs/system-service.md](docs/system-service.md) and [packaging/README.md](packaging/README.md).
+
 ## Development
 
 Common workspace commands:
@@ -114,6 +132,8 @@ Targeted helper scripts live under `testing/`.
 - [docs/testing.md](docs/testing.md): test surfaces, scripts, and example validation flows
 - [docs/compact-model.md](docs/compact-model.md): the compact device model, the lite table and the generic runtime adapter
 - [docs/board-definition.md](docs/board-definition.md): the board-definition format, built-in drivers, and HeliOS adoption
+- [docs/system-service.md](docs/system-service.md): `lemnosd`, the board's hardware service: client API, LED intents, updater integration, backends, packaging
+- [docs/composite-devices.md](docs/composite-devices.md): design only: composite devices and the fan controller with its failsafe
 - [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the Styx migration
 - [CHANGELOG.md](CHANGELOG.md): release history and notable workspace changes
 - [testing/README.md](testing/README.md): local and CI validation entry points

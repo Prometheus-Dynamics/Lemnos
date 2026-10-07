@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The lemnosd socket protocol and its clients: typed device reads and subscriptions, controls with a write policy, LED intents and connection events"
+documentation = "https://docs.rs/lemnos-ipc"
+readme = "README.md"
+keywords = ["ipc", "client", "hardware", "lemnos"]
+categories = ["hardware-support", "os::unix-apis"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-device.workspace = true
+lemnos-hal.workspace = true
+lemnos-light.workspace = true

@@ -1,0 +1,40 @@
+[package]
+name = "lemnosd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The board's hardware service: hosts a board definition's devices over the Lemnos compact device model and serves readings, controls and LED intents over a Unix socket"
+documentation = "https://docs.rs/lemnosd"
+readme = "README.md"
+keywords = ["hardware", "service", "sensor", "led", "lemnos"]
+categories = ["hardware-support", "os::linux-apis"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lemnosd"
+path = "src/main.rs"
+
+[[bin]]
+name = "lemnos-ctl"
+path = "src/bin/lemnos-ctl.rs"
+
+[dependencies]
+embedded-hal.workspace = true
+lemnos-board = { workspace = true, features = ["linux"] }
+lemnos-device = { workspace = true, features = ["alloc"] }
+lemnos-drivers-linux.workspace = true
+lemnos-hal = { workspace = true, features = ["std"] }
+lemnos-ipc.workspace = true
+lemnos-light.workspace = true
+lemnos-linux-sys.workspace = true
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+lemnos-bus.workspace = true
+lemnos-core = { workspace = true, features = ["std"] }
+lemnos-mock.workspace = true

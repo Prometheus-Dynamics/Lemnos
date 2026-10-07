@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-light"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std light rendering for Lemnos: easing, solid/blink/breathe effects, eased transitions and intent arbitration for LEDs and addressable strips"
+documentation = "https://docs.rs/lemnos-light"
+readme = "README.md"
+keywords = ["led", "animation", "easing", "no-std", "lemnos"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-device.workspace = true

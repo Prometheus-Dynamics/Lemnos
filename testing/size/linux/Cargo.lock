@@ -35,11 +35,13 @@ version = "2.0.0"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
+ "lemnos-device",
  "lemnos-discovery",
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
  "lemnos-drivers-gpio",
  "lemnos-drivers-i2c",
+ "lemnos-drivers-linux",
  "lemnos-drivers-pwm",
  "lemnos-drivers-spi",
  "lemnos-drivers-uart",
@@ -101,9 +103,12 @@ dependencies = [
 name = "lemnos-driver-sdk"
 version = "2.0.0"
 dependencies = [
+ "embedded-hal",
  "lemnos-bus",
  "lemnos-core",
+ "lemnos-device",
  "lemnos-driver-manifest",
+ "lemnos-hal",
  "thiserror",
 ]
 
@@ -128,13 +133,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-linux"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "lemnos-device",
+ "lemnos-drivers-ws2812",
+ "lemnos-hal",
+]
+
+[[package]]
 name = "lemnos-drivers-pwm"
 version = "2.0.0"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
+ "lemnos-device",
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
+ "lemnos-drivers-linux",
+ "lemnos-hal",
 ]
 
 [[package]]
@@ -165,6 +183,13 @@ dependencies = [
  "lemnos-core",
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
+]
+
+[[package]]
+name = "lemnos-drivers-ws2812"
+version = "2.0.0"
+dependencies = [
+ "lemnos-device",
 ]
 
 [[package]]

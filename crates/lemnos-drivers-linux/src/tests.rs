@@ -204,3 +204,33 @@ fn kernel_binding_reads_hwmon_power_monitors() {
     );
     assert!(KernelDevice::new(model.info(), model.kernel(), vec![]).is_err());
 }
+
+#[test]
+fn ws2812_writes_the_rp1_layout_and_controls_apply() {
+    use lemnos_device::{Pixels, Rgbw};
+    use lemnos_drivers_ws2812::{StripConfig, Wire};
+    let tree = Tree::new();
+    tree.file("dev/leds0", "");
+    let mut strip = Ws2812Pio::new(
+        tree.path("dev/leds0"),
+        StripConfig::new(4, Wire::Rgbw).with_offset(1),
+    );
+    let mut device = DeviceRef::light(&mut strip);
+    device.init(&mut NoDelay).unwrap();
+    assert_eq!(device.pixel_count(), 4);
+    device
+        .show(&[Rgbw::new(1, 2, 3, 4), Rgbw::rgb(0x102030)])
+        .unwrap();
+    let bytes = fs::read(tree.path("dev/leds0")).unwrap();
+    assert_eq!(
+        bytes,
+        [0, 0, 0, 0, 1, 2, 3, 4, 0x10, 0x20, 0x30, 0, 0, 0, 0, 0]
+    );
+    assert_eq!(device.set(CONTROL_BRIGHTNESS, 500), Ok(500));
+    assert_eq!(device.set(CONTROL_COLOR, 0xff0000), Ok(0xff0000));
+    let bytes = fs::read(tree.path("dev/leds0")).unwrap();
+    // Half brightness red on every LED.
+    assert_eq!(&bytes[..4], &[128, 0, 0, 0]);
+    assert_eq!(device.get(CONTROL_BRIGHTNESS), Ok(502));
+    assert_eq!(Pixels::pixel_count(&strip), 4);
+}

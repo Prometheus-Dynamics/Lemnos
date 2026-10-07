@@ -1,0 +1,127 @@
+# lemnosd as a managed systemd service: Gaia layer (Gaia >= 2.1).
+#
+# Builds lemnosd and lemnos-ctl as static aarch64 musl binaries, installs
+# them in /usr/bin, and stages the systemd unit, the default environment
+# file, a systemd-sysusers entry and a preset that enables the unit. A
+# board's device package imports this file from a pinned Lemnos checkout
+# and adds its board definition (/etc/lemnos/board.toml):
+#
+#   [[sources]]
+#   id = "lemnos"                     # this id is required: the artifacts build from it
+#   kind = "git"
+#   repo = "https://github.com/Prometheus-Dynamics/Lemnos.git"
+#   rev = "<pinned commit>"
+#
+#   imports = [
+#     ...base layers...,
+#     { source = "lemnos", path = "packaging/gaia/lemnosd.toml" },
+#   ]
+#
+#   [[stage.files]]
+#   id = "raze-lemnos-board"
+#   src = "@self/assets/lemnos/board.toml"
+#   dest = "/etc/lemnos/board.toml"
+#   mode = 420
+#   origin = "static-asset"
+#
+# For local development use `--set sources.lemnos.path=/abs/path/to/Lemnos`.
+# Items merge by id and a later layer replaces a whole item: redeclare
+# `lemnosd-env` to ship your own /etc/default/lemnosd.env, and prefer unit
+# drop-ins in /etc/systemd/system/lemnosd.service.d/*.conf to editing the
+# unit. See packaging/README.md.
+
+gaia_version = ">=2.1.0"
+
+[providers.rust]
+allow_nested_build = true
+
+[[artifacts]]
+id = "lemnosd"
+kind = "rust"
+source = "lemnos"
+package = "lemnosd"
+target = "aarch64-unknown-linux-musl"
+profile = "service"
+target_name = "lemnosd"
+install_name = "lemnosd"
+install_class = "binary"
+install_dest_hint = "/usr/bin/lemnosd"
+output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnosd"
+
+[artifacts.execution]
+backend = "docker"
+
+[artifacts.execution.docker]
+image = "lemnos-aarch64-musl"
+dockerfile = "@self/docker/aarch64-musl.Dockerfile"
+context = "@self/docker"
+
+[[artifacts]]
+id = "lemnos-ctl"
+kind = "rust"
+source = "lemnos"
+package = "lemnosd"
+target = "aarch64-unknown-linux-musl"
+profile = "service"
+target_name = "lemnos-ctl"
+install_name = "lemnos-ctl"
+install_class = "binary"
+install_dest_hint = "/usr/bin/lemnos-ctl"
+output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnos-ctl"
+
+[artifacts.execution]
+backend = "docker"
+
+[artifacts.execution.docker]
+image = "lemnos-aarch64-musl"
+dockerfile = "@self/docker/aarch64-musl.Dockerfile"
+context = "@self/docker"
+
+[[install]]
+id = "install-lemnosd"
+artifact = "lemnosd"
+dest = "/usr/bin/lemnosd"
+replace = true
+mode = 493 # 0755
+
+[[install]]
+id = "install-lemnos-ctl"
+artifact = "lemnos-ctl"
+dest = "/usr/bin/lemnos-ctl"
+replace = true
+mode = 493
+
+[[stage.services]]
+id = "lemnosd-service"
+name = "lemnosd.service"
+unit_path = "@self/../systemd/lemnosd.service"
+
+[[stage.files]]
+id = "lemnosd-env"
+src = "@self/../systemd/lemnosd.env.example"
+dest = "/etc/default/lemnosd.env"
+mode = 420 # 0644
+origin = "static-asset"
+
+[[stage.files]]
+id = "lemnosd-sysusers"
+src = "@self/../systemd/lemnos.sysusers"
+dest = "/usr/lib/sysusers.d/lemnos.conf"
+mode = 420
+origin = "static-asset"
+
+[[stage.files]]
+id = "lemnosd-preset"
+src = "@self/../systemd/lemnosd.preset"
+dest = "/usr/lib/systemd/system-preset/80-lemnosd.preset"
+mode = 420
+origin = "static-asset"
+
+[image]
+kind = "buildroot"
+
+# Once any layer lists feed ids, only listed ids are fed: name every item above.
+[image.feed]
+install_entries = ["install-lemnosd", "install-lemnos-ctl"]
+stage_files = ["lemnosd-env", "lemnosd-sysusers", "lemnosd-preset"]
+stage_services = ["lemnosd-service"]

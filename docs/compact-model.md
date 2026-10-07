@@ -1,7 +1,8 @@
 # Compact device model and lite runtime
 
 Status: phases 1-3 implemented (`lemnos-device`, `lemnos-lite`, the generic runtime adapter
-and board definitions); the decisions below are confirmed. Builds on
+and board definitions); the decisions below are confirmed. Phase 4 became `lemnosd`
+([system-service.md](system-service.md)); rich-model slimming moved after it. Builds on
 [foundation.md](foundation.md).
 
 ## Goal
@@ -285,7 +286,9 @@ Linux, x86_64, stripped, `opt-level = "z"`, stable toolchain: the three I2C sens
 their own APIs (`sensors`) take 317.5 KB, through a `lemnos-lite` table (`sensors-lite`)
 314.8 KB; the table is smaller because it prints plain value slices instead of each
 driver's `Debug` structs. Both are within 35 KB of an empty `main` (282 KB); the facade with
-the Linux backend (`linux-lite`) is 564 KB.
+the Linux backend (`linux-lite`) is 573 KB, and 728 KB with the built-in drivers, whose hwmon
+fan and thermal-zone drivers now run through the generic adapter (phase 3 added 9 KB and
+58 KB to those two images).
 
 ## Phases
 

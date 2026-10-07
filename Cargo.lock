@@ -157,7 +157,9 @@ dependencies = [
  "lemnos-drivers-ina2xx",
  "lemnos-drivers-linux",
  "lemnos-drivers-vcm",
+ "lemnos-drivers-ws2812",
  "lemnos-hal",
+ "lemnos-light",
  "lemnos-linux",
  "serde",
  "serde_json",
@@ -286,6 +288,7 @@ dependencies = [
  "lemnos-device",
  "lemnos-drivers-bmi088",
  "lemnos-drivers-ina2xx",
+ "lemnos-drivers-ws2812",
  "lemnos-hal",
 ]
 
@@ -347,11 +350,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-ws2812"
+version = "2.0.0"
+dependencies = [
+ "lemnos-device",
+]
+
+[[package]]
 name = "lemnos-hal"
 version = "2.0.0"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
+]
+
+[[package]]
+name = "lemnos-ipc"
+version = "2.0.0"
+dependencies = [
+ "lemnos-device",
+ "lemnos-hal",
+ "lemnos-light",
+]
+
+[[package]]
+name = "lemnos-light"
+version = "2.0.0"
+dependencies = [
+ "lemnos-device",
 ]
 
 [[package]]
@@ -457,6 +483,24 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lemnosd"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "lemnos-board",
+ "lemnos-bus",
+ "lemnos-core",
+ "lemnos-device",
+ "lemnos-drivers-linux",
+ "lemnos-hal",
+ "lemnos-ipc",
+ "lemnos-light",
+ "lemnos-linux-sys",
+ "lemnos-mock",
+ "serde_json",
 ]
 
 [[package]]

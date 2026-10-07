@@ -2,8 +2,8 @@
 //! [`ErrorKind`], so one table or service can hold many different drivers.
 //!
 //! Every [`Device`] is a [`DynDevice`], every [`Sensor`] a [`DynSensor`],
-//! every [`Control`] a [`DynControl`], and every device that is both a
-//! [`DynSensorControl`]. [`DeviceRef`] (borrowed) and `BoxedDevice` (owned,
+//! every [`Control`] a [`DynControl`], every device that is both a
+//! [`DynSensorControl`], and every [`Control`] + [`Pixels`] a [`DynLight`]. [`DeviceRef`] (borrowed) and `BoxedDevice` (owned,
 //! feature `alloc`) hold whichever of the three a device is and offer every
 //! operation, answering [`ErrorKind::Unsupported`] for the ones it lacks.
 //!
@@ -11,7 +11,7 @@
 //! driver their method names overlap with [`Device`], [`Sensor`] and
 //! [`Control`].
 
-use crate::{Control, Device, DeviceInfo, Sensor};
+use crate::{Control, Device, DeviceInfo, Pixels, Rgbw, Sensor};
 use embedded_hal::delay::DelayNs;
 use lemnos_hal::{ErrorKind, HalError};
 
@@ -34,6 +34,15 @@ pub trait DynControl: DynDevice {
 
 /// A device that is both a sensor and a control.
 pub trait DynSensorControl: DynSensor + DynControl {}
+
+/// The object-safe form of [`Pixels`].
+pub trait DynPixels: DynDevice {
+    fn pixel_count(&self) -> usize;
+    fn show(&mut self, pixels: &[Rgbw]) -> Result<(), ErrorKind>;
+}
+
+/// A light: shows frames and has controls (brightness, colour).
+pub trait DynLight: DynControl + DynPixels {}
 
 impl<T: Device + ?Sized> DynDevice for T {
     fn info(&self) -> &'static DeviceInfo {
@@ -63,6 +72,18 @@ impl<T: Control + ?Sized> DynControl for T {
 
 impl<T: Sensor + Control + ?Sized> DynSensorControl for T {}
 
+impl<T: Pixels + ?Sized> DynPixels for T {
+    fn pixel_count(&self) -> usize {
+        Pixels::pixel_count(self)
+    }
+
+    fn show(&mut self, pixels: &[Rgbw]) -> Result<(), ErrorKind> {
+        Pixels::show(self, pixels).map_err(|error| error.kind())
+    }
+}
+
+impl<T: Control + Pixels + ?Sized> DynLight for T {}
+
 macro_rules! erased_ops {
     () => {
         /// The device's description.
@@ -71,6 +92,7 @@ macro_rules! erased_ops {
                 Self::Sensor(d) => d.info(),
                 Self::Control(d) => d.info(),
                 Self::Both(d) => DynDevice::info(&**d),
+                Self::Light(d) => DynDevice::info(&**d),
             }
         }
 
@@ -80,6 +102,7 @@ macro_rules! erased_ops {
                 Self::Sensor(d) => d.init(delay),
                 Self::Control(d) => d.init(delay),
                 Self::Both(d) => DynDevice::init(&mut **d, delay),
+                Self::Light(d) => DynDevice::init(&mut **d, delay),
             }
         }
 
@@ -88,7 +111,7 @@ macro_rules! erased_ops {
             match self {
                 Self::Sensor(d) => d.read(out),
                 Self::Both(d) => DynSensor::read(&mut **d, out),
-                Self::Control(_) => Err(ErrorKind::Unsupported),
+                Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
             }
         }
 
@@ -97,6 +120,7 @@ macro_rules! erased_ops {
             match self {
                 Self::Control(d) => d.set(index, value),
                 Self::Both(d) => DynControl::set(&mut **d, index, value),
+                Self::Light(d) => DynControl::set(&mut **d, index, value),
                 Self::Sensor(_) => Err(ErrorKind::Unsupported),
             }
         }
@@ -106,18 +130,40 @@ macro_rules! erased_ops {
             match self {
                 Self::Control(d) => d.get(index),
                 Self::Both(d) => DynControl::get(&mut **d, index),
+                Self::Light(d) => DynControl::get(&mut **d, index),
                 Self::Sensor(_) => Err(ErrorKind::Unsupported),
+            }
+        }
+
+        /// Shows a frame on a light; `Unsupported` for other devices.
+        pub fn show(&mut self, pixels: &[Rgbw]) -> Result<(), ErrorKind> {
+            match self {
+                Self::Light(d) => DynPixels::show(&mut **d, pixels),
+                _ => Err(ErrorKind::Unsupported),
+            }
+        }
+
+        /// How many LEDs a light has (0 for other devices).
+        pub fn pixel_count(&self) -> usize {
+            match self {
+                Self::Light(d) => DynPixels::pixel_count(&**d),
+                _ => 0,
             }
         }
 
         /// Whether the device has channels to read.
         pub fn is_sensor(&self) -> bool {
-            !matches!(self, Self::Control(_))
+            matches!(self, Self::Sensor(_) | Self::Both(_))
         }
 
         /// Whether the device accepts controls.
         pub fn is_control(&self) -> bool {
             !matches!(self, Self::Sensor(_))
+        }
+
+        /// Whether the device shows frames.
+        pub fn is_light(&self) -> bool {
+            matches!(self, Self::Light(_))
         }
     };
 }
@@ -127,6 +173,7 @@ pub enum DeviceRef<'a> {
     Sensor(&'a mut dyn DynSensor),
     Control(&'a mut dyn DynControl),
     Both(&'a mut dyn DynSensorControl),
+    Light(&'a mut dyn DynLight),
 }
 
 impl<'a> DeviceRef<'a> {
@@ -140,6 +187,10 @@ impl<'a> DeviceRef<'a> {
 
     pub fn both(device: &'a mut (impl Sensor + Control)) -> Self {
         Self::Both(device)
+    }
+
+    pub fn light(device: &'a mut (impl Control + Pixels)) -> Self {
+        Self::Light(device)
     }
 
     erased_ops!();
@@ -164,6 +215,7 @@ mod boxed {
         Sensor(Box<dyn DynSensor + Send>),
         Control(Box<dyn DynControl + Send>),
         Both(Box<dyn DynSensorControl + Send>),
+        Light(Box<dyn DynLight + Send>),
     }
 
     impl BoxedDevice {
@@ -179,12 +231,17 @@ mod boxed {
             Self::Both(Box::new(device))
         }
 
+        pub fn light(device: impl Control + Pixels + Send + 'static) -> Self {
+            Self::Light(Box::new(device))
+        }
+
         /// Borrows it as a [`DeviceRef`].
         pub fn as_ref(&mut self) -> DeviceRef<'_> {
             match self {
                 Self::Sensor(d) => DeviceRef::Sensor(&mut **d),
                 Self::Control(d) => DeviceRef::Control(&mut **d),
                 Self::Both(d) => DeviceRef::Both(&mut **d),
+                Self::Light(d) => DeviceRef::Light(&mut **d),
             }
         }
 

@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-drivers-ws2812"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std frame model for WS2812/SK6812 addressable LED strips: RGB and RGBW wire formats, index offset, brightness, and encoders for the Raspberry Pi RP1 PIO driver and for SPI"
+documentation = "https://docs.rs/lemnos-drivers-ws2812"
+readme = "README.md"
+keywords = ["ws2812", "sk6812", "neopixel", "led", "no-std"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-device.workspace = true

@@ -29,6 +29,7 @@ extern crate alloc;
 pub mod asynch;
 pub mod erased;
 pub mod fixed;
+pub mod gpio;
 pub mod kernel;
 mod model;
 mod traits;
@@ -38,11 +39,13 @@ mod tests;
 
 #[cfg(feature = "alloc")]
 pub use erased::BoxedDevice;
-pub use erased::{DeviceRef, DynControl, DynDevice, DynSensor, DynSensorControl};
+pub use erased::{
+    DeviceRef, DynControl, DynDevice, DynLight, DynPixels, DynSensor, DynSensorControl,
+};
 pub use model::{
     Axis, Channel, ControlInfo, DeviceClass, DeviceInfo, DeviceStatus, NO_VALUE, Quantity, Unit,
 };
-pub use traits::{Control, Device, DeviceError, Sensor, check_buffer, check_control};
+pub use traits::{Control, Device, DeviceError, Pixels, Rgbw, Sensor, check_buffer, check_control};
 
 /// The largest channel count of any device in this workspace; a buffer of
 /// this many `i32`s fits every built-in driver's reading.

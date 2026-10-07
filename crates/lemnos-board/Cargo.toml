@@ -18,7 +18,7 @@ workspace = true
 [features]
 default = []
 # `LinuxBuses`: buses from /dev/i2c-N through `lemnos_linux::hal`.
-linux = ["dep:lemnos-linux"]
+linux = ["dep:lemnos-linux", "lemnos-linux/gpio-cdev"]
 
 [dependencies]
 embedded-hal.workspace = true
@@ -29,6 +29,8 @@ lemnos-drivers-bmm150 = { workspace = true, default-features = false }
 lemnos-drivers-ina2xx = { workspace = true, default-features = false }
 lemnos-drivers-vcm.workspace = true
 lemnos-drivers-linux.workspace = true
+lemnos-drivers-ws2812.workspace = true
+lemnos-light.workspace = true
 lemnos-linux = { workspace = true, optional = true, features = ["i2c"] }
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json = { workspace = true, features = ["std"] }

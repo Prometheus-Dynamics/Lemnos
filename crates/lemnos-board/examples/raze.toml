@@ -40,9 +40,23 @@ driver = "hwmon-fan"
 match = { name = "pwm-fan" }
 poll_ms = 1000
 writers = ["lemnosd.fan", "helios"]
+config = { restore_mode = 2 }
 
 [[devices]]
 id = "cpu-thermal"
 driver = "thermal-zone"
 match = { type = "cpu-thermal" }
 poll_ms = 1000
+
+# SK6812 ring on GPIO 13 (the ws2812-pio overlay), 16 LEDs, logical LED 0 at
+# physical LED 5. Atlas's manifest says RGBW: check `wire` on hardware.
+[[devices]]
+id = "status-ring"
+driver = "ws2812"
+path = "/dev/leds0"
+config = { count = 16, wire = "rgb", offset = 5, direction = "cw", gpio = 13, fade_ms = 250, easing = "ease-in-out", status_effect = "breathe" }
+
+[[devices]]
+id = "usb-a-power"
+driver = "gpio-output"
+config = { chip = "pinctrl-rp1", line = 20, initial = true }

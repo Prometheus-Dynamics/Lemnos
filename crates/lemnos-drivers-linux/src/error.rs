@@ -21,7 +21,7 @@ impl SysfsError {
         }
     }
 
-    pub(crate) fn io(path: &Path, action: &str, error: &io::Error) -> Self {
+    pub fn io(path: &Path, action: &str, error: &io::Error) -> Self {
         Self::new(
             ErrorKind::from_io(error.kind()),
             path,

@@ -21,7 +21,10 @@ entries=(
   "lemnos linux builtin-drivers|lemnos|linux,builtin-drivers"
   "lemnos linux gpio hotplug|lemnos|linux-gpio,linux-hotplug"
   "lemnos linux lite|lemnos|$lite"
+  "lemnos board mock|lemnos|board,mock,builtin-drivers"
+  "lemnos board linux|lemnos|board,linux,builtin-drivers"
   "lemnos-core serde|lemnos-core|serde"
+  "lemnos-board linux|lemnos-board|linux"
 )
 
 filter="${1:-}"
