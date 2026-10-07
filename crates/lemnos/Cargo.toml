@@ -18,8 +18,10 @@ workspace = true
 
 [features]
 default = []
-full = ["builtin-drivers", "linux", "macros", "mock", "parallel-discovery"]
+full = ["board", "builtin-drivers", "linux", "macros", "mock", "parallel-discovery"]
 builtin-drivers = [
+    "dep:lemnos-device",
+    "dep:lemnos-drivers-linux",
     "dep:lemnos-drivers-gpio",
     "dep:lemnos-drivers-i2c",
     "dep:lemnos-drivers-pwm",
@@ -50,6 +52,9 @@ linux-hotplug = ["linux-backend", "lemnos-linux/hotplug"]
 linux-gpio-cdev = ["linux-gpio", "lemnos-linux/gpio-cdev"]
 linux-gpio-sysfs = ["linux-gpio", "lemnos-linux/gpio-sysfs"]
 macros = ["dep:lemnos-macros"]
+# Board definitions (`lemnos::board`): devices from a TOML/JSON file, bound
+# through the generic device-model adapter.
+board = ["dep:lemnos-board", "dep:lemnos-drivers-linux", "dep:lemnos-device"]
 # Probe several interfaces on threads during a refresh (part of `linux`).
 parallel-discovery = ["lemnos-discovery/parallel"]
 mock = ["dep:lemnos-mock"]
@@ -57,7 +62,10 @@ tracing = ["lemnos-runtime/tracing", "lemnos-linux?/tracing"]
 tokio = ["lemnos-runtime/tokio", "lemnos-linux?/tokio", "dep:tokio"]
 
 [dependencies]
+lemnos-board = { workspace = true, optional = true }
 lemnos-bus.workspace = true
+lemnos-device = { workspace = true, optional = true, features = ["alloc"] }
+lemnos-drivers-linux = { workspace = true, optional = true }
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
 lemnos-driver-manifest = { workspace = true, features = ["std"] }
@@ -78,6 +86,7 @@ tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
 [dev-dependencies]
 embedded-hal.workspace = true
 lemnos-drivers-bmi088.workspace = true
+lemnos-drivers-ina2xx.workspace = true
 lemnos-mock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 

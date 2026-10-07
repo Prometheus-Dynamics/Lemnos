@@ -30,6 +30,25 @@ impl LemnosBuilder {
         Ok(self)
     }
 
+    /// Registers a board's drivers and binds its devices on every refresh.
+    /// Refreshes still need the board's probe
+    /// ([`BoardSetup::probe`](crate::board::BoardSetup::probe)), passed to
+    /// `refresh` or added to a `LinuxBackend` with `with_probe`.
+    #[cfg(feature = "board")]
+    pub fn with_board(mut self, setup: &crate::board::BoardSetup) -> RuntimeResult<Self> {
+        for driver in setup.drivers() {
+            self.runtime.register_driver(driver)?;
+        }
+        let policy = self
+            .runtime
+            .bind_policy()
+            .clone()
+            .with_driver(crate::board::I2C_DRIVER)
+            .with_driver(crate::board::PLATFORM_DRIVER);
+        self.runtime.set_bind_policy(policy);
+        Ok(self)
+    }
+
     #[cfg(feature = "builtin-drivers")]
     pub fn with_builtin_drivers(mut self) -> RuntimeResult<Self> {
         BuiltInDriverBundle::register_into(&mut self.runtime)?;

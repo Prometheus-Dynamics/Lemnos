@@ -12,6 +12,8 @@ The repository is split into small crates so applications, custom drivers, Linux
 - `crates/lemnos-hal`: `no_std` hardware vocabulary: embedded-hal 1.0 (re-exported), register maps over I2C/SPI, regulators, clocks, `ErrorKind`, mocks
 - `crates/lemnos-device`: `no_std` compact device model: device classes, quantities and units, fixed-point channels, controls, `Sensor`/`Control` traits
 - `crates/lemnos-lite`: `no_std` static device table with status and polling, for firmware and small Linux images
+- `crates/lemnos-board`: board definitions (TOML/JSON) and the factories that build device-model drivers from them
+- `crates/lemnos-drivers-linux`: device-model drivers over Linux kernel interfaces (hwmon fans, thermal zones, a generic IIO/hwmon binding)
 - `crates/lemnos-core`: shared types, requests, state, and descriptors (`no_std` + `alloc`)
 - `crates/lemnos-bus`: typed bus/session traits for hardware access
 - `crates/lemnos-discovery`: discovery probes, inventory snapshots, and diffing
@@ -45,6 +47,7 @@ Typical feature sets:
 - `macros`: re-exports `lemnos-macros`
 - `mock`: enables mock hardware support for tests and examples
 - `tokio`: enables the async runtime surface
+- `board`: board definitions (`lemnos::board`): devices from a TOML/JSON file, bound through the generic device-model adapter
 - `full`: enables the common bundled experience
 
 Example:
@@ -109,6 +112,8 @@ Targeted helper scripts live under `testing/`.
 - [docs/development.md](docs/development.md): repo layout, commands, and validation conventions
 - [docs/architecture-crate-map.md](docs/architecture-crate-map.md): crate responsibilities and relationships
 - [docs/testing.md](docs/testing.md): test surfaces, scripts, and example validation flows
+- [docs/compact-model.md](docs/compact-model.md): the compact device model, the lite table and the generic runtime adapter
+- [docs/board-definition.md](docs/board-definition.md): the board-definition format, built-in drivers, and HeliOS adoption
 - [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the Styx migration
 - [CHANGELOG.md](CHANGELOG.md): release history and notable workspace changes
 - [testing/README.md](testing/README.md): local and CI validation entry points

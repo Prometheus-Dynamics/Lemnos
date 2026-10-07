@@ -146,7 +146,8 @@ where
             | DriverError::HostIo { .. }
             | DriverError::InvariantViolation { .. }
             | DriverError::UnsupportedAction { .. }
-            | DriverError::NotImplemented { .. } => ConformanceError::UnexpectedRejection {
+            | DriverError::NotImplemented { .. }
+            | DriverError::Device { .. } => ConformanceError::UnexpectedRejection {
                 driver_id: self.driver.id().to_string(),
                 device_id: device.id.as_str().to_string(),
                 reason: error.to_string(),

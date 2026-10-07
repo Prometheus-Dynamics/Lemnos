@@ -35,6 +35,10 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 - `lemnos-drivers-vcm` is a `no_std` device driver crate (camera focus VCMs) over embedded-hal; future device drivers follow it.
 - `lemnos-drivers-bmi088` (IMU), `lemnos-drivers-bmm150` (magnetometer) and `lemnos-drivers-ina2xx` (power monitors) are `no_std` sensor drivers in the same style. All four implement the `lemnos-device` model next to their own APIs.
 
+- `lemnos-drivers-linux` holds device-model drivers over Linux kernel interfaces: `HwmonFan`, `ThermalZone`, and `KernelDevice`, the generic IIO/hwmon binding (std, file IO only).
+- `lemnos-board` parses board definitions and builds device-model drivers from them through a `DriverRegistry`; hosts (the facade's `board` feature, `lemnosd`, small programs) provide buses through `Buses`.
+- `lemnos_driver_sdk::l1` is the generic adapter from any device-model device to a runtime `BoundDevice`.
+
 ## Authoring And Test Support
 
 - `lemnos-macros` reduces boilerplate for configured-device and driver definitions.

@@ -1,0 +1,38 @@
+[package]
+name = "lemnos-board"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Lemnos board definitions: a versioned TOML/JSON description of a board's devices, and the factories that build lemnos-device drivers from it for any host"
+documentation = "https://docs.rs/lemnos-board"
+readme = "README.md"
+keywords = ["hardware", "board", "sensor", "configuration", "lemnos"]
+categories = ["hardware-support", "config"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# `LinuxBuses`: buses from /dev/i2c-N through `lemnos_linux::hal`.
+linux = ["dep:lemnos-linux"]
+
+[dependencies]
+embedded-hal.workspace = true
+lemnos-device = { workspace = true, features = ["alloc"] }
+lemnos-hal = { workspace = true, features = ["std"] }
+lemnos-drivers-bmi088 = { workspace = true, default-features = false }
+lemnos-drivers-bmm150 = { workspace = true, default-features = false }
+lemnos-drivers-ina2xx = { workspace = true, default-features = false }
+lemnos-drivers-vcm.workspace = true
+lemnos-drivers-linux.workspace = true
+lemnos-linux = { workspace = true, optional = true, features = ["i2c"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+toml = { workspace = true }
+
+[dev-dependencies]
+lemnos-hal = { workspace = true, features = ["mock", "std"] }

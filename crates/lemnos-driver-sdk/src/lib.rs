@@ -6,6 +6,7 @@ mod device;
 mod error;
 pub mod gpio;
 pub mod i2c;
+pub mod l1;
 mod linux;
 mod matching;
 mod operation;
@@ -31,6 +32,7 @@ pub use device::{
 pub use error::{DriverError, DriverResult};
 pub use gpio::GpioDeviceIo;
 pub use i2c::{I2cControllerIo, I2cControllerTarget, I2cDeviceIo};
+pub use l1::{L1BoundDevice, L1Driver};
 pub use lemnos_bus::{I2cControllerSession, I2cSession, SessionAccess};
 pub use linux::LinuxClassDeviceIo;
 pub use matching::{DriverMatch, DriverMatchLevel};

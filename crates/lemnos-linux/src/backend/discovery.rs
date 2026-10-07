@@ -9,7 +9,7 @@ use crate::SpiDiscoveryProbe;
 use crate::UartDiscoveryProbe;
 #[cfg(feature = "usb")]
 use crate::UsbDiscoveryProbe;
-use crate::{GpioDiscoveryProbe, LedDiscoveryProbe};
+use crate::{GpioDiscoveryProbe, LedDiscoveryProbe, ThermalDiscoveryProbe};
 #[cfg(feature = "pwm")]
 use crate::{HwmonDiscoveryProbe, PwmDiscoveryProbe};
 use lemnos_discovery::{
@@ -32,6 +32,8 @@ impl LinuxBackend {
 
     linux_probe_constructor!(led_probe -> LedDiscoveryProbe);
 
+    linux_probe_constructor!(thermal_probe -> ThermalDiscoveryProbe);
+
     linux_probe_constructor!(#[cfg(feature = "pwm")] pwm_probe -> PwmDiscoveryProbe);
 
     linux_probe_constructor!(#[cfg(feature = "pwm")] hwmon_probe -> HwmonDiscoveryProbe);
@@ -45,6 +47,7 @@ impl LinuxBackend {
     pub fn with_probes<T>(&self, f: impl FnOnce(Vec<&dyn DiscoveryProbe>) -> T) -> T {
         let gpio = self.gpio_probe();
         let led = self.led_probe();
+        let thermal = self.thermal_probe();
         #[cfg(feature = "pwm")]
         let pwm = self.pwm_probe();
         #[cfg(feature = "pwm")]
@@ -58,22 +61,11 @@ impl LinuxBackend {
         #[cfg(feature = "usb")]
         let usb = self.usb_probe();
 
-        #[cfg(any(
-            feature = "pwm",
-            feature = "i2c",
-            feature = "spi",
-            feature = "uart",
-            feature = "usb"
-        ))]
-        let mut probes = vec![&gpio as &dyn DiscoveryProbe, &led as &dyn DiscoveryProbe];
-        #[cfg(not(any(
-            feature = "pwm",
-            feature = "i2c",
-            feature = "spi",
-            feature = "uart",
-            feature = "usb"
-        )))]
-        let probes = vec![&gpio as &dyn DiscoveryProbe, &led as &dyn DiscoveryProbe];
+        let mut probes = vec![
+            &gpio as &dyn DiscoveryProbe,
+            &led as &dyn DiscoveryProbe,
+            &thermal as &dyn DiscoveryProbe,
+        ];
         #[cfg(feature = "pwm")]
         {
             probes.push(&pwm as &dyn DiscoveryProbe);
@@ -87,6 +79,7 @@ impl LinuxBackend {
         probes.push(&uart as &dyn DiscoveryProbe);
         #[cfg(feature = "usb")]
         probes.push(&usb as &dyn DiscoveryProbe);
+        probes.extend(self.extra_probes());
 
         f(probes)
     }

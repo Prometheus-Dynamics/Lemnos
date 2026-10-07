@@ -132,6 +132,8 @@ fn build_hwmon_descriptor(
     .control_surface(DeviceControlSurface::LinuxClass {
         root: path.display().to_string(),
     })
+    .label("device.class", "fan")
+    .property("device.class", "fan")
     .property("linux.subsystem", "hwmon")
     .property("linux.class_path", path.display().to_string())
     .property("fan.hwmon_name", hwmon_name.to_string())

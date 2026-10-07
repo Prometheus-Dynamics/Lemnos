@@ -1,0 +1,48 @@
+# The Raze's sensors, fan and thermal zone (Atlas generates this file from
+# the board's device manifest).
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "raze"
+name = "Raze"
+revision = "2027"
+
+[[devices]]
+id = "imu"
+label = "IMU"
+driver = "bmi088"
+bus = "i2c-1"
+address = 0x18
+poll_ms = 10
+config = { gyro_address = 0x68, accel_range = "6g", accel_rate = "400hz", gyro_range = "2000dps", gyro_rate = "400hz-47" }
+
+[[devices]]
+id = "magnetometer"
+driver = "bmm150"
+bus = "i2c-1"
+address = 0x10
+poll_ms = 100
+config = { preset = "regular", data_rate = "10hz" }
+
+[[devices]]
+id = "power"
+label = "Board power"
+driver = "ina238"
+bus = "i2c-1"
+address = 0x40
+poll_ms = 100
+config = { shunt_micro_ohms = 10000, max_current_micro_amps = 5000000 }
+
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+match = { name = "pwm-fan" }
+poll_ms = 1000
+writers = ["lemnosd.fan", "helios"]
+
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+match = { type = "cpu-thermal" }
+poll_ms = 1000

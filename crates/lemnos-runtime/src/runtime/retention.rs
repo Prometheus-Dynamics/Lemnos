@@ -182,12 +182,5 @@ fn string_id_bytes(id: &DeviceId) -> usize {
 }
 
 fn interface_bytes(interface: &InterfaceKind) -> usize {
-    match interface {
-        InterfaceKind::Gpio => "gpio".len(),
-        InterfaceKind::Pwm => "pwm".len(),
-        InterfaceKind::I2c => "i2c".len(),
-        InterfaceKind::Spi => "spi".len(),
-        InterfaceKind::Uart => "uart".len(),
-        InterfaceKind::Usb => "usb".len(),
-    }
+    interface.as_str().len()
 }

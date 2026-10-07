@@ -13,16 +13,20 @@ pub enum InterfaceKind {
     Spi,
     Uart,
     Usb,
+    /// No bus session: an on-chip or kernel-managed device reached through a
+    /// class interface (a thermal zone, an IIO or hwmon sensor).
+    Platform,
 }
 
 impl InterfaceKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Gpio,
         Self::Pwm,
         Self::I2c,
         Self::Spi,
         Self::Uart,
         Self::Usb,
+        Self::Platform,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -33,6 +37,7 @@ impl InterfaceKind {
             Self::Spi => "spi",
             Self::Uart => "uart",
             Self::Usb => "usb",
+            Self::Platform => "platform",
         }
     }
 }

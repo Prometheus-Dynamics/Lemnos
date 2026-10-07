@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Prometheus-Dynamics/Lemnos/docs/schemas/lemnos-board.schema.json",
+  "title": "Lemnos board definition",
+  "description": "A board's devices, each built from a generic Lemnos driver. TOML or JSON; see docs/board-definition.md. Driver-specific checks (config keys, values) are done by lemnos-board's DriverRegistry::validate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "schema_version", "board"],
+  "properties": {
+    "format": { "const": "lemnos.board" },
+    "schema_version": { "type": "integer", "minimum": 1, "maximum": 1 },
+    "board": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string" },
+        "revision": { "type": "string" },
+        "generated_by": { "type": "string" }
+      }
+    },
+    "devices": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/device" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "driver"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "driver": {
+          "type": "string",
+          "description": "Built-in: bmi088, bmm150, ina226, ina238, ina260, vcm, hwmon-fan, thermal-zone (hosts may register more)."
+        },
+        "label": { "type": "string" },
+        "backend": { "enum": ["auto", "userspace", "kernel"], "default": "auto" },
+        "bus": { "type": "string", "pattern": "^(i2c-[0-9]+|spi-[0-9]+\\.[0-9]+)$" },
+        "address": { "type": "integer", "minimum": 0, "maximum": 127 },
+        "path": { "type": "string" },
+        "match": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "poll_ms": { "type": "integer", "minimum": 1 },
+        "writers": { "type": "array", "items": { "type": "string" } },
+        "config": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/value" }
+        }
+      }
+    },
+    "value": {
+      "anyOf": [
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/$defs/value" } }
+      ]
+    }
+  }
+}

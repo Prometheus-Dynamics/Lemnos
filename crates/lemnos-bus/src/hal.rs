@@ -5,6 +5,8 @@
 //! backend (Linux, mock, a remote transport):
 //!
 //! - [`HalI2cBus`]: an [`I2cControllerSession`] as an embedded-hal [`I2c`] bus.
+//! - [`OwnedI2cBus`]: the same, owning a boxed session, so a driver can keep
+//!   its bus between operations.
 //! - [`HalI2cDevice`]: an [`I2cSession`] (one target) as an [`I2c`] bus that
 //!   only talks to that target's address.
 //! - [`HalSpiDevice`]: an [`SpiSession`] as a [`SpiDevice`]; a transaction is
@@ -96,6 +98,46 @@ impl<S: I2cControllerSession + ?Sized> I2c for HalI2cBus<'_, S> {
         let runs = merge_runs(operations);
         let results = self.session.transaction(address.into(), &runs)?;
         scatter_reads(operations, &results)
+    }
+}
+
+/// An owned [`I2cControllerSession`] as an embedded-hal [`I2c`] bus: a
+/// driver built on it keeps its bus, which is how the runtime holds a
+/// `lemnos-device` driver between operations.
+pub struct OwnedI2cBus {
+    session: Box<dyn I2cControllerSession>,
+}
+
+impl OwnedI2cBus {
+    pub fn new(session: Box<dyn I2cControllerSession>) -> Self {
+        Self { session }
+    }
+
+    /// Gives the session back.
+    pub fn into_session(self) -> Box<dyn I2cControllerSession> {
+        self.session
+    }
+}
+
+impl I2cErrorType for OwnedI2cBus {
+    type Error = BusError;
+}
+
+impl I2c for OwnedI2cBus {
+    fn read(&mut self, address: u8, read: &mut [u8]) -> BusResult<()> {
+        HalI2cBus::new(&mut *self.session).read(address, read)
+    }
+
+    fn write(&mut self, address: u8, write: &[u8]) -> BusResult<()> {
+        HalI2cBus::new(&mut *self.session).write(address, write)
+    }
+
+    fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> BusResult<()> {
+        HalI2cBus::new(&mut *self.session).write_read(address, write, read)
+    }
+
+    fn transaction(&mut self, address: u8, operations: &mut [I2cOp<'_>]) -> BusResult<()> {
+        HalI2cBus::new(&mut *self.session).transaction(address, operations)
     }
 }
 

@@ -5,6 +5,7 @@ members = [
     "crates/lemnos-hal",
     "crates/lemnos-device",
     "crates/lemnos-lite",
+    "crates/lemnos-board",
     "crates/lemnos-bus",
     "crates/lemnos-discovery",
     "crates/lemnos-driver-sdk",
@@ -25,6 +26,7 @@ members = [
     "crates/lemnos-drivers-ina2xx",
     "crates/lemnos-drivers-bmm150",
     "crates/lemnos-drivers-bmi088",
+    "crates/lemnos-drivers-linux",
     "crates/lemnos-mock",
 ]
 resolver = "3"
@@ -44,6 +46,7 @@ lemnos-core = { version = "2.0.0", path = "crates/lemnos-core", default-features
 lemnos-hal = { version = "2.0.0", path = "crates/lemnos-hal", default-features = false }
 lemnos-device = { version = "2.0.0", path = "crates/lemnos-device", default-features = false }
 lemnos-lite = { version = "2.0.0", path = "crates/lemnos-lite" }
+lemnos-board = { version = "2.0.0", path = "crates/lemnos-board" }
 lemnos-discovery = { version = "2.0.0", path = "crates/lemnos-discovery", default-features = false }
 lemnos-driver-manifest = { version = "2.0.0", path = "crates/lemnos-driver-manifest", default-features = false }
 lemnos-driver-sdk = { version = "2.0.0", path = "crates/lemnos-driver-sdk" }
@@ -57,6 +60,7 @@ lemnos-drivers-vcm = { version = "2.0.0", path = "crates/lemnos-drivers-vcm" }
 lemnos-drivers-ina2xx = { version = "2.0.0", path = "crates/lemnos-drivers-ina2xx" }
 lemnos-drivers-bmm150 = { version = "2.0.0", path = "crates/lemnos-drivers-bmm150" }
 lemnos-drivers-bmi088 = { version = "2.0.0", path = "crates/lemnos-drivers-bmi088" }
+lemnos-drivers-linux = { version = "2.0.0", path = "crates/lemnos-drivers-linux" }
 lemnos-linux = { version = "2.0.0", path = "crates/lemnos-linux", default-features = false }
 lemnos-linux-sys = { version = "2.0.0", path = "crates/lemnos-linux-sys" }
 lemnos-macros = { version = "2.0.0", path = "crates/lemnos-macros" }
@@ -76,6 +80,7 @@ serialport = { version = "4.10.1", default-features = false }
 syn = { version = "3.0.6", features = ["full"] }
 thiserror = { version = "2.0.21", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+toml = { version = "1.1.6", default-features = false, features = ["parse", "serde", "std"] }
 trybuild = "1.0.121"
 tokio = { version = "1.53.2", default-features = false }
 

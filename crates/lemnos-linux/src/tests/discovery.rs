@@ -1,13 +1,60 @@
 use super::support::TestRoot;
 use crate::{
     GpioDiscoveryProbe, HwmonDiscoveryProbe, I2cDiscoveryProbe, LedDiscoveryProbe, LinuxBackend,
-    PwmDiscoveryProbe, SpiDiscoveryProbe, UartDiscoveryProbe, UsbDiscoveryProbe,
-    metadata::descriptor_devnode,
+    PwmDiscoveryProbe, SpiDiscoveryProbe, ThermalDiscoveryProbe, UartDiscoveryProbe,
+    UsbDiscoveryProbe, metadata::descriptor_devnode,
 };
 use lemnos_core::{
     DeviceAddress, DeviceControlSurface, DeviceKind, DeviceRelation, InterfaceKind, Value,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryProbe};
+
+#[test]
+fn thermal_probe_discovers_zones_as_platform_devices() {
+    let root = TestRoot::new();
+    root.write("sys/class/thermal/thermal_zone0/type", "cpu-thermal\n");
+    root.write("sys/class/thermal/thermal_zone0/temp", "48250\n");
+    root.write("sys/class/thermal/cooling_device0/type", "pwm-fan\n");
+
+    let discovery = ThermalDiscoveryProbe::new(root.paths())
+        .discover(&DiscoveryContext::new())
+        .expect("discover thermal zones");
+    assert_eq!(discovery.devices.len(), 1);
+    let zone = &discovery.devices[0];
+    assert_eq!(zone.id.as_str(), "linux.thermal.thermal_zone0");
+    assert_eq!(zone.kind, DeviceKind::Unspecified(InterfaceKind::Platform));
+    assert_eq!(zone.display_name.as_deref(), Some("cpu-thermal"));
+    assert_eq!(
+        zone.properties.get("linux.subsystem"),
+        Some(&Value::from("thermal"))
+    );
+    assert_eq!(
+        zone.labels.get("device.class").map(String::as_str),
+        Some("temperature")
+    );
+    assert_eq!(zone.properties.get("temp"), None);
+
+    let backend = LinuxBackend::with_paths(root.paths());
+    let names =
+        backend.with_probes(|probes| probes.iter().map(|probe| probe.name()).collect::<Vec<_>>());
+    assert!(names.contains(&"linux-thermal"));
+}
+
+#[test]
+fn backend_runs_added_probes() {
+    let root = TestRoot::new();
+    let configured = std::sync::Arc::new(ThermalDiscoveryProbe::new(root.paths()));
+    let backend = LinuxBackend::with_paths(root.paths()).with_probe(configured);
+    let count = backend.with_probes(|probes| {
+        probes
+            .iter()
+            .filter(|probe| probe.name() == "linux-thermal")
+            .count()
+    });
+    assert_eq!(count, 2);
+    assert_eq!(backend.clone(), backend);
+    assert_ne!(backend, LinuxBackend::with_paths(root.paths()));
+}
 
 #[test]
 fn hwmon_probe_discovers_linux_pwm_fan_device() {

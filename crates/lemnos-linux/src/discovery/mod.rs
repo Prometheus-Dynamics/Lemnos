@@ -8,6 +8,7 @@ mod led;
 mod pwm;
 #[cfg(feature = "spi")]
 mod spi;
+mod thermal;
 #[cfg(feature = "uart")]
 mod uart;
 #[cfg(feature = "usb")]
@@ -23,6 +24,7 @@ pub use led::LedDiscoveryProbe;
 pub use pwm::PwmDiscoveryProbe;
 #[cfg(feature = "spi")]
 pub use spi::SpiDiscoveryProbe;
+pub use thermal::ThermalDiscoveryProbe;
 #[cfg(feature = "uart")]
 pub use uart::UartDiscoveryProbe;
 #[cfg(feature = "usb")]

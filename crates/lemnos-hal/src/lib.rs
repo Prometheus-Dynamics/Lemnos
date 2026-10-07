@@ -6,7 +6,9 @@
 //!   on Linux (`lemnos-linux`) and on microcontrollers alike.
 //! - [`register`] adds register maps over I2C and SPI (blocking and async).
 //! - [`power`] adds regulators and clock outputs.
-//! - [`ErrorKind`] and [`HalError`] classify failures portably.
+//! - [`ErrorKind`] and [`HalError`] classify failures portably; [`erased`]
+//!   reduces a bus's errors to `ErrorKind` so buses of different types fit
+//!   one `dyn` bus.
 //! - `mock` (feature `mock`) provides in-memory doubles for tests.
 //!
 //! [embedded-hal]: https://docs.rs/embedded-hal
@@ -15,6 +17,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod erased;
 mod error;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;

@@ -122,14 +122,18 @@ name = "lemnos"
 version = "2.0.0"
 dependencies = [
  "embedded-hal",
+ "lemnos-board",
  "lemnos-bus",
  "lemnos-core",
+ "lemnos-device",
  "lemnos-discovery",
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
  "lemnos-drivers-bmi088",
  "lemnos-drivers-gpio",
  "lemnos-drivers-i2c",
+ "lemnos-drivers-ina2xx",
+ "lemnos-drivers-linux",
  "lemnos-drivers-pwm",
  "lemnos-drivers-spi",
  "lemnos-drivers-uart",
@@ -140,6 +144,24 @@ dependencies = [
  "lemnos-mock",
  "lemnos-runtime",
  "tokio",
+]
+
+[[package]]
+name = "lemnos-board"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "lemnos-device",
+ "lemnos-drivers-bmi088",
+ "lemnos-drivers-bmm150",
+ "lemnos-drivers-ina2xx",
+ "lemnos-drivers-linux",
+ "lemnos-drivers-vcm",
+ "lemnos-hal",
+ "lemnos-linux",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -196,9 +218,12 @@ dependencies = [
 name = "lemnos-driver-sdk"
 version = "2.0.0"
 dependencies = [
+ "embedded-hal",
  "lemnos-bus",
  "lemnos-core",
+ "lemnos-device",
  "lemnos-driver-manifest",
+ "lemnos-hal",
  "thiserror",
 ]
 
@@ -254,13 +279,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-linux"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "lemnos-device",
+ "lemnos-drivers-bmi088",
+ "lemnos-drivers-ina2xx",
+ "lemnos-hal",
+]
+
+[[package]]
 name = "lemnos-drivers-pwm"
 version = "2.0.0"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
+ "lemnos-device",
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
+ "lemnos-drivers-linux",
+ "lemnos-hal",
  "lemnos-mock",
 ]
 

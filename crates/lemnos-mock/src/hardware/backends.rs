@@ -18,6 +18,7 @@ impl BusBackend for MockHardware {
             InterfaceKind::Spi => state.spi_devices.contains_key(&device.id),
             InterfaceKind::Uart => state.uart_ports.contains_key(&device.id),
             InterfaceKind::Usb => state.usb_descriptor_owners.contains_key(&device.id),
+            InterfaceKind::Platform => false,
         }
     }
 }

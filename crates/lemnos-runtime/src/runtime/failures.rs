@@ -97,7 +97,8 @@ fn driver_id_from_driver_error(error: &DriverError) -> DriverId {
         | DriverError::HostIo { driver_id, .. }
         | DriverError::InvariantViolation { driver_id, .. }
         | DriverError::UnsupportedAction { driver_id, .. }
-        | DriverError::NotImplemented { driver_id, .. } => DriverId::from(driver_id),
+        | DriverError::NotImplemented { driver_id, .. }
+        | DriverError::Device { driver_id, .. } => DriverId::from(driver_id),
     }
 }
 

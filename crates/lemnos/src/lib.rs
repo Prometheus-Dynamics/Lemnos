@@ -2,13 +2,15 @@
 
 extern crate self as lemnos;
 
+#[cfg(feature = "board")]
+pub mod board;
 #[cfg(feature = "builtin-drivers")]
 mod builtin;
 mod facade;
 pub mod prelude;
 
 #[cfg(feature = "builtin-drivers")]
-pub use builtin::BuiltInDriverBundle;
+pub use builtin::{BuiltInDriverBundle, THERMAL_ZONE_DRIVER, thermal_zone_driver};
 #[cfg(feature = "tokio")]
 pub use facade::AsyncLemnos;
 pub use facade::{Lemnos, LemnosBuilder};
@@ -18,6 +20,8 @@ pub use lemnos_runtime::DriverId;
 
 pub use lemnos_bus as bus;
 pub use lemnos_core as core;
+#[cfg(any(feature = "board", feature = "builtin-drivers"))]
+pub use lemnos_device as device;
 pub use lemnos_discovery as discovery;
 pub use lemnos_hal as hal;
 #[cfg(feature = "linux-backend")]
@@ -64,6 +68,7 @@ pub mod driver {
 pub mod drivers {
     pub use lemnos_drivers_gpio as gpio;
     pub use lemnos_drivers_i2c as i2c;
+    pub use lemnos_drivers_linux as linux;
     pub use lemnos_drivers_pwm as pwm;
     pub use lemnos_drivers_spi as spi;
     pub use lemnos_drivers_uart as uart;

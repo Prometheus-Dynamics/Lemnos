@@ -12,8 +12,10 @@ for the user-facing summary of finished work.
       INA2xx and VCM drivers; decisions confirmed; size images `device-static`, `device`.
 - [x] Phase 2: `lemnos-lite` (static table, status, polling); firmware image `lite`,
       Linux images `sensors`/`sensors-lite`, example `linux_sensors`.
-- [ ] Phase 3: the generic L3 adapter; board definitions; hwmon fan and thermal zones as
-      L1 devices; HeliOS binds the Raze sensors from `sensors.toml`.
+- [x] Phase 3: the generic L3 adapter (`lemnos_driver_sdk::l1`); board definitions
+      (`lemnos-board`, facade `board`); hwmon fan and thermal zones as L1 devices; generic
+      IIO/hwmon binding; HeliOS can bind the Raze sensors from `sensors.toml`
+      ([docs/board-definition.md](docs/board-definition.md)).
 - [ ] Phase 4: `lemnosd` (see `docs/system-service.md`).
 - [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
       shared probe code).
@@ -54,8 +56,9 @@ for the user-facing summary of finished work.
       their own register code; switch them to the new crates. Needs a hardware
       run on the board. Note the validator also accepts the BMI055, which
       `lemnos-drivers-bmi088` does not support.
-- [ ] Runtime adapter drivers for the sensor crates (configured devices plus
-      `HalI2cBus`), so HeliOS can bind them from `sensors.toml`.
+- [x] Runtime adapter drivers for the sensor crates: one generic adapter
+      (`lemnos_driver_sdk::l1`) plus board definitions, so HeliOS binds them from
+      `sensors.toml`.
 - [ ] Slimmer runtime for small Linux targets (no fixed budget: as small as
       reasonably possible; `scripts/check-sizes.sh` tracks it). Linux lite
       facade consumer, stripped at `opt-level = "z"`: 640 KB -> 575 KB after
@@ -137,4 +140,5 @@ for the user-facing summary of finished work.
       the local mapping helpers.
 - [ ] Publish deltas from `RuntimeWatchedRefreshReport::refresh.diff`.
 - [ ] Add `lemnos-mock` tests for the discover/apply paths.
-- [ ] Parse `sensors.toml` once sensor drivers exist.
+- [ ] Parse `sensors.toml` as a board definition (`lemnos::board::BoardSetup`, feature
+      `board`); steps in [docs/board-definition.md](docs/board-definition.md).

@@ -25,7 +25,7 @@ pub use discovery::SpiDiscoveryProbe;
 pub use discovery::UartDiscoveryProbe;
 #[cfg(feature = "usb")]
 pub use discovery::UsbDiscoveryProbe;
-pub use discovery::{GpioDiscoveryProbe, LedDiscoveryProbe};
+pub use discovery::{GpioDiscoveryProbe, LedDiscoveryProbe, ThermalDiscoveryProbe};
 #[cfg(feature = "pwm")]
 pub use discovery::{HwmonDiscoveryProbe, PwmDiscoveryProbe};
 pub use paths::LinuxPaths;

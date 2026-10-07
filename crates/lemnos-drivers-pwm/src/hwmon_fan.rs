@@ -5,21 +5,27 @@
 //! PWM timing, so this driver models the fan itself rather than a PWM channel:
 //! a normalized duty ratio, a control mode, and an optional tachometer reading.
 //!
-//! The driver only touches files under the device's
+//! The fan itself is `lemnos_drivers_linux::HwmonFan`, the same device-model
+//! fan (`DeviceClass::Fan`: `speed`, `duty`, `pwm_mode`) that `lemnos-lite`
+//! and `lemnosd` host. This driver adds the runtime surface: the fan's
+//! device-model telemetry and `duty.set`/`pwm_mode.set` interactions, plus
+//! the original `fan.*` interactions and telemetry keys. It only touches
+//! files under the device's
 //! [`DeviceControlSurface::LinuxClass`](lemnos_core::DeviceControlSurface)
-//! root, so it depends on no Linux-specific crate and can be exercised against
-//! a fake sysfs tree.
+//! root, so it can be exercised against a fake sysfs tree.
 
 use lemnos_core::{
     CoreError, CustomInteractionResponse, DeviceDescriptor, DeviceKind, DeviceLifecycleState,
     DeviceStateSnapshot, InteractionId, InteractionRequest, InteractionResponse, InterfaceKind,
     OperationRecord, OperationStatus, Value, ValueMap,
 };
+use lemnos_device::{Control, DeviceRef, MAX_CHANNELS, NO_VALUE};
 use lemnos_driver_manifest::{DriverManifest, DriverPriority, MatchCondition, MatchRule};
 use lemnos_driver_sdk::{
     BoundDevice, CustomInteraction, Driver, DriverBindContext, DriverError, DriverMatch,
-    DriverResult, LinuxClassDeviceIo, interaction_name,
+    DriverResult, LinuxClassDeviceIo, interaction_name, l1,
 };
+use lemnos_drivers_linux::{FAN_INFO, HwmonFan};
 use std::borrow::Cow;
 
 pub const DRIVER_ID: &str = "lemnos.pwm.hwmon-fan";
@@ -177,20 +183,20 @@ impl Driver for HwmonFanDriver {
         _context: &DriverBindContext<'_>,
     ) -> DriverResult<Box<dyn BoundDevice>> {
         let io = LinuxClassDeviceIo::from_device(DRIVER_ID, device)?;
-        let interactions = INTERACTIONS
+        let bind_failed = |source: lemnos_core::CoreError| DriverError::BindFailed {
+            driver_id: DRIVER_ID.to_string(),
+            device_id: device.id.clone(),
+            reason: source.to_string(),
+        };
+        let mut interactions = INTERACTIONS
             .iter()
-            .map(|(id, summary)| {
-                CustomInteraction::new(*id, *summary).map_err(|source| DriverError::BindFailed {
-                    driver_id: DRIVER_ID.to_string(),
-                    device_id: device.id.clone(),
-                    reason: source.to_string(),
-                })
-            })
+            .map(|(id, summary)| CustomInteraction::new(*id, *summary).map_err(bind_failed))
             .collect::<DriverResult<Vec<_>>>()?;
+        interactions.extend(l1::interactions(&FAN_INFO).map_err(bind_failed)?);
 
         let bound = HwmonFanBoundDevice {
             device: device.clone(),
-            io,
+            fan: HwmonFan::new(io.root()),
             interactions,
         };
         bound.read_sample()?;
@@ -200,7 +206,7 @@ impl Driver for HwmonFanDriver {
 
 struct HwmonFanBoundDevice {
     device: DeviceDescriptor,
-    io: LinuxClassDeviceIo,
+    fan: HwmonFan,
     interactions: Vec<CustomInteraction>,
 }
 
@@ -235,11 +241,21 @@ impl FanSample {
 }
 
 impl HwmonFanBoundDevice {
+    fn fan_error(&self, action: &str, error: lemnos_drivers_linux::SysfsError) -> DriverError {
+        DriverError::Device {
+            driver_id: DRIVER_ID.to_string(),
+            device_id: self.device.id.clone(),
+            action: format!("{action} ({error})"),
+            kind: lemnos_hal::HalError::kind(&error),
+        }
+    }
+
     fn read_sample(&self) -> DriverResult<FanSample> {
+        let read = |e| self.fan_error("read", e);
         Ok(FanSample {
-            pwm: self.io.read_u64("pwm1")?,
-            pwm_mode: self.io.read_u64("pwm1_enable")?,
-            rpm: self.io.read_optional_u64("fan1_input")?,
+            pwm: u64::from(self.fan.pwm().map_err(read)?),
+            pwm_mode: u64::try_from(self.fan.mode().map_err(read)?).unwrap_or_default(),
+            rpm: self.fan.rpm().map_err(read)?.map(u64::from),
         })
     }
 
@@ -270,7 +286,9 @@ impl HwmonFanBoundDevice {
                 format!("pwm must be between 0 and {HWMON_PWM_MAX}"),
             ));
         }
-        self.io.write_u64("pwm1", pwm)?;
+        self.fan
+            .set_pwm(pwm as u32)
+            .map_err(|e| self.fan_error("set pwm1", e))?;
         self.read_sample()
     }
 
@@ -302,17 +320,35 @@ impl HwmonFanBoundDevice {
                 ),
             )
         })?;
-        self.io.write_u64("pwm1_enable", raw)?;
+        self.fan
+            .set_mode(raw as i32)
+            .map_err(|e| self.fan_error("set pwm1_enable", e))?;
         self.read_sample()
     }
 
     fn state_from_sample(&self, sample: FanSample) -> DeviceStateSnapshot {
         let fan_name = self.fan_name().to_string();
-        let mut state = DeviceStateSnapshot::new(self.device.id.clone())
+        // Device-model telemetry first (`speed`, `duty`, `pwm_mode`); the
+        // original keys follow and keep `pwm_mode` an integer.
+        let channels = [
+            sample
+                .rpm
+                .map_or(NO_VALUE, |rpm| i32::try_from(rpm).unwrap_or(i32::MAX)),
+            lemnos_drivers_linux::pwm_to_duty(sample.pwm as u32),
+            sample.pwm_mode as i32,
+        ];
+        let state = l1::telemetry(
+            DeviceStateSnapshot::new(self.device.id.clone()),
+            &FAN_INFO,
+            &channels,
+        )
+        .with_config(l1::PROPERTY_CLASS, FAN_INFO.class.name())
+        .with_config(l1::PROPERTY_MODEL, FAN_INFO.model);
+        let mut state = state
             .with_lifecycle(DeviceLifecycleState::Idle)
             .with_config(CONFIG_LABEL, fan_name.clone())
             .with_config(CONFIG_FAN_NAME, fan_name)
-            .with_config(CONFIG_CLASS_ROOT, self.io.root().display().to_string())
+            .with_config(CONFIG_CLASS_ROOT, self.fan.root().display().to_string())
             .with_telemetry(TELEMETRY_DUTY_RATIO, sample.duty_ratio())
             .with_telemetry(TELEMETRY_PWM, sample.pwm)
             .with_telemetry(TELEMETRY_PWM_MODE, sample.pwm_mode)
@@ -372,13 +408,76 @@ impl BoundDevice for HwmonFanBoundDevice {
                 (2, self.set_pwm(pwm)?)
             }
             FAN_SET_MODE_INTERACTION => (3, self.set_mode(custom.input.as_ref())?),
-            _ => return Err(self.unsupported(request)),
+            other => return self.execute_l1(other, custom.input.as_ref(), request),
         };
         Ok(self.respond(index, sample))
     }
 }
 
 impl HwmonFanBoundDevice {
+    /// The device-model interactions: `device.read`, `duty.set`/`.get`,
+    /// `pwm_mode.set`/`.get`, values in their units (`duty` as a fraction).
+    fn execute_l1(
+        &mut self,
+        id: &str,
+        input: Option<&Value>,
+        request: &InteractionRequest,
+    ) -> DriverResult<InteractionResponse> {
+        let index = self
+            .interactions
+            .iter()
+            .position(|i| i.id.as_str() == id)
+            .ok_or_else(|| self.unsupported(request))?;
+        let failed = |kind| DriverError::Device {
+            driver_id: DRIVER_ID.to_string(),
+            device_id: self.device.id.clone(),
+            action: id.to_string(),
+            kind,
+        };
+        let output = if id == l1::READ_INTERACTION {
+            let mut values = [NO_VALUE; MAX_CHANNELS];
+            DeviceRef::both(&mut self.fan)
+                .read(&mut values)
+                .map_err(failed)?;
+            let map: ValueMap = FAN_INFO
+                .channels
+                .iter()
+                .zip(values)
+                .map(|(c, raw)| (c.name.to_string(), l1::channel_value(c, raw)))
+                .collect();
+            Value::from(map)
+        } else {
+            let (name, set) = match id.rsplit_once('.') {
+                Some((name, "set")) => (name, true),
+                Some((name, _)) => (name, false),
+                None => return Err(self.unsupported(request)),
+            };
+            let control_index = FAN_INFO
+                .control_index(name)
+                .ok_or_else(|| self.unsupported(request))?;
+            let control = &FAN_INFO.controls[control_index];
+            let raw = if set {
+                let raw = input
+                    .and_then(|value| l1::control_raw(control, value))
+                    .ok_or_else(|| {
+                        self.invalid(
+                            FAN_SET_DUTY_INTERACTION,
+                            format!("expected a {} value in range", control.name),
+                        )
+                    })?;
+                Control::set(&mut self.fan, control_index, raw)
+            } else {
+                Control::get(&mut self.fan, control_index)
+            }
+            .map_err(|error| failed(lemnos_hal::HalError::kind(&error)))?;
+            l1::control_value(control, raw)
+        };
+        let id: InteractionId = self.interactions[index].id.clone();
+        Ok(InteractionResponse::Custom(
+            CustomInteractionResponse::new(id).with_output(output),
+        ))
+    }
+
     fn unsupported(&self, request: &InteractionRequest) -> DriverError {
         DriverError::UnsupportedAction {
             driver_id: DRIVER_ID.to_string(),

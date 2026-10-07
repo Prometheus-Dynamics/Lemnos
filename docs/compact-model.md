@@ -1,7 +1,8 @@
 # Compact device model and lite runtime
 
-Status: phases 1 and 2 implemented (`lemnos-device`, `lemnos-lite`); the decisions below are
-confirmed. Builds on [foundation.md](foundation.md).
+Status: phases 1-3 implemented (`lemnos-device`, `lemnos-lite`, the generic runtime adapter
+and board definitions); the decisions below are confirmed. Builds on
+[foundation.md](foundation.md).
 
 ## Goal
 
@@ -226,6 +227,41 @@ re-initializes devices that are not up on their schedule. Status starts `missing
 
 `crates/lemnos-lite/examples/linux_sensors.rs` reads the Raze's three I2C sensors on Linux;
 the firmware size image `lite` is the microcontroller example.
+
+### L3: the generic adapter
+
+`lemnos_driver_sdk::l1` turns any L1 device into a runtime driver:
+
+- `L1BoundDevice` wraps a `BoxedDevice`. `state()` reads every channel into telemetry keyed
+  by channel name, as `f64` in the canonical unit (`acceleration.x = 9.81`), with
+  `device.class`, `device.model` and the current control values in `realized_config`.
+  Controls become custom interactions `<control>.set` and `<control>.get` (values in the
+  unit); `device.read` returns every channel.
+- `L1Driver` is a `Driver` with a factory `(descriptor, bind context) -> BoxedDevice`. It
+  matches descriptors whose `lemnos.driver` property is its id, or a custom rule.
+- `describe` adds the class, model and each channel's quantity and unit to a descriptor.
+
+Devices come from three places:
+
+- **Board definitions** ([board-definition.md](board-definition.md), crate `lemnos-board`):
+  a TOML/JSON file names each device's generic driver, bus and settings. The facade's
+  `board` feature reports them as configured descriptors and binds them with two
+  `L1Driver`s; I2C buses come from the runtime's backend as owned sessions
+  (`lemnos_bus::hal::OwnedI2cBus`). This is how HeliOS binds the Raze's BMI088, BMM150 and
+  INA238 from `sensors.toml`, and it replaces the planned per-sensor runtime adapters: a
+  new driver crate needs a registry entry, not runtime code.
+- **The kernel.** `lemnos-drivers-linux` has `HwmonFan` and `ThermalZone` as L1 devices,
+  and `KernelDevice`, a generic binding that serves a chip through its mainline IIO or
+  hwmon driver from the chip crate's `KernelBinding`. A board device with
+  `backend = "auto"` uses the kernel driver when one is bound.
+- **Discovery.** The Linux backend now reports thermal zones
+  (`InterfaceKind::Platform`, `linux.subsystem = thermal`), bound by the built-in
+  `lemnos.linux.thermal-zone` `L1Driver`. The built-in hwmon fan driver runs on
+  `HwmonFan`: it keeps its `fan.*` interactions and telemetry and adds the device-model
+  ones (`speed`, `duty`, `pwm_mode`, `duty.set`, `pwm_mode.set`).
+
+`InterfaceKind::Platform` is new: a device with no bus session (thermal zones, kernel class
+devices). The fan stays on `Pwm` for compatibility.
 
 ### Measured
 

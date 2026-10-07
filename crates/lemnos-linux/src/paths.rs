@@ -49,6 +49,10 @@ impl LinuxPaths {
         self.sys_class_root.join("hwmon")
     }
 
+    pub fn thermal_class_root(&self) -> PathBuf {
+        self.sys_class_root.join("thermal")
+    }
+
     pub fn gpio_line_root(&self, global_line: u32) -> PathBuf {
         self.gpio_class_root().join(format!("gpio{global_line}"))
     }

@@ -64,6 +64,14 @@ pub enum DriverError {
     },
     #[error("driver '{driver_id}' does not implement '{action}'")]
     NotImplemented { driver_id: String, action: String },
+    /// A `lemnos-device` driver failed; `kind` is its error's kind.
+    #[error("driver '{driver_id}' device '{device_id}' failed to {action}: {kind}")]
+    Device {
+        driver_id: String,
+        device_id: DeviceId,
+        action: String,
+        kind: ErrorKind,
+    },
 }
 
 impl DriverError {
@@ -77,6 +85,7 @@ impl DriverError {
             Self::InvalidRequest { source, .. } => source.kind(),
             Self::Transport { source, .. } => source.kind(),
             Self::HostIo { source, .. } => ErrorKind::from_io(source.kind()),
+            Self::Device { kind, .. } => *kind,
         }
     }
 }

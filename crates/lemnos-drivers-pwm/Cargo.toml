@@ -18,6 +18,9 @@ workspace = true
 
 [dependencies]
 lemnos-bus.workspace = true
+lemnos-device.workspace = true
+lemnos-drivers-linux.workspace = true
+lemnos-hal.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-driver-manifest = { workspace = true, features = ["std"] }
 lemnos-driver-sdk.workspace = true
