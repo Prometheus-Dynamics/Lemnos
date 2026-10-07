@@ -36,8 +36,11 @@ pub(crate) struct Slot {
     retry_ms: u64,
     pub subscriptions: Vec<Subscription>,
     /// For fans: how to hand the fan back to the kernel, worked out at the
-    /// first bind (before any client wrote to it).
+    /// first bind and refreshed just before the first client write.
     pub restore: Option<FanRestore>,
+    /// A client has written to this fan: the governor states in `restore`
+    /// are the ones from before that.
+    overriding: bool,
 }
 
 impl Slot {
@@ -56,6 +59,7 @@ impl Slot {
             retry_ms: RETRY_MIN_MS,
             subscriptions: Vec::new(),
             restore: None,
+            overriding: false,
         }
     }
 
@@ -225,6 +229,19 @@ impl Slot {
     /// Whether `client` may write this device's controls.
     pub fn allows(&self, client: &str) -> bool {
         self.spec.writers.is_empty() || self.spec.writers.iter().any(|w| w == client)
+    }
+
+    /// Before a client's write: on the first one, records the governor's
+    /// cooling states the hand-back restores (writing `pwm1` moves them).
+    /// Returns whether the plan changed.
+    pub fn before_write(&mut self) -> bool {
+        if self.overriding {
+            return false;
+        }
+        self.overriding = true;
+        self.restore
+            .as_mut()
+            .is_some_and(|plan| plan.record_states().is_ok())
     }
 
     /// Hands a fan back to the kernel, if this is a fan.

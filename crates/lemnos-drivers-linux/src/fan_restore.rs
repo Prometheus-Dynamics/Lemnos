@@ -7,11 +7,23 @@
 //!   speed), 1 is the normal enabled state, and 2 keeps the supply regulator
 //!   on. The thermal governor drives the fan through the cooling device
 //!   (`/sys/class/thermal/cooling_deviceN`, type `pwm-fan`), whatever
-//!   `pwm1_enable` says. The hand-back restores the `pwm1_enable` value read
-//!   when the controller bound the fan, then makes the driver re-apply the
-//!   governor's level. `pwm-fan` ignores a write of the state it already
-//!   has, so the hand-back writes a neighbouring state and then the current
-//!   one, and the driver re-emits `cooling-levels[state]`.
+//!   `pwm1_enable` says. Writing `pwm1` also moves the cooling device's
+//!   `cur_state` to the matching level, so the state at stop is the
+//!   controller's, not the governor's. The hand-back therefore:
+//!   1. restores the `pwm1_enable` value read when the controller bound the
+//!      fan;
+//!   2. writes back the governor's `cur_state` recorded just before the
+//!      controller's first write (`pwm-fan` ignores a write of the state it
+//!      already has, so when they are equal a neighbouring state goes
+//!      first), and the driver re-emits `cooling-levels[state]`;
+//!   3. makes the governor re-evaluate now, by writing each thermal zone
+//!      bound to the cooling device its own `policy` back (which rebinds the
+//!      governor and runs an update). Without this a zone with no polling
+//!      (`step_wise`, empty `polling_delay`) only re-evaluates on its next
+//!      trip crossing.
+//!
+//!   Without a record (a stop helper after a crash before the first write
+//!   was recorded), step 2 is skipped.
 //! - **Fans with a true automatic mode** (most fan-controller chips): the
 //!   hand-back writes that `pwm1_enable` mode (2 unless the board says
 //!   otherwise).
@@ -33,9 +45,42 @@ pub const PWM_FAN_DRIVER: &str = "pwm-fan";
 pub enum RestoreKind {
     /// Write this `pwm1_enable` mode, the chip's automatic control.
     Automatic { mode: i32 },
-    /// Write `pwm1_enable = enable`, then re-apply the governor's state of
-    /// each cooling device.
-    CoolingDevice { enable: i32, devices: Vec<PathBuf> },
+    /// Write `pwm1_enable = enable`, restore each cooling device's recorded
+    /// governor state, and make the zones bound to it re-evaluate.
+    CoolingDevice {
+        enable: i32,
+        devices: Vec<CoolingRecord>,
+    },
+}
+
+/// A cooling device and the governor's state recorded before a controller
+/// took the fan over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoolingRecord {
+    /// `/sys/class/thermal/cooling_deviceN`.
+    pub device: PathBuf,
+    /// The governor's `cur_state`, if recorded.
+    pub state: Option<u32>,
+}
+
+impl CoolingRecord {
+    /// Records the device's current state.
+    pub fn read(device: impl Into<PathBuf>) -> Result<Self, SysfsError> {
+        let device = device.into();
+        let state = sysfs::read_parsed(&device.join("cur_state"))?;
+        Ok(Self {
+            device,
+            state: Some(state),
+        })
+    }
+
+    /// A device without a recorded state.
+    pub fn unrecorded(device: impl Into<PathBuf>) -> Self {
+        Self {
+            device: device.into(),
+            state: None,
+        }
+    }
 }
 
 /// One fan's hand-back plan, worked out when the fan is bound (so it holds
@@ -47,13 +92,17 @@ pub struct FanRestore {
     pub kind: RestoreKind,
 }
 
-/// What a [`FanRestore::apply`] wrote to one cooling device.
+/// What a [`FanRestore::apply`] did to one cooling device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoolingNudge {
-    /// The governor's state, written last.
-    pub state: u32,
-    /// The neighbouring state written first, if the device has more than one.
+    /// The recorded governor state written back, if there was a record.
+    pub state: Option<u32>,
+    /// The neighbouring state written first (the device was already at the
+    /// recorded state).
     pub via: Option<u32>,
+    /// Thermal zones bound to the device whose governor was made to
+    /// re-evaluate.
+    pub zones: u32,
 }
 
 impl HwmonFan {
@@ -103,21 +152,24 @@ impl HwmonFan {
     }
 
     /// The hand-back plan for this fan, read now: for a cooling-device fan,
-    /// the current `pwm1_enable` and its cooling devices; otherwise
-    /// `automatic_mode`. Call it when binding the fan, before writing to it.
+    /// the current `pwm1_enable` and the governor's state of its cooling
+    /// devices; otherwise `automatic_mode`. Call it when binding the fan, and
+    /// [`FanRestore::record_states`] again just before the first write.
     pub fn restore_plan(
         &self,
         thermal_root: &Path,
         automatic_mode: i32,
     ) -> Result<FanRestore, SysfsError> {
         let enable = self.mode()?;
-        self.restore_plan_with(thermal_root, automatic_mode, enable)
+        let mut plan = self.restore_plan_with(thermal_root, automatic_mode, enable)?;
+        plan.record_states()?;
+        Ok(plan)
     }
 
-    /// [`Self::restore_plan`] with a known `pwm1_enable` for the
-    /// cooling-device case (a stop helper that runs after the controller is
-    /// gone uses the controller's recorded value, else
-    /// [`MODE_MANUAL`](crate::MODE_MANUAL), `pwm-fan`'s boot default).
+    /// [`Self::restore_plan`] with a known `pwm1_enable` and no recorded
+    /// governor states, for a stop helper without the controller's record
+    /// (it uses [`MODE_MANUAL`](crate::MODE_MANUAL), `pwm-fan`'s boot
+    /// default).
     pub fn restore_plan_with(
         &self,
         thermal_root: &Path,
@@ -127,7 +179,10 @@ impl HwmonFan {
         let devices = self.cooling_devices(thermal_root)?;
         let cooling = !devices.is_empty() || self.driver().as_deref() == Some(PWM_FAN_DRIVER);
         let kind = if cooling {
-            RestoreKind::CoolingDevice { enable, devices }
+            RestoreKind::CoolingDevice {
+                enable,
+                devices: devices.into_iter().map(CoolingRecord::unrecorded).collect(),
+            }
         } else {
             RestoreKind::Automatic {
                 mode: automatic_mode,
@@ -141,6 +196,18 @@ impl HwmonFan {
 }
 
 impl FanRestore {
+    /// Records the governor's current state of each cooling device: call it
+    /// just before the controller's first write to the fan (writing `pwm1`
+    /// moves `cur_state`).
+    pub fn record_states(&mut self) -> Result<(), SysfsError> {
+        if let RestoreKind::CoolingDevice { devices, .. } = &mut self.kind {
+            for record in devices {
+                *record = CoolingRecord::read(&record.device)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Hands the fan back. Every step is attempted; the first error is
     /// returned.
     pub fn apply(&self) -> Result<Vec<CoolingNudge>, SysfsError> {
@@ -150,8 +217,8 @@ impl FanRestore {
             RestoreKind::CoolingDevice { enable, devices } => {
                 let mut first = fan.set_mode(*enable).err();
                 let mut nudges = Vec::new();
-                for device in devices {
-                    match reapply_cooling_state(device) {
+                for record in devices {
+                    match restore_cooling_device(record) {
                         Ok(nudge) => nudges.push(nudge),
                         Err(error) => {
                             first.get_or_insert(error);
@@ -164,8 +231,8 @@ impl FanRestore {
     }
 
     /// The plan as one line (`automatic <mode> <fan>` or
-    /// `cooling <enable> <fan> <device>...`, tab separated), for a state file
-    /// a stop helper reads.
+    /// `cooling <enable> <fan> <device>[=<state>]...`, tab separated), for a
+    /// state file a stop helper reads.
     pub fn to_line(&self) -> String {
         match &self.kind {
             RestoreKind::Automatic { mode } => {
@@ -173,9 +240,12 @@ impl FanRestore {
             }
             RestoreKind::CoolingDevice { enable, devices } => {
                 let mut line = format!("cooling\t{enable}\t{}", self.fan.display());
-                for device in devices {
+                for record in devices {
                     line.push('\t');
-                    line.push_str(&device.display().to_string());
+                    line.push_str(&record.device.display().to_string());
+                    if let Some(state) = record.state {
+                        line.push_str(&format!("={state}"));
+                    }
                 }
                 line
             }
@@ -192,7 +262,15 @@ impl FanRestore {
             "automatic" => RestoreKind::Automatic { mode: value },
             "cooling" => RestoreKind::CoolingDevice {
                 enable: value,
-                devices: fields.map(PathBuf::from).collect(),
+                devices: fields
+                    .map(|field| match field.rsplit_once('=') {
+                        Some((device, state)) => state.parse().ok().map(|state| CoolingRecord {
+                            device: PathBuf::from(device),
+                            state: Some(state),
+                        }),
+                        None => Some(CoolingRecord::unrecorded(field)),
+                    })
+                    .collect::<Option<Vec<_>>>()?,
             },
             _ => return None,
         };
@@ -208,7 +286,7 @@ impl fmt::Display for FanRestore {
             }
             RestoreKind::CoolingDevice { enable, devices } => write!(
                 f,
-                "{}: pwm1_enable={enable}, {} cooling device(s) re-applied",
+                "{}: pwm1_enable={enable}, {} cooling device(s) handed back",
                 self.fan.display(),
                 devices.len()
             ),
@@ -216,20 +294,72 @@ impl fmt::Display for FanRestore {
     }
 }
 
-/// Makes a cooling device's driver re-apply the governor's state: writes a
-/// neighbouring state, then the current one.
-pub fn reapply_cooling_state(device: &Path) -> Result<CoolingNudge, SysfsError> {
-    let path = device.join("cur_state");
-    let state: u32 = sysfs::read_parsed(&path)?;
-    let max: u32 = sysfs::read_parsed_optional(&device.join("max_state"))?.unwrap_or(0);
-    let via = if state > 0 {
-        Some(state - 1)
-    } else {
-        (max > 0).then_some(1)
-    };
-    if let Some(via) = via {
-        sysfs::write(&path, via)?;
+/// Hands one cooling device back to its governor: writes the recorded
+/// state (after a neighbouring one when the device is already there, so the
+/// driver re-emits it), then makes every thermal zone bound to the device
+/// re-evaluate ([`kick_governors`]).
+pub fn restore_cooling_device(record: &CoolingRecord) -> Result<CoolingNudge, SysfsError> {
+    let path = record.device.join("cur_state");
+    let mut via = None;
+    if let Some(state) = record.state {
+        let current: u32 = sysfs::read_parsed(&path)?;
+        if current == state {
+            let max: u32 =
+                sysfs::read_parsed_optional(&record.device.join("max_state"))?.unwrap_or(0);
+            via = if state > 0 {
+                Some(state - 1)
+            } else {
+                (max > 0).then_some(1)
+            };
+            if let Some(via) = via {
+                sysfs::write(&path, via)?;
+            }
+        }
+        sysfs::write(&path, state)?;
     }
-    sysfs::write(&path, state)?;
-    Ok(CoolingNudge { state, via })
+    let zones = kick_governors(&record.device)?;
+    Ok(CoolingNudge {
+        state: record.state,
+        via,
+        zones,
+    })
+}
+
+/// Makes the governor of every thermal zone bound to `device` re-evaluate
+/// now: writes each zone's `policy` back to it, which rebinds the governor
+/// and runs an update. Zones are siblings of the device
+/// (`/sys/class/thermal/thermal_zoneN`) whose `cdevK` links resolve to it.
+/// Returns how many zones were kicked.
+pub fn kick_governors(device: &Path) -> Result<u32, SysfsError> {
+    let Some(thermal_root) = device.parent() else {
+        return Ok(0);
+    };
+    let target = fs::canonicalize(device).unwrap_or_else(|_| device.to_path_buf());
+    let mut kicked = 0;
+    for zone in sysfs::entries(thermal_root)? {
+        let is_zone = zone
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("thermal_zone"));
+        if !is_zone || !zone_binds(&zone, &target)? {
+            continue;
+        }
+        let policy_path = zone.join("policy");
+        if let Some(policy) = sysfs::read_optional(&policy_path)? {
+            sysfs::write(&policy_path, &policy)?;
+            kicked += 1;
+        }
+    }
+    Ok(kicked)
+}
+
+/// Whether one of the zone's `cdevK` links resolves to `target`.
+fn zone_binds(zone: &Path, target: &Path) -> Result<bool, SysfsError> {
+    Ok(sysfs::entries(zone)?.iter().any(|entry| {
+        let is_cdev_link = entry.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n.strip_prefix("cdev")
+                .is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()))
+        });
+        is_cdev_link && fs::canonicalize(entry).is_ok_and(|p| p == target)
+    }))
 }

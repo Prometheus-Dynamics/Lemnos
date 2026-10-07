@@ -140,8 +140,9 @@ fallback. The controller only ever *borrows* the fan:
 1. **Taking control** is writing `pwm1`. **Giving it back** is the fan hand-back
    (`FanRestore`, see [system-service.md](system-service.md#fan-hand-back)). On the
    Raze's `pwm-fan` (measured on the CM5) there is no automatic `pwm1_enable` mode: the
-   hand-back restores the bind-time `pwm1_enable` (1) and makes the thermal cooling device
-   re-apply the governor's level. Chips with an automatic mode get `restore_mode`
+   hand-back restores the bind-time `pwm1_enable` (1), restores the cooling device's
+   governor state from before the controller's first write, and makes the bound zones'
+   governor re-evaluate. Chips with an automatic mode get `restore_mode`
    (default 2).
 2. **Clean stop** (SIGTERM, reconfiguration, `enabled = false`): `release` restores the
    mode before the process exits.

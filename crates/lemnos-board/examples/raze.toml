@@ -38,8 +38,9 @@ config = { shunt_micro_ohms = 10000, max_current_micro_amps = 5000000 }
 id = "fan"
 driver = "hwmon-fan"
 # The Linux pwm-fan driver's hwmon name is `pwmfan`. On stop it gets back the
-# pwm1_enable read at bind and its cooling device re-applies the governor's
-# level (pwm-fan has no automatic mode, so no restore_mode here).
+# pwm1_enable read at bind and the governor's cooling state from before the
+# first write, and the thermal zone re-evaluates (pwm-fan has no automatic
+# mode, so no restore_mode here).
 match = { name = "pwmfan" }
 poll_ms = 1000
 writers = ["lemnosd.fan", "helios"]

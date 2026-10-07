@@ -189,8 +189,6 @@ impl Service {
         self.broadcast(&Message::Event(event));
     }
 
-    // The service logs to stderr (the journal).
-    #[allow(clippy::print_stderr)]
     fn build_devices(&mut self, now_ms: u64) {
         let fans_before = self.slots.iter().filter(|s| s.restore.is_some()).count();
         for index in 0..self.slots.len() {
@@ -215,12 +213,18 @@ impl Service {
         }
         // A fan was bound for the first time: record how to hand it back,
         // for the stop helper that runs after this process is gone.
-        let plans = self.fan_restore_targets();
-        if plans.len() != fans_before {
-            let path = crate::fans::fan_state_path(&self.socket);
-            if let Err(error) = crate::fans::write_fan_state(&path, &plans) {
-                eprintln!("lemnosd: {}: {error}", path.display());
-            }
+        if self.slots.iter().filter(|s| s.restore.is_some()).count() != fans_before {
+            self.save_fan_state();
+        }
+    }
+
+    /// Writes the fans' hand-back plans for the stop helper.
+    // The service logs to stderr (the journal).
+    #[allow(clippy::print_stderr)]
+    fn save_fan_state(&self) {
+        let path = crate::fans::fan_state_path(&self.socket);
+        if let Err(error) = crate::fans::write_fan_state(&path, &self.fan_restore_targets()) {
+            eprintln!("lemnosd: {}: {error}", path.display());
         }
     }
 
@@ -498,6 +502,9 @@ impl Service {
         let raw = (value * 10f64.powi(-i32::from(exponent))).round();
         if !raw.is_finite() || raw < f64::from(min) || raw > f64::from(max) {
             return Err(Refusal::OutOfRange);
+        }
+        if self.slots[index].before_write() {
+            self.save_fan_state();
         }
         let device_ref = self.slots[index]
             .device

@@ -433,11 +433,20 @@ go back to the kernel. There are two kinds of hwmon fan, and the hand-back diffe
   automatic `pwm1_enable` mode: 0 disables the PWM (full speed), 1 is enabled (the boot
   default), 2 keeps the supply regulator on. The thermal governor drives the fan through its
   cooling device (`/sys/class/thermal/cooling_deviceN`, type `pwm-fan`) whatever
-  `pwm1_enable` says, but only on its next trip crossing, so a fan left at a userspace duty
-  stays there. The hand-back restores the `pwm1_enable` read when `lemnosd` bound the fan
-  (normally 1), then reads the cooling device's `cur_state` and writes a neighbouring state
-  and the current one back, which makes `pwm-fan` re-emit `cooling-levels[state]`. A fan
-  counts as this kind when its driver (`device/driver`) is `pwm-fan` or a cooling device is
+  `pwm1_enable` says. Writing `pwm1` also moves the cooling device's `cur_state` to the
+  matching level (on the Raze, duty 1.0 is state 4), and a zone with no polling (`step_wise`,
+  empty `polling_delay`, as on the Raze) re-evaluates only on a trip crossing, so a fan left
+  at a userspace duty stays there. The hand-back:
+  1. restores the `pwm1_enable` read when `lemnosd` bound the fan (normally 1);
+  2. writes back the governor's `cur_state` recorded just before the first client write
+     (lemnosd records it at bind and again right before that write); when the device is
+     already at that state, a neighbouring state goes first so `pwm-fan` re-emits
+     `cooling-levels[state]`;
+  3. makes the governor re-evaluate now: every thermal zone bound to the cooling device (a
+     `thermal_zoneN/cdevK` link resolving to it) gets its own `policy` written back, which
+     rebinds the governor and runs an update.
+
+  A fan counts as this kind when its driver (`device/driver`) is `pwm-fan` or a cooling device is
   linked to its device (cooling devices of type `pwm-fan` are used when none is linked).
 - **Fan-controller chips with a true automatic mode** get `pwm1_enable = restore_mode`
   (default 2).
@@ -445,7 +454,8 @@ go back to the kernel. There are two kinds of hwmon fan, and the hand-back diffe
 `lemnosd` works the plan out at a fan's first bind, before any client writes to it, and
 records it in `fan-restore` next to the socket (`/run/lemnos/fan-restore`). `lemnos-ctl fan
 restore` applies the recorded plans, then the board's other fans, then with `--all` every
-other hwmon fan; fans it has no record of get `pwm1_enable = 1` on the cooling-device path.
-It runs as root (`ExecStopPost=+`) because cooling devices are root-owned; `lemnosd` itself
-needs the udev rules in `packaging/README.md`.
+other hwmon fan. Fans it has no record of get `pwm1_enable = 1` and step 3 only, so their
+cooling state may stay high until the next trip crossing. It runs as root (`ExecStopPost=+`)
+because cooling devices and zone policies are root-owned; `lemnosd` itself needs the udev
+rules in `packaging/README.md`.
 

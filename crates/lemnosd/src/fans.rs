@@ -86,7 +86,8 @@ pub struct Restored {
 /// `state` (with the `pwm1_enable` read when it bound them), then the
 /// board's other fans, then, with `all`, every other hwmon fan. Fans the
 /// service did not record get `pwm1_enable = 1` (`pwm-fan`'s boot default)
-/// on the cooling-device path.
+/// on the cooling-device path and only a governor re-evaluation (their
+/// cooling state may stay high until the next trip crossing).
 pub fn restore_after_stop(
     board: Option<&BoardDefinition>,
     state: Option<&Path>,

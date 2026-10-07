@@ -38,10 +38,12 @@ board definition as `/etc/lemnos/board.toml` (see the header of `gaia/lemnosd.to
   whichever group owns the LED device (`/dev/leds*`). Adjust `SupplementaryGroups=` with a
   drop-in.
 - Write access for the `lemnos` user to the fan's hwmon attributes (`pwm1`, `pwm1_enable`)
-  and, for a `pwm-fan` fan, its thermal cooling device's `cur_state` (the hand-back
-  re-applies the governor's level there): udev rules such as
+  and, for a `pwm-fan` fan, its thermal cooling device's `cur_state` and the thermal zones'
+  `policy` (the hand-back restores the governor's state and makes it re-evaluate): udev
+  rules such as
   `SUBSYSTEM=="hwmon", ATTR{name}=="pwmfan", RUN+="/bin/chgrp lemnos /sys%p/pwm1 /sys%p/pwm1_enable", RUN+="/bin/chmod g+w /sys%p/pwm1 /sys%p/pwm1_enable"` and
-  `SUBSYSTEM=="thermal", KERNEL=="cooling_device*", ATTR{type}=="pwm-fan", RUN+="/bin/chgrp lemnos /sys%p/cur_state", RUN+="/bin/chmod g+w /sys%p/cur_state"`.
+  `SUBSYSTEM=="thermal", KERNEL=="cooling_device*", ATTR{type}=="pwm-fan", RUN+="/bin/chgrp lemnos /sys%p/cur_state", RUN+="/bin/chmod g+w /sys%p/cur_state"` and
+  `SUBSYSTEM=="thermal", KERNEL=="thermal_zone*", RUN+="/bin/chgrp lemnos /sys%p/policy", RUN+="/bin/chmod g+w /sys%p/policy"`.
   (The hwmon `name` of the Linux `pwm-fan` driver is `pwmfan`.) `ExecStopPost` runs as
   root and needs neither.
 - Clients (HeliOS, PhotonVision, scripts) join the `lemnos` group to reach
@@ -56,9 +58,8 @@ board definition as `/etc/lemnos/board.toml` (see the header of `gaia/lemnosd.to
   the rebooting look when the system is restarting); `ExecStopPost=+lemnos-ctl fan restore
   --all` does the same after a crash, `SIGKILL` or a watchdog abort, from the plans the
   service recorded in `/run/lemnos/fan-restore`. A `pwm-fan` fan (or any fan with a linked
-  thermal cooling device) gets back the `pwm1_enable` read when the service bound it, and
-  its cooling device re-applies the thermal governor's level (`pwm-fan` has no automatic
-  `pwm1_enable` mode; writing 2 only keeps its regulator on). Fan-controller chips with an
+  thermal cooling device) gets back the `pwm1_enable` read at bind, its cooling device gets back the governor's state from just before the controller's first write, and the thermal zones bound to it re-evaluate now (their `policy` written back) (`pwm-fan` has no automatic `pwm1_enable` mode;
+  writing 2 only keeps its regulator on). Fan-controller chips with an
   automatic mode get `pwm1_enable = restore_mode` (default 2).
 - It shows the device package's updates on the status light without changes to the
   updater, from the status file `LEMNOSD_UPDATE_STATUS` names. The path is set only there:

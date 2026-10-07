@@ -301,6 +301,25 @@ fn pwm_fan_tree(tree: &Tree, linked: bool) {
         .link(
             "class/thermal/cooling_device1",
             "devices/virtual/thermal/cooling_device1",
+        )
+        // cpu-thermal drives the fan; another zone drives something else.
+        .file("devices/virtual/thermal/thermal_zone0/policy", "step_wise")
+        .file(
+            "devices/virtual/thermal/thermal_zone0/cdev0_trip_point",
+            "1",
+        )
+        .link(
+            "devices/virtual/thermal/thermal_zone0/cdev0",
+            "devices/virtual/thermal/cooling_device0",
+        )
+        .link(
+            "class/thermal/thermal_zone0",
+            "devices/virtual/thermal/thermal_zone0",
+        )
+        .file("devices/virtual/thermal/thermal_zone1/policy", "untouched")
+        .link(
+            "class/thermal/thermal_zone1",
+            "devices/virtual/thermal/thermal_zone1",
         );
     if linked {
         tree.link(
@@ -311,67 +330,97 @@ fn pwm_fan_tree(tree: &Tree, linked: bool) {
 }
 
 #[test]
-fn pwm_fan_restores_enable_and_cooling_state() {
+fn pwm_fan_restores_the_governors_state_and_kicks_its_zone() {
     let tree = Tree::new();
     pwm_fan_tree(&tree, false);
     let fan = HwmonFan::find(&tree.path("class/hwmon"), Some("pwmfan"))
         .unwrap()
         .expect("fan");
     assert_eq!(fan.driver().as_deref(), Some(PWM_FAN_DRIVER));
-    // Bound while the kernel had it enabled (1); the board's restore_mode 2
-    // does not apply to a cooling-device fan.
-    let plan = fan.restore_plan(&tree.path("class/thermal"), 2).unwrap();
+    // Bound while the kernel had it enabled (1) at governor state 2; the
+    // board's restore_mode 2 does not apply to a cooling-device fan.
+    let mut plan = fan.restore_plan(&tree.path("class/thermal"), 2).unwrap();
+    let cdev = tree.path("class/thermal/cooling_device0");
     assert_eq!(
         plan.kind,
         RestoreKind::CoolingDevice {
             enable: 1,
-            devices: vec![tree.path("class/thermal/cooling_device0")],
+            devices: vec![CoolingRecord {
+                device: cdev.clone(),
+                state: Some(2),
+            }],
         }
     );
+    // The governor stepped up before the controller's first write: that is
+    // the state to restore.
+    tree.file("devices/virtual/thermal/cooling_device0/cur_state", "3");
+    plan.record_states().unwrap();
+    assert!(plan.to_line().ends_with("cooling_device0=3"));
     assert_eq!(FanRestore::from_line(&plan.to_line()), Some(plan.clone()));
 
-    // The controller took over.
+    // The controller took over; pwm-fan moved cur_state to match pwm1.
     fan.set_mode(MODE_FULL_SPEED).unwrap();
     fan.set_pwm(255).unwrap();
+    tree.file("devices/virtual/thermal/cooling_device0/cur_state", "4");
     let nudges = plan.apply().unwrap();
     assert_eq!(
         nudges,
         vec![CoolingNudge {
-            state: 2,
-            via: Some(1)
+            state: Some(3),
+            via: None,
+            zones: 1
         }]
     );
     assert_eq!(
         tree.read("class/hwmon/hwmon2/pwm1_enable"),
         MODE_MANUAL.to_string()
     );
-    assert_eq!(tree.read("class/thermal/cooling_device0/cur_state"), "2");
+    assert_eq!(tree.read("class/thermal/cooling_device0/cur_state"), "3");
+    // The zone bound to the device got its policy written back; the other
+    // zone was left alone.
+    assert_eq!(tree.read("class/thermal/thermal_zone0/policy"), "step_wise");
+    assert_eq!(tree.read("class/thermal/thermal_zone1/policy"), "untouched");
+
+    // Already at the recorded state: a neighbour goes first.
+    assert_eq!(
+        plan.apply().unwrap(),
+        vec![CoolingNudge {
+            state: Some(3),
+            via: Some(2),
+            zones: 1
+        }]
+    );
 }
 
 #[test]
-fn linked_cooling_device_wins_and_state_zero_goes_up() {
+fn unrecorded_cooling_devices_only_kick_the_governor() {
     let tree = Tree::new();
     pwm_fan_tree(&tree, true);
-    tree.file("devices/virtual/thermal/cooling_device1/max_state", "3");
     let fan = HwmonFan::new(tree.path("class/hwmon/hwmon2"));
     let plan = fan
         .restore_plan_with(&tree.path("class/thermal"), 2, MODE_MANUAL)
         .unwrap();
+    // The linked cooling device wins over the pwm-fan-typed one.
     assert_eq!(
         plan.kind,
         RestoreKind::CoolingDevice {
             enable: MODE_MANUAL,
-            devices: vec![tree.path("class/thermal/cooling_device1")],
+            devices: vec![CoolingRecord::unrecorded(
+                tree.path("class/thermal/cooling_device1")
+            )],
         }
     );
+    tree.file("devices/virtual/thermal/cooling_device1/cur_state", "1");
     assert_eq!(
         plan.apply().unwrap(),
         vec![CoolingNudge {
-            state: 0,
-            via: Some(1)
+            state: None,
+            via: None,
+            zones: 0
         }]
     );
-    assert_eq!(tree.read("class/thermal/cooling_device1/cur_state"), "0");
+    assert_eq!(tree.read("class/thermal/cooling_device1/cur_state"), "1");
+    assert_eq!(FanRestore::from_line(&plan.to_line()), Some(plan));
 }
 
 #[test]

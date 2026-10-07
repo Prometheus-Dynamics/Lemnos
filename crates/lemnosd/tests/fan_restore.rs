@@ -4,7 +4,7 @@
 //! (`lemnos-ctl fan restore`) after the process is gone.
 
 use lemnos_board::{BoardDefinition, BoardError, Buses, DynI2c};
-use lemnos_drivers_linux::{FanRestore, RestoreKind, SysRoot};
+use lemnos_drivers_linux::{CoolingRecord, FanRestore, RestoreKind, SysRoot};
 use lemnos_ipc::ClientOptions;
 use lemnosd::fans::{fan_state_path, read_fan_state, restore_after_stop};
 use lemnosd::{Service, ServiceConfig};
@@ -67,8 +67,12 @@ fn tree(root: &Path) {
     write(root, &format!("{cdev}/cur_state"), "1");
     write(root, &format!("{cdev}/max_state"), "4");
     link(root, "class/thermal/cooling_device0", cdev);
-    write(root, "class/thermal/thermal_zone0/type", "cpu-thermal");
-    write(root, "class/thermal/thermal_zone0/temp", "57850");
+    let zone = "devices/virtual/thermal/thermal_zone0";
+    write(root, &format!("{zone}/type"), "cpu-thermal");
+    write(root, &format!("{zone}/temp"), "57850");
+    write(root, &format!("{zone}/policy"), "step_wise");
+    link(root, &format!("{zone}/cdev0"), cdev);
+    link(root, "class/thermal/thermal_zone0", zone);
 
     write(root, "class/hwmon/hwmon5/name", "nct6775");
     write(root, "class/hwmon/hwmon5/pwm1", "100");
@@ -127,30 +131,64 @@ fn service_hands_both_kinds_of_fan_back() {
     ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
 
     // The plans were recorded at bind, before any client wrote.
+    let cdev = root.join("class/thermal/cooling_device0");
     let plans = read_fan_state(&fan_state_path(&socket));
     assert_eq!(plans.len(), 2);
     assert_eq!(
         plans[0].kind,
         RestoreKind::CoolingDevice {
             enable: 1,
-            devices: vec![root.join("class/thermal/cooling_device0")],
+            devices: vec![CoolingRecord {
+                device: cdev.clone(),
+                state: Some(1),
+            }],
         }
     );
     assert_eq!(plans[1].kind, RestoreKind::Automatic { mode: 5 });
 
-    // A client takes both fans over.
+    // The governor steps up to 2, then a client takes both fans over; the
+    // kernel moves cur_state to match the client's pwm1 (Raze: 4).
+    write(
+        &root,
+        "devices/virtual/thermal/cooling_device0/cur_state",
+        "2",
+    );
     let mut client = ClientOptions::new(&socket, "helios").devices().unwrap();
     assert_eq!(client.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
+    write(
+        &root,
+        "devices/virtual/thermal/cooling_device0/cur_state",
+        "4",
+    );
     assert_eq!(client.set("fan", "duty", 1.0).unwrap(), 1.0);
     assert_eq!(client.set("case-fan", "pwm_mode", 1.0).unwrap(), 1.0);
     drop(client);
+    // The record holds the governor's state from just before the first write.
+    let plans = read_fan_state(&fan_state_path(&socket));
+    assert!(matches!(
+        &plans[0].kind,
+        RestoreKind::CoolingDevice { devices, .. } if devices[0].state == Some(2)
+    ));
 
+    // Make the policy write visible: date the file to the epoch.
+    let policy = root.join("class/thermal/thermal_zone0/policy");
+    fs::File::options()
+        .write(true)
+        .open(&policy)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH)
+        .unwrap();
     stop.store(true, Ordering::Relaxed);
     handle.join().unwrap();
-    // pwm-fan: the bind-time pwm1_enable, and the governor's level re-applied
-    // (written as 0, then 1 again).
+    // pwm-fan: the bind-time pwm1_enable, the governor's state from before
+    // the client, and the zone's governor re-evaluated (policy written back).
     assert_eq!(read(&root, "class/hwmon/hwmon2/pwm1_enable"), "1");
-    assert_eq!(read(&root, "class/thermal/cooling_device0/cur_state"), "1");
+    assert_eq!(read(&root, "class/thermal/cooling_device0/cur_state"), "2");
+    assert_eq!(
+        read(&root, "class/thermal/thermal_zone0/policy"),
+        "step_wise"
+    );
+    assert!(fs::metadata(&policy).unwrap().modified().unwrap() > std::time::UNIX_EPOCH);
     // The chip: its automatic mode.
     assert_eq!(read(&root, "class/hwmon/hwmon5/pwm1_enable"), "5");
     let _ = fs::remove_dir_all(&root);
@@ -170,7 +208,10 @@ fn stop_helper_uses_recorded_plans_then_falls_back() {
         fan: fan_dir.clone(),
         kind: RestoreKind::CoolingDevice {
             enable: 2,
-            devices: vec![root.join("class/thermal/cooling_device0")],
+            devices: vec![CoolingRecord {
+                device: root.join("class/thermal/cooling_device0"),
+                state: Some(3),
+            }],
         },
     };
     lemnosd::fans::write_fan_state(&state, std::slice::from_ref(&recorded)).unwrap();
@@ -181,14 +222,22 @@ fn stop_helper_uses_recorded_plans_then_falls_back() {
     assert!(restored.iter().all(|r| r.result.is_ok()));
     assert_eq!(restored[0].plan, recorded);
     assert_eq!(read(&root, "class/hwmon/hwmon2/pwm1_enable"), "2");
+    assert_eq!(read(&root, "class/thermal/cooling_device0/cur_state"), "3");
     assert_eq!(read(&root, "class/hwmon/hwmon5/pwm1_enable"), "5");
 
-    // No record, no board (a crash before the first bind, `--all`): the
-    // pwm-fan gets its boot default 1 and its cooling device, the chip 2.
+    // No record, no board (`--all` after a crash before the record was
+    // written): the pwm-fan gets its boot default 1 and only a governor
+    // re-evaluation (its state stays until then), the chip 2.
     write(&root, "class/hwmon/hwmon2/pwm1_enable", "0");
+    write(
+        &root,
+        "devices/virtual/thermal/cooling_device0/cur_state",
+        "4",
+    );
     let restored = restore_after_stop(None, None, &sys, true);
     assert_eq!(restored.len(), 2);
     assert_eq!(read(&root, "class/hwmon/hwmon2/pwm1_enable"), "1");
+    assert_eq!(read(&root, "class/thermal/cooling_device0/cur_state"), "4");
     assert!(matches!(
         restored[0].plan.kind,
         RestoreKind::CoolingDevice { enable: 1, .. }

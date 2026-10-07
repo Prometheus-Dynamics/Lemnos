@@ -40,7 +40,8 @@ pub use fan::{
     MODE_MANUAL, MODE_MAX, PWM_MAX, SPEED, duty_to_pwm, pwm_to_duty,
 };
 pub use fan_restore::{
-    CoolingNudge, FanRestore, PWM_FAN_DRIVER, RestoreKind, reapply_cooling_state,
+    CoolingNudge, CoolingRecord, FanRestore, PWM_FAN_DRIVER, RestoreKind, kick_governors,
+    restore_cooling_device,
 };
 pub use kernel::{I2cLocation, KernelDevice, SysRoot};
 pub use lemnos_drivers_ws2812 as ws2812;
