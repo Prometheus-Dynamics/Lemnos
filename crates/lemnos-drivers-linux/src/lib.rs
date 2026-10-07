@@ -4,6 +4,8 @@
 //!   [`DeviceClass::Fan`](lemnos_device::DeviceClass::Fan) sensor and
 //!   control, with [`HwmonFan::restore_automatic`] as the failsafe.
 //! - [`ThermalZone`]: a thermal zone as a temperature sensor.
+//! - [`UserspaceRegulator`] and [`DebugfsClock`]: supplies and clocks the
+//!   kernel exposes, as `lemnos_hal::Regulator` and `ClockOutput`.
 //! - [`Ws2812Pio`]: a WS2812/SK6812 strip on the Raspberry Pi RP1
 //!   `ws2812-pio` character device, as a light (`Pixels` plus `brightness`
 //!   and `color` controls).
@@ -22,6 +24,7 @@
 mod error;
 mod fan;
 mod kernel;
+mod power;
 mod strip;
 pub mod sysfs;
 mod thermal;
@@ -36,5 +39,6 @@ pub use fan::{
 };
 pub use kernel::{I2cLocation, KernelDevice, SysRoot};
 pub use lemnos_drivers_ws2812 as ws2812;
+pub use power::{DebugfsClock, UserspaceRegulator};
 pub use strip::{CONTROL_BRIGHTNESS, CONTROL_COLOR, LIGHT_INFO, Ws2812Pio};
 pub use thermal::{THERMAL_INFO, ThermalZone};

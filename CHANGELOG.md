@@ -24,6 +24,9 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - `lemnos-device`: `Rgbw`, the `Pixels` trait and `DynLight`/`DeviceRef::Light`/`BoxedDevice::Light` for lights; `gpio::{OutputLine, InputLine}` as devices over embedded-hal pins. Board drivers `ws2812`, `gpio-output`, `gpio-input`; `Buses::gpio_output`/`gpio_input` (`LinuxBuses` over GPIO uAPI v2).
 - `lemnos-linux-sys`: `poll_many` (a `poll` set) and `signal::SignalFd`.
 - `packaging/`: the `lemnosd` systemd unit, environment file, sysusers entry and preset, and a Gaia layer (`packaging/gaia/lemnosd.toml`) that builds static aarch64 musl binaries with the new `service` profile.
+- The Linux GPIO probe falls back to the character devices when `/sys/class/gpio` is absent (`CONFIG_GPIO_SYSFS=n`, feature `gpio-cdev`): chips with their labels and line counts, lines with their names (`line_name`, also the display name), consumers and whether they are in use.
+- `lemnos_linux::hal::AsyncGpioLine` (features `gpio-cdev` + `tokio`): `embedded_hal_async::digital::Wait` for a GPIO line, awaiting edge events through Tokio's reactor. `GpioLine` and `GpioLines` implement `AsRawFd`.
+- `lemnos_drivers_linux::UserspaceRegulator` (a `reg-userspace-consumer` supply as a `lemnos_hal::Regulator`) and `DebugfsClock` (a clock's rate from debugfs as a `ClockOutput`; gating stays with the kernel).
 - Size images for the device model: firmware `device-static`, `device` and `lite`, and Linux `sensors` / `sensors-lite` (three I2C sensors without the runtime). `scripts/check-sizes.sh` honours `CARGO_TARGET_DIR`.
 
 - `no_std`, allocation-free sensor drivers over embedded-hal I2C, blocking and async, in SI units:

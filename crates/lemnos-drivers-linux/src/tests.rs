@@ -234,3 +234,38 @@ fn ws2812_writes_the_rp1_layout_and_controls_apply() {
     assert_eq!(device.get(CONTROL_BRIGHTNESS), Ok(502));
     assert_eq!(Pixels::pixel_count(&strip), 4);
 }
+
+#[test]
+fn userspace_regulator_switches_through_state() {
+    use lemnos_hal::Regulator;
+    let tree = Tree::new();
+    tree.file("devices/platform/cam-supply/state", "disabled")
+        .file("class/regulator/regulator.5/microvolts", "2800000");
+    let mut supply = UserspaceRegulator::new(tree.path("devices/platform/cam-supply"))
+        .with_regulator(tree.path("class/regulator/regulator.5"));
+    assert!(!supply.is_enabled().unwrap());
+    supply.enable().unwrap();
+    assert_eq!(tree.read("devices/platform/cam-supply/state"), "enabled");
+    assert!(supply.is_enabled().unwrap());
+    assert_eq!(supply.voltage_uv().unwrap(), Some(2_800_000));
+    assert_eq!(
+        lemnos_hal::HalError::kind(&supply.set_voltage_uv(1, 2).unwrap_err()),
+        lemnos_hal::ErrorKind::Unsupported
+    );
+    supply.set_enabled(false).unwrap();
+    assert_eq!(tree.read("devices/platform/cam-supply/state"), "disabled");
+}
+
+#[test]
+fn debugfs_clock_reports_its_rate_and_refuses_gating() {
+    use lemnos_hal::ClockOutput;
+    let tree = Tree::new();
+    tree.file("debug/clk/cam0_clk/clk_rate", "24000000")
+        .file("debug/clk/cam0_clk/clk_enable_count", "1");
+    let mut clock = DebugfsClock::named(&tree.path("debug"), "cam0_clk");
+    assert_eq!(clock.rate_hz().unwrap(), 24_000_000);
+    clock.enable().unwrap();
+    assert!(clock.disable().is_err());
+    clock.set(Some(24_000_000)).unwrap();
+    assert!(clock.set(Some(19_200_000)).is_err());
+}

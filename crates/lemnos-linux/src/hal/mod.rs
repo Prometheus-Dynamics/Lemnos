@@ -24,6 +24,8 @@
 
 #[cfg(feature = "gpio-cdev")]
 mod gpio;
+#[cfg(all(feature = "gpio-cdev", feature = "tokio"))]
+mod gpio_async;
 #[cfg(feature = "i2c")]
 mod i2c;
 #[cfg(feature = "spi")]
@@ -34,6 +36,8 @@ pub use gpio::{
     EdgeEvent, EdgeKind, GpioChip, GpioChipInfo, GpioLine, GpioLineInfo, GpioLines, LineBias,
     LineDirection, LineDrive, LineEdge, LineSettings,
 };
+#[cfg(all(feature = "gpio-cdev", feature = "tokio"))]
+pub use gpio_async::AsyncGpioLine;
 #[cfg(feature = "i2c")]
 pub use i2c::{I2cBus, I2cMessage};
 #[cfg(feature = "spi")]

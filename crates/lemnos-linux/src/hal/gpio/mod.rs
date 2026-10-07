@@ -668,6 +668,18 @@ impl AsFd for GpioLine {
     }
 }
 
+impl std::os::fd::AsRawFd for GpioLine {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.lines.as_fd().as_raw_fd()
+    }
+}
+
+impl std::os::fd::AsRawFd for GpioLines {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
 impl ErrorType for GpioLine {
     type Error = IoError;
 }

@@ -35,11 +35,20 @@ impl DiscoveryProbe for GpioDiscoveryProbe {
         let mut discovery = ProbeDiscovery::default();
 
         if !gpio_root.exists() {
-            discovery.notes.push(format!(
-                "GPIO sysfs root '{}' is not present",
-                gpio_root.display()
-            ));
-            return Ok(discovery);
+            // No GPIO sysfs (`CONFIG_GPIO_SYSFS=n`): the character devices
+            // still describe every chip and line.
+            #[cfg(feature = "gpio-cdev")]
+            {
+                return Ok(self.discover_cdev(discovery));
+            }
+            #[cfg(not(feature = "gpio-cdev"))]
+            {
+                discovery.notes.push(format!(
+                    "GPIO sysfs root '{}' is not present",
+                    gpio_root.display()
+                ));
+                return Ok(discovery);
+            }
         }
 
         let entries = read_dir_sorted(&gpio_root).map_err(|error| {
@@ -68,7 +77,7 @@ impl DiscoveryProbe for GpioDiscoveryProbe {
             discovery.devices.push(chip);
 
             for offset in 0..chip_data.line_count {
-                match build_line_descriptor(&chip_data, &chip_id, offset) {
+                match build_line_descriptor(&chip_data, &chip_id, offset, None) {
                     Ok(line) => discovery.devices.push(line),
                     Err(note) => discovery.notes.push(note),
                 }
@@ -79,10 +88,80 @@ impl DiscoveryProbe for GpioDiscoveryProbe {
     }
 }
 
+impl GpioDiscoveryProbe {
+    /// Chips and lines from `/dev/gpiochipN` (GPIO uAPI v2): chip name,
+    /// label and line count, and each line's name and consumer.
+    #[cfg(feature = "gpio-cdev")]
+    fn discover_cdev(&self, mut discovery: ProbeDiscovery) -> ProbeDiscovery {
+        use crate::hal::GpioChip;
+        let chips = match GpioChip::paths_in(&self.paths.dev_root) {
+            Ok(chips) => chips,
+            Err(error) => {
+                discovery.notes.push(format!(
+                    "no GPIO sysfs and no GPIO character devices under '{}': {error}",
+                    self.paths.dev_root.display()
+                ));
+                return discovery;
+            }
+        };
+        for path in chips {
+            let chip = match GpioChip::open(&path) {
+                Ok(chip) => chip,
+                Err(error) => {
+                    discovery
+                        .notes
+                        .push(format!("cannot open '{}': {error}", path.display()));
+                    continue;
+                }
+            };
+            let info = chip.info().clone();
+            let data = GpioChipData {
+                chip_name: info.name.clone(),
+                chip_path: None,
+                devnode: Some(path.display().to_string()),
+                label: Some(info.label.clone()).filter(|l| !l.is_empty()),
+                base: None,
+                line_count: info.lines,
+            };
+            let descriptor = match build_chip_descriptor(&data) {
+                Ok(descriptor) => descriptor,
+                Err(note) => {
+                    discovery.notes.push(note);
+                    continue;
+                }
+            };
+            let chip_id = descriptor.id.clone();
+            discovery.devices.push(descriptor);
+            for offset in 0..data.line_count {
+                let line = chip.line_info(offset).ok().map(|l| LineExtra {
+                    name: l.name,
+                    consumer: l.consumer,
+                    used: l.used,
+                });
+                match build_line_descriptor(&data, &chip_id, offset, line.as_ref()) {
+                    Ok(line) => discovery.devices.push(line),
+                    Err(note) => discovery.notes.push(note),
+                }
+            }
+        }
+        discovery
+    }
+}
+
+/// What the character device says about a line.
+#[cfg_attr(not(feature = "gpio-cdev"), allow(dead_code))]
+#[derive(Debug, Clone, Default)]
+struct LineExtra {
+    name: String,
+    consumer: String,
+    used: bool,
+}
+
 #[derive(Debug, Clone)]
 struct GpioChipData {
     chip_name: String,
-    chip_path: String,
+    /// The sysfs directory, when discovered through sysfs.
+    chip_path: Option<String>,
     devnode: Option<String>,
     label: Option<String>,
     base: Option<u32>,
@@ -105,7 +184,7 @@ fn load_chip_data(
 
     Ok(GpioChipData {
         chip_name: chip_name.to_string(),
-        chip_path: chip_path.display().to_string(),
+        chip_path: Some(chip_path.display().to_string()),
         devnode: existing_path_string(&paths.gpio_devnode(chip_name)),
         label,
         base,
@@ -132,8 +211,11 @@ fn build_chip_descriptor(data: &GpioChipData) -> Result<DeviceDescriptor, String
     })
     .label("backend", "linux")
     .label("chip_name", data.chip_name.clone())
-    .property("sysfs_path", data.chip_path.clone())
     .property("line_count", u64::from(data.line_count));
+
+    if let Some(chip_path) = &data.chip_path {
+        builder = builder.property("sysfs_path", chip_path.clone());
+    }
 
     if let Some(label) = &data.label {
         builder = builder
@@ -163,6 +245,7 @@ fn build_line_descriptor(
     data: &GpioChipData,
     chip_id: &lemnos_core::DeviceId,
     offset: u32,
+    line: Option<&LineExtra>,
 ) -> Result<DeviceDescriptor, String> {
     let mut builder = DeviceDescriptor::builder_for_kind(
         format!("linux.gpio.line.{}.{}", data.chip_name, offset),
@@ -185,7 +268,6 @@ fn build_line_descriptor(
     .label("chip_name", data.chip_name.clone())
     .property("chip_name", data.chip_name.clone())
     .property("offset", u64::from(offset))
-    .property("sysfs_path", data.chip_path.clone())
     .link(DeviceLink::new(chip_id.clone(), DeviceRelation::Parent))
     .capability(gpio_capability("gpio.read", CapabilityAccess::READ))
     .capability(gpio_capability("gpio.write", CapabilityAccess::WRITE))
@@ -200,6 +282,23 @@ fn build_line_descriptor(
 
     if let Some(base) = data.base.and_then(|base| base.checked_add(offset)) {
         builder = builder.property("global_line", u64::from(base));
+    }
+
+    if let Some(chip_path) = &data.chip_path {
+        builder = builder.property("sysfs_path", chip_path.clone());
+    }
+
+    if let Some(line) = line {
+        if !line.name.is_empty() {
+            builder = builder
+                .display_name(line.name.clone())
+                .label("line_name", line.name.clone())
+                .property("line_name", line.name.clone());
+        }
+        if !line.consumer.is_empty() {
+            builder = builder.property("consumer", line.consumer.clone());
+        }
+        builder = builder.property("used", line.used);
     }
 
     if let Some(devnode) = &data.devnode {

@@ -9,6 +9,39 @@ use lemnos_core::{
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryProbe};
 
+/// Without GPIO sysfs the probe falls back to the character devices: on a
+/// host with readable `/dev/gpiochip*` it reports their chips and lines,
+/// otherwise a note.
+#[cfg(feature = "gpio-cdev")]
+#[test]
+fn gpio_probe_falls_back_to_character_devices() {
+    let root = TestRoot::new();
+    let paths = root.paths().with_dev_root("/dev");
+    let discovery = GpioDiscoveryProbe::new(paths)
+        .discover(&DiscoveryContext::new())
+        .expect("discover gpio");
+    let readable = crate::hal::GpioChip::paths()
+        .unwrap_or_default()
+        .iter()
+        .any(|path| crate::hal::GpioChip::open(path).is_ok());
+    if readable {
+        let chip = discovery
+            .devices
+            .iter()
+            .find(|d| d.kind == DeviceKind::GpioChip)
+            .expect("a chip");
+        assert!(!chip.properties.contains_key("sysfs_path"));
+        assert!(
+            discovery
+                .devices
+                .iter()
+                .any(|d| d.kind == DeviceKind::GpioLine && d.properties.contains_key("used"))
+        );
+    } else {
+        assert!(discovery.devices.is_empty() || !discovery.notes.is_empty());
+    }
+}
+
 #[test]
 fn thermal_probe_discovers_zones_as_platform_devices() {
     let root = TestRoot::new();

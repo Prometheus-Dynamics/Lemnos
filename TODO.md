@@ -84,12 +84,15 @@ for the user-facing summary of finished work.
         table, no discovery/registry/event log) that MCUs and small SoCs can
         share. Design before refactoring `lemnos-core`.
 - [ ] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`.
-- [ ] Linux regulators and clocks behind `Regulator`/`ClockOutput` (regulator
-      userspace-consumer and clock sysfs where the kernel exposes them).
-- [ ] GPIO discovery from the character devices (line names, consumers) when
-      `/sys/class/gpio` is absent (`CONFIG_GPIO_SYSFS=n`).
-- [ ] `embedded_hal_async::digital::Wait` for `GpioLine` through a reactor;
-      `SetDutyCycle` directly on sysfs PWM (today via `lemnos_bus::hal::HalPwm`).
+- [x] Linux regulators and clocks behind `Regulator`/`ClockOutput`:
+      `lemnos_drivers_linux::{UserspaceRegulator, DebugfsClock}` (the
+      `reg-userspace-consumer` `state` attribute; debugfs clock rates, gating left to the
+      kernel).
+- [x] GPIO discovery from the character devices (chip labels, line names, consumers)
+      when `/sys/class/gpio` is absent (`CONFIG_GPIO_SYSFS=n`), feature `gpio-cdev`.
+- [x] `embedded_hal_async::digital::Wait` for GPIO lines through Tokio's reactor:
+      `lemnos_linux::hal::AsyncGpioLine` (`gpio-cdev` + `tokio`). Needs a hardware check.
+- [ ] `SetDutyCycle` directly on sysfs PWM (today via `lemnos_bus::hal::HalPwm`).
 - [ ] Publish 2.0.0 (crates.io order: hal, linux-sys, core, ...).
 
 ## Done
