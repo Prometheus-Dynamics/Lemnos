@@ -269,3 +269,125 @@ fn debugfs_clock_reports_its_rate_and_refuses_gating() {
     clock.set(Some(24_000_000)).unwrap();
     assert!(clock.set(Some(19_200_000)).is_err());
 }
+
+/// A `pwm-fan` fan on a platform device, with the cooling device the thermal
+/// governor drives it through.
+fn pwm_fan_tree(tree: &Tree, linked: bool) {
+    tree.file("devices/platform/cooling_fan/hwmon/hwmon2/name", "pwmfan")
+        .file("devices/platform/cooling_fan/hwmon/hwmon2/pwm1", "255")
+        .file("devices/platform/cooling_fan/hwmon/hwmon2/pwm1_enable", "1")
+        .file("bus/platform/drivers/pwm-fan/bind", "")
+        .link(
+            "devices/platform/cooling_fan/driver",
+            "bus/platform/drivers/pwm-fan",
+        )
+        .link(
+            "devices/platform/cooling_fan/hwmon/hwmon2/device",
+            "devices/platform/cooling_fan",
+        )
+        .link(
+            "class/hwmon/hwmon2",
+            "devices/platform/cooling_fan/hwmon/hwmon2",
+        )
+        .file("devices/virtual/thermal/cooling_device0/type", "pwm-fan")
+        .file("devices/virtual/thermal/cooling_device0/cur_state", "2")
+        .file("devices/virtual/thermal/cooling_device0/max_state", "4")
+        .link(
+            "class/thermal/cooling_device0",
+            "devices/virtual/thermal/cooling_device0",
+        )
+        .file("devices/virtual/thermal/cooling_device1/type", "Processor")
+        .file("devices/virtual/thermal/cooling_device1/cur_state", "0")
+        .link(
+            "class/thermal/cooling_device1",
+            "devices/virtual/thermal/cooling_device1",
+        );
+    if linked {
+        tree.link(
+            "devices/virtual/thermal/cooling_device1/device",
+            "devices/platform/cooling_fan",
+        );
+    }
+}
+
+#[test]
+fn pwm_fan_restores_enable_and_cooling_state() {
+    let tree = Tree::new();
+    pwm_fan_tree(&tree, false);
+    let fan = HwmonFan::find(&tree.path("class/hwmon"), Some("pwmfan"))
+        .unwrap()
+        .expect("fan");
+    assert_eq!(fan.driver().as_deref(), Some(PWM_FAN_DRIVER));
+    // Bound while the kernel had it enabled (1); the board's restore_mode 2
+    // does not apply to a cooling-device fan.
+    let plan = fan.restore_plan(&tree.path("class/thermal"), 2).unwrap();
+    assert_eq!(
+        plan.kind,
+        RestoreKind::CoolingDevice {
+            enable: 1,
+            devices: vec![tree.path("class/thermal/cooling_device0")],
+        }
+    );
+    assert_eq!(FanRestore::from_line(&plan.to_line()), Some(plan.clone()));
+
+    // The controller took over.
+    fan.set_mode(MODE_FULL_SPEED).unwrap();
+    fan.set_pwm(255).unwrap();
+    let nudges = plan.apply().unwrap();
+    assert_eq!(
+        nudges,
+        vec![CoolingNudge {
+            state: 2,
+            via: Some(1)
+        }]
+    );
+    assert_eq!(
+        tree.read("class/hwmon/hwmon2/pwm1_enable"),
+        MODE_MANUAL.to_string()
+    );
+    assert_eq!(tree.read("class/thermal/cooling_device0/cur_state"), "2");
+}
+
+#[test]
+fn linked_cooling_device_wins_and_state_zero_goes_up() {
+    let tree = Tree::new();
+    pwm_fan_tree(&tree, true);
+    tree.file("devices/virtual/thermal/cooling_device1/max_state", "3");
+    let fan = HwmonFan::new(tree.path("class/hwmon/hwmon2"));
+    let plan = fan
+        .restore_plan_with(&tree.path("class/thermal"), 2, MODE_MANUAL)
+        .unwrap();
+    assert_eq!(
+        plan.kind,
+        RestoreKind::CoolingDevice {
+            enable: MODE_MANUAL,
+            devices: vec![tree.path("class/thermal/cooling_device1")],
+        }
+    );
+    assert_eq!(
+        plan.apply().unwrap(),
+        vec![CoolingNudge {
+            state: 0,
+            via: Some(1)
+        }]
+    );
+    assert_eq!(tree.read("class/thermal/cooling_device1/cur_state"), "0");
+}
+
+#[test]
+fn chip_fan_restores_automatic_mode() {
+    let tree = Tree::new();
+    tree.file("class/hwmon/hwmon1/name", "nct6775")
+        .file("class/hwmon/hwmon1/pwm1", "100")
+        .file("class/hwmon/hwmon1/pwm1_enable", "1")
+        .file("class/thermal/cooling_device0/type", "pwm-fan")
+        .file("class/thermal/cooling_device0/cur_state", "1");
+    let fan = HwmonFan::new(tree.path("class/hwmon/hwmon1"));
+    assert_eq!(fan.driver(), None);
+    let plan = fan.restore_plan(&tree.path("class/thermal"), 5).unwrap();
+    assert_eq!(plan.kind, RestoreKind::Automatic { mode: 5 });
+    assert_eq!(FanRestore::from_line(&plan.to_line()), Some(plan.clone()));
+    assert_eq!(plan.apply().unwrap(), Vec::new());
+    assert_eq!(tree.read("class/hwmon/hwmon1/pwm1_enable"), "5");
+    assert_eq!(FanRestore::from_line("bogus\t1\t/x"), None);
+}

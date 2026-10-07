@@ -20,9 +20,11 @@ StartLimitIntervalSec=0
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/bin/lemnosd
-# Fans go back to the kernel's curve however the service ends, including
-# SIGKILL and the watchdog's SIGABRT.
-ExecStopPost=/usr/bin/lemnos-ctl fan restore --all
+# Fans go back to the kernel however the service ends, including SIGKILL and
+# the watchdog's SIGABRT. `+` runs it as root: the thermal cooling devices it
+# re-applies (`cur_state`) are root-owned. It reads the plans lemnosd
+# recorded in /run/lemnos/fan-restore.
+ExecStopPost=+/usr/bin/lemnos-ctl fan restore --all
 
 # The loop pings every WatchdogSec/2 while it keeps completing passes.
 WatchdogSec=10s
@@ -36,7 +38,6 @@ RestartMaxDelaySec=10s
 
 Environment=LEMNOSD_BOARD=/etc/lemnos/board.toml
 Environment=LEMNOSD_SOCKET=/run/lemnos/lemnosd.sock
-Environment=LEMNOSD_UPDATE_STATUS=/run/pd-device/update.json
 EnvironmentFile=-/etc/default/lemnosd.env
 
 # A fixed user so clients get access through the `lemnos` group. The device

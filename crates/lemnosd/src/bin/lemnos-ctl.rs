@@ -18,7 +18,7 @@
 //!   led system <updating [0..1] [--phase P]|booting|rebooting|update-failed|rolled-back>
 //!   led locate [--seconds N]
 //!   led off
-//!   fan restore [--board PATH] [--all]
+//!   fan restore [--board PATH] [--state PATH] [--all]
 //!   validate <board.toml>...
 //! led options: --device ID --effect solid|blink|breathe|chase --blink
 //!   --period MS --depth 0..1 --fade MS --easing NAME --brightness 0..1 --seconds N
@@ -33,6 +33,7 @@ use lemnos_ipc::{
     ClientEvent, ClientOptions, DEFAULT_SOCKET, Easing, EffectKind, LedRequest, LedShow, LedStatus,
     Phase, SystemState, Update,
 };
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -86,6 +87,7 @@ fn main() -> ExitCode {
     };
     let socket = args
         .take("--socket")
+        .or_else(|| std::env::var("LEMNOSD_SOCKET").ok())
         .unwrap_or_else(|| DEFAULT_SOCKET.into());
     let client = args.take("--client").unwrap_or_else(|| "lemnos-ctl".into());
     let priority = args
@@ -98,7 +100,7 @@ fn main() -> ExitCode {
     };
     match command.as_str() {
         "validate" => validate(args),
-        "fan" => fan(args),
+        "fan" => fan(args, Path::new(&socket)),
         "led" => led(args, options),
         _ => devices(&command, args, options),
     }
@@ -123,59 +125,48 @@ fn validate(mut args: Args) -> ExitCode {
     }
 }
 
-/// `fan restore`: hands fans back to the kernel's automatic control by
-/// writing sysfs directly, so it works when `lemnosd` is gone (systemd runs
-/// it as `ExecStopPost`).
-fn fan(mut args: Args) -> ExitCode {
+/// `fan restore`: hands fans back to the kernel by writing sysfs directly,
+/// so it works when `lemnosd` is gone (systemd runs it as `ExecStopPost`):
+/// the plans `lemnosd` recorded at bind (`fan-restore` next to the socket, or
+/// `--state PATH`), then the board's fans, then with `--all` every hwmon fan.
+fn fan(mut args: Args, socket: &Path) -> ExitCode {
     if args.next().as_deref() != Some("restore") {
-        return fail("usage: fan restore [--board PATH] [--all]");
+        return fail("usage: fan restore [--board PATH] [--state PATH] [--all]");
     }
     let board = args
         .take("--board")
+        .or_else(|| std::env::var("LEMNOSD_BOARD").ok())
         .unwrap_or_else(|| lemnosd::DEFAULT_BOARD.into());
+    let state = args
+        .take("--state")
+        .map_or_else(|| lemnosd::fans::fan_state_path(socket), PathBuf::from);
     let all = args.flag("--all");
-    let sys = lemnos_drivers_linux::SysRoot::default();
-    let mut restored = 0;
-    if let Ok(definition) = BoardDefinition::from_path(&board) {
-        for spec in definition
-            .devices
-            .iter()
-            .filter(|d| d.driver == "hwmon-fan")
-        {
-            let mode = spec
-                .config
-                .get("restore_mode")
-                .and_then(lemnos_board::ConfigValue::as_i64)
-                .unwrap_or(2) as i32;
-            let fan = match &spec.path {
-                Some(path) => Some(lemnos_drivers_linux::HwmonFan::new(path)),
-                None => lemnos_drivers_linux::HwmonFan::find(
-                    &sys.hwmon(),
-                    spec.matches.get("name").map(String::as_str),
-                )
-                .ok()
-                .flatten(),
-            };
-            if let Some(fan) = fan
-                && fan.set_mode(mode).is_ok()
-            {
-                restored += 1;
+    let definition = BoardDefinition::from_path(&board).ok();
+    let restored = lemnosd::fans::restore_after_stop(
+        definition.as_ref(),
+        Some(&state),
+        &lemnos_drivers_linux::SysRoot::default(),
+        all,
+    );
+    let mut failed = false;
+    for item in &restored {
+        match &item.result {
+            Ok(()) => println!("restored {}", item.plan),
+            Err(error) => {
+                failed = true;
+                eprintln!("lemnos-ctl: {}: {error}", item.plan);
             }
         }
     }
-    if all {
-        for entry in lemnos_drivers_linux::sysfs::entries(&sys.hwmon()).unwrap_or_default() {
-            if entry.join("pwm1_enable").exists()
-                && lemnos_drivers_linux::HwmonFan::new(&entry)
-                    .restore_automatic()
-                    .is_ok()
-            {
-                restored += 1;
-            }
-        }
+    println!(
+        "restored {} fan(s)",
+        restored.iter().filter(|r| r.result.is_ok()).count()
+    );
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
-    println!("restored {restored} fan(s)");
-    ExitCode::SUCCESS
 }
 
 fn led(mut args: Args, options: ClientOptions) -> ExitCode {

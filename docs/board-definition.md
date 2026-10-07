@@ -42,7 +42,7 @@ backend = "auto"          # auto (default) | userspace | kernel
 bus = "i2c-1"             # bus devices: "i2c-<n>" or "spi-<bus>.<cs>"
 address = 0x18            # 7-bit I2C address; the driver's default if left out
 path = "/sys/class/hwmon/hwmon2"  # platform devices found by path
-match = { name = "pwm-fan" }      # platform devices found by attributes
+match = { name = "pwmfan" }       # platform devices found by attributes
 poll_ms = 10              # how often hosts read it
 writers = ["helios"]      # clients allowed to write its controls (empty: any)
 config = { gyro_address = 0x68, accel_range = "6g" }  # driver settings
@@ -71,7 +71,7 @@ Unknown fields are errors, so a typo does not silently fall back to a default.
 | `ina226`, `ina238` | `power-monitor` | I2C, default 0x40 | `shunt_micro_ohms` or `shunt_ohms`, `max_current_micro_amps` or `max_current_amps` (required) | `bus_voltage`, `shunt_voltage` V, `current` A, `power` W, (`ina238`) `die_temperature` °C |
 | `ina260` | `power-monitor` | I2C, default 0x40 | none (integrated shunt) | as `ina226` |
 | `vcm` | `lens` | I2C, default 0x0c | `chip` (`dw9714` `dw9807` `dw9817` `ak7375`, required) | control `position` |
-| `hwmon-fan` | `fan` | `match.name` or `path` | `restore_mode`: the `pwm1_enable` value that hands the fan back to the kernel when a host stops (2 on most drivers) | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
+| `hwmon-fan` | `fan` | `match.name` or `path` | `restore_mode`: for fan-controller chips, the automatic `pwm1_enable` mode that hands the fan back when a host stops (default 2). Not used for `pwm-fan` or other fans with a thermal cooling device: they get back the `pwm1_enable` read at bind and the cooling device re-applies the governor's level | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
 | `thermal-zone` | `temperature` | `match.type` or `path` | none | `temperature` °C |
 | `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1), `gpio` (informational), and the look defaults below | controls `brightness`, `color`; frames |
 | `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
@@ -127,7 +127,7 @@ config = { shunt_micro_ohms = 10000, max_current_micro_amps = 5000000 }
 [[devices]]
 id = "fan"
 driver = "hwmon-fan"
-match = { name = "pwm-fan" }
+match = { name = "pwmfan" }       # the Linux pwm-fan driver's hwmon name
 poll_ms = 1000
 
 [[devices]]

@@ -9,8 +9,11 @@ use std::path::{Path, PathBuf};
 
 /// Largest raw value the hwmon `pwm1` attribute accepts.
 pub const PWM_MAX: u32 = 255;
-/// `pwm1_enable` values: 0 full speed, 1 manual, 2 and up kernel or chip
-/// automatic control.
+/// `pwm1_enable` values. On most fan-controller chips: 0 full speed, 1
+/// manual, 2 and up the chip's automatic control. On `pwm-fan`: 0 PWM off
+/// (full speed), 1 enabled (the boot default), 2 enabled with the supply kept
+/// on; the thermal governor drives it through its cooling device instead
+/// (see [`FanRestore`](crate::FanRestore)).
 pub const MODE_FULL_SPEED: i32 = 0;
 pub const MODE_MANUAL: i32 = 1;
 pub const MODE_AUTOMATIC: i32 = 2;
@@ -109,9 +112,9 @@ impl HwmonFan {
         sysfs::write(&self.root.join("pwm1_enable"), mode.clamp(0, MODE_MAX))
     }
 
-    /// Hands the fan back to the kernel's automatic control
-    /// (`pwm1_enable = 2`), the failsafe a userspace fan controller restores
-    /// when it stops.
+    /// Writes `pwm1_enable = 2`, the automatic control of most fan-controller
+    /// chips. Not for `pwm-fan`, which has no automatic mode: hand fans back
+    /// with [`HwmonFan::restore_plan`] and [`FanRestore::apply`](crate::FanRestore::apply).
     pub fn restore_automatic(&self) -> Result<(), SysfsError> {
         self.set_mode(MODE_AUTOMATIC)
     }

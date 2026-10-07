@@ -9,13 +9,14 @@
 //!
 //! The loop is single-threaded: one `poll` over the socket, the clients and
 //! the next device or frame deadline. Lights render only while a fade or an
-//! effect runs (50 Hz), with no allocation per frame. On stop, fans with a
-//! `restore_mode` go back to the kernel's control.
+//! effect runs (50 Hz), with no allocation per frame. On stop, fans go back
+//! to the kernel's control (see [`fans`]).
 
 #![forbid(unsafe_code)]
 
 mod clients;
 mod devices;
+pub mod fans;
 mod light;
 mod notify;
 mod service;
@@ -27,8 +28,6 @@ pub use service::{Service, ServiceConfig, ServiceError};
 pub const DEFAULT_BOARD: &str = "/etc/lemnos/board.toml";
 /// The default socket.
 pub use lemnos_ipc::DEFAULT_SOCKET;
-/// The device package's update status file.
-pub const DEFAULT_UPDATE_STATUS: &str = "/run/pd-device/update.json";
 
 /// `raw × 10^exponent` as `f64`, dividing by exact powers of ten.
 pub(crate) fn scaled(raw: i32, exponent: i8) -> f64 {
@@ -40,12 +39,7 @@ pub(crate) fn scaled(raw: i32, exponent: i8) -> f64 {
     }
 }
 
-/// Writes each fan's restore mode (for a panic hook or a stop helper).
-pub fn restore_fans(targets: &[(std::path::PathBuf, i32)]) {
-    for (path, mode) in targets {
-        let _ = std::fs::write(path, mode.to_string());
-    }
-}
+pub use fans::restore_fans;
 
 /// Whether systemd is stopping the system (a restart or power-off).
 pub fn system_stopping() -> bool {

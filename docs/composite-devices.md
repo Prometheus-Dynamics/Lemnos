@@ -70,7 +70,7 @@ id = "fan-control"
 driver = "fan-controller"
 inputs = { cpu = "cpu-thermal.temperature", board = "power.power" }
 outputs = { fan = "fan" }
-config = { floor = 0.70, hysteresis = 3.0, curve.cpu = [[50.0, 0.70], [65.0, 0.85], [75.0, 1.0]], restore_mode = 2 }
+config = { floor = 0.70, hysteresis = 3.0, curve.cpu = [[50.0, 0.70], [65.0, 0.85], [75.0, 1.0]] }
 ```
 
 `inputs` and `outputs` map roles to `<device>.<channel>` and `<device>`; validation checks
@@ -137,10 +137,12 @@ reached through `lemnos-lite` and the optional bridge.
 The kernel's pwm-fan curve stays configured (the device tree's cooling maps) and is the
 fallback. The controller only ever *borrows* the fan:
 
-1. **Taking control** is `pwm1_enable = 1`. **Giving it back** is `pwm1_enable = 2` (the
-   kernel's automatic control) or the platform's equivalent, set per board as
-   `restore_mode` because hwmon drivers differ (`HwmonFan::restore_automatic` writes 2).
-   Verify on the CM5 kernel that 2 hands `pwm1` back to the thermal cooling device.
+1. **Taking control** is writing `pwm1`. **Giving it back** is the fan hand-back
+   (`FanRestore`, see [system-service.md](system-service.md#fan-hand-back)). On the
+   Raze's `pwm-fan` (measured on the CM5) there is no automatic `pwm1_enable` mode: the
+   hand-back restores the bind-time `pwm1_enable` (1) and makes the thermal cooling device
+   re-apply the governor's level. Chips with an automatic mode get `restore_mode`
+   (default 2).
 2. **Clean stop** (SIGTERM, reconfiguration, `enabled = false`): `release` restores the
    mode before the process exits.
 3. **Controller fault** (an output write fails, required inputs stale beyond a grace
@@ -149,8 +151,8 @@ fallback. The controller only ever *borrows* the fan:
 4. **Panic:** a panic hook restores the mode before aborting.
 5. **Crash, `kill -9`, missed watchdog:** no code of the process runs, so systemd restores
    the mode: `lemnosd.service` has
-   `ExecStopPost=/usr/bin/lemnos-ctl fan restore --all` (also a one-line `echo 2 >
-   pwm1_enable` fallback), which systemd runs after the main process exits for any reason,
+   `ExecStopPost=+/usr/bin/lemnos-ctl fan restore --all` (from the plans `lemnosd`
+   recorded at bind), which systemd runs after the main process exits for any reason,
    including SIGKILL and the watchdog's SIGABRT. `Restart=always` then brings the
    controller back.
 6. **Watchdog:** `lemnosd` sends `WATCHDOG=1` only while the control loop keeps completing
@@ -200,4 +202,3 @@ fan.
 - `max` versus weighted combination of inputs (proposed: `max`).
 - Whether tuned parameters persist in `lemnosd`'s state directory or only in the board
   definition (proposed: an overrides file, cleared by `lemnos-ctl fan reset`).
-- The restore value for the Raze's fan driver, measured on the CM5.

@@ -29,7 +29,7 @@ pub struct ServiceConfig {
     pub registry: DriverRegistry,
     /// The socket clients connect to.
     pub socket: PathBuf,
-    /// The device package's update status (`/run/pd-device/update.json`);
+    /// The device package's update status file (`LEMNOSD_UPDATE_STATUS`);
     /// `None` leaves updates off the light.
     pub update_status: Option<PathBuf>,
     /// Show the booting spinner for this long after start, or until a client
@@ -158,12 +158,11 @@ impl Service {
         &self.socket
     }
 
-    /// The fans to hand back to the kernel if the process dies: their
-    /// `pwm1_enable` files and modes.
-    pub fn fan_restore_targets(&self) -> Vec<(PathBuf, i32)> {
+    /// The fans to hand back to the kernel if the process dies.
+    pub fn fan_restore_targets(&self) -> Vec<lemnos_drivers_linux::FanRestore> {
         self.slots
             .iter()
-            .filter_map(|s| Some((s.restore_path.clone()?, s.restore_mode?)))
+            .filter_map(|s| s.restore.clone())
             .collect()
     }
 
@@ -190,7 +189,10 @@ impl Service {
         self.broadcast(&Message::Event(event));
     }
 
+    // The service logs to stderr (the journal).
+    #[allow(clippy::print_stderr)]
     fn build_devices(&mut self, now_ms: u64) {
+        let fans_before = self.slots.iter().filter(|s| s.restore.is_some()).count();
         for index in 0..self.slots.len() {
             let changed =
                 self.slots[index].build(&self.registry, &mut *self.buses, &mut SleepDelay, now_ms);
@@ -209,6 +211,15 @@ impl Service {
                     );
                 }
                 self.lights.push(light);
+            }
+        }
+        // A fan was bound for the first time: record how to hand it back,
+        // for the stop helper that runs after this process is gone.
+        let plans = self.fan_restore_targets();
+        if plans.len() != fans_before {
+            let path = crate::fans::fan_state_path(&self.socket);
+            if let Err(error) = crate::fans::write_fan_state(&path, &plans) {
+                eprintln!("lemnosd: {}: {error}", path.display());
             }
         }
     }

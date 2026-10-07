@@ -3,9 +3,9 @@
 
 use lemnos_board::{Buses, DeviceSpec, DriverRegistry};
 use lemnos_device::{BoxedDevice, DeviceInfo, DeviceStatus, MAX_CHANNELS, NO_VALUE};
+use lemnos_drivers_linux::FanRestore;
 use lemnos_hal::{ErrorKind, HalError};
 use lemnos_ipc::{ChannelDesc, ControlDesc, DeviceDesc};
-use std::path::PathBuf;
 
 /// The shortest and longest wait before rebuilding a device that failed.
 const RETRY_MIN_MS: u64 = 1_000;
@@ -35,19 +35,13 @@ pub(crate) struct Slot {
     pub next_build_ms: u64,
     retry_ms: u64,
     pub subscriptions: Vec<Subscription>,
-    /// For fans: the `pwm_mode` that hands the fan back to the kernel.
-    pub restore_mode: Option<i32>,
-    /// For fans: where that mode is written, for the panic hook.
-    pub restore_path: Option<PathBuf>,
+    /// For fans: how to hand the fan back to the kernel, worked out at the
+    /// first bind (before any client wrote to it).
+    pub restore: Option<FanRestore>,
 }
 
 impl Slot {
     pub fn new(spec: DeviceSpec) -> Self {
-        let restore_mode = spec
-            .config
-            .get("restore_mode")
-            .and_then(lemnos_board::ConfigValue::as_i64)
-            .and_then(|v| i32::try_from(v).ok());
         Self {
             spec,
             device: None,
@@ -61,8 +55,7 @@ impl Slot {
             next_build_ms: 0,
             retry_ms: RETRY_MIN_MS,
             subscriptions: Vec::new(),
-            restore_mode,
-            restore_path: None,
+            restore: None,
         }
     }
 
@@ -132,8 +125,8 @@ impl Slot {
                 self.device = Some(device);
                 self.retry_ms = RETRY_MIN_MS;
                 self.next_read_ms = now_ms;
-                if self.restore_mode.is_some() {
-                    self.restore_path = fan_mode_path(&self.spec, buses);
+                if self.restore.is_none() {
+                    self.restore = fan_restore_plan(&self.spec, buses);
                 }
                 self.set_status(DeviceStatus::Available, None)
             }
@@ -234,31 +227,18 @@ impl Slot {
         self.spec.writers.is_empty() || self.spec.writers.iter().any(|w| w == client)
     }
 
-    /// Hands a fan back to the kernel (`restore_mode`), if configured.
+    /// Hands a fan back to the kernel, if this is a fan.
     pub fn restore(&mut self) {
-        if let (Some(mode), Some(device)) = (self.restore_mode, self.device.as_mut())
-            && let Some(index) = device.info().control_index("pwm_mode")
-        {
-            let _ = device.set(index, mode);
+        if let Some(plan) = &self.restore {
+            let _ = plan.apply();
         }
     }
 }
 
-/// The `pwm1_enable` file of a hwmon fan, for the panic hook.
-fn fan_mode_path(spec: &DeviceSpec, buses: &mut dyn Buses) -> Option<PathBuf> {
-    if spec.driver != "hwmon-fan" {
-        return None;
-    }
-    let root = match &spec.path {
-        Some(path) => PathBuf::from(path),
-        None => lemnos_drivers_linux::HwmonFan::find(
-            &buses.sys().hwmon(),
-            spec.matches.get("name").map(String::as_str),
-        )
+/// A hwmon fan's hand-back plan, read at bind.
+fn fan_restore_plan(spec: &DeviceSpec, buses: &mut dyn Buses) -> Option<FanRestore> {
+    let sys = buses.sys();
+    let fan = crate::fans::find_fan(spec, &sys)?;
+    fan.restore_plan(&sys.thermal(), crate::fans::automatic_mode(spec))
         .ok()
-        .flatten()?
-        .root()
-        .to_path_buf(),
-    };
-    Some(root.join("pwm1_enable"))
 }

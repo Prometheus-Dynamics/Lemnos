@@ -2,7 +2,8 @@
 //!
 //! - [`HwmonFan`]: a hwmon fan (`pwm1`, `pwm1_enable`, `fan1_input`) as a
 //!   [`DeviceClass::Fan`](lemnos_device::DeviceClass::Fan) sensor and
-//!   control, with [`HwmonFan::restore_automatic`] as the failsafe.
+//!   control, with [`FanRestore`] as the failsafe that hands it back to the
+//!   kernel (the `pwm-fan` cooling device, or the chip's automatic mode).
 //! - [`ThermalZone`]: a thermal zone as a temperature sensor.
 //! - [`UserspaceRegulator`] and [`DebugfsClock`]: supplies and clocks the
 //!   kernel exposes, as `lemnos_hal::Regulator` and `ClockOutput`.
@@ -23,6 +24,7 @@
 
 mod error;
 mod fan;
+mod fan_restore;
 mod kernel;
 mod power;
 mod strip;
@@ -36,6 +38,9 @@ pub use error::SysfsError;
 pub use fan::{
     CONTROL_DUTY, CONTROL_MODE, DUTY, FAN_INFO, HwmonFan, MODE, MODE_AUTOMATIC, MODE_FULL_SPEED,
     MODE_MANUAL, MODE_MAX, PWM_MAX, SPEED, duty_to_pwm, pwm_to_duty,
+};
+pub use fan_restore::{
+    CoolingNudge, FanRestore, PWM_FAN_DRIVER, RestoreKind, reapply_cooling_state,
 };
 pub use kernel::{I2cLocation, KernelDevice, SysRoot};
 pub use lemnos_drivers_ws2812 as ws2812;

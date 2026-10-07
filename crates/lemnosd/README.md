@@ -13,7 +13,7 @@ drivers, and serves clients over `/run/lemnos/lemnosd.sock`:
 - events: status, control and LED-owner changes.
 
 It shows the device package's updates on the status light from
-`/run/pd-device/update.json` (no updater changes), hands fans back to the kernel when it
+the status file `LEMNOSD_UPDATE_STATUS` names (no updater changes), hands fans back to the kernel when it
 stops, and runs as a systemd `Type=notify` service with a watchdog. `lemnos-ctl` is its
 command-line client:
 

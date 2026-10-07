@@ -1,10 +1,14 @@
 //! Shows the device package's updates on the status light, from the files
 //! the updater already writes (no updater changes):
 //!
-//! - `/run/pd-device/update.json`: `{"state": "...", "progress": N, ...}`,
+//! - the status file `LEMNOSD_UPDATE_STATUS` names (for example
+//!   `/run/board/update.json`): `{"state": "...", "progress": N, ...}`,
 //!   rewritten on every state change;
-//! - `/run/pd-device/update/progress`: the image copy's progress (0-1000)
-//!   while staging, which `update status` maps to 100-950.
+//! - `update/progress` next to it: the image copy's progress (0-1000) while
+//!   staging, which `update status` maps to 100-950.
+//!
+//! The path is set only through `LEMNOSD_UPDATE_STATUS` (the device
+//! package's environment file); there is no built-in default.
 
 use lemnos_light::{Phase, SystemState};
 use std::path::{Path, PathBuf};

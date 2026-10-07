@@ -51,6 +51,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 ### Fixed
 
 - The facade's Linux API (`with_linux_backend*`, `refresh_with_linux`, hotplug helpers) now needs only `linux-backend` instead of the umbrella `linux` feature, and `LinuxBackend` implements every bus backend trait in every build (compiled-out buses return `BusError::UnsupportedInterface`). Builds can leave out `linux-usb` (libusb, a C toolchain) and `linux-uart` (serialport, nix); a `lemnos linux lite` CI matrix entry keeps that working.
+- Fan hand-back for the Linux `pwm-fan` driver (found on the Raze, kernel 7.2): `pwm-fan` has no automatic `pwm1_enable` mode (2 only keeps its regulator on), and its thermal governor drives it through a cooling device, so writing `pwm1_enable = 2` left the fan at the last userspace duty. `lemnos_drivers_linux::FanRestore` now restores the `pwm1_enable` read at bind and makes the cooling device re-apply the governor's level (`cur_state` written to a neighbouring state and back) for fans whose driver is `pwm-fan` or that have a linked cooling device; chips with an automatic mode keep `pwm1_enable = restore_mode` (default 2). `lemnosd` works the plan out at a fan's first bind and records it in `/run/lemnos/fan-restore`; `lemnos-ctl fan restore` (run as root by `ExecStopPost=+`) applies the recorded plans first. The Raze example matches the fan by its real hwmon name, `pwmfan`.
+- `LEMNOSD_UPDATE_STATUS` is the only place the update status path is set: `lemnosd` has no built-in default, the unit no longer sets it, and the staged `/etc/default/lemnosd.env` does (device packages redeclare the Gaia `lemnosd-env` item for another path).
 
 ## [2.0.0]
 

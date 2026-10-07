@@ -91,8 +91,7 @@ config = { count = 16, wire = "rgb", offset = 5, direction = "cw", brightness = 
 [[devices]]
 id = "fan"
 driver = "hwmon-fan"
-match = { name = "pwm-fan" }
-config = { restore_mode = 2 }   # the kernel curve takes over on stop
+match = { name = "pwmfan" }     # pwm-fan's hwmon name; handed back to its cooling device on stop
 writers = ["lemnosd.fan", "helios"]
 
 [[devices]]
@@ -232,7 +231,7 @@ lemnos-ctl led progress 0.4 --color 00ff40
 lemnos-ctl led system updating 0.4 --phase writing
 lemnos-ctl led locate --seconds 10
 lemnos-ctl led off
-lemnos-ctl fan restore --all          # direct sysfs write, works without the daemon
+lemnos-ctl fan restore --all          # direct sysfs writes, works without the daemon
 lemnos-ctl validate /etc/lemnos/board.toml
 ```
 
@@ -250,10 +249,12 @@ shown above application status (below `locate`):
 | idle status | as the client set it |
 
 The device package's updater drives `updating` with no changes beyond what it already does.
-`pd-device-update` writes `/run/pd-device/update.json` on every state change (`staging`,
+The updater writes a status file (`update.json`) on every state change (`staging`,
 `staged`, `trying`, `confirmed`, `rolled-back`, `error`) and the image copy's progress
-(0-1000) to `/run/pd-device/update/progress`. `lemnosd` reads both every 500 ms
-(`LEMNOSD_UPDATE_STATUS`) and holds a system intent of its own:
+(0-1000) to `update/progress` next to it. `lemnosd` reads both every 500 ms and holds a
+system intent of its own. The status file's path is set only by `LEMNOSD_UPDATE_STATUS`
+(the device package's `/etc/default/lemnosd.env`; for example `/run/board/update.json`);
+`lemnosd` has no built-in default and leaves updates off the light without it:
 
 | Updater state | Light |
 |---|---|
@@ -329,8 +330,9 @@ covers, and then upstream it.
   so) and restore subscriptions; LED intents are re-sent by clients that still want them.
   Devices are re-initialized from the board definition; a device that fails stays in the
   table as `missing` and is retried on its period, so one absent sensor never stops the
-  service. `ExecStopPost=lemnos-ctl fan restore --all` hands fans back to the kernel even
-  after `kill -9` (see [composite-devices.md](composite-devices.md)).
+  service. `ExecStopPost=+lemnos-ctl fan restore --all` hands fans back to the kernel even
+  after `kill -9`, from the plans the service recorded in `/run/lemnos/fan-restore` (see
+  [Fan hand-back](#fan-hand-back) and [composite-devices.md](composite-devices.md)).
 - **Startup ordering.** Early: `After=systemd-modules-load.service systemd-udevd.service`
   (I2C, PIO and hwmon drivers are bound), `Before=helios-peripherals.service
   photonvision.service`, `WantedBy=multi-user.target`. Vision services that need sensors
@@ -418,5 +420,32 @@ without building it:
   entries and writes through the same policy (its writer name, `lemnosd.fan`, is already in
   the Raze's `writers`);
 - the loop has per-device deadlines, the hook a composite's `step` needs;
-- `restore_mode`, the panic hook and `ExecStopPost=lemnos-ctl fan restore --all` already
-  return fans to the kernel curve, which is the failsafe the controller relies on.
+- the fan hand-back (on stop, the panic hook and `ExecStopPost=+lemnos-ctl fan restore
+  --all`) already returns fans to the kernel, which is the failsafe the controller relies on.
+
+## Fan hand-back
+
+Whenever `lemnosd` stops (cleanly, on a panic, or killed, through `ExecStopPost`), its fans
+go back to the kernel. There are two kinds of hwmon fan, and the hand-back differs
+(`lemnos_drivers_linux::FanRestore`, measured on the Raze):
+
+- **`pwm-fan`, and any fan with a linked thermal cooling device.** `pwm-fan` has no
+  automatic `pwm1_enable` mode: 0 disables the PWM (full speed), 1 is enabled (the boot
+  default), 2 keeps the supply regulator on. The thermal governor drives the fan through its
+  cooling device (`/sys/class/thermal/cooling_deviceN`, type `pwm-fan`) whatever
+  `pwm1_enable` says, but only on its next trip crossing, so a fan left at a userspace duty
+  stays there. The hand-back restores the `pwm1_enable` read when `lemnosd` bound the fan
+  (normally 1), then reads the cooling device's `cur_state` and writes a neighbouring state
+  and the current one back, which makes `pwm-fan` re-emit `cooling-levels[state]`. A fan
+  counts as this kind when its driver (`device/driver`) is `pwm-fan` or a cooling device is
+  linked to its device (cooling devices of type `pwm-fan` are used when none is linked).
+- **Fan-controller chips with a true automatic mode** get `pwm1_enable = restore_mode`
+  (default 2).
+
+`lemnosd` works the plan out at a fan's first bind, before any client writes to it, and
+records it in `fan-restore` next to the socket (`/run/lemnos/fan-restore`). `lemnos-ctl fan
+restore` applies the recorded plans, then the board's other fans, then with `--all` every
+other hwmon fan; fans it has no record of get `pwm1_enable = 1` on the cooling-device path.
+It runs as root (`ExecStopPost=+`) because cooling devices are root-owned; `lemnosd` itself
+needs the udev rules in `packaging/README.md`.
+

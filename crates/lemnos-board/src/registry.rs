@@ -330,8 +330,9 @@ const BUILTIN: &[DriverEntry] = &[
         class: DeviceClass::Fan,
         interface: Interface::Platform,
         default_address: None,
-        // `restore_mode`: the `pwm1_enable` value that hands the fan back to
-        // the kernel when a host stops (2 on most drivers).
+        // `restore_mode`: for chips with an automatic mode, the
+        // `pwm1_enable` value that hands the fan back when a host stops
+        // (default 2). `pwm-fan` fans go back through their cooling device.
         config_keys: &["restore_mode"],
         match_keys: &["name"],
         kernel: true,

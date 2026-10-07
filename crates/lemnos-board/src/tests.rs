@@ -148,7 +148,7 @@ fn raze_definition_parses_validates_and_round_trips() {
     assert_eq!(imu.bus, Some(BusRef::I2c(1)));
     assert_eq!(imu.address, Some(0x18));
     assert_eq!(imu.config["gyro_address"], ConfigValue::Integer(0x68));
-    assert_eq!(board.device("fan").unwrap().matches["name"], "pwm-fan");
+    assert_eq!(board.device("fan").unwrap().matches["name"], "pwmfan");
     let json = board.to_json_string();
     assert_eq!(BoardDefinition::from_json_str(&json).unwrap(), board);
 }
@@ -245,7 +245,7 @@ fn kernel_drivers_win_when_bound() {
         .file(&format!("{dev}/hwmon/hwmon4/power1_input"), "18000000")
         .file(&format!("{dev}/hwmon/hwmon4/temp1_input"), "31000")
         .link("class/hwmon/hwmon4", &format!("{dev}/hwmon/hwmon4"))
-        .file("class/hwmon/hwmon2/name", "pwm-fan")
+        .file("class/hwmon/hwmon2/name", "pwmfan")
         .file("class/hwmon/hwmon2/pwm1", "100")
         .file("class/hwmon/hwmon2/pwm1_enable", "2")
         .file("class/thermal/thermal_zone0/type", "cpu-thermal")

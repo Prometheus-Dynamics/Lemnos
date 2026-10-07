@@ -7,7 +7,7 @@
 
 use lemnos_board::{BoardDefinition, DriverRegistry, LinuxBuses};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
-use lemnosd::{DEFAULT_BOARD, DEFAULT_SOCKET, DEFAULT_UPDATE_STATUS, Service, ServiceConfig};
+use lemnosd::{DEFAULT_BOARD, DEFAULT_SOCKET, Service, ServiceConfig};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 fn main() -> ExitCode {
     let mut board = std::env::var("LEMNOSD_BOARD").unwrap_or_else(|_| DEFAULT_BOARD.into());
     let mut socket = std::env::var("LEMNOSD_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.into());
-    let mut update =
-        std::env::var("LEMNOSD_UPDATE_STATUS").unwrap_or_else(|_| DEFAULT_UPDATE_STATUS.into());
+    // No built-in path: the unit (or the environment file) names the device
+    // package's status file, and without it updates stay off the light.
+    let mut update = std::env::var("LEMNOSD_UPDATE_STATUS").unwrap_or_default();
     let mut booting: u64 = std::env::var("LEMNOSD_BOOTING_MS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -79,7 +80,7 @@ fn main() -> ExitCode {
     };
 
     // On a panic, hand fans back to the kernel before aborting.
-    let targets: Arc<Mutex<Vec<(PathBuf, i32)>>> = Arc::default();
+    let targets: Arc<Mutex<Vec<lemnos_drivers_linux::FanRestore>>> = Arc::default();
     let hook_targets = Arc::clone(&targets);
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
