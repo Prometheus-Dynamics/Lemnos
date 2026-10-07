@@ -8,7 +8,7 @@ use embedded_hal_async::i2c::I2c;
 #[derive(Debug)]
 pub struct Vcm<'a, I2C> {
     i2c: I2C,
-    state: State<'a>,
+    pub(crate) state: State<'a>,
 }
 
 impl<I2C: I2c> Vcm<'static, I2C> {

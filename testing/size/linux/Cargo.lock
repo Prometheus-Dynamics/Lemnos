@@ -63,10 +63,20 @@ dependencies = [
 name = "lemnos-core"
 version = "2.0.0"
 dependencies = [
+ "lemnos-device",
  "lemnos-hal",
  "ordered-float",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "lemnos-device"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-async",
+ "lemnos-hal",
 ]
 
 [[package]]

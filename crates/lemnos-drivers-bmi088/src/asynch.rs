@@ -17,7 +17,8 @@ pub struct Bmi088<I2C> {
     i2c: I2C,
     accel_address: u8,
     gyro_address: u8,
-    config: Option<Config>,
+    pub(crate) config: Option<Config>,
+    pub(crate) settings: Config,
 }
 
 impl<I2C: I2c> Bmi088<I2C> {
@@ -31,7 +32,14 @@ impl<I2C: I2c> Bmi088<I2C> {
             accel_address,
             gyro_address,
             config: None,
+            settings: Config::default(),
         }
+    }
+
+    /// Sets the configuration `lemnos_device::asynch::Device::init` applies.
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.settings = config;
+        self
     }
 
     /// A BMI088 that an earlier `init` already configured with
@@ -41,6 +49,7 @@ impl<I2C: I2c> Bmi088<I2C> {
     pub fn resume(i2c: I2C, accel_address: u8, gyro_address: u8, config: Config) -> Self {
         Self {
             config: Some(config),
+            settings: config,
             ..Self::with_addresses(i2c, accel_address, gyro_address)
         }
     }
@@ -90,6 +99,7 @@ impl<I2C: I2c> Bmi088<I2C> {
             self.gyro().write(w.address, w.bytes, w.value).await?;
         }
         self.config = Some(config);
+        self.settings = config;
         Ok(())
     }
 

@@ -57,6 +57,11 @@ run_sizes() {
   "$root_dir/scripts/check-sizes.sh"
 }
 
+run_matrix() {
+  echo "==> [matrix] Running the feature matrix"
+  "$root_dir/scripts/feature-matrix.sh"
+}
+
 run_package_surface() {
   echo "==> [package-surface] Validating package surface"
   cargo package --workspace --allow-dirty --no-verify
@@ -64,9 +69,10 @@ run_package_surface() {
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|sizes|package-surface|all]
+Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|sizes|matrix|package-surface|all]
 
-Defaults to `all`, which mirrors the non-matrix jobs in `.github/workflows/ci.yml`.
+Defaults to `all`, which mirrors the non-matrix jobs in `.github/workflows/ci.yml`;
+`matrix` runs the feature-matrix job (`scripts/feature-matrix.sh`).
 EOF
 }
 
@@ -84,6 +90,9 @@ case "$mode" in
     ;;
   sizes)
     run_sizes
+    ;;
+  matrix)
+    run_matrix
     ;;
   package-surface)
     run_package_surface

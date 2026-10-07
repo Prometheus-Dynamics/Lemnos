@@ -43,25 +43,9 @@ pub enum DeviceLifecycleState {
     Faulted,
 }
 
-/// Coarse single-value summary of a device's condition.
-///
-/// Collapses [`Availability`], [`DeviceHealth`], and [`DeviceLifecycleState`]
-/// into the one status most consumers publish. Variants are ordered from best
-/// to worst, so `max` picks the worse of two statuses.
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum DeviceStatus {
-    /// Present and usable.
-    #[default]
-    Available,
-    /// Present but running with warnings or incomplete information.
-    Degraded,
-    /// Present but its driver or last operation failed.
-    Faulted,
-    /// Removed, offline, or otherwise not reachable.
-    Missing,
-}
+/// Coarse single-value summary of a device's condition, shared with the
+/// compact device model (`lemnos_device::DeviceStatus`).
+pub use lemnos_device::DeviceStatus;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]

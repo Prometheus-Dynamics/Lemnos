@@ -149,3 +149,33 @@ fn async_driver_matches_blocking() {
     assert!(!lens.is_powered());
     assert_eq!(writes(&blocking.release()), writes(&lens.release()));
 }
+
+#[test]
+fn device_model_position_control() {
+    use lemnos_device::{DeviceRef, Quantity};
+    let mut lens = Vcm::dw9817(MockI2c::new().with_raw_target(DEFAULT_ADDRESS));
+    let mut device = DeviceRef::control(&mut lens);
+    assert!(!device.is_sensor());
+    let info = device.info();
+    assert_eq!(info.controls[0].quantity, Quantity::Position);
+    assert_eq!(info.controls[0].max, 1023);
+    device.init(&mut MockDelay::new()).unwrap();
+    assert_eq!(device.get(0), Err(lemnos_hal::ErrorKind::Unsupported));
+    assert_eq!(device.set(0, 445), Ok(445));
+    assert_eq!(device.get(0), Ok(445));
+    assert_eq!(
+        device.set(0, 1024),
+        Err(lemnos_hal::ErrorKind::InvalidInput)
+    );
+    assert_eq!(
+        device.read(&mut [0]),
+        Err(lemnos_hal::ErrorKind::Unsupported)
+    );
+    assert_eq!(info_for_bits(12).controls[0].max, 4095);
+
+    use lemnos_device::asynch::{Control, Device};
+    let mut lens = asynch::Vcm::chip(MockI2c::new().with_raw_target(0x0c), VcmChip::Ak7375);
+    block_on(Device::init(&mut lens, &mut MockDelay::new())).unwrap();
+    assert_eq!(block_on(Control::set(&mut lens, 0, 4095)), Ok(4095));
+    assert_eq!(block_on(Control::get(&mut lens, 0)), Ok(4095));
+}

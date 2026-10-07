@@ -1,0 +1,27 @@
+[package]
+name = "lemnos-size-linux-sensors"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+lemnos-linux = { path = "../../../crates/lemnos-linux", default-features = false, features = ["i2c"] }
+lemnos-drivers-bmi088 = { path = "../../../crates/lemnos-drivers-bmi088", default-features = false }
+lemnos-drivers-bmm150 = { path = "../../../crates/lemnos-drivers-bmm150", default-features = false }
+lemnos-drivers-ina2xx = { path = "../../../crates/lemnos-drivers-ina2xx", default-features = false }
+lemnos-lite = { path = "../../../crates/lemnos-lite", optional = true }
+
+[features]
+# The three sensors in a `lemnos-lite` table instead of their own APIs.
+lite = ["dep:lemnos-lite"]
+
+# Size-optimized, as a constrained Linux image would be built.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Not a workspace member: built only by scripts/check-sizes.sh.
+[workspace]

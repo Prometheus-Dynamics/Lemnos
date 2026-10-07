@@ -2,9 +2,13 @@
 # Measures what Lemnos costs a binary on small targets and compares it with
 # testing/size/baseline.txt:
 #   - bare-metal firmware images (flash bytes) using the no_std drivers, for a
-#     Cortex-M4F and an FPU-less RISC-V core, with and without `float`;
+#     Cortex-M4F and an FPU-less RISC-V core, with and without `float`, and
+#     the four drivers through the device-model traits (`device-static`), as
+#     `dyn` devices (`device`) and in a `lemnos-lite` table (`lite`);
 #   - stripped, size-optimized Linux binaries using the facade, plus an empty
-#     `main` built the same way for reference.
+#     `main` built the same way for reference;
+#   - stripped Linux binaries reading three sensors without the runtime,
+#     through the drivers' own APIs and through a `lemnos-lite` table.
 # There are no absolute budgets: the check fails when an image grows by more
 # than max(64 bytes, 1%) over the baseline. Shrinking is always fine. Linux
 # binaries go through the system linker and libc, which differ between hosts,
@@ -17,7 +21,7 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 size_dir="$root_dir/testing/size"
 baseline="$size_dir/baseline.txt"
-target_dir="$root_dir/target/size"
+target_dir="${CARGO_TARGET_DIR:-$root_dir/target}/size"
 update=false
 [[ "${1:-}" == "--update" ]] && update=true
 
@@ -34,7 +38,7 @@ trap 'rm -f "$results"' EXIT
 
 # Firmware: flash = .text + .rodata + .data.
 fw_targets=(thumbv7em-none-eabihf riscv32imac-unknown-none-elf)
-fw_images=(regs vcm ina2xx bmm150 bmi088 vcm,ina2xx,bmm150,bmi088 vcm,ina2xx,bmm150,bmi088,float)
+fw_images=(regs vcm ina2xx bmm150 bmi088 vcm,ina2xx,bmm150,bmi088 vcm,ina2xx,bmm150,bmi088,float device-static device lite)
 for target in "${fw_targets[@]}"; do
   rustup target add "$target" >/dev/null 2>&1 || true
   for image in "${fw_images[@]}"; do
@@ -56,6 +60,15 @@ for entry in "${linux_images[@]}"; do
   cargo build -q --release --manifest-path "$size_dir/linux/Cargo.toml" \
     --target-dir "$target_dir/linux-$name" ${features:+--features "$features"}
   echo "linux/$host/$name $(stat -c %s "$target_dir/linux-$name/release/lemnos-size-linux")" >>"$results"
+done
+
+# Linux without the runtime: three sensors on /dev/i2c-N, through each
+# driver's API and through a lemnos-lite table.
+for entry in "sensors|" "sensors-lite|lite"; do
+  name="${entry%%|*}"; features="${entry#*|}"
+  cargo build -q --release --manifest-path "$size_dir/linux-sensors/Cargo.toml" \
+    --target-dir "$target_dir/linux-$name" ${features:+--features "$features"}
+  echo "linux/$host/$name $(stat -c %s "$target_dir/linux-$name/release/lemnos-size-linux-sensors")" >>"$results"
 done
 
 if $update; then

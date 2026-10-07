@@ -8,6 +8,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-device` (`no_std`, no allocation): the compact device model from `docs/compact-model.md`. `DeviceClass`, `Quantity` with one canonical `Unit` each, fixed-point `Channel`s (`raw × 10^exponent`, `NO_VALUE` for no reading), `ControlInfo`, `DeviceInfo`; the `Device`, `Sensor` and `Control` traits (blocking and `asynch`); object-safe `DynSensor`/`DynControl`/`DynSensorControl`, `DeviceRef` and (feature `alloc`) `BoxedDevice`; `kernel::KernelBinding`, a data description of how a chip maps onto its mainline IIO/hwmon driver; `fixed::rescale`.
+- The BMI088, BMM150, INA2xx and VCM drivers implement the device model (blocking and async): `Imu` with acceleration (mm/s²) and angular rate (µrad/s), `Magnetometer` in nT, `PowerMonitor` with bus/shunt voltage, current, power and (INA238) die temperature, and `Lens` with a `position` control. Each publishes its `DeviceInfo` and kernel binding (`lemnos_drivers_bmi088::{INFO, KERNEL}`, `Model::info`/`Model::kernel`, ...). `Bmi088::with_config` and `Bmm150::with_config` set what the device model's `init` applies; The conversions (`Config::channels`, `MagneticFieldFixed::channels`, `ReadingFixed::channels`) use no 64-bit division.
+- `lemnos-lite` (`no_std`, no allocation): `Devices`, a static table of `dyn` devices with per-device `DeviceStatus`, last error kind, reads and control writes by index or name, and `poll` with per-device periods that re-initializes devices that are not up. Example: `linux_sensors` (BMI088 + BMM150 + INA238 on `/dev/i2c-N`).
+- Size images for the device model: firmware `device-static`, `device` and `lite`, and Linux `sensors` / `sensors-lite` (three I2C sensors without the runtime). `scripts/check-sizes.sh` honours `CARGO_TARGET_DIR`.
+
 - `no_std`, allocation-free sensor drivers over embedded-hal I2C, blocking and async, in SI units:
   - `lemnos-drivers-bmi088`: Bosch BMI088 IMU (both dies on one bus; ranges, data rates, die temperature).
   - `lemnos-drivers-bmm150`: Bosch BMM150 magnetometer with factory-trim compensation to µT and repetition presets.
@@ -19,6 +24,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- `DeviceStatus` now lives in `lemnos-device`; `lemnos_core::DeviceStatus` re-exports it (same variants, same serde names).
 - Toolchain pin moved to Rust 1.99.0 (MSRV stays 1.94). Dependencies upgraded to their newest releases (`syn` 3, `serialport` 4.10, `ordered-float` 5.5, `tokio` 1.53, `libc` 0.2.190, ...). No API changes. The size baseline is refreshed for 1.99 codegen.
 - `I2cRegisters::write` sends one register straight from a 6-byte buffer instead of going through the burst packer, and the drivers write registers one at a time, so images that never enable bursts do not link the packer.
 - `lemnos_drivers_ina2xx::Config` holds µΩ and µA (`Config::new(ohms, amps)` still exists with `float`).

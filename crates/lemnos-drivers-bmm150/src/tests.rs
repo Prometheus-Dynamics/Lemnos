@@ -218,3 +218,41 @@ fn fixed_read_matches_known_values() {
     });
     assert_eq!((overflow.x_ut16, overflow.z_ut16), (None, None));
 }
+
+#[test]
+fn device_model_reads_nanotesla() {
+    use lemnos_device::{DeviceRef, NO_VALUE};
+    let i2c = chip().with_registers(DEFAULT_ADDRESS, REG_DATA, &data(160, -320, 1000, XYZ1));
+    let config = Config {
+        preset: Preset::HighAccuracy,
+        data_rate: DataRate::Hz2,
+    };
+    let mut mag = Bmm150::new(i2c, DEFAULT_ADDRESS).with_config(config);
+    let mut device = DeviceRef::sensor(&mut mag);
+    device.init(&mut MockDelay::new()).unwrap();
+    let mut out = [0; 3];
+    device.read(&mut out).unwrap();
+    assert_eq!(&out[..2], &[50_000, -100_000]);
+    assert_eq!(device.info().model, "BMM150");
+    assert_eq!(
+        mag.release().register(DEFAULT_ADDRESS, REG_REP_XY),
+        Preset::HighAccuracy.registers().0
+    );
+    let overflow = MagneticFieldFixed {
+        x_ut16: None,
+        y_ut16: Some(1),
+        z_ut16: Some(-1),
+    };
+    assert_eq!(overflow.channels(), [NO_VALUE, 63, -63]);
+}
+
+#[test]
+fn async_device_model_matches_blocking() {
+    use lemnos_device::asynch::{Device, Sensor};
+    let i2c = chip().with_registers(DEFAULT_ADDRESS, REG_DATA, &data(160, -320, 1000, XYZ1));
+    let mut mag = asynch::Bmm150::new(i2c, DEFAULT_ADDRESS);
+    let mut out = [0; 3];
+    block_on(Device::init(&mut mag, &mut MockDelay::new())).unwrap();
+    block_on(Sensor::read(&mut mag, &mut out)).unwrap();
+    assert_eq!(&out[..2], &[50_000, -100_000]);
+}

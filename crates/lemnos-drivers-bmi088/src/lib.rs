@@ -15,9 +15,12 @@
 #![forbid(unsafe_code)]
 
 pub mod asynch;
+mod device;
 
 #[cfg(test)]
 mod tests;
+
+pub use device::{INFO, KERNEL};
 
 #[cfg(feature = "float")]
 use core::f32::consts::PI;
@@ -250,6 +253,36 @@ impl Config {
         }
     }
 
+    /// Converts raw counts to the device-model channels: acceleration in
+    /// mm/s² and angular rate in µrad/s (see [`INFO`]).
+    pub fn channels(self, accel: [i16; 3], gyro: [i16; 3]) -> [i32; 6] {
+        // Full scale in mm/s² (g = 9.80665 m/s²) × 2^8 and in µrad/s × 2^5:
+        // a count converts with one 32×32→64-bit multiply and a shift, and no
+        // 64-bit division (a library call on 32-bit MCUs).
+        let a: i32 = match self.accel_range {
+            AccelRange::G3 => 7_531_507,
+            AccelRange::G6 => 15_063_014,
+            AccelRange::G12 => 30_126_029,
+            AccelRange::G24 => 60_252_058,
+        };
+        let g: i32 = match self.gyro_range {
+            GyroRange::Dps2000 => 1_117_010_721,
+            GyroRange::Dps1000 => 558_505_361,
+            GyroRange::Dps500 => 279_252_680,
+            GyroRange::Dps250 => 139_626_340,
+            GyroRange::Dps125 => 69_813_170,
+        };
+        let scale = |v: i16, m: i32, shift: u32| ((i64::from(v) * i64::from(m)) >> shift) as i32;
+        [
+            scale(accel[0], a, 23),
+            scale(accel[1], a, 23),
+            scale(accel[2], a, 23),
+            scale(gyro[0], g, 20),
+            scale(gyro[1], g, 20),
+            scale(gyro[2], g, 20),
+        ]
+    }
+
     /// Converts raw counts with this configuration's ranges.
     #[cfg(feature = "float")]
     pub fn sample(self, accel: [i16; 3], gyro: [i16; 3]) -> ImuSample {
@@ -362,6 +395,7 @@ pub struct Bmi088<I2C> {
     accel_address: u8,
     gyro_address: u8,
     config: Option<Config>,
+    settings: Config,
 }
 
 impl<I2C: I2c> Bmi088<I2C> {
@@ -377,7 +411,15 @@ impl<I2C: I2c> Bmi088<I2C> {
             accel_address,
             gyro_address,
             config: None,
+            settings: Config::default(),
         }
+    }
+
+    /// Sets the configuration `lemnos_device::Device::init` applies (the
+    /// default matches the chip's reset values).
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.settings = config;
+        self
     }
 
     /// A BMI088 that an earlier [`init`](Self::init) already configured with
@@ -387,6 +429,7 @@ impl<I2C: I2c> Bmi088<I2C> {
     pub fn resume(i2c: I2C, accel_address: u8, gyro_address: u8, config: Config) -> Self {
         Self {
             config: Some(config),
+            settings: config,
             ..Self::with_addresses(i2c, accel_address, gyro_address)
         }
     }
@@ -442,6 +485,7 @@ impl<I2C: I2c> Bmi088<I2C> {
             self.gyro().write(w.address, w.bytes, w.value)?;
         }
         self.config = Some(config);
+        self.settings = config;
         Ok(())
     }
 

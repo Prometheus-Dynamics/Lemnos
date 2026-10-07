@@ -10,7 +10,7 @@ use lemnos_hal::register::{AddressWidth, I2cRegisters};
 pub struct Ina<I2C> {
     i2c: I2C,
     address: u8,
-    setup: Setup,
+    pub(crate) setup: Setup,
 }
 
 impl<I2C: I2c> Ina<I2C> {

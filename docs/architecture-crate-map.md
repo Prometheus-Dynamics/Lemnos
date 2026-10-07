@@ -6,6 +6,10 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 
 0. `lemnos-hal` (`no_std`, no allocation)
    embedded-hal 1.0 and embedded-hal-async (re-exported) as the bus vocabulary, plus what they lack: register maps over I2C/SPI (`RegisterBus`, blocking and async), `Regulator`, `ClockOutput`, the portable `ErrorKind`, and mocks.
+0. `lemnos-device` (`no_std`, no allocation)
+   The compact device model: device classes, quantities with canonical units, fixed-point channels and controls, the `Device`/`Sensor`/`Control` traits drivers implement, their object-safe forms, kernel IIO/hwmon bindings as data, and `DeviceStatus`. See [compact-model.md](compact-model.md).
+0. `lemnos-lite` (`no_std`, no allocation)
+   A static table of L1 devices with status, last error and polling, for firmware and small Linux images.
 1. `lemnos-core` (`no_std` + `alloc`)
    Shared device descriptors, interaction requests and responses, state snapshots, events, issues, and value types.
 2. `lemnos-bus`
@@ -29,7 +33,7 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 - `lemnos-linux-sys` holds the workspace's only `unsafe` code: Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs, each block with a `// SAFETY:` comment.
 - `lemnos-drivers-gpio`, `-pwm`, `-i2c`, `-spi`, `-uart`, `-usb` provide generic runtime drivers and manifests for common interface kinds (std).
 - `lemnos-drivers-vcm` is a `no_std` device driver crate (camera focus VCMs) over embedded-hal; future device drivers follow it.
-- `lemnos-drivers-bmi088` (IMU), `lemnos-drivers-bmm150` (magnetometer) and `lemnos-drivers-ina2xx` (power monitors) are `no_std` sensor drivers in the same style.
+- `lemnos-drivers-bmi088` (IMU), `lemnos-drivers-bmm150` (magnetometer) and `lemnos-drivers-ina2xx` (power monitors) are `no_std` sensor drivers in the same style. All four implement the `lemnos-device` model next to their own APIs.
 
 ## Authoring And Test Support
 

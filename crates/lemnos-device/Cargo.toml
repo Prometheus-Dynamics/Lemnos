@@ -1,0 +1,31 @@
+[package]
+name = "lemnos-device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std compact device model for Lemnos: device classes, quantities, fixed-point channels, controls, and the Sensor/Control traits drivers implement"
+documentation = "https://docs.rs/lemnos-device"
+readme = "README.md"
+keywords = ["embedded-hal", "no-std", "sensor", "device", "lemnos"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# `Channel::to_f32` and `ControlInfo::from_f32`.
+float = []
+# `BoxedDevice`, an owned type-erased device (needs `alloc`).
+alloc = []
+# Serialize/deserialize the plain-data types (`DeviceStatus`, classes, quantities).
+serde = ["dep:serde"]
+
+[dependencies]
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+lemnos-hal.workspace = true
+serde = { workspace = true, features = ["derive"], optional = true }

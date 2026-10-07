@@ -10,6 +10,8 @@ The repository is split into small crates so applications, custom drivers, Linux
 
 - `crates/lemnos`: consumer-facing facade and builder API
 - `crates/lemnos-hal`: `no_std` hardware vocabulary: embedded-hal 1.0 (re-exported), register maps over I2C/SPI, regulators, clocks, `ErrorKind`, mocks
+- `crates/lemnos-device`: `no_std` compact device model: device classes, quantities and units, fixed-point channels, controls, `Sensor`/`Control` traits
+- `crates/lemnos-lite`: `no_std` static device table with status and polling, for firmware and small Linux images
 - `crates/lemnos-core`: shared types, requests, state, and descriptors (`no_std` + `alloc`)
 - `crates/lemnos-bus`: typed bus/session traits for hardware access
 - `crates/lemnos-discovery`: discovery probes, inventory snapshots, and diffing
@@ -63,6 +65,15 @@ use lemnos_hal::{AddressWidth, I2cRegisters, RegisterBus};
 fn chip_id<I: lemnos_hal::i2c::I2c>(i2c: I) -> Option<u32> {
     I2cRegisters::new(i2c, 0x60, AddressWidth::Bits16).read(0x300a, 2).ok()
 }
+```
+
+The drivers also implement the compact device model (`lemnos-device`), so generic code reads any of them the same way, and `lemnos-lite` keeps a static table of them with status and polling:
+
+```rust
+let mut imu = lemnos_drivers_bmi088::Bmi088::new(i2c);
+let mut devices = lemnos_lite::Devices::new([lemnos_lite::sensor("imu", &mut imu).every(10)]);
+devices.init_all(&mut delay);
+devices.poll(now_ms, &mut delay, &mut buf, |r| { /* r.info.channels, r.values */ });
 ```
 
 Inside the runtime, `lemnos::bus::hal` turns any session into an embedded-hal bus or pin, so the same drivers run on whatever backend the runtime opened.

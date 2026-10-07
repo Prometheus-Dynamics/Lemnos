@@ -15,6 +15,7 @@ pub struct Bmm150<I2C> {
     i2c: I2C,
     address: u8,
     trim: Option<Trim>,
+    pub(crate) settings: Config,
 }
 
 impl<I2C: I2c> Bmm150<I2C> {
@@ -23,7 +24,14 @@ impl<I2C: I2c> Bmm150<I2C> {
             i2c,
             address,
             trim: None,
+            settings: Config::default(),
         }
+    }
+
+    /// Sets the configuration the device model's `init` applies.
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.settings = config;
+        self
     }
 
     /// A BMM150 that an earlier `init` already powered up and configured,
@@ -33,6 +41,7 @@ impl<I2C: I2c> Bmm150<I2C> {
             i2c,
             address,
             trim: Some(trim),
+            settings: Config::default(),
         }
     }
 
@@ -66,6 +75,7 @@ impl<I2C: I2c> Bmm150<I2C> {
         regs.write8(REG_REP_Z, rep_z).await?;
         regs.write8(REG_OP_MODE, config.op_mode()).await?;
         self.trim = Some(Trim::from_registers(x1y1, z4x2y2, rest));
+        self.settings = config;
         Ok(())
     }
 

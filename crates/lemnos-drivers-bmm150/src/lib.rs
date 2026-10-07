@@ -12,9 +12,12 @@
 #![forbid(unsafe_code)]
 
 pub mod asynch;
+mod device;
 
 #[cfg(test)]
 mod tests;
+
+pub use device::{INFO, KERNEL};
 
 use core::fmt;
 use embedded_hal::delay::DelayNs;
@@ -270,6 +273,27 @@ pub struct MagneticFieldFixed {
     pub z_ut16: Option<i32>,
 }
 
+impl MagneticFieldFixed {
+    /// The device-model channels: X, Y, Z in nT, `lemnos_device::NO_VALUE`
+    /// for an axis without a value (see [`INFO`]).
+    pub fn channels(self) -> [i32; 3] {
+        // 1/16 µT is 62.5 nT; round half away from zero.
+        let nt = |v: Option<i32>| match v {
+            Some(v) => {
+                // The sensor's ±2500 µT is ±40 000 counts, so this fits an i32.
+                let x = v.saturating_mul(125);
+                if x >= 0 {
+                    x.saturating_add(1) >> 1
+                } else {
+                    -(x.saturating_neg().saturating_add(1) >> 1)
+                }
+            }
+            None => lemnos_device::NO_VALUE,
+        };
+        [nt(self.x_ut16), nt(self.y_ut16), nt(self.z_ut16)]
+    }
+}
+
 /// A compensated field reading in µT.
 #[cfg(feature = "float")]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -329,6 +353,7 @@ pub struct Bmm150<I2C> {
     i2c: I2C,
     address: u8,
     trim: Option<Trim>,
+    settings: Config,
 }
 
 impl<I2C: I2c> Bmm150<I2C> {
@@ -338,7 +363,14 @@ impl<I2C: I2c> Bmm150<I2C> {
             i2c,
             address,
             trim: None,
+            settings: Config::default(),
         }
+    }
+
+    /// Sets the configuration the device model's `init` applies.
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.settings = config;
+        self
     }
 
     /// A BMM150 that an earlier `init` already powered up and configured,
@@ -348,6 +380,7 @@ impl<I2C: I2c> Bmm150<I2C> {
             i2c,
             address,
             trim: Some(trim),
+            settings: Config::default(),
         }
     }
 
@@ -387,6 +420,7 @@ impl<I2C: I2c> Bmm150<I2C> {
         regs.write8(REG_REP_Z, rep_z)?;
         regs.write8(REG_OP_MODE, config.op_mode())?;
         self.trim = Some(Trim::from_registers(x1y1, z4x2y2, rest));
+        self.settings = config;
         Ok(())
     }
 

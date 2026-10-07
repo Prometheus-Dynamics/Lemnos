@@ -159,3 +159,43 @@ fn fixed_point_matches_float() {
     assert_eq!(decode_temperature_mc(0xff, 0xe0), 22_875);
     assert_eq!(bmi.temperature_mc().unwrap(), 23_000);
 }
+
+#[test]
+fn device_model_reads_mm_per_s2_and_urad_per_s() {
+    use lemnos_device::{DeviceRef, NO_VALUE};
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([16384, -16384, 0]))
+        .with_registers(GYRO_ADDRESS, GYR_DATA, &axes([16384, 0, -32768]));
+    let config = Config {
+        accel_range: AccelRange::G3,
+        ..Config::default()
+    };
+    let mut bmi = Bmi088::new(i2c).with_config(config);
+    let mut device = DeviceRef::sensor(&mut bmi);
+    let mut out = [NO_VALUE; 7];
+    assert_eq!(
+        device.read(&mut out),
+        Err(lemnos_hal::ErrorKind::Unavailable)
+    );
+    device.init(&mut MockDelay::new()).unwrap();
+    device.read(&mut out).unwrap();
+    assert_eq!(device.info().channels.len(), 6);
+    // Half of ±3 g is 14.709975 m/s².
+    assert_eq!(&out[..3], &[14_709, -14_710, 0]);
+    // Half of ±2000 °/s is 17.453293 rad/s.
+    assert_eq!(&out[3..6], &[17_453_292, 0, -34_906_586]);
+    assert_eq!(out[6], NO_VALUE);
+    assert_eq!(bmi.config(), Some(config));
+    assert_eq!(KERNEL.channels.len(), INFO.channels.len());
+}
+
+#[test]
+fn async_device_model_matches_blocking() {
+    use lemnos_device::asynch::{Device, Sensor};
+    let i2c = imu().with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([16384, 0, 0]));
+    let mut bmi = asynch::Bmi088::new(i2c);
+    let mut out = [0; 6];
+    block_on(Device::init(&mut bmi, &mut MockDelay::new())).unwrap();
+    block_on(Sensor::read(&mut bmi, &mut out)).unwrap();
+    assert_eq!(out[0], 29_419);
+}

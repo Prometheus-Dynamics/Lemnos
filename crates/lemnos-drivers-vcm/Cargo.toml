@@ -18,6 +18,7 @@ workspace = true
 [dependencies]
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
+lemnos-device.workspace = true
 lemnos-hal.workspace = true
 
 [dev-dependencies]

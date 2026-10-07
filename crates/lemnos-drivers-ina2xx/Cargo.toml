@@ -20,11 +20,12 @@ default = ["float"]
 # `f32` readings in SI units and `Config::new` from ohms and amperes. Off:
 # integer readings only (`read_fixed`), which keeps software float routines out
 # of images for MCUs without an FPU.
-float = []
+float = ["lemnos-device/float"]
 
 [dependencies]
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
+lemnos-device.workspace = true
 lemnos-hal.workspace = true
 
 [dev-dependencies]

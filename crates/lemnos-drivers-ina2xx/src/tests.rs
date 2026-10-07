@@ -279,3 +279,56 @@ fn fixed_readings_use_exact_integer_units() {
     assert_eq!(reading.die_temperature_mc, Some(25_000));
     assert_eq!(ina.release().register16(0x02), 2000);
 }
+
+#[test]
+fn device_model_channels_follow_the_model() {
+    use lemnos_device::{DeviceRef, NO_VALUE};
+    let i2c = bus(0xfe, 0xff, 0x2260)
+        .with16(0x01, 4000)
+        .with16(0x02, 9600)
+        .with16(0x03, 3840)
+        .with16(0x04, 16000);
+    let config = Config::from_micro(10_000, 8_192_000);
+    let mut ina = Ina::new(i2c, DEFAULT_ADDRESS, Model::Ina226, config).unwrap();
+    let mut device = DeviceRef::sensor(&mut ina);
+    device
+        .init(&mut lemnos_hal::mock::MockDelay::new())
+        .unwrap();
+    let mut out = [NO_VALUE; 5];
+    device.read(&mut out).unwrap();
+    assert_eq!(device.info().channels.len(), 4);
+    assert_eq!(
+        out,
+        [12_000_000, 10_000_000, 4_000_000, 24_000_000, NO_VALUE]
+    );
+    assert_eq!(
+        device.read(&mut out[..3]),
+        Err(lemnos_hal::ErrorKind::InvalidInput)
+    );
+
+    let i2c = bus(0x3e, 0x3f, 0x2381)
+        .with16(0x07, 16384)
+        .with(0x08, &[0x0f, 0x00, 0x00]);
+    let mut ina = asynch::Ina::new(
+        i2c,
+        DEFAULT_ADDRESS,
+        Model::Ina238,
+        Config::from_micro(10_000, 2_000_000),
+    )
+    .unwrap();
+    use lemnos_device::asynch::{Device, Sensor};
+    block_on(Device::init(
+        &mut ina,
+        &mut lemnos_hal::mock::MockDelay::new(),
+    ))
+    .unwrap();
+    block_on(Sensor::read(&mut ina, &mut out)).unwrap();
+    assert_eq!(Device::info(&ina).model, "INA238");
+    // 16384 × 61035 nA = 0.99999744 A.
+    assert_eq!(out[2], 999_997);
+    assert_eq!(Model::Ina238.kernel().channels.len(), 5);
+    for model in [Model::Ina226, Model::Ina238, Model::Ina260] {
+        assert_eq!(model.info().channels.len(), model.kernel().channels.len());
+        assert_eq!(model.info().model, model.name());
+    }
+}

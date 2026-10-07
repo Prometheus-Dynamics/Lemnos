@@ -12,11 +12,13 @@
 #![forbid(unsafe_code)]
 
 pub mod asynch;
+mod device;
 mod format;
 
 #[cfg(test)]
 mod tests;
 
+pub use device::info_for_bits;
 pub use format::{FormatError, VcmChip, VcmFormat};
 
 use core::fmt;

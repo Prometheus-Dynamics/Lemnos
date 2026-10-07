@@ -6,6 +6,18 @@ Lemnos 2.0 becoming the hardware foundation under Styx
 ([docs/foundation.md](docs/foundation.md)). See [CHANGELOG.md](CHANGELOG.md)
 for the user-facing summary of finished work.
 
+## Second pass ([docs/compact-model.md](docs/compact-model.md))
+
+- [x] Phase 1: `lemnos-device` (compact L1 model) implemented by the BMI088, BMM150,
+      INA2xx and VCM drivers; decisions confirmed; size images `device-static`, `device`.
+- [x] Phase 2: `lemnos-lite` (static table, status, polling); firmware image `lite`,
+      Linux images `sensors`/`sensors-lite`, example `linux_sensors`.
+- [ ] Phase 3: the generic L3 adapter; board definitions; hwmon fan and thermal zones as
+      L1 devices; HeliOS binds the Raze sensors from `sensors.toml`.
+- [ ] Phase 4: `lemnosd` (see `docs/system-service.md`).
+- [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
+      shared probe code).
+
 ## Foundation (2.0)
 
 ### Done

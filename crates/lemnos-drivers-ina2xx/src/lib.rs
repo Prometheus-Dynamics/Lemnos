@@ -18,9 +18,14 @@
 #![forbid(unsafe_code)]
 
 pub mod asynch;
+mod device;
 
 #[cfg(test)]
 mod tests;
+
+pub use device::{
+    INFO_INA226, INFO_INA238, INFO_INA260, KERNEL_INA226, KERNEL_INA238, KERNEL_INA260,
+};
 
 #[cfg(test)]
 #[test]
@@ -147,6 +152,30 @@ pub struct ReadingFixed {
     pub power_nw: u64,
     /// Only the INA238 measures it.
     pub die_temperature_mc: Option<i32>,
+}
+
+impl ReadingFixed {
+    /// The device-model channels: bus voltage in µV, shunt voltage in nV,
+    /// current in µA, power in µW and die temperature in m°C
+    /// (`lemnos_device::NO_VALUE` where the model has none). See
+    /// [`Model::info`].
+    pub fn channels(self) -> [i32; 5] {
+        // n to µ, rounded, through `div_u64` (no 64-bit division libcall).
+        let micro =
+            |n: u64| i32::try_from(div_u64(n.saturating_add(500), 1000)).unwrap_or(i32::MAX);
+        let current = micro(self.current_na.unsigned_abs());
+        [
+            i32::try_from(self.bus_voltage_uv).unwrap_or(i32::MAX),
+            self.shunt_voltage_nv,
+            if self.current_na < 0 {
+                -current
+            } else {
+                current
+            },
+            micro(self.power_nw),
+            self.die_temperature_mc.unwrap_or(lemnos_device::NO_VALUE),
+        ]
+    }
 }
 
 /// One measurement, in SI units.

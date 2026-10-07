@@ -1,6 +1,7 @@
 # Compact device model and lite runtime
 
-Status: proposal. Builds on [foundation.md](foundation.md).
+Status: phases 1 and 2 implemented (`lemnos-device`, `lemnos-lite`); the decisions below are
+confirmed. Builds on [foundation.md](foundation.md).
 
 ## Goal
 
@@ -167,6 +168,89 @@ microcontroller's L2 devices appear in a Linux L3 runtime over UART or USB. That
 make a sensor board a remote Lemnos device. It isn't needed for the first phases, but the
 L1 types should stay plain data so they can be encoded later.
 
+## What was built
+
+### L1: `lemnos-device`
+
+`#![no_std]`, no allocation, no `String`s. Everything a device says about itself is a
+`'static` table:
+
+- `DeviceClass` (`Imu`, `Accelerometer`, `Gyroscope`, `Magnetometer`, `PowerMonitor`,
+  `Temperature`, `Fan`, `Lens`, `Light`, `Gpio`, `Orientation`, `Other`).
+- `Quantity`, each with one canonical `Unit`: acceleration m/s², angular rate rad/s,
+  magnetic field T, voltage V, current A, power W, temperature °C, rotational speed rpm,
+  ratio, position, level, mode, colour, angle rad, pressure Pa, frequency Hz. A reading
+  means the same thing whichever driver or backend produced it.
+- `Channel { name, quantity, axis, exponent }`: the value is `raw × 10^exponent` in the
+  unit. `name` is the stable telemetry key (`acceleration.x`, `bus_voltage`): the
+  proposal's `{quantity, axis}` alone could not tell an INA2xx's bus and shunt voltages
+  apart. `NO_VALUE` (`i32::MIN`) marks a channel without a reading.
+- `ControlInfo { name, quantity, exponent, min, max }`.
+- `DeviceInfo { class, model, channels, controls }`.
+- `DeviceStatus` moved here from `lemnos-core` (which re-exports it), so L2 and L3 report
+  the same status.
+
+Traits: `Device` (`info`, `init(&mut dyn DelayNs)`), `Sensor: Device` (`read(&mut [i32])`)
+and `Control: Device` (`set(index, value) -> applied`, `get(index)`), with errors wrapped in
+`DeviceError<E>` (`Driver(E)`, `Unsupported`, `OutOfRange`, `BufferTooSmall`).
+`asynch::{Device, Sensor, Control}` mirror them. `erased` has the object-safe forms
+(`DynSensor`, `DynControl`, `DynSensorControl`, errors reduced to `ErrorKind`), the borrowed
+`DeviceRef` and, with `alloc`, the owned `BoxedDevice`. `kernel::KernelBinding` describes,
+as data, how a chip's channels map onto its mainline IIO or hwmon driver, so a generic
+binding can serve the same `DeviceInfo` without code per chip (phase 3).
+
+The drivers implement it next to their own APIs:
+
+| Driver | Class | Channels | Controls | Kernel binding |
+|---|---|---|---|---|
+| `Bmi088` | `Imu` | `acceleration.{x,y,z}` (mm/s²), `angular_rate.{x,y,z}` (µrad/s) | | `bmi088-accel` + `bmg160` (IIO) |
+| `Bmm150` | `Magnetometer` | `magnetic_field.{x,y,z}` (nT) | | `bmc150_magn` (IIO) |
+| `Ina` (INA226/260) | `PowerMonitor` | `bus_voltage` (µV), `shunt_voltage` (nV), `current` (µA), `power` (µW) | | `ina2xx` (hwmon) |
+| `Ina` (INA238) | `PowerMonitor` | the above plus `die_temperature` (m°C) | | `ina238` (hwmon) |
+| `Vcm` | `Lens` | | `position` (steps, 0..2^bits-1) | |
+
+`Device::init` applies the configuration set with `with_config` (BMI088, BMM150), the
+calibration given to `new` (INA2xx), or powers the lens up (VCM). Conversions to the
+canonical units are one 32×32→64-bit multiply and a shift per value, with no 64-bit
+division: that is a library call on 32-bit MCUs.
+
+### L2: `lemnos-lite`
+
+`Devices<'a, N>` is a fixed array of entries built with `sensor(name, &mut dev)`,
+`control(...)` or `device(...)` (both), each holding a `DeviceRef`, a `DeviceStatus`, the
+last `ErrorKind` and an optional polling period (`.every(ms)`). It reads, sets and gets by
+index or name, and `poll(now_ms, delay, buf, on_reading)` reads due sensors and
+re-initializes devices that are not up on their schedule. Status starts `missing`, becomes
+`available` after a successful `init`, and follows `DeviceStatus::after_error` on failures
+(not found or NACK: `missing`; transient: `degraded`; otherwise `faulted`).
+
+`crates/lemnos-lite/examples/linux_sensors.rs` reads the Raze's three I2C sensors on Linux;
+the firmware size image `lite` is the microcontroller example.
+
+### Measured
+
+Firmware, flash bytes (`.text + .rodata + .data`), all four drivers, integer readings:
+
+| Image | Cortex-M4F | RISC-V (no FPU) |
+|---|---|---|
+| each driver's own API (`init`, `read_fixed`) | 5 294 | 5 562 |
+| L1 traits, static dispatch (`device-static`) | 6 322 | 7 084 |
+| L1 as `dyn` devices (`device`) | 7 644 | 8 340 |
+| L2 table with status and polling (`lite`) | 8 196 | 9 048 |
+
+So the device model costs about 1 KB over the drivers alone (channel tables and names in
+read-only data, unit conversion into the caller's buffer, buffer and initialization
+checks), `dyn` dispatch another 1.3 KB for four drivers (each driver's operations become
+separate functions instead of being inlined into one loop), and the L2 table 0.5-0.7 KB.
+That is more than the "few hundred bytes" the proposal guessed for L1; it is still under
+9 KB of flash, with no RAM beyond the table and the caller's buffer and no software float.
+
+Linux, x86_64, stripped, `opt-level = "z"`, stable toolchain: the three I2C sensors through
+their own APIs (`sensors`) take 317.5 KB, through a `lemnos-lite` table (`sensors-lite`)
+314.8 KB; the table is smaller because it prints plain value slices instead of each
+driver's `Debug` structs. Both are within 35 KB of an empty `main` (282 KB); the facade with
+the Linux backend (`linux-lite`) is 564 KB.
+
 ## Phases
 
 1. **`lemnos-device`.** Types and traits, implementations for the four device drivers, and
@@ -183,14 +267,20 @@ L1 types should stay plain data so they can be encoded later.
 None of these phases breaks HeliOS: L3's public API stays as it is, and L1/L2 are new
 crates.
 
-## Decisions to confirm
+## Decisions
 
-- **Fixed-point values with a decimal exponent in L1.** Floats remain an opt-in
-  conversion. *Recommended: yes.* It matches the drivers and keeps FPU-less targets free
-  of float code.
-- **`&'static str` names and static tables in L1/L2.** Dynamic names only in L3.
-  *Recommended: yes.*
-- **`dyn` dispatch in L2.** Generics would inline better for one or two devices but
-  multiply code with many. *Recommended: `dyn`, measured both ways in phase 2.*
-- **Bridge priority.** *Recommended: after phase 3, once there's a concrete MCU-plus-Linux
-  product that needs it.*
+Confirmed in phases 1 and 2:
+
+- **Fixed-point values with a decimal exponent in L1.** Yes: `i32` counts times
+  `10^exponent` in one canonical unit per quantity, with `NO_VALUE` for a missing reading.
+  Floats are an opt-in conversion (`Channel::to_f32`, `ControlInfo::from_f32`, feature
+  `float`); FPU-less images link no float code.
+- **`&'static str` names and static tables in L1/L2.** Yes: channel and control names are
+  the telemetry keys; device names in a `lemnos-lite` table are `&'static str`. Dynamic
+  names exist only in L3 and in services built on it.
+- **`dyn` dispatch in L2.** Yes, measured: static dispatch of the four drivers through the
+  L1 traits is 1.3 KB smaller than `dyn` on a Cortex-M4F, but every additional device type
+  costs only its own functions under `dyn`, while a generic table would need a type per
+  combination of devices. The table stays `dyn`; firmware that wants the last kilobyte can
+  call the L1 traits directly.
+- **Bridge priority.** Unchanged: after phase 3, once a product needs it.

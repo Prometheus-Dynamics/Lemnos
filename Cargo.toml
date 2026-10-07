@@ -3,6 +3,8 @@ members = [
     "crates/lemnos",
     "crates/lemnos-core",
     "crates/lemnos-hal",
+    "crates/lemnos-device",
+    "crates/lemnos-lite",
     "crates/lemnos-bus",
     "crates/lemnos-discovery",
     "crates/lemnos-driver-sdk",
@@ -40,6 +42,8 @@ lemnos = { version = "2.0.0", path = "crates/lemnos" }
 lemnos-bus = { version = "2.0.0", path = "crates/lemnos-bus" }
 lemnos-core = { version = "2.0.0", path = "crates/lemnos-core", default-features = false }
 lemnos-hal = { version = "2.0.0", path = "crates/lemnos-hal", default-features = false }
+lemnos-device = { version = "2.0.0", path = "crates/lemnos-device", default-features = false }
+lemnos-lite = { version = "2.0.0", path = "crates/lemnos-lite" }
 lemnos-discovery = { version = "2.0.0", path = "crates/lemnos-discovery", default-features = false }
 lemnos-driver-manifest = { version = "2.0.0", path = "crates/lemnos-driver-manifest", default-features = false }
 lemnos-driver-sdk = { version = "2.0.0", path = "crates/lemnos-driver-sdk" }

@@ -7,6 +7,8 @@ edition = "2024"
 [dependencies]
 embedded-hal = "1.0.0"
 lemnos-hal = { path = "../../../crates/lemnos-hal", default-features = false }
+lemnos-device = { path = "../../../crates/lemnos-device", optional = true, default-features = false }
+lemnos-lite = { path = "../../../crates/lemnos-lite", optional = true }
 lemnos-drivers-bmi088 = { path = "../../../crates/lemnos-drivers-bmi088", optional = true, default-features = false }
 lemnos-drivers-bmm150 = { path = "../../../crates/lemnos-drivers-bmm150", optional = true, default-features = false }
 lemnos-drivers-ina2xx = { path = "../../../crates/lemnos-drivers-ina2xx", optional = true, default-features = false }
@@ -18,6 +20,12 @@ bmi088 = ["dep:lemnos-drivers-bmi088"]
 bmm150 = ["dep:lemnos-drivers-bmm150"]
 ina2xx = ["dep:lemnos-drivers-ina2xx"]
 vcm = ["dep:lemnos-drivers-vcm"]
+# The four drivers through the device-model traits, statically dispatched.
+device-static = ["dep:lemnos-device", "bmi088", "bmm150", "ina2xx", "vcm"]
+# Drive every enabled driver through the device model (`dyn` sensors and controls).
+device = ["dep:lemnos-device", "bmi088", "bmm150", "ina2xx", "vcm"]
+# The same drivers in a `lemnos-lite` table, polled.
+lite = ["dep:lemnos-device", "dep:lemnos-lite", "bmi088", "bmm150", "ina2xx", "vcm"]
 float = ["lemnos-drivers-bmi088?/float", "lemnos-drivers-bmm150?/float", "lemnos-drivers-ina2xx?/float"]
 
 [profile.release]

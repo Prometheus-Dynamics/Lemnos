@@ -20,9 +20,10 @@ workspace = true
 default = ["std"]
 # Host conveniences: `ErrorKind::from_io` and serde's std support.
 std = ["lemnos-hal/std", "serde?/std"]
-serde = ["dep:serde", "ordered-float/serde", "serde/rc"]
+serde = ["dep:serde", "ordered-float/serde", "serde/rc", "lemnos-device/serde"]
 
 [dependencies]
+lemnos-device.workspace = true
 lemnos-hal.workspace = true
 ordered-float.workspace = true
 serde = { workspace = true, features = ["derive", "alloc"], optional = true }

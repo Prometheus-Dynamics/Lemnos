@@ -156,11 +156,22 @@ dependencies = [
 name = "lemnos-core"
 version = "2.0.0"
 dependencies = [
+ "lemnos-device",
  "lemnos-hal",
  "ordered-float",
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "lemnos-device"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-async",
+ "lemnos-hal",
+ "serde",
 ]
 
 [[package]]
@@ -197,6 +208,7 @@ version = "2.0.0"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
+ "lemnos-device",
  "lemnos-hal",
 ]
 
@@ -206,6 +218,7 @@ version = "2.0.0"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
+ "lemnos-device",
  "lemnos-hal",
 ]
 
@@ -236,6 +249,7 @@ version = "2.0.0"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
+ "lemnos-device",
  "lemnos-hal",
 ]
 
@@ -289,6 +303,7 @@ version = "2.0.0"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
+ "lemnos-device",
  "lemnos-hal",
 ]
 
@@ -322,6 +337,20 @@ name = "lemnos-linux-sys"
 version = "2.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "lemnos-lite"
+version = "2.0.0"
+dependencies = [
+ "embedded-hal",
+ "lemnos-device",
+ "lemnos-drivers-bmi088",
+ "lemnos-drivers-bmm150",
+ "lemnos-drivers-ina2xx",
+ "lemnos-drivers-vcm",
+ "lemnos-hal",
+ "lemnos-linux",
 ]
 
 [[package]]
