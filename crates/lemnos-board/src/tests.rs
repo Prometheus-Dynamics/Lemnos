@@ -236,6 +236,46 @@ fn validation_reports_every_problem() {
 }
 
 #[test]
+fn client_entries_match_exactly_or_by_a_trailing_wildcard() {
+    assert!(client_matches("helios", "helios"));
+    assert!(!client_matches("helios", "helios2"));
+    assert!(client_matches("orion:*", "orion:operator:atlas-host"));
+    assert!(client_matches("orion:*", "orion:"));
+    assert!(!client_matches("orion:*", "orion"));
+    assert!(!client_matches("orion:*", "photonvision"));
+    assert!(!client_matches("orion:*", "xorion:operator"));
+    assert!(client_matches("*", "anyone"));
+    assert!(client_matches("*", ""));
+    assert!(is_valid_client_entry("orion:*"));
+    assert!(is_valid_client_entry("*"));
+    assert!(is_valid_client_entry("helios"));
+    assert!(!is_valid_client_entry("*orion"));
+    assert!(!is_valid_client_entry("or*ion:*"));
+    assert!(!is_valid_client_entry("**"));
+}
+
+#[test]
+fn a_wildcard_is_only_valid_at_the_end_of_a_client_entry() {
+    let mut board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    board.raw_clients = vec!["helios".into(), "*-selftest".into()];
+    board.devices[0].writers = vec!["orion:*".into(), "orion:*x*".into()];
+    let Err(BoardError::Invalid(problems)) = board.validate(&DriverRegistry::builtin()) else {
+        panic!("expected problems");
+    };
+    let all = problems.join("\n");
+    assert!(
+        all.contains("raw_clients entry \"*-selftest\": '*' is only allowed at the end"),
+        "{all}"
+    );
+    assert!(
+        all.contains("writers entry \"orion:*x*\": '*' is only allowed at the end"),
+        "{all}"
+    );
+    assert!(!all.contains("\"orion:*\""), "{all}");
+    assert!(!all.contains("\"helios\""), "{all}");
+}
+
+#[test]
 fn userspace_drivers_build_from_the_definition() {
     let tree = Tree::new();
     tree.adapters();

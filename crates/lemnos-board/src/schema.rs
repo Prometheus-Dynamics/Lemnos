@@ -310,6 +310,21 @@ impl DeviceSpec {
     }
 }
 
+/// Whether a `writers` or `raw_clients` entry admits `client`: an exact name,
+/// or a prefix ending in `*` (`orion:*` admits every `orion:` client; a bare
+/// `*` admits any client).
+pub fn client_matches(entry: &str, client: &str) -> bool {
+    match entry.strip_suffix('*') {
+        Some(prefix) => client.starts_with(prefix),
+        None => entry == client,
+    }
+}
+
+/// Whether a client entry is well formed: `*` may only end it.
+pub fn is_valid_client_entry(entry: &str) -> bool {
+    !entry.strip_suffix('*').unwrap_or(entry).contains('*')
+}
+
 /// Whether `id` is lowercase letters, digits and inner `-`.
 pub fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -398,6 +413,12 @@ impl BoardDefinition {
             if self.devices[..index].iter().any(|d| d.id == device.id) {
                 problems.push(format!("device {:?}: duplicate id", device.id));
             }
+            for entry in device.writers.iter().filter(|e| !is_valid_client_entry(e)) {
+                problems.push(format!(
+                    "device {:?}: writers entry {entry:?}: '*' is only allowed at the end",
+                    device.id
+                ));
+            }
             match registry.get(&device.driver) {
                 Some(entry) => problems.extend(
                     entry
@@ -434,6 +455,15 @@ impl BoardDefinition {
             if self.pwms[..index].iter().any(|p| p.name == pwm.name) {
                 problems.push(format!("pwm {:?}: duplicate name", pwm.name));
             }
+        }
+        for entry in self
+            .raw_clients
+            .iter()
+            .filter(|e| !is_valid_client_entry(e))
+        {
+            problems.push(format!(
+                "raw_clients entry {entry:?}: '*' is only allowed at the end"
+            ));
         }
         if problems.is_empty() {
             Ok(())

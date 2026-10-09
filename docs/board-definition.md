@@ -48,6 +48,12 @@ writers = ["helios"]      # clients allowed to write its controls (empty: any)
 config = { gyro_address = 0x68, accel_range = "6g" }  # driver settings
 ```
 
+`writers` and the top-level `raw_clients` match client names exactly, unless an entry ends in
+`*`: `"orion:*"` admits every client whose name starts with `orion:`, and `"*"` admits any
+client. A `*` anywhere else is a validation error. The Orion bridge (`lemnos-orion`) writes as
+`orion:<requested_by>`, and Orion has already authorized those callers, so `writers = ["orion:*"]`
+is the usual way to let Orion clients write a device. Entries without `*` are still exact.
+
 Unknown fields are errors, so a typo does not silently fall back to a default.
 
 ### Finding an I2C bus without its number
@@ -86,7 +92,7 @@ back to `i2c-<n>`.
 Hosts that hand hardware to clients (`lemnosd`) read three more keys:
 
 ```toml
-raw_clients = ["helios", "atlas-selftest"]   # top level: who may claim raw (empty: anyone)
+raw_clients = ["helios", "atlas-selftest"]   # top level: who may claim raw (empty: anyone); `*` as in `writers`
 
 [[devices]]
 id = "imu"

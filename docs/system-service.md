@@ -179,7 +179,9 @@ led.clear()?;                                // drop this client's intents
   to `f64` on the client.
 - **Controls and the write policy.** `set(device, control, value)` goes through the
   device's policy: its board `writers` list (client names; empty means any client), then
-  the control's range. The answer is the applied value or a refusal (`not-allowed`,
+  the control's range. An entry ending in `*` matches by prefix (`orion:*` admits every
+  `orion:<requested_by>` client of the Orion bridge, which Orion has already authorized; `*`
+  alone admits any client); other entries match exactly. The answer is the applied value or a refusal (`not-allowed`,
   `out-of-range`, `unsupported`, `device-unavailable`). Client names are declared by the
   client at connect time, so they arbitrate between cooperating clients; the security
   boundary is the socket's permissions (mode 0660, group `lemnos`).
@@ -317,7 +319,8 @@ let jedec = flash.xfer(&mut hw, &[0x9f, 0, 0, 0], SpiConfig { speed_hz: 1_000_00
   multi-transaction sequences. What the kernel holds fails with `Busy` (`I2C_SLAVE`, the
   GPIO request, a PWM channel a driver exported).
 - **Policy.** The board-level `raw_clients` list names the clients allowed raw access
-  (empty: any member of the `lemnos` group).
+  (empty: any member of the `lemnos` group); entries match as `writers` do, with a trailing
+  `*` for a prefix.
 - **Claims end with the connection.** When a client's connection closes, cleanly or not,
   its locks end, its PWM channels are disabled (and unexported), and its lines go to their
   safe state: the claim's `on_release`, else the board's `[[lines]] safe` (`input`, `low`,

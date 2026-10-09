@@ -265,7 +265,12 @@ impl Slot {
 
     /// Whether `client` may write this device's controls.
     pub fn allows(&self, client: &str) -> bool {
-        self.spec.writers.is_empty() || self.spec.writers.iter().any(|w| w == client)
+        self.spec.writers.is_empty()
+            || self
+                .spec
+                .writers
+                .iter()
+                .any(|w| lemnos_board::client_matches(w, client))
     }
 
     /// Before a client's write: on the first one, records the governor's

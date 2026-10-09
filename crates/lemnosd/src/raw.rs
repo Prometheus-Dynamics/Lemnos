@@ -124,8 +124,13 @@ impl RawState {
         ctx: &mut Context<'_>,
     ) -> Message {
         let id = request.id();
-        if !ctx.board.raw_clients.is_empty() && !ctx.board.raw_clients.iter().any(|c| c == who.name)
-        {
+        let admitted = ctx.board.raw_clients.is_empty()
+            || ctx
+                .board
+                .raw_clients
+                .iter()
+                .any(|c| lemnos_board::client_matches(c, who.name));
+        if !admitted {
             return match request {
                 RawRequest::LineClaim { .. } | RawRequest::PwmClaim { .. } => Message::Claimed {
                     id,

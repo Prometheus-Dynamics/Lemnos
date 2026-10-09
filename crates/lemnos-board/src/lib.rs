@@ -57,5 +57,5 @@ pub use light::{LIGHT_KEYS, light_defaults, strip_config};
 pub use registry::{Build, DriverEntry, DriverRegistry, Interface};
 pub use schema::{
     Backend, BoardDefinition, BoardInfo, BusRef, ConfigValue, DeviceSpec, FORMAT, LineSpec,
-    PwmSpec, SCHEMA_VERSION, is_valid_id,
+    PwmSpec, SCHEMA_VERSION, client_matches, is_valid_client_entry, is_valid_id,
 };
