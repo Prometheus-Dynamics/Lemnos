@@ -59,6 +59,17 @@ impl PollFd {
         }
     }
 
+    /// Waits for `events` on a raw descriptor (one a caller holds through
+    /// another handle). Safe: `poll` reports a closed descriptor as
+    /// `POLLNVAL` instead of touching it.
+    pub fn from_raw(fd: RawFd, events: i16) -> Self {
+        Self {
+            fd,
+            events,
+            revents: 0,
+        }
+    }
+
     /// The events the last [`poll_many`] reported.
     pub fn revents(&self) -> i16 {
         self.revents

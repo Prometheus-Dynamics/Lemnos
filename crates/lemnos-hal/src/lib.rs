@@ -7,6 +7,8 @@
 //! - [`register`] adds register maps over I2C and SPI (blocking and async);
 //!   [`asynch::Blocking`] runs async driver code over blocking buses and maps.
 //! - [`power`] adds regulators and clock outputs.
+//! - [`raw`] defines claimed GPIO lines and PWM channels ([`raw::RawLine`],
+//!   [`raw::RawPwm`]) and per-transfer SPI settings, for every layer.
 //! - [`ErrorKind`] and [`HalError`] classify failures portably; [`erased`]
 //!   reduces a bus's errors to `ErrorKind` so buses of different types fit
 //!   one `dyn` bus.
@@ -24,6 +26,7 @@ mod error;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 pub mod power;
+pub mod raw;
 pub mod register;
 
 pub use embedded_hal;

@@ -23,6 +23,12 @@ path = "src/main.rs"
 name = "lemnos-ctl"
 path = "src/bin/lemnos-ctl.rs"
 
+[features]
+default = []
+# `lemnosd::mock::MockLemnosd`: the real service over mock hardware, for
+# client tests.
+mock = ["lemnos-hal/mock"]
+
 [dependencies]
 embedded-hal.workspace = true
 lemnos-board = { workspace = true, features = ["linux"] }
@@ -35,6 +41,7 @@ lemnos-linux-sys.workspace = true
 serde_json = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+lemnosd = { path = ".", features = ["mock"] }
 lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-mock.workspace = true

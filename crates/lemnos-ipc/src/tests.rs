@@ -23,6 +23,7 @@ fn requests_round_trip() {
         client: "helios".into(),
         priority: 80,
         keep: true,
+        events: false,
     });
     round_trip_request(Request::List);
     round_trip_request(Request::Read {
@@ -167,4 +168,143 @@ fn malformed_frames_are_errors() {
     frame.truncate(8);
     frame[0] = 4;
     assert!(decode_request(&frame).is_err());
+}
+
+#[test]
+fn raw_requests_and_answers_round_trip() {
+    use crate::raw::{Bias, EdgeDetect, LineConfig, Polarity, PwmConfig, SafeState, SpiMode};
+    round_trip_request(Request::Raw(RawRequest::LineClaim {
+        id: 1,
+        line: LineTarget::Chip {
+            chip: "pinctrl-rp1".into(),
+            offset: 5,
+        },
+        config: LineConfig::input()
+            .with_bias(Bias::PullUp)
+            .with_edge(EdgeDetect::Falling)
+            .with_debounce_us(500),
+        on_release: Some(SafeState::Low),
+    }));
+    round_trip_request(Request::Raw(RawRequest::LineClaim {
+        id: 2,
+        line: LineTarget::Name("aux".into()),
+        config: LineConfig::output(true).active_low(),
+        on_release: None,
+    }));
+    for raw in [
+        RawRequest::LineConfigure {
+            id: 3,
+            handle: 7,
+            config: LineConfig::high_impedance(),
+        },
+        RawRequest::LineGet { id: 4, handle: 7 },
+        RawRequest::LineSet {
+            id: 5,
+            handle: 7,
+            value: true,
+        },
+        RawRequest::PwmClaim {
+            id: 6,
+            pwm: PwmTarget::Chip {
+                chip: 0,
+                channel: 1,
+            },
+        },
+        RawRequest::PwmClaim {
+            id: 7,
+            pwm: PwmTarget::Name("buzzer".into()),
+        },
+        RawRequest::PwmConfigure {
+            id: 8,
+            handle: 2,
+            config: PwmConfig {
+                period_ns: 1_000_000,
+                duty_ns: 1,
+                polarity: Polarity::Inversed,
+                enabled: true,
+            },
+        },
+        RawRequest::Unclaim { id: 9, handle: 2 },
+        RawRequest::I2cTransfer {
+            id: 10,
+            bus: "i2c:compatible=i2c-gpio".into(),
+            address: 0x50,
+            ops: vec![I2cOp::Write(vec![0x10]), I2cOp::Read(2)],
+        },
+        RawRequest::I2cLock {
+            id: 11,
+            bus: "1".into(),
+            address: 0x50,
+            lock: true,
+        },
+        RawRequest::SpiTransfer {
+            id: 12,
+            bus: 0,
+            chip_select: 1,
+            transfers: vec![{
+                let mut t = SpiXfer::new(vec![0x9f], 3);
+                t.config.mode = SpiMode::Mode3;
+                t.config.speed_hz = 8_000_000;
+                t.cs_change = true;
+                t.delay_us = 10;
+                t
+            }],
+        },
+        RawRequest::SpiLock {
+            id: 13,
+            bus: 0,
+            chip_select: 1,
+            lock: false,
+        },
+    ] {
+        round_trip_request(Request::Raw(raw));
+    }
+    round_trip_request(Request::Restore {
+        id: 14,
+        device: "fan".into(),
+        control: String::new(),
+    });
+    round_trip_message(Message::Claimed {
+        id: 1,
+        result: Ok(42),
+    });
+    round_trip_message(Message::Claimed {
+        id: 2,
+        result: Err(Refusal::Owned),
+    });
+    round_trip_message(Message::Data {
+        id: 3,
+        result: Ok(vec![1, 2, 3]),
+    });
+    round_trip_message(Message::Data {
+        id: 4,
+        result: Err(Refusal::Claimed),
+    });
+    round_trip_message(Message::Event(Event::Edge {
+        handle: 7,
+        rising: false,
+        timestamp_ns: 123_456_789,
+        seq: 3,
+    }));
+    round_trip_message(Message::Event(Event::Dropped { count: 9 }));
+    round_trip_message(Message::Reply {
+        id: 5,
+        result: Err(Refusal::UnknownHandle),
+    });
+    // A greeting from before the events flag reads events.
+    let mut old = Request::Hello {
+        version: VERSION,
+        client: "old".into(),
+        priority: 1,
+        keep: false,
+        events: false,
+    }
+    .encode();
+    old.pop();
+    let length = u32::from_le_bytes(old[..4].try_into().unwrap()) - 1;
+    old[..4].copy_from_slice(&length.to_le_bytes());
+    assert!(matches!(
+        decode_request(&old).unwrap().unwrap().0,
+        Request::Hello { events: true, .. }
+    ));
 }

@@ -18,7 +18,7 @@ workspace = true
 [features]
 default = []
 # `LinuxBuses`: buses from /dev/i2c-N through `lemnos_linux::hal`.
-linux = ["dep:lemnos-linux", "lemnos-linux/gpio-cdev"]
+linux = ["dep:lemnos-linux", "lemnos-linux/gpio-cdev", "lemnos-linux/spi"]
 
 [dependencies]
 embedded-hal.workspace = true

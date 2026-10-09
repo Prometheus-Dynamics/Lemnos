@@ -41,6 +41,7 @@ mod buses;
 mod error;
 mod i2c_select;
 mod light;
+pub mod raw;
 mod registry;
 mod schema;
 
@@ -55,6 +56,6 @@ pub use i2c_select::I2cSelector;
 pub use light::{LIGHT_KEYS, light_defaults, strip_config};
 pub use registry::{Build, DriverEntry, DriverRegistry, Interface};
 pub use schema::{
-    Backend, BoardDefinition, BoardInfo, BusRef, ConfigValue, DeviceSpec, FORMAT, SCHEMA_VERSION,
-    is_valid_id,
+    Backend, BoardDefinition, BoardInfo, BusRef, ConfigValue, DeviceSpec, FORMAT, LineSpec,
+    PwmSpec, SCHEMA_VERSION, is_valid_id,
 };

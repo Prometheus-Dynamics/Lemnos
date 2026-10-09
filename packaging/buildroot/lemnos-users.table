@@ -1,0 +1,5 @@
+# Buildroot makeusers table for lemnosd.service: add this file to BR2_ROOTFS_USERS_TABLES on
+# images whose root filesystem is read-only at runtime (systemd-sysusers cannot add users there).
+# The same user as systemd/lemnos.sysusers. Columns: username uid group gid password home shell
+# groups comment (see Buildroot's makeusers).
+lemnos -1 lemnos -1 * /run/lemnos /bin/false i2c,gpio,spi,video Lemnos hardware service

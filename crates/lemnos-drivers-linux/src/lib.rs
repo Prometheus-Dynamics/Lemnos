@@ -5,6 +5,8 @@
 //!   control, with [`FanRestore`] as the failsafe that hands it back to the
 //!   kernel (the `pwm-fan` cooling device, or the chip's automatic mode).
 //! - [`ThermalZone`]: a thermal zone as a temperature sensor.
+//! - [`SysfsPwm`]: a sysfs PWM channel as a claimed
+//!   [`RawPwm`](lemnos_hal::raw::RawPwm).
 //! - [`UserspaceRegulator`] and [`DebugfsClock`]: supplies and clocks the
 //!   kernel exposes, as `lemnos_hal::Regulator` and `ClockOutput`.
 //! - [`Ws2812Pio`]: a WS2812/SK6812 strip on the Raspberry Pi RP1
@@ -27,6 +29,7 @@ mod fan;
 mod fan_restore;
 mod kernel;
 mod power;
+mod pwm;
 mod strip;
 pub mod sysfs;
 mod thermal;
@@ -46,5 +49,6 @@ pub use fan_restore::{
 pub use kernel::{I2cLocation, KernelDevice, SysRoot};
 pub use lemnos_drivers_ws2812 as ws2812;
 pub use power::{DebugfsClock, UserspaceRegulator};
+pub use pwm::SysfsPwm;
 pub use strip::{CONTROL_BRIGHTNESS, CONTROL_COLOR, LIGHT_INFO, Ws2812Pio};
 pub use thermal::{THERMAL_INFO, ThermalZone};

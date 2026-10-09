@@ -440,3 +440,50 @@ fn chip_fan_restores_automatic_mode() {
     assert_eq!(tree.read("class/hwmon/hwmon1/pwm1_enable"), "5");
     assert_eq!(FanRestore::from_line("bogus\t1\t/x"), None);
 }
+
+#[test]
+fn sysfs_pwm_exports_orders_writes_and_releases() {
+    use lemnos_hal::raw::{Polarity, PwmConfig, RawPwm};
+    let tree = Tree::new();
+    tree.file("class/pwm/pwmchip0/npwm", "2")
+        .file("class/pwm/pwmchip0/export", "")
+        .file("class/pwm/pwmchip0/unexport", "");
+    let sys = SysRoot::new(&tree.0);
+    assert_eq!(
+        lemnos_hal::HalError::kind(&SysfsPwm::open(&sys, 0, 2).unwrap_err()),
+        lemnos_hal::ErrorKind::NotFound
+    );
+    // The fake kernel: the channel directory as an export creates it.
+    tree.file("class/pwm/pwmchip0/pwm1/period", "0")
+        .file("class/pwm/pwmchip0/pwm1/duty_cycle", "0")
+        .file("class/pwm/pwmchip0/pwm1/enable", "0")
+        .file("class/pwm/pwmchip0/pwm1/polarity", "normal");
+    let mut pwm = SysfsPwm::open(&sys, 0, 1).unwrap();
+    let config = PwmConfig {
+        period_ns: 40_000,
+        duty_ns: 10_000,
+        polarity: Polarity::Inversed,
+        enabled: true,
+    };
+    pwm.configure(&config).unwrap();
+    assert_eq!(pwm.config(), Ok(config));
+    // A shorter period than the current duty: duty goes first.
+    let shorter = PwmConfig {
+        period_ns: 5_000,
+        duty_ns: 1_000,
+        ..config
+    };
+    pwm.configure(&shorter).unwrap();
+    assert_eq!(tree.read("class/pwm/pwmchip0/pwm1/period"), "5000");
+    assert!(
+        pwm.configure(&PwmConfig {
+            duty_ns: 6_000,
+            ..shorter
+        })
+        .is_err()
+    );
+    // Found already exported: release disables but does not unexport.
+    pwm.release().unwrap();
+    assert_eq!(tree.read("class/pwm/pwmchip0/pwm1/enable"), "0");
+    assert_eq!(tree.read("class/pwm/pwmchip0/unexport"), "");
+}

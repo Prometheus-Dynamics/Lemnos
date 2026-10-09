@@ -502,6 +502,7 @@ dependencies = [
  "lemnos-light",
  "lemnos-linux-sys",
  "lemnos-mock",
+ "lemnosd",
  "serde_json",
 ]
 

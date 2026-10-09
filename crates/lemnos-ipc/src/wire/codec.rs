@@ -51,6 +51,12 @@ impl Encoder {
         self.buf.extend_from_slice(&v.as_bytes()[..len]);
         self
     }
+    /// `u32 length` + bytes.
+    pub(super) fn bytes(&mut self, v: &[u8]) -> &mut Self {
+        self.u32(v.len() as u32);
+        self.buf.extend_from_slice(v);
+        self
+    }
     pub(super) fn opt_u32(&mut self, v: Option<u32>) -> &mut Self {
         self.u32(v.unwrap_or(u32::MAX))
     }
@@ -117,6 +123,13 @@ impl<'a> Decoder<'a> {
     pub(super) fn str(&mut self) -> Result<String, WireError> {
         let len = usize::from(self.u16()?);
         String::from_utf8(self.take(len)?.to_vec()).map_err(|_| bad("string is not UTF-8"))
+    }
+    pub(super) fn bytes(&mut self) -> Result<Vec<u8>, WireError> {
+        let n = self.u32()? as usize;
+        Ok(self.take(n)?.to_vec())
+    }
+    pub(super) fn is_empty(&self) -> bool {
+        self.buf.is_empty()
     }
     pub(super) fn opt_u32(&mut self) -> Result<Option<u32>, WireError> {
         Ok(Some(self.u32()?).filter(|v| *v != u32::MAX))

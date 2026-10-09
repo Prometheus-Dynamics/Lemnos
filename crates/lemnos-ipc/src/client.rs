@@ -4,8 +4,8 @@
 //! receive ([`ClientEvent`]), like Styx's `FrameClient` and `ControlClient`.
 
 use crate::wire::{
-    self, ChannelDesc, DeviceDesc, Event, LedRequest, LedShow, Message, RawReading, Refusal,
-    Request, VERSION, WireError,
+    self, ChannelDesc, DeviceDesc, Event, LedRequest, Message, RawReading, Refusal, Request,
+    VERSION, WireError,
 };
 use lemnos_device::{DeviceStatus, NO_VALUE};
 use std::collections::VecDeque;
@@ -16,6 +16,13 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[path = "client_led.rs"]
+mod led;
+#[path = "client_raw.rs"]
+mod raw;
+pub use led::LedClient;
+pub use raw::{I2cDevice, Line, Pwm, SpiDevice};
 
 /// The default socket path.
 pub const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
@@ -147,6 +154,9 @@ pub struct ClientOptions {
     timeout: Duration,
     reconnect: bool,
     keep: bool,
+    /// `None`: the client type's default (devices yes, LEDs no).
+    events: Option<bool>,
+    wait: Option<Duration>,
 }
 
 impl ClientOptions {
@@ -159,7 +169,27 @@ impl ClientOptions {
             timeout: DEFAULT_TIMEOUT,
             reconnect: false,
             keep: false,
+            events: None,
+            wait: None,
         }
+    }
+
+    /// Whether the service sends this client events (status, control and
+    /// LED-owner changes, edges). Device clients get them by default, LED
+    /// clients do not (an LED client that never reads them would otherwise
+    /// fill its socket).
+    pub fn events(mut self, events: bool) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Keep retrying the first connection for up to `wait` (for clients that
+    /// start before `lemnosd` is up). With [`reconnecting`](Self::reconnecting)
+    /// and no wait, a first connection that fails is reported as
+    /// `Disconnected` and retried in the background instead of failing.
+    pub fn wait(mut self, wait: Duration) -> Self {
+        self.wait = Some(wait);
+        self
     }
 
     /// The priority of this client's LED intents (0-255, default 50).
@@ -180,20 +210,24 @@ impl ClientOptions {
         self
     }
 
-    /// Ask the service to keep this client's LED intents after it
-    /// disconnects (for one-shot command-line clients).
+    /// Ask the service to keep what this client set after it disconnects:
+    /// LED intents, control writes and raw claims stay until replaced or
+    /// released (for one-shot command-line clients such as `lemnos-ctl`).
+    /// Without it, they end with the connection.
     pub fn keep_intents(mut self) -> Self {
         self.keep = true;
         self
     }
 
-    pub fn devices(self) -> Result<DeviceClient, ClientError> {
+    pub fn devices(mut self) -> Result<DeviceClient, ClientError> {
+        self.events.get_or_insert(true);
         Ok(DeviceClient {
             conn: Connection::open(self)?,
         })
     }
 
-    pub fn leds(self) -> Result<LedClient, ClientError> {
+    pub fn leds(mut self) -> Result<LedClient, ClientError> {
+        self.events.get_or_insert(false);
         Ok(LedClient {
             conn: Connection::open(self)?,
         })
@@ -236,8 +270,35 @@ impl Connection {
             backoff: RECONNECT_MIN,
             next_attempt: Instant::now(),
         };
-        conn.connect()?;
-        Ok(conn)
+        let deadline = conn.options.wait.map(|w| Instant::now() + w);
+        let mut pause = Duration::from_millis(20);
+        loop {
+            match conn.connect() {
+                Ok(()) => return Ok(conn),
+                Err(error) => {
+                    conn.stream = None;
+                    if let Some(deadline) = deadline
+                        && Instant::now() + pause < deadline
+                    {
+                        std::thread::sleep(pause);
+                        pause = (pause * 2).min(Duration::from_secs(1));
+                        continue;
+                    }
+                    if conn.options.reconnect && deadline.is_none() {
+                        conn.queue.push_back(ClientEvent::Disconnected { error });
+                        conn.next_attempt = Instant::now() + conn.backoff;
+                        return Ok(conn);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn next_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        id
     }
 
     /// Connects, greets, fetches the device list and restores subscriptions
@@ -253,6 +314,7 @@ impl Connection {
             client: self.options.name.clone(),
             priority: self.options.priority,
             keep: self.options.keep,
+            events: self.options.events.unwrap_or(true),
         })?;
         let deadline = Instant::now() + self.options.timeout;
         loop {
@@ -623,133 +685,5 @@ impl DeviceClient {
     /// Reconnections so far.
     pub fn reconnects(&self) -> u64 {
         self.conn.reconnects
-    }
-}
-
-/// Holds LED intents on `lemnosd`'s lights.
-pub struct LedClient {
-    conn: Connection,
-}
-
-impl LedClient {
-    /// The service at `path`, as client `name`.
-    pub fn connect(path: impl AsRef<Path>, name: impl Into<String>) -> Result<Self, ClientError> {
-        ClientOptions::new(path, name).leds()
-    }
-
-    /// Sends `request` and remembers it (to send again after a reconnection).
-    pub fn send(&mut self, request: LedRequest) -> Result<(), ClientError> {
-        if request.show == LedShow::Clear {
-            self.conn
-                .held
-                .retain(|r| r.device != request.device || (request.test && !r.test));
-        } else {
-            let layer = layer_of(&request);
-            self.conn
-                .held
-                .retain(|r| r.device != request.device || layer_of(r) != layer);
-            // Test intents are leases the caller renews: not re-sent.
-            if request.duration_ms.is_none() && !request.test {
-                self.conn.held.push(request.clone());
-            }
-        }
-        if self.conn.stream.is_none() && self.conn.options.reconnect {
-            self.conn.connect()?;
-        }
-        self.conn.send(&Request::Led(request))
-    }
-
-    /// Shows `status` with the light's default effect.
-    pub fn status(&mut self, status: lemnos_light::Status) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::Status(status)))
-    }
-
-    /// Every LED `0xRRGGBB`.
-    pub fn color(&mut self, rgb: u32) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::Color(rgb)))
-    }
-
-    /// One `0xWWRRGGBB` colour per LED.
-    pub fn frame(&mut self, pixels: &[u32]) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::Frame(pixels.to_vec())))
-    }
-
-    /// Sets single LEDs `(logical index, 0xWWRRGGBB)`, keeping this client's
-    /// other LEDs; index 0 is the ring's top.
-    pub fn set_leds(&mut self, pixels: &[(u16, u32)]) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::Pixels(pixels.to_vec())))
-    }
-
-    /// A gauge filled to `fraction` (0.0-1.0) in `0xRRGGBB` (`None`: the
-    /// board's progress colour); the fill advances eased.
-    pub fn progress(&mut self, fraction: f32, color: Option<u32>) -> Result<(), ClientError> {
-        let fraction = (fraction.clamp(0.0, 1.0) * 1000.0).round() as u16;
-        self.send(LedRequest::new(LedShow::Progress {
-            fraction,
-            color,
-            background: None,
-        }))
-    }
-
-    /// A spinner for progress of an unknown amount.
-    pub fn indeterminate(&mut self, color: Option<u32>) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::Indeterminate { color }))
-    }
-
-    /// A built-in system animation (updating, booting, rebooting, update
-    /// failed, rolled back), above application status.
-    pub fn system(&mut self, state: lemnos_light::SystemState) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::System(state)))
-    }
-
-    /// Shows the board's locate look over everything for `duration`.
-    pub fn locate(&mut self, duration: Duration) -> Result<(), ClientError> {
-        let mut request = LedRequest::new(LedShow::Locate);
-        request.duration_ms = Some(duration.as_millis().min(u128::from(u32::MAX - 1)) as u32);
-        self.send(request)
-    }
-
-    /// Shows `show` in the test layer, over every client's status, for
-    /// `lease` (`None`: the service's default, 10 s in `lemnosd`). Send it
-    /// again to renew it; it falls back to the layers below when the lease
-    /// runs out or this client disconnects.
-    pub fn test(&mut self, show: LedShow, lease: Option<Duration>) -> Result<(), ClientError> {
-        let mut request = LedRequest::new(show).test();
-        request.duration_ms = lease.map(|d| d.as_millis().min(u128::from(u32::MAX - 1)) as u32);
-        self.send(request)
-    }
-
-    /// Drops this client's test intent.
-    pub fn clear_test(&mut self) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::Clear).test())
-    }
-
-    /// Drops this client's intents.
-    pub fn clear(&mut self) -> Result<(), ClientError> {
-        self.send(LedRequest::new(LedShow::Clear))
-    }
-
-    /// Waits for the service to process what was sent (a round trip).
-    pub fn sync(&mut self) -> Result<(), ClientError> {
-        self.conn.request(&Request::List, |m| {
-            matches!(m, Message::Devices(_)).then_some(())
-        })
-    }
-}
-
-fn layer_of(request: &LedRequest) -> u8 {
-    if request.test {
-        return 5;
-    }
-    match &request.show {
-        LedShow::Clear => 0,
-        LedShow::Color(_)
-        | LedShow::Frame(_)
-        | LedShow::Pixels(_)
-        | LedShow::Progress { .. }
-        | LedShow::Indeterminate { .. } => 1,
-        LedShow::Status(_) => 2,
-        LedShow::System(_) => 3,
-        LedShow::Locate => 4,
     }
 }

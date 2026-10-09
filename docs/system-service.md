@@ -183,10 +183,24 @@ led.clear()?;                                // drop this client's intents
   `out-of-range`, `unsupported`, `device-unavailable`). Client names are declared by the
   client at connect time, so they arbitrate between cooperating clients; the security
   boundary is the socket's permissions (mode 0660, group `lemnos`).
+- **Writes end with the writer's connection.** The service remembers who last wrote each
+  control and the value from before the first write. When that client's connection closes
+  (cleanly, crashed or `kill -9`), the write is undone: a fan goes back to the kernel's
+  governor (the fan hand-back), other controls get their earlier value. A client undoes its
+  own writes earlier with `DeviceClient::restore(device, control)`. Clients that keep their
+  intents are exempt until they restore: **`lemnos-ctl set` writes persist after it exits**
+  (`lemnos-ctl restore <device> [control]` undoes them).
 - **Events.** Subscribed devices' readings, status changes (`available`, `degraded`,
-  `faulted`, `missing`), control changes (with the writer's name), LED owner changes, and,
-  on the client side, connection events (`Connected { reconnects }`, `Disconnected {
-  error }`).
+  `faulted`, `missing`), control changes (with the writer's name), LED owner changes, edges
+  of claimed lines, and, on the client side, connection events (`Connected { reconnects }`,
+  `Disconnected { error }`). A client says in its greeting whether it reads events:
+  device clients do by default, LED clients do not (`ClientOptions::events(true)` and
+  `LedClient::next_event` turn them on). The service queues at most 256 KiB per client;
+  when a client falls behind it drops readings first, then events, and reports the count
+  with `Event::Dropped { count }` once the queue drains.
+- **Starting before the service.** `ClientOptions::wait(timeout)` retries the first
+  connection until `lemnosd` accepts; with `.reconnecting()` and no wait, a first
+  connection that fails is a `Disconnected` event and is retried in the background.
 - **LED intents.** Kinds: `status(ok|warn|error|busy|off)`, `color`, `frame` (one colour per
   LED), single LEDs (`set_leds`, merged into the client's frame), `progress(fraction,
   colour)` (a gauge filling the ring: the leading LED lit fractionally for sub-LED
@@ -249,6 +263,94 @@ lemnos-ctl fan release fan            # back to the kernel governor; lemnosd kee
 lemnos-ctl fan restore --all          # direct sysfs writes, works without the daemon
 lemnos-ctl validate /etc/lemnos/board.toml
 ```
+
+## Raw bus and line access
+
+`lemnosd` is the one owner of the board's hardware, so clients that need a bare GPIO line,
+a PWM channel, an I2C target or an SPI device ask it instead of opening the device nodes
+themselves. One definition serves every layer: the `lemnos_hal::raw` types and traits
+(`LineConfig`, `RawLine`, `PwmConfig`, `RawPwm`, `SpiConfig`, `RawSpi`) are implemented by
+the GPIO character device, sysfs PWM (`lemnos_drivers_linux::SysfsPwm`), spidev and the
+`lemnos-hal` mocks, and the wire protocol carries exactly them.
+
+```rust
+use lemnos_ipc::raw::{EdgeDetect, LineConfig, PwmConfig, SafeState, SpiConfig};
+use lemnos_ipc::{ClientOptions, LineTarget, PwmTarget, SpiXfer};
+
+let mut hw = ClientOptions::new("/run/lemnos/lemnosd.sock", "helios").devices()?;
+
+// GPIO: by board name ([[lines]]), kernel line name, or chip and offset.
+let led = hw.claim_line(LineTarget::Name("aux-1".into()), LineConfig::output(false))?;
+led.set(&mut hw, true)?;
+let button = hw.claim_line_with(
+    LineTarget::Chip { chip: "pinctrl-rp1".into(), offset: 17 },
+    LineConfig::input().with_edge(EdgeDetect::Both).with_debounce_us(2000),
+    Some(SafeState::Input),                     // what it goes back to (default: the board's)
+)?;
+// Edges arrive as Event::Edge { handle, rising, timestamp_ns, seq } in next_event().
+
+// PWM: by board name ([[pwms]]) or chip and channel.
+let buzzer = hw.claim_pwm(PwmTarget::Name("buzzer".into()))?;
+buzzer.configure(&mut hw, PwmConfig { period_ns: 250_000, duty_ns: 125_000, enabled: true, ..Default::default() })?;
+
+// I2C: bus number, `i2c-N` or a board selector; each call is one transaction.
+let eeprom = hw.i2c("i2c:compatible=i2c-gpio", 0x50);
+let id = eeprom.read_reg8(&mut hw, 0x00)?;     // write [reg], repeated start, read
+let page = eeprom.write_read(&mut hw, &[0x10], 16)?;
+eeprom.lock(&mut hw)?;                         // keep others off across transactions
+
+// SPI: full duplex, mode, speed and word size per transaction.
+let flash = hw.spi(0, 0);
+let jedec = flash.xfer(&mut hw, &[0x9f, 0, 0, 0], SpiConfig { speed_hz: 1_000_000, ..Default::default() })?;
+```
+
+- **Arbitration.** The service derives what board devices own from the definition: each
+  I2C device's address (plus any integer `*_address` setting, such as the BMI088's
+  `gyro_address`), each SPI device's chip select, and the line of each `gpio-*` device.
+  Lines and PWM channels a device owns are never handed out (`Owned`); overriding a board
+  device means editing the board file. I2C and SPI transactions to a device's address are
+  refused unless the device lists the client in `raw = [...]`; listed clients get brokered
+  access between the device's own transfers (the service is single-threaded, so a
+  transaction never interleaves with the device's polling). Unowned lines and channels are
+  claimed exclusively per connection (`Claimed` for anyone else); unowned I2C addresses and
+  SPI chip selects need no claim (each transaction is atomic) and can be locked for
+  multi-transaction sequences. What the kernel holds fails with `Busy` (`I2C_SLAVE`, the
+  GPIO request, a PWM channel a driver exported).
+- **Policy.** The board-level `raw_clients` list names the clients allowed raw access
+  (empty: any member of the `lemnos` group).
+- **Claims end with the connection.** When a client's connection closes, cleanly or not,
+  its locks end, its PWM channels are disabled (and unexported), and its lines go to their
+  safe state: the claim's `on_release`, else the board's `[[lines]] safe` (`input`, `low`,
+  `high`), else input with bias off (high impedance). Clients that keep their intents
+  (`lemnos-ctl --keep`) keep their claims, by name, until they release them. Claims do not
+  survive a `lemnosd` restart: a reconnecting client claims again after `Connected`.
+- **Limits.** 4 KiB per I2C transaction, 64 KiB per SPI transaction, 64 claims per client.
+  spidev sets the SPI mode per device, so one transaction uses one mode.
+
+`lemnos-ctl` exposes all of it:
+
+```
+lemnos-ctl gpio get pinctrl-rp1:17 --bias up
+lemnos-ctl gpio set aux-1 1                    # holds until interrupted (or --hold S)
+lemnos-ctl gpio set aux-1 1 --keep             # persists; prints the handle
+lemnos-ctl gpio release 3
+lemnos-ctl gpio watch BUTTON --edge falling --count 5
+lemnos-ctl pwm set buzzer --period 250000 --duty 125000 --hold 1
+lemnos-ctl i2c read 1 0x50 0x10 16
+lemnos-ctl i2c write 1 0x50 0x10 0xaa 0xbb
+lemnos-ctl i2c xfer i2c-1 0x50 w:10 r:2
+lemnos-ctl spi xfer 0.0 9f000000 --mode 0 --speed 1000000
+lemnos-ctl restore fan                         # undo an earlier `lemnos-ctl set`
+```
+
+### Testing clients against a mock lemnosd
+
+`lemnosd` feature `mock`: `lemnosd::mock::MockLemnosd::start(board_toml, hardware)` runs the
+real service on a thread, on a socket in a temporary directory, over `MockHardware`
+(shared I2C buses, GPIO lines, PWM channels and SPI devices to preset and inspect) and a
+fake sysfs tree under the same directory. Arbitration, claims ending with the connection
+and restores behave as on a board, so client tests (HeliOS's) need no hardware and no
+mock server of their own.
 
 ## System states and the updater
 
@@ -420,7 +522,11 @@ HeliOS uses `lemnosd` the way it uses Styx's camera service:
 - `helios-peripherals` opens a `DeviceClient` (client `helios`), lists devices, and publishes
   one Orion resource per device, keyed by board device id, with the device class and the
   channel units as labels; readings from subscriptions become resource telemetry.
-- Leased resource actions become `set` calls; refusals come back as action failures.
+- Leased resource actions become `set` calls; refusals come back as action failures. A
+  write ends with the connection that made it, so a crashed HeliOS cannot leave the fan
+  overridden: no marker file is needed.
+- Raw GPIO, PWM, I2C and SPI actions go through `lemnosd` (`claim_line`, `claim_pwm`,
+  `i2c`, `spi`) instead of the device nodes, so they never fight the board's devices.
 - Status: `LedClient::status` from the peripherals provider's health.
 - During migration, HeliOS can keep the in-process runtime path
   ([board-definition.md](board-definition.md), "HeliOS adoption") on images without

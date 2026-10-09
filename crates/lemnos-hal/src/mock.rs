@@ -4,6 +4,10 @@
 //! uses [`ErrorKind`] as its error, so failures can be injected by kind.
 
 extern crate alloc;
+
+#[path = "mock_raw.rs"]
+mod raw;
+pub use raw::{MockLine, MockPwm, MockRawSpi, SpiRecord};
 #[cfg(feature = "std")]
 extern crate std;
 
@@ -633,5 +637,90 @@ mod tests {
         bus.set_dead(0x0c, false);
         assert_eq!(block_on(regs.read8(0x01)), Ok(7));
         assert!(bus.target(0x0c).is_some_and(|t| !t.dead));
+    }
+}
+
+#[cfg(test)]
+mod raw_tests {
+    use super::*;
+    use crate::raw::{
+        Direction, EdgeDetect, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, SafeState,
+        SpiConfig, SpiMode, SpiSegment,
+    };
+
+    #[test]
+    fn mock_line_reads_drives_and_reports_edges() {
+        let line = MockLine::new();
+        let mut claimed = line.clone();
+        claimed
+            .configure(&LineConfig::input().with_edge(EdgeDetect::Both))
+            .unwrap();
+        line.drive(true);
+        assert_eq!(claimed.get(), Ok(true));
+        line.edge(false, 10);
+        assert_eq!(claimed.get(), Ok(false));
+        let edge = claimed.read_edge().unwrap().unwrap();
+        assert!(!edge.rising && edge.timestamp_ns == 10 && edge.seq == 1);
+        assert_eq!(claimed.read_edge(), Ok(None));
+        assert_eq!(claimed.set(true), Err(ErrorKind::InvalidInput));
+        claimed
+            .configure(&LineConfig::output(true).active_low())
+            .unwrap();
+        assert_eq!(line.level(), Some(false));
+        claimed.set(false).unwrap();
+        assert_eq!(line.level(), Some(true));
+        claimed
+            .configure(&SafeState::Input.config().unwrap())
+            .unwrap();
+        assert_eq!(line.config().direction, Direction::Input);
+        assert_eq!(line.configs().len(), 3);
+        assert_eq!(SafeState::Keep.config(), None);
+        assert_eq!(SafeState::parse("high"), Some(SafeState::High));
+    }
+
+    #[test]
+    fn mock_pwm_and_spi_record() {
+        let pwm = MockPwm::new();
+        let mut claimed = pwm.clone();
+        let config = PwmConfig {
+            period_ns: 1_000_000,
+            duty_ns: 250_000,
+            enabled: true,
+            ..PwmConfig::default()
+        };
+        claimed.configure(&config).unwrap();
+        assert_eq!(claimed.config(), Ok(config));
+        assert!(
+            claimed
+                .configure(&PwmConfig {
+                    duty_ns: 2,
+                    period_ns: 1,
+                    ..config
+                })
+                .is_err()
+        );
+        assert_eq!(pwm.history(), [config]);
+
+        let spi = MockRawSpi::new();
+        spi.respond(&[0xaa, 0xbb]);
+        let mut device = spi.clone();
+        let mut rx = [0u8; 2];
+        let config = SpiConfig {
+            mode: SpiMode::from_bits(3),
+            speed_hz: 1_000_000,
+            bits_per_word: 8,
+        };
+        device
+            .transfer(&mut [SpiSegment {
+                config,
+                tx: &[0x9f, 0],
+                rx: &mut rx,
+                cs_change: false,
+                delay_us: 0,
+            }])
+            .unwrap();
+        assert_eq!(rx, [0xaa, 0xbb]);
+        assert_eq!(spi.transactions()[0][0].tx, [0x9f, 0]);
+        assert_eq!(spi.transactions()[0][0].config.mode.bits(), 3);
     }
 }

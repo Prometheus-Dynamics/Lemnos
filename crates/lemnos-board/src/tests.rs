@@ -406,3 +406,63 @@ fn i2c_buses_are_found_by_name_or_device_tree_node() {
         ErrorKind::NotFound
     );
 }
+
+#[test]
+fn raw_lines_pwms_and_owned_resources() {
+    use crate::raw::{Resource, line_safe_state, owned_resources};
+    use lemnos_hal::raw::SafeState;
+    let tree = Tree::new();
+    tree.adapters();
+    let text = format!(
+        "raw_clients = [\"helios\"]\n{RAZE}\n[[lines]]\nname = \"aux\"\nchip = \"pinctrl-rp1\"\nline = 5\nsafe = \"high\"\n\n[[pwms]]\nname = \"buzzer\"\nchip = 0\nchannel = 1\n"
+    );
+    let board = BoardDefinition::from_toml_str(&text).unwrap();
+    board.validate(&DriverRegistry::builtin()).unwrap();
+    assert_eq!(board.raw_clients, ["helios"]);
+    let chip_id = |c: &str| {
+        if c == "pinctrl-rp1" {
+            "gpiochip0".to_string()
+        } else {
+            c.to_string()
+        }
+    };
+    let owned = owned_resources(
+        &board,
+        &DriverRegistry::builtin(),
+        &SysRoot::new(&tree.0),
+        &chip_id,
+    );
+    let has = |r: Resource| owned.iter().any(|(o, _)| *o == r);
+    // The IMU on the i2c-gpio bus (4) owns both its addresses.
+    assert!(has(Resource::I2c {
+        bus: 4,
+        address: 0x18
+    }));
+    assert!(has(Resource::I2c {
+        bus: 4,
+        address: 0x68
+    }));
+    assert!(has(Resource::I2c {
+        bus: 1,
+        address: 0x40
+    }));
+    assert!(has(Resource::Line {
+        chip: "gpiochip0".into(),
+        offset: 20
+    }));
+    assert_eq!(
+        line_safe_state(&board, "gpiochip0", 5, &chip_id),
+        Some(SafeState::High)
+    );
+    assert_eq!(line_safe_state(&board, "gpiochip0", 6, &chip_id), None);
+
+    let bad = text.replace("safe = \"high\"", "safe = \"sideways\"")
+        + "\n[[lines]]\nname = \"aux\"\nchip = \"x\"\nline = 1\n";
+    let all = BoardDefinition::from_toml_str(&bad)
+        .unwrap()
+        .validate(&DriverRegistry::builtin())
+        .unwrap_err()
+        .to_string();
+    assert!(all.contains("safe must be"), "{all}");
+    assert!(all.contains("duplicate name"), "{all}");
+}

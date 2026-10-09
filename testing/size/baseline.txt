@@ -20,8 +20,8 @@ firmware/thumbv7em-none-eabihf/vcm 436
 firmware/thumbv7em-none-eabihf/vcm,ina2xx,bmm150,bmi088 5294
 firmware/thumbv7em-none-eabihf/vcm,ina2xx,bmm150,bmi088,float 5590
 linux/x86_64-unknown-linux-gnu/facade 290712
-linux/x86_64-unknown-linux-gnu/lemnos-ctl 742152
-linux/x86_64-unknown-linux-gnu/lemnosd 822144
+linux/x86_64-unknown-linux-gnu/lemnos-ctl 797592
+linux/x86_64-unknown-linux-gnu/lemnosd 905080
 linux/x86_64-unknown-linux-gnu/linux-lite 577264
 linux/x86_64-unknown-linux-gnu/linux-lite-builtin 732640
 linux/x86_64-unknown-linux-gnu/sensors 317504

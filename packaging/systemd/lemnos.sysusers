@@ -4,4 +4,5 @@
 u lemnos - "Lemnos hardware service" /run/lemnos
 m lemnos i2c
 m lemnos gpio
+m lemnos spi
 m lemnos video

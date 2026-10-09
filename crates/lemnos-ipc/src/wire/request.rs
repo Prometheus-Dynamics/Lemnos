@@ -128,14 +128,26 @@ impl Request {
                 client,
                 priority,
                 keep,
+                events,
             } => {
                 let mut e = Encoder::new(HELLO);
                 e.u16(*version)
                     .str(client)
                     .u8(*priority)
-                    .u8(u8::from(*keep));
+                    .u8(u8::from(*keep))
+                    .u8(u8::from(*events));
                 e.finish()
             }
+            Self::Restore {
+                id,
+                device,
+                control,
+            } => {
+                let mut e = Encoder::new(RESTORE);
+                e.u32(*id).str(device).str(control);
+                e.finish()
+            }
+            Self::Raw(raw) => raw.encode(),
             Self::List => Encoder::new(LIST).finish(),
             Self::Read { device } => {
                 let mut e = Encoder::new(READ);
@@ -235,7 +247,15 @@ impl Request {
                 client: d.str()?,
                 priority: d.u8()?,
                 keep: d.u8()? != 0,
+                // Appended later in protocol 1: older clients read events.
+                events: d.is_empty() || d.u8()? != 0,
             },
+            RESTORE => Self::Restore {
+                id: d.u32()?,
+                device: d.str()?,
+                control: d.str()?,
+            },
+            kind if super::raw::is_raw(kind) => Self::Raw(RawRequest::decode(kind, &mut d)?),
             LIST => Self::List,
             READ => Self::Read { device: d.str()? },
             SUBSCRIBE => Self::Subscribe {

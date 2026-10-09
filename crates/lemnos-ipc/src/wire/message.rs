@@ -97,7 +97,46 @@ impl Message {
                     } => {
                         e.u8(2).str(device).str(owner).str(layer);
                     }
+                    Event::Edge {
+                        handle,
+                        rising,
+                        timestamp_ns,
+                        seq,
+                    } => {
+                        e.u8(3)
+                            .u32(*handle)
+                            .u8(u8::from(*rising))
+                            .u64(*timestamp_ns)
+                            .u32(*seq);
+                    }
+                    Event::Dropped { count } => {
+                        e.u8(4).u32(*count);
+                    }
                 }
+                e.finish()
+            }
+            Self::Claimed { id, result } => {
+                let mut e = Encoder::new(CLAIMED);
+                e.u32(*id);
+                match result {
+                    Ok(handle) => e.u8(0).u8(0).u32(*handle),
+                    Err(refusal) => {
+                        let (code, kind) = refusal.code();
+                        e.u8(code).u8(kind).u32(0)
+                    }
+                };
+                e.finish()
+            }
+            Self::Data { id, result } => {
+                let mut e = Encoder::new(DATA);
+                e.u32(*id);
+                match result {
+                    Ok(bytes) => e.u8(0).u8(0).bytes(bytes),
+                    Err(refusal) => {
+                        let (code, kind) = refusal.code();
+                        e.u8(code).u8(kind).bytes(&[])
+                    }
+                };
                 e.finish()
             }
         }
@@ -202,8 +241,41 @@ impl Message {
                     owner: d.str()?,
                     layer: d.str()?,
                 },
+                3 => Event::Edge {
+                    handle: d.u32()?,
+                    rising: d.u8()? != 0,
+                    timestamp_ns: d.u64()?,
+                    seq: d.u32()?,
+                },
+                4 => Event::Dropped { count: d.u32()? },
                 other => return Err(bad(format!("unknown event {other}"))),
             }),
+            CLAIMED => {
+                let id = d.u32()?;
+                let (code, kind) = (d.u8()?, d.u8()?);
+                let handle = d.u32()?;
+                Self::Claimed {
+                    id,
+                    result: if code == 0 {
+                        Ok(handle)
+                    } else {
+                        Err(Refusal::from_code(code, kind))
+                    },
+                }
+            }
+            DATA => {
+                let id = d.u32()?;
+                let (code, kind) = (d.u8()?, d.u8()?);
+                let bytes = d.bytes()?;
+                Self::Data {
+                    id,
+                    result: if code == 0 {
+                        Ok(bytes)
+                    } else {
+                        Err(Refusal::from_code(code, kind))
+                    },
+                }
+            }
             other => return Err(bad(format!("unknown message kind {other}"))),
         })
     }

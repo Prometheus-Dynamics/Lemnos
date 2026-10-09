@@ -82,8 +82,14 @@ impl embedded_hal::delay::DelayNs for SleepDelay {
 }
 
 /// `lemnosd`: hosts a board's devices and serves clients.
+#[path = "service_raw.rs"]
+mod service_raw;
+
 pub struct Service {
     board: String,
+    /// The whole definition (lines, PWM channels, raw policy).
+    definition: lemnos_board::BoardDefinition,
+    raw: crate::raw::RawState,
     registry: DriverRegistry,
     buses: Box<dyn Buses>,
     slots: Vec<Slot>,
@@ -116,8 +122,11 @@ impl Service {
         let _ = std::fs::remove_file(&config.socket);
         let listener = UnixListener::bind(&config.socket)?;
         listener.set_nonblocking(true)?;
+        let definition = config.board.clone();
         let mut service = Self {
             board: config.board.board.id.clone(),
+            definition,
+            raw: crate::raw::RawState::default(),
             registry: config.registry,
             buses,
             slots: config.board.devices.into_iter().map(Slot::new).collect(),
@@ -172,7 +181,7 @@ impl Service {
     }
 
     fn broadcast(&mut self, message: &Message) {
-        for client in self.clients.iter_mut().filter(|c| c.greeted) {
+        for client in self.clients.iter_mut().filter(|c| c.greeted && c.events) {
             client.send(message);
         }
     }
@@ -346,6 +355,7 @@ impl Service {
                 client,
                 priority,
                 keep,
+                events,
                 ..
             } => {
                 let owner = self.owner_for(&client);
@@ -354,6 +364,7 @@ impl Service {
                     c.name = client;
                     c.priority = priority;
                     c.keep = keep;
+                    c.events = events;
                     c.owner = owner;
                     c.greeted = true;
                     c.id
@@ -443,6 +454,15 @@ impl Service {
                 let result = self.get(&device, &control);
                 self.clients[ci].send(&Message::Reply { id, result });
             }
+            Request::Raw(request) => self.handle_raw(ci, request),
+            Request::Restore {
+                id,
+                device,
+                control,
+            } => {
+                let result = self.restore_control(ci, &device, &control).map(|()| 0.0);
+                self.clients[ci].send(&Message::Reply { id, result });
+            }
             Request::Release { id, device } => {
                 let result = self.release(ci, &device);
                 if result.is_ok() {
@@ -516,6 +536,18 @@ impl Service {
         if !raw.is_finite() || raw < f64::from(min) || raw > f64::from(max) {
             return Err(Refusal::OutOfRange);
         }
+        let (wid, wname, wkeep) = {
+            let c = &self.clients[client];
+            (c.id, c.name.clone(), c.keep)
+        };
+        self.slots[index].note_write(
+            ci,
+            &crate::clients::Requester {
+                id: wid,
+                name: &wname,
+                keep: wkeep,
+            },
+        );
         if self.slots[index].before_write() {
             self.save_fan_state();
         }
@@ -576,6 +608,9 @@ impl Service {
         if self.update.is_some() {
             next = next.min(self.next_update_ms);
         }
+        if self.raw.polls_edges() {
+            next = next.min(now_ms + 20);
+        }
         if self.notifier.watchdog_interval().is_some() {
             next = next.min(self.next_watchdog_ms);
         }
@@ -591,6 +626,7 @@ impl Service {
         self.poll_devices(now);
         self.poll_update(now);
         self.render_lights(now);
+        self.send_edges();
         if let Some(interval) = self.notifier.watchdog_interval()
             && now >= self.next_watchdog_ms
         {
@@ -611,6 +647,9 @@ impl Service {
             };
             self.pollfds
                 .push(PollFd::new(client.stream.as_fd(), events));
+        }
+        for fd in self.raw.edge_fds() {
+            self.pollfds.push(PollFd::from_raw(fd, POLLIN));
         }
         if let Some(fd) = extra {
             self.pollfds.push(PollFd::new(fd, POLLIN));
@@ -648,6 +687,7 @@ impl Service {
         }
         // A request may have changed a light: render without waiting.
         self.render_lights(self.now_ms());
+        self.send_edges();
         self.drop_closed();
         Ok(extra_ready)
     }
@@ -662,6 +702,9 @@ impl Service {
             let client = self.clients.remove(ci);
             for slot in &mut self.slots {
                 slot.subscriptions.retain(|s| s.client != client.id);
+            }
+            if client.greeted {
+                self.client_closed(&client);
             }
             let others = self.clients.iter().any(|c| c.owner == client.owner);
             if !client.keep && !others && client.greeted {
@@ -693,6 +736,7 @@ impl Service {
     /// is restarting, the rebooting look), the socket removed.
     pub fn shutdown(&mut self, rebooting: bool) {
         self.notifier.stopping();
+        self.raw.release_all();
         for slot in &mut self.slots {
             slot.restore();
         }

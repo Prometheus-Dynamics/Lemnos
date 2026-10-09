@@ -28,6 +28,43 @@ pub struct BoardDefinition {
     /// The devices, in order.
     #[serde(default)]
     pub devices: Vec<DeviceSpec>,
+    /// Named GPIO lines no device owns, for clients' raw claims (with the
+    /// state each goes back to when its claim ends).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<LineSpec>,
+    /// Named PWM channels no device owns, for clients' raw claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pwms: Vec<PwmSpec>,
+    /// Clients allowed raw bus and line access (hosts such as `lemnosd`);
+    /// empty means any client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_clients: Vec<String>,
+}
+
+/// A named GPIO line for raw claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineSpec {
+    /// The name clients claim it by (`aux-1`).
+    pub name: String,
+    /// `gpiochipN` or a chip label (`pinctrl-rp1`).
+    pub chip: String,
+    /// The offset on the chip.
+    pub line: u32,
+    /// What the line goes back to when a claim ends: `input` (high
+    /// impedance, the default), `low` or `high`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe: Option<String>,
+}
+
+/// A named PWM channel for raw claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PwmSpec {
+    pub name: String,
+    /// The `pwmchipN` number.
+    pub chip: u32,
+    pub channel: u32,
 }
 
 /// Identity of the board.
@@ -220,6 +257,12 @@ pub struct DeviceSpec {
     /// Driver-specific settings.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub config: BTreeMap<String, ConfigValue>,
+    /// Clients allowed raw I2C or SPI transactions to this device's
+    /// addresses (brokered by the host between the device's own accesses);
+    /// empty means none. Lines and PWM channels a device owns are never
+    /// handed out raw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw: Vec<String>,
 }
 
 impl DeviceSpec {
@@ -237,6 +280,7 @@ impl DeviceSpec {
             poll_ms: None,
             writers: Vec::new(),
             config: BTreeMap::new(),
+            raw: Vec::new(),
         }
     }
 
@@ -289,6 +333,9 @@ impl BoardDefinition {
                 generated_by: None,
             },
             devices: Vec::new(),
+            lines: Vec::new(),
+            pwms: Vec::new(),
+            raw_clients: Vec::new(),
         }
     }
 
@@ -362,6 +409,30 @@ impl BoardDefinition {
                     "device {:?}: unknown driver {:?}",
                     device.id, device.driver
                 )),
+            }
+        }
+        for (index, line) in self.lines.iter().enumerate() {
+            if !is_valid_id(&line.name) {
+                problems.push(format!("line {:?}: not a valid name", line.name));
+            }
+            if self.lines[..index].iter().any(|l| l.name == line.name) {
+                problems.push(format!("line {:?}: duplicate name", line.name));
+            }
+            if let Some(safe) = &line.safe
+                && !matches!(safe.as_str(), "input" | "low" | "high")
+            {
+                problems.push(format!(
+                    "line {:?}: safe must be input, low or high, not {safe:?}",
+                    line.name
+                ));
+            }
+        }
+        for (index, pwm) in self.pwms.iter().enumerate() {
+            if !is_valid_id(&pwm.name) {
+                problems.push(format!("pwm {:?}: not a valid name", pwm.name));
+            }
+            if self.pwms[..index].iter().any(|p| p.name == pwm.name) {
+                problems.push(format!("pwm {:?}: duplicate name", pwm.name));
             }
         }
         if problems.is_empty() {

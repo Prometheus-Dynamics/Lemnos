@@ -319,3 +319,40 @@ fn release_hands_a_fan_back_while_the_service_runs() {
     assert_eq!(read(&root, "class/hwmon/hwmon2/pwm1_enable"), "1");
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_fan_override_ends_with_the_writers_connection() {
+    let root = root("disconnect");
+    tree(&root);
+    let socket = root.join("run/lemnosd.sock");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (thread_stop, thread_root, thread_socket) =
+        (Arc::clone(&stop), root.clone(), socket.clone());
+    let handle = std::thread::spawn(move || {
+        let config = ServiceConfig::new(board(), thread_socket);
+        let mut service = Service::new(config, Box::new(SysBuses(thread_root))).unwrap();
+        ready_tx.send(()).unwrap();
+        service.run(&thread_stop).unwrap();
+        service.shutdown(false);
+    });
+    ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    let cdev_state = "devices/virtual/thermal/cooling_device0/cur_state";
+
+    // HeliOS takes the fan over, then dies without cleaning up.
+    let mut helios = ClientOptions::new(&socket, "helios").devices().unwrap();
+    assert_eq!(helios.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
+    write(&root, cdev_state, "4");
+    drop(helios);
+    // The service, still running, hands the fan back to the governor.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while read(&root, "class/hwmon/hwmon2/pwm1_enable") != "1" {
+        assert!(std::time::Instant::now() < deadline, "not handed back");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(read(&root, "class/thermal/cooling_device0/cur_state"), "1");
+
+    stop.store(true, Ordering::Relaxed);
+    handle.join().unwrap();
+    let _ = fs::remove_dir_all(&root);
+}

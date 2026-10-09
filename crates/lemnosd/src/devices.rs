@@ -41,6 +41,22 @@ pub(crate) struct Slot {
     /// A client has written to this fan: the governor states in `restore`
     /// are the ones from before that.
     overriding: bool,
+    /// Controls clients changed, who changed them last, and the value from
+    /// before the first change.
+    pub overrides: Vec<Override>,
+}
+
+/// A control a client changed.
+#[derive(Debug, Clone)]
+pub(crate) struct Override {
+    pub control: usize,
+    /// The connection that wrote last.
+    pub holder: u32,
+    pub name: String,
+    /// The writer keeps its intents: not undone when it disconnects.
+    pub keep: bool,
+    /// The value before the first write (`None`: unreadable control).
+    pub before: Option<i32>,
 }
 
 impl Slot {
@@ -60,6 +76,7 @@ impl Slot {
             subscriptions: Vec::new(),
             restore: None,
             overriding: false,
+            overrides: Vec::new(),
         }
     }
 
@@ -267,6 +284,51 @@ impl Slot {
         }
     }
 
+    /// Records that `who` is about to write control `control`: the first
+    /// writer's snapshot of the old value stays; the holder becomes `who`.
+    pub fn note_write(&mut self, control: usize, who: &crate::clients::Requester<'_>) {
+        if let Some(existing) = self.overrides.iter_mut().find(|o| o.control == control) {
+            existing.holder = who.id;
+            existing.name = who.name.to_string();
+            existing.keep = who.keep;
+            return;
+        }
+        let before = self.device.as_mut().and_then(|d| d.get(control).ok());
+        self.overrides.push(Override {
+            control,
+            holder: who.id,
+            name: who.name.to_string(),
+            keep: who.keep,
+            before,
+        });
+    }
+
+    /// Undoes the overrides `matches` selects: a fan goes back to the kernel
+    /// (all of its overrides end), other controls get their old value.
+    /// Returns whether anything was undone.
+    pub fn revert(&mut self, matches: impl Fn(&Override) -> bool) -> bool {
+        if !self.overrides.iter().any(&matches) {
+            return false;
+        }
+        if self.restore.is_some() {
+            let _ = self.release();
+            self.overrides.clear();
+            return true;
+        }
+        let (undo, keep): (Vec<Override>, Vec<Override>) = std::mem::take(&mut self.overrides)
+            .into_iter()
+            .partition(|o| matches(o));
+        self.overrides = keep;
+        if let Some(device) = self.device.as_mut() {
+            for o in undo {
+                if let Some(value) = o.before {
+                    let _ = device.set(o.control, value);
+                }
+            }
+        }
+        true
+    }
+
     /// Hands a fan back to the kernel's governor while the service keeps
     /// running. The next client write takes it back (recording the
     /// governor's states again first).
@@ -277,6 +339,7 @@ impl Slot {
         let plan = self.hand_back_plan().ok_or(ErrorKind::Unsupported)?;
         plan.apply().map_err(|e| lemnos_hal::HalError::kind(&e))?;
         self.overriding = false;
+        self.overrides.clear();
         Ok(())
     }
 }

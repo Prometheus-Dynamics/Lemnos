@@ -18,6 +18,17 @@
 //!   led system <updating [0..1] [--phase P]|booting|rebooting|update-failed|rolled-back>
 //!   led locate [--seconds N]
 //!   led off
+//!   restore <device> [control]        undo lemnos-ctl's earlier `set`s
+//!   gpio get <line> [--bias up|down|off] [--active-low]
+//!   gpio set <line> <0|1> [--drive push-pull|open-drain|open-source] [--hold S | --keep]
+//!   gpio watch <line> [--edge rising|falling|both] [--count N]
+//!   gpio release <handle>
+//!   pwm set <chip:channel|name> --period NS --duty NS [--inversed] [--hold S | --keep]
+//!   pwm release <handle>
+//!   i2c read <bus> <address> <register> [count]
+//!   i2c write <bus> <address> <register> <byte>...
+//!   i2c xfer <bus> <address> w:HEX r:N ...
+//!   spi xfer <bus.cs> <HEX> [--mode 0-3] [--speed HZ]
 //!   fan release <device>
 //!   fan restore [--board PATH] [--state PATH] [--all]
 //!   validate <board.toml>...
@@ -26,6 +37,12 @@
 //!   --test (the test layer, over every client's status, for --seconds or 10 s;
 //!   `led off --test` clears only it)
 //! ```
+//!
+//! `<line>` is `chip:offset` (`pinctrl-rp1:5`, `gpiochip0:5`) or a board or
+//! kernel line name; `<bus>` an I2C bus number, `i2c-N` or a board selector.
+//! Writes (`set`) persist after `lemnos-ctl` exits, until `restore`. Line and
+//! PWM claims hold while it runs (until interrupted or `--hold` seconds),
+//! or persist with `--keep` until `release`.
 //!
 //! LED intents from `lemnos-ctl` stay after it exits, until replaced or
 //! cleared with `led off` (one intent per client name and layer).
@@ -38,6 +55,9 @@ use lemnos_ipc::{
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+#[path = "../ctl_raw.rs"]
+mod raw;
 use std::time::Duration;
 
 struct Args {
@@ -99,11 +119,18 @@ fn main() -> ExitCode {
         .unwrap_or(50);
     let options = ClientOptions::new(&socket, client).priority(priority);
     let Some(command) = args.next() else {
-        return fail("no command (list, read, watch, set, get, led, fan, validate)");
+        return fail(
+            "no command (list, read, watch, set, get, restore, led, gpio, pwm, i2c, spi, fan, validate)",
+        );
     };
     match command.as_str() {
         "validate" => validate(args),
         "fan" => fan(args, Path::new(&socket), options),
+        "gpio" => raw::gpio(args, options),
+        "pwm" => raw::pwm(args, options),
+        "i2c" => raw::i2c(args, options),
+        "spi" => raw::spi(args, options),
+        "restore" => raw::restore(args, options),
         "led" => led(args, options),
         _ => devices(&command, args, options),
     }
@@ -335,6 +362,12 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
 }
 
 fn devices(command: &str, mut args: Args, options: ClientOptions) -> ExitCode {
+    // Writes from lemnos-ctl persist after it exits (`restore` undoes them).
+    let options = if command == "set" {
+        options.keep_intents()
+    } else {
+        options
+    };
     let mut client = match options.devices() {
         Ok(c) => c,
         Err(e) => return fail(e),

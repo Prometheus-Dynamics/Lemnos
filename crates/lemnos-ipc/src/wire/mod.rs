@@ -24,11 +24,14 @@ const SET: u16 = 5;
 const GET: u16 = 6;
 const LED: u16 = 7;
 const RELEASE: u16 = 8;
+const RESTORE: u16 = 9;
 const WELCOME: u16 = 101;
 const DEVICES: u16 = 102;
 const READING: u16 = 103;
 const REPLY: u16 = 104;
 const EVENT: u16 = 105;
+const CLAIMED: u16 = 106;
+const DATA: u16 = 107;
 
 /// A malformed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +51,10 @@ fn bad(what: impl Into<String>) -> WireError {
 
 mod codec;
 mod message;
+mod raw;
 mod request;
+
+pub use raw::{I2cOp, LineTarget, PwmTarget, RawRequest, SpiXfer};
 
 use codec::{Code, frame};
 
@@ -109,6 +115,12 @@ pub enum Refusal {
     UnknownControl,
     /// The device failed or is not available; its error kind.
     Device(ErrorKind),
+    /// A board device owns this bus address, line or channel.
+    Owned,
+    /// Another client holds a claim or lock on it.
+    Claimed,
+    /// No such claim handle on this connection.
+    UnknownHandle,
 }
 
 impl Refusal {
@@ -119,6 +131,9 @@ impl Refusal {
             Self::UnknownDevice => (3, 0),
             Self::UnknownControl => (4, 0),
             Self::Device(kind) => (5, kind.code()),
+            Self::Owned => (6, 0),
+            Self::Claimed => (7, 0),
+            Self::UnknownHandle => (8, 0),
         }
     }
 
@@ -128,6 +143,9 @@ impl Refusal {
             2 => Self::OutOfRange,
             3 => Self::UnknownDevice,
             4 => Self::UnknownControl,
+            6 => Self::Owned,
+            7 => Self::Claimed,
+            8 => Self::UnknownHandle,
             _ => Self::Device(ErrorKind::from_code(kind)),
         }
     }
@@ -141,6 +159,9 @@ impl fmt::Display for Refusal {
             Self::UnknownDevice => f.write_str("no such device"),
             Self::UnknownControl => f.write_str("no such control"),
             Self::Device(kind) => write!(f, "device error: {kind}"),
+            Self::Owned => f.write_str("owned by a board device"),
+            Self::Claimed => f.write_str("claimed by another client"),
+            Self::UnknownHandle => f.write_str("no such claim"),
         }
     }
 }
@@ -167,6 +188,16 @@ pub enum Event {
         owner: String,
         layer: String,
     },
+    /// An edge on a line this connection claimed with edge detection.
+    Edge {
+        handle: u32,
+        rising: bool,
+        timestamp_ns: u64,
+        seq: u32,
+    },
+    /// The service dropped this many events because the client did not read
+    /// them (it keeps a bounded queue per client).
+    Dropped { count: u32 },
 }
 
 /// The LED request kinds. Colours are `0xWWRRGGBB` (white in the top byte);
@@ -251,11 +282,14 @@ impl LedRequest {
 pub enum Request {
     /// `keep`: the service keeps this client's LED intents after it
     /// disconnects (for one-shot command-line clients).
+    /// `events`: the client reads events (status, control, LED owner,
+    /// edges); without it the service sends none.
     Hello {
         version: u16,
         client: String,
         priority: u8,
         keep: bool,
+        events: bool,
     },
     List,
     Read {
@@ -287,6 +321,17 @@ pub enum Request {
         id: u32,
         device: String,
     },
+    /// Undoes this client's control writes on `device` (`control` empty:
+    /// all of them): fans go back to the kernel, other controls to their
+    /// value from before the client's first write. Clients that do not keep
+    /// their intents get this automatically when they disconnect.
+    Restore {
+        id: u32,
+        device: String,
+        control: String,
+    },
+    /// Raw bus and line access.
+    Raw(RawRequest),
 }
 
 /// Service to client.
@@ -304,6 +349,16 @@ pub enum Message {
         result: Result<f64, Refusal>,
     },
     Event(Event),
+    /// The handle of a new line or PWM claim.
+    Claimed {
+        id: u32,
+        result: Result<u32, Refusal>,
+    },
+    /// Bytes read by an I2C or SPI transaction.
+    Data {
+        id: u32,
+        result: Result<Vec<u8>, Refusal>,
+    },
 }
 
 /// Splits and decodes requests from `buf`; returns the request and the bytes

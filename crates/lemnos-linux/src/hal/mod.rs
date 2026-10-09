@@ -12,6 +12,9 @@
 //!   character device, uAPI v2: inputs, outputs, bias, drive, debounce, edge
 //!   events, reconfiguration without releasing; `GpioLine` is an
 //!   embedded-hal input/output pin.
+//! - The [`lemnos_hal::raw`] traits: `RawLine` for `GpioLine`, `RawSpi` for
+//!   `Spidev` (one SPI mode per transaction; speed and word size per
+//!   segment).
 //! - [`StdDelay`]: [`DelayNs`](embedded_hal::delay::DelayNs) over
 //!   `std::thread::sleep`.
 //!
@@ -28,6 +31,8 @@ mod gpio;
 mod gpio_async;
 #[cfg(feature = "i2c")]
 mod i2c;
+#[cfg(any(feature = "gpio-cdev", feature = "spi"))]
+mod raw;
 #[cfg(feature = "spi")]
 mod spi;
 
@@ -40,6 +45,8 @@ pub use gpio::{
 pub use gpio_async::AsyncGpioLine;
 #[cfg(feature = "i2c")]
 pub use i2c::{I2cBus, I2cMessage};
+#[cfg(feature = "gpio-cdev")]
+pub use raw::line_settings;
 #[cfg(feature = "spi")]
 pub use spi::{SpiMode, SpiTransfer, Spidev};
 

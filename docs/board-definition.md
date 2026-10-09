@@ -81,6 +81,35 @@ recorded on that kernel, never from documentation. Generators should emit the mo
 selector they know (a unique `compatible`, else the `of` path) and fall
 back to `i2c-<n>`.
 
+### Raw access: lines, PWM channels and policy
+
+Hosts that hand hardware to clients (`lemnosd`) read three more keys:
+
+```toml
+raw_clients = ["helios", "atlas-selftest"]   # top level: who may claim raw (empty: anyone)
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-1"
+raw = ["atlas-selftest"]   # clients allowed brokered I2C to the IMU's addresses
+
+[[lines]]                  # GPIO lines no device owns, by name, with a safe state
+name = "aux-1"
+chip = "pinctrl-rp1"
+line = 21
+safe = "low"               # input (default: high impedance), low or high
+
+[[pwms]]                   # PWM channels no device owns, by name
+name = "buzzer"
+chip = 0                   # pwmchip0
+channel = 1
+```
+
+A device owns its I2C address (plus any integer `*_address` setting), its SPI chip select
+and, for `gpio-*` devices, its line; those are never claimed raw. See
+[system-service.md](system-service.md#raw-bus-and-line-access).
+
 ### Backends
 
 - `userspace`: the Lemnos driver over the bus device (`/dev/i2c-N`).

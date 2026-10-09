@@ -38,10 +38,21 @@ the same static binary, with no image to pull or build and no container to start
 ## What the image provides
 
 - systemd (the unit is `Type=notify` with a watchdog) and `systemd-sysusers`, or a `lemnos`
-  user created at build time on read-only root filesystems.
+  user created at build time on read-only root filesystems. Buildroot does not run
+  sysusers into the target: add [buildroot/lemnos-users.table](buildroot/lemnos-users.table)
+  to `BR2_ROOTFS_USERS_TABLES` (space-separated; keep the image's own tables). With Gaia,
+  which has no user schema, add `@source:lemnos/packaging/buildroot/lemnos-users.table`
+  there.
 - Groups that own the devices: `i2c` (`/dev/i2c-*`), `gpio` (`/dev/gpiochip*`), `video` or
   whichever group owns the LED device (`/dev/leds*`). Adjust `SupplementaryGroups=` with a
-  drop-in.
+  drop-in; for raw SPI add the group owning `/dev/spidev*` (often `spi`) there. The unit
+  does not list it, because a group missing from the image stops the unit from starting.
+  The sysusers entry and the Buildroot table make `lemnos` a member of `spi` (creating the
+  group if needed).
+- For raw PWM claims (`[[pwms]]`, `lemnos-ctl pwm`): write access to sysfs PWM export and
+  channel attributes, for example
+  `SUBSYSTEM=="pwm", KERNEL=="pwmchip*", RUN+="/bin/chgrp lemnos /sys%p/export /sys%p/unexport", RUN+="/bin/chmod g+w /sys%p/export /sys%p/unexport"` and
+  `SUBSYSTEM=="pwm", KERNEL=="pwm*", RUN+="/bin/sh -c 'chgrp lemnos /sys%p/period /sys%p/duty_cycle /sys%p/enable /sys%p/polarity; chmod g+w /sys%p/period /sys%p/duty_cycle /sys%p/enable /sys%p/polarity'"`.
 - Write access for the `lemnos` user to the fan's hwmon attributes (`pwm1`, `pwm1_enable`)
   and, for a `pwm-fan` fan, its thermal cooling device's `cur_state` and the thermal zones'
   `policy` (the hand-back restores the governor's state and makes it re-evaluate): udev

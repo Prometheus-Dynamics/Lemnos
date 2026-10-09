@@ -2,10 +2,12 @@
 //! runtime session, a test double), the factories do not.
 
 use crate::BoardError;
+use crate::raw::{DynLine, DynPwm, DynSpi};
 use embedded_hal::digital::{self, InputPin, OutputPin};
 use embedded_hal::i2c::{ErrorType, I2c, Operation};
 use lemnos_drivers_linux::SysRoot;
 use lemnos_hal::erased::Kind;
+use lemnos_hal::raw::LineConfig;
 use lemnos_hal::{ErrorKind, HalError};
 
 /// An I2C bus of any type, its errors reduced to [`ErrorKind`].
@@ -150,6 +152,54 @@ pub trait Buses {
     fn sys(&self) -> SysRoot {
         SysRoot::default()
     }
+
+    /// Claims line `offset` of `chip` (`gpiochipN` or a label) for a
+    /// client, configured as `config`, under consumer name `consumer`.
+    fn line(
+        &mut self,
+        chip: &str,
+        offset: u32,
+        config: &LineConfig,
+        consumer: &str,
+    ) -> Result<DynLine, BoardError> {
+        let _ = (offset, config, consumer);
+        Err(BoardError::device(
+            chip,
+            ErrorKind::Unsupported,
+            "this host has no GPIO",
+        ))
+    }
+
+    /// The host's identity for a chip name or label (so `gpiochip0` and its
+    /// label compare equal); the name itself by default.
+    fn line_chip_id(&self, chip: &str) -> String {
+        chip.to_string()
+    }
+
+    /// A line by its kernel name: the chip identity and offset.
+    fn find_line(&self, name: &str) -> Option<(String, u32)> {
+        let _ = name;
+        None
+    }
+
+    /// Claims channel `channel` of `pwmchip{chip}`.
+    fn pwm(&mut self, chip: u32, channel: u32) -> Result<DynPwm, BoardError> {
+        let _ = channel;
+        Err(BoardError::device(
+            &format!("pwmchip{chip}"),
+            ErrorKind::Unsupported,
+            "this host has no PWM",
+        ))
+    }
+
+    /// Opens SPI bus `bus`, chip select `chip_select`.
+    fn spi(&mut self, bus: u32, chip_select: u16) -> Result<DynSpi, BoardError> {
+        Err(BoardError::device(
+            &format!("spi-{bus}.{chip_select}"),
+            ErrorKind::Unsupported,
+            "this host has no SPI",
+        ))
+    }
 }
 
 /// Buses from Linux device nodes (`/dev/i2c-N`) through
@@ -217,6 +267,70 @@ impl Buses for LinuxBuses {
         }
         self.gpio_line(line, settings).map(DynInputPin::new)
     }
+
+    fn line(
+        &mut self,
+        chip: &str,
+        offset: u32,
+        config: &LineConfig,
+        consumer: &str,
+    ) -> Result<DynLine, BoardError> {
+        use std::os::fd::{AsFd, AsRawFd};
+        let fail = |e: std::io::Error| BoardError::Device {
+            device: format!("{chip}:{offset}"),
+            kind: ErrorKind::from_io(e.kind()),
+            reason: e.to_string(),
+        };
+        let line = self
+            .open_chip(chip)
+            .and_then(|c| {
+                c.request_line(consumer, offset, lemnos_linux::hal::line_settings(config))
+            })
+            .map_err(fail)?;
+        let fd = line.as_fd().as_raw_fd();
+        Ok(DynLine::new(line, Some(fd)))
+    }
+
+    fn line_chip_id(&self, chip: &str) -> String {
+        self.open_chip(chip)
+            .ok()
+            .and_then(|c| {
+                c.path()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| chip.to_string())
+    }
+
+    fn find_line(&self, name: &str) -> Option<(String, u32)> {
+        let chips = lemnos_linux::hal::GpioChip::paths_in(&self.dev).ok()?;
+        chips.into_iter().find_map(|path| {
+            let chip = lemnos_linux::hal::GpioChip::open(&path).ok()?;
+            let offset = chip.find_line(name).ok()??;
+            Some((path.file_name()?.to_string_lossy().into_owned(), offset))
+        })
+    }
+
+    fn pwm(&mut self, chip: u32, channel: u32) -> Result<DynPwm, BoardError> {
+        lemnos_drivers_linux::SysfsPwm::open(&self.sys, chip, channel)
+            .map(DynPwm::new)
+            .map_err(|e| BoardError::Device {
+                device: format!("pwmchip{chip}/pwm{channel}"),
+                kind: e.kind(),
+                reason: e.to_string(),
+            })
+    }
+
+    fn spi(&mut self, bus: u32, chip_select: u16) -> Result<DynSpi, BoardError> {
+        let path = self.dev.join(format!("spidev{bus}.{chip_select}"));
+        lemnos_linux::hal::Spidev::open_path(&path)
+            .map(DynSpi::new)
+            .map_err(|e| BoardError::Device {
+                device: path.display().to_string(),
+                kind: ErrorKind::from_io(e.kind()),
+                reason: e.to_string(),
+            })
+    }
 }
 
 #[cfg(feature = "linux")]
@@ -226,19 +340,23 @@ impl LinuxBuses {
         line: &GpioRef,
         settings: lemnos_linux::hal::LineSettings,
     ) -> Result<lemnos_linux::hal::GpioLine, BoardError> {
-        use lemnos_linux::hal::GpioChip;
         let fail = |e: std::io::Error| BoardError::Device {
             device: format!("{}:{}", line.chip, line.line),
             kind: ErrorKind::from_io(e.kind()),
             reason: e.to_string(),
         };
-        let chip = if line.chip.starts_with("gpiochip") {
-            GpioChip::open(self.dev.join(&line.chip))
-        } else {
-            GpioChip::open_by_label(&line.chip)
-        }
-        .map_err(fail)?;
-        chip.request_line("lemnosd", line.line, settings)
+        self.open_chip(&line.chip)
+            .and_then(|chip| chip.request_line("lemnosd", line.line, settings))
             .map_err(fail)
+    }
+
+    /// A chip by `gpiochipN` name or by label.
+    fn open_chip(&self, chip: &str) -> std::io::Result<lemnos_linux::hal::GpioChip> {
+        use lemnos_linux::hal::GpioChip;
+        if chip.starts_with("gpiochip") {
+            GpioChip::open(self.dev.join(chip))
+        } else {
+            GpioChip::open_by_label(chip)
+        }
     }
 }

@@ -18,7 +18,10 @@ mod clients;
 mod devices;
 pub mod fans;
 mod light;
+#[cfg(feature = "mock")]
+pub mod mock;
 mod notify;
+mod raw;
 mod service;
 mod update;
 

@@ -20,7 +20,8 @@ pub enum BoardError {
 }
 
 impl BoardError {
-    pub(crate) fn device(device: &str, kind: ErrorKind, reason: impl Into<String>) -> Self {
+    /// A device-level failure: which device (or bus), its kind, and why.
+    pub fn device(device: &str, kind: ErrorKind, reason: impl Into<String>) -> Self {
         Self::Device {
             device: device.into(),
             kind,
