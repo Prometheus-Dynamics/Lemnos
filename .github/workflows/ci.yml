@@ -84,11 +84,3 @@ jobs:
           targets: thumbv7em-none-eabihf, riscv32imac-unknown-none-elf
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci.sh sizes
-
-  package-surface:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: ./scripts/ci.sh package-surface

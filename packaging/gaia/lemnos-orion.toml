@@ -1,0 +1,55 @@
+# lemnos-orion: lemnosd's devices as Orion resources (docs/orion.md), an
+# OPTIONAL Gaia layer. Import it after lemnosd.toml on images that run an
+# Orion node; images without one leave it out. It builds lemnosd's `orion`
+# feature (the lemnos-orion binary) in its own build group, so the lemnosd
+# and lemnos-orion builds do not share feature unification. The Orion crates
+# are git dependencies pinned to Orion's main at 4fadba9.
+#
+#   imports = [
+#     ...,
+#     { source = "lemnos", path = "packaging/gaia/lemnosd.toml" },
+#     { source = "lemnos", path = "packaging/gaia/lemnos-orion.toml" },
+#   ]
+#
+# The image feed lists (`[image.feed]`) must name these ids too when the
+# image uses feeds; see lemnosd.toml.
+
+gaia_version = ">=2.0.0"
+
+[providers.rust]
+allow_nested_build = true
+
+[[artifacts]]
+id = "lemnos-orion"
+kind = "rust"
+source = "lemnos"
+package = "lemnosd"
+features = ["orion"]
+target = "aarch64-unknown-linux-musl"
+profile = "service"
+target_name = "lemnos-orion"
+install_name = "lemnos-orion"
+install_class = "binary"
+install_dest_hint = "/usr/bin/lemnos-orion"
+build_group = "lemnos-orion"
+output_path = "${workspace.out_dir}/artifacts/lemnos-orion/lemnos-orion"
+
+[artifacts.execution]
+backend = "docker"
+
+[artifacts.execution.docker]
+image = "lemnos-aarch64-musl"
+dockerfile = "@self/docker/aarch64-musl.Dockerfile"
+context = "@self/docker"
+
+[[install]]
+id = "install-lemnos-orion"
+artifact = "lemnos-orion"
+dest = "/usr/bin/lemnos-orion"
+replace = true
+mode = 493 # 0755
+
+[[stage.services]]
+id = "lemnos-orion-service"
+name = "lemnos-orion.service"
+unit_path = "@self/../systemd/lemnos-orion.service"

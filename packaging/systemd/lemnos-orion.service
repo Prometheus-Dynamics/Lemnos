@@ -1,0 +1,57 @@
+# lemnos-orion as a managed systemd service: lemnosd's devices as Orion
+# resources (docs/orion.md). Optional: an image that has no Orion node does
+# not need it. It runs without Orion (it retries) and without lemnosd.
+#
+# Needs /usr/bin/lemnos-orion (the `orion` feature of lemnosd), lemnosd and
+# orion-node. Settings go in /etc/default/lemnos-orion.env (optional).
+
+[Unit]
+Description=Lemnos devices as Orion resources
+Documentation=https://github.com/Prometheus-Dynamics/Lemnos/blob/dev/docs/orion.md
+After=lemnosd.service orion-node.service
+Wants=lemnosd.service orion-node.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lemnos-orion
+Restart=always
+RestartSec=1s
+RestartSteps=5
+RestartMaxDelaySec=10s
+
+Environment=LEMNOSD_SOCKET=/run/lemnos/lemnosd.sock
+Environment=LEMNOSD_BOARD=/etc/lemnos/board.toml
+Environment=LEMNOS_ORION_RATE_HZ=2
+EnvironmentFile=-/etc/default/lemnos-orion.env
+
+# Only sockets are used: lemnosd's and Orion's local IPC. The `lemnos` user
+# reads /run/lemnos (group lemnos); Orion's socket must be reachable by it.
+User=lemnos
+Group=lemnos
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

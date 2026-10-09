@@ -31,6 +31,7 @@ entries=(
   "lemnos board linux|lemnos|board,linux,builtin-drivers|lint"
   "lemnos-core serde|lemnos-core|serde|test"
   "lemnos-board linux|lemnos-board|linux|test"
+  "lemnosd orion (lemnos-orion bridge)|lemnosd|orion|test"
 )
 
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"

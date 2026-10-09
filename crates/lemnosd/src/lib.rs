@@ -21,6 +21,8 @@ mod light;
 #[cfg(feature = "mock")]
 pub mod mock;
 mod notify;
+#[cfg(feature = "orion")]
+pub mod orion;
 mod raw;
 mod service;
 mod update;

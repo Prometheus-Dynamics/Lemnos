@@ -98,23 +98,9 @@ run_matrix() {
   timed "matrix: Running the feature matrix" "$root_dir/scripts/feature-matrix.sh"
 }
 
-package_surface() {
-  cargo package --workspace --allow-dirty --no-verify --offline ||
-    cargo package --workspace --allow-dirty --no-verify
-}
-
-run_package_surface() {
-  echo "==> [package-surface] Validating package surface"
-  # Offline: the builds already fetched the registry index, and an online
-  # run spends minutes re-querying crates.io for each package while the
-  # packaging itself takes a second. Falls back to online when the local
-  # index is missing.
-  timed "package-surface: Validating package surface" package_surface
-}
-
 usage() {
   cat <<'EOF'
-Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|sizes|matrix|package-surface|all]
+Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|sizes|matrix|all]
 
 Defaults to `all`, which mirrors the non-matrix jobs in `.github/workflows/ci.yml`;
 `matrix` runs the feature-matrix job (`scripts/feature-matrix.sh`).
@@ -139,15 +125,11 @@ case "$mode" in
   matrix)
     run_matrix
     ;;
-  package-surface)
-    run_package_surface
-    ;;
   all)
     run_docs_and_lints
     run_workspace
     run_nostd
     run_sizes
-    run_package_surface
     ;;
   -h|--help|help)
     usage

@@ -23,11 +23,27 @@ path = "src/main.rs"
 name = "lemnos-ctl"
 path = "src/bin/lemnos-ctl.rs"
 
+# The Orion bridge (docs/orion.md): lemnosd's devices as Orion resources.
+[[bin]]
+name = "lemnos-orion"
+path = "src/bin/lemnos-orion.rs"
+required-features = ["orion"]
+
 [features]
 default = []
 # `lemnosd::mock::MockLemnosd`: the real service over mock hardware, for
 # client tests.
 mock = ["lemnos-hal/mock"]
+# The Orion bridge: `lemnos-orion`, a lemnosd client and an Orion provider
+# over local IPC (`lemnosd::orion`). Pins Orion's main at 4fadba9; it also
+# pulls in `orion-node`, which only the bridge's tests use.
+orion = [
+    "dep:orion-client",
+    "dep:orion-control-plane",
+    "dep:orion-core",
+    "dep:orion-node",
+    "dep:tokio",
+]
 
 [dependencies]
 embedded-hal.workspace = true
@@ -39,6 +55,13 @@ lemnos-ipc.workspace = true
 lemnos-light.workspace = true
 lemnos-linux-sys.workspace = true
 serde_json = { workspace = true, features = ["std"] }
+
+# Orion (feature `orion`). Its crates are not published: pinned to its main.
+orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
+orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
+orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
+orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"], optional = true }
 
 [dev-dependencies]
 lemnosd = { path = ".", features = ["mock"] }

@@ -79,8 +79,9 @@ waiting on the disk and the network. The jobs avoid repeating each other:
   dependencies, which roughly halves test build CPU and the target dir.
 - The size check builds all Linux images in one target dir, so their dependencies build
   once instead of five times.
-- `cargo package --offline` reuses the index the builds fetched (online, it spent minutes
-  querying crates.io for 1 CPU-second of packaging).
+- There is no crates.io packaging check: Lemnos is consumed as a git dependency, and
+  lemnosd's optional `orion` feature depends on Orion through git, which `cargo package`
+  cannot resolve.
 
 Measured cold (empty target dir), same machine, October 2026:
 
