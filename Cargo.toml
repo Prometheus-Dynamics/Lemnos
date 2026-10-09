@@ -106,10 +106,22 @@ unimplemented = "deny"
 
 # lemnosd and lemnos-ctl as shipped: small, static, no unwinding (the panic
 # hook still runs: it hands fans back to the kernel before the abort).
+# Tests and checks spend most of their time generating and linking debug
+# info nobody reads in CI. Line tables keep file:line in panics and
+# backtraces for the workspace's crates; dependencies carry none.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# lemnosd and lemnos-ctl as shipped in OS images. Fat LTO keeps them small;
+# the default 16 codegen units let the final LTO step use every core
+# (one unit made it single-threaded: about 3x the wall time for 0.9 % less
+# size).
 [profile.service]
 inherits = "release"
 opt-level = "z"
 lto = "fat"
-codegen-units = 1
 panic = "abort"
 strip = true

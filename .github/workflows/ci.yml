@@ -6,203 +6,89 @@ on:
       - main
   pull_request:
 
+# Every job runs the same scripts as `./scripts/ci.sh`, so local runs and CI
+# cannot drift apart. Jobs do not repeat each other's work: the workspace job
+# owns the tests and the full-feature clippy, docs-and-lints the rest.
+env:
+  CARGO_INCREMENTAL: 0
+
 jobs:
   workspace:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci.sh workspace
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+  docs-and-lints:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run file-size lint
-        run: ./scripts/check-file-sizes.sh
-
-      - name: Run tests
-        run: cargo test --workspace
-
-      - name: Run all-features workspace tests
-        run: cargo test --workspace --all-features
-
-      - name: Run all-features tests
-        run: cargo test --workspace --all-targets --all-features
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Build docs
-        run: cargo doc --workspace --no-deps
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci.sh docs-and-lints
 
   feature-matrix:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: lemnos default
-            check: cargo check -p lemnos --no-default-features
-            test: cargo test -p lemnos --no-default-features
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features -- -D warnings
-          - name: lemnos mock
-            check: cargo check -p lemnos --no-default-features --features mock
-            test: cargo test -p lemnos --no-default-features --features mock
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features mock -- -D warnings
-          - name: lemnos mock builtin-drivers
-            check: cargo check -p lemnos --no-default-features --features mock,builtin-drivers
-            test: cargo test -p lemnos --no-default-features --features mock,builtin-drivers
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features mock,builtin-drivers -- -D warnings
-          - name: lemnos mock builtin-drivers tokio
-            check: cargo check -p lemnos --no-default-features --features mock,builtin-drivers,tokio
-            test: cargo test -p lemnos --no-default-features --features mock,builtin-drivers,tokio
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features mock,builtin-drivers,tokio -- -D warnings
-          - name: lemnos linux
-            check: cargo check -p lemnos --no-default-features --features linux
-            test: cargo test -p lemnos --no-default-features --features linux
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features linux -- -D warnings
-          - name: lemnos linux builtin-drivers
-            check: cargo check -p lemnos --no-default-features --features linux,builtin-drivers
-            test: cargo test -p lemnos --no-default-features --features linux,builtin-drivers
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features linux,builtin-drivers -- -D warnings
-          - name: lemnos linux gpio hotplug
-            check: cargo check -p lemnos --no-default-features --features linux-gpio,linux-hotplug
-            test: cargo test -p lemnos --no-default-features --features linux-gpio,linux-hotplug
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features linux-gpio,linux-hotplug -- -D warnings
-          # Linux without USB (libusb, C) and UART (serialport): the facade's Linux API must still exist.
-          - name: lemnos linux lite
-            check: cargo check -p lemnos --no-default-features --features linux-gpio,linux-gpio-cdev,linux-pwm,linux-i2c,linux-spi,linux-hotplug,builtin-drivers,tokio
-            test: cargo test -p lemnos --no-default-features --features linux-gpio,linux-gpio-cdev,linux-pwm,linux-i2c,linux-spi,linux-hotplug,builtin-drivers,tokio
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features linux-gpio,linux-gpio-cdev,linux-pwm,linux-i2c,linux-spi,linux-hotplug,builtin-drivers,tokio -- -D warnings
-          - name: lemnos board mock
-            check: cargo check -p lemnos --no-default-features --features board,mock,builtin-drivers
-            test: cargo test -p lemnos --no-default-features --features board,mock,builtin-drivers
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features board,mock,builtin-drivers -- -D warnings
-          - name: lemnos board linux
-            check: cargo check -p lemnos --no-default-features --features board,linux,builtin-drivers
-            test: cargo test -p lemnos --no-default-features --features board,linux,builtin-drivers
-            clippy: cargo clippy -p lemnos --all-targets --no-default-features --features board,linux,builtin-drivers -- -D warnings
-          - name: lemnos-board linux
-            check: cargo check -p lemnos-board --no-default-features --features linux
-            test: cargo test -p lemnos-board --no-default-features --features linux
-            clippy: cargo clippy -p lemnos-board --all-targets --no-default-features --features linux -- -D warnings
-          - name: lemnos-core serde
-            check: cargo check -p lemnos-core --no-default-features --features serde
-            test: cargo test -p lemnos-core --no-default-features --features serde
-            clippy: cargo clippy -p lemnos-core --all-targets --no-default-features --features serde -- -D warnings
-
+        # The entries of scripts/feature-matrix.sh (which documents which run
+        # tests and which only clippy).
+        name:
+          - lemnos default
+          - lemnos mock
+          - lemnos mock builtin-drivers
+          - lemnos mock builtin-drivers tokio
+          - lemnos linux
+          - lemnos linux builtin-drivers
+          - lemnos linux gpio hotplug
+          - lemnos linux lite
+          - lemnos board mock
+          - lemnos board linux
+          - lemnos-core serde
+          - lemnos-board linux
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run feature check
-        run: ${{ matrix.check }}
-
-      - name: Run feature tests
-        run: ${{ matrix.test }}
-
-      - name: Run feature clippy
-        run: ${{ matrix.clippy }}
-
-  docs-and-lints:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          components: clippy, rustfmt
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run file-size lint
-        run: ./scripts/check-file-sizes.sh
-
-      - name: Run clippy on default feature graph
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run clippy on full feature graph
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Run tests on full feature graph
-        run: cargo test --workspace --all-targets --all-features
-
-      - name: Build docs
-        run: cargo doc --workspace --no-deps
+          shared-key: feature-matrix
+      - run: ./scripts/feature-matrix.sh "${{ matrix.name }}"
 
   nostd:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
           targets: thumbv7em-none-eabihf, riscv32imac-unknown-none-elf, wasm32-unknown-unknown
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build and lint no_std crates
-        run: ./scripts/check-nostd.sh
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci.sh nostd
 
   sizes:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools
           targets: thumbv7em-none-eabihf, riscv32imac-unknown-none-elf
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check binary sizes against the baseline
-        run: ./scripts/check-sizes.sh
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci.sh sizes
 
   package-surface:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Validate package surface
-        run: cargo package --workspace --allow-dirty --no-verify
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/ci.sh package-surface

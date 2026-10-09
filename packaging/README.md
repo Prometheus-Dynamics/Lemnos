@@ -6,12 +6,12 @@ aarch64 musl binaries, built with the `service` profile (`opt-level = "z"`, fat 
 
 ```sh
 rustup target add aarch64-unknown-linux-musl
-CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-  cargo build -p lemnosd --profile service --target aarch64-unknown-linux-musl
+cargo build -p lemnosd --profile service --target aarch64-unknown-linux-musl
 ```
 
-No C cross toolchain is needed: rust-lld links Rust's self-contained musl. Sizes (stripped,
-static): `lemnosd` 758 KB, `lemnos-ctl` 681 KB.
+No C cross toolchain is needed: the repository's `.cargo/config.toml` has rust-lld link Rust's
+self-contained musl. Sizes (stripped, static): `lemnosd` 786 KB, `lemnos-ctl` 711 KB. A cold
+build of both takes about 35 CPU-seconds.
 
 ## Gaia
 
@@ -29,6 +29,11 @@ static): `lemnosd` 758 KB, `lemnos-ctl` 681 KB.
 
 A board's device package imports the layer from a pinned Lemnos checkout and stages its
 board definition as `/etc/lemnos/board.toml` (see the header of `gaia/lemnosd.toml`).
+
+Both artifacts are one Gaia build group, so one cargo invocation builds the two binaries.
+To build them without Docker, import [gaia/lemnosd-host.toml](gaia/lemnosd-host.toml) after
+`lemnosd.toml`. The host then needs only rustup and the musl target (above); the result is
+the same static binary, with no image to pull or build and no container to start.
 
 ## What the image provides
 

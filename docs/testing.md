@@ -58,3 +58,39 @@ For day-to-day changes:
 1. Run targeted crate tests first.
 2. Run the relevant `lemnos` example when changing facade, runtime, Linux, or mock flows.
 3. Run `cargo test --workspace` before publishing or cutting a release.
+
+## CI Cost
+
+`./scripts/ci.sh all` and `./scripts/ci.sh matrix` print the wall and CPU time of every
+step (`==> [time]` lines and a summary). CPU time is the work; wall time also counts
+waiting on the disk and the network. The jobs avoid repeating each other:
+
+- `docs-and-lints` runs formatting, the file-size lint, default-feature clippy and the
+  docs; `workspace` runs the tests (default features; all features over all targets; the
+  all-features doctests, which `--all-targets` skips) and the full-feature clippy. Earlier
+  both jobs ran the full-feature clippy, tests and docs.
+- The feature matrix runs clippy over all targets for every entry (it type-checks what
+  `cargo check` would, so there is no separate check) and runs tests only for `test`
+  entries. `lint` entries are feature subsets of a `test` entry or of the workspace's
+  all-features run; their tests are still compiled, not executed, under that feature set.
+- `CARGO_INCREMENTAL=0`: CI builds from scratch or a cache and never edits sources between
+  builds, so incremental state is pure overhead.
+- The dev profile writes line tables only for workspace crates and no debug info for
+  dependencies, which roughly halves test build CPU and the target dir.
+- The size check builds all Linux images in one target dir, so their dependencies build
+  once instead of five times.
+- `cargo package --offline` reuses the index the builds fetched (online, it spent minutes
+  querying crates.io for 1 CPU-second of packaging).
+
+Measured cold (empty target dir), same machine, October 2026:
+
+| | before | after |
+|---|---|---|
+| `ci.sh all`, CPU | 506 s | 282 s |
+| `ci.sh matrix`, CPU | 171 s | 78 s |
+| `ci.sh matrix`, wall | 91 s | 45 s |
+| target dir after both | 11 GB | 2.6 GB |
+
+`cargo nextest` is not used: running the tests takes a few seconds of the totals above;
+compiling them is the cost.
+

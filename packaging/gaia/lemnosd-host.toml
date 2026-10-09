@@ -1,0 +1,55 @@
+# Builds lemnosd and lemnos-ctl on the build host instead of in Docker: no
+# image to pull or build, no container start. Import it after lemnosd.toml:
+#
+#   imports = [
+#     ...base layers...,
+#     { source = "lemnos", path = "packaging/gaia/lemnosd.toml" },
+#     { source = "lemnos", path = "packaging/gaia/lemnosd-host.toml" },
+#   ]
+#
+# The host needs rustup (the repository's rust-toolchain.toml selects the
+# toolchain) and the musl target, once:
+#
+#   rustup target add aarch64-unknown-linux-musl --toolchain 1.99.0
+#
+# Nothing else: the repository's .cargo/config.toml links with rust-lld and
+# Rust's self-contained musl, so no C cross toolchain is involved and the
+# binaries are the same static executables the Docker build produces. Items
+# merge by id and replace the whole item, so both artifacts are redeclared in
+# full.
+
+gaia_version = ">=2.1.0"
+
+[[artifacts]]
+id = "lemnosd"
+kind = "rust"
+source = "lemnos"
+package = "lemnosd"
+target = "aarch64-unknown-linux-musl"
+profile = "service"
+target_name = "lemnosd"
+install_name = "lemnosd"
+install_class = "binary"
+install_dest_hint = "/usr/bin/lemnosd"
+build_group = "lemnosd"
+output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnosd"
+
+[artifacts.execution]
+backend = "host"
+
+[[artifacts]]
+id = "lemnos-ctl"
+kind = "rust"
+source = "lemnos"
+package = "lemnosd"
+target = "aarch64-unknown-linux-musl"
+profile = "service"
+target_name = "lemnos-ctl"
+install_name = "lemnos-ctl"
+install_class = "binary"
+install_dest_hint = "/usr/bin/lemnos-ctl"
+build_group = "lemnosd"
+output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnos-ctl"
+
+[artifacts.execution]
+backend = "host"

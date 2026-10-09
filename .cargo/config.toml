@@ -1,0 +1,12 @@
+# Static aarch64 musl builds (lemnosd and lemnos-ctl for OS images) link with
+# rust-lld and Rust's self-contained musl, so they need no C cross toolchain
+# and no container: `rustup target add aarch64-unknown-linux-musl`, then
+# `cargo build -p lemnosd --profile service --target aarch64-unknown-linux-musl`.
+# 64 KiB max page size: the binary runs on 4 KiB and 16 KiB page kernels.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = [
+  "-C", "target-feature=+crt-static",
+  "-C", "link-self-contained=yes",
+  "-C", "link-arg=-zmax-page-size=0x10000",
+]

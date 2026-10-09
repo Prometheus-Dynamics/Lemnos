@@ -25,6 +25,12 @@
 #   origin = "static-asset"
 #
 # For local development use `--set sources.lemnos.path=/abs/path/to/Lemnos`.
+#
+# Build cost: the binaries build in Docker (rust:1.99-slim plus the musl
+# target, pulled and built once per machine and cached by Gaia), cold for
+# each new Lemnos pin (about 35 CPU-seconds). Builders whose host already
+# has rustup can skip Docker entirely: import lemnosd-host.toml after this
+# file (`rustup target add aarch64-unknown-linux-musl` once).
 # Items merge by id and a later layer replaces a whole item: redeclare
 # `lemnosd-env` to ship your own /etc/default/lemnosd.env, and prefer unit
 # drop-ins in /etc/systemd/system/lemnosd.service.d/*.conf to editing the
@@ -46,6 +52,9 @@ target_name = "lemnosd"
 install_name = "lemnosd"
 install_class = "binary"
 install_dest_hint = "/usr/bin/lemnosd"
+# Both binaries come from one cargo invocation (one dependency build, one
+# container start).
+build_group = "lemnosd"
 output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnosd"
 
 [artifacts.execution]
@@ -67,6 +76,7 @@ target_name = "lemnos-ctl"
 install_name = "lemnos-ctl"
 install_class = "binary"
 install_dest_hint = "/usr/bin/lemnos-ctl"
+build_group = "lemnosd"
 output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnos-ctl"
 
 [artifacts.execution]
