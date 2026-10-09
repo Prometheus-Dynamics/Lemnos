@@ -33,7 +33,10 @@ for entry in "${entries[@]}"; do
   [[ -n "$filter" && "$name" != *"$filter"* ]] && continue
   args=(-p "$package" --no-default-features ${features:+--features "$features"})
   echo "==> [matrix] $name"
+  start=$(date +%s.%N)
   cargo check "${args[@]}"
   cargo test "${args[@]}"
   cargo clippy "${args[@]}" --all-targets -- -D warnings
+  awk -v s="$start" -v e="$(date +%s.%N)" -v n="$name" \
+    'BEGIN{printf "==> [time] %7.1fs  matrix: %s\n", e-s, n}'
 done
