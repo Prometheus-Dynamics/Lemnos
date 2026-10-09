@@ -475,3 +475,56 @@ fn lemnos_ctl_raw_commands() {
     assert!(!hw.pwm(0, 2).current().enabled);
     assert_eq!(hw.pwm(0, 2).history()[0].duty_ns, 500);
 }
+
+#[test]
+fn faulted_devices_say_why() {
+    let hardware = MockHardware::new();
+    // The accelerometer answers; the gyroscope does not.
+    let _ = hardware
+        .i2c(2)
+        .with_target(0x18, lemnos_hal::AddressWidth::Bits8)
+        .with_registers(0x18, 0x00, &[0x1e]);
+    let service = MockLemnosd::start(
+        r#"
+format = "lemnos.board"
+schema_version = 1
+[board]
+id = "raze"
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-2"
+backend = "userspace"
+[[devices]]
+id = "nowhere"
+driver = "bmi088"
+bus = "i2c:compatible=nothing-like-this"
+"#,
+        hardware,
+    )
+    .unwrap();
+    let mut helios = client(&service, "helios");
+    let list = helios.list().unwrap();
+    let imu = list.iter().find(|d| d.id == "imu").unwrap();
+    assert!(
+        imu.reason.starts_with("init: BMI088 gyro chip id:"),
+        "{}",
+        imu.reason
+    );
+    let nowhere = list.iter().find(|d| d.id == "nowhere").unwrap();
+    assert!(
+        nowhere.reason.contains("no I2C adapter matches"),
+        "{}",
+        nowhere.reason
+    );
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lemnos-ctl"))
+        .arg("--socket")
+        .arg(service.socket())
+        .args(["read", "imu"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gyro chip id"), "{stderr}");
+}

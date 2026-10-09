@@ -108,8 +108,70 @@ fn missing_die_reports_a_bus_error() {
     let error = Bmi088::new(i2c)
         .init(&mut MockDelay::new(), Config::default())
         .unwrap_err();
-    assert!(matches!(error, Error::Register(_)));
+    assert!(matches!(
+        error,
+        Error::Step {
+            step: "gyro chip id",
+            ..
+        }
+    ));
     assert_eq!(error.kind(), ErrorKind::Nack);
+    let mut text = heapless_text::Text::new();
+    core::fmt::Write::write_fmt(&mut text, format_args!("{error}")).unwrap();
+    assert!(text.as_str().starts_with("BMI088 gyro chip id:"), "{error}");
+}
+
+/// A bit-banged bus sees the soft-reset bytes unacknowledged (the die
+/// resets as it takes them): init goes on, and checks the dies came back.
+#[test]
+fn soft_resets_that_are_not_acknowledged_are_tolerated() {
+    let i2c = MockI2c::new()
+        .with_target(ACCEL_ADDRESS, AddressWidth::Bits8)
+        .with_target(GYRO_ADDRESS, AddressWidth::Bits8)
+        .with_registers(ACCEL_ADDRESS, ACC_CHIP_ID, &[ACCEL_CHIP_ID])
+        .with_registers(GYRO_ADDRESS, GYR_CHIP_ID, &[GYRO_CHIP_ID]);
+    let mut bmi = Bmi088::new(i2c.clone());
+    // Transactions: two chip-id reads, then the accel and gyro resets.
+    i2c.clear_log();
+    let mut delay = MockDelay::new();
+    // Fail exactly the two reset writes.
+    let failing = FailOn {
+        inner: i2c.clone(),
+        fail: [2, 3],
+        count: 0,
+    };
+    let mut bmi_failing = Bmi088::new(failing);
+    bmi_failing.init(&mut delay, Config::default()).unwrap();
+    assert!(bmi_failing.config().is_some());
+    let _ = bmi.chip_ids().unwrap();
+}
+
+/// Fails the transactions at the given indices with `ErrorKind::Failed`
+/// (what `EIO` from i2c-algo-bit becomes).
+struct FailOn {
+    inner: MockI2c,
+    fail: [usize; 2],
+    count: usize,
+}
+
+impl embedded_hal::i2c::ErrorType for FailOn {
+    type Error = ErrorKind;
+}
+
+impl embedded_hal::i2c::I2c for FailOn {
+    fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut [embedded_hal::i2c::Operation<'_>],
+    ) -> Result<(), ErrorKind> {
+        let index = self.count;
+        self.count += 1;
+        let result = self.inner.transaction(address, operations);
+        if self.fail.contains(&index) {
+            return Err(ErrorKind::Failed);
+        }
+        result
+    }
 }
 
 #[test]
@@ -198,4 +260,34 @@ fn async_device_model_matches_blocking() {
     block_on(Device::init(&mut bmi, &mut MockDelay::new())).unwrap();
     block_on(Sensor::read(&mut bmi, &mut out)).unwrap();
     assert_eq!(out[0], 29_419);
+}
+
+/// A small fixed buffer to format into without `alloc`.
+mod heapless_text {
+    pub struct Text {
+        buf: [u8; 128],
+        len: usize,
+    }
+
+    impl Text {
+        pub fn new() -> Self {
+            Self {
+                buf: [0; 128],
+                len: 0,
+            }
+        }
+
+        pub fn as_str(&self) -> &str {
+            core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+        }
+    }
+
+    impl core::fmt::Write for Text {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let end = (self.len + s.len()).min(self.buf.len());
+            self.buf[self.len..end].copy_from_slice(&s.as_bytes()[..end - self.len]);
+            self.len = end;
+            Ok(())
+        }
+    }
 }

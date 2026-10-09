@@ -355,6 +355,17 @@ pub enum Error<E> {
     WrongChip { accel: u8, gyro: u8 },
     /// A reading was requested before `init` set the ranges.
     NotInitialized,
+    /// A transfer of an `init` step failed (`step` names it, such as
+    /// `"accel power control"`), so a host can say which one.
+    Step {
+        step: &'static str,
+        error: RegisterError<E>,
+    },
+}
+
+/// Tags a register error with the `init` step it happened in.
+pub(crate) fn at<E>(step: &'static str) -> impl FnOnce(RegisterError<E>) -> Error<E> {
+    move |error| Error::Step { step, error }
 }
 
 impl<E> From<RegisterError<E>> for Error<E> {
@@ -369,7 +380,12 @@ impl<E: fmt::Debug> HalError for Error<E> {
             Self::Register(error) => error.kind(),
             Self::WrongChip { .. } => ErrorKind::Unsupported,
             Self::NotInitialized => ErrorKind::Unavailable,
+            Self::Step { error, .. } => error.kind(),
         }
+    }
+
+    fn describe(&self, f: &mut dyn fmt::Write) -> fmt::Result {
+        write!(f, "{self}")
     }
 }
 
@@ -382,6 +398,7 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
                 "expected BMI088 chip IDs 0x{ACCEL_CHIP_ID:02x}/0x{GYRO_CHIP_ID:02x}, found 0x{accel:02x}/0x{gyro:02x}"
             ),
             Self::NotInitialized => f.write_str("BMI088 read before init"),
+            Self::Step { step, error } => write!(f, "BMI088 {step}: {error}"),
         }
     }
 }
@@ -457,35 +474,59 @@ impl<I2C: I2c> Bmi088<I2C> {
 
     /// Verifies both chips, soft-resets them, powers the accelerometer on and
     /// applies `config`. Takes about 37 ms of `delay`.
+    ///
+    /// A die resets as it receives the soft-reset byte, so the master may
+    /// see that byte unacknowledged (a bit-banged `i2c-gpio` bus reports
+    /// `EIO`). The soft-reset writes' results are ignored; the chip IDs are
+    /// read again after the resets to confirm both dies came back.
     pub fn init(
         &mut self,
         delay: &mut impl DelayNs,
         config: Config,
     ) -> Result<(), Error<I2C::Error>> {
-        let (accel, gyro) = self.chip_ids()?;
-        if accel != ACCEL_CHIP_ID || gyro != GYRO_CHIP_ID {
-            return Err(Error::WrongChip { accel, gyro });
-        }
-        self.accel().write8(ACC_SOFTRESET, SOFTRESET)?;
+        self.check_ids("accel chip id", "gyro chip id")?;
+        let _ = self.accel().write8(ACC_SOFTRESET, SOFTRESET);
         delay.delay_us(ACC_RESET_US);
-        self.gyro().write8(GYR_SOFTRESET, SOFTRESET)?;
+        let _ = self.gyro().write8(GYR_SOFTRESET, SOFTRESET);
         delay.delay_us(GYR_RESET_US);
+        self.check_ids("accel chip id after reset", "gyro chip id after reset")?;
 
         // Active mode, then accelerometer on; both writes happen in suspend mode.
-        self.accel().write8(ACC_PWR_CONF, 0x00)?;
+        self.accel()
+            .write8(ACC_PWR_CONF, 0x00)
+            .map_err(at("accel power config"))?;
         delay.delay_us(ACC_SUSPEND_WRITE_US);
-        self.accel().write8(ACC_PWR_CTRL, 0x04)?;
+        self.accel()
+            .write8(ACC_PWR_CTRL, 0x04)
+            .map_err(at("accel power control"))?;
         delay.delay_us(ACC_POWER_ON_US);
 
         // One register per transfer: `write_sequence` would link the burst packer.
         for w in config.accel_writes() {
-            self.accel().write(w.address, w.bytes, w.value)?;
+            self.accel()
+                .write(w.address, w.bytes, w.value)
+                .map_err(at("accel config"))?;
         }
         for w in config.gyro_writes() {
-            self.gyro().write(w.address, w.bytes, w.value)?;
+            self.gyro()
+                .write(w.address, w.bytes, w.value)
+                .map_err(at("gyro config"))?;
         }
         self.config = Some(config);
         self.settings = config;
+        Ok(())
+    }
+
+    fn check_ids(
+        &mut self,
+        accel_step: &'static str,
+        gyro_step: &'static str,
+    ) -> Result<(), Error<I2C::Error>> {
+        let accel = self.accel().read8(ACC_CHIP_ID).map_err(at(accel_step))?;
+        let gyro = self.gyro().read8(GYR_CHIP_ID).map_err(at(gyro_step))?;
+        if accel != ACCEL_CHIP_ID || gyro != GYRO_CHIP_ID {
+            return Err(Error::WrongChip { accel, gyro });
+        }
         Ok(())
     }
 

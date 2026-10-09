@@ -12,6 +12,7 @@
 //! [`Control`].
 
 use crate::{Control, Device, DeviceInfo, Pixels, Rgbw, Sensor};
+use core::fmt::Write;
 use embedded_hal::delay::DelayNs;
 use lemnos_hal::{ErrorKind, HalError};
 
@@ -19,11 +20,24 @@ use lemnos_hal::{ErrorKind, HalError};
 pub trait DynDevice {
     fn info(&self) -> &'static DeviceInfo;
     fn init(&mut self, delay: &mut dyn DelayNs) -> Result<(), ErrorKind>;
+
+    /// [`init`](Self::init), writing why it failed (the driver's own error)
+    /// to `why`, so a host can show more than the error kind.
+    fn init_why(&mut self, delay: &mut dyn DelayNs, why: &mut dyn Write) -> Result<(), ErrorKind> {
+        let _ = why;
+        self.init(delay)
+    }
 }
 
 /// The object-safe form of [`Sensor`].
 pub trait DynSensor: DynDevice {
     fn read(&mut self, out: &mut [i32]) -> Result<(), ErrorKind>;
+
+    /// [`read`](Self::read), writing why it failed to `why`.
+    fn read_why(&mut self, out: &mut [i32], why: &mut dyn Write) -> Result<(), ErrorKind> {
+        let _ = why;
+        self.read(out)
+    }
 }
 
 /// The object-safe form of [`Control`].
@@ -52,11 +66,34 @@ impl<T: Device + ?Sized> DynDevice for T {
     fn init(&mut self, delay: &mut dyn DelayNs) -> Result<(), ErrorKind> {
         Device::init(self, delay).map_err(|error| error.kind())
     }
+
+    fn init_why(&mut self, delay: &mut dyn DelayNs, why: &mut dyn Write) -> Result<(), ErrorKind> {
+        Device::init(self, delay).map_err(|error| {
+            explain(&error, why);
+            error.kind()
+        })
+    }
+}
+
+/// Writes why `error` happened: the driver's own account
+/// ([`HalError::describe`]), or the device-model reason.
+fn explain<E: HalError>(error: &crate::DeviceError<E>, why: &mut dyn Write) {
+    let _ = match error {
+        crate::DeviceError::Driver(driver) => driver.describe(why),
+        other => write!(why, "{other}"),
+    };
 }
 
 impl<T: Sensor + ?Sized> DynSensor for T {
     fn read(&mut self, out: &mut [i32]) -> Result<(), ErrorKind> {
         Sensor::read(self, out).map_err(|error| error.kind())
+    }
+
+    fn read_why(&mut self, out: &mut [i32], why: &mut dyn Write) -> Result<(), ErrorKind> {
+        Sensor::read(self, out).map_err(|error| {
+            explain(&error, why);
+            error.kind()
+        })
     }
 }
 
@@ -103,6 +140,29 @@ macro_rules! erased_ops {
                 Self::Control(d) => d.init(delay),
                 Self::Both(d) => DynDevice::init(&mut **d, delay),
                 Self::Light(d) => DynDevice::init(&mut **d, delay),
+            }
+        }
+
+        /// [`init`](Self::init), writing why it failed to `why`.
+        pub fn init_why(
+            &mut self,
+            delay: &mut dyn DelayNs,
+            why: &mut dyn Write,
+        ) -> Result<(), ErrorKind> {
+            match self {
+                Self::Sensor(d) => d.init_why(delay, why),
+                Self::Control(d) => d.init_why(delay, why),
+                Self::Both(d) => DynDevice::init_why(&mut **d, delay, why),
+                Self::Light(d) => DynDevice::init_why(&mut **d, delay, why),
+            }
+        }
+
+        /// [`read`](Self::read), writing why it failed to `why`.
+        pub fn read_why(&mut self, out: &mut [i32], why: &mut dyn Write) -> Result<(), ErrorKind> {
+            match self {
+                Self::Sensor(d) => d.read_why(out, why),
+                Self::Both(d) => DynSensor::read_why(&mut **d, out, why),
+                Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
             }
         }
 

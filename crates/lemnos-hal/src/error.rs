@@ -198,6 +198,13 @@ impl embedded_hal::digital::Error for ErrorKind {
 pub trait HalError: fmt::Debug {
     /// The coarse classification of this error.
     fn kind(&self) -> ErrorKind;
+
+    /// Writes a human-readable account of the error, for hosts that show
+    /// why a device failed. Defaults to the `Debug` form; errors with a
+    /// `Display` form should write that.
+    fn describe(&self, f: &mut dyn fmt::Write) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
 }
 
 impl HalError for ErrorKind {

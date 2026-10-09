@@ -44,6 +44,12 @@ impl Message {
                             .i32(c.max);
                     }
                 }
+                // Reasons follow the whole list, so older clients (which
+                // stop after it) still read it.
+                e.u16(devices.len() as u16);
+                for d in devices {
+                    e.str(&d.reason);
+                }
                 e.finish()
             }
             Self::Reading(r) => {
@@ -76,11 +82,13 @@ impl Message {
                         device,
                         status,
                         error,
+                        reason,
                     } => {
                         e.u8(0)
                             .str(device)
                             .u8(status.code())
-                            .u8(error.map_or(255, |k| k.code()));
+                            .u8(error.map_or(255, |k| k.code()))
+                            .str(reason);
                     }
                     Event::Control {
                         device,
@@ -185,10 +193,16 @@ impl Message {
                         class,
                         model,
                         status,
+                        reason: String::new(),
                         channels,
                         controls,
                         pixels,
                     });
+                }
+                if !d.is_empty() && usize::from(d.u16()?) == devices.len() {
+                    for device in &mut devices {
+                        device.reason = d.str()?;
+                    }
                 }
                 Self::Devices(devices)
             }
@@ -229,6 +243,11 @@ impl Message {
                     error: Some(d.u8()?)
                         .filter(|k| *k != 255)
                         .map(ErrorKind::from_code),
+                    reason: if d.is_empty() {
+                        String::new()
+                    } else {
+                        d.str()?
+                    },
                 },
                 1 => Event::Control {
                     device: d.str()?,

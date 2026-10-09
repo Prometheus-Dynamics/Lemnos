@@ -391,6 +391,9 @@ fn devices(command: &str, mut args: Args, options: ClientOptions) -> ExitCode {
                         channels.join(", "),
                         controls.join(", ")
                     );
+                    if !d.reason.is_empty() {
+                        println!("{:<16} why: {}", "", d.reason);
+                    }
                 }
                 ExitCode::SUCCESS
             }
@@ -405,7 +408,19 @@ fn devices(command: &str, mut args: Args, options: ClientOptions) -> ExitCode {
                     print_reading(&reading);
                     ExitCode::SUCCESS
                 }
-                Err(e) => fail(e),
+                Err(e) => {
+                    // Say why, not just the error kind.
+                    let why = client
+                        .list()
+                        .ok()
+                        .and_then(|list| list.into_iter().find(|d| d.id == device))
+                        .map(|d| d.reason)
+                        .filter(|r| !r.is_empty());
+                    match why {
+                        Some(why) => fail(format!("{e} ({why})")),
+                        None => fail(e),
+                    }
+                }
             }
         }
         "watch" => {
