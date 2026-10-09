@@ -18,7 +18,7 @@
 # merge by id and replace the whole item, so both artifacts are redeclared in
 # full.
 
-gaia_version = ">=2.1.0"
+gaia_version = ">=2.0.0"
 
 [[artifacts]]
 id = "lemnosd"

@@ -15,7 +15,7 @@ build of both takes about 35 CPU-seconds.
 
 ## Gaia
 
-[gaia/lemnosd.toml](gaia/lemnosd.toml) is a Gaia layer (Gaia >= 2.1) in the style of Orion's
+[gaia/lemnosd.toml](gaia/lemnosd.toml) is a Gaia layer for Gaia 2.0 (a build that has Rust build groups, listed under Gaia 2.0.0's Unreleased) in the style of Orion's
 `orion-node` layer. It builds both binaries in a small Docker image
 ([gaia/docker/aarch64-musl.Dockerfile](gaia/docker/aarch64-musl.Dockerfile)), installs them in
 `/usr/bin`, and stages:

@@ -1,4 +1,5 @@
-# lemnosd as a managed systemd service: Gaia layer (Gaia >= 2.1).
+# lemnosd as a managed systemd service: Gaia layer (Gaia 2.0 with Rust build groups,
+# which Gaia lists under 2.0.0's Unreleased; `gaia_version` is ">=2.0.0").
 #
 # Builds lemnosd and lemnos-ctl as static aarch64 musl binaries, installs
 # them in /usr/bin, and stages the systemd unit, the default environment
@@ -36,7 +37,7 @@
 # drop-ins in /etc/systemd/system/lemnosd.service.d/*.conf to editing the
 # unit. See packaging/README.md.
 
-gaia_version = ">=2.1.0"
+gaia_version = ">=2.0.0"
 
 [providers.rust]
 allow_nested_build = true
