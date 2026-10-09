@@ -164,13 +164,28 @@ fn service_hands_both_kinds_of_fan_back() {
     );
     assert_eq!(client.set("fan", "duty", 1.0).unwrap(), 1.0);
     assert_eq!(client.set("case-fan", "pwm_mode", 1.0).unwrap(), 1.0);
-    drop(client);
     // The record holds the governor's state from just before the first write.
+    // Read it while the writer is connected.
     let plans = read_fan_state(&fan_state_path(&socket));
     assert!(matches!(
         &plans[0].kind,
         RestoreKind::CoolingDevice { devices, .. } if devices[0].state == Some(2)
     ));
+    drop(client);
+    // The service hands the fan back when the writer disconnects and then
+    // rewrites the record with the states left out. Wait for that rewrite
+    // before the checks below: the service only stops after this.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !matches!(
+        read_fan_state(&fan_state_path(&socket)).first().map(|p| &p.kind),
+        Some(RestoreKind::CoolingDevice { devices, .. }) if devices[0].state.is_none()
+    ) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the writer's disconnect never handed the fan back"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
     // Make the policy write visible: date the file to the epoch.
     let policy = root.join("class/thermal/thermal_zone0/policy");

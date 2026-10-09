@@ -4,7 +4,7 @@ use crate::{
     ACC_CHIP_ID, ACC_DATA, ACC_POWER_ON_US, ACC_PWR_CONF, ACC_PWR_CTRL, ACC_RESET_US,
     ACC_SOFTRESET, ACC_SUSPEND_WRITE_US, ACC_TEMP, ACCEL_ADDRESS, ACCEL_CHIP_ID, Config, Error,
     GYR_CHIP_ID, GYR_DATA, GYR_RESET_US, GYR_SOFTRESET, GYRO_ADDRESS, GYRO_CHIP_ID, ImuFixed,
-    SOFTRESET, decode_axes, decode_temperature_mc,
+    SOFTRESET, at, decode_axes, decode_temperature_mc,
 };
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
@@ -72,31 +72,64 @@ impl<I2C: I2c> Bmi088<I2C> {
         Ok((accel, gyro))
     }
 
+    async fn check_ids(
+        &mut self,
+        accel_step: &'static str,
+        gyro_step: &'static str,
+    ) -> Result<(), Error<I2C::Error>> {
+        let accel = self
+            .accel()
+            .read8(ACC_CHIP_ID)
+            .await
+            .map_err(at(accel_step))?;
+        let gyro = self
+            .gyro()
+            .read8(GYR_CHIP_ID)
+            .await
+            .map_err(at(gyro_step))?;
+        if accel != ACCEL_CHIP_ID || gyro != GYRO_CHIP_ID {
+            return Err(Error::WrongChip { accel, gyro });
+        }
+        Ok(())
+    }
+
     /// See [`crate::Bmi088::init`].
     pub async fn init(
         &mut self,
         delay: &mut impl DelayNs,
         config: Config,
     ) -> Result<(), Error<I2C::Error>> {
-        let (accel, gyro) = self.chip_ids().await?;
-        if accel != ACCEL_CHIP_ID || gyro != GYRO_CHIP_ID {
-            return Err(Error::WrongChip { accel, gyro });
-        }
-        self.accel().write8(ACC_SOFTRESET, SOFTRESET).await?;
+        self.check_ids("accel chip id", "gyro chip id").await?;
+        // Results ignored: see `crate::Bmi088::init`.
+        let _ = self.accel().write8(ACC_SOFTRESET, SOFTRESET).await;
         delay.delay_us(ACC_RESET_US).await;
-        self.gyro().write8(GYR_SOFTRESET, SOFTRESET).await?;
+        let _ = self.gyro().write8(GYR_SOFTRESET, SOFTRESET).await;
         delay.delay_us(GYR_RESET_US).await;
+        self.check_ids("accel chip id after reset", "gyro chip id after reset")
+            .await?;
 
-        self.accel().write8(ACC_PWR_CONF, 0x00).await?;
+        self.accel()
+            .write8(ACC_PWR_CONF, 0x00)
+            .await
+            .map_err(at("accel power config"))?;
         delay.delay_us(ACC_SUSPEND_WRITE_US).await;
-        self.accel().write8(ACC_PWR_CTRL, 0x04).await?;
+        self.accel()
+            .write8(ACC_PWR_CTRL, 0x04)
+            .await
+            .map_err(at("accel power control"))?;
         delay.delay_us(ACC_POWER_ON_US).await;
 
         for w in config.accel_writes() {
-            self.accel().write(w.address, w.bytes, w.value).await?;
+            self.accel()
+                .write(w.address, w.bytes, w.value)
+                .await
+                .map_err(at("accel config"))?;
         }
         for w in config.gyro_writes() {
-            self.gyro().write(w.address, w.bytes, w.value).await?;
+            self.gyro()
+                .write(w.address, w.bytes, w.value)
+                .await
+                .map_err(at("gyro config"))?;
         }
         self.config = Some(config);
         self.settings = config;

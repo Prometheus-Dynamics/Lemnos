@@ -88,6 +88,9 @@ pub struct DeviceDesc {
     pub class: DeviceClass,
     pub model: String,
     pub status: DeviceStatus,
+    /// Why the device is not available, in the driver's or the board's own
+    /// words (empty while it works, and from services that predate it).
+    pub reason: String,
     pub channels: Vec<ChannelDesc>,
     pub controls: Vec<ControlDesc>,
     /// LEDs, for lights; 0 otherwise.
@@ -174,6 +177,8 @@ pub enum Event {
         device: String,
         status: DeviceStatus,
         error: Option<ErrorKind>,
+        /// Why, as [`DeviceDesc::reason`].
+        reason: String,
     },
     /// A control changed; `by` is the writer's client name.
     Control {

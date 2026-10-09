@@ -191,6 +191,7 @@ impl Service {
             device: self.slots[index].id().to_string(),
             status,
             error: self.slots[index].error,
+            reason: self.slots[index].reason.clone(),
         };
         self.broadcast(&Message::Event(event));
     }

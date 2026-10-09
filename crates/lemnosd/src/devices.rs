@@ -28,6 +28,9 @@ pub(crate) struct Slot {
     pub info: Option<&'static DeviceInfo>,
     pub status: DeviceStatus,
     pub error: Option<ErrorKind>,
+    /// Why the device failed last (the driver's or the board's own words;
+    /// empty while it works).
+    pub reason: String,
     pub values: [i32; MAX_CHANNELS],
     pub read_us: u64,
     pub fresh: bool,
@@ -67,6 +70,7 @@ impl Slot {
             info: None,
             status: DeviceStatus::Missing,
             error: None,
+            reason: String::new(),
             values: [NO_VALUE; MAX_CHANNELS],
             read_us: 0,
             fresh: false,
@@ -115,6 +119,9 @@ impl Slot {
         } else {
             self.error
         });
+        if status == DeviceStatus::Available {
+            self.reason.clear();
+        }
         (self.status != status).then(|| {
             self.status = status;
             status
@@ -133,13 +140,23 @@ impl Slot {
         if self.device.is_some() || now_ms < self.next_build_ms {
             return None;
         }
-        let result = registry
-            .build(&self.spec, buses)
-            .map_err(|e| e.kind())
-            .and_then(|mut device| {
-                device.init(delay)?;
-                Ok(device)
-            });
+        let mut why = String::new();
+        let result = match registry.build(&self.spec, buses) {
+            Ok(mut device) => match device.init_why(delay, &mut why) {
+                Ok(()) => Ok(device),
+                Err(kind) => {
+                    why.insert_str(0, "init: ");
+                    Err(kind)
+                }
+            },
+            Err(error) => {
+                why = error.to_string();
+                Err(error.kind())
+            }
+        };
+        if result.is_err() {
+            self.reason = why;
+        }
         match result {
             Ok(device) => {
                 self.info = Some(device.info());
@@ -175,13 +192,15 @@ impl Slot {
     /// Reads the device now; returns a status change.
     pub fn read(&mut self, now_us: u64) -> Option<DeviceStatus> {
         let device = self.device.as_mut()?;
-        match device.read(&mut self.values) {
+        let mut why = String::new();
+        match device.read_why(&mut self.values, &mut why) {
             Ok(()) => {
                 self.read_us = now_us;
                 self.fresh = true;
                 self.set_status(DeviceStatus::Available, None)
             }
             Err(kind) => {
+                self.reason = format!("read: {why}");
                 let status = DeviceStatus::after_error(kind);
                 if status == DeviceStatus::Missing {
                     // Gone: rebuild it on the retry schedule.
@@ -207,6 +226,7 @@ impl Slot {
             class: info.map_or(lemnos_device::DeviceClass::Other, |i| i.class),
             model: info.map_or_else(|| self.spec.driver.clone(), |i| i.model.to_string()),
             status: self.status,
+            reason: self.reason.clone(),
             channels: info.map_or_else(Vec::new, |i| {
                 i.channels
                     .iter()

@@ -109,7 +109,8 @@ fn messages_round_trip() {
         label: "IMU".into(),
         class: DeviceClass::Imu,
         model: "BMI088".into(),
-        status: DeviceStatus::Available,
+        status: DeviceStatus::Faulted,
+        reason: "init: BMI088 accel power control: bus error".into(),
         channels: vec![ChannelDesc {
             name: "acceleration.x".into(),
             quantity: Quantity::Acceleration,
@@ -149,6 +150,7 @@ fn messages_round_trip() {
         device: "imu".into(),
         status: DeviceStatus::Missing,
         error: Some(lemnos_hal::ErrorKind::Nack),
+        reason: "init: BMI088 accel chip id: bus error: nack".into(),
     }));
     round_trip_message(Message::Event(Event::LedOwner {
         device: "ring".into(),
