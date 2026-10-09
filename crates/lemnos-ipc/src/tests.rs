@@ -57,6 +57,23 @@ fn requests_round_trip() {
     });
     led.duration_ms = Some(10_000);
     round_trip_request(Request::Led(led));
+    round_trip_request(Request::Led(
+        LedRequest::new(LedShow::Frame(vec![0xff0000, 0x00ff00])).test(),
+    ));
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Clear).test()));
+    round_trip_request(Request::Release {
+        id: 9,
+        device: "fan".into(),
+    });
+    // A frame from a peer that predates the flags byte: not a test intent.
+    let mut old = Request::Led(LedRequest::new(LedShow::Color(0x123456))).encode();
+    old.pop();
+    let length = u32::from_le_bytes(old[..4].try_into().unwrap()) - 1;
+    old[..4].copy_from_slice(&length.to_le_bytes());
+    match decode_request(&old).unwrap().unwrap().0 {
+        Request::Led(led) => assert!(!led.test && led.show == LedShow::Color(0x123456)),
+        other => panic!("{other:?}"),
+    }
     for show in [
         LedShow::Clear,
         LedShow::Color(0x00ff00),

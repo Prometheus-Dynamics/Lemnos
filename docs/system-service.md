@@ -132,7 +132,7 @@ an executor, connects with a timeout, optionally reconnects in the background, a
 connection changes in order with data.
 
 ```rust
-use lemnos_ipc::{ClientEvent, ClientOptions, DeviceClient, LedStatus, SystemState};
+use lemnos_ipc::{ClientEvent, ClientOptions, DeviceClient, LedShow, LedStatus, SystemState};
 
 // Typed reads and subscriptions over the compact model.
 let mut devices = DeviceClient::connect("/run/lemnos/lemnosd.sock", "helios")?;
@@ -152,6 +152,7 @@ loop {
 
 // Controls, with the service's write policy.
 devices.set("fan", "duty", 0.8)?;            // the applied value, or Err(Refused(..))
+devices.release("fan")?;                     // back to the kernel governor until the next write
 
 // LED intents, arbitrated between clients.
 let mut led = ClientOptions::new("/run/lemnos/lemnosd.sock", "photonvision").leds()?;
@@ -163,6 +164,8 @@ led.progress(0.4, None)?;                    // a gauge, sub-LED precise, eased 
 led.indeterminate(None)?;                    // a spinning comet
 led.system(SystemState::Rebooting)?;         // built-in system animations
 led.locate(Duration::from_secs(10))?;
+led.test(LedShow::Frame(pixels), None)?;     // a selftest's look, over every status (10 s lease)
+led.clear_test()?;
 led.send(request)?;                          // any of the above with fade_ms, easing,
                                              // effect, period, depth, brightness
 led.clear()?;                                // drop this client's intents
@@ -193,10 +196,19 @@ led.clear()?;                                // drop this client's intents
   `breathe`/pulse, or `chase`), `period_ms` (rate), `depth`, `brightness`, `fade_ms` and
   `easing` (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`, `cubic-bezier(x1, y1,
   x2, y2)`); `duration_ms` makes an intent temporary.
+- **Test layer.** Any look can be sent with `test` set (`LedClient::test`,
+  `LedRequest::test()`, `lemnos-ctl led ... --test`): it goes to the test layer, above every
+  client's status and application looks, so a selftest's frames are not hidden by another
+  client's status animation, and below the service's alerts, system states and locate.
+  A test intent is a lease: it lasts `duration_ms`, else `TEST_LEASE_MS` (10 s), and the
+  client renews it by sending it again; it also ends at once when its client disconnects
+  (unless the client keeps its intents, as `lemnos-ctl` does, in which case the lease
+  ends it). Either way the light falls back to the layers below. `clear_test` drops only
+  the test intent.
 - **Arbitration.** The light shows `locate` (from anyone, timed) > system states
-  (updating, booting, rebooting, failed update) > service alerts > status > application
-  colours, frames, LEDs and gauges, then the client's declared priority, then the most
-  recent. Owner changes fade like any other change. A client's intents end when it clears
+  (updating, booting, rebooting, failed update) > service alerts > test > status >
+  application colours, frames, LEDs and gauges, then the client's declared priority, then
+  the most recent. Owner changes fade like any other change. A client's intents end when it clears
   them or disconnects (one-shot clients such as `lemnos-ctl` ask the service to keep them),
   so a crashed application cannot leave the ring red.
 - **Geometry.** The board definition gives each strip its `count`, `offset` (the physical
@@ -230,7 +242,10 @@ lemnos-ctl led pixel 0 ff0000 8 0000ff
 lemnos-ctl led progress 0.4 --color 00ff40
 lemnos-ctl led system updating 0.4 --phase writing
 lemnos-ctl led locate --seconds 10
+lemnos-ctl led frame ff0000,00ff00,0000ff --test --seconds 5   # selftest look, over status
+lemnos-ctl led off --test             # clears only the test layer
 lemnos-ctl led off
+lemnos-ctl fan release fan            # back to the kernel governor; lemnosd keeps running
 lemnos-ctl fan restore --all          # direct sysfs writes, works without the daemon
 lemnos-ctl validate /etc/lemnos/board.toml
 ```
@@ -450,6 +465,20 @@ go back to the kernel. There are two kinds of hwmon fan, and the hand-back diffe
   linked to its device (cooling devices of type `pwm-fan` are used when none is linked).
 - **Fan-controller chips with a true automatic mode** get `pwm1_enable = restore_mode`
   (default 2).
+
+### Releasing a fan while the service runs
+
+A client can hand one fan back to the governor without stopping `lemnosd`:
+`Request::Release` (`DeviceClient::release(device)`, `lemnos-ctl fan release <device>`),
+under the device's write policy. It applies the same hand-back as a stop (bind-time
+`pwm1_enable`, the governor's state from before the first write, the zone kick) and
+broadcasts a `release` control event. The fan stays with the governor **until a client
+writes one of its controls again**: that write takes it back, recording the governor's
+state at that moment first. There is no separate claim request; writing is claiming, as
+it is for the first write after bind. While a fan is released (or was never written),
+the stop helper's record holds no governor state, so a later stop only restores
+`pwm1_enable` and kicks the governor instead of rolling the cooling device back to a stale
+state.
 
 `lemnosd` works the plan out at a fan's first bind, before any client writes to it, and
 records it in `fan-restore` next to the socket (`/run/lemnos/fan-restore`). `lemnos-ctl fan

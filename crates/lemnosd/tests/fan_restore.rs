@@ -130,7 +130,9 @@ fn service_hands_both_kinds_of_fan_back() {
     });
     ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
 
-    // The plans were recorded at bind, before any client wrote.
+    // The plans were recorded at bind. Until a client writes, the governor
+    // owns the cooling device, so the stop helper's record holds no state
+    // to restore (only pwm1_enable and the governor kick).
     let cdev = root.join("class/thermal/cooling_device0");
     let plans = read_fan_state(&fan_state_path(&socket));
     assert_eq!(plans.len(), 2);
@@ -140,7 +142,7 @@ fn service_hands_both_kinds_of_fan_back() {
             enable: 1,
             devices: vec![CoolingRecord {
                 device: cdev.clone(),
-                state: Some(1),
+                state: None,
             }],
         }
     );
@@ -243,5 +245,77 @@ fn stop_helper_uses_recorded_plans_then_falls_back() {
         RestoreKind::CoolingDevice { enable: 1, .. }
     ));
     assert_eq!(read(&root, "class/hwmon/hwmon5/pwm1_enable"), "2");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn release_hands_a_fan_back_while_the_service_runs() {
+    let root = root("release");
+    tree(&root);
+    let socket = root.join("run/lemnosd.sock");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (thread_stop, thread_root, thread_socket) =
+        (Arc::clone(&stop), root.clone(), socket.clone());
+    let handle = std::thread::spawn(move || {
+        let config = ServiceConfig::new(board(), thread_socket);
+        let mut service = Service::new(config, Box::new(SysBuses(thread_root))).unwrap();
+        ready_tx.send(()).unwrap();
+        service.run(&thread_stop).unwrap();
+        service.shutdown(false);
+    });
+    ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    let cdev_state = "devices/virtual/thermal/cooling_device0/cur_state";
+    let state = |root: &Path| read(root, "class/thermal/cooling_device0/cur_state");
+
+    // Take the fan over (the governor was at 1; the kernel follows pwm1 to 4).
+    let mut client = ClientOptions::new(&socket, "helios").devices().unwrap();
+    assert_eq!(client.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
+    write(&root, cdev_state, "4");
+    assert_eq!(client.set("fan", "duty", 1.0).unwrap(), 1.0);
+
+    // Release: pwm1_enable and the governor's state come back, the zone
+    // re-evaluates, and the service keeps running.
+    client.release("fan").unwrap();
+    assert_eq!(read(&root, "class/hwmon/hwmon2/pwm1_enable"), "1");
+    assert_eq!(state(&root), "1");
+    // The stop helper's record no longer holds a governor state to restore.
+    let plans = read_fan_state(&fan_state_path(&socket));
+    assert!(matches!(
+        &plans[0].kind,
+        RestoreKind::CoolingDevice { devices, .. } if devices[0].state.is_none()
+    ));
+    // Only fans can be released; the write policy applies.
+    assert!(client.release("cpu-thermal").is_err());
+    assert!(client.release("nope").is_err());
+    let mut other = ClientOptions::new(&socket, "photonvision")
+        .devices()
+        .unwrap();
+    assert!(
+        other.release("fan").is_ok(),
+        "no writers: anyone may release"
+    );
+    drop(other);
+
+    // The governor moves on; the next write takes the fan back, recording
+    // the governor's state at that moment.
+    write(&root, cdev_state, "2");
+    assert_eq!(client.set("fan", "duty", 0.9).unwrap(), 0.902);
+    write(&root, cdev_state, "4");
+    let plans = read_fan_state(&fan_state_path(&socket));
+    assert!(matches!(
+        &plans[0].kind,
+        RestoreKind::CoolingDevice { devices, .. } if devices[0].state == Some(2)
+    ));
+    client.release("fan").unwrap();
+    assert_eq!(state(&root), "2");
+
+    // Released at stop: the governor's later state is left alone.
+    write(&root, cdev_state, "3");
+    drop(client);
+    stop.store(true, Ordering::Relaxed);
+    handle.join().unwrap();
+    assert_eq!(state(&root), "3");
+    assert_eq!(read(&root, "class/hwmon/hwmon2/pwm1_enable"), "1");
     let _ = fs::remove_dir_all(&root);
 }

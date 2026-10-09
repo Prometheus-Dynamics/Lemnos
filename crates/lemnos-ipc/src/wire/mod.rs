@@ -23,6 +23,7 @@ const SUBSCRIBE: u16 = 4;
 const SET: u16 = 5;
 const GET: u16 = 6;
 const LED: u16 = 7;
+const RELEASE: u16 = 8;
 const WELCOME: u16 = 101;
 const DEVICES: u16 = 102;
 const READING: u16 = 103;
@@ -211,8 +212,15 @@ pub struct LedRequest {
     pub fade_ms: Option<u32>,
     pub easing: Option<lemnos_light::Easing>,
     /// How long the intent lasts (`None`: until cleared or the client
-    /// leaves).
+    /// leaves; for a `test` intent, the service's lease, 10 s in `lemnosd`).
     pub duration_ms: Option<u32>,
+    /// A selftest or diagnostic look, in the test layer above every client's
+    /// status ([`lemnos_light::Layer::Test`]). The service holds it on a
+    /// lease (`duration_ms`, else its default), so a client renews it by
+    /// sending it again; it ends at once when a client that does not keep
+    /// its intents disconnects. With [`LedShow::Clear`], clears only this
+    /// client's test intent.
+    pub test: bool,
 }
 
 impl LedRequest {
@@ -227,7 +235,14 @@ impl LedRequest {
             fade_ms: None,
             easing: None,
             duration_ms: None,
+            test: false,
         }
+    }
+
+    /// The same request in the test layer.
+    pub fn test(mut self) -> Self {
+        self.test = true;
+        self
     }
 }
 
@@ -263,6 +278,15 @@ pub enum Request {
         control: String,
     },
     Led(LedRequest),
+    /// Hands a fan back to the kernel's thermal governor while the service
+    /// keeps running (the same hand-back as on stop). The fan stays with the
+    /// governor until a client writes one of its controls again, which takes
+    /// it back. Answered with a [`Message::Reply`] (value 0) under the
+    /// device's write policy.
+    Release {
+        id: u32,
+        device: String,
+    },
 }
 
 /// Service to client.

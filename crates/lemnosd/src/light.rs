@@ -12,6 +12,9 @@ pub(crate) const MAX_LEDS: usize = 64;
 pub(crate) const MAX_INTENTS: usize = 32;
 /// The owner id the service itself uses (alerts, system states).
 pub(crate) const SERVICE_OWNER: u32 = 0;
+/// How long a test-layer intent lasts when the client gives no duration:
+/// a lease the client renews by sending it again.
+pub const TEST_LEASE_MS: u32 = 10_000;
 
 pub(crate) type LightIntent = Intent<MAX_LEDS>;
 
@@ -22,8 +25,9 @@ pub(crate) struct Light {
     pub animator: Animator<MAX_LEDS>,
     pub arbiter: Arbiter<MAX_LEDS, MAX_INTENTS>,
     shown: Option<(u32, Layer, LightIntent)>,
-    /// Per-owner frames built from single-LED writes.
-    frames: Vec<(u32, [Rgbw; MAX_LEDS])>,
+    /// Per-owner frames built from single-LED writes (separately for the
+    /// test layer).
+    frames: Vec<((u32, bool), [Rgbw; MAX_LEDS])>,
     pub count: usize,
     pub next_render_ms: u64,
 }
@@ -55,10 +59,15 @@ impl Light {
     /// Applies a client's request; returns `false` when every intent slot
     /// is taken.
     pub fn request(&mut self, owner: u32, priority: u8, request: &LedRequest, now_ms: u64) -> bool {
+        let key = (owner, request.test);
         let show = match &request.show {
+            LedShow::Clear if request.test => {
+                self.arbiter.clear(owner, Some(Layer::Test));
+                self.frames.retain(|(k, _)| *k != key);
+                return true;
+            }
             LedShow::Clear => {
-                self.arbiter.clear(owner, None);
-                self.frames.retain(|(o, _)| *o != owner);
+                self.forget(owner);
                 return true;
             }
             LedShow::Status(status) => Show::Status(*status),
@@ -68,20 +77,20 @@ impl Light {
                 for (slot, value) in frame.iter_mut().zip(pixels) {
                     *slot = rgbw(*value);
                 }
-                self.store_frame(owner, frame);
+                self.store_frame(key, frame);
                 Show::Frame {
                     pixels: frame,
                     len: pixels.len().min(MAX_LEDS),
                 }
             }
             LedShow::Pixels(pixels) => {
-                let mut frame = self.frame_of(owner);
+                let mut frame = self.frame_of(key);
                 for (index, value) in pixels {
                     if let Some(slot) = frame.get_mut(usize::from(*index)) {
                         *slot = rgbw(*value);
                     }
                 }
-                self.store_frame(owner, frame);
+                self.store_frame(key, frame);
                 Show::Frame {
                     pixels: frame,
                     len: self.count,
@@ -111,21 +120,26 @@ impl Light {
             .map(|b| ((u32::from(b.min(1000)) * 255 + 500) / 1000) as u8);
         intent.fade_ms = request.fade_ms;
         intent.easing = request.easing;
-        let expires = request.duration_ms.map(|d| now_ms + u64::from(d));
+        intent.test = request.test;
+        let duration = match request.duration_ms {
+            None if request.test => Some(TEST_LEASE_MS),
+            duration => duration,
+        };
+        let expires = duration.map(|d| now_ms + u64::from(d));
         self.arbiter.hold(owner, priority, intent, expires)
     }
 
-    fn frame_of(&self, owner: u32) -> [Rgbw; MAX_LEDS] {
+    fn frame_of(&self, key: (u32, bool)) -> [Rgbw; MAX_LEDS] {
         self.frames
             .iter()
-            .find(|(o, _)| *o == owner)
+            .find(|(k, _)| *k == key)
             .map_or([Rgbw::OFF; MAX_LEDS], |(_, f)| *f)
     }
 
-    fn store_frame(&mut self, owner: u32, frame: [Rgbw; MAX_LEDS]) {
-        match self.frames.iter_mut().find(|(o, _)| *o == owner) {
+    fn store_frame(&mut self, key: (u32, bool), frame: [Rgbw; MAX_LEDS]) {
+        match self.frames.iter_mut().find(|(k, _)| *k == key) {
             Some((_, f)) => *f = frame,
-            None => self.frames.push((owner, frame)),
+            None => self.frames.push((key, frame)),
         }
     }
 
@@ -142,7 +156,7 @@ impl Light {
     /// Drops an owner's intents.
     pub fn forget(&mut self, owner: u32) {
         self.arbiter.clear(owner, None);
-        self.frames.retain(|(o, _)| *o != owner);
+        self.frames.retain(|((o, _), _)| *o != owner);
     }
 
     /// Re-arbitrates after changes: expires intents and, when the winner

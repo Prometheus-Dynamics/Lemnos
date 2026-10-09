@@ -160,10 +160,7 @@ impl Service {
 
     /// The fans to hand back to the kernel if the process dies.
     pub fn fan_restore_targets(&self) -> Vec<lemnos_drivers_linux::FanRestore> {
-        self.slots
-            .iter()
-            .filter_map(|s| s.restore.clone())
-            .collect()
+        self.slots.iter().filter_map(Slot::hand_back_plan).collect()
     }
 
     fn now_ms(&self) -> u64 {
@@ -446,6 +443,22 @@ impl Service {
                 let result = self.get(&device, &control);
                 self.clients[ci].send(&Message::Reply { id, result });
             }
+            Request::Release { id, device } => {
+                let result = self.release(ci, &device);
+                if result.is_ok() {
+                    let by = self.clients[ci].name.clone();
+                    self.broadcast(&Message::Event(Event::Control {
+                        device,
+                        control: "release".into(),
+                        value: 0.0,
+                        by,
+                    }));
+                }
+                self.clients[ci].send(&Message::Reply {
+                    id,
+                    result: result.map(|()| 0.0),
+                });
+            }
             Request::Led(request) => {
                 let li = if request.device.is_empty() {
                     (!self.lights.is_empty()).then_some(0)
@@ -520,6 +533,17 @@ impl Service {
                 Err(Refusal::Device(kind))
             }
         }
+    }
+
+    /// Hands a fan back to the kernel's governor (`Request::Release`).
+    fn release(&mut self, client: usize, device: &str) -> Result<(), Refusal> {
+        let index = self.slot_of(device).ok_or(Refusal::UnknownDevice)?;
+        if !self.slots[index].allows(&self.clients[client].name) {
+            return Err(Refusal::NotAllowed);
+        }
+        self.slots[index].release().map_err(Refusal::Device)?;
+        self.save_fan_state();
+        Ok(())
     }
 
     fn get(&mut self, device: &str, control: &str) -> Result<f64, Refusal> {

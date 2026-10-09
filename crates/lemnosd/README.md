@@ -26,7 +26,9 @@ lemnos-ctl led status warn --effect breathe
 lemnos-ctl led progress 0.4 --color 00ff40
 lemnos-ctl led pixel 0 ff0000 8 0000ff
 lemnos-ctl led locate --seconds 10
+lemnos-ctl led frame ff0000,00ff00 --test   # test layer, over every status
 lemnos-ctl led off
+lemnos-ctl fan release fan                 # back to the kernel governor until the next write
 lemnos-ctl fan restore --all
 ```
 

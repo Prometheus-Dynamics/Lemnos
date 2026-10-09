@@ -61,7 +61,7 @@ adapter in `/sys/bus/i2c/devices`:
 |---|---|
 | `name` | the adapter's `name` attribute (`Synopsys DesignWare I2C adapter`) |
 | `compatible` | one of the `compatible` strings of the adapter's device-tree node, or of its parent device's node (`i2c-gpio`, `snps,designware-i2c`) |
-| `of` | that node's device-tree path (`/axi/pcie@120000/rp1/i2c@74000`) |
+| `of` | that node's device-tree path (on the Raze with kernel 7.2, RP1's i2c1 is `/axi/pcie@1000120000/rp1/i2c@74000`) |
 | `node` | the last component of that path (`i2c@74000`: a DesignWare controller at a given address) |
 
 ```toml
@@ -71,8 +71,14 @@ bus = "i2c:compatible=snps,designware-i2c;node=i2c@74000"
 
 Hosts resolve a selector when they build the device (and the runtime's board probe at each
 refresh), so a renumbered adapter is followed; no match, or more than one, fails that
-device with `not-found` and leaves the rest of the board running. Generators should emit
-the most robust selector they know (a unique `compatible`, else the `of` path) and fall
+device with `not-found` and leaves the rest of the board running.
+
+Device-tree paths and node names are kernel-specific: the RP1 PCIe node, for example, is
+`pcie@1000120000` on kernel 7.2 and has been spelled differently by other kernels and
+overlays. Generators should take an `of` or `node` value from the running device tree
+(`/sys/firmware/devicetree/base`, or an adapter's resolved `of_node`) or from a manifest
+recorded on that kernel, never from documentation. Generators should emit the most robust
+selector they know (a unique `compatible`, else the `of` path) and fall
 back to `i2c-<n>`.
 
 ### Backends

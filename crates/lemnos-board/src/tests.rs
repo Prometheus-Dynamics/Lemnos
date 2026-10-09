@@ -52,7 +52,7 @@ impl Tree {
             fs::write(path, bytes).unwrap();
         };
         raw(
-            &format!("{dt}/axi/pcie@120000/rp1/i2c@74000/compatible"),
+            &format!("{dt}/axi/pcie@1000120000/rp1/i2c@74000/compatible"),
             b"snps,designware-i2c\0",
         );
         raw(
@@ -65,7 +65,7 @@ impl Tree {
         )
         .link(
             &format!("{rp1}/i2c-1/of_node"),
-            &format!("{dt}/axi/pcie@120000/rp1/i2c@74000"),
+            &format!("{dt}/axi/pcie@1000120000/rp1/i2c@74000"),
         )
         .link("bus/i2c/devices/i2c-1", &format!("{rp1}/i2c-1"))
         .file("devices/platform/i2c@0/i2c-4/name", "i2c@0")
@@ -357,7 +357,7 @@ fn i2c_buses_are_found_by_name_or_device_tree_node() {
     assert_eq!(resolve("i2c:compatible=i2c-gpio"), Ok(4));
     assert_eq!(resolve("i2c:compatible=snps,designware-i2c"), Ok(1));
     assert_eq!(resolve("i2c:node=i2c@74000"), Ok(1));
-    assert_eq!(resolve("i2c:of=/axi/pcie@120000/rp1/i2c@74000"), Ok(1));
+    assert_eq!(resolve("i2c:of=/axi/pcie@1000120000/rp1/i2c@74000"), Ok(1));
     assert_eq!(resolve("i2c:name=Synopsys DesignWare I2C adapter"), Ok(1));
     assert_eq!(resolve("i2c:name=i2c@0;compatible=i2c-gpio"), Ok(4));
     assert!(resolve("i2c:name=i2c@0;compatible=snps,designware-i2c").is_err());

@@ -225,3 +225,28 @@ fn system_states_use_board_colours() {
     let (look, _) = Intent::<16>::new(Show::Indeterminate { color: None }).resolve(&defaults);
     assert!(look.is_moving());
 }
+
+#[test]
+fn test_layer_sits_between_status_and_alert() {
+    let mut arb: Arbiter<4, 8> = Arbiter::new();
+    arb.hold(1, 200, Intent::new(Show::Status(Status::Error)), None);
+    let mut test = Intent::new(Show::Color(Rgbw::rgb(0x00ff00)));
+    test.test = true;
+    assert_eq!(test.layer(), Layer::Test);
+    // A low-priority test beats a high-priority status.
+    arb.hold(2, 0, test, Some(1_000));
+    assert_eq!(arb.winner().unwrap().owner, 2);
+    assert_eq!(arb.winner().unwrap().layer.name(), "test");
+    // A host alert beats the test.
+    let mut alert = Intent::new(Show::Status(Status::Warn));
+    alert.alert = true;
+    alert.test = true;
+    assert_eq!(alert.layer(), Layer::Alert);
+    arb.hold(3, 0, alert, None);
+    assert_eq!(arb.winner().unwrap().owner, 3);
+    arb.clear(3, None);
+    // The test's lease runs out: back to the status below.
+    assert!(arb.expire(1_000));
+    assert_eq!(arb.winner().unwrap().owner, 1);
+    assert!(Layer::Status < Layer::Test && Layer::Test < Layer::Alert);
+}

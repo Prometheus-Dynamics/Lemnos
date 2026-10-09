@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// - `compatible`: one of the `compatible` strings of the adapter's
 ///   device-tree node (or its parent device's), such as `i2c-gpio` or
 ///   `snps,designware-i2c`;
-/// - `of`: the device-tree path of that node (`/axi/pcie@120000/rp1/i2c@74000`);
+/// - `of`: the device-tree path of that node (`/axi/pcie@1000120000/rp1/i2c@74000`);
 /// - `node`: the last component of that path (`i2c@74000`, a DesignWare
 ///   adapter at a given address).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -134,7 +134,7 @@ fn of_node(adapter: &Path) -> Option<PathBuf> {
 }
 
 /// A resolved `of_node` as a device-tree path: what follows
-/// `firmware/devicetree/base` (`/axi/pcie@120000/rp1/i2c@74000`).
+/// `firmware/devicetree/base` (`/axi/pcie@1000120000/rp1/i2c@74000`).
 fn dt_path(node: &Path) -> Option<String> {
     let text = node.to_str()?;
     let (_, rest) = text.split_once("firmware/devicetree/base")?;

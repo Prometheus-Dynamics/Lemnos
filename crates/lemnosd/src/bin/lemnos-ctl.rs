@@ -18,10 +18,13 @@
 //!   led system <updating [0..1] [--phase P]|booting|rebooting|update-failed|rolled-back>
 //!   led locate [--seconds N]
 //!   led off
+//!   fan release <device>
 //!   fan restore [--board PATH] [--state PATH] [--all]
 //!   validate <board.toml>...
 //! led options: --device ID --effect solid|blink|breathe|chase --blink
 //!   --period MS --depth 0..1 --fade MS --easing NAME --brightness 0..1 --seconds N
+//!   --test (the test layer, over every client's status, for --seconds or 10 s;
+//!   `led off --test` clears only it)
 //! ```
 //!
 //! LED intents from `lemnos-ctl` stay after it exits, until replaced or
@@ -100,7 +103,7 @@ fn main() -> ExitCode {
     };
     match command.as_str() {
         "validate" => validate(args),
-        "fan" => fan(args, Path::new(&socket)),
+        "fan" => fan(args, Path::new(&socket), options),
         "led" => led(args, options),
         _ => devices(&command, args, options),
     }
@@ -129,9 +132,28 @@ fn validate(mut args: Args) -> ExitCode {
 /// so it works when `lemnosd` is gone (systemd runs it as `ExecStopPost`):
 /// the plans `lemnosd` recorded at bind (`fan-restore` next to the socket, or
 /// `--state PATH`), then the board's fans, then with `--all` every hwmon fan.
-fn fan(mut args: Args, socket: &Path) -> ExitCode {
-    if args.next().as_deref() != Some("restore") {
-        return fail("usage: fan restore [--board PATH] [--state PATH] [--all]");
+fn fan(mut args: Args, socket: &Path, options: ClientOptions) -> ExitCode {
+    match args.next().as_deref() {
+        Some("restore") => {}
+        Some("release") => {
+            // Through the service: it hands the fan back to the governor and
+            // keeps running; the next write to the fan takes it back.
+            let Some(device) = args.next() else {
+                return fail("usage: fan release <device>");
+            };
+            return match options.devices().and_then(|mut c| c.release(&device)) {
+                Ok(()) => {
+                    println!("{device} released to the kernel governor");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(e),
+            };
+        }
+        _ => {
+            return fail(
+                "usage: fan release <device> | fan restore [--board PATH] [--state PATH] [--all]",
+            );
+        }
     }
     let board = args
         .take("--board")
@@ -182,6 +204,7 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     let color_opt = args.take("--color");
     let background = args.take("--background");
     let phase = args.take("--phase");
+    let test = args.flag("--test");
     let Some(what) = args.next() else {
         return fail(
             "led: status, color, brightness, pixel, frame, progress, spinner, system, locate or off",
@@ -277,6 +300,7 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     };
     let mut request = LedRequest::new(show);
     request.device = device;
+    request.test = test;
     request.effect = match (effect.as_deref(), blink) {
         (Some(name), _) => match EffectKind::parse(name) {
             Some(effect) => Some(effect),

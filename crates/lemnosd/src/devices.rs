@@ -3,7 +3,7 @@
 
 use lemnos_board::{Buses, DeviceSpec, DriverRegistry};
 use lemnos_device::{BoxedDevice, DeviceInfo, DeviceStatus, MAX_CHANNELS, NO_VALUE};
-use lemnos_drivers_linux::FanRestore;
+use lemnos_drivers_linux::{FanRestore, RestoreKind};
 use lemnos_hal::{ErrorKind, HalError};
 use lemnos_ipc::{ChannelDesc, ControlDesc, DeviceDesc};
 
@@ -244,11 +244,40 @@ impl Slot {
             .is_some_and(|plan| plan.record_states().is_ok())
     }
 
+    /// The hand-back to apply now. While no client is overriding the fan
+    /// (never written, or released), the recorded governor states are
+    /// stale: the governor owns the cooling device, so they are left out and
+    /// only `pwm1_enable` and the governor kick remain.
+    pub fn hand_back_plan(&self) -> Option<FanRestore> {
+        let mut plan = self.restore.clone()?;
+        if !self.overriding
+            && let RestoreKind::CoolingDevice { devices, .. } = &mut plan.kind
+        {
+            for record in devices {
+                record.state = None;
+            }
+        }
+        Some(plan)
+    }
+
     /// Hands a fan back to the kernel, if this is a fan.
     pub fn restore(&mut self) {
-        if let Some(plan) = &self.restore {
+        if let Some(plan) = self.hand_back_plan() {
             let _ = plan.apply();
         }
+    }
+
+    /// Hands a fan back to the kernel's governor while the service keeps
+    /// running. The next client write takes it back (recording the
+    /// governor's states again first).
+    pub fn release(&mut self) -> Result<(), ErrorKind> {
+        if self.device.is_none() {
+            return Err(self.error.unwrap_or(ErrorKind::Unavailable));
+        }
+        let plan = self.hand_back_plan().ok_or(ErrorKind::Unsupported)?;
+        plan.apply().map_err(|e| lemnos_hal::HalError::kind(&e))?;
+        self.overriding = false;
+        Ok(())
     }
 }
 

@@ -40,13 +40,18 @@ impl Status {
 
 /// Which kind of intent, from lowest to highest precedence. A light shows
 /// the highest layer anyone holds: `Locate` over `System` over `Alert` over
-/// `Status` over `App`.
+/// `Test` over `Status` over `App`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Layer {
     /// Colours, frames, single LEDs and gauges from applications.
     App,
     /// Status from applications.
     Status,
+    /// A selftest or diagnostic: any look, shown over every application's
+    /// status so a test's frames are not hidden, but under the host's
+    /// alerts, system states and locate. Hosts hold these on a lease, so
+    /// a test that disappears falls back to the layers below.
+    Test,
     /// Status from the host itself (a faulted sensor, a fan failsafe).
     Alert,
     /// System states: updating, booting, rebooting, a failed update.
@@ -122,6 +127,7 @@ impl Layer {
         match self {
             Self::App => "app",
             Self::Status => "status",
+            Self::Test => "test",
             Self::Alert => "alert",
             Self::System => "system",
             Self::Locate => "locate",
@@ -277,6 +283,9 @@ pub struct Intent<const N: usize> {
     pub easing: Option<Easing>,
     /// A status from the host itself: shown in the [`Layer::Alert`] layer.
     pub alert: bool,
+    /// A selftest or diagnostic look: shown in the [`Layer::Test`] layer
+    /// (`alert` wins if both are set).
+    pub test: bool,
 }
 
 impl<const N: usize> Intent<N> {
@@ -290,6 +299,7 @@ impl<const N: usize> Intent<N> {
             fade_ms: None,
             easing: None,
             alert: false,
+            test: false,
         }
     }
 
@@ -297,6 +307,9 @@ impl<const N: usize> Intent<N> {
     pub const fn layer(&self) -> Layer {
         if self.alert {
             return Layer::Alert;
+        }
+        if self.test {
+            return Layer::Test;
         }
         match self.show {
             Show::Locate => Layer::Locate,

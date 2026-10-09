@@ -534,6 +534,22 @@ impl DeviceClient {
             .map_err(ClientError::Refused)
     }
 
+    /// Hands fan `device` back to the kernel's thermal governor while the
+    /// service keeps running; it stays there until a client writes one of
+    /// its controls again.
+    pub fn release(&mut self, device: &str) -> Result<(), ClientError> {
+        let id = self.conn.next_id;
+        self.conn.next_id = self.conn.next_id.wrapping_add(1).max(1);
+        let request = Request::Release {
+            id,
+            device: device.into(),
+        };
+        self.conn
+            .request(&request, reply(id))?
+            .map(|_| ())
+            .map_err(ClientError::Refused)
+    }
+
     /// A control's current value in its unit.
     pub fn get(&mut self, device: &str, control: &str) -> Result<f64, ClientError> {
         let id = self.conn.next_id;
@@ -624,13 +640,16 @@ impl LedClient {
     /// Sends `request` and remembers it (to send again after a reconnection).
     pub fn send(&mut self, request: LedRequest) -> Result<(), ClientError> {
         if request.show == LedShow::Clear {
-            self.conn.held.retain(|r| r.device != request.device);
-        } else {
-            let layer = layer_of(&request.show);
             self.conn
                 .held
-                .retain(|r| r.device != request.device || layer_of(&r.show) != layer);
-            if request.duration_ms.is_none() {
+                .retain(|r| r.device != request.device || (request.test && !r.test));
+        } else {
+            let layer = layer_of(&request);
+            self.conn
+                .held
+                .retain(|r| r.device != request.device || layer_of(r) != layer);
+            // Test intents are leases the caller renews: not re-sent.
+            if request.duration_ms.is_none() && !request.test {
                 self.conn.held.push(request.clone());
             }
         }
@@ -690,6 +709,21 @@ impl LedClient {
         self.send(request)
     }
 
+    /// Shows `show` in the test layer, over every client's status, for
+    /// `lease` (`None`: the service's default, 10 s in `lemnosd`). Send it
+    /// again to renew it; it falls back to the layers below when the lease
+    /// runs out or this client disconnects.
+    pub fn test(&mut self, show: LedShow, lease: Option<Duration>) -> Result<(), ClientError> {
+        let mut request = LedRequest::new(show).test();
+        request.duration_ms = lease.map(|d| d.as_millis().min(u128::from(u32::MAX - 1)) as u32);
+        self.send(request)
+    }
+
+    /// Drops this client's test intent.
+    pub fn clear_test(&mut self) -> Result<(), ClientError> {
+        self.send(LedRequest::new(LedShow::Clear).test())
+    }
+
     /// Drops this client's intents.
     pub fn clear(&mut self) -> Result<(), ClientError> {
         self.send(LedRequest::new(LedShow::Clear))
@@ -703,8 +737,11 @@ impl LedClient {
     }
 }
 
-fn layer_of(show: &LedShow) -> u8 {
-    match show {
+fn layer_of(request: &LedRequest) -> u8 {
+    if request.test {
+        return 5;
+    }
+    match &request.show {
         LedShow::Clear => 0,
         LedShow::Color(_)
         | LedShow::Frame(_)

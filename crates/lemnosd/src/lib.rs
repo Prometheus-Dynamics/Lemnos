@@ -40,6 +40,7 @@ pub(crate) fn scaled(raw: i32, exponent: i8) -> f64 {
 }
 
 pub use fans::restore_fans;
+pub use light::TEST_LEASE_MS;
 
 /// Whether systemd is stopping the system (a restart or power-off).
 pub fn system_stopping() -> bool {

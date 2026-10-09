@@ -215,6 +215,13 @@ impl Request {
                     e.u16(p);
                 }
                 e.opt_u32(led.duration_ms);
+                // Flags, appended in protocol 1 (older peers stop before them).
+                e.u8(u8::from(led.test));
+                e.finish()
+            }
+            Self::Release { id, device } => {
+                let mut e = Encoder::new(RELEASE);
+                e.u32(*id).str(device);
                 e.finish()
             }
         }
@@ -297,8 +304,13 @@ impl Request {
                     fade_ms,
                     easing: easing_from(easing_kind, params),
                     duration_ms: d.opt_u32()?,
+                    test: !d.buf.is_empty() && d.u8()? & 1 != 0,
                 })
             }
+            RELEASE => Self::Release {
+                id: d.u32()?,
+                device: d.str()?,
+            },
             other => return Err(bad(format!("unknown request kind {other}"))),
         })
     }
