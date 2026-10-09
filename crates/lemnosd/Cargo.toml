@@ -35,13 +35,14 @@ default = []
 # client tests.
 mock = ["lemnos-hal/mock"]
 # The Orion bridge: `lemnos-orion`, a lemnosd client and an Orion provider
-# over local IPC (`lemnosd::orion`). Pins Orion's main at 4fadba9; it also
-# pulls in `orion-node`, which only the bridge's tests use.
+# over local IPC (`lemnosd::orion`). Pins Orion's main at 4fadba9. `orion-node`
+# is a dev-dependency (only the bridge's tests run an in-process node), so the
+# binary never links it: its default features pull rustls and ring, which the
+# musl artifact cannot build without a C cross toolchain.
 orion = [
     "dep:orion-client",
     "dep:orion-control-plane",
     "dep:orion-core",
-    "dep:orion-node",
     "dep:tokio",
 ]
 
@@ -60,11 +61,13 @@ serde_json = { workspace = true, features = ["std"] }
 orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
 orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
 orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
-orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"], optional = true }
 
 [dev-dependencies]
 lemnosd = { path = ".", features = ["mock"] }
+# The in-process node for tests/orion_bridge.rs. IPC only: default features
+# would add the HTTP/TCP/QUIC transports (rustls, ring).
+orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", default-features = false }
 lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-mock.workspace = true
