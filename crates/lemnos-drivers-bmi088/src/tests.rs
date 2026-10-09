@@ -108,17 +108,20 @@ fn missing_die_reports_a_bus_error() {
     let error = Bmi088::new(i2c)
         .init(&mut MockDelay::new(), Config::default())
         .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::Step {
-            step: "gyro chip id",
-            ..
-        }
-    ));
     assert_eq!(error.kind(), ErrorKind::Nack);
-    let mut text = heapless_text::Text::new();
-    core::fmt::Write::write_fmt(&mut text, format_args!("{error}")).unwrap();
-    assert!(text.as_str().starts_with("BMI088 gyro chip id:"), "{error}");
+    #[cfg(feature = "reasons")]
+    {
+        assert!(matches!(
+            error,
+            Error::Step {
+                step: "gyro chip id",
+                ..
+            }
+        ));
+        let mut text = heapless_text::Text::new();
+        core::fmt::Write::write_fmt(&mut text, format_args!("{error}")).unwrap();
+        assert!(text.as_str().starts_with("BMI088 gyro chip id:"), "{error}");
+    }
 }
 
 /// A bit-banged bus sees the soft-reset bytes unacknowledged (the die
@@ -263,6 +266,7 @@ fn async_device_model_matches_blocking() {
 }
 
 /// A small fixed buffer to format into without `alloc`.
+#[cfg(feature = "reasons")]
 mod heapless_text {
     pub struct Text {
         buf: [u8; 128],

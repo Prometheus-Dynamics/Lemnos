@@ -20,6 +20,10 @@ default = ["float"]
 # SI-unit `f32` readings. Off: integer readings only (`read_fixed`), which keeps
 # software float routines out of images for MCUs without an FPU.
 float = ["lemnos-device/float"]
+# `Error::Step`: names the `init` step a transfer failed in, for a host that
+# shows why a device faulted. Each step gets its own tag, which costs flash,
+# so MCU images leave it off.
+reasons = []
 
 [dependencies]
 embedded-hal.workspace = true

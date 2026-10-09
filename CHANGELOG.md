@@ -46,6 +46,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - `scripts/check-nostd.sh` builds the three crates for the embedded and wasm targets.
 - The sensor drivers read in integers (`read_fixed`: milli-g, milli-°/s, 1/16 µT, µV/nV/nA/nW, m°C) and gate their `f32` APIs behind a default `float` feature. Without it, an image for an FPU-less MCU links no software float routines: all four device drivers take 5.6 KB of flash on `riscv32imac` (9.9 KB with floats) and 5.3 KB on a Cortex-M4F.
 - `lemnos-drivers-bmm150` gains Bosch's integer trim compensation; `lemnos-drivers-ina2xx` calibrates in integers (`Config::from_micro`).
+- Fault reasons: `lemnosd` keeps why each device faulted (`init: ...`, `read: ...`, or a board build error) and sends it in `DeviceDesc::reason` and `Event::Status::reason`; `lemnos-ctl list` prints `why:`. The writer is `DynDevice::init_why` / `DynSensor::read_why` (`lemnos-device` feature `reasons`, which `alloc` implies), and `HalError::describe` gives the driver's own account.
 
 ### Changed
 
@@ -59,6 +60,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Toolchain pin moved to Rust 1.99.0 (MSRV stays 1.94). Dependencies upgraded to their newest releases (`syn` 3, `serialport` 4.10, `ordered-float` 5.5, `tokio` 1.53, `libc` 0.2.190, ...). No API changes. The size baseline is refreshed for 1.99 codegen.
 - `I2cRegisters::write` sends one register straight from a 6-byte buffer instead of going through the burst packer, and the drivers write registers one at a time, so images that never enable bursts do not link the packer.
 - `lemnos_drivers_ina2xx::Config` holds µΩ and µA (`Config::new(ohms, amps)` still exists with `float`).
+- Size (x86_64 service profile): `lemnosd` 905 KB to 920 KB and `lemnos-ctl` 798 KB to 813 KB for fault reasons. Firmware: the fault-reason and BMI088 step-name code is compiled out of MCU images (feature `reasons` on `lemnos-device` and `lemnos-drivers-bmi088`, enabled by `lemnos-board`). The device and lite images grow by at most 156 bytes (riscv32imac) and 88 bytes (thumbv7em), and the BMI088 image by 124 and 98 bytes, from the tolerated soft resets and the chip-ID re-read.
 
 ### Fixed
 
@@ -72,6 +74,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - The Raze example (`crates/lemnos-board/examples/raze.toml`) carries the buses and addresses verified on the Raze: BMI088 on the i2c-gpio bus (`bus = "i2c:compatible=i2c-gpio"`, i2c-4 on the 7.2.9 image; 0x18/0x68), BMM150 on i2c-1 0x10, INA238 on i2c-1 0x40, the fan as `pwmfan`, the ring as `wire = "rgb"`.
 - The `pwm-fan` hand-back restores the governor's state, not the controller's (retest on the Raze: writing `pwm1` moves the cooling device's `cur_state` to the matching level, so re-applying the current state kept the fan at 100 % until the next trip crossing of a zone without polling). `FanRestore` now records each cooling device's `cur_state` (`CoolingRecord`) at bind and again just before the controller's first write (`FanRestore::record_states`, `lemnosd` does this on a fan's first client write), writes it back on hand-back (after a neighbouring state when the device is already there), then makes every thermal zone bound to the device re-evaluate by writing its `policy` back (`kick_governors`). `lemnos-ctl fan restore` without a record only restores `pwm1_enable` and kicks the governor. The state file records the states (`<device>=<state>`).
 - `LEMNOSD_UPDATE_STATUS` is the only place the update status path is set: `lemnosd` has no built-in default, the unit no longer sets it, and the staged `/etc/default/lemnosd.env` does (device packages redeclare the Gaia `lemnosd-env` item for another path).
+- BMI088 `init` ignores the results of the two soft-reset writes (a die resets as it takes the byte, so a bit-banged `i2c-gpio` master can see it NAKed, `EIO`) and re-reads both chip IDs after the resets; a failing step is named in `Error::Step` (feature `reasons`).
 
 ## [2.0.0]
 

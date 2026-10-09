@@ -19,8 +19,13 @@ workspace = true
 default = []
 # `Channel::to_f32` and `ControlInfo::from_f32`.
 float = []
-# `BoxedDevice`, an owned type-erased device (needs `alloc`).
-alloc = []
+# `DynDevice::init_why` / `DynSensor::read_why` and their `BoxedDevice` and
+# `DeviceRef` forms: a host writes why a device failed. Pulls in `core::fmt`
+# formatting of driver errors, so MCU images leave it off.
+reasons = []
+# `BoxedDevice`, an owned type-erased device (needs `alloc`); hosts that
+# need it also get the failure reasons.
+alloc = ["reasons"]
 # Serialize/deserialize the plain-data types (`DeviceStatus`, classes, quantities).
 serde = ["dep:serde"]
 

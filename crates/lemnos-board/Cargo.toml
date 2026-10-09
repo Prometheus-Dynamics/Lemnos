@@ -24,7 +24,7 @@ linux = ["dep:lemnos-linux", "lemnos-linux/gpio-cdev", "lemnos-linux/spi"]
 embedded-hal.workspace = true
 lemnos-device = { workspace = true, features = ["alloc"] }
 lemnos-hal = { workspace = true, features = ["std"] }
-lemnos-drivers-bmi088 = { workspace = true, default-features = false }
+lemnos-drivers-bmi088 = { workspace = true, default-features = false, features = ["reasons"] }
 lemnos-drivers-bmm150 = { workspace = true, default-features = false }
 lemnos-drivers-ina2xx = { workspace = true, default-features = false }
 lemnos-drivers-vcm.workspace = true

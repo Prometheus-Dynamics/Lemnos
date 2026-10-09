@@ -356,16 +356,27 @@ pub enum Error<E> {
     /// A reading was requested before `init` set the ranges.
     NotInitialized,
     /// A transfer of an `init` step failed (`step` names it, such as
-    /// `"accel power control"`), so a host can say which one.
+    /// `"accel power control"`), so a host can say which one. Feature
+    /// `reasons` only.
+    #[cfg(feature = "reasons")]
     Step {
         step: &'static str,
         error: RegisterError<E>,
     },
 }
 
-/// Tags a register error with the `init` step it happened in.
+/// Tags a register error with the `init` step it happened in (`reasons`), or
+/// just wraps it.
+#[cfg(feature = "reasons")]
 pub(crate) fn at<E>(step: &'static str) -> impl FnOnce(RegisterError<E>) -> Error<E> {
     move |error| Error::Step { step, error }
+}
+
+/// Tags a register error with the `init` step it happened in (`reasons`), or
+/// just wraps it.
+#[cfg(not(feature = "reasons"))]
+pub(crate) fn at<E>(_step: &'static str) -> impl FnOnce(RegisterError<E>) -> Error<E> {
+    Error::Register
 }
 
 impl<E> From<RegisterError<E>> for Error<E> {
@@ -380,6 +391,7 @@ impl<E: fmt::Debug> HalError for Error<E> {
             Self::Register(error) => error.kind(),
             Self::WrongChip { .. } => ErrorKind::Unsupported,
             Self::NotInitialized => ErrorKind::Unavailable,
+            #[cfg(feature = "reasons")]
             Self::Step { error, .. } => error.kind(),
         }
     }
@@ -398,6 +410,7 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
                 "expected BMI088 chip IDs 0x{ACCEL_CHIP_ID:02x}/0x{GYRO_CHIP_ID:02x}, found 0x{accel:02x}/0x{gyro:02x}"
             ),
             Self::NotInitialized => f.write_str("BMI088 read before init"),
+            #[cfg(feature = "reasons")]
             Self::Step { step, error } => write!(f, "BMI088 {step}: {error}"),
         }
     }
