@@ -37,7 +37,7 @@
 use lemnos_board::DriverEntry;
 pub use lemnos_board::{
     Backend, BoardDefinition, BoardError, BoardInfo, BusRef, Buses, ConfigValue, DeviceSpec,
-    DriverRegistry, DynI2c, Interface,
+    DriverRegistry, DynI2c, I2cSelector, Interface,
 };
 use lemnos_bus::hal::OwnedI2cBus;
 use lemnos_core::{DeviceAddress, DeviceDescriptor, DeviceId, DeviceKind, InterfaceKind, Value};
@@ -106,6 +106,7 @@ impl BoardSetup {
         BoardProbe {
             board: Arc::clone(&self.board),
             registry: Arc::clone(&self.registry),
+            sys: self.sys.clone(),
         }
     }
 
@@ -196,6 +197,7 @@ fn descriptor_id(board: &BoardDefinition, device: &str) -> String {
 pub struct BoardProbe {
     board: Arc<BoardDefinition>,
     registry: Arc<DriverRegistry>,
+    sys: SysRoot,
 }
 
 impl BoardProbe {
@@ -235,7 +237,10 @@ impl BoardProbe {
         if let Some(poll_ms) = spec.poll_ms {
             builder = builder.property("board.poll_ms", u64::from(poll_ms));
         }
-        if let Some(BusRef::I2c(bus)) = spec.bus {
+        // A bus selector (`i2c:compatible=...`) is resolved under the sysfs
+        // root at each refresh, so a renumbered adapter is followed.
+        if let Some(bus) = spec.bus.as_ref().and_then(|b| b.i2c_bus(&self.sys)) {
+            let bus = bus?;
             let address = spec.address.or(entry.default_address).unwrap_or_default();
             builder = builder
                 .address(DeviceAddress::I2cDevice { bus, address })

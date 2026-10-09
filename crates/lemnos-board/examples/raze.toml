@@ -1,5 +1,7 @@
-# The Raze's sensors, fan and thermal zone (Atlas generates this file from
-# the board's device manifest).
+# The Raze's sensors, fan, thermal zone, status ring and USB-A power switch
+# (Atlas generates this file from the board's device manifest). Addresses and
+# buses verified by chip-id reads on the Raze (PhotonVision 2027 image,
+# kernel 7.2.9).
 format = "lemnos.board"
 schema_version = 1
 
@@ -12,7 +14,10 @@ revision = "2027"
 id = "imu"
 label = "IMU"
 driver = "bmi088"
-bus = "i2c-1"
+# On the board's i2c-gpio bus (i2c-4 on the 7.2.9 image): matched by its
+# device-tree compatible, since bus numbers follow probe order.
+# Accelerometer 0x18 (chip id 0x1E), gyroscope 0x68 (chip id 0x0F).
+bus = "i2c:compatible=i2c-gpio"
 address = 0x18
 poll_ms = 10
 config = { gyro_address = 0x68, accel_range = "6g", accel_rate = "400hz", gyro_range = "2000dps", gyro_rate = "400hz-47" }
@@ -20,6 +25,7 @@ config = { gyro_address = 0x68, accel_range = "6g", accel_rate = "400hz", gyro_r
 [[devices]]
 id = "magnetometer"
 driver = "bmm150"
+# Chip id 0x32 once power control (0x4B) bit 0 is set, which init does.
 bus = "i2c-1"
 address = 0x10
 poll_ms = 100
@@ -29,6 +35,7 @@ config = { preset = "regular", data_rate = "10hz" }
 id = "power"
 label = "Board power"
 driver = "ina238"
+# Die id 0x2381.
 bus = "i2c-1"
 address = 0x40
 poll_ms = 100
@@ -52,7 +59,7 @@ match = { type = "cpu-thermal" }
 poll_ms = 1000
 
 # SK6812 ring on GPIO 13 (the ws2812-pio overlay), 16 LEDs, logical LED 0 at
-# physical LED 5. Atlas's manifest says RGBW: check `wire` on hardware.
+# physical LED 5; `wire = "rgb"` ran correctly on the Raze.
 [[devices]]
 id = "status-ring"
 driver = "ws2812"

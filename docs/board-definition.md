@@ -39,7 +39,7 @@ id = "imu"                # required, unique within the board
 driver = "bmi088"         # required, see the driver table
 label = "IMU"             # optional, human-readable
 backend = "auto"          # auto (default) | userspace | kernel
-bus = "i2c-1"             # bus devices: "i2c-<n>" or "spi-<bus>.<cs>"
+bus = "i2c-1"             # bus devices: "i2c-<n>", "i2c:<selector>" or "spi-<bus>.<cs>"
 address = 0x18            # 7-bit I2C address; the driver's default if left out
 path = "/sys/class/hwmon/hwmon2"  # platform devices found by path
 match = { name = "pwmfan" }       # platform devices found by attributes
@@ -49,6 +49,31 @@ config = { gyro_address = 0x68, accel_range = "6g" }  # driver settings
 ```
 
 Unknown fields are errors, so a typo does not silently fall back to a default.
+
+### Finding an I2C bus without its number
+
+I2C bus numbers follow probe order and can change between kernels and overlays. Instead of
+`bus = "i2c-<n>"`, a definition can name the adapter by what it is:
+`bus = "i2c:<key>=<value>[;<key>=<value>...]"`, where every given key must match exactly one
+adapter in `/sys/bus/i2c/devices`:
+
+| Key | Matches |
+|---|---|
+| `name` | the adapter's `name` attribute (`Synopsys DesignWare I2C adapter`) |
+| `compatible` | one of the `compatible` strings of the adapter's device-tree node, or of its parent device's node (`i2c-gpio`, `snps,designware-i2c`) |
+| `of` | that node's device-tree path (`/axi/pcie@120000/rp1/i2c@74000`) |
+| `node` | the last component of that path (`i2c@74000`: a DesignWare controller at a given address) |
+
+```toml
+bus = "i2c:compatible=i2c-gpio"                          # the board's only i2c-gpio bus
+bus = "i2c:compatible=snps,designware-i2c;node=i2c@74000"
+```
+
+Hosts resolve a selector when they build the device (and the runtime's board probe at each
+refresh), so a renumbered adapter is followed; no match, or more than one, fails that
+device with `not-found` and leaves the rest of the board running. Generators should emit
+the most robust selector they know (a unique `compatible`, else the `of` path) and fall
+back to `i2c-<n>`.
 
 ### Backends
 
@@ -104,7 +129,7 @@ name = "Raze"
 [[devices]]
 id = "imu"
 driver = "bmi088"
-bus = "i2c-1"
+bus = "i2c:compatible=i2c-gpio"   # i2c-4 on the 7.2.9 image
 address = 0x18
 poll_ms = 10
 config = { gyro_address = 0x68, accel_range = "6g", accel_rate = "400hz", gyro_range = "2000dps", gyro_rate = "400hz-47" }
@@ -148,11 +173,12 @@ driver = "gpio-output"
 config = { chip = "pinctrl-rp1", line = 20, initial = true }
 ```
 
-The bus number, addresses and shunt value are the board's; check them against the
-schematic before deploying (the example's are placeholders where the Raze's are unknown to
-this repository). The ring is a 16-LED SK6812 on GPIO 13 with logical LED 0 at physical LED
-5; Atlas's manifest records it as RGBW (`rgbw = true`, matching the `ws2812-pio` overlay's
-`rgbw` parameter), so check on hardware which `wire` shows true colours.
+The buses and addresses were verified by chip-id reads on the Raze (PhotonVision 2027
+image, kernel 7.2.9): the BMI088 is on the board's i2c-gpio bus (i2c-4 there; accelerometer
+0x18, id 0x1E; gyroscope 0x68, id 0x0F), the BMM150 on i2c-1 at 0x10 (id 0x32 once power
+control 0x4B bit 0 is set) and the INA238 on i2c-1 at 0x40 (die id 0x2381). The shunt value
+is still the schematic's to confirm. The ring is a 16-LED SK6812 on GPIO 13 with logical
+LED 0 at physical LED 5; `wire = "rgb"` ran correctly on the Raze.
 
 ## Generating it
 

@@ -46,8 +46,11 @@ impl DriverEntry {
         let mut problems = Vec::new();
         match self.interface {
             Interface::I2c => {
-                if !matches!(spec.bus, Some(BusRef::I2c(_))) {
-                    problems.push(format!("{} needs `bus = \"i2c-<n>\"`", self.name));
+                if !spec.bus.as_ref().is_some_and(BusRef::is_i2c) {
+                    problems.push(format!(
+                        "{} needs `bus = \"i2c-<n>\"` or `bus = \"i2c:<key>=<value>\"`",
+                        self.name
+                    ));
                 }
                 if spec.address.is_none() && self.default_address.is_none() {
                     problems.push(format!("{} needs an `address`", self.name));
@@ -202,12 +205,19 @@ fn number(spec: &DeviceSpec, key: &str) -> Result<Option<f64>, BoardError> {
         .transpose()
 }
 
-fn i2c(spec: &DeviceSpec, entry_default: Option<u16>) -> (u32, u16) {
-    let bus = match spec.bus {
-        Some(BusRef::I2c(bus)) => bus,
-        _ => 0,
+/// The device's I2C bus number (a selector is resolved under the buses'
+/// sysfs root) and address.
+fn i2c(
+    spec: &DeviceSpec,
+    entry_default: Option<u16>,
+    buses: &dyn Buses,
+) -> Result<(u32, u16), BoardError> {
+    let bus = match spec.bus.as_ref().and_then(|b| b.i2c_bus(&buses.sys())) {
+        Some(Ok(bus)) => bus,
+        Some(Err(reason)) => return Err(BoardError::device(&spec.id, ErrorKind::NotFound, reason)),
+        None => 0,
     };
-    (bus, spec.address.or(entry_default).unwrap_or_default())
+    Ok((bus, spec.address.or(entry_default).unwrap_or_default()))
 }
 
 fn open(spec: &DeviceSpec, buses: &mut dyn Buses, bus: u32) -> Result<DynI2c, BoardError> {
@@ -398,7 +408,11 @@ const INA_KEYS: &[&str] = &[
 
 fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     use lemnos_drivers_bmi088::{AccelRange, AccelRate, Bmi088, Config, GyroRange, GyroRate};
-    let (bus, accel) = i2c(spec, Some(lemnos_drivers_bmi088::ACCEL_ADDRESS.into()));
+    let (bus, accel) = i2c(
+        spec,
+        Some(lemnos_drivers_bmi088::ACCEL_ADDRESS.into()),
+        &*buses,
+    )?;
     let gyro = integer(spec, "gyro_address")?
         .map(|a| u16::try_from(a).map_err(|_| bad(spec, "gyro_address must be a 7-bit address")))
         .transpose()?
@@ -480,7 +494,11 @@ fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice,
 
 fn build_bmm150(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     use lemnos_drivers_bmm150::{Bmm150, Config, DataRate, Preset};
-    let (bus, address) = i2c(spec, Some(lemnos_drivers_bmm150::DEFAULT_ADDRESS.into()));
+    let (bus, address) = i2c(
+        spec,
+        Some(lemnos_drivers_bmm150::DEFAULT_ADDRESS.into()),
+        &*buses,
+    )?;
     if let Some(device) = kernel_device(
         spec,
         buses,
@@ -534,7 +552,11 @@ fn build_ina(
     model: lemnos_drivers_ina2xx::Model,
 ) -> Result<BoxedDevice, BoardError> {
     use lemnos_drivers_ina2xx::{Config, Ina, Model};
-    let (bus, address) = i2c(spec, Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS.into()));
+    let (bus, address) = i2c(
+        spec,
+        Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS.into()),
+        &*buses,
+    )?;
     if let Some(device) = kernel_device(
         spec,
         buses,
@@ -596,7 +618,11 @@ fn build_vcm(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, Bo
             ));
         }
     };
-    let (bus, address) = i2c(spec, Some(lemnos_drivers_vcm::DEFAULT_ADDRESS.into()));
+    let (bus, address) = i2c(
+        spec,
+        Some(lemnos_drivers_vcm::DEFAULT_ADDRESS.into()),
+        &*buses,
+    )?;
     let address = u8::try_from(address).map_err(|_| bad(spec, "address out of range"))?;
     let bus = open(spec, buses, bus)?;
     Vcm::new(bus, address, chip.format())

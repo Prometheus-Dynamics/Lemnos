@@ -39,7 +39,11 @@
         },
         "label": { "type": "string" },
         "backend": { "enum": ["auto", "userspace", "kernel"], "default": "auto" },
-        "bus": { "type": "string", "pattern": "^(i2c-[0-9]+|spi-[0-9]+\\.[0-9]+)$" },
+        "bus": {
+          "type": "string",
+          "description": "\"i2c-<n>\", \"i2c:<key>=<value>[;<key>=<value>...]\" (keys: name, compatible, of, node) or \"spi-<bus>.<cs>\".",
+          "pattern": "^(i2c-[0-9]+|i2c:(name|compatible|of|node)=[^;]+(;(name|compatible|of|node)=[^;]+)*|spi-[0-9]+\\.[0-9]+)$"
+        },
         "address": { "type": "integer", "minimum": 0, "maximum": 127 },
         "path": { "type": "string" },
         "match": {

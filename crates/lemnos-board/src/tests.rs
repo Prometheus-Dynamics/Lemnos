@@ -39,6 +39,41 @@ impl Tree {
     }
 }
 
+impl Tree {
+    /// The Raze's I2C adapters as sysfs shows them: i2c-1 a DesignWare
+    /// controller on RP1 (its own `of_node`), i2c-4 an i2c-gpio bus (the
+    /// node on its parent platform device).
+    fn adapters(&self) -> &Self {
+        let dt = "firmware/devicetree/base";
+        let rp1 = "devices/platform/axi/1000120000.pcie/1f00074000.i2c";
+        let raw = |path: &str, bytes: &[u8]| {
+            let path = self.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        };
+        raw(
+            &format!("{dt}/axi/pcie@120000/rp1/i2c@74000/compatible"),
+            b"snps,designware-i2c\0",
+        );
+        raw(
+            &format!("{dt}/i2c@0/compatible"),
+            b"raze,imu-bus\0i2c-gpio\0",
+        );
+        self.file(
+            &format!("{rp1}/i2c-1/name"),
+            "Synopsys DesignWare I2C adapter",
+        )
+        .link(
+            &format!("{rp1}/i2c-1/of_node"),
+            &format!("{dt}/axi/pcie@120000/rp1/i2c@74000"),
+        )
+        .link("bus/i2c/devices/i2c-1", &format!("{rp1}/i2c-1"))
+        .file("devices/platform/i2c@0/i2c-4/name", "i2c@0")
+        .link("devices/platform/i2c@0/of_node", &format!("{dt}/i2c@0"))
+        .link("bus/i2c/devices/i2c-4", "devices/platform/i2c@0/i2c-4")
+    }
+}
+
 impl Drop for Tree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -122,7 +157,8 @@ fn raze() -> RazeBus {
 
 impl Buses for MockBuses {
     fn i2c(&mut self, bus: u32) -> Result<DynI2c, BoardError> {
-        if bus == 1 {
+        // One mock serves both of the Raze's buses.
+        if bus == 1 || bus == 4 {
             Ok(DynI2c::new(raze()))
         } else {
             Err(BoardError::Device {
@@ -145,7 +181,14 @@ fn raze_definition_parses_validates_and_round_trips() {
     assert_eq!(board.board.id, "raze");
     assert_eq!(board.devices.len(), 7);
     let imu = board.device("imu").unwrap();
-    assert_eq!(imu.bus, Some(BusRef::I2c(1)));
+    assert_eq!(
+        imu.bus,
+        Some(BusRef::I2cMatch(I2cSelector {
+            compatible: Some("i2c-gpio".into()),
+            ..I2cSelector::default()
+        }))
+    );
+    assert_eq!(board.device("power").unwrap().bus, Some(BusRef::I2c(1)));
     assert_eq!(imu.address, Some(0x18));
     assert_eq!(imu.config["gyro_address"], ConfigValue::Integer(0x68));
     assert_eq!(board.device("fan").unwrap().matches["name"], "pwmfan");
@@ -195,6 +238,7 @@ fn validation_reports_every_problem() {
 #[test]
 fn userspace_drivers_build_from_the_definition() {
     let tree = Tree::new();
+    tree.adapters();
     let board = BoardDefinition::from_toml_str(RAZE).unwrap();
     let registry = DriverRegistry::builtin();
     let mut buses = MockBuses {
@@ -237,6 +281,7 @@ fn userspace_drivers_build_from_the_definition() {
 #[test]
 fn kernel_drivers_win_when_bound() {
     let tree = Tree::new();
+    tree.adapters();
     let dev = "devices/platform/soc/i2c-1/1-0040";
     tree.file(&format!("{dev}/hwmon/hwmon4/name"), "ina238")
         .file(&format!("{dev}/hwmon/hwmon4/in1_input"), "12000")
@@ -300,4 +345,64 @@ fn kernel_drivers_win_when_bound() {
         .unwrap();
     zone.read(&mut buf).unwrap();
     assert_eq!(buf[0], 51_000);
+}
+
+#[test]
+fn i2c_buses_are_found_by_name_or_device_tree_node() {
+    let tree = Tree::new();
+    tree.adapters();
+    let sys = SysRoot::new(&tree.0);
+    let resolve = |text: &str| text.parse::<BusRef>().unwrap().i2c_bus(&sys).unwrap();
+    assert_eq!(resolve("i2c-7"), Ok(7));
+    assert_eq!(resolve("i2c:compatible=i2c-gpio"), Ok(4));
+    assert_eq!(resolve("i2c:compatible=snps,designware-i2c"), Ok(1));
+    assert_eq!(resolve("i2c:node=i2c@74000"), Ok(1));
+    assert_eq!(resolve("i2c:of=/axi/pcie@120000/rp1/i2c@74000"), Ok(1));
+    assert_eq!(resolve("i2c:name=Synopsys DesignWare I2C adapter"), Ok(1));
+    assert_eq!(resolve("i2c:name=i2c@0;compatible=i2c-gpio"), Ok(4));
+    assert!(resolve("i2c:name=i2c@0;compatible=snps,designware-i2c").is_err());
+    assert!(
+        resolve("i2c:compatible=nope")
+            .unwrap_err()
+            .contains("no I2C adapter")
+    );
+    // Several matches are an error, not a guess.
+    tree.file(
+        "devices/platform/i2c@0/i2c-4/name",
+        "Synopsys DesignWare I2C adapter",
+    );
+    assert!(
+        resolve("i2c:name=Synopsys DesignWare I2C adapter")
+            .unwrap_err()
+            .contains("i2c-1, i2c-4")
+    );
+
+    let bus: BusRef = "i2c:compatible=snps,designware-i2c;node=i2c@74000"
+        .parse()
+        .unwrap();
+    assert!(bus.is_i2c());
+    assert_eq!(
+        bus.to_string(),
+        "i2c:compatible=snps,designware-i2c;node=i2c@74000"
+    );
+    assert!("i2c:".parse::<BusRef>().is_err());
+    assert!("i2c:bus=1".parse::<BusRef>().is_err());
+    assert!("i2c:name".parse::<BusRef>().is_err());
+    assert_eq!("spi-0.1".parse::<BusRef>().unwrap().i2c_bus(&sys), None);
+
+    // Unresolvable buses fail the device's build, not the definition.
+    let board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let mut imu = board.device("imu").unwrap().clone();
+    imu.bus = Some("i2c:compatible=nope".parse().unwrap());
+    board.validate(&DriverRegistry::builtin()).unwrap();
+    let mut buses = MockBuses {
+        sys: tree.0.clone(),
+    };
+    assert_eq!(
+        DriverRegistry::builtin()
+            .build(&imu, &mut buses)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotFound
+    );
 }

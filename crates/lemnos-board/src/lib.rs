@@ -39,6 +39,7 @@
 
 mod buses;
 mod error;
+mod i2c_select;
 mod light;
 mod registry;
 mod schema;
@@ -50,6 +51,7 @@ mod tests;
 pub use buses::LinuxBuses;
 pub use buses::{Buses, DynI2c, DynInputPin, DynOutputPin, GpioRef};
 pub use error::BoardError;
+pub use i2c_select::I2cSelector;
 pub use light::{LIGHT_KEYS, light_defaults, strip_config};
 pub use registry::{Build, DriverEntry, DriverRegistry, Interface};
 pub use schema::{
