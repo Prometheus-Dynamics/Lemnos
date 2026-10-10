@@ -25,8 +25,8 @@ embedded-hal.workspace = true
 lemnos-core.workspace = true
 lemnos-device = { workspace = true, features = ["alloc"] }
 lemnos-hal = { workspace = true, features = ["std"] }
-lemnos-drivers-bmi088 = { workspace = true, default-features = false, features = ["reasons"] }
-lemnos-drivers-bmm150 = { workspace = true, default-features = false }
+lemnos-drivers-bmi088 = { workspace = true, default-features = false, features = ["reasons", "float"] }
+lemnos-drivers-bmm150 = { workspace = true, default-features = false, features = ["float"] }
 lemnos-drivers-ina2xx = { workspace = true, default-features = false }
 lemnos-drivers-vcm.workspace = true
 lemnos-drivers-linux.workspace = true
