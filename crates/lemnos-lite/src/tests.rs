@@ -87,10 +87,10 @@ fn poll_reads_due_sensors_and_retries_missing_ones() {
     assert_eq!(
         seen,
         [
-            (0, "imu", 6, 29_419),
-            (10, "imu", 6, 29_419),
-            (20, "imu", 6, 29_419),
-            (100, "imu", 6, 29_419)
+            (0, "imu", 12, 29_419),
+            (10, "imu", 12, 29_419),
+            (20, "imu", 12, 29_419),
+            (100, "imu", 12, 29_419)
         ]
     );
     assert_eq!(devices.status("power"), DeviceStatus::Missing);
