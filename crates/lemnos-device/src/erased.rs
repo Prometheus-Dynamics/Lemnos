@@ -11,6 +11,7 @@
 //! driver their method names overlap with [`Device`], [`Sensor`] and
 //! [`Control`].
 
+use crate::calibration::{CalibrationCommand, CalibrationStatus};
 use crate::{Control, Device, DeviceInfo, MAX_CHANNELS, Pixels, Rgbw, Sensor};
 #[cfg(feature = "reasons")]
 use core::fmt::Write;
@@ -54,6 +55,18 @@ pub trait DynSensor: DynDevice {
 
     /// See [`Sensor::select_channels`].
     fn select_channels(&mut self, mask: u64);
+
+    /// See [`Sensor::calibration_status`].
+    fn calibration_status(&self) -> Option<CalibrationStatus>;
+
+    /// See [`Sensor::calibration_command`].
+    fn calibration_command(&mut self, command: CalibrationCommand) -> Result<(), ErrorKind>;
+
+    /// See [`Sensor::calibration_words`].
+    fn calibration_words(&self, out: &mut [i32]) -> usize;
+
+    /// See [`Sensor::load_calibration`].
+    fn load_calibration(&mut self, words: &[i32]) -> Result<(), ErrorKind>;
 
     /// [`read`](Self::read), writing why it failed to `why`.
     #[cfg(feature = "reasons")]
@@ -136,6 +149,22 @@ impl<T: Sensor + ?Sized> DynSensor for T {
 
     fn select_channels(&mut self, mask: u64) {
         Sensor::select_channels(self, mask);
+    }
+
+    fn calibration_status(&self) -> Option<CalibrationStatus> {
+        Sensor::calibration_status(self)
+    }
+
+    fn calibration_command(&mut self, command: CalibrationCommand) -> Result<(), ErrorKind> {
+        Sensor::calibration_command(self, command).map_err(|error| error.kind())
+    }
+
+    fn calibration_words(&self, out: &mut [i32]) -> usize {
+        Sensor::calibration_words(self, out)
+    }
+
+    fn load_calibration(&mut self, words: &[i32]) -> Result<(), ErrorKind> {
+        Sensor::load_calibration(self, words).map_err(|error| error.kind())
     }
 
     #[cfg(feature = "reasons")]
@@ -256,6 +285,45 @@ macro_rules! erased_ops {
                 Self::Sensor(d) => d.select_channels(mask),
                 Self::Both(d) => DynSensor::select_channels(&mut **d, mask),
                 Self::Control(_) | Self::Light(_) => {}
+            }
+        }
+
+        /// See [`Sensor::calibration_status`]; `None` for a device without
+        /// one (controls and lights have none).
+        pub fn calibration_status(&self) -> Option<CalibrationStatus> {
+            match self {
+                Self::Sensor(d) => d.calibration_status(),
+                Self::Both(d) => DynSensor::calibration_status(&**d),
+                Self::Control(_) | Self::Light(_) => None,
+            }
+        }
+
+        /// See [`Sensor::calibration_command`]; `Unsupported` for a device
+        /// without a sensor.
+        pub fn calibration_command(&mut self, command: CalibrationCommand) -> Result<(), ErrorKind> {
+            match self {
+                Self::Sensor(d) => d.calibration_command(command),
+                Self::Both(d) => DynSensor::calibration_command(&mut **d, command),
+                Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
+            }
+        }
+
+        /// See [`Sensor::calibration_words`]; 0 for a device without a sensor.
+        pub fn calibration_words(&self, out: &mut [i32]) -> usize {
+            match self {
+                Self::Sensor(d) => d.calibration_words(out),
+                Self::Both(d) => DynSensor::calibration_words(&**d, out),
+                Self::Control(_) | Self::Light(_) => 0,
+            }
+        }
+
+        /// See [`Sensor::load_calibration`]; `Unsupported` for a device without
+        /// a sensor.
+        pub fn load_calibration(&mut self, words: &[i32]) -> Result<(), ErrorKind> {
+            match self {
+                Self::Sensor(d) => d.load_calibration(words),
+                Self::Both(d) => DynSensor::load_calibration(&mut **d, words),
+                Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
             }
         }
 

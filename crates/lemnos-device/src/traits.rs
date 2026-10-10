@@ -1,5 +1,6 @@
 //! The traits drivers implement.
 
+use crate::calibration::{CalibrationCommand, CalibrationStatus};
 use crate::DeviceInfo;
 use core::fmt;
 use embedded_hal::delay::DelayNs;
@@ -110,6 +111,35 @@ pub trait Sensor: Device {
     /// on the bus by itself.
     fn select_channels(&mut self, mask: u64) {
         let _ = mask;
+    }
+
+    /// The calibration this sensor reports (see [`crate::calibration`]), or
+    /// `None` for a sensor without one.
+    fn calibration_status(&self) -> Option<CalibrationStatus> {
+        None
+    }
+
+    /// Applies a calibration command. `Unsupported` by default.
+    fn calibration_command(
+        &mut self,
+        command: CalibrationCommand,
+    ) -> Result<(), DeviceError<Self::Error>> {
+        let _ = command;
+        Err(DeviceError::Unsupported)
+    }
+
+    /// Writes the applied calibration as words for a host to persist (word 0
+    /// is the layout's version); returns how many. 0 by default.
+    fn calibration_words(&self, out: &mut [i32]) -> usize {
+        let _ = out;
+        0
+    }
+
+    /// Applies calibration words written by [`calibration_words`](Self::calibration_words).
+    /// `Unsupported` by default; a driver rejects words of another version.
+    fn load_calibration(&mut self, words: &[i32]) -> Result<(), DeviceError<Self::Error>> {
+        let _ = words;
+        Err(DeviceError::Unsupported)
     }
 }
 

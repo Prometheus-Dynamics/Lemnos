@@ -27,6 +27,7 @@
 extern crate alloc;
 
 pub mod asynch;
+pub mod calibration;
 pub mod erased;
 pub mod fixed;
 pub mod gpio;
@@ -40,6 +41,10 @@ mod tests;
 
 #[cfg(feature = "alloc")]
 pub use erased::BoxedDevice;
+pub use calibration::{
+    CalibrationCommand, CalibrationPart, CalibrationRoutine, CalibrationStatus,
+    MAX_CALIBRATION_WORDS, PART_ACCEL, PART_GYRO, PART_MAG,
+};
 pub use erased::{
     DeviceRef, DynControl, DynDevice, DynLight, DynPixels, DynSensor, DynSensorControl,
 };
