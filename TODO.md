@@ -25,9 +25,12 @@ for the user-facing summary of finished work.
       ([docs/composite-devices.md](docs/composite-devices.md)), waiting for a decision.
 - [ ] IIO buffered reads (`/dev/iio:deviceN`, IRQ timestamps) in the generic kernel
       binding.
-- [ ] BMI088 FIFO batch reads: above 100 Hz a polled read can drop samples (the chip
-      keeps them in its FIFO); read the FIFO in batches and stamp each sample from the
-      output data rate. Not started; a 10 ms IMU subscription holds its rate without it.
+- [x] BMI088 FIFO batch reads (opt-in, `fifo = true`): `lemnos-drivers-bmi088::fifo`, one
+      batch per drain, samples stamped from the output rate. Not a win on the installed
+      board (100 Hz accelerometer, 2 kHz gyroscope defaults: 87 % of a core at 100 Hz vs
+      36 % polled); needs matched output rates and a hardware I2C pair for 200 Hz and up.
+- [ ] Board: the IMU's output rate (`accel_rate`, `gyro_rate`) is the limit above 100 Hz;
+      Atlas to set it for the rate the consumers need, and to move the IMU off i2c-gpio.
 - [ ] Measure the scheduler on the CM5 (`tests/schedule.rs` runs on the host with a mock
       bus): the IMU at 100 Hz beside the real power monitor and magnetometer on the board's
       buses, with the reads' real durations.

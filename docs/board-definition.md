@@ -43,7 +43,8 @@ bus = "i2c-1"             # bus devices: "i2c-<n>", "i2c:<selector>" or "spi-<bu
 address = 0x18            # 7-bit I2C address; the driver's default if left out
 path = "/sys/class/hwmon/hwmon2"  # platform devices found by path
 match = { name = "pwmfan" }       # platform devices found by attributes
-poll_ms = 10              # how often hosts read it
+poll_ms = 10              # the fastest hosts read it (the cap on a subscription)
+idle_poll_ms = 1000       # how often, with no subscriber (0: never; IMU-class: never by default)
 writers = ["helios"]      # clients allowed to write its controls (empty: any)
 config = { gyro_address = 0x68, accel_range = "6g" }  # driver settings
 ```

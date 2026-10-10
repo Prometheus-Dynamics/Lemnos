@@ -438,6 +438,30 @@ During a USB flash the board runs Raspberry Pi's mass-storage-gadget boot image
 RP1's M3 cores), reporting the bytes written over the USB mass-storage path. That is a later
 option; it is not built.
 
+## Sensor reads
+
+Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
+
+- **Rate.** A sensor is read as fast as someone needs. With subscribers, at the fastest
+  subscription's period, never faster than `poll_ms` (the cap: a 500 ms subscriber gets
+  500 ms, not the cap). With none, at `idle_poll_ms`; left out, that is `poll_ms`, except
+  for IMU-class devices, which are not read until a client subscribes. A one-shot `read`
+  is answered from the last reading while it is no older than `poll_ms`.
+- **Threads.** Each bus has a worker thread. A sensor's device goes to its bus's thread for
+  one read and comes back with the result: a slow transaction on one bus never delays a due
+  read on another, and a bus runs one read at a time. Fans and lights stay on the service
+  thread.
+- **Batches.** A driver with a FIFO (`fifo = true` on `bmi088`) returns every sample since
+  the last read. Each sample is stamped with its own time (the output period before the
+  read) and delivered to the subscribers due for it. Off by default: at the installed
+  board's rates (accelerometer 100 Hz, gyroscope 2000 Hz) a FIFO drain reads every gyroscope
+  frame, which costs far more bus time than polling 100 Hz. Turn it on only with output
+  rates that match what is subscribed.
+- **Bus cost.** On the Raze's bit-banged `i2c-gpio` bus the cost follows the bytes moved
+  (about 0.2 ms each): the IMU at 100 Hz costs about 36 % of a core, and each doubling of the
+  output rate doubles it. Lowering the output rate or moving the IMU to a hardware I2C pair
+  are the levers, not the scheduler.
+
 ## Backends for the Raze's sensors: kernel or userspace
 
 | | Kernel (IIO / hwmon) | Userspace (i2c-dev) |
@@ -478,10 +502,11 @@ covers, and then upstream it.
 
 ## Process model
 
-- **Single-threaded event loop.** One `ppoll(2)` loop waits on the listening socket, the
-  client sockets and the next device deadline (in microseconds). Device reads are
-  synchronous, so one thread keeps up with an IMU at 400 Hz and every other device when
-  reads are short (an I2C burst or a sysfs read, ≤ 1 ms); there is no locking, and a slow
+- **One loop, bus threads.** One `ppoll(2)` loop waits on the listening socket, the
+  client sockets, the next device deadline (in microseconds) and a wake pair that the bus
+  threads write to when a read finishes. Sensor reads run on one thread per bus
+  (see [Sensor reads](#sensor-reads)); fans and lights are read and written on the loop,
+  where a read is short (a sysfs read). The client state has no locking, and a slow
   client cannot stall reads because writes to clients are non-blocking with a bounded
   per-client queue (a client that falls behind loses old readings, never blocks the loop).
 - **Scheduling.** Each sensor reads on a grid of deadlines from its first read (no drift:
