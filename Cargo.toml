@@ -29,6 +29,7 @@ members = [
     "crates/lemnos-drivers-ina2xx",
     "crates/lemnos-drivers-bmm150",
     "crates/lemnos-drivers-bmi088",
+    "crates/lemnos-fusion",
     "crates/lemnos-drivers-linux",
     "crates/lemnos-drivers-ws2812",
     "crates/lemnos-mock",

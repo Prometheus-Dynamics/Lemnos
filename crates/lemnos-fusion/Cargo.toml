@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-fusion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std, no-alloc IMU orientation fusion (Mahony, Madgwick) and ellipsoid calibration for Lemnos"
+documentation = "https://docs.rs/lemnos-fusion"
+keywords = ["imu", "magnetometer", "calibration", "no-std", "sensor-fusion"]
+categories = ["embedded", "no-std", "science::robotics"]
+
+[lints]
+workspace = true
+
+[dependencies]
