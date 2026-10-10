@@ -76,6 +76,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- On a trial boot the ember is held until the self-test begins (the status file's `phase` turns `checking` or `failed`), bounded at 60 s, instead of a fixed 4 s; a status file without a `phase` key keeps the timed hand-over.
+- The board schema (docs/schemas/lemnos-board.schema.json) accepts `pio-i2c:sda=<gpio>,scl=<gpio>[,hz=<hertz>]` buses, which the parser already did.
 - The BMI088 FIFO is opt-in (`fifo = true`). On the Raze the installed board leaves the accelerometer at 100 Hz and the gyroscope at 2000 Hz, and a FIFO drain reads every gyroscope frame: measured at 100 Hz, the FIFO costs about 87 % of a core against 36 % for polling, and a 200 Hz request still gets 100 Hz (`docs/system-service.md`, "Sensor reads").
 - `lemnosd` reads an empty FIFO batch as no new reading: the last reading stays the latest, and a one-shot read or a subscriber then reads the device directly.
 - The `lemnosd` schedule tests (`crates/lemnosd/tests/schedule.rs`) measure spacing from the readings' sample timestamps (the scheduler's grid) rather than client arrival times, with bounds that tolerate a loaded host.

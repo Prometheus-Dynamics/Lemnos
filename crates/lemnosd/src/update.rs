@@ -19,10 +19,14 @@ pub(crate) const STAGED_MS: u64 = 5_000;
 pub(crate) const FAILED_MS: u64 = 60_000;
 /// How long the confirmed celebration is held (its look runs about 3.2 s).
 pub(crate) const CONFIRMED_MS: u64 = 3_300;
-/// On a trial boot the ember is held this long before the trial's sparkle
-/// (the self-test is not marked on the status file, so this is a timed
-/// hand-over; `LEMNOSD_TRIAL_EMBER_MS` overrides it).
+/// On a trial boot the ember is held until the self-test begins: the status
+/// file's `phase` turns `checking` (or `failed`) when the device package's
+/// confirm service starts judging the trial. A status file without a `phase`
+/// key (an older device package) gets this timed hand-over instead
+/// (`LEMNOSD_TRIAL_EMBER_MS` overrides it).
 pub(crate) const TRIAL_EMBER_MS: u64 = 4_000;
+/// The longest the ember waits for `phase` before the sparkle shows anyway.
+pub(crate) const TRIAL_EMBER_MAX_MS: u64 = 60_000;
 /// The cross-fade from the ember into the trial's sparkle.
 pub(crate) const TRIAL_CROSSFADE_MS: u32 = 1_000;
 
@@ -95,11 +99,21 @@ impl UpdateWatcher {
         // A trial boot (the status reads `trying`, or `rebooting`, when the
         // service starts) shows the ember first: the restart's look carries on
         // until the trial's self-test begins, then the sparkle fades in.
+        let phase = json.get("phase");
+        let checking = matches!(phase.and_then(|v| v.as_str()), Some("checking" | "failed"));
         if first && matches!(state.as_str(), "trying" | "rebooting") {
-            self.ember_until = Some(now_ms + self.trial_ember_ms);
+            // With a `phase` key the self-test's start ends the hold; the
+            // timer is only a bound. Without one, it is the hand-over.
+            let hold = if phase.is_some() {
+                TRIAL_EMBER_MAX_MS
+            } else {
+                self.trial_ember_ms
+            };
+            self.ember_until = Some(now_ms + hold);
         }
         if let Some(until) = self.ember_until {
-            if now_ms < until {
+            let trial = matches!(state.as_str(), "trying" | "rebooting");
+            if now_ms < until && trial && !checking {
                 self.seen = Some(key);
                 return if first {
                     Some(Some(UpdateView {
@@ -311,5 +325,48 @@ mod tests {
             }))
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+    fn set_trial_phase(path: &Path, phase: &str) {
+        std::fs::write(path, format!(r#"{{"state": "trying", "phase": {phase}}}"#)).unwrap();
+    }
+
+    #[test]
+    fn the_ember_holds_until_the_self_test_begins() {
+        let (path, _dir) = status_file("phase");
+        set_trial_phase(&path, "null");
+        let mut watcher = UpdateWatcher::new(&path);
+        assert_eq!(
+            watcher.poll(0),
+            Some(Some(UpdateView {
+                state: SystemState::Rebooting,
+                hold_ms: None
+            }))
+        );
+        // Past the old timer but before the checks: still the ember.
+        assert_eq!(watcher.poll(TRIAL_EMBER_MS + 1_000), None);
+        set_trial_phase(&path, "\"checking\"");
+        assert_eq!(
+            watcher.poll(TRIAL_EMBER_MS + 2_000),
+            Some(Some(UpdateView {
+                state: SystemState::Booting,
+                hold_ms: None
+            }))
+        );
+    }
+
+    #[test]
+    fn a_trial_without_the_checks_starting_gets_the_sparkle_at_the_bound() {
+        let (path, _dir) = status_file("phase-bound");
+        set_trial_phase(&path, "null");
+        let mut watcher = UpdateWatcher::new(&path);
+        watcher.poll(0);
+        assert_eq!(watcher.poll(TRIAL_EMBER_MAX_MS - 1), None);
+        assert_eq!(
+            watcher.poll(TRIAL_EMBER_MAX_MS),
+            Some(Some(UpdateView {
+                state: SystemState::Booting,
+                hold_ms: None
+            }))
+        );
     }
 }

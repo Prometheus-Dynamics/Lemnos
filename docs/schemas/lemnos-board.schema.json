@@ -150,7 +150,7 @@
         "bus": {
           "type": "string",
           "description": "\"i2c-<n>\", \"i2c:<key>=<value>[;<key>=<value>...]\" (keys: name, compatible, of, node) or \"spi-<bus>.<cs>\".",
-          "pattern": "^(i2c-[0-9]+|i2c:(name|compatible|of|node)=[^;]+(;(name|compatible|of|node)=[^;]+)*|spi-[0-9]+\\.[0-9]+)$"
+          "pattern": "^(i2c-[0-9]+|i2c:(name|compatible|of|node)=[^;]+(;(name|compatible|of|node)=[^;]+)*|pio-i2c:sda=[0-9]+,scl=[0-9]+(,hz=[0-9]+)?|spi-[0-9]+\\.[0-9]+)$"
         },
         "address": {
           "type": "integer",
