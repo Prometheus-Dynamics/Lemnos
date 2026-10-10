@@ -50,6 +50,7 @@ orion = [
 embedded-hal.workspace = true
 lemnos-board = { workspace = true, features = ["linux"] }
 lemnos-device = { workspace = true, features = ["alloc"] }
+lemnos-fusion = { path = "../lemnos-fusion" }
 lemnos-drivers-linux.workspace = true
 lemnos-hal = { workspace = true, features = ["std"] }
 lemnos-ipc.workspace = true

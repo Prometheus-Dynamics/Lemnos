@@ -2,7 +2,9 @@
 //! retried on a schedule, read on a schedule, with its status.
 
 use lemnos_board::{Buses, DeviceSpec, DriverRegistry};
-use lemnos_device::{BoxedDevice, DeviceClass, DeviceInfo, DeviceStatus, MAX_CHANNELS, NO_VALUE};
+use lemnos_device::{
+    BoxedDevice, CalibrationStatus, DeviceClass, DeviceInfo, DeviceStatus, MAX_CHANNELS, NO_VALUE,
+};
 use lemnos_drivers_linux::{FanRestore, RestoreKind};
 use lemnos_hal::{ErrorKind, HalError};
 use lemnos_ipc::{ChannelDesc, ControlDesc, DeviceDesc};
@@ -86,6 +88,9 @@ pub(crate) enum Placement {
     Inline,
     /// Anything else (lights, and devices that are not sensors).
     Other,
+    /// The fusion orientation: no device of its own. Its values come from the
+    /// IMU and magnetometer reads (see `fusion.rs`).
+    Composite,
 }
 
 impl Placement {
@@ -147,6 +152,17 @@ pub(crate) struct Slot {
     /// Controls clients changed, who changed them last, and the value from
     /// before the first change.
     pub overrides: Vec<Override>,
+    /// Why the device's calibration file was not used (empty when it was,
+    /// or there is none). Shown with the device's reason.
+    pub calibration_note: String,
+    /// The calibration revision last saved (or loaded): the device is saved
+    /// when its revision differs from this.
+    pub calibration_saved: Option<u32>,
+    /// When the calibration was last saved (boot clock, milliseconds).
+    pub calibration_saved_ms: Option<u64>,
+    /// The calibration status as of the last time the device was here
+    /// (a status request is answered from it while a read holds the device).
+    pub calibration_cache: Option<CalibrationStatus>,
 }
 
 /// A control a client changed.
@@ -190,6 +206,10 @@ impl Slot {
             restore: None,
             overriding: false,
             overrides: Vec::new(),
+            calibration_note: String::new(),
+            calibration_saved: None,
+            calibration_saved_ms: None,
+            calibration_cache: None,
         }
     }
 
@@ -201,7 +221,12 @@ impl Slot {
     /// subscription, and the age beyond which a one-shot read is not served
     /// from the last reading.
     pub fn cap_ms(&self) -> u32 {
-        self.spec.poll_ms.unwrap_or(DEFAULT_POLL_MS).max(1)
+        let default = if self.spec.driver == crate::fusion::DRIVER {
+            crate::fusion::DEFAULT_POLL_MS
+        } else {
+            DEFAULT_POLL_MS
+        };
+        self.spec.poll_ms.unwrap_or(default).max(1)
     }
 
     /// How often the sensor is read while nobody subscribes: `idle_poll_ms`
@@ -236,7 +261,8 @@ impl Slot {
         self.period_ms().map(|ms| u64::from(ms) * 1000)
     }
 
-    /// Whether the device is a sensor, read by a worker or inline.
+    /// Whether the device produces readings: a sensor, read by a worker or
+    /// inline, or the fusion orientation (fed by the IMU's reads).
     pub fn is_sensor(&self) -> bool {
         self.present && self.placement != Placement::Other
     }
@@ -458,7 +484,11 @@ impl Slot {
             class: info.map_or(lemnos_device::DeviceClass::Other, |i| i.class),
             model: info.map_or_else(|| self.spec.driver.clone(), |i| i.model.to_string()),
             status: self.status,
-            reason: self.reason.clone(),
+            reason: if self.reason.is_empty() {
+                self.calibration_note.clone()
+            } else {
+                self.reason.clone()
+            },
             channels: info.map_or_else(Vec::new, |i| {
                 i.channels
                     .iter()

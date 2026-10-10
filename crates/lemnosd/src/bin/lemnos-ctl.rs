@@ -20,6 +20,9 @@
 //!   led show --spec '<TOML body>' | --file PATH [--name N] | --json '<JSON body>'
 //!                                                     a look given in full, until replaced
 //!   looks list | show <name> | reload | save <name> (--spec|--file|--json)
+//!   calibration show|status|reset|stop|apply|discard <device>
+//!   calibration start <device> <accel-six|mag-rotate|gyro-hold>
+//!                                                     an IMU's or magnetometer's calibration
 //!   led system <updating [0..1] [--phase P]|booting|rebooting|update-failed|rolled-back|confirmed>
 //!   led locate [--seconds N]
 //!   led off
@@ -67,6 +70,8 @@ use lemnos_ipc::{
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[path = "../ctl_calibration.rs"]
+mod calibration_ctl;
 #[path = "../ctl_raw.rs"]
 mod raw;
 use std::time::Duration;
@@ -131,7 +136,7 @@ fn main() -> ExitCode {
     let options = ClientOptions::new(&socket, client).priority(priority);
     let Some(command) = args.next() else {
         return fail(
-            "no command (list, read, watch, set, get, restore, led, light, looks, power, gpio, pwm, i2c, spi, fan, validate)",
+            "no command (list, read, watch, set, get, restore, led, light, looks, power, calibration, gpio, pwm, i2c, spi, fan, validate)",
         );
     };
     match command.as_str() {
@@ -146,6 +151,7 @@ fn main() -> ExitCode {
         "light" => light(args, options),
         "power" => power(args, options),
         "looks" => looks_command(args, options),
+        "calibration" => calibration_ctl::calibration(args, options),
         _ => devices(&command, args, options),
     }
 }

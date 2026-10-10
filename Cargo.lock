@@ -715,6 +715,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-device",
  "lemnos-drivers-linux",
+ "lemnos-fusion",
  "lemnos-hal",
  "lemnos-ipc",
  "lemnos-light",

@@ -1,8 +1,10 @@
 //! The service: one thread, one `poll` loop over the socket, the clients and
 //! the next device deadline.
 
+use crate::calibration;
 use crate::clients::Client;
 use crate::devices::{Placement, Slot, Subscription, WHOLE_DEVICE, channel_mask};
+use crate::fusion::{self, Fusion};
 use crate::light::{FrameWatch, Light, LightIntent, MAX_LEDS, next_frame_due};
 use crate::looks::LookTable;
 use crate::notify::Notifier;
@@ -11,7 +13,7 @@ use crate::state;
 use crate::update::UpdateWatcher;
 use crate::workers::{Done, Job, Workers};
 use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
-use lemnos_device::{DeviceClass, DeviceStatus};
+use lemnos_device::{BoxedDevice, DeviceClass, DeviceStatus};
 use lemnos_hal::ErrorKind;
 use lemnos_ipc::{
     Event, LedShow, LightFrame, LightInfo, LooksOp, Message, RawReading, Refusal, Request, VERSION,
@@ -41,6 +43,11 @@ fn may_change_looks(client: &str) -> bool {
 
 /// The fastest a light's frames are watched (`Request::WatchFrames`).
 const MAX_WATCH_FPS: u16 = 60;
+/// How often calibration is checked for saves (a save waits for its minute).
+const CALIBRATION_POLL_MS: u64 = 1_000;
+/// How long before the fusion device (whose IMU or magnetometer is missing or
+/// not calibrated yet) is tried again.
+const FUSION_RETRY_MS: u64 = 1_000;
 /// The reboot ember's fade on shutdown, and the most time a stop may spend
 /// on it.
 const SHUTDOWN_FADE_MS: u32 = 1_200;
@@ -67,6 +74,9 @@ pub struct ServiceConfig {
     /// The directory of saved settings (`LEMNOSD_STATE_DIR`); `None` keeps
     /// none (a power switch's `persist` is then ignored).
     pub state_dir: Option<PathBuf>,
+    /// The directory the devices' calibrations are saved in (see
+    /// `calibration.rs`). Defaults to `LEMNOSD_CALIBRATION_DIR`.
+    pub calibration_dir: PathBuf,
 }
 
 impl ServiceConfig {
@@ -80,6 +90,7 @@ impl ServiceConfig {
             looks_dir: None,
             looks_override_dir: None,
             state_dir: None,
+            calibration_dir: calibration::default_dir(),
         }
     }
 }
@@ -120,6 +131,12 @@ impl embedded_hal::delay::DelayNs for SleepDelay {
 #[path = "service_raw.rs"]
 mod service_raw;
 
+#[path = "service_fusion.rs"]
+mod service_fusion;
+
+#[path = "service_calibration.rs"]
+mod service_calibration;
+
 pub struct Service {
     board: String,
     /// The whole definition (lines, PWM channels, raw policy).
@@ -151,6 +168,10 @@ pub struct Service {
     workers: Workers,
     /// Where settings persist (`None`: nowhere).
     state_dir: Option<PathBuf>,
+    /// The orientation fusion devices built so far (see `fusion.rs`).
+    fusions: Vec<Fusion>,
+    calibration_dir: PathBuf,
+    next_calibration_ms: u64,
 }
 
 impl Service {
@@ -208,6 +229,9 @@ impl Service {
             next_looks_ms: 0,
             workers: Workers::new()?,
             state_dir: config.state_dir.clone(),
+            fusions: Vec::new(),
+            calibration_dir: config.calibration_dir,
+            next_calibration_ms: 0,
         };
         service.build_devices(now_ms);
         Ok(service)
@@ -276,10 +300,18 @@ impl Service {
     fn build_devices(&mut self, now_ms: u64) {
         let fans_before = self.slots.iter().filter(|s| s.restore.is_some()).count();
         for index in 0..self.slots.len() {
+            if self.slots[index].spec.driver == fusion::DRIVER {
+                self.build_fusion(index, now_ms);
+                continue;
+            }
+            let was_present = self.slots[index].present;
             let changed =
                 self.slots[index].build(&self.registry, &mut *self.buses, &mut SleepDelay, now_ms);
             if let Some(status) = changed {
                 self.status_event(index, status);
+            }
+            if !was_present && self.slots[index].present {
+                calibration::restore(&mut self.slots[index], &self.calibration_dir);
             }
             // A sensor on a bus is read by that bus's thread.
             if self.slots[index].placement == Placement::Worker && self.slots[index].lane.is_none()
@@ -316,16 +348,7 @@ impl Service {
         if self.slots.iter().filter(|s| s.restore.is_some()).count() != fans_before {
             self.save_fan_state();
         }
-    }
-
-    /// Writes the fans' hand-back plans for the stop helper.
-    // The service logs to stderr (the journal).
-    #[allow(clippy::print_stderr)]
-    fn save_fan_state(&self) {
-        let path = crate::fans::fan_state_path(&self.socket);
-        if let Err(error) = crate::fans::write_fan_state(&path, &self.fan_restore_targets()) {
-            eprintln!("lemnosd: {}: {error}", path.display());
-        }
+        self.sync_fusion();
     }
 
     fn reading(&self, index: usize) -> Message {
@@ -371,6 +394,8 @@ impl Service {
         }
         let read_us = self.slots[index].read_us;
         if read_us != was_read {
+            let row = self.slots[index].values;
+            self.feed_fusion(index, &[row], read_us, 0);
             let now_us = self.now_us();
             self.deliver(index, read_us, now_us);
         }
@@ -433,6 +458,10 @@ impl Service {
         let slot = &mut self.slots[index];
         slot.busy = false;
         slot.device = Some(done.device);
+        slot.calibration_cache = slot
+            .device
+            .as_ref()
+            .and_then(BoxedDevice::calibration_status);
         if count > 0 {
             slot.values = done.samples[count - 1];
         }
@@ -471,6 +500,7 @@ impl Service {
         }
         if count > 0 {
             self.deliver_batch(index, &done.samples[..count], done.started_us, period_us);
+            self.feed_fusion(index, &done.samples[..count], done.started_us, period_us);
         }
         // Nothing new in the buffer, but a one-shot reader or a subscriber is
         // owed a reading: read the device now, on this thread.
@@ -483,6 +513,8 @@ impl Service {
             ok = self.slots[index].fresh;
             if ok {
                 let read_us = self.slots[index].read_us;
+                let row = self.slots[index].values;
+                self.feed_fusion(index, &[row], read_us, 0);
                 self.deliver(index, read_us, now_us);
             }
         }
@@ -1061,6 +1093,11 @@ impl Service {
                         {
                             self.status_event(index, status);
                         }
+                        if stale && self.slots[index].fresh {
+                            let (read_us, row) =
+                                (self.slots[index].read_us, self.slots[index].values);
+                            self.feed_fusion(index, &[row], read_us, 0);
+                        }
                         if self.slots[index].fresh {
                             self.reading(index)
                         } else {
@@ -1220,6 +1257,27 @@ impl Service {
                     id,
                     result: result.map(f64::from),
                 });
+            }
+            Request::Calibration {
+                id,
+                device,
+                command,
+            } => {
+                let result = self.calibration(ci, &device, command);
+                self.clients[ci].send(&Message::Reply {
+                    id,
+                    result: result.map(|()| 0.0),
+                });
+            }
+            Request::CalibrationStatus { id, device } => {
+                let message = match self.calibration_status(&device) {
+                    Ok(status) => Message::CalibrationStatus { id, device, status },
+                    Err(refusal) => Message::Reply {
+                        id,
+                        result: Err(refusal),
+                    },
+                };
+                self.clients[ci].send(&message);
             }
             Request::Looks { id, op } => {
                 // Preset changes and deletions are Atlas's, Orion's or an
@@ -1451,6 +1509,7 @@ impl Service {
         self.poll_devices();
         self.poll_update(now);
         self.poll_looks(now);
+        self.poll_calibration(now);
         self.render_lights(now);
         self.send_frames(now);
         self.send_edges();
@@ -1516,13 +1575,15 @@ impl Service {
             }
             self.clients[ci].flush();
         }
-        // A new subscription may be due now.
+        // A new subscription may be due now (and the fusion's inputs follow it).
+        self.sync_fusion();
         self.poll_devices();
         // A request may have changed a light: render without waiting.
         self.render_lights(self.now_ms());
         self.send_frames(self.now_ms());
         self.send_edges();
         self.drop_closed();
+        self.sync_fusion();
         Ok(extra_ready)
     }
 
@@ -1575,6 +1636,10 @@ impl Service {
     pub fn shutdown(&mut self, rebooting: bool) {
         self.notifier.stopping();
         self.drain_reads();
+        let now = self.now_ms();
+        for slot in self.slots.iter_mut() {
+            calibration::persist(slot, &self.calibration_dir, now, false);
+        }
         self.raw.release_all();
         for slot in &mut self.slots {
             slot.restore();

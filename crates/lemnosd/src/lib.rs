@@ -14,9 +14,11 @@
 
 #![forbid(unsafe_code)]
 
+mod calibration;
 mod clients;
 mod devices;
 pub mod fans;
+mod fusion;
 mod light;
 pub mod looks;
 #[cfg(feature = "mock")]
