@@ -77,8 +77,9 @@ fn subscribe_says_what_it_granted_and_why_it_refused() {
 #[test]
 fn the_granted_period_is_at_least_the_device_read_time() {
     // Each read is two transactions of 8 ms: no faster than 16 ms. The
-    // latency is set once the device is up (its init runs on the loop), and
-    // the board polls the device, so the service has measured it by then.
+    // latency is set once the device is up (its init runs on the loop). An
+    // idle IMU is not read, so the first subscription makes the service read
+    // it and measure the read; the grant after that reflects the measurement.
     let service = start();
     service
         .hardware()
@@ -88,6 +89,8 @@ fn the_granted_period_is_at_least_the_device_read_time() {
     let mut client = ClientOptions::new(service.socket(), "viewer")
         .devices()
         .unwrap();
+    client.subscribe("slow", 1).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
     let granted = client.subscribe("slow", 1).unwrap();
     assert!((16..=20).contains(&granted), "{granted}");
     // A period longer than the read time is granted as asked.

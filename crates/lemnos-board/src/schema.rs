@@ -251,9 +251,15 @@ pub struct DeviceSpec {
     /// `type = "cpu-thermal"`).
     #[serde(default, rename = "match", skip_serializing_if = "BTreeMap::is_empty")]
     pub matches: BTreeMap<String, String>,
-    /// How often hosts read it, in milliseconds.
+    /// The fastest hosts read it, in milliseconds: the cap on any
+    /// subscription's rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_ms: Option<u32>,
+    /// How often hosts read it while no client subscribes, in milliseconds
+    /// (0: not at all). Left out: `poll_ms`, except for IMU-class devices,
+    /// which are not read until someone subscribes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_poll_ms: Option<u32>,
     /// Clients allowed to write its controls (hosts with a write policy,
     /// such as `lemnosd`); empty means any client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -282,6 +288,7 @@ impl DeviceSpec {
             path: None,
             matches: BTreeMap::new(),
             poll_ms: None,
+            idle_poll_ms: None,
             writers: Vec::new(),
             config: BTreeMap::new(),
             raw: Vec::new(),

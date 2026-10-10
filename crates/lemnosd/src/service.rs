@@ -286,7 +286,8 @@ impl Service {
                     self.due.push(Due {
                         index,
                         deadline_us: slot.next_read_us,
-                        period_us: slot.period_us(),
+                        // Never due when the sensor is not read.
+                        period_us: slot.period_us().unwrap_or(u64::MAX),
                         cost_us: slot.read_cost_us,
                     });
                 }
@@ -352,7 +353,8 @@ impl Service {
         // Read on the new schedule from now.
         slot.next_read_us = slot.next_read_us.min(now_us);
         let read_ms = u32::try_from(slot.read_cost_us.div_ceil(1000)).unwrap_or(u32::MAX);
-        Ok(period_ms.max(read_ms))
+        // The device is never read faster than its cap or one read takes.
+        Ok(period_ms.max(slot.cap_ms()).max(read_ms))
     }
 
     fn poll_update(&mut self, now_ms: u64) {
@@ -501,7 +503,14 @@ impl Service {
                         result: Err(Refusal::UnknownDevice),
                     },
                     Some(index) => {
-                        if !self.slots[index].fresh
+                        // A one-shot read is served from the last reading
+                        // while it is no older than the device's cap.
+                        let now_us = self.now_us();
+                        let slot = &self.slots[index];
+                        let stale = !slot.fresh
+                            || now_us.saturating_sub(slot.read_us)
+                                >= u64::from(slot.cap_ms()) * 1000;
+                        if stale
                             && self.slots[index].is_sensor()
                             && let Some(status) = self.slots[index].read()
                         {

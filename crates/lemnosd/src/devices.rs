@@ -2,7 +2,7 @@
 //! retried on a schedule, read on a schedule, with its status.
 
 use lemnos_board::{Buses, DeviceSpec, DriverRegistry};
-use lemnos_device::{BoxedDevice, DeviceInfo, DeviceStatus, MAX_CHANNELS, NO_VALUE};
+use lemnos_device::{BoxedDevice, DeviceClass, DeviceInfo, DeviceStatus, MAX_CHANNELS, NO_VALUE};
 use lemnos_drivers_linux::{FanRestore, RestoreKind};
 use lemnos_hal::{ErrorKind, HalError};
 use lemnos_ipc::{ChannelDesc, ControlDesc, DeviceDesc};
@@ -13,7 +13,7 @@ use crate::schedule::advance;
 /// The shortest and longest wait before rebuilding a device that failed.
 const RETRY_MIN_MS: u64 = 1_000;
 const RETRY_MAX_MS: u64 = 30_000;
-/// How often a sensor is read when nothing asks for it more often.
+/// `poll_ms` when the board leaves it out.
 const DEFAULT_POLL_MS: u32 = 1_000;
 
 /// A client's subscription to a device. Deadlines are microseconds on the
@@ -97,21 +97,38 @@ impl Slot {
         &self.spec.id
     }
 
-    /// How often to read: the fastest subscription, else the board's
-    /// `poll_ms`.
-    pub fn period_ms(&self) -> u32 {
-        let board = self.spec.poll_ms.unwrap_or(DEFAULT_POLL_MS).max(1);
-        self.subscriptions
-            .iter()
-            .map(|s| s.period_ms)
-            .min()
-            .map_or(board, |fastest| fastest.min(board))
-            .max(1)
+    /// The fastest the sensor is read (`poll_ms`): the cap on any
+    /// subscription, and the age beyond which a one-shot read is not served
+    /// from the last reading.
+    pub fn cap_ms(&self) -> u32 {
+        self.spec.poll_ms.unwrap_or(DEFAULT_POLL_MS).max(1)
+    }
+
+    /// How often the sensor is read while nobody subscribes: `idle_poll_ms`
+    /// when set (0 means never). Without it, the cap, except for IMU-class
+    /// devices, which are not read until someone subscribes. `None`: never.
+    pub fn idle_ms(&self) -> Option<u32> {
+        match self.spec.idle_poll_ms {
+            Some(0) => None,
+            Some(ms) => Some(ms),
+            None if self.info.is_some_and(|i| i.class == DeviceClass::Imu) => None,
+            None => Some(self.cap_ms()),
+        }
+    }
+
+    /// The read period now: the fastest subscription, never faster than the
+    /// cap (a subscriber asking for 500 ms gets 500 ms, not the cap), else the
+    /// idle rate. `None`: the sensor is not read.
+    pub fn period_ms(&self) -> Option<u32> {
+        match self.subscriptions.iter().map(|s| s.period_ms).min() {
+            Some(fastest) => Some(fastest.max(self.cap_ms())),
+            None => self.idle_ms(),
+        }
     }
 
     /// The read period in microseconds (see [`period_ms`](Self::period_ms)).
-    pub fn period_us(&self) -> u64 {
-        u64::from(self.period_ms()) * 1000
+    pub fn period_us(&self) -> Option<u64> {
+        self.period_ms().map(|ms| u64::from(ms) * 1000)
     }
 
     pub fn is_sensor(&self) -> bool {
@@ -200,7 +217,10 @@ impl Slot {
     /// status change.
     pub fn read_scheduled(&mut self) -> Option<DeviceStatus> {
         let status = self.read();
-        self.next_read_us = advance(self.next_read_us, self.period_us(), boottime_us());
+        self.next_read_us = match self.period_us() {
+            Some(period_us) => advance(self.next_read_us, period_us, boottime_us()),
+            None => u64::MAX,
+        };
         status
     }
 
@@ -394,4 +414,60 @@ fn fan_restore_plan(spec: &DeviceSpec, buses: &mut dyn Buses) -> Option<FanResto
     let fan = crate::fans::find_fan(spec, &sys)?;
     fan.restore_plan(&sys.thermal(), crate::fans::automatic_mode(spec))
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(poll_ms: Option<u32>, idle_poll_ms: Option<u32>) -> Slot {
+        let mut spec = DeviceSpec::new("s", "bmi088");
+        spec.poll_ms = poll_ms;
+        spec.idle_poll_ms = idle_poll_ms;
+        Slot::new(spec)
+    }
+
+    fn subscribe(slot: &mut Slot, client: u32, period_ms: u32) {
+        slot.subscriptions.push(Subscription {
+            client,
+            period_ms,
+            next_us: 0,
+        });
+    }
+
+    #[test]
+    fn an_unbuilt_sensor_idles_at_its_cap() {
+        // Before the device is built its class is unknown: the cap applies.
+        let slot = slot(Some(100), None);
+        assert_eq!(slot.idle_ms(), Some(100));
+        assert_eq!(slot.period_ms(), Some(100));
+    }
+
+    #[test]
+    fn idle_poll_zero_means_never() {
+        let slot = slot(Some(10), Some(0));
+        assert_eq!(slot.idle_ms(), None);
+        assert_eq!(slot.period_ms(), None);
+        assert_eq!(slot.period_us(), None);
+    }
+
+    #[test]
+    fn a_subscription_sets_the_rate_but_not_above_the_cap_or_below_its_request() {
+        let mut slot = slot(Some(10), Some(0));
+        subscribe(&mut slot, 1, 100);
+        // A 100 ms subscriber does not make the sensor read at the cap.
+        assert_eq!(slot.period_ms(), Some(100));
+        subscribe(&mut slot, 2, 2);
+        // The fastest subscription wins, but never beyond the cap.
+        assert_eq!(slot.period_ms(), Some(10));
+    }
+
+    #[test]
+    fn the_idle_rate_resumes_when_the_subscriptions_end() {
+        let mut slot = slot(Some(10), Some(1000));
+        subscribe(&mut slot, 1, 10);
+        assert_eq!(slot.period_ms(), Some(10));
+        slot.subscriptions.clear();
+        assert_eq!(slot.period_ms(), Some(1000));
+    }
 }
