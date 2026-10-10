@@ -4,6 +4,7 @@ use lemnos_bus::{BusError, BusResult, I2cControllerSession, I2cSession, SessionA
 use lemnos_core::{DeviceDescriptor, DeviceKind, I2cOperation, InterfaceKind};
 
 mod kernel;
+pub(crate) mod pio;
 mod sessions;
 mod smbus;
 

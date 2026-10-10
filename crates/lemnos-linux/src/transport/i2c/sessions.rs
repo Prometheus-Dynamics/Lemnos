@@ -33,15 +33,19 @@ impl LinuxI2cSession {
                 device_id: device.id.clone(),
             }
         })?;
-        let devnode = descriptor_devnode(device)
-            .map(str::to_owned)
-            .unwrap_or_else(|| super::resolve_devnode(paths, bus));
-        let transport = LinuxKernelI2cTransport::new(device, &devnode, address)?;
+        let transport: Box<dyn I2cTransport> = if super::pio::is_pio_bus(bus) {
+            Box::new(super::pio::device_transport(device, bus, address)?)
+        } else {
+            let devnode = descriptor_devnode(device)
+                .map(str::to_owned)
+                .unwrap_or_else(|| super::resolve_devnode(paths, bus));
+            Box::new(LinuxKernelI2cTransport::new(device, &devnode, address)?)
+        };
 
         Ok(Self {
             device: device.clone(),
             metadata: SessionMetadata::new(BACKEND_NAME, access).with_state(SessionState::Idle),
-            transport: Box::new(transport),
+            transport,
         })
     }
 
@@ -175,16 +179,20 @@ impl LinuxI2cControllerSession {
             });
         }
 
-        let devnode = descriptor_devnode(owner)
-            .map(str::to_owned)
-            .unwrap_or_else(|| paths.i2c_devnode(bus).display().to_string());
-        let transport = LinuxKernelI2cControllerTransport::new(owner, devnode);
+        let transport: Box<dyn I2cControllerTransport> = if super::pio::is_pio_bus(bus) {
+            Box::new(super::pio::controller_transport(owner, bus)?)
+        } else {
+            let devnode = descriptor_devnode(owner)
+                .map(str::to_owned)
+                .unwrap_or_else(|| paths.i2c_devnode(bus).display().to_string());
+            Box::new(LinuxKernelI2cControllerTransport::new(owner, devnode))
+        };
 
         Ok(Self {
             owner: owner.clone(),
             bus,
             metadata: SessionMetadata::new(BACKEND_NAME, access).with_state(SessionState::Idle),
-            transport: Box::new(transport),
+            transport,
         })
     }
 
