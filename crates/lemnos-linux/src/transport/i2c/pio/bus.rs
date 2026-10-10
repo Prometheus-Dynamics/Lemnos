@@ -7,7 +7,7 @@ use lemnos_linux_sys::gpio;
 use lemnos_linux_sys::rp1_pio::{self, PioDevice, SmConfig, override_value, regs};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, mpsc};
 
 /// The RP1 PIO character device.
 pub const DEFAULT_DEVNODE: &str = "/dev/pio0";
@@ -31,10 +31,15 @@ pub enum Failure {
 }
 
 /// A configured PIO I2C master on one SDA/SCL pair.
+/// A transaction's TX words and the channel its result comes back on.
+type TxJob = (Vec<u32>, mpsc::Sender<io::Result<()>>);
+
 pub struct PioBus {
     sda: u8,
     scl: u8,
-    device: PioDevice,
+    device: Arc<PioDevice>,
+    /// The TX helper's queue: one job per transaction (see `transaction`).
+    tx: mpsc::Sender<TxJob>,
     devnode: PathBuf,
     sm: u16,
     base: u16,
@@ -173,10 +178,25 @@ impl PioBus {
             let _ = device.unclaim_sms(1 << sm);
             return Err(format!("configuring the PIO I2C bus failed: {e}"));
         }
+        // One TX helper per bus, for the bus's life: a transaction hands it the
+        // TX words instead of spawning a thread (that spawn cost most of a
+        // read's CPU at 100 Hz).
+        let device = Arc::new(device);
+        let (tx, jobs) = mpsc::channel::<TxJob>();
+        let helper = Arc::clone(&device);
+        std::thread::Builder::new()
+            .name(format!("pio-i2c-tx:{sda}-{scl}"))
+            .spawn(move || {
+                for (words, reply) in jobs {
+                    let _ = reply.send(helper.xfer_to_sm(sm, &words));
+                }
+            })
+            .map_err(|e| format!("starting the PIO I2C TX helper failed: {e}"))?;
         Ok(Self {
             sda,
             scl,
             device,
+            tx,
             devnode: devnode.to_path_buf(),
             sm,
             base,
@@ -202,14 +222,15 @@ impl PioBus {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tx = protocol::encode(self.base, u16::from(self.scl), ops);
         let mut rx = vec![0u32; protocol::rx_word_count(ops)];
-        let (tx_result, rx_result) = std::thread::scope(|scope| {
-            let sender = scope.spawn(|| self.device.xfer_to_sm(self.sm, &tx));
-            let rx_result = self.device.xfer_from_sm(self.sm, &mut rx);
-            let tx_result = sender
-                .join()
-                .unwrap_or_else(|_| Err(io::Error::other("PIO TX thread panicked")));
-            (tx_result, rx_result)
-        });
+        let (reply, done) = mpsc::channel();
+        let queued = self.tx.send((tx, reply)).is_ok();
+        let rx_result = self.device.xfer_from_sm(self.sm, &mut rx);
+        let tx_result = if queued {
+            done.recv()
+                .unwrap_or_else(|_| Err(io::Error::other("PIO TX helper stopped")))
+        } else {
+            Err(io::Error::other("PIO TX helper stopped"))
+        };
         if let Err(error) = tx_result.and(rx_result) {
             self.recover();
             return Err(classify(error));
