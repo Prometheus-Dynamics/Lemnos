@@ -522,6 +522,16 @@ fn looks_round_trip_by_name_inline_and_in_text() {
             text: "[looks.\"app.saved\"]\nlayers = []\n".into(),
         },
     });
+    round_trip_message(Message::LightInfo(LightInfo {
+        device: "ring".into(),
+        count: 16,
+        offset: 5,
+        clockwise: true,
+        look: "pv.targets".into(),
+        layer: "app".into(),
+        owner: "atlas".into(),
+        look_brightness: 250,
+    }));
     round_trip_message(Message::Text {
         id: 8,
         result: Ok(String::new()),

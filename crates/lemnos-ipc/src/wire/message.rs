@@ -27,7 +27,8 @@ impl Message {
                     .u8(u8::from(info.clockwise))
                     .str(&info.look)
                     .str(&info.layer)
-                    .str(&info.owner);
+                    .str(&info.owner)
+                    .u16(info.look_brightness);
                 e.finish()
             }
             Self::CalibrationStatus { id, device, status } => {
@@ -340,6 +341,8 @@ impl Message {
                 look: d.str()?,
                 layer: d.str()?,
                 owner: d.str()?,
+                // Appended later: an older service sends none (full brightness).
+                look_brightness: if d.is_empty() { 1_000 } else { d.u16()? },
             }),
             TEXT => {
                 let id = d.u32()?;

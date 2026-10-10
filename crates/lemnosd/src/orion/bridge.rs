@@ -184,6 +184,8 @@ pub async fn run(config: Config) -> Result<(), String> {
     let pump_retry = config.retry;
     let pump_channels = config.channels.clone();
     let period_ms = u32::try_from(cadence.min_interval.as_millis()).unwrap_or(u32::MAX);
+    let watchers = Arc::new(LightWatchers::default());
+    let pump_watchers = watchers.clone();
     std::thread::spawn(move || {
         pump(
             &pump_socket,
@@ -191,6 +193,7 @@ pub async fn run(config: Config) -> Result<(), String> {
             pump_retry,
             &feed_tx,
             &pump_channels,
+            &pump_watchers,
         );
     });
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
@@ -282,6 +285,7 @@ fn pump(
     retry: Duration,
     feed: &mpsc::UnboundedSender<Feed>,
     channels: &[(String, Vec<String>)],
+    watchers: &LightWatchers,
 ) {
     loop {
         if feed.is_closed() {
@@ -299,7 +303,7 @@ fn pump(
                 continue;
             }
         };
-        if !setup(socket, &mut client, period_ms, feed, channels) {
+        if !setup(socket, &mut client, period_ms, feed, channels, watchers) {
             std::thread::sleep(retry);
             continue;
         }
@@ -317,7 +321,9 @@ fn pump(
             match client.next_event_timeout(Duration::from_millis(200)) {
                 Ok(None) => {}
                 Ok(Some(ClientEvent::Connected { reconnects })) => {
-                    if reconnects > 0 && !setup(socket, &mut client, period_ms, feed, channels) {
+                    if reconnects > 0
+                        && !setup(socket, &mut client, period_ms, feed, channels, watchers)
+                    {
                         break;
                     }
                 }
@@ -395,6 +401,7 @@ fn setup(
     period_ms: u32,
     feed: &mpsc::UnboundedSender<Feed>,
     channels: &[(String, Vec<String>)],
+    watchers: &LightWatchers,
 ) -> bool {
     let devices = match client.list() {
         Ok(devices) => devices,
@@ -442,10 +449,14 @@ fn setup(
                     value,
                 });
             }
+            // One watcher per light for the bridge's lifetime: a reconnection
+            // finds it running and keeps it (it reconnects to lemnosd itself).
             let socket = socket.to_path_buf();
             let id = device.id.clone();
             let feed = feed.clone();
-            std::thread::spawn(move || watch_light(&socket, &id, &feed));
+            watchers.ensure(&device.id, move || {
+                std::thread::spawn(move || watch_light(&socket, &id, &feed));
+            });
         }
     }
     true
@@ -475,9 +486,31 @@ fn presets_status(client: &mut DeviceClient) -> Vec<(&'static str, TypedConfigVa
     ]
 }
 
-/// Watches a light's description (its look and owner) for as long as the
-/// connection to lemnosd lasts, one frame a second at most (the frames are
-/// not used). Reconnects with `retry` between attempts.
+/// The bridge's light watchers: one per light device, started on the first
+/// connection to lemnosd and kept across reconnections. A watcher ends when
+/// the bridge stops (its feed closes).
+#[derive(Default)]
+pub struct LightWatchers {
+    running: Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl LightWatchers {
+    /// Starts a watcher for `device` through `start`, unless one is running.
+    /// Returns whether it started one.
+    pub fn ensure(&self, device: &str, start: impl FnOnce()) -> bool {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        if running.contains(device) {
+            return false;
+        }
+        running.insert(device.to_owned());
+        start();
+        true
+    }
+}
+
+/// Watches a light's description (its look, owner and brightness) for as long
+/// as the bridge runs, one frame a second at most (the frames are not used).
+/// Reconnects to lemnosd with `retry`-style pauses.
 fn watch_light(socket: &Path, device: &str, feed: &mpsc::UnboundedSender<Feed>) {
     loop {
         if feed.is_closed() {
@@ -494,22 +527,38 @@ fn watch_light(socket: &Path, device: &str, feed: &mpsc::UnboundedSender<Feed>) 
             std::thread::sleep(Duration::from_secs(1));
             continue;
         }
-        while let Ok(event) = leds.next_frame(None) {
-            let Some(ClientEvent::Data(FrameUpdate::Info(info))) = event else {
-                if matches!(event, Some(ClientEvent::Disconnected { .. })) {
-                    break;
-                }
-                continue;
+        loop {
+            if feed.is_closed() {
+                return;
+            }
+            let event = match leds.next_frame(Some(Duration::from_millis(500))) {
+                Ok(event) => event,
+                Err(_) => break,
             };
-            for (key, value) in [("light.look", info.look), ("light.owner", info.owner)] {
-                let sent = feed.send(Feed::Extra {
-                    device: device.to_owned(),
-                    key: key.to_owned(),
-                    value: TypedConfigValue::String(value),
-                });
-                if sent.is_err() {
-                    return;
+            match event {
+                None => {}
+                Some(ClientEvent::Disconnected { .. }) => break,
+                Some(ClientEvent::Data(FrameUpdate::Info(info))) => {
+                    let values = [
+                        ("light.look", TypedConfigValue::String(info.look)),
+                        ("light.owner", TypedConfigValue::String(info.owner)),
+                        (
+                            "light.brightness",
+                            TypedConfigValue::F64(f64::from(info.look_brightness) / 1000.0),
+                        ),
+                    ];
+                    for (key, value) in values {
+                        let sent = feed.send(Feed::Extra {
+                            device: device.to_owned(),
+                            key: key.to_owned(),
+                            value,
+                        });
+                        if sent.is_err() {
+                            return;
+                        }
+                    }
                 }
+                Some(_) => {}
             }
         }
         std::thread::sleep(Duration::from_secs(1));
@@ -990,5 +1039,27 @@ mod channel_tests {
             ]
         );
         assert!(parse_channels("").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::LightWatchers;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// However often the bridge reconnects, each light keeps one watcher.
+    #[test]
+    fn reconnecting_leaves_one_watcher_per_light() {
+        let watchers = LightWatchers::default();
+        let started = AtomicUsize::new(0);
+        // Five connections, each one setting up every light.
+        for _ in 0..5 {
+            for device in ["status-ring", "aux-ring"] {
+                watchers.ensure(device, || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 2);
     }
 }

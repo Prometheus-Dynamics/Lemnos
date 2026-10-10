@@ -1038,6 +1038,11 @@ impl Service {
             }
             None => (String::new(), String::new(), String::new()),
         };
+        // The brightness in thousandths, rounded from the scale of 255.
+        let look_brightness = u16::try_from(
+            (u32::from(self.lights[li].defaults.look_brightness) * 1_000 + 127) / 255,
+        )
+        .unwrap_or(1_000);
         LightInfo {
             device: self.slots[slot].id().to_string(),
             count: u16::try_from(self.lights[li].count).unwrap_or(u16::MAX),
@@ -1046,6 +1051,7 @@ impl Service {
             look,
             layer,
             owner,
+            look_brightness,
         }
     }
 

@@ -159,7 +159,7 @@ frames are not used) and from the actions above:
 | `light.owner` | the client holding the light (`lemnosd` for the service's own looks) | when it changes, and on the heartbeat |
 | `looks.preset.active` | the active preset's name | at connection, after a preset action, and on the heartbeat |
 | `looks.presets` | the preset names, comma-separated | the same |
-| `light.brightness` | the ring-wide look brightness (0 to 1) | after `light.brightness`, and on the heartbeat once set |
+| `light.brightness` | the ring-wide look brightness (0 to 1) | at connection (from the light's description), after `light.brightness`, and when it changes |
 
 A power switch's status is on its channels: `power.on` (1 on, 0 off, `F64`) and, when
 the switch has a fault input, `power.fault` (1 asserted). They publish under the
@@ -195,6 +195,4 @@ which an image imports on top of `lemnosd.toml` when it runs Orion.
 
 - Raw GPIO, PWM, I2C and SPI: direct to lemnosd only.
 - Device operations (calibrate, and similar): not yet.
-- `light.brightness` starts at no value until it is first set through the bridge (lemnosd does not
-  report the ring brightness in its description).
 - `release` is the fan hand-back; on a device that is not a fan, lemnosd's answer is passed on as the outcome.

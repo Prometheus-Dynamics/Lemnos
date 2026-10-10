@@ -559,6 +559,8 @@ pub struct LightInfo {
     pub layer: String,
     /// The client that holds it (`lemnosd` for the service's own looks).
     pub owner: String,
+    /// The ring-wide look brightness, in thousandths (`look_brightness`).
+    pub look_brightness: u16,
 }
 
 /// Splits and decodes requests from `buf`; returns the request and the bytes
