@@ -108,6 +108,17 @@ impl Light {
             LedShow::Indeterminate { color } => Show::Indeterminate {
                 color: color.map(rgbw),
             },
+            LedShow::Orbit {
+                color,
+                tail,
+                heads,
+                base,
+            } => Show::Orbit {
+                color: color.map(rgbw),
+                tail: *tail,
+                heads: *heads,
+                base: *base,
+            },
             LedShow::System(state) => Show::System(*state),
             LedShow::Locate => Show::Locate,
         };

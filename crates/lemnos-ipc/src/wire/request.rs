@@ -95,6 +95,7 @@ pub(super) fn system_encode(e: &mut Encoder, state: lemnos_light::SystemState) {
         S::Rebooting => (2, None, 0),
         S::UpdateFailed => (3, None, 0),
         S::RolledBack => (4, None, 0),
+        S::Confirmed => (5, None, 0),
     };
     e.u8(code).opt_u16(progress).u8(phase);
 }
@@ -115,6 +116,7 @@ pub(super) fn system_decode(d: &mut Decoder<'_>) -> Result<lemnos_light::SystemS
         2 => S::Rebooting,
         3 => S::UpdateFailed,
         4 => S::RolledBack,
+        5 => S::Confirmed,
         other => return Err(bad(format!("system state {other}"))),
     })
 }
@@ -221,6 +223,17 @@ impl Request {
                         system_encode(&mut e, *state);
                         &mut e
                     }
+                    LedShow::Orbit {
+                        color,
+                        tail,
+                        heads,
+                        base,
+                    } => e
+                        .u8(9)
+                        .opt_color(*color)
+                        .opt_u16(*tail)
+                        .u8(*heads)
+                        .opt_u16(*base),
                 };
                 let (easing, params) = easing_code(led.easing);
                 e.u8(effect_code(led.effect))
@@ -313,6 +326,12 @@ impl Request {
                         color: d.opt_color()?,
                     },
                     8 => LedShow::System(system_decode(&mut d)?),
+                    9 => LedShow::Orbit {
+                        color: d.opt_color()?,
+                        tail: d.opt_u16()?,
+                        heads: d.u8()?,
+                        base: d.opt_u16()?,
+                    },
                     other => return Err(bad(format!("LED show {other}"))),
                 };
                 let effect = effect_from(d.u8()?);

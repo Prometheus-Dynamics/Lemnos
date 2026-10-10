@@ -147,10 +147,32 @@ A light's look defaults (used by `lemnosd`'s LED intents; any intent can overrid
 `fade_ms`, `easing` (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`,
 `cubic-bezier(x1, y1, x2, y2)`), `status_effect` and `error_effect` (`solid`, `blink`,
 `breathe`), `locate_effect` (`breathe`, `blink`, `chase`), `breathe_period_ms`,
-`breathe_depth` (0..1), `blink_period_ms`, `blink_duty` (0..1), `spinner_period_ms`,
-`spinner_tail` (LEDs), and colours (`0xRRGGBB` or `"#rrggbb"`): `ok`, `warn`, `error`,
-`busy`, `locate`, `idle`, `progress`, `progress_background`, `updating`, `verifying`,
-`writing`, `staged`, `booting`, `rebooting`, `failed`.
+`breathe_depth` (0..1; the breathe's low point is 1 minus this), `blink_period_ms`,
+`blink_duty` (0..1), `spinner_period_ms`, `spinner_tail` (LEDs), and colours
+(`0xRRGGBB` or `"#rrggbb"`): `ok`, `warn`, `error`, `busy`, `locate`, `idle`, `progress`
+(the arc's fill), `progress_background` (the arc's track; default `101012`, a faint
+neutral white), `updating` (the update's arc), `verifying`, `writing`, `staged`,
+`booting`, `rebooting` (the reboot ember, 12% of this colour), `failed`, `confirmed` (the
+ripple after a trial boot).
+
+The system looks' own timing and shape (see `docs/system-service.md`, "System states"):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `verifying_period_ms` | `1200` | the verifying comet's turn |
+| `verifying_tail` | `7` | its tail, in LEDs (fractions allowed, `0` to `64`) |
+| `verifying_base` | `0.05` | its floor brightness, 0 to 1 |
+| `booting_period_ms` | `1800` | the trial boot's twin comets' turn |
+| `booting_tail` | `5` | their tail, LEDs |
+| `booting_base` | `0.04` | their floor brightness |
+| `staged_period_ms` | `2200` | the staged breathe's period |
+| `staged_depth` | `0.45` | its depth (down to 55%) |
+| `failed_period_ms` | `2400` | the failed or rolled-back pulse's period |
+| `failed_depth` | `0.9` | its depth (down to 10%) |
+
+Example (the Raze, `/etc/lemnos/board.toml`): `config = { count = 16, wire = "rgb",
+offset = 5, direction = "cw", gpio = 13, fade_ms = 250, easing = "ease-in-out",
+status_effect = "breathe" }`; the rest is the defaults above.
 
 Hosts can register more drivers (`DriverRegistry::register`); a `DriverEntry` names the
 config keys it accepts so validation stays strict.

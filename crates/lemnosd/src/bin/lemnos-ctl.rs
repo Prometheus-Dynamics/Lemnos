@@ -15,7 +15,8 @@
 //!   led frame <RRGGBB,RRGGBB,...>
 //!   led progress <0..1> [--color RRGGBB] [--background RRGGBB]
 //!   led spinner [--color RRGGBB]
-//!   led system <updating [0..1] [--phase P]|booting|rebooting|update-failed|rolled-back>
+//!   led orbit <RRGGBB> [--period MS] [--tail N] [--heads 1|2] [--base F]
+//!   led system <updating [0..1] [--phase P]|booting|rebooting|update-failed|rolled-back|confirmed>
 //!   led locate [--seconds N]
 //!   led off
 //!   restore <device> [control]        undo lemnos-ctl's earlier `set`s
@@ -34,6 +35,8 @@
 //!   validate <board.toml>...
 //! led options: --device ID --effect solid|blink|breathe|chase --blink
 //!   --period MS --depth 0..1 --fade MS --easing NAME --brightness 0..1 --seconds N
+//!   orbit: --period is one turn, --tail the comet's length in LEDs (fractions
+//!   allowed), --heads 1 or 2, --base the floor brightness (0..1, default 0)
 //!   --test (the test layer, over every client's status, for --seconds or 10 s;
 //!   `led off --test` clears only it)
 //! ```
@@ -231,10 +234,13 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     let color_opt = args.take("--color");
     let background = args.take("--background");
     let phase = args.take("--phase");
+    let tail = args.take("--tail").and_then(|t| t.parse::<f64>().ok());
+    let heads = args.take("--heads");
+    let base = args.take("--base").as_deref().and_then(permille);
     let test = args.flag("--test");
     let Some(what) = args.next() else {
         return fail(
-            "led: status, color, brightness, pixel, frame, progress, spinner, system, locate or off",
+            "led: status, color, brightness, pixel, frame, progress, spinner, orbit, system, locate or off",
         );
     };
     let show = match what.as_str() {
@@ -300,6 +306,27 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
         "spinner" => LedShow::Indeterminate {
             color: color_opt.as_deref().and_then(color),
         },
+        "orbit" => {
+            let Some(rgb) = args.next().as_deref().and_then(color) else {
+                return fail(
+                    "led orbit <RRGGBB> [--period MS] [--tail N] [--heads 1|2] [--base F]",
+                );
+            };
+            let heads = match heads.as_deref() {
+                None | Some("1") => 1,
+                Some("2") => 2,
+                Some(_) => return fail("led orbit: --heads is 1 or 2"),
+            };
+            if tail.is_some_and(|t| !(0.0..=64.0).contains(&t)) {
+                return fail("led orbit: --tail is a number of LEDs, 0 to 64");
+            }
+            LedShow::Orbit {
+                color: Some(rgb),
+                tail: tail.map(|t| (t * 1000.0).round() as u16),
+                heads,
+                base,
+            }
+        }
         "system" => {
             let state = match args.next().as_deref() {
                 Some("updating") => SystemState::Updating {
@@ -313,9 +340,10 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
                 Some("rebooting") => SystemState::Rebooting,
                 Some("update-failed") => SystemState::UpdateFailed,
                 Some("rolled-back") => SystemState::RolledBack,
+                Some("confirmed") => SystemState::Confirmed,
                 _ => {
                     return fail(
-                        "led system <updating [0..1]|booting|rebooting|update-failed|rolled-back>",
+                        "led system <updating [0..1]|booting|rebooting|update-failed|rolled-back|confirmed>",
                     );
                 }
             };

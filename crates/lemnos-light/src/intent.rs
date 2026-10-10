@@ -108,6 +108,9 @@ pub enum SystemState {
     UpdateFailed,
     /// A red pulse.
     RolledBack,
+    /// The new version passed its trial boot: a green ripple, once (the
+    /// host holds it for about 2.2 s, then releases the light).
+    Confirmed,
 }
 
 impl SystemState {
@@ -118,9 +121,14 @@ impl SystemState {
             Self::Rebooting => "rebooting",
             Self::UpdateFailed => "update-failed",
             Self::RolledBack => "rolled-back",
+            Self::Confirmed => "confirmed",
         }
     }
 }
+
+/// The brightness of the reboot look: the ring holds it while power is cut,
+/// so it is a static ember (12% of full, 31 of 255).
+pub const EMBER: u8 = 31;
 
 impl Layer {
     pub const fn name(self) -> &'static str {
@@ -195,20 +203,40 @@ pub struct Defaults {
     /// Gauges: the fill and the unfilled part.
     pub progress: Rgbw,
     pub progress_background: Rgbw,
-    /// Spinners (booting, an unknown amount, a chase): one turn and the
-    /// tail length in LEDs.
+    /// Spinners (a chase, `Indeterminate`, an orbit without its own
+    /// timing): one turn and the tail length in LEDs.
     pub spinner_period_ms: u32,
     pub spinner_tail: u8,
-    /// The update fill and its phases' colours (shown dimmed under the
-    /// fill, and as the spinner while the amount is unknown).
+    /// The update's progress arc (blue) and its phases' colours: the
+    /// verifying and writing (unknown amount) comets, the staged breathe.
     pub updating: Rgbw,
     pub verifying: Rgbw,
+    pub verifying_period_ms: u32,
+    /// Thousandths of an LED.
+    pub verifying_tail: u16,
+    /// Thousandths.
+    pub verifying_base: u16,
     pub writing: Rgbw,
     pub staged: Rgbw,
+    pub staged_period_ms: u32,
+    /// Breathe depth, thousandths (the staged look breathes down to 55%).
+    pub staged_depth: u16,
+    /// The trial boot (and the start-up look): two comets.
     pub booting: Rgbw,
+    pub booting_period_ms: u32,
+    /// Thousandths of an LED.
+    pub booting_tail: u16,
+    /// Thousandths.
+    pub booting_base: u16,
+    /// The reboot ember (see [`EMBER`]).
     pub rebooting: Rgbw,
     /// A failed update or rollback: pulsed.
     pub failed: Rgbw,
+    pub failed_period_ms: u32,
+    /// Breathe depth, thousandths (the failed pulse breathes down to 10%).
+    pub failed_depth: u16,
+    /// The ripple after a confirmed trial boot.
+    pub confirmed: Rgbw,
 }
 
 impl Default for Defaults {
@@ -230,17 +258,29 @@ impl Default for Defaults {
             locate: Rgbw::rgb(0x00ffff),
             locate_effect: EffectKind::Breathe,
             idle: Rgbw::OFF,
+            // A faint neutral white (16/255): the track of a gauge.
             progress: Rgbw::rgb(0x00ff40),
-            progress_background: Rgbw::OFF,
+            progress_background: Rgbw::rgb(0x101012),
             spinner_period_ms: 1_200,
             spinner_tail: 5,
-            updating: Rgbw::rgb(0x0080ff),
-            verifying: Rgbw::rgb(0x8000ff),
-            writing: Rgbw::rgb(0x0080ff),
-            staged: Rgbw::rgb(0x00ff80),
-            booting: Rgbw::rgb(0xffffff),
+            updating: Rgbw::rgb(0x2f7bff),
+            verifying: Rgbw::rgb(0x8a5cff),
+            verifying_period_ms: 1_200,
+            verifying_tail: 7_000,
+            verifying_base: 50,
+            writing: Rgbw::rgb(0x2f7bff),
+            staged: Rgbw::rgb(0x2bd47d),
+            staged_period_ms: 2_200,
+            staged_depth: 450,
+            booting: Rgbw::rgb(0xfff4e6),
+            booting_period_ms: 1_800,
+            booting_tail: 5_000,
+            booting_base: 40,
             rebooting: Rgbw::rgb(0xff8000),
-            failed: Rgbw::rgb(0xff0000),
+            failed: Rgbw::rgb(0xff3b3b),
+            failed_period_ms: 2_400,
+            failed_depth: 900,
+            confirmed: Rgbw::rgb(0x2bd47d),
         }
     }
 }
@@ -263,6 +303,15 @@ pub enum Show<const N: usize> {
     /// A spinner: progress of an unknown amount.
     Indeterminate {
         color: Option<Rgbw>,
+    },
+    /// One or two comets (`heads`, 1 or 2) with their own tail length
+    /// (thousandths of an LED), floor brightness (thousandths) and period
+    /// (the intent's `period_ms`, else the spinner's).
+    Orbit {
+        color: Option<Rgbw>,
+        tail: Option<u16>,
+        heads: u8,
+        base: Option<u16>,
     },
     System(SystemState),
     /// The board's locate look.
@@ -318,12 +367,16 @@ impl<const N: usize> Intent<N> {
             Show::Color(_)
             | Show::Frame { .. }
             | Show::Progress { .. }
-            | Show::Indeterminate { .. } => Layer::App,
+            | Show::Indeterminate { .. }
+            | Show::Orbit { .. } => Layer::App,
         }
     }
 
     /// The look and the fade into it, with `defaults` filling unset fields.
     pub fn resolve(&self, defaults: &Defaults) -> (Look<N>, Transition) {
+        // The breathe's period and depth: the board's, unless a system state
+        // has its own.
+        let mut breathe = (defaults.breathe_period_ms, defaults.breathe_depth);
         let (mut look, default_effect) = match self.show {
             Show::Status(status) => {
                 let (color, effect) = match status {
@@ -353,36 +406,85 @@ impl<const N: usize> Intent<N> {
                 self.spinner(color.unwrap_or(defaults.progress), defaults),
                 EffectKind::Solid,
             ),
+            Show::Orbit {
+                color,
+                tail,
+                heads,
+                base,
+            } => (
+                self.comet(
+                    color.unwrap_or(defaults.progress),
+                    defaults.spinner_period_ms,
+                    tail.unwrap_or(u16::from(defaults.spinner_tail) * 1000),
+                    heads,
+                    base.unwrap_or(0),
+                ),
+                EffectKind::Solid,
+            ),
             Show::System(state) => match state {
-                SystemState::Updating { progress, phase } => {
-                    let phase_color = match phase {
-                        Phase::Verifying => defaults.verifying,
-                        Phase::Writing => defaults.writing,
-                        Phase::Staged => defaults.staged,
-                        Phase::Applying => defaults.rebooting,
-                    };
-                    match progress {
-                        Some(progress) => (
-                            Look::progress(
-                                permille(progress),
-                                defaults.updating,
-                                phase_color.scaled(64),
+                SystemState::Updating {
+                    phase: Phase::Staged,
+                    ..
+                } => {
+                    breathe = (defaults.staged_period_ms, defaults.staged_depth);
+                    (Look::fill(defaults.staged), EffectKind::Breathe)
+                }
+                SystemState::Updating {
+                    progress: Some(progress),
+                    ..
+                } => (
+                    Look::progress(
+                        permille(progress),
+                        defaults.updating,
+                        defaults.progress_background,
+                    ),
+                    EffectKind::Solid,
+                ),
+                SystemState::Updating {
+                    progress: None,
+                    phase,
+                } => match phase {
+                    Phase::Verifying | Phase::Writing => {
+                        let color = if phase == Phase::Verifying {
+                            defaults.verifying
+                        } else {
+                            defaults.writing
+                        };
+                        (
+                            self.comet(
+                                color,
+                                defaults.verifying_period_ms,
+                                defaults.verifying_tail,
+                                1,
+                                defaults.verifying_base,
                             ),
                             EffectKind::Solid,
-                        ),
-                        None => (self.spinner(phase_color, defaults), EffectKind::Solid),
+                        )
                     }
-                }
-                SystemState::Booting => {
-                    (self.spinner(defaults.booting, defaults), EffectKind::Solid)
-                }
+                    Phase::Applying | Phase::Staged => (
+                        Look::fill(defaults.rebooting.scaled(EMBER)),
+                        EffectKind::Solid,
+                    ),
+                },
+                SystemState::Booting => (
+                    self.comet(
+                        defaults.booting,
+                        defaults.booting_period_ms,
+                        defaults.booting_tail,
+                        2,
+                        defaults.booting_base,
+                    ),
+                    EffectKind::Solid,
+                ),
                 SystemState::Rebooting => (
-                    self.spinner(defaults.rebooting, defaults),
+                    Look::fill(defaults.rebooting.scaled(EMBER)),
                     EffectKind::Solid,
                 ),
                 SystemState::UpdateFailed | SystemState::RolledBack => {
+                    breathe = (defaults.failed_period_ms, defaults.failed_depth);
                     (Look::fill(defaults.failed), EffectKind::Breathe)
                 }
+                SystemState::Confirmed => (Look::ripple(defaults.confirmed), EffectKind::Solid),
             },
             Show::Locate if defaults.locate_effect == EffectKind::Chase => {
                 (self.spinner(defaults.locate, defaults), EffectKind::Solid)
@@ -407,8 +509,8 @@ impl<const N: usize> Intent<N> {
                 duty: self.depth.unwrap_or(defaults.blink_duty),
             },
             EffectKind::Breathe => Effect::Breathe {
-                period_ms: self.period_ms.unwrap_or(defaults.breathe_period_ms),
-                depth: self.depth.unwrap_or(defaults.breathe_depth),
+                period_ms: self.period_ms.unwrap_or(breathe.0),
+                depth: self.depth.unwrap_or(breathe.1),
                 easing: self.easing.unwrap_or(defaults.easing),
             },
         };
@@ -420,14 +522,33 @@ impl<const N: usize> Intent<N> {
         (look, transition)
     }
 
+    /// The spinner: one comet, no floor.
     fn spinner(&self, color: Rgbw, defaults: &Defaults) -> Look<N> {
-        Look::spinner(
+        self.comet(
             color,
-            Rgbw::OFF,
-            self.period_ms.unwrap_or(defaults.spinner_period_ms),
-            defaults.spinner_tail,
+            defaults.spinner_period_ms,
+            u16::from(defaults.spinner_tail) * 1000,
+            1,
+            0,
         )
     }
+
+    /// Comets in `color`: the intent's period when it sets one, else
+    /// `period_ms`; `tail` and `base` in thousandths.
+    fn comet(&self, color: Rgbw, period_ms: u32, tail: u16, heads: u8, base: u16) -> Look<N> {
+        Look::comet(
+            color,
+            self.period_ms.unwrap_or(period_ms),
+            leds(tail),
+            heads.clamp(1, 2),
+            permille(base),
+        )
+    }
+}
+
+/// Thousandths of an LED as Q16 LEDs.
+fn leds(thousandths: u16) -> u32 {
+    (u32::from(thousandths) << 16) / 1000
 }
 
 /// Thousandths as `0..=ONE`.

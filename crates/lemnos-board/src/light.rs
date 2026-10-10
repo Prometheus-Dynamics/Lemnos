@@ -37,11 +37,22 @@ pub const LIGHT_KEYS: &[&str] = &[
     "spinner_tail",
     "updating",
     "verifying",
+    "verifying_period_ms",
+    "verifying_tail",
+    "verifying_base",
     "writing",
     "staged",
+    "staged_period_ms",
+    "staged_depth",
     "booting",
+    "booting_period_ms",
+    "booting_tail",
+    "booting_base",
     "rebooting",
     "failed",
+    "failed_period_ms",
+    "failed_depth",
+    "confirmed",
 ];
 
 fn bad(spec: &DeviceSpec, reason: impl Into<String>) -> BoardError {
@@ -94,6 +105,18 @@ fn color(spec: &DeviceSpec, key: &str) -> Result<Option<Rgbw>, BoardError> {
         value as u8,
         (value >> 24) as u8,
     )))
+}
+
+/// LEDs as thousandths: a number from 0 to 64 (`7`, `4.5`).
+fn leds(spec: &DeviceSpec, key: &str) -> Result<Option<u16>, BoardError> {
+    match spec.config.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .filter(|v| (0.0..=64.0).contains(v))
+            .map(|v| Some((v * 1000.0).round() as u16))
+            .ok_or_else(|| bad(spec, format!("{key} must be a number of LEDs, 0 to 64"))),
+    }
 }
 
 fn effect(spec: &DeviceSpec, key: &str) -> Result<Option<EffectKind>, BoardError> {
@@ -177,7 +200,37 @@ pub fn light_defaults(spec: &DeviceSpec) -> Result<Defaults, BoardError> {
     if let Some(v) = uint(spec, "spinner_tail")? {
         d.spinner_tail = u8::try_from(v).map_err(|_| bad(spec, "spinner_tail is too large"))?;
     }
-    let colors: [(&str, &mut Rgbw); 15] = [
+    if let Some(v) = uint(spec, "verifying_period_ms")? {
+        d.verifying_period_ms = v;
+    }
+    if let Some(v) = leds(spec, "verifying_tail")? {
+        d.verifying_tail = v;
+    }
+    if let Some(v) = fraction(spec, "verifying_base")? {
+        d.verifying_base = v;
+    }
+    if let Some(v) = uint(spec, "booting_period_ms")? {
+        d.booting_period_ms = v;
+    }
+    if let Some(v) = leds(spec, "booting_tail")? {
+        d.booting_tail = v;
+    }
+    if let Some(v) = fraction(spec, "booting_base")? {
+        d.booting_base = v;
+    }
+    if let Some(v) = uint(spec, "staged_period_ms")? {
+        d.staged_period_ms = v;
+    }
+    if let Some(v) = fraction(spec, "staged_depth")? {
+        d.staged_depth = v;
+    }
+    if let Some(v) = uint(spec, "failed_period_ms")? {
+        d.failed_period_ms = v;
+    }
+    if let Some(v) = fraction(spec, "failed_depth")? {
+        d.failed_depth = v;
+    }
+    let colors: [(&str, &mut Rgbw); 16] = [
         ("ok", &mut d.ok),
         ("warn", &mut d.warn),
         ("error", &mut d.error),
@@ -193,6 +246,7 @@ pub fn light_defaults(spec: &DeviceSpec) -> Result<Defaults, BoardError> {
         ("booting", &mut d.booting),
         ("rebooting", &mut d.rebooting),
         ("failed", &mut d.failed),
+        ("confirmed", &mut d.confirmed),
     ];
     for (key, slot) in colors {
         if let Some(c) = color(spec, key)? {

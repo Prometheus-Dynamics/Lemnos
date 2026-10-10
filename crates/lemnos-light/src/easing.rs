@@ -123,7 +123,7 @@ fn sine_ease(t: u32) -> u32 {
 }
 
 /// `sin(πt/2)` for `t` in `0..=ONE`.
-fn quarter_sin(t: u32) -> u32 {
+pub(crate) fn quarter_sin(t: u32) -> u32 {
     // sin(k·π/32) × 65536 for k = 0..=16.
     const TABLE: [u32; 17] = [
         0, 6424, 12785, 19024, 25080, 30893, 36410, 41576, 46341, 50660, 54491, 57798, 60547,

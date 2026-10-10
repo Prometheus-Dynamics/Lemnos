@@ -218,9 +218,11 @@ led.clear()?;                                // drop this client's intents
   connection that fails is a `Disconnected` event and is retried in the background.
 - **LED intents.** Kinds: `status(ok|warn|error|busy|off)`, `color`, `frame` (one colour per
   LED), single LEDs (`set_leds`, merged into the client's frame), `progress(fraction,
-  colour)` (a gauge filling the ring: the leading LED lit fractionally for sub-LED
-  precision, new values reached by an eased advance, optional background), `indeterminate`
-  (a spinning comet when the amount is unknown), system animations and `locate`. Each
+  colour)` (a gauge filling the ring: an arc with sub-LED precision, a faint track, a
+  bright leading LED and a slow sheen; new values reached by an eased advance, optional
+  background), `indeterminate` (a spinning comet when the amount is unknown), `orbit`
+  (one or two comets with their own colour, tail, floor and period: a searching look),
+  system animations and `locate`. Each
   request can override the light's defaults: `effect` (`solid`, hard `blink`, eased
   `breathe`/pulse, or `chase`), `period_ms` (rate), `depth`, `brightness`, `fade_ms` and
   `easing` (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`, `cubic-bezier(x1, y1,
@@ -235,7 +237,7 @@ led.clear()?;                                // drop this client's intents
   ends it). Either way the light falls back to the layers below. `clear_test` drops only
   the test intent.
 - **Arbitration.** The light shows `locate` (from anyone, timed) > system states
-  (updating, booting, rebooting, failed update) > service alerts > test > status >
+  (updating, booting, rebooting, failed update, confirmed) > service alerts > test > status >
   application colours, frames, LEDs and gauges, then the client's declared priority, then
   the most recent. Owner changes fade like any other change. A client's intents end when it clears
   them or disconnects (one-shot clients such as `lemnos-ctl` ask the service to keep them),
@@ -247,13 +249,20 @@ led.clear()?;                                // drop this client's intents
   `status_effect` and `error_effect`, `breathe_period_ms`/`breathe_depth`,
   `blink_period_ms`/`blink_duty`, `spinner_period_ms`/`spinner_tail`, `locate_effect`
   (`breathe` or `chase`), and the colours of `ok`, `warn`, `error`, `busy`, `locate`
-  (cyan), `idle`, `progress`, `updating` and its phases (`verifying`, `writing`, `staged`),
-  `booting`, `rebooting` and `failed`. Requests override them per intent.
+  (cyan), `idle`, `progress`, `progress_background` (the track), `updating` and its phases
+  (`verifying`, `writing`, `staged`), `booting`, `rebooting`, `failed` and `confirmed`, with
+  the system looks' timing (`verifying_*`, `booting_*`, `staged_*`, `failed_*`; the full
+  list is in `docs/board-definition.md`). Requests override them per intent.
 - **Rendering.** Frames are computed in `lemnosd` (`lemnos-light`, `no_std`, fixed point)
-  and written only while a fade or an effect runs, at 50 Hz; a steady light is not
-  written at all. Frames live in fixed arrays, so rendering allocates nothing. Values are
-  linear; the RP1 `ws2812-pio` kernel driver applies its gamma table (and the driver's own
-  brightness byte stays at its overlay value), so gamma is applied exactly once.
+  and written only while a fade or an effect runs, at 50 Hz (a comet, the arc's sheen and a
+  ripple always run; the device is written only when a frame differs). Frames live in fixed
+  arrays, so rendering allocates nothing. Values are linear; the RP1 `ws2812-pio` kernel
+  driver applies its gamma table (and the driver's own brightness byte stays at its
+  overlay value), so gamma is applied exactly once. `lemnos-light` adds none: the 6% track
+  and the 12% ember are chosen against that corrected output, and a board whose output has
+  no correction (the SPI encoder of `lemnos-drivers-ws2812`) would need its own curve.
+  Every change of look fades with the light's `fade_ms`/`easing` from what is on the ring
+  (no pop), including breathe to orbit.
 - **Optional Orion bridge**: `lemnos-orion`, a client of `lemnosd` that publishes devices as
   Orion resources and forwards leased control writes (feature `orion`; the contract is
   [orion.md](orion.md)).
@@ -266,10 +275,12 @@ lemnos-ctl read imu
 lemnos-ctl watch imu --period 50
 lemnos-ctl set fan duty 0.8
 lemnos-ctl led status warn --effect breathe --fade 400 --easing sine
+lemnos-ctl led orbit 00ff00 --period 1600 --tail 6 --base 0.06   # searching
 lemnos-ctl led color ff8000 --brightness 0.5
 lemnos-ctl led pixel 0 ff0000 8 0000ff
 lemnos-ctl led progress 0.4 --color 00ff40
 lemnos-ctl led system updating 0.4 --phase writing
+lemnos-ctl led system confirmed        # the trial boot passed: a green ripple, 2.2 s
 lemnos-ctl led locate --seconds 10
 lemnos-ctl led frame ff0000,00ff00,0000ff --test --seconds 5   # selftest look, over status
 lemnos-ctl led off --test             # clears only the test layer
@@ -373,13 +384,23 @@ mock server of their own.
 Built-in animations, usable by any client (`LedClient::system`, `lemnos-ctl led system`) and
 shown above application status (below `locate`):
 
-| State | Look (colours from the board definition) |
+| State | Look (colours and timing from the board definition) |
 |---|---|
-| `updating` | a progress fill in `updating`, over the phase's colour dimmed (`writing`, `staged`); a spinner in `verifying` while the amount is unknown |
-| `booting`, `rebooting` | a spinner (`booting`, `rebooting`) |
-| `update-failed`, `rolled-back` | a red pulse (`failed`, breathing) |
+| `updating` with progress | the progress arc in `updating` (blue) over the faint track (`progress_background`, 6% neutral white): the filled LEDs shade from 25% to full, the leading LED is whitened, and a slow sheen travels over the fill |
+| `updating` while the amount is unknown (`verifying`) | a purple comet (`verifying`): one head, 1.2 s a turn, 7 LEDs of tail, a 5% floor |
+| `updating`, `writing` without progress | the same comet in `writing` |
+| `updating`, `staged` | a full green breathe (`staged`): 2.2 s, down to 55% |
+| `booting` (also the start-up look), the trial boot (`trying`) | twin comets in `booting` (warm white): 1.8 s, 5 LEDs of tail each, a 4% floor |
+| `confirmed` (the trial boot passed) | a green ripple (`confirmed`): a front runs down from the top at 12 LEDs a second, then a settling glow; held 2.2 s, then the light is released |
+| `rebooting` (also the shutdown look) | a static ember: `rebooting` at 12%; the ring holds it while power is cycled |
+| `update-failed`, `rolled-back` | a red breathe (`failed`): 2.4 s, down to 10% |
 | `locate` | bright cyan, breathing (or `chase`: a comet) |
 | idle status | as the client set it |
+
+`orbit` (`LedClient::orbit`, `lemnos-ctl led orbit`) is the app's comet: `period_ms` is one
+turn, `tail` is LEDs (fractions allowed), `heads` is 1 or 2 (two comets, opposite), `base` is
+the floor brightness (0 to 1). The comet's head moves in fractions of an LED, so motion is
+smooth at any speed. Its brightness is `(1 - d/tail)^2.2` for `d` LEDs behind the head.
 
 The device package's updater drives `updating` with no changes beyond what it already does.
 The updater writes a status file (`update.json`) on every state change (`staging`,
@@ -391,15 +412,17 @@ system intent of its own. The status file's path is set only by `LEMNOSD_UPDATE_
 
 | Updater state | Light |
 |---|---|
-| `staging`, no copy progress yet | `updating`, verifying (spinner) |
-| `staging` with progress | `updating`, writing, `100 + copied × 85 / 100` thousandths (the mapping `update status` reports) |
-| `staged` | `updating`, staged, full, for 5 s |
-| `trying` (the trial boot) | `booting` |
+| `staging`, no copy progress yet | `updating`, verifying (purple comet) |
+| `staging` with progress | `updating`, writing, the arc at `100 + copied × 85 / 100` thousandths (the mapping `update status` reports) |
+| `staged` | `updating`, staged (green breathe), for 5 s |
+| `trying` (the trial boot) | `booting` (twin comets) |
+| `confirmed`, after `trying` in this service's run | `confirmed` (the ripple), for 2.2 s, then released |
 | `rolled-back`, `error` | `rolled-back` / `update-failed`, for 60 s |
-| `idle`, `confirmed` | released: the previous owner's intent fades back |
+| `idle`, `confirmed` at start-up | released: the previous owner's intent fades back. A `confirmed` found at start-up shows nothing: the ripple is for the trial boot that just passed |
 
-When the service stops while systemd is stopping the system, it leaves the `rebooting` look
-on the ring (the kernel driver keeps the last frame); otherwise it turns the ring off. With
+When the service stops while systemd is stopping the system, it fades the ring to the
+`rebooting` ember over 1.2 s and holds it (the kernel driver keeps the last frame); the fade
+is capped at 1.5 s, so a stop is never delayed longer. Otherwise it turns the ring off. With
 `LEMNOSD_BOOTING_MS` set, the ring shows `booting` from the service's start until a client
 sets a status or the time passes.
 

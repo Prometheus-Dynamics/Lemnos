@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 pub(crate) const STAGED_MS: u64 = 5_000;
 /// How long a failed update or a rollback is shown.
 pub(crate) const FAILED_MS: u64 = 60_000;
+/// How long the ripple of a confirmed trial boot is shown.
+pub(crate) const CONFIRMED_MS: u64 = 2_200;
 
 /// What the updater's state means for the light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +73,9 @@ impl UpdateWatcher {
             .map(|copied| (100 + copied.min(1000) * 85 / 100) as u16);
         let key = (state.clone(), error);
         let changed = self.seen.as_ref() != Some(&key);
+        // The state seen last poll (`None`: this is the first look).
+        let previous = self.seen.as_ref().map(|(state, _)| state.as_str());
+        let first = previous.is_none();
         let view = match state.as_str() {
             "staging" => Some(UpdateView {
                 state: match progress {
@@ -96,6 +101,12 @@ impl UpdateWatcher {
                 state: SystemState::Booting,
                 hold_ms: None,
             }),
+            // Only the trial boot's own confirmation shows the ripple: an old
+            // `confirmed` found at start-up shows nothing.
+            "confirmed" if previous == Some("trying") => Some(UpdateView {
+                state: SystemState::Confirmed,
+                hold_ms: Some(CONFIRMED_MS),
+            }),
             "rolled-back" => Some(UpdateView {
                 state: SystemState::RolledBack,
                 hold_ms: Some(FAILED_MS),
@@ -111,8 +122,84 @@ impl UpdateWatcher {
             // Progress moves within `staging`: report every poll.
             Some(view) if changed || view.hold_ms.is_none() => Some(Some(view)),
             Some(_) => None,
-            None if changed => Some(None),
+            // Not on the first look: a start-up must not clear the boot
+            // spinner the service shows until it is due.
+            None if changed && !first => Some(None),
             None => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh directory with an update status file in it.
+    fn status_file(name: &str) -> (PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("lemnosd-update-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.join("update.json"), dir)
+    }
+
+    fn set_state(path: &Path, state: &str) {
+        std::fs::write(path, format!(r#"{{"state": "{state}"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn a_trial_boot_that_is_confirmed_shows_the_ripple_once() {
+        let (path, dir) = status_file("confirm");
+        set_state(&path, "trying");
+        let mut watcher = UpdateWatcher::new(&path);
+        assert_eq!(
+            watcher.poll(),
+            Some(Some(UpdateView {
+                state: SystemState::Booting,
+                hold_ms: None,
+            }))
+        );
+        set_state(&path, "confirmed");
+        assert_eq!(
+            watcher.poll(),
+            Some(Some(UpdateView {
+                state: SystemState::Confirmed,
+                hold_ms: Some(CONFIRMED_MS),
+            }))
+        );
+        // Shown once: nothing more until the state changes again.
+        assert_eq!(watcher.poll(), None);
+        assert_eq!(watcher.poll(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_fresh_start_with_an_old_confirmation_shows_nothing() {
+        let (path, dir) = status_file("fresh");
+        set_state(&path, "confirmed");
+        let mut watcher = UpdateWatcher::new(&path);
+        assert_eq!(watcher.poll(), None);
+        assert_eq!(watcher.poll(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_confirmation_that_was_not_from_a_trial_boot_shows_nothing() {
+        let (path, dir) = status_file("idle-then-confirmed");
+        set_state(&path, "idle");
+        let mut watcher = UpdateWatcher::new(&path);
+        assert_eq!(watcher.poll(), None);
+        set_state(&path, "confirmed");
+        // Not from `trying`: no ripple, and the system layer is released.
+        assert_eq!(watcher.poll(), Some(None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_fresh_start_leaves_the_boot_spinner_alone() {
+        let (path, dir) = status_file("idle-start");
+        let mut watcher = UpdateWatcher::new(&path);
+        assert_eq!(watcher.poll(), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

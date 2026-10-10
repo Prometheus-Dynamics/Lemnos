@@ -92,6 +92,19 @@ fn requests_round_trip() {
             phase: Phase::Writing,
         }),
         LedShow::System(SystemState::RolledBack),
+        LedShow::System(SystemState::Confirmed),
+        LedShow::Orbit {
+            color: Some(0x8a5cff),
+            tail: Some(6_500),
+            heads: 2,
+            base: Some(60),
+        },
+        LedShow::Orbit {
+            color: None,
+            tail: None,
+            heads: 1,
+            base: None,
+        },
         LedShow::Locate,
     ] {
         round_trip_request(Request::Led(LedRequest::new(show)));

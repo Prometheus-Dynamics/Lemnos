@@ -78,22 +78,29 @@ pub enum Pixels<const N: usize> {
     /// One colour per LED (logical order); `len` are used, the rest are off.
     Frame { pixels: [Rgbw; N], len: usize },
     /// A gauge: the first `fraction` (`0..=ONE`) of the LEDs in `color`, the
-    /// leading LED partly lit for sub-LED precision, the rest `background`.
-    /// A new fraction is reached by an eased advance, not a cross-fade.
+    /// rest `background` (the track). A partly lit LED shades from 25%
+    /// (just lit) to full with its fill, the leading LED is whitened (a
+    /// bright head), and a slow sheen travels over the filled part. A new
+    /// fraction is reached by an eased advance, not a cross-fade.
     Progress {
         fraction: u32,
         color: Rgbw,
         background: Rgbw,
     },
-    /// A comet going round once per `period_ms`: a head in `color` and a
-    /// tail fading over `tail` LEDs, over `background`. The progress of an
-    /// unknown amount, booting, a chase.
-    Spinner {
+    /// One or two comets going round, each `period_ms` per turn (`heads`
+    /// of them, evenly spaced): a head of `color` and a tail fading over
+    /// `tail` LEDs (Q16 LEDs, so fractions move smoothly). Every LED is at
+    /// least `base` (Q16 brightness), so the ring never goes fully dark.
+    Comet {
         color: Rgbw,
-        background: Rgbw,
         period_ms: u32,
-        tail: u8,
+        tail: u32,
+        heads: u8,
+        base: u32,
     },
+    /// A ripple from the top (LED 0) down both sides, and a settling glow:
+    /// shown from the look's start, for the caller to hold it (about 2.2 s).
+    Ripple { color: Rgbw },
 }
 
 impl<const N: usize> Look<N> {
@@ -134,23 +141,39 @@ impl<const N: usize> Look<N> {
         }
     }
 
-    /// A comet going round.
-    pub const fn spinner(color: Rgbw, background: Rgbw, period_ms: u32, tail: u8) -> Self {
+    /// Comets going round: `heads` (1 or 2) of them, `tail` and `base` in
+    /// Q16 (LEDs, brightness).
+    pub const fn comet(color: Rgbw, period_ms: u32, tail: u32, heads: u8, base: u32) -> Self {
         Self {
-            pixels: Pixels::Spinner {
+            pixels: Pixels::Comet {
                 color,
-                background,
                 period_ms,
                 tail,
+                heads,
+                base,
             },
             effect: Effect::Solid,
             brightness: 255,
         }
     }
 
-    /// Whether the colours themselves move (a spinner).
+    /// The ripple from the top, with the settling glow.
+    pub const fn ripple(color: Rgbw) -> Self {
+        Self {
+            pixels: Pixels::Ripple { color },
+            effect: Effect::Solid,
+            brightness: 255,
+        }
+    }
+
+    /// Whether the colours themselves move (comets, ripples, a gauge's
+    /// sheen), so the output changes without an effect.
     pub const fn is_moving(&self) -> bool {
-        matches!(self.pixels, Pixels::Spinner { .. })
+        match self.pixels {
+            Pixels::Comet { .. } | Pixels::Ripple { .. } => true,
+            Pixels::Progress { fraction, .. } => fraction > 0,
+            Pixels::Fill(_) | Pixels::Frame { .. } => false,
+        }
     }
 
     pub const fn with_effect(mut self, effect: Effect) -> Self {
@@ -172,38 +195,18 @@ impl<const N: usize> Look<N> {
             Pixels::Frame { .. } => Rgbw::OFF,
             Pixels::Progress {
                 color, background, ..
-            } => {
-                // LEDs lit, in 1/65536 of an LED.
-                let lit = u64::from(fraction.min(ONE)) * count as u64;
-                let start = (index as u64) << 16;
-                let level = lit.saturating_sub(start).min(u64::from(ONE)) as u32;
-                blend(*background, *color, level)
-            }
-            Pixels::Spinner {
+            } => progress_led(index, count, elapsed_ms, fraction, *color, *background),
+            Pixels::Comet {
                 color,
-                background,
                 period_ms,
                 tail,
+                heads,
+                base,
             } => {
-                let period = u64::from((*period_ms).max(1));
-                // The head's position in 1/65536 of an LED.
-                let head = ((elapsed_ms % period) << 16) * count as u64 / period;
-                let at = (index as u64) << 16;
-                let span = (count as u64) << 16;
-                // How far behind the head this LED is, going round.
-                let behind = (head + span - at) % span.max(1);
-                let tail = u64::from((*tail).max(1)) << 16;
-                let level = if behind < tail {
-                    // 1 at the head, 0 at the end of the tail.
-                    (u64::from(ONE) * (tail - behind) / tail) as u32
-                } else if span - behind < u64::from(ONE) {
-                    // The LED just ahead of the head, for sub-LED motion.
-                    (u64::from(ONE) - (span - behind)) as u32
-                } else {
-                    0
-                };
-                blend(*background, *color, level)
+                let level = comet_level(index, count, elapsed_ms, *period_ms, *tail, *heads, *base);
+                scale(*color, level)
             }
+            Pixels::Ripple { color } => scale(*color, ripple_level(index, count, elapsed_ms)),
         }
     }
 }
@@ -274,6 +277,161 @@ fn blend(from: Rgbw, to: Rgbw, t: u32) -> Rgbw {
 fn scale(color: Rgbw, level: u32) -> Rgbw {
     let s = |c: u8| ((u32::from(c) * level + (ONE / 2)) >> 16) as u8;
     Rgbw::new(s(color.r), s(color.g), s(color.b), s(color.w))
+}
+
+/// `x^2.2` for `x = k/32` (Q16), the comet's tail curve.
+const POW_2_2: [u32; 33] = [
+    0, 32, 147, 359, 676, 1104, 1648, 2314, 3104, 4022, 5072, 6255, 7574, 9033, 10632, 12375,
+    14263, 16298, 18482, 20817, 23303, 25944, 28740, 31692, 34803, 38073, 41504, 45097, 48854,
+    52775, 56861, 61115, 65536,
+];
+
+/// `x^2.2` (both Q16), linear between table entries.
+fn tail_curve(x: u32) -> u32 {
+    let scaled = x.min(ONE) * 32;
+    let index = (scaled >> 16) as usize;
+    if index >= 32 {
+        return ONE;
+    }
+    let frac = u64::from(scaled & 0xffff);
+    let (a, b) = (POW_2_2[index], POW_2_2[index + 1]);
+    a + (((u64::from(b - a)) * frac) >> 16) as u32
+}
+
+/// The comets' brightness at LED `index` (Q16): for each head, `(1 - d/tail)^2.2`
+/// where `d` is how far behind the head the LED is (going round), and the
+/// brightest head wins, but never below `base`.
+fn comet_level(
+    index: usize,
+    count: usize,
+    elapsed_ms: u64,
+    period_ms: u32,
+    tail: u32,
+    heads: u8,
+    base: u32,
+) -> u32 {
+    let period = u64::from(period_ms.max(1));
+    // This turn's position in 1/65536 of a turn.
+    let phase = ((elapsed_ms % period) << 16) / period;
+    let heads = u64::from(heads.clamp(1, 2));
+    let span = (count as u64) << 16;
+    let at = (index as u64) << 16;
+    let tail = u64::from(tail.max(1));
+    let mut best = 0;
+    for h in 0..heads {
+        let turn = (phase + h * u64::from(ONE) / heads) % u64::from(ONE);
+        // A head's position in 1/65536 of an LED.
+        let head = turn * count as u64;
+        let behind = (head + span - at) % span.max(1);
+        if behind < tail {
+            let x = ONE - ((behind << 16) / tail) as u32;
+            best = best.max(tail_curve(x));
+        }
+    }
+    best.max(base)
+}
+
+/// Ripple distance from the top, in LEDs ([`Pixels::Ripple`]).
+const RIPPLE_SPEED_LEDS_PER_S: u64 = 12;
+/// The ripple's half-width, in Q16 LEDs (2.2 LEDs).
+const RIPPLE_WIDTH: u64 = 144_179;
+/// The settling glow's peak (0.15) and how long it takes to fade (1.4 s).
+const RIPPLE_GLOW: u32 = 9_830;
+const RIPPLE_GLOW_MS: u64 = 1_400;
+
+/// The ripple at LED `index` (Q16): a wave front moving down from the top
+/// (LED 0), then a glow that settles.
+fn ripple_level(index: usize, count: usize, elapsed_ms: u64) -> u32 {
+    let distance = index.min(count - index) as u64;
+    // The front, in 1/65536 of an LED.
+    let front = (elapsed_ms * RIPPLE_SPEED_LEDS_PER_S * u64::from(ONE)) / 1000;
+    let apart = (distance << 16).abs_diff(front);
+    let wave = if apart >= RIPPLE_WIDTH {
+        0
+    } else {
+        ONE - (apart * u64::from(ONE) / RIPPLE_WIDTH) as u32
+    };
+    let settled = if elapsed_ms >= RIPPLE_GLOW_MS {
+        0
+    } else {
+        ONE - (elapsed_ms * u64::from(ONE) / RIPPLE_GLOW_MS) as u32
+    };
+    let glow = ((u64::from(RIPPLE_GLOW) * u64::from(settled)) >> 16) as u32;
+    wave.max(glow)
+}
+
+/// The white a gauge's leading LED is mixed with (35%).
+const HEAD_WHITE: u32 = 22_938;
+/// The sheen's strength over the filled part (35%), and its speed (0.35
+/// turns per second).
+const SHEEN_STRENGTH: u64 = 22_938;
+const SHEEN_TURNS_PER_MS_Q16: u64 = 35 * ONE as u64 / 100_000;
+
+/// `t` mixed toward white by `amount` (Q16), in the red, green and blue
+/// (the white channel is kept).
+fn whiten(t: Rgbw, amount: u32) -> Rgbw {
+    let mix = |c: u8| (u32::from(c) + (((255 - u32::from(c)) * amount) >> 16)) as u8;
+    Rgbw::new(mix(t.r), mix(t.g), mix(t.b), t.w)
+}
+
+/// `t` with `amount` (Q16) of white added to the red, green and blue.
+fn add_white(t: Rgbw, amount: u32) -> Rgbw {
+    let add = |c: u8| (u32::from(c) + ((255 * amount) >> 16)).min(255) as u8;
+    Rgbw::new(add(t.r), add(t.g), add(t.b), t.w)
+}
+
+/// `sin(2π x)` for `x` in turns (Q16), from the quarter-wave table, as a
+/// signed Q16 value.
+fn cos_turn(x: u32) -> i64 {
+    let quarters = u64::from(x % ONE) * 4;
+    let quadrant = quarters >> 16;
+    let f = (quarters & 0xffff) as u32;
+    let s = |t: u32| i64::from(crate::easing::quarter_sin(t));
+    match quadrant {
+        0 => s(ONE - f),
+        1 => -s(f),
+        2 => -s(ONE - f),
+        _ => s(f),
+    }
+}
+
+/// The gauge's LED `index` at `elapsed_ms` with `fraction` lit: the track
+/// unfilled, else the colour shaded 25% to full along the filled part (the
+/// leading LED whitened), and the sheen.
+fn progress_led(
+    index: usize,
+    count: usize,
+    elapsed_ms: u64,
+    fraction: u32,
+    color: Rgbw,
+    track: Rgbw,
+) -> Rgbw {
+    // LEDs lit, in 1/65536 of an LED.
+    let lit = u64::from(fraction.min(ONE)) * count as u64;
+    let span = (count as u64) << 16;
+    let k = lit.saturating_sub((index as u64) << 16).min(u64::from(ONE)) as u32;
+    if k == 0 {
+        return track;
+    }
+    // The leading LED: the last one lit, while the gauge is not full.
+    let head = lit < span && index as u64 == ((lit + u64::from(ONE) - 1) >> 16) - 1;
+    let base = if head {
+        whiten(color, HEAD_WHITE)
+    } else {
+        color
+    };
+    let bright = ONE / 4 + (3 * k) / 4;
+    let shaded = scale(base, bright);
+    // A sheen of white, moving over the filled part.
+    let position = (index as u64 * u64::from(ONE)) / count as u64;
+    let phase = (elapsed_ms * SHEEN_TURNS_PER_MS_Q16) % u64::from(ONE);
+    let along = ((position + u64::from(ONE) - phase) % u64::from(ONE)) as u32;
+    let c = cos_turn(along).max(0) as u64;
+    let c2 = (c * c) >> 16;
+    let c4 = (c2 * c2) >> 16;
+    let c8 = (c4 * c4) >> 16;
+    let sheen = (((c8 * SHEEN_STRENGTH) >> 16) * u64::from(k)) >> 16;
+    add_white(shaded, sheen as u32)
 }
 
 impl<const N: usize> Animator<N> {

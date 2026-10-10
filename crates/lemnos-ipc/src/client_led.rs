@@ -75,8 +75,30 @@ impl LedClient {
         self.send(LedRequest::new(LedShow::Indeterminate { color }))
     }
 
+    /// Comets going round (see [`LedShow::Orbit`]): `color` (`None`: the
+    /// board's progress colour), `period` per turn (`None`: the board's
+    /// spinner period), `tail` in LEDs (fractions allowed), `heads` (1 or
+    /// 2) and `base`, the floor brightness (0 to 1). A searching look, say.
+    pub fn orbit(
+        &mut self,
+        color: Option<u32>,
+        period_ms: Option<u32>,
+        tail: Option<f32>,
+        heads: u8,
+        base: Option<f32>,
+    ) -> Result<(), ClientError> {
+        let mut request = LedRequest::new(LedShow::Orbit {
+            color,
+            tail: tail.map(|t| (t.clamp(0.0, 64.0) * 1000.0).round() as u16),
+            heads,
+            base: base.map(|b| (b.clamp(0.0, 1.0) * 1000.0).round() as u16),
+        });
+        request.period_ms = period_ms;
+        self.send(request)
+    }
+
     /// A built-in system animation (updating, booting, rebooting, update
-    /// failed, rolled back), above application status.
+    /// failed, rolled back, confirmed), above application status.
     pub fn system(&mut self, state: lemnos_light::SystemState) -> Result<(), ClientError> {
         self.send(LedRequest::new(LedShow::System(state)))
     }
@@ -126,7 +148,8 @@ fn layer_of(request: &LedRequest) -> u8 {
         | LedShow::Frame(_)
         | LedShow::Pixels(_)
         | LedShow::Progress { .. }
-        | LedShow::Indeterminate { .. } => 1,
+        | LedShow::Indeterminate { .. }
+        | LedShow::Orbit { .. } => 1,
         LedShow::Status(_) => 2,
         LedShow::System(_) => 3,
         LedShow::Locate => 4,

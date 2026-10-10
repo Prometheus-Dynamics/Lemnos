@@ -24,6 +24,10 @@ use std::time::Duration;
 
 /// How often the updater's status files are read.
 const UPDATE_POLL_MS: u64 = 500;
+/// The reboot ember's fade on shutdown, and the most time a stop may spend
+/// on it.
+const SHUTDOWN_FADE_MS: u32 = 1_200;
+const SHUTDOWN_CAP_MS: u64 = 1_500;
 
 /// What the service needs.
 pub struct ServiceConfig {
@@ -786,34 +790,56 @@ impl Service {
     }
 
     /// Stops: fans back to the kernel, the light off (or, when the system
-    /// is restarting, the rebooting look), the socket removed.
+    /// is restarting, the rebooting ember, faded to over about 1.2 s), the
+    /// socket removed.
     pub fn shutdown(&mut self, rebooting: bool) {
         self.notifier.stopping();
         self.raw.release_all();
         for slot in &mut self.slots {
             slot.restore();
         }
-        let now = self.now_ms();
-        for li in 0..self.lights.len() {
-            let light = &mut self.lights[li];
-            let slot = light.slot;
-            let frame: [lemnos_light::Rgbw; MAX_LEDS] = if rebooting {
-                let (look, _) =
-                    LightIntent::new(Show::System(SystemState::Rebooting)).resolve(&light.defaults);
-                light.animator.set(look, lemnos_light::Transition::CUT, now);
-                let mut frame = [lemnos_light::Rgbw::OFF; MAX_LEDS];
-                if let Some(rendered) = light.animator.render(now) {
-                    frame[..rendered.len()].copy_from_slice(rendered);
+        if rebooting {
+            self.fade_to_ember();
+        } else {
+            for light in &self.lights {
+                let frame = [lemnos_light::Rgbw::OFF; MAX_LEDS];
+                if let Some(device) = self.slots[light.slot].device.as_mut() {
+                    let _ = device.show(&frame[..light.count]);
                 }
-                frame
-            } else {
-                [lemnos_light::Rgbw::OFF; MAX_LEDS]
-            };
-            let count = light.count;
-            if let Some(device) = self.slots[slot].device.as_mut() {
-                let _ = device.show(&frame[..count]);
             }
         }
         let _ = std::fs::remove_file(&self.socket);
+    }
+
+    /// Eases every light down to the reboot ember over
+    /// [`SHUTDOWN_FADE_MS`], and holds it: the ring keeps the last frame
+    /// while power is cycled, so it is a static look. Never longer than
+    /// [`SHUTDOWN_CAP_MS`], so a stop is not delayed.
+    fn fade_to_ember(&mut self) {
+        let start = self.now_ms();
+        for light in &mut self.lights {
+            let (look, _) =
+                LightIntent::new(Show::System(SystemState::Rebooting)).resolve(&light.defaults);
+            let transition =
+                lemnos_light::Transition::new(SHUTDOWN_FADE_MS, lemnos_light::Easing::EaseInOut);
+            light.animator.set(look, transition, start);
+        }
+        let slots = &mut self.slots;
+        loop {
+            let now = boottime_us() / 1000;
+            let mut animating = false;
+            for light in &mut self.lights {
+                if let Some(frame) = light.animator.render(now)
+                    && let Some(device) = slots[light.slot].device.as_mut()
+                {
+                    let _ = device.show(frame);
+                }
+                animating |= light.animator.is_animating(now);
+            }
+            if !animating || now.saturating_sub(start) >= SHUTDOWN_CAP_MS {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(u64::from(lemnos_light::FRAME_MS)));
+        }
     }
 }

@@ -12,11 +12,16 @@
 //!   a fade or an effect runs, never while steady), so a host writes the
 //!   device only when something moves. Frames are fixed arrays: no
 //!   allocation per frame.
-//! - Gauges and spinners: a progress fill with sub-LED precision and an
-//!   eased advance, and a comet for unknown amounts, booting and chases.
-//! - Built-in system animations ([`SystemState`]): updating (a fill over the
-//!   phase's colour), booting and rebooting (spinners), update failed and
-//!   rolled back (a red pulse).
+//! - Gauges: a progress arc with sub-LED precision, a faint track, a
+//!   shaded fill, a bright leading LED and a sheen; an eased advance.
+//! - Comets ([`Look::comet`], [`Show::Orbit`]): one or two heads going
+//!   round, with a tail and a floor brightness, for unknown amounts,
+//!   booting, searching and chases. A ripple ([`Look::ripple`]) marks a
+//!   confirmed update.
+//! - Built-in system animations ([`SystemState`]): updating (the arc, or a
+//!   purple comet while the amount is unknown), booting (a twin comet),
+//!   staged (a green breathe), confirmed (the ripple), rebooting (a static
+//!   [`EMBER`]), update failed and rolled back (a red breathe).
 //! - [`Arbiter`] and [`Intent`]: owners (clients) hold intents in
 //!   [`Layer`]s; the light shows `Locate` over `System` over `Alert` over
 //!   `Status` over `App`, then by priority and recency, and fades between
@@ -40,6 +45,6 @@ mod tests;
 pub use animator::{Animator, Effect, FRAME_MS, Look, Pixels, Transition};
 pub use easing::{Easing, ONE};
 pub use intent::{
-    Arbiter, Defaults, EffectKind, Intent, Layer, Phase, Show, Status, SystemState, Winner,
+    Arbiter, Defaults, EMBER, EffectKind, Intent, Layer, Phase, Show, Status, SystemState, Winner,
 };
 pub use lemnos_device::Rgbw;

@@ -246,6 +246,16 @@ pub enum LedShow {
     Indeterminate {
         color: Option<u32>,
     },
+    /// One or two comets going round: a colour (`None`: the progress colour),
+    /// a tail length in thousandths of an LED (`None`: the spinner's), 1 or
+    /// 2 heads, and a floor brightness in thousandths (`None`: 0). The period
+    /// is the request's `period_ms`.
+    Orbit {
+        color: Option<u32>,
+        tail: Option<u16>,
+        heads: u8,
+        base: Option<u16>,
+    },
     /// A built-in system animation.
     System(lemnos_light::SystemState),
     Locate,

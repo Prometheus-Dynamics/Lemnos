@@ -145,7 +145,7 @@ fn intents_take_board_defaults_unless_overridden() {
 fn progress_fills_with_a_partial_leading_led_and_advances_eased() {
     let green = Rgbw::rgb(0x00ff00);
     let mut a: Animator<16> = Animator::new(16);
-    // 3.5 LEDs of 16: three full, the fourth half lit.
+    // 3.5 LEDs of 16: three full, the fourth half lit (the head, whitened).
     let fraction = ONE * 35 / 160;
     a.set(
         Look::progress(fraction, green, Rgbw::OFF),
@@ -153,8 +153,12 @@ fn progress_fills_with_a_partial_leading_led_and_advances_eased() {
         0,
     );
     let frame = a.render(0).unwrap();
-    assert_eq!(frame[2], green);
-    assert!(frame[3].g > 100 && frame[3].g < 155, "{:?}", frame[3]);
+    // The full LED keeps its colour (the sheen only adds a little white).
+    assert_eq!(frame[2].g, 255);
+    assert!(frame[2].r < 20, "{:?}", frame[2]);
+    // The half LED is at 62.5% and whitened: its red shows.
+    assert!(frame[3].g > 150 && frame[3].g < 175, "{:?}", frame[3]);
+    assert!(frame[3].r > 45 && frame[3].r < 70, "{:?}", frame[3]);
     assert_eq!(frame[4], Rgbw::OFF);
     // A new fraction advances (the fifth LED fills in over the fade).
     a.set(
@@ -164,39 +168,285 @@ fn progress_fills_with_a_partial_leading_led_and_advances_eased() {
     );
     let mid = a.render(50).unwrap();
     assert!(mid[3].g > 200, "{:?}", mid[3]);
-    assert!(mid[4].g < 100);
+    assert!(mid[4].g < 150, "{:?}", mid[4]);
     let end = a.render(100).unwrap();
-    assert_eq!(end[4], green);
-    assert!(a.render(150).is_none());
+    // The new leading LED (4) is the full head now.
+    assert_eq!(end[4].g, 255);
+    assert_eq!(end[5], Rgbw::OFF);
+    // A gauge's sheen keeps it moving.
+    assert!(a.is_animating(150));
+}
+
+fn frame16(frame: &[Rgbw]) -> [Rgbw; 16] {
+    let mut out = [Rgbw::OFF; 16];
+    out[..frame.len()].copy_from_slice(frame);
+    out
+}
+
+/// One Q16 brightness from a thousandths value.
+fn permille_q16(thousandths: u32) -> u32 {
+    (thousandths << 16) / 1000
 }
 
 #[test]
-fn spinner_moves_a_comet_and_keeps_rendering() {
-    let mut a: Animator<8> = Animator::new(8);
+fn comet_moves_its_head_round_with_a_tail() {
+    let mut a: Animator<16> = Animator::new(16);
+    // 1.6 s a turn, a 3-LED tail, no floor.
     a.set(
-        Look::spinner(Rgbw::rgb(0xffffff), Rgbw::OFF, 800, 3),
+        Look::comet(Rgbw::rgb(0xffffff), 1600, 3 << 16, 1, 0),
         Transition::CUT,
         0,
     );
-    let at0 = a.render(0).unwrap().to_owned_array();
+    let at0 = frame16(a.render(0).unwrap());
     assert_eq!(at0[0].r, 255);
-    assert!(at0[7].r > 0 && at0[7].r < 255);
-    assert_eq!(at0[4], Rgbw::OFF);
-    let at100 = a.render(100).unwrap().to_owned_array();
-    assert_eq!(at100[1].r, 255);
-    assert_eq!(a.next_frame_ms(100), Some(120));
+    // One LED behind the head: (1 - 1/3)^2.2 of full.
+    assert!(at0[15].r > 90 && at0[15].r < 110, "{:?}", at0[15]);
+    // Outside the tail: dark.
+    assert_eq!(at0[13].r, 0);
+    // A quarter turn on: the head is at LED 4.
+    let at400 = frame16(a.render(400).unwrap());
+    assert_eq!(at400[4].r, 255);
+    assert!(at400[3].r > 0 && at400[3].r < 255);
+    assert_eq!(at400[0].r, 0);
+    // Sub-LED motion: half an LED on (50 ms of 1.6 s is 0.5 LED), the head
+    // sits between LEDs 0 and 1: LED 0 is part lit and LED 1 is not.
+    let half = frame16(a.render(50).unwrap());
+    // (1 - 0.5/3)^2.2 of full.
+    assert!(half[0].r > 165 && half[0].r < 175, "{:?}", half[0]);
+    assert_eq!(half[1].r, 0);
+    assert_eq!(a.next_frame_ms(400), Some(420));
 }
 
-trait Owned {
-    fn to_owned_array(&self) -> [Rgbw; 8];
+#[test]
+fn twin_comets_sit_opposite_and_a_floor_keeps_the_ring_lit() {
+    let mut a: Animator<16> = Animator::new(16);
+    a.set(
+        Look::comet(Rgbw::rgb(0xffffff), 1000, 2 << 16, 2, permille_q16(50)),
+        Transition::CUT,
+        0,
+    );
+    let f = frame16(a.render(0).unwrap());
+    assert_eq!(f[0].r, 255);
+    assert_eq!(f[8].r, 255);
+    // The floor (5%) away from the heads, and never darker than it.
+    assert!(f[4].r.abs_diff(13) <= 1, "{:?}", f[4]);
+    assert!(f.iter().all(|p| p.r >= 12));
+    // A heads-2 comet at a quarter turn: the heads are at LEDs 4 and 12.
+    let q = frame16(a.render(250).unwrap());
+    assert_eq!(q[4].r, 255);
+    assert_eq!(q[12].r, 255);
+    assert_eq!(q[0].r, 13);
 }
 
-impl Owned for [Rgbw] {
-    fn to_owned_array(&self) -> [Rgbw; 8] {
-        let mut out = [Rgbw::OFF; 8];
-        out[..self.len()].copy_from_slice(self);
-        out
-    }
+#[test]
+fn arc_fills_with_a_bright_head_over_a_faint_track() {
+    let blue = Rgbw::rgb(0x2f7bff);
+    let track = Rgbw::rgb(0x101012);
+    let mut a: Animator<16> = Animator::new(16);
+    // 3.5 of 16 LEDs lit.
+    a.set(
+        Look::progress(ONE * 35 / 160, blue, track),
+        Transition::CUT,
+        0,
+    );
+    let f = frame16(a.render(0).unwrap());
+    // Unfilled: the track itself, neither dim blue nor black.
+    assert_eq!(f[8], track);
+    assert_eq!(f[15], track);
+    // The leading LED (3, half lit) is whitened: its red is far above the
+    // blue's red, and it is dimmer than the full LED 2 in blue.
+    assert!(f[3].r > 60 && f[3].r < 90, "{:?}", f[3]);
+    assert!(f[3].r > f[2].r, "{:?} {:?}", f[2], f[3]);
+    assert!(f[2].b > 240 && f[3].b < 180, "{:?} {:?}", f[2], f[3]);
+    // The sheen travels: at a full arc the lit LED 0 is brighter at the
+    // start than LED 4, which the sheen has not reached.
+    let mut full: Animator<16> = Animator::new(16);
+    full.set(Look::progress(ONE, blue, track), Transition::CUT, 0);
+    let g = frame16(full.render(0).unwrap());
+    assert!(g[0].r > g[4].r + 40, "{:?} {:?}", g[0], g[4]);
+    assert!(full.is_animating(0));
+}
+
+#[test]
+fn ripple_runs_down_from_the_top_and_settles() {
+    let green = Rgbw::rgb(0x00ff00);
+    let mut a: Animator<16> = Animator::new(16);
+    a.set(Look::ripple(green), Transition::CUT, 0);
+    let at0 = frame16(a.render(0).unwrap());
+    assert_eq!(at0[0].g, 255);
+    // Only the settling glow (15%) at the bottom.
+    assert!(at0[8].g > 30 && at0[8].g < 50, "{:?}", at0[8]);
+    // 12 LEDs a second: the front is 6 LEDs down, on both sides.
+    let at500 = frame16(a.render(500).unwrap());
+    assert_eq!(at500[6].g, 255);
+    assert_eq!(at500[10].g, 255);
+    assert!(at500[0].g < 40, "{:?}", at500[0]);
+    // Past the bottom, the glow is fading; then dark.
+    let at1000 = frame16(a.render(1000).unwrap());
+    assert!(at1000.iter().all(|p| p.g < 20), "{at1000:?}");
+    let at1500 = frame16(a.render(1500).unwrap());
+    assert!(at1500.iter().all(|p| p.g == 0));
+    assert!(a.render(1600).is_none());
+}
+
+#[test]
+fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
+    let defaults = Defaults::default();
+    let (look, _) = Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve(&defaults);
+    assert_eq!(
+        look.pixels,
+        Pixels::Ripple {
+            color: defaults.confirmed
+        }
+    );
+    assert_eq!(SystemState::Confirmed.name(), "confirmed");
+
+    let (look, _) = Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve(&defaults);
+    assert_eq!(look.pixels, Pixels::Fill(defaults.rebooting.scaled(EMBER)));
+    assert_eq!(look.effect, Effect::Solid);
+    assert!(!look.is_moving());
+    // 12% of the amber: 31 of 255 on the red channel.
+    assert_eq!(EMBER, 31);
+    let mut a: Animator<16> = Animator::new(16);
+    a.set(look, Transition::new(1200, Easing::EaseInOut), 0);
+    a.render(0);
+    let end = frame16(a.render(1200).unwrap());
+    assert_eq!(end[0], defaults.rebooting.scaled(EMBER));
+    assert_eq!(end[0].r, 31);
+    assert!(a.render(1300).is_none());
+    assert_eq!(a.next_frame_ms(1300), None);
+}
+
+#[test]
+fn switching_from_a_breathe_to_an_orbit_fades_from_what_is_shown() {
+    let mut a: Animator<16> = Animator::new(16);
+    a.set(
+        Look::fill(Rgbw::rgb(0x00ff00)).with_effect(Effect::Breathe {
+            period_ms: 2000,
+            depth: 600,
+            easing: Easing::EaseInOut,
+        }),
+        Transition::CUT,
+        0,
+    );
+    // Half a period: the breathe's trough.
+    let before = frame16(a.render(1_000).unwrap());
+    let orbit = Look::comet(Rgbw::rgb(0x8a5cff), 1200, 7 << 16, 1, permille_q16(50));
+    a.set(orbit, Transition::new(250, Easing::EaseInOut), 1_000);
+    // The first frame of the fade is what was on the ring: no pop.
+    let first = frame16(a.render(1_000).unwrap());
+    assert_eq!(first, before);
+    // Then it moves toward the comet over the fade, not in one step.
+    let mid = frame16(a.render(1_125).unwrap());
+    assert_ne!(mid, before);
+    assert!(a.is_animating(1_125));
+    assert_eq!(a.next_frame_ms(1_000), Some(1_020));
+}
+
+#[test]
+fn orbit_intents_take_their_shape_from_the_intent_and_the_defaults() {
+    let defaults = Defaults::default();
+    let green = Rgbw::rgb(0x00ff00);
+    let orbit = Show::Orbit {
+        color: Some(green),
+        tail: Some(6_000),
+        heads: 1,
+        base: Some(60),
+    };
+    let intent = Intent::<16>::new(orbit);
+    assert_eq!(intent.layer(), Layer::App);
+    let (look, _) = intent.resolve(&defaults);
+    assert_eq!(
+        look.pixels,
+        Pixels::Comet {
+            color: green,
+            period_ms: 1_200,
+            tail: 6 << 16,
+            heads: 1,
+            base: permille_q16(60),
+        }
+    );
+    let mut timed = Intent::<16>::new(orbit);
+    timed.period_ms = Some(1_600);
+    let (look, _) = timed.resolve(&defaults);
+    assert!(matches!(
+        look.pixels,
+        Pixels::Comet {
+            period_ms: 1_600,
+            ..
+        }
+    ));
+    // The defaults: the progress colour, one head, no floor.
+    let (look, _) = Intent::<16>::new(Show::Orbit {
+        color: None,
+        tail: None,
+        heads: 2,
+        base: None,
+    })
+    .resolve(&defaults);
+    assert!(matches!(
+        look.pixels,
+        Pixels::Comet { color, tail, heads: 2, base: 0, .. }
+            if color == defaults.progress && tail == 5 << 16
+    ));
+}
+
+#[test]
+fn system_looks_match_the_update_states() {
+    let defaults = Defaults::default();
+    let resolve = |state| Intent::<16>::new(Show::System(state)).resolve(&defaults).0;
+    // Unknown amount: the purple comet, 7 LEDs, 5% floor.
+    let verifying = resolve(SystemState::Updating {
+        progress: None,
+        phase: Phase::Verifying,
+    });
+    assert_eq!(
+        verifying.pixels,
+        Pixels::Comet {
+            color: Rgbw::rgb(0x8a5cff),
+            period_ms: 1_200,
+            tail: 7 << 16,
+            heads: 1,
+            base: permille_q16(50),
+        }
+    );
+    // Staged: the green breathe, 2.2 s, down to 55%.
+    let staged = resolve(SystemState::Updating {
+        progress: Some(1000),
+        phase: Phase::Staged,
+    });
+    assert_eq!(staged.pixels, Pixels::Fill(Rgbw::rgb(0x2bd47d)));
+    assert_eq!(
+        staged.effect,
+        Effect::Breathe {
+            period_ms: 2_200,
+            depth: 450,
+            easing: Easing::EaseInOut,
+        }
+    );
+    // Trial boot: the twin comet, 1.8 s, 5 LEDs, 4% floor.
+    let trying = resolve(SystemState::Booting);
+    assert_eq!(
+        trying.pixels,
+        Pixels::Comet {
+            color: Rgbw::rgb(0xfff4e6),
+            period_ms: 1_800,
+            tail: 5 << 16,
+            heads: 2,
+            base: permille_q16(40),
+        }
+    );
+    // Failed: a red breathe, 2.4 s, down to 10%.
+    let failed = resolve(SystemState::UpdateFailed);
+    assert_eq!(failed.pixels, Pixels::Fill(Rgbw::rgb(0xff3b3b)));
+    assert_eq!(
+        failed.effect,
+        Effect::Breathe {
+            period_ms: 2_400,
+            depth: 900,
+            easing: Easing::EaseInOut,
+        }
+    );
 }
 
 #[test]
