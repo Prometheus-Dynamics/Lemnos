@@ -23,6 +23,9 @@ RestartMaxDelaySec=10s
 Environment=LEMNOSD_SOCKET=/run/lemnos/lemnosd.sock
 Environment=LEMNOSD_BOARD=/etc/lemnos/board.toml
 Environment=LEMNOS_ORION_RATE_HZ=2
+# Orion's local IPC sockets, as orion-node's unit puts them (its default is under $TMPDIR).
+Environment=ORION_NODE_IPC_SOCKET=/run/orion/control.sock
+Environment=ORION_NODE_IPC_STREAM_SOCKET=/run/orion/control-stream.sock
 EnvironmentFile=-/etc/default/lemnos-orion.env
 
 # Only sockets are used: lemnosd's and Orion's local IPC. The `lemnos` user

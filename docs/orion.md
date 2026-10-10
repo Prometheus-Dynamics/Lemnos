@@ -138,7 +138,8 @@ A refused action is `Rejected` with the reason. A failure of the device is `Fail
 | `LEMNOSD_BOARD` | `/etc/lemnos/board.toml` | the board definition (for `lemnos.driver` labels only) |
 | `LEMNOS_ORION_RATE_HZ` | `2` | readings per device per second, in (0, 50] |
 | `ORION_NODE_ID` | `node.local` | the node the provider runs on (must match the node) |
-| `ORION_NODE_IPC_SOCKET`, `ORION_NODE_IPC_STREAM_SOCKET` | Orion's defaults | Orion's local IPC sockets |
+| `ORION_NODE_IPC_SOCKET` | `/run/orion/control.sock` (unit) | Orion's local IPC socket, as orion-node's unit sets it |
+| `ORION_NODE_IPC_STREAM_SOCKET` | `/run/orion/control-stream.sock` (unit) | Orion's local IPC stream socket, as orion-node's unit sets it |
 
 The unit is `packaging/systemd/lemnos-orion.service` (`After=lemnosd.service orion-node.service`,
 `Wants=` both, `Restart=always`). It is optional: the Gaia layer is `packaging/gaia/lemnos-orion.toml`,

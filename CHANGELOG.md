@@ -82,6 +82,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - `LEMNOSD_UPDATE_STATUS` is the only place the update status path is set: `lemnosd` has no built-in default, the unit no longer sets it, and the staged `/etc/default/lemnosd.env` does (device packages redeclare the Gaia `lemnosd-env` item for another path).
 - BMI088 `init` ignores the results of the two soft-reset writes (a die resets as it takes the byte, so a bit-banged `i2c-gpio` master can see it NAKed, `EIO`) and re-reads both chip IDs after the resets; a failing step is named in `Error::Step` (feature `reasons`).
 - `lemnos-orion` builds again for `aarch64-unknown-linux-musl` (Gaia's Docker and host builds): `lemnosd`'s `orion-node` is a dev-dependency built without default features, so the binary no longer links Orion's HTTP/TCP/QUIC transports and with them `rustls` and `ring`, which need a C cross compiler for musl.
+- `lemnos-orion.service` reaches orion-node: it sets `ORION_NODE_IPC_SOCKET=/run/orion/control.sock` and `ORION_NODE_IPC_STREAM_SOCKET=/run/orion/control-stream.sock`, as orion-node's unit does (the client defaults are under `$TMPDIR`, so the bridge failed with "No such file or directory" on a device). `EnvironmentFile=` still comes after them, so an image can override.
 
 ## [2.0.0]
 
