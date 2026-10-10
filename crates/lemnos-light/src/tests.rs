@@ -295,16 +295,21 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     let defaults = Defaults::default();
     let (look, _) =
         Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve_builtin(&defaults);
-    // A flash of the whole ring (its fill, above the fill cap) and a ripple
-    // on top, over a pulse envelope.
+    // A flash of the whole ring (a wash shaped by its own pulse), a ripple
+    // on top, and falling sparks over a faint glow.
     assert!(matches!(
         block(&look),
-        Block::Fill { color } if color == defaults.confirmed
+        Block::Wash { color, effect: Effect::Pulse { attack_ms: 80, repeat: 1, .. } }
+            if color == Rgbw::rgb(0xc8ffd2)
     ));
-    assert!(matches!(look.envelope, Effect::Pulse { repeat: 1, .. }));
+    assert_eq!(look.envelope, Effect::Solid);
     assert!(matches!(
         look.layers[1].expect("a ripple").block,
-        Block::Ripple { color, .. } if color == defaults.confirmed
+        Block::Ripple { color, glow: 0, .. } if color == defaults.confirmed
+    ));
+    assert!(matches!(
+        look.sparkle(),
+        Some(s) if s.fall && s.base == 250 && s.start_ms == 300 && s.fade_ms == 2_600
     ));
     assert_eq!(SystemState::Confirmed.name(), "confirmed");
 
@@ -449,19 +454,17 @@ fn system_looks_match_the_update_states() {
             easing: Easing::EaseInOut,
         }
     );
-    // Trial boot: the twin comet, 1.8 s, 5 LEDs, 4% floor.
+    // Trial boot: a faint white breathe (3 s) under a warm-white sparkle.
     let trying = resolve(SystemState::Booting);
-    assert_eq!(
+    assert!(matches!(
         block(&trying),
-        Block::Comet {
-            color: Rgbw::rgb(0xfff4e6),
-            period_ms: 1_800,
-            tail: 5_000,
-            heads: 2,
-            base: 40,
-            reverse: false,
-        }
-    );
+        Block::Wash { color, effect: Effect::Breathe { period_ms: 3_000, .. } }
+            if color == Rgbw::rgb(0xffffff)
+    ));
+    assert!(matches!(
+        trying.layers[1].expect("a sparkle").block,
+        Block::Sparkle(s) if s.colors[0] == Rgbw::rgb(0xfff4e6) && s.base == 30 && !s.fall
+    ));
     // Failed: a red breathe, 2.4 s, down to 10%.
     let failed = resolve(SystemState::UpdateFailed);
     assert_eq!(
@@ -799,10 +802,11 @@ fn largest_step_per_ms(look: &LookSpec, count: usize) -> (u8, u64) {
         _ => panic!("a comet look"),
     };
     assert!(count <= 16);
+    let idle = crate::sparkle::SparkleState::new(0, &crate::Sparkle::DEFAULT);
     let frame = |t: u64| -> [u8; 16] {
         let mut out = [0u8; 16];
         for (i, slot) in out.iter_mut().enumerate().take(count) {
-            *slot = look.color(i, count, t, 0).r;
+            *slot = look.color(i, count, t, 0, &idle, t).r;
         }
         out
     };

@@ -3,8 +3,10 @@
 //! one entirely.
 
 use crate::animator::Effect;
+use crate::easing::Easing;
 use crate::intent::{Defaults, EffectKind};
-use crate::look::{Block, Fraction, LayerSpec, LookSpec, Mode};
+use crate::look::{Block, Fraction, LayerSpec, LookSpec};
+use crate::sparkle::Sparkle;
 use lemnos_device::Rgbw;
 
 /// The brightness of a full-ring fill or breathe (0.7 of full): a fill
@@ -14,9 +16,9 @@ pub const FULL_FILL: u8 = 178;
 /// The brightness of the staged breathe: a little above a full fill, so the
 /// ring reads as "ready" from across the room.
 pub const STAGED_BRIGHTNESS: u8 = 217;
-/// The confirmed flash's base: the whole ring, above the fill cap (a
-/// celebration). The ripple's fronts add full brightness on top of it.
-pub const CONFIRMED_FLASH: u8 = 140;
+/// The brightness of the booting breathe: a faint white wash under the
+/// sparkle (about 9% at its top, 4% at its bottom).
+pub const BOOTING_WASH: u8 = 23;
 
 /// The names of every built-in look.
 pub const NAMES: &[&str] = &[
@@ -80,13 +82,7 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
                 depth: d.staged_depth,
                 easing: d.easing,
             }),
-        "system.booting" => comet(
-            d.booting,
-            d.booting_period_ms,
-            d.booting_tail,
-            2,
-            d.booting_base,
-        ),
+        "system.booting" => booting(d.booting, d.easing),
         // The ember: held while power is cut, so it stays visible even when
         // the ring-wide brightness is low.
         "system.rebooting" => LookSpec::fill(d.rebooting)
@@ -137,30 +133,65 @@ pub const EMBER: u8 = crate::intent::EMBER;
 /// The least the ember is shown at, after the ring-wide scale (about 16%).
 pub const EMBER_FLOOR: u8 = 40;
 
-/// The confirmed celebration: the whole ring flashes up in `color` (over
-/// the attack), two fronts run out from the top and back round, and the
-/// glow decays to off. About 1.9 s; the host holds it a little longer.
-pub fn confirmed(color: Rgbw) -> LookSpec {
-    let mut look = LookSpec::fill(color)
-        .with_brightness(CONFIRMED_FLASH)
-        .with_envelope(Effect::Pulse {
-            attack_ms: 60,
-            hold_ms: 600,
-            decay_ms: 1_200,
-            repeat: 1,
-        });
-    // The fronts, added on top of the flash: full brightness, no glow.
-    look.push(
-        LayerSpec::new(Block::Ripple {
-            origin: 0,
-            color,
-            speed: 14_000,
-            width: 2_500,
-            settle_ms: 1,
-            glow: 0,
+/// The booting look (the trial boot, "testing a new image"): a starry
+/// sparkle of warm white over a faint white breathe, slow and calm.
+pub fn booting(color: Rgbw, easing: Easing) -> LookSpec {
+    let mut look = LookSpec::of(
+        LayerSpec::new(Block::Wash {
+            color: Rgbw::rgb(0xffffff),
+            effect: Effect::Breathe {
+                period_ms: 3_000,
+                depth: 550,
+                easing,
+            },
         })
-        .with_mode(Mode::Add),
+        .with_brightness(BOOTING_WASH),
     );
+    look.push(LayerSpec::new(Block::Sparkle(Sparkle {
+        density: 1_200,
+        density_end: 1_200,
+        base: 30,
+        ..Sparkle::one(color)
+    })));
+    look
+}
+
+/// The confirmed celebration (the update held): the whole ring flashes up
+/// in a pale green-white (attack 80 ms, decaying over 500 ms), a burst runs
+/// out from the top and back round at 14 LEDs a second, and green sparks
+/// fall from the top to the bottom, fading, over a faint green glow. About
+/// 3.2 s; the host holds it that long.
+pub fn confirmed(color: Rgbw) -> LookSpec {
+    const FLASH: Rgbw = Rgbw::rgb(0xc8ffd2);
+    const SPARK: Rgbw = Rgbw::rgb(0x78ff8c);
+    let mut look = LookSpec::of(LayerSpec::new(Block::Wash {
+        color: FLASH,
+        effect: Effect::Pulse {
+            attack_ms: 80,
+            hold_ms: 0,
+            decay_ms: 500,
+            repeat: 1,
+        },
+    }));
+    look.push(LayerSpec::new(Block::Ripple {
+        origin: 0,
+        color,
+        speed: 14_000,
+        width: 1_600,
+        settle_ms: 1,
+        glow: 0,
+    }));
+    look.push(LayerSpec::new(Block::Sparkle(Sparkle {
+        colors: [color, color, FLASH, SPARK],
+        count: 4,
+        density: 3_500,
+        density_end: 0,
+        fade_ms: 2_600,
+        start_ms: 300,
+        base: 250,
+        fall: true,
+        ..Sparkle::DEFAULT
+    })));
     look
 }
 

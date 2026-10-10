@@ -37,6 +37,7 @@
 //!   fan release <device>
 //!   fan restore [--board PATH] [--state PATH] [--all]
 //!   validate <board.toml>...
+//!   light gravity <ring> [--seconds N] [--board PATH]   (calibrate a falling sparkle)
 //! led options: --device ID --effect solid|blink|breathe|chase --blink
 //!   --period MS --depth 0..1 --fade MS --easing NAME --brightness 0..1 --seconds N
 //!   orbit: --period is one turn, --tail the comet's length in LEDs (fractions
@@ -130,7 +131,7 @@ fn main() -> ExitCode {
     let options = ClientOptions::new(&socket, client).priority(priority);
     let Some(command) = args.next() else {
         return fail(
-            "no command (list, read, watch, set, get, restore, led, looks, gpio, pwm, i2c, spi, fan, validate)",
+            "no command (list, read, watch, set, get, restore, led, light, looks, gpio, pwm, i2c, spi, fan, validate)",
         );
     };
     match command.as_str() {
@@ -142,9 +143,121 @@ fn main() -> ExitCode {
         "spi" => raw::spi(args, options),
         "restore" => raw::restore(args, options),
         "led" => led(args, options),
+        "light" => light(args, options),
         "looks" => looks_command(args, options),
         _ => devices(&command, args, options),
     }
+}
+
+/// `light gravity <ring>`: calibrates a ring's falling-sparkle gravity. Reads
+/// the IMU once a second, prints the in-plane gravity angle, the bottom LED
+/// the board settings give, and the plane's share of the reading, and lights
+/// that LED (green) with the top dim (the default bottom in amber while the
+/// board is flat). Tune `gravity_plane` and `gravity_led0_deg` in the board.
+fn light(mut args: Args, options: ClientOptions) -> ExitCode {
+    const USAGE: &str = "light gravity <ring> [--seconds N] [--board PATH]";
+    if args.next().as_deref() != Some("gravity") {
+        return fail(USAGE);
+    }
+    let Some(ring) = args.next() else {
+        return fail(USAGE);
+    };
+    let seconds = args
+        .take("--seconds")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10);
+    let board = args
+        .take("--board")
+        .or_else(|| std::env::var("LEMNOSD_BOARD").ok())
+        .unwrap_or_else(|| lemnosd::DEFAULT_BOARD.into());
+    let definition = match BoardDefinition::from_path(&board) {
+        Ok(d) => d,
+        Err(e) => return fail(format!("{board}: {e}")),
+    };
+    let Some(spec) = definition.devices.iter().find(|d| d.id == ring) else {
+        return fail(format!("no device {ring} in {board}"));
+    };
+    let gravity = match lemnos_board::gravity_config(spec) {
+        Ok(g) => g,
+        Err(e) => return fail(e),
+    };
+    let Some(imu) = gravity.device.clone() else {
+        return fail(format!(
+            "{ring} has no gravity_device (set gravity_device and gravity_plane)"
+        ));
+    };
+    let count = usize::from(gravity.strip.count).min(lemnos_light::MAX_FRAME_LEDS);
+    println!(
+        "{ring}: {count} LEDs, offset {}, {:?}, led0 {:.1} deg, plane {:?}, default_down {}, imu {imu}",
+        gravity.strip.offset,
+        gravity.strip.direction,
+        gravity.led0_deg,
+        gravity.plane,
+        gravity.default_down,
+    );
+    let mut devices = match options.clone().devices() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let mut leds = match options.leds() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let mut code = ExitCode::SUCCESS;
+    for second in 0..seconds {
+        let mut pixels = vec![lemnos_light::Rgbw::OFF; count];
+        match devices.read(&imu) {
+            Ok(reading) => {
+                let accel = ["acceleration.x", "acceleration.y", "acceleration.z"]
+                    .map(|name| reading.value(name));
+                let accel = match accel {
+                    [Some(x), Some(y), Some(z)] => Some([x, y, z]),
+                    _ => None,
+                };
+                match accel.and_then(|a| gravity.bottom(a).map(|b| (a, b))) {
+                    Some((a, b)) => {
+                        let logical = ((b.led_milli + 500) / 1_000) as usize % count.max(1);
+                        println!(
+                            "accel [{:+.2} {:+.2} {:+.2}] m/s2  in-plane {:.2}  down {:.1} deg  bottom LED {logical} (physical {})",
+                            a[0],
+                            a[1],
+                            a[2],
+                            b.in_plane,
+                            b.angle_deg,
+                            gravity.strip.physical(logical as u16),
+                        );
+                        pixels[logical.min(count - 1)] = lemnos_light::Rgbw::rgb(0x00ff20);
+                        let opposite = (logical + count / 2) % count.max(1);
+                        pixels[opposite] = lemnos_light::Rgbw::rgb(0x001a06);
+                    }
+                    None => {
+                        println!(
+                            "flat or no reading ({:?}): the default bottom is LED {}",
+                            accel, gravity.default_down
+                        );
+                        let fallback =
+                            usize::from(gravity.default_down).min(count.saturating_sub(1));
+                        pixels[fallback] = lemnos_light::Rgbw::rgb(0xffa424);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("lemnos-ctl: {imu}: {e}");
+                code = ExitCode::FAILURE;
+            }
+        }
+        if let Err(e) = leds.show_spec(&LookSpec::frame(&pixels)) {
+            return fail(e);
+        }
+        if second + 1 < seconds {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    // The frame is an intent that outlives the process: clear it.
+    if let Err(e) = leds.clear() {
+        return fail(e);
+    }
+    code
 }
 
 fn validate(mut args: Args) -> ExitCode {

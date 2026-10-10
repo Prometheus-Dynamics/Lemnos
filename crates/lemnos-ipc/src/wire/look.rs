@@ -11,7 +11,8 @@ use super::request::{easing_code, easing_from};
 use super::{WireError, bad};
 use lemnos_device::Rgbw;
 use lemnos_light::{
-    Block, Effect, Fraction, LayerSpec, LookSpec, MAX_FRAME_LEDS, MAX_LAYERS, Mode,
+    Block, Effect, Fraction, LayerSpec, LookSpec, MAX_FRAME_LEDS, MAX_LAYERS, MAX_SPARKLE_COLORS,
+    Mode, Sparkle,
 };
 
 const FILL: u8 = 0;
@@ -19,6 +20,8 @@ const COMET: u8 = 1;
 const ARC: u8 = 2;
 const RIPPLE: u8 = 3;
 const FRAME: u8 = 4;
+const WASH: u8 = 5;
+const SPARKLE: u8 = 6;
 
 const SOLID: u8 = 0;
 const BLINK: u8 = 1;
@@ -99,13 +102,41 @@ pub(super) fn encode(e: &mut Encoder, spec: &LookSpec) {
                     e.u32(color_code(*p));
                 }
             }
+            Block::Wash { color, effect } => {
+                e.u8(WASH).u32(color_code(color));
+                encode_effect(e, effect);
+            }
+            Block::Sparkle(sp) => {
+                let count = usize::from(sp.count).clamp(1, MAX_SPARKLE_COLORS);
+                e.u8(SPARKLE).u8(count as u8);
+                for c in &sp.colors[..count] {
+                    e.u32(color_code(*c));
+                }
+                e.u32(sp.density)
+                    .u32(sp.density_end)
+                    .u32(sp.fade_ms)
+                    .u32(sp.start_ms)
+                    .u32(sp.min_ms)
+                    .u32(sp.max_ms)
+                    .u16(sp.base)
+                    .u32(sp.seed)
+                    .u8(u8::from(sp.fall))
+                    .u32(sp.fall_speed)
+                    .u32(sp.fall_accel);
+            }
         }
         e.u8(layer.brightness).u8(match layer.mode {
             Mode::Max => 0,
             Mode::Add => 1,
         });
     }
-    match spec.envelope {
+    encode_effect(e, spec.envelope);
+    e.u8(spec.brightness).u8(spec.floor);
+}
+
+/// An envelope: its code, then its fields.
+fn encode_effect(e: &mut Encoder, effect: Effect) {
+    match effect {
         Effect::Solid => {
             e.u8(SOLID);
         }
@@ -136,7 +167,37 @@ pub(super) fn encode(e: &mut Encoder, spec: &LookSpec) {
                 .u8(repeat);
         }
     }
-    e.u8(spec.brightness).u8(spec.floor);
+}
+
+/// An envelope, as [`encode_effect`] wrote it.
+fn decode_effect(d: &mut Decoder<'_>) -> Result<Effect, WireError> {
+    Ok(match d.u8()? {
+        SOLID => Effect::Solid,
+        BLINK => Effect::Blink {
+            period_ms: d.u32()?,
+            duty: d.u16()?,
+        },
+        BREATHE => {
+            let period_ms = d.u32()?;
+            let depth = d.u16()?;
+            let code = d.u8()?;
+            let params = [d.u16()?, d.u16()?, d.u16()?, d.u16()?];
+            let easing =
+                easing_from(code, params).ok_or_else(|| bad(format!("breathe easing {code}")))?;
+            Effect::Breathe {
+                period_ms,
+                depth,
+                easing,
+            }
+        }
+        PULSE => Effect::Pulse {
+            attack_ms: d.u32()?,
+            hold_ms: d.u32()?,
+            decay_ms: d.u32()?,
+            repeat: d.u8()?,
+        },
+        other => return Err(bad(format!("look envelope {other}"))),
+    })
 }
 
 pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
@@ -196,6 +257,35 @@ pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
                     len: len as u8,
                 }
             }
+            WASH => Block::Wash {
+                color: color_from(d.u32()?),
+                effect: decode_effect(d)?,
+            },
+            SPARKLE => {
+                let count = usize::from(d.u8()?);
+                if !(1..=MAX_SPARKLE_COLORS).contains(&count) {
+                    return Err(bad(format!("sparkle of {count} colours")));
+                }
+                let mut colors = [Rgbw::OFF; MAX_SPARKLE_COLORS];
+                for slot in colors.iter_mut().take(count) {
+                    *slot = color_from(d.u32()?);
+                }
+                Block::Sparkle(Sparkle {
+                    colors,
+                    count: count as u8,
+                    density: d.u32()?,
+                    density_end: d.u32()?,
+                    fade_ms: d.u32()?,
+                    start_ms: d.u32()?,
+                    min_ms: d.u32()?,
+                    max_ms: d.u32()?,
+                    base: d.u16()?,
+                    seed: d.u32()?,
+                    fall: d.u8()? != 0,
+                    fall_speed: d.u32()?,
+                    fall_accel: d.u32()?,
+                })
+            }
             other => return Err(bad(format!("look block {other}"))),
         };
         let brightness = d.u8()?;
@@ -210,33 +300,7 @@ pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
             mode,
         });
     }
-    spec.envelope = match d.u8()? {
-        SOLID => Effect::Solid,
-        BLINK => Effect::Blink {
-            period_ms: d.u32()?,
-            duty: d.u16()?,
-        },
-        BREATHE => {
-            let period_ms = d.u32()?;
-            let depth = d.u16()?;
-            let code = d.u8()?;
-            let params = [d.u16()?, d.u16()?, d.u16()?, d.u16()?];
-            let easing =
-                easing_from(code, params).ok_or_else(|| bad(format!("breathe easing {code}")))?;
-            Effect::Breathe {
-                period_ms,
-                depth,
-                easing,
-            }
-        }
-        PULSE => Effect::Pulse {
-            attack_ms: d.u32()?,
-            hold_ms: d.u32()?,
-            decay_ms: d.u32()?,
-            repeat: d.u8()?,
-        },
-        other => return Err(bad(format!("look envelope {other}"))),
-    };
+    spec.envelope = decode_effect(d)?;
     spec.brightness = d.u8()?;
     spec.floor = d.u8()?;
     Ok(spec)

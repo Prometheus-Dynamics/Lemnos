@@ -26,6 +26,14 @@ pub(crate) struct Light {
     pub animator: Animator<MAX_LEDS>,
     pub arbiter: Arbiter<MAX_LEDS, MAX_INTENTS>,
     shown: Option<(u32, Layer, LightIntent)>,
+    /// The light's gravity settings (its IMU and ring geometry), if the
+    /// board gives it any.
+    pub gravity: Option<lemnos_board::Gravity>,
+    /// The look changed since the last render: the host checks what it
+    /// needs for the new look (the gravity of a falling sparkle).
+    pub look_changed: bool,
+    /// A one-shot IMU read for the falling sparkle is on its way.
+    pub waiting_gravity: bool,
     /// Per-owner frames built from single-LED writes (separately for the
     /// test layer).
     frames: Vec<((u32, bool), [Rgbw; MAX_LEDS])>,
@@ -60,6 +68,9 @@ impl Light {
             animator: Animator::new(count.min(MAX_LEDS)),
             arbiter: Arbiter::new(),
             shown: None,
+            gravity: None,
+            look_changed: false,
+            waiting_gravity: false,
             frames: Vec::new(),
             count: count.min(MAX_LEDS),
             next_render_ms: 0,
@@ -215,6 +226,7 @@ impl Light {
             ),
         };
         self.animator.set(look, transition, now_ms);
+        self.look_changed = true;
         Some(winner)
     }
 

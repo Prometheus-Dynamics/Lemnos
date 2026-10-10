@@ -1,7 +1,7 @@
 # Looks
 
 A **look** is what a light shows: a few layers of simple blocks (a fill, a
-comet, a progress arc, a ripple, static pixels), an optional breathe or blink
+comet, a progress arc, a ripple, static pixels, a wash, a sparkle), an optional breathe or blink
 over the whole, and a brightness. `lemnos-light` renders looks without `std` or
 allocation; `lemnosd` names them, loads them from files, and reloads them
 without a restart. Looks are data, so a new animation is a file, not a
@@ -16,7 +16,8 @@ rebuild.
 ## Layers and blocks
 
 A look has 1 to 4 **layers**, bottom first. Each layer is one block with its
-parameters, a colour, a brightness and a **mode**. Layers are composited per
+parameters, a colour, a brightness and a **mode**. A look has at most one
+`sparkle` layer. Layers are composited per
 LED: `max` keeps the brighter channel of the layers so far, `add` sums them
 (saturating). A layer's brightness scales that layer alone.
 
@@ -31,9 +32,113 @@ ring has 16 on the Raze, at most 64), and every other fraction is 0 to 1.
 | `arc` | `fraction` (`"input"`: the request's progress, or a number 0 to 1), `color` (required), `track` (`101012`, the unfilled part), `head` (0.35, the leading LED mixed toward white), `sheen` (true, a soft white moving over the fill) | A progress gauge. The fill advances eased when its fraction changes. |
 | `ripple` | `color` (required), `origin` (LED 0, 0 to 63), `speed` (12 LEDs a second), `width` (2.2 LEDs), `settle_ms` (1400, 0 to 60000), `glow` (0.15, the settling glow's peak) | A wave out from `origin` both ways round, then a glow that fades. `system.confirmed` is one. |
 | `frame` | `pixels` (required: 1 to 64 colours) | Static pixels from LED 0; the rest are off. |
+| `wash` | `color` (required), `envelope` (required: a breathe, pulse or blink, in the look envelope's form) | Every LED the colour, shaped by its **own** envelope, not the whole look's. A flash or a slow breathe under other layers. |
+| `sparkle` | `color` or `colors` (required: one colour, or a list of 1 to 4 chosen at random per twinkle), `density` (1.2, twinkles a LED a second, 0 to 64), `density_end` (`density`, see below), `fade_ms` (0), `start_ms` (0), `min_ms` (350), `max_ms` (950), `base` (0, a floor in the first colour), `seed` (0: from the look's start time), `fall` (false), `fall_speed` (5, LEDs a second), `fall_accel` (6, LEDs a second squared) | Random twinkles: each LED starts one with probability `density` a second (`density * dt` per render, so the rate does not depend on the frame rate), unless it is mid-twinkle. See below. |
+
+**Sparkle.** A twinkle lasts a random time in `min_ms` to `max_ms`. Its brightness
+rises linearly over the first fifth of its length, then decays as `(1 - x)^2` to
+off. The rate is `density` from the look's start, and nothing before `start_ms`.
+With `fade_ms`, the rate ramps linearly from `density` to `density_end` over
+`fade_ms` from `start_ms`, and the `base` fades to off by `start_ms + fade_ms`.
+With `fall = true` each twinkle is a particle instead: it spawns within three
+LEDs of the ring's top (the LED opposite the bottom), slides toward the bottom
+by the shorter arc, accelerating from `fall_speed` at `fall_accel`, and fades as
+it lands. Positions are fractional, drawn across the two neighbouring LEDs. At
+most 16 particles are in the air; a spawn with none free is skipped. The
+bottom comes from gravity when the look starts (see *Gravity* below), and is
+`default_down` otherwise (the middle of the ring). Sparkles are seeded per look
+start, so the same `seed` gives the same twinkles.
 
 Colours are `"rrggbb"` (or `"#rrggbb"`), `"wwrrggbb"` for a white channel, or an
 integer `0xWWRRGGBB`.
+
+### The two sparkle looks
+
+These are the built-in `system.booting` and `system.confirmed`, in look-file
+form (copy them as a starting point; the built-ins take the board's colours,
+and the look-file form uses these):
+
+```toml
+[looks."system.booting"]
+layers = [
+  { block = "wash", color = "ffffff", brightness = 0.09,
+    envelope = { kind = "breathe", period_ms = 3000, depth = 0.55, easing = "ease-in-out" } },
+  { block = "sparkle", color = "fff4e6", density = 1.2, base = 0.03, min_ms = 350, max_ms = 950 },
+]
+
+[looks."system.confirmed"]
+layers = [
+  { block = "wash", color = "c8ffd2",
+    envelope = { kind = "pulse", attack_ms = 80, hold_ms = 0, decay_ms = 500, repeat = 1 } },
+  { block = "ripple", color = "00ff20", speed = 14, width = 1.6, settle_ms = 1, glow = 0 },
+  { block = "sparkle", colors = ["00ff20", "00ff20", "c8ffd2", "78ff8c"],
+    density = 3.5, density_end = 0, fade_ms = 2600, start_ms = 300, base = 0.25,
+    fall = true, fall_speed = 5, fall_accel = 6 },
+]
+```
+
+`system.booting` is the trial boot ("testing a new image"): a calm, starry
+sparkle over a slow breathe. `system.confirmed` is the update confirmed: the
+flash comes at once, the burst runs out from the top to the bottom and back in
+about a second, and the sparks fall from the top and fade over the glow. Its
+look runs about 3.2 s, and the Confirmed hold in `lemnosd` is the same. The
+flash and the glow are above the fill cap (a celebration), and the ring-wide
+brightness still scales them.
+
+Tuning: `density` is per LED a second, so a falling sparkle at 3.5 shows many
+sparks (the 16 particles fill up early in the look); lower it to thin them.
+
+## Gravity: which way is down
+
+A falling sparkle wants the ring's bottom, from the IMU. The ws2812 light
+takes four more keys in `board.toml`:
+
+```toml
+[[devices]]
+id = "status-ring"
+# ...
+[devices.config]
+count = 16
+gravity_device = "imu"          # the IMU whose acceleration gives down
+gravity_plane = ["-y", "x"]     # the two IMU axes that span the ring's plane (signs allowed)
+gravity_led0_deg = 0            # the angle, in that plane, of the first LED on the wire
+default_down = 8                # the logical LED used when there is no gravity (default count / 2)
+```
+
+When a look with a falling sparkle starts, `lemnosd` reads the IMU **once**
+(through the same one-shot read a client gets; no subscription, no stream).
+The reading's acceleration is the support force, so *down* is its negation.
+The in-plane part of that gravity gives an angle; the angle of the physical LED
+on that side (from `gravity_led0_deg`, one LED every `360 / count` degrees,
+counted round the plane from the first axis to the second) is the bottom. The
+ring's `offset` and `direction` are honoured, so the bottom is a logical LED
+that the strip shows at the physical bottom. Until the read returns (or when
+the IMU is missing), the bottom is `default_down`. A board lying flat (less than
+35% of the reading in the ring's plane) also uses `default_down`. Spawns after
+the reading fall toward it; particles already in the air keep their path.
+
+### Calibrating the bottom
+
+Set the four keys, restart `lemnosd` (the board is read at start), and run:
+
+```text
+lemnos-ctl light gravity status-ring --seconds 30
+```
+
+Once a second it reads the IMU and prints the accelerometer, the in-plane share
+of the reading, the down angle, and the bottom LED (and its physical index),
+and it lights that LED green, its opposite LED dim. Tilt the board. The green LED
+should be at the bottom. Then tune the keys:
+
+- If it moves the wrong way round, flip the sign of one plane axis
+  (`["-y", "x"]` becomes `["y", "x"]`).
+- If it is a fixed number of LEDs off, change `gravity_led0_deg` by that angle
+  (`360 / count` degrees an LED).
+- If it does not move, the plane is wrong (the board is still in the plane's
+  normal direction): choose the other two axes.
+
+`--board PATH` names another board file (default `LEMNOSD_BOARD`, or
+`/etc/lemnos/board.toml`). The helper clears its frame when it ends.
 
 ## Envelope and brightness
 
@@ -98,10 +203,10 @@ the defaults shown. Each is also a valid `led look <name>`.
 | `system.writing` | the blue arc over the faint track, sheen, the request's progress | arc 1.0 |
 | `system.writing-unknown` | the blue comet, with the verifying timing | comet 1.0 |
 | `system.staged` | the green breathe, 2200 ms, depth 0.45 (`staged_*`) | fill 0.85 |
-| `system.booting` | two warm-white comets, 1800 ms, tail 5, base 0.04 (`booting_*`) | comet 1.0 |
+| `system.booting` | the trial boot: a faint white breathe (3000 ms, about 4 to 9%) under a warm-white sparkle (`booting`, density 1.2, base 0.03); see below | wash 0.09, sparkle 1.0 |
 | `system.rebooting` | the reboot ember: the rebooting colour at 44%, held at least 16% (about 22% on a default ring) | ember |
 | `system.failed` `system.rolled-back` | the red breathe, 2400 ms, depth 0.9 (`failed_*`) | fill 0.7 |
-| `system.confirmed` | the green celebration: the whole ring flashes up in `confirmed` (55%, above the fill cap), two fronts run out from the top and back, and the glow decays to off (a `pulse` envelope, 1.86 s) | fill 0.55, ripple 1.0 |
+| `system.confirmed` | the green pop: a pale green-white flash of the whole ring, a green burst running out from the top and back, and falling green sparks over a faint glow, about 3.2 s; see below | wash 1.0, ripple 1.0, sparkle 1.0 |
 | `system.locate` | the `locate` colour, breathe or chase (`locate_effect`) | fill 0.7 |
 | `pv.targets` | blue `2f7bff` breathe, 4000 ms, depth 0.18 | fill 0.7 |
 | `pv.searching` | green `00ff20` comet, 1600 ms, tail 6, base 0.06 | comet 1.0 |

@@ -444,6 +444,40 @@ fn looks_round_trip_by_name_inline_and_in_text() {
         spec: Box::new(flash),
         progress: None,
     })));
+    // A wash under a falling sparkle (the confirmed look), and a sparkle with a palette.
+    let mut sparks = LookSpec::of(LayerSpec::new(Block::Wash {
+        color: Rgbw::rgb(0xc8ffd2),
+        effect: Effect::Pulse {
+            attack_ms: 80,
+            hold_ms: 0,
+            decay_ms: 500,
+            repeat: 1,
+        },
+    }));
+    sparks.push(LayerSpec::new(Block::Sparkle(lemnos_light::Sparkle {
+        colors: [
+            Rgbw::rgb(0x00ff20),
+            Rgbw::rgb(0x00ff20),
+            Rgbw::rgb(0xc8ffd2),
+            Rgbw::rgb(0x78ff8c),
+        ],
+        count: 4,
+        density: 3_500,
+        density_end: 0,
+        fade_ms: 2_600,
+        start_ms: 300,
+        min_ms: 350,
+        max_ms: 950,
+        base: 250,
+        seed: 9,
+        fall: true,
+        fall_speed: 5_000,
+        fall_accel: 6_000,
+    })));
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(sparks),
+        progress: None,
+    })));
     round_trip_request(Request::Looks {
         id: 5,
         op: LooksOp::List,

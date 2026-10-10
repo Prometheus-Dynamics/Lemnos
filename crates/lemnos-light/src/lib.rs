@@ -15,6 +15,9 @@
 //!   static pixels), composited by `max` or `add`, under an envelope ([`Effect`]) and a
 //!   brightness. The built-in named looks ([`builtin_look`]) are made from a board's
 //!   [`Defaults`].
+//! - Sparkles (`Block::Sparkle`, see [`Sparkle`]): random twinkles, or falling sparks toward a
+//!   bottom the animator is given ([`Animator::set_bottom`]); a wash (`Block::Wash`) is a colour
+//!   under its own envelope.
 //! - Comets (`Block::Comet`): one or two heads going round with a tail and a floor
 //!   brightness, for unknown amounts, booting, searching and chases. A ripple
 //!   (`Block::Ripple`) marks a confirmed update.
@@ -40,6 +43,7 @@ mod builtin;
 mod easing;
 mod intent;
 mod look;
+mod sparkle;
 
 #[cfg(test)]
 mod golden;
@@ -58,3 +62,4 @@ pub use look::{
     Block, Fraction, LayerSpec, LookName, LookSpec, MAX_FRAME_LEDS, MAX_LAYERS, MAX_LOOK_NAME,
     Mode, valid_look_name,
 };
+pub use sparkle::{MAX_PARTICLES, MAX_SPARKLE_COLORS, Sparkle};

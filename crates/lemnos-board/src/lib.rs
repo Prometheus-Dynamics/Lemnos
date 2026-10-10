@@ -39,6 +39,7 @@
 
 mod buses;
 mod error;
+mod gravity;
 mod i2c_select;
 mod light;
 pub mod looks;
@@ -55,6 +56,9 @@ mod tests;
 pub use buses::LinuxBuses;
 pub use buses::{Buses, DynI2c, DynInputPin, DynOutputPin, GpioRef};
 pub use error::BoardError;
+pub use gravity::{
+    Bottom, FLAT_FRACTION, GRAVITY_KEYS, Gravity, gravity as gravity_config, parse_axis,
+};
 pub use i2c_select::I2cSelector;
 pub use light::{LIGHT_KEYS, light_defaults, strip_config};
 pub use registry::{Build, DriverEntry, DriverRegistry, Interface};

@@ -2,6 +2,7 @@
 
 use crate::easing::{Easing, ONE};
 use crate::look::{Block, Fraction, LayerSpec, LookSpec, MAX_LAYERS, scale};
+use crate::sparkle::{Sparkle, SparkleState};
 use lemnos_device::Rgbw;
 
 /// How a look changes over time.
@@ -141,6 +142,11 @@ pub struct Animator<const N: usize> {
     fraction_to: u32,
     advancing: bool,
     written: bool,
+    /// The sparkle's twinkles (reset when the look changes).
+    sparkle: SparkleState,
+    /// The LED at the bottom of the ring for a falling sparkle, thousandths
+    /// of an LED (see [`set_bottom`](Self::set_bottom)).
+    bottom: u32,
 }
 
 /// The default interval between frames while animating: 50 Hz.
@@ -204,6 +210,8 @@ fn shape(look: &LookSpec) -> [Option<u8>; MAX_LAYERS] {
             Block::Arc { .. } => 2,
             Block::Ripple { .. } => 3,
             Block::Frame { .. } => 4,
+            Block::Wash { .. } => 5,
+            Block::Sparkle(_) => 6,
         });
     }
     out
@@ -225,7 +233,16 @@ impl<const N: usize> Animator<N> {
             fraction_to: 0,
             advancing: false,
             written: false,
+            sparkle: SparkleState::new(0, &Sparkle::DEFAULT),
+            bottom: (count.min(N) as u32 / 2) * 1_000,
         }
+    }
+
+    /// Where the bottom of the ring is for a falling sparkle, in thousandths
+    /// of an LED (0 is LED 0's centre). The host sets it from gravity, or
+    /// from the default; it takes effect on the next render.
+    pub fn set_bottom(&mut self, led_milli: u32) {
+        self.bottom = led_milli;
     }
 
     /// Renders every `frame_ms` while animating (default [`FRAME_MS`]).
@@ -262,6 +279,10 @@ impl<const N: usize> Animator<N> {
             && (shape(&self.look) != shape(&look) || look.envelope != self.look.envelope)
         {
             self.look_since_ms = now_ms;
+        }
+        if look != self.look {
+            let sparkle = look.sparkle().unwrap_or(Sparkle::DEFAULT);
+            self.sparkle = SparkleState::new(now_ms, &sparkle);
         }
         self.look = look;
         self.transition = transition;
@@ -325,9 +346,16 @@ impl<const N: usize> Animator<N> {
             self.eased(now_ms)
         };
         let elapsed = now_ms.saturating_sub(self.look_since_ms);
+        if let Some(sparkle) = self.look.sparkle() {
+            self.sparkle
+                .advance(now_ms, &sparkle, self.count, self.bottom);
+        }
         let mut changed = !self.written;
         for index in 0..self.count {
-            let target = scale(self.look.color(index, self.count, elapsed, fraction), level);
+            let color =
+                self.look
+                    .color(index, self.count, elapsed, fraction, &self.sparkle, now_ms);
+            let target = scale(color, level);
             let pixel = match fade {
                 Some(t) => blend(self.from[index], target, t),
                 None => target,

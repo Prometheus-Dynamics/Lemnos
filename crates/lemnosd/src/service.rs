@@ -259,6 +259,7 @@ impl Service {
                 let count = slot.device.as_ref().map_or(0, |d| d.pixel_count());
                 let defaults = lemnos_board::light_defaults(&slot.spec).unwrap_or_default();
                 let mut light = Light::new(index, count, defaults);
+                light.gravity = lemnos_board::gravity_config(&slot.spec).ok();
                 if let Some(until) = self.booting_until {
                     light.hold_service(
                         LightIntent::new(Show::System(SystemState::Booting)),
@@ -502,6 +503,9 @@ impl Service {
 
     /// Sends a one-shot reader its reading, or why there is none.
     fn answer(&mut self, index: usize, waiters: &[u32], ok: bool) {
+        if waiters.contains(&GRAVITY_WAITER) {
+            self.apply_gravity(index);
+        }
         if waiters.is_empty() {
             return;
         }
@@ -715,6 +719,10 @@ impl Service {
                 let looks = &self.looks;
                 self.lights[li].arbitrate(now_ms, &|name| looks.get(name))
             };
+            if self.lights[li].look_changed {
+                self.lights[li].look_changed = false;
+                self.start_gravity(li);
+            }
             if let Some(winner) = winner {
                 let owner = winner.map_or_else(String::new, |w| self.owner_name(w.owner));
                 let layer = winner.map_or("", |w| w.layer.name()).to_string();
@@ -742,6 +750,68 @@ impl Service {
                     self.status_event(slot, status);
                 }
             }
+        }
+    }
+
+    /// A new look starts: a falling sparkle wants the ring's bottom. It
+    /// starts at the default (`default_down`, or the middle of the ring), and
+    /// one read of the IMU moves it to where gravity says, through the same
+    /// one-shot reads a client gets. Spawns after that fall toward it.
+    fn start_gravity(&mut self, li: usize) {
+        let falls = self.lights[li]
+            .animator
+            .look()
+            .sparkle()
+            .is_some_and(|s| s.fall);
+        let light = &mut self.lights[li];
+        light.waiting_gravity = false;
+        let Some(gravity) = light.gravity.clone() else {
+            return;
+        };
+        light.animator.set_bottom(gravity.default_milli());
+        if !falls {
+            return;
+        }
+        let Some(device) = gravity.device.clone() else {
+            return;
+        };
+        let Some(index) = self.slot_of(&device) else {
+            return;
+        };
+        if !self.slots[index].is_sensor() {
+            return;
+        }
+        if self.slots[index].placement == Placement::Worker {
+            self.slots[index].waiters.push(GRAVITY_WAITER);
+            self.lights[li].waiting_gravity = true;
+            self.dispatch_reads();
+        } else {
+            if let Some(status) = self.slots[index].read_full() {
+                self.status_event(index, status);
+            }
+            self.apply_gravity(index);
+        }
+    }
+
+    /// Moves the bottom of every light waiting on the IMU in slot `index` to
+    /// where its reading says down is (or leaves it at the default).
+    fn apply_gravity(&mut self, index: usize) {
+        let accel = acceleration(&self.slots[index]);
+        let id = self.slots[index].id().to_string();
+        for light in self.lights.iter_mut() {
+            let waits = light.waiting_gravity
+                && light.gravity.as_ref().and_then(|g| g.device.as_deref()) == Some(id.as_str());
+            if !waits {
+                continue;
+            }
+            light.waiting_gravity = false;
+            let Some(gravity) = light.gravity.as_ref() else {
+                continue;
+            };
+            let bottom = accel.and_then(|a| gravity.bottom(a));
+            light
+                .animator
+                .set_bottom(bottom.map_or(gravity.default_milli(), |b| b.led_milli));
         }
     }
 
@@ -1325,4 +1395,27 @@ fn mask_values(values: &[i32], mask: u64) -> Vec<i32> {
             }
         })
         .collect()
+}
+
+/// The one-shot waiter a falling sparkle's gravity read is queued under (no
+/// client has this id).
+const GRAVITY_WAITER: u32 = u32::MAX;
+
+/// The acceleration (m/s^2, the device's own axes) of an IMU, from its
+/// last reading; `None` when a channel has no value.
+fn acceleration(slot: &Slot) -> Option<[f64; 3]> {
+    let info = slot.info?;
+    let mut out = [0.0; 3];
+    for (axis, name) in ["acceleration.x", "acceleration.y", "acceleration.z"]
+        .iter()
+        .enumerate()
+    {
+        let index = info.channels.iter().position(|c| c.name == *name)?;
+        let raw = *slot.values.get(index)?;
+        if raw == lemnos_device::NO_VALUE {
+            return None;
+        }
+        out[axis] = f64::from(raw) * 10f64.powi(i32::from(info.channels[index].exponent));
+    }
+    Some(out)
 }

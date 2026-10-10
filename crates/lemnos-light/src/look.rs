@@ -9,6 +9,7 @@
 
 use crate::animator::Effect;
 use crate::easing::{ONE, quarter_sin};
+use crate::sparkle::{MAX_SPARKLE_COLORS, Sparkle, SparkleState};
 use lemnos_device::Rgbw;
 
 /// Layers in one look.
@@ -98,6 +99,12 @@ pub enum Block {
         pixels: [Rgbw; MAX_FRAME_LEDS],
         len: u8,
     },
+    /// Every LED `color`, shaped by its own envelope (a breathe, a pulse or a
+    /// blink) rather than the whole look's: a flash or a slow breathe under
+    /// other layers.
+    Wash { color: Rgbw, effect: Effect },
+    /// Random twinkles (or falling sparks); see [`Sparkle`].
+    Sparkle(Sparkle),
 }
 
 impl Block {
@@ -109,16 +116,19 @@ impl Block {
             Self::Arc { .. } => "arc",
             Self::Ripple { .. } => "ripple",
             Self::Frame { .. } => "frame",
+            Self::Wash { .. } => "wash",
+            Self::Sparkle(_) => "sparkle",
         }
     }
 
     /// Whether the colours move with time (a comet, a ripple, a sheen).
     pub const fn is_moving(&self) -> bool {
         match self {
-            Self::Comet { .. } | Self::Ripple { .. } => true,
+            Self::Comet { .. } | Self::Ripple { .. } | Self::Sparkle(_) => true,
             Self::Arc {
                 fraction, sheen, ..
             } => *sheen && !matches!(fraction, Fraction::Fixed(0)),
+            Self::Wash { effect, .. } => effect.is_animated(),
             Self::Fill { .. } | Self::Frame { .. } => false,
         }
     }
@@ -133,15 +143,27 @@ impl Block {
                 | (Self::Arc { .. }, Self::Arc { .. })
                 | (Self::Ripple { .. }, Self::Ripple { .. })
                 | (Self::Frame { .. }, Self::Frame { .. })
+                | (Self::Wash { .. }, Self::Wash { .. })
+                | (Self::Sparkle(_), Self::Sparkle(_))
         )
     }
 
     /// The colour of LED `index` of `count` at `elapsed_ms` into the look,
     /// before the layer's brightness and the envelope. `fraction` is the
     /// arc's displayed fill (Q16).
-    fn color(&self, index: usize, count: usize, elapsed_ms: u64, fraction: u32) -> Rgbw {
+    fn color(
+        &self,
+        index: usize,
+        count: usize,
+        elapsed_ms: u64,
+        fraction: u32,
+        sparkle: &SparkleState,
+        now_ms: u64,
+    ) -> Rgbw {
         match *self {
             Self::Fill { color } => color,
+            Self::Wash { color, effect } => scale(color, effect.level(elapsed_ms)),
+            Self::Sparkle(params) => sparkle.pixel(index, now_ms, &params),
             Self::Frame { pixels, len } => {
                 if index < usize::from(len) {
                     pixels[index]
@@ -409,6 +431,14 @@ impl LookSpec {
         self.layers.iter().flatten()
     }
 
+    /// The look's sparkle, if it has one (at most one).
+    pub fn sparkle(&self) -> Option<Sparkle> {
+        self.iter().find_map(|l| match l.block {
+            Block::Sparkle(s) => Some(s),
+            _ => None,
+        })
+    }
+
     /// Whether the output changes over time, without an envelope.
     pub fn is_moving(&self) -> bool {
         self.iter().any(|l| l.block.is_moving())
@@ -505,51 +535,37 @@ impl LookSpec {
                         return Err("a frame has at most 64 pixels");
                     }
                 }
+                Block::Wash { effect, .. } => validate_effect(effect)?,
+                Block::Sparkle(s) => validate_sparkle(&s)?,
             }
         }
-        match self.envelope {
-            Effect::Solid => {}
-            Effect::Blink { period_ms, duty } => {
-                if !(100..=600_000).contains(&period_ms) {
-                    return Err("a blink's period_ms must be 100 to 600000");
-                }
-                if duty > 1000 {
-                    return Err("a blink's duty must be 0 to 1");
-                }
-            }
-            Effect::Breathe {
-                period_ms, depth, ..
-            } => {
-                if !(100..=600_000).contains(&period_ms) {
-                    return Err("a breathe's period_ms must be 100 to 600000");
-                }
-                if depth > 1000 {
-                    return Err("a breathe's depth must be 0 to 1");
-                }
-            }
-            Effect::Pulse {
-                attack_ms,
-                hold_ms,
-                decay_ms,
-                ..
-            } => {
-                if attack_ms > 60_000 || hold_ms > 60_000 {
-                    return Err("a pulse's attack_ms and hold_ms must be 0 to 60000");
-                }
-                if !(1..=60_000).contains(&decay_ms) {
-                    return Err("a pulse's decay_ms must be 1 to 60000");
-                }
-            }
+        if self
+            .iter()
+            .filter(|l| matches!(l.block, Block::Sparkle(_)))
+            .count()
+            > 1
+        {
+            return Err("a look has at most one sparkle layer");
         }
-        Ok(())
+        validate_effect(self.envelope)
     }
 
     /// LED `index` of `count` at `elapsed_ms` into the look, with the arc at
     /// `fraction` (Q16): the layers combined, before the envelope.
-    pub(crate) fn color(&self, index: usize, count: usize, elapsed_ms: u64, fraction: u32) -> Rgbw {
+    pub(crate) fn color(
+        &self,
+        index: usize,
+        count: usize,
+        elapsed_ms: u64,
+        fraction: u32,
+        sparkle: &SparkleState,
+        now_ms: u64,
+    ) -> Rgbw {
         let mut acc = Rgbw::OFF;
         for layer in self.iter() {
-            let c = layer.block.color(index, count, elapsed_ms, fraction);
+            let c = layer
+                .block
+                .color(index, count, elapsed_ms, fraction, sparkle, now_ms);
             let c = scale(c, brightness_level(layer.brightness));
             acc = match layer.mode {
                 Mode::Max => max(acc, c),
@@ -558,6 +574,71 @@ impl LookSpec {
         }
         acc
     }
+}
+
+/// Checks an envelope's ranges.
+fn validate_effect(effect: Effect) -> Result<(), &'static str> {
+    match effect {
+        Effect::Solid => {}
+        Effect::Blink { period_ms, duty } => {
+            if !(100..=600_000).contains(&period_ms) {
+                return Err("a blink's period_ms must be 100 to 600000");
+            }
+            if duty > 1000 {
+                return Err("a blink's duty must be 0 to 1");
+            }
+        }
+        Effect::Breathe {
+            period_ms, depth, ..
+        } => {
+            if !(100..=600_000).contains(&period_ms) {
+                return Err("a breathe's period_ms must be 100 to 600000");
+            }
+            if depth > 1000 {
+                return Err("a breathe's depth must be 0 to 1");
+            }
+        }
+        Effect::Pulse {
+            attack_ms,
+            hold_ms,
+            decay_ms,
+            ..
+        } => {
+            if attack_ms > 60_000 || hold_ms > 60_000 {
+                return Err("a pulse's attack_ms and hold_ms must be 0 to 60000");
+            }
+            if !(1..=60_000).contains(&decay_ms) {
+                return Err("a pulse's decay_ms must be 1 to 60000");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks a sparkle's ranges.
+fn validate_sparkle(s: &Sparkle) -> Result<(), &'static str> {
+    if !(1..=MAX_SPARKLE_COLORS as u8).contains(&s.count) {
+        return Err("a sparkle has 1 to 4 colours");
+    }
+    if s.density > crate::sparkle::MAX_DENSITY || s.density_end > crate::sparkle::MAX_DENSITY {
+        return Err("a sparkle's density must be 0 to 64 a LED a second");
+    }
+    if s.fade_ms > 60_000 || s.start_ms > 60_000 {
+        return Err("a sparkle's fade_ms and start_ms must be 0 to 60000");
+    }
+    if !(1..=crate::sparkle::MAX_TWINKLE_MS).contains(&s.min_ms)
+        || !(1..=crate::sparkle::MAX_TWINKLE_MS).contains(&s.max_ms)
+        || s.min_ms > s.max_ms
+    {
+        return Err("a sparkle's min_ms and max_ms must be 1 to 60000, min at most max");
+    }
+    if s.base > 1000 {
+        return Err("a sparkle's base must be 0 to 1");
+    }
+    if s.fall_speed > crate::sparkle::MAX_MOTION || s.fall_accel > crate::sparkle::MAX_MOTION {
+        return Err("a sparkle's fall_speed and fall_accel must be 0 to 64 LEDs a second");
+    }
+    Ok(())
 }
 
 /// A look name: 1 to [`MAX_LOOK_NAME`] of `a-z`, `0-9`, `.`, `-` and `_`.

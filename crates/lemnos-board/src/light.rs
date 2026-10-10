@@ -54,6 +54,10 @@ pub const LIGHT_KEYS: &[&str] = &[
     "failed_period_ms",
     "failed_depth",
     "confirmed",
+    "gravity_device",
+    "gravity_plane",
+    "gravity_led0_deg",
+    "default_down",
 ];
 
 fn bad(spec: &DeviceSpec, reason: impl Into<String>) -> BoardError {

@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 pub(crate) const STAGED_MS: u64 = 5_000;
 /// How long a failed update or a rollback is shown.
 pub(crate) const FAILED_MS: u64 = 60_000;
-/// How long the confirmed celebration is held (its look runs about 1.9 s).
-pub(crate) const CONFIRMED_MS: u64 = 2_600;
+/// How long the confirmed celebration is held (its look runs about 3.2 s).
+pub(crate) const CONFIRMED_MS: u64 = 3_200;
 
 /// What the updater's state means for the light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

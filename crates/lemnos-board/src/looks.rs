@@ -16,8 +16,8 @@
 //! ```
 
 use lemnos_light::{
-    Block, Easing, Effect, Fraction, LayerSpec, LookSpec, MAX_FRAME_LEDS, MAX_LAYERS, Mode, Rgbw,
-    valid_look_name,
+    Block, Easing, Effect, Fraction, LayerSpec, LookSpec, MAX_FRAME_LEDS, MAX_LAYERS,
+    MAX_SPARKLE_COLORS, Mode, Rgbw, Sparkle, valid_look_name,
 };
 use std::fmt::Write as _;
 
@@ -514,7 +514,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         return Err(vec![err(
             source,
             &join(key, "block"),
-            "needs block: fill, comet, arc, ripple or frame",
+            "needs block: fill, comet, arc, ripple, frame, wash or sparkle",
         )]);
     };
     let allowed: &[&str] = match block_name {
@@ -552,11 +552,32 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
             "mode",
         ],
         "frame" => &["block", "pixels", "brightness", "mode"],
+        "wash" => &["block", "color", "envelope", "brightness", "mode"],
+        "sparkle" => &[
+            "block",
+            "color",
+            "colors",
+            "density",
+            "density_end",
+            "fade_ms",
+            "start_ms",
+            "min_ms",
+            "max_ms",
+            "base",
+            "seed",
+            "fall",
+            "fall_speed",
+            "fall_accel",
+            "brightness",
+            "mode",
+        ],
         other => {
             return Err(vec![err(
                 source,
                 &join(key, "block"),
-                format!("unknown block {other:?} (fill, comet, arc, ripple or frame)"),
+                format!(
+                    "unknown block {other:?} (fill, comet, arc, ripple, frame, wash or sparkle)"
+                ),
             )]);
         }
     };
@@ -567,6 +588,8 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         "comet" => comet(source, key, table, &mut errors),
         "arc" => arc(source, key, table, &mut errors),
         "ripple" => ripple(source, key, table, &mut errors),
+        "wash" => wash(source, key, table, &mut errors),
+        "sparkle" => sparkle(source, key, table, &mut errors),
         _ => frame(source, key, table, &mut errors),
     };
     let layer_brightness = match table.get("brightness") {
@@ -822,6 +845,156 @@ fn leds_per_second(
     value
 }
 
+/// A wash: a colour under its own envelope.
+fn wash(source: &str, key: &str, table: &toml::Table, errors: &mut Errors) -> Option<Block> {
+    let color = required_color(source, key, table, errors);
+    let effect = match table.get("envelope") {
+        None => {
+            errors.push(err(
+                source,
+                &join(key, "envelope"),
+                "needs an envelope: a table, or solid, blink, breathe or pulse",
+            ));
+            None
+        }
+        Some(value) => envelope(source, &join(key, "envelope"), value)
+            .map_err(|mut e| errors.append(&mut e))
+            .ok(),
+    };
+    match (color, effect) {
+        (Some(color), Some(effect)) => Some(Block::Wash { color, effect }),
+        _ => None,
+    }
+}
+
+/// Thousandths of a per-second rate (0 to 64 a LED a second), from `name`.
+fn per_second(
+    source: &str,
+    key: &str,
+    table: &toml::Table,
+    name: &str,
+    default: f64,
+    max: f64,
+    errors: &mut Errors,
+) -> Option<u32> {
+    match table.get(name) {
+        None => Some((default * 1000.0).round() as u32),
+        Some(v) => match number(v).filter(|v| (0.0..=max).contains(v)) {
+            Some(v) => Some((v * 1000.0).round() as u32),
+            None => {
+                errors.push(err(
+                    source,
+                    &join(key, name),
+                    format!("must be a number from 0 to {max}"),
+                ));
+                None
+            }
+        },
+    }
+}
+
+/// A sparkle: random twinkles of one colour or of up to four, or falling
+/// sparks. The keys are documented in `docs/looks.md`.
+fn sparkle(source: &str, key: &str, table: &toml::Table, errors: &mut Errors) -> Option<Block> {
+    let colors: Option<Vec<Rgbw>> = match (table.get("color"), table.get("colors")) {
+        (Some(_), Some(_)) => {
+            errors.push(err(source, key, "give color or colors, not both"));
+            None
+        }
+        (None, None) => {
+            errors.push(err(source, key, "needs color, or colors (up to 4)"));
+            None
+        }
+        (Some(v), None) => color(v).map(|c| vec![c]).or_else(|| {
+            errors.push(err(
+                source,
+                &join(key, "color"),
+                "must be a colour: \"rrggbb\" (or \"wwrrggbb\")",
+            ));
+            None
+        }),
+        (None, Some(v)) => {
+            let list = v
+                .as_array()
+                .and_then(|list| list.iter().map(color).collect::<Option<Vec<Rgbw>>>());
+            match list {
+                Some(list) if (1..=MAX_SPARKLE_COLORS).contains(&list.len()) => Some(list),
+                _ => {
+                    errors.push(err(
+                        source,
+                        &join(key, "colors"),
+                        "must be a list of 1 to 4 colours",
+                    ));
+                    None
+                }
+            }
+        }
+    };
+    let mut errs = Errors::new();
+    let density = per_second(source, key, table, "density", 1.2, 64.0, &mut errs);
+    let density_end = match table.get("density_end") {
+        None => density,
+        Some(_) => per_second(source, key, table, "density_end", 0.0, 64.0, &mut errs),
+    };
+    let fade_ms = ms_in(source, key, table, "fade_ms", 0, 60_000, &mut errs);
+    let start_ms = ms_in(source, key, table, "start_ms", 0, 60_000, &mut errs);
+    let min_ms = ms_in(source, key, table, "min_ms", 350, 60_000, &mut errs);
+    let max_ms = ms_in(source, key, table, "max_ms", 950, 60_000, &mut errs);
+    let base = optional_fraction(source, key, table, "base", 0, &mut errs);
+    let seed = match table.get("seed") {
+        None => Some(0),
+        Some(v) => whole(v, 0, i64::from(u32::MAX)).map(|s| s as u32),
+    };
+    if seed.is_none() {
+        errs.push(err(
+            source,
+            &join(key, "seed"),
+            "must be a whole number, 0 to 4294967295",
+        ));
+    }
+    let fall = match table.get("fall") {
+        None => Some(false),
+        Some(v) => v.as_bool(),
+    };
+    if fall.is_none() {
+        errs.push(err(source, &join(key, "fall"), "must be true or false"));
+    }
+    let fall_speed = per_second(source, key, table, "fall_speed", 5.0, 64.0, &mut errs);
+    let fall_accel = per_second(source, key, table, "fall_accel", 6.0, 64.0, &mut errs);
+    if !errs.is_empty() {
+        errors.append(&mut errs);
+        return None;
+    }
+    let (Some(colors), Some(density), Some(density_end), Some(fade_ms), Some(start_ms)) =
+        (colors, density, density_end, fade_ms, start_ms)
+    else {
+        return None;
+    };
+    let (Some(min_ms), Some(max_ms), Some(base), Some(seed), Some(fall), Some(fall_speed)) =
+        (min_ms, max_ms, base, seed, fall, fall_speed)
+    else {
+        return None;
+    };
+    let fall_accel = fall_accel?;
+    let mut palette = [Rgbw::OFF; MAX_SPARKLE_COLORS];
+    palette[..colors.len()].copy_from_slice(&colors);
+    Some(Block::Sparkle(Sparkle {
+        colors: palette,
+        count: colors.len() as u8,
+        density,
+        density_end,
+        fade_ms,
+        start_ms,
+        min_ms,
+        max_ms,
+        base,
+        seed,
+        fall,
+        fall_speed,
+        fall_accel,
+    }))
+}
+
 fn frame(source: &str, key: &str, table: &toml::Table, errors: &mut Errors) -> Option<Block> {
     let Some(pixels) = table.get("pixels").and_then(toml::Value::as_array) else {
         errors.push(err(
@@ -898,6 +1071,11 @@ fn fraction_text(b: u8) -> String {
 }
 
 /// Thousandths as a number of three decimals.
+/// Thousandths of a rate (LEDs a second, or twinkles a LED a second).
+fn per_second_text(v: u32) -> String {
+    format!("{:.3}", f64::from(v) / 1000.0)
+}
+
 fn thousandths(v: u16) -> String {
     format!("{:.3}", f64::from(v) / 1000.0)
 }
@@ -1010,6 +1188,34 @@ fn layer_text(layer: &LayerSpec) -> String {
                 .map(|c| format!("\"{}\"", color_text(*c)))
                 .collect();
             parts.push(format!("pixels = [{}]", list.join(", ")));
+        }
+        Block::Wash { color, effect } => {
+            parts.push("block = \"wash\"".into());
+            parts.push(format!("color = \"{}\"", color_text(color)));
+            parts.push(format!("envelope = {}", envelope_text(&effect)));
+        }
+        Block::Sparkle(sp) => {
+            parts.push("block = \"sparkle\"".into());
+            let list: Vec<String> = sp.colors[..usize::from(sp.count)]
+                .iter()
+                .map(|c| format!("\"{}\"", color_text(*c)))
+                .collect();
+            if list.len() == 1 {
+                parts.push(format!("color = {}", list[0]));
+            } else {
+                parts.push(format!("colors = [{}]", list.join(", ")));
+            }
+            parts.push(format!("density = {}", per_second_text(sp.density)));
+            parts.push(format!("density_end = {}", per_second_text(sp.density_end)));
+            parts.push(format!("fade_ms = {}", sp.fade_ms));
+            parts.push(format!("start_ms = {}", sp.start_ms));
+            parts.push(format!("min_ms = {}", sp.min_ms));
+            parts.push(format!("max_ms = {}", sp.max_ms));
+            parts.push(format!("base = {}", thousandths(sp.base)));
+            parts.push(format!("seed = {}", sp.seed));
+            parts.push(format!("fall = {}", sp.fall));
+            parts.push(format!("fall_speed = {}", per_second_text(sp.fall_speed)));
+            parts.push(format!("fall_accel = {}", per_second_text(sp.fall_accel)));
         }
     }
     if layer.brightness != 255 {

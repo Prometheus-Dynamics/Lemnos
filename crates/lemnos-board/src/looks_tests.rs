@@ -238,8 +238,8 @@ fn errors_name_the_file_and_the_key() {
 fn unknown_top_level_keys_and_blocks_are_rejected_with_the_list() {
     let e = first_error("[looks.pv]\nlayer = []\n");
     assert!(e.contains("unknown key"), "{e}");
-    let e = body_error("layers = [{ block = \"sparkle\", color = \"ff0000\" }]");
-    assert!(e.contains("unknown block \"sparkle\""), "{e}");
+    let e = body_error("layers = [{ block = \"bogus\", color = \"ff0000\" }]");
+    assert!(e.contains("unknown block \"bogus\""), "{e}");
     let e = body_error("layers = [{ block = \"fill\", color = \"ff0000\", period_ms = 100 }]");
     assert!(
         e.contains("unknown key (allowed: block, color, brightness, mode)"),
@@ -416,4 +416,126 @@ fn look_brightness_is_the_ring_wide_scale_and_the_driver_byte_is_unchanged() {
         128
     );
     assert!(crate::LIGHT_KEYS.contains(&"look_brightness"));
+}
+
+#[test]
+fn a_wash_and_a_sparkle_parse_with_their_defaults() {
+    let spec = from_toml(
+        "--spec",
+        r#"
+layers = [
+  { block = "wash", color = "ffffff", envelope = { kind = "breathe", period_ms = 3000, depth = 0.55 } },
+  { block = "sparkle", color = "fff4e6", base = 0.03 },
+]
+"#,
+    )
+    .expect("parses");
+    let mut layers = spec.iter();
+    assert!(matches!(
+        layers.next().unwrap().block,
+        Block::Wash {
+            effect: Effect::Breathe {
+                period_ms: 3_000,
+                depth: 550,
+                ..
+            },
+            ..
+        }
+    ));
+    let Block::Sparkle(s) = layers.next().unwrap().block else {
+        panic!("a sparkle");
+    };
+    assert_eq!(s.count, 1);
+    assert_eq!(
+        (s.density, s.density_end, s.fade_ms, s.start_ms),
+        (1_200, 1_200, 0, 0)
+    );
+    assert_eq!((s.min_ms, s.max_ms, s.base, s.seed), (350, 950, 30, 0));
+    assert!(!s.fall);
+    assert_eq!((s.fall_speed, s.fall_accel), (5_000, 6_000));
+}
+
+#[test]
+fn a_sparkle_takes_colors_or_a_colour_and_checks_its_ranges() {
+    let spec = from_toml(
+        "--spec",
+        r#"
+layers = [
+  { block = "sparkle", colors = ["00ff20", "c8ffd2", "78ff8c"], density = 3.5, density_end = 0, fade_ms = 2600, start_ms = 300, fall = true },
+]
+"#,
+    )
+    .expect("parses");
+    let Block::Sparkle(s) = spec.iter().next().unwrap().block else {
+        panic!("a sparkle");
+    };
+    assert_eq!((s.count, s.density, s.density_end), (3, 3_500, 0));
+    assert!(s.fall);
+
+    let cases = [
+        (
+            r#"{ block = "sparkle", color = "00ff20", colors = ["00ff20"] }"#,
+            "not both",
+        ),
+        (r#"{ block = "sparkle", density = 1.0 }"#, "needs color"),
+        (
+            r#"{ block = "sparkle", colors = ["00ff20","00ff20","00ff20","00ff20","00ff20"] }"#,
+            "1 to 4",
+        ),
+        (
+            r#"{ block = "sparkle", color = "00ff20", density = 70 }"#,
+            "density",
+        ),
+        (
+            r#"{ block = "sparkle", color = "00ff20", min_ms = 900, max_ms = 300 }"#,
+            "min_ms",
+        ),
+        (
+            r#"{ block = "sparkle", color = "00ff20", fall_speed = 100 }"#,
+            "fall_speed",
+        ),
+        (
+            r#"{ block = "sparkle", color = "00ff20", seed = -1 }"#,
+            "seed",
+        ),
+        (
+            r#"{ block = "sparkle", color = "00ff20", fall = "yes" }"#,
+            "fall",
+        ),
+        (r#"{ block = "wash", color = "00ff20" }"#, "envelope"),
+        (
+            r#"{ block = "wash", color = "00ff20", envelope = "nope" }"#,
+            "solid, blink",
+        ),
+    ];
+    for (layer, want) in cases {
+        let text = format!("layers = [{layer}]");
+        let err = body_error(&text);
+        assert!(err.contains(want), "{layer}: {err}");
+    }
+    // Two sparkles in one look are refused.
+    let two = body_error(
+        r#"layers = [
+  { block = "sparkle", color = "00ff20" },
+  { block = "sparkle", color = "ff0000" },
+]"#,
+    );
+    assert!(two.contains("at most one sparkle"), "{two}");
+}
+
+#[test]
+fn a_wash_and_a_sparkle_round_trip_through_the_file_form() {
+    let spec = from_toml(
+        "--spec",
+        r#"
+layers = [
+  { block = "wash", color = "c8ffd2", envelope = { kind = "pulse", attack_ms = 80, decay_ms = 500, repeat = 1 } },
+  { block = "sparkle", colors = ["00ff20", "78ff8c"], density = 3.5, density_end = 0, fade_ms = 2600, start_ms = 300, base = 0.25, seed = 9, fall = true, fall_speed = 5, fall_accel = 6 },
+]
+"#,
+    )
+    .expect("parses");
+    let text = body_toml(&spec);
+    let again = from_toml("round trip", &text).expect("the written form parses");
+    assert_eq!(again, spec);
 }
