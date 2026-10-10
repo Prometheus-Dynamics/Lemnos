@@ -98,7 +98,7 @@ match = {{ type = "cpu-thermal" }}
 id = "ring"
 driver = "ws2812"
 path = "{root}/dev/leds0"
-config = {{ count = 16, offset = 5, fade_ms = 0, status_effect = "solid", ok = 0x00ff00 }}
+config = {{ count = 16, offset = 5, fade_ms = 0, status_effect = "solid", ok = 0x00ff00, look_brightness = 1.0 }}
 "#,
         root = root.display()
     ))
@@ -230,7 +230,7 @@ fn serves_readings_controls_and_led_intents() {
     assert_eq!(&ring(&root)[0..4], &[0, 0, 0, 0]);
     leds.status(LedStatus::Ok).unwrap();
     leds.sync().unwrap();
-    eventually(|| ring(&root).chunks(4).all(|p| p == [0, 255, 0, 0]));
+    eventually(|| ring(&root).chunks(4).all(|p| p == [0, 178, 0, 0]));
     leds.system(SystemState::Updating {
         progress: Some(500),
         phase: lemnos_ipc::Phase::Writing,
@@ -240,7 +240,7 @@ fn serves_readings_controls_and_led_intents() {
     // Half the ring filled (from logical 0 = physical 5), the rest dim.
     eventually(|| {
         let bytes = ring(&root);
-        bytes[20..24] != [0, 255, 0, 0] && bytes[20..24] == bytes[24..28]
+        bytes[20..24] != [0, 178, 0, 0] && bytes[20..24] == bytes[24..28]
     });
     leds.clear().unwrap();
     leds.sync().unwrap();

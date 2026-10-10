@@ -6,7 +6,8 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use lemnos_board::{BoardDefinition, DriverRegistry, LinuxBuses};
-use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
+use lemnos_linux_sys::signal::{SIGHUP, SIGINT, SIGTERM, SignalFd};
+use lemnosd::looks::{DEFAULT_LOOKS_DIR, DEFAULT_OVERRIDE_DIR};
 use lemnosd::{DEFAULT_BOARD, DEFAULT_SOCKET, Service, ServiceConfig};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
@@ -24,6 +25,11 @@ fn main() -> ExitCode {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // The look files: a read-only directory, and a writable one (`looks save`
+    // writes there). `off` (or an empty value) turns either off.
+    let looks_dir = std::env::var("LEMNOSD_LOOKS_DIR").unwrap_or_else(|_| DEFAULT_LOOKS_DIR.into());
+    let looks_override =
+        std::env::var("LEMNOSD_LOOKS_OVERRIDE_DIR").unwrap_or_else(|_| DEFAULT_OVERRIDE_DIR.into());
     let mut check = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -60,8 +66,9 @@ fn main() -> ExitCode {
         println!("{board}: ok ({} devices)", definition.devices.len());
         return ExitCode::SUCCESS;
     }
-    // Block SIGTERM/SIGINT before anything else, so the loop sees them.
-    let signals = match SignalFd::new(&[SIGTERM, SIGINT]) {
+    // Block SIGTERM/SIGINT/SIGHUP before anything else, so the loop sees them
+    // (SIGHUP re-reads the look files).
+    let signals = match SignalFd::new(&[SIGTERM, SIGINT, SIGHUP]) {
         Ok(signals) => signals,
         Err(error) => {
             eprintln!("lemnosd: signals: {error}");
@@ -71,6 +78,8 @@ fn main() -> ExitCode {
     let mut config = ServiceConfig::new(definition, PathBuf::from(&socket));
     config.update_status = (!update.is_empty() && update != "off").then(|| PathBuf::from(&update));
     config.booting_ms = (booting > 0).then_some(booting);
+    config.looks_dir = off_or_path(&looks_dir);
+    config.looks_override_dir = off_or_path(&looks_override);
     let mut service = match Service::new(config, Box::new(LinuxBuses::default())) {
         Ok(service) => service.with_systemd(),
         Err(error) => {
@@ -100,7 +109,14 @@ fn main() -> ExitCode {
             next_targets = Instant::now() + Duration::from_secs(5);
         }
         match service.step(Duration::from_secs(1), Some(signals.as_fd())) {
-            Ok(true) => break,
+            Ok(true) => {
+                // A reload (SIGHUP) keeps the loop going; anything else stops it.
+                if let Ok(Some(SIGHUP)) = signals.read() {
+                    service.reload_looks();
+                } else {
+                    break;
+                }
+            }
             Ok(false) => {}
             Err(error) => {
                 eprintln!("lemnosd: {error}");
@@ -113,4 +129,9 @@ fn main() -> ExitCode {
     service.shutdown(lemnosd::system_stopping());
     eprintln!("lemnosd: stopped");
     ExitCode::SUCCESS
+}
+
+/// A directory from an environment value; `off` or empty is none.
+fn off_or_path(value: &str) -> Option<PathBuf> {
+    (!value.is_empty() && value != "off").then(|| PathBuf::from(value))
 }

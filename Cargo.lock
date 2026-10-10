@@ -722,6 +722,7 @@ dependencies = [
  "orion-node",
  "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]

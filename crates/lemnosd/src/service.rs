@@ -4,14 +4,15 @@
 use crate::clients::Client;
 use crate::devices::{Slot, Subscription};
 use crate::light::{Light, LightIntent, MAX_LEDS};
+use crate::looks::LookTable;
 use crate::notify::Notifier;
 use crate::schedule::{self, Due, Next};
 use crate::update::UpdateWatcher;
 use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
 use lemnos_device::DeviceStatus;
 use lemnos_hal::ErrorKind;
-use lemnos_ipc::{Event, Message, RawReading, Refusal, Request, VERSION};
-use lemnos_light::{Layer, Show, SystemState};
+use lemnos_ipc::{Event, LedShow, LooksOp, Message, RawReading, Refusal, Request, VERSION};
+use lemnos_light::{Layer, Show, SystemState, valid_look_name};
 use lemnos_linux_sys::poll::{POLLIN, POLLOUT, PollFd, poll_many};
 use lemnos_linux_sys::time::boottime_us;
 use std::fmt;
@@ -24,6 +25,8 @@ use std::time::Duration;
 
 /// How often the updater's status files are read.
 const UPDATE_POLL_MS: u64 = 500;
+/// How often the look files are checked for changes.
+const LOOKS_POLL_MS: u64 = 1_000;
 /// The reboot ember's fade on shutdown, and the most time a stop may spend
 /// on it.
 const SHUTDOWN_FADE_MS: u32 = 1_200;
@@ -41,6 +44,12 @@ pub struct ServiceConfig {
     /// Show the booting spinner for this long after start, or until a client
     /// sets a status (`None`: not at all).
     pub booting_ms: Option<u64>,
+    /// The read-only directory of look files (`LEMNOSD_LOOKS_DIR`); `None`
+    /// reads none.
+    pub looks_dir: Option<PathBuf>,
+    /// The writable directory of look files, read last and written by
+    /// `looks save` (`LEMNOSD_LOOKS_OVERRIDE_DIR`); `None` refuses saves.
+    pub looks_override_dir: Option<PathBuf>,
 }
 
 impl ServiceConfig {
@@ -51,6 +60,8 @@ impl ServiceConfig {
             socket: socket.into(),
             update_status: None,
             booting_ms: None,
+            looks_dir: None,
+            looks_override_dir: None,
         }
     }
 }
@@ -113,6 +124,9 @@ pub struct Service {
     pollfds: Vec<PollFd>,
     /// The sensors the scheduler looks at (reused between passes).
     due: Vec<Due>,
+    /// The named looks (built-in, board, look files).
+    looks: LookTable,
+    next_looks_ms: u64,
 }
 
 impl Service {
@@ -130,6 +144,11 @@ impl Service {
         let listener = UnixListener::bind(&config.socket)?;
         listener.set_nonblocking(true)?;
         let definition = config.board.clone();
+        let looks = LookTable::new(
+            &config.board,
+            config.looks_dir.as_deref(),
+            config.looks_override_dir.as_deref(),
+        );
         let now_ms = boottime_us() / 1000;
         let mut service = Self {
             board: config.board.board.id.clone(),
@@ -151,6 +170,8 @@ impl Service {
             next_watchdog_ms: 0,
             pollfds: Vec::new(),
             due: Vec::new(),
+            looks,
+            next_looks_ms: 0,
         };
         service.build_devices(now_ms);
         Ok(service)
@@ -354,9 +375,42 @@ impl Service {
         }
     }
 
+    /// Re-reads the look files that changed, about once a second.
+    #[allow(clippy::print_stderr)]
+    fn poll_looks(&mut self, now_ms: u64) {
+        if now_ms < self.next_looks_ms {
+            return;
+        }
+        self.next_looks_ms = now_ms + LOOKS_POLL_MS;
+        if self.looks.scan() {
+            eprint!("lemnosd: looks changed: {}", self.looks.report());
+            self.invalidate_lights();
+        }
+    }
+
+    /// Re-reads every look file now (`SIGHUP`), and reports what loaded and
+    /// what failed to the journal.
+    #[allow(clippy::print_stderr)]
+    pub fn reload_looks(&mut self) {
+        let report = self.looks.reload();
+        eprint!("lemnosd: looks: {report}");
+        self.invalidate_lights();
+    }
+
+    /// Makes every light re-resolve what it shows (a look file changed).
+    fn invalidate_lights(&mut self) {
+        for light in &mut self.lights {
+            light.invalidate();
+        }
+    }
+
     fn render_lights(&mut self, now_ms: u64) {
         for li in 0..self.lights.len() {
-            if let Some(winner) = self.lights[li].arbitrate(now_ms) {
+            let winner = {
+                let looks = &self.looks;
+                self.lights[li].arbitrate(now_ms, &|name| looks.get(name))
+            };
+            if let Some(winner) = winner {
                 let owner = winner.map_or_else(String::new, |w| self.owner_name(w.owner));
                 let layer = winner.map_or("", |w| w.layer.name()).to_string();
                 let device = self.slots[self.lights[li].slot].id().to_string();
@@ -549,12 +603,70 @@ impl Service {
                 if !self.slots[self.lights[li].slot].allows(&name) {
                     return;
                 }
-                if matches!(request.show, lemnos_ipc::LedShow::Status(_)) {
+                // A look must be one the service has (a built-in or a look
+                // file), and an inline look a valid one; a refusal leaves
+                // the light as it is.
+                let refusal = match &request.show {
+                    LedShow::Look { name, .. } if !valid_look_name(name) => {
+                        Some(format!("{name:?} is not a valid look name"))
+                    }
+                    LedShow::Look { name, .. } if !self.looks.knows(name) => {
+                        Some(format!("unknown look {name:?} (lemnos-ctl looks list)"))
+                    }
+                    LedShow::Inline { spec, .. } => spec
+                        .validate()
+                        .err()
+                        .map(|reason| format!("invalid look: {reason}")),
+                    _ => None,
+                };
+                if let Some(reason) = refusal {
+                    if request.id != 0 {
+                        self.clients[ci].send(&Message::Text {
+                            id: request.id,
+                            result: Err(reason),
+                        });
+                    }
+                    return;
+                }
+                if matches!(request.show, LedShow::Status(_)) {
                     // A client's status ends the booting spinner.
                     self.booting_until = None;
                     self.lights[li].clear_service(Layer::System);
                 }
-                self.lights[li].request(owner, priority, &request, now_ms);
+                let accepted = self.lights[li].request(owner, priority, &request, now_ms);
+                if request.id != 0 {
+                    let result = if accepted {
+                        Ok(String::new())
+                    } else {
+                        Err("every intent slot of the light is taken".to_string())
+                    };
+                    self.clients[ci].send(&Message::Text {
+                        id: request.id,
+                        result,
+                    });
+                }
+            }
+            Request::Looks { id, op } => {
+                let result = match op {
+                    LooksOp::List => Ok(self.looks.list()),
+                    LooksOp::Show(name) => {
+                        let defaults = self.lights.first().map(|l| l.defaults).unwrap_or_default();
+                        self.looks.show(&name, &defaults)
+                    }
+                    LooksOp::Reload => {
+                        let report = self.looks.reload();
+                        self.invalidate_lights();
+                        Ok(report)
+                    }
+                    LooksOp::Save { name, text } => {
+                        let saved = self.looks.save(&name, &text);
+                        if saved.is_ok() {
+                            self.invalidate_lights();
+                        }
+                        saved
+                    }
+                };
+                self.clients[ci].send(&Message::Text { id, result });
             }
         }
     }
@@ -680,6 +792,7 @@ impl Service {
         self.build_devices(now);
         self.poll_devices();
         self.poll_update(now);
+        self.poll_looks(now);
         self.render_lights(now);
         self.send_edges();
         if let Some(interval) = self.notifier.watchdog_interval()
@@ -817,9 +930,10 @@ impl Service {
     /// [`SHUTDOWN_CAP_MS`], so a stop is not delayed.
     fn fade_to_ember(&mut self) {
         let start = self.now_ms();
+        let looks = &self.looks;
         for light in &mut self.lights {
-            let (look, _) =
-                LightIntent::new(Show::System(SystemState::Rebooting)).resolve(&light.defaults);
+            let (look, _) = LightIntent::new(Show::System(SystemState::Rebooting))
+                .resolve(&light.defaults, &|name| looks.get(name));
             let transition =
                 lemnos_light::Transition::new(SHUTDOWN_FADE_MS, lemnos_light::Easing::EaseInOut);
             light.animator.set(look, transition, start);

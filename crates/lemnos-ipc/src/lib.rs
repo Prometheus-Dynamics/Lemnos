@@ -36,9 +36,11 @@ pub use lemnos_device::{Axis, DeviceClass, DeviceStatus, NO_VALUE, Quantity, Uni
 pub use lemnos_hal::ErrorKind;
 /// Raw line, PWM and SPI settings ([`DeviceClient::claim_line`] and friends).
 pub use lemnos_hal::raw;
-pub use lemnos_light::{Easing, EffectKind, Phase, Status as LedStatus, SystemState};
+pub use lemnos_light::{
+    Easing, EffectKind, LayerSpec, LookName, LookSpec, Phase, Status as LedStatus, SystemState,
+};
 pub use wire::{
-    ChannelDesc, ControlDesc, DeviceDesc, Event, I2cOp, LedRequest, LedShow, LineTarget, Message,
-    PwmTarget, RawReading, RawRequest, Refusal, Request, SpiXfer, VERSION, WireError,
+    ChannelDesc, ControlDesc, DeviceDesc, Event, I2cOp, LedRequest, LedShow, LineTarget, LooksOp,
+    Message, PwmTarget, RawReading, RawRequest, Refusal, Request, SpiXfer, VERSION, WireError,
     decode_message, decode_request,
 };

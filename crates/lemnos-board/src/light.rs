@@ -15,6 +15,7 @@ pub const LIGHT_KEYS: &[&str] = &[
     "offset",
     "direction",
     "brightness",
+    "look_brightness",
     "gpio",
     "fade_ms",
     "easing",
@@ -166,6 +167,9 @@ pub fn light_defaults(spec: &DeviceSpec) -> Result<Defaults, BoardError> {
     let mut d = Defaults::default();
     if let Some(v) = uint(spec, "fade_ms")? {
         d.fade_ms = v;
+    }
+    if let Some(v) = fraction(spec, "look_brightness")? {
+        d.look_brightness = ((u32::from(v) * 255 + 500) / 1000) as u8;
     }
     if let Some(v) = spec.config.get("easing") {
         d.easing = v

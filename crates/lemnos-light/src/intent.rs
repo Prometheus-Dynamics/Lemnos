@@ -1,7 +1,9 @@
 //! LED intents from several owners, and which one a light shows.
 
-use crate::animator::{Effect, Look, Transition};
+use crate::animator::{Effect, Transition};
+use crate::builtin;
 use crate::easing::Easing;
+use crate::look::{Block, LookName, LookSpec, MAX_FRAME_LEDS};
 use lemnos_device::Rgbw;
 
 /// Status a light can show.
@@ -36,6 +38,17 @@ impl Status {
             _ => None,
         }
     }
+
+    /// The look that shows this status (`status.<name>`).
+    pub const fn look_name(self) -> &'static str {
+        match self {
+            Self::Ok => "status.ok",
+            Self::Warn => "status.warn",
+            Self::Error => "status.error",
+            Self::Busy => "status.busy",
+            Self::Off => "status.off",
+        }
+    }
 }
 
 /// Which kind of intent, from lowest to highest precedence. A light shows
@@ -43,7 +56,7 @@ impl Status {
 /// `Test` over `Status` over `App`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Layer {
-    /// Colours, frames, single LEDs and gauges from applications.
+    /// Colours, frames, single LEDs, gauges and named looks from applications.
     App,
     /// Status from applications.
     Status,
@@ -100,9 +113,9 @@ pub enum SystemState {
     /// A progress fill (`progress` thousandths, `None`: unknown) over the
     /// phase's colour.
     Updating { progress: Option<u16>, phase: Phase },
-    /// A spinner.
+    /// The start-up look: two comets.
     Booting,
-    /// A spinner.
+    /// The reboot ember (a static look).
     Rebooting,
     /// A red pulse.
     UpdateFailed,
@@ -122,6 +135,39 @@ impl SystemState {
             Self::UpdateFailed => "update-failed",
             Self::RolledBack => "rolled-back",
             Self::Confirmed => "confirmed",
+        }
+    }
+
+    /// The look that shows this state: `system.verifying`,
+    /// `system.writing` (an arc; `system.writing-unknown` while the amount is
+    /// unknown), `system.staged`, `system.rebooting`, `system.booting`,
+    /// `system.failed`, `system.rolled-back`, `system.confirmed`.
+    pub const fn look_name(self) -> &'static str {
+        match self {
+            Self::Updating {
+                phase: Phase::Staged,
+                ..
+            } => "system.staged",
+            Self::Updating {
+                progress: Some(_), ..
+            } => "system.writing",
+            Self::Updating {
+                progress: None,
+                phase: Phase::Verifying,
+            } => "system.verifying",
+            Self::Updating {
+                progress: None,
+                phase: Phase::Writing,
+            } => "system.writing-unknown",
+            Self::Updating {
+                progress: None,
+                phase: Phase::Applying,
+            } => "system.rebooting",
+            Self::Booting => "system.booting",
+            Self::Rebooting => "system.rebooting",
+            Self::UpdateFailed => "system.failed",
+            Self::RolledBack => "system.rolled-back",
+            Self::Confirmed => "system.confirmed",
         }
     }
 }
@@ -177,6 +223,8 @@ impl EffectKind {
 
 /// How intents look unless they say otherwise; a board definition sets
 /// them per light (the Raze: 250 ms ease-in-out fades, breathing status).
+/// The built-in looks are made from these, so the board's keys still shape
+/// them; a look file overrides a built-in entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Defaults {
     pub fade_ms: u32,
@@ -191,7 +239,8 @@ pub struct Defaults {
     pub blink_period_ms: u32,
     /// Thousandths of the period the light is on.
     pub blink_duty: u16,
-    pub brightness: u8,
+    /// The ring-wide brightness: every look is scaled by it (0..=255).
+    pub look_brightness: u8,
     pub ok: Rgbw,
     pub warn: Rgbw,
     pub error: Rgbw,
@@ -250,7 +299,7 @@ impl Default for Defaults {
             breathe_depth: 600,
             blink_period_ms: 1_000,
             blink_duty: 500,
-            brightness: 255,
+            look_brightness: 128,
             ok: Rgbw::rgb(0x00ff00),
             warn: Rgbw::rgb(0xff8000),
             error: Rgbw::rgb(0xff0000),
@@ -258,8 +307,8 @@ impl Default for Defaults {
             locate: Rgbw::rgb(0x00ffff),
             locate_effect: EffectKind::Breathe,
             idle: Rgbw::OFF,
-            // A faint neutral white (16/255): the track of a gauge.
             progress: Rgbw::rgb(0x00ff40),
+            // A faint neutral white: the track of a gauge.
             progress_background: Rgbw::rgb(0x101012),
             spinner_period_ms: 1_200,
             spinner_tail: 5,
@@ -285,8 +334,10 @@ impl Default for Defaults {
     }
 }
 
-/// What an intent shows.
+/// What an intent shows. Fixed size on purpose (no allocation), so an
+/// inline look is as large as its layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Show<const N: usize> {
     Status(Status),
     Color(Rgbw),
@@ -316,6 +367,18 @@ pub enum Show<const N: usize> {
     System(SystemState),
     /// The board's locate look.
     Locate,
+    /// A named look: a built-in, or one from a look file, as the light's
+    /// look table has it when the intent is resolved. `progress` (thousandths)
+    /// fills the look's arcs that take an input.
+    Look {
+        name: LookName,
+        progress: Option<u16>,
+    },
+    /// A look given in full. `progress` as for [`Show::Look`].
+    Inline {
+        spec: LookSpec,
+        progress: Option<u16>,
+    },
 }
 
 /// One owner's request for a light. Unset fields take the light's
@@ -335,6 +398,15 @@ pub struct Intent<const N: usize> {
     /// A selftest or diagnostic look: shown in the [`Layer::Test`] layer
     /// (`alert` wins if both are set).
     pub test: bool,
+}
+
+/// Resolves a look name the light's table does not hold itself: the look
+/// table (file looks) is asked first, then the built-ins.
+pub type Lookup<'a> = &'a dyn Fn(&str) -> Option<LookSpec>;
+
+/// The look `name` is: from `lookup`, else a built-in made from `defaults`.
+pub fn named_look(name: &str, defaults: &Defaults, lookup: Lookup<'_>) -> Option<LookSpec> {
+    lookup(name).or_else(|| builtin::builtin(name, defaults))
 }
 
 impl<const N: usize> Intent<N> {
@@ -368,43 +440,41 @@ impl<const N: usize> Intent<N> {
             | Show::Frame { .. }
             | Show::Progress { .. }
             | Show::Indeterminate { .. }
-            | Show::Orbit { .. } => Layer::App,
+            | Show::Orbit { .. }
+            | Show::Look { .. }
+            | Show::Inline { .. } => Layer::App,
         }
     }
 
     /// The look and the fade into it, with `defaults` filling unset fields.
-    pub fn resolve(&self, defaults: &Defaults) -> (Look<N>, Transition) {
-        // The breathe's period and depth: the board's, unless a system state
-        // has its own.
-        let mut breathe = (defaults.breathe_period_ms, defaults.breathe_depth);
-        let (mut look, default_effect) = match self.show {
-            Show::Status(status) => {
-                let (color, effect) = match status {
-                    Status::Ok => (defaults.ok, defaults.status_effect),
-                    Status::Warn => (defaults.warn, defaults.status_effect),
-                    Status::Error => (defaults.error, defaults.error_effect),
-                    Status::Busy => (defaults.busy, defaults.status_effect),
-                    Status::Off => (Rgbw::OFF, EffectKind::Solid),
-                };
-                (Look::fill(color), effect)
-            }
-            Show::Color(color) => (Look::fill(color), EffectKind::Solid),
-            Show::Frame { pixels, len } => (Look::frame(&pixels[..len.min(N)]), EffectKind::Solid),
+    /// Named looks are taken from `lookup` first (the look files), then the
+    /// built-ins; an unknown name shows nothing.
+    pub fn resolve(&self, defaults: &Defaults, lookup: Lookup<'_>) -> (LookSpec, Transition) {
+        let (mut spec, progress) = match self.show {
+            Show::Status(status) => named(status.look_name(), None, defaults, lookup),
+            Show::Color(color) => (
+                LookSpec::fill(color).with_brightness(builtin::FULL_FILL),
+                None,
+            ),
+            Show::Frame { pixels, len } => (
+                LookSpec::frame(&pixels[..len.min(N).min(MAX_FRAME_LEDS)]),
+                None,
+            ),
             Show::Progress {
                 fraction,
                 color,
                 background,
             } => (
-                Look::progress(
-                    permille(fraction),
+                LookSpec::progress(
+                    fraction.min(1000),
                     color.unwrap_or(defaults.progress),
                     background.unwrap_or(defaults.progress_background),
                 ),
-                EffectKind::Solid,
+                None,
             ),
             Show::Indeterminate { color } => (
-                self.spinner(color.unwrap_or(defaults.progress), defaults),
-                EffectKind::Solid,
+                builtin::spinner(color.unwrap_or(defaults.progress), defaults),
+                None,
             ),
             Show::Orbit {
                 color,
@@ -412,148 +482,143 @@ impl<const N: usize> Intent<N> {
                 heads,
                 base,
             } => (
-                self.comet(
+                builtin::comet(
                     color.unwrap_or(defaults.progress),
                     defaults.spinner_period_ms,
                     tail.unwrap_or(u16::from(defaults.spinner_tail) * 1000),
-                    heads,
+                    heads.clamp(1, 2),
                     base.unwrap_or(0),
                 ),
-                EffectKind::Solid,
+                None,
             ),
-            Show::System(state) => match state {
-                SystemState::Updating {
-                    phase: Phase::Staged,
-                    ..
-                } => {
-                    breathe = (defaults.staged_period_ms, defaults.staged_depth);
-                    (Look::fill(defaults.staged), EffectKind::Breathe)
-                }
-                SystemState::Updating {
-                    progress: Some(progress),
-                    ..
-                } => (
-                    Look::progress(
-                        permille(progress),
-                        defaults.updating,
-                        defaults.progress_background,
-                    ),
-                    EffectKind::Solid,
-                ),
-                SystemState::Updating {
-                    progress: None,
-                    phase,
-                } => match phase {
-                    Phase::Verifying | Phase::Writing => {
-                        let color = if phase == Phase::Verifying {
-                            defaults.verifying
-                        } else {
-                            defaults.writing
-                        };
-                        (
-                            self.comet(
-                                color,
-                                defaults.verifying_period_ms,
-                                defaults.verifying_tail,
-                                1,
-                                defaults.verifying_base,
-                            ),
-                            EffectKind::Solid,
-                        )
-                    }
-                    Phase::Applying | Phase::Staged => (
-                        Look::fill(defaults.rebooting.scaled(EMBER)),
-                        EffectKind::Solid,
-                    ),
-                },
-                SystemState::Booting => (
-                    self.comet(
-                        defaults.booting,
-                        defaults.booting_period_ms,
-                        defaults.booting_tail,
-                        2,
-                        defaults.booting_base,
-                    ),
-                    EffectKind::Solid,
-                ),
-                SystemState::Rebooting => (
-                    Look::fill(defaults.rebooting.scaled(EMBER)),
-                    EffectKind::Solid,
-                ),
-                SystemState::UpdateFailed | SystemState::RolledBack => {
-                    breathe = (defaults.failed_period_ms, defaults.failed_depth);
-                    (Look::fill(defaults.failed), EffectKind::Breathe)
-                }
-                SystemState::Confirmed => (Look::ripple(defaults.confirmed), EffectKind::Solid),
-            },
-            Show::Locate if defaults.locate_effect == EffectKind::Chase => {
-                (self.spinner(defaults.locate, defaults), EffectKind::Solid)
-            }
-            Show::Locate => (Look::fill(defaults.locate), defaults.locate_effect),
-        };
-        let effect = match self.effect.unwrap_or(default_effect) {
-            EffectKind::Chase if !look.is_moving() => {
-                let color = match look.pixels {
-                    crate::animator::Pixels::Fill(color) => color,
-                    _ => defaults.locate,
+            Show::System(state) => {
+                let progress = match state {
+                    SystemState::Updating { progress, .. } => progress,
+                    _ => None,
                 };
-                look = self.spinner(color, defaults);
-                EffectKind::Solid
+                named(state.look_name(), progress, defaults, lookup)
             }
-            other => other,
+            Show::Locate => named("system.locate", None, defaults, lookup),
+            Show::Look { name, progress } => named(name.as_str(), progress, defaults, lookup),
+            Show::Inline { spec, progress } => (spec, progress),
         };
-        look.effect = match effect {
-            EffectKind::Solid | EffectKind::Chase => Effect::Solid,
-            EffectKind::Blink => Effect::Blink {
-                period_ms: self.period_ms.unwrap_or(defaults.blink_period_ms),
-                duty: self.depth.unwrap_or(defaults.blink_duty),
-            },
-            EffectKind::Breathe => Effect::Breathe {
-                period_ms: self.period_ms.unwrap_or(breathe.0),
-                depth: self.depth.unwrap_or(breathe.1),
-                easing: self.easing.unwrap_or(defaults.easing),
-            },
-        };
-        look.brightness = self.brightness.unwrap_or(defaults.brightness);
+        if let Some(progress) = progress {
+            spec.fill_input(progress);
+        } else {
+            spec.fill_input(0);
+        }
+        if let Some(brightness) = self.brightness {
+            spec.brightness = brightness;
+        }
+        if let Some(kind) = self.effect {
+            self.apply_effect(&mut spec, kind, defaults);
+        }
+        self.apply_timing(&mut spec);
+        spec.brightness = scale(spec.brightness, defaults.look_brightness).max(spec.floor);
         let transition = Transition::new(
             self.fade_ms.unwrap_or(defaults.fade_ms),
             self.easing.unwrap_or(defaults.easing),
         );
-        (look, transition)
+        (spec, transition)
     }
 
-    /// The spinner: one comet, no floor.
-    fn spinner(&self, color: Rgbw, defaults: &Defaults) -> Look<N> {
-        self.comet(
-            color,
-            defaults.spinner_period_ms,
-            u16::from(defaults.spinner_tail) * 1000,
-            1,
-            0,
-        )
+    /// Resolves with the built-in looks only.
+    pub fn resolve_builtin(&self, defaults: &Defaults) -> (LookSpec, Transition) {
+        self.resolve(defaults, &|_| None)
     }
 
-    /// Comets in `color`: the intent's period when it sets one, else
-    /// `period_ms`; `tail` and `base` in thousandths.
-    fn comet(&self, color: Rgbw, period_ms: u32, tail: u16, heads: u8, base: u16) -> Look<N> {
-        Look::comet(
-            color,
-            self.period_ms.unwrap_or(period_ms),
-            leds(tail),
-            heads.clamp(1, 2),
-            permille(base),
-        )
+    /// An effect the intent asks for replaces the look's envelope; a chase
+    /// turns a still fill into a comet.
+    fn apply_effect(&self, spec: &mut LookSpec, kind: EffectKind, defaults: &Defaults) {
+        // A breathe keeps its own period and depth (a staged or failed look
+        // has its own); else the board's.
+        let base = match spec.envelope {
+            Effect::Breathe {
+                period_ms, depth, ..
+            } => (period_ms, depth),
+            _ => (defaults.breathe_period_ms, defaults.breathe_depth),
+        };
+        match kind {
+            EffectKind::Solid => spec.envelope = Effect::Solid,
+            EffectKind::Chase => {
+                if !spec.is_moving()
+                    && let Some(slot) = spec.layers.first_mut()
+                    && let Some(layer) = slot
+                    && let Block::Fill { color } = layer.block
+                {
+                    layer.block = builtin::comet_block(color, defaults);
+                }
+                spec.envelope = Effect::Solid;
+            }
+            EffectKind::Blink => {
+                spec.envelope = Effect::Blink {
+                    period_ms: self.period_ms.unwrap_or(defaults.blink_period_ms),
+                    duty: self.depth.unwrap_or(defaults.blink_duty),
+                };
+            }
+            EffectKind::Breathe => {
+                spec.envelope = Effect::Breathe {
+                    period_ms: self.period_ms.unwrap_or(base.0),
+                    depth: self.depth.unwrap_or(base.1),
+                    easing: self.easing.unwrap_or(defaults.easing),
+                };
+            }
+        }
+    }
+
+    /// The request's timing: the period of comets and of the envelope, the
+    /// envelope's depth (or blink duty) and easing.
+    fn apply_timing(&self, spec: &mut LookSpec) {
+        for slot in spec.layers.iter_mut().flatten() {
+            if let Block::Comet { period_ms, .. } = &mut slot.block
+                && let Some(period) = self.period_ms
+            {
+                *period_ms = period;
+            }
+        }
+        match &mut spec.envelope {
+            Effect::Solid => {}
+            Effect::Blink { period_ms, duty } => {
+                if let Some(period) = self.period_ms {
+                    *period_ms = period;
+                }
+                if let Some(depth) = self.depth {
+                    *duty = depth;
+                }
+            }
+            Effect::Breathe {
+                period_ms,
+                depth,
+                easing,
+            } => {
+                if let Some(period) = self.period_ms {
+                    *period_ms = period;
+                }
+                if let Some(d) = self.depth {
+                    *depth = d;
+                }
+                if let Some(e) = self.easing {
+                    *easing = e;
+                }
+            }
+        }
     }
 }
 
-/// Thousandths of an LED as Q16 LEDs.
-fn leds(thousandths: u16) -> u32 {
-    (u32::from(thousandths) << 16) / 1000
+/// A named look, with its arc's input.
+fn named(
+    name: &str,
+    progress: Option<u16>,
+    defaults: &Defaults,
+    lookup: Lookup<'_>,
+) -> (LookSpec, Option<u16>) {
+    let spec = named_look(name, defaults, lookup).unwrap_or(LookSpec::OFF);
+    (spec, progress)
 }
 
-/// Thousandths as `0..=ONE`.
-fn permille(value: u16) -> u32 {
-    (u32::from(value.min(1000)) << 16) / 1000
+/// `brightness` scaled by the ring-wide `ring` (255 is all of it).
+fn scale(brightness: u8, ring: u8) -> u8 {
+    ((u32::from(brightness) * u32::from(ring) + 127) / 255) as u8
 }
 
 #[derive(Debug, Clone, Copy)]

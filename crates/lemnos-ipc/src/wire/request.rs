@@ -234,6 +234,12 @@ impl Request {
                         .opt_u16(*tail)
                         .u8(*heads)
                         .opt_u16(*base),
+                    LedShow::Look { name, progress } => e.u8(10).str(name).opt_u16(*progress),
+                    LedShow::Inline { spec, progress } => {
+                        e.u8(11);
+                        super::look::encode(&mut e, spec.as_ref());
+                        e.opt_u16(*progress)
+                    }
                 };
                 let (easing, params) = easing_code(led.easing);
                 e.u8(effect_code(led.effect))
@@ -247,12 +253,25 @@ impl Request {
                 }
                 e.opt_u32(led.duration_ms);
                 // Flags, appended in protocol 1 (older peers stop before them).
+                // The reply id is appended after them.
                 e.u8(u8::from(led.test));
+                e.u32(led.id);
                 e.finish()
             }
             Self::Release { id, device } => {
                 let mut e = Encoder::new(RELEASE);
                 e.u32(*id).str(device);
+                e.finish()
+            }
+            Self::Looks { id, op } => {
+                let mut e = Encoder::new(LOOKS);
+                e.u32(*id);
+                match op {
+                    LooksOp::List => e.u8(0),
+                    LooksOp::Show(name) => e.u8(1).str(name),
+                    LooksOp::Reload => e.u8(2),
+                    LooksOp::Save { name, text } => e.u8(3).str(name).str(text),
+                };
                 e.finish()
             }
         }
@@ -332,6 +351,14 @@ impl Request {
                         heads: d.u8()?,
                         base: d.opt_u16()?,
                     },
+                    10 => LedShow::Look {
+                        name: d.str()?,
+                        progress: d.opt_u16()?,
+                    },
+                    11 => LedShow::Inline {
+                        spec: Box::new(super::look::decode(&mut d)?),
+                        progress: d.opt_u16()?,
+                    },
                     other => return Err(bad(format!("LED show {other}"))),
                 };
                 let effect = effect_from(d.u8()?);
@@ -341,6 +368,10 @@ impl Request {
                 let fade_ms = d.opt_u32()?;
                 let easing_kind = d.u8()?;
                 let params = [d.u16()?, d.u16()?, d.u16()?, d.u16()?];
+                let duration_ms = d.opt_u32()?;
+                // Older clients stop before the flags and the reply id.
+                let test = !d.is_empty() && d.u8()? & 1 != 0;
+                let id = if d.is_empty() { 0 } else { d.u32()? };
                 Self::Led(LedRequest {
                     device,
                     show,
@@ -350,13 +381,27 @@ impl Request {
                     brightness,
                     fade_ms,
                     easing: easing_from(easing_kind, params),
-                    duration_ms: d.opt_u32()?,
-                    test: !d.buf.is_empty() && d.u8()? & 1 != 0,
+                    duration_ms,
+                    test,
+                    id,
                 })
             }
             RELEASE => Self::Release {
                 id: d.u32()?,
                 device: d.str()?,
+            },
+            LOOKS => Self::Looks {
+                id: d.u32()?,
+                op: match d.u8()? {
+                    0 => LooksOp::List,
+                    1 => LooksOp::Show(d.str()?),
+                    2 => LooksOp::Reload,
+                    3 => LooksOp::Save {
+                        name: d.str()?,
+                        text: d.str()?,
+                    },
+                    other => return Err(bad(format!("looks operation {other}"))),
+                },
             },
             other => return Err(bad(format!("unknown request kind {other}"))),
         })

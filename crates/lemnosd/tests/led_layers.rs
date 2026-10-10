@@ -41,7 +41,7 @@ id = "raze"
 id = "ring"
 driver = "ws2812"
 path = "{root}/dev/leds0"
-config = {{ count = 4, fade_ms = 0, status_effect = "solid", ok = 0x00ff00 }}
+config = {{ count = 4, fade_ms = 0, status_effect = "solid", ok = 0x00ff00, look_brightness = 1.0 }}
 "#,
         root = root.display()
     ))
@@ -89,7 +89,7 @@ fn test_layer_shows_over_status_and_falls_back() {
         .unwrap();
     app.status(LedStatus::Ok).unwrap();
     app.sync().unwrap();
-    eventually(|| first(&root) == Some([0, 255, 0, 0]));
+    eventually(|| first(&root) == Some([0, 178, 0, 0]));
 
     // A low-priority selftest's frame wins over it.
     let mut selftest = ClientOptions::new(&socket, "atlas-selftest")
@@ -112,14 +112,14 @@ fn test_layer_shows_over_status_and_falls_back() {
     // Clearing only the test intent: back to the status.
     selftest.clear_test().unwrap();
     selftest.sync().unwrap();
-    eventually(|| first(&root) == Some([0, 255, 0, 0]));
+    eventually(|| first(&root) == Some([0, 178, 0, 0]));
 
     // The selftest disappears: its intent goes with it.
     selftest.test(LedShow::Color(0x0000ff), None).unwrap();
     selftest.sync().unwrap();
-    eventually(|| first(&root) == Some([0, 0, 255, 0]));
+    eventually(|| first(&root) == Some([0, 0, 178, 0]));
     drop(selftest);
-    eventually(|| first(&root) == Some([0, 255, 0, 0]));
+    eventually(|| first(&root) == Some([0, 178, 0, 0]));
 
     // A client that keeps its intents (lemnos-ctl) gets a lease instead.
     let mut ctl = ClientOptions::new(&socket, "lemnos-ctl")
@@ -129,11 +129,11 @@ fn test_layer_shows_over_status_and_falls_back() {
     ctl.test(LedShow::Color(0xffffff), Some(Duration::from_millis(300)))
         .unwrap();
     ctl.sync().unwrap();
-    eventually(|| first(&root) == Some([255, 255, 255, 0]));
+    eventually(|| first(&root) == Some([178, 178, 178, 0]));
     drop(ctl);
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(first(&root), Some([255, 255, 255, 0]));
-    eventually(|| first(&root) == Some([0, 255, 0, 0]));
+    assert_eq!(first(&root), Some([178, 178, 178, 0]));
+    eventually(|| first(&root) == Some([0, 178, 0, 0]));
 
     drop(app);
     stop.store(true, Ordering::Relaxed);

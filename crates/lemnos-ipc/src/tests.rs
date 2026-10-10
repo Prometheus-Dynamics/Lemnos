@@ -67,13 +67,16 @@ fn requests_round_trip() {
         id: 9,
         device: "fan".into(),
     });
-    // A frame from a peer that predates the flags byte: not a test intent.
+    // A frame from a peer that predates the flags and the reply id: not a
+    // test intent, and no reply is asked for.
     let mut old = Request::Led(LedRequest::new(LedShow::Color(0x123456))).encode();
-    old.pop();
-    let length = u32::from_le_bytes(old[..4].try_into().unwrap()) - 1;
+    old.truncate(old.len() - 5);
+    let length = u32::from_le_bytes(old[..4].try_into().unwrap()) - 5;
     old[..4].copy_from_slice(&length.to_le_bytes());
     match decode_request(&old).unwrap().unwrap().0 {
-        Request::Led(led) => assert!(!led.test && led.show == LedShow::Color(0x123456)),
+        Request::Led(led) => {
+            assert!(!led.test && led.id == 0 && led.show == LedShow::Color(0x123456));
+        }
         other => panic!("{other:?}"),
     }
     for show in [
@@ -354,4 +357,113 @@ fn raw_requests_and_answers_round_trip() {
         decode_request(&old).unwrap().unwrap().0,
         Request::Hello { events: true, .. }
     ));
+}
+
+#[test]
+fn looks_round_trip_by_name_inline_and_in_text() {
+    use lemnos_light::{Block, Effect, Fraction, LayerSpec, LookName, LookSpec, Mode, Rgbw};
+    let mut spec = LookSpec::EMPTY;
+    spec.push(LayerSpec::comet(
+        Rgbw::new(0x11, 0x22, 0x33, 0x44),
+        1600,
+        6000,
+        2,
+        60,
+    ));
+    spec.push(
+        LayerSpec::arc(Fraction::Input, Rgbw::rgb(0x2f7bff), Rgbw::rgb(0x101012))
+            .with_brightness(64)
+            .with_mode(Mode::Add),
+    );
+    spec.push(LayerSpec::frame(&[
+        Rgbw::rgb(0xff0000),
+        Rgbw::rgb(0x00ff00),
+    ]));
+    spec.push(LayerSpec::ripple(Rgbw::rgb(0x2bd47d)));
+    spec.envelope = Effect::Breathe {
+        period_ms: 4000,
+        depth: 180,
+        easing: Easing::CubicBezier {
+            x1: 420,
+            y1: -100,
+            x2: 580,
+            y2: 1000,
+        },
+    };
+    spec.brightness = 178;
+    spec.floor = 16;
+    let mut inline = LedRequest::new(LedShow::Inline {
+        spec: Box::new(spec),
+        progress: Some(500),
+    });
+    inline.id = 77;
+    inline.duration_ms = Some(30_000);
+    round_trip_request(Request::Led(inline));
+    let mut named = LedRequest::new(LedShow::Look {
+        name: LookName::new("pv.targets").unwrap().as_str().to_string(),
+        progress: None,
+    });
+    named.id = 78;
+    round_trip_request(Request::Led(named));
+    // Every block and envelope kind round-trips too.
+    let mut blinking = LookSpec::of(LayerSpec::fill(Rgbw::rgb(0xff0000)));
+    blinking.envelope = Effect::Blink {
+        period_ms: 900,
+        duty: 300,
+    };
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(blinking),
+        progress: None,
+    })));
+    let mut arc = LookSpec::of(LayerSpec::new(Block::Arc {
+        fraction: Fraction::Fixed(250),
+        color: Rgbw::rgb(0x00ff40),
+        track: Rgbw::OFF,
+        head: 350,
+        sheen: false,
+    }));
+    arc.envelope = Effect::Solid;
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(arc),
+        progress: None,
+    })));
+    round_trip_request(Request::Looks {
+        id: 5,
+        op: LooksOp::List,
+    });
+    round_trip_request(Request::Looks {
+        id: 6,
+        op: LooksOp::Show("pv.targets".into()),
+    });
+    round_trip_request(Request::Looks {
+        id: 7,
+        op: LooksOp::Reload,
+    });
+    round_trip_request(Request::Looks {
+        id: 8,
+        op: LooksOp::Save {
+            name: "app.saved".into(),
+            text: "[looks.\"app.saved\"]\nlayers = []\n".into(),
+        },
+    });
+    round_trip_message(Message::Text {
+        id: 8,
+        result: Ok(String::new()),
+    });
+    round_trip_message(Message::Text {
+        id: 9,
+        result: Err("unknown look \"nope\"".into()),
+    });
+}
+
+#[test]
+fn a_look_with_no_layers_or_an_unknown_block_is_a_protocol_error() {
+    use lemnos_light::LookSpec;
+    // A look with no layers has no shape on the wire: refused.
+    let empty = Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(LookSpec::EMPTY),
+        progress: None,
+    }))
+    .encode();
+    assert!(decode_request(&empty).is_err());
 }

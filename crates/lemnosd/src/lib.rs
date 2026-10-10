@@ -18,6 +18,7 @@ mod clients;
 mod devices;
 pub mod fans;
 mod light;
+pub mod looks;
 #[cfg(feature = "mock")]
 pub mod mock;
 mod notify;

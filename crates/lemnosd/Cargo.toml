@@ -56,6 +56,7 @@ lemnos-ipc.workspace = true
 lemnos-light.workspace = true
 lemnos-linux-sys.workspace = true
 serde_json = { workspace = true, features = ["std"] }
+toml = { workspace = true }
 
 # Orion (feature `orion`). Its crates are not published: pinned to its main.
 orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }

@@ -16,6 +16,10 @@
 //!   led progress <0..1> [--color RRGGBB] [--background RRGGBB]
 //!   led spinner [--color RRGGBB]
 //!   led orbit <RRGGBB> [--period MS] [--tail N] [--heads 1|2] [--base F]
+//!   led look <name> [--brightness F] [--progress F]   a named look (built-in or from a look file)
+//!   led show --spec '<TOML body>' | --file PATH [--name N] | --json '<JSON body>'
+//!                                                     a look given in full, until replaced
+//!   looks list | show <name> | reload | save <name> (--spec|--file|--json)
 //!   led system <updating [0..1] [--phase P]|booting|rebooting|update-failed|rolled-back|confirmed>
 //!   led locate [--seconds N]
 //!   led off
@@ -48,13 +52,16 @@
 //! or persist with `--keep` until `release`.
 //!
 //! LED intents from `lemnos-ctl` stay after it exits, until replaced or
-//! cleared with `led off` (one intent per client name and layer).
+//! cleared with `led off` (one intent per client name and layer). `led show`
+//! and `led look` wait for `lemnosd` to accept the look and report a refusal
+//! (an unknown name, an invalid look) with the reason; the light keeps its
+//! look. Look syntax: `docs/looks.md`.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use lemnos_board::{BoardDefinition, DriverRegistry};
+use lemnos_board::{BoardDefinition, DriverRegistry, looks};
 use lemnos_ipc::{
     ClientEvent, ClientOptions, DEFAULT_SOCKET, Easing, EffectKind, LedRequest, LedShow, LedStatus,
-    Phase, SystemState, Update,
+    LookSpec, LooksOp, Phase, SystemState, Update,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -123,7 +130,7 @@ fn main() -> ExitCode {
     let options = ClientOptions::new(&socket, client).priority(priority);
     let Some(command) = args.next() else {
         return fail(
-            "no command (list, read, watch, set, get, restore, led, gpio, pwm, i2c, spi, fan, validate)",
+            "no command (list, read, watch, set, get, restore, led, looks, gpio, pwm, i2c, spi, fan, validate)",
         );
     };
     match command.as_str() {
@@ -135,6 +142,7 @@ fn main() -> ExitCode {
         "spi" => raw::spi(args, options),
         "restore" => raw::restore(args, options),
         "led" => led(args, options),
+        "looks" => looks_command(args, options),
         _ => devices(&command, args, options),
     }
 }
@@ -240,10 +248,29 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     let test = args.flag("--test");
     let Some(what) = args.next() else {
         return fail(
-            "led: status, color, brightness, pixel, frame, progress, spinner, orbit, system, locate or off",
+            "led: status, color, brightness, pixel, frame, progress, spinner, orbit, look, show, system, locate or off",
         );
     };
     let show = match what.as_str() {
+        "look" => {
+            let Some(name) = args.next() else {
+                return fail("led look <name> [--brightness F] [--progress F]");
+            };
+            LedShow::Look {
+                name,
+                progress: args.take("--progress").as_deref().and_then(permille),
+            }
+        }
+        "show" => match look_from_args(&mut args) {
+            Ok(Some((_, spec))) => LedShow::Inline {
+                spec: Box::new(spec),
+                progress: args.take("--progress").as_deref().and_then(permille),
+            },
+            Ok(None) => {
+                return fail("led show --spec '<TOML>' | --file PATH [--name N] | --json '<JSON>'");
+            }
+            Err(e) => return fail(e),
+        },
         "status" => match args.next().as_deref().and_then(LedStatus::parse) {
             Some(status) => LedShow::Status(status),
             None => return fail("led status <ok|warn|error|busy|off>"),
@@ -383,8 +410,104 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
-    match leds.send(request).and_then(|()| leds.sync()) {
+    // A look is checked by the service: its refusal comes back here.
+    let sent = match request.show {
+        LedShow::Look { .. } | LedShow::Inline { .. } => leds.send_look(request),
+        _ => leds.send(request).and_then(|()| leds.sync()),
+    };
+    match sent {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(e),
+    }
+}
+
+/// The look a `--spec TOML`, `--file PATH` or `--json JSON` gives, with its
+/// name (`--name`, or the file's one look). `None` when none is given.
+fn look_from_args(args: &mut Args) -> Result<Option<(Option<String>, LookSpec)>, String> {
+    let name = args.take("--name");
+    if let Some(text) = args.take("--spec") {
+        let spec = looks::from_toml("--spec", &text).map_err(join)?;
+        return Ok(Some((name, spec)));
+    }
+    if let Some(text) = args.take("--json") {
+        let spec = looks::from_json("--json", &text).map_err(join)?;
+        return Ok(Some((name, spec)));
+    }
+    let Some(path) = args.take("--file") else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let table: toml::Table = toml::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+    if !table.contains_key("looks") {
+        let spec = looks::from_toml(&path, &text).map_err(join)?;
+        return Ok(Some((name, spec)));
+    }
+    let mut all = looks::parse_file(&path, &text).map_err(join)?;
+    let pick = match name {
+        Some(name) => all
+            .iter()
+            .position(|(n, _)| *n == name)
+            .ok_or_else(|| format!("{path}: no look named {name:?}"))?,
+        None if all.len() == 1 => 0,
+        None => {
+            return Err(format!(
+                "{path} has {} looks: choose one with --name",
+                all.len()
+            ));
+        }
+    };
+    let (name, spec) = all.swap_remove(pick);
+    Ok(Some((Some(name), spec)))
+}
+
+fn join(errors: Vec<looks::LookError>) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `looks list | show <name> | reload | save <name> (--spec|--file|--json)`.
+fn looks_command(mut args: Args, options: ClientOptions) -> ExitCode {
+    let Some(op) = args.next() else {
+        return fail("looks: list, show <name>, reload or save <name> --spec|--file|--json");
+    };
+    let op = match op.as_str() {
+        "list" => LooksOp::List,
+        "reload" => LooksOp::Reload,
+        "show" => match args.next() {
+            Some(name) => LooksOp::Show(name),
+            None => return fail("looks show <name>"),
+        },
+        "save" => {
+            let Some(name) = args.next() else {
+                return fail("looks save <name> --spec|--file|--json");
+            };
+            let spec = match look_from_args(&mut args) {
+                Ok(Some((_, spec))) => spec,
+                Ok(None) => return fail("looks save <name> --spec|--file|--json"),
+                Err(e) => return fail(e),
+            };
+            LooksOp::Save {
+                text: looks::to_toml(&name, &spec),
+                name,
+            }
+        }
+        other => return fail(format!("looks: unknown {other}")),
+    };
+    let mut leds = match options.leds() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    match leds.looks(op) {
+        Ok(text) => {
+            print!("{text}");
+            if !text.ends_with('\n') && !text.is_empty() {
+                println!();
+            }
+            ExitCode::SUCCESS
+        }
         Err(e) => fail(e),
     }
 }

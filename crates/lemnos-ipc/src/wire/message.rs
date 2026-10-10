@@ -9,6 +9,15 @@ impl Message {
     /// The frame for this message.
     pub fn encode(&self) -> Vec<u8> {
         match self {
+            Self::Text { id, result } => {
+                let mut e = Encoder::new(TEXT);
+                e.u32(*id);
+                match result {
+                    Ok(text) => e.u8(0).str(text),
+                    Err(text) => e.u8(1).str(text),
+                };
+                e.finish()
+            }
             Self::Welcome {
                 version,
                 board,
@@ -280,6 +289,15 @@ impl Message {
                     } else {
                         Err(Refusal::from_code(code, kind))
                     },
+                }
+            }
+            TEXT => {
+                let id = d.u32()?;
+                let code = d.u8()?;
+                let text = d.str()?;
+                Self::Text {
+                    id,
+                    result: if code == 0 { Ok(text) } else { Err(text) },
                 }
             }
             DATA => {

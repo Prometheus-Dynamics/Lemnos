@@ -41,10 +41,13 @@ mod buses;
 mod error;
 mod i2c_select;
 mod light;
+pub mod looks;
 pub mod raw;
 mod registry;
 mod schema;
 
+#[cfg(test)]
+mod looks_tests;
 #[cfg(test)]
 mod tests;
 

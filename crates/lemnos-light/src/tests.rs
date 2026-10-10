@@ -1,5 +1,10 @@
 use super::*;
 
+/// The first layer's block.
+fn block(look: &LookSpec) -> Block {
+    look.layers[0].expect("a layer").block
+}
+
 #[test]
 fn easings_start_at_zero_end_at_one_and_stay_monotonic() {
     let curves = [
@@ -52,7 +57,7 @@ fn breathe_eases_between_full_and_depth_and_blink_is_hard() {
 #[test]
 fn animator_fades_and_writes_only_while_moving() {
     let mut a: Animator<4> = Animator::new(3);
-    let red = Look::fill(Rgbw::rgb(0xff0000));
+    let red = LookSpec::fill(Rgbw::rgb(0xff0000));
     a.set(red, Transition::new(100, Easing::Linear), 0);
     let first = a.render(0).map(|f| f.to_vec_len());
     assert_eq!(first, Some(3));
@@ -118,9 +123,9 @@ fn intents_take_board_defaults_unless_overridden() {
         fade_ms: 250,
         ..Defaults::default()
     };
-    let (look, fade) = Intent::<4>::new(Show::Status(Status::Ok)).resolve(&defaults);
+    let (look, fade) = Intent::<4>::new(Show::Status(Status::Ok)).resolve_builtin(&defaults);
     assert!(matches!(
-        look.effect,
+        look.envelope,
         Effect::Breathe {
             period_ms: 2000,
             depth: 600,
@@ -132,13 +137,15 @@ fn intents_take_board_defaults_unless_overridden() {
     solid.effect = Some(EffectKind::Solid);
     solid.fade_ms = Some(0);
     solid.brightness = Some(128);
-    let (look, fade) = solid.resolve(&defaults);
+    let (look, fade) = solid.resolve_builtin(&defaults);
+    // The request's 128 is half of full, and the ring-wide scale is half
+    // again.
     assert_eq!(
-        (look.effect, fade.duration_ms, look.brightness),
-        (Effect::Solid, 0, 128)
+        (look.envelope, fade.duration_ms, look.brightness),
+        (Effect::Solid, 0, 64)
     );
-    let (look, _) = Intent::<4>::new(Show::Status(Status::Error)).resolve(&defaults);
-    assert!(matches!(look.effect, Effect::Blink { .. }));
+    let (look, _) = Intent::<4>::new(Show::Status(Status::Error)).resolve_builtin(&defaults);
+    assert!(matches!(look.envelope, Effect::Blink { .. }));
 }
 
 #[test]
@@ -146,9 +153,9 @@ fn progress_fills_with_a_partial_leading_led_and_advances_eased() {
     let green = Rgbw::rgb(0x00ff00);
     let mut a: Animator<16> = Animator::new(16);
     // 3.5 LEDs of 16: three full, the fourth half lit (the head, whitened).
-    let fraction = ONE * 35 / 160;
+    let fraction = 219;
     a.set(
-        Look::progress(fraction, green, Rgbw::OFF),
+        LookSpec::progress(fraction, green, Rgbw::OFF),
         Transition::CUT,
         0,
     );
@@ -162,7 +169,7 @@ fn progress_fills_with_a_partial_leading_led_and_advances_eased() {
     assert_eq!(frame[4], Rgbw::OFF);
     // A new fraction advances (the fifth LED fills in over the fade).
     a.set(
-        Look::progress(ONE * 5 / 16, green, Rgbw::OFF),
+        LookSpec::progress(313, green, Rgbw::OFF),
         Transition::new(100, Easing::Linear),
         0,
     );
@@ -172,7 +179,9 @@ fn progress_fills_with_a_partial_leading_led_and_advances_eased() {
     let end = a.render(100).unwrap();
     // The new leading LED (4) is the full head now.
     assert_eq!(end[4].g, 255);
-    assert_eq!(end[5], Rgbw::OFF);
+    // Just past 5/16: LED 5 is only just lit, at its 25% shade.
+    assert!(end[5].g > 40 && end[5].g < 80, "{:?}", end[5]);
+    assert_eq!(end[6], Rgbw::OFF);
     // A gauge's sheen keeps it moving.
     assert!(a.is_animating(150));
 }
@@ -183,17 +192,12 @@ fn frame16(frame: &[Rgbw]) -> [Rgbw; 16] {
     out
 }
 
-/// One Q16 brightness from a thousandths value.
-fn permille_q16(thousandths: u32) -> u32 {
-    (thousandths << 16) / 1000
-}
-
 #[test]
 fn comet_moves_its_head_round_with_a_tail() {
     let mut a: Animator<16> = Animator::new(16);
     // 1.6 s a turn, a 3-LED tail, no floor.
     a.set(
-        Look::comet(Rgbw::rgb(0xffffff), 1600, 3 << 16, 1, 0),
+        LookSpec::comet(Rgbw::rgb(0xffffff), 1600, 3000, 1, 0),
         Transition::CUT,
         0,
     );
@@ -221,7 +225,7 @@ fn comet_moves_its_head_round_with_a_tail() {
 fn twin_comets_sit_opposite_and_a_floor_keeps_the_ring_lit() {
     let mut a: Animator<16> = Animator::new(16);
     a.set(
-        Look::comet(Rgbw::rgb(0xffffff), 1000, 2 << 16, 2, permille_q16(50)),
+        LookSpec::comet(Rgbw::rgb(0xffffff), 1000, 2000, 2, 50),
         Transition::CUT,
         0,
     );
@@ -244,11 +248,7 @@ fn arc_fills_with_a_bright_head_over_a_faint_track() {
     let track = Rgbw::rgb(0x101012);
     let mut a: Animator<16> = Animator::new(16);
     // 3.5 of 16 LEDs lit.
-    a.set(
-        Look::progress(ONE * 35 / 160, blue, track),
-        Transition::CUT,
-        0,
-    );
+    a.set(LookSpec::progress(219, blue, track), Transition::CUT, 0);
     let f = frame16(a.render(0).unwrap());
     // Unfilled: the track itself, neither dim blue nor black.
     assert_eq!(f[8], track);
@@ -261,7 +261,7 @@ fn arc_fills_with_a_bright_head_over_a_faint_track() {
     // The sheen travels: at a full arc the lit LED 0 is brighter at the
     // start than LED 4, which the sheen has not reached.
     let mut full: Animator<16> = Animator::new(16);
-    full.set(Look::progress(ONE, blue, track), Transition::CUT, 0);
+    full.set(LookSpec::progress(1000, blue, track), Transition::CUT, 0);
     let g = frame16(full.render(0).unwrap());
     assert!(g[0].r > g[4].r + 40, "{:?} {:?}", g[0], g[4]);
     assert!(full.is_animating(0));
@@ -271,7 +271,7 @@ fn arc_fills_with_a_bright_head_over_a_faint_track() {
 fn ripple_runs_down_from_the_top_and_settles() {
     let green = Rgbw::rgb(0x00ff00);
     let mut a: Animator<16> = Animator::new(16);
-    a.set(Look::ripple(green), Transition::CUT, 0);
+    a.set(LookSpec::ripple(green), Transition::CUT, 0);
     let at0 = frame16(a.render(0).unwrap());
     assert_eq!(at0[0].g, 255);
     // Only the settling glow (15%) at the bottom.
@@ -292,18 +292,21 @@ fn ripple_runs_down_from_the_top_and_settles() {
 #[test]
 fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     let defaults = Defaults::default();
-    let (look, _) = Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve(&defaults);
-    assert_eq!(
-        look.pixels,
-        Pixels::Ripple {
-            color: defaults.confirmed
-        }
-    );
+    let (look, _) =
+        Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve_builtin(&defaults);
+    assert!(matches!(
+        block(&look),
+        Block::Ripple { color, .. } if color == defaults.confirmed
+    ));
     assert_eq!(SystemState::Confirmed.name(), "confirmed");
 
-    let (look, _) = Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve(&defaults);
-    assert_eq!(look.pixels, Pixels::Fill(defaults.rebooting.scaled(EMBER)));
-    assert_eq!(look.effect, Effect::Solid);
+    let (look, _) =
+        Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve_builtin(&defaults);
+    assert!(matches!(
+        block(&look),
+        Block::Fill { color } if color == defaults.rebooting
+    ));
+    assert_eq!(look.envelope, Effect::Solid);
     assert!(!look.is_moving());
     // 12% of the amber: 31 of 255 on the red channel.
     assert_eq!(EMBER, 31);
@@ -311,8 +314,10 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     a.set(look, Transition::new(1200, Easing::EaseInOut), 0);
     a.render(0);
     let end = frame16(a.render(1200).unwrap());
-    assert_eq!(end[0], defaults.rebooting.scaled(EMBER));
-    assert_eq!(end[0].r, 31);
+    // At the default ring-wide brightness (half) the ember is held at its
+    // floor, about 6%: 16 of 255.
+    assert_eq!(end[0], Rgbw::rgb(0xff8000).scaled(16));
+    assert_eq!(end[0].r, 16);
     assert!(a.render(1300).is_none());
     assert_eq!(a.next_frame_ms(1300), None);
 }
@@ -321,7 +326,7 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
 fn switching_from_a_breathe_to_an_orbit_fades_from_what_is_shown() {
     let mut a: Animator<16> = Animator::new(16);
     a.set(
-        Look::fill(Rgbw::rgb(0x00ff00)).with_effect(Effect::Breathe {
+        LookSpec::fill(Rgbw::rgb(0x00ff00)).with_envelope(Effect::Breathe {
             period_ms: 2000,
             depth: 600,
             easing: Easing::EaseInOut,
@@ -331,7 +336,7 @@ fn switching_from_a_breathe_to_an_orbit_fades_from_what_is_shown() {
     );
     // Half a period: the breathe's trough.
     let before = frame16(a.render(1_000).unwrap());
-    let orbit = Look::comet(Rgbw::rgb(0x8a5cff), 1200, 7 << 16, 1, permille_q16(50));
+    let orbit = LookSpec::comet(Rgbw::rgb(0x8a5cff), 1200, 7000, 1, 50);
     a.set(orbit, Transition::new(250, Easing::EaseInOut), 1_000);
     // The first frame of the fade is what was on the ring: no pop.
     let first = frame16(a.render(1_000).unwrap());
@@ -355,69 +360,81 @@ fn orbit_intents_take_their_shape_from_the_intent_and_the_defaults() {
     };
     let intent = Intent::<16>::new(orbit);
     assert_eq!(intent.layer(), Layer::App);
-    let (look, _) = intent.resolve(&defaults);
+    let (look, _) = intent.resolve_builtin(&defaults);
     assert_eq!(
-        look.pixels,
-        Pixels::Comet {
+        block(&look),
+        Block::Comet {
             color: green,
             period_ms: 1_200,
-            tail: 6 << 16,
+            tail: 6_000,
             heads: 1,
-            base: permille_q16(60),
+            base: 60,
+            reverse: false,
         }
     );
     let mut timed = Intent::<16>::new(orbit);
     timed.period_ms = Some(1_600);
-    let (look, _) = timed.resolve(&defaults);
+    let (look, _) = timed.resolve_builtin(&defaults);
     assert!(matches!(
-        look.pixels,
-        Pixels::Comet {
+        block(&look),
+        Block::Comet {
             period_ms: 1_600,
             ..
         }
     ));
-    // The defaults: the progress colour, one head, no floor.
+    // The defaults: the progress colour, two heads, no floor.
     let (look, _) = Intent::<16>::new(Show::Orbit {
         color: None,
         tail: None,
         heads: 2,
         base: None,
     })
-    .resolve(&defaults);
+    .resolve_builtin(&defaults);
     assert!(matches!(
-        look.pixels,
-        Pixels::Comet { color, tail, heads: 2, base: 0, .. }
-            if color == defaults.progress && tail == 5 << 16
+        block(&look),
+        Block::Comet { color, tail: 5_000, heads: 2, base: 0, .. }
+            if color == defaults.progress
     ));
 }
 
 #[test]
 fn system_looks_match_the_update_states() {
     let defaults = Defaults::default();
-    let resolve = |state| Intent::<16>::new(Show::System(state)).resolve(&defaults).0;
+    let resolve = |state| {
+        Intent::<16>::new(Show::System(state))
+            .resolve_builtin(&defaults)
+            .0
+    };
     // Unknown amount: the purple comet, 7 LEDs, 5% floor.
     let verifying = resolve(SystemState::Updating {
         progress: None,
         phase: Phase::Verifying,
     });
     assert_eq!(
-        verifying.pixels,
-        Pixels::Comet {
+        block(&verifying),
+        Block::Comet {
             color: Rgbw::rgb(0x8a5cff),
             period_ms: 1_200,
-            tail: 7 << 16,
+            tail: 7_000,
             heads: 1,
-            base: permille_q16(50),
+            base: 50,
+            reverse: false,
         }
     );
+    assert_eq!(verifying.layers[0].map(|l| l.brightness), Some(255));
     // Staged: the green breathe, 2.2 s, down to 55%.
     let staged = resolve(SystemState::Updating {
         progress: Some(1000),
         phase: Phase::Staged,
     });
-    assert_eq!(staged.pixels, Pixels::Fill(Rgbw::rgb(0x2bd47d)));
     assert_eq!(
-        staged.effect,
+        block(&staged),
+        Block::Fill {
+            color: Rgbw::rgb(0x2bd47d)
+        }
+    );
+    assert_eq!(
+        staged.envelope,
         Effect::Breathe {
             period_ms: 2_200,
             depth: 450,
@@ -427,20 +444,26 @@ fn system_looks_match_the_update_states() {
     // Trial boot: the twin comet, 1.8 s, 5 LEDs, 4% floor.
     let trying = resolve(SystemState::Booting);
     assert_eq!(
-        trying.pixels,
-        Pixels::Comet {
+        block(&trying),
+        Block::Comet {
             color: Rgbw::rgb(0xfff4e6),
             period_ms: 1_800,
-            tail: 5 << 16,
+            tail: 5_000,
             heads: 2,
-            base: permille_q16(40),
+            base: 40,
+            reverse: false,
         }
     );
     // Failed: a red breathe, 2.4 s, down to 10%.
     let failed = resolve(SystemState::UpdateFailed);
-    assert_eq!(failed.pixels, Pixels::Fill(Rgbw::rgb(0xff3b3b)));
     assert_eq!(
-        failed.effect,
+        block(&failed),
+        Block::Fill {
+            color: Rgbw::rgb(0xff3b3b)
+        }
+    );
+    assert_eq!(
+        failed.envelope,
         Effect::Breathe {
             period_ms: 2_400,
             depth: 900,
@@ -457,22 +480,25 @@ fn system_states_use_board_colours() {
         phase: Phase::Writing,
     }));
     assert_eq!(updating.layer(), Layer::System);
-    let (look, _) = updating.resolve(&defaults);
+    let (look, _) = updating.resolve_builtin(&defaults);
     assert!(matches!(
-        look.pixels,
-        crate::Pixels::Progress { color, .. } if color == defaults.updating
+        block(&look),
+        Block::Arc { color, .. } if color == defaults.updating
     ));
-    let (look, _) = Intent::<16>::new(Show::System(SystemState::Booting)).resolve(&defaults);
+    let (look, _) =
+        Intent::<16>::new(Show::System(SystemState::Booting)).resolve_builtin(&defaults);
     assert!(look.is_moving());
-    let (look, _) = Intent::<16>::new(Show::System(SystemState::RolledBack)).resolve(&defaults);
-    assert!(matches!(look.effect, Effect::Breathe { .. }));
+    let (look, _) =
+        Intent::<16>::new(Show::System(SystemState::RolledBack)).resolve_builtin(&defaults);
+    assert!(matches!(look.envelope, Effect::Breathe { .. }));
     let chase = Defaults {
         locate_effect: EffectKind::Chase,
         ..defaults
     };
-    let (look, _) = Intent::<16>::new(Show::Locate).resolve(&chase);
+    let (look, _) = Intent::<16>::new(Show::Locate).resolve_builtin(&chase);
     assert!(look.is_moving());
-    let (look, _) = Intent::<16>::new(Show::Indeterminate { color: None }).resolve(&defaults);
+    let (look, _) =
+        Intent::<16>::new(Show::Indeterminate { color: None }).resolve_builtin(&defaults);
     assert!(look.is_moving());
 }
 
@@ -499,4 +525,260 @@ fn test_layer_sits_between_status_and_alert() {
     assert!(arb.expire(1_000));
     assert_eq!(arb.winner().unwrap().owner, 1);
     assert!(Layer::Status < Layer::Test && Layer::Test < Layer::Alert);
+}
+
+#[test]
+fn layers_composite_by_max_or_add_with_their_own_brightness() {
+    let mut a: Animator<4> = Animator::new(4);
+    let mut look = LookSpec::fill(Rgbw::rgb(0x404040));
+    assert!(
+        look.push(
+            LayerSpec::new(Block::Fill {
+                color: Rgbw::rgb(0x404040),
+            })
+            .with_mode(Mode::Add)
+        )
+    );
+    a.set(look, Transition::CUT, 0);
+    assert_eq!(a.render(0).unwrap()[0], Rgbw::rgb(0x808080));
+    // Max keeps the brighter channel of the two.
+    let mut look = LookSpec::fill(Rgbw::rgb(0x800000));
+    look.push(LayerSpec::new(Block::Fill {
+        color: Rgbw::rgb(0x008000),
+    }));
+    a.set(look, Transition::CUT, 0);
+    assert_eq!(a.render(0).unwrap()[0], Rgbw::new(0x80, 0x80, 0, 0));
+    // A layer's brightness scales its own colour, not the others.
+    let mut look = LookSpec::fill(Rgbw::rgb(0x0000ff));
+    look.push(
+        LayerSpec::new(Block::Fill {
+            color: Rgbw::rgb(0xff0000),
+        })
+        .with_brightness(128)
+        .with_mode(Mode::Add),
+    );
+    a.set(look, Transition::CUT, 0);
+    let p = a.render(0).unwrap()[0];
+    assert_eq!((p.r, p.b), (128, 255));
+    // A look's layers stop at the first gap, and a full look refuses a fifth.
+    let mut full = LookSpec::OFF;
+    for _ in 0..MAX_LAYERS - 1 {
+        assert!(full.push(LayerSpec::new(Block::Fill { color: Rgbw::OFF })));
+    }
+    assert!(!full.push(LayerSpec::new(Block::Fill { color: Rgbw::OFF })));
+}
+
+#[test]
+fn a_comet_can_run_the_other_way_round() {
+    let mut a: Animator<16> = Animator::new(16);
+    let mut look = LookSpec::comet(Rgbw::rgb(0xffffff), 1600, 1000, 1, 0);
+    if let Some(layer) = look.layers[0].as_mut()
+        && let Block::Comet { reverse, .. } = &mut layer.block
+    {
+        *reverse = true;
+    }
+    a.set(look, Transition::CUT, 0);
+    let f = frame16(a.render(0).unwrap());
+    // The head is at LED 0; going backward, the tail is on the far side of
+    // it, so LEDs 1 and 15 are dark.
+    assert_eq!(f[0].r, 255);
+    assert_eq!(f[1].r, 0);
+    assert_eq!(f[15].r, 0);
+}
+
+#[test]
+fn validation_names_the_first_bad_value() {
+    assert_eq!(LookSpec::OFF.validate(), Ok(()));
+    assert_eq!(
+        LookSpec::comet(Rgbw::rgb(1), 1600, 3000, 2, 0).validate(),
+        Ok(())
+    );
+    assert_eq!(
+        LookSpec::comet(Rgbw::rgb(1), 1600, 3000, 3, 0).validate(),
+        Err("a comet's heads must be 1 or 2")
+    );
+    assert_eq!(
+        LookSpec::comet(Rgbw::rgb(1), 50, 3000, 1, 0).validate(),
+        Err("a comet's period_ms must be 100 to 600000")
+    );
+    assert_eq!(
+        LookSpec::comet(Rgbw::rgb(1), 1600, 0, 1, 0).validate(),
+        Err("a comet's tail must be above 0 and at most 64 LEDs")
+    );
+    assert_eq!(
+        LookSpec::progress(1001, Rgbw::rgb(1), Rgbw::OFF).validate(),
+        Err("an arc's fraction must be 0 to 1")
+    );
+    assert_eq!(
+        LookSpec::fill(Rgbw::rgb(1))
+            .with_envelope(Effect::Breathe {
+                period_ms: 2000,
+                depth: 1200,
+                easing: Easing::Linear,
+            })
+            .validate(),
+        Err("a breathe's depth must be 0 to 1")
+    );
+    let empty = LookSpec {
+        layers: [None; MAX_LAYERS],
+        ..LookSpec::OFF
+    };
+    assert_eq!(empty.validate(), Err("a look needs at least one layer"));
+}
+
+#[test]
+fn look_names_are_short_lowercase_words() {
+    assert_eq!(LookName::new("pv.targets").unwrap().as_str(), "pv.targets");
+    assert!(LookName::new("system.rolled-back").is_some());
+    assert!(LookName::new("").is_none());
+    assert!(LookName::new("Pv.targets").is_none());
+    assert!(LookName::new("has space").is_none());
+    assert!(LookName::new(&"a".repeat(MAX_LOOK_NAME + 1)).is_none());
+    assert!(LookName::new(&"a".repeat(MAX_LOOK_NAME)).is_some());
+}
+
+#[test]
+fn a_named_look_comes_from_the_table_before_the_built_ins() {
+    let defaults = Defaults::default();
+    let custom = LookSpec::fill(Rgbw::rgb(0x123456));
+    let table = |name: &str| (name == "status.ok").then_some(custom);
+    let (look, _) = Intent::<16>::new(Show::Status(Status::Ok)).resolve(&defaults, &table);
+    assert_eq!(
+        look.layers[0].map(|l| l.block),
+        Some(Block::Fill {
+            color: Rgbw::rgb(0x123456),
+        })
+    );
+    // Names the table does not hold keep their built-in look.
+    let (look, _) = Intent::<16>::new(Show::Status(Status::Error)).resolve(&defaults, &table);
+    assert!(matches!(look.envelope, Effect::Blink { .. }));
+    // An unknown name shows nothing.
+    let name = LookName::new("nothing.here").unwrap();
+    let (look, _) = Intent::<16>::new(Show::Look {
+        name,
+        progress: None,
+    })
+    .resolve(&defaults, &table);
+    assert_eq!(block(&look), Block::Fill { color: Rgbw::OFF });
+    // An inline look is used as given, whatever the table holds.
+    let inline = LookSpec::fill(Rgbw::rgb(0x00ff00));
+    let (look, _) = Intent::<16>::new(Show::Inline {
+        spec: inline,
+        progress: None,
+    })
+    .resolve(&defaults, &table);
+    assert_eq!(look, inline.with_brightness(128));
+}
+
+#[test]
+fn a_named_arc_takes_the_request_progress() {
+    let defaults = Defaults::default();
+    let name = LookName::new("system.writing").unwrap();
+    let (look, _) = Intent::<16>::new(Show::Look {
+        name,
+        progress: Some(750),
+    })
+    .resolve_builtin(&defaults);
+    assert!(matches!(
+        block(&look),
+        Block::Arc {
+            fraction: Fraction::Fixed(750),
+            ..
+        }
+    ));
+    let (look, _) = Intent::<16>::new(Show::System(SystemState::Updating {
+        progress: Some(300),
+        phase: Phase::Writing,
+    }))
+    .resolve_builtin(&defaults);
+    assert!(matches!(
+        block(&look),
+        Block::Arc {
+            fraction: Fraction::Fixed(300),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn the_ring_wide_brightness_scales_every_look_and_the_ember_keeps_a_floor() {
+    let mut defaults = Defaults {
+        look_brightness: 128,
+        ..Defaults::default()
+    };
+    let (color, _) = Intent::<16>::new(Show::Color(Rgbw::rgb(0xffffff))).resolve_builtin(&defaults);
+    // A fill is capped at 0.7 of full, then halved by the ring.
+    assert_eq!(color.brightness, 89);
+    // A request's brightness is still scaled by the ring.
+    let mut asked = Intent::<16>::new(Show::Color(Rgbw::rgb(0xffffff)));
+    asked.brightness = Some(255);
+    let (look, _) = asked.resolve_builtin(&defaults);
+    assert_eq!(look.brightness, 128);
+    // The ember does not go below its floor however dim the ring is.
+    defaults.look_brightness = 10;
+    let (ember, _) =
+        Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve_builtin(&defaults);
+    assert_eq!(ember.brightness, 16);
+    // Half the ring-wide brightness is half a full fill (rounded).
+    defaults.look_brightness = 128;
+    let (fill, _) = Intent::<16>::new(Show::Status(Status::Ok)).resolve_builtin(&defaults);
+    assert_eq!(fill.brightness, 89);
+}
+
+#[test]
+fn system_states_map_to_named_looks_and_every_name_is_built_in() {
+    let updating = |progress, phase| SystemState::Updating { progress, phase };
+    let cases = [
+        (updating(None, Phase::Verifying), "system.verifying"),
+        (updating(Some(400), Phase::Writing), "system.writing"),
+        (updating(None, Phase::Writing), "system.writing-unknown"),
+        (updating(None, Phase::Staged), "system.staged"),
+        (updating(Some(900), Phase::Staged), "system.staged"),
+        (updating(None, Phase::Applying), "system.rebooting"),
+        (SystemState::Booting, "system.booting"),
+        (SystemState::Rebooting, "system.rebooting"),
+        (SystemState::UpdateFailed, "system.failed"),
+        (SystemState::RolledBack, "system.rolled-back"),
+        (SystemState::Confirmed, "system.confirmed"),
+    ];
+    for (state, name) in cases {
+        assert_eq!(state.look_name(), name, "{state:?}");
+        assert!(BUILTIN_LOOK_NAMES.contains(&name), "{name} is built in");
+    }
+    assert_eq!(Status::Busy.look_name(), "status.busy");
+    assert!(BUILTIN_LOOK_NAMES.contains(&"system.locate"));
+    assert!(BUILTIN_LOOK_NAMES.contains(&"status.off"));
+    // Each built-in name resolves to a look, and only to those names.
+    let defaults = Defaults::default();
+    for name in BUILTIN_LOOK_NAMES {
+        assert!(builtin_look(name, &defaults).is_some(), "{name}");
+    }
+    assert!(builtin_look("pv.nothing", &defaults).is_none());
+}
+
+#[test]
+fn named_arcs_and_inline_looks_share_the_one_render_path() {
+    // A named look and the same look inline render alike, frame for frame.
+    let defaults = Defaults::default();
+    let name = LookName::new("system.writing").unwrap();
+    let (named, _) = Intent::<16>::new(Show::Look {
+        name,
+        progress: Some(500),
+    })
+    .resolve_builtin(&defaults);
+    let (system, _) = Intent::<16>::new(Show::System(SystemState::Updating {
+        progress: Some(500),
+        phase: Phase::Writing,
+    }))
+    .resolve_builtin(&defaults);
+    assert_eq!(named, system);
+    // The same look given in full (unscaled, as a client sends it), with the
+    // request's progress, resolves to the same look.
+    let spec = builtin_look("system.writing", &defaults).unwrap();
+    let (inline, _) = Intent::<16>::new(Show::Inline {
+        spec,
+        progress: Some(500),
+    })
+    .resolve_builtin(&defaults);
+    assert_eq!(inline, named);
 }

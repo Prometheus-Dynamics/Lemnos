@@ -7,3 +7,8 @@ brightness) and returns a frame only when the output changed, and an `Arbiter` t
 which owner's intent a light shows (`Locate` > `System` > `Alert` > `Test` > `Status` > `App`, then priority,
 then recency). `Defaults` carry a board's choices (fade time, easing, status effect,
 colours). `lemnosd` drives the board's LEDs with it; firmware can use the same code.
+
+A look is data: a `LookSpec` of up to four layers (a `Block` each: fill, comet, progress
+arc, ripple or static frame; composited by `max` or `add`), an envelope and a brightness, all
+fixed size. The built-in named looks (`status.*`, `system.*`, `pv.*`) are generated from a
+board's `Defaults`; `lemnosd` overrides them from look files. See `docs/looks.md`.

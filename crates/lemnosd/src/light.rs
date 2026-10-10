@@ -3,7 +3,8 @@
 
 use lemnos_ipc::{LedRequest, LedShow};
 use lemnos_light::{
-    Animator, Arbiter, Defaults, Intent, Layer, Look, Rgbw, Show, Transition, Winner,
+    Animator, Arbiter, Defaults, Intent, Layer, LookName, LookSpec, Lookup, Rgbw, Show, Transition,
+    Winner,
 };
 
 /// The most LEDs a light may have.
@@ -57,7 +58,7 @@ impl Light {
     }
 
     /// Applies a client's request; returns `false` when every intent slot
-    /// is taken.
+    /// is taken, or the request names a look that cannot be a look.
     pub fn request(&mut self, owner: u32, priority: u8, request: &LedRequest, now_ms: u64) -> bool {
         let key = (owner, request.test);
         let show = match &request.show {
@@ -121,6 +122,17 @@ impl Light {
             },
             LedShow::System(state) => Show::System(*state),
             LedShow::Locate => Show::Locate,
+            LedShow::Look { name, progress } => match LookName::new(name) {
+                Some(name) => Show::Look {
+                    name,
+                    progress: *progress,
+                },
+                None => return false,
+            },
+            LedShow::Inline { spec, progress } => Show::Inline {
+                spec: **spec,
+                progress: *progress,
+            },
         };
         let mut intent = Intent::new(show);
         intent.effect = request.effect;
@@ -172,8 +184,13 @@ impl Light {
 
     /// Re-arbitrates after changes: expires intents and, when the winner
     /// changed, starts the fade to its look. Returns the new winner when it
-    /// changed (`Some(None)`: nobody holds an intent now).
-    pub fn arbitrate(&mut self, now_ms: u64) -> Option<Option<Winner<MAX_LEDS>>> {
+    /// changed (`Some(None)`: nobody holds an intent now). `lookup` gives
+    /// the look files' looks by name.
+    pub fn arbitrate(
+        &mut self,
+        now_ms: u64,
+        lookup: Lookup<'_>,
+    ) -> Option<Option<Winner<MAX_LEDS>>> {
         self.arbiter.expire(now_ms);
         let winner = self.arbiter.winner();
         let key = winner.map(|w| (w.owner, w.layer, w.intent));
@@ -182,14 +199,20 @@ impl Light {
         }
         self.shown = key;
         let (look, transition) = match &winner {
-            Some(w) => w.intent.resolve(&self.defaults),
+            Some(w) => w.intent.resolve(&self.defaults, lookup),
             None => (
-                Look::fill(self.defaults.idle),
+                LookSpec::fill(self.defaults.idle),
                 Transition::new(self.defaults.fade_ms, self.defaults.easing),
             ),
         };
         self.animator.set(look, transition, now_ms);
         Some(winner)
+    }
+
+    /// Makes the next arbitration re-resolve the shown intent (after a look
+    /// file changed).
+    pub fn invalidate(&mut self) {
+        self.shown = None;
     }
 
     /// When the light needs attention next: a frame or an expiry.

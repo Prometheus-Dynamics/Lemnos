@@ -39,6 +39,10 @@ pub struct BoardDefinition {
     /// empty means any client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_clients: Vec<String>,
+    /// Named looks for the lights (`[looks.<name>]`), over the built-in
+    /// ones; see `docs/looks.md`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub looks: BTreeMap<String, toml::Table>,
 }
 
 /// A named GPIO line for raw claims.
@@ -350,6 +354,7 @@ impl BoardDefinition {
             devices: Vec::new(),
             lines: Vec::new(),
             pwms: Vec::new(),
+            looks: BTreeMap::new(),
             raw_clients: Vec::new(),
         }
     }
@@ -405,6 +410,13 @@ impl BoardDefinition {
         }
         if !is_valid_id(&self.board.id) {
             problems.push(format!("board id {:?} is not a valid id", self.board.id));
+        }
+        for (name, table) in &self.looks {
+            if let Err(errors) =
+                crate::looks::from_value("board.toml", name, &toml::Value::Table(table.clone()))
+            {
+                problems.extend(errors.iter().map(ToString::to_string));
+            }
         }
         for (index, device) in self.devices.iter().enumerate() {
             if !is_valid_id(&device.id) {

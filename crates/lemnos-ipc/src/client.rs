@@ -42,6 +42,9 @@ pub enum ClientError {
     Timeout,
     /// The client is not connected (and does not reconnect).
     Closed,
+    /// The service answered with a reason it could not do the request (a
+    /// look that is unknown or invalid, a look file that cannot be saved).
+    Rejected(String),
 }
 
 impl fmt::Display for ClientError {
@@ -52,6 +55,7 @@ impl fmt::Display for ClientError {
             Self::Refused(r) => write!(f, "refused: {r}"),
             Self::Timeout => f.write_str("lemnosd did not answer in time"),
             Self::Closed => f.write_str("not connected to lemnosd"),
+            Self::Rejected(reason) => write!(f, "lemnosd refused: {reason}"),
         }
     }
 }
@@ -296,7 +300,7 @@ impl Connection {
         }
     }
 
-    fn next_id(&mut self) -> u32 {
+    pub(super) fn next_id(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         id
@@ -412,7 +416,7 @@ impl Connection {
 
     /// Sends `request` and waits for the message `pick` accepts; other
     /// messages are queued as events.
-    fn request<T>(
+    pub(super) fn request<T>(
         &mut self,
         request: &Request,
         mut pick: impl FnMut(&Message) -> Option<T>,

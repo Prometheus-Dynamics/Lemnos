@@ -1,7 +1,7 @@
 //! [`LedClient`]: LED intents on `lemnosd`'s lights.
 
 use super::{ClientError, ClientEvent, ClientOptions, Connection};
-use crate::wire::{Event, LedRequest, LedShow, Message, Request};
+use crate::wire::{Event, LedRequest, LedShow, LooksOp, Message, Request};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,75 @@ impl LedClient {
 
     /// Sends `request` and remembers it (to send again after a reconnection).
     pub fn send(&mut self, request: LedRequest) -> Result<(), ClientError> {
+        self.remember(&request);
+        if self.conn.stream.is_none() && self.conn.options.reconnect {
+            self.conn.connect()?;
+        }
+        self.conn.send(&Request::Led(request))
+    }
+
+    /// Sends `request` and waits for the service to show it: a refused look
+    /// (an unknown name, an invalid look) is an error, and the light keeps
+    /// its look. Remembered for a reconnection only once accepted.
+    pub fn send_checked(&mut self, mut request: LedRequest) -> Result<(), ClientError> {
+        request.id = self.conn.next_id();
+        let id = request.id;
+        let keep = request.clone();
+        let reply = self.conn.request(&Request::Led(request), |m| match m {
+            Message::Text { id: got, result } if *got == id => Some(result.clone()),
+            _ => None,
+        })?;
+        match reply {
+            Ok(_) => {
+                self.remember(&keep);
+                Ok(())
+            }
+            Err(reason) => Err(ClientError::Rejected(reason)),
+        }
+    }
+
+    /// Shows the named look (a built-in, or one from a look file), until
+    /// replaced or cleared. Waits for the service; an unknown name is
+    /// [`ClientError::Rejected`].
+    pub fn look(&mut self, name: &str) -> Result<(), ClientError> {
+        self.send_checked(LedRequest::new(LedShow::Look {
+            name: name.to_string(),
+            progress: None,
+        }))
+    }
+
+    /// Shows a look given in full (`spec`), until replaced or cleared. A
+    /// spec the service does not accept is [`ClientError::Rejected`], with
+    /// the reason.
+    pub fn show_spec(&mut self, spec: &lemnos_light::LookSpec) -> Result<(), ClientError> {
+        self.send_checked(LedRequest::new(LedShow::Inline {
+            spec: Box::new(*spec),
+            progress: None,
+        }))
+    }
+
+    /// Sends a look request as built (its `show` a [`LedShow::Look`] or
+    /// [`LedShow::Inline`], with brightness, duration and the rest), waiting
+    /// for the service's answer.
+    pub fn send_look(&mut self, request: LedRequest) -> Result<(), ClientError> {
+        self.send_checked(request)
+    }
+
+    /// A look-management request (list, show, reload, save), answered with
+    /// the service's text. A refusal is [`ClientError::Rejected`].
+    pub fn looks(&mut self, op: LooksOp) -> Result<String, ClientError> {
+        let id = self.conn.next_id();
+        let reply = self.conn.request(&Request::Looks { id, op }, |m| match m {
+            Message::Text { id: got, result } if *got == id => Some(result.clone()),
+            _ => None,
+        })?;
+        reply.map_err(ClientError::Rejected)
+    }
+
+    /// Bookkeeping for a request sent (or about to be): what a reconnection
+    /// sends again.
+    fn remember(&mut self, request: &LedRequest) {
+        let request = request.clone();
         if request.show == LedShow::Clear {
             self.conn
                 .held
@@ -29,13 +98,9 @@ impl LedClient {
                 .retain(|r| r.device != request.device || layer_of(r) != layer);
             // Test intents are leases the caller renews: not re-sent.
             if request.duration_ms.is_none() && !request.test {
-                self.conn.held.push(request.clone());
+                self.conn.held.push(request);
             }
         }
-        if self.conn.stream.is_none() && self.conn.options.reconnect {
-            self.conn.connect()?;
-        }
-        self.conn.send(&Request::Led(request))
     }
 
     /// Shows `status` with the light's default effect.
@@ -150,6 +215,7 @@ fn layer_of(request: &LedRequest) -> u8 {
         | LedShow::Progress { .. }
         | LedShow::Indeterminate { .. }
         | LedShow::Orbit { .. } => 1,
+        LedShow::Look { .. } | LedShow::Inline { .. } => 1,
         LedShow::Status(_) => 2,
         LedShow::System(_) => 3,
         LedShow::Locate => 4,

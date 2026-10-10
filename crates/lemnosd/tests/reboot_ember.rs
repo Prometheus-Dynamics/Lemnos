@@ -41,7 +41,7 @@ id = "raze"
 id = "ring"
 driver = "ws2812"
 path = "{root}/dev/leds0"
-config = {{ count = 4, fade_ms = 0, status_effect = "solid", ok = 0x00ff00, rebooting = 0xff8000 }}
+config = {{ count = 4, fade_ms = 0, status_effect = "solid", ok = 0x00ff00, rebooting = 0xff8000, look_brightness = 1.0 }}
 "#,
         root = root.display()
     ))
@@ -87,7 +87,7 @@ fn a_reboot_leaves_the_ring_on_a_static_ember() {
     let mut app = ClientOptions::new(&socket, "helios").leds().unwrap();
     app.status(LedStatus::Ok).unwrap();
     app.sync().unwrap();
-    eventually(|| ring(&root).chunks(4).all(|p| p == [0, 255, 0, 0]));
+    eventually(|| ring(&root).chunks(4).all(|p| p == [0, 178, 0, 0]));
 
     stop.store(true, Ordering::Relaxed);
     let took = handle.join().unwrap();

@@ -36,6 +36,7 @@ const GET: u16 = 6;
 const LED: u16 = 7;
 const RELEASE: u16 = 8;
 const RESTORE: u16 = 9;
+const LOOKS: u16 = 10;
 const WELCOME: u16 = 101;
 const DEVICES: u16 = 102;
 const READING: u16 = 103;
@@ -43,6 +44,7 @@ const REPLY: u16 = 104;
 const EVENT: u16 = 105;
 const CLAIMED: u16 = 106;
 const DATA: u16 = 107;
+const TEXT: u16 = 108;
 
 /// A malformed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +63,7 @@ fn bad(what: impl Into<String>) -> WireError {
 }
 
 mod codec;
+mod look;
 mod message;
 mod raw;
 mod request;
@@ -259,6 +262,20 @@ pub enum LedShow {
     /// A built-in system animation.
     System(lemnos_light::SystemState),
     Locate,
+    /// A named look: a built-in, or one from a look file (`lemnosd`'s look
+    /// table). An unknown name is refused, and the light keeps its look.
+    /// `progress` (thousandths) fills the look's arcs that take an input.
+    Look {
+        name: String,
+        progress: Option<u16>,
+    },
+    /// A look given in full, shown until replaced or cleared (or for the
+    /// request's `duration_ms`). `progress` as for [`LedShow::Look`].
+    /// (Boxed: a look is about a kilobyte, and requests are mostly small.)
+    Inline {
+        spec: Box<lemnos_light::LookSpec>,
+        progress: Option<u16>,
+    },
 }
 
 /// An LED intent on the wire. `None` fields take the light's defaults.
@@ -285,6 +302,10 @@ pub struct LedRequest {
     /// its intents disconnects. With [`LedShow::Clear`], clears only this
     /// client's test intent.
     pub test: bool,
+    /// A nonzero `id` gets a [`Message::Text`] reply: the empty text when
+    /// the look is shown, else why it was refused (an unknown name, a bad
+    /// look). `0` (what older clients send) gets no reply.
+    pub id: u32,
 }
 
 impl LedRequest {
@@ -300,6 +321,7 @@ impl LedRequest {
             easing: None,
             duration_ms: None,
             test: false,
+            id: 0,
         }
     }
 
@@ -368,11 +390,37 @@ pub enum Request {
     },
     /// Raw bus and line access.
     Raw(RawRequest),
+    /// Looks: list them, show one as TOML, reload the look files, or save a
+    /// look into the writable directory. Answered with a [`Message::Text`].
+    Looks {
+        id: u32,
+        op: LooksOp,
+    },
+}
+
+/// A looks request (see [`Request::Looks`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LooksOp {
+    /// The look names, with where each comes from.
+    List,
+    /// One look's resolved definition, as TOML.
+    Show(String),
+    /// Re-reads the look files now.
+    Reload,
+    /// Writes `text` (a look file body, `[looks.<name>]` table included) to
+    /// `<name>.toml` in the writable directory, then reloads.
+    Save { name: String, text: String },
 }
 
 /// Service to client.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
+    /// The answer to a request that asked for text: a look listing or
+    /// definition, or a success (empty) or refusal message.
+    Text {
+        id: u32,
+        result: Result<String, String>,
+    },
     Welcome {
         version: u16,
         board: String,
