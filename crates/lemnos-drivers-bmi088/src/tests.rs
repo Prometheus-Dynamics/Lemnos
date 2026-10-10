@@ -1,5 +1,5 @@
 use super::*;
-use lemnos_hal::mock::{MockDelay, MockI2c, block_on};
+use lemnos_hal::mock::{MockDelay, MockI2c, MockOp, block_on};
 
 fn close(actual: f32, expected: f32) {
     assert!(
@@ -392,4 +392,101 @@ fn sample_period_follows_the_accelerometer_rate() {
     assert_eq!(lemnos_device::Sensor::sample_period_us(&bmi), Some(2_500));
     let plain = Bmi088::new(imu());
     assert_eq!(lemnos_device::Sensor::sample_period_us(&plain), None);
+}
+
+/// The data bytes read from `die`'s bus, per read transaction (the register
+/// address writes are not counted).
+fn data_reads(bmi: &Bmi088<MockI2c>, address: u8) -> [usize; 4] {
+    let mut out = [0usize; 4];
+    let mut n = 0;
+    for op in bmi
+        .i2c
+        .transfers()
+        .iter()
+        .filter(|t| t.address == address)
+        .flat_map(|t| t.ops.iter())
+    {
+        if let MockOp::Read(len) = op {
+            out[n] = *len;
+            n += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn a_selected_axis_reads_only_its_own_bytes_on_the_bus() {
+    use lemnos_device::{DeviceRef, NO_VALUE};
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([1, 2, 3]))
+        .with_registers(GYRO_ADDRESS, GYR_DATA, &axes([4, 5, -6]));
+    let mut bmi = Bmi088::new(i2c).with_config(Config::default());
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    bmi.i2c.clear_log();
+
+    // Yaw alone (gyro Z): one two-byte read, at the Z register.
+    bmi.select(0b100_000);
+    let mut out = [NO_VALUE; 6];
+    DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
+    assert_eq!(data_reads(&bmi, GYRO_ADDRESS), [2, 0, 0, 0]);
+    assert_eq!(data_reads(&bmi, ACCEL_ADDRESS), [0; 4]);
+    assert!(out[..5].iter().all(|v| *v == NO_VALUE), "{out:?}");
+    assert_ne!(out[5], NO_VALUE);
+    // The register address written before the read is the Z register.
+    let wrote_z = bmi
+        .i2c
+        .transfers()
+        .iter()
+        .filter(|t| t.address == GYRO_ADDRESS)
+        .flat_map(|t| t.ops.iter())
+        .any(|op| matches!(op, MockOp::Write(b) if b.first() == Some(&((GYR_DATA + 4) as u8))));
+    assert!(wrote_z);
+
+    // Gyro only: one six-byte read; accelerometer only: one six-byte read.
+    bmi.i2c.clear_log();
+    bmi.select(0b111_000);
+    DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
+    assert_eq!(data_reads(&bmi, GYRO_ADDRESS), [6, 0, 0, 0]);
+    assert_eq!(data_reads(&bmi, ACCEL_ADDRESS), [0; 4]);
+    bmi.i2c.clear_log();
+    bmi.select(0b000_111);
+    DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
+    assert_eq!(data_reads(&bmi, ACCEL_ADDRESS), [6, 0, 0, 0]);
+    assert_eq!(data_reads(&bmi, GYRO_ADDRESS), [0; 4]);
+    assert!(out[3..].iter().all(|v| *v == NO_VALUE));
+
+    // Gyro X and Z: the burst covers X through Z (six bytes, the Y pair
+    // included), and the Y value is not reported.
+    bmi.i2c.clear_log();
+    bmi.select(0b101_000);
+    DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
+    assert_eq!(data_reads(&bmi, GYRO_ADDRESS), [6, 0, 0, 0]);
+    assert_eq!(out[4], NO_VALUE);
+    assert_ne!(out[3], NO_VALUE);
+
+    // Everything, as before: a six-byte read from each die.
+    bmi.i2c.clear_log();
+    bmi.select(ALL_AXES);
+    DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
+    assert_eq!(data_reads(&bmi, ACCEL_ADDRESS), [6, 0, 0, 0]);
+    assert_eq!(data_reads(&bmi, GYRO_ADDRESS), [6, 0, 0, 0]);
+    assert!(out.iter().all(|v| *v != NO_VALUE));
+}
+
+#[test]
+fn a_selection_reads_the_same_values_as_a_full_read() {
+    use lemnos_device::{DeviceRef, NO_VALUE};
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([-1000, 2000, -3000]))
+        .with_registers(GYRO_ADDRESS, GYR_DATA, &axes([400, -500, 600]));
+    let mut bmi = Bmi088::new(i2c);
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    let mut full = [NO_VALUE; 6];
+    DeviceRef::sensor(&mut bmi).read(&mut full).unwrap();
+    for axis in 0..6u8 {
+        bmi.select(1 << axis);
+        let mut one = [NO_VALUE; 6];
+        DeviceRef::sensor(&mut bmi).read(&mut one).unwrap();
+        assert_eq!(one[axis as usize], full[axis as usize], "axis {axis}");
+    }
 }

@@ -50,8 +50,28 @@ pub(crate) fn scaled(raw: i32, exponent: i8) -> f64 {
 pub use fans::restore_fans;
 pub use light::TEST_LEASE_MS;
 
-/// Whether systemd is stopping the system (a restart or power-off).
-pub fn system_stopping() -> bool {
+/// Whether systemd is stopping the system for a restart (not a power-off),
+/// so the reboot ember is left on the ring.
+///
+/// `systemctl reboot` (with or without `--reboot-argument`, such as
+/// `0 tryboot`) starts `reboot.target` and keeps it active while the services
+/// stop, so that is asked first. `poweroff.target` and `halt.target` answer
+/// "no". Only when neither says (no `systemctl`, or no answer) is
+/// `is-system-running`'s "stopping" taken as a restart, as it was before.
+pub fn system_rebooting() -> bool {
+    let unit_state = |unit: &str| -> String {
+        std::process::Command::new("systemctl")
+            .args(["is-active", unit])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    if unit_state("reboot.target") == "active" {
+        return true;
+    }
+    if unit_state("poweroff.target") == "active" || unit_state("halt.target") == "active" {
+        return false;
+    }
     std::process::Command::new("systemctl")
         .arg("is-system-running")
         .output()

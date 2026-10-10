@@ -117,6 +117,56 @@ layers = [
 }
 
 #[test]
+fn a_pulse_envelope_parses_with_its_defaults_and_checks_its_ranges() {
+    let look = from_toml(
+        "--spec",
+        "envelope = { kind = \"pulse\", attack_ms = 60, hold_ms = 600, decay_ms = 1200 }\nlayers = [{ block = \"fill\", color = \"00ff20\" }]",
+    )
+    .unwrap();
+    assert_eq!(
+        look.envelope,
+        Effect::Pulse {
+            attack_ms: 60,
+            hold_ms: 600,
+            decay_ms: 1200,
+            repeat: 1,
+        }
+    );
+    // A bare name takes the defaults, and the file form round-trips.
+    let bare = from_toml(
+        "--spec",
+        "envelope = \"pulse\"\nlayers = [{ block = \"fill\", color = \"00ff20\" }]",
+    )
+    .unwrap();
+    assert_eq!(
+        bare.envelope,
+        Effect::Pulse {
+            attack_ms: 80,
+            hold_ms: 0,
+            decay_ms: 1000,
+            repeat: 1,
+        }
+    );
+    let again = from_toml("--spec", &body_toml(&look)).unwrap();
+    assert_eq!(again.envelope, look.envelope);
+    for (text, want) in [
+        (
+            "envelope = { kind = \"pulse\", decay_ms = 0 }",
+            "decay_ms: must be a whole number of milliseconds from 1 to 60000",
+        ),
+        (
+            "envelope = { kind = \"pulse\", repeat = 300 }",
+            "repeat: must be a whole number from 0",
+        ),
+        ("envelope = { kind = \"pulse\", flash = 1 }", "flash"),
+    ] {
+        let text = format!("{text}\nlayers = [{{ block = \"fill\", color = \"ff0000\" }}]");
+        let error = body_error(&text);
+        assert!(error.contains(want), "{error}");
+    }
+}
+
+#[test]
 fn a_bare_envelope_name_takes_its_defaults() {
     let look = from_toml(
         "--spec",
@@ -251,7 +301,7 @@ fn numbers_out_of_range_are_named() {
         ),
         (
             "envelope = { kind = \"wobble\" }\nlayers = [{ block = \"fill\", color = \"ff0000\" }]".to_string(),
-            "kind: must be solid, blink or breathe",
+            "kind: must be solid, blink, breathe or pulse",
         ),
         (
             "envelope = { kind = \"breathe\", easing = \"bounce\" }\nlayers = [{ block = \"fill\", color = \"ff0000\" }]".to_string(),

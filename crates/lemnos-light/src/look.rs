@@ -527,6 +527,19 @@ impl LookSpec {
                     return Err("a breathe's depth must be 0 to 1");
                 }
             }
+            Effect::Pulse {
+                attack_ms,
+                hold_ms,
+                decay_ms,
+                ..
+            } => {
+                if attack_ms > 60_000 || hold_ms > 60_000 {
+                    return Err("a pulse's attack_ms and hold_ms must be 0 to 60000");
+                }
+                if !(1..=60_000).contains(&decay_ms) {
+                    return Err("a pulse's decay_ms must be 1 to 60000");
+                }
+            }
         }
         Ok(())
     }
@@ -639,6 +652,11 @@ fn tail_curve(x: u32) -> u32 {
 /// The comets' brightness at LED `index` (Q16): for each head, `(1 - d/tail)^2.2`
 /// where `d` is how far behind the head the LED is (going round), and the
 /// brightest head wins, but never below `base`.
+///
+/// The leading edge is anti-aliased: the LED just ahead of a head (less than
+/// one LED ahead) is lit by the fraction of the way the head has got to it,
+/// so the head steps smoothly from one LED to the next rather than jumping
+/// a whole LED at once.
 #[allow(clippy::too_many_arguments)]
 fn comet_level(
     index: usize,
@@ -670,6 +688,12 @@ fn comet_level(
         if behind < tail {
             let x = ONE - ((behind << 16) / tail) as u32;
             best = best.max(tail_curve(x));
+        } else {
+            // How far ahead of the head the LED is (in 1/65536 of an LED).
+            let ahead = (span - behind) % span.max(1);
+            if ahead > 0 && ahead < u64::from(ONE) {
+                best = best.max(ONE - ahead as u32);
+            }
         }
     }
     best.max(base)

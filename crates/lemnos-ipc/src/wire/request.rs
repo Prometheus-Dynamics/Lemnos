@@ -167,6 +167,20 @@ impl Request {
                 e.u32(*id);
                 e.finish()
             }
+            Self::SubscribeChannels {
+                id,
+                device,
+                channels,
+                period_ms,
+            } => {
+                let mut e = Encoder::new(SUBSCRIBE_CHANNELS);
+                e.str(device).u32(*period_ms).u16(channels.len() as u16);
+                for channel in channels {
+                    e.str(channel);
+                }
+                e.u32(*id);
+                e.finish()
+            }
             Self::Set {
                 id,
                 device,
@@ -296,6 +310,21 @@ impl Request {
             kind if super::raw::is_raw(kind) => Self::Raw(RawRequest::decode(kind, &mut d)?),
             LIST => Self::List,
             READ => Self::Read { device: d.str()? },
+            SUBSCRIBE_CHANNELS => {
+                let device = d.str()?;
+                let period_ms = d.u32()?;
+                let count = usize::from(d.u16()?);
+                let mut channels = Vec::with_capacity(count.min(64));
+                for _ in 0..count {
+                    channels.push(d.str()?);
+                }
+                Self::SubscribeChannels {
+                    id: d.u32()?,
+                    device,
+                    channels,
+                    period_ms,
+                }
+            }
             SUBSCRIBE => Self::Subscribe {
                 device: d.str()?,
                 period_ms: d.u32()?,

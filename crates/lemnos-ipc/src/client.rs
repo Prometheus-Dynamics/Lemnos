@@ -248,7 +248,8 @@ struct Connection {
     client_id: u32,
     devices: Vec<(DeviceDesc, Arc<[ChannelDesc]>)>,
     queue: VecDeque<ClientEvent<Message>>,
-    subscriptions: Vec<(String, u32)>,
+    /// Device, channel names (empty: the whole device), period.
+    subscriptions: Vec<(String, Vec<String>, u32)>,
     held: Vec<LedRequest>,
     next_id: u32,
     reconnects: u64,
@@ -335,14 +336,24 @@ impl Connection {
             }
         }
         self.refresh_devices()?;
-        for (device, period) in self.subscriptions.clone() {
+        for (device, channels, period) in self.subscriptions.clone() {
             // No id: the answer is not awaited (a refusal comes back as a
             // reply nobody reads).
-            self.send(&Request::Subscribe {
-                id: 0,
-                device,
-                period_ms: period,
-            })?;
+            let request = if channels.is_empty() {
+                Request::Subscribe {
+                    id: 0,
+                    device,
+                    period_ms: period,
+                }
+            } else {
+                Request::SubscribeChannels {
+                    id: 0,
+                    device,
+                    channels,
+                    period_ms: period,
+                }
+            };
+            self.send(&request)?;
         }
         for led in self.held.clone() {
             self.send(&Request::Led(led))?;
@@ -585,11 +596,11 @@ impl DeviceClient {
     /// that produces no readings. A refused subscription is not kept.
     pub fn subscribe(&mut self, device: &str, period_ms: u32) -> Result<u32, ClientError> {
         let id = self.conn.next_id();
-        self.conn.subscriptions.retain(|(d, _)| d != device);
+        self.conn.subscriptions.retain(|(d, _, _)| d != device);
         if period_ms > 0 {
             self.conn
                 .subscriptions
-                .push((device.to_string(), period_ms));
+                .push((device.to_string(), Vec::new(), period_ms));
         }
         let request = Request::Subscribe {
             id,
@@ -599,7 +610,48 @@ impl DeviceClient {
         match self.conn.request(&request, reply(id))? {
             Ok(granted) => Ok(u32::try_from(granted as u64).unwrap_or(u32::MAX)),
             Err(refusal) => {
-                self.conn.subscriptions.retain(|(d, _)| d != device);
+                self.conn.subscriptions.retain(|(d, _, _)| d != device);
+                Err(ClientError::Refused(refusal))
+            }
+        }
+    }
+
+    /// Subscribes to some of a device's channels only: each name is a channel
+    /// (`angular_rate.z`), a prefix with a trailing `.*` (`angular_rate.*`), or
+    /// `*` for all. The device's other channels come back as no value, and
+    /// the device reads only what these channels need on its bus. Subscriptions
+    /// on one device with different channels run at their own periods (say,
+    /// gyro Z at 100 Hz and accelerometer at 10 Hz). `period_ms` 0 ends this
+    /// selection's subscription. Returns the granted period, as
+    /// [`subscribe`](Self::subscribe).
+    pub fn subscribe_channels(
+        &mut self,
+        device: &str,
+        channels: &[&str],
+        period_ms: u32,
+    ) -> Result<u32, ClientError> {
+        let id = self.conn.next_id();
+        let names: Vec<String> = channels.iter().map(|c| (*c).to_string()).collect();
+        self.conn
+            .subscriptions
+            .retain(|(d, c, _)| !(d == device && *c == names));
+        if period_ms > 0 {
+            self.conn
+                .subscriptions
+                .push((device.to_string(), names.clone(), period_ms));
+        }
+        let request = Request::SubscribeChannels {
+            id,
+            device: device.to_string(),
+            channels: names.clone(),
+            period_ms,
+        };
+        match self.conn.request(&request, reply(id))? {
+            Ok(granted) => Ok(u32::try_from(granted as u64).unwrap_or(u32::MAX)),
+            Err(refusal) => {
+                self.conn
+                    .subscriptions
+                    .retain(|(d, c, _)| !(d == device && *c == names));
                 Err(ClientError::Refused(refusal))
             }
         }

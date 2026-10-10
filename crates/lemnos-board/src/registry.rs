@@ -33,6 +33,11 @@ pub struct DriverEntry {
     pub config_keys: &'static [&'static str],
     /// The `match` keys it accepts.
     pub match_keys: &'static [&'static str],
+    /// The `config` keys that take one of a fixed set of strings, with the
+    /// strings each accepts. `validate` checks these, so a bad value is
+    /// reported with the key and the allowed values, not only when the
+    /// driver binds.
+    pub config_choices: &'static [(&'static str, &'static [&'static str])],
     /// Whether `backend = "kernel"` (and so `auto`) can use a kernel driver.
     pub kernel: bool,
     /// Whether it has a userspace driver.
@@ -70,6 +75,20 @@ impl DriverEntry {
         }
         if spec.backend == Backend::Userspace && !self.userspace {
             problems.push(format!("{} has no userspace driver", self.name));
+        }
+        for (key, allowed) in self.config_choices {
+            let Some(value) = spec.config.get(*key) else {
+                continue;
+            };
+            if !value.as_str().is_some_and(|text| allowed.contains(&text)) {
+                let given = value
+                    .as_str()
+                    .map_or_else(|| format!("{value:?}"), |text| format!("{text:?}"));
+                problems.push(format!(
+                    "config {key:?} is {given}, must be one of: {}",
+                    allowed.join(", ")
+                ));
+            }
         }
         for key in spec.config.keys() {
             if !self.config_keys.contains(&key.as_str()) {
@@ -271,6 +290,7 @@ const BUILTIN: &[DriverEntry] = &[
             "fifo",
         ],
         match_keys: &[],
+        config_choices: BMI088_CHOICES,
         kernel: true,
         userspace: true,
         build: build_bmi088,
@@ -283,6 +303,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: Some(lemnos_drivers_bmm150::DEFAULT_ADDRESS as u16),
         config_keys: &["preset", "data_rate"],
         match_keys: &[],
+        config_choices: BMM150_CHOICES,
         kernel: true,
         userspace: true,
         build: build_bmm150,
@@ -295,6 +316,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
         config_keys: INA_KEYS,
         match_keys: &[],
+        config_choices: &[],
         kernel: true,
         userspace: true,
         build: build_ina226,
@@ -307,6 +329,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
         config_keys: INA_KEYS,
         match_keys: &[],
+        config_choices: &[],
         kernel: true,
         userspace: true,
         build: build_ina238,
@@ -319,6 +342,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
         config_keys: &[],
         match_keys: &[],
+        config_choices: &[],
         kernel: true,
         userspace: true,
         build: build_ina260,
@@ -331,6 +355,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: Some(lemnos_drivers_vcm::DEFAULT_ADDRESS as u16),
         config_keys: &["chip"],
         match_keys: &[],
+        config_choices: &[],
         kernel: false,
         userspace: true,
         build: build_vcm,
@@ -346,6 +371,7 @@ const BUILTIN: &[DriverEntry] = &[
         // (default 2). `pwm-fan` fans go back through their cooling device.
         config_keys: &["restore_mode"],
         match_keys: &["name"],
+        config_choices: &[],
         kernel: true,
         userspace: false,
         build: build_hwmon_fan,
@@ -358,6 +384,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: None,
         config_keys: &[],
         match_keys: &["type"],
+        config_choices: &[],
         kernel: true,
         userspace: false,
         build: build_thermal_zone,
@@ -370,6 +397,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: None,
         config_keys: crate::light::LIGHT_KEYS,
         match_keys: &[],
+        config_choices: LIGHT_CHOICES,
         kernel: true,
         userspace: false,
         build: build_ws2812,
@@ -382,6 +410,7 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: None,
         config_keys: &["chip", "line", "active_low", "initial"],
         match_keys: &[],
+        config_choices: &[],
         kernel: false,
         userspace: true,
         build: build_gpio_output,
@@ -394,10 +423,56 @@ const BUILTIN: &[DriverEntry] = &[
         default_address: None,
         config_keys: &["chip", "line", "active_low"],
         match_keys: &[],
+        config_choices: &[],
         kernel: false,
         userspace: true,
         build: build_gpio_input,
     },
+];
+
+const BMI088_CHOICES: &[(&str, &[&str])] = &[
+    ("accel_range", &["3g", "6g", "12g", "24g"]),
+    (
+        "accel_rate",
+        &[
+            "12.5hz", "25hz", "50hz", "100hz", "200hz", "400hz", "800hz", "1600hz",
+        ],
+    ),
+    (
+        "gyro_range",
+        &["125dps", "250dps", "500dps", "1000dps", "2000dps"],
+    ),
+    (
+        "gyro_rate",
+        &[
+            "2000hz-532",
+            "2000hz-230",
+            "1000hz-116",
+            "400hz-47",
+            "200hz-23",
+            "100hz-12",
+            "200hz-64",
+            "100hz-32",
+        ],
+    ),
+];
+
+const BMM150_CHOICES: &[(&str, &[&str])] = &[
+    (
+        "preset",
+        &["low-power", "regular", "enhanced", "high-accuracy"],
+    ),
+    (
+        "data_rate",
+        &["2hz", "6hz", "8hz", "10hz", "15hz", "20hz", "25hz", "30hz"],
+    ),
+];
+
+/// The ws2812 light's effect keys (see `light.rs`).
+const LIGHT_CHOICES: &[(&str, &[&str])] = &[
+    ("status_effect", &["solid", "blink", "breathe", "chase"]),
+    ("error_effect", &["solid", "blink", "breathe", "chase"]),
+    ("locate_effect", &["solid", "blink", "breathe", "chase"]),
 ];
 
 const INA_KEYS: &[&str] = &[

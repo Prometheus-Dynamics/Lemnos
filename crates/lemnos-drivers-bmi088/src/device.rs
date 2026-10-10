@@ -3,7 +3,9 @@
 use crate::{Bmi088, Error, MAX_SAMPLES, asynch};
 use embedded_hal::delay::DelayNs;
 use lemnos_device::kernel::{KernelBinding, KernelChannel, KernelPart, Subsystem};
-use lemnos_device::{Axis, Channel, Device, DeviceClass, DeviceError, DeviceInfo, Quantity};
+use lemnos_device::{
+    Axis, Channel, Device, DeviceClass, DeviceError, DeviceInfo, NO_VALUE, Quantity,
+};
 
 /// An IMU with six channels, X, Y, Z each. The raw counts are acceleration in
 /// mm/s² (exponent -3) and angular rate in µrad/s (exponent -6); a channel's
@@ -73,9 +75,18 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
         let config = self
             .config
             .ok_or(DeviceError::Driver(Error::NotInitialized))?;
-        let accel = self.read_accel_raw().map_err(DeviceError::Driver)?;
-        let gyro = self.read_gyro_raw().map_err(DeviceError::Driver)?;
+        let selected = self.selection();
+        let (accel, gyro) = self
+            .read_axes(selected & 0b111, selected >> 3)
+            .map_err(DeviceError::Driver)?;
         fill(out, config.channels(accel, gyro));
+        // An axis that was not selected has no value (its registers were not
+        // read).
+        for (i, slot) in out.iter_mut().enumerate().take(6) {
+            if selected & (1 << i) == 0 {
+                *slot = NO_VALUE;
+            }
+        }
         Ok(())
     }
 
@@ -131,6 +142,12 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
             return None;
         }
         self.config.map(|config| config.accel_rate.period_us())
+    }
+
+    /// The FIFO batch reads always return every axis (the FIFOs hold both
+    /// dies); the selection applies to plain reads.
+    fn select_channels(&mut self, mask: u64) {
+        self.select((mask & 0x3f) as u8);
     }
 }
 

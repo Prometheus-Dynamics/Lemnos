@@ -333,7 +333,7 @@ fn envelope(source: &str, key: &str, value: &toml::Value) -> Result<Effect, Erro
             return Err(vec![err(
                 source,
                 key,
-                "must be a table, or solid, blink or breathe",
+                "must be a table, or solid, blink, breathe or pulse",
             )]);
         }
     };
@@ -405,11 +405,45 @@ fn envelope(source: &str, key: &str, value: &toml::Value) -> Result<Effect, Erro
                 _ => None,
             }
         }
+        "pulse" => {
+            only_keys(
+                source,
+                key,
+                &table,
+                &["kind", "attack_ms", "hold_ms", "decay_ms", "repeat"],
+                &mut errors,
+            );
+            let attack = ms_in(source, key, &table, "attack_ms", 80, 60_000, &mut errors);
+            let hold = ms_in(source, key, &table, "hold_ms", 0, 60_000, &mut errors);
+            let decay = ms_in(source, key, &table, "decay_ms", 1_000, 60_000, &mut errors);
+            let repeat = match table.get("repeat") {
+                None => Some(1),
+                Some(v) => whole(v, 0, 255).map(|r| r as u8),
+            };
+            if repeat.is_none() {
+                errors.push(err(
+                    source,
+                    &join(key, "repeat"),
+                    "must be a whole number from 0 (keep repeating) to 255",
+                ));
+            }
+            match (attack, hold, decay, repeat) {
+                (Some(attack_ms), Some(hold_ms), Some(decay_ms), Some(repeat)) => {
+                    Some(Effect::Pulse {
+                        attack_ms,
+                        hold_ms,
+                        decay_ms,
+                        repeat,
+                    })
+                }
+                _ => None,
+            }
+        }
         _ => {
             errors.push(err(
                 source,
                 &join(key, "kind"),
-                "must be solid, blink or breathe",
+                "must be solid, blink, breathe or pulse",
             ));
             None
         }
@@ -417,6 +451,34 @@ fn envelope(source: &str, key: &str, value: &toml::Value) -> Result<Effect, Erro
     match (effect, errors.is_empty()) {
         (Some(effect), true) => Ok(effect),
         _ => Err(errors),
+    }
+}
+
+/// A duration in milliseconds from `min` (1 for a decay) to `max`, the
+/// default when unset.
+fn ms_in(
+    source: &str,
+    key: &str,
+    table: &toml::Table,
+    name: &str,
+    default: i64,
+    max: i64,
+    errors: &mut Errors,
+) -> Option<u32> {
+    let min = if name == "decay_ms" { 1 } else { 0 };
+    match table.get(name) {
+        None => Some(default as u32),
+        Some(value) => match whole(value, min, max) {
+            Some(v) => Some(v as u32),
+            None => {
+                errors.push(err(
+                    source,
+                    &join(key, name),
+                    format!("must be a whole number of milliseconds from {min} to {max}"),
+                ));
+                None
+            }
+        },
     }
 }
 
@@ -860,6 +922,14 @@ fn envelope_text(effect: &Effect) -> String {
             "{{ kind = \"breathe\", period_ms = {period_ms}, depth = {}, easing = \"{}\" }}",
             thousandths(depth),
             easing_text(easing)
+        ),
+        Effect::Pulse {
+            attack_ms,
+            hold_ms,
+            decay_ms,
+            repeat,
+        } => format!(
+            "{{ kind = \"pulse\", attack_ms = {attack_ms}, hold_ms = {hold_ms}, decay_ms = {decay_ms}, repeat = {repeat} }}"
         ),
     }
 }

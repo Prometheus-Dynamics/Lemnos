@@ -323,6 +323,12 @@ pub struct ImuSample {
     pub gyro_raw: [i16; 3],
 }
 
+/// The X, Y, Z counts of the accelerometer and of the gyroscope.
+pub type Axes = ([i16; 3], [i16; 3]);
+
+/// Every axis of both dies (see [`Bmi088::select`]).
+pub const ALL_AXES: u8 = 0b111_111;
+
 pub(crate) fn decode_axes(bytes: [u8; 6]) -> [i16; 3] {
     [
         i16::from_le_bytes([bytes[0], bytes[1]]),
@@ -431,6 +437,9 @@ pub struct Bmi088<I2C> {
     settings: Config,
     /// Batch reads come from the FIFOs (see [`with_fifo`](Self::with_fifo)).
     fifo: bool,
+    /// The channels the next read needs (see [`select`](Self::select)): bit
+    /// 0..=2 accelerometer X, Y, Z, bit 3..=5 gyroscope X, Y, Z.
+    selection: u8,
 }
 
 impl<I2C: I2c> Bmi088<I2C> {
@@ -448,11 +457,25 @@ impl<I2C: I2c> Bmi088<I2C> {
             config: None,
             settings: Config::default(),
             fifo: false,
+            selection: ALL_AXES,
         }
     }
 
+    /// Selects the axes a read returns: bit 0..=2 the accelerometer's X, Y, Z,
+    /// bit 3..=5 the gyroscope's. A read then reads only the registers of the
+    /// selected axes (one burst per die, covering the selected axes), and
+    /// returns the others as unselected. Every axis is selected by default.
+    pub fn select(&mut self, axes: u8) {
+        self.selection = axes & ALL_AXES;
+    }
+
+    /// The selected axes (see [`select`](Self::select)).
+    pub fn selection(&self) -> u8 {
+        self.selection
+    }
+
     /// Enables the accelerometer and gyroscope FIFOs at `init`, so
-    /// [`read_batch`](Self::read_batch) returns every sample since the last
+    /// `read_batch` (the device-model trait) returns every sample since the last
     /// read rather than the latest one.
     pub fn with_fifo(mut self) -> Self {
         self.fifo = true;
@@ -643,6 +666,38 @@ impl<I2C: I2c> Bmi088<I2C> {
         let mut bytes = [0u8; 6];
         self.gyro().read_burst(GYR_DATA, &mut bytes)?;
         Ok(decode_axes(bytes))
+    }
+
+    /// Reads the selected axes of each die (`accel` and `gyro`: bit 0..=2 X, Y,
+    /// Z). A die with no axis selected is not read, and its axes come back 0.
+    /// The selected axes of a die are one burst from its first selected axis
+    /// to its last, so one axis is two bytes on the bus.
+    pub fn read_axes(&mut self, accel: u8, gyro: u8) -> Result<Axes, Error<I2C::Error>> {
+        let accel = self.read_die_axes(true, accel & 0b111)?;
+        let gyro = self.read_die_axes(false, gyro & 0b111)?;
+        Ok((accel, gyro))
+    }
+
+    fn read_die_axes(&mut self, accel: bool, axes: u8) -> Result<[i16; 3], Error<I2C::Error>> {
+        let mut out = [0i16; 3];
+        if axes == 0 {
+            return Ok(out);
+        }
+        let first = axes.trailing_zeros() as usize;
+        let last = 7 - axes.leading_zeros() as usize;
+        let len = 2 * (last - first + 1);
+        let mut bytes = [0u8; 6];
+        let base = if accel { ACC_DATA } else { GYR_DATA } + 2 * first as u16;
+        if accel {
+            self.accel().read_burst(base, &mut bytes[..len])?;
+        } else {
+            self.gyro().read_burst(base, &mut bytes[..len])?;
+        }
+        for (axis, value) in out.iter_mut().enumerate().take(last + 1).skip(first) {
+            let k = 2 * (axis - first);
+            *value = i16::from_le_bytes([bytes[k], bytes[k + 1]]);
+        }
+        Ok(out)
     }
 
     /// Reads both dies, converted to milli-g and milli-degrees per second.

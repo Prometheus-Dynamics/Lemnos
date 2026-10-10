@@ -52,6 +52,9 @@ pub trait DynSensor: DynDevice {
     /// See [`Sensor::sample_period_us`].
     fn sample_period_us(&self) -> Option<u32>;
 
+    /// See [`Sensor::select_channels`].
+    fn select_channels(&mut self, mask: u64);
+
     /// [`read`](Self::read), writing why it failed to `why`.
     #[cfg(feature = "reasons")]
     fn read_why(&mut self, out: &mut [i32], why: &mut dyn Write) -> Result<(), ErrorKind> {
@@ -129,6 +132,10 @@ impl<T: Sensor + ?Sized> DynSensor for T {
 
     fn sample_period_us(&self) -> Option<u32> {
         Sensor::sample_period_us(self)
+    }
+
+    fn select_channels(&mut self, mask: u64) {
+        Sensor::select_channels(self, mask);
     }
 
     #[cfg(feature = "reasons")]
@@ -240,6 +247,15 @@ macro_rules! erased_ops {
                 Self::Sensor(d) => d.read_batch(out),
                 Self::Both(d) => DynSensor::read_batch(&mut **d, out),
                 Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
+            }
+        }
+
+        /// See [`Sensor::select_channels`]; a no-op for a control or light.
+        pub fn select_channels(&mut self, mask: u64) {
+            match self {
+                Self::Sensor(d) => d.select_channels(mask),
+                Self::Both(d) => DynSensor::select_channels(&mut **d, mask),
+                Self::Control(_) | Self::Light(_) => {}
             }
         }
 

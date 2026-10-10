@@ -33,6 +33,15 @@ pub(crate) struct Light {
     pub next_render_ms: u64,
 }
 
+/// When the frame after one due at `due` is due, having rendered at `now`:
+/// one frame later on the same cadence, or, if the light was woken a frame
+/// or more late, one frame after `now` (no burst of catch-up frames).
+pub(crate) fn next_frame_due(due: u64, now: u64) -> u64 {
+    let frame = u64::from(lemnos_light::FRAME_MS);
+    let base = if now >= due + frame { now } else { due };
+    base + frame
+}
+
 /// `0xWWRRGGBB` as a colour.
 pub(crate) fn rgbw(value: u32) -> Rgbw {
     Rgbw::new(
@@ -215,14 +224,37 @@ impl Light {
         self.shown = None;
     }
 
-    /// When the light needs attention next: a frame or an expiry.
+    /// When the light needs attention next: a frame or an expiry. A frame
+    /// is due at the light's own cadence (`next_render_ms`), not a fixed
+    /// interval from the wake-up, so a late wake does not stretch the frames.
     pub fn next_ms(&self, now_ms: u64) -> Option<u64> {
-        match (
-            self.animator.next_frame_ms(now_ms),
-            self.arbiter.next_expiry(),
-        ) {
+        let frame = self
+            .animator
+            .next_frame_ms(now_ms)
+            .map(|_| self.next_render_ms.max(now_ms));
+        match (frame, self.arbiter.next_expiry()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_keep_their_cadence_and_a_late_wake_resyncs_without_a_burst() {
+        let frame = u64::from(lemnos_light::FRAME_MS);
+        // On time, and a millisecond late: the next frame stays on the grid.
+        assert_eq!(next_frame_due(100, 100), 100 + frame);
+        assert_eq!(next_frame_due(100, 101), 100 + frame);
+        assert_eq!(
+            next_frame_due(100 + frame, 100 + frame + 1),
+            100 + 2 * frame
+        );
+        // Woken a whole frame late: resync to now, not a catch-up burst.
+        assert_eq!(next_frame_due(100, 100 + frame), 100 + 2 * frame);
+        assert_eq!(next_frame_due(100, 500), 500 + frame);
     }
 }

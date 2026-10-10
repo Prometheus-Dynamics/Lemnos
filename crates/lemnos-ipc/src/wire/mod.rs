@@ -37,6 +37,7 @@ const LED: u16 = 7;
 const RELEASE: u16 = 8;
 const RESTORE: u16 = 9;
 const LOOKS: u16 = 10;
+const SUBSCRIBE_CHANNELS: u16 = 11;
 const WELCOME: u16 = 101;
 const DEVICES: u16 = 102;
 const READING: u16 = 103;
@@ -142,6 +143,8 @@ pub enum Refusal {
     /// The device cannot do this: a subscription to a device that produces
     /// no readings (a light, a fan).
     Unsupported,
+    /// A channel name a subscription asked for is not one of the device's.
+    UnknownChannel,
 }
 
 impl Refusal {
@@ -156,6 +159,7 @@ impl Refusal {
             Self::Claimed => (7, 0),
             Self::UnknownHandle => (8, 0),
             Self::Unsupported => (9, 0),
+            Self::UnknownChannel => (10, 0),
         }
     }
 
@@ -169,6 +173,7 @@ impl Refusal {
             7 => Self::Claimed,
             8 => Self::UnknownHandle,
             9 => Self::Unsupported,
+            10 => Self::UnknownChannel,
             _ => Self::Device(ErrorKind::from_code(kind)),
         }
     }
@@ -186,6 +191,7 @@ impl fmt::Display for Refusal {
             Self::Claimed => f.write_str("claimed by another client"),
             Self::UnknownHandle => f.write_str("no such claim"),
             Self::Unsupported => f.write_str("not supported by this device"),
+            Self::UnknownChannel => f.write_str("no such channel on this device"),
         }
     }
 }
@@ -356,6 +362,16 @@ pub enum Request {
     Subscribe {
         id: u32,
         device: String,
+        period_ms: u32,
+    },
+    /// Subscribes to some of a device's channels, each name one channel
+    /// (`angular_rate.z`), or a prefix with a trailing `.*` (`angular_rate.*`),
+    /// or `*` for all. `period_ms` 0 ends this selection's subscription.
+    /// Answered as [`Subscribe`](Self::Subscribe) is.
+    SubscribeChannels {
+        id: u32,
+        device: String,
+        channels: Vec<String>,
         period_ms: u32,
     },
     Set {

@@ -34,6 +34,12 @@ fn requests_round_trip() {
         device: "imu".into(),
         period_ms: 10,
     });
+    round_trip_request(Request::SubscribeChannels {
+        id: 10,
+        device: "imu".into(),
+        channels: vec!["angular_rate.z".into(), "acceleration.*".into()],
+        period_ms: 10,
+    });
     round_trip_request(Request::Set {
         id: 7,
         device: "fan".into(),
@@ -425,6 +431,17 @@ fn looks_round_trip_by_name_inline_and_in_text() {
     arc.envelope = Effect::Solid;
     round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
         spec: Box::new(arc),
+        progress: None,
+    })));
+    let mut flash = LookSpec::fill(Rgbw::rgb(0x00ff20));
+    flash.envelope = Effect::Pulse {
+        attack_ms: 60,
+        hold_ms: 600,
+        decay_ms: 1200,
+        repeat: 1,
+    };
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(flash),
         progress: None,
     })));
     round_trip_request(Request::Looks {

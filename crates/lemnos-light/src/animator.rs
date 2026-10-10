@@ -19,6 +19,16 @@ pub enum Effect {
         depth: u16,
         easing: Easing,
     },
+    /// A one-shot flash, then a glow down to off: the level rises over
+    /// `attack_ms`, holds for `hold_ms`, and decays (eased) to 0 over
+    /// `decay_ms`. It runs `repeat` times (0: keeps repeating); after the
+    /// last one the level is 0.
+    Pulse {
+        attack_ms: u32,
+        hold_ms: u32,
+        decay_ms: u32,
+        repeat: u8,
+    },
 }
 
 impl Effect {
@@ -57,6 +67,30 @@ impl Effect {
                 let eased = easing.apply(t);
                 let depth = (u32::from(depth.min(1000)) << 16) / 1000;
                 ONE - ((u64::from(depth) * u64::from(ONE - eased)) >> 16) as u32
+            }
+            Self::Pulse {
+                attack_ms,
+                hold_ms,
+                decay_ms,
+                repeat,
+            } => {
+                let attack = u64::from(attack_ms);
+                let hold = u64::from(hold_ms);
+                let decay = u64::from(decay_ms).max(1);
+                let cycle = attack + hold + decay;
+                if repeat > 0 && elapsed_ms >= cycle * u64::from(repeat) {
+                    return 0;
+                }
+                let phase = elapsed_ms % cycle;
+                if phase < attack {
+                    ((phase << 16) / attack.max(1)) as u32
+                } else if phase < attack + hold {
+                    ONE
+                } else {
+                    // The glow: a quadratic ease-out to 0, so it lands softly.
+                    let left = ONE - (((phase - attack - hold) << 16) / decay) as u32;
+                    ((u64::from(left) * u64::from(left)) >> 16) as u32
+                }
             }
         }
     }

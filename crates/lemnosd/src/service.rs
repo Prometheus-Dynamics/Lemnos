@@ -2,8 +2,8 @@
 //! the next device deadline.
 
 use crate::clients::Client;
-use crate::devices::{Placement, Slot, Subscription};
-use crate::light::{Light, LightIntent, MAX_LEDS};
+use crate::devices::{Placement, Slot, Subscription, WHOLE_DEVICE, channel_mask};
+use crate::light::{Light, LightIntent, MAX_LEDS, next_frame_due};
 use crate::looks::LookTable;
 use crate::notify::Notifier;
 use crate::schedule::{self, Due, Next};
@@ -336,21 +336,38 @@ impl Service {
     /// Sends the reading at `read_us` to each subscriber whose next
     /// deadline it meets, and moves those deadlines on.
     fn deliver(&mut self, index: usize, read_us: u64, now_us: u64) {
-        let due: Vec<u32> = self.slots[index]
+        let due: Vec<(u32, u64)> = self.slots[index]
             .subscriptions
             .iter_mut()
             .filter(|s| s.next_us <= read_us)
             .map(|s| {
                 s.next_us = schedule::advance(s.next_us, u64::from(s.period_ms) * 1000, now_us);
-                s.client
+                (s.client, s.mask)
             })
             .collect();
         if due.is_empty() {
             return;
         }
-        let message = self.reading(index);
-        for client in self.clients.iter_mut().filter(|c| due.contains(&c.id)) {
-            client.send(&message);
+        let device = self.slots[index].id().to_string();
+        let status = self.slots[index].status;
+        let timestamp_us = self.slots[index].read_us;
+        let sends: Vec<(usize, Message)> = self
+            .clients
+            .iter()
+            .enumerate()
+            .filter_map(|(ci, c)| {
+                let mask = client_mask(&due, c.id)?;
+                let message = Message::Reading(RawReading {
+                    device: device.clone(),
+                    timestamp_us,
+                    status,
+                    values: self.slots[index].channel_values_for(mask),
+                });
+                Some((ci, message))
+            })
+            .collect();
+        for (ci, message) in sends {
+            self.clients[ci].send(&message);
         }
     }
 
@@ -450,25 +467,35 @@ impl Service {
             // a request in whole milliseconds (2 ms for a 400 Hz stream) then
             // gets every sample, not one in three.
             let slack = period_us / 2;
-            let mut due: Vec<u32> = Vec::new();
+            let mut due: Vec<(u32, u64)> = Vec::new();
             for sub in self.slots[index].subscriptions.iter_mut() {
                 if sub.next_us <= at_us + slack {
                     sub.next_us =
                         schedule::advance(sub.next_us, u64::from(sub.period_ms) * 1000, at_us);
-                    due.push(sub.client);
+                    due.push((sub.client, sub.mask));
                 }
             }
             if due.is_empty() {
                 continue;
             }
-            let message = Message::Reading(RawReading {
-                device: device.clone(),
-                timestamp_us: at_us,
-                status,
-                values: values[..channels].to_vec(),
-            });
-            for client in self.clients.iter_mut().filter(|c| due.contains(&c.id)) {
-                client.send(&message);
+            let sends: Vec<(u32, Message)> = self
+                .clients
+                .iter()
+                .filter_map(|c| {
+                    let mask = client_mask(&due, c.id)?;
+                    let message = Message::Reading(RawReading {
+                        device: device.clone(),
+                        timestamp_us: at_us,
+                        status,
+                        values: mask_values(&values[..channels], mask),
+                    });
+                    Some((c.id, message))
+                })
+                .collect();
+            for (id, message) in sends {
+                if let Some(client) = self.clients.iter_mut().find(|c| c.id == id) {
+                    client.send(&message);
+                }
             }
         }
     }
@@ -530,13 +557,18 @@ impl Service {
     /// Sends sensor `index`'s device to its bus thread for one read.
     /// `scheduled`: the read is the schedule's (it moves the grid on).
     fn dispatch(&mut self, index: usize, scheduled: bool) {
+        let now_us = self.now_us();
         let slot = &mut self.slots[index];
         let Some(lane) = slot.lane else {
             return;
         };
-        let Some(device) = slot.device.take() else {
+        let Some(mut device) = slot.device.take() else {
             return;
         };
+        // The channels this read needs (a one-shot reader's read takes all).
+        let mask = slot.read_mask(now_us);
+        device.select_channels(mask);
+        slot.values_mask = mask;
         let job = Job { index, device };
         slot.busy = true;
         if scheduled {
@@ -585,11 +617,46 @@ impl Service {
             client,
             period_ms,
             next_us: now_us,
+            mask: WHOLE_DEVICE,
         });
         // Read on the new schedule from now.
         slot.next_read_us = slot.next_read_us.min(now_us);
         let read_ms = u32::try_from(slot.read_cost_us.div_ceil(1000)).unwrap_or(u32::MAX);
         // The device is never read faster than its cap or one read takes.
+        Ok(period_ms.max(slot.cap_ms()).max(read_ms))
+    }
+
+    /// Starts (or, with 0, ends) this client's readings of some channels of
+    /// `device` (see `Request::SubscribeChannels`). Each selection is its own
+    /// subscription, at its own period; the device reads what the due ones need.
+    fn subscribe_channels(
+        &mut self,
+        ci: usize,
+        device: &str,
+        channels: &[String],
+        period_ms: u32,
+    ) -> Result<u32, Refusal> {
+        let index = self.slot_of(device).ok_or(Refusal::UnknownDevice)?;
+        let client = self.clients[ci].id;
+        let now_us = self.now_us();
+        let slot = &mut self.slots[index];
+        if period_ms > 0 && slot.present && !slot.is_sensor() {
+            return Err(Refusal::Unsupported);
+        }
+        let mask = channel_mask(slot.info, channels).ok_or(Refusal::UnknownChannel)?;
+        slot.subscriptions
+            .retain(|s| !(s.client == client && s.mask == mask));
+        if period_ms == 0 {
+            return Ok(0);
+        }
+        slot.subscriptions.push(Subscription {
+            client,
+            period_ms,
+            next_us: now_us,
+            mask,
+        });
+        slot.next_read_us = slot.next_read_us.min(now_us);
+        let read_ms = u32::try_from(slot.read_cost_us.div_ceil(1000)).unwrap_or(u32::MAX);
         Ok(period_ms.max(slot.cap_ms()).max(read_ms))
     }
 
@@ -659,12 +726,12 @@ impl Service {
                 }));
             }
             let light = &mut self.lights[li];
-            // A new look goes out at once; animation frames at most every
-            // FRAME_MS, however often the loop wakes.
+            // A new look goes out at once; animation frames on a fixed
+            // FRAME_MS cadence, however often the loop wakes.
             if !light.animator.is_pending() && now_ms < light.next_render_ms {
                 continue;
             }
-            light.next_render_ms = now_ms + u64::from(lemnos_light::FRAME_MS);
+            light.next_render_ms = next_frame_due(light.next_render_ms, now_ms);
             let slot = light.slot;
             if let Some(frame) = light.animator.render(now_ms)
                 && let Some(device) = self.slots[slot].device.as_mut()
@@ -743,7 +810,10 @@ impl Service {
                         // while it is no older than the device's cap.
                         let now_us = self.now_us();
                         let slot = &self.slots[index];
+                        // A reading of only some channels (a subscription's) is
+                        // not the whole device's: a one-shot read reads them all.
                         let stale = !slot.fresh
+                            || slot.values_mask & slot.all_channels() != slot.all_channels()
                             || now_us.saturating_sub(slot.read_us)
                                 >= u64::from(slot.cap_ms()) * 1000;
                         if stale && slot.present && slot.placement == Placement::Worker {
@@ -755,7 +825,7 @@ impl Service {
                         }
                         if stale
                             && self.slots[index].is_sensor()
-                            && let Some(status) = self.slots[index].read()
+                            && let Some(status) = self.slots[index].read_full()
                         {
                             self.status_event(index, status);
                         }
@@ -780,6 +850,20 @@ impl Service {
             } => {
                 let result = self.subscribe(ci, &device, period_ms);
                 // Older clients (id 0) are answered only with a refusal.
+                if id != 0 || result.is_err() {
+                    self.clients[ci].send(&Message::Reply {
+                        id,
+                        result: result.map(f64::from),
+                    });
+                }
+            }
+            Request::SubscribeChannels {
+                id,
+                device,
+                channels,
+                period_ms,
+            } => {
+                let result = self.subscribe_channels(ci, &device, &channels, period_ms);
                 if id != 0 || result.is_err() {
                     self.clients[ci].send(&Message::Reply {
                         id,
@@ -1216,4 +1300,29 @@ impl Service {
             std::thread::sleep(Duration::from_millis(u64::from(lemnos_light::FRAME_MS)));
         }
     }
+}
+
+/// The channels a client wants from a delivery: the union of the masks of its
+/// due subscriptions, `None` if it has none due.
+fn client_mask(due: &[(u32, u64)], client: u32) -> Option<u64> {
+    let mut found = None;
+    for (_, mask) in due.iter().filter(|(c, _)| *c == client) {
+        found = Some(found.unwrap_or(0u64) | mask);
+    }
+    found
+}
+
+/// `values` with no value for the channels outside `mask`.
+fn mask_values(values: &[i32], mask: u64) -> Vec<i32> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if i < 64 && mask & (1 << i) != 0 {
+                *v
+            } else {
+                lemnos_device::NO_VALUE
+            }
+        })
+        .collect()
 }

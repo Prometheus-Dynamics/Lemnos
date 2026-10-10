@@ -101,6 +101,16 @@ pub trait Sensor: Device {
     fn sample_period_us(&self) -> Option<u32> {
         None
     }
+
+    /// Which channels the next [`read`](Self::read) needs: bit `i` is channel
+    /// `i` of `info().channels`. A device that can read a subset of its
+    /// channels for less bus time (fewer registers) does so, and writes
+    /// [`NO_VALUE`](crate::NO_VALUE) for the channels not selected. The default
+    /// ignores the selection and reads every channel. Selecting costs nothing
+    /// on the bus by itself.
+    fn select_channels(&mut self, mask: u64) {
+        let _ = mask;
+    }
 }
 
 /// A device that accepts settings.

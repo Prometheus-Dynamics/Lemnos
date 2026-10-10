@@ -96,3 +96,54 @@ fn the_granted_period_is_at_least_the_device_read_time() {
     // A period longer than the read time is granted as asked.
     assert_eq!(client.subscribe("slow", 50).unwrap(), 50);
 }
+
+#[test]
+fn a_channel_subscription_gets_its_channels_and_refuses_unknown_names() {
+    use lemnos_device::NO_VALUE;
+    use lemnos_ipc::{ClientEvent, Update};
+    let service = start();
+    let mut client = ClientOptions::new(service.socket(), "viewer")
+        .devices()
+        .unwrap();
+
+    assert_eq!(
+        client
+            .subscribe_channels("slow", &["angular_rate.z"], 10)
+            .unwrap(),
+        10
+    );
+    assert!(matches!(
+        client.subscribe_channels("slow", &["angular_rate.q"], 10),
+        Err(ClientError::Refused(Refusal::UnknownChannel))
+    ));
+    assert!(matches!(
+        client.subscribe_channels("slow", &["nope.*"], 10),
+        Err(ClientError::Refused(Refusal::UnknownChannel))
+    ));
+    // Only the yaw rate has a value; the other channels have none.
+    let mut readings = 0;
+    while readings < 3 {
+        // Connection and status events come too: skip anything else.
+        let r = loop {
+            match client.next_event_timeout(Duration::from_secs(2)).unwrap() {
+                Some(ClientEvent::Data(Update::Reading(r))) => break r,
+                Some(_) => continue,
+                None => panic!("no readings"),
+            }
+        };
+        if r.device != "slow" {
+            continue;
+        }
+        readings += 1;
+        assert_eq!(r.raw.len(), 6);
+        assert!(r.raw[..5].iter().all(|v| *v == NO_VALUE), "{:?}", r.raw);
+        assert_ne!(r.raw[5], NO_VALUE);
+    }
+    // Ending the selection stops its readings.
+    assert_eq!(
+        client
+            .subscribe_channels("slow", &["angular_rate.z"], 0)
+            .unwrap(),
+        0
+    );
+}

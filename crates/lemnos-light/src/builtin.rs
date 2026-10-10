@@ -4,12 +4,19 @@
 
 use crate::animator::Effect;
 use crate::intent::{Defaults, EffectKind};
-use crate::look::{Block, Fraction, LayerSpec, LookSpec};
+use crate::look::{Block, Fraction, LayerSpec, LookSpec, Mode};
 use lemnos_device::Rgbw;
 
 /// The brightness of a full-ring fill or breathe (0.7 of full): a fill
 /// is much brighter than a comet's head, so it is capped lower.
 pub const FULL_FILL: u8 = 178;
+
+/// The brightness of the staged breathe: a little above a full fill, so the
+/// ring reads as "ready" from across the room.
+pub const STAGED_BRIGHTNESS: u8 = 217;
+/// The confirmed flash's base: the whole ring, above the fill cap (a
+/// celebration). The ripple's fronts add full brightness on top of it.
+pub const CONFIRMED_FLASH: u8 = 140;
 
 /// The names of every built-in look.
 pub const NAMES: &[&str] = &[
@@ -67,7 +74,7 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
             sheen: true,
         })),
         "system.staged" => LookSpec::fill(d.staged)
-            .with_brightness(FULL_FILL)
+            .with_brightness(STAGED_BRIGHTNESS)
             .with_envelope(Effect::Breathe {
                 period_ms: d.staged_period_ms,
                 depth: d.staged_depth,
@@ -92,7 +99,7 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
                 depth: d.failed_depth,
                 easing: d.easing,
             }),
-        "system.confirmed" => LookSpec::ripple(d.confirmed),
+        "system.confirmed" => confirmed(d.confirmed),
         // PhotonVision's app looks (the board's ring is the vision app's
         // status): blue while targets are seen, green while searching, amber
         // without NetworkTables, red on an error.
@@ -127,8 +134,35 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
 
 /// The brightness of the reboot ember (see [`EMBER`](crate::EMBER)).
 pub const EMBER: u8 = crate::intent::EMBER;
-/// The least the ember is shown at, after the ring-wide scale (about 6%).
-pub const EMBER_FLOOR: u8 = 16;
+/// The least the ember is shown at, after the ring-wide scale (about 16%).
+pub const EMBER_FLOOR: u8 = 40;
+
+/// The confirmed celebration: the whole ring flashes up in `color` (over
+/// the attack), two fronts run out from the top and back round, and the
+/// glow decays to off. About 1.9 s; the host holds it a little longer.
+pub fn confirmed(color: Rgbw) -> LookSpec {
+    let mut look = LookSpec::fill(color)
+        .with_brightness(CONFIRMED_FLASH)
+        .with_envelope(Effect::Pulse {
+            attack_ms: 60,
+            hold_ms: 600,
+            decay_ms: 1_200,
+            repeat: 1,
+        });
+    // The fronts, added on top of the flash: full brightness, no glow.
+    look.push(
+        LayerSpec::new(Block::Ripple {
+            origin: 0,
+            color,
+            speed: 14_000,
+            width: 2_500,
+            settle_ms: 1,
+            glow: 0,
+        })
+        .with_mode(Mode::Add),
+    );
+    look
+}
 
 /// A fill in `color` with `kind`'s envelope; a chase is a spinner.
 pub fn themed(color: Rgbw, kind: EffectKind, d: &Defaults) -> LookSpec {

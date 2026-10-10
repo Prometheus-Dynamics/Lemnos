@@ -23,6 +23,7 @@ const FRAME: u8 = 4;
 const SOLID: u8 = 0;
 const BLINK: u8 = 1;
 const BREATHE: u8 = 2;
+const PULSE: u8 = 3;
 
 fn color_code(c: Rgbw) -> u32 {
     (u32::from(c.w) << 24) | (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
@@ -122,6 +123,18 @@ pub(super) fn encode(e: &mut Encoder, spec: &LookSpec) {
                 e.u16(p);
             }
         }
+        Effect::Pulse {
+            attack_ms,
+            hold_ms,
+            decay_ms,
+            repeat,
+        } => {
+            e.u8(PULSE)
+                .u32(attack_ms)
+                .u32(hold_ms)
+                .u32(decay_ms)
+                .u8(repeat);
+        }
     }
     e.u8(spec.brightness).u8(spec.floor);
 }
@@ -216,6 +229,12 @@ pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
                 easing,
             }
         }
+        PULSE => Effect::Pulse {
+            attack_ms: d.u32()?,
+            hold_ms: d.u32()?,
+            decay_ms: d.u32()?,
+            repeat: d.u8()?,
+        },
         other => return Err(bad(format!("look envelope {other}"))),
     };
     spec.brightness = d.u8()?;

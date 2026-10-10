@@ -173,8 +173,9 @@ impl SystemState {
 }
 
 /// The brightness of the reboot look: the ring holds it while power is cut,
-/// so it is a static ember (12% of full, 31 of 255).
-pub const EMBER: u8 = 31;
+/// so it is a static ember. 112 of 255 (44%), which the default ring-wide
+/// brightness (half) makes about 22% of full: clearly visible on a dark ring.
+pub const EMBER: u8 = 112;
 
 impl Layer {
     pub const fn name(self) -> &'static str {
@@ -601,6 +602,9 @@ impl<const N: usize> Intent<N> {
                     *easing = e;
                 }
             }
+            // A pulse's timing is the look's own; the intent's period and
+            // depth do not reshape it.
+            Effect::Pulse { .. } => {}
         }
     }
 }

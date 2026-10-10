@@ -213,11 +213,12 @@ fn comet_moves_its_head_round_with_a_tail() {
     assert!(at400[3].r > 0 && at400[3].r < 255);
     assert_eq!(at400[0].r, 0);
     // Sub-LED motion: half an LED on (50 ms of 1.6 s is 0.5 LED), the head
-    // sits between LEDs 0 and 1: LED 0 is part lit and LED 1 is not.
+    // sits between LEDs 0 and 1: LED 0 is part lit, and LED 1 (the leading
+    // edge) is lit by the half that the head has reached.
     let half = frame16(a.render(50).unwrap());
     // (1 - 0.5/3)^2.2 of full.
     assert!(half[0].r > 165 && half[0].r < 175, "{:?}", half[0]);
-    assert_eq!(half[1].r, 0);
+    assert!(half[1].r.abs_diff(128) <= 2, "{:?}", half[1]);
     assert_eq!(a.next_frame_ms(400), Some(420));
 }
 
@@ -294,8 +295,15 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     let defaults = Defaults::default();
     let (look, _) =
         Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve_builtin(&defaults);
+    // A flash of the whole ring (its fill, above the fill cap) and a ripple
+    // on top, over a pulse envelope.
     assert!(matches!(
         block(&look),
+        Block::Fill { color } if color == defaults.confirmed
+    ));
+    assert!(matches!(look.envelope, Effect::Pulse { repeat: 1, .. }));
+    assert!(matches!(
+        look.layers[1].expect("a ripple").block,
         Block::Ripple { color, .. } if color == defaults.confirmed
     ));
     assert_eq!(SystemState::Confirmed.name(), "confirmed");
@@ -308,16 +316,16 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     ));
     assert_eq!(look.envelope, Effect::Solid);
     assert!(!look.is_moving());
-    // 12% of the amber: 31 of 255 on the red channel.
-    assert_eq!(EMBER, 31);
+    // 44% of the amber: 112 of 255, about 22% on a default (half) ring.
+    assert_eq!(EMBER, 112);
     let mut a: Animator<16> = Animator::new(16);
     a.set(look, Transition::new(1200, Easing::EaseInOut), 0);
     a.render(0);
     let end = frame16(a.render(1200).unwrap());
-    // At the default ring-wide brightness (half) the ember is held at its
-    // floor, about 6%: 16 of 255.
-    assert_eq!(end[0], Rgbw::rgb(0xff8000).scaled(16));
-    assert_eq!(end[0].r, 16);
+    // At the default ring-wide brightness (half) the ember is about 22%:
+    // 56 of 255 on the red channel.
+    assert_eq!(end[0], Rgbw::rgb(0xff8000).scaled(56));
+    assert_eq!(end[0].r, 56);
     assert!(a.render(1300).is_none());
     assert_eq!(a.next_frame_ms(1300), None);
 }
@@ -718,7 +726,7 @@ fn the_ring_wide_brightness_scales_every_look_and_the_ember_keeps_a_floor() {
     defaults.look_brightness = 10;
     let (ember, _) =
         Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve_builtin(&defaults);
-    assert_eq!(ember.brightness, 16);
+    assert_eq!(ember.brightness, 40);
     // Half the ring-wide brightness is half a full fill (rounded).
     defaults.look_brightness = 128;
     let (fill, _) = Intent::<16>::new(Show::Status(Status::Ok)).resolve_builtin(&defaults);
@@ -781,4 +789,115 @@ fn named_arcs_and_inline_looks_share_the_one_render_path() {
     })
     .resolve_builtin(&defaults);
     assert_eq!(inline, named);
+}
+
+/// The largest change in any LED's red between two frames 1 ms apart, over
+/// one turn of `look` (and across its wrap).
+fn largest_step_per_ms(look: &LookSpec, count: usize) -> (u8, u64) {
+    let period = match look.layers[0].expect("a layer").block {
+        Block::Comet { period_ms, .. } => u64::from(period_ms),
+        _ => panic!("a comet look"),
+    };
+    assert!(count <= 16);
+    let frame = |t: u64| -> [u8; 16] {
+        let mut out = [0u8; 16];
+        for (i, slot) in out.iter_mut().enumerate().take(count) {
+            *slot = look.color(i, count, t, 0).r;
+        }
+        out
+    };
+    let mut worst = (0u8, 0u64);
+    let mut prev = frame(0);
+    for t in 1..=period {
+        let next = frame(t);
+        for (a, b) in prev.iter().zip(&next) {
+            let step = a.abs_diff(*b);
+            if step > worst.0 {
+                worst = (step, t);
+            }
+        }
+        prev = next;
+    }
+    worst
+}
+
+#[test]
+fn comet_leading_edges_move_smoothly_at_one_ms_steps() {
+    // A comet's head crosses 16 LEDs in its period: at most a few steps of
+    // 255 in a millisecond, never a whole LED's jump (255 in one step).
+    let reversed = LookSpec::of(LayerSpec::new(Block::Comet {
+        color: Rgbw::rgb(0xffffff),
+        period_ms: 1200,
+        tail: 5_000,
+        heads: 1,
+        base: 0,
+        reverse: true,
+    }));
+    let cases = [
+        (
+            "one head, the default",
+            LookSpec::comet(Rgbw::rgb(0xffffff), 1200, 5000, 1, 0),
+        ),
+        (
+            "one head, a short tail",
+            LookSpec::comet(Rgbw::rgb(0xffffff), 1200, 1000, 1, 0),
+        ),
+        (
+            "one head, a long tail",
+            LookSpec::comet(Rgbw::rgb(0x00ff20), 1600, 6000, 1, 60),
+        ),
+        (
+            "two heads, amber",
+            LookSpec::comet(Rgbw::rgb(0xffa424), 2400, 5000, 2, 50),
+        ),
+        (
+            "two heads, blue",
+            LookSpec::comet(Rgbw::rgb(0x2f7bff), 2400, 5000, 2, 80),
+        ),
+        (
+            "two heads, short",
+            LookSpec::comet(Rgbw::rgb(0xffffff), 1000, 2000, 2, 0),
+        ),
+        ("one head, reversed", reversed),
+    ];
+    for (what, look) in cases {
+        let (step, at) = largest_step_per_ms(&look, 16);
+        assert!(step <= 9, "{what}: a LED moved {step} at {at} ms");
+    }
+}
+
+#[test]
+fn a_pulse_flashes_holds_then_glows_down_once() {
+    let pulse = Effect::Pulse {
+        attack_ms: 100,
+        hold_ms: 200,
+        decay_ms: 400,
+        repeat: 1,
+    };
+    assert_eq!(pulse.level(0), 0);
+    // Half way up the attack.
+    assert!(
+        pulse.level(50).abs_diff(ONE / 2) < 600,
+        "{}",
+        pulse.level(50)
+    );
+    assert_eq!(pulse.level(100), ONE);
+    assert_eq!(pulse.level(299), ONE);
+    // Half way down the decay: a quadratic ease-out, a quarter of full.
+    assert!(
+        pulse.level(500).abs_diff(ONE / 4) < 600,
+        "{}",
+        pulse.level(500)
+    );
+    assert_eq!(pulse.level(700), 0);
+    assert_eq!(pulse.level(5_000), 0);
+    // Repeat 0 keeps going.
+    let every = Effect::Pulse {
+        attack_ms: 100,
+        hold_ms: 200,
+        decay_ms: 400,
+        repeat: 0,
+    };
+    assert!(every.level(750).abs_diff(ONE / 2) < 600);
+    assert!(pulse.is_animated());
 }

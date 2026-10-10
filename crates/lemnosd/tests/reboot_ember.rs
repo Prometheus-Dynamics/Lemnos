@@ -91,10 +91,10 @@ fn a_reboot_leaves_the_ring_on_a_static_ember() {
 
     stop.store(true, Ordering::Relaxed);
     let took = handle.join().unwrap();
-    // Faded to the ember (ff8000 at 12%: 31, 16, 0), not one orange frame.
+    // Faded to the ember (ff8000 at 44%, half the ring: 112, 56, 0), not one orange frame.
     assert_eq!(ring(&root).len(), 16);
     assert!(
-        ring(&root).chunks(4).all(|p| p == [31, 16, 0, 0]),
+        ring(&root).chunks(4).all(|p| p == [112, 56, 0, 0]),
         "{:?}",
         ring(&root)
     );

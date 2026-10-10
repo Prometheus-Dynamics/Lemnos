@@ -126,7 +126,7 @@ fn main() -> ExitCode {
         }
     }
     let _ = signals.read();
-    service.shutdown(lemnosd::system_stopping());
+    service.shutdown(lemnosd::system_rebooting());
     eprintln!("lemnosd: stopped");
     ExitCode::SUCCESS
 }

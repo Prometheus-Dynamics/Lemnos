@@ -5,7 +5,7 @@
 //! lemnos-ctl [--socket PATH] [--client NAME] [--priority N] <command>
 //!   list
 //!   read <device>
-//!   watch <device> [--period MS] [--count N]
+//!   watch <device> [--period MS] [--count N] [--channels a.b,c.*]
 //!   set <device> <control> <value>
 //!   get <device> <control>
 //!   led status <ok|warn|error|busy|off> [led options]
@@ -576,14 +576,32 @@ fn devices(command: &str, mut args: Args, options: ClientOptions) -> ExitCode {
         }
         "watch" => {
             let Some(device) = args.next() else {
-                return fail("watch <device> [--period MS] [--count N]");
+                return fail("watch <device> [--period MS] [--count N] [--channels a.b,c.*]");
             };
             let period = args
                 .take("--period")
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(100);
             let count: Option<u64> = args.take("--count").and_then(|c| c.parse().ok());
-            if let Err(e) = client.subscribe(&device, period) {
+            // `--channels`: only these channels (`angular_rate.z`, `acceleration.*`,
+            // `*`), so the device reads only what they need.
+            let channels: Vec<String> = args
+                .take("--channels")
+                .map(|list| {
+                    list.split(',')
+                        .map(str::trim)
+                        .filter(|c| !c.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let subscribed = if channels.is_empty() {
+                client.subscribe(&device, period)
+            } else {
+                let names: Vec<&str> = channels.iter().map(String::as_str).collect();
+                client.subscribe_channels(&device, &names, period)
+            };
+            if let Err(e) = subscribed {
                 return fail(e);
             }
             let mut seen = 0;

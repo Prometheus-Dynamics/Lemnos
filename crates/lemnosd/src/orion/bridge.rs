@@ -56,6 +56,10 @@ pub struct Config {
     pub ttl: Duration,
     /// How long to wait between connection attempts to lemnosd or Orion.
     pub retry: Duration,
+    /// Devices whose readings are subscribed to only for some channels
+    /// (`LEMNOS_ORION_CHANNELS`, for example `imu=angular_rate.z`): the
+    /// device's other channels are not read. Other devices are whole.
+    pub channels: Vec<(String, Vec<String>)>,
 }
 
 impl Config {
@@ -92,6 +96,7 @@ impl Config {
             heartbeat: Duration::from_secs(30),
             ttl: Duration::from_secs(90),
             retry: Duration::from_secs(1),
+            channels: parse_channels(&std::env::var("LEMNOS_ORION_CHANNELS").unwrap_or_default()),
         })
     }
 
@@ -161,8 +166,17 @@ pub async fn run(config: Config) -> Result<(), String> {
     });
     let pump_socket = config.lemnosd_socket.clone();
     let pump_retry = config.retry;
+    let pump_channels = config.channels.clone();
     let period_ms = u32::try_from(cadence.min_interval.as_millis()).unwrap_or(u32::MAX);
-    std::thread::spawn(move || pump(&pump_socket, period_ms, pump_retry, &feed_tx));
+    std::thread::spawn(move || {
+        pump(
+            &pump_socket,
+            period_ms,
+            pump_retry,
+            &feed_tx,
+            &pump_channels,
+        );
+    });
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
     let started = Instant::now();
     let mut session: Option<Session> = None;
@@ -246,7 +260,13 @@ pub async fn run(config: Config) -> Result<(), String> {
 /// The lemnosd thread: one connection, readings forwarded, reconnected on
 /// failure. Ends when the bridge does.
 #[allow(clippy::print_stderr)]
-fn pump(socket: &Path, period_ms: u32, retry: Duration, feed: &mpsc::UnboundedSender<Feed>) {
+fn pump(
+    socket: &Path,
+    period_ms: u32,
+    retry: Duration,
+    feed: &mpsc::UnboundedSender<Feed>,
+    channels: &[(String, Vec<String>)],
+) {
     loop {
         if feed.is_closed() {
             return;
@@ -263,7 +283,7 @@ fn pump(socket: &Path, period_ms: u32, retry: Duration, feed: &mpsc::UnboundedSe
                 continue;
             }
         };
-        if !setup(&mut client, period_ms, feed) {
+        if !setup(&mut client, period_ms, feed, channels) {
             std::thread::sleep(retry);
             continue;
         }
@@ -274,7 +294,7 @@ fn pump(socket: &Path, period_ms: u32, retry: Duration, feed: &mpsc::UnboundedSe
             match client.next_event_timeout(Duration::from_millis(200)) {
                 Ok(None) => {}
                 Ok(Some(ClientEvent::Connected { reconnects })) => {
-                    if reconnects > 0 && !setup(&mut client, period_ms, feed) {
+                    if reconnects > 0 && !setup(&mut client, period_ms, feed, channels) {
                         break;
                     }
                 }
@@ -296,10 +316,33 @@ fn pump(socket: &Path, period_ms: u32, retry: Duration, feed: &mpsc::UnboundedSe
     }
 }
 
+/// `device=channel,channel;device=...` (`LEMNOS_ORION_CHANNELS`): each device
+/// with the channel names to subscribe to (see `DeviceClient::subscribe_channels`).
+pub fn parse_channels(text: &str) -> Vec<(String, Vec<String>)> {
+    text.split(';')
+        .filter_map(|entry| {
+            let (device, names) = entry.split_once('=')?;
+            let names: Vec<String> = names
+                .split(',')
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let device = device.trim();
+            (!device.is_empty() && !names.is_empty()).then(|| (device.to_owned(), names))
+        })
+        .collect()
+}
+
 /// Lists the devices, subscribes to each and reads its controls. False when
 /// lemnosd did not answer (the caller reconnects).
 #[allow(clippy::print_stderr)]
-fn setup(client: &mut DeviceClient, period_ms: u32, feed: &mpsc::UnboundedSender<Feed>) -> bool {
+fn setup(
+    client: &mut DeviceClient,
+    period_ms: u32,
+    feed: &mpsc::UnboundedSender<Feed>,
+    channels: &[(String, Vec<String>)],
+) -> bool {
     let devices = match client.list() {
         Ok(devices) => devices,
         Err(error) => {
@@ -317,7 +360,15 @@ fn setup(client: &mut DeviceClient, period_ms: u32, feed: &mpsc::UnboundedSender
         return true;
     }
     for device in &devices {
-        if let Err(error) = client.subscribe(&device.id, period_ms) {
+        let only = channels.iter().find(|(d, _)| *d == device.id);
+        let subscribed = match only {
+            Some((_, names)) => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                client.subscribe_channels(&device.id, &names, period_ms)
+            }
+            None => client.subscribe(&device.id, period_ms),
+        };
+        if let Err(error) = subscribed {
             eprintln!("lemnos-orion: subscribe {}: {error}", device.id);
         }
         for control in &device.controls {
@@ -638,4 +689,24 @@ fn drivers(path: Option<&std::path::Path>) -> BTreeMap<String, String> {
 #[allow(clippy::print_stderr)]
 fn log(message: &str) {
     eprintln!("lemnos-orion: {message}");
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::parse_channels;
+
+    #[test]
+    fn channel_selections_parse_per_device() {
+        assert_eq!(
+            parse_channels("imu=angular_rate.z, acceleration.* ;lights=;=x;fan=*"),
+            vec![
+                (
+                    "imu".to_string(),
+                    vec!["angular_rate.z".to_string(), "acceleration.*".to_string()]
+                ),
+                ("fan".to_string(), vec!["*".to_string()]),
+            ]
+        );
+        assert!(parse_channels("").is_empty());
+    }
 }

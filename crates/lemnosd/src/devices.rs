@@ -29,6 +29,52 @@ pub(crate) struct Subscription {
     pub client: u32,
     pub period_ms: u32,
     pub next_us: u64,
+    /// The channels wanted (bit i: channel i). All of them for a whole-device
+    /// subscription.
+    pub mask: u64,
+}
+
+/// Every channel of a device (`u64::MAX` for a whole-device subscription).
+pub(crate) const WHOLE_DEVICE: u64 = u64::MAX;
+
+/// The channels of `info` named by `names`: a channel's name, `prefix.*` for
+/// every channel under `prefix.`, or `*` for all. `None` when a name is none of
+/// the device's (or there is no name).
+pub(crate) fn channel_mask(info: Option<&DeviceInfo>, names: &[String]) -> Option<u64> {
+    let info = info?;
+    let mut mask = 0u64;
+    for name in names {
+        if name == "*" {
+            mask |= all_bits(info);
+            continue;
+        }
+        let mut hit = false;
+        for (i, channel) in info.channels.iter().enumerate().take(64) {
+            let matches = match name.strip_suffix(".*") {
+                Some(prefix) => channel
+                    .name
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('.')),
+                None => channel.name == name,
+            };
+            if matches {
+                mask |= 1 << i;
+                hit = true;
+            }
+        }
+        if !hit {
+            return None;
+        }
+    }
+    (mask != 0).then_some(mask)
+}
+
+/// The bits of every channel of `info`.
+fn all_bits(info: &DeviceInfo) -> u64 {
+    match info.channels.len().min(64) {
+        64 => u64::MAX,
+        n => (1u64 << n) - 1,
+    }
 }
 
 /// Where a device's reads run.
@@ -79,6 +125,9 @@ pub(crate) struct Slot {
     /// empty while it works).
     pub reason: String,
     pub values: [i32; MAX_CHANNELS],
+    /// The channels the last read was asked for (bit i: channel i). Channels
+    /// outside it hold no value.
+    pub values_mask: u64,
     /// When the last good read started (boot clock, microseconds).
     pub read_us: u64,
     pub fresh: bool,
@@ -130,6 +179,7 @@ impl Slot {
             error: None,
             reason: String::new(),
             values: [NO_VALUE; MAX_CHANNELS],
+            values_mask: 0,
             read_us: 0,
             fresh: false,
             next_read_us: 0,
@@ -286,12 +336,63 @@ impl Slot {
     /// Reads the device now and times the read; returns a status change. The
     /// reading is stamped with the time the read started.
     pub fn read(&mut self) -> Option<DeviceStatus> {
+        let mask = self.read_mask(boottime_us());
+        self.read_with(mask)
+    }
+
+    /// Reads every channel now (a one-shot reader's read; see [`read`](Self::read)).
+    pub fn read_full(&mut self) -> Option<DeviceStatus> {
+        self.read_with(self.all_channels())
+    }
+
+    /// Reads the channels in `mask` now.
+    fn read_with(&mut self, mask: u64) -> Option<DeviceStatus> {
         let started_us = boottime_us();
         let device = self.device.as_mut()?;
+        device.select_channels(mask);
+        self.values_mask = mask;
         let mut why = String::new();
         let result = device.read_why(&mut self.values, &mut why);
         let cost_us = boottime_us().saturating_sub(started_us);
         self.finish_read(started_us, cost_us, result, &why)
+    }
+
+    /// Every channel of the device (bit i: channel i), or all bits when the
+    /// device is not built yet.
+    pub fn all_channels(&self) -> u64 {
+        self.info.map_or(u64::MAX, all_bits)
+    }
+
+    /// The channels the read at `now_us` needs: those of the subscriptions due
+    /// by then (within half a period, as a read's deadline slack), and all of
+    /// them for a one-shot reader or with no subscriber (an idle read).
+    pub fn read_mask(&self, now_us: u64) -> u64 {
+        let all = self.all_channels();
+        if !self.waiters.is_empty() || self.subscriptions.is_empty() {
+            return all;
+        }
+        let slack = self.period_us().unwrap_or(0) / 2;
+        let mask = self
+            .subscriptions
+            .iter()
+            .filter(|s| s.next_us <= now_us + slack)
+            .fold(0u64, |m, s| m | (s.mask & all));
+        if mask == 0 { all } else { mask }
+    }
+
+    /// The channel values a reader wanting `mask` gets: the device's values
+    /// for those channels, and no value for the rest.
+    pub fn channel_values_for(&self, mask: u64) -> Vec<i32> {
+        let n = self.info.map_or(0, |i| i.channels.len());
+        (0..n)
+            .map(|i| {
+                if i < 64 && mask & (1 << i) != 0 {
+                    self.values[i]
+                } else {
+                    NO_VALUE
+                }
+            })
+            .collect()
     }
 
     /// Records a read that ran (inline, or on a worker with `values` already
@@ -506,6 +607,7 @@ mod tests {
             client,
             period_ms,
             next_us: 0,
+            mask: WHOLE_DEVICE,
         });
     }
 

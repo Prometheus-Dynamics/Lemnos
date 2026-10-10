@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 pub(crate) const STAGED_MS: u64 = 5_000;
 /// How long a failed update or a rollback is shown.
 pub(crate) const FAILED_MS: u64 = 60_000;
-/// How long the ripple of a confirmed trial boot is shown.
-pub(crate) const CONFIRMED_MS: u64 = 2_200;
+/// How long the confirmed celebration is held (its look runs about 1.9 s).
+pub(crate) const CONFIRMED_MS: u64 = 2_600;
 
 /// What the updater's state means for the light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +99,12 @@ impl UpdateWatcher {
             }),
             "trying" => Some(UpdateView {
                 state: SystemState::Booting,
+                hold_ms: None,
+            }),
+            // The updater writes this just before it restarts the system
+            // (into a new version, or back): the ember, held while it lasts.
+            "rebooting" => Some(UpdateView {
+                state: SystemState::Rebooting,
                 hold_ms: None,
             }),
             // Only the trial boot's own confirmation shows the ripple: an old
@@ -192,6 +198,40 @@ mod tests {
         set_state(&path, "confirmed");
         // Not from `trying`: no ripple, and the system layer is released.
         assert_eq!(watcher.poll(), Some(None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_reboot_the_updater_announces_shows_the_ember_while_it_lasts() {
+        let (path, dir) = status_file("rebooting");
+        set_state(&path, "staged");
+        let mut watcher = UpdateWatcher::new(&path);
+        assert!(matches!(
+            watcher.poll(),
+            Some(Some(UpdateView {
+                state: SystemState::Updating {
+                    phase: Phase::Staged,
+                    ..
+                },
+                hold_ms: Some(_),
+            }))
+        ));
+        set_state(&path, "rebooting");
+        assert_eq!(
+            watcher.poll(),
+            Some(Some(UpdateView {
+                state: SystemState::Rebooting,
+                hold_ms: None,
+            }))
+        );
+        // Held: the view is re-stated while the updater stays in the state.
+        assert!(matches!(
+            watcher.poll(),
+            Some(Some(UpdateView {
+                state: SystemState::Rebooting,
+                hold_ms: None,
+            }))
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 

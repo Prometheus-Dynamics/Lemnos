@@ -506,3 +506,71 @@ fn raw_lines_pwms_and_owned_resources() {
     assert!(all.contains("safe must be"), "{all}");
     assert!(all.contains("duplicate name"), "{all}");
 }
+
+#[test]
+fn validate_checks_config_values_against_the_declared_choices() {
+    let mut board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let imu = board.devices.iter_mut().find(|d| d.id == "imu").unwrap();
+    imu.config
+        .insert("gyro_rate".into(), ConfigValue::String("100hz-99".into()));
+    let Err(BoardError::Invalid(problems)) = board.validate(&DriverRegistry::builtin()) else {
+        panic!("expected a problem");
+    };
+    let all = problems.join("\n");
+    assert!(
+        all.contains(
+            "device \"imu\": config \"gyro_rate\" is \"100hz-99\", must be one of: 2000hz-532, 2000hz-230, 1000hz-116, 400hz-47, 200hz-23, 100hz-12, 200hz-64, 100hz-32"
+        ),
+        "{all}"
+    );
+    // A value of the wrong type is named too.
+    board
+        .devices
+        .iter_mut()
+        .find(|d| d.id == "imu")
+        .unwrap()
+        .config
+        .insert("accel_range".into(), ConfigValue::Integer(6));
+    let Err(BoardError::Invalid(problems)) = board.validate(&DriverRegistry::builtin()) else {
+        panic!("expected a problem");
+    };
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("config \"accel_range\" is Integer(6), must be one of: 3g")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn every_declared_config_choice_is_accepted_when_the_driver_builds() {
+    // The registry's lists are what `validate` checks; each must be a value
+    // the driver's own parsing takes, or `validate` would refuse a good board.
+    let tree = Tree::new();
+    tree.adapters();
+    let board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let registry = DriverRegistry::builtin();
+    let mut buses = MockBuses {
+        sys: tree.0.clone(),
+    };
+    for (device, driver) in [("imu", "bmi088"), ("magnetometer", "bmm150")] {
+        let entry = registry.get(driver).unwrap();
+        assert!(!entry.config_choices.is_empty());
+        for (key, allowed) in entry.config_choices {
+            for value in *allowed {
+                let spec = board
+                    .device(device)
+                    .unwrap()
+                    .clone()
+                    .with(*key, ConfigValue::String((*value).into()));
+                if let Err(error) = registry.build(&spec, &mut buses) {
+                    assert_ne!(
+                        error.kind(),
+                        ErrorKind::Configuration,
+                        "{driver} {key} = {value}: {error}"
+                    );
+                }
+            }
+        }
+    }
+}
