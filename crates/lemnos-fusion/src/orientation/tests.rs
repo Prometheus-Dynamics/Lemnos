@@ -331,8 +331,16 @@ fn board_measured_static_values_hold_the_attitude() {
     let out = o.output();
     // The board is on its side (gravity along the sensor's X): the attitude
     // must follow the accelerometer, not a level start.
-    assert!((deg(out.pitch) + 87.0).abs() < 2.0, "pitch {} deg", deg(out.pitch));
+    assert!(
+        (deg(out.pitch) + 87.0).abs() < 2.0,
+        "pitch {} deg",
+        deg(out.pitch)
+    );
     for i in 0..3 {
-        assert!((out.gravity[i] - a[i]).abs() < 0.1, "gravity {i}: {:?}", out.gravity);
+        assert!(
+            (out.gravity[i] - a[i]).abs() < 0.1,
+            "gravity {i}: {:?}",
+            out.gravity
+        );
     }
 }
