@@ -180,7 +180,7 @@ pub struct OrientationConfig {
     pub algorithm: Algorithm,          // Mahony
     pub mode: Mode,                    // SixAxis
     pub kp: f32,                       // 1.0 (Mahony proportional gain)
-    pub ki: f32,                       // 0.01 (Mahony integral gain)
+    pub ki: f32,                       // 0.05 (Mahony integral gain)
     pub beta: f32,                     // 0.1 (Madgwick)
     pub mount: Quat,                   // sensor -> body; Quat::IDENTITY default
     pub declination_rad: f32,          // 0.0
@@ -222,10 +222,10 @@ pub struct Fit { pub ellipsoid: Ellipsoid, pub residual: f32, pub coverage: f32,
 pub struct ImuCalibrator { /* accel + gyro estimators, applied state */ }
 impl ImuCalibrator {
     pub fn new() -> Self;
-    /// One sample (raw counts already converted to SI units).
-    pub fn push(&mut self, accel: Vec3, gyro: Vec3) -> Changed;   // Changed: bool-like flag: applied state changed
+    /// One sample (raw counts already converted to SI units), at `t_us`.
+    pub fn push(&mut self, t_us: u64, accel: Vec3, gyro: Vec3) -> Changed;   // Changed = bool: applied state changed
     pub fn accel(&self) -> Ellipsoid;  pub fn gyro_bias(&self) -> Vec3;
-    pub fn status(&self) -> PartStatus (accel), PartStatus (gyro)   // confidence/coverage/residual/samples/active, all permille
+    pub fn status(&self) -> (PartStatus, PartStatus)   // (accel, gyro); confidence/coverage/residual/samples/active, all permille
     pub fn reset(&mut self);
     pub fn words(&self, out: &mut [i32]) -> usize; pub fn load(&mut self, words: &[i32]) -> Result<(), WordsError>;
     // Forced routines:
@@ -233,7 +233,7 @@ impl ImuCalibrator {
     pub fn running(&self) -> Option<Routine>; pub fn progress_permille(&self) -> u16; pub fn candidate(&self) -> bool; pub fn failed(&self) -> bool;
 }
 pub struct MagCalibrator { /* ... */ }
-impl MagCalibrator { pub fn new() -> Self; pub fn push(&mut self, field_ut: Vec3) -> Changed; pub fn field(&self) -> Ellipsoid; pub fn status(&self) -> PartStatus; pub fn reset(&mut self); pub fn words(&self, out: &mut [i32]) -> usize; pub fn load(&mut self, words: &[i32]) -> Result<(), WordsError>; /* routines as ImuCalibrator, Routine::MagRotate */ }
+impl MagCalibrator { pub fn new() -> Self; pub fn push(&mut self, t_us: u64, field_ut: Vec3) -> Changed; pub fn field(&self) -> Ellipsoid; pub fn status(&self) -> PartStatus; pub fn reset(&mut self); pub fn words(&self, out: &mut [i32]) -> usize; pub fn load(&mut self, words: &[i32]) -> Result<(), WordsError>; /* routines as ImuCalibrator, Routine::MagRotate */ }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)] pub enum Routine { AccelSix, MagRotate, GyroHold }
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -244,6 +244,69 @@ pub mod words { pub const VERSION: i32 = 1; pub const KIND_IMU: i32 = 1; pub con
 
 The driver crates copy `PartStatus`/`Routine` into the device-model types (`lemnos_device::CalibrationPart`,
 `CalibrationRoutine`); `lemnos-fusion` does not depend on `lemnos-device`.
+
+### Implementation notes
+
+Deviations from the text above, as built in `crates/lemnos-fusion`:
+
+- `push` takes `t_us` first (both calibrators); `Changed` is `bool`; `ImuCalibrator::status()`
+  returns `(accel, gyro)`. Added: `revision()`. The factory calibrator state is the identity
+  correction at radius = reference (`matrix = I / reference`), not `Ellipsoid::IDENTITY`.
+- World frame: x points at magnetic north, y west, z up (yaw 0 = body x at north, positive yaw
+  turns toward west). The "east-north-up" wording cannot give yaw 0 at north with the ZYX Euler
+  angles, so the frame was chosen to match the yaw contract.
+- Mahony defaults are `kp 1.0, ki 0.05`. The integral term's slow pole is about `kp/ki` = 20 s
+  (ki 0.01 gave ~100 s, too slow to pull a bias out within a minute). Trade-off: a larger `ki`
+  settles faster but overshoots more after a large attitude step, and passes more accelerometer
+  noise into the bias. A static board that starts tilted holds its attitude at once (the first
+  sample sets it); a step from level settles over tens of seconds. Both gains are configurable
+  (`kp`, `ki` in the `fusion` device's config). The 60 s bias test uses `kp 2, ki 0.2`.
+- Mahony's magnetometer correction is applied on every IMU update with the latest fresh, usable
+  field (not once per magnetometer sample): a 10 Hz magnetometer applied once per sample left a
+  12 degree yaw error at rest.
+- Yaw in six-axis mode is relative (as specified); a static tilt transient can leave about 2
+  degrees of yaw, which is not asserted.
+- Magnetometer: the calibrated magnitude is the fitted radius, the local field, not a pinned 50 µT.
+  The fit's shape is normalised to unit determinant (the volume-preserving convention), so the
+  radius is `B = cbrt(1 / det P)` for the raw matrix `P`. A soft iron that is not volume-preserving
+  is therefore absorbed into the magnitude by `cbrt(det)` (about 3 % for a 9 % volume change). The
+  magnetometer's words carry the radius (word 19, milli-µT; `MAG_LEN` is 20). The accelerometer's
+  radius stays pinned to g. The filter learns its magnitude reference (EMA over trusted, undisturbed
+  samples) and its dip reference (only with a quasi-static accelerometer, unless
+  `OrientationConfig::dip_rad` is set).
+- Direction cells are classified against the centre of the latest fit (the running mean before the
+  first fit). Thresholds are 0.4 per component. Coverage uses decayed counts.
+- Residual is computed over the last 64 samples (a ring), not all of them.
+- The quasi-static accelerometer gate is `|a|` within 10 % of gravity (5 % was too tight: a 0.3 m/s²
+  offset with 2 % scale puts one face 5.03 % off). The gyro test stays at 0.05 rad/s.
+- `AccelSix` uses six faces as its coverage (cell coverage of six directions cannot reach 0.6); its
+  residual and sample thresholds still apply.
+- `MagRotate` is done when coverage, residual and samples all pass; a residual miss is not a failure
+  (only the timeout is).
+- Automatic estimation keeps running during a routine. Routines only produce candidates.
+  `start()` discards a previous candidate and the failed flag; routine timeouts count from the first
+  sample after `start()`. `apply()` replaces the applied state (no rate limit).
+- `GyroHold` candidates carry confidence 1000 when the hold completes. Gyro confidence is still time
+  over 60 s.
+- Words: IMU 24 words, magnetometer 20 words (layouts in `words.rs`). Sample counts and revisions are
+  exact; the coverage and residual are the applied fit's.
+- `asin` is ill-conditioned near ±1 (f32 rounding of `2(wy - zx)` near 1 gives about 6e-4 rad at
+  pitch 90 degrees); the gimbal-lock test allows 2e-3.
+- Mahony's integral term is clamped to ±0.5 rad/s.
+- Explicit `apply` replaces the applied calibration at once; the automatic estimators keep their
+  rate limit (25 % a fit).
+
+### Driver notes (BMI088, BMM150)
+
+- The estimators have no clock of their own: a sample's time is the count of samples times the
+  period (accelerometer 10 ms at 100 Hz, magnetometer the data rate's period). Routine timeouts and
+  the gyro's still time count samples, so a sparsely read device accrues them more slowly than wall
+  time.
+- A channel-selective read adds no sample to the calibration: the calibration needs every axis of
+  both dies. Subscribing to the calibrated channels takes every axis, so it feeds the estimators.
+  The FIFO batch feeds every sample it returns.
+- The asynchronous drivers return `NO_VALUE` for the calibrated channels (the calibration runs on
+  the blocking driver only).
 
 ## Drivers
 
@@ -276,7 +339,7 @@ id = "orientation"
 driver = "fusion"
 poll_ms = 10                      # the fastest it reports (its subscriptions' cap)
 config = { imu = "imu", mag = "magnetometer", mode = "9axis", algorithm = "mahony",
-           kp = 1.0, ki = 0.01, mount_roll_deg = 0, mount_pitch_deg = 0, mount_yaw_deg = 90,
+           kp = 1.0, ki = 0.05, mount_roll_deg = 0, mount_pitch_deg = 0, mount_yaw_deg = 90,
            declination_deg = 0.0, always = false }
 ```
 
@@ -286,7 +349,7 @@ config = { imu = "imu", mag = "magnetometer", mode = "9axis", algorithm = "mahon
 | `mag` | none | the magnetometer id; required for `mode = "9axis"` |
 | `mode` | `6axis` | `6axis` or `9axis` |
 | `algorithm` | `mahony` | `mahony` or `madgwick` |
-| `kp`, `ki` | 1.0, 0.01 | Mahony gains (`beta` for Madgwick, default 0.1) |
+| `kp`, `ki` | 1.0, 0.05 | Mahony gains (`beta` for Madgwick, default 0.1) |
 | `mount_roll_deg`, `mount_pitch_deg`, `mount_yaw_deg` | 0 | sensor-to-robot mounting (ZYX intrinsic) |
 | `declination_deg` | 0 | magnetic to true north |
 | `dip_deg` | learned | the reference dip for disturbance rejection |
@@ -345,7 +408,8 @@ New requests (`lemnos-ipc`), answered with a reply or a calibration status messa
 control writes. A fusion device's `status` shows its confidences and its disturbance.
 
 Atlas reaches the same operations through lemnosd's socket. Orion (`lemnos-orion`) exposing them
-as actions is a follow-up; the bridge's pinned Orion revision would need the same change.
+as Orion actions on the resource: `calibration.*` and the confidence status keys, documented in
+[orion.md](orion.md).
 
 ## Tests
 
@@ -369,3 +433,36 @@ as actions is a follow-up; the bridge's pinned Orion revision would need the sam
 Measured on the Raze (CM5) only; host timings are not reported. The plan: `lemnosd`'s CPU with the
 fusion device subscribed at 100 Hz, and orientation sanity (the gravity vector against the board's
 pose; yaw over 60 s at rest). Results are recorded in the commit that adds them.
+
+## Implementation notes (lemnosd)
+
+Deviations from the design above, as built:
+
+- **Status of the fusion device.** `CalibrationStatus` on `orientation` is `Unsupported` (the
+  fusion has no calibration of its own). Its confidences are the channels `confidence.imu` and
+  `confidence.magnetometer`: read them with `lemnos-ctl watch orientation`. `calibration reset
+  orientation` restarts the filter; other commands are `Unsupported`.
+- **Busy device.** A calibration command for a device whose bus thread holds it is refused with
+  `Busy` (retryable), not queued. A status request is answered from the last status seen.
+- **Words are not sent over IPC.** `calibration show` prints the live status and a summary of the
+  saved file (driver, revision, word count), not the decoded words.
+- **Before the first valid output** the fusion's status is `degraded` (not `available`); its
+  values are `NO_VALUE`.
+- **Fusion rate.** Without `poll_ms` the fusion reports at 10 ms (the fusion's own default); the
+  IMU's internal subscription is at the fusion's fastest subscriber period, never below 10 ms.
+  The magnetometer's internal subscription asks for 100 ms, but the device's `poll_ms` still caps
+  it (a magnetometer with `poll_ms` 1000 is read at 1 s).
+- **6-axis** fusions ignore `mag`: the magnetometer is not read for them.
+- **Registry checks.** `Interface::Composite` (no bus, address or match). The registry checks
+  `imu` (required), `mag` (required for `9axis`), value types, and `mode`/`algorithm` choices.
+  Whether `imu` and `mag` name built devices with the right channels is checked by lemnosd.
+  A fusion whose inputs are missing stays `missing` with its reason and is retried each second.
+- **Idle sensors** still get one read when built (the schedule's first deadline is due once); the
+  IMU and magnetometer are not read again until a subscriber arrives.
+- **Calibration files** that are refused keep the device running with factory calibration; the
+  reason is appended to the device's `reason` (shown by `lemnos-ctl list`).
+- **Modules.** `calibration.rs` (files), `fusion.rs` (device, settings, feeding, internal
+  subscriptions), `service_fusion.rs` and `service_calibration.rs` (the service's glue, split out
+  to keep `service.rs` from growing), `ctl_calibration.rs` (`lemnos-ctl calibration`).
+- **Client API.** `lemnos_ipc::DeviceClient::calibration` and `calibration_status` are new.
+- **Orion.** The calibration actions and confidence status keys are in `lemnos-orion` (see orion.md).

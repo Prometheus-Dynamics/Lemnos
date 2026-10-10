@@ -561,6 +561,36 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   configuration on the board. Gyroscope only is 9 bytes a read (3 + 6), yaw only 5 (3 + 2),
   and the accelerometer adds 9 at each of its reads (10 a second in the last row).
 
+## Calibration and orientation fusion
+
+The IMU and magnetometer calibrate themselves while they are read (`docs/imu-calibration-fusion.md`).
+lemnosd keeps the result and hosts the orientation:
+
+- **Persistence.** Each device's applied calibration is saved to
+  `/var/lib/lemnos/calibration/<device>.toml` (`LEMNOSD_CALIBRATION_DIR` overrides the directory):
+  when its revision changes, at most once a minute, on `calibration apply`, and at shutdown. It
+  is loaded when the device is built. A file of another format or version, or words the driver
+  refuses, is ignored, and the reason is shown as the device's reason.
+- **Fusion on demand.** The `orientation` device (`driver = "fusion"`) has no bus of its own.
+  While a client subscribes to it (or its `always` option is set), lemnosd subscribes internally
+  to the IMU's calibrated channels at the fusion's rate and to the magnetometer's at 100 ms. When
+  the last subscriber leaves, those subscriptions end and the sensors go back to idle. Its
+  channels are the table in the doc; before the first valid output they read no value.
+- **Commands.** `Calibration` and `CalibrationStatus` requests (`lemnos-ipc`) carry a routine,
+  `stop`, `apply`, `discard` or `reset`. Under the device's `writers` policy, as control writes
+  are. A device being read refuses a command with `Busy` (retry it); a status is answered from
+  the last one seen. The fusion device takes only `reset`, which restarts its filter.
+
+```text
+lemnos-ctl calibration show imu                  # status, and the saved file's summary
+lemnos-ctl calibration start imu accel-six       # or mag-rotate (magnetometer), gyro-hold
+lemnos-ctl calibration stop imu
+lemnos-ctl calibration apply imu                 # the candidate becomes the applied calibration
+lemnos-ctl calibration discard imu
+lemnos-ctl calibration reset imu                 # back to factory; also: reset orientation
+lemnos-ctl watch orientation --period 20
+```
+
 ## Backends for the Raze's sensors: kernel or userspace
 
 | | Kernel (IIO / hwmon) | Userspace (i2c-dev) |
