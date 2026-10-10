@@ -41,6 +41,7 @@ const RESTORE: u16 = 9;
 const LOOKS: u16 = 10;
 const SUBSCRIBE_CHANNELS: u16 = 11;
 const WATCH_FRAMES: u16 = 12;
+const LIGHT_SETTING: u16 = 15;
 const WELCOME: u16 = 101;
 const DEVICES: u16 = 102;
 const READING: u16 = 103;
@@ -445,6 +446,16 @@ pub enum Request {
     CalibrationStatus {
         id: u32,
         device: String,
+    },
+    /// Sets a light's ring-wide look brightness at runtime (`look_brightness`
+    /// of the board, in thousandths: 0 to 1000). `persist` saves it in the
+    /// state directory, where it is read back at start over the board's value.
+    /// Answered with a [`Message::Reply`] (the value applied) or a refusal.
+    LightSetting {
+        id: u32,
+        device: String,
+        look_brightness: u16,
+        persist: bool,
     },
 }
 

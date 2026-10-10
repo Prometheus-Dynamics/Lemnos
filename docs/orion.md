@@ -108,6 +108,20 @@ The IMU and magnetometer resources also carry the calibration confidence as stat
 every 10 s and published when they change: `calibration.revision`, `calibration.candidate`,
 `calibration.accel.confidence`, `calibration.gyro.confidence`, `calibration.mag.confidence` (`F64`, 0 to 1)
 and `calibration.<part>.active` (`Bool`). A device with no such part reads as zero.
+| `looks.preset.list` | none | `text` (one line per preset, `* ` marks the active one) | lists the look presets |
+| `looks.preset.show` | `name` (string, required) | `text` (the preset's look file) | shows a preset |
+| `looks.preset.apply` | `name` (string, required) | `text` | makes a preset the active one (kept across restarts) |
+| `looks.preset.save` | `name` (string), `body` (string: a look file, TOML) | `text` | saves a preset |
+| `looks.preset.delete` | `name` (string, required) | `text` | deletes a saved preset (the active one falls back to `scheme-b`) |
+| `looks.show_inline` | `body` (string: a look in TOML, checked before it is sent), `seconds` (optional) | none | shows a look in full on the light, until replaced or for `seconds` |
+| `looks.look` | `name` (string), `seconds` (optional) | none | shows a named look |
+| `looks.off` | none | none | drops the caller's intents on the light |
+| `looks.locate` | `seconds` (optional, default 10) | none | the locate look for `seconds` |
+| `light.brightness` | `value` (number, 0 to 1), `persist` (bool, default false) | `brightness` (`F64`, applied) | the ring-wide look brightness; `persist` keeps it across restarts |
+
+The look and brightness actions are on the light's resource (`lemnos.<board>.<light>`,
+for example `lemnos.raze.status-ring`). The writer policy is the light's `writers`
+(`["orion:*", "atlas"]`), and lemnosd checks the look-changing operations too.
 
 Writer naming: each caller (`requested_by`) gets its own lemnosd connection named `orion:<requested_by>`,
 created on its first action. lemnosd applies a device's write policy to that name, and it ends the
@@ -126,14 +140,26 @@ A refused action is `Rejected` with the reason. A failure of the device is `Fail
 |---|---|---|
 | Rejected | `only resources take lemnos actions` | target is not a resource |
 | Rejected | `no lemnos device <resource>` | the resource is not on this board |
-| Rejected | `unsupported action `<name>` (one of set, restore, release, read, calibration.start, calibration.stop, calibration.apply, calibration.discard, calibration.reset, calibration.status)` | unknown name |
+| Rejected | `unsupported action `<name>` (one of set, restore, release, read, power.set, power.reset, looks.*, light.brightness, calibration.start, calibration.stop, calibration.apply, calibration.discard, calibration.reset, calibration.status)` | unknown name |
 | Rejected | `` `routine` (accel-six, mag-rotate or gyro-hold) is required `` / `` unknown routine `<name>` `` | bad `calibration.start` arguments |
+| Rejected | `unsupported action `<name>` (one of set, restore, release, read, power.set, power.reset, looks.*, light.brightness)` | unknown name |
 | Rejected | `` `control` (string) is required `` / `` `value` (number) is required `` / `` `value` must be finite `` | bad `set` arguments |
 | Rejected | `not allowed by the device's write policy` | the caller is not in the device's `writers` |
 | Rejected | `value out of range` | outside the control's range |
 | Rejected | `no such control` | unknown control |
 | Failed | `device error: <kind>` | the device failed (its error kind) |
 | Failed | `lemnosd: <error>` | lemnosd could not be reached, or timed out |
+
+A light's status, from the bridge's own watch of the light (one frame a second at most, the
+frames are not used) and from the actions above:
+
+| Key | Value | When |
+|---|---|---|
+| `light.look` | the named look shown (empty for an inline look or none) | when it changes, and on the heartbeat |
+| `light.owner` | the client holding the light (`lemnosd` for the service's own looks) | when it changes, and on the heartbeat |
+| `looks.preset.active` | the active preset's name | at connection, after a preset action, and on the heartbeat |
+| `looks.presets` | the preset names, comma-separated | the same |
+| `light.brightness` | the ring-wide look brightness (0 to 1) | after `light.brightness`, and on the heartbeat once set |
 
 A power switch's status is on its channels: `power.on` (1 on, 0 off, `F64`) and, when
 the switch has a fault input, `power.fault` (1 asserted). They publish under the
@@ -169,7 +195,6 @@ which an image imports on top of `lemnosd.toml` when it runs Orion.
 
 - Raw GPIO, PWM, I2C and SPI: direct to lemnosd only.
 - Device operations (calibrate, and similar): not yet.
-- Look presets and LED controls (`looks.preset.apply`, `looks.show_inline`, the ring brightness): not on
-  this bridge yet. They need an action target that is the provider rather than a resource, which the
-  bridge does not route. The lemnosd operations exist (`lemnos-ctl looks preset`, `LedClient`).
+- `light.brightness` starts at no value until it is first set through the bridge (lemnosd does not
+  report the ring brightness in its description).
 - `release` is the fan hand-back; on a device that is not a fan, lemnosd's answer is passed on as the outcome.

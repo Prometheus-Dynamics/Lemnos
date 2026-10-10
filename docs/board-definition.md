@@ -163,7 +163,7 @@ and, for `gpio-*` devices, its line; those are never claimed raw. See
 | `vcm` | `lens` | I2C, default 0x0c | `chip` (`dw9714` `dw9807` `dw9817` `ak7375`, required) | control `position` |
 | `hwmon-fan` | `fan` | `match.name` or `path` | `restore_mode`: for fan-controller chips, the automatic `pwm1_enable` mode that hands the fan back when a host stops (default 2). Not used for `pwm-fan` or other fans with a thermal cooling device: they get back the `pwm1_enable` read at bind and the cooling device re-applies the governor's level | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
 | `thermal-zone` | `temperature` | `match.type` or `path` | none | `temperature` °C |
-| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`), `gpio` (informational), `spinner_base` (the comets' dim glow), `gravity_device`, `gravity_plane`, `gravity_led0_deg`, `default_down` (which way is down for a falling sparkle: `docs/looks.md`, *Gravity*), and the look defaults below | controls `brightness`, `color`; frames |
+| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`; a runtime value saved with `lemnos-ctl led brightness --persist` replaces it at start, `docs/system-service.md`, *Ring brightness at runtime*), `gpio` (informational), `spinner_base` (the comets' dim glow), `gravity_device`, `gravity_plane`, `gravity_led0_deg`, `default_down` (which way is down for a falling sparkle: `docs/looks.md`, *Gravity*), and the look defaults below | controls `brightness`, `color`; frames |
 | `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
 | `gpio-power-switch` | `power-switch` | `config.chip` + `config.line` | `chip`, `line`, `active_low`, `default_on` (true), `enable_delay_ms` (0, max 5000), `fault_line` (optional), `fault_chip` (default `chip`), `fault_active_low` (true), `persist` (false), `on_exit` (`keep`, `on` or `off`) | `power.on` channel and control (1 on, 0 off); `power.reset` control (write N: off for N ms, then on; max 10000); `power.fault` channel when `fault_line` is set |
 | `gpio-input` | `gpio` | `config.chip` + `config.line` | `chip`, `line`, `active_low` | `level` |
@@ -226,8 +226,8 @@ through the other level. Behaviour that `lemnosd` adds (`docs/system-service.md`
   or `off` sets it then.
 - `fault_line`: an input (an over-current flag, active low by default). When it
   asserts, the device is `degraded` with a status event; `power.fault` reads 1.
-- `enable_delay_ms`: a write that turns the switch on waits this long before the
-  reply, so the port has come up when the client continues.
+- `enable_delay_ms`: after a write turns the switch on, `lemnosd` reports
+  `power.ready` this long later (the write itself returns at once).
 - `writers`: `["orion:*", "atlas"]` is the usual list (the Orion bridge's callers
   and Atlas), with `lemnos-ctl` run on the board as needed.
 

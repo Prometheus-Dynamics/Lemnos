@@ -766,3 +766,116 @@ impl DeviceClient {
         self.conn.reconnects
     }
 }
+
+impl DeviceClient {
+    /// A look operation (presets and look files; see [`LooksOp`]), answered
+    /// with its text. A refusal is [`ClientError::Rejected`].
+    pub fn looks(&mut self, op: crate::wire::LooksOp) -> Result<String, ClientError> {
+        let id = self.conn.next_id();
+        let reply = self
+            .conn
+            .request(&crate::wire::Request::Looks { id, op }, |m| match m {
+                crate::wire::Message::Text { id: got, result } if *got == id => {
+                    Some(result.clone())
+                }
+                _ => None,
+            })?;
+        reply.map_err(ClientError::Rejected)
+    }
+
+    /// Shows a light's look or intent and waits for the service to accept it
+    /// (a refused look is [`ClientError::Rejected`]).
+    pub fn show(&mut self, mut request: crate::wire::LedRequest) -> Result<(), ClientError> {
+        request.id = self.conn.next_id();
+        let id = request.id;
+        let reply = self
+            .conn
+            .request(&crate::wire::Request::Led(request), |m| match m {
+                crate::wire::Message::Text { id: got, result } if *got == id => {
+                    Some(result.clone())
+                }
+                _ => None,
+            })?;
+        reply.map(|_| ()).map_err(ClientError::Rejected)
+    }
+
+    /// Sets a light's ring-wide look brightness (0 to 1; `persist` saves it in
+    /// the state directory). Returns the value applied.
+    pub fn light_brightness(
+        &mut self,
+        device: &str,
+        value: f64,
+        persist: bool,
+    ) -> Result<f64, ClientError> {
+        let id = self.conn.next_id();
+        let look_brightness = permille(value);
+        let reply = self.conn.request(
+            &crate::wire::Request::LightSetting {
+                id,
+                device: device.to_string(),
+                look_brightness,
+                persist,
+            },
+            |m| match m {
+                crate::wire::Message::Reply { id: got, result } if *got == id => Some(*result),
+                _ => None,
+            },
+        )?;
+        // The service answers in thousandths, as it was asked.
+        reply
+            .map(|permille| permille / 1000.0)
+            .map_err(ClientError::Refused)
+    }
+
+    /// A light's geometry and what it shows now: a one-frame watch that reads
+    /// the description the service sends when the watch starts, then ends.
+    pub fn light_info(&mut self, device: &str) -> Result<crate::wire::LightInfo, ClientError> {
+        let id = self.conn.next_id();
+        let started = self.conn.request(
+            &crate::wire::Request::WatchFrames {
+                id,
+                device: device.to_string(),
+                fps: 1,
+            },
+            |m| match m {
+                crate::wire::Message::Reply { id: got, result } if *got == id => Some(*result),
+                _ => None,
+            },
+        )?;
+        if let Err(refusal) = started {
+            return Err(ClientError::Refused(refusal));
+        }
+        let deadline = Instant::now() + self.conn.options.timeout;
+        let info = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.conn.next(Some(left))? {
+                Some(ClientEvent::Data(crate::wire::Message::LightInfo(info)))
+                    if info.device == device =>
+                {
+                    break Some(info);
+                }
+                Some(ClientEvent::Disconnected { error }) => return Err(error),
+                Some(_) => {}
+                None => break None,
+            }
+        };
+        let stop = self.conn.next_id();
+        self.conn.request(
+            &crate::wire::Request::WatchFrames {
+                id: stop,
+                device: device.to_string(),
+                fps: 0,
+            },
+            |m| match m {
+                crate::wire::Message::Reply { id: got, .. } if *got == stop => Some(()),
+                _ => None,
+            },
+        )?;
+        info.ok_or(ClientError::Timeout)
+    }
+}
+
+/// A look brightness (0 to 1) in thousandths, as the wire carries it.
+pub(crate) fn permille(value: f64) -> u16 {
+    (value.clamp(0.0, 1.0) * 1000.0).round() as u16
+}

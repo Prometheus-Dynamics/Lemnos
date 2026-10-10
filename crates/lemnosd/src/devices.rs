@@ -163,6 +163,12 @@ pub(crate) struct Slot {
     /// The calibration status as of the last time the device was here
     /// (a status request is answered from it while a read holds the device).
     pub calibration_cache: Option<CalibrationStatus>,
+    /// A power switch's reset: when it turns back on (boot-clock
+    /// milliseconds). `None`: no reset is pending.
+    pub power_reset_until_ms: Option<u64>,
+    /// A power switch's enable delay: when it is ready (boot-clock
+    /// milliseconds). `None`: ready, or no delay is pending.
+    pub power_settle_until_ms: Option<u64>,
 }
 
 /// A control a client changed.
@@ -210,6 +216,8 @@ impl Slot {
             calibration_saved: None,
             calibration_saved_ms: None,
             calibration_cache: None,
+            power_reset_until_ms: None,
+            power_settle_until_ms: None,
         }
     }
 

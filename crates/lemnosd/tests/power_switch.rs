@@ -166,12 +166,56 @@ fn reset_cycles_the_switch_and_leaves_it_on() {
     let hw = hardware();
     let service = MockLemnosd::start_in(root("reset"), BOARD, hw.clone()).unwrap();
     let mut atlas = client(service.socket(), "atlas");
-    atlas.set("usb-c-power", "power.reset", 20.0).unwrap();
-    assert_eq!(hw.line("gpiochip0", 16).level(), Some(true));
+    let start = std::time::Instant::now();
+    atlas.set("usb-c-power", "power.reset", 300.0).unwrap();
+    // Off at once, and back on by the service's own deadline.
+    assert_eq!(hw.line("gpiochip0", 16).level(), Some(false));
     assert_eq!(
         atlas.read("usb-c-power").unwrap().value("power.on"),
-        Some(1.0)
+        Some(0.0)
     );
+    eventually(|| hw.line("gpiochip0", 16).level() == Some(true));
+    assert!(start.elapsed() >= Duration::from_millis(300));
+    eventually(|| atlas.read("usb-c-power").unwrap().value("power.on") == Some(1.0));
+    drop(service);
+}
+
+/// Waits (up to five seconds) until `check` holds.
+fn eventually(mut check: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !check() {
+        assert!(std::time::Instant::now() < deadline, "timed out");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_reset_does_not_stall_the_service_loop() {
+    let hw = hardware();
+    let service = MockLemnosd::start_in(root("nonblocking"), BOARD, hw.clone()).unwrap();
+    let mut atlas = client(service.socket(), "atlas");
+    // The fault input is sampled as a subscribed sensor at 20 ms.
+    atlas.subscribe("aux-power", 20).unwrap();
+    let started = std::time::Instant::now();
+    atlas.set("usb-c-power", "power.reset", 1_000.0).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "the write waited for the reset"
+    );
+    // Readings keep coming while the port is off.
+    let mut readings = 0;
+    let window = std::time::Instant::now() + Duration::from_millis(500);
+    while std::time::Instant::now() < window {
+        if let Ok(Some(ClientEvent::Data(Update::Reading(r)))) =
+            atlas.next_event_timeout(Duration::from_millis(50))
+            && r.device == "aux-power"
+        {
+            readings += 1;
+        }
+    }
+    assert!(readings >= 5, "only {readings} readings during the reset");
+    assert_eq!(hw.line("gpiochip0", 16).level(), Some(false));
+    eventually(|| hw.line("gpiochip0", 16).level() == Some(true));
     drop(service);
 }
 

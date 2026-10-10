@@ -331,7 +331,13 @@ impl Service {
             if self.slots[index].is_light() && !self.lights.iter().any(|l| l.slot == index) {
                 let slot = &self.slots[index];
                 let count = slot.device.as_ref().map_or(0, |d| d.pixel_count());
-                let defaults = lemnos_board::light_defaults(&slot.spec).unwrap_or_default();
+                let mut defaults = lemnos_board::light_defaults(&slot.spec).unwrap_or_default();
+                // A runtime brightness saved earlier wins over the board's.
+                if let Some(dir) = &self.state_dir
+                    && let Some(permille) = state::load_light_brightness(dir, slot.id())
+                {
+                    defaults.look_brightness = state::permille_to_scale(permille);
+                }
                 let mut light = Light::new(index, count, defaults);
                 light.gravity = lemnos_board::gravity_config(&slot.spec).ok();
                 if let Some(until) = self.booting_until {
@@ -900,6 +906,40 @@ impl Service {
 
     /// Starts (or with `fps` 0, ends) client `ci`'s watch of a light's
     /// frames. The granted rate is `fps`, at most [`MAX_WATCH_FPS`].
+    /// Sets a light's ring-wide look brightness (`look_brightness`, in
+    /// thousandths), at once for every look; `persist` saves it. The write
+    /// policy is the light's `writers`.
+    #[allow(clippy::print_stderr)]
+    fn light_setting(
+        &mut self,
+        ci: usize,
+        device: &str,
+        look_brightness: u16,
+        persist: bool,
+    ) -> Result<u16, Refusal> {
+        let index = self.slot_of(device).ok_or(Refusal::UnknownDevice)?;
+        let li = self
+            .lights
+            .iter()
+            .position(|l| l.slot == index)
+            .ok_or(Refusal::Unsupported)?;
+        if !self.slots[index].allows(&self.clients[ci].name) {
+            return Err(Refusal::NotAllowed);
+        }
+        if look_brightness > 1_000 {
+            return Err(Refusal::OutOfRange);
+        }
+        self.lights[li].defaults.look_brightness = state::permille_to_scale(look_brightness);
+        self.invalidate_lights();
+        if persist && let Some(dir) = &self.state_dir {
+            let id = self.slots[index].id().to_string();
+            if let Err(error) = state::save_light_brightness(dir, &id, look_brightness) {
+                eprintln!("lemnosd: {id}: saving its brightness: {error}");
+            }
+        }
+        Ok(look_brightness)
+    }
+
     fn watch_frames(
         &mut self,
         ci: usize,
@@ -1199,6 +1239,14 @@ impl Service {
                         .and_then(|slot| self.lights.iter().position(|l| l.slot == slot))
                 };
                 let Some(li) = li else {
+                    // Not a light: say so, so a client's wait ends at once.
+                    if request.id != 0 {
+                        let device = request.device.clone();
+                        self.clients[ci].send(&Message::Text {
+                            id: request.id,
+                            result: Err(format!("no light {device:?}")),
+                        });
+                    }
                     return;
                 };
                 let (name, owner, priority) = {
@@ -1250,6 +1298,18 @@ impl Service {
                         result,
                     });
                 }
+            }
+            Request::LightSetting {
+                id,
+                device,
+                look_brightness,
+                persist,
+            } => {
+                let result = self.light_setting(ci, &device, look_brightness, persist);
+                self.clients[ci].send(&Message::Reply {
+                    id,
+                    result: result.map(f64::from),
+                });
             }
             Request::WatchFrames { id, device, fps } => {
                 let result = self.watch_frames(ci, &device, fps, now_ms);
@@ -1406,10 +1466,8 @@ impl Service {
             .ok_or(Refusal::Device(ErrorKind::Unavailable))?;
         match device_ref.set(ci, raw as i32) {
             Ok(applied) => {
-                if ci == 0 && latched {
-                    // The switch's reading is what it was just set to.
-                    self.slots[index].values[0] = applied;
-                    self.persist_power(index, applied == 1);
+                if latched {
+                    self.power_written(index, ci, applied);
                 }
                 Ok(crate::scaled(applied, exponent))
             }
@@ -1420,6 +1478,87 @@ impl Service {
                 }
                 Err(Refusal::Device(kind))
             }
+        }
+    }
+
+    /// The host side of a power switch's write, which never waits: a write
+    /// to `power.on` ends any reset and starts the enable delay; a reset
+    /// (`power.reset` = N) drives the switch off now and schedules the turn-on
+    /// N ms later (`power_tick`). The loop keeps running meanwhile.
+    fn power_written(&mut self, index: usize, ci: usize, applied: i32) {
+        let now = self.now_ms();
+        if ci == 0 {
+            // The switch's reading is what it was just set to.
+            let slot = &mut self.slots[index];
+            slot.values[0] = applied;
+            slot.power_reset_until_ms = None;
+            slot.power_settle_until_ms = (applied == 1)
+                .then(|| now + u64::from(state::power_enable_delay_ms(&slot.spec)))
+                .filter(|until| *until > now);
+            self.persist_power(index, applied == 1);
+        } else if applied > 0 {
+            let off_ms = u64::try_from(applied).unwrap_or(0);
+            let id = self.slots[index].id().to_string();
+            self.slots[index].values[0] = 0;
+            self.slots[index].power_reset_until_ms = Some(now + off_ms);
+            self.broadcast(&Message::Event(Event::Control {
+                device: id,
+                control: "power.on".into(),
+                value: 0.0,
+                by: "lemnosd".into(),
+            }));
+        }
+    }
+
+    /// Turns back on the power switches whose reset is due, and reports the
+    /// enable delay's end (`power.ready`). Each change is broadcast as it
+    /// happens.
+    #[allow(clippy::print_stderr)]
+    fn power_tick(&mut self, now_ms: u64) {
+        let mut events: Vec<(String, &'static str, f64)> = Vec::new();
+        let mut persist = Vec::new();
+        for index in 0..self.slots.len() {
+            let slot = &mut self.slots[index];
+            if !slot
+                .info
+                .is_some_and(|i| i.class == DeviceClass::PowerSwitch)
+            {
+                continue;
+            }
+            if slot
+                .power_reset_until_ms
+                .is_some_and(|until| now_ms >= until)
+            {
+                slot.power_reset_until_ms = None;
+                if let Some(device) = slot.device.as_mut()
+                    && device.set(0, 1).is_ok()
+                {
+                    slot.values[0] = 1;
+                    slot.power_settle_until_ms =
+                        Some(now_ms + u64::from(state::power_enable_delay_ms(&slot.spec)))
+                            .filter(|until| *until > now_ms);
+                    events.push((slot.id().to_string(), "power.on", 1.0));
+                    persist.push(index);
+                }
+            }
+            if slot
+                .power_settle_until_ms
+                .is_some_and(|until| now_ms >= until)
+            {
+                slot.power_settle_until_ms = None;
+                events.push((slot.id().to_string(), "power.ready", 1.0));
+            }
+        }
+        for index in persist {
+            self.persist_power(index, true);
+        }
+        for (device, control, value) in events {
+            self.broadcast(&Message::Event(Event::Control {
+                device,
+                control: control.into(),
+                value,
+                by: "lemnosd".into(),
+            }));
         }
     }
 
@@ -1475,6 +1614,14 @@ impl Service {
                 next = next.min(slot.next_read_us);
             }
         }
+        for slot in &self.slots {
+            for until in [slot.power_reset_until_ms, slot.power_settle_until_ms]
+                .into_iter()
+                .flatten()
+            {
+                next = next.min(until * 1000);
+            }
+        }
         for light in &self.lights {
             if let Some(at) = light.next_ms(now_us / 1000) {
                 next = next.min(at * 1000);
@@ -1510,6 +1657,7 @@ impl Service {
         self.poll_update(now);
         self.poll_looks(now);
         self.poll_calibration(now);
+        self.power_tick(now);
         self.render_lights(now);
         self.send_frames(now);
         self.send_edges();
@@ -1667,7 +1815,9 @@ impl Service {
             {
                 continue;
             }
+            // A reset pending at the stop ends on (the switch is never left off by it).
             let level = match state::power_on_exit(&slot.spec) {
+                _ if slot.power_reset_until_ms.is_some() => 1,
                 "on" => 1,
                 "off" => 0,
                 _ => continue,

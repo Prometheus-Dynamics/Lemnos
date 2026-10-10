@@ -868,12 +868,13 @@ fn build_gpio_power_switch(
 ) -> Result<BoxedDevice, BoardError> {
     let line = gpio_ref(spec)?;
     let default_on = flag(spec, "default_on", true)?;
-    let enable_delay_ms = match integer(spec, "enable_delay_ms")? {
-        None => 0,
-        Some(ms) => {
-            u32::try_from(ms).map_err(|_| bad(spec, "enable_delay_ms must be 0 or more"))?
-        }
-    };
+    // The host applies the enable delay: the driver never blocks.
+    if let Some(ms) = integer(spec, "enable_delay_ms")? {
+        u32::try_from(ms)
+            .ok()
+            .filter(|ms| *ms <= lemnos_device::power_switch::MAX_ENABLE_DELAY_MS)
+            .ok_or_else(|| bad(spec, "enable_delay_ms must be 0 to 5000"))?;
+    }
     let pin = buses.gpio_output(&line, default_on)?;
     let fault = match integer(spec, "fault_line")? {
         None => None,
@@ -892,21 +893,6 @@ fn build_gpio_power_switch(
         }
     };
     Ok(BoxedDevice::both(
-        lemnos_device::power_switch::PowerSwitch::new(
-            pin,
-            fault,
-            SleepDelay,
-            default_on,
-            enable_delay_ms,
-        ),
+        lemnos_device::power_switch::PowerSwitch::new(pin, fault, default_on),
     ))
-}
-
-/// Waits with `std::thread::sleep` (the power switch's enable delay and reset).
-struct SleepDelay;
-
-impl embedded_hal::delay::DelayNs for SleepDelay {
-    fn delay_ns(&mut self, ns: u32) {
-        std::thread::sleep(std::time::Duration::from_nanos(u64::from(ns)));
-    }
 }

@@ -8,7 +8,7 @@ use lemnos_ipc::{ClientError, Refusal};
 use orion_control_plane::TypedConfigValue;
 
 /// The action names a device resource accepts.
-pub const ACTIONS: [&str; 12] = [
+pub const ACTIONS: [&str; 22] = [
     "set",
     "restore",
     "release",
@@ -21,11 +21,58 @@ pub const ACTIONS: [&str; 12] = [
     "calibration.discard",
     "calibration.reset",
     "calibration.status",
+    "looks.preset.list",
+    "looks.preset.show",
+    "looks.preset.apply",
+    "looks.preset.save",
+    "looks.preset.delete",
+    "looks.show_inline",
+    "looks.look",
+    "looks.off",
+    "looks.locate",
+    "light.brightness",
 ];
+
+/// A light's look actions (the status ring's resource; `looks.*` and
+/// `light.brightness`). Bodies are checked when the action is parsed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LookOp {
+    PresetList,
+    PresetShow(String),
+    PresetApply(String),
+    PresetSave {
+        name: String,
+        body: String,
+    },
+    PresetDelete(String),
+    /// A look in full (a look file's body), shown until replaced or for
+    /// `seconds`.
+    ShowInline {
+        body: String,
+        seconds: Option<f64>,
+    },
+    /// A named look, shown until replaced or for `seconds`.
+    ShowLook {
+        name: String,
+        seconds: Option<f64>,
+    },
+    /// Drops the caller's intents on the light.
+    Off,
+    Locate {
+        seconds: f64,
+    },
+    /// The ring-wide look brightness (0 to 1).
+    Brightness {
+        value: f64,
+        persist: bool,
+    },
+}
 
 /// A parsed action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
+    /// A light's look or brightness action.
+    Look(LookOp),
     /// `set`: write `value` (in the control's unit) to `control`.
     Set { control: String, value: f64 },
     /// `restore`: undo this caller's writes (to `control`, or all of them).
@@ -88,6 +135,46 @@ pub fn parse(name: &str, args: &BTreeMap<String, TypedConfigValue>) -> Result<Op
                 value: if on { 1.0 } else { 0.0 },
             })
         }
+        "looks.preset.list" => Ok(Op::Look(LookOp::PresetList)),
+        "looks.preset.show" => Ok(Op::Look(LookOp::PresetShow(name_arg(args)?))),
+        "looks.preset.apply" => Ok(Op::Look(LookOp::PresetApply(name_arg(args)?))),
+        "looks.preset.delete" => Ok(Op::Look(LookOp::PresetDelete(name_arg(args)?))),
+        "looks.preset.save" => Ok(Op::Look(LookOp::PresetSave {
+            name: name_arg(args)?,
+            body: body_arg(args)?,
+        })),
+        "looks.show_inline" => {
+            let body = body_arg(args)?;
+            // Checked here, so a bad look is refused before lemnosd sees it.
+            lemnos_board::looks::from_toml("orion", &body).map_err(|errors| {
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })?;
+            Ok(Op::Look(LookOp::ShowInline {
+                body,
+                seconds: seconds_arg(args)?,
+            }))
+        }
+        "looks.look" => Ok(Op::Look(LookOp::ShowLook {
+            name: name_arg(args)?,
+            seconds: seconds_arg(args)?,
+        })),
+        "looks.off" => Ok(Op::Look(LookOp::Off)),
+        "looks.locate" => Ok(Op::Look(LookOp::Locate {
+            seconds: seconds_arg(args)?.unwrap_or(10.0),
+        })),
+        "light.brightness" => {
+            let value = number(args, "value")
+                .ok_or_else(|| "`value` (number, 0 to 1) is required".to_owned())?;
+            if !(0.0..=1.0).contains(&value) {
+                return Err("`value` must be 0 to 1".to_owned());
+            }
+            let persist = matches!(args.get("persist"), Some(TypedConfigValue::Bool(true)));
+            Ok(Op::Look(LookOp::Brightness { value, persist }))
+        }
         "power.reset" => {
             let off_ms = number(args, "off_ms").unwrap_or(1000.0);
             if !(0.0..=10_000.0).contains(&off_ms) {
@@ -125,6 +212,25 @@ pub fn parse(name: &str, args: &BTreeMap<String, TypedConfigValue>) -> Result<Op
             "unsupported action `{other}` (one of {})",
             ACTIONS.join(", ")
         )),
+    }
+}
+
+/// A required name argument.
+fn name_arg(args: &BTreeMap<String, TypedConfigValue>) -> Result<String, String> {
+    text(args, "name").ok_or_else(|| "`name` (string) is required".to_owned())
+}
+
+/// A required body argument (a look's TOML).
+fn body_arg(args: &BTreeMap<String, TypedConfigValue>) -> Result<String, String> {
+    text(args, "body").ok_or_else(|| "`body` (string, a look in TOML) is required".to_owned())
+}
+
+/// An optional duration in seconds (above 0, at most a day).
+fn seconds_arg(args: &BTreeMap<String, TypedConfigValue>) -> Result<Option<f64>, String> {
+    match number(args, "seconds") {
+        None => Ok(None),
+        Some(s) if s > 0.0 && s <= 86_400.0 => Ok(Some(s)),
+        Some(_) => Err("`seconds` must be above 0 and at most 86400".to_owned()),
     }
 }
 
@@ -291,6 +397,55 @@ mod tests {
         );
         let too_long = args(&[("off_ms", TypedConfigValue::UInt(99_999))]);
         assert!(parse("power.reset", &too_long).is_err());
+    }
+
+    #[test]
+    fn look_actions_parse_and_refuse_bad_arguments() {
+        let name = args(&[("name", TypedConfigValue::String("scheme-c".into()))]);
+        assert_eq!(
+            parse("looks.preset.apply", &name),
+            Ok(Op::Look(LookOp::PresetApply("scheme-c".into())))
+        );
+        assert!(parse("looks.preset.apply", &BTreeMap::new()).is_err());
+        assert_eq!(
+            parse("looks.preset.list", &BTreeMap::new()),
+            Ok(Op::Look(LookOp::PresetList))
+        );
+        // A look in full is checked before lemnosd sees it.
+        let good = args(&[(
+            "body",
+            TypedConfigValue::String("layers = [{ block = \"fill\", color = \"28c8ff\" }]".into()),
+        )]);
+        assert!(matches!(
+            parse("looks.show_inline", &good),
+            Ok(Op::Look(LookOp::ShowInline { .. }))
+        ));
+        let bad = args(&[(
+            "body",
+            TypedConfigValue::String("layers = [{ block = \"nope\" }]".into()),
+        )]);
+        assert!(parse("looks.show_inline", &bad).is_err());
+        // Locate defaults to ten seconds; a day is the most.
+        assert_eq!(
+            parse("looks.locate", &BTreeMap::new()),
+            Ok(Op::Look(LookOp::Locate { seconds: 10.0 }))
+        );
+        let long = args(&[("seconds", TypedConfigValue::UInt(100_000))]);
+        assert!(parse("looks.locate", &long).is_err());
+        // Brightness is 0 to 1, optionally persisted.
+        let half = args(&[
+            ("value", TypedConfigValue::F64(0.5)),
+            ("persist", TypedConfigValue::Bool(true)),
+        ]);
+        assert_eq!(
+            parse("light.brightness", &half),
+            Ok(Op::Look(LookOp::Brightness {
+                value: 0.5,
+                persist: true
+            }))
+        );
+        let over = args(&[("value", TypedConfigValue::F64(1.5))]);
+        assert!(parse("light.brightness", &over).is_err());
     }
 
     #[test]

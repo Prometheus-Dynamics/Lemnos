@@ -396,6 +396,36 @@ fn fan(mut args: Args, socket: &Path, options: ClientOptions) -> ExitCode {
     }
 }
 
+/// `led brightness <0..1> --device <ring> [--persist]`: the ring's look
+/// brightness at runtime, applied to every look at once; `--persist` keeps it
+/// across restarts (the board's `look_brightness` is the default).
+fn led_brightness(mut args: Args, options: ClientOptions, device: &str) -> ExitCode {
+    const USAGE: &str = "usage: led brightness <0..1> --device <ring> [--persist]";
+    let Some(value) = args.next().and_then(|v| v.parse::<f64>().ok()) else {
+        return fail(USAGE);
+    };
+    if !(0.0..=1.0).contains(&value) {
+        return fail("the brightness must be 0 to 1");
+    }
+    if device.is_empty() {
+        return fail(USAGE);
+    }
+    let persist = args.flag("--persist");
+    match options
+        .devices()
+        .and_then(|mut c| c.light_brightness(device, value, persist))
+    {
+        Ok(applied) => {
+            println!(
+                "{device} brightness {applied}{}",
+                if persist { " (saved)" } else { "" }
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// `led watch <device> [--fps N]`: the light's geometry and what it shows
 /// (`#` lines), then each frame that changes: `frame <seq> <device>` and one
 /// `0xWWRRGGBB` per logical LED. Runs until interrupted or the service goes.
@@ -465,6 +495,9 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     };
     if what == "watch" {
         return led_watch(args, options);
+    }
+    if what == "brightness" {
+        return led_brightness(args, options, &device);
     }
     let show = match what.as_str() {
         "look" => {

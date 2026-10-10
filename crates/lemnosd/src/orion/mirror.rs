@@ -118,6 +118,9 @@ struct Device {
     /// Last value published per calibration key (see `Mirror::calibration`).
     calibration: BTreeMap<String, TypedConfigValue>,
     read_us: Option<u64>,
+    /// Board-level values of a light (its look and owner, the presets, the
+    /// brightness), by key.
+    extras: BTreeMap<String, TypedConfigValue>,
     last_publish: Option<Duration>,
     last_heartbeat: Option<Duration>,
 }
@@ -181,6 +184,20 @@ impl Mirror {
             device.full(now, ttl, &mut out);
         }
         out
+    }
+
+    /// Sets a board-level value of `device` (see `Device::extras`): its entry
+    /// when the value changed, nothing when it did not.
+    pub fn extra(&mut self, device: &str, key: &str, value: TypedConfigValue) -> Vec<StatusEntry> {
+        let ttl = self.cadence.ttl_ms();
+        let Some(found) = self.find_mut(device) else {
+            return Vec::new();
+        };
+        if found.extras.get(key) == Some(&value) {
+            return Vec::new();
+        }
+        found.extras.insert(key.to_owned(), value.clone());
+        vec![entry(&found.resource, key.to_owned(), value, ttl)]
     }
 
     /// Status entries for the devices whose heartbeat is due.
@@ -396,6 +413,7 @@ impl Device {
             controls: vec![None; controls],
             calibration: BTreeMap::new(),
             read_us: None,
+            extras: BTreeMap::new(),
             last_publish: None,
             last_heartbeat: None,
             desc,
@@ -508,6 +526,9 @@ impl Device {
                     ttl,
                 ));
             }
+        }
+        for (key, value) in &self.extras {
+            out.push(entry(&self.resource, key.clone(), value.clone(), ttl));
         }
         self.last_heartbeat = Some(now);
         self.last_publish = Some(now);

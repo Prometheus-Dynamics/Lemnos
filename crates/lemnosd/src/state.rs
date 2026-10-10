@@ -34,6 +34,39 @@ pub fn power_on_exit(spec: &DeviceSpec) -> &str {
         .unwrap_or("keep")
 }
 
+/// A power switch's enable delay in milliseconds (0 when none, and capped at
+/// the driver's maximum).
+pub fn power_enable_delay_ms(spec: &DeviceSpec) -> u32 {
+    spec.config
+        .get("enable_delay_ms")
+        .and_then(ConfigValue::as_i64)
+        .and_then(|ms| u32::try_from(ms).ok())
+        .map_or(0, |ms| {
+            ms.min(lemnos_device::power_switch::MAX_ENABLE_DELAY_MS)
+        })
+}
+
+/// A light's saved ring brightness (thousandths), if one was saved:
+/// `<dir>/light/<device>.brightness`.
+pub fn load_light_brightness(dir: &Path, device: &str) -> Option<u16> {
+    let text = fs::read_to_string(dir.join("light").join(format!("{device}.brightness"))).ok()?;
+    text.trim().parse::<u16>().ok().filter(|p| *p <= 1_000)
+}
+
+/// Saves a light's ring brightness (thousandths).
+pub fn save_light_brightness(dir: &Path, device: &str, permille: u16) -> io::Result<()> {
+    write_atomic(
+        &dir.join("light").join(format!("{device}.brightness")),
+        &format!("{permille}\n"),
+    )
+}
+
+/// A ring brightness in thousandths as the light's `look_brightness` (0 to
+/// 255, rounded as the board's own setting is).
+pub fn permille_to_scale(permille: u16) -> u8 {
+    u8::try_from((u32::from(permille) * 255 + 500) / 1000).unwrap_or(u8::MAX)
+}
+
 /// Sets `spec`'s `default_on` from the saved state, for a switch that
 /// persists (the saved state is what it starts at).
 pub fn apply_saved_power(spec: &mut DeviceSpec, dir: &Path) {

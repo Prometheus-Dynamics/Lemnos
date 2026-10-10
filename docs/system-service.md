@@ -306,11 +306,20 @@ load switch: a USB port's power. Its `power.on` control is latched: a write is t
 setting, so it does not end with the writer's connection (the other controls'
 writes do). Its `power.reset` control (write N, 0 to 10000) turns the switch off
 for N milliseconds and back on, to recover a port that latched off after an
-inrush; the write waits for it, so it briefly holds the service loop.
+inrush. The write returns at once; the turn-on is scheduled (see below).
 
+- **Non-blocking.** No write waits. `power.reset` = N drives the switch off at
+  once and returns; `lemnosd` turns it back on N ms later, from the service loop
+  (the loop wakes at that deadline), and broadcasts each change as it happens
+  (`Control` events with `by = lemnosd`: `power.on` 0 at the reset, 1 at the
+  turn-on). `enable_delay_ms` works the same way: the write returns at once, and
+  when the delay has passed `lemnosd` broadcasts a `power.ready` control event
+  (value 1); until then the load is still coming up. Sensors and lights keep their
+  schedule during a reset (`tests/power_switch.rs`, `a_reset_does_not_stall`).
+  A reset pending at a stop ends on, whatever `on_exit` says.
 - **Start.** The output is requested at the default level (`default_on`, or the
   saved setting with `persist`), so it never passes through the other level.
-- **Persist.** With `persist = true`, each `power.on` write is saved to
+- **Persist.** With `persist = true`, each `power.on` write (and a reset's turn-on) is saved to
   `<LEMNOSD_STATE_DIR>/power/<device>.state` (default `/var/lib/lemnos`), written
   atomically.
 - **Exit.** `on_exit` (`keep`, `on` or `off`) is applied when the service stops.
@@ -329,6 +338,15 @@ lemnos-ctl power usb-c-power reset --off-ms 1000
 ```
 
 Orion's actions are `power.set {on}` and `power.reset {off_ms}` ([orion.md](orion.md)).
+
+## Ring brightness at runtime
+
+`Request::LightSetting` (code 15) sets a light's ring-wide `look_brightness` (0 to
+1000 thousandths) at once, for every look. The light's `writers` apply. With
+`persist`, the value is saved to `<LEMNOSD_STATE_DIR>/light/<device>.brightness` and
+read at the next start in place of the board's `look_brightness`. The reply is the
+value applied, in thousandths. `DeviceClient::light_brightness(device, 0..1,
+persist)` and `lemnos-ctl led brightness <0..1> --device <ring> [--persist]` send it.
 
 ## Frame watch
 

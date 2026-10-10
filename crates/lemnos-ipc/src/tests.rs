@@ -21,6 +21,28 @@ fn round_trip_message(message: Message) {
 
 #[test]
 fn requests_round_trip() {
+    round_trip_request(Request::WatchFrames {
+        id: 7,
+        device: "ring".into(),
+        fps: 20,
+    });
+    round_trip_request(Request::LightSetting {
+        id: 8,
+        device: "ring".into(),
+        look_brightness: 250,
+        persist: true,
+    });
+    round_trip_request(Request::Looks {
+        id: 9,
+        op: LooksOp::PresetSave {
+            name: "night".into(),
+            text: "[looks.\"pv.targets\"]\n".into(),
+        },
+    });
+    round_trip_request(Request::Looks {
+        id: 10,
+        op: LooksOp::Delete("pv.searching".into()),
+    });
     round_trip_request(Request::Hello {
         version: VERSION,
         client: "helios".into(),

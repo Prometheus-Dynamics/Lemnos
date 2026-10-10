@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use lemnos_ipc::{ClientEvent, ClientOptions, DeviceClient, DeviceDesc, Event, Update};
+use lemnos_ipc::{
+    ClientError, ClientEvent, ClientOptions, DeviceClass, DeviceClient, DeviceDesc, Event,
+    FrameUpdate, LedRequest, LedShow, LooksOp, Update,
+};
 use orion_client::{ActionReporter, LocalNodeRuntime, LocalProviderApp, LocalProviderService};
 use orion_control_plane::{
     ActionRequest, ActionTarget, ProviderRecord, ResourceRecord, StatusEntry, TypedConfigValue,
@@ -28,6 +31,7 @@ use orion_core::{NodeId, ProviderId, ResourceType};
 use tokio::sync::mpsc;
 
 use super::mirror::{Cadence, Mirror, PROVIDER_ID, RESOURCE_TYPE};
+use super::ops::LookOp;
 use super::ops::{self, Op, Outcome};
 
 /// The lemnosd client name of the bridge's readings connection.
@@ -125,6 +129,13 @@ enum Feed {
     Calibration {
         device: String,
         status: lemnos_device::CalibrationStatus,
+    },
+    /// A device's board-level value (a light's look and owner, the presets, the
+    /// ring brightness): published when it changes, and on the heartbeat.
+    Extra {
+        device: String,
+        key: String,
+        value: TypedConfigValue,
     },
 }
 
@@ -288,7 +299,7 @@ fn pump(
                 continue;
             }
         };
-        if !setup(&mut client, period_ms, feed, channels) {
+        if !setup(socket, &mut client, period_ms, feed, channels) {
             std::thread::sleep(retry);
             continue;
         }
@@ -306,7 +317,7 @@ fn pump(
             match client.next_event_timeout(Duration::from_millis(200)) {
                 Ok(None) => {}
                 Ok(Some(ClientEvent::Connected { reconnects })) => {
-                    if reconnects > 0 && !setup(&mut client, period_ms, feed, channels) {
+                    if reconnects > 0 && !setup(socket, &mut client, period_ms, feed, channels) {
                         break;
                     }
                 }
@@ -379,6 +390,7 @@ pub fn parse_channels(text: &str) -> Vec<(String, Vec<String>)> {
 /// lemnosd did not answer (the caller reconnects).
 #[allow(clippy::print_stderr)]
 fn setup(
+    socket: &Path,
     client: &mut DeviceClient,
     period_ms: u32,
     feed: &mpsc::UnboundedSender<Feed>,
@@ -421,8 +433,87 @@ fn setup(
                 });
             }
         }
+        if device.class == DeviceClass::Light {
+            // The presets, and the light's look and owner (watched below).
+            for (key, value) in presets_status(client) {
+                let _ = feed.send(Feed::Extra {
+                    device: device.id.clone(),
+                    key: key.to_owned(),
+                    value,
+                });
+            }
+            let socket = socket.to_path_buf();
+            let id = device.id.clone();
+            let feed = feed.clone();
+            std::thread::spawn(move || watch_light(&socket, &id, &feed));
+        }
     }
     true
+}
+
+/// The look presets' status: the active one, and the names (comma-separated).
+fn presets_status(client: &mut DeviceClient) -> Vec<(&'static str, TypedConfigValue)> {
+    let Ok(listing) = client.looks(LooksOp::PresetList) else {
+        return Vec::new();
+    };
+    let mut active = String::new();
+    let mut names = Vec::new();
+    for line in listing.lines() {
+        let (mark, rest) = line.split_at(line.len().min(2));
+        let name = rest.split(' ').next().unwrap_or_default().to_owned();
+        if name.is_empty() {
+            continue;
+        }
+        if mark.trim() == "*" {
+            active = name.clone();
+        }
+        names.push(name);
+    }
+    vec![
+        ("looks.preset.active", TypedConfigValue::String(active)),
+        ("looks.presets", TypedConfigValue::String(names.join(","))),
+    ]
+}
+
+/// Watches a light's description (its look and owner) for as long as the
+/// connection to lemnosd lasts, one frame a second at most (the frames are
+/// not used). Reconnects with `retry` between attempts.
+fn watch_light(socket: &Path, device: &str, feed: &mpsc::UnboundedSender<Feed>) {
+    loop {
+        if feed.is_closed() {
+            return;
+        }
+        let mut leds = match ClientOptions::new(socket, LEMNOSD_CLIENT).leds() {
+            Ok(leds) => leds,
+            Err(_) => {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+        if leds.watch_frames(device, 1).is_err() {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        while let Ok(event) = leds.next_frame(None) {
+            let Some(ClientEvent::Data(FrameUpdate::Info(info))) = event else {
+                if matches!(event, Some(ClientEvent::Disconnected { .. })) {
+                    break;
+                }
+                continue;
+            };
+            for (key, value) in [("light.look", info.look), ("light.owner", info.owner)] {
+                let sent = feed.send(Feed::Extra {
+                    device: device.to_owned(),
+                    key: key.to_owned(),
+                    value: TypedConfigValue::String(value),
+                });
+                if sent.is_err() {
+                    return;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// Applies one feed message to the mirror; the status entries to publish.
@@ -453,6 +544,10 @@ fn apply_feed(
         Feed::Calibration { device, status } => slot
             .as_mut()
             .map(|mirror| mirror.calibration(&device, &status))
+            .unwrap_or_default(),
+        Feed::Extra { device, key, value } => slot
+            .as_mut()
+            .map(|mirror| mirror.extra(&device, &key, value))
             .unwrap_or_default(),
         Feed::Update(update) => match slot.as_mut() {
             None => Vec::new(),
@@ -605,12 +700,22 @@ async fn handle(shared: &Arc<Shared>, request: ActionRequest) -> Outcome {
     };
     let shared_for_block = shared.clone();
     let device_for_block = device.clone();
-    let (outcome, values) = tokio::task::spawn_blocking(move || {
+    let (outcome, values, extras) = tokio::task::spawn_blocking(move || {
         let client = match caller_client(&shared_for_block, &caller) {
             Ok(client) => client,
-            Err(error) => return (Outcome::Failed(format!("lemnosd: {error}")), Vec::new()),
+            Err(error) => {
+                return (
+                    Outcome::Failed(format!("lemnosd: {error}")),
+                    Vec::new(),
+                    Vec::new(),
+                );
+            }
         };
         let mut client = client.lock().unwrap_or_else(|e| e.into_inner());
+        if let Op::Look(look) = op {
+            let (outcome, extras) = look_op(&mut client, &device_for_block, look);
+            return (outcome, Vec::new(), extras);
+        }
         let outcome = run_op(&mut client, &device_for_block, op);
         // lemnosd's restore and release do not name the control they changed,
         // so the controls are read back after every action.
@@ -623,15 +728,25 @@ async fn handle(shared: &Arc<Shared>, request: ActionRequest) -> Outcome {
                     .map(|value| (name.clone(), value))
             })
             .collect::<Vec<_>>();
-        (outcome, values)
+        (outcome, values, Vec::new())
     })
     .await
     .unwrap_or_else(|error| {
         (
             Outcome::Failed(format!("action panicked: {error}")),
             Vec::new(),
+            Vec::new(),
         )
     });
+    // A look action's status (the presets, the brightness) goes out on the
+    // light's resource, as the action's own answer does.
+    for (key, value) in extras {
+        let _ = shared.feed.send(Feed::Extra {
+            device: device.clone(),
+            key: key.to_owned(),
+            value,
+        });
+    }
     for (control, value) in values {
         let _ = shared.feed.send(Feed::Control {
             device: device.clone(),
@@ -657,9 +772,121 @@ fn caller_client(shared: &Shared, caller: &str) -> Result<Arc<Mutex<DeviceClient
     Ok(client)
 }
 
+/// A look action on the light `device`, and the status values it changed.
+fn look_op(
+    client: &mut DeviceClient,
+    device: &str,
+    op: LookOp,
+) -> (Outcome, Vec<(&'static str, TypedConfigValue)>) {
+    match op {
+        LookOp::PresetList => (looks_text(client, LooksOp::PresetList), Vec::new()),
+        LookOp::PresetShow(name) => (looks_text(client, LooksOp::PresetShow(name)), Vec::new()),
+        LookOp::PresetApply(name) => {
+            let outcome = looks_text(client, LooksOp::PresetApply(name));
+            (outcome, presets_status(client))
+        }
+        LookOp::PresetSave { name, body } => {
+            let outcome = looks_text(client, LooksOp::PresetSave { name, text: body });
+            (outcome, presets_status(client))
+        }
+        LookOp::PresetDelete(name) => {
+            let outcome = looks_text(client, LooksOp::PresetDelete(name));
+            (outcome, presets_status(client))
+        }
+        LookOp::ShowInline { body, seconds } => {
+            match lemnos_board::looks::from_toml("orion", &body) {
+                Ok(spec) => (
+                    show(
+                        client,
+                        device,
+                        LedShow::Inline {
+                            spec: Box::new(spec),
+                            progress: None,
+                        },
+                        seconds,
+                    ),
+                    Vec::new(),
+                ),
+                Err(errors) => (
+                    Outcome::Rejected(
+                        errors
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ),
+                    Vec::new(),
+                ),
+            }
+        }
+        LookOp::ShowLook { name, seconds } => (
+            show(
+                client,
+                device,
+                LedShow::Look {
+                    name,
+                    progress: None,
+                },
+                seconds,
+            ),
+            Vec::new(),
+        ),
+        LookOp::Off => (show(client, device, LedShow::Clear, None), Vec::new()),
+        LookOp::Locate { seconds } => (
+            show(client, device, LedShow::Locate, Some(seconds)),
+            Vec::new(),
+        ),
+        LookOp::Brightness { value, persist } => {
+            match client.light_brightness(device, value, persist) {
+                Ok(applied) => (
+                    Outcome::Succeeded(BTreeMap::from([(
+                        "brightness".to_owned(),
+                        TypedConfigValue::F64(applied),
+                    )])),
+                    vec![("light.brightness", TypedConfigValue::F64(applied))],
+                ),
+                Err(error) => (client_outcome(error), Vec::new()),
+            }
+        }
+    }
+}
+
+/// A look operation's text (a listing, a look's text, or a success's note).
+fn looks_text(client: &mut DeviceClient, op: LooksOp) -> Outcome {
+    match client.looks(op) {
+        Ok(text) => Outcome::Succeeded(BTreeMap::from([(
+            "text".to_owned(),
+            TypedConfigValue::String(text),
+        )])),
+        Err(error) => client_outcome(error),
+    }
+}
+
+/// Shows `show` on the light `device` for `seconds` (until replaced when
+/// `None`).
+fn show(client: &mut DeviceClient, device: &str, show: LedShow, seconds: Option<f64>) -> Outcome {
+    let mut request = LedRequest::new(show);
+    request.device = device.to_owned();
+    request.duration_ms = seconds.map(|s| (s * 1000.0).round() as u32);
+    match client.show(request) {
+        Ok(()) => Outcome::Succeeded(BTreeMap::new()),
+        Err(error) => client_outcome(error),
+    }
+}
+
+/// A client error as an outcome: lemnosd's refusal is a rejection (the
+/// request was not right), a device error or a lost connection a failure.
+fn client_outcome(error: ClientError) -> Outcome {
+    match error {
+        ClientError::Rejected(reason) => Outcome::Rejected(reason),
+        other => ops::client_error(other),
+    }
+}
+
 /// One operation on lemnosd.
 fn run_op(client: &mut DeviceClient, device: &str, op: Op) -> Outcome {
     match op {
+        Op::Look(_) => Outcome::Failed("internal: look actions run through look_op".to_owned()),
         Op::Set { control, value } => match client.set(device, &control, value) {
             Ok(applied) => Outcome::Succeeded(ops::set_output(&control, applied)),
             Err(error) => ops::client_error(error),

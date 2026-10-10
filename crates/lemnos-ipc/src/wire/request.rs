@@ -282,6 +282,19 @@ impl Request {
                 e.u32(*id).str(device).u16(*fps);
                 e.finish()
             }
+            Self::LightSetting {
+                id,
+                device,
+                look_brightness,
+                persist,
+            } => {
+                let mut e = Encoder::new(LIGHT_SETTING);
+                e.u32(*id)
+                    .str(device)
+                    .u16(*look_brightness)
+                    .u8(u8::from(*persist));
+                e.finish()
+            }
             Self::Looks { id, op } => {
                 let mut e = Encoder::new(LOOKS);
                 e.u32(*id);
@@ -449,6 +462,12 @@ impl Request {
                 id: d.u32()?,
                 device: d.str()?,
                 fps: d.u16()?,
+            },
+            LIGHT_SETTING => Self::LightSetting {
+                id: d.u32()?,
+                device: d.str()?,
+                look_brightness: d.u16()?,
+                persist: d.u8()? != 0,
             },
             LOOKS => Self::Looks {
                 id: d.u32()?,
