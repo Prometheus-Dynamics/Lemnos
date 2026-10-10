@@ -18,7 +18,9 @@
 //! rad/s, V, A, ...). The raw count is that value scaled by `10^-exponent`:
 //! the BMI088's counts are mm/s² (exponent -3) and µrad/s (exponent -6).
 
-use lemnos_device::{Axis, DeviceClass, DeviceStatus, Quantity};
+use lemnos_device::{
+    Axis, CalibrationCommand, CalibrationStatus, DeviceClass, DeviceStatus, Quantity,
+};
 use lemnos_hal::ErrorKind;
 use std::fmt;
 
@@ -49,6 +51,9 @@ const DATA: u16 = 107;
 const TEXT: u16 = 108;
 const FRAME: u16 = 109;
 const LIGHT_INFO: u16 = 110;
+const CALIBRATION_STATUS_REPLY: u16 = 111;
+const CALIBRATION: u16 = 13;
+const CALIBRATION_STATUS: u16 = 14;
 
 /// A malformed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +71,7 @@ fn bad(what: impl Into<String>) -> WireError {
     WireError(what.into())
 }
 
+mod calibration;
 mod codec;
 mod look;
 mod message;
@@ -425,6 +431,21 @@ pub enum Request {
         device: String,
         fps: u16,
     },
+    /// Starts, stops, applies, discards or resets a device's calibration (see
+    /// [`CalibrationCommand`]). Answered with a [`Message::Reply`] (value 0),
+    /// or a refusal: `UnknownDevice`, `Unsupported` (no calibration), or
+    /// `NotAllowed` under the device's write policy.
+    Calibration {
+        id: u32,
+        device: String,
+        command: CalibrationCommand,
+    },
+    /// A device's calibration status. Answered with a
+    /// [`Message::CalibrationStatus`], or a [`Message::Reply`] refusal.
+    CalibrationStatus {
+        id: u32,
+        device: String,
+    },
 }
 
 /// A looks request (see [`Request::Looks`]).
@@ -488,6 +509,13 @@ pub enum Message {
     Data {
         id: u32,
         result: Result<Vec<u8>, Refusal>,
+    },
+    /// A device's calibration status (the answer to
+    /// [`Request::CalibrationStatus`]).
+    CalibrationStatus {
+        id: u32,
+        device: String,
+        status: CalibrationStatus,
     },
 }
 

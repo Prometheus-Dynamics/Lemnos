@@ -605,3 +605,121 @@ fn pio_i2c_selector_names_pins_and_a_virtual_bus() {
         assert!(bad.parse::<BusRef>().is_err(), "{bad} should be refused");
     }
 }
+
+fn fusion_board(config: &[(&str, ConfigValue)]) -> BoardDefinition {
+    let mut board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let mut device = DeviceSpec::new("orientation", "fusion");
+    for (key, value) in config {
+        device = device.with(*key, value.clone());
+    }
+    board.devices.push(device);
+    board
+}
+
+fn text(value: &str) -> ConfigValue {
+    ConfigValue::String(value.into())
+}
+
+#[test]
+fn fusion_config_validates_its_keys_and_values() {
+    let registry = DriverRegistry::builtin();
+    let entry = registry.get("fusion").unwrap();
+    assert_eq!(entry.interface, Interface::Composite);
+    assert_eq!(entry.class, lemnos_device::DeviceClass::Orientation);
+
+    // A 9-axis fusion with every key the doc lists is valid.
+    let good = fusion_board(&[
+        ("imu", text("imu")),
+        ("mag", text("magnetometer")),
+        ("mode", text("9axis")),
+        ("algorithm", text("mahony")),
+        ("kp", ConfigValue::Float(1.0)),
+        ("ki", ConfigValue::Float(0.01)),
+        ("mount_roll_deg", ConfigValue::Integer(0)),
+        ("mount_pitch_deg", ConfigValue::Integer(0)),
+        ("mount_yaw_deg", ConfigValue::Integer(90)),
+        ("declination_deg", ConfigValue::Float(0.0)),
+        ("always", ConfigValue::Bool(false)),
+    ]);
+    good.validate(&registry).unwrap();
+
+    // An unknown key is an error, named with the accepted keys.
+    let unknown = fusion_board(&[("imu", text("imu")), ("gain", ConfigValue::Float(2.0))]);
+    let Err(BoardError::Invalid(problems)) = unknown.validate(&registry) else {
+        panic!("expected a problem");
+    };
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("unknown config key \"gain\"")),
+        "{problems:?}"
+    );
+
+    // The mode and algorithm are checked against their choices.
+    let bad_mode = fusion_board(&[("imu", text("imu")), ("mode", text("3axis"))]);
+    let Err(BoardError::Invalid(problems)) = bad_mode.validate(&registry) else {
+        panic!("expected a problem");
+    };
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("config \"mode\" is \"3axis\", must be one of: 6axis, 9axis")),
+        "{problems:?}"
+    );
+    let bad_algorithm = fusion_board(&[("imu", text("imu")), ("algorithm", text("kalman"))]);
+    assert!(bad_algorithm.validate(&registry).is_err());
+
+    // A 9-axis fusion names its magnetometer; `imu` is required.
+    let no_mag = fusion_board(&[("imu", text("imu")), ("mode", text("9axis"))]);
+    let Err(BoardError::Invalid(problems)) = no_mag.validate(&registry) else {
+        panic!("expected a problem");
+    };
+    assert!(
+        problems.iter().any(|p| p.contains("needs `mag`")),
+        "{problems:?}"
+    );
+    let no_imu = fusion_board(&[("mode", text("6axis"))]);
+    let Err(BoardError::Invalid(problems)) = no_imu.validate(&registry) else {
+        panic!("expected a problem");
+    };
+    assert!(
+        problems.iter().any(|p| p.contains("needs `imu`")),
+        "{problems:?}"
+    );
+
+    // Numbers and booleans are typed.
+    let typed = fusion_board(&[
+        ("imu", text("imu")),
+        ("kp", text("fast")),
+        ("always", text("yes")),
+    ]);
+    let Err(BoardError::Invalid(problems)) = typed.validate(&registry) else {
+        panic!("expected a problem");
+    };
+    let all = problems.join("\n");
+    assert!(all.contains("\"kp\" must be a number"), "{all}");
+    assert!(all.contains("\"always\" must be true or false"), "{all}");
+
+    // A bus or an address is refused: the device has none.
+    let mut on_bus = fusion_board(&[("imu", text("imu"))]);
+    on_bus.devices.last_mut().unwrap().bus = Some(BusRef::I2c(1));
+    assert!(on_bus.validate(&registry).is_err());
+}
+
+#[test]
+fn a_fusion_device_is_hosted_by_lemnosd_not_the_registry() {
+    let registry = DriverRegistry::builtin();
+    let board = fusion_board(&[("imu", text("imu"))]);
+    let spec = board.device("orientation").unwrap();
+    let tree = Tree::new();
+    tree.adapters();
+    let mut buses = MockBuses {
+        sys: tree.0.clone(),
+    };
+    let error = registry.build(spec, &mut buses).err().unwrap();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(
+        error.to_string().contains("fusion is hosted by lemnosd"),
+        "{error}"
+    );
+}

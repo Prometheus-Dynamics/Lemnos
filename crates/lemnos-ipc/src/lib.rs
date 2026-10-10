@@ -33,7 +33,10 @@ pub use client::{
 };
 /// The compact-model types the protocol carries, so clients need no
 /// direct `lemnos-device` or `lemnos-hal` dependency.
-pub use lemnos_device::{Axis, DeviceClass, DeviceStatus, NO_VALUE, Quantity, Unit};
+pub use lemnos_device::{
+    Axis, CalibrationCommand, CalibrationPart, CalibrationRoutine, CalibrationStatus, DeviceClass,
+    DeviceStatus, NO_VALUE, Quantity, Unit,
+};
 pub use lemnos_hal::ErrorKind;
 /// Raw line, PWM and SPI settings ([`DeviceClient::claim_line`] and friends).
 pub use lemnos_hal::raw;

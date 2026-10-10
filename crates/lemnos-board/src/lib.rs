@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 
 mod buses;
+mod composite;
 mod error;
 mod gravity;
 mod i2c_select;

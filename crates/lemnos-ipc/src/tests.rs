@@ -1,5 +1,8 @@
 use super::*;
-use lemnos_device::{Axis, DeviceClass, DeviceStatus, Quantity};
+use lemnos_device::{
+    Axis, CalibrationCommand, CalibrationPart, CalibrationRoutine, CalibrationStatus, DeviceClass,
+    DeviceStatus, Quantity,
+};
 
 fn round_trip_request(request: Request) {
     let frame = request.encode();
@@ -533,4 +536,66 @@ fn a_drain_round_trips_on_the_wire() {
         spec: Box::new(drain),
         progress: None,
     })));
+}
+
+#[test]
+fn calibration_requests_round_trip() {
+    for command in [
+        CalibrationCommand::Start(CalibrationRoutine::AccelSix),
+        CalibrationCommand::Start(CalibrationRoutine::MagRotate),
+        CalibrationCommand::Start(CalibrationRoutine::GyroHold),
+        CalibrationCommand::Stop,
+        CalibrationCommand::Apply,
+        CalibrationCommand::Discard,
+        CalibrationCommand::Reset,
+    ] {
+        round_trip_request(Request::Calibration {
+            id: 4,
+            device: "imu".into(),
+            command,
+        });
+    }
+    round_trip_request(Request::CalibrationStatus {
+        id: 5,
+        device: "magnetometer".into(),
+    });
+}
+
+#[test]
+fn calibration_status_message_round_trips() {
+    let part = CalibrationPart {
+        samples: 1234,
+        confidence: 800,
+        coverage: 700,
+        residual: 15,
+        active: true,
+    };
+    round_trip_message(Message::CalibrationStatus {
+        id: 5,
+        device: "imu".into(),
+        status: CalibrationStatus {
+            revision: 42,
+            running: Some(CalibrationRoutine::MagRotate),
+            progress: 500,
+            candidate: true,
+            failed: false,
+            parts: [part, CalibrationPart::default(), part],
+        },
+    });
+    round_trip_message(Message::CalibrationStatus {
+        id: 0,
+        device: "x".into(),
+        status: CalibrationStatus::default(),
+    });
+}
+
+#[test]
+fn bad_calibration_codes_are_refused() {
+    // A frame of kind CALIBRATION (12) whose command code is unknown.
+    let mut frame = Vec::new();
+    let payload = [0u8, 0, 0, 0, 1, 0, b'x', 9];
+    frame.extend_from_slice(&((payload.len() + 2) as u32).to_le_bytes());
+    frame.extend_from_slice(&12u16.to_le_bytes());
+    frame.extend_from_slice(&payload);
+    assert!(decode_request(&frame).is_err());
 }

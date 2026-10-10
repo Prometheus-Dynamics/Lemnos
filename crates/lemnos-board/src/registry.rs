@@ -1,5 +1,6 @@
 //! Driver names a board definition can use, and how each builds its device.
 
+use crate::composite::{FUSION_CHOICES, FUSION_KEYS, build_fusion, composite_problems};
 use crate::schema::{Backend, BusRef, ConfigValue, DeviceSpec};
 use crate::{BoardError, Buses, DynI2c};
 use lemnos_device::{BoxedDevice, DeviceClass};
@@ -14,6 +15,9 @@ pub enum Interface {
     I2c,
     /// A kernel class device found by `path` or `match` attributes.
     Platform,
+    /// Not a device of its own: lemnosd builds it from other devices (the
+    /// fusion orientation). Takes no bus, address, path or match.
+    Composite,
 }
 
 /// Builds a device from its spec.
@@ -68,6 +72,12 @@ impl DriverEntry {
                 if spec.bus.is_some() || spec.address.is_some() {
                     problems.push(format!("{} takes `path` or `match`, not a bus", self.name));
                 }
+            }
+            Interface::Composite => {
+                if spec.bus.is_some() || spec.address.is_some() || !spec.matches.is_empty() {
+                    problems.push(format!("{} takes no bus, address or match", self.name));
+                }
+                problems.extend(composite_problems(self.name, spec));
             }
         }
         if spec.backend == Backend::Kernel && !self.kernel {
@@ -275,6 +285,19 @@ fn kernel_device(
 // --- built-in drivers -------------------------------------------------------
 
 const BUILTIN: &[DriverEntry] = &[
+    DriverEntry {
+        name: "fusion",
+        summary: "Orientation fused from an IMU and a magnetometer (hosted by lemnosd)",
+        class: DeviceClass::Orientation,
+        interface: Interface::Composite,
+        default_address: None,
+        config_keys: FUSION_KEYS,
+        match_keys: &[],
+        config_choices: FUSION_CHOICES,
+        kernel: false,
+        userspace: false,
+        build: build_fusion,
+    },
     DriverEntry {
         name: "bmi088",
         summary: "Bosch BMI088 IMU (accelerometer + gyroscope)",

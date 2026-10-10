@@ -534,6 +534,9 @@ fn reply(id: u32) -> impl FnMut(&Message) -> Option<Result<f64, Refusal>> {
     }
 }
 
+#[path = "client/calibration.rs"]
+mod calibration;
+
 /// Reads, subscribes to and controls `lemnosd`'s devices.
 pub struct DeviceClient {
     conn: Connection,

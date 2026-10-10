@@ -30,6 +30,12 @@ impl Message {
                     .str(&info.owner);
                 e.finish()
             }
+            Self::CalibrationStatus { id, device, status } => {
+                let mut e = Encoder::new(CALIBRATION_STATUS_REPLY);
+                e.u32(*id).str(device);
+                super::calibration::status_encode(&mut e, status);
+                e.finish()
+            }
             Self::Text { id, result } => {
                 let mut e = Encoder::new(TEXT);
                 e.u32(*id);
@@ -357,6 +363,11 @@ impl Message {
                     },
                 }
             }
+            CALIBRATION_STATUS_REPLY => Self::CalibrationStatus {
+                id: d.u32()?,
+                device: d.str()?,
+                status: super::calibration::status_decode(&mut d)?,
+            },
             other => return Err(bad(format!("unknown message kind {other}"))),
         })
     }

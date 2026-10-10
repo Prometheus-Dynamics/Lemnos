@@ -299,6 +299,21 @@ impl Request {
                 };
                 e.finish()
             }
+            Self::Calibration {
+                id,
+                device,
+                command,
+            } => {
+                let mut e = Encoder::new(CALIBRATION);
+                e.u32(*id).str(device);
+                super::calibration::command_encode(&mut e, *command);
+                e.finish()
+            }
+            Self::CalibrationStatus { id, device } => {
+                let mut e = Encoder::new(CALIBRATION_STATUS);
+                e.u32(*id).str(device);
+                e.finish()
+            }
         }
     }
 
@@ -456,6 +471,15 @@ impl Request {
                     9 => LooksOp::Delete(d.str()?),
                     other => return Err(bad(format!("looks operation {other}"))),
                 },
+            },
+            CALIBRATION => Self::Calibration {
+                id: d.u32()?,
+                device: d.str()?,
+                command: super::calibration::command_decode(&mut d)?,
+            },
+            CALIBRATION_STATUS => Self::CalibrationStatus {
+                id: d.u32()?,
+                device: d.str()?,
             },
             other => return Err(bad(format!("unknown request kind {other}"))),
         })
