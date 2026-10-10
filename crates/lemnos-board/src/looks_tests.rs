@@ -539,3 +539,31 @@ layers = [
     let again = from_toml("round trip", &text).expect("the written form parses");
     assert_eq!(again, spec);
 }
+
+#[test]
+fn a_drain_parses_with_its_defaults_round_trips_and_checks_its_ranges() {
+    let spec = from_toml(
+        "--spec",
+        r#"layers = [{ block = "drain", color = "00ff20", fill_ms = 700, start_ms = 1100, duration_ms = 2100 }]"#,
+    )
+    .expect("parses");
+    let Block::Drain {
+        color,
+        fill_ms,
+        start_ms,
+        duration_ms,
+        easing,
+    } = spec.iter().next().unwrap().block
+    else {
+        panic!("a drain");
+    };
+    assert_eq!(
+        (color, fill_ms, start_ms, duration_ms),
+        (Rgbw::rgb(0x00ff20), 700, 1_100, 2_100)
+    );
+    assert_eq!(easing, Easing::EaseIn, "ease-in by default");
+    let again = from_toml("round trip", &body_toml(&spec)).expect("the written form parses");
+    assert_eq!(again, spec);
+    let err = body_error(r#"layers = [{ block = "drain", color = "00ff20", duration_ms = 0 }]"#);
+    assert!(err.contains("duration_ms"), "{err}");
+}

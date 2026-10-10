@@ -30,6 +30,7 @@ ring has 16 on the Raze, at most 64), and every other fraction is 0 to 1.
 | `fill` | `color` (required) | Every LED the colour. |
 | `comet` | `color` (required), `period_ms` (1200, 100 to 600000), `tail` (5 LEDs, above 0 to 64), `heads` (1, or 2 for opposite comets), `base` (0, the floor brightness), `reverse` (false, the other way round) | One turn per `period_ms`. The tail fades along `x^2.2` over `tail` LEDs. |
 | `arc` | `fraction` (`"input"`: the request's progress, or a number 0 to 1), `color` (required), `track` (`101012`, the unfilled part), `head` (0.35, the leading LED mixed toward white), `sheen` (true, a soft white moving over the fill) | A progress gauge. The fill advances eased when its fraction changes. |
+| `drain` | `color` (required), `fill_ms` (0, the fill grows from the top over this long), `start_ms` (0, when the drain starts), `duration_ms` (1000), `easing` (`ease-in`) | A fill of the colour that grows from the top, holds, then recedes toward the gravity bottom (both sides round) from `start_ms` over `duration_ms`, speeding up on an ease-in. The edge is one LED soft; the last LEDs at the bottom fade out. The bottom is the same one-shot gravity read a falling sparkle uses, `default_down` when there is none. `system.confirmed` drains. |
 | `ripple` | `color` (required), `origin` (LED 0, 0 to 63), `speed` (12 LEDs a second), `width` (2.2 LEDs), `settle_ms` (1400, 0 to 60000), `glow` (0.15, the settling glow's peak) | A wave out from `origin` both ways round, then a glow that fades. `system.confirmed` is one. |
 | `frame` | `pixels` (required: 1 to 64 colours) | Static pixels from LED 0; the rest are off. |
 | `wash` | `color` (required), `envelope` (required: a breathe, pulse or blink, in the look envelope's form) | Every LED the colour, shaped by its **own** envelope, not the whole look's. A flash or a slow breathe under other layers. |
@@ -70,23 +71,35 @@ layers = [
 layers = [
   { block = "wash", color = "c8ffd2",
     envelope = { kind = "pulse", attack_ms = 80, hold_ms = 0, decay_ms = 500, repeat = 1 } },
+  { block = "drain", color = "00ff20", fill_ms = 700, start_ms = 1100, duration_ms = 2100, easing = "ease-in" },
   { block = "ripple", color = "00ff20", speed = 14, width = 1.6, settle_ms = 1, glow = 0 },
-  { block = "sparkle", colors = ["00ff20", "00ff20", "c8ffd2", "78ff8c"],
-    density = 3.5, density_end = 0, fade_ms = 2600, start_ms = 300, base = 0.25,
-    fall = true, fall_speed = 5, fall_accel = 6 },
 ]
 ```
 
 `system.booting` is the trial boot ("testing a new image"): a calm, starry
 sparkle over a slow breathe. `system.confirmed` is the update confirmed: the
 flash comes at once, the burst runs out from the top to the bottom and back in
-about a second, and the sparks fall from the top and fade over the glow. Its
-look runs about 3.2 s, and the Confirmed hold in `lemnosd` is the same. The
-flash and the glow are above the fill cap (a celebration), and the ring-wide
-brightness still scales them.
+about a second, the green fills the ring from the top by 0.7 s, holds, and then
+drains toward the bottom from 1.1 s over 2.1 s (an ease-in, so it speeds up),
+the last LEDs at the bottom fading out. The look runs about 3.2 s, and the
+Confirmed hold in `lemnosd` is 3.3 s. The flash is above the fill cap (a
+celebration), and the ring-wide brightness still scales it.
 
-Tuning: `density` is per LED a second, so a falling sparkle at 3.5 shows many
-sparks (the 16 particles fill up early in the look); lower it to thin them.
+To make the drain start from a different place, change the `ripple`'s `origin`
+or the gravity keys; the drain always goes toward the bottom.
+
+### The trial boot's ember
+
+On an update's trial boot the ring shows the reboot ember (`system.rebooting`)
+from the moment `lemnosd` starts, not the sparkle: the updater's status reads
+`trying` (or `rebooting`) from the start of the new image, so the restart's
+look carries on. It holds the ember for `LEMNOSD_TRIAL_EMBER_MS` (4000 ms by
+default) and then cross-fades into `system.booting` over 1 s. The status file
+has no signal for when the self-test starts, so this is a timed hand-over. A
+ring is never written off on that path (a stop with a restart still fades to
+the ember). `lemnosd` logs the uptime of its first ring frame once per start
+(`lemnosd: first ring frame written at N s since boot`), so the boot's timing
+can be read from its log.
 
 ## Gravity: which way is down
 
@@ -199,21 +212,26 @@ the defaults shown. Each is also a valid `led look <name>`.
 |---|---|---|
 | `status.ok` `status.warn` `status.error` `status.busy` | the board's `ok`/`warn`/`error`/`busy` colour, solid, or the status effect (`status_effect`, `error_effect`) | fill 0.7 |
 | `status.off` | nothing | |
-| `system.verifying` | a purple comet, 1200 ms, tail 7, base 0.05 (`verifying_*`) | comet 1.0 |
+| `system.verifying` | a purple comet, 1200 ms, tail 8, base 0.18 (`verifying_*`) | comet 1.0 |
 | `system.writing` | the blue arc over the faint track, sheen, the request's progress | arc 1.0 |
 | `system.writing-unknown` | the blue comet, with the verifying timing | comet 1.0 |
 | `system.staged` | the green breathe, 2200 ms, depth 0.45 (`staged_*`) | fill 0.85 |
-| `system.booting` | the trial boot: a faint white breathe (3000 ms, about 4 to 9%) under a warm-white sparkle (`booting`, density 1.2, base 0.03); see below | wash 0.09, sparkle 1.0 |
+| `system.booting` | the trial boot: a faint white breathe (3000 ms, about 4 to 9%) under a warm-white sparkle (`booting`, density 1.2, base 0.03); see below, and *The trial boot's ember* | wash 0.09, sparkle 1.0 |
 | `system.rebooting` | the reboot ember: the rebooting colour at 44%, held at least 16% (about 22% on a default ring) | ember |
 | `system.failed` `system.rolled-back` | the red breathe, 2400 ms, depth 0.9 (`failed_*`) | fill 0.7 |
-| `system.confirmed` | the green pop: a pale green-white flash of the whole ring, a green burst running out from the top and back, and falling green sparks over a faint glow, about 3.2 s; see below | wash 1.0, ripple 1.0, sparkle 1.0 |
+| `system.confirmed` | the green pop: a pale green-white flash, a green burst from the top, the ring filled green and drained toward the bottom, about 3.2 s; see below | wash 1.0, drain 1.0, ripple 1.0 |
 | `system.locate` | the `locate` colour, breathe or chase (`locate_effect`) | fill 0.7 |
 | `pv.targets` | blue `2f7bff` breathe, 4000 ms, depth 0.18 | fill 0.7 |
-| `pv.searching` | green `00ff20` comet, 1600 ms, tail 6, base 0.06 | comet 1.0 |
-| `pv.no-nt` | amber `ffa424`, two comets, 2400 ms, tail 5, base 0.05 | comet 1.0 |
-| `pv.no-nt-targets` | blue `2f7bff`, two comets, 2400 ms, tail 5, base 0.08 | comet 1.0 |
+| `pv.searching` | green `00ff20` comet, 1600 ms, tail 7, base 0.18 | comet 1.0 |
+| `pv.no-nt` | amber `ffa424`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
+| `pv.no-nt-targets` | blue `2f7bff`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
 | `pv.error` | red `ff3b3b` breathe, 2000 ms, depth 0.85 | fill 0.7 |
 | `pv.vision` | steady white `ffffff` | fill 0.7 |
+
+Every comet has a dim glow of its own colour under it: the default base is
+0.18 (`spinner_base` for the spinner, the locate chase and an orbit;
+`verifying_base` for the verifying and writing comets), so the LEDs between
+the heads are never bare off. A look sets `base` to change it.
 
 A comet's head is anti-aliased: the LED just ahead of a head is lit by the
 fraction of the way the head has got to it, so a head moves from LED to LED

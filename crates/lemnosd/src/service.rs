@@ -119,6 +119,8 @@ pub struct Service {
     owners: Vec<(String, u32)>,
     update: Option<UpdateWatcher>,
     next_update_ms: u64,
+    /// The first frame written to a ring has been logged (boot timing).
+    first_frame_logged: bool,
     booting_until: Option<u64>,
     notifier: Notifier,
     next_watchdog_ms: u64,
@@ -168,6 +170,7 @@ impl Service {
             owners: Vec::new(),
             update: config.update_status.map(UpdateWatcher::new),
             next_update_ms: 0,
+            first_frame_logged: false,
             booting_until: config.booting_ms.map(|ms| now_ms + ms),
             notifier: Notifier::none(),
             next_watchdog_ms: 0,
@@ -669,7 +672,7 @@ impl Service {
             return;
         }
         self.next_update_ms = now_ms + UPDATE_POLL_MS;
-        let Some(change) = self.update.as_mut().and_then(UpdateWatcher::poll) else {
+        let Some(change) = self.update.as_mut().and_then(|u| u.poll(now_ms)) else {
             return;
         };
         let Some(light) = self.lights.first_mut() else {
@@ -741,14 +744,23 @@ impl Service {
             }
             light.next_render_ms = next_frame_due(light.next_render_ms, now_ms);
             let slot = light.slot;
+            let mut wrote = false;
             if let Some(frame) = light.animator.render(now_ms)
                 && let Some(device) = self.slots[slot].device.as_mut()
-                && let Err(kind) = device.show(frame)
             {
-                let status = DeviceStatus::after_error(kind);
-                if let Some(status) = self.slots[slot].set_status(status, Some(kind)) {
-                    self.status_event(slot, status);
+                match device.show(frame) {
+                    Ok(()) => wrote = true,
+                    Err(kind) => {
+                        let status = DeviceStatus::after_error(kind);
+                        if let Some(status) = self.slots[slot].set_status(status, Some(kind)) {
+                            self.status_event(slot, status);
+                        }
+                    }
                 }
+            }
+            if wrote && !self.first_frame_logged {
+                self.first_frame_logged = true;
+                log_first_frame();
             }
         }
     }
@@ -758,11 +770,7 @@ impl Service {
     /// one read of the IMU moves it to where gravity says, through the same
     /// one-shot reads a client gets. Spawns after that fall toward it.
     fn start_gravity(&mut self, li: usize) {
-        let falls = self.lights[li]
-            .animator
-            .look()
-            .sparkle()
-            .is_some_and(|s| s.fall);
+        let falls = self.lights[li].animator.look().wants_bottom();
         let light = &mut self.lights[li];
         light.waiting_gravity = false;
         let Some(gravity) = light.gravity.clone() else {
@@ -1418,4 +1426,15 @@ fn acceleration(slot: &Slot) -> Option<[f64; 3]> {
         out[axis] = f64::from(raw) * 10f64.powi(i32::from(info.channels[index].exponent));
     }
     Some(out)
+}
+
+/// Logs, once per start, when the first ring frame was written: seconds since
+/// the kernel started (`/proc/uptime`), for the boot's timing.
+#[allow(clippy::print_stderr)]
+fn log_first_frame() {
+    let uptime = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|t| t.split_whitespace().next().map(str::to_string))
+        .unwrap_or_else(|| "?".into());
+    eprintln!("lemnosd: first ring frame written at {uptime} s since boot");
 }

@@ -106,9 +106,9 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
                 depth: 180,
                 easing: d.easing,
             }),
-        "pv.searching" => comet(Rgbw::rgb(0x00ff20), 1_600, 6_000, 1, 60),
-        "pv.no-nt" => comet(Rgbw::rgb(0xffa424), 2_400, 5_000, 2, 50),
-        "pv.no-nt-targets" => comet(Rgbw::rgb(0x2f7bff), 2_400, 5_000, 2, 80),
+        "pv.searching" => comet(Rgbw::rgb(0x00ff20), 1_600, 7_000, 1, 180),
+        "pv.no-nt" => comet(Rgbw::rgb(0xffa424), 2_400, 6_000, 2, 180),
+        "pv.no-nt-targets" => comet(Rgbw::rgb(0x2f7bff), 2_400, 6_000, 2, 180),
         "pv.error" => LookSpec::fill(Rgbw::rgb(0xff3b3b))
             .with_brightness(FULL_FILL)
             .with_envelope(Effect::Breathe {
@@ -156,14 +156,14 @@ pub fn booting(color: Rgbw, easing: Easing) -> LookSpec {
     look
 }
 
-/// The confirmed celebration (the update held): the whole ring flashes up
-/// in a pale green-white (attack 80 ms, decaying over 500 ms), a burst runs
-/// out from the top and back round at 14 LEDs a second, and green sparks
-/// fall from the top to the bottom, fading, over a faint green glow. About
-/// 3.2 s; the host holds it that long.
+/// The confirmed celebration (the update held): a pale green-white flash of
+/// the whole ring (attack 80 ms, decaying over 500 ms), a green burst out
+/// from the top and back round at 14 LEDs a second, and the green filling
+/// the ring from the top (700 ms), holding, then draining to the gravity
+/// bottom (from 1.1 s, over 2.1 s, ease-in) with its last LEDs fading out.
+/// About 3.2 s; the host holds it a little longer.
 pub fn confirmed(color: Rgbw) -> LookSpec {
     const FLASH: Rgbw = Rgbw::rgb(0xc8ffd2);
-    const SPARK: Rgbw = Rgbw::rgb(0x78ff8c);
     let mut look = LookSpec::of(LayerSpec::new(Block::Wash {
         color: FLASH,
         effect: Effect::Pulse {
@@ -173,6 +173,13 @@ pub fn confirmed(color: Rgbw) -> LookSpec {
             repeat: 1,
         },
     }));
+    look.push(LayerSpec::new(Block::Drain {
+        color,
+        fill_ms: 700,
+        start_ms: 1_100,
+        duration_ms: 2_100,
+        easing: Easing::EaseIn,
+    }));
     look.push(LayerSpec::new(Block::Ripple {
         origin: 0,
         color,
@@ -181,17 +188,6 @@ pub fn confirmed(color: Rgbw) -> LookSpec {
         settle_ms: 1,
         glow: 0,
     }));
-    look.push(LayerSpec::new(Block::Sparkle(Sparkle {
-        colors: [color, color, FLASH, SPARK],
-        count: 4,
-        density: 3_500,
-        density_end: 0,
-        fade_ms: 2_600,
-        start_ms: 300,
-        base: 250,
-        fall: true,
-        ..Sparkle::DEFAULT
-    })));
     look
 }
 
@@ -220,7 +216,7 @@ pub fn spinner(color: Rgbw, d: &Defaults) -> LookSpec {
         d.spinner_period_ms,
         u16::from(d.spinner_tail) * 1000,
         1,
-        0,
+        d.spinner_base,
     )
 }
 
@@ -231,7 +227,7 @@ pub fn comet_block(color: Rgbw, d: &Defaults) -> Block {
         period_ms: d.spinner_period_ms,
         tail: u16::from(d.spinner_tail) * 1000,
         heads: 1,
-        base: 0,
+        base: d.spinner_base,
         reverse: false,
     }
 }

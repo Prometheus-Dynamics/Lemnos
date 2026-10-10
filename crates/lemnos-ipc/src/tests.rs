@@ -518,3 +518,19 @@ fn a_look_with_no_layers_or_an_unknown_block_is_a_protocol_error() {
     .encode();
     assert!(decode_request(&empty).is_err());
 }
+
+#[test]
+fn a_drain_round_trips_on_the_wire() {
+    use lemnos_light::{Block, Easing, LayerSpec, LookSpec, Rgbw};
+    let drain = LookSpec::of(LayerSpec::new(Block::Drain {
+        color: Rgbw::rgb(0x00ff20),
+        fill_ms: 700,
+        start_ms: 1_100,
+        duration_ms: 2_100,
+        easing: Easing::EaseIn,
+    }));
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(drain),
+        progress: None,
+    })));
+}

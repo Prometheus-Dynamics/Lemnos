@@ -22,6 +22,7 @@ const RIPPLE: u8 = 3;
 const FRAME: u8 = 4;
 const WASH: u8 = 5;
 const SPARKLE: u8 = 6;
+const DRAIN: u8 = 7;
 
 const SOLID: u8 = 0;
 const BLINK: u8 = 1;
@@ -105,6 +106,24 @@ pub(super) fn encode(e: &mut Encoder, spec: &LookSpec) {
             Block::Wash { color, effect } => {
                 e.u8(WASH).u32(color_code(color));
                 encode_effect(e, effect);
+            }
+            Block::Drain {
+                color,
+                fill_ms,
+                start_ms,
+                duration_ms,
+                easing,
+            } => {
+                e.u8(DRAIN)
+                    .u32(color_code(color))
+                    .u32(fill_ms)
+                    .u32(start_ms)
+                    .u32(duration_ms);
+                let (code, params) = easing_code(Some(easing));
+                e.u8(code);
+                for p in params {
+                    e.u16(p);
+                }
             }
             Block::Sparkle(sp) => {
                 let count = usize::from(sp.count).clamp(1, MAX_SPARKLE_COLORS);
@@ -261,6 +280,23 @@ pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
                 color: color_from(d.u32()?),
                 effect: decode_effect(d)?,
             },
+            DRAIN => {
+                let color = color_from(d.u32()?);
+                let fill_ms = d.u32()?;
+                let start_ms = d.u32()?;
+                let duration_ms = d.u32()?;
+                let code = d.u8()?;
+                let params = [d.u16()?, d.u16()?, d.u16()?, d.u16()?];
+                let easing =
+                    easing_from(code, params).ok_or_else(|| bad(format!("drain easing {code}")))?;
+                Block::Drain {
+                    color,
+                    fill_ms,
+                    start_ms,
+                    duration_ms,
+                    easing,
+                }
+            }
             SPARKLE => {
                 let count = usize::from(d.u8()?);
                 if !(1..=MAX_SPARKLE_COLORS).contains(&count) {

@@ -514,7 +514,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         return Err(vec![err(
             source,
             &join(key, "block"),
-            "needs block: fill, comet, arc, ripple, frame, wash or sparkle",
+            "needs block: fill, comet, arc, ripple, frame, wash, sparkle or drain",
         )]);
     };
     let allowed: &[&str] = match block_name {
@@ -553,6 +553,16 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         ],
         "frame" => &["block", "pixels", "brightness", "mode"],
         "wash" => &["block", "color", "envelope", "brightness", "mode"],
+        "drain" => &[
+            "block",
+            "color",
+            "fill_ms",
+            "start_ms",
+            "duration_ms",
+            "easing",
+            "brightness",
+            "mode",
+        ],
         "sparkle" => &[
             "block",
             "color",
@@ -576,7 +586,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
                 source,
                 &join(key, "block"),
                 format!(
-                    "unknown block {other:?} (fill, comet, arc, ripple, frame, wash or sparkle)"
+                    "unknown block {other:?} (fill, comet, arc, ripple, frame, wash, sparkle or drain)"
                 ),
             )]);
         }
@@ -589,6 +599,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         "arc" => arc(source, key, table, &mut errors),
         "ripple" => ripple(source, key, table, &mut errors),
         "wash" => wash(source, key, table, &mut errors),
+        "drain" => drain(source, key, table, &mut errors),
         "sparkle" => sparkle(source, key, table, &mut errors),
         _ => frame(source, key, table, &mut errors),
     };
@@ -863,6 +874,37 @@ fn wash(source: &str, key: &str, table: &toml::Table, errors: &mut Errors) -> Op
     };
     match (color, effect) {
         (Some(color), Some(effect)) => Some(Block::Wash { color, effect }),
+        _ => None,
+    }
+}
+
+/// A drain: a fill that grows from the top, then drains to the gravity bottom.
+fn drain(source: &str, key: &str, table: &toml::Table, errors: &mut Errors) -> Option<Block> {
+    let color = required_color(source, key, table, errors);
+    let fill_ms = ms_in(source, key, table, "fill_ms", 0, 60_000, errors);
+    let start_ms = ms_in(source, key, table, "start_ms", 0, 60_000, errors);
+    let duration_ms = ms_in(source, key, table, "duration_ms", 1_000, 60_000, errors);
+    let easing = match table.get("easing") {
+        None => Some(Easing::EaseIn),
+        Some(v) => v.as_str().and_then(Easing::parse),
+    };
+    if easing.is_none() {
+        errors.push(err(
+            source,
+            &join(key, "easing"),
+            "must be linear, ease-in, ease-out, ease-in-out, sine or cubic-bezier(x1, y1, x2, y2)",
+        ));
+    }
+    match (color, fill_ms, start_ms, duration_ms, easing) {
+        (Some(color), Some(fill_ms), Some(start_ms), Some(duration_ms), Some(easing)) => {
+            Some(Block::Drain {
+                color,
+                fill_ms,
+                start_ms,
+                duration_ms,
+                easing,
+            })
+        }
         _ => None,
     }
 }
@@ -1188,6 +1230,20 @@ fn layer_text(layer: &LayerSpec) -> String {
                 .map(|c| format!("\"{}\"", color_text(*c)))
                 .collect();
             parts.push(format!("pixels = [{}]", list.join(", ")));
+        }
+        Block::Drain {
+            color,
+            fill_ms,
+            start_ms,
+            duration_ms,
+            easing,
+        } => {
+            parts.push("block = \"drain\"".into());
+            parts.push(format!("color = \"{}\"", color_text(color)));
+            parts.push(format!("fill_ms = {fill_ms}"));
+            parts.push(format!("start_ms = {start_ms}"));
+            parts.push(format!("duration_ms = {duration_ms}"));
+            parts.push(format!("easing = \"{}\"", easing_text(easing)));
         }
         Block::Wash { color, effect } => {
             parts.push("block = \"wash\"".into());

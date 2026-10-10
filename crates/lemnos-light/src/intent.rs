@@ -257,6 +257,9 @@ pub struct Defaults {
     /// timing): one turn and the tail length in LEDs.
     pub spinner_period_ms: u32,
     pub spinner_tail: u8,
+    /// The floor of a spinner's and an orbit's comet (thousandths): dim glow
+    /// between the heads, so the LEDs between them are never bare off.
+    pub spinner_base: u16,
     /// The update's progress arc (blue) and its phases' colours: the
     /// verifying and writing (unknown amount) comets, the staged breathe.
     pub updating: Rgbw,
@@ -313,11 +316,12 @@ impl Default for Defaults {
             progress_background: Rgbw::rgb(0x101012),
             spinner_period_ms: 1_200,
             spinner_tail: 5,
+            spinner_base: 180,
             updating: Rgbw::rgb(0x2f7bff),
             verifying: Rgbw::rgb(0x8a5cff),
             verifying_period_ms: 1_200,
-            verifying_tail: 7_000,
-            verifying_base: 50,
+            verifying_tail: 8_000,
+            verifying_base: 180,
             writing: Rgbw::rgb(0x2f7bff),
             staged: Rgbw::rgb(0x00ff20),
             staged_period_ms: 2_200,
@@ -488,7 +492,7 @@ impl<const N: usize> Intent<N> {
                     defaults.spinner_period_ms,
                     tail.unwrap_or(u16::from(defaults.spinner_tail) * 1000),
                     heads.clamp(1, 2),
-                    base.unwrap_or(0),
+                    base.unwrap_or(defaults.spinner_base),
                 ),
                 None,
             ),

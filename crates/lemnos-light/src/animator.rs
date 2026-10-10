@@ -212,6 +212,7 @@ fn shape(look: &LookSpec) -> [Option<u8>; MAX_LAYERS] {
             Block::Frame { .. } => 4,
             Block::Wash { .. } => 5,
             Block::Sparkle(_) => 6,
+            Block::Drain { .. } => 7,
         });
     }
     out
@@ -352,9 +353,15 @@ impl<const N: usize> Animator<N> {
         }
         let mut changed = !self.written;
         for index in 0..self.count {
-            let color =
-                self.look
-                    .color(index, self.count, elapsed, fraction, &self.sparkle, now_ms);
+            let color = self.look.color(
+                index,
+                self.count,
+                elapsed,
+                fraction,
+                &self.sparkle,
+                now_ms,
+                self.bottom,
+            );
             let target = scale(color, level);
             let pixel = match fade {
                 Some(t) => blend(self.from[index], target, t),

@@ -296,7 +296,8 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     let (look, _) =
         Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve_builtin(&defaults);
     // A flash of the whole ring (a wash shaped by its own pulse), a ripple
-    // on top, and falling sparks over a faint glow.
+    // burst, and the green drain over both: filled from the top, then drained
+    // toward the bottom.
     assert!(matches!(
         block(&look),
         Block::Wash { color, effect: Effect::Pulse { attack_ms: 80, repeat: 1, .. } }
@@ -304,13 +305,15 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     ));
     assert_eq!(look.envelope, Effect::Solid);
     assert!(matches!(
-        look.layers[1].expect("a ripple").block,
-        Block::Ripple { color, glow: 0, .. } if color == defaults.confirmed
+        look.layers[1].expect("a drain").block,
+        Block::Drain { color, fill_ms: 700, start_ms: 1_100, duration_ms: 2_100, easing: Easing::EaseIn }
+            if color == defaults.confirmed
     ));
     assert!(matches!(
-        look.sparkle(),
-        Some(s) if s.fall && s.base == 250 && s.start_ms == 300 && s.fade_ms == 2_600
+        look.layers[2].expect("a ripple").block,
+        Block::Ripple { color, glow: 0, .. } if color == defaults.confirmed
     ));
+    assert!(look.wants_bottom());
     assert_eq!(SystemState::Confirmed.name(), "confirmed");
 
     let (look, _) =
@@ -405,7 +408,7 @@ fn orbit_intents_take_their_shape_from_the_intent_and_the_defaults() {
     .resolve_builtin(&defaults);
     assert!(matches!(
         block(&look),
-        Block::Comet { color, tail: 5_000, heads: 2, base: 0, .. }
+        Block::Comet { color, tail: 5_000, heads: 2, base: 180, .. }
             if color == defaults.progress
     ));
 }
@@ -418,7 +421,7 @@ fn system_looks_match_the_update_states() {
             .resolve_builtin(&defaults)
             .0
     };
-    // Unknown amount: the purple comet, 7 LEDs, 5% floor.
+    // Unknown amount: the purple comet, 8 LEDs, 18% floor.
     let verifying = resolve(SystemState::Updating {
         progress: None,
         phase: Phase::Verifying,
@@ -428,9 +431,9 @@ fn system_looks_match_the_update_states() {
         Block::Comet {
             color: Rgbw::rgb(0x8a5cff),
             period_ms: 1_200,
-            tail: 7_000,
+            tail: 8_000,
             heads: 1,
-            base: 50,
+            base: 180,
             reverse: false,
         }
     );
@@ -806,7 +809,7 @@ fn largest_step_per_ms(look: &LookSpec, count: usize) -> (u8, u64) {
     let frame = |t: u64| -> [u8; 16] {
         let mut out = [0u8; 16];
         for (i, slot) in out.iter_mut().enumerate().take(count) {
-            *slot = look.color(i, count, t, 0, &idle, t).r;
+            *slot = look.color(i, count, t, 0, &idle, t, 0).r;
         }
         out
     };
@@ -904,4 +907,109 @@ fn a_pulse_flashes_holds_then_glows_down_once() {
     };
     assert!(every.level(750).abs_diff(ONE / 2) < 600);
     assert!(pulse.is_animated());
+}
+
+/// LED levels (red channel, 0..=255) of a drain look at `t` ms, for `count`
+/// LEDs with the ring's bottom at `bottom` (thousandths).
+fn drain_frame(count: usize, bottom: u32, t: u64) -> [u8; 16] {
+    let look = confirmed_drain();
+    let mut anim = Animator::<16>::new(count);
+    anim.set_bottom(bottom);
+    anim.set(look, Transition::CUT, 0);
+    // Render at the time asked for: the frame is what the animator shows then.
+    let mut out = [0u8; 16];
+    if let Some(frame) = anim.render(t) {
+        for (slot, px) in out.iter_mut().zip(frame) {
+            *slot = px.g;
+        }
+    }
+    out
+}
+
+/// A drain look alone: green, fill 700 ms, drain from 1100 ms over 2100 ms.
+fn confirmed_drain() -> LookSpec {
+    LookSpec::of(LayerSpec::new(Block::Drain {
+        color: Rgbw::rgb(0x00ff00),
+        fill_ms: 700,
+        start_ms: 1_100,
+        duration_ms: 2_100,
+        easing: Easing::Linear,
+    }))
+}
+
+#[test]
+fn a_drain_fills_from_the_top_then_recedes_toward_the_bottom_on_either_arc() {
+    for bottom in [4_000u32, 12_000] {
+        // Full ring once filled, before the drain starts.
+        let full = drain_frame(16, bottom, 1_000);
+        assert!(full.iter().all(|&g| g >= 250), "bottom {bottom}: {full:?}");
+        // Halfway through the drain: the bottom side lit, the top dark.
+        let half = drain_frame(16, bottom, 1_100 + 1_050);
+        let b = (bottom / 1_000) as usize;
+        assert!(half[b] > 200, "bottom {bottom} lit: {half:?}");
+        assert_eq!(half[(b + 8) % 16], 0, "bottom {bottom} top dark: {half:?}");
+        // The lit region only shrinks: an LED lit later was lit earlier.
+        let mut prev = [255u8; 16];
+        for t in (1_100..=3_200).step_by(50) {
+            let now = drain_frame(16, bottom, t);
+            for i in 0..16 {
+                assert!(now[i] <= prev[i], "bottom {bottom} LED {i} at {t} ms relit");
+            }
+            prev = now;
+        }
+        // Drained: the ring is dark.
+        assert!(drain_frame(16, bottom, 3_250).iter().all(|&g| g == 0));
+    }
+}
+
+#[test]
+fn a_drain_is_eased_in_so_it_speeds_up() {
+    // Halfway through the time, an ease-in has drained less than linear.
+    let linear = drain_frame(16, 0, 1_100 + 1_050);
+    let eased = LookSpec::of(LayerSpec::new(Block::Drain {
+        color: Rgbw::rgb(0x00ff00),
+        fill_ms: 700,
+        start_ms: 1_100,
+        duration_ms: 2_100,
+        easing: Easing::EaseIn,
+    }));
+    let mut anim = Animator::<16>::new(16);
+    anim.set_bottom(0);
+    anim.set(eased, Transition::CUT, 0);
+    let mut out = [0u8; 16];
+    if let Some(frame) = anim.render(1_100 + 1_050) {
+        for (slot, px) in out.iter_mut().zip(frame) {
+            *slot = px.g;
+        }
+    }
+    let lit_linear = linear.iter().filter(|&&g| g > 0).count();
+    let lit_eased = out.iter().filter(|&&g| g > 0).count();
+    // Slow start: halfway the eased drain has passed less of the ring.
+    assert!(
+        lit_eased > lit_linear,
+        "eased {lit_eased} vs linear {lit_linear}"
+    );
+}
+
+#[test]
+fn a_drain_without_a_gravity_read_drains_to_the_default_bottom() {
+    // No set_bottom: the animator's default is the middle of the ring (LED 8).
+    let look = confirmed_drain();
+    let mut anim = Animator::<16>::new(16);
+    anim.set(look, Transition::CUT, 0);
+    let mut out = [0u8; 16];
+    if let Some(frame) = anim.render(1_100 + 1_900) {
+        for (slot, px) in out.iter_mut().zip(frame) {
+            *slot = px.g;
+        }
+    }
+    // Nearly drained: only the LEDs next to the default bottom remain.
+    assert!(out[8] >= out[7] && out[8] >= out[9], "{out:?}");
+    assert!(out[0] == 0, "the top is dark: {out:?}");
+}
+
+#[test]
+fn a_drain_is_flagged_as_needing_the_bottom_and_round_trips_its_fields() {
+    assert!(confirmed_drain().wants_bottom());
+    assert!(!LookSpec::fill(Rgbw::rgb(0xffffff)).wants_bottom());
 }

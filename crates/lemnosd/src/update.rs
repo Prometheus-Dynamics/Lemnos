@@ -18,7 +18,13 @@ pub(crate) const STAGED_MS: u64 = 5_000;
 /// How long a failed update or a rollback is shown.
 pub(crate) const FAILED_MS: u64 = 60_000;
 /// How long the confirmed celebration is held (its look runs about 3.2 s).
-pub(crate) const CONFIRMED_MS: u64 = 3_200;
+pub(crate) const CONFIRMED_MS: u64 = 3_300;
+/// On a trial boot the ember is held this long before the trial's sparkle
+/// (the self-test is not marked on the status file, so this is a timed
+/// hand-over; `LEMNOSD_TRIAL_EMBER_MS` overrides it).
+pub(crate) const TRIAL_EMBER_MS: u64 = 4_000;
+/// The cross-fade from the ember into the trial's sparkle.
+pub(crate) const TRIAL_CROSSFADE_MS: u32 = 1_000;
 
 /// What the updater's state means for the light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +40,10 @@ pub(crate) struct UpdateWatcher {
     progress: PathBuf,
     /// The last state and error text seen, so a held state shows once.
     seen: Option<(String, String)>,
+    /// The ember of a trial boot is held until this time (ms on the service
+    /// clock), then the trial's sparkle replaces it.
+    ember_until: Option<u64>,
+    trial_ember_ms: u64,
 }
 
 impl UpdateWatcher {
@@ -45,16 +55,22 @@ impl UpdateWatcher {
             .parent()
             .unwrap_or_else(|| Path::new("/"))
             .join("update/progress");
+        let trial_ember_ms = std::env::var("LEMNOSD_TRIAL_EMBER_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(TRIAL_EMBER_MS);
         Self {
             status,
             progress,
             seen: None,
+            ember_until: None,
+            trial_ember_ms,
         }
     }
 
     /// Reads the files. `Some(view)` when the light should change: a new
     /// view, or `None` inside when the update is over.
-    pub fn poll(&mut self) -> Option<Option<UpdateView>> {
+    pub fn poll(&mut self, now_ms: u64) -> Option<Option<UpdateView>> {
         let text = std::fs::read_to_string(&self.status).unwrap_or_default();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
         let state = json
@@ -76,6 +92,26 @@ impl UpdateWatcher {
         // The state seen last poll (`None`: this is the first look).
         let previous = self.seen.as_ref().map(|(state, _)| state.as_str());
         let first = previous.is_none();
+        // A trial boot (the status reads `trying`, or `rebooting`, when the
+        // service starts) shows the ember first: the restart's look carries on
+        // until the trial's self-test begins, then the sparkle fades in.
+        if first && matches!(state.as_str(), "trying" | "rebooting") {
+            self.ember_until = Some(now_ms + self.trial_ember_ms);
+        }
+        if let Some(until) = self.ember_until {
+            if now_ms < until {
+                self.seen = Some(key);
+                return if first {
+                    Some(Some(UpdateView {
+                        state: SystemState::Rebooting,
+                        hold_ms: None,
+                    }))
+                } else {
+                    None
+                };
+            }
+            self.ember_until = None;
+        }
         let view = match state.as_str() {
             "staging" => Some(UpdateView {
                 state: match progress {
@@ -158,8 +194,17 @@ mod tests {
         let (path, dir) = status_file("confirm");
         set_state(&path, "trying");
         let mut watcher = UpdateWatcher::new(&path);
+        // The trial boot's ember first, then the trial's sparkle.
         assert_eq!(
-            watcher.poll(),
+            watcher.poll(0),
+            Some(Some(UpdateView {
+                state: SystemState::Rebooting,
+                hold_ms: None,
+            }))
+        );
+        assert_eq!(watcher.poll(TRIAL_EMBER_MS - 1), None);
+        assert_eq!(
+            watcher.poll(TRIAL_EMBER_MS),
             Some(Some(UpdateView {
                 state: SystemState::Booting,
                 hold_ms: None,
@@ -167,15 +212,15 @@ mod tests {
         );
         set_state(&path, "confirmed");
         assert_eq!(
-            watcher.poll(),
+            watcher.poll(0),
             Some(Some(UpdateView {
                 state: SystemState::Confirmed,
                 hold_ms: Some(CONFIRMED_MS),
             }))
         );
         // Shown once: nothing more until the state changes again.
-        assert_eq!(watcher.poll(), None);
-        assert_eq!(watcher.poll(), None);
+        assert_eq!(watcher.poll(0), None);
+        assert_eq!(watcher.poll(0), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -184,8 +229,8 @@ mod tests {
         let (path, dir) = status_file("fresh");
         set_state(&path, "confirmed");
         let mut watcher = UpdateWatcher::new(&path);
-        assert_eq!(watcher.poll(), None);
-        assert_eq!(watcher.poll(), None);
+        assert_eq!(watcher.poll(0), None);
+        assert_eq!(watcher.poll(0), None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -194,10 +239,10 @@ mod tests {
         let (path, dir) = status_file("idle-then-confirmed");
         set_state(&path, "idle");
         let mut watcher = UpdateWatcher::new(&path);
-        assert_eq!(watcher.poll(), None);
+        assert_eq!(watcher.poll(0), None);
         set_state(&path, "confirmed");
         // Not from `trying`: no ripple, and the system layer is released.
-        assert_eq!(watcher.poll(), Some(None));
+        assert_eq!(watcher.poll(0), Some(None));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -207,7 +252,7 @@ mod tests {
         set_state(&path, "staged");
         let mut watcher = UpdateWatcher::new(&path);
         assert!(matches!(
-            watcher.poll(),
+            watcher.poll(0),
             Some(Some(UpdateView {
                 state: SystemState::Updating {
                     phase: Phase::Staged,
@@ -218,7 +263,7 @@ mod tests {
         ));
         set_state(&path, "rebooting");
         assert_eq!(
-            watcher.poll(),
+            watcher.poll(0),
             Some(Some(UpdateView {
                 state: SystemState::Rebooting,
                 hold_ms: None,
@@ -226,7 +271,7 @@ mod tests {
         );
         // Held: the view is re-stated while the updater stays in the state.
         assert!(matches!(
-            watcher.poll(),
+            watcher.poll(0),
             Some(Some(UpdateView {
                 state: SystemState::Rebooting,
                 hold_ms: None,
@@ -239,7 +284,32 @@ mod tests {
     fn a_fresh_start_leaves_the_boot_spinner_alone() {
         let (path, dir) = status_file("idle-start");
         let mut watcher = UpdateWatcher::new(&path);
-        assert_eq!(watcher.poll(), None);
+        assert_eq!(watcher.poll(0), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_restart_at_start_holds_the_ember_until_the_trial_begins() {
+        let (path, dir) = status_file("ember");
+        set_state(&path, "rebooting");
+        let mut watcher = UpdateWatcher::new(&path);
+        // At start the ember shows at once, and holds through the trial's start.
+        assert_eq!(
+            watcher.poll(0),
+            Some(Some(UpdateView {
+                state: SystemState::Rebooting,
+                hold_ms: None,
+            }))
+        );
+        assert_eq!(watcher.poll(TRIAL_EMBER_MS - 1), None);
+        // Still `rebooting` when the hold is over: the ember stays.
+        assert_eq!(
+            watcher.poll(TRIAL_EMBER_MS),
+            Some(Some(UpdateView {
+                state: SystemState::Rebooting,
+                hold_ms: None,
+            }))
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

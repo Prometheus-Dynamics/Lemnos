@@ -8,7 +8,7 @@
 //! colours are composited with the layers below it by `max` or `add`.
 
 use crate::animator::Effect;
-use crate::easing::{ONE, quarter_sin};
+use crate::easing::{Easing, ONE, quarter_sin};
 use crate::sparkle::{MAX_SPARKLE_COLORS, Sparkle, SparkleState};
 use lemnos_device::Rgbw;
 
@@ -103,6 +103,16 @@ pub enum Block {
     /// blink) rather than the whole look's: a flash or a slow breathe under
     /// other layers.
     Wash { color: Rgbw, effect: Effect },
+    /// A fill that grows from the top over `fill_ms`, holds, then drains
+    /// toward the ring's bottom (see [`drain_level`]) from `start_ms` over
+    /// `duration_ms` on `easing`.
+    Drain {
+        color: Rgbw,
+        fill_ms: u32,
+        start_ms: u32,
+        duration_ms: u32,
+        easing: Easing,
+    },
     /// Random twinkles (or falling sparks); see [`Sparkle`].
     Sparkle(Sparkle),
 }
@@ -117,6 +127,7 @@ impl Block {
             Self::Ripple { .. } => "ripple",
             Self::Frame { .. } => "frame",
             Self::Wash { .. } => "wash",
+            Self::Drain { .. } => "drain",
             Self::Sparkle(_) => "sparkle",
         }
     }
@@ -129,6 +140,7 @@ impl Block {
                 fraction, sheen, ..
             } => *sheen && !matches!(fraction, Fraction::Fixed(0)),
             Self::Wash { effect, .. } => effect.is_animated(),
+            Self::Drain { .. } => true,
             Self::Fill { .. } | Self::Frame { .. } => false,
         }
     }
@@ -144,6 +156,7 @@ impl Block {
                 | (Self::Ripple { .. }, Self::Ripple { .. })
                 | (Self::Frame { .. }, Self::Frame { .. })
                 | (Self::Wash { .. }, Self::Wash { .. })
+                | (Self::Drain { .. }, Self::Drain { .. })
                 | (Self::Sparkle(_), Self::Sparkle(_))
         )
     }
@@ -151,6 +164,7 @@ impl Block {
     /// The colour of LED `index` of `count` at `elapsed_ms` into the look,
     /// before the layer's brightness and the envelope. `fraction` is the
     /// arc's displayed fill (Q16).
+    #[allow(clippy::too_many_arguments)]
     fn color(
         &self,
         index: usize,
@@ -159,10 +173,31 @@ impl Block {
         fraction: u32,
         sparkle: &SparkleState,
         now_ms: u64,
+        bottom: u32,
     ) -> Rgbw {
         match *self {
             Self::Fill { color } => color,
             Self::Wash { color, effect } => scale(color, effect.level(elapsed_ms)),
+            Self::Drain {
+                color,
+                fill_ms,
+                start_ms,
+                duration_ms,
+                easing,
+            } => scale(
+                color,
+                drain_level(
+                    index,
+                    count,
+                    elapsed_ms,
+                    bottom,
+                    fill_ms,
+                    start_ms,
+                    duration_ms,
+                    easing,
+                ) * ONE
+                    / 1000,
+            ),
             Self::Sparkle(params) => sparkle.pixel(index, now_ms, &params),
             Self::Frame { pixels, len } => {
                 if index < usize::from(len) {
@@ -431,6 +466,16 @@ impl LookSpec {
         self.layers.iter().flatten()
     }
 
+    /// Whether the look shows something that needs the ring's bottom (a
+    /// falling sparkle, or a drain).
+    pub fn wants_bottom(&self) -> bool {
+        self.iter().any(|l| match l.block {
+            Block::Drain { .. } => true,
+            Block::Sparkle(s) => s.fall,
+            _ => false,
+        })
+    }
+
     /// The look's sparkle, if it has one (at most one).
     pub fn sparkle(&self) -> Option<Sparkle> {
         self.iter().find_map(|l| match l.block {
@@ -536,6 +581,19 @@ impl LookSpec {
                     }
                 }
                 Block::Wash { effect, .. } => validate_effect(effect)?,
+                Block::Drain {
+                    fill_ms,
+                    start_ms,
+                    duration_ms,
+                    ..
+                } => {
+                    if fill_ms > 60_000 || start_ms > 60_000 {
+                        return Err("a drain's fill_ms and start_ms must be 0 to 60000");
+                    }
+                    if !(1..=60_000).contains(&duration_ms) {
+                        return Err("a drain's duration_ms must be 1 to 60000");
+                    }
+                }
                 Block::Sparkle(s) => validate_sparkle(&s)?,
             }
         }
@@ -552,6 +610,7 @@ impl LookSpec {
 
     /// LED `index` of `count` at `elapsed_ms` into the look, with the arc at
     /// `fraction` (Q16): the layers combined, before the envelope.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn color(
         &self,
         index: usize,
@@ -560,12 +619,13 @@ impl LookSpec {
         fraction: u32,
         sparkle: &SparkleState,
         now_ms: u64,
+        bottom: u32,
     ) -> Rgbw {
         let mut acc = Rgbw::OFF;
         for layer in self.iter() {
             let c = layer
                 .block
-                .color(index, count, elapsed_ms, fraction, sparkle, now_ms);
+                .color(index, count, elapsed_ms, fraction, sparkle, now_ms, bottom);
             let c = scale(c, brightness_level(layer.brightness));
             acc = match layer.mode {
                 Mode::Max => max(acc, c),
@@ -574,6 +634,54 @@ impl LookSpec {
         }
         acc
     }
+}
+
+/// The level (thousandths) of a drain at LED `index` of `count` `elapsed_ms`
+/// into the look, with the ring's bottom at `bottom` (thousandths of an LED).
+///
+/// The lit part is the LEDs within a distance of the bottom (the shorter arc)
+/// that the drain has not yet passed: a fill grows from the top over
+/// `fill_ms`, and from `start_ms` the edge recedes toward the bottom over
+/// `duration_ms` on `easing`. The edge is one LED soft, so an LED on it is
+/// partly lit, and the last LEDs at the bottom fade to off.
+#[allow(clippy::too_many_arguments)]
+fn drain_level(
+    index: usize,
+    count: usize,
+    elapsed_ms: u64,
+    bottom: u32,
+    fill_ms: u32,
+    start_ms: u32,
+    duration_ms: u32,
+    easing: Easing,
+) -> u32 {
+    let count = count.max(1) as i64;
+    let ring = count * 1_000;
+    let bottom = i64::from(bottom).rem_euclid(ring);
+    let diff = (index as i64 * 1_000 - bottom).rem_euclid(ring);
+    let from_bottom = diff.min(ring - diff);
+    let from_top = ring / 2 - from_bottom;
+    // The edge's travel: from just past the top to just below the bottom.
+    let reach = ring / 2 + 1_500;
+    let edge =
+        |level: i64, distance: i64| (level * reach / 1_000 - 500 + 500 - distance).clamp(0, 1_000);
+    // The fill from the top (thousandths of its growth).
+    let grown = if fill_ms == 0 {
+        1_000
+    } else {
+        (elapsed_ms.min(u64::from(fill_ms)) * 1_000 / u64::from(fill_ms)) as i64
+    };
+    let fill = edge(grown, from_top);
+    // The drain (eased), from the start.
+    let drained = if elapsed_ms < u64::from(start_ms) {
+        0
+    } else {
+        let t = elapsed_ms - u64::from(start_ms);
+        let progress = (t.min(u64::from(duration_ms)) << 16) / u64::from(duration_ms.max(1));
+        i64::from(easing.apply(progress as u32)) * 1_000 / i64::from(ONE)
+    };
+    let drain = edge(1_000 - drained, from_bottom);
+    fill.min(drain) as u32
 }
 
 /// Checks an envelope's ranges.

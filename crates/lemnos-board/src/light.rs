@@ -41,6 +41,7 @@ pub const LIGHT_KEYS: &[&str] = &[
     "verifying_period_ms",
     "verifying_tail",
     "verifying_base",
+    "spinner_base",
     "writing",
     "staged",
     "staged_period_ms",
@@ -213,6 +214,9 @@ pub fn light_defaults(spec: &DeviceSpec) -> Result<Defaults, BoardError> {
     }
     if let Some(v) = leds(spec, "verifying_tail")? {
         d.verifying_tail = v;
+    }
+    if let Some(v) = fraction(spec, "spinner_base")? {
+        d.spinner_base = v;
     }
     if let Some(v) = fraction(spec, "verifying_base")? {
         d.verifying_base = v;

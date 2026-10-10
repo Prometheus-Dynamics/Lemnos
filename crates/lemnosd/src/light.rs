@@ -217,8 +217,26 @@ impl Light {
         if key == self.shown {
             return None;
         }
+        let previous = self.shown.map(|(_, _, intent)| intent.show);
         self.shown = key;
         let (look, transition) = match &winner {
+            // The ember of a restart hands over to a trial boot's sparkle in
+            // a slow cross-fade, not the usual fade.
+            Some(w)
+                if matches!(
+                    previous,
+                    Some(Show::System(lemnos_light::SystemState::Rebooting))
+                ) && matches!(
+                    w.intent.show,
+                    Show::System(lemnos_light::SystemState::Booting)
+                ) =>
+            {
+                let (look, _) = w.intent.resolve(&self.defaults, lookup);
+                (
+                    look,
+                    Transition::new(crate::update::TRIAL_CROSSFADE_MS, self.defaults.easing),
+                )
+            }
             Some(w) => w.intent.resolve(&self.defaults, lookup),
             None => (
                 LookSpec::fill(self.defaults.idle),
