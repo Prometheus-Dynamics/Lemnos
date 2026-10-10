@@ -12,6 +12,8 @@
 #![forbid(unsafe_code)]
 
 pub mod asynch;
+#[cfg(feature = "float")]
+mod calibration;
 mod device;
 
 #[cfg(test)]
@@ -84,6 +86,20 @@ pub enum DataRate {
 }
 
 impl DataRate {
+    /// The time between two readings, in microseconds (rounded).
+    pub fn period_us(self) -> u64 {
+        match self {
+            Self::Hz2 => 500_000,
+            Self::Hz6 => 166_667,
+            Self::Hz8 => 125_000,
+            Self::Hz10 => 100_000,
+            Self::Hz15 => 66_667,
+            Self::Hz20 => 50_000,
+            Self::Hz25 => 40_000,
+            Self::Hz30 => 33_333,
+        }
+    }
+
     fn bits(self) -> u8 {
         match self {
             Self::Hz10 => 0b000,
@@ -312,6 +328,8 @@ pub enum Error<E> {
     WrongChip { found: u8 },
     /// `read` was called before `init` loaded the trim.
     NotInitialized,
+    /// Calibration words of another layout or version were refused.
+    CalibrationWords,
 }
 
 impl<E> From<RegisterError<E>> for Error<E> {
@@ -326,6 +344,7 @@ impl<E: fmt::Debug> HalError for Error<E> {
             Self::Register(error) => error.kind(),
             Self::WrongChip { .. } => ErrorKind::Unsupported,
             Self::NotInitialized => ErrorKind::Unavailable,
+            Self::CalibrationWords => ErrorKind::InvalidInput,
         }
     }
 }
@@ -341,6 +360,9 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
                 )
             }
             Self::NotInitialized => f.write_str("BMM150 read before init"),
+            Self::CalibrationWords => {
+                f.write_str("BMM150 calibration words of another version or layout")
+            }
         }
     }
 }
@@ -354,6 +376,9 @@ pub struct Bmm150<I2C> {
     address: u8,
     trim: Option<Trim>,
     settings: Config,
+    /// The calibration and its estimator (feature `float`).
+    #[cfg(feature = "float")]
+    cal: calibration::Calibration,
 }
 
 impl<I2C: I2c> Bmm150<I2C> {
@@ -364,6 +389,8 @@ impl<I2C: I2c> Bmm150<I2C> {
             address,
             trim: None,
             settings: Config::default(),
+            #[cfg(feature = "float")]
+            cal: calibration::Calibration::new(),
         }
     }
 
@@ -381,6 +408,8 @@ impl<I2C: I2c> Bmm150<I2C> {
             address,
             trim: Some(trim),
             settings: Config::default(),
+            #[cfg(feature = "float")]
+            cal: calibration::Calibration::new(),
         }
     }
 
@@ -449,6 +478,18 @@ impl<I2C: I2c> Bmm150<I2C> {
         self.registers().write8(REG_POWER, 0x00)?;
         self.trim = None;
         Ok(())
+    }
+
+    /// The calibration's status (feature `float`).
+    #[cfg(feature = "float")]
+    pub fn calibration_status(&self) -> lemnos_device::CalibrationStatus {
+        self.cal.status()
+    }
+
+    /// The reading clock's step: the data rate's period (see `calibration.rs`).
+    #[cfg(feature = "float")]
+    pub(crate) fn period_us(&self) -> u64 {
+        self.settings.data_rate.period_us()
     }
 
     /// Gives the bus back.

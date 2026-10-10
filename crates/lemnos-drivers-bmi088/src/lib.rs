@@ -15,6 +15,8 @@
 #![forbid(unsafe_code)]
 
 pub mod asynch;
+#[cfg(feature = "float")]
+mod calibration;
 mod device;
 mod fifo;
 
@@ -364,6 +366,8 @@ pub enum Error<E> {
     WrongChip { accel: u8, gyro: u8 },
     /// A reading was requested before `init` set the ranges.
     NotInitialized,
+    /// Calibration words of another layout or version were refused.
+    CalibrationWords,
     /// A transfer of an `init` step failed (`step` names it, such as
     /// `"accel power control"`), so a host can say which one. Feature
     /// `reasons` only.
@@ -400,6 +404,7 @@ impl<E: fmt::Debug> HalError for Error<E> {
             Self::Register(error) => error.kind(),
             Self::WrongChip { .. } => ErrorKind::Unsupported,
             Self::NotInitialized => ErrorKind::Unavailable,
+            Self::CalibrationWords => ErrorKind::InvalidInput,
             #[cfg(feature = "reasons")]
             Self::Step { error, .. } => error.kind(),
         }
@@ -419,6 +424,9 @@ impl<E: fmt::Debug> fmt::Display for Error<E> {
                 "expected BMI088 chip IDs 0x{ACCEL_CHIP_ID:02x}/0x{GYRO_CHIP_ID:02x}, found 0x{accel:02x}/0x{gyro:02x}"
             ),
             Self::NotInitialized => f.write_str("BMI088 read before init"),
+            Self::CalibrationWords => {
+                f.write_str("BMI088 calibration words of another version or layout")
+            }
             #[cfg(feature = "reasons")]
             Self::Step { step, error } => write!(f, "BMI088 {step}: {error}"),
         }
@@ -440,6 +448,12 @@ pub struct Bmi088<I2C> {
     /// The channels the next read needs (see [`select`](Self::select)): bit
     /// 0..=2 accelerometer X, Y, Z, bit 3..=5 gyroscope X, Y, Z.
     selection: u8,
+    /// The channels the next read returns (bit i: channel i of
+    /// `device::INFO`, the six raw channels then the six calibrated ones).
+    channels: u16,
+    /// The calibration and its estimators (feature `float`).
+    #[cfg(feature = "float")]
+    cal: calibration::Calibration,
 }
 
 impl<I2C: I2c> Bmi088<I2C> {
@@ -458,6 +472,9 @@ impl<I2C: I2c> Bmi088<I2C> {
             settings: Config::default(),
             fifo: false,
             selection: ALL_AXES,
+            channels: 0x0fff,
+            #[cfg(feature = "float")]
+            cal: calibration::Calibration::new(),
         }
     }
 
@@ -467,6 +484,24 @@ impl<I2C: I2c> Bmi088<I2C> {
     /// returns the others as unselected. Every axis is selected by default.
     pub fn select(&mut self, axes: u8) {
         self.selection = axes & ALL_AXES;
+        self.channels = u16::from(self.selection);
+    }
+
+    /// Selects the channels a read returns (bit i: channel i of the device's
+    /// info). The dies' axes a read takes follow from it: the raw channels
+    /// need their axes, and a calibrated channel needs every axis of its die.
+    /// A read that takes every axis of both dies also feeds the calibration.
+    pub(crate) fn select_channel_mask(&mut self, mask: u16) {
+        let mask = mask & 0x0fff;
+        self.channels = mask;
+        let accel = (mask & 0b111) | ((mask >> 6) & 0b111);
+        let gyro = ((mask >> 3) & 0b111) | ((mask >> 9) & 0b111);
+        self.selection = (accel | (gyro << 3)) as u8;
+    }
+
+    /// The channels the next read returns (see [`select_channel_mask`](Self::select_channel_mask)).
+    pub(crate) fn channel_mask(&self) -> u16 {
+        self.channels
     }
 
     /// The selected axes (see [`select`](Self::select)).
@@ -725,6 +760,12 @@ impl<I2C: I2c> Bmi088<I2C> {
     #[cfg(feature = "float")]
     pub fn temperature_c(&mut self) -> Result<f32, Error<I2C::Error>> {
         Ok(self.temperature_mc()? as f32 / 1000.0)
+    }
+
+    /// The calibration's status (feature `float`; see `lemnos_device::Sensor`).
+    #[cfg(feature = "float")]
+    pub fn calibration_status(&self) -> lemnos_device::CalibrationStatus {
+        self.cal.status()
     }
 
     /// Gives the bus back.

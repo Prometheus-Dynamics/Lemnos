@@ -299,7 +299,7 @@ fn userspace_drivers_build_from_the_definition() {
         .build(board.device("magnetometer").unwrap(), &mut buses)
         .unwrap();
     mag.init(&mut MockDelay::new()).unwrap();
-    assert_eq!(mag.info().channels.len(), 3);
+    assert_eq!(mag.info().channels.len(), 6);
 
     let mut power = registry
         .build(board.device("power").unwrap(), &mut buses)

@@ -237,19 +237,25 @@ fn device_model_reads_mm_per_s2_and_urad_per_s() {
     };
     let mut bmi = Bmi088::new(i2c).with_config(config);
     let mut device = DeviceRef::sensor(&mut bmi);
-    let mut out = [NO_VALUE; 7];
+    let mut out = [NO_VALUE; 12];
     assert_eq!(
         device.read(&mut out),
         Err(lemnos_hal::ErrorKind::Unavailable)
     );
     device.init(&mut MockDelay::new()).unwrap();
     device.read(&mut out).unwrap();
-    assert_eq!(device.info().channels.len(), 6);
+    assert_eq!(device.info().channels.len(), 12);
     // Half of ±3 g is 14.709975 m/s².
     assert_eq!(&out[..3], &[14_709, -14_710, 0]);
     // Half of ±2000 °/s is 17.453293 rad/s.
     assert_eq!(&out[3..6], &[17_453_292, 0, -34_906_586]);
-    assert_eq!(out[6], NO_VALUE);
+    // The calibrated channels: under the factory calibration (no offset, no
+    // scale) they equal the raw ones, to a unit of rounding.
+    for i in 0..3 {
+        assert!((out[6 + i] - out[i]).abs() <= 1, "acceleration_cal {i}");
+        // f32 resolution at 35 rad/s is about 4 µrad/s.
+        assert!((out[9 + i] - out[3 + i]).abs() <= 4, "angular_rate_cal {i}");
+    }
     assert_eq!(bmi.config(), Some(config));
     assert_eq!(KERNEL.channels.len(), INFO.channels.len());
 }
@@ -259,7 +265,7 @@ fn async_device_model_matches_blocking() {
     use lemnos_device::asynch::{Device, Sensor};
     let i2c = imu().with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([16384, 0, 0]));
     let mut bmi = asynch::Bmi088::new(i2c);
-    let mut out = [0; 6];
+    let mut out = [0; 12];
     block_on(Device::init(&mut bmi, &mut MockDelay::new())).unwrap();
     block_on(Sensor::read(&mut bmi, &mut out)).unwrap();
     assert_eq!(out[0], 29_419);
@@ -426,7 +432,7 @@ fn a_selected_axis_reads_only_its_own_bytes_on_the_bus() {
 
     // Yaw alone (gyro Z): one two-byte read, at the Z register.
     bmi.select(0b100_000);
-    let mut out = [NO_VALUE; 6];
+    let mut out = [NO_VALUE; 12];
     DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
     assert_eq!(data_reads(&bmi, GYRO_ADDRESS), [2, 0, 0, 0]);
     assert_eq!(data_reads(&bmi, ACCEL_ADDRESS), [0; 4]);
@@ -470,7 +476,7 @@ fn a_selected_axis_reads_only_its_own_bytes_on_the_bus() {
     DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
     assert_eq!(data_reads(&bmi, ACCEL_ADDRESS), [6, 0, 0, 0]);
     assert_eq!(data_reads(&bmi, GYRO_ADDRESS), [6, 0, 0, 0]);
-    assert!(out.iter().all(|v| *v != NO_VALUE));
+    assert!(out[..6].iter().all(|v| *v != NO_VALUE));
 }
 
 #[test]
@@ -481,12 +487,70 @@ fn a_selection_reads_the_same_values_as_a_full_read() {
         .with_registers(GYRO_ADDRESS, GYR_DATA, &axes([400, -500, 600]));
     let mut bmi = Bmi088::new(i2c);
     bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
-    let mut full = [NO_VALUE; 6];
+    let mut full = [NO_VALUE; 12];
     DeviceRef::sensor(&mut bmi).read(&mut full).unwrap();
     for axis in 0..6u8 {
         bmi.select(1 << axis);
-        let mut one = [NO_VALUE; 6];
+        let mut one = [NO_VALUE; 12];
         DeviceRef::sensor(&mut bmi).read(&mut one).unwrap();
         assert_eq!(one[axis as usize], full[axis as usize], "axis {axis}");
     }
+}
+
+#[cfg(feature = "float")]
+#[test]
+fn a_still_board_learns_its_gyro_bias_and_the_raw_channel_keeps_it() {
+    use lemnos_device::{DeviceRef, NO_VALUE};
+    // Gravity on Z at the default ±6 g range (5461 counts per g), and a
+    // zero-rate offset of 19 counts about X (about 0.02 rad/s).
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([0, 0, 5461]))
+        .with_registers(GYRO_ADDRESS, GYR_DATA, &axes([19, 0, 0]));
+    let mut bmi = Bmi088::new(i2c);
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    let mut out = [NO_VALUE; 12];
+    for _ in 0..3000 {
+        DeviceRef::sensor(&mut bmi).read(&mut out).unwrap();
+    }
+    // The raw channel still reports the offset (about 0.02 rad/s = 20 000 µrad/s).
+    assert!((out[3] - 20_240).abs() < 1_000, "raw {}", out[3]);
+    // The calibrated channel has it removed (within 100 µrad/s).
+    assert!(out[9].abs() < 100, "calibrated {}", out[9]);
+    let status = bmi.calibration_status();
+    assert!(status.parts[lemnos_device::PART_GYRO].samples > 0);
+    assert!(status.parts[lemnos_device::PART_ACCEL].samples > 0);
+}
+
+#[cfg(feature = "float")]
+#[test]
+fn calibration_words_round_trip_into_a_fresh_device() {
+    use lemnos_device::{DeviceRef, NO_VALUE};
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, ACC_DATA, &axes([0, 0, 5461]))
+        .with_registers(GYRO_ADDRESS, GYR_DATA, &axes([19, 0, 0]));
+    let mut bmi = Bmi088::new(i2c);
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    for _ in 0..3000 {
+        DeviceRef::sensor(&mut bmi)
+            .read(&mut [NO_VALUE; 12])
+            .unwrap();
+    }
+    let mut words = [0i32; lemnos_device::MAX_CALIBRATION_WORDS];
+    let n = DeviceRef::sensor(&mut bmi).calibration_words(&mut words);
+    assert!(n > 0);
+    // A wrong version is refused and leaves the device as it is.
+    let mut bad = words;
+    bad[0] = 99;
+    let mut fresh = Bmi088::new(imu());
+    assert!(
+        DeviceRef::sensor(&mut fresh)
+            .load_calibration(&bad)
+            .is_err()
+    );
+    DeviceRef::sensor(&mut fresh)
+        .load_calibration(&words[..n])
+        .unwrap();
+    let mut back = [0i32; lemnos_device::MAX_CALIBRATION_WORDS];
+    let m = DeviceRef::sensor(&mut fresh).calibration_words(&mut back);
+    assert_eq!(&back[..m], &words[..n]);
 }

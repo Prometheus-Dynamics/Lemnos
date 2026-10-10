@@ -450,6 +450,7 @@ dependencies = [
  "embedded-hal",
  "embedded-hal-async",
  "lemnos-device",
+ "lemnos-fusion",
  "lemnos-hal",
 ]
 
@@ -460,6 +461,7 @@ dependencies = [
  "embedded-hal",
  "embedded-hal-async",
  "lemnos-device",
+ "lemnos-fusion",
  "lemnos-hal",
 ]
 

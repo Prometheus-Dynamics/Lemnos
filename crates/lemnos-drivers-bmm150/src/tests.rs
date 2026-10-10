@@ -230,9 +230,14 @@ fn device_model_reads_nanotesla() {
     let mut mag = Bmm150::new(i2c, DEFAULT_ADDRESS).with_config(config);
     let mut device = DeviceRef::sensor(&mut mag);
     device.init(&mut MockDelay::new()).unwrap();
-    let mut out = [0; 3];
+    let mut out = [0; 6];
     device.read(&mut out).unwrap();
     assert_eq!(&out[..2], &[50_000, -100_000]);
+    // The factory calibration (no offset, no iron correction) leaves the
+    // calibrated channels at the raw values, to a nanotesla of rounding.
+    for i in 0..2 {
+        assert!((out[3 + i] - out[i]).abs() <= 1, "cal {i}: {out:?}");
+    }
     assert_eq!(device.info().model, "BMM150");
     assert_eq!(
         mag.release().register(DEFAULT_ADDRESS, REG_REP_XY),
@@ -251,7 +256,7 @@ fn async_device_model_matches_blocking() {
     use lemnos_device::asynch::{Device, Sensor};
     let i2c = chip().with_registers(DEFAULT_ADDRESS, REG_DATA, &data(160, -320, 1000, XYZ1));
     let mut mag = asynch::Bmm150::new(i2c, DEFAULT_ADDRESS);
-    let mut out = [0; 3];
+    let mut out = [0; 6];
     block_on(Device::init(&mut mag, &mut MockDelay::new())).unwrap();
     block_on(Sensor::read(&mut mag, &mut out)).unwrap();
     assert_eq!(&out[..2], &[50_000, -100_000]);

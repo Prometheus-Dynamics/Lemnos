@@ -19,7 +19,7 @@ workspace = true
 default = ["float"]
 # SI-unit `f32` readings. Off: integer readings only (`read_fixed`), which keeps
 # software float routines out of images for MCUs without an FPU.
-float = ["lemnos-device/float"]
+float = ["lemnos-device/float", "dep:lemnos-fusion"]
 # `Error::Step`: names the `init` step a transfer failed in, for a host that
 # shows why a device faulted. Each step gets its own tag, which costs flash,
 # so MCU images leave it off.
@@ -30,6 +30,8 @@ embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 lemnos-device.workspace = true
 lemnos-hal.workspace = true
+# Auto-calibration (feature `float`): the estimators, `no_std` and allocation-free.
+lemnos-fusion = { path = "../lemnos-fusion", optional = true }
 
 [dev-dependencies]
 lemnos-hal = { workspace = true, features = ["mock"] }

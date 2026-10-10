@@ -171,13 +171,15 @@ fn kernel_binding_serves_the_userspace_channels_from_iio() {
     let mut imu = KernelDevice::find(info, binding, &sys, Some(at(1)))
         .unwrap()
         .expect("both parts");
-    let mut out = [0; 6];
+    let mut out = [0; 12];
     let mut device = DeviceRef::sensor(&mut imu);
     device.init(&mut NoDelay).unwrap();
     device.read(&mut out).unwrap();
     assert_eq!(device.info().model, "BMI088");
     // 1000 × 0.001796 m/s² and 100 × 0.001065264 rad/s.
-    assert_eq!(out, [1_796, -1_796, 0, 106_526, 0, -106_526]);
+    assert_eq!(out[..6], [1_796, -1_796, 0, 106_526, 0, -106_526]);
+    // The calibrated channels come from the driver, not the kernel.
+    assert!(out[6..].iter().all(|v| *v == lemnos_device::NO_VALUE));
 }
 
 #[test]

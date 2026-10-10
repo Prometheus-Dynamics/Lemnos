@@ -19,13 +19,15 @@ workspace = true
 default = ["float"]
 # `f32` compensation in µT. Off: integer compensation only (`read_fixed`), which
 # keeps software float routines out of images for MCUs without an FPU.
-float = ["lemnos-device/float"]
+float = ["lemnos-device/float", "dep:lemnos-fusion"]
 
 [dependencies]
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 lemnos-device.workspace = true
 lemnos-hal.workspace = true
+# Auto-calibration (feature `float`): the estimator, `no_std` and allocation-free.
+lemnos-fusion = { path = "../lemnos-fusion", optional = true }
 
 [dev-dependencies]
 lemnos-hal = { workspace = true, features = ["mock"] }
