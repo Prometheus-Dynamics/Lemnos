@@ -28,8 +28,8 @@
 //! the previous push, newest in bit 0). Each READ pushes one RX word (the byte
 //! in bits 7:0; bit 8 holds the ACK of the address write before it).
 //!
-//! The program is 27 instructions. It fits at offset 4 beside `ws2812-pio-rp1`
-//! (four slots at 0..3) and leaves four slots for it to stay at 0..3 too.
+//! The program is 27 instructions. It fits at offset 4, beside `ws2812-pio-rp1`
+//! (four slots at 0..3).
 
 /// Instructions in the program.
 pub const PROGRAM_LEN: usize = 27;
