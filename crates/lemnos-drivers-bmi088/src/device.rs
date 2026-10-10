@@ -118,7 +118,10 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
         }
         let n = na.min(ng);
         for i in 0..n {
-            fill(&mut out[i], config.channels(accel[na - n + i], gyro[ng - n + i]));
+            fill(
+                &mut out[i],
+                config.channels(accel[na - n + i], gyro[ng - n + i]),
+            );
         }
         Ok(n)
     }

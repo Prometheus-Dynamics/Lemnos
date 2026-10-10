@@ -606,7 +606,8 @@ impl<I2C: I2c> Bmi088<I2C> {
             return Ok((0, 0));
         }
         let mut buf = [0u8; MAX_SAMPLES * fifo::ACC_FRAME_LEN];
-        self.accel().read_burst(fifo::ACC_FIFO_DATA, &mut buf[..n])?;
+        self.accel()
+            .read_burst(fifo::ACC_FIFO_DATA, &mut buf[..n])?;
         let parsed = fifo::parse_accel(&buf[..n], &mut out[..cap]);
         Ok((parsed.samples, parsed.skipped))
     }
@@ -623,7 +624,10 @@ impl<I2C: I2c> Bmi088<I2C> {
         let mut buf = [0u8; MAX_SAMPLES * fifo::GYR_FRAME_LEN];
         let n = frames * fifo::GYR_FRAME_LEN;
         self.gyro().read_burst(fifo::GYR_FIFO_DATA, &mut buf[..n])?;
-        for (sample, frame) in out.iter_mut().zip(buf[..n].chunks_exact(fifo::GYR_FRAME_LEN)) {
+        for (sample, frame) in out
+            .iter_mut()
+            .zip(buf[..n].chunks_exact(fifo::GYR_FRAME_LEN))
+        {
             *sample = fifo::axes(frame);
         }
         Ok(frames)

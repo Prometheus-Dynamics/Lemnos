@@ -357,7 +357,9 @@ fn read_batch_returns_the_accel_frames_with_gyro_paired_from_the_newest() {
         (c[0], c[1], c[2], c[3], c[4], c[5])
     };
     let row = |i: usize| {
-        (out[i][0], out[i][1], out[i][2], out[i][3], out[i][4], out[i][5])
+        (
+            out[i][0], out[i][1], out[i][2], out[i][3], out[i][4], out[i][5],
+        )
     };
     assert_eq!(row(0), expect([16384, 0, 0], [4, 5, 6]));
     assert_eq!(row(1), expect([0, -16384, 0], [7, 8, 9]));
@@ -379,10 +381,13 @@ fn sample_period_follows_the_accelerometer_rate() {
     let bmi = Bmi088::new(imu()).with_fifo();
     assert_eq!(lemnos_device::Sensor::sample_period_us(&bmi), None);
     let mut bmi = bmi;
-    bmi.init(&mut MockDelay::new(), Config {
-        accel_rate: AccelRate::Hz400,
-        ..Config::default()
-    })
+    bmi.init(
+        &mut MockDelay::new(),
+        Config {
+            accel_rate: AccelRate::Hz400,
+            ..Config::default()
+        },
+    )
     .unwrap();
     assert_eq!(lemnos_device::Sensor::sample_period_us(&bmi), Some(2_500));
     let plain = Bmi088::new(imu());

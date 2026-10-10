@@ -3,12 +3,12 @@
 
 use crate::clients::Client;
 use crate::devices::{Placement, Slot, Subscription};
-use crate::workers::{Done, Job, Workers};
 use crate::light::{Light, LightIntent, MAX_LEDS};
 use crate::looks::LookTable;
 use crate::notify::Notifier;
 use crate::schedule::{self, Due, Next};
 use crate::update::UpdateWatcher;
+use crate::workers::{Done, Job, Workers};
 use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
 use lemnos_device::DeviceStatus;
 use lemnos_hal::ErrorKind;
@@ -240,8 +240,7 @@ impl Service {
                 self.status_event(index, status);
             }
             // A sensor on a bus is read by that bus's thread.
-            if self.slots[index].placement == Placement::Worker
-                && self.slots[index].lane.is_none()
+            if self.slots[index].placement == Placement::Worker && self.slots[index].lane.is_none()
             {
                 let bus = self.slots[index]
                     .spec
@@ -400,8 +399,9 @@ impl Service {
             // The grid moves on from the deadline this read was for. A
             // subscriber that arrived meanwhile set `next_read_us` to now.
             slot.next_read_us = match slot.period_us() {
-                Some(period_us) => schedule::advance(dispatched, period_us, now_us)
-                    .min(slot.next_read_us),
+                Some(period_us) => {
+                    schedule::advance(dispatched, period_us, now_us).min(slot.next_read_us)
+                }
                 None => u64::MAX,
             };
         }
@@ -453,11 +453,8 @@ impl Service {
             let mut due: Vec<u32> = Vec::new();
             for sub in self.slots[index].subscriptions.iter_mut() {
                 if sub.next_us <= at_us + slack {
-                    sub.next_us = schedule::advance(
-                        sub.next_us,
-                        u64::from(sub.period_ms) * 1000,
-                        at_us,
-                    );
+                    sub.next_us =
+                        schedule::advance(sub.next_us, u64::from(sub.period_ms) * 1000, at_us);
                     due.push(sub.client);
                 }
             }

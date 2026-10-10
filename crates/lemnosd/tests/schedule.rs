@@ -98,7 +98,15 @@ fn service(latency: Duration) -> MockLemnosd {
 /// records when the IMU's readings arrive for 3 s.
 #[allow(clippy::print_stderr)]
 fn run(label: &str, load: bool) -> Stats {
-    run_with(label, if load { Duration::from_millis(3) } else { Duration::ZERO }, load)
+    run_with(
+        label,
+        if load {
+            Duration::from_millis(3)
+        } else {
+            Duration::ZERO
+        },
+        load,
+    )
 }
 
 /// `run`, with bus 2 taking `latency` per transaction.
@@ -180,7 +188,11 @@ fn reading_timestamps_continue_across_a_restart() {
 fn imu_holds_100_hz_beside_a_read_longer_than_its_period() {
     // Each read on bus 2 takes 2 x 10 ms, longer than the IMU's 10 ms period.
     // The bus threads keep the IMU's bus free, so the IMU is not held back.
-    let s = run_with("slow bus, 10 ms per transaction", Duration::from_millis(10), true);
+    let s = run_with(
+        "slow bus, 10 ms per transaction",
+        Duration::from_millis(10),
+        true,
+    );
     assert!((s.rate_hz - 100.0).abs() < 3.0, "{s:?}");
     assert!(s.p99_dev_us <= 5_000, "{s:?}");
     assert!(s.max_dev_us <= 25_000, "{s:?}");
