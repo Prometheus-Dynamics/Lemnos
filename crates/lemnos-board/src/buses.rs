@@ -238,6 +238,16 @@ impl LinuxBuses {
 #[cfg(feature = "linux")]
 impl Buses for LinuxBuses {
     fn i2c(&mut self, bus: u32) -> Result<DynI2c, BoardError> {
+        // A `pio-i2c:` bus has no adapter node: its virtual number names the pins.
+        if let Some(pins) = lemnos_core::PioI2cPins::from_bus_number(bus) {
+            return lemnos_linux::hal::PioI2cBus::open(pins)
+                .map(DynI2c::new)
+                .map_err(|e| BoardError::Device {
+                    device: format!("pio-i2c sda={} scl={}", pins.sda, pins.scl),
+                    kind: ErrorKind::from_io(e.kind()),
+                    reason: e.to_string(),
+                });
+        }
         let path = self.dev.join(format!("i2c-{bus}"));
         lemnos_linux::hal::I2cBus::open_path(&path)
             .map(DynI2c::new)

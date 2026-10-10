@@ -364,6 +364,7 @@ name = "lemnos-board"
 version = "2.0.0"
 dependencies = [
  "embedded-hal",
+ "lemnos-core",
  "lemnos-device",
  "lemnos-drivers-bmi088",
  "lemnos-drivers-bmm150",

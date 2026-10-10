@@ -4,6 +4,7 @@
 
 use crate::BoardError;
 use crate::i2c_select::I2cSelector;
+use lemnos_core::{PIO_I2C_DEFAULT_HZ, PioI2cPins};
 use lemnos_drivers_linux::SysRoot;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
@@ -107,6 +108,8 @@ pub enum BusRef {
     I2c(u32),
     /// An I2C adapter found by name or device-tree node ([`I2cSelector`]).
     I2cMatch(I2cSelector),
+    /// An I2C master bit-banged on the RP1 PIO block (`pio-i2c:sda=8,scl=7`).
+    PioI2c(PioI2cPins),
     Spi {
         bus: u32,
         chip_select: u16,
@@ -116,7 +119,7 @@ pub enum BusRef {
 impl BusRef {
     /// Whether this is an I2C bus (by number or by selector).
     pub fn is_i2c(&self) -> bool {
-        matches!(self, Self::I2c(_) | Self::I2cMatch(_))
+        matches!(self, Self::I2c(_) | Self::I2cMatch(_) | Self::PioI2c(_))
     }
 
     /// The I2C bus number: given, or found under `sys` for a selector.
@@ -125,6 +128,7 @@ impl BusRef {
         match self {
             Self::I2c(bus) => Some(Ok(*bus)),
             Self::I2cMatch(selector) => Some(selector.resolve(sys)),
+            Self::PioI2c(pins) => Some(Ok(pins.bus_number())),
             Self::Spi { .. } => None,
         }
     }
@@ -135,6 +139,13 @@ impl fmt::Display for BusRef {
         match self {
             Self::I2c(bus) => write!(f, "i2c-{bus}"),
             Self::I2cMatch(selector) => selector.fmt(f),
+            Self::PioI2c(pins) => {
+                write!(f, "pio-i2c:sda={},scl={}", pins.sda, pins.scl)?;
+                if pins.hz != PIO_I2C_DEFAULT_HZ {
+                    write!(f, ",hz={}", pins.hz)?;
+                }
+                Ok(())
+            }
             Self::Spi { bus, chip_select } => write!(f, "spi-{bus}.{chip_select}"),
         }
     }
@@ -154,6 +165,11 @@ impl FromStr for BusRef {
                 .map(Self::I2cMatch)
                 .map_err(|e| format!("bus {s:?}: {e}"));
         }
+        if let Some(rest) = s.strip_prefix("pio-i2c:") {
+            return parse_pio_i2c(rest).map(Self::PioI2c).map_err(|e| {
+                format!("bus {s:?}: {e} (expected \"pio-i2c:sda=<gpio>,scl=<gpio>[,hz=<hertz>]\")")
+            });
+        }
         if let Some(n) = s.strip_prefix("i2c-") {
             return n.parse().map(Self::I2c).map_err(|_| bad());
         }
@@ -166,6 +182,49 @@ impl FromStr for BusRef {
         }
         Err(bad())
     }
+}
+
+/// The keys of a `pio-i2c:` selector: `sda` and `scl` GPIO numbers (distinct,
+/// below 28) and an optional `hz` (default 400 kHz).
+fn parse_pio_i2c(text: &str) -> Result<PioI2cPins, String> {
+    let mut sda = None;
+    let mut scl = None;
+    let mut hz = PIO_I2C_DEFAULT_HZ;
+    for part in text.split(',').filter(|p| !p.is_empty()) {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("{part:?}: expected <key>=<value>"))?;
+        let number = |what: &str| -> Result<u32, String> {
+            value
+                .parse::<u32>()
+                .map_err(|_| format!("{what} {value:?} is not a number"))
+        };
+        match key {
+            "sda" => sda = Some(gpio_number(number("sda")?)?),
+            "scl" => scl = Some(gpio_number(number("scl")?)?),
+            "hz" => {
+                hz = number("hz")?;
+                if hz == 0 || hz > lemnos_core::PIO_I2C_MAX_HZ {
+                    return Err(format!("hz {hz} is out of range"));
+                }
+            }
+            other => return Err(format!("unknown PIO I2C key {other:?} (sda, scl, hz)")),
+        }
+    }
+    let (Some(sda), Some(scl)) = (sda, scl) else {
+        return Err("a PIO I2C bus needs sda and scl".into());
+    };
+    if sda == scl {
+        return Err("sda and scl must be different pins".into());
+    }
+    Ok(PioI2cPins { sda, scl, hz })
+}
+
+fn gpio_number(value: u32) -> Result<u8, String> {
+    if value >= 28 {
+        return Err(format!("GPIO {value} is not an RP1 GPIO (0..27)"));
+    }
+    Ok(value as u8)
 }
 
 impl Serialize for BusRef {

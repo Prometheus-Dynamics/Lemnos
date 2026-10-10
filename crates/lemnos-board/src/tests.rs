@@ -574,3 +574,34 @@ fn every_declared_config_choice_is_accepted_when_the_driver_builds() {
         }
     }
 }
+
+#[test]
+fn pio_i2c_selector_names_pins_and_a_virtual_bus() {
+    let tree = Tree::new();
+    tree.adapters();
+    let sys = SysRoot::new(&tree.0);
+    let bus: BusRef = "pio-i2c:sda=8,scl=7".parse().unwrap();
+    assert!(bus.is_i2c());
+    assert_eq!(bus.to_string(), "pio-i2c:sda=8,scl=7");
+    let number = bus.i2c_bus(&sys).unwrap().unwrap();
+    assert_eq!(
+        lemnos_core::PioI2cPins::from_bus_number(number),
+        Some(lemnos_core::PioI2cPins {
+            sda: 8,
+            scl: 7,
+            hz: 400_000,
+        })
+    );
+    let slow: BusRef = "pio-i2c:scl=7,sda=8,hz=100000".parse().unwrap();
+    assert_eq!(slow.to_string(), "pio-i2c:sda=8,scl=7,hz=100000");
+    for bad in [
+        "pio-i2c:sda=8",
+        "pio-i2c:sda=8,scl=8",
+        "pio-i2c:sda=8,scl=28",
+        "pio-i2c:sda=8,scl=7,hz=0",
+        "pio-i2c:sda=8,scl=7,speed=1",
+        "pio-i2c:",
+    ] {
+        assert!(bad.parse::<BusRef>().is_err(), "{bad} should be refused");
+    }
+}
