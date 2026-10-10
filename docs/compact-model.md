@@ -205,7 +205,7 @@ The drivers implement it next to their own APIs:
 
 | Driver | Class | Channels | Controls | Kernel binding |
 |---|---|---|---|---|
-| `Bmi088` | `Imu` | `acceleration.{x,y,z}` (mm/s²), `angular_rate.{x,y,z}` (µrad/s) | | `bmi088-accel` + `bmg160` (IIO) |
+| `Bmi088` | `Imu` | `acceleration.{x,y,z}` (counts in mm/s², exponent -3: m/s²), `angular_rate.{x,y,z}` (counts in µrad/s, exponent -6: rad/s) | | `bmi088-accel` + `bmg160` (IIO) |
 | `Bmm150` | `Magnetometer` | `magnetic_field.{x,y,z}` (nT) | | `bmc150_magn` (IIO) |
 | `Ina` (INA226/260) | `PowerMonitor` | `bus_voltage` (µV), `shunt_voltage` (nV), `current` (µA), `power` (µW) | | `ina2xx` (hwmon) |
 | `Ina` (INA238) | `PowerMonitor` | the above plus `die_temperature` (m°C) | | `ina238` (hwmon) |

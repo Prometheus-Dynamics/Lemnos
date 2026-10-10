@@ -173,10 +173,22 @@ led.clear()?;                                // drop this client's intents
 
 - **Reads and subscriptions.** `list` describes every device in the compact model (class,
   channels with quantity and unit, controls with range, status). `read` returns the latest
-  values; `subscribe(device, period_ms)` streams readings at most that often (the service
-  polls each device at the fastest rate any client asked for, and at least its board
-  `poll_ms`). Values travel as fixed-point integers with their exponents and are converted
-  to `f64` on the client.
+  values. `subscribe(device, period_ms)` streams readings at most that often and waits for
+  the service's answer: it returns the granted period, the requested one or the device's
+  read time when that is longer (a device cannot be read faster than one read takes). A
+  refusal says why nothing arrives: `unknown-device`, or `unsupported` for a device that
+  produces no readings (a light, a fan). A refused subscription is not kept across
+  reconnections. `period_ms` 0 unsubscribes. Older services send no answer, so such a
+  subscribe waits for its timeout and returns `Timeout`; the subscription still stands.
+  Values travel as fixed-point integers with their exponents and are converted to `f64` on
+  the client. A channel's `value()` is in its quantity's canonical unit (m/s², rad/s, ...);
+  the raw count is that value times `10^-exponent`. The BMI088's counts are therefore mm/s²
+  (exponent -3) and µrad/s (exponent -6), and its `value()` is m/s² and rad/s.
+- **Timestamps.** A reading's `timestamp_us` is the time its read started, in microseconds
+  on `CLOCK_BOOTTIME`. The clock keeps counting across a `lemnosd` restart, so timestamps
+  stay comparable from one service process to the next. It restarts from zero only at a
+  reboot: a stream whose timestamps go backwards means the board rebooted. Arrival times at
+  a client include socket delays; the schedule is what the timestamps show.
 - **Controls and the write policy.** `set(device, control, value)` goes through the
   device's policy: its board `writers` list (client names; empty means any client), then
   the control's range. An entry ending in `*` matches by prefix (`orion:*` admits every
@@ -184,7 +196,8 @@ led.clear()?;                                // drop this client's intents
   alone admits any client); other entries match exactly. The answer is the applied value or a refusal (`not-allowed`,
   `out-of-range`, `unsupported`, `device-unavailable`). Client names are declared by the
   client at connect time, so they arbitrate between cooperating clients; the security
-  boundary is the socket's permissions (mode 0660, group `lemnos`).
+  boundary is the socket's permissions: mode 0770, owner and group `lemnos`, which is what
+  the unit's `UMask=0007` gives the socket (lemnosd sets no mode of its own).
 - **Writes end with the writer's connection.** The service remembers who last wrote each
   control and the value from before the first write. When that client's connection closes
   (cleanly, crashed or `kill -9`), the write is undone: a fan goes back to the kernel's
@@ -241,9 +254,9 @@ led.clear()?;                                // drop this client's intents
   written at all. Frames live in fixed arrays, so rendering allocates nothing. Values are
   linear; the RP1 `ws2812-pio` kernel driver applies its gamma table (and the driver's own
   brightness byte stays at its overlay value), so gamma is applied exactly once.
-- **Optional Orion bridge** (design only): a client of `lemnosd` that publishes devices as
-  Orion resources and forwards leased control writes. HeliOS's peripherals provider can do
-  this today with a `DeviceClient`.
+- **Optional Orion bridge**: `lemnos-orion`, a client of `lemnosd` that publishes devices as
+  Orion resources and forwards leased control writes (feature `orion`; the contract is
+  [orion.md](orion.md)).
 
 `lemnos-ctl` is the command-line client, for scripts and other runtimes:
 
@@ -437,13 +450,23 @@ covers, and then upstream it.
 
 ## Process model
 
-- **Single-threaded event loop.** One `poll(2)` loop waits on the listening socket, the
-  client sockets and the next device deadline. Device reads are synchronous and short (an
-  I2C burst or a sysfs read, ≤ 1 ms), so one thread keeps up with an IMU at 400 Hz and every
-  other device; there is no locking, and a slow client cannot stall reads because writes to
-  clients are non-blocking with a bounded per-client queue (a client that falls behind
-  loses old readings, never blocks the loop). If a board ever needs it, a device can move to
-  a thread of its own feeding the loop through a pipe.
+- **Single-threaded event loop.** One `ppoll(2)` loop waits on the listening socket, the
+  client sockets and the next device deadline (in microseconds). Device reads are
+  synchronous, so one thread keeps up with an IMU at 400 Hz and every other device when
+  reads are short (an I2C burst or a sysfs read, ≤ 1 ms); there is no locking, and a slow
+  client cannot stall reads because writes to clients are non-blocking with a bounded
+  per-client queue (a client that falls behind loses old readings, never blocks the loop).
+- **Scheduling.** Each sensor reads on a grid of deadlines from its first read (no drift:
+  a late read does not move the grid; deadlines that passed are skipped, not replayed).
+  The most overdue sensor goes first, and on a tie the cheaper read goes first. A read that
+  would still run when a cheaper sensor's deadline comes waits for it, so a slow device
+  does not delay a fast one; a sensor a whole period late reads anyway. The next deadline
+  is counted from the end of a read, so a read longer than its period cannot starve the
+  clients. One thread cannot interrupt a bus transaction: a fast sensor holds its rate while
+  each read of the others fits in the gap it has to fill. A single read longer than the fast
+  sensor's period delays it by that read's length. Splitting such a read (or moving the
+  device to a thread of its own) is the fix; the schedule is tested in
+  `crates/lemnosd/tests/schedule.rs`.
 - **Crash and restart.** systemd `Restart=always` with backoff; `Type=notify`, `READY=1`
   after the board's devices are built and the socket listens; `WATCHDOG=1` only while the
   loop keeps completing passes. On restart, clients reconnect (their `Connected` event says

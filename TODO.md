@@ -25,6 +25,12 @@ for the user-facing summary of finished work.
       ([docs/composite-devices.md](docs/composite-devices.md)), waiting for a decision.
 - [ ] IIO buffered reads (`/dev/iio:deviceN`, IRQ timestamps) in the generic kernel
       binding.
+- [ ] BMI088 FIFO batch reads: above 100 Hz a polled read can drop samples (the chip
+      keeps them in its FIFO); read the FIFO in batches and stamp each sample from the
+      output data rate. Not started; a 10 ms IMU subscription holds its rate without it.
+- [ ] Measure the scheduler on the CM5 (`tests/schedule.rs` runs on the host with a mock
+      bus): the IMU at 100 Hz beside the real power monitor and magnetometer on the board's
+      buses, with the reads' real durations.
 - [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
       shared probe code).
 
