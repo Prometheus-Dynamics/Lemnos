@@ -210,6 +210,9 @@ impl BoardProbe {
         let (interface, driver) = match entry.interface {
             Interface::I2c => (InterfaceKind::I2c, I2C_DRIVER),
             Interface::Platform => (InterfaceKind::Platform, PLATFORM_DRIVER),
+            Interface::Composite => {
+                return Err("a composite device is hosted by lemnosd, not the runtime".to_owned());
+            }
         };
         let mut builder = DeviceDescriptor::builder_for_kind(
             descriptor_id(&self.board, &spec.id),
@@ -273,6 +276,15 @@ impl DiscoveryProbe for BoardProbe {
             let interface = match entry.interface {
                 Interface::I2c => InterfaceKind::I2c,
                 Interface::Platform => InterfaceKind::Platform,
+                // lemnosd builds composite devices from other devices; the
+                // runtime has no such host.
+                Interface::Composite => {
+                    discovery.notes.push(format!(
+                        "device {:?}: a composite device, hosted by lemnosd",
+                        spec.id
+                    ));
+                    continue;
+                }
             };
             if !context.wants(interface) {
                 continue;
