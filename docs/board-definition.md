@@ -88,6 +88,28 @@ recorded on that kernel, never from documentation. Generators should emit the mo
 selector they know (a unique `compatible`, else the `of` path) and fall
 back to `i2c-<n>`.
 
+### PIO I2C buses
+
+When no hardware controller drives a device's pins, the bus can run on the RP1
+PIO block:
+
+```toml
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "pio-i2c:sda=8,scl=7"       # optional ,hz=100000 (default 400000)
+address = 0x18
+```
+
+`sda` and `scl` are RP1 GPIO numbers (0..27), distinct. The bus has no kernel
+adapter number; it is named by its pins and clock. Requirements, the pins
+being free, and the limits are in `docs/system-service.md` (PIO I2C).
+
+Board packages must drop the kernel `i2c-gpio` overlay for those pins (Atlas:
+remove the `i2c-gpio` node for GPIO7/GPIO8 from the image's overlay set, and
+give the `lemnos` user access to `/dev/pio0`). Until the overlay is gone the
+device reports that the pins are in use.
+
 ### Raw access: lines, PWM channels and policy
 
 Hosts that hand hardware to clients (`lemnosd`) read three more keys:

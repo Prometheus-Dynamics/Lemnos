@@ -517,6 +517,66 @@ and rates; `auto` keeps both working. Use the kernel backend when an overlay exi
 application needs IIO's buffered, IRQ-timestamped samples; reading IIO buffers
 (`/dev/iio:deviceN`) is a later addition to the generic binding, not new per-chip code.
 
+## PIO I2C: a bus the kernel can only bit-bang
+
+The Raze's BMI088 sits on RP1 GPIO8 (SDA) and GPIO7 (SCL). Those are not one
+hardware I2C controller's pair, so the kernel drives them with `i2c-gpio`
+(bit-banging through the RP1's GPIO registers over PCIe). Each bit costs
+about 25 µs of CPU, and the IMU streams accelerometer and gyro at 100 Hz.
+
+`pio-i2c:sda=8,scl=7` runs the bus on the RP1 PIO block instead. A PIO state
+machine clocks the bits and the host moves whole transactions through the
+FIFOs by DMA, so the CPU cost is per transaction, not per bit. The program
+(`crates/lemnos-linux/src/transport/i2c/pio/program.rs`) is 27 PIO instructions
+and handles ACK/NACK; START, repeated START and STOP are exec words the host sends,
+so they need no program space.
+Recovery (nine clocks and a STOP) runs when a transfer stalls.
+
+Requirements:
+
+- `/dev/pio0` (the `rp1_pio` driver, `rp1_fw` loaded). The node is root-only
+  (`crw-------`) on the Raze image: a production build needs a udev rule that
+  grants the `lemnos` user or group access to `/dev/pio0`.
+- The pins must be free: the kernel `i2c-gpio` device for them unbound. The
+  service checks the RP1 GPIO chip's line status at open and refuses with a
+  clear error naming the consumer (`GPIO8 is already requested by '...'`).
+  The device tree is not changed by Lemnos.
+- A free state machine and 27 contiguous instruction slots at offset 4 (the
+  block has 32 slots shared by all its programs). The Raze's `ws2812-pio-rp1`
+  program takes slots 0-3, so the I2C program sits right after it.
+- Pull-ups on SDA and SCL. The pins are driven low only (the output latch is
+  forced low, the direction carries the bit), as on any open-drain bus.
+- Clock: `hz` defaults to 400 kHz. The PIO clock is 200 MHz; the divider is
+  `200 MHz / (24 * hz)`.
+
+Limits: at most 31 data bytes per START-delimited write segment (the ACK
+accumulator is the 32-bit ISR); longer writes are refused with an error. Reads
+have no limit beyond the FIFO traffic.
+
+Interaction with the kernel: when the PIO bus is open, its pins are owned by
+the PIO block until the bus is dropped. The bus is opened once per pin pair
+and shared by every device on it.
+
+Status: working on the Raze. Both devices answer every register read through the
+PIO bus: 100000 of 100000 chip-id reads on the gyroscope (0x0F) and 100000 of
+100000 on the accelerometer (0x1E), at 400 kHz. The bus idles with SCL and SDA
+released, as I2C requires; START, repeated START and STOP run as exec words, and
+each SCL change is an exec'd jump, so no instruction runs at the wrong SCL level.
+The program is 27 instructions at offset 4, beside `ws2812-pio-rp1` at 0-3.
+
+CPU, lemnosd, 100 Hz, measured on the same boot (15 s windows):
+
+| Subscription | i2c-gpio (kernel) | PIO bus |
+|---|---|---|
+| whole device (accel + gyro) | 28.5 % | 1.9 % |
+| gyroscope only (x, y, z) | 14.9 % | 1.3 % |
+| yaw only (`angular_rate.z`) | 9.7 % | 1.3 % |
+
+Both lines carried the 100 Hz samples (`lemnos-ctl watch`; the sample timestamps
+are 10 ms apart). The i2c-gpio figures are not the earlier 36/19/13 %: those came
+from a different boot and load. The board package still has to drop the `i2c-gpio`
+overlay and grant `/dev/pio0` before this is the default (see the requirements above).
+
 ## Rust-for-Linux kernel modules: recommended against
 
 Building the `no_std` drivers as Rust-for-Linux modules is technically possible, but:
