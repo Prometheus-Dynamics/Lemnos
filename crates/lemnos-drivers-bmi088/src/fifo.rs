@@ -107,8 +107,9 @@ pub(crate) fn parse_accel(bytes: &[u8], out: &mut [[i16; 3]]) -> Parsed {
 /// Three little-endian 16-bit axes.
 pub(crate) fn axes(bytes: &[u8]) -> [i16; 3] {
     let mut out = [0i16; 3];
-    for (value, chunk) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *value = i16::from_le_bytes([chunk[0], chunk[1]]);
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for (value, pair) in out.iter_mut().zip(pairs) {
+        *value = i16::from_le_bytes(*pair);
     }
     out
 }

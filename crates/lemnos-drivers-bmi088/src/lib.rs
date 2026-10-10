@@ -624,10 +624,8 @@ impl<I2C: I2c> Bmi088<I2C> {
         let mut buf = [0u8; MAX_SAMPLES * fifo::GYR_FRAME_LEN];
         let n = frames * fifo::GYR_FRAME_LEN;
         self.gyro().read_burst(fifo::GYR_FIFO_DATA, &mut buf[..n])?;
-        for (sample, frame) in out
-            .iter_mut()
-            .zip(buf[..n].chunks_exact(fifo::GYR_FRAME_LEN))
-        {
+        let (chunks, _) = buf[..n].as_chunks::<{ fifo::GYR_FRAME_LEN }>();
+        for (sample, frame) in out.iter_mut().zip(chunks) {
             *sample = fifo::axes(frame);
         }
         Ok(frames)

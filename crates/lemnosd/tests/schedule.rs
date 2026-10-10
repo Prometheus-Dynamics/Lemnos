@@ -110,6 +110,7 @@ fn run(label: &str, load: bool) -> Stats {
 }
 
 /// `run`, with bus 2 taking `latency` per transaction.
+#[allow(clippy::print_stderr)]
 fn run_with(label: &str, latency: Duration, load: bool) -> Stats {
     let service = service(latency);
     let mut client = ClientOptions::new(service.socket(), "viewer")
