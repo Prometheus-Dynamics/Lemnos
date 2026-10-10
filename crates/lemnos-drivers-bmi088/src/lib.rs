@@ -253,8 +253,9 @@ impl Config {
         }
     }
 
-    /// Converts raw counts to the device-model channels: acceleration in
-    /// mm/s² and angular rate in µrad/s (see [`INFO`]).
+    /// Converts raw counts to the device-model channel counts: acceleration in
+    /// mm/s² and angular rate in µrad/s, so a channel's value is in m/s² and
+    /// rad/s (see [`INFO`]).
     pub fn channels(self, accel: [i16; 3], gyro: [i16; 3]) -> [i32; 6] {
         // Full scale in mm/s² (g = 9.80665 m/s²) × 2^8 and in µrad/s × 2^5:
         // a count converts with one 32×32→64-bit multiply and a shift, and no

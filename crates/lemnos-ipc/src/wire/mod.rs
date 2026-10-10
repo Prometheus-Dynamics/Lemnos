@@ -6,6 +6,17 @@
 //! Readings carry fixed-point integers; the device list carries each
 //! channel's exponent, so clients convert to `f64` themselves. A client opens
 //! with [`Request::Hello`]; the service answers [`Message::Welcome`].
+//!
+//! Reading timestamps are microseconds on `CLOCK_BOOTTIME`, taken when the
+//! read started. The clock keeps counting across a `lemnosd` restart, so a
+//! timestamp from before a restart is still comparable with one after it. It
+//! restarts from zero only at a reboot, so a stream that goes backwards means
+//! the board rebooted. Intervals between readings of one device follow the
+//! schedule; arrival times at a client also include socket delays.
+//!
+//! Units: a channel's `value()` is in its quantity's canonical unit (m/s²,
+//! rad/s, V, A, ...). The raw count is that value scaled by `10^-exponent`:
+//! the BMI088's counts are mm/s² (exponent -3) and µrad/s (exponent -6).
 
 use lemnos_device::{Axis, DeviceClass, DeviceStatus, Quantity};
 use lemnos_hal::ErrorKind;
@@ -101,7 +112,8 @@ pub struct DeviceDesc {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawReading {
     pub device: String,
-    /// Microseconds on the service's monotonic clock.
+    /// Microseconds on `CLOCK_BOOTTIME`, taken when the read started (see the
+    /// module docs for the contract).
     pub timestamp_us: u64,
     pub status: DeviceStatus,
     /// One fixed-point value per channel (`NO_VALUE`: none).
@@ -124,6 +136,9 @@ pub enum Refusal {
     Claimed,
     /// No such claim handle on this connection.
     UnknownHandle,
+    /// The device cannot do this: a subscription to a device that produces
+    /// no readings (a light, a fan).
+    Unsupported,
 }
 
 impl Refusal {
@@ -137,6 +152,7 @@ impl Refusal {
             Self::Owned => (6, 0),
             Self::Claimed => (7, 0),
             Self::UnknownHandle => (8, 0),
+            Self::Unsupported => (9, 0),
         }
     }
 
@@ -149,6 +165,7 @@ impl Refusal {
             6 => Self::Owned,
             7 => Self::Claimed,
             8 => Self::UnknownHandle,
+            9 => Self::Unsupported,
             _ => Self::Device(ErrorKind::from_code(kind)),
         }
     }
@@ -165,6 +182,7 @@ impl fmt::Display for Refusal {
             Self::Owned => f.write_str("owned by a board device"),
             Self::Claimed => f.write_str("claimed by another client"),
             Self::UnknownHandle => f.write_str("no such claim"),
+            Self::Unsupported => f.write_str("not supported by this device"),
         }
     }
 }
@@ -300,8 +318,11 @@ pub enum Request {
     Read {
         device: String,
     },
-    /// `period_ms` 0 unsubscribes.
+    /// `period_ms` 0 unsubscribes. A nonzero `id` gets a [`Message::Reply`]
+    /// with the granted period, or a refusal. `id` 0 (what older clients
+    /// send) gets one only for a refusal, as before.
     Subscribe {
+        id: u32,
         device: String,
         period_ms: u32,
     },

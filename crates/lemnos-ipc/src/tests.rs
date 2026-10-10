@@ -30,6 +30,7 @@ fn requests_round_trip() {
         device: "imu".into(),
     });
     round_trip_request(Request::Subscribe {
+        id: 9,
         device: "imu".into(),
         period_ms: 10,
     });
@@ -98,7 +99,38 @@ fn requests_round_trip() {
 }
 
 #[test]
+fn subscribe_from_an_older_client_has_no_id() {
+    // What protocol 1 clients sent before the id: kind 4, device, period.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&3u16.to_le_bytes());
+    payload.extend_from_slice(b"imu");
+    payload.extend_from_slice(&10u32.to_le_bytes());
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(payload.len() as u32 + 2).to_le_bytes());
+    frame.extend_from_slice(&4u16.to_le_bytes());
+    frame.extend_from_slice(&payload);
+    let (decoded, used) = decode_request(&frame).unwrap().unwrap();
+    assert_eq!(used, frame.len());
+    assert_eq!(
+        decoded,
+        Request::Subscribe {
+            id: 0,
+            device: "imu".into(),
+            period_ms: 10,
+        }
+    );
+}
+
+#[test]
 fn messages_round_trip() {
+    round_trip_message(Message::Reply {
+        id: 9,
+        result: Err(Refusal::Unsupported),
+    });
+    round_trip_message(Message::Reply {
+        id: 9,
+        result: Ok(10.0),
+    });
     round_trip_message(Message::Welcome {
         version: VERSION,
         board: "raze".into(),

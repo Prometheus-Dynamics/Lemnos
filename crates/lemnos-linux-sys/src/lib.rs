@@ -17,5 +17,6 @@ pub mod netlink;
 pub mod poll;
 pub mod signal;
 pub mod spi;
+pub mod time;
 
 pub use ioctl::{ioc, ior, iow, iowr};

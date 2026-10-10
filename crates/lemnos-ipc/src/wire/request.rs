@@ -154,9 +154,15 @@ impl Request {
                 e.str(device);
                 e.finish()
             }
-            Self::Subscribe { device, period_ms } => {
+            Self::Subscribe {
+                id,
+                device,
+                period_ms,
+            } => {
                 let mut e = Encoder::new(SUBSCRIBE);
                 e.str(device).u32(*period_ms);
+                // Appended in protocol 1 (older services stop before it).
+                e.u32(*id);
                 e.finish()
             }
             Self::Set {
@@ -261,6 +267,8 @@ impl Request {
             SUBSCRIBE => Self::Subscribe {
                 device: d.str()?,
                 period_ms: d.u32()?,
+                // Older clients send no id: they get no reply to a success.
+                id: if d.is_empty() { 0 } else { d.u32()? },
             },
             SET => Self::Set {
                 id: d.u32()?,

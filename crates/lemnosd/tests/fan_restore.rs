@@ -359,13 +359,16 @@ fn a_fan_override_ends_with_the_writers_connection() {
     assert_eq!(helios.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
     write(&root, cdev_state, "4");
     drop(helios);
-    // The service, still running, hands the fan back to the governor.
+    // The service, still running, hands the fan back to the governor. It
+    // writes `pwm1_enable` and then the cooling device's state, so wait for
+    // both (reading the state right after the enable could catch the write).
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while read(&root, "class/hwmon/hwmon2/pwm1_enable") != "1" {
+    while read(&root, "class/hwmon/hwmon2/pwm1_enable") != "1"
+        || read(&root, "class/thermal/cooling_device0/cur_state") != "1"
+    {
         assert!(std::time::Instant::now() < deadline, "not handed back");
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(read(&root, "class/thermal/cooling_device0/cur_state"), "1");
 
     stop.store(true, Ordering::Relaxed);
     handle.join().unwrap();

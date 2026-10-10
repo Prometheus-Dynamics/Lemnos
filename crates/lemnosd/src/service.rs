@@ -5,6 +5,7 @@ use crate::clients::Client;
 use crate::devices::{Slot, Subscription};
 use crate::light::{Light, LightIntent, MAX_LEDS};
 use crate::notify::Notifier;
+use crate::schedule::{self, Due, Next};
 use crate::update::UpdateWatcher;
 use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
 use lemnos_device::DeviceStatus;
@@ -12,13 +13,14 @@ use lemnos_hal::ErrorKind;
 use lemnos_ipc::{Event, Message, RawReading, Refusal, Request, VERSION};
 use lemnos_light::{Layer, Show, SystemState};
 use lemnos_linux_sys::poll::{POLLIN, POLLOUT, PollFd, poll_many};
+use lemnos_linux_sys::time::boottime_us;
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How often the updater's status files are read.
 const UPDATE_POLL_MS: u64 = 500;
@@ -97,7 +99,6 @@ pub struct Service {
     clients: Vec<Client>,
     listener: UnixListener,
     socket: PathBuf,
-    start: Instant,
     next_client: u32,
     owners: Vec<(String, u32)>,
     update: Option<UpdateWatcher>,
@@ -106,6 +107,8 @@ pub struct Service {
     notifier: Notifier,
     next_watchdog_ms: u64,
     pollfds: Vec<PollFd>,
+    /// The sensors the scheduler looks at (reused between passes).
+    due: Vec<Due>,
 }
 
 impl Service {
@@ -123,6 +126,7 @@ impl Service {
         let listener = UnixListener::bind(&config.socket)?;
         listener.set_nonblocking(true)?;
         let definition = config.board.clone();
+        let now_ms = boottime_us() / 1000;
         let mut service = Self {
             board: config.board.board.id.clone(),
             definition,
@@ -134,17 +138,17 @@ impl Service {
             clients: Vec::new(),
             listener,
             socket: config.socket,
-            start: Instant::now(),
             next_client: 1,
             owners: Vec::new(),
             update: config.update_status.map(UpdateWatcher::new),
             next_update_ms: 0,
-            booting_until: config.booting_ms,
+            booting_until: config.booting_ms.map(|ms| now_ms + ms),
             notifier: Notifier::none(),
             next_watchdog_ms: 0,
             pollfds: Vec::new(),
+            due: Vec::new(),
         };
-        service.build_devices(0);
+        service.build_devices(now_ms);
         Ok(service)
     }
 
@@ -172,12 +176,14 @@ impl Service {
         self.slots.iter().filter_map(Slot::hand_back_plan).collect()
     }
 
-    fn now_ms(&self) -> u64 {
-        self.start.elapsed().as_millis() as u64
+    /// The clock everything is scheduled and stamped with: the boot clock,
+    /// so times keep their meaning across a restart of the service.
+    fn now_us(&self) -> u64 {
+        boottime_us()
     }
 
-    fn now_us(&self) -> u64 {
-        self.start.elapsed().as_micros() as u64
+    fn now_ms(&self) -> u64 {
+        self.now_us() / 1000
     }
 
     fn broadcast(&mut self, message: &Message) {
@@ -245,34 +251,83 @@ impl Service {
         })
     }
 
-    fn poll_devices(&mut self, now_ms: u64) {
-        let now_us = self.now_us();
-        for index in 0..self.slots.len() {
-            let was_read = self.slots[index].read_us;
-            if let Some(status) = self.slots[index].poll(now_ms, now_us) {
-                self.status_event(index, status);
+    /// Reads the sensors that are due, in the order `schedule` picks, until
+    /// none is due or the next one has to wait (see `next_deadline`).
+    fn poll_devices(&mut self) {
+        loop {
+            self.due.clear();
+            for (index, slot) in self.slots.iter().enumerate() {
+                if slot.is_sensor() {
+                    self.due.push(Due {
+                        index,
+                        deadline_us: slot.next_read_us,
+                        period_us: slot.period_us(),
+                        cost_us: slot.read_cost_us,
+                    });
+                }
             }
-            if self.slots[index].read_us == was_read {
-                continue;
-            }
-            // Fresh values: send them to the subscribers that are due.
-            let due: Vec<u32> = self.slots[index]
-                .subscriptions
-                .iter_mut()
-                .filter(|s| s.next_ms <= now_ms)
-                .map(|s| {
-                    s.next_ms = now_ms + u64::from(s.period_ms);
-                    s.client
-                })
-                .collect();
-            if due.is_empty() {
-                continue;
-            }
-            let message = self.reading(index);
-            for client in self.clients.iter_mut().filter(|c| due.contains(&c.id)) {
-                client.send(&message);
+            match schedule::choose(&self.due, self.now_us()) {
+                Next::Run(index) => self.read_sensor(index),
+                Next::WaitUntil(_) | Next::Idle => return,
             }
         }
+    }
+
+    /// Reads one sensor on its schedule, reports a status change, and sends
+    /// fresh values to the subscribers that are due.
+    fn read_sensor(&mut self, index: usize) {
+        let was_read = self.slots[index].read_us;
+        if let Some(status) = self.slots[index].read_scheduled() {
+            self.status_event(index, status);
+        }
+        let read_us = self.slots[index].read_us;
+        if read_us == was_read {
+            return;
+        }
+        let now_us = self.now_us();
+        let due: Vec<u32> = self.slots[index]
+            .subscriptions
+            .iter_mut()
+            .filter(|s| s.next_us <= read_us)
+            .map(|s| {
+                s.next_us = schedule::advance(s.next_us, u64::from(s.period_ms) * 1000, now_us);
+                s.client
+            })
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let message = self.reading(index);
+        for client in self.clients.iter_mut().filter(|c| due.contains(&c.id)) {
+            client.send(&message);
+        }
+    }
+
+    /// Starts (or, with 0, ends) this client's readings of `device`. Returns
+    /// the granted period: the requested one, or the device's read time if
+    /// that is longer. A sensor that is not built yet is accepted (it reads
+    /// once it is).
+    fn subscribe(&mut self, ci: usize, device: &str, period_ms: u32) -> Result<u32, Refusal> {
+        let index = self.slot_of(device).ok_or(Refusal::UnknownDevice)?;
+        let client = self.clients[ci].id;
+        let now_us = self.now_us();
+        let slot = &mut self.slots[index];
+        slot.subscriptions.retain(|s| s.client != client);
+        if period_ms == 0 {
+            return Ok(0);
+        }
+        if slot.device.is_some() && !slot.is_sensor() {
+            return Err(Refusal::Unsupported);
+        }
+        slot.subscriptions.push(Subscription {
+            client,
+            period_ms,
+            next_us: now_us,
+        });
+        // Read on the new schedule from now.
+        slot.next_read_us = slot.next_read_us.min(now_us);
+        let read_ms = u32::try_from(slot.read_cost_us.div_ceil(1000)).unwrap_or(u32::MAX);
+        Ok(period_ms.max(read_ms))
     }
 
     fn poll_update(&mut self, now_ms: u64) {
@@ -388,11 +443,11 @@ impl Service {
                         result: Err(Refusal::UnknownDevice),
                     },
                     Some(index) => {
-                        if !self.slots[index].fresh && self.slots[index].is_sensor() {
-                            let now_us = self.now_us();
-                            if let Some(status) = self.slots[index].read(now_us) {
-                                self.status_event(index, status);
-                            }
+                        if !self.slots[index].fresh
+                            && self.slots[index].is_sensor()
+                            && let Some(status) = self.slots[index].read()
+                        {
+                            self.status_event(index, status);
                         }
                         if self.slots[index].fresh {
                             self.reading(index)
@@ -408,25 +463,18 @@ impl Service {
                 };
                 self.clients[ci].send(&message);
             }
-            Request::Subscribe { device, period_ms } => {
-                let Some(index) = self.slot_of(&device) else {
+            Request::Subscribe {
+                id,
+                device,
+                period_ms,
+            } => {
+                let result = self.subscribe(ci, &device, period_ms);
+                // Older clients (id 0) are answered only with a refusal.
+                if id != 0 || result.is_err() {
                     self.clients[ci].send(&Message::Reply {
-                        id: 0,
-                        result: Err(Refusal::UnknownDevice),
+                        id,
+                        result: result.map(f64::from),
                     });
-                    return;
-                };
-                let client = self.clients[ci].id;
-                let slot = &mut self.slots[index];
-                slot.subscriptions.retain(|s| s.client != client);
-                if period_ms > 0 {
-                    slot.subscriptions.push(Subscription {
-                        client,
-                        period_ms,
-                        next_ms: now_ms,
-                    });
-                    // Read on the new schedule from now.
-                    slot.next_read_ms = slot.next_read_ms.min(now_ms);
                 }
             }
             Request::Set {
@@ -591,31 +639,33 @@ impl Service {
             .map_err(Refusal::Device)
     }
 
-    /// When the loop must wake next.
-    fn next_deadline(&self, now_ms: u64) -> u64 {
-        let mut next = now_ms + 1_000;
+    /// When the loop must wake next, in microseconds on the boot clock. A
+    /// sensor whose deadline has passed is not waited for: it is either read
+    /// now or deferred to another sensor's deadline, which is in the list.
+    fn next_deadline(&self, now_us: u64) -> u64 {
+        let mut next = now_us + 1_000_000;
         for slot in &self.slots {
             if slot.device.is_none() {
-                next = next.min(slot.next_build_ms);
-            } else if slot.is_sensor() {
-                next = next.min(slot.next_read_ms);
+                next = next.min(slot.next_build_ms * 1000);
+            } else if slot.is_sensor() && slot.next_read_us > now_us {
+                next = next.min(slot.next_read_us);
             }
         }
         for light in &self.lights {
-            if let Some(at) = light.next_ms(now_ms) {
-                next = next.min(at);
+            if let Some(at) = light.next_ms(now_us / 1000) {
+                next = next.min(at * 1000);
             }
         }
         if self.update.is_some() {
-            next = next.min(self.next_update_ms);
+            next = next.min(self.next_update_ms * 1000);
         }
         if self.raw.polls_edges() {
-            next = next.min(now_ms + 20);
+            next = next.min(now_us + 20_000);
         }
         if self.notifier.watchdog_interval().is_some() {
-            next = next.min(self.next_watchdog_ms);
+            next = next.min(self.next_watchdog_ms * 1000);
         }
-        next.max(now_ms)
+        next.max(now_us)
     }
 
     /// One pass: devices, lights, then up to `max_wait` waiting for clients
@@ -624,7 +674,7 @@ impl Service {
     pub fn step(&mut self, max_wait: Duration, extra: Option<BorrowedFd<'_>>) -> io::Result<bool> {
         let now = self.now_ms();
         self.build_devices(now);
-        self.poll_devices(now);
+        self.poll_devices();
         self.poll_update(now);
         self.render_lights(now);
         self.send_edges();
@@ -635,8 +685,8 @@ impl Service {
             self.next_watchdog_ms = now + interval.as_millis() as u64;
         }
 
-        let wait = Duration::from_millis(self.next_deadline(now).saturating_sub(self.now_ms()))
-            .min(max_wait);
+        let now_us = self.now_us();
+        let wait = Duration::from_micros(self.next_deadline(now_us) - now_us).min(max_wait);
         self.pollfds.clear();
         self.pollfds
             .push(PollFd::new(self.listener.as_fd(), POLLIN));
@@ -686,6 +736,8 @@ impl Service {
             }
             self.clients[ci].flush();
         }
+        // A new subscription may be due now.
+        self.poll_devices();
         // A request may have changed a light: render without waiting.
         self.render_lights(self.now_ms());
         self.send_edges();

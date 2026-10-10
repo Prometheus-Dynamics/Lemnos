@@ -97,7 +97,8 @@ pub enum ClientEvent<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
     pub device: String,
-    /// Microseconds on the service's monotonic clock.
+    /// Microseconds on `CLOCK_BOOTTIME` when the read started (see
+    /// [`wire`] for the contract).
     pub timestamp_us: u64,
     pub status: DeviceStatus,
     pub raw: Vec<i32>,
@@ -331,7 +332,10 @@ impl Connection {
         }
         self.refresh_devices()?;
         for (device, period) in self.subscriptions.clone() {
+            // No id: the answer is not awaited (a refusal comes back as a
+            // reply nobody reads).
             self.send(&Request::Subscribe {
+                id: 0,
                 device,
                 period_ms: period,
             })?;
@@ -567,18 +571,34 @@ impl DeviceClient {
     }
 
     /// Streams `device`'s readings at most every `period_ms` (0
-    /// unsubscribes). Kept across reconnections.
-    pub fn subscribe(&mut self, device: &str, period_ms: u32) -> Result<(), ClientError> {
+    /// unsubscribes), and kept across reconnections. Waits for the service's
+    /// answer and returns the granted period: the requested one, or the
+    /// device's read time when that is longer (readings cannot come faster
+    /// than the device is read).
+    ///
+    /// A refusal ([`ClientError::Refused`]) says why nothing will arrive:
+    /// [`Refusal::UnknownDevice`], or [`Refusal::Unsupported`] for a device
+    /// that produces no readings. A refused subscription is not kept.
+    pub fn subscribe(&mut self, device: &str, period_ms: u32) -> Result<u32, ClientError> {
+        let id = self.conn.next_id();
         self.conn.subscriptions.retain(|(d, _)| d != device);
         if period_ms > 0 {
             self.conn
                 .subscriptions
                 .push((device.to_string(), period_ms));
         }
-        self.conn.send(&Request::Subscribe {
+        let request = Request::Subscribe {
+            id,
             device: device.to_string(),
             period_ms,
-        })
+        };
+        match self.conn.request(&request, reply(id))? {
+            Ok(granted) => Ok(u32::try_from(granted as u64).unwrap_or(u32::MAX)),
+            Err(refusal) => {
+                self.conn.subscriptions.retain(|(d, _)| d != device);
+                Err(ClientError::Refused(refusal))
+            }
+        }
     }
 
     /// Sets a control to `value` in its unit; returns the value applied.

@@ -5,8 +5,9 @@ use embedded_hal::delay::DelayNs;
 use lemnos_device::kernel::{KernelBinding, KernelChannel, KernelPart, Subsystem};
 use lemnos_device::{Axis, Channel, Device, DeviceClass, DeviceError, DeviceInfo, Quantity};
 
-/// An IMU with six channels: acceleration in mm/s² (exponent -3) and angular
-/// rate in µrad/s (exponent -6), X, Y, Z each.
+/// An IMU with six channels, X, Y, Z each. The raw counts are acceleration in
+/// mm/s² (exponent -3) and angular rate in µrad/s (exponent -6); a channel's
+/// value (counts × 10^exponent) is in m/s² and rad/s, the quantities' units.
 pub static INFO: DeviceInfo = DeviceInfo::new(
     DeviceClass::Imu,
     "BMI088",

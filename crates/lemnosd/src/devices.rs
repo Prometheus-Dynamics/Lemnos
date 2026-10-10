@@ -6,6 +6,9 @@ use lemnos_device::{BoxedDevice, DeviceInfo, DeviceStatus, MAX_CHANNELS, NO_VALU
 use lemnos_drivers_linux::{FanRestore, RestoreKind};
 use lemnos_hal::{ErrorKind, HalError};
 use lemnos_ipc::{ChannelDesc, ControlDesc, DeviceDesc};
+use lemnos_linux_sys::time::boottime_us;
+
+use crate::schedule::advance;
 
 /// The shortest and longest wait before rebuilding a device that failed.
 const RETRY_MIN_MS: u64 = 1_000;
@@ -13,12 +16,13 @@ const RETRY_MAX_MS: u64 = 30_000;
 /// How often a sensor is read when nothing asks for it more often.
 const DEFAULT_POLL_MS: u32 = 1_000;
 
-/// A client's subscription to a device.
+/// A client's subscription to a device. Deadlines are microseconds on the
+/// boot clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Subscription {
     pub client: u32,
     pub period_ms: u32,
-    pub next_ms: u64,
+    pub next_us: u64,
 }
 
 /// One device.
@@ -32,9 +36,13 @@ pub(crate) struct Slot {
     /// empty while it works).
     pub reason: String,
     pub values: [i32; MAX_CHANNELS],
+    /// When the last good read started (boot clock, microseconds).
     pub read_us: u64,
     pub fresh: bool,
-    pub next_read_ms: u64,
+    /// The sensor's next read deadline (boot clock, microseconds).
+    pub next_read_us: u64,
+    /// How long the last read took (microseconds; 0 before the first).
+    pub read_cost_us: u64,
     pub next_build_ms: u64,
     retry_ms: u64,
     pub subscriptions: Vec<Subscription>,
@@ -74,7 +82,8 @@ impl Slot {
             values: [NO_VALUE; MAX_CHANNELS],
             read_us: 0,
             fresh: false,
-            next_read_ms: 0,
+            next_read_us: 0,
+            read_cost_us: 0,
             next_build_ms: 0,
             retry_ms: RETRY_MIN_MS,
             subscriptions: Vec::new(),
@@ -98,6 +107,11 @@ impl Slot {
             .min()
             .map_or(board, |fastest| fastest.min(board))
             .max(1)
+    }
+
+    /// The read period in microseconds (see [`period_ms`](Self::period_ms)).
+    pub fn period_us(&self) -> u64 {
+        u64::from(self.period_ms()) * 1000
     }
 
     pub fn is_sensor(&self) -> bool {
@@ -162,7 +176,7 @@ impl Slot {
                 self.info = Some(device.info());
                 self.device = Some(device);
                 self.retry_ms = RETRY_MIN_MS;
-                self.next_read_ms = now_ms;
+                self.next_read_us = now_ms * 1000;
                 if self.restore.is_none() {
                     self.restore = fan_restore_plan(&self.spec, buses);
                 }
@@ -180,22 +194,27 @@ impl Slot {
         }
     }
 
-    /// Reads the device if it is due; returns a status change.
-    pub fn poll(&mut self, now_ms: u64, now_us: u64) -> Option<DeviceStatus> {
-        if now_ms < self.next_read_ms || !self.is_sensor() {
-            return None;
-        }
-        self.next_read_ms = now_ms + u64::from(self.period_ms());
-        self.read(now_us)
+    /// Reads the sensor at its deadline. The next deadline is the first grid
+    /// point after the read ends, so a read longer than the period cannot
+    /// leave the sensor due again at once (and starve the clients). Returns a
+    /// status change.
+    pub fn read_scheduled(&mut self) -> Option<DeviceStatus> {
+        let status = self.read();
+        self.next_read_us = advance(self.next_read_us, self.period_us(), boottime_us());
+        status
     }
 
-    /// Reads the device now; returns a status change.
-    pub fn read(&mut self, now_us: u64) -> Option<DeviceStatus> {
+    /// Reads the device now and times the read; returns a status change. The
+    /// reading is stamped with the time the read started.
+    pub fn read(&mut self) -> Option<DeviceStatus> {
+        let started_us = boottime_us();
         let device = self.device.as_mut()?;
         let mut why = String::new();
-        match device.read_why(&mut self.values, &mut why) {
+        let result = device.read_why(&mut self.values, &mut why);
+        self.read_cost_us = boottime_us().saturating_sub(started_us);
+        match result {
             Ok(()) => {
-                self.read_us = now_us;
+                self.read_us = started_us;
                 self.fresh = true;
                 self.set_status(DeviceStatus::Available, None)
             }
@@ -206,7 +225,7 @@ impl Slot {
                     // Gone: rebuild it on the retry schedule.
                     self.device = None;
                     self.fresh = false;
-                    self.next_build_ms = now_us / 1000 + self.retry_ms;
+                    self.next_build_ms = started_us / 1000 + self.retry_ms;
                 }
                 self.set_status(status, Some(kind))
             }

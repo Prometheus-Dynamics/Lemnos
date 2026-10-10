@@ -24,6 +24,7 @@ mod notify;
 #[cfg(feature = "orion")]
 pub mod orion;
 mod raw;
+mod schedule;
 mod service;
 mod update;
 

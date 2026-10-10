@@ -76,6 +76,14 @@ impl PollFd {
     }
 }
 
+fn timespec(d: Duration) -> libc::timespec {
+    libc::timespec {
+        tv_sec: libc::time_t::try_from(d.as_secs()).unwrap_or(libc::time_t::MAX),
+        // Below one second, so it fits a `c_long` on every 64-bit target.
+        tv_nsec: d.subsec_nanos() as libc::c_long,
+    }
+}
+
 fn timeout_ms(timeout: Option<Duration>) -> i32 {
     match timeout {
         None => -1,
@@ -94,14 +102,21 @@ pub fn poll_many(fds: &mut [PollFd], timeout: Option<Duration>) -> io::Result<us
     for fd in fds.iter_mut() {
         fd.revents = 0;
     }
+    // `ppoll` takes the timeout in nanoseconds (`poll` only in milliseconds,
+    // which would round a 10 ms schedule to whole milliseconds).
+    let spec = timeout.map(timespec);
+    let spec_ptr = spec.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
     // SAFETY: `PollFd` is `repr(C)` with the fields of `struct pollfd` in
     // order (checked by `poll_fd_matches_the_kernel_layout`), and `fds` is a
-    // live, writable slice of `count` entries.
+    // live, writable slice of `count` entries. `spec_ptr` is null (wait
+    // forever) or points at `spec`, which lives across the call; a null
+    // signal mask keeps the current one.
     let r = unsafe {
-        libc::poll(
+        libc::ppoll(
             fds.as_mut_ptr().cast::<libc::pollfd>(),
             count,
-            timeout_ms(timeout),
+            spec_ptr,
+            std::ptr::null(),
         )
     };
     if r >= 0 {
@@ -120,6 +135,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::fd::AsFd;
+
+    #[test]
+    fn many_waits_for_sub_millisecond_timeouts() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let mut fds = [PollFd::new(reader.as_fd(), POLLIN)];
+        let start = std::time::Instant::now();
+        assert_eq!(
+            poll_many(&mut fds, Some(Duration::from_micros(500))).unwrap(),
+            0
+        );
+        let waited = start.elapsed();
+        assert!(waited >= Duration::from_micros(500), "{waited:?}");
+        assert!(waited < Duration::from_millis(50), "{waited:?}");
+    }
 
     #[test]
     fn reports_readiness_and_timeouts() {

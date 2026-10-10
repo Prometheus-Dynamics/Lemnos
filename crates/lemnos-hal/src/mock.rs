@@ -78,6 +78,9 @@ struct I2cState {
     log: Vec<I2cTransfer>,
     fail: VecDeque<ErrorKind>,
     pending_polls: u32,
+    /// How long each blocking transaction takes (`std`; see `set_latency`).
+    #[cfg(feature = "std")]
+    latency: core::time::Duration,
 }
 
 /// An I2C bus with register-file targets that auto-increment their register
@@ -260,6 +263,16 @@ impl I2cState {
     }
 }
 
+impl MockI2c {
+    /// Makes every blocking transaction on this bus take `latency` (a slow
+    /// device on a real bus, for scheduling tests). Shared with the clones
+    /// of this bus; the async transactions are not delayed.
+    #[cfg(feature = "std")]
+    pub fn set_latency(&self, latency: core::time::Duration) {
+        with(&self.state, |s| s.latency = latency);
+    }
+}
+
 impl I2cErrorType for MockI2c {
     type Error = ErrorKind;
 }
@@ -270,6 +283,13 @@ impl I2c for MockI2c {
         address: u8,
         operations: &mut [I2cOperation<'_>],
     ) -> Result<(), Self::Error> {
+        #[cfg(feature = "std")]
+        {
+            let latency = with(&self.state, |s| s.latency);
+            if !latency.is_zero() {
+                std::thread::sleep(latency);
+            }
+        }
         self.run(address, operations)
     }
 }
