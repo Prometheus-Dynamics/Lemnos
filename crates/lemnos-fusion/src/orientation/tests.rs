@@ -317,3 +317,22 @@ fn outputs_stay_finite_over_random_input() {
         assert!(abs(out.yaw) <= core::f32::consts::PI + 1e-3);
     }
 }
+
+#[test]
+fn board_measured_static_values_hold_the_attitude() {
+    // The Raze, at rest on the bench: accelerometer (9.793, -0.099, -0.440)
+    // m/s², gyroscope about (0, -0.005, 0.002) rad/s, 100 Hz, 6-axis.
+    let mut o = Orientation::new(OrientationConfig::default());
+    let a = [9.793, -0.099, -0.440];
+    let g = [0.0, -0.005, 0.002];
+    for k in 0..500u64 {
+        o.update_imu(k * 10_000, g, a);
+    }
+    let out = o.output();
+    // The board is on its side (gravity along the sensor's X): the attitude
+    // must follow the accelerometer, not a level start.
+    assert!((deg(out.pitch) + 87.0).abs() < 2.0, "pitch {} deg", deg(out.pitch));
+    for i in 0..3 {
+        assert!((out.gravity[i] - a[i]).abs() < 0.1, "gravity {i}: {:?}", out.gravity);
+    }
+}

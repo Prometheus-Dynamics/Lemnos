@@ -430,39 +430,21 @@ as Orion actions on the resource: `calibration.*` and the confidence status keys
 
 ## Measurements
 
-Measured on the Raze (CM5) only; host timings are not reported. The plan: `lemnosd`'s CPU with the
-fusion device subscribed at 100 Hz, and orientation sanity (the gravity vector against the board's
-pose; yaw over 60 s at rest). Results are recorded in the commit that adds them.
+Measured on the Raze (CM5, board image r20, the IMU on the PIO bus), with the lemnosd build of
+commit 49710c9 (the `float` feature on in the board's drivers):
 
-## Implementation notes (lemnosd)
+- **CPU:** lemnosd idle with the orientation device not subscribed: 0 %. With it subscribed at 10 ms
+  (100 Hz output, 6501 readings over 65 s): 8 % of one core, measured from `/proc/<pid>/stat`
+  (whole percent).
+- **Gravity against the board's pose:** the board rests on its side, with gravity on the sensor's X
+  axis (accelerometer about (9.79, -0.10, -0.44) m/s²). The estimate starts at identity (gravity on
+  Z) and approaches the accelerometer with a time constant of about 20 s (the Mahony integral pole
+  `kp/ki`); at 65 s it reads (9.794, -0.055, -0.492).
+- **Rest drift:** the quaternion turned 0.46 degrees between 40 s and 65 s. In six-axis mode yaw is
+  relative, so this is the drift of the whole attitude, not an absolute yaw.
+- **Magnetometer:** not calibrated on the bench, so `magnetic_disturbance` stays 1 (the magnetometer
+  is ignored) and the filter runs six-axis.
 
-Deviations from the design above, as built:
-
-- **Status of the fusion device.** `CalibrationStatus` on `orientation` is `Unsupported` (the
-  fusion has no calibration of its own). Its confidences are the channels `confidence.imu` and
-  `confidence.magnetometer`: read them with `lemnos-ctl watch orientation`. `calibration reset
-  orientation` restarts the filter; other commands are `Unsupported`.
-- **Busy device.** A calibration command for a device whose bus thread holds it is refused with
-  `Busy` (retryable), not queued. A status request is answered from the last status seen.
-- **Words are not sent over IPC.** `calibration show` prints the live status and a summary of the
-  saved file (driver, revision, word count), not the decoded words.
-- **Before the first valid output** the fusion's status is `degraded` (not `available`); its
-  values are `NO_VALUE`.
-- **Fusion rate.** Without `poll_ms` the fusion reports at 10 ms (the fusion's own default); the
-  IMU's internal subscription is at the fusion's fastest subscriber period, never below 10 ms.
-  The magnetometer's internal subscription asks for 100 ms, but the device's `poll_ms` still caps
-  it (a magnetometer with `poll_ms` 1000 is read at 1 s).
-- **6-axis** fusions ignore `mag`: the magnetometer is not read for them.
-- **Registry checks.** `Interface::Composite` (no bus, address or match). The registry checks
-  `imu` (required), `mag` (required for `9axis`), value types, and `mode`/`algorithm` choices.
-  Whether `imu` and `mag` name built devices with the right channels is checked by lemnosd.
-  A fusion whose inputs are missing stays `missing` with its reason and is retried each second.
-- **Idle sensors** still get one read when built (the schedule's first deadline is due once); the
-  IMU and magnetometer are not read again until a subscriber arrives.
-- **Calibration files** that are refused keep the device running with factory calibration; the
-  reason is appended to the device's `reason` (shown by `lemnos-ctl list`).
-- **Modules.** `calibration.rs` (files), `fusion.rs` (device, settings, feeding, internal
-  subscriptions), `service_fusion.rs` and `service_calibration.rs` (the service's glue, split out
-  to keep `service.rs` from growing), `ctl_calibration.rs` (`lemnos-ctl calibration`).
-- **Client API.** `lemnos_ipc::DeviceClient::calibration` and `calibration_status` are new.
-- **Orion.** The calibration actions and confidence status keys are in `lemnos-orion` (see orion.md).
+Open: the first output starts from identity rather than from the first accelerometer sample, which
+`Orientation::init` would give. The filter test from a tilted start passes on the host, so the
+difference is in how the first samples reach the filter. Not yet traced.
