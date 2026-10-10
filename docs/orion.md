@@ -137,6 +137,7 @@ A refused action is `Rejected` with the reason. A failure of the device is `Fail
 | `LEMNOSD_SOCKET` | `/run/lemnos/lemnosd.sock` | lemnosd's socket |
 | `LEMNOSD_BOARD` | `/etc/lemnos/board.toml` | the board definition (for `lemnos.driver` labels only) |
 | `LEMNOS_ORION_RATE_HZ` | `2` | readings per device per second, in (0, 50] |
+| `LEMNOS_ORION_CHANNELS` | (unset) | `device=channel,channel;device=...`: subscribe to those channels only (`angular_rate.z`, `acceleration.*`, `*`); other devices are whole |
 | `ORION_NODE_ID` | `node.local` | the node the provider runs on (must match the node) |
 | `ORION_NODE_IPC_SOCKET` | `/run/orion/control.sock` (unit) | Orion's local IPC socket, as orion-node's unit sets it |
 | `ORION_NODE_IPC_STREAM_SOCKET` | `/run/orion/control-stream.sock` (unit) | Orion's local IPC stream socket, as orion-node's unit sets it |

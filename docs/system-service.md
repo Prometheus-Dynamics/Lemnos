@@ -180,6 +180,12 @@ led.clear()?;                                // drop this client's intents
   produces no readings (a light, a fan). A refused subscription is not kept across
   reconnections. `period_ms` 0 unsubscribes. Older services send no answer, so such a
   subscribe waits for its timeout and returns `Timeout`; the subscription still stands.
+  `subscribe_channels(device, channels, period_ms)` (`lemnos-ctl watch imu --channels
+  angular_rate.z`) subscribes to some channels only: a name, `prefix.*` (every channel
+  under `prefix.`), or `*`. Other channels come back with no value, and the device reads
+  only what the channels need (see Sensor reads). A channel name that is none of the
+  device's is refused `unknown-channel`. Each selection is its own subscription, at its
+  own period, so gyro Z at 100 Hz and the accelerometer at 10 Hz can share one IMU.
   Values travel as fixed-point integers with their exponents and are converted to `f64` on
   the client. A channel's `value()` is in its quantity's canonical unit (m/s², rad/s, ...);
   the raw count is that value times `10^-exponent`. The BMI088's counts are therefore mm/s²
@@ -273,6 +279,7 @@ led.clear()?;                                // drop this client's intents
 lemnos-ctl list
 lemnos-ctl read imu
 lemnos-ctl watch imu --period 50
+lemnos-ctl watch imu --channels angular_rate.z --period 10   # yaw only: fewer bus bytes
 lemnos-ctl set fan duty 0.8
 lemnos-ctl led status warn --effect breathe --fade 400 --easing sine
 lemnos-ctl led orbit 00ff00 --period 1600 --tail 6 --base 0.06   # searching
@@ -280,7 +287,7 @@ lemnos-ctl led color ff8000 --brightness 0.5
 lemnos-ctl led pixel 0 ff0000 8 0000ff
 lemnos-ctl led progress 0.4 --color 00ff40
 lemnos-ctl led system updating 0.4 --phase writing
-lemnos-ctl led system confirmed        # the trial boot passed: a green ripple, 2.2 s
+lemnos-ctl led system confirmed        # the trial boot passed: a green celebration, 1.9 s
 lemnos-ctl led locate --seconds 10
 lemnos-ctl led frame ff0000,00ff00,0000ff --test --seconds 5   # selftest look, over status
 lemnos-ctl led off --test             # clears only the test layer
@@ -394,10 +401,10 @@ comets and arcs at 100%, all scaled by the board's `look_brightness` (default 50
 | `updating` with progress | the progress arc in `updating` (blue) over the faint track (`progress_background`, 6% neutral white): the filled LEDs shade from 25% to full, the leading LED is whitened, and a slow sheen travels over the fill |
 | `updating` while the amount is unknown (`verifying`) | a purple comet (`verifying`): one head, 1.2 s a turn, 7 LEDs of tail, a 5% floor |
 | `updating`, `writing` without progress | the same comet in `writing` |
-| `updating`, `staged` | a full green breathe (`staged`): 2.2 s, down to 55% |
+| `updating`, `staged` | a green breathe (`staged`) at 85% of full, down to 55% of that: 2.2 s |
 | `booting` (also the start-up look), the trial boot (`trying`) | twin comets in `booting` (warm white): 1.8 s, 5 LEDs of tail each, a 4% floor |
-| `confirmed` (the trial boot passed) | a green ripple (`confirmed`): a front runs down from the top at 12 LEDs a second, then a settling glow; held 2.2 s, then the light is released |
-| `rebooting` (also the shutdown look) | a static ember: `rebooting` at 12% of the ring's brightness, never less than 6%; the ring holds it while power is cycled |
+| `confirmed` (the trial boot passed) | a celebration (`confirmed`): the whole ring flashes up in green (above the fill cap), two fronts run out from the top and back, and the glow decays to off over about 1.2 s (a `pulse` envelope, 1.86 s); held 2.6 s, then the light is released |
+| `rebooting` (the updater's state, and the shutdown look) | a static ember: `rebooting` at 44% of full (about 22% on a default ring, 16% floor); the ring holds it while power is cycled |
 | `update-failed`, `rolled-back` | a red breathe (`failed`): 2.4 s, down to 10% |
 | `locate` | bright cyan, breathing (or `chase`: a comet) |
 | idle status | as the client set it |
@@ -420,14 +427,19 @@ system intent of its own. The status file's path is set only by `LEMNOSD_UPDATE_
 | `staging`, no copy progress yet | `updating`, verifying (purple comet) |
 | `staging` with progress | `updating`, writing, the arc at `100 + copied × 85 / 100` thousandths (the mapping `update status` reports) |
 | `staged` | `updating`, staged (green breathe), for 5 s |
+| `rebooting` | the ember (`rebooting`), held while the updater says so: the updater writes it just before it restarts into a new version or back |
 | `trying` (the trial boot) | `booting` (twin comets) |
-| `confirmed`, after `trying` in this service's run | `confirmed` (the ripple), for 2.2 s, then released |
+| `confirmed`, after `trying` in this service's run | `confirmed` (the celebration), for 2.6 s, then released |
 | `rolled-back`, `error` | `rolled-back` / `update-failed`, for 60 s |
 | `idle`, `confirmed` at start-up | released: the previous owner's intent fades back. A `confirmed` found at start-up shows nothing: the ripple is for the trial boot that just passed |
 
-When the service stops while systemd is stopping the system, it fades the ring to the
-`rebooting` ember over 1.2 s and holds it (the kernel driver keeps the last frame); the fade
-is capped at 1.5 s, so a stop is never delayed longer. Otherwise it turns the ring off. With
+When the service stops for a restart, it fades the ring to the `rebooting` ember over 1.2 s
+and holds it (the kernel driver keeps the last frame); the fade is capped at 1.5 s, so a stop
+is never delayed longer. A restart is detected from systemd: `systemctl is-active reboot.target`
+is `active` while `systemctl reboot` (with or without `--reboot-argument`, such as `0 tryboot`)
+stops the services. `poweroff.target` or `halt.target` active means a power-off (the ring goes
+dark). If neither answers, `is-system-running` saying `stopping` is taken as a restart. This is
+the service's own check of systemd's state; the updater's `rebooting` state is a second signal. Otherwise it turns the ring off. With
 `LEMNOSD_BOOTING_MS` set, the ring shows `booting` from the service's start until a client
 sets a status or the time passes.
 
@@ -458,9 +470,33 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   frame, which costs far more bus time than polling 100 Hz. Turn it on only with output
   rates that match what is subscribed.
 - **Bus cost.** On the Raze's bit-banged `i2c-gpio` bus the cost follows the bytes moved
-  (about 0.2 ms each): the IMU at 100 Hz costs about 36 % of a core, and each doubling of the
-  output rate doubles it. Lowering the output rate or moving the IMU to a hardware I2C pair
-  are the levers, not the scheduler.
+  (about 25 µs a bit, so about 0.2 ms a byte): the IMU's accelerometer and gyroscope at 100 Hz
+  cost about 37 % of a core, and each doubling of the output rate doubles it. Lowering the
+  output rate, reading fewer channels (below) or moving the IMU to a hardware I2C pair are the
+  levers, not the scheduler.
+- **Channel selection.** A subscription can name channels (`subscribe_channels`). Each read
+  reads only the channels of the subscriptions due at that read (`Slot::read_mask`), through
+  `Sensor::select_channels`: the BMI088 reads only the registers of the selected axes, one
+  burst per die covering its selected axes (gyro Z alone is a two-byte read; gyro only, or
+  accelerometer only, one six-byte read). A subscriber gets the values it asked for, with no
+  value for the rest. A one-shot `read` always reads every channel. The whole-device
+  subscription (`subscribe`) is unchanged.
+
+  Bus cost, in bytes on the bus per sample (each transaction is a 3-byte address and register
+  setup plus its data bytes; the accelerometer and gyroscope are two I2C devices, so "both"
+  is two transactions, not one burst). Calibrated on the Raze, where full 100 Hz is 37 % of a
+  core (18 bytes a sample, about 0.2 ms a byte, measured on the board):
+
+  | Subscription | Bytes a second | CPU (estimate) |
+  |---|---|---|
+  | accelerometer + gyroscope, 100 Hz (whole device) | 1800 | 37 % |
+  | gyroscope only, 100 Hz | 900 | 18.5 % |
+  | yaw only (`angular_rate.z`), 100 Hz | 500 | 10 % |
+  | yaw 100 Hz + accelerometer 10 Hz | 590 | 12 % |
+
+  The estimates are from the byte model and the 37 % measurement, not measured per
+  configuration on the board. Gyroscope only is 9 bytes a read (3 + 6), yaw only 5 (3 + 2),
+  and the accelerometer adds 9 at each of its reads (10 a second in the last row).
 
 ## Backends for the Raze's sensors: kernel or userspace
 

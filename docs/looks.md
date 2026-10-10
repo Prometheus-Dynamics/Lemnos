@@ -37,21 +37,28 @@ integer `0xWWRRGGBB`.
 
 ## Envelope and brightness
 
-The **envelope** is a breathe or a blink over the whole look:
+The **envelope** is a breathe, a blink or a pulse over the whole look:
 
 ```toml
 envelope = { kind = "breathe", period_ms = 4000, depth = 0.18, easing = "ease-in-out" }
 envelope = { kind = "blink", period_ms = 1000, duty = 0.5 }
-envelope = "solid"                         # or "breathe"/"blink" with the defaults
+envelope = { kind = "pulse", attack_ms = 60, hold_ms = 600, decay_ms = 1200, repeat = 1 }
+envelope = "solid"                         # or "breathe"/"blink"/"pulse" with the defaults
 ```
 
 - `breathe`: `period_ms` (2000), `depth` (0.6: the brightness eases down by this
   much and back), `easing` (`ease-in-out`; any easing `lemnos-light` knows, or
   `cubic-bezier(x1, y1, x2, y2)`).
 - `blink`: `period_ms` (1000), `duty` (0.5, the fraction of the period lit).
+- `pulse`: a one-shot flash then a glow to off. The level rises linearly over
+  `attack_ms` (80), holds for `hold_ms` (0), then decays over `decay_ms` (1000)
+  on a quadratic ease-out to 0, and is 0 after the last one. `repeat` (1) is
+  how many times it runs; 0 keeps repeating. `attack_ms` and `hold_ms` are 0 to
+  60000, `decay_ms` 1 to 60000.
 
 The look's own `brightness` (0 to 1, default 1) and `min_brightness` (0 to 1,
-default 0) follow, then the **ring-wide** brightness (below). `min_brightness`
+default 0) follow, then the **ring-wide** brightness (below). A look's own
+brightness may be above the fill cap (0.7): `system.confirmed` is. `min_brightness`
 is the least the look is shown at after that scale.
 
 ## A look file
@@ -90,11 +97,11 @@ the defaults shown. Each is also a valid `led look <name>`.
 | `system.verifying` | a purple comet, 1200 ms, tail 7, base 0.05 (`verifying_*`) | comet 1.0 |
 | `system.writing` | the blue arc over the faint track, sheen, the request's progress | arc 1.0 |
 | `system.writing-unknown` | the blue comet, with the verifying timing | comet 1.0 |
-| `system.staged` | the green breathe, 2200 ms, depth 0.45 (`staged_*`) | fill 0.7 |
+| `system.staged` | the green breathe, 2200 ms, depth 0.45 (`staged_*`) | fill 0.85 |
 | `system.booting` | two warm-white comets, 1800 ms, tail 5, base 0.04 (`booting_*`) | comet 1.0 |
-| `system.rebooting` | the reboot ember: the rebooting colour at 12%, held at least 6% | ember |
+| `system.rebooting` | the reboot ember: the rebooting colour at 44%, held at least 16% (about 22% on a default ring) | ember |
 | `system.failed` `system.rolled-back` | the red breathe, 2400 ms, depth 0.9 (`failed_*`) | fill 0.7 |
-| `system.confirmed` | the green ripple (`confirmed`) | ripple 1.0 |
+| `system.confirmed` | the green celebration: the whole ring flashes up in `confirmed` (55%, above the fill cap), two fronts run out from the top and back, and the glow decays to off (a `pulse` envelope, 1.86 s) | fill 0.55, ripple 1.0 |
 | `system.locate` | the `locate` colour, breathe or chase (`locate_effect`) | fill 0.7 |
 | `pv.targets` | blue `2f7bff` breathe, 4000 ms, depth 0.18 | fill 0.7 |
 | `pv.searching` | green `00ff20` comet, 1600 ms, tail 6, base 0.06 | comet 1.0 |
@@ -102,6 +109,12 @@ the defaults shown. Each is also a valid `led look <name>`.
 | `pv.no-nt-targets` | blue `2f7bff`, two comets, 2400 ms, tail 5, base 0.08 | comet 1.0 |
 | `pv.error` | red `ff3b3b` breathe, 2000 ms, depth 0.85 | fill 0.7 |
 | `pv.vision` | steady white `ffffff` | fill 0.7 |
+
+A comet's head is anti-aliased: the LED just ahead of a head is lit by the
+fraction of the way the head has got to it, so a head moves from LED to LED
+in steps of a fraction of a LED, not a whole LED at a time, for one head, two
+and every tail. A test (`lemnos-light`, `comet_leading_edges_move_smoothly_at_one_ms_steps`)
+checks that no LED changes by more than 9 of 255 in 1 ms over one turn.
 
 `system.writing-unknown` is the write phase while its amount is unknown; the
 update's other states are listed in `docs/system-service.md`.
@@ -113,7 +126,7 @@ The **ring-wide** brightness scales every look: the board's
 comets and arcs, and 0.7 for full-ring fills and breathes (the built-in fills,
 status, locate, and `pv.targets`/`pv.error`/`pv.vision`), so a fill is not
 brighter than a comet's head. A request's `--brightness` replaces the look's
-own, and the ring-wide scale still applies. The reboot ember keeps a 6% floor.
+own, and the ring-wide scale still applies. The reboot ember keeps a 16% floor.
 
 To tune: set `look_brightness` on the light (`config` in `board.toml`), or
 `brightness` on a look for a single look. `brightness` on the light is the
