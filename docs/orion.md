@@ -7,7 +7,7 @@ for HeliOS. Changing a name or unit here is a breaking change.
 
 `lemnos-orion` is a lemnosd client (name `orion`) and an Orion provider over local IPC (client name
 `lemnos-orion`, provider `lemnos`). It publishes each board device as an Orion resource, mirrors its
-readings and status, and runs four actions on it. Raw GPIO, PWM, I2C and SPI stay direct to lemnosd
+readings and status, and runs its actions on it (`set`, `restore`, `release`, `read`, and the calibration actions below). Raw GPIO, PWM, I2C and SPI stay direct to lemnosd
 and are not exposed here. Device operations such as calibration are not built yet.
 
 Pinned against Orion `main` at `4fadba9` (`TypedConfigValue::F64` for readings). The actions use the
@@ -97,6 +97,17 @@ handler, so Orion routes an action here only while the bridge is connected.
 | `read` | none | `status` (string), `read_us` (`UInt`), one `F64` per channel with a value | the device's latest reading |
 | `power.set` | `on` (bool, required) | `control` (`power.on`), `applied` (`F64`) | switches a power switch on or off (`gpio-power-switch`; a latched setting, see [system-service.md](system-service.md), *Power switches*) |
 | `power.reset` | `off_ms` (number, optional, default 1000; 0 to 10000) | `control` (`power.reset`), `applied` (`F64`) | turns a power switch off for `off_ms` and back on (recovers a port that latched off) |
+| `calibration.start` | `routine` (string, required: `accel-six`, `mag-rotate` or `gyro-hold`) | none | starts a forced routine (the IMU takes `accel-six` and `gyro-hold`, the magnetometer `mag-rotate`) |
+| `calibration.stop` | none | none | ends the running routine; a finished candidate is kept |
+| `calibration.apply` | none | none | makes the candidate the applied calibration (replaces it at once); lemnosd saves it |
+| `calibration.discard` | none | none | drops the candidate |
+| `calibration.reset` | none | none | returns the device to its factory calibration |
+| `calibration.status` | none | `revision` (`UInt`), `running` (string: `none` or the routine), `progress` (`F64`, 0 to 1), `candidate` and `failed` (`Bool`), and for each of `accel`, `gyro`, `mag`: `samples` (`UInt`), `confidence`, `coverage`, `residual` (`F64`, 0 to 1), `active` (`Bool`) | the calibration's state, read now |
+
+The IMU and magnetometer resources also carry the calibration confidence as status keys, polled about
+every 10 s and published when they change: `calibration.revision`, `calibration.candidate`,
+`calibration.accel.confidence`, `calibration.gyro.confidence`, `calibration.mag.confidence` (`F64`, 0 to 1)
+and `calibration.<part>.active` (`Bool`). A device with no such part reads as zero.
 
 Writer naming: each caller (`requested_by`) gets its own lemnosd connection named `orion:<requested_by>`,
 created on its first action. lemnosd applies a device's write policy to that name, and it ends the
@@ -115,7 +126,8 @@ A refused action is `Rejected` with the reason. A failure of the device is `Fail
 |---|---|---|
 | Rejected | `only resources take lemnos actions` | target is not a resource |
 | Rejected | `no lemnos device <resource>` | the resource is not on this board |
-| Rejected | `unsupported action `<name>` (one of set, restore, release, read, power.set, power.reset)` | unknown name |
+| Rejected | `unsupported action `<name>` (one of set, restore, release, read, calibration.start, calibration.stop, calibration.apply, calibration.discard, calibration.reset, calibration.status)` | unknown name |
+| Rejected | `` `routine` (accel-six, mag-rotate or gyro-hold) is required `` / `` unknown routine `<name>` `` | bad `calibration.start` arguments |
 | Rejected | `` `control` (string) is required `` / `` `value` (number) is required `` / `` `value` must be finite `` | bad `set` arguments |
 | Rejected | `not allowed by the device's write policy` | the caller is not in the device's `writers` |
 | Rejected | `value out of range` | outside the control's range |

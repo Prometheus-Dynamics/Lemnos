@@ -135,9 +135,12 @@ fn a_channel_subscription_gets_its_channels_and_refuses_unknown_names() {
             continue;
         }
         readings += 1;
-        assert_eq!(r.raw.len(), 6);
+        // The BMI088 has twelve channels (six raw, six calibrated); only
+        // angular_rate.z (raw index 5) was asked for.
+        assert_eq!(r.raw.len(), 12);
         assert!(r.raw[..5].iter().all(|v| *v == NO_VALUE), "{:?}", r.raw);
         assert_ne!(r.raw[5], NO_VALUE);
+        assert!(r.raw[6..].iter().all(|v| *v == NO_VALUE), "{:?}", r.raw);
     }
     // Ending the selection stops its readings.
     assert_eq!(

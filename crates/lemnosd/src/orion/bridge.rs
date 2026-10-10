@@ -121,6 +121,11 @@ enum Feed {
     },
     /// A reading or an event from lemnosd.
     Update(Update),
+    /// A calibration status, polled from lemnosd (see `poll_calibration`).
+    Calibration {
+        device: String,
+        status: lemnos_device::CalibrationStatus,
+    },
 }
 
 /// What the watch tasks send the main loop.
@@ -287,9 +292,16 @@ fn pump(
             std::thread::sleep(retry);
             continue;
         }
+        let mut next_calibration = Instant::now();
         loop {
             if feed.is_closed() {
                 return;
+            }
+            if Instant::now() >= next_calibration {
+                next_calibration = Instant::now() + CALIBRATION_POLL;
+                if !poll_calibration(&mut client, feed) {
+                    return;
+                }
             }
             match client.next_event_timeout(Duration::from_millis(200)) {
                 Ok(None) => {}
@@ -314,6 +326,35 @@ fn pump(
         }
         std::thread::sleep(retry);
     }
+}
+
+/// How often the calibration status of the IMUs and magnetometers is read.
+const CALIBRATION_POLL: Duration = Duration::from_secs(10);
+
+/// Reads the calibration status of each IMU and magnetometer and feeds it to
+/// the mirror. `false` when the bridge has ended.
+fn poll_calibration(client: &mut DeviceClient, feed: &mpsc::UnboundedSender<Feed>) -> bool {
+    let Ok(devices) = client.list() else {
+        return true;
+    };
+    for device in devices.iter().filter(|d| {
+        matches!(
+            d.class,
+            lemnos_device::DeviceClass::Imu | lemnos_device::DeviceClass::Magnetometer
+        )
+    }) {
+        if let Ok(status) = client.calibration_status(&device.id)
+            && feed
+                .send(Feed::Calibration {
+                    device: device.id.clone(),
+                    status,
+                })
+                .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// `device=channel,channel;device=...` (`LEMNOS_ORION_CHANNELS`): each device
@@ -408,6 +449,10 @@ fn apply_feed(
         } => slot
             .as_mut()
             .map(|mirror| mirror.control(&device, &control, value))
+            .unwrap_or_default(),
+        Feed::Calibration { device, status } => slot
+            .as_mut()
+            .map(|mirror| mirror.calibration(&device, &status))
             .unwrap_or_default(),
         Feed::Update(update) => match slot.as_mut() {
             None => Vec::new(),
@@ -625,6 +670,16 @@ fn run_op(client: &mut DeviceClient, device: &str, op: Op) -> Outcome {
         },
         Op::Release => match client.release(device) {
             Ok(()) => Outcome::Succeeded(BTreeMap::new()),
+            Err(error) => ops::client_error(error),
+        },
+        Op::Calibration(ops::CalibrationOp::Command(command)) => {
+            match client.calibration(device, command) {
+                Ok(()) => Outcome::Succeeded(BTreeMap::new()),
+                Err(error) => ops::client_error(error),
+            }
+        }
+        Op::Calibration(ops::CalibrationOp::Status) => match client.calibration_status(device) {
+            Ok(status) => Outcome::Succeeded(ops::calibration_output(&status)),
             Err(error) => ops::client_error(error),
         },
         Op::Read => match client.read(device) {

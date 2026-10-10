@@ -3,17 +3,24 @@
 
 use std::collections::BTreeMap;
 
+use lemnos_device::{CalibrationCommand, CalibrationRoutine, CalibrationStatus};
 use lemnos_ipc::{ClientError, Refusal};
 use orion_control_plane::TypedConfigValue;
 
 /// The action names a device resource accepts.
-pub const ACTIONS: [&str; 6] = [
+pub const ACTIONS: [&str; 12] = [
     "set",
     "restore",
     "release",
     "read",
     "power.set",
     "power.reset",
+    "calibration.start",
+    "calibration.stop",
+    "calibration.apply",
+    "calibration.discard",
+    "calibration.reset",
+    "calibration.status",
 ];
 
 /// A parsed action.
@@ -27,6 +34,18 @@ pub enum Op {
     Release,
     /// `read`: the device's latest reading.
     Read,
+    /// A calibration action (`calibration.*`): a command, or the status.
+    Calibration(CalibrationOp),
+}
+
+/// A calibration action on the device.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CalibrationOp {
+    /// `calibration.start` (`routine`), `stop`, `apply`, `discard`, `reset`.
+    Command(CalibrationCommand),
+    /// `calibration.status`: the revision, the routine running, the parts'
+    /// confidences (see [`calibration_output`]).
+    Status,
 }
 
 /// How an action ended.
@@ -79,6 +98,29 @@ pub fn parse(name: &str, args: &BTreeMap<String, TypedConfigValue>) -> Result<Op
                 value: off_ms,
             })
         }
+        "calibration.start" => {
+            let name = text(args, "routine").ok_or_else(|| {
+                "`routine` (accel-six, mag-rotate or gyro-hold) is required".to_owned()
+            })?;
+            let routine = CalibrationRoutine::from_name(&name)
+                .ok_or_else(|| format!("unknown routine `{name}`"))?;
+            Ok(Op::Calibration(CalibrationOp::Command(
+                CalibrationCommand::Start(routine),
+            )))
+        }
+        "calibration.stop" => Ok(Op::Calibration(CalibrationOp::Command(
+            CalibrationCommand::Stop,
+        ))),
+        "calibration.apply" => Ok(Op::Calibration(CalibrationOp::Command(
+            CalibrationCommand::Apply,
+        ))),
+        "calibration.discard" => Ok(Op::Calibration(CalibrationOp::Command(
+            CalibrationCommand::Discard,
+        ))),
+        "calibration.reset" => Ok(Op::Calibration(CalibrationOp::Command(
+            CalibrationCommand::Reset,
+        ))),
+        "calibration.status" => Ok(Op::Calibration(CalibrationOp::Status)),
         other => Err(format!(
             "unsupported action `{other}` (one of {})",
             ACTIONS.join(", ")
@@ -120,6 +162,51 @@ pub fn client_error(error: ClientError) -> Outcome {
         ClientError::Refused(refused) => refusal(refused),
         other => Outcome::Failed(format!("lemnosd: {other}")),
     }
+}
+
+/// The output of `calibration.status`: `revision`, `running` (`none` or the
+/// routine's name), `progress` (0 to 1), `candidate` and `failed`, then for
+/// each part (`accel`, `gyro`, `mag`) its `samples`, `confidence`, `coverage`,
+/// `residual` (ratios, 0 to 1) and `active`. A part the device does not have
+/// reads all zeros.
+pub fn calibration_output(status: &CalibrationStatus) -> BTreeMap<String, TypedConfigValue> {
+    let ratio = |permille: u16| TypedConfigValue::F64(f64::from(permille) / 1000.0);
+    let mut out = BTreeMap::new();
+    out.insert(
+        "revision".to_owned(),
+        TypedConfigValue::UInt(u64::from(status.revision)),
+    );
+    let running = status.running.map_or("none", CalibrationRoutine::name);
+    out.insert(
+        "running".to_owned(),
+        TypedConfigValue::String(running.to_owned()),
+    );
+    out.insert("progress".to_owned(), ratio(status.progress));
+    out.insert(
+        "candidate".to_owned(),
+        TypedConfigValue::Bool(status.candidate),
+    );
+    out.insert("failed".to_owned(), TypedConfigValue::Bool(status.failed));
+    let parts = [
+        ("accel", lemnos_device::PART_ACCEL),
+        ("gyro", lemnos_device::PART_GYRO),
+        ("mag", lemnos_device::PART_MAG),
+    ];
+    for (name, index) in parts {
+        let part = status.parts[index];
+        out.insert(
+            format!("{name}.samples"),
+            TypedConfigValue::UInt(u64::from(part.samples)),
+        );
+        out.insert(format!("{name}.confidence"), ratio(part.confidence));
+        out.insert(format!("{name}.coverage"), ratio(part.coverage));
+        out.insert(format!("{name}.residual"), ratio(part.residual));
+        out.insert(
+            format!("{name}.active"),
+            TypedConfigValue::Bool(part.active),
+        );
+    }
+    out
 }
 
 /// The output of a successful `set`.
@@ -217,5 +304,62 @@ mod tests {
             client_error(ClientError::Timeout),
             Outcome::Failed(_)
         ));
+    }
+
+    #[test]
+    fn calibration_actions_parse_and_name_their_routine() {
+        assert_eq!(
+            parse(
+                "calibration.start",
+                &args(&[("routine", TypedConfigValue::String("mag-rotate".into()))])
+            ),
+            Ok(Op::Calibration(CalibrationOp::Command(
+                CalibrationCommand::Start(CalibrationRoutine::MagRotate)
+            )))
+        );
+        assert!(parse("calibration.start", &BTreeMap::new()).is_err());
+        assert!(
+            parse(
+                "calibration.start",
+                &args(&[("routine", TypedConfigValue::String("spin".into()))])
+            )
+            .is_err()
+        );
+        for (name, command) in [
+            ("calibration.stop", CalibrationCommand::Stop),
+            ("calibration.apply", CalibrationCommand::Apply),
+            ("calibration.discard", CalibrationCommand::Discard),
+            ("calibration.reset", CalibrationCommand::Reset),
+        ] {
+            assert_eq!(
+                parse(name, &BTreeMap::new()),
+                Ok(Op::Calibration(CalibrationOp::Command(command)))
+            );
+        }
+        assert_eq!(
+            parse("calibration.status", &BTreeMap::new()),
+            Ok(Op::Calibration(CalibrationOp::Status))
+        );
+        assert_eq!(ACTIONS.len(), 12);
+    }
+
+    #[test]
+    fn calibration_status_reports_confidences_as_ratios() {
+        let mut status = CalibrationStatus {
+            revision: 3,
+            running: Some(CalibrationRoutine::AccelSix),
+            progress: 250,
+            candidate: true,
+            failed: false,
+            parts: [Default::default(); 3],
+        };
+        status.parts[lemnos_device::PART_ACCEL].confidence = 800;
+        status.parts[lemnos_device::PART_ACCEL].active = true;
+        let out = calibration_output(&status);
+        assert_eq!(out["running"], TypedConfigValue::String("accel-six".into()));
+        assert_eq!(out["progress"], TypedConfigValue::F64(0.25));
+        assert_eq!(out["accel.confidence"], TypedConfigValue::F64(0.8));
+        assert_eq!(out["accel.active"], TypedConfigValue::Bool(true));
+        assert_eq!(out["candidate"], TypedConfigValue::Bool(true));
     }
 }

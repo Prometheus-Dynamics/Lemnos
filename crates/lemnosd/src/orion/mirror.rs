@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use lemnos_device::CalibrationStatus;
 use lemnos_ipc::{ChannelDesc, ControlDesc, DeviceDesc, DeviceStatus, NO_VALUE, Quantity};
 use orion_control_plane::{
     AvailabilityState, HealthState, ResourceRecord, StatusEntry, StatusSubject, TypedConfigValue,
@@ -114,6 +115,8 @@ struct Device {
     values: Vec<Option<f64>>,
     /// Last value published per control (`None`: never).
     controls: Vec<Option<f64>>,
+    /// Last value published per calibration key (see `Mirror::calibration`).
+    calibration: BTreeMap<String, TypedConfigValue>,
     read_us: Option<u64>,
     last_publish: Option<Duration>,
     last_heartbeat: Option<Duration>,
@@ -296,6 +299,50 @@ impl Mirror {
         )]
     }
 
+    /// The calibration's confidence keys (`calibration.<part>.confidence` and
+    /// `.active`, `calibration.candidate`, `calibration.revision`), published
+    /// when they change. Ratios are 0 to 1.
+    pub fn calibration(&mut self, device: &str, status: &CalibrationStatus) -> Vec<StatusEntry> {
+        let ttl = self.cadence.ttl_ms();
+        let Some(device) = self.find_mut(device) else {
+            return Vec::new();
+        };
+        let mut values: Vec<(String, TypedConfigValue)> = vec![
+            (
+                "calibration.revision".to_owned(),
+                TypedConfigValue::UInt(u64::from(status.revision)),
+            ),
+            (
+                "calibration.candidate".to_owned(),
+                TypedConfigValue::Bool(status.candidate),
+            ),
+        ];
+        for (name, index) in [
+            ("accel", lemnos_device::PART_ACCEL),
+            ("gyro", lemnos_device::PART_GYRO),
+            ("mag", lemnos_device::PART_MAG),
+        ] {
+            let part = status.parts[index];
+            values.push((
+                format!("calibration.{name}.confidence"),
+                TypedConfigValue::F64(f64::from(part.confidence) / 1000.0),
+            ));
+            values.push((
+                format!("calibration.{name}.active"),
+                TypedConfigValue::Bool(part.active),
+            ));
+        }
+        let mut out = Vec::new();
+        for (key, value) in values {
+            let last = device.calibration.get(&key);
+            if last != Some(&value) {
+                device.calibration.insert(key.clone(), value.clone());
+                out.push(entry(&device.resource, key, value, ttl));
+            }
+        }
+        out
+    }
+
     /// The controls to read at connection: their names, for `get`.
     pub fn control_names(&self, device: &str) -> Vec<String> {
         self.find(device)
@@ -347,6 +394,7 @@ impl Device {
             status: None,
             values: vec![None; channels],
             controls: vec![None; controls],
+            calibration: BTreeMap::new(),
             read_us: None,
             last_publish: None,
             last_heartbeat: None,
