@@ -309,10 +309,16 @@ mod tests {
         let base = 4;
         let from_idle = start_words(base, 7, true);
         assert_eq!(from_idle.len(), 3);
-        assert_eq!(((from_idle[2] >> 15) & 0xffff) & 0x1f, u32::from(base + LOW_PULL));
+        assert_eq!(
+            ((from_idle[2] >> 15) & 0xffff) & 0x1f,
+            u32::from(base + LOW_PULL)
+        );
         let repeated = start_words(base, 7, false);
         assert_eq!(repeated.len(), 6);
-        assert_eq!(((repeated[5] >> 15) & 0xffff) & 0x1f, u32::from(base + LOW_PULL));
+        assert_eq!(
+            ((repeated[5] >> 15) & 0xffff) & 0x1f,
+            u32::from(base + LOW_PULL)
+        );
         let stop = stop_words(base, 7);
         assert_eq!(stop.len(), 5);
     }
