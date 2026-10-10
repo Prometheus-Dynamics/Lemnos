@@ -382,7 +382,12 @@ mock server of their own.
 ## System states and the updater
 
 Built-in animations, usable by any client (`LedClient::system`, `lemnos-ctl led system`) and
-shown above application status (below `locate`):
+shown above application status (below `locate`). Each state is a named look
+(`system.verifying`, `system.writing`, `system.writing-unknown`, `system.staged`,
+`system.booting`, `system.rebooting`, `system.confirmed`, `system.failed`,
+`system.rolled-back`, `system.locate`); a look file replaces any of them, and the updater's
+visuals with them (`docs/looks.md`). Full-ring fills and breathes are at 70% of full and
+comets and arcs at 100%, all scaled by the board's `look_brightness` (default 50%).
 
 | State | Look (colours and timing from the board definition) |
 |---|---|
@@ -392,7 +397,7 @@ shown above application status (below `locate`):
 | `updating`, `staged` | a full green breathe (`staged`): 2.2 s, down to 55% |
 | `booting` (also the start-up look), the trial boot (`trying`) | twin comets in `booting` (warm white): 1.8 s, 5 LEDs of tail each, a 4% floor |
 | `confirmed` (the trial boot passed) | a green ripple (`confirmed`): a front runs down from the top at 12 LEDs a second, then a settling glow; held 2.2 s, then the light is released |
-| `rebooting` (also the shutdown look) | a static ember: `rebooting` at 12%; the ring holds it while power is cycled |
+| `rebooting` (also the shutdown look) | a static ember: `rebooting` at 12% of the ring's brightness, never less than 6%; the ring holds it while power is cycled |
 | `update-failed`, `rolled-back` | a red breathe (`failed`): 2.4 s, down to 10% |
 | `locate` | bright cyan, breathing (or `chase`: a comet) |
 | idle status | as the client set it |

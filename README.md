@@ -105,9 +105,10 @@ lemnos-ctl list
 lemnos-ctl read imu
 lemnos-ctl led status warn --effect breathe
 lemnos-ctl led progress 0.4
+lemnos-ctl led look pv.searching        # a named look: built-in, or from a look file
 ```
 
-See [docs/system-service.md](docs/system-service.md) and [packaging/README.md](packaging/README.md).
+See [docs/system-service.md](docs/system-service.md), [docs/looks.md](docs/looks.md) (the LED looks: blocks, files, reloads), and [packaging/README.md](packaging/README.md).
 
 ## Development
 
@@ -132,6 +133,7 @@ Targeted helper scripts live under `testing/`.
 - [docs/testing.md](docs/testing.md): test surfaces, scripts, and example validation flows
 - [docs/compact-model.md](docs/compact-model.md): the compact device model, the lite table and the generic runtime adapter
 - [docs/board-definition.md](docs/board-definition.md): the board-definition format, built-in drivers, and HeliOS adoption
+- [docs/looks.md](docs/looks.md): LED looks: the blocks, look files, built-in names, brightness, reloads and the CLI
 - [docs/system-service.md](docs/system-service.md): `lemnosd`, the board's hardware service: client API, LED intents, updater integration, backends, packaging
 - [docs/composite-devices.md](docs/composite-devices.md): design only: composite devices and the fan controller with its failsafe
 - [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the Styx migration

@@ -11,6 +11,7 @@ This directory holds repository-level documentation for the Lemnos workspace.
 - [system-service.md](system-service.md): `lemnosd`, the board's hardware service: its client API, LED intents and animations, the updater integration, kernel versus userspace backends, process model and packaging
 - [composite-devices.md](composite-devices.md): design only: composite (virtual) devices, the fan controller and its failsafe
 - [board-definition.md](board-definition.md): board definitions (TOML/JSON), the built-in drivers, generating them, and HeliOS adoption
+- [looks.md](looks.md): LED looks: the blocks and their parameters, look files, built-in names, brightness, reloads and the `lemnos-ctl` and Rust APIs
 - [compact-model.md](compact-model.md): the `no_std` compact device model (`lemnos-device`), the lite table (`lemnos-lite`) and how the runtime consumes them
 
 ## Where To Start

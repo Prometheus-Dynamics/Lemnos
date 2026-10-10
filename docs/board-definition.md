@@ -139,7 +139,7 @@ and, for `gpio-*` devices, its line; those are never claimed raw. See
 | `vcm` | `lens` | I2C, default 0x0c | `chip` (`dw9714` `dw9807` `dw9817` `ak7375`, required) | control `position` |
 | `hwmon-fan` | `fan` | `match.name` or `path` | `restore_mode`: for fan-controller chips, the automatic `pwm1_enable` mode that hands the fan back when a host stops (default 2). Not used for `pwm-fan` or other fans with a thermal cooling device: they get back the `pwm1_enable` read at bind and the cooling device re-applies the governor's level | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
 | `thermal-zone` | `temperature` | `match.type` or `path` | none | `temperature` °C |
-| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1), `gpio` (informational), and the look defaults below | controls `brightness`, `color`; frames |
+| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`), `gpio` (informational), and the look defaults below | controls `brightness`, `color`; frames |
 | `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
 | `gpio-input` | `gpio` | `config.chip` + `config.line` | `chip`, `line`, `active_low` | `level` |
 
@@ -154,6 +154,15 @@ A light's look defaults (used by `lemnosd`'s LED intents; any intent can overrid
 neutral white), `updating` (the update's arc), `verifying`, `writing`, `staged`,
 `booting`, `rebooting` (the reboot ember, 12% of this colour), `failed`, `confirmed` (the
 ripple after a trial boot).
+
+Named looks: the board's `[looks.<name>]` tables are read on top of the built-in looks
+(`status.*`, `system.*`, `pv.*`), and a look file (`LEMNOSD_LOOKS_DIR`) overrides them
+all; see [looks.md](looks.md) for the blocks, the keys and reloads.
+
+```toml
+[looks."pv.searching"]
+layers = [{ block = "comet", color = "2bd47d", period_ms = 1600, tail = 6, base = 0.06 }]
+```
 
 The system looks' own timing and shape (see `docs/system-service.md`, "System states"):
 

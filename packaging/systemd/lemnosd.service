@@ -20,6 +20,8 @@ StartLimitIntervalSec=0
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/bin/lemnosd
+# SIGHUP re-reads the look files (LEMNOSD_LOOKS_DIR, LEMNOSD_LOOKS_OVERRIDE_DIR).
+ExecReload=/bin/kill -HUP $MAINPID
 # Fans go back to the kernel however the service ends, including SIGKILL and
 # the watchdog's SIGABRT. `+` runs it as root: the thermal cooling devices it
 # re-applies (`cur_state`) are root-owned. It reads the plans lemnosd
@@ -51,6 +53,8 @@ SupplementaryGroups=i2c gpio video
 # /run/lemnos holds the socket: group-connectable for `lemnos` members.
 RuntimeDirectory=lemnos
 RuntimeDirectoryMode=0750
+# The writable look directory (LEMNOSD_LOOKS_OVERRIDE_DIR, `looks save`), owned by lemnos.
+StateDirectory=lemnos
 UMask=0007
 
 NoNewPrivileges=yes
