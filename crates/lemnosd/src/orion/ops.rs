@@ -495,7 +495,7 @@ mod tests {
             parse("calibration.status", &BTreeMap::new()),
             Ok(Op::Calibration(CalibrationOp::Status))
         );
-        assert_eq!(ACTIONS.len(), 12);
+        assert_eq!(ACTIONS.len(), 22);
     }
 
     #[test]
