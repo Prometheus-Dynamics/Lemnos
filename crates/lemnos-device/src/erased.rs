@@ -300,7 +300,10 @@ macro_rules! erased_ops {
 
         /// See [`Sensor::calibration_command`]; `Unsupported` for a device
         /// without a sensor.
-        pub fn calibration_command(&mut self, command: CalibrationCommand) -> Result<(), ErrorKind> {
+        pub fn calibration_command(
+            &mut self,
+            command: CalibrationCommand,
+        ) -> Result<(), ErrorKind> {
             match self {
                 Self::Sensor(d) => d.calibration_command(command),
                 Self::Both(d) => DynSensor::calibration_command(&mut **d, command),

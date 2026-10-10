@@ -39,12 +39,12 @@ mod traits;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "alloc")]
-pub use erased::BoxedDevice;
 pub use calibration::{
     CalibrationCommand, CalibrationPart, CalibrationRoutine, CalibrationStatus,
     MAX_CALIBRATION_WORDS, PART_ACCEL, PART_GYRO, PART_MAG,
 };
+#[cfg(feature = "alloc")]
+pub use erased::BoxedDevice;
 pub use erased::{
     DeviceRef, DynControl, DynDevice, DynLight, DynPixels, DynSensor, DynSensorControl,
 };

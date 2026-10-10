@@ -1,7 +1,7 @@
 //! The traits drivers implement.
 
-use crate::calibration::{CalibrationCommand, CalibrationStatus};
 use crate::DeviceInfo;
+use crate::calibration::{CalibrationCommand, CalibrationStatus};
 use core::fmt;
 use embedded_hal::delay::DelayNs;
 use lemnos_hal::{ErrorKind, HalError};
