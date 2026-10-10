@@ -370,13 +370,32 @@ impl Service {
         let index = done.index;
         let now_us = self.now_us();
         let ok = done.result.is_ok();
+        let count = if ok { done.count } else { 0 };
         let slot = &mut self.slots[index];
         slot.busy = false;
         slot.device = Some(done.device);
-        if ok {
-            slot.values = done.values;
+        if count > 0 {
+            slot.values = done.samples[count - 1];
         }
-        let status = slot.finish_read(done.started_us, done.cost_us, done.result, &done.why);
+        let period_us = slot
+            .device
+            .as_ref()
+            .and_then(lemnos_device::BoxedDevice::sample_period_us)
+            .map_or(0, u64::from);
+        // A buffered sensor with nothing new in its buffer has no new reading:
+        // the last one stays the latest (its status still changes).
+        let empty_batch = ok && count == 0 && slot.batched;
+        let (was_fresh, was_us) = (slot.fresh, slot.read_us);
+        let status = slot.finish_read(
+            done.started_us,
+            done.cost_us,
+            done.result.map(|_| ()),
+            &done.why,
+        );
+        if empty_batch {
+            slot.fresh = was_fresh;
+            slot.read_us = was_us;
+        }
         if let Some(dispatched) = slot.dispatched_us.take() {
             // The grid moves on from the deadline this read was for. A
             // subscriber that arrived meanwhile set `next_read_us` to now.
@@ -390,10 +409,71 @@ impl Service {
         if let Some(status) = status {
             self.status_event(index, status);
         }
-        if ok {
-            self.deliver(index, done.started_us, now_us);
+        if count > 0 {
+            self.deliver_batch(index, &done.samples[..count], done.started_us, period_us);
+        }
+        // Nothing new in the buffer, but a one-shot reader or a subscriber is
+        // owed a reading: read the device now, on this thread.
+        let mut ok = ok;
+        let owed = !waiters.is_empty() || !self.slots[index].subscriptions.is_empty();
+        if empty_batch && owed {
+            if let Some(status) = self.slots[index].read() {
+                self.status_event(index, status);
+            }
+            ok = self.slots[index].fresh;
+            if ok {
+                let read_us = self.slots[index].read_us;
+                self.deliver(index, read_us, now_us);
+            }
         }
         self.answer(index, &waiters, ok);
+    }
+
+    /// Sends a batch's samples to the subscribers that are due for them. The
+    /// samples are `period_us` apart and the last was taken at `read_us`; each
+    /// is stamped with its own time, and a subscriber's deadlines move on from
+    /// those times, not from when the batch arrived.
+    fn deliver_batch(
+        &mut self,
+        index: usize,
+        samples: &[[i32; lemnos_device::MAX_CHANNELS]],
+        read_us: u64,
+        period_us: u64,
+    ) {
+        let channels = self.slots[index].info.map_or(0, |i| i.channels.len());
+        let device = self.slots[index].id().to_string();
+        let status = self.slots[index].status;
+        let last = samples.len() as u64 - 1;
+        for (i, values) in samples.iter().enumerate() {
+            let at_us = read_us.saturating_sub((last - i as u64) * period_us);
+            // A sample within half a sample period of a deadline is due for it:
+            // a request in whole milliseconds (2 ms for a 400 Hz stream) then
+            // gets every sample, not one in three.
+            let slack = period_us / 2;
+            let mut due: Vec<u32> = Vec::new();
+            for sub in self.slots[index].subscriptions.iter_mut() {
+                if sub.next_us <= at_us + slack {
+                    sub.next_us = schedule::advance(
+                        sub.next_us,
+                        u64::from(sub.period_ms) * 1000,
+                        at_us,
+                    );
+                    due.push(sub.client);
+                }
+            }
+            if due.is_empty() {
+                continue;
+            }
+            let message = Message::Reading(RawReading {
+                device: device.clone(),
+                timestamp_us: at_us,
+                status,
+                values: values[..channels].to_vec(),
+            });
+            for client in self.clients.iter_mut().filter(|c| due.contains(&c.id)) {
+                client.send(&message);
+            }
+        }
     }
 
     /// Sends a one-shot reader its reading, or why there is none.
@@ -460,11 +540,7 @@ impl Service {
         let Some(device) = slot.device.take() else {
             return;
         };
-        let job = Job {
-            index,
-            device,
-            values: slot.values,
-        };
+        let job = Job { index, device };
         slot.busy = true;
         if scheduled {
             // Until the read completes, the schedule does not fire it again.

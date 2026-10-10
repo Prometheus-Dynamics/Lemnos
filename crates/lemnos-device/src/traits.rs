@@ -78,6 +78,29 @@ pub trait Sensor: Device {
     /// [`NO_VALUE`](crate::NO_VALUE) marks a channel without a valid reading.
     /// Slots past the channel count are left alone.
     fn read(&mut self, out: &mut [i32]) -> Result<(), DeviceError<Self::Error>>;
+
+    /// Reads the samples taken since the last read into `out`, one row of
+    /// channels each, oldest first, and returns how many. A device that buffers
+    /// samples (see [`sample_period_us`](Self::sample_period_us)) returns as
+    /// many as it has, up to `out.len()`; any other device reads one. Rows past
+    /// the count are left alone.
+    fn read_batch(
+        &mut self,
+        out: &mut [[i32; crate::MAX_CHANNELS]],
+    ) -> Result<usize, DeviceError<Self::Error>> {
+        let Some(row) = out.first_mut() else {
+            return Ok(0);
+        };
+        self.read(&mut row[..])?;
+        Ok(1)
+    }
+
+    /// The spacing of the samples in a batch, in microseconds: the samples of
+    /// one batch are this far apart, the last one taken when the batch was
+    /// read. `None` for a device whose batch is one sample.
+    fn sample_period_us(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// A device that accepts settings.

@@ -16,11 +16,13 @@
 
 pub mod asynch;
 mod device;
+mod fifo;
 
 #[cfg(test)]
 mod tests;
 
 pub use device::{INFO, KERNEL};
+pub use fifo::MAX_SAMPLES;
 
 #[cfg(feature = "float")]
 use core::f32::consts::PI;
@@ -427,6 +429,8 @@ pub struct Bmi088<I2C> {
     gyro_address: u8,
     config: Option<Config>,
     settings: Config,
+    /// Batch reads come from the FIFOs (see [`with_fifo`](Self::with_fifo)).
+    fifo: bool,
 }
 
 impl<I2C: I2c> Bmi088<I2C> {
@@ -443,7 +447,21 @@ impl<I2C: I2c> Bmi088<I2C> {
             gyro_address,
             config: None,
             settings: Config::default(),
+            fifo: false,
         }
+    }
+
+    /// Enables the accelerometer and gyroscope FIFOs at `init`, so
+    /// [`read_batch`](Self::read_batch) returns every sample since the last
+    /// read rather than the latest one.
+    pub fn with_fifo(mut self) -> Self {
+        self.fifo = true;
+        self
+    }
+
+    /// Whether the FIFOs are enabled.
+    pub fn fifo(&self) -> bool {
+        self.fifo
     }
 
     /// Sets the configuration `lemnos_device::Device::init` applies (the
@@ -526,6 +544,9 @@ impl<I2C: I2c> Bmi088<I2C> {
                 .write(w.address, w.bytes, w.value)
                 .map_err(at("gyro config"))?;
         }
+        if self.fifo {
+            self.setup_fifo()?;
+        }
         self.config = Some(config);
         self.settings = config;
         Ok(())
@@ -542,6 +563,70 @@ impl<I2C: I2c> Bmi088<I2C> {
             return Err(Error::WrongChip { accel, gyro });
         }
         Ok(())
+    }
+
+    /// Starts both FIFOs in STREAM mode: every frame the sensors take is kept
+    /// until read, and the newest are kept when a FIFO fills. The accelerometer
+    /// stores its data at the configured output rate (no down-sampling).
+    fn setup_fifo(&mut self) -> Result<(), Error<I2C::Error>> {
+        self.accel()
+            .write8(fifo::ACC_FIFO_DOWNS, fifo::ACC_DOWNS_NONE)
+            .map_err(at("accel fifo"))?;
+        self.accel()
+            .write8(fifo::ACC_FIFO_CONFIG_0, fifo::ACC_CONFIG_0_STREAM)
+            .map_err(at("accel fifo"))?;
+        self.accel()
+            .write8(fifo::ACC_FIFO_CONFIG_1, fifo::ACC_CONFIG_1_ACC)
+            .map_err(at("accel fifo"))?;
+        self.gyro()
+            .write8(fifo::GYR_FIFO_CONFIG_0, 0x00)
+            .map_err(at("gyro fifo"))?;
+        self.gyro()
+            .write8(fifo::GYR_FIFO_CONFIG_1, fifo::GYR_CONFIG_1_STREAM)
+            .map_err(at("gyro fifo"))?;
+        Ok(())
+    }
+
+    /// Reads the accelerometer FIFO into `out`, oldest first, at most
+    /// [`MAX_SAMPLES`] (and `out.len()`). Returns the samples and how many
+    /// frames the FIFO dropped on overflow since the last read.
+    pub fn read_accel_fifo(
+        &mut self,
+        out: &mut [[i16; 3]],
+    ) -> Result<(usize, u32), Error<I2C::Error>> {
+        let cap = out.len().min(MAX_SAMPLES);
+        let mut length = [0u8; 2];
+        self.accel()
+            .read_burst(fifo::ACC_FIFO_LENGTH_0, &mut length)?;
+        // The byte count is 14 bits; an empty FIFO reads 0x8000.
+        let bytes = usize::from(length[0]) | (usize::from(length[1] & 0x3f) << 8);
+        // Never more frames than `out` takes, so a frame is not read and lost.
+        let n = bytes.min(cap * fifo::ACC_FRAME_LEN);
+        if n == 0 {
+            return Ok((0, 0));
+        }
+        let mut buf = [0u8; MAX_SAMPLES * fifo::ACC_FRAME_LEN];
+        self.accel().read_burst(fifo::ACC_FIFO_DATA, &mut buf[..n])?;
+        let parsed = fifo::parse_accel(&buf[..n], &mut out[..cap]);
+        Ok((parsed.samples, parsed.skipped))
+    }
+
+    /// Reads the gyroscope FIFO into `out`, oldest first, at most
+    /// [`MAX_SAMPLES`] (and `out.len()`); returns how many were read.
+    pub fn read_gyro_fifo(&mut self, out: &mut [[i16; 3]]) -> Result<usize, Error<I2C::Error>> {
+        let cap = out.len().min(MAX_SAMPLES);
+        let status = self.gyro().read8(fifo::GYR_FIFO_STATUS)?;
+        let frames = usize::from(status & 0x7f).min(cap);
+        if frames == 0 {
+            return Ok(0);
+        }
+        let mut buf = [0u8; MAX_SAMPLES * fifo::GYR_FRAME_LEN];
+        let n = frames * fifo::GYR_FRAME_LEN;
+        self.gyro().read_burst(fifo::GYR_FIFO_DATA, &mut buf[..n])?;
+        for (sample, frame) in out.iter_mut().zip(buf[..n].chunks_exact(fifo::GYR_FRAME_LEN)) {
+            *sample = fifo::axes(frame);
+        }
+        Ok(frames)
     }
 
     /// Raw accelerometer counts.
@@ -588,5 +673,21 @@ impl<I2C: I2c> Bmi088<I2C> {
     /// Gives the bus back.
     pub fn release(self) -> I2C {
         self.i2c
+    }
+}
+
+impl AccelRate {
+    /// The time between two samples, in microseconds.
+    pub fn period_us(self) -> u32 {
+        match self {
+            Self::Hz12_5 => 80_000,
+            Self::Hz25 => 40_000,
+            Self::Hz50 => 20_000,
+            Self::Hz100 => 10_000,
+            Self::Hz200 => 5_000,
+            Self::Hz400 => 2_500,
+            Self::Hz800 => 1_250,
+            Self::Hz1600 => 625,
+        }
     }
 }

@@ -11,7 +11,7 @@
 //! driver their method names overlap with [`Device`], [`Sensor`] and
 //! [`Control`].
 
-use crate::{Control, Device, DeviceInfo, Pixels, Rgbw, Sensor};
+use crate::{Control, Device, DeviceInfo, MAX_CHANNELS, Pixels, Rgbw, Sensor};
 #[cfg(feature = "reasons")]
 use core::fmt::Write;
 use embedded_hal::delay::DelayNs;
@@ -34,6 +34,23 @@ pub trait DynDevice {
 /// The object-safe form of [`Sensor`].
 pub trait DynSensor: DynDevice {
     fn read(&mut self, out: &mut [i32]) -> Result<(), ErrorKind>;
+
+    /// See [`Sensor::read_batch`].
+    fn read_batch(&mut self, out: &mut [[i32; MAX_CHANNELS]]) -> Result<usize, ErrorKind>;
+
+    /// [`read_batch`](Self::read_batch), writing why it failed to `why`.
+    #[cfg(feature = "reasons")]
+    fn read_batch_why(
+        &mut self,
+        out: &mut [[i32; MAX_CHANNELS]],
+        why: &mut dyn Write,
+    ) -> Result<usize, ErrorKind> {
+        let _ = why;
+        self.read_batch(out)
+    }
+
+    /// See [`Sensor::sample_period_us`].
+    fn sample_period_us(&self) -> Option<u32>;
 
     /// [`read`](Self::read), writing why it failed to `why`.
     #[cfg(feature = "reasons")]
@@ -92,6 +109,26 @@ fn explain<E: HalError>(error: &crate::DeviceError<E>, why: &mut dyn Write) {
 impl<T: Sensor + ?Sized> DynSensor for T {
     fn read(&mut self, out: &mut [i32]) -> Result<(), ErrorKind> {
         Sensor::read(self, out).map_err(|error| error.kind())
+    }
+
+    fn read_batch(&mut self, out: &mut [[i32; MAX_CHANNELS]]) -> Result<usize, ErrorKind> {
+        Sensor::read_batch(self, out).map_err(|error| error.kind())
+    }
+
+    #[cfg(feature = "reasons")]
+    fn read_batch_why(
+        &mut self,
+        out: &mut [[i32; MAX_CHANNELS]],
+        why: &mut dyn Write,
+    ) -> Result<usize, ErrorKind> {
+        Sensor::read_batch(self, out).map_err(|error| {
+            explain(&error, why);
+            error.kind()
+        })
+    }
+
+    fn sample_period_us(&self) -> Option<u32> {
+        Sensor::sample_period_us(self)
     }
 
     #[cfg(feature = "reasons")]
@@ -180,6 +217,38 @@ macro_rules! erased_ops {
                 Self::Sensor(d) => d.read(out),
                 Self::Both(d) => DynSensor::read(&mut **d, out),
                 Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
+            }
+        }
+
+        /// [`read_batch`](Self::read_batch), writing why it failed to `why`.
+        #[cfg(feature = "reasons")]
+        pub fn read_batch_why(
+            &mut self,
+            out: &mut [[i32; MAX_CHANNELS]],
+            why: &mut dyn Write,
+        ) -> Result<usize, ErrorKind> {
+            match self {
+                Self::Sensor(d) => d.read_batch_why(out, why),
+                Self::Both(d) => DynSensor::read_batch_why(&mut **d, out, why),
+                Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
+            }
+        }
+
+        /// See [`Sensor::read_batch`]; `Unsupported` for a control-only device.
+        pub fn read_batch(&mut self, out: &mut [[i32; MAX_CHANNELS]]) -> Result<usize, ErrorKind> {
+            match self {
+                Self::Sensor(d) => d.read_batch(out),
+                Self::Both(d) => DynSensor::read_batch(&mut **d, out),
+                Self::Control(_) | Self::Light(_) => Err(ErrorKind::Unsupported),
+            }
+        }
+
+        /// See [`Sensor::sample_period_us`]; `None` for a control-only device.
+        pub fn sample_period_us(&self) -> Option<u32> {
+            match self {
+                Self::Sensor(d) => d.sample_period_us(),
+                Self::Both(d) => DynSensor::sample_period_us(&**d),
+                Self::Control(_) | Self::Light(_) => None,
             }
         }
 

@@ -295,3 +295,96 @@ mod heapless_text {
         }
     }
 }
+
+#[test]
+fn fifo_init_starts_both_stream_fifos() {
+    let mut bmi = Bmi088::new(imu()).with_fifo();
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    assert!(bmi.fifo());
+    let i2c = bmi.release();
+    // Accelerometer: no down-sampling, STREAM mode, data stored.
+    assert_eq!(i2c.register(ACCEL_ADDRESS, 0x45), 0x80);
+    assert_eq!(i2c.register(ACCEL_ADDRESS, 0x48), 0x02);
+    assert_eq!(i2c.register(ACCEL_ADDRESS, 0x49), 0x50);
+    // Gyroscope: no watermark, STREAM mode.
+    assert_eq!(i2c.register(GYRO_ADDRESS, 0x3d), 0x00);
+    assert_eq!(i2c.register(GYRO_ADDRESS, 0x3e), 0x80);
+}
+
+#[test]
+fn fifo_off_leaves_the_fifo_registers_alone() {
+    let mut bmi = Bmi088::new(imu());
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    let i2c = bmi.release();
+    assert_eq!(i2c.register(ACCEL_ADDRESS, 0x49), 0x00);
+    assert_eq!(i2c.register(GYRO_ADDRESS, 0x3e), 0x00);
+}
+
+/// Two accelerometer data frames around a skip frame (16 bytes), and three
+/// gyroscope frames (18 bytes).
+fn fifo_device() -> Bmi088<MockI2c> {
+    let mut accel = [0u8; 16];
+    accel[0] = 0x84;
+    accel[1..7].copy_from_slice(&axes([16384, 0, 0]));
+    accel[7..9].copy_from_slice(&[0x40, 3]);
+    accel[9] = 0x84;
+    accel[10..16].copy_from_slice(&axes([0, -16384, 0]));
+    let mut gyro = [0u8; 18];
+    gyro[0..6].copy_from_slice(&axes([1, 2, 3]));
+    gyro[6..12].copy_from_slice(&axes([4, 5, 6]));
+    gyro[12..18].copy_from_slice(&axes([7, 8, 9]));
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, 0x24, &(accel.len() as u16).to_le_bytes())
+        .with_registers(ACCEL_ADDRESS, 0x26, &accel)
+        .with_registers(GYRO_ADDRESS, 0x0e, &[3])
+        .with_registers(GYRO_ADDRESS, 0x3f, &gyro);
+    let mut bmi = Bmi088::new(i2c).with_fifo();
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    bmi
+}
+
+#[test]
+fn read_batch_returns_the_accel_frames_with_gyro_paired_from_the_newest() {
+    let mut bmi = fifo_device();
+    let mut out = [[0i32; lemnos_device::MAX_CHANNELS]; MAX_SAMPLES];
+    let n = lemnos_device::Sensor::read_batch(&mut bmi, &mut out).unwrap();
+    // Two accelerometer samples; the gyroscope's three are paired from the
+    // newest end, so the first gyroscope sample is not used.
+    assert_eq!(n, 2);
+    let config = Config::default();
+    let expect = |a: [i16; 3], g: [i16; 3]| {
+        let c = config.channels(a, g);
+        (c[0], c[1], c[2], c[3], c[4], c[5])
+    };
+    let row = |i: usize| {
+        (out[i][0], out[i][1], out[i][2], out[i][3], out[i][4], out[i][5])
+    };
+    assert_eq!(row(0), expect([16384, 0, 0], [4, 5, 6]));
+    assert_eq!(row(1), expect([0, -16384, 0], [7, 8, 9]));
+}
+
+#[test]
+fn read_batch_with_an_empty_fifo_is_no_samples() {
+    let mut bmi = Bmi088::new(imu()).with_fifo();
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    let mut out = [[0i32; lemnos_device::MAX_CHANNELS]; MAX_SAMPLES];
+    assert_eq!(
+        lemnos_device::Sensor::read_batch(&mut bmi, &mut out).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn sample_period_follows_the_accelerometer_rate() {
+    let bmi = Bmi088::new(imu()).with_fifo();
+    assert_eq!(lemnos_device::Sensor::sample_period_us(&bmi), None);
+    let mut bmi = bmi;
+    bmi.init(&mut MockDelay::new(), Config {
+        accel_rate: AccelRate::Hz400,
+        ..Config::default()
+    })
+    .unwrap();
+    assert_eq!(lemnos_device::Sensor::sample_period_us(&bmi), Some(2_500));
+    let plain = Bmi088::new(imu());
+    assert_eq!(lemnos_device::Sensor::sample_period_us(&plain), None);
+}

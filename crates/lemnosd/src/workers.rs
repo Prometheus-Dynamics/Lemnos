@@ -22,13 +22,15 @@ use std::time::Duration;
 /// How long shutdown waits for reads in flight.
 const WAIT_DONE: Duration = Duration::from_secs(5);
 
+/// Most samples one read returns (a batch from a FIFO; see
+/// `lemnos_drivers_bmi088::MAX_SAMPLES`).
+pub(crate) const BATCH: usize = 48;
+
 /// A read to run: the device, moved to the bus's thread.
 pub(crate) struct Job {
     /// The sensor's slot.
     pub index: usize,
     pub device: BoxedDevice,
-    /// Where the values go (the job's copy of the slot's values).
-    pub values: [i32; MAX_CHANNELS],
 }
 
 /// A finished read, with the device back.
@@ -37,7 +39,9 @@ pub(crate) struct Done {
     /// The bus it ran on.
     pub lane: usize,
     pub device: BoxedDevice,
-    pub values: [i32; MAX_CHANNELS],
+    /// The samples read, oldest first (`count` of them).
+    pub samples: [[i32; MAX_CHANNELS]; BATCH],
+    pub count: usize,
     /// When the read started (boot clock, microseconds).
     pub started_us: u64,
     pub cost_us: u64,
@@ -104,13 +108,19 @@ impl Workers {
                 for mut job in rx {
                     let started_us = boottime_us();
                     let mut why = String::new();
-                    let result = job.device.read_why(&mut job.values, &mut why);
+                    let mut samples = [[0i32; MAX_CHANNELS]; BATCH];
+                    let read = job.device.read_batch_why(&mut samples, &mut why);
                     let cost_us = boottime_us().saturating_sub(started_us);
+                    let (result, count) = match read {
+                        Ok(count) => (Ok(()), count.min(BATCH)),
+                        Err(kind) => (Err(kind), 0),
+                    };
                     let done_msg = Done {
                         index: job.index,
                         lane: index,
                         device: job.device,
-                        values: job.values,
+                        samples,
+                        count,
                         started_us,
                         cost_us,
                         result,

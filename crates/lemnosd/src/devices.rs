@@ -15,6 +15,12 @@ const RETRY_MIN_MS: u64 = 1_000;
 const RETRY_MAX_MS: u64 = 30_000;
 /// `poll_ms` when the board leaves it out.
 const DEFAULT_POLL_MS: u32 = 1_000;
+/// A sensor that buffers samples (a FIFO) is drained no more often than this:
+/// each drain is a few bus transactions, whatever it returns.
+const BATCH_MIN_MS: u32 = 20;
+/// ... and no less often than this, so its buffer does not overflow (the
+/// BMI088's FIFO holds about 0.37 s at 400 Hz; the batch holds 120 ms).
+const BATCH_MAX_MS: u32 = 100;
 
 /// A client's subscription to a device. Deadlines are microseconds on the
 /// boot clock.
@@ -54,6 +60,8 @@ pub(crate) struct Slot {
     pub device: Option<BoxedDevice>,
     /// The device is built (it may be on a worker).
     pub present: bool,
+    /// The device buffers samples: a read returns every sample since the last.
+    pub batched: bool,
     pub placement: Placement,
     /// The bus worker (lane) of a worker sensor.
     pub lane: Option<usize>,
@@ -111,6 +119,7 @@ impl Slot {
             spec,
             device: None,
             present: false,
+            batched: false,
             placement: Placement::Other,
             lane: None,
             busy: false,
@@ -162,6 +171,11 @@ impl Slot {
     /// idle rate. `None`: the sensor is not read.
     pub fn period_ms(&self) -> Option<u32> {
         match self.subscriptions.iter().map(|s| s.period_ms).min() {
+            // A buffered sensor is drained at the subscription's rate, within
+            // the batch bounds (its samples carry their own times).
+            Some(fastest) if self.batched => {
+                Some(fastest.max(self.cap_ms()).clamp(BATCH_MIN_MS, BATCH_MAX_MS))
+            }
             Some(fastest) => Some(fastest.max(self.cap_ms())),
             None => self.idle_ms(),
         }
@@ -234,6 +248,7 @@ impl Slot {
             Ok(device) => {
                 self.info = Some(device.info());
                 self.placement = Placement::of(&device);
+                self.batched = device.sample_period_us().is_some();
                 self.device = Some(device);
                 self.present = true;
                 self.retry_ms = RETRY_MIN_MS;

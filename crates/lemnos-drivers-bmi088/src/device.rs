@@ -1,6 +1,6 @@
 //! The BMI088 in the Lemnos device model (`lemnos-device`).
 
-use crate::{Bmi088, Error, asynch};
+use crate::{Bmi088, Error, MAX_SAMPLES, asynch};
 use embedded_hal::delay::DelayNs;
 use lemnos_device::kernel::{KernelBinding, KernelChannel, KernelPart, Subsystem};
 use lemnos_device::{Axis, Channel, Device, DeviceClass, DeviceError, DeviceInfo, Quantity};
@@ -77,6 +77,57 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
         let gyro = self.read_gyro_raw().map_err(DeviceError::Driver)?;
         fill(out, config.channels(accel, gyro));
         Ok(())
+    }
+
+    /// With the FIFOs on, every sample since the last read, oldest first (up
+    /// to [`MAX_SAMPLES`]). The accelerometer and gyroscope samples are paired
+    /// from the newest end: when one FIFO holds a sample more than the other
+    /// (a sample came between the two reads), its oldest is not returned.
+    /// Without them, one sample, as [`read`](Self::read).
+    fn read_batch(
+        &mut self,
+        out: &mut [[i32; lemnos_device::MAX_CHANNELS]],
+    ) -> Result<usize, DeviceError<Self::Error>> {
+        if !self.fifo {
+            let Some(row) = out.first_mut() else {
+                return Ok(0);
+            };
+            lemnos_device::Sensor::read(self, &mut row[..])?;
+            return Ok(1);
+        }
+        let config = self
+            .config
+            .ok_or(DeviceError::Driver(Error::NotInitialized))?;
+        let cap = out.len().min(MAX_SAMPLES);
+        let mut accel = [[0i16; 3]; MAX_SAMPLES];
+        let (na, _) = self
+            .read_accel_fifo(&mut accel[..cap])
+            .map_err(DeviceError::Driver)?;
+        if na == 0 {
+            return Ok(0);
+        }
+        let mut gyro = [[0i16; 3]; MAX_SAMPLES];
+        // The whole gyroscope FIFO, so the newest frames are the ones paired.
+        let mut ng = self
+            .read_gyro_fifo(&mut gyro)
+            .map_err(DeviceError::Driver)?;
+        if ng == 0 {
+            // The gyroscope FIFO is empty: hold its latest value for these.
+            gyro[..na].fill(self.read_gyro_raw().map_err(DeviceError::Driver)?);
+            ng = na;
+        }
+        let n = na.min(ng);
+        for i in 0..n {
+            fill(&mut out[i], config.channels(accel[na - n + i], gyro[ng - n + i]));
+        }
+        Ok(n)
+    }
+
+    fn sample_period_us(&self) -> Option<u32> {
+        if !self.fifo {
+            return None;
+        }
+        self.config.map(|config| config.accel_rate.period_us())
     }
 }
 

@@ -268,6 +268,7 @@ const BUILTIN: &[DriverEntry] = &[
             "accel_rate",
             "gyro_range",
             "gyro_rate",
+            "fifo",
         ],
         match_keys: &[],
         kernel: true,
@@ -487,9 +488,19 @@ fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice,
     };
     let bus = open(spec, buses, bus)?;
     let address = |a: u16| u8::try_from(a).map_err(|_| bad(spec, "address out of range"));
-    Ok(BoxedDevice::sensor(
-        Bmi088::with_addresses(bus, address(accel)?, address(gyro)?).with_config(config),
-    ))
+    // The FIFOs are opt-in (`fifo = true`): a batch read returns every sample
+    // since the last read, but at the chip's output rate, so it costs more bus
+    // time than polling unless the output rate matches what is subscribed.
+    let fifo = spec
+        .config
+        .get("fifo")
+        .and_then(ConfigValue::as_bool)
+        .unwrap_or(false);
+    let mut imu = Bmi088::with_addresses(bus, address(accel)?, address(gyro)?).with_config(config);
+    if fifo {
+        imu = imu.with_fifo();
+    }
+    Ok(BoxedDevice::sensor(imu))
 }
 
 fn build_bmm150(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
