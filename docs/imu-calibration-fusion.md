@@ -53,10 +53,21 @@ needs a `.` after the name, so `acceleration_cal.*` is not included).
 `NO_VALUE` marks a channel with no value (a fusion output before its first sample, or a
 calibrated channel with the calibration feature off).
 
-Quaternions use the Hamilton convention, scalar first, and rotate **body-frame** vectors into the
-**world** frame. World is east-north-up: `yaw` is 0 pointing magnetic north when the 9-axis
-mode has a calibrated magnetometer (`declination_deg` shifts it to true north), and it is only
-relative with the 6-axis mode.
+### Frame and conventions
+
+This is the one place the conventions are stated; the other sections refer here.
+
+- **World frame:** right-handed, z up, x toward magnetic north, y toward west (north-west-up).
+  Yaw 0 is body x at north, and positive yaw turns the body toward west (a counter-clockwise turn
+  seen from above). With the 9-axis mode and a calibrated magnetometer, yaw is referenced to
+  magnetic north (`declination_deg` shifts it to true north). In the 6-axis mode yaw is relative.
+- **Quaternion:** Hamilton convention, scalar first (`w, x, y, z`), and it rotates **body-frame**
+  vectors into the **world** frame (`q_world_body`). The mount rotation is applied on top, so the
+  body is the robot (or camera) frame, not the sensor's.
+- **Euler angles:** ZYX intrinsic (yaw, then pitch, then roll), in radians. Pitch of ±90 degrees
+  is gimbal lock, where roll and yaw are not separately meaningful; read the quaternion there.
+- **Gravity** is the world's up direction in the body frame (`gravity`), and `linear_acceleration`
+  is the calibrated acceleration minus that gravity, in the body frame.
 
 ## lemnos-fusion (no_std crate, no allocation)
 
@@ -252,9 +263,7 @@ Deviations from the text above, as built in `crates/lemnos-fusion`:
 - `push` takes `t_us` first (both calibrators); `Changed` is `bool`; `ImuCalibrator::status()`
   returns `(accel, gyro)`. Added: `revision()`. The factory calibrator state is the identity
   correction at radius = reference (`matrix = I / reference`), not `Ellipsoid::IDENTITY`.
-- World frame: x points at magnetic north, y west, z up (yaw 0 = body x at north, positive yaw
-  turns toward west). The "east-north-up" wording cannot give yaw 0 at north with the ZYX Euler
-  angles, so the frame was chosen to match the yaw contract.
+- The world frame is as stated in *Frame and conventions* (x north, y west, z up).
 - Mahony defaults are `kp 1.0, ki 0.05`. The integral term's slow pole is about `kp/ki` = 20 s
   (ki 0.01 gave ~100 s, too slow to pull a bias out within a minute). Trade-off: a larger `ki`
   settles faster but overshoots more after a large attitude step, and passes more accelerometer
