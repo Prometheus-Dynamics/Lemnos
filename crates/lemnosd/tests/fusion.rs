@@ -23,8 +23,18 @@ use std::time::{Duration, Instant};
 
 /// Reads of each fake sensor, by the index in its build function (one index
 /// per test, so tests running in parallel do not see each other's reads).
-static IMU_READS: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
-static MAG_READS: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+static IMU_READS: [AtomicU32; 4] = [
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+];
+static MAG_READS: [AtomicU32; 4] = [
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+];
 
 #[derive(Debug)]
 struct Fail;
@@ -70,6 +80,8 @@ static MAG_INFO: DeviceInfo =
 struct FakeImu {
     index: usize,
     revision: u32,
+    /// The acceleration at rest (mm/s²): gravity along +Z for a level board.
+    accel: [i32; 3],
 }
 
 impl Device for FakeImu {
@@ -84,7 +96,8 @@ impl Sensor for FakeImu {
     fn read(&mut self, out: &mut [i32]) -> Result<(), DeviceError<Fail>> {
         IMU_READS[self.index].fetch_add(1, Ordering::SeqCst);
         // acceleration (mm/s²), angular rate (µrad/s), then their calibrated forms.
-        let values = [0, 0, 9806, 0, 0, 0, 0, 0, 9806, 0, 0, 0];
+        let [ax, ay, az] = self.accel;
+        let values = [ax, ay, az, 0, 0, 0, ax, ay, az, 0, 0, 0];
         for (slot, value) in out.iter_mut().zip(values) {
             *slot = value;
         }
@@ -156,6 +169,17 @@ fn imu_at<const N: usize>(_: &DeviceSpec, _: &mut dyn Buses) -> Result<BoxedDevi
     Ok(BoxedDevice::sensor(FakeImu {
         index: N,
         revision: 0,
+        accel: [0, 0, 9806],
+    }))
+}
+
+/// A board on its side, as the Raze rests on the bench: gravity along the
+/// sensor's X (accelerometer about (9.79, -0.10, -0.44) m/s²).
+fn tilted_at<const N: usize>(_: &DeviceSpec, _: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
+    Ok(BoxedDevice::sensor(FakeImu {
+        index: N,
+        revision: 0,
+        accel: [9793, -99, -440],
     }))
 }
 
@@ -246,6 +270,9 @@ fn start(root: &Path, board: &str, calibration_dir: &Path) -> Running {
             .register(entry("fake-imu-2", DeviceClass::Imu, imu_at::<2>));
         config
             .registry
+            .register(entry("fake-imu-tilt-3", DeviceClass::Imu, tilted_at::<3>));
+        config
+            .registry
             .register(entry("fake-mag-0", DeviceClass::Magnetometer, mag_at::<0>));
         config
             .registry
@@ -253,6 +280,9 @@ fn start(root: &Path, board: &str, calibration_dir: &Path) -> Running {
         config
             .registry
             .register(entry("fake-mag-2", DeviceClass::Magnetometer, mag_at::<2>));
+        config
+            .registry
+            .register(entry("fake-mag-3", DeviceClass::Magnetometer, mag_at::<3>));
         config.calibration_dir = thread_dir;
         let mut service = Service::new(config, Box::new(NoBuses(thread_root))).unwrap();
         ready_tx.send(()).unwrap();
@@ -309,6 +339,10 @@ fn next_reading(
 /// A board: an IMU and a magnetometer (fake drivers `index`), and, when
 /// `fusion` is given, the orientation device with that config.
 fn board(index: usize, fusion: Option<&str>) -> String {
+    board_with(&format!("fake-imu-{index}"), index, fusion)
+}
+
+fn board_with(imu_driver: &str, index: usize, fusion: Option<&str>) -> String {
     let mut text = format!(
         r#"
 format = "lemnos.board"
@@ -319,7 +353,7 @@ id = "test"
 
 [[devices]]
 id = "imu"
-driver = "fake-imu-{index}"
+driver = "{imu_driver}"
 poll_ms = 10
 
 [[devices]]
@@ -411,6 +445,40 @@ fn the_imu_and_magnetometer_are_idle_until_fusion_is_subscribed() {
         mag,
         "magnetometer read after the last subscriber left"
     );
+    drop(running);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_first_output_follows_gravity_from_a_tilted_start() {
+    // The board on its side, read through lemnosd's fusion path (not the
+    // crate alone): the first output must already sit on the tilt, not start
+    // level (roll and pitch from the first accelerometer sample, as
+    // `Orientation::init` does).
+    let root = dir("tilted");
+    let calibration = root.join("calibration");
+    let running = start(
+        &root,
+        &board_with(
+            "fake-imu-tilt-3",
+            3,
+            Some(r#"config = { imu = "imu", mag = "magnetometer", mode = "6axis" }"#),
+        ),
+        &calibration,
+    );
+    let mut client = connect(&running);
+    client.subscribe("orientation", 20).unwrap();
+    let reading = next_reading(&mut client, "orientation", Duration::from_secs(5))
+        .expect("the fusion reports once the imu has been read");
+    // Pitch is atan2(-9.793, 0.44) = -87.4 degrees: within 5 degrees of that.
+    let pitch = reading.value("pitch").expect("pitch has a value");
+    let gravity_x = reading.value("gravity.x").expect("gravity.x has a value");
+    assert!(
+        (pitch + 87.4_f64.to_radians()).abs() < 5.0_f64.to_radians(),
+        "first pitch {} deg",
+        pitch.to_degrees()
+    );
+    assert!(gravity_x > 9.0, "first gravity.x {gravity_x}");
     drop(running);
     let _ = fs::remove_dir_all(&root);
 }
