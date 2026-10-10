@@ -344,3 +344,19 @@ fn board_measured_static_values_hold_the_attitude() {
         );
     }
 }
+
+#[test]
+fn an_unusable_first_sample_does_not_fix_the_start_level() {
+    // A zero accelerometer reading (no data yet) must not start the filter:
+    // the first usable sample sets the attitude from gravity.
+    let mut o = Orientation::new(OrientationConfig::default());
+    o.update_imu(0, [0.0; 3], [0.0; 3]);
+    let a = [9.793, -0.099, -0.440];
+    o.update_imu(10_000, [0.0; 3], a);
+    let out = o.output();
+    assert!(
+        (deg(out.pitch) + 87.4).abs() < 2.0,
+        "first pitch {} deg",
+        deg(out.pitch)
+    );
+}

@@ -203,10 +203,14 @@ impl Orientation {
         self.still = norm(gyro) < STILL_GYRO && w >= 0.99;
 
         if !self.valid {
-            self.init(t_us);
-            self.valid = true;
-            self.last_t = t_us;
-            self.refresh_output();
+            // Start from the first usable accelerometer sample: an unusable one
+            // (no data, or a zero reading) would otherwise start level.
+            if self.accel_w > 0.0 {
+                self.init(t_us);
+                self.valid = true;
+                self.last_t = t_us;
+                self.refresh_output();
+            }
             return;
         }
 
