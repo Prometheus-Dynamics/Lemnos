@@ -14,6 +14,7 @@ mod event;
 mod ids;
 mod interface;
 mod issue;
+mod pio_i2c;
 mod request;
 mod state;
 mod time;
@@ -39,6 +40,7 @@ pub use event::{DeviceEvent, InventoryEvent, LemnosEvent, StateEvent};
 pub use ids::{CapabilityId, DeviceId, InteractionId, IssueCode, LocalDeviceId};
 pub use interface::InterfaceKind;
 pub use issue::{DeviceIssue, IssueCategory, IssueSeverity};
+pub use pio_i2c::{PIO_I2C_BUS_FLAG, PIO_I2C_DEFAULT_HZ, PIO_I2C_MAX_HZ, PioI2cPins};
 pub use request::{
     CustomInteractionRequest, CustomInteractionResponse, DeviceRequest, DeviceResponse, GpioBias,
     GpioDirection, GpioDrive, GpioEdge, GpioLevel, GpioLineConfiguration, GpioRequest,
