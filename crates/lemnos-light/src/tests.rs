@@ -1013,3 +1013,63 @@ fn a_drain_is_flagged_as_needing_the_bottom_and_round_trips_its_fields() {
     assert!(confirmed_drain().wants_bottom());
     assert!(!LookSpec::fill(Rgbw::rgb(0xffffff)).wants_bottom());
 }
+
+#[test]
+fn an_over_layer_keeps_its_head_pure_and_shows_the_glow_elsewhere() {
+    let mut a: Animator<4> = Animator::new(4);
+    let glow = LayerSpec::fill(Rgbw::rgb(0x28c8ff)).with_brightness(64);
+    // A full-level head covers the glow: its own colour, nothing of the glow.
+    let mut look = LookSpec::EMPTY;
+    look.push(glow);
+    look.push(LayerSpec::fill(Rgbw::rgb(0xff5a00)).with_mode(Mode::Over));
+    a.set(look, Transition::CUT, 0);
+    assert_eq!(a.render(0).unwrap()[0], Rgbw::rgb(0xff5a00));
+
+    // No head (brightness 0 on the upper layer): the glow alone.
+    let mut only_glow = LookSpec::EMPTY;
+    only_glow.push(glow);
+    a.set(only_glow, Transition::CUT, 0);
+    let glow_only = a.render(0).unwrap()[0];
+    let mut none = LookSpec::EMPTY;
+    none.push(glow);
+    none.push(
+        LayerSpec::fill(Rgbw::rgb(0xff5a00))
+            .with_brightness(0)
+            .with_mode(Mode::Over),
+    );
+    a.set(none, Transition::CUT, 0);
+    assert_eq!(a.render(0).unwrap()[0], glow_only);
+    // The glow is cyan (28c8ff): blue and green, with little red, not orange.
+    assert!(
+        glow_only.b > glow_only.r && glow_only.g > glow_only.r,
+        "{glow_only:?}"
+    );
+}
+
+#[test]
+fn an_over_layer_blends_a_tail_without_hue_mixing_from_a_clip() {
+    let mut a: Animator<4> = Animator::new(4);
+    let mut look = LookSpec::EMPTY;
+    look.push(LayerSpec::fill(Rgbw::rgb(0x28c8ff)));
+    // Half the head's level: the glow shows through by the other half.
+    look.push(
+        LayerSpec::fill(Rgbw::rgb(0xff5a00))
+            .with_brightness(128)
+            .with_mode(Mode::Over),
+    );
+    a.set(look, Transition::CUT, 0);
+    let p = a.render(0).unwrap()[0];
+    // Red comes from the head alone (the glow has none), so the mix is
+    // half the head's red and half the glow's blue: the head scaled by
+    // its level plus the glow where the head is not.
+    assert!(p.r > 0 && p.r < 255, "{p:?}");
+    assert!(p.b > 0 && p.b < 255, "{p:?}");
+    // Max would give the glow's blue at full on top of the head's red; over
+    // keeps the blue below full.
+    let mut max = LookSpec::EMPTY;
+    max.push(LayerSpec::fill(Rgbw::rgb(0x28c8ff)));
+    max.push(LayerSpec::fill(Rgbw::rgb(0xff5a00)).with_brightness(128));
+    a.set(max, Transition::CUT, 0);
+    let m = a.render(0).unwrap()[0];
+    assert!(p.b < m.b, "over {p:?} vs max {m:?}");
+}

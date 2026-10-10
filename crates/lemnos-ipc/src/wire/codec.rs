@@ -197,7 +197,7 @@ code_enum!(DeviceClass, DeviceClass::Other, [
     DeviceClass::Imu => 0, DeviceClass::Accelerometer => 1, DeviceClass::Gyroscope => 2,
     DeviceClass::Magnetometer => 3, DeviceClass::PowerMonitor => 4, DeviceClass::Temperature => 5,
     DeviceClass::Fan => 6, DeviceClass::Lens => 7, DeviceClass::Light => 8, DeviceClass::Gpio => 9,
-    DeviceClass::Orientation => 10, DeviceClass::Other => 11,
+    DeviceClass::Orientation => 10, DeviceClass::Other => 11, DeviceClass::PowerSwitch => 12,
 ]);
 code_enum!(Quantity, Quantity::Mode, [
     Quantity::Acceleration => 0, Quantity::AngularRate => 1, Quantity::MagneticField => 2,

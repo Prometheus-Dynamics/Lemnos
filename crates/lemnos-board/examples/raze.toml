@@ -66,7 +66,17 @@ driver = "ws2812"
 path = "/dev/leds0"
 config = { count = 16, wire = "rgb", offset = 5, direction = "cw", gpio = 13, fade_ms = 250, easing = "ease-in-out", status_effect = "breathe" }
 
+# USB port power: the load switches are on by default, and stay as the
+# last setting (persisted) across restarts. Atlas switches them through
+# `lemnos-ctl power` or the Orion actions `power.set` and `power.reset`.
 [[devices]]
 id = "usb-a-power"
-driver = "gpio-output"
-config = { chip = "pinctrl-rp1", line = 20, initial = true }
+driver = "gpio-power-switch"
+writers = ["orion:*", "atlas"]
+config = { chip = "pinctrl-rp1", line = 20, default_on = true, persist = true, on_exit = "keep" }
+
+[[devices]]
+id = "usb-c-power"
+driver = "gpio-power-switch"
+writers = ["orion:*", "atlas"]
+config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, on_exit = "keep" }

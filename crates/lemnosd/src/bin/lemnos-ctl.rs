@@ -61,8 +61,8 @@
 
 use lemnos_board::{BoardDefinition, DriverRegistry, looks};
 use lemnos_ipc::{
-    ClientEvent, ClientOptions, DEFAULT_SOCKET, Easing, EffectKind, LedRequest, LedShow, LedStatus,
-    LookSpec, LooksOp, Phase, SystemState, Update,
+    ClientEvent, ClientOptions, DEFAULT_SOCKET, Easing, EffectKind, FrameUpdate, LedRequest,
+    LedShow, LedStatus, LookSpec, LooksOp, Phase, SystemState, Update,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -131,7 +131,7 @@ fn main() -> ExitCode {
     let options = ClientOptions::new(&socket, client).priority(priority);
     let Some(command) = args.next() else {
         return fail(
-            "no command (list, read, watch, set, get, restore, led, light, looks, gpio, pwm, i2c, spi, fan, validate)",
+            "no command (list, read, watch, set, get, restore, led, light, looks, power, gpio, pwm, i2c, spi, fan, validate)",
         );
     };
     match command.as_str() {
@@ -144,6 +144,7 @@ fn main() -> ExitCode {
         "restore" => raw::restore(args, options),
         "led" => led(args, options),
         "light" => light(args, options),
+        "power" => power(args, options),
         "looks" => looks_command(args, options),
         _ => devices(&command, args, options),
     }
@@ -283,6 +284,53 @@ fn validate(mut args: Args) -> ExitCode {
 /// so it works when `lemnosd` is gone (systemd runs it as `ExecStopPost`):
 /// the plans `lemnosd` recorded at bind (`fan-restore` next to the socket, or
 /// `--state PATH`), then the board's fans, then with `--all` every hwmon fan.
+/// `power <device> on|off|status|reset [--off-ms N]`: a power switch (a
+/// USB port's load switch). `reset` turns it off for N ms (default 1000),
+/// then on again, to recover a port that latched off.
+fn power(mut args: Args, options: ClientOptions) -> ExitCode {
+    const USAGE: &str = "usage: power <device> on|off|status|reset [--off-ms N]";
+    let Some(device) = args.next() else {
+        return fail(USAGE);
+    };
+    let action = args.next().unwrap_or_else(|| "status".into());
+    let off_ms = match args.take("--off-ms") {
+        None => 1000,
+        Some(ms) => match ms.parse::<u32>() {
+            Ok(ms) if ms <= 10_000 => ms,
+            _ => return fail("--off-ms must be 0 to 10000"),
+        },
+    };
+    let result = options.devices().and_then(|mut c| match action.as_str() {
+        "on" | "off" => {
+            let value = if action == "on" { 1.0 } else { 0.0 };
+            c.set(&device, "power.on", value)?;
+            Ok(format!("{device} {action}"))
+        }
+        "reset" => {
+            c.set(&device, "power.reset", f64::from(off_ms))?;
+            Ok(format!("{device} reset ({off_ms} ms off)"))
+        }
+        "status" => {
+            let reading = c.read(&device)?;
+            let on = reading.value("power.on") == Some(1.0);
+            let fault = reading.value("power.fault") == Some(1.0);
+            let mut line = format!("{device} {}", if on { "on" } else { "off" });
+            if fault {
+                line.push_str(" (fault asserted)");
+            }
+            Ok(line)
+        }
+        _ => Err(lemnos_ipc::ClientError::Rejected(USAGE.into())),
+    });
+    match result {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
 fn fan(mut args: Args, socket: &Path, options: ClientOptions) -> ExitCode {
     match args.next().as_deref() {
         Some("restore") => {}
@@ -342,6 +390,51 @@ fn fan(mut args: Args, socket: &Path, options: ClientOptions) -> ExitCode {
     }
 }
 
+/// `led watch <device> [--fps N]`: the light's geometry and what it shows
+/// (`#` lines), then each frame that changes: `frame <seq> <device>` and one
+/// `0xWWRRGGBB` per logical LED. Runs until interrupted or the service goes.
+fn led_watch(mut args: Args, options: ClientOptions) -> ExitCode {
+    let Some(device) = args.next() else {
+        return fail("usage: led watch <device> [--fps N]");
+    };
+    let fps = match args.take("--fps") {
+        None => 20,
+        Some(text) => match text.parse::<u16>() {
+            Ok(fps) if (1..=60).contains(&fps) => fps,
+            _ => return fail("--fps must be 1 to 60"),
+        },
+    };
+    let mut leds = match options.leds() {
+        Ok(leds) => leds,
+        Err(e) => return fail(e),
+    };
+    match leds.watch_frames(&device, fps) {
+        Ok(granted) => eprintln!("# watching {device} at {granted} fps"),
+        Err(e) => return fail(e),
+    }
+    loop {
+        match leds.next_frame(None) {
+            Ok(Some(ClientEvent::Data(FrameUpdate::Frame(frame)))) => {
+                let pixels: Vec<String> = frame.pixels.iter().map(|p| format!("{p:08x}")).collect();
+                println!("frame {} {} {}", frame.seq, frame.device, pixels.join(" "));
+            }
+            Ok(Some(ClientEvent::Data(FrameUpdate::Info(info)))) => println!(
+                "# {} count={} offset={} {} look={:?} layer={} owner={}",
+                info.device,
+                info.count,
+                info.offset,
+                if info.clockwise { "cw" } else { "ccw" },
+                info.look,
+                info.layer,
+                info.owner
+            ),
+            Ok(Some(ClientEvent::Disconnected { error })) => return fail(error),
+            Ok(Some(ClientEvent::Connected { .. })) | Ok(None) => {}
+            Err(e) => return fail(e),
+        }
+    }
+}
+
 fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     let device = args.take("--device").unwrap_or_default();
     let effect = args.take("--effect");
@@ -361,9 +454,12 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     let test = args.flag("--test");
     let Some(what) = args.next() else {
         return fail(
-            "led: status, color, brightness, pixel, frame, progress, spinner, orbit, look, show, system, locate or off",
+            "led: status, color, brightness, pixel, frame, progress, spinner, orbit, look, show, system, locate, watch or off",
         );
     };
+    if what == "watch" {
+        return led_watch(args, options);
+    }
     let show = match what.as_str() {
         "look" => {
             let Some(name) = args.next() else {
@@ -584,11 +680,18 @@ fn join(errors: Vec<looks::LookError>) -> String {
 /// `looks list | show <name> | reload | save <name> (--spec|--file|--json)`.
 fn looks_command(mut args: Args, options: ClientOptions) -> ExitCode {
     let Some(op) = args.next() else {
-        return fail("looks: list, show <name>, reload or save <name> --spec|--file|--json");
+        return fail(
+            "looks: list, show <name>, reload, save <name> --spec|--file|--json, delete <name>, preset list|show|apply|save|delete",
+        );
     };
     let op = match op.as_str() {
         "list" => LooksOp::List,
         "reload" => LooksOp::Reload,
+        "delete" => match args.next() {
+            Some(name) => LooksOp::Delete(name),
+            None => return fail("looks delete <name>"),
+        },
+        "preset" => return preset_command(args, options),
         "show" => match args.next() {
             Some(name) => LooksOp::Show(name),
             None => return fail("looks show <name>"),
@@ -617,6 +720,79 @@ fn looks_command(mut args: Args, options: ClientOptions) -> ExitCode {
         Ok(text) => {
             print!("{text}");
             if !text.ends_with('\n') && !text.is_empty() {
+                println!();
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `looks preset list | show <name> | apply <name> | save <name> (--from-active | --file <path>) | delete <name>`.
+/// A preset is a look file: `save --file` takes a whole file (any number of
+/// `[looks.<name>]` tables), and `--from-active` copies the active one.
+fn preset_command(mut args: Args, options: ClientOptions) -> ExitCode {
+    const USAGE: &str = "looks preset list | show <name> | apply <name> | save <name> (--from-active | --file <path>) | delete <name>";
+    let Some(action) = args.next() else {
+        return fail(USAGE);
+    };
+    let op = match action.as_str() {
+        "list" => LooksOp::PresetList,
+        "show" => match args.next() {
+            Some(name) => LooksOp::PresetShow(name),
+            None => return fail(USAGE),
+        },
+        "apply" => match args.next() {
+            Some(name) => LooksOp::PresetApply(name),
+            None => return fail(USAGE),
+        },
+        "delete" => match args.next() {
+            Some(name) => LooksOp::PresetDelete(name),
+            None => return fail(USAGE),
+        },
+        "save" => {
+            let Some(name) = args.next() else {
+                return fail(USAGE);
+            };
+            let text = if args.flag("--from-active") {
+                let mut leds = match options.clone().leds() {
+                    Ok(c) => c,
+                    Err(e) => return fail(e),
+                };
+                let listing = match leds.looks(LooksOp::PresetList) {
+                    Ok(text) => text,
+                    Err(e) => return fail(e),
+                };
+                let Some(active) = listing
+                    .lines()
+                    .find_map(|l| l.strip_prefix("* ").and_then(|r| r.split(' ').next()))
+                else {
+                    return fail("no active preset");
+                };
+                match leds.looks(LooksOp::PresetShow(active.to_string())) {
+                    Ok(text) => text,
+                    Err(e) => return fail(e),
+                }
+            } else if let Some(path) = args.take("--file") {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(e) => return fail(format!("{path}: {e}")),
+                }
+            } else {
+                return fail(USAGE);
+            };
+            LooksOp::PresetSave { name, text }
+        }
+        _ => return fail(USAGE),
+    };
+    let mut leds = match options.leds() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    match leds.looks(op) {
+        Ok(text) => {
+            print!("{text}");
+            if !text.is_empty() && !text.ends_with('\n') {
                 println!();
             }
             ExitCode::SUCCESS

@@ -293,7 +293,7 @@ fn numbers_out_of_range_are_named() {
         ),
         (
             "layers = [{ block = \"fill\", color = \"ff0000\", mode = \"multiply\" }]".to_string(),
-            "mode: must be max or add",
+            "mode: must be max, add or over",
         ),
         (
             "envelope = { kind = \"breathe\", depth = 1.5 }\nlayers = [{ block = \"fill\", color = \"ff0000\" }]".to_string(),

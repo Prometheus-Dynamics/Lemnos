@@ -27,6 +27,11 @@ pub enum Mode {
     Max,
     /// Per channel, the sum, saturating at full.
     Add,
+    /// Alpha over: the layer covers what is below by its own level (its
+    /// largest channel), so a head keeps its pure colour, the glow shows
+    /// where the head is off, and a tail blends from one to the other with
+    /// no hue mixing from a clipped max.
+    Over,
 }
 
 impl Mode {
@@ -34,6 +39,7 @@ impl Mode {
         match self {
             Self::Max => "max",
             Self::Add => "add",
+            Self::Over => "over",
         }
     }
 
@@ -41,6 +47,7 @@ impl Mode {
         match text {
             "max" => Some(Self::Max),
             "add" => Some(Self::Add),
+            "over" => Some(Self::Over),
             _ => None,
         }
     }
@@ -630,6 +637,7 @@ impl LookSpec {
             acc = match layer.mode {
                 Mode::Max => max(acc, c),
                 Mode::Add => add(acc, c),
+                Mode::Over => over(acc, c),
             };
         }
         acc
@@ -802,6 +810,21 @@ fn brightness_level(brightness: u8) -> u32 {
 
 fn max(a: Rgbw, b: Rgbw) -> Rgbw {
     Rgbw::new(a.r.max(b.r), a.g.max(b.g), a.b.max(b.b), a.w.max(b.w))
+}
+
+/// `top` over `below` by `top`'s own level: `below` shows through by
+/// `255 - level`, where `level` is `top`'s largest channel. The colours of
+/// `top` are already scaled by that level, so a full head is `top` alone and
+/// no glow shows through it.
+fn over(below: Rgbw, top: Rgbw) -> Rgbw {
+    let keep = 255 - u32::from(top.r.max(top.g).max(top.b).max(top.w));
+    let mix = |b: u8, t: u8| (((u32::from(b) * keep + 127) / 255) + u32::from(t)).min(255) as u8;
+    Rgbw::new(
+        mix(below.r, top.r),
+        mix(below.g, top.g),
+        mix(below.b, top.b),
+        mix(below.w, top.w),
+    )
 }
 
 fn add(a: Rgbw, b: Rgbw) -> Rgbw {

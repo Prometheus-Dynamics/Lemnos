@@ -26,6 +26,7 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 
+pub use client::FrameUpdate;
 pub use client::{
     ClientError, ClientEvent, ClientOptions, DEFAULT_SOCKET, DEFAULT_TIMEOUT, DeviceClient,
     I2cDevice, LedClient, Line, Pwm, Reading, SpiDevice, Update,
@@ -40,7 +41,7 @@ pub use lemnos_light::{
     Easing, EffectKind, LayerSpec, LookName, LookSpec, Phase, Status as LedStatus, SystemState,
 };
 pub use wire::{
-    ChannelDesc, ControlDesc, DeviceDesc, Event, I2cOp, LedRequest, LedShow, LineTarget, LooksOp,
-    Message, PwmTarget, RawReading, RawRequest, Refusal, Request, SpiXfer, VERSION, WireError,
-    decode_message, decode_request,
+    ChannelDesc, ControlDesc, DeviceDesc, Event, I2cOp, LedRequest, LedShow, LightFrame, LightInfo,
+    LineTarget, LooksOp, Message, PwmTarget, RawReading, RawRequest, Refusal, Request, SpiXfer,
+    VERSION, WireError, decode_message, decode_request,
 };

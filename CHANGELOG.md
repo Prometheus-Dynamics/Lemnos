@@ -6,12 +6,21 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Changed
+
+- The built-in `pv.*` looks are scheme B (healthy cool, trouble warm, motion means looking): `pv.targets` cyan `28c8ff`, `pv.searching` violet `965aff`, `pv.no-nt` deep orange `ff5a00`, `pv.no-nt-targets` a cyan glow at 0.25 under a deep-orange twin comet (`over`), `pv.error` red `ff2828`. The golden frames of the five looks are re-recorded.
+- `lemnosd` writes of a power switch are not undone when their client disconnects (they are the setting, not a lease); other controls are unchanged.
+
 ### Removed
 
 - The crates.io packaging check (`ci.sh package-surface` and its CI job). Lemnos is used as a git dependency and is not published to crates.io; lemnosd's `orion` feature depends on Orion through git, which `cargo package` cannot resolve.
 
 ### Added
 
+- Power switches: a `gpio-power-switch` driver (`lemnos-device` `power_switch`, `DeviceClass::PowerSwitch`, wire code 12), the USB port power of the Raze: `default_on` (applied in the GPIO request, so the line starts at its level with no glitch), `enable_delay_ms`, `fault_line` (a `power.fault` channel, degraded status when it asserts), `persist` (the setting survives a restart, in `LEMNOSD_STATE_DIR`), `on_exit` (`keep`, `on`, `off`). Controls: `power.on` (latched: the write outlives the client) and `power.reset` (off for N ms, then on). `lemnos-ctl power <device> on|off|status|reset [--off-ms N]`; Orion actions `power.set {on}` and `power.reset {off_ms}`, status keys `power.on` and `power.fault`. The Raze example has `usb-a-power` (line 20) and `usb-c-power` (line 16), both on by default. Tests use the mock GPIO only.
+- Frame watch: `LedClient::watch_frames(device, fps)` and `next_frame` (`FrameUpdate::Frame` with each rendered frame as `0xWWRRGGBB`, `FrameUpdate::Info` with the ring's count, offset, direction, look, layer and owner), `Request::WatchFrames` (code 12), `Message::Frame` (109), `Message::LightInfo` (110), appended. Sent only when the frame changes, at most at the watch's rate (up to 60 fps); nothing is done for a light nobody watches. `lemnos-ctl led watch <device> [--fps N]`.
+- Look presets: built-in `scheme-a`, `scheme-b` (the default) and `scheme-c`, and user presets saved under `<LEMNOSD_STATE_DIR>/presets`. The active preset sits above the board's looks and below the look files, and survives a restart. `lemnos-ctl looks preset list|show|apply|save|delete` and `lemnos-ctl looks delete <look>`; `LooksOp` codes 4 to 9 (appended). Preset changes are accepted from `atlas`, `lemnos-ctl` and `orion:*`. The Orion preset actions are not on the bridge yet (see `docs/orion.md`).
+- Looks: the `over` layer mode (alpha compositing: the layer covers what is below by its own level, so a coloured comet on a coloured glow keeps its head pure and blends its tail without hue mixing). Wire mode code 2, appended. `pv.no-nt-targets` uses it.
 - Looks: a `drain` block (a fill that grows from the top, holds, then recedes toward the gravity bottom on both sides, with a one-LED soft edge and an eased drain; the bottom comes from the same one-shot gravity read as a falling sparkle). `system.confirmed` is the flash, the burst, the green filled from the top and drained toward the bottom (3.2 s; the Confirmed hold is 3.3 s), and the falling sparks are dropped. Wire block code 7, appended.
 - Comets have a dim glow of their own colour under them: the default base is 0.18 (`spinner_base` for the spinner, the locate chase and orbits; `verifying_base` for the verifying and writing comets; the `pv.*` comets too). `system.verifying` is tail 8. Keys stay overridable.
 - Trial boot: the reboot ember stays on screen from the start of a trial boot (the status reads `trying`, or `rebooting`), held for `LEMNOSD_TRIAL_EMBER_MS` (4000 ms), then cross-fades into `system.booting` over 1 s. The ring is not written off on that path. `lemnosd` logs the uptime of its first ring frame once per start.

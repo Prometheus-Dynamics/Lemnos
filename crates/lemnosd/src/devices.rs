@@ -395,6 +395,17 @@ impl Slot {
             .collect()
     }
 
+    /// Whether a power switch's `power.fault` input reads asserted.
+    fn fault_asserted(&self) -> bool {
+        let Some(info) = self.info else {
+            return false;
+        };
+        info.channels
+            .iter()
+            .position(|c| c.name == "power.fault")
+            .is_some_and(|i| self.values.get(i) == Some(&1))
+    }
+
     /// Records a read that ran (inline, or on a worker with `values` already
     /// in place); returns a status change. A device that is gone is dropped
     /// and rebuilt on the retry schedule.
@@ -410,7 +421,14 @@ impl Slot {
             Ok(()) => {
                 self.read_us = started_us;
                 self.fresh = true;
-                self.set_status(DeviceStatus::Available, None)
+                if self.fault_asserted() {
+                    // A power switch whose fault input is asserted (an
+                    // over-current, a load that latched off) is degraded.
+                    self.reason = "fault: power.fault is asserted".into();
+                    self.set_status(DeviceStatus::Degraded, None)
+                } else {
+                    self.set_status(DeviceStatus::Available, None)
+                }
             }
             Err(kind) => {
                 self.reason = format!("read: {why}");

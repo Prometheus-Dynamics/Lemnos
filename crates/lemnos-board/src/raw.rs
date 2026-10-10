@@ -104,6 +104,28 @@ pub fn owned_resources(
                     chip: chip_id(chip),
                     offset: line,
                 },
+                owner.clone(),
+            ));
+        }
+        // A power switch's fault input is the device's too.
+        if spec.driver == "gpio-power-switch"
+            && let Some(line) = spec
+                .config
+                .get("fault_line")
+                .and_then(ConfigValue::as_i64)
+                .and_then(|l| u32::try_from(l).ok())
+        {
+            let chip = spec
+                .config
+                .get("fault_chip")
+                .or_else(|| spec.config.get("chip"))
+                .and_then(ConfigValue::as_str)
+                .unwrap_or_default();
+            owned.push((
+                Resource::Line {
+                    chip: chip_id(chip),
+                    offset: line,
+                },
                 owner,
             ));
         }

@@ -267,3 +267,15 @@ pub fn light_defaults(spec: &DeviceSpec) -> Result<Defaults, BoardError> {
     }
     Ok(d)
 }
+
+/// A light's ring geometry from its `config`: the physical LED that is
+/// logical LED 0 (the ring's "top"), and whether logical indices run
+/// clockwise. `None` when the `config` is not a valid strip.
+pub fn light_geometry(spec: &DeviceSpec) -> Option<(u16, bool)> {
+    strip_config(spec).ok().map(|s| {
+        (
+            s.offset,
+            s.direction == lemnos_drivers_ws2812::Direction::Cw,
+        )
+    })
+}

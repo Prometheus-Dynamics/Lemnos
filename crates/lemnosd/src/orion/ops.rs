@@ -7,7 +7,14 @@ use lemnos_ipc::{ClientError, Refusal};
 use orion_control_plane::TypedConfigValue;
 
 /// The action names a device resource accepts.
-pub const ACTIONS: [&str; 4] = ["set", "restore", "release", "read"];
+pub const ACTIONS: [&str; 6] = [
+    "set",
+    "restore",
+    "release",
+    "read",
+    "power.set",
+    "power.reset",
+];
 
 /// A parsed action.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +57,28 @@ pub fn parse(name: &str, args: &BTreeMap<String, TypedConfigValue>) -> Result<Op
         }),
         "release" => Ok(Op::Release),
         "read" => Ok(Op::Read),
+        // A power switch: `power.set {on}` writes `power.on`, `power.reset
+        // {off_ms}` writes `power.reset` (the off time, 0 to 10000 ms).
+        "power.set" => {
+            let on = match args.get("on") {
+                Some(TypedConfigValue::Bool(on)) => *on,
+                _ => return Err("`on` (bool) is required".to_owned()),
+            };
+            Ok(Op::Set {
+                control: "power.on".to_owned(),
+                value: if on { 1.0 } else { 0.0 },
+            })
+        }
+        "power.reset" => {
+            let off_ms = number(args, "off_ms").unwrap_or(1000.0);
+            if !(0.0..=10_000.0).contains(&off_ms) {
+                return Err("`off_ms` must be 0 to 10000".to_owned());
+            }
+            Ok(Op::Set {
+                control: "power.reset".to_owned(),
+                value: off_ms,
+            })
+        }
         other => Err(format!(
             "unsupported action `{other}` (one of {})",
             ACTIONS.join(", ")
@@ -145,6 +174,36 @@ mod tests {
         assert_eq!(parse("release", &BTreeMap::new()), Ok(Op::Release));
         assert_eq!(parse("read", &BTreeMap::new()), Ok(Op::Read));
         assert!(parse("calibrate", &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn power_actions_map_to_the_switch_controls() {
+        let on = args(&[("on", TypedConfigValue::Bool(false))]);
+        assert_eq!(
+            parse("power.set", &on),
+            Ok(Op::Set {
+                control: "power.on".into(),
+                value: 0.0
+            })
+        );
+        assert!(parse("power.set", &BTreeMap::new()).is_err());
+        let reset = args(&[("off_ms", TypedConfigValue::UInt(250))]);
+        assert_eq!(
+            parse("power.reset", &reset),
+            Ok(Op::Set {
+                control: "power.reset".into(),
+                value: 250.0
+            })
+        );
+        assert_eq!(
+            parse("power.reset", &BTreeMap::new()),
+            Ok(Op::Set {
+                control: "power.reset".into(),
+                value: 1000.0
+            })
+        );
+        let too_long = args(&[("off_ms", TypedConfigValue::UInt(99_999))]);
+        assert!(parse("power.reset", &too_long).is_err());
     }
 
     #[test]

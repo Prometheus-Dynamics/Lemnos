@@ -8,6 +8,7 @@
 use lemnos_board::{BoardDefinition, DriverRegistry, LinuxBuses};
 use lemnos_linux_sys::signal::{SIGHUP, SIGINT, SIGTERM, SignalFd};
 use lemnosd::looks::{DEFAULT_LOOKS_DIR, DEFAULT_OVERRIDE_DIR};
+use lemnosd::state::DEFAULT_STATE_DIR;
 use lemnosd::{DEFAULT_BOARD, DEFAULT_SOCKET, Service, ServiceConfig};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
@@ -30,6 +31,8 @@ fn main() -> ExitCode {
     let looks_dir = std::env::var("LEMNOSD_LOOKS_DIR").unwrap_or_else(|_| DEFAULT_LOOKS_DIR.into());
     let looks_override =
         std::env::var("LEMNOSD_LOOKS_OVERRIDE_DIR").unwrap_or_else(|_| DEFAULT_OVERRIDE_DIR.into());
+    // Settings that persist across restarts (power switches with `persist`).
+    let state_dir = std::env::var("LEMNOSD_STATE_DIR").unwrap_or_else(|_| DEFAULT_STATE_DIR.into());
     let mut check = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -80,6 +83,7 @@ fn main() -> ExitCode {
     config.booting_ms = (booting > 0).then_some(booting);
     config.looks_dir = off_or_path(&looks_dir);
     config.looks_override_dir = off_or_path(&looks_override);
+    config.state_dir = off_or_path(&state_dir);
     let mut service = match Service::new(config, Box::new(LinuxBuses::default())) {
         Ok(service) => service.with_systemd(),
         Err(error) => {

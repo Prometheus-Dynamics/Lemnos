@@ -39,6 +39,29 @@ pub(crate) struct Light {
     frames: Vec<((u32, bool), [Rgbw; MAX_LEDS])>,
     pub count: usize,
     pub next_render_ms: u64,
+    /// The frame the ring shows (the last one written), for frame watches.
+    pub current: [Rgbw; MAX_LEDS],
+    /// `current` is a frame the ring has shown (not yet, on a new light).
+    pub has_frame: bool,
+    /// Clients watching this light's frames (`Request::WatchFrames`).
+    pub watchers: Vec<FrameWatch>,
+}
+
+/// A client's watch of a light's frames: the least time between two frames,
+/// and the last frame and description sent (a frame goes out only when it
+/// differs from the last one).
+#[derive(Debug, Clone)]
+pub(crate) struct FrameWatch {
+    pub client: u32,
+    pub period_ms: u64,
+    /// When the next frame may go out.
+    pub next_ms: u64,
+    /// The frame last sent (`None`: none yet).
+    pub sent: Option<[Rgbw; MAX_LEDS]>,
+    /// The description last sent.
+    pub info_sent: Option<lemnos_ipc::LightInfo>,
+    /// Frames sent on this watch.
+    pub seq: u32,
 }
 
 /// When the frame after one due at `due` is due, having rendered at `now`:
@@ -74,6 +97,9 @@ impl Light {
             frames: Vec::new(),
             count: count.min(MAX_LEDS),
             next_render_ms: 0,
+            current: [Rgbw::OFF; MAX_LEDS],
+            has_frame: false,
+            watchers: Vec::new(),
         }
     }
 
@@ -257,6 +283,12 @@ impl Light {
     /// When the light needs attention next: a frame or an expiry. A frame
     /// is due at the light's own cadence (`next_render_ms`), not a fixed
     /// interval from the wake-up, so a late wake does not stretch the frames.
+    /// The winning intent: its owner, layer and intent (`None`: nothing holds
+    /// the light).
+    pub fn shown_intent(&self) -> Option<(u32, Layer, LightIntent)> {
+        self.shown
+    }
+
     pub fn next_ms(&self, now_ms: u64) -> Option<u64> {
         let frame = self
             .animator

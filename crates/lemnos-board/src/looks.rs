@@ -619,7 +619,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         Some(v) => v.as_str().and_then(Mode::parse),
     };
     if mode.is_none() {
-        errors.push(err(source, &join(key, "mode"), "must be max or add"));
+        errors.push(err(source, &join(key, "mode"), "must be max, add or over"));
     }
     match (block, layer_brightness, mode, errors.is_empty()) {
         (Some(block), Some(brightness), Some(mode), true) => Ok(LayerSpec {

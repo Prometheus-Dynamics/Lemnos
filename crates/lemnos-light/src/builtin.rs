@@ -5,7 +5,7 @@
 use crate::animator::Effect;
 use crate::easing::Easing;
 use crate::intent::{Defaults, EffectKind};
-use crate::look::{Block, Fraction, LayerSpec, LookSpec};
+use crate::look::{Block, Fraction, LayerSpec, LookSpec, Mode};
 use crate::sparkle::Sparkle;
 use lemnos_device::Rgbw;
 
@@ -99,17 +99,27 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
         // PhotonVision's app looks (the board's ring is the vision app's
         // status): blue while targets are seen, green while searching, amber
         // without NetworkTables, red on an error.
-        "pv.targets" => LookSpec::fill(Rgbw::rgb(0x2f7bff))
+        "pv.targets" => LookSpec::fill(Rgbw::rgb(0x28c8ff))
             .with_brightness(FULL_FILL)
             .with_envelope(Effect::Breathe {
                 period_ms: 4_000,
-                depth: 180,
+                depth: 200,
                 easing: d.easing,
             }),
-        "pv.searching" => comet(Rgbw::rgb(0x00ff20), 1_600, 7_000, 1, 180),
-        "pv.no-nt" => comet(Rgbw::rgb(0xffa424), 2_400, 6_000, 2, 180),
-        "pv.no-nt-targets" => comet(Rgbw::rgb(0x2f7bff), 2_400, 6_000, 2, 180),
-        "pv.error" => LookSpec::fill(Rgbw::rgb(0xff3b3b))
+        "pv.searching" => comet(Rgbw::rgb(0x965aff), 1_600, 7_000, 1, 180),
+        "pv.no-nt" => comet(Rgbw::rgb(0xff5a00), 2_400, 6_000, 2, 180),
+        // A deep-orange twin comet, over a cyan glow at a quarter of full:
+        // the head and tail are the comet's colour, the glow shows where the
+        // comet is not (`over`, so no hue mixing).
+        "pv.no-nt-targets" => {
+            let mut look = LookSpec::EMPTY;
+            look.push(LayerSpec::fill(Rgbw::rgb(0x28c8ff)).with_brightness(64));
+            look.push(
+                LayerSpec::comet(Rgbw::rgb(0xff5a00), 2_400, 6_000, 2, 0).with_mode(Mode::Over),
+            );
+            look
+        }
+        "pv.error" => LookSpec::fill(Rgbw::rgb(0xff2828))
             .with_brightness(FULL_FILL)
             .with_envelope(Effect::Breathe {
                 period_ms: 2_000,

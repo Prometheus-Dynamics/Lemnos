@@ -21,8 +21,16 @@ parameters, a colour, a brightness and a **mode**. A look has at most one
 LED: `max` keeps the brighter channel of the layers so far, `add` sums them
 (saturating). A layer's brightness scales that layer alone.
 
-Every block takes `brightness` (0 to 1, default 1) and `mode` (`max` or `add`,
-default `max`). Units: periods are milliseconds, a **LED** count is LEDs (the
+Every block takes `brightness` (0 to 1, default 1) and `mode` (`max`, `add` or
+`over`, default `max`). The modes:
+
+| Mode | Per channel | Use |
+|---|---|---|
+| `max` | the brighter of the two | the default; layers that do not overlap in colour |
+| `add` | the sum, saturating at full | light stacked on light |
+| `over` | alpha compositing: the layer covers what is below by its own level (its largest channel, `a`), so `below × (1 − a) + layer` | a coloured comet on a coloured glow: the head keeps its own colour, the glow shows where the head is off, and a tail blends from one to the other without the hue mixing a `max` gives |
+
+Wire: mode codes `0` (`max`), `1` (`add`), `2` (`over`), appended. Units: periods are milliseconds, a **LED** count is LEDs (the
 ring has 16 on the Raze, at most 64), and every other fraction is 0 to 1.
 
 | Block | Keys (default) | Notes |
@@ -221,12 +229,16 @@ the defaults shown. Each is also a valid `led look <name>`.
 | `system.failed` `system.rolled-back` | the red breathe, 2400 ms, depth 0.9 (`failed_*`) | fill 0.7 |
 | `system.confirmed` | the green pop: a pale green-white flash, a green burst from the top, the ring filled green and drained toward the bottom, about 3.2 s; see below | wash 1.0, drain 1.0, ripple 1.0 |
 | `system.locate` | the `locate` colour, breathe or chase (`locate_effect`) | fill 0.7 |
-| `pv.targets` | blue `2f7bff` breathe, 4000 ms, depth 0.18 | fill 0.7 |
-| `pv.searching` | green `00ff20` comet, 1600 ms, tail 7, base 0.18 | comet 1.0 |
-| `pv.no-nt` | amber `ffa424`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
-| `pv.no-nt-targets` | blue `2f7bff`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
-| `pv.error` | red `ff3b3b` breathe, 2000 ms, depth 0.85 | fill 0.7 |
+| `pv.targets` | cyan `28c8ff` breathe, 4000 ms, depth 0.2 | fill 0.7 |
+| `pv.searching` | violet `965aff` comet, 1600 ms, tail 7, base 0.18 | comet 1.0 |
+| `pv.no-nt` | deep orange `ff5a00`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
+| `pv.no-nt-targets` | cyan `28c8ff` glow at 0.25, under a deep-orange twin comet (2400 ms, tail 6, base 0, `over`) | glow 0.25, comet 1.0 |
+| `pv.error` | red `ff2828` breathe, 2000 ms, depth 0.85 | fill 0.7 |
 | `pv.vision` | steady white `ffffff` | fill 0.7 |
+
+These are the **scheme B** colours, the default preset (below). Scheme B is cool
+colours for healthy and warm colours for trouble, and motion means looking: a
+moving comet is a search or a wait, a steady colour is settled.
 
 Every comet has a dim glow of its own colour under it: the default base is
 0.18 (`spinner_base` for the spinner, the locate chase and an orbit;
@@ -241,6 +253,37 @@ checks that no LED changes by more than 9 of 255 in 1 ms over one turn.
 
 `system.writing-unknown` is the write phase while its amount is unknown; the
 update's other states are listed in `docs/system-service.md`.
+
+## Presets
+
+A **preset** is a named set of look definitions (a look file's text). Three are
+built in: `scheme-a` (a traffic light: green targets, white searching, amber
+no-NT, red error), `scheme-b` (the default: the scheme B colours above) and
+`scheme-c` (motion only: solid when settled, a comet when moving). Users save
+their own under `<LEMNOSD_STATE_DIR>/presets/<name>.toml` (default
+`/var/lib/lemnos/presets`); built-in names cannot be saved over or deleted.
+
+One preset is active, and the choice is saved (`<state>/presets/active`), so it
+survives a restart. The active preset's looks sit **above the board's looks and
+below every look file**: a look file in `LEMNOSD_LOOKS_DIR` or
+`LEMNOSD_LOOKS_OVERRIDE_DIR` still wins its name.
+
+```text
+lemnos-ctl looks preset list                       # * marks the active one
+lemnos-ctl looks preset show scheme-b              # its look file text
+lemnos-ctl looks preset apply scheme-c             # switch; remembered across restarts
+lemnos-ctl looks preset save night --file night.toml
+lemnos-ctl looks preset save night2 --from-active  # copy the active preset
+lemnos-ctl looks preset delete night               # the active one falls back to scheme-b
+lemnos-ctl looks delete pv.searching               # remove a look file override
+```
+
+Preset changes (apply, save, delete) and look deletions are accepted from the
+clients `atlas`, `lemnos-ctl` and `orion:<requested_by>`; any other client may
+read the presets but not change them. The socket's permissions remain the
+boundary. Protocol: `LooksOp` codes 4 to 9, appended (`PresetList`, `PresetShow`,
+`PresetApply`, `PresetSave`, `PresetDelete`, `Delete`), answered with
+`Message::Text`.
 
 ## Brightness
 
@@ -261,9 +304,10 @@ From the lowest to the highest:
 
 1. the built-ins;
 2. the board's `[looks.<name>]` tables (`board.toml`, read at start);
-3. every `*.toml` in `LEMNOSD_LOOKS_DIR` (read-only, default
+3. the active preset (see *Presets*);
+4. every `*.toml` in `LEMNOSD_LOOKS_DIR` (read-only, default
    `/etc/lemnos/looks.d`), in name order;
-4. every `*.toml` in `LEMNOSD_LOOKS_OVERRIDE_DIR` (writable, default
+5. every `*.toml` in `LEMNOSD_LOOKS_OVERRIDE_DIR` (writable, default
    `/var/lib/lemnos/looks.d`; `off` turns it off). `looks save` writes here.
 
 Within a directory a later file wins a name. A look that is used by a light

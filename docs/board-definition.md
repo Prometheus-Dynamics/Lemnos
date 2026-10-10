@@ -164,6 +164,7 @@ and, for `gpio-*` devices, its line; those are never claimed raw. See
 | `thermal-zone` | `temperature` | `match.type` or `path` | none | `temperature` °C |
 | `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`), `gpio` (informational), `spinner_base` (the comets' dim glow), `gravity_device`, `gravity_plane`, `gravity_led0_deg`, `default_down` (which way is down for a falling sparkle: `docs/looks.md`, *Gravity*), and the look defaults below | controls `brightness`, `color`; frames |
 | `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
+| `gpio-power-switch` | `power-switch` | `config.chip` + `config.line` | `chip`, `line`, `active_low`, `default_on` (true), `enable_delay_ms` (0, max 5000), `fault_line` (optional), `fault_chip` (default `chip`), `fault_active_low` (true), `persist` (false), `on_exit` (`keep`, `on` or `off`) | `power.on` channel and control (1 on, 0 off); `power.reset` control (write N: off for N ms, then on; max 10000); `power.fault` channel when `fault_line` is set |
 | `gpio-input` | `gpio` | `config.chip` + `config.line` | `chip`, `line`, `active_low` | `level` |
 
 A light's look defaults (used by `lemnosd`'s LED intents; any intent can override them):
@@ -209,6 +210,45 @@ status_effect = "breathe" }`; the rest is the defaults above.
 
 Hosts can register more drivers (`DriverRegistry::register`); a `DriverEntry` names the
 config keys it accepts so validation stays strict.
+
+### Power switches
+
+A `gpio-power-switch` is a load switch (a USB port's power). Its output is
+requested at `default_on`, in the GPIO request itself, so the line never passes
+through the other level. Behaviour that `lemnosd` adds (`docs/system-service.md`,
+*Power switches*):
+
+- `persist = true`: the last setting a client wrote is saved in the state
+  directory (`LEMNOSD_STATE_DIR`, default `/var/lib/lemnos`) and is the level the
+  line starts at after a restart.
+- `on_exit`: `keep` (default) leaves the line as it is when `lemnosd` stops; `on`
+  or `off` sets it then.
+- `fault_line`: an input (an over-current flag, active low by default). When it
+  asserts, the device is `degraded` with a status event; `power.fault` reads 1.
+- `enable_delay_ms`: a write that turns the switch on waits this long before the
+  reply, so the port has come up when the client continues.
+- `writers`: `["orion:*", "atlas"]` is the usual list (the Orion bridge's callers
+  and Atlas), with `lemnos-ctl` run on the board as needed.
+
+The Raze's two USB port switches (`crates/lemnos-board/examples/raze.toml`):
+
+```toml
+[[devices]]
+id = "usb-a-power"            # the USB-A port, on RP1 GPIO20
+driver = "gpio-power-switch"
+writers = ["orion:*", "atlas"]
+config = { chip = "pinctrl-rp1", line = 20, default_on = true, persist = true, on_exit = "keep" }
+
+[[devices]]
+id = "usb-c-power"            # the USB-C port, on RP1 GPIO16
+driver = "gpio-power-switch"
+writers = ["orion:*", "atlas"]
+config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, on_exit = "keep" }
+```
+
+Both lines are hogged on by the kernel overlay today, and the board package
+releases them; once `lemnosd` owns them it keeps them on from the start (no
+off-glitch). The older `gpio-output` driver still works for any other line.
 
 ## The Raze
 
@@ -265,8 +305,15 @@ config = { count = 16, wire = "rgb", offset = 5, direction = "cw", gpio = 13, fa
 
 [[devices]]
 id = "usb-a-power"
-driver = "gpio-output"
-config = { chip = "pinctrl-rp1", line = 20, initial = true }
+driver = "gpio-power-switch"
+writers = ["orion:*", "atlas"]
+config = { chip = "pinctrl-rp1", line = 20, default_on = true, persist = true, on_exit = "keep" }
+
+[[devices]]
+id = "usb-c-power"
+driver = "gpio-power-switch"
+writers = ["orion:*", "atlas"]
+config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, on_exit = "keep" }
 ```
 
 The buses and addresses were verified by chip-id reads on the Raze (PhotonVision 2027

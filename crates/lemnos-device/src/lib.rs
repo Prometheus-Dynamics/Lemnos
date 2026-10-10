@@ -32,6 +32,7 @@ pub mod fixed;
 pub mod gpio;
 pub mod kernel;
 mod model;
+pub mod power_switch;
 mod traits;
 
 #[cfg(test)]

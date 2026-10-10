@@ -33,8 +33,11 @@
 //! ```
 
 use crate::{Service, ServiceConfig};
+use embedded_hal::digital::{ErrorType, InputPin, OutputPin};
 use lemnos_board::raw::{DynLine, DynPwm, DynSpi};
-use lemnos_board::{BoardDefinition, BoardError, Buses, DynI2c};
+use lemnos_board::{
+    BoardDefinition, BoardError, Buses, DynI2c, DynInputPin, DynOutputPin, GpioRef,
+};
 use lemnos_drivers_linux::SysRoot;
 use lemnos_hal::ErrorKind;
 use lemnos_hal::mock::{MockI2c, MockLine, MockPwm, MockRawSpi};
@@ -183,8 +186,59 @@ impl Buses for MockBuses {
         Ok(DynPwm::new(self.hardware.pwm(chip, channel)))
     }
 
+    fn gpio_output(&mut self, line: &GpioRef, initial: bool) -> Result<DynOutputPin, BoardError> {
+        let mut config = LineConfig::output(initial);
+        config.active_low = line.active_low;
+        Ok(DynOutputPin::new(MockGpio(self.gpio(line, config)?)))
+    }
+
+    fn gpio_input(&mut self, line: &GpioRef) -> Result<DynInputPin, BoardError> {
+        let mut config = LineConfig::input();
+        config.active_low = line.active_low;
+        Ok(DynInputPin::new(MockGpio(self.gpio(line, config)?)))
+    }
+
     fn spi(&mut self, bus: u32, chip_select: u16) -> Result<DynSpi, BoardError> {
         Ok(DynSpi::new(self.hardware.spi(bus, chip_select)))
+    }
+}
+
+impl MockBuses {
+    /// Configures mock line `line` as `config` (the hardware's own line, so a
+    /// test reads what the service drove).
+    fn gpio(&self, line: &GpioRef, config: LineConfig) -> Result<MockLine, BoardError> {
+        let mut pin = self
+            .hardware
+            .line(&self.line_chip_id(&line.chip), line.line);
+        pin.configure(&config).map_err(|kind| {
+            BoardError::device(&format!("{}:{}", line.chip, line.line), kind, "configure")
+        })?;
+        Ok(pin)
+    }
+}
+
+/// A mock line as an embedded-hal pin, for the GPIO-backed devices.
+struct MockGpio(MockLine);
+
+impl ErrorType for MockGpio {
+    type Error = ErrorKind;
+}
+
+impl OutputPin for MockGpio {
+    fn set_low(&mut self) -> Result<(), ErrorKind> {
+        RawLine::set(&mut self.0, false)
+    }
+    fn set_high(&mut self) -> Result<(), ErrorKind> {
+        RawLine::set(&mut self.0, true)
+    }
+}
+
+impl InputPin for MockGpio {
+    fn is_high(&mut self) -> Result<bool, ErrorKind> {
+        RawLine::get(&mut self.0)
+    }
+    fn is_low(&mut self) -> Result<bool, ErrorKind> {
+        RawLine::get(&mut self.0).map(|high| !high)
     }
 }
 
@@ -196,6 +250,8 @@ pub struct MockLemnosd {
     hardware: MockHardware,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Keep the directory when dropped (a restart reuses its state).
+    keep_root: bool,
 }
 
 impl MockLemnosd {
@@ -216,6 +272,18 @@ impl MockLemnosd {
     /// [`start`](Self::start) in a directory the caller prepared (for
     /// example with fake sysfs files under `root/sys`).
     pub fn start_in(root: PathBuf, board: &str, hardware: MockHardware) -> io::Result<Self> {
+        let state = root.join("state");
+        Self::start_with_state(root, board, hardware, Some(state))
+    }
+
+    /// [`start_in`](Self::start_in) with the service's state directory
+    /// (`None`: none, so a power switch's `persist` is ignored).
+    pub fn start_with_state(
+        root: PathBuf,
+        board: &str,
+        hardware: MockHardware,
+        state_dir: Option<PathBuf>,
+    ) -> io::Result<Self> {
         let text = board.replace("{root}", &root.display().to_string());
         let definition = BoardDefinition::from_toml_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
@@ -228,7 +296,8 @@ impl MockLemnosd {
         };
         let (thread_stop, thread_socket) = (Arc::clone(&stop), socket.clone());
         let thread = std::thread::spawn(move || {
-            let config = ServiceConfig::new(definition, thread_socket);
+            let mut config = ServiceConfig::new(definition, thread_socket);
+            config.state_dir = state_dir;
             match Service::new(config, Box::new(buses)) {
                 Ok(mut service) => {
                     let _ = ready_tx.send(Ok(()));
@@ -247,6 +316,7 @@ impl MockLemnosd {
                 hardware,
                 stop,
                 thread: Some(thread),
+                keep_root: false,
             }),
             Ok(Err(error)) => Err(io::Error::other(error)),
             Err(_) => Err(io::Error::new(
@@ -274,6 +344,13 @@ impl MockLemnosd {
         self.shut_down();
     }
 
+    /// Stops the service and keeps its directory (state files and the
+    /// sysfs tree), for a restart over the same state.
+    pub fn stop_keep_root(mut self) {
+        self.shut_down();
+        self.keep_root = true;
+    }
+
     fn shut_down(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -285,6 +362,8 @@ impl MockLemnosd {
 impl Drop for MockLemnosd {
     fn drop(&mut self) {
         self.shut_down();
-        let _ = std::fs::remove_dir_all(&self.root);
+        if !self.keep_root {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }

@@ -293,9 +293,72 @@ lemnos-ctl led frame ff0000,00ff00,0000ff --test --seconds 5   # selftest look, 
 lemnos-ctl led off --test             # clears only the test layer
 lemnos-ctl led off
 lemnos-ctl fan release fan            # back to the kernel governor; lemnosd keeps running
+lemnos-ctl power usb-a-power off      # a power switch (docs: Power switches)
+lemnos-ctl led watch status-ring --fps 20   # the ring's frames as they change
 lemnos-ctl fan restore --all          # direct sysfs writes, works without the daemon
 lemnos-ctl validate /etc/lemnos/board.toml
 ```
+
+## Power switches
+
+A `gpio-power-switch` device (`docs/board-definition.md`, *Power switches*) is a
+load switch: a USB port's power. Its `power.on` control is latched: a write is the
+setting, so it does not end with the writer's connection (the other controls'
+writes do). Its `power.reset` control (write N, 0 to 10000) turns the switch off
+for N milliseconds and back on, to recover a port that latched off after an
+inrush; the write waits for it, so it briefly holds the service loop.
+
+- **Start.** The output is requested at the default level (`default_on`, or the
+  saved setting with `persist`), so it never passes through the other level.
+- **Persist.** With `persist = true`, each `power.on` write is saved to
+  `<LEMNOSD_STATE_DIR>/power/<device>.state` (default `/var/lib/lemnos`), written
+  atomically.
+- **Exit.** `on_exit` (`keep`, `on` or `off`) is applied when the service stops.
+  `keep` (default) does not touch the line; whether the level survives the process
+  exit is up to the kernel's release of the line (on the RP1 it is not confirmed
+  on hardware, so a restart re-requests the saved level).
+- **Fault.** With `fault_line`, the input's state is `power.fault`. A fault
+  asserting degrades the device (a status event, logged to the journal); clearing
+  it restores the device.
+
+```text
+lemnos-ctl power usb-a-power status
+lemnos-ctl power usb-a-power off
+lemnos-ctl power usb-a-power on
+lemnos-ctl power usb-c-power reset --off-ms 1000
+```
+
+Orion's actions are `power.set {on}` and `power.reset {off_ms}` ([orion.md](orion.md)).
+
+## Frame watch
+
+A client can watch a light's rendered frames: the exact RGBW values `lemnosd` wrote
+to the ring, after brightness and arbitration. `LedClient::watch_frames(device, fps)`
+(1 to 60 frames a second, default for the CLI 20; 0 ends the watch) returns the
+rate granted; `LedClient::next_frame(wait)` yields `FrameUpdate::Info` (the ring's
+count, `offset`, direction, the look shown, its layer and its owner; sent when the
+watch starts and when any of it changes) and `FrameUpdate::Frame` (one
+`0xWWRRGGBB` per logical LED, with a sequence number). A frame goes out only when it
+differs from the last one sent, at most at the watch's rate; a light nobody watches
+costs nothing. A reconnection needs the watch again. Wire: `Request::WatchFrames`
+(code 12), `Message::Frame` (109) and `Message::LightInfo` (110), appended.
+
+```text
+lemnos-ctl led watch status-ring --fps 20
+# status-ring count=16 offset=5 cw look="" layer=app owner=photonvision
+frame 1 status-ring 00b20000 00b20000 ...
+```
+
+Only lights can be watched (`unsupported` for another device, `unknown-device` for
+no device). Atlas's board-stream service reads these frames over `lemnos-ipc`.
+
+## Presets and the state directory
+
+`LEMNOSD_STATE_DIR` (default `/var/lib/lemnos`) holds what a user chose and expects
+to keep: the saved power settings, the look presets (`presets/`, with the active
+one) and a light's runtime settings. The Raze's device package makes it writable by
+`lemnos` (`StateDirectory=lemnos`). Look presets are described in
+[looks.md](looks.md), *Presets*; the CLI is `lemnos-ctl looks preset ...`.
 
 ## Raw bus and line access
 

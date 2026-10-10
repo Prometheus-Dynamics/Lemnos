@@ -1,7 +1,7 @@
 //! [`LedClient`]: LED intents on `lemnosd`'s lights.
 
 use super::{ClientError, ClientEvent, ClientOptions, Connection};
-use crate::wire::{Event, LedRequest, LedShow, LooksOp, Message, Request};
+use crate::wire::{Event, LedRequest, LedShow, LightFrame, LightInfo, LooksOp, Message, Request};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -243,6 +243,68 @@ impl LedClient {
                 }
                 Some(ClientEvent::Data(Message::Event(event))) => {
                     return Ok(Some(ClientEvent::Data(event)));
+                }
+                Some(ClientEvent::Data(_)) => {}
+            }
+        }
+    }
+}
+
+/// What a frame watch delivers (see [`LedClient::watch_frames`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameUpdate {
+    /// A frame of the light, as `lemnosd` wrote it.
+    Frame(LightFrame),
+    /// The light's geometry and what it shows, when that changes.
+    Info(LightInfo),
+}
+
+impl LedClient {
+    /// Watches `device`'s rendered frames at up to `fps` a second (1 to 60;
+    /// 0 ends the watch). Returns the rate granted. The frames then come from
+    /// [`next_frame`](Self::next_frame): the light's geometry and look first,
+    /// then each frame that changes, coalesced to the rate. A reconnection
+    /// needs the watch again.
+    pub fn watch_frames(&mut self, device: &str, fps: u16) -> Result<u16, ClientError> {
+        let id = self.conn.next_id();
+        let request = Request::WatchFrames {
+            id,
+            device: device.to_string(),
+            fps,
+        };
+        let reply = self.conn.request(&request, |m| match m {
+            Message::Reply { id: got, result } if *got == id => Some(*result),
+            _ => None,
+        })?;
+        match reply {
+            Ok(granted) => Ok(granted as u16),
+            Err(refusal) => Err(ClientError::Refused(refusal)),
+        }
+    }
+
+    /// The next frame or light description of a watch, waiting up to `wait`
+    /// (`None`: forever). Other messages are skipped, and connection changes
+    /// come back as [`ClientEvent`]s, as [`next_event`](Self::next_event) does.
+    pub fn next_frame(
+        &mut self,
+        wait: Option<Duration>,
+    ) -> Result<Option<ClientEvent<FrameUpdate>>, ClientError> {
+        let deadline = wait.map(|w| Instant::now() + w);
+        loop {
+            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            match self.conn.next(left)? {
+                None => return Ok(None),
+                Some(ClientEvent::Connected { reconnects }) => {
+                    return Ok(Some(ClientEvent::Connected { reconnects }));
+                }
+                Some(ClientEvent::Disconnected { error }) => {
+                    return Ok(Some(ClientEvent::Disconnected { error }));
+                }
+                Some(ClientEvent::Data(Message::Frame(frame))) => {
+                    return Ok(Some(ClientEvent::Data(FrameUpdate::Frame(frame))));
+                }
+                Some(ClientEvent::Data(Message::LightInfo(info))) => {
+                    return Ok(Some(ClientEvent::Data(FrameUpdate::Info(info))));
                 }
                 Some(ClientEvent::Data(_)) => {}
             }

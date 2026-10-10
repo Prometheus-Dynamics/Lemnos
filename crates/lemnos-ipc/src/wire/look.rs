@@ -147,6 +147,7 @@ pub(super) fn encode(e: &mut Encoder, spec: &LookSpec) {
         e.u8(layer.brightness).u8(match layer.mode {
             Mode::Max => 0,
             Mode::Add => 1,
+            Mode::Over => 2,
         });
     }
     encode_effect(e, spec.envelope);
@@ -328,6 +329,7 @@ pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
         let mode = match d.u8()? {
             0 => Mode::Max,
             1 => Mode::Add,
+            2 => Mode::Over,
             other => return Err(bad(format!("look mode {other}"))),
         };
         spec.push(LayerSpec {

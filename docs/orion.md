@@ -95,6 +95,8 @@ handler, so Orion routes an action here only while the bridge is connected.
 | `restore` | `control` (string, optional; all of the caller's writes when absent) | none | undoes the caller's writes |
 | `release` | none | none | hands a fan back to the kernel's governor |
 | `read` | none | `status` (string), `read_us` (`UInt`), one `F64` per channel with a value | the device's latest reading |
+| `power.set` | `on` (bool, required) | `control` (`power.on`), `applied` (`F64`) | switches a power switch on or off (`gpio-power-switch`; a latched setting, see [system-service.md](system-service.md), *Power switches*) |
+| `power.reset` | `off_ms` (number, optional, default 1000; 0 to 10000) | `control` (`power.reset`), `applied` (`F64`) | turns a power switch off for `off_ms` and back on (recovers a port that latched off) |
 
 Writer naming: each caller (`requested_by`) gets its own lemnosd connection named `orion:<requested_by>`,
 created on its first action. lemnosd applies a device's write policy to that name, and it ends the
@@ -113,13 +115,18 @@ A refused action is `Rejected` with the reason. A failure of the device is `Fail
 |---|---|---|
 | Rejected | `only resources take lemnos actions` | target is not a resource |
 | Rejected | `no lemnos device <resource>` | the resource is not on this board |
-| Rejected | `unsupported action `<name>` (one of set, restore, release, read)` | unknown name |
+| Rejected | `unsupported action `<name>` (one of set, restore, release, read, power.set, power.reset)` | unknown name |
 | Rejected | `` `control` (string) is required `` / `` `value` (number) is required `` / `` `value` must be finite `` | bad `set` arguments |
 | Rejected | `not allowed by the device's write policy` | the caller is not in the device's `writers` |
 | Rejected | `value out of range` | outside the control's range |
 | Rejected | `no such control` | unknown control |
 | Failed | `device error: <kind>` | the device failed (its error kind) |
 | Failed | `lemnosd: <error>` | lemnosd could not be reached, or timed out |
+
+A power switch's status is on its channels: `power.on` (1 on, 0 off, `F64`) and, when
+the switch has a fault input, `power.fault` (1 asserted). They publish under the
+channel names, as the other status keys do; a fault also makes the status
+`degraded`.
 
 ## Connections and failure behaviour
 
@@ -150,4 +157,7 @@ which an image imports on top of `lemnosd.toml` when it runs Orion.
 
 - Raw GPIO, PWM, I2C and SPI: direct to lemnosd only.
 - Device operations (calibrate, and similar): not yet.
+- Look presets and LED controls (`looks.preset.apply`, `looks.show_inline`, the ring brightness): not on
+  this bridge yet. They need an action target that is the provider rather than a resource, which the
+  bridge does not route. The lemnosd operations exist (`lemnos-ctl looks preset`, `LedClient`).
 - `release` is the fan hand-back; on a device that is not a fan, lemnosd's answer is passed on as the outcome.

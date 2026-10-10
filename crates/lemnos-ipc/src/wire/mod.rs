@@ -38,6 +38,7 @@ const RELEASE: u16 = 8;
 const RESTORE: u16 = 9;
 const LOOKS: u16 = 10;
 const SUBSCRIBE_CHANNELS: u16 = 11;
+const WATCH_FRAMES: u16 = 12;
 const WELCOME: u16 = 101;
 const DEVICES: u16 = 102;
 const READING: u16 = 103;
@@ -46,6 +47,8 @@ const EVENT: u16 = 105;
 const CLAIMED: u16 = 106;
 const DATA: u16 = 107;
 const TEXT: u16 = 108;
+const FRAME: u16 = 109;
+const LIGHT_INFO: u16 = 110;
 
 /// A malformed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,6 +415,16 @@ pub enum Request {
         id: u32,
         op: LooksOp,
     },
+    /// Watches a light's rendered frames: a [`Message::Frame`] whenever the
+    /// frame changes, at most `fps` a second (0 ends the watch), after a
+    /// [`Message::LightInfo`]. Answered with a [`Message::Reply`] (the granted
+    /// rate, or a refusal). The frames are sent only while they change, so a
+    /// watch costs nothing when the ring is still.
+    WatchFrames {
+        id: u32,
+        device: String,
+        fps: u16,
+    },
 }
 
 /// A looks request (see [`Request::Looks`]).
@@ -426,11 +439,28 @@ pub enum LooksOp {
     /// Writes `text` (a look file body, `[looks.<name>]` table included) to
     /// `<name>.toml` in the writable directory, then reloads.
     Save { name: String, text: String },
+    /// The presets: each built-in or saved one, with the active one marked.
+    PresetList,
+    /// One preset's look file text.
+    PresetShow(String),
+    /// Makes a preset the active one (its looks sit above the board's and
+    /// below the look files), and remembers the choice.
+    PresetApply(String),
+    /// Saves `text` (a look file body with any looks in it) as a preset.
+    PresetSave { name: String, text: String },
+    /// Deletes a saved preset (the active one falls back to the default).
+    PresetDelete(String),
+    /// Deletes the look `name` from the writable directory.
+    Delete(String),
 }
 
 /// Service to client.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
+    /// A rendered frame of a watched light (see [`Request::WatchFrames`]).
+    Frame(LightFrame),
+    /// A watched light's geometry and what it shows.
+    LightInfo(LightInfo),
     /// The answer to a request that asked for text: a look listing or
     /// definition, or a success (empty) or refusal message.
     Text {
@@ -459,6 +489,37 @@ pub enum Message {
         id: u32,
         result: Result<Vec<u8>, Refusal>,
     },
+}
+
+/// One rendered frame of a light: exactly what `lemnosd` wrote to the ring
+/// (after brightness and arbitration), one colour per logical LED, in the
+/// `0xWWRRGGBB` form of [`LedShow::Color`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightFrame {
+    pub device: String,
+    /// Counts the frames sent on this watch (from 1).
+    pub seq: u32,
+    pub pixels: Vec<u32>,
+}
+
+/// A light's geometry and what it shows, sent when a watch starts and when
+/// any of it changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightInfo {
+    pub device: String,
+    /// LEDs on the ring.
+    pub count: u16,
+    /// The physical LED that is logical LED 0 (the ring's "top").
+    pub offset: u16,
+    /// Whether logical indices run clockwise (`cw`) from the top.
+    pub clockwise: bool,
+    /// The named look shown, or empty for an inline look or none.
+    pub look: String,
+    /// The layer that holds the light (`status`, `application`, `test`,
+    /// `alert`, `system`, `locate`), empty when nothing holds it.
+    pub layer: String,
+    /// The client that holds it (`lemnosd` for the service's own looks).
+    pub owner: String,
 }
 
 /// Splits and decodes requests from `buf`; returns the request and the bytes

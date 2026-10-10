@@ -34,6 +34,8 @@ pub enum DeviceClass {
     Light,
     /// A digital input or output line.
     Gpio,
+    /// A switch that enables a load (a USB port's power), with optional fault sense.
+    PowerSwitch,
     /// An orientation estimate (typically computed from other devices).
     Orientation,
     Other,
@@ -53,6 +55,7 @@ impl DeviceClass {
             Self::Lens => "lens",
             Self::Light => "light",
             Self::Gpio => "gpio",
+            Self::PowerSwitch => "power-switch",
             Self::Orientation => "orientation",
             Self::Other => "other",
         }

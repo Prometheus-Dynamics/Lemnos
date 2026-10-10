@@ -60,7 +60,7 @@ pub use gravity::{
     Bottom, FLAT_FRACTION, GRAVITY_KEYS, Gravity, gravity as gravity_config, parse_axis,
 };
 pub use i2c_select::I2cSelector;
-pub use light::{LIGHT_KEYS, light_defaults, strip_config};
+pub use light::{LIGHT_KEYS, light_defaults, light_geometry, strip_config};
 pub use registry::{Build, DriverEntry, DriverRegistry, Interface};
 pub use schema::{
     Backend, BoardDefinition, BoardInfo, BusRef, ConfigValue, DeviceSpec, FORMAT, LineSpec,

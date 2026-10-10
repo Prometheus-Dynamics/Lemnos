@@ -9,6 +9,27 @@ impl Message {
     /// The frame for this message.
     pub fn encode(&self) -> Vec<u8> {
         match self {
+            Self::Frame(frame) => {
+                let mut e = Encoder::new(FRAME);
+                e.str(&frame.device)
+                    .u32(frame.seq)
+                    .u16(frame.pixels.len().min(u16::MAX as usize) as u16);
+                for pixel in frame.pixels.iter().take(u16::MAX as usize) {
+                    e.u32(*pixel);
+                }
+                e.finish()
+            }
+            Self::LightInfo(info) => {
+                let mut e = Encoder::new(LIGHT_INFO);
+                e.str(&info.device)
+                    .u16(info.count)
+                    .u16(info.offset)
+                    .u8(u8::from(info.clockwise))
+                    .str(&info.look)
+                    .str(&info.layer)
+                    .str(&info.owner);
+                e.finish()
+            }
             Self::Text { id, result } => {
                 let mut e = Encoder::new(TEXT);
                 e.u32(*id);
@@ -291,6 +312,29 @@ impl Message {
                     },
                 }
             }
+            FRAME => {
+                let device = d.str()?;
+                let seq = d.u32()?;
+                let n = d.u16()?;
+                let mut pixels = Vec::with_capacity(usize::from(n));
+                for _ in 0..n {
+                    pixels.push(d.u32()?);
+                }
+                Self::Frame(LightFrame {
+                    device,
+                    seq,
+                    pixels,
+                })
+            }
+            LIGHT_INFO => Self::LightInfo(LightInfo {
+                device: d.str()?,
+                count: d.u16()?,
+                offset: d.u16()?,
+                clockwise: d.u8()? != 0,
+                look: d.str()?,
+                layer: d.str()?,
+                owner: d.str()?,
+            }),
             TEXT => {
                 let id = d.u32()?;
                 let code = d.u8()?;

@@ -277,6 +277,11 @@ impl Request {
                 e.u32(*id).str(device);
                 e.finish()
             }
+            Self::WatchFrames { id, device, fps } => {
+                let mut e = Encoder::new(WATCH_FRAMES);
+                e.u32(*id).str(device).u16(*fps);
+                e.finish()
+            }
             Self::Looks { id, op } => {
                 let mut e = Encoder::new(LOOKS);
                 e.u32(*id);
@@ -285,6 +290,12 @@ impl Request {
                     LooksOp::Show(name) => e.u8(1).str(name),
                     LooksOp::Reload => e.u8(2),
                     LooksOp::Save { name, text } => e.u8(3).str(name).str(text),
+                    LooksOp::PresetList => e.u8(4),
+                    LooksOp::PresetShow(name) => e.u8(5).str(name),
+                    LooksOp::PresetApply(name) => e.u8(6).str(name),
+                    LooksOp::PresetSave { name, text } => e.u8(7).str(name).str(text),
+                    LooksOp::PresetDelete(name) => e.u8(8).str(name),
+                    LooksOp::Delete(name) => e.u8(9).str(name),
                 };
                 e.finish()
             }
@@ -419,6 +430,11 @@ impl Request {
                 id: d.u32()?,
                 device: d.str()?,
             },
+            WATCH_FRAMES => Self::WatchFrames {
+                id: d.u32()?,
+                device: d.str()?,
+                fps: d.u16()?,
+            },
             LOOKS => Self::Looks {
                 id: d.u32()?,
                 op: match d.u8()? {
@@ -429,6 +445,15 @@ impl Request {
                         name: d.str()?,
                         text: d.str()?,
                     },
+                    4 => LooksOp::PresetList,
+                    5 => LooksOp::PresetShow(d.str()?),
+                    6 => LooksOp::PresetApply(d.str()?),
+                    7 => LooksOp::PresetSave {
+                        name: d.str()?,
+                        text: d.str()?,
+                    },
+                    8 => LooksOp::PresetDelete(d.str()?),
+                    9 => LooksOp::Delete(d.str()?),
                     other => return Err(bad(format!("looks operation {other}"))),
                 },
             },

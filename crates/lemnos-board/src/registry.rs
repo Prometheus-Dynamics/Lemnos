@@ -416,6 +416,32 @@ const BUILTIN: &[DriverEntry] = &[
         build: build_gpio_output,
     },
     DriverEntry {
+        name: "gpio-power-switch",
+        summary: "GPIO power switch (a load switch: USB port power), optional fault input",
+        class: DeviceClass::PowerSwitch,
+        interface: Interface::Platform,
+        default_address: None,
+        // `persist`, `on_exit` and the saved state are lemnosd's: it reads them
+        // from the spec; the build uses `default_on`.
+        config_keys: &[
+            "chip",
+            "line",
+            "active_low",
+            "default_on",
+            "enable_delay_ms",
+            "fault_chip",
+            "fault_line",
+            "fault_active_low",
+            "persist",
+            "on_exit",
+        ],
+        match_keys: &[],
+        config_choices: POWER_SWITCH_CHOICES,
+        kernel: false,
+        userspace: true,
+        build: build_gpio_power_switch,
+    },
+    DriverEntry {
         name: "gpio-input",
         summary: "GPIO input line",
         class: DeviceClass::Gpio,
@@ -429,6 +455,8 @@ const BUILTIN: &[DriverEntry] = &[
         build: build_gpio_input,
     },
 ];
+
+const POWER_SWITCH_CHOICES: &[(&str, &[&str])] = &[("on_exit", &["keep", "on", "off"])];
 
 const BMI088_CHOICES: &[(&str, &[&str])] = &[
     ("accel_range", &["3g", "6g", "12g", "24g"]),
@@ -795,4 +823,67 @@ fn build_gpio_input(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDev
     Ok(BoxedDevice::sensor(lemnos_device::gpio::InputLine::new(
         pin,
     )))
+}
+
+/// A boolean setting, `default` when left out.
+fn flag(spec: &DeviceSpec, key: &str, default: bool) -> Result<bool, BoardError> {
+    match spec.config.get(key) {
+        None => Ok(default),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| bad(spec, format!("{key} must be true or false"))),
+    }
+}
+
+/// A power switch: its output line starts at `default_on` (the line is
+/// requested at that level, so it never passes through the other one), and
+/// an optional fault input (`fault_line`, on `fault_chip` or the same chip,
+/// active low unless `fault_active_low = false`).
+fn build_gpio_power_switch(
+    spec: &DeviceSpec,
+    buses: &mut dyn Buses,
+) -> Result<BoxedDevice, BoardError> {
+    let line = gpio_ref(spec)?;
+    let default_on = flag(spec, "default_on", true)?;
+    let enable_delay_ms = match integer(spec, "enable_delay_ms")? {
+        None => 0,
+        Some(ms) => {
+            u32::try_from(ms).map_err(|_| bad(spec, "enable_delay_ms must be 0 or more"))?
+        }
+    };
+    let pin = buses.gpio_output(&line, default_on)?;
+    let fault = match integer(spec, "fault_line")? {
+        None => None,
+        Some(offset) => {
+            let fault_line = crate::GpioRef {
+                chip: spec
+                    .config
+                    .get("fault_chip")
+                    .and_then(ConfigValue::as_str)
+                    .map_or_else(|| line.chip.clone(), str::to_string),
+                line: u32::try_from(offset)
+                    .map_err(|_| bad(spec, "fault_line must be a line offset"))?,
+                active_low: flag(spec, "fault_active_low", true)?,
+            };
+            Some(buses.gpio_input(&fault_line)?)
+        }
+    };
+    Ok(BoxedDevice::both(
+        lemnos_device::power_switch::PowerSwitch::new(
+            pin,
+            fault,
+            SleepDelay,
+            default_on,
+            enable_delay_ms,
+        ),
+    ))
+}
+
+/// Waits with `std::thread::sleep` (the power switch's enable delay and reset).
+struct SleepDelay;
+
+impl embedded_hal::delay::DelayNs for SleepDelay {
+    fn delay_ns(&mut self, ns: u32) {
+        std::thread::sleep(std::time::Duration::from_nanos(u64::from(ns)));
+    }
 }

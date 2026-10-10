@@ -3,16 +3,19 @@
 
 use crate::clients::Client;
 use crate::devices::{Placement, Slot, Subscription, WHOLE_DEVICE, channel_mask};
-use crate::light::{Light, LightIntent, MAX_LEDS, next_frame_due};
+use crate::light::{FrameWatch, Light, LightIntent, MAX_LEDS, next_frame_due};
 use crate::looks::LookTable;
 use crate::notify::Notifier;
 use crate::schedule::{self, Due, Next};
+use crate::state;
 use crate::update::UpdateWatcher;
 use crate::workers::{Done, Job, Workers};
 use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
-use lemnos_device::DeviceStatus;
+use lemnos_device::{DeviceClass, DeviceStatus};
 use lemnos_hal::ErrorKind;
-use lemnos_ipc::{Event, LedShow, LooksOp, Message, RawReading, Refusal, Request, VERSION};
+use lemnos_ipc::{
+    Event, LedShow, LightFrame, LightInfo, LooksOp, Message, RawReading, Refusal, Request, VERSION,
+};
 use lemnos_light::{Layer, Show, SystemState, valid_look_name};
 use lemnos_linux_sys::poll::{POLLIN, POLLOUT, PollFd, poll_many};
 use lemnos_linux_sys::time::boottime_us;
@@ -28,6 +31,16 @@ use std::time::Duration;
 const UPDATE_POLL_MS: u64 = 500;
 /// How often the look files are checked for changes.
 const LOOKS_POLL_MS: u64 = 1_000;
+/// Whether a client may change looks and presets: Atlas, the Orion bridge's
+/// callers (`orion:<requested_by>`), and `lemnos-ctl` run by an operator. The
+/// socket's permissions are the real boundary; this names who the service
+/// expects to make the changes.
+fn may_change_looks(client: &str) -> bool {
+    client == "atlas" || client == "lemnos-ctl" || client.starts_with("orion:")
+}
+
+/// The fastest a light's frames are watched (`Request::WatchFrames`).
+const MAX_WATCH_FPS: u16 = 60;
 /// The reboot ember's fade on shutdown, and the most time a stop may spend
 /// on it.
 const SHUTDOWN_FADE_MS: u32 = 1_200;
@@ -51,6 +64,9 @@ pub struct ServiceConfig {
     /// The writable directory of look files, read last and written by
     /// `looks save` (`LEMNOSD_LOOKS_OVERRIDE_DIR`); `None` refuses saves.
     pub looks_override_dir: Option<PathBuf>,
+    /// The directory of saved settings (`LEMNOSD_STATE_DIR`); `None` keeps
+    /// none (a power switch's `persist` is then ignored).
+    pub state_dir: Option<PathBuf>,
 }
 
 impl ServiceConfig {
@@ -63,6 +79,7 @@ impl ServiceConfig {
             booting_ms: None,
             looks_dir: None,
             looks_override_dir: None,
+            state_dir: None,
         }
     }
 }
@@ -132,6 +149,8 @@ pub struct Service {
     next_looks_ms: u64,
     /// The bus threads that read the sensors on each bus.
     workers: Workers,
+    /// Where settings persist (`None`: nowhere).
+    state_dir: Option<PathBuf>,
 }
 
 impl Service {
@@ -149,11 +168,20 @@ impl Service {
         let listener = UnixListener::bind(&config.socket)?;
         listener.set_nonblocking(true)?;
         let definition = config.board.clone();
-        let looks = LookTable::new(
+        let mut specs = config.board.devices.clone();
+        if let Some(dir) = &config.state_dir {
+            for spec in &mut specs {
+                state::apply_saved_power(spec, dir);
+            }
+        }
+        let mut looks = LookTable::new(
             &config.board,
             config.looks_dir.as_deref(),
             config.looks_override_dir.as_deref(),
         );
+        if let Some(dir) = &config.state_dir {
+            looks.use_presets(crate::presets::PresetDir::new(dir));
+        }
         let now_ms = boottime_us() / 1000;
         let mut service = Self {
             board: config.board.board.id.clone(),
@@ -161,7 +189,7 @@ impl Service {
             raw: crate::raw::RawState::default(),
             registry: config.registry,
             buses,
-            slots: config.board.devices.into_iter().map(Slot::new).collect(),
+            slots: specs.into_iter().map(Slot::new).collect(),
             lights: Vec::new(),
             clients: Vec::new(),
             listener,
@@ -179,6 +207,7 @@ impl Service {
             looks,
             next_looks_ms: 0,
             workers: Workers::new()?,
+            state_dir: config.state_dir.clone(),
         };
         service.build_devices(now_ms);
         Ok(service)
@@ -224,7 +253,17 @@ impl Service {
         }
     }
 
+    // The service logs to stderr (the journal); a power switch's status
+    // changes (a fault tripping, a recovery) are worth reading there.
+    #[allow(clippy::print_stderr)]
     fn status_event(&mut self, index: usize, status: DeviceStatus) {
+        let slot = &self.slots[index];
+        if slot
+            .info
+            .is_some_and(|i| i.class == DeviceClass::PowerSwitch)
+        {
+            eprintln!("lemnosd: {}: {status:?} {}", slot.id(), slot.reason);
+        }
         let event = Event::Status {
             device: self.slots[index].id().to_string(),
             status,
@@ -748,6 +787,10 @@ impl Service {
             if let Some(frame) = light.animator.render(now_ms)
                 && let Some(device) = self.slots[slot].device.as_mut()
             {
+                // The frame the ring shows, for frame watches.
+                let n = frame.len().min(MAX_LEDS);
+                light.current[..n].copy_from_slice(&frame[..n]);
+                light.has_frame = true;
                 match device.show(frame) {
                     Ok(()) => wrote = true,
                     Err(kind) => {
@@ -820,6 +863,117 @@ impl Service {
             light
                 .animator
                 .set_bottom(bottom.map_or(gravity.default_milli(), |b| b.led_milli));
+        }
+    }
+
+    /// Starts (or with `fps` 0, ends) client `ci`'s watch of a light's
+    /// frames. The granted rate is `fps`, at most [`MAX_WATCH_FPS`].
+    fn watch_frames(
+        &mut self,
+        ci: usize,
+        device: &str,
+        fps: u16,
+        now_ms: u64,
+    ) -> Result<u16, Refusal> {
+        let index = self.slot_of(device).ok_or(Refusal::UnknownDevice)?;
+        let li = self
+            .lights
+            .iter()
+            .position(|l| l.slot == index)
+            .ok_or(Refusal::Unsupported)?;
+        let client = self.clients[ci].id;
+        let watchers = &mut self.lights[li].watchers;
+        watchers.retain(|w| w.client != client);
+        if fps == 0 {
+            return Ok(0);
+        }
+        let fps = fps.min(MAX_WATCH_FPS);
+        watchers.push(FrameWatch {
+            client,
+            period_ms: (1_000 / u64::from(fps)).max(1),
+            next_ms: now_ms,
+            sent: None,
+            info_sent: None,
+            seq: 0,
+        });
+        Ok(fps)
+    }
+
+    /// Sends the watchers of each light what changed: its description when
+    /// it changes, and its frame when the frame differs from the last one sent
+    /// and the watcher's rate allows. Costs nothing for a light nobody watches.
+    fn send_frames(&mut self, now_ms: u64) {
+        let mut outgoing: Vec<(u32, Message)> = Vec::new();
+        for li in 0..self.lights.len() {
+            if self.lights[li].watchers.is_empty() {
+                continue;
+            }
+            let info = self.light_info(li);
+            let device = self.slots[self.lights[li].slot].id().to_string();
+            let n = self.lights[li].count.min(MAX_LEDS);
+            let light = &mut self.lights[li];
+            let current = light.current;
+            for w in &mut light.watchers {
+                if w.info_sent.as_ref() != Some(&info) {
+                    w.info_sent = Some(info.clone());
+                    outgoing.push((w.client, Message::LightInfo(info.clone())));
+                }
+                if !differs(w, &current, n) || now_ms < w.next_ms {
+                    continue;
+                }
+                let frame = current;
+                w.sent = Some(frame);
+                w.next_ms = now_ms + w.period_ms;
+                w.seq = w.seq.wrapping_add(1);
+                let pixels = frame[..n]
+                    .iter()
+                    .map(|c| {
+                        u32::from(c.w) << 24
+                            | u32::from(c.r) << 16
+                            | u32::from(c.g) << 8
+                            | u32::from(c.b)
+                    })
+                    .collect();
+                outgoing.push((
+                    w.client,
+                    Message::Frame(LightFrame {
+                        device: device.clone(),
+                        seq: w.seq,
+                        pixels,
+                    }),
+                ));
+            }
+        }
+        for (client, message) in outgoing {
+            if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
+                c.send(&message);
+            }
+        }
+    }
+
+    /// A light's geometry and what it shows now.
+    fn light_info(&self, li: usize) -> LightInfo {
+        let slot = self.lights[li].slot;
+        let spec = &self.slots[slot].spec;
+        let (offset, clockwise) = lemnos_board::light_geometry(spec).unwrap_or((0, true));
+        let (owner, layer, look) = match self.lights[li].shown_intent() {
+            Some((owner, layer, intent)) => {
+                let look = match intent.show {
+                    Show::Look { name, .. } => name.as_str().to_string(),
+                    _ => String::new(),
+                };
+                (self.owner_name(owner), layer.name().to_string(), look)
+            }
+            None => (String::new(), String::new(), String::new()),
+        };
+        LightInfo {
+            device: self.slots[slot].id().to_string(),
+            count: u16::try_from(self.lights[li].count).unwrap_or(u16::MAX),
+            offset,
+            clockwise,
+            look,
+            layer,
+            owner,
         }
     }
 
@@ -1060,27 +1214,78 @@ impl Service {
                     });
                 }
             }
+            Request::WatchFrames { id, device, fps } => {
+                let result = self.watch_frames(ci, &device, fps, now_ms);
+                self.clients[ci].send(&Message::Reply {
+                    id,
+                    result: result.map(f64::from),
+                });
+            }
             Request::Looks { id, op } => {
-                let result = match op {
-                    LooksOp::List => Ok(self.looks.list()),
-                    LooksOp::Show(name) => {
-                        let defaults = self.lights.first().map(|l| l.defaults).unwrap_or_default();
-                        self.looks.show(&name, &defaults)
-                    }
-                    LooksOp::Reload => {
-                        let report = self.looks.reload();
-                        self.invalidate_lights();
-                        Ok(report)
-                    }
-                    LooksOp::Save { name, text } => {
-                        let saved = self.looks.save(&name, &text);
-                        if saved.is_ok() {
-                            self.invalidate_lights();
-                        }
-                        saved
-                    }
+                // Preset changes and deletions are Atlas's, Orion's or an
+                // operator's (`lemnos-ctl`); other clients may only read.
+                let changes = matches!(
+                    op,
+                    LooksOp::PresetApply(_)
+                        | LooksOp::PresetSave { .. }
+                        | LooksOp::PresetDelete(_)
+                        | LooksOp::Delete(_)
+                );
+                let name = self.clients[ci].name.clone();
+                let result = if changes && !may_change_looks(&name) {
+                    Err(format!(
+                        "client {name:?} may not change looks (writers: atlas, orion:*, lemnos-ctl)"
+                    ))
+                } else {
+                    self.looks_op(op)
                 };
                 self.clients[ci].send(&Message::Text { id, result });
+            }
+        }
+    }
+
+    /// One looks operation (`Request::Looks`); the answer is its text or its
+    /// refusal.
+    fn looks_op(&mut self, op: LooksOp) -> Result<String, String> {
+        match op {
+            LooksOp::List => Ok(self.looks.list()),
+            LooksOp::Show(name) => {
+                let defaults = self.lights.first().map(|l| l.defaults).unwrap_or_default();
+                self.looks.show(&name, &defaults)
+            }
+            LooksOp::Reload => {
+                let report = self.looks.reload();
+                self.invalidate_lights();
+                Ok(report)
+            }
+            LooksOp::Save { name, text } => {
+                let saved = self.looks.save(&name, &text);
+                if saved.is_ok() {
+                    self.invalidate_lights();
+                }
+                saved
+            }
+            LooksOp::PresetList => Ok(self.looks.preset_list()),
+            LooksOp::PresetShow(name) => self.looks.preset_show(&name),
+            LooksOp::PresetApply(name) => {
+                let applied = self.looks.preset_apply(&name);
+                self.invalidate_lights();
+                applied
+            }
+            LooksOp::PresetSave { name, text } => {
+                let saved = self.looks.preset_save(&name, &text);
+                self.invalidate_lights();
+                saved
+            }
+            LooksOp::PresetDelete(name) => {
+                let deleted = self.looks.preset_delete(&name);
+                self.invalidate_lights();
+                deleted
+            }
+            LooksOp::Delete(name) => {
+                let deleted = self.looks.look_delete(&name);
+                self.invalidate_lights();
+                deleted
             }
         }
     }
@@ -1119,14 +1324,21 @@ impl Service {
             let c = &self.clients[client];
             (c.id, c.name.clone(), c.keep)
         };
-        self.slots[index].note_write(
-            ci,
-            &crate::clients::Requester {
-                id: wid,
-                name: &wname,
-                keep: wkeep,
-            },
-        );
+        // A power switch's write is latched: it is the setting, not a
+        // client's lease, so it does not end with the writer's connection.
+        let latched = self.slots[index]
+            .info
+            .is_some_and(|i| i.class == DeviceClass::PowerSwitch);
+        if !latched {
+            self.slots[index].note_write(
+                ci,
+                &crate::clients::Requester {
+                    id: wid,
+                    name: &wname,
+                    keep: wkeep,
+                },
+            );
+        }
         if self.slots[index].before_write() {
             self.save_fan_state();
         }
@@ -1135,7 +1347,14 @@ impl Service {
             .as_mut()
             .ok_or(Refusal::Device(ErrorKind::Unavailable))?;
         match device_ref.set(ci, raw as i32) {
-            Ok(applied) => Ok(crate::scaled(applied, exponent)),
+            Ok(applied) => {
+                if ci == 0 && latched {
+                    // The switch's reading is what it was just set to.
+                    self.slots[index].values[0] = applied;
+                    self.persist_power(index, applied == 1);
+                }
+                Ok(crate::scaled(applied, exponent))
+            }
             Err(kind) => {
                 let status = DeviceStatus::after_error(kind);
                 if let Some(status) = self.slots[index].set_status(status, Some(kind)) {
@@ -1143,6 +1362,21 @@ impl Service {
                 }
                 Err(Refusal::Device(kind))
             }
+        }
+    }
+
+    /// Saves a persisting power switch's state (see [`state`]).
+    #[allow(clippy::print_stderr)]
+    fn persist_power(&self, index: usize, on: bool) {
+        let slot = &self.slots[index];
+        let Some(dir) = self.state_dir.as_ref() else {
+            return;
+        };
+        if !state::power_persists(&slot.spec) {
+            return;
+        }
+        if let Err(error) = state::save_power(dir, slot.id(), on) {
+            eprintln!("lemnosd: {}: saving its state: {error}", slot.id());
         }
     }
 
@@ -1187,6 +1421,13 @@ impl Service {
             if let Some(at) = light.next_ms(now_us / 1000) {
                 next = next.min(at * 1000);
             }
+            // A frame that changed while its watcher's rate held it back goes
+            // out at the watcher's next time.
+            for w in &light.watchers {
+                if differs(w, &light.current, light.count.min(MAX_LEDS)) {
+                    next = next.min(w.next_ms * 1000);
+                }
+            }
         }
         if self.update.is_some() {
             next = next.min(self.next_update_ms * 1000);
@@ -1211,6 +1452,7 @@ impl Service {
         self.poll_update(now);
         self.poll_looks(now);
         self.render_lights(now);
+        self.send_frames(now);
         self.send_edges();
         if let Some(interval) = self.notifier.watchdog_interval()
             && now >= self.next_watchdog_ms
@@ -1278,6 +1520,7 @@ impl Service {
         self.poll_devices();
         // A request may have changed a light: render without waiting.
         self.render_lights(self.now_ms());
+        self.send_frames(self.now_ms());
         self.send_edges();
         self.drop_closed();
         Ok(extra_ready)
@@ -1293,6 +1536,9 @@ impl Service {
             let client = self.clients.remove(ci);
             for slot in &mut self.slots {
                 slot.subscriptions.retain(|s| s.client != client.id);
+            }
+            for light in &mut self.lights {
+                light.watchers.retain(|w| w.client != client.id);
             }
             if client.greeted {
                 self.client_closed(&client);
@@ -1333,6 +1579,7 @@ impl Service {
         for slot in &mut self.slots {
             slot.restore();
         }
+        self.power_on_exit();
         if rebooting {
             self.fade_to_ember();
         } else {
@@ -1344,6 +1591,26 @@ impl Service {
             }
         }
         let _ = std::fs::remove_file(&self.socket);
+    }
+
+    /// Each power switch goes to its `on_exit` state (`keep`: as it is).
+    fn power_on_exit(&mut self) {
+        for slot in &mut self.slots {
+            if !slot
+                .info
+                .is_some_and(|i| i.class == DeviceClass::PowerSwitch)
+            {
+                continue;
+            }
+            let level = match state::power_on_exit(&slot.spec) {
+                "on" => 1,
+                "off" => 0,
+                _ => continue,
+            };
+            if let Some(device) = slot.device.as_mut() {
+                let _ = device.set(0, level);
+            }
+        }
     }
 
     /// Eases every light down to the reboot ember over
@@ -1403,6 +1670,12 @@ fn mask_values(values: &[i32], mask: u64) -> Vec<i32> {
             }
         })
         .collect()
+}
+
+/// Whether the frame `current` differs from the last one watcher `w` was sent,
+/// over the first `n` LEDs.
+fn differs(w: &FrameWatch, current: &[lemnos_light::Rgbw; MAX_LEDS], n: usize) -> bool {
+    w.sent.as_ref().is_none_or(|sent| sent[..n] != current[..n])
 }
 
 /// The one-shot waiter a falling sparkle's gravity read is queued under (no

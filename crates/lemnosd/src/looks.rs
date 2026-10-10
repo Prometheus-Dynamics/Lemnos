@@ -9,6 +9,7 @@
 //! `SIGHUP` or `lemnos-ctl looks reload`. A file that fails to parse is
 //! reported and keeps the looks it had (a broken edit never blanks a look).
 
+use crate::presets::{self, PresetDir};
 use lemnos_board::{BoardDefinition, looks};
 use lemnos_light::{BUILTIN_LOOK_NAMES, Defaults, LookSpec, builtin_look, valid_look_name};
 use std::collections::BTreeMap;
@@ -49,6 +50,12 @@ pub struct LookTable {
     /// The overriding looks (the built-ins are not in here): name, and the
     /// origin shown by `looks list`.
     effective: BTreeMap<String, (LookSpec, String)>,
+    /// Where user presets are saved (`None`: only the built-ins).
+    presets: Option<PresetDir>,
+    /// The active preset's name, and its looks (between the board's looks
+    /// and the look files).
+    active: String,
+    preset: Vec<(String, LookSpec)>,
 }
 
 impl LookTable {
@@ -77,6 +84,11 @@ impl LookTable {
             dirs,
             files: Vec::new(),
             effective: BTreeMap::new(),
+            presets: None,
+            active: presets::DEFAULT.to_string(),
+            preset: presets::builtin_text(presets::DEFAULT)
+                .map(|text| parse_preset(presets::DEFAULT, text))
+                .unwrap_or_default(),
         };
         table.scan();
         // A scan rebuilds only when a file changed: the board's looks need it now.
@@ -162,12 +174,159 @@ impl LookTable {
         for (name, spec) in &self.board {
             effective.insert(name.clone(), (*spec, "board.toml".to_string()));
         }
+        for (name, spec) in &self.preset {
+            effective.insert(name.clone(), (*spec, format!("preset {}", self.active)));
+        }
         for file in &self.files {
             for (name, spec) in &file.looks {
                 effective.insert(name.clone(), (*spec, file.path.display().to_string()));
             }
         }
         self.effective = effective;
+    }
+
+    /// Uses the presets saved in `dir`, and applies the one recorded as active
+    /// there (the default when none is, or when it is gone).
+    pub fn use_presets(&mut self, dir: PresetDir) {
+        let saved = dir
+            .active()
+            .filter(|name| self.preset_text(&dir, name).is_some());
+        self.presets = Some(dir);
+        let name = saved.unwrap_or_else(|| presets::DEFAULT.to_string());
+        if let Some(text) = self.preset_text_of(&name) {
+            self.preset = parse_preset(&name, &text);
+            self.active = name;
+        }
+        self.rebuild();
+    }
+
+    /// The name of the active preset.
+    pub fn active_preset(&self) -> &str {
+        &self.active
+    }
+
+    /// The text of preset `name`: a built-in, else a saved one.
+    fn preset_text_of(&self, name: &str) -> Option<String> {
+        presets::builtin_text(name)
+            .map(str::to_string)
+            .or_else(|| self.presets.as_ref()?.load(name))
+    }
+
+    fn preset_text(&self, dir: &PresetDir, name: &str) -> Option<String> {
+        presets::builtin_text(name)
+            .map(str::to_string)
+            .or_else(|| dir.load(name))
+    }
+
+    /// The presets, with what each is and which is active.
+    pub fn preset_list(&self) -> String {
+        let mut out = String::new();
+        let mut names: Vec<String> = presets::BUILTIN
+            .iter()
+            .map(|(n, _)| n.to_string())
+            .collect();
+        if let Some(dir) = &self.presets {
+            names.extend(dir.names());
+        }
+        for name in names {
+            let origin = if presets::builtin_text(&name).is_some() {
+                "built-in"
+            } else {
+                "saved"
+            };
+            let mark = if name == self.active { "*" } else { " " };
+            out.push_str(&format!("{mark} {name} ({origin})\n"));
+        }
+        out
+    }
+
+    /// Preset `name`'s look file text.
+    pub fn preset_show(&self, name: &str) -> Result<String, String> {
+        self.preset_text_of(name)
+            .ok_or_else(|| format!("no preset {name:?} (lemnos-ctl looks preset list)"))
+    }
+
+    /// Makes preset `name` the active one: its looks replace the active
+    /// preset's, and the choice is saved (when there is a directory).
+    pub fn preset_apply(&mut self, name: &str) -> Result<String, String> {
+        let text = self.preset_show(name)?;
+        let parsed = parse_preset_checked(name, &text)?;
+        if let Some(dir) = &self.presets {
+            dir.set_active(name)
+                .map_err(|e| format!("saving the active preset: {e}"))?;
+        }
+        self.preset = parsed;
+        self.active = name.to_string();
+        self.rebuild();
+        Ok(format!("applied {name}"))
+    }
+
+    /// Saves `text` (a look file of looks, any names) as preset `name`. A
+    /// built-in's name is refused. The active preset is re-read when it is
+    /// the one saved.
+    pub fn preset_save(&mut self, name: &str, text: &str) -> Result<String, String> {
+        if !presets::valid_name(name) {
+            return Err(format!("{name:?} is not a valid preset name"));
+        }
+        if presets::builtin_text(name).is_some() {
+            return Err(format!("{name:?} is a built-in preset (use another name)"));
+        }
+        parse_preset_checked(name, text)?;
+        let dir = self
+            .presets
+            .as_ref()
+            .ok_or_else(|| "no state directory (LEMNOSD_STATE_DIR is off)".to_string())?;
+        dir.save(name, text)
+            .map_err(|e| format!("saving preset {name}: {e}"))?;
+        if name == self.active {
+            self.preset = parse_preset_checked(name, text)?;
+            self.rebuild();
+        }
+        Ok(format!("saved {name}"))
+    }
+
+    /// Deletes saved preset `name`. Deleting the active one applies the
+    /// default. Built-in presets cannot be deleted.
+    pub fn preset_delete(&mut self, name: &str) -> Result<String, String> {
+        if presets::builtin_text(name).is_some() {
+            return Err(format!(
+                "{name:?} is a built-in preset and cannot be deleted"
+            ));
+        }
+        let dir = self
+            .presets
+            .as_ref()
+            .ok_or_else(|| "no state directory (LEMNOSD_STATE_DIR is off)".to_string())?;
+        if !dir
+            .delete(name)
+            .map_err(|e| format!("deleting preset {name}: {e}"))?
+        {
+            return Err(format!("no preset {name:?}"));
+        }
+        if name == self.active {
+            self.preset_apply(presets::DEFAULT)?;
+        }
+        Ok(format!("deleted {name}"))
+    }
+
+    /// Deletes the look `name` from the writable directory (its override, if
+    /// it has one; the look it overrode, if any, shows again).
+    pub fn look_delete(&mut self, name: &str) -> Result<String, String> {
+        if !valid_look_name(name) {
+            return Err(format!("{name:?} is not a valid look name"));
+        }
+        let dir = self
+            .dirs
+            .iter()
+            .find(|(_, source)| *source == Source::Writable)
+            .map(|(dir, _)| dir.clone())
+            .ok_or_else(|| {
+                "no writable looks directory (LEMNOSD_LOOKS_OVERRIDE_DIR is off)".to_string()
+            })?;
+        let path = dir.join(format!("{name}.toml"));
+        fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.scan();
+        Ok(format!("deleted {}", path.display()))
     }
 
     /// Every look and where it comes from, then what failed to load.
@@ -286,5 +445,137 @@ fn read_into(file: &mut File) {
             file.error = None;
         }
         Err(errors) => file.error = Some(join(errors)),
+    }
+}
+
+/// A preset's looks (a built-in's text is valid by construction; a saved one
+/// that no longer parses gives none, and the report says so).
+fn parse_preset(name: &str, text: &str) -> Vec<(String, LookSpec)> {
+    parse_preset_checked(name, text).unwrap_or_default()
+}
+
+/// A preset's looks, or why its text is not valid.
+fn parse_preset_checked(name: &str, text: &str) -> Result<Vec<(String, LookSpec)>, String> {
+    looks::parse_file(&format!("preset {name}"), text).map_err(join)
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    use crate::presets::PresetDir;
+
+    fn board() -> BoardDefinition {
+        BoardDefinition::from_toml_str(
+            "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n",
+        )
+        .unwrap()
+    }
+
+    fn root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("lemnosd-looks-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn scheme_b_is_the_built_in_pv_looks() {
+        let root = root("b");
+        let table = LookTable::new(&board(), None, None);
+        let defaults = Defaults::default();
+        assert_eq!(table.active_preset(), "scheme-b");
+        for name in [
+            "pv.targets",
+            "pv.searching",
+            "pv.no-nt",
+            "pv.no-nt-targets",
+            "pv.error",
+        ] {
+            assert_eq!(
+                table.get(name),
+                builtin_look(name, &defaults),
+                "{name} differs from the built-in"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_preset_sits_between_the_board_and_the_look_files() {
+        let root = root("precedence");
+        let files = root.join("files");
+        fs::create_dir_all(&files).unwrap();
+        // A look file wins over the active preset.
+        fs::write(
+            files.join("pv.toml"),
+            "[looks.\"pv.searching\"]\nlayers = [{ block = \"fill\", color = \"ffffff\" }]\n",
+        )
+        .unwrap();
+        let mut table = LookTable::new(&board(), Some(&files), None);
+        table.use_presets(PresetDir::new(&root));
+        table.preset_apply("scheme-a").unwrap();
+        // The look file's searching look is the one in force, not scheme A's.
+        let searching = table.get("pv.searching").unwrap();
+        assert!(matches!(
+            searching.layers[0].unwrap().block,
+            lemnos_light::Block::Fill { .. }
+        ));
+        // Scheme A's own look (the preset's) is in force where no file overrides.
+        assert_eq!(
+            table.get("pv.no-nt").map(|l| l.layers[0].unwrap().block),
+            Some(lemnos_light::Block::Comet {
+                color: lemnos_light::Rgbw::rgb(0xff5a00),
+                period_ms: 2_400,
+                tail: 6_000,
+                heads: 2,
+                base: 180,
+                reverse: false,
+            })
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn presets_save_apply_persist_and_delete() {
+        let root = root("save");
+        let mut table = LookTable::new(&board(), None, None);
+        table.use_presets(PresetDir::new(&root));
+        let night = "[looks.\"pv.targets\"]\nlayers = [{ block = \"fill\", color = \"102030\" }]\n";
+        assert!(table.preset_save("night", night).is_ok());
+        assert!(
+            table.preset_save("scheme-b", night).is_err(),
+            "a built-in name is refused"
+        );
+        assert!(table.preset_list().contains("night (saved)"));
+        table.preset_apply("night").unwrap();
+        assert_eq!(table.active_preset(), "night");
+        // The choice is remembered by a new table over the same directory.
+        let mut again = LookTable::new(&board(), None, None);
+        again.use_presets(PresetDir::new(&root));
+        assert_eq!(again.active_preset(), "night");
+        // Deleting the active preset falls back to the default.
+        table.preset_delete("night").unwrap();
+        assert_eq!(table.active_preset(), "scheme-b");
+        assert!(table.preset_delete("scheme-a").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bad_preset_is_refused_and_nothing_changes() {
+        let root = root("bad");
+        let mut table = LookTable::new(&board(), None, None);
+        table.use_presets(PresetDir::new(&root));
+        let before = table.get("pv.targets");
+        assert!(
+            table
+                .preset_save(
+                    "broken",
+                    "[looks.\"pv.targets\"]\nlayers = [{ block = \"nope\" }]\n"
+                )
+                .is_err()
+        );
+        assert_eq!(table.get("pv.targets"), before);
+        let _ = fs::remove_dir_all(&root);
     }
 }

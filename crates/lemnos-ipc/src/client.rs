@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 mod led;
 #[path = "client_raw.rs"]
 mod raw;
-pub use led::LedClient;
+pub use led::{FrameUpdate, LedClient};
 pub use raw::{I2cDevice, Line, Pwm, SpiDevice};
 
 /// The default socket path.
