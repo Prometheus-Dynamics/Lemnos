@@ -62,6 +62,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- The built-in greens (`pv.searching`, the staged and confirmed update looks) are a true green, `00ff20`, instead of the mint `2bd47d`, which reads blue-green on the SK6812 ring.
 - Brightness: every look is scaled by the board's `look_brightness` (a new light key, default 0.5), and full-ring fills and breathes are capped at 0.7 of full (comets and arcs stay at 1.0), so a fill is no brighter than a comet's head. A request's `brightness` is still scaled by the ring. The reboot ember keeps at least 6%. The light's `brightness` key is unchanged: the LED driver's own byte, not the look scale.
 - `lemnos-light`'s `Look<N>` and `Pixels` are replaced by `LookSpec` (non-generic, fixed size) with `Block`, `LayerSpec`, `Fraction` and `Mode`; `Animator::set` takes a `LookSpec`, and `Intent::resolve` takes the named-look lookup (`resolve_builtin` for the built-ins alone). `Show` gains `Look` and `Inline`; `Defaults::brightness` is now `look_brightness`.
 - `lemnosd` shows status and system looks by name, so a look file replaces them, and an arc whose fill is set by the request (`system.writing`) takes the request's progress as before.

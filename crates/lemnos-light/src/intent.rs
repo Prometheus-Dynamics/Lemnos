@@ -318,7 +318,7 @@ impl Default for Defaults {
             verifying_tail: 7_000,
             verifying_base: 50,
             writing: Rgbw::rgb(0x2f7bff),
-            staged: Rgbw::rgb(0x2bd47d),
+            staged: Rgbw::rgb(0x00ff20),
             staged_period_ms: 2_200,
             staged_depth: 450,
             booting: Rgbw::rgb(0xfff4e6),
@@ -329,7 +329,7 @@ impl Default for Defaults {
             failed: Rgbw::rgb(0xff3b3b),
             failed_period_ms: 2_400,
             failed_depth: 900,
-            confirmed: Rgbw::rgb(0x2bd47d),
+            confirmed: Rgbw::rgb(0x00ff20),
         }
     }
 }

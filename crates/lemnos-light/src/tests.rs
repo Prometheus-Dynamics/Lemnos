@@ -430,7 +430,7 @@ fn system_looks_match_the_update_states() {
     assert_eq!(
         block(&staged),
         Block::Fill {
-            color: Rgbw::rgb(0x2bd47d)
+            color: Rgbw::rgb(0x00ff20)
         }
     );
     assert_eq!(

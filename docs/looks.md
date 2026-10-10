@@ -97,7 +97,7 @@ the defaults shown. Each is also a valid `led look <name>`.
 | `system.confirmed` | the green ripple (`confirmed`) | ripple 1.0 |
 | `system.locate` | the `locate` colour, breathe or chase (`locate_effect`) | fill 0.7 |
 | `pv.targets` | blue `2f7bff` breathe, 4000 ms, depth 0.18 | fill 0.7 |
-| `pv.searching` | green `2bd47d` comet, 1600 ms, tail 6, base 0.06 | comet 1.0 |
+| `pv.searching` | green `00ff20` comet, 1600 ms, tail 6, base 0.06 | comet 1.0 |
 | `pv.no-nt` | amber `ffa424`, two comets, 2400 ms, tail 5, base 0.05 | comet 1.0 |
 | `pv.no-nt-targets` | blue `2f7bff`, two comets, 2400 ms, tail 5, base 0.08 | comet 1.0 |
 | `pv.error` | red `ff3b3b` breathe, 2000 ms, depth 0.85 | fill 0.7 |

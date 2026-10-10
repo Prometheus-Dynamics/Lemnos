@@ -161,7 +161,7 @@ all; see [looks.md](looks.md) for the blocks, the keys and reloads.
 
 ```toml
 [looks."pv.searching"]
-layers = [{ block = "comet", color = "2bd47d", period_ms = 1600, tail = 6, base = 0.06 }]
+layers = [{ block = "comet", color = "00ff20", period_ms = 1600, tail = 6, base = 0.06 }]
 ```
 
 The system looks' own timing and shape (see `docs/system-service.md`, "System states"):

@@ -103,7 +103,7 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
                 depth: 180,
                 easing: d.easing,
             }),
-        "pv.searching" => comet(Rgbw::rgb(0x2bd47d), 1_600, 6_000, 1, 60),
+        "pv.searching" => comet(Rgbw::rgb(0x00ff20), 1_600, 6_000, 1, 60),
         "pv.no-nt" => comet(Rgbw::rgb(0xffa424), 2_400, 5_000, 2, 50),
         "pv.no-nt-targets" => comet(Rgbw::rgb(0x2f7bff), 2_400, 5_000, 2, 80),
         "pv.error" => LookSpec::fill(Rgbw::rgb(0xff3b3b))
