@@ -25,10 +25,45 @@ pub(crate) struct Subscription {
     pub next_us: u64,
 }
 
+/// Where a device's reads run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// A sensor on its bus's worker thread (`workers.rs`).
+    Worker,
+    /// A sensor the service thread reads itself (sysfs, with controls).
+    Inline,
+    /// Anything else (lights, and devices that are not sensors).
+    Other,
+}
+
+impl Placement {
+    fn of(device: &BoxedDevice) -> Self {
+        match device {
+            BoxedDevice::Sensor(_) => Self::Worker,
+            BoxedDevice::Both(_) => Self::Inline,
+            BoxedDevice::Control(_) | BoxedDevice::Light(_) => Self::Other,
+        }
+    }
+}
+
 /// One device.
 pub(crate) struct Slot {
     pub spec: DeviceSpec,
+    /// The device, when it is here: `None` while its bus's worker reads it,
+    /// and when it is missing.
     pub device: Option<BoxedDevice>,
+    /// The device is built (it may be on a worker).
+    pub present: bool,
+    pub placement: Placement,
+    /// The bus worker (lane) of a worker sensor.
+    pub lane: Option<usize>,
+    /// A read is running on the worker.
+    pub busy: bool,
+    /// The deadline a scheduled read on the worker was due at (`None`: a read
+    /// a client asked for, which leaves the schedule alone).
+    pub dispatched_us: Option<u64>,
+    /// Clients waiting for a one-shot read, answered when it completes.
+    pub waiters: Vec<u32>,
     pub info: Option<&'static DeviceInfo>,
     pub status: DeviceStatus,
     pub error: Option<ErrorKind>,
@@ -75,6 +110,12 @@ impl Slot {
         Self {
             spec,
             device: None,
+            present: false,
+            placement: Placement::Other,
+            lane: None,
+            busy: false,
+            dispatched_us: None,
+            waiters: Vec::new(),
             info: None,
             status: DeviceStatus::Missing,
             error: None,
@@ -131,8 +172,9 @@ impl Slot {
         self.period_ms().map(|ms| u64::from(ms) * 1000)
     }
 
+    /// Whether the device is a sensor, read by a worker or inline.
     pub fn is_sensor(&self) -> bool {
-        self.device.as_ref().is_some_and(BoxedDevice::is_sensor)
+        self.present && self.placement != Placement::Other
     }
 
     pub fn is_light(&self) -> bool {
@@ -168,7 +210,7 @@ impl Slot {
         delay: &mut dyn embedded_hal::delay::DelayNs,
         now_ms: u64,
     ) -> Option<DeviceStatus> {
-        if self.device.is_some() || now_ms < self.next_build_ms {
+        if self.present || now_ms < self.next_build_ms {
             return None;
         }
         let mut why = String::new();
@@ -191,7 +233,9 @@ impl Slot {
         match result {
             Ok(device) => {
                 self.info = Some(device.info());
+                self.placement = Placement::of(&device);
                 self.device = Some(device);
+                self.present = true;
                 self.retry_ms = RETRY_MIN_MS;
                 self.next_read_us = now_ms * 1000;
                 if self.restore.is_none() {
@@ -231,7 +275,21 @@ impl Slot {
         let device = self.device.as_mut()?;
         let mut why = String::new();
         let result = device.read_why(&mut self.values, &mut why);
-        self.read_cost_us = boottime_us().saturating_sub(started_us);
+        let cost_us = boottime_us().saturating_sub(started_us);
+        self.finish_read(started_us, cost_us, result, &why)
+    }
+
+    /// Records a read that ran (inline, or on a worker with `values` already
+    /// in place); returns a status change. A device that is gone is dropped
+    /// and rebuilt on the retry schedule.
+    pub fn finish_read(
+        &mut self,
+        started_us: u64,
+        cost_us: u64,
+        result: Result<(), ErrorKind>,
+        why: &str,
+    ) -> Option<DeviceStatus> {
+        self.read_cost_us = cost_us;
         match result {
             Ok(()) => {
                 self.read_us = started_us;
@@ -244,6 +302,7 @@ impl Slot {
                 if status == DeviceStatus::Missing {
                     // Gone: rebuild it on the retry schedule.
                     self.device = None;
+                    self.present = false;
                     self.fresh = false;
                     self.next_build_ms = started_us / 1000 + self.retry_ms;
                 }
@@ -397,7 +456,7 @@ impl Slot {
     /// running. The next client write takes it back (recording the
     /// governor's states again first).
     pub fn release(&mut self) -> Result<(), ErrorKind> {
-        if self.device.is_none() {
+        if !self.present {
             return Err(self.error.unwrap_or(ErrorKind::Unavailable));
         }
         let plan = self.hand_back_plan().ok_or(ErrorKind::Unsupported)?;

@@ -2,7 +2,8 @@
 //! the next device deadline.
 
 use crate::clients::Client;
-use crate::devices::{Slot, Subscription};
+use crate::devices::{Placement, Slot, Subscription};
+use crate::workers::{Done, Job, Workers};
 use crate::light::{Light, LightIntent, MAX_LEDS};
 use crate::looks::LookTable;
 use crate::notify::Notifier;
@@ -127,6 +128,8 @@ pub struct Service {
     /// The named looks (built-in, board, look files).
     looks: LookTable,
     next_looks_ms: u64,
+    /// The bus threads that read the sensors on each bus.
+    workers: Workers,
 }
 
 impl Service {
@@ -172,6 +175,7 @@ impl Service {
             due: Vec::new(),
             looks,
             next_looks_ms: 0,
+            workers: Workers::new()?,
         };
         service.build_devices(now_ms);
         Ok(service)
@@ -235,6 +239,22 @@ impl Service {
             if let Some(status) = changed {
                 self.status_event(index, status);
             }
+            // A sensor on a bus is read by that bus's thread.
+            if self.slots[index].placement == Placement::Worker
+                && self.slots[index].lane.is_none()
+            {
+                let bus = self.slots[index]
+                    .spec
+                    .bus
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                match self.workers.lane(&bus) {
+                    Ok(lane) => self.slots[index].lane = Some(lane),
+                    // No thread to be had: the service thread reads it.
+                    Err(_) => self.slots[index].placement = Placement::Inline,
+                }
+            }
             if self.slots[index].is_light() && !self.lights.iter().any(|l| l.slot == index) {
                 let slot = &self.slots[index];
                 let count = slot.device.as_ref().map_or(0, |d| d.pixel_count());
@@ -276,13 +296,14 @@ impl Service {
         })
     }
 
-    /// Reads the sensors that are due, in the order `schedule` picks, until
-    /// none is due or the next one has to wait (see `next_deadline`).
+    /// Reads the inline sensors (those the service thread reads) that are
+    /// due, in the order `schedule` picks, until none is due or the next one
+    /// has to wait (see `next_deadline`).
     fn poll_devices(&mut self) {
         loop {
             self.due.clear();
             for (index, slot) in self.slots.iter().enumerate() {
-                if slot.is_sensor() {
+                if slot.is_sensor() && slot.placement == Placement::Inline {
                     self.due.push(Due {
                         index,
                         deadline_us: slot.next_read_us,
@@ -299,18 +320,23 @@ impl Service {
         }
     }
 
-    /// Reads one sensor on its schedule, reports a status change, and sends
-    /// fresh values to the subscribers that are due.
+    /// Reads one inline sensor on its schedule, reports a status change, and
+    /// sends fresh values to the subscribers that are due.
     fn read_sensor(&mut self, index: usize) {
         let was_read = self.slots[index].read_us;
         if let Some(status) = self.slots[index].read_scheduled() {
             self.status_event(index, status);
         }
         let read_us = self.slots[index].read_us;
-        if read_us == was_read {
-            return;
+        if read_us != was_read {
+            let now_us = self.now_us();
+            self.deliver(index, read_us, now_us);
         }
-        let now_us = self.now_us();
+    }
+
+    /// Sends the reading at `read_us` to each subscriber whose next
+    /// deadline it meets, and moves those deadlines on.
+    fn deliver(&mut self, index: usize, read_us: u64, now_us: u64) {
         let due: Vec<u32> = self.slots[index]
             .subscriptions
             .iter_mut()
@@ -329,6 +355,143 @@ impl Service {
         }
     }
 
+    /// Takes the reads that finished on the bus threads, then starts the
+    /// ones that are due on each idle bus.
+    fn collect_reads(&mut self) {
+        while let Some(done) = self.workers.take_done() {
+            self.complete(done);
+        }
+        self.dispatch_reads();
+    }
+
+    /// Applies a finished read: status, values, the next deadline, the
+    /// subscribers and the one-shot readers waiting on it.
+    fn complete(&mut self, done: Done) {
+        let index = done.index;
+        let now_us = self.now_us();
+        let ok = done.result.is_ok();
+        let slot = &mut self.slots[index];
+        slot.busy = false;
+        slot.device = Some(done.device);
+        if ok {
+            slot.values = done.values;
+        }
+        let status = slot.finish_read(done.started_us, done.cost_us, done.result, &done.why);
+        if let Some(dispatched) = slot.dispatched_us.take() {
+            // The grid moves on from the deadline this read was for. A
+            // subscriber that arrived meanwhile set `next_read_us` to now.
+            slot.next_read_us = match slot.period_us() {
+                Some(period_us) => schedule::advance(dispatched, period_us, now_us)
+                    .min(slot.next_read_us),
+                None => u64::MAX,
+            };
+        }
+        let waiters = std::mem::take(&mut slot.waiters);
+        if let Some(status) = status {
+            self.status_event(index, status);
+        }
+        if ok {
+            self.deliver(index, done.started_us, now_us);
+        }
+        self.answer(index, &waiters, ok);
+    }
+
+    /// Sends a one-shot reader its reading, or why there is none.
+    fn answer(&mut self, index: usize, waiters: &[u32], ok: bool) {
+        if waiters.is_empty() {
+            return;
+        }
+        let message = if ok && self.slots[index].fresh {
+            self.reading(index)
+        } else {
+            Message::Reply {
+                id: 0,
+                result: Err(Refusal::Device(
+                    self.slots[index].error.unwrap_or(ErrorKind::Unavailable),
+                )),
+            }
+        };
+        for client in self.clients.iter_mut().filter(|c| waiters.contains(&c.id)) {
+            client.send(&message);
+        }
+    }
+
+    /// On each idle bus, starts the next read: a one-shot read a client waits
+    /// for first, else the sensor the schedule picks among that bus's sensors.
+    /// Sensors on other buses do not count, so a slow read on one bus never
+    /// holds back a due read on another.
+    fn dispatch_reads(&mut self) {
+        let now_us = self.now_us();
+        for lane in 0..self.workers.lanes() {
+            if self.workers.is_busy(lane) {
+                continue;
+            }
+            let waiting = self.slots.iter().position(|s| {
+                s.lane == Some(lane) && s.present && !s.busy && !s.waiters.is_empty()
+            });
+            if let Some(index) = waiting {
+                self.dispatch(index, false);
+                continue;
+            }
+            self.due.clear();
+            for (index, slot) in self.slots.iter().enumerate() {
+                if slot.lane == Some(lane) && slot.present && !slot.busy {
+                    self.due.push(Due {
+                        index,
+                        deadline_us: slot.next_read_us,
+                        period_us: slot.period_us().unwrap_or(u64::MAX),
+                        cost_us: slot.read_cost_us,
+                    });
+                }
+            }
+            if let Next::Run(index) = schedule::choose(&self.due, now_us) {
+                self.dispatch(index, true);
+            }
+        }
+    }
+
+    /// Sends sensor `index`'s device to its bus thread for one read.
+    /// `scheduled`: the read is the schedule's (it moves the grid on).
+    fn dispatch(&mut self, index: usize, scheduled: bool) {
+        let slot = &mut self.slots[index];
+        let Some(lane) = slot.lane else {
+            return;
+        };
+        let Some(device) = slot.device.take() else {
+            return;
+        };
+        let job = Job {
+            index,
+            device,
+            values: slot.values,
+        };
+        slot.busy = true;
+        if scheduled {
+            // Until the read completes, the schedule does not fire it again.
+            slot.dispatched_us = Some(slot.next_read_us);
+            slot.next_read_us = u64::MAX;
+        }
+        if let Err(job) = self.workers.submit(lane, job) {
+            // The bus thread is gone: the device stays here.
+            let slot = &mut self.slots[index];
+            slot.device = Some(job.device);
+            slot.busy = false;
+            if let Some(deadline) = slot.dispatched_us.take() {
+                slot.next_read_us = deadline;
+            }
+        }
+    }
+
+    /// Waits for the reads in flight (at shutdown), applying each.
+    fn drain_reads(&mut self) {
+        while self.workers.any_busy() {
+            let Some(done) = self.workers.wait_done() else {
+                return;
+            };
+            self.complete(done);
+        }
+    }
+
     /// Starts (or, with 0, ends) this client's readings of `device`. Returns
     /// the granted period: the requested one, or the device's read time if
     /// that is longer. A sensor that is not built yet is accepted (it reads
@@ -342,7 +505,7 @@ impl Service {
         if period_ms == 0 {
             return Ok(0);
         }
-        if slot.device.is_some() && !slot.is_sensor() {
+        if slot.present && !slot.is_sensor() {
             return Err(Refusal::Unsupported);
         }
         slot.subscriptions.push(Subscription {
@@ -510,6 +673,13 @@ impl Service {
                         let stale = !slot.fresh
                             || now_us.saturating_sub(slot.read_us)
                                 >= u64::from(slot.cap_ms()) * 1000;
+                        if stale && slot.present && slot.placement == Placement::Worker {
+                            // The bus thread reads it; the reply comes with the reading.
+                            let id = self.clients[ci].id;
+                            self.slots[index].waiters.push(id);
+                            self.dispatch_reads();
+                            return;
+                        }
                         if stale
                             && self.slots[index].is_sensor()
                             && let Some(status) = self.slots[index].read()
@@ -770,9 +940,11 @@ impl Service {
     fn next_deadline(&self, now_us: u64) -> u64 {
         let mut next = now_us + 1_000_000;
         for slot in &self.slots {
-            if slot.device.is_none() {
+            if !slot.present {
                 next = next.min(slot.next_build_ms * 1000);
-            } else if slot.is_sensor() && slot.next_read_us > now_us {
+            } else if slot.is_sensor() && !slot.busy && slot.next_read_us > now_us {
+                // A sensor whose read is in flight wakes the loop when it
+                // completes (the wake pair), not at a deadline.
                 next = next.min(slot.next_read_us);
             }
         }
@@ -799,6 +971,7 @@ impl Service {
     pub fn step(&mut self, max_wait: Duration, extra: Option<BorrowedFd<'_>>) -> io::Result<bool> {
         let now = self.now_ms();
         self.build_devices(now);
+        self.collect_reads();
         self.poll_devices();
         self.poll_update(now);
         self.poll_looks(now);
@@ -816,6 +989,8 @@ impl Service {
         self.pollfds.clear();
         self.pollfds
             .push(PollFd::new(self.listener.as_fd(), POLLIN));
+        self.pollfds
+            .push(PollFd::new(self.workers.wake_fd(), POLLIN));
         for client in &self.clients {
             let events = if client.wants_write() {
                 POLLIN | POLLOUT
@@ -833,6 +1008,8 @@ impl Service {
         }
         poll_many(&mut self.pollfds, Some(wait))?;
         let extra_ready = extra.is_some() && self.pollfds.last().is_some_and(|p| p.revents() != 0);
+        self.workers.drain_wake();
+        self.collect_reads();
 
         // New clients.
         loop {
@@ -916,6 +1093,7 @@ impl Service {
     /// socket removed.
     pub fn shutdown(&mut self, rebooting: bool) {
         self.notifier.stopping();
+        self.drain_reads();
         self.raw.release_all();
         for slot in &mut self.slots {
             slot.restore();

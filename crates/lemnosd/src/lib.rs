@@ -28,6 +28,7 @@ mod raw;
 mod schedule;
 mod service;
 mod update;
+mod workers;
 
 pub use service::{Service, ServiceConfig, ServiceError};
 
