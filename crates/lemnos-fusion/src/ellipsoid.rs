@@ -19,6 +19,12 @@ pub const CELLS: usize = 26;
 /// beyond `±CELL_THRESHOLD` counts as that side of the cell.
 const CELL_THRESHOLD: f32 = 0.4;
 
+/// A sample counts toward a direction cell only this far from the centre, as a
+/// fraction of the reference radius. Nearer, it is sensor noise around a
+/// still point, and its direction is random: a stationary sensor must not fill
+/// every cell.
+const MIN_RADIAL: f32 = 0.5;
+
 /// Ridge term, relative to the mean diagonal of the normal matrix.
 const RIDGE: f32 = 1e-5;
 
@@ -80,8 +86,18 @@ pub struct EllipsoidFit {
     forgetting: f32,
     min_per_cell: u16,
     samples: u32,
+    /// Normal equations over `u = (sample - origin) / reference`.
     normal: [[f32; 9]; 9],
     rhs: [f32; 9],
+    /// Decayed sample count (the weight of the normal equations).
+    weight: f32,
+    /// The origin of `u`. The quadric's constant term is fixed to 1, which only
+    /// describes an ellipsoid whose interior holds the origin: a raw origin
+    /// outside a large hard-iron offset gives no solution. Until a fit is
+    /// accepted it follows the running mean (see [`EllipsoidFit::bootstrap`]),
+    /// then it is the accepted centre (see [`EllipsoidFit::anchor`]).
+    origin: Vec3,
+    anchored: bool,
     cells: [f32; CELLS + 1],
     mean: Vec3,
     centre: Vec3,
@@ -107,6 +123,9 @@ impl EllipsoidFit {
             samples: 0,
             normal: [[0.0; 9]; 9],
             rhs: [0.0; 9],
+            weight: 0.0,
+            origin: [0.0; 3],
+            anchored: false,
             cells: [0.0; CELLS + 1],
             mean: [0.0; 3],
             centre: [0.0; 3],
@@ -120,7 +139,7 @@ impl EllipsoidFit {
     /// Adds one raw sample (sensor units).
     pub fn add(&mut self, sample: Vec3) {
         let inv = 1.0 / self.reference;
-        let u = math::scale(sample, inv);
+        let u = math::scale(math::sub(sample, self.origin), inv);
         let phi = [
             u[0] * u[0],
             u[1] * u[1],
@@ -147,6 +166,7 @@ impl EllipsoidFit {
                 *v *= lam;
             }
         }
+        self.weight = self.weight * lam + 1.0;
         for (i, row) in self.normal.iter_mut().enumerate() {
             let pi = phi[i];
             for (j, v) in row.iter_mut().enumerate() {
@@ -168,7 +188,7 @@ impl EllipsoidFit {
         };
         let d = math::sub(sample, reference_centre);
         let len = math::norm(d);
-        if len > 1e-9 {
+        if len >= MIN_RADIAL * self.reference {
             let idx = cell_index(math::scale(d, 1.0 / len));
             if idx != 13 {
                 self.cells[idx] += 1.0;
@@ -210,6 +230,66 @@ impl EllipsoidFit {
     pub fn set_centre(&mut self, centre: Vec3) {
         self.centre = centre;
         self.centre_set = true;
+    }
+
+    /// Until a fit has been accepted, moves the origin to the running mean. The
+    /// mean lies inside the cloud once it is spread over the sphere, so the
+    /// fit can start from a large offset. A degenerate fit's centre is not
+    /// used: it can lie far outside the cloud.
+    pub fn bootstrap(&mut self) {
+        if !self.anchored {
+            let mean = self.mean;
+            self.recentre(mean);
+        }
+    }
+
+    /// Anchors the origin at the centre of an accepted fit.
+    pub fn anchor(&mut self, centre: Vec3) {
+        self.anchored = true;
+        self.recentre(centre);
+    }
+
+    /// Moves the origin of the normal equations to `origin` (raw units). The
+    /// move is exact: with `v` the old coordinates and `w` the new, `φ(w)` is
+    /// an affine map of `φ(v)` (the quadric's features), so the sums are
+    /// rewritten from the sums alone, with no samples kept.
+    // Indexed 9x9 products read more clearly than iterator chains.
+    #[allow(clippy::needless_range_loop)]
+    pub fn recentre(&mut self, origin: Vec3) {
+        let shift = math::scale(math::sub(origin, self.origin), 1.0 / self.reference);
+        if shift == [0.0; 3] {
+            return;
+        }
+        // φ(w) = φ(v - shift).
+        let (a, c) = feature_shift(math::scale(shift, -1.0));
+        let w = self.weight;
+        let r = self.rhs;
+        let mut ar = [0.0_f32; 9];
+        for i in 0..9 {
+            for k in 0..9 {
+                ar[i] += a[i][k] * r[k];
+            }
+        }
+        // N_w = A N Aᵀ + A r cᵀ + c rᵀ Aᵀ + W c cᵀ.
+        let mut an = [[0.0_f32; 9]; 9];
+        for i in 0..9 {
+            for j in 0..9 {
+                for k in 0..9 {
+                    an[i][j] += a[i][k] * self.normal[k][j];
+                }
+            }
+        }
+        for i in 0..9 {
+            for j in 0..9 {
+                let mut v = 0.0_f32;
+                for k in 0..9 {
+                    v += an[i][k] * a[j][k];
+                }
+                self.normal[i][j] = v + ar[i] * c[j] + c[i] * ar[j] + w * c[i] * c[j];
+            }
+            self.rhs[i] = ar[i] + w * c[i];
+        }
+        self.origin = origin;
     }
 
     /// Forgets every sample.
@@ -290,7 +370,7 @@ impl EllipsoidFit {
         }
         let radius = math::cbrt(1.0 / det);
         let ellipsoid = Ellipsoid {
-            center: math::scale(c_u, self.reference),
+            center: math::add(self.origin, math::scale(c_u, self.reference)),
             matrix,
             radius,
         };
@@ -313,6 +393,28 @@ impl EllipsoidFit {
             samples: self.samples,
         })
     }
+}
+
+/// The features of `x + h` as an affine map of those of `x`: `φ(x + h) = A φ(x) + c`.
+/// The features are `x_i²`, `x_a x_b` (pairs (0,1), (1,2), (0,2)), then `x_i`.
+fn feature_shift(h: Vec3) -> ([[f32; 9]; 9], [f32; 9]) {
+    let mut a = [[0.0_f32; 9]; 9];
+    let mut c = [0.0_f32; 9];
+    for i in 0..3 {
+        a[i][i] = 1.0;
+        a[i][6 + i] = 2.0 * h[i];
+        c[i] = h[i] * h[i];
+        a[6 + i][6 + i] = 1.0;
+        c[6 + i] = h[i];
+    }
+    for (p, (x, y)) in [(0usize, 1usize), (1, 2), (0, 2)].into_iter().enumerate() {
+        let p = 3 + p;
+        a[p][p] = 1.0;
+        a[p][6 + x] = h[y];
+        a[p][6 + y] = h[x];
+        c[p] = h[x] * h[y];
+    }
+    (a, c)
 }
 
 /// Maps a unit direction to one of the 26 cells (index 13 is the centre,
@@ -362,6 +464,22 @@ mod tests {
             out[i] = s[i][0] * b[0] + s[i][1] * b[1] + s[i][2] * b[2];
         }
         [out[0] + 10.0, out[1] - 5.0, out[2] + 20.0]
+    }
+
+    #[test]
+    fn stationary_noise_does_not_fill_direction_cells() {
+        // A board at rest: every sample is the same point plus sensor noise.
+        // Noise is not a direction from the centre, so no cell fills.
+        let mut fit = EllipsoidFit::new(9.8, 1.0, 4);
+        let mut rng = Rng::new(3);
+        for _ in 0..2000 {
+            fit.add([
+                0.3 + 0.03 * rng.signed(),
+                -0.2 + 0.03 * rng.signed(),
+                9.8 + 0.03 * rng.signed(),
+            ]);
+        }
+        assert_eq!(fit.coverage(), 0.0);
     }
 
     #[test]

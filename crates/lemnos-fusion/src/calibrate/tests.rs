@@ -231,11 +231,12 @@ fn magnetometer_rotate_routine_produces_candidate_until_applied() {
 }
 
 #[test]
-fn magnetometer_ignores_fields_outside_the_earth_range() {
+fn magnetometer_ignores_fields_outside_the_sensor_range() {
     let mut m = MagCalibrator::new();
     let mut t = 0u64;
     for _ in 0..1000 {
-        m.push(t, [100.0, 0.0, 0.0]);
+        m.push(t, [2000.0, 0.0, 0.0]);
+        m.push(t + 5_000, [5.0, 0.0, 0.0]);
         t += 10_000;
     }
     assert_eq!(m.status().samples, 0);
@@ -251,4 +252,65 @@ fn start_ends_a_running_routine_and_discards_its_candidate() {
     c.stop();
     assert_eq!(c.running(), None);
     assert!(!c.apply());
+}
+
+/// A board at rest: the gravity vector with sensor noise (m/s², rad/s).
+fn hold_noisy(c: &mut ImuCalibrator, rng: &mut Rng, t0: u64, secs: f32, a: Vec3) -> u64 {
+    let n = (secs * 100.0) as u64;
+    for k in 0..n {
+        let noisy = [
+            a[0] + 0.03 * rng.signed(),
+            a[1] + 0.03 * rng.signed(),
+            a[2] + 0.03 * rng.signed(),
+        ];
+        let gyro = [
+            0.002 * rng.signed(),
+            0.002 * rng.signed(),
+            0.002 * rng.signed(),
+        ];
+        c.push(t0 + k * 10_000, raw_accel(noisy), gyro);
+    }
+    t0 + n * 10_000
+}
+
+#[test]
+fn stationary_board_with_clean_gravity_reports_high_imu_confidence() {
+    let mut c = ImuCalibrator::new();
+    let mut rng = Rng::new(7);
+    hold_noisy(&mut c, &mut rng, 0, 70.0, [0.0, 0.0, G]);
+    let (acc, gyro) = c.status();
+    assert!(
+        gyro.confidence >= 900,
+        "gyro confidence {}",
+        gyro.confidence
+    );
+    assert!(acc.confidence >= 900, "accel confidence {}", acc.confidence);
+}
+
+#[test]
+fn magnetometer_with_a_large_hard_iron_offset_is_calibrated_by_rotation() {
+    // A 50 µT field with a 140 µT hard-iron offset: every raw magnitude is
+    // between 90 and 190 µT, far outside the Earth's field.
+    let offset = [-37.0_f32, 140.0, -75.0];
+    let mut m = MagCalibrator::new();
+    let mut rng = Rng::new(51);
+    let mut t = 0u64;
+    for _ in 0..3000 {
+        let d = crate::testutil::random_unit(&mut rng);
+        let b = crate::math::scale(d, 50.0);
+        m.push(t, [b[0] + offset[0], b[1] + offset[1], b[2] + offset[2]]);
+        t += 100_000;
+    }
+    let s = m.status();
+    assert!(s.samples > 0, "no sample was taken");
+    assert!(
+        s.active,
+        "confidence {} coverage {}",
+        s.confidence, s.coverage
+    );
+    assert!(
+        norm(sub(m.field().center, offset)) < 1.0,
+        "centre {:?}",
+        m.field().center
+    );
 }

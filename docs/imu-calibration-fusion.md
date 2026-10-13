@@ -142,6 +142,11 @@ reads, with bounded cost per sample.
   factor 0.999 per sample, so about 1000 samples are remembered). Applied under the same
   thresholds, and rate-limited the same way. A raw field outside 15-80 µT is not accepted (it is
   not an Earth field).
+- **Accelerometer confidence** is its gravity agreement (the share of recent samples with `|a|` within 10 % of g, a moving average of about 0.6 s, starting at 1) times the applied fit's confidence, or 1 when no fit is applied (the factory correction). A still board with clean gravity is fully confident without a fit: a fit needs orientation coverage, which a still board never has.
+- **Coverage** counts a sample toward a direction cell only when it lies at least half the reference radius from the centre. Sensor noise around a still point is a random direction, so it must not fill the cells.
+- **Raw field range:** the magnetometer takes samples whose raw magnitude is between 15 and 1000 µT (the sensor's saturation). The raw magnitude includes the hard-iron offset, so it is not limited to the Earth's field.
+- **Fit origin:** the quadric is solved about an origin inside the ellipsoid. Until a fit is accepted the origin follows the running mean; after acceptance it is the accepted centre. Moving the origin is exact (the normal equations are rewritten from their sums), so no samples are kept.
+- **Outlier check:** a fit is rejected when its centre moved more than half the reference from the last *accepted* fit's centre (the first accepted fit is not checked).
 - **Confidence** of a part, 0 to 1000 permille: the minimum of three scores, each 1 at or above
   its threshold and falling linearly to 0: coverage (threshold 0.6), residual (threshold 2 %),
   and samples (threshold 300). The part is `active` once its confidence is at least 500.

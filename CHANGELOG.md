@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Fixed
+
+- Orientation fusion on a still board with clean gravity reported `confidence.imu` 0. The accelerometer's confidence now reads its gravity agreement (1000 while the factory correction stands) times the applied fit's confidence; a fit needs orientation coverage, so it never gated a still board.
+- Stationary sensor noise counted as direction coverage (a still board read coverage 1000). Coverage counts only samples at least half the reference radius from the centre.
+- The magnetometer calibration never took a sample when the raw field was outside 15 to 80 µT, which a hard-iron offset puts outside: the raw range is now up to the sensor's saturation (1000 µT).
+- The ellipsoid fit ran from the raw origin, which gives no solution when a hard-iron offset exceeds the field. The fit now moves its origin to the accepted centre (exact re-origin of the normal equations), and to the running mean until a fit is accepted.
+- A fit was rejected when its centre moved more than 0.5 of the reference from the applied (rate-limited) correction, so a large offset was never applied. The check now compares with the last accepted fit.
+
 ### Changed
 
 - The built-in `pv.*` looks are scheme B (healthy cool, trouble warm, motion means looking): `pv.targets` cyan `28c8ff`, `pv.searching` violet `965aff`, `pv.no-nt` deep orange `ff5a00`, `pv.no-nt-targets` a cyan glow at 0.25 under a deep-orange twin comet (`over`), `pv.error` red `ff2828`. The golden frames of the five looks are re-recorded.

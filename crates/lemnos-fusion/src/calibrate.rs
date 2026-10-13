@@ -52,9 +52,15 @@ const ACTIVE_PERMILLE: u16 = 500;
 const ACCEL_REF: f32 = STANDARD_GRAVITY;
 /// Magnetometer sphere radius (µT): the nominal Earth field.
 const MAG_REF: f32 = 50.0;
-/// Raw field magnitudes outside this range (µT) are not an Earth field.
+/// Raw field magnitudes (µT) outside this range are not a field at all. The
+/// raw magnitude is the Earth's field plus the board's hard-iron offset, so
+/// it can sit well above 50 µT (a 140 µT offset gives 90 to 190 µT); the upper
+/// bound is the sensor's saturation, not the Earth's field.
 const MAG_MIN_RAW: f32 = 15.0;
-const MAG_MAX_RAW: f32 = 80.0;
+const MAG_MAX_RAW: f32 = 1000.0;
+/// Weight of each sample in the accelerometer's gravity-agreement average
+/// (about 0.6 s at 100 Hz).
+const CLEAN_ALPHA: f32 = 1.0 / 64.0;
 const MAG_FORGET: f32 = 0.999;
 const ACCEL_FORGET: f32 = 0.9995;
 const CELL_MIN_SAMPLES: u16 = 4;
@@ -171,6 +177,14 @@ fn accel_target(e: Ellipsoid) -> Ellipsoid {
     }
 }
 
+/// `true` when a fit's centre moved more than `MAX_CENTRE_MOVE` of `reference`
+/// from the last accepted fit's. Measured against the last accepted fit, not
+/// the applied (rate-limited) correction, which trails a large offset and
+/// would reject every fit after the first.
+fn outlier(centre: Vec3, last: Option<Vec3>, reference: f32) -> bool {
+    last.is_some_and(|l| math::norm(math::sub(centre, l)) > MAX_CENTRE_MOVE * reference)
+}
+
 /// Live status of a fit-based part, with the applied stats for confidence.
 fn fit_part_status(live: &EllipsoidFit, applied: Stats) -> PartStatus {
     PartStatus {
@@ -211,6 +225,10 @@ pub struct ImuCalibrator {
     accel_stats: Stats,
     accel_gate_start: Option<u64>,
     accel_gated: u32,
+    /// The average of "|a| within the tolerance of gravity", 0 to 1.
+    accel_clean: f32,
+    /// The centre of the last accepted fit: the outlier test's reference.
+    accel_last_centre: Option<Vec3>,
     // Gyroscope.
     gyro_bias: Vec3,
     gyro_still_us: u64,
@@ -251,6 +269,8 @@ impl ImuCalibrator {
             accel_stats: Stats::default(),
             accel_gate_start: None,
             accel_gated: 0,
+            accel_clean: 1.0,
+            accel_last_centre: None,
             gyro_bias: [0.0; 3],
             gyro_still_us: 0,
             gyro_samples: 0,
@@ -286,6 +306,8 @@ impl ImuCalibrator {
         let a_mag = math::norm(accel);
         let accel_ok = a_mag > 1e-6 && math::abs(a_mag / STANDARD_GRAVITY - 1.0) <= QS_ACCEL_TOL;
         let quasi_static = accel_ok && math::norm(gyro) < QS_GYRO;
+        let clean = if accel_ok { 1.0 } else { 0.0 };
+        self.accel_clean += (clean - self.accel_clean) * CLEAN_ALPHA;
 
         if quasi_static {
             if self.accel_gate_start.is_none() {
@@ -344,7 +366,7 @@ impl ImuCalibrator {
 
     /// Status of the accelerometer and the gyroscope, in that order.
     pub fn status(&self) -> (PartStatus, PartStatus) {
-        let accel = fit_part_status(&self.accel_fit, self.accel_stats);
+        let accel = self.accel_part_status();
         let gyro_conf = permille(self.gyro_still_us as f32 / GYRO_FULL_STILL_US as f32);
         let gyro = PartStatus {
             samples: self.gyro_samples,
@@ -354,6 +376,27 @@ impl ImuCalibrator {
             active: gyro_conf >= ACTIVE_PERMILLE,
         };
         (accel, gyro)
+    }
+
+    /// The accelerometer's status. Its confidence is how consistently the
+    /// accelerometer reads gravity (a board at rest reads it fully), times the
+    /// applied fit's confidence once a fit is applied. The factory correction
+    /// needs no fit, so a still board with clean gravity is fully confident.
+    /// A fit needs orientation coverage, so it is never the only evidence.
+    fn accel_part_status(&self) -> PartStatus {
+        let fit = if self.accel_stats.confidence == 0 {
+            1.0
+        } else {
+            f32::from(self.accel_stats.confidence) / 1000.0
+        };
+        let confidence = permille(self.accel_clean * fit);
+        PartStatus {
+            samples: self.accel_fit.samples().max(self.accel_stats.samples),
+            confidence,
+            coverage: permille(self.accel_fit.coverage()),
+            residual: self.accel_stats.residual,
+            active: confidence >= ACTIVE_PERMILLE,
+        }
     }
 
     /// Counts applied calibration changes (lemnosd persists it).
@@ -491,6 +534,7 @@ impl ImuCalibrator {
             coverage: w[18].clamp(0, 1000) as u16,
             residual: w[19].clamp(0, 1000) as u16,
         };
+        self.accel_last_centre = (self.accel_stats.confidence > 0).then_some(center);
         self.gyro_bias = words::get_vec(&w[14..17], words::MICRO);
         self.gyro_still_us = GYRO_FULL_STILL_US * w[21].clamp(0, 1000) as u64 / 1000;
         self.gyro_samples = w[22].max(0) as u32;
@@ -575,6 +619,7 @@ impl ImuCalibrator {
 
     fn try_accel_fit(&mut self) -> Changed {
         let Some(f) = self.accel_fit.fit() else {
+            self.accel_fit.bootstrap();
             return false;
         };
         self.accel_fit.set_centre(f.ellipsoid.center);
@@ -584,10 +629,11 @@ impl ImuCalibrator {
         {
             return false;
         }
-        let moved = math::norm(math::sub(f.ellipsoid.center, self.accel_applied.center));
-        if moved > MAX_CENTRE_MOVE * ACCEL_REF {
+        if outlier(f.ellipsoid.center, self.accel_last_centre, ACCEL_REF) {
             return false;
         }
+        self.accel_last_centre = Some(f.ellipsoid.center);
+        self.accel_fit.anchor(f.ellipsoid.center);
         self.accel_applied = blend(self.accel_applied, accel_target(f.ellipsoid), APPLY_STEP);
         self.accel_stats = fit_stats(
             &f,
@@ -669,6 +715,8 @@ pub struct MagCalibrator {
     last_t: Option<u64>,
     fit: EllipsoidFit,
     applied: Ellipsoid,
+    /// The centre of the last accepted fit: the outlier test's reference.
+    last_centre: Option<Vec3>,
     stats: Stats,
     gated: u32,
     running: bool,
@@ -692,6 +740,7 @@ impl MagCalibrator {
             last_t: None,
             fit: EllipsoidFit::new(MAG_REF, MAG_FORGET, CELL_MIN_SAMPLES),
             applied: factory_ellipsoid(MAG_REF),
+            last_centre: None,
             stats: Stats::default(),
             gated: 0,
             running: false,
@@ -856,12 +905,14 @@ impl MagCalibrator {
             coverage: w[15].clamp(0, 1000) as u16,
             residual: w[16].clamp(0, 1000) as u16,
         };
+        self.last_centre = (self.stats.confidence > 0).then_some(self.applied.center);
         self.revision = w[18].max(0) as u32;
         Ok(())
     }
 
     fn try_fit(&mut self) -> Changed {
         let Some(f) = self.fit.fit() else {
+            self.fit.bootstrap();
             return false;
         };
         self.fit.set_centre(f.ellipsoid.center);
@@ -871,10 +922,11 @@ impl MagCalibrator {
         {
             return false;
         }
-        let moved = math::norm(math::sub(f.ellipsoid.center, self.applied.center));
-        if moved > MAX_CENTRE_MOVE * MAG_REF {
+        if outlier(f.ellipsoid.center, self.last_centre, MAG_REF) {
             return false;
         }
+        self.last_centre = Some(f.ellipsoid.center);
+        self.fit.anchor(f.ellipsoid.center);
         self.applied = blend(self.applied, f.ellipsoid, APPLY_STEP);
         self.stats = fit_stats(&f, MAG_MIN_COVERAGE, MAG_MAX_RESIDUAL, MAG_MIN_SAMPLES);
         self.revision = self.revision.wrapping_add(1);
@@ -883,6 +935,7 @@ impl MagCalibrator {
 
     fn try_routine_done(&mut self) {
         let Some(f) = self.routine_fit.fit() else {
+            self.routine_fit.bootstrap();
             return;
         };
         if f.coverage >= MAG_ROTATE_COVERAGE

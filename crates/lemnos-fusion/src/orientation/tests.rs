@@ -360,3 +360,33 @@ fn an_unusable_first_sample_does_not_fix_the_start_level() {
         deg(out.pitch)
     );
 }
+
+#[test]
+fn disturbed_magnetometer_degrades_to_six_axis() {
+    // A still board with an untrusted magnetometer (its raw field is far from
+    // Earth's): the nine-axis filter ignores the field and must match the
+    // six-axis filter's roll and pitch, with the disturbance flagged.
+    let a = sensor_accel(Quat::from_euler_deg(15.0, -8.0, 0.0), G);
+    let field = [-37.0, 140.0, -75.0];
+    let mut six = Orientation::new(OrientationConfig::default());
+    let mut nine = Orientation::new(nine_axis(1.0, 0.05));
+    for k in 0..6000u64 {
+        let t = k * 10_000;
+        six.update_imu(t, [0.0; 3], a);
+        nine.update_imu(t, [0.0; 3], a);
+        if k % 10 == 0 {
+            nine.update_mag(t, field, false);
+        }
+    }
+    let (s, n) = (six.output(), nine.output());
+    assert!(n.magnetic_disturbance);
+    assert!(!s.magnetic_disturbance);
+    assert!(
+        abs(s.roll - n.roll) < 1e-4 && abs(s.pitch - n.pitch) < 1e-4,
+        "six {:?} nine {:?}",
+        (deg(s.roll), deg(s.pitch)),
+        (deg(n.roll), deg(n.pitch))
+    );
+    assert!((deg(n.roll) - 15.0).abs() < 0.5, "roll {}", deg(n.roll));
+    assert!((deg(n.pitch) + 8.0).abs() < 0.5, "pitch {}", deg(n.pitch));
+}
