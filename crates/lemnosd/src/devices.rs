@@ -384,6 +384,7 @@ impl Slot {
         let started_us = boottime_us();
         let device = self.device.as_mut()?;
         device.select_channels(mask);
+        device.set_clock_us(started_us);
         self.values_mask = mask;
         let mut why = String::new();
         let result = device.read_why(&mut self.values, &mut why);

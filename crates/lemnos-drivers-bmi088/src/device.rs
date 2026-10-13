@@ -139,7 +139,7 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
         if self.selection() == crate::ALL_AXES {
             let si = config.sample(accel, gyro);
             let period = u64::from(config.accel_rate.period_us());
-            let (a, g) = self.cal.sample(period, si.accel_mps2, si.gyro_radps);
+            let (a, g) = self.cal.sample(0, period, si.accel_mps2, si.gyro_radps);
             copy_into(&mut values[RAW..], &cal_counts(a, g));
         }
         let mask = self.channel_mask();
@@ -201,7 +201,8 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
             #[cfg(feature = "float")]
             {
                 let si = config.sample(a, g);
-                let (ca, cg) = self.cal.sample(period, si.accel_mps2, si.gyro_radps);
+                let back = (n - 1 - i) as u64 * period;
+                let (ca, cg) = self.cal.sample(back, period, si.accel_mps2, si.gyro_radps);
                 copy_into(&mut row[RAW..], &cal_counts(ca, cg));
             }
             for (slot, value) in out[i].iter_mut().zip(row) {
@@ -221,6 +222,13 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
     /// The channels (bit i: channel i of [`INFO`]). The FIFO batch reads
     /// return every channel (both FIFOs hold both dies); the selection applies
     /// to plain reads.
+    fn set_clock_us(&mut self, t_us: u64) {
+        #[cfg(feature = "float")]
+        self.cal.set_read_us(t_us);
+        #[cfg(not(feature = "float"))]
+        let _ = t_us;
+    }
+
     fn select_channels(&mut self, mask: u64) {
         self.select_channel_mask((mask & 0x0fff) as u16);
     }

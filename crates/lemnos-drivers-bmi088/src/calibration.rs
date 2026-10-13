@@ -2,11 +2,13 @@
 //! `lemnos-fusion` fed by every full sample the driver reads, and the host
 //! contract (`lemnos_device::Sensor`'s calibration methods) over them.
 //!
-//! The estimators have no clock of their own (the driver is `no_std`), so a
-//! sample's time is the count of samples times the accelerometer's period:
-//! routine timeouts and the gyroscope's still time count samples, not wall
-//! time. A read that does not take every axis of both dies (a channel-selective
-//! read) adds no sample.
+//! The estimators run on sample time. The host gives each read its boot-clock
+//! time (`Sensor::set_clock_us`), so a sample's time is that time less the
+//! samples newer than it, and every timer (still time, routine timeouts, the
+//! fit's dwell) is wall time, whatever the read rate. Without a host clock (a
+//! standalone read), each sample advances the clock by the accelerometer's
+//! period. A read that does not take every axis of both dies (a
+//! channel-selective read) adds no sample.
 
 use lemnos_device::{
     CalibrationCommand, CalibrationPart, CalibrationRoutine, CalibrationStatus, PART_ACCEL,
@@ -23,8 +25,10 @@ impl core::fmt::Debug for Calibration {
 /// The applied calibration and the estimators behind it.
 pub(crate) struct Calibration {
     imu: ImuCalibrator,
-    /// The sample clock, microseconds.
+    /// The sample clock without a host clock, microseconds.
     clock_us: u64,
+    /// The host's boot-clock time of the newest sample of the read in progress.
+    read_us: Option<u64>,
 }
 
 /// A command the IMU cannot run (a magnetometer routine).
@@ -35,19 +39,34 @@ impl Calibration {
         Self {
             imu: ImuCalibrator::new(),
             clock_us: 0,
+            read_us: None,
         }
     }
 
-    /// Feeds one full sample (SI units), taken `period_us` after the last, and
-    /// returns the calibrated acceleration (m/s²) and angular rate (rad/s).
+    /// The host's time of the read about to run.
+    pub(crate) fn set_read_us(&mut self, t_us: u64) {
+        self.read_us = Some(t_us);
+    }
+
+    /// Feeds one full sample (SI units) and returns the calibrated acceleration
+    /// (m/s²) and angular rate (rad/s). The sample is `back_us` older than the
+    /// newest of its read; `period_us` is the sample spacing (used only without
+    /// a host clock).
     pub(crate) fn sample(
         &mut self,
+        back_us: u64,
         period_us: u64,
         accel: [f32; 3],
         gyro: [f32; 3],
     ) -> ([f32; 3], [f32; 3]) {
-        self.clock_us = self.clock_us.saturating_add(period_us.max(1));
-        let _ = self.imu.push(self.clock_us, accel, gyro);
+        let t = match self.read_us {
+            Some(read) => read.saturating_sub(back_us),
+            None => {
+                self.clock_us = self.clock_us.saturating_add(period_us.max(1));
+                self.clock_us
+            }
+        };
+        let _ = self.imu.push(t, accel, gyro);
         let a = self.imu.accel().apply(accel);
         let bias = self.imu.gyro_bias();
         let g = [gyro[0] - bias[0], gyro[1] - bias[1], gyro[2] - bias[2]];

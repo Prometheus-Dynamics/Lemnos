@@ -113,6 +113,15 @@ pub trait Sensor: Device {
         let _ = mask;
     }
 
+    /// The boot-clock time (microseconds) at which the next read starts. A
+    /// sensor whose calibration runs on sample time (the IMU and the
+    /// magnetometer) takes it as the time of its newest sample: a batch's
+    /// samples are [`sample_period_us`](Self::sample_period_us) apart, the last
+    /// at this time. The default ignores it.
+    fn set_clock_us(&mut self, t_us: u64) {
+        let _ = t_us;
+    }
+
     /// The calibration this sensor reports (see [`crate::calibration`]), or
     /// `None` for a sensor without one.
     fn calibration_status(&self) -> Option<CalibrationStatus> {

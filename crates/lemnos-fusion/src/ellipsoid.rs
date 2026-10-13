@@ -84,7 +84,7 @@ pub struct Fit {
 pub struct EllipsoidFit {
     reference: f32,
     forgetting: f32,
-    min_per_cell: u16,
+    min_per_cell: f32,
     samples: u32,
     /// Normal equations over `u = (sample - origin) / reference`.
     normal: [[f32; 9]; 9],
@@ -110,8 +110,9 @@ pub struct EllipsoidFit {
 impl EllipsoidFit {
     /// `reference` is the sphere radius (and normalisation scale) in sensor
     /// units. `forgetting` in `(0, 1]` decays old samples per update (1 keeps
-    /// all). A direction cell counts as covered at `min_per_cell` samples.
-    pub fn new(reference: f32, forgetting: f32, min_per_cell: u16) -> Self {
+    /// all). A direction cell counts as covered at `min_per_cell` weight (one
+    /// unit is one sample).
+    pub fn new(reference: f32, forgetting: f32, min_per_cell: f32) -> Self {
         EllipsoidFit {
             reference: if reference > 1e-9 { reference } else { 1.0 },
             forgetting: if forgetting > 0.0 && forgetting <= 1.0 {
@@ -136,8 +137,17 @@ impl EllipsoidFit {
         }
     }
 
-    /// Adds one raw sample (sensor units).
+    /// Adds one raw sample (sensor units), with the forgetting factor and unit
+    /// weight given at construction.
     pub fn add(&mut self, sample: Vec3) {
+        self.add_weighted(sample, 1.0, self.forgetting);
+    }
+
+    /// Adds one raw sample with weight `weight` (its share of the fit, and of
+    /// the direction cells), after decaying the older samples by `lam` (in
+    /// `(0, 1]`). A caller that weights by time passes the sample's time
+    /// step and the decay for it.
+    pub fn add_weighted(&mut self, sample: Vec3, weight: f32, lam: f32) {
         let inv = 1.0 / self.reference;
         let u = math::scale(math::sub(sample, self.origin), inv);
         let phi = [
@@ -152,7 +162,6 @@ impl EllipsoidFit {
             u[2],
         ];
 
-        let lam = self.forgetting;
         if lam < 1.0 {
             for row in self.normal.iter_mut() {
                 for v in row.iter_mut() {
@@ -166,9 +175,9 @@ impl EllipsoidFit {
                 *v *= lam;
             }
         }
-        self.weight = self.weight * lam + 1.0;
+        self.weight = self.weight * lam + weight;
         for (i, row) in self.normal.iter_mut().enumerate() {
-            let pi = phi[i];
+            let pi = phi[i] * weight;
             for (j, v) in row.iter_mut().enumerate() {
                 *v += pi * phi[j];
             }
@@ -191,7 +200,7 @@ impl EllipsoidFit {
         if len >= MIN_RADIAL * self.reference {
             let idx = cell_index(math::scale(d, 1.0 / len));
             if idx != 13 {
-                self.cells[idx] += 1.0;
+                self.cells[idx] += weight;
             }
         }
 
@@ -215,7 +224,7 @@ impl EllipsoidFit {
 
     /// Share of the 26 direction cells holding at least `min_per_cell` samples.
     pub fn coverage(&self) -> f32 {
-        let thr = self.min_per_cell as f32;
+        let thr = self.min_per_cell;
         let mut n = 0u32;
         for (i, c) in self.cells.iter().enumerate() {
             if i != 13 && *c >= thr && *c > 0.0 {
@@ -470,7 +479,7 @@ mod tests {
     fn stationary_noise_does_not_fill_direction_cells() {
         // A board at rest: every sample is the same point plus sensor noise.
         // Noise is not a direction from the centre, so no cell fills.
-        let mut fit = EllipsoidFit::new(9.8, 1.0, 4);
+        let mut fit = EllipsoidFit::new(9.8, 1.0, 4.0);
         let mut rng = Rng::new(3);
         for _ in 0..2000 {
             fit.add([
@@ -496,7 +505,7 @@ mod tests {
 
     #[test]
     fn mag_partial_cone_has_low_coverage_and_full_sphere_recovers() {
-        let mut fit = EllipsoidFit::new(50.0, 0.999, 4);
+        let mut fit = EllipsoidFit::new(50.0, 0.999, 4.0);
         let mut rng = Rng::new(11);
         // Cone: within 60 degrees of +Z.
         // The calibrator refreshes the cell centre from its fits; do the same.
@@ -550,7 +559,7 @@ mod tests {
                 scale[2] * a[2] + off[2],
             ]
         };
-        let mut fit = EllipsoidFit::new(g, 0.9995, 4);
+        let mut fit = EllipsoidFit::new(g, 0.9995, 4.0);
         // Six faces, then tumbling.
         for axis in 0..3 {
             for sign in [-1.0_f32, 1.0] {
@@ -577,7 +586,7 @@ mod tests {
 
     #[test]
     fn planar_samples_return_none() {
-        let mut fit = EllipsoidFit::new(50.0, 1.0, 2);
+        let mut fit = EllipsoidFit::new(50.0, 1.0, 2.0);
         let mut rng = Rng::new(5);
         for _ in 0..500 {
             let d = random_unit(&mut rng);
@@ -588,7 +597,7 @@ mod tests {
 
     #[test]
     fn too_few_samples_return_none() {
-        let mut fit = EllipsoidFit::new(50.0, 1.0, 2);
+        let mut fit = EllipsoidFit::new(50.0, 1.0, 2.0);
         for i in 0..5 {
             fit.add([i as f32, 1.0, 2.0]);
         }

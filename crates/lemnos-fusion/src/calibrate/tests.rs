@@ -314,3 +314,72 @@ fn magnetometer_with_a_large_hard_iron_offset_is_calibrated_by_rotation() {
         m.field().center
     );
 }
+
+/// A board at rest sampled every `step_us`, with sensor noise, for `secs`.
+fn hold_noisy_at(c: &mut ImuCalibrator, rng: &mut Rng, secs: f32, a: Vec3, step_us: u64) {
+    let n = (secs * 1e6) as u64 / step_us;
+    for k in 0..n {
+        let noisy = [
+            a[0] + 0.03 * rng.signed(),
+            a[1] + 0.03 * rng.signed(),
+            a[2] + 0.03 * rng.signed(),
+        ];
+        let gyro = [
+            0.002 * rng.signed(),
+            0.002 * rng.signed(),
+            0.002 * rng.signed(),
+        ];
+        c.push(k * step_us, raw_accel(noisy), gyro);
+    }
+}
+
+#[test]
+fn still_board_confidence_is_the_same_at_ten_hertz_and_at_a_hundred() {
+    // Confidence is wall time: 60 s of still time is full at either rate.
+    for step_us in [10_000u64, 100_000] {
+        let mut c = ImuCalibrator::new();
+        let mut rng = Rng::new(9);
+        hold_noisy_at(&mut c, &mut rng, 70.0, [0.0, 0.0, G], step_us);
+        let (acc, gyro) = c.status();
+        assert!(
+            gyro.confidence >= 900,
+            "step {step_us} gyro confidence {}",
+            gyro.confidence
+        );
+        assert!(
+            acc.confidence >= 900,
+            "step {step_us} accel confidence {}",
+            acc.confidence
+        );
+    }
+}
+
+#[test]
+fn accel_sphere_is_applied_at_ten_hertz() {
+    // The same tumbling as the 100 Hz test, sampled every 100 ms: the fit's
+    // dwell and cadence are time, so it applies at the same wall time.
+    let mut c = ImuCalibrator::new();
+    let mut rng = Rng::new(21);
+    let mut t = 0u64;
+    for _ in 0..60 {
+        let d = random_unit(&mut rng);
+        let a = [d[0] * G, d[1] * G, d[2] * G];
+        for _ in 0..15 {
+            c.push(t, raw_accel(a), [0.0; 3]);
+            t += 100_000;
+        }
+        // A short move between holds, gyro far above the quasi-static limit.
+        for _ in 0..2 {
+            c.push(t, [3.0, -2.0, 5.0], [1.0, 0.5, -0.7]);
+            t += 100_000;
+        }
+    }
+    let e = c.accel();
+    assert!(
+        norm(sub(e.center, ACCEL_OFFSET)) < 0.1,
+        "centre {:?}",
+        e.center
+    );
+    let (acc, _) = c.status();
+    assert!(acc.active, "confidence {}", acc.confidence);
+}

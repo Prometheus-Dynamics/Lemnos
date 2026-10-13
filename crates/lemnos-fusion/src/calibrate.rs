@@ -58,12 +58,25 @@ const MAG_REF: f32 = 50.0;
 /// bound is the sensor's saturation, not the Earth's field.
 const MAG_MIN_RAW: f32 = 15.0;
 const MAG_MAX_RAW: f32 = 1000.0;
-/// Weight of each sample in the accelerometer's gravity-agreement average
-/// (about 0.6 s at 100 Hz).
-const CLEAN_ALPHA: f32 = 1.0 / 64.0;
-const MAG_FORGET: f32 = 0.999;
-const ACCEL_FORGET: f32 = 0.9995;
-const CELL_MIN_SAMPLES: u16 = 4;
+/// Every timer and threshold below is time, not a sample count: a sample's time
+/// is the host's read time (see `lemnos-device`'s `set_clock_us`), so a 10 Hz
+/// board reaches the same confidence in the same wall time as a 100 Hz one.
+///
+/// The weight of a sample is its time step over this (the 100 Hz sample the
+/// constants were first tuned at), so a sample at 100 Hz weighs 1 and the fits
+/// keep their numbers at that rate.
+const NOMINAL_DT_US: u64 = 10_000;
+/// No sample for longer than this (µs) is a gap: its time is not integrated.
+const GAP_US: u64 = 500_000;
+/// Time constants of the forgetting (an old sample's weight falls by `e` over
+/// this time). At 100 Hz these were 0.9995 and 0.999 per sample.
+const ACCEL_TAU_US: u64 = 20_000_000;
+const MAG_TAU_US: u64 = 100_000_000;
+/// Time constant of the accelerometer's gravity-agreement average (0.64 s, the
+/// 1/64 weight per 100 Hz sample it was tuned at).
+const CLEAN_TAU_US: u64 = 640_000;
+/// A direction cell is covered at this much weight: 4 nominal samples (40 ms).
+const CELL_MIN_WEIGHT: f32 = 4.0;
 
 /// Quasi-static test: `|ω|` below this (rad/s) and `|a|` within
 /// `QS_ACCEL_TOL` of gravity.
@@ -73,42 +86,47 @@ const QS_GYRO: f32 = 0.05;
 const QS_ACCEL_TOL: f32 = 0.10;
 /// A quasi-static run must last this long (µs) before its samples are used.
 const HOLD_US: u64 = 1_000_000;
-/// Gyro still window length, in samples.
-const GYRO_WINDOW: u32 = 100;
+/// Gyro still window length (µs), and the fewest samples it may hold.
+const GYRO_WINDOW_US: u64 = 1_000_000;
+const GYRO_WINDOW_MIN: u32 = 5;
 /// Still window: gyro standard deviation below 0.5 °/s (in rad/s).
 const GYRO_STD_LIMIT: f32 = 0.008_726_646;
 /// Still window: mean `|a|` within this fraction of gravity.
 const GYRO_ACCEL_TOL: f32 = 0.03;
-/// Blend weight cap for a window's mean, and the sample count that reaches it.
+/// Blend weight of a still window's mean: this much per second of the window,
+/// capped (the cap is reached by one 1 s window, as at 100 Hz).
 const GYRO_BLEND_MAX: f32 = 0.2;
-const GYRO_BLEND_SAMPLES: f32 = 500.0;
+const GYRO_BLEND_PER_S: f32 = 0.2;
 /// Still time that gives full gyro confidence.
 const GYRO_FULL_STILL_US: u64 = 60_000_000;
-/// Fit attempts happen every this many gated samples.
-const FIT_CADENCE: u32 = 64;
+/// Fit attempts happen every this much gated time (µs).
+const FIT_INTERVAL_US: u64 = 640_000;
 /// Rate limit: each accepted automatic fit moves the applied calibration this far.
 const APPLY_STEP: f32 = 0.25;
 /// A fit whose centre moves more than this (times the reference) is an outlier.
 const MAX_CENTRE_MOVE: f32 = 0.5;
 
+/// A fit needs this much quasi-static time (µs): 300 samples at 100 Hz.
+const ACCEL_MIN_DWELL_US: u64 = 3_000_000;
 const ACCEL_MIN_COVERAGE: f32 = 0.6;
 const ACCEL_MAX_RESIDUAL: f32 = 0.02;
-const ACCEL_MIN_SAMPLES: u32 = 300;
 const MAG_MIN_COVERAGE: f32 = 0.6;
 const MAG_MAX_RESIDUAL: f32 = 0.02;
-const MAG_MIN_SAMPLES: u32 = 300;
+/// 300 magnetometer samples at its 10 Hz rate.
+const MAG_MIN_DWELL_US: u64 = 30_000_000;
 
-/// AccelSix: 100 samples per face, faces within 20° of an axis.
-const FACE_SAMPLES: u32 = 100;
+/// AccelSix: one second of quasi-static time per face, faces within 20° of an axis.
+const FACE_DWELL_US: u64 = 1_000_000;
 const FACE_COS: f32 = 0.939_692_6;
 const ACCEL_ROUTINE_TIMEOUT_US: u64 = 180_000_000;
 /// GyroHold: five seconds of still windows, timeout 30 s.
 const GYRO_HOLD_US: u64 = 5_000_000;
 const GYRO_ROUTINE_TIMEOUT_US: u64 = 30_000_000;
-/// MagRotate: coverage, residual and samples to finish, timeout 180 s.
+/// MagRotate: coverage, residual and dwell to finish, timeout 180 s.
 const MAG_ROTATE_COVERAGE: f32 = 0.9;
 const MAG_ROTATE_MAX_RESIDUAL: f32 = 0.03;
-const MAG_ROTATE_MIN_SAMPLES: u32 = 500;
+/// 500 magnetometer samples at 10 Hz.
+const MAG_ROTATE_MIN_DWELL_US: u64 = 50_000_000;
 const MAG_ROTATE_TIMEOUT_US: u64 = 180_000_000;
 
 /// Statistics of an applied or candidate fit.
@@ -125,10 +143,34 @@ fn permille(x: f32) -> u16 {
     math::round_i32(v).clamp(0, 1000) as u16
 }
 
-fn fit_stats(fit: &Fit, cov_thr: f32, res_thr: f32, min_samples: u32) -> Stats {
+/// The step (µs) a sample adds to the timers: its time since the last sample,
+/// or 0 for the first and across a gap (a gap is not integrated).
+fn step_us(last: Option<u64>, t_us: u64) -> u64 {
+    match last {
+        Some(l) if t_us > l && t_us - l <= GAP_US => t_us - l,
+        _ => 0,
+    }
+}
+
+/// A sample's weight in a fit: its time step over the nominal sample period.
+fn weight_of(dt_us: u64) -> f32 {
+    dt_us as f32 / NOMINAL_DT_US as f32
+}
+
+/// The decay for a sample: an old sample's weight falls by `e` over `tau_us`.
+fn decay_for(dt_us: u64, tau_us: u64) -> f32 {
+    clamp(1.0 - dt_us as f32 / tau_us as f32, 0.0, 1.0)
+}
+
+/// The share of a time constant that `dt_us` is, capped at 1 (an EMA weight).
+fn blend_for(dt_us: u64, tau_us: u64) -> f32 {
+    clamp(dt_us as f32 / tau_us as f32, 0.0, 1.0)
+}
+
+fn fit_stats(fit: &Fit, cov_thr: f32, res_thr: f32, dwell_us: u64, min_dwell_us: u64) -> Stats {
     let cov = clamp(fit.coverage / cov_thr, 0.0, 1.0);
     let res = clamp((2.0 * res_thr - fit.residual) / res_thr, 0.0, 1.0);
-    let samp = clamp(fit.samples as f32 / min_samples as f32, 0.0, 1.0);
+    let samp = clamp(dwell_us as f32 / min_dwell_us as f32, 0.0, 1.0);
     Stats {
         samples: fit.samples,
         confidence: permille(math::min(cov, math::min(res, samp))),
@@ -224,7 +266,10 @@ pub struct ImuCalibrator {
     accel_applied: Ellipsoid,
     accel_stats: Stats,
     accel_gate_start: Option<u64>,
-    accel_gated: u32,
+    /// Gated time since the last fit attempt, and the gated time in all (the
+    /// dwell the fit needs), µs.
+    accel_since_fit_us: u64,
+    accel_dwell_us: u64,
     /// The average of "|a| within the tolerance of gravity", 0 to 1.
     accel_clean: f32,
     /// The centre of the last accepted fit: the outlier test's reference.
@@ -244,7 +289,8 @@ pub struct ImuCalibrator {
     running: Option<Routine>,
     started_us: Option<u64>,
     routine_fit: EllipsoidFit,
-    faces: [u32; 6],
+    /// Quasi-static time collected per AccelSix face, µs.
+    faces_us: [u64; 6],
     gyro_routine_us: u64,
     gyro_routine_sum: Vec3,
     gyro_routine_n: u32,
@@ -264,11 +310,12 @@ impl ImuCalibrator {
     pub fn new() -> Self {
         ImuCalibrator {
             last_t: None,
-            accel_fit: EllipsoidFit::new(ACCEL_REF, ACCEL_FORGET, CELL_MIN_SAMPLES),
+            accel_fit: EllipsoidFit::new(ACCEL_REF, 1.0, CELL_MIN_WEIGHT),
             accel_applied: factory_ellipsoid(ACCEL_REF),
             accel_stats: Stats::default(),
             accel_gate_start: None,
-            accel_gated: 0,
+            accel_since_fit_us: 0,
+            accel_dwell_us: 0,
             accel_clean: 1.0,
             accel_last_centre: None,
             gyro_bias: [0.0; 3],
@@ -283,8 +330,8 @@ impl ImuCalibrator {
             win_accel_sum: 0.0,
             running: None,
             started_us: None,
-            routine_fit: EllipsoidFit::new(ACCEL_REF, 1.0, CELL_MIN_SAMPLES),
-            faces: [0; 6],
+            routine_fit: EllipsoidFit::new(ACCEL_REF, 1.0, CELL_MIN_WEIGHT),
+            faces_us: [0; 6],
             gyro_routine_us: 0,
             gyro_routine_sum: [0.0; 3],
             gyro_routine_n: 0,
@@ -297,6 +344,12 @@ impl ImuCalibrator {
     /// Processes one sample: raw accelerometer (m/s²) and gyroscope (rad/s)
     /// at time `t_us`. Returns `true` when the applied calibration changed.
     pub fn push(&mut self, t_us: u64, accel: Vec3, gyro: Vec3) -> Changed {
+        let dt = step_us(self.last_t, t_us);
+        if dt == 0 && self.last_t.is_some_and(|l| t_us.saturating_sub(l) > GAP_US) {
+            // A gap: no timed run crosses it.
+            self.accel_gate_start = None;
+            self.win_n = 0;
+        }
         self.last_t = Some(t_us);
         if self.running.is_some() && self.started_us.is_none() {
             self.started_us = Some(t_us);
@@ -307,7 +360,7 @@ impl ImuCalibrator {
         let accel_ok = a_mag > 1e-6 && math::abs(a_mag / STANDARD_GRAVITY - 1.0) <= QS_ACCEL_TOL;
         let quasi_static = accel_ok && math::norm(gyro) < QS_GYRO;
         let clean = if accel_ok { 1.0 } else { 0.0 };
-        self.accel_clean += (clean - self.accel_clean) * CLEAN_ALPHA;
+        self.accel_clean += (clean - self.accel_clean) * blend_for(dt, CLEAN_TAU_US);
 
         if quasi_static {
             if self.accel_gate_start.is_none() {
@@ -328,12 +381,14 @@ impl ImuCalibrator {
             changed |= self.apply_gyro_window(&done);
         }
 
-        // Accelerometer, continuous.
+        // Accelerometer, continuous: gated time is the fit's dwell.
         if gated {
-            self.accel_fit.add(accel);
-            self.accel_gated += 1;
-            if self.accel_gated >= FIT_CADENCE {
-                self.accel_gated = 0;
+            self.accel_fit
+                .add_weighted(accel, weight_of(dt), decay_for(dt, ACCEL_TAU_US));
+            self.accel_dwell_us = self.accel_dwell_us.saturating_add(dt);
+            self.accel_since_fit_us = self.accel_since_fit_us.saturating_add(dt);
+            if self.accel_since_fit_us >= FIT_INTERVAL_US {
+                self.accel_since_fit_us = 0;
                 changed |= self.try_accel_fit();
             }
         }
@@ -343,7 +398,7 @@ impl ImuCalibrator {
             match routine {
                 Routine::AccelSix => {
                     if gated {
-                        self.accel_routine_sample(accel);
+                        self.accel_routine_sample(accel, dt);
                     }
                 }
                 Routine::GyroHold => {}
@@ -419,8 +474,8 @@ impl ImuCalibrator {
         }
         self.running = Some(routine);
         self.started_us = None;
-        self.routine_fit = EllipsoidFit::new(ACCEL_REF, 1.0, CELL_MIN_SAMPLES);
-        self.faces = [0; 6];
+        self.routine_fit = EllipsoidFit::new(ACCEL_REF, 1.0, CELL_MIN_WEIGHT);
+        self.faces_us = [0; 6];
         self.gyro_routine_us = 0;
         self.gyro_routine_sum = [0.0; 3];
         self.gyro_routine_n = 0;
@@ -476,8 +531,8 @@ impl ImuCalibrator {
     pub fn progress_permille(&self) -> u16 {
         match self.running {
             Some(Routine::AccelSix) => {
-                let done: u32 = self.faces.iter().map(|f| (*f).min(FACE_SAMPLES)).sum();
-                permille(done as f32 / (6 * FACE_SAMPLES) as f32)
+                let done: u64 = self.faces_us.iter().map(|f| (*f).min(FACE_DWELL_US)).sum();
+                permille(done as f32 / (6 * FACE_DWELL_US) as f32)
             }
             Some(Routine::GyroHold) => permille(self.gyro_routine_us as f32 / GYRO_HOLD_US as f32),
             _ => 0,
@@ -558,7 +613,8 @@ impl ImuCalibrator {
         self.win_accel_sum += accel_mag;
         self.win_n += 1;
         self.win_t1 = t_us;
-        if self.win_n < GYRO_WINDOW {
+        if self.win_n < GYRO_WINDOW_MIN || self.win_t1.saturating_sub(self.win_t0) < GYRO_WINDOW_US
+        {
             return None;
         }
 
@@ -585,7 +641,8 @@ impl ImuCalibrator {
     }
 
     fn apply_gyro_window(&mut self, done: &WindowDone) -> Changed {
-        let w = math::min(GYRO_BLEND_MAX, done.samples as f32 / GYRO_BLEND_SAMPLES);
+        let seconds = done.duration_us as f32 * 1e-6;
+        let w = math::min(GYRO_BLEND_MAX, GYRO_BLEND_PER_S * seconds);
         for i in 0..3 {
             self.gyro_bias[i] += w * (done.mean[i] - self.gyro_bias[i]);
         }
@@ -625,7 +682,7 @@ impl ImuCalibrator {
         self.accel_fit.set_centre(f.ellipsoid.center);
         if f.coverage < ACCEL_MIN_COVERAGE
             || f.residual > ACCEL_MAX_RESIDUAL
-            || f.samples < ACCEL_MIN_SAMPLES
+            || self.accel_dwell_us < ACCEL_MIN_DWELL_US
         {
             return false;
         }
@@ -639,13 +696,14 @@ impl ImuCalibrator {
             &f,
             ACCEL_MIN_COVERAGE,
             ACCEL_MAX_RESIDUAL,
-            ACCEL_MIN_SAMPLES,
+            self.accel_dwell_us,
+            ACCEL_MIN_DWELL_US,
         );
         self.revision = self.revision.wrapping_add(1);
         true
     }
 
-    fn accel_routine_sample(&mut self, accel: Vec3) {
+    fn accel_routine_sample(&mut self, accel: Vec3, dt_us: u64) {
         let norm = math::norm(accel);
         if norm <= 1e-6 {
             return;
@@ -660,23 +718,25 @@ impl ImuCalibrator {
             return;
         }
         let face = best * 2 + usize::from(accel[best] > 0.0);
-        if self.faces[face] >= FACE_SAMPLES {
+        if self.faces_us[face] >= FACE_DWELL_US {
             return;
         }
-        self.faces[face] += 1;
-        self.routine_fit.add(accel);
-        if self.faces.iter().all(|f| *f >= FACE_SAMPLES) {
+        self.faces_us[face] = self.faces_us[face].saturating_add(dt_us);
+        self.routine_fit.add_weighted(accel, weight_of(dt_us), 1.0);
+        if self.faces_us.iter().all(|f| *f >= FACE_DWELL_US) {
             self.running = None;
             self.started_us = None;
+            let dwell: u64 = self.faces_us.iter().sum();
             match self.routine_fit.fit() {
-                Some(f) if f.residual <= ACCEL_MAX_RESIDUAL && f.samples >= ACCEL_MIN_SAMPLES => {
+                Some(f) if f.residual <= ACCEL_MAX_RESIDUAL && dwell >= ACCEL_MIN_DWELL_US => {
                     // Six faces are the coverage here: the cell coverage of six
                     // directions is structurally low.
                     let mut stats = fit_stats(
                         &f,
                         ACCEL_MIN_COVERAGE,
                         ACCEL_MAX_RESIDUAL,
-                        ACCEL_MIN_SAMPLES,
+                        dwell,
+                        ACCEL_MIN_DWELL_US,
                     );
                     stats.coverage = 1000;
                     self.candidate = Some(Candidate::Accel {
@@ -718,10 +778,15 @@ pub struct MagCalibrator {
     /// The centre of the last accepted fit: the outlier test's reference.
     last_centre: Option<Vec3>,
     stats: Stats,
-    gated: u32,
+    /// In-range time since the last fit attempt, and in all (the dwell).
+    since_fit_us: u64,
+    dwell_us: u64,
     running: bool,
     started_us: Option<u64>,
     routine_fit: EllipsoidFit,
+    /// The routine's in-range time since its last check, and in all.
+    routine_since_us: u64,
+    routine_dwell_us: u64,
     candidate: Option<Candidate>,
     failed: bool,
     revision: u32,
@@ -738,14 +803,17 @@ impl MagCalibrator {
     pub fn new() -> Self {
         MagCalibrator {
             last_t: None,
-            fit: EllipsoidFit::new(MAG_REF, MAG_FORGET, CELL_MIN_SAMPLES),
+            fit: EllipsoidFit::new(MAG_REF, 1.0, CELL_MIN_WEIGHT),
             applied: factory_ellipsoid(MAG_REF),
             last_centre: None,
             stats: Stats::default(),
-            gated: 0,
+            since_fit_us: 0,
+            dwell_us: 0,
+            routine_since_us: 0,
+            routine_dwell_us: 0,
             running: false,
             started_us: None,
-            routine_fit: EllipsoidFit::new(MAG_REF, MAG_FORGET, CELL_MIN_SAMPLES),
+            routine_fit: EllipsoidFit::new(MAG_REF, 1.0, CELL_MIN_WEIGHT),
             candidate: None,
             failed: false,
             revision: 0,
@@ -755,6 +823,7 @@ impl MagCalibrator {
     /// Processes one calibrated-units field sample (raw, µT) at `t_us`.
     /// Returns `true` when the applied calibration changed.
     pub fn push(&mut self, t_us: u64, field_ut: Vec3) -> Changed {
+        let dt = step_us(self.last_t, t_us);
         self.last_t = Some(t_us);
         if self.running && self.started_us.is_none() {
             self.started_us = Some(t_us);
@@ -763,17 +832,22 @@ impl MagCalibrator {
         let in_range = (MAG_MIN_RAW..=MAG_MAX_RAW).contains(&mag);
         let mut changed = false;
         if in_range {
-            self.fit.add(field_ut);
-            self.gated += 1;
-            if self.gated >= FIT_CADENCE {
-                self.gated = 0;
+            let (w, lam) = (weight_of(dt), decay_for(dt, MAG_TAU_US));
+            self.fit.add_weighted(field_ut, w, lam);
+            self.dwell_us = self.dwell_us.saturating_add(dt);
+            self.since_fit_us = self.since_fit_us.saturating_add(dt);
+            if self.since_fit_us >= FIT_INTERVAL_US {
+                self.since_fit_us = 0;
                 changed |= self.try_fit();
             }
             if self.running {
-                self.routine_fit.add(field_ut);
-                if self.routine_fit.samples().is_multiple_of(FIT_CADENCE)
-                    && self.routine_fit.samples() >= MAG_ROTATE_MIN_SAMPLES
+                self.routine_fit.add_weighted(field_ut, w, lam);
+                self.routine_dwell_us = self.routine_dwell_us.saturating_add(dt);
+                self.routine_since_us = self.routine_since_us.saturating_add(dt);
+                if self.routine_since_us >= FIT_INTERVAL_US
+                    && self.routine_dwell_us >= MAG_ROTATE_MIN_DWELL_US
                 {
+                    self.routine_since_us = 0;
                     self.try_routine_done();
                 }
             }
@@ -818,7 +892,9 @@ impl MagCalibrator {
         }
         self.running = true;
         self.started_us = None;
-        self.routine_fit = EllipsoidFit::new(MAG_REF, MAG_FORGET, CELL_MIN_SAMPLES);
+        self.routine_fit = EllipsoidFit::new(MAG_REF, 1.0, CELL_MIN_WEIGHT);
+        self.routine_since_us = 0;
+        self.routine_dwell_us = 0;
         self.candidate = None;
         self.failed = false;
     }
@@ -857,7 +933,7 @@ impl MagCalibrator {
             return 0;
         }
         let cov = self.routine_fit.coverage() / MAG_ROTATE_COVERAGE;
-        let samp = self.routine_fit.samples() as f32 / MAG_ROTATE_MIN_SAMPLES as f32;
+        let samp = self.routine_dwell_us as f32 / MAG_ROTATE_MIN_DWELL_US as f32;
         permille(math::min(cov, samp))
     }
 
@@ -918,7 +994,7 @@ impl MagCalibrator {
         self.fit.set_centre(f.ellipsoid.center);
         if f.coverage < MAG_MIN_COVERAGE
             || f.residual > MAG_MAX_RESIDUAL
-            || f.samples < MAG_MIN_SAMPLES
+            || self.dwell_us < MAG_MIN_DWELL_US
         {
             return false;
         }
@@ -928,7 +1004,13 @@ impl MagCalibrator {
         self.last_centre = Some(f.ellipsoid.center);
         self.fit.anchor(f.ellipsoid.center);
         self.applied = blend(self.applied, f.ellipsoid, APPLY_STEP);
-        self.stats = fit_stats(&f, MAG_MIN_COVERAGE, MAG_MAX_RESIDUAL, MAG_MIN_SAMPLES);
+        self.stats = fit_stats(
+            &f,
+            MAG_MIN_COVERAGE,
+            MAG_MAX_RESIDUAL,
+            self.dwell_us,
+            MAG_MIN_DWELL_US,
+        );
         self.revision = self.revision.wrapping_add(1);
         true
     }
@@ -940,13 +1022,14 @@ impl MagCalibrator {
         };
         if f.coverage >= MAG_ROTATE_COVERAGE
             && f.residual <= MAG_ROTATE_MAX_RESIDUAL
-            && f.samples >= MAG_ROTATE_MIN_SAMPLES
+            && self.routine_dwell_us >= MAG_ROTATE_MIN_DWELL_US
         {
             let stats = fit_stats(
                 &f,
                 MAG_ROTATE_COVERAGE,
                 MAG_ROTATE_MAX_RESIDUAL,
-                MAG_ROTATE_MIN_SAMPLES,
+                self.routine_dwell_us,
+                MAG_ROTATE_MIN_DWELL_US,
             );
             self.candidate = Some(Candidate::Mag {
                 ellipsoid: f.ellipsoid,

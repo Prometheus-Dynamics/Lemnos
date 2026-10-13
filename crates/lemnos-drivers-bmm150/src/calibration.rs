@@ -13,8 +13,10 @@ use lemnos_fusion::{MagCalibrator, PartStatus, Routine};
 /// The applied calibration and the estimator behind it.
 pub(crate) struct Calibration {
     mag: MagCalibrator,
-    /// The reading clock, microseconds.
+    /// The reading clock without a host clock, microseconds.
     clock_us: u64,
+    /// The host's boot-clock time of the read in progress.
+    read_us: Option<u64>,
 }
 
 impl core::fmt::Debug for Calibration {
@@ -31,14 +33,26 @@ impl Calibration {
         Self {
             mag: MagCalibrator::new(),
             clock_us: 0,
+            read_us: None,
         }
     }
 
-    /// Feeds one reading (µT), taken `period_us` after the last, and returns
-    /// the calibrated field (µT).
+    /// The host's time of the read about to run.
+    pub(crate) fn set_read_us(&mut self, t_us: u64) {
+        self.read_us = Some(t_us);
+    }
+
+    /// Feeds one reading (µT) and returns the calibrated field (µT). Its time
+    /// is the host's read time; without one, `period_us` after the last.
     pub(crate) fn sample(&mut self, period_us: u64, field_ut: [f32; 3]) -> [f32; 3] {
-        self.clock_us = self.clock_us.saturating_add(period_us.max(1));
-        let _ = self.mag.push(self.clock_us, field_ut);
+        let t = match self.read_us {
+            Some(read) => read,
+            None => {
+                self.clock_us = self.clock_us.saturating_add(period_us.max(1));
+                self.clock_us
+            }
+        };
+        let _ = self.mag.push(t, field_ut);
         self.mag.field().apply(field_ut)
     }
 

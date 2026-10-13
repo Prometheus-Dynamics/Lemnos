@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- Calibration timers are wall time, not sample counts. lemnosd gives each read its boot-clock time (`Sensor::set_clock_us`), so a 10 Hz board reaches the same gyro and accelerometer confidence in the same ~60 s as a 100 Hz one. Still windows, the fit's dwell and cadence, the forgetting, the routines' dwell and the gap rule are all in time; the read rate and the CPU cost are unchanged.
 - Orientation fusion on a still board with clean gravity reported `confidence.imu` 0. The accelerometer's confidence now reads its gravity agreement (1000 while the factory correction stands) times the applied fit's confidence; a fit needs orientation coverage, so it never gated a still board.
 - Stationary sensor noise counted as direction coverage (a still board read coverage 1000). Coverage counts only samples at least half the reference radius from the centre.
 - The magnetometer calibration never took a sample when the raw field was outside 15 to 80 µT, which a hard-iron offset puts outside: the raw range is now up to the sensor's saturation (1000 µT).

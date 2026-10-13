@@ -107,6 +107,7 @@ impl Workers {
             .spawn(move || {
                 for mut job in rx {
                     let started_us = boottime_us();
+                    job.device.set_clock_us(started_us);
                     let mut why = String::new();
                     let mut samples = [[0i32; MAX_CHANNELS]; BATCH];
                     let read = job.device.read_batch_why(&mut samples, &mut why);

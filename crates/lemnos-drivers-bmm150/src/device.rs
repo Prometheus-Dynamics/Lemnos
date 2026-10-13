@@ -80,6 +80,13 @@ fn nt(ut: f32) -> i32 {
 }
 
 impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmm150<I2C> {
+    fn set_clock_us(&mut self, t_us: u64) {
+        #[cfg(feature = "float")]
+        self.cal.set_read_us(t_us);
+        #[cfg(not(feature = "float"))]
+        let _ = t_us;
+    }
+
     fn read(&mut self, out: &mut [i32]) -> Result<(), DeviceError<Self::Error>> {
         lemnos_device::check_buffer(&INFO, out)?;
         let field = self.read_fixed().map_err(DeviceError::Driver)?;

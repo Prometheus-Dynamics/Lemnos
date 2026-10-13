@@ -114,7 +114,7 @@ This covers offset, per-axis scale and cross-axis (soft iron) at once.
   an exponential forgetting factor (so an old field fades), and occupancy counts over the
   sphere's 26 direction cells (the 3×3×3 cube's cells other than the centre, classified from the
   sample's direction relative to the current centre). `coverage()` is the share of cells that
-  hold at least `min_per_cell` samples.
+  hold at least `min_per_cell` weight (a sample weighs its time step over 10 ms, so 4 is 40 ms).
 - `fit()` solves the normal equations (with a small ridge term for conditioning, on samples
   normalised by a reference magnitude), recovers `c`, `Q`, and `Q^½` by a Jacobi
   eigendecomposition of the 3×3 matrix, and returns the `Ellipsoid`, its residual (RMS of
@@ -126,20 +126,20 @@ This covers offset, per-axis scale and cross-axis (soft iron) at once.
 `ImuCalibrator` (accelerometer, gyroscope) and `MagCalibrator` run on every sample the driver
 reads, with bounded cost per sample.
 
-- **Gyroscope zero-rate:** a window of about 1 s (or 100 samples) with a gyro standard deviation
+- **Gyroscope zero-rate:** a window of 1 s (and at least 5 samples) with a gyro standard deviation
   under 0.5 °/s and `|a|` within 3 % of gravity yields a candidate offset (the window mean). The
-  candidate blends into the applied offset with weight `min(0.2, samples_in_window / 500)`, so
+  candidate blends into the applied offset with weight `min(0.2, 0.2 per second of window)`, so
   one still window never moves it far. Confidence rises with the still time accumulated
   (full at 60 s). The fusion's integral term refines the residual while moving; neither is
   required.
 - **Accelerometer:** quasi-static samples (`|ω| < 0.05 rad/s` and `|a|` within 5 % of gravity,
   held for the window above) are fed to an `EllipsoidFit` with reference `g = 9.80665 m/s²`.
   The fit is applied when its coverage is at least 0.6, its residual at most 2 %, and it has at
-  least 300 samples. Application is rate-limited: each accepted fit moves the applied correction
+  least 3 s of quasi-static time (300 samples at 100 Hz). Application is rate-limited: each accepted fit moves the applied correction
   at most 25 % of the way (blended per parameter), and a fit whose centre moves by more than
   0.5 g is rejected as an outlier.
 - **Magnetometer:** every sample feeds a `MagCalibrator` (an `EllipsoidFit` in µT, forgetting
-  factor 0.999 per sample, so about 1000 samples are remembered). Applied under the same
+  factor 0.999 per 100 ms, so about 100 s are remembered; a fit needs 30 s of in-range time). Applied under the same
   thresholds, and rate-limited the same way. A raw field outside 15-80 µT is not accepted (it is
   not an Earth field).
 - **Accelerometer confidence** is its gravity agreement (the share of recent samples with `|a|` within 10 % of g, a moving average of about 0.6 s, starting at 1) times the applied fit's confidence, or 1 when no fit is applied (the factory correction). A still board with clean gravity is fully confident without a fit: a fit needs orientation coverage, which a still board never has.
@@ -159,8 +159,8 @@ applied calibration.
 
 | Routine | Procedure | Done when | Result |
 |---|---|---|---|
-| `AccelSix` | Hold still on each face. A face counts when its gravity direction is within 20° of ±X, ±Y or ±Z and it is quasi-static for 1 s. | 6 faces with 100 samples each, and the fit passes its thresholds | accelerometer candidate |
-| `MagRotate` | Rotate through as many orientations as possible. | coverage ≥ 0.9, residual ≤ 3 %, ≥ 500 samples | magnetometer candidate |
+| `AccelSix` | Hold still on each face. A face counts when its gravity direction is within 20° of ±X, ±Y or ±Z and it is quasi-static for 1 s. | 6 faces with 1 s of quasi-static time each, and the fit passes its thresholds (3 s in all) | accelerometer candidate |
+| `MagRotate` | Rotate through as many orientations as possible. | coverage ≥ 0.9, residual ≤ 3 %, ≥ 50 s of in-range time | magnetometer candidate |
 | `GyroHold` | Hold still. | 5 s of still windows | gyroscope candidate |
 
 Each routine has a timeout (`AccelSix` 180 s, `MagRotate` 180 s, `GyroHold` 30 s). A timeout, or
@@ -312,10 +312,15 @@ Deviations from the text above, as built in `crates/lemnos-fusion`:
 
 ### Driver notes (BMI088, BMM150)
 
-- The estimators have no clock of their own: a sample's time is the count of samples times the
-  period (accelerometer 10 ms at 100 Hz, magnetometer the data rate's period). Routine timeouts and
-  the gyro's still time count samples, so a sparsely read device accrues them more slowly than wall
-  time.
+- The estimators run on sample time, and every timer is wall time. lemnosd gives each read its
+  boot-clock time (`Sensor::set_clock_us`, called before the read starts); a batch's samples are
+  `sample_period_us` apart, the last at that time. So a 10 Hz board reaches the same confidence in
+  the same time as a 100 Hz one. Without a host clock (a standalone read) each sample advances the
+  clock by the nominal period.
+- Samples are weighted by their time step (over the 10 ms nominal period), and forgetting is per
+  unit of time (accelerometer 20 s, magnetometer 100 s), so a sample's share of a fit does not
+  depend on the rate. A gap of more than 0.5 s is not integrated: no still window, gated run or
+  timed routine crosses it.
 - A channel-selective read adds no sample to the calibration: the calibration needs every axis of
   both dies. Subscribing to the calibrated channels takes every axis, so it feeds the estimators.
   The FIFO batch feeds every sample it returns.
