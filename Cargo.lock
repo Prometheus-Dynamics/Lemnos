@@ -215,7 +215,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -846,7 +846,7 @@ dependencies = [
 [[package]]
 name = "orion-auth"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "ed25519-dalek",
  "orion-control-plane",
@@ -860,7 +860,7 @@ dependencies = [
 [[package]]
 name = "orion-client"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "orion-control-plane",
  "orion-core",
@@ -874,7 +874,7 @@ dependencies = [
 [[package]]
 name = "orion-cluster"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "orion-control-plane",
  "orion-core",
@@ -885,7 +885,7 @@ dependencies = [
 [[package]]
 name = "orion-control-plane"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "orion-core",
  "rkyv",
@@ -898,7 +898,7 @@ dependencies = [
 [[package]]
 name = "orion-core"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "rkyv",
  "serde",
@@ -908,7 +908,7 @@ dependencies = [
 [[package]]
 name = "orion-data-plane"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "orion-core",
  "rkyv",
@@ -919,7 +919,7 @@ dependencies = [
 [[package]]
 name = "orion-node"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "ed25519-dalek",
  "getrandom",
@@ -946,7 +946,7 @@ dependencies = [
 [[package]]
 name = "orion-runtime"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "orion-control-plane",
  "orion-core",
@@ -956,12 +956,12 @@ dependencies = [
 [[package]]
 name = "orion-service"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 
 [[package]]
 name = "orion-transport-common"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "tokio",
 ]
@@ -969,7 +969,7 @@ dependencies = [
 [[package]]
 name = "orion-transport-http"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "orion-auth",
  "orion-control-plane",
@@ -983,7 +983,7 @@ dependencies = [
 [[package]]
 name = "orion-transport-ipc"
 version = "1.0.0"
-source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=4fadba9#4fadba9fd81d376375dbe9a3c7a6ccc6416685ae"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=f8d767ac#f8d767ac5f7a995fbdc205d727f58dcf719c25dc"
 dependencies = [
  "libc",
  "orion-control-plane",
@@ -1626,7 +1626,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

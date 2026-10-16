@@ -35,7 +35,7 @@ default = []
 # client tests.
 mock = ["lemnos-hal/mock"]
 # The Orion bridge: `lemnos-orion`, a lemnosd client and an Orion provider
-# over local IPC (`lemnosd::orion`). Pins Orion's main at 4fadba9. `orion-node`
+# over local IPC (`lemnosd::orion`). Pins Orion f8d767ac (control protocol 5, the orion-node the Raze images ship). `orion-node`
 # is a dev-dependency (only the bridge's tests run an in-process node), so the
 # binary never links it: its default features pull rustls and ring, which the
 # musl artifact cannot build without a C cross toolchain.
@@ -60,16 +60,16 @@ serde_json = { workspace = true, features = ["std"] }
 toml = { workspace = true }
 
 # Orion (feature `orion`). Its crates are not published: pinned to its main.
-orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
-orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
-orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", optional = true }
+orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
+orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
+orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"], optional = true }
 
 [dev-dependencies]
 lemnosd = { path = ".", features = ["mock"] }
 # The in-process node for tests/orion_bridge.rs. IPC only: default features
 # would add the HTTP/TCP/QUIC transports (rustls, ring).
-orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "4fadba9", default-features = false }
+orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", default-features = false }
 lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-mock.workspace = true
