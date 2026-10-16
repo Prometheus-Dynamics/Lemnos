@@ -1,7 +1,8 @@
 # systemd-sysusers(8) entries for lemnosd.service. Install as
 # /usr/lib/sysusers.d/lemnos.conf. The lemnos group is how clients
 # (helios, photonvision) get access to /run/lemnos/lemnosd.sock.
-u lemnos - "Lemnos hardware service" /run/lemnos
+# Fixed uid/gid 900, as in packaging/buildroot/lemnos-users.table (shared /data).
+u lemnos 900 "Lemnos hardware service" /run/lemnos
 m lemnos i2c
 m lemnos gpio
 m lemnos spi

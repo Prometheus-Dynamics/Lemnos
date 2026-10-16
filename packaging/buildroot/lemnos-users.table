@@ -2,4 +2,7 @@
 # images whose root filesystem is read-only at runtime (systemd-sysusers cannot add users there).
 # The same user as systemd/lemnos.sysusers. Columns: username uid group gid password home shell
 # groups comment (see Buildroot's makeusers).
-lemnos -1 lemnos -1 * /run/lemnos /bin/false i2c,gpio,spi,video Lemnos hardware service
+# Fixed uid/gid 900: every OS image on a board (PhotonVision, HeliOS, each
+# slot) shares /data, so the owner of lemnosd's files there must not depend on
+# which other users an image happens to create first.
+lemnos 900 lemnos 900 * /run/lemnos /bin/false i2c,gpio,spi,video Lemnos hardware service
