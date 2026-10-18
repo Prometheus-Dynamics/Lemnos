@@ -65,7 +65,8 @@ For day-to-day changes:
 step (`==> [time]` lines and a summary). CPU time is the work; wall time also counts
 waiting on the disk and the network. The jobs avoid repeating each other:
 
-- `docs-and-lints` runs formatting, the file-size lint, default-feature clippy and the
+- `docs-and-lints` runs formatting, the file-size lint, the product-name check
+  (`scripts/check-names.sh`, allowlist `scripts/check-names.allow`), default-feature clippy and the
   docs; `workspace` runs the tests (default features; all features over all targets; the
   all-features doctests, which `--all-targets` skips) and the full-feature clippy. Earlier
   both jobs ran the full-feature clippy, tests and docs.

@@ -2,8 +2,8 @@
 
 Status: implemented (`crates/lemnosd/src/orion`, binary `lemnos-orion`, feature `orion` of
 `lemnosd`). Builds on [system-service.md](system-service.md) and
-[board-definition.md](board-definition.md). This page is the contract for Atlas's Sensors panel and
-for HeliOS. Changing a name or unit here is a breaking change.
+[board-definition.md](board-definition.md). This page is the contract for the manager's sensors panel and
+for the app. Changing a name or unit here is a breaking change.
 
 `lemnos-orion` is a lemnosd client (name `orion`) and an Orion provider over local IPC (client name
 `lemnos-orion`, provider `lemnos`). It publishes each board device as an Orion resource, mirrors its
@@ -11,7 +11,7 @@ readings and status, and runs its actions on it (`set`, `restore`, `release`, `r
 look actions, and the calibration actions below). Raw GPIO, PWM, I2C and SPI stay direct to lemnosd
 and are not exposed here.
 
-Pinned against Orion `f8d767ac` (control protocol 5, the node the Raze images ship), as
+Pinned against Orion `f8d767ac` (control protocol 5, the node the example board images ship), as
 `crates/lemnosd/Cargo.toml` pins it. The actions use the provider's `watch_action_requests`.
 
 ## Resources
@@ -19,7 +19,7 @@ Pinned against Orion `f8d767ac` (control protocol 5, the node the Raze images sh
 | | |
 |---|---|
 | Resource type | `lemnos.device` |
-| Resource id | `lemnos.<board>.<device>`, for example `lemnos.raze.imu` (`<board>` is the board id, `<device>` the board's device id) |
+| Resource id | `lemnos.<board>.<device>`, for example `lemnos.example.imu` (`<board>` is the board id, `<device>` the board's device id) |
 | Provider id | `lemnos`, on the node named by `ORION_NODE_ID` (default `node.local`) |
 
 Availability and health, from the device status:
@@ -126,7 +126,7 @@ every 10 s and published when they change: `calibration.revision`, `calibration.
 and `calibration.<part>.active` (`Bool`). A device with no such part reads as zero.
 
 The look and brightness actions are on the light's resource (`lemnos.<board>.<light>`,
-for example `lemnos.raze.status-ring`). The writer policy is the light's `writers`
+for example `lemnos.example.status-ring`). The writer policy is the light's `writers`
 (`["orion:*", "atlas"]`), and lemnosd checks the look-changing operations too.
 
 Writer naming: each caller (`requested_by`) gets its own lemnosd connection named `orion:<requested_by>`,

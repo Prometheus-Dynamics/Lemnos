@@ -8,14 +8,14 @@ and board definitions); the decisions below are confirmed. Phase 4 became `lemno
 ## Goal
 
 Lemnos should fit anywhere it is useful: a sensor on a small microcontroller, a Linux SoC
-with a few megabytes of flash, and the CM5 under HeliOS. There is no fixed size budget.
+with a few megabytes of flash, and the BCM2712 board under the app. There is no fixed size budget.
 Smaller is better, because the smaller Lemnos is, the more hardware it can run on.
 `scripts/check-sizes.sh` tracks every image, so growth is always a deliberate choice.
 
 Two things should hold on every target:
 
 1. **One driver per device.** A BMI088 driver written once serves firmware, a small Linux
-   program, and HeliOS.
+   program, and the app.
 2. **Pay for what you use.** Discovery, hotplug, driver matching, event history and
    string-keyed metadata cost nothing unless a target asks for them.
 
@@ -45,7 +45,7 @@ sensors on Linux" from "three sensors through Lemnos". Most of it comes from thr
   events. `Runtime::finish_refresh` alone is about 28 KB.
 - **Linux discovery.** Six sysfs probes at about 5 KB each, mostly building descriptors.
 
-HeliOS needs all of that. A sensor node needs none of it.
+The app needs all of that. A sensor node needs none of it.
 
 There is also a modeling gap: `DeviceKind` only says how a device is connected (an I2C
 device, a PWM channel). The BMI088 and the hwmon fan are both `Unspecified(...)` and
@@ -153,11 +153,11 @@ A generic adapter turns any L1 device into a runtime driver:
 - The device is bound through `lemnos_bus::hal` sessions, as
   `tests/nostd_driver_in_runtime.rs` already shows for the BMI088.
 
-This replaces the planned per-sensor runtime adapters. Each new driver crate reaches HeliOS
-without extra code, and HeliOS can bind sensors from `sensors.toml` through configured
+This replaces the planned per-sensor runtime adapters. Each new driver crate reaches the app
+without extra code, and the app can bind sensors from `sensors.toml` through configured
 devices.
 
-The rich model stays for HeliOS, but stops being the foundation. Size work there continues
+The rich model stays for the app, but stops being the foundation. Size work there continues
 separately:
 - events hold `Arc<DeviceDescriptor>` instead of clones
 - event retention and diagnostics become optional features
@@ -226,7 +226,7 @@ re-initializes devices that are not up on their schedule. Status starts `missing
 `available` after a successful `init`, and follows `DeviceStatus::after_error` on failures
 (not found or NACK: `missing`; transient: `degraded`; otherwise `faulted`).
 
-`crates/lemnos-lite/examples/linux_sensors.rs` reads the Raze's three I2C sensors on Linux;
+`crates/lemnos-lite/examples/linux_sensors.rs` reads the example board's three I2C sensors on Linux;
 the firmware size image `lite` is the microcontroller example.
 
 ### L3: the generic adapter
@@ -248,7 +248,7 @@ Devices come from three places:
   a TOML/JSON file names each device's generic driver, bus and settings. The facade's
   `board` feature reports them as configured descriptors and binds them with two
   `L1Driver`s; I2C buses come from the runtime's backend as owned sessions
-  (`lemnos_bus::hal::OwnedI2cBus`). This is how HeliOS binds the Raze's BMI088, BMM150 and
+  (`lemnos_bus::hal::OwnedI2cBus`). This is how the app binds the example board's BMI088, BMM150 and
   INA238 from `sensors.toml`, and it replaces the planned per-sensor runtime adapters: a
   new driver crate needs a registry entry, not runtime code.
 - **The kernel.** `lemnos-drivers-linux` has `HwmonFan` and `ThermalZone` as L1 devices,
@@ -297,13 +297,13 @@ fan and thermal-zone drivers now run through the generic adapter (phase 3 added 
    over the drivers alone; it should be a few hundred bytes.
 2. **`lemnos-lite`.** The static table, with firmware and Linux images in
    `testing/size/`. Measure against the 34 KB floor.
-3. **The generic L3 adapter.** The runtime binds any L1 device. HeliOS reads sensors
+3. **The generic L3 adapter.** The runtime binds any L1 device. The app reads sensors
    through it and `sensors.toml` maps onto configured devices.
 4. **Rich-model slimming.** `Arc` in events, optional retention and diagnostics, shared
    probe code. Each change is measured.
 5. **Bridge (optional).** The wire format plus a Linux-side probe.
 
-None of these phases breaks HeliOS: L3's public API stays as it is, and L1/L2 are new
+None of these phases breaks the app: L3's public API stays as it is, and L1/L2 are new
 crates.
 
 ## Decisions

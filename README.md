@@ -2,7 +2,7 @@
 
 Lemnos is a Rust workspace for hardware discovery, driver matching, and runtime interaction across GPIO, PWM, I2C, SPI, UART, and USB surfaces.
 
-Lemnos 2.0 is also the hardware foundation underneath [Styx](https://github.com/Prometheus-Dynamics/Styx): `embedded-hal` 1.0 is the bus vocabulary, device drivers are `no_std` and run on Linux and microcontrollers alike, and Linux is reached through one pure-Rust implementation with no C libraries. See [docs/foundation.md](docs/foundation.md).
+Lemnos 2.0 is also the hardware foundation under camera stacks and the apps on a board: `embedded-hal` 1.0 is the bus vocabulary, device drivers are `no_std` and run on Linux and microcontrollers alike, and Linux is reached through one pure-Rust implementation with no C libraries. See [docs/foundation.md](docs/foundation.md).
 
 The repository is split into small crates so applications, custom drivers, Linux backends, built-in generic drivers, and test helpers can evolve independently.
 
@@ -132,11 +132,12 @@ Targeted helper scripts live under `testing/`.
 - [docs/architecture-crate-map.md](docs/architecture-crate-map.md): crate responsibilities and relationships
 - [docs/testing.md](docs/testing.md): test surfaces, scripts, and example validation flows
 - [docs/compact-model.md](docs/compact-model.md): the compact device model, the lite table and the generic runtime adapter
-- [docs/board-definition.md](docs/board-definition.md): the board-definition format, built-in drivers, and HeliOS adoption
+- [docs/board-definition.md](docs/board-definition.md): the board-definition format, built-in drivers, and adopting a board in an app
 - [docs/looks.md](docs/looks.md): LED looks: the blocks, look files, built-in names, brightness, reloads and the CLI
 - [docs/system-service.md](docs/system-service.md): `lemnosd`, the board's hardware service: client API, LED intents, updater integration, backends, packaging
 - [docs/composite-devices.md](docs/composite-devices.md): design only: composite devices and the fan controller with its failsafe
-- [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the Styx migration
+- [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the migration record
+- [docs/provenance.md](docs/provenance.md): where the generic code came from, and the cross-repo migration that moved it
 - [CHANGELOG.md](CHANGELOG.md): release history and notable workspace changes
 - [testing/README.md](testing/README.md): local and CI validation entry points
 - [scripts/ci.sh](scripts/ci.sh): shared local CI entry point

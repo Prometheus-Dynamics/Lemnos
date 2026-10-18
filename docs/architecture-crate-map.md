@@ -1,6 +1,6 @@
 # Architecture Crate Map
 
-Lemnos is intentionally layered. Higher-level crates depend on lower-level vocabulary and contracts rather than reaching directly across the workspace. [foundation.md](foundation.md) explains the 2.0 layering and the Styx migration.
+Lemnos is intentionally layered. Higher-level crates depend on lower-level vocabulary and contracts rather than reaching directly across the workspace. [foundation.md](foundation.md) explains the 2.0 layering; [provenance.md](provenance.md) records where the generic code came from.
 
 ## Layering
 
@@ -55,4 +55,4 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 3. The registry selects a candidate driver.
 4. The runtime opens typed sessions through `lemnos-bus`.
 5. The bound driver performs interactions and updates runtime state, directly or through an embedded-hal device driver over `lemnos_bus::hal`.
-6. Applications use the `lemnos` facade or the lower-level crates directly; firmware and Styx use `lemnos-hal`, the device drivers, and `lemnos_linux::hal` without the runtime.
+6. Applications use the `lemnos` facade or the lower-level crates directly; firmware and camera stacks use `lemnos-hal`, the device drivers, and `lemnos_linux::hal` without the runtime.

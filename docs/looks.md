@@ -31,7 +31,7 @@ Every block takes `brightness` (0 to 1, default 1) and `mode` (`max`, `add` or
 | `over` | alpha compositing: the layer covers what is below by its own level (its largest channel, `a`), so `below × (1 − a) + layer` | a coloured comet on a coloured glow: the head keeps its own colour, the glow shows where the head is off, and a tail blends from one to the other without the hue mixing a `max` gives |
 
 Wire: mode codes `0` (`max`), `1` (`add`), `2` (`over`), appended. Units: periods are milliseconds, a **LED** count is LEDs (the
-ring has 16 on the Raze, at most 64), and every other fraction is 0 to 1.
+ring has 16 on the example board, at most 64), and every other fraction is 0 to 1.
 
 | Block | Keys (default) | Notes |
 |---|---|---|
@@ -193,7 +193,7 @@ A look file is a TOML file of `[looks.<name>]` tables. A name is 1 to 40 of
 `a-z`, `0-9`, `.`, `-` and `_`.
 
 ```toml
-# /etc/lemnos/looks.d/photonvision.toml (or the writable directory)
+# /etc/lemnos/looks.d/vision.toml (or the writable directory)
 [looks."pv.searching"]
 envelope = "solid"
 brightness = 1.0
@@ -279,7 +279,7 @@ lemnos-ctl looks delete pv.searching               # remove a look file override
 ```
 
 Preset changes (apply, save, delete) and look deletions are accepted from the
-clients `atlas`, `lemnos-ctl` and `orion:<requested_by>`; any other client may
+clients `atlas` (the manager), `lemnos-ctl` and `orion:<requested_by>`; any other client may
 read the presets but not change them. The socket's permissions remain the
 boundary. Protocol: `LooksOp` codes 4 to 9, appended (`PresetList`, `PresetShow`,
 `PresetApply`, `PresetSave`, `PresetDelete`, `Delete`), answered with
@@ -341,7 +341,7 @@ stays until it is replaced or cleared (`led off`), or for `--seconds N`. The
 `--file` form takes a bare look body, or a look file (with `--name` when it has
 more than one look). `--progress` feeds the look's arcs (0 to 1).
 
-A bare look body is what `--spec` and `--json` take (`--json` is what Atlas
+A bare look body is what `--spec` and `--json` take (`--json` is what the manager
 sends):
 
 ```bash

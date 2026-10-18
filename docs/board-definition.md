@@ -13,7 +13,7 @@ Every host reads the same file:
 
 | Host | How it uses the definition |
 |---|---|
-| The runtime (`lemnos`, feature `board`) | `BoardSetup` reports each device as a configured descriptor and binds it through the generic device-model adapter. HeliOS uses this. |
+| The runtime (`lemnos`, feature `board`) | `BoardSetup` reports each device as a configured descriptor and binds it through the generic device-model adapter. an app uses this. |
 | `lemnosd` | hosts the devices directly (see [system-service.md](system-service.md)). |
 | A small Linux program | `DriverRegistry::build` returns each device as a `BoxedDevice`; put them in a `lemnos-lite` table. |
 | Firmware | does not parse files; it constructs the same drivers in code (`lemnos-lite`). |
@@ -29,10 +29,10 @@ format = "lemnos.board"   # required, always this value
 schema_version = 1        # required; readers reject newer versions
 
 [board]
-id = "raze"               # required: lowercase letters, digits, inner '-'
-name = "Raze"             # optional
+id = "example"               # required: lowercase letters, digits, inner '-'
+name = "Example sensor board"             # optional
 revision = "2027"         # optional
-generated_by = "atlas 1.2.0"  # optional, set by generators
+generated_by = "manager 1.2.0"  # optional, set by generators
 
 [[devices]]
 id = "imu"                # required, unique within the board
@@ -45,7 +45,7 @@ path = "/sys/class/hwmon/hwmon2"  # platform devices found by path
 match = { name = "pwmfan" }       # platform devices found by attributes
 poll_ms = 10              # the fastest hosts read it (the cap on a subscription)
 idle_poll_ms = 1000       # how often, with no subscriber (0: never; IMU-class: never by default)
-writers = ["helios"]      # clients allowed to write its controls (empty: any)
+writers = ["app"]      # clients allowed to write its controls (empty: any)
 config = { gyro_address = 0x68, accel_range = "6g" }  # driver settings
 ```
 
@@ -68,7 +68,7 @@ adapter in `/sys/bus/i2c/devices`:
 |---|---|
 | `name` | the adapter's `name` attribute (`Synopsys DesignWare I2C adapter`) |
 | `compatible` | one of the `compatible` strings of the adapter's device-tree node, or of its parent device's node (`i2c-gpio`, `snps,designware-i2c`) |
-| `of` | that node's device-tree path (on the Raze with kernel 7.2, RP1's i2c1 is `/axi/pcie@1000120000/rp1/i2c@74000`) |
+| `of` | that node's device-tree path (on the example board with kernel 7.2, RP1's i2c1 is `/axi/pcie@1000120000/rp1/i2c@74000`) |
 | `node` | the last component of that path (`i2c@74000`: a DesignWare controller at a given address) |
 
 ```toml
@@ -105,7 +105,7 @@ address = 0x18
 adapter number; it is named by its pins and clock. Requirements, the pins
 being free, and the limits are in `docs/system-service.md` (PIO I2C).
 
-Board packages must drop the kernel `i2c-gpio` overlay for those pins (Atlas:
+Board packages must drop the kernel `i2c-gpio` overlay for those pins (the manager:
 remove the `i2c-gpio` node for GPIO7/GPIO8 from the image's overlay set, and
 give the `lemnos` user access to `/dev/pio0`). Until the overlay is gone the
 device reports that the pins are in use.
@@ -115,13 +115,13 @@ device reports that the pins are in use.
 Hosts that hand hardware to clients (`lemnosd`) read three more keys:
 
 ```toml
-raw_clients = ["helios", "atlas-selftest"]   # top level: who may claim raw (empty: anyone); `*` as in `writers`
+raw_clients = ["app", "manager-selftest"]   # top level: who may claim raw (empty: anyone); `*` as in `writers`
 
 [[devices]]
 id = "imu"
 driver = "bmi088"
 bus = "i2c-1"
-raw = ["atlas-selftest"]   # clients allowed brokered I2C to the IMU's addresses
+raw = ["manager-selftest"]   # clients allowed brokered I2C to the IMU's addresses
 
 [[lines]]                  # GPIO lines no device owns, by name, with a safe state
 name = "aux-1"
@@ -205,7 +205,7 @@ The system looks' own timing and shape (see `docs/system-service.md`, "System st
 | `failed_period_ms` | `2400` | the failed or rolled-back pulse's period |
 | `failed_depth` | `0.9` | its depth (down to 10%) |
 
-Example (the Raze, `/etc/lemnos/board.toml`): `config = { count = 16, wire = "rgb",
+Example (the example board, `/etc/lemnos/board.toml`): `config = { count = 16, wire = "rgb",
 offset = 5, direction = "cw", gpio = 13, fade_ms = 250, easing = "ease-in-out",
 status_effect = "breathe" }`; the rest is the defaults above.
 
@@ -229,9 +229,9 @@ through the other level. Behaviour that `lemnosd` adds (`docs/system-service.md`
 - `enable_delay_ms`: after a write turns the switch on, `lemnosd` reports
   `power.ready` this long later (the write itself returns at once).
 - `writers`: `["orion:*", "atlas"]` is the usual list (the Orion bridge's callers
-  and Atlas), with `lemnos-ctl` run on the board as needed.
+  and the manager), with `lemnos-ctl` run on the board as needed.
 
-The Raze's two USB port switches (`crates/lemnos-board/examples/raze.toml`):
+The example board's two USB port switches (`crates/lemnos-board/examples/boards/raze-example.toml`):
 
 ```toml
 [[devices]]
@@ -251,17 +251,17 @@ Both lines are hogged on by the kernel overlay today, and the board package
 releases them; once `lemnosd` owns them it keeps them on from the start (no
 off-glitch). The older `gpio-output` driver still works for any other line.
 
-## The Raze
+## The example board
 
-[crates/lemnos-board/examples/raze.toml](../crates/lemnos-board/examples/raze.toml):
+[crates/lemnos-board/examples/boards/raze-example.toml](../crates/lemnos-board/examples/boards/raze-example.toml):
 
 ```toml
 format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
-name = "Raze"
+id = "example"
+name = "Example sensor board"
 
 [[devices]]
 id = "imu"
@@ -317,16 +317,16 @@ writers = ["orion:*", "atlas"]
 config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, on_exit = "keep" }
 ```
 
-The buses and addresses were verified by chip-id reads on the Raze (PhotonVision 2027
+The buses and addresses were verified by chip-id reads on the example board (a 2027 image
 image, kernel 7.2.9): the BMI088 is on the board's i2c-gpio bus (i2c-4 there; accelerometer
 0x18, id 0x1E; gyroscope 0x68, id 0x0F), the BMM150 on i2c-1 at 0x10 (id 0x32 once power
 control 0x4B bit 0 is set) and the INA238 on i2c-1 at 0x40 (die id 0x2381). The shunt value
 is still the schematic's to confirm. The ring is a 16-LED SK6812 on GPIO 13 with logical
-LED 0 at physical LED 5; `wire = "rgb"` ran correctly on the Raze.
+LED 0 at physical LED 5; `wire = "rgb"` ran correctly on the example board.
 
 ## Generating it
 
-Generators (Atlas's device package) emit the file from their manifest:
+Generators (the manager's device package) emit the file from their manifest:
 
 - one `[[devices]]` entry per peripheral, `driver` from the part (`BMI088` → `bmi088`),
   `bus`/`address` from the wiring, settings into `config`;
@@ -352,71 +352,35 @@ for spec in &board.devices {
 }
 ```
 
-In the runtime: see "HeliOS adoption" below; the facade's `BoardSetup` wraps the same
+In the runtime: see "Adopting a board in an app" below; the facade's `BoardSetup` wraps the same
 registry.
 
-## HeliOS adoption
+## Adopting a board in an app
 
-HeliOS already passes sensor files through `HELIOS_SENSOR_CONFIG_PATHS` (and watches them),
-but does not parse them yet. With this format, `sensors.toml` *is* a board definition.
+An app reads a board definition through the `board` feature of the `lemnos` facade:
+`BoardDefinition::from_path` validates the file, `BoardSetup` adds its probe to the Linux
+backend and its drivers to the runtime, and `refresh_incremental_with_linux` and hotplug run
+the probe. Board devices are `DeviceKind::Unspecified(I2c)` (sensors) or
+`Unspecified(Platform)` (fans, thermal zones). The app-side wiring (its config file, which
+device classes it maps, and how it publishes them) belongs in the app's repository; the
+steps below are what every adopter gets.
 
-1. **Dependency.** Add the `board` feature:
-
-   ```toml
-   lemnos = { workspace = true, default-features = false,
-              features = ["builtin-drivers", "linux", "linux-hotplug", "tokio", "board"] }
-   ```
-
-2. **Config.** Ship `/etc/helios/sensors.toml` with the Raze's devices (the file above,
-   with the board's real bus, addresses and shunt) and keep
-   `HELIOS_SENSOR_CONFIG_PATHS=/etc/helios/sensors.toml`.
-
-3. **Stack.** In `LemnosPeripheralStack::new`, load the file, add its probe to the Linux
-   backend and its drivers to the runtime:
-
-   ```rust
-   use lemnos::board::{BoardDefinition, BoardSetup};
-
-   let mut backend = LinuxBackend::default();
-   let mut builder = Lemnos::builder();
-   for path in &config.sensor_config_paths {
-       if path.exists() {
-           let setup = BoardSetup::new(BoardDefinition::from_path(path)?)?;
-           backend = backend.with_probe(Arc::new(setup.probe()));
-           builder = builder.with_board(&setup)?;
-       }
-   }
-   let mut lemnos = builder.with_linux_backend_ref(&backend).build();
-   lemnos.register_builtin_drivers()?;
-   ```
-
-   `with_board` adds the board's drivers to the bind policy, so every refresh binds the
-   sensors; the existing `refresh_incremental_with_linux` and hotplug paths run the board
-   probe because it lives in the backend. On a change to `sensors.toml` (HeliOS already
-   watches it), rebuild the stack.
-
-4. **Resources.** Board devices are `DeviceKind::Unspecified(I2c)` (sensors) or
-   `Unspecified(Platform)` (fan, thermal zone). Map them by the `device.class` label
-   (`imu`, `magnetometer`, `power-monitor`, `fan`, `temperature`, `lens`) instead of the
-   kind; `board.device` is the id from the file and a stable resource name. The Linux
-   backend also discovers every thermal zone (`linux.thermal.thermal_zoneN`, class
-   `temperature`), bound by the built-in thermal-zone driver.
-
-5. **Telemetry.** `refresh_state(id)` returns the channels as `f64` in SI units, keyed by
+1. **Telemetry.** `refresh_state(id)` returns the channels as `f64` in SI units, keyed by
    channel name: `acceleration.x` (m/s²), `angular_rate.z` (rad/s), `magnetic_field.y`
    (T), `bus_voltage` (V), `current` (A), `power` (W), `temperature` (°C), `speed` (rpm),
    `duty` (fraction). `realized_config` carries `device.class`, `device.model` and the
    current control values. The existing `telemetry.*` label mapping in
    `resource_from_lemnos` works unchanged.
 
-6. **Controls.** Controls are custom interactions `<control>.set` with the value in its
+2. **Controls.** Controls are custom interactions `<control>.set` with the value in its
    unit: `request_custom_value(fan, "pwm_mode.set", 1u64)` then
    `request_custom_value(fan, "duty.set", 0.7)`. The built-in hwmon fan driver keeps
-   `fan.read`/`fan.set_duty`/`fan.set_pwm`/`fan.set_mode`, so `lemnos_fan.rs` can be
-   deleted in favour of it.
+   `fan.read`/`fan.set_duty`/`fan.set_pwm`/`fan.set_mode`; an app's own fan code can be
+   replaced by it.
 
-7. **Polling.** `poll_ms` is in the descriptor as `board.poll_ms`; use it for
+3. **Polling.** `poll_ms` is in the descriptor as `board.poll_ms`; use it for
    `driver_sample_interval_ms` per device instead of one global interval.
 
 `crates/lemnos/tests/board_definition.rs` runs this flow end to end against mock I2C
+hardware and a fake sysfs tree.
 hardware and a fake sysfs tree.

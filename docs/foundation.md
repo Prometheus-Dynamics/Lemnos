@@ -1,14 +1,14 @@
-# Lemnos 2.0: the hardware foundation under Styx
+# Lemnos 2.0: the hardware foundation
 
-Status: decided and implemented (branch `foundation`, Lemnos 2.0.0); verified on the CM5. Lemnos owns every generic driver and
-communication layer (buses, pins, power, hotplug, discovery). Styx keeps cameras only and
-consumes Lemnos, on Linux and on microcontrollers. Generic code that grew up in Styx moves
-here and is later deleted from Styx.
+Status: decided and implemented (branch `foundation`, Lemnos 2.0.0); verified on the BCM2712 board. Lemnos owns every generic driver and
+communication layer (buses, pins, power, hotplug, discovery). Camera stacks keep cameras only and
+consume Lemnos, on Linux and on microcontrollers. Where the generic code came from, and the
+cross-repo migration, is recorded in [provenance.md](provenance.md).
 
 ## Layering
 
 ```
- HeliOS, apps                Styx (cameras: V4L2, media, ISP, sensors, 3A)       MCU firmware
+ consuming apps          camera stack (V4L2, media, ISP, 3A)                 MCU firmware
  ───────────────────────────────────────────────────────────────────────────────────────────
  lemnos            facade                                                    std
  lemnos-runtime    refresh, bind, state, async                               std
@@ -31,7 +31,7 @@ Rules:
 
 1. **embedded-hal is the bus vocabulary.** Device drivers take `I2c`, `SpiDevice`,
    `OutputPin`, `DelayNs` (or the async traits) and nothing else. They never see Linux or the
-   Lemnos runtime, so the same driver runs on a CM5 and on a Cortex-M.
+   Lemnos runtime, so the same driver runs on a BCM2712 and on a Cortex-M.
 2. **`lemnos-hal` adds only what embedded-hal lacks**: register maps over I2C/SPI (8/16-bit
    addresses, 1-4 byte big-endian values, bursts, read-back, read-modify-write, zero
    allocation), regulators, clock outputs, and one portable `ErrorKind`.
@@ -43,36 +43,8 @@ Rules:
    `unsafe` block carries a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks` is
    denied there).
 5. **The dyn session API stays** as a convenience layer for the runtime: discovery, binding,
-   interactions and HeliOS keep working unchanged. `lemnos-bus::hal` adapts any session to
+   interactions and the app keep working unchanged. `lemnos-bus::hal` adapts any session to
    embedded-hal, so no_std drivers also run inside the runtime.
-
-## What moves from Styx
-
-| Styx source (branch `dev`) | Lemnos destination |
-|---|---|
-| `crates/kernel/src/bus/ioctl.rs` (`_IOC` encoding, `EINTR`-retrying ioctl) | `lemnos-linux-sys::ioctl` |
-| `crates/kernel/src/bus/i2c.rs` (`I2C_SLAVE`, `I2C_FUNCS`, `I2C_RDWR`, message limits, encoders) | `lemnos-linux-sys::i2c` (uAPI) + `lemnos_linux::hal::I2cBus` (embedded-hal `I2c`, sessions) |
-| `crates/kernel/src/bus/gpio.rs` (GPIO v2 chip info, line info, requests, values) | `lemnos-linux-sys::gpio` + `lemnos_linux::hal::{GpioChip, GpioLines, GpioLine}`; extended with inputs, bias, debounce, edge events, reconfiguration |
-| `crates/kernel/src/uevent.rs` (`NETLINK_KOBJECT_UEVENT`, parser) | `lemnos-linux-sys::netlink` + `lemnos_linux::uevent`; drives `LinuxHotplugWatcher` |
-| `crates/kernel/src/ioctl.rs` (`poll_fd`) | `lemnos-linux-sys::poll` |
-| `crates/sensor/src/bus.rs` (`RegisterBus`, `RegWrite`, `MockBus`) | `lemnos_hal::register::{RegisterBus, RegWrite}`, `lemnos_hal::mock` |
-| `crates/sensor/src/bus_error.rs` (`BusErrorKind`) | `lemnos_hal::ErrorKind` (superset) |
-| `crates/native/src/regbus.rs` (`I2cRegisterBus`: big-endian encoding, `with_bursts`, one message per transfer on RP1) | `lemnos_hal::register::I2cRegisters` (blocking + async) |
-| `crates/sensor/src/lens.rs` (`VcmChip`, `VcmFormat::encode`) + `crates/native/src/lens.rs` (`I2cVcm`) | `lemnos-drivers-vcm` (DW9714, DW9807, DW9817, AK7375, custom formats; blocking + async) |
-| `SensorPins::{set_gpio, set_clock, set_supply}` (generic halves) | `OutputPin`, `lemnos_hal::{Regulator, ClockOutput}`; `GpioRegulator`, `FixedClock` |
-
-Later (not in this change): `crates/kernel/src/usbfs.rs` replaces `rusb` in the USB transport;
-sensor drivers (BMI088, BMM150, INA2xx) become no_std drivers (done: `lemnos-drivers-bmi088`, `lemnos-drivers-bmm150`, `lemnos-drivers-ina2xx`).
-
-## What stays in Styx
-
-V4L2 video nodes, the media controller, subdevices, V4L2 events and controls, dma-heaps,
-the `styx-sensor-bridge` protocol and `BridgePins`, `SubdevBus` / `KernelControl` (kernel
-sensor drivers), sensor descriptions and `SensorDriver`, the role-name mapping of a sensor's
-power sequence (`SensorPins` becomes a thin camera trait over Lemnos pins, regulators and
-clocks), `LensDescription` / `LensSchedule` / `LensMotion` (frame timing), PDAF decoding,
-UVC, the ISPs and 3A. Styx's time `Clock` stays in `styx-hal`; Lemnos's clock trait is
-`ClockOutput` (a clock signal) to avoid the clash.
 
 ## Crate-by-crate changes
 
@@ -117,22 +89,10 @@ UVC, the ISPs and 3A. Styx's time `Clock` stays in `styx-hal`; Lemnos's clock tr
 The workspace becomes **2.0.0**: the dependency graph changes (crates removed, new crates),
 `lemnos-core` gains a default `std` feature (users with `default-features = false` must add
 `std` or accept no_std), `ErrorKind` gains variants, and GPIO cdev requires the v2 uAPI.
-MSRV stays 1.94. HeliOS (pinned to a git rev) updates when it chooses; no code change is
+MSRV stays 1.94. Consumers pinned to a git rev update when they choose; no code change is
 expected beyond the version.
 
-## Migration steps
-
-1. Lemnos 2.0 lands (this branch): the foundation crates, Linux rewrite, VCM drivers.
-2. Styx `native/hal`: `styx-hal` uses embedded-hal directly and keeps camera traits only;
-   `styx-sensor`'s `RegisterBus` becomes `lemnos_hal::RegisterBus` (re-export) and
-   `I2cRegisterBus` becomes `lemnos_hal::I2cRegisters<lemnos_linux::hal::I2cBus>`.
-3. Styx `native`: open I2C/GPIO through `lemnos_linux::hal`, lenses through
-   `lemnos_drivers_vcm`, hotplug through `lemnos_linux::uevent`.
-4. Delete `styx-kernel::bus::{i2c, gpio, ioctl}`, `uevent`, `regbus.rs` and the VCM code from
-   Styx. `styx-kernel` keeps V4L2/media/subdev/dma-heap/bridge.
-5. Port `usbfs` into `lemnos-linux` and drop `rusb`. (The sensor drivers are ported.)
-
-## How Styx consumes Lemnos
+## Using it from Linux and from an MCU
 
 On Linux:
 
@@ -142,7 +102,7 @@ use lemnos_linux::hal::{I2cBus, StdDelay};
 
 // /dev/i2c-10; each target address is claimed with I2C_SLAVE (never _FORCE) before use.
 let mut sensor = I2cRegisters::new(I2cBus::open(10)?, 0x60, AddressWidth::Bits16).with_bursts(32);
-let id = sensor.read(0x300a, 2)?;                       // chip id: 0x9281 on the CM5 module
+let id = sensor.read(0x300a, 2)?;                       // chip id: 0x9281 on the BCM2712 board module
 let mut lens = lemnos_drivers_vcm::Vcm::dw9817(I2cBus::open(10)?);
 lens.power_up(&mut StdDelay)?;
 lens.move_to(512)?;

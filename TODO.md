@@ -1,8 +1,7 @@
 # TODO
 
-Tracks Lemnos work driven by its integration into HeliOS
-(`HeliOS-architecture-overhaul`, `backend/src/helios/peripherals`) and by
-Lemnos 2.0 becoming the hardware foundation under Styx
+Tracks Lemnos work driven by the apps that integrate it and by the camera stack that
+consumes its foundation
 ([docs/foundation.md](docs/foundation.md)). See [CHANGELOG.md](CHANGELOG.md)
 for the user-facing summary of finished work.
 
@@ -14,12 +13,12 @@ for the user-facing summary of finished work.
       Linux images `sensors`/`sensors-lite`, example `linux_sensors`.
 - [x] Phase 3: the generic L3 adapter (`lemnos_driver_sdk::l1`); board definitions
       (`lemnos-board`, facade `board`); hwmon fan and thermal zones as L1 devices; generic
-      IIO/hwmon binding; HeliOS can bind the Raze sensors from `sensors.toml`
+      IIO/hwmon binding; an app can bind a board's sensors from its board file
       ([docs/board-definition.md](docs/board-definition.md)).
 - [x] Phase 4: `lemnosd`, `lemnos-ipc`, `lemnos-light`, `lemnos-drivers-ws2812`, packaging
       ([docs/system-service.md](docs/system-service.md)).
-- [ ] `lemnosd` on the CM5: run the Raze board definition against the real ring, fan and
-      sensors; check the ring's `wire` (the Atlas manifest says RGBW) and the fan's
+- [ ] `lemnosd` on the BCM2712 board: run the example board definition against the real ring, fan and
+      sensors; check the ring's `wire` (the manager's manifest says RGBW) and the fan's
       `restore_mode`; measure the aarch64 binary.
 - [ ] Composite devices and the fan controller: design only
       ([docs/composite-devices.md](docs/composite-devices.md)), waiting for a decision.
@@ -30,8 +29,8 @@ for the user-facing summary of finished work.
       board (100 Hz accelerometer, 2 kHz gyroscope defaults: 87 % of a core at 100 Hz vs
       36 % polled); needs matched output rates and a hardware I2C pair for 200 Hz and up.
 - [ ] Board: the IMU's output rate (`accel_rate`, `gyro_rate`) is the limit above 100 Hz;
-      Atlas to set it for the rate the consumers need, and to move the IMU off i2c-gpio.
-- [ ] Measure the scheduler on the CM5 (`tests/schedule.rs` runs on the host with a mock
+      the manager to set it for the rate the consumers need, and to move the IMU off i2c-gpio.
+- [ ] Measure the scheduler on the BCM2712 board (`tests/schedule.rs` runs on the host with a mock
       bus): the IMU at 100 Hz beside the real power monitor and magnetometer on the board's
       buses, with the reads' real durations.
 - [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
@@ -52,18 +51,12 @@ for the user-facing summary of finished work.
       netlink uevents, inotify, poll in pure Rust; sessions and hotplug run on
       them; `i2cdev`, `spidev`, `gpio-cdev`, `inotify` dropped.
 - [x] `lemnos-drivers-vcm`: DW9714, DW9807, DW9817, AK7375 (blocking + async).
-- [x] Verified on the CM5: discovery, GPIO v2 line info and reads, I2C chip-id
+- [x] Verified on the BCM2712 board: discovery, GPIO v2 line info and reads, I2C chip-id
       read of the camera sensor on bus 10, uevent hotplug on a USB
       `authorized` toggle, the Linux test suites on aarch64.
 
 ### Next
 
-- [ ] Styx switch-over (Styx repo): `styx-sensor`'s `RegisterBus` becomes
-      `lemnos_hal::RegisterBus`; `I2cRegisterBus` becomes
-      `I2cRegisters<lemnos_linux::hal::I2cBus>`; lenses use
-      `lemnos-drivers-vcm`; hotplug uses `lemnos_linux::uevent`; then delete
-      `styx-kernel::bus::{i2c, gpio, ioctl}`, `uevent`, `regbus.rs` and the
-      VCM code from Styx.
 - [x] Sensor drivers as `no_std` crates over embedded-hal:
       `lemnos-drivers-bmi088`, `lemnos-drivers-bmm150`,
       `lemnos-drivers-ina2xx` (INA226/INA238/INA260), reached from the runtime
@@ -74,7 +67,7 @@ for the user-facing summary of finished work.
       run on the board. Note the validator also accepts the BMI055, which
       `lemnos-drivers-bmi088` does not support.
 - [x] Runtime adapter drivers for the sensor crates: one generic adapter
-      (`lemnos_driver_sdk::l1`) plus board definitions, so HeliOS binds them from
+      (`lemnos_driver_sdk::l1`) plus board definitions, so apps bind them from
       `sensors.toml`.
 - [ ] Slimmer runtime for small Linux targets (no fixed budget: as small as
       reasonably possible; `scripts/check-sizes.sh` tracks it). Linux lite
@@ -92,7 +85,6 @@ for the user-facing summary of finished work.
         descriptors layered on top, plus a lite runtime (static device
         table, no discovery/registry/event log) that MCUs and small SoCs can
         share. Design before refactoring `lemnos-core`.
-- [ ] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`.
 - [x] Linux regulators and clocks behind `Regulator`/`ClockOutput`:
       `lemnos_drivers_linux::{UserspaceRegulator, DebugfsClock}` (the
       `reg-userspace-consumer` `state` attribute; debugfs clock rates, gating left to the
@@ -116,7 +108,7 @@ for the user-facing summary of finished work.
 - [x] Unbound status: `Runtime::device_status` and
       `DeviceStateSnapshot::status` return `DeviceStatus` without binding.
 - [x] Built-in `HwmonFanDriver` (`lemnos.pwm.hwmon-fan`) with `fan.read`,
-      `fan.set_duty`, `fan.set_pwm`, and `fan.set_mode`. Replaces the HeliOS
+      `fan.set_duty`, `fan.set_pwm`, and `fan.set_mode`. Replaces the app's
       copy and drops its `period_ns = 255` PWM mapping.
 - [x] `MockHwmonFan` in `lemnos-mock` for sysfs-free fan driver tests.
 - [x] `ErrorKind` plus `kind()` on every Lemnos error type, delegating through
@@ -133,9 +125,9 @@ for the user-facing summary of finished work.
       `crates/lemnos/examples/support/board_validator/drivers/`. Devices on
       non-probeable buses can already be declared through
       `lemnos-core`'s `ConfiguredDeviceModel`.
-- [ ] Memory breakdown for a Linux refresh on the CM5, measured with and
-      without eager binds. HeliOS measured ~6-7 MiB PSS for a refresh including
-      Styx/libcamera probing; Lemnos's share is unknown.
+- [ ] Memory breakdown for a Linux refresh on the BCM2712 board, measured with and
+      without eager binds. A consuming app measured ~6-7 MiB PSS for a refresh including
+      camera probing; Lemnos's share is unknown.
 - [ ] Decide whether the `tokio` facade feature is worth its cost for
       consumers that only need `AsyncLinuxHotplugWatcher`.
 
@@ -143,22 +135,8 @@ for the user-facing summary of finished work.
 
 - [ ] Merge `dev` into `main`.
 - [x] Version: 2.0.0 (the foundation work is breaking; it also carries the
-      HeliOS additions that were planned as 1.1.0).
+      app additions that were planned as 1.1.0).
 - [ ] Tag the release; optionally publish to crates.io.
-- [ ] HeliOS pins Lemnos to the tag instead of `branch = "main"`.
+- [ ] Consumers pin Lemnos to the tag instead of `branch = "main"`.
 
-## HeliOS migration (HeliOS repo, not here)
-
-- [ ] Replace the 250 ms hotplug sleep loop with
-      `AsyncLinuxHotplugWatcher::next_events` and run refreshes in
-      `spawn_blocking`.
-- [ ] Set a bind policy for the fan driver and delete the eager bind loop in
-      `LemnosDiscoveryProbe::discover`; drop the manual bind in `apply`
-      (`auto_bind_on_request` covers it).
-- [ ] Delete `lemnos_fan.rs` and use the built-in fan driver.
-- [ ] Use `device_status`, `ErrorKind`, and `Value::flatten_labels` in place of
-      the local mapping helpers.
-- [ ] Publish deltas from `RuntimeWatchedRefreshReport::refresh.diff`.
-- [ ] Add `lemnos-mock` tests for the discover/apply paths.
-- [ ] Parse `sensors.toml` as a board definition (`lemnos::board::BoardSetup`, feature
-      `board`); steps in [docs/board-definition.md](docs/board-definition.md).
+Consumer-side work (apps and the camera stack) is tracked in those repositories.

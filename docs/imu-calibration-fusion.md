@@ -6,7 +6,7 @@ Status: designed here, implemented in phases. Builds on [compact-model.md](compa
 The goal: a board's IMU and magnetometer give **raw** and **calibrated** numbers with no
 user action, and a **fused orientation** (quaternion, roll, pitch, yaw, gravity, linear
 acceleration) is available whenever something asks for it. Calibration needs no stillness
-(it is estimated while the board moves); Atlas can force a guided, more precise routine.
+(it is estimated while the board moves); the manager can force a guided, more precise routine.
 
 ## Layers
 
@@ -152,7 +152,7 @@ reads, with bounded cost per sample.
   and samples (threshold 300). The part is `active` once its confidence is at least 500.
 - The applied calibration changes `CalibrationStatus::revision`; lemnosd persists it.
 
-### Forced routines (Atlas)
+### Forced routines (the manager)
 
 `Routine` is a state machine over the same estimators. It collects **candidates**, never the
 applied calibration.
@@ -426,7 +426,7 @@ New requests (`lemnos-ipc`), answered with a reply or a calibration status messa
 `apply <device>`, `discard <device>`. The `writers` policy applies to these commands as it does to
 control writes. A fusion device's `status` shows its confidences and its disturbance.
 
-Atlas reaches the same operations through lemnosd's socket. Orion (`lemnos-orion`) exposing them
+The manager reaches the same operations through lemnosd's socket. Orion (`lemnos-orion`) exposing them
 as Orion actions on the resource: `calibration.*` and the confidence status keys, documented in
 [orion.md](orion.md).
 
@@ -449,7 +449,7 @@ as Orion actions on the resource: `calibration.*` and the confidence status keys
 
 ## Measurements
 
-Measured on the Raze (CM5, board image r20, the IMU on the PIO bus), with the lemnosd build of
+Measured on the example board (BCM2712, board image r20, the IMU on the PIO bus), with the lemnosd build of
 commit 49710c9 (the `float` feature on in the board's drivers):
 
 - **CPU:** lemnosd idle with the orientation device not subscribed: 0 %. With it subscribed at 10 ms

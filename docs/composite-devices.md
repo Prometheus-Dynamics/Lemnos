@@ -80,7 +80,7 @@ device that lists the composite in its `writers`.
 ## The fan controller
 
 The motivating case: replace the kernel's pwm-fan curve with one that knows more (several
-temperatures, board power, workload), can be tuned live, and keeps a high floor (the Raze
+temperatures, board power, workload), can be tuned live, and keeps a high floor (the example board
 wants at least 70 %).
 
 ### Inputs
@@ -92,7 +92,7 @@ curve:
   IMU temperature);
 - power (`power.power`): heat that has not reached a sensor yet;
 - workload: a `system-load` device (CPU utilisation from `/proc/stat`, a Linux L1 device in
-  `lemnos-drivers-linux`), or a hint a client sets (HeliOS raising "vision pipeline
+  `lemnos-drivers-linux`), or a hint a client sets (a client raising "vision pipeline
   running").
 
 Each input's curve maps its value to a duty; the controller's demand is the **maximum** over
@@ -103,7 +103,7 @@ inputs, so the hottest source wins and adding inputs can only make cooling more 
 - **Curve:** piecewise-linear points `(value, duty)` per input, interpolated, clamped at
   both ends.
 - **Floor and ceiling:** `duty = clamp(demand, floor, 1.0)`. The floor is a hard minimum (70
-  % on the Raze); the fan never stops while the controller runs.
+  % on the example board); the fan never stops while the controller runs.
 - **Hysteresis:** the curve is evaluated on the rising value; when an input falls, it is
   evaluated at `value + hysteresis` until it has fallen by the band, so the fan does not
   hunt around a breakpoint.
@@ -139,7 +139,7 @@ fallback. The controller only ever *borrows* the fan:
 
 1. **Taking control** is writing `pwm1`. **Giving it back** is the fan hand-back
    (`FanRestore`, see [system-service.md](system-service.md#fan-hand-back)). On the
-   Raze's `pwm-fan` (measured on the CM5) there is no automatic `pwm1_enable` mode: the
+   example board's `pwm-fan` (measured on the BCM2712 board) there is no automatic `pwm1_enable` mode: the
    hand-back restores the bind-time `pwm1_enable` (1), restores the cooling device's
    governor state from before the controller's first write, and makes the bound zones'
    governor re-evaluate. Chips with an automatic mode get `restore_mode`
@@ -161,7 +161,7 @@ fallback. The controller only ever *borrows* the fan:
    service, `ExecStopPost` restores the kernel curve, and the unit restarts.
 7. **Firmware:** independently of all of the above, the CPU firmware throttles at 85 °C,
    and the device tree's critical trip shuts the board down. The controller's curves must
-   reach 100 % well below that (75 °C on the Raze), so throttling is never the cooling
+   reach 100 % well below that (75 °C on the example board), so throttling is never the cooling
    policy.
 
 The result: at any moment either the controller is alive and stepping, or the kernel's
@@ -174,11 +174,11 @@ fan.
   BMM150's field. A Madgwick or Mahony filter at the IMU's rate produces an `Orientation`
   device with `quaternion.{w,x,y,z}` (and `roll`, `pitch`, `yaw` in rad). Controls: the
   filter gain, magnetometer enable, hard- and soft-iron calibration. No outputs. Clients
-  (HeliOS pose, PhotonVision's robot-to-camera transforms) read one device instead of
+  (a pose estimator, a vision pipeline's camera transforms) read one device instead of
   fusing in each application.
 - **Board power budget.** Inputs: the INA238's `power` and per-rail estimates; output
   channels `budget`, `headroom`, and an event when headroom goes negative. Outputs could
-  cap a load's draw (limit the fan's ceiling, ask Styx for a lower frame rate through a
+  cap a load's draw (limit the fan's ceiling, ask the camera service for a lower frame rate through a
   client hint), or only report.
 - **Status aggregation.** Inputs: several devices' statuses; output: one LED intent (the
   worst status wins), so the status LED reflects the board without each application
