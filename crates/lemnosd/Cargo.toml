@@ -63,7 +63,7 @@ toml = { workspace = true }
 orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
 orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
 orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"], optional = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"], optional = true }
 
 [dev-dependencies]
 lemnosd = { path = ".", features = ["mock"] }
@@ -72,4 +72,6 @@ lemnosd = { path = ".", features = ["mock"] }
 orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", default-features = false }
 lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
+# The integration test runs a multi-thread runtime (the binary is current-thread).
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 lemnos-mock.workspace = true

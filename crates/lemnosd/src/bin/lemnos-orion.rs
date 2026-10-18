@@ -13,7 +13,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    // The bridge is I/O bound: one thread runs the loop, and the blocking
+    // lemnosd calls go to tokio's blocking pool.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
