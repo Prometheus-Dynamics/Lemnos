@@ -39,8 +39,10 @@ pub(crate) struct Done {
     /// The bus it ran on.
     pub lane: usize,
     pub device: BoxedDevice,
-    /// The samples read, oldest first (`count` of them).
-    pub samples: [[i32; MAX_CHANNELS]; BATCH],
+    /// The samples read, oldest first: exactly `count` of them. A vector
+    /// rather than the full batch, so a finished read moves a pointer, not
+    /// the unused rows.
+    pub samples: Vec<[i32; MAX_CHANNELS]>,
     pub count: usize,
     /// When the read started (boot clock, microseconds).
     pub started_us: u64,
@@ -109,13 +111,14 @@ impl Workers {
                     let started_us = boottime_us();
                     job.device.set_clock_us(started_us);
                     let mut why = String::new();
-                    let mut samples = [[0i32; MAX_CHANNELS]; BATCH];
+                    let mut samples = vec![[0i32; MAX_CHANNELS]; BATCH];
                     let read = job.device.read_batch_why(&mut samples, &mut why);
                     let cost_us = boottime_us().saturating_sub(started_us);
                     let (result, count) = match read {
                         Ok(count) => (Ok(()), count.min(BATCH)),
                         Err(kind) => (Err(kind), 0),
                     };
+                    samples.truncate(count);
                     let done_msg = Done {
                         index: job.index,
                         lane: index,
