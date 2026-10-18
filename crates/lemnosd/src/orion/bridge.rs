@@ -457,7 +457,10 @@ fn pump(
                     return;
                 }
             }
-            match client.next_event_timeout(Duration::from_millis(200)) {
+            // Wait for the next event, or until the next calibration poll is
+            // due: the thread wakes for those only, not on a fixed poll.
+            let wait = next_calibration.saturating_duration_since(Instant::now());
+            match client.next_event_timeout(wait) {
                 Ok(None) => {}
                 Ok(Some(ClientEvent::Connected { reconnects })) => {
                     if reconnects > 0
