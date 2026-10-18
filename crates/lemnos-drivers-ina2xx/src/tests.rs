@@ -332,3 +332,139 @@ fn device_model_channels_follow_the_model() {
         assert_eq!(model.info().model, model.name());
     }
 }
+
+/// Counts the transactions and operations that reach the bus.
+#[derive(Debug, Default)]
+struct Counting {
+    bus: WordRegisters,
+    transactions: usize,
+    operations: usize,
+}
+
+impl ErrorType for Counting {
+    type Error = I2cErrorKind;
+}
+
+impl embedded_hal::i2c::I2c for Counting {
+    fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut [Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        self.transactions += 1;
+        self.operations += operations.len();
+        self.bus.transact(address, operations)
+    }
+}
+
+impl embedded_hal_async::i2c::I2c for Counting {
+    async fn transaction(
+        &mut self,
+        address: u8,
+        operations: &mut [Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        self.transactions += 1;
+        self.operations += operations.len();
+        self.bus.transact(address, operations)
+    }
+}
+
+/// Model, ID registers and device ID, and a config that calibrates it.
+fn models() -> [(Model, u8, u8, u16, Config); 3] {
+    [
+        (Model::Ina226, 0xfe, 0xff, 0x2260, Config::new(0.01, 8.192)),
+        (Model::Ina238, 0x3e, 0x3f, 0x2381, Config::new(0.01, 2.0)),
+        (
+            Model::Ina260,
+            0xfe,
+            0xff,
+            0x2270,
+            Config::from_micro(2_000, 1_000_000),
+        ),
+    ]
+}
+
+/// A bus holding every register the readings of `model` need, with bytes that
+/// differ per register and per byte (negative values included).
+fn loaded_bus(
+    model: Model,
+    manufacturer: u8,
+    device: u8,
+    id: u16,
+    config: Config,
+) -> WordRegisters {
+    let registers = Setup::new(model, config).unwrap().registers();
+    let mut bus = bus(manufacturer, device, id);
+    for (i, &(register, bytes)) in registers.iter().enumerate() {
+        let value: Vec<u8> = (0..bytes)
+            .map(|k| (0xb7u8 ^ (i as u8).wrapping_mul(53) ^ k.wrapping_mul(29)) | 0x81)
+            .collect();
+        bus = bus.with(register as u8, &value);
+    }
+    bus
+}
+
+#[test]
+fn poll_is_one_transaction_for_every_model() {
+    for (model, manufacturer, device, id, config) in models() {
+        let bus = Counting {
+            bus: loaded_bus(model, manufacturer, device, id, config),
+            ..Counting::default()
+        };
+        let mut ina = Ina::new(bus, DEFAULT_ADDRESS, model, config).unwrap();
+        ina.read_fixed().unwrap();
+        let registers = Setup::new(model, config).unwrap().registers().len();
+        assert_eq!(ina.i2c.transactions, 1, "{model:?}");
+        assert_eq!(ina.i2c.operations, 2 * registers, "{model:?}");
+    }
+}
+
+#[test]
+fn poll_decodes_like_per_register_reads() {
+    use lemnos_hal::register::{AddressWidth, I2cRegisters, RegisterBus};
+    for (model, manufacturer, device, id, config) in models() {
+        let setup = Setup::new(model, config).unwrap();
+        let mut ina = Ina::new(
+            loaded_bus(model, manufacturer, device, id, config),
+            DEFAULT_ADDRESS,
+            model,
+            config,
+        )
+        .unwrap();
+        let burst = ina.read_fixed().unwrap();
+
+        // The per-register path this replaces, on the same bus contents.
+        let mut bus = ina.release();
+        let mut regs = I2cRegisters::new(&mut bus, DEFAULT_ADDRESS, AddressWidth::Bits8);
+        let mut old = [0u32; 5];
+        for (slot, &(register, bytes)) in old.iter_mut().zip(setup.registers()) {
+            *slot = regs.read(register, bytes).unwrap();
+        }
+        assert_eq!(burst, setup.reading_fixed(&old), "{model:?}");
+        assert_ne!(burst.bus_voltage_uv, 0, "{model:?}");
+    }
+}
+
+#[test]
+fn async_poll_is_one_transaction_and_matches_blocking() {
+    for (model, manufacturer, device, id, config) in models() {
+        let blocking = {
+            let mut ina = Ina::new(
+                loaded_bus(model, manufacturer, device, id, config),
+                DEFAULT_ADDRESS,
+                model,
+                config,
+            )
+            .unwrap();
+            ina.read_fixed().unwrap()
+        };
+        let bus = Counting {
+            bus: loaded_bus(model, manufacturer, device, id, config),
+            ..Counting::default()
+        };
+        let mut ina = asynch::Ina::new(bus, DEFAULT_ADDRESS, model, config).unwrap();
+        let fixed = block_on(ina.read_fixed()).unwrap();
+        assert_eq!(fixed, blocking, "{model:?}");
+        assert_eq!(ina.release().transactions, 1, "{model:?}");
+    }
+}

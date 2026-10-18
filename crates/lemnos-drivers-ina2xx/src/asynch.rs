@@ -1,9 +1,14 @@
 //! The async INA2xx driver, over embedded-hal-async I2C.
 
-use crate::{Config, ConfigError, Error, Model, ReadingFixed, Setup};
+use crate::{
+    Config, ConfigError, Error, MAX_POLL_REGISTERS, Model, POLL_BYTES, ReadingFixed, Setup,
+    poll_decode, poll_operations, poll_pointers,
+};
+use embedded_hal::i2c::Operation;
 use embedded_hal_async::i2c::I2c;
 use lemnos_hal::asynch::RegisterBus;
 use lemnos_hal::register::{AddressWidth, I2cRegisters};
+use lemnos_hal::{ErrorKind, register::RegisterError};
 
 /// An INA2xx over an async I2C bus; see [`crate::Ina`].
 #[derive(Debug)]
@@ -45,14 +50,25 @@ impl<I2C: I2c> Ina<I2C> {
         Ok(())
     }
 
+    /// One poll: every register of the readings, in one I2C transaction.
     async fn read_registers(&mut self) -> Result<[u32; 5], Error<I2C::Error>> {
         let registers = self.setup.registers();
-        let mut raw = [0u32; 5];
-        let mut regs = self.registers();
-        for (slot, (register, bytes)) in raw.iter_mut().zip(registers) {
-            *slot = regs.read(*register, *bytes).await?;
-        }
-        Ok(raw)
+        let mut pointers = [0u8; MAX_POLL_REGISTERS];
+        poll_pointers(registers, &mut pointers);
+        let mut data = [0u8; POLL_BYTES];
+        let mut ops: [Operation<'_>; 2 * MAX_POLL_REGISTERS] =
+            core::array::from_fn(|_| Operation::Write(&[]));
+        let len = poll_operations(registers, &pointers, &mut data, &mut ops);
+        self.i2c
+            .transaction(self.address, &mut ops[..len])
+            .await
+            .map_err(|error| {
+                Error::Register(RegisterError::bus(
+                    ErrorKind::from_i2c(embedded_hal::i2c::Error::kind(&error)),
+                    error,
+                ))
+            })?;
+        Ok(poll_decode(registers, &data))
     }
 
     /// Reads the latest conversion in integer units.

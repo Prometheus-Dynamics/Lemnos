@@ -42,8 +42,10 @@ fn div_u64_matches_native_division() {
 }
 
 use core::fmt;
-use embedded_hal::i2c::I2c;
-use lemnos_hal::register::{AddressWidth, I2cRegisters, RegWrite, RegisterBus, RegisterError};
+use embedded_hal::i2c::{I2c, Operation};
+use lemnos_hal::register::{
+    AddressWidth, Endian, I2cRegisters, RegWrite, RegisterBus, RegisterError, decode_value,
+};
 use lemnos_hal::{ErrorKind, HalError};
 
 /// The default 7-bit address (A0 and A1 tied to ground).
@@ -458,6 +460,53 @@ fn round_cal(numerator: u64, denominator: u64) -> Result<u16, ConfigError> {
     }
 }
 
+/// Most registers one poll reads (the INA238 reads five).
+pub(crate) const MAX_POLL_REGISTERS: usize = 5;
+/// Data bytes of one poll: the INA238's four 16-bit registers and its 24-bit power.
+pub(crate) const POLL_BYTES: usize = 11;
+
+/// The pointer byte of each register of a poll (the tables' registers are
+/// 8-bit pointers).
+pub(crate) fn poll_pointers(registers: &[(u16, u8)], pointers: &mut [u8; MAX_POLL_REGISTERS]) {
+    for (pointer, &(register, _)) in pointers.iter_mut().zip(registers) {
+        *pointer = register as u8;
+    }
+}
+
+/// Builds one poll's transaction: for each register, a write of its pointer
+/// and a read of its bytes. Every register is addressed explicitly because the
+/// datasheets (INA226, INA238, INA260) do not auto-increment the pointer on
+/// reads: a read returns the register the last pointer write selected, and
+/// nothing after it. Returns the number of operations used.
+pub(crate) fn poll_operations<'a>(
+    registers: &[(u16, u8)],
+    pointers: &'a [u8],
+    data: &'a mut [u8],
+    ops: &mut [Operation<'a>],
+) -> usize {
+    let mut rest = data;
+    for (i, &(_, bytes)) in registers.iter().enumerate() {
+        let (chunk, tail) = core::mem::take(&mut rest).split_at_mut(usize::from(bytes));
+        rest = tail;
+        ops[2 * i] = Operation::Write(&pointers[i..i + 1]);
+        ops[2 * i + 1] = Operation::Read(chunk);
+    }
+    2 * registers.len()
+}
+
+/// The raw values of a poll's data, in `registers` order (big-endian, as the
+/// datasheets send them).
+pub(crate) fn poll_decode(registers: &[(u16, u8)], data: &[u8; POLL_BYTES]) -> [u32; 5] {
+    let mut raw = [0u32; 5];
+    let mut offset = 0;
+    for (slot, &(_, bytes)) in raw.iter_mut().zip(registers) {
+        let n = usize::from(bytes);
+        *slot = decode_value(&data[offset..offset + n], Endian::Big);
+        offset += n;
+    }
+    raw
+}
+
 /// An INA2xx over a blocking I2C bus.
 #[derive(Debug)]
 pub struct Ina<I2C> {
@@ -518,21 +567,32 @@ impl<I2C: I2c> Ina<I2C> {
         let (manufacturer, device) = self.ids()?;
         self.setup.check_ids(manufacturer, device)?;
         let setup = self.setup;
-        // One register per transfer: `write_sequence` would link the burst packer.
+        // One register per transfer: these chips do not auto-increment the
+        // pointer on writes, so the adjacent registers cannot share a message.
         for w in setup.writes() {
             self.registers().write(w.address, w.bytes, w.value)?;
         }
         Ok(())
     }
 
+    /// One poll: every register of the readings, in one I2C transaction.
     fn read_registers(&mut self) -> Result<[u32; 5], Error<I2C::Error>> {
         let registers = self.setup.registers();
-        let mut raw = [0u32; 5];
-        let mut regs = self.registers();
-        for (slot, (register, bytes)) in raw.iter_mut().zip(registers) {
-            *slot = regs.read(*register, *bytes)?;
-        }
-        Ok(raw)
+        let mut pointers = [0u8; MAX_POLL_REGISTERS];
+        poll_pointers(registers, &mut pointers);
+        let mut data = [0u8; POLL_BYTES];
+        let mut ops: [Operation<'_>; 2 * MAX_POLL_REGISTERS] =
+            core::array::from_fn(|_| Operation::Write(&[]));
+        let len = poll_operations(registers, &pointers, &mut data, &mut ops);
+        self.i2c
+            .transaction(self.address, &mut ops[..len])
+            .map_err(|error| {
+                Error::Register(RegisterError::bus(
+                    ErrorKind::from_i2c(embedded_hal::i2c::Error::kind(&error)),
+                    error,
+                ))
+            })?;
+        Ok(poll_decode(registers, &data))
     }
 
     /// Reads the latest conversion in integer units.
