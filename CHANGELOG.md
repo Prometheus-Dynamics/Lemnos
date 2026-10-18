@@ -8,6 +8,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- The INA2xx drivers read a poll in one I2C transaction (a pointer write and a read per register, joined by repeated starts) instead of one transaction per register. The datasheets do not auto-increment the register pointer on reads, so a single burst across registers is not used.
+- The BMM150 no longer feeds a repeated conversion to its calibration. When the data-ready bit is clear (no new conversion since the last read), a read repeats the last conversion's channels, so the compass does not flicker between polls; before the first conversion after `init` it reports `NO_VALUE`.
 - Calibration timers are wall time, not sample counts. lemnosd gives each read its boot-clock time (`Sensor::set_clock_us`), so a 10 Hz board reaches the same gyro and accelerometer confidence in the same ~60 s as a 100 Hz one. Still windows, the fit's dwell and cadence, the forgetting, the routines' dwell and the gap rule are all in time; the read rate and the CPU cost are unchanged.
 - Orientation fusion on a still board with clean gravity reported `confidence.imu` 0. The accelerometer's confidence now reads its gravity agreement (1000 while the factory correction stands) times the applied fit's confidence; a fit needs orientation coverage, so it never gated a still board.
 - Stationary sensor noise counted as direction coverage (a still board read coverage 1000). Coverage counts only samples at least half the reference radius from the centre.

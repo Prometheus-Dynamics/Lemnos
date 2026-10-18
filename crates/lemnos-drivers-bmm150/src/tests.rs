@@ -261,3 +261,85 @@ fn async_device_model_matches_blocking() {
     block_on(Sensor::read(&mut mag, &mut out)).unwrap();
     assert_eq!(&out[..2], &[50_000, -100_000]);
 }
+
+/// Data bytes with the data-ready bit clear: a conversion already read.
+fn stale(x: i16, y: i16, z: i16, rhall: u16) -> [u8; 8] {
+    let mut bytes = data(x, y, z, rhall);
+    bytes[6] &= !1;
+    bytes
+}
+
+#[test]
+fn stale_read_before_any_conversion_is_no_value() {
+    use lemnos_device::{NO_VALUE, Sensor};
+    let i2c = chip().with_registers(DEFAULT_ADDRESS, REG_DATA, &stale(160, -320, 1000, XYZ1));
+    let mut mag = Bmm150::new(i2c, DEFAULT_ADDRESS);
+    mag.init(&mut MockDelay::new(), Config::default()).unwrap();
+    let mut out = [0i32; 6];
+    Sensor::read(&mut mag, &mut out).unwrap();
+    assert_eq!(out, [NO_VALUE; 6]);
+}
+
+#[test]
+fn stale_read_repeats_the_last_conversion_and_skips_calibration() {
+    use lemnos_device::Sensor;
+    let i2c = chip();
+    let bus = i2c.clone();
+    let mut mag = Bmm150::new(i2c, DEFAULT_ADDRESS);
+    mag.init(&mut MockDelay::new(), Config::default()).unwrap();
+
+    bus.clone()
+        .with_registers(DEFAULT_ADDRESS, REG_DATA, &data(160, -320, 1000, XYZ1));
+    let mut ready = [0i32; 6];
+    Sensor::read(&mut mag, &mut ready).unwrap();
+    assert_ne!(ready[3], lemnos_device::NO_VALUE);
+
+    // Nothing new converted: the same channels again, and no calibration sample.
+    bus.clone()
+        .with_registers(DEFAULT_ADDRESS, REG_DATA, &stale(-7, 9, -11, XYZ1 + 3));
+    let before = Sensor::calibration_status(&mag);
+    let mut repeated = [0i32; 6];
+    Sensor::read(&mut mag, &mut repeated).unwrap();
+    assert_eq!(repeated, ready);
+    assert_eq!(Sensor::calibration_status(&mag), before);
+
+    // Repeats keep returning the same row until a new conversion.
+    let mut again = [0i32; 6];
+    Sensor::read(&mut mag, &mut again).unwrap();
+    assert_eq!(again, ready);
+
+    bus.clone()
+        .with_registers(DEFAULT_ADDRESS, REG_DATA, &data(-7, 9, -11, XYZ1 + 3));
+    Sensor::read(&mut mag, &mut repeated).unwrap();
+    assert_ne!(repeated, ready);
+}
+
+#[test]
+fn async_stale_read_repeats_and_starts_at_no_value() {
+    use lemnos_device::{NO_VALUE, asynch::Sensor};
+    let i2c = chip();
+    let bus = i2c.clone();
+    let mut mag = asynch::Bmm150::new(i2c, DEFAULT_ADDRESS);
+    block_on(mag.init(&mut MockDelay::new(), Config::default())).unwrap();
+    let mut out = [0i32; 6];
+    block_on(Sensor::read(&mut mag, &mut out)).unwrap();
+    assert_eq!(out, [NO_VALUE; 6]);
+
+    bus.clone()
+        .with_registers(DEFAULT_ADDRESS, REG_DATA, &data(160, 0, 0, XYZ1));
+    block_on(Sensor::read(&mut mag, &mut out)).unwrap();
+    let ready = out;
+    assert_ne!(ready[0], NO_VALUE);
+    assert_eq!(ready[3], NO_VALUE);
+
+    bus.clone()
+        .with_registers(DEFAULT_ADDRESS, REG_DATA, &stale(-7, 9, -11, XYZ1));
+    let mut repeated = [0i32; 6];
+    block_on(Sensor::read(&mut mag, &mut repeated)).unwrap();
+    assert_eq!(repeated, ready);
+}
+
+#[test]
+fn channel_count_matches_the_device_model() {
+    assert_eq!(INFO.channels.len(), CHANNELS);
+}

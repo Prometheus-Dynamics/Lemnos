@@ -1,8 +1,7 @@
 //! The BMM150 in the Lemnos device model (`lemnos-device`).
 
-use crate::{Bmm150, Error, asynch};
+use crate::{Bmm150, CHANNELS, Error, asynch};
 use embedded_hal::delay::DelayNs;
-#[cfg(feature = "float")]
 use lemnos_device::NO_VALUE;
 use lemnos_device::kernel::{KernelBinding, KernelChannel, KernelPart, Subsystem};
 use lemnos_device::{Axis, Channel, Device, DeviceClass, DeviceError, DeviceInfo, Quantity};
@@ -53,6 +52,21 @@ fn fill(out: &mut [i32], values: [i32; 3]) {
     }
 }
 
+/// Copies a channel row to `out` (element by element: no `memcpy`).
+fn publish(out: &mut [i32], row: [i32; CHANNELS]) {
+    for (slot, value) in out.iter_mut().zip(row) {
+        *slot = value;
+    }
+}
+
+/// A read with no new conversion (the data-ready bit is clear, so the
+/// registers still hold the previous one): the last conversion's row again,
+/// or `NO_VALUE` on every channel when none was read since `init`. The
+/// calibration does not take the repeat.
+fn repeat_last(out: &mut [i32], last: Option<[i32; CHANNELS]>) {
+    publish(out, last.unwrap_or([NO_VALUE; CHANNELS]));
+}
+
 impl<I2C: embedded_hal::i2c::I2c> Device for Bmm150<I2C> {
     type Error = Error<I2C::Error>;
 
@@ -89,8 +103,14 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmm150<I2C> {
 
     fn read(&mut self, out: &mut [i32]) -> Result<(), DeviceError<Self::Error>> {
         lemnos_device::check_buffer(&INFO, out)?;
-        let field = self.read_fixed().map_err(DeviceError::Driver)?;
-        fill(out, field.channels());
+        let raw = self.read_raw().map_err(DeviceError::Driver)?;
+        if !raw.data_ready {
+            repeat_last(out, self.last);
+            return Ok(());
+        }
+        let field = self.compensate_raw(raw).map_err(DeviceError::Driver)?;
+        let mut row = [NO_VALUE; CHANNELS];
+        fill(&mut row, field.channels());
         #[cfg(feature = "float")]
         {
             // The calibration needs all three axes; an overflowed one has no
@@ -103,17 +123,15 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmm150<I2C> {
                 }
                 _ => None,
             };
-            for (i, slot) in out.iter_mut().skip(RAW).take(3).enumerate() {
+            for (i, slot) in row.iter_mut().skip(RAW).take(3).enumerate() {
                 *slot = match calibrated {
                     Some(c) => nt(c[i]),
                     None => NO_VALUE,
                 };
             }
         }
-        #[cfg(not(feature = "float"))]
-        for slot in out.iter_mut().skip(RAW).take(3) {
-            *slot = lemnos_device::NO_VALUE;
-        }
+        self.last = Some(row);
+        publish(out, row);
         Ok(())
     }
 
@@ -167,12 +185,18 @@ impl<I2C: embedded_hal_async::i2c::I2c> lemnos_device::asynch::Device for asynch
 impl<I2C: embedded_hal_async::i2c::I2c> lemnos_device::asynch::Sensor for asynch::Bmm150<I2C> {
     async fn read(&mut self, out: &mut [i32]) -> Result<(), DeviceError<Self::Error>> {
         lemnos_device::check_buffer(&INFO, out)?;
-        let field = self.read_fixed().await.map_err(DeviceError::Driver)?;
-        fill(out, field.channels());
-        // The calibration runs on the blocking driver only.
-        for slot in out.iter_mut().skip(RAW).take(3) {
-            *slot = lemnos_device::NO_VALUE;
+        let raw = self.read_raw().await.map_err(DeviceError::Driver)?;
+        if !raw.data_ready {
+            repeat_last(out, self.last);
+            return Ok(());
         }
+        let field = self.compensate_raw(raw).map_err(DeviceError::Driver)?;
+        // The calibration runs on the blocking driver only: its calibrated
+        // channels stay `NO_VALUE`.
+        let mut row = [NO_VALUE; CHANNELS];
+        fill(&mut row, field.channels());
+        self.last = Some(row);
+        publish(out, row);
         Ok(())
     }
 }

@@ -1,8 +1,9 @@
 //! The async BMM150 driver, over embedded-hal-async I2C.
 
 use crate::{
-    CHIP_ID, Config, Error, MagneticFieldFixed, POWER_ON_US, REG_CHIP_ID, REG_DATA, REG_OP_MODE,
-    REG_POWER, REG_REP_XY, REG_REP_Z, REG_TRIM_X1, REG_TRIM_Z2, REG_TRIM_Z4, RawSample, Trim,
+    CHANNELS, CHIP_ID, Config, Error, MagneticFieldFixed, POWER_ON_US, REG_CHIP_ID, REG_DATA,
+    REG_OP_MODE, REG_POWER, REG_REP_XY, REG_REP_Z, REG_TRIM_X1, REG_TRIM_Z2, REG_TRIM_Z4,
+    RawSample, Trim,
 };
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
@@ -16,6 +17,8 @@ pub struct Bmm150<I2C> {
     address: u8,
     trim: Option<Trim>,
     pub(crate) settings: Config,
+    /// The last conversion's output row (see `device.rs`); `None` until one is read after `init`.
+    pub(crate) last: Option<[i32; CHANNELS]>,
 }
 
 impl<I2C: I2c> Bmm150<I2C> {
@@ -25,6 +28,7 @@ impl<I2C: I2c> Bmm150<I2C> {
             address,
             trim: None,
             settings: Config::default(),
+            last: None,
         }
     }
 
@@ -42,6 +46,7 @@ impl<I2C: I2c> Bmm150<I2C> {
             address,
             trim: Some(trim),
             settings: Config::default(),
+            last: None,
         }
     }
 
@@ -75,6 +80,7 @@ impl<I2C: I2c> Bmm150<I2C> {
         regs.write8(REG_REP_Z, rep_z).await?;
         regs.write8(REG_OP_MODE, config.op_mode()).await?;
         self.trim = Some(Trim::from_registers(x1y1, z4x2y2, rest));
+        self.last = None;
         self.settings = config;
         Ok(())
     }
@@ -90,6 +96,12 @@ impl<I2C: I2c> Bmm150<I2C> {
         Ok(trim.compensate_fixed(self.read_raw().await?))
     }
 
+    /// Compensates a sample that [`read_raw`](Self::read_raw) already read.
+    pub(crate) fn compensate_raw<E>(&self, raw: RawSample) -> Result<MagneticFieldFixed, Error<E>> {
+        let trim = self.trim.ok_or(Error::NotInitialized)?;
+        Ok(trim.compensate_fixed(raw))
+    }
+
     #[cfg(feature = "float")]
     pub async fn read(&mut self) -> Result<crate::MagneticField, Error<I2C::Error>> {
         let trim = self.trim.ok_or(Error::NotInitialized)?;
@@ -99,6 +111,7 @@ impl<I2C: I2c> Bmm150<I2C> {
     pub async fn power_down(&mut self) -> Result<(), Error<I2C::Error>> {
         self.registers().write8(REG_POWER, 0x00).await?;
         self.trim = None;
+        self.last = None;
         Ok(())
     }
 

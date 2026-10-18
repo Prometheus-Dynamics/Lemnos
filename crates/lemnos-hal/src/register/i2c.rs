@@ -42,7 +42,10 @@ impl<I2C> I2cRegisters<I2C> {
 
     /// Joins writes to consecutive registers in a sequence into one transfer
     /// of up to `max_bytes` data bytes (clamped to [`MAX_BURST`]); `0` or `1`
-    /// turns bursts off. Only for devices that auto-increment on writes.
+    /// turns bursts off, which is the default: every write is then its own
+    /// message, the split the RP1 camera workaround needs. Only for devices
+    /// that auto-increment on writes; a device that does not (the INA2xx
+    /// power monitors, per their datasheets) takes one register per write.
     pub fn with_bursts(mut self, max_bytes: usize) -> Self {
         self.burst = max_bytes.clamp(1, MAX_BURST);
         self

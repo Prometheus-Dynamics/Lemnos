@@ -376,10 +376,16 @@ pub struct Bmm150<I2C> {
     address: u8,
     trim: Option<Trim>,
     settings: Config,
+    /// The output row of the last conversion read (see `device.rs`), repeated
+    /// by a read with no new conversion; `None` until one is read after `init`.
+    pub(crate) last: Option<[i32; CHANNELS]>,
     /// The calibration and its estimator (feature `float`).
     #[cfg(feature = "float")]
     cal: calibration::Calibration,
 }
+
+/// The device model's channels (see `device::INFO`).
+pub(crate) const CHANNELS: usize = 6;
 
 impl<I2C: I2c> Bmm150<I2C> {
     /// A chip at 7-bit `address`; call [`init`](Self::init) next.
@@ -389,6 +395,7 @@ impl<I2C: I2c> Bmm150<I2C> {
             address,
             trim: None,
             settings: Config::default(),
+            last: None,
             #[cfg(feature = "float")]
             cal: calibration::Calibration::new(),
         }
@@ -408,6 +415,7 @@ impl<I2C: I2c> Bmm150<I2C> {
             address,
             trim: Some(trim),
             settings: Config::default(),
+            last: None,
             #[cfg(feature = "float")]
             cal: calibration::Calibration::new(),
         }
@@ -450,6 +458,7 @@ impl<I2C: I2c> Bmm150<I2C> {
         regs.write8(REG_OP_MODE, config.op_mode())?;
         self.trim = Some(Trim::from_registers(x1y1, z4x2y2, rest));
         self.settings = config;
+        self.last = None;
         Ok(())
     }
 
@@ -466,6 +475,12 @@ impl<I2C: I2c> Bmm150<I2C> {
         Ok(trim.compensate_fixed(self.read_raw()?))
     }
 
+    /// Compensates a sample that [`read_raw`](Self::read_raw) already read.
+    pub(crate) fn compensate_raw<E>(&self, raw: RawSample) -> Result<MagneticFieldFixed, Error<E>> {
+        let trim = self.trim.ok_or(Error::NotInitialized)?;
+        Ok(trim.compensate_fixed(raw))
+    }
+
     /// Reads and compensates the latest measurement in µT.
     #[cfg(feature = "float")]
     pub fn read(&mut self) -> Result<MagneticField, Error<I2C::Error>> {
@@ -477,6 +492,7 @@ impl<I2C: I2c> Bmm150<I2C> {
     pub fn power_down(&mut self) -> Result<(), Error<I2C::Error>> {
         self.registers().write8(REG_POWER, 0x00)?;
         self.trim = None;
+        self.last = None;
         Ok(())
     }
 
