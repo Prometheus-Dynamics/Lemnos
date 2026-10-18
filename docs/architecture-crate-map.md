@@ -40,7 +40,7 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 - `lemnos_driver_sdk::l1` is the generic adapter from any device-model device to a runtime `BoundDevice`.
 
 - `lemnos-light` (`no_std`) renders lights: easing, effects, gauges, spinners, system animations, and the arbitration of intents between owners. `lemnos-drivers-ws2812` (`no_std`) encodes strip frames; `lemnos_drivers_linux::Ws2812Pio` writes them to the RP1 PIO device.
-- `lemnos-ipc` is the `lemnosd` protocol and client library; `lemnosd` is the service (a single-threaded host over device-model devices built with `lemnos-board`) and `lemnos-ctl`.
+- `lemnos-ipc` is the `lemnosd` protocol and client library; `lemnosd` is the service (a single-threaded host over device-model devices built with `lemnos-board`). `lemnos-ctl` is its command-line client, its own crate (`crates/lemnos-ctl`) so it does not link the service: board and look-file tooling is behind its `board` feature (default on).
 
 ## Authoring And Test Support
 

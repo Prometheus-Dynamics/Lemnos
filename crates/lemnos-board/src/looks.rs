@@ -101,6 +101,7 @@ pub fn from_toml(source: &str, text: &str) -> Result<LookSpec, Errors> {
 }
 
 /// Parses a look body in JSON (what Atlas sends).
+#[cfg(feature = "json")]
 pub fn from_json(source: &str, text: &str) -> Result<LookSpec, Errors> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| {
         vec![LookError {

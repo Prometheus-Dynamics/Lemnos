@@ -1,11 +1,48 @@
 //! Driver names a board definition can use, and how each builds its device.
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
+use crate::DynI2c;
 use crate::composite::{FUSION_CHOICES, FUSION_KEYS, build_fusion, composite_problems};
-use crate::schema::{Backend, BusRef, ConfigValue, DeviceSpec};
-use crate::{BoardError, Buses, DynI2c};
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
+use crate::schema::ConfigValue;
+use crate::schema::{Backend, BusRef, DeviceSpec};
+use crate::{BoardError, Buses};
 use lemnos_device::{BoxedDevice, DeviceClass};
-use lemnos_drivers_linux::{HwmonFan, I2cLocation, KernelDevice, ThermalZone};
+#[cfg(feature = "drv-hwmon-fan")]
+use lemnos_drivers_linux::HwmonFan;
+#[cfg(feature = "drv-thermal-zone")]
+use lemnos_drivers_linux::ThermalZone;
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
+use lemnos_drivers_linux::{I2cLocation, KernelDevice};
 use lemnos_hal::ErrorKind;
+#[cfg(any(feature = "drv-hwmon-fan", feature = "drv-thermal-zone"))]
 use std::path::PathBuf;
 
 /// How a driver's devices are reached.
@@ -142,9 +179,33 @@ impl DriverRegistry {
     /// `ina260`, `vcm`, `hwmon-fan`, `thermal-zone`, `ws2812`,
     /// `gpio-output`, `gpio-input`.
     pub fn builtin() -> Self {
-        Self {
-            entries: BUILTIN.to_vec(),
-        }
+        #[allow(unused_mut)]
+        let mut entries = BUILTIN.to_vec();
+        #[cfg(feature = "drv-bmi088")]
+        entries.push(ENTRY_BMI088);
+        #[cfg(feature = "drv-bmm150")]
+        entries.push(ENTRY_BMM150);
+        #[cfg(feature = "drv-ina2xx")]
+        entries.push(ENTRY_INA226);
+        #[cfg(feature = "drv-ina2xx")]
+        entries.push(ENTRY_INA238);
+        #[cfg(feature = "drv-ina2xx")]
+        entries.push(ENTRY_INA260);
+        #[cfg(feature = "drv-vcm")]
+        entries.push(ENTRY_VCM);
+        #[cfg(feature = "drv-hwmon-fan")]
+        entries.push(ENTRY_HWMON_FAN);
+        #[cfg(feature = "drv-thermal-zone")]
+        entries.push(ENTRY_THERMAL_ZONE);
+        #[cfg(feature = "drv-ws2812")]
+        entries.push(ENTRY_WS2812);
+        #[cfg(feature = "drv-gpio")]
+        entries.push(ENTRY_GPIO_OUTPUT);
+        #[cfg(feature = "drv-gpio")]
+        entries.push(ENTRY_GPIO_POWER_SWITCH);
+        #[cfg(feature = "drv-gpio")]
+        entries.push(ENTRY_GPIO_INPUT);
+        Self { entries }
     }
 
     /// Adds or replaces a driver.
@@ -188,10 +249,30 @@ impl DriverRegistry {
 
 // --- settings ---------------------------------------------------------------
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn bad(spec: &DeviceSpec, reason: impl Into<String>) -> BoardError {
     BoardError::device(&spec.id, ErrorKind::Configuration, reason)
 }
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn choice<T: Copy>(
     spec: &DeviceSpec,
     key: &str,
@@ -214,6 +295,16 @@ fn choice<T: Copy>(
     }
 }
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn integer(spec: &DeviceSpec, key: &str) -> Result<Option<i64>, BoardError> {
     spec.config
         .get(key)
@@ -224,6 +315,16 @@ fn integer(spec: &DeviceSpec, key: &str) -> Result<Option<i64>, BoardError> {
         .transpose()
 }
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn number(spec: &DeviceSpec, key: &str) -> Result<Option<f64>, BoardError> {
     spec.config
         .get(key)
@@ -236,6 +337,16 @@ fn number(spec: &DeviceSpec, key: &str) -> Result<Option<f64>, BoardError> {
 
 /// The device's I2C bus number (a selector is resolved under the buses'
 /// sysfs root) and address.
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn i2c(
     spec: &DeviceSpec,
     entry_default: Option<u16>,
@@ -249,6 +360,16 @@ fn i2c(
     Ok((bus, spec.address.or(entry_default).unwrap_or_default()))
 }
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn open(spec: &DeviceSpec, buses: &mut dyn Buses, bus: u32) -> Result<DynI2c, BoardError> {
     buses.i2c(bus).map_err(|e| match e {
         BoardError::Device { kind, reason, .. } => BoardError::device(&spec.id, kind, reason),
@@ -259,6 +380,16 @@ fn open(spec: &DeviceSpec, buses: &mut dyn Buses, bus: u32) -> Result<DynI2c, Bo
 /// The kernel-backed device for `spec` if its backend allows one and the
 /// kernel driver is bound; an error if the backend demands one and it is
 /// missing.
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn kernel_device(
     spec: &DeviceSpec,
     buses: &dyn Buses,
@@ -284,203 +415,239 @@ fn kernel_device(
 
 // --- built-in drivers -------------------------------------------------------
 
-const BUILTIN: &[DriverEntry] = &[
-    DriverEntry {
-        name: "fusion",
-        summary: "Orientation fused from an IMU and a magnetometer (hosted by lemnosd)",
-        class: DeviceClass::Orientation,
-        interface: Interface::Composite,
-        default_address: None,
-        config_keys: FUSION_KEYS,
-        match_keys: &[],
-        config_choices: FUSION_CHOICES,
-        kernel: false,
-        userspace: false,
-        build: build_fusion,
-    },
-    DriverEntry {
-        name: "bmi088",
-        summary: "Bosch BMI088 IMU (accelerometer + gyroscope)",
-        class: DeviceClass::Imu,
-        interface: Interface::I2c,
-        default_address: Some(lemnos_drivers_bmi088::ACCEL_ADDRESS as u16),
-        config_keys: &[
-            "gyro_address",
-            "accel_range",
-            "accel_rate",
-            "gyro_range",
-            "gyro_rate",
-            "fifo",
-        ],
-        match_keys: &[],
-        config_choices: BMI088_CHOICES,
-        kernel: true,
-        userspace: true,
-        build: build_bmi088,
-    },
-    DriverEntry {
-        name: "bmm150",
-        summary: "Bosch BMM150 magnetometer",
-        class: DeviceClass::Magnetometer,
-        interface: Interface::I2c,
-        default_address: Some(lemnos_drivers_bmm150::DEFAULT_ADDRESS as u16),
-        config_keys: &["preset", "data_rate"],
-        match_keys: &[],
-        config_choices: BMM150_CHOICES,
-        kernel: true,
-        userspace: true,
-        build: build_bmm150,
-    },
-    DriverEntry {
-        name: "ina226",
-        summary: "TI INA226 power monitor",
-        class: DeviceClass::PowerMonitor,
-        interface: Interface::I2c,
-        default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
-        config_keys: INA_KEYS,
-        match_keys: &[],
-        config_choices: &[],
-        kernel: true,
-        userspace: true,
-        build: build_ina226,
-    },
-    DriverEntry {
-        name: "ina238",
-        summary: "TI INA238 power monitor",
-        class: DeviceClass::PowerMonitor,
-        interface: Interface::I2c,
-        default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
-        config_keys: INA_KEYS,
-        match_keys: &[],
-        config_choices: &[],
-        kernel: true,
-        userspace: true,
-        build: build_ina238,
-    },
-    DriverEntry {
-        name: "ina260",
-        summary: "TI INA260 power monitor (integrated shunt)",
-        class: DeviceClass::PowerMonitor,
-        interface: Interface::I2c,
-        default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
-        config_keys: &[],
-        match_keys: &[],
-        config_choices: &[],
-        kernel: true,
-        userspace: true,
-        build: build_ina260,
-    },
-    DriverEntry {
-        name: "vcm",
-        summary: "Camera focus voice-coil motor (DW9714, DW9807, DW9817, AK7375)",
-        class: DeviceClass::Lens,
-        interface: Interface::I2c,
-        default_address: Some(lemnos_drivers_vcm::DEFAULT_ADDRESS as u16),
-        config_keys: &["chip"],
-        match_keys: &[],
-        config_choices: &[],
-        kernel: false,
-        userspace: true,
-        build: build_vcm,
-    },
-    DriverEntry {
-        name: "hwmon-fan",
-        summary: "Linux hwmon fan (pwm-fan and similar)",
-        class: DeviceClass::Fan,
-        interface: Interface::Platform,
-        default_address: None,
-        // `restore_mode`: for chips with an automatic mode, the
-        // `pwm1_enable` value that hands the fan back when a host stops
-        // (default 2). `pwm-fan` fans go back through their cooling device.
-        config_keys: &["restore_mode"],
-        match_keys: &["name"],
-        config_choices: &[],
-        kernel: true,
-        userspace: false,
-        build: build_hwmon_fan,
-    },
-    DriverEntry {
-        name: "thermal-zone",
-        summary: "Linux thermal zone",
-        class: DeviceClass::Temperature,
-        interface: Interface::Platform,
-        default_address: None,
-        config_keys: &[],
-        match_keys: &["type"],
-        config_choices: &[],
-        kernel: true,
-        userspace: false,
-        build: build_thermal_zone,
-    },
-    DriverEntry {
-        name: "ws2812",
-        summary: "WS2812/SK6812 LED strip or ring (Raspberry Pi RP1 ws2812-pio device)",
-        class: DeviceClass::Light,
-        interface: Interface::Platform,
-        default_address: None,
-        config_keys: crate::light::LIGHT_KEYS,
-        match_keys: &[],
-        config_choices: LIGHT_CHOICES,
-        kernel: true,
-        userspace: false,
-        build: build_ws2812,
-    },
-    DriverEntry {
-        name: "gpio-output",
-        summary: "GPIO output line",
-        class: DeviceClass::Gpio,
-        interface: Interface::Platform,
-        default_address: None,
-        config_keys: &["chip", "line", "active_low", "initial"],
-        match_keys: &[],
-        config_choices: &[],
-        kernel: false,
-        userspace: true,
-        build: build_gpio_output,
-    },
-    DriverEntry {
-        name: "gpio-power-switch",
-        summary: "GPIO power switch (a load switch: USB port power), optional fault input",
-        class: DeviceClass::PowerSwitch,
-        interface: Interface::Platform,
-        default_address: None,
-        // `persist`, `on_exit` and the saved state are lemnosd's: it reads them
-        // from the spec; the build uses `default_on`.
-        config_keys: &[
-            "chip",
-            "line",
-            "active_low",
-            "default_on",
-            "enable_delay_ms",
-            "fault_chip",
-            "fault_line",
-            "fault_active_low",
-            "persist",
-            "on_exit",
-        ],
-        match_keys: &[],
-        config_choices: POWER_SWITCH_CHOICES,
-        kernel: false,
-        userspace: true,
-        build: build_gpio_power_switch,
-    },
-    DriverEntry {
-        name: "gpio-input",
-        summary: "GPIO input line",
-        class: DeviceClass::Gpio,
-        interface: Interface::Platform,
-        default_address: None,
-        config_keys: &["chip", "line", "active_low"],
-        match_keys: &[],
-        config_choices: &[],
-        kernel: false,
-        userspace: true,
-        build: build_gpio_input,
-    },
-];
+const BUILTIN: &[DriverEntry] = &[DriverEntry {
+    name: "fusion",
+    summary: "Orientation fused from an IMU and a magnetometer (hosted by lemnosd)",
+    class: DeviceClass::Orientation,
+    interface: Interface::Composite,
+    default_address: None,
+    config_keys: FUSION_KEYS,
+    match_keys: &[],
+    config_choices: FUSION_CHOICES,
+    kernel: false,
+    userspace: false,
+    build: build_fusion,
+}];
 
+/// The `bmi088` driver entry (feature `drv-bmi088`).
+#[cfg(feature = "drv-bmi088")]
+const ENTRY_BMI088: DriverEntry = DriverEntry {
+    name: "bmi088",
+    summary: "Bosch BMI088 IMU (accelerometer + gyroscope)",
+    class: DeviceClass::Imu,
+    interface: Interface::I2c,
+    default_address: Some(lemnos_drivers_bmi088::ACCEL_ADDRESS as u16),
+    config_keys: &[
+        "gyro_address",
+        "accel_range",
+        "accel_rate",
+        "gyro_range",
+        "gyro_rate",
+        "fifo",
+    ],
+    match_keys: &[],
+    config_choices: BMI088_CHOICES,
+    kernel: true,
+    userspace: true,
+    build: build_bmi088,
+};
+
+/// The `bmm150` driver entry (feature `drv-bmm150`).
+#[cfg(feature = "drv-bmm150")]
+const ENTRY_BMM150: DriverEntry = DriverEntry {
+    name: "bmm150",
+    summary: "Bosch BMM150 magnetometer",
+    class: DeviceClass::Magnetometer,
+    interface: Interface::I2c,
+    default_address: Some(lemnos_drivers_bmm150::DEFAULT_ADDRESS as u16),
+    config_keys: &["preset", "data_rate"],
+    match_keys: &[],
+    config_choices: BMM150_CHOICES,
+    kernel: true,
+    userspace: true,
+    build: build_bmm150,
+};
+
+/// The `ina226` driver entry (feature `drv-ina2xx`).
+#[cfg(feature = "drv-ina2xx")]
+const ENTRY_INA226: DriverEntry = DriverEntry {
+    name: "ina226",
+    summary: "TI INA226 power monitor",
+    class: DeviceClass::PowerMonitor,
+    interface: Interface::I2c,
+    default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
+    config_keys: INA_KEYS,
+    match_keys: &[],
+    config_choices: &[],
+    kernel: true,
+    userspace: true,
+    build: build_ina226,
+};
+
+/// The `ina238` driver entry (feature `drv-ina2xx`).
+#[cfg(feature = "drv-ina2xx")]
+const ENTRY_INA238: DriverEntry = DriverEntry {
+    name: "ina238",
+    summary: "TI INA238 power monitor",
+    class: DeviceClass::PowerMonitor,
+    interface: Interface::I2c,
+    default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
+    config_keys: INA_KEYS,
+    match_keys: &[],
+    config_choices: &[],
+    kernel: true,
+    userspace: true,
+    build: build_ina238,
+};
+
+/// The `ina260` driver entry (feature `drv-ina2xx`).
+#[cfg(feature = "drv-ina2xx")]
+const ENTRY_INA260: DriverEntry = DriverEntry {
+    name: "ina260",
+    summary: "TI INA260 power monitor (integrated shunt)",
+    class: DeviceClass::PowerMonitor,
+    interface: Interface::I2c,
+    default_address: Some(lemnos_drivers_ina2xx::DEFAULT_ADDRESS as u16),
+    config_keys: &[],
+    match_keys: &[],
+    config_choices: &[],
+    kernel: true,
+    userspace: true,
+    build: build_ina260,
+};
+
+/// The `vcm` driver entry (feature `drv-vcm`).
+#[cfg(feature = "drv-vcm")]
+const ENTRY_VCM: DriverEntry = DriverEntry {
+    name: "vcm",
+    summary: "Camera focus voice-coil motor (DW9714, DW9807, DW9817, AK7375)",
+    class: DeviceClass::Lens,
+    interface: Interface::I2c,
+    default_address: Some(lemnos_drivers_vcm::DEFAULT_ADDRESS as u16),
+    config_keys: &["chip"],
+    match_keys: &[],
+    config_choices: &[],
+    kernel: false,
+    userspace: true,
+    build: build_vcm,
+};
+
+/// The `hwmon-fan` driver entry (feature `drv-hwmon-fan`).
+#[cfg(feature = "drv-hwmon-fan")]
+const ENTRY_HWMON_FAN: DriverEntry = DriverEntry {
+    name: "hwmon-fan",
+    summary: "Linux hwmon fan (pwm-fan and similar)",
+    class: DeviceClass::Fan,
+    interface: Interface::Platform,
+    default_address: None,
+    // `restore_mode`: for chips with an automatic mode, the
+    // `pwm1_enable` value that hands the fan back when a host stops
+    // (default 2). `pwm-fan` fans go back through their cooling device.
+    config_keys: &["restore_mode"],
+    match_keys: &["name"],
+    config_choices: &[],
+    kernel: true,
+    userspace: false,
+    build: build_hwmon_fan,
+};
+
+/// The `thermal-zone` driver entry (feature `drv-thermal-zone`).
+#[cfg(feature = "drv-thermal-zone")]
+const ENTRY_THERMAL_ZONE: DriverEntry = DriverEntry {
+    name: "thermal-zone",
+    summary: "Linux thermal zone",
+    class: DeviceClass::Temperature,
+    interface: Interface::Platform,
+    default_address: None,
+    config_keys: &[],
+    match_keys: &["type"],
+    config_choices: &[],
+    kernel: true,
+    userspace: false,
+    build: build_thermal_zone,
+};
+
+/// The `ws2812` driver entry (feature `drv-ws2812`).
+#[cfg(feature = "drv-ws2812")]
+const ENTRY_WS2812: DriverEntry = DriverEntry {
+    name: "ws2812",
+    summary: "WS2812/SK6812 LED strip or ring (Raspberry Pi RP1 ws2812-pio device)",
+    class: DeviceClass::Light,
+    interface: Interface::Platform,
+    default_address: None,
+    config_keys: crate::light::LIGHT_KEYS,
+    match_keys: &[],
+    config_choices: LIGHT_CHOICES,
+    kernel: true,
+    userspace: false,
+    build: build_ws2812,
+};
+
+/// The `gpio-output` driver entry (feature `drv-gpio`).
+#[cfg(feature = "drv-gpio")]
+const ENTRY_GPIO_OUTPUT: DriverEntry = DriverEntry {
+    name: "gpio-output",
+    summary: "GPIO output line",
+    class: DeviceClass::Gpio,
+    interface: Interface::Platform,
+    default_address: None,
+    config_keys: &["chip", "line", "active_low", "initial"],
+    match_keys: &[],
+    config_choices: &[],
+    kernel: false,
+    userspace: true,
+    build: build_gpio_output,
+};
+
+/// The `gpio-power-switch` driver entry (feature `drv-gpio`).
+#[cfg(feature = "drv-gpio")]
+const ENTRY_GPIO_POWER_SWITCH: DriverEntry = DriverEntry {
+    name: "gpio-power-switch",
+    summary: "GPIO power switch (a load switch: USB port power), optional fault input",
+    class: DeviceClass::PowerSwitch,
+    interface: Interface::Platform,
+    default_address: None,
+    // `persist`, `on_exit` and the saved state are lemnosd's: it reads them
+    // from the spec; the build uses `default_on`.
+    config_keys: &[
+        "chip",
+        "line",
+        "active_low",
+        "default_on",
+        "enable_delay_ms",
+        "fault_chip",
+        "fault_line",
+        "fault_active_low",
+        "persist",
+        "on_exit",
+    ],
+    match_keys: &[],
+    config_choices: POWER_SWITCH_CHOICES,
+    kernel: false,
+    userspace: true,
+    build: build_gpio_power_switch,
+};
+
+/// The `gpio-input` driver entry (feature `drv-gpio`).
+#[cfg(feature = "drv-gpio")]
+const ENTRY_GPIO_INPUT: DriverEntry = DriverEntry {
+    name: "gpio-input",
+    summary: "GPIO input line",
+    class: DeviceClass::Gpio,
+    interface: Interface::Platform,
+    default_address: None,
+    config_keys: &["chip", "line", "active_low"],
+    match_keys: &[],
+    config_choices: &[],
+    kernel: false,
+    userspace: true,
+    build: build_gpio_input,
+};
+
+#[cfg(feature = "drv-gpio")]
 const POWER_SWITCH_CHOICES: &[(&str, &[&str])] = &[("on_exit", &["keep", "on", "off"])];
 
+#[cfg(feature = "drv-bmi088")]
 const BMI088_CHOICES: &[(&str, &[&str])] = &[
     ("accel_range", &["3g", "6g", "12g", "24g"]),
     (
@@ -508,6 +675,7 @@ const BMI088_CHOICES: &[(&str, &[&str])] = &[
     ),
 ];
 
+#[cfg(feature = "drv-bmm150")]
 const BMM150_CHOICES: &[(&str, &[&str])] = &[
     (
         "preset",
@@ -520,12 +688,14 @@ const BMM150_CHOICES: &[(&str, &[&str])] = &[
 ];
 
 /// The ws2812 light's effect keys (see `light.rs`).
+#[cfg(feature = "drv-ws2812")]
 const LIGHT_CHOICES: &[(&str, &[&str])] = &[
     ("status_effect", &["solid", "blink", "breathe", "chase"]),
     ("error_effect", &["solid", "blink", "breathe", "chase"]),
     ("locate_effect", &["solid", "blink", "breathe", "chase"]),
 ];
 
+#[cfg(feature = "drv-ina2xx")]
 const INA_KEYS: &[&str] = &[
     "shunt_micro_ohms",
     "shunt_ohms",
@@ -533,6 +703,7 @@ const INA_KEYS: &[&str] = &[
     "max_current_amps",
 ];
 
+#[cfg(feature = "drv-bmi088")]
 fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     use lemnos_drivers_bmi088::{AccelRange, AccelRate, Bmi088, Config, GyroRange, GyroRate};
     let (bus, accel) = i2c(
@@ -629,6 +800,7 @@ fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice,
     Ok(BoxedDevice::sensor(imu))
 }
 
+#[cfg(feature = "drv-bmm150")]
 fn build_bmm150(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     use lemnos_drivers_bmm150::{Bmm150, Config, DataRate, Preset};
     let (bus, address) = i2c(
@@ -683,6 +855,7 @@ fn build_bmm150(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice,
     ))
 }
 
+#[cfg(feature = "drv-ina2xx")]
 fn build_ina(
     spec: &DeviceSpec,
     buses: &mut dyn Buses,
@@ -731,18 +904,22 @@ fn build_ina(
         .map_err(|e| bad(spec, e.to_string()))
 }
 
+#[cfg(feature = "drv-ina2xx")]
 fn build_ina226(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     build_ina(spec, buses, lemnos_drivers_ina2xx::Model::Ina226)
 }
 
+#[cfg(feature = "drv-ina2xx")]
 fn build_ina238(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     build_ina(spec, buses, lemnos_drivers_ina2xx::Model::Ina238)
 }
 
+#[cfg(feature = "drv-ina2xx")]
 fn build_ina260(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     build_ina(spec, buses, lemnos_drivers_ina2xx::Model::Ina260)
 }
 
+#[cfg(feature = "drv-vcm")]
 fn build_vcm(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     use lemnos_drivers_vcm::{Vcm, VcmChip};
     let chip = match spec.config.get("chip").and_then(ConfigValue::as_str) {
@@ -767,10 +944,21 @@ fn build_vcm(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, Bo
         .map_err(|e| bad(spec, e.to_string()))
 }
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn not_found(spec: &DeviceSpec, what: &str) -> BoardError {
     BoardError::device(&spec.id, ErrorKind::NotFound, format!("no {what} matches"))
 }
 
+#[cfg(feature = "drv-hwmon-fan")]
 fn build_hwmon_fan(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     let fan = match &spec.path {
         Some(path) => HwmonFan::new(PathBuf::from(path)),
@@ -784,6 +972,7 @@ fn build_hwmon_fan(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevi
     Ok(BoxedDevice::both(fan))
 }
 
+#[cfg(feature = "drv-thermal-zone")]
 fn build_thermal_zone(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     let zone = match (&spec.path, spec.matches.get("type")) {
         (Some(path), _) => ThermalZone::new(PathBuf::from(path)),
@@ -795,6 +984,7 @@ fn build_thermal_zone(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedD
     Ok(BoxedDevice::sensor(zone))
 }
 
+#[cfg(feature = "drv-ws2812")]
 fn build_ws2812(spec: &DeviceSpec, _buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     let config = crate::light::strip_config(spec)?;
     // Check the look settings now, so a bad colour fails validation-time builds.
@@ -805,6 +995,16 @@ fn build_ws2812(spec: &DeviceSpec, _buses: &mut dyn Buses) -> Result<BoxedDevice
     )))
 }
 
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn gpio_ref(spec: &DeviceSpec) -> Result<crate::GpioRef, BoardError> {
     let chip = spec
         .config
@@ -827,6 +1027,7 @@ fn gpio_ref(spec: &DeviceSpec) -> Result<crate::GpioRef, BoardError> {
     })
 }
 
+#[cfg(feature = "drv-gpio")]
 fn build_gpio_output(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     let line = gpio_ref(spec)?;
     let initial = spec
@@ -840,6 +1041,7 @@ fn build_gpio_output(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDe
     )))
 }
 
+#[cfg(feature = "drv-gpio")]
 fn build_gpio_input(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     let line = gpio_ref(spec)?;
     let pin = buses.gpio_input(&line)?;
@@ -849,6 +1051,16 @@ fn build_gpio_input(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDev
 }
 
 /// A boolean setting, `default` when left out.
+#[cfg(any(
+    feature = "drv-bmi088",
+    feature = "drv-bmm150",
+    feature = "drv-ina2xx",
+    feature = "drv-vcm",
+    feature = "drv-ws2812",
+    feature = "drv-hwmon-fan",
+    feature = "drv-thermal-zone",
+    feature = "drv-gpio"
+))]
 fn flag(spec: &DeviceSpec, key: &str, default: bool) -> Result<bool, BoardError> {
     match spec.config.get(key) {
         None => Ok(default),
@@ -862,6 +1074,7 @@ fn flag(spec: &DeviceSpec, key: &str, default: bool) -> Result<bool, BoardError>
 /// requested at that level, so it never passes through the other one), and
 /// an optional fault input (`fault_line`, on `fault_chip` or the same chip,
 /// active low unless `fault_active_low = false`).
+#[cfg(feature = "drv-gpio")]
 fn build_gpio_power_switch(
     spec: &DeviceSpec,
     buses: &mut dyn Buses,

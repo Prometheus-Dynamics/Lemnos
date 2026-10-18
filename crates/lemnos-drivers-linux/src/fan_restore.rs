@@ -31,7 +31,7 @@
 //! A fan counts as cooling-device driven when its driver is `pwm-fan` or a
 //! thermal cooling device is linked to its device.
 
-use crate::{HwmonFan, SysfsError, sysfs};
+use crate::{HwmonFan, MODE_AUTOMATIC, MODE_MANUAL, SysRoot, SysfsError, sysfs};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -362,4 +362,91 @@ fn zone_binds(zone: &Path, target: &Path) -> Result<bool, SysfsError> {
         });
         is_cdev_link && fs::canonicalize(entry).is_ok_and(|p| p == target)
     }))
+}
+
+// --- the state file and the stop helper ---------------------------------------
+
+/// The state file's name, next to the socket (in `lemnosd`'s runtime
+/// directory, `/run/lemnos`).
+pub const FAN_STATE_FILE: &str = "fan-restore";
+
+/// Where the fan state file lives for a socket.
+pub fn fan_state_path(socket: &Path) -> PathBuf {
+    socket
+        .parent()
+        .unwrap_or_else(|| Path::new("/run/lemnos"))
+        .join(FAN_STATE_FILE)
+}
+
+/// Writes the plans, one line each, replacing the file atomically.
+pub fn write_fan_state(path: &Path, plans: &[FanRestore]) -> std::io::Result<()> {
+    let mut text = String::new();
+    for plan in plans {
+        text.push_str(&plan.to_line());
+        text.push('\n');
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Reads the plans `lemnosd` recorded (none if the file is missing).
+pub fn read_fan_state(path: &Path) -> Vec<FanRestore> {
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().filter_map(FanRestore::from_line).collect())
+        .unwrap_or_default()
+}
+
+/// What [`restore_after_stop`] did for one fan.
+#[derive(Debug)]
+pub struct Restored {
+    pub plan: FanRestore,
+    pub result: Result<(), SysfsError>,
+}
+
+/// The stop helper: hands back, in order, the fans `lemnosd` recorded in
+/// `state` (with the `pwm1_enable` read when it bound them), then `fans` (the
+/// board's hwmon fans, each with the automatic mode it hands back to), then,
+/// with `all`, every other hwmon fan. Fans the service did not record get
+/// `pwm1_enable = 1` (`pwm-fan`'s boot default) on the cooling-device path
+/// and only a governor re-evaluation (their cooling state may stay high until
+/// the next trip crossing).
+pub fn restore_after_stop(
+    fans: &[(HwmonFan, i32)],
+    state: Option<&Path>,
+    sys: &SysRoot,
+    all: bool,
+) -> Vec<Restored> {
+    let thermal = sys.thermal();
+    let mut plans: Vec<FanRestore> = state.map(read_fan_state).unwrap_or_default();
+    let add = |plans: &mut Vec<FanRestore>, fan: &HwmonFan, mode: i32| {
+        let root = canonical(fan.root());
+        if plans.iter().any(|p| canonical(&p.fan) == root) {
+            return;
+        }
+        if let Ok(plan) = fan.restore_plan_with(&thermal, mode, MODE_MANUAL) {
+            plans.push(plan);
+        }
+    };
+    for (fan, mode) in fans {
+        add(&mut plans, fan, *mode);
+    }
+    if all {
+        for entry in sysfs::entries(&sys.hwmon()).unwrap_or_default() {
+            if entry.join("pwm1_enable").exists() {
+                add(&mut plans, &HwmonFan::new(entry), MODE_AUTOMATIC);
+            }
+        }
+    }
+    plans
+        .into_iter()
+        .map(|plan| {
+            let result = plan.apply().map(|_| ());
+            Restored { plan, result }
+        })
+        .collect()
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

@@ -9,6 +9,7 @@ members = [
     "crates/lemnos-board",
     "crates/lemnos-ipc",
     "crates/lemnosd",
+    "crates/lemnos-ctl",
     "crates/lemnos-bus",
     "crates/lemnos-discovery",
     "crates/lemnos-driver-sdk",

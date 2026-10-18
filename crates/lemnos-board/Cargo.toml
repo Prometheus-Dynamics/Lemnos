@@ -16,25 +16,54 @@ categories = ["hardware-support", "config"]
 workspace = true
 
 [features]
-default = []
+default = ["json", "rp1", "drivers"]
+# JSON board definitions and look bodies (`serde_json`). Off: TOML only.
+json = ["dep:serde_json"]
 # `LinuxBuses`: buses from /dev/i2c-N through `lemnos_linux::hal`.
 linux = ["dep:lemnos-linux", "lemnos-linux/gpio-cdev", "lemnos-linux/spi"]
+# The Raspberry Pi RP1 PIO I2C bus (`pio-i2c:` selectors and the PIO device).
+rp1 = ["lemnos-core/rp1", "lemnos-linux?/rp1"]
+# Every built-in driver. A board build can take only the ones its board uses
+# (for example the Raze: bmi088, bmm150, ina238, hwmon-fan, thermal-zone,
+# ws2812, gpio), with `--no-default-features --features <list>`; a board that
+# names a driver not built in is refused by `validate` with the driver's name.
+drivers = [
+    "drv-bmi088",
+    "drv-bmm150",
+    "drv-ina2xx",
+    "drv-vcm",
+    "drv-ws2812",
+    "drv-hwmon-fan",
+    "drv-thermal-zone",
+    "drv-gpio",
+]
+drv-bmi088 = ["dep:lemnos-drivers-bmi088"]
+drv-bmm150 = ["dep:lemnos-drivers-bmm150"]
+# bmi088 and bmm150 are IMUs and magnetometers on I2C; `ina2xx` covers the
+# ina226, ina238 and ina260 power monitors.
+drv-ina2xx = ["dep:lemnos-drivers-ina2xx"]
+drv-vcm = ["dep:lemnos-drivers-vcm"]
+drv-ws2812 = []
+drv-hwmon-fan = []
+drv-thermal-zone = []
+# gpio-output, gpio-input and gpio-power-switch.
+drv-gpio = []
 
 [dependencies]
 embedded-hal.workspace = true
 lemnos-core.workspace = true
 lemnos-device = { workspace = true, features = ["alloc"] }
 lemnos-hal = { workspace = true, features = ["std"] }
-lemnos-drivers-bmi088 = { workspace = true, default-features = false, features = ["reasons", "float"] }
-lemnos-drivers-bmm150 = { workspace = true, default-features = false, features = ["float"] }
-lemnos-drivers-ina2xx = { workspace = true, default-features = false }
-lemnos-drivers-vcm.workspace = true
+lemnos-drivers-bmi088 = { workspace = true, optional = true, default-features = false, features = ["reasons", "float"] }
+lemnos-drivers-bmm150 = { workspace = true, optional = true, default-features = false, features = ["float"] }
+lemnos-drivers-ina2xx = { workspace = true, optional = true, default-features = false }
+lemnos-drivers-vcm = { workspace = true, optional = true }
 lemnos-drivers-linux.workspace = true
 lemnos-drivers-ws2812.workspace = true
 lemnos-light.workspace = true
 lemnos-linux = { workspace = true, optional = true, features = ["i2c"] }
 serde = { workspace = true, features = ["derive", "std"] }
-serde_json = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"], optional = true }
 toml = { workspace = true }
 
 [dev-dependencies]

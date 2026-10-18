@@ -575,6 +575,7 @@ fn every_declared_config_choice_is_accepted_when_the_driver_builds() {
     }
 }
 
+#[cfg(feature = "rp1")]
 #[test]
 fn pio_i2c_selector_names_pins_and_a_virtual_bus() {
     let tree = Tree::new();

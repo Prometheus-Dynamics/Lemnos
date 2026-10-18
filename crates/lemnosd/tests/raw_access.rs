@@ -419,64 +419,6 @@ fn clients_wait_for_the_service_and_led_clients_get_no_events_by_default() {
 }
 
 #[test]
-fn lemnos_ctl_raw_commands() {
-    let service = start();
-    let hw = service.hardware().clone();
-    let ctl = |args: &[&str]| {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_lemnos-ctl"))
-            .arg("--socket")
-            .arg(service.socket())
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    };
-    assert_eq!(ctl(&["i2c", "read", "1", "0x50", "0x10", "2"]), "aa bb");
-    ctl(&["i2c", "write", "1", "0x50", "0x30", "0x07"]);
-    assert_eq!(hw.i2c(1).register(0x50, 0x30), 7);
-    assert_eq!(ctl(&["i2c", "xfer", "1", "0x50", "w:30", "r:1"]), "07");
-    hw.spi(0, 0).respond(&[0x12, 0x34]);
-    assert_eq!(ctl(&["spi", "xfer", "0.0", "9f00", "--mode", "3"]), "12 34");
-
-    // A kept claim outlives lemnos-ctl until released by handle.
-    let out = ctl(&["gpio", "set", "aux", "1", "--keep"]);
-    let handle = out.split_whitespace().nth(1).unwrap().to_string();
-    assert_eq!(hw.line("gpiochip0", 5).level(), Some(true));
-    ctl(&["gpio", "release", &handle]);
-    assert_eq!(
-        hw.line("gpiochip0", 5).level(),
-        Some(false),
-        "board safe state"
-    );
-    // A held claim ends with the process.
-    ctl(&["gpio", "set", "pinctrl-rp1:8", "1", "--hold", "0"]);
-    assert_eq!(
-        hw.line("gpiochip0", 8).config(),
-        LineConfig::high_impedance()
-    );
-    hw.line("gpiochip0", 3).drive(true);
-    assert_eq!(ctl(&["gpio", "get", "gpiochip0:3"]), "1");
-
-    // `set` persists after lemnos-ctl exits; `restore` undoes it.
-    ctl(&["set", "ring", "brightness", "0.5"]);
-    let mut watcher = client(&service, "watcher");
-    assert!((watcher.get("ring", "brightness").unwrap() - 0.5).abs() < 0.01);
-    ctl(&["restore", "ring"]);
-    assert_eq!(watcher.get("ring", "brightness").unwrap(), 1.0);
-
-    ctl(&[
-        "pwm", "set", "0:2", "--period", "1000", "--duty", "500", "--hold", "0",
-    ]);
-    assert!(!hw.pwm(0, 2).current().enabled);
-    assert_eq!(hw.pwm(0, 2).history()[0].duty_ns, 500);
-}
-
-#[test]
 fn faulted_devices_say_why() {
     let hardware = MockHardware::new();
     // The accelerometer answers; the gyroscope does not.
@@ -517,14 +459,4 @@ bus = "i2c:compatible=nothing-like-this"
         "{}",
         nowhere.reason
     );
-
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lemnos-ctl"))
-        .arg("--socket")
-        .arg(service.socket())
-        .args(["read", "imu"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("gyro chip id"), "{stderr}");
 }

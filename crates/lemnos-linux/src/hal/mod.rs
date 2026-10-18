@@ -44,7 +44,11 @@ pub use gpio::{
 #[cfg(all(feature = "gpio-cdev", feature = "tokio"))]
 pub use gpio_async::AsyncGpioLine;
 #[cfg(feature = "i2c")]
-pub use i2c::{I2cBus, I2cMessage, PioI2cBus};
+pub use i2c::{I2cBus, I2cMessage};
+#[cfg(feature = "rp1")]
+mod pio_i2c;
+#[cfg(feature = "rp1")]
+pub use pio_i2c::PioI2cBus;
 #[cfg(feature = "gpio-cdev")]
 pub use raw::line_settings;
 #[cfg(feature = "spi")]

@@ -18,6 +18,8 @@ workspace = true
 
 [features]
 default = []
+# The RP1 PIO I2C bus (`PioI2cBus`, the `pio-i2c:` selectors).
+rp1 = ["lemnos-core/rp1", "lemnos-linux-sys/rp1"]
 full = ["gpio", "pwm", "i2c", "spi", "uart", "usb", "gpio-cdev", "hotplug"]
 gpio = []
 pwm = []
@@ -40,7 +42,7 @@ lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
 lemnos-hal = { workspace = true, features = ["std"] }
-lemnos-linux-sys.workspace = true
+lemnos-linux-sys = { workspace = true, default-features = false }
 rusb = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["net"] }

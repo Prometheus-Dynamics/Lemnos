@@ -62,6 +62,7 @@
 //! look. Look syntax: `docs/looks.md`.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+#[cfg(feature = "board")]
 use lemnos_board::{BoardDefinition, DriverRegistry, looks};
 use lemnos_ipc::{
     ClientEvent, ClientOptions, DEFAULT_SOCKET, Easing, EffectKind, FrameUpdate, LedRequest,
@@ -70,11 +71,16 @@ use lemnos_ipc::{
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-#[path = "../ctl_calibration.rs"]
-mod calibration_ctl;
-#[path = "../ctl_raw.rs"]
+mod calibration;
 mod raw;
 use std::time::Duration;
+
+/// The default board definition (`lemnosd`'s `DEFAULT_BOARD`).
+const DEFAULT_BOARD: &str = "/etc/lemnos/board.toml";
+
+/// The refusal of a board command in a build without the `board` feature.
+#[cfg(not(feature = "board"))]
+const NEEDS_BOARD: &str = "this command reads board definitions or look files: lemnos-ctl was built without the `board` feature";
 
 struct Args {
     words: Vec<String>,
@@ -151,7 +157,7 @@ fn main() -> ExitCode {
         "light" => light(args, options),
         "power" => power(args, options),
         "looks" => looks_command(args, options),
-        "calibration" => calibration_ctl::calibration(args, options),
+        "calibration" => calibration::calibration(args, options),
         _ => devices(&command, args, options),
     }
 }
@@ -161,6 +167,12 @@ fn main() -> ExitCode {
 /// the board settings give, and the plane's share of the reading, and lights
 /// that LED (green) with the top dim (the default bottom in amber while the
 /// board is flat). Tune `gravity_plane` and `gravity_led0_deg` in the board.
+#[cfg(not(feature = "board"))]
+fn light(_args: Args, _options: ClientOptions) -> ExitCode {
+    fail(NEEDS_BOARD)
+}
+
+#[cfg(feature = "board")]
 fn light(mut args: Args, options: ClientOptions) -> ExitCode {
     const USAGE: &str = "light gravity <ring> [--seconds N] [--board PATH]";
     if args.next().as_deref() != Some("gravity") {
@@ -176,7 +188,7 @@ fn light(mut args: Args, options: ClientOptions) -> ExitCode {
     let board = args
         .take("--board")
         .or_else(|| std::env::var("LEMNOSD_BOARD").ok())
-        .unwrap_or_else(|| lemnosd::DEFAULT_BOARD.into());
+        .unwrap_or_else(|| DEFAULT_BOARD.into());
     let definition = match BoardDefinition::from_path(&board) {
         Ok(d) => d,
         Err(e) => return fail(format!("{board}: {e}")),
@@ -267,6 +279,12 @@ fn light(mut args: Args, options: ClientOptions) -> ExitCode {
     code
 }
 
+#[cfg(not(feature = "board"))]
+fn validate(_args: Args) -> ExitCode {
+    fail(NEEDS_BOARD)
+}
+
+#[cfg(feature = "board")]
 fn validate(mut args: Args) -> ExitCode {
     let registry = DriverRegistry::builtin();
     let mut failed = false;
@@ -337,6 +355,25 @@ fn power(mut args: Args, options: ClientOptions) -> ExitCode {
     }
 }
 
+/// The board's hwmon fans for the stop helper: none when the board cannot be
+/// read (as before), and none without the `board` feature.
+#[cfg(feature = "board")]
+fn board_fans(
+    path: &str,
+    sys: &lemnos_drivers_linux::SysRoot,
+) -> Vec<(lemnos_drivers_linux::HwmonFan, i32)> {
+    let definition = BoardDefinition::from_path(path).ok();
+    lemnos_board::fans::board_fans(definition.as_ref(), sys)
+}
+
+#[cfg(not(feature = "board"))]
+fn board_fans(
+    _path: &str,
+    _sys: &lemnos_drivers_linux::SysRoot,
+) -> Vec<(lemnos_drivers_linux::HwmonFan, i32)> {
+    Vec::new()
+}
+
 fn fan(mut args: Args, socket: &Path, options: ClientOptions) -> ExitCode {
     match args.next().as_deref() {
         Some("restore") => {}
@@ -363,18 +400,15 @@ fn fan(mut args: Args, socket: &Path, options: ClientOptions) -> ExitCode {
     let board = args
         .take("--board")
         .or_else(|| std::env::var("LEMNOSD_BOARD").ok())
-        .unwrap_or_else(|| lemnosd::DEFAULT_BOARD.into());
-    let state = args
-        .take("--state")
-        .map_or_else(|| lemnosd::fans::fan_state_path(socket), PathBuf::from);
-    let all = args.flag("--all");
-    let definition = BoardDefinition::from_path(&board).ok();
-    let restored = lemnosd::fans::restore_after_stop(
-        definition.as_ref(),
-        Some(&state),
-        &lemnos_drivers_linux::SysRoot::default(),
-        all,
+        .unwrap_or_else(|| DEFAULT_BOARD.into());
+    let state = args.take("--state").map_or_else(
+        || lemnos_drivers_linux::fan_state_path(socket),
+        PathBuf::from,
     );
+    let all = args.flag("--all");
+    let sys = lemnos_drivers_linux::SysRoot::default();
+    let fans = board_fans(&board, &sys);
+    let restored = lemnos_drivers_linux::restore_after_stop(&fans, Some(&state), &sys, all);
     let mut failed = false;
     for item in &restored {
         match &item.result {
@@ -671,6 +705,33 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
 
 /// The look a `--spec TOML`, `--file PATH` or `--json JSON` gives, with its
 /// name (`--name`, or the file's one look). `None` when none is given.
+#[cfg(not(feature = "board"))]
+fn look_from_args(args: &mut Args) -> Result<Option<(Option<String>, LookSpec)>, String> {
+    let _ = args.take("--name");
+    for flag in ["--spec", "--json", "--file"] {
+        if args.take(flag).is_some() {
+            return Err(NEEDS_BOARD.into());
+        }
+    }
+    Ok(None)
+}
+
+/// The text `looks save` sends for a look (built with the `board` feature;
+/// without it `look_from_args` never yields a look to save).
+#[cfg(not(feature = "board"))]
+fn save_text(_name: &str, _spec: &LookSpec) -> String {
+    String::new()
+}
+
+/// The text `looks save` sends for a look.
+#[cfg(feature = "board")]
+fn save_text(name: &str, spec: &LookSpec) -> String {
+    looks::to_toml(name, spec)
+}
+
+/// The look a `--spec TOML`, `--file PATH` or `--json JSON` gives, with its
+/// name (`--name`, or the file's one look). `None` when none is given.
+#[cfg(feature = "board")]
 fn look_from_args(args: &mut Args) -> Result<Option<(Option<String>, LookSpec)>, String> {
     let name = args.take("--name");
     if let Some(text) = args.take("--spec") {
@@ -708,6 +769,7 @@ fn look_from_args(args: &mut Args) -> Result<Option<(Option<String>, LookSpec)>,
     Ok(Some((Some(name), spec)))
 }
 
+#[cfg(feature = "board")]
 fn join(errors: Vec<looks::LookError>) -> String {
     errors
         .iter()
@@ -745,7 +807,7 @@ fn looks_command(mut args: Args, options: ClientOptions) -> ExitCode {
                 Err(e) => return fail(e),
             };
             LooksOp::Save {
-                text: looks::to_toml(&name, &spec),
+                text: save_text(&name, &spec),
                 name,
             }
         }

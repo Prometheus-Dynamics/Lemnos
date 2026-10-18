@@ -4,6 +4,7 @@
 
 use crate::BoardError;
 use crate::i2c_select::I2cSelector;
+#[cfg(feature = "rp1")]
 use lemnos_core::{PIO_I2C_DEFAULT_HZ, PioI2cPins};
 use lemnos_drivers_linux::SysRoot;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -109,6 +110,7 @@ pub enum BusRef {
     /// An I2C adapter found by name or device-tree node ([`I2cSelector`]).
     I2cMatch(I2cSelector),
     /// An I2C master bit-banged on the RP1 PIO block (`pio-i2c:sda=8,scl=7`).
+    #[cfg(feature = "rp1")]
     PioI2c(PioI2cPins),
     Spi {
         bus: u32,
@@ -119,7 +121,12 @@ pub enum BusRef {
 impl BusRef {
     /// Whether this is an I2C bus (by number or by selector).
     pub fn is_i2c(&self) -> bool {
-        matches!(self, Self::I2c(_) | Self::I2cMatch(_) | Self::PioI2c(_))
+        match self {
+            Self::I2c(_) | Self::I2cMatch(_) => true,
+            #[cfg(feature = "rp1")]
+            Self::PioI2c(_) => true,
+            Self::Spi { .. } => false,
+        }
     }
 
     /// The I2C bus number: given, or found under `sys` for a selector.
@@ -128,6 +135,7 @@ impl BusRef {
         match self {
             Self::I2c(bus) => Some(Ok(*bus)),
             Self::I2cMatch(selector) => Some(selector.resolve(sys)),
+            #[cfg(feature = "rp1")]
             Self::PioI2c(pins) => Some(Ok(pins.bus_number())),
             Self::Spi { .. } => None,
         }
@@ -139,6 +147,7 @@ impl fmt::Display for BusRef {
         match self {
             Self::I2c(bus) => write!(f, "i2c-{bus}"),
             Self::I2cMatch(selector) => selector.fmt(f),
+            #[cfg(feature = "rp1")]
             Self::PioI2c(pins) => {
                 write!(f, "pio-i2c:sda={},scl={}", pins.sda, pins.scl)?;
                 if pins.hz != PIO_I2C_DEFAULT_HZ {
@@ -165,6 +174,7 @@ impl FromStr for BusRef {
                 .map(Self::I2cMatch)
                 .map_err(|e| format!("bus {s:?}: {e}"));
         }
+        #[cfg(feature = "rp1")]
         if let Some(rest) = s.strip_prefix("pio-i2c:") {
             return parse_pio_i2c(rest).map(Self::PioI2c).map_err(|e| {
                 format!("bus {s:?}: {e} (expected \"pio-i2c:sda=<gpio>,scl=<gpio>[,hz=<hertz>]\")")
@@ -184,6 +194,7 @@ impl FromStr for BusRef {
     }
 }
 
+#[cfg(feature = "rp1")]
 /// The keys of a `pio-i2c:` selector: `sda` and `scl` GPIO numbers (distinct,
 /// below 28) and an optional `hz` (default 400 kHz).
 fn parse_pio_i2c(text: &str) -> Result<PioI2cPins, String> {
@@ -220,6 +231,7 @@ fn parse_pio_i2c(text: &str) -> Result<PioI2cPins, String> {
     Ok(PioI2cPins { sda, scl, hz })
 }
 
+#[cfg(feature = "rp1")]
 fn gpio_number(value: u32) -> Result<u8, String> {
     if value >= 28 {
         return Err(format!("GPIO {value} is not an RP1 GPIO (0..27)"));
@@ -436,6 +448,7 @@ impl BoardDefinition {
     }
 
     /// Parses JSON.
+    #[cfg(feature = "json")]
     pub fn from_json_str(text: &str) -> Result<Self, BoardError> {
         serde_json::from_str(text).map_err(|e| BoardError::Parse(e.to_string()))
     }
@@ -446,11 +459,13 @@ impl BoardDefinition {
         let text = std::fs::read_to_string(path)
             .map_err(|e| BoardError::Io(format!("{}: {e}", path.display())))?;
         match path.extension().and_then(|e| e.to_str()) {
+            #[cfg(feature = "json")]
             Some("json") => Self::from_json_str(&text),
             _ => Self::from_toml_str(&text),
         }
     }
 
+    #[cfg(feature = "json")]
     pub fn to_json_string(&self) -> String {
         serde_json::to_string_pretty(self).expect("board definitions serialize")
     }

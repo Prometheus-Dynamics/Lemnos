@@ -106,28 +106,41 @@ fn print_file(device: &str) {
     );
     let file = dir.join(format!("{device}.toml"));
     let summary = match std::fs::read_to_string(&file) {
-        Ok(text) => match text.parse::<toml::Table>() {
-            Ok(table) => {
-                let driver = table
-                    .get("driver")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or("?");
-                let revision = table
-                    .get("revision")
-                    .and_then(toml::Value::as_integer)
-                    .unwrap_or(0);
-                let words = table
-                    .get("words")
-                    .and_then(toml::Value::as_array)
-                    .map_or(0, Vec::len);
-                format!(
-                    "saved: driver {driver}, revision {revision}, {words} words ({})",
-                    file.display()
-                )
-            }
-            Err(e) => format!("saved: {} is not readable: {e}", file.display()),
-        },
+        Ok(text) => summarize(&text, &file),
         Err(_) => "saved: none (factory calibration)".to_string(),
     };
     println!("  {summary}");
+}
+
+/// The driver, revision and word count of a saved calibration file.
+#[cfg(feature = "board")]
+fn summarize(text: &str, file: &std::path::Path) -> String {
+    match text.parse::<toml::Table>() {
+        Ok(table) => {
+            let driver = table
+                .get("driver")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("?");
+            let revision = table
+                .get("revision")
+                .and_then(toml::Value::as_integer)
+                .unwrap_or(0);
+            let words = table
+                .get("words")
+                .and_then(toml::Value::as_array)
+                .map_or(0, Vec::len);
+            format!(
+                "saved: driver {driver}, revision {revision}, {words} words ({})",
+                file.display()
+            )
+        }
+        Err(e) => format!("saved: {} is not readable: {e}", file.display()),
+    }
+}
+
+/// Without the `board` feature (and its TOML parser) a saved file is listed
+/// by its size only.
+#[cfg(not(feature = "board"))]
+fn summarize(text: &str, file: &std::path::Path) -> String {
+    format!("saved: {} ({} bytes)", file.display(), text.len())
 }

@@ -19,10 +19,6 @@ workspace = true
 name = "lemnosd"
 path = "src/main.rs"
 
-[[bin]]
-name = "lemnos-ctl"
-path = "src/bin/lemnos-ctl.rs"
-
 # The Orion bridge (docs/orion.md): lemnosd's devices as Orion resources.
 [[bin]]
 name = "lemnos-orion"

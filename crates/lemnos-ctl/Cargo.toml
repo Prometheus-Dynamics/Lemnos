@@ -1,0 +1,39 @@
+[package]
+name = "lemnos-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "lemnos-ctl: the command-line client of lemnosd (devices, LEDs and looks, raw buses, fans, calibration)"
+documentation = "https://docs.rs/lemnos-ctl"
+keywords = ["hardware", "service", "led", "lemnos", "cli"]
+categories = ["hardware-support", "command-line-utilities"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lemnos-ctl"
+path = "src/main.rs"
+
+[features]
+default = ["board"]
+# Board and look-file tooling: `validate`, `light gravity`, `looks save` and
+# `led show` from a file or a TOML/JSON body, the board's fans in `fan
+# restore`. Off, those commands are refused with the reason and the rest
+# (the service's client, the stop helper's state file) is unchanged.
+board = ["dep:lemnos-board", "dep:toml"]
+
+[dependencies]
+lemnos-drivers-linux.workspace = true
+lemnos-ipc.workspace = true
+lemnos-light.workspace = true
+lemnos-board = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The tests run lemnos-ctl against the mock service (`lemnosd::mock`).
+lemnosd = { path = "../lemnosd", features = ["mock"] }
+lemnos-hal = { workspace = true, features = ["std"] }

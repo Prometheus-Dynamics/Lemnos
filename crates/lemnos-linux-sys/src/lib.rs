@@ -15,6 +15,7 @@ pub mod inotify;
 mod ioctl;
 pub mod netlink;
 pub mod poll;
+#[cfg(feature = "rp1")]
 pub mod rp1_pio;
 pub mod signal;
 pub mod spi;

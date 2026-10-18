@@ -78,7 +78,7 @@ for entry in "sensors|" "sensors-lite|lite"; do
 done
 
 # The hardware service as shipped (service profile, stripped), host build.
-cargo build -q -p lemnosd --profile service --manifest-path "$root_dir/Cargo.toml" \
+cargo build -q -p lemnosd -p lemnos-ctl --profile service --manifest-path "$root_dir/Cargo.toml" \
   --target-dir "$linux_dir"
 echo "linux/$host/lemnosd $(stat -c %s "$linux_dir/service/lemnosd")" >>"$results"
 echo "linux/$host/lemnos-ctl $(stat -c %s "$linux_dir/service/lemnos-ctl")" >>"$results"

@@ -403,6 +403,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-ctl"
+version = "2.0.0"
+dependencies = [
+ "lemnos-board",
+ "lemnos-drivers-linux",
+ "lemnos-hal",
+ "lemnos-ipc",
+ "lemnos-light",
+ "lemnosd",
+ "toml",
+]
+
+[[package]]
 name = "lemnos-device"
 version = "2.0.0"
 dependencies = [

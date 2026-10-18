@@ -40,6 +40,7 @@
 mod buses;
 mod composite;
 mod error;
+pub mod fans;
 mod gravity;
 mod i2c_select;
 mod light;

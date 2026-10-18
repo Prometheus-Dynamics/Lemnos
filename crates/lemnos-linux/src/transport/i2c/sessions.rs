@@ -33,13 +33,14 @@ impl LinuxI2cSession {
                 device_id: device.id.clone(),
             }
         })?;
-        let transport: Box<dyn I2cTransport> = if super::pio::is_pio_bus(bus) {
-            Box::new(super::pio::device_transport(device, bus, address)?)
-        } else {
-            let devnode = descriptor_devnode(device)
-                .map(str::to_owned)
-                .unwrap_or_else(|| super::resolve_devnode(paths, bus));
-            Box::new(LinuxKernelI2cTransport::new(device, &devnode, address)?)
+        let transport: Box<dyn I2cTransport> = match pio_device(device, bus, address)? {
+            Some(transport) => transport,
+            None => {
+                let devnode = descriptor_devnode(device)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| super::resolve_devnode(paths, bus));
+                Box::new(LinuxKernelI2cTransport::new(device, &devnode, address)?)
+            }
         };
 
         Ok(Self {
@@ -179,13 +180,14 @@ impl LinuxI2cControllerSession {
             });
         }
 
-        let transport: Box<dyn I2cControllerTransport> = if super::pio::is_pio_bus(bus) {
-            Box::new(super::pio::controller_transport(owner, bus)?)
-        } else {
-            let devnode = descriptor_devnode(owner)
-                .map(str::to_owned)
-                .unwrap_or_else(|| paths.i2c_devnode(bus).display().to_string());
-            Box::new(LinuxKernelI2cControllerTransport::new(owner, devnode))
+        let transport: Box<dyn I2cControllerTransport> = match pio_controller(owner, bus)? {
+            Some(transport) => transport,
+            None => {
+                let devnode = descriptor_devnode(owner)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| paths.i2c_devnode(bus).display().to_string());
+                Box::new(LinuxKernelI2cControllerTransport::new(owner, devnode))
+            }
         };
 
         Ok(Self {
@@ -333,4 +335,51 @@ impl I2cControllerSession for LinuxI2cControllerSession {
             transport.transaction(address, operations)
         })
     }
+}
+
+/// The transport of a `pio-i2c:` bus (`None` for a kernel adapter; always
+/// `None` without the `rp1` feature).
+#[cfg(feature = "rp1")]
+fn pio_device(
+    device: &DeviceDescriptor,
+    bus: u32,
+    address: u16,
+) -> BusResult<Option<Box<dyn I2cTransport>>> {
+    if !super::pio::is_pio_bus(bus) {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(super::pio::device_transport(
+        device, bus, address,
+    )?)))
+}
+
+#[cfg(not(feature = "rp1"))]
+fn pio_device(
+    _device: &DeviceDescriptor,
+    _bus: u32,
+    _address: u16,
+) -> BusResult<Option<Box<dyn I2cTransport>>> {
+    Ok(None)
+}
+
+/// The controller transport of a `pio-i2c:` bus (see [`pio_device`]).
+#[cfg(feature = "rp1")]
+fn pio_controller(
+    owner: &DeviceDescriptor,
+    bus: u32,
+) -> BusResult<Option<Box<dyn I2cControllerTransport>>> {
+    if !super::pio::is_pio_bus(bus) {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(super::pio::controller_transport(
+        owner, bus,
+    )?)))
+}
+
+#[cfg(not(feature = "rp1"))]
+fn pio_controller(
+    _owner: &DeviceDescriptor,
+    _bus: u32,
+) -> BusResult<Option<Box<dyn I2cControllerTransport>>> {
+    Ok(None)
 }
