@@ -23,6 +23,11 @@ RestartMaxDelaySec=10s
 Environment=LEMNOSD_SOCKET=/run/lemnos/lemnosd.sock
 Environment=LEMNOSD_BOARD=/etc/lemnos/board.toml
 Environment=LEMNOS_ORION_RATE_HZ=2
+# Optional, off by default (every device is read whole). To publish only the IMU's
+# yaw rate, set this in /etc/default/lemnos-orion.env (docs/orion.md, Configuration):
+#   LEMNOS_ORION_CHANNELS=imu=angular_rate.z
+# The publish window (LEMNOS_ORION_BATCH_MS) defaults to 50 ms:
+#   LEMNOS_ORION_BATCH_MS=50
 # Orion's local IPC sockets, as orion-node's unit puts them (its default is under $TMPDIR).
 Environment=ORION_NODE_IPC_SOCKET=/run/orion/control.sock
 Environment=ORION_NODE_IPC_STREAM_SOCKET=/run/orion/control-stream.sock
