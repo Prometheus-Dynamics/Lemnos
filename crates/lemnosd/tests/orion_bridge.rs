@@ -161,6 +161,7 @@ async fn resources_readings_actions_and_restart() {
         ttl: Duration::from_secs(5),
         retry: Duration::from_millis(100),
         channels: Vec::new(),
+        batch: Duration::from_millis(50),
     };
     let bridge = tokio::spawn(bridge::run(config));
 

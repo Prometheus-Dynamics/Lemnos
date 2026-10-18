@@ -64,6 +64,9 @@ pub struct Config {
     /// (`LEMNOS_ORION_CHANNELS`, for example `imu=angular_rate.z`): the
     /// device's other channels are not read. Other devices are whole.
     pub channels: Vec<(String, Vec<String>)>,
+    /// How long feed messages coalesce before one batch is published
+    /// (`LEMNOS_ORION_BATCH_MS`, 50 ms by default, 0 to 1000).
+    pub batch: Duration,
 }
 
 impl Config {
@@ -101,6 +104,7 @@ impl Config {
             ttl: Duration::from_secs(90),
             retry: Duration::from_secs(1),
             channels: parse_channels(&std::env::var("LEMNOS_ORION_CHANNELS").unwrap_or_default()),
+            batch: parse_batch(std::env::var("LEMNOS_ORION_BATCH_MS").ok().as_deref())?,
         })
     }
 
@@ -299,6 +303,7 @@ struct Session {
 pub async fn run(config: Config) -> Result<(), String> {
     let drivers = drivers(config.board_file.as_deref());
     let cadence = config.cadence();
+    let batch_window = config.batch;
     let queue = Arc::new(FeedQueue::default());
     let feed_tx = FeedSender(Arc::downgrade(&queue));
     let shared = Arc::new(Shared {
@@ -333,6 +338,10 @@ pub async fn run(config: Config) -> Result<(), String> {
     loop {
         tokio::select! {
             () = queue.wake.notified() => {
+                // Feed messages that arrive within the window go out together.
+                if !batch_window.is_zero() {
+                    tokio::time::sleep(batch_window).await;
+                }
                 let batch = queue.take();
                 let devices_changed = batch.iter().any(|feed| matches!(feed, Feed::Connected { .. }));
                 let entries = apply_batch(&shared, batch, &drivers, cadence, started.elapsed());
@@ -500,6 +509,19 @@ fn poll_calibration(client: &mut DeviceClient, feed: &FeedSender) -> bool {
         }
     }
     true
+}
+
+/// `LEMNOS_ORION_BATCH_MS`: the coalescing window in milliseconds (0 to 1000).
+pub fn parse_batch(text: Option<&str>) -> Result<Duration, String> {
+    let Some(text) = text else {
+        return Ok(Duration::from_millis(50));
+    };
+    text.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|ms| *ms <= 1000)
+        .map(Duration::from_millis)
+        .ok_or_else(|| format!("LEMNOS_ORION_BATCH_MS `{text}`: expected milliseconds in 0..=1000"))
 }
 
 /// `device=channel,channel;device=...` (`LEMNOS_ORION_CHANNELS`): each device
@@ -1296,5 +1318,15 @@ mod feed_tests {
         drop(queue);
         assert!(sender.is_closed());
         assert!(sender.send(control("a", "x", 1.0)).is_err());
+    }
+
+    /// The window defaults to 50 ms, and is 0 to 1000 ms.
+    #[test]
+    fn batch_window_parses_milliseconds() {
+        assert_eq!(parse_batch(None), Ok(Duration::from_millis(50)));
+        assert_eq!(parse_batch(Some(" 0 ")), Ok(Duration::ZERO));
+        assert_eq!(parse_batch(Some("1000")), Ok(Duration::from_secs(1)));
+        assert!(parse_batch(Some("1001")).is_err());
+        assert!(parse_batch(Some("fast")).is_err());
     }
 }
