@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use lemnos_ipc::{
@@ -28,7 +28,7 @@ use orion_control_plane::{
     ActionRequest, ActionTarget, ProviderRecord, ResourceRecord, StatusEntry, TypedConfigValue,
 };
 use orion_core::{NodeId, ProviderId, ResourceType};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use super::mirror::{Cadence, Mirror, PROVIDER_ID, RESOURCE_TYPE};
 use super::ops::LookOp;
@@ -139,6 +139,132 @@ enum Feed {
     },
 }
 
+/// How many action requests may wait for the main loop. A full queue holds the
+/// watch task (Orion's requests wait in Orion), so none is dropped.
+const INBOUND_CAPACITY: usize = 64;
+
+/// The key a feed message's value is stored under: a later message with the
+/// same key replaces the earlier one (last value wins).
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum FeedKey {
+    Reading(String),
+    Status(String),
+    Control(String, String),
+    Calibration(String),
+    Extra(String, String),
+}
+
+/// The feed messages waiting for the main loop, in arrival order of their
+/// latest values. A message for a key already waiting replaces it, so a
+/// stalled publisher holds one message per device channel, control and
+/// status key however many readings arrive: the memory is bounded by the
+/// board, not by the time Orion stays stalled.
+#[derive(Default)]
+struct Pending {
+    next: u64,
+    by_seq: BTreeMap<u64, Feed>,
+    by_key: HashMap<FeedKey, u64>,
+}
+
+impl Pending {
+    fn push(&mut self, feed: Feed) {
+        let key = match feed_key(&feed) {
+            Some(key) => Some(key),
+            // A connection supersedes everything before it: the mirror is
+            // reset, and the new device list is read again.
+            None if matches!(feed, Feed::Connected { .. }) => {
+                self.by_seq.clear();
+                self.by_key.clear();
+                None
+            }
+            // Events the mirror does not use.
+            None => return,
+        };
+        let seq = self.next;
+        self.next += 1;
+        if let Some(key) = key
+            && let Some(old) = self.by_key.insert(key, seq)
+        {
+            self.by_seq.remove(&old);
+        }
+        self.by_seq.insert(seq, feed);
+    }
+
+    fn take(&mut self) -> Vec<Feed> {
+        self.by_key.clear();
+        std::mem::take(&mut self.by_seq).into_values().collect()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.by_seq.len()
+    }
+}
+
+/// The feed key of a message; `None` for a connection and for events the
+/// mirror does not use.
+fn feed_key(feed: &Feed) -> Option<FeedKey> {
+    match feed {
+        Feed::Connected { .. } => None,
+        Feed::Control {
+            device, control, ..
+        } => Some(FeedKey::Control(device.clone(), control.clone())),
+        Feed::Calibration { device, .. } => Some(FeedKey::Calibration(device.clone())),
+        Feed::Extra { device, key, .. } => Some(FeedKey::Extra(device.clone(), key.clone())),
+        Feed::Update(Update::Reading(reading)) => Some(FeedKey::Reading(reading.device.clone())),
+        Feed::Update(Update::Event(Event::Status { device, .. })) => {
+            Some(FeedKey::Status(device.clone()))
+        }
+        Feed::Update(Update::Event(Event::Control {
+            device, control, ..
+        })) => Some(FeedKey::Control(device.clone(), control.clone())),
+        Feed::Update(Update::Event(_)) => None,
+    }
+}
+
+/// The main loop's inbox: [`Pending`], and a wake-up for the loop.
+#[derive(Default)]
+struct FeedQueue {
+    pending: Mutex<Pending>,
+    wake: Notify,
+}
+
+impl FeedQueue {
+    /// Takes everything waiting, in order.
+    fn take(&self) -> Vec<Feed> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
+
+/// The bridge has stopped: its feed is gone.
+#[derive(Debug)]
+struct FeedClosed;
+
+/// Sends feed messages to the main loop. Never blocks: messages coalesce
+/// (see [`Pending`]). Sends fail once the bridge has stopped.
+#[derive(Clone)]
+struct FeedSender(Weak<FeedQueue>);
+
+impl FeedSender {
+    fn send(&self, feed: Feed) -> Result<(), FeedClosed> {
+        let queue = self.0.upgrade().ok_or(FeedClosed)?;
+        queue
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(feed);
+        queue.wake.notify_one();
+        Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.0.strong_count() == 0
+    }
+}
+
 /// What the watch tasks send the main loop.
 enum Inbound {
     /// An action request for a session's provider.
@@ -158,7 +284,7 @@ struct Shared {
     /// The mirror (the main loop updates it; actions read the resource ids).
     mirror: Mutex<Option<Mirror>>,
     /// Feeds the main loop (control values read after an action).
-    feed: mpsc::UnboundedSender<Feed>,
+    feed: FeedSender,
 }
 
 /// One Orion session: the registered provider, which publishes the resources
@@ -173,7 +299,8 @@ struct Session {
 pub async fn run(config: Config) -> Result<(), String> {
     let drivers = drivers(config.board_file.as_deref());
     let cadence = config.cadence();
-    let (feed_tx, mut feed_rx) = mpsc::unbounded_channel();
+    let queue = Arc::new(FeedQueue::default());
+    let feed_tx = FeedSender(Arc::downgrade(&queue));
     let shared = Arc::new(Shared {
         lemnosd_socket: config.lemnosd_socket.clone(),
         callers: Mutex::new(HashMap::new()),
@@ -196,7 +323,7 @@ pub async fn run(config: Config) -> Result<(), String> {
             &pump_watchers,
         );
     });
-    let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Inbound>();
+    let (inbound_tx, mut inbound_rx) = mpsc::channel::<Inbound>(INBOUND_CAPACITY);
     let started = Instant::now();
     let mut session: Option<Session> = None;
     let mut generation = 0u64;
@@ -205,9 +332,10 @@ pub async fn run(config: Config) -> Result<(), String> {
     let mut last_resources = Instant::now();
     loop {
         tokio::select! {
-            Some(feed) = feed_rx.recv() => {
-                let devices_changed = matches!(feed, Feed::Connected { .. });
-                let entries = apply_feed(&shared, feed, &drivers, cadence, started.elapsed());
+            () = queue.wake.notified() => {
+                let batch = queue.take();
+                let devices_changed = batch.iter().any(|feed| matches!(feed, Feed::Connected { .. }));
+                let entries = apply_batch(&shared, batch, &drivers, cadence, started.elapsed());
                 let mut lost = false;
                 if let Some(current) = session.as_mut() {
                     if devices_changed {
@@ -283,7 +411,7 @@ fn pump(
     socket: &Path,
     period_ms: u32,
     retry: Duration,
-    feed: &mpsc::UnboundedSender<Feed>,
+    feed: &FeedSender,
     channels: &[(String, Vec<String>)],
     watchers: &LightWatchers,
 ) {
@@ -350,7 +478,7 @@ const CALIBRATION_POLL: Duration = Duration::from_secs(10);
 
 /// Reads the calibration status of each IMU and magnetometer and feeds it to
 /// the mirror. `false` when the bridge has ended.
-fn poll_calibration(client: &mut DeviceClient, feed: &mpsc::UnboundedSender<Feed>) -> bool {
+fn poll_calibration(client: &mut DeviceClient, feed: &FeedSender) -> bool {
     let Ok(devices) = client.list() else {
         return true;
     };
@@ -399,7 +527,7 @@ fn setup(
     socket: &Path,
     client: &mut DeviceClient,
     period_ms: u32,
-    feed: &mpsc::UnboundedSender<Feed>,
+    feed: &FeedSender,
     channels: &[(String, Vec<String>)],
     watchers: &LightWatchers,
 ) -> bool {
@@ -511,7 +639,7 @@ impl LightWatchers {
 /// Watches a light's description (its look, owner and brightness) for as long
 /// as the bridge runs, one frame a second at most (the frames are not used).
 /// Reconnects to lemnosd with `retry`-style pauses.
-fn watch_light(socket: &Path, device: &str, feed: &mpsc::UnboundedSender<Feed>) {
+fn watch_light(socket: &Path, device: &str, feed: &FeedSender) {
     loop {
         if feed.is_closed() {
             return;
@@ -563,6 +691,20 @@ fn watch_light(socket: &Path, device: &str, feed: &mpsc::UnboundedSender<Feed>) 
         }
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// Applies a batch to the mirror, in order; the status entries to publish.
+fn apply_batch(
+    shared: &Shared,
+    batch: Vec<Feed>,
+    drivers: &BTreeMap<String, String>,
+    cadence: Cadence,
+    now: Duration,
+) -> Vec<StatusEntry> {
+    batch
+        .into_iter()
+        .flat_map(|feed| apply_feed(shared, feed, drivers, cadence, now))
+        .collect()
 }
 
 /// Applies one feed message to the mirror; the status entries to publish.
@@ -674,7 +816,7 @@ async fn publish_all(
 async fn connect_session(
     config: &Config,
     generation: u64,
-    inbound: mpsc::UnboundedSender<Inbound>,
+    inbound: mpsc::Sender<Inbound>,
 ) -> Result<Session, String> {
     let runtime = LocalNodeRuntime::new(&config.orion_socket, &config.orion_stream);
     let provider = ProviderRecord::builder(
@@ -697,19 +839,23 @@ async fn connect_session(
         loop {
             match watch.next().await {
                 Ok(request) => {
-                    let sent = inbound.send(Inbound::Request {
-                        request: Box::new(request),
-                        reporter: watch_reporter.clone(),
-                    });
+                    let sent = inbound
+                        .send(Inbound::Request {
+                            request: Box::new(request),
+                            reporter: watch_reporter.clone(),
+                        })
+                        .await;
                     if sent.is_err() {
                         return;
                     }
                 }
                 Err(error) => {
-                    let _ = inbound.send(Inbound::Lost {
-                        generation,
-                        reason: error.to_string(),
-                    });
+                    let _ = inbound
+                        .send(Inbound::Lost {
+                            generation,
+                            reason: error.to_string(),
+                        })
+                        .await;
                     return;
                 }
             }
@@ -1061,5 +1207,94 @@ mod watcher_tests {
             }
         }
         assert_eq!(started.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+
+    fn control(device: &str, name: &str, value: f64) -> Feed {
+        Feed::Control {
+            device: device.to_owned(),
+            control: name.to_owned(),
+            value,
+        }
+    }
+
+    fn value_of(feed: &Feed) -> Option<f64> {
+        match feed {
+            Feed::Control { value, .. } => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Each key keeps its latest value, in arrival order of those latest values.
+    #[test]
+    fn last_value_per_key_in_arrival_order() {
+        let mut pending = Pending::default();
+        pending.push(control("a", "x", 1.0));
+        pending.push(control("b", "x", 2.0));
+        pending.push(control("a", "x", 3.0));
+        let values: Vec<_> = pending.take().iter().filter_map(value_of).collect();
+        assert_eq!(values, vec![2.0, 3.0]);
+        assert_eq!(pending.len(), 0);
+    }
+
+    /// A stalled publisher: nothing drains while readings keep arriving. The
+    /// queue holds one message per key, however many arrive.
+    #[test]
+    fn stalled_publisher_holds_one_message_per_key() {
+        let queue = Arc::new(FeedQueue::default());
+        let sender = FeedSender(Arc::downgrade(&queue));
+        for i in 0..100_000u32 {
+            let device = ["a", "b", "c"][(i % 3) as usize];
+            sender.send(control(device, "x", f64::from(i))).unwrap();
+        }
+        assert_eq!(queue.pending.lock().unwrap().len(), 3);
+        let mut last: Vec<f64> = queue.take().iter().filter_map(value_of).collect();
+        last.sort_by(f64::total_cmp);
+        assert_eq!(last, vec![99_997.0, 99_998.0, 99_999.0]);
+    }
+
+    /// Action results and the events for the same control share one key.
+    #[test]
+    fn control_values_share_one_key() {
+        let mut pending = Pending::default();
+        pending.push(control("a", "x", 1.0));
+        pending.push(Feed::Update(Update::Event(Event::Control {
+            device: "a".to_owned(),
+            control: "x".to_owned(),
+            value: 5.0,
+            by: "helios".to_owned(),
+        })));
+        assert_eq!(pending.len(), 1);
+    }
+
+    /// A connection supersedes what came before it.
+    #[test]
+    fn connected_supersedes_pending() {
+        let mut pending = Pending::default();
+        pending.push(control("a", "x", 1.0));
+        pending.push(Feed::Connected {
+            board: "b".to_owned(),
+            devices: Vec::new(),
+        });
+        pending.push(control("a", "y", 2.0));
+        let batch = pending.take();
+        assert_eq!(batch.len(), 2);
+        assert!(matches!(batch[0], Feed::Connected { .. }));
+        assert_eq!(value_of(&batch[1]), Some(2.0));
+    }
+
+    /// Sends fail once the bridge's queue is gone.
+    #[test]
+    fn sends_fail_after_the_bridge_stops() {
+        let queue = Arc::new(FeedQueue::default());
+        let sender = FeedSender(Arc::downgrade(&queue));
+        assert!(!sender.is_closed());
+        drop(queue);
+        assert!(sender.is_closed());
+        assert!(sender.send(control("a", "x", 1.0)).is_err());
     }
 }
