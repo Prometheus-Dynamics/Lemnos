@@ -11,8 +11,9 @@
 //!
 //! The main loop owns the Orion session and the mirror of what has been
 //! published. A session that fails is dropped and reconnected on a timer,
-//! and the resources and status are published again on connect and on every
-//! heartbeat, so an Orion restart is repaired within one heartbeat.
+//! and the resources and status are published again on connect (the resources
+//! also when they change, the status on its heartbeat), so an Orion restart is
+//! repaired as soon as the new session connects.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};

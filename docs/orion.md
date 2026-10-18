@@ -7,11 +7,12 @@ for HeliOS. Changing a name or unit here is a breaking change.
 
 `lemnos-orion` is a lemnosd client (name `orion`) and an Orion provider over local IPC (client name
 `lemnos-orion`, provider `lemnos`). It publishes each board device as an Orion resource, mirrors its
-readings and status, and runs its actions on it (`set`, `restore`, `release`, `read`, and the calibration actions below). Raw GPIO, PWM, I2C and SPI stay direct to lemnosd
-and are not exposed here. Device operations such as calibration are not built yet.
+readings and status, and runs its actions on it (`set`, `restore`, `release`, `read`, the power and
+look actions, and the calibration actions below). Raw GPIO, PWM, I2C and SPI stay direct to lemnosd
+and are not exposed here.
 
-Pinned against Orion `main` at `4fadba9` (`TypedConfigValue::F64` for readings). The actions use the
-provider's `watch_action_requests`, which works with or without Orion's newer request/response API.
+Pinned against Orion `f8d767ac` (control protocol 5, the node the Raze images ship), as
+`crates/lemnosd/Cargo.toml` pins it. The actions use the provider's `watch_action_requests`.
 
 ## Resources
 
@@ -80,9 +81,13 @@ channel with no value yet is not published.
 | pressure | 100 Pa |
 | others (level, mode, colour) | exact |
 
-- Status changes are published at once, not rate limited.
-- Heartbeat: every 30 s, every status entry the bridge can publish is republished. That keeps the 90 s TTL
-  from lapsing. The resources are republished on the same heartbeat.
+- Status changes are not rate limited. They go out with the next batch: feed messages that arrive
+  within `LEMNOS_ORION_BATCH_MS` (50 ms by default) are published together, and a value that changes
+  twice in one window is published once, with its latest value.
+- Heartbeat: every 30 s per device, every status entry the bridge can publish is republished. That keeps
+  the 90 s TTL from lapsing.
+- Resource records are published on connection and when they change: the device list, or a device's
+  availability and health (its status). They are not republished on a timer.
 
 ## Actions
 
@@ -104,10 +109,6 @@ handler, so Orion routes an action here only while the bridge is connected.
 | `calibration.reset` | none | none | returns the device to its factory calibration |
 | `calibration.status` | none | `revision` (`UInt`), `running` (string: `none` or the routine), `progress` (`F64`, 0 to 1), `candidate` and `failed` (`Bool`), and for each of `accel`, `gyro`, `mag`: `samples` (`UInt`), `confidence`, `coverage`, `residual` (`F64`, 0 to 1), `active` (`Bool`) | the calibration's state, read now |
 
-The IMU and magnetometer resources also carry the calibration confidence as status keys, polled about
-every 10 s and published when they change: `calibration.revision`, `calibration.candidate`,
-`calibration.accel.confidence`, `calibration.gyro.confidence`, `calibration.mag.confidence` (`F64`, 0 to 1)
-and `calibration.<part>.active` (`Bool`). A device with no such part reads as zero.
 | `looks.preset.list` | none | `text` (one line per preset, `* ` marks the active one) | lists the look presets |
 | `looks.preset.show` | `name` (string, required) | `text` (the preset's look file) | shows a preset |
 | `looks.preset.apply` | `name` (string, required) | `text` | makes a preset the active one (kept across restarts) |
@@ -118,6 +119,11 @@ and `calibration.<part>.active` (`Bool`). A device with no such part reads as ze
 | `looks.off` | none | none | drops the caller's intents on the light |
 | `looks.locate` | `seconds` (optional, default 10) | none | the locate look for `seconds` |
 | `light.brightness` | `value` (number, 0 to 1), `persist` (bool, default false) | `brightness` (`F64`, applied) | the ring-wide look brightness; `persist` keeps it across restarts |
+
+The IMU and magnetometer resources also carry the calibration confidence as status keys, polled about
+every 10 s and published when they change: `calibration.revision`, `calibration.candidate`,
+`calibration.accel.confidence`, `calibration.gyro.confidence`, `calibration.mag.confidence` (`F64`, 0 to 1)
+and `calibration.<part>.active` (`Bool`). A device with no such part reads as zero.
 
 The look and brightness actions are on the light's resource (`lemnos.<board>.<light>`,
 for example `lemnos.raze.status-ring`). The writer policy is the light's `writers`
@@ -140,9 +146,8 @@ A refused action is `Rejected` with the reason. A failure of the device is `Fail
 |---|---|---|
 | Rejected | `only resources take lemnos actions` | target is not a resource |
 | Rejected | `no lemnos device <resource>` | the resource is not on this board |
-| Rejected | `unsupported action `<name>` (one of set, restore, release, read, power.set, power.reset, looks.*, light.brightness, calibration.start, calibration.stop, calibration.apply, calibration.discard, calibration.reset, calibration.status)` | unknown name |
+| Rejected | `unsupported action `<name>` (one of the names in the actions table)` | unknown name |
 | Rejected | `` `routine` (accel-six, mag-rotate or gyro-hold) is required `` / `` unknown routine `<name>` `` | bad `calibration.start` arguments |
-| Rejected | `unsupported action `<name>` (one of set, restore, release, read, power.set, power.reset, looks.*, light.brightness)` | unknown name |
 | Rejected | `` `control` (string) is required `` / `` `value` (number) is required `` / `` `value` must be finite `` | bad `set` arguments |
 | Rejected | `not allowed by the device's write policy` | the caller is not in the device's `writers` |
 | Rejected | `value out of range` | outside the control's range |
@@ -171,7 +176,7 @@ channel names, as the other status keys do; a fault also makes the status
 - Without lemnosd: the bridge retries its connection every `retry` (1 s) and publishes nothing.
 - Without Orion: the bridge retries the provider registration every second. It reads lemnosd meanwhile.
 - After an Orion restart: the bridge reconnects, registers again, and republishes the resources and
-  status. Within one heartbeat (30 s) the resources and status are back. Actions sent before that are
+  status. The resources and status are published on connection, so they are back at once. Actions sent before that are
   refused (no handler), with the usual Orion rejection.
 - After a lemnosd restart: its client reconnects and resubscribes, and the device list is read again.
 
@@ -182,6 +187,7 @@ channel names, as the other status keys do; a fault also makes the status
 | `LEMNOSD_SOCKET` | `/run/lemnos/lemnosd.sock` | lemnosd's socket |
 | `LEMNOSD_BOARD` | `/etc/lemnos/board.toml` | the board definition (for `lemnos.driver` labels only) |
 | `LEMNOS_ORION_RATE_HZ` | `2` | readings per device per second, in (0, 50] |
+| `LEMNOS_ORION_BATCH_MS` | `50` | the window (ms, 0 to 1000) in which feed messages are published together |
 | `LEMNOS_ORION_CHANNELS` | (unset) | `device=channel,channel;device=...`: subscribe to those channels only (`angular_rate.z`, `acceleration.*`, `*`); other devices are whole |
 | `ORION_NODE_ID` | `node.local` | the node the provider runs on (must match the node) |
 | `ORION_NODE_IPC_SOCKET` | `/run/orion/control.sock` (unit) | Orion's local IPC socket, as orion-node's unit sets it |
@@ -194,5 +200,4 @@ which an image imports on top of `lemnosd.toml` when it runs Orion.
 ## Not in this contract
 
 - Raw GPIO, PWM, I2C and SPI: direct to lemnosd only.
-- Device operations (calibrate, and similar): not yet.
 - `release` is the fan hand-back; on a device that is not a fan, lemnosd's answer is passed on as the outcome.
