@@ -28,6 +28,10 @@ use std::fmt;
 pub const VERSION: u16 = 1;
 /// Frames longer than this are refused.
 pub const MAX_FRAME: usize = 1 << 20;
+/// Requests longer than this are refused. The largest request is a raw
+/// transfer: at most 64 KiB of SPI bytes (lemnosd's `MAX_SPI_BYTES`) or 4 KiB
+/// of I2C, plus its header. Replies keep `MAX_FRAME`.
+pub const MAX_REQUEST_FRAME: usize = 70 * 1024;
 
 const HELLO: u16 = 1;
 const LIST: u16 = 2;
@@ -79,6 +83,7 @@ mod message;
 mod raw;
 mod request;
 
+pub use message::encode_reading;
 pub use raw::{I2cOp, LineTarget, PwmTarget, RawRequest, SpiXfer};
 
 use codec::{Code, frame};
@@ -566,7 +571,7 @@ pub struct LightInfo {
 /// Splits and decodes requests from `buf`; returns the request and the bytes
 /// it used, `None` until a whole frame arrived.
 pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, WireError> {
-    match frame(buf)? {
+    match frame(buf, MAX_REQUEST_FRAME)? {
         Some((kind, payload, used)) => Ok(Some((Request::decode(kind, payload)?, used))),
         None => Ok(None),
     }
@@ -574,7 +579,7 @@ pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, WireError>
 
 /// Splits and decodes messages from `buf`.
 pub fn decode_message(buf: &[u8]) -> Result<Option<(Message, usize)>, WireError> {
-    match frame(buf)? {
+    match frame(buf, MAX_FRAME)? {
         Some((kind, payload, used)) => Ok(Some((Message::decode(kind, payload)?, used))),
         None => Ok(None),
     }

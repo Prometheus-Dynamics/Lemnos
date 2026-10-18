@@ -1,7 +1,7 @@
 //! Frame encoding: the length-prefixed little-endian layout and stable enum
 //! codes.
 
-use super::{MAX_FRAME, WireError, bad};
+use super::{WireError, bad};
 use lemnos_device::{Axis, DeviceClass, DeviceStatus, Quantity};
 use lemnos_hal::ErrorKind;
 
@@ -12,7 +12,13 @@ pub(super) struct Encoder {
 
 impl Encoder {
     pub(super) fn new(kind: u16) -> Self {
-        let mut buf = Vec::with_capacity(64);
+        Self::with_capacity(kind, 64)
+    }
+
+    /// An encoder whose buffer starts with room for `capacity` bytes, so a
+    /// message whose size is known (a reading) is built in one allocation.
+    pub(super) fn with_capacity(kind: u16, capacity: usize) -> Self {
+        let mut buf = Vec::with_capacity(capacity.max(6));
         buf.extend_from_slice(&[0; 4]);
         buf.extend_from_slice(&kind.to_le_bytes());
         Self { buf }
@@ -149,13 +155,13 @@ impl<'a> Decoder<'a> {
 /// A frame's kind, payload, and total length.
 pub(super) type FrameParts<'a> = (u16, &'a [u8], usize);
 
-pub(super) fn frame(buf: &[u8]) -> Result<Option<FrameParts<'_>>, WireError> {
+pub(super) fn frame(buf: &[u8], limit: usize) -> Result<Option<FrameParts<'_>>, WireError> {
     if buf.len() < 4 {
         return Ok(None);
     }
     let len = u32::from_le_bytes(buf[..4].try_into().expect("4 bytes")) as usize;
-    if !(2..=MAX_FRAME).contains(&len) {
-        return Err(bad(format!("frame length {len}")));
+    if !(2..=limit).contains(&len) {
+        return Err(bad(format!("frame length {len} (at most {limit})")));
     }
     if buf.len() < 4 + len {
         return Ok(None);

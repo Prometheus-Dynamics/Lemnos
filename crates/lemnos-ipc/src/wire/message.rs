@@ -5,6 +5,29 @@ use super::*;
 use lemnos_device::{Axis, DeviceClass, DeviceStatus, Quantity};
 use lemnos_hal::ErrorKind;
 
+/// The frame for a device reading: what `Message::Reading` encodes to, built
+/// from its parts so a sender need not own the strings and values. One
+/// allocation, sized to the frame.
+pub fn encode_reading(
+    device: &str,
+    timestamp_us: u64,
+    status: DeviceStatus,
+    values: &[i32],
+) -> Vec<u8> {
+    let device_len = device.len().min(u16::MAX as usize);
+    // Frame length, kind, device (length and bytes), timestamp, status, count, values.
+    let size = 6 + 2 + device_len + 8 + 1 + 2 + 4 * values.len();
+    let mut e = Encoder::with_capacity(READING, size);
+    e.str(device)
+        .u64(timestamp_us)
+        .u8(status.code())
+        .u16(values.len() as u16);
+    for v in values {
+        e.i32(*v);
+    }
+    e.finish()
+}
+
 impl Message {
     /// The frame for this message.
     pub fn encode(&self) -> Vec<u8> {
@@ -89,17 +112,7 @@ impl Message {
                 }
                 e.finish()
             }
-            Self::Reading(r) => {
-                let mut e = Encoder::new(READING);
-                e.str(&r.device)
-                    .u64(r.timestamp_us)
-                    .u8(r.status.code())
-                    .u16(r.values.len() as u16);
-                for v in &r.values {
-                    e.i32(*v);
-                }
-                e.finish()
-            }
+            Self::Reading(r) => encode_reading(&r.device, r.timestamp_us, r.status, &r.values),
             Self::Reply { id, result } => {
                 let mut e = Encoder::new(REPLY);
                 e.u32(*id);

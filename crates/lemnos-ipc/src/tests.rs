@@ -631,3 +631,51 @@ fn bad_calibration_codes_are_refused() {
     frame.extend_from_slice(&payload);
     assert!(decode_request(&frame).is_err());
 }
+
+#[test]
+fn encode_reading_matches_the_message_frame() {
+    let values = [9_806, i32::MIN, 0];
+    let message = Message::Reading(RawReading {
+        device: "imu".into(),
+        timestamp_us: 42,
+        status: DeviceStatus::Available,
+        values: values.to_vec(),
+    });
+    assert_eq!(
+        crate::wire::encode_reading("imu", 42, DeviceStatus::Available, &values),
+        message.encode()
+    );
+}
+
+#[test]
+fn requests_over_the_request_limit_are_refused_before_their_body() {
+    // The length alone decides: a request frame this long is refused even
+    // though its body has not arrived.
+    let length = (crate::wire::MAX_REQUEST_FRAME + 1) as u32;
+    let mut header = length.to_le_bytes().to_vec();
+    header.extend_from_slice(&3u16.to_le_bytes());
+    let error = decode_request(&header).unwrap_err();
+    assert!(error.0.contains("at most"), "{error}");
+    // A reply of the same size is still a valid message length.
+    let mut reply = length.to_le_bytes().to_vec();
+    reply.extend_from_slice(&104u16.to_le_bytes());
+    assert!(matches!(decode_message(&reply), Ok(None)));
+}
+
+#[test]
+fn a_raw_transfer_at_the_largest_size_fits_the_request_limit() {
+    let request = Request::Raw(RawRequest::SpiTransfer {
+        id: 1,
+        bus: 0,
+        chip_select: 0,
+        transfers: vec![SpiXfer::new(vec![0xA5; 64 * 1024], 0)],
+    });
+    let frame = request.encode();
+    assert!(
+        frame.len() <= crate::wire::MAX_REQUEST_FRAME,
+        "{}",
+        frame.len()
+    );
+    let (decoded, used) = decode_request(&frame).unwrap().unwrap();
+    assert_eq!((decoded, used), (request, frame.len()));
+}
