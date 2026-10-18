@@ -216,6 +216,16 @@ impl Mirror {
         out
     }
 
+    /// When the next heartbeat is due: the earliest device's last full publish
+    /// plus `heartbeat` (a device never published is due now). `None` with no
+    /// devices.
+    pub fn next_heartbeat(&self, heartbeat: Duration) -> Option<Duration> {
+        self.devices
+            .iter()
+            .map(|d| d.last_heartbeat.map_or(Duration::ZERO, |at| at + heartbeat))
+            .min()
+    }
+
     /// Entries for a reading: the status when it changed, `read_us`, and each
     /// channel that moved by its deadband. Readings come at most once per
     /// `min_interval`; a reading inside that window publishes nothing (the
@@ -748,6 +758,18 @@ mod tests {
         assert_eq!(
             value(&out, "reason"),
             Some(TypedConfigValue::String(String::new()))
+        );
+    }
+
+    #[test]
+    fn next_heartbeat_follows_the_last_full_publish() {
+        let mut m = mirror();
+        assert_eq!(m.next_heartbeat(secs(30.0)), Some(Duration::ZERO));
+        m.snapshot(secs(5.0));
+        assert_eq!(m.next_heartbeat(secs(30.0)), Some(secs(35.0)));
+        assert_eq!(
+            Mirror::new("test", Vec::new(), &BTreeMap::new(), cadence()).next_heartbeat(secs(30.0)),
+            None
         );
     }
 

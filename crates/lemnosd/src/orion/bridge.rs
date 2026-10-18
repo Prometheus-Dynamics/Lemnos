@@ -333,8 +333,8 @@ pub async fn run(config: Config) -> Result<(), String> {
     let mut session: Option<Session> = None;
     let mut generation = 0u64;
     let mut connect = tokio::time::interval(config.retry);
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    let mut last_resources = Instant::now();
+    // The resource records last published (Orion has these until they change).
+    let mut published: Vec<ResourceRecord> = Vec::new();
     loop {
         tokio::select! {
             () = queue.wake.notified() => {
@@ -343,13 +343,19 @@ pub async fn run(config: Config) -> Result<(), String> {
                     tokio::time::sleep(batch_window).await;
                 }
                 let batch = queue.take();
-                let devices_changed = batch.iter().any(|feed| matches!(feed, Feed::Connected { .. }));
+                // A record changes with the device list and with the device's
+                // availability (a status change): publish it then, and only then.
+                let connected = batch.iter().any(|feed| matches!(feed, Feed::Connected { .. }));
                 let entries = apply_batch(&shared, batch, &drivers, cadence, started.elapsed());
+                let records_may_change = connected || entries.iter().any(|e| e.key == "status");
                 let mut lost = false;
                 if let Some(current) = session.as_mut() {
-                    if devices_changed {
-                        let resources = resources(&shared);
-                        lost |= current.provider.publish_resources(resources).await.is_err();
+                    if records_may_change {
+                        let records = resources(&shared);
+                        if records != published {
+                            lost |= current.provider.publish_resources(records.clone()).await.is_err();
+                            published = records;
+                        }
                     }
                     if !entries.is_empty() {
                         lost |= current.provider.publish_status(entries).await.is_err();
@@ -382,9 +388,9 @@ pub async fn run(config: Config) -> Result<(), String> {
                 generation += 1;
                 match connect_session(&config, generation, inbound_tx.clone()).await {
                     Ok(new) => match publish_all(&shared, &new, started.elapsed()).await {
-                        Ok(()) => {
+                        Ok(records) => {
                             log(&format!("connected to Orion as {ORION_CLIENT}"));
-                            last_resources = Instant::now();
+                            published = records;
                             session = Some(new);
                         }
                         Err(error) => log(&format!("Orion publish failed: {error}")),
@@ -392,18 +398,14 @@ pub async fn run(config: Config) -> Result<(), String> {
                     Err(error) => log(&format!("Orion not available: {error}")),
                 }
             }
-            _ = tick.tick() => {
+            // The status heartbeat, when the next device's entries fall due.
+            () = tokio::time::sleep_until(next_heartbeat_at(&shared, started, config.heartbeat)),
+                if session.is_some() => {
                 if let Some(current) = session.as_mut() {
-                    let mut lost = false;
                     let heartbeat = take_heartbeat(&shared, started.elapsed());
-                    if !heartbeat.is_empty() {
-                        lost |= current.provider.publish_status(heartbeat).await.is_err();
-                    }
-                    if last_resources.elapsed() >= config.heartbeat {
-                        last_resources = Instant::now();
-                        lost |= current.provider.publish_resources(resources(&shared)).await.is_err();
-                    }
-                    if lost {
+                    if !heartbeat.is_empty()
+                        && current.provider.publish_status(heartbeat).await.is_err()
+                    {
                         log("Orion lost during the heartbeat; reconnecting");
                         session = None;
                     }
@@ -812,12 +814,33 @@ fn take_heartbeat(shared: &Shared, now: Duration) -> Vec<StatusEntry> {
         .unwrap_or_default()
 }
 
+/// When the next status heartbeat is due, on the tokio clock. Without devices
+/// there is nothing to republish, so it is far off.
+fn next_heartbeat_at(
+    shared: &Shared,
+    started: Instant,
+    heartbeat: Duration,
+) -> tokio::time::Instant {
+    let due = shared
+        .mirror
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|mirror| mirror.next_heartbeat(heartbeat));
+    let at = match due {
+        Some(due) => started + due,
+        None => Instant::now() + Duration::from_secs(3600),
+    };
+    tokio::time::Instant::from_std(at)
+}
+
 /// Publishes the resources and every value the mirror knows, to a new session.
+/// Returns the resource records it published.
 async fn publish_all(
     shared: &Shared,
     session: &Session,
     now: Duration,
-) -> Result<(), orion_client::ClientError> {
+) -> Result<Vec<ResourceRecord>, orion_client::ClientError> {
     let (resources, snapshot) = {
         let mut slot = shared.mirror.lock().unwrap_or_else(|e| e.into_inner());
         match slot.as_mut() {
@@ -826,12 +849,15 @@ async fn publish_all(
         }
     };
     if !resources.is_empty() {
-        session.provider.publish_resources(resources).await?;
+        session
+            .provider
+            .publish_resources(resources.clone())
+            .await?;
     }
     if !snapshot.is_empty() {
         session.provider.publish_status(snapshot).await?;
     }
-    Ok(())
+    Ok(resources)
 }
 
 /// Connects Orion: registers the provider and watches its action requests.
