@@ -166,12 +166,27 @@ pub const RP1_BYTES_PER_LED: usize = 4;
 /// `ws2812-pio` device into `out`, which must hold
 /// [`StripConfig::rp1_len`] bytes. Returns the bytes written.
 pub fn encode_rp1(config: &StripConfig, pixels: &[Rgbw], out: &mut [u8]) -> usize {
+    rp1_into(config, pixels.iter().copied(), out)
+}
+
+/// Encodes every LED of the strip as `pixel` (a uniform colour) for the RP1
+/// device, the same bytes [`encode_rp1`] writes for `count` copies of it,
+/// without a frame slice. `out` must hold [`StripConfig::rp1_len`] bytes.
+pub fn encode_rp1_fill(config: &StripConfig, pixel: Rgbw, out: &mut [u8]) -> usize {
+    rp1_into(
+        config,
+        core::iter::repeat_n(pixel, config.count as usize),
+        out,
+    )
+}
+
+fn rp1_into(config: &StripConfig, pixels: impl Iterator<Item = Rgbw>, out: &mut [u8]) -> usize {
     let len = config
         .rp1_len()
         .min(out.len() / RP1_BYTES_PER_LED * RP1_BYTES_PER_LED);
     out[..len].fill(0);
-    for (index, pixel) in pixels.iter().take(config.count as usize).enumerate() {
-        let p = config.output(*pixel);
+    for (index, pixel) in pixels.take(config.count as usize).enumerate() {
+        let p = config.output(pixel);
         let at = config.physical(index as u16) as usize * RP1_BYTES_PER_LED;
         if let Some(slot) = out.get_mut(at..at + RP1_BYTES_PER_LED) {
             slot.copy_from_slice(&[p.r, p.g, p.b, p.w]);
@@ -205,7 +220,20 @@ pub fn encode_spi(config: &StripConfig, pixels: &[Rgbw], out: &mut [u8]) -> usiz
 }
 
 /// One data byte as 24 SPI bits, MSB first: `110` for a 1, `100` for a 0.
+/// With the `spi-lut` feature this reads a 256-entry table instead.
 pub const fn encode_spi_byte(byte: u8) -> [u8; 3] {
+    #[cfg(feature = "spi-lut")]
+    {
+        SPI_LUT[byte as usize]
+    }
+    #[cfg(not(feature = "spi-lut"))]
+    {
+        spi_byte_bits(byte)
+    }
+}
+
+/// The bit expansion behind [`encode_spi_byte`] (the table is built from it).
+const fn spi_byte_bits(byte: u8) -> [u8; 3] {
     let mut bits: u32 = 0;
     let mut i = 0;
     while i < 8 {
@@ -215,3 +243,15 @@ pub const fn encode_spi_byte(byte: u8) -> [u8; 3] {
     }
     [(bits >> 16) as u8, (bits >> 8) as u8, bits as u8]
 }
+
+/// [`spi_byte_bits`] for every byte, built at compile time.
+#[cfg(feature = "spi-lut")]
+const SPI_LUT: [[u8; 3]; 256] = {
+    let mut table = [[0u8; 3]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        table[byte] = spi_byte_bits(byte as u8);
+        byte += 1;
+    }
+    table
+};

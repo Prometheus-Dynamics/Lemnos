@@ -6,7 +6,7 @@ use lemnos_device::{
     Control, ControlInfo, Device, DeviceClass, DeviceError, DeviceInfo, Pixels, Quantity, Rgbw,
     check_control,
 };
-use lemnos_drivers_ws2812::{StripConfig, encode_rp1};
+use lemnos_drivers_ws2812::{StripConfig, encode_rp1, encode_rp1_fill};
 use lemnos_hal::ErrorKind;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
@@ -61,21 +61,14 @@ impl Ws2812Pio {
         &self.config
     }
 
-    fn open(&mut self) -> Result<&File, SysfsError> {
-        if self.file.is_none() {
-            let file = OpenOptions::new()
-                .write(true)
-                .open(&self.path)
-                .map_err(|e| SysfsError::io(&self.path, "open", &e))?;
-            self.file = Some(file);
-        }
-        Ok(self.file.as_ref().expect("opened above"))
-    }
-
     /// Writes a frame (logical order).
     pub fn write_frame(&mut self, pixels: &[Rgbw]) -> Result<(), SysfsError> {
-        let config = self.config;
-        let len = encode_rp1(&config, pixels, &mut self.buffer);
+        let len = encode_rp1(&self.config, pixels, &mut self.buffer);
+        self.write_buffer(len)
+    }
+
+    /// Writes the first `len` bytes of the encoded buffer.
+    fn write_buffer(&mut self, len: usize) -> Result<(), SysfsError> {
         if len == 1 {
             // A one-byte write sets the driver's brightness instead.
             return Err(SysfsError::new(
@@ -84,19 +77,28 @@ impl Ws2812Pio {
                 "a strip needs at least one 4-byte LED",
             ));
         }
-        let path = self.path.clone();
-        let buffer = std::mem::take(&mut self.buffer);
-        let result = self.open().and_then(|file| {
-            file.write_all_at(&buffer[..len], 0)
-                .map_err(|e| SysfsError::io(&path, "write", &e))
+        let result = open_file(&mut self.file, &self.path).and_then(|file| {
+            file.write_all_at(&self.buffer[..len], 0)
+                .map_err(|e| SysfsError::io(&self.path, "write", &e))
         });
-        self.buffer = buffer;
         if result.is_err() {
             // Reopen next time: the device may have been re-probed.
             self.file = None;
         }
         result
     }
+}
+
+/// The device file, opened for writing on first use.
+fn open_file<'a>(file: &'a mut Option<File>, path: &Path) -> Result<&'a File, SysfsError> {
+    if file.is_none() {
+        let opened = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| SysfsError::io(path, "open", &e))?;
+        *file = Some(opened);
+    }
+    Ok(file.as_ref().expect("opened above"))
 }
 
 impl Device for Ws2812Pio {
@@ -123,10 +125,8 @@ impl Control for Ws2812Pio {
             Ok(value)
         } else {
             self.color = value as u32;
-            let fill = [Rgbw::rgb(self.color); 1];
-            let count = usize::from(self.config.count);
-            let frame: Vec<Rgbw> = fill.iter().copied().cycle().take(count).collect();
-            self.write_frame(&frame).map_err(DeviceError::Driver)?;
+            let len = encode_rp1_fill(&self.config, Rgbw::rgb(self.color), &mut self.buffer);
+            self.write_buffer(len).map_err(DeviceError::Driver)?;
             Ok(value)
         }
     }

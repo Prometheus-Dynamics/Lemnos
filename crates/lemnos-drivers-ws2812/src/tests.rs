@@ -59,3 +59,32 @@ fn geometry_maps_logical_indices_round_the_ring() {
     );
     assert_eq!(Direction::from_name("ccw"), Some(Direction::Ccw));
 }
+
+#[test]
+fn spi_byte_encoding_matches_the_bit_expansion_for_every_byte() {
+    for byte in 0..=255u8 {
+        assert_eq!(
+            encode_spi_byte(byte),
+            spi_byte_bits(byte),
+            "byte {byte:#04x}"
+        );
+    }
+}
+
+#[test]
+fn rp1_fill_matches_a_frame_of_copies() {
+    for (count, offset, direction) in [(1u16, 0u16, Direction::Cw), (16, 5, Direction::Ccw)] {
+        let config = StripConfig::new(count, Wire::Rgbw)
+            .with_offset(offset)
+            .with_direction(direction)
+            .with_brightness(200);
+        let pixel = Rgbw::new(9, 80, 200, 33);
+        let frame = [pixel; 16];
+        let mut a = [0xaa; 64];
+        let mut b = [0x55; 64];
+        let na = encode_rp1(&config, &frame[..usize::from(count)], &mut a);
+        let nb = encode_rp1_fill(&config, pixel, &mut b);
+        assert_eq!(na, nb);
+        assert_eq!(a[..na], b[..nb]);
+    }
+}

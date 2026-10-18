@@ -168,9 +168,24 @@ impl Block {
         )
     }
 
+    /// A drain's eased progress (thousandths) at `elapsed_ms`; 0 for other
+    /// blocks. See [`LookSpec::drained`].
+    pub(crate) fn drained(&self, elapsed_ms: u64) -> u32 {
+        match *self {
+            Self::Drain {
+                start_ms,
+                duration_ms,
+                easing,
+                ..
+            } => drained_at(elapsed_ms, start_ms, duration_ms, easing),
+            _ => 0,
+        }
+    }
+
     /// The colour of LED `index` of `count` at `elapsed_ms` into the look,
     /// before the layer's brightness and the envelope. `fraction` is the
-    /// arc's displayed fill (Q16).
+    /// arc's displayed fill (Q16). `drained` is this block's drain progress
+    /// (see [`Block::drained`]).
     #[allow(clippy::too_many_arguments)]
     fn color(
         &self,
@@ -181,29 +196,14 @@ impl Block {
         sparkle: &SparkleState,
         now_ms: u64,
         bottom: u32,
+        drained: u32,
     ) -> Rgbw {
         match *self {
             Self::Fill { color } => color,
             Self::Wash { color, effect } => scale(color, effect.level(elapsed_ms)),
-            Self::Drain {
+            Self::Drain { color, fill_ms, .. } => scale(
                 color,
-                fill_ms,
-                start_ms,
-                duration_ms,
-                easing,
-            } => scale(
-                color,
-                drain_level(
-                    index,
-                    count,
-                    elapsed_ms,
-                    bottom,
-                    fill_ms,
-                    start_ms,
-                    duration_ms,
-                    easing,
-                ) * ONE
-                    / 1000,
+                drain_level(index, count, elapsed_ms, bottom, fill_ms, drained) * ONE / 1000,
             ),
             Self::Sparkle(params) => sparkle.pixel(index, now_ms, &params),
             Self::Frame { pixels, len } => {
@@ -314,6 +314,10 @@ pub struct LookSpec {
     pub brightness: u8,
     /// The least brightness the look is shown at, after the ring-wide scale.
     pub floor: u8,
+    /// Milliseconds between frames while this look animates; 0 takes the
+    /// animator's interval (20 ms, 50 Hz, by default). A slow look can run at
+    /// 40 ms (25 Hz) and save the writes.
+    pub frame_ms: u32,
 }
 
 impl LayerSpec {
@@ -376,6 +380,7 @@ impl LookSpec {
         envelope: Effect::Solid,
         brightness: 255,
         floor: 0,
+        frame_ms: 0,
     };
 
     /// Nothing at all (off).
@@ -388,6 +393,7 @@ impl LookSpec {
             envelope: Effect::Solid,
             brightness: 255,
             floor: 0,
+            frame_ms: 0,
         }
     }
 
@@ -454,6 +460,13 @@ impl LookSpec {
 
     pub const fn with_floor(mut self, floor: u8) -> Self {
         self.floor = floor;
+        self
+    }
+
+    /// The interval between frames while this look animates (1 to 1000 ms);
+    /// 0 keeps the animator's.
+    pub const fn with_frame_ms(mut self, frame_ms: u32) -> Self {
+        self.frame_ms = frame_ms;
         self
     }
 
@@ -612,6 +625,9 @@ impl LookSpec {
         {
             return Err("a look has at most one sparkle layer");
         }
+        if self.frame_ms > 1_000 {
+            return Err("a look's frame_ms must be 0 (the default) or 1 to 1000");
+        }
         validate_effect(self.envelope)
     }
 
@@ -627,12 +643,21 @@ impl LookSpec {
         sparkle: &SparkleState,
         now_ms: u64,
         bottom: u32,
+        drained: &[u32; MAX_LAYERS],
     ) -> Rgbw {
         let mut acc = Rgbw::OFF;
-        for layer in self.iter() {
-            let c = layer
-                .block
-                .color(index, count, elapsed_ms, fraction, sparkle, now_ms, bottom);
+        for (slot, layer) in self.layers.iter().enumerate() {
+            let Some(layer) = layer else { continue };
+            let c = layer.block.color(
+                index,
+                count,
+                elapsed_ms,
+                fraction,
+                sparkle,
+                now_ms,
+                bottom,
+                drained[slot],
+            );
             let c = scale(c, brightness_level(layer.brightness));
             acc = match layer.mode {
                 Mode::Max => max(acc, c),
@@ -642,26 +667,49 @@ impl LookSpec {
         }
         acc
     }
+
+    /// Each layer's drain progress (thousandths) at `elapsed_ms`, by layer
+    /// slot. It does not depend on the LED, so the animator computes it once
+    /// per frame rather than once per LED.
+    pub(crate) fn drained(&self, elapsed_ms: u64) -> [u32; MAX_LAYERS] {
+        let mut out = [0; MAX_LAYERS];
+        for (o, layer) in out.iter_mut().zip(self.layers.iter()) {
+            if let Some(layer) = layer {
+                *o = layer.block.drained(elapsed_ms);
+            }
+        }
+        out
+    }
+}
+
+/// The eased progress (thousandths) of a drain `elapsed_ms` into the look:
+/// 0 until `start_ms`, then `easing` over `duration_ms`.
+fn drained_at(elapsed_ms: u64, start_ms: u32, duration_ms: u32, easing: Easing) -> u32 {
+    if elapsed_ms < u64::from(start_ms) {
+        0
+    } else {
+        let t = elapsed_ms - u64::from(start_ms);
+        let progress = (t.min(u64::from(duration_ms)) << 16) / u64::from(duration_ms.max(1));
+        (i64::from(easing.apply(progress as u32)) * 1_000 / i64::from(ONE)) as u32
+    }
 }
 
 /// The level (thousandths) of a drain at LED `index` of `count` `elapsed_ms`
-/// into the look, with the ring's bottom at `bottom` (thousandths of an LED).
+/// into the look, with the ring's bottom at `bottom` (thousandths of an LED)
+/// and the drain already at `drained` (thousandths, see [`drained_at`]).
 ///
 /// The lit part is the LEDs within a distance of the bottom (the shorter arc)
 /// that the drain has not yet passed: a fill grows from the top over
 /// `fill_ms`, and from `start_ms` the edge recedes toward the bottom over
 /// `duration_ms` on `easing`. The edge is one LED soft, so an LED on it is
 /// partly lit, and the last LEDs at the bottom fade to off.
-#[allow(clippy::too_many_arguments)]
 fn drain_level(
     index: usize,
     count: usize,
     elapsed_ms: u64,
     bottom: u32,
     fill_ms: u32,
-    start_ms: u32,
-    duration_ms: u32,
-    easing: Easing,
+    drained: u32,
 ) -> u32 {
     let count = count.max(1) as i64;
     let ring = count * 1_000;
@@ -680,15 +728,7 @@ fn drain_level(
         (elapsed_ms.min(u64::from(fill_ms)) * 1_000 / u64::from(fill_ms)) as i64
     };
     let fill = edge(grown, from_top);
-    // The drain (eased), from the start.
-    let drained = if elapsed_ms < u64::from(start_ms) {
-        0
-    } else {
-        let t = elapsed_ms - u64::from(start_ms);
-        let progress = (t.min(u64::from(duration_ms)) << 16) / u64::from(duration_ms.max(1));
-        i64::from(easing.apply(progress as u32)) * 1_000 / i64::from(ONE)
-    };
-    let drain = edge(1_000 - drained, from_bottom);
+    let drain = edge(1_000 - i64::from(drained), from_bottom);
     fill.min(drain) as u32
 }
 

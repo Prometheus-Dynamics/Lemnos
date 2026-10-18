@@ -808,8 +808,9 @@ fn largest_step_per_ms(look: &LookSpec, count: usize) -> (u8, u64) {
     let idle = crate::sparkle::SparkleState::new(0, &crate::Sparkle::DEFAULT);
     let frame = |t: u64| -> [u8; 16] {
         let mut out = [0u8; 16];
+        let drained = look.drained(t);
         for (i, slot) in out.iter_mut().enumerate().take(count) {
-            *slot = look.color(i, count, t, 0, &idle, t, 0).r;
+            *slot = look.color(i, count, t, 0, &idle, t, 0, &drained).r;
         }
         out
     };
@@ -1072,4 +1073,29 @@ fn an_over_layer_blends_a_tail_without_hue_mixing_from_a_clip() {
     a.set(max, Transition::CUT, 0);
     let m = a.render(0).unwrap()[0];
     assert!(p.b < m.b, "over {p:?} vs max {m:?}");
+}
+
+#[test]
+fn a_look_can_set_its_own_frame_interval() {
+    use crate::{Animator, Easing, Effect, FRAME_MS, LookSpec, Rgbw, Transition};
+    let breathing = LookSpec::fill(Rgbw::rgb(0x102030)).with_envelope(Effect::Breathe {
+        period_ms: 1_000,
+        depth: 500,
+        easing: Easing::Linear,
+    });
+    let mut animator = Animator::<4>::new(4);
+    animator.set(breathing, Transition::CUT, 0);
+    animator.render(0);
+    // The default, then a slow look at 25 Hz.
+    assert_eq!(animator.next_frame_ms(0), Some(u64::from(FRAME_MS)));
+    animator.set(breathing.with_frame_ms(40), Transition::CUT, 0);
+    animator.render(0);
+    assert_eq!(animator.next_frame_ms(0), Some(40));
+    // Validation: 1 to 1000 ms, or 0 for the animator's interval.
+    assert_eq!(breathing.with_frame_ms(0).frame_ms, 0);
+    assert_eq!(breathing.with_frame_ms(1_000).validate(), Ok(()));
+    assert_eq!(
+        breathing.with_frame_ms(1_001).validate(),
+        Err("a look's frame_ms must be 0 (the default) or 1 to 1000")
+    );
 }

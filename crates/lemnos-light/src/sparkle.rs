@@ -172,6 +172,8 @@ pub(crate) struct SparkleState {
     len: [u16; MAX_FRAME_LEDS],
     pick: [u8; MAX_FRAME_LEDS],
     particles: [Particle; MAX_PARTICLES],
+    /// Per LED: the falling particles' light this render (see `settle_falling`).
+    falling: [Rgbw; MAX_FRAME_LEDS],
 }
 
 impl SparkleState {
@@ -192,6 +194,7 @@ impl SparkleState {
             len: [0; MAX_FRAME_LEDS],
             pick: [0; MAX_FRAME_LEDS],
             particles: [Particle::default(); MAX_PARTICLES],
+            falling: [Rgbw::OFF; MAX_FRAME_LEDS],
         }
     }
 
@@ -237,9 +240,16 @@ impl SparkleState {
         }
         let elapsed = now_ms.saturating_sub(self.since_ms);
         let density = sparkle.density_at(elapsed);
-        if dt == 0 || density == 0 {
-            return;
+        if dt != 0 && density != 0 {
+            self.spawn(now_ms, sparkle, count, dt, density);
         }
+        self.settle_falling(now16, sparkle);
+    }
+
+    /// Starts the twinkles (or falling particles) that the `dt` ms since the
+    /// last render call for, at `density` (thousandths a LED a second).
+    fn spawn(&mut self, now_ms: u64, sparkle: &Sparkle, count: usize, dt: u64, density: u64) {
+        let now16 = now_ms as u16;
         // Out of a million: the chance that an idle LED starts a twinkle now.
         let chance = density * dt;
         let colors = u32::from(sparkle.count.clamp(1, MAX_SPARKLE_COLORS as u8));
@@ -260,6 +270,32 @@ impl SparkleState {
                 self.len[index] = len.min(u32::from(u16::MAX)) as u16;
                 self.start[index] = now16;
                 self.pick[index] = (self.next_random() % colors) as u8;
+            }
+        }
+    }
+
+    /// The falling particles' light per LED, for this render: each live
+    /// particle lights the two LEDs either side of its position, weighted by
+    /// the fraction. Computed once here, so [`pixel`](Self::pixel) is a lookup
+    /// (the same per-LED maximum over the particles, without re-evaluating
+    /// every particle for every LED).
+    fn settle_falling(&mut self, now16: u16, sparkle: &Sparkle) {
+        self.falling = [Rgbw::OFF; MAX_FRAME_LEDS];
+        if !sparkle.fall || self.count == 0 {
+            return;
+        }
+        let count = self.count as usize;
+        for p in self.particles.iter().filter(|p| p.live) {
+            let (led, frac, colour, level) = self.particle_light(now16, p, sparkle);
+            let near = scale(
+                colour,
+                (u64::from(level) * u64::from(1000 - frac) / 1000) as u32,
+            );
+            self.falling[led] = max(self.falling[led], near);
+            let next = (led + 1) % count;
+            if next != led {
+                let far = scale(colour, (u64::from(level) * u64::from(frac) / 1000) as u32);
+                self.falling[next] = max(self.falling[next], far);
             }
         }
     }
@@ -308,9 +344,7 @@ impl SparkleState {
         let now16 = now_ms as u16;
         let mut out = base;
         if sparkle.fall {
-            for p in self.particles.iter().filter(|p| p.live) {
-                out = max(out, self.particle_pixel(index, now16, p, sparkle));
-            }
+            out = max(out, self.falling.get(index).copied().unwrap_or(Rgbw::OFF));
         } else if index < MAX_FRAME_LEDS && self.running(index, now16) {
             let age = u64::from(now16.wrapping_sub(self.start[index]));
             let level = twinkle_level(age, u64::from(self.len[index]));
@@ -323,16 +357,21 @@ impl SparkleState {
         out
     }
 
-    /// What falling particle `p` lights LED `index` with: its position is
-    /// fractional, shared by the two LEDs either side.
-    fn particle_pixel(&self, index: usize, now16: u16, p: &Particle, sparkle: &Sparkle) -> Rgbw {
+    /// Where falling particle `p` is this render: the LED it is at (the
+    /// lower of its two neighbours), the fraction toward the next LED, its
+    /// colour and its level (before the weight of either LED).
+    fn particle_light(
+        &self,
+        now16: u16,
+        p: &Particle,
+        sparkle: &Sparkle,
+    ) -> (usize, u32, Rgbw, u32) {
         let age = u64::from(now16.wrapping_sub(p.start));
         let ring = i64::from(self.count.max(1)) * 1_000;
         let travelled =
             travel_milli(age, sparkle.fall_speed, sparkle.fall_accel).min(u64::from(p.distance));
         let at = (i64::from(p.spawn) + i64::from(p.dir) * travelled as i64).rem_euclid(ring);
         let (led, frac) = ((at / 1_000) as usize, (at % 1_000) as u32);
-        let count = self.count.max(1) as usize;
         let mut level = twinkle_level(age, u64::from(p.len));
         let land = u64::from(p.land);
         if age >= land {
@@ -340,14 +379,7 @@ impl SparkleState {
             level = (u64::from(level) * (LAND_FADE_MS - after) / LAND_FADE_MS) as u32;
         }
         let colour = sparkle.colors[usize::from(p.pick).min(MAX_SPARKLE_COLORS - 1)];
-        let weight = if index == led % count {
-            1000 - frac
-        } else if index == (led + 1) % count {
-            frac
-        } else {
-            return Rgbw::OFF;
-        };
-        scale(colour, (u64::from(level) * u64::from(weight) / 1000) as u32)
+        (led, frac, colour, level)
     }
 }
 

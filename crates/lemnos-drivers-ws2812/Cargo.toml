@@ -17,3 +17,10 @@ workspace = true
 
 [dependencies]
 lemnos-device.workspace = true
+
+[features]
+default = []
+# `encode_spi_byte` reads a 256-entry table (768 bytes of flash) instead of
+# expanding the eight bits, which is faster on an MCU's SPI path. Off by
+# default, so the default build is unchanged.
+spi-lut = []

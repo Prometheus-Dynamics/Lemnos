@@ -328,7 +328,11 @@ impl<const N: usize> Animator<N> {
     /// When to render next: in `frame_ms` while animating or before the
     /// first write, `None` when steady.
     pub fn next_frame_ms(&self, now_ms: u64) -> Option<u64> {
-        (self.is_animating(now_ms) || !self.written).then(|| now_ms + u64::from(self.frame_ms))
+        let interval = match self.look.frame_ms {
+            0 => self.frame_ms,
+            look => look,
+        };
+        (self.is_animating(now_ms) || !self.written).then(|| now_ms + u64::from(interval))
     }
 
     /// Renders the frame for `now_ms`. Returns it when it differs from the
@@ -351,6 +355,7 @@ impl<const N: usize> Animator<N> {
             self.sparkle
                 .advance(now_ms, &sparkle, self.count, self.bottom);
         }
+        let drained = self.look.drained(elapsed);
         let mut changed = !self.written;
         for index in 0..self.count {
             let color = self.look.color(
@@ -361,6 +366,7 @@ impl<const N: usize> Animator<N> {
                 &self.sparkle,
                 now_ms,
                 self.bottom,
+                &drained,
             );
             let target = scale(color, level);
             let pixel = match fade {
