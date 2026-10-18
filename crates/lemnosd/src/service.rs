@@ -988,13 +988,15 @@ impl Service {
             if self.lights[li].watchers.is_empty() {
                 continue;
             }
-            let info = self.light_info(li);
-            let device = self.slots[self.lights[li].slot].id().to_string();
+            self.refresh_light_info(li);
             let n = self.lights[li].count.min(MAX_LEDS);
             let light = &mut self.lights[li];
             let current = light.current;
+            let Some((_, info)) = light.info.as_ref() else {
+                continue;
+            };
             for w in &mut light.watchers {
-                if w.info_sent.as_ref() != Some(&info) {
+                if w.info_sent.as_ref() != Some(info) {
                     w.info_sent = Some(info.clone());
                     outgoing.push((w.client, Message::LightInfo(info.clone())));
                 }
@@ -1017,7 +1019,7 @@ impl Service {
                 outgoing.push((
                     w.client,
                     Message::Frame(LightFrame {
-                        device: device.clone(),
+                        device: info.device.clone(),
                         seq: w.seq,
                         pixels,
                     }),
@@ -1029,6 +1031,21 @@ impl Service {
                 c.send(&message);
             }
         }
+    }
+
+    /// Rebuilds a light's description only when what it reports may have
+    /// changed since it was built (`Light::info_gen`).
+    fn refresh_light_info(&mut self, li: usize) {
+        let generation = self.lights[li].info_gen;
+        if self.lights[li]
+            .info
+            .as_ref()
+            .is_some_and(|(built, _)| *built == generation)
+        {
+            return;
+        }
+        let info = self.light_info(li);
+        self.lights[li].info = Some((generation, info));
     }
 
     /// A light's geometry and what it shows now.

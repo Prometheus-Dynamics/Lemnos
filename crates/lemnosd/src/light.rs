@@ -45,6 +45,12 @@ pub(crate) struct Light {
     pub has_frame: bool,
     /// Clients watching this light's frames (`Request::WatchFrames`).
     pub watchers: Vec<FrameWatch>,
+    /// Bumped when what the light's description (`LightInfo`) reports may
+    /// have changed: the shown intent (`arbitrate`, `invalidate`) or the
+    /// ring brightness (`light_setting`).
+    pub info_gen: u64,
+    /// The description last built, and the `info_gen` it was built at.
+    pub info: Option<(u64, lemnos_ipc::LightInfo)>,
 }
 
 /// A client's watch of a light's frames: the least time between two frames,
@@ -100,6 +106,8 @@ impl Light {
             current: [Rgbw::OFF; MAX_LEDS],
             has_frame: false,
             watchers: Vec::new(),
+            info_gen: 0,
+            info: None,
         }
     }
 
@@ -245,6 +253,7 @@ impl Light {
         }
         let previous = self.shown.map(|(_, _, intent)| intent.show);
         self.shown = key;
+        self.info_gen += 1;
         let (look, transition) = match &winner {
             // The ember of a restart hands over to a trial boot's sparkle in
             // a slow cross-fade, not the usual fade.
@@ -278,6 +287,7 @@ impl Light {
     /// file changed).
     pub fn invalidate(&mut self) {
         self.shown = None;
+        self.info_gen += 1;
     }
 
     /// When the light needs attention next: a frame or an expiry. A frame
