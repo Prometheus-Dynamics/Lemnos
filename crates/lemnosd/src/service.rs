@@ -3,7 +3,7 @@
 
 use crate::calibration;
 use crate::clients::Client;
-use crate::devices::{Placement, Slot, Subscription, WHOLE_DEVICE, channel_mask};
+use crate::devices::{Placement, Slot, Subscription, WHOLE_DEVICE, channel_mask, masked_values};
 use crate::fusion::{self, Fusion};
 use crate::light::{FrameWatch, Light, LightIntent, MAX_LEDS, next_frame_due};
 use crate::looks::LookTable;
@@ -26,6 +26,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -161,6 +162,10 @@ pub struct Service {
     pollfds: Vec<PollFd>,
     /// The sensors the scheduler looks at (reused between passes).
     due: Vec<Due>,
+    /// The subscribers due for a sample, as (client, mask) (reused).
+    due_subscribers: Vec<(u32, u64)>,
+    /// The frames encoded for one sample, by channel mask (reused).
+    encoded: Vec<(u64, Rc<Vec<u8>>)>,
     /// The named looks (built-in, board, look files).
     looks: LookTable,
     next_looks_ms: u64,
@@ -225,6 +230,8 @@ impl Service {
             next_watchdog_ms: 0,
             pollfds: Vec::new(),
             due: Vec::new(),
+            due_subscribers: Vec::new(),
+            encoded: Vec::new(),
             looks,
             next_looks_ms: 0,
             workers: Workers::new()?,
@@ -410,39 +417,58 @@ impl Service {
     /// Sends the reading at `read_us` to each subscriber whose next
     /// deadline it meets, and moves those deadlines on.
     fn deliver(&mut self, index: usize, read_us: u64, now_us: u64) {
-        let due: Vec<(u32, u64)> = self.slots[index]
-            .subscriptions
-            .iter_mut()
-            .filter(|s| s.next_us <= read_us)
-            .map(|s| {
-                s.next_us = schedule::advance(s.next_us, u64::from(s.period_ms) * 1000, now_us);
-                (s.client, s.mask)
-            })
-            .collect();
-        if due.is_empty() {
-            return;
+        let mut due = std::mem::take(&mut self.due_subscribers);
+        due.clear();
+        due.extend(
+            self.slots[index]
+                .subscriptions
+                .iter_mut()
+                .filter(|s| s.next_us <= read_us)
+                .map(|s| {
+                    s.next_us = schedule::advance(s.next_us, u64::from(s.period_ms) * 1000, now_us);
+                    (s.client, s.mask)
+                }),
+        );
+        if !due.is_empty() {
+            let slot = &self.slots[index];
+            let channels = slot.info.map_or(0, |i| i.channels.len());
+            let values = slot.values;
+            let timestamp_us = slot.read_us;
+            self.fan_out(index, timestamp_us, &values[..channels], &due);
         }
-        let device = self.slots[index].id().to_string();
-        let status = self.slots[index].status;
-        let timestamp_us = self.slots[index].read_us;
-        let sends: Vec<(usize, Message)> = self
-            .clients
-            .iter()
-            .enumerate()
-            .filter_map(|(ci, c)| {
-                let mask = client_mask(&due, c.id)?;
-                let message = Message::Reading(RawReading {
-                    device: device.clone(),
-                    timestamp_us,
-                    status,
-                    values: self.slots[index].channel_values_for(mask),
-                });
-                Some((ci, message))
-            })
-            .collect();
-        for (ci, message) in sends {
-            self.clients[ci].send(&message);
+        self.due_subscribers = due;
+    }
+
+    /// Sends one sample of slot `index` (`values`: one per channel, taken at
+    /// `timestamp_us`) to each client in `due`, with the channels its mask
+    /// asks for. A frame is encoded once per distinct mask and shared by the
+    /// clients that asked for that mask.
+    fn fan_out(&mut self, index: usize, timestamp_us: u64, values: &[i32], due: &[(u32, u64)]) {
+        let mut encoded = std::mem::take(&mut self.encoded);
+        encoded.clear();
+        let slot = &self.slots[index];
+        let (device, status) = (slot.id(), slot.status);
+        for client in &mut self.clients {
+            let Some(mask) = client_mask(due, client.id) else {
+                continue;
+            };
+            let at = match encoded.iter().position(|(m, _)| *m == mask) {
+                Some(at) => at,
+                None => {
+                    let mut scratch = [lemnos_device::NO_VALUE; lemnos_device::MAX_CHANNELS];
+                    let frame = lemnos_ipc::encode_reading(
+                        device,
+                        timestamp_us,
+                        status,
+                        masked_values(values, mask, &mut scratch),
+                    );
+                    encoded.push((mask, Rc::new(frame)));
+                    encoded.len() - 1
+                }
+            };
+            client.send_reading(&encoded[at].1);
         }
+        self.encoded = encoded;
     }
 
     /// Takes the reads that finished on the bus threads, then starts the
@@ -539,16 +565,15 @@ impl Service {
         period_us: u64,
     ) {
         let channels = self.slots[index].info.map_or(0, |i| i.channels.len());
-        let device = self.slots[index].id().to_string();
-        let status = self.slots[index].status;
         let last = samples.len() as u64 - 1;
+        let mut due = std::mem::take(&mut self.due_subscribers);
         for (i, values) in samples.iter().enumerate() {
             let at_us = read_us.saturating_sub((last - i as u64) * period_us);
             // A sample within half a sample period of a deadline is due for it:
             // a request in whole milliseconds (2 ms for a 400 Hz stream) then
             // gets every sample, not one in three.
             let slack = period_us / 2;
-            let mut due: Vec<(u32, u64)> = Vec::new();
+            due.clear();
             for sub in self.slots[index].subscriptions.iter_mut() {
                 if sub.next_us <= at_us + slack {
                     sub.next_us =
@@ -559,26 +584,9 @@ impl Service {
             if due.is_empty() {
                 continue;
             }
-            let sends: Vec<(u32, Message)> = self
-                .clients
-                .iter()
-                .filter_map(|c| {
-                    let mask = client_mask(&due, c.id)?;
-                    let message = Message::Reading(RawReading {
-                        device: device.clone(),
-                        timestamp_us: at_us,
-                        status,
-                        values: mask_values(&values[..channels], mask),
-                    });
-                    Some((c.id, message))
-                })
-                .collect();
-            for (id, message) in sends {
-                if let Some(client) = self.clients.iter_mut().find(|c| c.id == id) {
-                    client.send(&message);
-                }
-            }
+            self.fan_out(index, at_us, &values[..channels], &due);
         }
+        self.due_subscribers = due;
     }
 
     /// Sends a one-shot reader its reading, or why there is none.
@@ -1876,21 +1884,6 @@ fn client_mask(due: &[(u32, u64)], client: u32) -> Option<u64> {
         found = Some(found.unwrap_or(0u64) | mask);
     }
     found
-}
-
-/// `values` with no value for the channels outside `mask`.
-fn mask_values(values: &[i32], mask: u64) -> Vec<i32> {
-    values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            if i < 64 && mask & (1 << i) != 0 {
-                *v
-            } else {
-                lemnos_device::NO_VALUE
-            }
-        })
-        .collect()
 }
 
 /// Whether the frame `current` differs from the last one watcher `w` was sent,

@@ -39,6 +39,24 @@ pub(crate) struct Subscription {
 /// Every channel of a device (`u64::MAX` for a whole-device subscription).
 pub(crate) const WHOLE_DEVICE: u64 = u64::MAX;
 
+/// `values` with no value for the channels outside `mask`, written into
+/// `out`; returns the first `values.len()` entries of `out` (one per channel).
+pub(crate) fn masked_values<'a>(
+    values: &[i32],
+    mask: u64,
+    out: &'a mut [i32; MAX_CHANNELS],
+) -> &'a [i32] {
+    let n = values.len();
+    for (i, (slot, value)) in out[..n].iter_mut().zip(values).enumerate() {
+        *slot = if i < 64 && mask & (1 << i) != 0 {
+            *value
+        } else {
+            NO_VALUE
+        };
+    }
+    &out[..n]
+}
+
 /// The channels of `info` named by `names`: a channel's name, `prefix.*` for
 /// every channel under `prefix.`, or `*` for all. `None` when a name is none of
 /// the device's (or there is no name).
@@ -413,21 +431,6 @@ impl Slot {
             .filter(|s| s.next_us <= now_us + slack)
             .fold(0u64, |m, s| m | (s.mask & all));
         if mask == 0 { all } else { mask }
-    }
-
-    /// The channel values a reader wanting `mask` gets: the device's values
-    /// for those channels, and no value for the rest.
-    pub fn channel_values_for(&self, mask: u64) -> Vec<i32> {
-        let n = self.info.map_or(0, |i| i.channels.len());
-        (0..n)
-            .map(|i| {
-                if i < 64 && mask & (1 << i) != 0 {
-                    self.values[i]
-                } else {
-                    NO_VALUE
-                }
-            })
-            .collect()
     }
 
     /// Whether a power switch's `power.fault` input reads asserted.

@@ -5,10 +5,16 @@ use lemnos_ipc::{Event, Message, Request, WireError, decode_request};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 
 /// Bytes queued for a client before old readings, then old events, are
-/// dropped.
-const MAX_QUEUED: usize = 256 * 1024;
+/// dropped. Readings are superseded by the next one, so a client that is
+/// this far behind is better off with the newest values than an old backlog.
+const MAX_QUEUED: usize = 64 * 1024;
+/// The read buffer's starting size, and the size it returns to after a
+/// request larger than `READ_SHRINK_ABOVE` (the largest request is ~70 KiB).
+const READ_START: usize = 1024;
+const READ_SHRINK_ABOVE: usize = 16 * 1024;
 
 /// What a request needs to know about its client.
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +47,9 @@ pub(crate) struct Client {
     pub greeted: bool,
     pub stream: UnixStream,
     read: Vec<u8>,
-    queue: VecDeque<(Class, Vec<u8>)>,
+    /// Frames waiting to be written. A reading's frame is shared with every
+    /// client it goes to (see `send_reading`).
+    queue: VecDeque<(Class, Rc<Vec<u8>>)>,
     queued: usize,
     written: usize,
     /// Events dropped and not yet reported.
@@ -61,7 +69,7 @@ impl Client {
             events: true,
             greeted: false,
             stream,
-            read: Vec::with_capacity(1024),
+            read: Vec::with_capacity(READ_START),
             queue: VecDeque::new(),
             queued: 0,
             written: 0,
@@ -93,6 +101,11 @@ impl Client {
             self.read.drain(..used);
             requests.push(request);
         }
+        // A large request leaves a large buffer behind; give it back once
+        // the buffer is empty again.
+        if self.read.is_empty() && self.read.capacity() > READ_SHRINK_ABOVE {
+            self.read = Vec::with_capacity(READ_START);
+        }
         Ok(requests)
     }
 
@@ -105,7 +118,16 @@ impl Client {
             Message::Event(_) => Class::Event,
             _ => Class::Answer,
         };
-        let frame = message.encode();
+        self.enqueue(class, Rc::new(message.encode()));
+    }
+
+    /// Queues a reading whose frame (`lemnos_ipc::encode_reading`) the caller
+    /// encoded once for every client that gets the same channels.
+    pub fn send_reading(&mut self, frame: &Rc<Vec<u8>>) {
+        self.enqueue(Class::Reading, Rc::clone(frame));
+    }
+
+    fn enqueue(&mut self, class: Class, frame: Rc<Vec<u8>>) {
         self.queued += frame.len();
         self.queue.push_back((class, frame));
         for victim in [Class::Reading, Class::Event] {
@@ -131,9 +153,10 @@ impl Client {
         self.flush();
         if self.dropped > 0 && self.queued < MAX_QUEUED / 2 {
             let count = std::mem::take(&mut self.dropped);
-            let frame = Message::Event(Event::Dropped { count }).encode();
-            self.queued += frame.len();
-            self.queue.push_back((Class::Answer, frame));
+            self.enqueue(
+                Class::Answer,
+                Rc::new(Message::Event(Event::Dropped { count }).encode()),
+            );
             self.flush();
         }
     }
@@ -168,7 +191,40 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lemnos_ipc::decode_message;
+    use lemnos_device::{DeviceStatus, NO_VALUE};
+    use lemnos_ipc::{RawReading, decode_message, encode_reading};
+
+    #[test]
+    fn a_shared_reading_frame_is_the_reading_message() {
+        let (server, mut peer) = UnixStream::pair().unwrap();
+        let mut first = Client::new(1, server).unwrap();
+        let (server, _peer2) = UnixStream::pair().unwrap();
+        let mut second = Client::new(2, server).unwrap();
+        let values = [9_806, NO_VALUE, -3];
+        let message = Message::Reading(RawReading {
+            device: "imu".into(),
+            timestamp_us: 7,
+            status: DeviceStatus::Available,
+            values: values.to_vec(),
+        });
+        // One encoding for two clients: the first client's bytes are what the message encodes to.
+        let frame = Rc::new(encode_reading("imu", 7, DeviceStatus::Available, &values));
+        first.send_reading(&frame);
+        second.send_reading(&frame);
+        peer.set_nonblocking(true).unwrap();
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = peer.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(
+            decode_message(&received).unwrap(),
+            Some((message, received.len()))
+        );
+    }
 
     #[test]
     fn events_a_client_does_not_read_are_dropped_and_counted() {

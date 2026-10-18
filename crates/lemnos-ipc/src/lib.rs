@@ -46,5 +46,5 @@ pub use lemnos_light::{
 pub use wire::{
     ChannelDesc, ControlDesc, DeviceDesc, Event, I2cOp, LedRequest, LedShow, LightFrame, LightInfo,
     LineTarget, LooksOp, Message, PwmTarget, RawReading, RawRequest, Refusal, Request, SpiXfer,
-    VERSION, WireError, decode_message, decode_request,
+    VERSION, WireError, decode_message, decode_request, encode_reading,
 };
