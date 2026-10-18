@@ -69,7 +69,9 @@ impl Service {
         read_us: u64,
         period_us: u64,
     ) {
-        let mut changed = Vec::new();
+        // Reused between samples: a fusion's index is pushed when its output changed.
+        let mut changed = std::mem::take(&mut self.fusion_changed);
+        changed.clear();
         for fi in 0..self.fusions.len() {
             let (imu, mag) = (self.fusions[fi].imu, self.fusions[fi].mag);
             let is_imu = imu == index;
@@ -98,7 +100,7 @@ impl Service {
                 changed.push(fi);
             }
         }
-        for fi in changed {
+        for &fi in &changed {
             let slot = self.fusions[fi].slot;
             if let Some(status) = self.fusions[fi].publish(&mut self.slots) {
                 self.status_event(slot, status);
@@ -106,5 +108,6 @@ impl Service {
             let (out_us, now_us) = (self.slots[slot].read_us, self.now_us());
             self.deliver(slot, out_us, now_us);
         }
+        self.fusion_changed = changed;
     }
 }

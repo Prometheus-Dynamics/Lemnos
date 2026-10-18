@@ -175,6 +175,8 @@ pub struct Service {
     state_dir: Option<PathBuf>,
     /// The orientation fusion devices built so far (see `fusion.rs`).
     fusions: Vec<Fusion>,
+    /// The fusion devices whose output changed on a sample (reused).
+    fusion_changed: Vec<usize>,
     calibration_dir: PathBuf,
     next_calibration_ms: u64,
 }
@@ -237,6 +239,7 @@ impl Service {
             workers: Workers::new()?,
             state_dir: config.state_dir.clone(),
             fusions: Vec::new(),
+            fusion_changed: Vec::new(),
             calibration_dir: config.calibration_dir,
             next_calibration_ms: 0,
         };
