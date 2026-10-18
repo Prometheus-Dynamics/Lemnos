@@ -31,9 +31,17 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - `lemnos-ctl` is its own crate (`crates/lemnos-ctl`, package `lemnos-ctl`, binary and install path unchanged) and no longer ships inside the `lemnosd` package. Its board and look-file tooling (`validate`, `light gravity`, `looks save`, `led show` from a file or a TOML/JSON body) is behind a `board` feature, default on; without it those commands report that the build lacks the feature and everything else behaves the same. The stop helper's fan hand-back moved to `lemnos_drivers_linux::fan_restore` (the state file, `restore_after_stop`) and the board's hwmon fans to `lemnos_board::fans`; `lemnosd::fans` keeps its paths.
 - Feature sets to build smaller: `lemnos-board` has `drv-bmi088`, `drv-bmm150`, `drv-ina2xx`, `drv-vcm`, `drv-ws2812`, `drv-hwmon-fan`, `drv-thermal-zone` and `drv-gpio` (grouped by `drivers`), `json` and `rp1` (all default on). A board build takes its drivers by name (`--no-default-features --features ...`). `lemnos-core`'s PIO I2C numbers, `lemnos-linux`'s PIO bus and `lemnos-linux-sys`'s `rp1_pio` are behind `rp1`.
 - Sizes (stripped, `service` profile, aarch64-musl; host x86_64 in parentheses): `lemnos-ctl` 914,656 B (1,007,328) with the board feature, 519,512 B (502,128) without it; `lemnosd` 1,171,752 B (1,294,464), from 1,171,472 B (1,292,984) before. `lemnos-discovery`'s `parallel` feature was already off for `lemnosd`.
+- **Breaking (examples and dev tooling):** the Raze board definition moved from `crates/lemnos-board/examples/raze.toml` to `crates/lemnos-board/examples/boards/raze-example.toml`, and its id is now `raze-example`. Anything that included the old path must update it.
+- Tests and examples use role names for their clients and boards: `helios` is `app`, `photonvision` is `vision`, `atlas` in the tests that do not exercise the look-writer policy is `manager`, the test board id is `example`, and the test device ids are `example.*`. The wire protocol and the daemon's behaviour are unchanged.
+- `lemnos-board`'s test fixtures are named for the example board (`EXAMPLE`, `ExampleBus`), and the camera-sensor power consumer in the Linux GPIO tests is `camera-power`.
+- The HeliOS and PhotonVision sections of `docs/system-service.md` are a generic client section (`lemnos-ctl led ...` mapping and the `--client` names). The HeliOS adoption steps in `docs/board-definition.md` are generic; the app-side wiring belongs in the app's repository.
+- `docs/foundation.md` is the design; the Styx migration tables, the steps and the open cross-repo items moved to `docs/provenance.md`. Code comments that said "Ported from Styx" now point there.
+- The `TODO.md` consumer-side migration list moved out of this repository.
 
 ### Removed
 
+- Product names are out of the library's code, tests, examples and docs. A CI name check (`scripts/check-names.sh`, allowlist `scripts/check-names.allow`) runs in the `docs-and-lints` job and fails on a product name outside the allowlist.
+- `testing/device/helios-board-validator.env` (a live board's sensor targets) is removed; it belongs to the app that owns that board. `testing/device/run-linux-device-validator.sh` now defaults to `linux-device-validator.env`.
 - The crates.io packaging check (`ci.sh package-surface` and its CI job). Lemnos is used as a git dependency and is not published to crates.io; lemnosd's `orion` feature depends on Orion through git, which `cargo package` cannot resolve.
 
 ### Added

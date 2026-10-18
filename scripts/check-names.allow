@@ -1,0 +1,34 @@
+# Exemptions for scripts/check-names.sh. Every entry needs a reason (the last
+# column). Keep this list short: each entry is a known leak that is either a
+# record of provenance or waits for a decision that is not this repo's to make.
+#
+# kind	pattern	reason
+file	CHANGELOG.md	release history: names of past releases and their products
+file	docs/provenance.md	record of where generic code came from and the cross-repo migration
+file	scripts/check-names.sh	the checker's own product-name list
+file	scripts/check-names.allow	this allowlist
+file	crates/lemnos-board/examples/boards/*	the Raze-class example board file, kept as an example (see docs/board-definition.md)
+file	packaging/systemd/lemnosd.service	LEFT FOR USER: Before= names the client units; move to the image's drop-ins
+#
+# LEFT FOR USER: the built-in look writers are the client names "atlas" (the
+# device manager), "lemnos-ctl" and "orion:*" (crates/lemnosd/src/service.rs).
+# Moving them into board configuration changes who may write looks on deployed
+# boards, so it waits for a decision. The files that test or document this
+# policy keep the literal name:
+scoped	crates/lemnosd/src/service.rs	atlas	LEFT FOR USER: built-in look-writer policy, the manager's client name
+scoped	crates/lemnosd/tests/presets.rs	atlas	tests of the look-writer policy (client name)
+scoped	crates/lemnosd/tests/looks.rs	atlas	tests of the look-writer policy (client name)
+scoped	docs/looks.md	atlas	documents the look-writer policy and the manager's client name
+scoped	docs/board-definition.md	atlas	writers examples use the manager's client name (policy)
+scoped	docs/orion.md	atlas	writers example uses the manager's client name (policy)
+#
+# LEFT FOR USER: the built-in named looks pv.* (targets, searching, no-nt,
+# no-nt-targets, error, vision) are the vision app's look names. They are wire
+# data that clients send and look files that boards carry, so renaming them
+# needs an alias step first. The look-name tokens are exempt everywhere.
+token	[Pp]v\.[A-Za-z0-9_.*-]*	LEFT FOR USER: built-in look names pv.* (wire data; rename with aliases)
+token	looks\.pv\b	LEFT FOR USER: look-name paths in validation messages and docs (same rename)
+token	"Pv 	look-name validation test (same rename)
+#
+# The Raze-class example board: its file name and id are kept as an example.
+token	raze-example	the example board's file name and id (crates/lemnos-board/examples/boards)

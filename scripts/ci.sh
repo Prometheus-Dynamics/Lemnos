@@ -76,6 +76,9 @@ run_docs_and_lints() {
   echo "==> [docs-and-lints] Checking file sizes"
   timed "docs-and-lints: file sizes" "$root_dir/scripts/check-file-sizes.sh"
 
+  echo "==> [docs-and-lints] Checking for product names outside the allowlist"
+  timed "docs-and-lints: product names" "$root_dir/scripts/check-names.sh"
+
   echo "==> [docs-and-lints] Running default-feature clippy"
   timed "docs-and-lints: clippy (default features)" cargo clippy --workspace --all-targets -- -D warnings
 
