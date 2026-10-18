@@ -202,8 +202,8 @@ pub(crate) fn solve9(a: &mut [[f32; 9]; 9], b: &mut [f32; 9], scale_ref: f32) ->
                 piv = row;
             }
         }
-        let pv = abs(a[piv][col]);
-        if pv.is_nan() || pv <= tiny {
+        let pivot_abs = abs(a[piv][col]);
+        if pivot_abs.is_nan() || pivot_abs <= tiny {
             return None;
         }
         if piv != col {

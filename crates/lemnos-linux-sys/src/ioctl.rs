@@ -1,6 +1,6 @@
 //! Linux ioctl request encoding (the asm-generic layout used by arm, arm64,
 //! x86, riscv and loongarch) and checked, `EINTR`-retrying ioctl calls.
-//! Ported from Styx (`styx-kernel/src/bus/ioctl.rs`).
+//! Ported from the earlier stack (see docs/provenance.md).
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};

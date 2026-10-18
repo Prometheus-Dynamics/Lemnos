@@ -8,7 +8,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "imu"
@@ -28,6 +28,6 @@ config = { gyro_address = 0x68, accel_range = "6g" }
   mainline IIO/hwmon driver through `lemnos-drivers-linux`'s generic binding; both report
   the same channels.
 
-`examples/raze.toml` is the Raze; `cargo run -p lemnos-board --example validate -- file...`
+`examples/boards/raze-example.toml` is an example sensor board; `cargo run -p lemnos-board --example validate -- file...`
 checks files. The format is documented in `docs/board-definition.md` with a JSON Schema in
 `docs/schemas/lemnos-board.schema.json`.

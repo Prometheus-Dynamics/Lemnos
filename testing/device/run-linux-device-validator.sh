@@ -2,7 +2,7 @@
 set -eu
 
 BIN="${1:-./linux_device_validator}"
-CONFIG="${2:-./helios-board-validator.env}"
+CONFIG="${2:-./linux-device-validator.env}"
 
 if "$BIN" "$CONFIG"; then
     exit 0

@@ -1,7 +1,7 @@
 //! The kernel's uevent socket (`NETLINK_KOBJECT_UEVENT`): devices appearing,
 //! going away, binding to drivers. What udev listens to, without udev.
-//! Unprivileged processes may listen. Ported from Styx
-//! (`styx-kernel/src/uevent.rs`).
+//! Unprivileged processes may listen. Ported from the earlier stack (see docs/provenance.md)
+//!.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};

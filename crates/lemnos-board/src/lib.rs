@@ -3,7 +3,7 @@
 //! A board definition is a versioned TOML or JSON file that lists a board's
 //! devices: which generic driver each uses, on which bus and address (or
 //! which kernel class device), with which settings. It is written once per
-//! board, by hand or generated (Atlas generates it from a device manifest),
+//! board, by hand or generated (the manager generates it from a device manifest),
 //! and every host consumes the same file:
 //!
 //! - the full runtime (`lemnos` facade, feature `board`) turns each device
@@ -18,7 +18,7 @@
 //! schema_version = 1
 //!
 //! [board]
-//! id = "raze"
+//! id = "example"
 //!
 //! [[devices]]
 //! id = "imu"

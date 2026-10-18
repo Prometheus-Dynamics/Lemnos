@@ -31,7 +31,7 @@ default = []
 # client tests.
 mock = ["lemnos-hal/mock"]
 # The Orion bridge: `lemnos-orion`, a lemnosd client and an Orion provider
-# over local IPC (`lemnosd::orion`). Pins Orion f8d767ac (control protocol 5, the orion-node the Raze images ship). `orion-node`
+# over local IPC (`lemnosd::orion`). Pins Orion f8d767ac (control protocol 5, the orion-node that board images ship). `orion-node`
 # is a dev-dependency (only the bridge's tests run an in-process node), so the
 # binary never links it: its default features pull rustls and ring, which the
 # musl artifact cannot build without a C cross toolchain.

@@ -45,7 +45,7 @@ fn requests_round_trip() {
     });
     round_trip_request(Request::Hello {
         version: VERSION,
-        client: "helios".into(),
+        client: "app".into(),
         priority: 80,
         keep: true,
         events: false,
@@ -180,7 +180,7 @@ fn messages_round_trip() {
     });
     round_trip_message(Message::Welcome {
         version: VERSION,
-        board: "raze".into(),
+        board: "example".into(),
         client_id: 3,
     });
     round_trip_message(Message::Devices(vec![DeviceDesc {
@@ -223,7 +223,7 @@ fn messages_round_trip() {
         device: "fan".into(),
         control: "duty".into(),
         value: 0.5,
-        by: "helios".into(),
+        by: "app".into(),
     }));
     round_trip_message(Message::Event(Event::Status {
         device: "imu".into(),
@@ -233,7 +233,7 @@ fn messages_round_trip() {
     }));
     round_trip_message(Message::Event(Event::LedOwner {
         device: "ring".into(),
-        owner: "photonvision".into(),
+        owner: "vision".into(),
         layer: "status".into(),
     }));
 }
@@ -529,7 +529,7 @@ fn looks_round_trip_by_name_inline_and_in_text() {
         clockwise: true,
         look: "pv.targets".into(),
         layer: "app".into(),
-        owner: "atlas".into(),
+        owner: "manager".into(),
         look_brightness: 250,
     }));
     round_trip_message(Message::Text {

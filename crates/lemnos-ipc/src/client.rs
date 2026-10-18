@@ -1,7 +1,7 @@
 //! Clients of `lemnosd`: [`DeviceClient`] (devices, readings, controls) and
 //! [`LedClient`] (LED intents). Both connect with a timeout, can reconnect in
 //! the background, and report connection changes in order with what they
-//! receive ([`ClientEvent`]), like Styx's `FrameClient` and `ControlClient`.
+//! receive ([`ClientEvent`]), like the earlier stack's `FrameClient` and `ControlClient`.
 
 use crate::wire::{
     self, ChannelDesc, DeviceDesc, Event, LedRequest, Message, RawReading, Refusal, Request,

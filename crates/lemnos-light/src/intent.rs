@@ -223,7 +223,7 @@ impl EffectKind {
 }
 
 /// How intents look unless they say otherwise; a board definition sets
-/// them per light (the Raze: 250 ms ease-in-out fades, breathing status).
+/// them per light (the example board: 250 ms ease-in-out fades, breathing status).
 /// The built-in looks are made from these, so the board's keys still shape
 /// them; a look file overrides a built-in entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

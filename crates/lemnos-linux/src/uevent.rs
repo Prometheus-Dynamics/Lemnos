@@ -1,6 +1,6 @@
 //! Kernel uevents (`NETLINK_KOBJECT_UEVENT`): devices appearing, going away,
 //! binding to drivers, without udev. Unprivileged processes may listen.
-//! Ported from Styx (`styx-kernel/src/uevent.rs`); `LinuxHotplugWatcher`
+//! Ported from the earlier stack (see docs/provenance.md); `LinuxHotplugWatcher`
 //! (feature `hotplug`) is built on it.
 
 use lemnos_linux_sys::{netlink, poll};

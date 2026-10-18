@@ -1,6 +1,6 @@
 //! i2c-dev (`/dev/i2c-N`): adapter functionality, target selection, combined
-//! `I2C_RDWR` transfers and SMBus transfers. Ported from Styx
-//! (`styx-kernel/src/bus/i2c.rs`).
+//! `I2C_RDWR` transfers and SMBus transfers. Ported from the earlier stack (see docs/provenance.md)
+//!.
 
 use crate::ioctl::{ioctl_int, ioctl_ptr};
 use std::io;

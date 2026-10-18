@@ -35,7 +35,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "ring"
@@ -84,7 +84,7 @@ fn a_reboot_leaves_the_ring_on_a_static_ember() {
     ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
 
     // The ring is lit green when the stop comes.
-    let mut app = ClientOptions::new(&socket, "helios").leds().unwrap();
+    let mut app = ClientOptions::new(&socket, "app").leds().unwrap();
     app.status(LedStatus::Ok).unwrap();
     app.sync().unwrap();
     eventually(|| ring(&root).chunks(4).all(|p| p == [0, 178, 0, 0]));

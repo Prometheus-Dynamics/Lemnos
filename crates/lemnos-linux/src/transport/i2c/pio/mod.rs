@@ -1,5 +1,5 @@
 //! I2C on PIO: a bit-banged I2C master on the RP1 PIO block, for pins that no
-//! hardware I2C controller drives (the Raze board's BMI088 sits on GPIO8/GPIO7).
+//! hardware I2C controller drives (an example board's BMI088 sits on GPIO8/GPIO7).
 //!
 //! The bus is named in a board definition as `bus = "pio-i2c:sda=8,scl=7"`
 //! (optionally `,hz=100000`). It gets a virtual bus number

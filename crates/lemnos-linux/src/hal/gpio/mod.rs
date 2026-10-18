@@ -340,8 +340,8 @@ impl GpioLineInfo {
     }
 }
 
-/// An open GPIO chip (`/dev/gpiochipN`), GPIO uAPI v2. Ported from Styx
-/// (`styx-kernel`'s `GpioChip`) and extended with inputs, bias, debounce and
+/// An open GPIO chip (`/dev/gpiochipN`), GPIO uAPI v2. Ported from the earlier stack (see docs/provenance.md)
+/// and extended with inputs, bias, debounce and
 /// edge events.
 #[derive(Debug)]
 pub struct GpioChip {

@@ -23,7 +23,7 @@
 //! use lemnos::prelude::*;
 //! use std::sync::Arc;
 //!
-//! let setup = BoardSetup::new(BoardDefinition::from_path("/etc/helios/sensors.toml")?)?;
+//! let setup = BoardSetup::new(BoardDefinition::from_path("/etc/lemnos/board.toml")?)?;
 //! let backend = LinuxBackend::default().with_probe(Arc::new(setup.probe()));
 //! let mut lemnos = Lemnos::builder()
 //!     .with_linux_backend_ref(&backend)

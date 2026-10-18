@@ -14,4 +14,4 @@ each system call in a safe function:
 - `poll`: waiting on one descriptor.
 
 Every `unsafe` block carries a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks` is
-denied). Applications use `lemnos-linux`, not this crate. Ported from Styx's `styx-kernel`.
+denied). Applications use `lemnos-linux`, not this crate. Ported from the earlier kernel layer (see docs/provenance.md).

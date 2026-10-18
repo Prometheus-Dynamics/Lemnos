@@ -77,13 +77,13 @@ pub struct PwmSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoardInfo {
-    /// A stable identifier: lowercase letters, digits and `-` (`raze`).
+    /// A stable identifier: lowercase letters, digits and `-` (`my-board`).
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
-    /// The tool that produced the file (`atlas 1.2.0`), when generated.
+    /// The tool that produced the file (`manager 1.2.0`), when generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_by: Option<String>,
 }

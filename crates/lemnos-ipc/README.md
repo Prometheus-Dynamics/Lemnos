@@ -1,12 +1,12 @@
 # lemnos-ipc
 
-The `lemnosd` socket protocol and its clients, modelled on Styx's `FrameClient` and
+The `lemnosd` socket protocol and its clients, modelled on the earlier stack's `FrameClient` and
 `ControlClient`:
 
 ```rust
 use lemnos_ipc::{ClientEvent, ClientOptions, LedStatus, Update};
 
-let mut devices = ClientOptions::new("/run/lemnos/lemnosd.sock", "helios")
+let mut devices = ClientOptions::new("/run/lemnos/lemnosd.sock", "app")
     .reconnecting()
     .devices()?;
 let imu = devices.read("imu")?;
@@ -20,7 +20,7 @@ match devices.next_event()? {
     ClientEvent::Data(Update::Event(e)) => {}
 }
 
-let mut leds = ClientOptions::new("/run/lemnos/lemnosd.sock", "photonvision").leds()?;
+let mut leds = ClientOptions::new("/run/lemnos/lemnosd.sock", "vision").leds()?;
 leds.status(LedStatus::Warn)?;
 leds.progress(0.4, None)?;
 leds.set_leds(&[(0, 0xff0000)])?;              // logical index 0 is the ring's top

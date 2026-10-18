@@ -2,7 +2,7 @@
 //!
 //! The structures carry no pointers, so they are public and plain; the ioctls
 //! are wrapped in safe functions. Building requests is `lemnos-linux`'s job.
-//! Ported from Styx (`styx-kernel/src/bus/gpio.rs`).
+//! Ported from the earlier stack (see docs/provenance.md).
 
 use crate::ioctl::{ioctl_ptr, ior, iowr};
 use std::io;

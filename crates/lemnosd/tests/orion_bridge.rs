@@ -112,7 +112,7 @@ async fn run_action(
 ) -> ActionState {
     let mut request = ActionRequest::new(id, ActionTarget::Resource(resource_rid()), name);
     request.args = args;
-    node.run_action(request, "helios").expect("run action");
+    node.run_action(request, "app").expect("run action");
     let result = wait_for(10, "action result", || {
         node.query_actions(&ActionQuery {
             action_id: Some(id.to_owned()),

@@ -1,5 +1,5 @@
 //! `lemnos-ctl`: the command-line client of `lemnosd`, for scripts and
-//! other runtimes (PhotonVision's GPIO commands, Atlas's self-test).
+//! other runtimes (other runtimes' GPIO commands and self-tests).
 //!
 //! ```text
 //! lemnos-ctl [--socket PATH] [--client NAME] [--priority N] <command>

@@ -1,6 +1,6 @@
 //! Look definitions as text: the `[looks.<name>]` tables of a board
 //! definition and of look files, the bare look body of `led show --spec`
-//! and `--file`, and the JSON form Atlas sends. One validator for all of
+//! and `--file`, and the JSON form the manager sends. One validator for all of
 //! them, with the file or key named in every error. [`to_toml`] writes a
 //! look back in the file form.
 //!
@@ -100,7 +100,7 @@ pub fn from_toml(source: &str, text: &str) -> Result<LookSpec, Errors> {
     body(source, "", &table)
 }
 
-/// Parses a look body in JSON (what Atlas sends).
+/// Parses a look body in JSON (what the manager sends).
 #[cfg(feature = "json")]
 pub fn from_json(source: &str, text: &str) -> Result<LookSpec, Errors> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|e| {

@@ -32,6 +32,6 @@ devices.poll(now_ms, &mut delay, &mut buf, |reading| {
 
 No discovery, driver matching, event log or allocation. The same code runs on a
 microcontroller (buses from its HAL) and on Linux (buses from `lemnos_linux::hal`):
-`cargo run -p lemnos-lite --example linux_sensors -- <i2c bus>` reads the Raze's IMU,
+`cargo run -p lemnos-lite --example linux_sensors -- <i2c bus>` reads an example board's IMU,
 magnetometer and power monitor. `scripts/check-sizes.sh` tracks a firmware image (`lite`)
 and a Linux image (`sensors-lite`) built on it.

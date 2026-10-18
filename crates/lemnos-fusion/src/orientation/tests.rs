@@ -320,7 +320,7 @@ fn outputs_stay_finite_over_random_input() {
 
 #[test]
 fn board_measured_static_values_hold_the_attitude() {
-    // The Raze, at rest on the bench: accelerometer (9.793, -0.099, -0.440)
+    // The example board, at rest on the bench: accelerometer (9.793, -0.099, -0.440)
     // m/s², gyroscope about (0, -0.005, 0.002) rad/s, 100 Hz, 6-axis.
     let mut o = Orientation::new(OrientationConfig::default());
     let a = [9.793, -0.099, -0.440];

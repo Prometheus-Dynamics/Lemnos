@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub use sys::Message as I2cMessage;
 
 /// An I2C adapter through i2c-dev (`/dev/i2c-N`, opened close-on-exec), as an embedded-hal
-/// [`I2c`] bus. Ported from Styx (`styx-kernel`'s `I2cDevice`).
+/// [`I2c`] bus. Ported from the earlier stack (see docs/provenance.md).
 ///
 /// Every operation first claims its target address with `I2C_SLAVE` (only
 /// when it changes) — never `I2C_SLAVE_FORCE` — so an address a kernel driver

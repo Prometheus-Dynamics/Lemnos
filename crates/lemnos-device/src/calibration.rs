@@ -1,5 +1,5 @@
 //! Calibration as the device model sees it: what a sensor reports about its
-//! own calibration, the commands a host (lemnosd, for Atlas) can send it, and
+//! own calibration, the commands a host (lemnosd, for its manager) can send it, and
 //! the words a host persists so the calibration survives a restart.
 //!
 //! The estimators and their maths live in the driver (they are shared through

@@ -9,7 +9,7 @@ use embedded_hal::i2c::{I2c, Operation};
 /// start, read).
 ///
 /// Register writes go out as one message per transfer: on the Raspberry Pi
-/// CM5 (RP1 DesignWare I2C) with an OV9782, packing several write messages
+/// Raspberry Pi RP1 DesignWare I2C with an OV9782, packing several write messages
 /// into one combined transfer lost or misplaced some of them, so
 /// [`write_sequence`](RegisterBus::write_sequence) never does that. With
 /// [`with_bursts`](Self::with_bursts), writes to consecutive registers share

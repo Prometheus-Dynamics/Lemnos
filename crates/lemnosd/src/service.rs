@@ -34,7 +34,7 @@ use std::time::Duration;
 const UPDATE_POLL_MS: u64 = 500;
 /// How often the look files are checked for changes.
 const LOOKS_POLL_MS: u64 = 1_000;
-/// Whether a client may change looks and presets: Atlas, the Orion bridge's
+/// Whether a client may change looks and presets: the device manager (`atlas`), the Orion bridge's
 /// callers (`orion:<requested_by>`), and `lemnos-ctl` run by an operator. The
 /// socket's permissions are the real boundary; this names who the service
 /// expects to make the changes.
@@ -1374,7 +1374,7 @@ impl Service {
                 self.clients[ci].send(&message);
             }
             Request::Looks { id, op } => {
-                // Preset changes and deletions are Atlas's, Orion's or an
+                // Preset changes and deletions are the device manager's, Orion's or an
                 // operator's (`lemnos-ctl`); other clients may only read.
                 let changes = matches!(
                     op,

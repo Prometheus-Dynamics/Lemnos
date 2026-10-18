@@ -6,7 +6,7 @@ use lemnos_light::{
     builtin_look,
 };
 
-const PV_TARGETS: &str = r#"
+const VISION_TARGETS: &str = r#"
 [looks."pv.targets"]
 envelope = { kind = "breathe", period_ms = 4000, depth = 0.18, easing = "ease-in-out" }
 brightness = 0.7
@@ -34,7 +34,7 @@ fn body_error(text: &str) -> String {
 
 #[test]
 fn a_file_of_looks_parses_with_defaults() {
-    let looks = parse_file("looks.d/pv.toml", PV_TARGETS).unwrap();
+    let looks = parse_file("looks.d/pv.toml", VISION_TARGETS).unwrap();
     assert_eq!(looks.len(), 1);
     let (name, spec) = &looks[0];
     assert_eq!(name, "pv.targets");
@@ -365,7 +365,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "ring"

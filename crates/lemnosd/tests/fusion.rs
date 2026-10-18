@@ -173,7 +173,7 @@ fn imu_at<const N: usize>(_: &DeviceSpec, _: &mut dyn Buses) -> Result<BoxedDevi
     }))
 }
 
-/// A board on its side, as the Raze rests on the bench: gravity along the
+/// A board on its side, as the example board rests on the bench: gravity along the
 /// sensor's X (accelerometer about (9.79, -0.10, -0.44) m/s²).
 fn tilted_at<const N: usize>(_: &DeviceSpec, _: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     Ok(BoxedDevice::sensor(FakeImu {
@@ -315,7 +315,7 @@ fn status(client: &mut DeviceClient, device: &str) -> lemnos_device::Calibration
 }
 
 fn connect(running: &Running) -> DeviceClient {
-    DeviceClient::connect(&running.socket, "helios").unwrap()
+    DeviceClient::connect(&running.socket, "app").unwrap()
 }
 
 /// The next reading of `device` (from the event stream), within `wait`.

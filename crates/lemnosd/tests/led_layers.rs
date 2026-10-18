@@ -35,7 +35,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "ring"
@@ -83,7 +83,7 @@ fn test_layer_shows_over_status_and_falls_back() {
     ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
 
     // Another client's high-priority status.
-    let mut app = ClientOptions::new(&socket, "helios")
+    let mut app = ClientOptions::new(&socket, "app")
         .priority(250)
         .leds()
         .unwrap();
@@ -92,7 +92,7 @@ fn test_layer_shows_over_status_and_falls_back() {
     eventually(|| first(&root) == Some([0, 178, 0, 0]));
 
     // A low-priority selftest's frame wins over it.
-    let mut selftest = ClientOptions::new(&socket, "atlas-selftest")
+    let mut selftest = ClientOptions::new(&socket, "manager-selftest")
         .priority(0)
         .leds()
         .unwrap();

@@ -10,7 +10,7 @@ fn encode(format: &VcmFormat<'_>, position: i32) -> Vec<u8> {
     bytes[..n].to_vec()
 }
 
-/// Styx's `lens::tests::chip_formats`.
+/// the earlier stack's `lens::tests::chip_formats` (docs/provenance.md).
 #[test]
 fn chip_formats() {
     // DW9714: 0x1ff << 4.

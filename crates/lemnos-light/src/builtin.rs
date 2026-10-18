@@ -96,9 +96,9 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
                 easing: d.easing,
             }),
         "system.confirmed" => confirmed(d.confirmed),
-        // PhotonVision's app looks (the board's ring is the vision app's
+        // The vision app's looks (the board's ring shows the vision app's
         // status): blue while targets are seen, green while searching, amber
-        // without NetworkTables, red on an error.
+        // without its link to the robot, red on an error.
         "pv.targets" => LookSpec::fill(Rgbw::rgb(0x28c8ff))
             .with_brightness(FULL_FILL)
             .with_envelope(Effect::Breathe {

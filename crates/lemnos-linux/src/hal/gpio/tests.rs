@@ -2,16 +2,16 @@ use super::*;
 
 #[test]
 fn builds_output_requests() {
-    // Styx's OV9782 power lines: one plain output, two active-low.
+    // A camera sensor's power lines: one plain output, two active-low.
     let lines = [
         (5, LineSettings::output(true)),
         (7, LineSettings::output(false).active_low()),
         (9, LineSettings::output(true).active_low()),
     ];
-    let req = build_request("styx-ov9782", &lines).unwrap();
+    let req = build_request("camera-power", &lines).unwrap();
     assert_eq!(&req.offsets[..3], &[5, 7, 9]);
     assert_eq!(req.num_lines, 3);
-    assert_eq!(c_string(&req.consumer), "styx-ov9782");
+    assert_eq!(c_string(&req.consumer), "camera-power");
     assert_eq!(req.config.flags, flag::OUTPUT);
     assert_eq!(req.config.num_attrs, 2);
     let flags = req.config.attrs[0];

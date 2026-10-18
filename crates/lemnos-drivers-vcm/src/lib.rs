@@ -7,8 +7,8 @@
 //! loaded at run time; with `serde`, [`VcmChip`] (and with both, the owned
 //! format) (de)serialize, so descriptions can name the chip or spell out its
 //! format.
-//! [`asynch::Vcm`] is the same over embedded-hal-async. Ported from Styx
-//! (`styx-sensor/src/lens.rs` command formats, `styx-native`'s `I2cVcm`).
+//! [`asynch::Vcm`] is the same over embedded-hal-async. Ported from the earlier stack (see docs/provenance.md)
+//!.
 //!
 //! VCMs report no position: the driver remembers the last position written.
 

@@ -19,7 +19,7 @@
 #   ]
 #
 #   [[stage.files]]
-#   id = "raze-lemnos-board"
+#   id = "board-definition"
 #   src = "@self/assets/lemnos/board.toml"
 #   dest = "/etc/lemnos/board.toml"
 #   mode = 420

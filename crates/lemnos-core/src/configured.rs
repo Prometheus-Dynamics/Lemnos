@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn configured_i2c_endpoint_builds_child_descriptor() {
         let owner =
-            DeviceDescriptor::builder("helios.bmi088.bus4.accel0x18.gyro0x68", InterfaceKind::I2c)
+            DeviceDescriptor::builder("example.bmi088.bus4.accel0x18.gyro0x68", InterfaceKind::I2c)
                 .expect("owner builder")
                 .display_name("board imu")
                 .build()
@@ -407,7 +407,7 @@ mod tests {
 
         let endpoint = ConfiguredI2cEndpoint::new("accel", 4, 0x18);
         let descriptor = endpoint
-            .descriptor_for_owner(&owner, Some("helios.sensor.bmi088"))
+            .descriptor_for_owner(&owner, Some("example.sensor.bmi088"))
             .expect("endpoint descriptor");
 
         assert_eq!(
@@ -420,14 +420,14 @@ mod tests {
         assert_eq!(descriptor.display_name.as_deref(), Some("board imu accel"));
         assert_eq!(
             descriptor.match_hints.driver_hint.as_deref(),
-            Some("helios.sensor.bmi088")
+            Some("example.sensor.bmi088")
         );
     }
 
     #[test]
     fn configured_gpio_signal_builds_synthetic_descriptor_when_needed() {
         let owner =
-            DeviceDescriptor::builder("helios.bmi088.bus4.accel0x18.gyro0x68", InterfaceKind::I2c)
+            DeviceDescriptor::builder("example.bmi088.bus4.accel0x18.gyro0x68", InterfaceKind::I2c)
                 .expect("owner builder")
                 .display_name("board imu")
                 .build()
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn configured_gpio_signal_can_link_to_existing_device() {
-        let owner_id = DeviceId::new("helios.bmi088.bus4.accel0x18.gyro0x68").expect("owner id");
+        let owner_id = DeviceId::new("example.bmi088.bus4.accel0x18.gyro0x68").expect("owner id");
         let binding = ConfiguredGpioSignalBinding::new(
             "gyro_int",
             ConfiguredGpioSignal::by_device_id("linux.gpio.line.gpiochip4.24")

@@ -12,7 +12,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "ring"
@@ -84,7 +84,7 @@ fn frame_of(leds: &mut lemnos_ipc::LedClient, colour: u32) -> lemnos_ipc::LightF
 #[test]
 fn a_watch_sends_the_description_and_each_change_once() {
     let service = start();
-    let mut leds = ClientOptions::new(service.socket(), "atlas")
+    let mut leds = ClientOptions::new(service.socket(), "manager")
         .leds()
         .unwrap();
     // A colour before the watch: the watch starts from what the ring shows.
@@ -97,7 +97,7 @@ fn a_watch_sends_the_description_and_each_change_once() {
     assert_eq!(info.count, 4);
     assert_eq!(info.offset, 1);
     assert!(!info.clockwise);
-    assert_eq!(info.owner, "atlas");
+    assert_eq!(info.owner, "manager");
 
     // A colour fill shows at the look's 70% (the frame is what the ring shows).
     let first = frame_of(&mut leds, 0x00b2_0000);
@@ -117,7 +117,7 @@ fn a_watch_sends_the_description_and_each_change_once() {
 #[test]
 fn ending_the_watch_stops_the_frames() {
     let service = start();
-    let mut leds = ClientOptions::new(service.socket(), "atlas")
+    let mut leds = ClientOptions::new(service.socket(), "manager")
         .leds()
         .unwrap();
     assert_eq!(leds.watch_frames("ring", 20).unwrap(), 20);
@@ -134,7 +134,7 @@ fn only_lights_can_be_watched() {
     let hw = MockHardware::new();
     hw.label_chip("pinctrl-rp1", "gpiochip0");
     let service = start();
-    let mut leds = ClientOptions::new(service.socket(), "atlas")
+    let mut leds = ClientOptions::new(service.socket(), "manager")
         .leds()
         .unwrap();
     match leds.watch_frames("usb-a-power", 20) {

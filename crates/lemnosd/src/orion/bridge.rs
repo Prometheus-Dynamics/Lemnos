@@ -1318,7 +1318,7 @@ mod feed_tests {
             device: "a".to_owned(),
             control: "x".to_owned(),
             value: 5.0,
-            by: "helios".to_owned(),
+            by: "app".to_owned(),
         })));
         assert_eq!(pending.len(), 1);
     }

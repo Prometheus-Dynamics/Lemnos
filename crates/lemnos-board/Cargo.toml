@@ -24,7 +24,7 @@ linux = ["dep:lemnos-linux", "lemnos-linux/gpio-cdev", "lemnos-linux/spi"]
 # The Raspberry Pi RP1 PIO I2C bus (`pio-i2c:` selectors and the PIO device).
 rp1 = ["lemnos-core/rp1", "lemnos-linux?/rp1"]
 # Every built-in driver. A board build can take only the ones its board uses
-# (for example the Raze: bmi088, bmm150, ina238, hwmon-fan, thermal-zone,
+# (for example a sensor board: bmi088, bmm150, ina238, hwmon-fan, thermal-zone,
 # ws2812, gpio), with `--no-default-features --features <list>`; a board that
 # names a driver not built in is refused by `validate` with the driver's name.
 drivers = [

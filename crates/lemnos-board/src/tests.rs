@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const RAZE: &str = include_str!("../examples/raze.toml");
+const EXAMPLE: &str = include_str!("../examples/boards/raze-example.toml");
 
 struct Tree(PathBuf);
 
@@ -40,7 +40,7 @@ impl Tree {
 }
 
 impl Tree {
-    /// The Raze's I2C adapters as sysfs shows them: i2c-1 a DesignWare
+    /// The example board's I2C adapters as sysfs shows them: i2c-1 a DesignWare
     /// controller on RP1 (its own `of_node`), i2c-4 an i2c-gpio bus (the
     /// node on its parent platform device).
     fn adapters(&self) -> &Self {
@@ -57,7 +57,7 @@ impl Tree {
         );
         raw(
             &format!("{dt}/i2c@0/compatible"),
-            b"raze,imu-bus\0i2c-gpio\0",
+            b"example,imu-bus\0i2c-gpio\0",
         );
         self.file(
             &format!("{rp1}/i2c-1/name"),
@@ -80,7 +80,7 @@ impl Drop for Tree {
     }
 }
 
-/// The Raze's I2C bus 1: BMI088 and BMM150 register files, plus an
+/// The example board's I2C bus 1: BMI088 and BMM150 register files, plus an
 /// INA238's 16-bit registers at 0x40.
 struct MockBuses {
     sys: PathBuf,
@@ -88,17 +88,17 @@ struct MockBuses {
 
 /// Byte-register targets from `MockI2c`, and an INA238 at 0x40 with
 /// big-endian 16-bit registers.
-struct RazeBus {
+struct ExampleBus {
     bytes: MockI2c,
     words: std::collections::BTreeMap<u8, u16>,
     pointer: u8,
 }
 
-impl embedded_hal::i2c::ErrorType for RazeBus {
+impl embedded_hal::i2c::ErrorType for ExampleBus {
     type Error = ErrorKind;
 }
 
-impl embedded_hal::i2c::I2c for RazeBus {
+impl embedded_hal::i2c::I2c for ExampleBus {
     fn transaction(
         &mut self,
         address: u8,
@@ -130,7 +130,7 @@ impl embedded_hal::i2c::I2c for RazeBus {
     }
 }
 
-fn raze_bus() -> MockI2c {
+fn example_bus() -> MockI2c {
     let mut bmm_trim = [0u8; 10];
     bmm_trim[0..2].copy_from_slice(&700i16.to_le_bytes());
     bmm_trim[2..4].copy_from_slice(&24000u16.to_le_bytes());
@@ -146,9 +146,9 @@ fn raze_bus() -> MockI2c {
         .with_registers(0x10, 0x68, &bmm_trim)
 }
 
-fn raze() -> RazeBus {
-    RazeBus {
-        bytes: raze_bus(),
+fn example() -> ExampleBus {
+    ExampleBus {
+        bytes: example_bus(),
         // Manufacturer "TI", device 0x2381, die temperature 30 °C.
         words: [(0x3e, 0x5449), (0x3f, 0x2381), (0x06, 30 * 128)].into(),
         pointer: 0,
@@ -157,9 +157,9 @@ fn raze() -> RazeBus {
 
 impl Buses for MockBuses {
     fn i2c(&mut self, bus: u32) -> Result<DynI2c, BoardError> {
-        // One mock serves both of the Raze's buses.
+        // One mock serves both of the example board's buses.
         if bus == 1 || bus == 4 {
-            Ok(DynI2c::new(raze()))
+            Ok(DynI2c::new(example()))
         } else {
             Err(BoardError::Device {
                 device: format!("i2c-{bus}"),
@@ -175,10 +175,10 @@ impl Buses for MockBuses {
 }
 
 #[test]
-fn raze_definition_parses_validates_and_round_trips() {
-    let board = BoardDefinition::from_toml_str(RAZE).unwrap();
+fn example_definition_parses_validates_and_round_trips() {
+    let board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     board.validate(&DriverRegistry::builtin()).unwrap();
-    assert_eq!(board.board.id, "raze");
+    assert_eq!(board.board.id, "raze-example");
     assert_eq!(board.devices.len(), 8);
     let imu = board.device("imu").unwrap();
     assert_eq!(
@@ -198,7 +198,7 @@ fn raze_definition_parses_validates_and_round_trips() {
 
 #[test]
 fn validation_reports_every_problem() {
-    let mut board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let mut board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     board.schema_version = 2;
     board.devices.push(DeviceSpec::new("imu", "bmi088"));
     board
@@ -231,24 +231,24 @@ fn validation_reports_every_problem() {
     }
     assert!(BoardDefinition::from_toml_str("format = 1").is_err());
     assert!(
-        BoardDefinition::from_toml_str(&RAZE.replace("poll_ms = 10", "poll_msec = 10")).is_err()
+        BoardDefinition::from_toml_str(&EXAMPLE.replace("poll_ms = 10", "poll_msec = 10")).is_err()
     );
 }
 
 #[test]
 fn client_entries_match_exactly_or_by_a_trailing_wildcard() {
-    assert!(client_matches("helios", "helios"));
-    assert!(!client_matches("helios", "helios2"));
-    assert!(client_matches("orion:*", "orion:operator:atlas-host"));
+    assert!(client_matches("app", "app"));
+    assert!(!client_matches("app", "app2"));
+    assert!(client_matches("orion:*", "orion:operator:manager-host"));
     assert!(client_matches("orion:*", "orion:"));
     assert!(!client_matches("orion:*", "orion"));
-    assert!(!client_matches("orion:*", "photonvision"));
+    assert!(!client_matches("orion:*", "vision"));
     assert!(!client_matches("orion:*", "xorion:operator"));
     assert!(client_matches("*", "anyone"));
     assert!(client_matches("*", ""));
     assert!(is_valid_client_entry("orion:*"));
     assert!(is_valid_client_entry("*"));
-    assert!(is_valid_client_entry("helios"));
+    assert!(is_valid_client_entry("app"));
     assert!(!is_valid_client_entry("*orion"));
     assert!(!is_valid_client_entry("or*ion:*"));
     assert!(!is_valid_client_entry("**"));
@@ -256,8 +256,8 @@ fn client_entries_match_exactly_or_by_a_trailing_wildcard() {
 
 #[test]
 fn a_wildcard_is_only_valid_at_the_end_of_a_client_entry() {
-    let mut board = BoardDefinition::from_toml_str(RAZE).unwrap();
-    board.raw_clients = vec!["helios".into(), "*-selftest".into()];
+    let mut board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
+    board.raw_clients = vec!["app".into(), "*-selftest".into()];
     board.devices[0].writers = vec!["orion:*".into(), "orion:*x*".into()];
     let Err(BoardError::Invalid(problems)) = board.validate(&DriverRegistry::builtin()) else {
         panic!("expected problems");
@@ -272,14 +272,14 @@ fn a_wildcard_is_only_valid_at_the_end_of_a_client_entry() {
         "{all}"
     );
     assert!(!all.contains("\"orion:*\""), "{all}");
-    assert!(!all.contains("\"helios\""), "{all}");
+    assert!(!all.contains("\"app\""), "{all}");
 }
 
 #[test]
 fn userspace_drivers_build_from_the_definition() {
     let tree = Tree::new();
     tree.adapters();
-    let board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     let registry = DriverRegistry::builtin();
     let mut buses = MockBuses {
         sys: tree.0.clone(),
@@ -335,7 +335,7 @@ fn kernel_drivers_win_when_bound() {
         .file("class/hwmon/hwmon2/pwm1_enable", "2")
         .file("class/thermal/thermal_zone0/type", "cpu-thermal")
         .file("class/thermal/thermal_zone0/temp", "51000");
-    let board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     let registry = DriverRegistry::builtin();
     let mut buses = MockBuses {
         sys: tree.0.clone(),
@@ -431,7 +431,7 @@ fn i2c_buses_are_found_by_name_or_device_tree_node() {
     assert_eq!("spi-0.1".parse::<BusRef>().unwrap().i2c_bus(&sys), None);
 
     // Unresolvable buses fail the device's build, not the definition.
-    let board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     let mut imu = board.device("imu").unwrap().clone();
     imu.bus = Some("i2c:compatible=nope".parse().unwrap());
     board.validate(&DriverRegistry::builtin()).unwrap();
@@ -454,11 +454,11 @@ fn raw_lines_pwms_and_owned_resources() {
     let tree = Tree::new();
     tree.adapters();
     let text = format!(
-        "raw_clients = [\"helios\"]\n{RAZE}\n[[lines]]\nname = \"aux\"\nchip = \"pinctrl-rp1\"\nline = 5\nsafe = \"high\"\n\n[[pwms]]\nname = \"buzzer\"\nchip = 0\nchannel = 1\n"
+        "raw_clients = [\"app\"]\n{EXAMPLE}\n[[lines]]\nname = \"aux\"\nchip = \"pinctrl-rp1\"\nline = 5\nsafe = \"high\"\n\n[[pwms]]\nname = \"buzzer\"\nchip = 0\nchannel = 1\n"
     );
     let board = BoardDefinition::from_toml_str(&text).unwrap();
     board.validate(&DriverRegistry::builtin()).unwrap();
-    assert_eq!(board.raw_clients, ["helios"]);
+    assert_eq!(board.raw_clients, ["app"]);
     let chip_id = |c: &str| {
         if c == "pinctrl-rp1" {
             "gpiochip0".to_string()
@@ -509,7 +509,7 @@ fn raw_lines_pwms_and_owned_resources() {
 
 #[test]
 fn validate_checks_config_values_against_the_declared_choices() {
-    let mut board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let mut board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     let imu = board.devices.iter_mut().find(|d| d.id == "imu").unwrap();
     imu.config
         .insert("gyro_rate".into(), ConfigValue::String("100hz-99".into()));
@@ -548,7 +548,7 @@ fn every_declared_config_choice_is_accepted_when_the_driver_builds() {
     // the driver's own parsing takes, or `validate` would refuse a good board.
     let tree = Tree::new();
     tree.adapters();
-    let board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     let registry = DriverRegistry::builtin();
     let mut buses = MockBuses {
         sys: tree.0.clone(),
@@ -608,7 +608,7 @@ fn pio_i2c_selector_names_pins_and_a_virtual_bus() {
 }
 
 fn fusion_board(config: &[(&str, ConfigValue)]) -> BoardDefinition {
-    let mut board = BoardDefinition::from_toml_str(RAZE).unwrap();
+    let mut board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     let mut device = DeviceSpec::new("orientation", "fusion");
     for (key, value) in config {
         device = device.with(*key, value.clone());

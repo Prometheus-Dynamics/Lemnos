@@ -48,8 +48,8 @@ enum ExampleAccelRange {
 #[derive(Debug, Clone, PartialEq, ConfiguredDevice)]
 #[lemnos(
     interface = I2c,
-    id = "helios.bmi088",
-    driver = "helios.sensor.bmi088",
+    id = "example.bmi088",
+    driver = "example.sensor.bmi088",
     summary = "Configured BMI088 IMU"
 )]
 struct ExampleImuConfig {
@@ -191,7 +191,7 @@ fn configured_device_derive_generates_typed_composite_helpers() {
 
     assert_eq!(
         config.configured_device_id(),
-        "helios.bmi088.bus4.accel0x18.gyro0x68"
+        "example.bmi088.bus4.accel0x18.gyro0x68"
     );
     assert_eq!(
         ExampleImuConfig::CONFIGURED_DEVICE_INTERFACES,
@@ -216,11 +216,14 @@ fn configured_device_derive_generates_typed_composite_helpers() {
     assert_eq!(descriptors.len(), 4);
 
     let logical = &descriptors[0];
-    assert_eq!(logical.id.as_str(), "helios.bmi088.bus4.accel0x18.gyro0x68");
+    assert_eq!(
+        logical.id.as_str(),
+        "example.bmi088.bus4.accel0x18.gyro0x68"
+    );
     assert_eq!(logical.display_name.as_deref(), Some("board-imu"));
     assert_eq!(
         logical.match_hints.driver_hint.as_deref(),
-        Some("helios.sensor.bmi088")
+        Some("example.sensor.bmi088")
     );
     assert_eq!(
         logical.properties.get("accel_range"),
@@ -255,7 +258,7 @@ fn configured_device_derive_generates_typed_composite_helpers() {
             .logical_device_id()
             .expect("logical device id")
             .as_str(),
-        "helios.bmi088.bus4.accel0x18.gyro0x68"
+        "example.bmi088.bus4.accel0x18.gyro0x68"
     );
 
     let probe = ExampleImuConfig::configured_probe("macro-generated-probe", vec![config.clone()]);

@@ -14,8 +14,8 @@ Other chips (`VcmChip::Custom`) are described with a `VcmFormat` (register, widt
 constant bits, power sequences). Features: `alloc` adds `OwnedVcmFormat`, a format that owns
 its power sequences (loaded at run time, lent as a `VcmFormat` without allocating); `serde`
 (de)serializes `VcmChip` by name (`"dw9817"`, `"custom"`) and, with `alloc`, `OwnedVcmFormat`,
-so a sensor description can name its lens chip or spell out its format. The command formats come from Styx (`styx-sensor`'s lens descriptions), with its
-tests. VCMs report no position; frame-exact lens scheduling stays in Styx.
+so a sensor description can name its lens chip or spell out its format. The command formats come from the earlier stack, with its
+tests. VCMs report no position; frame-exact lens scheduling stays in the frame-side code.
 
 ```rust
 use lemnos_drivers_vcm::Vcm;

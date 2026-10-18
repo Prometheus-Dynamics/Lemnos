@@ -9,8 +9,7 @@
 //! burst.
 //!
 //! [`I2cRegisters`] and [`SpiRegisters`] implement both traits over any
-//! embedded-hal 1.0 bus. Ported from Styx (`styx-sensor`'s `RegisterBus` and
-//! `styx-native`'s `I2cRegisterBus`).
+//! embedded-hal 1.0 bus. Ported from the earlier stack (see docs/provenance.md).
 
 pub mod asynch;
 mod i2c;

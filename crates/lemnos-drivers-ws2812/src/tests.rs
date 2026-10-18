@@ -47,12 +47,16 @@ fn spi_stream_encodes_three_bits_per_bit_in_grb_order() {
 
 #[test]
 fn geometry_maps_logical_indices_round_the_ring() {
-    let raze = StripConfig::new(16, Wire::Rgb).with_offset(5);
+    let example = StripConfig::new(16, Wire::Rgb).with_offset(5);
     assert_eq!(
-        (raze.physical(0), raze.physical(10), raze.physical(11)),
+        (
+            example.physical(0),
+            example.physical(10),
+            example.physical(11)
+        ),
         (5, 15, 0)
     );
-    let ccw = raze.with_direction(Direction::Ccw);
+    let ccw = example.with_direction(Direction::Ccw);
     assert_eq!(
         (ccw.physical(0), ccw.physical(1), ccw.physical(6)),
         (5, 4, 15)

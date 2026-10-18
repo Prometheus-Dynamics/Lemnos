@@ -46,7 +46,7 @@ fn read(root: &Path, path: &str) -> String {
     fs::read_to_string(root.join(path)).unwrap().trim().into()
 }
 
-/// The Raze's fan as the kernel shows it, plus a chip fan with an automatic
+/// The example board's fan as the kernel shows it, plus a chip fan with an automatic
 /// mode.
 fn tree(root: &Path) {
     let _ = fs::remove_dir_all(root);
@@ -86,7 +86,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "fan"
@@ -149,13 +149,13 @@ fn service_hands_both_kinds_of_fan_back() {
     assert_eq!(plans[1].kind, RestoreKind::Automatic { mode: 5 });
 
     // The governor steps up to 2, then a client takes both fans over; the
-    // kernel moves cur_state to match the client's pwm1 (Raze: 4).
+    // kernel moves cur_state to match the client's pwm1 (example board: 4).
     write(
         &root,
         "devices/virtual/thermal/cooling_device0/cur_state",
         "2",
     );
-    let mut client = ClientOptions::new(&socket, "helios").devices().unwrap();
+    let mut client = ClientOptions::new(&socket, "app").devices().unwrap();
     assert_eq!(client.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
     write(
         &root,
@@ -284,7 +284,7 @@ fn release_hands_a_fan_back_while_the_service_runs() {
     let state = |root: &Path| read(root, "class/thermal/cooling_device0/cur_state");
 
     // Take the fan over (the governor was at 1; the kernel follows pwm1 to 4).
-    let mut client = ClientOptions::new(&socket, "helios").devices().unwrap();
+    let mut client = ClientOptions::new(&socket, "app").devices().unwrap();
     assert_eq!(client.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
     write(&root, cdev_state, "4");
     assert_eq!(client.set("fan", "duty", 1.0).unwrap(), 1.0);
@@ -303,9 +303,7 @@ fn release_hands_a_fan_back_while_the_service_runs() {
     // Only fans can be released; the write policy applies.
     assert!(client.release("cpu-thermal").is_err());
     assert!(client.release("nope").is_err());
-    let mut other = ClientOptions::new(&socket, "photonvision")
-        .devices()
-        .unwrap();
+    let mut other = ClientOptions::new(&socket, "vision").devices().unwrap();
     assert!(
         other.release("fan").is_ok(),
         "no writers: anyone may release"
@@ -354,11 +352,11 @@ fn a_fan_override_ends_with_the_writers_connection() {
     ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     let cdev_state = "devices/virtual/thermal/cooling_device0/cur_state";
 
-    // HeliOS takes the fan over, then dies without cleaning up.
-    let mut helios = ClientOptions::new(&socket, "helios").devices().unwrap();
-    assert_eq!(helios.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
+    // the app takes the fan over, then dies without cleaning up.
+    let mut app = ClientOptions::new(&socket, "app").devices().unwrap();
+    assert_eq!(app.set("fan", "pwm_mode", 0.0).unwrap(), 0.0);
     write(&root, cdev_state, "4");
-    drop(helios);
+    drop(app);
     // The service, still running, hands the fan back to the governor. It
     // writes `pwm1_enable` and then the cooling device's state, so wait for
     // both (reading the state right after the enable could catch the write).

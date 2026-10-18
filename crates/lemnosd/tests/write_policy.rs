@@ -65,7 +65,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "fan"
@@ -77,7 +77,7 @@ writers = ["orion:*"]
 id = "case-fan"
 driver = "hwmon-fan"
 match = { name = "nct6775" }
-writers = ["helios"]
+writers = ["app"]
 "#,
     )
     .unwrap()
@@ -123,9 +123,7 @@ fn a_prefix_wildcard_admits_orion_callers_and_nothing_else() {
     assert_eq!(read(&root, "class/hwmon/hwmon5/pwm1"), "77");
 
     // A name outside the prefix is refused on the wildcard device.
-    let mut other = ClientOptions::new(&socket, "photonvision")
-        .devices()
-        .unwrap();
+    let mut other = ClientOptions::new(&socket, "vision").devices().unwrap();
     assert!(matches!(
         other.set("fan", "duty", 0.5),
         Err(ClientError::Refused(Refusal::NotAllowed))

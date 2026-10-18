@@ -1,4 +1,4 @@
-//! A small Linux program: the Raze's IMU, magnetometer and power monitor on
+//! A small Linux program: an example board's IMU, magnetometer and power monitor on
 //! one I2C bus, through `lemnos-lite` and `lemnos_linux::hal`, with no
 //! runtime, discovery or allocation in the device path.
 //!

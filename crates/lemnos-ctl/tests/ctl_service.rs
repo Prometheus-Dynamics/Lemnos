@@ -11,7 +11,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "imu"
@@ -168,7 +168,7 @@ fn read_of_a_faulted_device_says_why() {
 format = "lemnos.board"
 schema_version = 1
 [board]
-id = "raze"
+id = "example"
 [[devices]]
 id = "imu"
 driver = "bmi088"

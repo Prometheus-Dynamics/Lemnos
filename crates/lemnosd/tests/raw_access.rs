@@ -15,7 +15,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "imu"
@@ -103,20 +103,20 @@ fn eventually(mut check: impl FnMut() -> bool) {
 fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
     let service = start();
     let hw = service.hardware().clone();
-    let mut helios = client(&service, "helios");
+    let mut app = client(&service, "app");
 
     // By board name: driven, then left low (its safe state) on disconnect.
-    let aux = helios
+    let aux = app
         .claim_line(LineTarget::Name("aux".into()), LineConfig::output(true))
         .unwrap();
     assert_eq!(hw.line("gpiochip0", 5).level(), Some(true));
-    aux.set(&mut helios, false).unwrap();
+    aux.set(&mut app, false).unwrap();
     assert_eq!(hw.line("gpiochip0", 5).level(), Some(false));
-    aux.set(&mut helios, true).unwrap();
-    assert!(aux.get(&mut helios).unwrap());
+    aux.set(&mut app, true).unwrap();
+    assert!(aux.get(&mut app).unwrap());
 
     // By kernel line name, as an input with edges.
-    let button = helios
+    let button = app
         .claim_line(
             LineTarget::Name("BUTTON".into()),
             LineConfig::input().with_edge(EdgeDetect::Both),
@@ -124,7 +124,7 @@ fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
         .unwrap();
     hw.line("gpiochip0", 9).edge(true, 1234);
     let edge = loop {
-        match helios.next_event_timeout(Duration::from_secs(5)).unwrap() {
+        match app.next_event_timeout(Duration::from_secs(5)).unwrap() {
             Some(ClientEvent::Data(Update::Event(Event::Edge {
                 handle,
                 rising,
@@ -136,10 +136,10 @@ fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
         }
     };
     assert_eq!(edge, (button.handle(), true, 1234));
-    assert!(button.get(&mut helios).unwrap());
+    assert!(button.get(&mut app).unwrap());
 
     // By chip label and offset, with its own release state.
-    let free = helios
+    let free = app
         .claim_line_with(
             LineTarget::Chip {
                 chip: "pinctrl-rp1".into(),
@@ -151,7 +151,7 @@ fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
         .unwrap();
 
     // Exclusive: another client is refused; unknown handles too.
-    let mut other = client(&service, "photonvision");
+    let mut other = client(&service, "vision");
     assert_eq!(
         refused(other.claim_line(LineTarget::Name("aux".into()), LineConfig::input())),
         Refusal::Claimed
@@ -170,7 +170,7 @@ fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
     );
 
     // An explicit release: the line goes high-impedance (no board entry).
-    let plain = helios
+    let plain = app
         .claim_line(
             LineTarget::Chip {
                 chip: "gpiochip0".into(),
@@ -179,7 +179,7 @@ fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
             LineConfig::output(true),
         )
         .unwrap();
-    plain.release(&mut helios).unwrap();
+    plain.release(&mut app).unwrap();
     assert_eq!(
         hw.line("gpiochip0", 7).config(),
         LineConfig::high_impedance()
@@ -187,7 +187,7 @@ fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
     let _ = free;
 
     // The client disappears (as with kill -9): every claim ends.
-    drop(helios);
+    drop(app);
     eventually(|| hw.line("gpiochip0", 5).level() == Some(false));
     assert_eq!(hw.line("gpiochip0", 9).config().direction, Direction::Input);
     assert_eq!(hw.line("gpiochip0", 6).level(), Some(true), "kept as set");
@@ -201,29 +201,26 @@ fn lines_claim_drive_report_edges_and_go_safe_on_disconnect() {
 fn i2c_spi_and_pwm_with_arbitration() {
     let service = start();
     let hw = service.hardware().clone();
-    let mut helios = client(&service, "helios");
+    let mut app = client(&service, "app");
 
     // An unowned address: register access, combined write-then-read.
-    let eeprom = helios.i2c("1", 0x50);
-    assert_eq!(
-        eeprom.read_regs(&mut helios, 0x10, 2).unwrap(),
-        [0xaa, 0xbb]
-    );
-    eeprom.write_reg8(&mut helios, 0x20, 0x42).unwrap();
+    let eeprom = app.i2c("1", 0x50);
+    assert_eq!(eeprom.read_regs(&mut app, 0x10, 2).unwrap(), [0xaa, 0xbb]);
+    eeprom.write_reg8(&mut app, 0x20, 0x42).unwrap();
     assert_eq!(hw.i2c(1).register(0x50, 0x20), 0x42);
     assert_eq!(
         eeprom
-            .transfer(&mut helios, vec![I2cOp::Write(vec![0x20]), I2cOp::Read(1)])
+            .transfer(&mut app, vec![I2cOp::Write(vec![0x20]), I2cOp::Read(1)])
             .unwrap(),
         [0x42]
     );
     // The IMU's addresses (both of them) are the board's...
     assert_eq!(
-        refused(helios.i2c("i2c-1", 0x68).read_reg8(&mut helios, 0)),
+        refused(app.i2c("i2c-1", 0x68).read_reg8(&mut app, 0)),
         Refusal::Owned
     );
     assert_eq!(
-        refused(helios.i2c("1", 0x18).read_reg8(&mut helios, 0)),
+        refused(app.i2c("1", 0x18).read_reg8(&mut app, 0)),
         Refusal::Owned
     );
     // ...but the device lists `selftest` for brokered access.
@@ -243,21 +240,21 @@ fn i2c_spi_and_pwm_with_arbitration() {
     // A bus that does not exist, and a missing target.
     hw.remove_i2c(9);
     assert!(matches!(
-        refused(helios.i2c("9", 0x50).read(&mut helios, 1)),
+        refused(app.i2c("9", 0x50).read(&mut app, 1)),
         Refusal::Device(_)
     ));
     assert!(matches!(
-        refused(helios.i2c("1", 0x51).read(&mut helios, 1)),
+        refused(app.i2c("1", 0x51).read(&mut app, 1)),
         Refusal::Device(lemnos_hal::ErrorKind::Nack)
     ));
 
     // Locks keep others off across transactions, and end with the client.
-    eeprom.lock(&mut helios).unwrap();
+    eeprom.lock(&mut app).unwrap();
     assert_eq!(
         refused(selftest.i2c("1", 0x50).read(&mut selftest, 1)),
         Refusal::Claimed
     );
-    drop(helios);
+    drop(app);
     eventually(|| selftest.i2c("1", 0x50).read(&mut selftest, 1).is_ok());
 
     // SPI: full duplex, per-transfer settings.
@@ -306,13 +303,13 @@ fn i2c_spi_and_pwm_with_arbitration() {
 #[test]
 fn control_writes_end_with_the_connection_unless_kept() {
     let service = start();
-    let mut helios = client(&service, "helios");
-    assert_eq!(helios.get("ring", "brightness").unwrap(), 1.0);
-    helios.set("ring", "brightness", 0.25).unwrap();
+    let mut app = client(&service, "app");
+    assert_eq!(app.get("ring", "brightness").unwrap(), 1.0);
+    app.set("ring", "brightness", 0.25).unwrap();
     let mut watcher = client(&service, "watcher");
     assert!((watcher.get("ring", "brightness").unwrap() - 0.25).abs() < 0.01);
     // Disconnect: the value from before the first write comes back.
-    drop(helios);
+    drop(app);
     eventually(|| watcher.get("ring", "brightness").unwrap() == 1.0);
 
     // A keeping client (lemnos-ctl) persists, until it restores by name.
@@ -336,9 +333,9 @@ fn control_writes_end_with_the_connection_unless_kept() {
 #[test]
 fn raw_access_follows_the_board_policy() {
     // A top-level key, so before the tables.
-    let board = format!("raw_clients = [\"helios\"]\n{BOARD}").replace("{root}", "/nonexistent");
+    let board = format!("raw_clients = [\"app\"]\n{BOARD}").replace("{root}", "/nonexistent");
     let service = MockLemnosd::start(&board, hardware()).unwrap();
-    let mut other = client(&service, "photonvision");
+    let mut other = client(&service, "vision");
     assert_eq!(
         refused(other.claim_line(LineTarget::Name("aux".into()), LineConfig::input())),
         Refusal::NotAllowed
@@ -347,8 +344,8 @@ fn raw_access_follows_the_board_policy() {
         refused(other.i2c("1", 0x50).read(&mut other, 1)),
         Refusal::NotAllowed
     );
-    let mut helios = client(&service, "helios");
-    assert!(helios.i2c("1", 0x50).read(&mut helios, 1).is_ok());
+    let mut app = client(&service, "app");
+    assert!(app.i2c("1", 0x50).read(&mut app, 1).is_ok());
 }
 
 #[test]
@@ -380,7 +377,7 @@ fn clients_wait_for_the_service_and_led_clients_get_no_events_by_default() {
         .devices()
         .unwrap();
     let service = starter.join().unwrap();
-    assert_eq!(waiting.board(), "raze");
+    assert_eq!(waiting.board(), "example");
     match lazy.next_event().unwrap() {
         ClientEvent::Disconnected { .. } => {}
         other => panic!("{other:?}"),
@@ -431,7 +428,7 @@ fn faulted_devices_say_why() {
 format = "lemnos.board"
 schema_version = 1
 [board]
-id = "raze"
+id = "example"
 [[devices]]
 id = "imu"
 driver = "bmi088"
@@ -445,8 +442,8 @@ bus = "i2c:compatible=nothing-like-this"
         hardware,
     )
     .unwrap();
-    let mut helios = client(&service, "helios");
-    let list = helios.list().unwrap();
+    let mut app = client(&service, "app");
+    let list = app.list().unwrap();
     let imu = list.iter().find(|d| d.id == "imu").unwrap();
     assert!(
         imu.reason.starts_with("init: BMI088 gyro chip id:"),

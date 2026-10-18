@@ -65,7 +65,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "imu"
@@ -86,7 +86,7 @@ backend = "userspace"
 id = "fan"
 driver = "hwmon-fan"
 path = "{root}/class/hwmon/hwmon2"
-writers = ["helios"]
+writers = ["app"]
 config = {{ restore_mode = 2 }}
 
 [[devices]]
@@ -163,9 +163,9 @@ fn serves_readings_controls_and_led_intents() {
     let root = std::env::temp_dir().join(format!("lemnosd-test-{}", std::process::id()));
     let (socket, stop, handle) = start(&root);
 
-    let mut helios = ClientOptions::new(&socket, "helios").devices().unwrap();
-    assert_eq!(helios.board(), "raze");
-    let devices = helios.list().unwrap();
+    let mut app = ClientOptions::new(&socket, "app").devices().unwrap();
+    assert_eq!(app.board(), "example");
+    let devices = app.list().unwrap();
     let names: Vec<&str> = devices.iter().map(|d| d.id.as_str()).collect();
     assert_eq!(names, ["imu", "magnetometer", "fan", "cpu-thermal", "ring"]);
     let status = |id: &str| devices.iter().find(|d| d.id == id).unwrap().status;
@@ -179,22 +179,22 @@ fn serves_readings_controls_and_led_intents() {
     assert_eq!(devices[4].pixels, 16);
 
     // Typed reads.
-    let imu = helios.read("imu").unwrap();
+    let imu = app.read("imu").unwrap();
     let x = imu.value("acceleration.x").unwrap();
     assert!((x - 29.419).abs() < 0.01, "{x}");
     assert!(imu.value("acceleration.z").unwrap() < -29.0);
-    let zone = helios.read("cpu-thermal").unwrap();
+    let zone = app.read("cpu-thermal").unwrap();
     assert_eq!(zone.value("temperature"), Some(45.0));
     assert!(matches!(
-        helios.read("nope"),
+        app.read("nope"),
         Err(ClientError::Refused(Refusal::UnknownDevice))
     ));
 
     // Subscriptions.
-    helios.subscribe("imu", 20).unwrap();
+    app.subscribe("imu", 20).unwrap();
     let mut readings = 0;
     while readings < 3 {
-        match helios.next_event_timeout(Duration::from_secs(5)).unwrap() {
+        match app.next_event_timeout(Duration::from_secs(5)).unwrap() {
             Some(ClientEvent::Data(Update::Reading(r))) if r.device == "imu" => readings += 1,
             Some(_) => {}
             None => panic!("no readings"),
@@ -202,19 +202,17 @@ fn serves_readings_controls_and_led_intents() {
     }
 
     // Controls under the write policy.
-    assert_eq!(helios.set("fan", "pwm_mode", 1.0).unwrap(), 1.0);
-    assert_eq!(helios.set("fan", "duty", 0.7).unwrap(), 0.702);
+    assert_eq!(app.set("fan", "pwm_mode", 1.0).unwrap(), 1.0);
+    assert_eq!(app.set("fan", "duty", 0.7).unwrap(), 0.702);
     assert_eq!(
         fs::read_to_string(root.join("class/hwmon/hwmon2/pwm1")).unwrap(),
         "179"
     );
     assert!(matches!(
-        helios.set("fan", "duty", 1.5),
+        app.set("fan", "duty", 1.5),
         Err(ClientError::Refused(Refusal::OutOfRange))
     ));
-    let mut other = ClientOptions::new(&socket, "photonvision")
-        .devices()
-        .unwrap();
+    let mut other = ClientOptions::new(&socket, "vision").devices().unwrap();
     assert!(matches!(
         other.set("fan", "duty", 0.5),
         Err(ClientError::Refused(Refusal::NotAllowed))

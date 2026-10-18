@@ -62,7 +62,7 @@ the same static binary, with no image to pull or build and no container to start
   `SUBSYSTEM=="thermal", KERNEL=="thermal_zone*", RUN+="/bin/chgrp lemnos /sys%p/policy", RUN+="/bin/chmod g+w /sys%p/policy"`.
   (The hwmon `name` of the Linux `pwm-fan` driver is `pwmfan`.) `ExecStopPost` runs as
   root and needs neither.
-- Clients (HeliOS, PhotonVision, scripts) join the `lemnos` group to reach
+- Clients (apps on the board, scripts) join the `lemnos` group to reach
   `/run/lemnos/lemnosd.sock`.
 
 ## Behaviour

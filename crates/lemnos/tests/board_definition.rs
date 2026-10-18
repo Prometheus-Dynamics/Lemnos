@@ -39,7 +39,7 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "imu"
@@ -93,7 +93,7 @@ fn board_devices_bind_and_report_device_model_telemetry() {
     assert!(report.rebinds.failed.is_empty(), "{:?}", report.rebinds);
 
     let imu = setup.device_id("imu").unwrap();
-    assert_eq!(imu.as_str(), "board.raze.imu");
+    assert_eq!(imu.as_str(), "board.example.imu");
     assert!(lemnos.is_bound(&imu));
     let state = lemnos.refresh_state(&imu).unwrap().unwrap();
     // Half of ±6 g, in m/s².

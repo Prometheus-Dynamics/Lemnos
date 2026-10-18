@@ -480,7 +480,7 @@ mod preset_tests {
     }
 
     #[test]
-    fn scheme_b_is_the_built_in_pv_looks() {
+    fn scheme_b_is_the_built_in_vision_looks() {
         let root = root("b");
         let table = LookTable::new(&board(), None, None);
         let defaults = Defaults::default();

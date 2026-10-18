@@ -15,18 +15,18 @@ format = "lemnos.board"
 schema_version = 1
 
 [board]
-id = "raze"
+id = "example"
 
 [[devices]]
 id = "usb-a-power"
 driver = "gpio-power-switch"
-writers = ["orion:*", "atlas"]
+writers = ["orion:*", "manager"]
 config = { chip = "pinctrl-rp1", line = 20, default_on = true, persist = true }
 
 [[devices]]
 id = "usb-c-power"
 driver = "gpio-power-switch"
-writers = ["atlas"]
+writers = ["manager"]
 config = { chip = "pinctrl-rp1", line = 16, default_on = true, on_exit = "off" }
 
 [[devices]]
@@ -76,10 +76,10 @@ fn starts_at_its_default_level_with_no_later_write() {
 fn a_write_drives_the_line_and_reads_back() {
     let hw = hardware();
     let service = MockLemnosd::start_in(root("write"), BOARD, hw.clone()).unwrap();
-    let mut atlas = client(service.socket(), "atlas");
-    assert_eq!(atlas.set("usb-c-power", "power.on", 0.0).unwrap(), 0.0);
+    let mut manager = client(service.socket(), "manager");
+    assert_eq!(manager.set("usb-c-power", "power.on", 0.0).unwrap(), 0.0);
     assert_eq!(hw.line("gpiochip0", 16).level(), Some(false));
-    let reading = atlas.read("usb-c-power").unwrap();
+    let reading = manager.read("usb-c-power").unwrap();
     assert_eq!(reading.value("power.on"), Some(0.0));
     drop(service);
 }
@@ -95,9 +95,9 @@ fn a_write_outlives_the_client_that_made_it() {
     // Give the service a moment to see the disconnect.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(hw.line("gpiochip0", 20).level(), Some(false));
-    let mut atlas = client(service.socket(), "atlas");
+    let mut manager = client(service.socket(), "manager");
     assert_eq!(
-        atlas.read("usb-a-power").unwrap().value("power.on"),
+        manager.read("usb-a-power").unwrap().value("power.on"),
         Some(0.0)
     );
     drop(service);
@@ -107,7 +107,7 @@ fn a_write_outlives_the_client_that_made_it() {
 fn the_write_policy_applies() {
     let hw = hardware();
     let service = MockLemnosd::start_in(root("policy"), BOARD, hw.clone()).unwrap();
-    let mut other = client(service.socket(), "helios");
+    let mut other = client(service.socket(), "app");
     match other.set("usb-a-power", "power.on", 0.0) {
         Err(ClientError::Refused(Refusal::NotAllowed)) => {}
         result => panic!("expected a refusal, got {result:?}"),
@@ -121,7 +121,7 @@ fn a_saved_state_is_the_start_state_after_a_restart() {
     let hw = hardware();
     let root = root("restart");
     let service = MockLemnosd::start_in(root.clone(), BOARD, hw.clone()).unwrap();
-    client(service.socket(), "atlas")
+    client(service.socket(), "manager")
         .set("usb-a-power", "power.on", 0.0)
         .unwrap();
     service.stop_keep_root();
@@ -139,7 +139,7 @@ fn a_switch_without_persist_starts_at_its_configured_level() {
     let hw = hardware();
     let root = root("nopersist");
     let service = MockLemnosd::start_in(root.clone(), BOARD, hw.clone()).unwrap();
-    client(service.socket(), "atlas")
+    client(service.socket(), "manager")
         .set("usb-c-power", "power.on", 0.0)
         .unwrap();
     service.stop();
@@ -165,18 +165,18 @@ fn on_exit_off_takes_the_line_low_when_the_service_stops() {
 fn reset_cycles_the_switch_and_leaves_it_on() {
     let hw = hardware();
     let service = MockLemnosd::start_in(root("reset"), BOARD, hw.clone()).unwrap();
-    let mut atlas = client(service.socket(), "atlas");
+    let mut manager = client(service.socket(), "manager");
     let start = std::time::Instant::now();
-    atlas.set("usb-c-power", "power.reset", 300.0).unwrap();
+    manager.set("usb-c-power", "power.reset", 300.0).unwrap();
     // Off at once, and back on by the service's own deadline.
     assert_eq!(hw.line("gpiochip0", 16).level(), Some(false));
     assert_eq!(
-        atlas.read("usb-c-power").unwrap().value("power.on"),
+        manager.read("usb-c-power").unwrap().value("power.on"),
         Some(0.0)
     );
     eventually(|| hw.line("gpiochip0", 16).level() == Some(true));
     assert!(start.elapsed() >= Duration::from_millis(300));
-    eventually(|| atlas.read("usb-c-power").unwrap().value("power.on") == Some(1.0));
+    eventually(|| manager.read("usb-c-power").unwrap().value("power.on") == Some(1.0));
     drop(service);
 }
 
@@ -193,11 +193,11 @@ fn eventually(mut check: impl FnMut() -> bool) {
 fn a_reset_does_not_stall_the_service_loop() {
     let hw = hardware();
     let service = MockLemnosd::start_in(root("nonblocking"), BOARD, hw.clone()).unwrap();
-    let mut atlas = client(service.socket(), "atlas");
+    let mut manager = client(service.socket(), "manager");
     // The fault input is sampled as a subscribed sensor at 20 ms.
-    atlas.subscribe("aux-power", 20).unwrap();
+    manager.subscribe("aux-power", 20).unwrap();
     let started = std::time::Instant::now();
-    atlas.set("usb-c-power", "power.reset", 1_000.0).unwrap();
+    manager.set("usb-c-power", "power.reset", 1_000.0).unwrap();
     assert!(
         started.elapsed() < Duration::from_millis(300),
         "the write waited for the reset"
@@ -207,7 +207,7 @@ fn a_reset_does_not_stall_the_service_loop() {
     let window = std::time::Instant::now() + Duration::from_millis(500);
     while std::time::Instant::now() < window {
         if let Ok(Some(ClientEvent::Data(Update::Reading(r)))) =
-            atlas.next_event_timeout(Duration::from_millis(50))
+            manager.next_event_timeout(Duration::from_millis(50))
             && r.device == "aux-power"
         {
             readings += 1;
@@ -223,16 +223,16 @@ fn a_reset_does_not_stall_the_service_loop() {
 fn a_tripped_fault_degrades_the_switch_and_clearing_it_restores_it() {
     let hw = hardware();
     let service = MockLemnosd::start_in(root("fault"), BOARD, hw.clone()).unwrap();
-    let mut atlas = client(service.socket(), "atlas");
+    let mut manager = client(service.socket(), "manager");
     let fault = hw.line("gpiochip0", 18);
     // Active low: the physical level 1 is no fault. Start clear, then trip.
     fault.drive(true);
     std::thread::sleep(Duration::from_millis(100));
     fault.drive(false);
-    let degraded = wait_for_status(&mut atlas, "aux-power", "degraded");
+    let degraded = wait_for_status(&mut manager, "aux-power", "degraded");
     assert!(degraded, "a fault should degrade aux-power");
     fault.drive(true);
-    assert!(wait_for_status(&mut atlas, "aux-power", "available"));
+    assert!(wait_for_status(&mut manager, "aux-power", "available"));
     drop(service);
 }
 

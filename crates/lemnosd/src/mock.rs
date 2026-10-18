@@ -26,7 +26,7 @@
 //! "#,
 //!     hardware.clone(),
 //! )?;
-//! let client = lemnos_ipc::DeviceClient::connect(service.socket(), "helios");
+//! let client = lemnos_ipc::DeviceClient::connect(service.socket(), "app");
 //! # drop(client);
 //! # Ok(())
 //! # }
