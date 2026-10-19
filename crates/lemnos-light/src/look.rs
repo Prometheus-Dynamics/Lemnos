@@ -10,6 +10,7 @@
 use crate::animator::Effect;
 use crate::easing::{Easing, ONE, quarter_sin};
 use crate::sparkle::{MAX_SPARKLE_COLORS, Sparkle, SparkleState};
+use crate::spots::{self, SpotList, SpotState, SpotsSpec};
 use lemnos_device::Rgbw;
 
 /// Layers in one look.
@@ -122,6 +123,8 @@ pub enum Block {
     },
     /// Random twinkles (or falling sparks); see [`Sparkle`].
     Sparkle(Sparkle),
+    /// Soft spots of light that glide to their inputs; see [`SpotsSpec`].
+    Spots(SpotsSpec),
 }
 
 impl Block {
@@ -136,6 +139,7 @@ impl Block {
             Self::Wash { .. } => "wash",
             Self::Drain { .. } => "drain",
             Self::Sparkle(_) => "sparkle",
+            Self::Spots(_) => "spots",
         }
     }
 
@@ -148,7 +152,7 @@ impl Block {
             } => *sheen && !matches!(fraction, Fraction::Fixed(0)),
             Self::Wash { effect, .. } => effect.is_animated(),
             Self::Drain { .. } => true,
-            Self::Fill { .. } | Self::Frame { .. } => false,
+            Self::Fill { .. } | Self::Frame { .. } | Self::Spots(_) => false,
         }
     }
 
@@ -165,6 +169,7 @@ impl Block {
                 | (Self::Wash { .. }, Self::Wash { .. })
                 | (Self::Drain { .. }, Self::Drain { .. })
                 | (Self::Sparkle(_), Self::Sparkle(_))
+                | (Self::Spots(_), Self::Spots(_))
         )
     }
 
@@ -194,11 +199,13 @@ impl Block {
         elapsed_ms: u64,
         fraction: u32,
         sparkle: &SparkleState,
+        spots: &SpotState,
         now_ms: u64,
         bottom: u32,
         drained: u32,
     ) -> Rgbw {
         match *self {
+            Self::Spots(s) => spots.pixel(index, count, spots::width_q16(s.width)),
             Self::Fill { color } => color,
             Self::Wash { color, effect } => scale(color, effect.level(elapsed_ms)),
             Self::Drain { color, fill_ms, .. } => scale(
@@ -521,8 +528,8 @@ impl LookSpec {
     }
 
     /// Replaces every `Input` fraction with `progress` (thousandths; 0 when
-    /// the request has none).
-    pub fn fill_input(&mut self, progress: u16) {
+    /// the request has none), and every `Input` spots source with `spots`.
+    pub fn fill_inputs(&mut self, progress: u16, spots: &SpotList) {
         for slot in self.layers.iter_mut().flatten() {
             if let Block::Arc { fraction, .. } = &mut slot.block
                 && *fraction == Fraction::Input
@@ -530,6 +537,7 @@ impl LookSpec {
                 *fraction = Fraction::Fixed(progress.min(1000));
             }
         }
+        self.fill_spots(spots);
     }
 
     /// Whether the spec can be shown: at least one layer, and every value in
@@ -615,7 +623,16 @@ impl LookSpec {
                     }
                 }
                 Block::Sparkle(s) => validate_sparkle(&s)?,
+                Block::Spots(s) => spots::validate(&s)?,
             }
+        }
+        if self
+            .iter()
+            .filter(|l| matches!(l.block, Block::Spots(_)))
+            .count()
+            > 1
+        {
+            return Err("a look has at most one spots layer");
         }
         if self
             .iter()
@@ -641,6 +658,7 @@ impl LookSpec {
         elapsed_ms: u64,
         fraction: u32,
         sparkle: &SparkleState,
+        spots: &SpotState,
         now_ms: u64,
         bottom: u32,
         drained: &[u32; MAX_LAYERS],
@@ -654,6 +672,7 @@ impl LookSpec {
                 elapsed_ms,
                 fraction,
                 sparkle,
+                spots,
                 now_ms,
                 bottom,
                 drained[slot],
@@ -1006,7 +1025,7 @@ fn add_white(t: Rgbw, amount: u32) -> Rgbw {
 
 /// `cos(2π x)` for `x` in turns (Q16), from the quarter-wave table, as a
 /// signed Q16 value.
-fn cos_turn(x: u32) -> i64 {
+pub(crate) fn cos_turn(x: u32) -> i64 {
     let quarters = u64::from(x % ONE) * 4;
     let quadrant = quarters >> 16;
     let f = (quarters & 0xffff) as u32;

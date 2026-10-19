@@ -46,6 +46,7 @@ const LOOKS: u16 = 10;
 const SUBSCRIBE_CHANNELS: u16 = 11;
 const WATCH_FRAMES: u16 = 12;
 const LIGHT_SETTING: u16 = 15;
+const LED_INPUTS: u16 = 16;
 const WELCOME: u16 = 101;
 const DEVICES: u16 = 102;
 const READING: u16 = 103;
@@ -297,6 +298,20 @@ pub enum LedShow {
         spec: Box<lemnos_light::LookSpec>,
         progress: Option<u16>,
     },
+    /// A named look with its spots: the look's spots block takes its spots
+    /// from the request (`spots = "input"`), up to eight `(position, level)`
+    /// pairs with an optional colour each. `progress` as for [`LedShow::Look`].
+    LookSpots {
+        name: String,
+        progress: Option<u16>,
+        spots: lemnos_light::SpotList,
+    },
+    /// A look given in full, with its spots (as [`LedShow::LookSpots`]).
+    InlineSpots {
+        spec: Box<lemnos_light::LookSpec>,
+        progress: Option<u16>,
+        spots: lemnos_light::SpotList,
+    },
 }
 
 /// An LED intent on the wire. `None` fields take the light's defaults.
@@ -451,6 +466,19 @@ pub enum Request {
     CalibrationStatus {
         id: u32,
         device: String,
+    },
+    /// Changes the inputs of the look this client is showing on `device`,
+    /// and nothing else: the look's time (a comet's turn, a breathe's phase,
+    /// a sparkle) carries on, and only its input-driven blocks move (an arc's
+    /// fill, a spots block's spots, which glide to the new ones). `progress`
+    /// (thousandths) and `spots`; `None` keeps what is there. Refused, with a
+    /// reason, when the client shows no look or the look takes no such input.
+    /// Answered with a [`Message::Text`] when `id` is nonzero.
+    LedInputs {
+        id: u32,
+        device: String,
+        progress: Option<u16>,
+        spots: Option<lemnos_light::SpotList>,
     },
     /// Sets a light's ring-wide look brightness at runtime (`look_brightness`
     /// of the board, in thousandths: 0 to 1000). `persist` saves it in the

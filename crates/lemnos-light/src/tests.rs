@@ -806,11 +806,12 @@ fn largest_step_per_ms(look: &LookSpec, count: usize) -> (u8, u64) {
     };
     assert!(count <= 16);
     let idle = crate::sparkle::SparkleState::new(0, &crate::Sparkle::DEFAULT);
+    let spots = crate::spots::SpotState::new(0);
     let frame = |t: u64| -> [u8; 16] {
         let mut out = [0u8; 16];
         let drained = look.drained(t);
         for (i, slot) in out.iter_mut().enumerate().take(count) {
-            *slot = look.color(i, count, t, 0, &idle, t, 0, &drained).r;
+            *slot = look.color(i, count, t, 0, &idle, &spots, t, 0, &drained).r;
         }
         out
     };

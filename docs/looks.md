@@ -17,7 +17,7 @@ rebuild.
 
 A look has 1 to 4 **layers**, bottom first. Each layer is one block with its
 parameters, a colour, a brightness and a **mode**. A look has at most one
-`sparkle` layer. Layers are composited per
+`sparkle` layer and at most one `spots` layer. Layers are composited per
 LED: `max` keeps the brighter channel of the layers so far, `add` sums them
 (saturating). A layer's brightness scales that layer alone.
 
@@ -43,6 +43,7 @@ ring has 16 on the example board, at most 64), and every other fraction is 0 to 
 | `frame` | `pixels` (required: 1 to 64 colours) | Static pixels from LED 0; the rest are off. |
 | `wash` | `color` (required), `envelope` (required: a breathe, pulse or blink, in the look envelope's form) | Every LED the colour, shaped by its **own** envelope, not the whole look's. A flash or a slow breathe under other layers. |
 | `sparkle` | `color` or `colors` (required: one colour, or a list of 1 to 4 chosen at random per twinkle), `density` (1.2, twinkles a LED a second, 0 to 64), `density_end` (`density`, see below), `fade_ms` (0), `start_ms` (0), `min_ms` (350), `max_ms` (950), `base` (0, a floor in the first colour), `seed` (0: from the look's start time), `fall` (false), `fall_speed` (5, LEDs a second), `fall_accel` (6, LEDs a second squared) | Random twinkles: each LED starts one with probability `density` a second (`density * dt` per render, so the rate does not depend on the frame rate), unless it is mid-twinkle. See below. |
+| `spots` | `color` (required: the colour of spots without their own), `spots` (required: `"input"`, the request's spots, or a list of up to 8 `{ at, level, color }` tables, see *Spots*), `width` (1.5, LEDs: the full width of a spot's falloff), `follow_ms` (120, 10 to 10000), `max_spots` (8, 1 to 8: how many of the spots are shown) | Soft points of light on the ring that glide to new positions and levels. See *Spots*. |
 
 **Sparkle.** A twinkle lasts a random time in `min_ms` to `max_ms`. Its brightness
 rises linearly over the first fifth of its length, then decays as `(1 - x)^2` to
@@ -57,6 +58,57 @@ most 16 particles are in the air; a spawn with none free is skipped. The
 bottom comes from gravity when the look starts (see *Gravity* below), and is
 `default_down` otherwise (the middle of the ring). Sparkles are seeded per look
 start, so the same `seed` gives the same twinkles.
+
+### Spots
+
+A `spots` block is up to eight soft spots of light, each with a **position**, a
+**level** (0 to 1), and a colour (the block's, or its own). It is the look for a
+point of interest: a target on a ring, a bearing, a pair of candidates.
+
+- **Position** is a fraction of a turn from LED 0's centre: `0` is LED 0, `0.25`
+  a quarter of the way round toward LED 1 (`0.25` of a 16-LED ring is LED 4), and
+  `1` is the whole way round again. It is the ring's *logical* index, like a
+  ripple's `origin` and the gravity bottom, so the board's `offset` and
+  `direction` apply at output as they do to every look. A position past one turn
+  wraps.
+- **Falloff.** A spot is full at its centre and falls off as a raised cosine to
+  zero `width / 2` LEDs either side (`width` is the full width, default 1.5
+  LEDs). So a spot on an LED lights that LED alone, and a spot between two LEDs
+  lights both, the same, each at about a quarter, rather than jumping from one to
+  the other. Spots in one block combine by `max`; the block's `mode` (`max`,
+  `add` or `over`) combines the block with the layers below.
+- **Motion.** Each spot's position and level follow a critically damped spring,
+  `follow_ms` from the start to about 95% of the way: no overshoot, and no jerk
+  when an input changes. A spot moves the shorter way round the ring. The spring
+  advances in whole milliseconds from the last render, so the same inputs at the
+  same times give the same frames at any frame rate.
+- **Matching.** A new list of spots is matched to the spots on the ring by
+  nearest position: a spot that moved slides to its new place, a new spot fades
+  in from nothing where it appears, and a spot that is dropped fades out where it
+  is. A spot with its own colour keeps it while it moves; a change of colour
+  takes effect at once.
+- **Inputs.** `spots = "input"` takes the request's spots (`LedClient::look_spots`,
+  `show_spots`, `lemnos-ctl led spots`). A look with no spots in its request shows
+  none. `max_spots` caps the list (the first ones are shown).
+
+A look with fixed spots, written in the look itself:
+
+```toml
+[looks."spots.fixed"]
+layers = [
+  { block = "spots", color = "ff8000", width = 2.0, follow_ms = 200, spots = [{ at = 0.00, level = 1.0 }, { at = 0.25, level = 0.6 }, { at = 0.75, level = 0.4, color = "00ff40" }] },
+]
+```
+
+A look whose spots come from the request (the same look, the spots given when it
+is shown and changed with `update_inputs`):
+
+```toml
+[looks."spots.follow"]
+layers = [
+  { block = "spots", color = "28c8ff", spots = "input", max_spots = 4 },
+]
+```
 
 Colours are `"rrggbb"` (or `"#rrggbb"`), `"wwrrggbb"` for a white channel, or an
 integer `0xWWRRGGBB`.
@@ -322,10 +374,26 @@ restart.
 
 ## Using looks
 
+### Changing inputs without restarting the look
+
+A look's **inputs** are what a request gives it: an arc's progress, and a spots
+block's spots. `LedClient::update_inputs` (`Request::LedInputs`, kind 16) changes
+only those, for the look this client is already showing on the light. The rest
+of the look carries on: a comet keeps its turn, a breathe its phase, a sparkle
+its twinkles. Only the input blocks move (the arc fills, the spots glide). A
+change of inputs does not cross-fade, and a look whose input is not in the
+request (a fixed arc, a look with no spots) refuses the update with the reason.
+
+Send it at up to about 60 a second. The ring renders at its own rate and always
+uses the latest inputs, so a faster sender only wastes writes. A reconnection
+sends the latest inputs again, as it sends the look.
+
 ### `lemnos-ctl`
 
 ```text
 lemnos-ctl led look <name> [--brightness F] [--progress F] [--seconds N]
+lemnos-ctl led spots <POS:LEVEL[:RRGGBB]>... [--color RRGGBB] [--width LEDS] [--seconds N]
+lemnos-ctl led inputs [--progress F] [<POS:LEVEL[:RRGGBB]>...]   # the look this client shows
 lemnos-ctl led show --spec '<TOML body>' [--seconds N] [--brightness F] [--progress F]
 lemnos-ctl led show --file <path> [--name N] [--seconds N]
 lemnos-ctl led show --json '<JSON body>' [--seconds N]
@@ -386,11 +454,61 @@ leds.show_spec(&look)?;   // refused with the reason if invalid
 `LookSpec` is plain data: `layers`, `envelope`, `brightness` and `floor` are
 public, and `LookSpec::validate` says why a look cannot be shown.
 
+Spots and their inputs:
+
+```rust
+use lemnos_ipc::{LedClient, Spot};
+use lemnos_light::{LayerSpec, LookSpec, Rgbw, SpotSource};
+
+// A spots look whose spots come from the request (the look file's
+// `spots = "input"`), shown with two spots: position and level as fractions,
+// and a colour of its own on the second.
+let mut look = LookSpec::EMPTY;
+look.push(LayerSpec::spots(Rgbw::rgb(0x28c8ff), SpotSource::Input));
+leds.show_spots(&look, None, &[
+    Spot::new(250, 1000),                                   // a quarter round, full
+    Spot::new(500, 600).with_color(Rgbw::rgb(0x00ff40)),    // half way, 60%, green
+])?;
+
+// The spots move, the look's time carries on (`device` "" is the board's light;
+// `None` keeps an input as it is):
+leds.update_inputs("", None, Some(&[Spot::new(750, 800)]))?;
+leds.update_inputs("", Some(0.4), None)?;   // an arc's progress, if the look has one
+```
+
+The signatures, in `lemnos-ipc`:
+
+```rust
+impl LedClient {
+    /// A named look with its spots (and an arc's progress), until replaced.
+    pub fn look_spots(&mut self, name: &str, progress: Option<f32>, spots: &[Spot])
+        -> Result<(), ClientError>;
+    /// A look in full, with its spots (and an arc's progress).
+    pub fn show_spots(&mut self, spec: &LookSpec, progress: Option<f32>, spots: &[Spot])
+        -> Result<(), ClientError>;
+    /// Changes the inputs of this client's look on `device` (`""`: the board's
+    /// light); refused with the reason when the look takes no such input.
+    pub fn update_inputs(&mut self, device: &str, progress: Option<f32>, spots: Option<&[Spot]>)
+        -> Result<(), ClientError>;
+}
+
+// lemnos-light: a spot is `Spot { at, level, color }` in thousandths (of a turn,
+// of full), at most eight in a `SpotList`.
+```
+
 ## Protocol
 
 - `LedShow::Look { name, progress }` (code 10) and `LedShow::Inline { spec,
   progress }` (code 11, the look in a compact binary form: `lemnos-ipc`,
   `wire/look.rs`). Both are appended; older codes are unchanged.
+- Spots, appended: `LedShow::LookSpots { name, progress, spots }` (code 12) and
+  `LedShow::InlineSpots { spec, progress, spots }` (code 13), where `spots` is a
+  count (0 to 8), then each spot's `at` and `level` (u16, thousandths) and an
+  optional colour. A spots block in a look is block code 8: its colour, width,
+  `follow_ms`, `max_spots`, and a source (0: the fixed list that follows, 1:
+  `"input"`).
+- `Request::LedInputs { id, device, progress, spots }` (kind 16): the update. It
+  is answered with `Message::Text` when `id` is nonzero, as a `LedRequest` is.
 - `LedRequest` has a trailing reply `id`. A nonzero id gets a `Message::Text`
   reply: the empty text when the look is shown, or the refusal's reason.
 - `Request::Looks` (kind 10) lists, shows, reloads or saves; it is answered
@@ -403,3 +521,11 @@ rendered at fixed times, hashed. A deliberate change to a built-in is recorded
 with `LEMNOS_GOLDEN_UPDATE=<file> cargo test -p lemnos-light`. The look parser,
 writer and error paths are tested in `lemnos-board` (`looks_tests.rs`), the
 file table, reloads and saves in `lemnosd/tests/looks.rs`.
+
+The spots block is tested in `lemnos-light` (`spots_tests.rs`: positions between
+LEDs and across the wrap, the glide and its shorter way round, a spot that
+appears or is dropped, an input update that keeps a comet's turn), in
+`lemnos-board` (`looks_tests.rs`, the file form), and on the wire in `lemnos-ipc`
+(`tests.rs`). The daemon's input update is tested in `lemnosd` (`light.rs`), and
+`lemnos-ctl` (`tests/ctl_service.rs`) runs `led spots` and `led inputs` against the
+mock service.

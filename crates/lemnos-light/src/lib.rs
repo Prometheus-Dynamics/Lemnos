@@ -18,6 +18,11 @@
 //! - Sparkles (`Block::Sparkle`, see [`Sparkle`]): random twinkles, or falling sparks toward a
 //!   bottom the animator is given ([`Animator::set_bottom`]); a wash (`Block::Wash`) is a colour
 //!   under its own envelope.
+//! - Soft spots (`Block::Spots`, see [`SpotsSpec`]): up to eight points of light on the ring, each
+//!   with a position, a width, a colour and a level, that glide to new inputs (a critically damped
+//!   spring, `follow_ms`). The inputs come from the request ([`Show::LookSpots`],
+//!   [`Show::InlineSpots`]) or the look, and [`Animator::set`] takes a change of inputs without
+//!   restarting the look's time.
 //! - Comets (`Block::Comet`): one or two heads going round with a tail and a floor
 //!   brightness, for unknown amounts, booting, searching and chases. A ripple
 //!   (`Block::Ripple`) marks a confirmed update.
@@ -44,9 +49,12 @@ mod easing;
 mod intent;
 mod look;
 mod sparkle;
+mod spots;
 
 #[cfg(test)]
 mod golden;
+#[cfg(test)]
+mod spots_tests;
 #[cfg(test)]
 mod tests;
 
@@ -63,3 +71,6 @@ pub use look::{
     Mode, valid_look_name,
 };
 pub use sparkle::{MAX_PARTICLES, MAX_SPARKLE_COLORS, Sparkle};
+pub use spots::{
+    DEFAULT_FOLLOW_MS, DEFAULT_WIDTH, MAX_SPOTS, Spot, SpotList, SpotSource, SpotsSpec,
+};

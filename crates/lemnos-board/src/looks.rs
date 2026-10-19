@@ -42,7 +42,7 @@ impl std::fmt::Display for LookError {
     }
 }
 
-type Errors = Vec<LookError>;
+pub(super) type Errors = Vec<LookError>;
 
 /// Parses a look file: `[looks.<name>]` tables and nothing else. Every
 /// look is checked; one bad look makes the whole file fail (the caller keeps
@@ -149,7 +149,7 @@ pub fn from_value(source: &str, name: &str, value: &toml::Value) -> Result<LookS
     }
 }
 
-fn err(source: &str, key: &str, reason: impl Into<String>) -> LookError {
+pub(super) fn err(source: &str, key: &str, reason: impl Into<String>) -> LookError {
     LookError {
         source: source.into(),
         key: key.into(),
@@ -157,7 +157,7 @@ fn err(source: &str, key: &str, reason: impl Into<String>) -> LookError {
     }
 }
 
-fn join(prefix: &str, key: &str) -> String {
+pub(super) fn join(prefix: &str, key: &str) -> String {
     if prefix.is_empty() {
         key.to_string()
     } else {
@@ -166,7 +166,7 @@ fn join(prefix: &str, key: &str) -> String {
 }
 
 /// Keys a table may have; anything else is rejected with the list.
-fn only_keys(
+pub(super) fn only_keys(
     source: &str,
     prefix: &str,
     table: &toml::Table,
@@ -185,7 +185,7 @@ fn only_keys(
 }
 
 /// A fraction 0..1 as thousandths.
-fn fraction(value: &toml::Value) -> Option<u16> {
+pub(super) fn fraction(value: &toml::Value) -> Option<u16> {
     let v = number(value)?;
     (0.0..=1.0)
         .contains(&v)
@@ -198,7 +198,7 @@ fn brightness(value: &toml::Value) -> Option<u8> {
     (0.0..=1.0).contains(&v).then(|| (v * 255.0).round() as u8)
 }
 
-fn number(value: &toml::Value) -> Option<f64> {
+pub(super) fn number(value: &toml::Value) -> Option<f64> {
     match value {
         toml::Value::Integer(i) => Some(*i as f64),
         toml::Value::Float(f) => f.is_finite().then_some(*f),
@@ -206,13 +206,13 @@ fn number(value: &toml::Value) -> Option<f64> {
     }
 }
 
-fn whole(value: &toml::Value, min: i64, max: i64) -> Option<i64> {
+pub(super) fn whole(value: &toml::Value, min: i64, max: i64) -> Option<i64> {
     value.as_integer().filter(|v| (min..=max).contains(v))
 }
 
 /// A colour: `"rrggbb"` or `"#rrggbb"` (white 0), `"wwrrggbb"`, or an
 /// integer `0xWWRRGGBB`.
-fn color(value: &toml::Value) -> Option<Rgbw> {
+pub(super) fn color(value: &toml::Value) -> Option<Rgbw> {
     let v = match value {
         toml::Value::Integer(i) => u32::try_from(*i).ok()?,
         toml::Value::String(s) => {
@@ -232,7 +232,7 @@ fn color(value: &toml::Value) -> Option<Rgbw> {
     ))
 }
 
-fn color_text(c: Rgbw) -> String {
+pub(super) fn color_text(c: Rgbw) -> String {
     if c.w == 0 {
         format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b)
     } else {
@@ -515,7 +515,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         return Err(vec![err(
             source,
             &join(key, "block"),
-            "needs block: fill, comet, arc, ripple, frame, wash, sparkle or drain",
+            "needs block: fill, comet, arc, ripple, frame, wash, sparkle, spots or drain",
         )]);
     };
     let allowed: &[&str] = match block_name {
@@ -564,6 +564,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
             "brightness",
             "mode",
         ],
+        "spots" => super::looks_spots::SPOTS_KEYS,
         "sparkle" => &[
             "block",
             "color",
@@ -587,7 +588,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
                 source,
                 &join(key, "block"),
                 format!(
-                    "unknown block {other:?} (fill, comet, arc, ripple, frame, wash, sparkle or drain)"
+                    "unknown block {other:?} (fill, comet, arc, ripple, frame, wash, sparkle, spots or drain)"
                 ),
             )]);
         }
@@ -602,6 +603,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
         "wash" => wash(source, key, table, &mut errors),
         "drain" => drain(source, key, table, &mut errors),
         "sparkle" => sparkle(source, key, table, &mut errors),
+        "spots" => super::looks_spots::spots(source, key, table, &mut errors),
         _ => frame(source, key, table, &mut errors),
     };
     let layer_brightness = match table.get("brightness") {
@@ -632,7 +634,7 @@ fn layer_spec(source: &str, key: &str, table: &toml::Table) -> Result<LayerSpec,
     }
 }
 
-fn required_color(
+pub(super) fn required_color(
     source: &str,
     key: &str,
     table: &toml::Table,
@@ -1119,7 +1121,7 @@ fn per_second_text(v: u32) -> String {
     format!("{:.3}", f64::from(v) / 1000.0)
 }
 
-fn thousandths(v: u16) -> String {
+pub(super) fn thousandths(v: u16) -> String {
     format!("{:.3}", f64::from(v) / 1000.0)
 }
 
@@ -1251,6 +1253,7 @@ fn layer_text(layer: &LayerSpec) -> String {
             parts.push(format!("color = \"{}\"", color_text(color)));
             parts.push(format!("envelope = {}", envelope_text(&effect)));
         }
+        Block::Spots(spots) => parts.extend(super::looks_spots::parts(&spots)),
         Block::Sparkle(sp) => {
             parts.push("block = \"sparkle\"".into());
             let list: Vec<String> = sp.colors[..usize::from(sp.count)]

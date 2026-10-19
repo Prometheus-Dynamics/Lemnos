@@ -1059,7 +1059,9 @@ impl Service {
         let (owner, layer, look) = match self.lights[li].shown_intent() {
             Some((owner, layer, intent)) => {
                 let look = match intent.show {
-                    Show::Look { name, .. } => name.as_str().to_string(),
+                    Show::Look { name, .. } | Show::LookSpots { name, .. } => {
+                        name.as_str().to_string()
+                    }
                     _ => String::new(),
                 };
                 (self.owner_name(owner), layer.name().to_string(), look)
@@ -1294,13 +1296,17 @@ impl Service {
                 // file), and an inline look a valid one; a refusal leaves
                 // the light as it is.
                 let refusal = match &request.show {
-                    LedShow::Look { name, .. } if !valid_look_name(name) => {
+                    LedShow::Look { name, .. } | LedShow::LookSpots { name, .. }
+                        if !valid_look_name(name) =>
+                    {
                         Some(format!("{name:?} is not a valid look name"))
                     }
-                    LedShow::Look { name, .. } if !self.looks.knows(name) => {
+                    LedShow::Look { name, .. } | LedShow::LookSpots { name, .. }
+                        if !self.looks.knows(name) =>
+                    {
                         Some(format!("unknown look {name:?} (lemnos-ctl looks list)"))
                     }
-                    LedShow::Inline { spec, .. } => spec
+                    LedShow::Inline { spec, .. } | LedShow::InlineSpots { spec, .. } => spec
                         .validate()
                         .err()
                         .map(|reason| format!("invalid look: {reason}")),
@@ -1330,6 +1336,45 @@ impl Service {
                     self.clients[ci].send(&Message::Text {
                         id: request.id,
                         result,
+                    });
+                }
+            }
+            Request::LedInputs {
+                id,
+                device,
+                progress,
+                spots,
+            } => {
+                let li = if device.is_empty() {
+                    (!self.lights.is_empty()).then_some(0)
+                } else {
+                    self.slot_of(&device)
+                        .and_then(|slot| self.lights.iter().position(|l| l.slot == slot))
+                };
+                let Some(li) = li else {
+                    if id != 0 {
+                        self.clients[ci].send(&Message::Text {
+                            id,
+                            result: Err(format!("no light {device:?}")),
+                        });
+                    }
+                    return;
+                };
+                let (name, owner) = {
+                    let c = &self.clients[ci];
+                    (c.name.clone(), c.owner)
+                };
+                if !self.slots[self.lights[li].slot].allows(&name) {
+                    return;
+                }
+                let result = {
+                    let looks = &self.looks;
+                    self.lights[li].update_inputs(owner, progress, spots, &|name| looks.get(name))
+                };
+                if id != 0 {
+                    self.clients[ci].send(&Message::Text {
+                        id,
+                        result: result.map(|()| String::new()),
                     });
                 }
             }

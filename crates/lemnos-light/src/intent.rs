@@ -4,6 +4,7 @@ use crate::animator::{Effect, Transition};
 use crate::builtin;
 use crate::easing::Easing;
 use crate::look::{Block, LookName, LookSpec, MAX_FRAME_LEDS};
+use crate::spots::SpotList;
 use lemnos_device::Rgbw;
 
 /// Status a light can show.
@@ -384,6 +385,19 @@ pub enum Show<const N: usize> {
         spec: LookSpec,
         progress: Option<u16>,
     },
+    /// A named look with its spots (the look's spots block takes
+    /// `spots = "input"`), and its progress as for [`Show::Look`].
+    LookSpots {
+        name: LookName,
+        progress: Option<u16>,
+        spots: SpotList,
+    },
+    /// A look given in full, with its spots (as [`Show::LookSpots`]).
+    InlineSpots {
+        spec: LookSpec,
+        progress: Option<u16>,
+        spots: SpotList,
+    },
 }
 
 /// One owner's request for a light. Unset fields take the light's
@@ -447,7 +461,9 @@ impl<const N: usize> Intent<N> {
             | Show::Indeterminate { .. }
             | Show::Orbit { .. }
             | Show::Look { .. }
-            | Show::Inline { .. } => Layer::App,
+            | Show::Inline { .. }
+            | Show::LookSpots { .. }
+            | Show::InlineSpots { .. } => Layer::App,
         }
     }
 
@@ -455,38 +471,38 @@ impl<const N: usize> Intent<N> {
     /// Named looks are taken from `lookup` first (the look files), then the
     /// built-ins; an unknown name shows nothing.
     pub fn resolve(&self, defaults: &Defaults, lookup: Lookup<'_>) -> (LookSpec, Transition) {
-        let (mut spec, progress) = match self.show {
-            Show::Status(status) => named(status.look_name(), None, defaults, lookup),
-            Show::Color(color) => (
+        let (mut spec, progress, spots) = match self.show {
+            Show::Status(status) => with_none(named(status.look_name(), None, defaults, lookup)),
+            Show::Color(color) => with_none((
                 LookSpec::fill(color).with_brightness(builtin::FULL_FILL),
                 None,
-            ),
-            Show::Frame { pixels, len } => (
+            )),
+            Show::Frame { pixels, len } => with_none((
                 LookSpec::frame(&pixels[..len.min(N).min(MAX_FRAME_LEDS)]),
                 None,
-            ),
+            )),
             Show::Progress {
                 fraction,
                 color,
                 background,
-            } => (
+            } => with_none((
                 LookSpec::progress(
                     fraction.min(1000),
                     color.unwrap_or(defaults.progress),
                     background.unwrap_or(defaults.progress_background),
                 ),
                 None,
-            ),
-            Show::Indeterminate { color } => (
+            )),
+            Show::Indeterminate { color } => with_none((
                 builtin::spinner(color.unwrap_or(defaults.progress), defaults),
                 None,
-            ),
+            )),
             Show::Orbit {
                 color,
                 tail,
                 heads,
                 base,
-            } => (
+            } => with_none((
                 builtin::comet(
                     color.unwrap_or(defaults.progress),
                     defaults.spinner_period_ms,
@@ -495,23 +511,34 @@ impl<const N: usize> Intent<N> {
                     base.unwrap_or(defaults.spinner_base),
                 ),
                 None,
-            ),
+            )),
             Show::System(state) => {
                 let progress = match state {
                     SystemState::Updating { progress, .. } => progress,
                     _ => None,
                 };
-                named(state.look_name(), progress, defaults, lookup)
+                with_none(named(state.look_name(), progress, defaults, lookup))
             }
-            Show::Locate => named("system.locate", None, defaults, lookup),
-            Show::Look { name, progress } => named(name.as_str(), progress, defaults, lookup),
-            Show::Inline { spec, progress } => (spec, progress),
+            Show::Locate => with_none(named("system.locate", None, defaults, lookup)),
+            Show::Look { name, progress } => {
+                with_none(named(name.as_str(), progress, defaults, lookup))
+            }
+            Show::Inline { spec, progress } => with_none((spec, progress)),
+            Show::LookSpots {
+                name,
+                progress,
+                spots,
+            } => {
+                let (spec, progress) = named(name.as_str(), progress, defaults, lookup);
+                (spec, progress, Some(spots))
+            }
+            Show::InlineSpots {
+                spec,
+                progress,
+                spots,
+            } => (spec, progress, Some(spots)),
         };
-        if let Some(progress) = progress {
-            spec.fill_input(progress);
-        } else {
-            spec.fill_input(0);
-        }
+        spec.fill_inputs(progress.unwrap_or(0), &spots.unwrap_or(SpotList::EMPTY));
         if let Some(brightness) = self.brightness {
             spec.brightness = brightness;
         }
@@ -525,6 +552,68 @@ impl<const N: usize> Intent<N> {
             self.easing.unwrap_or(defaults.easing),
         );
         (spec, transition)
+    }
+
+    /// The look as the client gave it, before its inputs are filled: a named
+    /// look from `lookup` or the built-ins, or an inline look. `None` for the
+    /// shows that are not a client's look.
+    pub fn look_template(&self, defaults: &Defaults, lookup: Lookup<'_>) -> Option<LookSpec> {
+        match self.show {
+            Show::Look { name, .. } | Show::LookSpots { name, .. } => {
+                named_look(name.as_str(), defaults, lookup)
+            }
+            Show::Inline { spec, .. } | Show::InlineSpots { spec, .. } => Some(spec),
+            _ => None,
+        }
+    }
+
+    /// Sets the inputs of this client's look: a new progress and, for a look
+    /// with spots, new spots (`None` keeps the current value). A look without
+    /// spots becomes one with them when given spots.
+    pub fn set_inputs(&mut self, progress: Option<u16>, spots: Option<SpotList>) {
+        self.show = match self.show {
+            Show::Look { name, progress: p } => match spots {
+                Some(spots) => Show::LookSpots {
+                    name,
+                    progress: progress.or(p),
+                    spots,
+                },
+                None => Show::Look {
+                    name,
+                    progress: progress.or(p),
+                },
+            },
+            Show::LookSpots {
+                name,
+                progress: p,
+                spots: s,
+            } => Show::LookSpots {
+                name,
+                progress: progress.or(p),
+                spots: spots.unwrap_or(s),
+            },
+            Show::Inline { spec, progress: p } => match spots {
+                Some(spots) => Show::InlineSpots {
+                    spec,
+                    progress: progress.or(p),
+                    spots,
+                },
+                None => Show::Inline {
+                    spec,
+                    progress: progress.or(p),
+                },
+            },
+            Show::InlineSpots {
+                spec,
+                progress: p,
+                spots: s,
+            } => Show::InlineSpots {
+                spec,
+                progress: progress.or(p),
+                spots: spots.unwrap_or(s),
+            },
+            other => other,
+        };
     }
 
     /// Resolves with the built-in looks only.
@@ -611,6 +700,11 @@ impl<const N: usize> Intent<N> {
             Effect::Pulse { .. } => {}
         }
     }
+}
+
+/// A resolved look with no spots input.
+fn with_none<T>(look: (LookSpec, T)) -> (LookSpec, T, Option<SpotList>) {
+    (look.0, look.1, None)
 }
 
 /// A named look, with its arc's input.
@@ -733,6 +827,27 @@ impl<const N: usize, const OWNERS: usize> Arbiter<N, OWNERS> {
             .flatten()
             .filter_map(|h| h.expires_ms)
             .min()
+    }
+
+    /// The look intent `owner` holds that is shown first: its highest layer,
+    /// then its most recent. A look (named or inline), not a status or a
+    /// system state.
+    pub fn look_mut(&mut self, owner: u32) -> Option<&mut Intent<N>> {
+        self.held
+            .iter_mut()
+            .flatten()
+            .filter(|h| {
+                h.owner == owner
+                    && matches!(
+                        h.intent.show,
+                        Show::Look { .. }
+                            | Show::LookSpots { .. }
+                            | Show::Inline { .. }
+                            | Show::InlineSpots { .. }
+                    )
+            })
+            .max_by_key(|h| (h.intent.layer(), h.seq))
+            .map(|h| &mut h.intent)
     }
 
     /// The intent the light shows, if anyone holds one.

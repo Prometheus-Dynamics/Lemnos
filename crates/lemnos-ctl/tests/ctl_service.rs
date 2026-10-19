@@ -188,3 +188,49 @@ backend = "userspace"
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("gyro chip id"), "{stderr}");
 }
+
+/// Runs `lemnos-ctl --socket <service> <args>` and returns whether it succeeded
+/// and its stderr.
+fn ctl_result(service: &MockLemnosd, args: &[&str]) -> (bool, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lemnos-ctl"))
+        .arg("--socket")
+        .arg(service.socket())
+        .args(args)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    )
+}
+
+#[test]
+fn led_spots_show_and_their_inputs_update_from_the_command_line() {
+    let service = start();
+    // A spots look, held after the command exits (as any led command is).
+    ctl(
+        &service,
+        &[
+            "led",
+            "spots",
+            "0.25:1",
+            "0.5:0.6:00ff40",
+            "--device",
+            "ring",
+            "--seconds",
+            "5",
+        ],
+    );
+    // A new process of the same client name updates the inputs the look shows.
+    ctl(&service, &["led", "inputs", "--device", "ring", "0.75:0.5"]);
+    // The look takes no progress: the service says so, and the look stays.
+    let (ok, reason) = ctl_result(
+        &service,
+        &["led", "inputs", "--device", "ring", "--progress", "0.5"],
+    );
+    assert!(!ok);
+    assert!(reason.contains("no progress"), "{reason}");
+    // Nothing to update, and a bad pair, are refused before the service.
+    assert!(!ctl_result(&service, &["led", "inputs", "--device", "ring"]).0);
+    assert!(!ctl_result(&service, &["led", "spots", "1.5:1"]).0);
+}

@@ -679,3 +679,114 @@ fn a_raw_transfer_at_the_largest_size_fits_the_request_limit() {
     let (decoded, used) = decode_request(&frame).unwrap().unwrap();
     assert_eq!((decoded, used), (request, frame.len()));
 }
+
+#[test]
+fn spots_looks_and_input_updates_round_trip_on_the_wire() {
+    use lemnos_light::{Block, LayerSpec, LookSpec, Rgbw, Spot, SpotList, SpotSource, SpotsSpec};
+    let spots = SpotList::new(&[
+        Spot::new(250, 1_000),
+        Spot::new(750, 600).with_color(Rgbw::rgb(0xff0000)),
+    ]);
+    // A named look with spots, and a look in full with them.
+    round_trip_request(Request::Led(LedRequest::new(LedShow::LookSpots {
+        name: "pv.spots".into(),
+        progress: Some(400),
+        spots,
+    })));
+    let inline = LookSpec::of(LayerSpec::new(Block::Spots(SpotsSpec {
+        width: 2_000,
+        follow_ms: 200,
+        max_spots: 4,
+        ..SpotsSpec::new(Rgbw::rgb(0x28c8ff), SpotSource::Input)
+    })));
+    round_trip_request(Request::Led(LedRequest::new(LedShow::InlineSpots {
+        spec: Box::new(inline),
+        progress: None,
+        spots,
+    })));
+    // A fixed spots block in the look, with a colour of its own on a spot.
+    let fixed = LookSpec::of(LayerSpec::spots(
+        Rgbw::rgb(0xff8000),
+        SpotSource::Fixed(SpotList::new(&[Spot::new(500, 1_000)])),
+    ));
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(fixed),
+        progress: None,
+    })));
+    // The update: both inputs, one, the other, and none.
+    for (progress, spots) in [
+        (Some(650), Some(spots)),
+        (None, Some(spots)),
+        (Some(0), None),
+        (None, None),
+    ] {
+        round_trip_request(Request::LedInputs {
+            id: 12,
+            device: "ring".into(),
+            progress,
+            spots,
+        });
+    }
+}
+
+#[test]
+fn a_spots_look_has_its_own_codes_and_the_old_ones_are_unchanged() {
+    use lemnos_light::{LayerSpec, LookSpec, Rgbw, Spot, SpotList};
+    // The show's code follows the frame's length and kind (4 + 2 bytes) and
+    // the device name (a u16 length, empty: 2 bytes): byte 8. A named look is
+    // 10, an inline one 11; the spots forms are 12 and 13, appended.
+    let code = |show: LedShow| Request::Led(LedRequest::new(show)).encode()[8];
+    assert_eq!(
+        code(LedShow::Look {
+            name: "pv.searching".into(),
+            progress: None,
+        }),
+        10
+    );
+    let fill = LookSpec::of(LayerSpec::fill(Rgbw::rgb(0)));
+    assert_eq!(
+        code(LedShow::Inline {
+            spec: Box::new(fill),
+            progress: None,
+        }),
+        11
+    );
+    let spots = SpotList::new(&[Spot::new(0, 1_000)]);
+    assert_eq!(
+        code(LedShow::LookSpots {
+            name: "x".into(),
+            progress: None,
+            spots,
+        }),
+        12
+    );
+    assert_eq!(
+        code(LedShow::InlineSpots {
+            spec: Box::new(LookSpec::of(LayerSpec::fill(Rgbw::rgb(0)))),
+            progress: None,
+            spots,
+        }),
+        13
+    );
+}
+
+#[test]
+fn a_truncated_spot_list_is_a_protocol_error() {
+    use lemnos_light::{Block, LayerSpec, LookSpec, Rgbw, Spot, SpotList, SpotSource, SpotsSpec};
+    let spec = LookSpec::of(LayerSpec::new(Block::Spots(SpotsSpec::new(
+        Rgbw::rgb(0x00ff00),
+        SpotSource::Fixed(SpotList::new(&[Spot::new(1, 2)])),
+    ))));
+    let frame = Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(spec),
+        progress: None,
+    }))
+    .encode();
+    // Cut inside the spots block, and fix up the frame length so the codec
+    // sees a complete frame whose body is short.
+    let body = &frame[..frame.len() - 12];
+    let mut short = body.to_vec();
+    let len = (short.len() - 4) as u32;
+    short[..4].copy_from_slice(&len.to_le_bytes());
+    assert!(decode_request(&short).is_err() || decode_request(&short).unwrap().is_none());
+}

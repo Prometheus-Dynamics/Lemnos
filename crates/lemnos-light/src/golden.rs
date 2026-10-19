@@ -6,7 +6,10 @@ extern crate std;
 use std::{format, string::String, vec::Vec};
 
 use crate::Phase;
-use crate::{Animator, Defaults, EffectKind, Intent, LookName, Rgbw, Show, Status, SystemState};
+use crate::{
+    Animator, Defaults, EffectKind, Intent, LayerSpec, LookName, LookSpec, Rgbw, Show, Spot,
+    SpotList, SpotSource, Status, SystemState,
+};
 
 const LEDS: usize = 16;
 const TIMES: [u64; 11] = [0, 1, 40, 125, 250, 600, 1000, 1500, 2200, 3000, 4800];
@@ -216,6 +219,36 @@ fn scenarios(defaults: &Defaults, out: &mut String) {
     };
     chase.spinner_tail = 4;
     run("locate-chase", Intent::new(Show::Locate), &chase, out);
+    // Spots: fixed in the look, and given by the request (with a colour of
+    // their own on one of them), gliding in from nothing.
+    let fixed = LookSpec::of(LayerSpec::spots(
+        Rgbw::rgb(0xff8000),
+        SpotSource::Fixed(SpotList::new(&[
+            Spot::new(0, 1000),
+            Spot::new(500, 600),
+            Spot::new(990, 500).with_color(Rgbw::rgb(0x00ff40)),
+        ])),
+    ));
+    run(
+        "spots-fixed",
+        Intent::new(Show::Inline {
+            spec: fixed,
+            progress: None,
+        }),
+        d,
+        out,
+    );
+    let input = LookSpec::of(LayerSpec::spots(Rgbw::rgb(0x28c8ff), SpotSource::Input));
+    run(
+        "spots-input",
+        Intent::new(Show::InlineSpots {
+            spec: input,
+            progress: None,
+            spots: SpotList::new(&[Spot::new(250, 1000), Spot::new(750, 800)]),
+        }),
+        d,
+        out,
+    );
 }
 
 /// The built-in looks render as recorded in `golden.txt`. A deliberate change

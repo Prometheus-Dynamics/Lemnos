@@ -228,7 +228,10 @@ led.clear()?;                                // drop this client's intents
   bright leading LED and a slow sheen; new values reached by an eased advance, optional
   background), `indeterminate` (a spinning comet when the amount is unknown), `orbit`
   (one or two comets with their own colour, tail, floor and period: a searching look),
-  system animations and `locate`. Each
+  `spots` (up to eight soft spots on the ring, each with a position, level and colour,
+  gliding to new inputs: `docs/looks.md`, *Spots*), system animations and `locate`. A
+  look's inputs (an arc's progress, a spots block's spots) can change without restarting
+  it: `LedClient::update_inputs`, and `lemnos-ctl led inputs`. Each
   request can override the light's defaults: `effect` (`solid`, hard `blink`, eased
   `breathe`/pulse, or `chase`), `period_ms` (rate), `depth`, `brightness`, `fade_ms` and
   `easing` (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`, `cubic-bezier(x1, y1,
@@ -289,6 +292,8 @@ lemnos-ctl led progress 0.4 --color 00ff40
 lemnos-ctl led system updating 0.4 --phase writing
 lemnos-ctl led system confirmed        # the trial boot passed: a green celebration, 1.9 s
 lemnos-ctl led locate --seconds 10
+lemnos-ctl led spots 0.25:1 0.5:0.6         # two spots; then `led inputs` moves them
+lemnos-ctl led inputs 0.75:0.5              # the look this client shows, inputs only
 lemnos-ctl led frame ff0000,00ff00,0000ff --test --seconds 5   # selftest look, over status
 lemnos-ctl led off --test             # clears only the test layer
 lemnos-ctl led off

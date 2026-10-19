@@ -12,7 +12,7 @@ use super::{WireError, bad};
 use lemnos_device::Rgbw;
 use lemnos_light::{
     Block, Effect, Fraction, LayerSpec, LookSpec, MAX_FRAME_LEDS, MAX_LAYERS, MAX_SPARKLE_COLORS,
-    Mode, Sparkle,
+    MAX_SPOTS, Mode, Sparkle, Spot, SpotList, SpotSource, SpotsSpec,
 };
 
 const FILL: u8 = 0;
@@ -23,6 +23,7 @@ const FRAME: u8 = 4;
 const WASH: u8 = 5;
 const SPARKLE: u8 = 6;
 const DRAIN: u8 = 7;
+const SPOTS: u8 = 8;
 
 const SOLID: u8 = 0;
 const BLINK: u8 = 1;
@@ -125,6 +126,22 @@ pub(super) fn encode(e: &mut Encoder, spec: &LookSpec) {
                     e.u16(p);
                 }
             }
+            Block::Spots(spots) => {
+                e.u8(SPOTS)
+                    .u32(color_code(spots.color))
+                    .u16(spots.width)
+                    .u32(spots.follow_ms)
+                    .u8(spots.max_spots);
+                match spots.source {
+                    SpotSource::Input => {
+                        e.u8(1);
+                    }
+                    SpotSource::Fixed(list) => {
+                        e.u8(0);
+                        encode_spots(e, &list);
+                    }
+                }
+            }
             Block::Sparkle(sp) => {
                 let count = usize::from(sp.count).clamp(1, MAX_SPARKLE_COLORS);
                 e.u8(SPARKLE).u8(count as u8);
@@ -152,6 +169,33 @@ pub(super) fn encode(e: &mut Encoder, spec: &LookSpec) {
     }
     encode_effect(e, spec.envelope);
     e.u8(spec.brightness).u8(spec.floor);
+}
+
+/// A list of spots: the count, then each spot's position, level and colour
+/// (a flag and the colour, if any).
+pub(super) fn encode_spots(e: &mut Encoder, list: &SpotList) {
+    e.u8(list.len);
+    for spot in list.iter() {
+        e.u16(spot.at)
+            .u16(spot.level)
+            .opt_color(spot.color.map(color_code));
+    }
+}
+
+/// A list of spots, as [`encode_spots`] wrote it.
+pub(super) fn decode_spots(d: &mut Decoder<'_>) -> Result<SpotList, WireError> {
+    let count = usize::from(d.u8()?);
+    if count > MAX_SPOTS {
+        return Err(bad(format!("{count} spots")));
+    }
+    let mut spots = Vec::with_capacity(count);
+    for _ in 0..count {
+        let at = d.u16()?;
+        let level = d.u16()?;
+        let color = d.opt_color()?.map(color_from);
+        spots.push(Spot { at, level, color });
+    }
+    Ok(SpotList::new(&spots))
 }
 
 /// An envelope: its code, then its fields.
@@ -321,6 +365,24 @@ pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
                     fall: d.u8()? != 0,
                     fall_speed: d.u32()?,
                     fall_accel: d.u32()?,
+                })
+            }
+            SPOTS => {
+                let color = color_from(d.u32()?);
+                let width = d.u16()?;
+                let follow_ms = d.u32()?;
+                let max_spots = d.u8()?;
+                let source = match d.u8()? {
+                    0 => SpotSource::Fixed(decode_spots(d)?),
+                    1 => SpotSource::Input,
+                    other => return Err(bad(format!("spots source {other}"))),
+                };
+                Block::Spots(SpotsSpec {
+                    color,
+                    width,
+                    follow_ms,
+                    max_spots,
+                    source,
                 })
             }
             other => return Err(bad(format!("look block {other}"))),

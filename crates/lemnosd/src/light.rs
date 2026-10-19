@@ -3,8 +3,8 @@
 
 use lemnos_ipc::{LedRequest, LedShow};
 use lemnos_light::{
-    Animator, Arbiter, Defaults, Intent, Layer, LookName, LookSpec, Lookup, Rgbw, Show, Transition,
-    Winner,
+    Animator, Arbiter, Defaults, Intent, Layer, LookName, LookSpec, Lookup, Rgbw, Show, SpotList,
+    Transition, Winner,
 };
 
 /// The most LEDs a light may have.
@@ -187,6 +187,27 @@ impl Light {
                 spec: **spec,
                 progress: *progress,
             },
+            LedShow::LookSpots {
+                name,
+                progress,
+                spots,
+            } => match LookName::new(name) {
+                Some(name) => Show::LookSpots {
+                    name,
+                    progress: *progress,
+                    spots: *spots,
+                },
+                None => return false,
+            },
+            LedShow::InlineSpots {
+                spec,
+                progress,
+                spots,
+            } => Show::InlineSpots {
+                spec: **spec,
+                progress: *progress,
+                spots: *spots,
+            },
         };
         let mut intent = Intent::new(show);
         intent.effect = request.effect;
@@ -278,9 +299,44 @@ impl Light {
                 Transition::new(self.defaults.fade_ms, self.defaults.easing),
             ),
         };
-        self.animator.set(look, transition, now_ms);
-        self.look_changed = true;
+        // An input-only change (a new progress or spots) is not a new look: the
+        // light's gravity is read for a look that starts, not for each input.
+        if self.animator.set(look, transition, now_ms) {
+            self.look_changed = true;
+        }
         Some(winner)
+    }
+
+    /// Changes the inputs (`progress`, `spots`) of `owner`'s look on this light
+    /// and nothing else (see `Request::LedInputs`). Refused, with the reason,
+    /// when the owner shows no look here or the look takes no such input. The
+    /// caller re-arbitrates: the look's time carries on, and only its input
+    /// blocks move.
+    pub fn update_inputs(
+        &mut self,
+        owner: u32,
+        progress: Option<u16>,
+        spots: Option<SpotList>,
+        lookup: Lookup<'_>,
+    ) -> Result<(), String> {
+        if progress.is_none() && spots.is_none() {
+            return Err("give a progress, spots or both".into());
+        }
+        let defaults = self.defaults;
+        let Some(intent) = self.arbiter.look_mut(owner) else {
+            return Err("this client shows no look on this light (send a look first)".into());
+        };
+        let Some(template) = intent.look_template(&defaults, lookup) else {
+            return Err("this client's look is not one the service has".into());
+        };
+        if progress.is_some() && !template.takes_progress() {
+            return Err("this look takes no progress (no arc with fraction = \"input\")".into());
+        }
+        if spots.is_some() && !template.takes_spots() {
+            return Err("this look takes no spots (no spots block with spots = \"input\")".into());
+        }
+        intent.set_inputs(progress, spots);
+        Ok(())
     }
 
     /// Makes the next arbitration re-resolve the shown intent (after a look
@@ -314,6 +370,110 @@ impl Light {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lemnos_light::{LayerSpec, Spot, SpotSource};
+
+    /// A comet (blue) with a spots block that takes its spots from the request.
+    fn comet_and_spots() -> LookSpec {
+        let mut look = LookSpec::EMPTY;
+        look.push(LayerSpec::comet(Rgbw::rgb(0x0000ff), 1_600, 4_000, 1, 0));
+        look.push(LayerSpec::spots(Rgbw::rgb(0xff0000), SpotSource::Input));
+        look
+    }
+
+    fn spots_request(level: u16) -> LedRequest {
+        LedRequest::new(LedShow::InlineSpots {
+            spec: Box::new(comet_and_spots()),
+            progress: None,
+            spots: SpotList::new(&[Spot::new(500, level)]),
+        })
+    }
+
+    fn no_looks(_: &str) -> Option<LookSpec> {
+        None
+    }
+
+    /// Arbitrates and renders `light` at `now`, keeping the last frame.
+    fn ring(light: &mut Light, now: u64, last: &mut [Rgbw; MAX_LEDS]) {
+        light.arbitrate(now, &no_looks);
+        if let Some(frame) = light.animator.render(now) {
+            let n = frame.len().min(MAX_LEDS);
+            last[..n].copy_from_slice(&frame[..n]);
+        }
+    }
+
+    #[test]
+    fn an_input_update_moves_the_spot_and_keeps_the_comet_turn() {
+        // LED 8 is the spot's (position 0.5 of 16, and its falloff reaches no
+        // other LED): every other LED is the comet, which must be where it
+        // would be had the look never changed.
+        let mut reference = Light::new(0, 16, Defaults::default());
+        assert!(reference.request(1, 0, &spots_request(400), 0));
+        let mut a = [Rgbw::OFF; MAX_LEDS];
+        ring(&mut reference, 0, &mut a);
+        ring(&mut reference, 800, &mut a);
+
+        let mut updated = Light::new(0, 16, Defaults::default());
+        assert!(updated.request(1, 0, &spots_request(1_000), 0));
+        let mut b = [Rgbw::OFF; MAX_LEDS];
+        ring(&mut updated, 0, &mut b);
+        ring(&mut updated, 500, &mut b);
+        let update = SpotList::new(&[Spot::new(500, 400)]);
+        assert_eq!(
+            updated.update_inputs(1, None, Some(update), &no_looks),
+            Ok(())
+        );
+        ring(&mut updated, 500, &mut b);
+        // Just after the update the spot is still gliding down from full
+        // (its level, not a fade of the look): brighter than at rest.
+        let mut gliding = [Rgbw::OFF; MAX_LEDS];
+        ring(&mut updated, 520, &mut gliding);
+        assert!(gliding[8].r > a[8].r, "{} {}", gliding[8].r, a[8].r);
+        ring(&mut updated, 800, &mut b);
+        for led in (0..16).filter(|&l| l != 8) {
+            assert_eq!(b[led], a[led], "LED {led}");
+        }
+
+        // Had the look been sent afresh at 500 ms, its comet would be a
+        // turn behind: the update is not a restart.
+        let mut restarted = Light::new(0, 16, Defaults::default());
+        assert!(restarted.request(1, 0, &spots_request(400), 500));
+        let mut c = [Rgbw::OFF; MAX_LEDS];
+        ring(&mut restarted, 500, &mut c);
+        ring(&mut restarted, 800, &mut c);
+        assert!((0..16).filter(|&l| l != 8).any(|l| c[l] != a[l]));
+    }
+
+    #[test]
+    fn an_update_is_refused_with_the_reason_when_there_is_nothing_to_update() {
+        let mut light = Light::new(0, 16, Defaults::default());
+        // No look from this client yet.
+        assert!(
+            light
+                .update_inputs(1, Some(500), None, &no_looks)
+                .unwrap_err()
+                .contains("no look")
+        );
+        // A plain fill takes no inputs.
+        assert!(light.request(1, 0, &LedRequest::new(LedShow::Color(0xff0000)), 0));
+        assert!(
+            light
+                .update_inputs(1, Some(500), None, &no_looks)
+                .unwrap_err()
+                .contains("no look")
+        );
+        // A look with spots takes spots, not a progress.
+        assert!(light.request(2, 0, &spots_request(1_000), 0));
+        let refused = light
+            .update_inputs(2, Some(500), None, &no_looks)
+            .unwrap_err();
+        assert!(refused.contains("no progress"), "{refused}");
+        assert!(
+            light
+                .update_inputs(2, None, Some(SpotList::EMPTY), &no_looks)
+                .is_ok()
+        );
+        assert!(light.update_inputs(2, None, None, &no_looks).is_err());
+    }
 
     #[test]
     fn frames_keep_their_cadence_and_a_late_wake_resyncs_without_a_burst() {

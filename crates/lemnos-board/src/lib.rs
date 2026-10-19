@@ -45,6 +45,7 @@ mod gravity;
 mod i2c_select;
 mod light;
 pub mod looks;
+mod looks_spots;
 pub mod raw;
 mod registry;
 mod schema;

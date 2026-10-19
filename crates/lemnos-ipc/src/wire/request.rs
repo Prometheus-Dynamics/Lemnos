@@ -254,6 +254,26 @@ impl Request {
                         super::look::encode(&mut e, spec.as_ref());
                         e.opt_u16(*progress)
                     }
+                    LedShow::LookSpots {
+                        name,
+                        progress,
+                        spots,
+                    } => {
+                        e.u8(12).str(name).opt_u16(*progress);
+                        super::look::encode_spots(&mut e, spots);
+                        &mut e
+                    }
+                    LedShow::InlineSpots {
+                        spec,
+                        progress,
+                        spots,
+                    } => {
+                        e.u8(13);
+                        super::look::encode(&mut e, spec.as_ref());
+                        e.opt_u16(*progress);
+                        super::look::encode_spots(&mut e, spots);
+                        &mut e
+                    }
                 };
                 let (easing, params) = easing_code(led.easing);
                 e.u8(effect_code(led.effect))
@@ -280,6 +300,25 @@ impl Request {
             Self::WatchFrames { id, device, fps } => {
                 let mut e = Encoder::new(WATCH_FRAMES);
                 e.u32(*id).str(device).u16(*fps);
+                e.finish()
+            }
+            Self::LedInputs {
+                id,
+                device,
+                progress,
+                spots,
+            } => {
+                let mut e = Encoder::new(LED_INPUTS);
+                e.u32(*id).str(device).opt_u16(*progress);
+                match spots {
+                    None => {
+                        e.u8(0);
+                    }
+                    Some(list) => {
+                        e.u8(1);
+                        super::look::encode_spots(&mut e, list);
+                    }
+                }
                 e.finish()
             }
             Self::LightSetting {
@@ -427,6 +466,16 @@ impl Request {
                         spec: Box::new(super::look::decode(&mut d)?),
                         progress: d.opt_u16()?,
                     },
+                    12 => LedShow::LookSpots {
+                        name: d.str()?,
+                        progress: d.opt_u16()?,
+                        spots: super::look::decode_spots(&mut d)?,
+                    },
+                    13 => LedShow::InlineSpots {
+                        spec: Box::new(super::look::decode(&mut d)?),
+                        progress: d.opt_u16()?,
+                        spots: super::look::decode_spots(&mut d)?,
+                    },
                     other => return Err(bad(format!("LED show {other}"))),
                 };
                 let effect = effect_from(d.u8()?);
@@ -458,6 +507,22 @@ impl Request {
                 id: d.u32()?,
                 device: d.str()?,
             },
+            LED_INPUTS => {
+                let id = d.u32()?;
+                let device = d.str()?;
+                let progress = d.opt_u16()?;
+                let spots = match d.u8()? {
+                    0 => None,
+                    1 => Some(super::look::decode_spots(&mut d)?),
+                    other => return Err(bad(format!("LED inputs spots flag {other}"))),
+                };
+                Self::LedInputs {
+                    id,
+                    device,
+                    progress,
+                    spots,
+                }
+            }
             WATCH_FRAMES => Self::WatchFrames {
                 id: d.u32()?,
                 device: d.str()?,

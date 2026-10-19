@@ -2,6 +2,7 @@
 
 use super::{ClientError, ClientEvent, ClientOptions, Connection};
 use crate::wire::{Event, LedRequest, LedShow, LightFrame, LightInfo, LooksOp, Message, Request};
+use lemnos_light::{LookSpec, Spot, SpotList};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -63,6 +64,80 @@ impl LedClient {
             spec: Box::new(*spec),
             progress: None,
         }))
+    }
+
+    /// Shows the named look with its spots: the look's spots block takes them
+    /// from the request (`spots = "input"`), and its arc its `progress` (0 to
+    /// 1). Until replaced or cleared. A refused look is [`ClientError::Rejected`].
+    pub fn look_spots(
+        &mut self,
+        name: &str,
+        progress: Option<f32>,
+        spots: &[Spot],
+    ) -> Result<(), ClientError> {
+        self.send_checked(LedRequest::new(LedShow::LookSpots {
+            name: name.to_string(),
+            progress: progress.map(permille),
+            spots: SpotList::new(spots),
+        }))
+    }
+
+    /// Shows a look given in full, with its spots (see
+    /// [`look_spots`](Self::look_spots)), until replaced or cleared.
+    pub fn show_spots(
+        &mut self,
+        spec: &LookSpec,
+        progress: Option<f32>,
+        spots: &[Spot],
+    ) -> Result<(), ClientError> {
+        self.send_checked(LedRequest::new(LedShow::InlineSpots {
+            spec: Box::new(*spec),
+            progress: progress.map(permille),
+            spots: SpotList::new(spots),
+        }))
+    }
+
+    /// Changes the inputs of the look this client shows on `device` (`""`: the
+    /// board's status light), and nothing else: the look's time carries on, so
+    /// a comet keeps its turn, and only the input-driven blocks move. `progress`
+    /// (0 to 1) feeds an arc with `fraction = "input"`; `spots` (position and
+    /// level, 0 to 1, of the ring, with an optional colour each) feed a spots
+    /// block with `spots = "input"`. `None` keeps an input as it is.
+    ///
+    /// Refused, with the reason, when this client shows no look, or the look
+    /// takes no such input ([`ClientError::Rejected`]). Send it at up to about
+    /// 60 a second: the ring renders at its own rate, from the latest inputs.
+    /// A reconnection sends the latest inputs again.
+    pub fn update_inputs(
+        &mut self,
+        device: &str,
+        progress: Option<f32>,
+        spots: Option<&[Spot]>,
+    ) -> Result<(), ClientError> {
+        let progress = progress.map(permille);
+        let spots = spots.map(SpotList::new);
+        let id = self.conn.next_id();
+        let request = Request::LedInputs {
+            id,
+            device: device.to_string(),
+            progress,
+            spots,
+        };
+        let reply = self.conn.request(&request, |m| match m {
+            Message::Text { id: got, result } if *got == id => Some(result.clone()),
+            _ => None,
+        })?;
+        match reply {
+            Ok(_) => {
+                for held in &mut self.conn.held {
+                    if held.device == device && !held.test && layer_of(held) == 1 {
+                        set_show_inputs(&mut held.show, progress, spots);
+                    }
+                }
+                Ok(())
+            }
+            Err(reason) => Err(ClientError::Rejected(reason)),
+        }
     }
 
     /// Sends a look request as built (its `show` a [`LedShow::Look`] or
@@ -203,6 +278,59 @@ impl LedClient {
     }
 }
 
+/// A fraction (0 to 1) as thousandths.
+fn permille(fraction: f32) -> u16 {
+    (fraction.clamp(0.0, 1.0) * 1000.0).round() as u16
+}
+
+/// Sets the inputs of a remembered look show (see [`LedClient::update_inputs`]).
+fn set_show_inputs(show: &mut LedShow, progress: Option<u16>, spots: Option<SpotList>) {
+    let taken = std::mem::replace(show, LedShow::Clear);
+    *show = match taken {
+        LedShow::Look { name, progress: p } => match spots {
+            Some(spots) => LedShow::LookSpots {
+                name,
+                progress: progress.or(p),
+                spots,
+            },
+            None => LedShow::Look {
+                name,
+                progress: progress.or(p),
+            },
+        },
+        LedShow::LookSpots {
+            name,
+            progress: p,
+            spots: s,
+        } => LedShow::LookSpots {
+            name,
+            progress: progress.or(p),
+            spots: spots.unwrap_or(s),
+        },
+        LedShow::Inline { spec, progress: p } => match spots {
+            Some(spots) => LedShow::InlineSpots {
+                spec,
+                progress: progress.or(p),
+                spots,
+            },
+            None => LedShow::Inline {
+                spec,
+                progress: progress.or(p),
+            },
+        },
+        LedShow::InlineSpots {
+            spec,
+            progress: p,
+            spots: s,
+        } => LedShow::InlineSpots {
+            spec,
+            progress: progress.or(p),
+            spots: spots.unwrap_or(s),
+        },
+        other => other,
+    };
+}
+
 fn layer_of(request: &LedRequest) -> u8 {
     if request.test {
         return 5;
@@ -215,7 +343,10 @@ fn layer_of(request: &LedRequest) -> u8 {
         | LedShow::Progress { .. }
         | LedShow::Indeterminate { .. }
         | LedShow::Orbit { .. } => 1,
-        LedShow::Look { .. } | LedShow::Inline { .. } => 1,
+        LedShow::Look { .. }
+        | LedShow::Inline { .. }
+        | LedShow::LookSpots { .. }
+        | LedShow::InlineSpots { .. } => 1,
         LedShow::Status(_) => 2,
         LedShow::System(_) => 3,
         LedShow::Locate => 4,

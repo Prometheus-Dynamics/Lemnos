@@ -317,3 +317,13 @@ locate-chase
   t=2200 32586fc0cc31f6a7
   t=3000 fc0570dbc412b0df
   t=4800 487c3632598882df
+spots-fixed
+  t=0 b9b23f3a46fd0825
+  t=40 5e5ec8856df2cf2e
+  t=125 bc6ea291e1aa2093
+  t=250 7f3d7c1d6b4320ce
+spots-input
+  t=0 b9b23f3a46fd0825
+  t=40 1801acc05f641cad
+  t=125 4798afa4851e17be
+  t=250 927c260ed774246b

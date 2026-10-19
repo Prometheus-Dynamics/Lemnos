@@ -6,6 +6,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ## [Unreleased]
 
+### Added
+
+- Soft spots in the LED light engine: a `spots` block (`lemnos-light`, `Block::Spots`, `docs/looks.md`, *Spots*) puts up to eight points of light on the ring, each with a position (a fraction of a turn from LED 0's centre, wrapping), a level, a colour (its own, or the block's) and a raised-cosine falloff `width` LEDs wide, so a spot between two LEDs lights both. Spots are fixed in the look (`spots = [{ at, level, color }]`) or come from the request (`spots = "input"`). They glide to new positions and levels on a critically damped spring (`follow_ms`, default 120 ms, shortest way round the ring), fade in where they appear and out where they are dropped. The motion is in fixed point and whole milliseconds, so the same inputs give the same frames at any frame rate. `LedClient::look_spots`, `show_spots`, and `lemnos-ctl led spots` show them.
+- Live input updates: `LedClient::update_inputs(device, progress, spots)` (`Request::LedInputs`, kind 16, appended) changes the progress and spots of the look this client is already showing, without restarting it. The look's time carries on (a comet keeps its turn, a breathe its phase, a sparkle its twinkles), only the input blocks move, nothing cross-fades, and a look that takes no such input refuses the update with the reason. `lemnos-ctl led inputs` sends one. Wire: `LedShow::LookSpots` (code 12) and `LedShow::InlineSpots` (code 13), and the look's spots block (block code 8), all appended.
+- Cost of both: stripped aarch64-musl `lemnosd` 1,184,096 B before, 1,249,632 B after, and `lemnos-ctl` 921,760 B to 987,296 B (the same toolchain; the text section grows by about 40 KB, and the file sizes include 64 KiB of segment alignment).
+
 ### Fixed
 
 - The INA2xx drivers read a poll in one I2C transaction (a pointer write and a read per register, joined by repeated starts) instead of one transaction per register. The datasheets do not auto-increment the register pointer on reads, so a single burst across registers is not used.
@@ -19,6 +25,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- A change of a look's inputs (an arc's fill, a spots block's spots) moves those inputs and nothing else, for any look: a look with several layers and an arc advances its fill instead of cross-fading from what is shown, and its comets and sparkles keep their time. Before, only a lone arc did that.
 - The LED light engine does less work per frame, with the same output (the golden frames are unchanged): a drain's eased progress is computed once per frame, not once per LED; a falling sparkle's particles are placed once per frame, not evaluated for every LED; and the RP1 strip driver keeps its device path and encodes a colour set without allocating. `lemnos-drivers-ws2812` gains an optional `spi-lut` feature (off by default) that replaces the SPI bit expansion with a 768-byte table.
 - `lemnos-orion` bounds its memory under a stalled Orion: the feed keeps the latest value per device channel, control and status (not every reading), and action requests wait in a bounded inbox. Feed messages that arrive within `LEMNOS_ORION_BATCH_MS` (50 ms by default, 0 to 1000) go out in one publish.
 - `lemnos-orion` republishes its resource records only when they change (the device list, or a device's availability), not every 30 s. The status heartbeat fires at each device's own deadline instead of on a 1 s timer.

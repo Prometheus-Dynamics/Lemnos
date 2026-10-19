@@ -1,8 +1,9 @@
 //! What a light shows ([`Look`]) and how it gets there ([`Animator`]).
 
 use crate::easing::{Easing, ONE};
-use crate::look::{Block, Fraction, LayerSpec, LookSpec, MAX_LAYERS, scale};
+use crate::look::{Block, Fraction, LookSpec, MAX_LAYERS, scale};
 use crate::sparkle::{Sparkle, SparkleState};
+use crate::spots::{self, SpotList, SpotSource, SpotState};
 use lemnos_device::Rgbw;
 
 /// How a look changes over time.
@@ -144,6 +145,8 @@ pub struct Animator<const N: usize> {
     written: bool,
     /// The sparkle's twinkles (reset when the look changes).
     sparkle: SparkleState,
+    /// The spots' positions and levels (reset when the look changes).
+    spots: SpotState,
     /// The LED at the bottom of the ring for a falling sparkle, thousandths
     /// of an LED (see [`set_bottom`](Self::set_bottom)).
     bottom: u32,
@@ -165,40 +168,24 @@ fn blend(from: Rgbw, to: Rgbw, t: u32) -> Rgbw {
     )
 }
 
-/// Whether `a` and `b` are the same single arc apart from its fill (colours,
-/// track, head, sheen, envelope equal), so the change advances the fill
-/// instead of cross-fading.
-fn same_arc(a: &LookSpec, b: &LookSpec) -> bool {
-    /// The look's one layer with its fill zeroed, if it is a lone arc.
-    fn arc_without_fill(look: &LookSpec) -> Option<LayerSpec> {
-        let mut layers = look.iter();
-        let (Some(layer), None) = (layers.next(), layers.next()) else {
-            return None;
-        };
-        match layer.block {
-            Block::Arc {
-                color,
-                track,
-                head,
-                sheen,
-                ..
-            } => Some(LayerSpec {
-                block: Block::Arc {
-                    fraction: Fraction::Fixed(0),
-                    color,
-                    track,
-                    head,
-                    sheen,
-                },
-                ..*layer
-            }),
-            _ => None,
+/// Whether `a` and `b` are the same look apart from its inputs: an arc's
+/// fill and a spots block's spots (and the envelope equal). Such a change
+/// moves the inputs and keeps the look's time, its sparkle and its phases;
+/// nothing cross-fades.
+fn same_but_inputs(a: &LookSpec, b: &LookSpec) -> bool {
+    /// The look with its inputs zeroed.
+    fn without_inputs(look: &LookSpec) -> LookSpec {
+        let mut out = *look;
+        for slot in out.layers.iter_mut().flatten() {
+            match &mut slot.block {
+                Block::Arc { fraction, .. } => *fraction = Fraction::Fixed(0),
+                Block::Spots(s) => s.source = SpotSource::Input,
+                _ => {}
+            }
         }
+        out
     }
-    match (arc_without_fill(a), arc_without_fill(b)) {
-        (Some(x), Some(y)) => x == y && a.envelope == b.envelope,
-        _ => false,
-    }
+    a.envelope == b.envelope && without_inputs(a) == without_inputs(b)
 }
 
 fn shape(look: &LookSpec) -> [Option<u8>; MAX_LAYERS] {
@@ -213,6 +200,7 @@ fn shape(look: &LookSpec) -> [Option<u8>; MAX_LAYERS] {
             Block::Wash { .. } => 5,
             Block::Sparkle(_) => 6,
             Block::Drain { .. } => 7,
+            Block::Spots(_) => 8,
         });
     }
     out
@@ -235,6 +223,7 @@ impl<const N: usize> Animator<N> {
             advancing: false,
             written: false,
             sparkle: SparkleState::new(0, &Sparkle::DEFAULT),
+            spots: SpotState::new(0),
             bottom: (count.min(N) as u32 / 2) * 1_000,
         }
     }
@@ -263,9 +252,14 @@ impl<const N: usize> Animator<N> {
     /// Moves to `look` with `transition`, starting from what is shown now. An
     /// arc whose colours stay the same advances its fill instead of
     /// cross-fading.
-    pub fn set(&mut self, look: LookSpec, transition: Transition, now_ms: u64) {
+    ///
+    /// Returns whether the look itself changed: `false` when only its inputs
+    /// did (an arc's fill, a spots block's spots), which keeps the look's time
+    /// and moves nothing else. A look set again unchanged counts as changed.
+    pub fn set(&mut self, look: LookSpec, transition: Transition, now_ms: u64) -> bool {
         let fraction_now = self.fraction(now_ms);
-        self.advancing = same_arc(&self.look, &look);
+        let inputs_only = look != self.look && same_but_inputs(&self.look, &look);
+        self.advancing = same_but_inputs(&self.look, &look);
         let target = look
             .arc_fraction()
             .map_or(0, |f| (u32::from(f.min(1000)) << 16) / 1000);
@@ -281,14 +275,39 @@ impl<const N: usize> Animator<N> {
         {
             self.look_since_ms = now_ms;
         }
-        if look != self.look {
+        if !self.advancing {
             let sparkle = look.sparkle().unwrap_or(Sparkle::DEFAULT);
             self.sparkle = SparkleState::new(now_ms, &sparkle);
+            if look.spots_block().is_some() {
+                self.spots = SpotState::new(now_ms);
+            }
+        }
+        // The spots move to the look's targets (none: the ones they had fade
+        // out), from where they are now.
+        match look.spots_block() {
+            Some(spots) => {
+                let list = match spots.source {
+                    SpotSource::Fixed(list) => list,
+                    SpotSource::Input => SpotList::EMPTY,
+                };
+                self.spots
+                    .retarget(now_ms, spots.follow_ms, spots.color, spots.max_spots, &list);
+            }
+            None => {
+                self.spots.retarget(
+                    now_ms,
+                    spots::DEFAULT_FOLLOW_MS,
+                    Rgbw::OFF,
+                    0,
+                    &SpotList::EMPTY,
+                );
+            }
         }
         self.look = look;
         self.transition = transition;
         self.transition_since_ms = now_ms;
         self.written = false;
+        !inputs_only
     }
 
     /// The transition's eased progress, `None` once it is over.
@@ -322,7 +341,10 @@ impl<const N: usize> Animator<N> {
 
     /// Whether the output changes over time right now.
     pub fn is_animating(&self, now_ms: u64) -> bool {
-        self.in_transition(now_ms) || self.look.envelope.is_animated() || self.look.is_moving()
+        self.in_transition(now_ms)
+            || self.look.envelope.is_animated()
+            || self.look.is_moving()
+            || self.spots.moving()
     }
 
     /// When to render next: in `frame_ms` while animating or before the
@@ -356,6 +378,7 @@ impl<const N: usize> Animator<N> {
                 .advance(now_ms, &sparkle, self.count, self.bottom);
         }
         let drained = self.look.drained(elapsed);
+        self.spots.advance(now_ms);
         let mut changed = !self.written;
         for index in 0..self.count {
             let color = self.look.color(
@@ -364,6 +387,7 @@ impl<const N: usize> Animator<N> {
                 elapsed,
                 fraction,
                 &self.sparkle,
+                &self.spots,
                 now_ms,
                 self.bottom,
                 &drained,

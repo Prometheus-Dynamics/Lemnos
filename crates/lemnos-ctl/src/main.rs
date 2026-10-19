@@ -17,6 +17,10 @@
 //!   led spinner [--color RRGGBB]
 //!   led orbit <RRGGBB> [--period MS] [--tail N] [--heads 1|2] [--base F]
 //!   led look <name> [--brightness F] [--progress F]   a named look (built-in or from a look file)
+//!   led spots <POS:LEVEL[:RRGGBB]>... [--color RRGGBB] [--width LEDS]
+//!                                                     a spots look, its spots given here
+//!   led inputs [--progress F] [<POS:LEVEL[:RRGGBB]>...]
+//!                                                     new inputs for the look this client shows
 //!   led show --spec '<TOML body>' | --file PATH [--name N] | --json '<JSON body>'
 //!                                                     a look given in full, until replaced
 //!   looks list | show <name> | reload | save <name> (--spec|--file|--json)
@@ -66,7 +70,7 @@
 use lemnos_board::{BoardDefinition, DriverRegistry, looks};
 use lemnos_ipc::{
     ClientEvent, ClientOptions, DEFAULT_SOCKET, Easing, EffectKind, FrameUpdate, LedRequest,
-    LedShow, LedStatus, LookSpec, LooksOp, Phase, SystemState, Update,
+    LedShow, LedStatus, LookSpec, LooksOp, Phase, Spot, SpotList, SpotSource, SystemState, Update,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -505,6 +509,60 @@ fn led_watch(mut args: Args, options: ClientOptions) -> ExitCode {
     }
 }
 
+const SPOTS_USAGE: &str = "led spots <POS:LEVEL[:RRGGBB]>... [--color RRGGBB] [--width LEDS]";
+
+/// A spot from `POS:LEVEL` or `POS:LEVEL:RRGGBB`: the position (0 to 1 of a
+/// turn from LED 0), the level (0 to 1, default 1) and a colour of its own.
+fn spot_pair(text: &str) -> Option<Spot> {
+    let mut parts = text.split(':');
+    let at = permille(parts.next()?)?;
+    let level = match parts.next() {
+        Some(level) => permille(level)?,
+        None => 1000,
+    };
+    let own = match parts.next() {
+        Some(rgb) => Some(lemnos_light::Rgbw::rgb(color(rgb)?)),
+        None => None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    let spot = Spot::new(at, level);
+    Some(match own {
+        Some(c) => spot.with_color(c),
+        None => spot,
+    })
+}
+
+/// `led inputs [--progress F] [POS:LEVEL[:RRGGBB]]...`: the new inputs of the
+/// look this client shows (`--device` names the light): the arc's progress
+/// and the spots. The look's time carries on.
+fn led_inputs(mut args: Args, options: ClientOptions, device: &str) -> ExitCode {
+    const USAGE: &str = "usage: led inputs [--progress F] [POS:LEVEL[:RRGGBB]]... [--device ID]";
+    let progress = args.take("--progress").as_deref().and_then(permille);
+    let mut spots = Vec::new();
+    while let Some(word) = args.next() {
+        match spot_pair(&word) {
+            Some(spot) => spots.push(spot),
+            None => return fail(USAGE),
+        }
+    }
+    if progress.is_none() && spots.is_empty() {
+        return fail(USAGE);
+    }
+    // Kept: this client's intents (the look being updated) outlive it, as
+    // every `led` command's do.
+    let mut leds = match options.keep_intents().leds() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    let spots = (!spots.is_empty()).then_some(spots.as_slice());
+    match leds.update_inputs(device, progress.map(|p| f32::from(p) / 1000.0), spots) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(e),
+    }
+}
+
 fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     let device = args.take("--device").unwrap_or_default();
     let effect = args.take("--effect");
@@ -521,10 +579,11 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     let tail = args.take("--tail").and_then(|t| t.parse::<f64>().ok());
     let heads = args.take("--heads");
     let base = args.take("--base").as_deref().and_then(permille);
+    let width = args.take("--width");
     let test = args.flag("--test");
     let Some(what) = args.next() else {
         return fail(
-            "led: status, color, brightness, pixel, frame, progress, spinner, orbit, look, show, system, locate, watch or off",
+            "led: status, color, brightness, pixel, frame, progress, spinner, orbit, look, spots, inputs, show, system, locate, watch or off",
         );
     };
     if what == "watch" {
@@ -532,6 +591,9 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     }
     if what == "brightness" {
         return led_brightness(args, options, &device);
+    }
+    if what == "inputs" {
+        return led_inputs(args, options, &device);
     }
     let show = match what.as_str() {
         "look" => {
@@ -553,6 +615,42 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
             }
             Err(e) => return fail(e),
         },
+        "spots" => {
+            let mut spots = Vec::new();
+            while let Some(word) = args.next() {
+                match spot_pair(&word) {
+                    Some(spot) => spots.push(spot),
+                    None => return fail(SPOTS_USAGE),
+                }
+            }
+            let colour = color_opt.as_deref().and_then(color).unwrap_or(0xff8000);
+            let mut spec = LookSpec::of(lemnos_light::LayerSpec::spots(
+                lemnos_light::Rgbw::rgb(colour),
+                SpotSource::Input,
+            ));
+            if let Some(width) = width {
+                let Some(width) = width
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|w| (0.0..=64.0).contains(w))
+                else {
+                    return fail("led spots: --width is a number of LEDs, above 0 and at most 64");
+                };
+                let block = lemnos_light::Block::Spots(lemnos_light::SpotsSpec {
+                    width: (width * 1000.0).round() as u16,
+                    ..lemnos_light::SpotsSpec::new(
+                        lemnos_light::Rgbw::rgb(colour),
+                        SpotSource::Input,
+                    )
+                });
+                spec = LookSpec::of(lemnos_light::LayerSpec::new(block));
+            }
+            LedShow::InlineSpots {
+                spec: Box::new(spec),
+                progress: None,
+                spots: SpotList::new(&spots),
+            }
+        }
         "status" => match args.next().as_deref().and_then(LedStatus::parse) {
             Some(status) => LedShow::Status(status),
             None => return fail("led status <ok|warn|error|busy|off>"),
@@ -694,7 +792,10 @@ fn led(mut args: Args, options: ClientOptions) -> ExitCode {
     };
     // A look is checked by the service: its refusal comes back here.
     let sent = match request.show {
-        LedShow::Look { .. } | LedShow::Inline { .. } => leds.send_look(request),
+        LedShow::Look { .. }
+        | LedShow::Inline { .. }
+        | LedShow::LookSpots { .. }
+        | LedShow::InlineSpots { .. } => leds.send_look(request),
         _ => leds.send(request).and_then(|()| leds.sync()),
     };
     match sent {

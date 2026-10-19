@@ -567,3 +567,167 @@ fn a_drain_parses_with_its_defaults_round_trips_and_checks_its_ranges() {
     let err = body_error(r#"layers = [{ block = "drain", color = "00ff20", duration_ms = 0 }]"#);
     assert!(err.contains("duration_ms"), "{err}");
 }
+
+#[test]
+fn a_spots_block_takes_input_spots_or_a_fixed_list_with_its_defaults() {
+    let input = from_toml(
+        "--spec",
+        r#"layers = [
+            { block = "spots", color = "ff8000", width = 2.0, follow_ms = 200, max_spots = 4,
+              spots = "input", brightness = 0.5, mode = "add" },
+        ]"#,
+    )
+    .unwrap();
+    let layer = input.layers[0].unwrap();
+    assert_eq!(layer.mode, Mode::Add);
+    assert_eq!(layer.brightness, 128);
+    assert!(matches!(
+        layer.block,
+        Block::Spots(lemnos_light::SpotsSpec {
+            color,
+            width: 2_000,
+            follow_ms: 200,
+            max_spots: 4,
+            source: lemnos_light::SpotSource::Input,
+        }) if color == Rgbw::rgb(0xff8000)
+    ));
+
+    // A fixed list: `at` and `level` (level defaults to 1), a colour of its own,
+    // and the defaults for the rest.
+    let fixed = from_toml(
+        "--spec",
+        r#"layers = [
+            { block = "spots", color = "2bd47d", spots = [
+                { at = 0.25 },
+                { at = 0.5, level = 0.6, color = "ff0000" },
+            ] },
+        ]"#,
+    )
+    .unwrap();
+    let Some(Block::Spots(spots)) = fixed.layers[0].map(|l| l.block) else {
+        panic!("a spots block");
+    };
+    assert_eq!(
+        (spots.width, spots.follow_ms, spots.max_spots),
+        (1_500, 120, 8)
+    );
+    let lemnos_light::SpotSource::Fixed(list) = spots.source else {
+        panic!("a fixed list");
+    };
+    let spots: Vec<_> = list.iter().copied().collect();
+    assert_eq!(spots.len(), 2);
+    assert_eq!(
+        (spots[0].at, spots[0].level, spots[0].color),
+        (250, 1000, None)
+    );
+    assert_eq!(
+        (spots[1].at, spots[1].level, spots[1].color),
+        (500, 600, Some(Rgbw::rgb(0xff0000)))
+    );
+}
+
+#[test]
+fn a_spots_block_names_the_key_it_gets_wrong() {
+    let color = "color = \"ff0000\"";
+    let cases = [
+        (
+            format!("layers = [{{ block = \"spots\", {color} }}]"),
+            "needs spots",
+        ),
+        (
+            format!("layers = [{{ block = \"spots\", {color}, spots = \"input\", width = 0 }}]"),
+            "width",
+        ),
+        (
+            format!(
+                "layers = [{{ block = \"spots\", {color}, spots = \"input\", follow_ms = 5 }}]"
+            ),
+            "follow_ms",
+        ),
+        (
+            format!(
+                "layers = [{{ block = \"spots\", {color}, spots = \"input\", max_spots = 9 }}]"
+            ),
+            "max_spots",
+        ),
+        (
+            format!("layers = [{{ block = \"spots\", {color}, spots = [{{ at = 1.5 }}] }}]"),
+            "spots[0].at",
+        ),
+        (
+            format!(
+                "layers = [{{ block = \"spots\", {color}, spots = [{{ at = 0.1, colour = \"ff0000\" }}] }}]"
+            ),
+            "colour",
+        ),
+        (
+            format!(
+                "layers = [{{ block = \"spots\", {color}, spots = [{}] }}]",
+                ["{ at = 0.1 }"; 9].join(", ")
+            ),
+            "at most 8",
+        ),
+    ];
+    for (text, word) in cases {
+        let reason = body_error(&text);
+        assert!(reason.contains(word), "{word}: {reason}");
+    }
+}
+
+#[test]
+fn a_look_with_spots_round_trips_through_its_file_form() {
+    let text = r#"
+[looks."pv.spots"]
+layers = [
+  { block = "spots", color = "28c8ff", width = 1.5, follow_ms = 150, max_spots = 4, spots = "input" },
+  { block = "spots", color = "ff8000", spots = [{ at = 0.25, level = 1.0 }, { at = 0.5, level = 0.5, color = "00ff40" }] },
+]
+"#;
+    // Only one spots layer per look: the second is refused.
+    assert!(parse_file("looks.d/spots.toml", text).is_err());
+    let one = r#"
+[looks."pv.spots"]
+layers = [
+  { block = "spots", color = "ff8000", spots = [{ at = 0.25, level = 1.0 }, { at = 0.5, level = 0.5, color = "00ff40" }] },
+]
+"#;
+    let parsed = parse_file("looks.d/spots.toml", one).unwrap();
+    let file = to_toml("pv.spots", &parsed[0].1);
+    let back = parse_file("looks.d/spots.toml", &file).unwrap();
+    assert_eq!(back, parsed, "{file}");
+    assert!(
+        file.contains("spots = [{ at = 0.250, level = 1.000 }"),
+        "{file}"
+    );
+    let input = parse_file(
+        "looks.d/spots.toml",
+        "[looks.\"pv.spots\"]\nlayers = [{ block = \"spots\", color = \"28c8ff\", spots = \"input\" }]\n",
+    )
+    .unwrap();
+    let file = to_toml("pv.spots", &input[0].1);
+    assert_eq!(
+        parse_file("looks.d/spots.toml", &file).unwrap(),
+        input,
+        "{file}"
+    );
+    assert!(file.contains("spots = \"input\""), "{file}");
+}
+
+#[test]
+fn the_spots_examples_in_the_docs_are_valid_look_files() {
+    let fixed = r#"
+[looks."spots.fixed"]
+layers = [
+  { block = "spots", color = "ff8000", width = 2.0, follow_ms = 200, spots = [{ at = 0.00, level = 1.0 }, { at = 0.25, level = 0.6 }, { at = 0.75, level = 0.4, color = "00ff40" }] },
+]
+"#;
+    let follow = r#"
+[looks."spots.follow"]
+layers = [
+  { block = "spots", color = "28c8ff", spots = "input", max_spots = 4 },
+]
+"#;
+    for text in [fixed, follow] {
+        parse_file("looks.d/spots.toml", text).unwrap_or_else(|e| panic!("{e:?}\n{text}"));
+    }
+}
