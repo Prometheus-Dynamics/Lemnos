@@ -8,6 +8,7 @@ file	docs/provenance.md	record of where generic code came from and the cross-rep
 file	scripts/check-names.sh	the checker's own product-name list
 file	scripts/check-names.allow	this allowlist
 file	crates/lemnos-board/examples/boards/*	the Raze-class example board file, kept as an example (see docs/board-definition.md)
+file	crates/lemnosd/tests/fixtures/*	copy of the device package's generated board definition, pinned to its source rev in the file header (the sim test runs it unchanged)
 file	packaging/systemd/lemnosd.service	LEFT FOR USER: Before= names the client units; move to the image's drop-ins
 #
 # LEFT FOR USER: the built-in look writers are the client names "atlas" (the

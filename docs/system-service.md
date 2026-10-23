@@ -792,7 +792,8 @@ bytes). The packaging hook for a sim image is in [packaging/README.md](../packag
 | `status-ring` (`ws2812`) | The frames are written to a file under the sim root and read through the frame watch, as on a board. |
 | `usb-a-power`, `usb-c-power` (`gpio-power-switch`) | Mock lines. An output the service drives loads the supply while it is on; `persist` and `on_exit` work as on a board. |
 | GPIO inputs and outputs | Mock lines; the script drives an input's level at a time (`[[gpio]]`). |
-| I2C selectors (`i2c:compatible=`, `i2c:name=`) | Fake adapters under `sys/bus/i2c` with their device-tree node, resolved by the real selector code. |
+| I2C selectors (`i2c:name=`, `compatible=`, `of=`, `node=`, and `i2c-<n>`) | Fake adapters under `sys/bus/i2c`, linked to a fake device tree (`firmware/devicetree/base`) at the selector's path, resolved by the real selector code. |
+| PIO I2C (`pio-i2c:sda=,scl=`) | Its own simulated bus, numbered as the board's PIO bus is (the pins are not checked against any GPIO state). |
 | `orientation` (`fusion`) | The real fusion over the simulated IMU and magnetometer. |
 
 ### What differs from a board
@@ -800,6 +801,7 @@ bytes). The packaging hook for a sim image is in [packaging/README.md](../packag
 - Bus timing is not modelled: a transfer takes no time, so there is no clock stretching,
   arbitration, PIO bit timing or interrupt latency. A real board's read rates and jitter are not
   reproduced; the simulation is for behaviour, not for timing (measure timing on the board).
+- SPI devices (`spi-<bus>.<cs>`) have no chip models: a driver on SPI reaches the mock SPI bus and gets no physics.
 - Only the userspace drivers run. The kernel-backed path (IIO and hwmon chips through their
   kernel drivers) is not simulated.
 - INA226, INA260 and the VCM driver have no model: a board that uses them does not start with

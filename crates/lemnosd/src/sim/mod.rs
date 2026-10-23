@@ -170,12 +170,6 @@ pub(crate) fn build(
         if adapters.iter().any(|(s, _)| s == selector) {
             continue;
         }
-        if selector.of.is_some() || selector.node.is_some() {
-            return Err(SimError::Board(format!(
-                "{}: the simulated board fakes name= and compatible= adapter selectors only",
-                spec.id
-            )));
-        }
         let bus = next_bus;
         next_bus += 1;
         sysfs::write_adapter(
@@ -184,6 +178,8 @@ pub(crate) fn build(
                 bus,
                 name: selector.name.clone(),
                 compatible: selector.compatible.clone(),
+                of: selector.of.clone(),
+                node: selector.node.clone(),
             },
         )?;
         adapters.push((selector.clone(), bus));

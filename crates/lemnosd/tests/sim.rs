@@ -70,13 +70,13 @@ config = { count = 16, wire = "rgb", offset = 5, direction = "cw", gpio = 13, fa
 [[devices]]
 id = "usb-a-power"
 driver = "gpio-power-switch"
-writers = ["orion:*", "atlas"]
+writers = ["orion:*"]
 config = { chip = "pinctrl-rp1", line = 20, default_on = true, persist = true, on_exit = "keep" }
 
 [[devices]]
 id = "usb-c-power"
 driver = "gpio-power-switch"
-writers = ["orion:*", "atlas"]
+writers = ["orion:*"]
 config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, on_exit = "keep" }
 
 [[devices]]
@@ -95,12 +95,17 @@ struct Sim {
 impl Sim {
     /// Starts the service on `script` (TOML) and connects a device client to it.
     fn start(name: &str, script: &str) -> (Self, DeviceClient) {
+        Self::start_with_board(name, BOARD, script)
+    }
+
+    /// Starts the service on `board` (a board definition's text) and `script`.
+    fn start_with_board(name: &str, board: &str, script: &str) -> (Self, DeviceClient) {
         let dir =
             std::env::temp_dir().join(format!("lemnosd-sim-it-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let board = dir.join("board.toml");
-        fs::write(&board, BOARD).unwrap();
+        let board_path = dir.join("board.toml");
+        fs::write(&board_path, board).unwrap();
         let script_path = dir.join("sim.toml");
         fs::write(&script_path, script).unwrap();
         let socket = dir.join("s.sock");
@@ -108,7 +113,7 @@ impl Sim {
         let child = Command::new(env!("CARGO_BIN_EXE_lemnosd"))
             .arg("--sim")
             .arg("--board")
-            .arg(&board)
+            .arg(&board_path)
             .arg("--socket")
             .arg(&socket)
             .arg("--sim-script")
@@ -195,6 +200,21 @@ fn wait_for_status(
             return status;
         }
         sleep(Duration::from_millis(100));
+    }
+}
+
+/// Reads `device` until it is available (a device is built and sampled a
+/// moment after the service starts answering), for at most ten seconds.
+fn read_available(client: &mut DeviceClient, device: &str) -> lemnos_ipc::Reading {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match client.read(device) {
+            Ok(reading) if reading.status == DeviceStatus::Available => return reading,
+            other if Instant::now() >= deadline => {
+                panic!("{device} never became available: {other:?}")
+            }
+            _ => sleep(Duration::from_millis(100)),
+        }
     }
 }
 
@@ -363,5 +383,111 @@ fn led_frames_are_visible_through_the_frame_watch() {
     // The strip's frames are also a file in the sim root.
     let file = sim.sim_root().join("dev").join("leds0");
     assert!(Path::new(&file).is_file());
+    drop(sim);
+}
+
+/// The device package's board definition, a copy of the file the image ships
+/// (see the fixture's header for its source and rev), run unchanged in sim: its
+/// I2C selectors, the PIO bus, the ring, fan, thermal zone, switches and fusion.
+#[test]
+fn runs_the_device_package_board_unchanged() {
+    let (sim, mut client) = Sim::start_with_board(
+        "package",
+        include_str!("fixtures/device-board.toml"),
+        "format = \"lemnos.sim\"\nschema_version = 1\nspeed = 2.0\n",
+    );
+    let names: Vec<String> = client.list().unwrap().into_iter().map(|d| d.id).collect();
+    for id in [
+        "imu",
+        "magnetometer",
+        "power",
+        "orientation",
+        "fan",
+        "cpu-thermal",
+        "usb-a-power",
+        "usb-c-power",
+        "status-ring",
+    ] {
+        assert!(
+            names.iter().any(|n| n == id),
+            "{id} is not listed: {names:?}"
+        );
+    }
+
+    // The IMU on the PIO bus, the magnetometer and power monitor on the device
+    // tree's bus: each has readings.
+    let imu = read_available(&mut client, "imu");
+    assert_eq!(imu.status, DeviceStatus::Available);
+    near("acceleration.z", imu.value("acceleration.z"), 9.806, 0.3);
+    let mag = read_available(&mut client, "magnetometer");
+    assert_eq!(mag.status, DeviceStatus::Available);
+    near(
+        "magnetic_field.x",
+        mag.value("magnetic_field.x"),
+        20e-6,
+        5e-6,
+    );
+    let current = wait_for_value(
+        &mut client,
+        "power",
+        "current",
+        Duration::from_secs(5),
+        |a| a > 1.0,
+    );
+    near("current", current, 1.25, 0.05);
+
+    // Orientation runs while a client subscribes; it reads once its filter has
+    // a valid output.
+    client.subscribe("orientation", 50).unwrap();
+    let roll = wait_for_value(
+        &mut client,
+        "orientation",
+        "roll",
+        Duration::from_secs(10),
+        |_| true,
+    );
+    assert!(roll.is_some(), "the orientation never produced a value");
+
+    // The fan and the thermal zone read; both switched ports are on.
+    let fan = read_available(&mut client, "fan");
+    assert!(fan.value("speed").is_some(), "the fan has no speed");
+    let thermal = read_available(&mut client, "cpu-thermal");
+    assert!(
+        thermal.value("temperature").is_some(),
+        "the thermal zone has no reading"
+    );
+    for port in ["usb-a-power", "usb-c-power"] {
+        let switch = client.read(port).unwrap();
+        assert_eq!(switch.status, DeviceStatus::Available, "{port}");
+        assert_eq!(switch.value("power.on"), Some(1.0), "{port} is not on");
+    }
+
+    // The ring: available, its frames watched, and written to its file.
+    // A light has no readings: its status comes from the device list.
+    let ring = client
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id == "status-ring")
+        .expect("the ring is listed");
+    assert_eq!(
+        ring.status,
+        DeviceStatus::Available,
+        "the ring: {}",
+        ring.reason
+    );
+    let mut leds = ClientOptions::new(&sim.socket, "app").leds().unwrap();
+    leds.watch_frames("status-ring", 5).unwrap();
+    let mut frames = 0;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && frames == 0 {
+        if let Ok(Some(ClientEvent::Data(FrameUpdate::Frame(frame)))) =
+            leds.next_frame(Some(Duration::from_millis(500)))
+        {
+            frames = frame.pixels.len();
+        }
+    }
+    assert_eq!(frames, 16, "the ring's frames");
+    assert!(sim.sim_root().join("dev").join("leds0").is_file());
     drop(sim);
 }
