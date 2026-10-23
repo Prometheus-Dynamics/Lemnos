@@ -35,6 +35,38 @@ To build them without Docker, import [gaia/lemnosd-host.toml](gaia/lemnosd-host.
 `lemnosd.toml`. The host then needs only rustup and the musl target (above); the result is
 the same static binary, with no image to pull or build and no container to start.
 
+## Simulated board
+
+A sim image runs `lemnosd --sim` on the board definition of the image instead of the host's buses
+(docs/system-service.md, *Simulated board*). Its hook is one Gaia layer, a systemd drop-in and a
+script:
+
+| File | Installed as |
+|---|---|
+| [gaia/lemnosd-sim.toml](gaia/lemnosd-sim.toml) | the sim layer: rebuilds `lemnosd` with `features = ["sim"]` and stages the two files below |
+| [systemd/lemnosd-sim.conf](systemd/lemnosd-sim.conf) | `/etc/systemd/system/lemnosd.service.d/sim.conf`: `ExecStart=/usr/bin/lemnosd --sim --sim-script /etc/lemnos/sim.toml`, and the sim root under `/run/lemnos-sim` |
+| [sim/sim.toml](sim/sim.toml) | `/etc/lemnos/sim.toml`, the script (replace it to change the motion, faults or loads) |
+
+The board stays the device package's `/etc/lemnos/board.toml`, so a sim image runs the same
+devices as the board. The board image itself does not import the layer, and a board build of
+`lemnosd` has no simulation: `--sim` is refused there.
+
+The sim layer is a later Gaia layer: import it after `gaia/lemnosd.toml`, since a later layer
+replaces an item of the same id (the `lemnosd` artifact, with its features) and the feed lists.
+Gaia's artifact `features` list is what builds the simulation in. To run it without a sim layer
+(a host with Rust), build it and point the unit at the script:
+
+```sh
+cargo build -p lemnosd --features sim --release
+sudo install -m 0755 target/release/lemnosd /usr/bin/lemnosd
+sudo install -m 0644 packaging/systemd/lemnosd-sim.conf /etc/systemd/system/lemnosd.service.d/sim.conf
+sudo install -m 0644 packaging/sim/sim.toml /etc/lemnos/sim.toml
+sudo systemctl daemon-reload && sudo systemctl restart lemnosd
+```
+
+The Gaia layer is not built here: it is written against Gaia's documented artifact `features`
+key, and needs a Gaia build to check.
+
 ## What the image provides
 
 - systemd (the unit is `Type=notify` with a watchdog) and `systemd-sysusers`, or a `lemnos`

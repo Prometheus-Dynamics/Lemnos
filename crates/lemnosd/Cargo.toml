@@ -30,6 +30,10 @@ default = []
 # `lemnosd::mock::MockLemnosd`: the real service over mock hardware, for
 # client tests.
 mock = ["lemnos-hal/mock"]
+# `lemnosd --sim`: the board's devices over simulated buses with scripted
+# device models (`lemnosd::sim`, docs/system-service.md, Simulated board). Not
+# in a board build.
+sim = ["mock", "dep:serde"]
 # The Orion bridge: `lemnos-orion`, a lemnosd client and an Orion provider
 # over local IPC (`lemnosd::orion`). Pins Orion f8d767ac (control protocol 5, the orion-node that board images ship). `orion-node`
 # is a dev-dependency (only the bridge's tests run an in-process node), so the
@@ -53,6 +57,7 @@ lemnos-ipc.workspace = true
 lemnos-light.workspace = true
 lemnos-linux-sys.workspace = true
 serde_json = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["derive", "std"], optional = true }
 toml = { workspace = true }
 
 # Orion (feature `orion`). Its crates are not published: pinned to its main.

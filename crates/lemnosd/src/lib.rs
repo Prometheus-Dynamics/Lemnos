@@ -30,6 +30,8 @@ pub mod presets;
 mod raw;
 mod schedule;
 mod service;
+#[cfg(feature = "sim")]
+pub mod sim;
 pub mod state;
 mod update;
 mod workers;

@@ -123,9 +123,16 @@ impl MockHardware {
 }
 
 /// The service's buses: the mock hardware, and the fake sysfs at `sys`.
-struct MockBuses {
+/// Also the buses of the simulated board (`crate::sim`).
+pub(crate) struct MockBuses {
     hardware: MockHardware,
     sys: PathBuf,
+}
+
+impl MockBuses {
+    pub(crate) fn new(hardware: MockHardware, sys: PathBuf) -> Self {
+        Self { hardware, sys }
+    }
 }
 
 impl Buses for MockBuses {
@@ -290,10 +297,7 @@ impl MockLemnosd {
         let socket = root.join("lemnosd.sock");
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let buses = MockBuses {
-            hardware: hardware.clone(),
-            sys: root.join("sys"),
-        };
+        let buses = MockBuses::new(hardware.clone(), root.join("sys"));
         let (thread_stop, thread_socket) = (Arc::clone(&stop), socket.clone());
         let thread = std::thread::spawn(move || {
             let mut config = ServiceConfig::new(definition, thread_socket);

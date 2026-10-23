@@ -741,6 +741,7 @@ dependencies = [
  "orion-control-plane",
  "orion-core",
  "orion-node",
+ "serde",
  "serde_json",
  "tokio",
  "toml",

@@ -757,6 +757,152 @@ covers, and then upstream it.
   within 35 KB of an empty binary, `testing/size`); most of the rest is std, serde and the
   TOML parser. `scripts/check-sizes.sh` tracks both binaries (host builds).
 
+## Simulated board
+
+`lemnosd --sim` runs a board definition over simulated buses instead of the host's device nodes,
+for a machine with no hardware (the simulation of the fast test pipeline runs it on x86_64, in a
+container). It is the feature `sim` (`cargo build -p lemnosd --features sim`); a board build has
+none of it. The service is the board's: the same drivers, fusion, light engine, looks and fan
+control, the same socket, client API and Orion bridge. A client cannot tell the difference from
+the readings and the protocol.
+
+```sh
+lemnosd --sim --board /etc/lemnos/board.toml --sim-script /etc/lemnos/sim.toml
+lemnosd --sim --board board.toml                  # no script: a still board, both ports on
+LEMNOSD_SIM=1 LEMNOSD_SIM_SCRIPT=sim.toml lemnosd --board board.toml   # the same, by environment
+```
+
+`--sim-root DIR` (`LEMNOSD_SIM_ROOT`) is where the simulation keeps its files: the sysfs tree the
+devices read (`sys/`), the LED frames (`dev/<led>`: four bytes per LED), and the service's saved
+state (`state/` for power settings, `calibration/`, `looks.d/`), unless the environment names those
+directories. Without `--sim-root` a temporary directory is used and removed at a clean stop.
+The socket is `--socket` as on a board (keep it short: Unix socket paths are limited to about 100
+bytes). The packaging hook for a sim image is in [packaging/README.md](../packaging/README.md),
+*Simulated board*.
+
+### What is simulated
+
+| Device | Model |
+|---|---|
+| `imu` (`bmi088`) | Accelerometer and gyroscope register files at their addresses: chip IDs, the configured ranges scale the counts, the die temperature. The scripted motion gives the specific force (gravity on the body's axes as the attitude turns it), the angular rate, with the script's bias and noise. |
+| `magnetometer` (`bmm150`) | Data registers with the Earth field in the body frame (the field in the world, z up and x toward magnetic north, turned by the attitude), with the chip's compensation inverted for a neutral trim. |
+| `power` (`ina238`) | Shunt, bus voltage, die temperature, current and power, scaled by the calibration the driver wrote (the chip's own LSB). The supply load is a base, plus each switched port that is on, plus the script's loads; the bus sags across the supply's resistance. |
+| `fan` (`hwmon-fan`) | `pwm1` and `pwm1_enable` as the kernel has them: mode 0 is full speed, otherwise the duty. The tachometer follows the duty with a first-order lag (the script's time constant). |
+| `cpu-thermal` | The temperature warms with the supply current and the fan's duty, with a time constant. |
+| `status-ring` (`ws2812`) | The frames are written to a file under the sim root and read through the frame watch, as on a board. |
+| `usb-a-power`, `usb-c-power` (`gpio-power-switch`) | Mock lines. An output the service drives loads the supply while it is on; `persist` and `on_exit` work as on a board. |
+| GPIO inputs and outputs | Mock lines; the script drives an input's level at a time (`[[gpio]]`). |
+| I2C selectors (`i2c:compatible=`, `i2c:name=`) | Fake adapters under `sys/bus/i2c` with their device-tree node, resolved by the real selector code. |
+| `orientation` (`fusion`) | The real fusion over the simulated IMU and magnetometer. |
+
+### What differs from a board
+
+- Bus timing is not modelled: a transfer takes no time, so there is no clock stretching,
+  arbitration, PIO bit timing or interrupt latency. A real board's read rates and jitter are not
+  reproduced; the simulation is for behaviour, not for timing (measure timing on the board).
+- Only the userspace drivers run. The kernel-backed path (IIO and hwmon chips through their
+  kernel drivers) is not simulated.
+- INA226, INA260 and the VCM driver have no model: a board that uses them does not start with
+  `--sim` (the error names the driver). The BMM150 reports its chip ID from the start, and the
+  BMI088's accelerometer has no power-mode gate; the BMM150's trim is neutral, where a real
+  part's trim is its own.
+- One fan and one thermal zone. The SPI, PWM and UART devices use the mock hardware's bus
+  without physics.
+- The motion is rigid body: no vibration apart from the script's shake, no temperature drift
+  in the sensors, no magnetic disturbance beyond the field the script sets.
+
+### The script
+
+`--sim-script` is a TOML file (`format = "lemnos.sim"`, `schema_version = 1`). Every key is
+optional; the sample in [packaging/sim/sim.toml](../packaging/sim/sim.toml) uses them all.
+
+```toml
+format = "lemnos.sim"
+schema_version = 1
+speed = 1.0                  # simulated seconds per real second
+seed = 1                     # the noise is the same for the same seed
+repeat = true                # loop the motion; else the last pose is held
+
+[imu]
+accel_noise = 0.02           # m/s², one sigma
+gyro_noise = 0.002           # rad/s, one sigma
+gyro_bias = [0.0, 0.0, 0.0]  # rad/s
+
+[mag]
+field_ut = [20.0, 0.0, -40.0]  # the Earth field, world frame (z up, x magnetic north), µT
+noise_ut = 0.3
+
+[fan]
+max_rpm = 4200.0             # at 100 % duty
+time_constant_s = 0.8
+
+[power]
+bus_v = 5.1
+base_a = 0.35
+port_a = 0.45                # per switched port that is on
+sag_ohm = 0.04
+noise_a = 0.01
+
+[thermal]
+ambient_c = 34.0
+c_per_amp = 3.0
+c_per_duty = 6.0
+time_constant_s = 8.0
+
+[[motion]]                   # in order; each lasts `seconds`
+kind = "still"               # gravity only
+seconds = 2.0
+
+[[motion]]
+kind = "attitude"            # slerp to a pose, then hold it
+seconds = 1.0
+roll_deg = 20.0
+pitch_deg = -10.0
+yaw_deg = 0.0
+
+[[motion]]
+kind = "rotate"              # a constant body rate
+seconds = 3.0
+rate_dps = [0.0, 0.0, 90.0]
+
+[[motion]]
+kind = "shake"               # sinusoidal linear acceleration along world x
+seconds = 2.0
+amplitude = 3.0              # m/s², peak
+hz = 6.0
+
+[[load]]                     # extra supply current while `at` <= t < `at + seconds`
+at = 5.0
+seconds = 3.0
+amps = 1.0
+
+[[fault]]                    # on a board device id: imu, magnetometer, power
+device = "magnetometer"
+kind = "unresponsive"        # unresponsive | bus-error | stuck
+at = 6.0
+seconds = 3.0                # omitted: until the end of the run
+# rate = 0.3                 # bus-error only: the chance per step that it NACKs
+
+[[gpio]]                     # drive a line's input level from `at`
+chip = "pinctrl-rp1"
+line = 5
+level = true
+at = 3.0
+```
+
+A fault on a device stops its chip answering: `unresponsive` NACKs every transaction in the window,
+`bus-error` NACKs at random with the given rate, and `stuck` keeps the last samples. The service
+shows the loss as the device's status (degraded or faulted, then available again when the window
+ends), as it would a real one. The fault names the device; the rest of its bus is unaffected.
+
+### Testing
+
+`cargo test -p lemnosd --features sim` runs the simulation's unit tests (the physics and each
+device model, stepped in simulated time, without threads) and `tests/sim.rs`, which runs the
+binary and reads it over its socket: the readings and their values, fusion settling on the
+scripted attitude, the fan following its duty with lag, a fault shown and recovered, and the
+LED frames through the frame watch.
+
 ## Packaging
 
 `packaging/gaia/lemnosd.toml` is a Gaia layer in the style of Orion's `orion-node` layer: it

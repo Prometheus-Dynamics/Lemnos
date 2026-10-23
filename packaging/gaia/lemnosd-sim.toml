@@ -1,0 +1,131 @@
+# The simulated board for a sim image (the Gaia sim platform layer): lemnosd
+# built with the `sim` feature, a systemd drop-in that starts it with
+# `--sim --sim-script /etc/lemnos/sim.toml`, and the script. Import it after
+# lemnosd.toml. This layer builds lemnosd in Docker (the backend lemnosd.toml
+# uses); for host builds, copy its lemnosd artifact with the host backend from
+# lemnosd-host.toml and add `features = ["sim"]` there, instead of importing it:
+#
+#   imports = [
+#     ...base layers...,
+#     { source = "lemnos", path = "packaging/gaia/lemnosd.toml" },
+#     { source = "lemnos", path = "packaging/gaia/lemnosd-sim.toml" },
+#   ]
+#
+# The board's device package still stages /etc/lemnos/board.toml. The sim
+# image does not change the board's own layers or its device package: a board
+# image never imports this file. Items merge by id and a later layer replaces
+# the whole item, so the lemnosd artifact is redeclared in full with its
+# features, and the feed lists name every item, as the base layer does.
+
+gaia_version = ">=2.0.0"
+
+[[artifacts]]
+id = "lemnosd"
+kind = "rust"
+source = "lemnos"
+package = "lemnosd"
+target = "aarch64-unknown-linux-musl"
+profile = "service"
+target_name = "lemnosd"
+install_name = "lemnosd"
+install_class = "binary"
+install_dest_hint = "/usr/bin/lemnosd"
+build_group = "lemnosd"
+output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnosd"
+# The simulated board (`lemnosd --sim`), off in a board build.
+features = ["sim"]
+
+[artifacts.execution]
+backend = "docker"
+
+[artifacts.execution.docker]
+image = "lemnos-aarch64-musl"
+dockerfile = "@self/docker/aarch64-musl.Dockerfile"
+context = "@self/docker"
+
+[[artifacts]]
+id = "lemnos-ctl"
+kind = "rust"
+source = "lemnos"
+package = "lemnos-ctl"
+target = "aarch64-unknown-linux-musl"
+profile = "service"
+target_name = "lemnos-ctl"
+install_name = "lemnos-ctl"
+install_class = "binary"
+install_dest_hint = "/usr/bin/lemnos-ctl"
+build_group = "lemnosd"
+output_path = "${workspace.out_dir}/artifacts/lemnosd/lemnos-ctl"
+
+[artifacts.execution]
+backend = "docker"
+
+[artifacts.execution.docker]
+image = "lemnos-aarch64-musl"
+dockerfile = "@self/docker/aarch64-musl.Dockerfile"
+context = "@self/docker"
+
+[[install]]
+id = "install-lemnosd"
+artifact = "lemnosd"
+dest = "/usr/bin/lemnosd"
+replace = true
+mode = 493 # 0755
+
+[[install]]
+id = "install-lemnos-ctl"
+artifact = "lemnos-ctl"
+dest = "/usr/bin/lemnos-ctl"
+replace = true
+mode = 493
+
+[[stage.services]]
+id = "lemnosd-service"
+name = "lemnosd.service"
+unit_path = "@self/../systemd/lemnosd.service"
+
+[[stage.files]]
+id = "lemnosd-env"
+src = "@self/../systemd/lemnosd.env.example"
+dest = "/etc/default/lemnosd.env"
+mode = 420 # 0644
+origin = "static-asset"
+
+[[stage.files]]
+id = "lemnosd-sysusers"
+src = "@self/../systemd/lemnos.sysusers"
+dest = "/usr/lib/sysusers.d/lemnos.conf"
+mode = 420
+origin = "static-asset"
+
+[[stage.files]]
+id = "lemnosd-preset"
+src = "@self/../systemd/lemnosd.preset"
+dest = "/usr/lib/systemd/system-preset/80-lemnosd.preset"
+mode = 420
+origin = "static-asset"
+
+[[stage.files]]
+id = "lemnosd-sim-dropin"
+src = "@self/../systemd/lemnosd-sim.conf"
+dest = "/etc/systemd/system/lemnosd.service.d/sim.conf"
+mode = 420
+origin = "static-asset"
+
+[[stage.files]]
+id = "lemnosd-sim-script"
+src = "@self/../sim/sim.toml"
+dest = "/etc/lemnos/sim.toml"
+mode = 420
+origin = "static-asset"
+
+[image.feed]
+install_entries = ["install-lemnosd", "install-lemnos-ctl"]
+stage_files = [
+  "lemnosd-env",
+  "lemnosd-sysusers",
+  "lemnosd-preset",
+  "lemnosd-sim-dropin",
+  "lemnosd-sim-script",
+]
+stage_services = ["lemnosd-service"]

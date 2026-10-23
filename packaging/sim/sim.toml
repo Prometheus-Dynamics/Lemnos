@@ -1,0 +1,45 @@
+# The simulation script of a sim image (lemnosd --sim-script /etc/lemnos/sim.toml).
+# A still board, then a sequence of motions that repeats: a settle, a slow
+# attitude change, a spin, and a shake. Simulated seconds; `speed = 1.0` runs
+# in real time. The format, and the faults and inputs a script can add, are in
+# docs/system-service.md (Simulated board).
+format = "lemnos.sim"
+schema_version = 1
+speed = 1.0
+seed = 1
+repeat = true
+
+[imu]
+accel_noise = 0.02
+gyro_noise = 0.002
+
+[mag]
+field_ut = [20.0, 0.0, -40.0]
+noise_ut = 0.3
+
+[[motion]]
+kind = "still"
+seconds = 3.0
+
+[[motion]]
+kind = "attitude"
+seconds = 2.0
+roll_deg = 15.0
+pitch_deg = -8.0
+yaw_deg = 0.0
+
+[[motion]]
+kind = "rotate"
+seconds = 4.0
+rate_dps = [0.0, 0.0, 45.0]
+
+[[motion]]
+kind = "shake"
+seconds = 2.0
+amplitude = 2.5
+hz = 5.0
+
+[[load]]
+at = 6.0
+seconds = 2.0
+amps = 0.8

@@ -38,6 +38,10 @@ lemnos-ctl fan release fan                 # back to the kernel governor until t
 lemnos-ctl fan restore --all
 ```
 
+`lemnosd --sim` (feature `sim`) runs the same board definition over simulated buses: scripted
+chip models, a motion, a supply load and faults, with the same socket and clients
+(docs/system-service.md, *Simulated board*).
+
 Libraries talk to it with `lemnos-ipc` (`DeviceClient`, `LedClient`); with the `mock` feature,
 `lemnosd::mock::MockLemnosd` runs the real service over mock hardware for client tests. Packaging (systemd unit,
 Gaia layer) is in `packaging/`; the design is `docs/system-service.md`.

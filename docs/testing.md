@@ -37,6 +37,10 @@ The `lemnos` examples exercise realistic flows without touching host hardware:
 
 These examples are good smoke tests for the facade, runtime, registry, driver SDK, macros, and mock backend working together.
 
+## Simulated Board
+
+`cargo test -p lemnosd --features sim` covers the simulated board (`lemnosd --sim`): its device models and physics as unit tests, and the binary run with `--sim` and read over its socket (`crates/lemnosd/tests/sim.rs`). See [system-service.md](system-service.md), *Simulated board*.
+
 ## Linux-Oriented Helpers
 
 Repository helper assets live under `testing/`:
