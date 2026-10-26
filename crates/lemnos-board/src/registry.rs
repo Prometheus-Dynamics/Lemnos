@@ -23,11 +23,13 @@ use crate::composite::{FUSION_CHOICES, FUSION_KEYS, build_fusion, composite_prob
     feature = "drv-gpio"
 ))]
 use crate::schema::ConfigValue;
-use crate::schema::{Backend, BusRef, DeviceSpec};
+use crate::schema::{Backend, BusRef, DeviceSpec, Owner};
 use crate::{BoardError, Buses};
 use lemnos_device::{BoxedDevice, DeviceClass};
 #[cfg(feature = "drv-hwmon-fan")]
 use lemnos_drivers_linux::HwmonFan;
+#[cfg(feature = "drv-net-link")]
+use lemnos_drivers_linux::NetLink;
 #[cfg(feature = "drv-thermal-zone")]
 use lemnos_drivers_linux::ThermalZone;
 #[cfg(any(
@@ -83,6 +85,10 @@ pub struct DriverEntry {
     pub kernel: bool,
     /// Whether it has a userspace driver.
     pub userspace: bool,
+    /// Whether it has a form that only reads: a host-owned device (see
+    /// [`Owner`]) is built with that form only. A driver without one is
+    /// refused for a host-owned device.
+    pub read_only: bool,
     pub build: Build,
 }
 
@@ -122,6 +128,12 @@ impl DriverEntry {
         }
         if spec.backend == Backend::Userspace && !self.userspace {
             problems.push(format!("{} has no userspace driver", self.name));
+        }
+        if spec.owner == Owner::Host && !self.read_only {
+            problems.push(format!(
+                "{} has no read-only form, so it cannot be host-owned",
+                self.name
+            ));
         }
         for (key, allowed) in self.config_choices {
             let Some(value) = spec.config.get(*key) else {
@@ -197,6 +209,8 @@ impl DriverRegistry {
         entries.push(ENTRY_HWMON_FAN);
         #[cfg(feature = "drv-thermal-zone")]
         entries.push(ENTRY_THERMAL_ZONE);
+        #[cfg(feature = "drv-net-link")]
+        entries.push(ENTRY_NET_LINK);
         #[cfg(feature = "drv-ws2812")]
         entries.push(ENTRY_WS2812);
         #[cfg(feature = "drv-gpio")]
@@ -243,7 +257,18 @@ impl DriverRegistry {
                 problems.join("; "),
             ));
         }
-        (entry.build)(spec, buses)
+        let device = (entry.build)(spec, buses)?;
+        if spec.owner == Owner::Host && !matches!(device, BoxedDevice::Sensor(_)) {
+            return Err(BoardError::device(
+                &spec.id,
+                ErrorKind::Configuration,
+                format!(
+                    "{} built with controls: a host-owned device is read-only",
+                    entry.name
+                ),
+            ));
+        }
+        Ok(device)
     }
 }
 
@@ -426,6 +451,7 @@ const BUILTIN: &[DriverEntry] = &[DriverEntry {
     config_choices: FUSION_CHOICES,
     kernel: false,
     userspace: false,
+    read_only: false,
     build: build_fusion,
 }];
 
@@ -449,6 +475,7 @@ const ENTRY_BMI088: DriverEntry = DriverEntry {
     config_choices: BMI088_CHOICES,
     kernel: true,
     userspace: true,
+    read_only: false,
     build: build_bmi088,
 };
 
@@ -465,6 +492,7 @@ const ENTRY_BMM150: DriverEntry = DriverEntry {
     config_choices: BMM150_CHOICES,
     kernel: true,
     userspace: true,
+    read_only: false,
     build: build_bmm150,
 };
 
@@ -481,6 +509,7 @@ const ENTRY_INA226: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: true,
     userspace: true,
+    read_only: false,
     build: build_ina226,
 };
 
@@ -497,6 +526,7 @@ const ENTRY_INA238: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: true,
     userspace: true,
+    read_only: false,
     build: build_ina238,
 };
 
@@ -513,6 +543,7 @@ const ENTRY_INA260: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: true,
     userspace: true,
+    read_only: false,
     build: build_ina260,
 };
 
@@ -529,6 +560,7 @@ const ENTRY_VCM: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: false,
     userspace: true,
+    read_only: false,
     build: build_vcm,
 };
 
@@ -548,6 +580,7 @@ const ENTRY_HWMON_FAN: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: true,
     userspace: false,
+    read_only: true,
     build: build_hwmon_fan,
 };
 
@@ -564,7 +597,25 @@ const ENTRY_THERMAL_ZONE: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: true,
     userspace: false,
+    read_only: true,
     build: build_thermal_zone,
+};
+
+/// The `net-link` driver entry (feature `drv-net-link`).
+#[cfg(feature = "drv-net-link")]
+const ENTRY_NET_LINK: DriverEntry = DriverEntry {
+    name: "net-link",
+    summary: "Linux network link (a CAN bus, a network port): up and carrier, from sysfs",
+    class: DeviceClass::Other,
+    interface: Interface::Platform,
+    default_address: None,
+    config_keys: &[],
+    match_keys: &[],
+    config_choices: &[],
+    kernel: true,
+    userspace: false,
+    read_only: true,
+    build: build_net_link,
 };
 
 /// The `ws2812` driver entry (feature `drv-ws2812`).
@@ -580,6 +631,7 @@ const ENTRY_WS2812: DriverEntry = DriverEntry {
     config_choices: LIGHT_CHOICES,
     kernel: true,
     userspace: false,
+    read_only: false,
     build: build_ws2812,
 };
 
@@ -596,6 +648,7 @@ const ENTRY_GPIO_OUTPUT: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: false,
     userspace: true,
+    read_only: false,
     build: build_gpio_output,
 };
 
@@ -625,6 +678,7 @@ const ENTRY_GPIO_POWER_SWITCH: DriverEntry = DriverEntry {
     config_choices: POWER_SWITCH_CHOICES,
     kernel: false,
     userspace: true,
+    read_only: false,
     build: build_gpio_power_switch,
 };
 
@@ -641,6 +695,7 @@ const ENTRY_GPIO_INPUT: DriverEntry = DriverEntry {
     config_choices: &[],
     kernel: false,
     userspace: true,
+    read_only: false,
     build: build_gpio_input,
 };
 
@@ -969,7 +1024,12 @@ fn build_hwmon_fan(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevi
         .map_err(|e| BoardError::device(&spec.id, ErrorKind::Failed, e.to_string()))?
         .ok_or_else(|| not_found(spec, "hwmon fan"))?,
     };
-    Ok(BoxedDevice::both(fan))
+    // A host-owned fan is read (speed, duty), never driven.
+    Ok(if spec.owner == Owner::Host {
+        BoxedDevice::sensor(fan)
+    } else {
+        BoxedDevice::both(fan)
+    })
 }
 
 #[cfg(feature = "drv-thermal-zone")]
@@ -982,6 +1042,18 @@ fn build_thermal_zone(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedD
         (None, None) => return Err(bad(spec, "needs `path` or `match.type`")),
     };
     Ok(BoxedDevice::sensor(zone))
+}
+
+#[cfg(feature = "drv-net-link")]
+fn build_net_link(spec: &DeviceSpec, _buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
+    let Some(path) = &spec.path else {
+        return Err(BoardError::device(
+            &spec.id,
+            ErrorKind::Configuration,
+            "net-link needs `path`, the link's sysfs directory (/sys/class/net/can_s0)",
+        ));
+    };
+    Ok(BoxedDevice::sensor(NetLink::new(PathBuf::from(path))))
 }
 
 #[cfg(feature = "drv-ws2812")]

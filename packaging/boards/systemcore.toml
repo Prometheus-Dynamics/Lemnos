@@ -1,0 +1,68 @@
+# The SystemCore board definition: the devices a SystemCore unit exposes to a
+# guest, read through the host's own interfaces. Every device is host-owned:
+# Limelight's services on the unit drive them, so Lemnos reads and never
+# writes, claims or raw-accesses any of them. Verified by reading a unit
+# running limelightosr-2027.0.0-alpha18 (docs/board-definition.md, *The
+# SystemCore board*).
+#
+# lemnosd refuses to start on a host other than the one named in [board.identity].
+# Lemnos drives nothing here: the host has no lemnos-owned device.
+
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "systemcore"
+name = "SystemCore on Limelight OS"
+identity = { os_release_id = "limelightos_systemcore", device_tree_model = "Raspberry Pi Compute Module 5" }
+
+# The SoC temperature (the thermal zone's `temp`, millidegrees C).
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+owner = "host"
+label = "SoC temperature"
+match = { type = "cpu-thermal" }
+poll_ms = 1000
+
+# The five CAN buses. `up` is operstate `up`; `carrier` is the link's carrier.
+# The bus error state (error-passive, bus-off) is not in sysfs: it is not read.
+[[devices]]
+id = "can-s0"
+driver = "net-link"
+owner = "host"
+label = "CAN bus 0"
+path = "/sys/class/net/can_s0"
+poll_ms = 1000
+
+[[devices]]
+id = "can-s1"
+driver = "net-link"
+owner = "host"
+label = "CAN bus 1"
+path = "/sys/class/net/can_s1"
+poll_ms = 1000
+
+[[devices]]
+id = "can-s2"
+driver = "net-link"
+owner = "host"
+label = "CAN bus 2"
+path = "/sys/class/net/can_s2"
+poll_ms = 1000
+
+[[devices]]
+id = "can-s3"
+driver = "net-link"
+owner = "host"
+label = "CAN bus 3"
+path = "/sys/class/net/can_s3"
+poll_ms = 1000
+
+[[devices]]
+id = "can-s4"
+driver = "net-link"
+owner = "host"
+label = "CAN bus 4"
+path = "/sys/class/net/can_s4"
+poll_ms = 1000

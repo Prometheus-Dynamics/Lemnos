@@ -5,6 +5,7 @@
 //!   control, with [`FanRestore`] as the failsafe that hands it back to the
 //!   kernel (the `pwm-fan` cooling device, or the chip's automatic mode).
 //! - [`ThermalZone`]: a thermal zone as a temperature sensor.
+//! - [`NetLink`]: a network link (a CAN bus) as an up and carrier sensor.
 //! - [`SysfsPwm`]: a sysfs PWM channel as a claimed
 //!   [`RawPwm`](lemnos_hal::raw::RawPwm).
 //! - [`UserspaceRegulator`] and [`DebugfsClock`]: supplies and clocks the
@@ -28,6 +29,7 @@ mod error;
 mod fan;
 mod fan_restore;
 mod kernel;
+mod net_link;
 mod power;
 mod pwm;
 mod strip;
@@ -49,6 +51,7 @@ pub use fan_restore::{
 };
 pub use kernel::{I2cLocation, KernelDevice, SysRoot};
 pub use lemnos_drivers_ws2812 as ws2812;
+pub use net_link::{NET_LINK_INFO, NetLink};
 pub use power::{DebugfsClock, UserspaceRegulator};
 pub use pwm::SysfsPwm;
 pub use strip::{CONTROL_BRIGHTNESS, CONTROL_COLOR, LIGHT_INFO, Ws2812Pio};

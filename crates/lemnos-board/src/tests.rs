@@ -724,3 +724,181 @@ fn a_fusion_device_is_hosted_by_lemnosd_not_the_registry() {
         "{error}"
     );
 }
+
+const SYSTEMCORE: &str = include_str!("../../../packaging/boards/systemcore.toml");
+const SYSTEMCORE_OS_RELEASE: &str = "NAME=LIMELIGHTOS_SYSTEMCORE\n\
+    VERSION=aef8f2eb41eb4ceb2b73c7a4bc22002deac2a337\n\
+    ID=limelightos_systemcore\n\
+    VERSION_ID=aef8f2eb41eb4ceb2b73c7a4bc22002deac2a337\n\
+    PRETTY_NAME=\"limelightosr-2027.0.0-alpha18\"\n";
+const SYSTEMCORE_MODEL: &str = "Raspberry Pi Compute Module 5 Rev 1.0\0";
+
+#[test]
+fn systemcore_board_is_host_owned_read_only_and_names_its_host() {
+    let board = BoardDefinition::from_toml_str(SYSTEMCORE).unwrap();
+    let registry = DriverRegistry::builtin();
+    board.validate(&registry).unwrap();
+
+    assert_eq!(board.devices.len(), 6);
+    assert!(board.devices.iter().all(|d| d.owner == Owner::Host));
+    assert!(
+        board
+            .devices
+            .iter()
+            .all(|d| d.writers.is_empty() && d.raw.is_empty())
+    );
+    let drivers: std::collections::BTreeSet<&str> =
+        board.devices.iter().map(|d| d.driver.as_str()).collect();
+    assert_eq!(drivers, ["net-link", "thermal-zone"].into());
+
+    let identity = board.board.identity.as_ref().expect("identity");
+    identity
+        .matches(SYSTEMCORE_OS_RELEASE, SYSTEMCORE_MODEL)
+        .unwrap();
+    // Another OS, or another board, is refused with what did not match.
+    let other_os = identity
+        .matches("ID=raspbian\n", SYSTEMCORE_MODEL)
+        .unwrap_err();
+    assert!(other_os.contains("limelightos_systemcore"), "{other_os}");
+    let other_board = identity
+        .matches(SYSTEMCORE_OS_RELEASE, "Raspberry Pi 5 Model B Rev 1.0\0")
+        .unwrap_err();
+    assert!(other_board.contains("Compute Module 5"), "{other_board}");
+}
+
+#[test]
+fn os_release_values_are_read_with_or_without_quotes() {
+    assert_eq!(
+        os_release_value(SYSTEMCORE_OS_RELEASE, "ID").as_deref(),
+        Some("limelightos_systemcore")
+    );
+    assert_eq!(
+        os_release_value(SYSTEMCORE_OS_RELEASE, "PRETTY_NAME").as_deref(),
+        Some("limelightosr-2027.0.0-alpha18")
+    );
+    assert_eq!(os_release_value(SYSTEMCORE_OS_RELEASE, "NOPE"), None);
+}
+
+#[test]
+fn host_owned_devices_take_no_writers_no_raw_access_and_need_a_read_only_driver() {
+    let board = BoardDefinition::from_toml_str(
+        r#"
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "example"
+
+[[devices]]
+id = "aux"
+driver = "gpio-output"
+owner = "host"
+config = { chip = "pinctrl-rp1", line = 4 }
+
+[[devices]]
+id = "temp"
+driver = "thermal-zone"
+owner = "host"
+writers = ["app"]
+raw = ["app"]
+match = { type = "cpu-thermal" }
+"#,
+    )
+    .unwrap();
+    let text = board
+        .validate(&DriverRegistry::builtin())
+        .unwrap_err()
+        .to_string();
+    assert!(text.contains("gpio-output has no read-only form"), "{text}");
+    assert!(
+        text.contains("\"temp\": a host-owned device takes no writers"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"temp\": a host-owned device takes no raw clients"),
+        "{text}"
+    );
+    // Lemnos-owned is the default, and `owner` is written only when it is host.
+    let lemnos = DeviceSpec::new("aux", "gpio-output");
+    assert_eq!(lemnos.owner, Owner::Lemnos);
+    assert!(lemnos.owned_by(Owner::Host).owner == Owner::Host);
+}
+
+#[test]
+fn host_owned_sensors_build_read_only_and_lemnos_fans_keep_their_control() {
+    let tree = Tree::new();
+    tree.adapters();
+    tree.file("class/thermal/thermal_zone0/type", "cpu-thermal")
+        .file("class/thermal/thermal_zone0/temp", "67750")
+        .file("class/net/can_s0/operstate", "up")
+        .file("class/net/can_s0/carrier", "1")
+        .file("class/hwmon/hwmon3/pwm1", "128")
+        .file("class/hwmon/hwmon3/pwm1_enable", "2");
+    let fan_path = tree.0.join("class/hwmon/hwmon3").display().to_string();
+    let board = BoardDefinition::from_toml_str(&format!(
+        r#"
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "example"
+
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+owner = "host"
+match = {{ type = "cpu-thermal" }}
+
+[[devices]]
+id = "can-s0"
+driver = "net-link"
+owner = "host"
+path = "{}/class/net/can_s0"
+
+[[devices]]
+id = "host-fan"
+driver = "hwmon-fan"
+owner = "host"
+path = "{fan_path}"
+
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+path = "{fan_path}"
+"#,
+        tree.0.display()
+    ))
+    .unwrap();
+    let registry = DriverRegistry::builtin();
+    board.validate(&registry).unwrap();
+    let mut buses = MockBuses {
+        sys: tree.0.clone(),
+    };
+    let mut buf = [0; MAX_CHANNELS];
+
+    let mut zone = registry
+        .build(board.device("cpu-thermal").unwrap(), &mut buses)
+        .unwrap();
+    assert!(matches!(zone, lemnos_device::BoxedDevice::Sensor(_)));
+    zone.init(&mut MockDelay::new()).unwrap();
+    zone.read(&mut buf).unwrap();
+    assert_eq!(buf[0], 67_750);
+
+    let mut link = registry
+        .build(board.device("can-s0").unwrap(), &mut buses)
+        .unwrap();
+    assert_eq!(link.info().model, "net-link");
+    link.read(&mut buf).unwrap();
+    assert_eq!(&buf[..2], &[1, 1]);
+
+    // The host's fan is read as a sensor only; the same fan owned by Lemnos
+    // keeps its controls.
+    let host_fan = registry
+        .build(board.device("host-fan").unwrap(), &mut buses)
+        .unwrap();
+    assert!(matches!(host_fan, lemnos_device::BoxedDevice::Sensor(_)));
+    let fan = registry
+        .build(board.device("fan").unwrap(), &mut buses)
+        .unwrap();
+    assert!(matches!(fan, lemnos_device::BoxedDevice::Both(_)));
+}

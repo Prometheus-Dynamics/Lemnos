@@ -35,6 +35,7 @@ drivers = [
     "drv-ws2812",
     "drv-hwmon-fan",
     "drv-thermal-zone",
+    "drv-net-link",
     "drv-gpio",
 ]
 drv-bmi088 = ["dep:lemnos-drivers-bmi088"]
@@ -46,6 +47,8 @@ drv-vcm = ["dep:lemnos-drivers-vcm"]
 drv-ws2812 = []
 drv-hwmon-fan = []
 drv-thermal-zone = []
+# net-link: a network link (a CAN bus) up and carrier, from sysfs.
+drv-net-link = []
 # gpio-output, gpio-input and gpio-power-switch.
 drv-gpio = []
 

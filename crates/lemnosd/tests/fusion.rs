@@ -199,6 +199,7 @@ fn entry(name: &'static str, class: DeviceClass, build: lemnos_board::Build) -> 
         config_choices: &[],
         kernel: false,
         userspace: true,
+        read_only: false,
         build,
     }
 }

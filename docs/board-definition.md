@@ -33,12 +33,14 @@ id = "example"               # required: lowercase letters, digits, inner '-'
 name = "Example sensor board"             # optional
 revision = "2027"         # optional
 generated_by = "manager 1.2.0"  # optional, set by generators
+identity = { os_release_id = "example-os" }  # optional: lemnosd refuses to start on any other host
 
 [[devices]]
 id = "imu"                # required, unique within the board
 driver = "bmi088"         # required, see the driver table
 label = "IMU"             # optional, human-readable
 backend = "auto"          # auto (default) | userspace | kernel
+owner = "lemnos"          # lemnos (default) | host: see "Device ownership"
 bus = "i2c-1"             # bus devices: "i2c-<n>", "i2c:<selector>" or "spi-<bus>.<cs>"
 address = 0x18            # 7-bit I2C address; the driver's default if left out
 path = "/sys/class/hwmon/hwmon2"  # platform devices found by path
@@ -56,6 +58,39 @@ client. A `*` anywhere else is a validation error. The Orion bridge (`lemnos-ori
 is the usual way to let Orion clients write a device. Entries without `*` are still exact.
 
 Unknown fields are errors, so a typo does not silently fall back to a default.
+
+### Device ownership
+
+Every device is either **lemnos-owned** (the default: Lemnos drives it) or
+**host-owned** (`owner = "host"`: the host the board runs on drives it through its own
+services, and Lemnos only reads what the host exposes). The host's services are the owner of
+a host-owned device, so Lemnos never:
+
+- writes it: a host-owned device is built in its read-only form only (the driver's sensor
+  side), and `lemnosd` refuses every write to it with `NotAllowed`, whatever `writers` says;
+- claims it, or hands it out to raw clients: `writers` and `raw` are refused on a host-owned
+  device when the definition is validated;
+- hands a fan back to the kernel when `lemnosd` stops (a host-owned fan has no hand-back to
+  record, so the host's own mode is left as it is).
+
+A driver can be host-owned only if it has a read-only form. The built-in drivers that do are
+`thermal-zone`, `net-link` and `hwmon-fan` (read as a sensor: speed and duty, no `pwm1`
+writes); every other driver is refused for a host-owned device, with its name.
+
+### Board identity
+
+A board definition for one host can name that host in `[board]`:
+
+```toml
+[board]
+id = "systemcore"
+identity = { os_release_id = "limelightos_systemcore", device_tree_model = "Raspberry Pi Compute Module 5" }
+```
+
+`os_release_id` must equal the os-release `ID`; `device_tree_model`, when given, must be a prefix
+of `/proc/device-tree/model`. `lemnosd` checks both at start and refuses the board on any other
+host (its exit message names what did not match). A simulated board (`--sim`) is not checked.
+A definition without `identity` runs on any host.
 
 ### Finding an I2C bus without its number
 
@@ -167,6 +202,7 @@ and, for `gpio-*` devices, its line; those are never claimed raw. See
 | `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
 | `gpio-power-switch` | `power-switch` | `config.chip` + `config.line` | `chip`, `line`, `active_low`, `default_on` (true), `enable_delay_ms` (0, max 5000), `fault_line` (optional), `fault_chip` (default `chip`), `fault_active_low` (true), `persist` (false), `on_exit` (`keep`, `on` or `off`) | `power.on` channel and control (1 on, 0 off); `power.reset` control (write N: off for N ms, then on; max 10000); `power.fault` channel when `fault_line` is set |
 | `gpio-input` | `gpio` | `config.chip` + `config.line` | `chip`, `line`, `active_low` | `level` |
+| `net-link` | `other` | `path` (the link's class directory, `/sys/class/net/can_s0`) | none | `up` (1 when `operstate` is `up`), `carrier` (1 when the link has carrier; 0 while it is down). Read from sysfs only: a CAN bus's error state (error-passive, bus-off) is not in sysfs, so it is not read |
 
 A light's look defaults (used by `lemnosd`'s LED intents; any intent can override them):
 `fade_ms`, `easing` (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`,
@@ -250,6 +286,24 @@ config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, o
 Both lines are hogged on by the kernel overlay today, and the board package
 releases them; once `lemnosd` owns them it keeps them on from the start (no
 off-glitch). The older `gpio-output` driver still works for any other line.
+
+## The SystemCore board
+
+[packaging/boards/systemcore.toml](../packaging/boards/systemcore.toml) is the board definition
+of a SystemCore running Limelight's OS (`ID=limelightos_systemcore`, device-tree model
+`Raspberry Pi Compute Module 5`). Every device is host-owned: on that OS, Limelight's services use
+the SoC, the CAN buses, the power distribution, the fan and the LEDs, so Lemnos drives nothing.
+It lists what is read, verified on a unit running `limelightosr-2027.0.0-alpha18`:
+
+| Device | Driver | Read from |
+|---|---|---|
+| `cpu-thermal` | `thermal-zone` (`match.type = "cpu-thermal"`) | `/sys/class/thermal/thermal_zone0/temp` |
+| `can-s0` .. `can-s4` | `net-link` | `/sys/class/net/can_s<n>/{operstate,carrier}` |
+
+Not listed, because the unit does not expose them to a read-only reader: the fan (its device-tree
+node `cooling_fan` has no hwmon or cooling-device node on that OS), the input voltage (the
+`rpi_volt` hwmon has only a low-voltage alarm), and the RP1 ADC channels (their use is not known).
+The CPU load is `/proc/loadavg`, and no driver reads it yet.
 
 ## The example board
 

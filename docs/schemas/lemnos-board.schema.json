@@ -37,6 +37,24 @@
         },
         "generated_by": {
           "type": "string"
+        },
+        "identity": {
+          "description": "What the host must be for this definition to run on it (lemnosd refuses to start on another host). Left out: any host.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "os_release_id"
+          ],
+          "properties": {
+            "os_release_id": {
+              "type": "string",
+              "description": "The os-release ID, compared exactly."
+            },
+            "device_tree_model": {
+              "type": "string",
+              "description": "The start of /proc/device-tree/model."
+            }
+          }
         }
       }
     },
@@ -134,7 +152,7 @@
         },
         "driver": {
           "type": "string",
-          "description": "Built-in: bmi088, bmm150, ina226, ina238, ina260, vcm, hwmon-fan, thermal-zone (hosts may register more)."
+          "description": "Built-in: bmi088, bmm150, ina226, ina238, ina260, vcm, hwmon-fan, thermal-zone, net-link, ws2812, gpio-output, gpio-input, gpio-power-switch (hosts may register more)."
         },
         "label": {
           "type": "string"
@@ -146,6 +164,14 @@
             "kernel"
           ],
           "default": "auto"
+        },
+        "owner": {
+          "description": "lemnos (the default): Lemnos drives the device. host: the host's own services drive it; Lemnos only reads it, and takes no writers or raw clients.",
+          "enum": [
+            "lemnos",
+            "host"
+          ],
+          "default": "lemnos"
         },
         "bus": {
           "type": "string",

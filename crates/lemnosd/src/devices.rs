@@ -355,7 +355,8 @@ impl Slot {
                 self.present = true;
                 self.retry_ms = RETRY_MIN_MS;
                 self.next_read_us = now_ms * 1000;
-                if self.restore.is_none() {
+                // A host-owned fan is never driven, so there is nothing to hand back.
+                if self.restore.is_none() && self.spec.owner.is_lemnos() {
                     self.restore = fan_restore_plan(&self.spec, buses);
                 }
                 self.set_status(DeviceStatus::Available, None)
@@ -537,8 +538,12 @@ impl Slot {
         self.values[..n].to_vec()
     }
 
-    /// Whether `client` may write this device's controls.
+    /// Whether `client` may write this device's controls. A host-owned device
+    /// (its host's services drive it) takes no writes from anyone.
     pub fn allows(&self, client: &str) -> bool {
+        if !self.spec.owner.is_lemnos() {
+            return false;
+        }
         self.spec.writers.is_empty()
             || self
                 .spec

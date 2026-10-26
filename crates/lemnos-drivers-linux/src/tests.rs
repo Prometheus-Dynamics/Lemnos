@@ -489,3 +489,34 @@ fn sysfs_pwm_exports_orders_writes_and_releases() {
     assert_eq!(tree.read("class/pwm/pwmchip0/pwm1/enable"), "0");
     assert_eq!(tree.read("class/pwm/pwmchip0/unexport"), "");
 }
+
+#[test]
+fn net_link_reads_up_and_carrier() {
+    let tree = Tree::new();
+    tree.file("class/net/can_s0/operstate", "up")
+        .file("class/net/can_s0/carrier", "1")
+        .file("class/net/can_s1/operstate", "down");
+    let mut up = NetLink::new(tree.path("class/net/can_s0"));
+    let mut out = [9; 2];
+    {
+        let mut device = DeviceRef::sensor(&mut up);
+        device.init(&mut NoDelay).unwrap();
+        device.read(&mut out).unwrap();
+    }
+    assert_eq!(out, [1, 1]);
+    assert!(up.is_up().unwrap());
+
+    // A link that is down: its carrier attribute cannot be read (EINVAL on a
+    // real kernel; absent here), which reads as no carrier, not as an error.
+    let mut down = NetLink::new(tree.path("class/net/can_s1"));
+    {
+        let mut device = DeviceRef::sensor(&mut down);
+        device.read(&mut out).unwrap();
+    }
+    assert_eq!(out, [0, 0]);
+
+    // A missing link is a driver error (the device is absent).
+    let mut missing = NetLink::new(tree.path("class/net/can_s9"));
+    assert!(DeviceRef::sensor(&mut missing).init(&mut NoDelay).is_err());
+    assert_eq!(tree.read("class/net/can_s0/operstate"), "up");
+}

@@ -86,6 +86,80 @@ pub struct BoardInfo {
     /// The tool that produced the file (`manager 1.2.0`), when generated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_by: Option<String>,
+    /// What the host must be for this definition to run on it (`lemnosd`
+    /// checks it at start, and refuses the board when it does not match). A
+    /// definition without one runs on any host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<HostIdentity>,
+}
+
+/// The host a board definition is for: its os-release `ID` and, optionally,
+/// the device-tree model it starts with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostIdentity {
+    /// The os-release `ID` (`limelightos_systemcore`), compared exactly.
+    pub os_release_id: String,
+    /// The start of `/proc/device-tree/model` (`Raspberry Pi Compute Module 5`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_tree_model: Option<String>,
+}
+
+impl HostIdentity {
+    /// Whether a host with this os-release text and device-tree model is the
+    /// host the definition is for. `Err` names what did not match.
+    pub fn matches(&self, os_release: &str, device_tree_model: &str) -> Result<(), String> {
+        let id = os_release_value(os_release, "ID");
+        if id.as_deref() != Some(self.os_release_id.as_str()) {
+            return Err(format!(
+                "os-release ID is {:?}, the board is for {:?}",
+                id.unwrap_or_default(),
+                self.os_release_id
+            ));
+        }
+        let model = device_tree_model.trim_end_matches('\0').trim();
+        if let Some(wanted) = &self.device_tree_model
+            && !model.starts_with(wanted.as_str())
+        {
+            return Err(format!(
+                "device-tree model is {model:?}, the board is for {wanted:?}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The value of `key` in os-release text (`KEY=value`, with or without quotes).
+pub fn os_release_value(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        (name.trim() == key).then(|| {
+            value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
+    })
+}
+
+/// Who drives a device. `lemnos` (the default): Lemnos drives it. `host`:
+/// the host the board runs on uses it through its own services, so Lemnos
+/// only reads what the host exposes; it never writes, claims or raw-accesses
+/// the device (`docs/board-definition.md`, *Device ownership*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Owner {
+    #[default]
+    Lemnos,
+    Host,
+}
+
+impl Owner {
+    /// Whether this is the default (Lemnos drives the device).
+    pub fn is_lemnos(&self) -> bool {
+        *self == Self::Lemnos
+    }
 }
 
 /// How a device is reached.
@@ -309,6 +383,10 @@ pub struct DeviceSpec {
     pub label: Option<String>,
     #[serde(default)]
     pub backend: Backend,
+    /// Who drives it: `lemnos` (the default) or `host` (read-only through the
+    /// host's own interface; see [`Owner`]).
+    #[serde(default, skip_serializing_if = "Owner::is_lemnos")]
+    pub owner: Owner,
     /// The bus, for bus devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus: Option<BusRef>,
@@ -354,6 +432,7 @@ impl DeviceSpec {
             driver: driver.into(),
             label: None,
             backend: Backend::Auto,
+            owner: Owner::Lemnos,
             bus: None,
             address: None,
             path: None,
@@ -388,6 +467,11 @@ impl DeviceSpec {
 
     pub fn with_backend(mut self, backend: Backend) -> Self {
         self.backend = backend;
+        self
+    }
+
+    pub fn owned_by(mut self, owner: Owner) -> Self {
+        self.owner = owner;
         self
     }
 }
@@ -428,6 +512,7 @@ impl BoardDefinition {
                 name: None,
                 revision: None,
                 generated_by: None,
+                identity: None,
             },
             devices: Vec::new(),
             lines: Vec::new(),
@@ -492,6 +577,18 @@ impl BoardDefinition {
         if !is_valid_id(&self.board.id) {
             problems.push(format!("board id {:?} is not a valid id", self.board.id));
         }
+        if let Some(identity) = &self.board.identity {
+            if identity.os_release_id.trim().is_empty() {
+                problems.push("board identity: os_release_id is empty".into());
+            }
+            if identity
+                .device_tree_model
+                .as_deref()
+                .is_some_and(|m| m.trim().is_empty())
+            {
+                problems.push("board identity: device_tree_model is empty".into());
+            }
+        }
         for (name, table) in &self.looks {
             if let Err(errors) =
                 crate::looks::from_value("board.toml", name, &toml::Value::Table(table.clone()))
@@ -505,6 +602,20 @@ impl BoardDefinition {
             }
             if self.devices[..index].iter().any(|d| d.id == device.id) {
                 problems.push(format!("device {:?}: duplicate id", device.id));
+            }
+            if device.owner == Owner::Host {
+                if !device.writers.is_empty() {
+                    problems.push(format!(
+                        "device {:?}: a host-owned device takes no writers (the host's services own it)",
+                        device.id
+                    ));
+                }
+                if !device.raw.is_empty() {
+                    problems.push(format!(
+                        "device {:?}: a host-owned device takes no raw clients (the host's services own it)",
+                        device.id
+                    ));
+                }
             }
             for entry in device.writers.iter().filter(|e| !is_valid_client_entry(e)) {
                 problems.push(format!(

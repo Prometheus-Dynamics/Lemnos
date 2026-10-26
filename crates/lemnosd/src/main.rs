@@ -74,6 +74,16 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A board that names its host runs only there. A simulated board runs
+    // anywhere (its buses are a script).
+    if !sim && let Some(identity) = &definition.board.identity {
+        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let model = std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default();
+        if let Err(why) = identity.matches(&os_release, &model) {
+            eprintln!("lemnosd: {board}: this board is for another host: {why}");
+            return ExitCode::FAILURE;
+        }
+    }
     if check {
         println!("{board}: ok ({} devices)", definition.devices.len());
         return ExitCode::SUCCESS;
