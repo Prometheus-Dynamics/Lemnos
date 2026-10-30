@@ -36,9 +36,9 @@ use super::ops::LookOp;
 use super::ops::{self, Op, Outcome};
 
 /// The lemnosd client name of the bridge's readings connection.
-pub const LEMNOSD_CLIENT: &str = "orion";
+pub(crate) const LEMNOSD_CLIENT: &str = "orion";
 /// The Orion client name (its provider and action handler identity).
-pub const ORION_CLIENT: &str = "lemnos-orion";
+pub(crate) const ORION_CLIENT: &str = "lemnos-orion";
 
 /// Where and how the bridge runs.
 #[derive(Debug, Clone)]
@@ -518,7 +518,7 @@ fn poll_calibration(client: &mut DeviceClient, feed: &FeedSender) -> bool {
 }
 
 /// `LEMNOS_ORION_BATCH_MS`: the coalescing window in milliseconds (0 to 1000).
-pub fn parse_batch(text: Option<&str>) -> Result<Duration, String> {
+pub(crate) fn parse_batch(text: Option<&str>) -> Result<Duration, String> {
     let Some(text) = text else {
         return Ok(Duration::from_millis(50));
     };
@@ -532,7 +532,7 @@ pub fn parse_batch(text: Option<&str>) -> Result<Duration, String> {
 
 /// `device=channel,channel;device=...` (`LEMNOS_ORION_CHANNELS`): each device
 /// with the channel names to subscribe to (see `DeviceClient::subscribe_channels`).
-pub fn parse_channels(text: &str) -> Vec<(String, Vec<String>)> {
+pub(crate) fn parse_channels(text: &str) -> Vec<(String, Vec<String>)> {
     text.split(';')
         .filter_map(|entry| {
             let (device, names) = entry.split_once('=')?;
@@ -646,7 +646,7 @@ fn presets_status(client: &mut DeviceClient) -> Vec<(&'static str, TypedConfigVa
 /// connection to lemnosd and kept across reconnections. A watcher ends when
 /// the bridge stops (its feed closes).
 #[derive(Default)]
-pub struct LightWatchers {
+pub(crate) struct LightWatchers {
     running: Mutex<std::collections::BTreeSet<String>>,
 }
 

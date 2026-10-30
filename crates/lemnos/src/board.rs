@@ -49,16 +49,16 @@ use lemnos_hal::HalError;
 use std::sync::Arc;
 
 /// The driver that binds a board's I2C devices.
-pub const I2C_DRIVER: &str = "lemnos.board.i2c";
+pub(crate) const I2C_DRIVER: &str = "lemnos.board.i2c";
 /// The driver that binds a board's platform devices (fans, thermal zones,
 /// kernel class devices).
-pub const PLATFORM_DRIVER: &str = "lemnos.board.platform";
+pub(crate) const PLATFORM_DRIVER: &str = "lemnos.board.platform";
 /// Descriptor property: the board id.
-pub const PROPERTY_BOARD: &str = "board.id";
+pub(crate) const PROPERTY_BOARD: &str = "board.id";
 /// Descriptor property: the device id within the board.
-pub const PROPERTY_DEVICE: &str = "board.device";
+pub(crate) const PROPERTY_DEVICE: &str = "board.device";
 /// Descriptor property: the board driver name (`bmi088`).
-pub const PROPERTY_BOARD_DRIVER: &str = "board.driver";
+pub(crate) const PROPERTY_BOARD_DRIVER: &str = "board.driver";
 
 const INTERFACES: [InterfaceKind; 2] = [InterfaceKind::I2c, InterfaceKind::Platform];
 

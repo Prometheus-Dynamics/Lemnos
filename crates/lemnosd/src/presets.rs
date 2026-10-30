@@ -93,7 +93,7 @@ pub const BUILTIN: &[(&str, &str)] = &[
 ];
 
 /// The text of built-in preset `name`.
-pub fn builtin_text(name: &str) -> Option<&'static str> {
+pub(crate) fn builtin_text(name: &str) -> Option<&'static str> {
     BUILTIN
         .iter()
         .find(|(n, _)| *n == name)
@@ -101,7 +101,7 @@ pub fn builtin_text(name: &str) -> Option<&'static str> {
 }
 
 /// Whether `name` is a valid preset name (letters, digits, `-` and `_`).
-pub fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 40
         && name

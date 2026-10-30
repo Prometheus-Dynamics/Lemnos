@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_STATE_DIR: &str = "/var/lib/lemnos";
 
 /// The driver name of a power switch.
-pub const POWER_DRIVER: &str = "gpio-power-switch";
+pub(crate) const POWER_DRIVER: &str = "gpio-power-switch";
 
 /// Whether `spec` is a power switch that keeps its state across restarts
 /// (`persist = true`).
-pub fn power_persists(spec: &DeviceSpec) -> bool {
+pub(crate) fn power_persists(spec: &DeviceSpec) -> bool {
     spec.driver == POWER_DRIVER
         && spec
             .config
@@ -27,7 +27,7 @@ pub fn power_persists(spec: &DeviceSpec) -> bool {
 
 /// What a power switch does when `lemnosd` stops: `keep` (the default, the
 /// last commanded state stays), `on` or `off`.
-pub fn power_on_exit(spec: &DeviceSpec) -> &str {
+pub(crate) fn power_on_exit(spec: &DeviceSpec) -> &str {
     spec.config
         .get("on_exit")
         .and_then(ConfigValue::as_str)
@@ -36,7 +36,7 @@ pub fn power_on_exit(spec: &DeviceSpec) -> &str {
 
 /// A power switch's enable delay in milliseconds (0 when none, and capped at
 /// the driver's maximum).
-pub fn power_enable_delay_ms(spec: &DeviceSpec) -> u32 {
+pub(crate) fn power_enable_delay_ms(spec: &DeviceSpec) -> u32 {
     spec.config
         .get("enable_delay_ms")
         .and_then(ConfigValue::as_i64)
@@ -48,13 +48,13 @@ pub fn power_enable_delay_ms(spec: &DeviceSpec) -> u32 {
 
 /// A light's saved ring brightness (thousandths), if one was saved:
 /// `<dir>/light/<device>.brightness`.
-pub fn load_light_brightness(dir: &Path, device: &str) -> Option<u16> {
+pub(crate) fn load_light_brightness(dir: &Path, device: &str) -> Option<u16> {
     let text = fs::read_to_string(dir.join("light").join(format!("{device}.brightness"))).ok()?;
     text.trim().parse::<u16>().ok().filter(|p| *p <= 1_000)
 }
 
 /// Saves a light's ring brightness (thousandths).
-pub fn save_light_brightness(dir: &Path, device: &str, permille: u16) -> io::Result<()> {
+pub(crate) fn save_light_brightness(dir: &Path, device: &str, permille: u16) -> io::Result<()> {
     write_atomic(
         &dir.join("light").join(format!("{device}.brightness")),
         &format!("{permille}\n"),
@@ -63,13 +63,13 @@ pub fn save_light_brightness(dir: &Path, device: &str, permille: u16) -> io::Res
 
 /// A ring brightness in thousandths as the light's `look_brightness` (0 to
 /// 255, rounded as the board's own setting is).
-pub fn permille_to_scale(permille: u16) -> u8 {
+pub(crate) fn permille_to_scale(permille: u16) -> u8 {
     u8::try_from((u32::from(permille) * 255 + 500) / 1000).unwrap_or(u8::MAX)
 }
 
 /// Sets `spec`'s `default_on` from the saved state, for a switch that
 /// persists (the saved state is what it starts at).
-pub fn apply_saved_power(spec: &mut DeviceSpec, dir: &Path) {
+pub(crate) fn apply_saved_power(spec: &mut DeviceSpec, dir: &Path) {
     if power_persists(spec)
         && let Some(on) = load_power(dir, &spec.id)
     {
@@ -84,7 +84,7 @@ fn power_path(dir: &Path, device: &str) -> PathBuf {
 }
 
 /// The saved state of power switch `device`, if one was saved.
-pub fn load_power(dir: &Path, device: &str) -> Option<bool> {
+pub(crate) fn load_power(dir: &Path, device: &str) -> Option<bool> {
     match fs::read_to_string(power_path(dir, device)).ok()?.trim() {
         "on" => Some(true),
         "off" => Some(false),
@@ -93,7 +93,7 @@ pub fn load_power(dir: &Path, device: &str) -> Option<bool> {
 }
 
 /// Saves power switch `device`'s state.
-pub fn save_power(dir: &Path, device: &str, on: bool) -> io::Result<()> {
+pub(crate) fn save_power(dir: &Path, device: &str, on: bool) -> io::Result<()> {
     write_atomic(&power_path(dir, device), if on { "on\n" } else { "off\n" })
 }
 

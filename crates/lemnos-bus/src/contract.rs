@@ -1,4 +1,6 @@
-use crate::{BusSession, GpioSession, PwmSession, SessionAccess, SessionState, StreamSession};
+#[cfg(test)]
+use crate::StreamSession;
+use crate::{BusSession, GpioSession, PwmSession, SessionAccess, SessionState};
 use lemnos_core::{DeviceDescriptor, GpioDirection, GpioLevel, InterfaceKind, PwmConfiguration};
 
 /// Assert the common metadata and ownership contract shared by all sessions.
@@ -70,7 +72,8 @@ pub fn assert_pwm_configuration_contract(
 }
 
 /// Assert a polling stream session yields the expected typed event batch.
-pub fn assert_stream_poll_contract<S>(
+#[cfg(test)]
+pub(crate) fn assert_stream_poll_contract<S>(
     session: &mut S,
     max_events: u32,
     timeout_ms: Option<u32>,

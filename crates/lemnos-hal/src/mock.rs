@@ -12,14 +12,17 @@ pub use raw::{MockLine, MockPwm, MockRawSpi, SpiRecord};
 extern crate std;
 
 use crate::ErrorKind;
+#[cfg(test)]
 use crate::power::{ClockOutput, Regulator};
 use crate::register::AddressWidth;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::future::Future;
 use core::task::{Context, Poll, Waker};
+#[cfg(test)]
 use embedded_hal::digital::{ErrorType as PinErrorType, InputPin, OutputPin, StatefulOutputPin};
 use embedded_hal::i2c::{ErrorType as I2cErrorType, I2c, Operation as I2cOperation};
+#[cfg(test)]
 use embedded_hal::spi::{ErrorType as SpiErrorType, Operation as SpiOperation, SpiDevice};
 
 /// Runs a future that completes without waiting on real events to
@@ -339,152 +342,6 @@ fn with<T, R>(shared: &Shared<T>, f: impl FnOnce(&mut T) -> R) -> R {
     f(&mut shared.borrow_mut())
 }
 
-/// An SPI device that records transactions and clocks out queued response
-/// bytes on reads and transfers (0 when the queue is empty).
-#[derive(Debug, Clone, Default)]
-pub struct MockSpi {
-    /// Every transaction, as given.
-    pub transactions: Vec<Vec<MockOp>>,
-    /// Bytes the device sends, in order.
-    pub responses: VecDeque<u8>,
-    fail: VecDeque<ErrorKind>,
-}
-
-impl MockSpi {
-    /// A device with no queued responses.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Queues bytes the device sends.
-    pub fn with_response(mut self, bytes: &[u8]) -> Self {
-        self.responses.extend(bytes.iter().copied());
-        self
-    }
-
-    /// The next transaction fails with `kind`.
-    pub fn fail_next(&mut self, kind: ErrorKind) {
-        self.fail.push_back(kind);
-    }
-
-    fn next_byte(&mut self) -> u8 {
-        self.responses.pop_front().unwrap_or(0)
-    }
-
-    fn run(&mut self, operations: &mut [SpiOperation<'_, u8>]) -> Result<(), ErrorKind> {
-        if let Some(kind) = self.fail.pop_front() {
-            return Err(kind);
-        }
-        let mut log = Vec::with_capacity(operations.len());
-        for op in operations.iter_mut() {
-            match op {
-                SpiOperation::Write(data) => log.push(MockOp::Write(data.to_vec())),
-                SpiOperation::Read(buf) => {
-                    log.push(MockOp::Read(buf.len()));
-                    for b in buf.iter_mut() {
-                        *b = self.next_byte();
-                    }
-                }
-                SpiOperation::Transfer(read, write) => {
-                    log.push(MockOp::Transfer(write.to_vec()));
-                    for b in read.iter_mut() {
-                        *b = self.next_byte();
-                    }
-                }
-                SpiOperation::TransferInPlace(buf) => {
-                    log.push(MockOp::Transfer(buf.to_vec()));
-                    for b in buf.iter_mut() {
-                        *b = self.next_byte();
-                    }
-                }
-                SpiOperation::DelayNs(ns) => log.push(MockOp::DelayNs(*ns)),
-            }
-        }
-        self.transactions.push(log);
-        Ok(())
-    }
-}
-
-impl SpiErrorType for MockSpi {
-    type Error = ErrorKind;
-}
-
-impl SpiDevice for MockSpi {
-    fn transaction(&mut self, operations: &mut [SpiOperation<'_, u8>]) -> Result<(), ErrorKind> {
-        self.run(operations)
-    }
-}
-
-impl embedded_hal_async::spi::SpiDevice for MockSpi {
-    async fn transaction(
-        &mut self,
-        operations: &mut [SpiOperation<'_, u8>],
-    ) -> Result<(), ErrorKind> {
-        self.run(operations)
-    }
-}
-
-/// A pin: an output that records every level set, and an input whose level
-/// tests set through `input`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MockPin {
-    /// The level driven (true: high).
-    pub output: bool,
-    /// The level read as an input.
-    pub input: bool,
-    /// Every level set, in order.
-    pub log: Vec<bool>,
-    /// Setting the level fails with this kind.
-    pub fail: Option<ErrorKind>,
-}
-
-impl MockPin {
-    /// A low pin.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn set(&mut self, high: bool) -> Result<(), ErrorKind> {
-        if let Some(kind) = self.fail {
-            return Err(kind);
-        }
-        self.output = high;
-        self.log.push(high);
-        Ok(())
-    }
-}
-
-impl PinErrorType for MockPin {
-    type Error = ErrorKind;
-}
-
-impl OutputPin for MockPin {
-    fn set_low(&mut self) -> Result<(), ErrorKind> {
-        self.set(false)
-    }
-    fn set_high(&mut self) -> Result<(), ErrorKind> {
-        self.set(true)
-    }
-}
-
-impl StatefulOutputPin for MockPin {
-    fn is_set_high(&mut self) -> Result<bool, ErrorKind> {
-        Ok(self.output)
-    }
-    fn is_set_low(&mut self) -> Result<bool, ErrorKind> {
-        Ok(!self.output)
-    }
-}
-
-impl InputPin for MockPin {
-    fn is_high(&mut self) -> Result<bool, ErrorKind> {
-        Ok(self.input)
-    }
-    fn is_low(&mut self) -> Result<bool, ErrorKind> {
-        Ok(!self.input)
-    }
-}
-
 /// A delay that only adds up the time asked for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MockDelay {
@@ -512,90 +369,6 @@ impl embedded_hal_async::delay::DelayNs for MockDelay {
     async fn delay_ns(&mut self, ns: u32) {
         self.total_ns += u64::from(ns);
         self.calls += 1;
-    }
-}
-
-/// A regulator that records every switch.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MockRegulator {
-    /// Whether it is on.
-    pub enabled: bool,
-    /// Every enable (true) and disable (false), in order.
-    pub log: Vec<bool>,
-    /// The voltage, settable when present.
-    pub microvolts: Option<u32>,
-}
-
-impl Regulator for MockRegulator {
-    type Error = ErrorKind;
-
-    fn enable(&mut self) -> Result<(), ErrorKind> {
-        self.enabled = true;
-        self.log.push(true);
-        Ok(())
-    }
-
-    fn disable(&mut self) -> Result<(), ErrorKind> {
-        self.enabled = false;
-        self.log.push(false);
-        Ok(())
-    }
-
-    fn is_enabled(&mut self) -> Result<bool, ErrorKind> {
-        Ok(self.enabled)
-    }
-
-    fn set_voltage_uv(&mut self, min_uv: u32, _max_uv: u32) -> Result<u32, ErrorKind> {
-        match self.microvolts {
-            Some(_) => {
-                self.microvolts = Some(min_uv);
-                Ok(min_uv)
-            }
-            None => Err(ErrorKind::Unsupported),
-        }
-    }
-
-    fn voltage_uv(&mut self) -> Result<Option<u32>, ErrorKind> {
-        Ok(self.microvolts)
-    }
-}
-
-/// A clock whose rate can be set freely; records enables and rates.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MockClock {
-    /// The rate in hertz.
-    pub rate_hz: u32,
-    /// Whether it runs.
-    pub enabled: bool,
-    /// `Some(rate)` per enable, `None` per disable, in order.
-    pub log: Vec<Option<u32>>,
-}
-
-impl ClockOutput for MockClock {
-    type Error = ErrorKind;
-
-    fn enable(&mut self) -> Result<(), ErrorKind> {
-        self.enabled = true;
-        self.log.push(Some(self.rate_hz));
-        Ok(())
-    }
-
-    fn disable(&mut self) -> Result<(), ErrorKind> {
-        self.enabled = false;
-        self.log.push(None);
-        Ok(())
-    }
-
-    fn rate_hz(&mut self) -> Result<u32, ErrorKind> {
-        Ok(self.rate_hz)
-    }
-
-    fn set_rate_hz(&mut self, rate_hz: u32) -> Result<u32, ErrorKind> {
-        if rate_hz == 0 {
-            return Err(ErrorKind::InvalidInput);
-        }
-        self.rate_hz = rate_hz;
-        Ok(rate_hz)
     }
 }
 
@@ -742,5 +515,241 @@ mod raw_tests {
         assert_eq!(rx, [0xaa, 0xbb]);
         assert_eq!(spi.transactions()[0][0].tx, [0x9f, 0]);
         assert_eq!(spi.transactions()[0][0].config.mode.bits(), 3);
+    }
+}
+
+/// An SPI device that records transactions and clocks out queued response
+/// bytes on reads and transfers (0 when the queue is empty).
+#[derive(Debug, Clone, Default)]
+#[cfg(test)]
+pub(crate) struct MockSpi {
+    /// Every transaction, as given.
+    pub transactions: Vec<Vec<MockOp>>,
+    /// Bytes the device sends, in order.
+    pub responses: VecDeque<u8>,
+}
+
+#[cfg(test)]
+impl MockSpi {
+    /// A device with no queued responses.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queues bytes the device sends.
+    pub fn with_response(mut self, bytes: &[u8]) -> Self {
+        self.responses.extend(bytes.iter().copied());
+        self
+    }
+
+    fn next_byte(&mut self) -> u8 {
+        self.responses.pop_front().unwrap_or(0)
+    }
+
+    fn run(&mut self, operations: &mut [SpiOperation<'_, u8>]) -> Result<(), ErrorKind> {
+        let mut log = Vec::with_capacity(operations.len());
+        for op in operations.iter_mut() {
+            match op {
+                SpiOperation::Write(data) => log.push(MockOp::Write(data.to_vec())),
+                SpiOperation::Read(buf) => {
+                    log.push(MockOp::Read(buf.len()));
+                    for b in buf.iter_mut() {
+                        *b = self.next_byte();
+                    }
+                }
+                SpiOperation::Transfer(read, write) => {
+                    log.push(MockOp::Transfer(write.to_vec()));
+                    for b in read.iter_mut() {
+                        *b = self.next_byte();
+                    }
+                }
+                SpiOperation::TransferInPlace(buf) => {
+                    log.push(MockOp::Transfer(buf.to_vec()));
+                    for b in buf.iter_mut() {
+                        *b = self.next_byte();
+                    }
+                }
+                SpiOperation::DelayNs(ns) => log.push(MockOp::DelayNs(*ns)),
+            }
+        }
+        self.transactions.push(log);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl SpiErrorType for MockSpi {
+    type Error = ErrorKind;
+}
+
+#[cfg(test)]
+impl SpiDevice for MockSpi {
+    fn transaction(&mut self, operations: &mut [SpiOperation<'_, u8>]) -> Result<(), ErrorKind> {
+        self.run(operations)
+    }
+}
+
+#[cfg(test)]
+impl embedded_hal_async::spi::SpiDevice for MockSpi {
+    async fn transaction(
+        &mut self,
+        operations: &mut [SpiOperation<'_, u8>],
+    ) -> Result<(), ErrorKind> {
+        self.run(operations)
+    }
+}
+
+/// A pin: an output that records every level set, and an input whose level
+/// tests set through `input`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg(test)]
+pub(crate) struct MockPin {
+    /// The level driven (true: high).
+    pub output: bool,
+    /// The level read as an input.
+    pub input: bool,
+    /// Every level set, in order.
+    pub log: Vec<bool>,
+    /// Setting the level fails with this kind.
+    pub fail: Option<ErrorKind>,
+}
+
+#[cfg(test)]
+impl MockPin {
+    /// A low pin.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn set(&mut self, high: bool) -> Result<(), ErrorKind> {
+        if let Some(kind) = self.fail {
+            return Err(kind);
+        }
+        self.output = high;
+        self.log.push(high);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl PinErrorType for MockPin {
+    type Error = ErrorKind;
+}
+
+#[cfg(test)]
+impl OutputPin for MockPin {
+    fn set_low(&mut self) -> Result<(), ErrorKind> {
+        self.set(false)
+    }
+    fn set_high(&mut self) -> Result<(), ErrorKind> {
+        self.set(true)
+    }
+}
+
+#[cfg(test)]
+impl StatefulOutputPin for MockPin {
+    fn is_set_high(&mut self) -> Result<bool, ErrorKind> {
+        Ok(self.output)
+    }
+    fn is_set_low(&mut self) -> Result<bool, ErrorKind> {
+        Ok(!self.output)
+    }
+}
+
+#[cfg(test)]
+impl InputPin for MockPin {
+    fn is_high(&mut self) -> Result<bool, ErrorKind> {
+        Ok(self.input)
+    }
+    fn is_low(&mut self) -> Result<bool, ErrorKind> {
+        Ok(!self.input)
+    }
+}
+
+/// A regulator that records every switch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg(test)]
+pub(crate) struct MockRegulator {
+    /// Whether it is on.
+    pub enabled: bool,
+    /// Every enable (true) and disable (false), in order.
+    pub log: Vec<bool>,
+    /// The voltage, settable when present.
+    pub microvolts: Option<u32>,
+}
+
+#[cfg(test)]
+impl Regulator for MockRegulator {
+    type Error = ErrorKind;
+
+    fn enable(&mut self) -> Result<(), ErrorKind> {
+        self.enabled = true;
+        self.log.push(true);
+        Ok(())
+    }
+
+    fn disable(&mut self) -> Result<(), ErrorKind> {
+        self.enabled = false;
+        self.log.push(false);
+        Ok(())
+    }
+
+    fn is_enabled(&mut self) -> Result<bool, ErrorKind> {
+        Ok(self.enabled)
+    }
+
+    fn set_voltage_uv(&mut self, min_uv: u32, _max_uv: u32) -> Result<u32, ErrorKind> {
+        match self.microvolts {
+            Some(_) => {
+                self.microvolts = Some(min_uv);
+                Ok(min_uv)
+            }
+            None => Err(ErrorKind::Unsupported),
+        }
+    }
+
+    fn voltage_uv(&mut self) -> Result<Option<u32>, ErrorKind> {
+        Ok(self.microvolts)
+    }
+}
+
+/// A clock whose rate can be set freely; records enables and rates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg(test)]
+pub(crate) struct MockClock {
+    /// The rate in hertz.
+    pub rate_hz: u32,
+    /// Whether it runs.
+    pub enabled: bool,
+    /// `Some(rate)` per enable, `None` per disable, in order.
+    pub log: Vec<Option<u32>>,
+}
+
+#[cfg(test)]
+impl ClockOutput for MockClock {
+    type Error = ErrorKind;
+
+    fn enable(&mut self) -> Result<(), ErrorKind> {
+        self.enabled = true;
+        self.log.push(Some(self.rate_hz));
+        Ok(())
+    }
+
+    fn disable(&mut self) -> Result<(), ErrorKind> {
+        self.enabled = false;
+        self.log.push(None);
+        Ok(())
+    }
+
+    fn rate_hz(&mut self) -> Result<u32, ErrorKind> {
+        Ok(self.rate_hz)
+    }
+
+    fn set_rate_hz(&mut self, rate_hz: u32) -> Result<u32, ErrorKind> {
+        if rate_hz == 0 {
+            return Err(ErrorKind::InvalidInput);
+        }
+        self.rate_hz = rate_hz;
+        Ok(rate_hz)
     }
 }

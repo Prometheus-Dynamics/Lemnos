@@ -32,13 +32,13 @@
 //! (four slots at 0..3).
 
 /// Instructions in the program.
-pub const PROGRAM_LEN: usize = 27;
+pub(crate) const PROGRAM_LEN: usize = 27;
 /// Entry offset of the WRITE op, from the program base.
-pub const OP_WRITE: u16 = 0;
+pub(crate) const OP_WRITE: u16 = 0;
 /// Entry offset of the READ op.
-pub const OP_READ: u16 = 1;
+pub(crate) const OP_READ: u16 = 1;
 /// Maximum WRITEs between pushes (the 32-bit ISR holds the ACK bits).
-pub const MAX_WRITES_PER_PUSH: usize = 32;
+pub(crate) const MAX_WRITES_PER_PUSH: usize = 32;
 
 /// Side-set: SCL driven low (direction output, latch forced low).
 const LOW: bool = true;
@@ -155,7 +155,7 @@ pub fn program(base: u16, scl: u16) -> [u16; PROGRAM_LEN] {
 }
 
 /// The wrap window of the released loop: (bottom, top) instruction offsets.
-pub fn idle_wrap(base: u16) -> (u16, u16) {
+pub(crate) fn idle_wrap(base: u16) -> (u16, u16) {
     (base + REL_PULL, base + REL_WRAP_TOP)
 }
 
@@ -170,29 +170,29 @@ pub fn entry(base: u16, op: u16) -> u32 {
 }
 
 /// The data word for one WRITE of `byte`.
-pub fn write_word(base: u16, byte: u8) -> u32 {
+pub(crate) fn write_word(base: u16, byte: u8) -> u32 {
     (entry(base, OP_WRITE) << 26) | (u32::from(!byte) << 18)
 }
 
 /// The data word for one READ, with the ACK (`true`) or NACK bit.
-pub fn read_word(base: u16, ack: bool) -> u32 {
+pub(crate) fn read_word(base: u16, ack: bool) -> u32 {
     (entry(base, OP_READ) << 26) | (u32::from(ack) << 17)
 }
 
 /// An exec word carrying `instruction`.
-pub fn exec_word(instruction: u16) -> u32 {
+pub(crate) fn exec_word(instruction: u16) -> u32 {
     (1 << 31) | (u32::from(instruction) << 15)
 }
 
 /// An exec word that drives SDA through `out pindirs, 1` (low = drive low,
 /// high = release). Its bit is bit 14 (the OSR's next bit after the instruction).
 /// `side` is the SCL level the instruction holds (side-set applies to it).
-pub fn exec_sda(low: bool, side: bool, delay: u16) -> u32 {
+pub(crate) fn exec_sda(low: bool, side: bool, delay: u16) -> u32 {
     exec_word(out_1(DST_PINDIRS, side, delay)) | (u32::from(low) << 14)
 }
 
 /// `wait 1 gpio <scl>` as an exec word, with SCL released.
-pub fn wait_scl_high(scl: u16, delay: u16) -> u32 {
+pub(crate) fn wait_scl_high(scl: u16, delay: u16) -> u32 {
     exec_word(wait_gpio_high(scl, REL, delay))
 }
 
@@ -202,7 +202,7 @@ pub fn push(side: bool) -> u32 {
 }
 
 /// A jump to `addr` as an exec word that also sets SCL to `side`.
-pub fn jump_to(addr: u16, side: bool, delay: u16) -> u32 {
+pub(crate) fn jump_to(addr: u16, side: bool, delay: u16) -> u32 {
     exec_word(jmp(COND_ALWAYS, addr, side, delay))
 }
 
@@ -210,7 +210,7 @@ pub fn jump_to(addr: u16, side: bool, delay: u16) -> u32 {
 /// released, then SCL goes low and the machine moves to the low loop. A
 /// repeated START (low loop) releases SDA, then moves to the released loop,
 /// waits for SCL to rise, drops SDA, and returns to the low loop with SCL low.
-pub fn start_words(base: u16, scl: u16, from_idle: bool) -> Vec<u32> {
+pub(crate) fn start_words(base: u16, scl: u16, from_idle: bool) -> Vec<u32> {
     let low_pull = base + LOW_PULL;
     let rel_pull = base + REL_PULL;
     if from_idle {
@@ -234,7 +234,7 @@ pub fn start_words(base: u16, scl: u16, from_idle: bool) -> Vec<u32> {
 /// The exec words of a STOP from the low loop (SCL low): SDA low, SCL released
 /// (moving to the released loop), wait for SCL, then SDA released while SCL is
 /// high. The machine stays in the released loop: the bus idles released.
-pub fn stop_words(base: u16, scl: u16) -> Vec<u32> {
+pub(crate) fn stop_words(base: u16, scl: u16) -> Vec<u32> {
     vec![
         push(LOW),
         exec_sda(true, LOW, 7),

@@ -13,7 +13,7 @@ use embedded_hal::digital::{InputPin, OutputPin};
 use lemnos_hal::HalError;
 
 /// A digital output: channel and control `level` (0 or 1, logical).
-pub static OUTPUT_INFO: DeviceInfo = DeviceInfo::new(
+pub(crate) static OUTPUT_INFO: DeviceInfo = DeviceInfo::new(
     DeviceClass::Gpio,
     "gpio-output",
     &[Channel::new("level", Quantity::Level, 0)],
@@ -21,7 +21,7 @@ pub static OUTPUT_INFO: DeviceInfo = DeviceInfo::new(
 );
 
 /// A digital input: channel `level` (0 or 1, logical).
-pub static INPUT_INFO: DeviceInfo = DeviceInfo::new(
+pub(crate) static INPUT_INFO: DeviceInfo = DeviceInfo::new(
     DeviceClass::Gpio,
     "gpio-input",
     &[Channel::new("level", Quantity::Level, 0)],

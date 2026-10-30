@@ -24,7 +24,7 @@ use lemnos_hal::HalError;
 
 /// The longest reset's off time, in milliseconds. `power.reset` is a
 /// `Level`-quantity control whose value is milliseconds.
-pub const MAX_RESET_MS: i32 = 10_000;
+pub(crate) const MAX_RESET_MS: i32 = 10_000;
 
 /// The longest enable delay a host applies after turning a switch on, in
 /// milliseconds.
@@ -37,7 +37,7 @@ static CONTROLS: [ControlInfo; 2] = [
 ];
 
 /// The switch without a fault input.
-pub static POWER_INFO: DeviceInfo = DeviceInfo::new(
+pub(crate) static POWER_INFO: DeviceInfo = DeviceInfo::new(
     DeviceClass::PowerSwitch,
     "gpio-power-switch",
     &[Channel::new("power.on", Quantity::Level, 0)],
@@ -45,7 +45,7 @@ pub static POWER_INFO: DeviceInfo = DeviceInfo::new(
 );
 
 /// The switch with a fault input.
-pub static POWER_FAULT_INFO: DeviceInfo = DeviceInfo::new(
+pub(crate) static POWER_FAULT_INFO: DeviceInfo = DeviceInfo::new(
     DeviceClass::PowerSwitch,
     "gpio-power-switch",
     &[

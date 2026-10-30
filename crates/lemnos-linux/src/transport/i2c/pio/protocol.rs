@@ -28,7 +28,7 @@ pub struct Nack {
 
 /// Why a decode failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DecodeError {
+pub(crate) enum DecodeError {
     /// The RX stream had fewer or more words than the ops imply.
     Length { expected: usize, actual: usize },
     /// A WRITE was NACKed.
@@ -36,7 +36,7 @@ pub enum DecodeError {
 }
 
 /// The 7-bit address and transfer direction as the address byte.
-pub fn address_byte(address: u8, read: bool) -> u8 {
+pub(crate) fn address_byte(address: u8, read: bool) -> u8 {
     (address << 1) | u8::from(read)
 }
 
@@ -63,7 +63,7 @@ pub fn write_read_ops(address: u8, write: &[u8], read_len: usize) -> Vec<Op> {
 
 /// Whether a list of ops stays within the ACK accumulator: at most
 /// [`MAX_WRITES_PER_PUSH`] WRITEs between consecutive START/STOP pushes.
-pub fn check_ack_window(ops: &[Op]) -> Result<(), usize> {
+pub(crate) fn check_ack_window(ops: &[Op]) -> Result<(), usize> {
     let mut writes = 0usize;
     for op in ops {
         match op {
@@ -103,7 +103,7 @@ pub fn encode(base: u16, scl: u16, ops: &[Op]) -> Vec<u32> {
 }
 
 /// RX words the ops produce: one per START/STOP and one per READ.
-pub fn rx_word_count(ops: &[Op]) -> usize {
+pub(crate) fn rx_word_count(ops: &[Op]) -> usize {
     ops.iter().filter(|op| !matches!(op, Op::Write(_))).count()
 }
 

@@ -76,7 +76,7 @@ impl Target {
 /// One I2C bus of simulated targets. Clones share the bus: the plant updates
 /// the registers the service reads.
 #[derive(Debug, Clone, Default)]
-pub struct SimBus(Arc<Mutex<BTreeMap<u8, Target>>>);
+pub(crate) struct SimBus(Arc<Mutex<BTreeMap<u8, Target>>>);
 
 impl SimBus {
     fn with<R>(&self, f: impl FnOnce(&mut BTreeMap<u8, Target>) -> R) -> R {
@@ -178,7 +178,7 @@ impl I2c for SimBus {
 
 /// The service's buses on the simulated board: the simulated I2C buses, and
 /// the mock hardware for GPIO, PWM and SPI (and the sysfs root).
-pub struct SimBuses {
+pub(crate) struct SimBuses {
     pub(crate) i2c: BTreeMap<u32, SimBus>,
     pub(crate) rest: crate::mock::MockBuses,
 }

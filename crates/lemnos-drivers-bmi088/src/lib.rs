@@ -326,10 +326,10 @@ pub struct ImuSample {
 }
 
 /// The X, Y, Z counts of the accelerometer and of the gyroscope.
-pub type Axes = ([i16; 3], [i16; 3]);
+pub(crate) type Axes = ([i16; 3], [i16; 3]);
 
 /// Every axis of both dies (see [`Bmi088::select`]).
-pub const ALL_AXES: u8 = 0b111_111;
+pub(crate) const ALL_AXES: u8 = 0b111_111;
 
 pub(crate) fn decode_axes(bytes: [u8; 6]) -> [i16; 3] {
     [
@@ -341,7 +341,7 @@ pub(crate) fn decode_axes(bytes: [u8; 6]) -> [i16; 3] {
 
 /// Decodes `TEMP_MSB`, `TEMP_LSB` to milli-degrees Celsius: an 11-bit two's
 /// complement value in 0.125 °C steps, offset by 23 °C.
-pub fn decode_temperature_mc(msb: u8, lsb: u8) -> i32 {
+pub(crate) fn decode_temperature_mc(msb: u8, lsb: u8) -> i32 {
     let raw = (u16::from(msb) << 3) | u16::from(lsb >> 5);
     let raw = if raw > 1023 {
         i32::from(raw) - 2048
@@ -352,8 +352,8 @@ pub fn decode_temperature_mc(msb: u8, lsb: u8) -> i32 {
 }
 
 /// Decodes `TEMP_MSB`, `TEMP_LSB` to degrees Celsius.
-#[cfg(feature = "float")]
-pub fn decode_temperature(msb: u8, lsb: u8) -> f32 {
+#[cfg(all(test, feature = "float"))]
+pub(crate) fn decode_temperature(msb: u8, lsb: u8) -> f32 {
     decode_temperature_mc(msb, lsb) as f32 / 1000.0
 }
 

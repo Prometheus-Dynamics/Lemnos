@@ -197,7 +197,7 @@ pub fn unsupported_action_error(
     }
 }
 
-pub fn bind_rejected_expected(
+pub(crate) fn bind_rejected_expected(
     driver_id: &str,
     device: &DeviceDescriptor,
     expected: impl Into<String>,

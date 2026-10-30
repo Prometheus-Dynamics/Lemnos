@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// One I2C adapter the board's selectors name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Adapter {
+pub(crate) struct Adapter {
     pub bus: u32,
     /// The adapter's `name` attribute.
     pub name: Option<String>,
@@ -29,7 +29,7 @@ const DEVICETREE: &str = "firmware/devicetree/base";
 /// its `of_node` link to a node of the fake device tree carrying the
 /// `compatible`, at the path the selector names (`of=`), or under `sim/` named
 /// for the selector's `node=`.
-pub fn write_adapter(sys: &Path, adapter: &Adapter) -> io::Result<()> {
+pub(crate) fn write_adapter(sys: &Path, adapter: &Adapter) -> io::Result<()> {
     let dir = sys
         .join("bus/i2c/devices")
         .join(format!("i2c-{}", adapter.bus));
@@ -61,7 +61,7 @@ pub fn write_adapter(sys: &Path, adapter: &Adapter) -> io::Result<()> {
 
 /// The hwmon fan's directory (`class/hwmon/hwmon0`), in manual mode at 50 %
 /// with the tachometer at rest.
-pub fn write_fan(sys: &Path, name: &str) -> io::Result<PathBuf> {
+pub(crate) fn write_fan(sys: &Path, name: &str) -> io::Result<PathBuf> {
     let dir = sys.join("class/hwmon/hwmon0");
     fs::create_dir_all(&dir)?;
     fs::write(dir.join("name"), format!("{name}\n"))?;
@@ -73,7 +73,7 @@ pub fn write_fan(sys: &Path, name: &str) -> io::Result<PathBuf> {
 
 /// The thermal zone's directory (`class/thermal/thermal_zone0`) and its
 /// `temp` file, at `temp_mc` millidegrees.
-pub fn write_thermal_zone(sys: &Path, zone_type: &str, temp_mc: i64) -> io::Result<PathBuf> {
+pub(crate) fn write_thermal_zone(sys: &Path, zone_type: &str, temp_mc: i64) -> io::Result<PathBuf> {
     let dir = sys.join("class/thermal/thermal_zone0");
     fs::create_dir_all(&dir)?;
     fs::write(dir.join("type"), format!("{zone_type}\n"))?;

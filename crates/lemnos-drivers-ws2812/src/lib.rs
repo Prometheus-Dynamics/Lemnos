@@ -160,7 +160,7 @@ impl StripConfig {
 }
 
 /// Bytes per LED in the RP1 `ws2812-pio` userspace layout.
-pub const RP1_BYTES_PER_LED: usize = 4;
+pub(crate) const RP1_BYTES_PER_LED: usize = 4;
 
 /// Encodes `pixels` (logical order; LEDs past the end are off) for the RP1
 /// `ws2812-pio` device into `out`, which must hold

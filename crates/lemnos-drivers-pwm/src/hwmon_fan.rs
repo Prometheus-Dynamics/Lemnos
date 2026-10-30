@@ -41,19 +41,19 @@ pub const FAN_SET_PWM_INTERACTION: &str = "fan.set_pwm";
 pub const FAN_SET_MODE_INTERACTION: &str = "fan.set_mode";
 
 /// Largest raw value the hwmon `pwm1` attribute accepts.
-pub const HWMON_PWM_MAX: u64 = 255;
+pub(crate) const HWMON_PWM_MAX: u64 = 255;
 /// Largest raw `pwm1_enable` value accepted. Values from 2 upward select
 /// chip-specific automatic modes.
-pub const HWMON_PWM_ENABLE_MAX: u64 = 5;
+pub(crate) const HWMON_PWM_ENABLE_MAX: u64 = 5;
 
 pub const TELEMETRY_DUTY_RATIO: &str = "duty_ratio";
-pub const TELEMETRY_PWM: &str = "pwm";
-pub const TELEMETRY_PWM_MODE: &str = "pwm_mode";
+pub(crate) const TELEMETRY_PWM: &str = "pwm";
+pub(crate) const TELEMETRY_PWM_MODE: &str = "pwm_mode";
 pub const TELEMETRY_MODE: &str = "mode";
 pub const TELEMETRY_RPM: &str = "rpm";
 pub const CONFIG_FAN_NAME: &str = "fan_name";
 pub const CONFIG_LABEL: &str = "label";
-pub const CONFIG_CLASS_ROOT: &str = "linux.class_root";
+pub(crate) const CONFIG_CLASS_ROOT: &str = "linux.class_root";
 
 const INTERACTIONS: [(&str, &str); 4] = [
     (FAN_READ_INTERACTION, "Read fan duty, mode, and speed"),
@@ -70,7 +70,7 @@ const INTERACTIONS: [(&str, &str); 4] = [
 
 /// Fan control mode, from the hwmon `pwm1_enable` attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FanMode {
+pub(crate) enum FanMode {
     /// `0`: no speed control; the fan runs at full speed.
     FullSpeed,
     /// `1`: manual control; `pwm1` sets the speed.

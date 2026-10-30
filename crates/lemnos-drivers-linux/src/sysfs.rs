@@ -34,13 +34,15 @@ pub fn parse<T: std::str::FromStr>(path: &Path, text: &str) -> Result<T, SysfsEr
 }
 
 /// Reads and parses an attribute.
-pub fn read_parsed<T: std::str::FromStr>(path: &Path) -> Result<T, SysfsError> {
+pub(crate) fn read_parsed<T: std::str::FromStr>(path: &Path) -> Result<T, SysfsError> {
     let text = read(path)?;
     parse(path, &text)
 }
 
 /// Reads and parses an attribute, or `None` if it does not exist.
-pub fn read_parsed_optional<T: std::str::FromStr>(path: &Path) -> Result<Option<T>, SysfsError> {
+pub(crate) fn read_parsed_optional<T: std::str::FromStr>(
+    path: &Path,
+) -> Result<Option<T>, SysfsError> {
     read_optional(path)?
         .map(|text| parse(path, &text))
         .transpose()
@@ -68,7 +70,7 @@ pub fn entries(root: &Path) -> Result<Vec<PathBuf>, SysfsError> {
 /// Whether the device behind a class device sits at I2C `bus`/`address`:
 /// some component of its resolved path is the kernel's `<bus>-<address>`
 /// client name (`1-0018`).
-pub fn is_i2c_client(class_device: &Path, bus: u32, address: u16) -> bool {
+pub(crate) fn is_i2c_client(class_device: &Path, bus: u32, address: u16) -> bool {
     let client = format!("{bus}-{address:04x}");
     let resolved = fs::canonicalize(class_device).unwrap_or_else(|_| class_device.to_path_buf());
     let linked = fs::canonicalize(class_device.join("device")).ok();

@@ -30,12 +30,12 @@ pub const FORMAT: &str = "lemnos.calibration";
 pub const SCHEMA_VERSION: i64 = 1;
 /// The fewest milliseconds between two saves of one device's calibration
 /// (a revision change saves at once if none was made in the last minute).
-pub const SAVE_INTERVAL_MS: u64 = 60_000;
+pub(crate) const SAVE_INTERVAL_MS: u64 = 60_000;
 /// The directory calibration files are kept in when none is set.
-pub const DEFAULT_DIR: &str = "/var/lib/lemnos/calibration";
+pub(crate) const DEFAULT_DIR: &str = "/var/lib/lemnos/calibration";
 
 /// The calibration directory: `LEMNOSD_CALIBRATION_DIR`, else the default.
-pub fn default_dir() -> PathBuf {
+pub(crate) fn default_dir() -> PathBuf {
     std::env::var_os("LEMNOSD_CALIBRATION_DIR")
         .map_or_else(|| PathBuf::from(DEFAULT_DIR), PathBuf::from)
 }

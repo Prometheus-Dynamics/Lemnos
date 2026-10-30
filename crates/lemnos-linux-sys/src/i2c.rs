@@ -16,9 +16,9 @@ const I2C_M_RD: u16 = 0x0001;
 /// Most messages the kernel accepts in one `I2C_RDWR` call (`I2C_RDWR_IOCTL_MAX_MSGS`).
 pub const MAX_MESSAGES: usize = 42;
 /// Longest message the kernel accepts (`8192` bytes).
-pub const MAX_MESSAGE_LEN: usize = 8192;
+pub(crate) const MAX_MESSAGE_LEN: usize = 8192;
 /// Longest SMBus block (`I2C_SMBUS_BLOCK_MAX`).
-pub const SMBUS_BLOCK_MAX: usize = 32;
+pub(crate) const SMBUS_BLOCK_MAX: usize = 32;
 
 /// `I2C_FUNC_*` bits of [`functionality`].
 pub mod func {
@@ -232,13 +232,6 @@ pub fn smbus_write_byte(fd: BorrowedFd<'_>, value: u8) -> io::Result<()> {
     let mut data = empty_data();
     // The value travels in the command field.
     smbus(fd, SMBUS_WRITE, value, SMBUS_BYTE, &mut data)
-}
-
-/// SMBus "receive byte" from the selected target.
-pub fn smbus_read_byte(fd: BorrowedFd<'_>) -> io::Result<u8> {
-    let mut data = empty_data();
-    smbus(fd, SMBUS_READ, 0, SMBUS_BYTE, &mut data)?;
-    Ok(data.block[0])
 }
 
 /// SMBus "write byte data": `register`, then `value`.

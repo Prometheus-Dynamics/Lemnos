@@ -13,15 +13,9 @@ pub const MODE_CPHA: u32 = 0x01;
 pub const MODE_CPOL: u32 = 0x02;
 /// `SPI_CS_HIGH`.
 pub const MODE_CS_HIGH: u32 = 0x04;
-/// `SPI_LSB_FIRST`.
-pub const MODE_LSB_FIRST: u32 = 0x08;
-/// `SPI_3WIRE`.
-pub const MODE_3WIRE: u32 = 0x10;
-/// `SPI_NO_CS`.
-pub const MODE_NO_CS: u32 = 0x40;
 
 /// Most transfers in one `SPI_IOC_MESSAGE` (the size field holds 14 bits).
-pub const MAX_TRANSFERS: usize = 511;
+pub(crate) const MAX_TRANSFERS: usize = 511;
 
 /// `struct spi_ioc_transfer`.
 #[repr(C)]

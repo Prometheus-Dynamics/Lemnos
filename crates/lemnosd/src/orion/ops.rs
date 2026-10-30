@@ -263,7 +263,7 @@ pub fn refusal(refusal: Refusal) -> Outcome {
 
 /// A failed call to lemnosd: a refusal as [`refusal`], anything else (the
 /// connection, a timeout) as `Failed`.
-pub fn client_error(error: ClientError) -> Outcome {
+pub(crate) fn client_error(error: ClientError) -> Outcome {
     match error {
         ClientError::Refused(refused) => refusal(refused),
         other => Outcome::Failed(format!("lemnosd: {other}")),
@@ -316,7 +316,7 @@ pub fn calibration_output(status: &CalibrationStatus) -> BTreeMap<String, TypedC
 }
 
 /// The output of a successful `set`.
-pub fn set_output(control: &str, applied: f64) -> BTreeMap<String, TypedConfigValue> {
+pub(crate) fn set_output(control: &str, applied: f64) -> BTreeMap<String, TypedConfigValue> {
     BTreeMap::from([
         (
             "control".to_owned(),

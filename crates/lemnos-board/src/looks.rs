@@ -1086,7 +1086,7 @@ pub fn to_toml(name: &str, spec: &LookSpec) -> String {
 }
 
 /// A look's body as TOML (what `led show --spec` takes).
-pub fn body_toml(spec: &LookSpec) -> String {
+pub(crate) fn body_toml(spec: &LookSpec) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "envelope = {}", envelope_text(&spec.envelope));
     let _ = writeln!(out, "brightness = {}", fraction_text(spec.brightness));

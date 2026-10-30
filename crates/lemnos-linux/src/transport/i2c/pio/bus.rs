@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// The RP1 PIO character device.
-pub const DEFAULT_DEVNODE: &str = "/dev/pio0";
+pub(crate) const DEFAULT_DEVNODE: &str = "/dev/pio0";
 /// Bounce-buffer size and count for each DMA direction (bytes, buffers).
 const DMA_BUF_SIZE: u32 = 64;
 const DMA_BUF_COUNT: u32 = 4;
@@ -34,7 +34,7 @@ pub enum Failure {
 /// A transaction's TX words and the channel its result comes back on.
 type TxJob = (Vec<u32>, mpsc::Sender<io::Result<()>>);
 
-pub struct PioBus {
+pub(crate) struct PioBus {
     sda: u8,
     scl: u8,
     device: Arc<PioDevice>,
@@ -61,7 +61,7 @@ impl std::fmt::Debug for PioBus {
 }
 
 /// SCL clock divider for `hz`: `200 MHz / (24 * hz)` as integer and 1/256 parts.
-pub fn clkdiv_for(hz: u32) -> Result<(u16, u8), String> {
+pub(crate) fn clkdiv_for(hz: u32) -> Result<(u16, u8), String> {
     if hz == 0 {
         return Err("PIO I2C frequency must be above zero".into());
     }

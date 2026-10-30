@@ -12,7 +12,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 
 const WATCHER_NAME: &str = "linux.hotplug";
-pub const DEFAULT_EVENT_BUFFER_SIZE: usize = 16 * 1024;
+pub(crate) const DEFAULT_EVENT_BUFFER_SIZE: usize = 16 * 1024;
 const WATCH_MASK: u32 = mask::CREATE
     | mask::DELETE
     | mask::MOVED_FROM

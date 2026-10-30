@@ -55,8 +55,9 @@ pub mod attr {
 
 /// `GPIO_V2_LINE_EVENT_RISING_EDGE`.
 pub const EVENT_RISING_EDGE: u32 = 1;
-/// `GPIO_V2_LINE_EVENT_FALLING_EDGE`.
-pub const EVENT_FALLING_EDGE: u32 = 2;
+/// `GPIO_V2_LINE_EVENT_FALLING_EDGE` (the tests build falling-edge events).
+#[cfg(test)]
+const EVENT_FALLING_EDGE: u32 = 2;
 
 /// `struct gpiochip_info`.
 #[repr(C)]
@@ -191,7 +192,7 @@ impl LineInfo {
 pub struct LineEvent {
     /// Nanoseconds on `CLOCK_MONOTONIC` (or the requested clock).
     pub timestamp_ns: u64,
-    /// [`EVENT_RISING_EDGE`] or [`EVENT_FALLING_EDGE`].
+    /// [`EVENT_RISING_EDGE`] or falling edge.
     pub id: u32,
     /// Chip offset of the line.
     pub offset: u32,

@@ -13,9 +13,9 @@ use orion_control_plane::{
 use orion_core::{ProviderId, ResourceId, ResourceType};
 
 /// The Orion provider id the bridge registers.
-pub const PROVIDER_ID: &str = "lemnos";
+pub(crate) const PROVIDER_ID: &str = "lemnos";
 /// The Orion resource type of every lemnosd device.
-pub const RESOURCE_TYPE: &str = "lemnos.device";
+pub(crate) const RESOURCE_TYPE: &str = "lemnos.device";
 
 /// The Orion resource id of a board's device: `lemnos.<board>.<device>`.
 pub fn resource_id(board: &str, device: &str) -> ResourceId {
@@ -24,7 +24,7 @@ pub fn resource_id(board: &str, device: &str) -> ResourceId {
 
 /// How often readings may be published, and how long entries live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cadence {
+pub(crate) struct Cadence {
     /// At least this long between reading publishes of one device (1 s / rate).
     pub min_interval: Duration,
     /// Every status entry is republished at least this often.
@@ -73,7 +73,7 @@ pub fn deadband(quantity: Quantity) -> f64 {
 }
 
 /// The name of a device status as published under `status`.
-pub fn status_name(status: DeviceStatus) -> &'static str {
+pub(crate) fn status_name(status: DeviceStatus) -> &'static str {
     match status {
         DeviceStatus::Available => "available",
         DeviceStatus::Degraded => "degraded",
@@ -126,7 +126,7 @@ struct Device {
 }
 
 /// The bridge's view of the board's devices, and what has been published.
-pub struct Mirror {
+pub(crate) struct Mirror {
     board: String,
     cadence: Cadence,
     devices: Vec<Device>,
@@ -150,16 +150,6 @@ impl Mirror {
             cadence,
             devices,
         }
-    }
-
-    /// The board's id.
-    pub fn board(&self) -> &str {
-        &self.board
-    }
-
-    /// The device with this id, if the board has one.
-    pub fn device(&self, id: &str) -> Option<&DeviceDesc> {
-        self.find(id).map(|d| &d.desc)
     }
 
     /// The resource's device id (the part after `lemnos.<board>.`).

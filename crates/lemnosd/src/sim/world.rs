@@ -5,7 +5,7 @@
 use super::script::{Script, Segment};
 
 /// Standard gravity, m/s².
-pub const GRAVITY: f64 = 9.80665;
+pub(crate) const GRAVITY: f64 = 9.80665;
 
 /// A unit quaternion `w + xi + yj + zk`, the body-to-world rotation.
 #[derive(Debug, Clone, Copy, PartialEq)]

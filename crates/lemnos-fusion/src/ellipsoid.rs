@@ -10,7 +10,7 @@ use crate::Vec3;
 use crate::math::{self, eig3_sym, solve3, solve9, sqrt};
 
 /// Number of recent samples kept for the residual check.
-pub const RESIDUAL_SAMPLES: usize = 64;
+pub(crate) const RESIDUAL_SAMPLES: usize = 64;
 
 /// Number of direction cells (the 3x3x3 cube's cells other than the centre).
 pub const CELLS: usize = 26;

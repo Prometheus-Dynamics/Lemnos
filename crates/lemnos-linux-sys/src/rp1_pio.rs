@@ -19,8 +19,6 @@ const PIO_IOC_MAGIC: u8 = 102;
 
 /// Instruction slots per PIO block (`RP1_PIO_INSTRUCTION_COUNT`).
 pub const INSTRUCTION_COUNT: usize = 32;
-/// State machines per PIO block (`RP1_PIO_SM_COUNT`).
-pub const SM_COUNT: u16 = 4;
 /// GPIO pins the PIO can address (`RP1_PIO_GPIO_COUNT`).
 pub const GPIO_COUNT: u32 = 28;
 /// GPIO function select for PIO (`RP1_GPIO_FUNC_PIO`).
@@ -28,8 +26,6 @@ pub const GPIO_FUNC_PIO: u16 = 7;
 /// GPIO function select for the software-controlled (SIO) mode the kernel
 /// gpio driver uses (`GPIO_FUNC_SYS_RIO` in `pio_rp1.h`).
 pub const GPIO_FUNC_SIO: u16 = 5;
-/// `RP1_PIO_ORIGIN_ANY`: let the driver pick the instruction offset.
-pub const ORIGIN_ANY: u16 = u16::MAX;
 /// `RP1_PIO_DIR_TO_SM` / `RP1_PIO_DIR_FROM_SM`.
 pub const DIR_TO_SM: u16 = 0;
 /// Data from a machine's RX FIFO to the host.
@@ -213,7 +209,7 @@ impl PioDevice {
     }
 
     /// Loads `instrs` into instruction memory at `origin` (or any free place
-    /// with [`ORIGIN_ANY`]); returns the offset the program was placed at.
+    /// with `u16::MAX`); returns the offset the program was placed at.
     /// Fails with `EBUSY`/`ENOSPC`-style errors when the space is taken.
     pub fn add_program(&self, origin: u16, instrs: &[u16]) -> io::Result<u16> {
         if instrs.is_empty() || instrs.len() > INSTRUCTION_COUNT {

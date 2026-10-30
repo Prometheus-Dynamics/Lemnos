@@ -26,7 +26,7 @@ pub use spi::SpiRegisters;
 
 /// Longest burst [`I2cRegisters::with_bursts`] and [`SpiRegisters::with_bursts`]
 /// pack into one transfer, in data bytes (the stack buffer size).
-pub const MAX_BURST: usize = 64;
+pub(crate) const MAX_BURST: usize = 64;
 
 /// Width of a register address on the wire (always sent most significant byte
 /// first).
@@ -238,10 +238,10 @@ impl<E: fmt::Debug> embedded_hal::i2c::Error for RegisterError<E> {
 }
 
 /// Result of a register operation.
-pub type RegisterResult<T, E> = Result<T, RegisterError<E>>;
+pub(crate) type RegisterResult<T, E> = Result<T, RegisterError<E>>;
 
 /// Checks a value width (1..=4 bytes).
-pub fn check_width<E>(bytes: u8) -> RegisterResult<usize, E> {
+pub(crate) fn check_width<E>(bytes: u8) -> RegisterResult<usize, E> {
     if (1..=4).contains(&bytes) {
         Ok(usize::from(bytes))
     } else {
@@ -250,7 +250,7 @@ pub fn check_width<E>(bytes: u8) -> RegisterResult<usize, E> {
 }
 
 /// Encodes a register address into the start of `out`; returns the bytes used.
-pub fn encode_address<E>(
+pub(crate) fn encode_address<E>(
     address: u16,
     width: AddressWidth,
     out: &mut [u8],
@@ -268,7 +268,7 @@ pub fn encode_address<E>(
 }
 
 /// Encodes the low `bytes` bytes of `value` into the start of `out`.
-pub fn encode_value<E>(
+pub(crate) fn encode_value<E>(
     value: u32,
     bytes: u8,
     endian: Endian,
@@ -298,7 +298,7 @@ pub fn decode_value(bytes: &[u8], endian: Endian) -> u32 {
 
 /// Encodes a register write (address then value) into a fixed buffer; returns
 /// the buffer and the length used.
-pub fn encode_write<E>(
+pub(crate) fn encode_write<E>(
     address: u16,
     bytes: u8,
     value: u32,

@@ -18,20 +18,20 @@ use lemnos_device::{
 use lemnos_fusion::{Algorithm, Mode, Orientation, OrientationConfig, Quat};
 
 /// The driver name in `board.toml`.
-pub const DRIVER: &str = "fusion";
+pub(crate) const DRIVER: &str = "fusion";
 /// `poll_ms` when the board leaves it out: the fastest the fusion reports.
-pub const DEFAULT_POLL_MS: u32 = 10;
+pub(crate) const DEFAULT_POLL_MS: u32 = 10;
 /// The fastest the IMU is read for the fusion (the subscriber's period is
 /// never below this).
 pub const MIN_PERIOD_MS: u32 = 10;
 /// How often the magnetometer is read for the fusion.
-pub const MAG_PERIOD_MS: u32 = 100;
+pub(crate) const MAG_PERIOD_MS: u32 = 100;
 /// The subscriber id of the fusion's internal subscriptions: no socket client
 /// has it, so deliveries to clients skip them.
 pub(crate) const INTERNAL: u32 = u32::MAX - 1;
 
 /// The fusion device's channels, in the order its values are filled.
-pub static FUSION_INFO: DeviceInfo = DeviceInfo::new(
+pub(crate) static FUSION_INFO: DeviceInfo = DeviceInfo::new(
     DeviceClass::Orientation,
     "fusion",
     &[

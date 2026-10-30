@@ -26,14 +26,14 @@ pub const MAX_SPARKLE_COLORS: usize = 4;
 pub const MAX_PARTICLES: usize = 16;
 
 /// The longest a twinkle may run (it must fit the 16-bit stored length).
-pub const MAX_TWINKLE_MS: u32 = 60_000;
+pub(crate) const MAX_TWINKLE_MS: u32 = 60_000;
 
 /// Rates (thousandths of a twinkle per LED a second) are capped here.
-pub const MAX_DENSITY: u32 = 64_000;
+pub(crate) const MAX_DENSITY: u32 = 64_000;
 
 /// Speeds and accelerations (thousandths of an LED a second, and of an LED a
 /// second squared) are capped here.
-pub const MAX_MOTION: u32 = 64_000;
+pub(crate) const MAX_MOTION: u32 = 64_000;
 
 /// How long a falling particle takes to fade once it lands.
 const LAND_FADE_MS: u64 = 200;

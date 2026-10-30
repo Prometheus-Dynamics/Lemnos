@@ -8,12 +8,6 @@ use std::time::Duration;
 pub const POLLIN: i16 = libc::POLLIN;
 /// `POLLOUT`.
 pub const POLLOUT: i16 = libc::POLLOUT;
-/// `POLLPRI`.
-pub const POLLPRI: i16 = libc::POLLPRI;
-/// `POLLERR`.
-pub const POLLERR: i16 = libc::POLLERR;
-/// `POLLHUP`.
-pub const POLLHUP: i16 = libc::POLLHUP;
 
 /// Waits until `fd` reports one of `events` or `timeout` passes (`None`:
 /// forever). Returns the reported events (0 on timeout). Retries on `EINTR`

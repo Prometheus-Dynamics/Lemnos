@@ -19,7 +19,7 @@ pub const KIND_MAG: i32 = 2;
 /// The most words a calibration writes.
 pub const MAX_CALIBRATION_WORDS: usize = 64;
 /// Words in an IMU calibration.
-pub const IMU_LEN: usize = 24;
+pub(crate) const IMU_LEN: usize = 24;
 /// Words in a magnetometer calibration.
 pub const MAG_LEN: usize = 20;
 

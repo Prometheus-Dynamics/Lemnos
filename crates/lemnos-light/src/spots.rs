@@ -35,11 +35,11 @@ pub const DEFAULT_FOLLOW_MS: u32 = 120;
 
 /// The shortest and longest `follow_ms` a block may have. The shortest keeps
 /// the spring stable at the 1 ms step.
-pub const MIN_FOLLOW_MS: u32 = 10;
-pub const MAX_FOLLOW_MS: u32 = 10_000;
+pub(crate) const MIN_FOLLOW_MS: u32 = 10;
+pub(crate) const MAX_FOLLOW_MS: u32 = 10_000;
 
 /// The widest spot, thousandths of an LED (64 LEDs, the most a ring has).
-pub const MAX_WIDTH: u16 = 64_000;
+pub(crate) const MAX_WIDTH: u16 = 64_000;
 
 /// One spot's target: where, how bright and, optionally, its own colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

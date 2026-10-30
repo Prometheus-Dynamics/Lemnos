@@ -17,7 +17,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Fan and thermal updates, in simulated milliseconds.
-pub const SLOW_MS: f64 = 50.0;
+pub(crate) const SLOW_MS: f64 = 50.0;
 
 /// A fault with the chips it applies to.
 #[derive(Debug)]
@@ -55,7 +55,7 @@ pub struct Sysfs {
 
 /// The simulated board's state.
 #[derive(Debug)]
-pub struct Plant {
+pub(crate) struct Plant {
     speed: f64,
     world: World,
     rng: Rng,

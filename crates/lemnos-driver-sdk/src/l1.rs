@@ -356,7 +356,7 @@ impl BoundDevice for L1BoundDevice {
 }
 
 /// Builds the device for a descriptor at bind time.
-pub type L1Factory =
+pub(crate) type L1Factory =
     dyn Fn(&DeviceDescriptor, &DriverBindContext<'_>) -> DriverResult<BoxedDevice> + Send + Sync;
 
 /// A runtime driver for L1 devices: it matches descriptors whose

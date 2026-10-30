@@ -15,10 +15,10 @@ pub const FULL_FILL: u8 = 178;
 
 /// The brightness of the staged breathe: a little above a full fill, so the
 /// ring reads as "ready" from across the room.
-pub const STAGED_BRIGHTNESS: u8 = 217;
+pub(crate) const STAGED_BRIGHTNESS: u8 = 217;
 /// The brightness of the booting breathe: a faint white wash under the
 /// sparkle (about 9% at its top, 4% at its bottom).
-pub const BOOTING_WASH: u8 = 23;
+pub(crate) const BOOTING_WASH: u8 = 23;
 
 /// The names of every built-in look.
 pub const NAMES: &[&str] = &[
@@ -141,7 +141,7 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
 /// The brightness of the reboot ember (see [`EMBER`](crate::EMBER)).
 pub const EMBER: u8 = crate::intent::EMBER;
 /// The least the ember is shown at, after the ring-wide scale (about 16%).
-pub const EMBER_FLOOR: u8 = 40;
+pub(crate) const EMBER_FLOOR: u8 = 40;
 
 /// The booting look (the trial boot, "testing a new image"): a starry
 /// sparkle of warm white over a faint white breathe, slow and calm.
@@ -202,7 +202,7 @@ pub fn confirmed(color: Rgbw) -> LookSpec {
 }
 
 /// A fill in `color` with `kind`'s envelope; a chase is a spinner.
-pub fn themed(color: Rgbw, kind: EffectKind, d: &Defaults) -> LookSpec {
+pub(crate) fn themed(color: Rgbw, kind: EffectKind, d: &Defaults) -> LookSpec {
     let fill = LookSpec::fill(color).with_brightness(FULL_FILL);
     match kind {
         EffectKind::Solid => fill,
@@ -231,7 +231,7 @@ pub fn spinner(color: Rgbw, d: &Defaults) -> LookSpec {
 }
 
 /// The spinner's comet as a block (a chase over a fill).
-pub fn comet_block(color: Rgbw, d: &Defaults) -> Block {
+pub(crate) fn comet_block(color: Rgbw, d: &Defaults) -> Block {
     Block::Comet {
         color,
         period_ms: d.spinner_period_ms,
