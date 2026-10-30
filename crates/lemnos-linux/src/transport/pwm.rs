@@ -2,6 +2,7 @@ use crate::LinuxPaths;
 use crate::backend::BACKEND_NAME;
 use crate::backend::LinuxTransportConfig;
 use crate::transport;
+use crate::transport::session;
 use crate::util::{read_trimmed, wait_for_path};
 use lemnos_bus::{
     BusError, BusResult, BusSession, PwmSession, SessionAccess, SessionMetadata, SessionState,
@@ -99,13 +100,7 @@ impl LinuxSysfsPwmSession {
     }
 
     fn ensure_open(&self, operation: &'static str) -> BusResult<()> {
-        if self.metadata.state == SessionState::Closed {
-            return Err(BusError::SessionUnavailable {
-                device_id: self.device.id.clone(),
-                reason: format!("cannot perform '{operation}' on a closed PWM session"),
-            });
-        }
-        Ok(())
+        session::ensure_open(&self.metadata, &self.device.id, "PWM", operation)
     }
 
     fn run_call<T>(&mut self, call: impl FnOnce(&mut Self) -> BusResult<T>) -> BusResult<T> {

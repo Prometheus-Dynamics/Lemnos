@@ -1,3 +1,4 @@
+use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
 use crate::util::{existing_path_string, file_name, read_dir_sorted, read_link_name, read_trimmed};
@@ -149,11 +150,4 @@ fn build_port_descriptor(
 
 fn uart_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
     CapabilityDescriptor::new(id, access).expect("static UART capability identifiers are valid")
-}
-
-fn probe_failed(probe: &str, path: &Path, action: &str, error: std::io::Error) -> DiscoveryError {
-    DiscoveryError::ProbeFailed {
-        probe: probe.to_string(),
-        message: format!("{action} at '{}': {error}", path.display()),
-    }
 }

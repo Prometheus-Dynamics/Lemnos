@@ -1,3 +1,4 @@
+use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::with_devnode;
 use crate::util::{existing_path_string, file_name, read_dir_sorted, read_trimmed, read_u32};
@@ -317,11 +318,4 @@ fn build_line_descriptor(
 
 fn gpio_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
     CapabilityDescriptor::new(id, access).expect("static GPIO capability identifiers are valid")
-}
-
-fn probe_failed(probe: &str, path: &Path, action: &str, error: std::io::Error) -> DiscoveryError {
-    DiscoveryError::ProbeFailed {
-        probe: probe.to_string(),
-        message: format!("{action} at '{}': {error}", path.display()),
-    }
 }

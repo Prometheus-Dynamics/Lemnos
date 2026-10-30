@@ -1,3 +1,6 @@
+use lemnos_discovery::DiscoveryError;
+use std::path::Path;
+
 mod gpio;
 #[cfg(feature = "pwm")]
 mod hwmon;
@@ -29,3 +32,11 @@ pub use thermal::ThermalDiscoveryProbe;
 pub use uart::UartDiscoveryProbe;
 #[cfg(feature = "usb")]
 pub use usb::UsbDiscoveryProbe;
+
+/// A probe's failed filesystem read, named by what it was doing.
+fn probe_failed(probe: &str, path: &Path, action: &str, error: std::io::Error) -> DiscoveryError {
+    DiscoveryError::ProbeFailed {
+        probe: probe.to_string(),
+        message: format!("{action} at '{}': {error}", path.display()),
+    }
+}

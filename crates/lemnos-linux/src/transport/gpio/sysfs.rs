@@ -2,6 +2,7 @@ use super::{gpio_line_address, resolve_global_line};
 use crate::LinuxPaths;
 use crate::backend::BACKEND_NAME;
 use crate::backend::LinuxTransportConfig;
+use crate::transport::session;
 use crate::util::{read_trimmed, wait_for_path};
 use lemnos_bus::{
     BusError, BusResult, BusSession, GpioSession, SessionAccess, SessionMetadata, SessionState,
@@ -96,13 +97,7 @@ impl LinuxSysfsGpioSession {
     }
 
     fn ensure_open(&self, operation: &'static str) -> BusResult<()> {
-        if self.metadata.state == SessionState::Closed {
-            return Err(BusError::SessionUnavailable {
-                device_id: self.device.id.clone(),
-                reason: format!("cannot perform '{operation}' on a closed GPIO session"),
-            });
-        }
-        Ok(())
+        session::ensure_open(&self.metadata, &self.device.id, "GPIO", operation)
     }
 
     fn run_call<T>(&mut self, call: impl FnOnce(&mut Self) -> BusResult<T>) -> BusResult<T> {

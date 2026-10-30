@@ -13,6 +13,20 @@ pub(crate) fn permission_denied(
     }
 }
 
+#[cfg(any(feature = "spi", feature = "uart"))]
+pub(crate) fn ensure_writable(
+    metadata: &SessionMetadata,
+    device_id: &DeviceId,
+    operation: &'static str,
+    reason: &'static str,
+) -> BusResult<()> {
+    if metadata.access.can_write() {
+        Ok(())
+    } else {
+        Err(permission_denied(device_id, operation, reason))
+    }
+}
+
 pub(crate) fn ensure_open(
     metadata: &SessionMetadata,
     device_id: &DeviceId,

@@ -7,6 +7,7 @@ use crate::hal::{
     EdgeKind, GpioChip, GpioLine, GpioLineInfo, LineBias, LineDirection, LineDrive, LineEdge,
     LineSettings,
 };
+use crate::transport::session;
 use lemnos_bus::{
     BusError, BusResult, BusSession, GpioEdgeEvent, GpioEdgeStreamSession, GpioSession,
     SessionAccess, SessionMetadata, SessionState, StreamSession,
@@ -148,13 +149,7 @@ impl LinuxCdevGpioSession {
     }
 
     fn ensure_open(&self, operation: &'static str) -> BusResult<()> {
-        if self.metadata.state == SessionState::Closed {
-            return Err(BusError::SessionUnavailable {
-                device_id: self.device.id.clone(),
-                reason: format!("cannot perform '{operation}' on a closed GPIO session"),
-            });
-        }
-        Ok(())
+        session::ensure_open(&self.metadata, &self.device.id, "GPIO", operation)
     }
 
     fn run_call<T>(&mut self, call: impl FnOnce(&mut Self) -> BusResult<T>) -> BusResult<T> {

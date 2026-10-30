@@ -1,3 +1,4 @@
+use super::probe_failed;
 use crate::LinuxPaths;
 use crate::util::{file_name, parse_prefixed_u32, read_dir_sorted, read_u32};
 use lemnos_core::{
@@ -193,11 +194,4 @@ fn build_channel_descriptor(
 
 fn pwm_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
     CapabilityDescriptor::new(id, access).expect("static PWM capability identifiers are valid")
-}
-
-fn probe_failed(probe: &str, path: &Path, action: &str, error: std::io::Error) -> DiscoveryError {
-    DiscoveryError::ProbeFailed {
-        probe: probe.to_string(),
-        message: format!("{action} at '{}': {error}", path.display()),
-    }
 }

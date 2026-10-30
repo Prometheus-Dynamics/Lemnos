@@ -89,15 +89,7 @@ impl LinuxSpiSession {
     }
 
     fn ensure_writable(&self, operation: &'static str, reason: &'static str) -> BusResult<()> {
-        if self.metadata.access.can_write() {
-            Ok(())
-        } else {
-            Err(session::permission_denied(
-                &self.device.id,
-                operation,
-                reason,
-            ))
-        }
+        session::ensure_writable(&self.metadata, &self.device.id, operation, reason)
     }
 
     fn run_transport_call<T>(

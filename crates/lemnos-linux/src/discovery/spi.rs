@@ -1,3 +1,4 @@
+use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
 use crate::util::{
@@ -182,11 +183,4 @@ fn build_device_descriptor(
 
 fn spi_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
     CapabilityDescriptor::new(id, access).expect("static SPI capability identifiers are valid")
-}
-
-fn probe_failed(probe: &str, path: &Path, action: &str, error: std::io::Error) -> DiscoveryError {
-    DiscoveryError::ProbeFailed {
-        probe: probe.to_string(),
-        message: format!("{action} at '{}': {error}", path.display()),
-    }
 }

@@ -1,3 +1,4 @@
+use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::with_linux_driver;
 use crate::util::{file_name, read_dir_sorted, read_link_name, read_trimmed, read_u32};
@@ -169,11 +170,4 @@ fn build_hwmon_descriptor(
 
 fn fan_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
     CapabilityDescriptor::new(id, access).expect("static fan capability identifiers are valid")
-}
-
-fn probe_failed(probe: &str, path: &Path, action: &str, error: std::io::Error) -> DiscoveryError {
-    DiscoveryError::ProbeFailed {
-        probe: probe.to_string(),
-        message: format!("{action} at '{}': {error}", path.display()),
-    }
 }
