@@ -26,7 +26,7 @@ pub use spi::SpiRegisters;
 
 /// Longest burst [`I2cRegisters::with_bursts`] and [`SpiRegisters::with_bursts`]
 /// pack into one transfer, in data bytes (the stack buffer size).
-pub(crate) const MAX_BURST: usize = 64;
+pub const MAX_BURST: usize = 64;
 
 /// Width of a register address on the wire (always sent most significant byte
 /// first).
@@ -238,7 +238,7 @@ impl<E: fmt::Debug> embedded_hal::i2c::Error for RegisterError<E> {
 }
 
 /// Result of a register operation.
-pub(crate) type RegisterResult<T, E> = Result<T, RegisterError<E>>;
+pub type RegisterResult<T, E> = Result<T, RegisterError<E>>;
 
 /// Checks a value width (1..=4 bytes).
 pub(crate) fn check_width<E>(bytes: u8) -> RegisterResult<usize, E> {
