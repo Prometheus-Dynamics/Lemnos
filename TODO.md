@@ -19,7 +19,19 @@ for the user-facing summary of finished work.
       ([docs/system-service.md](docs/system-service.md)).
 - [ ] `lemnosd` on the BCM2712 board: run the example board definition against the real ring, fan and
       sensors; check the ring's `wire` (the manager's manifest says RGBW) and the fan's
-      `restore_mode`; measure the aarch64 binary.
+      `restore_mode`; measure the aarch64 binary. Measured on a Raze (HeliOS dev.800, kernel
+      7.2.9, 2026-10-25 board clock):
+      - Ring `wire = "rgb"` (GRB24) is right: the manifest has `wire_format: "grb24"` and
+        `rgbw: false`; its RGBW is the 4-byte userspace layout (W ignored), which the driver
+        writes. The live overlay has no `rgbw` property. Pure R/G/B sent through the test layer
+        show as logical frames 00590000, 00005900, 00000059. Pure W can't be sent through
+        `lemnos-ctl` or lemnosd (colours are 24-bit), so W and the colours on the LEDs are not
+        verified here.
+      - Fan: no `restore_mode` (`pwm-fan` hands back through its cooling device). A stop and
+        start kept `pwm1_enable = 1`, `pwm1 = 179`, `cur_state = 0`; the start re-recorded
+        `/run/lemnos/fan-restore`.
+      - `lemnosd` binary: 1240648 bytes on disk; RSS 1600 kB, PSS 1588 kB; 0.43 % of a core
+        idle over 60 s, 1.35 % with an IMU subscriber at 100 Hz.
 - [ ] Composite devices and the fan controller: design only
       ([docs/composite-devices.md](docs/composite-devices.md)), waiting for a decision.
 - [ ] IIO buffered reads (`/dev/iio:deviceN`, IRQ timestamps) in the generic kernel
@@ -32,7 +44,11 @@ for the user-facing summary of finished work.
       the manager to set it for the rate the consumers need, and to move the IMU off i2c-gpio.
 - [ ] Measure the scheduler on the BCM2712 board (`tests/schedule.rs` runs on the host with a mock
       bus): the IMU at 100 Hz beside the real power monitor and magnetometer on the board's
-      buses, with the reads' real durations.
+      buses, with the reads' real durations. Partly measured on the Raze: 6201 IMU readings in
+      about 62 s with the real service polling the power monitor and magnetometer; spacing mean
+      10000 us, deviation from the 10 ms grid at most 251 us (client-side, from the readings'
+      timestamps). Read durations are not exposed (`read_cost_us` stays inside lemnosd), so
+      they still need instrumentation.
 - [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
       shared probe code).
 
@@ -127,7 +143,11 @@ for the user-facing summary of finished work.
       `lemnos-core`'s `ConfiguredDeviceModel`.
 - [ ] Memory breakdown for a Linux refresh on the BCM2712 board, measured with and
       without eager binds. A consuming app measured ~6-7 MiB PSS for a refresh including
-      camera probing; Lemnos's share is unknown.
+      camera probing; Lemnos's share is unknown. Measured without binds (`examples/bringup_memory.rs`,
+      cross-built for aarch64 musl, run on a Raze): PSS 648 kB at start, 1344 kB after building the
+      facade with the builtin drivers, 1696 kB after one refresh (RSS 1708 kB; refresh 1 ms).
+      Eager binds are not measured on the live board: `RuntimeBindPolicy::all()` would bind the
+      camera's I2C bus and the USB power GPIO lines.
 - [ ] Decide whether the `tokio` facade feature is worth its cost for
       consumers that only need `AsyncLinuxHotplugWatcher`.
 
