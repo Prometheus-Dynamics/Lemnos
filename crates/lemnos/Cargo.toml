@@ -95,6 +95,10 @@ name = "linux_device_validator"
 required-features = ["builtin-drivers", "linux", "macros"]
 
 [[example]]
+name = "bringup_memory"
+required-features = ["builtin-drivers", "linux"]
+
+[[example]]
 name = "linux_hal_probe"
 required-features = ["linux"]
 
