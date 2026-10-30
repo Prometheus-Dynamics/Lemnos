@@ -31,7 +31,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "lemnos"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-bus"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "lemnos-core",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-core"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-device",
  "lemnos-hal",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-device"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-discovery"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "thiserror",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-driver-manifest"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "serde",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-driver-sdk"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "lemnos-bus",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-gpio"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-i2c"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-linux"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "lemnos-device",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-pwm"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-spi"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-uart"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-usb"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",
@@ -187,14 +187,14 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-ws2812"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-device",
 ]
 
 [[package]]
 name = "lemnos-hal"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-linux"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -215,14 +215,14 @@ dependencies = [
 
 [[package]]
 name = "lemnos-linux-sys"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "lemnos-registry"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "lemnos-driver-manifest",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-runtime"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-bus",
  "lemnos-core",

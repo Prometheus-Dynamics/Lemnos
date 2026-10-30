@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-bus"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "lemnos-core",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-core"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-device",
  "lemnos-hal",
@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-device"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-discovery"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "lemnos-core",
  "thiserror",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-bmi088"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-bmm150"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-drivers-ina2xx"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-hal"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "lemnos-linux"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "embedded-hal-async",
@@ -114,14 +114,14 @@ dependencies = [
 
 [[package]]
 name = "lemnos-linux-sys"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "lemnos-lite"
-version = "2.0.0"
+version = "2.0.1-dev"
 dependencies = [
  "embedded-hal",
  "lemnos-device",
