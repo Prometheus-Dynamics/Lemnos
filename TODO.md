@@ -38,6 +38,17 @@ when, blocked by.
       "Next".
 - [ ] **Memory on small boards.** Why: the K230D has 128 MB in total. Done when: lemnosd PSS is
       measured on the K230D and Flame boards (1.6 MB RSS on the CM5 today). Blocked by: boards.
+- [ ] **IO hardware blocks, used in full.** Why: the user's rule after the PIO fix (2026-10-31):
+      every board IO block is used for everything it can do, not one feature. Today the RP1 PIO runs
+      ws2812 (offsets 0..3) and I2C (27 instructions), 31 of its 32 instruction slots. Done when
+      docs list per board each IO block and each capability as used / unused / impossible, with
+      the software path it would replace:
+      - RP1: PIO (capacity: free slots, a second PIO image swap, which programs share), the
+        hardware PWMs, RP1 DMA, GPIO edge timestamps;
+      - candidates: camera frame-sync and IMU sample timestamps on one clock, the fan tach, any
+        remaining bit-banged line;
+      - K230D, Rockchip and the RV1106's on-chip RISC-V MCU core: their IO and timer blocks.
+      Blocked by: nothing for the RP1; the boards for the rest.
 
 ### 3. Release mechanics
 
@@ -59,31 +70,23 @@ warnings, tests, and the size images.
       ([docs/board-definition.md](docs/board-definition.md)).
 - [x] Phase 4: `lemnosd`, `lemnos-ipc`, `lemnos-light`, `lemnos-drivers-ws2812`, packaging
       ([docs/system-service.md](docs/system-service.md)).
-- [ ] `lemnosd` on the BCM2712 board: run the example board definition against the real ring, fan and
-      sensors; check the ring's `wire` (the manager's manifest says RGBW) and the fan's
-      `restore_mode`; measure the aarch64 binary. Measured on a Raze (HeliOS dev.800, kernel
-      7.2.9, 2026-10-25 board clock):
-      - Ring `wire = "rgb"` (GRB24) is right: the manifest has `wire_format: "grb24"` and
-        `rgbw: false`; its RGBW is the 4-byte userspace layout (W ignored), which the driver
-        writes. The live overlay has no `rgbw` property. Pure R/G/B sent through the test layer
-        show as logical frames 00590000, 00005900, 00000059. Pure W can't be sent through
-        `lemnos-ctl` or lemnosd (colours are 24-bit), so W and the colours on the LEDs are not
-        verified here.
-      - Fan: no `restore_mode` (`pwm-fan` hands back through its cooling device). A stop and
-        start kept `pwm1_enable = 1`, `pwm1 = 179`, `cur_state = 0`; the start re-recorded
-        `/run/lemnos/fan-restore`.
-      - `lemnosd` binary: 1240648 bytes on disk; RSS 1600 kB, PSS 1588 kB; 0.43 % of a core
-        idle over 60 s, 1.35 % with an IMU subscriber at 100 Hz.
+- [x] `lemnosd` on the BCM2712 board (Raze, HeliOS dev.800, 2026-10-25): ring `wire = "rgb"`
+      (GRB24) matches the manifest (`grb24`, `rgbw: false`); the fan has no `restore_mode` and hands
+      back through its cooling device; lemnosd is 1240648 bytes, PSS 1588 kB, 0.43 % of a core idle.
+      The W channel isn't reachable (colours are 24-bit) and the ring has none to verify.
 - [ ] Composite devices and the fan controller: design only
       ([docs/composite-devices.md](docs/composite-devices.md)), waiting for a decision.
 - [ ] IIO buffered reads (`/dev/iio:deviceN`, IRQ timestamps) in the generic kernel
       binding.
 - [x] BMI088 FIFO batch reads (opt-in, `fifo = true`): `lemnos-drivers-bmi088::fifo`, one
-      batch per drain, samples stamped from the output rate. Not a win on the installed
-      board (100 Hz accelerometer, 2 kHz gyroscope defaults: 87 % of a core at 100 Hz vs
-      36 % polled); needs matched output rates and a hardware I2C pair for 200 Hz and up.
-- [ ] Board: the IMU's output rate (`accel_rate`, `gyro_rate`) is the limit above 100 Hz;
-      the manager to set it for the rate the consumers need, and to move the IMU off i2c-gpio.
+      batch per drain, samples stamped from the output rate. Measured on i2c-gpio with mismatched
+      rates (100 Hz accel, 2 kHz gyro): 87 % of a core vs 36 % polled.
+- [ ] Re-measure FIFO reads on the PIO bus with matched rates (200 Hz accel and `200hz-23` gyro,
+      then 400 Hz): the earlier loss came from i2c-gpio and the 2 kHz gyro, neither of which holds
+      now. Done when: CPU and sample timing, FIFO vs polled, are recorded here. Blocked by: nothing.
+- [x] Board: the IMU off i2c-gpio and above 100 Hz: the RP1 PIO I2C bus (068427e) and Atlas
+      20cd0c4 (200 Hz). Raze #1, full-rate subscriber, lemnosd CPU: 100 Hz 1.9 %, 200 Hz 2.9 %,
+      400 Hz 6.0 % of a core (2026-10-31).
 - [ ] Measure the scheduler on the BCM2712 board (`tests/schedule.rs` runs on the host with a mock
       bus): the IMU at 100 Hz beside the real power monitor and magnetometer on the board's
       buses, with the reads' real durations. Partly measured on the Raze: 6201 IMU readings in
@@ -177,12 +180,6 @@ warnings, tests, and the size images.
 
 ## Next
 
-- [ ] Sensor drivers (BMI088, BMM150, INA238). On hold: decide on an
-      extensible driver system first, so drivers can be added without
-      rebuilding the crate. The existing drivers live only in
-      `crates/lemnos/examples/support/board_validator/drivers/`. Devices on
-      non-probeable buses can already be declared through
-      `lemnos-core`'s `ConfiguredDeviceModel`.
 - [ ] Memory breakdown for a Linux refresh on the BCM2712 board, measured with and
       without eager binds. A consuming app measured ~6-7 MiB PSS for a refresh including
       camera probing; Lemnos's share is unknown. Measured without binds (`examples/bringup_memory.rs`,
