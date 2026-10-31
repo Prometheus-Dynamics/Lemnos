@@ -13,10 +13,12 @@ when, blocked by.
 
 ### 1. Freeze items still open
 
-- [ ] **IMU above 100 Hz.** Why: the frozen IMU-rate item. The BMI088 sits on bit-banged I2C
-      (i2c-gpio GPIO8/7), which costs about a third of a core at 100 Hz. Done when: on a board with a
-      hardware I2C pair, the IMU runs at 200 Hz or more through lemnosd within a stated CPU budget,
-      measured on the board. Blocked by: the next Raze board revision (PCB).
+- [x] **IMU above 100 Hz.** Done on the current board: the BMI088 is on the RP1 PIO I2C bus
+      (`pio-i2c:sda=8,scl=7`, 068427e), not i2c-gpio. Measured on Raze #1 (2026-10-31) with
+      `lemnos-ctl watch imu --period <poll>` streaming at the full rate, lemnosd CPU over 30 s:
+      100 Hz 1.9 %, 200 Hz (`200hz` / `200hz-23`, poll 5 ms) 2.9 %, 400 Hz (`400hz` / `400hz-47`,
+      poll 2 ms) 6.0 % of a core, every sample delivered. The Raze package's default rate is the
+      device package's choice (Atlas devices/raze board.toml).
 - [x] **The tokio facade decision.** The user keeps the `tokio` facade feature (2026-10-30).
 - [x] BCM2712 bring-up and timing (a5496ee), the size baseline, the surface trim and the API dedup
       (1ed6fdd, f5754ec, 66a354d, b87f76c).
