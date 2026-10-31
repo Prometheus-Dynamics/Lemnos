@@ -5,7 +5,7 @@ consumes its foundation
 ([docs/foundation.md](docs/foundation.md)). See [CHANGELOG.md](CHANGELOG.md)
 for the user-facing summary of finished work.
 
-## Next release (2.0.0)
+## Next release (1.0.0)
 
 The release list: the 2026-10-27 feature freeze plus the hardware-support work added on 2026-10-30
 (the last addition). Everything else stays under the headings below. Every item: what, why, done
@@ -17,9 +17,7 @@ when, blocked by.
       (i2c-gpio GPIO8/7), which costs about a third of a core at 100 Hz. Done when: on a board with a
       hardware I2C pair, the IMU runs at 200 Hz or more through lemnosd within a stated CPU budget,
       measured on the board. Blocked by: the next Raze board revision (PCB).
-- [ ] **The tokio facade decision.** Why: the frozen decision on whether the `tokio` facade feature
-      is worth its cost. Done when: the user decides (keep, or remove it in favour of
-      `AsyncLinuxHotplugWatcher` alone), and the code and docs match. Blocked by: a user decision.
+- [x] **The tokio facade decision.** The user keeps the `tokio` facade feature (2026-10-30).
 - [x] BCM2712 bring-up and timing (a5496ee), the size baseline, the surface trim and the API dedup
       (1ed6fdd, f5754ec, 66a354d, b87f76c).
 
@@ -30,9 +28,8 @@ when, blocked by.
       armv7-unknown-linux-gnueabihf in CI, with the size reported per target. Blocked by: nothing.
 - [ ] **Board definitions for the new boards.** Why: each board's LEDs, fan, power monitor, IMU and
       spare I/O come from its board file. Done when: board files for the K230D board, the Rockchip
-      modules (RK3588S, RK3576, and RK3566 or RK3562) and Flame load in lemnosd on the real board,
-      with their devices bound and the LED ring and fan driven. Blocked by: boards (PCB), and the
-      user's RK3566/RK3562 decision.
+      modules (RK3588S, RK3576, RK3566 and RK3562) and Flame load in lemnosd on the real board,
+      with their devices bound and the LED ring and fan driven. Blocked by: boards (PCB).
 - [ ] **Drivers those boards need.** Why: any LED, fan, sensor or power chip on the new boards that
       Lemnos doesn't drive yet. Done when: each is a driver behind the extensible driver system,
       tested on its board. Blocked by: the boards' BOMs (PCB) and the driver-system decision under
@@ -42,7 +39,9 @@ when, blocked by.
 
 ### 3. Release mechanics
 
-See "Release (do last)" below: merge `dev` into `main`, tag 2.0.0, and have consumers (HeliOS,
+Version 1.0.0 (agreed with the user on 2026-10-30, tagged when this feature push is done; the
+workspace says 2.0.0 today and is set to 1.0.0 in the release commit). See "Release (do last)"
+below: merge `dev` into `main`, tag 1.0.0, and have consumers (HeliOS,
 Styx, Atlas, the Gaia `lemnos` source) pin the tag. Gates on the release commit: fmt, clippy -D
 warnings, tests, and the size images.
 
@@ -189,14 +188,12 @@ warnings, tests, and the size images.
       facade with the builtin drivers, 1696 kB after one refresh (RSS 1708 kB; refresh 1 ms).
       Eager binds are not measured on the live board: `RuntimeBindPolicy::all()` would bind the
       camera's I2C bus and the USB power GPIO lines.
-- [ ] Decide whether the `tokio` facade feature is worth its cost for
-      consumers that only need `AsyncLinuxHotplugWatcher`.
+- [x] The `tokio` facade feature stays (user, 2026-10-30).
 
 ## Release (do last)
 
 - [ ] Merge `dev` into `main`.
-- [x] Version: 2.0.0 (the foundation work is breaking; it also carries the
-      app additions that were planned as 1.1.0).
+- [x] Version: 1.0.0 (user, 2026-10-30; replaces the earlier 2.0.0 plan).
 - [ ] Tag the release; optionally publish to crates.io.
 - [ ] Consumers pin Lemnos to the tag instead of `branch = "main"`.
 
