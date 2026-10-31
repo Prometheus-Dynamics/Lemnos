@@ -5,6 +5,47 @@ consumes its foundation
 ([docs/foundation.md](docs/foundation.md)). See [CHANGELOG.md](CHANGELOG.md)
 for the user-facing summary of finished work.
 
+## Next release (2.0.0)
+
+The release list: the 2026-10-27 feature freeze plus the hardware-support work added on 2026-10-30
+(the last addition). Everything else stays under the headings below. Every item: what, why, done
+when, blocked by.
+
+### 1. Freeze items still open
+
+- [ ] **IMU above 100 Hz.** Why: the frozen IMU-rate item. The BMI088 sits on bit-banged I2C
+      (i2c-gpio GPIO8/7), which costs about a third of a core at 100 Hz. Done when: on a board with a
+      hardware I2C pair, the IMU runs at 200 Hz or more through lemnosd within a stated CPU budget,
+      measured on the board. Blocked by: the next Raze board revision (PCB).
+- [ ] **The tokio facade decision.** Why: the frozen decision on whether the `tokio` facade feature
+      is worth its cost. Done when: the user decides (keep, or remove it in favour of
+      `AsyncLinuxHotplugWatcher` alone), and the code and docs match. Blocked by: a user decision.
+- [x] BCM2712 bring-up and timing (a5496ee), the size baseline, the surface trim and the API dedup
+      (1ed6fdd, f5754ec, 66a354d, b87f76c).
+
+### 2. Hardware support (added 2026-10-30)
+
+- [ ] **riscv64 and armv7 builds.** Why: lemnosd runs on the K230D (riscv64) and Flame (RV1106G2,
+      Cortex-A7). Done when: lemnosd and its client build for riscv64gc-unknown-linux-gnu/musl and
+      armv7-unknown-linux-gnueabihf in CI, with the size reported per target. Blocked by: nothing.
+- [ ] **Board definitions for the new boards.** Why: each board's LEDs, fan, power monitor, IMU and
+      spare I/O come from its board file. Done when: board files for the K230D board, the Rockchip
+      modules (RK3588S, RK3576, and RK3566 or RK3562) and Flame load in lemnosd on the real board,
+      with their devices bound and the LED ring and fan driven. Blocked by: boards (PCB), and the
+      user's RK3566/RK3562 decision.
+- [ ] **Drivers those boards need.** Why: any LED, fan, sensor or power chip on the new boards that
+      Lemnos doesn't drive yet. Done when: each is a driver behind the extensible driver system,
+      tested on its board. Blocked by: the boards' BOMs (PCB) and the driver-system decision under
+      "Next".
+- [ ] **Memory on small boards.** Why: the K230D has 128 MB in total. Done when: lemnosd PSS is
+      measured on the K230D and Flame boards (1.6 MB RSS on the CM5 today). Blocked by: boards.
+
+### 3. Release mechanics
+
+See "Release (do last)" below: merge `dev` into `main`, tag 2.0.0, and have consumers (HeliOS,
+Styx, Atlas, the Gaia `lemnos` source) pin the tag. Gates on the release commit: fmt, clippy -D
+warnings, tests, and the size images.
+
 ## Second pass ([docs/compact-model.md](docs/compact-model.md))
 
 - [x] Phase 1: `lemnos-device` (compact L1 model) implemented by the BMI088, BMM150,
