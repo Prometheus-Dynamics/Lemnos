@@ -30,12 +30,13 @@ when, blocked by.
       armv7-unknown-linux-gnueabihf in CI, with the size reported per target. Blocked by: nothing.
 - [ ] **Board definitions for the new boards.** Why: each board's LEDs, fan, power monitor, IMU and
       spare I/O come from its board file. Done when: board files for the K230D board, the Rockchip
-      modules (RK3588S, RK3576, RK3566 and RK3562) and Flame load in lemnosd on the real board,
-      with their devices bound and the LED ring and fan driven. Blocked by: boards (PCB).
+      modules (RK3588S, RK3576, RK3566 and RK3562) and Flame are written, marked untested on board,
+      and then load in lemnosd on the real board with their devices bound and the LED ring and fan
+      driven. Blocked by: the boards' pinouts (PCB) for the files; boards only for the test.
 - [ ] **Drivers those boards need.** Why: any LED, fan, sensor or power chip on the new boards that
-      Lemnos doesn't drive yet. Done when: each is a driver behind the extensible driver system,
-      tested on its board. Blocked by: the boards' BOMs (PCB) and the driver-system decision under
-      "Next".
+      Lemnos doesn't drive yet. Done when: each has a driver written from its datasheet, marked
+      untested on board, and then tested on its board. Blocked by: the boards' BOMs (PCB) for the
+      list; boards only for the test.
 - [ ] **Memory on small boards.** Why: the K230D has 128 MB in total. Done when: lemnosd PSS is
       measured on the K230D and Flame boards (1.6 MB RSS on the CM5 today). Blocked by: boards.
 - [ ] **IO hardware blocks, used in full.** Why: the user's rule after the PIO fix (2026-10-31):
@@ -52,11 +53,11 @@ when, blocked by.
 
 ### 3. Release mechanics
 
-Version 1.0.0 (agreed with the user on 2026-10-30, tagged when this feature push is done; the
-workspace says 2.0.0 today and is set to 1.0.0 in the release commit). See "Release (do last)"
-below: merge `dev` into `main`, tag 1.0.0, and have consumers (HeliOS,
-Styx, Atlas, the Gaia `lemnos` source) pin the tag. Gates on the release commit: fmt, clippy -D
-warnings, tests, and the size images.
+For when the user calls the release; only the user decides when. Version target 1.0.0 (agreed with
+the user on 2026-10-30; the workspace says 2.0.1-dev today, from the dropped 2.0.0 plan, and is set
+to 1.0.0 in the release commit). See "Release (do last)" below: merge `dev` into `main`, tag 1.0.0,
+and have consumers (HeliOS, Styx, Atlas, the Gaia `lemnos` source) pin the tag. Gates on the release
+commit: fmt, clippy -D warnings, tests, and the size images.
 
 ## Second pass ([docs/compact-model.md](docs/compact-model.md))
 
@@ -75,7 +76,7 @@ warnings, tests, and the size images.
       back through its cooling device; lemnosd is 1240648 bytes, PSS 1588 kB, 0.43 % of a core idle.
       The W channel isn't reachable (colours are 24-bit) and the ring has none to verify.
 - [ ] Composite devices and the fan controller: design only
-      ([docs/composite-devices.md](docs/composite-devices.md)), waiting for a decision.
+      ([docs/composite-devices.md](docs/composite-devices.md)); not built until the user asks.
 - [ ] IIO buffered reads (`/dev/iio:deviceN`, IRQ timestamps) in the generic kernel
       binding.
 - [x] BMI088 FIFO batch reads (opt-in, `fifo = true`): `lemnos-drivers-bmi088::fifo`, one
@@ -97,7 +98,7 @@ warnings, tests, and the size images.
 - [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
       shared probe code).
 
-## Foundation (2.0)
+## Foundation
 
 ### Done
 
@@ -155,7 +156,6 @@ warnings, tests, and the size images.
 - [x] `embedded_hal_async::digital::Wait` for GPIO lines through Tokio's reactor:
       `lemnos_linux::hal::AsyncGpioLine` (`gpio-cdev` + `tokio`). Needs a hardware check.
 - [ ] `SetDutyCycle` directly on sysfs PWM (today via `lemnos_bus::hal::HalPwm`).
-- [ ] Publish 2.0.0 (crates.io order: hal, linux-sys, core, ...).
 
 ## Done
 
@@ -193,7 +193,7 @@ warnings, tests, and the size images.
 
 - [ ] Merge `dev` into `main`.
 - [x] Version: 1.0.0 (user, 2026-10-30; replaces the earlier 2.0.0 plan).
-- [ ] Tag the release; optionally publish to crates.io.
-- [ ] Consumers pin Lemnos to the tag instead of `branch = "main"`.
+- [ ] Tag the release; optionally publish to crates.io (order: hal, linux-sys, core, ...).
+- [ ] Consumers pin Lemnos to the tag instead of a `dev` revision.
 
 Consumer-side work (apps and the camera stack) is tracked in those repositories.
