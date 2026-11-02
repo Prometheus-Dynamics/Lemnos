@@ -202,23 +202,45 @@ fn usb_session_round_trips_through_transport() {
 fn usb_open_error_classification_maps_access_busy_and_missing() {
     let device_id = lemnos_core::DeviceId::new("usb0-if0").expect("device id");
 
+    let usb_error = |kind| lemnos_usb::Error::new(kind, "test");
+
     assert!(matches!(
-        libusb_transport::classify_open_error(&device_id, 1, &[2], rusb::Error::Access),
+        usb_transport::classify_open_error(
+            &device_id,
+            1,
+            &[2],
+            &usb_error(lemnos_usb::ErrorKind::PermissionDenied)
+        ),
         BusError::PermissionDenied {
             operation: "open",
             ..
         }
     ));
     assert!(matches!(
-        libusb_transport::classify_open_error(&device_id, 1, &[2], rusb::Error::Busy),
+        usb_transport::classify_open_error(
+            &device_id,
+            1,
+            &[2],
+            &usb_error(lemnos_usb::ErrorKind::Busy)
+        ),
         BusError::AccessConflict { .. }
     ));
     assert!(matches!(
-        libusb_transport::classify_open_error(&device_id, 1, &[2], rusb::Error::NoDevice),
+        usb_transport::classify_open_error(
+            &device_id,
+            1,
+            &[2],
+            &usb_error(lemnos_usb::ErrorKind::Disconnected)
+        ),
         BusError::SessionUnavailable { .. }
     ));
     assert!(matches!(
-        libusb_transport::classify_open_error(&device_id, 1, &[2], rusb::Error::NotFound),
+        usb_transport::classify_open_error(
+            &device_id,
+            1,
+            &[2],
+            &usb_error(lemnos_usb::ErrorKind::NotFound)
+        ),
         BusError::SessionUnavailable { .. }
     ));
 }

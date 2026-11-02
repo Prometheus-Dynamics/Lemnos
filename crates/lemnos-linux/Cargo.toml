@@ -26,7 +26,7 @@ pwm = []
 i2c = []
 spi = []
 uart = ["dep:serialport"]
-usb = ["dep:rusb"]
+usb = ["dep:lemnos-usb"]
 hotplug = []
 gpio-sysfs = []
 # DMA buffers: dma-heap allocation, dma-buf sync, mappings and sync-file fences (`dma`).
@@ -47,7 +47,7 @@ lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
 lemnos-hal = { workspace = true, features = ["std"] }
 lemnos-linux-sys = { workspace = true, default-features = false }
-rusb = { workspace = true, optional = true }
+lemnos-usb = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["net"] }
 tracing = { workspace = true, optional = true }

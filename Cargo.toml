@@ -34,6 +34,7 @@ members = [
     "crates/lemnos-drivers-linux",
     "crates/lemnos-drivers-ws2812",
     "crates/lemnos-mock",
+    "crates/lemnos-usb",
 ]
 resolver = "3"
 
@@ -71,6 +72,7 @@ lemnos-drivers-bmi088 = { version = "2.0.1-dev", path = "crates/lemnos-drivers-b
 lemnos-drivers-linux = { version = "2.0.1-dev", path = "crates/lemnos-drivers-linux" }
 lemnos-drivers-ws2812 = { version = "2.0.1-dev", path = "crates/lemnos-drivers-ws2812" }
 lemnos-linux = { version = "2.0.1-dev", path = "crates/lemnos-linux", default-features = false }
+lemnos-usb = { version = "2.0.1-dev", path = "crates/lemnos-usb" }
 lemnos-linux-sys = { version = "2.0.1-dev", path = "crates/lemnos-linux-sys" }
 lemnos-macros = { version = "2.0.1-dev", path = "crates/lemnos-macros" }
 lemnos-mock = { version = "2.0.1-dev", path = "crates/lemnos-mock" }
@@ -79,10 +81,11 @@ lemnos-runtime = { version = "2.0.1-dev", path = "crates/lemnos-runtime" }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 libc = "0.2.190"
+futures-core = "0.3.29"
+nusb = "0.2.9"
 ordered-float = { version = "5.5.0", default-features = false }
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
-rusb = "0.9.4"
 serde = { version = "1.0.229", default-features = false }
 serde_json = { version = "1.0.151", default-features = false, features = ["alloc"] }
 serialport = { version = "4.10.1", default-features = false }

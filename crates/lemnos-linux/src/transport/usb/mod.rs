@@ -11,7 +11,7 @@ use lemnos_core::{
     UsbInterruptTransfer,
 };
 
-mod libusb_transport;
+mod usb_transport;
 
 #[cfg(test)]
 mod tests;
@@ -101,11 +101,8 @@ impl LinuxUsbSession {
             backend: BACKEND_NAME.to_string(),
             device_id: device.id.clone(),
         })?;
-        let transport = libusb_transport::LinuxLibusbTransport::new(
-            device.id.clone(),
-            target,
-            transport_config,
-        )?;
+        let transport =
+            usb_transport::LinuxUsbTransport::new(device.id.clone(), target, transport_config)?;
 
         Ok(Self {
             device: device.clone(),
