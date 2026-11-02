@@ -26,6 +26,7 @@ pub static INFO: DeviceInfo = DeviceInfo::new(
 );
 
 /// The raw channels come first.
+#[cfg(feature = "float")]
 const RAW: usize = 3;
 
 /// The mainline kernel driver: `bmc150_magn` (IIO, gauss).
