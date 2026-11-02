@@ -92,7 +92,11 @@ fn the_granted_period_is_at_least_the_device_read_time() {
     client.subscribe("slow", 1).unwrap();
     std::thread::sleep(Duration::from_millis(200));
     let granted = client.subscribe("slow", 1).unwrap();
-    assert!((16..=20).contains(&granted), "{granted}");
+    // The grant is the measured read: 16 ms of transactions, plus whatever the
+    // host adds to the read's wakeups (22 ms seen on a host at load 100). The
+    // floor is the property; the ceiling only has to rule out a grant at twice
+    // the read.
+    assert!((16..=30).contains(&granted), "{granted}");
     // A period longer than the read time is granted as asked.
     assert_eq!(client.subscribe("slow", 50).unwrap(), 50);
 }
