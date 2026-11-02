@@ -39,6 +39,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let report = lemnos.refresh_with_linux_default(&backend)?;
     println!("refresh_ms={} eager={eager}", started.elapsed().as_millis());
     println!("report: {report:?}");
-    memory(if eager { "after eager refresh" } else { "after refresh" });
+    memory(if eager {
+        "after eager refresh"
+    } else {
+        "after refresh"
+    });
     Ok(())
 }
