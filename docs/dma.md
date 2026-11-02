@@ -69,10 +69,17 @@ The synchronous buses move bytes through the CPU, so they refuse dma-bufs with
 `TransferError::Unsupported` and finish in `submit`. `TransferError::kind()` gives the
 portable `ErrorKind`.
 
+Implemented, `lemnos-linux::transfer` (feature `usb`): `UsbBulkEngine`, one bulk endpoint
+of a `lemnos-usb` device. It is asynchronous: the ticket holds the URB, `poll` and `wait`
+settle it, and `cancel` asks the kernel to drop it. The buffers are owned by the USB layer
+while in flight, so the caller's slice is copied in at `submit` (OUT) or copied out when
+the transfer settles (IN); a dropped or cancelled ticket leaves the caller's buffer alone.
+Each submit allocates its own URB buffer (the one-shot form). Streams keep buffers and
+reuse them (`lemnos-usb`'s `BulkReader` and `BulkWriter`). Host-tested on the settle
+logic and the error mapping; the transfer itself is untested on hardware.
+
 Planned, not implemented, each a new `TransferEngine`:
 
-- **USB bulk** (the one USB transport item): an endpoint engine with buffered bulk
-  streaming. The hook is this trait; the USB code is not touched by this interface.
 - **PCIe DMA**: descriptor rings over vfio, with dma-buf sources.
 - **RP1 DMA**: the RP1 channels, for PIO and peripheral transfers.
 
