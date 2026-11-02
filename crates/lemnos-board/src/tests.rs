@@ -192,8 +192,11 @@ fn example_definition_parses_validates_and_round_trips() {
     assert_eq!(imu.address, Some(0x18));
     assert_eq!(imu.config["gyro_address"], ConfigValue::Integer(0x68));
     assert_eq!(board.device("fan").unwrap().matches["name"], "pwmfan");
-    let json = board.to_json_string();
-    assert_eq!(BoardDefinition::from_json_str(&json).unwrap(), board);
+    #[cfg(feature = "json")]
+    {
+        let json = board.to_json_string();
+        assert_eq!(BoardDefinition::from_json_str(&json).unwrap(), board);
+    }
 }
 
 #[test]

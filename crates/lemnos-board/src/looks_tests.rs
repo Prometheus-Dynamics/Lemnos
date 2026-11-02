@@ -1,6 +1,8 @@
 //! Look definitions: parsing, every error path, and the file form round trip.
 
-use crate::looks::{body_toml, from_json, from_toml, parse_file, to_toml};
+#[cfg(feature = "json")]
+use crate::looks::from_json;
+use crate::looks::{body_toml, from_toml, parse_file, to_toml};
 use lemnos_light::{
     BUILTIN_LOOK_NAMES, Block, Defaults, Easing, Effect, Fraction, LayerSpec, LookSpec, Mode, Rgbw,
     builtin_look,
@@ -183,6 +185,7 @@ fn a_bare_envelope_name_takes_its_defaults() {
 }
 
 #[test]
+#[cfg(feature = "json")]
 fn json_and_toml_give_the_same_look() {
     let toml = from_toml(
         "--spec",
