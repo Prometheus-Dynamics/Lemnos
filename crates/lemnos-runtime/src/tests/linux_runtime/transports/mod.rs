@@ -118,17 +118,20 @@ impl SysfsPwmExportHarness {
                 if read_trimmed(&export_path).as_deref() == Some(&channel.to_string())
                     && !channel_root.exists()
                 {
-                    fs::create_dir_all(&channel_root).expect("create exported pwm channel");
-                    fs::write(channel_root.join("period"), format!("{period_ns}\n"))
+                    // The kernel shows a channel with its attributes already in
+                    // place. Build the whole channel beside it and rename it in,
+                    // so a reader that sees the directory sees every attribute,
+                    // and no write of this thread can land after the runtime's.
+                    let staging = chip_root.join(format!(".pwm{channel}.staging"));
+                    let _ = fs::remove_dir_all(&staging);
+                    fs::create_dir_all(&staging).expect("create staged pwm channel");
+                    fs::write(staging.join("period"), format!("{period_ns}\n"))
                         .expect("write pwm period");
-                    fs::write(
-                        channel_root.join("duty_cycle"),
-                        format!("{duty_cycle_ns}\n"),
-                    )
-                    .expect("write pwm duty_cycle");
-                    fs::write(channel_root.join("enable"), "0\n").expect("write pwm enable");
-                    fs::write(channel_root.join("polarity"), "normal\n")
-                        .expect("write pwm polarity");
+                    fs::write(staging.join("duty_cycle"), format!("{duty_cycle_ns}\n"))
+                        .expect("write pwm duty_cycle");
+                    fs::write(staging.join("enable"), "0\n").expect("write pwm enable");
+                    fs::write(staging.join("polarity"), "normal\n").expect("write pwm polarity");
+                    fs::rename(&staging, &channel_root).expect("publish pwm channel");
                     fs::write(&export_path, "").expect("clear pwm export file");
                 }
 
