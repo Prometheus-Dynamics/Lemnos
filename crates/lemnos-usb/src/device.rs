@@ -13,7 +13,7 @@ use crate::info::UsbDeviceInfo;
 use crate::listing::find_device;
 use crate::location::UsbLocation;
 use crate::stream::{BulkReader, BulkWriter};
-use crate::transfer::{Transfer, TransferOutcome};
+use crate::transfer::{Transfer, TransferBuffer, TransferOutcome};
 use crate::types::{ControlSetup, Direction, TransferType};
 use std::sync::Arc;
 use std::time::Duration;
@@ -297,7 +297,7 @@ impl UsbDevice {
             let data = device.control_in(&setup, length, timeout)?;
             Ok(TransferOutcome {
                 actual_length: data.len(),
-                buffer: data,
+                buffer: TransferBuffer::from_vec(data),
                 packets: Vec::new(),
             })
         })
@@ -318,7 +318,7 @@ impl UsbDevice {
             let sent = device.control_out(&setup, &data, timeout)?;
             Ok(TransferOutcome {
                 actual_length: sent,
-                buffer: data,
+                buffer: TransferBuffer::from_vec(data),
                 packets: Vec::new(),
             })
         })
@@ -359,7 +359,7 @@ impl UsbDevice {
             Backend::Usbfs(usb) => usb.submit(
                 lemnos_linux_sys::usbfs::UrbKind::Bulk,
                 endpoint,
-                data,
+                crate::buffer::heap(data),
                 &[],
                 true,
             ),
@@ -391,6 +391,45 @@ impl UsbDevice {
         direction: Direction,
         buffer: Vec<u8>,
     ) -> Result<Transfer> {
+        self.submit_buffer(
+            endpoint,
+            transfer,
+            direction,
+            TransferBuffer::from_vec(buffer),
+        )
+    }
+
+    /// Memory for a transfer of `len` bytes. On Linux, a usbdevfs mapping when
+    /// the kernel offers one (page-aligned, used by the host controller as is);
+    /// otherwise, and when a mapping fails, a heap vector.
+    pub fn allocate_buffer(&self, len: usize) -> TransferBuffer {
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => crate::buffer::wrap(usb.allocate(len)),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(_) => TransferBuffer::from_vec(vec![0; len]),
+        }
+    }
+
+    /// Starts a bulk IN transfer into a buffer from [`UsbDevice::allocate_buffer`]
+    /// (or any buffer): its length is the most it asks for.
+    pub fn submit_bulk_in_buffer(&self, endpoint: u8, buffer: TransferBuffer) -> Result<Transfer> {
+        self.submit_buffer(endpoint, TransferType::Bulk, Direction::In, buffer)
+    }
+
+    /// Starts a bulk OUT transfer of a buffer's bytes ([`TransferBuffer::len`]).
+    pub fn submit_bulk_out_buffer(&self, endpoint: u8, buffer: TransferBuffer) -> Result<Transfer> {
+        self.submit_buffer(endpoint, TransferType::Bulk, Direction::Out, buffer)
+    }
+
+    /// The submission every async transfer goes through.
+    pub(crate) fn submit_buffer(
+        &self,
+        endpoint: u8,
+        transfer: TransferType,
+        direction: Direction,
+        buffer: TransferBuffer,
+    ) -> Result<Transfer> {
         check_endpoint(endpoint, direction)?;
         match &self.inner.backend {
             #[cfg(target_os = "linux")]
@@ -401,10 +440,12 @@ impl UsbDevice {
                         "control transfers are not submitted",
                     )
                 })?;
-                usb.submit(kind, endpoint, buffer, &[], false)
+                usb.submit(kind, endpoint, crate::buffer::unwrap(buffer), &[], false)
             }
             #[cfg(not(target_os = "linux"))]
-            Backend::Native(native) => native.submit(endpoint, transfer, direction, buffer),
+            Backend::Native(native) => {
+                native.submit(endpoint, transfer, direction, buffer.into_vec())
+            }
         }
     }
 
@@ -417,35 +458,62 @@ impl UsbDevice {
         buffer: Vec<u8>,
         packet_len: usize,
     ) -> Result<Transfer> {
-        check_endpoint(endpoint, Direction::In)?;
+        self.submit_isochronous_in_buffer(endpoint, TransferBuffer::from_vec(buffer), packet_len)
+    }
+
+    /// As [`UsbDevice::submit_isochronous_in`], into a buffer from
+    /// [`UsbDevice::allocate_buffer`].
+    pub fn submit_isochronous_in_buffer(
+        &self,
+        endpoint: u8,
+        buffer: TransferBuffer,
+        packet_len: usize,
+    ) -> Result<Transfer> {
         if packet_len == 0 || buffer.is_empty() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 "isochronous transfers need a packet length and a buffer",
             ));
         }
+        let lengths = iso_packet_lengths(buffer.len(), packet_len);
+        self.submit_isochronous_packets(endpoint, buffer, &lengths)
+    }
+
+    /// The isochronous submission: one packet per entry of `lengths`, which
+    /// sum to the buffer's length. Streams call this with lengths they keep, so
+    /// a steady stream allocates no lengths.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn submit_isochronous_packets(
+        &self,
+        endpoint: u8,
+        buffer: TransferBuffer,
+        lengths: &[u32],
+    ) -> Result<Transfer> {
+        check_endpoint(endpoint, Direction::In)?;
         match &self.inner.backend {
-            #[cfg(target_os = "linux")]
-            Backend::Usbfs(usb) => {
-                let packets = buffer.len().div_ceil(packet_len);
-                let mut lengths = vec![packet_len as u32; packets];
-                if let Some(last) = lengths.last_mut() {
-                    *last = (buffer.len() - (packets - 1) * packet_len) as u32;
-                }
-                usb.submit(
-                    lemnos_linux_sys::usbfs::UrbKind::Isochronous,
-                    endpoint,
-                    buffer,
-                    &lengths,
-                    false,
-                )
-            }
-            #[cfg(not(target_os = "linux"))]
-            Backend::Native(_) => Err(Error::new(
-                ErrorKind::Unsupported,
-                "isochronous transfers are supported on Linux only",
-            )),
+            Backend::Usbfs(usb) => usb.submit(
+                lemnos_linux_sys::usbfs::UrbKind::Isochronous,
+                endpoint,
+                crate::buffer::unwrap(buffer),
+                lengths,
+                false,
+            ),
         }
+    }
+
+    /// The isochronous submission on other platforms: refused.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn submit_isochronous_packets(
+        &self,
+        endpoint: u8,
+        buffer: TransferBuffer,
+        lengths: &[u32],
+    ) -> Result<Transfer> {
+        let _ = (endpoint, buffer, lengths);
+        Err(Error::new(
+            ErrorKind::Unsupported,
+            "isochronous transfers are supported on Linux only",
+        ))
     }
 
     /// Clears the halt on `endpoint` (after a stall).
@@ -469,6 +537,20 @@ impl UsbDevice {
                 )
                 .map(|_| ()),
         }
+    }
+
+    /// An isochronous IN reader over `endpoint`: `depth` transfers in flight,
+    /// each of `packets` packets of `packet_len` bytes. Linux only.
+    #[cfg(target_os = "linux")]
+    pub fn isochronous_reader(
+        &self,
+        endpoint: u8,
+        packet_len: usize,
+        packets: usize,
+        depth: usize,
+    ) -> Result<crate::stream::IsoReader> {
+        check_endpoint(endpoint, Direction::In)?;
+        crate::stream::IsoReader::new(self.clone(), endpoint, packet_len, packets, depth)
     }
 
     /// A buffered reader over bulk IN endpoint `endpoint`: `depth` transfers
@@ -556,4 +638,15 @@ fn check_direction(actual: Direction, wanted: Direction, context: &str) -> Resul
             format!("{context}: wrong direction in the setup packet"),
         ))
     }
+}
+
+/// The packet lengths of an isochronous transfer of `total` bytes in packets of
+/// `packet_len` (the last packet takes the rest). `total` is non-zero.
+pub(crate) fn iso_packet_lengths(total: usize, packet_len: usize) -> Vec<u32> {
+    let packets = total.div_ceil(packet_len);
+    let mut lengths = vec![packet_len as u32; packets];
+    if let Some(last) = lengths.last_mut() {
+        *last = (total - (packets - 1) * packet_len) as u32;
+    }
+    lengths
 }

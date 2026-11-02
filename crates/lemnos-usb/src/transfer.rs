@@ -19,12 +19,74 @@ pub struct IsoPacket {
     pub error: Option<Error>,
 }
 
+/// A transfer's memory: the bytes it moves. On Linux it is a page-aligned
+/// usbdevfs mapping when the kernel offers one, and a heap vector otherwise.
+pub struct TransferBuffer {
+    pub(crate) storage: crate::buffer::Storage,
+}
+
+impl TransferBuffer {
+    /// A buffer over `bytes` (the heap path, on every platform).
+    pub fn from_vec(bytes: Vec<u8>) -> Self {
+        crate::buffer::wrap(crate::buffer::heap(bytes))
+    }
+
+    /// Bytes in use.
+    pub fn len(&self) -> usize {
+        self.storage.len()
+    }
+
+    /// Whether no bytes are in use.
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
+    /// Bytes available for a transfer (a mapping's whole length, or a vector's).
+    pub fn capacity(&self) -> usize {
+        self.storage.capacity()
+    }
+
+    /// Whether the memory is a usbdevfs mapping rather than a heap vector.
+    pub fn is_mapped(&self) -> bool {
+        self.storage.is_mapped()
+    }
+
+    /// The bytes in use.
+    pub fn as_slice(&self) -> &[u8] {
+        self.storage.as_slice()
+    }
+
+    /// The bytes in use, for writing before the buffer is submitted.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.storage.as_mut_slice()
+    }
+
+    /// Sets the bytes in use (at most the capacity).
+    pub fn set_len(&mut self, len: usize) {
+        self.storage.set_len(len);
+    }
+
+    /// The bytes as a heap vector: the buffer itself, or a copy of a mapping's bytes.
+    pub fn into_vec(self) -> Vec<u8> {
+        self.storage.into_vec()
+    }
+}
+
+impl std::fmt::Debug for TransferBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransferBuffer")
+            .field("len", &self.len())
+            .field("mapped", &self.is_mapped())
+            .finish()
+    }
+}
+
 /// A finished transfer: its buffer, back with the data it received (IN) or
 /// the data it sent (OUT), and the packet results for isochronous transfers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct TransferOutcome {
     /// The buffer the transfer was submitted with.
-    pub buffer: Vec<u8>,
+    pub buffer: TransferBuffer,
     /// The bytes that moved (IN: the bytes received at the start of `buffer`).
     pub actual_length: usize,
     /// The isochronous packets (empty for control, bulk and interrupt).
@@ -34,11 +96,11 @@ pub struct TransferOutcome {
 impl TransferOutcome {
     /// The bytes that moved: the start of the buffer, `actual_length` long.
     pub fn data(&self) -> &[u8] {
-        &self.buffer[..self.actual_length.min(self.buffer.len())]
+        &self.buffer.as_slice()[..self.actual_length.min(self.buffer.len())]
     }
 
     /// The buffer, to submit again without allocating.
-    pub fn into_buffer(self) -> Vec<u8> {
+    pub fn into_buffer(self) -> TransferBuffer {
         self.buffer
     }
 }

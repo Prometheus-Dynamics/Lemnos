@@ -1,9 +1,18 @@
-//! Buffered bulk streams: several transfers in flight, so the device never
-//! waits for the host between them. Both are blocking `std::io` adapters.
+//! Buffered streams: several transfers in flight, so the device never waits
+//! for the host between them. The bulk streams are blocking `std::io`
+//! adapters; the isochronous reader hands out each completed transfer's data.
+//! Buffers are allocated once per stream slot and recycled, so a steady stream
+//! allocates no transfer memory.
 
 use crate::device::UsbDevice;
+#[cfg(target_os = "linux")]
+use crate::device::iso_packet_lengths;
+#[cfg(target_os = "linux")]
+use crate::error::ErrorKind;
 use crate::error::{Error, Result};
-use crate::transfer::{Transfer, TransferOutcome};
+#[cfg(target_os = "linux")]
+use crate::transfer::IsoPacket;
+use crate::transfer::{Transfer, TransferBuffer, TransferOutcome};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 
@@ -18,7 +27,7 @@ pub struct BulkReader {
     chunk: usize,
     depth: usize,
     queue: VecDeque<Transfer>,
-    spare: Vec<Vec<u8>>,
+    spare: Vec<TransferBuffer>,
     current: Option<TransferOutcome>,
     position: usize,
 }
@@ -40,8 +49,11 @@ impl BulkReader {
     /// Keeps `depth` transfers in flight.
     fn top_up(&mut self) -> Result<()> {
         while self.queue.len() < self.depth {
-            let buffer = self.spare.pop().unwrap_or_else(|| vec![0; self.chunk]);
-            let transfer = self.device.submit_bulk_in(self.endpoint, buffer)?;
+            let buffer = match self.spare.pop() {
+                Some(buffer) => buffer,
+                None => self.device.allocate_buffer(self.chunk),
+            };
+            let transfer = self.device.submit_bulk_in_buffer(self.endpoint, buffer)?;
             self.queue.push_back(transfer);
         }
         Ok(())
@@ -93,8 +105,10 @@ pub struct BulkWriter {
     chunk: usize,
     depth: usize,
     queue: VecDeque<Transfer>,
-    spare: Vec<Vec<u8>>,
-    current: Vec<u8>,
+    spare: Vec<TransferBuffer>,
+    /// The buffer being filled, `chunk` bytes long, and how much of it is filled.
+    current: Option<TransferBuffer>,
+    filled: usize,
     /// Bytes written since the last [`BulkWriter::flush_end`].
     written: u64,
     /// The endpoint's `wMaxPacketSize`, from the descriptors.
@@ -110,19 +124,56 @@ pub(crate) fn needs_zero_packet(written: u64, max_packet: u16) -> bool {
 
 impl BulkWriter {
     pub(crate) fn new(device: UsbDevice, endpoint: u8, chunk: usize, depth: usize) -> Self {
-        let chunk = chunk.max(1);
         let max_packet = device.endpoint_max_packet_size(endpoint);
         Self {
             device,
             endpoint,
-            chunk,
+            chunk: chunk.max(1),
             depth: depth.max(1),
             queue: VecDeque::new(),
             spare: Vec::new(),
-            current: Vec::with_capacity(chunk),
+            current: None,
+            filled: 0,
             written: 0,
             max_packet,
         }
+    }
+
+    /// The buffer to fill next: a recycled one (restored to a full chunk), or a new one.
+    fn next_buffer(&mut self) -> TransferBuffer {
+        match self.spare.pop() {
+            Some(mut buffer) => {
+                buffer.set_len(self.chunk);
+                buffer
+            }
+            None => self.device.allocate_buffer(self.chunk),
+        }
+    }
+
+    /// Sends the gathered bytes as one transfer, waiting first while `depth`
+    /// transfers are in flight.
+    fn send_current(&mut self) -> Result<()> {
+        if self.filled == 0 {
+            return Ok(());
+        }
+        while self.queue.len() >= self.depth {
+            self.retire_oldest()?;
+        }
+        let mut buffer = self.current.take().unwrap_or_else(|| self.next_buffer());
+        buffer.set_len(self.filled);
+        self.filled = 0;
+        let transfer = self.device.submit_bulk_out_buffer(self.endpoint, buffer)?;
+        self.queue.push_back(transfer);
+        Ok(())
+    }
+
+    /// Waits for the oldest transfer and keeps its buffer for reuse.
+    fn retire_oldest(&mut self) -> Result<()> {
+        if let Some(transfer) = self.queue.pop_front() {
+            let outcome = transfer.wait()?;
+            self.spare.push(outcome.into_buffer());
+        }
+        Ok(())
     }
 
     /// Flushes, then ends the transfer for the device: when the bytes written
@@ -150,35 +201,6 @@ impl BulkWriter {
         self.written = 0;
         Ok(())
     }
-
-    /// Sends the gathered bytes as one transfer, waiting first while `depth`
-    /// transfers are in flight.
-    fn send_current(&mut self) -> Result<()> {
-        if self.current.is_empty() {
-            return Ok(());
-        }
-        while self.queue.len() >= self.depth {
-            self.retire_oldest()?;
-        }
-        let mut next = self
-            .spare
-            .pop()
-            .unwrap_or_else(|| Vec::with_capacity(self.chunk));
-        next.clear();
-        let data = std::mem::replace(&mut self.current, next);
-        let transfer = self.device.submit_bulk_out(self.endpoint, data)?;
-        self.queue.push_back(transfer);
-        Ok(())
-    }
-
-    /// Waits for the oldest transfer and keeps its buffer for reuse.
-    fn retire_oldest(&mut self) -> Result<()> {
-        if let Some(transfer) = self.queue.pop_front() {
-            let outcome = transfer.wait()?;
-            self.spare.push(outcome.into_buffer());
-        }
-        Ok(())
-    }
 }
 
 impl Write for BulkWriter {
@@ -186,11 +208,18 @@ impl Write for BulkWriter {
         let written = data.len();
         self.written += written as u64;
         while !data.is_empty() {
-            let room = self.chunk - self.current.len();
+            if self.current.is_none() {
+                self.current = Some(self.next_buffer());
+            }
+            let room = self.chunk - self.filled;
             let count = room.min(data.len());
-            self.current.extend_from_slice(&data[..count]);
+            if let Some(buffer) = self.current.as_mut() {
+                buffer.as_mut_slice()[self.filled..self.filled + count]
+                    .copy_from_slice(&data[..count]);
+            }
+            self.filled += count;
             data = &data[count..];
-            if self.current.len() == self.chunk {
+            if self.filled == self.chunk {
                 self.send_current().map_err(to_io)?;
             }
         }
@@ -211,5 +240,116 @@ impl Drop for BulkWriter {
     /// Flushes what was written. A failure here is lost: call `flush` to see it.
     fn drop(&mut self) {
         let _ = self.flush();
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// One completed isochronous transfer, borrowed from the reader: its data (the
+/// bytes the packets moved, packet after packet) and the packets' results.
+#[derive(Debug)]
+pub struct IsoBlock<'a> {
+    /// The bytes received, packet after packet.
+    pub data: &'a [u8],
+    /// Each packet's scheduled length, bytes moved and status.
+    pub packets: &'a [IsoPacket],
+}
+
+/// Reads an isochronous IN endpoint: `depth` transfers of `packets` packets of
+/// `packet_len` bytes stay in flight, and each completed transfer is handed out
+/// as an [`IsoBlock`] until the next call, which recycles its buffer. The
+/// packet lengths are computed once; buffers are reused. The completion path
+/// still builds one packet table per transfer.
+#[cfg(target_os = "linux")]
+pub struct IsoReader {
+    device: UsbDevice,
+    endpoint: u8,
+    packet_len: usize,
+    lengths: Vec<u32>,
+    depth: usize,
+    queue: VecDeque<Transfer>,
+    spare: Vec<TransferBuffer>,
+    current: Option<TransferOutcome>,
+}
+
+#[cfg(target_os = "linux")]
+impl IsoReader {
+    pub(crate) fn new(
+        device: UsbDevice,
+        endpoint: u8,
+        packet_len: usize,
+        packets: usize,
+        depth: usize,
+    ) -> Result<Self> {
+        if packet_len == 0 || packets == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "isochronous reads need a packet length and a packet count",
+            ));
+        }
+        let total = packet_len * packets;
+        let lengths = iso_packet_lengths(total, packet_len);
+        Ok(Self {
+            device,
+            endpoint,
+            packet_len,
+            lengths,
+            depth: depth.max(1),
+            queue: VecDeque::new(),
+            spare: Vec::new(),
+            current: None,
+        })
+    }
+
+    /// The bytes of one transfer: `packets` times the packet length.
+    pub fn transfer_len(&self) -> usize {
+        self.lengths.iter().map(|&len| len as usize).sum()
+    }
+
+    /// The packet length this reader was built for.
+    pub fn packet_len(&self) -> usize {
+        self.packet_len
+    }
+
+    /// Keeps `depth` transfers in flight.
+    fn top_up(&mut self) -> Result<()> {
+        while self.queue.len() < self.depth {
+            let buffer = match self.spare.pop() {
+                Some(buffer) => buffer,
+                None => self.device.allocate_buffer(self.transfer_len()),
+            };
+            let transfer =
+                self.device
+                    .submit_isochronous_packets(self.endpoint, buffer, &self.lengths)?;
+            self.queue.push_back(transfer);
+        }
+        Ok(())
+    }
+
+    /// Waits for the next completed transfer and returns it. The previous block's
+    /// buffer is recycled first, and the next transfer is already in flight.
+    pub fn next_block(&mut self) -> Result<IsoBlock<'_>> {
+        if let Some(done) = self.current.take() {
+            self.spare.push(done.into_buffer());
+        }
+        self.top_up()?;
+        let transfer = self
+            .queue
+            .pop_front()
+            .ok_or_else(|| Error::new(ErrorKind::Other, "no isochronous transfer queued"))?;
+        let outcome = transfer.wait()?;
+        let outcome = self.current.insert(outcome);
+        Ok(IsoBlock {
+            data: outcome.data(),
+            packets: &outcome.packets,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for IsoReader {
+    fn drop(&mut self) {
+        for transfer in &self.queue {
+            transfer.cancel();
+        }
     }
 }

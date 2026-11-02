@@ -538,7 +538,7 @@ fn finish(completion: Completion, wanted: Option<usize>) -> Result<TransferOutco
         buffer.truncate(actual.min(wanted));
     }
     Ok(TransferOutcome {
-        buffer,
+        buffer: crate::buffer::wrap(crate::buffer::heap(buffer)),
         actual_length: actual,
         packets: Vec::new(),
     })

@@ -45,6 +45,7 @@
 //! transfer. On Linux they are the kernel's copy source and target directly;
 //! on Windows and macOS nusb copies them into its own buffers.
 
+mod buffer;
 mod config;
 mod descriptor;
 mod device;
@@ -72,5 +73,7 @@ pub use info::{InterfaceSummary, Speed, UsbDeviceInfo};
 pub use listing::{UsbHotplugEvent, UsbWatch, find_device, list_devices, watch};
 pub use location::UsbLocation;
 pub use stream::{BulkReader, BulkWriter};
-pub use transfer::{IsoPacket, Transfer, TransferOutcome};
+#[cfg(target_os = "linux")]
+pub use stream::{IsoBlock, IsoReader};
+pub use transfer::{IsoPacket, Transfer, TransferBuffer, TransferOutcome};
 pub use types::{ControlKind, ControlRecipient, ControlSetup, Direction, TransferType};

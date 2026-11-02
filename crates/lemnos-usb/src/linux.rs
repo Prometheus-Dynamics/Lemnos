@@ -5,6 +5,7 @@
 //! completions while any are in flight and exits when none are. The reaper
 //! holds the backend, not the device, so a transfer outlives its handle.
 
+use crate::buffer::Storage;
 use crate::error::{Error, Result};
 use crate::transfer::{Canceller, IsoPacket, Shared, Transfer, TransferOutcome};
 use crate::types::{ControlSetup as Setup, Direction};
@@ -34,6 +35,8 @@ pub(crate) struct Usbfs {
     file: UsbfsFile,
     state: Mutex<State>,
     next_tag: AtomicU64,
+    /// Whether the kernel maps DMA buffers for this device (`USBDEVFS_CAP_MMAP`).
+    mapped: bool,
 }
 
 impl Usbfs {
@@ -46,11 +49,24 @@ impl Usbfs {
         ));
         let file = UsbfsFile::open(&path)
             .map_err(|error| Error::from_io(&format!("opening {}", path.display()), &error))?;
+        let mapped = file.has_mmap().unwrap_or(false);
         Ok(Arc::new(Self {
             file,
             state: Mutex::new(State::default()),
             next_tag: AtomicU64::new(1),
+            mapped,
         }))
+    }
+
+    /// Memory for a transfer of `len` bytes: a usbdevfs mapping when the kernel
+    /// offers one, and the heap otherwise (also when a mapping fails).
+    pub(crate) fn allocate(&self, len: usize) -> Storage {
+        if self.mapped
+            && let Ok(buffer) = self.file.map_buffer(len)
+        {
+            return buffer;
+        }
+        crate::buffer::heap(vec![0; len])
     }
 
     /// The device's raw descriptors (see `configurations_from_blob`).
@@ -162,7 +178,7 @@ impl Usbfs {
         self: &Arc<Self>,
         kind: UrbKind,
         endpoint: u8,
-        buffer: Vec<u8>,
+        buffer: Storage,
         packet_lengths: &[u32],
         zero_packet: bool,
     ) -> Result<Transfer> {
@@ -280,7 +296,7 @@ fn outcome(done: UrbCompletion) -> Result<TransferOutcome> {
         })
         .collect();
     Ok(TransferOutcome {
-        buffer: done.buffer,
+        buffer: crate::buffer::wrap(done.buffer),
         actual_length: done.actual_length,
         packets,
     })

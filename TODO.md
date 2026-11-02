@@ -237,8 +237,8 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
       URB completion, isochronous streams, reattach after detach) and every Windows and macOS
       runtime path. This host's devices allow no open for this user; the probe covered the
       permission path only. *Follow-up, now done:* USB bulk is a `TransferEngine`
-      (`lemnos_linux::transfer::UsbBulkEngine`, feature `usb`). Still open: the USB watch on the
-      single hotplug watcher, and USB buffers from the DMA basics (see the next two items).
+      (`lemnos_linux::transfer::UsbBulkEngine`, feature `usb`). The USB watch on the single hotplug
+      watcher and the USB buffers are done below (untested on a device).
 - [x] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
       Done when: a single watcher serves Lemnos and the camera stack. (8669d26:
       `lemnos_linux::device_watch::DeviceWatcher`, netlink, inotify or rescan; Lemnos's
@@ -285,18 +285,16 @@ Done, on dev:
 - [x] **Scope overlaps note** (`docs/scope-overlaps.md`): `lemnos-light`, `lemnos-fusion` and the
       client queue in `lemnosd`. Options and a recommendation; nothing moved.
 
-Open:
+Done (2026-11-02, the follow-up above):
 
-- [ ] **USB watch on the single hotplug watcher (Linux).** Why: one watcher for Lemnos and the
-      camera stack. Blocked by a dependency cycle: `lemnos-linux` (feature `usb`) depends on
-      `lemnos-usb`, so `lemnos-usb` cannot use `DeviceWatcher`, which is in `lemnos-linux`
-      (`device_watch`, `uevent`, `util`, and `LinuxPaths`). Done when: that core sits in a crate
-      below `lemnos-usb` (a new `lemnos-hotplug`, or `lemnos-linux-sys`), `lemnos_usb::watch()` on
-      Linux is a `DeviceWatcher` with the `usb` subsystem and `usb_device` devtype, and nusb's watch
-      stays for Windows and macOS. Needs a decision on where the crate goes.
-- [ ] **USB buffers from the DMA basics.** Why: a camera stack's isochronous frames should land
-      without copies. Not done: usbdevfs's `mmap` path (`USBDEVFS_CAP_MMAP`) needs an opened device
-      to test, and no device may be opened on this host. Done when: page-aligned USB buffers, the
-      capability read, and the mmap-backed path (with the Vec fallback) are written and tested on
-      a board. Isochronous streams still allocate per call (`submit_isochronous_in` takes a `Vec`).
-
+- [x] **USB watch on the single hotplug watcher (Linux).** The watcher core is the crate
+      `lemnos-uevent` (below `lemnos-linux` and `lemnos-usb`, which both use it), and `lemnos-usb`'s
+      `watch()` on Linux is a `DeviceWatcher` filtered to `usb` devices. nusb's watch stays for
+      Windows and macOS. Untested on a device (host tests cover the devpath rule only).
+- [x] **USB buffers from the DMA basics.** `UsbDevice::allocate_buffer` returns a usbdevfs mapping
+      (`USBDEVFS_CAP_MMAP`, page-aligned, used by the host controller directly) and falls back to
+      a heap vector when the kernel has no mapping or the mapping fails. Streams allocate their
+      slots once and recycle them; `IsoReader` reuses its buffers and packet lengths. **Untested on
+      a device:** written from the usbdevfs interface, never run against hardware, and not opened on
+      this host. Host tests cover the page rounding, the heap buffer and the packet lengths. The
+      completion path still builds one packet table per isochronous transfer.

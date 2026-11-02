@@ -98,12 +98,12 @@ fn classifies_errno_failures() {
 #[test]
 fn outcome_reports_the_bytes_that_moved() {
     let outcome = TransferOutcome {
-        buffer: vec![1, 2, 3, 4],
+        buffer: crate::TransferBuffer::from_vec(vec![1, 2, 3, 4]),
         actual_length: 2,
         packets: Vec::new(),
     };
     assert_eq!(outcome.data(), &[1, 2]);
-    assert_eq!(outcome.into_buffer(), vec![1, 2, 3, 4]);
+    assert_eq!(outcome.into_buffer().into_vec(), vec![1, 2, 3, 4]);
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn a_transfer_resolves_when_completed_from_another_thread() {
     let handle = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(10));
         completer.complete(Ok(TransferOutcome {
-            buffer: vec![7; 3],
+            buffer: crate::TransferBuffer::from_vec(vec![7; 3]),
             actual_length: 3,
             packets: Vec::new(),
         }));
@@ -160,7 +160,7 @@ fn a_timed_out_wait_returns_the_transfer_still_in_flight() {
     };
     assert!(!transfer.is_complete());
     shared.complete(Ok(TransferOutcome {
-        buffer: Vec::new(),
+        buffer: crate::TransferBuffer::from_vec(Vec::new()),
         actual_length: 0,
         packets: Vec::new(),
     }));
@@ -228,7 +228,7 @@ fn a_zero_packet_is_needed_exactly_when_the_total_ends_on_a_packet_boundary() {
 fn a_worker_transfer_resolves_with_the_outcome_of_its_work() {
     let transfer = Transfer::from_worker(|| {
         Ok(TransferOutcome {
-            buffer: vec![9, 8, 7],
+            buffer: crate::TransferBuffer::from_vec(vec![9, 8, 7]),
             actual_length: 2,
             packets: Vec::new(),
         })
@@ -248,7 +248,7 @@ fn a_worker_transfer_is_awaited_as_a_future() {
     let mut transfer = Transfer::from_worker(|| {
         std::thread::sleep(Duration::from_millis(10));
         Ok(TransferOutcome {
-            buffer: vec![1],
+            buffer: crate::TransferBuffer::from_vec(vec![1]),
             actual_length: 1,
             packets: Vec::new(),
         })
@@ -274,4 +274,27 @@ fn the_device_descriptor_comes_from_the_blob_without_a_request() {
     let descriptor = crate::DeviceDescriptor::from_bytes(&blob).unwrap();
     assert_eq!(descriptor.num_configurations, 1);
     assert_eq!(configurations_from_blob(&blob).unwrap().len(), 1);
+}
+
+#[test]
+fn iso_packets_split_a_transfer_with_a_shorter_last_packet() {
+    use crate::device::iso_packet_lengths;
+    assert_eq!(iso_packet_lengths(1000, 300), vec![300, 300, 300, 100]);
+    assert_eq!(iso_packet_lengths(900, 300), vec![300, 300, 300]);
+    assert_eq!(iso_packet_lengths(7, 1024), vec![7], "one short packet");
+    assert_eq!(iso_packet_lengths(3072, 1024).iter().sum::<u32>(), 3072);
+}
+
+#[test]
+fn a_transfer_buffer_holds_its_bytes_and_grows_and_shrinks_in_place() {
+    use crate::TransferBuffer;
+    let mut buffer = TransferBuffer::from_vec(vec![1, 2, 3, 4]);
+    assert_eq!(buffer.len(), 4);
+    assert!(!buffer.is_mapped());
+    buffer.set_len(2);
+    assert_eq!(buffer.as_slice(), &[1, 2]);
+    buffer.set_len(4);
+    assert_eq!(buffer.as_slice(), &[1, 2, 0, 0], "growing zero-fills");
+    buffer.as_mut_slice()[3] = 9;
+    assert_eq!(buffer.into_vec(), vec![1, 2, 0, 9]);
 }

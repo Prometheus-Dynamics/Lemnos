@@ -424,7 +424,7 @@ mod usb {
         match sink {
             Some(dst) => {
                 let n = moved.min(dst.len());
-                dst[..n].copy_from_slice(&outcome.buffer[..n]);
+                dst[..n].copy_from_slice(&outcome.buffer.as_slice()[..n]);
                 Ok(Completion { bytes: n })
             }
             None => Ok(Completion { bytes: moved }),
@@ -470,11 +470,11 @@ mod usb {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use lemnos_usb::IsoPacket;
+        use lemnos_usb::{IsoPacket, TransferBuffer};
 
         fn outcome(buffer: Vec<u8>, actual_length: usize) -> TransferOutcome {
             TransferOutcome {
-                buffer,
+                buffer: TransferBuffer::from_vec(buffer),
                 actual_length,
                 packets: Vec::<IsoPacket>::new(),
             }

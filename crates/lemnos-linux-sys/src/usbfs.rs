@@ -10,6 +10,7 @@
 //! caller's tag, which the header carries in its `usercontext` field.
 
 use crate::ioctl::{ioctl_int, ioctl_ptr};
+use crate::mmap::Mapping;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -45,6 +46,10 @@ const URB_TYPE_INTERRUPT: u8 = 1;
 const URB_TYPE_BULK: u8 = 3;
 /// `USBDEVFS_URB_ISO_ASAP`: start isochronous URBs at the next free frame.
 const URB_ISO_ASAP: u32 = 0x2;
+/// `USBDEVFS_CAP_MMAP`: the device file can be mapped, and each mapping is
+/// memory the URBs can use as DMA buffers (no copy into a kernel bounce buffer).
+pub const CAP_MMAP: u32 = 0x20;
+
 /// `USBDEVFS_URB_ZERO_PACKET`: an OUT bulk or interrupt URB whose length is a
 /// multiple of the endpoint's packet size ends with a zero-length packet, so
 /// the device sees the end of the transfer.
@@ -180,7 +185,7 @@ pub struct UrbCompletion {
     /// The tag given at submission.
     pub tag: u64,
     /// The buffer submitted, holding the data an IN transfer received.
-    pub buffer: Vec<u8>,
+    pub buffer: UrbBuffer,
     /// Zero, or a negative errno.
     pub status: i32,
     /// The bytes moved.
@@ -189,18 +194,121 @@ pub struct UrbCompletion {
     pub packets: Vec<IsoPacket>,
 }
 
+/// The memory a URB transfers to or from, owned by the caller until the URB
+/// is submitted and by the table while it is in flight.
+pub enum UrbBuffer {
+    /// Heap memory. The kernel maps it for DMA for the transfer's duration.
+    Heap(Vec<u8>),
+    /// Memory from [`UsbfsFile::map_buffer`]: a usbdevfs mapping, page-aligned,
+    /// usable directly as URB memory (`CAP_MMAP`). `len` is the bytes in use.
+    Mapped {
+        /// The mapping (a whole number of pages).
+        mapping: Mapping,
+        /// Bytes of the mapping the transfer uses.
+        len: usize,
+    },
+}
+
+impl std::fmt::Debug for UrbBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UrbBuffer")
+            .field("len", &self.len())
+            .field("mapped", &self.is_mapped())
+            .finish()
+    }
+}
+
+impl UrbBuffer {
+    /// Bytes in use.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Heap(bytes) => bytes.len(),
+            Self::Mapped { len, .. } => *len,
+        }
+    }
+
+    /// Whether no bytes are in use.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Bytes available: the whole mapping, or the heap buffer's length.
+    pub fn capacity(&self) -> usize {
+        match self {
+            Self::Heap(bytes) => bytes.len(),
+            Self::Mapped { mapping, .. } => mapping.len(),
+        }
+    }
+
+    /// Whether the memory is a usbdevfs mapping.
+    pub fn is_mapped(&self) -> bool {
+        matches!(self, Self::Mapped { .. })
+    }
+
+    /// The bytes in use.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Heap(bytes) => bytes,
+            Self::Mapped { mapping, len } => &mapping.as_slice()[..*len],
+        }
+    }
+
+    /// The bytes in use, for writing before submission.
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Heap(bytes) => bytes,
+            Self::Mapped { mapping, len } => &mut mapping.as_mut_slice()[..*len],
+        }
+    }
+
+    /// Sets the bytes in use. A heap buffer grows with zeros or shrinks; a
+    /// mapping is clamped to its length.
+    pub fn set_len(&mut self, new_len: usize) {
+        match self {
+            Self::Heap(bytes) => bytes.resize(new_len, 0),
+            Self::Mapped { mapping, len } => *len = new_len.min(mapping.len()),
+        }
+    }
+
+    /// The memory as a heap vector: the buffer itself, or a copy of a mapping's bytes.
+    pub fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Heap(bytes) => bytes,
+            Self::Mapped { mapping, len } => mapping.as_slice()[..len].to_vec(),
+        }
+    }
+
+    fn data_ptr(&mut self) -> *mut u8 {
+        match self {
+            Self::Heap(bytes) => bytes.as_mut_ptr(),
+            Self::Mapped { mapping, .. } => mapping.as_mut_slice().as_mut_ptr(),
+        }
+    }
+}
+
+/// The bytes a usbdevfs mapping of `len` bytes needs: `len` rounded up to whole
+/// pages (`page` bytes each). A zero length still takes one page.
+pub fn mapping_len(len: usize, page: usize) -> usize {
+    let page = page.max(1);
+    len.max(1).div_ceil(page) * page
+}
+
 /// The URB memory the kernel holds for one submission.
 struct InFlight {
     /// The header, then the isochronous descriptors, in 8-byte words.
     block: Vec<u64>,
-    buffer: Vec<u8>,
+    buffer: UrbBuffer,
     packets: usize,
 }
+
+/// Header blocks kept for reuse: a steady stream of submissions allocates none.
+const SPARE_BLOCKS: usize = 16;
 
 /// An open usbdevfs device file, and the URBs in flight on it.
 pub struct UsbfsFile {
     file: File,
     urbs: Mutex<HashMap<u64, InFlight>>,
+    spare: Mutex<Vec<Vec<u64>>>,
 }
 
 impl UsbfsFile {
@@ -210,6 +318,7 @@ impl UsbfsFile {
         Ok(Self {
             file,
             urbs: Mutex::new(HashMap::new()),
+            spare: Mutex::new(Vec::new()),
         })
     }
 
@@ -430,7 +539,7 @@ impl UsbfsFile {
         tag: u64,
         kind: UrbKind,
         endpoint: u8,
-        mut buffer: Vec<u8>,
+        mut buffer: UrbBuffer,
         packet_lengths: &[u32],
         zero_packet: bool,
     ) -> io::Result<()> {
@@ -456,7 +565,7 @@ impl UsbfsFile {
         })?;
 
         let words = (HEADER_LEN + packets * ISO_DESC_LEN).div_ceil(size_of::<u64>());
-        let mut block = vec![0u64; words];
+        let mut block = self.take_block(words);
         let base = block.as_mut_ptr().cast::<u8>();
         let header = UrbHeader {
             kind: match kind {
@@ -467,7 +576,7 @@ impl UsbfsFile {
             endpoint,
             status: 0,
             flags,
-            buffer: buffer.as_mut_ptr().cast(),
+            buffer: buffer.data_ptr().cast(),
             buffer_length,
             actual_length: 0,
             start_frame: 0,
@@ -522,6 +631,46 @@ impl UsbfsFile {
         Ok(())
     }
 
+    /// A zeroed header block of `words` words, from the spare list when there is one.
+    fn take_block(&self, words: usize) -> Vec<u64> {
+        let mut block = self
+            .spare
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .unwrap_or_default();
+        block.clear();
+        block.resize(words, 0);
+        block
+    }
+
+    fn give_block(&self, block: Vec<u64>) {
+        let mut spare = self
+            .spare
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if spare.len() < SPARE_BLOCKS {
+            spare.push(block);
+        }
+    }
+
+    /// Whether the kernel lets this device file map DMA buffers (`CAP_MMAP`).
+    pub fn has_mmap(&self) -> io::Result<bool> {
+        Ok(self.capabilities()? & CAP_MMAP != 0)
+    }
+
+    /// Maps a buffer of `len` bytes (rounded up to whole pages) for URBs. The
+    /// kernel allocates the memory with each mapping; it is released when the
+    /// mapping is dropped, which the table never does while a URB uses it.
+    pub fn map_buffer(&self, len: usize) -> io::Result<UrbBuffer> {
+        // SAFETY: `sysconf` takes no pointers and only reads the page size.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page = usize::try_from(page).unwrap_or(4096);
+        let mapped = mapping_len(len, page);
+        let mapping = Mapping::new(self.file.as_fd(), mapped, 0, true)?;
+        Ok(UrbBuffer::Mapped { mapping, len })
+    }
+
     /// Waits for the next completed URB (`blocking`) or returns `None` at once
     /// when none has completed.
     pub fn reap(&self, blocking: bool) -> io::Result<Option<UrbCompletion>> {
@@ -549,9 +698,11 @@ impl UsbfsFile {
         // SAFETY: as above.
         let actual_length = unsafe { (*header).actual_length };
         let packets = read_packets(&in_flight);
+        let InFlight { block, buffer, .. } = in_flight;
+        self.give_block(block);
         Ok(Some(UrbCompletion {
             tag,
-            buffer: in_flight.buffer,
+            buffer,
             status,
             actual_length: usize::try_from(actual_length).unwrap_or(0),
             packets,
@@ -622,6 +773,31 @@ pub struct ControlSetup {
 #[cfg(all(test, target_pointer_width = "64"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapped_buffers_round_up_to_whole_pages_and_the_heap_grows() {
+        assert_eq!(CAP_MMAP, 0x20);
+        assert_eq!(
+            mapping_len(0, 4096),
+            4096,
+            "a zero length still takes a page"
+        );
+        assert_eq!(mapping_len(1, 4096), 4096);
+        assert_eq!(mapping_len(4096, 4096), 4096);
+        assert_eq!(mapping_len(4097, 4096), 8192);
+        assert_eq!(
+            mapping_len(10, 0),
+            10,
+            "a zero page size is treated as one byte"
+        );
+        let mut heap = UrbBuffer::Heap(vec![7; 4]);
+        assert_eq!(heap.len(), 4);
+        assert!(!heap.is_mapped());
+        heap.set_len(6);
+        assert_eq!(heap.as_slice(), &[7, 7, 7, 7, 0, 0]);
+        heap.set_len(1);
+        assert_eq!(heap.into_vec(), vec![7]);
+    }
 
     #[test]
     fn urb_flags_carry_the_zero_packet_bit_on_out_bulk_and_interrupt_only() {

@@ -211,6 +211,7 @@ dependencies = [
  "lemnos-discovery",
  "lemnos-hal",
  "lemnos-linux-sys",
+ "lemnos-uevent",
 ]
 
 [[package]]
@@ -247,6 +248,13 @@ name = "lemnos-size-linux"
 version = "0.0.0"
 dependencies = [
  "lemnos",
+]
+
+[[package]]
+name = "lemnos-uevent"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
 ]
 
 [[package]]
