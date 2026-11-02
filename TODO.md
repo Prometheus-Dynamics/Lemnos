@@ -113,6 +113,18 @@ commit: fmt, clippy -D warnings, tests, and the size images.
 
 ### Done
 
+- [x] **DMA buffer basics as library code** (dbc5df4, c38ef59): dma-heap allocation, dma-buf
+      CPU-access sync, RAII mappings, names and sync-file fences in `lemnos-linux` (feature `dma`),
+      over `lemnos-linux-sys`. Host-tested against the system heap; written, untested on board
+      (CMA and vendor heaps, the board kernel's fences). `docs/dma.md`.
+- [x] **A generic bus and DMA-engine transfer interface** (dbc5df4): `lemnos_bus::transfer::TransferEngine`
+      (submit, poll, wait, cancel) over memory or dma-bufs; SPI (`SpidevEngine`) and I2C (`I2cEngine`)
+      engines. Written, untested on board. Planned, not implemented: USB bulk (its hook is this
+      trait), PCIe DMA, RP1 DMA. `docs/dma.md`.
+- [x] **V4L2 memory-to-memory sessions** (5fa1379): `lemnos_linux::v4l2::m2m::M2mSession` (feature
+      `v4l2-m2m`): formats, MMAP and dma-buf queues, streaming, poll, drains, events. Host-tested against
+      vim2m and vicodec; written, untested on board (hardware 2D and codec devices). `docs/m2m.md`.
+
 - [x] Design: [docs/foundation.md](docs/foundation.md).
 - [x] `lemnos-hal`: embedded-hal 1.0 + async re-exported; `RegisterBus`
       (blocking + async), `I2cRegisters`, `SpiRegisters`; `Regulator`,
@@ -222,17 +234,6 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
       on Windows, report whether WinUSB is bound so the tool can offer to install it.
 - [ ] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
       Done when: a single watcher serves Lemnos and the camera stack.
-- [ ] **DMA buffer basics as library code.** Why: consumers need buffer allocation and sync
-      without a separate memory layer. Done when: dma-heap allocation, dmabuf sync, mapping and
-      fences are in the library.
-- [ ] **A generic bus and DMA-engine transfer interface.** Why: USB bulk, PCIe DMA, SPI/I2C and
-      general DMA controllers need one way to start and finish a transfer. Done when: the
-      interface covers all of them; lemnosd arbitrates ownership and is never in the data path;
-      pools and data-movement decisions stay with consumers.
-- [ ] **V4L2 memory-to-memory sessions.** Why: the 2D unit binding (in the compute library) and
-      the camera stack's codecs both drive V4L2 M2M devices. Agreed 2026-11-02: the M2M session
-      (open, formats, dma-buf import, queue/dequeue) moves here; the 2D binding and the codecs
-      build on it. Done when: one M2M session type serves both, with dma-buf import and no copies.
 - [ ] **Accelerator transports.** Why: accelerators sit on PCIe/MMIO and USB. Done when: PCIe and
       MMIO access works through vfio, and USB devices can load firmware and re-enumerate.
 - [ ] **Scope line.** Lemnos is user-space hardware access. It is not a memory manager, does not
