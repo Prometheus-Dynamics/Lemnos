@@ -324,12 +324,25 @@ impl AsFd for SyncFence {
 /// Waits on a sync file (or any descriptor that polls as one) until it
 /// signals or `timeout` passes (`None`: forever). Returns whether it signalled.
 /// A fence whose work failed is an error. Borrowed form of [`SyncFence::wait`].
+///
+/// A descriptor that is not a sync file can hang up or be invalid without ever
+/// becoming readable (`POLLHUP` or `POLLNVAL` with no `POLLIN`). That is an
+/// error at once, not "not signalled" for the whole timeout.
 pub fn wait_fence(fd: BorrowedFd<'_>, timeout: Option<Duration>) -> io::Result<bool> {
     let revents = poll::poll_one(fd, poll::POLLIN, timeout)?;
     if revents & poll::POLLERR != 0 {
         return Err(io::Error::other("the fence's work failed"));
     }
-    Ok(revents & poll::POLLIN != 0)
+    if revents & poll::POLLIN != 0 {
+        return Ok(true);
+    }
+    if revents & (poll::POLLHUP | poll::POLLNVAL) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a sync_file: the descriptor hung up or is invalid",
+        ));
+    }
+    Ok(false)
 }
 
 /// Whether a sync file has signalled, without waiting. Borrowed form of
@@ -500,5 +513,33 @@ mod tests {
         let mut byte = [0u8; 1];
         std::io::Read::read_exact(&mut reader, &mut byte).unwrap();
         assert!(!fence_is_signaled(reader.as_fd()).unwrap());
+    }
+
+    /// A sync file that can never signal (a pipe whose writer has gone) fails
+    /// at once: it hangs up without becoming readable, and that is not "not
+    /// signalled". The owned and borrowed forms agree.
+    #[test]
+    fn fence_wait_outcomes_for_a_hung_up_descriptor() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(writer);
+        let started = std::time::Instant::now();
+        let err = wait_fence(reader.as_fd(), Some(Duration::from_secs(5)))
+            .expect_err("a hung-up descriptor is not a fence");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(started.elapsed() < Duration::from_secs(2), "fails at once");
+        assert!(fence_is_signaled(reader.as_fd()).is_err());
+        let owned = SyncFence::from_fd(OwnedFd::from(reader));
+        assert!(owned.wait(Some(Duration::from_secs(5))).is_err());
+        assert!(owned.is_signaled().is_err());
+    }
+
+    /// Data still buffered behind a closed writer is readable: a fence that
+    /// reads true, not an error.
+    #[test]
+    fn a_hung_up_pipe_with_data_is_readable_not_an_error() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(b"x").unwrap();
+        drop(writer);
+        assert!(wait_fence(reader.as_fd(), Some(Duration::ZERO)).unwrap());
     }
 }
