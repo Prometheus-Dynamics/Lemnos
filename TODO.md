@@ -119,8 +119,8 @@ commit: fmt, clippy -D warnings, tests, and the size images.
       (CMA and vendor heaps, the board kernel's fences). `docs/dma.md`.
 - [x] **A generic bus and DMA-engine transfer interface** (dbc5df4): `lemnos_bus::transfer::TransferEngine`
       (submit, poll, wait, cancel) over memory or dma-bufs; SPI (`SpidevEngine`) and I2C (`I2cEngine`)
-      engines. Written, untested on board. Planned, not implemented: USB bulk (its hook is this
-      trait), PCIe DMA, RP1 DMA. `docs/dma.md`.
+      engines. Written, untested on board. USB bulk is done (`UsbBulkEngine`, feature `usb`, below).
+      Planned, not implemented: PCIe DMA, RP1 DMA. `docs/dma.md`.
 - [x] **V4L2 memory-to-memory sessions** (5fa1379): `lemnos_linux::v4l2::m2m::M2mSession` (feature
       `v4l2-m2m`): formats, MMAP and dma-buf queues, streaming, poll, drains, events. Host-tested against
       vim2m and vicodec; written, untested on board (hardware 2D and codec devices). `docs/m2m.md`.
@@ -236,10 +236,9 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
       *Untested on hardware:* every Linux runtime path (descriptor reads, claims, transfers,
       URB completion, isochronous streams, reattach after detach) and every Windows and macOS
       runtime path. This host's devices allow no open for this user; the probe covered the
-      permission path only. *Follow-up:* wire USB bulk into the transfer interface
-      (`lemnos_bus::transfer::TransferEngine`, dbc5df4) as a small step; the USB watch should
-      move onto the single hotplug watcher once it lands; USB buffers should come from the DMA
-      buffer basics (not page-aligned yet).
+      permission path only. *Follow-up, now done:* USB bulk is a `TransferEngine`
+      (`lemnos_linux::transfer::UsbBulkEngine`, feature `usb`). Still open: the USB watch on the
+      single hotplug watcher, and USB buffers from the DMA basics (see the next two items).
 - [x] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
       Done when: a single watcher serves Lemnos and the camera stack. (8669d26:
       `lemnos_linux::device_watch::DeviceWatcher`, netlink, inotify or rescan; Lemnos's
@@ -253,3 +252,51 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
       algorithms), which compute on data rather than access hardware; `lemnosd`'s frame fan-out
       policy (`clients.rs`, one shared `Rc` per reading); look names with a product prefix in README.md
       and docs/looks.md.
+
+## Layer follow-ups (2026-11-02)
+
+Done, on dev:
+
+- [x] **M2M crop and device query** (6cdc68b): `QueueSetup::crop` (`S_SELECTION`, crop target,
+      after `S_FMT` and before `REQBUFS`), `output_crop()` / `capture_crop()`,
+      `M2mSession::set_output_crop`, `lemnos_linux::v4l2::query(path)` (read-only `QUERYCAP`) and
+      `find_m2m(driver)`. Host-tested only as far as vim2m allows: this kernel's vim2m has no
+      selection operation (`ENOTTY`), so the crop's success path is untested here. `docs/m2m.md`.
+- [x] **USB for flashing tools** (d4d333a): `UsbDevice::device_descriptor()` (no request: the
+      blob's first 18 bytes on Linux, nusb's cached copy elsewhere), `usb_version()` and
+      `device_version()` on the listing, zero-length bulk OUT, `BulkWriter::flush_end()` (the ZLP
+      on a packet boundary), `submit_bulk_out_zlp` (`URB_ZERO_PACKET`, Linux), and the control
+      futures `submit_control_in` / `submit_control_out`. Untested on hardware. `docs/usb.md`.
+- [x] **DMA borrowed forms** (92d8047): `DmaBufRef`, `DmaBuf::borrow()`, `wait_fence` and
+      `fence_is_signaled` over a borrowed descriptor, and a size query that leaves the caller's
+      offset where it was (no dup). `docs/dma.md`.
+- [x] **USB bulk as a transfer engine** (`lemnos-linux::transfer::UsbBulkEngine`, feature `usb`):
+      asynchronous, the ticket holds the URB; the caller's buffers are copied at submit and at
+      settle, so a dropped ticket never writes the caller's memory. Host-tested on the settle
+      logic and the error mapping. Untested on hardware. `docs/dma.md`.
+- [x] **Product names out of Lemnos** (8d559f2): the built-in looks named for one consumer are
+      generic (`detect.*`, `link.*`; CHANGELOG has the mapping), the example board is `sample-board`,
+      and the checker self-tests known leaks against its allowlist. Left for the user (allowlisted):
+      the lemnosd test fixture copied from a device package, the systemd unit's `Before=` names, and
+      the built-in look-writer client-name policy.
+- [x] **Flaky PWM test** (b6884fd): the sysfs harness published a channel before its
+      attributes existed; it now renames a staged channel into place. Forced window: 5 of 5 failed;
+      fixed: 200 of 200 under load.
+- [x] **Scope overlaps note** (`docs/scope-overlaps.md`): `lemnos-light`, `lemnos-fusion` and the
+      client queue in `lemnosd`. Options and a recommendation; nothing moved.
+
+Open:
+
+- [ ] **USB watch on the single hotplug watcher (Linux).** Why: one watcher for Lemnos and the
+      camera stack. Blocked by a dependency cycle: `lemnos-linux` (feature `usb`) depends on
+      `lemnos-usb`, so `lemnos-usb` cannot use `DeviceWatcher`, which is in `lemnos-linux`
+      (`device_watch`, `uevent`, `util`, and `LinuxPaths`). Done when: that core sits in a crate
+      below `lemnos-usb` (a new `lemnos-hotplug`, or `lemnos-linux-sys`), `lemnos_usb::watch()` on
+      Linux is a `DeviceWatcher` with the `usb` subsystem and `usb_device` devtype, and nusb's watch
+      stays for Windows and macOS. Needs a decision on where the crate goes.
+- [ ] **USB buffers from the DMA basics.** Why: a camera stack's isochronous frames should land
+      without copies. Not done: usbdevfs's `mmap` path (`USBDEVFS_CAP_MMAP`) needs an opened device
+      to test, and no device may be opened on this host. Done when: page-aligned USB buffers, the
+      capability read, and the mmap-backed path (with the Vec fallback) are written and tested on
+      a board. Isochronous streams still allocate per call (`submit_isochronous_in` takes a `Vec`).
+

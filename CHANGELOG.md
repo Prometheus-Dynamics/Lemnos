@@ -8,6 +8,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- V4L2 M2M crop: `QueueSetup::crop` sets the crop rectangle (`VIDIOC_S_SELECTION`, crop target) after the format and before the buffers; `output_crop()` and `capture_crop()` return what the driver kept; `M2mSession::set_output_crop` changes it between frames. `lemnos_linux::v4l2::query(path)` reads a node's capabilities without a session, and `find_m2m(driver)` finds the first M2M node of a driver. `Capability::is_m2m()` and `is_m2m_multiplanar()`. `docs/m2m.md`.
+- USB for flashing tools (`lemnos-usb`): `UsbDevice::device_descriptor()` (the 18-byte device descriptor, read at open with no request), `UsbDeviceInfo::usb_version()` and `device_version()` at listing time, zero-length bulk OUT transfers, `BulkWriter::flush_end()` (sends the zero-length packet when the bytes end on a packet boundary), `submit_bulk_out_zlp` (usbdevfs `URB_ZERO_PACKET`, Linux), and the control futures `submit_control_in` and `submit_control_out`. `docs/usb.md`.
+- USB bulk transfer engine: `lemnos_linux::transfer::UsbBulkEngine` (feature `usb`), a `TransferEngine` over one bulk endpoint, asynchronous (the ticket holds the URB).
+- DMA borrowed descriptors: `DmaBufRef` (over a `BorrowedFd`, with `DmaBuf::borrow()`), `wait_fence` and `fence_is_signaled` over a borrowed sync file. `docs/dma.md`.
+- `docs/scope-overlaps.md`: the light engine, the IMU fusion crate and the client queue in `lemnosd`, with options and a recommendation. Nothing moved.
+
 - DMA buffers in `lemnos-linux` (feature `dma`): dma-heap allocation (`dma::DmaHeap`, `DmaBuf`), dma-buf CPU-access sync, RAII mappings (`Mapping`), buffer names, and sync-file fences (`SyncFence`: export, import, poll). Pure Rust over `lemnos-linux-sys`; the kernel's sync-file calls report `Unsupported` where missing. `docs/dma.md`.
 - A transfer interface for buses and DMA engines, `lemnos_bus::transfer::TransferEngine` (submit, poll, wait, cancel), over memory or dma-bufs, with the synchronous SPI (`SpidevEngine`) and I2C (`I2cEngine`) engines in `lemnos-linux::transfer`. USB bulk, PCIe DMA and RP1 DMA are planned engines, not implemented (`docs/dma.md`).
 - V4L2 memory-to-memory sessions in `lemnos-linux` (feature `v4l2-m2m`): `v4l2::m2m::M2mSession` opens a memory-to-memory node, sets the output and capture formats (single- or multi-planar), requests MMAP or dma-buf buffers, queues and dequeues by index without blocking, streams, polls, drains (`Drain::Encoder`, `Drain::Decoder`) and subscribes to events. `docs/m2m.md`.
@@ -36,6 +42,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `DmaBuf::from_fd` and the borrowed form leave the caller's file offset where it was (the size query used to seek a dup, which shares the offset). dma-bufs answer only `SEEK_END` and `SEEK_SET`, which the query handles.
+- The runtime's PWM sysfs test harness publishes a channel whole (staged, then renamed into place), so a read never sees a channel without its attributes. The test failed under load before; it passes 200 of 200 under load after.
 - The INA2xx drivers read a poll in one I2C transaction (a pointer write and a read per register, joined by repeated starts) instead of one transaction per register. The datasheets do not auto-increment the register pointer on reads, so a single burst across registers is not used.
 - The BMM150 no longer feeds a repeated conversion to its calibration. When the data-ready bit is clear (no new conversion since the last read), a read repeats the last conversion's channels, so the compass does not flicker between polls; before the first conversion after `init` it reports `NO_VALUE`.
 - Calibration timers are wall time, not sample counts. lemnosd gives each read its boot-clock time (`Sensor::set_clock_us`), so a 10 Hz board reaches the same gyro and accelerometer confidence in the same ~60 s as a 100 Hz one. Still windows, the fit's dwell and cadence, the forgetting, the routines' dwell and the gap rule are all in time; the read rate and the CPU cost are unchanged.
