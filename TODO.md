@@ -229,6 +229,10 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
       general DMA controllers need one way to start and finish a transfer. Done when: the
       interface covers all of them; lemnosd arbitrates ownership and is never in the data path;
       pools and data-movement decisions stay with consumers.
+- [ ] **V4L2 memory-to-memory sessions.** Why: the 2D unit binding (in the compute library) and
+      the camera stack's codecs both drive V4L2 M2M devices. Agreed 2026-11-02: the M2M session
+      (open, formats, dma-buf import, queue/dequeue) moves here; the 2D binding and the codecs
+      build on it. Done when: one M2M session type serves both, with dma-buf import and no copies.
 - [ ] **Accelerator transports.** Why: accelerators sit on PCIe/MMIO and USB. Done when: PCIe and
       MMIO access works through vfio, and USB devices can load firmware and re-enumerate.
 - [ ] **Scope line.** Lemnos is user-space hardware access. It is not a memory manager, does not
