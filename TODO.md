@@ -214,7 +214,12 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
 - [ ] **One USB transport.** Why: Lemnos (rusb over libusb today), a flashing tool's USB boot
       code (nusb) and a camera stack's UVC access (raw usbdevfs) each talk to USB separately.
       Done when: one USB layer serves all three and also builds for Windows and macOS; libusb is
-      removed from the dependency tree.
+      removed from the dependency tree. The flashing tool's needs, from nusb 0.2.7 (2026-11-02):
+      listing with vid/pid, serial and strings, plus bus id and port chain as a stable location;
+      hotplug watch; open, active configuration and endpoint lookup; interface claim (detach the
+      kernel driver on Linux; plain claim on macOS); vendor control in/out; async bulk in/out with
+      buffered bulk streaming; error kinds permission denied, busy, disconnected, unsupported;
+      on Windows, report whether WinUSB is bound so the tool can offer to install it.
 - [ ] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
       Done when: a single watcher serves Lemnos and the camera stack.
 - [ ] **DMA buffer basics as library code.** Why: consumers need buffer allocation and sync
