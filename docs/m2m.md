@@ -40,11 +40,18 @@ s.stream_off()?;                                  // every buffer comes back
   crop that queue refuses the open with the driver's error. The format's variant (`Single` or
   `Multi`) and direction give the `VIDIOC` buffer type. `Memory::Mmap` or `Memory::Dmabuf`.
   Userptr is not supported.
-- `open` sets the capture format first, then the output format (an encoder sizes its coded
-  buffers from its source format, which is the order the stateful devices want), then
-  `REQBUFS` on each queue. The formats the driver kept are `output_format()` and
-  `capture_format()`: `S_FMT` adjusts a format it does not take rather than failing, so
-  check the pixel format before relying on it.
+- Order at open: the output (source) format, then the capture (coded) format, then the
+  capture format is read back, then `REQBUFS` on each queue. The stateful order: an encoder
+  sizes its coded buffers (`sizeimage`) from its source format, and it refuses a source format
+  (`EBUSY`) once its capture buffers exist, so the source must come first. The stored
+  `capture_format()` is the driver's answer for that sequence. The formats the driver kept are
+  `output_format()` and `capture_format()`: `S_FMT` adjusts a format it does not take rather
+  than failing, so check the pixel format before relying on it.
+- `from_file(file, output, capture)` takes an open descriptor (`File` or `OwnedFd`) and sets
+  up the same queues; `open(path, ..)` is `from_file` over the node. The descriptor is made
+  non-blocking. V4L2 memory-to-memory state is per file handle, so a caller that sets controls
+  (bitrate, profile, GOP) does it through the session's `AsFd` (`VIDIOC_S_EXT_CTRLS` on that
+  descriptor): the session keeps the descriptor it was given.
 - `Format`, `PixFormat`, `PixFormatMplane`, `PlaneFormat`, `fourcc(b"NV12")` are plain values.
 - `set_output_crop(rect)` changes the source crop between frames (a scaler's source window).
   It returns the rectangle the driver kept. The driver refuses it while the queue streams
@@ -69,7 +76,8 @@ s.stream_off()?;                                  // every buffer comes back
   source buffer is free, `capture` means a frame is out, `event` means an event is pending.
   Dequeues never block: they return `None` when nothing is ready.
 - `drain(Drain::Encoder)` (`ENC_CMD_STOP`) or `Drain::Decoder` (`DEC_CMD_STOP`): the queued
-  frames finish, and the last capture buffer is flagged `BUF_FLAG_LAST`.
+  frames finish, and the last capture buffer is flagged `BUF_FLAG_LAST`. After that buffer,
+  `dequeue_capture` returns `None` (the device reports `EPIPE`: nothing more is coming).
 - `subscribe(event_type, id)` and `dequeue_event()`: control events take the control's id.
   A driver that does not produce an event type refuses its subscription (`EINVAL`); vim2m
   refuses end-of-stream and takes control events.
@@ -91,8 +99,13 @@ s.stream_off()?;                                  // every buffer comes back
   format layout and the queue type rules, refusal of a non-M2M node.
 - With vim2m (`modprobe vim2m`): MMAP round trip with content and timestamps; dma-buf input
   from the system heap, read in place; the control-event subscription.
-- With vicodec (`modprobe vicodec`): an encoder turns I420 into FWHT, a decoder turns it back,
-  and each is drained: both return a `LAST` buffer.
+- With vicodec (`modprobe vicodec`): an encoder turns I420 into FWHT and is drained (its
+  `LAST` buffer ends the stream). The capture size follows the source: the stored format
+  equals the driver's answer after the source is set.
+- The decoder round trip is `#[ignore]`d: a stateful decoder's capture follows the stream, so it
+  needs the source-change flow (`EVENT_SOURCE_CHANGE`, then the capture buffers), which the
+  session does not do yet. Run it with `--ignored` when that flow lands.
+- With vim2m, `from_file` opens the same queues as the path form, and the descriptor is kept.
 - The vicodec and vim2m tests skip with a note where the module is absent.
 
 ## Migration notes

@@ -50,7 +50,7 @@
 
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::time::Duration;
 
@@ -116,7 +116,8 @@ struct Queue {
 }
 
 impl Queue {
-    fn open(fd: BorrowedFd<'_>, setup: &QueueSetup, output: bool) -> io::Result<Self> {
+    /// Sets the queue's format (and crop). No buffers yet: see [`Queue::allocate`].
+    fn set_format(fd: BorrowedFd<'_>, setup: &QueueSetup, output: bool) -> io::Result<Self> {
         let buf_type = queue_type(&setup.format, output);
         let format = sys::s_fmt(fd, buf_type, &setup.format)?;
         if format.num_planes() != setup.format.num_planes() {
@@ -126,19 +127,45 @@ impl Queue {
             Some(rect) => Some(sys::s_selection(fd, buf_type, sys::SEL_TGT_CROP, rect)?),
             None => None,
         };
-        let wanted = setup.buffers.max(1);
-        let granted = sys::reqbufs(fd, buf_type, setup.memory, wanted)?.count;
+        Ok(Self {
+            buf_type,
+            memory: setup.memory,
+            format,
+            count: 0,
+            queued: 0,
+            maps: Vec::new(),
+            crop,
+        })
+    }
+
+    /// Reads the format back from the driver, after the other queue's format
+    /// was set: an encoder resizes its coded buffers (`sizeimage`) from the
+    /// source format, so the format set before it can be stale.
+    fn refresh_format(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
+        let format = sys::g_fmt(fd, self.buf_type)?;
+        if format.num_planes() != self.format.num_planes() {
+            return Err(invalid("the driver changed a queue's plane count".into()));
+        }
+        self.format = format;
+        Ok(())
+    }
+
+    /// Requests `buffers` buffers of the queue's memory kind and, for MMAP,
+    /// maps them.
+    fn allocate(&mut self, fd: BorrowedFd<'_>, buffers: u32) -> io::Result<()> {
+        let granted = sys::reqbufs(fd, self.buf_type, self.memory, buffers.max(1))?.count;
         if granted == 0 || granted > MAX_BUFFERS {
             return Err(invalid(format!(
                 "{granted} buffers granted (1 to {MAX_BUFFERS} supported)"
             )));
         }
-        let mut maps = Vec::new();
-        if setup.memory == Memory::Mmap {
-            let planes = format.num_planes() as u32;
-            maps.reserve(granted as usize);
+        self.count = granted;
+        self.maps.clear();
+        if self.memory == Memory::Mmap {
+            let planes = self.format.num_planes() as u32;
+            self.maps.reserve(granted as usize);
             for index in 0..granted {
-                let info = sys::querybuf(fd, buf_type, index, planes)?;
+                let info = sys::querybuf(fd, self.buf_type, index, planes)?;
                 let mut buffer = Vec::with_capacity(planes as usize);
                 for plane in info.planes.iter().take(planes as usize) {
                     buffer.push(Mapping::new(
@@ -148,18 +175,10 @@ impl Queue {
                         true,
                     )?);
                 }
-                maps.push(buffer);
+                self.maps.push(buffer);
             }
         }
-        Ok(Self {
-            buf_type,
-            memory: setup.memory,
-            format,
-            count: granted,
-            queued: 0,
-            maps,
-            crop,
-        })
+        Ok(())
     }
 
     fn planes(&self) -> u32 {
@@ -228,10 +247,8 @@ pub struct M2mSession {
 }
 
 impl M2mSession {
-    /// Opens the memory-to-memory device at `path` and sets up both queues:
-    /// the capture format first (encoders take the size of their coded buffers
-    /// from the source format, which is set after it), then the output format,
-    /// with the buffers asked for.
+    /// Opens the memory-to-memory device at `path` and sets up both queues (see
+    /// [`M2mSession::from_file`]).
     ///
     /// Fails with [`io::ErrorKind::InvalidInput`] when the node is not a
     /// memory-to-memory device, or when a queue's setup is refused.
@@ -241,16 +258,47 @@ impl M2mSession {
         capture: QueueSetup,
     ) -> io::Result<Self> {
         let file = sys::open_node(path.as_ref())?;
+        Self::from_file(file, output, capture)
+    }
+
+    /// Sets up both queues on an open device file (or any descriptor of one).
+    /// V4L2 memory-to-memory state is per file handle, so a caller that sets
+    /// controls (bitrate, profile, GOP) on the descriptor does it through
+    /// [`AsFd`] before or after this, and the session keeps the descriptor.
+    ///
+    /// The descriptor is made non-blocking, so dequeues return at once. Order:
+    /// the output (source) format, then the capture format, then the capture
+    /// format is read back (an encoder resizes its coded buffers, `sizeimage`,
+    /// from the source), and only then are the buffers requested. The formats the
+    /// driver kept are `capture_format()` and `output_format()`.
+    ///
+    /// Fails with [`io::ErrorKind::InvalidInput`] when the descriptor is not a
+    /// memory-to-memory device, or when a queue's setup is refused.
+    pub fn from_file(
+        file: impl Into<OwnedFd>,
+        output: QueueSetup,
+        capture: QueueSetup,
+    ) -> io::Result<Self> {
+        let file = File::from(file.into());
+        sys::set_nonblocking(file.as_fd())?;
         let capabilities = sys::querycap(file.as_fd())?;
-        let node = capabilities.node_caps();
-        if node & (sys::CAP_VIDEO_M2M | sys::CAP_VIDEO_M2M_MPLANE) == 0 {
+        if capabilities.node_caps() & (sys::CAP_VIDEO_M2M | sys::CAP_VIDEO_M2M_MPLANE) == 0 {
             return Err(invalid(format!(
-                "{} is not a memory-to-memory device",
-                path.as_ref().display()
+                "the descriptor is not a memory-to-memory device (driver {})",
+                capabilities.driver
             )));
         }
-        let capture_queue = Queue::open(file.as_fd(), &capture, false)?;
-        let output_queue = Queue::open(file.as_fd(), &output, true)?;
+        let fd = file.as_fd();
+        // The stateful order: the source (output) format first, then the coded
+        // (capture) format. An encoder sizes its coded buffers (`sizeimage`) from
+        // the source, and refuses a source format once its capture buffers exist
+        // (EBUSY). The capture format is read back after both are set, then the
+        // buffers are requested.
+        let mut output_queue = Queue::set_format(fd, &output, true)?;
+        let mut capture_queue = Queue::set_format(fd, &capture, false)?;
+        capture_queue.refresh_format(fd)?;
+        capture_queue.allocate(fd, capture.buffers)?;
+        output_queue.allocate(fd, output.buffers)?;
         Ok(Self {
             file,
             capabilities,
@@ -405,7 +453,9 @@ impl M2mSession {
     }
 
     /// Takes back a destination buffer holding a frame, or `None` when none
-    /// is ready. Read it with [`Self::capture_plane`], then queue it again.
+    /// is ready. After a drain, `None` also comes once the LAST buffer has been
+    /// taken (the device reports `EPIPE`: nothing more is coming). Read a
+    /// frame with [`Self::capture_plane`], then queue it again.
     pub fn dequeue_capture(&mut self) -> io::Result<Option<Dequeued>> {
         dequeue(self.file.as_fd(), &mut self.capture)
     }

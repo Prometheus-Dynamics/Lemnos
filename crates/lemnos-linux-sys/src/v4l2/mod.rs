@@ -361,6 +361,24 @@ pub fn open_node(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Makes a descriptor non-blocking (`O_NONBLOCK`), so a dequeue returns at once
+/// when nothing is ready. Already non-blocking descriptors are left alone.
+pub fn set_nonblocking(fd: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: `fcntl` with `F_GETFL` takes no pointer.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if flags & libc::O_NONBLOCK != 0 {
+        return Ok(());
+    }
+    // SAFETY: `fcntl` with `F_SETFL` takes an integer flag set.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Queries the node's capabilities (`VIDIOC_QUERYCAP`).
 pub fn querycap(fd: BorrowedFd<'_>) -> io::Result<Capability> {
     let mut raw = uapi::Capability::zeroed();
@@ -705,6 +723,9 @@ pub fn dqbuf(
     match unsafe { ioctl_ptr(fd, uapi::DQBUF, &raw mut raw) } {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        // EPIPE: the last buffer of a drained stream has been dequeued (its
+        // LAST flag said so), and nothing more is coming. Not an error.
+        Err(e) if e.raw_os_error() == Some(libc::EPIPE) => return Ok(None),
         Err(e) => return Err(e),
     }
     let mut bytes_used = [0u32; MAX_PLANES];
