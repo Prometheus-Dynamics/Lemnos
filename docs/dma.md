@@ -26,6 +26,7 @@ move data. A buffer is handed over as the same descriptor, never copied.
 | `import_fence(Access, &SyncFence)` | `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`: attaches a fence (read or write) |
 | `identity()` | the device and inode numbers, the same for every descriptor of one buffer (`fstat`, no dup) |
 | `SyncFence::wait(timeout)`, `is_signaled()` | polls the sync file; a fence whose work failed is an error |
+| `sync(fd: BorrowedFd, Phase::{Begin, End}, Access)` | brackets a CPU access (`DMA_BUF_IOCTL_SYNC` start or end) on a borrowed dma-buf; `DmaBufRef::begin_cpu_access` / `end_cpu_access` are the same on a borrowed view |
 | `wait_fence(fd: BorrowedFd, timeout)`, `fence_is_signaled(fd)` (a descriptor that hangs up or is invalid without becoming readable is `InvalidInput`, not "not signalled") | the same over a borrowed descriptor (any pollable one works, a sync file included), no owned `SyncFence` needed |
 
 `Access` is `Read`, `Write` or `ReadWrite`. A kernel without sync files reports

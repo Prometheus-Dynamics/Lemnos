@@ -170,13 +170,13 @@ impl DmaBuf {
     /// Starts a CPU access (`DMA_BUF_SYNC_START`): makes the device's writes
     /// visible to the CPU, or flushes the CPU's before a read by a device.
     pub fn begin_cpu_access(&self, access: Access) -> io::Result<()> {
-        dma_buf::sync(self.fd.as_fd(), dma_buf::SYNC_START | access.bits())
+        sync(self.fd.as_fd(), Phase::Begin, access)
     }
 
     /// Ends a CPU access (`DMA_BUF_SYNC_END`), handing the buffer back to the
     /// devices.
     pub fn end_cpu_access(&self, access: Access) -> io::Result<()> {
-        dma_buf::sync(self.fd.as_fd(), dma_buf::SYNC_END | access.bits())
+        sync(self.fd.as_fd(), Phase::End, access)
     }
 
     /// Names the buffer for debugging (shown in the kernel's dma-buf debug
@@ -237,6 +237,16 @@ pub struct DmaBufRef<'a> {
 }
 
 impl<'a> DmaBufRef<'a> {
+    /// Starts a CPU access through this borrowed descriptor; see [`DmaBuf::begin_cpu_access`].
+    pub fn begin_cpu_access(&self, access: Access) -> io::Result<()> {
+        sync(self.fd, Phase::Begin, access)
+    }
+
+    /// Ends a CPU access through this borrowed descriptor; see [`DmaBuf::end_cpu_access`].
+    pub fn end_cpu_access(&self, access: Access) -> io::Result<()> {
+        sync(self.fd, Phase::End, access)
+    }
+
     /// Borrows a dma-buf descriptor, reading its size from the kernel. The
     /// descriptor's file offset is left as it was.
     pub fn from_fd(fd: BorrowedFd<'a>) -> io::Result<Self> {
@@ -319,6 +329,27 @@ impl AsFd for SyncFence {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
+}
+
+/// Which end of a CPU access a [`sync`] call brackets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Phase {
+    /// The start of the access: the device's writes become visible to the CPU
+    /// (for a read), or the CPU's are flushed before a device reads.
+    Begin,
+    /// The end of the access: the buffer goes back to the devices.
+    End,
+}
+
+/// Brackets a CPU access to a dma-buf through a borrowed descriptor
+/// (`DMA_BUF_IOCTL_SYNC`): [`Phase::Begin`] before the CPU touches the mapping,
+/// [`Phase::End`] after. A descriptor that is not a dma-buf is an error.
+pub fn sync(fd: BorrowedFd<'_>, phase: Phase, access: Access) -> io::Result<()> {
+    let start_or_end = match phase {
+        Phase::Begin => dma_buf::SYNC_START,
+        Phase::End => dma_buf::SYNC_END,
+    };
+    dma_buf::sync(fd, start_or_end | access.bits())
 }
 
 /// Waits on a sync file (or any descriptor that polls as one) until it
@@ -472,6 +503,15 @@ mod tests {
             }
             Err(e) => panic!("export_fence: {e}"),
         }
+        // The borrowed forms bracket the same access on the same buffer.
+        {
+            let view = buf.borrow();
+            view.begin_cpu_access(Access::Read).unwrap();
+            assert!(map.as_slice().iter().all(|&b| b == 0xa5));
+            view.end_cpu_access(Access::Read).unwrap();
+            sync(buf.as_fd(), Phase::Begin, Access::Write).unwrap();
+            sync(buf.as_fd(), Phase::End, Access::Write).unwrap();
+        }
         let again = DmaBuf::from_fd(buf.into_fd()).unwrap();
         assert_eq!(again.len(), 4096);
     }
@@ -541,5 +581,13 @@ mod tests {
         writer.write_all(b"x").unwrap();
         drop(writer);
         assert!(wait_fence(reader.as_fd(), Some(Duration::ZERO)).unwrap());
+    }
+
+    /// Bracketing a CPU access on a descriptor that is not a dma-buf is an error.
+    #[test]
+    fn sync_on_a_plain_descriptor_is_an_error() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        assert!(sync(reader.as_fd(), Phase::Begin, Access::Read).is_err());
+        assert!(sync(reader.as_fd(), Phase::End, Access::Read).is_err());
     }
 }
