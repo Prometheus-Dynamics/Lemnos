@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+// The watch diagnostics are used by the hotplug watcher only.
+#[cfg(feature = "hotplug")]
 #[macro_use]
 mod trace;
 

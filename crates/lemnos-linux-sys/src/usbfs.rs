@@ -11,10 +11,11 @@
 
 use crate::ioctl::{ioctl_int, ioctl_ptr};
 use crate::mmap::Mapping;
+use crate::pool::Spares;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self};
 use std::mem::size_of;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
@@ -190,8 +191,6 @@ pub struct UrbCompletion {
     pub status: i32,
     /// The bytes moved.
     pub actual_length: usize,
-    /// The isochronous packets (empty for bulk and interrupt).
-    pub packets: Vec<IsoPacket>,
 }
 
 /// The memory a URB transfers to or from, owned by the caller until the URB
@@ -308,7 +307,8 @@ const SPARE_BLOCKS: usize = 16;
 pub struct UsbfsFile {
     file: File,
     urbs: Mutex<HashMap<u64, InFlight>>,
-    spare: Mutex<Vec<Vec<u64>>>,
+    /// Header blocks kept for reuse (see `take_block`).
+    blocks: Spares<Vec<u64>>,
 }
 
 impl UsbfsFile {
@@ -318,7 +318,7 @@ impl UsbfsFile {
         Ok(Self {
             file,
             urbs: Mutex::new(HashMap::new()),
-            spare: Mutex::new(Vec::new()),
+            blocks: Spares::new(SPARE_BLOCKS),
         })
     }
 
@@ -329,9 +329,12 @@ impl UsbfsFile {
 
     /// The raw descriptors the kernel reports for the device: its device
     /// descriptor, then each configuration descriptor, as one blob.
+    /// The read is positional (offset 0), so it can be repeated: the file
+    /// offset is not moved, and a second call returns the same bytes.
     pub fn read_descriptors(&self) -> io::Result<Vec<u8>> {
+        use std::os::unix::fs::FileExt;
         let mut buf = vec![0u8; 64 * 1024];
-        let read = (&self.file).read(&mut buf)?;
+        let read = self.file.read_at(&mut buf, 0)?;
         buf.truncate(read);
         Ok(buf)
     }
@@ -633,25 +636,14 @@ impl UsbfsFile {
 
     /// A zeroed header block of `words` words, from the spare list when there is one.
     fn take_block(&self, words: usize) -> Vec<u64> {
-        let mut block = self
-            .spare
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pop()
-            .unwrap_or_default();
+        let mut block = self.blocks.take().unwrap_or_default();
         block.clear();
         block.resize(words, 0);
         block
     }
 
     fn give_block(&self, block: Vec<u64>) {
-        let mut spare = self
-            .spare
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if spare.len() < SPARE_BLOCKS {
-            spare.push(block);
-        }
+        self.blocks.give(block);
     }
 
     /// Whether the kernel lets this device file map DMA buffers (`CAP_MMAP`).
@@ -672,8 +664,14 @@ impl UsbfsFile {
     }
 
     /// Waits for the next completed URB (`blocking`) or returns `None` at once
-    /// when none has completed.
-    pub fn reap(&self, blocking: bool) -> io::Result<Option<UrbCompletion>> {
+    /// when none has completed. The isochronous packets of the completed URB
+    /// are written into `packets` (cleared first; empty for bulk and
+    /// interrupt), so a caller that keeps the vector reaps without allocating.
+    pub fn reap(
+        &self,
+        blocking: bool,
+        packets: &mut Vec<IsoPacket>,
+    ) -> io::Result<Option<UrbCompletion>> {
         let mut urb: *mut c_void = std::ptr::null_mut();
         let request = if blocking { REAPURB } else { REAPURBNDELAY };
         // SAFETY: `urb` is a live pointer-sized slot the kernel writes the
@@ -697,7 +695,7 @@ impl UsbfsFile {
         let status = unsafe { (*header).status };
         // SAFETY: as above.
         let actual_length = unsafe { (*header).actual_length };
-        let packets = read_packets(&in_flight);
+        read_packets(&in_flight, packets);
         let InFlight { block, buffer, .. } = in_flight;
         self.give_block(block);
         Ok(Some(UrbCompletion {
@@ -705,7 +703,6 @@ impl UsbfsFile {
             buffer,
             status,
             actual_length: usize::try_from(actual_length).unwrap_or(0),
-            packets,
         }))
     }
 
@@ -739,8 +736,9 @@ impl UsbfsFile {
 }
 
 /// The isochronous packet statuses of a completed URB.
-fn read_packets(in_flight: &InFlight) -> Vec<IsoPacket> {
-    let mut packets = Vec::with_capacity(in_flight.packets);
+fn read_packets(in_flight: &InFlight, packets: &mut Vec<IsoPacket>) {
+    packets.clear();
+    packets.reserve(in_flight.packets);
     for index in 0..in_flight.packets {
         let base = in_flight.block.as_ptr().cast::<u8>();
         // SAFETY: the completed URB's descriptors are in `in_flight.block`, one
@@ -754,7 +752,6 @@ fn read_packets(in_flight: &InFlight) -> Vec<IsoPacket> {
             status: desc.status as i32,
         });
     }
-    packets
 }
 
 /// A control request's setup fields.
@@ -773,6 +770,22 @@ pub struct ControlSetup {
 #[cfg(all(test, target_pointer_width = "64"))]
 mod tests {
     use super::*;
+
+    /// A regular file stands in for the device node: the descriptor read is
+    /// positional, so two reads return the same bytes. No USB device is opened.
+    #[test]
+    fn reading_the_descriptors_twice_returns_the_same_bytes() {
+        let bytes: Vec<u8> = (0..40u8).collect();
+        let path =
+            std::env::temp_dir().join(format!("lemnos-usbfs-descriptors-{}", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let file = UsbfsFile::open(&path).unwrap();
+        let first = file.read_descriptors().unwrap();
+        let second = file.read_descriptors().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(first, bytes);
+        assert_eq!(second, bytes, "the second call starts at offset 0 again");
+    }
 
     #[test]
     fn mapped_buffers_round_up_to_whole_pages_and_the_heap_grows() {

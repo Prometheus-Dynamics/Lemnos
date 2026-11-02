@@ -256,9 +256,9 @@ pub struct IsoBlock<'a> {
 
 /// Reads an isochronous IN endpoint: `depth` transfers of `packets` packets of
 /// `packet_len` bytes stay in flight, and each completed transfer is handed out
-/// as an [`IsoBlock`] until the next call, which recycles its buffer. The
-/// packet lengths are computed once; buffers are reused. The completion path
-/// still builds one packet table per transfer.
+/// as an [`IsoBlock`] until the next call, which recycles its buffer and its
+/// packet table. The packet lengths are computed once; buffers and packet tables
+/// are reused, so a steady stream allocates nothing per transfer.
 #[cfg(target_os = "linux")]
 pub struct IsoReader {
     device: UsbDevice,
@@ -329,7 +329,9 @@ impl IsoReader {
     /// buffer is recycled first, and the next transfer is already in flight.
     pub fn next_block(&mut self) -> Result<IsoBlock<'_>> {
         if let Some(done) = self.current.take() {
-            self.spare.push(done.into_buffer());
+            let (buffer, packets) = done.into_parts();
+            self.spare.push(buffer);
+            self.device.recycle_packets(packets);
         }
         self.top_up()?;
         let transfer = self

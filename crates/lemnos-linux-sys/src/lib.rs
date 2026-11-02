@@ -19,6 +19,7 @@ mod ioctl;
 pub mod mmap;
 pub mod netlink;
 pub mod poll;
+pub mod pool;
 #[cfg(feature = "rp1")]
 pub mod rp1_pio;
 pub mod signal;

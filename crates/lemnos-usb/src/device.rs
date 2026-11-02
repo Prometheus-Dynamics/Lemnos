@@ -13,6 +13,8 @@ use crate::info::UsbDeviceInfo;
 use crate::listing::find_device;
 use crate::location::UsbLocation;
 use crate::stream::{BulkReader, BulkWriter};
+#[cfg(target_os = "linux")]
+use crate::transfer::IsoPacket;
 use crate::transfer::{Transfer, TransferBuffer, TransferOutcome};
 use crate::types::{ControlSetup, Direction, TransferType};
 use std::sync::Arc;
@@ -335,6 +337,72 @@ impl UsbDevice {
             .flat_map(|setting| setting.endpoints.iter())
             .find(|info| info.address == endpoint)
             .map(|info| info.max_packet_size)
+    }
+
+    /// Chooses who reaps this device's completions. By default a reaper thread
+    /// does it. With `on`, no thread is started and the caller reaps with
+    /// [`UsbDevice::reap_now`] or [`UsbDevice::reap_until`], on any thread it
+    /// likes (a ring, a poll loop). Set it before submitting: it is refused while
+    /// transfers are in flight. Linux only; other platforms reap on their own
+    /// threads and refuse `on`.
+    pub fn set_caller_driven_reaping(&self, on: bool) -> Result<()> {
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => usb.set_caller_driven(on),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(_) => {
+                if on {
+                    Err(Error::new(
+                        ErrorKind::Unsupported,
+                        "caller-driven reaping is Linux only",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Delivers every completion the kernel has ready, without waiting; returns
+    /// how many. Caller-driven reaping only (see
+    /// [`UsbDevice::set_caller_driven_reaping`]); the transfers waiting on them
+    /// complete.
+    pub fn reap_now(&self) -> Result<usize> {
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => usb.reap_now(),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(_) => Err(Error::new(
+                ErrorKind::Unsupported,
+                "caller-driven reaping is Linux only",
+            )),
+        }
+    }
+
+    /// Waits until a completion is ready or `deadline` passes, then delivers the
+    /// ready completions; returns how many (zero at the deadline). Caller-driven
+    /// reaping only, as [`UsbDevice::reap_now`].
+    pub fn reap_until(&self, deadline: std::time::Instant) -> Result<usize> {
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => usb.reap_until(deadline),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(_) => {
+                let _ = deadline;
+                Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "caller-driven reaping is Linux only",
+                ))
+            }
+        }
+    }
+
+    /// Gives an outcome's packet table back for reuse (an isochronous reader does).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recycle_packets(&self, packets: Vec<IsoPacket>) {
+        match &self.inner.backend {
+            Backend::Usbfs(usb) => usb.recycle_packets(packets),
+        }
     }
 
     /// Starts a bulk IN transfer that fills `buffer` (its length is the

@@ -103,6 +103,12 @@ impl TransferOutcome {
     pub fn into_buffer(self) -> TransferBuffer {
         self.buffer
     }
+
+    /// The buffer and the packet table, both to reuse.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_parts(self) -> (TransferBuffer, Vec<IsoPacket>) {
+        (self.buffer, self.packets)
+    }
 }
 
 /// How a backend stops a transfer it has in flight.

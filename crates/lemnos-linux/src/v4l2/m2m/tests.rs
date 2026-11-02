@@ -561,7 +561,10 @@ fn decode_stream(
         } else {
             None
         } {
-            sizes.push(d.bytes_used[0]);
+            // A drain's LAST buffer may be empty: it is the end marker, not a frame.
+            if d.bytes_used[0] > 0 {
+                sizes.push(d.bytes_used[0]);
+            }
             if end_drain_sent && d.flags & sys::BUF_FLAG_LAST != 0 {
                 end = true;
             }
