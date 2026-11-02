@@ -380,68 +380,90 @@ fn vicodec_encodes_and_drains() {
     drop(enc);
 }
 
-/// The decoder half of the round trip: decode the coded frames the encoder
-/// produced. A stateful decoder's capture format follows the stream it is
-/// given, so a session that fixes its capture format at open cannot decode it
-/// yet: the decoder needs the source-change flow (wait for the event, read the
-/// capture format, then request buffers), which `M2mSession` does not do. Kept
-/// ignored so the gap stays visible, not skipped.
-#[test]
-#[ignore = "needs the decoder source-change flow (EVENT_SOURCE_CHANGE, then buffers)"]
-fn vicodec_decodes_the_encoders_frames() {
-    const W: u32 = 64;
-    const H: u32 = 48;
-    let yuv = fourcc(b"YU12");
-    let fwht = fourcc(b"FWHT");
-    let frame_bytes = W * H * 3 / 2;
-    let coded: Vec<Vec<u8>> = Vec::new();
-    // The decoder takes the coded frames back and drains to LAST too.
-    let coded_format = Format::Single(PixFormat {
-        width: W,
-        height: H,
-        pixelformat: fwht,
-        size_image: W * H * 3,
+/// A decoder session on vicodec: the output (coded FWHT) format is fixed, the
+/// capture (I420) buffers are deferred until the stream says its size. The
+/// coded buffers take the size given here, so give the largest stream.
+fn vicodec_decoder(w: u32, h: u32) -> Option<M2mSession> {
+    let fwht = Format::Single(PixFormat {
+        width: w,
+        height: h,
+        pixelformat: fourcc(b"FWHT"),
+        size_image: w * h * 3,
         ..Default::default()
     });
-    let Some(mut dec) = codec(
-        "vicodec",
-        coded_format,
-        Format::Single(PixFormat {
-            width: W,
-            height: H,
-            pixelformat: yuv,
-            bytes_per_line: W,
-            size_image: frame_bytes,
-            ..Default::default()
-        }),
-        Memory::Mmap,
-    ) else {
-        crate::tests::skip("no vicodec decoder node");
-        return;
+    let yuv = Format::Single(PixFormat {
+        width: w,
+        height: h,
+        pixelformat: fourcc(b"YU12"),
+        bytes_per_line: w,
+        size_image: w * h * 3 / 2,
+        ..Default::default()
+    });
+    m2m_nodes("vicodec").into_iter().find_map(|path| {
+        let out = QueueSetup {
+            format: fwht,
+            memory: Memory::Mmap,
+            buffers: 4,
+            crop: None,
+        };
+        let cap = QueueSetup {
+            format: yuv,
+            memory: Memory::Mmap,
+            buffers: 0,
+            crop: None,
+        };
+        let s = M2mSession::open(&path, out, cap).ok()?;
+        let kept = |f: &Format, code: &[u8; 4]| match f {
+            Format::Single(p) => p.pixelformat == fourcc(code),
+            Format::Multi(p) => p.pixelformat == fourcc(code),
+        };
+        (kept(s.output_format(), b"FWHT") && kept(s.capture_format(), b"YU12")).then_some(s)
+    })
+}
+
+/// The coded frames vicodec's encoder makes from `frames` I420 frames of `w`x`h`.
+fn vicodec_encode(w: u32, h: u32, frames: u64) -> Option<Vec<Vec<u8>>> {
+    let yuv = Format::Single(PixFormat {
+        width: w,
+        height: h,
+        pixelformat: fourcc(b"YU12"),
+        bytes_per_line: w,
+        size_image: w * h * 3 / 2,
+        ..Default::default()
+    });
+    let fwht = Format::Single(PixFormat {
+        width: w,
+        height: h,
+        pixelformat: fourcc(b"FWHT"),
+        size_image: w * h * 3,
+        ..Default::default()
+    });
+    let mut enc = codec("vicodec", yuv, fwht, Memory::Mmap)?;
+    // The frames are the size the driver kept: vicodec takes most requests as
+    // 640x368 and keeps 1280x720 as asked, so the requested size is not the frame.
+    let yuv_len = match enc.output_format() {
+        Format::Single(p) => p.size_image as usize,
+        Format::Multi(p) => p.planes[0].size_image as usize,
     };
-    for i in 0..dec.capture_buffers() {
-        dec.queue_capture(i, &plane(0)).unwrap();
+    for i in 0..enc.capture_buffers() {
+        enc.queue_capture(i, &plane(0)).unwrap();
     }
-    dec.stream_on().unwrap();
-    let mut decoded = 0usize;
-    let mut last = false;
-    let mut pending = coded.into_iter();
+    enc.stream_on().unwrap();
+    for k in 0..frames {
+        let index = enc.free_output().expect("a free source buffer");
+        let frame: Vec<u8> = (0..yuv_len as u64)
+            .map(|i| ((i * 3 + k * 11) % 251) as u8)
+            .collect();
+        enc.output_plane_mut(index, 0).unwrap()[..yuv_len].copy_from_slice(&frame);
+        enc.queue_output(index, &plane(yuv_len as u32), Duration::from_millis(k))
+            .unwrap();
+    }
+    enc.drain(Drain::Encoder).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut drained = false;
+    let mut coded = Vec::new();
+    let mut last = false;
     while !last && std::time::Instant::now() < deadline {
-        while let Some(index) = dec.free_output() {
-            let Some(data) = pending.next() else {
-                if !drained {
-                    dec.drain(Drain::Decoder).unwrap();
-                    drained = true;
-                }
-                break;
-            };
-            dec.output_plane_mut(index, 0).unwrap()[..data.len()].copy_from_slice(&data);
-            dec.queue_output(index, &plane(data.len() as u32), Duration::ZERO)
-                .unwrap();
-        }
-        dec.wait(
+        enc.wait(
             Ready {
                 capture: true,
                 ..Ready::default()
@@ -449,18 +471,177 @@ fn vicodec_decodes_the_encoders_frames() {
             Some(Duration::from_millis(500)),
         )
         .unwrap();
-        while let Some(d) = dec.dequeue_capture().unwrap() {
-            if d.bytes_used[0] == frame_bytes {
-                decoded += 1;
+        while let Some(d) = enc.dequeue_capture().unwrap() {
+            let n = d.bytes_used[0] as usize;
+            if n > 0 {
+                coded.push(enc.capture_plane(d.index, 0).unwrap()[..n].to_vec());
             }
             last |= d.flags & sys::BUF_FLAG_LAST != 0;
-            dec.queue_capture(d.index, &plane(0)).unwrap();
+            enc.queue_capture(d.index, &plane(0)).unwrap();
         }
-        while dec.dequeue_output().unwrap().is_some() {}
     }
-    assert!(decoded >= 1, "the decoder produced frames");
-    assert!(last, "the decoder's drain ended with a LAST buffer");
-    dec.stream_off().unwrap();
+    assert!(last, "the encoder's drain ended with a LAST buffer");
+    Some(coded)
+}
+
+/// Feeds `coded` to a decoder and returns the size (bytes used) of each decoded
+/// frame, in order, and how many source changes arrived. The first change
+/// allocates the capture buffers (`adopt_capture`); a later resolution change
+/// is reconfigured after a drain (`drain`, the LAST buffer, `reconfigure_capture`)
+/// without touching the output queue, then the stream resumes.
+fn decode_stream(
+    dec: &mut M2mSession,
+    coded: &[Vec<u8>],
+    buffers: u32,
+    expected_changes: usize,
+) -> (Vec<u32>, usize) {
+    // The output queue starts now; the capture queue starts once its buffers exist.
+    dec.stream_on().unwrap();
+    let mut pending = coded.iter();
+    let mut sizes = Vec::new();
+    let mut changes = 0usize;
+    let mut want_reconfigure = false;
+    let mut end_drain_sent = false;
+    let mut end = false;
+    // The capture queue is polled only once it streams: a driver reports an
+    // error for a queue that is not streaming.
+    let mut capture_live = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !end && std::time::Instant::now() < deadline {
+        // Once every coded frame is queued and every expected source change is
+        // handled, drain: the LAST buffer ends the loop. A drain sent earlier would
+        // collide with the drain a resolution change needs (EBUSY).
+        if !end_drain_sent
+            && pending.as_slice().is_empty()
+            && changes >= expected_changes
+            && !want_reconfigure
+        {
+            dec.drain(Drain::Decoder).unwrap();
+            end_drain_sent = true;
+        }
+        while let Some(index) = dec.free_output() {
+            let Some(data) = pending.next() else {
+                break;
+            };
+            dec.output_plane_mut(index, 0).unwrap()[..data.len()].copy_from_slice(data);
+            dec.queue_output(index, &plane(data.len() as u32), Duration::ZERO)
+                .unwrap();
+        }
+        dec.wait(
+            Ready {
+                capture: capture_live,
+                event: true,
+                ..Ready::default()
+            },
+            Some(Duration::from_millis(500)),
+        )
+        .unwrap();
+        if let Some(change) = dec.take_source_change().unwrap() {
+            changes += 1;
+            assert!(
+                change.resolution(),
+                "a decoder's source change is a resolution change"
+            );
+            if dec.capture_pending() {
+                dec.adopt_capture(buffers).unwrap();
+                for i in 0..dec.capture_buffers() {
+                    dec.queue_capture(i, &plane(0)).unwrap();
+                }
+                dec.start_capture().unwrap();
+                capture_live = true;
+            } else {
+                // Mid-stream: the stream is drained first, its LAST taken below.
+                dec.drain(Drain::Decoder).unwrap();
+                want_reconfigure = true;
+            }
+        }
+        // A queue that is not streaming has nothing to dequeue (EINVAL).
+        while let Some(d) = if capture_live {
+            dec.dequeue_capture().unwrap()
+        } else {
+            None
+        } {
+            sizes.push(d.bytes_used[0]);
+            if end_drain_sent && d.flags & sys::BUF_FLAG_LAST != 0 {
+                end = true;
+            }
+            if !(want_reconfigure && dec.capture_drained() && d.flags & sys::BUF_FLAG_LAST != 0) {
+                dec.queue_capture(d.index, &plane(0)).unwrap();
+            }
+        }
+        if want_reconfigure && dec.capture_drained() {
+            dec.reconfigure_capture(buffers).unwrap();
+            for i in 0..dec.capture_buffers() {
+                dec.queue_capture(i, &plane(0)).unwrap();
+            }
+            dec.start_capture().unwrap();
+            want_reconfigure = false;
+            capture_live = true;
+        }
+    }
+    assert!(
+        end,
+        "the decoder's drain ended with a LAST buffer before the deadline: {sizes:?}"
+    );
+    (sizes, changes)
+}
+
+/// vicodec's frame size: the driver takes most requests as 640x368 (I420,
+/// 353280 bytes).
+const VICODEC_FRAME: u32 = 640 * 368 * 3 / 2;
+
+/// The decoder round trip: vicodec's encoder makes coded frames, its decoder
+/// takes them back. The capture size follows the stream: the first source
+/// change allocates the capture buffers, and the decoded frames are the coded
+/// frames' size.
+#[test]
+fn vicodec_decodes_the_encoders_frames() {
+    let Some(coded) = vicodec_encode(64, 48, 2) else {
+        crate::tests::skip("no vicodec encoder (modprobe vicodec)");
+        return;
+    };
+    let Some(mut dec) = vicodec_decoder(1280, 720) else {
+        crate::tests::skip("no vicodec decoder node");
+        return;
+    };
+    assert!(
+        dec.capture_pending(),
+        "the capture buffers wait for the stream's size"
+    );
+    let (sizes, changes) = decode_stream(&mut dec, &coded, 4, 1);
+    assert_eq!(changes, 1, "one source change: the first size");
+    assert!(!sizes.is_empty(), "the decoder produced frames");
+    assert!(
+        sizes.iter().all(|&n| n == VICODEC_FRAME),
+        "frames are the stream's size: {sizes:?}"
+    );
+}
+
+/// A mid-stream resolution change: a 640x368 stream, then a 1280x720 stream on
+/// the same decoder. The second change is reconfigured after a drain; the
+/// output queue is not torn down. Frames come back at each size.
+#[test]
+fn vicodec_decoder_follows_a_mid_stream_resolution_change() {
+    let (Some(first), Some(second)) = (vicodec_encode(64, 48, 2), vicodec_encode(1280, 720, 2))
+    else {
+        crate::tests::skip("no vicodec encoder (modprobe vicodec)");
+        return;
+    };
+    let Some(mut dec) = vicodec_decoder(1280, 720) else {
+        crate::tests::skip("no vicodec decoder node");
+        return;
+    };
+    let coded: Vec<Vec<u8>> = first.into_iter().chain(second).collect();
+    let (sizes, changes) = decode_stream(&mut dec, &coded, 4, 2);
+    assert_eq!(
+        changes, 2,
+        "the first size and the mid-stream change: {sizes:?}"
+    );
+    assert!(sizes.contains(&VICODEC_FRAME), "640x368 frames: {sizes:?}");
+    assert!(
+        sizes.contains(&(1280 * 720 * 3 / 2)),
+        "1280x720 frames after the change: {sizes:?}"
+    );
 }
 
 #[test]

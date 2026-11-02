@@ -60,6 +60,21 @@ use lemnos_linux_sys::v4l2 as sys;
 
 use super::{BufType, Capability, Dequeued, Event, Format, Memory, PlaneMemory, QueuePlane, Rect};
 
+/// A source-change event: the stream's format changed. A decoder reports a new
+/// coded size this way (see [`M2mSession::take_source_change`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceChange {
+    /// The `changes` flags of the event (`SRC_CH_*`).
+    pub changes: u32,
+}
+
+impl SourceChange {
+    /// Whether the resolution changed (the capture buffers must be re-requested).
+    pub fn resolution(&self) -> bool {
+        self.changes & sys::SRC_CH_RESOLUTION != 0
+    }
+}
+
 /// Most buffers one queue may have (the session tracks them in a 64-bit mask).
 pub const MAX_BUFFERS: u32 = 64;
 
@@ -244,6 +259,18 @@ pub struct M2mSession {
     capabilities: Capability,
     output: Queue,
     capture: Queue,
+    /// The capture queue has no buffers yet: its format follows the stream (a
+    /// decoder), and [`M2mSession::adopt_capture`] allocates them once the
+    /// source is known.
+    capture_deferred: bool,
+    /// The capture queue was streamed on (by `stream_on` or `start_capture`).
+    capture_streaming: bool,
+    /// The LAST buffer of a drain has been dequeued. A resolution change is
+    /// reconfigured only after this (the drain comes first).
+    last_seen: bool,
+    /// The visible rectangle of a capture frame (`SEL_TGT_COMPOSE`), when the
+    /// driver reports one.
+    capture_visible: Option<Rect>,
 }
 
 impl M2mSession {
@@ -293,17 +320,34 @@ impl M2mSession {
         // (capture) format. An encoder sizes its coded buffers (`sizeimage`) from
         // the source, and refuses a source format once its capture buffers exist
         // (EBUSY). The capture format is read back after both are set, then the
-        // buffers are requested.
+        // buffers are requested. A capture queue asked for no buffers (`buffers`
+        // 0) is deferred: a decoder's capture format follows the stream, so its
+        // buffers wait for the source (see `adopt_capture`).
+        let deferred = capture.buffers == 0;
         let mut output_queue = Queue::set_format(fd, &output, true)?;
         let mut capture_queue = Queue::set_format(fd, &capture, false)?;
         capture_queue.refresh_format(fd)?;
-        capture_queue.allocate(fd, capture.buffers)?;
+        if !deferred {
+            capture_queue.allocate(fd, capture.buffers)?;
+        }
         output_queue.allocate(fd, output.buffers)?;
+        // Source changes are reported on the descriptor for any driver that has
+        // them; a driver without them refuses the subscription, which is no error.
+        let _ = sys::subscribe_event(fd, sys::EVENT_SOURCE_CHANGE, 0);
+        let capture_visible = if deferred {
+            None
+        } else {
+            visible_rect(fd, capture_queue.buf_type)
+        };
         Ok(Self {
             file,
             capabilities,
             output: output_queue,
             capture: capture_queue,
+            capture_deferred: deferred,
+            capture_streaming: false,
+            last_seen: false,
+            capture_visible,
         })
     }
 
@@ -457,7 +501,101 @@ impl M2mSession {
     /// taken (the device reports `EPIPE`: nothing more is coming). Read a
     /// frame with [`Self::capture_plane`], then queue it again.
     pub fn dequeue_capture(&mut self) -> io::Result<Option<Dequeued>> {
-        dequeue(self.file.as_fd(), &mut self.capture)
+        let done = dequeue(self.file.as_fd(), &mut self.capture)?;
+        if let Some(d) = &done {
+            self.last_seen |= d.flags & sys::BUF_FLAG_LAST != 0;
+        }
+        Ok(done)
+    }
+
+    /// Takes the pending source-change events, if any, and says whether one of
+    /// them reports a change. A driver that has no source changes reports none.
+    /// Other events taken here are consumed (subscribe to what you use).
+    pub fn take_source_change(&self) -> io::Result<Option<SourceChange>> {
+        let mut change = None;
+        while let Some(event) = sys::dqevent(self.file.as_fd())? {
+            if event.event_type == sys::EVENT_SOURCE_CHANGE {
+                change = Some(SourceChange {
+                    changes: event.changes,
+                });
+            }
+        }
+        Ok(change)
+    }
+
+    /// Whether the LAST buffer of a drain has been taken: the stream is drained,
+    /// and [`M2mSession::reconfigure_capture`] may run.
+    pub fn capture_drained(&self) -> bool {
+        self.last_seen
+    }
+
+    /// Whether the capture queue is still waiting for its buffers: a decoder's
+    /// capture format follows the stream, and the buffers are allocated by
+    /// [`M2mSession::adopt_capture`] once the source is known.
+    pub fn capture_pending(&self) -> bool {
+        self.capture_deferred
+    }
+
+    /// The visible rectangle of a capture frame, when the driver reports one.
+    pub fn capture_visible(&self) -> Option<Rect> {
+        self.capture_visible
+    }
+
+    /// Reads the capture format the driver now has (after a source change) and
+    /// allocates `buffers` capture buffers for it. The capture queue must be
+    /// pending (see [`M2mSession::capture_pending`]); queue the buffers, then
+    /// [`M2mSession::start_capture`].
+    pub fn adopt_capture(&mut self, buffers: u32) -> io::Result<()> {
+        if !self.capture_deferred {
+            return Err(invalid("the capture buffers are allocated already".into()));
+        }
+        self.capture.refresh_format(self.file.as_fd())?;
+        self.capture_visible = visible_rect(self.file.as_fd(), self.capture.buf_type);
+        self.capture.allocate(self.file.as_fd(), buffers)?;
+        self.capture_deferred = false;
+        Ok(())
+    }
+
+    /// Starts the capture queue (after its buffers are queued). Needed when the
+    /// capture queue was deferred, or to resume it after
+    /// [`M2mSession::reconfigure_capture`].
+    pub fn start_capture(&mut self) -> io::Result<()> {
+        if self.capture_deferred {
+            return Err(invalid("the capture buffers are not allocated yet".into()));
+        }
+        sys::streamon(self.file.as_fd(), self.capture.buf_type)?;
+        self.capture_streaming = true;
+        self.last_seen = false;
+        Ok(())
+    }
+
+    /// Reconfigures the capture queue after a resolution change, without touching
+    /// the output queue: stops the capture queue (its buffers come back), frees
+    /// the buffers, reads the new format and allocates `buffers`. The stream must
+    /// have been drained first: the LAST buffer dequeued ([`M2mSession::drain`],
+    /// then [`M2mSession::dequeue_capture`] until LAST). Then queue the buffers
+    /// and call [`M2mSession::start_capture`].
+    pub fn reconfigure_capture(&mut self, buffers: u32) -> io::Result<()> {
+        if !self.last_seen {
+            return Err(invalid(
+                "drain the stream first: take its LAST capture buffer before reconfiguring".into(),
+            ));
+        }
+        let fd = self.file.as_fd();
+        if self.capture_streaming {
+            sys::streamoff(fd, self.capture.buf_type)?;
+        }
+        self.capture_streaming = false;
+        self.capture.queued = 0;
+        sys::reqbufs(fd, self.capture.buf_type, self.capture.memory, 0)?;
+        self.capture.count = 0;
+        self.capture.maps.clear();
+        self.capture.refresh_format(fd)?;
+        self.capture_visible = visible_rect(fd, self.capture.buf_type);
+        self.capture.allocate(fd, buffers)?;
+        self.capture_deferred = false;
+        self.last_seen = false;
+        Ok(())
     }
 
     /// Waits until one of the readiness flags in `want` holds or `timeout`
@@ -489,8 +627,14 @@ impl M2mSession {
 
     /// Starts streaming both queues. The destination queue starts first, so
     /// the device has somewhere to put the first frame.
+    /// A deferred capture queue (see [`M2mSession::capture_pending`]) is not
+    /// started here: only the output queue starts, and [`M2mSession::start_capture`]
+    /// starts the capture queue once its buffers exist.
     pub fn stream_on(&mut self) -> io::Result<()> {
-        sys::streamon(self.file.as_fd(), self.capture.buf_type)?;
+        if !self.capture_deferred {
+            sys::streamon(self.file.as_fd(), self.capture.buf_type)?;
+            self.capture_streaming = true;
+        }
         sys::streamon(self.file.as_fd(), self.output.buf_type)
     }
 
@@ -499,6 +643,7 @@ impl M2mSession {
     pub fn stream_off(&mut self) -> io::Result<()> {
         sys::streamoff(self.file.as_fd(), self.output.buf_type)?;
         sys::streamoff(self.file.as_fd(), self.capture.buf_type)?;
+        self.capture_streaming = false;
         self.output.queued = 0;
         self.capture.queued = 0;
         Ok(())
@@ -540,6 +685,12 @@ fn dequeue(fd: BorrowedFd<'_>, queue: &mut Queue) -> io::Result<Option<Dequeued>
         queue.queued &= !(1 << d.index);
     }
     Ok(done)
+}
+
+/// The visible rectangle of a queue (`SEL_TGT_COMPOSE`), or `None` when the
+/// driver does not report one.
+fn visible_rect(fd: BorrowedFd<'_>, buf_type: BufType) -> Option<Rect> {
+    sys::g_selection(fd, buf_type, sys::SEL_TGT_COMPOSE).ok()
 }
 
 fn invalid(message: String) -> io::Error {

@@ -53,6 +53,12 @@ pub const EVENT_EOS: u32 = 2;
 pub const EVENT_CTRL: u32 = 3;
 /// `V4L2_EVENT_SOURCE_CHANGE`: the stream's format changed.
 pub const EVENT_SOURCE_CHANGE: u32 = 5;
+/// `V4L2_EVENT_SRC_CH_RESOLUTION`: a source-change event's `changes` flag for a
+/// new resolution (the decoder's coded size changed).
+pub const SRC_CH_RESOLUTION: u32 = 1 << 0;
+/// `V4L2_SEL_TGT_COMPOSE`: the rectangle a frame occupies in the buffer (for a
+/// decoder, the visible picture of the decoded frame).
+pub const SEL_TGT_COMPOSE: u32 = 0x0100;
 
 /// `V4L2_ENC_CMD_STOP`: finish encoding what is queued.
 pub const ENC_CMD_STOP: u32 = 1;
@@ -316,6 +322,9 @@ pub struct Event {
     pub pending: u32,
     /// The event's sequence number.
     pub sequence: u32,
+    /// The first word of the event's payload: for a source change, the
+    /// `changes` flags (see [`SRC_CH_RESOLUTION`]); zero for other events.
+    pub changes: u32,
     /// When the event happened, on the monotonic clock.
     pub timestamp: Duration,
 }
@@ -813,6 +822,7 @@ pub fn dqevent(fd: BorrowedFd<'_>) -> io::Result<Option<Event>> {
         id: raw.id,
         pending: raw.pending,
         sequence: raw.sequence,
+        changes: uapi::get_u32(&raw.u.0, 0),
         timestamp: duration_of(raw.timestamp[0], raw.timestamp[1], 1),
     }))
 }

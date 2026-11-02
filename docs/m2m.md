@@ -75,6 +75,18 @@ s.stream_off()?;                                  // every buffer comes back
 - Waiting: `wait(Ready { output, capture, event }, timeout)` polls the device; `output` means a
   source buffer is free, `capture` means a frame is out, `event` means an event is pending.
   Dequeues never block: they return `None` when nothing is ready.
+- Stateful decoders (the source-change flow): `from_file` with a capture `QueueSetup` of
+  `buffers: 0` defers the capture buffers, because a decoder's capture format follows the
+  stream. The session subscribes to `EVENT_SOURCE_CHANGE` at open (a driver without it refuses,
+  which is no error). The loop: `stream_on()` starts the output queue only; `wait` with `event`
+  (and `capture` once the capture queue streams: a driver reports an error for a queue that is
+  not streaming); `take_source_change()` returns the change (`SourceChange::resolution()`);
+  then `adopt_capture(buffers)` reads the new capture format and visible size
+  (`capture_visible()`) and allocates the buffers, the caller queues them, and
+  `start_capture()` streams the capture queue. On a resolution change once the capture buffers
+  exist: `drain(Drain::Decoder)`, dequeue until LAST (`capture_drained()`), then
+  `reconfigure_capture(buffers)` (the capture queue stops, its buffers are freed and
+  re-requested; the output queue is not touched), queue the buffers, `start_capture()`.
 - `drain(Drain::Encoder)` (`ENC_CMD_STOP`) or `Drain::Decoder` (`DEC_CMD_STOP`): the queued
   frames finish, and the last capture buffer is flagged `BUF_FLAG_LAST`. After that buffer,
   `dequeue_capture` returns `None` (the device reports `EPIPE`: nothing more is coming).
@@ -102,9 +114,10 @@ s.stream_off()?;                                  // every buffer comes back
 - With vicodec (`modprobe vicodec`): an encoder turns I420 into FWHT and is drained (its
   `LAST` buffer ends the stream). The capture size follows the source: the stored format
   equals the driver's answer after the source is set.
-- The decoder round trip is `#[ignore]`d: a stateful decoder's capture follows the stream, so it
-  needs the source-change flow (`EVENT_SOURCE_CHANGE`, then the capture buffers), which the
-  session does not do yet. Run it with `--ignored` when that flow lands.
+- With vicodec's decoder: the round trip (a coded stream in, I420 out, the first source change
+  allocating the capture buffers), and a mid-stream resolution change (640x368, then 1280x720
+  on the same decoder: the second change is reconfigured after a drain, and the output queue
+  keeps running).
 - With vim2m, `from_file` opens the same queues as the path form, and the descriptor is kept.
 - The vicodec and vim2m tests skip with a note where the module is absent.
 
