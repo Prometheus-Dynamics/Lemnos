@@ -1,0 +1,28 @@
+[package]
+name = "lemnos-uevent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Linux device watching for Lemnos and the camera stack: uevent netlink, inotify and rescan sources behind one DeviceWatcher, with the sysfs and dev roots they watch"
+documentation = "https://docs.rs/lemnos-uevent"
+exclude = ["src/tests.rs", "src/tests/**", "src/**/tests.rs", "tests/**"]
+keywords = ["linux", "uevent", "hotplug", "udev"]
+categories = ["os::linux-apis", "hardware-support"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Watcher diagnostics through `tracing` (`watch_*` events; none otherwise).
+tracing = ["dep:tracing"]
+# The reactor-driven watcher (`AsyncDeviceWatcher`).
+tokio = ["dep:tokio"]
+
+[dependencies]
+lemnos-linux-sys = { workspace = true, default-features = false }
+tokio = { workspace = true, optional = true, features = ["net"] }
+tracing = { workspace = true, optional = true }

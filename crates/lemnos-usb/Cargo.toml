@@ -24,3 +24,5 @@ nusb.workspace = true
 # usbdevfs lives in lemnos-linux-sys, the workspace's one crate with `unsafe`.
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux-sys = { workspace = true, default-features = false }
+# Hotplug on Linux: the same DeviceWatcher the camera stack uses.
+lemnos-uevent.workspace = true

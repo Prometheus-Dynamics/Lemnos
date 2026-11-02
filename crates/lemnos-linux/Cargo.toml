@@ -35,9 +35,9 @@ dma = []
 v4l2-m2m = []
 # GPIO character device, uAPI v2 (Linux 5.10+).
 gpio-cdev = ["gpio"]
-tracing = ["dep:tracing"]
+tracing = ["dep:tracing", "lemnos-uevent/tracing"]
 # Reactor-driven async hotplug watching; takes effect together with `hotplug`.
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "lemnos-uevent/tokio"]
 
 [dependencies]
 embedded-hal.workspace = true
@@ -47,6 +47,7 @@ lemnos-core = { workspace = true, features = ["std"] }
 lemnos-discovery.workspace = true
 lemnos-hal = { workspace = true, features = ["std"] }
 lemnos-linux-sys = { workspace = true, default-features = false }
+lemnos-uevent.workspace = true
 lemnos-usb = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["net"] }

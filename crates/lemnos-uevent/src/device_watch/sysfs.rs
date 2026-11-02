@@ -3,7 +3,7 @@
 //! diff two walks and synthesize events the kernel never sent.
 
 use super::Filter;
-use crate::LinuxPaths;
+use crate::paths::LinuxPaths;
 use crate::uevent::{UeventMsg, encode};
 use crate::util::read_dir_sorted;
 use std::collections::BTreeMap;

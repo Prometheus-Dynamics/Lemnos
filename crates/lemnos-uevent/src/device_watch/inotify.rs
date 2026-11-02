@@ -5,7 +5,7 @@
 
 use super::Filter;
 use super::sysfs::ROOTS;
-use crate::LinuxPaths;
+use crate::paths::LinuxPaths;
 use crate::uevent::{UeventMsg, UeventRef, encode};
 use crate::util::read_dir_sorted;
 use lemnos_linux_sys::inotify::{self as sys, mask};

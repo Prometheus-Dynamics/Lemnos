@@ -620,6 +620,7 @@ dependencies = [
  "lemnos-discovery",
  "lemnos-hal",
  "lemnos-linux-sys",
+ "lemnos-uevent",
  "lemnos-usb",
  "serialport",
  "tokio",
@@ -715,11 +716,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-uevent"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lemnos-usb"
 version = "2.0.1-dev"
 dependencies = [
  "futures-core",
  "lemnos-linux-sys",
+ "lemnos-uevent",
  "libc",
  "nusb",
 ]

@@ -30,7 +30,7 @@ mod sysfs;
 #[cfg(feature = "tokio")]
 pub use async_watch::AsyncDeviceWatcher;
 
-use crate::LinuxPaths;
+use crate::paths::LinuxPaths;
 use crate::uevent::{UeventMsg, UeventRef, UeventSocket};
 use lemnos_linux_sys::poll;
 use std::io;

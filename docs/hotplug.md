@@ -1,9 +1,12 @@
 # Hotplug
 
 Device arrival and removal on Linux: one watcher for Lemnos's own inventory
-refresh and for the camera stack. The code is `lemnos-linux`: the generic
-watcher in `device_watch` (and `uevent`, the netlink socket it reads), and
-Lemnos's adapter in `watch` (feature `hotplug`).
+refresh, for the USB layer and for the camera stack. The watcher core is the
+crate `lemnos-uevent`, below `lemnos-linux` and `lemnos-usb`: `device_watch` (the
+watcher), `uevent` (the netlink socket it reads) and `paths` (`LinuxPaths`, the
+sysfs and dev roots). `lemnos-linux` re-exports them, so `lemnos_linux::device_watch`
+and `lemnos_linux::uevent` are unchanged. Lemnos's adapter is `lemnos-linux`'s
+`watch` (feature `hotplug`); `lemnos-usb`'s `watch()` is the USB adapter on Linux.
 
 ## One watcher, three sources
 

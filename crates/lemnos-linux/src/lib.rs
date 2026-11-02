@@ -6,17 +6,14 @@ mod trace;
 #[cfg(all(feature = "hotplug", feature = "tokio"))]
 mod async_watch;
 mod backend;
-pub mod device_watch;
 mod discovery;
 #[cfg(feature = "dma")]
 pub mod dma;
 pub mod hal;
 mod metadata;
-mod paths;
 #[cfg(any(feature = "i2c", feature = "spi"))]
 pub mod transfer;
 mod transport;
-pub mod uevent;
 mod util;
 #[cfg(feature = "v4l2-m2m")]
 pub mod v4l2;
@@ -40,6 +37,10 @@ pub use discovery::{GpioDiscoveryProbe, LedDiscoveryProbe, ThermalDiscoveryProbe
 #[cfg(feature = "pwm")]
 pub use discovery::{HwmonDiscoveryProbe, PwmDiscoveryProbe};
 pub use paths::LinuxPaths;
+// The watcher core is `lemnos-uevent`, below this crate and `lemnos-usb`; these
+// paths stay the same for consumers.
+use lemnos_uevent::paths;
+pub use lemnos_uevent::{device_watch, uevent};
 #[cfg(feature = "hotplug")]
 pub use watch::{HotplugSource, LinuxHotplugWatcher};
 
