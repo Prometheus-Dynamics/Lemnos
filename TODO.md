@@ -14,11 +14,11 @@ when, blocked by.
 ### 1. Freeze items still open
 
 - [x] **IMU above 100 Hz.** Done on the current board: the BMI088 is on the RP1 PIO I2C bus
-      (`pio-i2c:sda=8,scl=7`, 068427e), not i2c-gpio. Measured on Raze #1 (2026-10-31) with
+      (`pio-i2c:sda=8,scl=7`, 068427e), not i2c-gpio. Measured on the BCM2712 board #1 (2026-10-31) with
       `lemnos-ctl watch imu --period <poll>` streaming at the full rate, lemnosd CPU over 30 s:
       100 Hz 1.9 %, 200 Hz (`200hz` / `200hz-23`, poll 5 ms) 2.9 %, 400 Hz (`400hz` / `400hz-47`,
-      poll 2 ms) 6.0 % of a core, every sample delivered. The Raze package's default rate is the
-      device package's choice (Atlas devices/raze board.toml).
+      poll 2 ms) 6.0 % of a core, every sample delivered. The board's default rate is the device
+      package's choice (the consuming app's devices/<board>/board.toml).
 - [x] **The tokio facade decision.** The user keeps the `tokio` facade feature (2026-10-30).
 - [x] BCM2712 bring-up and timing (a5496ee), the size baseline, the surface trim and the API dedup
       (1ed6fdd, f5754ec, 66a354d, b87f76c).
@@ -43,7 +43,7 @@ when, blocked by.
       untested on board, and then tested on its board. Blocked by: the boards' BOMs (PCB) for the
       list; boards only for the test.
 - [ ] **Memory on small boards.** Why: the K230D has 128 MB in total. Done when: lemnosd PSS is
-      measured on the K230D and Flame boards (1.6 MB RSS on the CM5 today). Blocked by: boards.
+      measured on the K230D and Flame boards (1.6 MB RSS on the BCM2712 board today). Blocked by: boards.
 - [ ] **IO hardware blocks, used in full.** Why: the user's rule after the PIO fix (2026-10-31):
       every board IO block is used for everything it can do, not one feature. Today the RP1 PIO runs
       ws2812 (offsets 0..3) and I2C (27 instructions), 31 of its 32 instruction slots. Done when
@@ -61,7 +61,7 @@ when, blocked by.
 For when the user calls the release; only the user decides when. Version target 1.0.0 (agreed with
 the user on 2026-10-30; the workspace says 2.0.1-dev today, from the dropped 2.0.0 plan, and is set
 to 1.0.0 in the release commit). See "Release (do last)" below: merge `dev` into `main`, tag 1.0.0,
-and have consumers (HeliOS, Styx, Atlas, the Gaia `lemnos` source) pin the tag. Gates on the release
+and have consumers (the consuming apps, the Gaia `lemnos` source) pin the tag. Gates on the release
 commit: fmt, clippy -D warnings, tests, and the size images.
 
 ## Second pass ([docs/compact-model.md](docs/compact-model.md))
@@ -76,7 +76,7 @@ commit: fmt, clippy -D warnings, tests, and the size images.
       ([docs/board-definition.md](docs/board-definition.md)).
 - [x] Phase 4: `lemnosd`, `lemnos-ipc`, `lemnos-light`, `lemnos-drivers-ws2812`, packaging
       ([docs/system-service.md](docs/system-service.md)).
-- [x] `lemnosd` on the BCM2712 board (Raze, HeliOS dev.800, 2026-10-25): ring `wire = "rgb"`
+- [x] `lemnosd` on the BCM2712 board (board #1, a consuming app's dev.800, 2026-10-25): ring `wire = "rgb"`
       (GRB24) matches the manifest (`grb24`, `rgbw: false`); the fan has no `restore_mode` and hands
       back through its cooling device; lemnosd is 1240648 bytes, PSS 1588 kB, 0.43 % of a core idle.
       The W channel isn't reachable (colours are 24-bit) and the ring has none to verify.
@@ -90,16 +90,22 @@ commit: fmt, clippy -D warnings, tests, and the size images.
 - [ ] Re-measure FIFO reads on the PIO bus with matched rates (200 Hz accel and `200hz-23` gyro,
       then 400 Hz): the earlier loss came from i2c-gpio and the 2 kHz gyro, neither of which holds
       now. Done when: CPU and sample timing, FIFO vs polled, are recorded here. Blocked by: nothing.
-- [x] Board: the IMU off i2c-gpio and above 100 Hz: the RP1 PIO I2C bus (068427e) and Atlas
-      20cd0c4 (200 Hz). Raze #1, full-rate subscriber, lemnosd CPU: 100 Hz 1.9 %, 200 Hz 2.9 %,
+- [x] Board: the IMU off i2c-gpio and above 100 Hz: the RP1 PIO I2C bus (068427e) and the
+      device package 20cd0c4 (200 Hz). Board #1, full-rate subscriber, lemnosd CPU: 100 Hz 1.9 %, 200 Hz 2.9 %,
       400 Hz 6.0 % of a core (2026-10-31).
 - [ ] Measure the scheduler on the BCM2712 board (`tests/schedule.rs` runs on the host with a mock
       bus): the IMU at 100 Hz beside the real power monitor and magnetometer on the board's
-      buses, with the reads' real durations. Partly measured on the Raze: 6201 IMU readings in
+      buses, with the reads' real durations. Partly measured on board #1: 6201 IMU readings in
       about 62 s with the real service polling the power monitor and magnetometer; spacing mean
       10000 us, deviation from the 10 ms grid at most 251 us (client-side, from the readings'
       timestamps). Read durations are not exposed (`read_cost_us` stays inside lemnosd), so
       they still need instrumentation.
+- [ ] **A mock FIFO that drains.** Why: the mock I2C returns the same register bytes on every
+      read, so the batched-IMU test in `crates/lemnosd/tests/schedule.rs` sees a window replayed
+      when two drains land within one window (17.5 ms). That test therefore allows a step back of
+      half a sample, and bounds gaps by the host's wakeup jitter. Done when: a mock FIFO removes
+      what a read takes and the test asserts strict stamp order with a fixed gap bound. Blocked
+      by: nothing (a `lemnos-hal` mock change).
 - [ ] Phase 5: rich-model slimming (`Arc` in events, optional retention/diagnostics,
       shared probe code).
 
@@ -188,7 +194,7 @@ commit: fmt, clippy -D warnings, tests, and the size images.
 - [ ] Memory breakdown for a Linux refresh on the BCM2712 board, measured with and
       without eager binds. A consuming app measured ~6-7 MiB PSS for a refresh including
       camera probing; Lemnos's share is unknown. Measured without binds (`examples/bringup_memory.rs`,
-      cross-built for aarch64 musl, run on a Raze): PSS 648 kB at start, 1344 kB after building the
+      cross-built for aarch64 musl, run on board #1): PSS 648 kB at start, 1344 kB after building the
       facade with the builtin drivers, 1696 kB after one refresh (RSS 1708 kB; refresh 1 ms).
       Eager binds are not measured on the live board: `RuntimeBindPolicy::all()` would bind the
       camera's I2C bus and the USB power GPIO lines.
