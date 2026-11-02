@@ -32,6 +32,10 @@ pub const CAP_DEVICE_CAPS: u32 = 0x8000_0000;
 /// `V4L2_BUF_CAP_SUPPORTS_DMABUF`: the queue accepts DMA-buf memory.
 pub const BUF_CAP_SUPPORTS_DMABUF: u32 = 0x0000_0004;
 
+/// `V4L2_SEL_TGT_CROP`: the crop rectangle of a queue (the part of the source
+/// the device reads, or of a capture the device fills).
+pub const SEL_TGT_CROP: u32 = 0x0000;
+
 /// `V4L2_BUF_FLAG_KEYFRAME`.
 pub const BUF_FLAG_KEYFRAME: u32 = 0x0000_0008;
 /// `V4L2_BUF_FLAG_PFRAME`.
@@ -123,6 +127,30 @@ impl Capability {
             self.capabilities
         }
     }
+
+    /// Whether this node is a memory-to-memory device (either queue layout).
+    pub fn is_m2m(&self) -> bool {
+        self.node_caps() & (CAP_VIDEO_M2M | CAP_VIDEO_M2M_MPLANE) != 0
+    }
+
+    /// Whether this node is a memory-to-memory device with multi-planar queues.
+    /// `false` for a single-planar device and for a node that is not M2M.
+    pub fn is_m2m_multiplanar(&self) -> bool {
+        self.is_m2m() && self.node_caps() & CAP_VIDEO_M2M_MPLANE != 0
+    }
+}
+
+/// A rectangle in pixels (`struct v4l2_rect`): an offset and a size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Rect {
+    /// `left`: the x offset.
+    pub left: i32,
+    /// `top`: the y offset.
+    pub top: i32,
+    /// `width`.
+    pub width: u32,
+    /// `height`.
+    pub height: u32,
 }
 
 /// Single-planar pixel format (`struct v4l2_pix_format`).
@@ -458,6 +486,47 @@ pub fn s_fmt(fd: BorrowedFd<'_>, buf_type: BufType, format: &Format) -> io::Resu
     // SAFETY: `S_FMT` takes a `v4l2_format`, which `raw` is.
     unsafe { ioctl_ptr(fd, uapi::S_FMT, &raw mut raw)? };
     Ok(decode(buf_type, &raw))
+}
+
+/// Reads a queue's selection rectangle for `target` (`VIDIOC_G_SELECTION`),
+/// e.g. [`SEL_TGT_CROP`].
+pub fn g_selection(fd: BorrowedFd<'_>, buf_type: BufType, target: u32) -> io::Result<Rect> {
+    let mut raw = uapi::Selection::zeroed();
+    raw.buf_type = buf_type as u32;
+    raw.target = target;
+    // SAFETY: `G_SELECTION` takes a `v4l2_selection`, which `raw` is.
+    unsafe { ioctl_ptr(fd, uapi::G_SELECTION, &raw mut raw)? };
+    Ok(rect_of(&raw))
+}
+
+/// Sets a queue's selection rectangle for `target` (`VIDIOC_S_SELECTION`) and
+/// returns the one the driver kept: it may clamp or align `rect` to what the
+/// hardware can do. The device refuses the call while the queue streams.
+pub fn s_selection(
+    fd: BorrowedFd<'_>,
+    buf_type: BufType,
+    target: u32,
+    rect: Rect,
+) -> io::Result<Rect> {
+    let mut raw = uapi::Selection::zeroed();
+    raw.buf_type = buf_type as u32;
+    raw.target = target;
+    raw.left = rect.left;
+    raw.top = rect.top;
+    raw.width = rect.width;
+    raw.height = rect.height;
+    // SAFETY: `S_SELECTION` takes a `v4l2_selection`, which `raw` is.
+    unsafe { ioctl_ptr(fd, uapi::S_SELECTION, &raw mut raw)? };
+    Ok(rect_of(&raw))
+}
+
+fn rect_of(raw: &uapi::Selection) -> Rect {
+    Rect {
+        left: raw.left,
+        top: raw.top,
+        width: raw.width,
+        height: raw.height,
+    }
 }
 
 /// Asks for `count` buffers of `memory` on a queue (`VIDIOC_REQBUFS`). Asking

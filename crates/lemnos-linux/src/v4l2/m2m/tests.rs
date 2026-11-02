@@ -5,7 +5,7 @@
 use super::*;
 #[cfg(feature = "dma")]
 use crate::dma::{Access, DmaHeap};
-use crate::v4l2::{PixFormat, PixFormatMplane, fourcc};
+use crate::v4l2::{PixFormat, PixFormatMplane, Rect, fourcc};
 use std::os::fd::AsFd;
 
 /// A queue with no device behind it, for the bookkeeping checks.
@@ -25,6 +25,7 @@ fn queue(count: u32, memory: Memory, num_planes: usize) -> Queue {
         count,
         queued: 0,
         maps: Vec::new(),
+        crop: None,
     }
 }
 
@@ -87,33 +88,17 @@ fn a_session_refuses_a_node_that_is_not_m2m() {
         format: Format::Single(PixFormat::default()),
         memory: Memory::Mmap,
         buffers: 1,
+        crop: None,
     };
     assert!(M2mSession::open("/dev/null", setup, setup).is_err());
 }
 
-/// The first video node whose driver is `driver` and that is memory-to-memory.
+/// The first memory-to-memory node whose driver is `driver`.
 fn find_m2m(driver: &str) -> Option<std::path::PathBuf> {
-    let mut nodes: Vec<_> = std::fs::read_dir("/dev")
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("video"))
-        })
-        .collect();
-    nodes.sort();
-    nodes.into_iter().find(|path| {
-        let Ok(file) = sys::open_node(path) else {
-            return false;
-        };
-        let Ok(caps) = sys::querycap(file.as_fd()) else {
-            return false;
-        };
-        caps.driver == driver
-            && caps.node_caps() & (sys::CAP_VIDEO_M2M | sys::CAP_VIDEO_M2M_MPLANE) != 0
-    })
+    crate::v4l2::find_m2m(driver)
+        .ok()
+        .flatten()
+        .map(|(path, _)| path)
 }
 
 fn rgb_setup(memory: Memory) -> QueueSetup {
@@ -128,6 +113,7 @@ fn rgb_setup(memory: Memory) -> QueueSetup {
         }),
         memory,
         buffers: 2,
+        crop: None,
     }
 }
 
@@ -290,11 +276,13 @@ fn codec(driver: &str, output: Format, capture: Format, memory: Memory) -> Optio
             format: output,
             memory,
             buffers: 2,
+            crop: None,
         };
         let cap = QueueSetup {
             format: capture,
             memory,
             buffers: 2,
+            crop: None,
         };
         let s = M2mSession::open(&path, out, cap).ok()?;
         let kept = |f: &Format| match f {
@@ -486,4 +474,79 @@ fn an_idle_device_has_no_pending_events() {
         )
         .unwrap();
     assert!(!ready.event);
+}
+
+#[test]
+fn query_reads_the_driver_and_the_queue_layout_without_a_session() {
+    let Some(path) = find_m2m("vim2m") else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    let cap = crate::v4l2::query(&path).unwrap();
+    assert_eq!(cap.driver, "vim2m");
+    assert!(cap.is_m2m());
+    assert!(!cap.is_m2m_multiplanar(), "vim2m is single-planar");
+    assert!(crate::v4l2::query("/dev/null").is_err(), "not a V4L2 node");
+}
+
+#[test]
+fn find_m2m_finds_the_driver_or_nothing() {
+    let Some((path, cap)) = crate::v4l2::find_m2m("vim2m").unwrap() else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    assert!(path.starts_with("/dev"));
+    assert_eq!(cap.driver, "vim2m");
+    assert!(
+        crate::v4l2::find_m2m("no-such-driver").unwrap().is_none(),
+        "an unknown driver finds no node"
+    );
+}
+
+/// vim2m has no selection operation on this kernel: `S_SELECTION` is refused
+/// (`ENOTTY`). A session asked for a crop therefore fails to open, with the
+/// driver's error and no half-open session. The crop's success path needs a
+/// driver that crops (the RGA, on a board); its ioctl layout is checked in
+/// `lemnos-linux-sys`.
+#[test]
+fn a_crop_the_driver_refuses_fails_the_open() {
+    let Some(path) = find_m2m("vim2m") else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    let out = QueueSetup {
+        crop: Some(Rect {
+            left: 0,
+            top: 0,
+            width: 32,
+            height: 24,
+        }),
+        ..rgb_setup(Memory::Mmap)
+    };
+    let err = M2mSession::open(&path, out, rgb_setup(Memory::Mmap))
+        .err()
+        .expect("vim2m refuses S_SELECTION");
+    assert!(err.raw_os_error().is_some(), "the driver's errno: {err}");
+
+    // Without a crop the same device opens, and reports none.
+    let s = M2mSession::open(&path, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
+    assert_eq!(s.output_crop(), None);
+    assert_eq!(s.capture_crop(), None);
+}
+
+#[test]
+fn set_output_crop_is_refused_where_the_driver_has_no_selection() {
+    let Some(path) = find_m2m("vim2m") else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    let mut s = M2mSession::open(&path, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
+    let rect = Rect {
+        left: 0,
+        top: 0,
+        width: 16,
+        height: 12,
+    };
+    assert!(s.set_output_crop(rect).is_err());
+    assert_eq!(s.output_crop(), None, "a refused change keeps no crop");
 }

@@ -205,6 +205,23 @@ pub(crate) struct Event {
 // SAFETY: integers and byte arrays only.
 unsafe impl Pod for Event {}
 
+/// The kernel's `struct v4l2_selection` (64 bytes): a queue's crop, compose or
+/// bounds rectangle (`r`), read or set through `G_SELECTION` / `S_SELECTION`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct Selection {
+    pub buf_type: u32,
+    pub target: u32,
+    pub flags: u32,
+    pub left: i32,
+    pub top: i32,
+    pub width: u32,
+    pub height: u32,
+    reserved: [u32; 9],
+}
+// SAFETY: integers only.
+unsafe impl Pod for Selection {}
+
 /// `VIDIOC_QUERYCAP`.
 pub(crate) const QUERYCAP: u32 = ior::<Capability>(V, 0);
 /// `VIDIOC_ENUM_FMT`.
@@ -235,6 +252,10 @@ pub(crate) const DECODER_CMD: u32 = iowr::<DecoderCmd>(V, 96);
 pub(crate) const SUBSCRIBE_EVENT: u32 = iow::<Subscription>(V, 90);
 /// `VIDIOC_DQEVENT`.
 pub(crate) const DQEVENT: u32 = ior::<Event>(V, 89);
+/// `VIDIOC_G_SELECTION`.
+pub(crate) const G_SELECTION: u32 = iowr::<Selection>(V, 94);
+/// `VIDIOC_S_SELECTION`.
+pub(crate) const S_SELECTION: u32 = iowr::<Selection>(V, 95);
 
 /// Reads a native-endian `u32` at `offset` of a byte array.
 pub(crate) fn get_u32(bytes: &[u8], offset: usize) -> u32 {
@@ -269,6 +290,7 @@ mod tests {
         assert_eq!(size_of::<DecoderCmd>(), 72);
         assert_eq!(size_of::<Subscription>(), 32);
         assert_eq!(size_of::<Event>(), 136);
+        assert_eq!(size_of::<Selection>(), 64);
     }
 
     #[test]
@@ -312,6 +334,8 @@ mod tests {
         assert_eq!(DECODER_CMD, 0xc048_5660);
         assert_eq!(SUBSCRIBE_EVENT, 0x4020_565a);
         assert_eq!(DQEVENT, 0x8088_5659);
+        assert_eq!(G_SELECTION, 0xc040_565e);
+        assert_eq!(S_SELECTION, 0xc040_565f);
     }
 
     #[test]

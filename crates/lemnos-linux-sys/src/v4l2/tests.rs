@@ -1,6 +1,7 @@
 //! Encoding and layout checks for the V4L2 wrappers (no device needed).
 
 use super::*;
+use std::os::fd::AsFd;
 
 #[test]
 fn fourcc_packs_little_endian() {
@@ -67,6 +68,20 @@ fn timestamps_convert_both_ways() {
     assert_eq!((tv.tv_sec, tv.tv_usec), (3, 250_000));
     assert_eq!(duration_of(3, 250_000, 1_000), t);
     assert_eq!(duration_of(-1, -5, 1_000), Duration::ZERO);
+}
+
+#[test]
+fn selection_calls_fail_cleanly_on_a_node_without_selection() {
+    // /dev/null is no V4L2 node: the calls fail, and the caller sees the errno.
+    let file = std::fs::File::open("/dev/null").unwrap();
+    let rect = Rect {
+        left: 0,
+        top: 0,
+        width: 8,
+        height: 8,
+    };
+    assert!(s_selection(file.as_fd(), BufType::VideoOutput, SEL_TGT_CROP, rect).is_err());
+    assert!(g_selection(file.as_fd(), BufType::VideoOutput, SEL_TGT_CROP).is_err());
 }
 
 #[test]

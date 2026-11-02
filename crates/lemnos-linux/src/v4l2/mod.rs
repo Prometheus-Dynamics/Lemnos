@@ -7,10 +7,48 @@
 
 pub mod m2m;
 
+use std::io;
+use std::path::{Path, PathBuf};
+
+use lemnos_linux_sys::v4l2 as sys;
+
+/// Reads a node's capabilities (`VIDIOC_QUERYCAP`) without opening a session:
+/// its driver name, and whether it is a memory-to-memory device and which
+/// queue layout it uses ([`Capability::is_m2m`], [`Capability::is_m2m_multiplanar`]).
+/// The node is opened read-only, so this does not claim the device.
+pub fn query(path: impl AsRef<Path>) -> io::Result<Capability> {
+    let file = std::fs::File::open(path.as_ref())?;
+    sys::querycap(std::os::fd::AsFd::as_fd(&file))
+}
+
+/// Finds the first memory-to-memory node whose driver is `driver` (e.g.
+/// `"rockchip-rga"`), scanning `/dev/video*` in numeric order. Nodes that
+/// cannot be queried are skipped. `None` when no node matches.
+pub fn find_m2m(driver: &str) -> io::Result<Option<(PathBuf, Capability)>> {
+    let mut nodes: Vec<(u32, PathBuf)> = std::fs::read_dir("/dev")?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let index = name.to_str()?.strip_prefix("video")?.parse::<u32>().ok()?;
+            Some((index, entry.path()))
+        })
+        .collect();
+    nodes.sort_by_key(|(index, _)| *index);
+    for (_, path) in nodes {
+        if let Some(cap) = query(&path)
+            .ok()
+            .filter(|cap| cap.is_m2m() && cap.driver == driver)
+        {
+            return Ok(Some((path, cap)));
+        }
+    }
+    Ok(None)
+}
+
 pub use lemnos_linux_sys::v4l2::{
     BUF_CAP_SUPPORTS_DMABUF, BUF_FLAG_BFRAME, BUF_FLAG_ERROR, BUF_FLAG_KEYFRAME, BUF_FLAG_LAST,
     BUF_FLAG_PFRAME, BufType, BufferInfo, CAP_VIDEO_M2M, CAP_VIDEO_M2M_MPLANE, Capability,
     DEC_CMD_STOP, Dequeued, ENC_CMD_STOP, EVENT_EOS, EVENT_SOURCE_CHANGE, Event, Format,
     FormatDesc, MAX_PLANES, Memory, PixFormat, PixFormatMplane, PlaneFormat, PlaneInfo,
-    PlaneMemory, QueuePlane, Requested, fourcc,
+    PlaneMemory, QueuePlane, Rect, Requested, fourcc,
 };

@@ -34,7 +34,10 @@ s.drain(Drain::Encoder)?;                         // or Drain::Decoder; last buf
 s.stream_off()?;                                  // every buffer comes back
 ```
 
-- `QueueSetup { format, memory, buffers }` per queue. The format's variant (`Single` or
+- `QueueSetup { format, memory, buffers, crop }` per queue. `crop: Option<Rect>` is
+  `VIDIOC_S_SELECTION` with `V4L2_SEL_TGT_CROP`, sent after `S_FMT` and before `REQBUFS`.
+  The rectangle the driver kept is `output_crop()` / `capture_crop()`. A device that does not
+  crop that queue refuses the open with the driver's error. The format's variant (`Single` or
   `Multi`) and direction give the `VIDIOC` buffer type. `Memory::Mmap` or `Memory::Dmabuf`.
   Userptr is not supported.
 - `open` sets the capture format first, then the output format (an encoder sizes its coded
@@ -43,6 +46,15 @@ s.stream_off()?;                                  // every buffer comes back
   `capture_format()`: `S_FMT` adjusts a format it does not take rather than failing, so
   check the pixel format before relying on it.
 - `Format`, `PixFormat`, `PixFormatMplane`, `PlaneFormat`, `fourcc(b"NV12")` are plain values.
+- `set_output_crop(rect)` changes the source crop between frames (a scaler's source window).
+  It returns the rectangle the driver kept. The driver refuses it while the queue streams
+  (`EBUSY` on vim2m); the tests check that.
+- Discovery without a session: `lemnos_linux::v4l2::query(path)` returns the node's
+  `Capability` (driver name, `is_m2m()`, `is_m2m_multiplanar()`), opened read-only.
+  `lemnos_linux::v4l2::find_m2m("rockchip-rga")` scans `/dev/video*` in numeric order and
+  returns the first M2M node of that driver with its capability, or `None`. Nodes that
+  fail `QUERYCAP` are skipped. Pick `Format::Single` or `Format::Multi` from
+  `is_m2m_multiplanar()` before opening.
 - Buffers are tracked by index in a 64-bit mask, so a session has at most 64 per queue. A
   buffer is the caller's between `dequeue_*` and `queue_*`, and the device's in between.
 - `queue_output` takes the timestamp; the capture buffer carries it back

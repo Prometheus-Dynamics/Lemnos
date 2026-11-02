@@ -23,7 +23,7 @@
 //!     size_image: 9216,
 //!     ..Default::default()
 //! });
-//! let setup = |memory| QueueSetup { format: rgb, memory, buffers: 2 };
+//! let setup = |memory| QueueSetup { format: rgb, memory, buffers: 2, crop: None };
 //! let mut s = M2mSession::open("/dev/video0", setup(Memory::Mmap), setup(Memory::Mmap))?;
 //! let frame = [0u8; 9216];
 //! let mmap = [QueuePlane { memory: PlaneMemory::Mmap, length: 0, bytes_used: 0, data_offset: 0 }];
@@ -58,7 +58,7 @@ use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::poll::{self, PollFd};
 use lemnos_linux_sys::v4l2 as sys;
 
-use super::{BufType, Capability, Dequeued, Event, Format, Memory, PlaneMemory, QueuePlane};
+use super::{BufType, Capability, Dequeued, Event, Format, Memory, PlaneMemory, QueuePlane, Rect};
 
 /// Most buffers one queue may have (the session tracks them in a 64-bit mask).
 pub const MAX_BUFFERS: u32 = 64;
@@ -72,6 +72,12 @@ pub struct QueueSetup {
     pub memory: Memory,
     /// Buffers to ask for (at least 1; the driver may grant more or fewer).
     pub buffers: u32,
+    /// The queue's crop rectangle (`VIDIOC_S_SELECTION`, `V4L2_SEL_TGT_CROP`),
+    /// set after the format and before the buffers are requested. `None`
+    /// leaves the driver's default. The rectangle the driver kept is read
+    /// back with [`M2mSession::output_crop`] or [`M2mSession::capture_crop`].
+    /// A device that does not crop this queue refuses the open.
+    pub crop: Option<Rect>,
 }
 
 /// What a drain asks the device to finish.
@@ -105,6 +111,8 @@ struct Queue {
     queued: u64,
     /// For MMAP queues: per buffer, one mapping per plane.
     maps: Vec<Vec<Mapping>>,
+    /// The crop rectangle the driver kept, when one was set.
+    crop: Option<Rect>,
 }
 
 impl Queue {
@@ -114,6 +122,10 @@ impl Queue {
         if format.num_planes() != setup.format.num_planes() {
             return Err(invalid("the driver changed a queue's plane count".into()));
         }
+        let crop = match setup.crop {
+            Some(rect) => Some(sys::s_selection(fd, buf_type, sys::SEL_TGT_CROP, rect)?),
+            None => None,
+        };
         let wanted = setup.buffers.max(1);
         let granted = sys::reqbufs(fd, buf_type, setup.memory, wanted)?.count;
         if granted == 0 || granted > MAX_BUFFERS {
@@ -146,6 +158,7 @@ impl Queue {
             count: granted,
             queued: 0,
             maps,
+            crop,
         })
     }
 
@@ -259,6 +272,33 @@ impl M2mSession {
     /// The destination queue's format, as the driver took it.
     pub fn capture_format(&self) -> &Format {
         &self.capture.format
+    }
+
+    /// The source queue's crop rectangle as the driver kept it, when one was
+    /// set at open ([`QueueSetup::crop`]) or by [`Self::set_output_crop`].
+    pub fn output_crop(&self) -> Option<Rect> {
+        self.output.crop
+    }
+
+    /// The destination queue's crop rectangle as the driver kept it, when one
+    /// was set at open.
+    pub fn capture_crop(&self) -> Option<Rect> {
+        self.capture.crop
+    }
+
+    /// Sets the source queue's crop rectangle (`VIDIOC_S_SELECTION`) and returns
+    /// the one the driver kept. Changing it between frames is how a scaler is
+    /// asked for a new source window. The device refuses the change while the
+    /// queue streams (`EBUSY` on most drivers).
+    pub fn set_output_crop(&mut self, rect: Rect) -> io::Result<Rect> {
+        let kept = sys::s_selection(
+            self.file.as_fd(),
+            self.output.buf_type,
+            sys::SEL_TGT_CROP,
+            rect,
+        )?;
+        self.output.crop = Some(kept);
+        Ok(kept)
     }
 
     /// The source queue's buffer count.
