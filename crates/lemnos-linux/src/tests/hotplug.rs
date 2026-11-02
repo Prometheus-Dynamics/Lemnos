@@ -106,22 +106,13 @@ fn hotplug_watcher_uses_inotify_on_test_roots_and_uevents_on_the_system() {
 }
 
 #[test]
-fn uevents_map_to_interfaces() {
-    use crate::uevent::Uevent;
+fn subsystems_map_to_interfaces() {
     use crate::watch::uevent_interface;
 
-    let event = |subsystem: &str| Uevent {
-        action: "add".into(),
-        devpath: "/devices/x".into(),
-        vars: vec![("SUBSYSTEM".into(), subsystem.into())],
-    };
-    assert_eq!(uevent_interface(&event("usb")), Some(InterfaceKind::Usb));
-    assert_eq!(
-        uevent_interface(&event("i2c-dev")),
-        Some(InterfaceKind::I2c)
-    );
-    assert_eq!(uevent_interface(&event("hwmon")), Some(InterfaceKind::Pwm));
-    assert_eq!(uevent_interface(&event("gpio")), Some(InterfaceKind::Gpio));
-    assert_eq!(uevent_interface(&event("tty")), Some(InterfaceKind::Uart));
-    assert_eq!(uevent_interface(&event("video4linux")), None);
+    assert_eq!(uevent_interface("usb"), Some(InterfaceKind::Usb));
+    assert_eq!(uevent_interface("i2c-dev"), Some(InterfaceKind::I2c));
+    assert_eq!(uevent_interface("hwmon"), Some(InterfaceKind::Pwm));
+    assert_eq!(uevent_interface("gpio"), Some(InterfaceKind::Gpio));
+    assert_eq!(uevent_interface("tty"), Some(InterfaceKind::Uart));
+    assert_eq!(uevent_interface("video4linux"), None);
 }

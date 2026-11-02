@@ -37,6 +37,14 @@ impl LinuxPaths {
         self
     }
 
+    /// The sysfs mount point the class and bus roots live under (`/sys`).
+    pub fn sys_root(&self) -> PathBuf {
+        self.sys_class_root
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/sys"))
+    }
+
     pub fn gpio_class_root(&self) -> PathBuf {
         self.sys_class_root.join("gpio")
     }

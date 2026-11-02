@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
+#[macro_use]
+mod trace;
+
 #[cfg(all(feature = "hotplug", feature = "tokio"))]
 mod async_watch;
 mod backend;
+pub mod device_watch;
 mod discovery;
 #[cfg(feature = "dma")]
 pub mod dma;
@@ -23,6 +27,7 @@ mod watch;
 pub use async_watch::AsyncLinuxHotplugWatcher;
 pub use backend::LinuxBackend;
 pub use backend::LinuxTransportConfig;
+pub use device_watch::{DeviceWatchSource, DeviceWatcher, Filter};
 #[cfg(feature = "i2c")]
 pub use discovery::I2cDiscoveryProbe;
 #[cfg(feature = "spi")]

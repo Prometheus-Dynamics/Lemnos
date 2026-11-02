@@ -78,9 +78,23 @@ pub struct Event {
 
 /// Decodes the events in a buffer filled by `read(2)` on an inotify
 /// descriptor (`struct inotify_event` records, native endianness).
-pub fn parse_events(mut bytes: &[u8]) -> Vec<Event> {
-    const HEADER: usize = 16;
+pub fn parse_events(bytes: &[u8]) -> Vec<Event> {
     let mut events = Vec::new();
+    for_each_event(bytes, |wd, mask, name| {
+        events.push(Event {
+            wd,
+            mask,
+            name: name.map(std::ffi::OsStr::to_os_string),
+        });
+    });
+    events
+}
+
+/// Calls `f(wd, mask, name)` for each event in a buffer filled by `read(2)`
+/// on an inotify descriptor, without allocating: `name` borrows the buffer.
+/// A truncated trailing record is dropped.
+pub fn for_each_event(mut bytes: &[u8], mut f: impl FnMut(i32, u32, Option<&std::ffi::OsStr>)) {
+    const HEADER: usize = 16;
     while bytes.len() >= HEADER {
         let word = |i: usize| [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
         let wd = i32::from_ne_bytes(word(0));
@@ -89,12 +103,10 @@ pub fn parse_events(mut bytes: &[u8]) -> Vec<Event> {
         let end = (HEADER + len).min(bytes.len());
         let raw_name = &bytes[HEADER..end];
         let trimmed = raw_name.split(|b| *b == 0).next().unwrap_or(&[]);
-        let name =
-            (!trimmed.is_empty()).then(|| std::ffi::OsStr::from_bytes(trimmed).to_os_string());
-        events.push(Event { wd, mask, name });
+        let name = (!trimmed.is_empty()).then(|| std::ffi::OsStr::from_bytes(trimmed));
+        f(wd, mask, name);
         bytes = &bytes[end..];
     }
-    events
 }
 
 #[cfg(test)]

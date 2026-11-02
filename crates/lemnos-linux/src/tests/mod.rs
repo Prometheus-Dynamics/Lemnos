@@ -1,4 +1,5 @@
 mod backend;
+mod device_watch;
 mod discovery;
 #[cfg(feature = "hotplug")]
 mod hotplug;

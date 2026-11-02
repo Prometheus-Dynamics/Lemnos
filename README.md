@@ -4,6 +4,10 @@ Lemnos is a Rust workspace for hardware discovery, driver matching, and runtime 
 
 Lemnos 2.0 is also the hardware foundation under camera stacks and the apps on a board: `embedded-hal` 1.0 is the bus vocabulary, device drivers are `no_std` and run on Linux and microcontrollers alike, and Linux is reached through one pure-Rust implementation with no C libraries. See [docs/foundation.md](docs/foundation.md).
 
+## Scope
+
+Lemnos is user-space hardware access: buses (GPIO, PWM, I2C, SPI, UART), USB, later PCIe and MMIO through vfio, hotplug, board files, drivers, device ownership through `lemnosd`, DMA buffer basics, and MCU drivers. It is not a memory manager and does not decide what data moves where. It has no camera or vision code. Lower layers hand over file descriptors and handles, never copies: a consumer that needs frames, buffers or pixels owns that layer.
+
 The repository is split into small crates so applications, custom drivers, Linux backends, built-in generic drivers, and test helpers can evolve independently.
 
 ## Workspace Layout
@@ -135,6 +139,7 @@ Targeted helper scripts live under `testing/`.
 - [docs/board-definition.md](docs/board-definition.md): the board-definition format, built-in drivers, and adopting a board in an app
 - [docs/looks.md](docs/looks.md): LED looks: the blocks, look files, built-in names, brightness, reloads and the CLI
 - [docs/system-service.md](docs/system-service.md): `lemnosd`, the board's hardware service: client API, LED intents, updater integration, backends, packaging
+- [docs/hotplug.md](docs/hotplug.md): device arrival and removal: one watcher (netlink, inotify, sysfs rescan) for Lemnos and the camera stack, its filters and events, and the camera-stack migration notes
 - [docs/composite-devices.md](docs/composite-devices.md): design only: composite devices and the fan controller with its failsafe
 - [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the migration record
 - [docs/provenance.md](docs/provenance.md): where the generic code came from, and the cross-repo migration that moved it

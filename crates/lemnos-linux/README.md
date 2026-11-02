@@ -10,18 +10,18 @@ This crate provides:
 - Linux transport configuration
 - discovery probes for GPIO, LED, PWM, hwmon, I2C, SPI, UART, and USB surfaces
 - Linux path helpers
-- optional hotplug watching: netlink uevents on the real `/sys`, inotify on other roots or as a fallback (`LinuxHotplugWatcher::source`)
+- optional hotplug watching: `device_watch::DeviceWatcher` (any subsystems; netlink uevents on the real `/sys`, inotify or a sysfs rescan otherwise; coldplug; `AsyncDeviceWatcher` with `tokio`) and Lemnos's inventory adapter `LinuxHotplugWatcher::source`; see [docs/hotplug.md](../../docs/hotplug.md)
 - `hal`: embedded-hal 1.0 implementations: `I2cBus` (i2c-dev; addresses claimed with `I2C_SLAVE`, never forced), `Spidev`, `GpioChip`/`GpioLines`/`GpioLine` (GPIO uAPI v2: bias, drive, debounce, edge events), `StdDelay`; the backend's sessions run on the same code
-- `uevent`: the kernel's uevent socket and parser
 - `v4l2::m2m` (feature `v4l2-m2m`): V4L2 memory-to-memory sessions, MMAP or dma-buf queues, drains and events ([docs/m2m.md](../../docs/m2m.md))
 - `dma` (feature): DMA buffers, dma-heap allocation, dma-buf sync, mappings and sync-file fences ([docs/dma.md](../../docs/dma.md))
 - `transfer` (feature `spi` or `i2c`): the SPI and I2C transfer engines of `lemnos_bus::transfer`
+- `uevent`: the kernel's uevent socket, a zero-copy message view (`UeventMsg`) and the owned form (`Uevent`)
 
 ## Features
 
 - `full`: enables the common Linux capability bundle
 - `gpio`, `pwm`, `i2c`, `spi`, `uart`, `usb`: enable interface-specific support
-- `hotplug`: enables hotplug watching (uevent, inotify fallback)
+- `hotplug`: enables Lemnos's inventory hotplug watcher (`LinuxHotplugWatcher`); the generic `device_watch` is always built
 - `gpio-sysfs`: enables sysfs-based GPIO discovery
 - `gpio-cdev`: enables character-device GPIO support (uAPI v2, Linux 5.10+)
 - `dma`: enables DMA buffers (dma-heap, dma-buf sync, fences)
