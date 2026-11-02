@@ -25,9 +25,14 @@ when, blocked by.
 
 ### 2. Hardware support (added 2026-10-30)
 
-- [ ] **riscv64 and armv7 builds.** Why: lemnosd runs on the K230D (riscv64) and Flame (RV1106G2,
-      Cortex-A7). Done when: lemnosd and its client build for riscv64gc-unknown-linux-gnu/musl and
-      armv7-unknown-linux-gnueabihf in CI, with the size reported per target. Blocked by: nothing.
+- [x] **riscv64 and armv7 builds.** Why: lemnosd runs on the K230D (riscv64) and Flame (RV1106G2,
+      Cortex-A7). Done in 5f54be0 (CI job `cross32`, `./scripts/ci.sh cross32`): lemnosd and
+      lemnos-ctl (the client, over lemnos-ipc) build with the service profile for
+      riscv64gc-unknown-linux-gnu and armv7-unknown-linux-gnueabihf, and are checked stripped;
+      lemnosd --help runs under qemu-riscv64. Stripped sizes: riscv64gc lemnosd 1,195,920 B,
+      lemnos-ctl 902,592 B; armv7 lemnosd 1,221,944 B, lemnos-ctl 914,600 B. Checked locally with
+      zig cc against glibc 2.39 and a Debian trixie sysroot; the GitHub job is the first run on
+      ubuntu-latest. Blocked by: nothing.
 - [ ] **Board definitions for the new boards.** Why: each board's LEDs, fan, power monitor, IMU and
       spare I/O come from its board file. Done when: board files for the K230D board, the Rockchip
       modules (RK3588S, RK3576, RK3566 and RK3562) and Flame are written, marked untested on board,
