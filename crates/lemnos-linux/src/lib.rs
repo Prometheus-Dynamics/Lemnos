@@ -14,6 +14,8 @@ pub mod transfer;
 mod transport;
 pub mod uevent;
 mod util;
+#[cfg(feature = "v4l2-m2m")]
+pub mod v4l2;
 #[cfg(feature = "hotplug")]
 mod watch;
 
