@@ -112,7 +112,7 @@ pub enum Block {
     /// other layers.
     Wash { color: Rgbw, effect: Effect },
     /// A fill that grows from the top over `fill_ms`, holds, then drains
-    /// toward the ring's bottom (see [`drain_level`]) from `start_ms` over
+    /// toward the ring's bottom (see `drain_level`) from `start_ms` over
     /// `duration_ms` on `easing`.
     Drain {
         color: Rgbw,

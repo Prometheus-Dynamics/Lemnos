@@ -550,7 +550,7 @@ impl ImuCalibrator {
     }
 
     /// Writes the applied state as words. Returns the number written, or 0
-    /// when `out` is shorter than [`words::IMU_LEN`].
+    /// when `out` is shorter than `words::IMU_LEN`.
     pub fn words(&self, out: &mut [i32]) -> usize {
         if out.len() < words::IMU_LEN {
             return 0;

@@ -36,7 +36,7 @@ pub const FAN_READ_INTERACTION: &str = "fan.read";
 pub const FAN_SET_DUTY_INTERACTION: &str = "fan.set_duty";
 /// Sets the raw hwmon `pwm1` value. Input: `u64` in `0..=255`.
 pub const FAN_SET_PWM_INTERACTION: &str = "fan.set_pwm";
-/// Sets the control mode. Input: a [`FanMode`] name (`"full-speed"`,
+/// Sets the control mode. Input: a `FanMode` name (`"full-speed"`,
 /// `"manual"`, `"automatic"`) or the raw `pwm1_enable` value as `u64`.
 pub const FAN_SET_MODE_INTERACTION: &str = "fan.set_mode";
 
@@ -119,14 +119,14 @@ impl FanMode {
 /// Driver for Linux hwmon fans, matched by `linux.subsystem = "hwmon"`.
 ///
 /// State telemetry: `duty_ratio` (`f64`, `0.0..=1.0`), `pwm` (raw `0..=255`),
-/// `pwm_mode` (raw `pwm1_enable`), `mode` (a [`FanMode`] name), and `rpm`
+/// `pwm_mode` (raw `pwm1_enable`), `mode` (a `FanMode` name), and `rpm`
 /// when the chip has a tachometer. Realized config: `label`, `fan_name`, and
 /// `linux.class_root`.
 ///
 /// Interactions: [`FAN_READ_INTERACTION`], [`FAN_SET_DUTY_INTERACTION`],
 /// [`FAN_SET_PWM_INTERACTION`], and [`FAN_SET_MODE_INTERACTION`]. Each
 /// returns the fan state map after the operation. The kernel only applies
-/// `pwm1` in [`FanMode::Manual`].
+/// `pwm1` in `FanMode::Manual`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HwmonFanDriver;
 

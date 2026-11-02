@@ -66,7 +66,7 @@ impl I2c for PioI2cBus {
     }
 }
 
-/// Completes synchronously, as [`I2cBus`] does.
+/// Completes synchronously, as [`I2cBus`](super::I2cBus) does.
 impl embedded_hal_async::i2c::I2c for PioI2cBus {
     async fn transaction(
         &mut self,

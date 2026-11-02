@@ -768,7 +768,7 @@ impl DeviceClient {
 }
 
 impl DeviceClient {
-    /// A look operation (presets and look files; see [`LooksOp`]), answered
+    /// A look operation (presets and look files; see [`crate::wire::LooksOp`]), answered
     /// with its text. A refusal is [`ClientError::Rejected`].
     pub fn looks(&mut self, op: crate::wire::LooksOp) -> Result<String, ClientError> {
         let id = self.conn.next_id();
