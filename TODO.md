@@ -223,15 +223,23 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
 
 ## After the release (planned 2026-11-02; not started; the user's go first)
 
-- [ ] **One USB transport.** Why: Lemnos (rusb over libusb today), a flashing tool's USB boot
-      code (nusb) and a camera stack's UVC access (raw usbdevfs) each talk to USB separately.
-      Done when: one USB layer serves all three and also builds for Windows and macOS; libusb is
-      removed from the dependency tree. The flashing tool's needs, from nusb 0.2.7 (2026-11-02):
-      listing with vid/pid, serial and strings, plus bus id and port chain as a stable location;
-      hotplug watch; open, active configuration and endpoint lookup; interface claim (detach the
-      kernel driver on Linux; plain claim on macOS); vendor control in/out; async bulk in/out with
-      buffered bulk streaming; error kinds permission denied, busy, disconnected, unsupported;
-      on Windows, report whether WinUSB is bound so the tool can offer to install it.
+- [x] **One USB transport** (780588c, 3e5fd0f, c39ba67, 811b9c1): `lemnos-usb` is the one USB
+      layer. Linux runs on usbdevfs (URBs and ioctls in `lemnos-linux-sys`, the `usbfs` module);
+      Windows (WinUSB) and macOS (IOKit) run on nusb 0.2.9, which no consumer imports. Listing,
+      stable location (bus id and port chain), hotplug watch, descriptors and endpoint lookup,
+      claims (detach on Linux), vendor and standard control, blocking and async bulk and interrupt
+      transfers, buffered bulk streams, isochronous transfers on Linux, error kinds, and WinUSB
+      reporting on Windows. libusb is gone from the lock (`rusb` removed). Migration notes for the
+      flashing tool (from nusb) and the camera stack (from raw usbdevfs): `docs/usb.md`.
+      *Gates:* workspace tests and clippy (all features), docs-and-lints, no_std, sizes, and the
+      `lemnos linux` matrix entries pass; `cargo check` and clippy pass for Windows and macOS.
+      *Untested on hardware:* every Linux runtime path (descriptor reads, claims, transfers,
+      URB completion, isochronous streams, reattach after detach) and every Windows and macOS
+      runtime path. This host's devices allow no open for this user; the probe covered the
+      permission path only. *Follow-up:* wire USB bulk into the transfer interface
+      (`lemnos_bus::transfer::TransferEngine`, dbc5df4) as a small step; the USB watch should
+      move onto the single hotplug watcher once it lands; USB buffers should come from the DMA
+      buffer basics (not page-aligned yet).
 - [x] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
       Done when: a single watcher serves Lemnos and the camera stack. (8669d26:
       `lemnos_linux::device_watch::DeviceWatcher`, netlink, inotify or rescan; Lemnos's
