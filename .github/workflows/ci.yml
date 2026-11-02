@@ -1,14 +1,35 @@
 name: CI
 
 on:
+  # Every push to the integration branch and to main. Docs-only pushes skip
+  # the run: nothing a job checks changes with them.
   push:
     branches:
+      - dev
       - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE-*"
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Sunday 03:00 UTC: the long jobs (sizes, cross32) that a push
+    # does not run.
+    - cron: "0 3 * * 0"
+
+# A newer push to the same ref cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # Every job runs the same scripts as `./scripts/ci.sh`, so local runs and CI
 # cannot drift apart. Jobs do not repeat each other's work: the workspace job
 # owns the tests and the full-feature clippy, docs-and-lints the rest.
+#
+# Per push and pull request: workspace, docs-and-lints, feature-matrix, nostd.
+# Manual dispatch and the weekly schedule add the long jobs: sizes (firmware
+# and Linux size images) and cross32 (cross-built service binaries under qemu).
 env:
   CARGO_INCREMENTAL: 0
 
@@ -75,7 +96,10 @@ jobs:
       - run: ./scripts/ci.sh nostd
 
   sizes:
+    # Long: firmware and Linux size images. Manual dispatch and weekly only.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -89,6 +113,8 @@ jobs:
     # lemnosd and lemnos-ctl (the client) for the K230D (riscv64) and Flame (armv7) boards: the
     # service profile cross-built for riscv64gc-unknown-linux-gnu and armv7-unknown-linux-gnueabihf,
     # the stripped size of each reported, and lemnos-ctl run once under qemu-user.
+    # Long: cross builds and a qemu run. Manual dispatch and weekly only.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
