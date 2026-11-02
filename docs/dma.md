@@ -17,14 +17,16 @@ move data. A buffer is handed over as the same descriptor, never copied.
 |---|---|
 | `DmaHeap::open(name)`, `open_path` | opens `/dev/dma_heap/<name>`; `list_heaps()` names the heaps present (empty without the directory) |
 | `DmaHeap::allocate(len)` | `DMA_HEAP_IOCTL_ALLOC`: a `DmaBuf` of `len` bytes, read-write, close-on-exec. The kernel rounds the size up to pages; `len()` is what was asked for |
-| `DmaBuf::from_fd(fd)` | wraps a descriptor from elsewhere (a V4L2 export, a received fd); the size comes from the kernel (`lseek`) |
+| `DmaBuf::from_fd(fd)` | wraps a descriptor from elsewhere (a V4L2 export, a received fd); the size comes from the kernel (`lseek`), and the descriptor's file offset is left where it was |
+| `DmaBufRef::from_fd(fd: BorrowedFd)` | the same over a descriptor someone else owns (a frame's): `len()`, `identity()`, `export_fence`, `import_fence`, `map()`, with no dup and no close. `DmaBuf::borrow()` gives one for an owned buffer |
 | `DmaBuf::map()` | a `Mapping` (`lemnos_linux::dma::Mapping`): shared, read-write, unmapped on drop |
 | `begin_cpu_access(Access)`, `end_cpu_access(Access)` | `DMA_BUF_IOCTL_SYNC` start and end around CPU access to a mapping |
 | `set_name(&str)` | `DMA_BUF_SET_NAME`: a debugging name (at most 31 bytes) |
 | `export_fence(Access)` | `DMA_BUF_IOCTL_EXPORT_SYNC_FILE`: a `SyncFence` for the buffer's pending accesses |
 | `import_fence(Access, &SyncFence)` | `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`: attaches a fence (read or write) |
-| `identity()` | the device and inode numbers, the same for every descriptor of one buffer |
+| `identity()` | the device and inode numbers, the same for every descriptor of one buffer (`fstat`, no dup) |
 | `SyncFence::wait(timeout)`, `is_signaled()` | polls the sync file; a fence whose work failed is an error |
+| `wait_fence(fd: BorrowedFd, timeout)`, `fence_is_signaled(fd)` | the same over a borrowed descriptor (any pollable one works, a sync file included), no owned `SyncFence` needed |
 
 `Access` is `Read`, `Write` or `ReadWrite`. A kernel without sync files reports
 `io::ErrorKind::Unsupported` from the fence calls.
@@ -98,3 +100,20 @@ modules):
 - `dmabuf_size` is `DmaBuf::len()`; `dmabuf_id` is `DmaBuf::identity()` (`io::Result`).
 - Errors are `io::Error`; the kind is `Unsupported` for missing sync files, `InvalidInput`
   for bad names and sizes.
+
+## Offsets and sizes
+
+A dma-buf has no read or write position to use, and it answers only `lseek(SEEK_END, 0)`
+and `lseek(SEEK_SET, 0)`: `SEEK_CUR` is `EINVAL`. The size query therefore reads the
+offset where it can. For a regular descriptor it reads the current offset, seeks to the
+end for the size, and restores the old offset, so a caller's offset is unchanged. For a
+dma-buf it seeks to the end and back to 0, which is where a fresh descriptor's offset
+already is. Neither path duplicates the descriptor: a dup shares the open file
+description, so a dup's seek would move the caller's offset too.
+
+`lemnos_linux::dma::DmaBufRef` is the borrowed form, so a caller holding a per-frame
+descriptor queries its size, identity and fences without a dup and without taking
+ownership. Test coverage: the system heap (allocate, map, sync, name, fence, offset
+behaviour) and a pipe for the borrowed fence polling. Untested on board: CMA and vendor
+heaps and the board kernel's fences, as before.
+

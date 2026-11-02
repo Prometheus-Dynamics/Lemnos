@@ -97,6 +97,59 @@ pub fn import_sync_file(
     Ok(())
 }
 
+/// A dma-buf's size, from the kernel. The descriptor's file offset is left
+/// where it was: the offset is read, the end found with `lseek`, and the old
+/// offset restored. No duplicate is made, since a duplicate shares the offset.
+///
+/// A dma-buf answers only `lseek(SEEK_END, 0)` and `lseek(SEEK_SET, 0)`
+/// (`SEEK_CUR` is `EINVAL`), so for one the offset cannot be read: a fresh
+/// descriptor's offset is 0, and that is what is restored.
+pub fn size(dmabuf: BorrowedFd<'_>) -> io::Result<u64> {
+    let fd = dmabuf.as_raw_fd();
+    // SAFETY: `lseek` on a descriptor the caller holds only moves its offset.
+    let offset = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };
+    if offset < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINVAL) {
+            return Err(error);
+        }
+        // SAFETY: as above; the dma-buf form of the size query.
+        let end = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
+        if end < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(end as u64);
+    }
+    // SAFETY: as above.
+    let end = unsafe { libc::lseek(fd, 0, libc::SEEK_END) };
+    let end_error = (end < 0).then(io::Error::last_os_error);
+    // SAFETY: as above; `offset` came from this descriptor.
+    let restored = unsafe { libc::lseek(fd, offset, libc::SEEK_SET) };
+    if let Some(error) = end_error {
+        return Err(error);
+    }
+    if restored < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(end as u64)
+}
+
+/// The buffer's identity, its device and inode numbers (`fstat`): the same for
+/// every descriptor of one dma-buf. No duplicate is made.
+pub fn identity(dmabuf: BorrowedFd<'_>) -> io::Result<(u64, u64)> {
+    // SAFETY: an all-zero `stat` is a valid value; `fstat` fills it in.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fstat` writes one `stat` through the pointer, which is live.
+    if unsafe { libc::fstat(dmabuf.as_raw_fd(), &raw mut st) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((st.st_dev as u64, st.st_ino as u64))
+}
+
 /// ENOTTY from the sync-file ioctls means the kernel lacks them.
 fn unsupported(error: io::Error) -> io::Error {
     if error.raw_os_error() == Some(libc::ENOTTY) {
