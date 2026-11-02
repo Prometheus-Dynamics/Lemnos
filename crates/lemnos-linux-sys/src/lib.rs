@@ -24,6 +24,7 @@ pub mod rp1_pio;
 pub mod signal;
 pub mod spi;
 pub mod time;
+pub mod usbfs;
 pub mod v4l2;
 
 pub use ioctl::{ioc, ior, iow, iowr};
