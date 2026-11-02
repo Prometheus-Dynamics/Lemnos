@@ -4,9 +4,13 @@
 mod async_watch;
 mod backend;
 mod discovery;
+#[cfg(feature = "dma")]
+pub mod dma;
 pub mod hal;
 mod metadata;
 mod paths;
+#[cfg(any(feature = "i2c", feature = "spi"))]
+pub mod transfer;
 mod transport;
 pub mod uevent;
 mod util;

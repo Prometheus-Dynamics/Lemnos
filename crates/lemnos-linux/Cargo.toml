@@ -20,7 +20,7 @@ workspace = true
 default = []
 # The RP1 PIO I2C bus (`PioI2cBus`, the `pio-i2c:` selectors).
 rp1 = ["lemnos-core/rp1", "lemnos-linux-sys/rp1"]
-full = ["gpio", "pwm", "i2c", "spi", "uart", "usb", "gpio-cdev", "hotplug"]
+full = ["gpio", "pwm", "i2c", "spi", "uart", "usb", "gpio-cdev", "hotplug", "dma"]
 gpio = []
 pwm = []
 i2c = []
@@ -29,6 +29,8 @@ uart = ["dep:serialport"]
 usb = ["dep:rusb"]
 hotplug = []
 gpio-sysfs = []
+# DMA buffers: dma-heap allocation, dma-buf sync, mappings and sync-file fences (`dma`).
+dma = []
 # GPIO character device, uAPI v2 (Linux 5.10+).
 gpio-cdev = ["gpio"]
 tracing = ["dep:tracing"]
