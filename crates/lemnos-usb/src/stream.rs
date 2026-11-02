@@ -95,11 +95,23 @@ pub struct BulkWriter {
     queue: VecDeque<Transfer>,
     spare: Vec<Vec<u8>>,
     current: Vec<u8>,
+    /// Bytes written since the last [`BulkWriter::flush_end`].
+    written: u64,
+    /// The endpoint's `wMaxPacketSize`, from the descriptors.
+    max_packet: Option<u16>,
+}
+
+/// Whether a transfer of `written` bytes ends on a packet boundary, so that
+/// the device needs a zero-length packet to see its end. `max_packet` is the
+/// endpoint's packet size; nothing written means nothing to terminate.
+pub(crate) fn needs_zero_packet(written: u64, max_packet: u16) -> bool {
+    max_packet > 0 && written > 0 && written.is_multiple_of(u64::from(max_packet))
 }
 
 impl BulkWriter {
     pub(crate) fn new(device: UsbDevice, endpoint: u8, chunk: usize, depth: usize) -> Self {
         let chunk = chunk.max(1);
+        let max_packet = device.endpoint_max_packet_size(endpoint);
         Self {
             device,
             endpoint,
@@ -108,7 +120,35 @@ impl BulkWriter {
             queue: VecDeque::new(),
             spare: Vec::new(),
             current: Vec::with_capacity(chunk),
+            written: 0,
+            max_packet,
         }
+    }
+
+    /// Flushes, then ends the transfer for the device: when the bytes written
+    /// since the last `flush_end` are a whole number of packets, a zero-length
+    /// packet follows them, as nusb's `flush_end_async` does. A device that
+    /// reads until a short packet needs this, or its read never returns. The
+    /// count starts again afterwards. Writing nothing sends nothing.
+    pub fn flush_end(&mut self) -> io::Result<()> {
+        self.flush()?;
+        if self.written == 0 {
+            return Ok(());
+        }
+        let max_packet = self.max_packet.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the endpoint is not in the descriptors, so its packet size is unknown",
+            )
+        })?;
+        if needs_zero_packet(self.written, max_packet) {
+            self.device
+                .submit_bulk_out(self.endpoint, Vec::new())
+                .and_then(Transfer::wait)
+                .map_err(to_io)?;
+        }
+        self.written = 0;
+        Ok(())
     }
 
     /// Sends the gathered bytes as one transfer, waiting first while `depth`
@@ -144,6 +184,7 @@ impl BulkWriter {
 impl Write for BulkWriter {
     fn write(&mut self, mut data: &[u8]) -> io::Result<usize> {
         let written = data.len();
+        self.written += written as u64;
         while !data.is_empty() {
             let room = self.chunk - self.current.len();
             let count = room.min(data.len());

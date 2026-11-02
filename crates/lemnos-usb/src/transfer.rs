@@ -1,7 +1,7 @@
 //! Asynchronous transfers: a future for each submitted transfer, which also
 //! blocks for callers on plain threads.
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -97,6 +97,25 @@ pub struct Transfer {
 impl Transfer {
     pub(crate) fn new(shared: Arc<Shared>, canceller: Option<Box<dyn Canceller>>) -> Self {
         Self { shared, canceller }
+    }
+
+    /// Runs `work` on a new thread and returns the transfer it completes. The
+    /// transfer has no canceller: the work runs until it returns.
+    pub(crate) fn from_worker(
+        work: impl FnOnce() -> Result<TransferOutcome> + Send + 'static,
+    ) -> Result<Self> {
+        let shared = Shared::new();
+        let done = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("lemnos-usb-transfer".into())
+            .spawn(move || done.complete(work()))
+            .map_err(|error| {
+                Error::new(
+                    ErrorKind::Other,
+                    format!("starting a USB transfer thread: {error}"),
+                )
+            })?;
+        Ok(Self::new(shared, None))
     }
 
     /// Whether the transfer has finished (its result is ready to take).

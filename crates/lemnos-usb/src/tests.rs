@@ -202,3 +202,76 @@ fn a_hotplug_watch_starts() {
     // Starting only: a quiet bus has no event to wait for in a test.
     let _watch = crate::watch().expect("starting the hotplug watch");
 }
+
+#[test]
+fn a_zero_packet_is_needed_exactly_when_the_total_ends_on_a_packet_boundary() {
+    use crate::stream::needs_zero_packet;
+    // High-speed bulk (512) and SuperSpeed bulk (1024).
+    assert!(
+        !needs_zero_packet(0, 512),
+        "nothing written, nothing to end"
+    );
+    assert!(!needs_zero_packet(511, 512));
+    assert!(needs_zero_packet(512, 512));
+    assert!(!needs_zero_packet(513, 512));
+    assert!(needs_zero_packet(1024, 512), "two whole packets");
+    assert!(!needs_zero_packet(1536 + 1, 512));
+    assert!(!needs_zero_packet(1024, 1024 + 512), "short of one packet");
+    assert!(needs_zero_packet(1024, 1024), "SuperSpeed boundary");
+    assert!(
+        !needs_zero_packet(4096, 0),
+        "an unknown packet size sends nothing"
+    );
+}
+
+#[test]
+fn a_worker_transfer_resolves_with_the_outcome_of_its_work() {
+    let transfer = Transfer::from_worker(|| {
+        Ok(TransferOutcome {
+            buffer: vec![9, 8, 7],
+            actual_length: 2,
+            packets: Vec::new(),
+        })
+    })
+    .unwrap();
+    let outcome = transfer.wait().unwrap();
+    assert_eq!(outcome.data(), &[9, 8]);
+
+    let failed = Transfer::from_worker(|| Err(Error::new(ErrorKind::Timeout, "timed out")))
+        .unwrap()
+        .wait();
+    assert_eq!(failed.unwrap_err().kind(), ErrorKind::Timeout);
+}
+
+#[test]
+fn a_worker_transfer_is_awaited_as_a_future() {
+    let mut transfer = Transfer::from_worker(|| {
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(TransferOutcome {
+            buffer: vec![1],
+            actual_length: 1,
+            packets: Vec::new(),
+        })
+    })
+    .unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    loop {
+        match Pin::new(&mut transfer).poll(&mut context) {
+            Poll::Ready(result) => {
+                assert_eq!(result.unwrap().data(), &[1]);
+                break;
+            }
+            Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+/// The recorded device descriptor is the first 18 bytes of the blob the
+/// device returns, so the device-level view and the blob agree.
+#[test]
+fn the_device_descriptor_comes_from_the_blob_without_a_request() {
+    let blob = sample_blob();
+    let descriptor = crate::DeviceDescriptor::from_bytes(&blob).unwrap();
+    assert_eq!(descriptor.num_configurations, 1);
+    assert_eq!(configurations_from_blob(&blob).unwrap().len(), 1);
+}

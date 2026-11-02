@@ -164,6 +164,7 @@ impl Usbfs {
         endpoint: u8,
         buffer: Vec<u8>,
         packet_lengths: &[u32],
+        zero_packet: bool,
     ) -> Result<Transfer> {
         let tag = self.next_tag.fetch_add(1, Ordering::Relaxed);
         let shared = Shared::new();
@@ -184,9 +185,9 @@ impl Usbfs {
                 state.reaping = true;
             }
         }
-        if let Err(error) = self
-            .file
-            .submit(tag, kind, endpoint, buffer, packet_lengths)
+        if let Err(error) =
+            self.file
+                .submit(tag, kind, endpoint, buffer, packet_lengths, zero_packet)
         {
             self.lock_state().pending.remove(&tag);
             return Err(Error::from_io("submitting a USB transfer", &error));

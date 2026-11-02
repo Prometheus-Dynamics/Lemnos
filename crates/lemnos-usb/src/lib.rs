@@ -46,6 +46,7 @@
 //! on Windows and macOS nusb copies them into its own buffers.
 
 mod config;
+mod descriptor;
 mod device;
 mod error;
 mod info;
@@ -64,6 +65,7 @@ mod wait;
 mod tests;
 
 pub use config::{AlternateSetting, ConfigurationInfo, EndpointInfo, InterfaceInfo};
+pub use descriptor::DeviceDescriptor;
 pub use device::{Interface, UsbDevice};
 pub use error::{Error, ErrorKind, Result};
 pub use info::{InterfaceSummary, Speed, UsbDeviceInfo};

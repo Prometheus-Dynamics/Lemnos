@@ -8,6 +8,7 @@
 
 use crate::config::ConfigurationInfo;
 use crate::config::configuration_from_bytes;
+use crate::descriptor::DeviceDescriptor;
 use crate::error::{Error, ErrorKind, Result};
 use crate::transfer::{Canceller, Shared, Transfer, TransferOutcome};
 use crate::types::{ControlKind, ControlRecipient, ControlSetup, Direction, TransferType};
@@ -129,6 +130,11 @@ impl Native {
             claimed: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// The device descriptor, from nusb's cached copy (no request is made).
+    pub(crate) fn device_descriptor(&self) -> Result<DeviceDescriptor> {
+        DeviceDescriptor::from_bytes(self.device.device_descriptor().as_bytes())
     }
 
     pub(crate) fn configurations(&self) -> Result<Vec<ConfigurationInfo>> {

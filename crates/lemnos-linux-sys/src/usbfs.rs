@@ -45,6 +45,31 @@ const URB_TYPE_INTERRUPT: u8 = 1;
 const URB_TYPE_BULK: u8 = 3;
 /// `USBDEVFS_URB_ISO_ASAP`: start isochronous URBs at the next free frame.
 const URB_ISO_ASAP: u32 = 0x2;
+/// `USBDEVFS_URB_ZERO_PACKET`: an OUT bulk or interrupt URB whose length is a
+/// multiple of the endpoint's packet size ends with a zero-length packet, so
+/// the device sees the end of the transfer.
+pub const URB_ZERO_PACKET: u32 = 0x40;
+
+/// The URB flags for a submission. Isochronous URBs start at the next free
+/// frame; the zero-length terminator applies to OUT bulk and interrupt URBs
+/// only, so any other use is refused before the kernel sees it.
+pub(crate) fn urb_flags(kind: UrbKind, endpoint: u8, zero_packet: bool) -> io::Result<u32> {
+    let mut flags = if kind == UrbKind::Isochronous {
+        URB_ISO_ASAP
+    } else {
+        0
+    };
+    if zero_packet {
+        if kind == UrbKind::Isochronous || endpoint & 0x80 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a zero-length terminator applies to OUT bulk and interrupt transfers",
+            ));
+        }
+        flags |= URB_ZERO_PACKET;
+    }
+    Ok(flags)
+}
 
 /// `struct usbdevfs_ctrltransfer`.
 #[repr(C)]
@@ -398,7 +423,8 @@ impl UsbfsFile {
     /// Submits an asynchronous transfer. `buffer` is sent (OUT) or receives
     /// the data (IN); for isochronous transfers `packet_lengths` gives each
     /// packet's length and their sum is the buffer's length. `tag` identifies
-    /// the completion; it must not be in flight already.
+    /// the completion; it must not be in flight already. `zero_packet` sets
+    /// [`URB_ZERO_PACKET`] (OUT bulk and interrupt only).
     pub fn submit(
         &self,
         tag: u64,
@@ -406,7 +432,9 @@ impl UsbfsFile {
         endpoint: u8,
         mut buffer: Vec<u8>,
         packet_lengths: &[u32],
+        zero_packet: bool,
     ) -> io::Result<()> {
+        let flags = urb_flags(kind, endpoint, zero_packet)?;
         let packets = match kind {
             UrbKind::Isochronous => packet_lengths.len(),
             UrbKind::Bulk | UrbKind::Interrupt => 0,
@@ -438,11 +466,7 @@ impl UsbfsFile {
             },
             endpoint,
             status: 0,
-            flags: if kind == UrbKind::Isochronous {
-                URB_ISO_ASAP
-            } else {
-                0
-            },
+            flags,
             buffer: buffer.as_mut_ptr().cast(),
             buffer_length,
             actual_length: 0,
@@ -598,6 +622,18 @@ pub struct ControlSetup {
 #[cfg(all(test, target_pointer_width = "64"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urb_flags_carry_the_zero_packet_bit_on_out_bulk_and_interrupt_only() {
+        assert_eq!(URB_ZERO_PACKET, 0x40);
+        assert_eq!(urb_flags(UrbKind::Bulk, 0x01, false).unwrap(), 0);
+        assert_eq!(urb_flags(UrbKind::Bulk, 0x01, true).unwrap(), 0x40);
+        assert_eq!(urb_flags(UrbKind::Interrupt, 0x02, true).unwrap(), 0x40);
+        assert_eq!(urb_flags(UrbKind::Isochronous, 0x81, false).unwrap(), 0x2);
+        // IN endpoints and isochronous URBs cannot take the terminator.
+        assert!(urb_flags(UrbKind::Bulk, 0x81, true).is_err());
+        assert!(urb_flags(UrbKind::Isochronous, 0x81, true).is_err());
+    }
 
     #[test]
     fn structures_match_the_kernel_layout_on_64_bit() {

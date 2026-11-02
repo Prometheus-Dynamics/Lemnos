@@ -7,12 +7,13 @@
 use crate::config::ConfigurationInfo;
 #[cfg(target_os = "linux")]
 use crate::config::configurations_from_blob;
+use crate::descriptor::DeviceDescriptor;
 use crate::error::{Error, ErrorKind, Result};
 use crate::info::UsbDeviceInfo;
 use crate::listing::find_device;
 use crate::location::UsbLocation;
 use crate::stream::{BulkReader, BulkWriter};
-use crate::transfer::Transfer;
+use crate::transfer::{Transfer, TransferOutcome};
 use crate::types::{ControlSetup, Direction, TransferType};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +37,7 @@ enum Backend {
 struct Inner {
     info: UsbDeviceInfo,
     backend: Backend,
+    descriptor: DeviceDescriptor,
     configurations: Vec<ConfigurationInfo>,
 }
 
@@ -48,22 +50,27 @@ pub struct UsbDevice {
 impl UsbDevice {
     /// Opens the device a listing describes.
     pub fn open(info: &UsbDeviceInfo) -> Result<Self> {
+        // The raw blob starts with the device descriptor: no extra request.
         #[cfg(target_os = "linux")]
-        let (backend, configurations) = {
+        let (backend, descriptor, configurations) = {
             let usb = Usbfs::open(info.native())?;
-            let configurations = configurations_from_blob(&usb.read_descriptors()?)?;
-            (Backend::Usbfs(usb), configurations)
+            let blob = usb.read_descriptors()?;
+            let descriptor = DeviceDescriptor::from_bytes(&blob)?;
+            let configurations = configurations_from_blob(&blob)?;
+            (Backend::Usbfs(usb), descriptor, configurations)
         };
         #[cfg(not(target_os = "linux"))]
-        let (backend, configurations) = {
+        let (backend, descriptor, configurations) = {
             let native = Native::open(info.native())?;
+            let descriptor = native.device_descriptor()?;
             let configurations = native.configurations()?;
-            (Backend::Native(native), configurations)
+            (Backend::Native(native), descriptor, configurations)
         };
         Ok(Self {
             inner: Arc::new(Inner {
                 info: info.clone(),
                 backend,
+                descriptor,
                 configurations,
             }),
         })
@@ -80,6 +87,14 @@ impl UsbDevice {
     /// What the listing said about the device when it was opened.
     pub fn info(&self) -> &UsbDeviceInfo {
         &self.inner.info
+    }
+
+    /// The device descriptor, as read when the device was opened: versions,
+    /// class, IDs, string indices and the configuration count. No request is
+    /// made for it. A boot ROM and its loader differ here (for example in
+    /// `iSerialNumber`, or in `bcdUSB`).
+    pub fn device_descriptor(&self) -> &DeviceDescriptor {
+        &self.inner.descriptor
     }
 
     /// Every configuration the device has, as parsed when it was opened.
@@ -255,12 +270,8 @@ impl UsbDevice {
         timeout: Duration,
     ) -> Result<usize> {
         check_endpoint(endpoint, Direction::Out)?;
-        if data.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "transfer payload must not be empty",
-            ));
-        }
+        // An empty payload is a zero-length packet (the terminator some devices
+        // read to: see `BulkWriter::flush_end`).
         // See `read`: usbfs ignores the transfer type.
         let _ = transfer;
         match &self.inner.backend {
@@ -269,6 +280,61 @@ impl UsbDevice {
             #[cfg(not(target_os = "linux"))]
             Backend::Native(native) => native.transfer_out(endpoint, transfer, data, timeout),
         }
+    }
+
+    /// Starts a control IN transfer of up to `length` bytes. The transfer runs
+    /// on its own thread, bounded by `timeout`, and can be awaited like a bulk
+    /// transfer. It cannot be cancelled: `cancel` does nothing for it.
+    pub fn submit_control_in(
+        &self,
+        setup: ControlSetup,
+        length: u16,
+        timeout: Duration,
+    ) -> Result<Transfer> {
+        check_direction(setup.direction, Direction::In, "control read")?;
+        let device = self.clone();
+        Transfer::from_worker(move || {
+            let data = device.control_in(&setup, length, timeout)?;
+            Ok(TransferOutcome {
+                actual_length: data.len(),
+                buffer: data,
+                packets: Vec::new(),
+            })
+        })
+    }
+
+    /// Starts a control OUT transfer of `data`. The transfer runs on its own
+    /// thread, as for [`UsbDevice::submit_control_in`]; the outcome's buffer is
+    /// `data`, back for reuse.
+    pub fn submit_control_out(
+        &self,
+        setup: ControlSetup,
+        data: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Transfer> {
+        check_direction(setup.direction, Direction::Out, "control write")?;
+        let device = self.clone();
+        Transfer::from_worker(move || {
+            let sent = device.control_out(&setup, &data, timeout)?;
+            Ok(TransferOutcome {
+                actual_length: sent,
+                buffer: data,
+                packets: Vec::new(),
+            })
+        })
+    }
+
+    /// The `wMaxPacketSize` of `endpoint` as the descriptors give it (the first
+    /// alternate setting that has it), or `None` when no configuration does.
+    pub fn endpoint_max_packet_size(&self, endpoint: u8) -> Option<u16> {
+        self.inner
+            .configurations
+            .iter()
+            .flat_map(|configuration| configuration.interfaces.iter())
+            .flat_map(|interface| interface.alternates.iter())
+            .flat_map(|setting| setting.endpoints.iter())
+            .find(|info| info.address == endpoint)
+            .map(|info| info.max_packet_size)
     }
 
     /// Starts a bulk IN transfer that fills `buffer` (its length is the
@@ -280,6 +346,32 @@ impl UsbDevice {
     /// Starts a bulk OUT transfer of `data`.
     pub fn submit_bulk_out(&self, endpoint: u8, data: Vec<u8>) -> Result<Transfer> {
         self.submit(endpoint, TransferType::Bulk, Direction::Out, data)
+    }
+
+    /// Starts a bulk OUT transfer of `data` that ends with a zero-length
+    /// packet when `data` is a whole number of packets. Linux only: this is
+    /// usbdevfs's `URB_ZERO_PACKET`, applied within the one transfer. Elsewhere
+    /// it is `Unsupported`; use [`BulkWriter::flush_end`] there.
+    pub fn submit_bulk_out_zlp(&self, endpoint: u8, data: Vec<u8>) -> Result<Transfer> {
+        check_endpoint(endpoint, Direction::Out)?;
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => usb.submit(
+                lemnos_linux_sys::usbfs::UrbKind::Bulk,
+                endpoint,
+                data,
+                &[],
+                true,
+            ),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(_) => {
+                let _ = data;
+                Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "URB_ZERO_PACKET is Linux only; use BulkWriter::flush_end",
+                ))
+            }
+        }
     }
 
     /// Starts an interrupt IN transfer that fills `buffer`.
@@ -300,12 +392,6 @@ impl UsbDevice {
         buffer: Vec<u8>,
     ) -> Result<Transfer> {
         check_endpoint(endpoint, direction)?;
-        if direction == Direction::Out && buffer.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "transfer payload must not be empty",
-            ));
-        }
         match &self.inner.backend {
             #[cfg(target_os = "linux")]
             Backend::Usbfs(usb) => {
@@ -315,7 +401,7 @@ impl UsbDevice {
                         "control transfers are not submitted",
                     )
                 })?;
-                usb.submit(kind, endpoint, buffer, &[])
+                usb.submit(kind, endpoint, buffer, &[], false)
             }
             #[cfg(not(target_os = "linux"))]
             Backend::Native(native) => native.submit(endpoint, transfer, direction, buffer),
@@ -351,6 +437,7 @@ impl UsbDevice {
                     endpoint,
                     buffer,
                     &lengths,
+                    false,
                 )
             }
             #[cfg(not(target_os = "linux"))]

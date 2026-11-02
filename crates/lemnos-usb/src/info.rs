@@ -58,6 +58,8 @@ pub struct UsbDeviceInfo {
     manufacturer: Option<String>,
     product: Option<String>,
     serial_number: Option<String>,
+    usb_version: u16,
+    device_version: u16,
     speed: Option<Speed>,
     interfaces: Vec<InterfaceSummary>,
     driver: Option<String>,
@@ -102,6 +104,8 @@ impl UsbDeviceInfo {
             manufacturer: info.manufacturer_string().map(str::to_owned),
             product: info.product_string().map(str::to_owned),
             serial_number: info.serial_number().map(str::to_owned),
+            usb_version: info.usb_version(),
+            device_version: info.device_version(),
             speed: info.speed().and_then(Speed::from_nusb),
             interfaces,
             driver,
@@ -152,6 +156,20 @@ impl UsbDeviceInfo {
     /// The serial number string, when the device reports one.
     pub fn serial_number(&self) -> Option<&str> {
         self.serial_number.as_deref()
+    }
+
+    /// `bcdUSB`: the USB specification the device reports (`0x0200` for USB
+    /// 2.0). Known at listing time, without opening the device: the way to
+    /// tell a device's modes apart before it is opened. On Linux this is the
+    /// sysfs `version` attribute, read by nusb.
+    pub fn usb_version(&self) -> u16 {
+        self.usb_version
+    }
+
+    /// `bcdDevice`: the device's release number, known at listing time. On
+    /// Linux this is the sysfs `bcdDevice` attribute, read by nusb.
+    pub fn device_version(&self) -> u16 {
+        self.device_version
     }
 
     /// The negotiated speed, when the platform reports it.
