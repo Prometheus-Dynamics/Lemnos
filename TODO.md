@@ -208,3 +208,23 @@ commit: fmt, clippy -D warnings, tests, and the size images.
 - [ ] Consumers pin Lemnos to the tag instead of a `dev` revision.
 
 Consumer-side work (apps and the camera stack) is tracked in those repositories.
+
+## After the release (planned 2026-11-02; not started; the user's go first)
+
+- [ ] **One USB transport.** Why: Lemnos (rusb over libusb today), a flashing tool's USB boot
+      code (nusb) and a camera stack's UVC access (raw usbdevfs) each talk to USB separately.
+      Done when: one USB layer serves all three and also builds for Windows and macOS; libusb is
+      removed from the dependency tree.
+- [ ] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
+      Done when: a single watcher serves Lemnos and the camera stack.
+- [ ] **DMA buffer basics as library code.** Why: consumers need buffer allocation and sync
+      without a separate memory layer. Done when: dma-heap allocation, dmabuf sync, mapping and
+      fences are in the library.
+- [ ] **A generic bus and DMA-engine transfer interface.** Why: USB bulk, PCIe DMA, SPI/I2C and
+      general DMA controllers need one way to start and finish a transfer. Done when: the
+      interface covers all of them; lemnosd arbitrates ownership and is never in the data path;
+      pools and data-movement decisions stay with consumers.
+- [ ] **Accelerator transports.** Why: accelerators sit on PCIe/MMIO and USB. Done when: PCIe and
+      MMIO access works through vfio, and USB devices can load firmware and re-enumerate.
+- [ ] **Scope line.** Lemnos is user-space hardware access. It is not a memory manager, does not
+      decide what data moves where, and has no camera or vision code.
