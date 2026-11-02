@@ -54,4 +54,4 @@ UVC, the ISPs and 3A. Styx's time `Clock` stays in `styx-hal`; Lemnos's clock tr
       `styx-kernel::bus::{i2c, gpio, ioctl}`, `uevent`, `regbus.rs` and the
       VCM code from Styx.
 
-- [ ] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`.
+- [x] Port Styx's `usbfs` into `lemnos-linux` and drop `rusb`. Done as `lemnos-usb` (usbdevfs in `lemnos-linux-sys`, nusb elsewhere); see `docs/usb.md`. The Styx-side removal is Styx's own item.

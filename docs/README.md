@@ -16,6 +16,7 @@ This directory holds repository-level documentation for the Lemnos workspace.
 - [m2m.md](m2m.md): V4L2 memory-to-memory sessions (scalers, converters, codecs): queues, dma-buf import, drains and events
 - [hotplug.md](hotplug.md): device arrival and removal: the generic watcher (netlink, inotify, sysfs rescan), its filters and events, Lemnos's inventory watcher, and the camera-stack migration notes
 - [compact-model.md](compact-model.md): the `no_std` compact device model (`lemnos-device`), the lite table (`lemnos-lite`) and how the runtime consumes them
+- [usb.md](usb.md): the USB layer (`lemnos-usb`): platforms, API, errors, and the migration notes for a flashing tool (from nusb) and a camera stack (from raw usbdevfs)
 
 ## Where To Start
 
