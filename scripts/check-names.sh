@@ -48,15 +48,39 @@ matches_glob() {
 # Removes the exempt matches from stdin, keeping the line count.
 strip_exempt() {
   local path="$1" sed_args=(-E) re i
-  for re in "${token_res[@]}"; do
+  for re in "${token_res[@]+"${token_res[@]}"}"; do
     sed_args+=(-e "s#${re}# #gI")
   done
   for i in "${!scoped_globs[@]}"; do
     # shellcheck disable=SC2254
     case "$path" in ${scoped_globs[$i]}) sed_args+=(-e "s#${scoped_res[$i]}# #gI") ;; esac
   done
-  sed "${sed_args[@]}"
+  if [[ ${#sed_args[@]} -eq 1 ]]; then
+    cat
+  else
+    sed "${sed_args[@]}"
+  fi
 }
+
+# Names that were once leaks. The checker must still catch each one with the
+# allowlist in force: an allowlist entry that exempts one of them (as the
+# look-name token entries once did for `pv.*`) fails here, before any file is
+# scanned.
+known_leaks=(
+  "pv.targets"
+  "Pv.searching"
+  "looks.pv.x"
+  "raze-example"
+  "helios"
+  "photonvision"
+  "wpilib"
+)
+for leak in "${known_leaks[@]}"; do
+  if ! printf '%s\n' "$leak" | strip_exempt "README.md" | grep -q -i -E "$product"; then
+    echo "check-names: the allowlist exempts the known leak '$leak' (self-test)" >&2
+    exit 1
+  fi
+done
 
 violations=0
 report() {

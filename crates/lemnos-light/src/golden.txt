@@ -246,7 +246,7 @@ locate-blink
   t=600 b9b23f3a46fd0825
   t=1000 6992dec35cf08805
   t=1500 b9b23f3a46fd0825
-pv.targets
+detect.targets
   t=0 b9b23f3a46fd0825
   t=40 331089f1829d2ca5
   t=125 c2a87d8e674dccc5
@@ -257,7 +257,7 @@ pv.targets
   t=2200 38019822e6c017a5
   t=3000 989b7ef4bd0ae1a5
   t=4800 865c8e7c291f5285
-pv.searching
+detect.searching
   t=0 b9b23f3a46fd0825
   t=40 98d17481092bd6c7
   t=125 6f79b8d7308aead8
@@ -268,7 +268,7 @@ pv.searching
   t=2200 0cd04f690e6efbc4
   t=3000 26711b9014876444
   t=4800 f93cb7a0d65944ac
-pv.no-nt
+link.waiting
   t=0 b9b23f3a46fd0825
   t=40 abcee681315fd169
   t=125 611eb1a14a5ea3f5
@@ -279,7 +279,7 @@ pv.no-nt
   t=2200 db6bf8418e6819c5
   t=3000 2440ecc52272e2d1
   t=4800 8bd3b89cf37a9f41
-pv.no-nt-targets
+link.waiting-targets
   t=0 b9b23f3a46fd0825
   t=40 9ca0c2ee780f3e85
   t=125 6c0184ba1553ffa5
@@ -290,7 +290,7 @@ pv.no-nt-targets
   t=2200 45392faca2dd7b4d
   t=3000 6a12041b1742b615
   t=4800 d7b6a67c4f932f85
-pv.error
+detect.error
   t=0 b9b23f3a46fd0825
   t=40 c3db385e0bde3f25
   t=125 fab575c3ba7cbb85
@@ -301,7 +301,7 @@ pv.error
   t=2200 f09f560ed99c1325
   t=3000 b2c2097fbbeb6685
   t=4800 ace474e30f14e005
-pv.vision
+detect.live
   t=0 b9b23f3a46fd0825
   t=40 51bdadbd03c25725
   t=125 2906e2159d2af325

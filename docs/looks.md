@@ -245,22 +245,22 @@ A look file is a TOML file of `[looks.<name>]` tables. A name is 1 to 40 of
 `a-z`, `0-9`, `.`, `-` and `_`.
 
 ```toml
-# /etc/lemnos/looks.d/vision.toml (or the writable directory)
-[looks."pv.searching"]
+# /etc/lemnos/looks.d/custom.toml (or the writable directory)
+[looks."detect.searching"]
 envelope = "solid"
 brightness = 1.0
 layers = [
   { block = "comet", color = "2bd47d", period_ms = 1600, tail = 6, base = 0.06 },
 ]
 
-[looks."pv.no-nt"]
+[looks."link.waiting"]
 layers = [
   { block = "comet", color = "ffa424", period_ms = 2400, tail = 5, base = 0.05, heads = 2 },
 ]
 ```
 
 An unknown key, a bad value or a bad name is an error that names the file and
-the key (`looks.pv.no-nt.layers[0].heads: must be 1 or 2`). A file with any bad
+the key (`looks.link.waiting.layers[0].heads: must be 1 or 2`). A file with any bad
 look fails as a whole, and the looks it had keep working.
 
 ## Built-in looks
@@ -281,12 +281,12 @@ the defaults shown. Each is also a valid `led look <name>`.
 | `system.failed` `system.rolled-back` | the red breathe, 2400 ms, depth 0.9 (`failed_*`) | fill 0.7 |
 | `system.confirmed` | the green pop: a pale green-white flash, a green burst from the top, the ring filled green and drained toward the bottom, about 3.2 s; see below | wash 1.0, drain 1.0, ripple 1.0 |
 | `system.locate` | the `locate` colour, breathe or chase (`locate_effect`) | fill 0.7 |
-| `pv.targets` | cyan `28c8ff` breathe, 4000 ms, depth 0.2 | fill 0.7 |
-| `pv.searching` | violet `965aff` comet, 1600 ms, tail 7, base 0.18 | comet 1.0 |
-| `pv.no-nt` | deep orange `ff5a00`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
-| `pv.no-nt-targets` | cyan `28c8ff` glow at 0.25, under a deep-orange twin comet (2400 ms, tail 6, base 0, `over`) | glow 0.25, comet 1.0 |
-| `pv.error` | red `ff2828` breathe, 2000 ms, depth 0.85 | fill 0.7 |
-| `pv.vision` | steady white `ffffff` | fill 0.7 |
+| `detect.targets` | cyan `28c8ff` breathe, 4000 ms, depth 0.2 | fill 0.7 |
+| `detect.searching` | violet `965aff` comet, 1600 ms, tail 7, base 0.18 | comet 1.0 |
+| `link.waiting` | deep orange `ff5a00`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
+| `link.waiting-targets` | cyan `28c8ff` glow at 0.25, under a deep-orange twin comet (2400 ms, tail 6, base 0, `over`) | glow 0.25, comet 1.0 |
+| `detect.error` | red `ff2828` breathe, 2000 ms, depth 0.85 | fill 0.7 |
+| `detect.live` | steady white `ffffff` | fill 0.7 |
 
 These are the **scheme B** colours, the default preset (below). Scheme B is cool
 colours for healthy and warm colours for trouble, and motion means looking: a
@@ -327,7 +327,7 @@ lemnos-ctl looks preset apply scheme-c             # switch; remembered across r
 lemnos-ctl looks preset save night --file night.toml
 lemnos-ctl looks preset save night2 --from-active  # copy the active preset
 lemnos-ctl looks preset delete night               # the active one falls back to scheme-b
-lemnos-ctl looks delete pv.searching               # remove a look file override
+lemnos-ctl looks delete detect.searching               # remove a look file override
 ```
 
 Preset changes (apply, save, delete) and look deletions are accepted from the
@@ -342,7 +342,7 @@ boundary. Protocol: `LooksOp` codes 4 to 9, appended (`PresetList`, `PresetShow`
 The **ring-wide** brightness scales every look: the board's
 `look_brightness` (0 to 1, default **0.5**). A look's own brightness is 1.0 for
 comets and arcs, and 0.7 for full-ring fills and breathes (the built-in fills,
-status, locate, and `pv.targets`/`pv.error`/`pv.vision`), so a fill is not
+status, locate, and `detect.targets`/`detect.error`/`detect.live`), so a fill is not
 brighter than a comet's head. A request's `--brightness` replaces the look's
 own, and the ring-wide scale still applies. The reboot ember keeps a 16% floor.
 
@@ -414,7 +414,7 @@ sends):
 
 ```bash
 # A named look, from the look table:
-lemnos-ctl --client atlas led look pv.searching --seconds 30
+lemnos-ctl --client atlas led look detect.searching --seconds 30
 
 # A look in full, from the command line (the same look as above):
 lemnos-ctl --client atlas led show \
@@ -426,7 +426,7 @@ lemnos-ctl --client atlas led show \
   --json '{"layers":[{"block":"comet","color":"2bd47d","period_ms":1600,"tail":6,"base":0.06}]}'
 
 # Keep a look tried inline, under a name:
-lemnos-ctl looks save pv.searching --spec 'layers = [{ block = "comet", color = "2bd47d", period_ms = 1600, tail = 6, base = 0.06 }]'
+lemnos-ctl looks save detect.searching --spec 'layers = [{ block = "comet", color = "2bd47d", period_ms = 1600, tail = 6, base = 0.06 }]'
 ```
 
 ### Rust
@@ -438,7 +438,7 @@ use lemnos_light::{Fraction, LayerSpec, LookSpec, Rgbw};
 let mut leds: LedClient = ClientOptions::new(socket, "atlas").keep_intents().leds()?;
 
 // A named look (a built-in or from a look file):
-leds.look("pv.searching")?;
+leds.look("detect.searching")?;
 
 // A look composed in code: a comet over a progress track, two layers.
 let mut look = LookSpec::EMPTY;

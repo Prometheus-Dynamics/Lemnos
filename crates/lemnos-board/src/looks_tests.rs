@@ -9,7 +9,7 @@ use lemnos_light::{
 };
 
 const VISION_TARGETS: &str = r#"
-[looks."pv.targets"]
+[looks."detect.targets"]
 envelope = { kind = "breathe", period_ms = 4000, depth = 0.18, easing = "ease-in-out" }
 brightness = 0.7
 layers = [
@@ -36,10 +36,10 @@ fn body_error(text: &str) -> String {
 
 #[test]
 fn a_file_of_looks_parses_with_defaults() {
-    let looks = parse_file("looks.d/pv.toml", VISION_TARGETS).unwrap();
+    let looks = parse_file("looks.d/detect.toml", VISION_TARGETS).unwrap();
     assert_eq!(looks.len(), 1);
     let (name, spec) = &looks[0];
-    assert_eq!(name, "pv.targets");
+    assert_eq!(name, "detect.targets");
     assert_eq!(
         spec.envelope,
         Effect::Breathe {
@@ -226,20 +226,20 @@ fn a_cubic_bezier_and_a_frame_round_trip() {
 #[test]
 fn errors_name_the_file_and_the_key() {
     let e = first_error(
-        "[looks.\"pv.bad\"]\nlayers = [{ block = \"comet\", color = \"ff0000\", heads = 3 }]\n",
+        "[looks.\"custom.bad\"]\nlayers = [{ block = \"comet\", color = \"ff0000\", heads = 3 }]\n",
     );
     assert!(
-        e.starts_with("looks.d/test.toml: looks.pv.bad.layers[0].heads:"),
+        e.starts_with("looks.d/test.toml: looks.custom.bad.layers[0].heads:"),
         "{e}"
     );
-    let e = first_error("[looks.pv]\nlayers = [{ block = \"fill\", colour = \"ff0000\" }]\n");
-    assert!(e.contains("looks.pv.layers[0].colour"), "{e}");
+    let e = first_error("[looks.custom]\nlayers = [{ block = \"fill\", colour = \"ff0000\" }]\n");
+    assert!(e.contains("looks.custom.layers[0].colour"), "{e}");
     assert!(e.contains("unknown key"), "{e}");
 }
 
 #[test]
 fn unknown_top_level_keys_and_blocks_are_rejected_with_the_list() {
-    let e = first_error("[looks.pv]\nlayer = []\n");
+    let e = first_error("[looks.custom]\nlayer = []\n");
     assert!(e.contains("unknown key"), "{e}");
     let e = body_error("layers = [{ block = \"bogus\", color = \"ff0000\" }]");
     assert!(e.contains("unknown block \"bogus\""), "{e}");
@@ -319,8 +319,9 @@ fn numbers_out_of_range_are_named() {
 
 #[test]
 fn a_look_name_is_checked_in_its_table() {
-    let e =
-        first_error("[looks.\"Pv Bad\"]\nlayers = [{ block = \"fill\", color = \"ff0000\" }]\n");
+    let e = first_error(
+        "[looks.\"Custom Bad\"]\nlayers = [{ block = \"fill\", color = \"ff0000\" }]\n",
+    );
     assert!(e.contains("a look name is 1 to 40"), "{e}");
 }
 
@@ -335,7 +336,7 @@ fn a_broken_look_fails_the_file_and_the_rest_is_reported_too() {
 
 #[test]
 fn text_that_is_not_toml_is_reported_with_the_file() {
-    let e = first_error("[looks.pv\n");
+    let e = first_error("[looks.custom\n");
     assert!(e.starts_with("looks.d/test.toml:"), "{e}");
 }
 
@@ -385,7 +386,7 @@ config = {{ count = 16, {light} }}
 fn a_board_carries_its_looks_and_validates_them_with_the_board() {
     let registry = crate::DriverRegistry::builtin();
     let ok = crate::BoardDefinition::from_toml_str(&board_text(
-        "[looks.\"pv.x\"]\nlayers = [{ block = \"fill\", color = \"ff0000\" }]\n",
+        "[looks.\"custom.x\"]\nlayers = [{ block = \"fill\", color = \"ff0000\" }]\n",
         "",
     ))
     .unwrap();
@@ -393,12 +394,15 @@ fn a_board_carries_its_looks_and_validates_them_with_the_board() {
     ok.validate(&registry).unwrap();
 
     let bad = crate::BoardDefinition::from_toml_str(&board_text(
-        "[looks.\"pv.x\"]\nlayers = [{ block = \"comet\", color = \"ff0000\", heads = 3 }]\n",
+        "[looks.\"custom.x\"]\nlayers = [{ block = \"comet\", color = \"ff0000\", heads = 3 }]\n",
         "",
     ))
     .unwrap();
     let message = bad.validate(&registry).unwrap_err().to_string();
-    assert!(message.contains("looks.pv.x.layers[0].heads"), "{message}");
+    assert!(
+        message.contains("looks.custom.x.layers[0].heads"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -680,7 +684,7 @@ fn a_spots_block_names_the_key_it_gets_wrong() {
 #[test]
 fn a_look_with_spots_round_trips_through_its_file_form() {
     let text = r#"
-[looks."pv.spots"]
+[looks."detect.spots"]
 layers = [
   { block = "spots", color = "28c8ff", width = 1.5, follow_ms = 150, max_spots = 4, spots = "input" },
   { block = "spots", color = "ff8000", spots = [{ at = 0.25, level = 1.0 }, { at = 0.5, level = 0.5, color = "00ff40" }] },
@@ -689,13 +693,13 @@ layers = [
     // Only one spots layer per look: the second is refused.
     assert!(parse_file("looks.d/spots.toml", text).is_err());
     let one = r#"
-[looks."pv.spots"]
+[looks."detect.spots"]
 layers = [
   { block = "spots", color = "ff8000", spots = [{ at = 0.25, level = 1.0 }, { at = 0.5, level = 0.5, color = "00ff40" }] },
 ]
 "#;
     let parsed = parse_file("looks.d/spots.toml", one).unwrap();
-    let file = to_toml("pv.spots", &parsed[0].1);
+    let file = to_toml("detect.spots", &parsed[0].1);
     let back = parse_file("looks.d/spots.toml", &file).unwrap();
     assert_eq!(back, parsed, "{file}");
     assert!(
@@ -704,10 +708,10 @@ layers = [
     );
     let input = parse_file(
         "looks.d/spots.toml",
-        "[looks.\"pv.spots\"]\nlayers = [{ block = \"spots\", color = \"28c8ff\", spots = \"input\" }]\n",
+        "[looks.\"detect.spots\"]\nlayers = [{ block = \"spots\", color = \"28c8ff\", spots = \"input\" }]\n",
     )
     .unwrap();
-    let file = to_toml("pv.spots", &input[0].1);
+    let file = to_toml("detect.spots", &input[0].1);
     assert_eq!(
         parse_file("looks.d/spots.toml", &file).unwrap(),
         input,

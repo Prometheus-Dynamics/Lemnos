@@ -195,12 +195,12 @@ fn scenarios(defaults: &Defaults, out: &mut String) {
     locate_blink.depth = Some(300);
     run("locate-blink", locate_blink, d, out);
     for name in [
-        "pv.targets",
-        "pv.searching",
-        "pv.no-nt",
-        "pv.no-nt-targets",
-        "pv.error",
-        "pv.vision",
+        "detect.targets",
+        "detect.searching",
+        "link.waiting",
+        "link.waiting-targets",
+        "detect.error",
+        "detect.live",
     ] {
         let look = LookName::new(name).unwrap();
         run(

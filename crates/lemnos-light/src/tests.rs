@@ -642,10 +642,13 @@ fn validation_names_the_first_bad_value() {
 
 #[test]
 fn look_names_are_short_lowercase_words() {
-    assert_eq!(LookName::new("pv.targets").unwrap().as_str(), "pv.targets");
+    assert_eq!(
+        LookName::new("detect.targets").unwrap().as_str(),
+        "detect.targets"
+    );
     assert!(LookName::new("system.rolled-back").is_some());
     assert!(LookName::new("").is_none());
-    assert!(LookName::new("Pv.targets").is_none());
+    assert!(LookName::new("Detect.targets").is_none());
     assert!(LookName::new("has space").is_none());
     assert!(LookName::new(&"a".repeat(MAX_LOOK_NAME + 1)).is_none());
     assert!(LookName::new(&"a".repeat(MAX_LOOK_NAME)).is_some());
@@ -767,7 +770,7 @@ fn system_states_map_to_named_looks_and_every_name_is_built_in() {
     for name in BUILTIN_LOOK_NAMES {
         assert!(builtin_look(name, &defaults).is_some(), "{name}");
     }
-    assert!(builtin_look("pv.nothing", &defaults).is_none());
+    assert!(builtin_look("custom.nothing", &defaults).is_none());
 }
 
 #[test]

@@ -37,12 +37,12 @@ pub const NAMES: &[&str] = &[
     "system.rolled-back",
     "system.confirmed",
     "system.locate",
-    "pv.targets",
-    "pv.searching",
-    "pv.no-nt",
-    "pv.no-nt-targets",
-    "pv.error",
-    "pv.vision",
+    "detect.targets",
+    "detect.searching",
+    "link.waiting",
+    "link.waiting-targets",
+    "detect.error",
+    "detect.live",
 ];
 
 /// The built-in look `name`, from the board's `defaults`.
@@ -96,22 +96,24 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
                 easing: d.easing,
             }),
         "system.confirmed" => confirmed(d.confirmed),
-        // The vision app's looks (the board's ring shows the vision app's
-        // status): blue while targets are seen, green while searching, amber
-        // without its link to the robot, red on an error.
-        "pv.targets" => LookSpec::fill(Rgbw::rgb(0x28c8ff))
+        // Detection and link looks, for a consumer that reports targets and a
+        // link to a controller: blue while targets are seen, violet while
+        // searching, amber while the link is down, red on an error, and white
+        // while detection is live. A consumer may replace any of them with a
+        // look file of the same name.
+        "detect.targets" => LookSpec::fill(Rgbw::rgb(0x28c8ff))
             .with_brightness(FULL_FILL)
             .with_envelope(Effect::Breathe {
                 period_ms: 4_000,
                 depth: 200,
                 easing: d.easing,
             }),
-        "pv.searching" => comet(Rgbw::rgb(0x965aff), 1_600, 7_000, 1, 180),
-        "pv.no-nt" => comet(Rgbw::rgb(0xff5a00), 2_400, 6_000, 2, 180),
+        "detect.searching" => comet(Rgbw::rgb(0x965aff), 1_600, 7_000, 1, 180),
+        "link.waiting" => comet(Rgbw::rgb(0xff5a00), 2_400, 6_000, 2, 180),
         // A deep-orange twin comet, over a cyan glow at a quarter of full:
         // the head and tail are the comet's colour, the glow shows where the
         // comet is not (`over`, so no hue mixing).
-        "pv.no-nt-targets" => {
+        "link.waiting-targets" => {
             let mut look = LookSpec::EMPTY;
             look.push(LayerSpec::fill(Rgbw::rgb(0x28c8ff)).with_brightness(64));
             look.push(
@@ -119,14 +121,14 @@ pub fn builtin(name: &str, d: &Defaults) -> Option<LookSpec> {
             );
             look
         }
-        "pv.error" => LookSpec::fill(Rgbw::rgb(0xff2828))
+        "detect.error" => LookSpec::fill(Rgbw::rgb(0xff2828))
             .with_brightness(FULL_FILL)
             .with_envelope(Effect::Breathe {
                 period_ms: 2_000,
                 depth: 850,
                 easing: d.easing,
             }),
-        "pv.vision" => LookSpec::fill(Rgbw::rgb(0xffffff)).with_brightness(FULL_FILL),
+        "detect.live" => LookSpec::fill(Rgbw::rgb(0xffffff)).with_brightness(FULL_FILL),
         "system.locate" => {
             if d.locate_effect == EffectKind::Chase {
                 spinner(d.locate, d)

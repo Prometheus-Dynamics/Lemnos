@@ -486,11 +486,11 @@ mod preset_tests {
         let defaults = Defaults::default();
         assert_eq!(table.active_preset(), "scheme-b");
         for name in [
-            "pv.targets",
-            "pv.searching",
-            "pv.no-nt",
-            "pv.no-nt-targets",
-            "pv.error",
+            "detect.targets",
+            "detect.searching",
+            "link.waiting",
+            "link.waiting-targets",
+            "detect.error",
         ] {
             assert_eq!(
                 table.get(name),
@@ -508,22 +508,24 @@ mod preset_tests {
         fs::create_dir_all(&files).unwrap();
         // A look file wins over the active preset.
         fs::write(
-            files.join("pv.toml"),
-            "[looks.\"pv.searching\"]\nlayers = [{ block = \"fill\", color = \"ffffff\" }]\n",
+            files.join("detect.toml"),
+            "[looks.\"detect.searching\"]\nlayers = [{ block = \"fill\", color = \"ffffff\" }]\n",
         )
         .unwrap();
         let mut table = LookTable::new(&board(), Some(&files), None);
         table.use_presets(PresetDir::new(&root));
         table.preset_apply("scheme-a").unwrap();
         // The look file's searching look is the one in force, not scheme A's.
-        let searching = table.get("pv.searching").unwrap();
+        let searching = table.get("detect.searching").unwrap();
         assert!(matches!(
             searching.layers[0].unwrap().block,
             lemnos_light::Block::Fill { .. }
         ));
         // Scheme A's own look (the preset's) is in force where no file overrides.
         assert_eq!(
-            table.get("pv.no-nt").map(|l| l.layers[0].unwrap().block),
+            table
+                .get("link.waiting")
+                .map(|l| l.layers[0].unwrap().block),
             Some(lemnos_light::Block::Comet {
                 color: lemnos_light::Rgbw::rgb(0xff5a00),
                 period_ms: 2_400,
@@ -541,7 +543,8 @@ mod preset_tests {
         let root = root("save");
         let mut table = LookTable::new(&board(), None, None);
         table.use_presets(PresetDir::new(&root));
-        let night = "[looks.\"pv.targets\"]\nlayers = [{ block = \"fill\", color = \"102030\" }]\n";
+        let night =
+            "[looks.\"detect.targets\"]\nlayers = [{ block = \"fill\", color = \"102030\" }]\n";
         assert!(table.preset_save("night", night).is_ok());
         assert!(
             table.preset_save("scheme-b", night).is_err(),
@@ -566,16 +569,16 @@ mod preset_tests {
         let root = root("bad");
         let mut table = LookTable::new(&board(), None, None);
         table.use_presets(PresetDir::new(&root));
-        let before = table.get("pv.targets");
+        let before = table.get("detect.targets");
         assert!(
             table
                 .preset_save(
                     "broken",
-                    "[looks.\"pv.targets\"]\nlayers = [{ block = \"nope\" }]\n"
+                    "[looks.\"detect.targets\"]\nlayers = [{ block = \"nope\" }]\n"
                 )
                 .is_err()
         );
-        assert_eq!(table.get("pv.targets"), before);
+        assert_eq!(table.get("detect.targets"), before);
         let _ = fs::remove_dir_all(&root);
     }
 }

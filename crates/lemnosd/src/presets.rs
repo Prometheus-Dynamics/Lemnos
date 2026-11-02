@@ -14,50 +14,51 @@ pub const DEFAULT: &str = "scheme-b";
 /// Scheme A: a traffic light (green targets, white searching, amber no-NT,
 /// red error).
 const SCHEME_A: &str = r#"
-[looks."pv.targets"]
+[looks."detect.targets"]
 layers = [{ block = "fill", color = "00ff20" }]
 brightness = 0.698
 envelope = { kind = "breathe", period_ms = 4000, depth = 0.2 }
 
-[looks."pv.searching"]
+[looks."detect.searching"]
 layers = [{ block = "comet", color = "fff4e6", period_ms = 1600, tail = 7, heads = 1, base = 0.12 }]
 
-[looks."pv.no-nt"]
+[looks."link.waiting"]
 layers = [{ block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.18 }]
 
-[looks."pv.no-nt-targets"]
+[looks."link.waiting-targets"]
 layers = [
   { block = "fill", color = "00ff20", brightness = 0.12 },
   { block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.0, mode = "over" },
 ]
 
-[looks."pv.error"]
+[looks."detect.error"]
 layers = [{ block = "fill", color = "ff2828" }]
 brightness = 0.698
 envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }
 "#;
 
 /// Scheme B: cool colours are healthy, warm colours are trouble, and motion
-/// means looking (the default; the built-in `pv.*` looks are these).
+/// means looking (the default; the built-in `detect.*` and `link.*` looks are
+/// these).
 const SCHEME_B: &str = r#"
-[looks."pv.targets"]
+[looks."detect.targets"]
 layers = [{ block = "fill", color = "28c8ff" }]
 brightness = 0.698
 envelope = { kind = "breathe", period_ms = 4000, depth = 0.2 }
 
-[looks."pv.searching"]
+[looks."detect.searching"]
 layers = [{ block = "comet", color = "965aff", period_ms = 1600, tail = 7, heads = 1, base = 0.18 }]
 
-[looks."pv.no-nt"]
+[looks."link.waiting"]
 layers = [{ block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.18 }]
 
-[looks."pv.no-nt-targets"]
+[looks."link.waiting-targets"]
 layers = [
   { block = "fill", color = "28c8ff", brightness = 0.25 },
   { block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.0, mode = "over" },
 ]
 
-[looks."pv.error"]
+[looks."detect.error"]
 layers = [{ block = "fill", color = "ff2828" }]
 brightness = 0.698
 envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }
@@ -65,21 +66,21 @@ envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }
 
 /// Scheme C: motion only (solid when settled, a comet when it is moving).
 const SCHEME_C: &str = r#"
-[looks."pv.targets"]
+[looks."detect.targets"]
 layers = [{ block = "fill", color = "00ff20" }]
 brightness = 0.9
 
-[looks."pv.searching"]
+[looks."detect.searching"]
 layers = [{ block = "comet", color = "00ff20", period_ms = 1600, tail = 7, heads = 1, base = 0.15 }]
 
-[looks."pv.no-nt"]
+[looks."link.waiting"]
 layers = [{ block = "fill", color = "ff5a00" }]
 brightness = 0.698
 
-[looks."pv.no-nt-targets"]
+[looks."link.waiting-targets"]
 layers = [{ block = "comet", color = "ff5a00", period_ms = 1600, tail = 7, heads = 1, base = 0.2 }]
 
-[looks."pv.error"]
+[looks."detect.error"]
 layers = [{ block = "fill", color = "ff2828" }]
 brightness = 0.698
 envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }
@@ -201,11 +202,11 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let dir = PresetDir::new(&root);
         assert!(dir.names().is_empty());
-        dir.save("night", "[looks.\"pv.targets\"]\n").unwrap();
+        dir.save("night", "[looks.\"detect.targets\"]\n").unwrap();
         assert_eq!(dir.names(), vec!["night".to_string()]);
         assert_eq!(
             dir.load("night").as_deref(),
-            Some("[looks.\"pv.targets\"]\n")
+            Some("[looks.\"detect.targets\"]\n")
         );
         assert!(dir.delete("night").unwrap());
         assert!(!dir.delete("night").unwrap());

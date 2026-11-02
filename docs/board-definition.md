@@ -217,11 +217,11 @@ neutral white), `updating` (the update's arc), `verifying`, `writing`, `staged`,
 ripple after a trial boot).
 
 Named looks: the board's `[looks.<name>]` tables are read on top of the built-in looks
-(`status.*`, `system.*`, `pv.*`), and a look file (`LEMNOSD_LOOKS_DIR`) overrides them
+(`status.*`, `system.*`, `detect.*`, `link.*`), and a look file (`LEMNOSD_LOOKS_DIR`) overrides them
 all; see [looks.md](looks.md) for the blocks, the keys and reloads.
 
 ```toml
-[looks."pv.searching"]
+[looks."detect.searching"]
 layers = [{ block = "comet", color = "00ff20", period_ms = 1600, tail = 6, base = 0.06 }]
 ```
 
@@ -267,7 +267,7 @@ through the other level. Behaviour that `lemnosd` adds (`docs/system-service.md`
 - `writers`: `["orion:*", "atlas"]` is the usual list (the Orion bridge's callers
   and the manager), with `lemnos-ctl` run on the board as needed.
 
-The example board's two USB port switches (`crates/lemnos-board/examples/boards/raze-example.toml`):
+The example board's two USB port switches (`crates/lemnos-board/examples/boards/sample-board.toml`):
 
 ```toml
 [[devices]]
@@ -307,7 +307,7 @@ The CPU load is `/proc/loadavg`, and no driver reads it yet.
 
 ## The example board
 
-[crates/lemnos-board/examples/boards/raze-example.toml](../crates/lemnos-board/examples/boards/raze-example.toml):
+[crates/lemnos-board/examples/boards/sample-board.toml](../crates/lemnos-board/examples/boards/sample-board.toml):
 
 ```toml
 format = "lemnos.board"

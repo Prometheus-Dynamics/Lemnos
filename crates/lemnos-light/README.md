@@ -10,5 +10,5 @@ colours). `lemnosd` drives the board's LEDs with it; firmware can use the same c
 
 A look is data: a `LookSpec` of up to four layers (a `Block` each: fill, comet, progress
 arc, ripple or static frame; composited by `max` or `add`), an envelope and a brightness, all
-fixed size. The built-in named looks (`status.*`, `system.*`, `pv.*`) are generated from a
+fixed size. The built-in named looks (`status.*`, `system.*`, `detect.*`, `link.*`) are generated from a
 board's `Defaults`; `lemnosd` overrides them from look files. See `docs/looks.md`.

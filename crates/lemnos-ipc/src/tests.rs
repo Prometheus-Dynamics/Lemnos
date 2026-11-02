@@ -36,12 +36,12 @@ fn requests_round_trip() {
         id: 9,
         op: LooksOp::PresetSave {
             name: "night".into(),
-            text: "[looks.\"pv.targets\"]\n".into(),
+            text: "[looks.\"detect.targets\"]\n".into(),
         },
     });
     round_trip_request(Request::Looks {
         id: 10,
-        op: LooksOp::Delete("pv.searching".into()),
+        op: LooksOp::Delete("detect.searching".into()),
     });
     round_trip_request(Request::Hello {
         version: VERSION,
@@ -431,7 +431,10 @@ fn looks_round_trip_by_name_inline_and_in_text() {
     inline.duration_ms = Some(30_000);
     round_trip_request(Request::Led(inline));
     let mut named = LedRequest::new(LedShow::Look {
-        name: LookName::new("pv.targets").unwrap().as_str().to_string(),
+        name: LookName::new("detect.targets")
+            .unwrap()
+            .as_str()
+            .to_string(),
         progress: None,
     });
     named.id = 78;
@@ -509,7 +512,7 @@ fn looks_round_trip_by_name_inline_and_in_text() {
     });
     round_trip_request(Request::Looks {
         id: 6,
-        op: LooksOp::Show("pv.targets".into()),
+        op: LooksOp::Show("detect.targets".into()),
     });
     round_trip_request(Request::Looks {
         id: 7,
@@ -527,7 +530,7 @@ fn looks_round_trip_by_name_inline_and_in_text() {
         count: 16,
         offset: 5,
         clockwise: true,
-        look: "pv.targets".into(),
+        look: "detect.targets".into(),
         layer: "app".into(),
         owner: "manager".into(),
         look_brightness: 250,
@@ -689,7 +692,7 @@ fn spots_looks_and_input_updates_round_trip_on_the_wire() {
     ]);
     // A named look with spots, and a look in full with them.
     round_trip_request(Request::Led(LedRequest::new(LedShow::LookSpots {
-        name: "pv.spots".into(),
+        name: "detect.spots".into(),
         progress: Some(400),
         spots,
     })));
@@ -738,7 +741,7 @@ fn a_spots_look_has_its_own_codes_and_the_old_ones_are_unchanged() {
     let code = |show: LedShow| Request::Led(LedRequest::new(show)).encode()[8];
     assert_eq!(
         code(LedShow::Look {
-            name: "pv.searching".into(),
+            name: "detect.searching".into(),
             progress: None,
         }),
         10

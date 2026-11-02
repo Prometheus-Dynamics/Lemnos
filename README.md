@@ -110,7 +110,7 @@ lemnos-ctl list
 lemnos-ctl read imu
 lemnos-ctl led status warn --effect breathe
 lemnos-ctl led progress 0.4
-lemnos-ctl led look pv.searching        # a named look: built-in, or from a look file
+lemnos-ctl led look detect.searching        # a named look: built-in, or from a look file
 ```
 
 See [docs/system-service.md](docs/system-service.md), [docs/looks.md](docs/looks.md) (the LED looks: blocks, files, reloads), and [packaging/README.md](packaging/README.md).

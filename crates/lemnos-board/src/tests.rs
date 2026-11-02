@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const EXAMPLE: &str = include_str!("../examples/boards/raze-example.toml");
+const EXAMPLE: &str = include_str!("../examples/boards/sample-board.toml");
 
 struct Tree(PathBuf);
 
@@ -178,7 +178,7 @@ impl Buses for MockBuses {
 fn example_definition_parses_validates_and_round_trips() {
     let board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     board.validate(&DriverRegistry::builtin()).unwrap();
-    assert_eq!(board.board.id, "raze-example");
+    assert_eq!(board.board.id, "sample-board");
     assert_eq!(board.devices.len(), 8);
     let imu = board.device("imu").unwrap();
     assert_eq!(

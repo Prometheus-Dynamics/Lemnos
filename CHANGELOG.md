@@ -29,6 +29,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Live input updates: `LedClient::update_inputs(device, progress, spots)` (`Request::LedInputs`, kind 16, appended) changes the progress and spots of the look this client is already showing, without restarting it. The look's time carries on (a comet keeps its turn, a breathe its phase, a sparkle its twinkles), only the input blocks move, nothing cross-fades, and a look that takes no such input refuses the update with the reason. `lemnos-ctl led inputs` sends one. Wire: `LedShow::LookSpots` (code 12) and `LedShow::InlineSpots` (code 13), and the look's spots block (block code 8), all appended.
 - Cost of both: stripped aarch64-musl `lemnosd` 1,184,096 B before, 1,249,632 B after, and `lemnos-ctl` 921,760 B to 987,296 B (the same toolchain; the text section grows by about 40 KB, and the file sizes include 64 KiB of segment alignment).
 
+### Changed
+
+- **Breaking:** the built-in looks with the vision app's prefix are now generic: `pv.targets` is `detect.targets`, `pv.searching` is `detect.searching`, `pv.no-nt` is `link.waiting`, `pv.no-nt-targets` is `link.waiting-targets`, `pv.error` is `detect.error` and `pv.vision` is `detect.live`. The presets (`scheme-b`) and the docs use the new names. A consumer that sends the old names, or keeps look files under them, renames them (a look file of the new name replaces the built-in). The example board `raze-example` is `sample-board`.
+- `scripts/check-names.sh` no longer exempts look-name tokens or the example board's file: the allowlist had hidden the `pv.*` and `raze` names. The checker now self-tests a list of known leaks against the allowlist before it scans files, and an empty sed script no longer breaks it when the allowlist has no token entries.
+
 ### Fixed
 
 - The INA2xx drivers read a poll in one I2C transaction (a pointer write and a read per register, joined by repeated starts) instead of one transaction per register. The datasheets do not auto-increment the register pointer on reads, so a single burst across registers is not used.

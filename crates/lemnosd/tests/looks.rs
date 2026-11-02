@@ -90,7 +90,7 @@ fn board_then_look_dir_then_writable_directory_in_that_order() {
     fs::remove_file(dir.join("a.toml")).unwrap();
     table.scan();
     assert_eq!(fill_of(&table, "status.ok"), Some(Rgbw::rgb(0xff0000)));
-    assert!(table.knows("pv.targets"), "a built-in is always known");
+    assert!(table.knows("detect.targets"), "a built-in is always known");
     assert!(!table.knows("nothing.here"));
 }
 
@@ -165,9 +165,9 @@ fn save_writes_the_writable_directory_and_refuses_what_is_not_a_look() {
     let defaults = lemnos_light::Defaults::default();
     assert!(
         table
-            .show("pv.targets", &defaults)
+            .show("detect.targets", &defaults)
             .unwrap()
-            .contains("[looks.\"pv.targets\"]")
+            .contains("[looks.\"detect.targets\"]")
     );
     assert!(
         table
@@ -316,7 +316,7 @@ fn the_service_refuses_unknown_and_invalid_looks_and_shows_named_and_inline_ones
     // The look table answers a list and a show.
     let listed = ctl.looks(LooksOp::List).unwrap();
     assert!(
-        listed.contains("app.blue") && listed.contains("pv.targets"),
+        listed.contains("app.blue") && listed.contains("detect.targets"),
         "{listed}"
     );
     let shown = ctl.looks(LooksOp::Show("app.blue".into())).unwrap();
