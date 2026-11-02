@@ -72,13 +72,23 @@ fn print_hex(bytes: &[u8]) {
 
 /// Holds a claim: for `--hold` seconds, else until interrupted (with
 /// `--keep`, returns at once and the claim persists).
-fn hold(args: &mut Args, keep: bool, handle: u32) -> ExitCode {
+///
+/// A timed hold ends with an explicit release that the service answers before
+/// this returns. The service also releases a claim when the connection closes,
+/// but it does that after reading the close, so a command that exited at once
+/// could still see the line held.
+fn hold(args: &mut Args, keep: bool, client: &mut DeviceClient, handle: u32) -> ExitCode {
     if keep {
         println!("handle {handle} (kept; release with `release {handle}`)");
         return ExitCode::SUCCESS;
     }
     match args.take("--hold").and_then(|s| s.parse::<f64>().ok()) {
-        Some(seconds) => std::thread::sleep(Duration::from_secs_f64(seconds.max(0.0))),
+        Some(seconds) => {
+            std::thread::sleep(Duration::from_secs_f64(seconds.max(0.0)));
+            if let Err(e) = client.unclaim(handle) {
+                return fail(e);
+            }
+        }
         None => loop {
             std::thread::sleep(Duration::from_secs(3600));
         },
@@ -140,7 +150,7 @@ pub(super) fn gpio(mut args: Args, options: ClientOptions) -> ExitCode {
                 Err(code) => return code,
             };
             match client.claim_line(line_target(&line), config) {
-                Ok(claimed) => hold(&mut args, keep, claimed.handle()),
+                Ok(claimed) => hold(&mut args, keep, &mut client, claimed.handle()),
                 Err(e) => fail(e),
             }
         }
@@ -228,7 +238,7 @@ pub(super) fn pwm(mut args: Args, options: ClientOptions) -> ExitCode {
                 .claim_pwm(pwm_target(&target))
                 .and_then(|p| p.configure(&mut client, config).map(|()| p))
             {
-                Ok(claimed) => hold(&mut args, keep, claimed.handle()),
+                Ok(claimed) => hold(&mut args, keep, &mut client, claimed.handle()),
                 Err(e) => fail(e),
             }
         }
