@@ -30,6 +30,7 @@ entries=(
   "lemnos board mock|lemnos|board,mock,builtin-drivers|test"
   "lemnos board linux|lemnos|board,linux,builtin-drivers|lint"
   "lemnos-core serde|lemnos-core|serde|test"
+  "lemnos-linux full (dma, v4l2-m2m)|lemnos-linux|full|test"
   "lemnos-board linux|lemnos-board|linux|lint"
   "lemnosd orion (lemnos-orion bridge)|lemnosd|orion|test"
   "lemnosd sim (simulated board)|lemnosd|sim|test"

@@ -73,6 +73,7 @@ jobs:
           - lemnos board mock
           - lemnos board linux
           - lemnos-core serde
+          - lemnos-linux full (dma, v4l2-m2m)
           - lemnos-board linux
     steps:
       - uses: actions/checkout@v5

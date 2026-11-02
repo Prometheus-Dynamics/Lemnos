@@ -8,6 +8,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- DMA buffers in `lemnos-linux` (feature `dma`): dma-heap allocation (`dma::DmaHeap`, `DmaBuf`), dma-buf CPU-access sync, RAII mappings (`Mapping`), buffer names, and sync-file fences (`SyncFence`: export, import, poll). Pure Rust over `lemnos-linux-sys`; the kernel's sync-file calls report `Unsupported` where missing. `docs/dma.md`.
+- A transfer interface for buses and DMA engines, `lemnos_bus::transfer::TransferEngine` (submit, poll, wait, cancel), over memory or dma-bufs, with the synchronous SPI (`SpidevEngine`) and I2C (`I2cEngine`) engines in `lemnos-linux::transfer`. USB bulk, PCIe DMA and RP1 DMA are planned engines, not implemented (`docs/dma.md`).
+- V4L2 memory-to-memory sessions in `lemnos-linux` (feature `v4l2-m2m`): `v4l2::m2m::M2mSession` opens a memory-to-memory node, sets the output and capture formats (single- or multi-planar), requests MMAP or dma-buf buffers, queues and dequeues by index without blocking, streams, polls, drains (`Drain::Encoder`, `Drain::Decoder`) and subscribes to events. `docs/m2m.md`.
+- `lemnos-linux-sys`: dma-heap, dma-buf, `mmap` and V4L2 wrappers with layout tests against the kernel headers; `poll` gains `POLLPRI`, `POLLERR`, `POLLHUP` and `POLLNVAL`.
+- The `lemnos-linux` feature `full` includes `dma` and `v4l2-m2m`.
+
 - Device ownership in board definitions: `owner = "lemnos"` (the default: Lemnos drives the device) or `owner = "host"` (the host's own services drive it; Lemnos reads only what the host exposes). A host-owned device is built in its read-only form, refuses writes from every client (`lemnosd`'s `NotAllowed`), takes no `writers` or `raw` clients (refused at validation), and leaves no fan hand-back to record. A driver without a read-only form is refused for a host-owned device (`DriverEntry::read_only`). `docs/board-definition.md`, *Device ownership*.
 - Board identity: `[board] identity = { os_release_id, device_tree_model }` names the host a definition is for. `lemnosd` refuses to start on another host (not with `--sim`). `lemnos_board::HostIdentity`, `os_release_value`.
 - The `net-link` driver (feature `drv-net-link`, on by default): a network link (a CAN bus) as an `up` and `carrier` sensor, read from `/sys/class/net/<name>`. Its bus error state is not in sysfs and is not read.

@@ -13,7 +13,7 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 1. `lemnos-core` (`no_std` + `alloc`)
    Shared device descriptors, interaction requests and responses, state snapshots, events, issues, and value types.
 2. `lemnos-bus`
-   Bus-specific session traits and backend contracts for GPIO, PWM, I2C, SPI, UART, and USB access (the runtime's dyn convenience layer), and `lemnos_bus::hal`: embedded-hal views of those sessions.
+   Bus-specific session traits and backend contracts for GPIO, PWM, I2C, SPI, UART, and USB access (the runtime's dyn convenience layer), `lemnos_bus::hal`: embedded-hal views of those sessions, and `lemnos_bus::transfer`: one way to start, poll, wait for and cancel a transfer over memory or dma-bufs ([dma.md](dma.md)).
 3. `lemnos-discovery`
    Discovery probes, inventory snapshots, probe reports, diffing, and watch events.
 4. `lemnos-driver-manifest` (`no_std` + `alloc`)
@@ -29,8 +29,8 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 
 ## Backend And Driver Crates
 
-- `lemnos-linux` is the one Linux implementation: discovery probes, sessions, hotplug (netlink uevents, inotify fallback), and embedded-hal implementations (`lemnos_linux::hal`: i2c-dev, spidev, GPIO uAPI v2, delay). It forbids `unsafe`.
-- `lemnos-linux-sys` holds the workspace's only `unsafe` code: Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs, each block with a `// SAFETY:` comment.
+- `lemnos-linux` is the one Linux implementation: discovery probes, sessions, hotplug (netlink uevents, inotify fallback), and embedded-hal implementations (`lemnos_linux::hal`: i2c-dev, spidev, GPIO uAPI v2, delay). Behind features it adds DMA buffers (`dma`, [dma.md](dma.md)), V4L2 memory-to-memory sessions (`v4l2-m2m`, [m2m.md](m2m.md)) and the SPI and I2C transfer engines. It forbids `unsafe`.
+- `lemnos-linux-sys` holds the workspace's only `unsafe` code: Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs (including dma-heap, dma-buf, V4L2 and `mmap`), each block with a `// SAFETY:` comment.
 - `lemnos-drivers-gpio`, `-pwm`, `-i2c`, `-spi`, `-uart`, `-usb` provide generic runtime drivers and manifests for common interface kinds (std).
 - `lemnos-drivers-vcm` is a `no_std` device driver crate (camera focus VCMs) over embedded-hal; future device drivers follow it.
 - `lemnos-drivers-bmi088` (IMU), `lemnos-drivers-bmm150` (magnetometer) and `lemnos-drivers-ina2xx` (power monitors) are `no_std` sensor drivers in the same style. All four implement the `lemnos-device` model next to their own APIs.
