@@ -351,6 +351,17 @@ impl M2mSession {
         })
     }
 
+    /// Sets control `id` on the session's descriptor (`VIDIOC_S_CTRL`) and returns
+    /// the value the driver kept. See [`set_control`](super::set_control).
+    pub fn set_control(&mut self, id: u32, value: i32) -> io::Result<i32> {
+        super::set_control(self.file.as_fd(), id, value)
+    }
+
+    /// Reads control `id` on the session's descriptor (`VIDIOC_G_CTRL`).
+    pub fn control(&self, id: u32) -> io::Result<i32> {
+        super::control(self.file.as_fd(), id)
+    }
+
     /// The device's capabilities, as `QUERYCAP` reported them.
     pub fn capabilities(&self) -> &Capability {
         &self.capabilities

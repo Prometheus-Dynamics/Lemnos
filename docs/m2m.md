@@ -94,6 +94,19 @@ s.stream_off()?;                                  // every buffer comes back
   A driver that does not produce an event type refuses its subscription (`EINVAL`); vim2m
   refuses end-of-stream and takes control events.
 
+## Controls
+
+- `M2mSession::set_control(id, value)` (`VIDIOC_S_CTRL`) returns the value the driver kept (the
+  kernel writes it back; a driver may clamp it), and `control(id)` reads it (`VIDIOC_G_CTRL`).
+  Free functions `lemnos_linux::v4l2::set_control(fd, id, value)` and `control(fd, id)` take any
+  descriptor of the device: a control can be set before the session is built, on the descriptor
+  the session then takes (`from_file`). Controls are per file handle.
+- Plain integer controls only: the flips (`CID_HFLIP`, `CID_VFLIP`), `CID_ROTATE`,
+  `CID_BG_COLOR`, and a codec's bitrate or GOP. A control with a payload needs the extended form
+  (`VIDIOC_S_EXT_CTRLS`), which is not wrapped yet.
+- vim2m tests: each flip combination mirrors the converted frame, and the value read back is the
+  value kept.
+
 ## Zero copies
 
 - MMAP buffers are the driver's; the caller writes into them through `output_plane_mut` and

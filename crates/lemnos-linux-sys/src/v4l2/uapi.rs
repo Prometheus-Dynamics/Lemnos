@@ -173,6 +173,16 @@ pub(crate) struct DecoderCmd {
 // SAFETY: integers only.
 unsafe impl Pod for DecoderCmd {}
 
+/// The kernel's `struct v4l2_control` (8 bytes): a control id and its value.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct Control {
+    pub id: u32,
+    pub value: i32,
+}
+// SAFETY: integers only.
+unsafe impl Pod for Control {}
+
 /// The kernel's `struct v4l2_event_subscription` (32 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -250,6 +260,10 @@ pub(crate) const ENCODER_CMD: u32 = iowr::<EncoderCmd>(V, 77);
 pub(crate) const DECODER_CMD: u32 = iowr::<DecoderCmd>(V, 96);
 /// `VIDIOC_SUBSCRIBE_EVENT`.
 pub(crate) const SUBSCRIBE_EVENT: u32 = iow::<Subscription>(V, 90);
+/// `VIDIOC_G_CTRL`.
+pub(crate) const G_CTRL: u32 = iowr::<Control>(V, 27);
+/// `VIDIOC_S_CTRL`.
+pub(crate) const S_CTRL: u32 = iowr::<Control>(V, 28);
 /// `VIDIOC_DQEVENT`.
 pub(crate) const DQEVENT: u32 = ior::<Event>(V, 89);
 /// `VIDIOC_G_SELECTION`.
@@ -334,6 +348,8 @@ mod tests {
         assert_eq!(DECODER_CMD, 0xc048_5660);
         assert_eq!(SUBSCRIBE_EVENT, 0x4020_565a);
         assert_eq!(DQEVENT, 0x8088_5659);
+        assert_eq!(G_CTRL, 0xc008_561b);
+        assert_eq!(S_CTRL, 0xc008_561c);
         assert_eq!(G_SELECTION, 0xc040_565e);
         assert_eq!(S_SELECTION, 0xc040_565f);
     }

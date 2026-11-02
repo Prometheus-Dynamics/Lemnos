@@ -56,6 +56,34 @@ pub const EVENT_SOURCE_CHANGE: u32 = 5;
 /// `V4L2_EVENT_SRC_CH_RESOLUTION`: a source-change event's `changes` flag for a
 /// new resolution (the decoder's coded size changed).
 pub const SRC_CH_RESOLUTION: u32 = 1 << 0;
+/// `V4L2_CID_HFLIP`: a horizontal flip (a boolean control).
+pub const CID_HFLIP: u32 = 0x0098_0914;
+/// `V4L2_CID_VFLIP`: a vertical flip (a boolean control).
+pub const CID_VFLIP: u32 = 0x0098_0915;
+/// `V4L2_CID_ROTATE`: a rotation in degrees (0, 90, 180, 270).
+pub const CID_ROTATE: u32 = 0x0098_0922;
+/// `V4L2_CID_BG_COLOR`: the background colour of a frame (an RGB value).
+pub const CID_BG_COLOR: u32 = 0x0098_0923;
+
+/// Sets control `id` to `value` (`VIDIOC_S_CTRL`) and returns the value the
+/// driver kept (the kernel writes it back; a driver clamps or adjusts it).
+pub fn s_ctrl(fd: BorrowedFd<'_>, id: u32, value: i32) -> io::Result<i32> {
+    let mut raw = uapi::Control { id, value };
+    // SAFETY: `S_CTRL` takes a `v4l2_control`, which `raw` is; the kernel writes
+    // the kept value back into it.
+    unsafe { ioctl_ptr(fd, uapi::S_CTRL, &raw mut raw)? };
+    Ok(raw.value)
+}
+
+/// Reads control `id` (`VIDIOC_G_CTRL`).
+pub fn g_ctrl(fd: BorrowedFd<'_>, id: u32) -> io::Result<i32> {
+    let mut raw = uapi::Control { id, value: 0 };
+    // SAFETY: `G_CTRL` takes a `v4l2_control`, which `raw` is; the kernel writes
+    // the value into it.
+    unsafe { ioctl_ptr(fd, uapi::G_CTRL, &raw mut raw)? };
+    Ok(raw.value)
+}
+
 /// `V4L2_SEL_TGT_COMPOSE`: the rectangle a frame occupies in the buffer (for a
 /// decoder, the visible picture of the decoded frame).
 pub const SEL_TGT_COMPOSE: u32 = 0x0100;

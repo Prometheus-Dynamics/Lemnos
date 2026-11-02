@@ -5,7 +5,7 @@
 use super::*;
 #[cfg(feature = "dma")]
 use crate::dma::{Access, DmaHeap};
-use crate::v4l2::{PixFormat, PixFormatMplane, Rect, fourcc};
+use crate::v4l2::{CID_HFLIP, CID_VFLIP, PixFormat, PixFormatMplane, Rect, fourcc};
 use std::os::fd::AsFd;
 
 /// A queue with no device behind it, for the bookkeeping checks.
@@ -907,4 +907,146 @@ fn the_capture_size_follows_the_source_and_the_session_reports_that() {
         "the stored format is the driver's now"
     );
     assert!(size(&driver) > 0);
+}
+
+/// The 64x48 RGB24 test frame: pixel (x, y) is distinct, so a mirror shows.
+fn flip_pattern() -> Vec<u8> {
+    let mut frame = Vec::with_capacity(64 * 48 * 3);
+    for y in 0..48u32 {
+        for x in 0..64u32 {
+            frame.extend_from_slice(&[x as u8, y as u8, ((x * 7) ^ (y * 3)) as u8]);
+        }
+    }
+    frame
+}
+
+/// Each row reversed: the horizontal mirror of a 64-pixel RGB24 frame.
+fn mirror_h(frame: &[u8]) -> Vec<u8> {
+    frame
+        .as_chunks::<{ 64 * 3 }>()
+        .0
+        .iter()
+        .flat_map(|row| row.as_chunks::<3>().0.iter().rev().flatten().copied())
+        .collect()
+}
+
+/// The rows in reverse order: the vertical mirror.
+fn mirror_v(frame: &[u8]) -> Vec<u8> {
+    frame
+        .as_chunks::<{ 64 * 3 }>()
+        .0
+        .iter()
+        .rev()
+        .flatten()
+        .copied()
+        .collect()
+}
+
+/// One frame through a session (its controls already set): returns what the
+/// device converted it to.
+fn vim2m_frame(s: &mut M2mSession, frame: &[u8]) -> Vec<u8> {
+    for i in 0..s.capture_buffers() {
+        s.queue_capture(i, &plane(0)).unwrap();
+    }
+    s.stream_on().unwrap();
+    let out = s.free_output().expect("a free source buffer");
+    s.output_plane_mut(out, 0).unwrap()[..frame.len()].copy_from_slice(frame);
+    s.queue_output(out, &plane(frame.len() as u32), Duration::from_millis(1))
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        s.wait(
+            Ready {
+                capture: true,
+                ..Ready::default()
+            },
+            Some(Duration::from_millis(200)),
+        )
+        .unwrap();
+        if let Some(d) = s.dequeue_capture().unwrap() {
+            let n = d.bytes_used[0] as usize;
+            let data = s.capture_plane(d.index, 0).unwrap()[..n].to_vec();
+            s.stream_off().unwrap();
+            return data;
+        }
+    }
+    panic!("the device returned no frame");
+}
+
+/// The flip controls on vim2m: each combination mirrors the converted frame, and
+/// the value read back is the value the driver kept.
+#[test]
+fn vim2m_flips_follow_the_controls() {
+    let Some(path) = find_m2m("vim2m") else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    let frame = flip_pattern();
+    for (hflip, vflip) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut s =
+            M2mSession::open(&path, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
+        assert_eq!(
+            s.set_control(CID_HFLIP, hflip as i32).unwrap(),
+            hflip as i32
+        );
+        assert_eq!(
+            s.set_control(CID_VFLIP, vflip as i32).unwrap(),
+            vflip as i32
+        );
+        assert_eq!(s.control(CID_HFLIP).unwrap(), hflip as i32, "read back");
+        assert_eq!(s.control(CID_VFLIP).unwrap(), vflip as i32, "read back");
+        let mut expected = frame.clone();
+        if hflip {
+            expected = mirror_h(&expected);
+        }
+        if vflip {
+            expected = mirror_v(&expected);
+        }
+        let converted = vim2m_frame(&mut s, &frame);
+        assert!(
+            converted == expected,
+            "hflip={hflip} vflip={vflip}: the converted frame is the mirrored source"
+        );
+    }
+}
+
+/// A control set on the raw descriptor before the session is built applies to
+/// the session that takes that descriptor (the codec-control path).
+#[test]
+fn a_control_set_on_the_descriptor_before_the_session_applies() {
+    let Some(path) = find_m2m("vim2m") else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        crate::v4l2::set_control(file.as_fd(), CID_HFLIP, 1).unwrap(),
+        1
+    );
+    let frame = flip_pattern();
+    let mut s =
+        M2mSession::from_file(file, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
+    assert_eq!(
+        s.control(CID_HFLIP).unwrap(),
+        1,
+        "the session sees the control"
+    );
+    let converted = vim2m_frame(&mut s, &frame);
+    assert!(converted == mirror_h(&frame), "the frame is mirrored");
+}
+
+/// An unknown control id is refused by the driver, not ignored.
+#[test]
+fn an_unknown_control_is_refused() {
+    let Some(path) = find_m2m("vim2m") else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    let mut s = M2mSession::open(&path, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
+    assert!(s.set_control(0x0098_ffff, 1).is_err());
+    assert!(s.control(0x0098_ffff).is_err());
 }
