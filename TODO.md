@@ -232,9 +232,16 @@ Consumer-side work (apps and the camera stack) is tracked in those repositories.
       kernel driver on Linux; plain claim on macOS); vendor control in/out; async bulk in/out with
       buffered bulk streaming; error kinds permission denied, busy, disconnected, unsupported;
       on Windows, report whether WinUSB is bound so the tool can offer to install it.
-- [ ] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
-      Done when: a single watcher serves Lemnos and the camera stack.
+- [x] **One hotplug watcher.** Why: the camera stack needs the same device-arrival events.
+      Done when: a single watcher serves Lemnos and the camera stack. (8669d26:
+      `lemnos_linux::device_watch::DeviceWatcher`, netlink, inotify or rescan; Lemnos's
+      `LinuxHotplugWatcher` is an adapter over it; camera-stack migration notes in docs/hotplug.md.)
 - [ ] **Accelerator transports.** Why: accelerators sit on PCIe/MMIO and USB. Done when: PCIe and
       MMIO access works through vfio, and USB devices can load firmware and re-enumerate.
-- [ ] **Scope line.** Lemnos is user-space hardware access. It is not a memory manager, does not
-      decide what data moves where, and has no camera or vision code.
+- [x] **Scope line.** Lemnos is user-space hardware access. It is not a memory manager, does not
+      decide what data moves where, and has no camera or vision code. (8669d26: README, Scope.)
+      Open overlaps, not refactored: the camera focus VCM drivers (`lemnos-drivers-vcm`) and their
+      board-registry naming; `lemnos-light` (LED rendering) and `lemnos-fusion` (IMU fusion
+      algorithms), which compute on data rather than access hardware; `lemnosd`'s frame fan-out
+      policy (`clients.rs`, one shared `Rc` per reading); look names with a product prefix in README.md
+      and docs/looks.md.
