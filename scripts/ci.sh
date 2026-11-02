@@ -101,9 +101,45 @@ run_matrix() {
   timed "matrix: Running the feature matrix" "$root_dir/scripts/feature-matrix.sh"
 }
 
+# lemnosd and lemnos-ctl (its client, which links lemnos-ipc) as shipped in the service profile, for
+# the K230D (riscv64) and Flame (RV1106G2, Cortex-A7) boards. Each binary is stripped and its size
+# reported per target. The CI workflow sets the cross linkers (docs/development.md).
+run_cross32() {
+  local targets=(riscv64gc-unknown-linux-gnu armv7-unknown-linux-gnueabihf)
+  local target bin file
+  echo "==> [cross32] Building lemnosd and lemnos-ctl (service profile) for riscv64 and armv7"
+  for target in "${targets[@]}"; do
+    timed "cross32: build lemnosd lemnos-ctl $target" \
+      cargo build --locked --profile service -p lemnosd -p lemnos-ctl --target "$target"
+  done
+
+  echo "==> [cross32] Checking the binaries are stripped and reporting sizes"
+  timed "cross32: stripped sizes" bash -c '
+    target_dir="$1"; shift
+    for target in "$@"; do
+      for bin in lemnosd lemnos-ctl; do
+        file="$target_dir/$target/service/$bin"
+        if readelf -S --wide "$file" | grep -q "[.]symtab"; then
+          echo "error: $file is not stripped" >&2
+          exit 1
+        fi
+        printf "%-34s %-12s %10s bytes\n" "$target" "$bin" "$(stat -c %s "$file")"
+      done
+    done' _ "${CARGO_TARGET_DIR:-$root_dir/target}" "${targets[@]}"
+
+  # Smoke test under qemu-user when the runner is configured (the CI cross job sets it): lemnosd
+  # starts its CLI and exits 0 on --help, which exercises the dynamic loader and libc.
+  local var="CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER"
+  if [[ -n "${!var:-}" ]]; then
+    echo "==> [cross32] lemnosd --help under the riscv64 runner"
+    timed "cross32: lemnosd --help riscv64 under qemu" bash -c \
+      "${!var} ${CARGO_TARGET_DIR:-$root_dir/target}/riscv64gc-unknown-linux-gnu/service/lemnosd --help >/dev/null"
+  fi
+}
+
 usage() {
   cat <<'EOF'
-Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|sizes|matrix|all]
+Usage: ./scripts/ci.sh [workspace|docs-and-lints|nostd|sizes|matrix|cross32|all]
 
 Defaults to `all`, which mirrors the non-matrix jobs in `.github/workflows/ci.yml`;
 `matrix` runs the feature-matrix job (`scripts/feature-matrix.sh`).
@@ -128,11 +164,15 @@ case "$mode" in
   matrix)
     run_matrix
     ;;
+  cross32)
+    run_cross32
+    ;;
   all)
     run_docs_and_lints
     run_workspace
     run_nostd
     run_sizes
+    run_cross32
     ;;
   -h|--help|help)
     usage
