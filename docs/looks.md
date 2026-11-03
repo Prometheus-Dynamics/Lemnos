@@ -7,8 +7,10 @@ allocation; `lemnosd` names them, loads them from files, and reloads them
 without a restart. Looks are data, so a new animation is a file, not a
 rebuild.
 
-- Built-in looks are compiled in (`lemnos-light`, `builtin.rs`), shaped by the
-  board's light keys (`docs/board-definition.md`).
+- The built-in looks are the board's own states, `status.*` (`lemnos-light`,
+  `builtin.rs`), shaped by the board's light keys (`docs/board-definition.md`).
+  Every other named look is a look file: the example set (*Example set*) is the
+  update, boot, detection and link looks.
 - A look file overrides a built-in of the same name, and adds new names.
 - Clients ask for a look by name (`led look`), or send one in full (`led show`,
   `LedClient::show_spec`), with the same layering and brightness either way.
@@ -265,22 +267,65 @@ look fails as a whole, and the looks it had keep working.
 
 ## Built-in looks
 
-Their colours and timings come from the board's light keys (in brackets) and
-the defaults shown. Each is also a valid `led look <name>`.
+`lemnos-light` compiles in the board's own status looks only. Their colours and
+timings come from the board's light keys (`docs/board-definition.md`), and each
+is a valid `led look <name>`.
 
 | Name | Look | Brightness |
 |---|---|---|
 | `status.ok` `status.warn` `status.error` `status.busy` | the board's `ok`/`warn`/`error`/`busy` colour, solid, or the status effect (`status_effect`, `error_effect`) | fill 0.7 |
 | `status.off` | nothing | |
-| `system.verifying` | a purple comet, 1200 ms, tail 8, base 0.18 (`verifying_*`) | comet 1.0 |
-| `system.writing` | the blue arc over the faint track, sheen, the request's progress | arc 1.0 |
-| `system.writing-unknown` | the blue comet, with the verifying timing | comet 1.0 |
-| `system.staged` | the green breathe, 2200 ms, depth 0.45 (`staged_*`) | fill 0.85 |
-| `system.booting` | the trial boot: a faint white breathe (3000 ms, about 4 to 9%) under a warm-white sparkle (`booting`, density 1.2, base 0.03); see below, and *The trial boot's ember* | wash 0.09, sparkle 1.0 |
-| `system.rebooting` | the reboot ember: the rebooting colour at 44%, held at least 16% (about 22% on a default ring) | ember |
-| `system.failed` `system.rolled-back` | the red breathe, 2400 ms, depth 0.9 (`failed_*`) | fill 0.7 |
-| `system.confirmed` | the green pop: a pale green-white flash, a green burst from the top, the ring filled green and drained toward the bottom, about 3.2 s; see below | wash 1.0, drain 1.0, ripple 1.0 |
-| `system.locate` | the `locate` colour, breathe or chase (`locate_effect`) | fill 0.7 |
+
+### The default look
+
+A light must never go dark because a look is missing. The board's
+`default_look` key names the look a light shows when no owner holds an intent,
+and in place of a named look that no look file and no built-in defines. It is
+any look name (a `status.*` built-in, or a look file's), and `status.ok` by
+default. Only a `default_look` that names nothing shows dark.
+
+```toml
+[[devices]]
+id = "status-ring"
+driver = "ws2812"
+config = { count = 16, default_look = "status.busy" }
+```
+
+## Example set
+
+The named looks that are not built in are a **documented example set**, in
+`examples/looks` in this repository. They are look files in the format above,
+loadable unchanged by `lemnosd`:
+
+| File | Installed as | Holds |
+|---|---|---|
+| `examples/looks/looks.d/system.toml` | `/etc/lemnos/looks.d/system.toml` | the system states and `system.locate` |
+| `examples/looks/looks.d/detect.toml` | `/etc/lemnos/looks.d/detect.toml` | `detect.live` |
+| `examples/looks/presets/scheme-a.toml` | `/var/lib/lemnos/presets/scheme-a.toml` | a traffic light: green targets, white searching, amber no-NT, red error |
+| `examples/looks/presets/scheme-b.toml` | `/var/lib/lemnos/presets/scheme-b.toml` | scheme B: `detect.targets`, `detect.searching`, `detect.error`, `link.waiting`, `link.waiting-targets` |
+| `examples/looks/presets/scheme-c.toml` | `/var/lib/lemnos/presets/scheme-c.toml` | motion only: solid when settled, a comet when moving |
+
+The look files (`looks.d`) are read whatever preset is active, and a look file
+wins its name over a preset. So the detection and link looks, which the schemes
+set, are in the presets, not in `looks.d`, and `/var/lib/lemnos/presets/active`
+must hold `scheme-b` for them to show. The shipped scheme B reproduces the old
+built-in detection and link looks. `lemnosd`'s `example_looks` test renders
+every look of the set and checks the frames against the recorded ones
+(`lemnos-light/src/golden.txt`), so the set is what the built-ins were.
+
+Scheme B's look, for reference:
+
+| Name | Look | Brightness |
+|---|---|---|
+| `system.verifying` | a purple comet `8a5cff`, 1200 ms, tail 8, base 0.18 | comet 1.0 |
+| `system.writing` | the blue arc `2f7bff` over the faint track `101012`, sheen, the request's progress | arc 1.0 |
+| `system.writing-unknown` | the blue comet `2f7bff`, 1200 ms, tail 8, base 0.18 | comet 1.0 |
+| `system.staged` | the green breathe `00ff20`, 2200 ms, depth 0.45 | fill 0.85 |
+| `system.booting` | the trial boot: a faint white breathe (3000 ms, about 4 to 9%) under a warm-white sparkle (density 1.2, base 0.03); see *The trial boot's ember* | wash 0.09, sparkle 1.0 |
+| `system.rebooting` | the reboot ember `ff8000` at 44%, held at least 16% | ember |
+| `system.failed` `system.rolled-back` | the red breathe `ff3b3b`, 2400 ms, depth 0.9 | fill 0.7 |
+| `system.confirmed` | the green pop: a pale green-white flash, a green burst from the top, the ring filled green and drained toward the bottom, about 3.2 s | wash 1.0, drain 1.0, ripple 1.0 |
+| `system.locate` | cyan `00ffff` breathe, 2000 ms, depth 0.6 | fill 0.7 |
 | `detect.targets` | cyan `28c8ff` breathe, 4000 ms, depth 0.2 | fill 0.7 |
 | `detect.searching` | violet `965aff` comet, 1600 ms, tail 7, base 0.18 | comet 1.0 |
 | `link.waiting` | deep orange `ff5a00`, two comets, 2400 ms, tail 6, base 0.18 | comet 1.0 |
@@ -288,14 +333,12 @@ the defaults shown. Each is also a valid `led look <name>`.
 | `detect.error` | red `ff2828` breathe, 2000 ms, depth 0.85 | fill 0.7 |
 | `detect.live` | steady white `ffffff` | fill 0.7 |
 
-These are the **scheme B** colours, the default preset (below). Scheme B is cool
-colours for healthy and warm colours for trouble, and motion means looking: a
-moving comet is a search or a wait, a steady colour is settled.
+Scheme B is cool colours for healthy and warm colours for trouble, and motion
+means looking: a moving comet is a search or a wait, a steady colour is settled.
 
-Every comet has a dim glow of its own colour under it: the default base is
-0.18 (`spinner_base` for the spinner, the locate chase and an orbit;
-`verifying_base` for the verifying and writing comets), so the LEDs between
-the heads are never bare off. A look sets `base` to change it.
+Every comet has a dim glow of its own colour under it, set by its `base`
+(0.18 in the example set; the spinner's glow is `spinner_base` on the board),
+so the LEDs between the heads are never bare off.
 
 A comet's head is anti-aliased: the LED just ahead of a head is lit by the
 fraction of the way the head has got to it, so a head moves from LED to LED
@@ -306,14 +349,35 @@ checks that no LED changes by more than 9 of 255 in 1 ms over one turn.
 `system.writing-unknown` is the write phase while its amount is unknown; the
 update's other states are listed in `docs/system-service.md`.
 
+### Migrating a device package (release condition)
+
+Nothing is released yet, so the built-in set moved on dev without a shim. A
+device package that ships the moved looks must install the example set (or its
+own copies) before a release drops them:
+
+1. Copy `examples/looks/looks.d/*.toml` to `/etc/lemnos/looks.d/`.
+2. Copy `examples/looks/presets/*.toml` to `/var/lib/lemnos/presets/`, and write
+   `scheme-b` (a line with the name) to `/var/lib/lemnos/presets/active`.
+3. Remove these look keys from its board files (a board that sets one is refused now):
+   `idle`, `locate`, `locate_effect`,
+   `updating`, `verifying`, `verifying_period_ms`, `verifying_tail`,
+   `verifying_base`, `writing`, `staged`, `staged_period_ms`, `staged_depth`,
+   `booting`, `booting_period_ms`, `booting_tail`, `booting_base`, `rebooting`,
+   `failed`, `failed_period_ms`, `failed_depth` and `confirmed`. Their colours
+   and timings move into the look files, edited as data.
+4. Set `default_look` where the default is not `status.ok`.
+
+The `status.*` keys (`ok`, `warn`, `error`, `busy`, `status_effect`,
+`error_effect`, the breathe and blink keys, `progress*`, `spinner_*`) keep their
+meaning.
+
 ## Presets
 
-A **preset** is a named set of look definitions (a look file's text). Three are
-built in: `scheme-a` (a traffic light: green targets, white searching, amber
-no-NT, red error), `scheme-b` (the default: the scheme B colours above) and
-`scheme-c` (motion only: solid when settled, a comet when moving). Users save
-their own under `<LEMNOSD_STATE_DIR>/presets/<name>.toml` (default
-`/var/lib/lemnos/presets`); built-in names cannot be saved over or deleted.
+A **preset** is a named set of look definitions (a look file's text). None is
+built in. The example schemes (`scheme-a`, `scheme-b` and `scheme-c`, in
+*Example set*) are saved presets, and users save their own under
+`<LEMNOSD_STATE_DIR>/presets/<name>.toml` (default `/var/lib/lemnos/presets`).
+With no preset active, the look files and the board's looks are all there is.
 
 One preset is active, and the choice is saved (`<state>/presets/active`), so it
 survives a restart. The active preset's looks sit **above the board's looks and
@@ -326,7 +390,7 @@ lemnos-ctl looks preset show scheme-b              # its look file text
 lemnos-ctl looks preset apply scheme-c             # switch; remembered across restarts
 lemnos-ctl looks preset save night --file night.toml
 lemnos-ctl looks preset save night2 --from-active  # copy the active preset
-lemnos-ctl looks preset delete night               # the active one falls back to scheme-b
+lemnos-ctl looks preset delete night               # the active one leaves no preset active
 lemnos-ctl looks delete detect.searching               # remove a look file override
 ```
 
@@ -343,7 +407,7 @@ boundary. Protocol: `LooksOp` codes 4 to 9, appended (`PresetList`, `PresetShow`
 The **ring-wide** brightness scales every look: the board's
 `look_brightness` (0 to 1, default **0.5**). A look's own brightness is 1.0 for
 comets and arcs, and 0.7 for full-ring fills and breathes (the built-in fills,
-status, locate, and `detect.targets`/`detect.error`/`detect.live`), so a fill is not
+status, and the example set's fills), so a fill is not
 brighter than a comet's head. A request's `--brightness` replaces the look's
 own, and the ring-wide scale still applies. The reboot ember keeps a 16% floor.
 
@@ -355,9 +419,9 @@ LED driver's own byte (`docs/board-definition.md`); it is not the look scale.
 
 From the lowest to the highest:
 
-1. the built-ins;
+1. the built-ins (`status.*`), and the default look for a name nothing defines;
 2. the board's `[looks.<name>]` tables (`board.toml`, read at start);
-3. the active preset (see *Presets*);
+3. the active preset (see *Presets*, if one is active);
 4. every `*.toml` in `LEMNOSD_LOOKS_DIR` (read-only, default
    `/etc/lemnos/looks.d`), in name order;
 5. every `*.toml` in `LEMNOSD_LOOKS_OVERRIDE_DIR` (writable, default
@@ -518,8 +582,11 @@ impl LedClient {
 ## Tests
 
 `lemnos-light` checks every built-in look against `golden.txt`: frames
-rendered at fixed times, hashed. A deliberate change to a built-in is recorded
-with `LEMNOS_GOLDEN_UPDATE=<file> cargo test -p lemnos-light`. The look parser,
+rendered at fixed times, hashed. The example set's looks are recorded in the
+same file (the engine tests render them through a test-only copy of the old
+definitions, `lemnos-light/src/reference.rs`). `lemnosd/tests/example_looks.rs`
+loads the example set and checks its frames against `golden.txt`. A deliberate
+change is recorded with `LEMNOS_GOLDEN_UPDATE=<file> cargo test -p lemnos-light`. The look parser,
 writer and error paths are tested in `lemnos-board` (`looks_tests.rs`), the
 file table, reloads and saves in `lemnosd/tests/looks.rs`.
 

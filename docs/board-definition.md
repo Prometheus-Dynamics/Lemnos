@@ -209,7 +209,7 @@ and, for `gpio-*` devices, its line; those are never claimed raw. See
 | `vcm` | `lens` | I2C, default 0x0c | `chip` (`dw9714` `dw9807` `dw9817` `ak7375`, required) | control `position` |
 | `hwmon-fan` | `fan` | `match.name` or `path` | `restore_mode`: for fan-controller chips, the automatic `pwm1_enable` mode that hands the fan back when a host stops (default 2). Not used for `pwm-fan` or other fans with a thermal cooling device: they get back the `pwm1_enable` read at bind and the cooling device re-applies the governor's level | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
 | `thermal-zone` | `temperature` | `match.type` or `path` | none | `temperature` °C |
-| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`; a runtime value saved with `lemnos-ctl led brightness --persist` replaces it at start, `docs/system-service.md`, *Ring brightness at runtime*), `gpio` (informational), `spinner_base` (the comets' dim glow), `gravity_device`, `gravity_plane`, `gravity_led0_deg`, `default_down` (which way is down for a falling sparkle: `docs/looks.md`, *Gravity*), and the look defaults below | controls `brightness`, `color`; frames |
+| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`; a runtime value saved with `lemnos-ctl led brightness --persist` replaces it at start, `docs/system-service.md`, *Ring brightness at runtime*), `gpio` (informational), `spinner_base` (the comets' dim glow), `gravity_device`, `gravity_plane`, `gravity_led0_deg`, `default_down` (which way is down for a falling sparkle: `docs/looks.md`, *Gravity*), `default_look` (the look a light shows when nothing holds an intent, and in place of a missing named look: `docs/looks.md`, *The default look*), and the look defaults below | controls `brightness`, `color`; frames |
 | `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
 | `gpio-power-switch` | `power-switch` | `config.chip` + `config.line` | `chip`, `line`, `active_low`, `default_on` (true), `enable_delay_ms` (0, max 5000), `fault_line` (optional), `fault_chip` (default `chip`), `fault_active_low` (true), `persist` (false), `on_exit` (`keep`, `on` or `off`) | `power.on` channel and control (1 on, 0 off); `power.reset` control (write N: off for N ms, then on; max 10000); `power.fault` channel when `fault_line` is set |
 | `gpio-input` | `gpio` | `config.chip` + `config.line` | `chip`, `line`, `active_low` | `level` |
@@ -218,39 +218,27 @@ and, for `gpio-*` devices, its line; those are never claimed raw. See
 A light's look defaults (used by `lemnosd`'s LED intents; any intent can override them):
 `fade_ms`, `easing` (`linear`, `ease-in`, `ease-out`, `ease-in-out`, `sine`,
 `cubic-bezier(x1, y1, x2, y2)`), `status_effect` and `error_effect` (`solid`, `blink`,
-`breathe`), `locate_effect` (`breathe`, `blink`, `chase`), `breathe_period_ms`,
-`breathe_depth` (0..1; the breathe's low point is 1 minus this), `blink_period_ms`,
-`blink_duty` (0..1), `spinner_period_ms`, `spinner_tail` (LEDs), and colours
-(`0xRRGGBB` or `"#rrggbb"`): `ok`, `warn`, `error`, `busy`, `locate`, `idle`, `progress`
-(the arc's fill), `progress_background` (the arc's track; default `101012`, a faint
-neutral white), `updating` (the update's arc), `verifying`, `writing`, `staged`,
-`booting`, `rebooting` (the reboot ember, 12% of this colour), `failed`, `confirmed` (the
-ripple after a trial boot).
+`breathe`), `breathe_period_ms`, `breathe_depth` (0..1; the breathe's low point is 1
+minus this), `blink_period_ms`, `blink_duty` (0..1), `spinner_period_ms`, `spinner_tail`
+(LEDs), `spinner_base`, and colours (`0xRRGGBB` or `"#rrggbb"`): `ok`, `warn`, `error`,
+`busy`, `progress` (the arc's fill), `progress_background` (the arc's track; default
+`101012`, a faint neutral white).
 
-Named looks: the board's `[looks.<name>]` tables are read on top of the built-in looks
-(`status.*`, `system.*`, `detect.*`, `link.*`), and a look file (`LEMNOSD_LOOKS_DIR`) overrides them
-all; see [looks.md](looks.md) for the blocks, the keys and reloads.
+`default_look` is a look name (default `status.ok`): the look the light shows when no
+owner holds an intent, and in place of a named look that nothing defines, so a light
+never goes dark for a missing look.
+
+Named looks: the board's `[looks.<name>]` tables are read on top of the built-in
+`status.*` looks, and a look file (`LEMNOSD_LOOKS_DIR`) overrides them all. The system,
+detection and link looks are look files, not board keys: see [looks.md](looks.md), *Example
+set*, and its migration step for the keys this format no longer has (`locate`,
+`locate_effect`, `idle`, `updating`, `verifying*`, `writing`, `staged*`, `booting*`,
+`rebooting`, `failed*`, `confirmed`).
 
 ```toml
 [looks."detect.searching"]
 layers = [{ block = "comet", color = "00ff20", period_ms = 1600, tail = 6, base = 0.06 }]
 ```
-
-The system looks' own timing and shape (see `docs/system-service.md`, "System states"):
-
-| Key | Default | Meaning |
-|---|---|---|
-| `verifying_period_ms` | `1200` | the verifying comet's turn |
-| `verifying_tail` | `7` | its tail, in LEDs (fractions allowed, `0` to `64`) |
-| `verifying_base` | `0.18` | its floor brightness, 0 to 1 (the dim glow under the comet) |
-| `spinner_base` | `0.18` | the floor of the spinner, the locate chase and an orbit (0 to 1) |
-| `booting_period_ms` | `1800` | the trial boot's twin comets' turn |
-| `booting_tail` | `5` | their tail, LEDs |
-| `booting_base` | `0.04` | their floor brightness |
-| `staged_period_ms` | `2200` | the staged breathe's period |
-| `staged_depth` | `0.45` | its depth (down to 55%) |
-| `failed_period_ms` | `2400` | the failed or rolled-back pulse's period |
-| `failed_depth` | `0.9` | its depth (down to 10%) |
 
 Example (the example board, `/etc/lemnos/board.toml`): `config = { count = 16, wire = "rgb",
 offset = 5, direction = "cw", gpio = 13, fade_ms = 250, easing = "ease-in-out",
