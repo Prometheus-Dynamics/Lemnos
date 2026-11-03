@@ -40,13 +40,40 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Live input updates: `LedClient::update_inputs(device, progress, spots)` (`Request::LedInputs`, kind 16, appended) changes the progress and spots of the look this client is already showing, without restarting it. The look's time carries on (a comet keeps its turn, a breathe its phase, a sparkle its twinkles), only the input blocks move, nothing cross-fades, and a look that takes no such input refuses the update with the reason. `lemnos-ctl led inputs` sends one. Wire: `LedShow::LookSpots` (code 12) and `LedShow::InlineSpots` (code 13), and the look's spots block (block code 8), all appended.
 - Cost of both: stripped aarch64-musl `lemnosd` 1,184,096 B before, 1,249,632 B after, and `lemnos-ctl` 921,760 B to 987,296 B (the same toolchain; the text section grows by about 40 KB, and the file sizes include 64 KiB of segment alignment).
 
+- Composite devices: the fan controller (`lemnos_device::fan_control`, no_std: piecewise-linear curves per input, the maximum demand, a floor, hysteresis, slew-limited falls, a spin-up kick, full duty when an input goes stale), declared as a `[[composites]]` entry in the board file and hosted by `lemnosd`. `docs/composite-devices.md`.
+- IIO buffered reads: `lemnos_drivers_linux::IioBuffer` (`KernelDevice::buffered`): scan elements, trigger, the timestamp channel on CLOCK_BOOTTIME, poll-based reads. Untested on a board.
+- `lemnos-soc`, a no_std data crate: IO blocks and their capabilities for the K230D, RK3588S, RK3576, RK3566, RK3562 and RV1106, with register layouts for the Rockchip PWM and timer and the RISC-V CLINT. Untested on a board. `docs/io-blocks.md`.
+- RP1 DMA engine: `lemnos_linux::rp1_dma::Rp1DmaEngine` (feature `rp1-dma`, off by default), a `TransferEngine` on the RP1's DesignWare AXI DMAC, channels 3 to 7. Untested for transfers.
+- V4L2 requests for stateless codecs: media entities, request allocation, queueing and reinit, extended controls per request, `QBUF` with a request descriptor (`lemnos_linux::v4l2::Request`, `set_request_controls`, `queue_output_in_request`). `docs/m2m.md`.
+- USB firmware download: `UsbDevice::dfu_download` (blocks of the device's `wTransferSize`) and `wait_for_device` for the re-enumeration. Verified on a Coral USB accelerator on both boards. `docs/usb.md`.
+- Read timing over IPC: `Request::Stats` / `Message::Stats`, `lemnos-ctl stats` (per-device read counts and costs).
+- `lemnos_linux::hal::SysfsPwm` (feature `pwm`): embedded-hal `SetDutyCycle` directly on a sysfs PWM channel.
+- `lemnos-hal` mocks: a FIFO that drains (`with_fifo`, `with_fifo_stream`).
+- Example look set under `examples/looks/` (`looks.d/system.toml`, `looks.d/detect.toml`, presets `scheme-a`/`b`/`c`), and the board key `default_look` (ws2812 `config`).
+- The board-file list `look_writers` (default `lemnos-ctl` and `orion:*`).
+- The nightly `-Z build-std` recipe for constrained images (`docs/compact-model.md`, *Constrained images*).
+- Hardware results recorded: USB on both boards (`docs/usb.md`), DMA heaps, fences and the I2C engine (`docs/dma.md`), lemnosd timing, FIFO vs polled and memory on board #1 (`docs/system-service.md`).
+
 ### Changed
 
+- **Breaking:** the built-in looks are `status.*` only. `system.*`, `detect.*`, `link.*` and the presets moved to the example look set; a device package installs them (`docs/looks.md`, migration). The 21 retired ws2812 look keys (`idle`, `locate`, `failed`, ...) are refused with an error naming where each now lives.
+- **Breaking:** inventory events (`InventoryEvent`, `InventoryDiff`, `ChangedDevice`) share descriptors through `Arc`; the serde shape is unchanged.
+- **Breaking:** the built-in look-writer client name for the device manager is gone; boards list their writers in `look_writers`. The lemnosd unit no longer names client units in `Before=` (`packaging/systemd/lemnosd.service.d/order.conf.example`).
+- Retained-event byte accounting is behind the `retention-bytes` feature (on by default). Device-keyed runtime state is a sorted vector. Linux lite facade: 574,480 B to 562,704 B.
+- The board validator example uses `lemnos-drivers-bmi088`, `-bmm150` and `-ina2xx`; the BMI055 is no longer accepted.
+- lemnosd never polls a sensor faster than its output rate.
+- DMA heap requests above the heap's capacity are refused before the kernel (`OutOfMemory`): CMA heaps by `CmaFree`, the system heap by a quarter of `MemAvailable`; `DmaHeap::with_capacity` sets a lower cap.
+- USB: a transfer or interface request on an unclaimed interface is refused before the kernel; usbdevfs mappings are capped by `usbfs_memory_mb` and fall back to the heap.
 - **Breaking:** the built-in looks with the vision app's prefix are now generic: `pv.targets` is `detect.targets`, `pv.searching` is `detect.searching`, `pv.no-nt` is `link.waiting`, `pv.no-nt-targets` is `link.waiting-targets`, `pv.error` is `detect.error` and `pv.vision` is `detect.live`. The presets (`scheme-b`) and the docs use the new names. A consumer that sends the old names, or keeps look files under them, renames them (a look file of the new name replaces the built-in). The example board `raze-example` is `sample-board`.
 - `scripts/check-names.sh` no longer exempts look-name tokens or the example board's file: the allowlist had hidden the `pv.*` and `raze` names. The checker now self-tests a list of known leaks against the allowlist before it scans files, and an empty sed script no longer breaks it when the allowlist has no token entries.
 
 ### Fixed
 
+- The USB reaper spun on a hung-up usbdevfs descriptor (its poll returned at once); it now fails the transfers.
+- The USB interface release used a bare `USBDEVFS_CONNECT` (`ENOTTY`); it now goes through `USBDEVFS_IOCTL`, with a sysfs rebind fallback.
+- A polled IMU at 400 Hz was read at 500 Hz (a 2 ms poll), delivering repeated samples.
+- lemnosd shows a light's default look at start (an idle ring stayed dark until something was shown).
+- Flaky tests: the USB mapping test now matches its own file (another thread could map the freed address).
 - `DmaBuf::from_fd` and the borrowed form leave the caller's file offset where it was (the size query used to seek a dup, which shares the offset). dma-bufs answer only `SEEK_END` and `SEEK_SET`, which the query handles.
 - The runtime's PWM sysfs test harness publishes a channel whole (staged, then renamed into place), so a read never sees a channel without its attributes. The test failed under load before; it passes 200 of 200 under load after.
 - The INA2xx drivers read a poll in one I2C transaction (a pointer write and a read per register, joined by repeated starts) instead of one transaction per register. The datasheets do not auto-increment the register pointer on reads, so a single burst across registers is not used.
