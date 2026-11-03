@@ -25,7 +25,11 @@ impl DiscoveryContext {
         self
     }
 
-    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn with_property(
+        mut self,
+        key: impl Into<lemnos_core::MapKey>,
+        value: impl Into<Value>,
+    ) -> Self {
         self.properties.insert(key.into(), value.into());
         self
     }

@@ -46,10 +46,10 @@ impl MatchCondition {
                 .capabilities
                 .iter()
                 .any(|value| &value.id == capability),
-            Self::LabelEq { key, value } => device.labels.get(key) == Some(value),
-            Self::PropertyEq { key, value } => device.properties.get(key) == Some(value),
+            Self::LabelEq { key, value } => device.labels.get(key.as_str()) == Some(value),
+            Self::PropertyEq { key, value } => device.properties.get(key.as_str()) == Some(value),
             Self::HardwareIdEq { key, value } => {
-                device.match_hints.hardware_ids.get(key) == Some(value)
+                device.match_hints.hardware_ids.get(key.as_str()) == Some(value)
             }
         }
     }

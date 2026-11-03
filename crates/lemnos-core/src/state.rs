@@ -1,4 +1,4 @@
-use crate::{DeviceId, DeviceIssue, TimestampMs, ValueMap};
+use crate::{DeviceId, DeviceIssue, MapKey, TimestampMs, ValueMap};
 use alloc::string::String;
 use alloc::vec::Vec;
 #[cfg(feature = "serde")]
@@ -165,7 +165,7 @@ impl DeviceStateSnapshot {
     ///
     /// Prefer shared constants for reusable keys and use ad hoc names only for
     /// driver-specific metadata that does not merit a shared schema.
-    pub fn with_config(mut self, key: impl Into<String>, value: impl Into<crate::Value>) -> Self {
+    pub fn with_config(mut self, key: impl Into<MapKey>, value: impl Into<crate::Value>) -> Self {
         self.realized_config.insert(key.into(), value.into());
         self
     }
@@ -176,7 +176,7 @@ impl DeviceStateSnapshot {
     /// scoped to the driver or integration that owns them.
     pub fn with_telemetry(
         mut self,
-        key: impl Into<String>,
+        key: impl Into<MapKey>,
         value: impl Into<crate::Value>,
     ) -> Self {
         self.telemetry.insert(key.into(), value.into());

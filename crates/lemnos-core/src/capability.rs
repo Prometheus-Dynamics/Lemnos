@@ -97,7 +97,11 @@ impl CapabilityDescriptor {
         self
     }
 
-    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<crate::Value>) -> Self {
+    pub fn with_property(
+        mut self,
+        key: impl Into<crate::MapKey>,
+        value: impl Into<crate::Value>,
+    ) -> Self {
         self.properties.insert(key.into(), value.into());
         self
     }

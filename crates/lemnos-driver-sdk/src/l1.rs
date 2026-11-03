@@ -303,7 +303,7 @@ impl BoundDevice for L1BoundDevice {
                 .channels
                 .iter()
                 .zip(values)
-                .map(|(channel, raw)| (channel.name.to_string(), channel_value(channel, raw)))
+                .map(|(channel, raw)| (channel.name.into(), channel_value(channel, raw)))
                 .collect();
             return self.respond(id, Value::from(map));
         }

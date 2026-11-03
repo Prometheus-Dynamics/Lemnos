@@ -1,9 +1,8 @@
 use super::{DeviceAddress, DeviceControlSurface, DeviceKind, DeviceLink, MatchHints};
 use crate::{
     CapabilityDescriptor, CoreError, CoreResult, DeviceHealth, DeviceId, InterfaceKind,
-    LocalDeviceId, Value, ValueMap,
+    LocalDeviceId, MapKey, SmallMap, Value, ValueMap,
 };
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 #[cfg(feature = "serde")]
@@ -24,7 +23,7 @@ pub struct DeviceDescriptor {
     /// selecting the underlying device. Implementations should not require
     /// duplicate entries in `properties` for the same addressing data.
     pub address: Option<DeviceAddress>,
-    pub labels: BTreeMap<String, String>,
+    pub labels: SmallMap<MapKey, String>,
     /// Descriptive metadata that augments the descriptor.
     ///
     /// Properties are intended for discovery notes, UI, diagnostics, and
@@ -51,7 +50,7 @@ impl DeviceDescriptor {
             display_name: None,
             summary: None,
             address: None,
-            labels: BTreeMap::new(),
+            labels: SmallMap::new(),
             properties: ValueMap::new(),
             control_surface: None,
             capabilities: Vec::new(),
@@ -106,11 +105,11 @@ impl DeviceDescriptor {
         Ok(())
     }
 
-    pub fn add_label(&mut self, key: impl Into<String>, value: impl Into<String>) {
+    pub fn add_label(&mut self, key: impl Into<MapKey>, value: impl Into<String>) {
         self.labels.insert(key.into(), value.into());
     }
 
-    pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<Value>) {
+    pub fn set_property(&mut self, key: impl Into<MapKey>, value: impl Into<Value>) {
         self.properties.insert(key.into(), value.into());
     }
 
@@ -198,7 +197,7 @@ impl DeviceDescriptorBuilder {
         self
     }
 
-    pub fn hardware_id(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn hardware_id(mut self, key: impl Into<MapKey>, value: impl Into<String>) -> Self {
         self.descriptor
             .match_hints
             .hardware_ids
@@ -206,12 +205,12 @@ impl DeviceDescriptorBuilder {
         self
     }
 
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<MapKey>, value: impl Into<String>) -> Self {
         self.descriptor.add_label(key, value);
         self
     }
 
-    pub fn property(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn property(mut self, key: impl Into<MapKey>, value: impl Into<Value>) -> Self {
         self.descriptor.set_property(key, value);
         self
     }

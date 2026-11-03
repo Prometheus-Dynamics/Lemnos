@@ -1,5 +1,4 @@
-use crate::{DeviceId, Value, ValueMap};
-use alloc::collections::BTreeMap;
+use crate::{DeviceId, MapKey, SmallMap, Value, ValueMap};
 use alloc::string::String;
 use alloc::vec::Vec;
 #[cfg(feature = "serde")]
@@ -46,7 +45,7 @@ impl DeviceLink {
         }
     }
 
-    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn with_attribute(mut self, key: impl Into<MapKey>, value: impl Into<Value>) -> Self {
         self.attributes.insert(key.into(), value.into());
         self
     }
@@ -62,5 +61,5 @@ pub struct MatchHints {
     pub model: Option<String>,
     pub revision: Option<String>,
     pub serial_number: Option<String>,
-    pub hardware_ids: BTreeMap<String, String>,
+    pub hardware_ids: SmallMap<MapKey, String>,
 }

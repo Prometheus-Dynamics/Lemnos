@@ -211,17 +211,25 @@ impl DeviceFixtureBuilder {
         self
     }
 
-    pub fn hardware_id(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn hardware_id(
+        mut self,
+        key: impl Into<lemnos_core::MapKey>,
+        value: impl Into<String>,
+    ) -> Self {
         self.builder = self.builder.hardware_id(key, value);
         self
     }
 
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<lemnos_core::MapKey>, value: impl Into<String>) -> Self {
         self.builder = self.builder.label(key, value);
         self
     }
 
-    pub fn property(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn property(
+        mut self,
+        key: impl Into<lemnos_core::MapKey>,
+        value: impl Into<Value>,
+    ) -> Self {
         self.builder = self.builder.property(key, value);
         self
     }

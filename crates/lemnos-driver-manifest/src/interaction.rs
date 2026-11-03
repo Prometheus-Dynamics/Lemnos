@@ -1,8 +1,8 @@
 use crate::{ManifestError, ManifestResult};
-use alloc::collections::BTreeMap;
+
 use alloc::string::String;
 use alloc::string::ToString;
-use lemnos_core::{InteractionId, Value};
+use lemnos_core::{InteractionId, Value, ValueMap};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,7 @@ pub struct InteractionManifest {
     pub id: String,
     pub summary: String,
     pub kind: InteractionKind,
-    pub attributes: BTreeMap<String, Value>,
+    pub attributes: ValueMap,
 }
 
 impl InteractionManifest {
@@ -29,7 +29,7 @@ impl InteractionManifest {
             id: id.into(),
             summary: summary.into(),
             kind: InteractionKind::Standard,
-            attributes: BTreeMap::new(),
+            attributes: ValueMap::new(),
         }
     }
 
@@ -38,11 +38,15 @@ impl InteractionManifest {
             id: id.into(),
             summary: summary.into(),
             kind: InteractionKind::Custom,
-            attributes: BTreeMap::new(),
+            attributes: ValueMap::new(),
         }
     }
 
-    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn with_attribute(
+        mut self,
+        key: impl Into<lemnos_core::MapKey>,
+        value: impl Into<Value>,
+    ) -> Self {
         self.attributes.insert(key.into(), value.into());
         self
     }

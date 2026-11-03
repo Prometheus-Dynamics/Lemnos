@@ -1,9 +1,8 @@
 use lemnos_core::{
     CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceEvent, DeviceId, DeviceIssue,
-    DeviceLink, DeviceRelation, DeviceStateSnapshot, InterfaceKind, LemnosEvent, MatchHints,
-    OperationRecord, StateEvent, Value, ValueMap,
+    DeviceLink, DeviceRelation, DeviceStateSnapshot, InterfaceKind, LemnosEvent, MapKey,
+    MatchHints, OperationRecord, SmallMap, StateEvent, Value, ValueMap,
 };
-use std::collections::BTreeMap;
 use std::mem::size_of;
 
 pub(super) fn estimated_retained_event_bytes(event: &LemnosEvent) -> usize {
@@ -156,7 +155,7 @@ fn value_map_bytes(values: &ValueMap) -> usize {
         .sum()
 }
 
-fn string_map_bytes(values: &BTreeMap<String, String>) -> usize {
+fn string_map_bytes(values: &SmallMap<MapKey, String>) -> usize {
     values
         .iter()
         .map(|(key, value)| key.len() + value.len())

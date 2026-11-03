@@ -443,7 +443,7 @@ impl HwmonFanBoundDevice {
                 .channels
                 .iter()
                 .zip(values)
-                .map(|(c, raw)| (c.name.to_string(), l1::channel_value(c, raw)))
+                .map(|(c, raw)| (c.name.into(), l1::channel_value(c, raw)))
                 .collect();
             Value::from(map)
         } else {

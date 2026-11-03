@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use crate::small_map::{MapKey, SmallMap};
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -7,7 +7,7 @@ use ordered_float::OrderedFloat;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-pub type ValueMap = BTreeMap<String, Value>;
+pub type ValueMap = SmallMap<MapKey, Value>;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

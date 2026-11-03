@@ -1,4 +1,4 @@
-use crate::{IssueCode, TimestampMs, ValueMap};
+use crate::{IssueCode, MapKey, TimestampMs, ValueMap};
 use alloc::string::String;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ impl DeviceIssue {
 
     pub fn with_attribute(
         mut self,
-        key: impl Into<String>,
+        key: impl Into<MapKey>,
         value: impl Into<crate::Value>,
     ) -> Self {
         self.attributes.insert(key.into(), value.into());

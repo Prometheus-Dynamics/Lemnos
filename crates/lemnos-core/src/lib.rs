@@ -17,6 +17,7 @@ mod issue;
 #[cfg(feature = "rp1")]
 mod pio_i2c;
 mod request;
+mod small_map;
 mod state;
 mod time;
 mod value;
@@ -53,6 +54,7 @@ pub use request::{
     UartStopBits, UsbControlSetup, UsbControlTransfer, UsbDirection, UsbInterruptTransfer,
     UsbRecipient, UsbRequest, UsbRequestType, UsbResponse,
 };
+pub use small_map::{MapKey, SmallMap};
 pub use state::{
     Availability, DeviceHealth, DeviceLifecycleState, DeviceStateSnapshot, DeviceStatus,
     OperationRecord, OperationStatus,
