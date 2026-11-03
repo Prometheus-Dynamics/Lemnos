@@ -166,7 +166,7 @@ A stream's depth is its in-flight count, and its buffers are recycled, so no tra
 
 ## DFU firmware download
 
-`UsbDevice::dfu_download(interface, image, block_size)` is the DFU 1.1 sequence a boot ROM takes its firmware through: a DNLOAD per block (the block number in `wValue`), a GETSTATUS after each block until the device is idle (`bwPollTimeout` honoured), a zero-length DNLOAD, one GETSTATUS to start the manifest, then a reset. A disconnect during the manifest is the expected end. `UsbDevice::dfu_status(interface)` is the read-only GETSTATUS. `lemnos_usb::wait_for_device(vendor, product, timeout)` polls the listing for the re-enumerated identity; the location is kept, the IDs change. The interface must be claimed. Nothing names a product: the caller brings the image and the IDs. Host-tested against a simulated DFU device; see *Hardware results* for the boards.
+`UsbDevice::dfu_download(interface, image, block_size)` is the DFU 1.1 sequence a boot ROM takes its firmware through: a DNLOAD per block (the block number in `wValue`), a GETSTATUS after each block until the device is idle (`bwPollTimeout` honoured), a zero-length DNLOAD, one GETSTATUS (dfuIDLE, or the manifest states for a manifestation-tolerant device), then a reset. A disconnect during the manifest is the expected end. The block size must be the device's `wTransferSize` from its DFU functional descriptor (`dfu_transfer_size(descriptors)` reads it from the raw descriptors): a larger DNLOAD is not what the device accepts. The sequence follows the open-source loader's (`UsbDfuCommands::UpdateFirmware`). `UsbDevice::dfu_status(interface)` is the read-only GETSTATUS. `lemnos_usb::wait_for_device(vendor, product, timeout)` polls the listing for the re-enumerated identity; the location is kept, the IDs change. The interface must be claimed. Nothing names a product: the caller brings the image and the IDs. Host-tested against a simulated DFU device; see *Hardware results* for the boards.
 
 ## Feature gating
 
@@ -208,9 +208,18 @@ Other results:
 - `next_block_until`: the stream loop uses it with a 2 s deadline and saw no timeouts, so the `Ok(None)` path did not run on hardware. The interrupt read is a blocking `interrupt_read`.
 - The claim check (refused unclaimed transfers) is host-tested. The first control run on board #2, before the check existed, had its UVC requests refused by the kernel (EBUSY); nothing reached the device.
 
+## Coral firmware load (board #1, item 20)
+
+The image is `apex_latest_single_ep.bin` from the user's libedgetpu checkout (10783 bytes, sha256 `3b07311b…dc7f`), copied to board #1's `/tmp` and checked there. The Coral was at `1a6e:089a`, DFU state dfuIDLE (2), before the run. The DFU functional descriptor reads `bmAttributes` 0x07 (canDnload, canUpload, manifestation tolerant), `wDetachTimeOut` 1000 ms, `wTransferSize` 256 bytes, `bcdDFUVersion` 1.01.
+
+- First attempt: blocks of 4096 bytes, which is larger than `wTransferSize` (256). The first DNLOAD was accepted, and the GETSTATUS after it timed out after 5 s (`USBDEVFS_CONTROL` failed with `-110`, `ETIMEDOUT`, on the GETSTATUS). The kernel log shows nothing else from the device. The oversized block is the one difference from the libedgetpu sequence that I can identify. Whether it caused the hang is not established.
+- Reset (`USBDEVFS_RESET` through `usb_probe reset`): the device disconnected. Its descriptor reads failed (`device descriptor read/64, error -110`, `device not accepting address`), and it was gone from the bus. One reset, then about two minutes of polling: no enumeration (`unable to enumerate USB device` on `usb1-port1`).
+- **Result:** no `18d1:9302` re-enumeration. The Coral is not on the bus, and the firmware load did not complete. The loader was not retried (it would only repeat the same device fault). The brief's expectation (the device stays at `18d1:9302` until power-cycled) is not what happened: the device has to be power-cycled to be seen again at all. The next step is a physical power cycle of the Coral, by the user. Then `usb_probe dfu-status 1-1` to see the state, and a retry with the descriptor's `wTransferSize` (the probe does this when no block size is given).
+- The webcam on board #1 was not touched by these runs: it is bound to uvcvideo and `video8`, `video9` are present.
+
 ## Blocked on hardware
 
-- **Coral firmware load (item 20).** No `apex_latest*` image is on either board, and a time-boxed search of the repo tree on this host did not finish (HDD). The DFU download is written and host-tested; it has not run on a board. After a load the Coral stays at `18d1:9302` until it is power-cycled.
+- **Coral bulk (items 20, 21).** The bulk endpoints exist only after the firmware load, and the load did not complete (above). `usb_bulk_engine` (lemnos-linux, feature `usb`) is written; it ran only on the webcam, where it exits with "no bulk endpoint" (the skip path). The zero-length OUT, the bounded IN read and the cancel have not run on a device. No safe echo is known for this protocol; the plan is endpoint discovery, a claim, a zero-length OUT and an IN read with a timeout, nothing more.
 - **Bulk (items 20, 21).** Both webcams have no bulk endpoint, and the Coral has none before the firmware load. `UsbBulkEngine` (lemnos-linux) therefore has no hardware run.
 - **Isochronous allocation count.** Not measured: the allocator is not hooked, because the workspace forbids the `unsafe` a counting allocator needs.
 
