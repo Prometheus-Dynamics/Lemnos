@@ -76,10 +76,7 @@ pub fn run_validations(
             report,
         );
     } else {
-        report.skip(
-            "bosch_imu.sample",
-            "no BMI088_* target configured",
-        );
+        report.skip("bosch_imu.sample", "no BMI088_* target configured");
     }
 
     if let Some(config) = bmm150_config {
