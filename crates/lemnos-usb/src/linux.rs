@@ -47,6 +47,9 @@ pub(crate) struct Usbfs {
     next_tag: AtomicU64,
     /// Whether the kernel maps DMA buffers for this device (`USBDEVFS_CAP_MMAP`).
     mapped: bool,
+    /// The largest mapping asked for, in bytes: the kernel's usbfs memory limit
+    /// (`usbfs_memory_mb`, shared by every usbfs user). Larger buffers are heap.
+    mapping_limit: usize,
     /// The packet scratch of the reaping, kept between completions.
     scratch: Mutex<Vec<UrbPacket>>,
     /// Packet tables handed to outcomes, given back by the isochronous readers.
@@ -69,6 +72,7 @@ impl Usbfs {
             state: Mutex::new(State::default()),
             next_tag: AtomicU64::new(1),
             mapped,
+            mapping_limit: usbfs_memory_limit(),
             scratch: Mutex::new(Vec::new()),
             packet_tables: Spares::new(SPARE_PACKET_TABLES),
         }))
@@ -78,6 +82,7 @@ impl Usbfs {
     /// offers one, and the heap otherwise (also when a mapping fails).
     pub(crate) fn allocate(&self, len: usize) -> Storage {
         if self.mapped
+            && len <= self.mapping_limit
             && let Ok(buffer) = self.file.map_buffer(len)
         {
             return buffer;
@@ -354,6 +359,17 @@ impl Usbfs {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// The usbfs memory limit in bytes: `usbfs_memory_mb` (default 16 MiB) from the
+/// usbcore module parameters. A mapping over it cannot succeed, so it is heap.
+fn usbfs_memory_limit() -> usize {
+    const DEFAULT_MB: usize = 16;
+    std::fs::read_to_string("/sys/module/usbcore/parameters/usbfs_memory_mb")
+        .ok()
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MB)
+        .saturating_mul(1024 * 1024)
 }
 
 /// Waits for completions while transfers are in flight, then exits.
