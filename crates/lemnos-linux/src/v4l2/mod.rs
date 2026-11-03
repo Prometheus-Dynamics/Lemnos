@@ -6,6 +6,7 @@
 //! to the consumer.
 
 pub mod m2m;
+pub mod request;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -62,8 +63,9 @@ pub fn find_m2m(driver: &str) -> io::Result<Option<(PathBuf, Capability)>> {
 
 pub use lemnos_linux_sys::v4l2::{
     BUF_CAP_SUPPORTS_DMABUF, BUF_FLAG_BFRAME, BUF_FLAG_ERROR, BUF_FLAG_KEYFRAME, BUF_FLAG_LAST,
-    BUF_FLAG_PFRAME, BufType, BufferInfo, CAP_VIDEO_M2M, CAP_VIDEO_M2M_MPLANE, CID_BG_COLOR,
-    CID_HFLIP, CID_ROTATE, CID_VFLIP, Capability, DEC_CMD_STOP, Dequeued, ENC_CMD_STOP, EVENT_EOS,
-    EVENT_SOURCE_CHANGE, Event, Format, FormatDesc, MAX_PLANES, Memory, PixFormat, PixFormatMplane,
-    PlaneFormat, PlaneInfo, PlaneMemory, QueuePlane, Rect, Requested, fourcc,
+    BUF_FLAG_PFRAME, BUF_FLAG_REQUEST_FD, BufType, BufferInfo, CAP_VIDEO_M2M, CAP_VIDEO_M2M_MPLANE,
+    CID_BG_COLOR, CID_HFLIP, CID_ROTATE, CID_VFLIP, CTRL_WHICH_REQUEST_VAL, Capability,
+    DEC_CMD_STOP, Dequeued, ENC_CMD_STOP, EVENT_EOS, EVENT_SOURCE_CHANGE, Event, ExtControl,
+    ExtValue, Format, FormatDesc, MAX_PLANES, Memory, PixFormat, PixFormatMplane, PlaneFormat,
+    PlaneInfo, PlaneMemory, QueuePlane, Rect, Requested, fourcc,
 };

@@ -542,7 +542,10 @@ mod tests {
     fn a_cma_heap_is_capped_by_its_free_pool() {
         let text = "MemAvailable:    4000000 kB\nCmaFree:           65536 kB\n";
         for name in ["linux,cma", "default_cma_region"] {
-            assert_eq!(heap_capacity_from_meminfo(name, text).unwrap(), 65536 * 1024);
+            assert_eq!(
+                heap_capacity_from_meminfo(name, text).unwrap(),
+                65536 * 1024
+            );
         }
     }
 

@@ -16,6 +16,7 @@ pub mod gpio;
 pub mod i2c;
 pub mod inotify;
 mod ioctl;
+pub mod media;
 pub mod mmap;
 pub mod netlink;
 pub mod poll;

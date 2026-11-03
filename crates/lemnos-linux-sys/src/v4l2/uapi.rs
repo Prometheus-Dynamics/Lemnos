@@ -232,6 +232,31 @@ pub(crate) struct Selection {
 // SAFETY: integers only.
 unsafe impl Pod for Selection {}
 
+/// The kernel's `struct v4l2_ext_control`, which the header packs (20 bytes):
+/// a scalar control keeps its value in `value`'s low four bytes, a compound
+/// control points `value` at a payload of `size` bytes.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub(crate) struct ExtControl {
+    pub id: u32,
+    pub size: u32,
+    pub reserved: u32,
+    pub value: u64,
+}
+
+/// The kernel's `struct v4l2_ext_controls` (32 bytes on 64-bit): the controls
+/// of one `S_EXT_CTRLS`, in the current state (`which` 0) or in a request
+/// (`which` `V4L2_CTRL_WHICH_REQUEST_VAL`, with `request_fd`).
+#[repr(C)]
+pub(crate) struct ExtControls {
+    pub which: u32,
+    pub count: u32,
+    pub error_idx: u32,
+    pub request_fd: i32,
+    pub reserved: u32,
+    pub controls: *mut ExtControl,
+}
+
 /// `VIDIOC_QUERYCAP`.
 pub(crate) const QUERYCAP: u32 = ior::<Capability>(V, 0);
 /// `VIDIOC_ENUM_FMT`.
@@ -270,6 +295,8 @@ pub(crate) const DQEVENT: u32 = ior::<Event>(V, 89);
 pub(crate) const G_SELECTION: u32 = iowr::<Selection>(V, 94);
 /// `VIDIOC_S_SELECTION`.
 pub(crate) const S_SELECTION: u32 = iowr::<Selection>(V, 95);
+/// `VIDIOC_S_EXT_CTRLS`.
+pub(crate) const S_EXT_CTRLS: u32 = iowr::<ExtControls>(V, 72);
 
 /// Reads a native-endian `u32` at `offset` of a byte array.
 pub(crate) fn get_u32(bytes: &[u8], offset: usize) -> u32 {

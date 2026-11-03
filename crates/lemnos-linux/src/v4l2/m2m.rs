@@ -58,7 +58,10 @@ use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::poll::{self, PollFd};
 use lemnos_linux_sys::v4l2 as sys;
 
-use super::{BufType, Capability, Dequeued, Event, Format, Memory, PlaneMemory, QueuePlane, Rect};
+use super::request::Request;
+use super::{
+    BufType, Capability, Dequeued, Event, ExtControl, Format, Memory, PlaneMemory, QueuePlane, Rect,
+};
 
 /// A source-change event: the stream's format changed. A decoder reports a new
 /// coded size this way (see [`M2mSession::take_source_change`]).
@@ -482,6 +485,42 @@ impl M2mSession {
         )?;
         self.output.queued |= 1 << index;
         Ok(())
+    }
+
+    /// Queues source buffer `index` as part of `request` (a stateless codec's
+    /// frame): the device runs it when the request is queued. The buffer comes
+    /// back by [`Self::dequeue_output`] once the request has completed. Sets
+    /// the request's controls first with [`Self::set_request_controls`].
+    pub fn queue_output_in_request(
+        &mut self,
+        index: u32,
+        planes: &[QueuePlane<'_>],
+        timestamp: Duration,
+        request: &Request,
+    ) -> io::Result<()> {
+        self.output.check_queueable(index, planes)?;
+        sys::qbuf_in_request(
+            self.file.as_fd(),
+            self.output.buf_type,
+            self.output.memory,
+            index,
+            planes,
+            timestamp,
+            request.as_fd(),
+        )?;
+        self.output.queued |= 1 << index;
+        Ok(())
+    }
+
+    /// Sets controls in `request` (`VIDIOC_S_EXT_CTRLS` on this session's
+    /// device, with the request's values): they apply when the request runs.
+    /// Controls are per file handle, so the session's descriptor is the one set.
+    pub fn set_request_controls(
+        &self,
+        request: &Request,
+        controls: &[ExtControl<'_>],
+    ) -> io::Result<()> {
+        sys::s_ext_ctrls(self.file.as_fd(), Some(request.as_fd()), controls)
     }
 
     /// Queues destination buffer `index` with its planes, for the device to

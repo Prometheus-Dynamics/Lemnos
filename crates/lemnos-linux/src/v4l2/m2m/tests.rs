@@ -5,7 +5,9 @@
 use super::*;
 #[cfg(feature = "dma")]
 use crate::dma::{Access, DmaHeap};
-use crate::v4l2::{CID_HFLIP, CID_VFLIP, PixFormat, PixFormatMplane, Rect, fourcc};
+use crate::v4l2::{
+    CID_HFLIP, CID_VFLIP, ExtControl, ExtValue, PixFormat, PixFormatMplane, Rect, fourcc,
+};
 use std::os::fd::AsFd;
 
 /// A queue with no device behind it, for the bookkeeping checks.
@@ -1049,4 +1051,169 @@ fn an_unknown_control_is_refused() {
     let mut s = M2mSession::open(&path, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
     assert!(s.set_control(0x0098_ffff, 1).is_err());
     assert!(s.control(0x0098_ffff).is_err());
+}
+
+/// The node whose sysfs name is `name` (vicodec's stateless decoder, say).
+fn node_by_name(name: &str) -> Option<std::path::PathBuf> {
+    let mut nodes: Vec<_> = std::fs::read_dir("/dev")
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("video"))
+        })
+        .collect();
+    nodes.sort();
+    nodes.into_iter().find(|path| {
+        let Some(file) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        std::fs::read_to_string(format!("/sys/class/video4linux/{file}/name"))
+            .is_ok_and(|n| n.trim() == name)
+    })
+}
+
+/// `V4L2_CID_STATELESS_FWHT_PARAMS`: the codec base plus 100.
+const FWHT_PARAMS_CID: u32 = 0x00a4_0900 + 100;
+
+/// The eight frame parameters of a vicodec frame header (`fwht_cframe_hdr`,
+/// big-endian on the wire): version, width, height, flags, colorspace,
+/// transfer function, YCbCr encoding and quantization.
+fn fwht_header(frame: &[u8]) -> Option<[u32; 8]> {
+    if frame.len() < 44 {
+        return None;
+    }
+    let be = |at: usize| u32::from_be_bytes(frame[at..at + 4].try_into().unwrap());
+    Some([8, 12, 16, 20, 24, 28, 32, 36].map(be))
+}
+
+/// The bytes of `struct v4l2_ctrl_fwht_params`: a 64-bit reference timestamp
+/// (zero for an intra frame), then the eight header fields in native order.
+fn fwht_params(h: [u32; 8]) -> [u8; 40] {
+    let mut out = [0u8; 40];
+    for (i, field) in h.iter().enumerate() {
+        out[8 + 4 * i..12 + 4 * i].copy_from_slice(&field.to_ne_bytes());
+    }
+    out
+}
+
+/// A stateless decode through a request: the frame's parameters are a control
+/// in the request, the coded frame is queued in it, the request runs, and the
+/// decoded frame and the source buffer come back. Skipped where vicodec's
+/// stateless node or its media device is absent.
+#[test]
+fn a_stateless_frame_decodes_through_a_request() {
+    use crate::v4l2::request::{Request, media_device_for};
+    let Some(coded) = vicodec_encode(640, 360, 1) else {
+        return skip_note("no vicodec encoder");
+    };
+    let frame = &coded[0];
+    let Some(h) = fwht_header(frame) else {
+        panic!("the encoder's frame has no header");
+    };
+    let (w, hgt) = (h[1], h[2]);
+    let Some(path) = node_by_name("stateless-decoder") else {
+        return skip_note("no vicodec stateless-decoder node");
+    };
+    let Some(media) = media_device_for(&path).unwrap() else {
+        return skip_note("the stateless node has no media device");
+    };
+    let fwht = Format::Single(PixFormat {
+        width: w,
+        height: hgt,
+        pixelformat: fourcc(b"SFWH"),
+        size_image: w * hgt * 3,
+        ..Default::default()
+    });
+    let yuv = Format::Single(PixFormat {
+        width: w,
+        height: hgt,
+        pixelformat: fourcc(b"YU12"),
+        bytes_per_line: w,
+        size_image: w * hgt * 3 / 2,
+        ..Default::default()
+    });
+    let out = QueueSetup {
+        format: fwht,
+        memory: Memory::Mmap,
+        buffers: 2,
+        crop: None,
+    };
+    let cap = QueueSetup {
+        format: yuv,
+        memory: Memory::Mmap,
+        buffers: 2,
+        crop: None,
+    };
+    let mut s = M2mSession::open(&path, out, cap).expect("a stateless decoder session");
+    for i in 0..s.capture_buffers() {
+        s.queue_capture(i, &plane(0)).unwrap();
+    }
+    s.stream_on().unwrap();
+
+    let req = Request::allocate(File::open(&media).unwrap()).expect("a request");
+    let params = fwht_params(h);
+    s.set_request_controls(
+        &req,
+        &[ExtControl {
+            id: FWHT_PARAMS_CID,
+            value: ExtValue::Bytes(&params),
+        }],
+    )
+    .expect("the frame's parameters are set in the request");
+
+    let index = s.free_output().expect("a free source buffer");
+    // A stateless decoder takes the frame's data after its header: the header's
+    // fields came in the request's parameters. With the header in the buffer the
+    // request fails in the driver (BUF_FLAG_ERROR on both buffers).
+    let payload = &frame[44..];
+    s.output_plane_mut(index, 0).unwrap()[..payload.len()].copy_from_slice(payload);
+    s.queue_output_in_request(index, &plane(payload.len() as u32), Duration::ZERO, &req)
+        .expect("the coded frame is queued in the request");
+    req.queue().expect("the request queues");
+    assert!(
+        req.wait(Some(Duration::from_secs(5))).unwrap(),
+        "the request completes"
+    );
+
+    let source = s
+        .dequeue_output()
+        .unwrap()
+        .expect("the source buffer returns with the completed request");
+    assert_eq!(source.index, index);
+    let decoded = s
+        .wait(
+            Ready {
+                capture: true,
+                ..Ready::default()
+            },
+            Some(Duration::from_secs(5)),
+        )
+        .unwrap();
+    assert!(decoded.capture, "a decoded frame is ready");
+    let done = s.dequeue_capture().unwrap().expect("a decoded frame");
+    assert_eq!(
+        done.flags & sys::BUF_FLAG_ERROR,
+        0,
+        "the frame decodes without error"
+    );
+    assert_eq!(
+        done.bytes_used[0],
+        w * hgt * 3 / 2,
+        "I420 of the frame's size"
+    );
+    let luma = &s.capture_plane(done.index, 0).unwrap()[..w as usize * hgt as usize];
+    assert!(
+        luma.iter().any(|&b| b != 0),
+        "the decoded luma is not blank"
+    );
+    s.queue_capture(done.index, &plane(0)).unwrap();
+    req.reinit().expect("a completed request reinitialises");
+    s.stream_off().unwrap();
+}
+
+fn skip_note(reason: &str) {
+    eprintln!("skipped: {reason}");
 }

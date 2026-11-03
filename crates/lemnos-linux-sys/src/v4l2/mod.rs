@@ -47,6 +47,12 @@ pub const BUF_FLAG_ERROR: u32 = 0x0000_0040;
 /// `V4L2_BUF_FLAG_LAST`: the last buffer of a drained stream.
 pub const BUF_FLAG_LAST: u32 = 0x0010_0000;
 
+/// `V4L2_BUF_FLAG_REQUEST_FD`: the buffer belongs to the request in `request_fd`.
+pub const BUF_FLAG_REQUEST_FD: u32 = 0x0080_0000;
+
+/// `V4L2_CTRL_WHICH_REQUEST_VAL`: controls of a request, not of the device.
+pub const CTRL_WHICH_REQUEST_VAL: u32 = 0x0f01_0000;
+
 /// `V4L2_EVENT_EOS`: the stream ended (after a drain).
 pub const EVENT_EOS: u32 = 2;
 /// `V4L2_EVENT_CTRL`.
@@ -584,6 +590,75 @@ fn rect_of(raw: &uapi::Selection) -> Rect {
     }
 }
 
+/// A control's value in an ext-controls call: a scalar, or a compound payload
+/// (the bytes of the control's struct, copied by the kernel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtValue<'a> {
+    /// A scalar (an integer or menu index).
+    Int(i32),
+    /// A compound control's payload, `size` bytes of its struct.
+    Bytes(&'a [u8]),
+}
+
+/// One control to set: its id and value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExtControl<'a> {
+    /// The control's id (`V4L2_CID_*`).
+    pub id: u32,
+    /// Its value.
+    pub value: ExtValue<'a>,
+}
+
+/// Sets `controls` on `fd` (`VIDIOC_S_EXT_CTRLS`). With `request`, the values
+/// are the request's (`which` [`CTRL_WHICH_REQUEST_VAL`]) and apply when the
+/// request runs; without it they are the device's current values. On failure
+/// the error names the index of the control that was refused.
+pub fn s_ext_ctrls(
+    fd: BorrowedFd<'_>,
+    request: Option<BorrowedFd<'_>>,
+    controls: &[ExtControl<'_>],
+) -> io::Result<()> {
+    let mut raw: Vec<uapi::ExtControl> = controls
+        .iter()
+        .map(|c| match c.value {
+            ExtValue::Int(v) => uapi::ExtControl {
+                id: c.id,
+                size: 0,
+                reserved: 0,
+                value: u64::from(v as u32),
+            },
+            ExtValue::Bytes(bytes) => uapi::ExtControl {
+                id: c.id,
+                size: bytes.len() as u32,
+                reserved: 0,
+                value: bytes.as_ptr() as u64,
+            },
+        })
+        .collect();
+    let mut arg = uapi::ExtControls {
+        which: if request.is_some() {
+            CTRL_WHICH_REQUEST_VAL
+        } else {
+            0
+        },
+        count: raw.len() as u32,
+        error_idx: 0,
+        request_fd: request.map_or(-1, |r| r.as_raw_fd()),
+        reserved: 0,
+        controls: raw.as_mut_ptr(),
+    };
+    // SAFETY: `S_EXT_CTRLS` takes a `v4l2_ext_controls` whose `controls` array
+    // (`raw`) and any payload bytes (borrowed by `controls`) stay alive and
+    // unmoved for the call; the kernel reads them and writes only `error_idx`.
+    match unsafe { ioctl_ptr(fd, uapi::S_EXT_CTRLS, &raw mut arg) } {
+        Ok(_) => Ok(()),
+        Err(e) => Err(io::Error::new(
+            e.kind(),
+            format!("S_EXT_CTRLS refused control {}: {e}", arg.error_idx),
+        )),
+    }
+}
+
 /// Asks for `count` buffers of `memory` on a queue (`VIDIOC_REQBUFS`). Asking
 /// for 0 frees the queue's buffers.
 pub fn reqbufs(
@@ -683,11 +758,49 @@ pub fn qbuf(
     planes: &[QueuePlane<'_>],
     timestamp: Duration,
 ) -> io::Result<()> {
+    qbuf_with(fd, buf_type, memory, index, planes, timestamp, None)
+}
+
+/// Queues buffer `index` as part of a request: the device runs it when the
+/// request is queued (`MEDIA_REQUEST_IOC_QUEUE`). Otherwise as [`qbuf`].
+pub fn qbuf_in_request(
+    fd: BorrowedFd<'_>,
+    buf_type: BufType,
+    memory: Memory,
+    index: u32,
+    planes: &[QueuePlane<'_>],
+    timestamp: Duration,
+    request: BorrowedFd<'_>,
+) -> io::Result<()> {
+    qbuf_with(
+        fd,
+        buf_type,
+        memory,
+        index,
+        planes,
+        timestamp,
+        Some(request),
+    )
+}
+
+fn qbuf_with(
+    fd: BorrowedFd<'_>,
+    buf_type: BufType,
+    memory: Memory,
+    index: u32,
+    planes: &[QueuePlane<'_>],
+    timestamp: Duration,
+    request: Option<BorrowedFd<'_>>,
+) -> io::Result<()> {
     let mut raw = uapi::Buffer::zeroed();
     raw.index = index;
     raw.buf_type = buf_type as u32;
     raw.memory = memory as u32;
     raw.timestamp = timeval(timestamp);
+    if let Some(request) = request {
+        raw.flags |= BUF_FLAG_REQUEST_FD;
+        raw.request_fd = request.as_raw_fd();
+    }
     if buf_type.is_multiplanar() {
         checked_planes(planes.len() as u32)?;
         let mut kernel_planes = [uapi::Plane::zeroed(); MAX_PLANES];
