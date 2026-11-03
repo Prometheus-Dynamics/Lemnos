@@ -140,6 +140,7 @@ dependencies = [
  "lemnos-device",
  "lemnos-drivers-ws2812",
  "lemnos-hal",
+ "lemnos-linux-sys",
 ]
 
 [[package]]
