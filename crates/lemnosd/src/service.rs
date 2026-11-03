@@ -147,6 +147,9 @@ mod service_raw;
 #[path = "service_fusion.rs"]
 mod service_fusion;
 
+#[path = "service_fan.rs"]
+mod service_fan;
+
 #[path = "service_calibration.rs"]
 mod service_calibration;
 
@@ -187,6 +190,8 @@ pub struct Service {
     state_dir: Option<PathBuf>,
     /// The orientation fusion devices built so far (see `fusion.rs`).
     fusions: Vec<Fusion>,
+    /// The fan controllers (`[[composites]]`, see `service_fan.rs`).
+    fan_loops: Vec<service_fan::FanLoop>,
     /// The fusion devices whose output changed on a sample (reused).
     fusion_changed: Vec<usize>,
     calibration_dir: PathBuf,
@@ -251,11 +256,15 @@ impl Service {
             workers: Workers::new()?,
             state_dir: config.state_dir.clone(),
             fusions: Vec::new(),
+            fan_loops: Vec::new(),
             fusion_changed: Vec::new(),
             calibration_dir: config.calibration_dir,
             next_calibration_ms: 0,
         };
         service.build_devices(now_ms);
+        service.fan_loops = service
+            .build_fan_loops()
+            .map_err(|reason| ServiceError::Board(BoardError::Invalid(vec![reason])))?;
         Ok(service)
     }
 
@@ -1755,6 +1764,7 @@ impl Service {
         self.poll_looks(now);
         self.poll_calibration(now);
         self.power_tick(now);
+        self.fan_tick(now);
         self.render_lights(now);
         self.send_frames(now);
         self.send_edges();

@@ -29,6 +29,7 @@ extern crate alloc;
 pub mod asynch;
 pub mod calibration;
 pub mod erased;
+pub mod fan_control;
 pub mod fixed;
 pub mod gpio;
 pub mod kernel;

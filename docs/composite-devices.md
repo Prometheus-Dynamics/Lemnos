@@ -1,9 +1,48 @@
 # Composite devices
 
-Status: **design only, not implemented.** The user has not decided whether to build this;
-nothing in the code depends on it. [system-service.md](system-service.md) leaves room for it
+Status: **the fan controller is built** (`lemnos_device::fan_control`, `lemnos-board`'s
+`[[composites]]`, `lemnosd`'s `service_fan.rs`), host-tested, and run once on board #1 under the
+lemnosd lock (see "Built" below). The generic `Composite` trait, the other uses and the
+persisted tuning are still design. [system-service.md](system-service.md) leaves room for it
 in `lemnosd`. Builds on [compact-model.md](compact-model.md) and
 [board-definition.md](board-definition.md).
+
+## Built
+
+- **The control law** (`crates/lemnos-device/src/fan_control.rs`, `no_std`, no allocation): a
+  curve per input (piecewise linear, clamped; `check_curve` refuses unordered, out-of-range or
+  too many points), the demand as the maximum over inputs, the floor, hysteresis (a peak is held
+  until the value has fallen the band), the slew limit on the way down (rising is immediate),
+  the spin-up kick (only with floor 0), and staleness (a missing or old required input forces
+  full duty and `Health::Degraded`). Host-tested (9 tests).
+- **The board entry** (`crates/lemnos-board/src/fan_controller.rs`): a top-level
+  `[[composites]]` table, separate from `[[devices]]` because the controller has no hardware
+  driver. Validation reports every problem at once: unknown driver, duplicate id, unknown config
+  key, input not `<device>.<channel>`, input device missing, curve invalid, outputs not exactly
+  `{ fan = <device> }`, and a fan whose `writers` do not admit `lemnosd.fan`.
+- **The host** (`crates/lemnosd/src/service_fan.rs`): once per second per controller it reads
+  each input's latest channel value and its age, steps the controller, and writes the fan's
+  `duty` (control 0). On its first step it sets `pwm_mode` to manual and records the fan's
+  hand-back (`before_write`), so `ExecStopPost` and a clean stop return the fan to the kernel.
+  A failed write hands the fan back and waits 10 s before taking it again.
+
+```toml
+[[composites]]
+id = "fan-control"
+driver = "fan-controller"
+inputs = { cpu = "cpu-thermal.temperature" }   # role -> <device>.<channel>
+outputs = { fan = "fan" }                      # role -> the fan device
+config = { floor = 300, hysteresis = 3000, slew = 50, kick_ms = 0, max_age_ms = 3000, curve_cpu = [[30000, 300], [60000, 600], [75000, 1000]] }
+```
+
+Units: duties are per-mille; `curve_<role>` values are in the input's unit (millidegrees for a
+thermal zone), so `50000` is 50 °C. Every input needs its `curve_<role>`.
+
+**Not built yet:** the generic `Composite` trait (the controller is a concrete type the host
+calls), a composite listed by `lemnos-ctl list` and in the runtime (it is a `[[composites]]`
+entry, not a device), the status and the events it would report, the watchdog hook, persisted
+tuning (`/var/lib/lemnosd/overrides.toml`), live `curve.cpu.*` controls, `override`, and the
+other uses below.
 
 ## What a composite device is
 
