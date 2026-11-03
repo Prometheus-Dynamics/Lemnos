@@ -7,18 +7,3 @@ file	CHANGELOG.md	release history: names of past releases and their products
 file	docs/provenance.md	record of where generic code came from and the cross-repo migration
 file	scripts/check-names.sh	the checker's own product-name list
 file	scripts/check-names.allow	this allowlist
-file	crates/lemnosd/tests/fixtures/*	copy of the device package's generated board definition, pinned to its source rev in the file header (the sim test runs it unchanged)
-file	packaging/systemd/lemnosd.service	LEFT FOR USER: Before= names the client units; move to the image's drop-ins
-#
-# LEFT FOR USER: the built-in look writers are the client names "atlas" (the
-# device manager), "lemnos-ctl" and "orion:*" (crates/lemnosd/src/service.rs).
-# Moving them into board configuration changes who may write looks on deployed
-# boards, so it waits for a decision. The files that test or document this
-# policy keep the literal name:
-scoped	crates/lemnosd/src/service.rs	atlas	LEFT FOR USER: built-in look-writer policy, the manager's client name
-scoped	crates/lemnosd/tests/presets.rs	atlas	tests of the look-writer policy (client name)
-scoped	crates/lemnosd/tests/looks.rs	atlas	tests of the look-writer policy (client name)
-scoped	docs/looks.md	atlas	documents the look-writer policy and the manager's client name
-scoped	docs/board-definition.md	atlas	writers examples use the manager's client name (policy)
-scoped	docs/orion.md	atlas	writers example uses the manager's client name (policy)
-#

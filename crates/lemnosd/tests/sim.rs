@@ -386,14 +386,13 @@ fn led_frames_are_visible_through_the_frame_watch() {
     drop(sim);
 }
 
-/// The device package's board definition, a copy of the file the image ships
-/// (see the fixture's header for its source and rev), run unchanged in sim: its
-/// I2C selectors, the PIO bus, the ring, fan, thermal zone, switches and fusion.
+/// The sample board definition, run unchanged in sim: its I2C selectors, the PIO
+/// bus, the ring, fan, thermal zone, switches and fusion.
 #[test]
-fn runs_the_device_package_board_unchanged() {
+fn runs_the_sample_board_unchanged() {
     let (sim, mut client) = Sim::start_with_board(
-        "package",
-        include_str!("fixtures/device-board.toml"),
+        "sample",
+        include_str!("fixtures/sample-board.toml"),
         "format = \"lemnos.sim\"\nschema_version = 1\nspeed = 2.0\n",
     );
     let names: Vec<String> = client.list().unwrap().into_iter().map(|d| d.id).collect();

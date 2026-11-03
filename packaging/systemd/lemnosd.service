@@ -4,7 +4,8 @@
 # from lemnos.sysusers, and a board definition at /etc/lemnos/board.toml
 # (installed by the board's device package). Settings go in
 # /etc/default/lemnosd.env; local changes to this unit belong in drop-ins
-# (`systemctl edit lemnosd`). See packaging/README.md.
+# (`systemctl edit lemnosd`). Units that must start after lemnosd go in a
+# drop-in (packaging/systemd/lemnosd.service.d/order.conf.example). See packaging/README.md.
 
 [Unit]
 Description=Lemnos hardware service
@@ -12,7 +13,6 @@ Documentation=https://github.com/Prometheus-Dynamics/Lemnos/blob/dev/docs/system
 # Early: once the I2C, PIO, GPIO and hwmon drivers are bound, before the
 # services that use the hardware.
 After=systemd-modules-load.service systemd-udevd.service
-Before=helios-peripherals.service photonvision.service
 StartLimitIntervalSec=0
 
 [Service]
