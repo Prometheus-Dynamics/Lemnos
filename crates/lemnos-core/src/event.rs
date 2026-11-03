@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InventoryEvent {
-    Added(Box<DeviceDescriptor>),
+    /// Descriptors are shared (`Arc`), so a diff, the retained event log and
+    /// the subscribers hold one copy of each.
+    Added(Arc<DeviceDescriptor>),
     Changed {
-        previous: Box<DeviceDescriptor>,
-        current: Box<DeviceDescriptor>,
+        previous: Arc<DeviceDescriptor>,
+        current: Arc<DeviceDescriptor>,
     },
     Removed(DeviceId),
 }
@@ -62,8 +64,8 @@ mod tests {
     #[test]
     fn inventory_events_preserve_descriptor_data() {
         let descriptor = DeviceDescriptor::new("gpio0", InterfaceKind::Gpio).expect("descriptor");
-        let event = InventoryEvent::Added(Box::new(descriptor.clone()));
-        assert_eq!(event, InventoryEvent::Added(Box::new(descriptor)));
+        let event = InventoryEvent::Added(Arc::new(descriptor.clone()));
+        assert_eq!(event, InventoryEvent::Added(Arc::new(descriptor)));
     }
 
     #[test]

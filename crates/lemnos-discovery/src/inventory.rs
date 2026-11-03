@@ -3,6 +3,7 @@ use lemnos_core::{
     DeviceDescriptor, DeviceId, DeviceKind, InterfaceKind, InventoryEvent, TimestampMs,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InventorySnapshot {
@@ -112,10 +113,10 @@ impl InventorySnapshot {
 
         for (device_id, device) in &updated {
             match current.get(device_id) {
-                None => added.push((*device).clone()),
+                None => added.push(Arc::new((*device).clone())),
                 Some(previous) if *previous != *device => changed.push(ChangedDevice {
-                    previous: (*previous).clone(),
-                    current: (*device).clone(),
+                    previous: Arc::new((*previous).clone()),
+                    current: Arc::new((*device).clone()),
                 }),
                 Some(_) => {}
             }
@@ -135,15 +136,17 @@ impl InventorySnapshot {
     }
 }
 
+/// A device whose descriptor changed. Descriptors are shared (`Arc`) with
+/// the inventory events built from the diff, so each is copied once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedDevice {
-    pub previous: DeviceDescriptor,
-    pub current: DeviceDescriptor,
+    pub previous: Arc<DeviceDescriptor>,
+    pub current: Arc<DeviceDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InventoryDiff {
-    pub added: Vec<DeviceDescriptor>,
+    pub added: Vec<Arc<DeviceDescriptor>>,
     pub changed: Vec<ChangedDevice>,
     pub removed: Vec<DeviceId>,
 }
@@ -160,15 +163,15 @@ impl InventoryDiff {
             self.added
                 .iter()
                 .cloned()
-                .map(|device| InventoryEvent::Added(Box::new(device))),
+                .map(InventoryEvent::Added),
         );
         events.extend(
             self.changed
                 .iter()
                 .cloned()
                 .map(|change| InventoryEvent::Changed {
-                    previous: Box::new(change.previous),
-                    current: Box::new(change.current),
+                    previous: change.previous,
+                    current: change.current,
                 }),
         );
         events.extend(self.removed.iter().cloned().map(InventoryEvent::Removed));

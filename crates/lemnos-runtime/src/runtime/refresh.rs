@@ -1,10 +1,12 @@
 use super::operations::close_detached_bindings;
 use super::*;
 use crate::runtime::operations::DetachedBoundDevice;
+use lemnos_discovery::{EnrichmentReport, ProbeReport};
 use std::sync::Arc;
 
 pub(crate) struct PreparedRefreshCommit {
-    discovery: DiscoveryRunReport,
+    probe_reports: Vec<ProbeReport>,
+    enrichment_reports: Vec<EnrichmentReport>,
     mode: RefreshMode,
     probe_count: usize,
     started_at: std::time::Instant,
@@ -38,9 +40,9 @@ impl PreparedRefreshCommit {
                 RefreshMode::Full => runtime_warn!(
                     elapsed_ms = self.started_at.elapsed().as_millis() as u64,
                     probe_count = self.probe_count,
-                    probe_reports = self.discovery.probe_reports.len(),
+                    probe_reports = self.probe_reports.len(),
                     probe_failures = self.probe_failures,
-                    enrichment_reports = self.discovery.enrichment_reports.len(),
+                    enrichment_reports = self.enrichment_reports.len(),
                     enrichment_failures = self.enrichment_failures,
                     retained_prior_inventory = self.retained_prior_inventory,
                     snapshot_size = self.snapshot.len(),
@@ -54,9 +56,9 @@ impl PreparedRefreshCommit {
                 RefreshMode::Incremental => runtime_warn!(
                     elapsed_ms = self.started_at.elapsed().as_millis() as u64,
                     probe_count = self.probe_count,
-                    probe_reports = self.discovery.probe_reports.len(),
+                    probe_reports = self.probe_reports.len(),
                     probe_failures = self.probe_failures,
-                    enrichment_reports = self.discovery.enrichment_reports.len(),
+                    enrichment_reports = self.enrichment_reports.len(),
                     enrichment_failures = self.enrichment_failures,
                     retained_prior_inventory = self.retained_prior_inventory,
                     snapshot_size = self.snapshot.len(),
@@ -76,9 +78,9 @@ impl PreparedRefreshCommit {
             RefreshMode::Full => runtime_info!(
                 elapsed_ms = self.started_at.elapsed().as_millis() as u64,
                 probe_count = self.probe_count,
-                probe_reports = self.discovery.probe_reports.len(),
+                probe_reports = self.probe_reports.len(),
                 probe_failures = self.probe_failures,
-                enrichment_reports = self.discovery.enrichment_reports.len(),
+                enrichment_reports = self.enrichment_reports.len(),
                 enrichment_failures = self.enrichment_failures,
                 retained_prior_inventory = self.retained_prior_inventory,
                 snapshot_size = self.snapshot.len(),
@@ -92,9 +94,9 @@ impl PreparedRefreshCommit {
             RefreshMode::Incremental => runtime_info!(
                 elapsed_ms = self.started_at.elapsed().as_millis() as u64,
                 probe_count = self.probe_count,
-                probe_reports = self.discovery.probe_reports.len(),
+                probe_reports = self.probe_reports.len(),
                 probe_failures = self.probe_failures,
-                enrichment_reports = self.discovery.enrichment_reports.len(),
+                enrichment_reports = self.enrichment_reports.len(),
                 enrichment_failures = self.enrichment_failures,
                 retained_prior_inventory = self.retained_prior_inventory,
                 snapshot_size = self.snapshot.len(),
@@ -110,8 +112,8 @@ impl PreparedRefreshCommit {
         RuntimeRefreshReport {
             discovery: DiscoveryRunReport {
                 snapshot: self.snapshot,
-                probe_reports: self.discovery.probe_reports,
-                enrichment_reports: self.discovery.enrichment_reports,
+                probe_reports: self.probe_reports,
+                enrichment_reports: self.enrichment_reports,
             },
             diff: self.diff,
             rebinds,
@@ -175,7 +177,7 @@ impl Runtime {
 
     pub(crate) fn prepare_refresh_commit(
         &mut self,
-        discovery: DiscoveryRunReport,
+        mut discovery: DiscoveryRunReport,
         mode: RefreshMode,
         probe_count: usize,
         started_at: std::time::Instant,
@@ -184,8 +186,14 @@ impl Runtime {
         let probe_failures = discovery.probe_failure_count();
         let enrichment_failures = discovery.enrichment_failure_count();
         let retained_prior_inventory = matches!(mode, RefreshMode::Full) && probe_failures > 0;
+        // Built before the materialized snapshot is moved out below: it reads the
+        // snapshot's devices.
+        let full_index = match mode {
+            RefreshMode::Full => Some(ProbeInventoryIndex::from_run(&discovery)),
+            RefreshMode::Incremental => None,
+        };
         let next_inventory = match mode {
-            RefreshMode::Full => self.materialize_refresh_inventory(&discovery)?,
+            RefreshMode::Full => self.materialize_refresh_inventory(&mut discovery)?,
             RefreshMode::Incremental => self
                 .probe_inventory
                 .merge_snapshot(&self.inventory, &discovery)?,
@@ -197,17 +205,19 @@ impl Runtime {
         self.record_inventory_events(&diff);
         let detached = self.detach_invalidated_bindings(&diff, &invalidated_bindings);
         self.inventory = Arc::new(next_inventory);
-        match mode {
-            RefreshMode::Full => {
-                self.probe_inventory = ProbeInventoryIndex::from_run(&discovery);
-            }
-            RefreshMode::Incremental => {
-                self.probe_inventory.record_run(&discovery);
-            }
+        match full_index {
+            Some(index) => self.probe_inventory = index,
+            None => self.probe_inventory.record_run(&discovery),
         }
 
+        let DiscoveryRunReport {
+            probe_reports,
+            enrichment_reports,
+            ..
+        } = discovery;
         Ok(PreparedRefreshCommit {
-            discovery,
+            probe_reports,
+            enrichment_reports,
             mode,
             probe_count,
             started_at,
@@ -340,16 +350,19 @@ impl Runtime {
         report
     }
 
+    /// A full refresh's inventory. Without probe failures the run's snapshot
+    /// is the inventory, so it is moved out (cloned only if something else
+    /// still holds it) rather than copied device by device.
     fn materialize_refresh_inventory(
         &self,
-        discovery: &DiscoveryRunReport,
+        discovery: &mut DiscoveryRunReport,
     ) -> RuntimeResult<InventorySnapshot> {
         if discovery.has_probe_failures() {
             self.probe_inventory
                 .merge_snapshot(&self.inventory, discovery)
                 .map_err(RuntimeError::from)
         } else {
-            Ok((*discovery.snapshot).clone())
+            Ok(Arc::unwrap_or_clone(std::mem::take(&mut discovery.snapshot)))
         }
     }
 }
