@@ -2,7 +2,7 @@ use super::Runtime;
 use crate::{
     RuntimeEventCursor, RuntimeEventPoll, RuntimeEventRetentionStats, RuntimeEventSubscription,
 };
-use lemnos_core::{DeviceStateSnapshot, LemnosEvent, StateEvent};
+use lemnos_core::{DeviceStateSnapshot, InventoryEvent, LemnosEvent, StateEvent};
 use lemnos_discovery::InventoryDiff;
 use std::mem;
 use std::sync::Arc;
@@ -101,7 +101,21 @@ impl Runtime {
 
     pub(super) fn record_inventory_events(&mut self, diff: &InventoryDiff) {
         let prior_tail = self.event_tail_index();
-        for event in diff.events() {
+        // Pushed straight from the diff: an intermediate `Vec<InventoryEvent>`
+        // from `InventoryDiff::events` would link its own extend and map code.
+        for device in &diff.added {
+            let event = InventoryEvent::Added(Arc::clone(device));
+            self.push_retained_event(LemnosEvent::Inventory(Box::new(event)));
+        }
+        for change in &diff.changed {
+            let event = InventoryEvent::Changed {
+                previous: Arc::clone(&change.previous),
+                current: Arc::clone(&change.current),
+            };
+            self.push_retained_event(LemnosEvent::Inventory(Box::new(event)));
+        }
+        for device_id in &diff.removed {
+            let event = InventoryEvent::Removed(device_id.clone());
             self.push_retained_event(LemnosEvent::Inventory(Box::new(event)));
         }
         self.enforce_event_retention();
