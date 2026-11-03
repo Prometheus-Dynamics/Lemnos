@@ -3,8 +3,8 @@
 Status: implemented in `lemnos-linux` (feature `dma`) and `lemnos-bus` (the transfer
 interface); host-tested against the system dma-heap. Verified on the BCM2712 board (board #2,
 kernel 7.2.9-v8-16k, 16K pages): the three dma-heaps, sync-file fences from a real driver
-(DRM syncobj), and the SPI and I2C engines (numbers below). Not verified: a pending fence from
-a running producer. The RP1 DMAC engine is written (feature `rp1-dma`) and untested for transfers;
+(DRM syncobj), a pending fence from a running v3d job (2026-11-03), and the SPI and I2C engines
+(numbers below). The RP1 DMAC engine is written (feature `rp1-dma`) and untested for transfers;
 PCIe DMA does not exist yet (see "Planned").
 
 ## Scope
@@ -168,9 +168,31 @@ Fences (sync files, the kernel's fence path on this board):
 - `import_fence(Write, fence)` onto a `system` buffer succeeds; `export_fence(ReadWrite)` then
   reads back as signalled.
 - A plain pipe passed as a fence is refused with `InvalidInput`, not treated as "not signalled".
-- Pending fences were not reproduced. The same export on an unsignalled syncobj fails with
-  `EINVAL` on both `card0` and `renderD128`: a pending fence needs a submission (a v3d job with
-  an out-syncobj), which this pass did not build. So the "signals later" path is untested on board.
+- An unsignalled syncobj with no fence attached fails the export with `EINVAL` on both `card0` and
+  `renderD128`, so a fence must come from a submission.
+- Pending, verified 2026-11-03 on board #2 (`examples/v3d_pending_fence.rs`, five runs, v3d on
+  `renderD128`). A 4 MiB byte copy runs as 1024 TFU jobs, one row of 4096 bytes each, submitted in
+  order on one descriptor; the last carries the out-syncobj. The sync file exported straight after
+  the submits reads unsignalled in every run (9,300 to 11,100 unsignalled polls before it signals),
+  and it signals 4.9 to 5.0 ms after the first submit (run 1, with warm-up: 9.0 ms). The submits
+  themselves take 1.5 ms. All 4,194,304 bytes of the destination match the source in every run.
+  Untested: a job that fails, and a timeline syncobj.
+
+### v3d TFU job (`lemnos_linux_sys::v3d`)
+
+`DRM_IOCTL_V3D_SUBMIT_TFU` needs no shader. The uAPI header gives the struct and the handle order
+(output buffer first), but not the `icfg` bit fields, and no register reference was on the host.
+So the job's shape was found by a sweep on board #2, and the byte-for-byte copy is the check:
+
+- `icfg` 0 (and 1 to 16, 64, 128 as tried): the first output row holds the input's last row when
+  the job is given several rows, so the job is wrong for a copy as written.
+- `icfg` 32: the output's first row is the input's first row, copied forward.
+- The height in `ios` (`height << 16 | width`) is not honoured in the sweep: each job wrote one row,
+  `width` bytes long (one byte per element with `icfg` 32; tried with widths 64 to 1024 and heights
+  4 to 1024). A copy is therefore one job per row, `iia` and `ioa` advanced by the stride. With that
+  shape the copy is byte-exact.
+- In the sweep, every byte of the destination outside the written row stayed at its fill value.
+  No GPU reset, and the dmesg tail after the sweep had no `v3d` line.
 
 SPI (`SpidevEngine`): `/dev/spidev10.0` (`107d004000.spi`, the SoC SPI, DMA channels
 `dma1chan0/1`, no device in the board file). A zero-length write and a zero-length duplex both

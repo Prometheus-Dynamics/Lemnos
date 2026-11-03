@@ -12,6 +12,7 @@
 
 pub mod dma_buf;
 pub mod dma_heap;
+pub mod drm;
 pub mod gpio;
 pub mod i2c;
 pub mod inotify;
@@ -30,6 +31,7 @@ pub mod signal;
 pub mod spi;
 pub mod time;
 pub mod usbfs;
+pub mod v3d;
 pub mod v4l2;
 
 pub use ioctl::{ioc, ior, iow, iowr};

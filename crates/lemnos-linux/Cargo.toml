@@ -56,5 +56,9 @@ serialport = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["net"] }
 tracing = { workspace = true, optional = true }
 
+[[example]]
+name = "v3d_pending_fence"
+required-features = ["dma"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
