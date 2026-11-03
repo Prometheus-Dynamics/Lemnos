@@ -12,6 +12,7 @@ This directory holds repository-level documentation for the Lemnos workspace.
 - [composite-devices.md](composite-devices.md): design only: composite (virtual) devices, the fan controller and its failsafe
 - [board-definition.md](board-definition.md): board definitions (TOML/JSON), the built-in drivers, generating them, and adopting a board in an app
 - [looks.md](looks.md): LED looks: the blocks and their parameters, look files, built-in names, brightness, reloads and the `lemnos-ctl` and Rust APIs
+- [io-blocks.md](io-blocks.md): per-board IO hardware blocks (RP1 PIO with its program map, PWM, GPIO edges, DMA, buses): what each does, what Lemnos uses it for, and the plan
 - [dma.md](dma.md): DMA buffers (dma-heap allocation, dma-buf sync, mappings, sync-file fences) and the transfer interface for buses and DMA engines
 - [m2m.md](m2m.md): V4L2 memory-to-memory sessions (scalers, converters, codecs): queues, dma-buf import, drains and events
 - [hotplug.md](hotplug.md): device arrival and removal: the generic watcher (netlink, inotify, sysfs rescan), its filters and events, Lemnos's inventory watcher, and the camera-stack migration notes
