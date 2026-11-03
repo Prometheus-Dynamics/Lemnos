@@ -886,6 +886,15 @@ async fn connect_session(
         .watch_action_requests()
         .await
         .map_err(|e| e.to_string())?;
+    // The node's own id, from the session welcome: the records this bridge
+    // publishes carry `ORION_NODE_ID`, and Orion refuses a foreign node's records.
+    if watch.node_id().as_str() != config.node_id {
+        return Err(format!(
+            "ORION_NODE_ID `{}` is not this node's id `{}`; the provider records would be refused",
+            config.node_id,
+            watch.node_id().as_str()
+        ));
+    }
     let watch_reporter = watch.reporter();
     tokio::spawn(async move {
         loop {

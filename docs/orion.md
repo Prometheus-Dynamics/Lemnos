@@ -11,7 +11,7 @@ readings and status, and runs its actions on it (`set`, `restore`, `release`, `r
 look actions, and the calibration actions below). Raw GPIO, PWM, I2C and SPI stay direct to lemnosd
 and are not exposed here.
 
-Pinned against Orion `f8d767ac` (control protocol 5, the node the example board images ship), as
+Pinned against Orion `c8a173f` (control protocol 7), as
 `crates/lemnosd/Cargo.toml` pins it. The actions use the provider's `watch_action_requests`.
 
 ## Resources
@@ -201,3 +201,16 @@ which an image imports on top of `lemnosd.toml` when it runs Orion.
 
 - Raw GPIO, PWM, I2C and SPI: direct to lemnosd only.
 - `release` is the fan hand-back; on a device that is not a fan, lemnosd's answer is passed on as the outcome.
+
+## Protocol 7
+
+- Pinned to Orion `c8a173f` (control protocol 7). The bridge compiles unchanged against it. What
+  changed for it is the node's behaviour: observed state is not persisted by the node, so the
+  bridge republishes its resources and every value it knows on each
+  new session (`publish_all`), and a reconnection does the same.
+- The bridge's provider records carry `ORION_NODE_ID`. Orion refuses a provider or executor record
+  whose node id is not its own, so the bridge checks the node id the session welcome reports and
+  refuses to publish when they differ (`lemnosd/src/orion/bridge.rs`, `connect_session`).
+- Not used by the bridge, so not handled: `ActionState::Cancelled` (the bridge's actions are not
+  long-running jobs), blob push, `ReconcileReport::unsupported_runtime_count`.
+
