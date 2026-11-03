@@ -92,5 +92,140 @@ placement the loader makes.
    the kernel's PWM counter mode is not reachable from userspace. If the tach line is
    confirmed: first check `/dev/pio1` (second block) and then decide between a second
    block and a PWM counter driver. Do not free the I2C program's slots for it.
-5. Not in this pass: the K230D, Rockchip (RK3588S, RK3576, RK3566, RK3562) and RV1106
-   (Flame) IO and timer blocks. Each gets its own table when its board file lands.
+5. Done, untested on board: the K230D, Rockchip and RV1106 capability tables below, as code in
+   the `lemnos-soc` crate (`CHIPS`). Board files for those chips are not written (the boards'
+   pinouts are not here), so nothing runs on them yet.
+
+## Other chips (descriptors, untested on board)
+
+Each table below matches an `Entry` list in `crates/lemnos-soc/src/chips.rs` (`CHIPS`), where
+the addresses are. **Used** means code in the tree runs the capability on that chip (none yet);
+**Unused** means the block can do it and nothing does; **Impossible** means the block or its
+kernel interface cannot do it. Every chip here is untested on board, and nothing was booted or
+probed.
+
+Sources. The Rockchip and K230 rows come from the mainline device trees at torvalds/linux master
+`6628e7d4` (fetched 2026-11-02): `k230.dtsi`, `rk3588-base.dtsi` with `rk3588s.dtsi`,
+`rk3576.dtsi`, `rk356x-base.dtsi` with `rk3566.dtsi`, `rk3562.dtsi`. Register layouts come from
+the mainline drivers `pwm-rockchip.c` (the `rk3328-pwm` data), `timer-rockchip.c` (the rk3288
+layout) and `timer-clint.c`. A row the description does not give says so; the TRM is named in
+the chip's sources and was **not checked here** (no datasheet was downloaded).
+
+Shared facts, checked against the drivers:
+
+- Rockchip PWM (RK3562, RK3566, RK3588): the `rockchip,rk3328-pwm` layout, one channel per
+  0x10 register block. Counter 0x00, period 0x04, duty 0x08, control 0x0c. The mainline driver has
+  no capture operation, and sysfs exposes none, so **PWM input capture is impossible from the
+  kernel interfaces here**. A `/dev/mem` path would bypass the kernel and is not planned.
+- Rockchip timers (RK3576, RK3588): the rk3288 layout (control at 0x10). Their kernel driver owns
+  them. Lemnos reads time through the arch timer, which is what every timestamp uses.
+- Lemnos reads a Rockchip SAR ADC through IIO sysfs and a TSADC through the thermal zones, both
+  with the generic bindings (`lemnos-drivers-linux`), once a board names them. Buffered reads
+  need driver support that was not checked.
+
+### K230D (`k230.dtsi`; the K230D shares the K230 map as far as that description shows)
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| CLINT | CPU timer (`mtime`, `mtimecmp`), 27 MHz timebase | unused | the kernel's clocksource; layout `clint::` in `lemnos-soc` |
+| PLIC | interrupt routing, 208 sources | unused | kernel IRQs (no Lemnos path) |
+| UART x5 (`dw-apb-uart`, 0x91400000 + 0x1000 n) | serial | unused | `lemnos-drivers-uart` |
+| pinctrl, clk, rst | pin mux, clock tree, resets | unused | the board file's pin names (no runtime path) |
+| GPIO, PWM (output, input capture), timers, I2C, SPI, I2S, ADC, DMA, WDT | the vendor's IO | unused | the rows are not in `k230.dtsi`; the K230 TRM gives them (not checked here) |
+
+The K230's single C908 (`thead,c908`) and its RVV are in `k230.dtsi`. riscv64 lemnosd and lemnos-ctl
+already build (the `cross32` gate).
+
+### RK3588S (`rk3588-base.dtsi` with `rk3588s.dtsi`)
+
+The S description is `rk3588-base.dtsi` alone. `rk3588-extra.dtsi` adds PCIe 3.0 x4, x2 and
+PCIe 2.0, the GMAC, the HDMI RX, USB host 1, and I2S6, I2S7, I2S8 and I2S10. The S description
+leaves all of them out. Whether the S die has them is a TRM check.
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| GPIO x5 (`rockchip,gpio-bank`) | levels and edges | unused | gpio cdev (`lemnos-linux`), as on RP1 |
+| PWM x16 (`rk3588-pwm`, `rk3328-pwm` layout) | output | unused | sysfs pwm (`SysfsPwm`) |
+| PWM x16 | input capture | **impossible** (no capture in the driver or sysfs) | none; a kernel capture interface |
+| timer0 (`feae0000`, one channel) | bus timer | unused | the kernel's rockchip timer (no Lemnos path) |
+| arm generic timer | clocksource | used (by the kernel, under every Lemnos timestamp) | `clock_gettime(CLOCK_BOOTTIME)` |
+| WDT (`feaf0000`, DW) | watchdog | unused | `/dev/watchdog` |
+| I2C x9 | controllers | unused | `i2c-dev` (`/dev/i2c-N`) |
+| SPI x5 (sfc left out) | controllers | unused | `spidev` |
+| UART x10 | serial | unused | `lemnos-drivers-uart` |
+| I2S/TDM x7 (S description) | audio | unused | ALSA (none in Lemnos) |
+| SARADC (`fec10000`) | ADC | unused | IIO sysfs through `KernelDevice` |
+| TSADC (`fec00000`) | temperature | unused | `ThermalZone` |
+| DMA PL330 x3 | DMA | unused | dmaengine in the kernel; no user-space path |
+
+Cores as in `rk3588-base.dtsi`: 4 x Cortex-A76 and 4 x Cortex-A55.
+
+### RK3576 (`rk3576.dtsi`)
+
+The description has **no PWM and no I2S node** at this commit; those rows follow the TRM (not
+checked here). The rest are in the table.
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| GPIO x5 | levels and edges | unused | gpio cdev |
+| PWM (not in the description) | output, input capture | unused | sysfs pwm once a driver binds it; capture unknown (TRM) |
+| timer0 (`2acc0000`) | bus timer | unused | the kernel's rockchip timer |
+| arm generic timer | clocksource | used (by the kernel) | `clock_gettime(CLOCK_BOOTTIME)` |
+| WDT (`2ace0000`) | watchdog | unused | `/dev/watchdog` |
+| I2C x10 | controllers | unused | `i2c-dev` |
+| SPI x5 (sfc left out) | controllers | unused | `spidev` |
+| UART x12 | serial | unused | `lemnos-drivers-uart` |
+| I2S (not in the description) | audio | unused | ALSA (TRM, not checked) |
+| SARADC (`2ae00000`) | ADC | unused | IIO sysfs through `KernelDevice` |
+| TSADC (`2ae70000`) | temperature | unused | `ThermalZone` |
+| DMA PL330 x3 | DMA | unused | dmaengine in the kernel |
+
+Cores as in `rk3576.dtsi`: 4 x Cortex-A53 and 4 x Cortex-A72.
+
+### RK3566 (`rk356x-base.dtsi`, shared with the RK3568, with `rk3566.dtsi`)
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| GPIO x5 | levels and edges | unused | gpio cdev |
+| PWM x16 (`rk3568-pwm`, `rk3328-pwm` layout) | output | unused | sysfs pwm |
+| PWM x16 | input capture | **impossible** | none; a kernel capture interface |
+| arm generic timer | clocksource | used (by the kernel) | `clock_gettime(CLOCK_BOOTTIME)` |
+| WDT (`fe600000`) | watchdog | unused | `/dev/watchdog` |
+| I2C x6 | controllers | unused | `i2c-dev` |
+| SPI x4 (sfc left out) | controllers | unused | `spidev` |
+| UART x10 | serial | unused | `lemnos-drivers-uart` |
+| I2S/TDM x4 | audio | unused | ALSA |
+| PDM (`fe440000`) | digital microphones | unused | ALSA (a sensor board could use it) |
+| SARADC (`fe720000`) | ADC | unused | IIO sysfs through `KernelDevice` |
+| TSADC (`fe710000`) | temperature | unused | `ThermalZone` |
+| DMA PL330 x2 | DMA | unused | dmaengine in the kernel |
+
+Cores as in `rk356x-base.dtsi`: 4 x Cortex-A55. The description has no Rockchip timer node.
+
+### RK3562 (`rk3562.dtsi`)
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| GPIO x5 | levels and edges | unused | gpio cdev |
+| PWM x16 (`rk3562-pwm`, `rk3328-pwm` layout) | output | unused | sysfs pwm |
+| PWM x16 | input capture | **impossible** | none; a kernel capture interface |
+| arm generic timer | clocksource | used (by the kernel) | `clock_gettime(CLOCK_BOOTTIME)` |
+| WDT | watchdog | unused (no node in the description; TRM) | `/dev/watchdog` |
+| I2C x6 | controllers | unused | `i2c-dev` |
+| SPI x3 (sfc left out) | controllers | unused | `spidev` |
+| UART x10 | serial | unused | `lemnos-drivers-uart` |
+| I2S (not in the description) | audio | unused | ALSA (TRM, not checked) |
+| SARADC x2 (`ff730000`, `ffaa0000`) | ADC | unused | IIO sysfs through `KernelDevice` |
+| DMA PL330 x1 (`ff990000`) | DMA | unused | dmaengine in the kernel |
+
+Cores as in `rk3562.dtsi`: 4 x Cortex-A53.
+
+### RV1106 (no mainline description)
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| MCU (on-chip RISC-V core, beside the Cortex-A7) | runs firmware | unused | none: firmware, a loader and a message path would be needed (a remoteproc path is the kernel's way in; none was checked) |
+
+The rest of the RV1106 IO map is a datasheet check. `arch/arm/boot/dts/rockchip` has no RV1106
+description at this commit (it has rv1103b, rv1108, rv1109 and rv1126), so the RV1106 rows come from
+the Rockchip datasheet only.
