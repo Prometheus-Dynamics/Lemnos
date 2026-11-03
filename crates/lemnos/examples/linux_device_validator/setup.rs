@@ -1,5 +1,5 @@
-use crate::support::board_validator::config::{Bmi055Target, Bmm150Target, PowerTarget};
-use crate::support::board_validator::drivers::{Bmi055Config, Bmm150Config, PowerSensorConfig};
+use crate::support::board_validator::config::{Bmi088Target, Bmm150Target, PowerTarget};
+use crate::support::board_validator::drivers::{Bmi088Config, Bmm150Config, PowerSensorConfig};
 use crate::{linux_hwmon_fan, linux_led};
 use lemnos::core::{ConfiguredGpioSignal, DeviceId};
 use lemnos::prelude::Lemnos;
@@ -31,10 +31,10 @@ pub fn keep_example_support_symbols() {
         as fn(&Lemnos) -> Result<DeviceId, Box<dyn std::error::Error>>;
 }
 
-pub fn build_bmi055_config(
-    target: &Bmi055Target,
-) -> Result<Bmi055Config, Box<dyn std::error::Error>> {
-    let mut builder = Bmi055Config::builder()
+pub fn build_bmi088_config(
+    target: &Bmi088Target,
+) -> Result<Bmi088Config, Box<dyn std::error::Error>> {
+    let mut builder = Bmi088Config::builder()
         .bus(target.bus)
         .accel_address(target.accel_address)
         .gyro_address(target.gyro_address)

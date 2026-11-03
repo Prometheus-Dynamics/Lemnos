@@ -21,7 +21,7 @@ use std::env;
 use std::process::ExitCode;
 use support::board_validator::config::ValidatorConfig;
 use support::board_validator::drivers::{
-    Bmi055Config, Bmi055Driver, Bmm150Config, Bmm150Driver, PowerSensorConfig, PowerSensorDriver,
+    Bmi088Config, Bmi088Driver, Bmm150Config, Bmm150Driver, PowerSensorConfig, PowerSensorDriver,
 };
 use support::board_validator::report::ValidatorReport;
 
@@ -57,12 +57,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         .with_driver(linux_hwmon_fan::ExampleLinuxHwmonFanDriver)?
         .build();
 
-    let bmi055_config = config
-        .bmi055
+    let bmi088_config = config
+        .bmi088
         .as_ref()
-        .map(setup::build_bmi055_config)
+        .map(setup::build_bmi088_config)
         .transpose()?;
-    register_bmi055_driver(&mut lemnos, &bmi055_config)?;
+    register_bmi088_driver(&mut lemnos, &bmi088_config)?;
 
     let bmm150_config = config
         .bmm150
@@ -86,9 +86,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let spi_probe = backend.spi_probe();
     let uart_probe = backend.uart_probe();
     let usb_probe = backend.usb_probe();
-    let bmi055_probe = bmi055_config
+    let bmi088_probe = bmi088_config
         .clone()
-        .map(|config| Bmi055Config::configured_probe("validator-bmi055", vec![config]));
+        .map(|config| Bmi088Config::configured_probe("validator-bmi088", vec![config]));
     let bmm150_probe = bmm150_config
         .clone()
         .map(|config| Bmm150Config::configured_probe("validator-bmm150", vec![config]));
@@ -106,7 +106,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         &uart_probe,
         &usb_probe,
     ];
-    if let Some(probe) = &bmi055_probe {
+    if let Some(probe) = &bmi088_probe {
         probes.push(probe);
     }
     if let Some(probe) = &bmm150_probe {
@@ -121,7 +121,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     validation::run_validations(
         &mut lemnos,
         &config,
-        bmi055_config.as_ref(),
+        bmi088_config.as_ref(),
         bmm150_config.as_ref(),
         power_config.as_ref(),
         &mut report,
@@ -147,12 +147,12 @@ fn print_header(config: &ValidatorConfig) {
     println!();
 }
 
-fn register_bmi055_driver(
+fn register_bmi088_driver(
     lemnos: &mut Lemnos,
-    config: &Option<Bmi055Config>,
+    config: &Option<Bmi088Config>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(config) = config {
-        lemnos.register_driver(Bmi055Driver::from_configs([config.clone()]))?;
+        lemnos.register_driver(Bmi088Driver::from_configs([config.clone()]))?;
     }
     Ok(())
 }

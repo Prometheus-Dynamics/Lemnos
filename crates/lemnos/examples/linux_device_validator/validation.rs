@@ -4,7 +4,7 @@ use crate::inventory::{
 use crate::support::board_validator::config::{
     FanTarget, GpioReadTarget, LedTarget, SpiTarget, UsbInterfaceTarget, ValidatorConfig,
 };
-use crate::support::board_validator::drivers::{Bmi055Config, Bmm150Config, PowerSensorConfig};
+use crate::support::board_validator::drivers::{Bmi088Config, Bmm150Config, PowerSensorConfig};
 use crate::support::board_validator::report::ValidatorReport;
 use crate::{linux_hwmon_fan, linux_led};
 use lemnos::core::{
@@ -16,7 +16,7 @@ use lemnos::prelude::*;
 pub fn run_validations(
     lemnos: &mut Lemnos,
     config: &ValidatorConfig,
-    bmi055_config: Option<&Bmi055Config>,
+    bmi088_config: Option<&Bmi088Config>,
     bmm150_config: Option<&Bmm150Config>,
     power_config: Option<&PowerSensorConfig>,
     report: &mut ValidatorReport,
@@ -67,10 +67,10 @@ pub fn run_validations(
         report.skip("usb.interface", "no USB_TARGET configured");
     }
 
-    if let Some(config) = bmi055_config {
+    if let Some(config) = bmi088_config {
         validate_sensor_device(
             lemnos,
-            &config.logical_device_id().expect("validated BMI055 config"),
+            &config.logical_device_id().expect("validated BMI088 config"),
             "bosch_imu.sample",
             "sensor.imu.sample",
             report,
@@ -78,7 +78,7 @@ pub fn run_validations(
     } else {
         report.skip(
             "bosch_imu.sample",
-            "no BMI088_* or BMI055_* target configured",
+            "no BMI088_* or BMI088_* target configured",
         );
     }
 
@@ -107,7 +107,7 @@ pub fn run_validations(
     }
 
     if let Some(target) = config
-        .bmi055
+        .bmi088
         .as_ref()
         .and_then(|target| target.accel_interrupt.as_ref())
     {
@@ -115,7 +115,7 @@ pub fn run_validations(
     }
 
     if let Some(target) = config
-        .bmi055
+        .bmi088
         .as_ref()
         .and_then(|target| target.gyro_interrupt.as_ref())
     {

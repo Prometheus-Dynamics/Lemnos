@@ -7,9 +7,12 @@ use lemnos::core::{
 use lemnos::driver::{
     BoundDevice, CONFIG_ADDRESS, CONFIG_BUS, CustomInteraction, Driver, DriverBindContext,
     DriverError, DriverManifest, DriverMatch, DriverMatchLevel, DriverPriority, DriverResult,
-    I2cControllerIo, I2cControllerSession, SessionAccess, interaction_name,
+    I2cControllerSession, SessionAccess, interaction_name,
 };
 use lemnos::macros::ConfiguredDevice;
+use lemnos_bus::hal::HalI2cBus;
+use lemnos_drivers_ina2xx::{Config as InaConfig, Ina, Model};
+use lemnos_hal::HalError;
 use std::borrow::Cow;
 
 const POWER_SAMPLE_INTERACTION: &str = "sensor.power.sample";
@@ -55,14 +58,6 @@ struct PowerSensorBinding {
 }
 
 impl PowerSensorBinding {
-    fn current_lsb(&self) -> f64 {
-        self.max_current_a / 32_768.0
-    }
-
-    fn calibration(&self) -> u16 {
-        (0.00512_f64 / (self.current_lsb() * self.shunt_resistance_ohms)).round() as u16
-    }
-
     fn apply_state_config(&self, state: DeviceStateSnapshot) -> DeviceStateSnapshot {
         state
             .with_config(CONFIG_LABEL, self.label.clone())
@@ -260,6 +255,9 @@ impl PowerSensorSample {
     }
 }
 
+/// The chip layer: `lemnos-drivers-ina2xx` over the session. `configure_and_verify`
+/// checks the chip IDs and writes the chip's configuration and calibration (as
+/// the validator always did); `sample` converts one reading to SI units.
 struct PowerSensorIo<'a> {
     driver_id: &'a str,
     device: DeviceDescriptor,
@@ -282,133 +280,66 @@ impl<'a> PowerSensorIo<'a> {
         }
     }
 
-    fn configure_and_verify(&mut self) -> DriverResult<()> {
+    fn model(&self) -> Model {
         match self.binding.kind {
-            PowerSensorKind::Ina226 => self.configure_ina226(),
-            PowerSensorKind::Ina238 => self.configure_ina238(),
-            PowerSensorKind::Ina260 => self.verify_ina260(),
+            PowerSensorKind::Ina226 => Model::Ina226,
+            PowerSensorKind::Ina238 => Model::Ina238,
+            PowerSensorKind::Ina260 => Model::Ina260,
         }
+    }
+
+    fn chip(&mut self) -> DriverResult<Ina<HalI2cBus<'_, dyn I2cControllerSession + 'a>>> {
+        let model = self.model();
+        let config = InaConfig::new(
+            self.binding.shunt_resistance_ohms as f32,
+            self.binding.max_current_a as f32,
+        );
+        let address = self.binding.address as u8;
+        let driver_id = self.driver_id.to_string();
+        let device_id = self.device.id.clone();
+        let bus = HalI2cBus::new(&mut *self.controller);
+        Ina::new(bus, address, model, config).map_err(|e| DriverError::BindRejected {
+            driver_id,
+            device_id,
+            reason: e.0.to_string(),
+        })
+    }
+
+    fn configure_and_verify(&mut self) -> DriverResult<()> {
+        let (driver_id, device) = (self.driver_id, self.device.clone());
+        let mut chip = self.chip()?;
+        chip.init()
+            .map_err(|e| device_error(driver_id, &device, "configure the power sensor", &e))
     }
 
     fn sample(&mut self) -> DriverResult<PowerSensorSample> {
-        match self.binding.kind {
-            PowerSensorKind::Ina226 => self.sample_ina226(),
-            PowerSensorKind::Ina238 => self.sample_ina238(),
-            PowerSensorKind::Ina260 => self.sample_ina260(),
-        }
-    }
-
-    fn configure_ina226(&mut self) -> DriverResult<()> {
-        let calibration = self.binding.calibration();
-        let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-        let mut sensor = bus.target(self.binding.address);
-        sensor.write_u16_be(0x05, calibration)?;
-        sensor.write_u16_be(0x00, 0x4527)?;
-        Ok(())
-    }
-
-    fn configure_ina238(&mut self) -> DriverResult<()> {
-        let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-        let mut sensor = bus.target(self.binding.address);
-        sensor.write_u16_be(0x00, 0x0000)?;
-        sensor.write_u16_be(0x01, 0xFB6A)?;
-        sensor.write_u16_be(0x02, 0x4000)?;
-        sensor.write_u16_be(0x0B, 0x2000)?;
-        Ok(())
-    }
-
-    fn verify_ina260(&mut self) -> DriverResult<()> {
-        let manufacturer = {
-            let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-            let mut sensor = bus.target(self.binding.address);
-            sensor.read_u16_be(0xFE)?
-        };
-        if manufacturer != 0x5449 {
-            return Err(DriverError::BindRejected {
-                driver_id: self.driver_id.to_string(),
-                device_id: self.device.id.clone(),
-                reason: format!(
-                    "unexpected INA260 manufacturer id 0x{manufacturer:04x} (expected 0x5449)"
-                ),
-            });
-        }
-        Ok(())
-    }
-
-    fn sample_ina226(&mut self) -> DriverResult<PowerSensorSample> {
-        let (shunt_voltage, bus_voltage, current, power) = {
-            let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-            let mut sensor = bus.target(self.binding.address);
-            let shunt_voltage =
-                i16::from_be_bytes(sensor.read_u16_be(0x01)?.to_be_bytes()) as f64 * 2.5e-6_f64;
-            let bus_voltage = f64::from(sensor.read_u16_be(0x02)?) * 1.25e-3_f64;
-            let current = i16::from_be_bytes(sensor.read_u16_be(0x04)?.to_be_bytes()) as f64
-                * self.binding.current_lsb();
-            let power = f64::from(sensor.read_u16_be(0x03)?) * self.binding.current_lsb() * 25.0;
-            (shunt_voltage, bus_voltage, current, power)
-        };
-
+        let (driver_id, device) = (self.driver_id, self.device.clone());
+        let reading = self
+            .chip()?
+            .read_fixed()
+            .map_err(|e| device_error(driver_id, &device, "read the power sensor", &e))?;
         Ok(PowerSensorSample {
-            kind: PowerSensorKind::Ina226,
-            bus_voltage_v: bus_voltage,
-            shunt_voltage_v: shunt_voltage,
-            current_a: current,
-            power_w: power,
-            die_temperature_c: None,
+            kind: self.binding.kind,
+            bus_voltage_v: f64::from(reading.bus_voltage_uv) / 1e6,
+            shunt_voltage_v: f64::from(reading.shunt_voltage_nv) / 1e9,
+            current_a: reading.current_na as f64 / 1e9,
+            power_w: reading.power_nw as f64 / 1e9,
+            die_temperature_c: reading.die_temperature_mc.map(|mc| f64::from(mc) / 1000.0),
         })
     }
+}
 
-    fn sample_ina238(&mut self) -> DriverResult<PowerSensorSample> {
-        let (shunt_voltage, bus_voltage, current, power, die_temperature) = {
-            let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-            let mut sensor = bus.target(self.binding.address);
-            let shunt_voltage =
-                i16::from_be_bytes(sensor.read_u16_be(0x04)?.to_be_bytes()) as f64 * 5.0e-6_f64;
-            let bus_voltage = f64::from(sensor.read_u16_be(0x05)?) * 3.125e-3_f64;
-            let current = i16::from_be_bytes(sensor.read_u16_be(0x07)?.to_be_bytes()) as f64
-                * 4.0_f64
-                * 5.0e-6_f64
-                / self.binding.shunt_resistance_ohms;
-            let power_bytes = sensor.read_exact_block::<3>(0x08)?;
-            let power_raw = (u32::from(power_bytes[0]) << 16)
-                | (u32::from(power_bytes[1]) << 8)
-                | u32::from(power_bytes[2]);
-            let power =
-                f64::from(power_raw) * 4.0_f64 * 1.0e-6_f64 / self.binding.shunt_resistance_ohms;
-            let die_temperature =
-                (i16::from_be_bytes(sensor.read_u16_be(0x06)?.to_be_bytes()) >> 4) as f64 * 0.125;
-            (shunt_voltage, bus_voltage, current, power, die_temperature)
-        };
-
-        Ok(PowerSensorSample {
-            kind: PowerSensorKind::Ina238,
-            bus_voltage_v: bus_voltage,
-            shunt_voltage_v: shunt_voltage,
-            current_a: current,
-            power_w: power,
-            die_temperature_c: Some(die_temperature),
-        })
-    }
-
-    fn sample_ina260(&mut self) -> DriverResult<PowerSensorSample> {
-        let (bus_voltage, current, power) = {
-            let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-            let mut sensor = bus.target(self.binding.address);
-            let bus_voltage = f64::from(sensor.read_u16_be(0x02)?) * 0.00125_f64;
-            let current =
-                i16::from_be_bytes(sensor.read_u16_be(0x01)?.to_be_bytes()) as f64 * 0.00125_f64;
-            let power = f64::from(sensor.read_u16_be(0x03)?) * 0.01_f64;
-            (bus_voltage, current, power)
-        };
-
-        Ok(PowerSensorSample {
-            kind: PowerSensorKind::Ina260,
-            bus_voltage_v: bus_voltage,
-            shunt_voltage_v: current * 0.002_f64,
-            current_a: current,
-            power_w: power,
-            die_temperature_c: None,
-        })
+fn device_error<E: HalError>(
+    driver_id: &str,
+    device: &DeviceDescriptor,
+    action: &str,
+    error: &E,
+) -> DriverError {
+    DriverError::Device {
+        driver_id: driver_id.to_string(),
+        device_id: device.id.clone(),
+        action: action.to_string(),
+        kind: error.kind(),
     }
 }
 

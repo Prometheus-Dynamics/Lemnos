@@ -666,9 +666,14 @@ impl BoardDefinition {
                 problems.push(format!("pwm {:?}: duplicate name", pwm.name));
             }
         }
-        for (field, entries) in [("raw_clients", &self.raw_clients), ("look_writers", &self.look_writers)] {
+        for (field, entries) in [
+            ("raw_clients", &self.raw_clients),
+            ("look_writers", &self.look_writers),
+        ] {
             for entry in entries.iter().filter(|e| !is_valid_client_entry(e)) {
-                problems.push(format!("{field} entry {entry:?}: '*' is only allowed at the end"));
+                problems.push(format!(
+                    "{field} entry {entry:?}: '*' is only allowed at the end"
+                ));
             }
         }
         if problems.is_empty() {

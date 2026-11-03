@@ -337,6 +337,7 @@ dependencies = [
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
  "lemnos-drivers-bmi088",
+ "lemnos-drivers-bmm150",
  "lemnos-drivers-gpio",
  "lemnos-drivers-i2c",
  "lemnos-drivers-ina2xx",

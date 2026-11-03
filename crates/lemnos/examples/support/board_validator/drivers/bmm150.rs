@@ -5,23 +5,18 @@ use lemnos::core::{
 };
 use lemnos::driver::{
     BoundDevice, CustomInteraction, Driver, DriverBindContext, DriverError, DriverManifest,
-    DriverMatch, DriverMatchLevel, DriverPriority, DriverResult, I2cControllerIo,
-    I2cControllerSession, SessionAccess, interaction_name,
+    DriverMatch, DriverMatchLevel, DriverPriority, DriverResult, I2cControllerSession,
+    SessionAccess, interaction_name,
 };
 use lemnos::macros::ConfiguredDevice;
+use lemnos_bus::hal::HalI2cBus;
+use lemnos_drivers_bmm150::{Bmm150, Config, Trim};
+use lemnos_hal::HalError;
 use std::borrow::Cow;
 use std::thread;
 use std::time::Duration;
 
 const BMM150_SAMPLE_INTERACTION: &str = "sensor.magnetometer.sample";
-const BMM150_CHIP_ID_REGISTER: u8 = 0x40;
-const BMM150_EXPECTED_ID: u8 = 0x32;
-const BMM150_POWER_CONTROL_REGISTER: u8 = 0x4B;
-const BMM150_OP_MODE_REGISTER: u8 = 0x4C;
-const BMM150_AXES_ENABLE_REGISTER: u8 = 0x4E;
-const BMM150_REP_XY_REGISTER: u8 = 0x51;
-const BMM150_REP_Z_REGISTER: u8 = 0x52;
-const BMM150_DATA_REGISTER: u8 = 0x42;
 
 #[derive(Debug, Clone, PartialEq, ConfiguredDevice)]
 #[lemnos(
@@ -159,13 +154,11 @@ impl Driver for Bmm150Driver {
             binding.bus,
             SessionAccess::ExclusiveController,
         )?;
-        {
+        let trim = {
             let mut io =
                 Bmm150Io::new(self.id(), device.clone(), &mut *controller, binding.address);
-            io.power_up()?;
-            io.verify_id()?;
-            io.configure()?;
-        }
+            io.init()?
+        };
 
         let interaction = CustomInteraction::new(
             BMM150_SAMPLE_INTERACTION,
@@ -182,6 +175,7 @@ impl Driver for Bmm150Driver {
             device: device.clone(),
             controller,
             binding,
+            trim,
             interactions: vec![interaction],
         }))
     }
@@ -192,6 +186,7 @@ struct Bmm150BoundDevice {
     device: DeviceDescriptor,
     controller: Box<dyn I2cControllerSession>,
     binding: Bmm150Binding,
+    trim: Trim,
     interactions: Vec<CustomInteraction>,
 }
 
@@ -223,6 +218,18 @@ impl Bmm150Sample {
     }
 }
 
+/// Sleeps for the delays of `init`.
+struct SleepDelay;
+
+impl embedded_hal::delay::DelayNs for SleepDelay {
+    fn delay_ns(&mut self, ns: u32) {
+        thread::sleep(Duration::from_nanos(u64::from(ns)));
+    }
+}
+
+/// The chip layer: `lemnos-drivers-bmm150` over the session. `init` configures
+/// the chip (it leaves suspend mode and starts continuous measurement, as the
+/// validator always did); `sample` attaches with the trim `init` read.
 struct Bmm150Io<'a> {
     driver_id: &'a str,
     device: DeviceDescriptor,
@@ -245,55 +252,51 @@ impl<'a> Bmm150Io<'a> {
         }
     }
 
-    fn verify_id(&mut self) -> DriverResult<()> {
-        let chip_id = {
-            let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-            let mut sensor = bus.target(self.address);
-            sensor.read_u8(BMM150_CHIP_ID_REGISTER)?
-        };
-        if chip_id != BMM150_EXPECTED_ID {
-            return Err(DriverError::BindRejected {
-                driver_id: self.driver_id.to_string(),
-                device_id: self.device.id.clone(),
-                reason: format!(
-                    "unexpected BMM150 chip id 0x{chip_id:02x} (expected 0x{BMM150_EXPECTED_ID:02x})"
-                ),
-            });
-        }
-        Ok(())
+    fn init(&mut self) -> DriverResult<Trim> {
+        let (driver_id, device) = (self.driver_id, &self.device);
+        let mut sensor = Bmm150::new(HalI2cBus::new(&mut *self.controller), self.address as u8);
+        sensor
+            .init(&mut SleepDelay, Config::default())
+            .map_err(|e| device_error(driver_id, device, "configure the BMM150", &e))?;
+        sensor
+            .trim()
+            .copied()
+            .ok_or_else(|| DriverError::BindRejected {
+                driver_id: driver_id.to_string(),
+                device_id: device.id.clone(),
+                reason: "the BMM150 has no trim after init".into(),
+            })
     }
 
-    fn power_up(&mut self) -> DriverResult<()> {
-        let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-        let mut sensor = bus.target(self.address);
-        sensor.write_u8(BMM150_POWER_CONTROL_REGISTER, 0x01)?;
-        thread::sleep(Duration::from_millis(2));
-        Ok(())
-    }
-
-    fn configure(&mut self) -> DriverResult<()> {
-        let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-        let mut sensor = bus.target(self.address);
-        sensor.write_u8(BMM150_AXES_ENABLE_REGISTER, 0x00)?;
-        sensor.write_u8(BMM150_REP_XY_REGISTER, 0x04)?;
-        sensor.write_u8(BMM150_REP_Z_REGISTER, 0x07)?;
-        let register = sensor.read_u8(BMM150_OP_MODE_REGISTER)?;
-        let register = (register & !0x38_u8) | (0x07_u8 << 3);
-        let register = register & !0x06_u8;
-        sensor.write_u8(BMM150_OP_MODE_REGISTER, register)?;
-        Ok(())
-    }
-
-    fn sample(&mut self) -> DriverResult<Bmm150Sample> {
-        let mut bus = I2cControllerIo::new(self.controller, self.driver_id, &self.device);
-        let mut sensor = bus.target(self.address);
-        let bytes = sensor.read_exact_block::<8>(BMM150_DATA_REGISTER)?;
+    fn sample(&mut self, trim: Trim) -> DriverResult<Bmm150Sample> {
+        let (driver_id, device) = (self.driver_id, &self.device);
+        let raw = Bmm150::resume(
+            HalI2cBus::new(&mut *self.controller),
+            self.address as u8,
+            trim,
+        )
+        .read_raw()
+        .map_err(|e| device_error(driver_id, device, "read the BMM150 data registers", &e))?;
         Ok(Bmm150Sample {
-            x_raw: i16::from_le_bytes([bytes[0], bytes[1]]) >> 3,
-            y_raw: i16::from_le_bytes([bytes[2], bytes[3]]) >> 3,
-            z_raw: i16::from_le_bytes([bytes[4], bytes[5]]) >> 1,
-            rhall_raw: u16::from_le_bytes([bytes[6], bytes[7]]) >> 2,
+            x_raw: raw.x,
+            y_raw: raw.y,
+            z_raw: raw.z,
+            rhall_raw: raw.rhall,
         })
+    }
+}
+
+fn device_error<E: HalError>(
+    driver_id: &str,
+    device: &DeviceDescriptor,
+    action: &str,
+    error: &E,
+) -> DriverError {
+    DriverError::Device {
+        driver_id: driver_id.to_string(),
+        device_id: device.id.clone(),
+        action: action.to_string(),
+        kind: error.kind(),
     }
 }
 
@@ -318,7 +321,7 @@ impl BoundDevice for Bmm150BoundDevice {
                 &mut *self.controller,
                 self.binding.address,
             );
-            io.sample()?
+            io.sample(self.trim)?
         };
         let state = self.binding.apply_state_config(
             DeviceStateSnapshot::new(self.device.id.clone())
@@ -345,7 +348,7 @@ impl BoundDevice for Bmm150BoundDevice {
                         &mut *self.controller,
                         self.binding.address,
                     );
-                    io.sample()?
+                    io.sample(self.trim)?
                 };
                 Ok(InteractionResponse::Custom(
                     CustomInteractionResponse::new(self.interactions[0].id.clone())

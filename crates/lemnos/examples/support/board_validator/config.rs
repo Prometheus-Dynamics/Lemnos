@@ -46,7 +46,7 @@ pub struct Bmm150Target {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bmi055Target {
+pub struct Bmi088Target {
     pub bus: u32,
     pub accel_address: u16,
     pub gyro_address: u16,
@@ -96,7 +96,7 @@ pub struct ValidatorConfig {
     pub uart_ports: Vec<String>,
     pub usb_target: Option<UsbInterfaceTarget>,
     pub bmm150: Option<Bmm150Target>,
-    pub bmi055: Option<Bmi055Target>,
+    pub bmi088: Option<Bmi088Target>,
     pub power: Option<PowerTarget>,
 }
 
@@ -147,7 +147,7 @@ impl ValidatorConfig {
                 sources.get("USB_ALT_SETTING").as_deref(),
             )?,
             bmm150: parse_bmm150(&sources)?,
-            bmi055: parse_bmi055(&sources)?,
+            bmi088: parse_bmi088(&sources)?,
             power: parse_power(&sources)?,
         })
     }
@@ -219,30 +219,21 @@ fn parse_bmm150(sources: &ConfigSources) -> Result<Option<Bmm150Target>, String>
     }))
 }
 
-fn parse_bmi055(sources: &ConfigSources) -> Result<Option<Bmi055Target>, String> {
-    let Some(bus) = get_first(sources, &["BMI088_BUS", "BMI055_BUS"]) else {
+fn parse_bmi088(sources: &ConfigSources) -> Result<Option<Bmi088Target>, String> {
+    let Some(bus) = get_first(sources, &["BMI088_BUS"]) else {
         return Ok(None);
     };
 
-    let accel_interrupt = parse_optional_gpio_target(
-        get_first(sources, &["BMI088_ACCEL_INT", "BMI055_ACCEL_INT"]).as_deref(),
-    )?;
-    let gyro_interrupt = parse_optional_gpio_target(
-        get_first(sources, &["BMI088_GYRO_INT", "BMI055_GYRO_INT"]).as_deref(),
-    )?;
+    let accel_interrupt =
+        parse_optional_gpio_target(get_first(sources, &["BMI088_ACCEL_INT"]).as_deref())?;
+    let gyro_interrupt =
+        parse_optional_gpio_target(get_first(sources, &["BMI088_GYRO_INT"]).as_deref())?;
 
-    Ok(Some(Bmi055Target {
+    Ok(Some(Bmi088Target {
         bus: parse_u32(&bus)?,
-        accel_address: parse_u16(&require_any(
-            sources,
-            &["BMI088_ACCEL_ADDRESS", "BMI055_ACCEL_ADDRESS"],
-        )?)?,
-        gyro_address: parse_u16(&require_any(
-            sources,
-            &["BMI088_GYRO_ADDRESS", "BMI055_GYRO_ADDRESS"],
-        )?)?,
-        label: get_first(sources, &["BMI088_LABEL", "BMI055_LABEL"])
-            .unwrap_or_else(|| "bmi-imu".to_string()),
+        accel_address: parse_u16(&require_any(sources, &["BMI088_ACCEL_ADDRESS"])?)?,
+        gyro_address: parse_u16(&require_any(sources, &["BMI088_GYRO_ADDRESS"])?)?,
+        label: get_first(sources, &["BMI088_LABEL"]).unwrap_or_else(|| "bmi-imu".to_string()),
         accel_interrupt,
         gyro_interrupt,
     }))
