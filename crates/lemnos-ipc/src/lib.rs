@@ -17,6 +17,23 @@
 //!
 //! [`wire`] is the protocol: length-prefixed little-endian frames over a
 //! Unix stream socket.
+//!
+//! # When a client falls behind
+//!
+//! `lemnosd` queues each client's frames in a bounded write queue of 64 KiB
+//! (the queue lives in `lemnosd`; this crate only defines the frames). When
+//! the queue is full, frames are dropped in this order, and never otherwise:
+//!
+//! 1. [`Message::Reading`] frames go first, silently. The next reading
+//!    supersedes them.
+//! 2. [`Message::Event`] frames go next. Each dropped event is counted, and
+//!    the count goes out as one [`Event::Dropped`] once the queue is under
+//!    half full again.
+//! 3. Every other message (replies, watched light frames, light info, the
+//!    welcome) is never dropped.
+//!
+//! A client that needs every event must keep up; [`Event::Dropped`] says how
+//! many it missed.
 
 #![forbid(unsafe_code)]
 

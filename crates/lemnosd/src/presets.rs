@@ -1,105 +1,12 @@
 //! Look presets: a named set of looks (a look file's text) that is applied
-//! as one. Three are built in (`scheme-a`, `scheme-b`, the default, and
-//! `scheme-c`); users save their own under `<state>/presets/<name>.toml`.
-//! The active preset (`<state>/presets/active`) sits above the board's looks
-//! and below the look files, so a look file still wins a name.
+//! as one. They are saved under `<state>/presets/<name>.toml` (the example
+//! schemes are in `examples/looks/presets`, docs/looks.md). The active preset
+//! (`<state>/presets/active`) sits above the board's looks and below the look
+//! files, so a look file still wins a name. None is active until one is applied.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-
-/// The preset applied when none is chosen.
-pub const DEFAULT: &str = "scheme-b";
-
-/// Scheme A: a traffic light (green targets, white searching, amber no-NT,
-/// red error).
-const SCHEME_A: &str = r#"
-[looks."detect.targets"]
-layers = [{ block = "fill", color = "00ff20" }]
-brightness = 0.698
-envelope = { kind = "breathe", period_ms = 4000, depth = 0.2 }
-
-[looks."detect.searching"]
-layers = [{ block = "comet", color = "fff4e6", period_ms = 1600, tail = 7, heads = 1, base = 0.12 }]
-
-[looks."link.waiting"]
-layers = [{ block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.18 }]
-
-[looks."link.waiting-targets"]
-layers = [
-  { block = "fill", color = "00ff20", brightness = 0.12 },
-  { block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.0, mode = "over" },
-]
-
-[looks."detect.error"]
-layers = [{ block = "fill", color = "ff2828" }]
-brightness = 0.698
-envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }
-"#;
-
-/// Scheme B: cool colours are healthy, warm colours are trouble, and motion
-/// means looking (the default; the built-in `detect.*` and `link.*` looks are
-/// these).
-const SCHEME_B: &str = r#"
-[looks."detect.targets"]
-layers = [{ block = "fill", color = "28c8ff" }]
-brightness = 0.698
-envelope = { kind = "breathe", period_ms = 4000, depth = 0.2 }
-
-[looks."detect.searching"]
-layers = [{ block = "comet", color = "965aff", period_ms = 1600, tail = 7, heads = 1, base = 0.18 }]
-
-[looks."link.waiting"]
-layers = [{ block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.18 }]
-
-[looks."link.waiting-targets"]
-layers = [
-  { block = "fill", color = "28c8ff", brightness = 0.25 },
-  { block = "comet", color = "ff5a00", period_ms = 2400, tail = 6, heads = 2, base = 0.0, mode = "over" },
-]
-
-[looks."detect.error"]
-layers = [{ block = "fill", color = "ff2828" }]
-brightness = 0.698
-envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }
-"#;
-
-/// Scheme C: motion only (solid when settled, a comet when it is moving).
-const SCHEME_C: &str = r#"
-[looks."detect.targets"]
-layers = [{ block = "fill", color = "00ff20" }]
-brightness = 0.9
-
-[looks."detect.searching"]
-layers = [{ block = "comet", color = "00ff20", period_ms = 1600, tail = 7, heads = 1, base = 0.15 }]
-
-[looks."link.waiting"]
-layers = [{ block = "fill", color = "ff5a00" }]
-brightness = 0.698
-
-[looks."link.waiting-targets"]
-layers = [{ block = "comet", color = "ff5a00", period_ms = 1600, tail = 7, heads = 1, base = 0.2 }]
-
-[looks."detect.error"]
-layers = [{ block = "fill", color = "ff2828" }]
-brightness = 0.698
-envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }
-"#;
-
-/// The built-in presets: name and look file text.
-pub const BUILTIN: &[(&str, &str)] = &[
-    ("scheme-a", SCHEME_A),
-    ("scheme-b", SCHEME_B),
-    ("scheme-c", SCHEME_C),
-];
-
-/// The text of built-in preset `name`.
-pub(crate) fn builtin_text(name: &str) -> Option<&'static str> {
-    BUILTIN
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, text)| *text)
-}
 
 /// Whether `name` is a valid preset name (letters, digits, `-` and `_`).
 pub(crate) fn valid_name(name: &str) -> bool {
@@ -172,6 +79,15 @@ impl PresetDir {
         let text = fs::read_to_string(self.dir.join("active")).ok()?;
         let name = text.trim().to_string();
         valid_name(&name).then_some(name)
+    }
+
+    /// Forgets the active preset (none is active).
+    pub fn clear_active(&self) -> io::Result<()> {
+        match fs::remove_file(self.dir.join("active")) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Records `name` as the active preset.

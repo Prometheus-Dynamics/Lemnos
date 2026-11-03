@@ -3,8 +3,8 @@
 
 use lemnos_ipc::{LedRequest, LedShow};
 use lemnos_light::{
-    Animator, Arbiter, Defaults, Intent, Layer, LookName, LookSpec, Lookup, Rgbw, Show, SpotList,
-    Transition, Winner,
+    Animator, Arbiter, Defaults, Intent, Layer, LookName, Lookup, Rgbw, Show, SpotList, Transition,
+    Winner,
 };
 
 /// The most LEDs a light may have.
@@ -295,7 +295,7 @@ impl Light {
             }
             Some(w) => w.intent.resolve(&self.defaults, lookup),
             None => (
-                LookSpec::fill(self.defaults.idle),
+                lemnos_light::fallback_look(&self.defaults, lookup),
                 Transition::new(self.defaults.fade_ms, self.defaults.easing),
             ),
         };
@@ -370,6 +370,7 @@ impl Light {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lemnos_light::LookSpec;
     use lemnos_light::{LayerSpec, Spot, SpotSource};
 
     /// A comet (blue) with a spots block that takes its spots from the request.

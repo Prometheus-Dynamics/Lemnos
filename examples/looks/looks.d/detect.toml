@@ -1,0 +1,7 @@
+# Detection looks that are not part of a scheme (the example set's). The
+# scheme presets (examples/looks/presets) hold detect.targets, detect.searching
+# and detect.error.
+
+[looks."detect.live"]
+layers = [{ block = "fill", color = "ffffff" }]
+brightness = 0.698

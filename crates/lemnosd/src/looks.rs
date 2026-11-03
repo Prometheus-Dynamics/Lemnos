@@ -52,9 +52,9 @@ pub struct LookTable {
     effective: BTreeMap<String, (LookSpec, String)>,
     /// Where user presets are saved (`None`: only the built-ins).
     presets: Option<PresetDir>,
-    /// The active preset's name, and its looks (between the board's looks
-    /// and the look files).
-    active: String,
+    /// The active preset's name (none when `None`), and its looks (between the
+    /// board's looks and the look files).
+    active: Option<String>,
     preset: Vec<(String, LookSpec)>,
 }
 
@@ -85,10 +85,8 @@ impl LookTable {
             files: Vec::new(),
             effective: BTreeMap::new(),
             presets: None,
-            active: presets::DEFAULT.to_string(),
-            preset: presets::builtin_text(presets::DEFAULT)
-                .map(|text| parse_preset(presets::DEFAULT, text))
-                .unwrap_or_default(),
+            active: None,
+            preset: Vec::new(),
         };
         table.scan();
         // A scan rebuilds only when a file changed: the board's looks need it now.
@@ -174,8 +172,10 @@ impl LookTable {
         for (name, spec) in &self.board {
             effective.insert(name.clone(), (*spec, "board.toml".to_string()));
         }
-        for (name, spec) in &self.preset {
-            effective.insert(name.clone(), (*spec, format!("preset {}", self.active)));
+        if let Some(active) = &self.active {
+            for (name, spec) in &self.preset {
+                effective.insert(name.clone(), (*spec, format!("preset {active}")));
+            }
         }
         for file in &self.files {
             for (name, spec) in &file.looks {
@@ -186,56 +186,47 @@ impl LookTable {
     }
 
     /// Uses the presets saved in `dir`, and applies the one recorded as active
-    /// there (the default when none is, or when it is gone).
+    /// there (none when none is recorded, or when it is gone).
     pub fn use_presets(&mut self, dir: PresetDir) {
         let saved = dir
             .active()
-            .filter(|name| self.preset_text(&dir, name).is_some());
+            .and_then(|name| Some((parse_preset_checked(&name, &dir.load(&name)?).ok()?, name)));
         self.presets = Some(dir);
-        let name = saved.unwrap_or_else(|| presets::DEFAULT.to_string());
-        if let Some(text) = self.preset_text_of(&name) {
-            self.preset = parse_preset(&name, &text);
-            self.active = name;
+        match saved {
+            Some((looks, name)) => {
+                self.preset = looks;
+                self.active = Some(name);
+            }
+            None => {
+                self.preset = Vec::new();
+                self.active = None;
+            }
         }
         self.rebuild();
     }
 
-    /// The name of the active preset.
-    pub fn active_preset(&self) -> &str {
-        &self.active
+    /// The name of the active preset, if one is.
+    pub fn active_preset(&self) -> Option<&str> {
+        self.active.as_deref()
     }
 
-    /// The text of preset `name`: a built-in, else a saved one.
+    /// Preset `name`'s look file text, from the saved presets.
     fn preset_text_of(&self, name: &str) -> Option<String> {
-        presets::builtin_text(name)
-            .map(str::to_string)
-            .or_else(|| self.presets.as_ref()?.load(name))
+        self.presets.as_ref()?.load(name)
     }
 
-    fn preset_text(&self, dir: &PresetDir, name: &str) -> Option<String> {
-        presets::builtin_text(name)
-            .map(str::to_string)
-            .or_else(|| dir.load(name))
-    }
-
-    /// The presets, with what each is and which is active.
+    /// The presets, with which is active.
     pub fn preset_list(&self) -> String {
         let mut out = String::new();
-        let mut names: Vec<String> = presets::BUILTIN
-            .iter()
-            .map(|(n, _)| n.to_string())
-            .collect();
         if let Some(dir) = &self.presets {
-            names.extend(dir.names());
-        }
-        for name in names {
-            let origin = if presets::builtin_text(&name).is_some() {
-                "built-in"
-            } else {
-                "saved"
-            };
-            let mark = if name == self.active { "*" } else { " " };
-            out.push_str(&format!("{mark} {name} ({origin})\n"));
+            for name in dir.names() {
+                let mark = if self.active.as_deref() == Some(name.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                out.push_str(&format!("{mark} {name} (saved)\n"));
+            }
         }
         out
     }
@@ -256,20 +247,16 @@ impl LookTable {
                 .map_err(|e| format!("saving the active preset: {e}"))?;
         }
         self.preset = parsed;
-        self.active = name.to_string();
+        self.active = Some(name.to_string());
         self.rebuild();
         Ok(format!("applied {name}"))
     }
 
-    /// Saves `text` (a look file of looks, any names) as preset `name`. A
-    /// built-in's name is refused. The active preset is re-read when it is
-    /// the one saved.
+    /// Saves `text` (a look file of looks, any names) as preset `name`. The
+    /// active preset is re-read when it is the one saved.
     pub fn preset_save(&mut self, name: &str, text: &str) -> Result<String, String> {
         if !presets::valid_name(name) {
             return Err(format!("{name:?} is not a valid preset name"));
-        }
-        if presets::builtin_text(name).is_some() {
-            return Err(format!("{name:?} is a built-in preset (use another name)"));
         }
         parse_preset_checked(name, text)?;
         let dir = self
@@ -278,21 +265,16 @@ impl LookTable {
             .ok_or_else(|| "no state directory (LEMNOSD_STATE_DIR is off)".to_string())?;
         dir.save(name, text)
             .map_err(|e| format!("saving preset {name}: {e}"))?;
-        if name == self.active {
+        if self.active.as_deref() == Some(name) {
             self.preset = parse_preset_checked(name, text)?;
             self.rebuild();
         }
         Ok(format!("saved {name}"))
     }
 
-    /// Deletes saved preset `name`. Deleting the active one applies the
-    /// default. Built-in presets cannot be deleted.
+    /// Deletes saved preset `name`. Deleting the active one leaves no preset
+    /// active.
     pub fn preset_delete(&mut self, name: &str) -> Result<String, String> {
-        if presets::builtin_text(name).is_some() {
-            return Err(format!(
-                "{name:?} is a built-in preset and cannot be deleted"
-            ));
-        }
         let dir = self
             .presets
             .as_ref()
@@ -303,8 +285,12 @@ impl LookTable {
         {
             return Err(format!("no preset {name:?}"));
         }
-        if name == self.active {
-            self.preset_apply(presets::DEFAULT)?;
+        if self.active.as_deref() == Some(name) {
+            dir.clear_active()
+                .map_err(|e| format!("saving the active preset: {e}"))?;
+            self.preset = Vec::new();
+            self.active = None;
+            self.rebuild();
         }
         Ok(format!("deleted {name}"))
     }
@@ -448,12 +434,6 @@ fn read_into(file: &mut File) {
     }
 }
 
-/// A preset's looks (a built-in's text is valid by construction; a saved one
-/// that no longer parses gives none, and the report says so).
-fn parse_preset(name: &str, text: &str) -> Vec<(String, LookSpec)> {
-    parse_preset_checked(name, text).unwrap_or_default()
-}
-
 /// A preset's looks, or why its text is not valid.
 fn parse_preset_checked(name: &str, text: &str) -> Result<Vec<(String, LookSpec)>, String> {
     looks::parse_file(&format!("preset {name}"), text).map_err(join)
@@ -463,6 +443,9 @@ fn parse_preset_checked(name: &str, text: &str) -> Result<Vec<(String, LookSpec)
 mod preset_tests {
     use super::*;
     use crate::presets::PresetDir;
+
+    /// The example scheme A (a look file's text).
+    const SCHEME_A: &str = include_str!("../../../examples/looks/presets/scheme-a.toml");
 
     fn board() -> BoardDefinition {
         BoardDefinition::from_toml_str(
@@ -480,24 +463,15 @@ mod preset_tests {
     }
 
     #[test]
-    fn scheme_b_is_the_built_in_vision_looks() {
-        let root = root("b");
-        let table = LookTable::new(&board(), None, None);
-        let defaults = Defaults::default();
-        assert_eq!(table.active_preset(), "scheme-b");
-        for name in [
-            "detect.targets",
-            "detect.searching",
-            "link.waiting",
-            "link.waiting-targets",
-            "detect.error",
-        ] {
-            assert_eq!(
-                table.get(name),
-                builtin_look(name, &defaults),
-                "{name} differs from the built-in"
-            );
-        }
+    fn no_preset_is_active_until_one_is_applied() {
+        let root = root("none");
+        let mut table = LookTable::new(&board(), None, None);
+        // The built-ins are the status looks only: a named look is unknown.
+        assert!(table.get("detect.targets").is_none());
+        assert!(!table.knows("detect.targets"));
+        assert!(table.knows("status.ok"));
+        table.use_presets(PresetDir::new(&root));
+        assert_eq!(table.active_preset(), None);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -514,6 +488,7 @@ mod preset_tests {
         .unwrap();
         let mut table = LookTable::new(&board(), Some(&files), None);
         table.use_presets(PresetDir::new(&root));
+        table.preset_save("scheme-a", SCHEME_A).unwrap();
         table.preset_apply("scheme-a").unwrap();
         // The look file's searching look is the one in force, not scheme A's.
         let searching = table.get("detect.searching").unwrap();
@@ -546,21 +521,17 @@ mod preset_tests {
         let night =
             "[looks.\"detect.targets\"]\nlayers = [{ block = \"fill\", color = \"102030\" }]\n";
         assert!(table.preset_save("night", night).is_ok());
-        assert!(
-            table.preset_save("scheme-b", night).is_err(),
-            "a built-in name is refused"
-        );
         assert!(table.preset_list().contains("night (saved)"));
         table.preset_apply("night").unwrap();
-        assert_eq!(table.active_preset(), "night");
+        assert_eq!(table.active_preset(), Some("night"));
         // The choice is remembered by a new table over the same directory.
         let mut again = LookTable::new(&board(), None, None);
         again.use_presets(PresetDir::new(&root));
-        assert_eq!(again.active_preset(), "night");
-        // Deleting the active preset falls back to the default.
+        assert_eq!(again.active_preset(), Some("night"));
+        // Deleting the active preset leaves none active.
         table.preset_delete("night").unwrap();
-        assert_eq!(table.active_preset(), "scheme-b");
-        assert!(table.preset_delete("scheme-a").is_err());
+        assert_eq!(table.active_preset(), None);
+        assert!(table.preset_delete("night").is_err());
         let _ = fs::remove_dir_all(&root);
     }
 

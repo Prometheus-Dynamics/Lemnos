@@ -4,7 +4,7 @@
 
 use lemnos_board::{BoardDefinition, BoardError, Buses, DynI2c};
 use lemnos_drivers_linux::SysRoot;
-use lemnos_ipc::{ClientError, ClientOptions, LedShow, LookSpec, LooksOp};
+use lemnos_ipc::{ClientError, ClientOptions, LookSpec, LooksOp};
 use lemnos_light::{Block, Rgbw};
 use lemnosd::looks::LookTable;
 use lemnosd::{Service, ServiceConfig};
@@ -90,7 +90,7 @@ fn board_then_look_dir_then_writable_directory_in_that_order() {
     fs::remove_file(dir.join("a.toml")).unwrap();
     table.scan();
     assert_eq!(fill_of(&table, "status.ok"), Some(Rgbw::rgb(0xff0000)));
-    assert!(table.knows("detect.targets"), "a built-in is always known");
+    assert!(table.knows("status.off"), "a built-in is always known");
     assert!(!table.knows("nothing.here"));
 }
 
@@ -165,9 +165,9 @@ fn save_writes_the_writable_directory_and_refuses_what_is_not_a_look() {
     let defaults = lemnos_light::Defaults::default();
     assert!(
         table
-            .show("detect.targets", &defaults)
+            .show("status.busy", &defaults)
             .unwrap()
-            .contains("[looks.\"detect.targets\"]")
+            .contains("[looks.\"status.busy\"]")
     );
     assert!(
         table
@@ -316,7 +316,7 @@ fn the_service_refuses_unknown_and_invalid_looks_and_shows_named_and_inline_ones
     // The look table answers a list and a show.
     let listed = ctl.looks(LooksOp::List).unwrap();
     assert!(
-        listed.contains("app.blue") && listed.contains("detect.targets"),
+        listed.contains("app.blue") && listed.contains("status.busy"),
         "{listed}"
     );
     let shown = ctl.looks(LooksOp::Show("app.blue".into())).unwrap();
@@ -326,13 +326,12 @@ fn the_service_refuses_unknown_and_invalid_looks_and_shows_named_and_inline_ones
         Err(ClientError::Rejected(_))
     ));
 
-    // A LedShow::Look with a progress for a look with no input is fine too.
-    ctl.send(lemnos_ipc::LedRequest::new(LedShow::Look {
-        name: "system.writing".into(),
-        progress: Some(500),
-    }))
-    .unwrap();
-    ctl.sync().unwrap();
+    // A named look with no file and no built-in is refused: the system looks
+    // are look files now (the example set).
+    assert!(matches!(
+        ctl.look("system.writing"),
+        Err(ClientError::Rejected(_))
+    ));
 
     drop(ctl);
     stop.store(true, Ordering::Relaxed);

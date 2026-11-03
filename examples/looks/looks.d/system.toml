@@ -1,0 +1,56 @@
+# The system states and locate, the example set's (docs/looks.md, Example set).
+# The board's own states use the built-in status.* looks; these are the update,
+# boot and recovery states, and the locate look that finds a board.
+
+[looks."system.verifying"]
+layers = [{ block = "comet", color = "8a5cff", period_ms = 1200, tail = 8, heads = 1, base = 0.18 }]
+
+[looks."system.writing-unknown"]
+layers = [{ block = "comet", color = "2f7bff", period_ms = 1200, tail = 8, heads = 1, base = 0.18 }]
+
+# A gauge: the fraction is the request's progress.
+[looks."system.writing"]
+layers = [{ block = "arc", fraction = "input", color = "2f7bff", track = "101012", head = 0.35, sheen = true }]
+
+[looks."system.staged"]
+layers = [{ block = "fill", color = "00ff20" }]
+brightness = 0.851
+envelope = { kind = "breathe", period_ms = 2200, depth = 0.45, easing = "ease-in-out" }
+
+# The trial boot: a starry sparkle of warm white over a faint white breathe.
+[looks."system.booting"]
+layers = [
+  { block = "wash", color = "ffffff", brightness = 0.09,
+    envelope = { kind = "breathe", period_ms = 3000, depth = 0.55, easing = "ease-in-out" } },
+  { block = "sparkle", color = "fff4e6", density = 1.2, density_end = 1.2, base = 0.03 },
+]
+
+# The reboot ember: held while power is cut, with a floor so it stays visible.
+[looks."system.rebooting"]
+layers = [{ block = "fill", color = "ff8000" }]
+brightness = 0.439
+min_brightness = 0.157
+
+[looks."system.failed"]
+layers = [{ block = "fill", color = "ff3b3b" }]
+brightness = 0.698
+envelope = { kind = "breathe", period_ms = 2400, depth = 0.9, easing = "ease-in-out" }
+
+[looks."system.rolled-back"]
+layers = [{ block = "fill", color = "ff3b3b" }]
+brightness = 0.698
+envelope = { kind = "breathe", period_ms = 2400, depth = 0.9, easing = "ease-in-out" }
+
+# The update confirmed: a flash, a burst, then the green drains to the bottom.
+[looks."system.confirmed"]
+layers = [
+  { block = "wash", color = "c8ffd2",
+    envelope = { kind = "pulse", attack_ms = 80, hold_ms = 0, decay_ms = 500, repeat = 1 } },
+  { block = "drain", color = "00ff20", fill_ms = 700, start_ms = 1100, duration_ms = 2100, easing = "ease-in" },
+  { block = "ripple", color = "00ff20", speed = 14, width = 1.6, settle_ms = 1, glow = 0 },
+]
+
+[looks."system.locate"]
+layers = [{ block = "fill", color = "00ffff" }]
+brightness = 0.698
+envelope = { kind = "breathe", period_ms = 2000, depth = 0.6, easing = "ease-in-out" }

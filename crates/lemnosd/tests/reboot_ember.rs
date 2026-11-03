@@ -41,7 +41,7 @@ id = "example"
 id = "ring"
 driver = "ws2812"
 path = "{root}/dev/leds0"
-config = {{ count = 4, fade_ms = 0, status_effect = "solid", ok = 0x00ff00, rebooting = 0xff8000, look_brightness = 1.0 }}
+config = {{ count = 4, fade_ms = 0, status_effect = "solid", ok = 0x00ff00, look_brightness = 1.0 }}
 "#,
         root = root.display()
     ))
@@ -73,7 +73,12 @@ fn a_reboot_leaves_the_ring_on_a_static_ember() {
     let (thread_stop, thread_root, thread_socket) =
         (Arc::clone(&stop), root.clone(), socket.clone());
     let handle = std::thread::spawn(move || {
-        let config = ServiceConfig::new(board(&thread_root), thread_socket);
+        let mut config = ServiceConfig::new(board(&thread_root), thread_socket);
+        // The ember is a look file (the example set), as on a device.
+        config.looks_dir = Some(std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/looks/looks.d"
+        )));
         let mut service = Service::new(config, Box::new(SysBuses(thread_root))).unwrap();
         ready_tx.send(()).unwrap();
         service.run(&thread_stop).unwrap();

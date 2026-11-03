@@ -1,0 +1,19 @@
+# Scheme C: motion only (solid when settled, a comet when it is moving).
+[looks."detect.targets"]
+layers = [{ block = "fill", color = "00ff20" }]
+brightness = 0.9
+
+[looks."detect.searching"]
+layers = [{ block = "comet", color = "00ff20", period_ms = 1600, tail = 7, heads = 1, base = 0.15 }]
+
+[looks."link.waiting"]
+layers = [{ block = "fill", color = "ff5a00" }]
+brightness = 0.698
+
+[looks."link.waiting-targets"]
+layers = [{ block = "comet", color = "ff5a00", period_ms = 1600, tail = 7, heads = 1, base = 0.2 }]
+
+[looks."detect.error"]
+layers = [{ block = "fill", color = "ff2828" }]
+brightness = 0.698
+envelope = { kind = "breathe", period_ms = 2000, depth = 0.85 }

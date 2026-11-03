@@ -19,6 +19,17 @@ fn root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("lemnosd-presets-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("sys")).unwrap();
+    // The example schemes are saved presets (the device package ships them).
+    let presets = root.join("state/presets");
+    std::fs::create_dir_all(&presets).unwrap();
+    let examples = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/looks/presets");
+    for scheme in ["scheme-a", "scheme-b", "scheme-c"] {
+        std::fs::copy(
+            format!("{examples}/{scheme}.toml"),
+            presets.join(format!("{scheme}.toml")),
+        )
+        .unwrap();
+    }
     root
 }
 
@@ -63,7 +74,11 @@ fn an_applied_preset_survives_a_restart_and_only_operators_may_apply() {
         .leds()
         .unwrap();
     let listing = manager.looks(LooksOp::PresetList).unwrap();
-    assert!(listing.contains("* scheme-b (built-in)"), "{listing}");
+    assert!(listing.contains("scheme-a (saved)"), "{listing}");
+    assert!(
+        !listing.contains('*'),
+        "no preset is active at first: {listing}"
+    );
 
     // A client that is not in the board's look_writers may not change looks.
     let mut app = ClientOptions::new(service.socket(), "app").leds().unwrap();
@@ -92,6 +107,6 @@ fn an_applied_preset_survives_a_restart_and_only_operators_may_apply() {
         .leds()
         .unwrap();
     let listing = manager.looks(LooksOp::PresetList).unwrap();
-    assert!(listing.contains("* scheme-c"), "{listing}");
+    assert!(listing.contains("* scheme-c (saved)"), "{listing}");
     drop(service);
 }

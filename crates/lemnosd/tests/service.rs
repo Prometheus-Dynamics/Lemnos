@@ -135,7 +135,12 @@ fn start(root: &Path) -> (PathBuf, Arc<AtomicBool>, std::thread::JoinHandle<()>)
             owner,
             sys: thread_root.clone(),
         };
-        let config = ServiceConfig::new(board(&thread_root), thread_socket);
+        let mut config = ServiceConfig::new(board(&thread_root), thread_socket);
+        // The update looks are look files (the example set), as on a device.
+        config.looks_dir = Some(std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/looks/looks.d"
+        )));
         let mut service = Service::new(config, Box::new(buses)).unwrap();
         ready_tx.send(()).unwrap();
         service.run(&thread_stop).unwrap();
@@ -235,21 +240,25 @@ fn serves_readings_controls_and_led_intents() {
     })
     .unwrap();
     leds.sync().unwrap();
-    // Half the ring filled (from logical 0 = physical 5), the rest dim.
+    // Half the ring filled (from logical 0 = physical 5): logical 0 is the
+    // blue fill, and logical 8 (physical 13) is the faint track. (The fill's
+    // sheen moves, so the test checks the two ends, not equal neighbours.)
     eventually(|| {
         let bytes = ring(&root);
-        bytes[20..24] != [0, 178, 0, 0] && bytes[20..24] == bytes[24..28]
+        bytes[22] > 200 && bytes[52..56] == [16, 16, 18, 0]
     });
+    // With no intent held, the light shows the default look (status.ok here),
+    // never a dark ring.
     leds.clear().unwrap();
     leds.sync().unwrap();
-    eventually(|| ring(&root).iter().all(|b| *b == 0));
+    eventually(|| ring(&root).chunks(4).all(|p| p == [0, 178, 0, 0]));
 
     // A client's intents end when it leaves (unless it asked to keep them).
     leds.status(LedStatus::Error).unwrap();
     leds.sync().unwrap();
     eventually(|| ring(&root).iter().any(|b| *b != 0));
     drop(leds);
-    eventually(|| ring(&root).iter().all(|b| *b == 0));
+    eventually(|| ring(&root).chunks(4).all(|p| p == [0, 178, 0, 0]));
 
     // Stopping hands the fan back to the kernel.
     stop.store(true, Ordering::Relaxed);
