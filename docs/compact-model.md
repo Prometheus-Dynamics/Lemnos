@@ -90,6 +90,40 @@ images build without it, a saving of 2 512 bytes on `linux-lite`); the six sysfs
 one absent-root helper; `Runtime`'s per-device state is a sorted vector instead of a
 `BTreeMap` (about 6 KB on `linux-lite`).
 
+Descriptor maps and shared probe code (round 4, item 17), stripped, measured with
+`scripts/check-sizes.sh` on the host (x86_64, `opt-level = "z"`, fat LTO):
+
+- Labels, hardware ids, properties, link attributes, telemetry, realized configuration and
+  issue attributes are `SmallMap<MapKey, V>` (`crates/lemnos-core/src/small_map.rs`): a
+  sorted vector searched by binary search. It iterates in key order and serializes as the
+  same JSON object a `BTreeMap` did. `MapKey` is `Cow<'static, str>`, so the probes' fixed
+  keys (`"backend"`, `"sysfs_path"`) are borrowed and allocate nothing. `ValueMap` is
+  `SmallMap<MapKey, Value>`.
+- Every other map and set keyed by a device ID (the runtime's failures, bind locks, refresh
+  sets and per-device state, the discovery index, the I2C/SPI/USB probes' bus-id maps) is a
+  `SmallMap` too. The runtime's private `DeviceMap` is gone. What remains of `BTreeMap` in
+  `linux-lite` is about 1.5 KB of monomorphs.
+- The probes share `discovery/descriptor.rs`: the id, kind, display name, summary, address
+  and `backend` label (`start`), the sysfs class-device fields of hwmon, thermal and LED
+  (`class_device`), and one capability constructor (eight copies before). UART and USB still
+  build their chains inline.
+
+| Image | Before | After | Change |
+|---|---|---|---|
+| `linux-lite` | 560 928 | 525 088 | -35 840 (-6.4 %) |
+| `linux-lite-builtin` | 720 584 | 671 088 | -49 496 (-6.9 %) |
+| `facade` | 288 856 | 288 344 | -512 |
+| `sensors-lite` | 322 784 | 322 768 | -16 |
+| `lemnos-ctl` | 1 076 552 | 1 076 840 | +288 |
+| `lemnosd` | 1 421 592 | 1 422 072 | +480 |
+
+The two service binaries grow by about 0.03 %; the cause is not isolated yet. Firmware images
+are unchanged within 4 bytes.
+
+Not done yet, and where the next bytes are: `Runtime::finish_refresh` is about 15 KB of
+`.text` (unstripped build) with the diff, event and rebind steps inlined into it, and
+`DeviceAddress`'s derived `Debug` is about 6 KB, pulled in by error and descriptor formatting.
+
 ## Proposal
 
 Four layers. Each is useful on its own, and each only depends on the ones below it.
