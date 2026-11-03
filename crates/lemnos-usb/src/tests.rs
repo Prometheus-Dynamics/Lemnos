@@ -392,10 +392,14 @@ fn a_transfer_buffer_is_send_and_sync() {
     assert_send_sync::<crate::TransferOutcome>();
 }
 
-/// Whether `/proc/self/maps` has a mapping that contains `address`.
+/// Whether `/proc/self/maps` maps `path` at an address range that contains
+/// `address`. Matching the file as well as the address keeps the check true to
+/// this mapping: once it is unmapped, another test thread may map something else
+/// at the same address.
 #[cfg(target_os = "linux")]
-fn mapped(address: usize) -> bool {
+fn mapped(address: usize, path: &std::path::Path) -> bool {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    let path = path.to_string_lossy();
     maps.lines().any(|line| {
         let range = line.split_whitespace().next().unwrap_or("");
         let Some((start, end)) = range.split_once('-') else {
@@ -403,7 +407,7 @@ fn mapped(address: usize) -> bool {
         };
         let start = usize::from_str_radix(start, 16).unwrap_or(usize::MAX);
         let end = usize::from_str_radix(end, 16).unwrap_or(0);
-        (start..end).contains(&address)
+        (start..end).contains(&address) && line.trim_end().ends_with(path.as_ref())
     })
 }
 
@@ -427,17 +431,20 @@ fn a_mapped_buffer_unmaps_on_drop_and_outlives_its_descriptor() {
     let mapping = Mapping::new(file.as_fd(), 4096, 0, true).unwrap();
     let address = mapping.as_slice().as_ptr() as usize;
     let buffer = crate::buffer::wrap(UrbBuffer::Mapped { mapping, len: 4096 });
-    assert!(mapped(address), "mapped while the buffer lives");
+    assert!(mapped(address, &path), "mapped while the buffer lives");
 
     // The descriptor closes first: the buffer's bytes stay readable, and the
     // mapping stays where it is.
     drop(file);
-    assert!(mapped(address), "the mapping outlives its descriptor");
+    assert!(
+        mapped(address, &path),
+        "the mapping outlives its descriptor"
+    );
     assert_eq!(buffer.as_slice()[0], 0x5a, "the bytes are still there");
 
     // The buffer goes last: its drop is the munmap.
     drop(buffer);
-    assert!(!mapped(address), "the drop of the buffer unmaps it");
+    assert!(!mapped(address, &path), "the drop of the buffer unmaps it");
     std::fs::remove_file(&path).unwrap();
 }
 
