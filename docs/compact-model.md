@@ -110,19 +110,26 @@ Descriptor maps and shared probe code (round 4, item 17), stripped, measured wit
 
 | Image | Before | After | Change |
 |---|---|---|---|
-| `linux-lite` | 560 928 | 525 088 | -35 840 (-6.4 %) |
-| `linux-lite-builtin` | 720 584 | 671 088 | -49 496 (-6.9 %) |
+| `linux-lite` | 560 928 | 511 664 | -49 264 (-8.8 %) |
+| `linux-lite-builtin` | 720 584 | 662 032 | -58 552 (-8.1 %) |
 | `facade` | 288 856 | 288 344 | -512 |
-| `sensors-lite` | 322 784 | 322 768 | -16 |
-| `lemnos-ctl` | 1 076 552 | 1 076 840 | +288 |
-| `lemnosd` | 1 421 592 | 1 422 072 | +480 |
+| `sensors-lite` | 322 784 | 322 736 | -48 |
+| `lemnos-ctl` | 1 076 552 | 1 076 824 | +272 |
+| `lemnosd` | 1 421 592 | 1 439 408 | +17 816 (the composite and fan-controller work on dev, +17 376 of it) |
 
 The two service binaries grow by about 0.03 %; the cause is not isolated yet. Firmware images
 are unchanged within 4 bytes.
 
-Not done yet, and where the next bytes are: `Runtime::finish_refresh` is about 15 KB of
-`.text` (unstripped build) with the diff, event and rebind steps inlined into it, and
-`DeviceAddress`'s derived `Debug` is about 6 KB, pulled in by error and descriptor formatting.
+Later in round 4: `DeviceAddress` has a compact `Debug` (its one-line form, inside
+`DeviceAddress(...)`), which saved 7.2 KB on `linux-lite` and 5.3 KB on `linux-lite-builtin`.
+Inventory events are pushed straight from the diff, saving 2.1 KB on both lite images. The UART and
+USB chains use the shared helpers; no measured image links the UART or USB probes, so their
+bytes did not change.
+
+Not done: `Runtime::finish_refresh` is about 15 KB of `.text` (unstripped). Splitting its steps out
+with `#[inline(never)]` moved the bytes around without shrinking the total, so there is no
+duplicated code to remove there. The remaining cost is the steps' own logic (about 4 KB for
+`prepare_refresh_commit`, 3 KB for `rebind_tracked_devices`).
 
 ## Proposal
 
