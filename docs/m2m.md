@@ -2,8 +2,9 @@
 
 Status: implemented in `lemnos-linux` (`v4l2::m2m`, feature `v4l2-m2m`) over the device calls
 in `lemnos-linux-sys::v4l2`. Host-tested against vim2m (scaler, MMAP and dma-buf input) and
-vicodec (encoder, decoder, drain with LAST). Written, untested on board: the hardware M2M
-devices (2D units, RGA-class scalers, stateful codecs on the board's SoCs).
+vicodec (encoder, decoder, drain with LAST). On the BCM2712 boards (2026-11-03) the one M2M node
+found opens and grants its queues; no stream has run on it, and no board device supports the
+crop selection (see "Board results").
 
 ## What a session is
 
@@ -133,6 +134,41 @@ s.stream_off()?;                                  // every buffer comes back
   keeps running).
 - With vim2m, `from_file` opens the same queues as the path form, and the descriptor is kept.
 - The vicodec and vim2m tests skip with a note where the module is absent.
+
+## Board results (BCM2712 boards, 2026-11-03)
+
+Discovery was run on both boards with `v4l2::query`, `find_m2m` and the probe's `M2mSession::open`:
+
+- Board #1 (`rpi-hevc-dec`, `/dev/video19`, the only M2M node on that board): `find_m2m("rpi-hevc-dec")`
+  finds it. `M2mSession::open` succeeds with output `S265` (HEVC parsed slice data, 1 MiB source
+  buffers, 2 granted) and a capture queue deferred (`buffers: 0`), and reports `cap_fmt` 1920x1080
+  2 planes (2,073,600 and 1,036,800 bytes, 1920 bytes per line). No frame was streamed: this
+  decoder is stateless (its output format is `S265`, with the request API and extended HEVC
+  controls), and the session has neither requests nor extended controls.
+- Board #2 (`pispbe`, `/dev/video20`..`35`): no node is M2M. Every node reports only
+  `OUTPUT_MPLANE`, `CAPTURE_MPLANE` or metadata, and `find_m2m("pispbe")` returns `None`.
+  `M2mSession::open` on a pispbe node is refused: "the descriptor is not a memory-to-memory
+  device (driver pispbe)", `InvalidInput`. The ISP runs jobs through media requests across its
+  per-direction nodes, and the session does not do requests.
+  - `/dev/video20`..`27` are held open by the camera stack, and `S_FMT` on
+    `/dev/video20` returns `EBUSY`. Nothing was changed there.
+  - `S_FMT` on idle `/dev/video28` succeeds (`RG16` 1920x1080, `size_image` 4,147,200). No
+    buffers were requested and nothing was streamed.
+
+Crop (`VIDIOC_S_SELECTION` / `G_SELECTION`), the success path that `QueueSetup::crop` and
+`set_output_crop` depend on: no device on either board supports it.
+
+- Board #2: `G_SELECTION` and `S_SELECTION` return `ENOTTY` for every target (`CROP`,
+  `CROP_DEFAULT`, `CROP_BOUNDS`, `COMPOSE`, `COMPOSE_DEFAULT`, `COMPOSE_BOUNDS`) on both the
+  output and the capture queue of `/dev/video28` and `/dev/video31` (and `video35`), so the
+  crop path is refused at the driver. The ISP takes its crop in its config metadata, not
+  through selection.
+- Board #1: the same `ENOTTY` on every target of `/dev/video19`.
+- The host's vim2m, the only device that has run the success path, also reports `ENOTTY`.
+
+Consequence: `QueueSetup::crop` and `set_output_crop` have no verified success path on the
+boards. The crop code is unchanged and still host-tested only for the refusal. A device with a
+real selection, such as a scaler, is needed to verify it.
 
 ## Migration notes
 

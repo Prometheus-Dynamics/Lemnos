@@ -1,8 +1,10 @@
 # DMA buffers and transfers
 
 Status: implemented in `lemnos-linux` (feature `dma`) and `lemnos-bus` (the transfer
-interface); host-tested against the system dma-heap. Written, untested on board: the
-board-side heaps (CMA, vendor heaps) and the fence paths of the board's kernel.
+interface); host-tested against the system dma-heap. Verified on the BCM2712 board (board #2,
+kernel 7.2.9-v8-16k, 16K pages): the three dma-heaps, sync-file fences from a real driver
+(DRM syncobj), and the SPI and I2C engines (numbers below). Not verified: a pending fence from
+a running producer, and any RP1 or PCIe DMA engine (none exists; see "Planned").
 
 ## Scope
 
@@ -82,10 +84,79 @@ logic and the error mapping; the transfer itself is untested on hardware.
 Planned, not implemented, each a new `TransferEngine`:
 
 - **PCIe DMA**: descriptor rings over vfio, with dma-buf sources.
-- **RP1 DMA**: the RP1 channels, for PIO and peripheral transfers.
+- **RP1 DMA**: the RP1 channels, for PIO and peripheral transfers. The controller is a DesignWare
+  AXI DMAC (`dw_axi_dmac_platform`, 8 channels) at RP1 `0x1f00188000` (`dma2` in
+  `/sys/kernel/debug/dmaengine`). Board #2 result (2026-11-03): the register window is
+  reachable read-only through `/dev/mem` (`mmap` with `PROT_READ`, root only; plain `read` returns
+  `EFAULT` because the address is above RAM). `COMPVER` (`+0x08`) reads `0x3130332a` and the
+  channel-enable register (`+0x18`) reads 0, so the controller is idle. Channels 0 to 2 belong to
+  the kernel's RP1 PIO driver (`pio:tx0`, `tx1`, `rx1`); 3 to 7 are unassigned. No engine is
+  written. The blockers, all on board: (1) no userspace DMA interface (no dmaengine chardev, no
+  `dmatest`); (2) channel registers written from user space would bypass the kernel driver that
+  owns the controller and its interrupts; (3) a buffer's bus address in the RP1's view is not
+  established (the PCIe `dma-ranges` and pagemap PFNs would have to be combined, and that is
+  unverified). Write it when a kernel interface exists, or when the lead accepts a root-only
+  raw-register engine on free channels.
+- PCIe DMA: not written. No PCIe DMA device on either board is reachable from user space without
+  vfio, so the interface would be untested.
 
 `lemnosd` arbitrates ownership of an engine and is never in the data path; pools and
 data-movement decisions stay with the consumer.
+
+## Board results (BCM2712 board, board #2, 2026-11-03)
+
+Probe: a throwaway program on the board, built for `aarch64-unknown-linux-musl` against this
+crate's `dma`, `spi` and `i2c` features. Not committed.
+
+Heaps (`/dev/dma_heap/`: `system`, `linux,cma`, `default_cma_region`). Allocation latency is the
+median of 10 `ALLOC` calls, the size is the requested length:
+
+| Size | system | linux,cma | default_cma_region |
+|---|---|---|---|
+| 4 KiB | 1.6 us | 15 us | 4.4 ms (first-call outlier; 4 KiB later ~20 us) |
+| 64 KiB | 3.6 us | 20 us | 21 us |
+| 1 MiB | 60 us | 162 us | 165 us |
+| 8 MiB | 1.6 ms | 1.8 ms | 1.2 ms |
+| 32 MiB | 8.5 ms | 5.5 ms | 6.2 ms |
+| 128 MiB | 35 ms | ENOMEM (errno 12) | ENOMEM |
+| 512 MiB | 153 ms | ENOMEM | ENOMEM |
+
+- The CMA pool is 64 MiB (`CmaTotal: 65536 kB`, from the `linux,cma` reservation); the two CMA
+  heaps share it, so a single allocation larger than what is free fails with `ENOMEM` (the
+  kernel's `OutOfMemory`). The `system` heap has no such cap here; the kernel command line sets
+  `system_heap.max_order=0`, so it allocates order-0 (16 KiB) pages.
+- Map, 1 MiB: `system` 53 us, `linux,cma` 21 us, `default_cma_region` 26 us. Write 0xa5 under
+  `begin_cpu_access(Write)`/`end_cpu_access`, then read back under `Read`: every byte matched on
+  all three heaps. `set_name` and `identity()` work on all three.
+- Failure modes: an over-size request fails at `ALLOC` and leaves nothing mapped. The heap node
+  is `root:root 0600`, so a non-root caller is refused at `open`; lemnosd needs its own access.
+
+Fences (sync files, the kernel's fence path on this board):
+
+- A signalled DRM syncobj on the v3d render node (`/dev/dri/renderD128`) exported with
+  `DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD` (`EXPORT_SYNC_FILE`) gives a sync file that
+  `is_signaled()` reads as `true` and `wait(0)` returns at once (1.6 us).
+- `import_fence(Write, fence)` onto a `system` buffer succeeds; `export_fence(ReadWrite)` then
+  reads back as signalled.
+- A plain pipe passed as a fence is refused with `InvalidInput`, not treated as "not signalled".
+- Pending fences were not reproduced. The same export on an unsignalled syncobj fails with
+  `EINVAL` on both `card0` and `renderD128`: a pending fence needs a submission (a v3d job with
+  an out-syncobj), which this pass did not build. So the "signals later" path is untested on board.
+
+SPI (`SpidevEngine`): `/dev/spidev10.0` (`107d004000.spi`, the SoC SPI, DMA channels
+`dma1chan0/1`, no device in the board file). A zero-length write and a zero-length duplex both
+complete (`Ok`, 0 bytes), which exercises the `SPI_IOC_MESSAGE` path without clocking a bit.
+No data transfer was run: no known-safe SPI device exists on this board.
+
+I2C (`I2cEngine`): i2c-1, the `rp1` hardware bus (`i2c@74000`) that lemnosd uses for the
+magnetometer and power monitor. One combined write-then-read: register `0x40` of the BMM150 at
+`0x10` returned `0x32` (its chip id) in 435 us. Read only, one transaction. i2c-10 (the camera's
+OV9782) and i2c-13/14 were not touched.
+
+Not in the tree or not reachable on board #2:
+
+- No dmaengine character device, no `dmatest` module, no `udmabuf` user. `udmabuf` is loaded but
+  it is a dma-buf exporter, not a transfer engine.
 
 ## Tests
 
