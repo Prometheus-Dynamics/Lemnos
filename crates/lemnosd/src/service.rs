@@ -12,6 +12,7 @@ use crate::schedule::{self, Due, Next};
 use crate::state;
 use crate::update::UpdateWatcher;
 use crate::workers::{Done, Job, Workers};
+use lemnos_board::fan_controller::FAN_CONTROLLER;
 use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
 use lemnos_device::{BoxedDevice, DeviceClass, DeviceStatus};
 use lemnos_hal::ErrorKind;
@@ -214,6 +215,15 @@ impl Service {
         listener.set_nonblocking(true)?;
         let definition = config.board.clone();
         let mut specs = config.board.devices.clone();
+        // A fan controller is a composite device in its own slot (`service_fan.rs`).
+        specs.extend(
+            config
+                .board
+                .composites
+                .iter()
+                .filter(|c| c.driver == FAN_CONTROLLER)
+                .cloned(),
+        );
         if let Some(dir) = &config.state_dir {
             for spec in &mut specs {
                 state::apply_saved_power(spec, dir);
@@ -333,6 +343,9 @@ impl Service {
         for index in 0..self.slots.len() {
             if self.slots[index].spec.driver == fusion::DRIVER {
                 self.build_fusion(index, now_ms);
+                continue;
+            }
+            if self.slots[index].spec.driver == FAN_CONTROLLER {
                 continue;
             }
             let was_present = self.slots[index].present;
@@ -1594,6 +1607,11 @@ impl Service {
         if !raw.is_finite() || raw < f64::from(min) || raw > f64::from(max) {
             return Err(Refusal::OutOfRange);
         }
+        if self.slots[index].placement == Placement::Composite {
+            // A fan controller's tuning: kept, not a client's lease.
+            let applied = self.fan_set(index, ci, raw as i32)?;
+            return Ok(crate::scaled(applied, exponent));
+        }
         let (wid, wname, wkeep) = {
             let c = &self.clients[client];
             (c.id, c.name.clone(), c.keep)
@@ -1746,6 +1764,11 @@ impl Service {
 
     fn get(&mut self, device: &str, control: &str) -> Result<f64, Refusal> {
         let (index, ci, exponent, _, _) = self.control(device, control)?;
+        if self.slots[index].placement == Placement::Composite {
+            return self
+                .fan_get(index, ci)
+                .map(|raw| crate::scaled(raw, exponent));
+        }
         let device_ref = self.slots[index]
             .device
             .as_mut()
@@ -1820,6 +1843,7 @@ impl Service {
         self.send_edges();
         if let Some(interval) = self.notifier.watchdog_interval()
             && now >= self.next_watchdog_ms
+            && self.fan_stepping(now)
         {
             self.notifier.ping();
             self.next_watchdog_ms = now + interval.as_millis() as u64;

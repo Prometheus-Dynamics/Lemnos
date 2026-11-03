@@ -1,11 +1,11 @@
 # Composite devices
 
-Status: **the fan controller is built** (`lemnos_device::fan_control`, `lemnos-board`'s
-`[[composites]]`, `lemnosd`'s `service_fan.rs`), host-tested, and run once on board #1 under the
-lemnosd lock (see "Built" below). The generic `Composite` trait, the other uses and the
-persisted tuning are still design. [system-service.md](system-service.md) leaves room for it
-in `lemnosd`. Builds on [compact-model.md](compact-model.md) and
-[board-definition.md](board-definition.md).
+Status: **the fan controller is built as a composite device** and run on board #1 under the
+lemnosd lock (see "Built" below). The `Composite` trait is in `lemnos-device`, with the fan
+controller as its first implementation. Its listing, live tuning and persisted tuning are built.
+The other uses below are still design, and so are `override` and `lemnos-ctl fan reset`.
+[system-service.md](system-service.md) leaves room for it in `lemnosd`. Builds on
+[compact-model.md](compact-model.md) and [board-definition.md](board-definition.md).
 
 ## Built
 
@@ -20,11 +20,28 @@ in `lemnosd`. Builds on [compact-model.md](compact-model.md) and
   driver. Validation reports every problem at once: unknown driver, duplicate id, unknown config
   key, input not `<device>.<channel>`, input device missing, curve invalid, outputs not exactly
   `{ fan = <device> }`, and a fan whose `writers` do not admit `lemnosd.fan`.
-- **The host** (`crates/lemnosd/src/service_fan.rs`): once per second per controller it reads
-  each input's latest channel value and its age, steps the controller, and writes the fan's
-  `duty` (control 0). On its first step it sets `pwm_mode` to manual and records the fan's
-  hand-back (`before_write`), so `ExecStopPost` and a clean stop return the fan to the kernel.
-  A failed write hands the fan back and waits 10 s before taking it again.
+- **The composite device** (`crates/lemnos-device/src/composite.rs`, `fan_device.rs`):
+  the `Composite` trait (`no_std`) and `FanDevice`, which is the controller as a device:
+  `Sensor` (channels), `Control` (tuning) and `Composite` (inputs, outputs, `step`, `release`).
+  Its layout is fixed (`fan_device` documents the channel and control order).
+- **The host** (`crates/lemnosd/src/service_fan.rs`): the controller is a slot in the device
+  table, so `lemnos-ctl list` shows it with its status (`degraded` and a reason while a
+  required input is missing or stale, `faulted` after a failed write, `available` otherwise)
+  and its channels and controls. Once per second per enabled controller it reads each input's
+  latest channel value and its age, steps the device, and writes the fan's `duty` (output 0).
+  On its first step it sets `pwm_mode` to manual and records the fan's hand-back
+  (`before_write`), so `ExecStopPost` and a clean stop return the fan to the kernel. A failed
+  write hands the fan back and waits 10 s before taking it again.
+- **Live tuning and persistence:** a client's `set` on a controller control is applied at once
+  and saved to `<LEMNOSD_STATE_DIR>/fan/<id>.tuning` (text, one line per setting and one per
+  curve); a saved tuning is applied over the board's at start. A curve keeps its point count
+  (set by the board) and stays ascending: a point that would cross its neighbour is refused.
+  Tuning writes are settings, not a client's lease, so they survive the writer.
+- **Watchdog:** lemnosd pings `WATCHDOG=1` only while every enabled controller has completed a
+  step in the last three periods (`fan_stepping`).
+- **Units in the listing:** the input's channels carry the input's unit; the curve controls
+  carry the input's quantity and exponent, so `lemnos-ctl set fan-control curve.cpu.0.duty 0.9`
+  takes a fraction. Hysteresis takes the first input's unit.
 
 ```toml
 [[composites]]
@@ -39,11 +56,18 @@ The entry is a device table, so it reuses the device deserializer. `input_<role>
 Units: duties are per-mille; `curve_<role>` values are in the input's unit (millidegrees for a
 thermal zone), so `50000` is 50 °C. Every `input_<role>` needs its `curve_<role>`.
 
-**Not built yet:** the generic `Composite` trait (the controller is a concrete type the host
-calls), a composite listed by `lemnos-ctl list` and in the runtime (it is a `[[composites]]`
-entry, not a device), the status and the events it would report, the watchdog hook, persisted
-tuning (`/var/lib/lemnosd/overrides.toml`), live `curve.cpu.*` controls, `override`, and the
-other uses below.
+**Not built yet:** `override` (a fixed duty with a timeout), `lemnos-ctl fan reset` (clearing
+the saved tuning; delete `<state>/fan/<id>.tuning` and restart until then), a composite in the
+runtime (it is a `lemnosd` device; the runtime has no inter-device data path), the other uses
+below, and `kick_ms` as a control (it stays a board setting).
+
+**Deviations from the trait sketch above, as built:** `inputs()` returns `InputSpec { required,
+max_age_ms }` and `outputs()` returns `OutputSpec { per_mille }`: the roles and the units are the
+host's (the board's `input_<role>`), not the device's, and `Outputs::set` takes the output's
+index. `Outputs::set` and `release` take the output's index and return `ErrorKind`, and
+`Composite::step` returns `DeviceError<ErrorKind>`, so a failed write reaches the host as an
+error. `Sample` is the one in `lemnos_device::composite`. The `[[composites]]` keys are the ones
+in the example below, not the `inputs`/`outputs`/`curve.cpu` keys of the first sketch.
 
 ## What a composite device is
 
@@ -157,14 +181,13 @@ inputs, so the hottest source wins and adding inputs can only make cooling more 
 
 ### Live tuning
 
-The controller's controls are its parameters: `floor`, `hysteresis`, `slew`, `enabled`,
-`override` (a fixed duty for testing, with a timeout after which it reverts), and the curve
-points (`curve.cpu.0.value`, `curve.cpu.0.duty`, ...). They are set like any control,
-subject to the write policy. Tuned values live in memory; a client that wants them kept
-writes them back into the board definition (or `lemnosd` keeps a small overrides file in
-its state directory, `/var/lib/lemnosd/overrides.toml`, applied over the board definition
-at start). Its channels report `demand` (the curve result), `duty` (what was written),
-`input.<role>` (the values it used) and `source` (which input won).
+The controller's controls are its parameters: `floor`, `hysteresis`, `slew` (per-mille per
+second), `enabled` (0 hands the fan back to the kernel and stops the controller until it is set
+to 1), and the curve points (`curve.<role>.<n>.value` in the input's unit, `curve.<role>.<n>.duty`
+per-mille). They are set like any control, and the write policy applies. Each change is saved in
+the state directory (see "Built"), so a restart keeps it. Its channels report `demand` (the curve
+result), `duty` (what was written), `source` (which input won) and `input.<role>` (the values it
+used).
 
 ### Output
 
@@ -237,9 +260,22 @@ fan.
   composite would need read access to other bound devices' latest states. Not needed while
   `lemnosd` hosts the hardware.
 
-## To decide
+## Decided
 
-- Whether to build it at all, and the fan controller first.
-- `max` versus weighted combination of inputs (proposed: `max`).
-- Whether tuned parameters persist in `lemnosd`'s state directory or only in the board
-  definition (proposed: an overrides file, cleared by `lemnos-ctl fan reset`).
+- Built: the fan controller first, as the proposal says.
+- `max` over the inputs (as proposed).
+- Tuned parameters persist in `lemnosd`'s state directory, one text file per controller
+  (`<state>/fan/<id>.tuning`), not in an overrides file. The board definition is never changed.
+
+## Board test (round 4, board #1)
+
+Under `/tmp/lemnos-r3-lemnosd.lock`, with the unit stopped and a temporary `lemnosd` (the
+service's own build, the example board plus the `[[composites]]` entry, state in `/tmp`):
+
+- Listing: `fan-control  fan  fan-controller  degraded` at the first step (no input read yet,
+  so full duty), then `available`, with the ten controls and four channels.
+- Live: setting `curve.cpu.0.duty` to 0.9 (the floor is 0.7, `pwm1` 179) put `pwm1` at 230 within
+  three seconds; a point set out of order is refused (`value out of range`).
+- Restart: the 0.9 point was back after a stop and a start, with the same `pwm1` 230 as before.
+- Restore: `pwm1` 179, `pwm1_enable` 1 and `cur_state` 0 before and after, from the stop helper.
+

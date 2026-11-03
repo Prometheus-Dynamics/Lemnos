@@ -1,7 +1,7 @@
 # lemnosd: the board's hardware service
 
 Status: implemented in phase 4 (`crates/lemnosd`, `crates/lemnos-ipc`, `crates/lemnos-light`,
-`crates/lemnos-drivers-ws2812`, `packaging/`). The composite fan controller stays design-only
+`crates/lemnos-drivers-ws2812`, `packaging/`). The composite fan controller is built
 ([composite-devices.md](composite-devices.md)). Builds on [compact-model.md](compact-model.md)
 and [board-definition.md](board-definition.md).
 
@@ -109,9 +109,8 @@ config = { chip = "gpiochip0", line = 20 }
 ```
 
 `gpio = 13` is informational for a host that configures the PIO itself (an MCU); on Linux
-the `ws2812-pio` overlay does. The fan floor (70 %) belongs to the fan controller's
-configuration once that exists ([composite-devices.md](composite-devices.md)); until then
-the kernel's cooling levels set it.
+the `ws2812-pio` overlay does. The fan floor (70 %) is the fan controller's `floor`
+([composite-devices.md](composite-devices.md)); the kernel's cooling levels are its fallback.
 
 **Generated from the manager's manifest.** The manager's device manifest (`devices/example/manifest.json`)
 already lists `capabilities.leds` (`kind = "ws2812"`, `gpio`, `count`, `device`,
@@ -380,7 +379,8 @@ no device). The manager's board-stream service reads these frames over `lemnos-i
 
 `LEMNOSD_STATE_DIR` (default `/var/lib/lemnos`) holds what a user chose and expects
 to keep: the saved power settings, the look presets (`presets/`, with the active
-one) and a light's runtime settings. The example board's device package makes it writable by
+one), a light's runtime settings and a fan controller's tuning (`fan/<controller>.tuning`,
+see [composite-devices.md](composite-devices.md)). The example board's device package makes it writable by
 `lemnos` (`StateDirectory=lemnos`). Look presets are described in
 [looks.md](looks.md), *Presets*; the CLI is `lemnos-ctl looks preset ...`.
 
@@ -857,7 +857,7 @@ covers, and then upstream it.
   `crates/lemnosd/tests/schedule.rs`.
 - **Crash and restart.** systemd `Restart=always` with backoff; `Type=notify`, `READY=1`
   after the board's devices are built and the socket listens; `WATCHDOG=1` only while the
-  loop keeps completing passes. On restart, clients reconnect (their `Connected` event says
+  loop keeps completing passes and every enabled fan controller has stepped lately. On restart, clients reconnect (their `Connected` event says
   so) and restore subscriptions; LED intents are re-sent by clients that still want them.
   Devices are re-initialized from the board definition; a device that fails stays in the
   table as `missing` and is retried on its period, so one absent sensor never stops the
@@ -1083,17 +1083,13 @@ replaces the client's previous intent in the same layer, and `led off` clears th
 Product-specific integrations (which resources an app publishes, which of its commands map to
 which intent) live in the app's own repository, not here.
 
-## Room for the composite fan controller
+## The composite fan controller
 
-[composite-devices.md](composite-devices.md) designs it; `lemnosd` leaves room for it
-without building it:
-
-- devices are hosted behind one table, so a composite is one more entry that reads other
-  entries and writes through the same policy (its writer name, `lemnosd.fan`, is already in
-  the example board's `writers`);
-- the loop has per-device deadlines, the hook a composite's `step` needs;
-- the fan hand-back (on stop, the panic hook and `ExecStopPost=+lemnos-ctl fan restore
-  --all`) already returns fans to the kernel, which is the failsafe the controller relies on.
+[composite-devices.md](composite-devices.md) describes it. It is one more entry in the device
+table, read and written through the same policy (its writer name, `lemnosd.fan`, is in the
+example board's `writers`), stepped on the loop's per-device deadlines. The fan hand-back (on
+stop, the panic hook and `ExecStopPost=+lemnos-ctl fan restore --all`) already returns fans to
+the kernel, which is the failsafe the controller relies on.
 
 ## Fan hand-back
 

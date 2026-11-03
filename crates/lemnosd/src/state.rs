@@ -97,6 +97,22 @@ pub(crate) fn save_power(dir: &Path, device: &str, on: bool) -> io::Result<()> {
     write_atomic(&power_path(dir, device), if on { "on\n" } else { "off\n" })
 }
 
+/// A fan controller's saved tuning (its text, see `service_fan.rs`):
+/// `<dir>/fan/<controller>.tuning`.
+fn fan_tuning_path(dir: &Path, controller: &str) -> PathBuf {
+    dir.join("fan").join(format!("{controller}.tuning"))
+}
+
+/// The saved tuning of fan controller `controller`, if one was saved.
+pub(crate) fn load_fan_tuning(dir: &Path, controller: &str) -> Option<String> {
+    fs::read_to_string(fan_tuning_path(dir, controller)).ok()
+}
+
+/// Saves fan controller `controller`'s tuning.
+pub(crate) fn save_fan_tuning(dir: &Path, controller: &str, text: &str) -> io::Result<()> {
+    write_atomic(&fan_tuning_path(dir, controller), text)
+}
+
 fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
