@@ -1,0 +1,15 @@
+[package]
+name = "lemnos-hevc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std HEVC (H.265) bitstream parser: Annex B NAL units, VPS, SPS and PPS, and the header of an intra slice. Parses; does not decode"
+documentation = "https://docs.rs/lemnos-hevc"
+keywords = ["hevc", "h265", "bitstream", "no-std"]
+categories = ["embedded", "multimedia::video", "no-std"]
+
+[lints]
+workspace = true

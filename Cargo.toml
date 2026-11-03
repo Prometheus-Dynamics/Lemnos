@@ -20,6 +20,7 @@ members = [
     "crates/lemnos-uevent",
     "crates/lemnos-linux",
     "crates/lemnos-linux-sys",
+    "crates/lemnos-hevc",
     "crates/lemnos-macros",
     "crates/lemnos-macros-tests",
     "crates/lemnos-drivers-gpio",
@@ -75,6 +76,7 @@ lemnos-drivers-linux = { version = "2.0.1-dev", path = "crates/lemnos-drivers-li
 lemnos-drivers-ws2812 = { version = "2.0.1-dev", path = "crates/lemnos-drivers-ws2812" }
 lemnos-linux = { version = "2.0.1-dev", path = "crates/lemnos-linux", default-features = false }
 lemnos-usb = { version = "2.0.1-dev", path = "crates/lemnos-usb" }
+lemnos-hevc = { version = "2.0.1-dev", path = "crates/lemnos-hevc", default-features = false }
 lemnos-linux-sys = { version = "2.0.1-dev", path = "crates/lemnos-linux-sys" }
 lemnos-uevent = { version = "2.0.1-dev", path = "crates/lemnos-uevent" }
 lemnos-macros = { version = "2.0.1-dev", path = "crates/lemnos-macros" }

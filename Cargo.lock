@@ -596,6 +596,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-hevc"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-ipc"
 version = "2.0.1-dev"
 dependencies = [
@@ -621,6 +625,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-discovery",
  "lemnos-hal",
+ "lemnos-hevc",
  "lemnos-linux-sys",
  "lemnos-uevent",
  "lemnos-usb",
