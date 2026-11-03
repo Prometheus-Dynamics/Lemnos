@@ -21,6 +21,9 @@ pub mod mmap;
 pub mod netlink;
 pub mod poll;
 pub mod pool;
+
+#[cfg(feature = "rp1-dma")]
+pub mod dw_axi_dmac;
 #[cfg(feature = "rp1")]
 pub mod rp1_pio;
 pub mod signal;

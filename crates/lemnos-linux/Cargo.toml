@@ -33,6 +33,9 @@ gpio-sysfs = []
 dma = []
 # V4L2 memory-to-memory sessions (`v4l2::m2m`).
 v4l2-m2m = []
+# The RP1 DesignWare AXI DMAC as a transfer engine (`rp1_dma`), through
+# `/dev/mem` (root only). Off by default; untested on board for transfers.
+rp1-dma = ["lemnos-linux-sys/rp1-dma"]
 # GPIO character device, uAPI v2 (Linux 5.10+).
 gpio-cdev = ["gpio"]
 tracing = ["dep:tracing", "lemnos-uevent/tracing"]

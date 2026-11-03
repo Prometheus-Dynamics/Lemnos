@@ -4,7 +4,8 @@ Status: implemented in `lemnos-linux` (feature `dma`) and `lemnos-bus` (the tran
 interface); host-tested against the system dma-heap. Verified on the BCM2712 board (board #2,
 kernel 7.2.9-v8-16k, 16K pages): the three dma-heaps, sync-file fences from a real driver
 (DRM syncobj), and the SPI and I2C engines (numbers below). Not verified: a pending fence from
-a running producer, and any RP1 or PCIe DMA engine (none exists; see "Planned").
+a running producer. The RP1 DMAC engine is written (feature `rp1-dma`) and untested for transfers;
+PCIe DMA does not exist yet (see "Planned").
 
 ## Scope
 
@@ -83,24 +84,32 @@ Each submit allocates its own URB buffer (the one-shot form). Streams keep buffe
 reuse them (`lemnos-usb`'s `BulkReader` and `BulkWriter`). Host-tested on the settle
 logic and the error mapping; the transfer itself is untested on hardware.
 
-Planned, not implemented, each a new `TransferEngine`:
+Planned, each a new `TransferEngine` (RP1 is written, see below):
 
-- **PCIe DMA**: descriptor rings over vfio, with dma-buf sources.
-- **RP1 DMA**: the RP1 channels, for PIO and peripheral transfers. The controller is a DesignWare
-  AXI DMAC (`dw_axi_dmac_platform`, 8 channels) at RP1 `0x1f00188000` (`dma2` in
-  `/sys/kernel/debug/dmaengine`). Board #2 result (2026-11-03): the register window is
-  reachable read-only through `/dev/mem` (`mmap` with `PROT_READ`, root only; plain `read` returns
-  `EFAULT` because the address is above RAM). `COMPVER` (`+0x08`) reads `0x3130332a` and the
-  channel-enable register (`+0x18`) reads 0, so the controller is idle. Channels 0 to 2 belong to
-  the kernel's RP1 PIO driver (`pio:tx0`, `tx1`, `rx1`); 3 to 7 are unassigned. No engine is
-  written. The blockers, all on board: (1) no userspace DMA interface (no dmaengine chardev, no
-  `dmatest`); (2) channel registers written from user space would bypass the kernel driver that
-  owns the controller and its interrupts; (3) a buffer's bus address in the RP1's view is not
-  established (the PCIe `dma-ranges` and pagemap PFNs would have to be combined, and that is
-  unverified). Write it when a kernel interface exists, or when the lead accepts a root-only
-  raw-register engine on free channels.
+- **PCIe DMA**: descriptor rings over vfio, with dma-buf sources. Not written: no reachable device,
+  and the trait is the shape it would take.
+- **RP1 DMA**: written, feature `rp1-dma` (off by default), `lemnos_linux::rp1_dma::Rp1DmaEngine`.
+  The DesignWare AXI DMAC (`dw_axi_dmac_platform`, 8 channels) at RP1 `0x1f00188000` (`dma2` in
+  `/sys/kernel/debug/dmaengine`). Register layout from the kernel's `dw-axi-dmac` driver
+  (`lemnos_linux_sys::dw_axi_dmac`). Reached only through `/dev/mem` (root): a read-only mapping
+  reads the state, and a writable one is needed for transfers. Behaviour:
+  - copies dma-buf to dma-buf, one block, software handshaking, 8/4/2/1-byte width from the
+    alignment of both addresses and the length;
+  - uses channels 3 to 7 only (`FIRST_FREE_CHANNEL`); channels 0 to 2 are the kernel PIO's and are
+    refused at construction;
+  - refuses to start if the DMAC is not running or no configured channel is idle (`Busy`);
+  - bus addresses come from a caller-supplied `BusAddress`: the RP1's view of a dma-buf. Nothing
+    derives it, and a wrong one moves data to the wrong place;
+  - `cancel` waits for the copy to finish (the controller's abort register is not wired), so a
+    ticket is never dropped while the controller still writes.
+  Board #1 (read only, 2026-11-03, `Window` mapped `PROT_READ`): `COMPVER` `0x3130332a`, controller
+  enabled, no channel enabled, channels 3 to 7 idle. Untested on board: any transfer. Host-tested
+  against a fake register file (channel choice, refusals, programming order and values, error and
+  silent-stop reporting). Blocker, one line: verified RP1-view bus addresses for a dma-heap buffer
+  (not established: how the RP1's inbound PCIe window maps host memory, and the pagemap PFNs need
+  root). Until then no transfer starts on a board.
 - PCIe DMA: not written. No PCIe DMA device on either board is reachable from user space without
-  vfio, so the interface would be untested.
+  vfio, so the interface would be untested; the `TransferEngine` trait is the shape it would take.
 
 `lemnosd` arbitrates ownership of an engine and is never in the data path; pools and
 data-movement decisions stay with the consumer.

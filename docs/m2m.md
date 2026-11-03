@@ -1,7 +1,7 @@
 # V4L2 memory-to-memory sessions
 
-Status: implemented in `lemnos-linux` (`v4l2::m2m`, feature `v4l2-m2m`) over the device calls
-in `lemnos-linux-sys::v4l2`. Host-tested against vim2m (scaler, MMAP and dma-buf input) and
+Status: implemented in `lemnos-linux` (`v4l2::m2m`, feature `v4l2-m2m`, and `v4l2::request` for
+stateless codecs) over the device calls in `lemnos-linux-sys::v4l2` and `media`. Host-tested against vim2m (scaler, MMAP and dma-buf input) and
 vicodec (encoder, decoder, drain with LAST). On the BCM2712 boards (2026-11-03) the one M2M node
 found opens and grants its queues; no stream has run on it, and no board device supports the
 crop selection (see "Board results").
@@ -137,6 +137,18 @@ s.stream_off()?;                                  // every buffer comes back
 
 ## Board results (BCM2712 boards, 2026-11-03)
 
+Stateless, board #1 (`rpi-hevc-dec`, 2026-11-03, after the request API landed):
+
+- `media_device_for("/dev/video19")` finds `/dev/media2`, with three entities: the source and the
+  sink (`/dev/video19`, device 81:16) and the processing entity.
+- `M2mSession::open` as above; `Request::allocate` succeeds.
+- The driver lists `HEVC Decode Mode` (`0x00a40a95`) as accepting only `1` (min = max = 1). Set
+  in the request, `1` is accepted. `0` is refused with `ERANGE`. `HEVC Start Code` (`0x00a40a96`)
+  takes 0 or 1.
+- A 4096-byte source buffer is queued in the request. The request is not queued, so no hardware
+  job runs. Full decoding needs the HEVC parameter controls (SPS, PPS, slice and decode params),
+  which need a header parser; none is in the tree. Blocker: no HEVC header parser.
+
 Discovery was run on both boards with `v4l2::query`, `find_m2m` and the probe's `M2mSession::open`:
 
 - Board #1 (`rpi-hevc-dec`, `/dev/video19`, the only M2M node on that board): `find_m2m("rpi-hevc-dec")`
@@ -169,6 +181,34 @@ Crop (`VIDIOC_S_SELECTION` / `G_SELECTION`), the success path that `QueueSetup::
 Consequence: `QueueSetup::crop` and `set_output_crop` have no verified success path on the
 boards. The crop code is unchanged and still host-tested only for the refusal. A device with a
 real selection, such as a scaler, is needed to verify it.
+
+## Requests (stateless codecs)
+
+A stateless device takes each frame's parameters with its buffers as one request on the media
+device. `lemnos_linux::v4l2::request`:
+
+```rust
+let media = request::media_device_for("/dev/video19")?;          // the node's /dev/mediaN
+let req = Request::allocate(&File::open(media)?)?;               // MEDIA_IOC_REQUEST_ALLOC
+s.set_request_controls(&req, &[ExtControl { id, value: ExtValue::Int(1) }])?;  // or ExtValue::Bytes(struct)
+s.queue_output_in_request(index, &planes, ts, &req)?;            // QBUF with REQUEST_FD
+req.queue()?;                                                    // MEDIA_REQUEST_IOC_QUEUE: runs it
+req.wait(Some(timeout))?;                                        // POLLPRI when completed
+// ... dequeue as usual, then:
+req.reinit()?;                                                   // MEDIA_REQUEST_IOC_REINIT
+```
+
+`media_device_for` lists each `/dev/mediaN` and matches the node's device numbers against its
+entities (`MEDIA_IOC_ENUM_ENTITIES`). `set_request_controls` is `VIDIOC_S_EXT_CTRLS` with
+`which = V4L2_CTRL_WHICH_REQUEST_VAL` on the session's descriptor; a compound control's payload
+is the struct's bytes, copied by the kernel. A refused control is named by its index in the
+error. Controls are per file handle, so the session's descriptor is the one that is set.
+
+Host-tested against vicodec's stateless decoder (`stateless-decoder`, found by its sysfs name):
+a coded frame from the stateful encoder decodes through a request. Its FWHT parameters are a
+request control, read from the frame header. The frame's data follows the 44-byte header: with
+the header in the buffer, the driver flags both buffers in error. The decoded I420 frame is the
+right size and not blank.
 
 ## Migration notes
 

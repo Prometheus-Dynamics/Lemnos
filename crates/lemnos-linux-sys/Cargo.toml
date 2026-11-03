@@ -34,6 +34,9 @@ multiple_unsafe_ops_per_block = "deny"
 default = ["rp1"]
 # The RP1 PIO character device (`/dev/pioN`): `rp1_pio`.
 rp1 = []
+# The RP1 DesignWare AXI DMAC, through a mapping of `/dev/mem` (root only):
+# `dw_axi_dmac`. Off by default.
+rp1-dma = []
 
 [dependencies]
 libc.workspace = true
