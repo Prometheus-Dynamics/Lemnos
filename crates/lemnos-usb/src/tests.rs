@@ -456,3 +456,87 @@ fn an_outcome_carries_the_time_it_was_reaped() {
     };
     assert_eq!(outcome.reaped, reaped);
 }
+
+/// A configuration with interface 0 (control, endpoint 0x83) and interface 1
+/// (streaming, isochronous 0x81 in alternate 1), for the claim checks.
+fn claim_fixture() -> Vec<crate::config::ConfigurationInfo> {
+    use crate::config::{AlternateSetting, ConfigurationInfo, EndpointInfo, InterfaceInfo};
+    let endpoint = |address, transfer_type| EndpointInfo {
+        address,
+        direction: if address & 0x80 != 0 {
+            Direction::In
+        } else {
+            Direction::Out
+        },
+        transfer_type,
+        max_packet_size: 64,
+        packets_per_microframe: 1,
+        interval: 1,
+    };
+    vec![ConfigurationInfo {
+        value: 1,
+        interfaces: vec![
+            InterfaceInfo {
+                number: 0,
+                alternates: vec![AlternateSetting {
+                    alternate: 0,
+                    class: 0x0e,
+                    subclass: 1,
+                    protocol: 0,
+                    endpoints: vec![endpoint(0x83, TransferType::Interrupt)],
+                }],
+            },
+            InterfaceInfo {
+                number: 1,
+                alternates: vec![
+                    AlternateSetting {
+                        alternate: 0,
+                        class: 0x0e,
+                        subclass: 2,
+                        protocol: 0,
+                        endpoints: Vec::new(),
+                    },
+                    AlternateSetting {
+                        alternate: 1,
+                        class: 0x0e,
+                        subclass: 2,
+                        protocol: 0,
+                        endpoints: vec![endpoint(0x81, TransferType::Isochronous)],
+                    },
+                ],
+            },
+        ],
+    }]
+}
+
+#[test]
+fn a_transfer_needs_its_interface_claimed() {
+    use crate::device::claimed_check;
+    assert_eq!(
+        claimed_check(&[], 1).unwrap_err().kind(),
+        ErrorKind::Busy,
+        "an unclaimed interface is refused before the kernel"
+    );
+    assert!(claimed_check(&[0, 1], 1).is_ok());
+    assert!(
+        claimed_check(&[0], 1).is_err(),
+        "claiming 0 does not claim 1"
+    );
+}
+
+#[test]
+fn an_endpoint_belongs_to_the_interface_its_descriptor_names() {
+    use crate::device::endpoint_interface;
+    let configs = claim_fixture();
+    assert_eq!(
+        endpoint_interface(&configs, 0x81),
+        Some(1),
+        "in an alternate setting"
+    );
+    assert_eq!(endpoint_interface(&configs, 0x83), Some(0));
+    assert_eq!(
+        endpoint_interface(&configs, 0x85),
+        None,
+        "no descriptor names it: the kernel decides"
+    );
+}

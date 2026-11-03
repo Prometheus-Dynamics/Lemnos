@@ -17,7 +17,7 @@ use crate::stream::{BulkReader, BulkWriter};
 use crate::transfer::IsoPacket;
 use crate::transfer::{Transfer, TransferBuffer, TransferOutcome, TransferStatus};
 use crate::types::{ControlSetup, Direction, TransferType};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -41,6 +41,9 @@ struct Inner {
     backend: Backend,
     descriptor: DeviceDescriptor,
     configurations: Vec<ConfigurationInfo>,
+    /// The interfaces this handle has claimed. Transfers on an interface that
+    /// is not in here are refused before the kernel sees them.
+    claimed: Mutex<Vec<u8>>,
 }
 
 /// An open USB device. Cheap to clone: clones share the same handle.
@@ -74,6 +77,7 @@ impl UsbDevice {
                 backend,
                 descriptor,
                 configurations,
+                claimed: Mutex::new(Vec::new()),
             }),
         })
     }
@@ -184,22 +188,60 @@ impl UsbDevice {
         let detached = match &self.inner.backend {
             #[cfg(target_os = "linux")]
             Backend::Usbfs(usb) => {
+                // Named before the claim unbinds it, so the release can bind it again.
+                let driver = if detach { usb.driver(number)? } else { None };
                 usb.claim_interface(number, detach)?;
-                detach
+                driver
             }
             #[cfg(not(target_os = "linux"))]
             Backend::Native(native) => {
                 // WinUSB and IOKit claim without unbinding anything.
                 let _ = detach;
                 native.claim_interface(number)?;
-                false
+                None
             }
         };
+        self.lock_claimed().push(number);
         Ok(Interface {
             device: Arc::clone(&self.inner),
             number,
             detached,
         })
+    }
+
+    fn lock_claimed(&self) -> MutexGuard<'_, Vec<u8>> {
+        self.inner
+            .claimed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Refuses a transfer on an interface this handle has not claimed. The kernel
+    /// refuses it too (EBUSY), but only after the request reached usbfs; this says
+    /// what to do.
+    fn require_claimed(&self, interface: u8) -> Result<()> {
+        claimed_check(&self.lock_claimed(), interface)
+    }
+
+    /// The claim check for a control request: an interface-recipient request is
+    /// addressed to the interface in the low byte of `wIndex`.
+    fn check_control(&self, setup: &ControlSetup) -> Result<()> {
+        match setup.recipient {
+            crate::types::ControlRecipient::Interface => {
+                self.require_claimed((setup.index & 0xff) as u8)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The claim check for a transfer on `endpoint`: its interface, as the active
+    /// descriptors name it, must be claimed. An endpoint no descriptor names is
+    /// left to the kernel.
+    fn check_endpoint_claimed(&self, endpoint: u8) -> Result<()> {
+        match endpoint_interface(&self.inner.configurations, endpoint) {
+            Some(interface) => self.require_claimed(interface),
+            None => Ok(()),
+        }
     }
 
     /// Resets the device. Its claims are lost; reopen it afterwards.
@@ -220,6 +262,7 @@ impl UsbDevice {
         timeout: Duration,
     ) -> Result<Vec<u8>> {
         check_direction(setup.direction, Direction::In, "control read")?;
+        self.check_control(setup)?;
         match &self.inner.backend {
             #[cfg(target_os = "linux")]
             Backend::Usbfs(usb) => {
@@ -242,6 +285,7 @@ impl UsbDevice {
         timeout: Duration,
     ) -> Result<usize> {
         check_direction(setup.direction, Direction::In, "control read")?;
+        self.check_control(setup)?;
         match &self.inner.backend {
             #[cfg(target_os = "linux")]
             Backend::Usbfs(usb) => usb.control_in(setup, data, timeout),
@@ -263,6 +307,7 @@ impl UsbDevice {
         timeout: Duration,
     ) -> Result<usize> {
         check_direction(setup.direction, Direction::Out, "control write")?;
+        self.check_control(setup)?;
         match &self.inner.backend {
             #[cfg(target_os = "linux")]
             Backend::Usbfs(usb) => usb.control_out(setup, data, timeout),
@@ -304,6 +349,7 @@ impl UsbDevice {
         timeout: Duration,
     ) -> Result<usize> {
         check_endpoint(endpoint, Direction::In)?;
+        self.check_endpoint_claimed(endpoint)?;
         // usbfs runs bulk and interrupt endpoints through one ioctl, so Linux
         // ignores the transfer type.
         let _ = transfer;
@@ -327,6 +373,7 @@ impl UsbDevice {
         timeout: Duration,
     ) -> Result<usize> {
         check_endpoint(endpoint, Direction::Out)?;
+        self.check_endpoint_claimed(endpoint)?;
         // An empty payload is a zero-length packet (the terminator some devices
         // read to: see `BulkWriter::flush_end`).
         // See `read`: usbfs ignores the transfer type.
@@ -566,6 +613,7 @@ impl UsbDevice {
         buffer: TransferBuffer,
     ) -> Result<Transfer> {
         check_endpoint(endpoint, direction)?;
+        self.check_endpoint_claimed(endpoint)?;
         match &self.inner.backend {
             #[cfg(target_os = "linux")]
             Backend::Usbfs(usb) => {
@@ -625,6 +673,7 @@ impl UsbDevice {
         lengths: &[u32],
     ) -> Result<Transfer> {
         check_endpoint(endpoint, Direction::In)?;
+        self.check_endpoint_claimed(endpoint)?;
         match &self.inner.backend {
             Backend::Usbfs(usb) => usb.submit(
                 lemnos_linux_sys::usbfs::UrbKind::Isochronous,
@@ -708,9 +757,9 @@ impl UsbDevice {
 pub struct Interface {
     device: Arc<Inner>,
     number: u8,
-    // Read on Linux only, where a detaching claim is released with a reattach.
+    // The driver a detaching claim unbound (Linux only); the release binds it again.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    detached: bool,
+    detached: Option<String>,
 }
 
 impl Interface {
@@ -732,15 +781,75 @@ impl Interface {
 
 impl Drop for Interface {
     fn drop(&mut self) {
+        {
+            let mut claimed = self
+                .device
+                .claimed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(index) = claimed.iter().position(|&n| n == self.number) {
+                claimed.swap_remove(index);
+            }
+        }
         match &self.device.backend {
             #[cfg(target_os = "linux")]
             Backend::Usbfs(usb) => {
-                let _ = usb.release_interface(self.number, self.detached);
+                let _ = usb.release_interface(self.number, self.detached.is_some());
+                // USBDEVFS_IOCTL CONNECT does not rebind an interface after a
+                // usbfs release on the kernel tested (see docs/usb.md): bind the
+                // driver the claim unbound through sysfs, when it is still unbound.
+                if let Some(driver) = &self.detached
+                    && matches!(usb.driver(self.number), Ok(None))
+                {
+                    let _ = rebind_sysfs(
+                        &self.device.info.location().to_string(),
+                        self.number,
+                        driver,
+                    );
+                }
             }
             #[cfg(not(target_os = "linux"))]
             Backend::Native(native) => native.release_interface(self.number),
         }
     }
+}
+
+/// Binds `driver` to interface `number` of the device at `location` through
+/// sysfs (`/sys/bus/usb/drivers/<driver>/bind`), named `<location>:<config>.<number>`.
+#[cfg(target_os = "linux")]
+fn rebind_sysfs(location: &str, number: u8, driver: &str) -> std::io::Result<()> {
+    let config = std::fs::read_to_string(format!(
+        "/sys/bus/usb/devices/{location}/bConfigurationValue"
+    ))?;
+    let name = format!("{location}:{}.{number}", config.trim());
+    std::fs::write(format!("/sys/bus/usb/drivers/{driver}/bind"), name)
+}
+
+/// Whether `interface` is among the `claimed` interfaces.
+pub(crate) fn claimed_check(claimed: &[u8], interface: u8) -> Result<()> {
+    if claimed.contains(&interface) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorKind::Busy,
+        format!(
+            "interface {interface} is not claimed by this handle: claim it (claim_interface or detach_and_claim_interface) before a transfer on it"
+        ),
+    ))
+}
+
+/// The interface number an endpoint belongs to, from the configurations' descriptors.
+pub(crate) fn endpoint_interface(configurations: &[ConfigurationInfo], endpoint: u8) -> Option<u8> {
+    configurations
+        .iter()
+        .flat_map(|configuration| configuration.interfaces.iter())
+        .find(|interface| {
+            interface
+                .alternates
+                .iter()
+                .any(|setting| setting.endpoints.iter().any(|e| e.address == endpoint))
+        })
+        .map(|interface| interface.number)
 }
 
 /// Endpoint 0 is the control endpoint: never a bulk or interrupt address.
