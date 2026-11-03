@@ -139,6 +139,45 @@
         "type": "string"
       },
       "description": "Clients allowed to change looks and presets; empty: lemnos-ctl and orion:*."
+    },
+    "composites": {
+      "type": "array",
+      "description": "Composite devices hosted by lemnosd (docs/composite-devices.md). Only the fan-controller driver exists.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "driver"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "driver": {
+            "type": "string",
+            "enum": [
+              "fan-controller"
+            ]
+          },
+          "inputs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[^.]+\\.[^.]+$"
+            }
+          },
+          "outputs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "config": {
+            "type": "object"
+          }
+        }
+      }
     }
   },
   "$defs": {
