@@ -520,3 +520,167 @@ fn net_link_reads_up_and_carrier() {
     assert!(DeviceRef::sensor(&mut missing).init(&mut NoDelay).is_err());
     assert_eq!(tree.read("class/net/can_s0/operstate"), "up");
 }
+
+/// A BMI088 accelerometer's scan elements and buffer attributes, on top of
+/// [`imu_tree`]: the timestamp element, the trigger and the buffer, as the
+/// kernel lays them out.
+fn buffered_imu_tree(tree: &Tree) {
+    let dev = "devices/platform/soc/i2c-1/1-0018/iio:device0";
+    tree.file(&format!("{dev}/current_timestamp_clock"), "monotonic")
+        .file(&format!("{dev}/trigger/current_trigger"), "")
+        .file(&format!("{dev}/buffer/enable"), "0")
+        .file(&format!("{dev}/buffer/length"), "0")
+        .file(&format!("{dev}/buffer/watermark"), "1");
+    for (name, index, ty) in [
+        ("in_accel_x", 0, "le:s16/16>>0"),
+        ("in_accel_y", 1, "le:s16/16>>0"),
+        ("in_accel_z", 2, "le:s16/16>>0"),
+        ("in_timestamp", 3, "le:s64/64>>0"),
+    ] {
+        tree.file(&format!("{dev}/scan_elements/{name}_en"), "0")
+            .file(
+                &format!("{dev}/scan_elements/{name}_index"),
+                &index.to_string(),
+            )
+            .file(&format!("{dev}/scan_elements/{name}_type"), ty);
+    }
+}
+
+#[test]
+fn buffered_read_decodes_records_and_stamps_them_on_boottime() {
+    use crate::iio::BufferConfig;
+    let tree = Tree::new();
+    imu_tree(&tree);
+    buffered_imu_tree(&tree);
+    let sys = SysRoot::new(&tree.0);
+    let info = &lemnos_drivers_bmi088::INFO;
+    let binding = &lemnos_drivers_bmi088::KERNEL;
+    let at = I2cLocation {
+        bus: 1,
+        addresses: &[0x18, 0x68],
+    };
+    let imu = KernelDevice::find(info, binding, &sys, Some(at))
+        .unwrap()
+        .expect("both parts");
+    // Two records: x, y, z as i16, then the IRQ stamp (i64 ns) at byte 8.
+    let mut node = Vec::new();
+    for (x, y, z, ns) in [
+        (1000i16, -1000i16, 0i16, 5_000_000_000i64),
+        (-2, 3, 4, 5_002_500_000),
+    ] {
+        node.extend_from_slice(&x.to_le_bytes());
+        node.extend_from_slice(&y.to_le_bytes());
+        node.extend_from_slice(&z.to_le_bytes());
+        node.extend_from_slice(&[0, 0]);
+        node.extend_from_slice(&ns.to_le_bytes());
+    }
+    let node_path = tree.path("dev/iio:device0");
+    fs::create_dir_all(node_path.parent().unwrap()).unwrap();
+    fs::write(&node_path, &node).unwrap();
+    let config = BufferConfig {
+        trigger: Some("hrtimer-0".to_string()),
+        length: 8,
+        watermark: 2,
+        node: Some(node_path),
+    };
+    let accel_dir = "devices/platform/soc/i2c-1/1-0018/iio:device0";
+    {
+        let mut buffer = imu.buffered(0, &config).unwrap();
+        assert_eq!(buffer.record_bytes(), 16);
+        assert_eq!(buffer.clock(), crate::iio::Clock::Boottime);
+        assert_eq!(tree.read(&format!("{accel_dir}/buffer/enable")), "1");
+        assert_eq!(tree.read(&format!("{accel_dir}/buffer/length")), "8");
+        assert_eq!(tree.read(&format!("{accel_dir}/buffer/watermark")), "2");
+        assert_eq!(
+            tree.read(&format!("{accel_dir}/trigger/current_trigger")),
+            "hrtimer-0"
+        );
+        assert_eq!(
+            tree.read(&format!("{accel_dir}/current_timestamp_clock")),
+            "boottime"
+        );
+        assert_eq!(
+            tree.read(&format!("{accel_dir}/scan_elements/in_accel_y_en")),
+            "1"
+        );
+        let mut values = [0; 6];
+        let mut stamps = [0u64; 2];
+        let n = buffer
+            .read(
+                Some(std::time::Duration::from_millis(10)),
+                &mut values,
+                &mut stamps,
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        // Same canonical values as the snapshot path: 1000 × 0.001796 m/s².
+        assert_eq!(values, [1_796, -1_796, 0, -4, 5, 7]);
+        assert_eq!(stamps, [5_000_000, 5_002_500]);
+        assert_eq!(buffer.channels(), &[0, 1, 2]);
+    }
+    // Teardown: the buffer stopped, the scan elements cleared, the trigger
+    // and the clock restored.
+    assert_eq!(tree.read(&format!("{accel_dir}/buffer/enable")), "0");
+    assert_eq!(
+        tree.read(&format!("{accel_dir}/scan_elements/in_timestamp_en")),
+        "0"
+    );
+    assert_eq!(
+        tree.read(&format!("{accel_dir}/scan_elements/in_accel_x_en")),
+        "0"
+    );
+    assert_eq!(
+        tree.read(&format!("{accel_dir}/trigger/current_trigger")),
+        ""
+    );
+    assert_eq!(
+        tree.read(&format!("{accel_dir}/current_timestamp_clock")),
+        "monotonic"
+    );
+}
+
+#[test]
+fn buffered_read_refuses_a_running_buffer_and_restores_on_failure() {
+    use crate::iio::BufferConfig;
+    let tree = Tree::new();
+    imu_tree(&tree);
+    buffered_imu_tree(&tree);
+    let accel_dir = "devices/platform/soc/i2c-1/1-0018/iio:device0";
+    let sys = SysRoot::new(&tree.0);
+    let imu = KernelDevice::find(
+        &lemnos_drivers_bmi088::INFO,
+        &lemnos_drivers_bmi088::KERNEL,
+        &sys,
+        Some(I2cLocation {
+            bus: 1,
+            addresses: &[0x18, 0x68],
+        }),
+    )
+    .unwrap()
+    .expect("both parts");
+    let node = tree.path("dev/iio:device0");
+    fs::create_dir_all(node.parent().unwrap()).unwrap();
+    fs::write(&node, b"").unwrap();
+    let config = BufferConfig {
+        node: Some(node.clone()),
+        ..BufferConfig::default()
+    };
+    // Another consumer runs the buffer: setup refuses and changes nothing.
+    fs::write(tree.path(&format!("{accel_dir}/buffer/enable")), "1\n").unwrap();
+    assert!(imu.buffered(0, &config).is_err());
+    assert_eq!(
+        tree.read(&format!("{accel_dir}/scan_elements/in_accel_x_en")),
+        "0"
+    );
+    assert_eq!(
+        tree.read(&format!("{accel_dir}/current_timestamp_clock")),
+        "monotonic"
+    );
+    // A part that is not IIO (or not there) is refused by name.
+    assert!(imu.buffered(5, &config).is_err());
+    // An explicit close reports and restores.
+    fs::write(tree.path(&format!("{accel_dir}/buffer/enable")), "0\n").unwrap();
+    let buffer = imu.buffered(0, &config).unwrap();
+    buffer.close().unwrap();
+    assert_eq!(tree.read(&format!("{accel_dir}/buffer/enable")), "0");
+}

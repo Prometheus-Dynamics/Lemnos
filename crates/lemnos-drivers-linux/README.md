@@ -12,6 +12,13 @@ Lemnos device-model (`lemnos-device`) drivers over Linux kernel interfaces:
   driver, from the chip crate's `KernelBinding`. `KernelDevice::find` locates the kernel
   devices by name (and optionally I2C bus/address); reads produce exactly the channels the
   chip's userspace driver would.
+- `KernelDevice::buffered`: a buffered read of an IIO part through `/dev/iio:deviceN`, with
+  `BufferConfig` (trigger, length, watermark, character device). The scan elements are
+  enabled from the binding's channels; each record decodes with the `_type` descriptors
+  (endianness, signedness, bits, shift, repeat) and the kernel's alignment, and the IIO
+  timestamp is the IRQ time on `CLOCK_BOOTTIME` microseconds. `IioBuffer::read` polls for
+  the watermark (it blocks without spinning) and returns the values in canonical units.
+  Dropping the buffer stops it and restores what setup changed. Written, untested on board.
 
 All file IO happens under a configurable root (`SysRoot`), so tests run against a fake
-sysfs tree. `lemnos-lite`, the runtime and `lemnosd` host these devices alike.
+sysfs tree; a buffered read's character device is a path the caller gives (a file in tests). `lemnos-lite`, the runtime and `lemnosd` host these devices alike.

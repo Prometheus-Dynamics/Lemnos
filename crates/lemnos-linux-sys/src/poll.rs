@@ -1,7 +1,10 @@
 //! Waiting for descriptors to become ready.
 
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::time::Duration;
 
 /// `POLLIN`.
@@ -16,6 +19,16 @@ pub const POLLERR: i16 = libc::POLLERR;
 pub const POLLHUP: i16 = libc::POLLHUP;
 /// `POLLNVAL`: the descriptor is not open.
 pub const POLLNVAL: i16 = libc::POLLNVAL;
+
+/// Opens `path` read-only, non-blocking and close-on-exec, for a caller that
+/// waits with [`poll_one`] and then reads what is ready: a read with nothing
+/// buffered returns `WouldBlock` instead of sleeping.
+pub fn open_nonblocking(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
 
 /// Waits until `fd` reports one of `events` or `timeout` passes (`None`:
 /// forever). Returns the reported events (0 on timeout). Retries on `EINTR`

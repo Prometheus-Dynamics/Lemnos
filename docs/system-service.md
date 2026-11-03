@@ -630,8 +630,15 @@ lemnos-ctl watch orientation --period 20
 For the example board today (IMU at 100-400 Hz for orientation and vision stamping, power and
 temperatures at 1-10 Hz) the userspace path is simpler and gives full control of ranges
 and rates; `auto` keeps both working. Use the kernel backend when an overlay exists and the
-application needs IIO's buffered, IRQ-timestamped samples; reading IIO buffers
-(`/dev/iio:deviceN`) is a later addition to the generic binding, not new per-chip code.
+application needs IIO's buffered, IRQ-timestamped samples. The generic binding reads them:
+`KernelDevice::buffered` (`lemnos-drivers-linux`, `iio` module) sets up the buffer of an IIO
+part (scan elements, trigger, length, watermark, `buffer/enable`), opens `/dev/iio:deviceN`,
+and decodes each record with the channel `_type` descriptors. The timestamp element is the
+IRQ stamp, on the readings' clock (`boottime`, set on the device when it allows it; a
+`monotonic` device is converted per record). Reads poll the descriptor and never spin.
+Dropping the buffer stops it and restores the scan elements, trigger and clock. Written,
+untested on board: neither board has IIO, so the host tests use a fake sysfs tree and a
+regular file as the character device.
 
 ## PIO I2C: a bus the kernel can only bit-bang
 

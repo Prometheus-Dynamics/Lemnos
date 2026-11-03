@@ -28,6 +28,7 @@
 mod error;
 mod fan;
 mod fan_restore;
+mod iio;
 mod kernel;
 mod net_link;
 mod power;
@@ -49,6 +50,7 @@ pub use fan_restore::{
     fan_state_path, kick_governors, read_fan_state, restore_after_stop, restore_cooling_device,
     write_fan_state,
 };
+pub use iio::{BufferConfig, Clock, Field, IioBuffer, Layout, ScanType};
 pub use kernel::{I2cLocation, KernelDevice, SysRoot};
 pub use lemnos_drivers_ws2812 as ws2812;
 pub use net_link::{NET_LINK_INFO, NetLink};

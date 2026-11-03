@@ -514,6 +514,7 @@ dependencies = [
  "lemnos-drivers-ina2xx",
  "lemnos-drivers-ws2812",
  "lemnos-hal",
+ "lemnos-linux-sys",
 ]
 
 [[package]]

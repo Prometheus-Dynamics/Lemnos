@@ -2,6 +2,7 @@
 //! a mainline kernel driver (IIO or hwmon) serves the same [`DeviceInfo`]
 //! as the chip's userspace driver, with no code per chip.
 
+use crate::iio::{self, BoundChannel, BufferConfig, IioBuffer};
 use crate::{SysfsError, sysfs};
 use lemnos_device::kernel::{KernelBinding, KernelChannel, Subsystem};
 use lemnos_device::{Device, DeviceError, DeviceInfo, NO_VALUE, Sensor, check_buffer};
@@ -137,6 +138,47 @@ impl KernelDevice {
         &self.parts
     }
 
+    /// Starts the buffered read of part `part` (an IIO part; an index into
+    /// [`KernelBinding::parts`]): every channel the binding maps onto it is a
+    /// scan element of the buffer, and each record decodes to those values
+    /// and an IRQ timestamp. See [`IioBuffer`] for the setup, the record
+    /// layout and the teardown. Fails when the part is hwmon, when no channel
+    /// maps onto it, or when the buffer is already running.
+    pub fn buffered(&self, part: usize, config: &BufferConfig) -> Result<IioBuffer, SysfsError> {
+        let subsystem = self.binding.parts.get(part).map(|p| p.subsystem);
+        let dir = self.parts.get(part).cloned();
+        let (Some(Subsystem::Iio), Some(dir)) = (subsystem, dir) else {
+            return Err(SysfsError::new(
+                ErrorKind::Configuration,
+                self.parts.first().cloned().unwrap_or_default(),
+                format!("{} part {part} is not an IIO device", self.info.model),
+            ));
+        };
+        let mut bound = Vec::new();
+        for (index, channel) in self.binding.channels.iter().enumerate() {
+            let Some(channel) = channel.filter(|c| usize::from(c.part) == part) else {
+                continue;
+            };
+            let exponent = self.info.channels[index].exponent;
+            let (offset, scale) = iio_offset_and_scale(&dir, channel.attribute)?;
+            bound.push(BoundChannel {
+                attribute: channel.attribute,
+                channel: index,
+                shift: i32::from(channel.unit_exponent) - i32::from(exponent),
+                offset,
+                scale,
+            });
+        }
+        if bound.is_empty() {
+            return Err(SysfsError::new(
+                ErrorKind::Configuration,
+                &dir,
+                format!("{} has no channel on part {part}", self.info.model),
+            ));
+        }
+        IioBuffer::open(&dir, config, &bound)
+    }
+
     fn channel(&self, index: usize, channel: &KernelChannel) -> Result<i32, SysfsError> {
         let root = &self.parts[usize::from(channel.part)];
         let subsystem = self.binding.parts[usize::from(channel.part)].subsystem;
@@ -156,20 +198,15 @@ impl KernelDevice {
                 let Some(value) = iio_value(root, channel.attribute)? else {
                     return Ok(NO_VALUE);
                 };
-                let scaled = (value * 10f64.powi(shift)).round();
-                Ok(if scaled.is_finite() {
-                    scaled.clamp(f64::from(NO_VALUE) + 1.0, f64::from(i32::MAX)) as i32
-                } else {
-                    NO_VALUE
-                })
+                Ok(iio::canonical(value, shift))
             }
         }
     }
 }
 
 /// An IIO channel's value in the kernel's unit: `<attr>_input` if the driver
-/// processes it, else `(<attr>_raw + offset) × scale` with the channel's own
-/// or the shared (`in_accel_scale`) scale and offset.
+/// processes it, else `(<attr>_raw + offset) × scale` (see
+/// [`iio_offset_and_scale`]).
 fn iio_value(root: &Path, attribute: &str) -> Result<Option<f64>, SysfsError> {
     if let Some(value) =
         sysfs::read_parsed_optional::<f64>(&root.join(format!("{attribute}_input")))?
@@ -180,6 +217,13 @@ fn iio_value(root: &Path, attribute: &str) -> Result<Option<f64>, SysfsError> {
     else {
         return Ok(None);
     };
+    let (offset, scale) = iio_offset_and_scale(root, attribute)?;
+    Ok(Some((raw + offset) * scale))
+}
+
+/// An IIO channel's `_offset` and `_scale`: its own attribute, else the
+/// shared one (`in_accel_scale` for `in_accel_x`), else 0 and 1.
+fn iio_offset_and_scale(root: &Path, attribute: &str) -> Result<(f64, f64), SysfsError> {
     let shared = attribute
         .strip_suffix("_x")
         .or_else(|| attribute.strip_suffix("_y"))
@@ -193,7 +237,7 @@ fn iio_value(root: &Path, attribute: &str) -> Result<Option<f64>, SysfsError> {
     };
     let offset = attr("offset")?.unwrap_or(0.0);
     let scale = attr("scale")?.unwrap_or(1.0);
-    Ok(Some((raw + offset) * scale))
+    Ok((offset, scale))
 }
 
 impl Device for KernelDevice {
