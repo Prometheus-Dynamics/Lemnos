@@ -34,7 +34,13 @@ const REAPURB: u32 = crate::iow::<*mut c_void>(USB, 12);
 const REAPURBNDELAY: u32 = crate::iow::<*mut c_void>(USB, 13);
 const CLAIMINTERFACE: u32 = crate::ior::<libc::c_uint>(USB, 15);
 const RELEASEINTERFACE: u32 = crate::ior::<libc::c_uint>(USB, 16);
-const CONNECT: u32 = crate::ioc(0, USB, 23, 0);
+/// `USBDEVFS_IOCTL`: a driver ioctl on one interface. Its `ioctl_code` can be
+/// `USBDEVFS_CONNECT`, which rebinds the interface's driver (the kernel's
+/// `usb_rebind_intf`). The bare `_IO('U', 23)` is not a top-level request: the
+/// kernel answers it with `ENOTTY`, so it cannot reattach anything.
+const IOCTL: u32 = crate::iowr::<UsbfsIoctl>(USB, 18);
+/// `USBDEVFS_CONNECT` as an `ioctl_code` of [`IOCTL`].
+const CONNECT_CODE: i32 = crate::ioc(0, USB, 23, 0) as i32;
 const RESET: u32 = crate::ioc(0, USB, 20, 0);
 const CLEAR_HALT: u32 = crate::ior::<libc::c_uint>(USB, 21);
 const GET_CAPABILITIES: u32 = crate::ior::<u32>(USB, 26);
@@ -114,6 +120,15 @@ struct SetInterface {
 struct GetDriver {
     interface: u32,
     driver: [u8; DRIVER_NAME_LEN],
+}
+
+/// `struct usbdevfs_ioctl`: a driver ioctl addressed to interface `ifno`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UsbfsIoctl {
+    ifno: i32,
+    ioctl_code: i32,
+    data: *mut c_void,
 }
 
 /// `struct usbdevfs_disconnect_claim`.
@@ -458,7 +473,14 @@ impl UsbfsFile {
         unsafe { ioctl_ptr(self.file.as_fd(), RELEASEINTERFACE, &mut n) }?;
         if reattach {
             // Best effort: the interface may have no driver to return to.
-            let _ = ioctl_int(self.file.as_fd(), CONNECT, 0);
+            let mut arg = UsbfsIoctl {
+                ifno: i32::from(number),
+                ioctl_code: CONNECT_CODE,
+                data: std::ptr::null_mut(),
+            };
+            // SAFETY: `arg` is a live `usbdevfs_ioctl`; the kernel reads it
+            // and, for `USBDEVFS_CONNECT`, takes no data pointer.
+            let _ = unsafe { ioctl_ptr(self.file.as_fd(), IOCTL, &mut arg) };
         }
         Ok(())
     }
@@ -846,5 +868,12 @@ mod tests {
         assert_eq!(CLAIMINTERFACE, 0x8004_550f);
         assert_eq!(DISCONNECT_CLAIM, 0x8108_551b);
         assert_eq!(GET_SPEED, 0x0000_551f);
+        assert_eq!(IOCTL, 0xc010_5512);
+        assert_eq!(CONNECT_CODE, 0x0000_5517);
+    }
+
+    #[test]
+    fn the_driver_ioctl_structure_matches_the_kernel_on_64_bit() {
+        assert_eq!(size_of::<UsbfsIoctl>(), 16);
     }
 }
