@@ -9,6 +9,8 @@
 //! Duties are per-mille of full scale (0..=1000). Input values are integers in
 //! the input's own unit (millidegrees Celsius for a thermal zone).
 
+pub use crate::composite::Sample;
+
 /// Most inputs one controller takes.
 pub const MAX_INPUTS: usize = 4;
 /// Most curve points per input.
@@ -60,24 +62,6 @@ pub struct Input<'a> {
     pub max_age_ms: u32,
 }
 
-/// The latest sample of one input: `present` is false when it has never been
-/// read or its read failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sample {
-    pub value: i32,
-    pub age_ms: u32,
-    pub present: bool,
-}
-
-impl Sample {
-    /// No sample.
-    pub const NONE: Self = Self {
-        value: 0,
-        age_ms: 0,
-        present: false,
-    };
-}
-
 /// The tuning: floor, hysteresis, slew and spin-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
@@ -106,6 +90,8 @@ pub enum Health {
 /// One step's result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decision {
+    /// The curves' demand before the floor and the slew limit (per-mille).
+    pub demand: i32,
     /// The duty to command (per-mille).
     pub duty: i32,
     pub health: Health,
@@ -142,6 +128,16 @@ impl FanController {
         self.duty
     }
 
+    /// The tuning in force.
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Replaces the tuning; the next step uses it.
+    pub fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+    }
+
     /// One step at `now_ms` (any monotonic clock, milliseconds). `inputs[i]`
     /// and `samples[i]` are input `i` and its latest sample; missing samples
     /// count as absent. At most [`MAX_INPUTS`] inputs are used.
@@ -176,6 +172,7 @@ impl FanController {
         };
         let commanded = self.next_duty(now_ms, dt_ms, target);
         Decision {
+            demand,
             duty: commanded,
             health,
             source,

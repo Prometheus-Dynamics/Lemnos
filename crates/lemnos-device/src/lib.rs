@@ -28,8 +28,10 @@ extern crate alloc;
 
 pub mod asynch;
 pub mod calibration;
+pub mod composite;
 pub mod erased;
 pub mod fan_control;
+pub mod fan_device;
 pub mod fixed;
 pub mod gpio;
 pub mod kernel;
@@ -44,6 +46,7 @@ pub use calibration::{
     CalibrationCommand, CalibrationPart, CalibrationRoutine, CalibrationStatus,
     MAX_CALIBRATION_WORDS, PART_ACCEL, PART_GYRO, PART_MAG,
 };
+pub use composite::{Composite, InputSpec, OutputSpec, Outputs, Sample};
 #[cfg(feature = "alloc")]
 pub use erased::BoxedDevice;
 pub use erased::{
