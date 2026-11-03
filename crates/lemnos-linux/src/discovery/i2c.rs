@@ -1,3 +1,4 @@
+use super::descriptor::{capability, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
@@ -6,8 +7,8 @@ use crate::util::{
     read_link_name, read_trimmed,
 };
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceHealth,
-    DeviceId, DeviceKind, DeviceLink, DeviceRelation, InterfaceKind, SmallMap,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceHealth, DeviceId, DeviceKind,
+    DeviceLink, DeviceRelation, InterfaceKind, SmallMap,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -130,15 +131,16 @@ fn build_bus_descriptor(
     };
     let devnode = existing_path_string(&paths.i2c_devnode(bus));
 
-    let mut builder =
-        DeviceDescriptor::builder_for_kind(format!("linux.i2c.bus.{bus}"), DeviceKind::I2cBus)
-            .map_err(|error| format!("failed to start I2C bus descriptor for bus {bus}: {error}"))?
-            .display_name(bus_name.clone())
-            .summary("Linux I2C bus")
-            .address(DeviceAddress::I2cBus { bus })
-            .label("backend", "linux")
-            .label("bus", bus.to_string())
-            .property("bus", u64::from(bus));
+    let mut builder = start(
+        format!("linux.i2c.bus.{bus}"),
+        DeviceKind::I2cBus,
+        bus_name.clone(),
+        "Linux I2C bus",
+        DeviceAddress::I2cBus { bus },
+    )
+    .map_err(|error| format!("failed to start I2C bus descriptor for bus {bus}: {error}"))?
+    .label("bus", bus.to_string())
+    .property("bus", u64::from(bus));
 
     if let Some(adapter_name) = adapter_name {
         builder = builder
@@ -219,13 +221,10 @@ fn build_device_descriptor(
     .property("kernel_name", kernel_name.clone())
     .property("sysfs_path", device_path.display().to_string())
     .link(DeviceLink::new(bus_id.clone(), DeviceRelation::Parent))
-    .capability(i2c_capability("i2c.read", CapabilityAccess::READ))
-    .capability(i2c_capability("i2c.write", CapabilityAccess::WRITE))
-    .capability(i2c_capability(
-        "i2c.write_read",
-        CapabilityAccess::READ_WRITE,
-    ))
-    .capability(i2c_capability("i2c.transaction", CapabilityAccess::FULL));
+    .capability(capability("i2c.read", CapabilityAccess::READ))
+    .capability(capability("i2c.write", CapabilityAccess::WRITE))
+    .capability(capability("i2c.write_read", CapabilityAccess::READ_WRITE))
+    .capability(capability("i2c.transaction", CapabilityAccess::FULL));
 
     if let Some(device_name) = device_name {
         builder = builder
@@ -253,8 +252,4 @@ fn build_device_descriptor(
     builder
         .build()
         .map_err(|error| format!("failed to build I2C device descriptor '{kernel_name}': {error}"))
-}
-
-fn i2c_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static I2C capability identifiers are valid")
 }

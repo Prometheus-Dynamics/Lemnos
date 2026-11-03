@@ -1,4 +1,5 @@
 use super::absent_root;
+use super::descriptor::capability;
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
@@ -8,9 +9,8 @@ use crate::util::{
     read_trimmed, read_u32,
 };
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor,
-    DeviceDescriptorBuilder, DeviceHealth, DeviceId, DeviceKind, DeviceLink, DeviceRelation,
-    InterfaceKind, SmallMap,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceDescriptorBuilder, DeviceHealth,
+    DeviceId, DeviceKind, DeviceLink, DeviceRelation, InterfaceKind, SmallMap,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -472,28 +472,21 @@ fn build_interface_descriptor(
     })
 }
 
-fn usb_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static USB capability identifiers are valid")
-}
-
 fn with_usb_request_capabilities(builder: DeviceDescriptorBuilder) -> DeviceDescriptorBuilder {
     builder
-        .capability(usb_capability(
+        .capability(capability(
             "usb.control_transfer",
             CapabilityAccess::READ_WRITE,
         ))
-        .capability(usb_capability("usb.bulk_read", CapabilityAccess::READ))
-        .capability(usb_capability("usb.bulk_write", CapabilityAccess::WRITE))
-        .capability(usb_capability("usb.interrupt_read", CapabilityAccess::READ))
-        .capability(usb_capability(
-            "usb.interrupt_write",
-            CapabilityAccess::WRITE,
-        ))
-        .capability(usb_capability(
+        .capability(capability("usb.bulk_read", CapabilityAccess::READ))
+        .capability(capability("usb.bulk_write", CapabilityAccess::WRITE))
+        .capability(capability("usb.interrupt_read", CapabilityAccess::READ))
+        .capability(capability("usb.interrupt_write", CapabilityAccess::WRITE))
+        .capability(capability(
             "usb.claim_interface",
             CapabilityAccess::CONFIGURE,
         ))
-        .capability(usb_capability(
+        .capability(capability(
             "usb.release_interface",
             CapabilityAccess::CONFIGURE,
         ))

@@ -1,4 +1,5 @@
 use super::absent_root;
+use super::descriptor::{capability, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
@@ -7,8 +8,8 @@ use crate::util::{
     read_trimmed,
 };
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceHealth,
-    DeviceId, DeviceKind, DeviceLink, DeviceRelation, InterfaceKind, SmallMap,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceHealth, DeviceId, DeviceKind,
+    DeviceLink, DeviceRelation, InterfaceKind, SmallMap,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -85,12 +86,15 @@ impl DiscoveryProbe for SpiDiscoveryProbe {
 }
 
 fn build_bus_descriptor(bus: u32) -> Result<DeviceDescriptor, String> {
-    DeviceDescriptor::builder_for_kind(format!("linux.spi.bus.{bus}"), DeviceKind::SpiBus)
-        .map_err(|error| format!("failed to start SPI bus descriptor for bus {bus}: {error}"))?
-        .display_name(format!("spi-{bus}"))
-        .summary("Linux SPI bus")
-        .address(DeviceAddress::SpiBus { bus })
-        .label("backend", "linux")
+    let started = start(
+        format!("linux.spi.bus.{bus}"),
+        DeviceKind::SpiBus,
+        format!("spi-{bus}"),
+        "Linux SPI bus",
+        DeviceAddress::SpiBus { bus },
+    )
+    .map_err(|error| format!("failed to start SPI bus descriptor for bus {bus}: {error}"))?;
+    started
         .label("bus", bus.to_string())
         .property("bus", u64::from(bus))
         .build()
@@ -148,13 +152,10 @@ fn build_device_descriptor(
     .property("kernel_name", kernel_name.clone())
     .property("sysfs_path", device_path.display().to_string())
     .link(DeviceLink::new(bus_id.clone(), DeviceRelation::Parent))
-    .capability(spi_capability("spi.transfer", CapabilityAccess::READ_WRITE))
-    .capability(spi_capability("spi.write", CapabilityAccess::WRITE))
-    .capability(spi_capability("spi.configure", CapabilityAccess::CONFIGURE))
-    .capability(spi_capability(
-        "spi.get_configuration",
-        CapabilityAccess::READ,
-    ));
+    .capability(capability("spi.transfer", CapabilityAccess::READ_WRITE))
+    .capability(capability("spi.write", CapabilityAccess::WRITE))
+    .capability(capability("spi.configure", CapabilityAccess::CONFIGURE))
+    .capability(capability("spi.get_configuration", CapabilityAccess::READ));
 
     if let Some(modalias) = modalias {
         builder = builder
@@ -176,8 +177,4 @@ fn build_device_descriptor(
     builder
         .build()
         .map_err(|error| format!("failed to build SPI device descriptor '{kernel_name}': {error}"))
-}
-
-fn spi_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static SPI capability identifiers are valid")
 }

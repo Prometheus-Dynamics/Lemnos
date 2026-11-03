@@ -1,10 +1,11 @@
 use super::absent_root;
+use super::descriptor::{capability, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::util::{file_name, parse_prefixed_u32, read_dir_sorted, read_u32};
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceId, DeviceKind,
-    DeviceLink, DeviceRelation, InterfaceKind,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceId, DeviceKind, DeviceLink,
+    DeviceRelation, InterfaceKind,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -100,9 +101,14 @@ fn load_chip_data(
 }
 
 fn build_chip_descriptor(data: &PwmChipData) -> Result<DeviceDescriptor, String> {
-    let mut builder = DeviceDescriptor::builder_for_kind(
+    let mut builder = start(
         format!("linux.pwm.chip.{}", data.chip_name),
         DeviceKind::PwmChip,
+        data.chip_name.clone(),
+        "Linux PWM controller",
+        DeviceAddress::PwmChip {
+            chip_name: data.chip_name.clone(),
+        },
     )
     .map_err(|error| {
         format!(
@@ -110,12 +116,6 @@ fn build_chip_descriptor(data: &PwmChipData) -> Result<DeviceDescriptor, String>
             data.chip_name
         )
     })?
-    .display_name(data.chip_name.clone())
-    .summary("Linux PWM controller")
-    .address(DeviceAddress::PwmChip {
-        chip_name: data.chip_name.clone(),
-    })
-    .label("backend", "linux")
     .label("chip_name", data.chip_name.clone())
     .property("chip_name", data.chip_name.clone())
     .property("sysfs_path", data.chip_path.clone())
@@ -139,9 +139,15 @@ fn build_channel_descriptor(
     channel: u32,
 ) -> Result<DeviceDescriptor, String> {
     let channel_path = Path::new(&data.chip_path).join(format!("pwm{channel}"));
-    let mut builder = DeviceDescriptor::builder_for_kind(
+    let mut builder = start(
         format!("linux.pwm.channel.{}.{}", data.chip_name, channel),
         DeviceKind::PwmChannel,
+        format!("{}:{channel}", data.chip_name),
+        "Linux PWM channel",
+        DeviceAddress::PwmChannel {
+            chip_name: data.chip_name.clone(),
+            channel,
+        },
     )
     .map_err(|error| {
         format!(
@@ -149,34 +155,21 @@ fn build_channel_descriptor(
             data.chip_name, channel
         )
     })?
-    .display_name(format!("{}:{channel}", data.chip_name))
-    .summary("Linux PWM channel")
-    .address(DeviceAddress::PwmChannel {
-        chip_name: data.chip_name.clone(),
-        channel,
-    })
     .driver_hint("lemnos.pwm.generic")
-    .label("backend", "linux")
     .label("chip_name", data.chip_name.clone())
     .property("chip_name", data.chip_name.clone())
     .property("channel", u64::from(channel))
     .property("sysfs_path", data.chip_path.clone())
     .property("exported", channel_path.exists())
     .link(DeviceLink::new(chip_id.clone(), DeviceRelation::Parent))
-    .capability(pwm_capability("pwm.enable", CapabilityAccess::WRITE))
-    .capability(pwm_capability("pwm.configure", CapabilityAccess::CONFIGURE))
-    .capability(pwm_capability(
-        "pwm.set_period",
-        CapabilityAccess::CONFIGURE,
-    ))
-    .capability(pwm_capability(
+    .capability(capability("pwm.enable", CapabilityAccess::WRITE))
+    .capability(capability("pwm.configure", CapabilityAccess::CONFIGURE))
+    .capability(capability("pwm.set_period", CapabilityAccess::CONFIGURE))
+    .capability(capability(
         "pwm.set_duty_cycle",
         CapabilityAccess::CONFIGURE,
     ))
-    .capability(pwm_capability(
-        "pwm.get_configuration",
-        CapabilityAccess::READ,
-    ));
+    .capability(capability("pwm.get_configuration", CapabilityAccess::READ));
 
     if let Some(chip_index) = data.chip_index {
         builder = builder.property("chip_index", u64::from(chip_index));
@@ -188,8 +181,4 @@ fn build_channel_descriptor(
             data.chip_name, channel
         )
     })
-}
-
-fn pwm_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static PWM capability identifiers are valid")
 }

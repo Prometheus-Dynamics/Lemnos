@@ -1,11 +1,11 @@
 use super::absent_root;
+use super::descriptor::capability;
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
 use crate::util::{existing_path_string, file_name, read_dir_sorted, read_link_name, read_trimmed};
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceHealth,
-    DeviceKind, InterfaceKind,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceHealth, DeviceKind, InterfaceKind,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -110,17 +110,11 @@ fn build_port_descriptor(
     .label("port", port_name.to_string())
     .property("port", port_name.to_string())
     .property("sysfs_path", tty_path.display().to_string())
-    .capability(uart_capability("uart.read", CapabilityAccess::READ))
-    .capability(uart_capability("uart.write", CapabilityAccess::WRITE))
-    .capability(uart_capability(
-        "uart.configure",
-        CapabilityAccess::CONFIGURE,
-    ))
-    .capability(uart_capability("uart.flush", CapabilityAccess::WRITE))
-    .capability(uart_capability(
-        "uart.get_configuration",
-        CapabilityAccess::READ,
-    ));
+    .capability(capability("uart.read", CapabilityAccess::READ))
+    .capability(capability("uart.write", CapabilityAccess::WRITE))
+    .capability(capability("uart.configure", CapabilityAccess::CONFIGURE))
+    .capability(capability("uart.flush", CapabilityAccess::WRITE))
+    .capability(capability("uart.get_configuration", CapabilityAccess::READ));
 
     if let Some(dev_major_minor) = dev_major_minor {
         builder = builder.property("dev", dev_major_minor);
@@ -144,8 +138,4 @@ fn build_port_descriptor(
         .build()
         .map(Some)
         .map_err(|error| format!("failed to build UART descriptor for '{port_name}': {error}"))
-}
-
-fn uart_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static UART capability identifiers are valid")
 }

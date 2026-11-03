@@ -1,10 +1,11 @@
+use super::descriptor::{capability, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::with_devnode;
 use crate::util::{existing_path_string, file_name, read_dir_sorted, read_trimmed, read_u32};
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceHealth,
-    DeviceKind, DeviceLink, DeviceRelation, InterfaceKind,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceHealth, DeviceKind, DeviceLink,
+    DeviceRelation, InterfaceKind,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -194,9 +195,15 @@ fn load_chip_data(
 }
 
 fn build_chip_descriptor(data: &GpioChipData) -> Result<DeviceDescriptor, String> {
-    let mut builder = DeviceDescriptor::builder_for_kind(
+    let mut builder = start(
         format!("linux.gpio.chip.{}", data.chip_name),
         DeviceKind::GpioChip,
+        data.label.clone().unwrap_or_else(|| data.chip_name.clone()),
+        "Linux GPIO controller",
+        DeviceAddress::GpioChip {
+            chip_name: data.chip_name.clone(),
+            base_line: data.base,
+        },
     )
     .map_err(|error| {
         format!(
@@ -204,13 +211,6 @@ fn build_chip_descriptor(data: &GpioChipData) -> Result<DeviceDescriptor, String
             data.chip_name
         )
     })?
-    .display_name(data.label.clone().unwrap_or_else(|| data.chip_name.clone()))
-    .summary("Linux GPIO controller")
-    .address(DeviceAddress::GpioChip {
-        chip_name: data.chip_name.clone(),
-        base_line: data.base,
-    })
-    .label("backend", "linux")
     .label("chip_name", data.chip_name.clone())
     .property("line_count", u64::from(data.line_count));
 
@@ -248,9 +248,15 @@ fn build_line_descriptor(
     offset: u32,
     line: Option<&LineExtra>,
 ) -> Result<DeviceDescriptor, String> {
-    let mut builder = DeviceDescriptor::builder_for_kind(
+    let mut builder = start(
         format!("linux.gpio.line.{}.{}", data.chip_name, offset),
         DeviceKind::GpioLine,
+        format!("{}:{offset}", data.chip_name),
+        "Linux GPIO line",
+        DeviceAddress::GpioLine {
+            chip_name: data.chip_name.clone(),
+            offset,
+        },
     )
     .map_err(|error| {
         format!(
@@ -258,28 +264,15 @@ fn build_line_descriptor(
             data.chip_name, offset
         )
     })?
-    .display_name(format!("{}:{offset}", data.chip_name))
-    .summary("Linux GPIO line")
-    .address(DeviceAddress::GpioLine {
-        chip_name: data.chip_name.clone(),
-        offset,
-    })
     .driver_hint("lemnos.gpio.generic")
-    .label("backend", "linux")
     .label("chip_name", data.chip_name.clone())
     .property("chip_name", data.chip_name.clone())
     .property("offset", u64::from(offset))
     .link(DeviceLink::new(chip_id.clone(), DeviceRelation::Parent))
-    .capability(gpio_capability("gpio.read", CapabilityAccess::READ))
-    .capability(gpio_capability("gpio.write", CapabilityAccess::WRITE))
-    .capability(gpio_capability(
-        "gpio.configure",
-        CapabilityAccess::CONFIGURE,
-    ))
-    .capability(gpio_capability(
-        "gpio.get_configuration",
-        CapabilityAccess::READ,
-    ));
+    .capability(capability("gpio.read", CapabilityAccess::READ))
+    .capability(capability("gpio.write", CapabilityAccess::WRITE))
+    .capability(capability("gpio.configure", CapabilityAccess::CONFIGURE))
+    .capability(capability("gpio.get_configuration", CapabilityAccess::READ));
 
     if let Some(base) = data.base.and_then(|base| base.checked_add(offset)) {
         builder = builder.property("global_line", u64::from(base));
@@ -314,8 +307,4 @@ fn build_line_descriptor(
             data.chip_name, offset
         )
     })
-}
-
-fn gpio_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static GPIO capability identifiers are valid")
 }

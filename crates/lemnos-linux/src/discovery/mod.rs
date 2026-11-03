@@ -1,6 +1,7 @@
 use lemnos_discovery::{DiscoveryError, ProbeDiscovery};
 use std::path::Path;
 
+mod descriptor;
 mod gpio;
 #[cfg(feature = "pwm")]
 mod hwmon;

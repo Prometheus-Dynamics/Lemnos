@@ -1,11 +1,12 @@
 use super::absent_root;
+use super::descriptor::capability;
+use super::descriptor::{class_device, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::with_linux_driver;
 use crate::util::{file_name, read_dir_sorted, read_link_name, read_trimmed, read_u32};
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceControlSurface, DeviceDescriptor,
-    DeviceHealth, DeviceKind, InterfaceKind,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceHealth, DeviceKind, InterfaceKind,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -113,36 +114,29 @@ fn build_hwmon_descriptor(
         )
     })?;
 
-    let mut builder = DeviceDescriptor::builder_for_kind(
+    let started = start(
         format!("linux.pwm.hwmon-fan.{hwmon_name}"),
         DeviceKind::Unspecified(InterfaceKind::Pwm),
+        name.clone().unwrap_or_else(|| hwmon_name.to_string()),
+        "Linux hwmon fan control device",
+        DeviceAddress::Custom {
+            interface: InterfaceKind::Pwm,
+            scheme: "linux-hwmon-fan".into(),
+            value: hwmon_name.into(),
+        },
     )
-    .map_err(|error| format!("failed to start Linux hwmon fan descriptor '{hwmon_name}': {error}"))?
-    .display_name(name.clone().unwrap_or_else(|| hwmon_name.to_string()))
-    .summary("Linux hwmon fan control device")
-    .address(DeviceAddress::Custom {
-        interface: InterfaceKind::Pwm,
-        scheme: "linux-hwmon-fan".into(),
-        value: hwmon_name.into(),
-    })
-    .label("backend", "linux")
-    .label("subsystem", "hwmon")
-    .label("hwmon_name", hwmon_name.to_string())
-    .control_surface(DeviceControlSurface::LinuxClass {
-        root: path.display().to_string(),
-    })
-    .label("device.class", "fan")
-    .property("device.class", "fan")
-    .property("linux.subsystem", "hwmon")
-    .property("linux.class_path", path.display().to_string())
-    .property("fan.hwmon_name", hwmon_name.to_string())
-    .capability(fan_capability("fan.get_state", CapabilityAccess::READ))
-    .capability(fan_capability("fan.set_pwm", CapabilityAccess::CONFIGURE))
-    .capability(fan_capability("fan.get_pwm_mode", CapabilityAccess::READ))
-    .capability(fan_capability(
-        "fan.set_pwm_mode",
-        CapabilityAccess::CONFIGURE,
-    ));
+    .map_err(|error| {
+        format!("failed to start Linux hwmon fan descriptor '{hwmon_name}': {error}")
+    })?;
+    let mut builder = class_device(started, "hwmon", path)
+        .label("hwmon_name", hwmon_name.to_string())
+        .label("device.class", "fan")
+        .property("device.class", "fan")
+        .property("fan.hwmon_name", hwmon_name.to_string())
+        .capability(capability("fan.get_state", CapabilityAccess::READ))
+        .capability(capability("fan.set_pwm", CapabilityAccess::CONFIGURE))
+        .capability(capability("fan.get_pwm_mode", CapabilityAccess::READ))
+        .capability(capability("fan.set_pwm_mode", CapabilityAccess::CONFIGURE));
 
     if let Some(name) = name {
         builder = builder.property("hwmon.name", name);
@@ -164,8 +158,4 @@ fn build_hwmon_descriptor(
     builder.build().map(Some).map_err(|error| {
         format!("failed to build Linux hwmon fan descriptor '{hwmon_name}': {error}")
     })
-}
-
-fn fan_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static fan capability identifiers are valid")
 }

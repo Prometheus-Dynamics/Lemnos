@@ -1,11 +1,13 @@
 use super::absent_root;
+use super::descriptor::capability;
+use super::descriptor::{class_device, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::with_linux_driver;
 use crate::util::{file_name, read_dir_sorted, read_link_name, read_trimmed, read_u32};
 use lemnos_core::{
-    CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceControlSurface, DeviceDescriptor,
-    DeviceHealth, DeviceKind, InterfaceKind, Value,
+    CapabilityAccess, DeviceAddress, DeviceDescriptor, DeviceHealth, DeviceKind, InterfaceKind,
+    Value,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
 use std::path::Path;
@@ -107,37 +109,25 @@ fn build_led_descriptor(path: &Path, led_name: &str) -> Result<DeviceDescriptor,
     })?;
     let (active_trigger, available_triggers) = parse_trigger_state(trigger_text.as_deref());
 
-    let mut builder = DeviceDescriptor::builder_for_kind(
+    let started = start(
         format!("linux.gpio.led.{led_name}"),
         DeviceKind::Unspecified(InterfaceKind::Gpio),
+        led_name.to_string(),
+        "Linux LED class device",
+        DeviceAddress::Custom {
+            interface: InterfaceKind::Gpio,
+            scheme: "linux-led-class".into(),
+            value: led_name.into(),
+        },
     )
-    .map_err(|error| format!("failed to start Linux LED descriptor '{led_name}': {error}"))?
-    .display_name(led_name.to_string())
-    .summary("Linux LED class device")
-    .address(DeviceAddress::Custom {
-        interface: InterfaceKind::Gpio,
-        scheme: "linux-led-class".into(),
-        value: led_name.into(),
-    })
-    .label("backend", "linux")
-    .label("subsystem", "leds")
-    .label("led_name", led_name.to_string())
-    .control_surface(DeviceControlSurface::LinuxClass {
-        root: path.display().to_string(),
-    })
-    .property("linux.subsystem", "leds")
-    .property("linux.class_path", path.display().to_string())
-    .property("led.name", led_name.to_string())
-    .capability(led_capability("led.get_brightness", CapabilityAccess::READ))
-    .capability(led_capability(
-        "led.set_brightness",
-        CapabilityAccess::WRITE,
-    ))
-    .capability(led_capability("led.get_trigger", CapabilityAccess::READ))
-    .capability(led_capability(
-        "led.set_trigger",
-        CapabilityAccess::CONFIGURE,
-    ));
+    .map_err(|error| format!("failed to start Linux LED descriptor '{led_name}': {error}"))?;
+    let mut builder = class_device(started, "leds", path)
+        .label("led_name", led_name.to_string())
+        .property("led.name", led_name.to_string())
+        .capability(capability("led.get_brightness", CapabilityAccess::READ))
+        .capability(capability("led.set_brightness", CapabilityAccess::WRITE))
+        .capability(capability("led.get_trigger", CapabilityAccess::READ))
+        .capability(capability("led.set_trigger", CapabilityAccess::CONFIGURE));
 
     if let Some(brightness) = brightness {
         builder = builder.property("led.brightness", u64::from(brightness));
@@ -201,8 +191,4 @@ fn parse_trigger_state(value: Option<&str>) -> (Option<String>, Vec<String>) {
     }
 
     (active, available)
-}
-
-fn led_capability(id: &str, access: CapabilityAccess) -> CapabilityDescriptor {
-    CapabilityDescriptor::new(id, access).expect("static LED capability identifiers are valid")
 }
