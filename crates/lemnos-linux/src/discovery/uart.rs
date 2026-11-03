@@ -1,3 +1,4 @@
+use super::absent_root;
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
@@ -36,10 +37,7 @@ impl DiscoveryProbe for UartDiscoveryProbe {
         let mut discovery = ProbeDiscovery::default();
 
         if !tty_root.exists() {
-            discovery.notes.push(format!(
-                "TTY sysfs root '{}' is not present",
-                tty_root.display()
-            ));
+            absent_root(&mut discovery, "TTY sysfs root", &tty_root);
             return Ok(discovery);
         }
 

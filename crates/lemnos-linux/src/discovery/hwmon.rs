@@ -1,3 +1,4 @@
+use super::absent_root;
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::with_linux_driver;
@@ -36,10 +37,7 @@ impl DiscoveryProbe for HwmonDiscoveryProbe {
         let mut discovery = ProbeDiscovery::default();
 
         if !hwmon_root.exists() {
-            discovery.notes.push(format!(
-                "Linux hwmon sysfs root '{}' is not present",
-                hwmon_root.display()
-            ));
+            absent_root(&mut discovery, "Linux hwmon sysfs root", &hwmon_root);
             return Ok(discovery);
         }
 

@@ -1,3 +1,4 @@
+use super::absent_root;
 use crate::LinuxPaths;
 use crate::util::{file_name, read_dir_sorted, read_trimmed};
 use lemnos_core::{
@@ -39,10 +40,7 @@ impl DiscoveryProbe for ThermalDiscoveryProbe {
         }
         let root = self.paths.thermal_class_root();
         if !root.exists() {
-            discovery.notes.push(format!(
-                "Linux thermal sysfs root '{}' is not present",
-                root.display()
-            ));
+            absent_root(&mut discovery, "Linux thermal sysfs root", &root);
             return Ok(discovery);
         }
         let entries = read_dir_sorted(&root).map_err(|error| DiscoveryError::ProbeFailed {

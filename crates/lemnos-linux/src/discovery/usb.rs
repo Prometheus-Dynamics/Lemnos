@@ -1,3 +1,4 @@
+use super::absent_root;
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
@@ -54,10 +55,7 @@ impl DiscoveryProbe for UsbDiscoveryProbe {
         let mut discovery = ProbeDiscovery::default();
 
         if !devices_root.exists() {
-            discovery.notes.push(format!(
-                "USB sysfs root '{}' is not present",
-                devices_root.display()
-            ));
+            absent_root(&mut discovery, "USB sysfs root", &devices_root);
             return Ok(discovery);
         }
 

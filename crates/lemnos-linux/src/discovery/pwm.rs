@@ -1,3 +1,4 @@
+use super::absent_root;
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::util::{file_name, parse_prefixed_u32, read_dir_sorted, read_u32};
@@ -35,10 +36,7 @@ impl DiscoveryProbe for PwmDiscoveryProbe {
         let mut discovery = ProbeDiscovery::default();
 
         if !pwm_root.exists() {
-            discovery.notes.push(format!(
-                "PWM sysfs root '{}' is not present",
-                pwm_root.display()
-            ));
+            absent_root(&mut discovery, "PWM sysfs root", &pwm_root);
             return Ok(discovery);
         }
 

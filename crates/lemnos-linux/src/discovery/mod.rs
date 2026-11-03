@@ -1,4 +1,4 @@
-use lemnos_discovery::DiscoveryError;
+use lemnos_discovery::{DiscoveryError, ProbeDiscovery};
 use std::path::Path;
 
 mod gpio;
@@ -32,6 +32,14 @@ pub use thermal::ThermalDiscoveryProbe;
 pub use uart::UartDiscoveryProbe;
 #[cfg(feature = "usb")]
 pub use usb::UsbDiscoveryProbe;
+
+/// Notes that a probe's sysfs root is absent: the probe then reports nothing
+/// and succeeds, as on a kernel without that subsystem.
+fn absent_root(discovery: &mut ProbeDiscovery, label: &str, root: &Path) {
+    discovery
+        .notes
+        .push(format!("{label} '{}' is not present", root.display()));
+}
 
 /// A probe's failed filesystem read, named by what it was doing.
 fn probe_failed(probe: &str, path: &Path, action: &str, error: std::io::Error) -> DiscoveryError {

@@ -1,3 +1,4 @@
+use super::absent_root;
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::with_linux_driver;
@@ -36,10 +37,7 @@ impl DiscoveryProbe for LedDiscoveryProbe {
         let mut discovery = ProbeDiscovery::default();
 
         if !leds_root.exists() {
-            discovery.notes.push(format!(
-                "Linux LED sysfs root '{}' is not present",
-                leds_root.display()
-            ));
+            absent_root(&mut discovery, "Linux LED sysfs root", &leds_root);
             return Ok(discovery);
         }
 
