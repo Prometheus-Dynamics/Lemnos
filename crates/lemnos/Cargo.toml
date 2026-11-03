@@ -17,7 +17,10 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [features]
-default = []
+# Byte-accurate retained-event limits (`max_retained_event_bytes`); off in the
+# constrained images (`default-features = false`).
+default = ["runtime-retention-bytes"]
+runtime-retention-bytes = ["lemnos-runtime/retention-bytes"]
 full = ["board", "builtin-drivers", "linux", "macros", "mock", "parallel-discovery"]
 builtin-drivers = [
     "dep:lemnos-device",
@@ -80,7 +83,7 @@ lemnos-drivers-usb = { workspace = true, optional = true }
 lemnos-linux = { workspace = true, optional = true, default-features = false }
 lemnos-macros = { workspace = true, optional = true }
 lemnos-mock = { workspace = true, optional = true }
-lemnos-runtime.workspace = true
+lemnos-runtime = { workspace = true, default-features = false }
 tokio = { workspace = true, optional = true, features = ["rt", "sync"] }
 
 [dev-dependencies]

@@ -17,6 +17,11 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [features]
+default = ["retention-bytes"]
+# Byte estimates of retained events, for `max_retained_event_bytes`. Off: the
+# byte limit is not enforced (the event count limit still is) and the
+# estimator is not built.
+retention-bytes = []
 gpio-cdev = ["lemnos-linux/gpio-cdev"]
 tracing = ["dep:tracing"]
 tokio = ["dep:tokio"]
