@@ -63,7 +63,7 @@ impl fmt::Display for DeviceKind {
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DeviceAddress {
     GpioChip {
         chip_name: String,
@@ -137,6 +137,18 @@ impl DeviceAddress {
             }
             Self::Custom { interface, .. } => *interface,
         }
+    }
+}
+
+/// `DeviceAddress(gpio-chip:gpiochip0@0)`: the address's [`Display`] form,
+/// which is the one-line text logs and errors already use. The derived
+/// `Debug` printed every field of every variant and cost about 6 KB of
+/// formatting code on small targets.
+impl fmt::Debug for DeviceAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DeviceAddress")
+            .field(&format_args!("{self}"))
+            .finish()
     }
 }
 
