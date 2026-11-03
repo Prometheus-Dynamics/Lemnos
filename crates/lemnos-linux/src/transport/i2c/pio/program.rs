@@ -269,6 +269,25 @@ mod tests {
         assert_eq!(ds(LOW, 7), 0x17);
     }
 
+    /// The instruction slots of `/dev/pio0` (32 per block), as the programs
+    /// resident on it take them. The kernel's `ws2812-pio-rp1` overlay program
+    /// holds 0..3 (four slots); this I2C master takes the first run that fits
+    /// after it (origin 4, 27 slots). One slot stays free: a second program that
+    /// needs two or more slots cannot share the block (see docs/io-blocks.md).
+    #[test]
+    fn resident_programs_fit_the_32_slot_block() {
+        use lemnos_linux_sys::rp1_pio::{INSTRUCTION_COUNT, first_fit, slot_mask};
+        const WS2812_PIO_RP1_LEN: usize = 4;
+        let mut occupied = slot_mask(0, WS2812_PIO_RP1_LEN);
+        let base = first_fit(occupied, PROGRAM_LEN).expect("the I2C program fits");
+        assert_eq!(base, 4, "the I2C program loads beside the ws2812 program");
+        assert!(usize::from(base) + PROGRAM_LEN <= INSTRUCTION_COUNT);
+        occupied |= slot_mask(base, PROGRAM_LEN);
+        assert_eq!(occupied.count_ones(), 31, "31 of 32 slots are in use");
+        assert_eq!(first_fit(occupied, 2), None);
+        assert_eq!(first_fit(occupied, 1), Some(31));
+    }
+
     #[test]
     fn program_jump_targets_stay_inside_the_program() {
         for base in 0..=5u16 {

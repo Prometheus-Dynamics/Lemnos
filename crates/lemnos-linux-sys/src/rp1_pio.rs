@@ -444,6 +444,27 @@ impl PioDevice {
     }
 }
 
+/// The instruction slots a program of `len` instructions at `origin` occupies,
+/// as a bitmask (bit n = slot n).
+pub const fn slot_mask(origin: u16, len: usize) -> u32 {
+    let span = if len >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << len) - 1
+    };
+    span << origin
+}
+
+/// The lowest origin where `len` consecutive slots are free in `occupied`
+/// (a [`slot_mask`] of the resident programs), or `None` when no run fits.
+/// Matches the origin order the Lemnos loaders try (0 upward).
+pub fn first_fit(occupied: u32, len: usize) -> Option<u16> {
+    if len == 0 || len > INSTRUCTION_COUNT {
+        return None;
+    }
+    (0..=(INSTRUCTION_COUNT - len) as u16).find(|&origin| slot_mask(origin, len) & occupied == 0)
+}
+
 /// RP2040-layout register helpers (`pio_rp1.h`): the PINCTRL, SHIFTCTRL,
 /// EXECCTRL and CLKDIV fields used by Lemnos.
 pub mod regs {
@@ -520,6 +541,20 @@ mod tests {
         assert_eq!(SM_XFER_DATA32, 0x4010_6602); // _IOW(102, 2, 16 bytes)
         assert_eq!(SM_CLAIM, 0x4002_6614); // _IOW(102, 20, 2 bytes)
         assert_eq!(ADD_PROGRAM, 0x4044_660b); // _IOW(102, 11, 68 bytes)
+    }
+
+    #[test]
+    fn slot_masks_place_programs_and_first_fit_finds_the_gap() {
+        assert_eq!(slot_mask(0, 4), 0b1111);
+        assert_eq!(slot_mask(4, 27), 0x7fff_fff0);
+        assert_eq!(slot_mask(0, 32), u32::MAX);
+        // A 4-slot program at 0 leaves 4 and up free: a 27-slot program lands at 4.
+        assert_eq!(first_fit(slot_mask(0, 4), 27), Some(4));
+        // Nothing fits in a full block, and nothing empty-length or oversized.
+        assert_eq!(first_fit(u32::MAX, 1), None);
+        assert_eq!(first_fit(0, 0), None);
+        assert_eq!(first_fit(0, 33), None);
+        assert_eq!(first_fit(0, 32), Some(0));
     }
 
     #[test]
