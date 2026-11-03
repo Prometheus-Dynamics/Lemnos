@@ -362,7 +362,9 @@ impl Runtime {
                 .merge_snapshot(&self.inventory, discovery)
                 .map_err(RuntimeError::from)
         } else {
-            Ok(Arc::unwrap_or_clone(std::mem::take(&mut discovery.snapshot)))
+            Ok(Arc::unwrap_or_clone(std::mem::take(
+                &mut discovery.snapshot,
+            )))
         }
     }
 }

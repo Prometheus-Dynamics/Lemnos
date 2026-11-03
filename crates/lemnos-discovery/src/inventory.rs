@@ -159,12 +159,7 @@ impl InventoryDiff {
     pub fn events(&self) -> Vec<InventoryEvent> {
         let mut events =
             Vec::with_capacity(self.added.len() + self.changed.len() + self.removed.len());
-        events.extend(
-            self.added
-                .iter()
-                .cloned()
-                .map(InventoryEvent::Added),
-        );
+        events.extend(self.added.iter().cloned().map(InventoryEvent::Added));
         events.extend(
             self.changed
                 .iter()

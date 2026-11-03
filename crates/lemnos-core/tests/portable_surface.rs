@@ -133,7 +133,9 @@ fn serde_round_trip_preserves_inventory_events() {
         .build()
         .expect("descriptor");
 
-    let event = LemnosEvent::Inventory(Box::new(InventoryEvent::Added(std::sync::Arc::new(descriptor))));
+    let event = LemnosEvent::Inventory(Box::new(InventoryEvent::Added(std::sync::Arc::new(
+        descriptor,
+    ))));
     let encoded = serde_json::to_string(&event).expect("serialize inventory event");
     let decoded: LemnosEvent = serde_json::from_str(&encoded).expect("deserialize inventory event");
 
