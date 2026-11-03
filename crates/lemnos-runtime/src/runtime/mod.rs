@@ -9,18 +9,32 @@ use lemnos_discovery::{
 };
 use lemnos_driver_sdk::{BoundDevice, Driver};
 use lemnos_registry::DriverRegistry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crate::subscription::RuntimeEventNotifier;
+use device_map::DeviceMap;
 
+mod device_map;
 mod events;
 mod failures;
 mod lifecycle;
 mod operations;
 mod refresh;
 mod requests;
+// Byte estimates for `RuntimeConfig::max_retained_event_bytes`. Without the
+// `retention-bytes` feature every event counts as 0 bytes, so only the event
+// count limit applies and the estimator's code is not built.
+#[cfg(feature = "retention-bytes")]
 mod retention;
+#[cfg(not(feature = "retention-bytes"))]
+mod retention {
+    use lemnos_core::LemnosEvent;
+
+    pub(super) fn estimated_retained_event_bytes(_event: &LemnosEvent) -> usize {
+        0
+    }
+}
 mod watch;
 
 #[cfg(feature = "tokio")]
@@ -128,10 +142,10 @@ pub struct Runtime {
     running: bool,
     inventory: Arc<InventorySnapshot>,
     registry: DriverRegistry,
-    states: BTreeMap<DeviceId, Arc<DeviceStateSnapshot>>,
-    bindings: BTreeMap<DeviceId, SharedBoundDevice>,
+    states: DeviceMap<Arc<DeviceStateSnapshot>>,
+    bindings: DeviceMap<SharedBoundDevice>,
     probe_inventory: ProbeInventoryIndex,
-    desired_bindings: BTreeSet<DeviceId>,
+    desired_bindings: DeviceMap<()>,
     failures: BTreeMap<DeviceId, RuntimeFailureRecord>,
     backends: RuntimeBackends,
     event_base_index: usize,
@@ -148,10 +162,10 @@ impl Default for Runtime {
             running: true,
             inventory: Arc::new(InventorySnapshot::default()),
             registry: DriverRegistry::default(),
-            states: BTreeMap::default(),
-            bindings: BTreeMap::default(),
+            states: DeviceMap::default(),
+            bindings: DeviceMap::default(),
             probe_inventory: ProbeInventoryIndex::default(),
-            desired_bindings: BTreeSet::default(),
+            desired_bindings: DeviceMap::default(),
             failures: BTreeMap::default(),
             backends: RuntimeBackends::default(),
             event_base_index: 0,

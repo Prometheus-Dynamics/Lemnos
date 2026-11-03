@@ -73,7 +73,7 @@ impl Runtime {
         #[cfg(not(feature = "tracing"))]
         let _ = &started_at;
         if result.is_ok() {
-            self.desired_bindings.insert(device_id.clone());
+            self.desired_bindings.insert(device_id.clone(), ());
         }
         result
     }
@@ -256,7 +256,7 @@ impl Runtime {
     ) -> (bool, bool, bool, bool, bool, Option<DetachedBoundDevice>) {
         let detached = self.take_bound_device(device_id);
         let removed_binding = detached.is_some();
-        let removed_interest = self.desired_bindings.remove(device_id);
+        let removed_interest = self.desired_bindings.remove(device_id).is_some();
         let removed_state = self.states.remove(device_id).is_some();
         let removed_failure = self.failures.remove(device_id).is_some();
         let removed_anything =
@@ -301,6 +301,7 @@ impl Runtime {
 
     fn take_all_bound_devices(&mut self) -> Vec<DetachedBoundDevice> {
         std::mem::take(&mut self.bindings)
+            .into_entries()
             .into_iter()
             .map(|(device_id, binding)| DetachedBoundDevice { device_id, binding })
             .collect()

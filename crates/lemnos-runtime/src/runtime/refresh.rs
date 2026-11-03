@@ -2,6 +2,7 @@ use super::operations::close_detached_bindings;
 use super::*;
 use crate::runtime::operations::DetachedBoundDevice;
 use lemnos_discovery::{EnrichmentReport, ProbeReport};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub(crate) struct PreparedRefreshCommit {
@@ -264,7 +265,8 @@ impl Runtime {
 
         let mut targets = BTreeMap::new();
         for device in candidates {
-            if self.config.auto_rebind_on_refresh && self.desired_bindings.contains(&device.id) {
+            if self.config.auto_rebind_on_refresh && self.desired_bindings.contains_key(&device.id)
+            {
                 targets.insert(device.id.clone(), RuntimeFailureOperation::Rebind);
             } else if self.matches_bind_policy(device) {
                 targets.insert(device.id.clone(), RuntimeFailureOperation::Bind);
@@ -330,7 +332,7 @@ impl Runtime {
             self.complete_operation(device_id.clone(), operation, &result);
             if result.is_ok() {
                 runtime_info!(device_id = ?device_id, operation = ?operation, "runtime device bound by refresh");
-                self.desired_bindings.insert(device_id.clone());
+                self.desired_bindings.insert(device_id.clone(), ());
                 report.rebound.push(device_id);
             } else {
                 if let Err(_error) = &result {

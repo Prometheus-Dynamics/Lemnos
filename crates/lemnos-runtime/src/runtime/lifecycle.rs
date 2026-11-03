@@ -181,7 +181,7 @@ impl Runtime {
     }
 
     pub fn wants_binding(&self, device_id: &DeviceId) -> bool {
-        self.desired_bindings.contains(device_id)
+        self.desired_bindings.contains_key(device_id)
     }
 
     pub fn failure(&self, device_id: &DeviceId) -> Option<&RuntimeFailureRecord> {
@@ -203,7 +203,7 @@ impl Runtime {
 
     #[cfg(feature = "tokio")]
     pub(crate) fn mark_desired_binding(&mut self, device_id: DeviceId) {
-        self.desired_bindings.insert(device_id);
+        self.desired_bindings.insert(device_id, ());
     }
 
     pub(crate) fn ensure_running(&self) -> RuntimeResult<()> {

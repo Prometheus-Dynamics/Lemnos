@@ -89,7 +89,7 @@ impl Runtime {
             && !was_bound
             && let Ok(response) = &result
         {
-            self.desired_bindings.insert(response.device_id.clone());
+            self.desired_bindings.insert(response.device_id.clone(), ());
         }
         result
     }
