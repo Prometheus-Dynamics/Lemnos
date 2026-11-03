@@ -13,7 +13,7 @@ PIO register fields used there, and the board files and code in this repo. The R
 peripherals datasheet is not in the tree, and nothing here was downloaded. Items marked
 **verify on board** are facts this repo does not establish.
 
-## Raze (CM5, RP1)
+## BCM2712 board (RP1)
 
 ### RP1 PIO (`/dev/pio0`, the `rp1_pio` driver)
 
@@ -47,14 +47,14 @@ placement the loader makes.
 | Fan tach counter | impossible now | Any edge-counting loop has a wait and a jump, so it needs two slots or more. One slot is free, so it needs a second block or a program swap. |
 | Edge timestamps in PIO | not used | The kernel edge path already stamps events (see GPIO edges below). PIO timestamping would need a cycle-counter program, which does not fit. Revisit only if on-board jitter measurements say the kernel path is too slow. |
 | Program swapping | unused | Possible for programs that run in bursts (ws2812 writes are bursts). The I2C master runs continuously, so swapping cannot free its slots. |
-| Second PIO block | verify on board | If `/dev/pio1` exists on the Raze, the tach counter and any future PIO program go there. Not wired in Lemnos (the DEFAULT_DEVNODE is `/dev/pio0`). |
+| Second PIO block | verify on board | If `/dev/pio1` exists on the BCM2712 board, the tach counter and any future PIO program go there. Not wired in Lemnos (the DEFAULT_DEVNODE is `/dev/pio0`). |
 
 ### RP1 PWM
 
 | Capability | Status | Used for / plan |
 | --- | --- | --- |
 | PWM output (sysfs `pwm`) | used | The fan (`pwm-fan`, `pwm1`; the fan controller and hand-back write it, see composite-devices.md). Also PWM examples in board files. |
-| PWM input / counter mode (count edges on the B pin) | impossible from userspace | The sysfs PWM interface does not expose it. Needs a kernel driver change (a Styx out-of-tree module or the stock `pwm` driver), and the Raze fan's tach line is not in this repo. |
+| PWM input / counter mode (count edges on the B pin) | impossible from userspace | The sysfs PWM interface does not expose it. Needs a kernel driver change (a module outside this tree, or the stock `pwm` driver), and the BCM2712 board fan's tach line is not in this repo. |
 
 ### RP1 GPIO (edges, timestamps)
 
@@ -78,17 +78,17 @@ placement the loader makes.
 | Block | Status | Used for / plan |
 | --- | --- | --- |
 | I2C controllers (`i2c@74000` and others) | used where wired | Hardware buses the drivers bind to (board file `i2c:` selectors). The BMI088 is on the PIO bus because its pins (8/7) are not on one. |
-| SPI controllers | available, not on the Raze board file in this repo | spidev drivers exist (`lemnos-drivers-spi`); verify the Raze's wiring. |
-| UART | available, not on the Raze board file in this repo | `lemnos-drivers-uart`; verify the Raze's wiring. |
+| SPI controllers | available, not on the BCM2712 board board file in this repo | spidev drivers exist (`lemnos-drivers-spi`); verify the BCM2712 board's wiring. |
+| UART | available, not on the BCM2712 board board file in this repo | `lemnos-drivers-uart`; verify the BCM2712 board's wiring. |
 
 ## Plan, in order
 
 1. Done (1e0c504): edge stamps on the readings' clock, microseconds.
 2. Written, untested on board: nothing new on the PIO block. Its one free slot stays free.
-3. Needs board wiring (the Raze's board file is in the consuming app, HeliOS
-   `devices/`): BMI088 INT1 and the camera strobe as edge streams, so each IMU sample and
+3. Needs board wiring (the board file is in the consuming app's
+   `devices/`, not this repo): BMI088 INT1 and the camera strobe as edge streams, so each IMU sample and
    camera frame has an acquisition stamp on the boot clock.
-4. Fan tach: blocked. The Raze's fan tach line is not in this repo's board files, and
+4. Fan tach: blocked. The BCM2712 board's fan tach line is not in this repo's board files, and
    the kernel's PWM counter mode is not reachable from userspace. If the tach line is
    confirmed: first check `/dev/pio1` (second block) and then decide between a second
    block and a PWM counter driver. Do not free the I2C program's slots for it.

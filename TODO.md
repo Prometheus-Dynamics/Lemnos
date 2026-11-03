@@ -12,6 +12,19 @@ first; the other boards' items below are still needed, after it.
 
 - [ ] **RP1 IO blocks used in full on the Raze.** The RP1 part of "IO hardware blocks, used in
       full" below (PIO capacity and sharing, frame-sync and IMU timestamps on one clock, fan tach).
+      Status 2026-11-02, from [docs/io-blocks.md](docs/io-blocks.md):
+      - Done, host-tested: GPIO edge events are stamped on CLOCK_BOOTTIME in microseconds, the
+        clock of the readings (1e0c504, `GpioEdgeEvent::observed_at_us`). Written, untested on board.
+      - Done, host-tested: the PIO slot map. The ws2812 program (0..3) and the I2C master
+        (4..30) fill 31 of 32 slots on `/dev/pio0`; the test `resident_programs_fit_the_32_slot_block`
+        and `first_fit` in `lemnos-linux-sys` check it (cd0a111). One slot stays free.
+      - Open, needs board wiring (the board file is in the consuming app's `devices/`, not this
+        repo): the BMI088 INT1 line and the camera strobe as edge streams, so every IMU sample and
+        frame has an acquisition stamp on the boot clock.
+      - Blocked, fan tach: the board definitions here name no tach line, and the kernel's PWM
+        counter mode is not reachable from sysfs. A PIO counter needs two slots, and only one is free.
+        Next: confirm the tach wiring and `ls /dev/pio*` on the board; a second block or a program
+        swap decides the rest.
 - [ ] **The new USB layer on a real device.** ae792df and 3c0909f are host-tested only: caller-driven
       reaping, `next_block_until`, `driver()`/`speed()`, a mapped buffer on a real endpoint, through
       Styx's userspace UVC on the Raze.
@@ -67,7 +80,8 @@ when, blocked by.
       - candidates: camera frame-sync and IMU sample timestamps on one clock, the fan tach, any
         remaining bit-banged line;
       - K230D, Rockchip and the RV1106's on-chip RISC-V MCU core: their IO and timer blocks.
-      Blocked by: nothing for the RP1; the boards for the rest.
+      Status (2026-11-02): the RP1 part is in docs/io-blocks.md (the capability table and plan);
+      its open items are the Alpha item above. Blocked by: nothing for the RP1; the boards for the rest.
 
 ### 3. Release mechanics
 
