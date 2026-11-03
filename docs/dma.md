@@ -4,8 +4,7 @@ Status: implemented in `lemnos-linux` (feature `dma`) and `lemnos-bus` (the tran
 interface); host-tested against the system dma-heap. Verified on the BCM2712 board (board #2,
 kernel 7.2.9-v8-16k, 16K pages): the three dma-heaps, sync-file fences from a real driver
 (DRM syncobj), a pending fence from a running v3d job (2026-11-03), and the SPI and I2C engines
-(numbers below). The RP1 DMAC engine is written (feature `rp1-dma`) and untested for transfers;
-PCIe DMA does not exist yet (see "Planned").
+(numbers below).
 
 ## Scope
 
@@ -13,6 +12,8 @@ Lemnos is user-space hardware access. It allocates and synchronises DMA buffers,
 and hands their descriptors to whoever reads or writes them. It is not a memory manager: it
 does not pool buffers, decide which buffer holds which frame, choose a heap for a use, or
 move data. A buffer is handed over as the same descriptor, never copied.
+
+Device DMA goes through kernel drivers, never raw controller registers from user space.
 
 ## Buffers (`lemnos_linux::dma`)
 
@@ -83,44 +84,6 @@ the transfer settles (IN); a dropped or cancelled ticket leaves the caller's buf
 Each submit allocates its own URB buffer (the one-shot form). Streams keep buffers and
 reuse them (`lemnos-usb`'s `BulkReader` and `BulkWriter`). Host-tested on the settle
 logic and the error mapping; the transfer itself is untested on hardware.
-
-Planned, each a new `TransferEngine` (RP1 is written, see below):
-
-- **PCIe DMA**: descriptor rings over vfio, with dma-buf sources. Not written: no reachable device,
-  and the trait is the shape it would take.
-- **RP1 DMA**: written, feature `rp1-dma` (off by default), `lemnos_linux::rp1_dma::Rp1DmaEngine`.
-  The DesignWare AXI DMAC (`dw_axi_dmac_platform`, 8 channels) at RP1 `0x1f00188000` (`dma2` in
-  `/sys/kernel/debug/dmaengine`). Register layout from the kernel's `dw-axi-dmac` driver
-  (`lemnos_linux_sys::dw_axi_dmac`). Reached only through `/dev/mem` (root): a read-only mapping
-  reads the state, and a writable one is needed for transfers. Behaviour:
-  - copies dma-buf to dma-buf, one block, software handshaking, 8/4/2/1-byte width from the
-    alignment of both addresses and the length;
-  - uses channels 3 to 7 only (`FIRST_FREE_CHANNEL`); channels 0 to 2 are the kernel PIO's and are
-    refused at construction;
-  - refuses to start if the DMAC is not running or no configured channel is idle (`Busy`);
-  - bus addresses come from a caller-supplied `BusAddress`: the RP1's view of a dma-buf. Nothing
-    derives it, and a wrong one moves data to the wrong place;
-  - `cancel` waits for the copy to finish (the controller's abort register is not wired), so a
-    ticket is never dropped while the controller still writes.
-  Board #1 (read only, 2026-11-03, `Window` mapped `PROT_READ`): `COMPVER` `0x3130332a`, controller
-  enabled, no channel enabled, channels 3 to 7 idle. Untested on board: any transfer. Host-tested
-  against a fake register file (channel choice, refusals, programming order and values, error and
-  silent-stop reporting). Blocker, one line: verified RP1-view bus addresses for a dma-heap buffer
-  (not established: how the RP1's inbound PCIe window maps host memory, and the pagemap PFNs need
-  root). Until then no transfer starts on a board.
-  Board #1, 2026-11-03, the translation and the address source (no DMA run). The RP1 bus address of
-  a CPU physical address, from the live device tree: the PCIe node's `dma-ranges` (CPU to PCI bus,
-  `0x10_0000_0000` + PA for the 64 GiB inbound window) composed with RP1's `dma-ranges` (PCI bus
-  to RP1 side, identity for `0x10_0000_0000`). Two entries of RP1's list also cover that PCI range
-  (one with a 32-bit space code and a non-zero middle cell), so the translation refuses ambiguous
-  matches. The source of the physical address is the blocker: `/proc/self/pagemap` reports the
-  dma-buf mapping's pages as not present (entry 0) on this kernel, though it works for anonymous
-  memory, and the `/dev/mem` bytes at the physical address it gave for an anonymous probe page did
-  not match that page. The CMA reservation has no fixed `reg` in the device tree to scan. No
-  verified physical address, so the pattern check of step 3 fails and the example stops before
-  any DMA. The example is kept out of the tree until that is solved.
-- PCIe DMA: not written. No PCIe DMA device on either board is reachable from user space without
-  vfio, so the interface would be untested; the `TransferEngine` trait is the shape it would take.
 
 `lemnosd` arbitrates ownership of an engine and is never in the data path; pools and
 data-movement decisions stay with the consumer.

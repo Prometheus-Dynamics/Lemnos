@@ -20,7 +20,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - `docs/scope-overlaps.md`: the light engine, the IMU fusion crate and the client queue in `lemnosd`, with options and a recommendation. Nothing moved.
 
 - DMA buffers in `lemnos-linux` (feature `dma`): dma-heap allocation (`dma::DmaHeap`, `DmaBuf`), dma-buf CPU-access sync, RAII mappings (`Mapping`), buffer names, and sync-file fences (`SyncFence`: export, import, poll). Pure Rust over `lemnos-linux-sys`; the kernel's sync-file calls report `Unsupported` where missing. `docs/dma.md`.
-- A transfer interface for buses and DMA engines, `lemnos_bus::transfer::TransferEngine` (submit, poll, wait, cancel), over memory or dma-bufs, with the synchronous SPI (`SpidevEngine`) and I2C (`I2cEngine`) engines in `lemnos-linux::transfer`. USB bulk, PCIe DMA and RP1 DMA are planned engines, not implemented (`docs/dma.md`).
+- A transfer interface for buses and DMA engines, `lemnos_bus::transfer::TransferEngine` (submit, poll, wait, cancel), over memory or dma-bufs, with the synchronous SPI (`SpidevEngine`) and I2C (`I2cEngine`) engines in `lemnos-linux::transfer` (`docs/dma.md`).
 - V4L2 memory-to-memory sessions in `lemnos-linux` (feature `v4l2-m2m`): `v4l2::m2m::M2mSession` opens a memory-to-memory node, sets the output and capture formats (single- or multi-planar), requests MMAP or dma-buf buffers, queues and dequeues by index without blocking, streams, polls, drains (`Drain::Encoder`, `Drain::Decoder`) and subscribes to events. `docs/m2m.md`.
 - `lemnos-linux-sys`: dma-heap, dma-buf, `mmap` and V4L2 wrappers with layout tests against the kernel headers; `poll` gains `POLLPRI`, `POLLERR`, `POLLHUP` and `POLLNVAL`.
 - The `lemnos-linux` feature `full` includes `dma` and `v4l2-m2m`.
@@ -43,7 +43,6 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Composite devices: the fan controller (`lemnos_device::fan_control`, no_std: piecewise-linear curves per input, the maximum demand, a floor, hysteresis, slew-limited falls, a spin-up kick, full duty when an input goes stale), declared as a `[[composites]]` entry in the board file and hosted by `lemnosd`. `docs/composite-devices.md`.
 - IIO buffered reads: `lemnos_drivers_linux::IioBuffer` (`KernelDevice::buffered`): scan elements, trigger, the timestamp channel on CLOCK_BOOTTIME, poll-based reads. Untested on a board.
 - `lemnos-soc`, a no_std data crate: IO blocks and their capabilities for the K230D, RK3588S, RK3576, RK3566, RK3562 and RV1106, with register layouts for the Rockchip PWM and timer and the RISC-V CLINT. Untested on a board. `docs/io-blocks.md`.
-- RP1 DMA engine: `lemnos_linux::rp1_dma::Rp1DmaEngine` (feature `rp1-dma`, off by default), a `TransferEngine` on the RP1's DesignWare AXI DMAC, channels 3 to 7. Untested for transfers.
 - V4L2 requests for stateless codecs: media entities, request allocation, queueing and reinit, extended controls per request, `QBUF` with a request descriptor (`lemnos_linux::v4l2::Request`, `set_request_controls`, `queue_output_in_request`). `docs/m2m.md`.
 - USB firmware download: `UsbDevice::dfu_download` (blocks of the device's `wTransferSize`) and `wait_for_device` for the re-enumeration. Verified on a Coral USB accelerator on both boards. `docs/usb.md`.
 - Read timing over IPC: `Request::Stats` / `Message::Stats`, `lemnos-ctl stats` (per-device read counts and costs).
@@ -55,7 +54,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - The `Composite` trait (`lemnos-device`: inputs, outputs, period, step, release) and `FanDevice`: the fan controller is a device slot, listed by `lemnos-ctl list` with its status, reason, channels and controls. Client tuning outlives the writer and is saved in `<state>/fan/<id>.tuning`, applied over the board's settings at start. The watchdog is pinged only while every enabled controller has stepped lately.
 - The board validator opens the RP1 PIO I2C bus (`pio-i2c:sda=N,scl=N` targets, facade feature `rp1`), so it checks the BMI088 there.
 - `lemnos-hevc`, a no_std HEVC bitstream parser (VPS, SPS, PPS and IDR slice headers) for stateless decoders, and the V4L2 stateless HEVC controls (`lemnos-linux-sys`, `lemnos_linux::v4l2::hevc`, feature `v4l2-hevc`). One IDR frame decoded on rpi-hevc-dec matches a VA-API decode byte for byte. Non-IDR slices are refused.
-- A pending v3d sync-file fence verified on hardware (TFU copy jobs with an out-syncobj, `docs/dma.md`), and the RP1 DMA bus-address translation recorded there.
+- A pending v3d sync-file fence verified on hardware (TFU copy jobs with an out-syncobj, `docs/dma.md`).
 - Hardware results recorded: USB on both boards (`docs/usb.md`), DMA heaps, fences and the I2C engine (`docs/dma.md`), lemnosd timing, FIFO vs polled and memory on board #1 (`docs/system-service.md`).
 
 ### Changed

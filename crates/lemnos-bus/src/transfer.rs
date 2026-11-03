@@ -8,10 +8,9 @@
 //! or cancelled.
 //!
 //! Who implements it: `lemnos_linux::transfer` has the synchronous buses (SPI
-//! through spidev, I2C through i2c-dev). They move bytes through the CPU, so
-//! they complete a transfer in `submit` and refuse dma-bufs. Planned, not
-//! implemented: USB bulk endpoints (a hook for them when the USB transport
-//! lands), PCIe DMA and RP1 DMA channels. The engines never decide what data
+//! through spidev, I2C through i2c-dev), which move bytes through the CPU, so
+//! they complete a transfer in `submit` and refuse dma-bufs, and USB bulk
+//! endpoints (feature `usb`). Device DMA stays in kernel drivers. The engines never decide what data
 //! moves where: pools and buffer choices stay with the consumer, and `lemnosd`
 //! arbitrates ownership of an engine but is not in the data path.
 

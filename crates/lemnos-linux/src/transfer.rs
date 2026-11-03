@@ -5,8 +5,7 @@
 //! `submit`: the ticket is already complete, `poll` and `wait` report it at
 //! once, and `cancel` has nothing to stop. dma-bufs are refused with
 //! [`TransferError::Unsupported`]. USB bulk (feature `usb`) is asynchronous:
-//! its ticket holds the URB until the kernel finishes it. A PCIe or RP1 DMA
-//! engine implements the same trait when it lands.
+//! its ticket holds the URB until the kernel finishes it.
 
 #[cfg(any(feature = "i2c", feature = "spi"))]
 use std::io;

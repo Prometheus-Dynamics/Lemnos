@@ -29,7 +29,8 @@ Boards: two BCM2712 boards, #1 and #2, each with a USB webcam and a Coral USB ac
 - [x] **21. HEVC decode** (9f0c0d8, 0ce8289, 78222b0, #1 rpi-hevc-dec): `lemnos-hevc`, a no_std
       parser (IDR path only), and the stateless HEVC controls (`v4l2-hevc`). One 320x240 IDR
       decodes and matches the host VA-API decode byte for byte (3 runs); request run 181-192 us.
-- [ ] **22. RP1 DMA transfer:** blocked, below. Nothing was written to RP1 memory.
+- [x] **22. Raw RP1 DMA dropped** (the user, 2026-11-03): the `rp1-dma` engine, its register
+      layout and the planned PCIe DMA engine are removed. Device DMA goes through kernel drivers.
 
 ## Round 3 (the user's ruling, 2026-11-03)
 
@@ -98,10 +99,6 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
       (019d090). Fences: a signalled v3d syncobj exports and imports. I2C engine: BMM150 chip id in
       435 us (#2). SPI: zero-length only. M2M: stateless request API (bb4eb7e, e24e50a), host
       decode through vicodec; on #1 rpi-hevc-dec takes a request, a control and an OUTPUT buffer.
-- [x] **22. RP1 DMA engine** (060d755, feature `rp1-dma`, off by default): a `TransferEngine` on
-      the DesignWare AXI DMAC, channels 3-7 only (0-2 are the kernel's PIO). #1 read-only: COMPVER
-      0x3130332a, enabled, channels 3-7 idle. No transfer run. PCIe DMA: skipped (no reachable
-      device; `TransferEngine` is the shape).
 - [x] **24. Isochronous packet tables reused:** the pool was already in c546b44; a host test now
       proves steady-state reuse.
 - [x] **26. Product names out of Lemnos** (569ad29, 47b3b07): look writers are a board-file
@@ -122,11 +119,7 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
 
 ### Left, with blockers
 
-- [ ] 22: an RP1 DMA transfer on a board. The bus address is known (0x10_0000_0000 + PA, from the
-      PCIe and RP1 `dma-ranges`), but the physical-address source is not verified: pagemap reports
-      dma-buf pages as not present, `/dev/mem` does not match a known probe page, and the CMA pool
-      has no fixed `reg`. Needs a verified PA source that passes the read-only pattern check before
-      any DMA write. The example is kept out of the tree.
+- [ ] The live Orion bridge test: waits on board images with the new Orion.
 
 ### Decisions (made during the round)
 
@@ -145,7 +138,6 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
   timestamp element is refused; a running buffer is `Busy`.
 - DMA heaps: CMA requests are capped by `CmaFree`, system by a quarter of `MemAvailable`;
   `DmaHeap::with_capacity` sets a lower cap.
-- RP1 DMA: channels 3-7 only; `cancel` waits for completion (the abort register is not wired).
 - USB: transfers on an unclaimed interface are refused before the kernel; driver rebind after a
   release goes through sysfs, for UVC through the control interface.
 - USB port power (the user, 2026-11-03): a wedged USB device is recovered by cycling its port's
@@ -165,7 +157,6 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
 ## Open (carried)
 
 - [ ] `embedded_hal_async::digital::Wait` on GPIO lines (`AsyncGpioLine`): needs a hardware check.
-- [ ] Accelerator transports over PCIe and MMIO (vfio): not in this round's scope (USB only).
 
 ## Done earlier
 

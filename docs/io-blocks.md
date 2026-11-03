@@ -71,7 +71,7 @@ placement the loader makes.
 | Capability | Status | Used for / plan |
 | --- | --- | --- |
 | RP1 DMA for PIO FIFO transfers | used, by the kernel driver | `XFER_DATA32` moves PIO FIFO data through the driver's DMA (`rp1_pio.rs`). |
-| RP1 DMA for other peripherals (SPI, UART) | written, untested for transfers | `lemnos_linux::rp1_dma::Rp1DmaEngine` (feature `rp1-dma`, off by default) drives the DW AXI DMAC (`dma2`, 8 channels, RP1 `0x1f00188000`) on channels 3 to 7 through `/dev/mem` (root). Read-only state verified on board #1; no transfer run. Blocker: verified RP1-view bus addresses for a dma-heap buffer (docs/dma.md). |
+| RP1 DMA for other peripherals (SPI, UART) | kernel drivers only | Device DMA goes through kernel drivers, never raw controller registers from user space. |
 
 ### RP1 I2C, SPI, UART (hardware blocks)
 
