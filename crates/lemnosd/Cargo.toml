@@ -35,7 +35,8 @@ mock = ["lemnos-hal/mock"]
 # in a board build.
 sim = ["mock", "dep:serde"]
 # The Orion bridge: `lemnos-orion`, a lemnosd client and an Orion provider
-# over local IPC (`lemnosd::orion`). Pins Orion f8d767ac (control protocol 5, the orion-node that board images ship). `orion-node`
+# over local IPC (`lemnosd::orion`). Pins Orion a89ebd5 (control protocol 1,
+# the orion-node that board images ship). `orion-node`
 # is a dev-dependency (only the bridge's tests run an in-process node), so the
 # binary never links it: its default features pull rustls and ring, which the
 # musl artifact cannot build without a C cross toolchain.
@@ -61,16 +62,16 @@ serde = { workspace = true, features = ["derive", "std"], optional = true }
 toml = { workspace = true }
 
 # Orion (feature `orion`). Its crates are not published: pinned to its main.
-orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
-orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
-orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", optional = true }
+orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1", optional = true }
+orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1", optional = true }
+orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1", optional = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"], optional = true }
 
 [dev-dependencies]
 lemnosd = { path = ".", features = ["mock"] }
 # The in-process node for tests/orion_bridge.rs. IPC only: default features
 # would add the HTTP/TCP/QUIC transports (rustls, ring).
-orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "f8d767ac", default-features = false }
+orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1", default-features = false }
 lemnos-bus.workspace = true
 lemnos-core = { workspace = true, features = ["std"] }
 # The integration test runs a multi-thread runtime (the binary is current-thread).

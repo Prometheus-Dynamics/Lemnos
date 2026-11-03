@@ -114,13 +114,10 @@ async fn run_action(
     request.args = args;
     node.run_action(request, "app").expect("run action");
     let result = wait_for(10, "action result", || {
-        node.query_actions(&ActionQuery {
-            action_id: Some(id.to_owned()),
-            target: None,
-        })
-        .into_iter()
-        .next()
-        .filter(|r| !matches!(r.state, ActionState::Accepted | ActionState::Running { .. }))
+        node.query_actions(&ActionQuery::action(id))
+            .into_iter()
+            .next()
+            .filter(|r| !matches!(r.state, ActionState::Accepted | ActionState::Running { .. }))
     })
     .await;
     result.state
