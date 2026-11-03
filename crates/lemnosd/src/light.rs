@@ -26,6 +26,10 @@ pub(crate) struct Light {
     pub animator: Animator<MAX_LEDS>,
     pub arbiter: Arbiter<MAX_LEDS, MAX_INTENTS>,
     shown: Option<(u32, Layer, LightIntent)>,
+    /// Whether the winner has been resolved since the light started (or was
+    /// invalidated): a light with nobody holding an intent must still show its
+    /// default look once, from the start.
+    arbitrated: bool,
     /// The light's gravity settings (its IMU and ring geometry), if the
     /// board gives it any.
     pub gravity: Option<lemnos_board::Gravity>,
@@ -97,6 +101,7 @@ impl Light {
             animator: Animator::new(count.min(MAX_LEDS)),
             arbiter: Arbiter::new(),
             shown: None,
+            arbitrated: false,
             gravity: None,
             look_changed: false,
             waiting_gravity: false,
@@ -269,9 +274,10 @@ impl Light {
         self.arbiter.expire(now_ms);
         let winner = self.arbiter.winner();
         let key = winner.map(|w| (w.owner, w.layer, w.intent));
-        if key == self.shown {
+        if self.arbitrated && key == self.shown {
             return None;
         }
+        self.arbitrated = true;
         let previous = self.shown.map(|(_, _, intent)| intent.show);
         self.shown = key;
         self.info_gen += 1;
@@ -343,6 +349,7 @@ impl Light {
     /// file changed).
     pub fn invalidate(&mut self) {
         self.shown = None;
+        self.arbitrated = false;
         self.info_gen += 1;
     }
 

@@ -446,10 +446,67 @@ fn a_board_names_its_default_look_and_a_light_never_goes_dark_without_one() {
         .to_string();
     assert!(message.contains("default_look"), "{message}");
     assert!(crate::LIGHT_KEYS.contains(&"default_look"));
-    // The system and link looks' keys are gone: a board carrying one is refused.
+    // A retired key is refused, and the error names the look that holds it now.
     let old = crate::BoardDefinition::from_toml_str(&board_text("", "locate_effect = \"chase\""))
         .unwrap();
-    assert!(old.validate(&crate::DriverRegistry::builtin()).is_err());
+    let message = old
+        .validate(&crate::DriverRegistry::builtin())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("\"ring\": config key `locate_effect` is retired; its look is `system.locate` in /etc/lemnos/looks.d"),
+        "{message}"
+    );
+    // Any other unknown key is refused as before.
+    let unknown =
+        crate::BoardDefinition::from_toml_str(&board_text("", "locate_effects = \"chase\""))
+            .unwrap();
+    let message = unknown
+        .validate(&crate::DriverRegistry::builtin())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("unknown config key \"locate_effects\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn every_retired_look_key_is_refused_with_its_look_named() {
+    let registry = crate::DriverRegistry::builtin();
+    for (key, looks) in crate::light::RETIRED_LIGHT_KEYS {
+        let board =
+            crate::BoardDefinition::from_toml_str(&board_text("", &format!("{key} = 1"))).unwrap();
+        let message = board.validate(&registry).unwrap_err().to_string();
+        assert!(
+            message.contains(&format!("config key `{key}` is retired")),
+            "{key}: {message}"
+        );
+        if looks.is_empty() {
+            assert!(message.contains("set by `default_look`"), "{message}");
+        } else {
+            assert!(message.contains(&format!("`{}`", looks[0])), "{message}");
+        }
+    }
+    // Two looks are named together.
+    let board =
+        crate::BoardDefinition::from_toml_str(&board_text("", "failed = 0xff3b3b")).unwrap();
+    let message = board.validate(&registry).unwrap_err().to_string();
+    assert!(
+        message.contains(
+            "its looks are `system.failed` and `system.rolled-back` in /etc/lemnos/looks.d"
+        ),
+        "{message}"
+    );
+    // Only a ws2812 light has these keys: another driver's unknown key is unknown.
+    assert!(crate::light::retired_problem("bmi088", "imu", "failed").is_none());
+    // The default look is the one key that names a look nothing else holds.
+    let idle = crate::BoardDefinition::from_toml_str(&board_text("", "idle = 0x000000")).unwrap();
+    let message = idle.validate(&registry).unwrap_err().to_string();
+    assert!(
+        message.contains("the idle look is set by `default_look`"),
+        "{message}"
+    );
 }
 
 #[test]

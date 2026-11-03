@@ -151,10 +151,14 @@ impl DriverEntry {
         }
         for key in spec.config.keys() {
             if !self.config_keys.contains(&key.as_str()) {
-                problems.push(format!(
-                    "unknown config key {key:?} (accepted: {})",
-                    self.config_keys.join(", ")
-                ));
+                problems.push(
+                    crate::light::retired_problem(self.name, &spec.id, key).unwrap_or_else(|| {
+                        format!(
+                            "unknown config key {key:?} (accepted: {})",
+                            self.config_keys.join(", ")
+                        )
+                    }),
+                );
             }
         }
         for key in spec.matches.keys() {

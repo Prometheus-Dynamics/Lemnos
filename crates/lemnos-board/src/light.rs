@@ -8,6 +8,60 @@ use lemnos_drivers_ws2812::{Direction, StripConfig, Wire};
 use lemnos_hal::ErrorKind;
 use lemnos_light::{Defaults, Easing, EffectKind, LookName, Rgbw};
 
+/// The look directory a moved look is in (`lemnosd`'s default).
+pub const LOOKS_DIR: &str = "/etc/lemnos/looks.d";
+
+/// The ws2812 keys of the system and link looks, retired: the looks are look
+/// files now (`docs/looks.md`, the example set). A board that sets one is
+/// refused, and the error names the look that holds the setting now.
+pub const RETIRED_LIGHT_KEYS: &[(&str, &[&str])] = &[
+    ("idle", &[]),
+    ("locate", &["system.locate"]),
+    ("locate_effect", &["system.locate"]),
+    ("updating", &["system.writing"]),
+    ("verifying", &["system.verifying"]),
+    ("verifying_period_ms", &["system.verifying"]),
+    ("verifying_tail", &["system.verifying"]),
+    ("verifying_base", &["system.verifying"]),
+    ("writing", &["system.writing-unknown"]),
+    ("staged", &["system.staged"]),
+    ("staged_period_ms", &["system.staged"]),
+    ("staged_depth", &["system.staged"]),
+    ("booting", &["system.booting"]),
+    ("booting_period_ms", &["system.booting"]),
+    ("booting_tail", &["system.booting"]),
+    ("booting_base", &["system.booting"]),
+    ("rebooting", &["system.rebooting"]),
+    ("failed", &["system.failed", "system.rolled-back"]),
+    ("failed_period_ms", &["system.failed", "system.rolled-back"]),
+    ("failed_depth", &["system.failed", "system.rolled-back"]),
+    ("confirmed", &["system.confirmed"]),
+];
+
+/// The refusal for a retired key a ws2812 device sets (`None` for any other
+/// key): the device, the key, and where its setting now lives.
+pub(crate) fn retired_problem(driver: &str, device: &str, key: &str) -> Option<String> {
+    if driver != "ws2812" {
+        return None;
+    }
+    let (_, looks) = RETIRED_LIGHT_KEYS.iter().find(|(k, _)| *k == key)?;
+    Some(match looks {
+        [] => format!(
+            "{device:?}: config key `{key}` is retired; the idle look is set by `default_look`"
+        ),
+        [look] => format!(
+            "{device:?}: config key `{key}` is retired; its look is `{look}` in {LOOKS_DIR}"
+        ),
+        many => {
+            let names: Vec<String> = many.iter().map(|l| format!("`{l}`")).collect();
+            format!(
+                "{device:?}: config key `{key}` is retired; its looks are {} in {LOOKS_DIR}",
+                names.join(" and ")
+            )
+        }
+    })
+}
+
 /// The `config` keys of a light. The look defaults of the `status.*` looks and
 /// the progress and spinner shapes; the system and link looks are look files
 /// (`docs/looks.md`, the example set), so their keys are gone.
