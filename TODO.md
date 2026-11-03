@@ -7,6 +7,30 @@ call.
 
 Boards: two BCM2712 boards, #1 and #2, each with a USB webcam and a Coral USB accelerator.
 
+## Round 4 (the user's list, 2026-11-03)
+
+- [x] **Orion protocol 1** (351b7eb, 00aa534): the bridge pinned to Orion a89ebd5. #1's node
+      is older than protocol 1, so there is no live test.
+- [x] **15. Composites** (6d66b53, 7aac6a3): the `Composite` trait in `lemnos-device`; the fan
+      controller is a device slot listed by `lemnos-ctl list` with status, reason, channels and
+      controls; client tuning persists in `<state>/fan/<id>.tuning`; the watchdog is pinged only
+      while every enabled controller has stepped lately. #1 fan: listing, live tuning and
+      persistence tested, then restored exactly.
+- [x] **16. The BMI088 in the validator** (e28ae66): the bus targets take a `pio-i2c:sda=N,scl=N`
+      selector (facade feature `rp1`). Passes on #1.
+- [x] **17. String-keyed maps and probe sharing** (37065b5, 8c1cec0, 1e71ab7, ba46fb7, 153a405,
+      ccafd32, 4b2d0e5, c7174aa): `SmallMap<MapKey, V>` (sorted vector, `Cow<'static, str>` keys)
+      replaces the `BTreeMap`s in descriptors and runtime bookkeeping (an API break, serde shape
+      unchanged); the probes share their descriptor builders. linux-lite 560 928 -> 511 664 B
+      (-8.8 %), linux-lite-builtin 720 584 -> 662 032 B; lemnosd +17 KB from the composite work.
+- [x] **21. Pending fence** (0735212, #2): 1024 TFU copy jobs (4 MiB), the out-syncobj's sync
+      file reads pending straight after the submits and signals 4.9-5.0 ms later; all bytes match
+      in five runs. The TFU `icfg` (32) and one-row-per-job shape came from a sweep.
+- [x] **21. HEVC decode** (9f0c0d8, 0ce8289, 78222b0, #1 rpi-hevc-dec): `lemnos-hevc`, a no_std
+      parser (IDR path only), and the stateless HEVC controls (`v4l2-hevc`). One 320x240 IDR
+      decodes and matches the host VA-API decode byte for byte (3 runs); request run 181-192 us.
+- [ ] **22. RP1 DMA transfer:** blocked, below. Nothing was written to RP1 memory.
+
 ## Round 3 (the user's ruling, 2026-11-03)
 
 Every item below was ruled on by the user. Shas are on `dev`; "host" means this workstation.
@@ -98,22 +122,11 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
 
 ### Left, with blockers
 
-- [ ] 21: a pending sync-file fence on hardware: needs a v3d job with an out-syncobj.
-- [ ] 21: SPI transfer engine with data: no known-safe SPI device on either board.
-- [ ] 21: a full stateless HEVC decode on rpi-hevc-dec: needs an HEVC header parser for the
-      SPS/PPS/slice controls.
-- [ ] 21: USB bulk with a payload on the Coral: needs a known-safe command for its protocol.
-- [ ] 22: an RP1 DMA transfer on a board: needs verified RP1-view bus addresses for a dma-heap
-      buffer.
-- [ ] 23: M2M crop success path: no device on either board supports `VIDIOC_S_SELECTION`.
-- [ ] 16: the BMI088 in the validator: the validator must open the PIO I2C bus.
-- [ ] 17: `finish_refresh`'s work (now `prepare_refresh_commit` ~10 KB and
-      `rebind_tracked_devices` ~12 KB) and the `String`-keyed descriptor maps: the latter are
-      public `lemnos-core` types (an API break).
-- [ ] 8: rows marked "TRM, not checked" in `docs/io-blocks.md`, and the RV1106 beyond its MCU
-      core: need the TRMs and datasheets.
-- [ ] 15: not built: the `Composite` trait, a listing in `lemnos-ctl list`, persisted tuning, live
-      curve controls, the watchdog hook.
+- [ ] 22: an RP1 DMA transfer on a board. The bus address is known (0x10_0000_0000 + PA, from the
+      PCIe and RP1 `dma-ranges`), but the physical-address source is not verified: pagemap reports
+      dma-buf pages as not present, `/dev/mem` does not match a known probe page, and the CMA pool
+      has no fixed `reg`. Needs a verified PA source that passes the read-only pattern check before
+      any DMA write. The example is kept out of the tree.
 
 ### Decisions (made during the round)
 
@@ -145,6 +158,9 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
   lemnosd.
 - Looks: the retired ws2812 look keys are refused, not ignored (the user: nothing unreleased gets
   compat). A light with no owner, or a look name nothing defines, shows `default_look`.
+- `finish_refresh` stays at about 15 KB: split into its steps it showed no duplicated code.
+- HEVC: frame-based decode mode (the only one the driver takes); the driver's NV12 is in 128-byte
+  columns; `bit_size` covers the slice data from `data_byte_offset`, not the whole buffer.
 
 ## Open (carried)
 

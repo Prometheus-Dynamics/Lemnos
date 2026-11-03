@@ -52,11 +52,17 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Example look set under `examples/looks/` (`looks.d/system.toml`, `looks.d/detect.toml`, presets `scheme-a`/`b`/`c`), and the board key `default_look` (ws2812 `config`).
 - The board-file list `look_writers` (default `lemnos-ctl` and `orion:*`).
 - The nightly `-Z build-std` recipe for constrained images (`docs/compact-model.md`, *Constrained images*).
+- The `Composite` trait (`lemnos-device`: inputs, outputs, period, step, release) and `FanDevice`: the fan controller is a device slot, listed by `lemnos-ctl list` with its status, reason, channels and controls. Client tuning outlives the writer and is saved in `<state>/fan/<id>.tuning`, applied over the board's settings at start. The watchdog is pinged only while every enabled controller has stepped lately.
+- The board validator opens the RP1 PIO I2C bus (`pio-i2c:sda=N,scl=N` targets, facade feature `rp1`), so it checks the BMI088 there.
+- `lemnos-hevc`, a no_std HEVC bitstream parser (VPS, SPS, PPS and IDR slice headers) for stateless decoders, and the V4L2 stateless HEVC controls (`lemnos-linux-sys`, `lemnos_linux::v4l2::hevc`, feature `v4l2-hevc`). One IDR frame decoded on rpi-hevc-dec matches a VA-API decode byte for byte. Non-IDR slices are refused.
+- A pending v3d sync-file fence verified on hardware (TFU copy jobs with an out-syncobj, `docs/dma.md`), and the RP1 DMA bus-address translation recorded there.
 - Hardware results recorded: USB on both boards (`docs/usb.md`), DMA heaps, fences and the I2C engine (`docs/dma.md`), lemnosd timing, FIFO vs polled and memory on board #1 (`docs/system-service.md`).
 
 ### Changed
 
 - **Breaking:** the built-in looks are `status.*` only. `system.*`, `detect.*`, `link.*` and the presets moved to the example look set; a device package installs them (`docs/looks.md`, migration). The 21 retired ws2812 look keys (`idle`, `locate`, `failed`, ...) are refused with an error naming where each now lives.
+- **Breaking:** descriptor labels, properties, attributes, telemetry and the runtime's per-device bookkeeping are `SmallMap<MapKey, V>` (a sorted vector, `Cow<'static, str>` keys) instead of `BTreeMap`; iteration order and the serde shape are unchanged. `Runtime::failures()` returns `&SmallMap`. `DeviceAddress`'s `Debug` prints its one-line form. Linux lite facade: 560,928 B to 511,664 B.
+- The Orion bridge is pinned to Orion's protocol 1 (a89ebd5).
 - **Breaking:** inventory events (`InventoryEvent`, `InventoryDiff`, `ChangedDevice`) share descriptors through `Arc`; the serde shape is unchanged.
 - **Breaking:** the built-in look-writer client name for the device manager is gone; boards list their writers in `look_writers`. The lemnosd unit no longer names client units in `Before=` (`packaging/systemd/lemnosd.service.d/order.conf.example`).
 - Retained-event byte accounting is behind the `retention-bytes` feature (on by default). Device-keyed runtime state is a sorted vector. Linux lite facade: 574,480 B to 562,704 B.
