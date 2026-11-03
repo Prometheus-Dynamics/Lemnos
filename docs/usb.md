@@ -204,6 +204,8 @@ Board #2 was stopped after these runs: it reset at about 9842 s of its uptime (a
 Other results:
 
 - The Coral (`1a6e:089a`, DFU mode, `fe/01/02`) on board #1: its one interface has no endpoints. Bulk is not available until the firmware load. The read-only `dfu-status` (GETSTATUS) answers status 0, state 2 (dfuIDLE).
+- Sustained stream, board #1, 60 s (`stream 3-1 1800`, the probe's 60 s cap): 1800 frames in 59.2 s (30.40 fps), 14802 blocks, 473664 packets (about 8000 per second), 0 packet errors, 0 timeouts. The probe used 0.62 s of CPU (about 1%), and the xHCI interrupt count rose by about 485 per second (`/proc/interrupts`, sampled every 5 s). Nothing ran at elevated priority, pinned to a CPU, or busy-polled.
+- Reaping never spins: the reaper thread and `reap_until` block in `poll` (100 ms slices); `REAPURBNDELAY` is called only after a poll reports the device file ready. A hung-up or errored file (`POLLERR`, `POLLHUP`, `POLLNVAL`) now fails the transfers; before, the poll would have returned at once with nothing to reap. Host test: an idle wait sleeps (`lemnos-linux-sys`, `an_idle_wait_sleeps_instead_of_spinning`).
 - Packet tables: a steady isochronous stream reuses one table (host test `a_steady_isochronous_stream_reuses_one_packet_table`). The probe runs did not count allocations; the pool is the only per-stream table.
 - `next_block_until`: the stream loop uses it with a 2 s deadline and saw no timeouts, so the `Ok(None)` path did not run on hardware. The interrupt read is a blocking `interrupt_read`.
 - The claim check (refused unclaimed transfers) is host-tested. The first control run on board #2, before the check existed, had its UVC requests refused by the kernel (EBUSY); nothing reached the device.
