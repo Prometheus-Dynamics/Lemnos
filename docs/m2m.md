@@ -137,17 +137,26 @@ s.stream_off()?;                                  // every buffer comes back
 
 ## Board results (BCM2712 boards, 2026-11-03)
 
-Stateless, board #1 (`rpi-hevc-dec`, 2026-11-03, after the request API landed):
+Stateless, board #1 (`rpi-hevc-dec`, `/dev/video19`, media `/dev/media2`), 2026-11-03: one IDR frame
+decoded through the request API and matched byte for byte against a host decode of the same
+frame (`examples/hevc_idr_decode.rs`, feature `v4l2-hevc`):
 
-- `media_device_for("/dev/video19")` finds `/dev/media2`, with three entities: the source and the
-  sink (`/dev/video19`, device 81:16) and the processing entity.
-- `M2mSession::open` as above; `Request::allocate` succeeds.
-- The driver lists `HEVC Decode Mode` (`0x00a40a95`) as accepting only `1` (min = max = 1). Set
-  in the request, `1` is accepted. `0` is refused with `ERANGE`. `HEVC Start Code` (`0x00a40a96`)
-  takes 0 or 1.
-- A 4096-byte source buffer is queued in the request. The request is not queued, so no hardware
-  job runs. Full decoding needs the HEVC parameter controls (SPS, PPS, slice and decode params),
-  which need a header parser; none is in the tree. Blocker: no HEVC header parser.
+- Stream: a 320x240 IDR (one slice, 3,977 bytes), encoded on the host with GStreamer's VA-API
+  H.265 encoder (`vah265enc`); the reference is the host's VA-API decode (`vah265dec`) of the
+  same stream, NV12. The host has no software HEVC decoder in ffmpeg.
+- Headers: `lemnos-hevc` parses the VPS, SPS, PPS and the slice header (`lemnos-hevc`
+  unit tests use the same fixture). The controls: SPS, PPS, SLICE_PARAMS, DECODE_PARAMS, with
+  `DECODE_MODE` frame-based (the driver accepts only 1) and `START_CODE` Annex B. No scaling
+  matrix (scaling lists are off in this stream).
+- Driver details found on the board: `bit_size` is the slice data in bits from
+  `data_byte_offset` to the end of the buffer (the whole buffer gives "data_byte_offset 7 +
+  bits 31064 > bytesused 3883" in dmesg). Asking for NV12 with two planes gives `Nc12` back
+  (`V4L2_PIX_FMT_NV12`'s 128-byte-column layout, luma and chroma each in columns of 128 bytes,
+  stride 384 for 320 columns); a linear read of that layout is wrong, the column read matches.
+- Result: 115,200 of 115,200 bytes equal the host reference (0 differ), in three runs. Request
+  run 181 to 192 us (from queueing to completion), queue to decoded frame 188 to 200 us,
+  `open` 0.9 to 1.3 ms, `stream on` 1.1 to 1.2 ms, request controls 13 to 32 us. Run under the
+  board's camera device lock (taken with flock); no dmesg error, `vcgencmd get_throttled` 0x0.
 
 Discovery was run on both boards with `v4l2::query`, `find_m2m` and the probe's `M2mSession::open`:
 

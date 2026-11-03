@@ -5,6 +5,8 @@
 //! What a device does with the frames (which codec, which conversion) belongs
 //! to the consumer.
 
+#[cfg(feature = "v4l2-hevc")]
+pub mod hevc;
 pub mod m2m;
 pub mod request;
 
