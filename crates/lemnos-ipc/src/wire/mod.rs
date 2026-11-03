@@ -144,6 +144,8 @@ pub struct ReadStats {
     pub max_us: u64,
     /// The last one's (what the scheduler uses as the read's cost).
     pub last_us: u64,
+    /// Reads that found no new sample (counted in `reads`, not a reading).
+    pub misses: u64,
 }
 
 /// One device reading.

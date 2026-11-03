@@ -191,6 +191,7 @@ fn messages_round_trip() {
             total_us: 6201 * 180,
             max_us: 2_400,
             last_us: 170,
+            misses: 412,
         },
         ReadStats {
             device: "power".into(),
@@ -198,6 +199,7 @@ fn messages_round_trip() {
             total_us: 0,
             max_us: 0,
             last_us: 0,
+            misses: 0,
         },
     ]));
     round_trip_message(Message::Devices(vec![DeviceDesc {

@@ -74,7 +74,41 @@ pub struct MockI2cTarget {
     pub dead: bool,
     /// A FIFO behind the data register (see [`MockI2c::with_fifo`]).
     pub fifo: Option<MockFifo>,
+    /// A sample counter in the registers (see [`MockI2c::with_sampler`]).
+    #[cfg(feature = "std")]
+    pub sampler: Option<Sampler>,
     pointer: u16,
+}
+
+/// A sensor's output: a sample every `period` on the host's clock. The sample
+/// counter at `register` (two bytes, little-endian) steps once per sample, and
+/// the sensor clock at `register + 6` (three bytes, little-endian; a 39.0625 us
+/// tick, as the BMI088's SENSORTIME at 0x18) is the sample's index times the
+/// ticks in a sample. Both are published together, as the sensor latches its
+/// data with its clock.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sampler {
+    origin: std::time::Instant,
+    period: core::time::Duration,
+    register: u16,
+    /// The sample last published (its index).
+    last: u64,
+}
+
+#[cfg(feature = "std")]
+impl Sampler {
+    /// Publishes the sample due at `now` (the first sample is 1).
+    fn publish(&mut self, registers: &mut BTreeMap<u16, u8>, now: std::time::Instant) {
+        let elapsed = now.saturating_duration_since(self.origin);
+        let due = (elapsed.as_nanos() / self.period.as_nanos().max(1)) as u64 + 1;
+        if due != self.last {
+            self.last = due;
+            let [lo, hi] = (due as u16).to_le_bytes();
+            registers.insert(self.register, lo);
+            registers.insert(self.register.wrapping_add(1), hi);
+        }
+    }
 }
 
 /// Where a [`MockFifo`] keeps its fill level, so a driver can read how much
@@ -248,6 +282,37 @@ impl MockI2c {
         self
     }
 
+    /// Gives the target at `address` a sample counter at `register` and the
+    /// sensor clock at `register + 6`, stepping once per `period` from this
+    /// call (see [`Sampler`]). It is published at the start of every
+    /// transaction to the target.
+    #[cfg(feature = "std")]
+    pub fn with_sampler(self, address: u8, register: u16, period: core::time::Duration) -> Self {
+        with(&self.state, |s| {
+            s.targets.entry(address).or_default().sampler = Some(Sampler {
+                origin: std::time::Instant::now(),
+                period,
+                register,
+                last: 0,
+            });
+        });
+        self
+    }
+
+    /// Restarts the sample clock of the target at `address` now, with its
+    /// first sample `phase` after this call. A test starts the device's clock
+    /// half a period after its reads, so a read that is up to half a period
+    /// late still finds the sample due at its deadline.
+    #[cfg(feature = "std")]
+    pub fn restart_sampler(&self, address: u8, phase: core::time::Duration) {
+        with(&self.state, |s| {
+            if let Some(sampler) = s.targets.entry(address).or_default().sampler.as_mut() {
+                sampler.origin = std::time::Instant::now() + phase;
+                sampler.last = 0;
+            }
+        });
+    }
+
     /// Gives the target at `address` a FIFO that the device fills on the
     /// host's clock: one `frame` (the same bytes each time) is buffered every
     /// `period` from this call, so a read takes the frames that have arrived
@@ -367,6 +432,10 @@ impl I2cState {
             .get_mut(&address)
             .filter(|t| !t.dead)
             .ok_or(ErrorKind::Nack)?;
+        #[cfg(feature = "std")]
+        if let Some(sampler) = target.sampler.as_mut() {
+            sampler.publish(&mut target.registers, std::time::Instant::now());
+        }
         let mut previous_write = false;
         for op in operations.iter_mut() {
             match op {

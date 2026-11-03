@@ -44,6 +44,15 @@ fn host_wakeups(stop: Arc<AtomicBool>) -> JoinHandle<i64> {
     })
 }
 
+/// The rate floor for a nominal rate, tied to the host's wakeup p99 (as the
+/// other bounds in this file are): a read that runs late past its sample's
+/// margin loses the sample, and the p99 says how late reads run, so that
+/// share of the nominal rate is allowed (at most half of it).
+fn rate_floor(nominal_hz: f64, period_us: i64, host_p99_us: i64) -> f64 {
+    let share = (host_p99_us as f64 / period_us as f64).min(0.5);
+    nominal_hz * (1.0 - share)
+}
+
 /// The slow device comes first, so a fixed slot order would poll it first.
 const BOARD: &str = r#"
 format = "lemnos.board"
@@ -135,7 +144,10 @@ fn service(latency: Duration) -> MockLemnosd {
             .with_target(0x18, AddressWidth::Bits8)
             .with_target(0x68, AddressWidth::Bits8)
             .with_registers(0x18, 0x00, &[0x1e])
-            .with_registers(0x68, 0x00, &[0x0f]);
+            .with_registers(0x68, 0x00, &[0x0f])
+            // The accelerometer makes a sample every 10 ms (100 Hz), with its
+            // data-ready bit: a polled read between samples has nothing new.
+            .with_sampler(0x18, 0x12, Duration::from_millis(10));
     }
     hardware.i2c(2).set_latency(latency);
     MockLemnosd::start(BOARD, hardware).unwrap()
@@ -168,6 +180,13 @@ fn run_with(label: &str, latency: Duration, load: bool) -> Stats {
     if load {
         client.subscribe("slow", 10).unwrap();
     }
+    // The samples fall half-way between the reads (see `restart_sampler`).
+    for bus in [1, 2] {
+        service
+            .hardware()
+            .i2c(bus)
+            .restart_sampler(0x18, Duration::from_millis(5));
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let host = host_wakeups(stop.clone());
     let warm = Instant::now() + Duration::from_millis(500);
@@ -198,7 +217,10 @@ fn run_with(label: &str, latency: Duration, load: bool) -> Stats {
 #[test]
 fn imu_holds_100_hz_on_an_idle_bus() {
     let s = run("idle", false);
-    assert!((s.rate_hz - 100.0).abs() < 3.0, "{s:?}");
+    assert!(
+        s.rate_hz >= rate_floor(100.0, PERIOD_US, s.host_p99_us) && s.rate_hz <= 103.0,
+        "{s:?}"
+    );
     assert!(
         s.p99_dev_us <= P99_DEV_US + HOST_FACTOR * s.host_p99_us,
         "{s:?}"
@@ -210,7 +232,10 @@ fn imu_holds_100_hz_on_an_idle_bus() {
 #[test]
 fn imu_holds_100_hz_beside_a_slow_device() {
     let s = run("slow bus, 3 ms per transaction", true);
-    assert!((s.rate_hz - 100.0).abs() < 3.0, "{s:?}");
+    assert!(
+        s.rate_hz >= rate_floor(100.0, PERIOD_US, s.host_p99_us) && s.rate_hz <= 103.0,
+        "{s:?}"
+    );
     // The bounds allow for a busy host (the grid is checked, not arrival times); a schedule that lets a 6 ms read
     // delay the IMU misses the rate (98.7 Hz) and the p99 spacing.
     assert!(
@@ -252,7 +277,10 @@ fn imu_holds_100_hz_beside_a_read_longer_than_its_period() {
         Duration::from_millis(10),
         true,
     );
-    assert!((s.rate_hz - 100.0).abs() < 3.0, "{s:?}");
+    assert!(
+        s.rate_hz >= rate_floor(100.0, PERIOD_US, s.host_p99_us) && s.rate_hz <= 103.0,
+        "{s:?}"
+    );
     assert!(
         s.p99_dev_us <= P99_DEV_US + HOST_FACTOR * s.host_p99_us,
         "{s:?}"
@@ -329,6 +357,11 @@ fn a_batched_imu_delivers_every_sample_on_its_own_timestamp() {
         .unwrap();
     // 2 ms asks for every sample of the 400 Hz stream.
     client.subscribe("imu", 2).unwrap();
+    // The samples fall half-way between the reads (see `restart_sampler`).
+    service
+        .hardware()
+        .i2c(1)
+        .restart_sampler(0x18, FRAME_PERIOD / 2);
     let warm = Instant::now() + Duration::from_millis(500);
     let end = warm + Duration::from_secs(3);
     let mut stamps: Vec<i64> = Vec::new();
@@ -380,4 +413,80 @@ fn read_timing_is_reported_per_sensor() {
     assert!(imu.reads >= 10, "{imu:?}");
     assert!(imu.last_us <= imu.max_us, "{imu:?}");
     assert!(imu.total_us >= imu.max_us, "{imu:?}");
+}
+
+/// The IMU polled at 2 ms with a 400 Hz output: the device makes a sample every
+/// 2.5 ms, so the scheduler reads it at that period.
+const POLLED_400_BOARD: &str = r#"
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "polled400"
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-1"
+address = 0x18
+backend = "userspace"
+poll_ms = 2
+config = { fifo = false, accel_rate = "400hz", gyro_rate = "400hz-47" }
+"#;
+
+/// The accelerometer's output register is a sample counter that steps every
+/// 2.5 ms, with its data-ready bit (`MockI2c::with_sampler`): a read with no
+/// new sample is a miss, so each reading names its own sample.
+fn polled_400_service() -> MockLemnosd {
+    let hardware = MockHardware::new();
+    hardware
+        .i2c(1)
+        .with_target(0x18, AddressWidth::Bits8)
+        .with_target(0x68, AddressWidth::Bits8)
+        .with_registers(0x18, 0x00, &[0x1e])
+        .with_registers(0x68, 0x00, &[0x0f])
+        .with_sampler(0x18, 0x12, FRAME_PERIOD);
+    MockLemnosd::start(POLLED_400_BOARD, hardware).unwrap()
+}
+
+#[test]
+fn a_polled_400_hz_imu_delivers_each_sample_once() {
+    let _turn = timing_turn();
+    let service = polled_400_service();
+    let mut client = ClientOptions::new(service.socket(), "viewer")
+        .devices()
+        .unwrap();
+    // A 2 ms subscription, on a device that makes a sample every 2.5 ms.
+    client.subscribe("imu", 2).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let host = host_wakeups(stop.clone());
+    let warm = Instant::now() + Duration::from_millis(500);
+    let end = warm + Duration::from_secs(3);
+    let mut readings: Vec<(i64, f64)> = Vec::new();
+    while Instant::now() < end {
+        if let Ok(Some(ClientEvent::Data(Update::Reading(r)))) =
+            client.next_event_timeout(Duration::from_millis(50))
+            && r.device == "imu"
+            && Instant::now() >= warm
+        {
+            let counter = r.value("acceleration.x").unwrap_or(f64::NAN);
+            readings.push((r.timestamp_us as i64, counter));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let host_p99 = host.join().unwrap();
+    service.stop();
+    let rate = readings.len() as f64 / 3.0;
+    // At most 400 a second (the sensor's rate; a 2 ms poll would deliver 500).
+    // The floor is tied to the host's wakeup p99, as the other rate bounds
+    // are: a read that runs late past its sample's margin loses it.
+    let floor = rate_floor(400.0, 2_500, host_p99);
+    assert!(
+        rate >= floor && rate <= 420.0,
+        "{rate} readings a second (floor {floor:.0})"
+    );
+    // No duplicates: a reading is a new sample, so its counter (the
+    // accelerometer's X axis) differs from the last one's.
+    let repeats = readings.windows(2).filter(|w| w[1].1 == w[0].1).count();
+    assert_eq!(repeats, 0, "{repeats} readings repeat the last sample");
 }

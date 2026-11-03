@@ -86,7 +86,8 @@ impl Message {
                         .u64(s.reads)
                         .u64(s.total_us)
                         .u64(s.max_us)
-                        .u64(s.last_us);
+                        .u64(s.last_us)
+                        .u64(s.misses);
                 }
                 e.finish()
             }
@@ -278,6 +279,7 @@ impl Message {
                         total_us: d.u64()?,
                         max_us: d.u64()?,
                         last_us: d.u64()?,
+                        misses: d.u64()?,
                     });
                 }
                 Self::Stats(stats)

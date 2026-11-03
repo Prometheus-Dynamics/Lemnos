@@ -314,21 +314,22 @@ fn validate(mut args: Args) -> ExitCode {
 /// so it works when `lemnosd` is gone (systemd runs it as `ExecStopPost`):
 /// the plans `lemnosd` recorded at bind (`fan-restore` next to the socket, or
 /// `--state PATH`), then the board's fans, then with `--all` every hwmon fan.
-/// `stats`: each sensor's read timing as the service measured it (reads,
-/// mean, longest and last read, in microseconds).
+/// `stats`: each sensor's read timing as the service measured it (reads, the
+/// reads that found no new sample, mean, longest and last read, in
+/// microseconds).
 fn stats(options: ClientOptions) -> ExitCode {
     match options.devices().and_then(|mut c| c.stats()) {
         Ok(mut stats) => {
             stats.sort_by(|a, b| a.device.cmp(&b.device));
             println!(
-                "{:<16} {:>8} {:>10} {:>10} {:>10}",
-                "device", "reads", "mean_us", "max_us", "last_us"
+                "{:<16} {:>8} {:>8} {:>10} {:>10} {:>10}",
+                "device", "reads", "misses", "mean_us", "max_us", "last_us"
             );
             for s in stats {
                 let mean = s.total_us.checked_div(s.reads).unwrap_or(0);
                 println!(
-                    "{:<16} {:>8} {:>10} {:>10} {:>10}",
-                    s.device, s.reads, mean, s.max_us, s.last_us
+                    "{:<16} {:>8} {:>8} {:>10} {:>10} {:>10}",
+                    s.device, s.reads, s.misses, mean, s.max_us, s.last_us
                 );
             }
             ExitCode::SUCCESS

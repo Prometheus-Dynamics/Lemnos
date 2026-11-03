@@ -543,13 +543,32 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
 
 - **Rate.** A sensor is read as fast as someone needs. With subscribers, at the fastest
   subscription's period, never faster than `poll_ms` (the cap: a 500 ms subscriber gets
-  500 ms, not the cap). With none, at `idle_poll_ms`; left out, that is `poll_ms`, except
+  500 ms, not the cap), and never faster than the device's output period
+  (`Sensor::output_period_us`, the accelerometer's rate on the BMI088): a read between two
+  samples returns the one it already had, so a 2 ms subscription on a 400 Hz device is read
+  every 2.5 ms, 400 readings a second, not 500 of which 100 repeat (`Slot::period_us`). With none, at `idle_poll_ms`; left out, that is `poll_ms`, except
   for IMU-class devices, which are not read until a client subscribes. A one-shot `read`
   is answered from the last reading while it is no older than `poll_ms`.
 - **Threads.** Each bus has a worker thread. A sensor's device goes to its bus's thread for
   one read and comes back with the result: a slow transaction on one bus never delays a due
   read on another, and a bus runs one read at a time. Fans and lights stay on the service
   thread.
+- **New samples only (the duplicate filter).** A polled sensor's reading identical to the last
+  one it delivered (every channel value equal, which is every raw byte of a BMI088) is not
+  delivered when it is read within one output period of that delivery. The filter is lemnosd's
+  (`Slot::repeats_last`), so the drivers and the firmware images carry none of it. A still
+  sensor, or a simulation whose output does not change, is still delivered once per output
+  period. A skipped read is counted as a miss (`lemnos-ctl stats`, `misses`), is not a fault, and
+  delivers nothing. The first reading after start or subscribe is always delivered; a one-shot
+  reader is answered from the last delivered reading. A polled sensor is read at its output
+  period (`Slot::period_us`), the period coming from the board entry
+  (`lemnos_board::output_period_us`: the BMI088's `accel_rate`), not from the no_std traits. A read
+  that runs late past a sample loses that sample to the next one (the sensor overwrites), so the
+  delivered rate falls below the output rate under load; the board run shows it.
+  Not done: the sensor clock. SENSORTIME (0x18..0x1A) could index the samples and show lost
+  ones exactly, but raw reads are refused while lemnosd owns the IMU bus, so its tick rate
+  and the data/clock latch were not measured on a board. An index-based design needs that
+  measurement first.
 - **Batches.** A driver with a FIFO (`fifo = true` on `bmi088`) returns every sample since
   the last read. Each sample is stamped with its own time (the output period before the
   read) and delivered to the subscribers due for it. Off by default: at the installed

@@ -124,6 +124,13 @@ impl Placement {
 /// One device.
 pub(crate) struct Slot {
     pub spec: DeviceSpec,
+    /// The sensor's output period from its board entry (the read clamp); see
+    /// [`lemnos_board::output_period_us`].
+    pub output_us: Option<u32>,
+    /// The last reading a polled sensor delivered (its start and its row): a
+    /// reading identical to it, read within one output period, is a repeat
+    /// and is not delivered (see [`repeats_last`](Self::repeats_last)).
+    pub last_delivered: Option<(u64, [i32; MAX_CHANNELS])>,
     /// The device, when it is here: `None` while its bus's worker reads it,
     /// and when it is missing.
     pub device: Option<BoxedDevice>,
@@ -162,6 +169,9 @@ pub(crate) struct Slot {
     pub reads: u64,
     pub read_total_us: u64,
     pub read_max_us: u64,
+    /// Reads that found no new sample (the sensor's index unchanged): counted
+    /// in `reads`, not a reading and not a fault.
+    pub misses: u64,
     pub next_build_ms: u64,
     retry_ms: u64,
     pub subscriptions: Vec<Subscription>,
@@ -208,8 +218,11 @@ pub(crate) struct Override {
 
 impl Slot {
     pub fn new(spec: DeviceSpec) -> Self {
+        let output_us = lemnos_board::output_period_us(&spec);
         Self {
             spec,
+            output_us,
+            last_delivered: None,
             device: None,
             present: false,
             batched: false,
@@ -231,6 +244,7 @@ impl Slot {
             reads: 0,
             read_total_us: 0,
             read_max_us: 0,
+            misses: 0,
             next_build_ms: 0,
             retry_ms: RETRY_MIN_MS,
             subscriptions: Vec::new(),
@@ -289,9 +303,17 @@ impl Slot {
         }
     }
 
-    /// The read period in microseconds (see [`period_ms`](Self::period_ms)).
+    /// The read period in microseconds: [`period_ms`](Self::period_ms), but
+    /// never faster than the device makes a sample. A polled sensor is read a
+    /// little faster than that (90 % of the output period), so the reads
+    /// straddle every sample whatever the phase of the two clocks: a read that
+    /// finds the sample it already had delivers nothing. A batched sensor is
+    /// clamped to its output period. A device not built yet has no output
+    /// period, so its period is the requested one.
     pub fn period_us(&self) -> Option<u64> {
-        self.period_ms().map(|ms| u64::from(ms) * 1000)
+        let output = self.output_us.map_or(0, u64::from);
+        self.period_ms()
+            .map(|ms| (u64::from(ms) * 1000).max(output))
     }
 
     /// Whether the device produces readings: a sensor, read by a worker or
@@ -385,7 +407,11 @@ impl Slot {
     /// leave the sensor due again at once (and starve the clients). Returns a
     /// status change.
     pub fn read_scheduled(&mut self) -> Option<DeviceStatus> {
-        let status = self.read();
+        let status = if self.batched {
+            self.read()
+        } else {
+            self.read_sample()
+        };
         self.next_read_us = match self.period_us() {
             Some(period_us) => advance(self.next_read_us, period_us, boottime_us()),
             None => u64::MAX,
@@ -398,6 +424,59 @@ impl Slot {
     pub fn read(&mut self) -> Option<DeviceStatus> {
         let mask = self.read_mask(boottime_us());
         self.read_with(mask)
+    }
+
+    /// Whether `row`, read at `started_us`, repeats the last delivered reading
+    /// of a polled sensor: identical values, read within one output period of
+    /// it. A still sensor (or a simulation with no noise) repeats its output
+    /// every read, so it is delivered once per period, not once per read.
+    pub fn repeats_last(&self, row: &[i32; MAX_CHANNELS], started_us: u64) -> bool {
+        let (Some(period), Some((at, last))) = (self.output_us, self.last_delivered) else {
+            return false;
+        };
+        last == *row && started_us.saturating_sub(at) < u64::from(period)
+    }
+
+    /// Reads a polled sensor's next sample on this thread, as a scheduled read
+    /// does on a worker: a read with no new sample is a miss, and delivers
+    /// nothing. Returns a status change.
+    fn read_sample(&mut self) -> Option<DeviceStatus> {
+        let started_us = boottime_us();
+        let mask = self.read_mask(started_us);
+        let device = self.device.as_mut()?;
+        device.select_channels(mask);
+        device.set_clock_us(started_us);
+        self.values_mask = mask;
+        let mut why = String::new();
+        let mut row = [[0i32; MAX_CHANNELS]; 1];
+        let result = device.read_batch_why(&mut row, &mut why);
+        let cost_us = boottime_us().saturating_sub(started_us);
+        match result {
+            Ok(0) => {
+                self.count_miss(cost_us);
+                None
+            }
+            Ok(_) if self.repeats_last(&row[0], started_us) => {
+                self.count_miss(cost_us);
+                None
+            }
+            Ok(_) => {
+                self.values = row[0];
+                self.last_delivered = Some((started_us, row[0]));
+                self.finish_read(started_us, cost_us, Ok(()), &why)
+            }
+            Err(kind) => self.finish_read(started_us, cost_us, Err(kind), &why),
+        }
+    }
+
+    /// Counts a read that found no new sample: its time is on the bus, and it
+    /// is not a reading (the last one stays the latest, and the status stays).
+    pub fn count_miss(&mut self, cost_us: u64) {
+        self.read_cost_us = cost_us;
+        self.reads += 1;
+        self.read_total_us = self.read_total_us.saturating_add(cost_us);
+        self.read_max_us = self.read_max_us.max(cost_us);
+        self.misses += 1;
     }
 
     /// Reads every channel now (a one-shot reader's read; see [`read`](Self::read)).
@@ -669,6 +748,23 @@ fn fan_restore_plan(spec: &DeviceSpec, buses: &mut dyn Buses) -> Option<FanResto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeat_within_one_output_period_is_not_delivered() {
+        let mut s = slot(None, None);
+        s.output_us = Some(2_500);
+        let row = [7i32; MAX_CHANNELS];
+        s.last_delivered = Some((1_000, row));
+        // Identical, within the period: a repeat.
+        assert!(s.repeats_last(&row, 2_000));
+        // Identical, a period on: a still sensor's next sample.
+        assert!(!s.repeats_last(&row, 3_500));
+        // Different values: a new sample.
+        assert!(!s.repeats_last(&[8i32; MAX_CHANNELS], 2_000));
+        // No period known: nothing is a repeat.
+        s.output_us = None;
+        assert!(!s.repeats_last(&row, 2_000));
+    }
 
     fn slot(poll_ms: Option<u32>, idle_poll_ms: Option<u32>) -> Slot {
         let mut spec = DeviceSpec::new("s", "bmi088");

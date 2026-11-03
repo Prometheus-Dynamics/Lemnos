@@ -510,8 +510,15 @@ impl Service {
         let index = done.index;
         let now_us = self.now_us();
         let ok = done.result.is_ok();
-        let count = if ok { done.count } else { 0 };
         let slot = &mut self.slots[index];
+        // A polled sensor's reading that repeats the last delivered one (within
+        // one output period) is not delivered: it is a miss, as no new sample is.
+        let repeat = ok
+            && done.count == 1
+            && !slot.batched
+            && slot.repeats_last(&done.samples[0], done.started_us);
+        let count = if ok && !repeat { done.count } else { 0 };
+        let miss_repeat = repeat;
         slot.busy = false;
         slot.device = Some(done.device);
         slot.calibration_cache = slot
@@ -529,13 +536,24 @@ impl Service {
         // A buffered sensor with nothing new in its buffer has no new reading:
         // the last one stays the latest (its status still changes).
         let empty_batch = ok && count == 0 && slot.batched;
+        // A polled sensor with no new sample, or a repeat: nothing to deliver,
+        // no fault.
+        let miss = ok && !slot.batched && (done.count == 0 || miss_repeat);
+        if ok && !slot.batched && count == 1 {
+            slot.last_delivered = Some((done.started_us, done.samples[0]));
+        }
         let (was_fresh, was_us) = (slot.fresh, slot.read_us);
-        let status = slot.finish_read(
-            done.started_us,
-            done.cost_us,
-            done.result.map(|_| ()),
-            &done.why,
-        );
+        let status = if miss {
+            slot.count_miss(done.cost_us);
+            None
+        } else {
+            slot.finish_read(
+                done.started_us,
+                done.cost_us,
+                done.result.map(|_| ()),
+                &done.why,
+            )
+        };
         if empty_batch {
             slot.fresh = was_fresh;
             slot.read_us = was_us;
@@ -557,6 +575,16 @@ impl Service {
         if count > 0 {
             self.deliver_batch(index, &done.samples[..count], done.started_us, period_us);
             self.feed_fusion(index, &done.samples[..count], done.started_us, period_us);
+        }
+        if miss {
+            // A one-shot reader is answered from the last reading; with none
+            // yet, it waits for the first sample rather than an error.
+            if self.slots[index].fresh {
+                self.answer(index, &waiters, true);
+            } else {
+                self.slots[index].waiters.extend(waiters);
+            }
+            return;
         }
         // Nothing new in the buffer, but a one-shot reader or a subscriber is
         // owed a reading: read the device now, on this thread.
@@ -622,6 +650,11 @@ impl Service {
             return;
         }
         let message = if ok && self.slots[index].fresh {
+            // A one-shot reader gets every channel, not the mask of the
+            // subscription that last read the sensor (a polled read takes them
+            // all).
+            let slot = &mut self.slots[index];
+            slot.values_mask = slot.all_channels();
             self.reading(index)
         } else {
             Message::Reply {
@@ -1172,6 +1205,7 @@ impl Service {
                         total_us: s.read_total_us,
                         max_us: s.read_max_us,
                         last_us: s.read_cost_us,
+                        misses: s.misses,
                     })
                     .collect();
                 self.clients[ci].send(&Message::Stats(stats));

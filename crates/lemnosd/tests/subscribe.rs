@@ -48,7 +48,9 @@ fn start() -> MockLemnosd {
         .with_target(0x18, AddressWidth::Bits8)
         .with_target(0x68, AddressWidth::Bits8)
         .with_registers(0x18, 0x00, &[0x1e])
-        .with_registers(0x68, 0x00, &[0x0f]);
+        .with_registers(0x68, 0x00, &[0x0f])
+        // The accelerometer makes a sample every 10 ms: a subscriber gets each.
+        .with_sampler(0x18, 0x12, Duration::from_millis(10));
     MockLemnosd::start_in(root, BOARD, hardware).unwrap()
 }
 

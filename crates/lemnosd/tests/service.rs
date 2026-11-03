@@ -195,7 +195,8 @@ fn serves_readings_controls_and_led_intents() {
         Err(ClientError::Refused(Refusal::UnknownDevice))
     ));
 
-    // Subscriptions.
+    // Subscriptions: a still device's output is delivered once per sample
+    // period (the duplicate filter only skips repeats inside a period).
     app.subscribe("imu", 20).unwrap();
     let mut readings = 0;
     while readings < 3 {

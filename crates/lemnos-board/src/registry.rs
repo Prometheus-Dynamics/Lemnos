@@ -762,8 +762,38 @@ const INA_KEYS: &[&str] = &[
 ];
 
 #[cfg(feature = "drv-bmi088")]
+/// The accelerometer's output rate from a BMI088 entry (`accel_rate`).
+fn accel_rate(spec: &DeviceSpec) -> Result<lemnos_drivers_bmi088::AccelRate, BoardError> {
+    use lemnos_drivers_bmi088::AccelRate;
+    choice(
+        spec,
+        "accel_rate",
+        &[
+            ("12.5hz", AccelRate::Hz12_5),
+            ("25hz", AccelRate::Hz25),
+            ("50hz", AccelRate::Hz50),
+            ("100hz", AccelRate::Hz100),
+            ("200hz", AccelRate::Hz200),
+            ("400hz", AccelRate::Hz400),
+            ("800hz", AccelRate::Hz800),
+            ("1600hz", AccelRate::Hz1600),
+        ],
+        AccelRate::Hz100,
+    )
+}
+
+/// The output period of a board entry's sensor in microseconds, for the
+/// service's read clamp (a polled read is never scheduled faster than the
+/// sensor makes samples). `None` for a device whose period is not known here.
+pub fn output_period_us(spec: &DeviceSpec) -> Option<u32> {
+    match spec.driver.as_str() {
+        "bmi088" => accel_rate(spec).ok().map(|rate| rate.period_us()),
+        _ => None,
+    }
+}
+
 fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
-    use lemnos_drivers_bmi088::{AccelRange, AccelRate, Bmi088, Config, GyroRange, GyroRate};
+    use lemnos_drivers_bmi088::{AccelRange, Bmi088, Config, GyroRange, GyroRate};
     let (bus, accel) = i2c(
         spec,
         Some(lemnos_drivers_bmi088::ACCEL_ADDRESS.into()),
@@ -798,21 +828,7 @@ fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice,
             ],
             AccelRange::G6,
         )?,
-        accel_rate: choice(
-            spec,
-            "accel_rate",
-            &[
-                ("12.5hz", AccelRate::Hz12_5),
-                ("25hz", AccelRate::Hz25),
-                ("50hz", AccelRate::Hz50),
-                ("100hz", AccelRate::Hz100),
-                ("200hz", AccelRate::Hz200),
-                ("400hz", AccelRate::Hz400),
-                ("800hz", AccelRate::Hz800),
-                ("1600hz", AccelRate::Hz1600),
-            ],
-            AccelRate::Hz100,
-        )?,
+        accel_rate: accel_rate(spec)?,
         gyro_range: choice(
             spec,
             "gyro_range",
