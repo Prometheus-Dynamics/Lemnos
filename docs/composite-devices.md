@@ -30,13 +30,14 @@ in `lemnosd`. Builds on [compact-model.md](compact-model.md) and
 [[composites]]
 id = "fan-control"
 driver = "fan-controller"
-inputs = { cpu = "cpu-thermal.temperature" }   # role -> <device>.<channel>
-outputs = { fan = "fan" }                      # role -> the fan device
-config = { floor = 300, hysteresis = 3000, slew = 50, kick_ms = 0, max_age_ms = 3000, curve_cpu = [[30000, 300], [60000, 600], [75000, 1000]] }
+config = { input_cpu = "cpu-thermal.temperature", output_fan = "fan", floor = 300, hysteresis = 3000, slew = 50, kick_ms = 0, max_age_ms = 3000, curve_cpu = [[30000, 300], [60000, 600], [75000, 1000]] }
 ```
 
+The entry is a device table, so it reuses the device deserializer. `input_<role>` is `<device>.<channel>`,
+`output_fan` is the fan device, and `curve_<role>` is the input's curve; the scalars are the other keys.
+
 Units: duties are per-mille; `curve_<role>` values are in the input's unit (millidegrees for a
-thermal zone), so `50000` is 50 °C. Every input needs its `curve_<role>`.
+thermal zone), so `50000` is 50 °C. Every `input_<role>` needs its `curve_<role>`.
 
 **Not built yet:** the generic `Composite` trait (the controller is a concrete type the host
 calls), a composite listed by `lemnos-ctl list` and in the runtime (it is a `[[composites]]`

@@ -49,30 +49,11 @@ pub struct BoardDefinition {
     /// Composite devices hosted by `lemnosd`: a controller that reads other
     /// devices' channels and drives a control (`docs/composite-devices.md`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub composites: Vec<CompositeSpec>,
+    pub composites: Vec<DeviceSpec>,
     /// Named looks for the lights (`[looks.<name>]`), over the built-in
     /// ones; see `docs/looks.md`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub looks: BTreeMap<String, toml::Table>,
-}
-
-/// A composite device: computed from other devices' channels and driving
-/// their controls, not a hardware driver. `lemnosd` hosts it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompositeSpec {
-    pub id: String,
-    /// The composite's driver (`fan-controller`).
-    pub driver: String,
-    /// Input roles to `<device>.<channel>`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub inputs: BTreeMap<String, String>,
-    /// Output roles to the device they drive.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub outputs: BTreeMap<String, String>,
-    /// The composite's settings.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub config: BTreeMap<String, ConfigValue>,
 }
 
 /// A named GPIO line for raw claims.

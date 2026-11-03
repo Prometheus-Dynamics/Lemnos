@@ -5,16 +5,17 @@
 //! [[composites]]
 //! id = "fan-control"
 //! driver = "fan-controller"
-//! inputs = { cpu = "cpu-thermal.temperature" }   # role -> <device>.<channel>
-//! outputs = { fan = "fan" }                      # role -> the fan device
-//! config = { floor = 700, hysteresis = 3000, slew = 50, kick_ms = 0, max_age_ms = 3000, curve_cpu = [[50000, 700], [65000, 850], [75000, 1000]] }
+//! config = { input_cpu = "cpu-thermal.temperature", output_fan = "fan", floor = 300, hysteresis = 3000, slew = 50, kick_ms = 0, max_age_ms = 3000, curve_cpu = [[30000, 300], [60000, 600], [75000, 1000]] }
 //! ```
 //!
-//! Duties are per-mille. A curve's values are in the input's unit. Every input
-//! has a `curve_<role>` key; a role that is not an input is an error.
+//! The entry is a device table (`DeviceSpec`), so it reuses the device
+//! deserializer. Roles are `input_<role>` (`<device>.<channel>`) and
+//! `output_<role>` (a device; the controller takes only `output_fan`), each
+//! with a `curve_<role>` for an input. Scalars are the other keys.
 
-use crate::schema::{BoardDefinition, CompositeSpec, ConfigValue};
+use crate::schema::{BoardDefinition, ConfigValue, DeviceSpec};
 use lemnos_device::fan_control::{self, Point, Settings};
+use std::collections::BTreeMap;
 
 /// The driver id of the fan controller composite.
 pub const FAN_CONTROLLER: &str = "fan-controller";
@@ -24,7 +25,7 @@ pub const FAN_WRITER: &str = "lemnosd.fan";
 /// The output role the controller drives.
 pub const FAN_ROLE: &str = "fan";
 
-const SCALAR_KEYS: &[&str] = &["floor", "hysteresis", "slew", "kick_ms", "max_age_ms"];
+const SCALARS: &[&str] = &["floor", "hysteresis", "slew", "kick_ms", "max_age_ms"];
 
 /// One input of the controller, resolved from the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,15 +44,13 @@ pub struct FanInput {
 pub struct FanControllerSpec {
     pub id: String,
     pub settings: Settings,
+    /// In role order (the board's config keys are sorted).
     pub inputs: Vec<FanInput>,
     /// The fan device the controller drives.
     pub fan: String,
 }
 
-fn int(
-    config: &std::collections::BTreeMap<String, ConfigValue>,
-    key: &str,
-) -> Result<Option<i64>, String> {
+fn int(config: &BTreeMap<String, ConfigValue>, key: &str) -> Result<Option<i64>, String> {
     match config.get(key) {
         None => Ok(None),
         Some(value) => value
@@ -61,111 +60,121 @@ fn int(
     }
 }
 
-fn pairs(value: &ConfigValue, key: &str) -> Result<Vec<Point>, String> {
+fn points(value: &ConfigValue, key: &str) -> Result<Vec<Point>, String> {
     let ConfigValue::List(items) = value else {
         return Err(format!(
             "config {key:?} must be a list of [value, duty] pairs"
         ));
     };
-    items
-        .iter()
-        .map(|item| match item {
-            ConfigValue::List(pair) if pair.len() == 2 => {
-                let value = pair[0].as_i64();
-                let duty = pair[1].as_i64();
-                match (value, duty) {
-                    (Some(value), Some(duty)) => Ok(Point {
-                        value: i32::try_from(value)
-                            .map_err(|_| format!("config {key:?}: value out of range"))?,
-                        duty: i32::try_from(duty)
-                            .map_err(|_| format!("config {key:?}: duty out of range"))?,
-                    }),
-                    _ => Err(format!("config {key:?}: pairs are integers")),
-                }
-            }
-            _ => Err(format!("config {key:?}: pairs are [value, duty]")),
-        })
-        .collect()
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let ConfigValue::List(pair) = item else {
+            return Err(format!("config {key:?}: pairs are [value, duty]"));
+        };
+        let (Some(value), Some(duty)) = (
+            pair.first().and_then(ConfigValue::as_i64),
+            pair.get(1).and_then(ConfigValue::as_i64),
+        ) else {
+            return Err(format!("config {key:?}: pairs are two integers"));
+        };
+        let value =
+            i32::try_from(value).map_err(|_| format!("config {key:?}: value out of range"))?;
+        let duty = i32::try_from(duty).map_err(|_| format!("config {key:?}: duty out of range"))?;
+        out.push(Point { value, duty });
+    }
+    Ok(out)
 }
 
 /// Parses a `fan-controller` entry against the board's devices. Returns every
 /// problem found, not just the first.
-pub fn parse(
-    board: &BoardDefinition,
-    spec: &CompositeSpec,
-) -> Result<FanControllerSpec, Vec<String>> {
-    let mut problems = Vec::new();
-    let device_exists = |id: &str| board.devices.iter().any(|d| d.id == id);
+#[inline(never)]
+pub fn parse(board: &BoardDefinition, spec: &DeviceSpec) -> Result<FanControllerSpec, Vec<String>> {
     let id = &spec.id;
-
-    if spec.inputs.is_empty() || spec.inputs.len() > fan_control::MAX_INPUTS {
-        problems.push(format!(
-            "composite {id:?}: 1 to {} inputs, found {}",
-            fan_control::MAX_INPUTS,
-            spec.inputs.len()
-        ));
-    }
-    match spec.outputs.get(FAN_ROLE) {
-        Some(fan) if spec.outputs.len() == 1 => {
-            if !device_exists(fan) {
-                problems.push(format!("composite {id:?}: fan {fan:?} is not a device"));
-            }
-        }
-        _ => problems.push(format!(
-            "composite {id:?}: outputs must be exactly {{ {FAN_ROLE} = <device> }}"
-        )),
-    }
-    for role in spec.config.keys() {
-        let known = SCALAR_KEYS.contains(&role.as_str())
-            || role
-                .strip_prefix("curve_")
-                .is_some_and(|r| spec.inputs.contains_key(r));
-        if !known {
-            problems.push(format!("composite {id:?}: unknown config key {role:?}"));
-        }
-    }
+    let config = &spec.config;
+    let mut problems = Vec::new();
+    let device_exists = |name: &str| board.devices.iter().any(|d| d.id == name);
 
     let mut inputs = Vec::new();
-    for (role, reference) in &spec.inputs {
-        let Some((device, channel)) = reference.split_once('.') else {
-            problems.push(format!(
-                "composite {id:?}: input {role:?} must be <device>.<channel>"
-            ));
-            continue;
-        };
-        if !device_exists(device) {
-            problems.push(format!(
-                "composite {id:?}: input {role:?} names no device {device:?}"
-            ));
-        }
-        let key = format!("curve_{role}");
-        let points = match spec.config.get(&key) {
-            None => {
-                problems.push(format!("composite {id:?}: missing config {key:?}"));
-                Vec::new()
+    let mut fan = None;
+    for (key, value) in config {
+        if let Some(role) = key.strip_prefix("input_") {
+            let Some(reference) = value.as_str() else {
+                problems.push(format!(
+                    "composite {id:?}: {key} must be <device>.<channel>"
+                ));
+                continue;
+            };
+            let Some((device, channel)) = reference.split_once('.') else {
+                problems.push(format!(
+                    "composite {id:?}: {key} must be <device>.<channel>"
+                ));
+                continue;
+            };
+            if !device_exists(device) {
+                problems.push(format!(
+                    "composite {id:?}: {key} names no device {device:?}"
+                ));
             }
-            Some(value) => match pairs(value, &key) {
-                Ok(points) => match fan_control::check_curve(&points) {
-                    Ok(()) => points,
+            let curve = format!("curve_{role}");
+            let points = match config.get(&curve) {
+                None => {
+                    problems.push(format!("composite {id:?}: missing config {curve:?}"));
+                    Vec::new()
+                }
+                Some(value) => match points(value, &curve) {
+                    Ok(points) => match fan_control::check_curve(&points) {
+                        Ok(()) => points,
+                        Err(error) => {
+                            problems.push(format!("composite {id:?}: {curve:?}: {error:?}"));
+                            Vec::new()
+                        }
+                    },
                     Err(error) => {
-                        problems.push(format!("composite {id:?}: {key:?}: {error:?}"));
+                        problems.push(format!("composite {id:?}: {error}"));
                         Vec::new()
                     }
                 },
-                Err(error) => {
-                    problems.push(format!("composite {id:?}: {error}"));
-                    Vec::new()
+            };
+            inputs.push(FanInput {
+                role: role.to_string(),
+                device: device.to_string(),
+                channel: channel.to_string(),
+                points,
+                max_age_ms: 3_000,
+            });
+        } else if let Some(role) = key.strip_prefix("output_") {
+            match (role == FAN_ROLE, value.as_str()) {
+                (true, Some(device)) => {
+                    if !device_exists(device) {
+                        problems.push(format!("composite {id:?}: fan {device:?} is not a device"));
+                    }
+                    fan = Some(device.to_string());
                 }
-            },
-        };
-        inputs.push(FanInput {
-            role: role.clone(),
-            device: device.to_string(),
-            channel: channel.to_string(),
-            points,
-            max_age_ms: 3_000,
-        });
+                _ => problems.push(format!(
+                    "composite {id:?}: {key} is not supported (the controller drives output_{FAN_ROLE})"
+                )),
+            }
+        } else if !key.starts_with("curve_") && !SCALARS.contains(&key.as_str()) {
+            problems.push(format!("composite {id:?}: unknown config key {key:?}"));
+        }
     }
+    for key in config.keys().filter(|k| k.starts_with("curve_")) {
+        let role = &key["curve_".len()..];
+        if !inputs.iter().any(|i| i.role == role) {
+            problems.push(format!("composite {id:?}: {key:?} has no input_{role}"));
+        }
+    }
+    if inputs.is_empty() || inputs.len() > fan_control::MAX_INPUTS {
+        problems.push(format!(
+            "composite {id:?}: 1 to {} inputs, found {}",
+            fan_control::MAX_INPUTS,
+            inputs.len()
+        ));
+    }
+    let Some(fan) = fan else {
+        problems.push(format!("composite {id:?}: output_{FAN_ROLE} is required"));
+        return Err(problems);
+    };
 
     let mut settings = Settings {
         floor: 0,
@@ -174,15 +183,14 @@ pub fn parse(
         kick_ms: 0,
     };
     let mut max_age = 3_000i64;
-    let checks = [
+    for (key, low, high) in [
         ("floor", 0i64, 1000i64),
         ("hysteresis", 0, i64::from(i32::MAX)),
         ("slew", 0, 1000),
         ("kick_ms", 0, i64::from(u32::MAX)),
         ("max_age_ms", 1, i64::from(u32::MAX)),
-    ];
-    for (key, low, high) in checks {
-        match int(&spec.config, key) {
+    ] {
+        match int(config, key) {
             Ok(Some(v)) if (low..=high).contains(&v) => match key {
                 "floor" => settings.floor = v as i32,
                 "hysteresis" => settings.hysteresis = v as i32,
@@ -200,7 +208,6 @@ pub fn parse(
     for input in &mut inputs {
         input.max_age_ms = max_age as u32;
     }
-    inputs.sort_by(|a, b| a.role.cmp(&b.role));
 
     if !problems.is_empty() {
         return Err(problems);
@@ -209,12 +216,13 @@ pub fn parse(
         id: id.clone(),
         settings,
         inputs,
-        fan: spec.outputs[FAN_ROLE].clone(),
+        fan,
     })
 }
 
 /// Checks every `[[composites]]` entry: unique ids, known drivers, and the
 /// parse above. Returns the problems for [`BoardDefinition::validate`].
+#[inline(never)]
 pub(crate) fn check(board: &BoardDefinition) -> Vec<String> {
     let mut problems = Vec::new();
     for (index, spec) in board.composites.iter().enumerate() {
@@ -273,9 +281,7 @@ writers = ["lemnosd.fan"]
 [[composites]]
 id = "fan-control"
 driver = "fan-controller"
-inputs = { cpu = "cpu-thermal.temperature" }
-outputs = { fan = "fan" }
-config = { floor = 300, hysteresis = 3000, slew = 50, curve_cpu = [[30000, 300], [60000, 600], [75000, 1000]] }
+config = { input_cpu = "cpu-thermal.temperature", output_fan = "fan", floor = 300, hysteresis = 3000, slew = 50, curve_cpu = [[30000, 300], [60000, 600], [75000, 1000]] }
 "#;
 
     fn board(extra: &str) -> BoardDefinition {
@@ -298,17 +304,16 @@ config = { floor = 300, hysteresis = 3000, slew = 50, curve_cpu = [[30000, 300],
     #[test]
     fn problems_are_reported_together() {
         let mut b = board("");
-        b.composites[0].config.insert(
+        let config = &mut b.composites[0].config;
+        config.insert(
             "curve_cpu".into(),
             ConfigValue::List(vec![ConfigValue::List(vec![
                 ConfigValue::Integer(5),
                 ConfigValue::Integer(2000),
             ])]),
         );
-        b.composites[0]
-            .config
-            .insert("bogus".into(), ConfigValue::Integer(1));
-        b.composites[0].inputs.insert("board".into(), "nope".into());
+        config.insert("bogus".into(), ConfigValue::Integer(1));
+        config.insert("input_board".into(), ConfigValue::String("nope".into()));
         let problems = check(&b).join("\n");
         assert!(problems.contains("Duty"), "{problems}");
         assert!(
@@ -316,7 +321,7 @@ config = { floor = 300, hysteresis = 3000, slew = 50, curve_cpu = [[30000, 300],
             "{problems}"
         );
         assert!(
-            problems.contains("must be <device>.<channel>"),
+            problems.contains("input_board must be <device>.<channel>"),
             "{problems}"
         );
     }

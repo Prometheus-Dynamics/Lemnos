@@ -67,7 +67,7 @@ pub use i2c_select::I2cSelector;
 pub use light::{LIGHT_KEYS, light_defaults, light_geometry, strip_config};
 pub use registry::{Build, DriverEntry, DriverRegistry, Interface};
 pub use schema::{
-    Backend, BoardDefinition, BoardInfo, BusRef, CompositeSpec, ConfigValue, DeviceSpec, FORMAT,
-    HostIdentity, LineSpec, Owner, PwmSpec, SCHEMA_VERSION, client_matches, is_valid_client_entry,
-    is_valid_id, os_release_value,
+    Backend, BoardDefinition, BoardInfo, BusRef, ConfigValue, DeviceSpec, FORMAT, HostIdentity,
+    LineSpec, Owner, PwmSpec, SCHEMA_VERSION, client_matches, is_valid_client_entry, is_valid_id,
+    os_release_value,
 };

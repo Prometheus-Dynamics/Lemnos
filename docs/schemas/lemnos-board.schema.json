@@ -142,10 +142,9 @@
     },
     "composites": {
       "type": "array",
-      "description": "Composite devices hosted by lemnosd (docs/composite-devices.md). Only the fan-controller driver exists.",
+      "description": "Composite devices hosted by lemnosd (docs/composite-devices.md). Each entry is a device table; only the fan-controller driver exists.",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": [
           "id",
           "driver"
@@ -160,21 +159,9 @@
               "fan-controller"
             ]
           },
-          "inputs": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string",
-              "pattern": "^[^.]+\\.[^.]+$"
-            }
-          },
-          "outputs": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
           "config": {
-            "type": "object"
+            "type": "object",
+            "description": "input_<role> = \"<device>.<channel>\", output_fan = \"<device>\", curve_<role> = [[value, duty], ...], and the scalars floor, hysteresis, slew, kick_ms, max_age_ms."
           }
         }
       }
