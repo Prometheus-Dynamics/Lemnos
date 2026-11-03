@@ -210,21 +210,46 @@ Other results:
 - `next_block_until`: the stream loop uses it with a 2 s deadline and saw no timeouts, so the `Ok(None)` path did not run on hardware. The interrupt read is a blocking `interrupt_read`.
 - The claim check (refused unclaimed transfers) is host-tested. The first control run on board #2, before the check existed, had its UVC requests refused by the kernel (EBUSY); nothing reached the device.
 
-## Coral firmware load (board #1, item 20)
+## Coral firmware load and bulk (board #1, item 20 and 21)
 
-The image is `apex_latest_single_ep.bin` from the user's libedgetpu checkout (10783 bytes, sha256 `3b07311b…dc7f`), copied to board #1's `/tmp` and checked there. The Coral was at `1a6e:089a`, DFU state dfuIDLE (2), before the run. The DFU functional descriptor reads `bmAttributes` 0x07 (canDnload, canUpload, manifestation tolerant), `wDetachTimeOut` 1000 ms, `wTransferSize` 256 bytes, `bcdDFUVersion` 1.01.
+The image is `apex_latest_single_ep.bin` from the user's libedgetpu checkout (10783 bytes, sha256 `3b07311b…dc7f`), copied to board #1's `/tmp`. The Coral was at `1a6e:089a`, DFU state dfuIDLE (2). The DFU functional descriptor reads `bmAttributes` 0x07 (canDnload, canUpload, manifestation tolerant), `wDetachTimeOut` 1000 ms, `wTransferSize` 256 bytes, `bcdDFUVersion` 1.01.
 
-- First load: the first load used 4096-byte blocks against a `wTransferSize` of 256. The first DNLOAD was accepted; the GETSTATUS after it timed out after 5 s (`USBDEVFS_CONTROL` failed with `-110`). The device then wedged: it disconnected after one USB reset and does not enumerate (`device descriptor read/64, error -110`, `device not accepting address`, `unable to enumerate`, also after a port disable/enable). It needs a physical power cycle. Whether the oversized block caused the wedge is not established; it is the one difference from the libedgetpu sequence I can identify.
-- The loader now honours `wTransferSize` (block size from the descriptors), and accepts dfuIDLE after the zero-length DNLOAD as libedgetpu does. **Unverified on hardware**: no load has run with the fixed block size, since the device has to be power-cycled first.
-- Reset (`USBDEVFS_RESET` through `usb_probe reset`): the device disconnected. Its descriptor reads failed (`device descriptor read/64, error -110`, `device not accepting address`), and it was gone from the bus. One reset, then about two minutes of polling: no enumeration (`unable to enumerate USB device` on `usb1-port1`).
-- **Result:** no `18d1:9302` re-enumeration. The Coral is not on the bus, and the firmware load did not complete. The loader was not retried (it would only repeat the same device fault). The brief's expectation (the device stays at `18d1:9302` until power-cycled) is not what happened: the device has to be power-cycled to be seen again at all. The next step is a physical power cycle of the Coral, by the user. Then `usb_probe dfu-status 1-1` to see the state, and a retry with the descriptor's `wTransferSize` (the probe does this when no block size is given).
-- The webcam on board #1 was not touched by these runs: it is bound to uvcvideo and `video8`, `video9` are present.
+**First load (failed, 4096-byte blocks).**
+the first load used 4096-byte blocks against a `wTransferSize` of 256. The first DNLOAD was accepted; the GETSTATUS after it timed out after 5 s (`USBDEVFS_CONTROL` failed with `-110`). The device then wedged: it disconnected after one USB reset and does not enumerate (`device descriptor read/64, error -110`, `device not accepting address`, `unable to enumerate`, also after a port disable/enable). It needs a physical power cycle. Whether the oversized block caused the wedge is not established; it is the one difference from the libedgetpu sequence I can identify.
+
+**Second load (succeeded, `wTransferSize` blocks).** Run once, under the board lock, after the device was power-cycled (below). `usb_probe dfu 1-1 FILE` read `wTransferSize` (256) from the device's descriptors: 43 DNLOAD blocks (42 of 256 bytes and one of 31), the zero-length DNLOAD, GETSTATUS to dfuIDLE, then the reset. Download and reset took 1.22 s; the device re-enumerated as `18d1:9302` 1.52 s after the download started. The kernel log shows the device firmware change and the new device with `Mfr=0, Product=0, SerialNumber=0`.
+
+**Bulk after the load (transport only).** Endpoints of `18d1:9302` (interface 0, class ff, no kernel driver): bulk OUT `0x01`, `0x02`, `0x03`; bulk IN `0x81`, `0x82` (512 bytes each); interrupt IN `0x83` (64 bytes). `usb_bulk_engine 1-1 2` claimed interface 0 and ran, through `UsbBulkEngine`:
+- zero-length OUT on `0x01`, `0x02`, `0x03`: complete in 147 µs, 122 µs and 56 µs, 0 bytes each;
+- IN on `0x81` and `0x82`: no data in 2 s; each cancelled through the engine (no leak reported).
+No payload was sent and no protocol command was issued: there is no known safe echo for this device's bulk protocol, so only the zero-length packets and the IN timeouts ran. The blocking `bulk_read` in `usb_probe bulk` on an unclaimed interface was refused by the claim check (`Busy`, naming the interface), as designed. The interrupt endpoint `0x83` and an OUT payload were not exercised. The Coral stays at `18d1:9302` after these runs.
+
+## Power cycles and port map
+
+Power cycles are done through lemnosd's power switches (`lemnos-ctl --client <writer> power <device> reset --off-ms 2000`), which the user allowed for USB ports. `<writer>` is one of the board file's authorised clients.
+
+| Board | Switch | Port | Device |
+|---|---|---|---|
+| #1 | `usb-c-power` (RP1 GPIO16) | `xhci-hcd.0`, bus 1 port 1 | Coral (`1a6e:089a`, `18d1:9302`) |
+| #1 | `usb-a-power` (RP1 GPIO20) | `xhci-hcd.1`, bus 3 port 1 | webcam (`1bcf:0050`) |
+| #2 | not mapped | | webcam (`041e:40a3`) |
+
+Power cycles (lead-reported; the port map above was verified by the lead with `power <device> reset`):
+- Board #1, `usb-c-power`, one reset after the first load wedged the Coral (not enumerating). Result: the Coral came back as `1a6e:089a`; the second load then succeeded (above). Earlier port disable and enable on `usb1-port1` (not a power switch) did not recover it.
+- Board #1, `usb-a-power`: not cycled by me. The lead reports the webcam re-enumerated onto uvcvideo when its port was cycled.
+- Board #2: no power cycle.
+
+## Board #2 monitored runs (items re-run after the reboot)
+
+Each run was watched from a second ssh session: `vcgencmd get_throttled` and new kernel log lines every 2 s. Throttling was `0x0` in all 85 samples of the two monitored windows, and no undervoltage, RCU, xHCI, reset or disconnect line appeared. The only new kernel lines were three uvcvideo `Found UVC` probes from the rebinds.
+
+- Stream, 150 frames (thread reaping): 6.23 s = 24.08 fps (target 25.00), 1557 blocks, 49824 packets, 20.1 MB, 0 packet errors, 0 timeouts.
+- Item 3 re-run: describe (`041e:40a3`, speed High, interface 0 `uvcvideo`, interface 1 `uvcvideo`); claimed control (GET_DESCRIPTOR device 18 bytes, configuration wTotalLength 896, GET_STATUS `00 00`, UVC GET_MIN/MAX/DEF/CUR all `400000` ns, max payload 2400, GET_LEN 48, VC GET_INFO stalled); interrupt `0x83`, 10 s: 0 events, 20 timeouts; stream 300 frames in both reaping modes: thread 12.23 s = 24.53 fps, 97824 packets, 40.5 MB, 0 errors, 0 timeouts; caller-driven (`reap_until`) 12.23 s = 24.53 fps, 97824 packets, 40.4 MB, 0 errors, 0 timeouts; reattach PASS after the UVC rebind (video8, video9 present).
 
 ## Blocked on hardware
 
-- **Coral bulk (items 20, 21).** The bulk endpoints exist only after the firmware load, and the load did not complete (above). `usb_bulk_engine` (lemnos-linux, feature `usb`) is written; it ran only on the webcam, where it exits with "no bulk endpoint" (the skip path). The zero-length OUT, the bounded IN read and the cancel have not run on a device. No safe echo is known for this protocol; the plan is endpoint discovery, a claim, a zero-length OUT and an IN read with a timeout, nothing more.
-- **Bulk (items 20, 21).** Both webcams have no bulk endpoint, and the Coral has none before the firmware load. `UsbBulkEngine` (lemnos-linux) therefore has no hardware run.
 - **Isochronous allocation count.** Not measured: the allocator is not hooked, because the workspace forbids the `unsafe` a counting allocator needs.
+- **Coral bulk payloads.** No safe echo is known for this protocol, so only zero-length OUT and IN timeouts have run.
 
 ## Untested on hardware
 
