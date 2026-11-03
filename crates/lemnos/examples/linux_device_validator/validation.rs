@@ -78,7 +78,7 @@ pub fn run_validations(
     } else {
         report.skip(
             "bosch_imu.sample",
-            "no BMI088_* or BMI088_* target configured",
+            "no BMI088_* target configured",
         );
     }
 

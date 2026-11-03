@@ -153,10 +153,8 @@ look_writers = ["manager", "orion:*", "lemnos-ctl"]   # top level: who may chang
 
 `lemnosd` refuses preset changes and look deletions from any other client; reads stay open to all.
 When the key is absent (or empty), the writers are `lemnos-ctl` and `orion:*`, the operator's
-tool and the Orion bridge's callers. A device package that needs its device manager to keep
-changing looks must list the manager's client name here; the manager was the default before
-this key existed, so a board file written for that release needs the line added to keep working.
-Entries match exactly, or as a prefix with a trailing `*`.
+tool and the Orion bridge's callers. A device manager that changes looks lists its client name
+here. Entries match exactly, or as a prefix with a trailing `*`.
 
 ### Raw access: lines, PWM channels and policy
 

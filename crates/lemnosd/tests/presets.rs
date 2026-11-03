@@ -33,14 +33,18 @@ fn the_default_writers_are_the_operator_and_orion() {
         Some(root.join("state")),
     )
     .unwrap();
-    let mut manager = ClientOptions::new(service.socket(), "manager").leds().unwrap();
+    let mut manager = ClientOptions::new(service.socket(), "manager")
+        .leds()
+        .unwrap();
     match manager.looks(LooksOp::PresetApply("scheme-a".into())) {
         Err(ClientError::Rejected(reason)) => {
             assert!(reason.contains("lemnos-ctl, orion:*"), "{reason}")
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
-    let mut ctl = ClientOptions::new(service.socket(), "lemnos-ctl").leds().unwrap();
+    let mut ctl = ClientOptions::new(service.socket(), "lemnos-ctl")
+        .leds()
+        .unwrap();
     ctl.looks(LooksOp::PresetApply("scheme-a".into())).unwrap();
     drop(service);
 }
