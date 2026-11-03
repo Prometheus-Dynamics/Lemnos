@@ -20,7 +20,7 @@ nusb is used for listing on every platform, for hotplug and every transfer off L
 | Windows | nusb (WinUSB) | through a claimed interface | nusb | nusb, worker per endpoint | no (`Unsupported`) |
 | macOS | nusb (IOKit) | device, after a claim | nusb | nusb, worker per endpoint | no (`Unsupported`) |
 
-Checked on this host: Linux (the crate's tests and a read-only probe), and `cargo check` and `clippy` for `x86_64-pc-windows-gnu` and `x86_64-apple-darwin`. Only the Linux listing and the permission path have run against a device; see *Untested on hardware* below.
+Checked on this host: Linux (the crate's tests and a read-only probe), and `cargo check` and `clippy` for `x86_64-pc-windows-gnu` and `x86_64-apple-darwin`. On Linux, the listing, descriptors, control, UVC isochronous streams, interrupt reads, mappings and reattach have run against the two boards' webcams; see *Hardware results*. Bulk has not run (no bulk device yet), and every Windows and macOS path is untested.
 
 ## API
 
@@ -41,7 +41,8 @@ let mut reader = device.bulk_reader(0x81, 16 * 1024, 4); // 4 transfers in fligh
 - **Location.** `UsbLocation` is the bus identifier and the port chain, in the sysfs form (`3-1.2`). It is stable while the device stays in its port. The bus identifier is zero-padded on Linux in nusb; `UsbLocation::new` drops the padding, so `003-1` and `3-1` are the same location.
 - **Hotplug.** `watch()` returns a `UsbWatch`: a `futures_core::Stream` of `UsbHotplugEvent::{Connected, Disconnected(location)}`, with `next_event()` for threads. It starts before its initial listing, so an arrival in between is not missed.
 - **Descriptors.** `UsbDevice::device_descriptor()` is the 18-byte device descriptor (`DeviceDescriptor`): `usb_version`, the class, `max_packet_size_0`, IDs, `device_version`, the `manufacturer_index`, `product_index` and `serial_number_index` string indices, and `num_configurations`. It is read when the device is opened, with no request: on Linux it is the first 18 bytes of the descriptor blob, on Windows and macOS nusb's cached copy. `UsbDevice::configurations()` (parsed when the device was opened) and `active_configuration()`. `ConfigurationInfo::find_endpoint(interface, alternate, direction, transfer_type)` returns an `EndpointInfo` (address, direction, transfer type, max packet size, packets per microframe, interval).
-- **Claims.** `claim_interface(n)` and `detach_and_claim_interface(n)` return an `Interface`. Dropping it releases the claim, and on Linux reattaches a driver that the detaching claim unbound. `Interface::set_alternate(alt)` selects an alternate setting.
+- **Claims.** `claim_interface(n)` and `detach_and_claim_interface(n)` return an `Interface`. Dropping it releases the claim, and on Linux binds the driver the detaching claim unbound (see *Reattaching a driver* below). `Interface::set_alternate(alt)` selects an alternate setting.
+- **Claim check.** A transfer on an interface the handle has not claimed is refused before the kernel sees it (`Busy`, naming the interface). That covers interface-recipient control requests (the UVC class requests, the DFU requests: the interface number is `wIndex`'s low byte) and any bulk, interrupt or isochronous transfer on an endpoint whose descriptor names an interface. An endpoint no descriptor names is left to the kernel. On Linux the kernel answers the same case with `EBUSY` and logs "did not claim interface"; the check says what to do.
 - **Control.** `control_in(&ControlSetup, length, timeout)` and `control_out(&ControlSetup, &data, timeout)`. `ControlSetup::vendor(direction, request, value, index)` builds a vendor request to the device, and the struct's fields cover the class and standard kinds and the recipient.
 - **Isochronous reads.** `IsoReader::next_block()` waits without a deadline. `next_block_until(deadline)`
   returns `Ok(None)` at the deadline and leaves the transfer in flight. In caller-driven reaping
@@ -102,6 +103,7 @@ after it stay where they were scheduled.
 - **macOS.** Claims are plain (there is no driver to detach). Device-level control transfers are used.
 - **IN transfers on Windows and macOS.** nusb reads whole packets, so a read rounds its request up to the endpoint's packet size. Bytes past the caller's buffer are dropped.
 - **Isochronous.** Linux only. A packet's length is the chunk size, and the last packet may be shorter.
+- **Mapped buffers and the usbfs limit.** `usbfs_memory_mb` (default 16 MiB, `/sys/module/usbcore/parameters`) bounds every usbfs mapping. A buffer larger than it is heap memory from the start, and a mapping the kernel refuses also falls back to the heap.
 - **Zero-length packets.** An empty OUT payload is a zero-length packet, and `bulk_write`, `submit_bulk_out` and `flush_end` accept it. A device that reads until a short packet needs the transfer to end on one. When the bytes written are a whole number of the endpoint's packet size (`wMaxPacketSize`: 512 at high speed, 1024 at SuperSpeed), `BulkWriter::flush_end()` sends that terminator after the data, as nusb's `flush_end_async` does. It counts bytes since the last `flush_end`, and writing nothing sends nothing. Drop does not send it. On Linux, `submit_bulk_out_zlp` sets usbdevfs's `USBDEVFS_URB_ZERO_PACKET` on one URB, so the kernel appends the terminator within the transfer; it applies to OUT bulk and interrupt only and is `Unsupported` elsewhere.
 - **Zero-copy frames (bulk).** A completed transfer hands its `TransferBuffer` back in the outcome, the
   same memory that was submitted: nothing is copied. A caller that moves whole frames runs its own
@@ -121,7 +123,8 @@ after it stay where they were scheduled.
   interface (`USBDEVFS_GETDRIVER`; `None` when none). `speed()` reads the negotiated speed of the
   open file (`USBDEVFS_GET_SPEED`), and `None` for an unknown or wireless speed. Other platforms:
   `Unsupported` (`speed()` is on the listing there).
-- **Buffers.** `TransferBuffer` is the memory a transfer moves its bytes through. On Linux, `UsbDevice::allocate_buffer(len)` returns a usbdevfs mapping when the kernel offers `USBDEVFS_CAP_MMAP`: page-aligned memory the host controller uses directly (`UrbBuffer::Mapped`). A failed mapping, or a kernel without the capability, falls back to a heap vector (`UrbBuffer::Heap`), the copy path. Other platforms have vectors only. The streams allocate their slots once and recycle them. `TransferOutcome::into_buffer()` returns the buffer for reuse, and `set_len` sizes it. Untested on a device (see *Untested on hardware*).
+- **Reattaching a driver (Linux).** A detaching claim (`detach_and_claim_interface`) unbinds the driver and remembers its name. The release does not bind it again on the kernel tested: `USBDEVFS_RELEASEINTERFACE` leaves the interface unbound, and `USBDEVFS_IOCTL` with `USBDEVFS_CONNECT` (the kernel's `usb_rebind_intf`) did nothing for a UVC streaming interface. The bare `_IO('U', 23)` is not a usbdevfs request (`ENOTTY`). The release therefore tries the sysfs bind (`/sys/bus/usb/drivers/<driver>/bind`, `<location>:<config>.<interface>`) when the interface is still unbound. For a UVC streaming interface that bind is refused (`ENODEV`): uvcvideo claims its streaming interfaces from the control interface, when the control interface is probed. The recovery that works is the UVC device's own rebind: unbind and bind the control interface (`<location>:<config>.<control>`) in `uvcvideo`, which re-registers the video nodes and claims the streaming interface.
+- **Buffers.** `TransferBuffer` is the memory a transfer moves its bytes through. On Linux, `UsbDevice::allocate_buffer(len)` returns a usbdevfs mapping when the kernel offers `USBDEVFS_CAP_MMAP`: page-aligned memory the host controller uses directly (`UrbBuffer::Mapped`). A failed mapping, or a kernel without the capability, falls back to a heap vector (`UrbBuffer::Heap`), the copy path. Other platforms have vectors only. The streams allocate their slots once and recycle them. `TransferOutcome::into_buffer()` returns the buffer for reuse, and `set_len` sizes it. Mapping runs on hardware (*Hardware results*); the copy fallback and the usbfs limit do not.
 - **Hotplug.** On Linux, `watch()` is `lemnos-uevent`'s `DeviceWatcher` (netlink, falling back to inotify and then a sysfs rescan), filtered to USB devices. Arrivals are listed through nusb before they are reported, so a device gone by then is not reported. A removal is reported for a device this watch saw. On overflow the watch lists again and reports the difference. Windows and macOS use nusb's watch.
 
 ## Migrating a flashing tool from nusb 0.2
@@ -161,6 +164,10 @@ A tokio-based tool can `.await` a `Transfer` directly; no runtime feature is nee
 
 A stream's depth is its in-flight count, and its buffers are recycled, so no transfer allocates in steady state.
 
+## DFU firmware download
+
+`UsbDevice::dfu_download(interface, image, block_size)` is the DFU 1.1 sequence a boot ROM takes its firmware through: a DNLOAD per block (the block number in `wValue`), a GETSTATUS after each block until the device is idle (`bwPollTimeout` honoured), a zero-length DNLOAD, one GETSTATUS to start the manifest, then a reset. A disconnect during the manifest is the expected end. `UsbDevice::dfu_status(interface)` is the read-only GETSTATUS. `lemnos_usb::wait_for_device(vendor, product, timeout)` polls the listing for the re-enumerated identity; the location is kept, the IDs change. The interface must be claimed. Nothing names a product: the caller brings the image and the IDs. Host-tested against a simulated DFU device; see *Hardware results* for the boards.
+
 ## Feature gating
 
 `lemnos-linux`'s `usb` feature (and `lemnos`'s `linux-usb`) enables `lemnos-usb`, which enables nusb. Without it, neither is in the dependency tree. The workspace has no libusb or rusb.
@@ -171,18 +178,46 @@ A stream's depth is its in-flight count, and its buffers are recycled, so no tra
 - `lemnos-linux`'s USB transport tests run through a mock transport (`cargo test -p lemnos-linux --features full`).
 - `cargo check` and `cargo clippy --target x86_64-pc-windows-gnu` / `--target x86_64-apple-darwin` cover the other platforms. A target needs its rustup target installed.
 
+## Hardware results (2026-11-03)
+
+Run with `crates/lemnos-usb/examples/usb_probe` (aarch64, musl, release) under the board's device lock. Board #1 (the BCM2712 board), kernel 7.2.9-v8-16k, webcam `1bcf:0050` at `3-1`, Coral at `1-1`. Board #2: webcam `041e:40a3` at `3-1`. Each run was one process; each claim was released and the webcam left bound to `uvcvideo` (the last step of each board's run).
+
+| Path | Board #1 (1bcf:0050, high speed) | Board #2 (041e:40a3, high speed) |
+|---|---|---|
+| Listing, `driver()`, `speed()` | `driver` `uvcvideo` on both UVC interfaces before the claim; `speed()` High | the same; `speed()` High |
+| `GET_DESCRIPTOR(device)` | 18 bytes, the `1bcf:0050` IDs | 18 bytes, the `041e:40a3` IDs |
+| `GET_DESCRIPTOR(configuration)` | wTotalLength 1680, read in two steps (9, then 1680) | wTotalLength 896, the same two steps |
+| `GET_STATUS(device)` | `00 00` | `00 00` |
+| UVC probe GET_MIN / GET_MAX / GET_DEF / GET_CUR (26 bytes) | 333333 ns (30 fps), format 1, frame 1, max payload 3060 | 400000 ns (25 fps), format 1, frame 1, max payload 2400 |
+| UVC GET_LEN (probe) | 26 | 48 |
+| VC GET_INFO (selector 1, unit 0) | answered (`03`) | stalled (EPIPE, "Broken pipe" in the message) |
+| UVC stream: probe, commit, alternate | alt 11, `0x81`, 1020 x 3 bytes per microframe, 32 packets per transfer (97920 bytes), 4 in flight | alt 5, `0x81`, 800 x 3, 32 packets (76800 bytes), 4 in flight |
+| stream, reaper thread, 300 frames | 10.21 s = 29.39 fps; 2551 blocks, 81632 packets, 41.7 MB (4.08 MB/s); packet errors 0; UVC ERR 0; bad headers 0; zero-length packets 0; no block timeouts | 12.23 s = 24.53 fps (target 25.00); 3057 blocks, 97824 packets, 41.2 MB (3.37 MB/s); errors 0; bad headers 0; no timeouts |
+| stream, caller-driven (`reap_until`), 300 frames | 10.21 s = 29.40 fps; 81632 packets, 0 errors | 12.23 s = 24.53 fps; 97824 packets, 0 errors |
+| `allocate_buffer` mapping (`USBDEVFS_CAP_MMAP`) | mapped (`is_mapped()` true) | mapped |
+| interrupt, VC status endpoint, 10 s | `0x87` (16 bytes): 20 read timeouts, 0 events (no control changes happened) | `0x83` (64 bytes): 20 timeouts, 0 events |
+| bulk | no bulk endpoint on the webcam: SKIP | the same |
+| reattach (detach+claim, release, check) | the release alone leaves the streaming interface unbound; the UVC rebind through control interface `1.0` restores it; `video8` and `video9` present throughout | the same |
+
+Board #2 was stopped after these runs: it reset at about 9842 s of its uptime (an rcu stall, with undervoltage logged earlier), and its results above are from before that. They are to be re-run once the lead clears the board.
+
+Other results:
+
+- The Coral (`1a6e:089a`, DFU mode, `fe/01/02`) on board #1: its one interface has no endpoints. Bulk is not available until the firmware load. The read-only `dfu-status` (GETSTATUS) answers status 0, state 2 (dfuIDLE).
+- Packet tables: a steady isochronous stream reuses one table (host test `a_steady_isochronous_stream_reuses_one_packet_table`). The probe runs did not count allocations; the pool is the only per-stream table.
+- `next_block_until`: the stream loop uses it with a 2 s deadline and saw no timeouts, so the `Ok(None)` path did not run on hardware. The interrupt read is a blocking `interrupt_read`.
+- The claim check (refused unclaimed transfers) is host-tested. The first control run on board #2, before the check existed, had its UVC requests refused by the kernel (EBUSY); nothing reached the device.
+
+## Blocked on hardware
+
+- **Coral firmware load (item 20).** No `apex_latest*` image is on either board, and a time-boxed search of the repo tree on this host did not finish (HDD). The DFU download is written and host-tested; it has not run on a board. After a load the Coral stays at `18d1:9302` until it is power-cycled.
+- **Bulk (items 20, 21).** Both webcams have no bulk endpoint, and the Coral has none before the firmware load. `UsbBulkEngine` (lemnos-linux) therefore has no hardware run.
+- **Isochronous allocation count.** Not measured: the allocator is not hooked, because the workspace forbids the `unsafe` a counting allocator needs.
+
 ## Untested on hardware
 
-- Everything in this section that goes through a device: the caller-driven ring and `reap_until`
-  on a live device, `next_block_until` with caller-driven and thread reaping, the iso packet layout
-  on real hardware (the synthetic tests check the arithmetic), `driver()` and `speed()` on a
-  device, and a mapped transfer buffer submitted to a real endpoint. Host tests cover the packet
-  layout arithmetic, the status mapping, the outcome shape (status, buffer, reap time), the
-  buffer's `Send`/`Sync`, the unmap-on-drop and descriptor-outlives-mapping behaviour on a regular
-  file standing in for the node, and the speed mapping. No USB device is opened on this host.
-
-- Linux caller-driven reaping (`set_caller_driven_reaping`, `reap_now`, `reap_until`), the isochronous packet tables handed back and reused, and the completion path's reuse of the packet scratch. The logic that runs without a device is host-tested: the outcome of a bulk or an isochronous completion, the packet table pool, and `read_descriptors` (`pread` at offset 0, tested on a regular file: two reads return the same bytes; no USB device is opened).
-- Linux descriptor reads, control transfers (blocking and the futures), claims, bulk and interrupt transfers, URB completions, zero-length packets on the wire (`flush_end` and `URB_ZERO_PACKET`), isochronous streams, the reaper's shutdown, and reattaching a driver after a detaching claim.
-- Linux usbdevfs mappings (`USBDEVFS_CAP_MMAP`): the mapping, the URBs that use mapped memory, the page alignment, and the copy fallback when a mapping fails. Written from the kernel's usbdevfs interface, with no device to run it on. Host tests cover the page rounding, the heap buffer and the packet lengths only.
-- Linux hotplug through `lemnos-uevent` for USB devices: the add and remove mapping, the listing check, overflow resync, and the waker thread. Host tests cover only the devpath-to-location rule. This host's devices are root-owned with no write permission for the build user, so the probe exercised the permission path alone (`EACCES` mapped to `PermissionDenied`). It did not open the Broadcom boot device, which is a board in USB boot mode. Run the flashing tool's and the camera stack's own tests on a board before relying on these.
 - Windows and macOS: every runtime path. They are compile-checked only.
+- Linux hotplug through `lemnos-uevent` for USB devices (add and remove on a board), overflow resync and the waker thread. Host tests cover the devpath rule only.
+- `next_block_until` returning `Ok(None)` on a live device.
+- The zero-length packets on the wire (`flush_end` and `URB_ZERO_PACKET`).
+- Mappings under the kernel's limit: the fallback when `usbfs_memory_mb` is hit (the cap is read; no run pushed past it).

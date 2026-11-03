@@ -545,6 +545,28 @@ mod tests {
         assert!(tables.is_empty(), "the table left the pool");
     }
 
+    /// A steady isochronous stream hands the same packet table round and round:
+    /// the reader gives each table back as the next outcome is built, so the
+    /// table's storage (its pointer) never changes after the first transfer.
+    #[test]
+    fn a_steady_isochronous_stream_reuses_one_packet_table() {
+        let tables = Spares::new(SPARE_PACKET_TABLES);
+        let urb = [packet(100, 100, 0), packet(100, 40, 0), packet(100, 100, 0)];
+        let mut first_storage = None;
+        for _ in 0..200 {
+            let out = outcome(completion(0, 240), &urb, &tables, Instant::now());
+            let storage = out.packets.as_ptr() as usize;
+            assert_eq!(out.packets.len(), 3);
+            match first_storage {
+                None => first_storage = Some(storage),
+                Some(first) => assert_eq!(storage, first, "the table was allocated again"),
+            }
+            let (_buffer, packets) = out.into_parts();
+            tables.give(packets);
+            assert_eq!(tables.len(), 1, "one table circulates");
+        }
+    }
+
     /// A status that ends the whole isochronous URB is the transfer's status, and
     /// the buffer still comes back with it.
     #[test]
