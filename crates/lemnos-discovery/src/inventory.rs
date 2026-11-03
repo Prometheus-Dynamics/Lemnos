@@ -1,8 +1,7 @@
 use crate::{DiscoveryError, DiscoveryResult};
 use lemnos_core::{
-    DeviceDescriptor, DeviceId, DeviceKind, InterfaceKind, InventoryEvent, TimestampMs,
+    DeviceDescriptor, DeviceId, DeviceKind, InterfaceKind, InventoryEvent, SmallMap, TimestampMs,
 };
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -11,11 +10,10 @@ pub struct InventorySnapshot {
     pub devices: Vec<DeviceDescriptor>,
 }
 
-/// Devices keyed by ID. Built by insertion: collecting into a `BTreeMap`
-/// sorts a `Vec` first, which links a whole sort implementation per element
-/// type.
-fn index_by_id(devices: &[DeviceDescriptor]) -> BTreeMap<&DeviceId, &DeviceDescriptor> {
-    let mut map = BTreeMap::new();
+/// Devices keyed by ID. Built by insertion: collecting sorts a `Vec` first,
+/// which links a whole sort implementation per element type.
+fn index_by_id(devices: &[DeviceDescriptor]) -> SmallMap<&DeviceId, &DeviceDescriptor> {
+    let mut map = SmallMap::new();
     for device in devices {
         map.insert(&device.id, device);
     }
@@ -175,7 +173,7 @@ impl InventoryDiff {
 }
 
 pub(crate) fn validate_devices(devices: &[DeviceDescriptor]) -> DiscoveryResult<()> {
-    let mut seen = BTreeSet::new();
+    let mut seen = SmallMap::new();
     for device in devices {
         device
             .validate()
@@ -184,7 +182,7 @@ pub(crate) fn validate_devices(devices: &[DeviceDescriptor]) -> DiscoveryResult<
                 device_id: device.id.clone(),
                 source,
             })?;
-        if !seen.insert(device.id.clone()) {
+        if seen.insert(device.id.clone(), ()).is_some() {
             return Err(DiscoveryError::DuplicateDeviceId {
                 device_id: device.id.clone(),
             });

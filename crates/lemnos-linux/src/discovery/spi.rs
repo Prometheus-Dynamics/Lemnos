@@ -8,10 +8,9 @@ use crate::util::{
 };
 use lemnos_core::{
     CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceHealth,
-    DeviceId, DeviceKind, DeviceLink, DeviceRelation, InterfaceKind,
+    DeviceId, DeviceKind, DeviceLink, DeviceRelation, InterfaceKind, SmallMap,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
-use std::collections::BTreeMap;
 use std::path::Path;
 
 const INTERFACES: [InterfaceKind; 1] = [InterfaceKind::Spi];
@@ -48,7 +47,7 @@ impl DiscoveryProbe for SpiDiscoveryProbe {
         let entries = read_dir_sorted(&devices_root).map_err(|error| {
             probe_failed(self.name(), &devices_root, "enumerate SPI devices", error)
         })?;
-        let mut bus_ids: BTreeMap<u32, DeviceId> = BTreeMap::new();
+        let mut bus_ids: SmallMap<u32, DeviceId> = SmallMap::new();
 
         for device_path in entries {
             let Some(device_name) = file_name(&device_path) else {

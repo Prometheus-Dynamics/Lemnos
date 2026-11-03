@@ -1,5 +1,4 @@
-use lemnos_core::{DeviceId, InterfaceKind};
-use std::collections::{BTreeMap, BTreeSet};
+use lemnos_core::{DeviceId, InterfaceKind, SmallMap};
 use std::sync::Arc;
 
 use crate::{DiscoveryResult, InventorySnapshot};
@@ -137,7 +136,7 @@ impl DiscoveryRunReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProbeInventoryIndex {
-    devices_by_probe: BTreeMap<String, BTreeMap<InterfaceKind, BTreeSet<DeviceId>>>,
+    devices_by_probe: SmallMap<String, SmallMap<InterfaceKind, SmallMap<DeviceId, ()>>>,
 }
 
 impl ProbeInventoryIndex {
@@ -152,8 +151,7 @@ impl ProbeInventoryIndex {
     }
 
     pub fn record_run(&mut self, run: &DiscoveryRunReport) {
-        // Built by insertion rather than `collect`, which would link a sort.
-        let mut devices = BTreeMap::new();
+        let mut devices = SmallMap::new();
         for device in &run.snapshot.devices {
             devices.insert(&device.id, device.interface);
         }
@@ -163,20 +161,16 @@ impl ProbeInventoryIndex {
                 continue;
             }
 
-            let probe_entry = self
-                .devices_by_probe
-                .entry(report.probe.clone())
-                .or_default();
+            let probe_entry = self.devices_by_probe.entry_or_default(report.probe.clone());
             for interface in &report.refreshed_interfaces {
-                probe_entry.insert(*interface, BTreeSet::new());
+                probe_entry.insert(*interface, SmallMap::new());
             }
 
             for device_id in &report.discovered_device_ids {
                 if let Some(interface) = devices.get(device_id) {
                     probe_entry
-                        .entry(*interface)
-                        .or_default()
-                        .insert(device_id.clone());
+                        .entry_or_default(*interface)
+                        .insert(device_id.clone(), ());
                 }
             }
         }
@@ -186,7 +180,7 @@ impl ProbeInventoryIndex {
         &self,
         probe: &str,
         interface: InterfaceKind,
-    ) -> Option<&BTreeSet<DeviceId>> {
+    ) -> Option<&SmallMap<DeviceId, ()>> {
         self.devices_by_probe.get(probe)?.get(&interface)
     }
 
@@ -218,7 +212,7 @@ impl ProbeInventoryIndex {
                 && report.refreshed_interfaces.contains(&interface)
                 && self
                     .ids_for_probe_interface(&report.probe, interface)
-                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == device_id))
+                    .is_some_and(|ids| ids.keys().any(|id| id.as_str() == device_id))
         })
     }
 }

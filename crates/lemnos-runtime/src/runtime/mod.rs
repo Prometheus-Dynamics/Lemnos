@@ -2,20 +2,18 @@ use crate::{
     RuntimeBackends, RuntimeBindPolicy, RuntimeConfig, RuntimeError, RuntimeFailureOperation,
     RuntimeFailureRecord, RuntimeResult,
 };
-use lemnos_core::{DeviceId, DeviceRequest, DeviceResponse, DeviceStateSnapshot, LemnosEvent};
+use lemnos_core::{
+    DeviceId, DeviceRequest, DeviceResponse, DeviceStateSnapshot, LemnosEvent, SmallMap,
+};
 use lemnos_discovery::{
     DiscoveryContext, DiscoveryProbe, DiscoveryRunReport, InventoryDiff, InventorySnapshot,
     InventoryWatchEvent, ProbeInventoryIndex, run_probes,
 };
 use lemnos_driver_sdk::{BoundDevice, Driver};
 use lemnos_registry::DriverRegistry;
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crate::subscription::RuntimeEventNotifier;
-use device_map::DeviceMap;
-
-mod device_map;
 mod events;
 mod failures;
 mod lifecycle;
@@ -142,11 +140,11 @@ pub struct Runtime {
     running: bool,
     inventory: Arc<InventorySnapshot>,
     registry: DriverRegistry,
-    states: DeviceMap<Arc<DeviceStateSnapshot>>,
-    bindings: DeviceMap<SharedBoundDevice>,
+    states: SmallMap<DeviceId, Arc<DeviceStateSnapshot>>,
+    bindings: SmallMap<DeviceId, SharedBoundDevice>,
     probe_inventory: ProbeInventoryIndex,
-    desired_bindings: DeviceMap<()>,
-    failures: BTreeMap<DeviceId, RuntimeFailureRecord>,
+    desired_bindings: SmallMap<DeviceId, ()>,
+    failures: SmallMap<DeviceId, RuntimeFailureRecord>,
     backends: RuntimeBackends,
     event_base_index: usize,
     retained_event_bytes: usize,
@@ -162,11 +160,11 @@ impl Default for Runtime {
             running: true,
             inventory: Arc::new(InventorySnapshot::default()),
             registry: DriverRegistry::default(),
-            states: DeviceMap::default(),
-            bindings: DeviceMap::default(),
+            states: SmallMap::default(),
+            bindings: SmallMap::default(),
             probe_inventory: ProbeInventoryIndex::default(),
-            desired_bindings: DeviceMap::default(),
-            failures: BTreeMap::default(),
+            desired_bindings: SmallMap::default(),
+            failures: SmallMap::default(),
             backends: RuntimeBackends::default(),
             event_base_index: 0,
             retained_event_bytes: 0,

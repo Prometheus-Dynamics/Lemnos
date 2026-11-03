@@ -10,10 +10,9 @@ use crate::util::{
 use lemnos_core::{
     CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor,
     DeviceDescriptorBuilder, DeviceHealth, DeviceId, DeviceKind, DeviceLink, DeviceRelation,
-    InterfaceKind,
+    InterfaceKind, SmallMap,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
-use std::collections::BTreeMap;
 use std::path::Path;
 
 const INTERFACES: [InterfaceKind; 1] = [InterfaceKind::Usb];
@@ -62,9 +61,9 @@ impl DiscoveryProbe for UsbDiscoveryProbe {
         let entries = read_dir_sorted(&devices_root).map_err(|error| {
             probe_failed(self.name(), &devices_root, "enumerate USB devices", error)
         })?;
-        let mut bus_ids: BTreeMap<u16, DeviceId> = BTreeMap::new();
-        let mut device_ids: BTreeMap<String, DeviceId> = BTreeMap::new();
-        let mut device_vendor_products: BTreeMap<String, UsbVendorProduct> = BTreeMap::new();
+        let mut bus_ids: SmallMap<u16, DeviceId> = SmallMap::new();
+        let mut device_ids: SmallMap<String, DeviceId> = SmallMap::new();
+        let mut device_vendor_products: SmallMap<String, UsbVendorProduct> = SmallMap::new();
 
         for entry in entries {
             let Some(name) = file_name(&entry) else {

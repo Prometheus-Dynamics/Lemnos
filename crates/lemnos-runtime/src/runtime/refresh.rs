@@ -1,8 +1,8 @@
 use super::operations::close_detached_bindings;
 use super::*;
 use crate::runtime::operations::DetachedBoundDevice;
+use lemnos_core::SmallMap;
 use lemnos_discovery::{EnrichmentReport, ProbeReport};
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub(crate) struct PreparedRefreshCommit {
@@ -232,12 +232,11 @@ impl Runtime {
         })
     }
 
-    fn collect_invalidated_bindings(&self, diff: &InventoryDiff) -> BTreeSet<DeviceId> {
-        // Inserted one by one: `collect` into a set links a sort.
-        let mut invalidated = BTreeSet::new();
+    fn collect_invalidated_bindings(&self, diff: &InventoryDiff) -> SmallMap<DeviceId, ()> {
+        let mut invalidated = SmallMap::new();
         for changed in &diff.changed {
             if self.binding_requires_rebind(changed) {
-                invalidated.insert(changed.current.id.clone());
+                invalidated.insert(changed.current.id.clone(), ());
             }
         }
         invalidated
@@ -246,7 +245,7 @@ impl Runtime {
     fn collect_rebind_targets(
         &self,
         diff: &InventoryDiff,
-        invalidated_bindings: &BTreeSet<DeviceId>,
+        invalidated_bindings: &SmallMap<DeviceId, ()>,
     ) -> Vec<RefreshBindTarget> {
         // Added devices, plus changed devices that are unbound or whose
         // binding the change invalidated.
@@ -258,12 +257,12 @@ impl Runtime {
                         .iter()
                         .map(|changed| &changed.current)
                         .filter(|device| {
-                            invalidated_bindings.contains(&device.id)
+                            invalidated_bindings.contains_key(&device.id)
                                 || !self.bindings.contains_key(&device.id)
                         }),
                 );
 
-        let mut targets = BTreeMap::new();
+        let mut targets = SmallMap::new();
         for device in candidates {
             if self.config.auto_rebind_on_refresh && self.desired_bindings.contains_key(&device.id)
             {

@@ -274,7 +274,7 @@ impl Runtime {
     pub(crate) fn detach_invalidated_bindings(
         &mut self,
         diff: &InventoryDiff,
-        invalidated_bindings: &std::collections::BTreeSet<DeviceId>,
+        invalidated_bindings: &lemnos_core::SmallMap<DeviceId, ()>,
     ) -> Vec<DetachedBoundDevice> {
         let mut detached = Vec::new();
         for device_id in &diff.removed {
@@ -286,7 +286,7 @@ impl Runtime {
         }
 
         for changed in &diff.changed {
-            if !invalidated_bindings.contains(&changed.current.id) {
+            if !invalidated_bindings.contains_key(&changed.current.id) {
                 continue;
             }
 
@@ -301,7 +301,6 @@ impl Runtime {
 
     fn take_all_bound_devices(&mut self) -> Vec<DetachedBoundDevice> {
         std::mem::take(&mut self.bindings)
-            .into_entries()
             .into_iter()
             .map(|(device_id, binding)| DetachedBoundDevice { device_id, binding })
             .collect()

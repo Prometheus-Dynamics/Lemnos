@@ -7,10 +7,9 @@ use crate::util::{
 };
 use lemnos_core::{
     CapabilityAccess, CapabilityDescriptor, DeviceAddress, DeviceDescriptor, DeviceHealth,
-    DeviceId, DeviceKind, DeviceLink, DeviceRelation, InterfaceKind,
+    DeviceId, DeviceKind, DeviceLink, DeviceRelation, InterfaceKind, SmallMap,
 };
 use lemnos_discovery::{DiscoveryContext, DiscoveryError, DiscoveryProbe, ProbeDiscovery};
-use std::collections::BTreeMap;
 use std::path::Path;
 
 const INTERFACES: [InterfaceKind; 1] = [InterfaceKind::I2c];
@@ -49,7 +48,7 @@ impl DiscoveryProbe for I2cDiscoveryProbe {
             return Ok(discovery);
         }
 
-        let mut bus_ids = BTreeMap::new();
+        let mut bus_ids = SmallMap::new();
         let class_entries = read_dir_sorted(&class_root).map_err(|error| {
             probe_failed(self.name(), &class_root, "enumerate I2C buses", error)
         })?;

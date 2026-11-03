@@ -9,11 +9,11 @@ use lemnos_bus::{
 };
 use lemnos_core::{
     DeviceId, DeviceRequest, DeviceResponse, DeviceStateSnapshot, DeviceStatus, LemnosEvent,
+    SmallMap,
 };
 use lemnos_discovery::{
     DiscoveryContext, DiscoveryProbe, InventorySnapshot, InventoryWatcher, run_probes,
 };
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 use thiserror::Error;
@@ -94,7 +94,7 @@ impl AsyncRuntimeError {
 /// - runtime write lock is taken only after any watcher/subscription mutex has been released
 pub struct AsyncRuntime {
     pub(crate) inner: Arc<RwLock<Runtime>>,
-    pub(crate) bind_locks: Arc<Mutex<BTreeMap<DeviceId, Weak<Mutex<()>>>>>,
+    pub(crate) bind_locks: Arc<Mutex<SmallMap<DeviceId, Weak<Mutex<()>>>>>,
 }
 
 /// Async handle around a blocking [`InventoryWatcher`].

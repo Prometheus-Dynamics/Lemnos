@@ -36,7 +36,7 @@ impl AsyncRuntime {
     pub fn from_runtime(runtime: Runtime) -> Self {
         Self {
             inner: Arc::new(RwLock::new(runtime)),
-            bind_locks: Arc::new(Mutex::new(BTreeMap::new())),
+            bind_locks: Arc::new(Mutex::new(SmallMap::new())),
         }
     }
 

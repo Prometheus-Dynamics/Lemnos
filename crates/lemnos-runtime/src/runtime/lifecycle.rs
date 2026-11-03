@@ -2,7 +2,7 @@ use super::*;
 use lemnos_bus::{
     GpioBusBackend, I2cBusBackend, PwmBusBackend, SpiBusBackend, UartBusBackend, UsbBusBackend,
 };
-use lemnos_core::DeviceStatus;
+use lemnos_core::{DeviceStatus, SmallMap};
 
 impl Runtime {
     pub fn new() -> Self {
@@ -192,7 +192,7 @@ impl Runtime {
         self.failures.contains_key(device_id)
     }
 
-    pub fn failures(&self) -> &BTreeMap<DeviceId, RuntimeFailureRecord> {
+    pub fn failures(&self) -> &SmallMap<DeviceId, RuntimeFailureRecord> {
         &self.failures
     }
 
