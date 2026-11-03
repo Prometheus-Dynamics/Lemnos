@@ -108,6 +108,17 @@ Planned, each a new `TransferEngine` (RP1 is written, see below):
   silent-stop reporting). Blocker, one line: verified RP1-view bus addresses for a dma-heap buffer
   (not established: how the RP1's inbound PCIe window maps host memory, and the pagemap PFNs need
   root). Until then no transfer starts on a board.
+  Board #1, 2026-11-03, the translation and the address source (no DMA run). The RP1 bus address of
+  a CPU physical address, from the live device tree: the PCIe node's `dma-ranges` (CPU to PCI bus,
+  `0x10_0000_0000` + PA for the 64 GiB inbound window) composed with RP1's `dma-ranges` (PCI bus
+  to RP1 side, identity for `0x10_0000_0000`). Two entries of RP1's list also cover that PCI range
+  (one with a 32-bit space code and a non-zero middle cell), so the translation refuses ambiguous
+  matches. The source of the physical address is the blocker: `/proc/self/pagemap` reports the
+  dma-buf mapping's pages as not present (entry 0) on this kernel, though it works for anonymous
+  memory, and the `/dev/mem` bytes at the physical address it gave for an anonymous probe page did
+  not match that page. The CMA reservation has no fixed `reg` in the device tree to scan. No
+  verified physical address, so the pattern check of step 3 fails and the example stops before
+  any DMA. The example is kept out of the tree until that is solved.
 - PCIe DMA: not written. No PCIe DMA device on either board is reachable from user space without
   vfio, so the interface would be untested; the `TransferEngine` trait is the shape it would take.
 
