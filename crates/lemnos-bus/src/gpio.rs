@@ -6,7 +6,12 @@ pub struct GpioEdgeEvent {
     pub edge: GpioEdge,
     pub level: Option<GpioLevel>,
     pub sequence: u64,
+    /// When the edge was seen, in milliseconds (the core's coarse clock).
     pub observed_at: Option<TimestampMs>,
+    /// When the edge was seen, in microseconds on `CLOCK_BOOTTIME`: the clock
+    /// readings are stamped on (`Reading::timestamp_us`), so an edge (a camera
+    /// strobe, an IMU data-ready line) and a sample share one timeline.
+    pub observed_at_us: Option<u64>,
 }
 
 pub trait GpioSession: BusSession {

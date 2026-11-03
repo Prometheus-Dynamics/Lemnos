@@ -16,6 +16,7 @@ use lemnos_core::{
     DeviceDescriptor, GpioBias, GpioDirection, GpioDrive, GpioEdge, GpioLevel,
     GpioLineConfiguration, InterfaceKind, TimestampMs,
 };
+use lemnos_linux_sys::time::boottime_us_of_monotonic_ns;
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::time::Duration;
@@ -271,6 +272,9 @@ impl StreamSession for LinuxCdevGpioSession {
                 )
             })?;
             let Some(event) = next else { break };
+            // The uAPI stamps edges on CLOCK_MONOTONIC (no clock flag is requested);
+            // convert them to the boot clock the readings use, so both share a timeline.
+            let observed_us = boottime_us_of_monotonic_ns(event.timestamp_ns);
             events.push(GpioEdgeEvent {
                 edge: match event.kind {
                     EdgeKind::Rising => GpioEdge::Rising,
@@ -281,7 +285,8 @@ impl StreamSession for LinuxCdevGpioSession {
                     EdgeKind::Falling => GpioLevel::Low,
                 }),
                 sequence: u64::from(event.line_seqno),
-                observed_at: Some(TimestampMs::new(event.timestamp_ns / 1_000_000)),
+                observed_at: Some(TimestampMs::new(observed_us / 1_000)),
+                observed_at_us: Some(observed_us),
             });
             // After the first event, only drain what is already queued.
             timeout = Some(Duration::ZERO);

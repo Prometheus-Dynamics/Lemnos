@@ -342,12 +342,14 @@ fn gpio_edge_stream_sessions_use_typed_polling_contract() {
                 level: Some(GpioLevel::High),
                 sequence: 1,
                 observed_at: Some(TimestampMs::new(10)),
+                observed_at_us: None,
             },
             GpioEdgeEvent {
                 edge: GpioEdge::Falling,
                 level: Some(GpioLevel::Low),
                 sequence: 2,
                 observed_at: Some(TimestampMs::new(20)),
+                observed_at_us: None,
             },
         ],
     };
@@ -362,12 +364,14 @@ fn gpio_edge_stream_sessions_use_typed_polling_contract() {
                 level: Some(GpioLevel::High),
                 sequence: 1,
                 observed_at: Some(TimestampMs::new(10)),
+                observed_at_us: None,
             },
             GpioEdgeEvent {
                 edge: GpioEdge::Falling,
                 level: Some(GpioLevel::Low),
                 sequence: 2,
                 observed_at: Some(TimestampMs::new(20)),
+                observed_at_us: None,
             },
         ],
     );
