@@ -617,7 +617,10 @@ mod tests {
         crate::RegisterBus::read_burst(&mut regs, 0x24, &mut level).unwrap();
         let waiting = usize::from(u16::from_le_bytes(level));
         // Seven bytes a frame: about 20 frames in 20 ms at 1 ms a frame.
-        assert!((105..=175).contains(&waiting), "{waiting} bytes after 20 ms");
+        assert!(
+            (105..=175).contains(&waiting),
+            "{waiting} bytes after 20 ms"
+        );
         // The data read takes them, oldest first, and leaves the rest.
         let mut taken = alloc::vec![0u8; waiting];
         crate::RegisterBus::read_burst(&mut regs, 0x26, &mut taken).unwrap();
@@ -629,7 +632,14 @@ mod tests {
     fn a_frame_fifo_reports_its_frame_count() {
         let bus = MockI2c::new()
             .with_target(0x68, AddressWidth::Bits8)
-            .with_fifo(0x68, 0x3f, FifoLength::Frames { register: 0x0e, frame: 6 });
+            .with_fifo(
+                0x68,
+                0x3f,
+                FifoLength::Frames {
+                    register: 0x0e,
+                    frame: 6,
+                },
+            );
         bus.push_fifo(0x68, &[0; 12]);
         assert_eq!(bus.register(0x68, 0x0e), 2);
         let mut regs = I2cRegisters::new(bus.clone(), 0x68, AddressWidth::Bits8);
