@@ -11,8 +11,11 @@ readings and status, and runs its actions on it (`set`, `restore`, `release`, `r
 look actions, and the calibration actions below). Raw GPIO, PWM, I2C and SPI stay direct to lemnosd
 and are not exposed here.
 
-Pinned against Orion `f8d767ac` (control protocol 5, the node the example board images ship), as
-`crates/lemnosd/Cargo.toml` pins it. The actions use the provider's `watch_action_requests`.
+Pinned against Orion `a89ebd5` (Orion dev, the head that merged protocol 1), as
+`crates/lemnosd/Cargo.toml` pins it. The control protocol is `CONTROL_PROTOCOL_VERSION` 1 (every
+protocol and on-disk format of Orion restarted at 1 there). An Orion node on an older protocol refuses
+the bridge's connection with a protocol-mismatch error, and the bridge keeps retrying, so the node
+must run `a89ebd5` or later. The actions use the provider's `watch_action_requests`.
 
 ## Resources
 
