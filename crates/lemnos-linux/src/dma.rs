@@ -28,6 +28,9 @@ use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
+
+/// The kernel's memory accounting, read for the capacity check.
+const MEMINFO: &str = "/proc/meminfo";
 use std::time::Duration;
 
 use lemnos_linux_sys::{dma_buf, dma_heap, poll};
@@ -62,11 +65,50 @@ impl Access {
     }
 }
 
+/// A system-heap request may take at most this share of `MemAvailable` at the
+/// time of the call (one quarter). Above it, reclaim starts, which is what a
+/// request this large would otherwise push the kernel into.
+pub const SYSTEM_HEAP_SHARE_DIVISOR: u64 = 4;
+
+/// The capacity of a heap, in bytes, from `/proc/meminfo` text: a contiguous
+/// (CMA) heap may take what is free in its pool (`CmaFree`); any other heap
+/// (the page-backed `system` heap) may take a share of `MemAvailable`.
+///
+/// Fails when the figure is missing, so a caller never allocates against an
+/// unknown capacity.
+pub fn heap_capacity_from_meminfo(name: &str, meminfo: &str) -> io::Result<u64> {
+    let (key, share) = if name.contains("cma") {
+        ("CmaFree", 1)
+    } else {
+        ("MemAvailable", SYSTEM_HEAP_SHARE_DIVISOR)
+    };
+    meminfo_bytes(meminfo, key)
+        .map(|bytes| bytes / share)
+        .ok_or_else(|| io::Error::other(format!("{key} is not in {MEMINFO}")))
+}
+
+/// The capacity of the heap called `name` right now (see
+/// [`heap_capacity_from_meminfo`]).
+pub fn heap_capacity(name: &str) -> io::Result<u64> {
+    heap_capacity_from_meminfo(name, &std::fs::read_to_string(MEMINFO)?)
+}
+
+/// The value of `key` in `/proc/meminfo` text, in bytes.
+fn meminfo_bytes(meminfo: &str, key: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let rest = line.strip_prefix(key)?.strip_prefix(':')?;
+        let kib: u64 = rest.trim().strip_suffix("kB")?.trim().parse().ok()?;
+        Some(kib * 1024)
+    })
+}
+
 /// An open dma-heap (`/dev/dma_heap/<name>`).
 #[derive(Debug)]
 pub struct DmaHeap {
     file: File,
     path: PathBuf,
+    /// An explicit capacity (see [`DmaHeap::with_capacity`]), in bytes.
+    limit: Option<u64>,
 }
 
 impl DmaHeap {
@@ -82,7 +124,19 @@ impl DmaHeap {
     pub fn open_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
-        Ok(Self { file, path })
+        Ok(Self {
+            file,
+            path,
+            limit: None,
+        })
+    }
+
+    /// Caps every allocation from this heap at `bytes`, below the heap's own
+    /// capacity (see [`heap_capacity`]). A request above the cap fails before
+    /// the kernel sees it.
+    pub fn with_capacity(mut self, bytes: u64) -> Self {
+        self.limit = Some(bytes);
+        self
     }
 
     /// The heap's name (its node's file name).
@@ -95,11 +149,31 @@ impl DmaHeap {
 
     /// Allocates a dma-buf of `len` bytes, read-write and close-on-exec. The
     /// kernel may round the size up; [`DmaBuf::len`] is what was asked for.
+    ///
+    /// The request is checked first against the heap's capacity (the CMA pool's
+    /// free bytes, or a share of `MemAvailable` for the system heap) and against
+    /// any cap set with [`DmaHeap::with_capacity`]. A request above either fails
+    /// with [`io::ErrorKind::OutOfMemory`] and the kernel is not asked, so a
+    /// large request cannot push it into reclaim or a failed contiguous search.
     pub fn allocate(&self, len: usize) -> io::Result<DmaBuf> {
         if len == 0 {
             return Err(invalid("cannot allocate an empty dma-buf".into()));
         }
-        let fd = dma_heap::allocate(self.file.as_fd(), len as u64)?;
+        let want = len as u64;
+        let mut capacity = heap_capacity(self.name())?;
+        if let Some(limit) = self.limit {
+            capacity = capacity.min(limit);
+        }
+        if want > capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                format!(
+                    "a {len}-byte request exceeds the {} heap's capacity of {capacity} bytes",
+                    self.name()
+                ),
+            ));
+        }
+        let fd = dma_heap::allocate(self.file.as_fd(), want)?;
         Ok(DmaBuf { fd, len })
     }
 }
@@ -454,6 +528,54 @@ mod tests {
         let buf = DmaBuf::from_fd(plain_file("plain", 4096)).unwrap();
         assert!(buf.begin_cpu_access(Access::Read).is_err());
         assert!(buf.export_fence(Access::Read).is_err());
+    }
+
+    #[test]
+    fn meminfo_figures_are_read_in_bytes() {
+        let text = "MemTotal:        4063952 kB\nMemAvailable:    3834104 kB\nCmaTotal:          65536 kB\nCmaFree:           43004 kB\n";
+        assert_eq!(meminfo_bytes(text, "CmaFree"), Some(43004 * 1024));
+        assert_eq!(meminfo_bytes(text, "CmaTotalX"), None);
+        assert_eq!(meminfo_bytes("MemAvailable: 12 MB\n", "MemAvailable"), None);
+    }
+
+    #[test]
+    fn a_cma_heap_is_capped_by_its_free_pool() {
+        let text = "MemAvailable:    4000000 kB\nCmaFree:           65536 kB\n";
+        for name in ["linux,cma", "default_cma_region"] {
+            assert_eq!(heap_capacity_from_meminfo(name, text).unwrap(), 65536 * 1024);
+        }
+    }
+
+    #[test]
+    fn the_system_heap_is_capped_by_a_share_of_available_memory() {
+        let text = "MemAvailable:    4000000 kB\nCmaFree:           65536 kB\n";
+        assert_eq!(
+            heap_capacity_from_meminfo("system", text).unwrap(),
+            4_000_000 * 1024 / SYSTEM_HEAP_SHARE_DIVISOR
+        );
+    }
+
+    #[test]
+    fn a_missing_figure_is_an_error_not_a_zero_or_no_cap() {
+        assert!(heap_capacity_from_meminfo("system", "MemTotal: 1 kB\n").is_err());
+        assert!(heap_capacity_from_meminfo("linux,cma", "MemAvailable: 1 kB\n").is_err());
+    }
+
+    #[test]
+    fn a_request_above_the_capacity_fails_before_the_kernel() {
+        // The cap is set far below any real heap, so the request is refused by
+        // the library's check whether or not the heap exists here.
+        let heap = match DmaHeap::open("system") {
+            Ok(heap) => heap.with_capacity(64 * 1024),
+            Err(e) => {
+                crate::tests::skip(&format!("no system dma-heap ({e})"));
+                return;
+            }
+        };
+        let err = heap.allocate(1 << 20).expect_err("above the cap");
+        assert_eq!(err.kind(), io::ErrorKind::OutOfMemory);
+        let buf = heap.allocate(64 * 1024).unwrap();
+        assert_eq!(buf.len(), 64 * 1024);
     }
 
     #[test]
