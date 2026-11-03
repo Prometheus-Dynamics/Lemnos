@@ -98,7 +98,7 @@ The facade crate includes examples for both mock and Linux-backed flows:
 - `cargo run -p lemnos --example mock_gpio --features "mock builtin-drivers"`
 - `cargo run -p lemnos --example mock_gpio_async --features "mock builtin-drivers tokio"`
 - `cargo run -p lemnos --example linux_led_class_driver --features "linux"`
-- `cargo run -p lemnos --example linux_device_validator --features "builtin-drivers linux macros"`
+- `cargo run -p lemnos --example linux_device_validator --features "board builtin-drivers linux macros rp1"` (the `rp1` feature opens `pio-i2c:` buses, such as the BMI088 on the RP1 PIO bus: `BMI088_BUS=pio-i2c:sda=8,scl=7`)
 - `cargo run -p lemnos --example linux_hal_probe --features linux -- discover` (also `gpio-info`, `gpio-read`, `i2c-read`, `hotplug`)
 
 ## The hardware service
@@ -142,7 +142,7 @@ Targeted helper scripts live under `testing/`.
 - [docs/looks.md](docs/looks.md): LED looks: the blocks, look files, built-in names, brightness, reloads and the CLI
 - [docs/system-service.md](docs/system-service.md): `lemnosd`, the board's hardware service: client API, LED intents, updater integration, backends, packaging
 - [docs/hotplug.md](docs/hotplug.md): device arrival and removal: one watcher (netlink, inotify, sysfs rescan) for Lemnos and the camera stack, its filters and events, and the camera-stack migration notes
-- [docs/composite-devices.md](docs/composite-devices.md): design only: composite devices and the fan controller with its failsafe
+- [docs/composite-devices.md](docs/composite-devices.md): composite devices: the fan controller (built, tuned live, persisted) with its failsafe; other uses are design
 - [docs/foundation.md](docs/foundation.md): Lemnos 2.0 layering, embedded-hal foundation, and the migration record
 - [docs/provenance.md](docs/provenance.md): where the generic code came from, and the cross-repo migration that moved it
 - [CHANGELOG.md](CHANGELOG.md): release history and notable workspace changes

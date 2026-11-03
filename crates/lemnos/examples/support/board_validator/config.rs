@@ -1,3 +1,4 @@
+use lemnos::board::BusRef;
 use lemnos::prelude::GpioLevel;
 use std::collections::BTreeMap;
 use std::env;
@@ -211,12 +212,28 @@ fn parse_bmm150(sources: &ConfigSources) -> Result<Option<Bmm150Target>, String>
     };
     let address = require(sources, "BMM150_ADDRESS")?;
     Ok(Some(Bmm150Target {
-        bus: parse_u32(&bus)?,
+        bus: parse_i2c_bus(&bus)?,
         address: parse_u16(&address)?,
         label: sources
             .get("BMM150_LABEL")
             .unwrap_or_else(|| "bmm150".to_string()),
     }))
+}
+
+/// An I2C bus as a number: a kernel adapter (`1`, `i2c-1`) or a `pio-i2c:`
+/// selector (`pio-i2c:sda=8,scl=7`), which lemnosd opens on the RP1 PIO block.
+/// The selector's virtual number is what the Linux backend opens.
+fn parse_i2c_bus(value: &str) -> Result<u32, String> {
+    if let Ok(bus) = parse_u32(value) {
+        return Ok(bus);
+    }
+    match value.parse::<BusRef>()? {
+        BusRef::I2c(bus) => Ok(bus),
+        BusRef::PioI2c(pins) => Ok(pins.bus_number()),
+        _ => Err(format!(
+            "I2C bus '{value}' is not a kernel adapter or pio-i2c"
+        )),
+    }
 }
 
 fn parse_bmi088(sources: &ConfigSources) -> Result<Option<Bmi088Target>, String> {
@@ -230,7 +247,7 @@ fn parse_bmi088(sources: &ConfigSources) -> Result<Option<Bmi088Target>, String>
         parse_optional_gpio_target(get_first(sources, &["BMI088_GYRO_INT"]).as_deref())?;
 
     Ok(Some(Bmi088Target {
-        bus: parse_u32(&bus)?,
+        bus: parse_i2c_bus(&bus)?,
         accel_address: parse_u16(&require_any(sources, &["BMI088_ACCEL_ADDRESS"])?)?,
         gyro_address: parse_u16(&require_any(sources, &["BMI088_GYRO_ADDRESS"])?)?,
         label: get_first(sources, &["BMI088_LABEL"]).unwrap_or_else(|| "bmi-imu".to_string()),
@@ -271,7 +288,7 @@ fn parse_power(sources: &ConfigSources) -> Result<Option<PowerTarget>, String> {
 
     Ok(Some(PowerTarget {
         kind,
-        bus: parse_u32(&require(sources, "POWER_BUS")?)?,
+        bus: parse_i2c_bus(&require(sources, "POWER_BUS")?)?,
         address: parse_u16(&require(sources, "POWER_ADDRESS")?)?,
         label: sources
             .get("POWER_LABEL")

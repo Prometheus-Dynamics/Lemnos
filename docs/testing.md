@@ -51,7 +51,7 @@ Repository helper assets live under `testing/`:
 - `testing/docker/lemnos-facade.Dockerfile`
 - `testing/device/*.env`
 
-The `linux_device_validator` example under `crates/lemnos/examples/` wires together Linux probes plus example drivers and is the main end-to-end Linux validation entry point.
+The `linux_device_validator` example under `crates/lemnos/examples/` wires together Linux probes plus example drivers and is the main end-to-end Linux validation entry point. Its BMI088 target takes a kernel adapter (`BMI088_BUS=1`) or a PIO bus (`BMI088_BUS=pio-i2c:sda=8,scl=7`, feature `rp1`); on a board where lemnosd owns the PIO bus, stop lemnosd first. Measured on board #1 (round 4): the BMI088 on `pio-i2c:sda=8,scl=7` passed (accel chip id 0x1E, gyro chip id 0x0F).
 
 `linux_hal_probe` exercises the pure-Rust Linux layer on a board: `discover` (inventory), `gpio-info [chip]` (GPIO v2 chip and line info), `gpio-read CHIP OFFSET` (reads a line without changing it), `i2c-read BUS ADDR REG LEN [8|16]` (register read; claims the address, never forces), `hotplug SECONDS` (prints watch events and the source in use). Cross-compile with `--target aarch64-unknown-linux-gnu`. The `lemnos-linux-sys` and `lemnos-linux` test binaries also run on the target (struct layouts, present chips and buses, the uevent socket).
 
