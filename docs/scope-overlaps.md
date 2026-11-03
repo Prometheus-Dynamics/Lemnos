@@ -80,7 +80,8 @@ across two crates for no reuse.
   - Board files have `default_look` (a look name, `status.ok` by default). A light shows it when no
     owner holds an intent, and in place of a named look nothing defines, so it never goes dark.
     The keys of the moved looks (`locate`, `updating`, `verifying*`, `staged*`, `booting*`,
-    `rebooting`, `failed*`, `confirmed`, `idle`, `locate_effect`) are no longer board keys.
+    `rebooting`, `failed*`, `confirmed`, `idle`, `locate_effect`) are retired: a board that sets
+    one is refused, and the error names where the setting now lives (`RETIRED_LIGHT_KEYS`).
   - Verified: `lemnosd/tests/example_looks.rs` renders each moved look from the example set and
     checks it frame for frame against the recorded golden frames of the old built-ins (20
     scenarios). `lemnos-light` keeps the old definitions as a test-only reference

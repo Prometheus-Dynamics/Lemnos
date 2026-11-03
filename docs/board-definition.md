@@ -231,9 +231,10 @@ never goes dark for a missing look.
 Named looks: the board's `[looks.<name>]` tables are read on top of the built-in
 `status.*` looks, and a look file (`LEMNOSD_LOOKS_DIR`) overrides them all. The system,
 detection and link looks are look files, not board keys: see [looks.md](looks.md), *Example
-set*, and its migration step for the keys this format no longer has (`locate`,
-`locate_effect`, `idle`, `updating`, `verifying*`, `writing`, `staged*`, `booting*`,
-`rebooting`, `failed*`, `confirmed`).
+set*. The keys of those looks (`locate`, `locate_effect`, `idle`, `updating`, `verifying*`,
+`writing`, `staged*`, `booting*`, `rebooting`, `failed*`, `confirmed`) are retired: a board
+that sets one is refused. The error names the device, the key and the look that holds the
+setting now (`docs/looks.md`, the migration step, has the table).
 
 ```toml
 [looks."detect.searching"]

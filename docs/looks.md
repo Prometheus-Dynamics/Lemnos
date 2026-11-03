@@ -358,13 +358,31 @@ own copies) before a release drops them:
 1. Copy `examples/looks/looks.d/*.toml` to `/etc/lemnos/looks.d/`.
 2. Copy `examples/looks/presets/*.toml` to `/var/lib/lemnos/presets/`, and write
    `scheme-b` (a line with the name) to `/var/lib/lemnos/presets/active`.
-3. Remove these look keys from its board files (a board that sets one is refused now):
-   `idle`, `locate`, `locate_effect`,
-   `updating`, `verifying`, `verifying_period_ms`, `verifying_tail`,
-   `verifying_base`, `writing`, `staged`, `staged_period_ms`, `staged_depth`,
-   `booting`, `booting_period_ms`, `booting_tail`, `booting_base`, `rebooting`,
-   `failed`, `failed_period_ms`, `failed_depth` and `confirmed`. Their colours
-   and timings move into the look files, edited as data.
+3. Remove the retired look keys from its board files. A board that sets one is
+   refused, and the error names the device, the key and where its setting now
+   lives, for example:
+
+   ```text
+   lemnosd: /etc/lemnos/board.toml: "ring": config key `failed` is retired; its looks are `system.failed` and `system.rolled-back` in /etc/lemnos/looks.d
+   ```
+
+   The retired keys and their looks (`lemnos-board`, `RETIRED_LIGHT_KEYS`):
+
+   | Board key | Now in |
+   |---|---|
+   | `idle` | `default_look` (the look shown with no owner) |
+   | `locate`, `locate_effect` | `system.locate` |
+   | `updating` | `system.writing` (the arc colour) |
+   | `verifying`, `verifying_period_ms`, `verifying_tail`, `verifying_base` | `system.verifying` |
+   | `writing` | `system.writing-unknown` |
+   | `staged`, `staged_period_ms`, `staged_depth` | `system.staged` |
+   | `booting`, `booting_period_ms`, `booting_tail`, `booting_base` | `system.booting` |
+   | `rebooting` | `system.rebooting` |
+   | `failed`, `failed_period_ms`, `failed_depth` | `system.failed` and `system.rolled-back` |
+   | `confirmed` | `system.confirmed` |
+
+   Their colours and timings move into the look files (`/etc/lemnos/looks.d`),
+   edited as data. Any other unknown key is refused as before.
 4. Set `default_look` where the default is not `status.ok`.
 
 The `status.*` keys (`ok`, `warn`, `error`, `busy`, `status_effect`,
