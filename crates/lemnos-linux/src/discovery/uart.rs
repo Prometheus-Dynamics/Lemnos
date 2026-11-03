@@ -1,5 +1,5 @@
 use super::absent_root;
-use super::descriptor::capability;
+use super::descriptor::{capability, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
@@ -95,18 +95,17 @@ fn build_port_descriptor(
         )
     })?;
 
-    let mut builder = DeviceDescriptor::builder_for_kind(
+    let mut builder = start(
         format!("linux.uart.port.{port_name}"),
         DeviceKind::UartPort,
+        port_name.to_string(),
+        "Linux UART port",
+        DeviceAddress::UartPort {
+            port: port_name.to_string(),
+        },
     )
     .map_err(|error| format!("failed to start UART descriptor for '{port_name}': {error}"))?
-    .display_name(port_name.to_string())
-    .summary("Linux UART port")
-    .address(DeviceAddress::UartPort {
-        port: port_name.to_string(),
-    })
     .driver_hint("lemnos.uart.generic")
-    .label("backend", "linux")
     .label("port", port_name.to_string())
     .property("port", port_name.to_string())
     .property("sysfs_path", tty_path.display().to_string())

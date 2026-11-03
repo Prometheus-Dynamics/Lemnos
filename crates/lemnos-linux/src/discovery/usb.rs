@@ -1,5 +1,5 @@
 use super::absent_root;
-use super::descriptor::capability;
+use super::descriptor::{capability, start};
 use super::probe_failed;
 use crate::LinuxPaths;
 use crate::metadata::{with_devnode, with_driver};
@@ -149,30 +149,41 @@ impl DiscoveryProbe for UsbDiscoveryProbe {
     }
 }
 
+/// A failed read of one sysfs attribute of a USB device or interface.
+fn read_failed(what: &str, kernel_name: &str, path: &Path, error: std::io::Error) -> String {
+    format!(
+        "failed to read Linux USB {what} for '{kernel_name}' at '{}': {error}",
+        path.display()
+    )
+}
+
 fn build_bus_descriptor_from_number(bus: u16) -> Result<DeviceDescriptor, String> {
-    DeviceDescriptor::builder_for_kind(format!("linux.usb.bus.{bus}"), DeviceKind::UsbBus)
-        .map_err(|error| format!("failed to start USB bus descriptor for bus {bus}: {error}"))?
-        .display_name(format!("usb{bus}"))
-        .summary("Linux USB bus")
-        .address(DeviceAddress::UsbBus { bus })
-        .label("backend", "linux")
-        .label("bus", bus.to_string())
-        .property("bus", u64::from(bus))
-        .build()
-        .map_err(|error| format!("failed to build USB bus descriptor for bus {bus}: {error}"))
+    start(
+        format!("linux.usb.bus.{bus}"),
+        DeviceKind::UsbBus,
+        format!("usb{bus}"),
+        "Linux USB bus",
+        DeviceAddress::UsbBus { bus },
+    )
+    .map_err(|error| format!("failed to start USB bus descriptor for bus {bus}: {error}"))?
+    .label("bus", bus.to_string())
+    .property("bus", u64::from(bus))
+    .build()
+    .map_err(|error| format!("failed to build USB bus descriptor for bus {bus}: {error}"))
 }
 
 fn build_bus_descriptor(bus: u16, path: &Path) -> Result<DeviceDescriptor, String> {
-    let mut builder =
-        DeviceDescriptor::builder_for_kind(format!("linux.usb.bus.{bus}"), DeviceKind::UsbBus)
-            .map_err(|error| format!("failed to start USB bus descriptor for bus {bus}: {error}"))?
-            .display_name(format!("usb{bus}"))
-            .summary("Linux USB bus")
-            .address(DeviceAddress::UsbBus { bus })
-            .label("backend", "linux")
-            .label("bus", bus.to_string())
-            .property("bus", u64::from(bus))
-            .property("sysfs_path", path.display().to_string());
+    let mut builder = start(
+        format!("linux.usb.bus.{bus}"),
+        DeviceKind::UsbBus,
+        format!("usb{bus}"),
+        "Linux USB bus",
+        DeviceAddress::UsbBus { bus },
+    )
+    .map_err(|error| format!("failed to start USB bus descriptor for bus {bus}: {error}"))?
+    .label("bus", bus.to_string())
+    .property("bus", u64::from(bus))
+    .property("sysfs_path", path.display().to_string());
 
     if let Some(product) = read_trimmed(&path.join("product")).map_err(|error| {
         format!(
@@ -204,60 +215,33 @@ fn build_device_descriptor(
             )
         })?
         .to_string();
-    let vendor_id = read_hex_u16(&path.join("idVendor")).map_err(|error| {
-        format!(
-            "failed to read Linux USB vendor ID for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let product_id = read_hex_u16(&path.join("idProduct")).map_err(|error| {
-        format!(
-            "failed to read Linux USB product ID for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let device_number = read_u32(&path.join("devnum")).map_err(|error| {
-        format!(
-            "failed to read Linux USB device number for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let modalias = read_trimmed(&path.join("modalias")).map_err(|error| {
-        format!(
-            "failed to read Linux USB modalias for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let manufacturer = read_trimmed(&path.join("manufacturer")).map_err(|error| {
-        format!(
-            "failed to read Linux USB manufacturer for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let product = read_trimmed(&path.join("product")).map_err(|error| {
-        format!(
-            "failed to read Linux USB product for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let serial_number = read_trimmed(&path.join("serial")).map_err(|error| {
-        format!(
-            "failed to read Linux USB serial for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
+    let vendor_id = read_hex_u16(&path.join("idVendor"))
+        .map_err(|error| read_failed("vendor ID", &kernel_name, path, error))?;
+    let product_id = read_hex_u16(&path.join("idProduct"))
+        .map_err(|error| read_failed("product ID", &kernel_name, path, error))?;
+    let device_number = read_u32(&path.join("devnum"))
+        .map_err(|error| read_failed("device number", &kernel_name, path, error))?;
+    let modalias = read_trimmed(&path.join("modalias"))
+        .map_err(|error| read_failed("modalias", &kernel_name, path, error))?;
+    let manufacturer = read_trimmed(&path.join("manufacturer"))
+        .map_err(|error| read_failed("manufacturer", &kernel_name, path, error))?;
+    let product = read_trimmed(&path.join("product"))
+        .map_err(|error| read_failed("product", &kernel_name, path, error))?;
+    let serial_number = read_trimmed(&path.join("serial"))
+        .map_err(|error| read_failed("serial", &kernel_name, path, error))?;
 
     let mut builder = with_usb_request_capabilities(
-        DeviceDescriptor::builder_for_kind(
+        start(
             format!("linux.usb.bus{bus}.ports{}", ports_label(ports)),
             DeviceKind::UsbDevice,
+            format!("usb-{bus}-{}", ports_display(ports)),
+            "Linux USB device",
+            DeviceAddress::UsbDevice {
+                bus,
+                ports: ports.to_vec(),
+                vendor_id,
+                product_id,
+            },
         )
         .map_err(|error| {
             format!(
@@ -265,16 +249,7 @@ fn build_device_descriptor(
                 ports_display(ports)
             )
         })?
-        .display_name(format!("usb-{bus}-{}", ports_display(ports)))
-        .summary("Linux USB device")
-        .address(DeviceAddress::UsbDevice {
-            bus,
-            ports: ports.to_vec(),
-            vendor_id,
-            product_id,
-        })
         .driver_hint("lemnos.usb.generic")
-        .label("backend", "linux")
         .label("bus", bus.to_string())
         .property("bus", u64::from(bus))
         .property("ports", ports_display(ports))
@@ -348,64 +323,38 @@ fn build_interface_descriptor(
             )
         })?
         .to_string();
-    let interface_number = read_hex_u8(&path.join("bInterfaceNumber")).map_err(|error| {
-        format!(
-            "failed to read Linux USB interface number for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let alternate_setting = read_hex_u8(&path.join("bAlternateSetting")).map_err(|error| {
-        format!(
-            "failed to read Linux USB alternate setting for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let class_code = read_hex_u8(&path.join("bInterfaceClass")).map_err(|error| {
-        format!(
-            "failed to read Linux USB interface class for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let subclass_code = read_hex_u8(&path.join("bInterfaceSubClass")).map_err(|error| {
-        format!(
-            "failed to read Linux USB interface subclass for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let protocol_code = read_hex_u8(&path.join("bInterfaceProtocol")).map_err(|error| {
-        format!(
-            "failed to read Linux USB interface protocol for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let driver = read_link_name(&path.join("driver")).map_err(|error| {
-        format!(
-            "failed to read Linux USB interface driver link for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
-    let modalias = read_trimmed(&path.join("modalias")).map_err(|error| {
-        format!(
-            "failed to read Linux USB interface modalias for '{}' at '{}': {error}",
-            kernel_name,
-            path.display()
-        )
-    })?;
+    let interface_number = read_hex_u8(&path.join("bInterfaceNumber"))
+        .map_err(|error| read_failed("interface number", &kernel_name, path, error))?;
+    let alternate_setting = read_hex_u8(&path.join("bAlternateSetting"))
+        .map_err(|error| read_failed("alternate setting", &kernel_name, path, error))?;
+    let class_code = read_hex_u8(&path.join("bInterfaceClass"))
+        .map_err(|error| read_failed("interface class", &kernel_name, path, error))?;
+    let subclass_code = read_hex_u8(&path.join("bInterfaceSubClass"))
+        .map_err(|error| read_failed("interface subclass", &kernel_name, path, error))?;
+    let protocol_code = read_hex_u8(&path.join("bInterfaceProtocol"))
+        .map_err(|error| read_failed("interface protocol", &kernel_name, path, error))?;
+    let driver = read_link_name(&path.join("driver"))
+        .map_err(|error| read_failed("interface driver link", &kernel_name, path, error))?;
+    let modalias = read_trimmed(&path.join("modalias"))
+        .map_err(|error| read_failed("interface modalias", &kernel_name, path, error))?;
 
     let interface_number = interface_number.unwrap_or(parsed_interface_number);
     let mut builder = with_usb_request_capabilities(
-        DeviceDescriptor::builder_for_kind(
+        start(
             format!(
                 "linux.usb.bus{bus}.ports{}.if{interface_number}",
                 ports_label(ports)
             ),
             DeviceKind::UsbInterface,
+            format!("usb-{bus}-{}:if{interface_number}", ports_display(ports)),
+            "Linux USB interface",
+            DeviceAddress::UsbInterface {
+                bus,
+                ports: ports.to_vec(),
+                interface_number,
+                vendor_id,
+                product_id,
+            },
         )
         .map_err(|error| {
             format!(
@@ -414,20 +363,7 @@ fn build_interface_descriptor(
                 path.display()
             )
         })?
-        .display_name(format!(
-            "usb-{bus}-{}:if{interface_number}",
-            ports_display(ports)
-        ))
-        .summary("Linux USB interface")
-        .address(DeviceAddress::UsbInterface {
-            bus,
-            ports: ports.to_vec(),
-            interface_number,
-            vendor_id,
-            product_id,
-        })
         .driver_hint("lemnos.usb.generic")
-        .label("backend", "linux")
         .label("bus", bus.to_string())
         .property("bus", u64::from(bus))
         .property("ports", ports_display(ports))
