@@ -10,7 +10,6 @@ use crate::device::iso_packet_lengths;
 #[cfg(target_os = "linux")]
 use crate::error::ErrorKind;
 use crate::error::{Error, Result};
-#[cfg(target_os = "linux")]
 use crate::transfer::IsoPacket;
 use crate::transfer::{Transfer, TransferBuffer, TransferOutcome};
 use std::collections::VecDeque;
@@ -243,16 +242,66 @@ impl Drop for BulkWriter {
     }
 }
 
-#[cfg(target_os = "linux")]
 /// One completed isochronous transfer, borrowed from the reader: its data (the
 /// bytes the packets moved, packet after packet) and the packets' results.
 #[derive(Debug)]
 pub struct IsoBlock<'a> {
-    /// The bytes received, packet after packet.
-    pub data: &'a [u8],
-    /// Each packet's scheduled length, bytes moved and status.
-    pub packets: &'a [IsoPacket],
+    buffer: &'a [u8],
+    packets: &'a [IsoPacket],
 }
+
+impl<'a> IsoBlock<'a> {
+    /// A block over a completed transfer's buffer and its packets.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn new(buffer: &'a [u8], packets: &'a [IsoPacket]) -> Self {
+        Self { buffer, packets }
+    }
+
+    /// The number of packets in the transfer.
+    pub fn packet_count(&self) -> usize {
+        self.packets.len()
+    }
+
+    /// Each packet with the bytes it moved, in packet order. The usbdevfs layout
+    /// places packet `i` at the sum of the scheduled lengths of the packets before
+    /// it, not at the sum of the bytes they moved: a short packet leaves a gap
+    /// after its bytes, and the packets after it stay where they were scheduled.
+    pub fn packets(&self) -> IsoPackets<'a> {
+        IsoPackets {
+            buffer: self.buffer,
+            packets: self.packets.iter(),
+            offset: 0,
+        }
+    }
+}
+
+/// The packets of an [`IsoBlock`], each with its bytes (see [`IsoBlock::packets`]).
+#[derive(Debug, Clone)]
+pub struct IsoPackets<'a> {
+    buffer: &'a [u8],
+    packets: std::slice::Iter<'a, IsoPacket>,
+    offset: usize,
+}
+
+impl<'a> Iterator for IsoPackets<'a> {
+    type Item = (&'a IsoPacket, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let packet = self.packets.next()?;
+        let start = self.offset.min(self.buffer.len());
+        let end = start
+            .saturating_add(packet.actual_length)
+            .min(self.buffer.len());
+        self.offset = self.offset.saturating_add(packet.length);
+        Some((packet, &self.buffer[start..end]))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.packets.size_hint()
+    }
+}
+
+impl ExactSizeIterator for IsoPackets<'_> {}
 
 /// Reads an isochronous IN endpoint: `depth` transfers of `packets` packets of
 /// `packet_len` bytes stay in flight, and each completed transfer is handed out
@@ -340,10 +389,7 @@ impl IsoReader {
             .ok_or_else(|| Error::new(ErrorKind::Other, "no isochronous transfer queued"))?;
         let outcome = transfer.wait()?;
         let outcome = self.current.insert(outcome);
-        Ok(IsoBlock {
-            data: outcome.data(),
-            packets: &outcome.packets,
-        })
+        Ok(IsoBlock::new(outcome.buffer.as_slice(), &outcome.packets))
     }
 }
 

@@ -298,3 +298,63 @@ fn a_transfer_buffer_holds_its_bytes_and_grows_and_shrinks_in_place() {
     buffer.as_mut_slice()[3] = 9;
     assert_eq!(buffer.into_vec(), vec![1, 2, 0, 9]);
 }
+
+/// usbdevfs places isochronous IN packet `i` at the sum of the scheduled lengths
+/// of the packets before it. A short packet in the middle leaves a gap after its
+/// bytes; the packets after it stay where they were scheduled.
+#[test]
+#[cfg(target_os = "linux")]
+fn an_iso_block_places_each_packet_at_its_scheduled_offset() {
+    use crate::stream::IsoBlock;
+    let buffer: Vec<u8> = (1..=12).collect();
+    let packets = [
+        IsoPacket {
+            length: 4,
+            actual_length: 4,
+            error: None,
+        },
+        IsoPacket {
+            length: 4,
+            actual_length: 2,
+            error: None,
+        },
+        IsoPacket {
+            length: 4,
+            actual_length: 4,
+            error: None,
+        },
+    ];
+    let block = IsoBlock::new(&buffer, &packets);
+    let got: Vec<&[u8]> = block.packets().map(|(_, bytes)| bytes).collect();
+    assert_eq!(got, [&[1, 2, 3, 4][..], &[5, 6][..], &[9, 10, 11, 12][..]]);
+    assert_eq!(block.packets().len(), 3);
+}
+
+/// A packet that moved nothing is an empty slice at its offset, and a packet
+/// that moved less than it was scheduled keeps its own start.
+#[test]
+#[cfg(target_os = "linux")]
+fn an_empty_packet_keeps_the_offsets_of_the_packets_after_it() {
+    use crate::stream::IsoBlock;
+    let buffer: Vec<u8> = (1..=9).collect();
+    let packets = [
+        IsoPacket {
+            length: 3,
+            actual_length: 0,
+            error: None,
+        },
+        IsoPacket {
+            length: 3,
+            actual_length: 3,
+            error: None,
+        },
+        IsoPacket {
+            length: 3,
+            actual_length: 1,
+            error: None,
+        },
+    ];
+    let block = IsoBlock::new(&buffer, &packets);
+    let got: Vec<&[u8]> = block.packets().map(|(_, bytes)| bytes).collect();
+    assert_eq!(got, [&[][..], &[4, 5, 6][..], &[7][..]]);
+}

@@ -72,8 +72,9 @@ pub use error::{Error, ErrorKind, Result};
 pub use info::{InterfaceSummary, Speed, UsbDeviceInfo};
 pub use listing::{UsbHotplugEvent, UsbWatch, find_device, list_devices, watch};
 pub use location::UsbLocation;
-pub use stream::{BulkReader, BulkWriter};
 #[cfg(target_os = "linux")]
-pub use stream::{IsoBlock, IsoReader};
+pub use stream::IsoReader;
+pub use stream::{BulkReader, BulkWriter};
+pub use stream::{IsoBlock, IsoPackets};
 pub use transfer::{IsoPacket, Transfer, TransferBuffer, TransferOutcome};
 pub use types::{ControlKind, ControlRecipient, ControlSetup, Direction, TransferType};
