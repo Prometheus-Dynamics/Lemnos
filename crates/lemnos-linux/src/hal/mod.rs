@@ -15,6 +15,10 @@
 //!   character device, uAPI v2: inputs, outputs, bias, drive, debounce, edge
 //!   events, reconfiguration without releasing; `GpioLine` is an
 //!   embedded-hal input/output pin.
+//! - `AsyncGpioLine` (features `gpio-cdev` and `tokio`):
+//!   `embedded_hal_async::digital::Wait` over a line's edge events.
+//!   Host-tested against a fake edge source; untested on board (no line on
+//!   either board gives real edges without rewiring).
 //! - The [`lemnos_hal::raw`] traits: `RawLine` for `GpioLine`, `RawSpi` for
 //!   `Spidev` (one SPI mode per transaction; speed and word size per
 //!   segment).

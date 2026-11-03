@@ -61,7 +61,7 @@ placement the loader makes.
 | Capability | Status | Used for / plan |
 | --- | --- | --- |
 | Level read/write | used | Raw GPIO and GPIO devices (`pinctrl-rp1` lines). |
-| Edge events (cdev uAPI v2, `open_gpio_edge_stream`) | used, now on the readings' clock | Edge events are stamped on `CLOCK_MONOTONIC` by the kernel. Since 1e0c504, Lemnos converts each stamp to `CLOCK_BOOTTIME` microseconds (`GpioEdgeEvent::observed_at_us`), the clock of `Reading::timestamp_us`. Written, untested on board. |
+| Edge events (cdev uAPI v2, `open_gpio_edge_stream`) | used, now on the readings' clock | Edge events are stamped on `CLOCK_MONOTONIC` by the kernel. Since 1e0c504, Lemnos converts each stamp to `CLOCK_BOOTTIME` microseconds (`GpioEdgeEvent::observed_at_us`), the clock of `Reading::timestamp_us`. `AsyncGpioLine` (`embedded_hal_async::digital::Wait`) awaits them through Tokio, host-tested against a fake edge source. Written, untested on board: no line on either board gives real edges without rewiring. |
 | Kernel-side clock choice | used: monotonic, converted | uAPI v2 offers monotonic (the default), realtime, and hardware timestamps (HTE). Lemnos requests none of them: realtime would not share the readings' clock, and HTE needs a hardware timestamp engine (verify on board). The boot/monotonic offset changes only at suspend. |
 | Edge streams on the IMU data-ready line (BMI088 INT1) | unused | Plan: stamp each IMU sample at acquisition, not at read. Needs the INT line wired and named in the board file (not in this repo). |
 | Edge streams on the camera strobe / frame-valid line | unused | Plan: frame-sync with the IMU on one clock. Needs the camera's strobe output wired to a GPIO (verify on the board's PCB). |

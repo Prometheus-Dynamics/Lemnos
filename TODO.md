@@ -154,10 +154,6 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
 - HEVC: frame-based decode mode (the only one the driver takes); the driver's NV12 is in 128-byte
   columns; `bit_size` covers the slice data from `data_byte_offset`, not the whole buffer.
 
-## Open (carried)
-
-- [ ] `embedded_hal_async::digital::Wait` on GPIO lines (`AsyncGpioLine`): needs a hardware check.
-
 ## Done earlier
 
 The compact model (phases 1-4: `lemnos-device`, `lemnos-lite`, the generic L3 adapter, board
@@ -165,7 +161,8 @@ definitions, `lemnosd`, `lemnos-ipc`, `lemnos-light`, `lemnos-drivers-ws2812`); 
 (`lemnos-hal`, `lemnos-linux-sys`, no_std sensor drivers, regulators and clocks, GPIO character
 devices); lemnosd on the BCM2712 board; the IMU on the RP1 PIO I2C bus (100 Hz 1.9 %, 200 Hz 2.9 %,
 400 Hz 6.0 % of a core on #1); riscv64 and armv7 builds; DMA buffers, the transfer interface and
-V4L2 M2M sessions; one USB layer (`lemnos-usb`) and one hotplug watcher (`lemnos-uevent`); the
+V4L2 M2M sessions; `AsyncGpioLine` (host-tested, untested on board: no line gives real edges
+without rewiring); one USB layer (`lemnos-usb`) and one hotplug watcher (`lemnos-uevent`); the
 `tokio` facade feature kept (user, 2026-10-30). Details are in [CHANGELOG.md](CHANGELOG.md).
 
 Consumer-side work (apps and the camera stack) is tracked in those repositories.
