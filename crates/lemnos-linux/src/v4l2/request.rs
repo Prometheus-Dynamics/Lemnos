@@ -56,6 +56,12 @@ impl Request {
     }
 }
 
+impl AsFd for Request {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
 /// The media device that owns the video node at `video` (its entities include a
 /// device node with the same major and minor), or `None` when no `/dev/mediaN`
 /// lists it. Media devices are read in numeric order.
