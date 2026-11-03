@@ -32,3 +32,9 @@ Feature-matrix and Docker-specific validation are documented in [`testing/README
 - Local validation entrypoint lives in [`scripts/ci.sh`](../scripts/ci.sh)
 - Local cleanup entrypoint lives in [`scripts/repo-clean.sh`](../scripts/repo-clean.sh)
 - CI entrypoints live in [`.github/workflows`](../.github/workflows)
+
+## Constrained images
+
+For a small Linux image, build with nightly `-Z build-std` and `-Cpanic=immediate-abort`:
+the commands and measured sizes are in [compact-model.md](compact-model.md#constrained-images-the-nightly-build-std-recipe).
+`scripts/check-sizes.sh` measures stable and is not affected.

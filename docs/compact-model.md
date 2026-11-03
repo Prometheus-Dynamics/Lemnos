@@ -52,6 +52,44 @@ device, a PWM channel). The BMI088 and the hwmon fan are both `Unspecified(...)`
 expose behavior through string-named custom interactions, so nothing generic can tell
 that one is an IMU and the other a fan.
 
+## Constrained images: the nightly build-std recipe
+
+The recommended build for a constrained Linux image is nightly `-Z build-std` with
+`-Cpanic=immediate-abort` and `-Cforce-unwind-tables=no`, at `opt-level = "z"` (the
+size-image profile in `testing/size/linux/Cargo.toml`: LTO, one codegen unit, `panic =
+"abort"`, stripped). It drops std's panic and backtrace machinery, which the stable build
+links in. Measured with `nightly-2026-10-15` (`rust-src` installed for it), x86_64, stripped:
+
+```sh
+rustup toolchain install nightly-2026-10-15 --component rust-src   # once
+RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Cforce-unwind-tables=no" \
+  cargo +nightly-2026-10-15 build --release \
+  -Z build-std=std,panic_abort --target x86_64-unknown-linux-gnu \
+  --manifest-path testing/size/linux/Cargo.toml \
+  --features "linux,lemnos/linux-gpio,lemnos/linux-gpio-cdev,lemnos/linux-pwm,lemnos/linux-i2c,lemnos/linux-spi,lemnos/linux-hotplug"
+```
+
+For the three-sensor image, drop the `--manifest-path` and features and point it at
+`testing/size/linux-sensors` (add `--features lite` for the `lemnos-lite` table). Use a
+separate `CARGO_TARGET_DIR` per image: reusing one can leave a stale binary behind.
+
+| Image | Stable (`check-sizes.sh`) | Nightly build-std |
+|---|---|---|
+| Empty `main` | 278 856 | 12 232 |
+| Three sensors through their own APIs (`sensors`) | 319 056 | 43 712 |
+| Three sensors through a `lemnos-lite` table (`sensors-lite`) | 322 736 | 49 136 |
+| Facade + Linux backend, lite features (`linux-lite`) | 562 704 | 232 608 |
+
+The build-std numbers are not in `baseline.txt`: `check-sizes.sh` measures stable. The lite
+table costs more than the drivers' own APIs on both toolchains: 3.7 KB more on stable (322 736
+against 319 056) and 5.4 KB more under build-std. Its names and `dyn` dispatch are not free.
+
+Retention and probes, measured on stable with the same profile: the byte estimator for
+`max_retained_event_bytes` is behind the `retention-bytes` feature (on by default; the size
+images build without it, a saving of 2 512 bytes on `linux-lite`); the six sysfs probes share
+one absent-root helper; `Runtime`'s per-device state is a sorted vector instead of a
+`BTreeMap` (about 6 KB on `linux-lite`).
+
 ## Proposal
 
 Four layers. Each is useful on its own, and each only depends on the ones below it.
