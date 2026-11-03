@@ -98,6 +98,7 @@ impl Service {
         }
     }
 
+    #[allow(clippy::print_stderr)]
     fn fan_step(&mut self, index: usize, now_ms: u64) {
         let now_us = self.now_us();
         let samples: Vec<Sample> = self.fan_loops[index]
@@ -158,6 +159,7 @@ impl Service {
 
     /// A failed write: the fan goes back to the kernel and the controller
     /// waits before it takes the fan again.
+    #[allow(clippy::print_stderr)]
     fn fan_fault(&mut self, index: usize, now_ms: u64) {
         let fan = self.fan_loops[index].fan;
         let id = self.fan_loops[index].spec.id.clone();
