@@ -261,6 +261,7 @@ fn client_entries_match_exactly_or_by_a_trailing_wildcard() {
 fn a_wildcard_is_only_valid_at_the_end_of_a_client_entry() {
     let mut board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     board.raw_clients = vec!["app".into(), "*-selftest".into()];
+    board.look_writers = vec!["manager*x".into()];
     board.devices[0].writers = vec!["orion:*".into(), "orion:*x*".into()];
     let Err(BoardError::Invalid(problems)) = board.validate(&DriverRegistry::builtin()) else {
         panic!("expected problems");
@@ -268,6 +269,10 @@ fn a_wildcard_is_only_valid_at_the_end_of_a_client_entry() {
     let all = problems.join("\n");
     assert!(
         all.contains("raw_clients entry \"*-selftest\": '*' is only allowed at the end"),
+        "{all}"
+    );
+    assert!(
+        all.contains("look_writers entry \"manager*x\": '*' is only allowed at the end"),
         "{all}"
     );
     assert!(

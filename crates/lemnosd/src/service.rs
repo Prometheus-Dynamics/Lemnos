@@ -34,12 +34,24 @@ use std::time::Duration;
 const UPDATE_POLL_MS: u64 = 500;
 /// How often the look files are checked for changes.
 const LOOKS_POLL_MS: u64 = 1_000;
-/// Whether a client may change looks and presets: the device manager (`atlas`), the Orion bridge's
-/// callers (`orion:<requested_by>`), and `lemnos-ctl` run by an operator. The
-/// socket's permissions are the real boundary; this names who the service
-/// expects to make the changes.
-fn may_change_looks(client: &str) -> bool {
-    client == "atlas" || client == "lemnos-ctl" || client.starts_with("orion:")
+/// Who may change looks and presets when the board does not say (its
+/// `look_writers`): `lemnos-ctl` run by an operator, and the Orion bridge's callers
+/// (`orion:<requested_by>`). The socket's permissions are the real boundary; this
+/// names who the service expects to make the changes.
+const DEFAULT_LOOK_WRITERS: &[&str] = &["lemnos-ctl", "orion:*"];
+
+/// Whether `client` may change looks and presets under `writers` (the board's
+/// `look_writers`, or [`DEFAULT_LOOK_WRITERS`] when it is empty).
+fn may_change_looks(writers: &[String], client: &str) -> bool {
+    if writers.is_empty() {
+        DEFAULT_LOOK_WRITERS
+            .iter()
+            .any(|w| lemnos_board::client_matches(w, client))
+    } else {
+        writers
+            .iter()
+            .any(|w| lemnos_board::client_matches(w, client))
+    }
 }
 
 /// The fastest a light's frames are watched (`Request::WatchFrames`).
@@ -1429,9 +1441,15 @@ impl Service {
                         | LooksOp::Delete(_)
                 );
                 let name = self.clients[ci].name.clone();
-                let result = if changes && !may_change_looks(&name) {
+                let writers = &self.definition.look_writers;
+                let result = if changes && !may_change_looks(writers, &name) {
+                    let listed = if writers.is_empty() {
+                        DEFAULT_LOOK_WRITERS.join(", ")
+                    } else {
+                        writers.join(", ")
+                    };
                     Err(format!(
-                        "client {name:?} may not change looks (writers: atlas, orion:*, lemnos-ctl)"
+                        "client {name:?} may not change looks (look_writers: {listed})"
                     ))
                 } else {
                     self.looks_op(op)

@@ -41,6 +41,11 @@ pub struct BoardDefinition {
     /// empty means any client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_clients: Vec<String>,
+    /// Clients allowed to change looks and presets (`lemnosd`'s `looks` requests);
+    /// empty means the service's default (`lemnos-ctl` and `orion:*`). Entries match as
+    /// `writers` do. Other clients may still read looks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub look_writers: Vec<String>,
     /// Named looks for the lights (`[looks.<name>]`), over the built-in
     /// ones; see `docs/looks.md`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -519,6 +524,7 @@ impl BoardDefinition {
             pwms: Vec::new(),
             looks: BTreeMap::new(),
             raw_clients: Vec::new(),
+            look_writers: Vec::new(),
         }
     }
 
@@ -660,14 +666,10 @@ impl BoardDefinition {
                 problems.push(format!("pwm {:?}: duplicate name", pwm.name));
             }
         }
-        for entry in self
-            .raw_clients
-            .iter()
-            .filter(|e| !is_valid_client_entry(e))
-        {
-            problems.push(format!(
-                "raw_clients entry {entry:?}: '*' is only allowed at the end"
-            ));
+        for (field, entries) in [("raw_clients", &self.raw_clients), ("look_writers", &self.look_writers)] {
+            for entry in entries.iter().filter(|e| !is_valid_client_entry(e)) {
+                problems.push(format!("{field} entry {entry:?}: '*' is only allowed at the end"));
+            }
         }
         if problems.is_empty() {
             Ok(())

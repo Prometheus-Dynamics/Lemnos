@@ -127,7 +127,7 @@ and `calibration.<part>.active` (`Bool`). A device with no such part reads as ze
 
 The look and brightness actions are on the light's resource (`lemnos.<board>.<light>`,
 for example `lemnos.example.status-ring`). The writer policy is the light's `writers`
-(`["orion:*", "atlas"]`), and lemnosd checks the look-changing operations too.
+(`["orion:*", "manager"]`), and lemnosd checks the look-changing operations too.
 
 Writer naming: each caller (`requested_by`) gets its own lemnosd connection named `orion:<requested_by>`,
 created on its first action. lemnosd applies a device's write policy to that name, and it ends the

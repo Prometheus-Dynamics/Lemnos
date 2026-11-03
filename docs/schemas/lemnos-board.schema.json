@@ -132,6 +132,13 @@
         "type": "string"
       },
       "description": "Clients allowed raw bus and line access; empty: any client."
+    },
+    "look_writers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Clients allowed to change looks and presets; empty: lemnos-ctl and orion:*."
     }
   },
   "$defs": {

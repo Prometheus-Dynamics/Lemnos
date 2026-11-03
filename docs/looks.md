@@ -330,9 +330,10 @@ lemnos-ctl looks preset delete night               # the active one falls back t
 lemnos-ctl looks delete detect.searching               # remove a look file override
 ```
 
-Preset changes (apply, save, delete) and look deletions are accepted from the
-clients `atlas` (the manager), `lemnos-ctl` and `orion:<requested_by>`; any other client may
-read the presets but not change them. The socket's permissions remain the
+Preset changes (apply, save, delete) and look deletions are accepted from the board's
+`look_writers` (default: `lemnos-ctl` and `orion:<requested_by>`; see
+[board-definition.md](board-definition.md), *Look writers*); any other client may read the
+presets but not change them. The socket's permissions remain the
 boundary. Protocol: `LooksOp` codes 4 to 9, appended (`PresetList`, `PresetShow`,
 `PresetApply`, `PresetSave`, `PresetDelete`, `Delete`), answered with
 `Message::Text`.
@@ -409,20 +410,20 @@ stays until it is replaced or cleared (`led off`), or for `--seconds N`. The
 `--file` form takes a bare look body, or a look file (with `--name` when it has
 more than one look). `--progress` feeds the look's arcs (0 to 1).
 
-A bare look body is what `--spec` and `--json` take (`--json` is what the manager
+A bare look body is what `--spec` and `--json` take (`--json` is what a device manager
 sends):
 
 ```bash
 # A named look, from the look table:
-lemnos-ctl --client atlas led look detect.searching --seconds 30
+lemnos-ctl --client manager led look detect.searching --seconds 30
 
 # A look in full, from the command line (the same look as above):
-lemnos-ctl --client atlas led show \
+lemnos-ctl --client manager led show \
   --spec 'layers = [{ block = "comet", color = "2bd47d", period_ms = 1600, tail = 6, base = 0.06 }]' \
   --seconds 30
 
 # The same look as JSON:
-lemnos-ctl --client atlas led show \
+lemnos-ctl --client manager led show \
   --json '{"layers":[{"block":"comet","color":"2bd47d","period_ms":1600,"tail":6,"base":0.06}]}'
 
 # Keep a look tried inline, under a name:
@@ -435,7 +436,7 @@ lemnos-ctl looks save detect.searching --spec 'layers = [{ block = "comet", colo
 use lemnos_ipc::{ClientOptions, LedClient};
 use lemnos_light::{Fraction, LayerSpec, LookSpec, Rgbw};
 
-let mut leds: LedClient = ClientOptions::new(socket, "atlas").keep_intents().leds()?;
+let mut leds: LedClient = ClientOptions::new(socket, "manager").keep_intents().leds()?;
 
 // A named look (a built-in or from a look file):
 leds.look("detect.searching")?;

@@ -267,7 +267,7 @@ fn the_service_refuses_unknown_and_invalid_looks_and_shows_named_and_inline_ones
     });
     ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
 
-    let mut ctl = ClientOptions::new(&socket, "atlas")
+    let mut ctl = ClientOptions::new(&socket, "app")
         .keep_intents()
         .leds()
         .unwrap();

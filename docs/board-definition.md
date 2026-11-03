@@ -145,6 +145,19 @@ remove the `i2c-gpio` node for GPIO7/GPIO8 from the image's overlay set, and
 give the `lemnos` user access to `/dev/pio0`). Until the overlay is gone the
 device reports that the pins are in use.
 
+### Look writers
+
+```toml
+look_writers = ["manager", "orion:*", "lemnos-ctl"]   # top level: who may change looks and presets; `*` as in `writers`
+```
+
+`lemnosd` refuses preset changes and look deletions from any other client; reads stay open to all.
+When the key is absent (or empty), the writers are `lemnos-ctl` and `orion:*`, the operator's
+tool and the Orion bridge's callers. A device package that needs its device manager to keep
+changing looks must list the manager's client name here; the manager was the default before
+this key existed, so a board file written for that release needs the line added to keep working.
+Entries match exactly, or as a prefix with a trailing `*`.
+
 ### Raw access: lines, PWM channels and policy
 
 Hosts that hand hardware to clients (`lemnosd`) read three more keys:
@@ -264,8 +277,8 @@ through the other level. Behaviour that `lemnosd` adds (`docs/system-service.md`
   asserts, the device is `degraded` with a status event; `power.fault` reads 1.
 - `enable_delay_ms`: after a write turns the switch on, `lemnosd` reports
   `power.ready` this long later (the write itself returns at once).
-- `writers`: `["orion:*", "atlas"]` is the usual list (the Orion bridge's callers
-  and the manager), with `lemnos-ctl` run on the board as needed.
+- `writers`: `["orion:*", "manager"]` is the usual list (the Orion bridge's callers
+  and the device manager), with `lemnos-ctl` run on the board as needed.
 
 The example board's two USB port switches (`crates/lemnos-board/examples/boards/sample-board.toml`):
 
@@ -273,13 +286,13 @@ The example board's two USB port switches (`crates/lemnos-board/examples/boards/
 [[devices]]
 id = "usb-a-power"            # the USB-A port, on RP1 GPIO20
 driver = "gpio-power-switch"
-writers = ["orion:*", "atlas"]
+writers = ["orion:*", "manager"]
 config = { chip = "pinctrl-rp1", line = 20, default_on = true, persist = true, on_exit = "keep" }
 
 [[devices]]
 id = "usb-c-power"            # the USB-C port, on RP1 GPIO16
 driver = "gpio-power-switch"
-writers = ["orion:*", "atlas"]
+writers = ["orion:*", "manager"]
 config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, on_exit = "keep" }
 ```
 
@@ -361,13 +374,13 @@ config = { count = 16, wire = "rgb", offset = 5, direction = "cw", gpio = 13, fa
 [[devices]]
 id = "usb-a-power"
 driver = "gpio-power-switch"
-writers = ["orion:*", "atlas"]
+writers = ["orion:*", "manager"]
 config = { chip = "pinctrl-rp1", line = 20, default_on = true, persist = true, on_exit = "keep" }
 
 [[devices]]
 id = "usb-c-power"
 driver = "gpio-power-switch"
-writers = ["orion:*", "atlas"]
+writers = ["orion:*", "manager"]
 config = { chip = "pinctrl-rp1", line = 16, default_on = true, persist = true, on_exit = "keep" }
 ```
 
