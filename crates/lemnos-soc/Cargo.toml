@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-soc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "no_std chip descriptors for Lemnos: each SoC's IO blocks and their capabilities (used, unused or impossible), with the software path each would replace, and the typed register layouts of the userspace-reachable timers and PWMs"
+documentation = "https://docs.rs/lemnos-soc"
+readme = "README.md"
+keywords = ["embedded", "soc", "no-std", "hardware", "lemnos"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lints]
+workspace = true
+
+[dependencies]

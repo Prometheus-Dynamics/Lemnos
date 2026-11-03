@@ -718,6 +718,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-soc"
+version = "2.0.1-dev"
+
+[[package]]
 name = "lemnos-uevent"
 version = "2.0.1-dev"
 dependencies = [

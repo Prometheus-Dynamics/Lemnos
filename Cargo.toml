@@ -4,6 +4,7 @@ members = [
     "crates/lemnos-core",
     "crates/lemnos-hal",
     "crates/lemnos-device",
+    "crates/lemnos-soc",
     "crates/lemnos-lite",
     "crates/lemnos-light",
     "crates/lemnos-board",
