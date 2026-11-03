@@ -13,6 +13,8 @@
 //! usb_probe stream LOC FRAMES [caller]    # UVC probe/commit, alt setting, FRAMES frames over isochronous URBs
 //! usb_probe interrupt LOC SECONDS         # the VideoControl status endpoint
 //! usb_probe bulk LOC                      # bulk round-trip on the first bulk IN endpoint, if there is one
+//! usb_probe dfu-status LOC                # GETSTATUS on the DFU interface (read-only)
+//! usb_probe dfu LOC FILE [BLOCK]          # DFU download of FILE, then wait for 18d1:9302 (transport only)
 //! usb_probe reattach LOC                  # detach, claim, release; the kernel driver and /dev/videoN come back
 //! ```
 //!
@@ -90,6 +92,16 @@ fn run() -> Result<(), String> {
             interrupt(&location, Duration::from_secs(seconds))
         }
         "bulk" => bulk(&location),
+        "dfu-status" => dfu_status(&location),
+        "dfu" => {
+            let image = args.get(2).ok_or("dfu needs the firmware file")?;
+            let block: usize = args
+                .get(3)
+                .map(|value| value.parse().map_err(|_| "the block size is a number"))
+                .transpose()?
+                .unwrap_or(4096);
+            dfu(&location, image, block)
+        }
         "reattach" => reattach(&location),
         other => Err(format!("unknown command {other}")),
     }
@@ -786,4 +798,66 @@ fn wait_for(limit: Duration, check: impl Fn() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(100));
     }
     true
+}
+
+/// The DFU interface: the one whose class is application-specific DFU (0xfe/0x01).
+fn dfu_interface(config: &ConfigurationInfo) -> Option<u8> {
+    config
+        .interfaces
+        .iter()
+        .find(|interface| {
+            interface
+                .alternates
+                .first()
+                .is_some_and(|first| first.class == 0xfe && first.subclass == 0x01)
+        })
+        .map(|interface| interface.number)
+}
+
+fn dfu_status(location: &UsbLocation) -> Result<(), String> {
+    let device = open(location)?;
+    let config = device
+        .active_configuration()
+        .map_err(|error| error.to_string())?;
+    let interface_number = dfu_interface(&config).ok_or("no DFU interface")?;
+    let interface = device
+        .claim_interface(interface_number)
+        .map_err(|error| format!("claiming DFU interface {interface_number}: {error}"))?;
+    let status = device
+        .dfu_status(interface_number)
+        .map_err(|error| error.to_string())?;
+    println!("DFU interface {interface_number} GETSTATUS: {status:?}");
+    drop(interface);
+    Ok(())
+}
+
+fn dfu(location: &UsbLocation, image: &str, block: usize) -> Result<(), String> {
+    let bytes = std::fs::read(image).map_err(|error| format!("reading {image}: {error}"))?;
+    println!("downloading {} bytes in {block}-byte blocks", bytes.len());
+    let device = open(location)?;
+    let config = device
+        .active_configuration()
+        .map_err(|error| error.to_string())?;
+    let interface_number = dfu_interface(&config).ok_or("no DFU interface")?;
+    let interface = device
+        .claim_interface(interface_number)
+        .map_err(|error| format!("claiming DFU interface {interface_number}: {error}"))?;
+    let started = Instant::now();
+    device
+        .dfu_download(interface_number, &bytes, block)
+        .map_err(|error| format!("DFU download: {error}"))?;
+    drop(interface);
+    println!("download and reset done in {:?}", started.elapsed());
+    match lemnos_usb::wait_for_device(0x18d1, 0x9302, Duration::from_secs(30))
+        .map_err(|error| error.to_string())?
+    {
+        Some(info) => println!(
+            "re-enumerated: {} {:04x}:{:04x}",
+            info.location(),
+            info.vendor_id(),
+            info.product_id()
+        ),
+        None => println!("no 18d1:9302 within 30 s"),
+    }
+    Ok(())
 }

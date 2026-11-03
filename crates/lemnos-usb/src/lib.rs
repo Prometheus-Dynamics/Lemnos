@@ -50,6 +50,7 @@ mod config;
 mod descriptor;
 mod device;
 mod error;
+mod firmware;
 mod info;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -69,6 +70,7 @@ pub use config::{AlternateSetting, ConfigurationInfo, EndpointInfo, InterfaceInf
 pub use descriptor::DeviceDescriptor;
 pub use device::{Interface, UsbDevice};
 pub use error::{Error, ErrorKind, Result};
+pub use firmware::{DfuStatus, wait_for_device};
 pub use info::{InterfaceSummary, Speed, UsbDeviceInfo};
 pub use listing::{UsbHotplugEvent, UsbWatch, find_device, list_devices, watch};
 pub use location::UsbLocation;
