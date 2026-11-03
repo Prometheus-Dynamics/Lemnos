@@ -5,6 +5,9 @@
 //!   [`I2c`](embedded_hal::i2c::I2c) bus. Each target address is claimed with
 //!   `I2C_SLAVE` (never `I2C_SLAVE_FORCE`) before it is used, so addresses a
 //!   kernel driver owns fail with [`ErrorKind::Busy`].
+//! - `SysfsPwm` (feature `pwm`): an exported sysfs PWM channel as an
+//!   embedded-hal [`SetDutyCycle`](embedded_hal::pwm::SetDutyCycle), written
+//!   straight to `duty_cycle` (no `lemnos-bus` session in between).
 //! - `Spidev` (feature `spi`): a spidev node as an embedded-hal
 //!   [`SpiDevice`](embedded_hal::spi::SpiDevice); a transaction is one
 //!   `SPI_IOC_MESSAGE`, so chip select stays asserted throughout.
@@ -31,6 +34,8 @@ mod gpio;
 mod gpio_async;
 #[cfg(feature = "i2c")]
 mod i2c;
+#[cfg(feature = "pwm")]
+mod pwm;
 #[cfg(any(feature = "gpio-cdev", feature = "spi"))]
 mod raw;
 #[cfg(feature = "spi")]
@@ -45,6 +50,8 @@ pub use gpio::{
 pub use gpio_async::AsyncGpioLine;
 #[cfg(feature = "i2c")]
 pub use i2c::{I2cBus, I2cMessage};
+#[cfg(feature = "pwm")]
+pub use pwm::SysfsPwm;
 #[cfg(feature = "rp1")]
 mod pio_i2c;
 #[cfg(feature = "rp1")]

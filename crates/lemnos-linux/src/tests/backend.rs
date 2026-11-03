@@ -148,6 +148,67 @@ fn linux_backend_gpio_open_rejects_property_only_identity() {
     ));
 }
 
+#[cfg(feature = "pwm")]
+#[test]
+fn sysfs_pwm_hal_sets_duty_cycle_on_the_exported_channel() {
+    use crate::hal::SysfsPwm;
+    use embedded_hal::pwm::SetDutyCycle;
+
+    let root = TestRoot::new();
+    root.create_dir("sys/class/pwm/pwmchip0/pwm0");
+    root.write("sys/class/pwm/pwmchip0/pwm0/period", "20000000\n");
+    root.write("sys/class/pwm/pwmchip0/pwm0/duty_cycle", "0\n");
+    root.write("sys/class/pwm/pwmchip0/pwm0/enable", "1\n");
+    let duty_path = root.root.join("sys/class/pwm/pwmchip0/pwm0/duty_cycle");
+    let read_duty = || -> u64 {
+        fs::read_to_string(&duty_path)
+            .expect("duty file")
+            .trim()
+            .parse()
+            .expect("duty value")
+    };
+
+    let mut pwm = SysfsPwm::open(&root.paths(), "pwmchip0", 0).expect("open exported channel");
+    assert_eq!(pwm.max_duty_cycle(), u16::MAX);
+
+    pwm.set_duty_cycle(0).expect("zero");
+    assert_eq!(read_duty(), 0);
+    pwm.set_duty_cycle(u16::MAX / 4).expect("quarter");
+    assert_eq!(
+        read_duty(),
+        20_000_000 * u64::from(u16::MAX / 4) / u64::from(u16::MAX)
+    );
+    pwm.set_duty_cycle(u16::MAX).expect("full");
+    assert_eq!(read_duty(), 20_000_000);
+    // Percent and fraction go through the u16 scale: 50 % is 32 767 of 65 535.
+    pwm.set_duty_cycle_percent(50).expect("half");
+    assert_eq!(read_duty(), 20_000_000 * 32_767 / 65_535);
+
+    // The period is read on every call, so a retuned period rescales the duty.
+    root.write("sys/class/pwm/pwmchip0/pwm0/period", "1000\n");
+    pwm.set_duty_cycle_fraction(1, 4)
+        .expect("quarter of the new period");
+    assert_eq!(read_duty(), 1000 * 16_383 / 65_535);
+
+    // The enable attribute belongs to the bus session; the HAL leaves it alone.
+    assert_eq!(
+        fs::read_to_string(root.root.join("sys/class/pwm/pwmchip0/pwm0/enable"))
+            .expect("enable file"),
+        "1\n"
+    );
+}
+
+#[cfg(feature = "pwm")]
+#[test]
+fn sysfs_pwm_hal_needs_an_exported_channel() {
+    use crate::hal::SysfsPwm;
+
+    let root = TestRoot::new();
+    root.create_dir("sys/class/pwm/pwmchip0");
+    let error = SysfsPwm::open(&root.paths(), "pwmchip0", 3).expect_err("not exported");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
 #[test]
 fn linux_backend_pwm_session_round_trips_sysfs_state() {
     let root = TestRoot::new();

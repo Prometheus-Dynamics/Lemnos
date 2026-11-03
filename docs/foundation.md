@@ -108,6 +108,11 @@ lens.power_up(&mut StdDelay)?;
 lens.move_to(512)?;
 ```
 
+A PWM channel that is already exported (`/sys/class/pwm/pwmchip0/pwm0`) is an embedded-hal
+`SetDutyCycle` on its own, without a `lemnos-bus` session: `SysfsPwm::open(&paths, "pwmchip0", 0)`
+(feature `pwm`). It writes `duty_cycle` on each call and reads `period` to scale it; the
+`enable` attribute stays with the bus session. Written, untested on board.
+
 On an MCU, the firmware's HAL supplies the `I2c` (e.g. `embassy-stm32`'s async I2C) and the
 same `I2cRegisters` and `Vcm` run over it with `default-features = false`; nothing from the
 std crates is linked. CI builds `lemnos-hal`, `lemnos-core`, `lemnos-driver-manifest`,
