@@ -1215,5 +1215,5 @@ fn a_stateless_frame_decodes_through_a_request() {
 }
 
 fn skip_note(reason: &str) {
-    eprintln!("skipped: {reason}");
+    crate::tests::skip(reason);
 }

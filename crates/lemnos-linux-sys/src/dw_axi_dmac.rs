@@ -127,17 +127,29 @@ impl Window {
     }
 }
 
-impl Registers for Window {
-    fn read32(&self, offset: usize) -> u32 {
+impl Window {
+    /// The address of the word at `offset`, checked to be inside the mapping and
+    /// word aligned.
+    fn word(&self, offset: usize) -> *mut u32 {
         assert!(
             offset + 4 <= self.len,
             "register offset {offset:#x} outside the window"
         );
         assert_eq!(offset % 4, 0, "register offsets are word aligned");
-        // SAFETY: the offset is inside the mapping (checked above) and word
-        // aligned; registers are read with volatile loads so the access is
-        // neither elided nor reordered by the compiler.
-        unsafe { std::ptr::read_volatile(self.ptr.add(offset).cast::<u32>()) }
+        // SAFETY: the offset is inside the mapping (checked above), so the
+        // result stays inside it.
+        let base = unsafe { self.ptr.add(offset) };
+        base.cast::<u32>()
+    }
+}
+
+impl Registers for Window {
+    fn read32(&self, offset: usize) -> u32 {
+        let at = self.word(offset);
+        // SAFETY: `word` returns an aligned address inside the mapping. Registers
+        // are read with volatile loads, so the access is neither elided nor
+        // reordered by the compiler.
+        unsafe { std::ptr::read_volatile(at) }
     }
 
     fn write32(&mut self, offset: usize, value: u32) -> io::Result<()> {
@@ -147,13 +159,9 @@ impl Registers for Window {
                 "the DMAC window was mapped read-only",
             ));
         }
-        assert!(
-            offset + 4 <= self.len,
-            "register offset {offset:#x} outside the window"
-        );
-        assert_eq!(offset % 4, 0, "register offsets are word aligned");
+        let at = self.word(offset);
         // SAFETY: as for `read32`, and the mapping is writable (checked above).
-        unsafe { std::ptr::write_volatile(self.ptr.add(offset).cast::<u32>(), value) };
+        unsafe { std::ptr::write_volatile(at, value) };
         Ok(())
     }
 }

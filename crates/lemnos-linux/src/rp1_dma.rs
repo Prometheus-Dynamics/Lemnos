@@ -154,7 +154,7 @@ impl<R: Registers, A: BusAddress> Rp1DmaEngine<R, A> {
 fn transfer_width(len: u64, src: u64, dst: u64) -> u32 {
     [8u64, 4, 2, 1]
         .into_iter()
-        .find(|w| (len | src | dst) % w == 0)
+        .find(|&w| (len | src | dst).is_multiple_of(w))
         .map_or(0, |w| w.trailing_zeros())
 }
 
