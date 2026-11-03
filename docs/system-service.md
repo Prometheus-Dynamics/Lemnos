@@ -281,6 +281,7 @@ led.clear()?;                                // drop this client's intents
 ```
 lemnos-ctl list
 lemnos-ctl read imu
+lemnos-ctl stats                                  # read timing per sensor (reads, mean, max, last)
 lemnos-ctl watch imu --period 50
 lemnos-ctl watch imu --channels angular_rate.z --period 10   # yaw only: fewer bus bytes
 lemnos-ctl set fan duty 0.8
@@ -568,6 +569,11 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   value for the rest. A one-shot `read` always reads every channel. The whole-device
   subscription (`subscribe`) is unchanged.
 
+  Read timing. Each sensor slot counts its reads and their durations (`reads`, `total`, `max`,
+  `last`: the scheduler's `read_cost_us`), a few integer updates per read. `DeviceClient::stats()`
+  (`Request::Stats`, answered with `Message::Stats`) and `lemnos-ctl stats` read them, so asking
+  costs the readers nothing. Measured on board #1 under the scheduler (see Timing measurements).
+
   Bus cost, in bytes on the bus per sample (each transaction is a 3-byte address and register
   setup plus its data bytes; the accelerometer and gyroscope are two I2C devices, so "both"
   is two transactions, not one burst). Calibrated on the example board, where full 100 Hz is 37 % of a
@@ -699,6 +705,97 @@ Both lines carried the 100 Hz samples (`lemnos-ctl watch`; the sample timestamps
 are 10 ms apart). The i2c-gpio figures are not the earlier 36/19/13 %: those came
 from a different boot and load. The board package still has to drop the `i2c-gpio`
 overlay and grant `/dev/pio0` before this is the default (see the requirements above).
+
+## Timing measurements (board #1, round 3)
+
+Measured on board #1 (BCM2712, kernel 7.2.9-v8-16k, 4 cores), lemnosd built for aarch64 from this
+tree with `--profile service` (1,241,320 B stripped; the Raze package build is 1,240,648 B, the
+difference is the `Request::Stats` path). The IMU is the BMI088 on the RP1 PIO bus (`pio-i2c:sda=8,scl=7`);
+the power monitor (INA238, 100 ms poll), magnetometer (BMM150, 100 ms poll) and the fan and thermal zone
+(1 s) are on the board file. Each run stopped the service (`systemctl stop lemnosd`, under
+`/tmp/lemnos-r3-lemnosd.lock`), ran a copy of this lemnosd on a board file in `/tmp` with the IMU
+rate changed, and restarted the service. A probe subscribed to the IMU and recorded each reading's
+timestamp and receive time for 60 s, after 0.5 s of warm-up. The camera stack (`helios-peripherals`,
+with the webcam's video nodes open) was running throughout and was not touched. Times are in
+microseconds. "Grid deviation" is `|spacing - nominal|` over consecutive readings. "Receive age"
+is the receive time minus the reading's timestamp. "Host wakeup" is a plain thread sleeping on a
+10 ms cadence beside the probe (the host's own lateness). CPU is lemnosd's `utime + stime` over the
+window, as a share of one core.
+
+Scheduler, IMU at 100 Hz (`accel_rate = "100hz"`, `gyro_rate = "100hz-32"`, polled at 10 ms):
+
+| | value |
+|---|---|
+| readings, rate | 6001 in 60 s, 100.00 Hz |
+| spacing median / grid deviation mean, p99, max | 10000 / 16.9, 118, 614 |
+| gaps over 1.5 periods | 0 |
+| receive age p50, p99, max | 583, 770, 1897 |
+| host wakeup late (sleeper) p50, p99, max | 55, 76, 257 |
+| lemnosd CPU | 1.62 % of a core |
+
+Read durations per device in that run (`lemnos-ctl stats`, the 100 Hz run beside the power monitor
+and magnetometer; the mean, max and last of each device's reads):
+
+| device | reads | mean us | max us | last us |
+|---|---|---|---|---|
+| imu | 6053 | 563 | 1443 | 581 |
+| magnetometer | 637 | 1082 | 1270 | 1074 |
+| power (INA238) | 637 | 2543 | 2826 | 2534 |
+| fan | 64 | 131 | 528 | 97 |
+| cpu-thermal | 64 | 125 | 543 | 94 |
+
+The IMU's grid deviation (max 614 us) is within what the host adds to a plain sleeper (max 257 us)
+and the reads' own spread. The magnetometer and the power monitor share one bus (`i2c:of=...i2c@74000`),
+and the IMU has the PIO bus to itself, so the slow power and magnetometer reads never queue the IMU.
+
+Polled against FIFO at matched rates (the same board file, the IMU at the rate named, `fifo = true`
+for the FIFO rows; the FIFO is drained on each poll, 5 ms for 200 Hz and 2 ms for 400 Hz):
+
+| rate, mode | readings / s | grid dev mean, p99, max (us) | gaps > 1.5 periods | max gap (us) | receive age p50, p99, max (us) | IMU read mean, max (us) | lemnosd CPU |
+|---|---|---|---|---|---|---|---|
+| 200 Hz, polled | 200.00 | 10.5, 104, 676 | 0 | 5676 | 563, 766, 2572 | 558, 2507 | 2.55 % |
+| 200 Hz, FIFO | 198.90 | 32.8, 62, 5039 | 66 | 10039 | 7238, 17081, 18042 | 1894, 15747 | 1.40 % |
+| 400 Hz, polled (2 ms poll: reads at 500 Hz, the device at 400 Hz) | 499.85 | 500.2, 542, 3483 | 4 | 5983 | 558, 753, 4052 | 552, 4015 | 5.14 % |
+| 400 Hz, FIFO | 397.85 | 15.4, 40, 5000 | 128 | 7500 | 10956, 20827, 22735 | 3163, 15730 | 1.72 % |
+
+Readings per second are the probe's count over its 60 s window; a FIFO row's shortfall (expected
+minus received) is 65 at 200 Hz and 128 at 400 Hz, the batches that came in late. The FIFO saves
+CPU (1.4 % against 2.6 % at 200 Hz; 1.7 % against 5.1 % at 400 Hz, where the polled 2 ms
+subscription reads the device faster than it produces) but its batches arrive late: a read of
+up to 48 frames costs up to 16 ms on the PIO bus, so a read that starts on the 5 ms or 2.5 ms grid
+can run past the next deadline, and the stamps (anchored to each read's start) show that as one
+gap a read long. The polled 200 Hz row is the better one for latency; FIFO is the better one for
+CPU at 400 Hz and above, with the gaps accepted.
+
+Batched IMU under load (item 4): the FIFO at 400 Hz, a full-rate subscriber (2 ms), the camera stack
+running on the board, 60 s. Spacing median 2500 us, grid deviation mean 15.4 us, p99 40 us, max
+5000 us; 128 gaps over 3.75 ms (largest 7500 us); 23872 readings against 24000 expected (0.5 %
+short). Receive age p50 10956 us, p99 20827 us, max 22735 us (a batch's oldest sample is up to a
+read period old on arrival, so the age is the batch's span, not a wakeup delay). Host wakeup
+(sleeper) p50 55 us, p99 79 us, max 446 us. lemnosd CPU 1.72 % of a core. The IMU's read
+took 3.2 ms on average and 15.7 ms at most (`lemnos-ctl stats`).
+
+Memory, one Linux refresh (item 19, board #1, the service stopped for the run). Built with
+`crates/lemnos/examples/bringup_memory.rs`, cross-built for aarch64 musl (release). Bind policy
+`all-except --except linux.i2c.bus.10,linux.i2c.bus10.0x0060`: the second refresh binds every discovered
+device by id (the bind policy has no exclusions, so the example binds each remaining device after
+the refresh) except the camera's I2C bus (`linux.i2c.bus.10`, the ov9782 sensor at 0x60) and its
+device. The USB power lines (GPIO16 and GPIO20 on `gpiochip15`, lemnosd's `gpio-power-switch`
+devices) are not discovered by this example (it runs without the board file), so the exclusion
+does not apply to them; the board file's switches are not in this run.
+
+| phase | PSS kB | RSS kB |
+|---|---|---|
+| start | 616 | 620 |
+| facade built (builtin drivers) | 1212 | 1216 |
+| first refresh, no binds (run 1 / run 2) | 1896 / 1888 | 1908 / 1900 |
+| refresh with the eager binds (36 binds attempted: 20 bound, 16 failed) | 2136 | 2148 |
+
+The refresh with no binds took 2 ms; the refresh with binds took 110 ms. The 16 failures are
+expected for this discovery: 11 buses and LEDs with no matching driver, one USB bus, one UART path
+that is not a device (`/dev/tty`), and PWM channel 3, which is busy (exported by another owner).
+The eager binds add about 248 kB PSS over the no-bind refresh, in the same process: the example
+runs the no-bind refresh first, then the refresh with its binds. Both phases share one process.
 
 ## Rust-for-Linux kernel modules: recommended against
 

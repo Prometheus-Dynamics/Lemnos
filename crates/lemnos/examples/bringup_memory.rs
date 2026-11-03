@@ -113,7 +113,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         for id in &ids {
             match lemnos.bind(id) {
                 Ok(()) => bound += 1,
-                Err(_) => failed += 1,
+                Err(error) => {
+                    println!("bind {} failed: {error}", id.as_str());
+                    failed += 1;
+                }
             }
         }
     }
