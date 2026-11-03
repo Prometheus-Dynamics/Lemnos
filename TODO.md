@@ -5,6 +5,19 @@ consumes its foundation
 ([docs/foundation.md](docs/foundation.md)). See [CHANGELOG.md](CHANGELOG.md)
 for the user-facing summary of finished work.
 
+## Alpha (Raze)
+
+The user, 2026-11-03: the next release is an alpha for the Raze (CM5) hardware only. These come
+first; the other boards' items below are still needed, after it.
+
+- [ ] **RP1 IO blocks used in full on the Raze.** The RP1 part of "IO hardware blocks, used in
+      full" below (PIO capacity and sharing, frame-sync and IMU timestamps on one clock, fan tach).
+- [ ] **The new USB layer on a real device.** ae792df and 3c0909f are host-tested only: caller-driven
+      reaping, `next_block_until`, `driver()`/`speed()`, a mapped buffer on a real endpoint, through
+      Styx's userspace UVC on the Raze.
+- [ ] **lemnosd on the Raze under HeliOS's load.** The IMU batching test is load-sensitive on the
+      host (17.9 ms gap once); measure the batched IMU timestamps and wakeup p99 on the CM5.
+
 ## Next release (1.0.0)
 
 The release list: the 2026-10-27 feature freeze plus the hardware-support work added on 2026-10-30
