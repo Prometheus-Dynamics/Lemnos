@@ -72,7 +72,82 @@ pub struct MockI2cTarget {
     pub raw_writes: Vec<Vec<u8>>,
     /// The target stopped answering: transfers to it are not acknowledged.
     pub dead: bool,
+    /// A FIFO behind the data register (see [`MockI2c::with_fifo`]).
+    pub fifo: Option<MockFifo>,
     pointer: u16,
+}
+
+/// Where a [`MockFifo`] keeps its fill level, so a driver can read how much
+/// is waiting before it reads the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoLength {
+    /// Two bytes at this register, little-endian: the byte count.
+    Bytes(u16),
+    /// One byte at `register`: the frame count in its low seven bits, with
+    /// frames of `frame` bytes.
+    Frames { register: u16, frame: usize },
+}
+
+/// A FIFO that drains: the bytes the device has buffered wait in a queue, a
+/// read of the data register takes them off the front, and the fill level
+/// register follows the queue. A read of an empty FIFO returns zeros. The
+/// queue is unbounded; a test keeps it within the device's depth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockFifo {
+    /// The data register: a read starting here takes bytes from the queue.
+    pub data: u16,
+    /// The fill level register.
+    pub length: FifoLength,
+    /// The buffered bytes, oldest first.
+    pub queue: VecDeque<u8>,
+    /// The device's own clock, when it produces frames (see
+    /// [`MockI2c::with_fifo_stream`]).
+    #[cfg(feature = "std")]
+    stream: Option<Stream>,
+}
+
+/// A device that buffers one frame per `period`, on the host's clock: frame
+/// `i` appears at `origin + i * period`, whether or not anything reads.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stream {
+    origin: std::time::Instant,
+    period: core::time::Duration,
+    /// Frames produced so far (the next frame's index).
+    produced: u64,
+    /// One frame's bytes.
+    frame: Vec<u8>,
+}
+
+impl MockFifo {
+    /// Produces the frames the device's clock has reached (a stream only).
+    #[cfg(feature = "std")]
+    fn produce(&mut self, now: std::time::Instant) {
+        let Some(stream) = self.stream.as_mut() else {
+            return;
+        };
+        let elapsed = now.saturating_duration_since(stream.origin);
+        let due = (elapsed.as_nanos() / stream.period.as_nanos().max(1)) as u64 + 1;
+        for _ in stream.produced..due {
+            self.queue.extend(stream.frame.iter().copied());
+        }
+        stream.produced = stream.produced.max(due);
+    }
+
+    /// Writes the fill level into the target's registers.
+    fn publish_level(&self, registers: &mut BTreeMap<u16, u8>) {
+        match self.length {
+            FifoLength::Bytes(register) => {
+                let [lo, hi] = (self.queue.len() as u16).to_le_bytes();
+                registers.insert(register, lo);
+                registers.insert(register.wrapping_add(1), hi);
+            }
+            FifoLength::Frames { register, frame } => {
+                let frames = self.queue.len() / frame.max(1);
+                registers.insert(register, frames.min(0x7f) as u8);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +230,73 @@ impl MockI2c {
         with(&self.state, |s| {
             s.targets.entry(address).or_default().dead = dead
         });
+    }
+
+    /// Gives the register-file target at `address` a FIFO behind `data`
+    /// (see [`MockFifo`]). It starts empty; the device's output comes in with
+    /// [`push_fifo`](Self::push_fifo).
+    pub fn with_fifo(self, address: u8, data: u16, length: FifoLength) -> Self {
+        with(&self.state, |s| {
+            s.targets.entry(address).or_default().fifo = Some(MockFifo {
+                data,
+                length,
+                queue: VecDeque::new(),
+                #[cfg(feature = "std")]
+                stream: None,
+            });
+        });
+        self
+    }
+
+    /// Gives the target at `address` a FIFO that the device fills on the
+    /// host's clock: one `frame` (the same bytes each time) is buffered every
+    /// `period` from this call, so a read takes the frames that have arrived
+    /// since the last one, as a real FIFO does. The level register follows the
+    /// queue.
+    #[cfg(feature = "std")]
+    pub fn with_fifo_stream(
+        self,
+        address: u8,
+        data: u16,
+        length: FifoLength,
+        period: core::time::Duration,
+        frame: &[u8],
+    ) -> Self {
+        with(&self.state, |s| {
+            s.targets.entry(address).or_default().fifo = Some(MockFifo {
+                data,
+                length,
+                queue: VecDeque::new(),
+                stream: Some(Stream {
+                    origin: std::time::Instant::now(),
+                    period,
+                    produced: 0,
+                    frame: frame.to_vec(),
+                }),
+            });
+        });
+        self
+    }
+
+    /// Appends the device's output to the FIFO at `address` (the sensor
+    /// buffering frames). Panics without a FIFO.
+    pub fn push_fifo(&self, address: u8, bytes: &[u8]) {
+        with(&self.state, |s| {
+            let target = s.targets.entry(address).or_default();
+            let fifo = target.fifo.as_mut().expect("no FIFO on this target");
+            fifo.queue.extend(bytes.iter().copied());
+            fifo.publish_level(&mut target.registers);
+        });
+    }
+
+    /// Bytes waiting in the FIFO at `address` (0 without one).
+    pub fn fifo_bytes(&self, address: u8) -> usize {
+        with(&self.state, |s| {
+            s.targets
+                .get(&address)
+                .and_then(|t| t.fifo.as_ref())
+                .map_or(0, |f| f.queue.len())
+        })
     }
 
     /// The target at `address` (a snapshot).
@@ -254,9 +396,25 @@ impl I2cState {
                     previous_write = true;
                 }
                 I2cOperation::Read(buf) => {
-                    for b in buf.iter_mut() {
-                        *b = target.registers.get(&target.pointer).copied().unwrap_or(0);
-                        target.pointer = target.pointer.wrapping_add(1);
+                    #[cfg(feature = "std")]
+                    if let Some(fifo) = target.fifo.as_mut() {
+                        fifo.produce(std::time::Instant::now());
+                        fifo.publish_level(&mut target.registers);
+                    }
+                    match target.fifo.as_mut().filter(|f| f.data == target.pointer) {
+                        // A read of the data register takes what it reads.
+                        Some(fifo) => {
+                            for b in buf.iter_mut() {
+                                *b = fifo.queue.pop_front().unwrap_or(0);
+                            }
+                            fifo.publish_level(&mut target.registers);
+                        }
+                        None => {
+                            for b in buf.iter_mut() {
+                                *b = target.registers.get(&target.pointer).copied().unwrap_or(0);
+                                target.pointer = target.pointer.wrapping_add(1);
+                            }
+                        }
                     }
                     previous_write = false;
                 }
@@ -416,6 +574,67 @@ mod tests {
         assert_eq!((polls, buf), (3, [0x32]));
         bus.set_pending_polls(0);
         assert_eq!(block_on(AsyncI2c::write(&mut bus, 0x10, &[0x00])), Ok(()));
+    }
+
+    #[test]
+    fn a_fifo_read_takes_what_it_reads() {
+        let bus = MockI2c::new()
+            .with_target(0x18, AddressWidth::Bits8)
+            .with_fifo(0x18, 0x26, FifoLength::Bytes(0x24));
+        bus.push_fifo(0x18, &[1, 2, 3, 4, 5, 6, 7]);
+        let mut regs = I2cRegisters::new(bus.clone(), 0x18, AddressWidth::Bits8);
+        // The fill level reads as the byte count, little-endian.
+        let mut level = [0u8; 2];
+        crate::RegisterBus::read_burst(&mut regs, 0x24, &mut level).unwrap();
+        assert_eq!(u16::from_le_bytes(level), 7);
+        let mut first = [0u8; 3];
+        crate::RegisterBus::read_burst(&mut regs, 0x26, &mut first).unwrap();
+        assert_eq!(first, [1, 2, 3]);
+        // The next read continues where the last stopped, not from the top.
+        let mut rest = [0u8; 5];
+        crate::RegisterBus::read_burst(&mut regs, 0x26, &mut rest).unwrap();
+        assert_eq!(rest, [4, 5, 6, 7, 0]);
+        assert_eq!(bus.fifo_bytes(0x18), 0);
+        assert_eq!(bus.value(0x18, 0x24, 2), 0);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_streaming_fifo_buffers_frames_on_the_device_clock() {
+        let bus = MockI2c::new()
+            .with_target(0x18, AddressWidth::Bits8)
+            .with_fifo_stream(
+                0x18,
+                0x26,
+                FifoLength::Bytes(0x24),
+                core::time::Duration::from_millis(1),
+                &[0x84, 1, 0, 2, 0, 3, 0],
+            );
+        // Nothing read yet: the clock still runs, so frames have arrived.
+        std::thread::sleep(core::time::Duration::from_millis(20));
+        let mut regs = I2cRegisters::new(bus.clone(), 0x18, AddressWidth::Bits8);
+        let mut level = [0u8; 2];
+        crate::RegisterBus::read_burst(&mut regs, 0x24, &mut level).unwrap();
+        let waiting = usize::from(u16::from_le_bytes(level));
+        // Seven bytes a frame: about 20 frames in 20 ms at 1 ms a frame.
+        assert!((105..=175).contains(&waiting), "{waiting} bytes after 20 ms");
+        // The data read takes them, oldest first, and leaves the rest.
+        let mut taken = alloc::vec![0u8; waiting];
+        crate::RegisterBus::read_burst(&mut regs, 0x26, &mut taken).unwrap();
+        assert!(taken.chunks(7).all(|f| f == [0x84, 1, 0, 2, 0, 3, 0]));
+        assert!(bus.fifo_bytes(0x18) < 10);
+    }
+
+    #[test]
+    fn a_frame_fifo_reports_its_frame_count() {
+        let bus = MockI2c::new()
+            .with_target(0x68, AddressWidth::Bits8)
+            .with_fifo(0x68, 0x3f, FifoLength::Frames { register: 0x0e, frame: 6 });
+        bus.push_fifo(0x68, &[0; 12]);
+        assert_eq!(bus.register(0x68, 0x0e), 2);
+        let mut regs = I2cRegisters::new(bus.clone(), 0x68, AddressWidth::Bits8);
+        crate::RegisterBus::read_burst(&mut regs, 0x3f, &mut [0u8; 6]).unwrap();
+        assert_eq!(bus.register(0x68, 0x0e), 1);
     }
 
     #[test]

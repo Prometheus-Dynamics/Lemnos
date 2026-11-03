@@ -2,6 +2,7 @@
 //! mock buses. The slow bus takes a fixed time per transaction
 //! (`MockI2c::set_latency`), so its device's reads take real time.
 
+use lemnos_hal::mock::FifoLength;
 use lemnos_hal::register::AddressWidth;
 use lemnos_ipc::{ClientEvent, ClientOptions, Update};
 use lemnos_linux_sys::time::boottime_us;
@@ -259,8 +260,9 @@ fn imu_holds_100_hz_beside_a_read_longer_than_its_period() {
     assert!(s.max_dev_us <= 25_000, "{s:?}");
 }
 
-/// The IMU alone, with its FIFOs: the mock's FIFOs hold eight samples, 2.5 ms
-/// apart (400 Hz), and every read returns the same eight.
+/// The IMU alone, with its FIFOs. Each mock FIFO fills on the host's clock at
+/// 400 Hz (one accelerometer and one gyroscope frame every 2.5 ms, from when
+/// the bus is built), and a read takes what has arrived since the last one.
 const FIFO_BOARD: &str = r#"
 format = "lemnos.board"
 schema_version = 1
@@ -278,28 +280,45 @@ poll_ms = 10
 config = { fifo = true, accel_rate = "400hz", gyro_rate = "400hz-47" }
 "#;
 
-const FIFO_SAMPLES: usize = 8;
+/// One 400 Hz frame: 2.5 ms apart.
+const FRAME_PERIOD: Duration = Duration::from_micros(2_500);
+const ACCEL_FRAME: [u8; 7] = [0x84, 0, 0, 0, 0, 0, 0];
+const GYRO_FRAME: [u8; 6] = [0; 6];
 
 fn fifo_service() -> MockLemnosd {
     let hardware = MockHardware::new();
-    // Eight accelerometer frames (header 0x84 and X, Y, Z), 7 bytes each.
-    let mut accel = Vec::new();
-    for i in 0..FIFO_SAMPLES {
-        accel.extend_from_slice(&[0x84, i as u8, 0, 0, 0, 0, 0]);
-    }
-    let length = (accel.len() as u16).to_le_bytes();
     hardware
         .i2c(1)
         .with_target(0x18, AddressWidth::Bits8)
         .with_target(0x68, AddressWidth::Bits8)
         .with_registers(0x18, 0x00, &[0x1e])
         .with_registers(0x68, 0x00, &[0x0f])
-        .with_registers(0x18, 0x24, &length)
-        .with_registers(0x18, 0x26, &accel)
-        .with_registers(0x68, 0x0e, &[FIFO_SAMPLES as u8])
-        .with_registers(0x68, 0x3f, &[0u8; FIFO_SAMPLES * 6]);
+        .with_fifo_stream(
+            0x18,
+            0x26,
+            FifoLength::Bytes(0x24),
+            FRAME_PERIOD,
+            &ACCEL_FRAME,
+        )
+        .with_fifo_stream(
+            0x68,
+            0x3f,
+            FifoLength::Frames {
+                register: 0x0e,
+                frame: GYRO_FRAME.len(),
+            },
+            FRAME_PERIOD,
+            &GYRO_FRAME,
+        );
     MockLemnosd::start(FIFO_BOARD, hardware).unwrap()
 }
+
+/// The largest gap a batched IMU may show between two samples. A late drain
+/// shows as a gap: the reads run every 10 ms, so a gap is one missed read
+/// (20 ms) plus the host's scheduling slack. Fixed, not scaled by the host's
+/// wakeups: the FIFO's frames arrive on their own clock, so a gap is the
+/// service's to explain.
+const MAX_GAP_US: i64 = 25_000;
 
 #[test]
 fn a_batched_imu_delivers_every_sample_on_its_own_timestamp() {
@@ -310,8 +329,6 @@ fn a_batched_imu_delivers_every_sample_on_its_own_timestamp() {
         .unwrap();
     // 2 ms asks for every sample of the 400 Hz stream.
     client.subscribe("imu", 2).unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
-    let host = host_wakeups(stop.clone());
     let warm = Instant::now() + Duration::from_millis(500);
     let end = warm + Duration::from_secs(3);
     let mut stamps: Vec<i64> = Vec::new();
@@ -324,35 +341,26 @@ fn a_batched_imu_delivers_every_sample_on_its_own_timestamp() {
             stamps.push(r.timestamp_us as i64);
         }
     }
-    stop.store(true, Ordering::Relaxed);
-    let host_p99 = host.join().unwrap();
+    let left = service.hardware().i2c(1).fifo_bytes(0x18);
     service.stop();
     assert!(stamps.len() > 100, "{}", stamps.len());
     let deltas: Vec<i64> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
     let span = (stamps[stamps.len() - 1] - stamps[0]) as f64 / 1e6;
     let rate = (stamps.len() - 1) as f64 / span;
-    // Loose on a busy host: a late drain leaves a gap, and the stamps show it.
     assert!((300.0..=420.0).contains(&rate), "{rate} Hz");
-    // The mock's FIFO always returns the same eight-sample window, so two
-    // drains closer than the window's 17.5 ms replay up to a sample: the
-    // stamps of the replay step back by that sample at most. A real FIFO never
-    // replays, so a step back of more than half a sample period is a stamping
-    // bug, and that is what this bound catches.
-    let half_sample = 1_250;
+    // Every read takes what arrived: no sample is replayed, so the stamps
+    // strictly increase.
     assert!(
-        deltas.iter().all(|d| *d > -half_sample),
-        "stamps step back more than half a sample: {deltas:?}"
+        deltas.iter().all(|d| *d > 0),
+        "stamps do not increase: {:?}",
+        deltas.iter().filter(|d| **d <= 0).collect::<Vec<_>>()
     );
-    // The median is the stream's spacing.
+    // The median is the stream's spacing, and the FIFO is drained: a read
+    // leaves at most a read's worth behind (a few frames, 7 bytes each).
     let mut sorted = deltas.clone();
     sorted.sort_unstable();
-    let median = sorted[sorted.len() / 2];
-    assert_eq!(median, 2_500, "median spacing");
-    // A late drain shows as a gap. A gap is a host wakeup too: the bound is
-    // the 10 ms period plus the host's wakeup allowance (see `HOST_FACTOR`).
+    assert_eq!(sorted[sorted.len() / 2], 2_500, "median spacing");
+    assert!(left < 10 * 7, "{left} bytes left in the FIFO");
     let max = sorted[sorted.len() - 1];
-    assert!(
-        max <= 10_000 + HOST_FACTOR * host_p99,
-        "largest gap {max} us (host p99 wakeup {host_p99} us)"
-    );
+    assert!(max <= MAX_GAP_US, "largest gap {max} us");
 }
