@@ -5,12 +5,12 @@ consumes its foundation
 ([docs/foundation.md](docs/foundation.md)). See [CHANGELOG.md](CHANGELOG.md)
 for the user-facing summary of finished work.
 
-## Alpha (Raze)
+## Alpha (BCM2712 board)
 
-The user, 2026-11-03: the next release is an alpha for the Raze (CM5) hardware only. These come
+The user, 2026-11-03: the next release is an alpha for the BCM2712 board hardware only. These come
 first; the other boards' items below are still needed, after it.
 
-- [ ] **RP1 IO blocks used in full on the Raze.** The RP1 part of "IO hardware blocks, used in
+- [ ] **RP1 IO blocks used in full on the BCM2712 board.** The RP1 part of "IO hardware blocks, used in
       full" below (PIO capacity and sharing, frame-sync and IMU timestamps on one clock, fan tach).
       Status 2026-11-02, from [docs/io-blocks.md](docs/io-blocks.md):
       - Done, host-tested: GPIO edge events are stamped on CLOCK_BOOTTIME in microseconds, the
@@ -27,9 +27,9 @@ first; the other boards' items below are still needed, after it.
         swap decides the rest.
 - [ ] **The new USB layer on a real device.** ae792df and 3c0909f are host-tested only: caller-driven
       reaping, `next_block_until`, `driver()`/`speed()`, a mapped buffer on a real endpoint, through
-      Styx's userspace UVC on the Raze.
-- [ ] **lemnosd on the Raze under HeliOS's load.** The IMU batching test is load-sensitive on the
-      host (17.9 ms gap once); measure the batched IMU timestamps and wakeup p99 on the CM5.
+      the consuming product's userspace UVC on the BCM2712 board.
+- [ ] **lemnosd on the BCM2712 board under the consuming product's load.** The IMU batching test is load-sensitive on the
+      host (17.9 ms gap once); measure the batched IMU timestamps and wakeup p99 on the BCM2712 board.
 
 ## Next release (1.0.0)
 
