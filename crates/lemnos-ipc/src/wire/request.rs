@@ -151,6 +151,7 @@ impl Request {
             }
             Self::Raw(raw) => raw.encode(),
             Self::List => Encoder::new(LIST).finish(),
+            Self::Stats => Encoder::new(STATS).finish(),
             Self::Read { device } => {
                 let mut e = Encoder::new(READ);
                 e.str(device);
@@ -387,6 +388,7 @@ impl Request {
             },
             kind if super::raw::is_raw(kind) => Self::Raw(RawRequest::decode(kind, &mut d)?),
             LIST => Self::List,
+            STATS => Self::Stats,
             READ => Self::Read { device: d.str()? },
             SUBSCRIBE_CHANNELS => {
                 let device = d.str()?;

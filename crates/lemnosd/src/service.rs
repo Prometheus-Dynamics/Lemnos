@@ -1160,6 +1160,22 @@ impl Service {
                 let devices = self.slots.iter().map(Slot::describe).collect();
                 self.clients[ci].send(&Message::Devices(devices));
             }
+            Request::Stats => {
+                // Counted per read on the slot already; this only reads them.
+                let stats = self
+                    .slots
+                    .iter()
+                    .filter(|s| s.reads > 0)
+                    .map(|s| lemnos_ipc::ReadStats {
+                        device: s.id().to_string(),
+                        reads: s.reads,
+                        total_us: s.read_total_us,
+                        max_us: s.read_max_us,
+                        last_us: s.read_cost_us,
+                    })
+                    .collect();
+                self.clients[ci].send(&Message::Stats(stats));
+            }
             Request::Read { device } => {
                 let message = match self.slot_of(&device) {
                     None => Message::Reply {

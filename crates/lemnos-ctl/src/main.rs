@@ -24,6 +24,7 @@
 //!   led show --spec '<TOML body>' | --file PATH [--name N] | --json '<JSON body>'
 //!                                                     a look given in full, until replaced
 //!   looks list | show <name> | reload | save <name> (--spec|--file|--json)
+//!   stats                                            read timing of each sensor (reads, mean, max, last)
 //!   calibration show|status|reset|stop|apply|discard <device>
 //!   calibration start <device> <accel-six|mag-rotate|gyro-hold>
 //!                                                     an IMU's or magnetometer's calibration
@@ -160,6 +161,7 @@ fn main() -> ExitCode {
         "led" => led(args, options),
         "light" => light(args, options),
         "power" => power(args, options),
+        "stats" => stats(options),
         "looks" => looks_command(args, options),
         "calibration" => calibration::calibration(args, options),
         _ => devices(&command, args, options),
@@ -312,6 +314,29 @@ fn validate(mut args: Args) -> ExitCode {
 /// so it works when `lemnosd` is gone (systemd runs it as `ExecStopPost`):
 /// the plans `lemnosd` recorded at bind (`fan-restore` next to the socket, or
 /// `--state PATH`), then the board's fans, then with `--all` every hwmon fan.
+/// `stats`: each sensor's read timing as the service measured it (reads,
+/// mean, longest and last read, in microseconds).
+fn stats(options: ClientOptions) -> ExitCode {
+    match options.devices().and_then(|mut c| c.stats()) {
+        Ok(mut stats) => {
+            stats.sort_by(|a, b| a.device.cmp(&b.device));
+            println!(
+                "{:<16} {:>8} {:>10} {:>10} {:>10}",
+                "device", "reads", "mean_us", "max_us", "last_us"
+            );
+            for s in stats {
+                let mean = s.total_us.checked_div(s.reads).unwrap_or(0);
+                println!(
+                    "{:<16} {:>8} {:>10} {:>10} {:>10}",
+                    s.device, s.reads, mean, s.max_us, s.last_us
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// `power <device> on|off|status|reset [--off-ms N]`: a power switch (a
 /// USB port's load switch). `reset` turns it off for N ms (default 1000),
 /// then on again, to recover a port that latched off.

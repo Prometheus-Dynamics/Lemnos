@@ -158,6 +158,10 @@ pub(crate) struct Slot {
     pub next_read_us: u64,
     /// How long the last read took (microseconds; 0 before the first).
     pub read_cost_us: u64,
+    /// Reads that ran, and their total and longest durations (`Request::Stats`).
+    pub reads: u64,
+    pub read_total_us: u64,
+    pub read_max_us: u64,
     pub next_build_ms: u64,
     retry_ms: u64,
     pub subscriptions: Vec<Subscription>,
@@ -224,6 +228,9 @@ impl Slot {
             fresh: false,
             next_read_us: 0,
             read_cost_us: 0,
+            reads: 0,
+            read_total_us: 0,
+            read_max_us: 0,
             next_build_ms: 0,
             retry_ms: RETRY_MIN_MS,
             subscriptions: Vec::new(),
@@ -456,6 +463,9 @@ impl Slot {
         why: &str,
     ) -> Option<DeviceStatus> {
         self.read_cost_us = cost_us;
+        self.reads += 1;
+        self.read_total_us = self.read_total_us.saturating_add(cost_us);
+        self.read_max_us = self.read_max_us.max(cost_us);
         match result {
             Ok(()) => {
                 self.read_us = started_us;

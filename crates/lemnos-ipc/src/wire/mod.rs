@@ -58,6 +58,8 @@ const TEXT: u16 = 108;
 const FRAME: u16 = 109;
 const LIGHT_INFO: u16 = 110;
 const CALIBRATION_STATUS_REPLY: u16 = 111;
+const STATS: u16 = 17;
+const STATS_REPLY: u16 = 112;
 const CALIBRATION: u16 = 13;
 const CALIBRATION_STATUS: u16 = 14;
 
@@ -126,6 +128,22 @@ pub struct DeviceDesc {
     pub controls: Vec<ControlDesc>,
     /// LEDs, for lights; 0 otherwise.
     pub pixels: u16,
+}
+
+/// One sensor's read timing, as the service measured it (see
+/// [`Request::Stats`]). Times are microseconds; the reads are the device's
+/// reads since the service started, batched or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadStats {
+    pub device: String,
+    /// Reads that ran.
+    pub reads: u64,
+    /// The sum of their durations (mean = total / reads).
+    pub total_us: u64,
+    /// The longest.
+    pub max_us: u64,
+    /// The last one's (what the scheduler uses as the read's cost).
+    pub last_us: u64,
 }
 
 /// One device reading.
@@ -383,6 +401,10 @@ pub enum Request {
         events: bool,
     },
     List,
+    /// The read timing of every sensor that has been read. Answered with a
+    /// [`Message::Stats`]. Kept by the service per read, so asking costs the
+    /// readers nothing.
+    Stats,
     Read {
         device: String,
     },
@@ -538,6 +560,8 @@ pub enum Message {
         client_id: u32,
     },
     Devices(Vec<DeviceDesc>),
+    /// The answer to [`Request::Stats`].
+    Stats(Vec<ReadStats>),
     Reading(RawReading),
     Reply {
         id: u32,

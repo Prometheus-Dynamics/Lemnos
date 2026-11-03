@@ -51,6 +51,7 @@ fn requests_round_trip() {
         events: false,
     });
     round_trip_request(Request::List);
+    round_trip_request(Request::Stats);
     round_trip_request(Request::Read {
         device: "imu".into(),
     });
@@ -183,6 +184,22 @@ fn messages_round_trip() {
         board: "example".into(),
         client_id: 3,
     });
+    round_trip_message(Message::Stats(vec![
+        ReadStats {
+            device: "imu".into(),
+            reads: 6201,
+            total_us: 6201 * 180,
+            max_us: 2_400,
+            last_us: 170,
+        },
+        ReadStats {
+            device: "power".into(),
+            reads: 0,
+            total_us: 0,
+            max_us: 0,
+            last_us: 0,
+        },
+    ]));
     round_trip_message(Message::Devices(vec![DeviceDesc {
         id: "imu".into(),
         label: "IMU".into(),

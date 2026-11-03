@@ -568,6 +568,15 @@ impl DeviceClient {
         Ok(self.devices().cloned().collect())
     }
 
+    /// The read timing of each sensor the service has read (see
+    /// [`ReadStats`]).
+    pub fn stats(&mut self) -> Result<Vec<crate::ReadStats>, ClientError> {
+        self.conn.request(&Request::Stats, |m| match m {
+            Message::Stats(stats) => Some(stats.clone()),
+            _ => None,
+        })
+    }
+
     /// The latest reading of `device`.
     pub fn read(&mut self, device: &str) -> Result<Reading, ClientError> {
         let name = device.to_string();

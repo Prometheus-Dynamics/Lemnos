@@ -78,6 +78,18 @@ impl Message {
                 e.u16(*version).str(board).u32(*client_id);
                 e.finish()
             }
+            Self::Stats(stats) => {
+                let mut e = Encoder::new(STATS_REPLY);
+                e.u16(stats.len() as u16);
+                for s in stats {
+                    e.str(&s.device)
+                        .u64(s.reads)
+                        .u64(s.total_us)
+                        .u64(s.max_us)
+                        .u64(s.last_us);
+                }
+                e.finish()
+            }
             Self::Devices(devices) => {
                 let mut e = Encoder::new(DEVICES);
                 e.u16(devices.len() as u16);
@@ -255,6 +267,20 @@ impl Message {
                     }
                 }
                 Self::Devices(devices)
+            }
+            STATS_REPLY => {
+                let count = usize::from(d.u16()?);
+                let mut stats = Vec::with_capacity(count.min(64));
+                for _ in 0..count {
+                    stats.push(ReadStats {
+                        device: d.str()?,
+                        reads: d.u64()?,
+                        total_us: d.u64()?,
+                        max_us: d.u64()?,
+                        last_us: d.u64()?,
+                    });
+                }
+                Self::Stats(stats)
             }
             READING => {
                 let device = d.str()?;

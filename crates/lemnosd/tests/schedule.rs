@@ -364,3 +364,20 @@ fn a_batched_imu_delivers_every_sample_on_its_own_timestamp() {
     let max = sorted[sorted.len() - 1];
     assert!(max <= MAX_GAP_US, "largest gap {max} us");
 }
+
+#[test]
+fn read_timing_is_reported_per_sensor() {
+    let _turn = timing_turn();
+    let service = service(Duration::from_millis(1));
+    let mut client = ClientOptions::new(service.socket(), "viewer")
+        .devices()
+        .unwrap();
+    client.subscribe("imu", 10).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let stats = client.stats().unwrap();
+    service.stop();
+    let imu = stats.iter().find(|s| s.device == "imu").expect("imu");
+    assert!(imu.reads >= 10, "{imu:?}");
+    assert!(imu.last_us <= imu.max_us, "{imu:?}");
+    assert!(imu.total_us >= imu.max_us, "{imu:?}");
+}
