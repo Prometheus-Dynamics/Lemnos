@@ -9,7 +9,7 @@ use crate::buffer::Storage;
 use crate::error::{Error, Result};
 use crate::transfer::{Canceller, IsoPacket, Shared, Transfer, TransferOutcome, TransferStatus};
 use crate::types::{ControlSetup as Setup, Direction};
-use lemnos_linux_sys::poll::{POLLOUT, poll_one};
+use lemnos_linux_sys::poll::{POLLERR, POLLHUP, POLLNVAL, POLLOUT, poll_one};
 use lemnos_linux_sys::pool::Spares;
 use lemnos_linux_sys::usbfs::{
     ControlSetup, IsoPacket as UrbPacket, UrbCompletion, UrbKind, UsbfsFile,
@@ -312,8 +312,13 @@ impl Usbfs {
                 return Ok(0);
             }
             let wait = (deadline - now).min(REAP_POLL);
-            if let Err(error) = poll_one(self.file.as_fd(), POLLOUT, Some(wait)) {
-                return Err(self.reap_failed(&error));
+            match poll_one(self.file.as_fd(), POLLOUT, Some(wait)) {
+                Ok(revents) => {
+                    if let Err(error) = hangup_check(revents) {
+                        return Err(self.reap_failed(&error));
+                    }
+                }
+                Err(error) => return Err(self.reap_failed(&error)),
             }
         }
     }
@@ -384,7 +389,10 @@ fn reap_loop(usb: Arc<Usbfs>) {
                 return;
             }
         }
-        match poll_one(usb.file.as_fd(), POLLOUT, Some(REAP_POLL)) {
+        // A hang-up or error on the device file cannot be reaped past: fail the
+        // transfers now. Without this check a hung-up file reports ready at once,
+        // and nothing reaps it, so the loop would spin.
+        match poll_one(usb.file.as_fd(), POLLOUT, Some(REAP_POLL)).and_then(hangup_check) {
             Ok(0) => continue,
             Ok(_) => {}
             Err(error) => {
@@ -435,6 +443,17 @@ fn outcome(
         status,
         reaped,
     }
+}
+
+/// The error for a poll that reports the device file gone (`POLLERR`, `POLLHUP`,
+/// `POLLNVAL`); any other events are fine.
+fn hangup_check(revents: i16) -> io::Result<i16> {
+    if revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
+        return Err(io::Error::other(
+            "the device file reports an error or a hang-up",
+        ));
+    }
+    Ok(revents)
 }
 
 /// Statuses that end the whole isochronous URB, not just one packet.

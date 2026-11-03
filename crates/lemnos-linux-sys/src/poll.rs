@@ -208,4 +208,53 @@ mod tests {
         assert_eq!(fds[0].revents(), 0);
         assert_eq!(fds[1].revents() & POLLIN, POLLIN);
     }
+
+    /// CPU time the calling thread has used, from `/proc/thread-self/stat`.
+    fn thread_cpu() -> Duration {
+        let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
+        // Fields after the command name, which is in parentheses: utime is field 14
+        // and stime field 15 of stat(5), so indices 11 and 12 here.
+        let after = stat.rsplit_once(") ").unwrap().1;
+        let fields: Vec<&str> = after.split_whitespace().collect();
+        let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
+        // SAFETY: `sysconf` takes no pointers and only reads the clock tick rate.
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+        Duration::from_millis(ticks * 1000 / hz)
+    }
+
+    /// An idle wait sleeps: a 300 ms poll on a silent socket returns with no
+    /// events, and the thread uses almost none of that time. A reaper that spun
+    /// here would burn a CPU while a device is idle.
+    #[test]
+    fn an_idle_wait_sleeps_instead_of_spinning() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+        let (quiet, _peer) = UnixStream::pair().unwrap();
+        let before = thread_cpu();
+        let started = std::time::Instant::now();
+        let revents = poll_one(quiet.as_fd(), POLLIN, Some(Duration::from_millis(300))).unwrap();
+        let waited = started.elapsed();
+        let used = thread_cpu() - before;
+        assert_eq!(revents, 0, "nothing to read: the wait ends on its timeout");
+        assert!(
+            waited >= Duration::from_millis(250),
+            "the wait lasted: {waited:?}"
+        );
+        assert!(
+            used < Duration::from_millis(50),
+            "the wait used {used:?} of CPU"
+        );
+    }
+
+    /// A hung-up peer reports at once (`POLLHUP`), so a loop that polls it
+    /// without reaping spins: the caller must fail on the flag, as the USB reaper does.
+    #[test]
+    fn a_hung_up_descriptor_reports_at_once() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixStream;
+        let (quiet, peer) = UnixStream::pair().unwrap();
+        drop(peer);
+        let revents = poll_one(quiet.as_fd(), POLLIN, Some(Duration::from_secs(5))).unwrap();
+        assert_ne!(revents & POLLHUP, 0, "a hang-up is reported");
+    }
 }
