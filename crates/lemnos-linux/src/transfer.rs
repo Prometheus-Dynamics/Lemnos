@@ -8,7 +8,9 @@
 //! its ticket holds the URB until the kernel finishes it. A PCIe or RP1 DMA
 //! engine implements the same trait when it lands.
 
+#[cfg(any(feature = "i2c", feature = "spi"))]
 use std::io;
+#[cfg(any(feature = "i2c", feature = "spi"))]
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -18,11 +20,13 @@ use lemnos_bus::{
 use lemnos_hal::ErrorKind;
 
 /// The ticket of a transfer that finished in `submit`.
+#[cfg(any(feature = "i2c", feature = "spi"))]
 pub struct Finished<'a> {
     bytes: usize,
     _buffers: PhantomData<&'a ()>,
 }
 
+#[cfg(any(feature = "i2c", feature = "spi"))]
 impl Finished<'_> {
     fn completion(&self) -> Completion {
         Completion { bytes: self.bytes }
@@ -52,6 +56,7 @@ fn dma_buf_refused() -> TransferError {
     TransferError::Unsupported("this bus moves bytes through the CPU; dma-bufs need a DMA engine")
 }
 
+#[cfg(any(feature = "i2c", feature = "spi"))]
 fn failed(error: io::Error) -> TransferError {
     let kind = match error.raw_os_error() {
         Some(errno) => ErrorKind::from_errno(errno),

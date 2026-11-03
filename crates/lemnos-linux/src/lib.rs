@@ -15,7 +15,7 @@ pub mod hal;
 mod metadata;
 #[cfg(feature = "rp1-dma")]
 pub mod rp1_dma;
-#[cfg(any(feature = "i2c", feature = "spi"))]
+#[cfg(any(feature = "i2c", feature = "spi", feature = "usb"))]
 pub mod transfer;
 mod transport;
 mod util;
