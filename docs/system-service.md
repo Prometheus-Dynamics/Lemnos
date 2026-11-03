@@ -709,13 +709,13 @@ overlay and grant `/dev/pio0` before this is the default (see the requirements a
 ## Timing measurements (board #1, round 3)
 
 Measured on board #1 (BCM2712, kernel 7.2.9-v8-16k, 4 cores), lemnosd built for aarch64 from this
-tree with `--profile service` (1,241,320 B stripped; the Raze package build is 1,240,648 B, the
+tree with `--profile service` (1,241,320 B stripped; the consuming app's package build is 1,240,648 B, the
 difference is the `Request::Stats` path). The IMU is the BMI088 on the RP1 PIO bus (`pio-i2c:sda=8,scl=7`);
 the power monitor (INA238, 100 ms poll), magnetometer (BMM150, 100 ms poll) and the fan and thermal zone
 (1 s) are on the board file. Each run stopped the service (`systemctl stop lemnosd`, under
 `/tmp/lemnos-r3-lemnosd.lock`), ran a copy of this lemnosd on a board file in `/tmp` with the IMU
 rate changed, and restarted the service. A probe subscribed to the IMU and recorded each reading's
-timestamp and receive time for 60 s, after 0.5 s of warm-up. The camera stack (`helios-peripherals`,
+timestamp and receive time for 60 s, after 0.5 s of warm-up. The camera stack (its peripheral service,
 with the webcam's video nodes open) was running throughout and was not touched. Times are in
 microseconds. "Grid deviation" is `|spacing - nominal|` over consecutive readings. "Receive age"
 is the receive time minus the reading's timestamp. "Host wakeup" is a plain thread sleeping on a

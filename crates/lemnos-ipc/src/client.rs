@@ -569,7 +569,7 @@ impl DeviceClient {
     }
 
     /// The read timing of each sensor the service has read (see
-    /// [`ReadStats`]).
+    /// [`crate::ReadStats`]).
     pub fn stats(&mut self) -> Result<Vec<crate::ReadStats>, ClientError> {
         self.conn.request(&Request::Stats, |m| match m {
             Message::Stats(stats) => Some(stats.clone()),
