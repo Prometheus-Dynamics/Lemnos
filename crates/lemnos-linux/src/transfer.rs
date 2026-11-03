@@ -420,6 +420,10 @@ mod usb {
         outcome: TransferOutcome,
         sink: Option<&mut [u8]>,
     ) -> TransferResult<Completion> {
+        // A transfer that did not complete moves nothing: its status is the error.
+        if let Some(error) = outcome.status.to_error("USB bulk transfer") {
+            return Err(usb_failed(error));
+        }
         let moved = outcome.actual_length.min(outcome.buffer.len());
         match sink {
             Some(dst) => {
@@ -477,6 +481,8 @@ mod usb {
                 buffer: TransferBuffer::from_vec(buffer),
                 actual_length,
                 packets: Vec::<IsoPacket>::new(),
+                status: lemnos_usb::TransferStatus::Ok,
+                reaped: std::time::Instant::now(),
             }
         }
 

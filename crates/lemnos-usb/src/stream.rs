@@ -14,6 +14,12 @@ use crate::transfer::IsoPacket;
 use crate::transfer::{Transfer, TransferBuffer, TransferOutcome};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
+
+/// How long one wait for a completion lasts before the deadline is checked again.
+#[cfg(target_os = "linux")]
+const WAIT_SLICE: Duration = Duration::from_millis(100);
 
 fn to_io(error: Error) -> io::Error {
     io::Error::other(error)
@@ -83,7 +89,13 @@ impl Read for BulkReader {
                 .queue
                 .pop_front()
                 .ok_or_else(|| io::Error::other("no transfer queued"))?;
-            self.current = Some(transfer.wait().map_err(to_io)?);
+            let outcome = transfer.wait().map_err(to_io)?;
+            if let Some(error) = outcome.status.to_error("bulk read") {
+                // The memory comes back to the stream, even on an error.
+                self.spare.push(outcome.into_buffer());
+                return Err(to_io(error));
+            }
+            self.current = Some(outcome);
         }
     }
 }
@@ -170,7 +182,11 @@ impl BulkWriter {
     fn retire_oldest(&mut self) -> Result<()> {
         if let Some(transfer) = self.queue.pop_front() {
             let outcome = transfer.wait()?;
+            let status = outcome.status;
             self.spare.push(outcome.into_buffer());
+            if let Some(error) = status.to_error("bulk write") {
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -192,10 +208,16 @@ impl BulkWriter {
             )
         })?;
         if needs_zero_packet(self.written, max_packet) {
-            self.device
+            let outcome = self
+                .device
                 .submit_bulk_out(self.endpoint, Vec::new())
                 .and_then(Transfer::wait)
                 .map_err(to_io)?;
+            let status = outcome.status;
+            self.spare.push(outcome.into_buffer());
+            if let Some(error) = status.to_error("zero-length packet") {
+                return Err(to_io(error));
+            }
         }
         self.written = 0;
         Ok(())
@@ -374,22 +396,63 @@ impl IsoReader {
         Ok(())
     }
 
-    /// Waits for the next completed transfer and returns it. The previous block's
-    /// buffer is recycled first, and the next transfer is already in flight.
+    /// Waits for the next completed transfer and returns it, without a deadline.
+    /// The previous block's buffer is recycled first, and the next transfer is
+    /// already in flight. In caller-driven reaping mode this reaps itself, so it
+    /// completes; it does not wait for a thread that is not there.
     pub fn next_block(&mut self) -> Result<IsoBlock<'_>> {
+        match self.next_block_until(None)? {
+            Some(block) => Ok(block),
+            None => Err(Error::new(
+                ErrorKind::Other,
+                "no isochronous transfer completed",
+            )),
+        }
+    }
+
+    /// As [`IsoReader::next_block`], but gives up at `deadline` (`None`: never):
+    /// returns `Ok(None)` then, with the next transfer still in flight. Both
+    /// reaping modes work: a caller-driven device is reaped here (see
+    /// [`UsbDevice::reap_until`]), and a device with a reaper thread is waited on.
+    pub fn next_block_until(&mut self, deadline: Option<Instant>) -> Result<Option<IsoBlock<'_>>> {
         if let Some(done) = self.current.take() {
             let (buffer, packets) = done.into_parts();
             self.spare.push(buffer);
             self.device.recycle_packets(packets);
         }
         self.top_up()?;
-        let transfer = self
-            .queue
-            .pop_front()
-            .ok_or_else(|| Error::new(ErrorKind::Other, "no isochronous transfer queued"))?;
-        let outcome = transfer.wait()?;
-        let outcome = self.current.insert(outcome);
-        Ok(IsoBlock::new(outcome.buffer.as_slice(), &outcome.packets))
+        loop {
+            let ready = self
+                .queue
+                .front()
+                .is_some_and(|transfer| transfer.wait_complete(Some(Duration::ZERO)));
+            if ready {
+                let transfer = self.queue.pop_front().ok_or_else(|| {
+                    Error::new(ErrorKind::Other, "no isochronous transfer queued")
+                })?;
+                let outcome = transfer.wait()?;
+                let outcome = self.current.insert(outcome);
+                return Ok(Some(IsoBlock::new(
+                    outcome.buffer.as_slice(),
+                    &outcome.packets,
+                )));
+            }
+            let slice = match deadline {
+                None => WAIT_SLICE,
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(None);
+                    }
+                    (deadline - now).min(WAIT_SLICE)
+                }
+            };
+            if self.device.caller_driven() {
+                self.device.reap_until(Instant::now() + slice)?;
+            } else if let Some(transfer) = self.queue.front() {
+                transfer.wait_complete(Some(slice));
+            }
+        }
     }
 }
 

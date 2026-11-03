@@ -9,13 +9,13 @@ use crate::config::ConfigurationInfo;
 use crate::config::configurations_from_blob;
 use crate::descriptor::DeviceDescriptor;
 use crate::error::{Error, ErrorKind, Result};
-use crate::info::UsbDeviceInfo;
+use crate::info::{Speed, UsbDeviceInfo};
 use crate::listing::find_device;
 use crate::location::UsbLocation;
 use crate::stream::{BulkReader, BulkWriter};
 #[cfg(target_os = "linux")]
 use crate::transfer::IsoPacket;
-use crate::transfer::{Transfer, TransferBuffer, TransferOutcome};
+use crate::transfer::{Transfer, TransferBuffer, TransferOutcome, TransferStatus};
 use crate::types::{ControlSetup, Direction, TransferType};
 use std::sync::Arc;
 use std::time::Duration;
@@ -102,6 +102,39 @@ impl UsbDevice {
     /// Every configuration the device has, as parsed when it was opened.
     pub fn configurations(&self) -> &[ConfigurationInfo] {
         &self.inner.configurations
+    }
+
+    /// The kernel driver bound to interface `interface` (Linux, `USBDEVFS_GETDRIVER`):
+    /// its name, or `None` when no driver is bound. Other platforms are
+    /// `Unsupported`: WinUSB and IOKit do not report a bound driver this way.
+    pub fn driver(&self, interface: u8) -> Result<Option<String>> {
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => usb.driver(interface),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(_) => {
+                let _ = interface;
+                Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "the bound driver is read on Linux only",
+                ))
+            }
+        }
+    }
+
+    /// The speed the open device negotiated (Linux, `USBDEVFS_GET_SPEED`). `None`
+    /// when the kernel reports an unknown or wireless speed. Other platforms are
+    /// `Unsupported`: use [`UsbDeviceInfo::speed`] from the listing.
+    pub fn speed(&self) -> Result<Option<Speed>> {
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => Ok(Speed::from_usbdevfs(usb.speed()?)),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(_) => Err(Error::new(
+                ErrorKind::Unsupported,
+                "the open device's speed is read on Linux only; use the listing",
+            )),
+        }
     }
 
     /// The configuration the device is in now.
@@ -197,6 +230,28 @@ impl UsbDevice {
             }
             #[cfg(not(target_os = "linux"))]
             Backend::Native(native) => native.control_in(setup, length, timeout),
+        }
+    }
+
+    /// A control IN transfer into `data` (its length is the most it asks for);
+    /// returns the bytes received. The buffer is the caller's either way.
+    pub(crate) fn control_in_into(
+        &self,
+        setup: &ControlSetup,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Result<usize> {
+        check_direction(setup.direction, Direction::In, "control read")?;
+        match &self.inner.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Usbfs(usb) => usb.control_in(setup, data, timeout),
+            #[cfg(not(target_os = "linux"))]
+            Backend::Native(native) => {
+                let received = native.control_in(setup, data.len() as u16, timeout)?;
+                let n = received.len().min(data.len());
+                data[..n].copy_from_slice(&received[..n]);
+                Ok(n)
+            }
         }
     }
 
@@ -296,12 +351,16 @@ impl UsbDevice {
         check_direction(setup.direction, Direction::In, "control read")?;
         let device = self.clone();
         Transfer::from_worker(move || {
-            let data = device.control_in(&setup, length, timeout)?;
-            Ok(TransferOutcome {
-                actual_length: data.len(),
-                buffer: TransferBuffer::from_vec(data),
-                packets: Vec::new(),
-            })
+            let mut data = vec![0; usize::from(length)];
+            let (actual_length, status) = match device.control_in_into(&setup, &mut data, timeout) {
+                Ok(received) => (received, TransferStatus::Ok),
+                Err(error) => (0, status_of(&error)),
+            };
+            Ok(finished(
+                TransferBuffer::from_vec(data),
+                actual_length,
+                status,
+            ))
         })
     }
 
@@ -317,12 +376,11 @@ impl UsbDevice {
         check_direction(setup.direction, Direction::Out, "control write")?;
         let device = self.clone();
         Transfer::from_worker(move || {
-            let sent = device.control_out(&setup, &data, timeout)?;
-            Ok(TransferOutcome {
-                actual_length: sent,
-                buffer: TransferBuffer::from_vec(data),
-                packets: Vec::new(),
-            })
+            let (sent, status) = match device.control_out(&setup, &data, timeout) {
+                Ok(sent) => (sent, TransferStatus::Ok),
+                Err(error) => (0, status_of(&error)),
+            };
+            Ok(finished(TransferBuffer::from_vec(data), sent, status))
         })
     }
 
@@ -394,6 +452,15 @@ impl UsbDevice {
                     "caller-driven reaping is Linux only",
                 ))
             }
+        }
+    }
+
+    /// Whether the caller reaps this device's completions (see
+    /// [`UsbDevice::set_caller_driven_reaping`]).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn caller_driven(&self) -> bool {
+        match &self.inner.backend {
+            Backend::Usbfs(usb) => usb.caller_driven(),
         }
     }
 
@@ -705,6 +772,33 @@ fn check_direction(actual: Direction, wanted: Direction, context: &str) -> Resul
             ErrorKind::InvalidInput,
             format!("{context}: wrong direction in the setup packet"),
         ))
+    }
+}
+
+/// A worker transfer's outcome: its buffer back with the status (a failed control
+/// transfer keeps its buffer too).
+fn finished(
+    buffer: TransferBuffer,
+    actual_length: usize,
+    status: TransferStatus,
+) -> TransferOutcome {
+    TransferOutcome {
+        buffer,
+        actual_length,
+        packets: Vec::new(),
+        status,
+        reaped: std::time::Instant::now(),
+    }
+}
+
+/// The status a failed synchronous call stands for, for an outcome.
+fn status_of(error: &Error) -> TransferStatus {
+    match error.kind() {
+        ErrorKind::Stall => TransferStatus::Stalled,
+        ErrorKind::Cancelled => TransferStatus::Cancelled,
+        ErrorKind::Disconnected => TransferStatus::Disconnected,
+        ErrorKind::Timeout => TransferStatus::Error(libc::ETIMEDOUT),
+        _ => TransferStatus::Error(libc::EIO),
     }
 }
 

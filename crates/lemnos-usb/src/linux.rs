@@ -7,7 +7,7 @@
 
 use crate::buffer::Storage;
 use crate::error::{Error, Result};
-use crate::transfer::{Canceller, IsoPacket, Shared, Transfer, TransferOutcome};
+use crate::transfer::{Canceller, IsoPacket, Shared, Transfer, TransferOutcome, TransferStatus};
 use crate::types::{ControlSetup as Setup, Direction};
 use lemnos_linux_sys::poll::{POLLOUT, poll_one};
 use lemnos_linux_sys::pool::Spares;
@@ -153,6 +153,16 @@ impl Usbfs {
         )
     }
 
+    /// The kernel driver bound to interface `number` (`USBDEVFS_GETDRIVER`).
+    pub(crate) fn driver(&self, number: u8) -> Result<Option<String>> {
+        map_io("reading the bound driver", self.file.driver(number))
+    }
+
+    /// The device's speed as the kernel's `enum usb_device_speed` (`USBDEVFS_GET_SPEED`).
+    pub(crate) fn speed(&self) -> Result<i32> {
+        map_io("reading the device speed", self.file.speed())
+    }
+
     pub(crate) fn claim_interface(&self, number: u8, detach: bool) -> Result<()> {
         map_io(
             "claiming the interface",
@@ -233,12 +243,14 @@ impl Usbfs {
         ))
     }
 
-    fn deliver(&self, done: UrbCompletion, packets: &[UrbPacket]) {
+    /// Delivers one reaped completion to its transfer. `reaped` is the moment the
+    /// kernel handed it over: taken before the waiter is woken.
+    fn deliver(&self, done: UrbCompletion, packets: &[UrbPacket], reaped: Instant) {
         let shared = self.lock_state().pending.remove(&done.tag);
         let Some(shared) = shared else {
             return;
         };
-        shared.complete(outcome(done, packets, &self.packet_tables));
+        shared.complete(Ok(outcome(done, packets, &self.packet_tables, reaped)));
     }
 
     /// Reaps every completion the kernel has ready, without waiting, and
@@ -250,7 +262,8 @@ impl Usbfs {
         let result = loop {
             match self.file.reap(false, &mut packets) {
                 Ok(Some(done)) => {
-                    self.deliver(done, &packets);
+                    let reaped = Instant::now();
+                    self.deliver(done, &packets, reaped);
                     delivered += 1;
                 }
                 Ok(None) => break Ok(delivered),
@@ -305,6 +318,11 @@ impl Usbfs {
     fn reap_failed(&self, error: &std::io::Error) -> Error {
         self.fail_all(error);
         Error::from_io("reaping USB transfers", error)
+    }
+
+    /// Whether the caller reaps this device (no reaper thread).
+    pub(crate) fn caller_driven(&self) -> bool {
+        self.lock_state().caller_driven
     }
 
     /// Gives back a packet table an outcome held (an isochronous reader does
@@ -365,18 +383,22 @@ fn reap_loop(usb: Arc<Usbfs>) {
     }
 }
 
+/// The outcome of a completed URB. It always carries the buffer back, and the
+/// status: a whole-URB failure is a status, not an error that drops the memory.
+/// An isochronous URB's whole status is `Ok` unless it ends the URB; its packets
+/// carry their own.
 fn outcome(
     done: UrbCompletion,
     urb_packets: &[UrbPacket],
     tables: &Spares<Vec<IsoPacket>>,
-) -> Result<TransferOutcome> {
-    // An isochronous URB can complete with a per-packet error status; its
-    // packets say which ones failed. Only a status that ends the whole URB is
-    // an error for the transfer.
+    reaped: Instant,
+) -> TransferOutcome {
     let isochronous = !urb_packets.is_empty();
-    if done.status != 0 && !(isochronous && !is_fatal_for_packets(done.status)) {
-        return Err(Error::from_status("USB transfer", done.status));
-    }
+    let status = if isochronous && !is_fatal_for_packets(done.status) {
+        TransferStatus::Ok
+    } else {
+        TransferStatus::from_kernel(done.status)
+    };
     // A bulk transfer has no packet table: an empty Vec allocates nothing. An
     // isochronous one takes a table the readers gave back, when there is one.
     let mut packets = if isochronous {
@@ -388,14 +410,15 @@ fn outcome(
     packets.extend(urb_packets.iter().map(|packet| IsoPacket {
         length: packet.length as usize,
         actual_length: packet.actual_length as usize,
-        error:
-            (packet.status != 0).then(|| Error::from_status("isochronous packet", packet.status)),
+        status: TransferStatus::from_kernel(packet.status),
     }));
-    Ok(TransferOutcome {
+    TransferOutcome {
         buffer: crate::buffer::wrap(done.buffer),
         actual_length: done.actual_length,
         packets,
-    })
+        status,
+        reaped,
+    }
 }
 
 /// Statuses that end the whole isochronous URB, not just one packet.
@@ -450,6 +473,7 @@ pub(crate) fn urb_kind(transfer: crate::types::TransferType) -> Option<UrbKind> 
 mod tests {
     use super::*;
     use lemnos_linux_sys::usbfs::UrbBuffer;
+    use std::time::Instant;
 
     fn completion(status: i32, actual_length: usize) -> UrbCompletion {
         UrbCompletion {
@@ -473,7 +497,7 @@ mod tests {
     fn a_bulk_outcome_takes_no_packet_table() {
         let tables = Spares::new(4);
         tables.give(Vec::with_capacity(8));
-        let out = outcome(completion(0, 5), &[], &tables).unwrap();
+        let out = outcome(completion(0, 5), &[], &tables, Instant::now());
         assert!(out.packets.is_empty());
         assert_eq!(tables.len(), 1, "the pool keeps its table");
     }
@@ -485,10 +509,19 @@ mod tests {
         let tables = Spares::new(4);
         tables.give(Vec::with_capacity(16));
         let urb = [packet(100, 100, 0), packet(100, 0, -libc::EPROTO)];
-        let out = outcome(completion(0, 100), &urb, &tables).unwrap();
+        let out = outcome(completion(0, 100), &urb, &tables, Instant::now());
         assert_eq!(out.packets.len(), 2);
-        assert!(out.packets[0].error.is_none());
-        assert!(out.packets[1].error.is_some(), "a packet's own error");
+        assert_eq!(out.packets[0].status, TransferStatus::Ok);
+        assert_eq!(
+            out.packets[1].status,
+            TransferStatus::Error(libc::EPROTO),
+            "a packet's own error"
+        );
+        assert_eq!(
+            out.status,
+            TransferStatus::Ok,
+            "the URB as a whole completed"
+        );
         assert!(
             out.packets.capacity() >= 16,
             "the returned table was reused"
@@ -496,11 +529,41 @@ mod tests {
         assert!(tables.is_empty(), "the table left the pool");
     }
 
-    /// A status that ends the whole isochronous URB is the transfer's error.
+    /// A status that ends the whole isochronous URB is the transfer's status, and
+    /// the buffer still comes back with it.
     #[test]
-    fn a_fatal_status_fails_the_isochronous_transfer() {
+    fn a_fatal_status_is_the_outcome_status_and_keeps_the_buffer() {
         let tables = Spares::new(4);
         let urb = [packet(100, 0, 0)];
-        assert!(outcome(completion(-libc::ENODEV, 0), &urb, &tables).is_err());
+        let out = outcome(completion(-libc::ENODEV, 0), &urb, &tables, Instant::now());
+        assert_eq!(out.status, TransferStatus::Disconnected);
+        assert_eq!(out.buffer.len(), 8, "the buffer is back");
+    }
+
+    /// A stall is a status of the whole transfer (the caller clears the halt).
+    #[test]
+    fn a_stall_is_a_status_not_an_error() {
+        let tables = Spares::new(4);
+        let out = outcome(completion(-libc::EPIPE, 0), &[], &tables, Instant::now());
+        assert_eq!(out.status, TransferStatus::Stalled);
+        assert!(out.packets.is_empty());
+    }
+
+    /// A bulk outcome hands the very memory it submitted back: the caller's
+    /// buffer is moved through the transfer, never copied.
+    #[test]
+    fn a_bulk_outcome_hands_back_the_same_memory() {
+        let tables = Spares::new(4);
+        let heap = vec![7u8; 16];
+        let address = heap.as_ptr();
+        let done = UrbCompletion {
+            tag: 1,
+            buffer: UrbBuffer::Heap(heap),
+            status: 0,
+            actual_length: 16,
+        };
+        let out = outcome(done, &[], &tables, Instant::now());
+        assert_eq!(out.buffer.as_slice().as_ptr(), address, "no copy");
+        assert_eq!(out.status, TransferStatus::Ok);
     }
 }

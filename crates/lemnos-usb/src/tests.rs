@@ -4,7 +4,7 @@
 use crate::config::configurations_from_blob;
 use crate::device::check_endpoint;
 use crate::error::{Error, ErrorKind};
-use crate::transfer::{IsoPacket, Shared, Transfer, TransferOutcome};
+use crate::transfer::{IsoPacket, Shared, Transfer, TransferOutcome, TransferStatus};
 use crate::types::{Direction, TransferType};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -101,6 +101,8 @@ fn outcome_reports_the_bytes_that_moved() {
         buffer: crate::TransferBuffer::from_vec(vec![1, 2, 3, 4]),
         actual_length: 2,
         packets: Vec::new(),
+        status: TransferStatus::Ok,
+        reaped: std::time::Instant::now(),
     };
     assert_eq!(outcome.data(), &[1, 2]);
     assert_eq!(outcome.into_buffer().into_vec(), vec![1, 2, 3, 4]);
@@ -117,6 +119,8 @@ fn a_transfer_resolves_when_completed_from_another_thread() {
             buffer: crate::TransferBuffer::from_vec(vec![7; 3]),
             actual_length: 3,
             packets: Vec::new(),
+            status: TransferStatus::Ok,
+            reaped: std::time::Instant::now(),
         }));
     });
     let outcome = transfer.wait().unwrap();
@@ -163,6 +167,8 @@ fn a_timed_out_wait_returns_the_transfer_still_in_flight() {
         buffer: crate::TransferBuffer::from_vec(Vec::new()),
         actual_length: 0,
         packets: Vec::new(),
+        status: TransferStatus::Ok,
+        reaped: std::time::Instant::now(),
     }));
     assert!(transfer.is_complete());
 }
@@ -172,10 +178,10 @@ fn iso_packets_report_their_own_status() {
     let packet = IsoPacket {
         length: 1024,
         actual_length: 0,
-        error: Some(Error::new(ErrorKind::Other, "packet error")),
+        status: TransferStatus::Error(libc::EPROTO),
     };
     assert_eq!(packet.length, 1024);
-    assert!(packet.error.is_some());
+    assert_eq!(packet.status, TransferStatus::Error(libc::EPROTO));
 }
 
 #[test]
@@ -231,6 +237,8 @@ fn a_worker_transfer_resolves_with_the_outcome_of_its_work() {
             buffer: crate::TransferBuffer::from_vec(vec![9, 8, 7]),
             actual_length: 2,
             packets: Vec::new(),
+            status: TransferStatus::Ok,
+            reaped: std::time::Instant::now(),
         })
     })
     .unwrap();
@@ -251,6 +259,8 @@ fn a_worker_transfer_is_awaited_as_a_future() {
             buffer: crate::TransferBuffer::from_vec(vec![1]),
             actual_length: 1,
             packets: Vec::new(),
+            status: TransferStatus::Ok,
+            reaped: std::time::Instant::now(),
         })
     })
     .unwrap();
@@ -311,17 +321,17 @@ fn an_iso_block_places_each_packet_at_its_scheduled_offset() {
         IsoPacket {
             length: 4,
             actual_length: 4,
-            error: None,
+            status: TransferStatus::Ok,
         },
         IsoPacket {
             length: 4,
             actual_length: 2,
-            error: None,
+            status: TransferStatus::Ok,
         },
         IsoPacket {
             length: 4,
             actual_length: 4,
-            error: None,
+            status: TransferStatus::Ok,
         },
     ];
     let block = IsoBlock::new(&buffer, &packets);
@@ -341,20 +351,108 @@ fn an_empty_packet_keeps_the_offsets_of_the_packets_after_it() {
         IsoPacket {
             length: 3,
             actual_length: 0,
-            error: None,
+            status: TransferStatus::Ok,
         },
         IsoPacket {
             length: 3,
             actual_length: 3,
-            error: None,
+            status: TransferStatus::Ok,
         },
         IsoPacket {
             length: 3,
             actual_length: 1,
-            error: None,
+            status: TransferStatus::Ok,
         },
     ];
     let block = IsoBlock::new(&buffer, &packets);
     let got: Vec<&[u8]> = block.packets().map(|(_, bytes)| bytes).collect();
     assert_eq!(got, [&[][..], &[4, 5, 6][..], &[7][..]]);
+}
+
+/// usbdevfs reports the device speed as `enum usb_device_speed`: unknown and
+/// wireless have no `Speed`.
+#[test]
+#[cfg(target_os = "linux")]
+fn usbdevfs_speeds_map_to_the_listing_speeds() {
+    use crate::info::Speed;
+    assert_eq!(Speed::from_usbdevfs(0), None, "unknown");
+    assert_eq!(Speed::from_usbdevfs(1), Some(Speed::Low));
+    assert_eq!(Speed::from_usbdevfs(2), Some(Speed::Full));
+    assert_eq!(Speed::from_usbdevfs(3), Some(Speed::High));
+    assert_eq!(Speed::from_usbdevfs(4), None, "wireless");
+    assert_eq!(Speed::from_usbdevfs(5), Some(Speed::Super));
+    assert_eq!(Speed::from_usbdevfs(6), Some(Speed::SuperPlus));
+}
+
+/// A transfer and its buffer can be moved to another thread (a frame backing).
+#[test]
+fn a_transfer_buffer_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<crate::TransferBuffer>();
+    assert_send_sync::<crate::TransferOutcome>();
+}
+
+/// Whether `/proc/self/maps` has a mapping that contains `address`.
+#[cfg(target_os = "linux")]
+fn mapped(address: usize) -> bool {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    maps.lines().any(|line| {
+        let range = line.split_whitespace().next().unwrap_or("");
+        let Some((start, end)) = range.split_once('-') else {
+            return false;
+        };
+        let start = usize::from_str_radix(start, 16).unwrap_or(usize::MAX);
+        let end = usize::from_str_radix(end, 16).unwrap_or(0);
+        (start..end).contains(&address)
+    })
+}
+
+/// A usbdevfs-style mapping is unmapped when its transfer buffer is dropped, not
+/// when the descriptor it came from closes: the mapping keeps the file open. A
+/// regular file stands in for the device node (no USB device is opened).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_mapped_buffer_unmaps_on_drop_and_outlives_its_descriptor() {
+    use lemnos_linux_sys::mmap::Mapping;
+    use lemnos_linux_sys::usbfs::UrbBuffer;
+    use std::os::fd::AsFd;
+
+    let path = std::env::temp_dir().join(format!("lemnos-usb-map-{}", std::process::id()));
+    std::fs::write(&path, vec![0x5a; 4096]).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let mapping = Mapping::new(file.as_fd(), 4096, 0, true).unwrap();
+    let address = mapping.as_slice().as_ptr() as usize;
+    let buffer = crate::buffer::wrap(UrbBuffer::Mapped { mapping, len: 4096 });
+    assert!(mapped(address), "mapped while the buffer lives");
+
+    // The descriptor closes first: the buffer's bytes stay readable, and the
+    // mapping stays where it is.
+    drop(file);
+    assert!(mapped(address), "the mapping outlives its descriptor");
+    assert_eq!(buffer.as_slice()[0], 0x5a, "the bytes are still there");
+
+    // The buffer goes last: its drop is the munmap.
+    drop(buffer);
+    assert!(!mapped(address), "the drop of the buffer unmaps it");
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// The outcome carries the time the completion was reaped, as given (the reaper
+/// takes it before it wakes the waiter).
+#[cfg(target_os = "linux")]
+#[test]
+fn an_outcome_carries_the_time_it_was_reaped() {
+    let reaped = std::time::Instant::now();
+    let outcome = TransferOutcome {
+        buffer: crate::TransferBuffer::from_vec(vec![1]),
+        actual_length: 1,
+        packets: Vec::new(),
+        status: TransferStatus::Ok,
+        reaped,
+    };
+    assert_eq!(outcome.reaped, reaped);
 }

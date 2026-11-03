@@ -43,12 +43,40 @@ let mut reader = device.bulk_reader(0x81, 16 * 1024, 4); // 4 transfers in fligh
 - **Descriptors.** `UsbDevice::device_descriptor()` is the 18-byte device descriptor (`DeviceDescriptor`): `usb_version`, the class, `max_packet_size_0`, IDs, `device_version`, the `manufacturer_index`, `product_index` and `serial_number_index` string indices, and `num_configurations`. It is read when the device is opened, with no request: on Linux it is the first 18 bytes of the descriptor blob, on Windows and macOS nusb's cached copy. `UsbDevice::configurations()` (parsed when the device was opened) and `active_configuration()`. `ConfigurationInfo::find_endpoint(interface, alternate, direction, transfer_type)` returns an `EndpointInfo` (address, direction, transfer type, max packet size, packets per microframe, interval).
 - **Claims.** `claim_interface(n)` and `detach_and_claim_interface(n)` return an `Interface`. Dropping it releases the claim, and on Linux reattaches a driver that the detaching claim unbound. `Interface::set_alternate(alt)` selects an alternate setting.
 - **Control.** `control_in(&ControlSetup, length, timeout)` and `control_out(&ControlSetup, &data, timeout)`. `ControlSetup::vendor(direction, request, value, index)` builds a vendor request to the device, and the struct's fields cover the class and standard kinds and the recipient.
+- **Isochronous reads.** `IsoReader::next_block()` waits without a deadline. `next_block_until(deadline)`
+  returns `Ok(None)` at the deadline and leaves the transfer in flight. In caller-driven reaping
+  mode both reap the device themselves (`reap_until`); in thread mode both wait on the transfer.
+  Neither hangs on a device nobody reaps.
 - **Reaping (Linux).** By default a reaper thread waits for the kernel's completions while transfers are in flight, and exits when none are. `set_caller_driven_reaping(true)` switches the device to caller-driven reaping: no thread is started, and the caller reaps with `reap_now()` (delivers the completions ready now) or `reap_until(deadline)` (waits until one is ready or the deadline passes, then delivers the ready ones). Both return how many were delivered, and the transfers waiting on them complete. This is for a caller with its own thread or ring. The mode is set before submitting: it is refused while transfers are in flight. Other platforms reap on their own threads and refuse caller-driven reaping.
 - **Blocking transfers.** `bulk_read`, `bulk_write`, `interrupt_read`, `interrupt_write`, `clear_halt`, `reset`, `set_configuration`.
 - **Async transfers.** `submit_bulk_in(endpoint, buffer)`, `submit_bulk_out`, `submit_bulk_out_zlp` (Linux, below), `submit_interrupt_in`, `submit_interrupt_out`, `submit_isochronous_in(endpoint, buffer, packet_len)` (Linux). `submit_control_in(&setup, length, timeout)` and `submit_control_out(&setup, data, timeout)` are the futures for control transfers: the blocking call runs on its own thread, bounded by the timeout, so no caller needs `spawn_blocking`. A control transfer cannot be cancelled (`cancel()` does nothing for it). Each returns a `Transfer`: a future (any executor works) that also has `wait()`, `wait_timeout()`, `is_complete()` and `cancel()`. Its `TransferOutcome` holds the buffer back, the bytes that moved (`data()`) and, for isochronous transfers, the `IsoPacket`s with their own errors.
 - **Streams.** `bulk_reader(endpoint, chunk, depth)` implements `std::io::Read` and keeps `depth` transfers in flight. `bulk_writer(endpoint, chunk, depth)` implements `std::io::Write`, gathers writes into `chunk`-byte transfers, and flushes on `flush()` or drop. `flush_end()` ends the transfer for the device: see *Zero-length packets* below. `isochronous_reader(endpoint, packet_len, packets, depth)` (Linux) keeps `depth` transfers of `packets` packets in flight; `next_block()` returns each completed transfer as an `IsoBlock` (its data and packet results) and recycles the previous block's buffer, so the packet lengths are computed once and the transfer buffers are reused. The packet tables are reused too: the completion reads the packets into a scratch the reaper keeps, and the table comes from a pool that the reader gives back to. A steady stream allocates nothing per transfer.
 
 Buffers are `TransferBuffer`s (a heap vector, or a usbdevfs mapping on Linux). They move into a transfer and come back in its outcome, so a caller that reuses them allocates nothing per transfer. The `submit_*` calls take a `Vec<u8>` and wrap it; `submit_bulk_in_buffer`, `submit_bulk_out_buffer` and `submit_isochronous_in_buffer` take a `TransferBuffer`. On Linux the kernel copies to and from them directly. On Windows and macOS nusb copies them into its own buffers.
+
+## Outcomes and status
+
+A completed asynchronous transfer always returns its outcome, and the outcome always
+returns the buffer. A failure of the whole transfer is a status, not an `Err`, so a caller
+that reuses buffers never allocates after an error:
+
+- `TransferOutcome { buffer, actual_length, packets, status, reaped }`. `status` is a
+  `TransferStatus`: `Ok`, `Cancelled`, `Disconnected` (reconnect; do not retry the same
+  handle), `Stalled` (call `clear_halt` on the endpoint, then retry), or `Error(errno)`
+  (the errno on Linux, 0 where the platform gives none). It is a copy value; a message is
+  built only by `status.to_error(context)`.
+- `reaped` is the moment the kernel handed the completion over, taken before the waiter is
+  woken: the device's finish time, not the caller's.
+- `Transfer::wait()` is `Err` only when no outcome exists (the reaper failed and the buffer
+  is still with the kernel).
+- An isochronous outcome's `status` is `Ok` unless the URB ended; each packet has its own
+  `status` (`IsoPacket { length, actual_length, status }`, a copy value). A packet that fails
+  routinely (`EXDEV`, `EPROTO`) costs no allocation.
+
+Isochronous data: `IsoBlock::packets()` yields each packet with the bytes it moved. The
+usbdevfs layout places packet `i` at the sum of the *scheduled* lengths before it, not at
+the sum of the bytes moved: a short packet leaves a gap after its bytes, and the packets
+after it stay where they were scheduled.
 
 ## Errors
 
@@ -75,6 +103,24 @@ Buffers are `TransferBuffer`s (a heap vector, or a usbdevfs mapping on Linux). T
 - **IN transfers on Windows and macOS.** nusb reads whole packets, so a read rounds its request up to the endpoint's packet size. Bytes past the caller's buffer are dropped.
 - **Isochronous.** Linux only. A packet's length is the chunk size, and the last packet may be shorter.
 - **Zero-length packets.** An empty OUT payload is a zero-length packet, and `bulk_write`, `submit_bulk_out` and `flush_end` accept it. A device that reads until a short packet needs the transfer to end on one. When the bytes written are a whole number of the endpoint's packet size (`wMaxPacketSize`: 512 at high speed, 1024 at SuperSpeed), `BulkWriter::flush_end()` sends that terminator after the data, as nusb's `flush_end_async` does. It counts bytes since the last `flush_end`, and writing nothing sends nothing. Drop does not send it. On Linux, `submit_bulk_out_zlp` sets usbdevfs's `USBDEVFS_URB_ZERO_PACKET` on one URB, so the kernel appends the terminator within the transfer; it applies to OUT bulk and interrupt only and is `Unsupported` elsewhere.
+- **Zero-copy frames (bulk).** A completed transfer hands its `TransferBuffer` back in the outcome, the
+  same memory that was submitted: nothing is copied. A caller that moves whole frames runs its own
+  ring: submit `depth` buffers with `submit_bulk_in_buffer`, reap with `reap_until` (caller-driven
+  mode), take each `outcome.buffer` as the frame, and resubmit a spare (`exchange`). `TransferBuffer`
+  is `Send` and `Sync`, and may outlive the transfer and the device handle as the frame's backing.
+  The `BulkReader` copies into the caller's slice; the ring does not.
+- **Mapping lifetime (Linux).** A mapped `TransferBuffer` is unmapped when the buffer is dropped, not when
+  the device closes. The mapping keeps the device file open, and the kernel frees the DMA memory when
+  the last mapping and the last URB using it are gone (`dec_usb_memory_use_count` in
+  `drivers/usb/core/devio.c`, upstream commit `0dd68b5d01d022fc9c5e71c82a82b0a94d3d0671`:
+  `usbdev_mmap` allocates, `usbdev_vm_close` drops the mapping's count, `usbdev_release` is the
+  file's release and does not free mapped memory). A URB in flight holds the memory, so an unmap
+  while a transfer is in flight does not free it under the kernel. The kernel tree on this host
+  has the headers only, so the citation is the upstream file at that commit.
+- **Querying the open device (Linux).** `driver(interface)` reads the kernel driver bound to an
+  interface (`USBDEVFS_GETDRIVER`; `None` when none). `speed()` reads the negotiated speed of the
+  open file (`USBDEVFS_GET_SPEED`), and `None` for an unknown or wireless speed. Other platforms:
+  `Unsupported` (`speed()` is on the listing there).
 - **Buffers.** `TransferBuffer` is the memory a transfer moves its bytes through. On Linux, `UsbDevice::allocate_buffer(len)` returns a usbdevfs mapping when the kernel offers `USBDEVFS_CAP_MMAP`: page-aligned memory the host controller uses directly (`UrbBuffer::Mapped`). A failed mapping, or a kernel without the capability, falls back to a heap vector (`UrbBuffer::Heap`), the copy path. Other platforms have vectors only. The streams allocate their slots once and recycle them. `TransferOutcome::into_buffer()` returns the buffer for reuse, and `set_len` sizes it. Untested on a device (see *Untested on hardware*).
 - **Hotplug.** On Linux, `watch()` is `lemnos-uevent`'s `DeviceWatcher` (netlink, falling back to inotify and then a sysfs rescan), filtered to USB devices. Arrivals are listed through nusb before they are reported, so a device gone by then is not reported. A removal is reported for a device this watch saw. On overflow the watch lists again and reports the difference. Windows and macOS use nusb's watch.
 
@@ -126,6 +172,14 @@ A stream's depth is its in-flight count, and its buffers are recycled, so no tra
 - `cargo check` and `cargo clippy --target x86_64-pc-windows-gnu` / `--target x86_64-apple-darwin` cover the other platforms. A target needs its rustup target installed.
 
 ## Untested on hardware
+
+- Everything in this section that goes through a device: the caller-driven ring and `reap_until`
+  on a live device, `next_block_until` with caller-driven and thread reaping, the iso packet layout
+  on real hardware (the synthetic tests check the arithmetic), `driver()` and `speed()` on a
+  device, and a mapped transfer buffer submitted to a real endpoint. Host tests cover the packet
+  layout arithmetic, the status mapping, the outcome shape (status, buffer, reap time), the
+  buffer's `Send`/`Sync`, the unmap-on-drop and descriptor-outlives-mapping behaviour on a regular
+  file standing in for the node, and the speed mapping. No USB device is opened on this host.
 
 - Linux caller-driven reaping (`set_caller_driven_reaping`, `reap_now`, `reap_until`), the isochronous packet tables handed back and reused, and the completion path's reuse of the packet scratch. The logic that runs without a device is host-tested: the outcome of a bulk or an isochronous completion, the packet table pool, and `read_descriptors` (`pread` at offset 0, tested on a regular file: two reads return the same bytes; no USB device is opened).
 - Linux descriptor reads, control transfers (blocking and the futures), claims, bulk and interrupt transfers, URB completions, zero-length packets on the wire (`flush_end` and `URB_ZERO_PACKET`), isochronous streams, the reaper's shutdown, and reattaching a driver after a detaching claim.

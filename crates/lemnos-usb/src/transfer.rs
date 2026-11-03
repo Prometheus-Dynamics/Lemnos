@@ -6,17 +6,93 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How a transfer ended. A copy value: a completion never builds a message. The
+/// [`TransferStatus::to_error`] form builds one on request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransferStatus {
+    /// The transfer completed (for an isochronous one, see each packet's status).
+    Ok,
+    /// Cancelled, or discarded by the kernel (`ENOENT`, `ECONNRESET`, `ECANCELED`).
+    Cancelled,
+    /// The device went away (`ESHUTDOWN`, `ENODEV`): reconnect, do not retry the
+    /// same device handle.
+    Disconnected,
+    /// The endpoint stalled (`EPIPE`): clear the halt, then retry.
+    Stalled,
+    /// Any other failure: the errno on Linux, or 0 where the platform gives none.
+    Error(i32),
+}
+
+impl TransferStatus {
+    /// Whether the transfer completed.
+    pub fn is_ok(self) -> bool {
+        self == Self::Ok
+    }
+
+    /// The status of a completed URB (`status` as the kernel reports it: zero, or
+    /// a negative errno).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_kernel(status: i32) -> Self {
+        if status == 0 {
+            return Self::Ok;
+        }
+        match -status {
+            libc::ECANCELED | libc::ENOENT | libc::ECONNRESET => Self::Cancelled,
+            libc::ESHUTDOWN | libc::ENODEV => Self::Disconnected,
+            libc::EPIPE => Self::Stalled,
+            errno => Self::Error(errno),
+        }
+    }
+
+    /// The status of a completed nusb transfer (Windows and macOS).
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn from_nusb(error: &nusb::transfer::TransferError) -> Self {
+        use nusb::transfer::TransferError;
+        match error {
+            TransferError::Cancelled => Self::Cancelled,
+            TransferError::Stall => Self::Stalled,
+            TransferError::Disconnected => Self::Disconnected,
+            _ => Self::Error(0),
+        }
+    }
+
+    /// The error this status stands for, with `context` in its message. Built
+    /// only when asked: `None` for [`TransferStatus::Ok`].
+    pub fn to_error(self, context: &str) -> Option<Error> {
+        Some(match self {
+            Self::Ok => return None,
+            Self::Cancelled => Error::new(ErrorKind::Cancelled, format!("{context}: cancelled")),
+            Self::Disconnected => Error::new(
+                ErrorKind::Disconnected,
+                format!("{context}: device disconnected"),
+            ),
+            Self::Stalled => Error::new(ErrorKind::Stall, format!("{context}: endpoint stalled")),
+            Self::Error(code) => error_from_code(context, code),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn error_from_code(context: &str, errno: i32) -> Error {
+    Error::from_status(context, -errno)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn error_from_code(context: &str, code: i32) -> Error {
+    Error::new(ErrorKind::Other, format!("{context}: failed (code {code})"))
+}
 
 /// One packet of an isochronous transfer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IsoPacket {
     /// The length the packet was scheduled for.
     pub length: usize,
     /// The bytes that moved.
     pub actual_length: usize,
-    /// What went wrong with this packet, if anything.
-    pub error: Option<Error>,
+    /// How the packet ended (a packet can fail while the transfer completes).
+    pub status: TransferStatus,
 }
 
 /// A transfer's memory: the bytes it moves. On Linux it is a page-aligned
@@ -83,6 +159,10 @@ impl std::fmt::Debug for TransferBuffer {
 
 /// A finished transfer: its buffer, back with the data it received (IN) or
 /// the data it sent (OUT), and the packet results for isochronous transfers.
+///
+/// The buffer comes back whatever the status: a stalled or disconnected transfer
+/// returns its memory too, so a caller that reuses buffers does not allocate
+/// after an error.
 #[derive(Debug)]
 pub struct TransferOutcome {
     /// The buffer the transfer was submitted with.
@@ -91,6 +171,12 @@ pub struct TransferOutcome {
     pub actual_length: usize,
     /// The isochronous packets (empty for control, bulk and interrupt).
     pub packets: Vec<IsoPacket>,
+    /// How the transfer ended. `Ok` moves the bytes; anything else is a failure
+    /// of the whole transfer (see [`TransferStatus`]).
+    pub status: TransferStatus,
+    /// When the completion was reaped from the kernel, before any waiter was
+    /// woken: the moment the device finished, not when the caller ran.
+    pub reaped: Instant,
 }
 
 impl TransferOutcome {
@@ -203,6 +289,42 @@ impl Transfer {
                 .done
                 .wait(slot)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    /// Waits until the transfer completes or `timeout` passes (`None`: forever),
+    /// without taking its result. True when the result is ready to take. This
+    /// waits on the transfer alone: a caller-driven device reaps with
+    /// [`crate::UsbDevice::reap_until`], not here.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn wait_complete(&self, timeout: Option<Duration>) -> bool {
+        let deadline = timeout.map(|limit| Instant::now() + limit);
+        let mut slot = self.shared.lock();
+        loop {
+            if slot.result.is_some() {
+                return true;
+            }
+            match deadline {
+                None => {
+                    slot = self
+                        .shared
+                        .done
+                        .wait(slot)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return false;
+                    }
+                    let (guard, _) = self
+                        .shared
+                        .done
+                        .wait_timeout(slot, deadline - now)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    slot = guard;
+                }
+            }
         }
     }
 

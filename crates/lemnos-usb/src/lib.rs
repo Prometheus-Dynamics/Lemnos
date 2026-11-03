@@ -76,5 +76,5 @@ pub use location::UsbLocation;
 pub use stream::IsoReader;
 pub use stream::{BulkReader, BulkWriter};
 pub use stream::{IsoBlock, IsoPackets};
-pub use transfer::{IsoPacket, Transfer, TransferBuffer, TransferOutcome};
+pub use transfer::{IsoPacket, Transfer, TransferBuffer, TransferOutcome, TransferStatus};
 pub use types::{ControlKind, ControlRecipient, ControlSetup, Direction, TransferType};

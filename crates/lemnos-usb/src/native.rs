@@ -10,7 +10,7 @@ use crate::config::ConfigurationInfo;
 use crate::config::configuration_from_bytes;
 use crate::descriptor::DeviceDescriptor;
 use crate::error::{Error, ErrorKind, Result};
-use crate::transfer::{Canceller, Shared, Transfer, TransferOutcome};
+use crate::transfer::{Canceller, Shared, Transfer, TransferOutcome, TransferStatus};
 use crate::types::{ControlKind, ControlRecipient, ControlSetup, Direction, TransferType};
 use crate::wait::ThreadWaker;
 use nusb::transfer::{
@@ -509,7 +509,7 @@ fn run_worker(mut ep: Ep, commands: Receiver<Command>) {
         if let Poll::Ready(completion) = ep.poll_next(&mut context)
             && let Some((shared, wanted)) = queue.pop_front()
         {
-            shared.complete(finish(completion, wanted));
+            shared.complete(Ok(finish(completion, wanted)));
         } else if !queue.is_empty() {
             thread::park();
         }
@@ -530,18 +530,24 @@ fn apply(ep: &mut Ep, queue: &mut VecDeque<(Arc<Shared>, Option<usize>)>, comman
     }
 }
 
-fn finish(completion: Completion, wanted: Option<usize>) -> Result<TransferOutcome> {
+/// The outcome of a completed nusb transfer: its buffer back with the status.
+fn finish(completion: Completion, wanted: Option<usize>) -> TransferOutcome {
     let actual = completion.actual_len;
+    let status = match &completion.status {
+        Ok(()) => TransferStatus::Ok,
+        Err(error) => TransferStatus::from_nusb(error),
+    };
     let mut buffer = completion.buffer.into_vec();
-    check_status(completion.status, "USB transfer")?;
     if let Some(wanted) = wanted {
         buffer.truncate(actual.min(wanted));
     }
-    Ok(TransferOutcome {
+    TransferOutcome {
         buffer: crate::buffer::wrap(crate::buffer::heap(buffer)),
         actual_length: actual,
         packets: Vec::new(),
-    })
+        status,
+        reaped: std::time::Instant::now(),
+    }
 }
 
 /// A transfer's status as an error. nusb reports a timed-out transfer as
@@ -560,13 +566,6 @@ fn check_sync_status(
         )),
         Err(error) => Err(Error::from_transfer(context, error)),
     }
-}
-
-fn check_status(
-    status: std::result::Result<(), nusb::transfer::TransferError>,
-    context: &str,
-) -> Result<()> {
-    status.map_err(|error| Error::from_transfer(context, error))
 }
 
 fn timeout_or_forever(timeout: Duration) -> Duration {

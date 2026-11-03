@@ -19,6 +19,20 @@ pub enum Speed {
 }
 
 impl Speed {
+    /// The speed of a usbdevfs `USBDEVFS_GET_SPEED` answer (`enum usb_device_speed`):
+    /// low, full, high, super and super-plus. Unknown and wireless are `None`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_usbdevfs(speed: i32) -> Option<Self> {
+        Some(match speed {
+            1 => Self::Low,
+            2 => Self::Full,
+            3 => Self::High,
+            5 => Self::Super,
+            6 => Self::SuperPlus,
+            _ => return None,
+        })
+    }
+
     fn from_nusb(speed: nusb::Speed) -> Option<Self> {
         Some(match speed {
             nusb::Speed::Low => Self::Low,
