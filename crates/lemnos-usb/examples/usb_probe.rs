@@ -14,7 +14,8 @@
 //! usb_probe interrupt LOC SECONDS         # the VideoControl status endpoint
 //! usb_probe bulk LOC                      # bulk round-trip on the first bulk IN endpoint, if there is one
 //! usb_probe dfu-status LOC                # GETSTATUS on the DFU interface (read-only)
-//! usb_probe dfu LOC FILE [BLOCK]          # DFU download of FILE, then wait for 18d1:9302 (transport only)
+//! usb_probe dfu LOC FILE [BLOCK]          # DFU download of FILE (blocks of wTransferSize), then wait for 18d1:9302
+//! usb_probe reset LOC                     # USB reset of the device (re-enumerates it)
 //! usb_probe reattach LOC                  # detach, claim, release; the kernel driver and /dev/videoN come back
 //! ```
 //!
@@ -93,13 +94,18 @@ fn run() -> Result<(), String> {
         }
         "bulk" => bulk(&location),
         "dfu-status" => dfu_status(&location),
+        "reset" => {
+            let device = open(&location)?;
+            device.reset().map_err(|error| format!("reset: {error}"))?;
+            println!("reset {location}");
+            Ok(())
+        }
         "dfu" => {
             let image = args.get(2).ok_or("dfu needs the firmware file")?;
-            let block: usize = args
+            let block: Option<usize> = args
                 .get(3)
                 .map(|value| value.parse().map_err(|_| "the block size is a number"))
-                .transpose()?
-                .unwrap_or(4096);
+                .transpose()?;
             dfu(&location, image, block)
         }
         "reattach" => reattach(&location),
@@ -831,8 +837,18 @@ fn dfu_status(location: &UsbLocation) -> Result<(), String> {
     Ok(())
 }
 
-fn dfu(location: &UsbLocation, image: &str, block: usize) -> Result<(), String> {
+fn dfu(location: &UsbLocation, image: &str, block: Option<usize>) -> Result<(), String> {
     let bytes = std::fs::read(image).map_err(|error| format!("reading {image}: {error}"))?;
+    // The block size is the device's wTransferSize (DFU functional descriptor), unless given.
+    let descriptors = std::fs::read(format!("/sys/bus/usb/devices/{location}/descriptors"))
+        .map_err(|error| format!("reading the descriptors of {location}: {error}"))?;
+    let block = match block {
+        Some(block) => block,
+        None => usize::from(
+            lemnos_usb::dfu_transfer_size(&descriptors)
+                .ok_or("the device has no DFU functional descriptor")?,
+        ),
+    };
     println!("downloading {} bytes in {block}-byte blocks", bytes.len());
     let device = open(location)?;
     let config = device
@@ -852,10 +868,11 @@ fn dfu(location: &UsbLocation, image: &str, block: usize) -> Result<(), String> 
         .map_err(|error| error.to_string())?
     {
         Some(info) => println!(
-            "re-enumerated: {} {:04x}:{:04x}",
+            "re-enumerated: {} {:04x}:{:04x}, {:?} after the download started",
             info.location(),
             info.vendor_id(),
-            info.product_id()
+            info.product_id(),
+            started.elapsed()
         ),
         None => println!("no 18d1:9302 within 30 s"),
     }

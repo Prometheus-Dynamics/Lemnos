@@ -20,10 +20,32 @@ const DFU_DNLOAD: u8 = 0x01;
 const DFU_GETSTATUS: u8 = 0x03;
 
 /// `bState` values (DFU 1.1, table 4.1).
+const STATE_DFU_IDLE: u8 = 2;
 const STATE_DNLOAD_IDLE: u8 = 5;
 const STATE_MANIFEST_SYNC: u8 = 6;
 const STATE_MANIFEST: u8 = 7;
 const STATE_MANIFEST_WAIT_RESET: u8 = 8;
+
+/// The `wTransferSize` of the DFU functional descriptor (type 0x21) in a raw
+/// descriptor blob: the largest DNLOAD the device accepts. Read it from the
+/// device's own descriptors, not from a fixed size.
+pub fn dfu_transfer_size(descriptors: &[u8]) -> Option<u16> {
+    let mut offset = 0;
+    while offset + 2 <= descriptors.len() {
+        let length = usize::from(descriptors[offset]);
+        if length < 2 || offset + length > descriptors.len() {
+            return None;
+        }
+        if descriptors[offset + 1] == 0x21 && length >= 9 {
+            return Some(u16::from_le_bytes([
+                descriptors[offset + 5],
+                descriptors[offset + 6],
+            ]));
+        }
+        offset += length;
+    }
+    None
+}
 
 /// The GETSTATUS polls allowed for one block before the download gives up.
 const MAX_POLLS: u32 = 1000;
@@ -148,13 +170,15 @@ pub(crate) fn download(
     }
     // The zero-length DNLOAD ends the download; the device then manifests.
     control.dfu_out(interface, DFU_DNLOAD, blocks, &[])?;
+    // A device that is not manifestation tolerant returns to dfuIDLE; one that
+    // is manifests (dfuMANIFEST-SYNC, dfuMANIFEST, dfuMANIFEST-WAIT-RESET).
     let manifest = poll_until(
         control,
         interface,
         |state| {
             matches!(
                 state,
-                STATE_MANIFEST_SYNC | STATE_MANIFEST | STATE_MANIFEST_WAIT_RESET
+                STATE_DFU_IDLE | STATE_MANIFEST_SYNC | STATE_MANIFEST | STATE_MANIFEST_WAIT_RESET
             )
         },
         sleep,
@@ -335,6 +359,26 @@ mod tests {
         let error = download(&device, 0, &[1], 0, &mut |_| {}).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert!(device.blocks.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_transfer_size_comes_from_the_dfu_functional_descriptor() {
+        // An interface descriptor, then the DFU functional descriptor (wTransferSize 0x0100).
+        let blob = [
+            0x09, 0x04, 0, 0, 0, 0xfe, 0x01, 0x02, 0, 0x09, 0x21, 0x07, 0xe8, 0x03, 0x00, 0x01,
+            0x01, 0x01,
+        ];
+        assert_eq!(dfu_transfer_size(&blob), Some(256));
+        assert_eq!(
+            dfu_transfer_size(&blob[..9]),
+            None,
+            "no functional descriptor"
+        );
+        assert_eq!(
+            dfu_transfer_size(&[0x09, 0x21]),
+            None,
+            "a truncated descriptor"
+        );
     }
 
     #[test]
