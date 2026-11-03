@@ -426,6 +426,33 @@ fn look_brightness_is_the_ring_wide_scale_and_the_driver_byte_is_unchanged() {
 }
 
 #[test]
+fn a_board_names_its_default_look_and_a_light_never_goes_dark_without_one() {
+    // Unset: status.ok, the look a light shows when nothing else is held.
+    let plain = crate::BoardDefinition::from_toml_str(&board_text("", "")).unwrap();
+    let defaults = crate::light_defaults(&plain.devices[0]).unwrap();
+    assert_eq!(defaults.default_look.as_str(), "status.ok");
+    // A board's own look: any look name (a look file's or a built-in).
+    let board =
+        crate::BoardDefinition::from_toml_str(&board_text("", "default_look = \"status.busy\""))
+            .unwrap();
+    let defaults = crate::light_defaults(&board.devices[0]).unwrap();
+    assert_eq!(defaults.default_look.as_str(), "status.busy");
+    // A name that is not a look name is refused, with the device named.
+    let bad =
+        crate::BoardDefinition::from_toml_str(&board_text("", "default_look = \"Not A Look\""))
+            .unwrap();
+    let message = crate::light_defaults(&bad.devices[0])
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("default_look"), "{message}");
+    assert!(crate::LIGHT_KEYS.contains(&"default_look"));
+    // The system and link looks' keys are gone: a board carrying one is refused.
+    let old = crate::BoardDefinition::from_toml_str(&board_text("", "locate_effect = \"chase\""))
+        .unwrap();
+    assert!(old.validate(&crate::DriverRegistry::builtin()).is_err());
+}
+
+#[test]
 fn a_wash_and_a_sparkle_parse_with_their_defaults() {
     let spec = from_toml(
         "--spec",

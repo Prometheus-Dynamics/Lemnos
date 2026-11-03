@@ -6,6 +6,7 @@ extern crate std;
 use std::{format, string::String, vec::Vec};
 
 use crate::Phase;
+use crate::reference::ResolveReference;
 use crate::{
     Animator, Defaults, EffectKind, Intent, LayerSpec, LookName, LookSpec, Rgbw, Show, Spot,
     SpotList, SpotSource, Status, SystemState,
@@ -23,7 +24,7 @@ fn fnv(bytes: &[u8], mut hash: u64) -> u64 {
 }
 
 fn run(name: &str, intent: Intent<LEDS>, defaults: &Defaults, out: &mut String) {
-    let (look, transition) = intent.resolve_builtin(defaults);
+    let (look, transition) = intent.resolve_reference(defaults);
     let mut animator = Animator::<LEDS>::new(LEDS);
     animator.set(look, transition, 0);
     out.push_str(&format!("{name}\n"));
@@ -213,12 +214,6 @@ fn scenarios(defaults: &Defaults, out: &mut String) {
             out,
         );
     }
-    let mut chase = Defaults {
-        locate_effect: EffectKind::Chase,
-        ..*d
-    };
-    chase.spinner_tail = 4;
-    run("locate-chase", Intent::new(Show::Locate), &chase, out);
     // Spots: fixed in the look, and given by the request (with a colour of
     // their own on one of them), gliding in from nothing.
     let fixed = LookSpec::of(LayerSpec::spots(

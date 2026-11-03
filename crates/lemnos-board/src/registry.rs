@@ -747,7 +747,6 @@ const BMM150_CHOICES: &[(&str, &[&str])] = &[
 const LIGHT_CHOICES: &[(&str, &[&str])] = &[
     ("status_effect", &["solid", "blink", "breathe", "chase"]),
     ("error_effect", &["solid", "blink", "breathe", "chase"]),
-    ("locate_effect", &["solid", "blink", "breathe", "chase"]),
 ];
 
 #[cfg(feature = "drv-ina2xx")]

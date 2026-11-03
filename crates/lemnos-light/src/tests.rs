@@ -1,4 +1,5 @@
 use super::*;
+use crate::reference::ResolveReference;
 
 /// The first layer's block.
 fn block(look: &LookSpec) -> Block {
@@ -123,7 +124,7 @@ fn intents_take_board_defaults_unless_overridden() {
         fade_ms: 250,
         ..Defaults::default()
     };
-    let (look, fade) = Intent::<4>::new(Show::Status(Status::Ok)).resolve_builtin(&defaults);
+    let (look, fade) = Intent::<4>::new(Show::Status(Status::Ok)).resolve_reference(&defaults);
     assert!(matches!(
         look.envelope,
         Effect::Breathe {
@@ -137,14 +138,14 @@ fn intents_take_board_defaults_unless_overridden() {
     solid.effect = Some(EffectKind::Solid);
     solid.fade_ms = Some(0);
     solid.brightness = Some(128);
-    let (look, fade) = solid.resolve_builtin(&defaults);
+    let (look, fade) = solid.resolve_reference(&defaults);
     // The request's 128 is half of full, and the ring-wide scale is half
     // again.
     assert_eq!(
         (look.envelope, fade.duration_ms, look.brightness),
         (Effect::Solid, 0, 64)
     );
-    let (look, _) = Intent::<4>::new(Show::Status(Status::Error)).resolve_builtin(&defaults);
+    let (look, _) = Intent::<4>::new(Show::Status(Status::Error)).resolve_reference(&defaults);
     assert!(matches!(look.envelope, Effect::Blink { .. }));
 }
 
@@ -294,7 +295,7 @@ fn ripple_runs_down_from_the_top_and_settles() {
 fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     let defaults = Defaults::default();
     let (look, _) =
-        Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve_builtin(&defaults);
+        Intent::<16>::new(Show::System(SystemState::Confirmed)).resolve_reference(&defaults);
     // A flash of the whole ring (a wash shaped by its own pulse), a ripple
     // burst, and the green drain over both: filled from the top, then drained
     // toward the bottom.
@@ -307,20 +308,20 @@ fn confirmed_is_a_ripple_and_a_reboot_holds_a_static_ember() {
     assert!(matches!(
         look.layers[1].expect("a drain").block,
         Block::Drain { color, fill_ms: 700, start_ms: 1_100, duration_ms: 2_100, easing: Easing::EaseIn }
-            if color == defaults.confirmed
+            if color == Rgbw::rgb(0x00ff20)
     ));
     assert!(matches!(
         look.layers[2].expect("a ripple").block,
-        Block::Ripple { color, glow: 0, .. } if color == defaults.confirmed
+        Block::Ripple { color, glow: 0, .. } if color == Rgbw::rgb(0x00ff20)
     ));
     assert!(look.wants_bottom());
     assert_eq!(SystemState::Confirmed.name(), "confirmed");
 
     let (look, _) =
-        Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve_builtin(&defaults);
+        Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve_reference(&defaults);
     assert!(matches!(
         block(&look),
-        Block::Fill { color } if color == defaults.rebooting
+        Block::Fill { color } if color == Rgbw::rgb(0xff8000)
     ));
     assert_eq!(look.envelope, Effect::Solid);
     assert!(!look.is_moving());
@@ -376,7 +377,7 @@ fn orbit_intents_take_their_shape_from_the_intent_and_the_defaults() {
     };
     let intent = Intent::<16>::new(orbit);
     assert_eq!(intent.layer(), Layer::App);
-    let (look, _) = intent.resolve_builtin(&defaults);
+    let (look, _) = intent.resolve_reference(&defaults);
     assert_eq!(
         block(&look),
         Block::Comet {
@@ -390,7 +391,7 @@ fn orbit_intents_take_their_shape_from_the_intent_and_the_defaults() {
     );
     let mut timed = Intent::<16>::new(orbit);
     timed.period_ms = Some(1_600);
-    let (look, _) = timed.resolve_builtin(&defaults);
+    let (look, _) = timed.resolve_reference(&defaults);
     assert!(matches!(
         block(&look),
         Block::Comet {
@@ -405,7 +406,7 @@ fn orbit_intents_take_their_shape_from_the_intent_and_the_defaults() {
         heads: 2,
         base: None,
     })
-    .resolve_builtin(&defaults);
+    .resolve_reference(&defaults);
     assert!(matches!(
         block(&look),
         Block::Comet { color, tail: 5_000, heads: 2, base: 180, .. }
@@ -418,7 +419,7 @@ fn system_looks_match_the_update_states() {
     let defaults = Defaults::default();
     let resolve = |state| {
         Intent::<16>::new(Show::System(state))
-            .resolve_builtin(&defaults)
+            .resolve_reference(&defaults)
             .0
     };
     // Unknown amount: the purple comet, 8 LEDs, 18% floor.
@@ -494,25 +495,21 @@ fn system_states_use_board_colours() {
         phase: Phase::Writing,
     }));
     assert_eq!(updating.layer(), Layer::System);
-    let (look, _) = updating.resolve_builtin(&defaults);
+    let (look, _) = updating.resolve_reference(&defaults);
     assert!(matches!(
         block(&look),
-        Block::Arc { color, .. } if color == defaults.updating
+        Block::Arc { color, .. } if color == Rgbw::rgb(0x2f7bff)
     ));
     let (look, _) =
-        Intent::<16>::new(Show::System(SystemState::Booting)).resolve_builtin(&defaults);
+        Intent::<16>::new(Show::System(SystemState::Booting)).resolve_reference(&defaults);
     assert!(look.is_moving());
     let (look, _) =
-        Intent::<16>::new(Show::System(SystemState::RolledBack)).resolve_builtin(&defaults);
+        Intent::<16>::new(Show::System(SystemState::RolledBack)).resolve_reference(&defaults);
     assert!(matches!(look.envelope, Effect::Breathe { .. }));
-    let chase = Defaults {
-        locate_effect: EffectKind::Chase,
-        ..defaults
-    };
-    let (look, _) = Intent::<16>::new(Show::Locate).resolve_builtin(&chase);
-    assert!(look.is_moving());
+    let (look, _) = Intent::<16>::new(Show::Locate).resolve_reference(&defaults);
+    assert!(matches!(look.envelope, Effect::Breathe { .. }));
     let (look, _) =
-        Intent::<16>::new(Show::Indeterminate { color: None }).resolve_builtin(&defaults);
+        Intent::<16>::new(Show::Indeterminate { color: None }).resolve_reference(&defaults);
     assert!(look.is_moving());
 }
 
@@ -669,14 +666,20 @@ fn a_named_look_comes_from_the_table_before_the_built_ins() {
     // Names the table does not hold keep their built-in look.
     let (look, _) = Intent::<16>::new(Show::Status(Status::Error)).resolve(&defaults, &table);
     assert!(matches!(look.envelope, Effect::Blink { .. }));
-    // An unknown name shows nothing.
+    // An unknown name shows the default look (status.ok, as the table gives
+    // it here), never dark.
     let name = LookName::new("nothing.here").unwrap();
     let (look, _) = Intent::<16>::new(Show::Look {
         name,
         progress: None,
     })
     .resolve(&defaults, &table);
-    assert_eq!(block(&look), Block::Fill { color: Rgbw::OFF });
+    assert_eq!(
+        block(&look),
+        Block::Fill {
+            color: Rgbw::rgb(0x123456)
+        }
+    );
     // An inline look is used as given, whatever the table holds.
     let inline = LookSpec::fill(Rgbw::rgb(0x00ff00));
     let (look, _) = Intent::<16>::new(Show::Inline {
@@ -695,7 +698,7 @@ fn a_named_arc_takes_the_request_progress() {
         name,
         progress: Some(750),
     })
-    .resolve_builtin(&defaults);
+    .resolve_reference(&defaults);
     assert!(matches!(
         block(&look),
         Block::Arc {
@@ -707,7 +710,7 @@ fn a_named_arc_takes_the_request_progress() {
         progress: Some(300),
         phase: Phase::Writing,
     }))
-    .resolve_builtin(&defaults);
+    .resolve_reference(&defaults);
     assert!(matches!(
         block(&look),
         Block::Arc {
@@ -723,22 +726,23 @@ fn the_ring_wide_brightness_scales_every_look_and_the_ember_keeps_a_floor() {
         look_brightness: 128,
         ..Defaults::default()
     };
-    let (color, _) = Intent::<16>::new(Show::Color(Rgbw::rgb(0xffffff))).resolve_builtin(&defaults);
+    let (color, _) =
+        Intent::<16>::new(Show::Color(Rgbw::rgb(0xffffff))).resolve_reference(&defaults);
     // A fill is capped at 0.7 of full, then halved by the ring.
     assert_eq!(color.brightness, 89);
     // A request's brightness is still scaled by the ring.
     let mut asked = Intent::<16>::new(Show::Color(Rgbw::rgb(0xffffff)));
     asked.brightness = Some(255);
-    let (look, _) = asked.resolve_builtin(&defaults);
+    let (look, _) = asked.resolve_reference(&defaults);
     assert_eq!(look.brightness, 128);
     // The ember does not go below its floor however dim the ring is.
     defaults.look_brightness = 10;
     let (ember, _) =
-        Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve_builtin(&defaults);
+        Intent::<16>::new(Show::System(SystemState::Rebooting)).resolve_reference(&defaults);
     assert_eq!(ember.brightness, 40);
     // Half the ring-wide brightness is half a full fill (rounded).
     defaults.look_brightness = 128;
-    let (fill, _) = Intent::<16>::new(Show::Status(Status::Ok)).resolve_builtin(&defaults);
+    let (fill, _) = Intent::<16>::new(Show::Status(Status::Ok)).resolve_reference(&defaults);
     assert_eq!(fill.brightness, 89);
 }
 
@@ -760,10 +764,10 @@ fn system_states_map_to_named_looks_and_every_name_is_built_in() {
     ];
     for (state, name) in cases {
         assert_eq!(state.look_name(), name, "{state:?}");
-        assert!(BUILTIN_LOOK_NAMES.contains(&name), "{name} is built in");
+        // The system looks are look files, not built-ins.
+        assert!(!BUILTIN_LOOK_NAMES.contains(&name), "{name} is a look file");
     }
     assert_eq!(Status::Busy.look_name(), "status.busy");
-    assert!(BUILTIN_LOOK_NAMES.contains(&"system.locate"));
     assert!(BUILTIN_LOOK_NAMES.contains(&"status.off"));
     // Each built-in name resolves to a look, and only to those names.
     let defaults = Defaults::default();
@@ -771,6 +775,16 @@ fn system_states_map_to_named_looks_and_every_name_is_built_in() {
         assert!(builtin_look(name, &defaults).is_some(), "{name}");
     }
     assert!(builtin_look("custom.nothing", &defaults).is_none());
+    assert!(builtin_look("system.writing", &defaults).is_none());
+    // A state with no look file shows the default look, not nothing.
+    let (look, _) =
+        Intent::<16>::new(Show::System(SystemState::Booting)).resolve_builtin(&defaults);
+    assert_eq!(
+        block(&look),
+        Block::Fill {
+            color: Rgbw::rgb(0x00ff00)
+        }
+    );
 }
 
 #[test]
@@ -782,21 +796,21 @@ fn named_arcs_and_inline_looks_share_the_one_render_path() {
         name,
         progress: Some(500),
     })
-    .resolve_builtin(&defaults);
+    .resolve_reference(&defaults);
     let (system, _) = Intent::<16>::new(Show::System(SystemState::Updating {
         progress: Some(500),
         phase: Phase::Writing,
     }))
-    .resolve_builtin(&defaults);
+    .resolve_reference(&defaults);
     assert_eq!(named, system);
     // The same look given in full (unscaled, as a client sends it), with the
     // request's progress, resolves to the same look.
-    let spec = builtin_look("system.writing", &defaults).unwrap();
+    let spec = crate::reference::look("system.writing", &defaults).unwrap();
     let (inline, _) = Intent::<16>::new(Show::Inline {
         spec,
         progress: Some(500),
     })
-    .resolve_builtin(&defaults);
+    .resolve_reference(&defaults);
     assert_eq!(inline, named);
 }
 

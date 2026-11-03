@@ -824,6 +824,21 @@ pub struct LookName {
 }
 
 impl LookName {
+    /// `status.ok`: the default look (`Defaults::default_look`).
+    pub const STATUS_OK: Self = {
+        let text = b"status.ok";
+        let mut bytes = [0; MAX_LOOK_NAME];
+        let mut i = 0;
+        while i < text.len() {
+            bytes[i] = text[i];
+            i += 1;
+        }
+        Self {
+            len: text.len() as u8,
+            bytes,
+        }
+    };
+
     /// The name, if it is a valid look name.
     pub fn new(name: &str) -> Option<Self> {
         if !valid_look_name(name) {

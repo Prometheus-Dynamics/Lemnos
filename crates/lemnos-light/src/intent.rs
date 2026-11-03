@@ -225,8 +225,8 @@ impl EffectKind {
 
 /// How intents look unless they say otherwise; a board definition sets
 /// them per light (the example board: 250 ms ease-in-out fades, breathing status).
-/// The built-in looks are made from these, so the board's keys still shape
-/// them; a look file overrides a built-in entirely.
+/// The built-in `status.*` looks are made from these, so the board's keys still
+/// shape them; the other named looks are look files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Defaults {
     pub fade_ms: u32,
@@ -247,10 +247,10 @@ pub struct Defaults {
     pub warn: Rgbw,
     pub error: Rgbw,
     pub busy: Rgbw,
-    pub locate: Rgbw,
-    pub locate_effect: EffectKind,
-    /// What the light shows when nobody asks for anything.
-    pub idle: Rgbw,
+    /// The look a light shows when no owner holds an intent, and in place of a
+    /// named look that no file and no built-in defines: a light never goes dark
+    /// because a look is missing. A `status.*` name (`status.ok` by default).
+    pub default_look: LookName,
     /// Gauges: the fill and the unfilled part.
     pub progress: Rgbw,
     pub progress_background: Rgbw,
@@ -261,36 +261,6 @@ pub struct Defaults {
     /// The floor of a spinner's and an orbit's comet (thousandths): dim glow
     /// between the heads, so the LEDs between them are never bare off.
     pub spinner_base: u16,
-    /// The update's progress arc (blue) and its phases' colours: the
-    /// verifying and writing (unknown amount) comets, the staged breathe.
-    pub updating: Rgbw,
-    pub verifying: Rgbw,
-    pub verifying_period_ms: u32,
-    /// Thousandths of an LED.
-    pub verifying_tail: u16,
-    /// Thousandths.
-    pub verifying_base: u16,
-    pub writing: Rgbw,
-    pub staged: Rgbw,
-    pub staged_period_ms: u32,
-    /// Breathe depth, thousandths (the staged look breathes down to 55%).
-    pub staged_depth: u16,
-    /// The trial boot (and the start-up look): two comets.
-    pub booting: Rgbw,
-    pub booting_period_ms: u32,
-    /// Thousandths of an LED.
-    pub booting_tail: u16,
-    /// Thousandths.
-    pub booting_base: u16,
-    /// The reboot ember (see [`EMBER`]).
-    pub rebooting: Rgbw,
-    /// A failed update or rollback: pulsed.
-    pub failed: Rgbw,
-    pub failed_period_ms: u32,
-    /// Breathe depth, thousandths (the failed pulse breathes down to 10%).
-    pub failed_depth: u16,
-    /// The ripple after a confirmed trial boot.
-    pub confirmed: Rgbw,
 }
 
 impl Default for Defaults {
@@ -309,33 +279,13 @@ impl Default for Defaults {
             warn: Rgbw::rgb(0xff8000),
             error: Rgbw::rgb(0xff0000),
             busy: Rgbw::rgb(0x0040ff),
-            locate: Rgbw::rgb(0x00ffff),
-            locate_effect: EffectKind::Breathe,
-            idle: Rgbw::OFF,
+            default_look: LookName::STATUS_OK,
             progress: Rgbw::rgb(0x00ff40),
             // A faint neutral white: the track of a gauge.
             progress_background: Rgbw::rgb(0x101012),
             spinner_period_ms: 1_200,
             spinner_tail: 5,
             spinner_base: 180,
-            updating: Rgbw::rgb(0x2f7bff),
-            verifying: Rgbw::rgb(0x8a5cff),
-            verifying_period_ms: 1_200,
-            verifying_tail: 8_000,
-            verifying_base: 180,
-            writing: Rgbw::rgb(0x2f7bff),
-            staged: Rgbw::rgb(0x00ff20),
-            staged_period_ms: 2_200,
-            staged_depth: 450,
-            booting: Rgbw::rgb(0xfff4e6),
-            booting_period_ms: 1_800,
-            booting_tail: 5_000,
-            booting_base: 40,
-            rebooting: Rgbw::rgb(0xff8000),
-            failed: Rgbw::rgb(0xff3b3b),
-            failed_period_ms: 2_400,
-            failed_depth: 900,
-            confirmed: Rgbw::rgb(0x00ff20),
         }
     }
 }
@@ -428,6 +378,14 @@ pub fn named_look(name: &str, defaults: &Defaults, lookup: Lookup<'_>) -> Option
     lookup(name).or_else(|| builtin::builtin(name, defaults))
 }
 
+/// The default look (`Defaults::default_look`), by the same lookup as a
+/// named look. What a light shows when no owner holds an intent, and in place
+/// of a named look that nothing defines. Off only when the default names a
+/// look nothing defines either.
+pub fn fallback_look(defaults: &Defaults, lookup: Lookup<'_>) -> LookSpec {
+    named_look(defaults.default_look.as_str(), defaults, lookup).unwrap_or(LookSpec::OFF)
+}
+
 impl<const N: usize> Intent<N> {
     pub const fn new(show: Show<N>) -> Self {
         Self {
@@ -469,7 +427,7 @@ impl<const N: usize> Intent<N> {
 
     /// The look and the fade into it, with `defaults` filling unset fields.
     /// Named looks are taken from `lookup` first (the look files), then the
-    /// built-ins; an unknown name shows nothing.
+    /// built-ins; an unknown name shows the default look.
     pub fn resolve(&self, defaults: &Defaults, lookup: Lookup<'_>) -> (LookSpec, Transition) {
         let (mut spec, progress, spots) = match self.show {
             Show::Status(status) => with_none(named(status.look_name(), None, defaults, lookup)),
@@ -714,7 +672,8 @@ fn named(
     defaults: &Defaults,
     lookup: Lookup<'_>,
 ) -> (LookSpec, Option<u16>) {
-    let spec = named_look(name, defaults, lookup).unwrap_or(LookSpec::OFF);
+    let spec =
+        named_look(name, defaults, lookup).unwrap_or_else(|| fallback_look(defaults, lookup));
     (spec, progress)
 }
 

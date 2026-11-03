@@ -306,17 +306,6 @@ detect.live
   t=40 51bdadbd03c25725
   t=125 2906e2159d2af325
   t=250 175bc71187ed0aa5
-locate-chase
-  t=0 b9b23f3a46fd0825
-  t=40 ed3c3702cca0abf5
-  t=125 fca8f1ae29c5d41b
-  t=250 e66c24ed91ecbd17
-  t=600 fc0570dbc412b0df
-  t=1000 32586fc0cc31f6a7
-  t=1500 1e928a57c9c1821f
-  t=2200 32586fc0cc31f6a7
-  t=3000 fc0570dbc412b0df
-  t=4800 487c3632598882df
 spots-fixed
   t=0 b9b23f3a46fd0825
   t=40 5e5ec8856df2cf2e
