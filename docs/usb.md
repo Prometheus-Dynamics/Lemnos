@@ -232,12 +232,23 @@ Power cycles are done through lemnosd's power switches (`lemnos-ctl --client <wr
 |---|---|---|---|
 | #1 | `usb-c-power` (RP1 GPIO16) | `xhci-hcd.0`, bus 1 port 1 | Coral (`1a6e:089a`, `18d1:9302`) |
 | #1 | `usb-a-power` (RP1 GPIO20) | `xhci-hcd.1`, bus 3 port 1 | webcam (`1bcf:0050`) |
-| #2 | not mapped | | webcam (`041e:40a3`) |
+| #2 | `usb-a-power` (RP1 GPIO20) | bus 3 port 1 (`3-1`) | webcam (`041e:40a3`) |
+| #2 | `usb-c-power` (RP1 GPIO16) | bus 1 port 1 (`1-1`) | Coral (`1a6e:089a`, `18d1:9302`) |
 
 Power cycles (lead-reported; the port map above was verified by the lead with `power <device> reset`):
 - Board #1, `usb-c-power`, one reset after the first load wedged the Coral (not enumerating). Result: the Coral came back as `1a6e:089a`; the second load then succeeded (above). Earlier port disable and enable on `usb1-port1` (not a power switch) did not recover it.
 - Board #1, `usb-a-power`: not cycled by me. The lead reports the webcam re-enumerated onto uvcvideo when its port was cycled.
-- Board #2: no power cycle.
+- Board #2, mapping, one switch at a time, under the lock (`lemnos-ctl --client <writer> power <switch> reset --off-ms 2000`):
+  - `usb-a-power`: the webcam (`3-1`, `041e:40a3`) disconnected and re-enumerated as `041e:40a3` within 3 s; uvcvideo rebound on its own. `throttled=0x0`. Result: webcam, no fault.
+  - `usb-c-power`: the Coral (`1-1`) disconnected and returned as `1a6e:089a` in DFU mode (the device was not loaded yet). `throttled=0x0`. Result: Coral, no fault.
+  Board #2 uses the same switch-to-device mapping as board #1 (`usb-a-power` the webcam, `usb-c-power` the Coral). The xHCI instance names were not checked on board #2; the bus and port were read from the device paths.
+- Board #2, Coral loaded once after the mapping (fixed loader): see *Board #2 Coral* below. No wedge, so no further power cycle.
+
+## Board #2 Coral (second board, same load)
+
+Fixed loader, once, under the lock, from `1a6e:089a` (dfuIDLE): 43 DNLOAD blocks of 256 bytes (`wTransferSize`), the zero-length DNLOAD, reset. Download and reset 1.23 s; re-enumerated as `18d1:9302` 1.53 s after the download started. Endpoints as on board #1: bulk OUT `0x01`, `0x02`, `0x03`; bulk IN `0x81`, `0x82`; interrupt IN `0x83`.
+
+Transport-only bulk: the blocking `bulk_read` on the unclaimed interface was refused by the claim check (`Busy`). `usb_bulk_engine 1-1 2` claimed interface 0: zero-length OUT on `0x01`, `0x02`, `0x03` completed in 94 µs, 56 µs and 64 µs; IN on `0x81` and `0x82` had no data in 2 s and were cancelled. `throttled=0x0` throughout. No payload was sent.
 
 ## Board #2 monitored runs (items re-run after the reboot)
 
