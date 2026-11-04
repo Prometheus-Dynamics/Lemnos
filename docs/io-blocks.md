@@ -71,7 +71,7 @@ placement the loader makes.
 | Capability | Status | Used for / plan |
 | --- | --- | --- |
 | RP1 DMA for PIO FIFO transfers | used, by the kernel driver | `XFER_DATA32` moves PIO FIFO data through the driver's DMA (`rp1_pio.rs`). |
-| RP1 DMA for other peripherals (SPI, UART) | kernel drivers only | Device DMA goes through kernel drivers, never raw controller registers from user space. |
+| RP1 DMA for other peripherals (SPI, UART) | kernel drivers only | The RP1 memory-copy DMA engine is reached through kernel drivers, never its raw controller registers from user space. |
 
 ### RP1 I2C, SPI, UART (hardware blocks)
 

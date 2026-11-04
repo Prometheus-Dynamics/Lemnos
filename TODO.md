@@ -7,15 +7,15 @@ call.
 
 Boards: two BCM2712 boards, #1 and #2, each with a USB webcam and a Coral USB accelerator.
 
-## Waiting on the user's go
+## Decided, starts when the user says
 
-Everything planned, in order. Nothing here starts until the user says so.
+Everything planned, in order. Execution is paused until the user starts it.
 
 - [ ] **1. `lemnos-abi`.** Generation-counted handles, status codes, a `catch_unwind` macro, recycled
       slabs, buffer and fence descriptors, a version handshake. Every dependency uses it instead of
       inventing its own.
 - [ ] **2. C surface and client wrapper.** Lemnos's small versioned C surface and a static Rust
-      client wrapper: the first proof of core, surface and wrapper.
+      client wrapper: the first core, surface and wrapper set.
 - [ ] **3. `lemnos-ipc` written spec.**
 - [ ] **4. Single owner of hardware blocks.** Resume branch `lemnos-r5-v4l2` (df1dc81, local only,
       worktree `/mnt/nvme-wd/lemnos-r5-v4l2`): V4L2, subdev and media, then RGA, VGLite, PiSP, and
@@ -25,20 +25,24 @@ Everything planned, in order. Nothing here starts until the user says so.
       Lemnos: claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:
       stock V4L2 stays as the fallback, and other boards, the simulator and other kernels stay on
-      stock interfaces. No patches on other people's code; our own modules are fine. The raw RP1
-      DMA ruling covered the memory-copy engine only, so the scope line in
-      [docs/dma.md](docs/dma.md) reads wider than it was meant and needs narrowing if this goes
-      ahead.
-  - [ ] PiSP back end spike first. Answer: IOMMU coverage, interrupt-to-user-space latency, clocks,
-        power and reset, and the GPL position of porting from stock drivers.
+      stock interfaces. No patches on other people's code; our own modules are fine.
+  - [ ] The PiSP back end is the first block. First task: answer IOMMU coverage,
+        interrupt-to-user-space latency, clocks, power and reset, and the GPL position of porting
+        from stock drivers.
   - [ ] Then the receiver, the sensor over i2c-dev, and a mock backend for the simulator.
+  - [ ] When the module lands, reword "Lemnos is user-space hardware access" in
+        [docs/dma.md](docs/dma.md) and "no kernel modules" in
+        [docs/system-service.md](docs/system-service.md). The latter argues against chip drivers as
+        modules, which still holds, but its recommendation reads wider than that.
 - [ ] **6. GPU**, per the agreed seam note (kept outside this repository, because it names the
       products). Mesa stays, and `lemnosd` coordinates rather than enforces: an advisory lease
       first, `lemnos-gpu` only when a consumer needs it.
-- [ ] **7. Shared and static builds.** Which forms Lemnos ships depends on the workspace's LTO test.
-- [ ] **8. `a_polled_400_hz_imu_delivers_each_sample_once` is intermittent.** It failed 3 of 11 runs
-      on 2026-11-03 with the host at load 115-230 on 32 threads (258-279 readings a second against
-      floors of 305-378). Load is the likely cause, not proven. The test is unchanged. Its floor
+- [ ] **7. Shared and static builds.** Both modes, with core, surface and wrapper for each
+      dependency. The workspace's LTO test informs how shared gets built.
+- [ ] **8. `a_polled_400_hz_imu_delivers_each_sample_once` is intermittent.** It failed 3 of 12 runs
+      on 2026-11-03 with the host at load 115-270 on 32 threads (237-279 readings a second against
+      floors of 272-378). Load is the likely cause, not proven: the last run passed at about the
+      highest load. The test is unchanged. Its floor
       follows a host wakeup probe, which does not always track the delay the read saw.
 
 ## Round 4 (the user's list, 2026-11-03)
@@ -66,7 +70,8 @@ Everything planned, in order. Nothing here starts until the user says so.
       parser (IDR path only), and the stateless HEVC controls (`v4l2-hevc`). One 320x240 IDR
       decodes and matches the host VA-API decode byte for byte (3 runs); request run 181-192 us.
 - [x] **22. Raw RP1 DMA dropped** (the user, 2026-11-03): the `rp1-dma` engine, its register
-      layout and the planned PCIe DMA engine are removed. Device DMA goes through kernel drivers.
+      layout and the planned PCIe DMA engine are removed. The ruling covers this memory-copy engine
+      only.
 
 ## Round 3 (the user's ruling, 2026-11-03)
 

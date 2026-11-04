@@ -13,7 +13,8 @@ and hands their descriptors to whoever reads or writes them. It is not a memory 
 does not pool buffers, decide which buffer holds which frame, choose a heap for a use, or
 move data. A buffer is handed over as the same descriptor, never copied.
 
-Device DMA goes through kernel drivers, never raw controller registers from user space.
+The RP1 memory-copy DMA engine is reached through kernel drivers, never its raw controller
+registers from user space.
 
 ## Buffers (`lemnos_linux::dma`)
 
