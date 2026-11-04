@@ -97,6 +97,18 @@ pub fn import_sync_file(
     Ok(())
 }
 
+/// A new `memfd` called `name`, close-on-exec and empty: plain memory that is
+/// shared and mapped the way a dma-buf is, for tests and software producers.
+pub fn memfd(name: &CStr) -> io::Result<OwnedFd> {
+    // SAFETY: `name` is a valid NUL-terminated string for the call.
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `memfd_create` returned a new descriptor that nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// A dma-buf's size, from the kernel. The descriptor's file offset is left
 /// where it was: the offset is read, the end found with `lseek`, and the old
 /// offset restored. No duplicate is made, since a duplicate shares the offset.

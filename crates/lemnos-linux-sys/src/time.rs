@@ -1,5 +1,13 @@
 //! Clock readings for stamping device readings and GPIO edge events.
 
+/// `CLOCK_MONOTONIC` now: the clock of V4L2 buffer and event timestamps, so the
+/// time since a frame started is `monotonic_now() - timestamp`. Zero if the clock
+/// cannot be read.
+pub fn monotonic_now() -> std::time::Duration {
+    clock_ns(libc::CLOCK_MONOTONIC)
+        .map_or(std::time::Duration::ZERO, std::time::Duration::from_nanos)
+}
+
 /// Microseconds on `CLOCK_BOOTTIME`: monotonic like `CLOCK_MONOTONIC`, but it
 /// keeps counting through suspend. It does not reset when a service restarts,
 /// only at a reboot. Falls back to `CLOCK_MONOTONIC` if the boot clock cannot
@@ -58,6 +66,14 @@ fn clock_us(clock: libc::clockid_t) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monotonic_moves_forward() {
+        let a = monotonic_now();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = monotonic_now();
+        assert!(b > a && b - a >= std::time::Duration::from_millis(2));
+    }
 
     #[test]
     fn boot_clock_does_not_go_backwards() {

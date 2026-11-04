@@ -1,7 +1,7 @@
 //! The unsafe edge of `lemnos-linux`: Linux uAPI structures and safe wrappers
 //! over the system calls Lemnos needs (i2c-dev, spidev, GPIO uAPI v2, netlink
-//! uevents, inotify, poll, signalfd, dma-heap and dma-buf, V4L2 memory-to-memory
-//! queues, mappings).
+//! uevents, inotify, poll, signalfd, dma-heap and dma-buf, V4L2, subdevices and
+//! the media controller, mappings).
 //!
 //! One of two Lemnos crates allowed `unsafe` (the other, `lemnos-capi`, is the
 //! C boundary); every block states
@@ -33,4 +33,7 @@ pub mod usbfs;
 pub mod v3d;
 pub mod v4l2;
 
-pub use ioctl::{ioc, ior, iow, iowr};
+pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};
+
+#[cfg(test)]
+mod test_alloc;

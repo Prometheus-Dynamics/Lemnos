@@ -14,6 +14,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+pub mod device;
 pub mod hevc;
 mod uapi;
 

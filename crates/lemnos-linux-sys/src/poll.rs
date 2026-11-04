@@ -145,11 +145,218 @@ pub fn poll_many(fds: &mut [PollFd], timeout: Option<Duration>) -> io::Result<us
     }
 }
 
+/// Readiness of a device descriptor, as `poll(2)` reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ready {
+    /// `POLLIN`: a capture buffer can be dequeued (or data read).
+    pub readable: bool,
+    /// `POLLOUT`: an output buffer can be dequeued.
+    pub writable: bool,
+    /// `POLLPRI`: a V4L2 event is pending, or a media request completed.
+    pub priority: bool,
+    /// `POLLERR`: the device reported an error (for example, streaming stopped).
+    pub error: bool,
+    /// `POLLHUP`: the device went away.
+    pub hangup: bool,
+}
+
+impl Ready {
+    /// True when nothing is ready (the wait timed out).
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The readiness in `revents`.
+    pub fn from_revents(revents: i16) -> Self {
+        Self {
+            readable: revents & POLLIN != 0,
+            writable: revents & POLLOUT != 0,
+            priority: revents & POLLPRI != 0,
+            error: revents & POLLERR != 0,
+            hangup: revents & POLLHUP != 0,
+        }
+    }
+}
+
+/// What to wait for on one descriptor with [`poll_ready`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Wait {
+    /// `POLLIN`.
+    pub readable: bool,
+    /// `POLLPRI` (V4L2 events).
+    pub priority: bool,
+}
+
+impl Wait {
+    /// Nothing (errors and hang-ups are still reported).
+    pub const NONE: Wait = Wait {
+        readable: false,
+        priority: false,
+    };
+    /// `POLLIN`.
+    pub const READABLE: Wait = Wait {
+        readable: true,
+        priority: false,
+    };
+    /// `POLLPRI`.
+    pub const PRIORITY: Wait = Wait {
+        readable: false,
+        priority: true,
+    };
+
+    /// Both waits.
+    pub fn union(self, other: Wait) -> Wait {
+        Wait {
+            readable: self.readable || other.readable,
+            priority: self.priority || other.priority,
+        }
+    }
+
+    /// The `poll` events of this wait.
+    pub fn events(self) -> i16 {
+        let mut e = 0;
+        if self.readable {
+            e |= POLLIN;
+        }
+        if self.priority {
+            e |= POLLPRI;
+        }
+        e
+    }
+}
+
+/// [`poll_many`], restarting on `EINTR` (with the full timeout again).
+fn poll_restarting(fds: &mut [PollFd], timeout: Option<Duration>) -> io::Result<()> {
+    let count = libc::nfds_t::try_from(fds.len())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let spec = timeout.map(timespec);
+    let spec_ptr = spec.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
+    loop {
+        for fd in fds.iter_mut() {
+            fd.revents = 0;
+        }
+        // SAFETY: as in `poll_many`: `PollFd` has the layout of `struct pollfd`,
+        // `fds` is a live, writable slice of `count` entries, and `spec_ptr` is
+        // null or points at `spec`.
+        let r = unsafe {
+            libc::ppoll(
+                fds.as_mut_ptr().cast::<libc::pollfd>(),
+                count,
+                spec_ptr,
+                std::ptr::null(),
+            )
+        };
+        if r >= 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// [`poll_ready`] with the results written to `ready` (one per descriptor, in
+/// order), without allocating for up to 8 descriptors: a frame's wait runs on
+/// every frame.
+///
+/// # Panics
+///
+/// When `ready` is shorter than `fds`.
+pub fn poll_ready_into(
+    fds: &[(BorrowedFd<'_>, Wait)],
+    timeout: Option<Duration>,
+    ready: &mut [Ready],
+) -> io::Result<()> {
+    assert!(
+        ready.len() >= fds.len(),
+        "poll_ready_into: one result per descriptor"
+    );
+    const INLINE: usize = 8;
+    let unset = PollFd::from_raw(-1, 0);
+    let mut inline = [unset; INLINE];
+    let mut spilled: Vec<PollFd> = Vec::new();
+    let pfds: &mut [PollFd] = if fds.len() <= INLINE {
+        &mut inline[..fds.len()]
+    } else {
+        spilled.resize(fds.len(), unset);
+        &mut spilled
+    };
+    for (p, (fd, wait)) in pfds.iter_mut().zip(fds) {
+        *p = PollFd::new(*fd, wait.events());
+    }
+    poll_restarting(pfds, timeout)?;
+    for (r, p) in ready.iter_mut().zip(pfds.iter()) {
+        *r = Ready::from_revents(p.revents);
+    }
+    Ok(())
+}
+
+/// Waits until one of `fds` is ready or the timeout passes (`None`: forever).
+/// Returns what each descriptor reported, in order (all empty on a timeout).
+/// Errors and hang-ups are always reported.
+pub fn poll_ready(
+    fds: &[(BorrowedFd<'_>, Wait)],
+    timeout: Option<Duration>,
+) -> io::Result<Vec<Ready>> {
+    let mut ready = vec![Ready::default(); fds.len()];
+    poll_ready_into(fds, timeout, &mut ready)?;
+    Ok(ready)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
     use std::os::fd::AsFd;
+
+    #[test]
+    fn poll_ready_into_does_not_allocate_for_a_frames_descriptors() {
+        let (a, mut aw) = std::io::pipe().unwrap();
+        let (b, _bw) = std::io::pipe().unwrap();
+        let (c, _cw) = std::io::pipe().unwrap();
+        aw.write_all(b"x").unwrap();
+        let fds = [
+            (a.as_fd(), Wait::READABLE),
+            (b.as_fd(), Wait::PRIORITY),
+            (c.as_fd(), Wait::NONE),
+        ];
+        let t = Some(Duration::ZERO);
+        let mut ready = [Ready::default(); 3];
+        for _ in 0..3 {
+            let (r, n) = crate::test_alloc::allocations(|| poll_ready_into(&fds, t, &mut ready));
+            r.unwrap();
+            assert_eq!(n, 0, "poll_ready_into allocates");
+        }
+        assert!(ready[0].readable && !ready[1].readable && !ready[2].readable);
+        // The Vec form keeps its contract: the same answers, in order (and it does
+        // allocate, which shows the counter sees this thread's allocations).
+        let (v, n) = crate::test_alloc::allocations(|| poll_ready(&fds, t));
+        assert_eq!(v.unwrap()[..], ready[..]);
+        assert!(n > 0, "the counter sees no allocation");
+    }
+
+    #[test]
+    fn polls_several_descriptors() {
+        let (a, mut aw) = std::io::pipe().unwrap();
+        let (b, bw) = std::io::pipe().unwrap();
+        let t = Some(Duration::from_millis(1));
+        let r = poll_ready(
+            &[(a.as_fd(), Wait::READABLE), (b.as_fd(), Wait::READABLE)],
+            t,
+        )
+        .unwrap();
+        assert!(r.iter().all(Ready::is_empty));
+        aw.write_all(b"x").unwrap();
+        drop(bw);
+        let r = poll_ready(&[(a.as_fd(), Wait::READABLE), (b.as_fd(), Wait::NONE)], t).unwrap();
+        assert!(r[0].readable && !r[0].hangup);
+        assert!(r[1].hangup, "{:?}", r[1]);
+        assert_eq!(
+            Wait::READABLE.union(Wait::PRIORITY).events(),
+            POLLIN | POLLPRI
+        );
+    }
 
     #[test]
     fn many_waits_for_sub_millisecond_timeouts() {

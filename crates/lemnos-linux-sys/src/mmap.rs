@@ -60,6 +60,11 @@ impl Mapping {
         self.len == 0
     }
 
+    /// The start address.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
+
     /// The mapped bytes.
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: `ptr` maps `len` readable bytes for as long as `self` lives,
