@@ -7,6 +7,23 @@ call.
 
 Boards: two BCM2712 boards, #1 and #2, each with a USB webcam and a Coral USB accelerator.
 
+## Waiting on the user's go
+
+Nothing here starts until the user says so.
+
+- [ ] **Lemnos kernel module, direction.** One small module of our own: claim a block, DMA buffers
+      and device addresses, dma-buf export, interrupt forwarding, register mapping. The drivers are
+      Rust in user space. It is a fast path, never a requirement: other boards, the simulator and
+      other kernels stay on stock interfaces. No patches on other people's code; our own modules
+      are fine. The raw RP1 DMA ruling covered the memory-copy engine only, so the scope line in
+      [docs/dma.md](docs/dma.md) reads wider than it was meant and needs narrowing if this goes
+      ahead.
+- [ ] **Spike, once approved.** PiSP back end first. Answer: IOMMU coverage, interrupt-to-user-space
+      latency, clocks, power and reset, and the GPL position of porting from stock drivers.
+- [ ] **After the spike.** The receiver, the sensor over i2c-dev, a mock backend for the simulator.
+- [ ] **Also waiting.** `lemnos-abi`, the C surface and its wrapper, a `lemnos-ipc` spec, and
+      `lemnos-gpu` only when a consumer needs it.
+
 ## Round 4 (the user's list, 2026-11-03)
 
 - [x] **Orion protocol 1** (351b7eb, 00aa534): the bridge pinned to Orion a89ebd5. Live on #1
