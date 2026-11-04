@@ -9,20 +9,33 @@ Boards: two BCM2712 boards, #1 and #2, each with a USB webcam and a Coral USB ac
 
 ## Waiting on the user's go
 
-Nothing here starts until the user says so.
+Everything planned, in order. Nothing here starts until the user says so.
 
-- [ ] **Lemnos kernel module, direction.** One small module of our own: claim a block, DMA buffers
-      and device addresses, dma-buf export, interrupt forwarding, register mapping. The drivers are
-      Rust in user space. It is a fast path, never a requirement: other boards, the simulator and
-      other kernels stay on stock interfaces. No patches on other people's code; our own modules
-      are fine. The raw RP1 DMA ruling covered the memory-copy engine only, so the scope line in
+- [ ] **1. `lemnos-abi`.** Generation-counted handles, status codes, a `catch_unwind` macro, recycled
+      slabs, buffer and fence descriptors, a version handshake. Every dependency uses it instead of
+      inventing its own.
+- [ ] **2. C surface and client wrapper.** Lemnos's small versioned C surface and a static Rust
+      client wrapper: the first proof of core, surface and wrapper.
+- [ ] **3. `lemnos-ipc` written spec.**
+- [ ] **4. Single owner of hardware blocks.** Resume branch `lemnos-r5-v4l2` (df1dc81, local only,
+      worktree `/mnt/nvme-wd/lemnos-r5-v4l2`): V4L2, subdev and media, then RGA, VGLite, PiSP, and
+      the K230 and rkisp device layers. `crates/rga` and `crates/vglite` come over from the graph
+      runtime, and the generic parts of the camera stack's `crates/kernel` move here.
+- [ ] **5. Kernel module and Rust user-space drivers.** One small module of our own, its sources in
+      Lemnos: claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
+      register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:
+      stock V4L2 stays as the fallback, and other boards, the simulator and other kernels stay on
+      stock interfaces. No patches on other people's code; our own modules are fine. The raw RP1
+      DMA ruling covered the memory-copy engine only, so the scope line in
       [docs/dma.md](docs/dma.md) reads wider than it was meant and needs narrowing if this goes
       ahead.
-- [ ] **Spike, once approved.** PiSP back end first. Answer: IOMMU coverage, interrupt-to-user-space
-      latency, clocks, power and reset, and the GPL position of porting from stock drivers.
-- [ ] **After the spike.** The receiver, the sensor over i2c-dev, a mock backend for the simulator.
-- [ ] **Also waiting.** `lemnos-abi`, the C surface and its wrapper, a `lemnos-ipc` spec, and
-      `lemnos-gpu` only when a consumer needs it.
+  - [ ] PiSP back end spike first. Answer: IOMMU coverage, interrupt-to-user-space latency, clocks,
+        power and reset, and the GPL position of porting from stock drivers.
+  - [ ] Then the receiver, the sensor over i2c-dev, and a mock backend for the simulator.
+- [ ] **6. GPU**, per the agreed seam note (kept outside this repository, because it names the
+      products). Mesa stays, and `lemnosd` coordinates rather than enforces: an advisory lease
+      first, `lemnos-gpu` only when a consumer needs it.
+- [ ] **7. Shared and static builds.** Which forms Lemnos ships depends on the workspace's LTO test.
 
 ## Round 4 (the user's list, 2026-11-03)
 
