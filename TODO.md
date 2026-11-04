@@ -9,8 +9,10 @@ Boards: two BCM2712 boards, #1 and #2, each with a USB webcam and a Coral USB ac
 
 ## Round 4 (the user's list, 2026-11-03)
 
-- [x] **Orion protocol 1** (351b7eb, 00aa534): the bridge pinned to Orion a89ebd5. #1's node
-      is older than protocol 1, so there is no live test.
+- [x] **Orion protocol 1** (351b7eb, 00aa534): the bridge pinned to Orion a89ebd5. Live on #1
+      (2026-11-04, image dev.912): 9 devices published as `lemnos.device` resources, all healthy;
+      `read` matches `lemnos-ctl`, `calibration.status`, `set` and `restore` succeed, a bad control
+      is rejected.
 - [x] **15. Composites** (6d66b53, 7aac6a3): the `Composite` trait in `lemnos-device`; the fan
       controller is a device slot listed by `lemnos-ctl list` with status, reason, channels and
       controls; client tuning persists in `<state>/fan/<id>.tuning`; the watchdog is pinged only
@@ -116,10 +118,6 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
       sensor to its output period (from the board config) and skips a reading equal to the last
       one within that period. #1 at 400 Hz: 399.90 Hz, 6 gaps, grid p99 64 us, 4.41 % of a core,
       receive age p50 559 us. Firmware images unchanged.
-
-### Left, with blockers
-
-- [ ] The live Orion bridge test: waits on board images with the new Orion.
 
 ### Decisions (made during the round)
 

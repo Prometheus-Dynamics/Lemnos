@@ -17,6 +17,8 @@ protocol and on-disk format of Orion restarted at 1 there). An Orion node on an 
 the bridge's connection with a protocol-mismatch error, and the bridge keeps retrying, so the node
 must run `a89ebd5` or later. The actions use the provider's `watch_action_requests`.
 
+Live on board #1 (2026-11-04, protocol 1, through `orionctl`): nine devices published as `lemnos.device` resources, all healthy and available. `read` on the power monitor gave the bus voltage `lemnos-ctl` read (4.44375 V); `read` on the IMU and `calibration.status` succeeded; `set` of the status ring's brightness applied 0.5 and `restore` succeeded; `set` of an unknown control was rejected with `no such control`. The bridge reconnected by itself after losing Orion once at boot. Not exercised: the power and look actions, and a restart of Orion or lemnosd on demand.
+
 ## Resources
 
 | | |
