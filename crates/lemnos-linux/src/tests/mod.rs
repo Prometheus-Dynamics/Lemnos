@@ -11,3 +11,11 @@ mod support;
 pub(crate) fn skip(reason: &str) {
     eprintln!("skipped: {reason}");
 }
+
+/// Whether the tests may scan this machine's device nodes, which opens and
+/// queries whatever is there: `LEMNOS_TEST_DEVICE_NODES=1`. Off by default, so
+/// a test run never touches a device it was not pointed at.
+#[cfg(feature = "v4l2-m2m")]
+pub(crate) fn device_nodes_allowed() -> bool {
+    std::env::var_os("LEMNOS_TEST_DEVICE_NODES").is_some_and(|value| value == "1")
+}

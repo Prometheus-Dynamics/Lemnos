@@ -1,6 +1,7 @@
 //! Session tests. The bookkeeping checks need no device; the round trips use
 //! vim2m (`modprobe vim2m`) and the system dma-heap, and are skipped where
-//! either is missing.
+//! either is missing. Finding a node opens every video node on the machine, so
+//! those tests also need `LEMNOS_TEST_DEVICE_NODES=1`.
 
 use super::*;
 #[cfg(feature = "dma")]
@@ -97,6 +98,9 @@ fn a_session_refuses_a_node_that_is_not_m2m() {
 
 /// The first memory-to-memory node whose driver is `driver`.
 fn find_m2m(driver: &str) -> Option<std::path::PathBuf> {
+    if !crate::tests::device_nodes_allowed() {
+        return None;
+    }
     crate::v4l2::find_m2m(driver)
         .ok()
         .flatten()
@@ -248,6 +252,9 @@ fn vim2m_reads_dmabufs_in_place() {
 
 /// Every memory-to-memory node of `driver`, in name order.
 fn m2m_nodes(driver: &str) -> Vec<std::path::PathBuf> {
+    if !crate::tests::device_nodes_allowed() {
+        return Vec::new();
+    }
     let mut nodes: Vec<_> = std::fs::read_dir("/dev")
         .map(|d| d.filter_map(Result::ok).map(|e| e.path()).collect())
         .unwrap_or_default();
@@ -690,6 +697,10 @@ fn query_reads_the_driver_and_the_queue_layout_without_a_session() {
 
 #[test]
 fn find_m2m_finds_the_driver_or_nothing() {
+    if !crate::tests::device_nodes_allowed() {
+        crate::tests::skip("LEMNOS_TEST_DEVICE_NODES is not set");
+        return;
+    }
     let Some((path, cap)) = crate::v4l2::find_m2m("vim2m").unwrap() else {
         crate::tests::skip("no vim2m node (modprobe vim2m)");
         return;
@@ -1055,6 +1066,9 @@ fn an_unknown_control_is_refused() {
 
 /// The node whose sysfs name is `name` (vicodec's stateless decoder, say).
 fn node_by_name(name: &str) -> Option<std::path::PathBuf> {
+    if !crate::tests::device_nodes_allowed() {
+        return None;
+    }
     let mut nodes: Vec<_> = std::fs::read_dir("/dev")
         .ok()?
         .filter_map(Result::ok)

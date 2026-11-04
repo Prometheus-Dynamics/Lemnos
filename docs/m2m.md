@@ -123,6 +123,7 @@ s.stream_off()?;                                  // every buffer comes back
 
 - Without hardware: the queue bookkeeping (indices, planes, memory kinds, the free mask), the
   format layout and the queue type rules, refusal of a non-M2M node.
+- The tests below need `LEMNOS_TEST_DEVICE_NODES=1` as well as the module: finding a node opens and queries every video and media node on the machine, so a plain test run leaves them alone.
 - With vim2m (`modprobe vim2m`): MMAP round trip with content and timestamps; dma-buf input
   from the system heap, read in place; the control-event subscription.
 - With vicodec (`modprobe vicodec`): an encoder turns I420 into FWHT and is drained (its

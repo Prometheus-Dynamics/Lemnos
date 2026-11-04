@@ -123,6 +123,10 @@ mod tests {
 
     #[test]
     fn a_plain_node_has_no_media_device() {
+        if !crate::tests::device_nodes_allowed() {
+            crate::tests::skip("LEMNOS_TEST_DEVICE_NODES is not set");
+            return;
+        }
         // /dev/null is not an entity of any media device.
         assert_eq!(media_device_for("/dev/null").unwrap(), None);
     }
