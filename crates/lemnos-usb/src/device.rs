@@ -511,6 +511,20 @@ impl UsbDevice {
         }
     }
 
+    /// A URB ring on an IN endpoint of a claimed interface, and the backend that
+    /// holds the ring's place.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn urb_ring(
+        &self,
+        config: crate::ring::UrbRingConfig,
+    ) -> Result<(lemnos_linux_sys::usbfs::UrbRing, Arc<Usbfs>)> {
+        check_endpoint(config.endpoint, Direction::In)?;
+        self.check_endpoint_claimed(config.endpoint)?;
+        match &self.inner.backend {
+            Backend::Usbfs(usb) => Ok((usb.urb_ring(config)?, Arc::clone(usb))),
+        }
+    }
+
     /// Gives an outcome's packet table back for reuse (an isochronous reader does).
     #[cfg(target_os = "linux")]
     pub(crate) fn recycle_packets(&self, packets: Vec<IsoPacket>) {
@@ -749,6 +763,18 @@ impl UsbDevice {
     /// drop) the writer to send the tail.
     pub fn bulk_writer(&self, endpoint: u8, chunk: usize, depth: usize) -> BulkWriter {
         BulkWriter::new(self.clone(), endpoint, chunk, depth)
+    }
+}
+
+/// The usbdevfs file, for polling: `POLLOUT` when a URB has completed, `POLLHUP`
+/// when the device left. Completions are per open file, so a second descriptor
+/// on the device would not see them.
+#[cfg(target_os = "linux")]
+impl std::os::fd::AsFd for UsbDevice {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        match &self.inner.backend {
+            Backend::Usbfs(usb) => usb.as_fd(),
+        }
     }
 }
 

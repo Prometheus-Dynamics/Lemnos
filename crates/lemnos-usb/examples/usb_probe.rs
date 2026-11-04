@@ -10,7 +10,7 @@
 //! usb_probe list                          # every device, with its interfaces
 //! usb_probe describe LOC                  # descriptors, endpoints, driver, speed
 //! usb_probe control LOC                   # GET_DESCRIPTOR, GET_STATUS, UVC GET_CUR/GET_DEF/GET_MIN/GET_MAX
-//! usb_probe stream LOC FRAMES [caller]    # UVC probe/commit, alt setting, FRAMES frames over isochronous URBs
+//! usb_probe stream LOC FRAMES [caller|ring|ring-mmap]  # UVC probe/commit, alt setting, FRAMES frames over isochronous URBs
 //! usb_probe interrupt LOC SECONDS         # the VideoControl status endpoint
 //! usb_probe bulk LOC                      # bulk round-trip on the first bulk IN endpoint, if there is one
 //! usb_probe dfu-status LOC                # GETSTATUS on the DFU interface (read-only)
@@ -25,10 +25,13 @@
 //! `reattach` and every command that claims an interface hand it back to the
 //! kernel driver when they finish.
 
+use lemnos_linux_sys::poll::{POLLOUT, poll_one};
 use lemnos_usb::{
     ConfigurationInfo, ControlKind, ControlRecipient, ControlSetup, Direction, EndpointInfo,
-    TransferStatus, TransferType, UsbDevice, UsbDeviceInfo, UsbLocation,
+    TransferStatus, TransferType, UrbRing, UrbRingConfig, UrbRingKind, UsbDevice, UsbDeviceInfo,
+    UsbLocation,
 };
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -81,8 +84,7 @@ fn run() -> Result<(), String> {
                 .ok_or("stream needs a frame count")?
                 .parse()
                 .map_err(|_| "the frame count is a number")?;
-            let caller = args.get(3).is_some_and(|mode| mode == "caller");
-            stream(&location, frames, caller)
+            stream(&location, frames, args.get(3).map(String::as_str))
         }
         "interrupt" => {
             let seconds: u64 = args
@@ -428,30 +430,34 @@ impl StreamStats {
     fn record(&mut self, block: &lemnos_usb::IsoBlock<'_>) {
         self.blocks += 1;
         for (packet, data) in block.packets() {
-            self.packets += 1;
-            if packet.status != TransferStatus::Ok {
-                self.status_errors += 1;
-            }
-            if packet.actual_length == 0 {
-                self.zero_length += 1;
-                continue;
-            }
-            self.bytes += data.len() as u64;
-            let header = usize::from(data[0]);
-            if header < 2 || header > data.len() {
-                self.header_bad += 1;
-                continue;
-            }
-            let flags = data[1];
-            if flags & 0x40 != 0 {
-                self.uvc_errors += 1;
-            }
-            let fid = flags & 0x01;
-            if self.last_fid.is_some_and(|last| last != fid) {
-                self.frames += 1;
-            }
-            self.last_fid = Some(fid);
+            self.record_packet(packet.status, data);
         }
+    }
+
+    fn record_packet(&mut self, status: TransferStatus, data: &[u8]) {
+        self.packets += 1;
+        if status != TransferStatus::Ok {
+            self.status_errors += 1;
+        }
+        if data.is_empty() {
+            self.zero_length += 1;
+            return;
+        }
+        self.bytes += data.len() as u64;
+        let header = usize::from(data[0]);
+        if header < 2 || header > data.len() {
+            self.header_bad += 1;
+            return;
+        }
+        let flags = data[1];
+        if flags & 0x40 != 0 {
+            self.uvc_errors += 1;
+        }
+        let fid = flags & 0x01;
+        if self.last_fid.is_some_and(|last| last != fid) {
+            self.frames += 1;
+        }
+        self.last_fid = Some(fid);
     }
 
     fn error_packets(&self) -> u64 {
@@ -459,7 +465,8 @@ impl StreamStats {
     }
 }
 
-fn stream(location: &UsbLocation, frames: u32, caller: bool) -> Result<(), String> {
+fn stream(location: &UsbLocation, frames: u32, mode: Option<&str>) -> Result<(), String> {
+    let caller = mode == Some("caller");
     let (info, device) = open_with_info(location)?;
     let config = device
         .active_configuration()
@@ -552,6 +559,15 @@ fn stream(location: &UsbLocation, frames: u32, caller: bool) -> Result<(), Strin
         endpoint.address, endpoint.max_packet_size, endpoint.packets_per_microframe
     );
 
+    if let Some(mmap) = mode.and_then(|mode| match mode {
+        "ring" => Some(false),
+        "ring-mmap" => Some(true),
+        _ => None,
+    }) {
+        let result = ring_stream(&device, endpoint.address, packet_len, packets, frames, mmap);
+        let _ = interface.set_alternate(0);
+        return result;
+    }
     if caller {
         device
             .set_caller_driven_reaping(true)
@@ -618,6 +634,71 @@ fn stream(location: &UsbLocation, frames: u32, caller: bool) -> Result<(), Strin
     println!(
         "driver after the claim was released: {:?}",
         device.driver(vs).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+/// The stream over a URB ring, reaped from this loop.
+fn ring_stream(
+    device: &UsbDevice,
+    endpoint: u8,
+    packet_size: usize,
+    packets: usize,
+    frames: u32,
+    mmap: bool,
+) -> Result<(), String> {
+    let mut ring = UrbRing::new(
+        device,
+        UrbRingConfig {
+            endpoint,
+            kind: UrbRingKind::Iso {
+                packets,
+                packet_size,
+            },
+            count: 4,
+            mmap,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    println!("URB ring: mapped {}", ring.is_mapped());
+    ring.submit_all().map_err(|error| error.to_string())?;
+    let mut stats = StreamStats::default();
+    let start = Instant::now();
+    let limit = Duration::from_secs(60);
+    while stats.frames < u64::from(frames) && start.elapsed() < limit {
+        let ready = poll_one(device.as_fd(), POLLOUT, Some(Duration::from_secs(2)))
+            .map_err(|error| error.to_string())?;
+        if ready == 0 {
+            stats.timeouts += 1;
+            continue;
+        }
+        while let Some(done) = ring.reap().map_err(|error| error.to_string())? {
+            let slot = done.slot();
+            for packet in done.packets() {
+                stats.record_packet(packet.status, packet.data);
+            }
+            stats.blocks += 1;
+            ring.submit(slot).map_err(|error| error.to_string())?;
+        }
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    let left = ring.cancel(Duration::from_secs(2));
+    println!(
+        "ring: {} frames in {elapsed:.3} s = {:.2} fps; URBs {}, timeouts {}, unreaped {left}",
+        stats.frames,
+        stats.frames as f64 / elapsed.max(1e-9),
+        stats.blocks,
+        stats.timeouts,
+    );
+    println!(
+        "packets {} (zero-length {}), bytes {}, packet errors {} (status {}, UVC ERR {}), bad headers {}",
+        stats.packets,
+        stats.zero_length,
+        stats.bytes,
+        stats.error_packets(),
+        stats.status_errors,
+        stats.uvc_errors,
+        stats.header_bad,
     );
     Ok(())
 }

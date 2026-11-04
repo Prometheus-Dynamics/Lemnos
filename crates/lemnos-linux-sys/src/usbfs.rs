@@ -21,6 +21,9 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+mod ring;
+pub use ring::{MAX_ISO_PACKETS, RingCompletion, RingConfig, RingKind, RingPacket, UrbRing};
+
 const USB: u8 = b'U';
 
 const CONTROL: u32 = crate::iowr::<CtrlTransfer>(USB, 0);
@@ -305,6 +308,13 @@ impl UrbBuffer {
 pub fn mapping_len(len: usize, page: usize) -> usize {
     let page = page.max(1);
     len.max(1).div_ceil(page) * page
+}
+
+/// The system's page size in bytes.
+fn page_size() -> usize {
+    // SAFETY: `sysconf` takes no pointers and only reads the page size.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(page).unwrap_or(4096)
 }
 
 /// The URB memory the kernel holds for one submission.
@@ -677,10 +687,7 @@ impl UsbfsFile {
     /// kernel allocates the memory with each mapping; it is released when the
     /// mapping is dropped, which the table never does while a URB uses it.
     pub fn map_buffer(&self, len: usize) -> io::Result<UrbBuffer> {
-        // SAFETY: `sysconf` takes no pointers and only reads the page size.
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        let page = usize::try_from(page).unwrap_or(4096);
-        let mapped = mapping_len(len, page);
+        let mapped = mapping_len(len, page_size());
         let mapping = Mapping::new(self.file.as_fd(), mapped, 0, true)?;
         Ok(UrbBuffer::Mapped { mapping, len })
     }
@@ -743,6 +750,12 @@ impl UsbfsFile {
             Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    /// A ring of URBs on this file. Nothing else may submit or reap on the file
+    /// while the ring exists (see [`UrbRing`]).
+    pub fn urb_ring(&self, config: RingConfig) -> io::Result<UrbRing> {
+        UrbRing::new(self.file.as_fd(), config)
     }
 
     /// The number of URBs submitted and not yet reaped.

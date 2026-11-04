@@ -58,6 +58,8 @@ mod listing;
 mod location;
 #[cfg(not(target_os = "linux"))]
 mod native;
+#[cfg(target_os = "linux")]
+mod ring;
 mod stream;
 mod transfer;
 mod types;
@@ -74,6 +76,8 @@ pub use firmware::{DfuStatus, dfu_transfer_size, wait_for_device};
 pub use info::{InterfaceSummary, Speed, UsbDeviceInfo};
 pub use listing::{UsbHotplugEvent, UsbWatch, find_device, list_devices, watch};
 pub use location::UsbLocation;
+#[cfg(target_os = "linux")]
+pub use ring::{MAX_ISO_PACKETS, UrbCompletion, UrbPacket, UrbRing, UrbRingConfig, UrbRingKind};
 #[cfg(target_os = "linux")]
 pub use stream::IsoReader;
 pub use stream::{BulkReader, BulkWriter};

@@ -12,10 +12,11 @@ use crate::types::{ControlSetup as Setup, Direction};
 use lemnos_linux_sys::poll::{POLLERR, POLLHUP, POLLNVAL, POLLOUT, poll_one};
 use lemnos_linux_sys::pool::Spares;
 use lemnos_linux_sys::usbfs::{
-    ControlSetup, IsoPacket as UrbPacket, UrbCompletion, UrbKind, UsbfsFile,
+    ControlSetup, IsoPacket as UrbPacket, RingConfig, UrbCompletion, UrbKind, UrbRing, UsbfsFile,
 };
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -38,6 +39,8 @@ struct State {
     reaping: bool,
     /// The caller reaps (`reap_now`, `reap_until`): no reaper thread is started.
     caller_driven: bool,
+    /// A URB ring reaps this device: nothing else may submit or reap.
+    ring: bool,
 }
 
 /// An open usbdevfs device and its asynchronous transfers.
@@ -219,6 +222,9 @@ impl Usbfs {
             // Registered before the kernel sees the URB, so a completion that
             // arrives at once finds its waiter.
             let mut state = self.lock_state();
+            if state.ring {
+                return Err(ring_owns_reaping());
+            }
             state.pending.insert(tag, Arc::clone(&shared));
             if !state.reaping && !state.caller_driven {
                 let reaper = Arc::clone(self);
@@ -293,8 +299,37 @@ impl Usbfs {
         Ok(())
     }
 
+    /// A URB ring on this device. The ring takes over the device's reaping, so
+    /// it is refused while a transfer is in flight or another ring exists; give
+    /// it back with [`Usbfs::release_ring`].
+    pub(crate) fn urb_ring(&self, config: RingConfig) -> Result<UrbRing> {
+        let mut state = self.lock_state();
+        if state.ring || state.reaping || !state.pending.is_empty() {
+            return Err(Error::new(
+                crate::error::ErrorKind::Busy,
+                "a URB ring needs the device to itself: a ring or a transfer is active",
+            ));
+        }
+        let ring = map_io("allocating a URB ring", self.file.urb_ring(config))?;
+        state.ring = true;
+        Ok(ring)
+    }
+
+    /// The URB ring has gone: transfers may be submitted again.
+    pub(crate) fn release_ring(&self) {
+        self.lock_state().ring = false;
+    }
+
+    /// The device file, for polling.
+    pub(crate) fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+
     /// Delivers the completions ready now; returns how many.
     pub(crate) fn reap_now(&self) -> Result<usize> {
+        if self.lock_state().ring {
+            return Err(ring_owns_reaping());
+        }
         self.reap_available()
             .map_err(|error| self.reap_failed(&error))
     }
@@ -418,11 +453,7 @@ fn outcome(
     reaped: Instant,
 ) -> TransferOutcome {
     let isochronous = !urb_packets.is_empty();
-    let status = if isochronous && !is_fatal_for_packets(done.status) {
-        TransferStatus::Ok
-    } else {
-        TransferStatus::from_kernel(done.status)
-    };
+    let status = urb_status(done.status, isochronous);
     // A bulk transfer has no packet table: an empty Vec allocates nothing. An
     // isochronous one takes a table the readers gave back, when there is one.
     let mut packets = if isochronous {
@@ -454,6 +485,24 @@ fn hangup_check(revents: i16) -> io::Result<i16> {
         ));
     }
     Ok(revents)
+}
+
+/// The refusal while a URB ring reaps the device.
+fn ring_owns_reaping() -> Error {
+    Error::new(
+        crate::error::ErrorKind::Busy,
+        "a URB ring reaps this device: drop it before other asynchronous transfers",
+    )
+}
+
+/// A URB's status: an isochronous URB is fine unless it ended as a whole, since
+/// its packets carry their own.
+pub(crate) fn urb_status(status: i32, isochronous: bool) -> TransferStatus {
+    if isochronous && !is_fatal_for_packets(status) {
+        TransferStatus::Ok
+    } else {
+        TransferStatus::from_kernel(status)
+    }
 }
 
 /// Statuses that end the whole isochronous URB, not just one packet.
@@ -509,6 +558,70 @@ mod tests {
     use super::*;
     use lemnos_linux_sys::usbfs::UrbBuffer;
     use std::time::Instant;
+
+    /// A device whose file is `/dev/null`: the state checks run before any
+    /// usbdevfs call, and the ring needs only a descriptor to duplicate.
+    fn null_device() -> Arc<Usbfs> {
+        Arc::new(Usbfs {
+            file: UsbfsFile::open(std::path::Path::new("/dev/null")).unwrap(),
+            state: Mutex::new(State::default()),
+            next_tag: AtomicU64::new(1),
+            mapped: false,
+            mapping_limit: 0,
+            scratch: Mutex::new(Vec::new()),
+            packet_tables: Spares::new(1),
+        })
+    }
+
+    const RING: RingConfig = RingConfig {
+        endpoint: 0x81,
+        kind: lemnos_linux_sys::usbfs::RingKind::Bulk { size: 64 },
+        count: 2,
+        mmap: false,
+    };
+
+    fn is_busy<T>(result: Result<T>) -> bool {
+        result.is_err_and(|error| error.kind() == crate::error::ErrorKind::Busy)
+    }
+
+    #[test]
+    fn a_ring_has_the_device_to_itself() {
+        let usb = null_device();
+        let ring = usb.urb_ring(RING).unwrap();
+        assert!(is_busy(usb.urb_ring(RING)));
+        assert!(is_busy(usb.reap_now()));
+        let buffer = crate::buffer::heap(vec![0; 8]);
+        assert!(is_busy(usb.submit(UrbKind::Bulk, 0x81, buffer, &[], false)));
+        assert!(usb.lock_state().pending.is_empty());
+
+        drop(ring);
+        usb.release_ring();
+        assert!(usb.urb_ring(RING).is_ok());
+    }
+
+    #[test]
+    fn a_ring_waits_for_transfers_in_flight() {
+        let usb = null_device();
+        usb.lock_state().pending.insert(1, Shared::new());
+        assert!(is_busy(usb.urb_ring(RING)));
+        usb.lock_state().pending.clear();
+        usb.lock_state().reaping = true;
+        assert!(is_busy(usb.urb_ring(RING)));
+    }
+
+    #[test]
+    fn urb_status_keeps_packet_failures_in_the_packets() {
+        assert_eq!(urb_status(-libc::EXDEV, true), TransferStatus::Ok);
+        assert_eq!(urb_status(-libc::ENOENT, true), TransferStatus::Cancelled);
+        assert_eq!(
+            urb_status(-libc::ENODEV, true),
+            TransferStatus::Disconnected
+        );
+        assert_eq!(
+            urb_status(-libc::EXDEV, false),
+            TransferStatus::Error(libc::EXDEV)
+        );
+    }
 
     fn completion(status: i32, actual_length: usize) -> UrbCompletion {
         UrbCompletion {

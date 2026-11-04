@@ -55,6 +55,31 @@ let mut reader = device.bulk_reader(0x81, 16 * 1024, 4); // 4 transfers in fligh
 
 Buffers are `TransferBuffer`s (a heap vector, or a usbdevfs mapping on Linux). They move into a transfer and come back in its outcome, so a caller that reuses them allocates nothing per transfer. The `submit_*` calls take a `Vec<u8>` and wrap it; `submit_bulk_in_buffer`, `submit_bulk_out_buffer` and `submit_isochronous_in_buffer` take a `TransferBuffer`. On Linux the kernel copies to and from them directly. On Windows and macOS nusb copies them into its own buffers.
 
+## URB rings
+
+`UrbRing` (Linux) is for streams that must not allocate. The URB structs, packet tables and buffers are allocated once in `UrbRing::new`; `submit_all`, `submit(slot)` and `reap()` then allocate nothing, and there is no reaper thread. The caller polls the device (`UsbDevice` is `AsFd`, the usbdevfs file) for `POLLOUT`, and `POLLHUP` for a device that left, and calls `reap()`, which never blocks.
+
+```rust
+use lemnos_usb::{UrbRing, UrbRingConfig, UrbRingKind};
+
+let kind = UrbRingKind::Iso { packets: 32, packet_size: 3072 };
+let mut ring = UrbRing::new(&device, UrbRingConfig { endpoint: 0x81, kind, count: 4, mmap: true })?;
+ring.submit_all()?;
+// after a poll reports POLLOUT:
+while let Some(done) = ring.reap()? {
+    let slot = done.slot();
+    for packet in done.packets() { /* packet.status, packet.data */ }
+    ring.submit(slot)?;
+}
+```
+
+- **One reaper.** A completion goes to whoever reaps first, so a device has at most one ring, and while it exists `submit_*`, the streams and `reap_now` are refused (`Busy`). A ring is refused while a transfer is in flight. Synchronous control, bulk and interrupt calls carry on, so UVC controls work during a stream.
+- **Status.** An isochronous URB is `Ok` unless it ended as a whole, as for `Transfer`; its packets carry their own status and `error_count()` counts them.
+- **Buffers.** `mmap: true` puts them in one usbdevfs mapping (no copy at reap), with a heap fallback (`is_mapped()`). On heap bulk rings `exchange_buffer(slot, filled, empty)` swaps a full buffer for an empty one with no copy; `empty`'s capacity must be exactly the URB's length. `idle_data(slot, filled)` reads an idle URB and never returns more than a bulk completion wrote.
+- **Teardown.** `cancel(timeout)` discards and reaps; drop does too. Memory the kernel does not give back within a few seconds is leaked rather than freed.
+
+Host-tested: every step of a steady stream allocates nothing (a counting allocator), the packet layout, the buffer exchange and its refusals, and the one-reaper rule. Untested on board.
+
 ## Outcomes and status
 
 A completed asynchronous transfer always returns its outcome, and the outcome always
