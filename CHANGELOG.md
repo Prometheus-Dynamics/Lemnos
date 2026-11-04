@@ -55,7 +55,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - The board validator opens the RP1 PIO I2C bus (`pio-i2c:sda=N,scl=N` targets, facade feature `rp1`), so it checks the BMI088 there.
 - `lemnos-hevc`, a no_std HEVC bitstream parser (VPS, SPS, PPS and IDR slice headers) for stateless decoders, and the V4L2 stateless HEVC controls (`lemnos-linux-sys`, `lemnos_linux::v4l2::hevc`, feature `v4l2-hevc`). One IDR frame decoded on rpi-hevc-dec matches a VA-API decode byte for byte. Non-IDR slices are refused.
 - A pending v3d sync-file fence verified on hardware (TFU copy jobs with an out-syncobj, `docs/dma.md`).
-- `lemnos_usb::UrbRing` (Linux): a ring of URBs on one IN endpoint, isochronous or bulk, allocated once and driven from the caller's loop (`submit`, `reap`, `exchange_buffer`, `idle_data`, `cancel`), with no allocation in a steady stream. While a ring exists the device's asynchronous transfers are refused. `UsbDevice` is `AsFd` on Linux (the usbdevfs file, for polling). `docs/usb.md`. Untested on board.
+- `lemnos_usb::UrbRing` (Linux): a ring of URBs on one IN endpoint, isochronous or bulk, allocated once and driven from the caller's loop (`submit`, `reap`, `exchange_buffer`, `idle_data`, `cancel`), with no allocation in a steady stream. While a ring exists the device's asynchronous transfers are refused. `UsbDevice` is `AsFd` on Linux (the usbdevfs file, for polling). Isochronous rings verified on a webcam, 0 allocations per URB; bulk rings untested on a device. `docs/usb.md`.
 - Hardware results recorded: USB on both boards (`docs/usb.md`), DMA heaps, fences and the I2C engine (`docs/dma.md`), lemnosd timing, FIFO vs polled and memory on board #1 (`docs/system-service.md`).
 
 ### Changed

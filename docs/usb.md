@@ -78,7 +78,11 @@ while let Some(done) = ring.reap()? {
 - **Buffers.** `mmap: true` puts them in one usbdevfs mapping (no copy at reap), with a heap fallback (`is_mapped()`). On heap bulk rings `exchange_buffer(slot, filled, empty)` swaps a full buffer for an empty one with no copy; `empty`'s capacity must be exactly the URB's length. `idle_data(slot, filled)` reads an idle URB and never returns more than a bulk completion wrote.
 - **Teardown.** `cancel(timeout)` discards and reaps; drop does too. Memory the kernel does not give back within a few seconds is leaked rather than freed.
 
-Host-tested: every step of a steady stream allocates nothing (a counting allocator), the packet layout, the buffer exchange and its refusals, and the one-reaper rule. Untested on board.
+Host-tested: every step of a steady stream allocates nothing (a counting allocator), the packet layout, the buffer exchange and its refusals, and the one-reaper rule.
+
+Board #2 (2026-11-03, 16 KiB pages, webcam `041e:40a3` at `3-1`, alt 3, 800-byte packets, 32 packets per URB, 4 URBs; `usb_probe stream 3-1 150 ring` and `ring-mmap`, built with a counting allocator): 150 frames in 5.18 s (28.96 fps at a 30 fps setting) in both modes, 1295 URBs, 41 440 packets, 0 packet errors, 0 bad headers, 0 timeouts, every URB reaped at the end. Allocations over the 1231 URBs after a 64-URB warm-up: 0 in both modes. `is_mapped()` was false and true respectively. Bulk rings and `exchange_buffer` have not run on a device: the webcam has no bulk endpoint.
+
+A detaching claim removes the webcam's video nodes. If a service holds one open, its number stays taken until the service closes it, so the rebound device can come back under other numbers (here `video9` and `video10`, not `video8` and `video9`). Find the device by its USB location, not its node number.
 
 ## Outcomes and status
 
