@@ -36,6 +36,10 @@ Everything planned, in order. Nothing here starts until the user says so.
       products). Mesa stays, and `lemnosd` coordinates rather than enforces: an advisory lease
       first, `lemnos-gpu` only when a consumer needs it.
 - [ ] **7. Shared and static builds.** Which forms Lemnos ships depends on the workspace's LTO test.
+- [ ] **8. `a_polled_400_hz_imu_delivers_each_sample_once` is intermittent.** It failed 3 of 11 runs
+      on 2026-11-03 with the host at load 115-230 on 32 threads (258-279 readings a second against
+      floors of 305-378). Load is the likely cause, not proven. The test is unchanged. Its floor
+      follows a host wakeup probe, which does not always track the delay the read saw.
 
 ## Round 4 (the user's list, 2026-11-03)
 
