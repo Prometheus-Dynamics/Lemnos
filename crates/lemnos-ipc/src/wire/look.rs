@@ -266,7 +266,9 @@ fn decode_effect(d: &mut Decoder<'_>) -> Result<Effect, WireError> {
 
 pub(super) fn decode(d: &mut Decoder<'_>) -> Result<LookSpec, WireError> {
     let count = usize::from(d.u8()?);
-    if !(1..=MAX_LAYERS).contains(&count) {
+    // 0 is a look with no layers (`LookSpec::EMPTY`, draws nothing): the
+    // encoder writes it, so the decoder takes it.
+    if count > MAX_LAYERS {
         return Err(bad(format!("look with {count} layers")));
     }
     let mut spec = LookSpec::EMPTY;

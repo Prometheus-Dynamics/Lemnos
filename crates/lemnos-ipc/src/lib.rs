@@ -30,7 +30,8 @@
 //!    the count goes out as one [`Event::Dropped`] once the queue is under
 //!    half full again.
 //! 3. Every other message (replies, watched light frames, light info, the
-//!    welcome) is never dropped.
+//!    welcome) is never dropped. A client with more than 4 MiB of them
+//!    waiting has stopped reading, and the service closes it.
 //!
 //! A client that needs every event must keep up; [`Event::Dropped`] says how
 //! many it missed.

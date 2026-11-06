@@ -1374,6 +1374,13 @@ impl Service {
                     (c.name.clone(), c.owner, c.priority)
                 };
                 if !self.slots[self.lights[li].slot].allows(&name) {
+                    if request.id != 0 {
+                        let device = self.slots[self.lights[li].slot].id().to_string();
+                        self.clients[ci].send(&Message::Text {
+                            id: request.id,
+                            result: Err(format!("{name:?} may not write light {device:?}")),
+                        });
+                    }
                     return;
                 }
                 // A look must be one the service has (a built-in or a look
@@ -1449,6 +1456,13 @@ impl Service {
                     (c.name.clone(), c.owner)
                 };
                 if !self.slots[self.lights[li].slot].allows(&name) {
+                    if id != 0 {
+                        let device = self.slots[self.lights[li].slot].id().to_string();
+                        self.clients[ci].send(&Message::Text {
+                            id,
+                            result: Err(format!("{name:?} may not write light {device:?}")),
+                        });
+                    }
                     return;
                 }
                 let result = {
@@ -1930,11 +1944,12 @@ impl Service {
             for light in &mut self.lights {
                 light.watchers.retain(|w| w.client != client.id);
             }
-            if client.greeted {
-                self.client_closed(&client);
-            }
+            // Every connection, greeted or not: one that claimed, wrote a
+            // control or set an LED intent without `Hello` must not leave
+            // them behind.
+            self.client_closed(&client);
             let others = self.clients.iter().any(|c| c.owner == client.owner);
-            if !client.keep && !others && client.greeted {
+            if !client.keep && !others {
                 for light in &mut self.lights {
                     light.forget(client.owner);
                 }

@@ -565,15 +565,17 @@ fn looks_round_trip_by_name_inline_and_in_text() {
 }
 
 #[test]
-fn a_look_with_no_layers_or_an_unknown_block_is_a_protocol_error() {
+fn a_look_with_no_layers_decodes_so_the_service_can_answer_it() {
     use lemnos_light::LookSpec;
-    // A look with no layers has no shape on the wire: refused.
+    // The encoder writes a look with no layers as a count of 0. The decoder
+    // takes it, so the service refuses the look with a reply (it needs a
+    // layer) instead of closing the connection on a decode error.
     let empty = Request::Led(LedRequest::new(LedShow::Inline {
         spec: Box::new(LookSpec::EMPTY),
         progress: None,
     }))
     .encode();
-    assert!(decode_request(&empty).is_err());
+    assert!(decode_request(&empty).unwrap().is_some());
 }
 
 #[test]
@@ -811,4 +813,86 @@ fn a_truncated_spot_list_is_a_protocol_error() {
     let len = (short.len() - 4) as u32;
     short[..4].copy_from_slice(&len.to_le_bytes());
     assert!(decode_request(&short).is_err() || decode_request(&short).unwrap().is_none());
+}
+
+/// A one-connection fake service: answers `Hello` with a `Welcome` of
+/// `version` and `List` with no devices, then sends `after_list` raw, and
+/// reports whether the client then closed its end.
+fn fake_service(
+    name: &str,
+    version: u16,
+    after_list: Vec<u8>,
+) -> (std::path::PathBuf, std::thread::JoinHandle<bool>) {
+    use std::io::{Read, Write};
+    let dir = std::env::temp_dir().join(format!("lemnos-ipc-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            while let Ok(Some((request, used))) = decode_request(&buf) {
+                buf.drain(..used);
+                let answer = match request {
+                    Request::Hello { .. } => Message::Welcome {
+                        version,
+                        board: "fake".into(),
+                        client_id: 1,
+                    },
+                    Request::List => Message::Devices(Vec::new()),
+                    _ => continue,
+                };
+                stream.write_all(&answer.encode()).unwrap();
+                if matches!(answer, Message::Devices(_)) {
+                    stream.write_all(&after_list).unwrap();
+                }
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return true,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(_) => return false,
+            }
+        }
+    });
+    (path, handle)
+}
+
+#[test]
+fn a_welcome_of_another_protocol_version_is_refused() {
+    let (path, service) = fake_service("version", VERSION + 1, Vec::new());
+    match ClientOptions::new(&path, "test").devices() {
+        Err(ClientError::Protocol(e)) => assert!(e.0.contains("protocol 2"), "{e}"),
+        Err(other) => panic!("expected a protocol error, got {other}"),
+        Ok(_) => panic!("expected a protocol error, got a client"),
+    }
+    assert!(service.join().unwrap(), "the client kept the connection");
+}
+
+#[test]
+fn a_bad_frame_drops_the_connection_instead_of_failing_forever() {
+    // A frame of an unknown message kind.
+    let (path, service) = fake_service("bad-frame", VERSION, vec![2, 0, 0, 0, 0xee, 0xee]);
+    let mut client = ClientOptions::new(&path, "test")
+        .timeout(std::time::Duration::from_secs(2))
+        .devices()
+        .unwrap();
+    match client.read("imu") {
+        Err(ClientError::Protocol(_)) => {}
+        other => panic!("expected a protocol error, got {other:?}"),
+    }
+    assert!(service.join().unwrap(), "the client kept the connection");
+}
+
+#[test]
+fn an_inline_look_with_no_layers_round_trips() {
+    round_trip_request(Request::Led(LedRequest::new(LedShow::Inline {
+        spec: Box::new(lemnos_light::LookSpec::EMPTY),
+        progress: None,
+    })));
 }

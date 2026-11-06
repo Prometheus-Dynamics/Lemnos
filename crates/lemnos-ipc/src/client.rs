@@ -326,8 +326,17 @@ impl Connection {
         loop {
             match self.receive(deadline)? {
                 Message::Welcome {
-                    board, client_id, ..
+                    version,
+                    board,
+                    client_id,
                 } => {
+                    if version != VERSION {
+                        self.stream = None;
+                        self.buf.clear();
+                        return Err(ClientError::Protocol(WireError(format!(
+                            "the service speaks protocol {version}, this client {VERSION}"
+                        ))));
+                    }
                     self.board = board;
                     self.client_id = client_id;
                     break;
@@ -370,8 +379,18 @@ impl Connection {
     }
 
     fn send(&mut self, request: &Request) -> Result<(), ClientError> {
+        let frame = request.encode();
+        // The service closes a connection that sends a longer frame, with no
+        // refusal, so refuse it here, where the caller can be told why.
+        if frame.len() > wire::MAX_REQUEST_FRAME {
+            return Err(ClientError::Protocol(WireError(format!(
+                "request of {} bytes exceeds the {}-byte frame limit",
+                frame.len(),
+                wire::MAX_REQUEST_FRAME
+            ))));
+        }
         let stream = self.stream.as_mut().ok_or(ClientError::Closed)?;
-        match stream.write_all(&request.encode()) {
+        match stream.write_all(&frame) {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.lost(ClientError::Io(e));
@@ -391,9 +410,20 @@ impl Connection {
     /// The next message, waiting until `deadline`.
     fn receive(&mut self, deadline: Instant) -> Result<Message, ClientError> {
         loop {
-            if let Some((message, used)) = wire::decode_message(&self.buf)? {
-                self.buf.drain(..used);
-                return Ok(message);
+            match wire::decode_message(&self.buf) {
+                Ok(Some((message, used))) => {
+                    self.buf.drain(..used);
+                    return Ok(message);
+                }
+                Ok(None) => {}
+                // The stream cannot be resynchronised past a bad frame:
+                // drop the connection (the next call reconnects) rather
+                // than fail on the same bytes forever.
+                Err(e) => {
+                    self.buf.clear();
+                    self.lost(ClientError::Protocol(e.clone()));
+                    return Err(ClientError::Protocol(e));
+                }
             }
             let now = Instant::now();
             if now >= deadline {

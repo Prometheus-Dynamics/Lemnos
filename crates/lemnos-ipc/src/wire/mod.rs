@@ -394,8 +394,10 @@ impl LedRequest {
 pub enum Request {
     /// `keep`: the service keeps this client's LED intents after it
     /// disconnects (for one-shot command-line clients).
-    /// `events`: the client reads events (status, control, LED owner,
-    /// edges); without it the service sends none.
+    /// `events`: the client reads broadcast events (status, control, LED
+    /// owner); without it the service sends none. Edges of a raw line claim
+    /// are not broadcasts: they go to the claimant whatever this says,
+    /// because the claim asked for them.
     Hello {
         version: u16,
         client: String,

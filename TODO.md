@@ -38,7 +38,7 @@ Everything planned, in order. Execution is paused until the user starts it.
       lifecycle, compatibility, limits), with 11 test vectors that
       `crates/lemnos-ipc/src/spec_vectors.rs` encodes, decodes and compares byte for byte. Writing
       it found 17 gaps (its section 14). Open from them:
-  - [ ] Defects to fix: the version is never checked by either side; replies, frames and the
+  - [x] Defects, fixed 2026-11-05 (docs/ipc.md section 14 marks each): the version is never checked by either side; replies, frames and the
         other non-reading messages queue without a bound; the client keeps a bad frame in its
         buffer and fails every later receive; a connection that never sent `Hello` keeps its
         claims, control writes and LED intents after it closes; a refused LED request gets no

@@ -101,3 +101,37 @@ fn a_persisted_brightness_is_the_start_value_after_a_restart() {
     assert_eq!(red_after_colour(service.socket()), dim);
     drop(service);
 }
+
+#[test]
+fn a_look_from_a_client_the_writers_refuse_is_answered_not_dropped() {
+    let root = root("refused-look");
+    let service = MockLemnosd::start_in(root.clone(), BOARD, MockHardware::new()).unwrap();
+    let mut app: LedClient = ClientOptions::new(service.socket(), "app")
+        .timeout(Duration::from_secs(10))
+        .leds()
+        .unwrap();
+    let started = std::time::Instant::now();
+    match app.look("status.ok") {
+        Err(ClientError::Rejected(reason)) => assert!(reason.contains("ring"), "{reason}"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    // Answered at once, not left to the 10 s timeout.
+    assert!(started.elapsed() < Duration::from_secs(5));
+    drop(service);
+}
+
+#[test]
+fn an_inline_look_with_no_layers_is_refused_with_a_reply_and_keeps_the_connection() {
+    let root = root("empty-look");
+    let service = MockLemnosd::start_in(root.clone(), BOARD, MockHardware::new()).unwrap();
+    let mut manager: LedClient = ClientOptions::new(service.socket(), "manager")
+        .leds()
+        .unwrap();
+    match manager.show_spec(&lemnos_light::LookSpec::EMPTY) {
+        Err(ClientError::Rejected(reason)) => assert!(reason.contains("layer"), "{reason}"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    // Still connected: the next request is answered on the same connection.
+    manager.look("status.ok").unwrap();
+    drop(service);
+}

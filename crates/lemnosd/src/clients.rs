@@ -11,6 +11,12 @@ use std::rc::Rc;
 /// dropped. Readings are superseded by the next one, so a client that is
 /// this far behind is better off with the newest values than an old backlog.
 const MAX_QUEUED: usize = 64 * 1024;
+/// Bytes of answers (replies, frames, device lists: never dropped) queued for
+/// a client before it is closed. A client this far behind has stopped
+/// reading; without a bound its queue would grow the service's memory.
+/// Several full-size frames, so a burst of large answers to a live client
+/// still fits.
+const MAX_ANSWERS_QUEUED: usize = 4 * lemnos_ipc::wire::MAX_FRAME;
 /// The read buffer's starting size, and the size it returns to after a
 /// request larger than `READ_SHRINK_ABOVE` (the largest request is ~70 KiB).
 const READ_START: usize = 1024;
@@ -62,7 +68,9 @@ impl Client {
         stream.set_nonblocking(true)?;
         Ok(Self {
             id,
-            owner: id,
+            // Until `Hello` names it, a connection owns its intents alone: an
+            // id outside the named owners' range (1, 2, ... from `owner_for`).
+            owner: u32::MAX - id,
             name: String::new(),
             priority: 50,
             keep: false,
@@ -128,6 +136,9 @@ impl Client {
     }
 
     fn enqueue(&mut self, class: Class, frame: Rc<Vec<u8>>) {
+        if self.closed {
+            return;
+        }
         self.queued += frame.len();
         self.queue.push_back((class, frame));
         for victim in [Class::Reading, Class::Event] {
@@ -149,6 +160,12 @@ impl Client {
                     }
                 }
             }
+        }
+        if self.queued > MAX_ANSWERS_QUEUED {
+            self.closed = true;
+            self.queue.clear();
+            self.queued = 0;
+            return;
         }
         self.flush();
         if self.dropped > 0 && self.queued < MAX_QUEUED / 2 {

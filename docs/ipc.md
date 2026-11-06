@@ -202,15 +202,12 @@ The server does not require `Hello` to come first. It answers a `Hello` with
 `Welcome` (`lemnosd/src/service.rs:1180-1201`). The `Welcome` holds the
 service's `VERSION`, the board id, and the client's id for this connection.
 
-**Version check.** Neither side checks the version.
-
-- The service does not read `Hello.version` (`service.rs:1180-1186` binds the
-  other fields and ignores the rest).
-- The client does not read `Welcome.version` (`client.rs:328-331`).
-
-A peer whose version differs is not refused. What happens after that is not
-specified by the implementation. The wire version is documented only as "the
-protocol version both sides send in their greeting" (`wire/mod.rs:27`).
+**Version check.** The client refuses a `Welcome` whose version is not its own
+`VERSION`. It drops the connection and returns a protocol error naming both
+versions (`lemnos-ipc/src/client.rs`, `connect`). The service does not read
+`Hello.version`. It answers every greeting with its own version, and leaves the
+decision to the client. A version is a breaking change. Additions within a
+version go in appended fields (section 12).
 
 ## 6. Requests
 
@@ -286,7 +283,7 @@ A look:
 
 | Field | Type | Notes |
 |---|---|---|
-| layer count | `u8` | Encoder writes at most 4. Decoder accepts 1 to 4 only (section 14). |
+| layer count | `u8` | 0 to 4. Encoder writes at most 4. A look with 0 layers decodes. The service refuses it with a reply, because a look needs a layer. |
 | layers | see below | One per layer, bottom first |
 | envelope | effect | Whole-look effect |
 | brightness | `u8` | |
@@ -525,7 +522,7 @@ client after its requests are answered.
 | `Event` (105), tag 0 `Status` | A device's status changes | Clients with `greeted` and `events` set | `lemnosd/src/service.rs:315-318`, `status_event` |
 | `Event` (105), tag 1 `Control` | A control write or release; a restore | Clients with `greeted` and `events` set | `lemnosd/src/service.rs:315-318`, `:1303-1320`, `:1338-1353`; `service_raw.rs:84-108` |
 | `Event` (105), tag 2 `LedOwner` | The owner of a light's intent changes | Clients with `greeted` and `events` set | `lemnosd/src/service.rs:888` |
-| `Event` (105), tag 3 `Edge` | An edge on a line the client claimed with edge detection | The claiming client, if `greeted`. The `events` flag is not checked (section 14). | `lemnosd/src/service_raw.rs:30-40` |
+| `Event` (105), tag 3 `Edge` | An edge on a line the client claimed with edge detection | The claiming client, if `greeted`. Edges belong to the claim, not to the broadcasts, so the `events` flag does not apply. | `lemnosd/src/service_raw.rs:30-40` |
 | `Event` (105), tag 4 `Dropped` | The client's queue dropped events (section 13) | That client | `lemnosd/src/clients.rs:154-161` |
 | `LightInfo` (110) | A watched light's description changes, and once when a watch starts | The watcher | `lemnosd/src/service.rs:1055-1101` |
 | `Frame` (109) | A watched light's frame changes, at most `fps` a second | The watcher | `lemnosd/src/service.rs:1055-1101` |
@@ -541,7 +538,8 @@ What `lemnosd` does with a connection (`lemnosd/src/service.rs:1880-1945`,
 
 1. **Accept.** The connection gets the next client id. Ids start at 1 and skip
    0 on wrap (`service.rs:252`, `:1883-1884`). The connection is not greeted.
-   Its owner id is its own id.
+   Its owner id is `u32::MAX - id`, outside the range of named owners, so its
+   LED intents are its own until `Hello` names it.
 2. **Requests.** Requests are run in the order they arrive. Nothing requires
    `Hello` first. A request from a connection that has not sent `Hello` is
    run (`service.rs:1178`).
@@ -553,12 +551,13 @@ What `lemnosd` does with a connection (`lemnosd/src/service.rs:1880-1945`,
    not decode, closes the connection. No reply is sent. The requests decoded
    earlier from the same read are dropped with it (`clients.rs:99-103`,
    `service.rs:1897-1903`). A request larger than 71 680 bytes is one such case.
+   The reference client refuses to send one (section 11).
 5. **Read end.** End of stream, or a read error, closes the connection
    (`clients.rs:85-96`).
 6. **Write error.** A write error closes the connection (`clients.rs:178-181`).
 7. **Close.** `drop_closed` runs (`service.rs:1919-1943`):
    - The connection's subscriptions and frame watches are removed.
-   - If the connection was greeted, `client_closed` runs (`service.rs:1933-1934`):
+   - `client_closed` runs for every connection, greeted or not:
      - Raw claims: without `keep`, the connection's claims and locks are
        released. With `keep`, they stay held with no holder, until released by
        name (`raw.rs:530-546`).
@@ -567,7 +566,8 @@ What `lemnosd` does with a connection (`lemnosd/src/service.rs:1880-1945`,
        (`service_raw.rs:84-108`).
      - LED intents: forgotten, unless `keep` is set or another connection shares
        its owner id (`service.rs:1935-1940`).
-   - A connection that never sent `Hello` gets none of these cleanups (section 14).
+8. **Falling behind.** Answers are never dropped (section 13). A connection
+   with more than 4 MiB of answers waiting has stopped reading, and is closed.
 
 The service sends nothing unprompted except the messages in section 9. There is
 no keepalive, no ping, and no idle timeout.
@@ -595,6 +595,11 @@ is what it will see.
 - **Events flag.** Device clients send `events = 1` by default. LED clients send
   0 (`client.rs:227-239`, `:323`).
 - **Priority.** Default 50 (`client.rs:173`).
+- **Bad frames.** A message that does not decode drops the connection: the
+  buffer is cleared, `Disconnected` is reported, and the call returns the
+  protocol error. A client that reconnects starts clean.
+- **Frame size.** A request that would encode to more than 71 680 bytes is not
+  sent. The call returns a protocol error, and the connection stays up.
 
 ## 12. Compatibility rules
 
@@ -619,7 +624,7 @@ Only what the code does:
     looks operation (`request.rs:558`), system state (`request.rs:120`).
   - Calibration command (`calibration.rs:44`) and routine (`calibration.rs:23`).
   - Event tag (`message.rs:348`).
-  - Look: layer count outside 1 to 4 (`look.rs:269`), block code (`look.rs:388`),
+  - Look: layer count above 4 (`look.rs:269`), block code (`look.rs:388`),
     envelope code (`look.rs:263`), arc fraction kind (`look.rs:292`), spots
     source (`look.rs:378`), look mode (`look.rs:391`), breathe and drain easing
     codes (`look.rs:250`, `:336`), spot count above 8 (`look.rs:188`), frame
@@ -661,41 +666,42 @@ The queue rules, exactly as coded (`lemnosd/src/clients.rs:112-162`):
 - Readings are dropped first, oldest first, silently.
 - Events are dropped next, and each drop is counted. The count goes out as one
   `Dropped` once the queue is below half its limit.
-- Every other message is queued without a limit (section 14).
+- Every other message is queued, and is never dropped. Past 4 MiB of them the
+  client is closed (`lemnosd/src/clients.rs`, `MAX_ANSWERS_QUEUED`).
 - The frame being written is never dropped.
 
 ## 14. Gaps and inconsistencies
 
-These are facts about the code as it stands. This file does not fix them.
+Facts about the code as it stood when this file was written. Entries marked fixed have been changed since. The rest stand.
 
-1. **Version is never checked.** Neither `Hello` nor `Welcome` is compared
+1. **Fixed (2026-11-05):** the client refuses a mismatched `Welcome` (section 5). Was: **Version is never checked.** Neither `Hello` nor `Welcome` is compared
    with `VERSION` (section 5).
-2. **Edge events ignore the events flag.** The `Request::Hello` doc says that
+2. **Fixed (2026-11-05):** edges belong to the claim. The `Hello` doc now says so. Was: **Edge events ignore the events flag.** The `Request::Hello` doc says that
    without `events` the service sends no events (`wire/mod.rs:395-398`). Edges
    still go to a greeted claimant (`lemnosd/src/service_raw.rs:30-40`).
-3. **Only readings and events are bounded.** Replies, `Text`, `Claimed`, `Data`,
+3. **Fixed (2026-11-05):** past 4 MiB of answers the client is closed. Was: **Only readings and events are bounded.** Replies, `Text`, `Claimed`, `Data`,
    `Devices`, `Stats`, `Welcome`, `Frame` and `LightInfo` are queued without a
    limit (`lemnosd/src/clients.rs:115-122`, `:29-36`). A client that stops
    reading makes the service's memory grow for that client. The crate's own
    description of the queue (`lemnos-ipc/src/lib.rs`) says that replies and
    frames are never dropped, which is accurate. It does not say they are
    unbounded.
-4. **The client does not close on a bad message.** When `decode_message` fails,
+4. **Fixed (2026-11-05):** a bad frame drops the connection (section 11). Was: **The client does not close on a bad message.** When `decode_message` fails,
    the bytes stay in the buffer and the client returns the protocol error. The
    next receive decodes the same bytes and fails the same way
    (`lemnos-ipc/src/client.rs:392-395`). The client stays connected. A caller
    must reconnect itself.
-5. **Requests from a connection that never sent `Hello` are cleaned up only if
+5. **Fixed (2026-11-05):** `client_closed` runs for every connection, and an ungreeted connection owns its intents alone (section 10). Was: **Requests from a connection that never sent `Hello` are cleaned up only if
    the connection is greeted.** `drop_closed` calls `client_closed` only for
    greeted connections (`lemnosd/src/service.rs:1933-1934`). `client_closed`
    is what ends raw claims (`service_raw.rs:85`), reverts control writes, and
    forgets LED intents. So a connection that writes or claims without `Hello`
    leaves those in place after it closes.
-6. **A refused LED request gets no answer.** A `Led` or `LedInputs` from a
+6. **Fixed (2026-11-05):** the service answers with a `Text` error naming the light. Was: **A refused LED request gets no answer.** A `Led` or `LedInputs` from a
    client the device's write policy does not allow is ignored without a reply,
    even with a nonzero id (`lemnosd/src/service.rs:1376-1378`, `:1451-1453`).
    The client waits for its timeout.
-7. **An inline look with no layers closes the connection.** The encoder writes a
+7. **Fixed (2026-11-05):** the decoder takes 0 layers, and the service refuses the look with a reply. Was: **An inline look with no layers closes the connection.** The encoder writes a
    layer count of 0 for a look with no layers (`wire/look.rs:42-43`). The
    decoder refuses 0 (`wire/look.rs:267-271`), so the service drops the
    connection. The test that found this is described in section 15.
@@ -713,7 +719,7 @@ These are facts about the code as it stands. This file does not fix them.
 12. **`SubscribeChannels` requires its id.** Its decoder reads `u32 id`
     unconditionally (`wire/request.rs:402-405`). `Subscribe` accepts the
     absence of its id. The two are not symmetric.
-13. **Frame-size arithmetic.** The comment on `MAX_REQUEST_FRAME`
+13. **Fixed (2026-11-05):** the reference client refuses to send an oversized request. Was: **Frame-size arithmetic.** The comment on `MAX_REQUEST_FRAME`
     (`wire/mod.rs:31-33`) reasons from payload bytes only. Each SPI transfer
     adds 15 bytes of header, and each I2C op adds 5. A request within the
     64 KiB SPI byte limit can exceed the 71 680-byte frame limit when it has

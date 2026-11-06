@@ -80,6 +80,14 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- The `lemnosd` protocol defects `docs/ipc.md` found:
+  - The client refuses a `Welcome` of another protocol version.
+  - A bad frame now drops the client's connection, where before every later receive failed on the same bytes.
+  - The client refuses to send a request over the frame limit, where before the service closed the connection with no refusal.
+  - A refused LED request gets a reply, where before the client waited for its timeout.
+  - An inline look with no layers is refused with a reply, where before it closed the connection.
+  - A connection that never sent `Hello` is cleaned up like any other (claims, control writes, LED intents), and its LED intents no longer share an owner id with a named client.
+  - A client with more than 4 MiB of unsent answers is closed, where before its queue grew without a bound.
 - `lemnosd` skipped polled samples on a loaded board: its loop thread waited for a CPU behind other work. The packaged unit now runs it `SCHED_FIFO` at priority 10 (`CPUSchedulingPolicy=fifo`). On board #2 with four busy loops: 43 of 12 000 IMU samples missed before, 0 after. `docs/system-service.md`, "Scheduling under load".
 - lemnosd: a polled sensor's repeat filter measures its period from the end of the last delivered read, not its start, so a read preempted before its bus transaction cannot let the same sample through twice.
 - The USB reaper spun on a hung-up usbdevfs descriptor (its poll returned at once); it now fails the transfers.
