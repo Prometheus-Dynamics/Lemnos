@@ -111,6 +111,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnosd`: a polled sensor is read at 90 % of its output period, as its docs said, not at the period itself. At exactly the period the read grid kept one phase to the sensor's samples, and near the sample step timer jitter made one read early and the next one a sample late for the whole run: under load, half the runs of the 400 Hz IMU test delivered 334-338 a second at 15-21 % CPU wait. Now 380-387 at the same load. About 11 % more reads find no new sample (counted as misses). A batched sensor still reads at its output period.
 - `lemnos_linux::dma`: a CMA heap's capacity is `CmaTotal`, not `CmaFree`. `CmaFree` counts only idle pages, and the kernel serves a CMA request beyond it by migrating movable pages out, so the check refused requests the kernel serves: on a board with `CmaFree` at 0 of 64 MiB every `linux,cma` allocation failed before the call, though the kernel gave eight 1.28 MB buffers. Only a request larger than the pool is now refused before the kernel.
 - `lemnos-ipc` and `lemnosd`, protocol 1 unchanged for the reference encoder (docs/ipc.md section 14, items 9, 11, 15, 16 and 17):
   - A string over 65 535 bytes is cut at a character boundary. A cut inside a character used to make the frame undecodable.

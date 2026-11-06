@@ -520,8 +520,22 @@ fn a_polled_400_hz_imu_delivers_each_sample_once() {
         (Some(from), Some(to)) => to.saturating_sub(from),
         _ => 0,
     };
+    let misses = client
+        .stats()
+        .ok()
+        .and_then(|s| s.into_iter().find(|s| s.device == "imu"))
+        .map_or(0, |s| s.misses);
     service.stop();
     let rate = readings.len() as f64 / 3.0;
+    // Samples the readings skipped: the counter steps once a sample, one count
+    // at the BMI088's default ±6 g range (5461 counts per g), so a jump of more
+    // than one count is a sample no read took.
+    let step = 9.806_65 / 5461.0;
+    let skipped: f64 = readings
+        .windows(2)
+        .map(|w| ((w[1].1 - w[0].1) / step).round() - 1.0)
+        .filter(|n| *n > 0.0)
+        .sum();
     // At most 400 a second (the sensor's rate; a 2 ms poll would deliver 500).
     // The floor is `rate_floor`'s: what the service could read in the time
     // the reading's threads (the service's and this client's) had a CPU. A plain thread sleeping on the same grid stays on
@@ -529,10 +543,15 @@ fn a_polled_400_hz_imu_delivers_each_sample_once() {
     // wakeup and is preempted. With the run-queue delay unreported the floor
     // is 90 % of 400.
     //
-    // The share is 90 %, not the 100 Hz tests' 95 %. The service reads no
-    // faster than the 2.5 ms output period, so its reads sit on the sample
-    // grid with no slack, and a wait of part of a period can lose a whole
-    // sample. On the desktop under other work (2026-11-06, 16 runs, 7 to 54 %
+    // The share is 90 %, not the 100 Hz tests' 95 %. The service reads every
+    // 2.25 ms (90 % of the output period), so there is little slack, and a
+    // wait of part of a period can lose a whole sample. Reading at exactly
+    // 2.5 ms also lost samples that no wait explains: at a phase near the
+    // sample step, timer jitter made one read early and the next a sample
+    // late, all run (2026-11-06, under 24 busy loops: 334-338 a second at 15
+    // to 21 % waited, with about 200 misses and 190 samples skipped; at 2.25
+    // ms, 380-387 a second at 13-16 % waited). The failure message counts
+    // both, so a loss is told apart from a wait. On the desktop under other work (2026-11-06, 16 runs, 7 to 54 %
     // waited), the loss was within a few points of the wait share either way:
     // one run lost 41 % at 37 % waited, which 95 % failed. Reading every other
     // sample (200 a second) still fails on a quiet host.
@@ -540,7 +559,8 @@ fn a_polled_400_hz_imu_delivers_each_sample_once() {
     let floor = rate_floor(400.0, waited_us as i64, 0.90);
     assert!(
         rate >= floor && rate <= 420.0,
-        "{rate} readings a second (floor {floor:.0}; the service waited {:.0} % of the time for a CPU)",
+        "{rate} readings a second (floor {floor:.0}; the service waited {:.0} % of the time for a \
+         CPU; {skipped} samples skipped, {misses} reads found no new sample)",
         waited * 100.0
     );
     // No duplicates: a reading is a new sample, so its counter (the

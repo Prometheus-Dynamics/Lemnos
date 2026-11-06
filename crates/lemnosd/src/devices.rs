@@ -313,8 +313,16 @@ impl Slot {
     /// period, so its period is the requested one.
     pub fn period_us(&self) -> Option<u64> {
         let output = self.output_us.map_or(0, u64::from);
-        self.period_ms()
-            .map(|ms| (u64::from(ms) * 1000).max(output))
+        // Reading a polled sensor at exactly its output period puts the read
+        // grid at a fixed phase to the sample grid: near the step, a little
+        // timer jitter makes one read early (no new sample) and the next one
+        // a sample late (one skipped), for the whole run.
+        let floor = if self.batched {
+            output
+        } else {
+            output * 9 / 10
+        };
+        self.period_ms().map(|ms| (u64::from(ms) * 1000).max(floor))
     }
 
     /// Whether the device produces readings: a sensor, read by a worker or
@@ -430,8 +438,9 @@ impl Slot {
     /// Whether `row`, read at `started_us`, repeats the last delivered reading
     /// of a polled sensor: identical values, read within one output period of
     /// the end of that read. A still sensor (or a simulation with no noise)
-    /// repeats its output every read, so it is delivered once per period, not
-    /// once per read. Measured from the end, not the start: a read preempted
+    /// repeats its output every read, so it is delivered at most once per
+    /// output period, not once per read: with reads at 90 % of the period,
+    /// every other read. Measured from the end, not the start: a read preempted
     /// between its timestamp and its bus transaction took a later sample, and
     /// a read one period after its start can still find that same sample.
     pub fn repeats_last(&self, row: &[i32; MAX_CHANNELS], started_us: u64) -> bool {
@@ -772,6 +781,22 @@ mod tests {
         // No period known: nothing is a repeat.
         s.output_us = None;
         assert!(!s.repeats_last(&row, 2_000));
+    }
+
+    #[test]
+    fn a_polled_sensor_reads_a_little_faster_than_it_samples() {
+        // A 2 ms subscription on a 400 Hz sensor: read every 2.25 ms, so each
+        // 2.5 ms sample interval holds a read whatever the phase.
+        let mut s = slot(Some(2), None);
+        s.output_us = Some(2_500);
+        assert_eq!(s.period_us(), Some(2_250));
+        // Batched: the output period itself (a read takes every frame).
+        s.batched = true;
+        assert_eq!(s.period_us(), Some(2_500));
+        // Slower than the sensor: the requested period.
+        let mut slow = slot(Some(10), None);
+        slow.output_us = Some(2_500);
+        assert_eq!(slow.period_us(), Some(10_000));
     }
 
     fn slot(poll_ms: Option<u32>, idle_poll_ms: Option<u32>) -> Slot {
