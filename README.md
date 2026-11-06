@@ -140,6 +140,7 @@ Targeted helper scripts live under `testing/`.
 - [docs/architecture-crate-map.md](docs/architecture-crate-map.md): crate responsibilities and relationships
 - [docs/testing.md](docs/testing.md): test surfaces, scripts, and example validation flows
 - [docs/compact-model.md](docs/compact-model.md): the compact device model, the lite table and the generic runtime adapter
+- [docs/driver-ownership.md](docs/driver-ownership.md): where a driver lives: Lemnos, a board file, or the product, and the kernel-code rule
 - [docs/board-definition.md](docs/board-definition.md): the board-definition format, built-in drivers, and adopting a board in an app
 - [docs/looks.md](docs/looks.md): LED looks: the blocks, look files, built-in names, brightness, reloads and the CLI
 - [docs/system-service.md](docs/system-service.md): `lemnosd`, the board's hardware service: client API, LED intents, updater integration, backends, packaging
