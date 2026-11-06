@@ -4,6 +4,16 @@ Lemnos's C surface, version 1.0: the `lemnosd` device client behind ten `extern 
 declared in [`include/lemnos.h`](include/lemnos.h), built as a static and a shared library, and
 `Client`, a Rust wrapper that calls through those same functions.
 
+The exported names are listed in [`lemnos.exports`](lemnos.exports), one per line, and a test
+keeps that list, the header and the crate's exports in step. On Linux the shared library's
+SONAME is `liblemnos_capi.so.<LEMNOS_ABI_MAJOR>` (now `liblemnos_capi.so.1`), so install it
+under that name, with `liblemnos_capi.so` as the link for building against it.
+
+The surface's process-wide state is its client handle table. A process should contain the
+surface once: either statically (this crate as an rlib, or `liblemnos_capi.a`) or by loading
+`liblemnos_capi.so`, not both, or handles from one copy are unknown to the other. The crates
+under it (`lemnos-ipc`, `lemnos-abi`) hold no process-wide state.
+
 | Function | Does |
 | --- | --- |
 | `lemnos_version`, `lemnos_check_version` | the handshake (major, minor, layout hash) |
@@ -24,7 +34,7 @@ value.
 LemnosAbiVersion mine = LEMNOS_VERSION_INIT;
 lemnos_check_version(&mine);
 LemnosHandle client;
-lemnos_client_open("/run/lemnosd/lemnosd.sock", "my-app", 0, &client, LEMNOS_NO_SINK);
+lemnos_client_open("/run/lemnos/lemnosd.sock", "my-app", 0, &client, LEMNOS_NO_SINK);
 LemnosReading reading = {.struct_size = sizeof reading};
 lemnos_read(client, 0, &reading, LEMNOS_NO_SINK);
 lemnos_client_close(client);

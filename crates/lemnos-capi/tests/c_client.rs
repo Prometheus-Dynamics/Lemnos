@@ -132,9 +132,32 @@ fn a_c_program_runs_on_the_shared_library() {
         &program,
         &["-L", deps.to_str().unwrap(), "-llemnos_capi", "-lm"],
     );
+    // The program records the SONAME, liblemnos_capi.so.1, as what it needs;
+    // cargo writes only liblemnos_capi.so, so the loader finds it through a
+    // link of that name, as an installed library would have.
+    let libdir = std::env::temp_dir().join(format!("lemnos-capi-lib-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&libdir);
+    fs::create_dir_all(&libdir).unwrap();
+    std::os::unix::fs::symlink(&lib, libdir.join("liblemnos_capi.so.1")).unwrap();
     let service = service("shared");
-    let stdout = run(&program, &service, &[("LD_LIBRARY_PATH", &deps)]);
+    let stdout = run(&program, &service, &[("LD_LIBRARY_PATH", &libdir)]);
     service.stop();
     let _ = fs::remove_file(&program);
+    let _ = fs::remove_dir_all(&libdir);
     check(&stdout);
+}
+
+/// The shared library's SONAME carries the surface's major version (where
+/// `readelf` is installed).
+#[test]
+fn the_shared_library_is_named_for_the_surface_major() {
+    let lib = deps_dir().join("liblemnos_capi.so");
+    let Ok(out) = Command::new("readelf").arg("-d").arg(&lib).output() else {
+        return;
+    };
+    assert!(out.status.success(), "readelf -d {}", lib.display());
+    let dynamic = String::from_utf8_lossy(&out.stdout);
+    let major = lemnos_capi::VERSION.major;
+    let want = format!("Library soname: [liblemnos_capi.so.{major}]");
+    assert!(dynamic.contains(&want), "{want} not in:\n{dynamic}");
 }

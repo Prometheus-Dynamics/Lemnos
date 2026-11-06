@@ -116,6 +116,14 @@ Everything planned, in order. Execution is paused until the user starts it.
       first, `lemnos-gpu` only when a consumer needs it.
 - [ ] **7. Shared and static builds.** Both modes, with core, surface and wrapper for each
       dependency. The workspace's LTO test informs how shared gets built.
+  - [x] Decided 2026-11-06, for the image's surface checks: the feature is `shared` on each
+        surface crate (first `lemnos-capi`). It makes the Rust wrapper link to the installed
+        library (`liblemnos_capi.so.1`, by the normal dynamic linker, never dlopen) instead of
+        the crate's own exports. Core: `lemnos-abi` and `lemnos-ipc`, no process-wide state.
+        Surface: the exports and their handle table, the only process-wide state. Wrapper:
+        `Client`. A process holds each surface once: statically or loaded, never both.
+  - [x] `lemnos-capi/lemnos.exports` (the surface list, checked against the header and the
+        exports) and the SONAME `liblemnos_capi.so.<major>`.
 - [x] **Consumer compatibility of items 5-7 and the IPC gaps** (decided 2026-11-06, before the
       consumers switch). Each stays additive to what the consumers switch to now:
   - Item 5: the module path is a second, opt-in backend of lemnos-drivers-pisp's device layer.

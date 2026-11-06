@@ -256,3 +256,38 @@ fn the_header_matches_the_surface() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `lemnos.exports` lists exactly the functions the header declares and the
+/// crate exports, in the header's order.
+#[test]
+fn the_export_list_matches_the_header_and_the_exports() {
+    let listed: Vec<&str> = include_str!("../lemnos.exports")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let name_before_paren = |line: &str| -> Option<String> {
+        let at = line.find("lemnos_")?;
+        let rest = &line[at..];
+        let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+        rest[end..]
+            .starts_with('(')
+            .then(|| rest[..end].to_string())
+    };
+    let declared: Vec<String> = include_str!("../include/lemnos.h")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(['#', '/', '*']))
+        .filter_map(name_before_paren)
+        .collect();
+    assert_eq!(listed, declared, "lemnos.exports against include/lemnos.h");
+    let source = include_str!("surface.rs");
+    let mut exported: Vec<String> = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == "#[unsafe(no_mangle)]" {
+            let decl = lines.next().unwrap_or_default();
+            exported.extend(name_before_paren(decl));
+        }
+    }
+    assert_eq!(listed, exported, "lemnos.exports against src/surface.rs");
+}
