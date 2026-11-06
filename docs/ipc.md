@@ -43,7 +43,7 @@ the same values with the crate and compares the bytes with the hex here.
 | Path override (service) | `LEMNOSD_SOCKET` | `lemnosd/src/main.rs:23` |
 | Listener | `lemnosd` binds. It removes a stale file at the path first, and creates the parent directory. | `lemnosd/src/service.rs:211-215` |
 | Connecting side | Clients. The service never connects out. | `lemnos-ipc/src/client.rs:313` |
-| Permissions | The code sets no mode. The socket gets the process umask. The packaged unit sets `UMask=0007`, `RuntimeDirectory=lemnos`, `RuntimeDirectoryMode=0750`, `User=lemnos`, `Group=lemnos`. | `packaging/systemd/lemnosd.service:49-58` |
+| Permissions | `lemnosd` sets the socket to 0660 after binding, whatever the umask. The packaged unit also sets `UMask=0007`, `RuntimeDirectory=lemnos`, `RuntimeDirectoryMode=0750`, `User=lemnos`, `Group=lemnos`. | `packaging/systemd/lemnosd.service:49-58` |
 | Byte order | Little-endian for every integer and for `f64` bits | `wire/codec.rs:23-51` |
 | Direction | Both sides send at any time. The client sends requests; the service sends replies and unsolicited messages. | `wire/mod.rs:1-16` |
 
@@ -545,8 +545,8 @@ What `lemnosd` does with a connection (`lemnosd/src/service.rs:1880-1945`,
    run (`service.rs:1178`).
 3. **Hello.** Sets the client's name, priority, `keep` flag and `events` flag.
    Its owner id is the one shared by every connection with the same name. Then
-   `Welcome` is sent. A second `Hello` repeats all of this, and sends another
-   `Welcome` (`service.rs:1180-1201`, `:1165-1173`).
+   `Welcome` is sent. A second `Hello` changes none of this, and is answered
+   with another `Welcome` (`service.rs:1180-1201`, `:1165-1173`).
 4. **Bad input.** A frame whose length is out of range, or whose payload does
    not decode, closes the connection. No reply is sent. The requests decoded
    earlier from the same read are dropped with it (`clients.rs:99-103`,
@@ -613,7 +613,8 @@ Only what the code does:
   - `Devices` reasons: absent means empty reasons (`message.rs:265-270`).
   - `Event::Status.reason`: absent means empty (`message.rs:324-328`).
   - `LightInfo.look_brightness`: absent means 1000 (`message.rs:385-386`).
-- **Trailing bytes.** No decoder rejects trailing bytes. Only the appended
+- **Trailing bytes.** No decoder rejects trailing bytes, by design: that is
+  how an older peer skips a field appended after its time. Only the appended
   fields above check for their presence.
 - **Unknown request kind.** A decode error, and the service closes the
   connection (`wire/request.rs:570`).
@@ -705,18 +706,19 @@ Facts about the code as it stood when this file was written. Entries marked fixe
    layer count of 0 for a look with no layers (`wire/look.rs:42-43`). The
    decoder refuses 0 (`wire/look.rs:267-271`), so the service drops the
    connection. The test that found this is described in section 15.
-8. **Trailing bytes are not checked** (section 12). A malformed tail is silently
-   ignored.
-9. **Strings are cut, not refused.** A `str` over 65 535 bytes is truncated on
+8. **Kept as the rule (2026-11-06):** trailing bytes are not checked (section 12).
+   This is how an appended field reaches an older peer, which stops before it, so
+   refusing a tail would break every appended field.
+9. **Fixed (2026-11-06):** a long string is cut at a character boundary, so the frame still decodes. Was: **Strings are cut, not refused.** A `str` over 65 535 bytes is truncated on
    encode, possibly inside a UTF-8 sequence, and the decoder then refuses the
    frame (`wire/codec.rs:54-59`).
-10. **Optional sentinels collide with values.** `Some(0xFFFF)` as `opt u16` and
+10. **A limit of protocol 1:** fixing it changes the wire, so it waits for a version 2. **Optional sentinels collide with values.** `Some(0xFFFF)` as `opt u16` and
     `Some(0xFFFFFFFF)` as `opt u32` decode as None (`wire/codec.rs:141`,
     `:144`). A sender must avoid these values.
-11. **Lenient tags.** The raw line target treats any nonzero kind as a name
+11. **Fixed (2026-11-06):** a line target kind or I2C op tag other than 0 or 1 is refused. Was: **Lenient tags.** The raw line target treats any nonzero kind as a name
     (`wire/raw.rs:354-363`). The I2C op decoder treats any nonzero tag as a
     read (`wire/raw.rs:426-429`). The encoder writes 0 and 1.
-12. **`SubscribeChannels` requires its id.** Its decoder reads `u32 id`
+12. **Kept (2026-11-06):** `SubscribeChannels` was added with its id, so no older sender omits it; `Subscribe` gained its id later. **`SubscribeChannels` requires its id.** Its decoder reads `u32 id`
     unconditionally (`wire/request.rs:402-405`). `Subscribe` accepts the
     absence of its id. The two are not symmetric.
 13. **Fixed (2026-11-05):** the reference client refuses to send an oversized request. Was: **Frame-size arithmetic.** The comment on `MAX_REQUEST_FRAME`
@@ -725,13 +727,13 @@ Facts about the code as it stood when this file was written. Entries marked fixe
     64 KiB SPI byte limit can exceed the 71 680-byte frame limit when it has
     many transfers. The service then closes the connection and sends no
     refusal.
-14. **Reads are matched by device name.** A `Reading` has no id. Two
+14. **A limit of protocol 1:** fixing it changes the wire, so it waits for a version 2. A client should not overlap reads of one device. **Reads are matched by device name.** A `Reading` has no id. Two
     overlapping `Read` calls for one device cannot be told apart.
-15. **Hello repeats are allowed.** A second `Hello` changes the name, owner,
+15. **Fixed (2026-11-06):** a repeated `Hello` is answered with `Welcome` and changes nothing. Was: **Hello repeats are allowed.** A second `Hello` changes the name, owner,
     priority and flags, and sends a second `Welcome` (section 10, step 3).
-16. **Devices reasons are dropped silently** when their count does not match
+16. **Fixed (2026-11-06):** a reason count that does not match is refused. Was: **Devices reasons are dropped silently** when their count does not match
     (`wire/message.rs:265-269`).
-17. **Socket mode comes from the umask.** The code sets no permissions. The
+17. **Fixed (2026-11-06):** `lemnosd` sets the socket to 0660 after binding. Was: **Socket mode comes from the umask.** The code sets no permissions. The
     packaged unit's umask and directory mode are what keep the socket
     private (section 1).
 

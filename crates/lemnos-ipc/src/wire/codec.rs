@@ -52,7 +52,8 @@ impl Encoder {
         self.u64(v.to_bits())
     }
     pub(super) fn str(&mut self, v: &str) -> &mut Self {
-        let len = v.len().min(u16::MAX as usize);
+        // Cut at a character boundary, so the decoder still accepts the frame.
+        let len = v.floor_char_boundary(usize::from(u16::MAX));
         self.u16(len as u16);
         self.buf.extend_from_slice(&v.as_bytes()[..len]);
         self

@@ -262,7 +262,10 @@ impl Message {
                         pixels,
                     });
                 }
-                if !d.is_empty() && usize::from(d.u16()?) == devices.len() {
+                if !d.is_empty() {
+                    if usize::from(d.u16()?) != devices.len() {
+                        return Err(bad("device reason count"));
+                    }
                     for device in &mut devices {
                         device.reason = d.str()?;
                     }

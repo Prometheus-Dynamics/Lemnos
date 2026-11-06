@@ -107,6 +107,13 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnos-ipc` and `lemnosd`, protocol 1 unchanged for the reference encoder (docs/ipc.md section 14, items 9, 11, 15, 16 and 17):
+  - A string over 65 535 bytes is cut at a character boundary. A cut inside a character used to make the frame undecodable.
+  - A raw line target kind or I2C op tag other than 0 or 1 is refused. It used to be read as a name or a read.
+  - A `Devices` message whose reason count does not match its devices is refused. Its reasons used to be dropped.
+  - A repeated `Hello` is answered with `Welcome` and changes nothing. It used to rename the connection and move its owner.
+  - `lemnosd` sets its socket to 0660 after binding, whatever the umask.
+  - Items 10 and 14 (the opt sentinels, reads without an id) need a wire change, so they stay limits of protocol 1. Item 8 (trailing bytes) is kept as the rule appended fields rely on.
 - `lemnosd`: a `power.reset` of N ms could hold the switch off up to 1 ms less than N, because the deadline was taken from a clock truncated to the millisecond. It now lasts at least N ms.
 - `lemnosd`: a one-shot read that arrived while a subscription's channel-masked read was running got that read's partial row, with no value for the unselected channels. One-shot readers now wait for a read of every channel.
 - The `lemnosd` protocol defects `docs/ipc.md` found:

@@ -271,3 +271,15 @@ fn serves_readings_controls_and_led_intents() {
     assert!(!socket.exists());
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn the_socket_is_owner_and_group_only_whatever_the_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("lemnosd-test-mode-{}", std::process::id()));
+    let (socket, stop, handle) = start(&root);
+    let mode = fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o660);
+    stop.store(true, Ordering::Relaxed);
+    handle.join().unwrap();
+    let _ = fs::remove_dir_all(&root);
+}

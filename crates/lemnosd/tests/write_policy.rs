@@ -129,6 +129,53 @@ fn a_prefix_wildcard_admits_orion_callers_and_nothing_else() {
         Err(ClientError::Refused(Refusal::NotAllowed))
     ));
 
+    // A second Hello does not rename a connection: "vision" greeting again
+    // as "app" is still refused on the device only "app" may write.
+    {
+        use lemnos_ipc::{Message, Request, VERSION};
+        use std::io::{Read, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = Vec::new();
+        let mut next = |stream: &mut std::os::unix::net::UnixStream| loop {
+            if let Some((message, used)) = lemnos_ipc::decode_message(&buf).unwrap() {
+                buf.drain(..used);
+                return message;
+            }
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0, "the service closed the connection");
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        for client in ["vision", "app"] {
+            let hello = Request::Hello {
+                version: VERSION,
+                client: client.into(),
+                priority: 0,
+                keep: false,
+                events: false,
+            };
+            stream.write_all(&hello.encode()).unwrap();
+            assert!(matches!(next(&mut stream), Message::Welcome { .. }));
+        }
+        let set = Request::Set {
+            id: 1,
+            device: "case-fan".into(),
+            control: "duty".into(),
+            value: 0.5,
+        };
+        stream.write_all(&set.encode()).unwrap();
+        let reply = loop {
+            if let Message::Reply { id: 1, result } = next(&mut stream) {
+                break result;
+            }
+        };
+        assert_eq!(reply, Err(Refusal::NotAllowed));
+        assert_eq!(read(&root, "class/hwmon/hwmon5/pwm1"), "77");
+    }
+
     drop(orion);
     drop(other);
     stop.store(true, Ordering::Relaxed);

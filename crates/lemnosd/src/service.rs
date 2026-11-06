@@ -25,6 +25,7 @@ use lemnos_linux_sys::time::boottime_us;
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -212,6 +213,9 @@ impl Service {
         }
         let _ = std::fs::remove_file(&config.socket);
         let listener = UnixListener::bind(&config.socket)?;
+        // Owner and group only, whatever the umask. Connecting needs write
+        // permission, so the umask's mode before this is never wider.
+        std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o660))?;
         listener.set_nonblocking(true)?;
         let definition = config.board.clone();
         let mut specs = config.board.devices.clone();
@@ -1193,8 +1197,11 @@ impl Service {
                 events,
                 ..
             } => {
-                let owner = self.owner_for(&client);
-                let id = {
+                // The first Hello fixes the connection's name, owner, priority
+                // and flags. A repeat is answered and changes nothing, so held
+                // claims and intents keep the owner they were made under.
+                if !self.clients[ci].greeted {
+                    let owner = self.owner_for(&client);
                     let c = &mut self.clients[ci];
                     c.name = client;
                     c.priority = priority;
@@ -1202,8 +1209,8 @@ impl Service {
                     c.events = events;
                     c.owner = owner;
                     c.greeted = true;
-                    c.id
-                };
+                }
+                let id = self.clients[ci].id;
                 let board = self.board.clone();
                 self.clients[ci].send(&Message::Welcome {
                     version: VERSION,

@@ -896,3 +896,67 @@ fn an_inline_look_with_no_layers_round_trips() {
         progress: None,
     })));
 }
+
+#[test]
+fn an_overlong_string_is_cut_at_a_character_boundary() {
+    // 65 535 falls inside a two-byte character here.
+    let device = format!("aa{}", "é".repeat(40_000));
+    let frame = Request::Read { device }.encode();
+    let (decoded, used) = decode_request(&frame).unwrap().unwrap();
+    assert_eq!(used, frame.len());
+    let Request::Read { device } = decoded else {
+        panic!("not a Read: {decoded:?}");
+    };
+    assert_eq!(device.len(), 65_534);
+}
+
+#[test]
+fn raw_tags_other_than_zero_and_one_are_refused() {
+    use crate::raw::LineConfig;
+    // Length, kind and id come first: the target kind is byte 10.
+    let mut frame = Request::Raw(RawRequest::LineClaim {
+        id: 2,
+        line: LineTarget::Name("aux".into()),
+        config: LineConfig::output(true),
+        on_release: None,
+    })
+    .encode();
+    assert_eq!(frame[10], 1);
+    frame[10] = 2;
+    assert!(decode_request(&frame).is_err());
+
+    // Then the bus string, address and op count: the first op tag follows.
+    let bus = "1";
+    let mut frame = Request::Raw(RawRequest::I2cTransfer {
+        id: 10,
+        bus: bus.into(),
+        address: 0x50,
+        ops: vec![I2cOp::Read(2)],
+    })
+    .encode();
+    let tag = 10 + 2 + bus.len() + 2 + 2;
+    assert_eq!(frame[tag], 1);
+    frame[tag] = 2;
+    assert!(decode_request(&frame).is_err());
+}
+
+#[test]
+fn device_reasons_of_the_wrong_count_are_refused() {
+    let device = DeviceDesc {
+        id: "imu".into(),
+        label: "IMU".into(),
+        class: DeviceClass::Imu,
+        model: "BMI088".into(),
+        status: DeviceStatus::Faulted,
+        reason: "x".into(),
+        channels: Vec::new(),
+        controls: Vec::new(),
+        pixels: 0,
+    };
+    let mut frame = Message::Devices(vec![device]).encode();
+    // The tail is the reason count, then one string: u16 1, u16 1, "x".
+    let count = frame.len() - 5;
+    assert_eq!(frame[count], 1);
+    frame[count] = 2;
+    assert!(decode_message(&frame).is_err());
+}

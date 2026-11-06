@@ -356,11 +356,12 @@ impl RawRequest {
                         chip: d.str()?,
                         offset: d.u32()?,
                     },
-                    _ => {
+                    1 => {
                         let name = d.str()?;
                         d.u32()?;
                         LineTarget::Name(name)
                     }
+                    _ => return Err(bad("line target kind")),
                 };
                 Self::LineClaim {
                     id,
@@ -425,7 +426,8 @@ impl RawRequest {
                 for _ in 0..n {
                     ops.push(match d.u8()? {
                         0 => I2cOp::Write(d.bytes()?),
-                        _ => I2cOp::Read(u16::try_from(d.u32()?).map_err(|_| bad("I2C read"))?),
+                        1 => I2cOp::Read(u16::try_from(d.u32()?).map_err(|_| bad("I2C read"))?),
+                        _ => return Err(bad("I2C op tag")),
                     });
                 }
                 Self::I2cTransfer {
