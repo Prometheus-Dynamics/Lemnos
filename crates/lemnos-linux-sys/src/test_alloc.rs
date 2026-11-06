@@ -1,13 +1,24 @@
-//! Counts allocations in tests: the crate's test binary runs on this allocator.
+//! Counts allocations in tests. This crate's test binary runs on [`Counting`]; with the
+//! `alloc-count` feature another crate's test binary can install it too (the `unsafe` stays
+//! here):
+//!
+//! ```ignore
+//! #[global_allocator]
+//! static ALLOCATOR: lemnos_linux_sys::test_alloc::Counting = lemnos_linux_sys::test_alloc::Counting;
+//! ```
+//!
+//! Test support only: never install it in a shipped binary.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-/// Counts this thread's allocations, so parallel tests do not disturb a count.
-struct Counting;
+/// Counts this thread's allocations, so parallel tests do not disturb a count. Forwards every
+/// call to [`System`].
+pub struct Counting;
 
 thread_local! {
-    pub(crate) static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    /// This thread's allocations so far.
+    pub static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn count() {
@@ -32,11 +43,13 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+#[cfg(test)]
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-/// The value of `f`, and how many allocations this thread made while it ran.
-pub(crate) fn allocations<T>(f: impl FnOnce() -> T) -> (T, usize) {
+/// The value of `f`, and how many allocations this thread made while it ran (zero counts
+/// unless [`Counting`] is the global allocator).
+pub fn allocations<T>(f: impl FnOnce() -> T) -> (T, usize) {
     let before = ALLOCATIONS.with(Cell::get);
     let value = f();
     (value, ALLOCATIONS.with(Cell::get) - before)

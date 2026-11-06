@@ -37,5 +37,5 @@ pub mod vg_lite;
 
 pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};
 
-#[cfg(test)]
-mod test_alloc;
+#[cfg(any(test, feature = "alloc-count"))]
+pub mod test_alloc;

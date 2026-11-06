@@ -180,6 +180,56 @@ fn vim2m_round_trips_mmap_frames() {
     assert_eq!(s.free_capture(), Some(0), "stream_off returns every buffer");
 }
 
+/// vim2m with MMAP on both queues, once warm: a frame's queue, wait and dequeue
+/// make no allocation, on either queue.
+#[test]
+fn a_vim2m_frame_allocates_nothing_once_warm() {
+    let Some(path) = find_m2m("vim2m") else {
+        crate::tests::skip("no vim2m node (modprobe vim2m)");
+        return;
+    };
+    let mut s = M2mSession::open(&path, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
+    let mmap = |bytes: u32| {
+        [QueuePlane {
+            memory: PlaneMemory::Mmap,
+            length: 0,
+            bytes_used: bytes,
+            data_offset: 0,
+        }]
+    };
+    for index in 0..s.capture_buffers() {
+        s.queue_capture(index, &mmap(0)).unwrap();
+    }
+    s.stream_on().unwrap();
+    let frame = |s: &mut M2mSession, k: u64| {
+        let out = s.free_output().expect("a free source buffer");
+        s.queue_output(out, &mmap(FRAME), Duration::from_millis(k))
+            .unwrap();
+        let ready = s
+            .wait(
+                Ready {
+                    capture: true,
+                    ..Ready::default()
+                },
+                Some(Duration::from_secs(5)),
+            )
+            .unwrap();
+        assert!(ready.capture, "frame {k} came out");
+        let got = s.dequeue_capture().unwrap().expect("a frame");
+        s.queue_capture(got.index, &mmap(0)).unwrap();
+        while s.dequeue_output().unwrap().is_some() {}
+    };
+    // Warm: the first frames may touch lazily set up state.
+    for k in 0..2 {
+        frame(&mut s, k);
+    }
+    for k in 2..10 {
+        let ((), n) = lemnos_linux_sys::test_alloc::allocations(|| frame(&mut s, k));
+        assert_eq!(n, 0, "frame {k} allocated {n} times");
+    }
+    s.stream_off().unwrap();
+}
+
 #[cfg(feature = "dma")]
 /// vim2m reading dma-bufs from the system heap in place: each frame comes out
 /// the same, and the destination stays MMAP.

@@ -66,4 +66,5 @@ name = "hevc_idr_decode"
 required-features = ["v4l2-hevc"]
 
 [dev-dependencies]
+lemnos-linux-sys = { workspace = true, default-features = false, features = ["alloc-count"] }
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

@@ -1,3 +1,8 @@
+// Every allocation of this test binary is counted per thread, so a test can
+// check that a hot path allocates nothing (`lemnos_linux_sys::test_alloc`).
+#[global_allocator]
+static ALLOCATOR: lemnos_linux_sys::test_alloc::Counting = lemnos_linux_sys::test_alloc::Counting;
+
 mod backend;
 mod device_watch;
 mod discovery;
