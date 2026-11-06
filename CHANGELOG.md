@@ -87,6 +87,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnosd`: a `power.reset` of N ms could hold the switch off up to 1 ms less than N, because the deadline was taken from a clock truncated to the millisecond. It now lasts at least N ms.
 - `lemnosd`: a one-shot read that arrived while a subscription's channel-masked read was running got that read's partial row, with no value for the unselected channels. One-shot readers now wait for a read of every channel.
 - The `lemnosd` protocol defects `docs/ipc.md` found:
   - The client refuses a `Welcome` of another protocol version.

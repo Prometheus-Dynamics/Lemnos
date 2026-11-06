@@ -1697,7 +1697,10 @@ impl Service {
             let off_ms = u64::try_from(applied).unwrap_or(0);
             let id = self.slots[index].id().to_string();
             self.slots[index].values[0] = 0;
-            self.slots[index].power_reset_until_ms = Some(now + off_ms);
+            // `now` is truncated to the millisecond, so `now + off_ms` could
+            // end the pulse up to 1 ms early: one more makes it at least
+            // `off_ms` long.
+            self.slots[index].power_reset_until_ms = Some(now + off_ms + 1);
             self.broadcast(&Message::Event(Event::Control {
                 device: id,
                 control: "power.on".into(),
