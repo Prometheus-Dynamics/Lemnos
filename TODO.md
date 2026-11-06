@@ -151,6 +151,12 @@ Everything planned, in order. Execution is paused until the user starts it.
         filter measured a period from the start of the last delivered read; a read preempted between
         its timestamp and its transaction took a later sample, which the next read found again a
         period after that start. Now measured from the end of the read.
+  - [ ] Reopened 2026-11-06: one failure in the workspace gate at cb5a790, with the host's load
+        average at 39-46 on 32 cores (other builds): 294 readings a second against a floor of 308,
+        with the service's threads waiting only 14 % of the time for a CPU. So the rate floor's
+        wait accounting misses part of the loss under that load. The test passed 5 of 5 alone
+        straight after. Find where the remaining loss goes (wakeup latency not seen as run-queue
+        delay, or a thread the floor does not count) before calling the test stable.
   - [x] The 100 Hz tests in the same file failed the same way (one 100 ms gap against a fixed
         25 ms bound, at load 93). Every rate floor there is now 95 % of nominal for the time the
         service's threads had a CPU, and the largest gap may pass 25 ms only by the time they
