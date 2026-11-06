@@ -52,6 +52,14 @@ Everything planned, in order. Execution is paused until the user starts it.
       worktree `/mnt/nvme-wd/lemnos-r5-v4l2`): V4L2, subdev and media, then RGA, VGLite, PiSP, and
       the K230 and rkisp device layers. `crates/rga` and `crates/vglite` come over from the graph
       runtime, and the generic parts of the camera stack's `crates/kernel` move here.
+  - [x] V4L2, subdev and media: `lemnos-v4l2` (5,274 lines, no `unsafe`, 35 tests) over the sys
+        uAPI layer. All of the camera stack's generic `crates/kernel` code moved except `bus`,
+        `dma_heap` (already `lemnos-linux::dma`) and `v4l2::m2m`.
+  - [ ] Merge the two V4L2 layers. `lemnos-linux::v4l2::m2m` and its sys module predate
+        `v4l2::device`, so `BufType`, `Memory`, `Rect` and `Fraction` exist twice with the same
+        layout. Move m2m onto `lemnos-v4l2` types, then drop the old sys module.
+  - [ ] RGA and VGLite from the graph runtime, on V4L2 M2M and direct kernel routes. Untested
+        on board.
 - [ ] **5. Kernel module and Rust user-space drivers.** One small module of our own, its sources in
       Lemnos: claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:

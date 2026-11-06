@@ -761,6 +761,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-v4l2"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "libc",
+]
+
+[[package]]
 name = "lemnosd"
 version = "2.0.1-dev"
 dependencies = [

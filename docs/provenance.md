@@ -18,13 +18,15 @@ This is a record for the owning repositories; the design itself is in
 | `crates/native/src/regbus.rs` (`I2cRegisterBus`: big-endian encoding, `with_bursts`, one message per transfer on RP1) | `lemnos_hal::register::I2cRegisters` (blocking + async) |
 | `crates/sensor/src/lens.rs` (`VcmChip`, `VcmFormat::encode`) + `crates/native/src/lens.rs` (`I2cVcm`) | `lemnos-drivers-vcm` (DW9714, DW9807, DW9817, AK7375, custom formats; blocking + async) |
 | `SensorPins::{set_gpio, set_clock, set_supply}` (generic halves) | `OutputPin`, `lemnos_hal::{Regulator, ClockOutput}`; `GpioRegulator`, `FixedClock` |
+| `crates/kernel/src/{v4l2,subdev,media,event}*` (video nodes, buffers, controls, formats, capture, MMAP queues, subdevices, media topology, events; with `error`, `flags`, `fourcc`) | `lemnos-v4l2`, over the uAPI and calls in `lemnos-linux-sys::v4l2::device` and `lemnos-linux-sys::media` (2026-11-05). `bus` (the sensor bridge), `dma_heap` (in `lemnos-linux::dma`) and `v4l2::m2m` (in `lemnos-linux::v4l2::m2m`) did not move. |
 
 Later (not in this change): `crates/kernel/src/usbfs.rs` replaces `rusb` in the USB transport;
 sensor drivers (BMI088, BMM150, INA2xx) become no_std drivers (done: `lemnos-drivers-bmi088`, `lemnos-drivers-bmm150`, `lemnos-drivers-ina2xx`).
 
 ## What stays in Styx
 
-V4L2 video nodes, the media controller, subdevices, V4L2 events and controls, dma-heaps,
+Until the camera stack switches to `lemnos-v4l2` (block-move step 2): its own copies of the V4L2
+video nodes, the media controller, subdevices, V4L2 events and controls. Kept: dma-heaps,
 the `styx-sensor-bridge` protocol and `BridgePins`, `SubdevBus` / `KernelControl` (kernel
 sensor drivers), sensor descriptions and `SensorDriver`, the role-name mapping of a sensor's
 power sequence (`SensorPins` becomes a thin camera trait over Lemnos pins, regulators and

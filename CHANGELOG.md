@@ -8,6 +8,13 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-v4l2`, a new crate: safe V4L2 for Linux with no `unsafe` of its own. It covers:
+  - video nodes: formats, MMAP and DMA-buf buffer queues, controls, capture
+  - subdevices: formats, media-bus codes, routing, selections, frame intervals
+  - the media controller: topology, links, requests
+  - V4L2 events
+
+  It is built on the new `lemnos-linux-sys::v4l2::device` uAPI layer and the media calls (`media.rs`: topology, lock holder, requests), whose layouts and request numbers were checked against the kernel headers.
 - `docs/ipc.md`: the `lemnosd` socket protocol, byte for byte, as implemented, with test vectors pinned by `lemnos-ipc` tests, and the gaps the writing found.
 - `lemnos-capi`, a new crate: Lemnos's C surface 1.0 over the `lemnosd` device client (`include/lemnos.h`: version handshake, open/close, device and channel info, one-shot read, subscribe, next reading), built as a static and a shared library, and `Client`, a Rust wrapper that calls through the same functions. Tests run a C program linked against each library on mock hardware.
 - `lemnos_ipc::wire::Code`: the wire numbers of `DeviceClass`, `Quantity`, `Axis`, `DeviceStatus` and `ErrorKind`, now public.

@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-v4l2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Safe Rust interfaces to Linux V4L2 video nodes, subdevices, the media controller and V4L2 events, in pure Rust"
+documentation = "https://docs.rs/lemnos-v4l2"
+readme = "README.md"
+keywords = ["linux", "v4l2", "camera", "media-controller", "subdev"]
+categories = ["embedded", "hardware-support", "os::linux-apis"]
+
+[lints]
+workspace = true
+
+# Linux only: every system call goes through lemnos-linux-sys, the one crate
+# allowed `unsafe` in this workspace.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+lemnos-linux-sys = { workspace = true, default-features = false }
