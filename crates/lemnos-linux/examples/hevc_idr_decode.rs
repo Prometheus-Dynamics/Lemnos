@@ -32,6 +32,7 @@ use lemnos_linux::v4l2::{
     QueuePlane, fourcc,
 };
 use lemnos_linux_sys::v4l2::hevc as sys;
+use lemnos_v4l2::FourCc;
 
 /// The OUTPUT buffer: one slice NAL unit (the test stream's slice is ~4 KB).
 const SOURCE_BYTES: u32 = 1 << 20;
@@ -180,11 +181,11 @@ fn main() -> io::Result<()> {
             format: Format::Multi(PixFormatMplane {
                 width: w,
                 height: h,
-                pixelformat: sys::PIX_FMT_HEVC_SLICE,
+                fourcc: FourCc(sys::PIX_FMT_HEVC_SLICE),
                 field: 0,
                 colorspace: 0,
-                planes: source_planes,
-                num_planes: 1,
+                planes: source_planes[..1].to_vec(),
+                ..Default::default()
             }),
             memory: Memory::Mmap,
             buffers: 2,
@@ -194,11 +195,11 @@ fn main() -> io::Result<()> {
             format: Format::Multi(PixFormatMplane {
                 width: w,
                 height: h,
-                pixelformat: fourcc(b"NV12"),
+                fourcc: FourCc::new(b"NV12"),
                 field: 0,
                 colorspace: 0,
-                planes: capture_planes_fmt,
-                num_planes: 2,
+                planes: capture_planes_fmt[..2].to_vec(),
+                ..Default::default()
             }),
             memory: Memory::Mmap,
             buffers: 4,
@@ -291,8 +292,9 @@ fn main() -> io::Result<()> {
 
     // Read the frame back as linear NV12 at the visible width.
     let (pixfmt, luma_stride) = match s.capture_format() {
-        Format::Multi(m) => (m.pixelformat, m.planes[0].bytes_per_line),
-        Format::Single(p) => (p.pixelformat, p.bytes_per_line),
+        Format::Multi(m) => (m.fourcc.0, m.planes[0].bytes_per_line),
+        Format::Single(p) => (p.fourcc.0, p.bytes_per_line),
+        Format::Meta(_) => unreachable!("a session has no metadata queue"),
     };
     if pixfmt != fourcc(b"Nc12") || luma_stride != w.div_ceil(128) * 128 {
         return Err(io::Error::other(

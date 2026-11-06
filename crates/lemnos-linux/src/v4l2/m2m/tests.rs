@@ -6,9 +6,12 @@
 use super::*;
 #[cfg(feature = "dma")]
 use crate::dma::{Access, DmaHeap};
+use crate::v4l2::PlaneFormat;
+use crate::v4l2::sys_format::{from_sys, plane_count, to_sys};
 use crate::v4l2::{
     CID_HFLIP, CID_VFLIP, ExtControl, ExtValue, PixFormat, PixFormatMplane, Rect, fourcc,
 };
+use lemnos_v4l2::FourCc;
 use std::os::fd::AsFd;
 
 /// A queue with no device behind it, for the bookkeeping checks.
@@ -17,7 +20,7 @@ fn queue(count: u32, memory: Memory, num_planes: usize) -> Queue {
         Format::Single(PixFormat::default())
     } else {
         Format::Multi(PixFormatMplane {
-            num_planes: num_planes as u32,
+            planes: vec![PlaneFormat::default(); num_planes],
             ..Default::default()
         })
     };
@@ -93,7 +96,7 @@ fn a_session_refuses_a_node_that_is_not_m2m() {
         buffers: 1,
         crop: None,
     };
-    assert!(M2mSession::open("/dev/null", setup, setup).is_err());
+    assert!(M2mSession::open("/dev/null", setup.clone(), setup).is_err());
 }
 
 /// The first memory-to-memory node whose driver is `driver`.
@@ -112,7 +115,7 @@ fn rgb_setup(memory: Memory) -> QueueSetup {
         format: Format::Single(PixFormat {
             width: 64,
             height: 48,
-            pixelformat: fourcc(b"RGB3"),
+            fourcc: FourCc::new(b"RGB3"),
             bytes_per_line: 192,
             size_image: 64 * 48 * 3,
             ..Default::default()
@@ -134,7 +137,7 @@ fn vim2m_round_trips_mmap_frames() {
         return;
     };
     let mut s = M2mSession::open(&path, rgb_setup(Memory::Mmap), rgb_setup(Memory::Mmap)).unwrap();
-    assert_eq!(s.output_format().num_planes(), 1);
+    assert_eq!(plane_count(s.output_format()), 1);
     let mmap = |bytes: u32| {
         [QueuePlane {
             memory: PlaneMemory::Mmap,
@@ -282,21 +285,22 @@ fn m2m_nodes(driver: &str) -> Vec<std::path::PathBuf> {
 fn codec(driver: &str, output: Format, capture: Format, memory: Memory) -> Option<M2mSession> {
     m2m_nodes(driver).into_iter().find_map(|path| {
         let out = QueueSetup {
-            format: output,
+            format: output.clone(),
             memory,
             buffers: 2,
             crop: None,
         };
         let cap = QueueSetup {
-            format: capture,
+            format: capture.clone(),
             memory,
             buffers: 2,
             crop: None,
         };
         let s = M2mSession::open(&path, out, cap).ok()?;
         let kept = |f: &Format| match f {
-            Format::Single(p) => p.pixelformat,
-            Format::Multi(p) => p.pixelformat,
+            Format::Single(p) => p.fourcc.0,
+            Format::Multi(p) => p.fourcc.0,
+            Format::Meta(_) => 0,
         };
         (kept(s.output_format()) == kept(&output) && kept(s.capture_format()) == kept(&capture))
             .then_some(s)
@@ -319,12 +323,10 @@ fn plane(bytes: u32) -> [QueuePlane<'static>; 1] {
 fn vicodec_encodes_and_drains() {
     const W: u32 = 64;
     const H: u32 = 48;
-    let yuv = fourcc(b"YU12");
-    let fwht = fourcc(b"FWHT");
     let yuv_format = Format::Single(PixFormat {
         width: W,
         height: H,
-        pixelformat: yuv,
+        fourcc: FourCc::new(b"YU12"),
         bytes_per_line: W,
         size_image: W * H * 3 / 2,
         ..Default::default()
@@ -335,7 +337,7 @@ fn vicodec_encodes_and_drains() {
         Format::Single(PixFormat {
             width: W,
             height: H,
-            pixelformat: fwht,
+            fourcc: FourCc::new(b"FWHT"),
             size_image: W * H * 3,
             ..Default::default()
         }),
@@ -396,35 +398,36 @@ fn vicodec_decoder(w: u32, h: u32) -> Option<M2mSession> {
     let fwht = Format::Single(PixFormat {
         width: w,
         height: h,
-        pixelformat: fourcc(b"FWHT"),
+        fourcc: FourCc::new(b"FWHT"),
         size_image: w * h * 3,
         ..Default::default()
     });
     let yuv = Format::Single(PixFormat {
         width: w,
         height: h,
-        pixelformat: fourcc(b"YU12"),
+        fourcc: FourCc::new(b"YU12"),
         bytes_per_line: w,
         size_image: w * h * 3 / 2,
         ..Default::default()
     });
     m2m_nodes("vicodec").into_iter().find_map(|path| {
         let out = QueueSetup {
-            format: fwht,
+            format: fwht.clone(),
             memory: Memory::Mmap,
             buffers: 4,
             crop: None,
         };
         let cap = QueueSetup {
-            format: yuv,
+            format: yuv.clone(),
             memory: Memory::Mmap,
             buffers: 0,
             crop: None,
         };
         let s = M2mSession::open(&path, out, cap).ok()?;
         let kept = |f: &Format, code: &[u8; 4]| match f {
-            Format::Single(p) => p.pixelformat == fourcc(code),
-            Format::Multi(p) => p.pixelformat == fourcc(code),
+            Format::Single(p) => p.fourcc.0 == fourcc(code),
+            Format::Multi(p) => p.fourcc.0 == fourcc(code),
+            Format::Meta(_) => false,
         };
         (kept(s.output_format(), b"FWHT") && kept(s.capture_format(), b"YU12")).then_some(s)
     })
@@ -435,7 +438,7 @@ fn vicodec_encode(w: u32, h: u32, frames: u64) -> Option<Vec<Vec<u8>>> {
     let yuv = Format::Single(PixFormat {
         width: w,
         height: h,
-        pixelformat: fourcc(b"YU12"),
+        fourcc: FourCc::new(b"YU12"),
         bytes_per_line: w,
         size_image: w * h * 3 / 2,
         ..Default::default()
@@ -443,7 +446,7 @@ fn vicodec_encode(w: u32, h: u32, frames: u64) -> Option<Vec<Vec<u8>>> {
     let fwht = Format::Single(PixFormat {
         width: w,
         height: h,
-        pixelformat: fourcc(b"FWHT"),
+        fourcc: FourCc::new(b"FWHT"),
         size_image: w * h * 3,
         ..Default::default()
     });
@@ -453,6 +456,7 @@ fn vicodec_encode(w: u32, h: u32, frames: u64) -> Option<Vec<Vec<u8>>> {
     let yuv_len = match enc.output_format() {
         Format::Single(p) => p.size_image as usize,
         Format::Multi(p) => p.planes[0].size_image as usize,
+        Format::Meta(_) => 0,
     };
     for i in 0..enc.capture_buffers() {
         enc.queue_capture(i, &plane(0)).unwrap();
@@ -809,7 +813,7 @@ fn the_capture_format_is_read_back_after_the_source_is_set() {
     let yuv = Format::Single(PixFormat {
         width: W,
         height: H,
-        pixelformat: fourcc(b"YU12"),
+        fourcc: FourCc::new(b"YU12"),
         bytes_per_line: W,
         size_image: W * H * 3 / 2,
         ..Default::default()
@@ -817,7 +821,7 @@ fn the_capture_format_is_read_back_after_the_source_is_set() {
     let fwht = Format::Single(PixFormat {
         width: W,
         height: H,
-        pixelformat: fourcc(b"FWHT"),
+        fourcc: FourCc::new(b"FWHT"),
         size_image: W * H * 3,
         ..Default::default()
     });
@@ -827,7 +831,7 @@ fn the_capture_format_is_read_back_after_the_source_is_set() {
     };
     // What the driver reports now for the capture queue, after both formats
     // were set, must be what the session stores.
-    let buf_type = if enc.capture_format().is_multiplanar() {
+    let buf_type = if matches!(enc.capture_format(), Format::Multi(_)) {
         sys::BufType::VideoCaptureMplane
     } else {
         sys::BufType::VideoCapture
@@ -835,7 +839,7 @@ fn the_capture_format_is_read_back_after_the_source_is_set() {
     let driver = sys::g_fmt(enc.as_fd(), buf_type).unwrap();
     assert_eq!(
         *enc.capture_format(),
-        driver,
+        from_sys(driver),
         "stored capture format is current"
     );
 }
@@ -853,14 +857,14 @@ fn the_capture_size_follows_the_source_and_the_session_reports_that() {
     let fwht = Format::Single(PixFormat {
         width: W,
         height: H,
-        pixelformat: fourcc(b"FWHT"),
+        fourcc: FourCc::new(b"FWHT"),
         size_image: W * H * 3,
         ..Default::default()
     });
     let yuv = Format::Single(PixFormat {
         width: W,
         height: H,
-        pixelformat: fourcc(b"YU12"),
+        fourcc: FourCc::new(b"YU12"),
         bytes_per_line: W,
         size_image: W * H * 3 / 2,
         ..Default::default()
@@ -868,15 +872,24 @@ fn the_capture_size_follows_the_source_and_the_session_reports_that() {
     let size = |f: &Format| match f {
         Format::Single(p) => p.size_image,
         Format::Multi(p) => p.planes[0].size_image,
+        Format::Meta(_) => 0,
     };
     let Some(path) = m2m_nodes("vicodec").into_iter().find(|path| {
         let Ok(file) = sys::open_node(path) else {
             return false;
         };
-        sys::s_fmt(file.as_fd(), sys::BufType::VideoOutput, &yuv)
-            .is_ok_and(|f| matches!(f, Format::Single(p) if p.pixelformat == fourcc(b"YU12")))
-            && sys::s_fmt(file.as_fd(), sys::BufType::VideoCapture, &fwht)
-                .is_ok_and(|f| matches!(f, Format::Single(p) if p.pixelformat == fourcc(b"FWHT")))
+        sys::s_fmt(
+            file.as_fd(),
+            sys::BufType::VideoOutput,
+            &to_sys(&yuv).unwrap(),
+        )
+        .is_ok_and(|f| matches!(f, sys::Format::Single(p) if p.pixelformat == fourcc(b"YU12")))
+            && sys::s_fmt(
+                file.as_fd(),
+                sys::BufType::VideoCapture,
+                &to_sys(&fwht).unwrap(),
+            )
+            .is_ok_and(|f| matches!(f, sys::Format::Single(p) if p.pixelformat == fourcc(b"FWHT")))
     }) else {
         crate::tests::skip("no vicodec encoder node (modprobe vicodec)");
         return;
@@ -885,12 +898,22 @@ fn the_capture_size_follows_the_source_and_the_session_reports_that() {
     // The coded format in the other order: set first, then the source. The
     // size changes, so reading the format back is not a no-op.
     let raw = sys::open_node(&path).unwrap();
-    let coded_first = sys::s_fmt(raw.as_fd(), sys::BufType::VideoCapture, &fwht).unwrap();
-    sys::s_fmt(raw.as_fd(), sys::BufType::VideoOutput, &yuv).unwrap();
+    let coded_first = sys::s_fmt(
+        raw.as_fd(),
+        sys::BufType::VideoCapture,
+        &to_sys(&fwht).unwrap(),
+    )
+    .unwrap();
+    sys::s_fmt(
+        raw.as_fd(),
+        sys::BufType::VideoOutput,
+        &to_sys(&yuv).unwrap(),
+    )
+    .unwrap();
     let coded_after = sys::g_fmt(raw.as_fd(), sys::BufType::VideoCapture).unwrap();
     assert_ne!(
-        size(&coded_first),
-        size(&coded_after),
+        size(&from_sys(coded_first)),
+        size(&from_sys(coded_after)),
         "the driver resizes the coded buffer"
     );
     drop(raw);
@@ -916,10 +939,10 @@ fn the_capture_size_follows_the_source_and_the_session_reports_that() {
     let driver = sys::g_fmt(session.as_fd(), sys::BufType::VideoCapture).unwrap();
     assert_eq!(
         *session.capture_format(),
-        driver,
+        from_sys(driver),
         "the stored format is the driver's now"
     );
-    assert!(size(&driver) > 0);
+    assert!(size(&from_sys(driver)) > 0);
 }
 
 /// The 64x48 RGB24 test frame: pixel (x, y) is distinct, so a mirror shows.
@@ -1137,14 +1160,14 @@ fn a_stateless_frame_decodes_through_a_request() {
     let fwht = Format::Single(PixFormat {
         width: w,
         height: hgt,
-        pixelformat: fourcc(b"SFWH"),
+        fourcc: FourCc::new(b"SFWH"),
         size_image: w * hgt * 3,
         ..Default::default()
     });
     let yuv = Format::Single(PixFormat {
         width: w,
         height: hgt,
-        pixelformat: fourcc(b"YU12"),
+        fourcc: FourCc::new(b"YU12"),
         bytes_per_line: w,
         size_image: w * hgt * 3 / 2,
         ..Default::default()

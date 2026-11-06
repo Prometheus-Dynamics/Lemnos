@@ -53,7 +53,10 @@ s.stream_off()?;                                  // every buffer comes back
   non-blocking. V4L2 memory-to-memory state is per file handle, so a caller that sets controls
   (bitrate, profile, GOP) does it through the session's `AsFd` (`VIDIOC_S_EXT_CTRLS` on that
   descriptor): the session keeps the descriptor it was given.
-- `Format`, `PixFormat`, `PixFormatMplane`, `PlaneFormat`, `fourcc(b"NV12")` are plain values.
+- `Format`, `PixFormat`, `PixFormatMplane`, `PlaneFormat` are `lemnos-v4l2`'s (`lemnos_v4l2::v4l2`, re-exported here):
+  `PixFormat::fourcc` is a `FourCc`, `PixFormatMplane::planes` is a `Vec` (its length is the plane count),
+  and `QueueSetup` is not `Copy`. The sys calls take their own copies; the conversion is internal.
+  Flags and encodings the sys calls do not carry read back as zero.
 - `set_output_crop(rect)` changes the source crop between frames (a scaler's source window).
   It returns the rectangle the driver kept. The driver refuses it while the queue streams
   (`EBUSY` on vim2m); the tests check that.
@@ -62,7 +65,7 @@ s.stream_off()?;                                  // every buffer comes back
   `lemnos_linux::v4l2::find_m2m("rockchip-rga")` scans `/dev/video*` in numeric order and
   returns the first M2M node of that driver with its capability, or `None`. Nodes that
   fail `QUERYCAP` are skipped. Pick `Format::Single` or `Format::Multi` from
-  `is_m2m_multiplanar()` before opening.
+  `is_m2m_multiplanar()` before opening. Metadata formats are refused.
 - Buffers are tracked by index in a 64-bit mask, so a session has at most 64 per queue. A
   buffer is the caller's between `dequeue_*` and `queue_*`, and the device's in between.
 - `queue_output` takes the timestamp; the capture buffer carries it back

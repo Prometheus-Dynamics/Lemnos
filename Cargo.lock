@@ -580,6 +580,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux",
  "lemnos-linux-sys",
+ "lemnos-v4l2",
 ]
 
 [[package]]
@@ -680,6 +681,7 @@ dependencies = [
  "lemnos-linux-sys",
  "lemnos-uevent",
  "lemnos-usb",
+ "lemnos-v4l2",
  "serialport",
  "tokio",
  "tracing",

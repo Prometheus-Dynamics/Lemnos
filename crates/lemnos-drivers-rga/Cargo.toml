@@ -18,6 +18,7 @@ workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux = { workspace = true, features = ["v4l2-m2m"] }
 lemnos-linux-sys = { workspace = true }
+lemnos-v4l2 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-linux = { workspace = true, features = ["v4l2-m2m", "dma"] }

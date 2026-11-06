@@ -9,6 +9,7 @@
 pub mod hevc;
 pub mod m2m;
 pub mod request;
+mod sys_format;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -68,6 +69,8 @@ pub use lemnos_linux_sys::v4l2::{
     BUF_FLAG_PFRAME, BUF_FLAG_REQUEST_FD, BufType, BufferInfo, CAP_VIDEO_M2M, CAP_VIDEO_M2M_MPLANE,
     CID_BG_COLOR, CID_HFLIP, CID_ROTATE, CID_VFLIP, CTRL_WHICH_REQUEST_VAL, Capability,
     DEC_CMD_STOP, Dequeued, ENC_CMD_STOP, EVENT_EOS, EVENT_SOURCE_CHANGE, Event, ExtControl,
-    ExtValue, Format, FormatDesc, MAX_PLANES, Memory, PixFormat, PixFormatMplane, PlaneFormat,
-    PlaneInfo, PlaneMemory, QueuePlane, Rect, Requested, fourcc,
+    ExtValue, MAX_PLANES, Memory, PlaneInfo, PlaneMemory, QueuePlane, Rect, Requested, fourcc,
 };
+// The session's formats are `lemnos-v4l2`'s (the sys calls' copies are internal).
+#[cfg(feature = "v4l2-m2m")]
+pub use lemnos_v4l2::v4l2::{Format, FormatDesc, PixFormat, PixFormatMplane, PlaneFormat};

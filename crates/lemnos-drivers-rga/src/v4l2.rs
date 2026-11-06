@@ -13,6 +13,8 @@ use lemnos_linux::v4l2::{
     PlaneMemory, QueuePlane,
 };
 
+use lemnos_v4l2::FourCc;
+
 use crate::Transform;
 use crate::format::{Layout, Rect};
 
@@ -225,25 +227,22 @@ impl Session {
 fn format(layout: Layout, mplane: bool) -> Format {
     let size_image = layout.frame_len() as u32;
     if mplane {
-        let mut planes = [PlaneFormat::default(); lv::MAX_PLANES];
-        planes[0] = PlaneFormat {
-            size_image,
-            bytes_per_line: layout.stride,
-        };
         Format::Multi(PixFormatMplane {
             width: layout.width,
             height: layout.height,
-            pixelformat: layout.format.fourcc(),
+            fourcc: FourCc(layout.format.fourcc()),
             field: FIELD_NONE,
-            planes,
-            num_planes: 1,
+            planes: vec![PlaneFormat {
+                size_image,
+                bytes_per_line: layout.stride,
+            }],
             ..Default::default()
         })
     } else {
         Format::Single(PixFormat {
             width: layout.width,
             height: layout.height,
-            pixelformat: layout.format.fourcc(),
+            fourcc: FourCc(layout.format.fourcc()),
             field: FIELD_NONE,
             bytes_per_line: layout.stride,
             size_image,
@@ -255,8 +254,9 @@ fn format(layout: Layout, mplane: bool) -> Format {
 /// The frame size of the format the driver kept, or an error when it did not take `layout`.
 fn kept(format: &Format, layout: Layout) -> io::Result<usize> {
     let (got, w, h, size) = match format {
-        Format::Single(p) => (p.pixelformat, p.width, p.height, p.size_image),
-        Format::Multi(m) => (m.pixelformat, m.width, m.height, m.planes[0].size_image),
+        Format::Single(p) => (p.fourcc.0, p.width, p.height, p.size_image),
+        Format::Multi(m) => (m.fourcc.0, m.width, m.height, m.planes[0].size_image),
+        Format::Meta(_) => (0, 0, 0, 0),
     };
     if got != layout.format.fourcc() || (w, h) != (layout.width, layout.height) {
         return Err(io::Error::other(format!(

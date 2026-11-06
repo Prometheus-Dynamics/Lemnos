@@ -55,15 +55,12 @@ Everything planned, in order. Execution is paused until the user starts it.
   - [x] V4L2, subdev and media: `lemnos-v4l2` (5,274 lines, no `unsafe`, 35 tests) over the sys
         uAPI layer. All of the camera stack's generic `crates/kernel` code moved except `bus`,
         `dma_heap` (already `lemnos-linux::dma`) and `v4l2::m2m`.
-  - [ ] Merge the two V4L2 layers. `lemnos-linux::v4l2::m2m` and its sys module predate
-        `v4l2::device`, so `BufType`, `Memory`, `Rect` and `Fraction` exist twice with the same
-        layout. Move m2m onto `lemnos-v4l2` types, then drop the old sys module.
-        Done on `lemnos-r8-m2m`: the sys wrappers sit on `v4l2::device` and its copy of the uAPI
-        (`v4l2/uapi.rs`) is gone; `BufType` (moved from `lemnos-v4l2`) and `Memory` (ditto,
-        `Dmabuf` now `DmaBuf`) and `Rect` each have one definition, re-exported by `lemnos-v4l2`.
-        `Fraction` had only the one. Not ticked: m2m's safe types (`Format`, `PixFormat`,
-        `PixFormatMplane`, `PlaneFormat`, `FormatDesc`) still differ from `lemnos-v4l2`'s of the
-        same names, and `lemnos-linux` does not depend on `lemnos-v4l2`.
+  - [x] Merge the two V4L2 layers. `lemnos-linux::v4l2::m2m` and its sys module predate
+        `v4l2::device`, so `BufType`, `Memory`, `Rect` and `Fraction` existed twice. Done on
+        `lemnos-r8-m2m`: the sys wrappers sit on `v4l2::device` (its copy of the uAPI is gone);
+        `BufType`, `Memory` and `Rect` are each defined once, re-exported by `lemnos-v4l2`;
+        `Fraction` had one. m2m's format types are `lemnos-v4l2`'s (`lemnos-linux` takes it
+        under `v4l2-m2m`), converted at the sys calls in `v4l2/sys_format.rs`.
   - [x] PiSP: `lemnos-drivers-pisp` (the camera stack's `crates/pisp`, bb34279c): uAPI layouts, front and back end builders, tiling, statistics, and the `device` layer on `lemnos-v4l2` and `lemnos-linux` (no `unsafe`; the line timer's volatile accesses are in `lemnos-linux-sys::mmap`). Untested on board: the `device` layer since the move (the board results in the source are the earlier implementation's). `layout-check/run.sh` matches the Raspberry Pi 7.2 kernel tree (53679a578), the boards' kernel.
   - [ ] RGA and VGLite from the graph runtime, on V4L2 M2M and direct kernel routes. Untested
         on board.

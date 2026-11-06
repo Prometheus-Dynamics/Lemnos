@@ -12,18 +12,19 @@
 //!
 //! ```no_run
 //! use lemnos_linux::v4l2::m2m::{M2mSession, QueueSetup};
-//! use lemnos_linux::v4l2::{Format, Memory, PixFormat, PlaneMemory, QueuePlane, fourcc};
+//! use lemnos_linux::v4l2::{Format, Memory, PixFormat, PlaneMemory, QueuePlane};
+//! use lemnos_v4l2::FourCc;
 //! use std::time::Duration;
 //!
 //! let rgb = Format::Single(PixFormat {
 //!     width: 64,
 //!     height: 48,
-//!     pixelformat: fourcc(b"RGB3"),
+//!     fourcc: FourCc::new(b"RGB3"),
 //!     bytes_per_line: 192,
 //!     size_image: 9216,
 //!     ..Default::default()
 //! });
-//! let setup = |memory| QueueSetup { format: rgb, memory, buffers: 2, crop: None };
+//! let setup = |memory| QueueSetup { format: rgb.clone(), memory, buffers: 2, crop: None };
 //! let mut s = M2mSession::open("/dev/video0", setup(Memory::Mmap), setup(Memory::Mmap))?;
 //! let frame = [0u8; 9216];
 //! let mmap = [QueuePlane { memory: PlaneMemory::Mmap, length: 0, bytes_used: 0, data_offset: 0 }];
@@ -59,6 +60,7 @@ use lemnos_linux_sys::poll::{self, PollFd};
 use lemnos_linux_sys::v4l2 as sys;
 
 use super::request::Request;
+use super::sys_format::{from_sys, plane_count, to_sys};
 use super::{
     BufType, Capability, Dequeued, Event, ExtControl, Format, Memory, PlaneMemory, QueuePlane, Rect,
 };
@@ -82,7 +84,7 @@ impl SourceChange {
 pub const MAX_BUFFERS: u32 = 64;
 
 /// How one queue is set up when a session opens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueSetup {
     /// The format to set; its single- or multi-planar layout gives the queue's type.
     pub format: Format,
@@ -142,8 +144,8 @@ impl Queue {
             ));
         }
         let buf_type = queue_type(&setup.format, output);
-        let format = sys::s_fmt(fd, buf_type, &setup.format)?;
-        if format.num_planes() != setup.format.num_planes() {
+        let format = from_sys(sys::s_fmt(fd, buf_type, &to_sys(&setup.format)?)?);
+        if plane_count(&format) != plane_count(&setup.format) {
             return Err(invalid("the driver changed a queue's plane count".into()));
         }
         let crop = match setup.crop {
@@ -165,8 +167,8 @@ impl Queue {
     /// was set: an encoder resizes its coded buffers (`sizeimage`) from the
     /// source format, so the format set before it can be stale.
     fn refresh_format(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
-        let format = sys::g_fmt(fd, self.buf_type)?;
-        if format.num_planes() != self.format.num_planes() {
+        let format = from_sys(sys::g_fmt(fd, self.buf_type)?);
+        if plane_count(&format) != plane_count(&self.format) {
             return Err(invalid("the driver changed a queue's plane count".into()));
         }
         self.format = format;
@@ -185,7 +187,7 @@ impl Queue {
         self.count = granted;
         self.maps.clear();
         if self.memory == Memory::Mmap {
-            let planes = self.format.num_planes() as u32;
+            let planes = plane_count(&self.format) as u32;
             self.maps.reserve(granted as usize);
             for index in 0..granted {
                 let info = sys::querybuf(fd, self.buf_type, index, planes)?;
@@ -205,7 +207,7 @@ impl Queue {
     }
 
     fn planes(&self) -> u32 {
-        self.format.num_planes() as u32
+        plane_count(&self.format) as u32
     }
 
     fn check_index(&self, index: u32) -> io::Result<()> {
@@ -220,11 +222,11 @@ impl Queue {
         if self.queued & (1 << index) != 0 {
             return Err(invalid(format!("buffer {index} is already queued")));
         }
-        if planes.len() != self.format.num_planes() {
+        if planes.len() != plane_count(&self.format) {
             return Err(invalid(format!(
                 "{} planes for a {}-plane queue",
                 planes.len(),
-                self.format.num_planes()
+                plane_count(&self.format)
             )));
         }
         let want_mmap = self.memory == Memory::Mmap;
@@ -252,7 +254,7 @@ impl Queue {
 /// The queue type a format takes: output for the source side, capture for the
 /// destination, single- or multi-planar from the format.
 fn queue_type(format: &Format, output: bool) -> BufType {
-    match (format.is_multiplanar(), output) {
+    match (matches!(format, Format::Multi(_)), output) {
         (false, false) => BufType::VideoCapture,
         (false, true) => BufType::VideoOutput,
         (true, false) => BufType::VideoCaptureMplane,

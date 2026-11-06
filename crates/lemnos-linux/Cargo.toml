@@ -32,7 +32,7 @@ gpio-sysfs = []
 # DMA buffers: dma-heap allocation, dma-buf sync, mappings and sync-file fences (`dma`).
 dma = []
 # V4L2 memory-to-memory sessions (`v4l2::m2m`).
-v4l2-m2m = []
+v4l2-m2m = ["dep:lemnos-v4l2"]
 # Stateless HEVC controls from parsed headers (`v4l2::hevc`, needs `v4l2-m2m`).
 v4l2-hevc = ["v4l2-m2m", "dep:lemnos-hevc"]
 # GPIO character device, uAPI v2 (Linux 5.10+).
@@ -51,6 +51,7 @@ lemnos-discovery.workspace = true
 lemnos-hal = { workspace = true, features = ["std"] }
 lemnos-linux-sys = { workspace = true, default-features = false }
 lemnos-uevent.workspace = true
+lemnos-v4l2 = { workspace = true, optional = true }
 lemnos-usb = { workspace = true, optional = true }
 serialport = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["net"] }
