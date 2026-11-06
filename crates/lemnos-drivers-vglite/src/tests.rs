@@ -571,3 +571,95 @@ const PALETTE: [u32; 324] = [
     0x10000007, 0x00000000, 0x20000007, 0x00000000, 0x30010a1b, 0x00000001, 0x10000007, 0x00000000,
     0x20000007, 0x00000000, 0x00000000, 0x00000000,
 ];
+
+// The stroke draw: the outline (inline data) and the draw words against the vendor's fresh-state
+// streams for the same outlines (the oracle's `DRAW_O_*`, one process per fixture).
+
+const STROKE_COLOUR: u32 = 0xFF11_2233;
+
+fn stroke_words(outline: &[u8], target: Bound<'_, Scratch>) -> io::Result<Vec<u32>> {
+    let mut stream = Stream::new(1 << 17, tess());
+    let drew = command::encode(
+        Op::Stroke {
+            outline,
+            colour: STROKE_COLOUR,
+        },
+        &mut stream,
+        target,
+        None,
+    )?;
+    assert!(drew, "a stroke draws");
+    stream.finish()?;
+    Ok(stream.words().to_vec())
+}
+
+#[test]
+fn open_stroke_draws_match_the_vendor_word_for_word() {
+    use crate::stroke_tests::*;
+    let t = target_buffer();
+    let target = bound(&t, Format::Rgba8888, 16, 16, 64);
+    let cases: [(&[u8], &[u32]); 17] = [
+        (GEOM_O_H_BUTT, &DRAW_O_H_BUTT),
+        (GEOM_O_H_SQUARE, &DRAW_O_H_SQUARE),
+        (GEOM_O_DIAG_BUTT, &DRAW_O_DIAG_BUTT),
+        (GEOM_O_DIAG_SQUARE, &DRAW_O_DIAG_SQUARE),
+        (GEOM_O_API_H_SQUARE, &DRAW_O_API_H_SQUARE),
+        (GEOM_O_API_DIAG_SQUARE, &DRAW_O_API_DIAG_SQUARE),
+        (GEOM_O_POLY_MITER, &DRAW_O_POLY_MITER),
+        (GEOM_O_POLY_BEVEL, &DRAW_O_POLY_BEVEL),
+        (GEOM_O_POLY_MITER_LIMITED, &DRAW_O_POLY_MITER_LIMITED),
+        (GEOM_O_CTL_LIMITED_BEVEL, &DRAW_O_CTL_LIMITED_BEVEL),
+        (GEOM_O_POLY_MITER_FALLBACK, &DRAW_O_POLY_MITER_FALLBACK),
+        (GEOM_O_CTL_FALLBACK_BEVEL, &DRAW_O_CTL_FALLBACK_BEVEL),
+        (GEOM_O_POLY_MITER_SQ, &DRAW_O_POLY_MITER_SQ),
+        (GEOM_O_SINGLE_BUTT_WIDE, &DRAW_O_SINGLE_BUTT_WIDE),
+        (GEOM_O_POLY3_SQUARE_W3, &DRAW_O_POLY3_SQUARE_W3),
+        (GEOM_O_POLY_BEVEL_W2, &DRAW_O_POLY_BEVEL_W2),
+        (GEOM_O_DUP_POINTS, &DRAW_O_DUP_POINTS),
+    ];
+    for (i, (outline, want)) in cases.iter().enumerate() {
+        // The oracle submits the context's set-up with the first draw of a process (no finish
+        // between init and draw), so the first 24 words of INIT (the tessellation and colour-key
+        // writes) come before the draw.
+        let mut full = INIT[..24].to_vec();
+        full.extend(stroke_words(outline, target).unwrap());
+        assert_eq!(full.as_slice(), *want, "fixture {i}");
+    }
+}
+
+#[test]
+fn a_line_is_the_square_capped_stroke_at_pixel_centres() {
+    // `line_bytes` from (2, 3) to (12, 3) builds the points (2.5, 3.5) and (12.5, 3.5): the open
+    // fixture `o_api_h_square` is exactly that outline.
+    use crate::stroke::{Cap, Join, Subpath, outline};
+    use crate::stroke_tests::GEOM_O_API_H_SQUARE;
+    let got = outline(
+        &[(2.5, 3.5), (12.5, 3.5)],
+        1.0,
+        Cap::Square,
+        Join::Miter,
+        4.0,
+        Subpath::Open,
+    )
+    .unwrap();
+    assert_eq!(got.as_slice(), GEOM_O_API_H_SQUARE);
+}
+
+#[test]
+fn a_stroke_larger_than_the_command_buffer_is_refused() {
+    use crate::stroke_tests::GEOM_O_POLY_MITER;
+    let t = target_buffer();
+    let target = bound(&t, Format::Rgba8888, 16, 16, 64);
+    let mut stream = Stream::new(64, tess());
+    let err = command::encode(
+        Op::Stroke {
+            outline: GEOM_O_POLY_MITER,
+            colour: STROKE_COLOUR,
+        },
+        &mut stream,
+        target,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::OutOfMemory);
+}

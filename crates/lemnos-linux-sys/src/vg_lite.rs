@@ -769,9 +769,18 @@ impl Layout {
 
 /// Registers a stream may write with a value of the caller's choosing. None of them holds an
 /// address or an extent. Their meaning beyond the vendor's use is unverified on board.
+///
+/// The path-draw group is written by [`Stream::plain`] in a stroke draw (`vg_lite_draw`, the
+/// stroke branch of the non-parallel path): 0x0A34 is the tessellation control word (format,
+/// quality, the stroke bit; the blit and clear write it as zero through [`Stream::zero`]);
+/// 0x0A3B and 0x0A3C are the path tessellation scale (1.0) and bias (0.0), named so in the
+/// vendor; 0x0A40 to 0x0A45 are the path matrix as floats; 0x0ACD and 0x0ACE are the matrix's
+/// translation words, the values the vendor pushes beside it (unverified on board). The window
+/// registers 0x0A39, 0x0A3A and 0x0A3D are written only by [`Stream::tessellation_window`].
 const PLAIN_REGISTERS: &[u32] = &[
     0x0A00, 0x0A02, 0x0A18, 0x0A19, 0x0A1A, 0x0A1B, 0x0A1C, 0x0A1D, 0x0A1E, 0x0A1F, 0x0A20, 0x0A21,
-    0x0A22, 0x0A25,
+    0x0A22, 0x0A25, 0x0A34, 0x0A3B, 0x0A3C, 0x0A40, 0x0A41, 0x0A42, 0x0A43, 0x0A44, 0x0A45, 0x0ACD,
+    0x0ACE,
 ];
 /// Colour-key registers: written with values of the caller's choosing, as the vendor's set-up
 /// does (zero).
@@ -786,6 +795,8 @@ const SEMAPHORE_7: u32 = 0x1000_0007;
 const STALL_7: u32 = 0x2000_0007;
 /// `VG_LITE_DATA(1)`, the header of a rectangle or a pixel-engine clear.
 const DATA_1: u32 = 0x4000_0001;
+/// `VG_LITE_DATA(n)`: the header of `n` eight-byte units of inline data (`push_data`).
+const DATA: u32 = 0x4000_0000;
 /// `VG_LITE_STATES(256, 0x0B00)`: the colour table's run header.
 const CLUT_HEADER: u32 = 0x3100_0B00;
 /// `VG_LITE_NOP()`: pads the colour table to an even count.
@@ -797,6 +808,7 @@ const NOP: u32 = 0x8000_0000;
 /// A finished stream runs with [`Context::run`].
 pub struct Stream<'a> {
     words: Vec<u32>,
+    capacity: usize,
     tessellation: Tessellation,
     /// The render target's width, height and bytes, once one is set.
     target: Option<(u32, u32, u32)>,
@@ -813,6 +825,7 @@ impl<'a> Stream<'a> {
         // The capacity is checked at run; reserving only avoids regrowth for a usual stream.
         Self {
             words: Vec::with_capacity(capacity.min(4096) / 4),
+            capacity,
             tessellation,
             target: None,
             kernel_only: true,
@@ -962,6 +975,75 @@ impl<'a> Stream<'a> {
         self.state(0x0AC8, tess.size);
         self.state(0x0ACB, tess.physical.wrapping_add(tess.size));
         self.state(0x0ACC, tess.count_size);
+        Ok(())
+    }
+
+    /// The tessellation window of a path draw (`vg_lite_draw`, one window): the window's origin
+    /// `(x, y)` and size, written to 0x0A39 and 0x0A3A, with the tessellation buffer's size in
+    /// 64-byte units to 0x0A3D (from this context, not the caller), after 0x0A1B as `0x00011000`.
+    /// The window must lie inside the render target, which must already be set.
+    pub fn tessellation_window(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> io::Result<()> {
+        self.open()?;
+        let (tw, th, _) = self.target_size()?;
+        let inside = width > 0
+            && height > 0
+            && x.checked_add(width).is_some_and(|r| r <= tw)
+            && y.checked_add(height).is_some_and(|b| b <= th);
+        if !inside {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("window {x},{y} {width}x{height} is outside the {tw}x{th} target"),
+            ));
+        }
+        let tess = self.tessellation;
+        self.state(0x0A1B, 0x0001_1000);
+        self.state(0x0A3D, tess.size / 64);
+        self.state(0x0A39, x | (y << 16));
+        self.state(0x0A3A, width | (height << 16));
+        Ok(())
+    }
+
+    /// Inline data (`push_data`): a data header of the padded length in eight-byte units, a zero
+    /// word, the bytes as little-endian words, then zero words to the padded length. The data is
+    /// part of the command buffer, so it is bounded by the buffer's capacity and nothing else:
+    /// no address is involved. `data` must be whole words and not empty.
+    pub fn path_data(&mut self, data: &[u8]) -> io::Result<()> {
+        self.open()?;
+        if data.is_empty() || !data.len().is_multiple_of(4) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} bytes of inline data: whole words only", data.len()),
+            ));
+        }
+        let padded = data.len().next_multiple_of(8);
+        let block = 8 + padded;
+        if self.words.len() * 4 + block > self.capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                format!(
+                    "{} bytes of inline path data do not fit the {}-byte command buffer",
+                    block, self.capacity
+                ),
+            ));
+        }
+        self.words.push(DATA | (padded / 8) as u32);
+        self.words.push(0);
+        self.words.extend(
+            data.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_le_bytes(*w)),
+        );
+        // One zero word past the data for a 148-byte block: the vendor's 8-byte zeroing at the
+        // padded length, which the copy of the data then overwrites up to its end.
+        self.words
+            .resize(self.words.len() + (padded - data.len()) / 4, 0);
         Ok(())
     }
 
@@ -1290,10 +1372,10 @@ mod stream_tests {
         }
         // A zero register takes only zero.
         assert_eq!(
-            refused(s.push_raw(&[STATE | 0x0A34, 1])),
+            refused(s.push_raw(&[STATE | 0x0A27, 1])),
             io::ErrorKind::InvalidInput
         );
-        s.push_raw(&[STATE | 0x0A34, 0]).unwrap();
+        s.push_raw(&[STATE | 0x0A27, 0]).unwrap();
         // An unknown register, and an unknown opcode, are refused.
         assert!(s.push_raw(&[STATE | 0x0ACC, 0]).is_err());
         assert!(s.push_raw(&[0x5000_0000, 0]).is_err());
@@ -1412,5 +1494,68 @@ mod stream_tests {
         assert_eq!(Identification::ChipId.address(), 0x20);
         assert_eq!(Identification::Revision.address(), 0x24);
         assert_eq!(Identification::Cid.address(), 0x30);
+    }
+
+    #[test]
+    fn path_data_is_inline_whole_words_bounded_by_the_buffer() {
+        let tess = Tessellation {
+            physical: 0x4000_0000,
+            size: 0x1_0000,
+            count_size: 0x1000,
+            tess_w_h: 0,
+        };
+        let mut stream = Stream::new(1024, tess);
+        // Not whole words, and empty, are refused.
+        assert!(stream.path_data(&[0; 6]).is_err());
+        assert!(stream.path_data(&[]).is_err());
+        // 8 bytes of data: header 0x40000001, a zero word, the data, no padding.
+        stream.path_data(&[1, 0, 0, 0, 2, 0, 0, 0]).unwrap();
+        assert_eq!(stream.words(), &[0x4000_0001, 0, 1, 2]);
+        // A block larger than the buffer is refused and adds nothing.
+        let before = stream.words().len();
+        let err = stream.path_data(&[0; 1024]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::OutOfMemory);
+        assert_eq!(stream.words().len(), before);
+    }
+
+    #[test]
+    fn tessellation_window_is_inside_the_target_and_the_size_is_the_context_s() {
+        let tess = Tessellation {
+            physical: 0x4000_0000,
+            size: 0x1_0000,
+            count_size: 0x1000,
+            tess_w_h: 0,
+        };
+        let buffer = Scratch::new(0x8000_0000, 0x1000);
+        let mut stream = Stream::new(1 << 16, tess);
+        assert!(stream.tessellation_window(0, 0, 4, 4).is_err(), "no target");
+        stream
+            .render_target(
+                &buffer,
+                0x123,
+                Layout {
+                    bytes_per_pixel: 4,
+                    width: 16,
+                    height: 4,
+                    stride: 64,
+                },
+            )
+            .unwrap();
+        assert!(stream.tessellation_window(13, 0, 4, 4).is_err());
+        let before = stream.words().len();
+        stream.tessellation_window(0, 0, 16, 4).unwrap();
+        assert_eq!(
+            &stream.words()[before..],
+            &[
+                0x3001_0a1b,
+                0x0001_1000,
+                0x3001_0a3d,
+                0x400,
+                0x3001_0a39,
+                0,
+                0x3001_0a3a,
+                0x0004_0010,
+            ]
+        );
     }
 }

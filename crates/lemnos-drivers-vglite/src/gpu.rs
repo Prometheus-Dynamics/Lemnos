@@ -17,6 +17,7 @@ use crate::plan::{
     self, BLEND_NONE, BlendMode, Format, IDENTITY, Image, Matrix, Sampling, check_output,
     check_rect, invalid, unsupported,
 };
+use crate::stroke::{self, Cap, Join, Subpath};
 use crate::surface::{Frame, Input, Output, Surface, Transfer};
 
 /// `VG_LITE_COMMAND_BUFFER_SIZE`: the bytes of each command buffer (128 KiB).
@@ -448,8 +449,50 @@ impl Vglite {
         )
     }
 
-    /// A one-pixel line from `from` to `to`, both ends included, in `rgba`. `Unsupported` until
-    /// the stroke port (see `TODO.md`).
+    fn line(
+        &self,
+        image: Image,
+        out: Output<'_>,
+        from: (i32, i32),
+        to: (i32, i32),
+        rgba: [u8; 4],
+    ) -> io::Result<Transfer> {
+        if matches!(image.format, Format::L8 | Format::Index8) {
+            return unsupported(format!(
+                "line on {:?}: VGLite converts the colour to luma with a truncating float sum",
+                image.format
+            ));
+        }
+        // Pixel (x, y) covers [x, x + 1) by [y, y + 1), so its centre is at (x + 0.5, y + 0.5).
+        // A width-1 stroke centred there covers exactly that pixel row or column when the line is
+        // axis-aligned, and a square cap extends each end by half a pixel, so both ends are
+        // included. Diagonals are antialiased by the GPU and are not Bresenham lines.
+        const LIMIT: i32 = 1 << 20;
+        let bad = |p: (i32, i32)| p.0.abs() > LIMIT || p.1.abs() > LIMIT;
+        if bad(from) || bad(to) {
+            return invalid(format!("line {from:?} to {to:?}: coordinates beyond 2^20"));
+        }
+        let points = [
+            (from.0 as f32 + 0.5, from.1 as f32 + 0.5),
+            (to.0 as f32 + 0.5, to.1 as f32 + 0.5),
+        ];
+        let outline = stroke::outline(&points, 1.0, Cap::Square, Join::Miter, 4.0, Subpath::Open)?;
+        self.run(
+            None,
+            image,
+            out,
+            true,
+            Op::Stroke {
+                outline: &outline,
+                colour: plan::color(rgba),
+            },
+        )
+    }
+
+    /// A one-pixel line from `from` to `to`, both ends included, in `rgba`: a width-1 stroke
+    /// with square caps, through the GPU's path draw, over the rest of the buffer, which is
+    /// kept. Points beyond the image are clipped by the GPU (unverified on board); L8 is
+    /// `Unsupported`, as for fills.
     pub fn line_bytes(
         &self,
         image: Image,
@@ -459,11 +502,10 @@ impl Vglite {
         rgba: [u8; 4],
     ) -> io::Result<Transfer> {
         image.check(buf.len())?;
-        let _ = (from, to, rgba);
-        stroke_unsupported()
+        self.line(image, Output::Bytes(buf), from, to, rgba)
     }
 
-    /// [`Vglite::line_bytes`] on a dmabuf: `Unsupported` until the stroke port.
+    /// [`Vglite::line_bytes`] on a dmabuf.
     pub fn line_dmabuf(
         &self,
         frame: Frame<'_>,
@@ -471,16 +513,8 @@ impl Vglite {
         to: (i32, i32),
         rgba: [u8; 4],
     ) -> io::Result<Transfer> {
-        let _ = (frame, from, to, rgba);
-        stroke_unsupported()
+        self.line(frame.image, Output::Frame(frame), from, to, rgba)
     }
-}
-
-fn stroke_unsupported() -> io::Result<Transfer> {
-    unsupported(
-        "a line is a stroke: the VGLite stroke port (phase 2) is not in this crate; draw on the CPU"
-            .into(),
-    )
 }
 
 /// Open the device, initialize the context, check the chip, and run the set-up stream.

@@ -21,9 +21,30 @@ Ported (phase 1):
 | `blend_*` | blit with SRC, SRC_OVER or DST_OVER, straight alpha | premultiplied SRC_OVER and DST_OVER are `Unsupported` |
 | `palette_*` | 256-entry colour table, then an identity blit of an `Index8` source | |
 
-Not ported (phase 2): **lines** (`line_bytes`, `line_dmabuf`) return `Unsupported`, because a
-line is a stroke (`vg_lite_set_stroke`, `vg_lite_update_stroke`, the stroke path of
-`vg_lite_draw`). Callers draw lines on the CPU until the stroke port (see `TODO.md`, item 4).
+Ported (phase 2):
+
+| Operation | Stream | Notes |
+|---|---|---|
+| `line_*` | stroke draw (`vg_lite_draw`'s stroke branch) of an outline from `stroke.rs` | a width-1 stroke with square caps, from pixel centre to pixel centre: both ends are included, and axis-aligned lines cover exactly their pixels; diagonals are antialiased, not Bresenham |
+
+The stroke port (`src/stroke.rs`) is the vendor's `vg_lite_update_stroke` for open polylines with
+BUTT and SQUARE caps and MITER and BEVEL joins, closed subpaths, and the straight-line case. The
+line operation uses one segment (its public API has no width, caps or joins, so the crate fixes
+them: width 1, square caps, and a miter limit of 4, which does not matter for two points).
+Not ported, and refused as `Unsupported` where they would be needed: round caps and joins
+(`_convert_circle_arc`, the pie areas of `_draw_swing_pie_area`), curved and arc input, dashes, and
+the swing handling of curved joints (`need_to_handle_swing`, which straight input never sets).
+
+**Path data is inline.** The vendor's stroke draw passes the outline inline in the command
+buffer (`push_data`), not by address; the port does the same, so no GPU memory is allocated for
+it. The outline is bounded by the command buffer (128 KiB; a larger one is `OutOfMemory`). The
+vendor's uploaded-path branch (`push_call`) is not used. In that branch the vendor draws the
+fill data for a stroke, which this port does not reproduce, since it never uploads a path.
+
+**Fresh state.** The vendor skips a register write it believes unchanged, and every second
+parallel window it adds a `0x0E02`/`0x0F00` flush (`path_counter`). Both depend on what earlier
+draws left in the context. The port writes every value in full and no flush, and each
+`Context::run` waits for the GPU; the goldens are the vendor's fresh-state streams.
 
 Not in the port, and no operation here needs them: path fill (`vg_lite_draw` of a fill path),
 the linear and Gaussian filters, YUV and planar formats, 24-bit RGB, tiled and compressed
@@ -82,10 +103,23 @@ A `Stream` is the only way to submit, and it is checked as it is built:
 - **Source reads** are bounded by the source's declared size and stride. The GPU's sampling at
   the edges of a source (bilinear taps, a rotated matrix's corners) is assumed to stay inside that
   size, as its width and height registers say; unverified on board.
+- **Inline path data** (`path_data`) is whole words, non-empty, and fits in the command buffer
+  with its header: a larger outline is `OutOfMemory` and adds nothing. It carries no address.
+- **Tessellation window** (`tessellation_window`) lies inside the render target, and its size
+  register takes the context's own tessellation buffer, not the caller's.
 - **Running** (`Context::run`) refuses a stream that is not finished, one that names a `Scratch`,
   and one larger than a command buffer.
 
 ## Unverified values
+
+Stroke draws add these, unmeasured on a K230: the path tessellation control word (0x0A34: format
+0x300000 for FP32, quality 3 for `VG_LITE_HIGH`, stroke bit 0x200), the path scale and bias
+(0x0A3B, 0x0A3C, named so in the vendor), the path matrix (0x0A40 to 0x0A45), the matrix's
+translation words (0x0ACD, 0x0ACE: the vendor pushes them; their meaning is not in the source),
+the window's origin and size (0x0A39, 0x0A3A) and tessellation size per window (0x0A3D, the
+context's buffer in 64-byte units). The stroke geometry is the vendor's, exact on the host; what
+the GPU draws with it, including antialiasing of a diagonal and the clipping of a line that runs
+past the target, is not measured.
 
 Each of these was read from the vendor source or inferred, and was not confirmed on a K230. The
 source-level meaning is the vendor's own; the hardware meaning is not.
@@ -110,6 +144,12 @@ source-level meaning is the vendor's own; the hardware meaning is not.
 
 ## Tests
 
+- `src/stroke_tests.rs`: the outlines of 34 fixtures (open and closed, BUTT, SQUARE, MITER, BEVEL,
+  the miter fallback and the bevel controls) against the vendor's `vg_lite_update_stroke` output,
+  byte for byte, and the draw streams (`DRAW_O_*`) of the open ones, word for word. The
+  round-cap and round-join fixtures are checked to be `Unsupported`. The oracle was built from
+  the vendor sources unmodified, with the kernel ioctl replaced by a recorder, `-O2` and `-O0`,
+  `-ffp-contract=off`; both gave the same bytes.
 - `src/tests.rs`: the streams of init, clear, blit (identity, crop, flip, quarter turn, bilinear
   half-scale), blend (SRC_OVER, DST_OVER) and palette, compared word for word with the library's
   output for small fixtures. Words that come from reading the C rather than from the recording
@@ -117,7 +157,8 @@ source-level meaning is the vendor's own; the hardware meaning is not.
 - `src/plan.rs`: the matrix, sampling, format and stride rules.
 - `tests/vglite.rs`: on a device, crop, flips, quarter turns, fills, palettes and an opaque SRC_OVER
   against local references; a flat source through each resize filter; dmabufs on the `system` and
-  CMA heaps; lines `Unsupported`. Skips without `/dev/vg_lite`.
+  CMA heaps; an axis-aligned line on exact pixels, and an L8 line `Unsupported`. Skips without
+  `/dev/vg_lite`.
 
 ## Provenance
 

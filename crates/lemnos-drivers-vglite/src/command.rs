@@ -100,6 +100,9 @@ pub(crate) enum Op<'c> {
     },
     /// A 256-entry colour table, then an identity blit of an `Index8` source through it.
     Palette { colours: &'c [u32; 256] },
+    /// A stroke outline (`vg_lite_update_stroke`'s FP32 path bytes) drawn in `colour` with the
+    /// identity matrix, as `vg_lite_draw` does for a stroke path that is not uploaded.
+    Stroke { outline: &'c [u8], colour: u32 },
 }
 
 /// Encodes `op` into `stream`. Returns `false` when the operation draws nothing; the stream is
@@ -122,6 +125,7 @@ pub(crate) fn encode<'a, B: Buffer>(
             };
             blit(stream, target, source, &matrix, blend, sampling)
         }
+        Op::Stroke { outline, colour } => stroke(stream, target, outline, colour),
         Op::Palette { colours } => {
             let Some(source) = source else {
                 return plan::invalid("a palette has indices".into());
@@ -308,6 +312,56 @@ fn blit<'a, B: Buffer>(
         (bottom - top) as u32,
     )?;
     stream.flush()?;
+    Ok(true)
+}
+
+/// The path-draw HW values for the stroke draw (`vg_lite_draw`, non-parallel branch): FP32 path
+/// data (`convert_path_format`), `VG_LITE_HIGH` quality (`convert_path_quality` 3), no fill rule
+/// (non-zero), and the stroke bit 0x200 that the stroke window sets.
+const PATH_FP32: u32 = 0x0030_0000;
+const PATH_QUALITY_HIGH: u32 = 0x3;
+const PATH_STROKE: u32 = 0x0100_0200;
+const PATH_CONTROL: u32 = 0x0100_0000;
+/// The configuration word of a stroke draw with no blend (`0x10000000` alone: linear target, no
+/// scissor, no colour transform, no matrix).
+const PATH_CONFIG_NONE: u32 = 0x1000_0000;
+
+/// A stroke draw of `outline` over the whole target, in `colour`, with the identity matrix.
+/// Every value is written in full, as a fresh context writes it; the outline is inline data, so
+/// the command buffer bounds it. The vendor's stroke branch is the model; its tessellation
+/// window is the whole target (no scissor here).
+fn stroke<'a, B: Buffer>(
+    stream: &mut Stream<'a>,
+    target: Bound<'a, B>,
+    outline: &[u8],
+    colour: u32,
+) -> io::Result<bool> {
+    if outline.is_empty() {
+        return Ok(false);
+    }
+    set_render_target(stream, target)?;
+    stream.plain(0x0A00, PATH_CONFIG_NONE)?;
+    stream.plain(0x0A02, colour)?;
+    stream.plain(0x0A34, PATH_CONTROL | PATH_FP32 | PATH_QUALITY_HIGH)?;
+    stream.plain(0x0A3B, 1.0f32.to_bits())?;
+    stream.plain(0x0A3C, 0.0f32.to_bits())?;
+    // new_matrix for the identity: (m00 * 1, m01 * 1, (m00 + m01) * 0 + m02, and the same row).
+    let m = IDENTITY.m;
+    let bias = 0.0f32;
+    let scale = 1.0f32;
+    stream.plain(0x0A40, (m[0][0] * scale).to_bits())?;
+    stream.plain(0x0A41, (m[0][1] * scale).to_bits())?;
+    stream.plain(0x0A42, ((m[0][0] + m[0][1]) * bias + m[0][2]).to_bits())?;
+    stream.plain(0x0A43, (m[1][0] * scale).to_bits())?;
+    stream.plain(0x0A44, (m[1][1] * scale).to_bits())?;
+    stream.plain(0x0A45, ((m[1][0] + m[1][1]) * bias + m[1][2]).to_bits())?;
+    stream.plain(0x0ACD, m[0][2].to_bits())?;
+    stream.plain(0x0ACE, m[1][2].to_bits())?;
+    let (w, h) = (target.image.width, target.image.height);
+    stream.tessellation_window(0, 0, w, h)?;
+    stream.plain(0x0A34, PATH_STROKE | PATH_FP32 | PATH_QUALITY_HIGH)?;
+    stream.plain(0x0A02, colour)?;
+    stream.path_data(outline)?;
     Ok(true)
 }
 

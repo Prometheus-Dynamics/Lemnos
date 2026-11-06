@@ -376,6 +376,13 @@ const VGLITE_OPS: &[OpCaps] = &[
         exactness: Exactness::Unmeasured,
         note: "Untested on board. an INDEX_8 source through a 256-entry colour table",
     },
+    OpCaps {
+        op: FixedOp::Line,
+        exactness: Exactness::Unmeasured,
+        note: "Untested on board. a width-1 square-capped stroke at pixel centres, both ends \
+               included; axis-aligned lines cover exactly their pixels, diagonals are antialiased \
+               and are not Bresenham lines",
+    },
 ];
 
 const fn vglite(soc: Soc) -> UnitCaps {
@@ -383,7 +390,7 @@ const fn vglite(soc: Soc) -> UnitCaps {
         soc,
         unit: Unit::K230Vglite,
         route: Route::Vglite,
-        // Phase 1 of `lemnos-drivers-vglite` (untested on board); lines wait for the stroke port.
+        // Phases 1 and 2 of `lemnos-drivers-vglite` (untested on board): blits and fills, then lines.
         implemented: true,
         min_size: None,
         max_scale: None,
@@ -555,7 +562,7 @@ mod tests {
             (Unit::K230Vglite, Route::Vglite)
         );
         assert_eq!(k230[0].staging, Staging::UnlessContiguous);
-        assert!(k230[0].op(FixedOp::Line).is_none() && k230[0].op(FixedOp::Blend).is_some());
+        assert!(k230[0].op(FixedOp::Line).is_some() && k230[0].op(FixedOp::Blend).is_some());
         assert!(k230[0].op(FixedOp::ColorKey).is_none());
         assert!(k230[1].route == Route::Design && k230[1].filters.is_empty());
         assert!(caps(Soc::Rk3576).all(|c| c.route == Route::MultiRga));
@@ -645,9 +652,13 @@ mod tests {
             Some(Route::V4l2)
         );
         // The K230D's VGLite serves its rows: a fill, a 2x area downscale, a bilinear resize.
-        // Lines are not in its rows, and a 3x area downscale is not a half-phase blit.
+        // Lines are in its rows too; a 3x area downscale is not a half-phase blit.
         assert_eq!(
             route_for(Soc::K230d, Op::Fixed(FixedOp::Fill), abgr, abgr),
+            Some(Route::Vglite)
+        );
+        assert_eq!(
+            route_for(Soc::K230d, Op::Fixed(FixedOp::Line), abgr, abgr),
             Some(Route::Vglite)
         );
         let big = layout(PixelFormat::Abgr32, 640, 360);
@@ -667,7 +678,7 @@ mod tests {
         );
         assert_eq!(
             route_for(Soc::K230d, Op::Fixed(FixedOp::Line), abgr, abgr),
-            None
+            Some(Route::Vglite)
         );
         assert_eq!(
             route_for(Soc::K230d, Op::Fixed(FixedOp::Palette), abgr, abgr),

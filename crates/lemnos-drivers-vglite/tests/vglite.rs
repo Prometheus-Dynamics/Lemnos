@@ -3,9 +3,9 @@
 //! is absent. Untested on board: a run on a K230 is what turns these from compiled into measured.
 //!
 //! Cut from the old suite: its resize and line comparisons used the reference kernels of the
-//! source repository, which this crate no longer depends on. Resize is checked here only on a flat source
-//! (which any filter must keep flat); lines are checked to report `Unsupported` (the stroke port
-//! is not in this crate yet).
+//! source repository, which this crate no longer depends on. Resize is checked here only on a flat
+//! source (which any filter must keep flat); an axis-aligned line is checked on exact pixels, and
+//! an L8 line is refused.
 #![cfg(target_os = "linux")]
 #![allow(clippy::print_stderr)]
 
@@ -164,10 +164,32 @@ fn vglite_keeps_a_flat_source_flat_under_resize() {
     );
 }
 
+/// A horizontal line from (1, 3) to (6, 3) covers exactly pixels 1 to 6 of row 3 (both ends
+/// included); nothing else changes. Untested on board until a run on a K230.
 #[test]
-fn vglite_refuses_lines_until_the_stroke_port() {
+fn vglite_draws_an_axis_aligned_line_on_exact_pixels() {
     let Some(gpu) = gpu() else { return };
     let img = Image::packed(Format::Rgba8888, 8, 8);
+    let mut buf = vec![0u8; img.frame_len()];
+    gpu.line_bytes(img, &mut buf, (1, 3), (6, 3), [255; 4])
+        .unwrap();
+    for y in 0..8u32 {
+        for x in 0..8u32 {
+            let at = ((y * 8 + x) * 4) as usize;
+            let want = if y == 3 && (1..=6).contains(&x) {
+                [255; 4]
+            } else {
+                [0; 4]
+            };
+            assert_eq!(buf[at..at + 4], want, "pixel {x},{y}");
+        }
+    }
+}
+
+#[test]
+fn vglite_refuses_l8_lines() {
+    let Some(gpu) = gpu() else { return };
+    let img = Image::packed(Format::L8, 8, 8);
     let mut buf = vec![0u8; img.frame_len()];
     let err = gpu
         .line_bytes(img, &mut buf, (0, 0), (7, 7), [255; 4])

@@ -76,12 +76,15 @@ Everything planned, in order. Execution is paused until the user starts it.
           state are marked unverified in the crate. Y-only output is not served.
     - [x] VGLite, phase 1: `lemnos-drivers-vglite` on `/dev/vg_lite`, with no vendor library and
           no dlopen. `lemnos-linux-sys::vg_lite` has the safe calls (open, initialize, allocate,
-          map and unmap, a checked command stream run with its wait, and the identification registers). The clear, blit (resize, crop, flips and
-          turns, blends), palette and context streams are ported from the vendor's `vg_lite.c`
-          and checked word for word against its output. Untested on board. Lines return
-          `Unsupported` until phase 2; callers draw them on the CPU meanwhile.
-    - [ ] VGLite stroke (phase 2): `vg_lite_set_stroke`, `vg_lite_update_stroke` and the stroke
-          path of `vg_lite_draw` (`VGLite/vg_lite_stroke.c`, 4.5k lines), so lines leave the CPU.
+          map and unmap, a checked command stream run with its wait, and the identification
+          registers). The clear, blit (resize, crop, flips and turns, blends), palette and context
+          streams are ported from the vendor's `vg_lite.c` and checked word for word against its
+          output. Untested on board.
+    - [x] VGLite stroke (phase 2): `src/stroke.rs` ports `vg_lite_update_stroke` for open and
+          closed polylines with BUTT and SQUARE caps and MITER and BEVEL joins, and the stroke draw
+          inlines the outline; `line_bytes` and `line_dmabuf` draw width-1 square-capped lines,
+          golden-tested word for word against the vendor. Round caps and joins, curves, dashes and
+          the swing handling are not ported (refused).
     - [x] K230 and rkisp device layers: `lemnos-drivers-k230isp` and `lemnos-drivers-rkisp`, from the camera stack's `crates/k230isp` and `crates/rkisp` (d17de2ed). Moved: the uAPI layouts and bindgen headers, the K230 register map, `RegisterAccess` and the statistics register reads, `Isp`, `ParamBuffer`, `isp32::{Variant, nodes}`, and both `device` layers (on `lemnos-v4l2` and `lemnos-linux-sys::vvcam_isp`). Stayed in the camera stack: the builders and statistics math (`params.rs`, `stats.rs`, `isp32/params.rs`, `isp32/stats.rs`). Untested on board: both `device` layers (no K230D or Rockchip SoC on this PC), the ISP32 fixed-point scales, and the K230 register map's unconfirmed constants. The uAPI layouts are in `lemnos-rkisp-sys`, whose ISP32 bitfield accessors (bindgen output) and bitfield-unit `Pod` impls are the only unsafe code of the move. The camera stack has not switched to these crates yet.
 - [ ] **5. Kernel module and Rust user-space drivers.** One small module of our own, its sources in
       `kernel-modules/` (GPL-2.0, see its README): claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
