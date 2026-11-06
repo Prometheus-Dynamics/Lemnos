@@ -6,8 +6,9 @@
 //! pin without a vector in the doc fails too.
 
 use crate::wire::{
-    ChannelDesc, DeviceDesc, Event, I2cOp, LedRequest, LedShow, Message, RawReading, RawRequest,
-    Refusal, Request, VERSION, decode_message, decode_request, encode_reading,
+    ChannelDesc, DeviceDesc, Event, FEATURE_GPU_LEASE, GpuAcquire, GpuLeaseState, GpuMode, I2cOp,
+    LedRequest, LedShow, Message, RawReading, RawRequest, Refusal, Request, VERSION,
+    decode_message, decode_request, encode_reading,
 };
 use lemnos_device::{Axis, DeviceClass, DeviceStatus, NO_VALUE, Quantity};
 use lemnos_hal::ErrorKind;
@@ -27,6 +28,8 @@ const PINNED: &[&str] = &[
     "devices",
     "event-control",
     "data-reply",
+    "gpu-acquire",
+    "gpu-lease",
 ];
 
 /// The bytes of the doc's vector `name`.
@@ -156,6 +159,38 @@ fn request_vectors_match_the_encoder() {
             id: 4,
         }),
     );
+    pin_request(
+        "gpu-acquire",
+        Request::GpuAcquire {
+            id: 6,
+            acquire: GpuAcquire {
+                gpu: "v3d".into(),
+                mode: GpuMode::Exclusive,
+                priority: 50,
+                wait: true,
+                max_hold_ms: 60_000,
+                label: "bench".into(),
+            },
+        },
+    );
+}
+
+/// A welcome from a service before the features field decodes with none.
+#[test]
+fn a_welcome_without_features_has_none() {
+    let mut bytes = vector_bytes("welcome");
+    bytes.truncate(bytes.len() - 4);
+    bytes[0] -= 4;
+    let (message, _) = decode_message(&bytes).unwrap().unwrap();
+    assert_eq!(
+        message,
+        Message::Welcome {
+            version: VERSION,
+            board: "example-board".into(),
+            client_id: 3,
+            features: 0,
+        }
+    );
 }
 
 #[test]
@@ -166,6 +201,7 @@ fn message_vectors_match_the_encoder() {
             version: VERSION,
             board: "example-board".into(),
             client_id: 3,
+            features: FEATURE_GPU_LEASE,
         },
     );
     let values = [9_806, NO_VALUE, -3];
@@ -238,6 +274,14 @@ fn message_vectors_match_the_encoder() {
         Message::Data {
             id: 5,
             result: Ok(vec![0x12, 0x34]),
+        },
+    );
+    pin_message(
+        "gpu-lease",
+        Message::GpuLease {
+            id: 6,
+            lease: 1,
+            state: GpuLeaseState::Queued { ahead: 2 },
         },
     );
 }

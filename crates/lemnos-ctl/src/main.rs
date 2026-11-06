@@ -42,6 +42,10 @@
 //!   i2c write <bus> <address> <register> <byte>...
 //!   i2c xfer <bus> <address> w:HEX r:N ...
 //!   spi xfer <bus.cs> <HEX> [--mode 0-3] [--speed HZ]
+//!   gpu [status]                                     the GPUs and their advisory leases
+//!   gpu run [--shared] [--gpu NAME] [--wait S] [--max-hold S] [--label L] -- <command> [args...]
+//!                                                     run a command holding a GPU lease (exclusive
+//!                                                     unless --shared; waits up to 900 s by default)
 //!   fan release <device>
 //!   fan restore [--board PATH] [--state PATH] [--all]
 //!   validate <board.toml>...
@@ -77,6 +81,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod calibration;
+mod gpu;
 mod raw;
 use std::time::Duration;
 
@@ -147,7 +152,7 @@ fn main() -> ExitCode {
     let options = ClientOptions::new(&socket, client).priority(priority);
     let Some(command) = args.next() else {
         return fail(
-            "no command (list, read, watch, set, get, restore, led, light, looks, power, calibration, gpio, pwm, i2c, spi, fan, validate)",
+            "no command (list, read, watch, set, get, restore, led, light, looks, power, calibration, gpu, gpio, pwm, i2c, spi, fan, validate)",
         );
     };
     match command.as_str() {
@@ -164,6 +169,7 @@ fn main() -> ExitCode {
         "stats" => stats(options),
         "looks" => looks_command(args, options),
         "calibration" => calibration::calibration(args, options),
+        "gpu" => gpu::gpu(args, options, priority),
         _ => devices(&command, args, options),
     }
 }

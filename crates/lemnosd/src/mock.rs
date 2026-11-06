@@ -298,6 +298,8 @@ impl MockLemnosd {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let buses = MockBuses::new(hardware.clone(), root.join("sys"));
+        // The GPU leases' render nodes, under the same fake sysfs.
+        let drm_class = root.join("sys/class/drm");
         let (thread_stop, thread_socket) = (Arc::clone(&stop), socket.clone());
         // Named like the bus threads, so a test can find the service's threads.
         let thread = std::thread::Builder::new()
@@ -305,6 +307,7 @@ impl MockLemnosd {
             .spawn(move || {
                 let mut config = ServiceConfig::new(definition, thread_socket);
                 config.state_dir = state_dir;
+                config.drm_class = drm_class;
                 match Service::new(config, Box::new(buses)) {
                     Ok(mut service) => {
                         let _ = ready_tx.send(Ok(()));

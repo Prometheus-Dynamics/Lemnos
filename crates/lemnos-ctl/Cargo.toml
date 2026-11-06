@@ -30,6 +30,7 @@ board = ["dep:lemnos-board", "dep:toml"]
 lemnos-drivers-linux.workspace = true
 lemnos-ipc.workspace = true
 lemnos-light.workspace = true
+lemnos-linux-sys.workspace = true
 lemnos-board = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 

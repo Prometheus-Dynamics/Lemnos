@@ -120,6 +120,27 @@ Everything planned, in order. Execution is paused until the user starts it.
 - [ ] **6. GPU**, per the agreed seam note (kept outside this repository, because it names the
       products). Mesa stays, and `lemnosd` coordinates rather than enforces: an advisory lease
       first, `lemnos-gpu` only when a consumer needs it.
+  - [x] The advisory lease (2026-11-06): `lemnosd` keeps one per render node (named by driver,
+        `v3d`): exclusive or shared, waiters by priority then arrival, a yield request to a
+        lower-priority holder, an overdue notice past the holder's `max_hold_ms`, hang reports in
+        the state, leases ending with their connection. `lemnos_ipc::GpuClient`,
+        `lemnos-ctl gpu [status]` and `lemnos-ctl gpu run -- <command>`.
+        [docs/ipc.md](docs/ipc.md) section 6.6, [docs/system-service.md](docs/system-service.md).
+        Board #1: the v3d node found, runs under the lease ordered as expected.
+        Decided:
+        - Additive to protocol 1: request kinds 18, 19, 31 and 32 and messages 113 and 114, sent
+          only after the welcome's new `features` field (appended; absent is 0) says the service
+          has them, and `GpuLease` only to a client that asked. Existing clients' types are
+          unchanged (`Update`, `Event`, `Refusal`, `ClientEvent` gain nothing).
+        - A separate `GpuClient` connection that never reconnects: a lost connection has lost
+          its leases.
+        - Leases end with the connection whatever `keep` says: a lease nobody can release would
+          hold the GPU until the service restarts.
+        - Not overtaking: the first waiter is granted first, so a stream of shared leases cannot
+          starve an exclusive waiter of the same priority.
+  - [ ] Switch the board runs from their shared `flock` lock file to `lemnos-ctl gpu run` once
+        the image's lemnosd has the lease (the consumers' call).
+  - [ ] `lemnos-gpu`: only when a consumer without wgpu needs it.
 - [ ] **7. Shared and static builds.** Both modes, with core, surface and wrapper for each
       dependency. The workspace's LTO test informs how shared gets built.
   - [x] Decided 2026-11-06, for the image's surface checks: the feature is `shared` on each

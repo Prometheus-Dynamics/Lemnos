@@ -185,6 +185,9 @@ In `Event::Status` the error byte is `255` for "no error" (`wire/message.rs:153`
 | Look block (u8) | See section 6.3 | `wire/look.rs:18-26` |
 | Look envelope (u8) | 0 solid, 1 blink, 2 breathe, 3 pulse | `wire/look.rs:28-31` |
 | Look mode (u8) | 0 `Max`, 1 `Add`, 2 `Over` | `wire/look.rs:164-168`, `:391-396` |
+| GPU lease mode (u8) | 0 exclusive, 1 shared. Fallback: exclusive. | `wire/gpu.rs` |
+| GPU lease state (u8) | 0 granted, 1 queued, 2 refused, 3 yield asked, 4 overdue. Unknown: a decode error. | `wire/gpu.rs` |
+| Welcome feature bits (u32) | bit 0: the GPU lease requests (6.6) | `wire/gpu.rs` |
 
 ## 5. Handshake and version
 
@@ -200,7 +203,8 @@ The steps the client library takes, in order (`lemnos-ipc/src/client.rs:312-370`
 
 The server does not require `Hello` to come first. It answers a `Hello` with
 `Welcome` (`lemnosd/src/service.rs:1180-1201`). The `Welcome` holds the
-service's `VERSION`, the board id, and the client's id for this connection.
+service's `VERSION`, the board id, the client's id for this connection and the
+service's feature bits (section 4; appended within protocol 1).
 
 **Version check.** The client refuses a `Welcome` whose version is not its own
 `VERSION`. It drops the connection and returns a protocol error naming both
@@ -235,6 +239,10 @@ reply. Field types are from section 3.
 | 15 | `LightSetting` | `u32 id`, `str device`, `u16 look_brightness` (0 to 1000), `u8 persist` | `Reply` (104), the value applied | `request.rs:325-337`, `:533-538` |
 | 16 | `LedInputs` | `u32 id`, `str device`, `opt u16 progress`, `u8 spots_flag`, spots list if flag = 1 | `Text` (108), see 8 | `request.rs:306-324`, `:512-527` |
 | 17 | `Stats` | (empty) | `Stats` (112) | `request.rs:154`, `:391` |
+| 18 | `GpuAcquire` | `u32 id`, `str gpu`, `u8 mode`, `u8 priority`, `u8 wait`, `u32 max_hold_ms`, `str label` | `GpuLease` (113), see 6.6 | `wire/gpu.rs` |
+| 19 | `GpuRelease` | `u32 id`, `u32 lease` | `Reply` (104) | `wire/request.rs` |
+| 31 | `GpuStatus` | `u32 id` | `GpuState` (114) | `wire/request.rs` |
+| 32 | `GpuHang` | `u32 id`, `u32 lease`, `str detail` | `Reply` (104) | `wire/request.rs` |
 | 20-30 | Raw requests | See 6.4 | `Claimed` (106), `Data` (107), or `Reply` (104) | `raw.rs:136-151`, `:231-479` |
 
 ### 6.2 `Led` payload
@@ -403,6 +411,58 @@ operations 6, 7, 8 and 9 unless the client matches the board's look writers
 (`lemnosd/src/service.rs:1505-1532`). Op 3 is not in that list. The service
 answers each operation with `Text` (108).
 
+### 6.6 GPU lease
+
+Kinds 18, 19, 31 and 32, added within protocol 1. A client sends them only to
+a service whose `Welcome` has feature bit 0 set: an older service does not know
+the kinds and closes the connection (section 12). Source: `wire/gpu.rs`,
+`lemnosd/src/gpu.rs`.
+
+The lease is advisory. The GPU's user-space driver opens the render node
+itself, so the service enforces nothing: a lease orders the clients that ask
+and says who holds the GPU. A client that never asks is not affected.
+
+- **GPUs.** The service lists the render nodes under `/sys/class/drm`
+  (`renderD*`) each time a lease is asked for or the state is read. A GPU is
+  named by its kernel driver (`v3d`), with a number after it when the board has
+  more than one of that driver (`v3d1`), in node order. `gpu` empty means the
+  first. An unknown name is refused with `UnknownDevice`; so is any request on a
+  host with no render node.
+- **Modes.** An exclusive lease is held alone. Shared leases are held together,
+  never beside an exclusive one.
+- **Order.** Waiters are ordered by `priority` (higher first), then by arrival.
+  The first waiter is granted as soon as it fits beside the holders; a waiter
+  behind it waits even if it would fit, so a shared stream cannot starve an
+  exclusive waiter of the same priority.
+- **`wait` 0** takes the lease only if it would be granted at once, otherwise
+  `GpuLease` refused with `Claimed`. **`wait` 1** queues: `GpuLease` queued, with
+  the number of leases ahead (holders and waiters), then a second `GpuLease`
+  with the same id when granted.
+- **Yield.** When the first waiter is held back by a holder of lower priority,
+  that holder gets `GpuLease` "yield asked", once per lease. It decides whether
+  to release.
+- **Overdue.** A holder past its `max_hold_ms` (0: no limit) gets `GpuLease`
+  "overdue", once, and the state shows it overdue. Nothing is taken back. The
+  service logs it.
+- **Release.** `GpuRelease` ends a held or a queued lease of this connection,
+  else `UnknownHandle`. Closing the connection ends all of them, whatever
+  `keep` says.
+- **Hangs.** `GpuHang` records a hang the client saw under one of its leases
+  (else `UnknownHandle`): the GPU's hang count, and its last report with the
+  client, the label and `detail`. The service logs it.
+
+`GpuLease` (113) payload: `u32 id` (the acquire's), `u32 lease` (0 when
+refused), `u8 state` (section 4), `u8 code`, `u8 kind` (the refusal, for state
+2; else 0), `u16 ahead` (for state 1; else 0).
+
+`GpuState` (114) payload: `u32 id`, `u16 n`, then per GPU: `str name`,
+`str driver`, `str node`, the holders, the waiters (in grant order), `u32 hangs`,
+`u8 has_last_hang`, and if 1: `str client`, `str label`, `str detail`,
+`u64 ago_ms`. The holders and the waiters are each `u16 n`, then per lease:
+`u32 lease`, `u32 client_id`, `str client`, `str label`, `u8 mode`,
+`u8 priority`, `u64 for_ms` (held or waited for), `u32 max_hold_ms`,
+`u8 overdue`.
+
 ## 7. Messages
 
 Service to client. Source: encode `wire/message.rs:33-214`, decode
@@ -410,7 +470,7 @@ Service to client. Source: encode `wire/message.rs:33-214`, decode
 
 | Kind | Message | Payload (in order) | Source |
 |---|---|---|---|
-| 101 | `Welcome` | `u16 version`, `str board`, `u32 client_id` | `message.rs:72-80`, `:219-223` |
+| 101 | `Welcome` | `u16 version`, `str board`, `u32 client_id`, `u32 features` (absent: 0) | `message.rs:72-80`, `:219-223` |
 | 102 | `Devices` | device list (below), then the reason list (below) | `message.rs:94-127`, `:224-271` |
 | 103 | `Reading` | `str device`, `u64 timestamp_us`, `u8 status`, `u16 n`, `n` x `i32` value | `message.rs:128`, `:287-302` |
 | 104 | `Reply` | `u32 id`, `u8 code`, `u8 kind`, `f64 value` | `message.rs:129-140`, `:303-316` |
@@ -422,6 +482,8 @@ Service to client. Source: encode `wire/message.rs:33-214`, decode
 | 110 | `LightInfo` | `str device`, `u16 count`, `u16 offset`, `u8 clockwise`, `str look`, `str layer`, `str owner`, `u16 look_brightness` (absent: 1000) | `message.rs:45-56`, `:377-387` |
 | 111 | `CalibrationStatus` | `u32 id`, `str device`, status (below) | `message.rs:57-62`, `:410-414` |
 | 112 | `Stats` | `u16 n`, `n` x (`str device`, `u64 reads`, `u64 total_us`, `u64 max_us`, `u64 last_us`, `u64 misses`) | `message.rs:81-93`, `:272-286` |
+| 113 | `GpuLease` | See 6.6 | `wire/gpu.rs` |
+| 114 | `GpuState` | See 6.6 | `wire/gpu.rs` |
 
 For `Reply`, `Claimed`, `Data` and `Text`, `code` 0 is success. Any other code
 is a refusal, and the refusal is described by the code and kind in section 4.
@@ -506,6 +568,9 @@ What each request is answered with (`lemnosd/src/service.rs:1178-1533`):
 | `CalibrationStatus` | `CalibrationStatus` or `Reply` refusal | (`:1495-1504`) |
 | `Looks` | `Text` always | Refusals too. Writing ops need look writers (6.5). (`:1505-1533`) |
 | raw requests | `Claimed`, `Data` or `Reply` with the request's id | (`lemnosd/src/raw.rs:120-152`) |
+| `GpuAcquire` | `GpuLease` with the request's id, always | Queued leases get a second one when granted (6.6) |
+| `GpuRelease`, `GpuHang` | `Reply` value 0, or `UnknownHandle` | |
+| `GpuStatus` | `GpuState` with the request's id | |
 
 A request with id 0 that gets no answer is a fire-and-forget request. A
 request with an id that gets no answer is an open question for the client.
@@ -526,6 +591,7 @@ client after its requests are answered.
 | `Event` (105), tag 4 `Dropped` | The client's queue dropped events (section 13) | That client | `lemnosd/src/clients.rs:154-161` |
 | `LightInfo` (110) | A watched light's description changes, and once when a watch starts | The watcher | `lemnosd/src/service.rs:1055-1101` |
 | `Frame` (109) | A watched light's frame changes, at most `fps` a second | The watcher | `lemnosd/src/service.rs:1055-1101` |
+| `GpuLease` (113) | A queued lease is granted; a holder is asked to yield, or is past its time (6.6). Carries the acquire's id. | The lease's client, greeted or not; never broadcast | `lemnosd/src/gpu.rs` |
 
 "Greeted" means the connection has sent `Hello`. "events" is the `events`
 flag from `Hello`. A client that does not send `Hello` gets replies but no
@@ -566,6 +632,8 @@ What `lemnosd` does with a connection (`lemnosd/src/service.rs:1880-1945`,
        (`service_raw.rs:84-108`).
      - LED intents: forgotten, unless `keep` is set or another connection shares
        its owner id (`service.rs:1935-1940`).
+     - GPU leases, held or queued: ended whatever `keep` says, and the next
+       waiters granted (6.6).
 8. **Falling behind.** Answers are never dropped (section 13). A connection
    with more than 4 MiB of answers waiting has stopped reading, and is closed.
 
@@ -613,6 +681,7 @@ Only what the code does:
   - `Devices` reasons: absent means empty reasons (`message.rs:265-270`).
   - `Event::Status.reason`: absent means empty (`message.rs:324-328`).
   - `LightInfo.look_brightness`: absent means 1000 (`message.rs:385-386`).
+  - `Welcome.features`: absent means 0, no features (`message.rs`).
 - **Trailing bytes.** No decoder rejects trailing bytes, by design: that is
   how an older peer skips a field appended after its time. Only the appended
   fields above check for their presence.
@@ -634,6 +703,10 @@ Only what the code does:
 - **Unknown codes in enums decode to a fallback** (section 4), with no error.
   This covers the device enums, the raw bias, drive and edge codes, the LED
   status and effect codes, the easing code of an LED request, and system phase.
+- **New request kinds are gated by a feature bit.** The GPU lease kinds (6.6)
+  are sent only to a service whose `Welcome` sets its bit, so an older service
+  never sees them. The service sends `GpuLease` only to a client that asked for
+  a lease, so an older client never sees it.
 - **No rule is given for reserving kinds.** Each kind number is used once in the
   source. A new kind is refused by an older decoder.
 
@@ -842,21 +915,25 @@ reverse.
 
 ### 15.5 `welcome`
 
-`Message::Welcome { version: 1, board: "example-board", client_id: 3 }`
+`Message::Welcome { version: 1, board: "example-board", client_id: 3, features: 1 }`
 
 <!-- vector: welcome -->
 ```hex
-17 00 00 00 65 00 01 00 0d 00 65 78 61 6d 70 6c 65 2d 62 6f 61 72 64 03 00 00 00
+1b 00 00 00 65 00 01 00 0d 00 65 78 61 6d 70 6c 65 2d 62 6f 61 72 64 03 00 00 00 01 00 00 00
 ```
 
 | Offset | Bytes | Field |
 |---|---|---|
-| 0-3 | `17 00 00 00` | length = 23 |
+| 0-3 | `1b 00 00 00` | length = 27 |
 | 4-5 | `65 00` | kind 101 (`Welcome`) |
 | 6-7 | `01 00` | version 1 |
 | 8-9 | `0d 00` | board length 13 |
 | 10-22 | `65 78 61 6d 70 6c 65 2d 62 6f 61 72 64` | "example-board" |
 | 23-26 | `03 00 00 00` | client id 3 |
+| 27-30 | `01 00 00 00` | features: bit 0, the GPU lease |
+
+A service from before the features field sends the same frame without bytes
+27-30 (length 23); it decodes with features 0.
 
 ### 15.6 `reading`
 
@@ -1000,3 +1077,45 @@ The fast path `encode_reading` must produce the same bytes. The test checks it.
 | 11 | `00` | kind (unused) |
 | 12-15 | `02 00 00 00` | byte count 2 |
 | 16-17 | `12 34` | the bytes |
+
+### 15.12 `gpu-acquire`
+
+`Request::GpuAcquire { id: 6, acquire: GpuAcquire { gpu: "v3d", mode: Exclusive, priority: 50, wait: true, max_hold_ms: 60000, label: "bench" } }`
+
+<!-- vector: gpu-acquire -->
+```hex
+19 00 00 00 12 00 06 00 00 00 03 00 76 33 64 00 32 01 60 ea 00 00 05 00 62 65 6e 63 68
+```
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0-3 | `19 00 00 00` | length = 25 |
+| 4-5 | `12 00` | kind 18 (`GpuAcquire`) |
+| 6-9 | `06 00 00 00` | id 6 |
+| 10-11 | `03 00` | gpu length 3 |
+| 12-14 | `76 33 64` | "v3d" |
+| 15 | `00` | mode 0 (exclusive) |
+| 16 | `32` | priority 50 |
+| 17 | `01` | wait |
+| 18-21 | `60 ea 00 00` | max_hold_ms 60000 |
+| 22-23 | `05 00` | label length 5 |
+| 24-28 | `62 65 6e 63 68` | "bench" |
+
+### 15.13 `gpu-lease`
+
+`Message::GpuLease { id: 6, lease: 1, state: Queued { ahead: 2 } }`
+
+<!-- vector: gpu-lease -->
+```hex
+0f 00 00 00 71 00 06 00 00 00 01 00 00 00 01 00 00 02 00
+```
+
+| Offset | Bytes | Field |
+|---|---|---|
+| 0-3 | `0f 00 00 00` | length = 15 |
+| 4-5 | `71 00` | kind 113 (`GpuLease`) |
+| 6-9 | `06 00 00 00` | id 6 |
+| 10-13 | `01 00 00 00` | lease 1 |
+| 14 | `01` | state 1 (queued) |
+| 15-16 | `00 00` | refusal code and kind (unused) |
+| 17-18 | `02 00` | ahead 2 |

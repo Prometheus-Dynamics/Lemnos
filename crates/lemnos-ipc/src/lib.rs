@@ -11,6 +11,9 @@
 //! - Raw access through the service ([`DeviceClient::claim_line`],
 //!   [`DeviceClient::claim_pwm`], [`DeviceClient::i2c`], [`DeviceClient::spi`]):
 //!   claims belong to the connection and end with it.
+//! - [`GpuClient`]: the advisory GPU lease. It orders the clients that ask
+//!   (exclusive or shared, by priority) and reports who holds a GPU; it
+//!   enforces nothing, and a client that never asks keeps working.
 //! - Both report connection changes in order with data ([`ClientEvent`]),
 //!   reconnect in the background when asked, and restore subscriptions and
 //!   held intents after `lemnosd` restarts.
@@ -49,7 +52,7 @@ mod tests;
 pub use client::FrameUpdate;
 pub use client::{
     ClientError, ClientEvent, ClientOptions, DEFAULT_SOCKET, DEFAULT_TIMEOUT, DeviceClient,
-    I2cDevice, LedClient, Line, Pwm, Reading, SpiDevice, Update,
+    GpuClient, GpuNotice, I2cDevice, LedClient, Line, Pwm, Reading, SpiDevice, Update,
 };
 /// The compact-model types the protocol carries, so clients need no
 /// direct `lemnos-device` or `lemnos-hal` dependency.
@@ -65,7 +68,8 @@ pub use lemnos_light::{
     SpotsSpec, Status as LedStatus, SystemState,
 };
 pub use wire::{
-    ChannelDesc, ControlDesc, DeviceDesc, Event, I2cOp, LedRequest, LedShow, LightFrame, LightInfo,
+    ChannelDesc, ControlDesc, DeviceDesc, Event, FEATURE_GPU_LEASE, GpuAcquire, GpuHangReport,
+    GpuHolder, GpuInfo, GpuLeaseState, GpuMode, I2cOp, LedRequest, LedShow, LightFrame, LightInfo,
     LineTarget, LooksOp, Message, PwmTarget, RawReading, RawRequest, ReadStats, Refusal, Request,
     SpiXfer, VERSION, WireError, decode_message, decode_request, encode_reading,
 };

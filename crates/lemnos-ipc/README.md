@@ -39,6 +39,22 @@ let rx = devices.spi(0, 0).xfer(&mut devices, &[0x9f, 0, 0], Default::default())
 devices.restore("fan", None)?;                 // undo this client's writes (automatic on disconnect)
 ```
 
+The advisory GPU lease (`docs/ipc.md` section 6.6): it orders the clients that ask and enforces
+nothing; leases end with the connection.
+
+```rust
+use lemnos_ipc::{GpuAcquire, GpuClient, GpuMode};
+use std::time::Duration;
+
+let mut gpu = GpuClient::connect("/run/lemnos/lemnosd.sock", "bench")?;
+if gpu.supported() {
+    let request = GpuAcquire { mode: GpuMode::Exclusive, label: "bench".into(), ..Default::default() };
+    let lease = gpu.acquire(request, Some(Duration::from_secs(60)))?; // queue for up to 60 s
+    // ... the GPU work ...
+    gpu.release(lease)?;
+}
+```
+
 `ClientOptions::wait(timeout)` waits for a service that is not up yet; LED clients receive
 events only with `ClientOptions::events(true)`. The compact-model types the protocol uses
 (`DeviceClass`, `Quantity`, `Unit`, `Axis`, `DeviceStatus`, `ErrorKind`) and `lemnos_hal::raw`

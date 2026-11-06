@@ -62,6 +62,12 @@ const STATS: u16 = 17;
 const STATS_REPLY: u16 = 112;
 const CALIBRATION: u16 = 13;
 const CALIBRATION_STATUS: u16 = 14;
+const GPU_ACQUIRE: u16 = 18;
+const GPU_RELEASE: u16 = 19;
+const GPU_STATUS: u16 = 31;
+const GPU_HANG: u16 = 32;
+const GPU_LEASE_REPLY: u16 = 113;
+const GPU_STATE_REPLY: u16 = 114;
 
 /// A malformed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,11 +87,15 @@ fn bad(what: impl Into<String>) -> WireError {
 
 mod calibration;
 mod codec;
+mod gpu;
 mod look;
 mod message;
 mod raw;
 mod request;
 
+pub use gpu::{
+    FEATURE_GPU_LEASE, GpuAcquire, GpuHangReport, GpuHolder, GpuInfo, GpuLeaseState, GpuMode,
+};
 pub use message::encode_reading;
 pub use raw::{I2cOp, LineTarget, PwmTarget, RawRequest, SpiXfer};
 
@@ -517,6 +527,31 @@ pub enum Request {
         look_brightness: u16,
         persist: bool,
     },
+    /// Asks for an advisory lease on a GPU (see [`GpuAcquire`]). Answered
+    /// with a [`Message::GpuLease`] carrying `id`: granted, queued (then a
+    /// second one when granted) or refused. Only to a service whose welcome
+    /// has [`FEATURE_GPU_LEASE`].
+    GpuAcquire {
+        id: u32,
+        acquire: GpuAcquire,
+    },
+    /// Ends a lease, held or queued. Answered with a [`Message::Reply`].
+    GpuRelease {
+        id: u32,
+        lease: u32,
+    },
+    /// The GPUs and their leases: answered with a [`Message::GpuState`].
+    GpuStatus {
+        id: u32,
+    },
+    /// Reports that work under `lease` hung (a fence that never signalled, a
+    /// reset). Recorded in the GPU's state; answered with a
+    /// [`Message::Reply`].
+    GpuHang {
+        id: u32,
+        lease: u32,
+        detail: String,
+    },
 }
 
 /// A looks request (see [`Request::Looks`]).
@@ -563,6 +598,9 @@ pub enum Message {
         version: u16,
         board: String,
         client_id: u32,
+        /// Feature bits ([`FEATURE_GPU_LEASE`]); appended within protocol 1,
+        /// 0 from an older service.
+        features: u32,
     },
     Devices(Vec<DeviceDesc>),
     /// The answer to [`Request::Stats`].
@@ -589,6 +627,19 @@ pub enum Message {
         id: u32,
         device: String,
         status: CalibrationStatus,
+    },
+    /// Where a GPU lease stands: the answer to [`Request::GpuAcquire`]
+    /// (with its id), and later, with the same id, the grant of a queued
+    /// lease or a notice to its holder.
+    GpuLease {
+        id: u32,
+        lease: u32,
+        state: GpuLeaseState,
+    },
+    /// The answer to [`Request::GpuStatus`].
+    GpuState {
+        id: u32,
+        gpus: Vec<GpuInfo>,
     },
 }
 

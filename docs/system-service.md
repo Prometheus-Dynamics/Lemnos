@@ -1113,6 +1113,37 @@ replaces the client's previous intent in the same layer, and `led off` clears th
 Product-specific integrations (which resources an app publishes, which of its commands map to
 which intent) live in the app's own repository, not here.
 
+## The GPU lease (advisory)
+
+`lemnosd` keeps an advisory lease per GPU: who holds it, who waits and in what order, holders
+past the time they said, and hangs clients report. It is cooperative only. The GPU's user-space
+driver (Mesa) opens the render node itself, so nothing is enforced, and a client that never
+asks keeps working as before: RGA, VGLite and V4L2 users make no new calls. No GPU code runs in
+the service; it lists the render nodes under `/sys/class/drm` and names each by its kernel
+driver (`v3d`). The protocol is `docs/ipc.md` section 6.6; the Rust client is
+`lemnos_ipc::GpuClient`.
+
+- Exclusive leases are held alone; shared leases together. Waiters go by priority, then
+  arrival, and a waiter is never overtaken by one of the same priority behind it.
+- Leases belong to the connection and end with it, as a lock on an open file does.
+- A holder of lower priority than the first waiter is asked once to yield; a holder past its
+  `max_hold_ms` is told once and shown overdue. Neither takes the lease back.
+
+From a shell, `lemnos-ctl gpu run` holds a lease while a command runs, the cooperative lock a
+benchmark or a board test takes so that runs that also ask do not overlap:
+
+```sh
+lemnos-ctl gpu                                   # each GPU: free, or its holders and waiters
+lemnos-ctl gpu run --label bench -- ./bench      # exclusive; waits up to 900 s (--wait S)
+lemnos-ctl gpu run --shared -- ./pipeline        # beside other shared leases
+```
+
+The command's exit code is `lemnos-ctl`'s. On board #1 (2026-11-06) the service found the
+v3d render node (`/dev/dri/renderD128`); a run under the lease showed in `gpu status` from
+inside it and got its overdue notice past `--max-hold`; a second run with a 0.2 s wait gave
+up while the first held the GPU; a third, queued, ran when the first ended (1.0 s after it
+started).
+
 ## The composite fan controller
 
 [composite-devices.md](composite-devices.md) describes it. It is one more entry in the device

@@ -17,10 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "client_gpu.rs"]
+mod gpu;
 #[path = "client_led.rs"]
 mod led;
 #[path = "client_raw.rs"]
 mod raw;
+pub use gpu::{GpuClient, GpuNotice};
 pub use led::{FrameUpdate, LedClient};
 pub use raw::{I2cDevice, Line, Pwm, SpiDevice};
 
@@ -237,6 +240,14 @@ impl ClientOptions {
             conn: Connection::open(self)?,
         })
     }
+
+    /// A [`GpuClient`]: no events, and no reconnection (leases end with the
+    /// connection, so a new one would hold none).
+    pub fn gpu(mut self) -> Result<GpuClient, ClientError> {
+        self.events = Some(false);
+        self.reconnect = false;
+        Ok(GpuClient::new(Connection::open(self)?))
+    }
 }
 
 /// The shared connection state.
@@ -246,6 +257,8 @@ struct Connection {
     buf: Vec<u8>,
     board: String,
     client_id: u32,
+    /// The welcome's feature bits.
+    features: u32,
     devices: Vec<(DeviceDesc, Arc<[ChannelDesc]>)>,
     queue: VecDeque<ClientEvent<Message>>,
     /// Device, channel names (empty: the whole device), period.
@@ -266,6 +279,7 @@ impl Connection {
             buf: Vec::with_capacity(4096),
             board: String::new(),
             client_id: 0,
+            features: 0,
             devices: Vec::new(),
             queue: VecDeque::new(),
             subscriptions: Vec::new(),
@@ -329,6 +343,7 @@ impl Connection {
                     version,
                     board,
                     client_id,
+                    features,
                 } => {
                     if version != VERSION {
                         self.stream = None;
@@ -339,6 +354,7 @@ impl Connection {
                     }
                     self.board = board;
                     self.client_id = client_id;
+                    self.features = features;
                     break;
                 }
                 other => self.queue.push_back(ClientEvent::Data(other)),

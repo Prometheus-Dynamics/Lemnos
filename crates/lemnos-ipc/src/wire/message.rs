@@ -73,9 +73,22 @@ impl Message {
                 version,
                 board,
                 client_id,
+                features,
             } => {
                 let mut e = Encoder::new(WELCOME);
-                e.u16(*version).str(board).u32(*client_id);
+                e.u16(*version).str(board).u32(*client_id).u32(*features);
+                e.finish()
+            }
+            Self::GpuLease { id, lease, state } => {
+                let mut e = Encoder::new(GPU_LEASE_REPLY);
+                e.u32(*id).u32(*lease);
+                super::gpu::state_encode(&mut e, *state);
+                e.finish()
+            }
+            Self::GpuState { id, gpus } => {
+                let mut e = Encoder::new(GPU_STATE_REPLY);
+                e.u32(*id);
+                super::gpu::gpus_encode(&mut e, gpus);
                 e.finish()
             }
             Self::Stats(stats) => {
@@ -220,6 +233,17 @@ impl Message {
                 version: d.u16()?,
                 board: d.str()?,
                 client_id: d.u32()?,
+                // Appended later in protocol 1: older services send none.
+                features: if d.is_empty() { 0 } else { d.u32()? },
+            },
+            GPU_LEASE_REPLY => Self::GpuLease {
+                id: d.u32()?,
+                lease: d.u32()?,
+                state: super::gpu::state_decode(&mut d)?,
+            },
+            GPU_STATE_REPLY => Self::GpuState {
+                id: d.u32()?,
+                gpus: super::gpu::gpus_decode(&mut d)?,
             },
             DEVICES => {
                 let n = d.u16()?;

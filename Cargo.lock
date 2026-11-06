@@ -440,6 +440,7 @@ dependencies = [
  "lemnos-hal",
  "lemnos-ipc",
  "lemnos-light",
+ "lemnos-linux-sys",
  "lemnosd",
  "toml",
 ]

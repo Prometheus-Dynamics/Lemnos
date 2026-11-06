@@ -92,6 +92,8 @@ pub struct ServiceConfig {
     /// The directory the devices' calibrations are saved in (see
     /// `calibration.rs`). Defaults to `LEMNOSD_CALIBRATION_DIR`.
     pub calibration_dir: PathBuf,
+    /// Where the GPU leases find the render nodes (`/sys/class/drm`).
+    pub drm_class: PathBuf,
 }
 
 impl ServiceConfig {
@@ -106,6 +108,7 @@ impl ServiceConfig {
             looks_override_dir: None,
             state_dir: None,
             calibration_dir: calibration::default_dir(),
+            drm_class: PathBuf::from(crate::gpu::DRM_CLASS),
         }
     }
 }
@@ -155,6 +158,9 @@ mod service_fan;
 #[path = "service_calibration.rs"]
 mod service_calibration;
 
+#[path = "service_gpu.rs"]
+mod service_gpu;
+
 pub struct Service {
     board: String,
     /// The whole definition (lines, PWM channels, raw policy).
@@ -198,6 +204,8 @@ pub struct Service {
     fusion_changed: Vec<usize>,
     calibration_dir: PathBuf,
     next_calibration_ms: u64,
+    /// The advisory GPU leases (`gpu.rs`).
+    gpu: crate::gpu::GpuLeases,
 }
 
 impl Service {
@@ -274,6 +282,7 @@ impl Service {
             fusion_changed: Vec::new(),
             calibration_dir: config.calibration_dir,
             next_calibration_ms: 0,
+            gpu: crate::gpu::GpuLeases::new(config.drm_class),
         };
         service.build_devices(now_ms);
         service.fan_loops = service
@@ -1216,6 +1225,7 @@ impl Service {
                     version: VERSION,
                     board,
                     client_id: id,
+                    features: lemnos_ipc::FEATURE_GPU_LEASE,
                 });
             }
             Request::List => {
@@ -1343,6 +1353,10 @@ impl Service {
                 self.clients[ci].send(&Message::Reply { id, result });
             }
             Request::Raw(request) => self.handle_raw(ci, request),
+            request @ (Request::GpuAcquire { .. }
+            | Request::GpuRelease { .. }
+            | Request::GpuStatus { .. }
+            | Request::GpuHang { .. }) => self.handle_gpu(ci, request, now_ms),
             Request::Restore {
                 id,
                 device,
@@ -1855,6 +1869,9 @@ impl Service {
         if self.notifier.watchdog_interval().is_some() {
             next = next.min(self.next_watchdog_ms * 1000);
         }
+        if let Some(at) = self.gpu.next_ms() {
+            next = next.min(at * 1000);
+        }
         next.max(now_us)
     }
 
@@ -1874,6 +1891,7 @@ impl Service {
         self.render_lights(now);
         self.send_frames(now);
         self.send_edges();
+        self.gpu_tick(now, &[]);
         if let Some(interval) = self.notifier.watchdog_interval()
             && now >= self.next_watchdog_ms
             && self.fan_stepping(now)
@@ -1950,6 +1968,7 @@ impl Service {
     }
 
     fn drop_closed(&mut self) {
+        let mut gone = Vec::new();
         let mut ci = 0;
         while ci < self.clients.len() {
             if !self.clients[ci].closed {
@@ -1957,6 +1976,7 @@ impl Service {
                 continue;
             }
             let client = self.clients.remove(ci);
+            gone.push(client.id);
             for slot in &mut self.slots {
                 slot.subscriptions.retain(|s| s.client != client.id);
             }
@@ -1973,6 +1993,10 @@ impl Service {
                     light.forget(client.owner);
                 }
             }
+        }
+        if !gone.is_empty() {
+            // A closed connection's leases end, and the next waiters get them.
+            self.gpu_tick(self.now_ms(), &gone);
         }
     }
 

@@ -367,6 +367,27 @@ impl Request {
                 e.u32(*id).str(device);
                 e.finish()
             }
+            Self::GpuAcquire { id, acquire } => {
+                let mut e = Encoder::new(GPU_ACQUIRE);
+                e.u32(*id);
+                super::gpu::acquire_encode(&mut e, acquire);
+                e.finish()
+            }
+            Self::GpuRelease { id, lease } => {
+                let mut e = Encoder::new(GPU_RELEASE);
+                e.u32(*id).u32(*lease);
+                e.finish()
+            }
+            Self::GpuStatus { id } => {
+                let mut e = Encoder::new(GPU_STATUS);
+                e.u32(*id);
+                e.finish()
+            }
+            Self::GpuHang { id, lease, detail } => {
+                let mut e = Encoder::new(GPU_HANG);
+                e.u32(*id).u32(*lease).str(detail);
+                e.finish()
+            }
         }
     }
 
@@ -566,6 +587,20 @@ impl Request {
             CALIBRATION_STATUS => Self::CalibrationStatus {
                 id: d.u32()?,
                 device: d.str()?,
+            },
+            GPU_ACQUIRE => Self::GpuAcquire {
+                id: d.u32()?,
+                acquire: super::gpu::acquire_decode(&mut d)?,
+            },
+            GPU_RELEASE => Self::GpuRelease {
+                id: d.u32()?,
+                lease: d.u32()?,
+            },
+            GPU_STATUS => Self::GpuStatus { id: d.u32()? },
+            GPU_HANG => Self::GpuHang {
+                id: d.u32()?,
+                lease: d.u32()?,
+                detail: d.str()?,
             },
             other => return Err(bad(format!("unknown request kind {other}"))),
         })

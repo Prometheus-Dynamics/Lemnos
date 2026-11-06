@@ -183,6 +183,7 @@ fn messages_round_trip() {
         version: VERSION,
         board: "example".into(),
         client_id: 3,
+        features: crate::FEATURE_GPU_LEASE,
     });
     round_trip_message(Message::Stats(vec![
         ReadStats {
@@ -844,6 +845,7 @@ fn fake_service(
                         version,
                         board: "fake".into(),
                         client_id: 1,
+                        features: 0,
                     },
                     Request::List => Message::Devices(Vec::new()),
                     _ => continue,
