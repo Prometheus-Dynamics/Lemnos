@@ -72,14 +72,19 @@ impl Access {
 pub const SYSTEM_HEAP_SHARE_DIVISOR: u64 = 4;
 
 /// The capacity of a heap, in bytes, from `/proc/meminfo` text: a contiguous
-/// (CMA) heap may take what is free in its pool (`CmaFree`); any other heap
-/// (the page-backed `system` heap) may take a share of `MemAvailable`.
+/// (CMA) heap may take its whole pool (`CmaTotal`); any other heap (the
+/// page-backed `system` heap) may take a share of `MemAvailable`.
+///
+/// Not `CmaFree`: that counts only idle pages, and the kernel serves a CMA
+/// request beyond it by migrating movable pages out of the pool. A board showed
+/// `CmaFree` at 0 of 64 MiB and still gave eight 1.28 MB buffers. Only a request
+/// larger than the pool can never succeed.
 ///
 /// Fails when the figure is missing, so a caller never allocates against an
 /// unknown capacity.
 pub fn heap_capacity_from_meminfo(name: &str, meminfo: &str) -> io::Result<u64> {
     let (key, share) = if name.contains("cma") {
-        ("CmaFree", 1)
+        ("CmaTotal", 1)
     } else {
         ("MemAvailable", SYSTEM_HEAP_SHARE_DIVISOR)
     };
@@ -163,7 +168,7 @@ impl DmaHeap {
     /// kernel may round the size up; [`DmaBuf::len`] is what was asked for.
     ///
     /// The request is checked first against the heap's capacity (the CMA pool's
-    /// free bytes, or a share of `MemAvailable` for the system heap) and against
+    /// whole size, or a share of `MemAvailable` for the system heap) and against
     /// any cap set with [`DmaHeap::with_capacity`]. A request above either fails
     /// with [`io::ErrorKind::OutOfMemory`] and the kernel is not asked, so a
     /// large request cannot push it into reclaim or a failed contiguous search.
@@ -649,19 +654,21 @@ mod tests {
     }
 
     #[test]
-    fn a_cma_heap_is_capped_by_its_free_pool() {
-        let text = "MemAvailable:    4000000 kB\nCmaFree:           65536 kB\n";
+    fn a_cma_heap_is_capped_by_its_whole_pool_not_its_idle_pages() {
+        // As a board read: no idle page, and the kernel still serves requests by
+        // migrating movable pages out of the pool.
+        let text = "MemAvailable:    4000000 kB\nCmaTotal:          65536 kB\nCmaFree:               0 kB\n";
         for name in ["linux,cma", "default_cma_region"] {
-            assert_eq!(
-                heap_capacity_from_meminfo(name, text).unwrap(),
-                65536 * 1024
-            );
+            let capacity = heap_capacity_from_meminfo(name, text).unwrap();
+            assert_eq!(capacity, 65536 * 1024);
+            // A 1280x800 raw frame, above CmaFree and within CmaTotal, passes the check.
+            assert!(1_282_048 <= capacity);
         }
     }
 
     #[test]
     fn the_system_heap_is_capped_by_a_share_of_available_memory() {
-        let text = "MemAvailable:    4000000 kB\nCmaFree:           65536 kB\n";
+        let text = "MemAvailable:    4000000 kB\nCmaTotal:          65536 kB\n";
         assert_eq!(
             heap_capacity_from_meminfo("system", text).unwrap(),
             4_000_000 * 1024 / SYSTEM_HEAP_SHARE_DIVISOR

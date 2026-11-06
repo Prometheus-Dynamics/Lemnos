@@ -110,6 +110,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnos_linux::dma`: a CMA heap's capacity is `CmaTotal`, not `CmaFree`. `CmaFree` counts only idle pages, and the kernel serves a CMA request beyond it by migrating movable pages out, so the check refused requests the kernel serves: on a board with `CmaFree` at 0 of 64 MiB every `linux,cma` allocation failed before the call, though the kernel gave eight 1.28 MB buffers. Only a request larger than the pool is now refused before the kernel.
 - `lemnos-ipc` and `lemnosd`, protocol 1 unchanged for the reference encoder (docs/ipc.md section 14, items 9, 11, 15, 16 and 17):
   - A string over 65 535 bytes is cut at a character boundary. A cut inside a character used to make the frame undecodable.
   - A raw line target kind or I2C op tag other than 0 or 1 is refused. It used to be read as a name or a read.

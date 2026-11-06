@@ -23,7 +23,7 @@ registers from user space.
 | `DmaHeap::open(name)`, `open_path` | opens `/dev/dma_heap/<name>`; `list_heaps()` names the heaps present (empty without the directory) |
 | `DmaHeap::allocate(len)` | `DMA_HEAP_IOCTL_ALLOC`: a `DmaBuf` of `len` bytes, read-write, close-on-exec. The kernel rounds the size up to pages; `len()` is what was asked for. A request above the heap's capacity fails with `OutOfMemory` before the kernel is asked (see "Capacity") |
 | `DmaHeap::with_capacity(bytes)` | caps every allocation from that heap, below its own capacity |
-| `heap_capacity(name)`, `heap_capacity_from_meminfo(name, text)` | the capacity now: a CMA heap (name contains `cma`) takes `CmaFree`; any other heap takes a quarter of `MemAvailable` (`SYSTEM_HEAP_SHARE_DIVISOR`). A missing figure is an error, never "no cap" |
+| `heap_capacity(name)`, `heap_capacity_from_meminfo(name, text)` | the capacity now: a CMA heap (name contains `cma`) takes `CmaTotal`, its whole pool; any other heap takes a quarter of `MemAvailable` (`SYSTEM_HEAP_SHARE_DIVISOR`). A missing figure is an error, never "no cap" |
 | `DmaBuf::from_fd(fd)` | wraps a descriptor from elsewhere (a V4L2 export, a received fd); the size comes from the kernel (`lseek`), and the descriptor's file offset is left where it was |
 | `DmaBufRef::from_fd(fd: BorrowedFd)` | the same over a descriptor someone else owns (a frame's): `len()`, `identity()`, `export_fence`, `import_fence`, `map()`, with no dup and no close. `DmaBuf::borrow()` gives one for an owned buffer |
 | `DmaBuf::map()` | a `Mapping` (`lemnos_linux::dma::Mapping`): shared, read-write, unmapped on drop |
@@ -93,8 +93,11 @@ data-movement decisions stay with the consumer.
 
 Every `allocate` reads `/proc/meminfo` first and refuses a request larger than the heap can
 hold, so a large request cannot start reclaim or a contiguous search that the kernel would
-then fail. CMA heaps (`linux,cma`, `default_cma_region`) take `CmaFree`, the free bytes of the
-64 MiB pool on the BCM2712 board. The `system` heap takes `MemAvailable / 4`, so about 0.9 GiB
+then fail. CMA heaps (`linux,cma`, `default_cma_region`) take `CmaTotal`, the whole 64 MiB pool
+on the BCM2712 board. Not `CmaFree`: it counts only idle pages, and the kernel serves a request
+beyond it by migrating movable pages out of the pool (on 2026-11-06 a board read `CmaFree` 0 of
+64 MiB and gave eight 1.28 MB buffers). Until then the check took `CmaFree` and refused those.
+The `system` heap takes `MemAvailable / 4`, so about 0.9 GiB
 on that board. A caller may set a lower cap with `DmaHeap::with_capacity`. The check is a
 bound, not a reservation: a request that fits can still fail in the kernel (CMA fragmentation),
 and that failure is returned as `ENOMEM`. Host tests: the capacity figures from text, the
