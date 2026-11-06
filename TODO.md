@@ -111,6 +111,10 @@ Everything planned, in order. Execution is paused until the user starts it.
         of 12 000 with four busy loops, 33 with `Nice=-10`, and 0 with `SCHED_FIFO` priority 10.
         The packaged unit now sets `CPUSchedulingPolicy=fifo`. Still to do: rerun beside the
         120 fps pipeline when a board runs it (busy loops stood in).
+  - [x] The p99 spacing bound was the one left fixed. It failed once in a gate run at load 120
+        (p99 11.5 ms against 8.4 ms, with the service waiting 0.86 s of 3 s for a CPU), and it
+        passed 6 of 6 on rerun. It now adds a hundredth of the service's CPU wait, which is nothing
+        on an idle host.
 
 - [x] **9. `serves_the_simulated_readings_over_the_socket` failed once** (2026-11-05, gate run at
       load 70): `acceleration.z: no value` on a one-shot `read("imu")` right after start. Cause, as
