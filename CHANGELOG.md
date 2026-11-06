@@ -80,6 +80,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnosd` skipped polled samples on a loaded board: its loop thread waited for a CPU behind other work. The packaged unit now runs it `SCHED_FIFO` at priority 10 (`CPUSchedulingPolicy=fifo`). On board #2 with four busy loops: 43 of 12 000 IMU samples missed before, 0 after. `docs/system-service.md`, "Scheduling under load".
 - lemnosd: a polled sensor's repeat filter measures its period from the end of the last delivered read, not its start, so a read preempted before its bus transaction cannot let the same sample through twice.
 - The USB reaper spun on a hung-up usbdevfs descriptor (its poll returned at once); it now fails the transfers.
 - The USB interface release used a bare `USBDEVFS_CONNECT` (`ENOTTY`); it now goes through `USBDEVFS_IOCTL`, with a sysfs rebind fallback.

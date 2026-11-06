@@ -87,9 +87,11 @@ Everything planned, in order. Execution is paused until the user starts it.
         service's threads had a CPU, and the largest gap may pass 25 ms only by the time they
         waited for one. The p99 spacing bound is unchanged (it is what catches a slow read
         delaying the IMU). The whole binary passes 8 of 8 at 0-16 busy loops on two cores.
-  - [ ] Open: under CPU contention lemnosd's loop is preempted where a lighter thread is not, so
-        it loses samples. Not measured on a board or in a release build. Options: less work per
-        wakeup, or a scheduling class for lemnosd in its unit.
+  - [x] Under CPU contention lemnosd's loop was preempted and lost samples. Measured on board #2
+        with the image's release build: 0 missed with only the 30 fps pipeline running, 20 to 43
+        of 12 000 with four busy loops, 33 with `Nice=-10`, and 0 with `SCHED_FIFO` priority 10.
+        The packaged unit now sets `CPUSchedulingPolicy=fifo`. Still to do: rerun beside the
+        120 fps pipeline when a board runs it (busy loops stood in).
 
 - [ ] **9. `serves_the_simulated_readings_over_the_socket` failed once** (2026-11-05, gate run at
       load 70): `acceleration.z: no value` on a one-shot `read("imu")` right after start. Not

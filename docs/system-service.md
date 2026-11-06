@@ -816,6 +816,33 @@ that is not a device (`/dev/tty`), and PWM channel 3, which is busy (exported by
 The eager binds add about 248 kB PSS over the no-bind refresh, in the same process: the example
 runs the no-bind refresh first, then the refresh with its binds. Both phases share one process.
 
+## Scheduling under load (board #2, 2026-11-05)
+
+Board #2 (BCM2712, 4 cores, image dev.907), with the image's release `lemnosd`. The IMU (BMI088 on the
+PIO bus) is polled every 5 ms. Each run watches 12 000 samples (60 s) through `lemnos-ctl watch imu
+--period 5`. It counts gaps over 7.5 ms as missed samples, and sums the run-queue wait of the
+service's threads (field 2 of `/proc/<pid>/task/*/schedstat`). The camera pipeline ran at 30 fps
+throughout. The 120 fps pipeline was not running on the board, so busy loops stand in for heavy
+load.
+
+| Load | Service scheduling | Missed | Largest gap | CPU wait |
+|---|---|---|---|---|
+| 30 fps pipeline only | default (nice 0) | 0 | 5.3 ms | 18 ms |
+| + 4 busy loops, nice 0 | default | 20 | 10.0 ms | 994 ms |
+| + 4 busy loops, nice 0 | `SCHED_FIFO` 10 (`chrt`) | 0 | 5.5 ms | 0 ms |
+| + 4 busy loops, nice -5 | default | 43 | 11.1 ms | 1159 ms |
+| + 4 busy loops, nice -5 | `Nice=-10` (unit) | 33 | 10.7 ms | 943 ms |
+| + 4 busy loops, nice -5 | `CPUSchedulingPolicy=fifo`, priority 10 (unit) | 0 | 5.6 ms | 0 ms |
+
+A sample is lost only while the service waits for a CPU, the same thing the schedule tests
+measure. A nice value does not stop that, because the fair scheduler still shares the CPU with
+the load. A real-time class does. The packaged unit
+([packaging/systemd/lemnosd.service](../packaging/systemd/lemnosd.service)) sets
+`CPUSchedulingPolicy=fifo` and `CPUSchedulingPriority=10`. systemd applies them before exec, so
+they work with `RestrictRealtime=yes` (checked on the board: all five threads ran `SCHED_FIFO`).
+The test drop-ins were removed afterwards, and the board's service was restarted to its image
+settings.
+
 ## Rust-for-Linux kernel modules: recommended against
 
 Building the `no_std` drivers as Rust-for-Linux modules is technically possible, but:

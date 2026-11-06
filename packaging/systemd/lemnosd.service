@@ -70,6 +70,15 @@ ProtectHostname=yes
 ProtectClock=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+# The scheduling class is set by systemd before exec, so RestrictRealtime still
+# stops the service changing it later. Fixed priority 10 sits below the kernel's
+# interrupt threads (50) and inside the default real-time throttle (95 %), and
+# lemnosd sleeps between reads, so it takes the CPU only when a read is due.
+# Without it, a loaded board makes the poll loop wait for a CPU and it skips
+# samples: four busy loops at nice -5 cost 43 of 12 000 IMU samples at 200 Hz
+# (Nice=-10: 33); with it, none (docs/system-service.md, "Scheduling under load").
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=10
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
