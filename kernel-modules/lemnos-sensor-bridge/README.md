@@ -95,6 +95,34 @@ For images built from now on, `buildroot/linux-ext-lemnos-sensor-bridge.mk` buil
 part of whatever kernel the image uses (6.12 or 7.2, e.g. in the 1.1.0 device package's
 external tree) instead, so it always matches.
 
+The module needs a Raspberry Pi kernel tree: `MEDIA_BUS_FMT_SENSOR_DATA` (0x7002) is a downstream
+media-bus code that mainline and distribution headers lack, so a host build against them fails
+on it. Against the Raspberry Pi 7.2 tree (53679a578, `7.2.9-v8-16k`) it builds with no warnings
+at `W=1` (2026-11-06, host cross GCC 16; not loaded on a board yet).
+
+### Packaging in an image
+
+`install/install.sh` is a dev-box install: it puts files under `/usr/local` and
+`/etc/systemd/system`. An image that packages the bridge follows the image layout instead, with
+nothing under `/usr/local`:
+
+| File | Image path |
+| --- | --- |
+| `lemnos_sensor_bridge.ko` | `/lib/modules/<kernel release>/updates/` |
+| `lemnos-sensor-bridge-bcm2712.dtbo` (boot overlay) and the other `.dtbo` | the boot partition's `overlays/` |
+| `lemnos-bridge.service` | `/usr/lib/systemd/system/` |
+| `spike/up.sh`, `spike/down.sh`, `spike/spike-env.sh` and the runtime `.dtbo` the unit loads | an image library directory, e.g. `/usr/lib/lemnos-bridge/` |
+
+The unit as shipped here names `/usr/local/lib/lemnos-bridge` for `up.sh`, `down.sh` and
+`OVERLAY_DTBO` (the runtime overlay). An image package rewrites those three paths to its library
+directory, or installs a drop-in that sets them. The runtime overlay is applied by `up.sh` at
+run time, not by the firmware, so it does not go in `overlays/`. `up.sh` loads the module with
+`insmod` from its own directory, so in an image it either finds `lemnos_sensor_bridge.ko` there
+(a link to the `updates/` copy) or is changed to `modprobe lemnos_sensor_bridge`; the package
+picks one.
+
+The bridge is for camera-stack image variants only (see `../README.md`).
+
 ## On a BCM2712 dev board
 
 The dev box boots as an image would (the shipping configuration): `config.txt` has
