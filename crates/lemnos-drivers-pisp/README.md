@@ -83,7 +83,9 @@ feature and a board, so it is `required-features` and is not built by default; s
 `be_module_check` (feature `be-module`), which compares the module with the `pispbe` nodes and
 runs the IOMMU and stopped-block tests. `csi2_module_check` (feature `csi2-module`) sets a
 sensor up from a register file, captures through the receiver module, and reports the frame
-rate, the frame start to frame end time, drops, and a check of the test pattern's bars.
+rate, the frame start to frame end time, drops, and a check of the test pattern's bars. With
+`--be` (and the `be-module` feature) it unpacks to 16 bits in the receiver and runs each frame
+through the back end module, from the receiver's buffer.
 
 ## Debug hooks (feature `debug-hooks`)
 

@@ -55,6 +55,25 @@ The `linux_device_validator` example under `crates/lemnos/examples/` wires toget
 
 `linux_hal_probe` exercises the pure-Rust Linux layer on a board: `discover` (inventory), `gpio-info [chip]` (GPIO v2 chip and line info), `gpio-read CHIP OFFSET` (reads a line without changing it), `i2c-read BUS ADDR REG LEN [8|16]` (register read; claims the address, never forces), `hotplug SECONDS` (prints watch events and the source in use). Cross-compile with `--target aarch64-unknown-linux-gnu`. The `lemnos-linux-sys` and `lemnos-linux` test binaries also run on the target (struct layouts, present chips and buses, the uevent socket).
 
+## Tests on a Board
+
+`scripts/board-tests.sh` runs the workspace's tests on a Linux board:
+- It cross-builds the test binaries for `TARGET` (default `aarch64-unknown-linux-musl`), strips
+  them, copies them over SSH to `BOARD`, and runs each one there.
+- Some tests read repository files (the example looks, the presets) or run `lemnos-ctl` through
+  paths compiled in at build time. The script puts those files at the same paths on the board.
+  Where the board's root is read-only, it mounts a tmpfs on the first directory of the path that
+  is missing, provided that directory is empty, and unmounts it afterwards.
+- `LOCK` names a lock file taken with `flock -w 900` on the board for the run.
+- trybuild's compile-fail test needs cargo, so it is skipped.
+
+Board #1 (aarch64, 2026-11-06): 86 of 87 binaries pass, and the 87th is the skipped compile-fail
+test.
+
+```sh
+BOARD=root@<board> SSH_OPTS="-J <jump host>" STRIP=<toolchain>-strip scripts/board-tests.sh
+```
+
 ## Practical Workflow
 
 For day-to-day changes:

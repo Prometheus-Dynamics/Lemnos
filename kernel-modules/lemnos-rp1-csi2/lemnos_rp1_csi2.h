@@ -35,6 +35,13 @@ struct lemnos_rp1_csi2_info {
 
 /* Write lines packed, without stride padding (embedded data). */
 #define LEMNOS_RP1_CSI2_PACK_BYTES	(1u << 0)
+/*
+ * Unpack each pixel of a RAW10/12/14 stream to 16 bits, most significant bit
+ * aligned (rp1-cfe's 16-bit remap, V4L2's SBGGR16 and friends): what the PiSP
+ * back end reads. Needs width and height, a stride of at least width x 2, and
+ * not PACK_BYTES.
+ */
+#define LEMNOS_RP1_CSI2_UNPACK16	(1u << 1)
 
 struct lemnos_rp1_csi2_start {
 	__u32 lanes;		/* 1 to max_lanes */

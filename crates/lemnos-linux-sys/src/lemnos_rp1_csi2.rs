@@ -18,6 +18,10 @@ pub const ABI: u32 = 1;
 pub const DEPTH: usize = 8;
 /// `LEMNOS_RP1_CSI2_PACK_BYTES`: write lines packed, without stride padding.
 pub const PACK_BYTES: u32 = 1;
+/// `LEMNOS_RP1_CSI2_UNPACK16`: unpack each RAW10/12/14 pixel to 16 bits, most significant bit
+/// aligned, which is what the PiSP back end reads. Needs a width, a stride of at least twice it,
+/// and not [`PACK_BYTES`].
+pub const UNPACK16: u32 = 2;
 
 /// `struct lemnos_rp1_csi2_info`.
 #[repr(C)]
@@ -61,7 +65,7 @@ pub struct Start {
     pub stride: u32,
     /// Bytes written at most, a multiple of 16.
     pub size: u32,
-    /// [`PACK_BYTES`].
+    /// [`PACK_BYTES`], [`UNPACK16`].
     pub flags: u32,
     /// Zero ([`start`] clears it).
     pub reserved: [u32; 3],

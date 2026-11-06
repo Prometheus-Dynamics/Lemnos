@@ -76,6 +76,7 @@
 #define IRQ_EN_FE_ACK		BIT(15)
 #define PACK_LINE		BIT(29)
 #define PACK_BYTES		BIT(30)
+#define CH_MODE_SHIFT		1
 #define VC_SHIFT		5
 #define DT_SHIFT		7
 
@@ -439,12 +440,16 @@ static long lrc_start(struct lrc_dev *l, void __user *arg)
 		return -EFAULT;
 	if (s.lanes < 1 || s.lanes > l->max_lanes || s.mbps < 80 || s.mbps > 1500 ||
 	    s.vc > 3 || s.dt < 1 || s.dt > 63 || (s.stride & 15) || (s.size & 15) ||
-	    !s.size || (s.flags & ~LEMNOS_RP1_CSI2_PACK_BYTES) ||
+	    !s.size ||
+	    (s.flags & ~(LEMNOS_RP1_CSI2_PACK_BYTES | LEMNOS_RP1_CSI2_UNPACK16)) ||
 	    s.width > 0xffff || s.height > 0xffff || !s.width != !s.height ||
 	    s.reserved[0] || s.reserved[1] || s.reserved[2])
 		return -EINVAL;
 	if (s.width && !(s.flags & LEMNOS_RP1_CSI2_PACK_BYTES) &&
 	    (u64)s.stride * s.height > s.size)
+		return -EINVAL;
+	if ((s.flags & LEMNOS_RP1_CSI2_UNPACK16) &&
+	    (!s.width || (s.flags & LEMNOS_RP1_CSI2_PACK_BYTES) || s.stride < 2 * s.width))
 		return -EINVAL;
 	spin_lock_irqsave(&l->lock, flags);
 	if (l->streaming) {
@@ -463,6 +468,9 @@ static long lrc_start(struct lrc_dev *l, void __user *arg)
 	ctrl = DMA_EN | IRQ_EN_FS | IRQ_EN_FE_ACK | PACK_LINE;
 	if (s.flags & LEMNOS_RP1_CSI2_PACK_BYTES)
 		ctrl |= PACK_BYTES;
+	/* CH_MODE (bits 2:1): CSI2_MODE_REMAP, as cfe_start_channel picks for a 16-bit format. */
+	if (s.flags & LEMNOS_RP1_CSI2_UNPACK16)
+		ctrl |= 1 << CH_MODE_SHIFT;
 	wr(l->dma, CSI2_CH_FRAME_SIZE(LRC_CH), (s.height << 16) | s.width);
 	ctrl |= (s.vc << VC_SHIFT) | (s.dt << DT_SHIFT);
 	wr(l->dma, CSI2_CH_CTRL(LRC_CH), ctrl);

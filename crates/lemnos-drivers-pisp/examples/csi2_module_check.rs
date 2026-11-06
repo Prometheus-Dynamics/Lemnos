@@ -13,6 +13,10 @@
 //!   --bars            check the frame is vertical bars: rows of a parity identical, columns
 //!                     varying
 //!   --dump PATH       write the checked frame's bytes to PATH
+//!   --be              (feature `be-module` too) unpack to 16 bits in the receiver and hand each
+//!                     frame's buffer to the back end module, which demosaics it to RGB888: the
+//!                     frame end to back end interrupt and wake-up times, and a bar check of
+//!                     the RGB output
 //! ```
 //!
 //! The register file's sections run in file order before streaming, except `stream_on`, run
@@ -27,7 +31,9 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::time::Duration;
 
 use lemnos_drivers_pisp::device::cci::{Cci, I2cCci, RegisterFile};
-use lemnos_drivers_pisp::device::csi2_module::{Csi2Module, DEPTH, Done, Receiver, Start};
+use lemnos_drivers_pisp::device::csi2_module::{
+    Csi2Module, DEPTH, Done, Receiver, Start, UNPACK16,
+};
 use lemnos_linux::dma::{Access, DmaBuf, DmaHeap};
 use lemnos_linux_sys::gpio;
 
@@ -43,6 +49,7 @@ struct Args {
     frames: u32,
     bars: bool,
     dump: Option<String>,
+    be: bool,
 }
 
 fn num(s: &str) -> Result<u32> {
@@ -72,6 +79,7 @@ fn args() -> Result<Args> {
         frames: 300,
         bars: false,
         dump: None,
+        be: false,
     };
     while let Some(arg) = it.next() {
         let mut val = || it.next().ok_or_else(|| format!("{arg} needs a value"));
@@ -95,12 +103,17 @@ fn args() -> Result<Args> {
             "--frames" => a.frames = num(&val()?)?,
             "--bars" => a.bars = true,
             "--dump" => a.dump = Some(val()?),
+            "--be" => a.be = true,
             _ if a.regfile.is_empty() && !arg.starts_with('-') => a.regfile = arg,
             _ => return Err(format!("unknown argument {arg}").into()),
         }
     }
     if a.regfile.is_empty() {
         return Err("usage: csi2_module_check REGFILE [options]".into());
+    }
+    if a.be {
+        a.start.flags |= UNPACK16;
+        a.start.stride = a.start.stride.max(a.start.width * 2).next_multiple_of(64);
     }
     a.start.size = (a.start.stride * a.start.height).next_multiple_of(16);
     Ok(a)
@@ -201,6 +214,12 @@ fn main() -> Result<()> {
     let bufs: Vec<DmaBuf> = (0..DEPTH)
         .map(|_| heap.allocate(a.start.size as usize))
         .collect::<std::io::Result<_>>()?;
+    #[cfg(feature = "be-module")]
+    let mut be = a.be.then(|| be::Stage::new(&heap, &a.start)).transpose()?;
+    #[cfg(not(feature = "be-module"))]
+    if a.be {
+        return Err("--be needs the be-module feature".into());
+    }
     rx.start(&a.start)?;
     for (i, b) in bufs.iter().enumerate() {
         rx.queue(b.as_fd(), 0, i as u64)?;
@@ -229,6 +248,10 @@ fn main() -> Result<()> {
                     std::fs::write(path, &map.as_slice()[..a.start.size as usize])?;
                 }
                 buf.end_cpu_access(Access::Read)?;
+            }
+            #[cfg(feature = "be-module")]
+            if let Some(be) = be.as_mut().filter(|_| d.status == 0) {
+                be.run(buf, d, got.len() == 10)?;
             }
             got.push(*d);
             rx.queue(buf.as_fd(), 0, d.tag)?;
@@ -262,6 +285,10 @@ fn main() -> Result<()> {
         "receiver: {} frame starts, {} without a buffer",
         info.frames, info.dropped
     );
+    #[cfg(feature = "be-module")]
+    if let Some(be) = &be {
+        be.report();
+    }
     if let Some((differ, distinct)) = checked.filter(|_| a.bars) {
         println!(
             "bars: {:.2} % of sampled row bytes differ from row 0 or 1, {distinct} distinct values in row 0",
@@ -269,4 +296,141 @@ fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The back end module behind the receiver (`--be`): each frame's buffer, unpacked to 16 bits,
+/// is the input of a demosaic job, run one frame at a time.
+#[cfg(feature = "be-module")]
+mod be {
+    use super::Result;
+    use lemnos_drivers_pisp::be::ops::demosaic_ccm;
+    use lemnos_drivers_pisp::device::be_module::{BeModule, BeModuleJob};
+    use lemnos_drivers_pisp::device::csi2_module::{Done, Start};
+    use lemnos_drivers_pisp::uapi::BayerOrder;
+    use lemnos_linux::dma::{Access, DmaBuf, DmaHeap};
+    use lemnos_linux_sys::time::monotonic_now;
+    use std::os::fd::AsFd;
+    use std::time::Duration;
+
+    pub struct Stage {
+        be: BeModule,
+        job: BeModuleJob,
+        out: DmaBuf,
+        size: (usize, usize),
+        /// Per frame: frame end to the back end's interrupt, and to this thread's wake-up, ns.
+        times: Vec<(u64, u64)>,
+        failed: u32,
+        checked: Option<(usize, usize)>,
+    }
+
+    impl Stage {
+        pub fn new(heap: &DmaHeap, start: &Start) -> Result<Self> {
+            let size = (start.width as u16, start.height as u16);
+            let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            let mut op = demosaic_ccm(BayerOrder::Bggr, size, identity, [0.0; 3])?;
+            let job = BeModuleJob::new(&mut op)?;
+            if job.input_len() > start.size as usize {
+                return Err(format!(
+                    "the back end reads {} bytes, the receiver writes {}",
+                    job.input_len(),
+                    start.size
+                )
+                .into());
+            }
+            let out_len = job.output_len(0).ok_or("the op writes no output 0")?;
+            let be = BeModule::open()?;
+            println!(
+                "back end: demosaic {}x{} to RGB888, {out_len} bytes",
+                size.0, size.1
+            );
+            Ok(Self {
+                be,
+                job,
+                out: heap.allocate(out_len)?,
+                size: (usize::from(size.0), usize::from(size.1)),
+                times: Vec::new(),
+                failed: 0,
+                checked: None,
+            })
+        }
+
+        /// Runs the job on the frame `d` the receiver wrote into `input`, and checks the bars
+        /// in its output when `check`.
+        pub fn run(&mut self, input: &DmaBuf, d: &Done, check: bool) -> Result<()> {
+            self.be.submit(
+                &self.job,
+                d.tag,
+                input.as_fd(),
+                [Some(self.out.as_fd()), None],
+            )?;
+            let done = self.be.wait(Duration::from_secs(1))?;
+            let woke = monotonic_now().as_nanos() as u64;
+            let Some(job) = done.first() else {
+                return Err("the back end did not finish within 1 s".into());
+            };
+            if job.status != 0 {
+                self.failed += 1;
+                return Ok(());
+            }
+            self.times.push((
+                job.irq_ns.saturating_sub(d.fe_ns),
+                woke.saturating_sub(d.fe_ns),
+            ));
+            if check {
+                self.out.begin_cpu_access(Access::Read)?;
+                let map = self.out.map_read_only()?;
+                self.checked = Some(rgb_bars(map.as_slice(), self.size));
+                self.out.end_cpu_access(Access::Read)?;
+            }
+            Ok(())
+        }
+
+        pub fn report(&self) {
+            let mut irq: Vec<u64> = self.times.iter().map(|t| t.0).collect();
+            let mut wake: Vec<u64> = self.times.iter().map(|t| t.1).collect();
+            irq.sort_unstable();
+            wake.sort_unstable();
+            let pct = |v: &[u64], p: usize| {
+                v.get((v.len() * p / 100).min(v.len().saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0)
+                    / 1000
+            };
+            println!(
+                "back end: {} jobs ({} failed); frame end to back end interrupt p50 {} p99 {} max {} us; to wake-up p50 {} p99 {} max {} us",
+                self.times.len(),
+                self.failed,
+                pct(&irq, 50),
+                pct(&irq, 99),
+                irq.last().copied().unwrap_or(0) / 1000,
+                pct(&wake, 50),
+                pct(&wake, 99),
+                wake.last().copied().unwrap_or(0) / 1000,
+            );
+            if let Some((differ, colours)) = self.checked {
+                println!(
+                    "back end bars: {differ} of the sampled RGB rows' bytes differ from row {}, {colours} colour runs in it",
+                    self.size.1 / 8
+                );
+            }
+        }
+    }
+
+    /// Bytes of rows h/4, h/2 and 3h/4 that differ from row h/8 (bars are vertical, and rows
+    /// away from the edges are whole after the demosaic), and the runs of one colour in row h/8.
+    fn rgb_bars(rgb: &[u8], (w, h): (usize, usize)) -> (usize, usize) {
+        let stride = rgb.len() / h;
+        let row = |r: usize| &rgb[r * stride..r * stride + w * 3];
+        let base = row(h / 8);
+        let differ = [h / 4, h / 2, 3 * h / 4]
+            .iter()
+            .map(|r| row(*r).iter().zip(base).filter(|(a, b)| a != b).count())
+            .sum();
+        let runs = 1 + base
+            .chunks(3)
+            .zip(base.chunks(3).skip(1))
+            .filter(|(a, b)| a != b)
+            .count();
+        (differ, runs)
+    }
 }

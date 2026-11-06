@@ -25,6 +25,10 @@ Ltd, notice kept in the source). The uAPI header `lemnos_rp1_csi2.h` is
   - the stream: virtual channel 0-3, data type 1-63, width, height, stride and size, with
     stride and size multiples of 16.
 
+  `LEMNOS_RP1_CSI2_UNPACK16` makes the DMA channel unpack each RAW10/12/14 pixel to 16 bits,
+  most significant bit aligned. This is `rp1-cfe`'s 16-bit remap, and it is what the PiSP back
+  end reads, so a frame can go straight from the receiver's buffer into a back end job.
+
   It then brings things up in `rp1-cfe`'s order: the DMA channel, the first buffer armed,
   MIPICFG, the D-PHY, and last the CSI-2 host. Other data types on the link, such as a sensor's
   embedded line, are not written.
@@ -93,6 +97,18 @@ Results:
   expected 0 and 1023 runs.
 - **Restore:** `rp1-cfe` bound again afterwards and registered its nodes, and the camera
   service started again. This held on each of three runs.
+
+**Receiver to back end**, the same day: `csi2_module_check --be`, with this module and
+`kernel-modules/lemnos-pisp-be` bound, `UNPACK16` at stride 2560, and each frame's buffer
+submitted as the input of a demosaic job (BGGR to RGB888, identity matrix):
+- No copy: the back end reads the receiver's dma-buf.
+- 600 frames at 60.28 fps; none failed in either module, and no frame start went without a
+  buffer.
+- Frame end to the back end's interrupt: p50 757 µs, p99 1324 µs, max 1847 µs. To the
+  user-space wake-up: p50 759 µs, p99 1341 µs, max 1864 µs.
+- The RGB output's sampled rows were identical byte for byte, with 18 runs of one colour across
+  a row (the bars and the demosaic's transitions between them).
+- `pispbe` and `rp1-cfe` were bound again afterwards.
 
 Untested: more than one virtual channel or data type, 1 lane, `PACK_BYTES`, link rates other
 than 800 Mbit/s, a missing frame end, and the 6.12 kernels.

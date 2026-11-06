@@ -194,4 +194,7 @@ Measured 2026-11-06 on board #1 with an OV9782 at 1280x800 RAW10, 2 lanes at 800
 - frame start to frame end median 7465 µs;
 - the colour-bar test pattern exact.
 
+- With `UNPACK16`, each frame's buffer went straight into a back end demosaic job (no copy):
+  600 frames, frame end to the back end's interrupt p50 757 µs, p99 1324 µs.
+
 The full record is in the module's README.

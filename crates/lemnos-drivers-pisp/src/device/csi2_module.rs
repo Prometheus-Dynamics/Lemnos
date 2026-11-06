@@ -15,7 +15,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::lemnos_rp1_csi2 as sys;
-pub use lemnos_linux_sys::lemnos_rp1_csi2::{DEPTH, Done, Info, PACK_BYTES, Start};
+pub use lemnos_linux_sys::lemnos_rp1_csi2::{DEPTH, Done, Info, PACK_BYTES, Start, UNPACK16};
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::poll::poll_one;
 use lemnos_linux_sys::time::monotonic_now;
