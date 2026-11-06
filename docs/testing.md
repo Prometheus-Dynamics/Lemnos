@@ -74,6 +74,18 @@ test.
 BOARD=root@<board> SSH_OPTS="-J <jump host>" STRIP=<toolchain>-strip scripts/board-tests.sh
 ```
 
+## RISC-V Vector Code Under qemu
+
+`scripts/rvv-qemu.sh` runs `lemnos-drivers-rga`'s CPU route tests as riscv64 binaries under
+qemu's user mode:
+- with the V extension at VLEN 128 (the K230's C908), 256 and 512, where the RVV rows must run and
+  match the scalar loops;
+- with V off, where the scalar loops must run.
+
+`LEMNOS_EXPECT_VECTOR` makes a test check which path ran. The script needs `qemu-riscv64-static`
+and the `riscv64gc-unknown-linux-musl` target, and links with rust-lld. It is no board run: it
+shows the code follows the specification, not how fast a C908 runs it.
+
 ## Practical Workflow
 
 For day-to-day changes:

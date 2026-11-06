@@ -1,7 +1,7 @@
 //! The unsafe edge of `lemnos-linux`: Linux uAPI structures and safe wrappers
 //! over the system calls Lemnos needs (i2c-dev, spidev, GPIO uAPI v2, netlink
 //! uevents, inotify, poll, signalfd, dma-heap and dma-buf, V4L2, subdevices and
-//! the media controller, mappings).
+//! the media controller, mappings), and the RISC-V vector rows of the CPU route (`rvv`).
 //!
 //! One of two Lemnos crates allowed `unsafe` (the other, `lemnos-capi`, is the
 //! C boundary); every block states
@@ -30,6 +30,8 @@ pub mod rga;
 
 #[cfg(feature = "rp1")]
 pub mod rp1_pio;
+#[cfg(target_arch = "riscv64")]
+pub mod rvv;
 pub mod signal;
 pub mod spi;
 pub mod time;

@@ -134,7 +134,8 @@ Shared facts, checked against the drivers:
 | GPIO, PWM (output, input capture), timers, I2C, SPI, I2S, ADC, DMA, WDT | the vendor's IO | unused | the rows are not in `k230.dtsi`; the K230 TRM gives them (not checked here) |
 
 The K230's single C908 (`thead,c908`) and its RVV are in `k230.dtsi`. riscv64 lemnosd and lemnos-ctl
-already build (the `cross32` gate).
+already build (the `cross32` gate). The RVV is used by `lemnos-drivers-rga::cpu`, the CPU route for
+what VGLite does not serve (`lemnos_linux_sys::rvv`; checked under qemu, untested on board).
 
 ### RK3588S (`rk3588-base.dtsi` with `rk3588s.dtsi`)
 

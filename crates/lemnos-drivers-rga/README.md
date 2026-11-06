@@ -38,6 +38,18 @@ Rockchip board. Each device test skips where its node is absent.
   one-byte `yuv2rgb_mode`, so no field is verified for them), line drawing (on the multi-RGA node, and on
   VGLite until a board run matches Bresenham), and resizes on the multi-RGA node. A caller sends
   these to the CPU.
+- **CPU (`cpu`):** what a caller does when no route serves. Four operations are written so far:
+  - `channel_to_gray`, `gray_to_rgba`, `color_key` (giving an 8-bit mask) and `rop`;
+  - all over strided images, as scalar loops.
+
+  On riscv64 Linux whose kernel offers the V extension, each row runs as RVV code from
+  `lemnos_linux_sys::rvv` instead, and `cpu::vector()` says so. The RVV rows were written from the
+  RVV 1.0 specification for the K230's C908. `scripts/rvv-qemu.sh` runs them under qemu at VLEN
+  128, 256 and 512 against the scalar loops. Untested on board.
+
+  Not written yet:
+  - conversions and resizes, which need their colour matrices and rounding defined first;
+  - lines, which stay with the caller: one pixel a step gives a vector unit nothing to do.
 
 ## Choosing a route
 

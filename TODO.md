@@ -191,6 +191,16 @@ Everything planned, in order. Execution is paused until the user starts it.
     appended id, and `FEATURE_READ_ID` (welcome bit 1) tells the client to match by it. No byte
     changes for an older peer. The file keeps the rule for when a version is due, the negotiation
     (`Hello` frozen; the service answers the client's version per connection), and what waits.
+- [x] **RVV for the K230's CPU fallbacks** (2026-11-06). Lemnos had no CPU code for what a route
+      leaves to the CPU. `lemnos-drivers-rga::cpu` now has four operations: channel to gray, gray to
+      RGBA, colour key and mask ROP. Each is a scalar loop, with RVV 1.0 rows from
+      `lemnos_linux_sys::rvv` when the kernel offers V. They match byte for byte under qemu at VLEN
+      128/256/512 (`scripts/rvv-qemu.sh`, in the riscv64 push gate). Untested on board; no K230
+      profile exists, so the four were picked as the per-pixel operations VGLite does not serve.
+  - [ ] Conversions and resizes on the CPU route: define the matrices and rounding first (they
+        must match the units' rows in `caps`), then scalar and RVV.
+  - [ ] On a K230: run `cpu`'s tests with `LEMNOS_EXPECT_VECTOR=1` and time each operation against
+        its scalar loop.
 - [x] **8. `a_polled_400_hz_imu_delivers_each_sample_once` was intermittent.** Fixed: its rate floor
       is now 90 % of 400 for the time the service's threads had a CPU (their run-queue delay in
       `/proc/self/task/*/schedstat`), not a share set by a 10 ms wakeup probe's p99. Measured on two

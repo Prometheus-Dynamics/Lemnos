@@ -4,7 +4,8 @@
 //!
 //! A caller asks which route serves an operation before it runs one: [`caps::route_for`] answers
 //! from the SoC table, and [`route_on_system`] also checks that the device node is there. What
-//! no route serves is the caller's to do on the CPU.
+//! no route serves runs on the CPU: [`cpu`] has the per-pixel operations (with RVV rows on
+//! riscv64), and the rest is the caller's.
 //!
 //! ```no_run
 //! # #[cfg(target_os = "linux")]
@@ -31,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 pub mod caps;
+pub mod cpu;
 mod format;
 mod multirga;
 // The shared checks serve the Linux routes only.

@@ -8,6 +8,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-drivers-rga::cpu`: the CPU route, for what no unit serves (on the K230D, all of these), as scalar loops over strided images:
+  - `channel_to_gray`, `gray_to_rgba`, `color_key` (an 8-bit mask) and `rop`;
+  - on riscv64 Linux with the V extension, each row runs as RVV 1.0 code instead (`lemnos_linux_sys::rvv`, with `available()` from the kernel's `AT_HWCAP`), and `cpu::vector()` says which path runs.
+  - The RVV code was written from the specification for the K230's C908 and matches the scalar loops byte for byte under qemu at VLEN 128, 256 and 512 (`scripts/rvv-qemu.sh`, now part of the riscv64 push gate). Untested on board.
 - The two IPC gaps set aside for a protocol 2 are fixed within protocol 1 (`docs/ipc-v2.md`).
   - `Request::Read` gains an appended `id` and `RawReading` an `id`, sent only when nonzero, so a subscription's reading is byte for byte as before.
   - A service with the new welcome bit `FEATURE_READ_ID` (value 2) answers each read, reading or refusal, with its id, and `DeviceClient::read` then matches by id: overlapping reads of one device are told apart.
