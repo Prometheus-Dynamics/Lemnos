@@ -299,20 +299,23 @@ impl MockLemnosd {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let buses = MockBuses::new(hardware.clone(), root.join("sys"));
         let (thread_stop, thread_socket) = (Arc::clone(&stop), socket.clone());
-        let thread = std::thread::spawn(move || {
-            let mut config = ServiceConfig::new(definition, thread_socket);
-            config.state_dir = state_dir;
-            match Service::new(config, Box::new(buses)) {
-                Ok(mut service) => {
-                    let _ = ready_tx.send(Ok(()));
-                    let _ = service.run(&thread_stop);
-                    service.shutdown(false);
+        // Named like the bus threads, so a test can find the service's threads.
+        let thread = std::thread::Builder::new()
+            .name("lemnosd-loop".into())
+            .spawn(move || {
+                let mut config = ServiceConfig::new(definition, thread_socket);
+                config.state_dir = state_dir;
+                match Service::new(config, Box::new(buses)) {
+                    Ok(mut service) => {
+                        let _ = ready_tx.send(Ok(()));
+                        let _ = service.run(&thread_stop);
+                        service.shutdown(false);
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error.to_string()));
+                    }
                 }
-                Err(error) => {
-                    let _ = ready_tx.send(Err(error.to_string()));
-                }
-            }
-        });
+            })?;
         match ready_rx.recv_timeout(Duration::from_secs(30)) {
             Ok(Ok(())) => Ok(Self {
                 root,

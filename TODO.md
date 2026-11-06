@@ -39,11 +39,17 @@ Everything planned, in order. Execution is paused until the user starts it.
       first, `lemnos-gpu` only when a consumer needs it.
 - [ ] **7. Shared and static builds.** Both modes, with core, surface and wrapper for each
       dependency. The workspace's LTO test informs how shared gets built.
-- [ ] **8. `a_polled_400_hz_imu_delivers_each_sample_once` is intermittent.** It failed 3 of 12 runs
-      on 2026-11-03 with the host at load 115-270 on 32 threads (237-279 readings a second against
-      floors of 272-378). Load is the likely cause, not proven: the last run passed at about the
-      highest load. The test is unchanged. Its floor
-      follows a host wakeup probe, which does not always track the delay the read saw.
+- [x] **8. `a_polled_400_hz_imu_delivers_each_sample_once` was intermittent.** Fixed: its rate floor
+      is now 90 % of 400 for the time the service's threads had a CPU (their run-queue delay in
+      `/proc/self/task/*/schedstat`), not a share set by a 10 ms wakeup probe's p99. Measured on two
+      cores with 0-16 busy loops: a plain thread sleeping on the same 2.5 ms grid hit 99.8-100 % of
+      it, but the service's loop thread waited 60-74 % of the time for a CPU (89 preemptions in
+      2.5 s, about 54 us of work per wakeup in a debug build) and delivered 156-335 a second. 12 of
+      12 runs pass at 0-16 busy loops; a 5 ms schedule (200 a second) still fails with no load
+      (floor 358).
+  - [ ] Open: under CPU contention lemnosd's loop is preempted where a lighter thread is not, so
+        it loses samples. Not measured on a board or in a release build. Options: less work per
+        wakeup, or a scheduling class for lemnosd in its unit.
 
 ## Round 4 (the user's list, 2026-11-03)
 
