@@ -31,7 +31,8 @@ use std::path::{Path, PathBuf};
 
 /// The kernel's memory accounting, read for the capacity check.
 const MEMINFO: &str = "/proc/meminfo";
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::{dma_buf, dma_heap, poll};
 
@@ -436,15 +437,37 @@ pub enum Phase {
     End,
 }
 
+static SYNC_CALLS: AtomicU64 = AtomicU64::new(0);
+static SYNC_NS: AtomicU64 = AtomicU64::new(0);
+
 /// Brackets a CPU access to a dma-buf through a borrowed descriptor
 /// (`DMA_BUF_IOCTL_SYNC`): [`Phase::Begin`] before the CPU touches the mapping,
 /// [`Phase::End`] after. A descriptor that is not a dma-buf is an error.
+///
+/// Every call, failed or not, is counted with its time in [`sync_stats`]; the
+/// `begin_cpu_access` and `end_cpu_access` of [`DmaBuf`] and [`DmaBufRef`]
+/// come through here.
 pub fn sync(fd: BorrowedFd<'_>, phase: Phase, access: Access) -> io::Result<()> {
     let start_or_end = match phase {
         Phase::Begin => dma_buf::SYNC_START,
         Phase::End => dma_buf::SYNC_END,
     };
-    dma_buf::sync(fd, start_or_end | access.bits())
+    let started = Instant::now();
+    let result = dma_buf::sync(fd, start_or_end | access.bits());
+    let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    SYNC_CALLS.fetch_add(1, Ordering::Relaxed);
+    SYNC_NS.fetch_add(ns, Ordering::Relaxed);
+    result
+}
+
+/// The process's dma-buf syncs so far ([`sync`], counted for the whole
+/// process): `(calls, nanoseconds spent in them)`. The two counters are read
+/// one after the other, so a sync running meanwhile may show in one only.
+pub fn sync_stats() -> (u64, u64) {
+    (
+        SYNC_CALLS.load(Ordering::Relaxed),
+        SYNC_NS.load(Ordering::Relaxed),
+    )
 }
 
 /// Waits on a sync file (or any descriptor that polls as one) until it
@@ -764,5 +787,15 @@ mod tests {
         let (reader, _writer) = std::io::pipe().unwrap();
         assert!(sync(reader.as_fd(), Phase::Begin, Access::Read).is_err());
         assert!(sync(reader.as_fd(), Phase::End, Access::Read).is_err());
+    }
+
+    #[test]
+    fn every_sync_is_counted_failed_or_not() {
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let (calls, _) = sync_stats();
+        let _ = sync(reader.as_fd(), Phase::Begin, Access::Read);
+        let _ = sync(reader.as_fd(), Phase::End, Access::Read);
+        // Other tests sync in parallel, so the count grows by at least two.
+        assert!(sync_stats().0 >= calls + 2);
     }
 }
