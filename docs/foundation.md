@@ -38,10 +38,11 @@ Rules:
 3. **One Linux implementation.** `lemnos-linux` implements embedded-hal over i2c-dev,
    spidev, GPIO uAPI v2 and sysfs PWM, and the existing `lemnos-bus` sessions over the same
    code. No `i2cdev`, `spidev`, `gpio-cdev` (v1 ABI, deprecated upstream) or `inotify` crates.
-4. **Unsafe lives in one crate.** `unsafe_code = "forbid"` stays workspace-wide;
-   `lemnos-linux-sys` opts out (its own lint table), exposes only safe functions, and every
-   `unsafe` block carries a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks` is
-   denied there).
+4. **Unsafe lives in two crates.** `unsafe_code = "forbid"` stays workspace-wide;
+   `lemnos-linux-sys` (the kernel's uAPI) and `lemnos-capi` (the C surface) opt out (their own
+   lint tables), expose only safe Rust functions, and every `unsafe` block holds one operation
+   and carries a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks` and
+   `multiple_unsafe_ops_per_block` are denied there).
 5. **The dyn session API stays** as a convenience layer for the runtime: discovery, binding,
    interactions and the app keep working unchanged. `lemnos-bus::hal` adapts any session to
    embedded-hal, so no_std drivers also run inside the runtime.

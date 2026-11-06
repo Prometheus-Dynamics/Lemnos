@@ -3,7 +3,8 @@ use core::ffi::c_void;
 /// Where a call writes a message, usually the text of an error: a C callback
 /// and its context, in the same shape as the graph runtime's plugin string
 /// sink. The callee may write several times; the caller appends. A null
-/// `write` drops the message.
+/// `write` drops the message. Not part of [`LAYOUT_HASH`](crate::LAYOUT_HASH):
+/// its size is the target's pointer width.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct MessageSink {

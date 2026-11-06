@@ -30,7 +30,9 @@ The repository is split into small crates so applications, custom drivers, Linux
 - `crates/lemnos-registry`: driver registration, ranking, and selection
 - `crates/lemnos-runtime`: embeddable runtime for refresh, bind, and state
 - `crates/lemnos-linux`: Linux discovery, transports, hotplug, and embedded-hal implementations (i2c-dev, spidev, GPIO v2), in pure Rust
-- `crates/lemnos-linux-sys`: the only crate with `unsafe`: Linux uAPI structs and safe syscall wrappers
+- `crates/lemnos-linux-sys`: Linux uAPI structs and safe syscall wrappers (one of two crates with `unsafe`)
+- `crates/lemnos-abi`: the C-ABI building blocks surfaces share (status codes, handles, descriptors, the version handshake)
+- `crates/lemnos-capi`: the C surface (`include/lemnos.h`) over the `lemnosd` client, as a static and a shared library, and its Rust wrapper (the other crate with `unsafe`)
 - `crates/lemnos-uevent`: Linux device watching (netlink uevents, inotify, a sysfs rescan) behind one `DeviceWatcher`, with the sysfs and dev roots it reads; below `lemnos-linux` and `lemnos-usb`
 - `crates/lemnos-usb`: one USB layer (listing, hotplug, control, bulk, interrupt, isochronous): usbdevfs on Linux, nusb (WinUSB, IOKit) elsewhere; see [docs/usb.md](docs/usb.md)
 - `crates/lemnos-drivers-*`: built-in generic runtime drivers for common bus classes

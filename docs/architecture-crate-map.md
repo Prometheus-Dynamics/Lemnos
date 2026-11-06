@@ -30,9 +30,9 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 ## Backend And Driver Crates
 
 - `lemnos-linux` is the one Linux implementation: discovery probes, sessions, hotplug (netlink uevents, inotify fallback), and embedded-hal implementations (`lemnos_linux::hal`: i2c-dev, spidev, GPIO uAPI v2, delay). Behind features it adds DMA buffers (`dma`, [dma.md](dma.md)), V4L2 memory-to-memory sessions (`v4l2-m2m`, [m2m.md](m2m.md)) and the SPI and I2C transfer engines. It forbids `unsafe`.
-- `lemnos-linux-sys` holds the workspace's only `unsafe` code: Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs (including dma-heap, dma-buf, V4L2 and `mmap`), each block with a `// SAFETY:` comment.
+- `lemnos-linux-sys` holds the kernel side of the workspace's `unsafe` code (the C boundary's is in `lemnos-capi`): Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs (including dma-heap, dma-buf, V4L2 and `mmap`), each block with a `// SAFETY:` comment.
 - `lemnos-linux` is the one Linux implementation: discovery probes, sessions, hotplug (netlink uevents, inotify fallback), and embedded-hal implementations (`lemnos_linux::hal`: i2c-dev, spidev, GPIO uAPI v2, delay). It forbids `unsafe`.
-- `lemnos-linux-sys` holds the workspace's only `unsafe` code: Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs, each block with a `// SAFETY:` comment.
+- `lemnos-linux-sys` holds the kernel side of the workspace's `unsafe` code (the C boundary's is in `lemnos-capi`): Linux uAPI structures and safe wrappers over the ioctls, sockets and syscalls `lemnos-linux` needs, each block with a `// SAFETY:` comment.
 - `lemnos-usb` is the one USB layer: listing, hotplug, descriptors, control, bulk, interrupt and isochronous transfers in Lemnos's own types. Linux runs on usbdevfs (the `usbfs` module of `lemnos-linux-sys`); Windows and macOS run on nusb. `lemnos-linux`'s `usb` feature is its bus session. See `docs/usb.md`.
 - `lemnos-drivers-gpio`, `-pwm`, `-i2c`, `-spi`, `-uart`, `-usb` provide generic runtime drivers and manifests for common interface kinds (std).
 - `lemnos-drivers-vcm` is a `no_std` device driver crate (camera focus VCMs) over embedded-hal; future device drivers follow it.
@@ -40,6 +40,7 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 
 - `lemnos-hevc` (`no_std`, no allocation) parses HEVC bitstreams for a stateless decoder's controls: Annex B NAL units, VPS, SPS, PPS and an IDR slice header. It parses; it decodes nothing. The V4L2 control structures are in `lemnos-linux-sys`, the conversion in `lemnos_linux::v4l2::hevc` (feature `v4l2-hevc`).
 - `lemnos-abi` (`no_std`) holds the C-ABI building blocks every surface shares: `Status`, generation-counted `Handle`s and their `Slab`, `BufferDesc` and `FenceDesc`, `MessageSink`, the `AbiVersion` handshake with a layout hash, and a panic guard for `extern "C"` entry points.
+- `lemnos-capi` is the C surface over the `lemnosd` device client: ten functions in `include/lemnos.h`, built as `staticlib` and `cdylib`, and `Client`, a Rust wrapper that calls through them. Its unsafe code is the C boundary's, one operation per block.
 - `lemnos-soc` (`no_std`) holds the chip descriptors: each SoC's IO blocks and capabilities as used, unused or impossible, and the typed register layouts of the Rockchip PWM and timer and the CLINT. See [io-blocks.md](io-blocks.md).
 - `lemnos-drivers-linux` holds device-model drivers over Linux kernel interfaces: `HwmonFan`, `ThermalZone`, and `KernelDevice`, the generic IIO/hwmon binding, with buffered IIO reads (std, file IO and poll).
 - `lemnos-board` parses board definitions and builds device-model drivers from them through a `DriverRegistry`; hosts (the facade's `board` feature, `lemnosd`, small programs) provide buses through `Buses`.

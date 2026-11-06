@@ -89,7 +89,8 @@ mod request;
 pub use message::encode_reading;
 pub use raw::{I2cOp, LineTarget, PwmTarget, RawRequest, SpiXfer};
 
-use codec::{Code, frame};
+pub use codec::Code;
+use codec::frame;
 
 // --- messages ---------------------------------------------------------------
 

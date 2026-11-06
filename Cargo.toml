@@ -3,6 +3,7 @@ members = [
     "crates/lemnos",
     "crates/lemnos-core",
     "crates/lemnos-abi",
+    "crates/lemnos-capi",
     "crates/lemnos-hal",
     "crates/lemnos-device",
     "crates/lemnos-soc",

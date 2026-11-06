@@ -4,7 +4,7 @@ Lemnos has one USB layer, `crates/lemnos-usb`. A flashing tool's USB boot code, 
 
 ## Layers
 
-- `crates/lemnos-linux-sys` (`usbfs`): the usbdevfs ioctls, the URB table that owns each in-flight buffer until the kernel returns it, and the descriptor read. This is the workspace's only `unsafe` code, as for every other Linux interface.
+- `crates/lemnos-linux-sys` (`usbfs`): the usbdevfs ioctls, the URB table that owns each in-flight buffer until the kernel returns it, and the descriptor read. The USB stack's `unsafe` code lives here, as it does for every other Linux interface.
 - `crates/lemnos-uevent`: Linux device watching (netlink uevents, inotify, a sysfs rescan) behind one `DeviceWatcher`. `lemnos-usb` uses it for hotplug on Linux, and `lemnos-linux` re-exports it under the same paths.
 - `crates/lemnos-usb`: the public API, in Lemnos's own types and error kinds. On Linux it runs on usbdevfs. On Windows and macOS it runs on nusb 0.2 (WinUSB and IOKit).
 - `crates/lemnos-linux`, feature `usb`: the bus session for USB devices that discovery found in sysfs. It maps the crate's errors to bus errors. Discovery stays sysfs-based.

@@ -21,7 +21,7 @@ cargo doc --workspace --no-deps
 ./scripts/check-nostd.sh
 ```
 
-`unsafe` is forbidden workspace-wide; `lemnos-linux-sys` is the single exception (its own lint table, every block documented with `// SAFETY:`).
+`unsafe` is forbidden workspace-wide. Two crates are exceptions, each with its own lint table, one unsafe operation per block and every block documented with `// SAFETY:`: `lemnos-linux-sys` (the kernel's uAPI) and `lemnos-capi` (the C boundary: exported symbols and caller pointers).
 
 Feature-matrix and Docker-specific validation are documented in [`testing/README.md`](../testing/README.md).
 

@@ -390,6 +390,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-capi"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-abi",
+ "lemnos-hal",
+ "lemnos-ipc",
+ "lemnosd",
+]
+
+[[package]]
 name = "lemnos-core"
 version = "2.0.1-dev"
 dependencies = [

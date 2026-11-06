@@ -1,6 +1,6 @@
 use core::mem::{align_of, offset_of, size_of};
 
-use crate::{AbiVersion as V, BufferDesc, FenceDesc, Handle, MessageSink, PlaneDesc, Status};
+use crate::{AbiVersion as V, BufferDesc, FenceDesc, Handle, PlaneDesc, Status};
 
 /// A surface's version, exchanged before any other call: the caller passes
 /// the one it was built against, the surface checks it ([`Self::accepts`]).
@@ -85,7 +85,7 @@ const fn concat<const N: usize>(parts: &[&[u64]]) -> [u64; N] {
     out
 }
 
-const SHAPES: [u64; 36] = concat(&[
+const SHAPES: [u64; 32] = concat(&[
     &shape!(Status),
     &shape!(Handle),
     &shape!(PlaneDesc, fd, reserved, offset, stride, size),
@@ -102,10 +102,12 @@ const SHAPES: [u64; 36] = concat(&[
     ),
     &shape!(FenceDesc, kind, fd, point),
     &shape!(V, struct_size, major, minor, layout),
-    &shape!(MessageSink, context, write),
 ]);
 
-/// The layout hash of this crate's own types.
+/// The layout hash of this crate's own types. Types holding pointers
+/// (`MessageSink`) are left out: their layout follows the target's pointer
+/// width, which both sides of a call in one process share, and the hash is
+/// then the same on every target, so a C header can carry it as a constant.
 pub const LAYOUT_HASH: u64 = layout_hash(&SHAPES);
 
 /// This crate's version. A surface that passes its types embeds it in its own

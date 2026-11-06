@@ -3,7 +3,8 @@
 //! uevents, inotify, poll, signalfd, dma-heap and dma-buf, V4L2 memory-to-memory
 //! queues, mappings).
 //!
-//! This is the only Lemnos crate allowed to use `unsafe`; every block states
+//! One of two Lemnos crates allowed `unsafe` (the other, `lemnos-capi`, is the
+//! C boundary); every block states
 //! why it is sound in a `// SAFETY:` comment. Everything public here is safe to
 //! call. Structures carry layout tests against the kernel headers (64-bit
 //! targets: x86_64, aarch64, riscv64).

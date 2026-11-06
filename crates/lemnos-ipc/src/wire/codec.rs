@@ -193,8 +193,10 @@ macro_rules! code_enum {
     };
 }
 
-/// A stable wire number for an enum.
-pub(super) trait Code: Sized {
+/// A stable wire number for an enum: the number the wire carries for each
+/// variant of `DeviceClass`, `Quantity`, `Axis`, `DeviceStatus` and
+/// `ErrorKind`. A C surface uses the same numbers.
+pub trait Code: Sized {
     fn code(self) -> u8;
     fn from_code(code: u8) -> Self;
 }

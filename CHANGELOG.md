@@ -8,6 +8,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-capi`, a new crate: Lemnos's C surface 1.0 over the `lemnosd` device client (`include/lemnos.h`: version handshake, open/close, device and channel info, one-shot read, subscribe, next reading), built as a static and a shared library, and `Client`, a Rust wrapper that calls through the same functions. Tests run a C program linked against each library on mock hardware.
+- `lemnos_ipc::wire::Code`: the wire numbers of `DeviceClass`, `Quantity`, `Axis`, `DeviceStatus` and `ErrorKind`, now public.
 - `lemnos-abi`, a new `no_std` crate: the C-ABI building blocks surfaces share. `Status` (`i32`: 0 ok, negated errno, own codes from -4096), generation-counted `Handle` and `Slab`, `BufferDesc`/`PlaneDesc` and `FenceDesc` with validation, `MessageSink`, the `AbiVersion` handshake with a compile-time layout hash, and `guard`/`guard_or` for `extern "C"` entry points. No dependencies, no unsafe code.
 - DMA: `DmaHeap::open_path_read_write` (a read-write open, for tools that report whether a heap node's permissions allow it; allocation still needs only `open_path`), and `DmaBuf::map_read_only` / `DmaBufRef::map_read_only`.
 - M2M controls: `M2mSession::set_control` and `control` (`VIDIOC_S_CTRL`, `VIDIOC_G_CTRL`), and the free functions `lemnos_linux::v4l2::set_control` and `control` on any descriptor, so a codec control can be set before the session is built. The `CID_HFLIP`, `CID_VFLIP`, `CID_ROTATE` and `CID_BG_COLOR` constants. `docs/m2m.md`.
