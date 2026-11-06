@@ -11,9 +11,16 @@ Boards: two BCM2712 boards, #1 and #2, each with a USB webcam and a Coral USB ac
 
 Everything planned, in order. Execution is paused until the user starts it.
 
-- [ ] **1. `lemnos-abi`.** Generation-counted handles, status codes, a `catch_unwind` macro, recycled
-      slabs, buffer and fence descriptors, a version handshake. Every dependency uses it instead of
-      inventing its own.
+- [x] **1. `lemnos-abi`.** `Status` (`i32`: 0 ok, a negated errno passes through, own codes from
+      -4096, positive counts), generation-counted `Handle` and `Slab` (released slots reused with a
+      new generation, a slot retired before its generation wraps), `BufferDesc` (4 planes, fourcc,
+      modifier, `OWNED` flag, `struct_size`) and `FenceDesc` (none, sync file, syncobj + point),
+      `MessageSink`, `AbiVersion` (major, minor, struct size, layout hash from sizes and offsets),
+      and `guard`/`guard_or` (a function, not a macro: a closure needs no macro). `no_std`, no
+      dependencies, no unsafe. Host tests only. Decided: negative `i32` status, not the graph
+      runtime's positive `u32`: a kernel errno passes through without a mapping table, and the
+      MCU template already returns negative `i32`. Its stable ABI adopting this is its owner's
+      change.
 - [ ] **2. C surface and client wrapper.** Lemnos's small versioned C surface and a static Rust
       client wrapper: the first core, surface and wrapper set.
 - [ ] **3. `lemnos-ipc` written spec.**
@@ -47,9 +54,19 @@ Everything planned, in order. Execution is paused until the user starts it.
       2.5 s, about 54 us of work per wakeup in a debug build) and delivered 156-335 a second. 12 of
       12 runs pass at 0-16 busy loops; a 5 ms schedule (200 a second) still fails with no load
       (floor 358).
+  - [x] A second failure under load: one delivered reading repeated the last sample. The repeat
+        filter measured a period from the start of the last delivered read; a read preempted between
+        its timestamp and its transaction took a later sample, which the next read found again a
+        period after that start. Now measured from the end of the read.
   - [ ] Open: under CPU contention lemnosd's loop is preempted where a lighter thread is not, so
         it loses samples. Not measured on a board or in a release build. Options: less work per
         wakeup, or a scheduling class for lemnosd in its unit.
+
+- [ ] **9. `serves_the_simulated_readings_over_the_socket` failed once** (2026-11-05, gate run at
+      load 70): `acceleration.z: no value` on a one-shot `read("imu")` right after start. Not
+      reproduced in 35 runs since, with or without the repeat-filter change. Unproven lead: a
+      one-shot reader that joins a read in flight for a subscription with a smaller channel mask
+      is answered from that read's values with every channel marked present.
 
 ## Round 4 (the user's list, 2026-11-03)
 

@@ -39,6 +39,7 @@ Lemnos is intentionally layered. Higher-level crates depend on lower-level vocab
 - `lemnos-drivers-bmi088` (IMU), `lemnos-drivers-bmm150` (magnetometer) and `lemnos-drivers-ina2xx` (power monitors) are `no_std` sensor drivers in the same style. All four implement the `lemnos-device` model next to their own APIs.
 
 - `lemnos-hevc` (`no_std`, no allocation) parses HEVC bitstreams for a stateless decoder's controls: Annex B NAL units, VPS, SPS, PPS and an IDR slice header. It parses; it decodes nothing. The V4L2 control structures are in `lemnos-linux-sys`, the conversion in `lemnos_linux::v4l2::hevc` (feature `v4l2-hevc`).
+- `lemnos-abi` (`no_std`) holds the C-ABI building blocks every surface shares: `Status`, generation-counted `Handle`s and their `Slab`, `BufferDesc` and `FenceDesc`, `MessageSink`, the `AbiVersion` handshake with a layout hash, and a panic guard for `extern "C"` entry points.
 - `lemnos-soc` (`no_std`) holds the chip descriptors: each SoC's IO blocks and capabilities as used, unused or impossible, and the typed register layouts of the Rockchip PWM and timer and the CLINT. See [io-blocks.md](io-blocks.md).
 - `lemnos-drivers-linux` holds device-model drivers over Linux kernel interfaces: `HwmonFan`, `ThermalZone`, and `KernelDevice`, the generic IIO/hwmon binding, with buffered IIO reads (std, file IO and poll).
 - `lemnos-board` parses board definitions and builds device-model drivers from them through a `DriverRegistry`; hosts (the facade's `board` feature, `lemnosd`, small programs) provide buses through `Buses`.

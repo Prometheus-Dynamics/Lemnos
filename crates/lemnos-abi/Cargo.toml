@@ -1,0 +1,25 @@
+[package]
+name = "lemnos-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The C-ABI building blocks Lemnos and its consumers share: status codes, generation-counted handles and their slab, buffer and fence descriptors, a version handshake and a panic guard for extern \"C\" entry points"
+documentation = "https://docs.rs/lemnos-abi"
+readme = "README.md"
+keywords = ["ffi", "abi", "no-std", "hardware", "lemnos"]
+categories = ["development-tools::ffi", "no-std"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+# `Slab`, the handle table.
+alloc = []
+# The panic guard and `Status::from_io_error`.
+std = ["alloc"]
+
+[dependencies]
