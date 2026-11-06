@@ -16,6 +16,7 @@
 //! with a `// SAFETY:` comment. Everything public in Rust is safe to call.
 
 mod client;
+mod ffi;
 pub mod surface;
 
 pub use client::{Channel, Client, Device, Error, Reading};

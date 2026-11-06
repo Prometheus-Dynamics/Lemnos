@@ -9,6 +9,7 @@ use std::fmt;
 
 use lemnos_abi::{Handle, MessageSink, Status};
 
+use crate::ffi;
 use crate::surface::{self, ChannelInfo, DeviceInfo, RawReading};
 
 /// A call that failed: its status and the surface's words for why (empty
@@ -134,7 +135,7 @@ impl Client {
     /// as `name`. `timeout_ms` bounds each request (0: the default).
     pub fn open(socket: &str, name: &str, timeout_ms: u32) -> Result<Self, Error> {
         // SAFETY: a pointer to a live `AbiVersion`, read during the call.
-        let checked = unsafe { surface::lemnos_check_version(&surface::VERSION) };
+        let checked = unsafe { ffi::lemnos_check_version(&surface::VERSION) };
         checked.into_result()?;
         let socket = CString::new(socket).map_err(|_| Error::from(Status::INVALID_ARGUMENT))?;
         let name = CString::new(name).map_err(|_| Error::from(Status::INVALID_ARGUMENT))?;
@@ -143,7 +144,7 @@ impl Client {
             // SAFETY: NUL-terminated strings and a handle to write, all alive
             // for the call.
             unsafe {
-                surface::lemnos_client_open(
+                ffi::lemnos_client_open(
                     socket.as_ptr(),
                     name.as_ptr(),
                     timeout_ms,
@@ -162,7 +163,7 @@ impl Client {
 
     /// The devices the service listed when the client connected.
     pub fn devices(&self) -> Result<Vec<Device>, Error> {
-        let count = surface::lemnos_device_count(self.handle).into_result()?;
+        let count = ffi::lemnos_device_count(self.handle).into_result()?;
         (0..count).map(|index| self.device(index)).collect()
     }
 
@@ -175,7 +176,7 @@ impl Client {
             // SAFETY: `info`, `buf` (`buf.len()` bytes) and `len` are alive
             // and writable for the call.
             unsafe {
-                surface::lemnos_device_info(
+                ffi::lemnos_device_info(
                     self.handle,
                     index,
                     &mut info,
@@ -194,7 +195,7 @@ impl Client {
                 let name = text(|buf, len| {
                     // SAFETY: as for the device's info above.
                     unsafe {
-                        surface::lemnos_channel_info(
+                        ffi::lemnos_channel_info(
                             self.handle,
                             index,
                             channel,
@@ -222,7 +223,7 @@ impl Client {
         call(|sink| {
             // SAFETY: `raw` is alive and writable for the call, its
             // `struct_size` set.
-            unsafe { surface::lemnos_read(self.handle, device, &mut raw, sink) }
+            unsafe { ffi::lemnos_read(self.handle, device, &mut raw, sink) }
         })?;
         Ok(Reading { device, raw })
     }
@@ -233,7 +234,7 @@ impl Client {
         let mut granted = 0u32;
         call(|sink| {
             // SAFETY: `granted` is alive and writable for the call.
-            unsafe { surface::lemnos_subscribe(self.handle, device, period_ms, &mut granted, sink) }
+            unsafe { ffi::lemnos_subscribe(self.handle, device, period_ms, &mut granted, sink) }
         })?;
         Ok(granted)
     }
@@ -246,7 +247,7 @@ impl Client {
         let result = call(|sink| {
             // SAFETY: `device` and `raw` are alive and writable for the call.
             unsafe {
-                surface::lemnos_next_reading(self.handle, timeout_ms, &mut device, &mut raw, sink)
+                ffi::lemnos_next_reading(self.handle, timeout_ms, &mut device, &mut raw, sink)
             }
         });
         match result {
@@ -259,6 +260,6 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let _ = surface::lemnos_client_close(self.handle);
+        let _ = ffi::lemnos_client_close(self.handle);
     }
 }

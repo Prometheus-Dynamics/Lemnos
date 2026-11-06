@@ -50,6 +50,16 @@ fn deps_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// The shared library the tests run on: the one cargo built beside the test
+/// binary, or with `shared` (where this crate exports nothing) the one its
+/// build script found or built, named for its SONAME.
+fn shared_library() -> PathBuf {
+    #[cfg(feature = "shared")]
+    return Path::new(env!("LEMNOS_CAPI_SHARED_DIR")).join("liblemnos_capi.so.1");
+    #[cfg(not(feature = "shared"))]
+    return deps_dir().join("liblemnos_capi.so");
+}
+
 fn have_cc() -> bool {
     Command::new("cc")
         .arg("--version")
@@ -99,6 +109,8 @@ fn check(stdout: &str) {
     assert!(stdout.contains("closed"), "{stdout}");
 }
 
+/// The static library is this crate's own exports, which `shared` leaves out.
+#[cfg(not(feature = "shared"))]
 #[test]
 fn a_c_program_runs_on_the_static_library() {
     let deps = deps_dir();
@@ -125,12 +137,17 @@ fn a_c_program_runs_on_the_shared_library() {
     if !have_cc() {
         return;
     }
-    let lib = deps.join("liblemnos_capi.so");
+    let lib = shared_library();
     assert!(lib.exists(), "cargo builds {} for the tests", lib.display());
     let program = deps.join(format!("lemnos-capi-c-shared-{}", std::process::id()));
     build(
         &program,
-        &["-L", deps.to_str().unwrap(), "-llemnos_capi", "-lm"],
+        &[
+            "-L",
+            lib.parent().unwrap().to_str().unwrap(),
+            &format!("-l:{}", lib.file_name().unwrap().to_str().unwrap()),
+            "-lm",
+        ],
     );
     // The program records the SONAME, liblemnos_capi.so.1, as what it needs;
     // cargo writes only liblemnos_capi.so, so the loader finds it through a
@@ -151,7 +168,7 @@ fn a_c_program_runs_on_the_shared_library() {
 /// `readelf` is installed).
 #[test]
 fn the_shared_library_is_named_for_the_surface_major() {
-    let lib = deps_dir().join("liblemnos_capi.so");
+    let lib = shared_library();
     let Ok(out) = Command::new("readelf").arg("-d").arg(&lib).output() else {
         return;
     };

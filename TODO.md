@@ -130,6 +130,10 @@ Everything planned, in order. Execution is paused until the user starts it.
         `Client`. A process holds each surface once: statically or loaded, never both.
   - [x] `lemnos-capi/lemnos.exports` (the surface list, checked against the header and the
         exports) and the SONAME `liblemnos_capi.so.<major>`.
+  - [x] lemnos-capi's `shared` feature (2026-11-06): `Client` links `liblemnos_capi.so.1` from
+        `LEMNOS_CAPI_LIB_DIR` (or one the build script builds, for development), and the crate's
+        own exports are left out. The tests, the C program's included, run both ways.
+  - [ ] The other surfaces, as each gets one.
 - [x] **Consumer compatibility of items 5-7 and the IPC gaps** (decided 2026-11-06, before the
       consumers switch). Each stays additive to what the consumers switch to now:
   - Item 5: the module path is a second, opt-in backend of lemnos-drivers-pisp's device layer.

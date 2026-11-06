@@ -11,6 +11,10 @@
 //! (`INVALID_ARGUMENT`), so a newer surface never writes past an older
 //! caller's struct.
 
+// With `shared` the functions below are not exported, and only the tests
+// call them (to check the library's declarations against them).
+#![cfg_attr(feature = "shared", allow(dead_code))]
+
 use core::ffi::{CStr, c_char};
 use core::mem::{align_of, offset_of, size_of};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -266,7 +270,7 @@ fn device_id(entry: &Entry, device: u32) -> Result<String, Status> {
 }
 
 /// The surface's version, for the handshake (`lemnos_check_version`).
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub extern "C" fn lemnos_version() -> AbiVersion {
     VERSION
 }
@@ -276,7 +280,7 @@ pub extern "C" fn lemnos_version() -> AbiVersion {
 ///
 /// # Safety
 /// `caller` is null or points to a readable `LemnosAbiVersion`.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub unsafe extern "C" fn lemnos_check_version(caller: *const AbiVersion) -> Status {
     guard(|| {
         if caller.is_null() {
@@ -295,7 +299,7 @@ pub unsafe extern "C" fn lemnos_check_version(caller: *const AbiVersion) -> Stat
 /// # Safety
 /// `socket` and `name` are NUL-terminated strings; `client` is valid for a
 /// write of a handle.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub unsafe extern "C" fn lemnos_client_open(
     socket: *const c_char,
     name: *const c_char,
@@ -341,7 +345,7 @@ pub unsafe extern "C" fn lemnos_client_open(
 }
 
 /// Disconnects `client`; its handle is stale from now on.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub extern "C" fn lemnos_client_close(client: Handle) -> Status {
     guard(|| match clients().remove(client) {
         Ok(_) => Status::OK,
@@ -350,7 +354,7 @@ pub extern "C" fn lemnos_client_close(client: Handle) -> Status {
 }
 
 /// The number of devices in `client`'s list (as a positive status).
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub extern "C" fn lemnos_device_count(client: Handle) -> Status {
     guard(|| {
         with_entry(client, |e| {
@@ -368,7 +372,7 @@ pub extern "C" fn lemnos_device_count(client: Handle) -> Status {
 /// `info` is valid for a `LemnosDeviceInfo` whose `struct_size` the caller
 /// set; `id` is null or valid for `id_capacity` bytes; `id_len` is null or
 /// valid for a `size_t`.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub unsafe extern "C" fn lemnos_device_info(
     client: Handle,
     device: u32,
@@ -411,7 +415,7 @@ pub unsafe extern "C" fn lemnos_device_info(
 ///
 /// # Safety
 /// As for `lemnos_device_info`, with a `LemnosChannelInfo`.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub unsafe extern "C" fn lemnos_channel_info(
     client: Handle,
     device: u32,
@@ -457,7 +461,7 @@ pub unsafe extern "C" fn lemnos_channel_info(
 /// # Safety
 /// `reading` is valid for a `LemnosReading` whose `struct_size` the caller
 /// set.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub unsafe extern "C" fn lemnos_read(
     client: Handle,
     device: u32,
@@ -489,7 +493,7 @@ pub unsafe extern "C" fn lemnos_read(
 ///
 /// # Safety
 /// `granted_ms` is null or valid for a write of a `uint32_t`.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub unsafe extern "C" fn lemnos_subscribe(
     client: Handle,
     device: u32,
@@ -524,7 +528,7 @@ pub unsafe extern "C" fn lemnos_subscribe(
 /// # Safety
 /// `device` is valid for a write of a `uint32_t`; `reading` as for
 /// `lemnos_read`.
-#[unsafe(no_mangle)]
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
 pub unsafe extern "C" fn lemnos_next_reading(
     client: Handle,
     timeout_ms: u32,

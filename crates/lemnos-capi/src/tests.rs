@@ -6,6 +6,7 @@ use lemnos_abi::{AbiVersion, Handle, MessageSink, Status};
 use lemnos_hal::register::AddressWidth;
 use lemnosd::mock::{MockHardware, MockLemnosd};
 
+use crate::ffi;
 use crate::surface::{self, DeviceInfo, RawReading};
 use crate::{Client, MAX_CHANNELS, VERSION};
 
@@ -51,11 +52,11 @@ fn socket(service: &MockLemnosd) -> String {
 
 #[test]
 fn the_handshake_accepts_this_build_and_refuses_another() {
-    assert_eq!(surface::lemnos_version(), VERSION);
+    assert_eq!(ffi::lemnos_version(), VERSION);
     let check = |version: *const AbiVersion| {
         // SAFETY: each caller below passes a pointer to a live version, or
         // null, which the surface refuses.
-        unsafe { surface::lemnos_check_version(version) }
+        unsafe { ffi::lemnos_check_version(version) }
     };
     assert_eq!(check(&VERSION), Status::OK);
     let newer = AbiVersion::new(VERSION.major, VERSION.minor + 1, VERSION.layout);
@@ -113,16 +114,13 @@ fn a_closed_client_is_stale_and_unknown_devices_are_not_found() {
     let service = service();
     let client = Client::open(&socket(&service), "capi", 0).unwrap();
     let handle = client.handle();
-    assert!(surface::lemnos_device_count(handle).0 >= 1);
+    assert!(ffi::lemnos_device_count(handle).0 >= 1);
     let err = client.read(9_999).unwrap_err();
     assert_eq!(err.status, Status::NOT_FOUND);
     drop(client);
-    assert_eq!(surface::lemnos_device_count(handle), Status::STALE_HANDLE);
-    assert_eq!(surface::lemnos_client_close(handle), Status::STALE_HANDLE);
-    assert_eq!(
-        surface::lemnos_device_count(Handle::NULL),
-        Status::STALE_HANDLE
-    );
+    assert_eq!(ffi::lemnos_device_count(handle), Status::STALE_HANDLE);
+    assert_eq!(ffi::lemnos_client_close(handle), Status::STALE_HANDLE);
+    assert_eq!(ffi::lemnos_device_count(Handle::NULL), Status::STALE_HANDLE);
     service.stop();
 }
 
@@ -137,10 +135,10 @@ fn short_structs_null_pointers_and_small_buffers_are_refused() {
         ..RawReading::default()
     };
     // SAFETY: a live reading whose struct_size says it is too small.
-    let status = unsafe { surface::lemnos_read(h, 0, &mut short, MessageSink::NONE) };
+    let status = unsafe { ffi::lemnos_read(h, 0, &mut short, MessageSink::NONE) };
     assert_eq!(status, Status::INVALID_ARGUMENT);
     // SAFETY: null is allowed and refused.
-    let status = unsafe { surface::lemnos_read(h, 0, core::ptr::null_mut(), MessageSink::NONE) };
+    let status = unsafe { ffi::lemnos_read(h, 0, core::ptr::null_mut(), MessageSink::NONE) };
     assert_eq!(status, Status::INVALID_ARGUMENT);
 
     let mut info = DeviceInfo {
@@ -150,22 +148,20 @@ fn short_structs_null_pointers_and_small_buffers_are_refused() {
     let mut buf = [0u8; 2];
     let mut len = 0usize;
     // SAFETY: live info, a 2-byte buffer and a length.
-    let status =
-        unsafe { surface::lemnos_device_info(h, 0, &mut info, buf.as_mut_ptr(), 2, &mut len) };
+    let status = unsafe { ffi::lemnos_device_info(h, 0, &mut info, buf.as_mut_ptr(), 2, &mut len) };
     assert_eq!(status, Status::BUFFER_TOO_SMALL);
     assert_eq!(len, "imu".len(), "the length is reported anyway");
     assert_eq!(info.class, 0, "the info is written anyway");
     let mut buf = [0xffu8; 4];
     // SAFETY: as above, with room for "imu" and its NUL.
-    let status =
-        unsafe { surface::lemnos_device_info(h, 0, &mut info, buf.as_mut_ptr(), 4, &mut len) };
+    let status = unsafe { ffi::lemnos_device_info(h, 0, &mut info, buf.as_mut_ptr(), 4, &mut len) };
     assert_eq!(status, Status::OK);
     assert_eq!(&buf, b"imu\0");
 
     let mut out = Handle::NULL;
     // SAFETY: null strings are refused before any use.
     let status = unsafe {
-        surface::lemnos_client_open(
+        ffi::lemnos_client_open(
             core::ptr::null(),
             core::ptr::null(),
             0,
@@ -284,10 +280,41 @@ fn the_export_list_matches_the_header_and_the_exports() {
     let mut exported: Vec<String> = Vec::new();
     let mut lines = source.lines();
     while let Some(line) = lines.next() {
-        if line.trim() == "#[unsafe(no_mangle)]" {
+        if line.trim() == r#"#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]"# {
             let decl = lines.next().unwrap_or_default();
             exported.extend(name_before_paren(decl));
         }
     }
     assert_eq!(listed, exported, "lemnos.exports against src/surface.rs");
+}
+
+/// With `shared`, each declaration of the library is the type of the function
+/// in `surface` it stands for: an array of the two only coerces when the two
+/// signatures are the same.
+#[cfg(feature = "shared")]
+#[test]
+fn ffi_matches_the_surface() {
+    let _ = [surface::lemnos_version, ffi::lemnos_version];
+    let _ = [surface::lemnos_check_version, ffi::lemnos_check_version];
+    let _ = [surface::lemnos_client_open, ffi::lemnos_client_open];
+    let _ = [surface::lemnos_client_close, ffi::lemnos_client_close];
+    let _ = [surface::lemnos_device_count, ffi::lemnos_device_count];
+    let _ = [surface::lemnos_device_info, ffi::lemnos_device_info];
+    let _ = [surface::lemnos_channel_info, ffi::lemnos_channel_info];
+    let _ = [surface::lemnos_read, ffi::lemnos_read];
+    let _ = [surface::lemnos_subscribe, ffi::lemnos_subscribe];
+    let _ = [surface::lemnos_next_reading, ffi::lemnos_next_reading];
+}
+
+/// With `shared`, the wrapper's process runs on the library: this crate
+/// exports none of the surface itself.
+#[cfg(feature = "shared")]
+#[test]
+fn the_shared_wrapper_exports_nothing_of_its_own() {
+    assert!(!include_str!("surface.rs").contains("\n#[unsafe(no_mangle)]"));
+    assert!(
+        std::path::Path::new(env!("LEMNOS_CAPI_SHARED_DIR"))
+            .join("liblemnos_capi.so.1")
+            .exists()
+    );
 }

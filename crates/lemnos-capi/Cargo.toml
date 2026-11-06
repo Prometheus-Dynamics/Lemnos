@@ -33,6 +33,14 @@ unimplemented = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 
+[features]
+# The Rust wrapper links the installed library, liblemnos_capi.so.1, by the
+# normal dynamic linker (never dlopen), instead of this crate's own exports,
+# which it then leaves out. LEMNOS_CAPI_LIB_DIR names the directory holding
+# it; unset, the build script builds the library itself (development and
+# tests). See README.md.
+shared = []
+
 [dependencies]
 lemnos-abi = { workspace = true, features = ["std"] }
 lemnos-ipc.workspace = true

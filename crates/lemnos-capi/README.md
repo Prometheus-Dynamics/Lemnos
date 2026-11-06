@@ -14,6 +14,24 @@ surface once: either statically (this crate as an rlib, or `liblemnos_capi.a`) o
 `liblemnos_capi.so`, not both, or handles from one copy are unknown to the other. The crates
 under it (`lemnos-ipc`, `lemnos-abi`) hold no process-wide state.
 
+## The `shared` feature
+
+By default `Client` calls this crate's own exports: the surface is linked statically. With the
+`shared` feature, `Client` instead links the installed library, `liblemnos_capi.so.1`, through
+the normal dynamic linker (never dlopen), and the crate leaves its own exports out, so the
+process holds the surface once, as the library. Signatures and behaviour are the same; a test
+checks each declaration against the function it stands for.
+
+- `LEMNOS_CAPI_LIB_DIR` names the directory holding `liblemnos_capi.so.1` at build time (an
+  image's sysroot, for example). The program then finds it at run time where the loader
+  looks, as for any library.
+- Unset, the build script builds the library from this crate (without `shared`, `cargo build
+  --offline` into its `OUT_DIR`), for development and this crate's tests, which find it by an
+  rpath. A program built that way outside this crate needs `LD_LIBRARY_PATH` or the
+  installed library.
+- The crate's own `staticlib` and `cdylib` under `shared` export nothing: build the library
+  without it. Linux only.
+
 | Function | Does |
 | --- | --- |
 | `lemnos_version`, `lemnos_check_version` | the handshake (major, minor, layout hash) |
