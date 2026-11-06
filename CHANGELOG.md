@@ -8,6 +8,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-drivers-rga::cpu` gains conversions and resizes:
+  - `convert` turns any `PixelFormat` into any other of the same size, with `Matrix::{Bt601Limited, Bt601Full, Bt709Limited}`, the matrices the units offer. Coefficients are in 1/1024ths with `(sum + 512) >> 10` rounding; 4:2:0 chroma is nearest from YUV and a 2x2 average to it; gray is full-range luma.
+  - `resize` does area (integer factor) and bilinear within one format, plane by plane. `Sampling::{Centres, Corners, Origin}` gives the phase each unit is documented to use.
+  - Both run their rows as RVV on riscv64 with V (`lemnos_linux_sys::rvv::{mix3, average_2x2, accumulate, divide, bilinear, BilinearTable, Strided}`). They match a per-pixel reference of the definitions byte for byte under qemu at VLEN 128, 256 and 512. Untested on board.
+  - How close they come to each unit is unmeasured, since the units' own rounding and phase are.
+- 120 fps rerun on board #1: lemnosd's IMU at 5 ms beside the CSI-2 receiver and PiSP back end chain at 120.63 fps delivered 12 000 of 12 000. One gap was a read that found no new sample, with 0 ms of CPU wait; with 4 busy loops added there was none. The chain ran 9000 of 9000 frames, frame end to back end interrupt p99 1007 µs.
 - `lemnos-drivers-rga::cpu`: the CPU route, for what no unit serves (on the K230D, all of these), as scalar loops over strided images:
   - `channel_to_gray`, `gray_to_rgba`, `color_key` (an 8-bit mask) and `rop`;
   - on riscv64 Linux with the V extension, each row runs as RVV 1.0 code instead (`lemnos_linux_sys::rvv`, with `available()` from the kernel's `AT_HWCAP`), and `cpu::vector()` says which path runs.

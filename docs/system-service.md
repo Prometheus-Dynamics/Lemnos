@@ -856,6 +856,26 @@ they work with `RestrictRealtime=yes` (checked on the board: all five threads ra
 The test drop-ins were removed afterwards, and the board's service was restarted to its image
 settings.
 
+**Beside a 120 fps pipeline (board #1, 2026-11-06).** The rerun the busy loops stood in for.
+- The board: BCM2712, 4 cores, the image's `lemnosd` under its packaged `SCHED_FIFO` 10.
+- The probe: subscribe to the IMU at 5 ms for 60 s, count deliveries and gaps over 1.5 periods,
+  and sum the run-queue wait of the service's threads.
+- The pipeline: the sensor (an OV9782) set to 120.63 fps, 1280x800 RAW10, through
+  `lemnos-rp1-csi2` straight into a `lemnos-pisp-be` demosaic of every frame, 9000 frames a run.
+
+| Load | Delivered | Gaps over 7.5 ms | Largest gap | CPU wait |
+|---|---|---|---|---|
+| The board as it runs (camera service on) | 12 000 of 12 000 | 0 | 5.2 ms | 0 ms |
+| Camera service stopped, nothing else | 12 001 of 12 000 | 0 | 5.1 ms | 0 ms |
+| 120 fps receiver and back end | 12 000 of 12 000 | 1 | 9.9 ms | 0 ms |
+| 120 fps receiver and back end + 4 busy loops | 12 001 of 12 000 | 0 | 5.1 ms | 0 ms |
+
+The one gap came with no CPU wait. lemnosd counted it as a miss: the read found no new sample.
+So it is the read schedule meeting the sample grid, not the pipeline taking the CPU. Both
+pipeline runs finished 9000 of 9000 frames with none dropped. The probe and the pipeline's
+modules leave no state behind: `rp1-cfe`, `pispbe`, the sensor's driver and its regulator were
+bound again and the camera service restarted.
+
 ## Rust-for-Linux kernel modules: recommended against
 
 Building the `no_std` drivers as Rust-for-Linux modules is technically possible, but:

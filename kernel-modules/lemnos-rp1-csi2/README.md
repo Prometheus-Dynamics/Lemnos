@@ -110,5 +110,13 @@ submitted as the input of a demosaic job (BGGR to RGB888, identity matrix):
   a row (the bars and the demosaic's transitions between them).
 - `pispbe` and `rp1-cfe` were bound again afterwards.
 
+**At 120 fps**, the same day: the sensor's VTS set to 910 lines (120.63 fps), 9000 frames a run,
+beside a `lemnosd` probe:
+- Alone: none failed or dropped. Frame end to the back end's interrupt p50 756 µs, p99 1007 µs,
+  max 3589 µs; to the wake-up p50 759 µs, p99 1014 µs.
+- With 4 busy loops on the 4 cores: none failed or dropped. Interrupt p50 757 µs, p99 1082 µs,
+  max 5168 µs; wake-up p50 760 µs, p99 3729 µs, max 6693 µs. The checking program runs at normal
+  priority, so the busy loops show in its wake-up tail.
+
 Untested: more than one virtual channel or data type, 1 lane, `PACK_BYTES`, link rates other
 than 800 Mbit/s, a missing frame end, and the 6.12 kernels.

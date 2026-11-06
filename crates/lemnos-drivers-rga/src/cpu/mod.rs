@@ -1,18 +1,32 @@
-//! The CPU route: the per-pixel operations a unit leaves to the CPU (on the K230D, every one of
-//! these: its VGLite route serves none), as scalar loops over strided images. On riscv64 Linux
-//! with the V extension, each row goes through `lemnos_linux_sys::rvv` instead. Same bytes
-//! either way; [`vector`] says which runs.
+//! The CPU route: what a unit leaves to the CPU, as scalar loops over strided images. On the
+//! K230D that is every conversion, gray and cross-format resizes, and the per-pixel operations
+//! below. On riscv64 Linux with the V extension, each row goes through `lemnos_linux_sys::rvv`
+//! instead. Same bytes either way; [`vector`] says which runs.
+//!
+//! - [`convert`] and [`resize`] take whole frames as [`crate::Layout`]s; their modules' docs
+//!   give the definitions (matrices, rounding, chroma, phase) both paths follow.
+//! - [`channel_to_gray`], [`gray_to_rgba`], [`color_key`] and [`rop`] take each image's `width`
+//!   and `height` in pixels and each buffer's stride in bytes.
+//!
+//! Every function refuses (`InvalidInput`) a stride shorter than a row or a buffer shorter than
+//! the image.
 //!
 //! The RVV rows were written from the RVV 1.0 specification for the K230's C908 and checked
-//! under qemu (VLEN 128, 256 and 512) against these loops. Untested on board.
-//!
-//! Each function takes the image's `width` and `height` in pixels and each buffer's stride in
-//! bytes, and refuses (`InvalidInput`) a stride shorter than a row or a buffer shorter than the
-//! image.
+//! under qemu (VLEN 128, 256 and 512) against a reference written per pixel from the
+//! definitions (`scripts/rvv-qemu.sh`). Untested on board.
 
 use std::io;
 
 use crate::{Channel, Rop};
+
+mod convert;
+mod resize;
+mod rows;
+#[cfg(test)]
+mod tests_frames;
+
+pub use convert::{Matrix, convert};
+pub use resize::{Sampling, resize};
 
 /// Whether the rows run as RVV vector code here (riscv64 Linux whose kernel offers V).
 pub fn vector() -> bool {

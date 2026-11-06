@@ -197,8 +197,11 @@ Everything planned, in order. Execution is paused until the user starts it.
       `lemnos_linux_sys::rvv` when the kernel offers V. They match byte for byte under qemu at VLEN
       128/256/512 (`scripts/rvv-qemu.sh`, in the riscv64 push gate). Untested on board; no K230
       profile exists, so the four were picked as the per-pixel operations VGLite does not serve.
-  - [ ] Conversions and resizes on the CPU route: define the matrices and rounding first (they
-        must match the units' rows in `caps`), then scalar and RVV.
+  - [x] Conversions and resizes on the CPU route (2026-11-06): `cpu::convert` with the three
+        matrices the units offer and `cpu::resize` (area, bilinear with each unit's documented
+        phase), scalar and RVV, byte-identical under qemu at three VLENs. Untested on board.
+  - [ ] Measure each unit against the CPU route's definitions (coefficient precision, phase,
+        rounding), and fill the `Exactness` of the `caps` rows.
   - [ ] On a K230: run `cpu`'s tests with `LEMNOS_EXPECT_VECTOR=1` and time each operation against
         its scalar loop.
 - [x] **8. `a_polled_400_hz_imu_delivers_each_sample_once` was intermittent.** Fixed: its rate floor
@@ -246,8 +249,10 @@ Everything planned, in order. Execution is paused until the user starts it.
   - [x] Under CPU contention lemnosd's loop was preempted and lost samples. Measured on board #2
         with the image's release build: 0 missed with only the 30 fps pipeline running, 20 to 43
         of 12 000 with four busy loops, 33 with `Nice=-10`, and 0 with `SCHED_FIFO` priority 10.
-        The packaged unit now sets `CPUSchedulingPolicy=fifo`. Still to do: rerun beside the
-        120 fps pipeline when a board runs it (busy loops stood in).
+        The packaged unit now sets `CPUSchedulingPolicy=fifo`. Rerun beside a 120 fps pipeline
+        (board #1, 2026-11-06): 12 000 of 12 000 delivered, one 9.9 ms gap with 0 ms of CPU wait
+        (a read that found no new sample), and none with 4 busy loops added
+        (`docs/system-service.md`, "Beside a 120 fps pipeline").
   - [x] The p99 spacing bound was the one left fixed. It failed once in a gate run at load 120
         (p99 11.5 ms against 8.4 ms, with the service waiting 0.86 s of 3 s for a CPU), and it
         passed 6 of 6 on rerun. It now adds a hundredth of the service's CPU wait, which is nothing

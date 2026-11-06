@@ -38,18 +38,26 @@ Rockchip board. Each device test skips where its node is absent.
   one-byte `yuv2rgb_mode`, so no field is verified for them), line drawing (on the multi-RGA node, and on
   VGLite until a board run matches Bresenham), and resizes on the multi-RGA node. A caller sends
   these to the CPU.
-- **CPU (`cpu`):** what a caller does when no route serves. Four operations are written so far:
-  - `channel_to_gray`, `gray_to_rgba`, `color_key` (giving an 8-bit mask) and `rop`;
-  - all over strided images, as scalar loops.
+- **CPU (`cpu`):** what a caller does when no route serves (on the K230D, every conversion,
+  gray and cross-format resizes, colour keys, mask ROPs and channel extraction). All of it is
+  scalar loops over strided images; on riscv64 Linux whose kernel offers the V extension, each row
+  runs as RVV code from `lemnos_linux_sys::rvv` instead, and `cpu::vector()` says so.
+  - `convert`: any `PixelFormat` to any other of the same size, with `Matrix::Bt601Limited`
+    (the mainline RGA2 driver's default), `Bt601Full` or `Bt709Limited`. Coefficients in
+    1/1024ths, `(sum + 512) >> 10` then a clamp, 4:2:0 chroma taken nearest from YUV and
+    averaged over each 2x2 block to it. The module documentation gives the whole definition.
+  - `resize`: area (integer factor, `(sum + n / 2) / n`) and bilinear (16.16 positions, 8-bit
+    weights) within one format, each plane on its own. `Sampling` picks the bilinear phase each
+    unit is documented to use: `Centres` (VGLite, OpenCV), `Corners` (mainline RGA2), `Origin`
+    (mainline RGA3).
+  - `channel_to_gray`, `gray_to_rgba`, `color_key` (an 8-bit mask) and `rop`.
 
-  On riscv64 Linux whose kernel offers the V extension, each row runs as RVV code from
-  `lemnos_linux_sys::rvv` instead, and `cpu::vector()` says so. The RVV rows were written from the
-  RVV 1.0 specification for the K230's C908. `scripts/rvv-qemu.sh` runs them under qemu at VLEN
-  128, 256 and 512 against the scalar loops. Untested on board.
-
-  Not written yet:
-  - conversions and resizes, which need their colour matrices and rounding defined first;
-  - lines, which stay with the caller: one pixel a step gives a vector unit nothing to do.
+  The units' own coefficient precision, phase and rounding are unmeasured, so how close the CPU
+  route comes to a unit is not known until a board measures it. The RVV rows were written from
+  the RVV 1.0 specification for the K230's C908. `scripts/rvv-qemu.sh` checks them byte for byte
+  under qemu at VLEN 128, 256 and 512, against a reference written per pixel from the
+  definitions. Untested on board. Lines stay with the caller: one pixel a step gives a vector
+  unit nothing to do.
 
 ## Choosing a route
 

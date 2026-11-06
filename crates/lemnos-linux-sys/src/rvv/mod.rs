@@ -1,12 +1,18 @@
-//! RISC-V vector (RVV 1.0) kernels for the per-pixel operations the K230's routes leave on the
-//! CPU. Each one is a safe function that returns `false`, doing nothing, when the CPU or the
-//! kernel does not offer the V extension; the caller then runs its scalar loop.
+//! RISC-V vector (RVV 1.0) kernels for the pixel rows the K230's routes leave on the CPU: the
+//! per-pixel operations here, and the strided rows of conversions and resizes ([`mix3`],
+//! [`average_2x2`], [`accumulate`], [`divide`] and [`bilinear`]). Each one is a safe function
+//! that returns `false`, doing nothing, when the CPU or the kernel does not offer the V
+//! extension; the caller then runs its scalar loop.
 //!
 //! Written from the RVV 1.0 specification for the K230's C908. Run under qemu's RVV (VLEN 128,
 //! 256 and 512) against the scalar loops; untested on board.
 
 use core::arch::asm;
 use std::sync::OnceLock;
+
+mod pixel;
+
+pub use pixel::{BilinearTable, Strided, accumulate, average_2x2, bilinear, divide, mix3};
 
 /// `AT_HWCAP`, and its bit for the V extension (`'V' - 'A'`), as the kernel sets it when it
 /// enables vector state for user space.
