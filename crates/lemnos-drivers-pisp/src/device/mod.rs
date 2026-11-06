@@ -16,9 +16,13 @@ mod be_output;
 mod be_spare;
 mod be_stream;
 mod be_tdn;
+#[cfg(feature = "csi2-module")]
+pub mod cci;
 mod config_buf;
 #[cfg(feature = "debug-hooks")]
 mod config_dump;
+#[cfg(feature = "csi2-module")]
+pub mod csi2_module;
 mod slots;
 #[cfg(not(feature = "debug-hooks"))]
 mod config_dump {

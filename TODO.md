@@ -114,7 +114,22 @@ Everything planned, in order. Execution is paused until the user starts it.
           reboot stays the recovery.
         - An IOMMU violation never shows: the block reads and writes the IOMMU's default page and
           finishes with status 0. The module never unmaps a buffer a job holds.
-  - [ ] Then the receiver, the sensor over i2c-dev, and a mock backend for the simulator.
+  - [x] The receiver, the sensor over i2c-dev, and a mock backend for the simulator
+        (2026-11-06):
+        - `kernel-modules/lemnos-rp1-csi2` and `lemnos-drivers-pisp`'s `csi2-module` feature:
+          `Csi2Module`, `cci::{I2cCci, RegisterFile}`, and the `Receiver` trait with
+          `MockReceiver` and `MockCci` for a simulator.
+        - Board #1, OV9782 at 1280x800 RAW10 over 2 lanes at 800 Mbit/s: 3600 frames at
+          60.28 fps, 0 failed, 0 dropped; frame start to frame end median 7465 µs. The colour
+          bars were exact. `rp1-cfe` and the camera service were restored after each run.
+        Decided:
+        - The module only receives. It never touches the sensor, its supply or its clock; user
+          space owns them (the register file, a GPIO line).
+        - Lemnos ships no register tables: the sensor's register file is read at run time from
+          a path the caller gives.
+        - The mock covers the receiver and the sensor bus. A mock of the back end module waits
+          for a simulator that needs one: the stock `pispbe` path has no mock either.
+        Untested on board: other lanes, rates, data types and virtual channels, and `PACK_BYTES`.
   - [x] Reworded "Lemnos is user-space hardware access" in [docs/dma.md](docs/dma.md) and "no
         kernel modules" in [docs/system-service.md](docs/system-service.md) for the module.
 - [ ] **6. GPU**, per the agreed seam note (kept outside this repository, because it names the

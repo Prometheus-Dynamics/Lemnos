@@ -1,4 +1,4 @@
-# Kernel module: the PiSP back end, first questions
+# Kernel module: the PiSP back end and the CSI-2 receiver
 
 TODO item 5 plans one small kernel module of Lemnos's own. It claims a block, maps DMA buffers,
 exports dma-bufs, forwards interrupts and maps registers. The drivers above it are Rust in user
@@ -171,3 +171,27 @@ is in the module's README.
   A job whose input was unmapped while it ran finished with status 0 and wrong output; one
   whose output was unmapped wrote almost nothing to it. So the module must never unmap a buffer
   while a job holds it, which it does not, and it keeps a stopped block's buffers mapped.
+
+## 6. The CSI-2 receiver
+
+`kernel-modules/lemnos-rp1-csi2` is the second block: RP1's CSI-2 receiver, without the PiSP
+front end. The block has the same split:
+- **The module.** GPL-2.0, ported from `rp1_cfe`. It writes every address, and it only receives.
+- **The sensor.** Driven from user space over i2c-dev from a register file read at run time
+  (`lemnos-drivers-pisp`'s `device::cci`). The sensor's kernel driver is unbound first, because
+  i2c-dev claims the address and never forces it.
+
+The questions of sections 1 to 3, for this block:
+- **Addresses.** RP1 has no IOMMU in front of it, so a buffer must be one contiguous segment (a
+  CMA heap buffer). The module checks this at `QUEUE`.
+- **Latency.** Each frame's start and end interrupts are timestamped in the module and returned
+  with the buffer.
+- **Recovery.** `STOP` forces the DMA channel off as `rp1-cfe` does. Rebinding `rp1-cfe`
+  afterwards worked on each run.
+
+Measured 2026-11-06 on board #1 with an OV9782 at 1280x800 RAW10, 2 lanes at 800 Mbit/s:
+- 3600 frames at 60.28 fps, none failed or dropped;
+- frame start to frame end median 7465 µs;
+- the colour-bar test pattern exact.
+
+The full record is in the module's README.

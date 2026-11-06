@@ -20,6 +20,16 @@ back end video nodes. It has no C libraries at run time and forbids `unsafe` cod
   dma-bufs and returns at once, and `BeModule::wait` returns the finished jobs, each with its
   interrupt's `CLOCK_MONOTONIC` time. Measured on a board for one op (see the module's README);
   the Bayer path through it is untested.
+- `csi2-module` (implies `device`): the CSI-2 receiver through Lemnos's own module,
+  `/dev/lemnos-rp1-csi2` (`kernel-modules/lemnos-rp1-csi2`), beside the `rp1-cfe` nodes.
+  Opt-in. Three parts:
+  - `device::csi2_module`: `Csi2Module` (start the link and stream, queue one dma-buf per frame,
+    wait for each frame's start and end times) and the `Receiver` trait it shares with
+    `MockReceiver`. The mock writes frames from a function into the queued buffers at a set
+    rate, for a simulator without a receiver.
+  - `device::cci`: a sensor's 16-bit registers over i2c-dev (`I2cCci`, which claims the address
+    and never forces it) or in memory (`MockCci`).
+  - `RegisterFile`: the register file read at run time. This crate ships no sensor tables.
 
 ## Modules
 
@@ -71,7 +81,9 @@ Last run 2026-11-06 against the Raspberry Pi 7.2 tree (53679a578): it matches.
 fakes and temporary files and need no hardware. The example `be_ops_check` needs the `device`
 feature and a board, so it is `required-features` and is not built by default; so does
 `be_module_check` (feature `be-module`), which compares the module with the `pispbe` nodes and
-runs the IOMMU and stopped-block tests.
+runs the IOMMU and stopped-block tests. `csi2_module_check` (feature `csi2-module`) sets a
+sensor up from a register file, captures through the receiver module, and reports the frame
+rate, the frame start to frame end time, drops, and a check of the test pattern's bars.
 
 ## Debug hooks (feature `debug-hooks`)
 
