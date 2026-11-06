@@ -47,7 +47,8 @@ pub enum Unit {
     Rga3,
     /// K230D Image 2D engine.
     K230Image2d,
-    /// K230D VGLite 2.5D GPU.
+    /// K230D VGLite 2.5D GPU. Untested on board: the row is implemented for the ported
+    /// operations, and lines and path fill wait for the stroke port.
     K230Vglite,
 }
 
@@ -60,7 +61,9 @@ pub enum Route {
     /// The vendor kernel's multi-RGA driver, `/dev/rga` ([`crate::MultiRga`]): the fill, mask
     /// ROP, blend, palette, colour key, flip and turn operations, and gray input.
     MultiRga,
-    /// The direct `/dev/vg_lite` route of the K230D's GPU (`lemnos-drivers-vglite`).
+    /// The direct `/dev/vg_lite` route of the K230D's GPU (`lemnos-drivers-vglite`). Served for
+    /// the operations its rows list: clear, blits (resize, crop, flips and quarter turns, the
+    /// blends) and palette. Untested on board. Lines and path fill are not served.
     Vglite,
     /// Not written: the interfaces need a design note first.
     Design,
@@ -153,8 +156,8 @@ pub struct UnitCaps {
     pub unit: Unit,
     pub route: Route,
     /// Whether this crate reaches the unit through the route. Rows that are described but not
-    /// ported say `false`, and [`route_for`] never returns them. The Vglite row says `false`
-    /// until its port lands.
+    /// ported say `false`, and [`route_for`] never returns them. The Vglite row is implemented
+    /// for the operations its rows list (untested on board).
     pub implemented: bool,
     /// The smallest frame the driver takes, when known.
     pub min_size: Option<(u32, u32)>,
@@ -326,7 +329,7 @@ const VGLITE_FILTERS: &[FilterCaps] = &[
         down: true,
         up: false,
         exactness: Exactness::Unmeasured,
-        note: "2x only: a bilinear blit at half scale, whose half-pixel phase puts each output \
+        note: "Untested on board. 2x only: a bilinear blit at half scale, whose half-pixel phase puts each output \
                centre on the corner of four source pixels (weights of a quarter each); VGLite \
                has no averaging filter, and its rounding is unmeasured",
     },
@@ -335,7 +338,7 @@ const VGLITE_FILTERS: &[FilterCaps] = &[
         down: true,
         up: true,
         exactness: Exactness::Unmeasured,
-        note: "a scale matrix with the bilinear filter, sampled at the half-pixel phase as \
+        note: "Untested on board. a scale matrix with the bilinear filter, sampled at the half-pixel phase as \
                OpenCV; weights, rounding and edges unmeasured",
     },
 ];
@@ -344,41 +347,34 @@ const VGLITE_OPS: &[OpCaps] = &[
     OpCaps {
         op: FixedOp::Crop,
         exactness: Exactness::Unmeasured,
-        note: "a translated, point-sampled blit",
+        note: "Untested on board. a translated, point-sampled blit",
     },
     OpCaps {
         op: FixedOp::Flip,
         exactness: Exactness::Unmeasured,
-        note: "a mirror matrix, point sampled (gcFEATURE_VG_MIRROR is 0)",
+        note: "Untested on board. a mirror matrix, point sampled (gcFEATURE_VG_MIRROR is 0)",
     },
     OpCaps {
         op: FixedOp::Rotate,
         exactness: Exactness::Unmeasured,
-        note: "a quarter-turn matrix, point sampled",
+        note: "Untested on board. a quarter-turn matrix, point sampled",
     },
     OpCaps {
         op: FixedOp::Fill,
         exactness: Exactness::Unmeasured,
-        note: "a clear; masks as A8 (an L8 target converts the colour with a truncating float \
+        note: "Untested on board. a clear; masks as A8 (an L8 target converts the colour with a truncating float \
                sum, so it is refused)",
     },
     OpCaps {
         op: FixedOp::Blend,
         exactness: Exactness::Unmeasured,
-        note: "a blit with no blend, SRC_OVER or DST_OVER, straight alpha: the K230 build \
+        note: "Untested on board. a blit with no blend, SRC_OVER or DST_OVER, straight alpha: the K230 build \
                premultiplies every RGBA source itself, so premultiplied input is refused",
     },
     OpCaps {
         op: FixedOp::Palette,
         exactness: Exactness::Unmeasured,
-        note: "an INDEX_8 source through a 256-entry colour table",
-    },
-    OpCaps {
-        op: FixedOp::Line,
-        exactness: Exactness::Unmeasured,
-        note: "a draw of a 1-wide stroke with square caps through the pixel centres, no \
-               anti-aliasing; Bresenham's pixels on axes and diagonals in theory, other slopes \
-               differ where a centre is near the edge",
+        note: "Untested on board. an INDEX_8 source through a 256-entry colour table",
     },
 ];
 
@@ -387,8 +383,8 @@ const fn vglite(soc: Soc) -> UnitCaps {
         soc,
         unit: Unit::K230Vglite,
         route: Route::Vglite,
-        // The `/dev/vg_lite` port is in progress; see `lemnos-drivers-vglite`.
-        implemented: false,
+        // Phase 1 of `lemnos-drivers-vglite` (untested on board); lines wait for the stroke port.
+        implemented: true,
         min_size: None,
         max_scale: None,
         luma_cost_permille: 1000,
@@ -448,6 +444,7 @@ impl UnitCaps {
     pub fn serves(&self, op: Op, src: Layout, dst: Layout) -> bool {
         match self.route {
             Route::MultiRga => return self.serves_multirga(op, src, dst),
+            Route::Vglite => return self.serves_vglite(op, src, dst),
             Route::V4l2 => {}
             _ => return false,
         }
@@ -501,6 +498,34 @@ impl UnitCaps {
     }
 }
 
+impl UnitCaps {
+    /// The VGLite rules, untested on board: the rows it lists. A resize is a bilinear scale (down
+    /// or up, per its filter row) or the 2x area downscale that the half-phase blit serves, one
+    /// format at a time and never to or from gray. The other fixed operations need only their
+    /// row; the driver checks sizes and formats when it runs.
+    fn serves_vglite(&self, op: Op, src: Layout, dst: Layout) -> bool {
+        match op {
+            Op::Convert => false,
+            Op::Resize(filter) => {
+                let Some(f) = self.filter(filter) else {
+                    return false;
+                };
+                if src.format != dst.format || src.format == PixelFormat::Grey {
+                    return false;
+                }
+                let shrinks = dst.width <= src.width && dst.height <= src.height;
+                let grows = dst.width >= src.width && dst.height >= src.height;
+                let halved = |s: u32, d: u32| s >= 2 && d == s / 2;
+                match filter {
+                    Filter::Area => halved(src.width, dst.width) && halved(src.height, dst.height),
+                    Filter::Bilinear => (shrinks && f.down) || (grows && f.up),
+                }
+            }
+            Op::Fixed(op) => self.op(op).is_some(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,7 +555,8 @@ mod tests {
             (Unit::K230Vglite, Route::Vglite)
         );
         assert_eq!(k230[0].staging, Staging::UnlessContiguous);
-        assert!(k230[0].op(FixedOp::Line).is_some() && k230[0].op(FixedOp::ColorKey).is_none());
+        assert!(k230[0].op(FixedOp::Line).is_none() && k230[0].op(FixedOp::Blend).is_some());
+        assert!(k230[0].op(FixedOp::ColorKey).is_none());
         assert!(k230[1].route == Route::Design && k230[1].filters.is_empty());
         assert!(caps(Soc::Rk3576).all(|c| c.route == Route::MultiRga));
         for c in caps(Soc::Rk3588).filter(|c| c.route == Route::MultiRga) {
@@ -557,7 +583,7 @@ mod tests {
     #[test]
     fn the_mainline_and_multi_rga_routes_are_implemented_and_nothing_else() {
         for c in Soc::ALL.into_iter().flat_map(caps) {
-            let want = matches!(c.route, Route::V4l2 | Route::MultiRga);
+            let want = matches!(c.route, Route::V4l2 | Route::MultiRga | Route::Vglite);
             assert_eq!(c.implemented, want, "{c:?}");
         }
     }
@@ -618,10 +644,34 @@ mod tests {
             route_for(Soc::Rk3588, Op::Convert, small, small),
             Some(Route::V4l2)
         );
-        // The K230D has no implemented route yet.
+        // The K230D's VGLite serves its rows: a fill, a 2x area downscale, a bilinear resize.
+        // Lines are not in its rows, and a 3x area downscale is not a half-phase blit.
         assert_eq!(
             route_for(Soc::K230d, Op::Fixed(FixedOp::Fill), abgr, abgr),
+            Some(Route::Vglite)
+        );
+        let big = layout(PixelFormat::Abgr32, 640, 360);
+        let small = layout(PixelFormat::Abgr32, 320, 180);
+        assert_eq!(
+            route_for(Soc::K230d, Op::Resize(Filter::Area), big, small),
+            Some(Route::Vglite)
+        );
+        let third = layout(PixelFormat::Abgr32, 213, 120);
+        assert_eq!(
+            route_for(Soc::K230d, Op::Resize(Filter::Area), big, third),
             None
+        );
+        assert_eq!(
+            route_for(Soc::K230d, Op::Resize(Filter::Bilinear), big, third),
+            Some(Route::Vglite)
+        );
+        assert_eq!(
+            route_for(Soc::K230d, Op::Fixed(FixedOp::Line), abgr, abgr),
+            None
+        );
+        assert_eq!(
+            route_for(Soc::K230d, Op::Fixed(FixedOp::Palette), abgr, abgr),
+            Some(Route::Vglite)
         );
     }
 }

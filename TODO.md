@@ -73,12 +73,14 @@ Everything planned, in order. Execution is paused until the user starts it.
           from librga's Apache-2.0 `rga.h` (commit 331d5750), in `lemnos-linux-sys::rga`, with its
           layout pinned to the header. Untested on board; the field mappings the header does not
           state are marked unverified in the crate. Y-only output is not served.
-    - [ ] VGLite: `lemnos-linux-sys::vg_lite` has the `/dev/vg_lite` request, command ids and
-          structures (layouts checked against `vg_lite_kernel.h`). The graph
-          runtime's `crates/vglite` is not taken yet: it dlopens `libvg_lite.so`. Its command
-          encoding (blit, clear, colour table, the stroke of draw; about 15k lines of the MIT
-          Vivante library behind it) and the calls on the new structures are a piece of their own,
-          next after the m2m merge.
+    - [x] VGLite, phase 1: `lemnos-drivers-vglite` on `/dev/vg_lite`, with no vendor library and
+          no dlopen. `lemnos-linux-sys::vg_lite` has the safe calls (open, initialize, allocate,
+          map and unmap, a checked command stream run with its wait, and the identification registers). The clear, blit (resize, crop, flips and
+          turns, blends), palette and context streams are ported from the vendor's `vg_lite.c`
+          and checked word for word against its output. Untested on board. Lines return
+          `Unsupported` until phase 2; callers draw them on the CPU meanwhile.
+    - [ ] VGLite stroke (phase 2): `vg_lite_set_stroke`, `vg_lite_update_stroke` and the stroke
+          path of `vg_lite_draw` (`VGLite/vg_lite_stroke.c`, 4.5k lines), so lines leave the CPU.
 - [ ] **5. Kernel module and Rust user-space drivers.** One small module of our own, its sources in
       Lemnos: claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:

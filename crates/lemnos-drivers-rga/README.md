@@ -19,9 +19,13 @@ Rockchip board. Each device test skips where its node is absent.
   and flips and turns (`transform`). Serves no resize. The request layout comes from the librga
   release at commit 331d5750, Apache-2.0 (`lemnos_linux_sys::rga`), with the struct sizes and
   offsets pinned to the header by tests.
+- **VGLite (`Vglite`, `/dev/vg_lite`, K230D):** `lemnos-drivers-vglite`, untested on board. Served
+  for its rows: clear (fill), blits (resize: bilinear, or the 2x area downscale; crop; flips and
+  quarter turns), the blends SRC, SRC_OVER and DST_OVER, and palette. Premultiplied blends and
+  gray formats are not served.
 - **Not served:** Y-only output (RGA's RGB-to-YUV modes do not fit the request's one-byte
-  `yuv2rgb_mode`, so no field is verified for them), line drawing, and resizes on the multi-RGA
-  node. A caller sends these to the CPU.
+  `yuv2rgb_mode`, so no field is verified for them), line drawing (on the multi-RGA node and on
+  VGLite until its stroke port), and resizes on the multi-RGA node. A caller sends these to the CPU.
 
 ## Choosing a route
 

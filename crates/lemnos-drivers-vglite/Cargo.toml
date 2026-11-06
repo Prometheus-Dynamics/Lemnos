@@ -1,0 +1,23 @@
+[package]
+name = "lemnos-drivers-vglite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The K230's VGLite 2.5D GPU (resize, crop, flip, rotate, fill, blend, palette) through /dev/vg_lite: the vendor library's command streams, ported to Rust. Lines wait for the stroke port."
+documentation = "https://docs.rs/lemnos-drivers-vglite"
+readme = "README.md"
+keywords = ["k230", "vglite", "dmabuf", "2d", "gpu"]
+categories = ["hardware-support", "multimedia::images"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-drivers-rga = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux = { workspace = true, features = ["dma"] }
+lemnos-linux-sys = { workspace = true }

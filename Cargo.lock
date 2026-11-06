@@ -629,6 +629,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-vglite"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-drivers-rga",
+ "lemnos-linux",
+ "lemnos-linux-sys",
+]
+
+[[package]]
 name = "lemnos-drivers-ws2812"
 version = "2.0.1-dev"
 dependencies = [

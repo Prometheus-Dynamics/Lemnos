@@ -40,6 +40,7 @@ members = [
     "crates/lemnos-drivers-linux",
     "crates/lemnos-drivers-ws2812",
     "crates/lemnos-drivers-rga",
+    "crates/lemnos-drivers-vglite",
     "crates/lemnos-drivers-pisp",
     "crates/lemnos-mock",
     "crates/lemnos-usb",
@@ -81,6 +82,7 @@ lemnos-drivers-bmi088 = { version = "2.0.1-dev", path = "crates/lemnos-drivers-b
 lemnos-drivers-linux = { version = "2.0.1-dev", path = "crates/lemnos-drivers-linux" }
 lemnos-drivers-ws2812 = { version = "2.0.1-dev", path = "crates/lemnos-drivers-ws2812" }
 lemnos-drivers-rga = { version = "2.0.1-dev", path = "crates/lemnos-drivers-rga" }
+lemnos-drivers-vglite = { version = "2.0.1-dev", path = "crates/lemnos-drivers-vglite" }
 lemnos-drivers-pisp = { version = "2.0.1-dev", path = "crates/lemnos-drivers-pisp", default-features = false }
 lemnos-linux = { version = "2.0.1-dev", path = "crates/lemnos-linux", default-features = false }
 lemnos-usb = { version = "2.0.1-dev", path = "crates/lemnos-usb" }
