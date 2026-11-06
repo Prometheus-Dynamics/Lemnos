@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `docs/ipc.md`: the `lemnosd` socket protocol, byte for byte, as implemented, with test vectors pinned by `lemnos-ipc` tests, and the gaps the writing found.
 - `lemnos-capi`, a new crate: Lemnos's C surface 1.0 over the `lemnosd` device client (`include/lemnos.h`: version handshake, open/close, device and channel info, one-shot read, subscribe, next reading), built as a static and a shared library, and `Client`, a Rust wrapper that calls through the same functions. Tests run a C program linked against each library on mock hardware.
 - `lemnos_ipc::wire::Code`: the wire numbers of `DeviceClass`, `Quantity`, `Axis`, `DeviceStatus` and `ErrorKind`, now public.
 - `lemnos-abi`, a new `no_std` crate: the C-ABI building blocks surfaces share. `Status` (`i32`: 0 ok, negated errno, own codes from -4096), generation-counted `Handle` and `Slab`, `BufferDesc`/`PlaneDesc` and `FenceDesc` with validation, `MessageSink`, the `AbiVersion` handshake with a compile-time layout hash, and `guard`/`guard_or` for `extern "C"` entry points. No dependencies, no unsafe code.

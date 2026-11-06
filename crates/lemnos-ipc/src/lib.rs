@@ -41,6 +41,8 @@ mod client;
 pub mod wire;
 
 #[cfg(test)]
+mod spec_vectors;
+#[cfg(test)]
 mod tests;
 
 pub use client::FrameUpdate;

@@ -20,7 +20,7 @@ The repository is split into small crates so applications, custom drivers, Linux
 - `crates/lemnos-drivers-linux`: device-model drivers over Linux kernel interfaces (hwmon fans, thermal zones, a generic IIO/hwmon binding)
 - `crates/lemnos-light`: `no_std` light rendering: easing, effects, gauges, spinners, system animations, intent arbitration
 - `crates/lemnos-drivers-ws2812`: `no_std` WS2812/SK6812 strip model and encoders (RP1 PIO device, SPI)
-- `crates/lemnos-ipc`: the `lemnosd` socket protocol and its clients (`DeviceClient`, `LedClient`)
+- `crates/lemnos-ipc`: the `lemnosd` socket protocol and its clients (`DeviceClient`, `LedClient`); the protocol is specified in [docs/ipc.md](docs/ipc.md)
 - `crates/lemnosd`: the board's hardware service and `lemnos-ctl`
 - `crates/lemnos-core`: shared types, requests, state, and descriptors (`no_std` + `alloc`)
 - `crates/lemnos-bus`: typed bus/session traits for hardware access

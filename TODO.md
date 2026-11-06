@@ -33,7 +33,21 @@ Everything planned, in order. Execution is paused until the user starts it.
       wrapper calls the exports directly, so static mode needs no loader (a loader for the
       shared form is item 7). The layout hash leaves out pointer-sized types, so it is one
       constant on every target (a compile-time assert; checked on armv7).
-- [ ] **3. `lemnos-ipc` written spec.**
+- [x] **3. `lemnos-ipc` written spec.** [docs/ipc.md](docs/ipc.md): the byte-level protocol as the
+      code has it (frames, encodings, enum codes, handshake, every request and message, replies,
+      lifecycle, compatibility, limits), with 11 test vectors that
+      `crates/lemnos-ipc/src/spec_vectors.rs` encodes, decodes and compares byte for byte. Writing
+      it found 17 gaps (its section 14). Open from them:
+  - [ ] Defects to fix: the version is never checked by either side; replies, frames and the
+        other non-reading messages queue without a bound; the client keeps a bad frame in its
+        buffer and fails every later receive; a connection that never sent `Hello` keeps its
+        claims, control writes and LED intents after it closes; a refused LED request gets no
+        reply; an inline look with no layers closes the connection; edge events ignore the
+        `events` flag; a request inside the byte limits can exceed the frame limit and is closed
+        without a refusal.
+  - [ ] Smaller ones to rule on: strings cut inside UTF-8, `opt` sentinels colliding with
+        values, lenient raw tags, `SubscribeChannels` requiring its id, reads matched by name,
+        trailing bytes unchecked.
 - [ ] **4. Single owner of hardware blocks.** Resume branch `lemnos-r5-v4l2` (df1dc81, local only,
       worktree `/mnt/nvme-wd/lemnos-r5-v4l2`): V4L2, subdev and media, then RGA, VGLite, PiSP, and
       the K230 and rkisp device layers. `crates/rga` and `crates/vglite` come over from the graph
