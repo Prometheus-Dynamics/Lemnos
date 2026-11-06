@@ -586,7 +586,7 @@ client after its requests are answered.
 | `Reading` (103) | Each read of a device that a subscription is due for. Its channels are the subscription's channels. Channels outside the subscription carry `NO_VALUE`. | The subscribing client | `lemnosd/src/service.rs:456-510`, `:625-660`; `lemnosd/src/devices.rs:44` |
 | `Event` (105), tag 0 `Status` | A device's status changes | Clients with `greeted` and `events` set | `lemnosd/src/service.rs:315-318`, `status_event` |
 | `Event` (105), tag 1 `Control` | A control write or release; a restore | Clients with `greeted` and `events` set | `lemnosd/src/service.rs:315-318`, `:1303-1320`, `:1338-1353`; `service_raw.rs:84-108` |
-| `Event` (105), tag 2 `LedOwner` | The owner of a light's intent changes | Clients with `greeted` and `events` set | `lemnosd/src/service.rs:888` |
+| `Event` (105), tag 2 `LedOwner` | The owner of a light's intent changes; and once per light right after the `Welcome` of a connection's first `Hello` with `events` set, giving the current owner (empty: nobody) | Clients with `greeted` and `events` set | `lemnosd/src/service.rs`, `render_lights`, `send_light_owners` |
 | `Event` (105), tag 3 `Edge` | An edge on a line the client claimed with edge detection | The claiming client, if `greeted`. Edges belong to the claim, not to the broadcasts, so the `events` flag does not apply. | `lemnosd/src/service_raw.rs:30-40` |
 | `Event` (105), tag 4 `Dropped` | The client's queue dropped events (section 13) | That client | `lemnosd/src/clients.rs:154-161` |
 | `LightInfo` (110) | A watched light's description changes, and once when a watch starts | The watcher | `lemnosd/src/service.rs:1055-1101` |

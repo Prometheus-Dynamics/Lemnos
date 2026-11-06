@@ -1193,6 +1193,24 @@ impl Service {
         id
     }
 
+    /// Tells a client that just asked for events whose intent each light shows now, as the
+    /// `LedOwner` events it would have seen on the last change: a new watcher otherwise learns
+    /// nothing until the next change.
+    fn send_light_owners(&mut self, ci: usize) {
+        for li in 0..self.lights.len() {
+            let (owner, layer) = match self.lights[li].shown_intent() {
+                Some((owner, layer, _)) => (self.owner_name(owner), layer.name().to_string()),
+                None => (String::new(), String::new()),
+            };
+            let device = self.slots[self.lights[li].slot].id().to_string();
+            self.clients[ci].send(&Message::Event(Event::LedOwner {
+                device,
+                owner,
+                layer,
+            }));
+        }
+    }
+
     fn slot_of(&self, device: &str) -> Option<usize> {
         self.slots.iter().position(|s| s.id() == device)
     }
@@ -1209,7 +1227,8 @@ impl Service {
                 // The first Hello fixes the connection's name, owner, priority
                 // and flags. A repeat is answered and changes nothing, so held
                 // claims and intents keep the owner they were made under.
-                if !self.clients[ci].greeted {
+                let first = !self.clients[ci].greeted;
+                if first {
                     let owner = self.owner_for(&client);
                     let c = &mut self.clients[ci];
                     c.name = client;
@@ -1227,6 +1246,9 @@ impl Service {
                     client_id: id,
                     features: lemnos_ipc::FEATURE_GPU_LEASE,
                 });
+                if first && self.clients[ci].events {
+                    self.send_light_owners(ci);
+                }
             }
             Request::List => {
                 let devices = self.slots.iter().map(Slot::describe).collect();

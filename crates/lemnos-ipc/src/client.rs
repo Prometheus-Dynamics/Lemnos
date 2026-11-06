@@ -329,6 +329,9 @@ impl Connection {
         stream.set_write_timeout(Some(self.options.timeout))?;
         self.stream = Some(stream);
         self.buf.clear();
+        // `Connected` goes ahead of what arrives while connecting (the service's current light
+        // owners, say), so a caller sees the connection before the state it brings.
+        let mark = self.queue.len();
         self.send(&Request::Hello {
             version: VERSION,
             client: self.options.name.clone(),
@@ -386,9 +389,12 @@ impl Connection {
         if self.connected_once {
             self.reconnects += 1;
         }
-        self.queue.push_back(ClientEvent::Connected {
-            reconnects: self.reconnects,
-        });
+        self.queue.insert(
+            mark,
+            ClientEvent::Connected {
+                reconnects: self.reconnects,
+            },
+        );
         self.connected_once = true;
         self.backoff = RECONNECT_MIN;
         Ok(())

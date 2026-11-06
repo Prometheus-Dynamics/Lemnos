@@ -395,17 +395,35 @@ fn clients_wait_for_the_service_and_led_clients_get_no_events_by_default() {
         .events(true)
         .leds()
         .unwrap();
+    // An events client is told each light's current owner right after its welcome, then each
+    // change.
+    let owner_of = |client: &mut lemnos_ipc::LedClient| loop {
+        match client.next_event(Some(Duration::from_millis(500))).unwrap() {
+            Some(ClientEvent::Data(Event::LedOwner { owner, .. })) => break Some(owner),
+            Some(_) => {}
+            None => break None,
+        }
+    };
+    assert!(
+        owner_of(&mut loud).is_some(),
+        "no current owner after the welcome"
+    );
     let mut app = ClientOptions::new(service.socket(), "app").leds().unwrap();
     app.status(LedStatus::Warn).unwrap();
     app.sync().unwrap();
-    let mut owner_event = false;
-    while let Some(event) = loud.next_event(Some(Duration::from_millis(500))).unwrap() {
-        if matches!(event, ClientEvent::Data(Event::LedOwner { .. })) {
-            owner_event = true;
+    let mut changed = false;
+    while let Some(owner) = owner_of(&mut loud) {
+        if owner == "app" {
+            changed = true;
             break;
         }
     }
-    assert!(owner_event);
+    assert!(changed, "no LedOwner change to app");
+    let mut late = ClientOptions::new(service.socket(), "late")
+        .events(true)
+        .leds()
+        .unwrap();
+    assert_eq!(owner_of(&mut late).as_deref(), Some("app"));
     while let Some(event) = quiet.next_event(Some(Duration::from_millis(200))).unwrap() {
         assert!(
             matches!(event, ClientEvent::Connected { .. }),
