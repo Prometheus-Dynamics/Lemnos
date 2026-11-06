@@ -113,6 +113,12 @@ pub enum FixedOp {
     Blend,
     /// A one-pixel line between two points.
     Line,
+    /// One channel of RGBA8 as one gray byte a pixel, exactly (not luma). Implemented on the
+    /// `/dev/rga` route as `MultiRga::channel_to_gray` (RGA2 cores, the user colour-space
+    /// conversion), untested on board. No row lists it until the board test
+    /// (`tests/multirga.rs`, every byte of each channel) matches, so `route_for` answers `None`
+    /// and the caller keeps it on the CPU.
+    Channel,
 }
 
 /// An operation a caller asks of a route (see [`route_for`]).
@@ -641,6 +647,14 @@ mod tests {
             route_for(Soc::Rk3588, Op::Fixed(FixedOp::Line), abgr, abgr),
             None
         );
+        // A channel to gray waits for its board test on every SoC (see `FixedOp::Channel`).
+        let grey = layout(PixelFormat::Grey, 640, 360);
+        for soc in Soc::ALL {
+            assert_eq!(
+                route_for(soc, Op::Fixed(FixedOp::Channel), abgr, grey),
+                None
+            );
+        }
         // Flips on the mainline driver; a frame below the RGA3 minimum goes to the RGA2 row.
         assert_eq!(
             route_for(Soc::Rk3588, Op::Fixed(FixedOp::Flip), abgr, abgr),

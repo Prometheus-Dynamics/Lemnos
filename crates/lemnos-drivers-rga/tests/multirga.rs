@@ -4,7 +4,7 @@
 #![cfg(target_os = "linux")]
 #![allow(clippy::print_stderr)]
 
-use lemnos_drivers_rga::{BlendMode, Buffer, Image, MultiRga, RgaFormat, Rop, Transform};
+use lemnos_drivers_rga::{BlendMode, Buffer, Channel, Image, MultiRga, RgaFormat, Rop, Transform};
 
 fn device() -> Option<MultiRga> {
     match MultiRga::find() {
@@ -181,6 +181,26 @@ fn gray_to_rgba_matches_the_reference() {
         .expect("gray");
     let want: Vec<u8> = gray.iter().flat_map(|&g| [g, g, g, 255]).collect();
     within_one("gray to rgba", &out, &want).expect("gray");
+}
+
+/// Bit-exact, every byte value of each channel: 256 pixels a row, the channel counting up, the
+/// other bytes from a pattern. A caps row for this operation waits on this test passing.
+#[test]
+fn a_channel_to_gray_is_exact_for_every_byte() {
+    let Some(rga) = device() else { return };
+    let (w, h) = (256u32, 4u32);
+    for (channel, c) in [(Channel::Red, 0), (Channel::Green, 1), (Channel::Blue, 2)] {
+        let mut src = pattern((w * h * 4) as usize, 13 + c as u8);
+        for (i, px) in src.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            px[c] = (i % 256) as u8;
+        }
+        let mut out = vec![0u8; (w * h) as usize];
+        rga.channel_to_gray(w, h, channel, Buffer::Read(&src), Buffer::Write(&mut out))
+            .expect("channel to gray");
+        let want: Vec<u8> = src.as_chunks::<4>().0.iter().map(|px| px[c]).collect();
+        let diff = measure(&format!("{channel:?} to gray"), &out, &want).expect("channel");
+        assert_eq!(diff, 0, "{channel:?} must be exact");
+    }
 }
 
 #[test]

@@ -83,6 +83,25 @@ impl Image {
     }
 }
 
+/// One colour channel of an RGBA8888 pixel (see `MultiRga::channel_to_gray`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Channel {
+    Red,
+    Green,
+    Blue,
+}
+
+/// The request's user colour-space conversion (`full_csc`) has coefficients and offsets in
+/// 1/1024ths, as librga scales them (`NormalRgaFullColorSpaceConvert` multiplies by `0x3ff`, so
+/// 1.0 itself is never sent). `channel_to_gray` gives its channel 1023/1024, the largest librga
+/// sends.
+pub(crate) const CHANNEL_COEFFICIENT: i16 = 1023;
+
+/// The offset it adds, in 1/1024ths. With the coefficient above, `(1023 * v + offset + k) >> 10`
+/// is exactly `v` for every byte `v` when `offset + k` is within 255 to 1023. This offset keeps
+/// that true whether the hardware truncates (`k` = 0) or rounds half up (`k` = 512).
+pub(crate) const CHANNEL_OFFSET: i32 = 383;
+
 /// `dst = src op dst` (the `IM_ROP_*` codes of `im2d_type.h`, Apache-2.0). The request's ROP
 /// table is not stated in the header: field mapping unverified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -130,6 +149,16 @@ impl BlendMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_channel_conversion_is_exact_for_every_byte_truncated_or_rounded() {
+        for k in [0, 512] {
+            for v in 0..=255i32 {
+                let y = (i32::from(CHANNEL_COEFFICIENT) * v + CHANNEL_OFFSET + k) >> 10;
+                assert_eq!(y, v, "byte {v}, rounding term {k}");
+            }
+        }
+    }
 
     #[test]
     fn codes_and_frame_lengths_follow_the_headers() {

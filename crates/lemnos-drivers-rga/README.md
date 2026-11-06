@@ -16,7 +16,7 @@ Rockchip board. Each device test skips where its node is absent.
 - **Multi-RGA (`MultiRga`, `/dev/rga`):** the vendor kernel's BSP driver, through `RGA_BLIT_SYNC`
   (`0x5017`) with `struct rga_req`. Covers fill (`MultiRga::fill`), mask ROP (`rop`), blend
   (`blend`), 8-bit palette (`palette`), colour key (`color_key`), gray to RGBA (`gray_to_rgba`),
-  and flips and turns (`transform`). Serves no resize. The request layout comes from the librga
+  one channel of RGBA8888 to gray (`channel_to_gray`, below), and flips and turns (`transform`). Serves no resize. The request layout comes from the librga
   release at commit 331d5750, Apache-2.0 (`lemnos_linux_sys::rga`), with the struct sizes and
   offsets pinned to the header by tests.
 - **VGLite (`Vglite`, `/dev/vg_lite`, K230D):** `lemnos-drivers-vglite`, untested on board. Served
@@ -25,8 +25,17 @@ Rockchip board. Each device test skips where its node is absent.
   gray formats are not served. Lines are not routed: `lemnos-drivers-vglite`'s `line_bytes` draws
   them on the GPU when called directly, but the match to Bresenham is unverified on board (its
   README names the device test that turns the route on).
-- **Not served:** Y-only output (RGA's RGB-to-YUV modes do not fit the request's one-byte
-  `yuv2rgb_mode`, so no field is verified for them), line drawing (on the multi-RGA node, and on
+- **Channel to gray (`MultiRga::channel_to_gray`):** `dst[i] = src[4 * i + c]` for R, G or B,
+  meant to be bit-exact, not luma. It programs the request's user colour-space conversion
+  (`full_csc`, RGA2 cores only; the vendor driver gives RGA3 no `RGA_FULL_CSC`, so on an RK3588
+  the scheduler picks the RGA2 core) with a Y row of 1023/1024 on the channel and an offset of
+  383/1024. That is exact for every byte whether the hardware truncates or rounds half up, and
+  the clip is the kernel's default 0 to 255. Untested on board, and `caps` does not route it
+  (`FixedOp::Channel`) until `tests/multirga.rs`'s `a_channel_to_gray_is_exact_for_every_byte`
+  passes on one. The mainline V4L2 driver cannot do it: it has no gray or Y-only format, and its
+  colour conversion is the fixed BT.601 or BT.709 mode.
+- **Not served:** Y-only output as luma (RGA's fixed RGB-to-YUV modes do not fit the request's
+  one-byte `yuv2rgb_mode`, so no field is verified for them), line drawing (on the multi-RGA node, and on
   VGLite until a board run matches Bresenham), and resizes on the multi-RGA node. A caller sends
   these to the CPU.
 
@@ -48,6 +57,9 @@ so the value is the crate's assumption until a board run confirms it:
 - **Palette:** the 256-entry table's entry layout (`[r, g, b, a]`).
 - **Colour key:** the enable bit and inversion mode (the header gives the range only).
 - **Gray to RGBA:** the chroma of a Y-only source is neutral; `yuv2rgb_mode` 1 is full range.
+- **Channel to gray:** which `full_csc` coefficient meets the first byte of RGBA8888 (the vendor
+  table names it R), the coefficient register's width (librga never sends more than 1023), and
+  the rounding.
 - **Transforms:** which mirror is horizontal, and the turn direction (clockwise assumed).
 - **Buffers:** a dma-buf descriptor goes in the address field with the MMU disabled; a byte buffer
   goes in at its virtual address with the MMU enabled. The header gives the flags but not this use.

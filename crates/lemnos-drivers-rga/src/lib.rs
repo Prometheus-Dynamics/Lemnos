@@ -42,7 +42,7 @@ mod transform;
 mod v4l2;
 
 pub use format::{Layout, PixelFormat, Rect};
-pub use multirga::{BlendMode, Image, RgaFormat, Rop};
+pub use multirga::{BlendMode, Channel, Image, RgaFormat, Rop};
 #[cfg(target_os = "linux")]
 pub use multirga::{Buffer, MultiRga};
 // The vendor-library name is kept for one release: it stays deprecated and is the same type.

@@ -8,11 +8,11 @@ use std::io;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
-use lemnos_linux_sys::rga::{self, ImgInfo, Job, Rect as RgaRect};
+use lemnos_linux_sys::rga::{self, CscCoe, FullCsc, ImgInfo, Job, Rect as RgaRect};
 
 pub use lemnos_linux_sys::rga::Buffer;
 
-use super::{BlendMode, Image, RgaFormat, Rop};
+use super::{BlendMode, CHANNEL_COEFFICIENT, CHANNEL_OFFSET, Channel, Image, RgaFormat, Rop};
 use crate::Transform;
 
 /// The device node.
@@ -158,6 +158,28 @@ impl MultiRga {
         dst: Buffer<'_>,
     ) -> io::Result<()> {
         self.run(&mut gray_job(width, height, src, dst)?)
+    }
+
+    /// One channel of an RGBA8888 image to gray (Y only, `RK_FORMAT_YCbCr_400`), the same size:
+    /// `dst[i] = src[4 * i + c]` for the channel's byte `c`, meant to be exact, not luma.
+    ///
+    /// It runs through the request's user colour-space conversion (`full_csc`), which only RGA2
+    /// cores have; on an RK3588 the kernel's scheduler gives it to the RGA2 core. The Y row is
+    /// 1023/1024 on the channel and zero on the others, plus an offset of 383/1024, which is
+    /// exact for every byte whether the hardware truncates or rounds; the clip is the kernel's
+    /// default full range (0 to 255). Field
+    /// mapping unverified: which coefficient meets the first byte of RGBA8888 (the vendor table
+    /// names it R), the coefficient register's width, and the hardware's rounding. Untested on
+    /// board; [`crate::caps`] does not route it until the board test matches.
+    pub fn channel_to_gray(
+        &self,
+        width: u32,
+        height: u32,
+        channel: Channel,
+        src: Buffer<'_>,
+        dst: Buffer<'_>,
+    ) -> io::Result<()> {
+        self.run(&mut channel_job(width, height, channel, src, dst)?)
     }
 
     /// Flips or turns `src` into `dst` (the output size of `transform`). Field mapping
@@ -355,6 +377,43 @@ fn gray_job<'a>(width: u32, height: u32, src: Buffer<'a>, dst: Buffer<'a>) -> io
     Ok(job)
 }
 
+/// The request of a channel to gray conversion: Y only, through the user conversion.
+fn channel_job<'a>(
+    width: u32,
+    height: u32,
+    channel: Channel,
+    src: Buffer<'a>,
+    dst: Buffer<'a>,
+) -> io::Result<Job<'a>> {
+    let input = Image::packed(RgaFormat::Rgba8888, width, height);
+    let out = Image::packed(RgaFormat::Gray8, width, height);
+    let c = CHANNEL_COEFFICIENT;
+    let (r_v, g_y, b_u) = match channel {
+        Channel::Red => (c, 0, 0),
+        Channel::Green => (0, c, 0),
+        Channel::Blue => (0, 0, c),
+    };
+    let mut job = Job::new();
+    let req = job.req();
+    req.render_mode = BITBLT;
+    req.full_csc = FullCsc {
+        flag: 1,
+        coe_y: CscCoe {
+            r_v,
+            g_y,
+            b_u,
+            off: CHANNEL_OFFSET,
+        },
+        // A Y-only destination has no chroma; these rows are written and unused.
+        coe_u: CscCoe::default(),
+        coe_v: CscCoe::default(),
+    };
+    req.clip = full_clip(out)?;
+    job.set_src(info(input)?, src)?;
+    job.set_dst(info(out)?, dst)?;
+    Ok(job)
+}
+
 /// The request of a flip or quarter turn: the rotate mode and, for turns, `sina`/`cosa`.
 fn transform_job<'a>(
     src: Image,
@@ -395,6 +454,40 @@ fn transform_job<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_channel_conversion_programs_the_y_row_only() {
+        let src = vec![0u8; 8 * 2 * 4];
+        let mut dst = vec![0u8; 8 * 2];
+        for (channel, row) in [
+            (Channel::Red, (1023, 0, 0)),
+            (Channel::Green, (0, 1023, 0)),
+            (Channel::Blue, (0, 0, 1023)),
+        ] {
+            let job =
+                channel_job(8, 2, channel, Buffer::Read(&src), Buffer::Write(&mut dst)).unwrap();
+            let req = job.request();
+            assert_eq!(req.render_mode, BITBLT);
+            assert_eq!(req.yuv2rgb_mode, 0);
+            let csc = req.full_csc;
+            assert_eq!(csc.flag, 1);
+            assert_eq!((csc.coe_y.r_v, csc.coe_y.g_y, csc.coe_y.b_u), row);
+            assert_eq!(csc.coe_y.off, CHANNEL_OFFSET);
+            assert_eq!(csc.coe_u, CscCoe::default());
+        }
+        // A short destination is refused before any call.
+        let mut short = vec![0u8; 15];
+        assert!(
+            channel_job(
+                8,
+                2,
+                Channel::Red,
+                Buffer::Read(&src),
+                Buffer::Write(&mut short)
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn a_fill_describes_its_rectangle_and_colour() {
