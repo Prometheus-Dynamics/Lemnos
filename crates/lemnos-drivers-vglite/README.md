@@ -25,7 +25,7 @@ Ported (phase 2):
 
 | Operation | Stream | Notes |
 |---|---|---|
-| `line_*` | stroke draw (`vg_lite_draw`'s stroke branch) of an outline from `stroke.rs` | a width-1 stroke with square caps, from pixel centre to pixel centre: both ends are included, and axis-aligned lines cover exactly their pixels; diagonals are antialiased, not Bresenham |
+| `line_*` | stroke draw (`vg_lite_draw`'s stroke branch, quality LOW: no antialiasing) of an outline from `stroke.rs` | a width-1 square-capped stroke from pixel centre to pixel centre, both ends included. Not shown to equal Bresenham on board; not routed by `lemnos-drivers-rga` (see below) |
 
 The stroke port (`src/stroke.rs`) is the vendor's `vg_lite_update_stroke` for open polylines with
 BUTT and SQUARE caps and MITER and BEVEL joins, closed subpaths, and the straight-line case. The
@@ -118,7 +118,7 @@ Stroke draws add these, unmeasured on a K230: the path tessellation control word
 translation words (0x0ACD, 0x0ACE: the vendor pushes them; their meaning is not in the source),
 the window's origin and size (0x0A39, 0x0A3A) and tessellation size per window (0x0A3D, the
 context's buffer in 64-byte units). The stroke geometry is the vendor's, exact on the host; what
-the GPU draws with it, including antialiasing of a diagonal and the clipping of a line that runs
+the GPU draws with it, including whether a line's pixels equal Bresenham's on each slope, and the clipping of a line that runs
 past the target, is not measured.
 
 Each of these was read from the vendor source or inferred, and was not confirmed on a K230. The
@@ -142,6 +142,19 @@ source-level meaning is the vendor's own; the hardware meaning is not.
   `OutOfMemory`; the vendor splits it. No operation here comes near that (the palette stream is
   about 1.3 KiB).
 
+## Lines and Bresenham
+
+The line op's contract is Bresenham's pixels, both ends included. The GPU draw is binary (quality
+LOW), so an axis or 45-degree line should cover exactly those pixels, and the stroke's pixel
+centres are on the line. Other slopes may cover one pixel more than Bresenham (a neighbour whose
+centre is within half a width of the line), so the draw is not proven equal to Bresenham there.
+The line op is therefore not routed by `lemnos-drivers-rga`'s caps. To turn it on, run
+`tests/lines.rs` (`gpu_lines_against_bresenham_by_slope_class`) on a K230: it draws every line of
+Chebyshev radius 1 to 64 from the frame centre, in both directions, and asserts axes and 45
+degrees exactly, printing the mismatch count for other slopes. Serve lines when that count is
+zero for every class. The reference there is the variant documented in that file (its tie rule
+and the direction dependence).
+
 ## Tests
 
 - `src/stroke_tests.rs`: the outlines of 34 fixtures (open and closed, BUTT, SQUARE, MITER, BEVEL,
@@ -150,6 +163,8 @@ source-level meaning is the vendor's own; the hardware meaning is not.
   round-cap and round-join fixtures are checked to be `Unsupported`. The oracle was built from
   the vendor sources unmodified, with the kernel ioctl replaced by a recorder, `-O2` and `-O0`,
   `-ffp-contract=off`; both gave the same bytes.
+- `tests/lines.rs`: the reference Bresenham on hand-checked lines (host), and the device comparison
+  described above (skips without `/dev/vg_lite`).
 - `src/tests.rs`: the streams of init, clear, blit (identity, crop, flip, quarter turn, bilinear
   half-scale), blend (SRC_OVER, DST_OVER) and palette, compared word for word with the library's
   output for small fixtures. Words that come from reading the C rather than from the recording

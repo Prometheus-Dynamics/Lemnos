@@ -21,10 +21,14 @@ Rockchip board. Each device test skips where its node is absent.
   offsets pinned to the header by tests.
 - **VGLite (`Vglite`, `/dev/vg_lite`, K230D):** `lemnos-drivers-vglite`, untested on board. Served
   for its rows: clear (fill), blits (resize: bilinear, or the 2x area downscale; crop; flips and
-  quarter turns), the blends SRC, SRC_OVER and DST_OVER, palette, and one-pixel lines (a width-1
-  square-capped stroke). Premultiplied blends and gray formats are not served.
+  quarter turns), the blends SRC, SRC_OVER and DST_OVER, and palette. Premultiplied blends and
+  gray formats are not served. Lines are not routed: `lemnos-drivers-vglite`'s `line_bytes` draws
+  them on the GPU when called directly, but the match to Bresenham is unverified on board (its
+  README names the device test that turns the route on).
 - **Not served:** Y-only output (RGA's RGB-to-YUV modes do not fit the request's one-byte
-  `yuv2rgb_mode`, so no field is verified for them), line drawing on the multi-RGA node, and resizes on the multi-RGA node. A caller sends these to the CPU.
+  `yuv2rgb_mode`, so no field is verified for them), line drawing (on the multi-RGA node, and on
+  VGLite until a board run matches Bresenham), and resizes on the multi-RGA node. A caller sends
+  these to the CPU.
 
 ## Choosing a route
 

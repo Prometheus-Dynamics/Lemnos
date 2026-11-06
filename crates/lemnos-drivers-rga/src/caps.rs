@@ -376,13 +376,6 @@ const VGLITE_OPS: &[OpCaps] = &[
         exactness: Exactness::Unmeasured,
         note: "Untested on board. an INDEX_8 source through a 256-entry colour table",
     },
-    OpCaps {
-        op: FixedOp::Line,
-        exactness: Exactness::Unmeasured,
-        note: "Untested on board. a width-1 square-capped stroke at pixel centres, both ends \
-               included; axis-aligned lines cover exactly their pixels, diagonals are antialiased \
-               and are not Bresenham lines",
-    },
 ];
 
 const fn vglite(soc: Soc) -> UnitCaps {
@@ -390,7 +383,13 @@ const fn vglite(soc: Soc) -> UnitCaps {
         soc,
         unit: Unit::K230Vglite,
         route: Route::Vglite,
-        // Phases 1 and 2 of `lemnos-drivers-vglite` (untested on board): blits and fills, then lines.
+        // Phases 1 and 2 of `lemnos-drivers-vglite` (untested on board): blits and fills, then
+        // lines. Lines are not served by this row: the GPU's stroke is not shown to match
+        // Bresenham on board, so `FixedOp::Line` stays on the CPU. `lemnos-drivers-vglite`'s
+        // `line_bytes` and `line_dmabuf` still draw on the GPU when called directly. To serve
+        // lines here, add the `OpCaps` back with `Exactness::Unmeasured` once the device test
+        // `tests/lines.rs` (`gpu_lines_against_bresenham_by_slope_class`) reports zero mismatches
+        // for every slope class on a K230.
         implemented: true,
         min_size: None,
         max_scale: None,
@@ -562,7 +561,8 @@ mod tests {
             (Unit::K230Vglite, Route::Vglite)
         );
         assert_eq!(k230[0].staging, Staging::UnlessContiguous);
-        assert!(k230[0].op(FixedOp::Line).is_some() && k230[0].op(FixedOp::Blend).is_some());
+        // Lines wait for a board match against Bresenham: see the comment in `vglite`.
+        assert!(k230[0].op(FixedOp::Line).is_none() && k230[0].op(FixedOp::Blend).is_some());
         assert!(k230[0].op(FixedOp::ColorKey).is_none());
         assert!(k230[1].route == Route::Design && k230[1].filters.is_empty());
         assert!(caps(Soc::Rk3576).all(|c| c.route == Route::MultiRga));
@@ -652,14 +652,14 @@ mod tests {
             Some(Route::V4l2)
         );
         // The K230D's VGLite serves its rows: a fill, a 2x area downscale, a bilinear resize.
-        // Lines are in its rows too; a 3x area downscale is not a half-phase blit.
+        // Lines are not in its rows (see `vglite`); a 3x area downscale is not a half-phase blit.
         assert_eq!(
             route_for(Soc::K230d, Op::Fixed(FixedOp::Fill), abgr, abgr),
             Some(Route::Vglite)
         );
         assert_eq!(
             route_for(Soc::K230d, Op::Fixed(FixedOp::Line), abgr, abgr),
-            Some(Route::Vglite)
+            None
         );
         let big = layout(PixelFormat::Abgr32, 640, 360);
         let small = layout(PixelFormat::Abgr32, 320, 180);
@@ -674,10 +674,6 @@ mod tests {
         );
         assert_eq!(
             route_for(Soc::K230d, Op::Resize(Filter::Bilinear), big, third),
-            Some(Route::Vglite)
-        );
-        assert_eq!(
-            route_for(Soc::K230d, Op::Fixed(FixedOp::Line), abgr, abgr),
             Some(Route::Vglite)
         );
         assert_eq!(

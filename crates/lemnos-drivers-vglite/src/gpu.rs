@@ -466,7 +466,10 @@ impl Vglite {
         // Pixel (x, y) covers [x, x + 1) by [y, y + 1), so its centre is at (x + 0.5, y + 0.5).
         // A width-1 stroke centred there covers exactly that pixel row or column when the line is
         // axis-aligned, and a square cap extends each end by half a pixel, so both ends are
-        // included. Diagonals are antialiased by the GPU and are not Bresenham lines.
+        // included. The draw is not antialiased (quality LOW): a pixel is set when its centre is
+        // inside the stroke. That covers every Bresenham pixel, and on other slopes it can cover
+        // more (a neighbour whose centre is within half a width of the line): not proven equal to
+        // Bresenham, see `tests/lines.rs`.
         const LIMIT: i32 = 1 << 20;
         let bad = |p: (i32, i32)| p.0.abs() > LIMIT || p.1.abs() > LIMIT;
         if bad(from) || bad(to) {
@@ -490,9 +493,10 @@ impl Vglite {
     }
 
     /// A one-pixel line from `from` to `to`, both ends included, in `rgba`: a width-1 stroke
-    /// with square caps, through the GPU's path draw, over the rest of the buffer, which is
-    /// kept. Points beyond the image are clipped by the GPU (unverified on board); L8 is
-    /// `Unsupported`, as for fills.
+    /// with square caps, drawn without antialiasing through the GPU's path draw, over the rest of
+    /// the buffer, which is kept. Points beyond the image are clipped by the GPU (unverified on
+    /// board); L8 is `Unsupported`, as for fills. Not routed by `lemnos-drivers-rga`'s caps until
+    /// a board run matches Bresenham (`tests/lines.rs`).
     pub fn line_bytes(
         &self,
         image: Image,

@@ -316,10 +316,11 @@ fn blit<'a, B: Buffer>(
 }
 
 /// The path-draw HW values for the stroke draw (`vg_lite_draw`, non-parallel branch): FP32 path
-/// data (`convert_path_format`), `VG_LITE_HIGH` quality (`convert_path_quality` 3), no fill rule
-/// (non-zero), and the stroke bit 0x200 that the stroke window sets.
+/// data (`convert_path_format`), `VG_LITE_LOW` quality (non-antialiased: `convert_path_quality`
+/// gives 0 for it; `VG_LITE_HIGH` would give 3, 16x antialiasing), no fill rule (non-zero), and the
+/// stroke bit 0x200 that the stroke window sets.
 const PATH_FP32: u32 = 0x0030_0000;
-const PATH_QUALITY_HIGH: u32 = 0x3;
+const PATH_QUALITY_LOW: u32 = 0x0;
 const PATH_STROKE: u32 = 0x0100_0200;
 const PATH_CONTROL: u32 = 0x0100_0000;
 /// The configuration word of a stroke draw with no blend (`0x10000000` alone: linear target, no
@@ -342,7 +343,7 @@ fn stroke<'a, B: Buffer>(
     set_render_target(stream, target)?;
     stream.plain(0x0A00, PATH_CONFIG_NONE)?;
     stream.plain(0x0A02, colour)?;
-    stream.plain(0x0A34, PATH_CONTROL | PATH_FP32 | PATH_QUALITY_HIGH)?;
+    stream.plain(0x0A34, PATH_CONTROL | PATH_FP32 | PATH_QUALITY_LOW)?;
     stream.plain(0x0A3B, 1.0f32.to_bits())?;
     stream.plain(0x0A3C, 0.0f32.to_bits())?;
     // new_matrix for the identity: (m00 * 1, m01 * 1, (m00 + m01) * 0 + m02, and the same row).
@@ -359,7 +360,7 @@ fn stroke<'a, B: Buffer>(
     stream.plain(0x0ACE, m[1][2].to_bits())?;
     let (w, h) = (target.image.width, target.image.height);
     stream.tessellation_window(0, 0, w, h)?;
-    stream.plain(0x0A34, PATH_STROKE | PATH_FP32 | PATH_QUALITY_HIGH)?;
+    stream.plain(0x0A34, PATH_STROKE | PATH_FP32 | PATH_QUALITY_LOW)?;
     stream.plain(0x0A02, colour)?;
     stream.path_data(outline)?;
     Ok(true)
