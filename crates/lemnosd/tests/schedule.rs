@@ -44,35 +44,35 @@ fn host_wakeups(stop: Arc<AtomicBool>) -> JoinHandle<i64> {
     })
 }
 
-/// How long the service's threads (`lemnosd-loop`, `lemnosd-bus:*`) have
-/// waited for a CPU, summed, in microseconds: the run-queue delay in each
-/// thread's `/proc/self/task/*/schedstat`. `None` when the kernel does not
-/// report it.
+/// How long the threads a reading passes through have waited for a CPU,
+/// summed, in microseconds: the service's (`lemnosd-loop`, `lemnosd-bus:*`)
+/// and the calling thread, which is the client reading them. It is the
+/// run-queue delay in each thread's `schedstat`. `None` when the kernel does
+/// not report it.
 fn service_run_delay_us() -> Option<u64> {
-    let mut total = 0;
-    let mut found = false;
+    let waited_us = |stat: String| -> Option<u64> {
+        Some(stat.split_whitespace().nth(1)?.parse::<u64>().ok()? / 1_000)
+    };
+    let mut total = waited_us(std::fs::read_to_string("/proc/thread-self/schedstat").ok()?)?;
     for task in std::fs::read_dir("/proc/self/task").ok()?.flatten() {
         let comm = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
         if !comm.starts_with("lemnosd-") {
             continue;
         }
-        let stat = std::fs::read_to_string(task.path().join("schedstat")).ok()?;
-        let waited_ns: u64 = stat.split_whitespace().nth(1)?.parse().ok()?;
-        total += waited_ns / 1_000;
-        found = true;
+        total += waited_us(std::fs::read_to_string(task.path().join("schedstat")).ok()?)?;
     }
-    found.then_some(total)
+    Some(total)
 }
 
-/// The rate floor for `nominal_hz` over a 3 s window in which the service's
-/// threads waited `waited_us` for a CPU: 95 % of the nominal rate for the
-/// time they had one. A thread that waits a whole period loses that period's
-/// reading, and that share is the host's, not the schedule's. On a quiet host
-/// the floor is about 94 % of nominal; the p99 spacing bound is the strict
-/// check there.
-fn rate_floor(nominal_hz: f64, waited_us: i64) -> f64 {
+/// The rate floor for `nominal_hz` over a 3 s window in which the threads a
+/// reading passes through waited `waited_us` for a CPU: `share` of the
+/// nominal rate for the time they had one. A thread that waits a whole period
+/// loses that period's reading, and that share is the host's, not the
+/// schedule's. On a quiet host the floor is about `share` of nominal; the p99
+/// spacing bound is the strict check there.
+fn rate_floor(nominal_hz: f64, waited_us: i64, share: f64) -> f64 {
     let waited = (waited_us as f64 / 3e6).clamp(0.0, 1.0);
-    nominal_hz * (1.0 - waited) * 0.95
+    nominal_hz * (1.0 - waited) * share
 }
 
 /// The slow device comes first, so a fixed slot order would poll it first.
@@ -268,7 +268,7 @@ fn run_with(label: &str, latency: Duration, load: bool) -> Stats {
 fn imu_holds_100_hz_on_an_idle_bus() {
     let s = run("idle", false);
     assert!(
-        s.rate_hz >= rate_floor(100.0, s.waited_us) && s.rate_hz <= 103.0,
+        s.rate_hz >= rate_floor(100.0, s.waited_us, 0.95) && s.rate_hz <= 103.0,
         "{s:?}"
     );
     assert!(s.p99_dev_us <= p99_bound(&s), "{s:?}");
@@ -280,7 +280,7 @@ fn imu_holds_100_hz_on_an_idle_bus() {
 fn imu_holds_100_hz_beside_a_slow_device() {
     let s = run("slow bus, 3 ms per transaction", true);
     assert!(
-        s.rate_hz >= rate_floor(100.0, s.waited_us) && s.rate_hz <= 103.0,
+        s.rate_hz >= rate_floor(100.0, s.waited_us, 0.95) && s.rate_hz <= 103.0,
         "{s:?}"
     );
     // The bounds allow for a busy host (the grid is checked, not arrival times); a schedule that lets a 6 ms read
@@ -322,7 +322,7 @@ fn imu_holds_100_hz_beside_a_read_longer_than_its_period() {
         true,
     );
     assert!(
-        s.rate_hz >= rate_floor(100.0, s.waited_us) && s.rate_hz <= 103.0,
+        s.rate_hz >= rate_floor(100.0, s.waited_us, 0.95) && s.rate_hz <= 103.0,
         "{s:?}"
     );
     assert!(s.p99_dev_us <= p99_bound(&s), "{s:?}");
@@ -524,12 +524,20 @@ fn a_polled_400_hz_imu_delivers_each_sample_once() {
     let rate = readings.len() as f64 / 3.0;
     // At most 400 a second (the sensor's rate; a 2 ms poll would deliver 500).
     // The floor is `rate_floor`'s: what the service could read in the time
-    // its threads had a CPU. A plain thread sleeping on the same grid stays on
+    // the reading's threads (the service's and this client's) had a CPU. A plain thread sleeping on the same grid stays on
     // time under the same load, because the service's loop does more work per
     // wakeup and is preempted. With the run-queue delay unreported the floor
-    // is 95 % of 400.
+    // is 90 % of 400.
+    //
+    // The share is 90 %, not the 100 Hz tests' 95 %. The service reads no
+    // faster than the 2.5 ms output period, so its reads sit on the sample
+    // grid with no slack, and a wait of part of a period can lose a whole
+    // sample. On the desktop under other work (2026-11-06, 16 runs, 7 to 54 %
+    // waited), the loss was within a few points of the wait share either way:
+    // one run lost 41 % at 37 % waited, which 95 % failed. Reading every other
+    // sample (200 a second) still fails on a quiet host.
     let waited = (waited_us as f64 / 3e6).min(1.0);
-    let floor = rate_floor(400.0, waited_us as i64);
+    let floor = rate_floor(400.0, waited_us as i64, 0.90);
     assert!(
         rate >= floor && rate <= 420.0,
         "{rate} readings a second (floor {floor:.0}; the service waited {:.0} % of the time for a CPU)",
