@@ -62,6 +62,7 @@ Everything planned, in order. Execution is paused until the user starts it.
         `Fraction` had one. m2m's format types are `lemnos-v4l2`'s (`lemnos-linux` takes it
         under `v4l2-m2m`), converted at the sys calls in `v4l2/sys_format.rs`.
   - [x] PiSP: `lemnos-drivers-pisp` (the camera stack's `crates/pisp`, bb34279c): uAPI layouts, front and back end builders, tiling, statistics, and the `device` layer on `lemnos-v4l2` and `lemnos-linux` (no `unsafe`; the line timer's volatile accesses are in `lemnos-linux-sys::mmap`). Untested on board: the `device` layer since the move (the board results in the source are the earlier implementation's). `layout-check/run.sh` matches the Raspberry Pi 7.2 kernel tree (53679a578), the boards' kernel.
+  - [x] Step 6, the sensor bridge (block-move step 6): `kernel-modules/lemnos-sensor-bridge` (GPL-2.0, out of tree) and the `lemnos-sensor-bridge` crate, from the camera stack's module and bridge client (d17de2ed, see `docs/provenance.md`). Renamed in one step: the module, its platform driver, the `lemnos,*` device-tree properties, the `LEMNOS_CID_*` controls (same ids), and `lemnos-bridge.service`. The module is syntax-checked only; the crate builds, clippy is clean and its host tests pass. Untested on board. The camera stack has not switched to these yet.
   - [ ] RGA and VGLite from the graph runtime, on V4L2 M2M and direct kernel routes. Untested
         on board.
     - [x] RGA: `lemnos-drivers-rga` on the V4L2 M2M route, with `caps::route_for` naming the route
@@ -83,7 +84,7 @@ Everything planned, in order. Execution is paused until the user starts it.
           path of `vg_lite_draw` (`VGLite/vg_lite_stroke.c`, 4.5k lines), so lines leave the CPU.
     - [x] K230 and rkisp device layers: `lemnos-drivers-k230isp` and `lemnos-drivers-rkisp`, from the camera stack's `crates/k230isp` and `crates/rkisp` (d17de2ed). Moved: the uAPI layouts and bindgen headers, the K230 register map, `RegisterAccess` and the statistics register reads, `Isp`, `ParamBuffer`, `isp32::{Variant, nodes}`, and both `device` layers (on `lemnos-v4l2` and `lemnos-linux-sys::vvcam_isp`). Stayed in the camera stack: the builders and statistics math (`params.rs`, `stats.rs`, `isp32/params.rs`, `isp32/stats.rs`). Untested on board: both `device` layers (no K230D or Rockchip SoC on this PC), the ISP32 fixed-point scales, and the K230 register map's unconfirmed constants. The uAPI layouts are in `lemnos-rkisp-sys`, whose ISP32 bitfield accessors (bindgen output) and bitfield-unit `Pod` impls are the only unsafe code of the move. The camera stack has not switched to these crates yet.
 - [ ] **5. Kernel module and Rust user-space drivers.** One small module of our own, its sources in
-      Lemnos: claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
+      `kernel-modules/` (GPL-2.0, see its README): claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:
       stock V4L2 stays as the fallback, and other boards, the simulator and other kernels stay on
       stock interfaces. No patches on other people's code; our own modules are fine.

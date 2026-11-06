@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Kernel selection for lemnos-sensor-bridge/build.sh (sourced, bash).
+#
+# Two Raspberry Pi kernels are supported:
+#
+#   LEMNOS_KERNEL=6.12  (default) Raspberry Pi tag stable_20250916, release 6.12.47-v8-16k.
+#   LEMNOS_KERNEL=7.2   raspberrypi/linux rpi-7.2.y (7.2.9-v8-16k). An O= build of a configured
+#                     tree works (bcm2712_defconfig with 4K pages and VIDEO_OV9282=m; see the
+#                     README).
+#
+# KERNEL_TREE is required: the configured and built kernel tree of the device's image (for
+# example the image's Buildroot linux-custom). The modules must match its config and symbols.
+#
+# Every variable can be set directly:
+#   KERNEL_TREE       built kernel tree (in-tree build, or the O= object tree of an out-of-tree one)
+#   KERNEL_SRC        its source tree (default: $KERNEL_TREE/source for an O= tree, else $KERNEL_TREE)
+#   BR_HOST           Buildroot host dir with the cross toolchain
+#   CROSS_COMPILE     toolchain prefix (default: $BR_HOST/bin/aarch64-linux-, else aarch64-linux-gnu-)
+#   KERNEL_RELEASE    expected release (6.12: 6.12.47-v8-16k; 7.2: read from $KERNEL_TREE)
+#   LEMNOS_KBUILD_ROOT  work dir outside the git tree (default: ../linux-build-lemnos next to the repo)
+#   PATCH_PKG          optional path to a device package with extra driver patches; no default
+
+# shellcheck shell=bash
+# Callers set $workspace (the directory containing the repository).
+
+LEMNOS_KERNEL="${LEMNOS_KERNEL:-6.12}"
+PATCH_PKG="${PATCH_PKG:-}"
+KERNEL_TREE="${KERNEL_TREE:?set KERNEL_TREE to the built kernel tree of the device image (see kernel-modules/README)}"
+
+case "$LEMNOS_KERNEL" in
+6.12)
+    KERNEL_RELEASE="${KERNEL_RELEASE:-6.12.47-v8-16k}"
+    ;;
+7.2)
+    if [[ -z "${KERNEL_RELEASE:-}" ]]; then
+        KERNEL_RELEASE="$(cat "$KERNEL_TREE/include/config/kernel.release" 2>/dev/null || true)"
+        [[ -n "$KERNEL_RELEASE" ]] ||
+            { echo "error: KERNEL_TREE=$KERNEL_TREE has no kernel.release; set KERNEL_RELEASE" >&2; exit 1; }
+    fi
+    ;;
+*)
+    echo "error: LEMNOS_KERNEL=$LEMNOS_KERNEL (6.12 or 7.2)" >&2
+    exit 1
+    ;;
+esac
+
+if [[ -z "${KERNEL_SRC:-}" ]]; then
+    if [[ -d "$KERNEL_TREE/source" ]]; then
+        KERNEL_SRC="$(cd "$KERNEL_TREE/source" && pwd -P)"
+    else
+        KERNEL_SRC="$KERNEL_TREE"
+    fi
+fi
+
+if [[ -z "${BR_HOST:-}" ]]; then
+    # A Buildroot linux-custom sits in <output>/build/; its host dir is then the toolchain.
+    BR_HOST="$(cd "$KERNEL_TREE/../.." 2>/dev/null && pwd)/host"
+fi
+if [[ -z "${CROSS_COMPILE:-}" ]]; then
+    if [[ -x "$BR_HOST/bin/aarch64-linux-gcc" ]]; then
+        CROSS_COMPILE="$BR_HOST/bin/aarch64-linux-"
+    else
+        CROSS_COMPILE="aarch64-linux-gnu-"
+    fi
+fi
+LEMNOS_KBUILD_ROOT="${LEMNOS_KBUILD_ROOT:-$workspace/linux-build-lemnos}"
+
+# The device's camera receiver module: rp1-cfe (6.12) became rp1-cfe-downstream in rpi-7.2.y
+# (same driver and compatible; the mainline driver is rp1-cfe, compatible
+# raspberrypi,rp1-cfe-upstream).
+case "$KERNEL_RELEASE" in
+6.*) CFE_MODULE_PATH="platform/raspberrypi/rp1_cfe/rp1-cfe" ;;
+*) CFE_MODULE_PATH="platform/raspberrypi/rp1_cfe/rp1-cfe-downstream" ;;
+esac
+
+# The vermagic a module built for this kernel carries.
+kernel_vermagic() {
+    echo "$KERNEL_RELEASE SMP preempt mod_unload modversions aarch64"
+}
+
+export LEMNOS_KERNEL PATCH_PKG KERNEL_TREE KERNEL_SRC KERNEL_RELEASE BR_HOST CROSS_COMPILE LEMNOS_KBUILD_ROOT

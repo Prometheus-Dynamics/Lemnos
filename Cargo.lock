@@ -807,6 +807,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-sensor-bridge"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-v4l2",
+ "libc",
+]
+
+[[package]]
 name = "lemnos-soc"
 version = "2.0.1-dev"
 

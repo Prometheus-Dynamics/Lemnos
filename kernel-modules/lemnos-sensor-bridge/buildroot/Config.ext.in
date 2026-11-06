@@ -1,0 +1,8 @@
+config BR2_LINUX_KERNEL_EXT_LEMNOS_SENSOR_BRIDGE
+	bool "Lemnos sensor bridge"
+	help
+	  Build lemnos_sensor_bridge.ko, the generic V4L2 sensor subdevice
+	  for camera sensors driven from userspace by Lemnos, into the
+	  kernel the package builds (Raspberry Pi 6.12 or rpi-7.2.y), and
+	  the BCM2712 camera overlays (lemnos-sensor-bridge-bcm2712.dtbo,
+	  lemnos-cam0-i2c-fast.dtbo).

@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-sensor-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Userspace client for the Lemnos sensor bridge kernel module: a camera sensor driven from user space through V4L2 subdevice controls and events"
+documentation = "https://docs.rs/lemnos-sensor-bridge"
+readme = "README.md"
+keywords = ["linux", "v4l2", "camera", "sensor", "subdev"]
+categories = ["embedded", "hardware-support", "os::linux-apis"]
+
+[lints]
+workspace = true
+
+# Linux only: the bridge is a V4L2 subdevice, and every kernel call goes through
+# lemnos-v4l2 and lemnos-linux-sys. This crate has no `unsafe` of its own.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-v4l2.workspace = true
+libc.workspace = true

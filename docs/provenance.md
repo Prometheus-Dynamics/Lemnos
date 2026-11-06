@@ -24,6 +24,8 @@ This is a record for the owning repositories; the design itself is in
 
 | `crates/pisp` at `bb34279c` (Styx, branch `dev`): uAPI layouts, front and back end builders, tiling, statistics, `device` over the stock `rp1-cfe` and `pispbe` nodes | `lemnos-drivers-pisp` (`device` now on `lemnos-v4l2` and `lemnos-linux`, with the same names; debug variables `STYX_PISP_*` renamed `LEMNOS_PISP_*`; `styx.pisp.*` capability names renamed `lemnos.pisp.*`; untested on board since the move) |
 | the camera stack's `crates/rkisp` (d17de2ed): the uAPI layouts and bindgen headers, `Isp`, `ParamBuffer`, `isp32::{Variant, nodes}`, and the `device` layer over the vendor `rkisp` driver's nodes | the layouts in `lemnos-rkisp-sys` (headers in its `headers/`, `scripts/rkisp-bindgen.sh`); `lemnos-drivers-rkisp` for `Isp`, `ParamBuffer`, `isp32` and `device` (on `lemnos-v4l2`; untested on board) |
+| the camera stack's `kernel-modules/styx-sensor-bridge` (d17de2ed): the sensor bridge module (`styx_sensor_bridge.c/.h`), its device-tree overlays, Buildroot extension, install and spike scripts, `PROTOCOL.md`, and `kernel-env.sh` | `kernel-modules/lemnos-sensor-bridge` and `kernel-modules/kernel-env.sh` (GPL-2.0, out of tree). Renamed for Lemnos: the module, the platform driver, the device-tree compatible and properties, the overlays, the controls (the same ids; protocol version 1 unchanged) and the service unit. Untested on board. |
+| the camera stack's `crates/kernel/src/bus` (d17de2ed): `bus.rs`, `bus/bridge.rs`, `bus/bridge_sys.rs` | `lemnos-sensor-bridge`: the bridge client over `lemnos-v4l2` (`bridge_sys.rs` holds the ABI constants and has no `unsafe`). Untested on board. |
 | the camera stack's `crates/k230isp` (d17de2ed): the register map, `RegisterAccess`, the statistics register reads (`stats::{Raw, read_raw}`), and the `device` layer over the `vvcam-isp` ioctls | `lemnos-drivers-k230isp`; the ioctls are in `lemnos-linux-sys::vvcam_isp` (untested on board) |
 
 Later (not in this change): `crates/kernel/src/usbfs.rs` replaces `rusb` in the USB transport;
@@ -33,7 +35,7 @@ sensor drivers (BMI088, BMM150, INA2xx) become no_std drivers (done: `lemnos-dri
 
 Until the camera stack switches to `lemnos-v4l2` (block-move step 2): its own copies of the V4L2
 video nodes, the media controller, subdevices, V4L2 events and controls. Kept: dma-heaps,
-the `styx-sensor-bridge` protocol and `BridgePins`, `SubdevBus` / `KernelControl` (kernel
+`BridgePins` (the bridge's pins; the bridge protocol moved, see above), `SubdevBus` / `KernelControl` (kernel
 sensor drivers), sensor descriptions and `SensorDriver`, the role-name mapping of a sensor's
 power sequence (`SensorPins` becomes a thin camera trait over Lemnos pins, regulators and
 clocks), `LensDescription` / `LensSchedule` / `LensMotion` (frame timing), PDAF decoding,

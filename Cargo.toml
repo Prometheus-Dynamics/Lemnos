@@ -23,6 +23,7 @@ members = [
     "crates/lemnos-linux",
     "crates/lemnos-linux-sys",
     "crates/lemnos-v4l2",
+    "crates/lemnos-sensor-bridge",
     "crates/lemnos-hevc",
     "crates/lemnos-macros",
     "crates/lemnos-macros-tests",
@@ -95,6 +96,7 @@ lemnos-usb = { version = "2.0.1-dev", path = "crates/lemnos-usb" }
 lemnos-hevc = { version = "2.0.1-dev", path = "crates/lemnos-hevc", default-features = false }
 lemnos-linux-sys = { version = "2.0.1-dev", path = "crates/lemnos-linux-sys" }
 lemnos-v4l2 = { version = "2.0.1-dev", path = "crates/lemnos-v4l2" }
+lemnos-sensor-bridge = { version = "2.0.1-dev", path = "crates/lemnos-sensor-bridge" }
 lemnos-uevent = { version = "2.0.1-dev", path = "crates/lemnos-uevent" }
 lemnos-macros = { version = "2.0.1-dev", path = "crates/lemnos-macros" }
 lemnos-mock = { version = "2.0.1-dev", path = "crates/lemnos-mock" }

@@ -7,3 +7,4 @@ file	CHANGELOG.md	release history: names of past releases and their products
 file	docs/provenance.md	record of where generic code came from and the cross-repo migration
 file	scripts/check-names.sh	the checker's own product-name list
 file	scripts/check-names.allow	this allowlist
+token	bcm2712-rpi-cm5-cm5io	upstream Raspberry Pi kernel device tree name that the sensor bridge build applies overlays to (a file the kernel builds, not a product)
