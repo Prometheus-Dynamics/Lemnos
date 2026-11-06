@@ -116,6 +116,20 @@ Everything planned, in order. Execution is paused until the user starts it.
       first, `lemnos-gpu` only when a consumer needs it.
 - [ ] **7. Shared and static builds.** Both modes, with core, surface and wrapper for each
       dependency. The workspace's LTO test informs how shared gets built.
+- [x] **Consumer compatibility of items 5-7 and the IPC gaps** (decided 2026-11-06, before the
+      consumers switch). Each stays additive to what the consumers switch to now:
+  - Item 5: the module path is a second, opt-in backend of lemnos-drivers-pisp's device layer.
+    Stock V4L2 stays the default and its constructors, types and behaviour do not change.
+  - Item 6: the lease is advisory. RGA, VGLite and V4L2 users make no new calls, and an
+    unleased user keeps working; lemnos-gpu stays a new crate.
+  - Item 7: no crate or feature is renamed or split. lemnos-capi keeps `rlib`, `staticlib` and
+    `cdylib`, and `Client` keeps calling the exports directly, so static linking is unchanged.
+    The shared-form loader is a new opt-in feature. Any per-dependency core or surface is a new
+    crate beside the existing ones.
+  - IPC: protocol 1 stays byte for byte. Gaps 8, 11, 12, 15 and 16 are tightened or relaxed only
+    for frames the reference encoder never sends. Gap 9 cuts at a UTF-8 boundary instead, keeping
+    `encode`'s signature. Gap 17 is packaging. Gaps 10 (the opt sentinels) and 14 (no read id)
+    need a wire change, so they stay documented limits of protocol 1 and wait for a version 2.
 - [x] **8. `a_polled_400_hz_imu_delivers_each_sample_once` was intermittent.** Fixed: its rate floor
       is now 90 % of 400 for the time the service's threads had a CPU (their run-queue delay in
       `/proc/self/task/*/schedstat`), not a share set by a 10 ms wakeup probe's p99. Measured on two
