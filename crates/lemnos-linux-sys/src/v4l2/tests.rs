@@ -10,7 +10,7 @@ fn fourcc_packs_little_endian() {
 }
 
 #[test]
-fn single_and_multi_formats_encode_at_the_kernel_offsets() {
+fn single_and_multi_formats_encode_into_the_kernel_layout() {
     let mut m = PixFormatMplane {
         width: 640,
         height: 480,
@@ -29,11 +29,17 @@ fn single_and_multi_formats_encode_at_the_kernel_offsets() {
         bytes_per_line: 640,
     };
     let raw = encode(BufType::VideoOutputMplane, &Format::Multi(m)).unwrap();
-    assert_eq!(uapi::get_u32(&raw.fmt.0, 8), fourcc(b"NV12"));
-    assert_eq!(uapi::get_u32(&raw.fmt.0, 20), 307_200);
-    assert_eq!(uapi::get_u32(&raw.fmt.0, 24), 640);
-    assert_eq!(uapi::get_u32(&raw.fmt.0, 40), 153_600);
-    assert_eq!(raw.fmt.0[180], 2);
+    assert_eq!(raw.type_, BufType::VideoOutputMplane as u32);
+    // Packed structures: copy each field out before comparing it.
+    let mp = raw.pix_mp();
+    let (pixelformat, size0, size1, planes) = (
+        mp.pixelformat,
+        mp.plane_fmt[0].sizeimage,
+        mp.plane_fmt[1].sizeimage,
+        mp.num_planes,
+    );
+    assert_eq!(pixelformat, fourcc(b"NV12"));
+    assert_eq!((size0, size1, planes), (307_200, 153_600, 2));
     assert_eq!(decode(BufType::VideoOutputMplane, &raw), Format::Multi(m));
 
     let s = PixFormat {
@@ -46,7 +52,7 @@ fn single_and_multi_formats_encode_at_the_kernel_offsets() {
         colorspace: 0,
     };
     let raw = encode(BufType::VideoCapture, &Format::Single(s)).unwrap();
-    assert_eq!(uapi::get_u32(&raw.fmt.0, 16), 192);
+    assert_eq!(raw.pix().bytesperline, 192);
     assert_eq!(decode(BufType::VideoCapture, &raw), Format::Single(s));
 }
 

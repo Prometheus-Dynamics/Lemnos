@@ -8,8 +8,8 @@ use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use super::uapi::{
-    MEMORY_USERPTR, VIDEO_MAX_PLANES, v4l2_buffer, v4l2_exportbuffer, v4l2_ext_control,
-    v4l2_ext_control_value, v4l2_ext_controls, v4l2_m, v4l2_plane,
+    MEMORY_USERPTR, VIDEO_MAX_PLANES, VIDIOC_EXPBUF, v4l2_buffer, v4l2_exportbuffer,
+    v4l2_ext_control, v4l2_ext_control_value, v4l2_ext_controls, v4l2_m, v4l2_plane,
 };
 use crate::ioctl::{ioctl_ptr, iowr};
 
@@ -97,9 +97,7 @@ impl BufferIoctl {
 /// Exports one plane of an MMAP buffer as a dma-buf (`VIDIOC_EXPBUF`); `raw` says
 /// which plane and with which open flags.
 pub fn export_buffer(fd: BorrowedFd<'_>, raw: &mut v4l2_exportbuffer) -> io::Result<OwnedFd> {
-    const EXPBUF: u32 = iowr::<v4l2_exportbuffer>(b'V', 16);
-    // SAFETY: `EXPBUF` takes a `v4l2_exportbuffer`, which `raw` is.
-    unsafe { ioctl_ptr(fd, EXPBUF, std::ptr::from_mut(raw))? };
+    VIDIOC_EXPBUF.call(fd, raw)?;
     if raw.fd < 0 {
         return Err(io::Error::other("VIDIOC_EXPBUF returned no descriptor"));
     }

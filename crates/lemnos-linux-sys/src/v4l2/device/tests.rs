@@ -70,6 +70,8 @@ fn field_offsets_match_the_kernel_header() {
 #[test]
 fn request_numbers_match_the_kernel_header() {
     assert_eq!(VIDIOC_QUERYCAP.nr(), 0x8068_5600);
+    assert_eq!(VIDIOC_EXPBUF.nr(), 0xc040_5610);
+    assert_eq!(VIDIOC_QUERYCAP.nr(), 0x8068_5600);
     assert_eq!(VIDIOC_ENUM_FMT.nr(), 0xc040_5602);
     assert_eq!(VIDIOC_G_FMT.nr(), 0xc0d0_5604);
     assert_eq!(VIDIOC_S_FMT.nr(), 0xc0d0_5605);

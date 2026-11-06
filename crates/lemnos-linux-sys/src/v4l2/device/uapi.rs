@@ -537,6 +537,7 @@ ioctls! {
     VIDIOC_QUERYMENU: v4l2_querymenu = iowr(b'V', 37);
     VIDIOC_ENUM_FRAMESIZES: v4l2_frmsizeenum = iowr(b'V', 74);
     VIDIOC_ENUM_FRAMEINTERVALS: v4l2_frmivalenum = iowr(b'V', 75);
+    VIDIOC_EXPBUF: v4l2_exportbuffer = iowr(b'V', 16);
     VIDIOC_ENCODER_CMD: v4l2_encoder_cmd = iowr(b'V', 77);
     VIDIOC_DQEVENT: v4l2_event = ior(b'V', 89);
     VIDIOC_SUBSCRIBE_EVENT: v4l2_event_subscription = iow(b'V', 90);

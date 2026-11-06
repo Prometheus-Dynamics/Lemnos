@@ -6,22 +6,28 @@
 //! Single-planar and multi-planar queues share one set of functions; the
 //! [`BufType`] says which layout a call uses.
 
-use crate::ioctl::ioctl_ptr;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
 pub mod device;
 pub mod hevc;
-mod uapi;
 
-use uapi::Pod;
+use device::{
+    VIDEO_MAX_PLANES, VIDIOC_DECODER_CMD, VIDIOC_DQBUF, VIDIOC_DQEVENT, VIDIOC_ENCODER_CMD,
+    VIDIOC_ENUM_FMT, VIDIOC_G_CTRL, VIDIOC_G_FMT, VIDIOC_G_SELECTION, VIDIOC_QBUF, VIDIOC_QUERYBUF,
+    VIDIOC_QUERYCAP, VIDIOC_REQBUFS, VIDIOC_S_CTRL, VIDIOC_S_FMT, VIDIOC_S_SELECTION,
+    VIDIOC_STREAMOFF, VIDIOC_STREAMON, VIDIOC_SUBSCRIBE_EVENT, v4l2_buffer, v4l2_capability,
+    v4l2_control, v4l2_decoder_cmd, v4l2_encoder_cmd, v4l2_event, v4l2_event_subscription,
+    v4l2_exportbuffer, v4l2_fmtdesc, v4l2_format, v4l2_m, v4l2_pix_format, v4l2_pix_format_mplane,
+    v4l2_plane, v4l2_requestbuffers, v4l2_selection, zeroed,
+};
 
 /// The most planes one buffer has (`VIDEO_MAX_PLANES`).
-pub const MAX_PLANES: usize = 8;
+pub const MAX_PLANES: usize = VIDEO_MAX_PLANES;
 
 /// `V4L2_CAP_VIDEO_M2M_MPLANE`: a memory-to-memory device with multi-planar queues.
 pub const CAP_VIDEO_M2M_MPLANE: u32 = 0x0000_4000;
@@ -76,19 +82,15 @@ pub const CID_BG_COLOR: u32 = 0x0098_0923;
 /// Sets control `id` to `value` (`VIDIOC_S_CTRL`) and returns the value the
 /// driver kept (the kernel writes it back; a driver clamps or adjusts it).
 pub fn s_ctrl(fd: BorrowedFd<'_>, id: u32, value: i32) -> io::Result<i32> {
-    let mut raw = uapi::Control { id, value };
-    // SAFETY: `S_CTRL` takes a `v4l2_control`, which `raw` is; the kernel writes
-    // the kept value back into it.
-    unsafe { ioctl_ptr(fd, uapi::S_CTRL, &raw mut raw)? };
+    let mut raw = v4l2_control { id, value };
+    VIDIOC_S_CTRL.call(fd, &mut raw)?;
     Ok(raw.value)
 }
 
 /// Reads control `id` (`VIDIOC_G_CTRL`).
 pub fn g_ctrl(fd: BorrowedFd<'_>, id: u32) -> io::Result<i32> {
-    let mut raw = uapi::Control { id, value: 0 };
-    // SAFETY: `G_CTRL` takes a `v4l2_control`, which `raw` is; the kernel writes
-    // the value into it.
-    unsafe { ioctl_ptr(fd, uapi::G_CTRL, &raw mut raw)? };
+    let mut raw = v4l2_control { id, value: 0 };
+    VIDIOC_G_CTRL.call(fd, &mut raw)?;
     Ok(raw.value)
 }
 
@@ -106,41 +108,7 @@ pub const fn fourcc(code: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*code)
 }
 
-/// The kind of a buffer queue (`enum v4l2_buf_type`), the queues this module drives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum BufType {
-    /// Single-planar capture (the destination of a memory-to-memory device).
-    VideoCapture = 1,
-    /// Single-planar output (the source of a memory-to-memory device).
-    VideoOutput = 2,
-    /// Multi-planar capture.
-    VideoCaptureMplane = 9,
-    /// Multi-planar output.
-    VideoOutputMplane = 10,
-}
-
-impl BufType {
-    /// Whether the queue is multi-planar.
-    pub const fn is_multiplanar(self) -> bool {
-        matches!(self, Self::VideoCaptureMplane | Self::VideoOutputMplane)
-    }
-
-    /// Whether the queue is an output (source) queue.
-    pub const fn is_output(self) -> bool {
-        matches!(self, Self::VideoOutput | Self::VideoOutputMplane)
-    }
-}
-
-/// Where a queue's buffers live (`enum v4l2_memory`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum Memory {
-    /// Buffers the driver allocates and the caller maps (`mmap`).
-    Mmap = 1,
-    /// Buffers the caller passes as dma-bufs (`V4L2_MEMORY_DMABUF`).
-    Dmabuf = 4,
-}
+pub use device::{BufType, Memory};
 
 /// The capabilities of a device node (`struct v4l2_capability`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,18 +150,7 @@ impl Capability {
     }
 }
 
-/// A rectangle in pixels (`struct v4l2_rect`): an offset and a size.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Rect {
-    /// `left`: the x offset.
-    pub left: i32,
-    /// `top`: the y offset.
-    pub top: i32,
-    /// `width`.
-    pub width: u32,
-    /// `height`.
-    pub height: u32,
-}
+pub use device::Rect;
 
 /// Single-planar pixel format (`struct v4l2_pix_format`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -409,26 +366,13 @@ pub fn open_node(path: &Path) -> io::Result<File> {
 /// Makes a descriptor non-blocking (`O_NONBLOCK`), so a dequeue returns at once
 /// when nothing is ready. Already non-blocking descriptors are left alone.
 pub fn set_nonblocking(fd: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: `fcntl` with `F_GETFL` takes no pointer.
-    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if flags & libc::O_NONBLOCK != 0 {
-        return Ok(());
-    }
-    // SAFETY: `fcntl` with `F_SETFL` takes an integer flag set.
-    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    device::set_nonblocking(fd, true)
 }
 
 /// Queries the node's capabilities (`VIDIOC_QUERYCAP`).
 pub fn querycap(fd: BorrowedFd<'_>) -> io::Result<Capability> {
-    let mut raw = uapi::Capability::zeroed();
-    // SAFETY: `QUERYCAP` takes a `v4l2_capability`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::QUERYCAP, &raw mut raw)? };
+    let mut raw: v4l2_capability = zeroed();
+    VIDIOC_QUERYCAP.call(fd, &mut raw)?;
     Ok(Capability {
         driver: text(&raw.driver),
         card: text(&raw.card),
@@ -446,11 +390,10 @@ pub fn enum_fmt(
     buf_type: BufType,
     index: u32,
 ) -> io::Result<Option<FormatDesc>> {
-    let mut raw = uapi::FmtDesc::zeroed();
+    let mut raw: v4l2_fmtdesc = zeroed();
     raw.index = index;
-    raw.buf_type = buf_type as u32;
-    // SAFETY: `ENUM_FMT` takes a `v4l2_fmtdesc`, which `raw` is.
-    match unsafe { ioctl_ptr(fd, uapi::ENUM_FMT, &raw mut raw) } {
+    raw.type_ = buf_type as u32;
+    match VIDIOC_ENUM_FMT.call(fd, &mut raw) {
         Ok(_) => Ok(Some(FormatDesc {
             pixelformat: raw.pixelformat,
             flags: raw.flags,
@@ -461,66 +404,72 @@ pub fn enum_fmt(
     }
 }
 
-fn decode(buf_type: BufType, raw: &uapi::Format) -> Format {
-    let b = &raw.fmt.0;
+fn decode(buf_type: BufType, raw: &v4l2_format) -> Format {
     if buf_type.is_multiplanar() {
+        let m = raw.pix_mp();
+        let kernel_planes = m.plane_fmt;
         let mut planes = [PlaneFormat::default(); MAX_PLANES];
-        for (i, plane) in planes.iter_mut().enumerate() {
-            let at = 20 + 20 * i;
-            *plane = PlaneFormat {
-                size_image: uapi::get_u32(b, at),
-                bytes_per_line: uapi::get_u32(b, at + 4),
+        for (dst, src) in planes.iter_mut().zip(kernel_planes.iter()) {
+            *dst = PlaneFormat {
+                size_image: src.sizeimage,
+                bytes_per_line: src.bytesperline,
             };
         }
         Format::Multi(PixFormatMplane {
-            width: uapi::get_u32(b, 0),
-            height: uapi::get_u32(b, 4),
-            pixelformat: uapi::get_u32(b, 8),
-            field: uapi::get_u32(b, 12),
-            colorspace: uapi::get_u32(b, 16),
+            width: m.width,
+            height: m.height,
+            pixelformat: m.pixelformat,
+            field: m.field,
+            colorspace: m.colorspace,
             planes,
-            num_planes: u32::from(b[180]),
+            num_planes: u32::from(m.num_planes),
         })
     } else {
+        let p = raw.pix();
         Format::Single(PixFormat {
-            width: uapi::get_u32(b, 0),
-            height: uapi::get_u32(b, 4),
-            pixelformat: uapi::get_u32(b, 8),
-            field: uapi::get_u32(b, 12),
-            bytes_per_line: uapi::get_u32(b, 16),
-            size_image: uapi::get_u32(b, 20),
-            colorspace: uapi::get_u32(b, 24),
+            width: p.width,
+            height: p.height,
+            pixelformat: p.pixelformat,
+            field: p.field,
+            bytes_per_line: p.bytesperline,
+            size_image: p.sizeimage,
+            colorspace: p.colorspace,
         })
     }
 }
 
-fn encode(buf_type: BufType, format: &Format) -> io::Result<uapi::Format> {
-    let mut raw = uapi::Format::zeroed();
-    raw.buf_type = buf_type as u32;
-    let b = &mut raw.fmt.0;
+fn encode(buf_type: BufType, format: &Format) -> io::Result<v4l2_format> {
+    let mut raw: v4l2_format = zeroed();
+    raw.type_ = buf_type as u32;
     match (format, buf_type.is_multiplanar()) {
         (Format::Single(p), false) => {
-            uapi::put_u32(b, 0, p.width);
-            uapi::put_u32(b, 4, p.height);
-            uapi::put_u32(b, 8, p.pixelformat);
-            uapi::put_u32(b, 12, p.field);
-            uapi::put_u32(b, 16, p.bytes_per_line);
-            uapi::put_u32(b, 20, p.size_image);
-            uapi::put_u32(b, 24, p.colorspace);
+            raw.fmt.pix = v4l2_pix_format {
+                width: p.width,
+                height: p.height,
+                pixelformat: p.pixelformat,
+                field: p.field,
+                bytesperline: p.bytes_per_line,
+                sizeimage: p.size_image,
+                colorspace: p.colorspace,
+                ..Default::default()
+            };
         }
         (Format::Multi(m), true) => {
             checked_planes(m.num_planes)?;
-            uapi::put_u32(b, 0, m.width);
-            uapi::put_u32(b, 4, m.height);
-            uapi::put_u32(b, 8, m.pixelformat);
-            uapi::put_u32(b, 12, m.field);
-            uapi::put_u32(b, 16, m.colorspace);
-            for (i, p) in m.planes.iter().enumerate() {
-                let at = 20 + 20 * i;
-                uapi::put_u32(b, at, p.size_image);
-                uapi::put_u32(b, at + 4, p.bytes_per_line);
+            let mut mp = v4l2_pix_format_mplane {
+                width: m.width,
+                height: m.height,
+                pixelformat: m.pixelformat,
+                field: m.field,
+                colorspace: m.colorspace,
+                num_planes: m.num_planes as u8,
+                ..Default::default()
+            };
+            for (dst, src) in mp.plane_fmt.iter_mut().zip(m.planes.iter()) {
+                dst.sizeimage = src.size_image;
+                dst.bytesperline = src.bytes_per_line;
             }
-            b[180] = m.num_planes as u8;
+            raw.fmt.pix_mp = mp;
         }
         _ => {
             return Err(io::Error::new(
@@ -534,10 +483,9 @@ fn encode(buf_type: BufType, format: &Format) -> io::Result<uapi::Format> {
 
 /// Reads a queue's current format (`VIDIOC_G_FMT`).
 pub fn g_fmt(fd: BorrowedFd<'_>, buf_type: BufType) -> io::Result<Format> {
-    let mut raw = uapi::Format::zeroed();
-    raw.buf_type = buf_type as u32;
-    // SAFETY: `G_FMT` takes a `v4l2_format`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::G_FMT, &raw mut raw)? };
+    let mut raw: v4l2_format = zeroed();
+    raw.type_ = buf_type as u32;
+    VIDIOC_G_FMT.call(fd, &mut raw)?;
     Ok(decode(buf_type, &raw))
 }
 
@@ -546,20 +494,18 @@ pub fn g_fmt(fd: BorrowedFd<'_>, buf_type: BufType) -> io::Result<Format> {
 /// `buf_type`'s layout.
 pub fn s_fmt(fd: BorrowedFd<'_>, buf_type: BufType, format: &Format) -> io::Result<Format> {
     let mut raw = encode(buf_type, format)?;
-    // SAFETY: `S_FMT` takes a `v4l2_format`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::S_FMT, &raw mut raw)? };
+    VIDIOC_S_FMT.call(fd, &mut raw)?;
     Ok(decode(buf_type, &raw))
 }
 
 /// Reads a queue's selection rectangle for `target` (`VIDIOC_G_SELECTION`),
 /// e.g. [`SEL_TGT_CROP`].
 pub fn g_selection(fd: BorrowedFd<'_>, buf_type: BufType, target: u32) -> io::Result<Rect> {
-    let mut raw = uapi::Selection::zeroed();
-    raw.buf_type = buf_type as u32;
+    let mut raw: v4l2_selection = zeroed();
+    raw.type_ = buf_type as u32;
     raw.target = target;
-    // SAFETY: `G_SELECTION` takes a `v4l2_selection`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::G_SELECTION, &raw mut raw)? };
-    Ok(rect_of(&raw))
+    VIDIOC_G_SELECTION.call(fd, &mut raw)?;
+    Ok(raw.r)
 }
 
 /// Sets a queue's selection rectangle for `target` (`VIDIOC_S_SELECTION`) and
@@ -571,25 +517,12 @@ pub fn s_selection(
     target: u32,
     rect: Rect,
 ) -> io::Result<Rect> {
-    let mut raw = uapi::Selection::zeroed();
-    raw.buf_type = buf_type as u32;
+    let mut raw: v4l2_selection = zeroed();
+    raw.type_ = buf_type as u32;
     raw.target = target;
-    raw.left = rect.left;
-    raw.top = rect.top;
-    raw.width = rect.width;
-    raw.height = rect.height;
-    // SAFETY: `S_SELECTION` takes a `v4l2_selection`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::S_SELECTION, &raw mut raw)? };
-    Ok(rect_of(&raw))
-}
-
-fn rect_of(raw: &uapi::Selection) -> Rect {
-    Rect {
-        left: raw.left,
-        top: raw.top,
-        width: raw.width,
-        height: raw.height,
-    }
+    raw.r = rect;
+    VIDIOC_S_SELECTION.call(fd, &mut raw)?;
+    Ok(raw.r)
 }
 
 /// A control's value in an ext-controls call: a scalar, or a compound payload
@@ -620,45 +553,36 @@ pub fn s_ext_ctrls(
     request: Option<BorrowedFd<'_>>,
     controls: &[ExtControl<'_>],
 ) -> io::Result<()> {
-    let mut raw: Vec<uapi::ExtControl> = controls
+    // The kernel only reads a set's payload, but the device layer takes its
+    // payloads as exclusive slices, so each one is copied here.
+    let mut payloads: Vec<Vec<u8>> = controls
         .iter()
         .map(|c| match c.value {
-            ExtValue::Int(v) => uapi::ExtControl {
-                id: c.id,
-                size: 0,
-                reserved: 0,
-                value: u64::from(v as u32),
-            },
-            ExtValue::Bytes(bytes) => uapi::ExtControl {
-                id: c.id,
-                size: bytes.len() as u32,
-                reserved: 0,
-                value: bytes.as_ptr() as u64,
-            },
+            ExtValue::Int(_) => Vec::new(),
+            ExtValue::Bytes(bytes) => bytes.to_vec(),
         })
         .collect();
-    let mut arg = uapi::ExtControls {
-        which: if request.is_some() {
-            CTRL_WHICH_REQUEST_VAL
-        } else {
-            0
-        },
-        count: raw.len() as u32,
-        error_idx: 0,
-        request_fd: request.map_or(-1, |r| r.as_raw_fd()),
-        reserved: 0,
-        controls: raw.as_mut_ptr(),
+    let mut raw: Vec<device::ExtControl<'_>> = controls
+        .iter()
+        .zip(payloads.iter_mut())
+        .map(|(c, payload)| match c.value {
+            ExtValue::Int(v) => device::ExtControl::value(c.id, v),
+            ExtValue::Bytes(_) => device::ExtControl::payload(c.id, payload.as_mut_slice()),
+        })
+        .collect();
+    let which = if request.is_some() {
+        CTRL_WHICH_REQUEST_VAL
+    } else {
+        0
     };
-    // SAFETY: `S_EXT_CTRLS` takes a `v4l2_ext_controls` whose `controls` array
-    // (`raw`) and any payload bytes (borrowed by `controls`) stay alive and
-    // unmoved for the call; the kernel reads them and writes only `error_idx`.
-    match unsafe { ioctl_ptr(fd, uapi::S_EXT_CTRLS, &raw mut arg) } {
-        Ok(_) => Ok(()),
-        Err(e) => Err(io::Error::new(
-            e.kind(),
-            format!("S_EXT_CTRLS refused control {}: {e}", arg.error_idx),
-        )),
-    }
+    device::VIDIOC_S_EXT_CTRLS
+        .call(fd, which, request, &mut raw)
+        .map_err(|e| {
+            io::Error::new(
+                e.source.kind(),
+                format!("S_EXT_CTRLS refused control {}: {}", e.error_idx, e.source),
+            )
+        })
 }
 
 /// Asks for `count` buffers of `memory` on a queue (`VIDIOC_REQBUFS`). Asking
@@ -669,12 +593,11 @@ pub fn reqbufs(
     memory: Memory,
     count: u32,
 ) -> io::Result<Requested> {
-    let mut raw = uapi::RequestBuffers::zeroed();
+    let mut raw: v4l2_requestbuffers = zeroed();
     raw.count = count;
-    raw.buf_type = buf_type as u32;
+    raw.type_ = buf_type as u32;
     raw.memory = memory as u32;
-    // SAFETY: `REQBUFS` takes a `v4l2_requestbuffers`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::REQBUFS, &raw mut raw)? };
+    VIDIOC_REQBUFS.call(fd, &mut raw)?;
     Ok(Requested {
         count: raw.count,
         capabilities: raw.capabilities,
@@ -689,9 +612,9 @@ pub fn querybuf(
     index: u32,
     num_planes: u32,
 ) -> io::Result<BufferInfo> {
-    let mut raw = uapi::Buffer::zeroed();
+    let mut raw: v4l2_buffer = zeroed();
     raw.index = index;
-    raw.buf_type = buf_type as u32;
+    raw.type_ = buf_type as u32;
     raw.memory = Memory::Mmap as u32;
     let mut info = BufferInfo {
         planes: [PlaneInfo::default(); MAX_PLANES],
@@ -699,31 +622,20 @@ pub fn querybuf(
     };
     if buf_type.is_multiplanar() {
         let n = checked_planes(num_planes)?;
-        let mut planes = [uapi::Plane::zeroed(); MAX_PLANES];
-        raw.length = n as u32;
-        raw.m = uapi::Memory {
-            planes: planes.as_mut_ptr(),
-        };
-        // SAFETY: `QUERYBUF` writes `length` planes into the array `raw.m`
-        // points at, which lives until the call returns.
-        unsafe { ioctl_ptr(fd, uapi::QUERYBUF, &raw mut raw)? };
+        let mut planes = [zeroed::<v4l2_plane>(); MAX_PLANES];
+        VIDIOC_QUERYBUF.call(fd, &mut raw, &mut planes[..n])?;
         info.num_planes = n as u32;
         for (dst, src) in info.planes.iter_mut().zip(&planes).take(n) {
             *dst = PlaneInfo {
                 length: src.length,
-                // SAFETY: the kernel filled the plane's memory member for an
-                // MMAP buffer, which is the offset.
-                offset: unsafe { src.m.offset },
+                offset: src.offset(),
             };
         }
     } else {
-        // SAFETY: `QUERYBUF` writes a `v4l2_buffer`, which `raw` is.
-        unsafe { ioctl_ptr(fd, uapi::QUERYBUF, &raw mut raw)? };
+        VIDIOC_QUERYBUF.call(fd, &mut raw, &mut [])?;
         info.planes[0] = PlaneInfo {
             length: raw.length,
-            // SAFETY: the kernel filled the memory member for an MMAP buffer,
-            // which is the offset.
-            offset: unsafe { raw.m.offset },
+            offset: raw.offset(),
         };
     }
     Ok(info)
@@ -737,16 +649,12 @@ pub fn expbuf(
     index: u32,
     plane: u32,
 ) -> io::Result<OwnedFd> {
-    let mut raw = uapi::ExportBuffer::zeroed();
-    raw.buf_type = buf_type as u32;
+    let mut raw: v4l2_exportbuffer = zeroed();
+    raw.type_ = buf_type as u32;
     raw.index = index;
     raw.plane = plane;
     raw.flags = (libc::O_CLOEXEC | libc::O_RDWR) as u32;
-    // SAFETY: `EXPBUF` takes a `v4l2_exportbuffer`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::EXPBUF, &raw mut raw)? };
-    // SAFETY: a successful export returns a new dma-buf descriptor, which no
-    // other owner has.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw.fd as RawFd) })
+    device::export_buffer(fd, &mut raw)
 }
 
 /// Queues buffer `index` with its planes (`VIDIOC_QBUF`). `timestamp` goes with
@@ -785,6 +693,14 @@ pub fn qbuf_in_request(
     )
 }
 
+/// The `m` member of a plane or buffer for one piece of memory.
+fn memory_of(memory: PlaneMemory<'_>) -> v4l2_m {
+    match memory {
+        PlaneMemory::Mmap => v4l2_m { offset: 0 },
+        PlaneMemory::Dmabuf(fd) => v4l2_m { fd: fd.as_raw_fd() },
+    }
+}
+
 fn qbuf_with(
     fd: BorrowedFd<'_>,
     buf_type: BufType,
@@ -794,9 +710,9 @@ fn qbuf_with(
     timestamp: Duration,
     request: Option<BorrowedFd<'_>>,
 ) -> io::Result<()> {
-    let mut raw = uapi::Buffer::zeroed();
+    let mut raw: v4l2_buffer = zeroed();
     raw.index = index;
-    raw.buf_type = buf_type as u32;
+    raw.type_ = buf_type as u32;
     raw.memory = memory as u32;
     raw.timestamp = timeval(timestamp);
     if let Some(request) = request {
@@ -804,24 +720,15 @@ fn qbuf_with(
         raw.request_fd = request.as_raw_fd();
     }
     if buf_type.is_multiplanar() {
-        checked_planes(planes.len() as u32)?;
-        let mut kernel_planes = [uapi::Plane::zeroed(); MAX_PLANES];
+        let n = checked_planes(planes.len() as u32)?;
+        let mut kernel_planes = [zeroed::<v4l2_plane>(); MAX_PLANES];
         for (k, p) in kernel_planes.iter_mut().zip(planes) {
             k.length = p.length;
             k.bytesused = p.bytes_used;
             k.data_offset = p.data_offset;
-            k.m = match p.memory {
-                PlaneMemory::Mmap => uapi::Memory { offset: 0 },
-                PlaneMemory::Dmabuf(fd) => uapi::Memory { fd: fd.as_raw_fd() },
-            };
+            k.m = memory_of(p.memory);
         }
-        raw.length = planes.len() as u32;
-        raw.m = uapi::Memory {
-            planes: kernel_planes.as_mut_ptr(),
-        };
-        // SAFETY: `QBUF` reads `length` planes from the array `raw.m` points at,
-        // which lives until the call returns.
-        unsafe { ioctl_ptr(fd, uapi::QBUF, &raw mut raw)? };
+        VIDIOC_QBUF.call(fd, &mut raw, &mut kernel_planes[..n])?;
     } else {
         let [p] = planes else {
             return Err(io::Error::new(
@@ -837,12 +744,8 @@ fn qbuf_with(
         }
         raw.length = p.length;
         raw.bytesused = p.bytes_used;
-        raw.m = match p.memory {
-            PlaneMemory::Mmap => uapi::Memory { offset: 0 },
-            PlaneMemory::Dmabuf(fd) => uapi::Memory { fd: fd.as_raw_fd() },
-        };
-        // SAFETY: `QBUF` takes a `v4l2_buffer`, which `raw` is.
-        unsafe { ioctl_ptr(fd, uapi::QBUF, &raw mut raw)? };
+        raw.m = memory_of(p.memory);
+        VIDIOC_QBUF.call(fd, &mut raw, &mut [])?;
     }
     Ok(())
 }
@@ -856,24 +759,18 @@ pub fn dqbuf(
     memory: Memory,
     num_planes: u32,
 ) -> io::Result<Option<Dequeued>> {
-    let mut raw = uapi::Buffer::zeroed();
-    raw.buf_type = buf_type as u32;
+    let mut raw: v4l2_buffer = zeroed();
+    raw.type_ = buf_type as u32;
     raw.memory = memory as u32;
-    let mut kernel_planes = [uapi::Plane::zeroed(); MAX_PLANES];
-    let n = if buf_type.is_multiplanar() {
+    let mut kernel_planes = [zeroed::<v4l2_plane>(); MAX_PLANES];
+    let (n, result) = if buf_type.is_multiplanar() {
         let n = checked_planes(num_planes)?;
-        raw.length = n as u32;
-        raw.m = uapi::Memory {
-            planes: kernel_planes.as_mut_ptr(),
-        };
-        n
+        (n, VIDIOC_DQBUF.call(fd, &mut raw, &mut kernel_planes[..n]))
     } else {
-        1
+        (1, VIDIOC_DQBUF.call(fd, &mut raw, &mut []))
     };
-    // SAFETY: `DQBUF` writes a `v4l2_buffer`, and for a multi-planar queue
-    // `length` planes into the array `raw.m` points at; both live for the call.
-    match unsafe { ioctl_ptr(fd, uapi::DQBUF, &raw mut raw) } {
-        Ok(_) => {}
+    match result {
+        Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
         // EPIPE: the last buffer of a drained stream has been dequeued (its
         // LAST flag said so), and nothing more is coming. Not an error.
@@ -900,38 +797,34 @@ pub fn dqbuf(
 
 /// Starts streaming a queue (`VIDIOC_STREAMON`).
 pub fn streamon(fd: BorrowedFd<'_>, buf_type: BufType) -> io::Result<()> {
-    let mut t = buf_type as i32;
-    // SAFETY: `STREAMON` takes a pointer to the queue type as an `int`.
-    unsafe { ioctl_ptr(fd, uapi::STREAMON, &raw mut t)? };
+    let mut t = buf_type as libc::c_int;
+    VIDIOC_STREAMON.call(fd, &mut t)?;
     Ok(())
 }
 
 /// Stops streaming a queue (`VIDIOC_STREAMOFF`); the device gives every queued
 /// buffer back.
 pub fn streamoff(fd: BorrowedFd<'_>, buf_type: BufType) -> io::Result<()> {
-    let mut t = buf_type as i32;
-    // SAFETY: `STREAMOFF` takes a pointer to the queue type as an `int`.
-    unsafe { ioctl_ptr(fd, uapi::STREAMOFF, &raw mut t)? };
+    let mut t = buf_type as libc::c_int;
+    VIDIOC_STREAMOFF.call(fd, &mut t)?;
     Ok(())
 }
 
 /// Sends an encoder command (`VIDIOC_ENCODER_CMD`), e.g. [`ENC_CMD_STOP`].
 pub fn encoder_cmd(fd: BorrowedFd<'_>, cmd: u32, flags: u32) -> io::Result<()> {
-    let mut raw = uapi::EncoderCmd::zeroed();
+    let mut raw: v4l2_encoder_cmd = zeroed();
     raw.cmd = cmd;
     raw.flags = flags;
-    // SAFETY: `ENCODER_CMD` takes a `v4l2_encoder_cmd`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::ENCODER_CMD, &raw mut raw)? };
+    VIDIOC_ENCODER_CMD.call(fd, &mut raw)?;
     Ok(())
 }
 
 /// Sends a decoder command (`VIDIOC_DECODER_CMD`), e.g. [`DEC_CMD_STOP`].
 pub fn decoder_cmd(fd: BorrowedFd<'_>, cmd: u32, flags: u32) -> io::Result<()> {
-    let mut raw = uapi::DecoderCmd::zeroed();
+    let mut raw: v4l2_decoder_cmd = zeroed();
     raw.cmd = cmd;
     raw.flags = flags;
-    // SAFETY: `DECODER_CMD` takes a `v4l2_decoder_cmd`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::DECODER_CMD, &raw mut raw)? };
+    VIDIOC_DECODER_CMD.call(fd, &mut raw)?;
     Ok(())
 }
 
@@ -939,11 +832,10 @@ pub fn decoder_cmd(fd: BorrowedFd<'_>, cmd: u32, flags: u32) -> io::Result<()> {
 /// [`EVENT_EOS`]. Control events take the control's id in `id` (0 for all of
 /// them); other events take 0.
 pub fn subscribe_event(fd: BorrowedFd<'_>, event_type: u32, id: u32) -> io::Result<()> {
-    let mut raw = uapi::Subscription::zeroed();
-    raw.event_type = event_type;
+    let mut raw: v4l2_event_subscription = zeroed();
+    raw.type_ = event_type;
     raw.id = id;
-    // SAFETY: `SUBSCRIBE_EVENT` takes a `v4l2_event_subscription`, which `raw` is.
-    unsafe { ioctl_ptr(fd, uapi::SUBSCRIBE_EVENT, &raw mut raw)? };
+    VIDIOC_SUBSCRIBE_EVENT.call(fd, &mut raw)?;
     Ok(())
 }
 
@@ -951,22 +843,22 @@ pub fn subscribe_event(fd: BorrowedFd<'_>, event_type: u32, id: u32) -> io::Resu
 /// none: the kernel answers ENOENT for an empty queue of a non-blocking
 /// descriptor.
 pub fn dqevent(fd: BorrowedFd<'_>) -> io::Result<Option<Event>> {
-    let mut raw = uapi::Event::zeroed();
-    // SAFETY: `DQEVENT` writes a `v4l2_event`, which `raw` is.
-    match unsafe { ioctl_ptr(fd, uapi::DQEVENT, &raw mut raw) } {
+    let mut raw: v4l2_event = zeroed();
+    match VIDIOC_DQEVENT.call(fd, &mut raw) {
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound || e.kind() == io::ErrorKind::WouldBlock => {
             return Ok(None);
         }
         Err(e) => return Err(e),
     }
+    let p = raw.u.0;
     Ok(Some(Event {
-        event_type: raw.event_type,
+        event_type: raw.type_,
         id: raw.id,
         pending: raw.pending,
         sequence: raw.sequence,
-        changes: uapi::get_u32(&raw.u.0, 0),
-        timestamp: duration_of(raw.timestamp[0], raw.timestamp[1], 1),
+        changes: u32::from_ne_bytes([p[0], p[1], p[2], p[3]]),
+        timestamp: duration_of(raw.timestamp.tv_sec, raw.timestamp.tv_nsec, 1),
     }))
 }
 

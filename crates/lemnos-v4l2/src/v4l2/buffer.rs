@@ -96,28 +96,7 @@ impl<'a, T> IntoIterator for &'a Planes<T> {
     }
 }
 
-/// How buffer memory is provided (`enum v4l2_memory`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u32)]
-pub enum Memory {
-    /// Driver-allocated buffers, mapped with `mmap` (and exportable as dma-bufs).
-    Mmap = 1,
-    /// User pointers.
-    UserPtr = 2,
-    /// Imported dma-buf file descriptors.
-    DmaBuf = 4,
-}
-
-impl Memory {
-    fn from_raw(v: u32) -> Option<Self> {
-        match v {
-            1 => Some(Memory::Mmap),
-            2 => Some(Memory::UserPtr),
-            4 => Some(Memory::DmaBuf),
-            _ => None,
-        }
-    }
-}
+pub use lemnos_linux_sys::v4l2::device::Memory;
 
 flags! {
     /// What a queue supports (`V4L2_BUF_CAP_*`), reported by `VIDIOC_REQBUFS`.

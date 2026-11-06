@@ -55,7 +55,7 @@ fn queue_types_follow_the_format_layout_and_direction() {
 fn indices_and_planes_are_checked_before_the_device_sees_them() {
     let file = std::fs::File::open("/dev/null").unwrap();
     let fd = file.as_fd();
-    let mut q = queue(2, Memory::Dmabuf, 1);
+    let mut q = queue(2, Memory::DmaBuf, 1);
     let plane = [dmabuf_plane(fd, 16)];
     assert!(
         q.check_queueable(2, &plane).is_err(),
@@ -191,8 +191,8 @@ fn vim2m_reads_dmabufs_in_place() {
         return;
     };
     let mut s =
-        M2mSession::open(&path, rgb_setup(Memory::Dmabuf), rgb_setup(Memory::Mmap)).unwrap();
-    assert_eq!(s.output_memory(), Memory::Dmabuf);
+        M2mSession::open(&path, rgb_setup(Memory::DmaBuf), rgb_setup(Memory::Mmap)).unwrap();
+    assert_eq!(s.output_memory(), Memory::DmaBuf);
     let mmap = [QueuePlane {
         memory: PlaneMemory::Mmap,
         length: 0,

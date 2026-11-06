@@ -39,7 +39,7 @@ s.stream_off()?;                                  // every buffer comes back
   `VIDIOC_S_SELECTION` with `V4L2_SEL_TGT_CROP`, sent after `S_FMT` and before `REQBUFS`.
   The rectangle the driver kept is `output_crop()` / `capture_crop()`. A device that does not
   crop that queue refuses the open with the driver's error. The format's variant (`Single` or
-  `Multi`) and direction give the `VIDIOC` buffer type. `Memory::Mmap` or `Memory::Dmabuf`.
+  `Multi`) and direction give the `VIDIOC` buffer type. `Memory::Mmap` or `Memory::DmaBuf`.
   Userptr is not supported.
 - Order at open: the output (source) format, then the capture (coded) format, then the
   capture format is read back, then `REQBUFS` on each queue. The stateful order: an encoder
@@ -228,7 +228,7 @@ binding):
 - Per-slot holds (`M2mSession<H>`): not needed. The kernel keeps the dma-buf while it is
   queued. A consumer that wants its frame object to live until the device gives the buffer
   back keeps its own record per index: `queue_*` then `dequeue_*` marks when it may go.
-- `open_importing` becomes `QueueSetup { memory: Memory::Dmabuf, .. }` on the source;
+- `open_importing` becomes `QueueSetup { memory: Memory::DmaBuf, .. }` on the source;
   `push_dmabuf` becomes `queue_output` with `PlaneMemory::Dmabuf`; `push` and `push_image`
   (copies into MMAP buffers) become `output_plane_mut` plus `queue_output`.
 - `Span` and `ImageRows` (the colour-plane layout helpers) are image layout, not a session

@@ -64,7 +64,7 @@ impl Session {
         let mplane = cap.is_m2m_multiplanar();
         let mem = match memory {
             Memory::Mmap => lv::Memory::Mmap,
-            Memory::Dmabuf => lv::Memory::Dmabuf,
+            Memory::Dmabuf => lv::Memory::DmaBuf,
         };
         let setup = |layout: Layout, crop: Option<Rect>| QueueSetup {
             format: format(layout, mplane),

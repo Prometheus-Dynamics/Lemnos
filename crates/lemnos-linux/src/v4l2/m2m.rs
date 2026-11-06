@@ -136,6 +136,11 @@ struct Queue {
 impl Queue {
     /// Sets the queue's format (and crop). No buffers yet: see [`Queue::allocate`].
     fn set_format(fd: BorrowedFd<'_>, setup: &QueueSetup, output: bool) -> io::Result<Self> {
+        if setup.memory == Memory::UserPtr {
+            return Err(invalid(
+                "user-pointer buffers are not supported: use Memory::Mmap or Memory::DmaBuf".into(),
+            ));
+        }
         let buf_type = queue_type(&setup.format, output);
         let format = sys::s_fmt(fd, buf_type, &setup.format)?;
         if format.num_planes() != setup.format.num_planes() {
