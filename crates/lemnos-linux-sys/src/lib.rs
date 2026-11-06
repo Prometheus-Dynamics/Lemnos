@@ -34,6 +34,7 @@ pub mod usbfs;
 pub mod v3d;
 pub mod v4l2;
 pub mod vg_lite;
+pub mod vvcam_isp;
 
 pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};
 

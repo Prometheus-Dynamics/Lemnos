@@ -42,6 +42,9 @@ members = [
     "crates/lemnos-drivers-rga",
     "crates/lemnos-drivers-vglite",
     "crates/lemnos-drivers-pisp",
+    "crates/lemnos-drivers-rkisp",
+    "crates/lemnos-rkisp-sys",
+    "crates/lemnos-drivers-k230isp",
     "crates/lemnos-mock",
     "crates/lemnos-usb",
 ]
@@ -84,6 +87,9 @@ lemnos-drivers-ws2812 = { version = "2.0.1-dev", path = "crates/lemnos-drivers-w
 lemnos-drivers-rga = { version = "2.0.1-dev", path = "crates/lemnos-drivers-rga" }
 lemnos-drivers-vglite = { version = "2.0.1-dev", path = "crates/lemnos-drivers-vglite" }
 lemnos-drivers-pisp = { version = "2.0.1-dev", path = "crates/lemnos-drivers-pisp", default-features = false }
+lemnos-drivers-rkisp = { version = "2.0.1-dev", path = "crates/lemnos-drivers-rkisp", default-features = false }
+lemnos-rkisp-sys = { version = "2.0.1-dev", path = "crates/lemnos-rkisp-sys" }
+lemnos-drivers-k230isp = { version = "2.0.1-dev", path = "crates/lemnos-drivers-k230isp", default-features = false }
 lemnos-linux = { version = "2.0.1-dev", path = "crates/lemnos-linux", default-features = false }
 lemnos-usb = { version = "2.0.1-dev", path = "crates/lemnos-usb" }
 lemnos-hevc = { version = "2.0.1-dev", path = "crates/lemnos-hevc", default-features = false }

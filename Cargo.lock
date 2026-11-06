@@ -539,6 +539,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-k230isp"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+]
+
+[[package]]
 name = "lemnos-drivers-linux"
 version = "2.0.1-dev"
 dependencies = [
@@ -580,6 +587,14 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux",
  "lemnos-linux-sys",
+ "lemnos-v4l2",
+]
+
+[[package]]
+name = "lemnos-drivers-rkisp"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-rkisp-sys",
  "lemnos-v4l2",
 ]
 
@@ -758,6 +773,13 @@ dependencies = [
  "lemnos-driver-manifest",
  "lemnos-driver-sdk",
  "thiserror",
+]
+
+[[package]]
+name = "lemnos-rkisp-sys"
+version = "2.0.1-dev"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]

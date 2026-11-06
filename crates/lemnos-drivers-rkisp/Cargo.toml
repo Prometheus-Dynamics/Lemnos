@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-drivers-rkisp"
+version.workspace = true
+edition.workspace = true
+description = "Rockchip ISP21 (RK3566/RK3568), ISP30 (RK3588/RK3588S) and ISP32 (RV1106, RK3562) from Rust: the vendor kernel's parameter and statistics uAPI layouts, the ISP each SoC has, and, with the device feature, the vendor rkisp driver's nodes on lemnos-v4l2."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+# Devicetree detection (`Isp::detect`) from std. Without it the crate is `no_std` + `alloc`.
+std = []
+# Drive the vendor `rkisp` driver's nodes through `lemnos-v4l2` (Linux only).
+device = ["std", "dep:lemnos-v4l2"]
+
+[dependencies]
+lemnos-rkisp-sys.workspace = true
+lemnos-v4l2 = { workspace = true, optional = true }
