@@ -57,9 +57,20 @@ Everything planned, in order. Execution is paused until the user starts it.
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:
       stock V4L2 stays as the fallback, and other boards, the simulator and other kernels stay on
       stock interfaces. No patches on other people's code; our own modules are fine.
-  - [ ] The PiSP back end is the first block. First task: answer IOMMU coverage,
+  - [x] The PiSP back end is the first block. First task: answer IOMMU coverage,
         interrupt-to-user-space latency, clocks, power and reset, and the GPL position of porting
-        from stock drivers.
+        from stock drivers. Answered from the kernel sources in
+        [docs/kernel-module.md](docs/kernel-module.md):
+        - The IOMMU translates only its 40-44 GiB aperture and passes lower addresses (all of
+          DRAM) straight through, so the module must write every address the block uses. No
+          register mapping to user space for this block.
+        - The clock is the firmware's ISP clock and is marked critical. There is no power domain
+          and no reset reachable from Linux, so a stuck block still needs a reboot.
+        - The module is GPL-2.0 and may port from the stock driver. User space uses only the
+          uAPI headers (syscall note) and libpisp (BSD-2-Clause).
+        - Latency is unmeasured.
+  - [ ] PiSP back end on the board: interrupt-to-user-space latency, the two soft-recovery tries,
+        and whether an IOMMU violation shows in the block's status.
   - [ ] Then the receiver, the sensor over i2c-dev, and a mock backend for the simulator.
   - [ ] When the module lands, reword "Lemnos is user-space hardware access" in
         [docs/dma.md](docs/dma.md) and "no kernel modules" in
