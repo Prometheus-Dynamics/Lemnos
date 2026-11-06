@@ -64,13 +64,15 @@ fn service_run_delay_us() -> Option<u64> {
     found.then_some(total)
 }
 
-/// The rate floor for a nominal rate, tied to the host's wakeup p99 (as the
-/// other bounds in this file are): a read that runs late past its sample's
-/// margin loses the sample, and the p99 says how late reads run, so that
-/// share of the nominal rate is allowed (at most half of it).
-fn rate_floor(nominal_hz: f64, period_us: i64, host_p99_us: i64) -> f64 {
-    let share = (host_p99_us as f64 / period_us as f64).min(0.5);
-    nominal_hz * (1.0 - share)
+/// The rate floor for `nominal_hz` over a 3 s window in which the service's
+/// threads waited `waited_us` for a CPU: 95 % of the nominal rate for the
+/// time they had one. A thread that waits a whole period loses that period's
+/// reading, and that share is the host's, not the schedule's. On a quiet host
+/// the floor is about 94 % of nominal; the p99 spacing bound is the strict
+/// check there.
+fn rate_floor(nominal_hz: f64, waited_us: i64) -> f64 {
+    let waited = (waited_us as f64 / 3e6).clamp(0.0, 1.0);
+    nominal_hz * (1.0 - waited) * 0.95
 }
 
 /// The slow device comes first, so a fixed slot order would poll it first.
@@ -113,7 +115,15 @@ struct Stats {
     p99_age_us: i64,
     /// This host's p99 wakeup deviation during the run (`host_wakeups`).
     host_p99_us: i64,
+    /// How long the service's threads waited for a CPU during the run
+    /// (`service_run_delay_us`); 0 when the kernel does not report it.
+    waited_us: i64,
 }
+
+/// The largest spacing deviation on a quiet host. A gap longer than this is
+/// allowed only as far as the service's threads waited for a CPU meanwhile:
+/// a thread that does not run cannot read, and that wait is the host's.
+const MAX_DEV_US: i64 = 25_000;
 
 /// The IMU's p99 spacing bound, in microseconds: `P99_DEV_US` plus
 /// `HOST_FACTOR` times what this host adds to a sleeper's p99 wakeup in the
@@ -134,7 +144,7 @@ struct Sample {
 }
 
 /// The spacing of the readings as a viewer receives them, and their ages.
-fn stats(samples: &[Sample], host_p99_us: i64) -> Stats {
+fn stats(samples: &[Sample], host_p99_us: i64, waited_us: i64) -> Stats {
     let times: Vec<i64> = samples.iter().map(|s| s.at_us).collect();
     let deltas: Vec<i64> = times.windows(2).map(|w| w[1] - w[0]).collect();
     let span = times
@@ -152,6 +162,7 @@ fn stats(samples: &[Sample], host_p99_us: i64) -> Stats {
         max_dev_us: devs.last().copied().unwrap_or(0),
         p99_age_us: p99(&ages),
         host_p99_us,
+        waited_us,
     }
 }
 
@@ -212,7 +223,11 @@ fn run_with(label: &str, latency: Duration, load: bool) -> Stats {
     let warm = Instant::now() + Duration::from_millis(500);
     let end = warm + Duration::from_secs(3);
     let mut samples = Vec::new();
+    let mut waited_from = None;
     while Instant::now() < end {
+        if waited_from.is_none() && Instant::now() >= warm {
+            waited_from = Some(service_run_delay_us());
+        }
         if let Ok(Some(ClientEvent::Data(Update::Reading(r)))) =
             client.next_event_timeout(Duration::from_millis(50))
             && r.device == "imu"
@@ -227,7 +242,11 @@ fn run_with(label: &str, latency: Duration, load: bool) -> Stats {
     }
     stop.store(true, Ordering::Relaxed);
     let host_p99 = host.join().unwrap();
-    let s = stats(&samples, host_p99);
+    let waited_us = match (waited_from.flatten(), service_run_delay_us()) {
+        (Some(from), Some(to)) => to.saturating_sub(from) as i64,
+        _ => 0,
+    };
+    let s = stats(&samples, host_p99, waited_us);
     eprintln!("{label}: {s:?}");
     drop(client);
     service.stop();
@@ -238,14 +257,14 @@ fn run_with(label: &str, latency: Duration, load: bool) -> Stats {
 fn imu_holds_100_hz_on_an_idle_bus() {
     let s = run("idle", false);
     assert!(
-        s.rate_hz >= rate_floor(100.0, PERIOD_US, s.host_p99_us) && s.rate_hz <= 103.0,
+        s.rate_hz >= rate_floor(100.0, s.waited_us) && s.rate_hz <= 103.0,
         "{s:?}"
     );
     assert!(
         s.p99_dev_us <= P99_DEV_US + HOST_FACTOR * s.host_p99_us,
         "{s:?}"
     );
-    assert!(s.max_dev_us <= 25_000, "{s:?}");
+    assert!(s.max_dev_us <= MAX_DEV_US + s.waited_us, "{s:?}");
     assert!(s.p99_age_us <= 25_000, "{s:?}");
 }
 
@@ -253,7 +272,7 @@ fn imu_holds_100_hz_on_an_idle_bus() {
 fn imu_holds_100_hz_beside_a_slow_device() {
     let s = run("slow bus, 3 ms per transaction", true);
     assert!(
-        s.rate_hz >= rate_floor(100.0, PERIOD_US, s.host_p99_us) && s.rate_hz <= 103.0,
+        s.rate_hz >= rate_floor(100.0, s.waited_us) && s.rate_hz <= 103.0,
         "{s:?}"
     );
     // The bounds allow for a busy host (the grid is checked, not arrival times); a schedule that lets a 6 ms read
@@ -262,7 +281,7 @@ fn imu_holds_100_hz_beside_a_slow_device() {
         s.p99_dev_us <= P99_DEV_US + HOST_FACTOR * s.host_p99_us,
         "{s:?}"
     );
-    assert!(s.max_dev_us <= 25_000, "{s:?}");
+    assert!(s.max_dev_us <= MAX_DEV_US + s.waited_us, "{s:?}");
     assert!(s.p99_age_us <= 25_000, "{s:?}");
 }
 
@@ -298,14 +317,14 @@ fn imu_holds_100_hz_beside_a_read_longer_than_its_period() {
         true,
     );
     assert!(
-        s.rate_hz >= rate_floor(100.0, PERIOD_US, s.host_p99_us) && s.rate_hz <= 103.0,
+        s.rate_hz >= rate_floor(100.0, s.waited_us) && s.rate_hz <= 103.0,
         "{s:?}"
     );
     assert!(
         s.p99_dev_us <= P99_DEV_US + HOST_FACTOR * s.host_p99_us,
         "{s:?}"
     );
-    assert!(s.max_dev_us <= 25_000, "{s:?}");
+    assert!(s.max_dev_us <= MAX_DEV_US + s.waited_us, "{s:?}");
 }
 
 /// The IMU alone, with its FIFOs. Each mock FIFO fills on the host's clock at
@@ -502,14 +521,13 @@ fn a_polled_400_hz_imu_delivers_each_sample_once() {
     service.stop();
     let rate = readings.len() as f64 / 3.0;
     // At most 400 a second (the sensor's rate; a 2 ms poll would deliver 500).
-    // At least 90 % of 400 for the time the service's threads had a CPU: on a
-    // loaded host a thread that waits a whole period for one loses that
-    // period's sample, and that share is the host's, not the schedule's. A
-    // plain thread sleeping on the same grid stays on time under the same
-    // load, because the service's loop does more work per wakeup and is
-    // preempted. With the run-queue delay unreported the floor is 90 % of 400.
+    // The floor is `rate_floor`'s: what the service could read in the time
+    // its threads had a CPU. A plain thread sleeping on the same grid stays on
+    // time under the same load, because the service's loop does more work per
+    // wakeup and is preempted. With the run-queue delay unreported the floor
+    // is 95 % of 400.
     let waited = (waited_us as f64 / 3e6).min(1.0);
-    let floor = 400.0 * (1.0 - waited) * 0.9;
+    let floor = rate_floor(400.0, waited_us as i64);
     assert!(
         rate >= floor && rate <= 420.0,
         "{rate} readings a second (floor {floor:.0}; the service waited {:.0} % of the time for a CPU)",
