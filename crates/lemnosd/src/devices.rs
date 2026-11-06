@@ -129,7 +129,8 @@ pub(crate) struct Slot {
     pub output_us: Option<u32>,
     /// The last reading a polled sensor delivered (its start and its row): a
     /// reading identical to it, read within one output period, is a repeat
-    /// and is not delivered (see [`repeats_last`](Self::repeats_last)).
+    /// and is not delivered (see [`repeats_last`](Self::repeats_last)). The
+    /// time is when that read ended: its sample was taken at the latest then.
     pub last_delivered: Option<(u64, [i32; MAX_CHANNELS])>,
     /// The device, when it is here: `None` while its bus's worker reads it,
     /// and when it is missing.
@@ -428,8 +429,11 @@ impl Slot {
 
     /// Whether `row`, read at `started_us`, repeats the last delivered reading
     /// of a polled sensor: identical values, read within one output period of
-    /// it. A still sensor (or a simulation with no noise) repeats its output
-    /// every read, so it is delivered once per period, not once per read.
+    /// the end of that read. A still sensor (or a simulation with no noise)
+    /// repeats its output every read, so it is delivered once per period, not
+    /// once per read. Measured from the end, not the start: a read preempted
+    /// between its timestamp and its bus transaction took a later sample, and
+    /// a read one period after its start can still find that same sample.
     pub fn repeats_last(&self, row: &[i32; MAX_CHANNELS], started_us: u64) -> bool {
         let (Some(period), Some((at, last))) = (self.output_us, self.last_delivered) else {
             return false;
@@ -462,7 +466,7 @@ impl Slot {
             }
             Ok(_) => {
                 self.values = row[0];
-                self.last_delivered = Some((started_us, row[0]));
+                self.last_delivered = Some((started_us + cost_us, row[0]));
                 self.finish_read(started_us, cost_us, Ok(()), &why)
             }
             Err(kind) => self.finish_read(started_us, cost_us, Err(kind), &why),
@@ -757,6 +761,10 @@ mod tests {
         s.last_delivered = Some((1_000, row));
         // Identical, within the period: a repeat.
         assert!(s.repeats_last(&row, 2_000));
+        // The last read ended at 1_000 though it started a whole period
+        // before (it was preempted before its transaction): a read at 3_000
+        // is still within one period of the sample it took.
+        assert!(s.repeats_last(&row, 3_000));
         // Identical, a period on: a still sensor's next sample.
         assert!(!s.repeats_last(&row, 3_500));
         // Different values: a new sample.

@@ -553,7 +553,7 @@ impl Service {
         // no fault.
         let miss = ok && !slot.batched && (done.count == 0 || miss_repeat);
         if ok && !slot.batched && count == 1 {
-            slot.last_delivered = Some((done.started_us, done.samples[0]));
+            slot.last_delivered = Some((done.started_us + done.cost_us, done.samples[0]));
         }
         let (was_fresh, was_us) = (slot.fresh, slot.read_us);
         let status = if miss {

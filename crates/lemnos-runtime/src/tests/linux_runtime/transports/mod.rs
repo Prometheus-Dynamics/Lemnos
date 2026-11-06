@@ -55,13 +55,19 @@ impl SysfsGpioExportHarness {
                 if read_trimmed(&export_path).as_deref() == Some(&global_line.to_string())
                     && !line_root.exists()
                 {
-                    fs::create_dir_all(&line_root).expect("create exported gpio line");
-                    fs::write(line_root.join("direction"), format!("{direction}\n"))
+                    // Built beside the line and renamed in, as the PWM harness
+                    // does: a reader that sees the directory sees every
+                    // attribute, as with the kernel's.
+                    let staging = gpio_root.join(format!(".gpio{global_line}.staging"));
+                    let _ = fs::remove_dir_all(&staging);
+                    fs::create_dir_all(&staging).expect("create staged gpio line");
+                    fs::write(staging.join("direction"), format!("{direction}\n"))
                         .expect("write gpio direction");
-                    fs::write(line_root.join("value"), format!("{value}\n"))
+                    fs::write(staging.join("value"), format!("{value}\n"))
                         .expect("write gpio value");
-                    fs::write(line_root.join("active_low"), "0\n").expect("write gpio active_low");
-                    fs::write(line_root.join("edge"), "none\n").expect("write gpio edge");
+                    fs::write(staging.join("active_low"), "0\n").expect("write gpio active_low");
+                    fs::write(staging.join("edge"), "none\n").expect("write gpio edge");
+                    fs::rename(&staging, &line_root).expect("publish gpio line");
                     fs::write(&export_path, "").expect("clear gpio export file");
                 }
 
