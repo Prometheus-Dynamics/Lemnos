@@ -546,6 +546,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-rga"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux",
+ "lemnos-linux-sys",
+]
+
+[[package]]
 name = "lemnos-drivers-spi"
 version = "2.0.1-dev"
 dependencies = [

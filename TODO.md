@@ -60,6 +60,21 @@ Everything planned, in order. Execution is paused until the user starts it.
         layout. Move m2m onto `lemnos-v4l2` types, then drop the old sys module.
   - [ ] RGA and VGLite from the graph runtime, on V4L2 M2M and direct kernel routes. Untested
         on board.
+    - [x] RGA: `lemnos-drivers-rga` on the V4L2 M2M route, with `caps::route_for` naming the route
+          each operation takes on each SoC. No `unsafe`, no dlopen, no consumer dev-dependencies;
+          its device tests skip without `vim2m` or `rockchip-rga`, and this host has neither.
+          Untested on board.
+    - [x] RGA `/dev/rga` (the vendor multi-RGA node): `lemnos-drivers-rga`'s `MultiRga` covers
+          fill, mask ROP, blend, palette, colour key, gray to RGBA, flips and turns. The request is
+          from librga's Apache-2.0 `rga.h` (commit 331d5750), in `lemnos-linux-sys::rga`, with its
+          layout pinned to the header. Untested on board; the field mappings the header does not
+          state are marked unverified in the crate. Y-only output is not served.
+    - [ ] VGLite: `lemnos-linux-sys::vg_lite` has the `/dev/vg_lite` request, command ids and
+          structures (layouts checked against `vg_lite_kernel.h`). The graph
+          runtime's `crates/vglite` is not taken yet: it dlopens `libvg_lite.so`. Its command
+          encoding (blit, clear, colour table, the stroke of draw; about 15k lines of the MIT
+          Vivante library behind it) and the calls on the new structures are a piece of their own,
+          next after the m2m merge.
 - [ ] **5. Kernel module and Rust user-space drivers.** One small module of our own, its sources in
       Lemnos: claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:

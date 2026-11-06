@@ -8,6 +8,9 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-drivers-rga`, a new crate (from the graph runtime's `crates/rga`, commit 2c3f7a0): Rockchip's RGA 2D engine through two routes. The V4L2 mem2mem driver (`Rga`: convert, scale, crop, flip and turn between dmabufs or byte buffers) and the vendor multi-RGA node (`MultiRga`, `/dev/rga`: fill, mask ROP, blend, palette, colour key, gray to RGBA, flips and turns). `caps::route_for` answers which route serves an operation on which SoC, and `route_on_system` also checks the node. No `unsafe` in the crate, no dlopen. Untested on board; the field mappings the Apache-2.0 header does not state are marked unverified in the crate's README and docs. `crates/lemnos-drivers-rga/README.md`.
+- `lemnos-linux-sys::rga`: the `/dev/rga` request (`RGA_BLIT_SYNC`, 0x5017) and `struct rga_req` with its sub-structures, transcribed from librga's Apache-2.0 `rga.h` (release commit 331d5750), with the layout pinned to the header. `Job` lends its buffers to the kernel for the call, so the addresses in a request are only ever buffers the caller holds; a mapped buffer shorter than its image, an active rectangle outside the virtual image, a read-only destination and a short palette table are refused before the call.
+- `lemnos-linux-sys::vg_lite`: the K230's `/dev/vg_lite` request (`VG_LITE_IOCTL`), command ids, error codes and the initialize, allocate, free, submit, wait, map and unmap structures, with layouts checked against `vg_lite_kernel.h` (MIT). Structures only: the calls and the VGLite port are not in this change.
 - `lemnos-v4l2`, a new crate: safe V4L2 for Linux with no `unsafe` of its own. It covers:
   - video nodes: formats, MMAP and DMA-buf buffer queues, controls, capture
   - subdevices: formats, media-bus codes, routing, selections, frame intervals
@@ -72,6 +75,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- `lemnos-drivers-rga` no longer loads `librga.so` (`dlopen`). The vendor library route is gone: `MultiRga` takes its place on `/dev/rga`, `Librga` is a deprecated alias of `MultiRga` for one release, and `caps::Route::Librga` is removed (`Route::MultiRga` replaces it). `Route::Vglite` is documented as the direct `/dev/vg_lite` route.
 - **Breaking:** the built-in looks are `status.*` only. `system.*`, `detect.*`, `link.*` and the presets moved to the example look set; a device package installs them (`docs/looks.md`, migration). The 21 retired ws2812 look keys (`idle`, `locate`, `failed`, ...) are refused with an error naming where each now lives.
 - **Breaking:** descriptor labels, properties, attributes, telemetry and the runtime's per-device bookkeeping are `SmallMap<MapKey, V>` (a sorted vector, `Cow<'static, str>` keys) instead of `BTreeMap`; iteration order and the serde shape are unchanged. `Runtime::failures()` returns `&SmallMap`. `DeviceAddress`'s `Debug` prints its one-line form. Linux lite facade: 560,928 B to 511,664 B.
 - The Orion bridge is pinned to Orion's protocol 1 (a89ebd5).

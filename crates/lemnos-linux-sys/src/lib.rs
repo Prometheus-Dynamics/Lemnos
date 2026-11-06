@@ -23,6 +23,7 @@ pub mod mmap;
 pub mod netlink;
 pub mod poll;
 pub mod pool;
+pub mod rga;
 
 #[cfg(feature = "rp1")]
 pub mod rp1_pio;
@@ -32,6 +33,7 @@ pub mod time;
 pub mod usbfs;
 pub mod v3d;
 pub mod v4l2;
+pub mod vg_lite;
 
 pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};
 
