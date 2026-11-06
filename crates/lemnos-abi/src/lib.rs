@@ -11,6 +11,11 @@
 //! - [`MessageSink`]: a C callback that takes a message, such as an error's
 //!   text.
 //! - [`AbiVersion`]: the handshake, with a hash of the layouts above.
+//! - [`Features`]: a surface's optional features, a `u64` bit set from its
+//!   own call, beside the version.
+//! - [`write_out`] and [`write_text`]: a value into a buffer the caller
+//!   supplies, all or nothing, with the length it needs
+//!   ([`Status::BUFFER_TOO_SMALL`] when it does not fit).
 //! - [`guard`] (feature `std`): runs an entry point's body and turns a panic
 //!   into [`Status::PANIC`] instead of unwinding into C.
 //!
@@ -30,9 +35,11 @@ extern crate alloc;
 extern crate std;
 
 mod desc;
+mod features;
 #[cfg(feature = "std")]
 mod guard;
 mod handle;
+mod out;
 mod sink;
 #[cfg(feature = "alloc")]
 mod slab;
@@ -40,9 +47,11 @@ mod status;
 mod version;
 
 pub use desc::{BufferDesc, FenceDesc, MAX_PLANES, PlaneDesc};
+pub use features::Features;
 #[cfg(feature = "std")]
 pub use guard::{guard, guard_or};
 pub use handle::Handle;
+pub use out::{Written, write_out, write_text};
 pub use sink::MessageSink;
 #[cfg(feature = "alloc")]
 pub use slab::Slab;

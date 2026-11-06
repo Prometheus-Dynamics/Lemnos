@@ -230,18 +230,18 @@ unsafe fn sized<T>(out: *mut T) -> Status {
 /// `buf` is null or valid for writes of `capacity` bytes; `len` is null or
 /// valid for a write of a `usize`.
 unsafe fn put_text(value: &str, buf: *mut u8, capacity: usize, len: *mut usize) -> Status {
+    let out = if buf.is_null() {
+        None
+    } else {
+        // SAFETY: not null, and valid for `capacity` bytes by the caller's contract.
+        Some(unsafe { core::slice::from_raw_parts_mut(buf, capacity) })
+    };
+    let written = lemnos_abi::write_text(value, out);
     if !len.is_null() {
         // SAFETY: not null, and valid for the write by the caller's contract.
-        unsafe { len.write(value.len()) };
+        unsafe { len.write(written.needed) };
     }
-    if buf.is_null() || value.len() >= capacity {
-        return Status::BUFFER_TOO_SMALL;
-    }
-    // SAFETY: not null, and valid for `capacity` bytes by the caller's contract.
-    let out = unsafe { core::slice::from_raw_parts_mut(buf, capacity) };
-    out[..value.len()].copy_from_slice(value.as_bytes());
-    out[value.len()] = 0;
-    Status::OK
+    written.status
 }
 
 fn raw_reading(reading: &Reading) -> RawReading {

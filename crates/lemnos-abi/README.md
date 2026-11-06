@@ -13,6 +13,12 @@ wrappers do not each invent their own.
 - `MessageSink`: a C callback that takes a message, such as an error's text.
 - `AbiVersion`: major, minor, struct size and a layout hash (`layout_hash`, FNV-1a over sizes,
   alignments and field offsets, at compile time). `accepts` checks a caller against a surface.
+- `Features`: a surface's optional features, a `u64` bit set the surface returns from its own
+  `<prefix>_features()` call after the handshake (`contains`, `require`). It is not a field of
+  `AbiVersion`, so the handshake's layout and every layout hash stay as they are.
+- `write_out` / `write_text`: a value into a buffer the caller supplies, all or nothing, with the
+  length it needs and `Status::BUFFER_TOO_SMALL` when it does not fit (text also needs room for
+  its NUL). The surface makes the slice from its pointer; this crate has no unsafe code.
 - `guard` / `guard_or` (feature `std`): runs an `extern "C"` body and returns `Status::PANIC`
   (or a given value) instead of unwinding into C.
 

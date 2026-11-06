@@ -191,3 +191,51 @@ fn a_sink_hands_the_message_to_its_callback() {
     );
     assert!(CALLS.load(Ordering::Relaxed) >= 2);
 }
+
+#[test]
+fn features_are_bits_a_caller_requires() {
+    let have = Features::NONE.with(0).with(5);
+    assert!(have.contains(Features::NONE.with(5)));
+    assert_eq!(have.require(Features::NONE.with(0)), Status::OK);
+    assert_eq!(have.require(Features::NONE.with(1)), Status::NOT_SUPPORTED);
+    assert_eq!(size_of::<Features>(), 8);
+}
+
+#[test]
+fn out_buffers_take_all_or_nothing_and_report_the_length() {
+    let mut buf = [0xaau8; 4];
+    assert_eq!(
+        write_out(b"abc", Some(&mut buf)),
+        Written {
+            status: Status::OK,
+            needed: 3
+        }
+    );
+    assert_eq!(&buf, b"abc\xaa");
+    let mut small = [0xaau8; 2];
+    assert_eq!(
+        write_out(b"abc", Some(&mut small)),
+        Written {
+            status: Status::BUFFER_TOO_SMALL,
+            needed: 3
+        }
+    );
+    assert_eq!(small, [0xaa; 2]);
+    assert_eq!(write_out(b"abc", None).needed, 3);
+    // Text needs room for its NUL; the length does not count it.
+    let mut exact = [0xaau8; 3];
+    assert_eq!(
+        write_text("abc", Some(&mut exact)).status,
+        Status::BUFFER_TOO_SMALL
+    );
+    assert_eq!(exact, [0xaa; 3]);
+    let mut room = [0xaau8; 4];
+    assert_eq!(
+        write_text("abc", Some(&mut room)),
+        Written {
+            status: Status::OK,
+            needed: 3
+        }
+    );
+    assert_eq!(&room, b"abc\0");
+}
