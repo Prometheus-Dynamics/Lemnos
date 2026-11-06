@@ -332,6 +332,9 @@ fn checked_planes(num_planes: u32) -> io::Result<usize> {
     }
 }
 
+// `libc` deprecates `time_t` and `suseconds_t` on musl (they will become 64-bit on 32-bit musl
+// targets). The fields are those types, so the alias is named here either way.
+#[allow(deprecated)]
 fn timeval(time: Duration) -> libc::timeval {
     libc::timeval {
         tv_sec: libc::time_t::try_from(time.as_secs()).unwrap_or(libc::time_t::MAX),

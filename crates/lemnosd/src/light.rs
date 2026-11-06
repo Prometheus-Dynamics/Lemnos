@@ -353,15 +353,15 @@ impl Light {
         self.info_gen += 1;
     }
 
-    /// When the light needs attention next: a frame or an expiry. A frame
-    /// is due at the light's own cadence (`next_render_ms`), not a fixed
-    /// interval from the wake-up, so a late wake does not stretch the frames.
     /// The winning intent: its owner, layer and intent (`None`: nothing holds
     /// the light).
     pub fn shown_intent(&self) -> Option<(u32, Layer, LightIntent)> {
         self.shown
     }
 
+    /// When the light needs attention next: a frame or an expiry. A frame
+    /// is due at the light's own cadence (`next_render_ms`), not a fixed
+    /// interval from the wake-up, so a late wake does not stretch the frames.
     pub fn next_ms(&self, now_ms: u64) -> Option<u64> {
         let frame = self
             .animator

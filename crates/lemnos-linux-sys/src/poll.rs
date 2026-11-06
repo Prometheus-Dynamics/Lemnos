@@ -91,6 +91,9 @@ impl PollFd {
     }
 }
 
+// `libc` deprecates `time_t` and `suseconds_t` on musl (they will become 64-bit on 32-bit musl
+// targets). The fields are those types, so the alias is named here either way.
+#[allow(deprecated)]
 fn timespec(d: Duration) -> libc::timespec {
     libc::timespec {
         tv_sec: libc::time_t::try_from(d.as_secs()).unwrap_or(libc::time_t::MAX),
