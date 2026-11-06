@@ -581,7 +581,16 @@ impl Service {
                 None => u64::MAX,
             };
         }
-        let waiters = std::mem::take(&mut slot.waiters);
+        // A one-shot reader is owed every channel. A reader that arrived while
+        // a subscription's masked read was in flight waits for its own full
+        // read (dispatched next: waiting slots go first, with every channel)
+        // instead of taking this partial row.
+        let all = slot.all_channels();
+        let waiters = if slot.values_mask & all == all {
+            std::mem::take(&mut slot.waiters)
+        } else {
+            Vec::new()
+        };
         if let Some(status) = status {
             self.status_event(index, status);
         }

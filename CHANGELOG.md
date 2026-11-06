@@ -87,6 +87,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnosd`: a one-shot read that arrived while a subscription's channel-masked read was running got that read's partial row, with no value for the unselected channels. One-shot readers now wait for a read of every channel.
 - The `lemnosd` protocol defects `docs/ipc.md` found:
   - The client refuses a `Welcome` of another protocol version.
   - A bad frame now drops the client's connection, where before every later receive failed on the same bytes.

@@ -112,11 +112,13 @@ Everything planned, in order. Execution is paused until the user starts it.
         The packaged unit now sets `CPUSchedulingPolicy=fifo`. Still to do: rerun beside the
         120 fps pipeline when a board runs it (busy loops stood in).
 
-- [ ] **9. `serves_the_simulated_readings_over_the_socket` failed once** (2026-11-05, gate run at
-      load 70): `acceleration.z: no value` on a one-shot `read("imu")` right after start. Not
-      reproduced in 35 runs since, with or without the repeat-filter change. Unproven lead: a
-      one-shot reader that joins a read in flight for a subscription with a smaller channel mask
-      is answered from that read's values with every channel marked present.
+- [x] **9. `serves_the_simulated_readings_over_the_socket` failed once** (2026-11-05, gate run at
+      load 70): `acceleration.z: no value` on a one-shot `read("imu")` right after start. Cause, as
+      the lead suspected: a one-shot reader that arrived while a subscription's channel-masked read
+      was in flight was answered from that read's partial row. Fixed (2026-11-06): waiters are
+      answered only from a read of every channel. Otherwise they stay queued, and the next dispatch
+      gives them a full read first. `a_one_shot_read_during_a_masked_subscription_read_gets_every_channel`
+      (tests/subscribe.rs) fails at read 16 without the fix and passes with it.
 
 ## Round 4 (the user's list, 2026-11-03)
 

@@ -156,3 +156,30 @@ fn a_channel_subscription_gets_its_channels_and_refuses_unknown_names() {
         0
     );
 }
+
+#[test]
+fn a_one_shot_read_during_a_masked_subscription_read_gets_every_channel() {
+    // One client reads only angular_rate.z, every 10 ms: most reads in flight
+    // are masked. A one-shot read is owed every channel, even when it arrives
+    // while such a read runs.
+    let service = start();
+    let mut subscriber = ClientOptions::new(service.socket(), "rate")
+        .devices()
+        .unwrap();
+    subscriber
+        .subscribe_channels("slow", &["angular_rate.z"], 10)
+        .unwrap();
+    let mut reader = ClientOptions::new(service.socket(), "reader")
+        .devices()
+        .unwrap();
+    for i in 0..200 {
+        let reading = reader.read("slow").unwrap();
+        assert!(
+            reading.value("acceleration.z").is_some(),
+            "read {i}: acceleration.z has no value"
+        );
+        assert!(reading.value("angular_rate.x").is_some(), "read {i}");
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    drop(subscriber);
+}
