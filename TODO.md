@@ -58,6 +58,7 @@ Everything planned, in order. Execution is paused until the user starts it.
   - [ ] Merge the two V4L2 layers. `lemnos-linux::v4l2::m2m` and its sys module predate
         `v4l2::device`, so `BufType`, `Memory`, `Rect` and `Fraction` exist twice with the same
         layout. Move m2m onto `lemnos-v4l2` types, then drop the old sys module.
+  - [x] PiSP: `lemnos-drivers-pisp` (the camera stack's `crates/pisp`, bb34279c): uAPI layouts, front and back end builders, tiling, statistics, and the `device` layer on `lemnos-v4l2` and `lemnos-linux` (no `unsafe`; the line timer's volatile accesses are in `lemnos-linux-sys::mmap`). Untested on board: the `device` layer since the move (the board results in the source are the earlier implementation's). `layout-check/run.sh` matches the Raspberry Pi 7.2 kernel tree (53679a578), the boards' kernel.
   - [ ] RGA and VGLite from the graph runtime, on V4L2 M2M and direct kernel routes. Untested
         on board.
     - [x] RGA: `lemnos-drivers-rga` on the V4L2 M2M route, with `caps::route_for` naming the route

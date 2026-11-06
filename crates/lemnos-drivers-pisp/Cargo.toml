@@ -1,0 +1,34 @@
+[package]
+name = "lemnos-drivers-pisp"
+version.workspace = true
+edition.workspace = true
+description = "Raspberry Pi 5 ISP (PiSP) from Rust: uAPI config and statistics layouts, front and back end configuration builders, back end tiling, statistics decoding, and device access on Linux."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+# Float rounding from std. Without it the crate (configuration builders, back end tiling,
+# statistics decoding) is `no_std` + `alloc`; see README.md.
+std = []
+# Drive the front end (`rp1-cfe`) and back end (`pispbe`) device nodes (Linux only).
+device = ["std", "dep:lemnos-v4l2", "dep:lemnos-linux"]
+# Debug hooks on the device path: the config dumps (`LEMNOS_PISP_BE_DUMP`, `LEMNOS_PISP_FE_DUMP`)
+# and the back end block patch (`LEMNOS_PISP_BE_PATCH`). Off, they compile to no-ops and the
+# variables are ignored.
+debug-hooks = ["device"]
+
+[dependencies]
+bytemuck = { version = "1.25", features = ["derive", "min_const_generics", "extern_crate_alloc"] }
+lemnos-v4l2 = { workspace = true, optional = true }
+lemnos-linux = { workspace = true, optional = true, features = ["dma"] }
+
+[[example]]
+name = "be_ops_check"
+required-features = ["device"]

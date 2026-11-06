@@ -10,6 +10,7 @@ use std::ptr::NonNull;
 pub struct Mapping {
     ptr: NonNull<u8>,
     len: usize,
+    writable: bool,
 }
 
 // SAFETY: the mapping is memory this value owns until it is dropped; nothing
@@ -47,7 +48,11 @@ impl Mapping {
         }
         let ptr = NonNull::new(raw.cast::<u8>())
             .ok_or_else(|| io::Error::other("mmap returned a null address"))?;
-        Ok(Self { ptr, len })
+        Ok(Self {
+            ptr,
+            len,
+            writable: write,
+        })
     }
 
     /// Bytes mapped.
@@ -78,6 +83,33 @@ impl Mapping {
         // SAFETY: as for `as_slice`, and `&mut self` makes the slice unique.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
+    /// Reads `N` bytes at `offset` with one volatile load, for memory the device writes at any
+    /// time. `None` when the bytes do not all lie inside the mapping.
+    pub fn read_volatile<const N: usize>(&self, offset: usize) -> Option<[u8; N]> {
+        let end = offset.checked_add(N)?;
+        if end > self.len {
+            return None;
+        }
+        let at = self.ptr.as_ptr().wrapping_add(offset).cast::<[u8; N]>();
+        // SAFETY: `at` starts `offset` bytes into the mapping and `end <= len` keeps the `N`
+        // bytes inside the `len` that `new` mapped; `[u8; N]` needs no alignment; the mapping
+        // stays mapped while `&self` lives.
+        Some(unsafe { at.read_volatile() })
+    }
+
+    /// Writes `value` at `offset` with one volatile store. `None`, and nothing written, when
+    /// the bytes do not all lie inside the mapping or the mapping is read-only.
+    pub fn write_volatile<const N: usize>(&mut self, offset: usize, value: [u8; N]) -> Option<()> {
+        let end = offset.checked_add(N)?;
+        if end > self.len || !self.writable {
+            return None;
+        }
+        let at = self.ptr.as_ptr().wrapping_add(offset).cast::<[u8; N]>();
+        // SAFETY: as for `read_volatile`; the store also needs a writable mapping, which the
+        // check above ruled in, and `&mut self` makes the store exclusive.
+        unsafe { at.write_volatile(value) };
+        Some(())
+    }
 }
 
 impl Drop for Mapping {
@@ -92,6 +124,38 @@ impl Drop for Mapping {
 mod tests {
     use super::*;
     use std::os::fd::AsFd;
+
+    #[test]
+    fn volatile_accessors_are_bounds_checked_and_respect_writability() {
+        let path =
+            std::env::temp_dir().join(format!("lemnos-mmap-volatile-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(4096).unwrap();
+        {
+            let mut map = Mapping::new(file.as_fd(), 4096, 0, true).unwrap();
+            assert_eq!(map.write_volatile(4080, [7; 16]), Some(()));
+            assert_eq!(map.read_volatile::<16>(4080), Some([7; 16]));
+            assert_eq!(map.as_slice()[4095], 7);
+            // Past the end, and at an offset that overflows: refused, nothing written.
+            assert_eq!(map.write_volatile(4081, [1; 16]), None);
+            assert_eq!(map.read_volatile::<16>(4081), None);
+            assert_eq!(map.read_volatile::<4>(usize::MAX - 1), None);
+            assert_eq!(map.as_slice()[4080], 7);
+        }
+        {
+            let mut map = Mapping::new(file.as_fd(), 4096, 0, false).unwrap();
+            assert_eq!(map.read_volatile::<16>(4080), Some([7; 16]));
+            assert_eq!(map.write_volatile(0, [1; 16]), None, "read-only");
+            assert_eq!(map.as_slice()[0], 0);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn maps_a_file_shared_and_unmaps_it() {

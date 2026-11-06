@@ -21,6 +21,8 @@ This is a record for the owning repositories; the design itself is in
 | `crates/kernel/src/{v4l2,subdev,media,event}*` (video nodes, buffers, controls, formats, capture, MMAP queues, subdevices, media topology, events; with `error`, `flags`, `fourcc`) | `lemnos-v4l2`, over the uAPI and calls in `lemnos-linux-sys::v4l2::device` and `lemnos-linux-sys::media` (2026-11-05). `bus` (the sensor bridge), `dma_heap` (in `lemnos-linux::dma`) and `v4l2::m2m` (in `lemnos-linux::v4l2::m2m`) did not move. |
 | graph runtime's `crates/rga` (commit 2c3f7a0) | `lemnos-drivers-rga`: the V4L2 M2M route, and the multi-RGA route on `/dev/rga` (request from librga's Apache-2.0 `rga.h`, commit 331d5750, in `lemnos-linux-sys::rga`). The VGLite half (`crates/vglite`) is not yet in the workspace; only `lemnos-linux-sys::vg_lite`'s structures are. |
 
+| `crates/pisp` at `bb34279c` (Styx, branch `dev`): uAPI layouts, front and back end builders, tiling, statistics, `device` over the stock `rp1-cfe` and `pispbe` nodes | `lemnos-drivers-pisp` (`device` now on `lemnos-v4l2` and `lemnos-linux`, with the same names; debug variables `STYX_PISP_*` renamed `LEMNOS_PISP_*`; `styx.pisp.*` capability names renamed `lemnos.pisp.*`; untested on board since the move) |
+
 Later (not in this change): `crates/kernel/src/usbfs.rs` replaces `rusb` in the USB transport;
 sensor drivers (BMI088, BMM150, INA2xx) become no_std drivers (done: `lemnos-drivers-bmi088`, `lemnos-drivers-bmm150`, `lemnos-drivers-ina2xx`).
 
