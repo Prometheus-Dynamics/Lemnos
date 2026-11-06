@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- DMA: `DmaHeap::open_path_read_write` (a read-write open, for tools that report whether a heap node's permissions allow it; allocation still needs only `open_path`), and `DmaBuf::map_read_only` / `DmaBufRef::map_read_only`.
 - M2M controls: `M2mSession::set_control` and `control` (`VIDIOC_S_CTRL`, `VIDIOC_G_CTRL`), and the free functions `lemnos_linux::v4l2::set_control` and `control` on any descriptor, so a codec control can be set before the session is built. The `CID_HFLIP`, `CID_VFLIP`, `CID_ROTATE` and `CID_BG_COLOR` constants. `docs/m2m.md`.
 - M2M source-change flow for stateful decoders: `M2mSession::from_file` with a capture `buffers: 0` defers the capture buffers; `take_source_change()` returns the change, `adopt_capture`/`start_capture` allocate and start the capture queue once the stream's size is known, and `reconfigure_capture` handles a mid-stream resolution change after a drain (the output queue keeps running). `capture_visible()` reports the decoded frame's visible rectangle. `docs/m2m.md`.
 - `lemnos-uevent`, a new crate: the Linux device watcher (`DeviceWatcher`: netlink uevents, inotify or a sysfs rescan, for any set of subsystems), the uevent parser and `LinuxPaths`, moved out of `lemnos-linux` below both `lemnos-linux` and `lemnos-usb`. `lemnos-linux` re-exports them, so its paths are unchanged.

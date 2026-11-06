@@ -120,10 +120,21 @@ impl DmaHeap {
         Self::open_path(Path::new(HEAP_DIR).join(name))
     }
 
-    /// Opens a heap node by path.
+    /// Opens a heap node by path, read-only: enough to allocate from it.
     pub fn open_path(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_path_with(path, false)
+    }
+
+    /// Opens a heap node by path read-write, as a tool does that reports
+    /// whether the node's permissions allow it (`PermissionDenied` when the
+    /// caller lacks the node's group). Allocation needs only [`Self::open_path`].
+    pub fn open_path_read_write(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_path_with(path, true)
+    }
+
+    fn open_path_with(path: impl AsRef<Path>, write: bool) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = File::open(&path)?;
+        let file = File::options().read(true).write(write).open(&path)?;
         Ok(Self {
             file,
             path,
@@ -239,6 +250,11 @@ impl DmaBuf {
     /// [`Self::begin_cpu_access`] and [`Self::end_cpu_access`].
     pub fn map(&self) -> io::Result<Mapping> {
         Mapping::new(self.fd.as_fd(), self.len, 0, true)
+    }
+
+    /// Maps the whole buffer read-only; bracket CPU access as for [`Self::map`].
+    pub fn map_read_only(&self) -> io::Result<Mapping> {
+        Mapping::new(self.fd.as_fd(), self.len, 0, false)
     }
 
     /// Starts a CPU access (`DMA_BUF_SYNC_START`): makes the device's writes
@@ -361,6 +377,11 @@ impl<'a> DmaBufRef<'a> {
     /// Maps the whole buffer read-write; bracket CPU access as for [`DmaBuf::map`].
     pub fn map(&self) -> io::Result<Mapping> {
         Mapping::new(self.fd, self.len, 0, true)
+    }
+
+    /// Maps the whole buffer read-only; bracket CPU access as for [`DmaBuf::map`].
+    pub fn map_read_only(&self) -> io::Result<Mapping> {
+        Mapping::new(self.fd, self.len, 0, false)
     }
 }
 
@@ -521,6 +542,35 @@ mod tests {
         let buf = DmaBuf::from_fd(plain_file("name", 4096)).unwrap();
         assert!(buf.set_name(&"x".repeat(NAME_CAPACITY)).is_err());
         assert!(buf.set_name("nul\0inside").is_err());
+    }
+
+    #[test]
+    fn a_read_write_open_reports_a_node_it_may_not_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("lemnos-dma-ro-{}", std::process::id()));
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let read = DmaHeap::open_path(&path);
+        let write = DmaHeap::open_path_read_write(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(read.is_ok(), "{read:?}");
+        // Root may write any file; anyone else is refused.
+        if let Err(e) = write {
+            assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
+    #[test]
+    fn a_read_only_mapping_reads_the_buffer() {
+        let mut file = File::from(plain_file("map-ro", 4096));
+        file.write_all(b"lemnos").unwrap();
+        let buf = DmaBuf::from_fd(OwnedFd::from(file)).unwrap();
+        let mapping = buf.map_read_only().unwrap();
+        assert_eq!(&mapping.as_slice()[..6], b"lemnos");
+        assert_eq!(
+            &buf.borrow().map_read_only().unwrap().as_slice()[..6],
+            b"lemnos"
+        );
     }
 
     #[test]
