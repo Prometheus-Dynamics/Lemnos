@@ -9,6 +9,7 @@ This directory holds repository-level documentation for the Lemnos workspace.
 - [testing.md](testing.md): describes test entry points, helper scripts, and validation flows
 - [foundation.md](foundation.md): Lemnos 2.0 layering (embedded-hal, `lemnos-hal`, one Linux implementation) and the migration record (see provenance.md)
 - [system-service.md](system-service.md): `lemnosd`, the board's hardware service: its client API, LED intents and animations, the updater integration, kernel versus userspace backends, process model and packaging
+- [ipc.md](ipc.md): the `lemnosd` socket protocol byte by byte, with test vectors; [ipc-v2.md](ipc-v2.md): when a version 2 is due and how it would be negotiated
 - [composite-devices.md](composite-devices.md): composite (virtual) devices: the fan controller (built, tuned live, persisted) and its failsafe; other uses are design
 - [driver-ownership.md](driver-ownership.md): where a driver lives (Lemnos, a board file, or the product) and the kernel-code rule
 - [board-definition.md](board-definition.md): board definitions (TOML/JSON), the built-in drivers, generating them, and adopting a board in an app

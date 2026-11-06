@@ -630,18 +630,27 @@ impl DeviceClient {
     }
 
     /// The latest reading of `device`.
+    ///
+    /// A service with [`FEATURE_READ_ID`](crate::FEATURE_READ_ID) answers with this read's id,
+    /// so overlapping reads of one device are told apart. With an older one, the answer is the
+    /// first reading of the device, or the first refusal without an id.
     pub fn read(&mut self, device: &str) -> Result<Reading, ClientError> {
+        let id = self.conn.next_id();
+        let by_id = self.conn.features & crate::FEATURE_READ_ID != 0;
         let name = device.to_string();
         let raw = self.conn.request(
             &Request::Read {
+                id,
                 device: name.clone(),
             },
             |m| match m {
-                Message::Reading(r) if r.device == name => Some(Ok(r.clone())),
+                Message::Reading(r) if (by_id && r.id == id) || (!by_id && r.device == name) => {
+                    Some(Ok(r.clone()))
+                }
                 Message::Reply {
-                    id: 0,
+                    id: answer,
                     result: Err(refusal),
-                } => Some(Err(*refusal)),
+                } if *answer == if by_id { id } else { 0 } => Some(Err(*refusal)),
                 _ => None,
             },
         )?;

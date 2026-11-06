@@ -8,6 +8,12 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- The two IPC gaps set aside for a protocol 2 are fixed within protocol 1 (`docs/ipc-v2.md`).
+  - `Request::Read` gains an appended `id` and `RawReading` an `id`, sent only when nonzero, so a subscription's reading is byte for byte as before.
+  - A service with the new welcome bit `FEATURE_READ_ID` (value 2) answers each read, reading or refusal, with its id, and `DeviceClient::read` then matches by id: overlapping reads of one device are told apart.
+  - Optional `u16`/`u32` values equal to their None sentinel are sent one below it, instead of arriving as None.
+  - `docs/ipc-v2.md` records when a version 2 is due, how it would be negotiated, and what waits for it.
+  - `Request::Read` and `RawReading` gain a field (a source change for code that builds them).
 - `lemnosd`: a subscribed reading allocates nothing in the service once warm. Sample batches are reused through the bus jobs, the bus channels are bounded (`sync_channel`), and readings are encoded into pooled frames. It was about 3 allocations a reading plus a channel block every 31 messages. `tests/alloc.rs` asserts 0 over every service thread. `lemnos_ipc::encode_reading_into` encodes a reading into a caller's buffer. `lemnos_hal::mock::MockI2c::set_logging(false)` stops recording transactions, so a mock bus allocates nothing per transfer. `lemnos_linux_sys::test_alloc` gains `TOTAL` (every thread's count) and opt-in backtrace recording (`set_recording`, `take_records`) for finding an allocation's source.
 - `lemnos-rp1-csi2`: `LEMNOS_RP1_CSI2_UNPACK16` (`lemnos_linux_sys::lemnos_rp1_csi2::UNPACK16`), the DMA channel's 16-bit unpack, so the PiSP back end reads the receiver's buffer directly. `csi2_module_check --be` runs that chain: on board #1, 600 frames at 60.28 fps, none failed, frame end to back end interrupt p50 757 µs, p99 1324 µs, no copy.
 - `scripts/board-tests.sh`: cross-builds the workspace tests, runs each binary on a board over SSH, and puts the repository files the tests read at their build path (a tmpfs where the board's root is read-only). Board #1 (aarch64): 86 of 87 binaries pass; trybuild's compile-fail test needs cargo and is skipped.

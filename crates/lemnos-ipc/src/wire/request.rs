@@ -152,9 +152,9 @@ impl Request {
             Self::Raw(raw) => raw.encode(),
             Self::List => Encoder::new(LIST).finish(),
             Self::Stats => Encoder::new(STATS).finish(),
-            Self::Read { device } => {
+            Self::Read { id, device } => {
                 let mut e = Encoder::new(READ);
-                e.str(device);
+                e.str(device).u32(*id);
                 e.finish()
             }
             Self::Subscribe {
@@ -410,7 +410,12 @@ impl Request {
             kind if super::raw::is_raw(kind) => Self::Raw(RawRequest::decode(kind, &mut d)?),
             LIST => Self::List,
             STATS => Self::Stats,
-            READ => Self::Read { device: d.str()? },
+            READ => {
+                let device = d.str()?;
+                // Appended within protocol 1: absent from older clients.
+                let id = if d.is_empty() { 0 } else { d.u32()? };
+                Self::Read { id, device }
+            }
             SUBSCRIBE_CHANNELS => {
                 let device = d.str()?;
                 let period_ms = d.u32()?;

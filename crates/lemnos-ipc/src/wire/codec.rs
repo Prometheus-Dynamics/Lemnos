@@ -74,11 +74,15 @@ impl Encoder {
         self.buf.extend_from_slice(v);
         self
     }
+    /// `u32`, `u32::MAX` for None. `Some(u32::MAX)` goes as `u32::MAX - 1`, so a value always
+    /// arrives as a value: every optional field is milliseconds (49.7 days at the top) or
+    /// thousandths, far below it.
     pub(super) fn opt_u32(&mut self, v: Option<u32>) -> &mut Self {
-        self.u32(v.unwrap_or(u32::MAX))
+        self.u32(v.map_or(u32::MAX, |v| v.min(u32::MAX - 1)))
     }
+    /// `u16`, `u16::MAX` for None; `Some(u16::MAX)` goes as `u16::MAX - 1` (see `opt_u32`).
     pub(super) fn opt_u16(&mut self, v: Option<u16>) -> &mut Self {
-        self.u16(v.unwrap_or(u16::MAX))
+        self.u16(v.map_or(u16::MAX, |v| v.min(u16::MAX - 1)))
     }
     pub(super) fn opt_color(&mut self, v: Option<u32>) -> &mut Self {
         match v {

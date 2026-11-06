@@ -68,9 +68,9 @@ pub use lemnos_light::{
     SpotsSpec, Status as LedStatus, SystemState,
 };
 pub use wire::{
-    ChannelDesc, ControlDesc, DeviceDesc, Event, FEATURE_GPU_LEASE, GpuAcquire, GpuHangReport,
-    GpuHolder, GpuInfo, GpuLeaseState, GpuMode, I2cOp, LedRequest, LedShow, LightFrame, LightInfo,
-    LineTarget, LooksOp, Message, PwmTarget, RawReading, RawRequest, ReadStats, Refusal, Request,
-    SpiXfer, VERSION, WireError, decode_message, decode_request, encode_reading,
-    encode_reading_into,
+    ChannelDesc, ControlDesc, DeviceDesc, Event, FEATURE_GPU_LEASE, FEATURE_READ_ID, GpuAcquire,
+    GpuHangReport, GpuHolder, GpuInfo, GpuLeaseState, GpuMode, I2cOp, LedRequest, LedShow,
+    LightFrame, LightInfo, LineTarget, LooksOp, Message, PwmTarget, RawReading, RawRequest,
+    ReadStats, Refusal, Request, SpiXfer, VERSION, WireError, decode_message, decode_request,
+    encode_reading, encode_reading_into,
 };

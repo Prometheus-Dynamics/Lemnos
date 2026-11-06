@@ -152,7 +152,16 @@ impl Message {
                 }
                 e.finish()
             }
-            Self::Reading(r) => encode_reading(&r.device, r.timestamp_us, r.status, &r.values),
+            Self::Reading(r) => {
+                let mut frame = encode_reading(&r.device, r.timestamp_us, r.status, &r.values);
+                if r.id != 0 {
+                    // Appended within protocol 1, only for an answer to a read with an id.
+                    frame.extend_from_slice(&r.id.to_le_bytes());
+                    let length = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) + 4;
+                    frame[..4].copy_from_slice(&length.to_le_bytes());
+                }
+                frame
+            }
             Self::Reply { id, result } => {
                 let mut e = Encoder::new(REPLY);
                 e.u32(*id);
@@ -334,11 +343,13 @@ impl Message {
                 for _ in 0..n {
                     values.push(d.i32()?);
                 }
+                let id = if d.is_empty() { 0 } else { d.u32()? };
                 Self::Reading(RawReading {
                     device,
                     timestamp_us,
                     status,
                     values,
+                    id,
                 })
             }
             REPLY => {

@@ -184,7 +184,13 @@ Everything planned, in order. Execution is paused until the user starts it.
     ignored only for frames the reference client never sends, gap 9 cuts at a UTF-8 boundary with
     `encode`'s signature kept, and gap 17 sets the socket to 0660. Gaps 8 and 12 are kept as
     intended (appended fields rely on unchecked tails). Gaps 10 (the opt sentinels) and 14 (no read
-    id) need a wire change, so they stay documented limits of protocol 1 and wait for a version 2.
+    id) were set aside for a version 2.
+  - Protocol 2 design (2026-11-06, `docs/ipc-v2.md`): neither gap needs a version. Both are fixed
+    within protocol 1's own rules. The encoder saturates `Some(sentinel)` one below it, since every
+    optional field is thousandths or milliseconds. `Read` and its answering `Reading` carry an
+    appended id, and `FEATURE_READ_ID` (welcome bit 1) tells the client to match by it. No byte
+    changes for an older peer. The file keeps the rule for when a version is due, the negotiation
+    (`Hello` frozen; the service answers the client's version per connection), and what waits.
 - [x] **8. `a_polled_400_hz_imu_delivers_each_sample_once` was intermittent.** Fixed: its rate floor
       is now 90 % of 400 for the time the service's threads had a CPU (their run-queue delay in
       `/proc/self/task/*/schedstat`), not a share set by a 10 ms wakeup probe's p99. Measured on two

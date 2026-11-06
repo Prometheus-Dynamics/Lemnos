@@ -53,6 +53,7 @@ fn requests_round_trip() {
     round_trip_request(Request::List);
     round_trip_request(Request::Stats);
     round_trip_request(Request::Read {
+        id: 6,
         device: "imu".into(),
     });
     round_trip_request(Request::Subscribe {
@@ -230,6 +231,14 @@ fn messages_round_trip() {
         timestamp_us: 123_456,
         status: DeviceStatus::Degraded,
         values: vec![9_806, i32::MIN],
+        id: 0,
+    }));
+    round_trip_message(Message::Reading(RawReading {
+        device: "imu".into(),
+        timestamp_us: 7,
+        status: DeviceStatus::Available,
+        values: vec![1],
+        id: 11,
     }));
     round_trip_message(Message::Reply {
         id: 4,
@@ -263,6 +272,7 @@ fn malformed_frames_are_errors() {
     assert!(decode_request(&[1, 0, 0, 0, 0]).is_err());
     assert!(decode_request(&[2, 0, 0, 0, 99, 0]).is_err());
     let mut frame = Request::Read {
+        id: 0,
         device: "imu".into(),
     }
     .encode();
@@ -665,6 +675,7 @@ fn encode_reading_matches_the_message_frame() {
         timestamp_us: 42,
         status: DeviceStatus::Available,
         values: values.to_vec(),
+        id: 0,
     });
     assert_eq!(
         crate::wire::encode_reading("imu", 42, DeviceStatus::Available, &values),
@@ -908,10 +919,10 @@ fn an_inline_look_with_no_layers_round_trips() {
 fn an_overlong_string_is_cut_at_a_character_boundary() {
     // 65 535 falls inside a two-byte character here.
     let device = format!("aa{}", "é".repeat(40_000));
-    let frame = Request::Read { device }.encode();
+    let frame = Request::Read { id: 0, device }.encode();
     let (decoded, used) = decode_request(&frame).unwrap().unwrap();
     assert_eq!(used, frame.len());
-    let Request::Read { device } = decoded else {
+    let Request::Read { device, .. } = decoded else {
         panic!("not a Read: {decoded:?}");
     };
     assert_eq!(device.len(), 65_534);
@@ -966,4 +977,46 @@ fn device_reasons_of_the_wrong_count_are_refused() {
     assert_eq!(frame[count], 1);
     frame[count] = 2;
     assert!(decode_message(&frame).is_err());
+}
+
+#[test]
+fn optional_values_never_meet_their_sentinel() {
+    let mut led = LedRequest::new(LedShow::Clear);
+    led.period_ms = Some(u32::MAX);
+    led.depth = Some(u16::MAX);
+    let (decoded, _) = decode_request(&Request::Led(led).encode())
+        .unwrap()
+        .unwrap();
+    let Request::Led(led) = decoded else {
+        panic!("not a Led: {decoded:?}");
+    };
+    assert_eq!(led.period_ms, Some(u32::MAX - 1));
+    assert_eq!(led.depth, Some(u16::MAX - 1));
+    assert_eq!(led.brightness, None);
+}
+
+#[test]
+fn a_read_without_its_appended_id_reads_as_id_zero() {
+    let old = crate::wire::encode_reading("imu", 1, DeviceStatus::Available, &[]);
+    let (decoded, _) = decode_message(&old).unwrap().unwrap();
+    assert!(matches!(
+        decoded,
+        Message::Reading(RawReading { id: 0, .. })
+    ));
+    // A read request from an older client: the device alone.
+    let mut frame = Request::Read {
+        id: 9,
+        device: "imu".into(),
+    }
+    .encode();
+    frame.truncate(frame.len() - 4);
+    frame[0] -= 4;
+    let (decoded, _) = decode_request(&frame).unwrap().unwrap();
+    assert_eq!(
+        decoded,
+        Request::Read {
+            id: 0,
+            device: "imu".into()
+        }
+    );
 }

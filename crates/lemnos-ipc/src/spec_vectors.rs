@@ -212,6 +212,7 @@ fn message_vectors_match_the_encoder() {
             timestamp_us: 1_000_000,
             status: DeviceStatus::Available,
             values: values.to_vec(),
+            id: 0,
         }),
     );
     // The service's fast path encodes a reading without building the message.

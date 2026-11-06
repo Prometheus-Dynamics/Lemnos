@@ -424,13 +424,15 @@ impl Service {
         self.sync_fusion();
     }
 
-    fn reading(&self, index: usize) -> Message {
+    /// The slot's reading, answering the read `id` (0: none).
+    fn reading(&self, index: usize, id: u32) -> Message {
         let slot = &self.slots[index];
         Message::Reading(RawReading {
             device: slot.id().to_string(),
             timestamp_us: slot.read_us,
             status: slot.status,
             values: slot.channel_values(),
+            id,
         })
     }
 
@@ -706,20 +708,20 @@ impl Service {
     }
 
     /// Sends a one-shot reader its reading, or why there is none.
-    fn answer(&mut self, index: usize, waiters: &[u32], ok: bool) {
-        if waiters.contains(&GRAVITY_WAITER) {
+    fn answer(&mut self, index: usize, waiters: &[(u32, u32)], ok: bool) {
+        if waiters.iter().any(|w| w.0 == GRAVITY_WAITER) {
             self.apply_gravity(index);
         }
         if waiters.is_empty() {
             return;
         }
-        let message = if ok && self.slots[index].fresh {
+        let mut message = if ok && self.slots[index].fresh {
             // A one-shot reader gets every channel, not the mask of the
             // subscription that last read the sensor (a polled read takes them
             // all).
             let slot = &mut self.slots[index];
             slot.values_mask = slot.all_channels();
-            self.reading(index)
+            self.reading(index, 0)
         } else {
             Message::Reply {
                 id: 0,
@@ -728,8 +730,16 @@ impl Service {
                 )),
             }
         };
-        for client in self.clients.iter_mut().filter(|c| waiters.contains(&c.id)) {
-            client.send(&message);
+        // Each read is answered with its own id.
+        for &(client, read) in waiters {
+            match &mut message {
+                Message::Reading(r) => r.id = read,
+                Message::Reply { id, .. } => *id = read,
+                _ => {}
+            }
+            if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
+                c.send(&message);
+            }
         }
     }
 
@@ -1007,7 +1017,7 @@ impl Service {
             return;
         }
         if self.slots[index].placement == Placement::Worker {
-            self.slots[index].waiters.push(GRAVITY_WAITER);
+            self.slots[index].waiters.push((GRAVITY_WAITER, 0));
             self.lights[li].waiting_gravity = true;
             self.dispatch_reads();
         } else {
@@ -1280,7 +1290,7 @@ impl Service {
                     version: VERSION,
                     board,
                     client_id: id,
-                    features: lemnos_ipc::FEATURE_GPU_LEASE,
+                    features: lemnos_ipc::FEATURE_GPU_LEASE | lemnos_ipc::FEATURE_READ_ID,
                 });
                 if first && self.clients[ci].events {
                     self.send_light_owners(ci);
@@ -1307,10 +1317,10 @@ impl Service {
                     .collect();
                 self.clients[ci].send(&Message::Stats(stats));
             }
-            Request::Read { device } => {
+            Request::Read { id: read, device } => {
                 let message = match self.slot_of(&device) {
                     None => Message::Reply {
-                        id: 0,
+                        id: read,
                         result: Err(Refusal::UnknownDevice),
                     },
                     Some(index) => {
@@ -1327,7 +1337,7 @@ impl Service {
                         if stale && slot.present && slot.placement == Placement::Worker {
                             // The bus thread reads it; the reply comes with the reading.
                             let id = self.clients[ci].id;
-                            self.slots[index].waiters.push(id);
+                            self.slots[index].waiters.push((id, read));
                             self.dispatch_reads();
                             return;
                         }
@@ -1343,10 +1353,10 @@ impl Service {
                             self.feed_fusion(index, &[row], read_us, 0);
                         }
                         if self.slots[index].fresh {
-                            self.reading(index)
+                            self.reading(index, read)
                         } else {
                             Message::Reply {
-                                id: 0,
+                                id: read,
                                 result: Err(Refusal::Device(
                                     self.slots[index].error.unwrap_or(ErrorKind::Unavailable),
                                 )),

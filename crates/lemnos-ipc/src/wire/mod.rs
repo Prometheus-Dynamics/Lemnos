@@ -26,6 +26,11 @@ use std::fmt;
 
 /// The protocol version both sides send in their greeting.
 pub const VERSION: u16 = 1;
+
+/// [`Message::Welcome`] feature bit: the service echoes a [`Request::Read`]'s id in its answer,
+/// so a client tells overlapping reads of one device apart.
+pub const FEATURE_READ_ID: u32 = 2;
+
 /// Frames longer than this are refused.
 pub const MAX_FRAME: usize = 1 << 20;
 /// Requests longer than this are refused. The largest request is a raw
@@ -169,6 +174,9 @@ pub struct RawReading {
     pub status: DeviceStatus,
     /// One fixed-point value per channel (`NO_VALUE`: none).
     pub values: Vec<i32>,
+    /// The id of the [`Request::Read`] this answers; 0 for a subscription's reading, or from a
+    /// service without [`FEATURE_READ_ID`]. Appended to the frame only when nonzero.
+    pub id: u32,
 }
 
 /// Why the service refused a request.
@@ -420,7 +428,11 @@ pub enum Request {
     /// [`Message::Stats`]. Kept by the service per read, so asking costs the
     /// readers nothing.
     Stats,
+    /// The device's latest reading, as a [`Message::Reading`], or a [`Message::Reply`] refusal.
+    /// A service with [`FEATURE_READ_ID`] echoes a nonzero `id` in both (appended within
+    /// protocol 1; older clients send none, which reads as 0).
     Read {
+        id: u32,
         device: String,
     },
     /// `period_ms` 0 unsubscribes. A nonzero `id` gets a [`Message::Reply`]
@@ -598,7 +610,7 @@ pub enum Message {
         version: u16,
         board: String,
         client_id: u32,
-        /// Feature bits ([`FEATURE_GPU_LEASE`]); appended within protocol 1,
+        /// Feature bits ([`FEATURE_GPU_LEASE`], [`FEATURE_READ_ID`]); appended within protocol 1,
         /// 0 from an older service.
         features: u32,
     },

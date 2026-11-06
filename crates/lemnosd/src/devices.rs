@@ -147,8 +147,9 @@ pub(crate) struct Slot {
     /// The deadline a scheduled read on the worker was due at (`None`: a read
     /// a client asked for, which leaves the schedule alone).
     pub dispatched_us: Option<u64>,
-    /// Clients waiting for a one-shot read, answered when it completes.
-    pub waiters: Vec<u32>,
+    /// Clients waiting for a one-shot read, answered when it completes: the client's id and
+    /// its read's id.
+    pub waiters: Vec<(u32, u32)>,
     pub info: Option<&'static DeviceInfo>,
     pub status: DeviceStatus,
     pub error: Option<ErrorKind>,

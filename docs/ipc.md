@@ -13,6 +13,8 @@ Sources, relative to the repository root:
 Line numbers are given as `file:line`. Where the implementation leaves a point
 open, this file says "not specified by the implementation".
 
+When a version 2 would be due, and how it would be negotiated: [ipc-v2.md](ipc-v2.md).
+
 Section 15 holds test vectors. `crates/lemnos-ipc/src/spec_vectors.rs` encodes
 the same values with the crate and compares the bytes with the hex here.
 
@@ -96,8 +98,9 @@ Notes on the table:
 
 - A `str` longer than 65 535 bytes is cut to 65 535 bytes on encode. The cut
   may split a UTF-8 sequence. The decoder then rejects the frame (section 14).
-- `opt` sentinels make `Some(0xFFFF)` and `Some(0xFFFFFFFF)` impossible to send.
-  They decode as None (section 14).
+- The encoder sends `Some(0xFFFF)` as `0xFFFE` and `Some(0xFFFFFFFF)` as
+  `0xFFFFFFFE`, so a value never arrives as None. Every optional field is
+  thousandths or milliseconds, far below the sentinel (section 14, item 10).
 
 ### Fixed-point values
 
@@ -187,7 +190,7 @@ In `Event::Status` the error byte is `255` for "no error" (`wire/message.rs:153`
 | Look mode (u8) | 0 `Max`, 1 `Add`, 2 `Over` | `wire/look.rs:164-168`, `:391-396` |
 | GPU lease mode (u8) | 0 exclusive, 1 shared. Fallback: exclusive. | `wire/gpu.rs` |
 | GPU lease state (u8) | 0 granted, 1 queued, 2 refused, 3 yield asked, 4 overdue. Unknown: a decode error. | `wire/gpu.rs` |
-| Welcome feature bits (u32) | bit 0: the GPU lease requests (6.6) | `wire/gpu.rs` |
+| Welcome feature bits (u32) | bit 0: the GPU lease requests (6.6). Bit 1: a `Read`'s id is echoed in its answer (section 8). | `wire/gpu.rs`, `wire/mod.rs` |
 
 ## 5. Handshake and version
 
@@ -224,7 +227,7 @@ reply. Field types are from section 3.
 |---|---|---|---|---|
 | 1 | `Hello` | `u16 version`, `str client`, `u8 priority`, `u8 keep`, `u8 events` (absent: 1) | `Welcome` (kind 101) | `request.rs:128-142`, `:376-383` |
 | 2 | `List` | (empty) | `Devices` (102) | `request.rs:153`, `:390` |
-| 3 | `Read` | `str device` | `Reading` (103), or `Reply` id 0 on refusal | `request.rs:155-159`, `:392` |
+| 3 | `Read` | `str device`, `u32 id` (absent: 0) | `Reading` (103), or `Reply` on refusal, both with the read's id | `request.rs` |
 | 4 | `Subscribe` | `str device`, `u32 period_ms`, `u32 id` (absent: 0) | `Reply` (104), see 8 | `request.rs:160-170`, `:408-413` |
 | 5 | `Set` | `u32 id`, `str device`, `str control`, `f64 value` | `Reply` (104) | `request.rs:185-194`, `:414-419` |
 | 6 | `Get` | `u32 id`, `str device`, `str control` | `Reply` (104) | `request.rs:195-203`, `:420-424` |
@@ -472,7 +475,7 @@ Service to client. Source: encode `wire/message.rs:33-214`, decode
 |---|---|---|---|
 | 101 | `Welcome` | `u16 version`, `str board`, `u32 client_id`, `u32 features` (absent: 0) | `message.rs:72-80`, `:219-223` |
 | 102 | `Devices` | device list (below), then the reason list (below) | `message.rs:94-127`, `:224-271` |
-| 103 | `Reading` | `str device`, `u64 timestamp_us`, `u8 status`, `u16 n`, `n` x `i32` value | `message.rs:128`, `:287-302` |
+| 103 | `Reading` | `str device`, `u64 timestamp_us`, `u8 status`, `u16 n`, `n` x `i32` value, then `u32 id` only when it answers a `Read` with a nonzero id (absent: 0) | `message.rs` |
 | 104 | `Reply` | `u32 id`, `u8 code`, `u8 kind`, `f64 value` | `message.rs:129-140`, `:303-316` |
 | 105 | `Event` | `u8` event tag, then the event payload (7.2) | `message.rs:141-188`, `:317-349` |
 | 106 | `Claimed` | `u32 id`, `u8 code`, `u8 kind`, `u32 handle` (0 on refusal) | `message.rs:189-200`, `:350-362` |
@@ -544,8 +547,10 @@ sends `restore`. The value is 0 in each case
 - An id of 0 means "no id". Clients before protocol 1 send 0 everywhere. The
   service sends a reply with id 0 only where the table says so.
 - Ids are per connection. Two connections may use the same id.
-- A `Reading` carries no id. A one-shot `Read` is matched by device name
-  (`client.rs:583-596`).
+- A `Reading` for a subscription carries no id. One that answers a `Read` with a
+  nonzero id carries that id, from a service with feature bit 1. The client
+  then matches its read by id; with an older service, by device name
+  (`client.rs`, `read`).
 
 What each request is answered with (`lemnosd/src/service.rs:1178-1533`):
 
@@ -554,7 +559,7 @@ What each request is answered with (`lemnosd/src/service.rs:1178-1533`):
 | `Hello` | `Welcome` (always) | No id |
 | `List` | `Devices` | No id |
 | `Stats` | `Stats` | No id |
-| `Read` | `Reading` when the read is served, else `Reply` id 0 | Refusals: `UnknownDevice`, or the device's error kind (`:1226-1270`) |
+| `Read` | `Reading` when the read is served, else `Reply`, both with the read's id | Refusals: `UnknownDevice`, or the device's error kind. Overlapping reads of one device are each answered with their own id. |
 | `Subscribe`, `SubscribeChannels` | `Reply` with the granted period | Sent when id is nonzero, or when refused (then even with id 0). A refusal does not add a subscription. (`:1275-1302`) |
 | `Set` | `Reply` with the applied value | On success also a `Control` event to events clients (`:1303-1320`) |
 | `Get` | `Reply` | (`:1321-1328`) |
@@ -682,6 +687,9 @@ Only what the code does:
   - `Event::Status.reason`: absent means empty (`message.rs:324-328`).
   - `LightInfo.look_brightness`: absent means 1000 (`message.rs:385-386`).
   - `Welcome.features`: absent means 0, no features (`message.rs`).
+  - `Read.id`: absent means 0 (`request.rs`).
+  - `Reading.id`: absent means 0. Sent only for a nonzero id, so a
+    subscription's reading is unchanged (`message.rs`).
 - **Trailing bytes.** No decoder rejects trailing bytes, by design: that is
   how an older peer skips a field appended after its time. Only the appended
   fields above check for their presence.
@@ -785,9 +793,10 @@ Facts about the code as it stood when this file was written. Entries marked fixe
 9. **Fixed (2026-11-06):** a long string is cut at a character boundary, so the frame still decodes. Was: **Strings are cut, not refused.** A `str` over 65 535 bytes is truncated on
    encode, possibly inside a UTF-8 sequence, and the decoder then refuses the
    frame (`wire/codec.rs:54-59`).
-10. **A limit of protocol 1:** fixing it changes the wire, so it waits for a version 2. **Optional sentinels collide with values.** `Some(0xFFFF)` as `opt u16` and
-    `Some(0xFFFFFFFF)` as `opt u32` decode as None (`wire/codec.rs:141`,
-    `:144`). A sender must avoid these values.
+10. **Fixed (2026-11-06), within protocol 1:** the encoder saturates a value one below its
+    sentinel. Every optional field is thousandths or milliseconds, so no value meant is lost
+    ([ipc-v2.md](ipc-v2.md), 2.1). Was: **Optional sentinels collide with values.**
+    `Some(0xFFFF)` as `opt u16` and `Some(0xFFFFFFFF)` as `opt u32` decoded as None.
 11. **Fixed (2026-11-06):** a line target kind or I2C op tag other than 0 or 1 is refused. Was: **Lenient tags.** The raw line target treats any nonzero kind as a name
     (`wire/raw.rs:354-363`). The I2C op decoder treats any nonzero tag as a
     read (`wire/raw.rs:426-429`). The encoder writes 0 and 1.
@@ -800,8 +809,10 @@ Facts about the code as it stood when this file was written. Entries marked fixe
     64 KiB SPI byte limit can exceed the 71 680-byte frame limit when it has
     many transfers. The service then closes the connection and sends no
     refusal.
-14. **A limit of protocol 1:** fixing it changes the wire, so it waits for a version 2. A client should not overlap reads of one device. **Reads are matched by device name.** A `Reading` has no id. Two
-    overlapping `Read` calls for one device cannot be told apart.
+14. **Fixed (2026-11-06), within protocol 1:** `Read` carries an appended id, the answer
+    echoes it, and the `Welcome` sets feature bit 1 ([ipc-v2.md](ipc-v2.md), 2.2). Was:
+    **Reads are matched by device name.** A `Reading` had no id, so two overlapping `Read`
+    calls for one device could not be told apart.
 15. **Fixed (2026-11-06):** a repeated `Hello` is answered with `Welcome` and changes nothing. Was: **Hello repeats are allowed.** A second `Hello` changes the name, owner,
     priority and flags, and sends a second `Welcome` (section 10, step 3).
 16. **Fixed (2026-11-06):** a reason count that does not match is refused. Was: **Devices reasons are dropped silently** when their count does not match

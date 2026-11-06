@@ -223,6 +223,7 @@ mod tests {
             timestamp_us: 7,
             status: DeviceStatus::Available,
             values: values.to_vec(),
+            id: 0,
         });
         // One encoding for two clients: the first client's bytes are what the message encodes to.
         let frame = Rc::new(encode_reading("imu", 7, DeviceStatus::Available, &values));

@@ -183,3 +183,68 @@ fn a_one_shot_read_during_a_masked_subscription_read_gets_every_channel() {
     }
     drop(subscriber);
 }
+
+/// Each one-shot read is answered with its own id, so two overlapping reads of one device are
+/// told apart; a read with id 0 (an older client's) is answered as before, with none.
+#[test]
+fn overlapping_reads_are_answered_by_id() {
+    use lemnos_ipc::{FEATURE_READ_ID, Message, Request, VERSION};
+    use std::io::{Read, Write};
+    let service = start();
+    let mut stream = std::os::unix::net::UnixStream::connect(service.socket()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buf = Vec::new();
+    let mut next = |stream: &mut std::os::unix::net::UnixStream| loop {
+        if let Some((message, used)) = lemnos_ipc::decode_message(&buf).unwrap() {
+            buf.drain(..used);
+            return message;
+        }
+        let mut chunk = [0u8; 4096];
+        let n = stream.read(&mut chunk).unwrap();
+        assert!(n > 0, "the service closed the connection");
+        buf.extend_from_slice(&chunk[..n]);
+    };
+    let hello = Request::Hello {
+        version: VERSION,
+        client: "reader".into(),
+        priority: 0,
+        keep: false,
+        events: false,
+    };
+    stream.write_all(&hello.encode()).unwrap();
+    let Message::Welcome { features, .. } = next(&mut stream) else {
+        panic!("no welcome");
+    };
+    assert_ne!(features & FEATURE_READ_ID, 0);
+    let mut frames = Vec::new();
+    for (id, device) in [(5, "slow"), (6, "slow"), (0, "slow"), (7, "nope")] {
+        frames.extend(
+            Request::Read {
+                id,
+                device: device.into(),
+            }
+            .encode(),
+        );
+    }
+    stream.write_all(&frames).unwrap();
+    let (mut readings, mut refused) = (Vec::new(), Vec::new());
+    while readings.len() + refused.len() < 4 {
+        match next(&mut stream) {
+            Message::Reading(r) => {
+                assert_eq!(r.device, "slow");
+                readings.push(r.id);
+            }
+            Message::Reply {
+                id,
+                result: Err(refusal),
+            } => refused.push((id, refusal)),
+            _ => {}
+        }
+    }
+    readings.sort_unstable();
+    assert_eq!(readings, [0, 5, 6]);
+    assert_eq!(refused, [(7, Refusal::UnknownDevice)]);
+    service.stop();
+}
