@@ -564,7 +564,9 @@ version = "2.0.1-dev"
 dependencies = [
  "bytemuck",
  "lemnos-linux",
+ "lemnos-linux-sys",
  "lemnos-v4l2",
+ "libc",
 ]
 
 [[package]]

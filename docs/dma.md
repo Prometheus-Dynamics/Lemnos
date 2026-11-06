@@ -8,7 +8,8 @@ kernel 7.2.9-v8-16k, 16K pages): the three dma-heaps, sync-file fences from a re
 
 ## Scope
 
-Lemnos is user-space hardware access. It allocates and synchronises DMA buffers, maps them,
+Lemnos is user-space hardware access, with small kernel modules of its own where a block needs
+one (`kernel-modules/`, opt-in beside the stock drivers; see docs/kernel-module.md). It allocates and synchronises DMA buffers, maps them,
 and hands their descriptors to whoever reads or writes them. It is not a memory manager: it
 does not pool buffers, decide which buffer holds which frame, choose a heap for a use, or
 move data. A buffer is handed over as the same descriptor, never copied.

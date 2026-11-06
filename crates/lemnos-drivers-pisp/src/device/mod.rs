@@ -10,6 +10,8 @@
 
 mod be;
 mod be_image;
+#[cfg(feature = "be-module")]
+pub mod be_module;
 mod be_output;
 mod be_spare;
 mod be_stream;

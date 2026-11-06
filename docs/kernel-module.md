@@ -151,9 +151,23 @@ The split that answers the security question also answers the licence one. The r
 code is GPL in the module. The permissively licensed user space deals only in uAPI structs and
 dma-buf handles.
 
-## Open, for the board
+## 5. On the board
 
-- Interrupt-to-user-space latency, measured as in question 2.
-- Whether either soft-recovery idea in question 3 revives a stuck block.
-- Whether the IOMMU's violation abort reaches the BE's error status, or only the IOMMU's own
-  log. Test with a mapping freed while a job runs.
+Measured 2026-11-06 on board #1 (a Pi 5 class board, 7.2.9-v8-16k) with the module,
+`kernel-modules/lemnos-pisp-be`, and `lemnos-drivers-pisp`'s `be_module_check`. The full table
+is in the module's README.
+
+- **Latency.** Interrupt to user-space wake-up: p50 2 µs, p99 20 µs, max 76 µs under
+  `SCHED_FIFO` over 10000 jobs; p50 2 µs, p99 30 µs, max 411 µs at normal priority over 2000.
+  The job's round trip (an NV12 640x480 downscale) is the block's own time, p50 511 µs, the same
+  as through `pispbe` (505 µs), once the module keeps buffers mapped between jobs as vb2 does.
+  Mapping per job cost about 50 µs a job.
+- **Soft recovery.** A Bayer TDN and stitch input on an RGB input stopped the block (status 0x2,
+  started one ahead of done). Neither idea of question 3 revived it: the AXI rewrite with the
+  interrupts cleared, and the ISP clock halved and restored, both left status 0x2, and `pispbe`
+  refused the block at probe until a reboot. "Only a reboot" stands.
+- **IOMMU violation.** Nothing reaches the block's status, and nothing is logged: the bcm2712
+  IOMMU driver has no fault reporting, and an unmapped page translates to its "default" page.
+  A job whose input was unmapped while it ran finished with status 0 and wrong output; one
+  whose output was unmapped wrote almost nothing to it. So the module must never unmap a buffer
+  while a job holds it, which it does not, and it keeps a stopped block's buffers mapped.

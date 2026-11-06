@@ -23,12 +23,21 @@ device = ["std", "dep:lemnos-v4l2", "dep:lemnos-linux"]
 # and the back end block patch (`LEMNOS_PISP_BE_PATCH`). Off, they compile to no-ops and the
 # variables are ignored.
 debug-hooks = ["device"]
+# The back end through Lemnos's own module, /dev/lemnos-pisp-be (kernel-modules/lemnos-pisp-be),
+# beside the pispbe nodes, which stay the default. Opt-in.
+be-module = ["device", "dep:lemnos-linux-sys", "dep:libc"]
 
 [dependencies]
 bytemuck = { version = "1.25", features = ["derive", "min_const_generics", "extern_crate_alloc"] }
 lemnos-v4l2 = { workspace = true, optional = true }
 lemnos-linux = { workspace = true, optional = true, features = ["dma"] }
+lemnos-linux-sys = { workspace = true, optional = true, default-features = false }
+libc = { workspace = true, optional = true }
 
 [[example]]
 name = "be_ops_check"
 required-features = ["device"]
+
+[[example]]
+name = "be_module_check"
+required-features = ["be-module"]

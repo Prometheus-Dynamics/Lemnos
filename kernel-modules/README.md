@@ -16,6 +16,9 @@ the rest of the repository, which is MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-
 - `lemnos-sensor-bridge/`: the sensor bridge, a V4L2 subdevice that carries a camera sensor driven
   from user space. Its user-space side is the `lemnos-sensor-bridge` crate. See
   `lemnos-sensor-bridge/README.md` and `lemnos-sensor-bridge/PROTOCOL.md`.
+- `lemnos-pisp-be/`: the Raspberry Pi 5 PiSP back end as a character device, an opt-in fast path
+  beside the stock `pispbe` driver, bound only through `driver_override`. Its user-space side is
+  `lemnos-drivers-pisp`'s `be-module` feature. See `lemnos-pisp-be/README.md`.
 - `kernel-env.sh`: the kernel selection that the modules' build scripts source.
 
 ## Licence boundary

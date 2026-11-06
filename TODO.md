@@ -104,13 +104,19 @@ Everything planned, in order. Execution is paused until the user starts it.
         - The module is GPL-2.0 and may port from the stock driver. User space uses only the
           uAPI headers (syscall note) and libpisp (BSD-2-Clause).
         - Latency is unmeasured.
-  - [ ] PiSP back end on the board: interrupt-to-user-space latency, the two soft-recovery tries,
-        and whether an IOMMU violation shows in the block's status.
+  - [x] PiSP back end on the board (2026-11-06, board #1): `kernel-modules/lemnos-pisp-be` and
+        `lemnos-drivers-pisp`'s `be-module` feature. Numbers in the module's README and
+        [docs/kernel-module.md](docs/kernel-module.md) section 5:
+        - interrupt to user-space wake-up p50 2 µs, p99 20 µs, max 76 µs under `SCHED_FIFO`
+          (10000 jobs); the round trip matches `pispbe` (p50 511 against 505 µs) once mappings
+          are kept between jobs.
+        - Neither soft recovery (AXI rewrite, clock rate change) revives a stopped block: a
+          reboot stays the recovery.
+        - An IOMMU violation never shows: the block reads and writes the IOMMU's default page and
+          finishes with status 0. The module never unmaps a buffer a job holds.
   - [ ] Then the receiver, the sensor over i2c-dev, and a mock backend for the simulator.
-  - [ ] When the module lands, reword "Lemnos is user-space hardware access" in
-        [docs/dma.md](docs/dma.md) and "no kernel modules" in
-        [docs/system-service.md](docs/system-service.md). The latter argues against chip drivers as
-        modules, which still holds, but its recommendation reads wider than that.
+  - [x] Reworded "Lemnos is user-space hardware access" in [docs/dma.md](docs/dma.md) and "no
+        kernel modules" in [docs/system-service.md](docs/system-service.md) for the module.
 - [ ] **6. GPU**, per the agreed seam note (kept outside this repository, because it names the
       products). Mesa stays, and `lemnosd` coordinates rather than enforces: an advisory lease
       first, `lemnos-gpu` only when a consumer needs it.

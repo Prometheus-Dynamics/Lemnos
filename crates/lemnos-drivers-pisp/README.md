@@ -13,6 +13,13 @@ back end video nodes. It has no C libraries at run time and forbids `unsafe` cod
   `lemnos-linux` (dma-heap buffers). Linux only.
 - `debug-hooks` (implies `device`): environment-variable hooks for diffing configurations
   against another stack's (see below). Off, they compile to nothing.
+- `be-module` (implies `device`): `device::be_module`, the back end through Lemnos's own module,
+  `/dev/lemnos-pisp-be` (`kernel-modules/lemnos-pisp-be`), instead of the `pispbe` nodes.
+  Opt-in; the `pispbe` path stays the default and does not change. `BeModuleJob::new` prepares a
+  `be::ops` op with strides of its own choosing, `BeModule::submit` queues it on the caller's
+  dma-bufs and returns at once, and `BeModule::wait` returns the finished jobs, each with its
+  interrupt's `CLOCK_MONOTONIC` time. Measured on a board for one op (see the module's README);
+  the Bayer path through it is untested.
 
 ## Modules
 
@@ -62,7 +69,9 @@ Last run 2026-11-06 against the Raspberry Pi 7.2 tree (53679a578): it matches.
 `cargo test -p lemnos-drivers-pisp` runs the host tests (default features).
 `cargo test -p lemnos-drivers-pisp --features device` adds the device-side tests, which use
 fakes and temporary files and need no hardware. The example `be_ops_check` needs the `device`
-feature and a board, so it is `required-features` and is not built by default.
+feature and a board, so it is `required-features` and is not built by default; so does
+`be_module_check` (feature `be-module`), which compares the module with the `pispbe` nodes and
+runs the IOMMU and stopped-block tests.
 
 ## Debug hooks (feature `debug-hooks`)
 

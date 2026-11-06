@@ -18,6 +18,7 @@ pub mod gpio;
 pub mod i2c;
 pub mod inotify;
 mod ioctl;
+pub mod lemnos_pisp_be;
 pub mod media;
 pub mod mmap;
 pub mod netlink;

@@ -12,6 +12,8 @@ each system call in a safe function:
 - `netlink`: the kernel's `NETLINK_KOBJECT_UEVENT` socket.
 - `inotify`: init, add and remove watches.
 - `poll`: waiting on one descriptor.
+- `lemnos_pisp_be`: the uAPI of Lemnos's own PiSP back end module (`/dev/lemnos-pisp-be`):
+  info, submit, recover and the finished-job records.
 
 Every `unsafe` block carries a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks` is
 denied). Applications use `lemnos-linux`, not this crate. Ported from the earlier kernel layer (see docs/provenance.md).

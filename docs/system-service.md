@@ -858,9 +858,12 @@ Building the `no_std` drivers as Rust-for-Linux modules is technically possible,
 - **Two driver models.** The chip drivers would need kernel-specific glue (no
   embedded-hal in the kernel), breaking "write once" across lemnosd, the runtime and MCUs.
 
-Recommendation: no kernel modules. Mainline drivers where they exist (generic binding),
-userspace drivers elsewhere. Revisit only for a chip with hard real-time needs that neither
-covers, and then upstream it.
+Recommendation: no chip drivers as kernel modules. Mainline drivers where they exist (generic
+binding), userspace drivers elsewhere. Revisit only for a chip with hard real-time needs that
+neither covers, and then upstream it. This is about the bus chips' drivers. Lemnos's own small
+modules for SoC blocks (`kernel-modules/`, the PiSP back end first) are a different case: an
+opt-in fast path beside a stock driver, written in C, with the drivers still in user space
+(docs/kernel-module.md).
 
 ## Process model
 
