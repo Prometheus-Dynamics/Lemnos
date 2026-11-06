@@ -553,6 +553,19 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   one read and comes back with the result: a slow transaction on one bus never delays a due
   read on another, and a bus runs one read at a time. Fans and lights stay on the service
   thread.
+- **No allocation per reading.** Once each sensor has been read and a few frames are in use,
+  a subscribed reading allocates nothing in the service:
+  - the bus thread reads into a sample batch that travels with the job and comes back to be
+    reused;
+  - the hand-off to the loop and back goes over bounded channels, which hold their slots from
+    the start;
+  - the reading is encoded into a pooled frame that no client still queues (at most 64 are
+    kept).
+
+  `crates/lemnosd/tests/alloc.rs` counts every allocation outside the test thread: 0 over about
+  200 readings a second (2026-11-06; it was about 3 a reading, plus a channel block every 31
+  messages). The client's decoding (`DeviceClient`) still allocates a reading's device name and
+  values.
 - **New samples only (the duplicate filter).** A polled sensor's reading identical to the last
   one it delivered (every channel value equal, which is every raw byte of a BMI088) is not
   delivered when it is read within one output period of that delivery. The filter is lemnosd's

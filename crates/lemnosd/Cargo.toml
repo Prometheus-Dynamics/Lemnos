@@ -77,3 +77,5 @@ lemnos-core = { workspace = true, features = ["std"] }
 # The integration test runs a multi-thread runtime (the binary is current-thread).
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 lemnos-mock.workspace = true
+# tests/alloc.rs: the counting allocator.
+lemnos-linux-sys = { workspace = true, features = ["alloc-count"] }

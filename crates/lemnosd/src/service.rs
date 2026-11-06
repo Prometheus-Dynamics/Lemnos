@@ -67,6 +67,9 @@ const FUSION_RETRY_MS: u64 = 1_000;
 /// on it.
 const SHUTDOWN_FADE_MS: u32 = 1_200;
 const SHUTDOWN_CAP_MS: u64 = 1_500;
+/// Reading frames kept for reuse (`Service::frame_pool`): enough for every client queue that
+/// holds a few readings, bounded so a client that stops reading cannot grow it.
+const FRAME_POOL: usize = 64;
 
 /// What the service needs.
 pub struct ServiceConfig {
@@ -189,6 +192,11 @@ pub struct Service {
     due_subscribers: Vec<(u32, u64)>,
     /// The frames encoded for one sample, by channel mask (reused).
     encoded: Vec<(u64, Rc<Vec<u8>>)>,
+    /// Reading frames to encode into: one no client still queues is reused, so a reading
+    /// allocates no frame once the pool covers the frames in flight.
+    frame_pool: Vec<Rc<Vec<u8>>>,
+    /// Sample batches back from the bus threads, for the next reads.
+    spare_samples: Vec<Vec<[i32; lemnos_device::MAX_CHANNELS]>>,
     /// The named looks (built-in, board, look files).
     looks: LookTable,
     next_looks_ms: u64,
@@ -273,6 +281,8 @@ impl Service {
             due: Vec::new(),
             due_subscribers: Vec::new(),
             encoded: Vec::new(),
+            frame_pool: Vec::new(),
+            spare_samples: Vec::new(),
             looks,
             next_looks_ms: 0,
             workers: Workers::new()?,
@@ -506,17 +516,34 @@ impl Service {
                 Some(at) => at,
                 None => {
                     let mut scratch = [lemnos_device::NO_VALUE; lemnos_device::MAX_CHANNELS];
-                    let frame = lemnos_ipc::encode_reading(
-                        device,
-                        timestamp_us,
-                        status,
-                        masked_values(values, mask, &mut scratch),
-                    );
-                    encoded.push((mask, Rc::new(frame)));
+                    // A pooled frame nobody else holds, or a new one.
+                    let mut frame = match self
+                        .frame_pool
+                        .iter()
+                        .position(|f| Rc::strong_count(f) == 1)
+                    {
+                        Some(free) => self.frame_pool.swap_remove(free),
+                        None => Rc::new(Vec::new()),
+                    };
+                    if let Some(buf) = Rc::get_mut(&mut frame) {
+                        lemnos_ipc::encode_reading_into(
+                            buf,
+                            device,
+                            timestamp_us,
+                            status,
+                            masked_values(values, mask, &mut scratch),
+                        );
+                    }
+                    encoded.push((mask, frame));
                     encoded.len() - 1
                 }
             };
             client.send_reading(&encoded[at].1);
+        }
+        for (_, frame) in encoded.drain(..) {
+            if self.frame_pool.len() < FRAME_POOL {
+                self.frame_pool.push(frame);
+            }
         }
         self.encoded = encoded;
     }
@@ -524,15 +551,17 @@ impl Service {
     /// Takes the reads that finished on the bus threads, then starts the
     /// ones that are due on each idle bus.
     fn collect_reads(&mut self) {
-        while let Some(done) = self.workers.take_done() {
-            self.complete(done);
+        while let Some(mut done) = self.workers.take_done() {
+            let samples = std::mem::take(&mut done.samples);
+            self.complete(done, &samples);
+            self.spare_samples.push(samples);
         }
         self.dispatch_reads();
     }
 
     /// Applies a finished read: status, values, the next deadline, the
     /// subscribers and the one-shot readers waiting on it.
-    fn complete(&mut self, done: Done) {
+    fn complete(&mut self, done: Done, samples: &[[i32; lemnos_device::MAX_CHANNELS]]) {
         let index = done.index;
         let now_us = self.now_us();
         let ok = done.result.is_ok();
@@ -542,7 +571,7 @@ impl Service {
         let repeat = ok
             && done.count == 1
             && !slot.batched
-            && slot.repeats_last(&done.samples[0], done.started_us);
+            && slot.repeats_last(&samples[0], done.started_us);
         let count = if ok && !repeat { done.count } else { 0 };
         let miss_repeat = repeat;
         slot.busy = false;
@@ -552,7 +581,7 @@ impl Service {
             .as_ref()
             .and_then(BoxedDevice::calibration_status);
         if count > 0 {
-            slot.values = done.samples[count - 1];
+            slot.values = samples[count - 1];
         }
         let period_us = slot
             .device
@@ -566,7 +595,7 @@ impl Service {
         // no fault.
         let miss = ok && !slot.batched && (done.count == 0 || miss_repeat);
         if ok && !slot.batched && count == 1 {
-            slot.last_delivered = Some((done.started_us + done.cost_us, done.samples[0]));
+            slot.last_delivered = Some((done.started_us + done.cost_us, samples[0]));
         }
         let (was_fresh, was_us) = (slot.fresh, slot.read_us);
         let status = if miss {
@@ -608,8 +637,8 @@ impl Service {
             self.status_event(index, status);
         }
         if count > 0 {
-            self.deliver_batch(index, &done.samples[..count], done.started_us, period_us);
-            self.feed_fusion(index, &done.samples[..count], done.started_us, period_us);
+            self.deliver_batch(index, &samples[..count], done.started_us, period_us);
+            self.feed_fusion(index, &samples[..count], done.started_us, period_us);
         }
         if miss {
             // A one-shot reader is answered from the last reading; with none
@@ -753,7 +782,12 @@ impl Service {
         let mask = slot.read_mask(now_us);
         device.select_channels(mask);
         slot.values_mask = mask;
-        let job = Job { index, device };
+        let samples = self.spare_samples.pop().unwrap_or_default();
+        let job = Job {
+            index,
+            device,
+            samples,
+        };
         slot.busy = true;
         if scheduled {
             // Until the read completes, the schedule does not fire it again.
@@ -774,10 +808,12 @@ impl Service {
     /// Waits for the reads in flight (at shutdown), applying each.
     fn drain_reads(&mut self) {
         while self.workers.any_busy() {
-            let Some(done) = self.workers.wait_done() else {
+            let Some(mut done) = self.workers.wait_done() else {
                 return;
             };
-            self.complete(done);
+            let samples = std::mem::take(&mut done.samples);
+            self.complete(done, &samples);
+            self.spare_samples.push(samples);
         }
     }
 

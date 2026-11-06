@@ -24,6 +24,16 @@ impl Encoder {
         Self { buf }
     }
 
+    /// An encoder writing into `buf`, cleared first: a caller that keeps its buffer between
+    /// frames encodes without allocating once the buffer is large enough.
+    pub(super) fn reuse(kind: u16, mut buf: Vec<u8>, capacity: usize) -> Self {
+        buf.clear();
+        buf.reserve(capacity.max(6));
+        buf.extend_from_slice(&[0; 4]);
+        buf.extend_from_slice(&kind.to_le_bytes());
+        Self { buf }
+    }
+
     pub(super) fn u8(&mut self, v: u8) -> &mut Self {
         self.buf.push(v);
         self

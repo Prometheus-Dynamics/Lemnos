@@ -96,7 +96,7 @@ mod request;
 pub use gpu::{
     FEATURE_GPU_LEASE, GpuAcquire, GpuHangReport, GpuHolder, GpuInfo, GpuLeaseState, GpuMode,
 };
-pub use message::encode_reading;
+pub use message::{encode_reading, encode_reading_into};
 pub use raw::{I2cOp, LineTarget, PwmTarget, RawRequest, SpiXfer};
 
 pub use codec::Code;

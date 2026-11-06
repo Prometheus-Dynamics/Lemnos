@@ -188,6 +188,8 @@ impl MockFifo {
 struct I2cState {
     targets: BTreeMap<u8, MockI2cTarget>,
     log: Vec<I2cTransfer>,
+    /// Logging off (`set_logging`): no transaction or raw write is recorded.
+    quiet: bool,
     fail: VecDeque<ErrorKind>,
     pending_polls: u32,
     /// How long each blocking transaction takes (`std`; see `set_latency`).
@@ -387,6 +389,12 @@ impl MockI2c {
         })
     }
 
+    /// Records transactions and raw writes (`true`, the default) or not: off, a transaction
+    /// allocates nothing, for tests that count allocations or run long.
+    pub fn set_logging(&self, on: bool) {
+        with(&self.state, |s| s.quiet = !on);
+    }
+
     /// Every transaction so far (a snapshot).
     pub fn transfers(&self) -> Vec<I2cTransfer> {
         with(&self.state, |s| s.log.clone())
@@ -414,16 +422,19 @@ impl MockI2c {
 
 impl I2cState {
     fn run(&mut self, address: u8, operations: &mut [I2cOperation<'_>]) -> Result<(), ErrorKind> {
-        self.log.push(I2cTransfer {
-            address,
-            ops: operations
-                .iter()
-                .map(|op| match op {
-                    I2cOperation::Write(data) => MockOp::Write(data.to_vec()),
-                    I2cOperation::Read(buf) => MockOp::Read(buf.len()),
-                })
-                .collect(),
-        });
+        if !self.quiet {
+            self.log.push(I2cTransfer {
+                address,
+                ops: operations
+                    .iter()
+                    .map(|op| match op {
+                        I2cOperation::Write(data) => MockOp::Write(data.to_vec()),
+                        I2cOperation::Read(buf) => MockOp::Read(buf.len()),
+                    })
+                    .collect(),
+            });
+        }
+        let quiet = self.quiet;
         if let Some(kind) = self.fail.pop_front() {
             return Err(kind);
         }
@@ -442,7 +453,9 @@ impl I2cState {
                 I2cOperation::Write(data) => {
                     let mut data: &[u8] = data;
                     if !previous_write {
-                        target.raw_writes.push(Vec::new());
+                        if !quiet {
+                            target.raw_writes.push(Vec::new());
+                        }
                         if let Some(width) = target.width {
                             let n = width.bytes().min(data.len());
                             target.pointer = data[..n]
@@ -450,7 +463,7 @@ impl I2cState {
                                 .fold(0u16, |acc, b| (acc << 8) | u16::from(*b));
                         }
                     }
-                    if let Some(run) = target.raw_writes.last_mut() {
+                    if let Some(run) = target.raw_writes.last_mut().filter(|_| !quiet) {
                         run.extend_from_slice(data);
                     }
                     if let Some(width) = target.width {

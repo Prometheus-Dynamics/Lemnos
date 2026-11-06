@@ -14,10 +14,24 @@ pub fn encode_reading(
     status: DeviceStatus,
     values: &[i32],
 ) -> Vec<u8> {
+    let mut frame = Vec::new();
+    encode_reading_into(&mut frame, device, timestamp_us, status, values);
+    frame
+}
+
+/// [`encode_reading`] into `frame`, replacing what it held: no allocation once `frame` has
+/// room, so a sender that keeps its frames encodes readings without allocating.
+pub fn encode_reading_into(
+    frame: &mut Vec<u8>,
+    device: &str,
+    timestamp_us: u64,
+    status: DeviceStatus,
+    values: &[i32],
+) {
     let device_len = device.len().min(u16::MAX as usize);
     // Frame length, kind, device (length and bytes), timestamp, status, count, values.
     let size = 6 + 2 + device_len + 8 + 1 + 2 + 4 * values.len();
-    let mut e = Encoder::with_capacity(READING, size);
+    let mut e = Encoder::reuse(READING, std::mem::take(frame), size);
     e.str(device)
         .u64(timestamp_us)
         .u8(status.code())
@@ -25,7 +39,7 @@ pub fn encode_reading(
     for v in values {
         e.i32(*v);
     }
-    e.finish()
+    *frame = e.finish();
 }
 
 impl Message {

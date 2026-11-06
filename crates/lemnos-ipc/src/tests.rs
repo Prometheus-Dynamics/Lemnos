@@ -670,6 +670,11 @@ fn encode_reading_matches_the_message_frame() {
         crate::wire::encode_reading("imu", 42, DeviceStatus::Available, &values),
         message.encode()
     );
+    // Into a buffer that held a longer frame: replaced, not appended to.
+    let mut frame = vec![0xaa; 100];
+    crate::wire::encode_reading_into(&mut frame, "imu", 42, DeviceStatus::Available, &values);
+    assert_eq!(frame, message.encode());
+    assert!(frame.capacity() >= 100, "the buffer was kept");
 }
 
 #[test]

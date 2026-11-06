@@ -15,7 +15,7 @@ use lemnos_linux_sys::time::boottime_us;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -26,11 +26,19 @@ const WAIT_DONE: Duration = Duration::from_secs(5);
 /// `lemnos_drivers_bmi088::MAX_SAMPLES`).
 pub(crate) const BATCH: usize = 48;
 
+/// Finished reads that may wait for the service at once: a lane runs one read at a time, so
+/// this bounds the lanes that can finish together without blocking. A bounded channel holds
+/// its slots from the start: a read sent through it allocates nothing.
+const DONE_SLOTS: usize = 64;
+
 /// A read to run: the device, moved to the bus's thread.
 pub(crate) struct Job {
     /// The sensor's slot.
     pub index: usize,
     pub device: BoxedDevice,
+    /// Room for the samples, handed back in [`Done::samples`] and reused for the next read, so
+    /// a read allocates nothing once each sensor has had one.
+    pub samples: Vec<[i32; MAX_CHANNELS]>,
 }
 
 /// A finished read, with the device back.
@@ -54,14 +62,14 @@ pub(crate) struct Done {
 
 struct Lane {
     name: String,
-    jobs: Sender<Job>,
+    jobs: SyncSender<Job>,
     busy: bool,
 }
 
 /// The lanes (one per bus), and the channel their results come back on.
 pub(crate) struct Workers {
     lanes: Vec<Lane>,
-    done_tx: Sender<Done>,
+    done_tx: SyncSender<Done>,
     done_rx: Receiver<Done>,
     /// The poll loop's end of the wake pair (non-blocking).
     wake_rx: UnixStream,
@@ -74,7 +82,7 @@ impl Workers {
         let (wake_rx, wake_tx) = UnixStream::pair()?;
         wake_rx.set_nonblocking(true)?;
         wake_tx.set_nonblocking(true)?;
-        let (done_tx, done_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::sync_channel(DONE_SLOTS);
         Ok(Self {
             lanes: Vec::new(),
             done_tx,
@@ -100,7 +108,8 @@ impl Workers {
         if let Some(lane) = self.lanes.iter().position(|l| l.name == name) {
             return Ok(lane);
         }
-        let (jobs, rx): (Sender<Job>, Receiver<Job>) = mpsc::channel();
+        // One read at a time per lane (`busy`), so one slot never makes `submit` wait.
+        let (jobs, rx): (SyncSender<Job>, Receiver<Job>) = mpsc::sync_channel(1);
         let index = self.lanes.len();
         let done = self.done_tx.clone();
         let mut wake = self.wake_tx.try_clone()?;
@@ -111,7 +120,9 @@ impl Workers {
                     let started_us = boottime_us();
                     job.device.set_clock_us(started_us);
                     let mut why = String::new();
-                    let mut samples = vec![[0i32; MAX_CHANNELS]; BATCH];
+                    let mut samples = std::mem::take(&mut job.samples);
+                    samples.clear();
+                    samples.resize(BATCH, [0i32; MAX_CHANNELS]);
                     let read = job.device.read_batch_why(&mut samples, &mut why);
                     let cost_us = boottime_us().saturating_sub(started_us);
                     let (result, count) = match read {
