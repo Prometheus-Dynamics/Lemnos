@@ -48,10 +48,11 @@ Everything planned, in order. Execution is paused until the user starts it.
   - [ ] Smaller ones to rule on: strings cut inside UTF-8, `opt` sentinels colliding with
         values, lenient raw tags, `SubscribeChannels` requiring its id, reads matched by name,
         trailing bytes unchecked.
-- [ ] **4. Single owner of hardware blocks.** Resume branch `lemnos-r5-v4l2` (df1dc81, local only,
-      worktree `/mnt/nvme-wd/lemnos-r5-v4l2`): V4L2, subdev and media, then RGA, VGLite, PiSP, and
-      the K230 and rkisp device layers. `crates/rga` and `crates/vglite` come over from the graph
-      runtime, and the generic parts of the camera stack's `crates/kernel` move here.
+- [x] **4. Single owner of hardware blocks.** Done 2026-11-06 (dev 1ab6b5e): V4L2, subdev and
+      media, RGA, VGLite, PiSP, the K230 and rkisp device layers and the sensor bridge are Lemnos's.
+      `crates/rga` and `crates/vglite` came over from the graph runtime, and the generic parts of
+      the camera stack's `crates/kernel` moved here. Every device path is untested on board; the
+      consumers switch on the coordinator's go.
   - [x] V4L2, subdev and media: `lemnos-v4l2` (5,274 lines, no `unsafe`, 35 tests) over the sys
         uAPI layer. All of the camera stack's generic `crates/kernel` code moved except `bus`,
         `dma_heap` (already `lemnos-linux::dma`) and `v4l2::m2m`.
@@ -63,7 +64,7 @@ Everything planned, in order. Execution is paused until the user starts it.
         under `v4l2-m2m`), converted at the sys calls in `v4l2/sys_format.rs`.
   - [x] PiSP: `lemnos-drivers-pisp` (the camera stack's `crates/pisp`, bb34279c): uAPI layouts, front and back end builders, tiling, statistics, and the `device` layer on `lemnos-v4l2` and `lemnos-linux` (no `unsafe`; the line timer's volatile accesses are in `lemnos-linux-sys::mmap`). Untested on board: the `device` layer since the move (the board results in the source are the earlier implementation's). `layout-check/run.sh` matches the Raspberry Pi 7.2 kernel tree (53679a578), the boards' kernel.
   - [x] Step 6, the sensor bridge (block-move step 6): `kernel-modules/lemnos-sensor-bridge` (GPL-2.0, out of tree) and the `lemnos-sensor-bridge` crate, from the camera stack's module and bridge client (d17de2ed, see `docs/provenance.md`). Renamed in one step: the module, its platform driver, the `lemnos,*` device-tree properties, the `LEMNOS_CID_*` controls (same ids), and `lemnos-bridge.service`. The module is syntax-checked only; the crate builds, clippy is clean and its host tests pass. Untested on board. The camera stack has not switched to these yet.
-  - [ ] RGA and VGLite from the graph runtime, on V4L2 M2M and direct kernel routes. Untested
+  - [x] RGA and VGLite from the graph runtime, on V4L2 M2M and direct kernel routes. Untested
         on board.
     - [x] RGA: `lemnos-drivers-rga` on the V4L2 M2M route, with `caps::route_for` naming the route
           each operation takes on each SoC. No `unsafe`, no dlopen, no consumer dev-dependencies;
