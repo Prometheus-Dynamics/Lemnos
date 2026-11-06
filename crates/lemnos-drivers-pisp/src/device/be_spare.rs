@@ -46,13 +46,16 @@ impl Allocate for HeapAllocator {
         if system_first {
             order.reverse();
         }
-        let buf = order.iter().find_map(|heap| match heap.allocate(len) {
-            Ok(buf) => Some(buf),
-            Err(e) => {
-                last = Some(e);
-                None
-            }
-        });
+        // Padded, so a GPU can import the output whole (`allocate_importable`).
+        let buf = order
+            .iter()
+            .find_map(|heap| match heap.allocate_importable(len) {
+                Ok(buf) => Some(buf),
+                Err(e) => {
+                    last = Some(e);
+                    None
+                }
+            });
         match (buf, last) {
             (Some(buf), _) => Ok(buf),
             (None, Some(e)) => Err(e.into()),

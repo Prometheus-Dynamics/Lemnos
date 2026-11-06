@@ -120,6 +120,13 @@ impl Drop for Mapping {
     }
 }
 
+/// The system's page size in bytes (4096 when it cannot be read).
+pub fn page_size() -> usize {
+    // SAFETY: `sysconf` takes no pointers and only reads the page size.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(page).unwrap_or(4096)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

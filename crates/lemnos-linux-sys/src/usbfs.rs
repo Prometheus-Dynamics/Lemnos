@@ -310,12 +310,7 @@ pub fn mapping_len(len: usize, page: usize) -> usize {
     len.max(1).div_ceil(page) * page
 }
 
-/// The system's page size in bytes.
-fn page_size() -> usize {
-    // SAFETY: `sysconf` takes no pointers and only reads the page size.
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    usize::try_from(page).unwrap_or(4096)
-}
+pub(crate) use crate::mmap::page_size;
 
 /// The URB memory the kernel holds for one submission.
 struct InFlight {

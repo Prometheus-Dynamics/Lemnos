@@ -188,6 +188,30 @@ impl DmaHeap {
         let fd = dma_heap::allocate(self.file.as_fd(), want)?;
         Ok(DmaBuf { fd, len })
     }
+
+    /// Allocates a dma-buf another driver can import whole, as
+    /// [`Self::allocate`] does, but at least [`IMPORT_SLACK`] bytes past `len`
+    /// and rounded up to whole pages. [`DmaBuf::len`] is that padded size,
+    /// which is also the size the kernel reports for the buffer.
+    ///
+    /// Use it for a buffer a GPU may import: Mesa's v3dv takes a linear
+    /// dma-buf as a storage buffer only when the dma-buf is at least 256 bytes
+    /// larger than what it binds. A frame whose size is a whole number of pages
+    /// (NV12 1280x800 is 375 pages of 4 KiB) would otherwise be refused.
+    pub fn allocate_importable(&self, len: usize) -> io::Result<DmaBuf> {
+        self.allocate(importable_len(len, lemnos_linux_sys::mmap::page_size())?)
+    }
+}
+
+/// The bytes past a buffer's end that [`DmaHeap::allocate_importable`] adds
+/// before rounding to pages.
+pub const IMPORT_SLACK: usize = 256;
+
+/// `len` plus [`IMPORT_SLACK`], rounded up to whole pages of `page` bytes.
+pub fn importable_len(len: usize, page: usize) -> io::Result<usize> {
+    len.checked_add(IMPORT_SLACK)
+        .and_then(|n| n.checked_next_multiple_of(page.max(1)))
+        .ok_or_else(|| invalid(format!("a {len}-byte dma-buf is too large to pad")))
 }
 
 impl AsFd for DmaHeap {
@@ -522,6 +546,19 @@ fn invalid(message: String) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_importable_buffer_has_the_slack_and_whole_pages() {
+        use super::{IMPORT_SLACK, importable_len};
+        // NV12 1280x800: exactly 375 pages of 4 KiB, so one page more.
+        let nv12 = 1280 * 800 * 3 / 2;
+        assert_eq!(importable_len(nv12, 4096).unwrap(), nv12 + 4096);
+        assert_eq!(importable_len(nv12, 16384).unwrap(), 1_540_096);
+        assert_eq!(importable_len(1, 4096).unwrap(), 4096);
+        assert_eq!(importable_len(4096 - IMPORT_SLACK, 4096).unwrap(), 4096);
+        assert_eq!(importable_len(4096 - IMPORT_SLACK + 1, 4096).unwrap(), 8192);
+        assert!(importable_len(usize::MAX - 100, 4096).is_err());
+    }
+
     use super::*;
     use std::io::Write;
 
