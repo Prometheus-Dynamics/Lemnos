@@ -175,6 +175,17 @@ Everything planned, in order. Execution is paused until the user starts it.
         skips); at 2.25 ms none did (380-387 at 13-16 % waited, skips tracking the wait). The
         cost is about 11 % more reads that find no new sample. The test's failure message now
         counts skipped samples and misses.
+        On a board (2026-11-06, board #1, BMI088 on the RP1 PIO I2C bus, accelerometer at
+        200 Hz, the image's other services running; the release service build before and at
+        the fix, two interleaved rounds each, 45 s a window): no difference. The board entry's
+        `poll_ms = 5` caps the read period at 5 ms, above the 4.5 ms floor, so even a 1 ms
+        subscriber is read 200 times a second by both builds. lemnosd's CPU: 0.7-0.8 % idle,
+        3.1-3.2 % at 200 Hz (5 ms and 1 ms subscribers), 1.4-1.5 % at 50 Hz (20 ms, the
+        recorder's rate), both builds. A read takes 555-576 µs on the bus. At 200 Hz, 9000 or
+        9001 of 9000 readings delivered, no misses, largest gap 5.1-5.2 ms; at 50 Hz, 2250 or
+        2251 of 2250, at most one miss (one 40 ms gap), in both builds. Repeats (the same
+        accelerometer triple delivered twice in a row; polled reads carry no sensor time):
+        0-5 of 9000 at 200 Hz in both, none at 50 Hz. So no cheaper early read is needed here.
   - [x] The 100 Hz tests in the same file failed the same way (one 100 ms gap against a fixed
         25 ms bound, at load 93). Every rate floor there is now 95 % of nominal for the time the
         service's threads had a CPU, and the largest gap may pass 25 ms only by the time they
