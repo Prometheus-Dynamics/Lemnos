@@ -209,7 +209,7 @@ and, for `gpio-*` devices, its line; those are never claimed raw. See
 | `vcm` | `lens` | I2C, default 0x0c | `chip` (`dw9714` `dw9807` `dw9817` `ak7375`, required) | control `position` |
 | `hwmon-fan` | `fan` | `match.name` or `path` | `restore_mode`: for fan-controller chips, the automatic `pwm1_enable` mode that hands the fan back when a host stops (default 2). Not used for `pwm-fan` or other fans with a thermal cooling device: they get back the `pwm1_enable` read at bind and the cooling device re-applies the governor's level | `speed` rpm, `duty`, `pwm_mode`; controls `duty`, `pwm_mode` |
 | `thermal-zone` | `temperature` | `match.type` or `path` | none | `temperature` °C |
-| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`; a runtime value saved with `lemnos-ctl led brightness --persist` replaces it at start, `docs/system-service.md`, *Ring brightness at runtime*), `gpio` (informational), `spinner_base` (the comets' dim glow), `gravity_device`, `gravity_plane`, `gravity_led0_deg`, `default_down` (which way is down for a falling sparkle: `docs/looks.md`, *Gravity*), `default_look` (the look a light shows when nothing holds an intent, and in place of a missing named look: `docs/looks.md`, *The default look*), and the look defaults below | controls `brightness`, `color`; frames |
+| `ws2812` | `light` | `path` (default `/dev/leds0`, the RP1 `ws2812-pio` device) | `count` (required), `wire` (`rgb`, `rgbw`), `offset` (the physical LED that is logical 0), `direction` (`cw`, `ccw`), `brightness` (0..1, the driver's own byte; not the look scale), `look_brightness` (0..1, default `0.5`: the ring-wide scale of every look, `docs/looks.md`; a runtime value saved with `lemnos-ctl led brightness --persist` replaces it at start, `docs/system-service.md`, *Ring brightness at runtime*), `gpio` (informational), `spinner_base` (the comets' dim glow), `gravity_device`, `gravity_plane`, `gravity_led0_deg`, `default_down` (which way is down for a falling sparkle: `docs/looks.md`, *Gravity*), `default_look` (the look a light shows when nothing holds an intent, and in place of a missing named look: `docs/looks.md`, *The default look*), `absent_look` and `absent_priority` (the look shown while the main writer is away, below), and the look defaults below | controls `brightness`, `color`; frames |
 | `gpio-output` | `gpio` | `config.chip` + `config.line` | `chip` (`gpiochipN` or a label such as `pinctrl-rp1`), `line`, `active_low`, `initial` | `level` channel and control |
 | `gpio-power-switch` | `power-switch` | `config.chip` + `config.line` | `chip`, `line`, `active_low`, `default_on` (true), `enable_delay_ms` (0, max 5000), `fault_line` (optional), `fault_chip` (default `chip`), `fault_active_low` (true), `persist` (false), `on_exit` (`keep`, `on` or `off`) | `power.on` channel and control (1 on, 0 off); `power.reset` control (write N: off for N ms, then on; max 10000); `power.fault` channel when `fault_line` is set |
 | `gpio-input` | `gpio` | `config.chip` + `config.line` | `chip`, `line`, `active_low` | `level` |
@@ -227,6 +227,14 @@ minus this), `blink_period_ms`, `blink_duty` (0..1), `spinner_period_ms`, `spinn
 `default_look` is a look name (default `status.ok`): the look the light shows when no
 owner holds an intent, and in place of a named look that nothing defines, so a light
 never goes dark for a missing look.
+
+`absent_look` is a look name, unset by default. It is the look the light shows while its
+main writer is away. The service holds it as its own application intent, at
+`absent_priority` (0-255, default 20, under a client's default of 50), for as long as it
+runs. So a client above that priority, or in a higher layer, shows over it. When that client
+goes, the ring falls back to the absent look, not to a client below it or to
+`default_look`. With `absent_look` set, `default_look` shows only in place of a missing
+look. `absent_priority` without `absent_look` is refused.
 
 Named looks: the board's `[looks.<name>]` tables are read on top of the built-in
 `status.*` looks, and a look file (`LEMNOSD_LOOKS_DIR`) overrides them all. The system,

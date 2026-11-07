@@ -430,6 +430,9 @@ impl Service {
                 }
                 let mut light = Light::new(index, count, defaults);
                 light.gravity = lemnos_board::gravity_config(&slot.spec).ok();
+                if let Ok(Some((name, priority))) = lemnos_board::light_absent(&slot.spec) {
+                    light.hold_absent(name, priority);
+                }
                 if let Some(until) = self.booting_until {
                     light.hold_service(
                         LightIntent::new(Show::System(SystemState::Booting)),

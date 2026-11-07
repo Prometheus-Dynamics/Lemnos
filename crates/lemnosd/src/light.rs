@@ -252,6 +252,17 @@ impl Light {
             .hold(SERVICE_OWNER, u8::MAX, intent, expires_ms);
     }
 
+    /// Holds the board's absent look (`absent_look`): the service's own
+    /// application intent at `priority`, with no end, so the ring shows it
+    /// whenever no client above that priority holds the light.
+    pub fn hold_absent(&mut self, name: LookName, priority: u8) {
+        let intent = Intent::new(Show::Look {
+            name,
+            progress: None,
+        });
+        self.arbiter.hold(SERVICE_OWNER, priority, intent, None);
+    }
+
     pub fn clear_service(&mut self, layer: Layer) {
         self.arbiter.clear(SERVICE_OWNER, Some(layer));
     }

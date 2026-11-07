@@ -291,6 +291,22 @@ driver = "ws2812"
 config = { count = 16, default_look = "status.busy" }
 ```
 
+### The absent look
+
+A board can name the look a light shows while its main writer (the OS image's status
+service, say) is away: `absent_look`, held by the service at `absent_priority` (default
+20). A writer above that priority shows over it, and when the writer goes, the ring
+falls back to the absent look rather than to a lower client's look. Unlike
+`default_look`, it holds even while lower clients hold intents. Its owner reads
+`lemnosd`, layer `app`.
+
+```toml
+[[devices]]
+id = "status-ring"
+driver = "ws2812"
+config = { count = 16, absent_look = "status.warn", absent_priority = 20 }
+```
+
 ## Example set
 
 The named looks that are not built in are a **documented example set**, in

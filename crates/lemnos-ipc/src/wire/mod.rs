@@ -706,7 +706,7 @@ pub struct LightInfo {
     pub clockwise: bool,
     /// The named look shown, or empty for an inline look or none.
     pub look: String,
-    /// The layer that holds the light (`status`, `application`, `test`,
+    /// The layer that holds the light (`status`, `app`, `test`,
     /// `alert`, `system`, `locate`), empty when nothing holds it.
     pub layer: String,
     /// The client that holds it (`lemnosd` for the service's own looks).

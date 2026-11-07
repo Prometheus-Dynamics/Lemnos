@@ -334,6 +334,24 @@ for consumers: everything below is additive until they switch.
       (2026-11-04, image dev.912): 9 devices published as `lemnos.device` resources, all healthy;
       `read` matches `lemnos-ctl`, `calibration.status`, `set` and `restore` succeed, a bad control
       is rejected.
+- [x] **Absent look on a light** (2026-11-07, asked through the OS image's coordinator: the
+      process that held a status look at priority 20 while its API was down is gone). Board
+      keys `absent_look` and `absent_priority` (default 20). lemnosd holds the look as its own
+      application intent at that priority for as long as it runs. Decisions:
+      - A held intent at a priority, not "while no client of the status layer is
+        connected": the OS image's writers send named looks, which are application intents,
+        so a priority is what they already arbitrate by, and it reproduces the removed
+        process exactly.
+      - Default 20: under a client's default of 50.
+      Tested in the mock (`tests/absent_look.rs`); untested on board.
+- [ ] **Allocation tests under host load** (seen 2026-11-07 at load average about 114):
+      - `alloc_board`: 21 allocations with no clients, and under 300 readings in 3 s, in
+        every run at that load. 0 allocations and 423 readings when load fell to about 64,
+        for the build both before and after cef4f36.
+      - `light_requests_allocate_nothing`: 201 allocations for 200 looks once; 5 of 5 passes
+        alone.
+      The 21 look like one burst when the loop stalls (a 1.7 s pause was seen). Where they
+      come from is not found yet.
 - [x] **Batched IMU: no lost samples, stamps on the device's clock** (2026-11-07, asked by the
       coordinator after the board check of the stamp fix):
       - **Cause.** The 0.4 % lost samples were single samples, with or without load: 79 of 20 078

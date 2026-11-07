@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- Board key `absent_look` (with `absent_priority`, default 20) on a light: the look shown while the main writer is away. `lemnosd` holds it as its own application intent at that priority, so a writer above it shows over it and the ring falls back to it when the writer goes. It replaces an OS image process that held a status look at priority 20 for this.
 - `lemnos-drivers-pisp`: `BeModule::wait_done(out, timeout)` waits for finished back end jobs into the caller's slice, without allocating, like the receiver's `wait_done`. `wait` now calls it. The chain example uses it: on board #1, 9000 of 9000 frames at 120 fps, back end wake-up p99 957 µs.
 - `lemnos.ko` test parameters `test_map_unconfined` and `test_irq_inject`, off by default and settable only at load.
   - `test_irq_inject` enables `LEMNOS_IOC_TEST_IRQ`, which sets an interrupt pending at its controller. Without it the ioctl gets `EPERM`.

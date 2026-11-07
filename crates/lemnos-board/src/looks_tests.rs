@@ -822,3 +822,45 @@ layers = [
         parse_file("looks.d/spots.toml", text).unwrap_or_else(|e| panic!("{e:?}\n{text}"));
     }
 }
+
+#[test]
+fn a_board_names_an_absent_look_and_its_priority() {
+    // Unset: no absent look.
+    let plain = crate::BoardDefinition::from_toml_str(&board_text("", "")).unwrap();
+    assert_eq!(crate::light_absent(&plain.devices[0]).unwrap(), None);
+    // A look name, at the default priority (under a client's 50).
+    let board =
+        crate::BoardDefinition::from_toml_str(&board_text("", "absent_look = \"status.warn\""))
+            .unwrap();
+    let (name, priority) = crate::light_absent(&board.devices[0]).unwrap().unwrap();
+    assert_eq!(name.as_str(), "status.warn");
+    assert_eq!(priority, crate::ABSENT_PRIORITY);
+    assert_eq!(priority, 20);
+    // The board's own priority.
+    let board = crate::BoardDefinition::from_toml_str(&board_text(
+        "",
+        "absent_look = \"status.warn\", absent_priority = 30",
+    ))
+    .unwrap();
+    assert_eq!(
+        crate::light_absent(&board.devices[0]).unwrap().unwrap().1,
+        30
+    );
+    // Refused, naming the key: a bad name, a priority past 255, a priority alone.
+    for (config, key) in [
+        ("absent_look = \"Not A Look\"", "absent_look"),
+        (
+            "absent_look = \"status.warn\", absent_priority = 256",
+            "absent_priority",
+        ),
+        ("absent_priority = 10", "absent_priority"),
+    ] {
+        let bad = crate::BoardDefinition::from_toml_str(&board_text("", config)).unwrap();
+        let message = crate::light_absent(&bad.devices[0])
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(key), "{config}: {message}");
+    }
+    assert!(crate::LIGHT_KEYS.contains(&"absent_look"));
+    assert!(crate::LIGHT_KEYS.contains(&"absent_priority"));
+}

@@ -1080,6 +1080,7 @@ fn build_ws2812(spec: &DeviceSpec, _buses: &mut dyn Buses) -> Result<BoxedDevice
     let config = crate::light::strip_config(spec)?;
     // Check the look settings now, so a bad colour fails validation-time builds.
     crate::light::light_defaults(spec)?;
+    crate::light::light_absent(spec)?;
     let path = spec.path.clone().unwrap_or_else(|| "/dev/leds0".into());
     Ok(BoxedDevice::light(lemnos_drivers_linux::Ws2812Pio::new(
         path, config,

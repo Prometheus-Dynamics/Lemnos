@@ -86,6 +86,8 @@ pub const LIGHT_KEYS: &[&str] = &[
     "error",
     "busy",
     "default_look",
+    "absent_look",
+    "absent_priority",
     "progress",
     "progress_background",
     "spinner_period_ms",
@@ -188,6 +190,38 @@ pub fn strip_config(spec: &DeviceSpec) -> Result<StripConfig, BoardError> {
         .with_offset(offset as u16)
         .with_direction(direction)
         .with_brightness(((u32::from(brightness) * 255 + 500) / 1000) as u8))
+}
+
+/// The priority of a light's absent look when the board gives none: under a
+/// client's default (50).
+pub const ABSENT_PRIORITY: u8 = 20;
+
+/// A light's absent look, from its `config`: `absent_look` (a look name)
+/// and `absent_priority` (0-255, default [`ABSENT_PRIORITY`]). The service
+/// holds it as its own application intent at that priority for as long as
+/// it runs, so any client above that priority (or in a higher layer) shows
+/// over it, and the ring falls back to it, not to dark or to a lower
+/// client, when they go. `None` when the board sets no `absent_look`.
+pub fn light_absent(spec: &DeviceSpec) -> Result<Option<(LookName, u8)>, BoardError> {
+    let priority = match uint(spec, "absent_priority")? {
+        None => None,
+        Some(v) => {
+            Some(u8::try_from(v).map_err(|_| bad(spec, "absent_priority must be 0 to 255"))?)
+        }
+    };
+    let Some(name) = spec.config.get("absent_look") else {
+        if priority.is_some() {
+            return Err(bad(spec, "absent_priority needs absent_look"));
+        }
+        return Ok(None);
+    };
+    let name = name.as_str().and_then(LookName::new).ok_or_else(|| {
+        bad(
+            spec,
+            "absent_look must be a look name (lowercase letters, digits, '.', '-' and '_')",
+        )
+    })?;
+    Ok(Some((name, priority.unwrap_or(ABSENT_PRIORITY))))
 }
 
 /// How a light's intents look, from its `config` (unset keys keep
