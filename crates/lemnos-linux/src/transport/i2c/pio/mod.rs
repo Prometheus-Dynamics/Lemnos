@@ -79,8 +79,19 @@ pub(crate) enum Segment<'a> {
 /// The ops for segments, with adjacent operations of one direction merged into
 /// one transfer (no repeated START between them, as embedded-hal requires).
 /// The last byte of every read run is NACKed.
+#[cfg(test)]
 pub(crate) fn segment_ops(address: u8, segments: &[Segment<'_>]) -> Vec<Op> {
     let mut ops = Vec::new();
+    segment_ops_into(&mut ops, address, segments.iter().copied());
+    ops
+}
+
+/// [`segment_ops`] appended to `ops`.
+pub(crate) fn segment_ops_into<'a>(
+    ops: &mut Vec<Op>,
+    address: u8,
+    segments: impl IntoIterator<Item = Segment<'a>>,
+) {
     let mut reading: Option<bool> = None;
     let mut last_read: Option<usize> = None;
     let close_read = |ops: &mut Vec<Op>, last_read: &mut Option<usize>| {
@@ -89,10 +100,10 @@ pub(crate) fn segment_ops(address: u8, segments: &[Segment<'_>]) -> Vec<Op> {
         }
     };
     for segment in segments {
-        match *segment {
+        match segment {
             Segment::Write(bytes) => {
                 if reading != Some(false) {
-                    close_read(&mut ops, &mut last_read);
+                    close_read(ops, &mut last_read);
                     ops.push(Op::Start);
                     ops.push(Op::Write(address_byte(address, false)));
                 }
@@ -102,7 +113,7 @@ pub(crate) fn segment_ops(address: u8, segments: &[Segment<'_>]) -> Vec<Op> {
             Segment::Read(0) => {}
             Segment::Read(len) => {
                 if reading != Some(true) {
-                    close_read(&mut ops, &mut last_read);
+                    close_read(ops, &mut last_read);
                     ops.push(Op::Start);
                     ops.push(Op::Write(address_byte(address, true)));
                 }
@@ -114,31 +125,65 @@ pub(crate) fn segment_ops(address: u8, segments: &[Segment<'_>]) -> Vec<Op> {
             }
         }
     }
-    close_read(&mut ops, &mut last_read);
+    close_read(ops, &mut last_read);
     if !ops.is_empty() {
         ops.push(Op::Stop);
     }
-    ops
 }
 
-/// Runs embedded-hal segments on `bus`; returns the bytes read, in order.
-pub(crate) fn run_segments(
+/// Runs embedded-hal operations on `bus` (adjacent ones of one direction merged, see
+/// [`segment_ops`]), filling the reads in place. Allocates nothing on success.
+pub(crate) fn run_operations(
     bus: &PioBus,
     address: u8,
-    segments: &[Segment<'_>],
-) -> io::Result<Vec<u8>> {
-    let ops = segment_ops(address, segments);
-    if ops.is_empty() {
-        return Ok(Vec::new());
-    }
-    bus.transaction(&ops).map_err(|failure| match failure {
-        Failure::Nack(nack) => io::Error::other(format!(
-            "no ACK to byte {:#04x} (op {}); the target is absent or not ready",
-            nack.byte, nack.op
+    operations: &mut [embedded_hal::i2c::Operation<'_>],
+) -> io::Result<()> {
+    use embedded_hal::i2c::Operation;
+    let filled = bus.run(
+        operations,
+        |operations, ops| {
+            segment_ops_into(
+                ops,
+                address,
+                operations.iter().map(|operation| match operation {
+                    Operation::Read(buffer) => Segment::Read(buffer.len()),
+                    Operation::Write(bytes) => Segment::Write(bytes),
+                }),
+            );
+        },
+        |operations, data| {
+            let mut cursor = 0usize;
+            for operation in operations.iter_mut() {
+                let Operation::Read(buffer) = operation else {
+                    continue;
+                };
+                let end = cursor + buffer.len();
+                let Some(chunk) = data.get(cursor..end) else {
+                    return false;
+                };
+                buffer.copy_from_slice(chunk);
+                cursor = end;
+            }
+            true
+        },
+    );
+    match filled {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PIO I2C returned fewer bytes than read",
         )),
-        Failure::Timeout => io::Error::new(io::ErrorKind::TimedOut, "PIO I2C transfer timed out"),
-        Failure::Io(reason) => io::Error::other(reason),
-    })
+        Err(failure) => Err(match failure {
+            Failure::Nack(nack) => io::Error::other(format!(
+                "no ACK to byte {:#04x} (op {}); the target is absent or not ready",
+                nack.byte, nack.op
+            )),
+            Failure::Timeout => {
+                io::Error::new(io::ErrorKind::TimedOut, "PIO I2C transfer timed out")
+            }
+            Failure::Io(reason) => io::Error::other(reason),
+        }),
+    }
 }
 
 /// Maps a bus failure onto the bus error for `operation`.

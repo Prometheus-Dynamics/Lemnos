@@ -2,7 +2,7 @@
 //! selectors, as an embedded-hal bus next to [`I2cBus`](super::I2cBus).
 
 use super::{IoError, invalid_input};
-use crate::transport::i2c::pio::{self, PioBus, Segment};
+use crate::transport::i2c::pio::{self, PioBus};
 use embedded_hal::i2c::{I2c, Operation};
 use lemnos_core::PioI2cPins;
 use std::io;
@@ -42,26 +42,7 @@ impl I2c for PioI2cBus {
                 invalid_input(format!("7-bit I2C address {address:#x} out of range")).into(),
             );
         }
-        let mut segments = Vec::with_capacity(operations.len());
-        for operation in operations.iter() {
-            match operation {
-                Operation::Read(buffer) => segments.push(Segment::Read(buffer.len())),
-                Operation::Write(bytes) => segments.push(Segment::Write(bytes)),
-            }
-        }
-        let data = pio::run_segments(&self.bus, address, &segments)?;
-        let mut cursor = 0usize;
-        for operation in operations.iter_mut() {
-            let Operation::Read(buffer) = operation else {
-                continue;
-            };
-            let end = cursor + buffer.len();
-            let Some(chunk) = data.get(cursor..end) else {
-                return Err(invalid_input("PIO I2C returned fewer bytes than read").into());
-            };
-            buffer.copy_from_slice(chunk);
-            cursor = end;
-        }
+        pio::run_operations(&self.bus, address, operations)?;
         Ok(())
     }
 }

@@ -30,22 +30,36 @@ pub enum Failure {
     Io(String),
 }
 
-/// A configured PIO I2C master on one SDA/SCL pair.
-/// A transaction's TX words and the channel its result comes back on.
-type TxJob = (Vec<u32>, mpsc::Sender<io::Result<()>>);
+/// A transaction's TX words handed back by the helper with its result.
+type TxDone = (Vec<u32>, io::Result<()>);
 
+/// A transaction's buffers, kept for the bus's life under its lock: a steady stream of
+/// transactions (a sensor polled every few milliseconds) allocates nothing.
+struct Scratch {
+    ops: Vec<Op>,
+    /// The TX words; lent to the helper for each transaction and handed back.
+    tx: Vec<u32>,
+    rx: Vec<u32>,
+    data: Vec<u8>,
+    pending: Vec<usize>,
+    /// The helper's answers, one per job.
+    done: mpsc::Receiver<TxDone>,
+}
+
+/// A configured PIO I2C master on one SDA/SCL pair.
 pub(crate) struct PioBus {
     sda: u8,
     scl: u8,
     device: Arc<PioDevice>,
-    /// The TX helper's queue: one job per transaction (see `transaction`).
-    tx: mpsc::Sender<TxJob>,
+    /// The TX helper's queue: one job per transaction (see `run`). Bounded, so a job
+    /// allocates no queue slot.
+    tx: mpsc::SyncSender<Vec<u32>>,
     devnode: PathBuf,
     sm: u16,
     base: u16,
     config: SmConfig,
-    /// Serializes transactions: one state machine, one FIFO pair.
-    gate: Mutex<()>,
+    /// Serializes transactions (one state machine, one FIFO pair) and holds their buffers.
+    gate: Mutex<Scratch>,
 }
 
 impl std::fmt::Debug for PioBus {
@@ -182,13 +196,18 @@ impl PioBus {
         // TX words instead of spawning a thread (that spawn cost most of a
         // read's CPU at 100 Hz).
         let device = Arc::new(device);
-        let (tx, jobs) = mpsc::channel::<TxJob>();
+        // One transaction in flight at a time (under `gate`): bounded channels of one.
+        let (tx, jobs) = mpsc::sync_channel::<Vec<u32>>(1);
+        let (reply, done) = mpsc::sync_channel::<TxDone>(1);
         let helper = Arc::clone(&device);
         std::thread::Builder::new()
             .name(format!("pio-i2c-tx:{sda}-{scl}"))
             .spawn(move || {
-                for (words, reply) in jobs {
-                    let _ = reply.send(helper.xfer_to_sm(sm, &words));
+                for words in jobs {
+                    let result = helper.xfer_to_sm(sm, &words);
+                    if reply.send((words, result)).is_err() {
+                        break;
+                    }
                 }
             })
             .map_err(|e| format!("starting the PIO I2C TX helper failed: {e}"))?;
@@ -201,33 +220,68 @@ impl PioBus {
             sm,
             base,
             config,
-            gate: Mutex::new(()),
+            gate: Mutex::new(Scratch {
+                ops: Vec::with_capacity(64),
+                tx: Vec::with_capacity(64),
+                rx: Vec::with_capacity(32),
+                data: Vec::with_capacity(32),
+                pending: Vec::with_capacity(8),
+                done,
+            }),
         })
     }
 
     /// Runs `ops` to completion and returns the bytes read, in order.
+    pub fn transaction(&self, ops: &[Op]) -> Result<Vec<u8>, Failure> {
+        self.run(
+            &mut (),
+            |(), buf| buf.extend_from_slice(ops),
+            |(), data| data.to_vec(),
+        )
+    }
+
+    /// Runs the ops `build` writes (into a cleared, reused list) and hands the bytes read, in
+    /// order, to `read`; `ctx` is lent to both. Allocates nothing once the bus's buffers have
+    /// grown to its transactions. No ops: nothing on the wire, `read` gets no bytes.
     ///
     /// The TX words go to the machine on a helper thread while this thread
     /// drains the RX FIFO: the machine pushes a read byte per READ, so a long
     /// transaction would stall on a full RX FIFO if the TX DMA ran first.
-    pub fn transaction(&self, ops: &[Op]) -> Result<Vec<u8>, Failure> {
-        if let Err(writes) = protocol::check_ack_window(ops) {
+    pub fn run<C: ?Sized, R>(
+        &self,
+        ctx: &mut C,
+        build: impl FnOnce(&C, &mut Vec<Op>),
+        read: impl FnOnce(&mut C, &[u8]) -> R,
+    ) -> Result<R, Failure> {
+        let mut guard = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let s = &mut *guard;
+        s.ops.clear();
+        build(ctx, &mut s.ops);
+        if s.ops.is_empty() {
+            return Ok(read(ctx, &[]));
+        }
+        if let Err(writes) = protocol::check_ack_window(&s.ops) {
             return Err(Failure::Io(format!(
                 "{writes} writes between START/STOP exceed the PIO ACK window of {MAX_WRITES_PER_PUSH}"
             )));
         }
-        let _guard = self
-            .gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let tx = protocol::encode(self.base, u16::from(self.scl), ops);
-        let mut rx = vec![0u32; protocol::rx_word_count(ops)];
-        let (reply, done) = mpsc::channel();
-        let queued = self.tx.send((tx, reply)).is_ok();
-        let rx_result = self.device.xfer_from_sm(self.sm, &mut rx);
+        let mut words = std::mem::take(&mut s.tx);
+        protocol::encode_into(self.base, u16::from(self.scl), &s.ops, &mut words);
+        s.rx.clear();
+        s.rx.resize(protocol::rx_word_count(&s.ops), 0);
+        let queued = self.tx.send(words).is_ok();
+        let rx_result = self.device.xfer_from_sm(self.sm, &mut s.rx);
         let tx_result = if queued {
-            done.recv()
-                .unwrap_or_else(|_| Err(io::Error::other("PIO TX helper stopped")))
+            match s.done.recv() {
+                Ok((words, result)) => {
+                    s.tx = words;
+                    result
+                }
+                Err(_) => Err(io::Error::other("PIO TX helper stopped")),
+            }
         } else {
             Err(io::Error::other("PIO TX helper stopped"))
         };
@@ -235,8 +289,8 @@ impl PioBus {
             self.recover();
             return Err(classify(error));
         }
-        match protocol::decode(ops, &rx) {
-            Ok(data) => Ok(data),
+        match protocol::decode_into(&s.ops, &s.rx, &mut s.data, &mut s.pending) {
+            Ok(()) => Ok(read(ctx, &s.data)),
             Err(DecodeError::Nack(nack)) => Err(Failure::Nack(nack)),
             Err(DecodeError::Length { expected, actual }) => Err(Failure::Io(format!(
                 "PIO returned {actual} RX words for {expected} expected"

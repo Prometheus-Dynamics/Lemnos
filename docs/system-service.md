@@ -573,12 +573,22 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   allocation outside the test thread: 0 over 3 s (about 150 readings, 120 ring frames and 3
   fan steps; 2026-11-06, three runs). Before, each sysfs read or write allocated its path and
   its text, and each fan step a vector.
+- **No allocation on the PIO I2C bus.** A board's first readings with `alloc-stats` (board #2,
+  2026-11-07, 6c662c6, idle) showed about 533 allocations a second: the IMU on
+  `pio-i2c:sda=8,scl=7` is read every 5 ms, and each transaction allocated its op list, TX
+  words, RX words, result bytes and a reply channel. The bus now keeps those buffers for its
+  life under its lock and hands the TX words to its helper over bounded channels made once.
+  Untested on board. `crates/lemnosd/tests/alloc_board.rs` runs a shipped board definition on
+  mock I2C (no PIO) with no client: 0 allocations over 3 s.
 - **Allocations on a running board.** Built with the `alloc-stats` feature, `lemnosd` runs on a
   counting allocator (`lemnos_linux_sys::alloc_stats`: two relaxed atomic adds per call) and
   sets `FEATURE_ALLOC_STATS` (4). `Request::AllocStats` answers its allocations, frees, bytes
   allocated and bytes live since it started, and `lemnos-ctl stats` prints them. Run it twice
   a while apart: in a steady state `allocs` does not move. Without the feature the service
-  answers that it does not count. Untested on a board.
+  answers that it does not count. Build it on its own, from `crates/lemnosd` with
+  `--features alloc-stats` (or `cargo build -p lemnosd --features alloc-stats`): built
+  together with `-p lemnos-ctl` and `--features lemnosd/alloc-stats`, an OS image got a
+  `lemnosd` without the feature (2026-11-07).
 - **New samples only (the duplicate filter).** A polled sensor's reading identical to the last
   one it delivered (every channel value equal, which is every raw byte of a BMI088) is not
   delivered when it is read within one output period of that delivery. The filter is lemnosd's

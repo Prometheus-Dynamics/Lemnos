@@ -84,6 +84,13 @@ pub(crate) fn check_ack_window(ops: &[Op]) -> Result<(), usize> {
 /// repeated START from the data loop first lowers SCL. A STOP returns to idle.
 pub fn encode(base: u16, scl: u16, ops: &[Op]) -> Vec<u32> {
     let mut words = Vec::new();
+    encode_into(base, scl, ops, &mut words);
+    words
+}
+
+/// [`encode`] into `words` (cleared first), reusing its capacity.
+pub(crate) fn encode_into(base: u16, scl: u16, ops: &[Op], words: &mut Vec<u32>) {
+    words.clear();
     let mut idle = true;
     for op in ops {
         match *op {
@@ -99,7 +106,6 @@ pub fn encode(base: u16, scl: u16, ops: &[Op]) -> Vec<u32> {
             Op::Read { ack } => words.push(read_word(base, ack)),
         }
     }
-    words
 }
 
 /// RX words the ops produce: one per START/STOP and one per READ.
@@ -110,7 +116,23 @@ pub(crate) fn rx_word_count(ops: &[Op]) -> usize {
 /// Decodes the RX words of `ops` into the bytes read (in order), checking every
 /// WRITE's ACK. The first START/STOP word carries whatever the ISR held before
 /// the transaction; it is not an ACK and is skipped.
+#[cfg(test)]
 pub fn decode(ops: &[Op], rx: &[u32]) -> Result<Vec<u8>, DecodeError> {
+    let (mut data, mut pending) = (Vec::new(), Vec::new());
+    decode_into(ops, rx, &mut data, &mut pending)?;
+    Ok(data)
+}
+
+/// [`decode`] into `data` (cleared first), with `pending` as its scratch; both keep their
+/// capacity, so a steady stream of transactions allocates nothing.
+pub(crate) fn decode_into(
+    ops: &[Op],
+    rx: &[u32],
+    data: &mut Vec<u8>,
+    pending: &mut Vec<usize>,
+) -> Result<(), DecodeError> {
+    data.clear();
+    pending.clear();
     let expected = rx_word_count(ops);
     if rx.len() != expected {
         return Err(DecodeError::Length {
@@ -119,9 +141,7 @@ pub fn decode(ops: &[Op], rx: &[u32]) -> Result<Vec<u8>, DecodeError> {
         });
     }
     let mut words = rx.iter().copied();
-    let mut data = Vec::new();
-    // Indices of the WRITE ops since the last push, oldest first.
-    let mut pending: Vec<usize> = Vec::new();
+    // `pending`: indices of the WRITE ops since the last push, oldest first.
     let mut first = true;
     for (index, op) in ops.iter().enumerate() {
         match *op {
@@ -129,7 +149,7 @@ pub fn decode(ops: &[Op], rx: &[u32]) -> Result<Vec<u8>, DecodeError> {
             Op::Start | Op::Stop => {
                 let word = words.next().unwrap_or(0);
                 if !first {
-                    check_acks(ops, &pending, word, 0)?;
+                    check_acks(ops, pending, word, 0)?;
                 }
                 first = false;
                 pending.clear();
@@ -138,13 +158,13 @@ pub fn decode(ops: &[Op], rx: &[u32]) -> Result<Vec<u8>, DecodeError> {
                 let word = words.next().unwrap_or(0);
                 // The first READ after a push also carries the ACK of the
                 // address write before it, one bit above the byte.
-                check_acks(ops, &pending, word, 8)?;
+                check_acks(ops, pending, word, 8)?;
                 data.push(word as u8);
                 pending.clear();
             }
         }
     }
-    Ok(data)
+    Ok(())
 }
 
 /// Checks the ACK bits of `pending` WRITEs in `word`, the newest at bit
