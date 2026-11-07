@@ -139,6 +139,29 @@ impl MmapQueue {
         }
     }
 
+    /// Adds up to `count` MMAP buffers after the existing ones (`VIDIOC_CREATE_BUFS`), maps
+    /// them, and returns their indices; the caller queues them. Works while streaming where the
+    /// driver allows it. Not for a queue importing dma-bufs.
+    pub fn add_buffers(&mut self, count: u32) -> Result<std::ops::Range<u32>> {
+        if self.memory != Memory::Mmap {
+            return Err(Error::Invalid(format!("{}: not an MMAP queue", self.name)));
+        }
+        let (first, got) = self
+            .dev
+            .create_buffers(self.buf_type, Memory::Mmap, count)?;
+        if first as usize != self.maps.len() {
+            return Err(Error::Invalid(format!(
+                "{}: new buffers start at {first}, expected {}",
+                self.name,
+                self.maps.len()
+            )));
+        }
+        for i in first..first + got.count {
+            self.maps.push(self.dev.map_buffer(self.buf_type, i)?);
+        }
+        Ok(first..first + got.count)
+    }
+
     /// Starts streaming.
     pub fn stream_on(&self) -> Result<()> {
         self.dev.stream_on(self.buf_type)

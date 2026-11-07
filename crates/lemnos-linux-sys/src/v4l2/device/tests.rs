@@ -11,6 +11,12 @@ use super::*;
 fn structure_sizes_match_the_kernel_header() {
     assert_eq!(size_of::<v4l2_capability>(), 104);
     assert_eq!(size_of::<v4l2_format>(), 208);
+    assert_eq!(size_of::<v4l2_create_buffers>(), 256);
+    assert_eq!(core::mem::offset_of!(v4l2_create_buffers, format), 16);
+    assert_eq!(
+        core::mem::offset_of!(v4l2_create_buffers, capabilities),
+        224
+    );
     assert_eq!(size_of::<v4l2_fmtdesc>(), 64);
     assert_eq!(size_of::<v4l2_frmsizeenum>(), 44);
     assert_eq!(size_of::<v4l2_frmivalenum>(), 52);
@@ -74,6 +80,10 @@ fn request_numbers_match_the_kernel_header() {
     assert_eq!(VIDIOC_QUERYCAP.nr(), 0x8068_5600);
     assert_eq!(VIDIOC_ENUM_FMT.nr(), 0xc040_5602);
     assert_eq!(VIDIOC_G_FMT.nr(), 0xc0d0_5604);
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(VIDIOC_CREATE_BUFS.nr(), 0xc100_565c);
+    #[cfg(target_pointer_width = "32")]
+    assert_eq!(VIDIOC_CREATE_BUFS.nr(), 0xc0f8_565c);
     assert_eq!(VIDIOC_S_FMT.nr(), 0xc0d0_5605);
     assert_eq!(VIDIOC_TRY_FMT.nr(), 0xc0d0_5640);
     assert_eq!(VIDIOC_REQBUFS.nr(), 0xc014_5608);

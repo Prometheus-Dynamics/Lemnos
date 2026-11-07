@@ -8,6 +8,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- Buffers added while streaming (`VIDIOC_CREATE_BUFS`), at the camera stack's request.
+  - `lemnos-linux-sys` gains the ioctl and `v4l2_create_buffers` (256 bytes on 64-bit, pinned).
+  - `lemnos-v4l2` gains `VideoDevice::create_buffers` and `MmapQueue::add_buffers`.
+  - `lemnos-drivers-pisp` gains `FrontEndDevice::add_image_buffers(n)`. It adds raw output buffers after the existing ones, maps them (and into the line timer, when line events are on), and returns their dma-bufs. The caller queues them with `release_image`.
+  - rp1-cfe has no `VIDIOC_REMOVE_BUFS`, so they stay until the capture closes. Untested on board.
 - `lemnos-capi`: both forms installable, and one copy per process enforced.
   - `scripts/install-capi.sh <prefix>` installs the headers, `liblemnos_capi.so.1` with its `.so` link, `liblemnos_capi.a`, and two pkg-config files: `lemnos-capi` (shared) and `lemnos-capi-static`.
   - The static `.pc` file adds rustc's native libraries and `--gc-sections`. On x86_64 the stripped C client is 443 952 B static, against 1 242 944 B without `--gc-sections`.

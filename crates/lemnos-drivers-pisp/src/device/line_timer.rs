@@ -91,6 +91,20 @@ impl LineTimer {
         }
     }
 
+    /// Takes a raw buffer added after the others (its index is the next one), mapped
+    /// writable. `false` when it is too short for the row.
+    pub(super) fn add_buffer(&mut self, mut planes: Vec<Mapping>) -> bool {
+        let Some(end) = self.offset.checked_add(MARKER.len()) else {
+            return false;
+        };
+        if planes.first().is_none_or(|row| row.len() < end) {
+            return false;
+        }
+        self.rows.get_mut().push(planes.remove(0));
+        self._planes.push(planes);
+        true
+    }
+
     /// The time from a frame's start to the check.
     pub(super) fn set_delay(&mut self, delay: Duration) {
         self.delay = delay;
@@ -234,6 +248,21 @@ mod tests {
         assert_eq!((ev.sequence, ev.line, ev.frame_start), (7, 600, 100 * MS));
         assert_eq!(t.due(), None);
         assert_eq!(t.counts().fired, 1);
+    }
+
+    /// A buffer added while streaming (`add_image_buffers`) is armed and checked like the
+    /// first ones, at the next index; one too short for the row is refused.
+    #[test]
+    fn an_added_buffer_takes_the_next_index() {
+        let mut t = timer(2);
+        let extra = mapped(1, 0).unwrap().rows.into_inner().remove(0);
+        assert!(t.add_buffer(vec![extra]));
+        assert!(!t.add_buffer(Vec::new()));
+        t.arm(2);
+        t.frame_start(7, 100 * MS);
+        device_writes(&t, 2, [1; 16]);
+        let ev = t.check(105 * MS, Some(2)).unwrap();
+        assert_eq!((ev.sequence, ev.line), (7, 600));
     }
 
     #[test]

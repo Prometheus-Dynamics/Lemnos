@@ -188,6 +188,23 @@ pub struct v4l2_requestbuffers {
     pub reserved: [u8; 3],
 }
 
+/// `struct v4l2_create_buffers`: `count` more buffers after the existing ones.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct v4l2_create_buffers {
+    /// Out: the index of the first buffer created.
+    pub index: u32,
+    /// In: buffers wanted; out: buffers created.
+    pub count: u32,
+    pub memory: u32,
+    /// The format the buffers are sized for (usually the queue's, from `VIDIOC_G_FMT`).
+    pub format: v4l2_format,
+    pub capabilities: u32,
+    pub flags: u32,
+    pub max_num_buffers: u32,
+    pub reserved: [u32; 5],
+}
+
 /// The `m` union of `v4l2_plane` / `v4l2_buffer`. Private: the kernel follows
 /// `planes` and `userptr`, so only this crate writes them (see `BufferIoctl`).
 #[repr(C)]
@@ -412,6 +429,7 @@ pod!(
     v4l2_streamparm_union,
     v4l2_streamparm,
     v4l2_requestbuffers,
+    v4l2_create_buffers,
     v4l2_m,
     v4l2_plane,
     v4l2_timecode,
@@ -548,6 +566,12 @@ ioctls! {
     VIDIOC_QUERY_EXT_CTRL: v4l2_query_ext_ctrl = iowr(b'V', 103);
 }
 
+/// `VIDIOC_CREATE_BUFS`. Refuses the overlay queues (their format holds pointers).
+pub const VIDIOC_CREATE_BUFS: Ioctl<v4l2_create_buffers> = Ioctl::checked(
+    iowr::<v4l2_create_buffers>(b'V', 92),
+    "VIDIOC_CREATE_BUFS",
+    |create| no_overlay(&create.format),
+);
 /// `VIDIOC_G_FMT`. Refuses the overlay queues.
 pub const VIDIOC_G_FMT: Ioctl<v4l2_format> =
     Ioctl::checked(iowr::<v4l2_format>(b'V', 4), "VIDIOC_G_FMT", no_overlay);

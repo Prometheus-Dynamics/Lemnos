@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::v4l2::device::{
-    BufferIoctl, VIDEO_MAX_PLANES, VIDIOC_DQBUF, VIDIOC_PREPARE_BUF, VIDIOC_QBUF, VIDIOC_QUERYBUF,
-    VIDIOC_REQBUFS, VIDIOC_STREAMOFF, VIDIOC_STREAMON, v4l2_buffer, v4l2_plane,
-    v4l2_requestbuffers, zeroed,
+    BufferIoctl, VIDEO_MAX_PLANES, VIDIOC_CREATE_BUFS, VIDIOC_DQBUF, VIDIOC_G_FMT,
+    VIDIOC_PREPARE_BUF, VIDIOC_QBUF, VIDIOC_QUERYBUF, VIDIOC_REQBUFS, VIDIOC_STREAMOFF,
+    VIDIOC_STREAMON, v4l2_buffer, v4l2_create_buffers, v4l2_plane, v4l2_requestbuffers, zeroed,
 };
 
 use super::{BufType, DmaBufAccess, VideoDevice};
@@ -305,6 +305,32 @@ impl VideoDevice {
             count: raw.count,
             capabilities: BufferCapabilities(raw.capabilities),
         })
+    }
+
+    /// Adds up to `count` buffers after the existing ones, sized for the queue's current
+    /// format (`VIDIOC_CREATE_BUFS`); works while streaming where the driver allows it. Returns
+    /// the index of the first new buffer and how many were made (possibly fewer than asked, or
+    /// none). They are freed only with the whole queue, unless the queue reports
+    /// [`BufferCapabilities::SUPPORTS_REMOVE_BUFS`].
+    pub fn create_buffers(
+        &self,
+        buf_type: BufType,
+        memory: Memory,
+        count: u32,
+    ) -> Result<(u32, RequestedBuffers)> {
+        let mut raw: v4l2_create_buffers = zeroed();
+        raw.format.type_ = buf_type.to_raw();
+        node::ioctl(self.as_fd(), VIDIOC_G_FMT, &mut raw.format)?;
+        raw.count = count;
+        raw.memory = memory as u32;
+        node::ioctl(self.as_fd(), VIDIOC_CREATE_BUFS, &mut raw)?;
+        Ok((
+            raw.index,
+            RequestedBuffers {
+                count: raw.count,
+                capabilities: BufferCapabilities(raw.capabilities),
+            },
+        ))
     }
 
     /// Frees all buffers of a queue (`VIDIOC_REQBUFS` with count 0). Mappings and exported

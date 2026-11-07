@@ -424,6 +424,10 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
 
 ### Decisions (made during the round)
 
+- 2026-11-06, the camera stack's request: `FrontEndDevice::add_image_buffers` creates raw
+  buffers while streaming and leaves them unqueued for the caller. They are only freed by closing
+  the capture: rp1-cfe implements `VIDIOC_CREATE_BUFS` but not `VIDIOC_REMOVE_BUFS`, and
+  `VIDIOC_REQBUFS(0)` needs the queue stopped. Untested on board.
 - 2026-11-06, the camera stack's request: `FrontEndSetup::image_compressed: bool` rather than a format enum, since rp1-cfe offers one compressed mode on fe_image0 (`PISP_COMP1_*`, depth 8, the sink's 16-bit media bus code). Lemnos sets the node format and `image_format()`; the compression offset and mode stay with the caller, who sets the front and back end configs. Untested on board.
 - The validator drops the BMI055 (no crate support, no board carries one).
 - INA238 range: 16.38 A at 10 mOhm (16.384 A is exactly the 163.84 mV limit and is refused).

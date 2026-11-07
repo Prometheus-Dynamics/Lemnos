@@ -466,6 +466,37 @@ impl FrontEndDevice {
         self.image_path.as_deref()
     }
 
+    /// Adds `count` raw output buffers after the existing ones (`VIDIOC_CREATE_BUFS`, sized
+    /// for the node's format), maps them like the others, and exports each as a dma-buf, in
+    /// index order: their indices are the old [`Self::image_dmabufs`] length onwards. Works
+    /// while streaming; the new buffers are not queued, so the caller queues each with
+    /// [`Self::release_image`] when it wants the front end to write it.
+    ///
+    /// They stay until the capture is closed: rp1-cfe has no `VIDIOC_REMOVE_BUFS`. The driver
+    /// may make fewer than asked; an error when it makes none. Untested on board.
+    pub fn add_image_buffers(&mut self, count: u32) -> Result<Vec<OwnedFd>> {
+        let q = self
+            .image
+            .as_mut()
+            .ok_or_else(|| DeviceError::Setup("no raw output".into()))?;
+        let added = q.add_buffers(count)?;
+        if added.is_empty() {
+            return Err(DeviceError::Setup("fe_image0 made no buffers".into()));
+        }
+        if let Some(t) = &mut self.line_timer {
+            for i in added.clone() {
+                if !t.add_buffer(q.dev.map_buffer_writable(q.buf_type, i)?) {
+                    return Err(DeviceError::Setup(format!(
+                        "buffer {i} too short for the row"
+                    )));
+                }
+            }
+        }
+        added
+            .map(|i| Ok(q.dev.export_buffer(q.buf_type, i, 0)?))
+            .collect()
+    }
+
     /// Exports every raw output buffer as a dma-buf (in buffer index order), e.g. to import
     /// them into the back end's input queue.
     pub fn image_dmabufs(&self) -> Result<Vec<OwnedFd>> {
