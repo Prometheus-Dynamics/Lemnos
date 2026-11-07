@@ -22,6 +22,10 @@ pub(super) struct Slots {
     sets: u32,
     /// All indices: those past `own * sets` are spares any buffer can take.
     count: u32,
+    /// Indices the node gave (`count` is at most this).
+    granted: u32,
+    /// Queued jobs a buffer can be in at once.
+    jobs: u32,
     /// Indices queued and not yet dequeued, oldest first.
     queued: VecDeque<u32>,
 }
@@ -30,7 +34,7 @@ impl Slots {
     /// `own` buffers, each in up to `jobs` queued jobs at once, on `own * jobs` indices.
     pub(super) fn new(own: u32, jobs: u32) -> Self {
         let sets = jobs.max(1);
-        Self::with(own, sets, own * sets)
+        Self::with(own, sets, own * sets, own * sets, sets)
     }
 
     /// `own` buffers in up to `jobs` queued jobs at once on the `granted` indices a node gave:
@@ -41,20 +45,39 @@ impl Slots {
         if granted < jobs {
             return None;
         }
+        let (sets, count) = Self::layout(own, jobs, granted);
+        Some(Self::with(own, sets, count, granted, jobs))
+    }
+
+    fn layout(own: u32, jobs: u32, granted: u32) -> (u32, u32) {
         let sets = (0..=jobs)
             .rev()
             .find(|&s| own * s + (jobs - s) <= granted)
             .unwrap_or(0);
-        Some(Self::with(own, sets, granted.min(own * jobs)))
+        (sets, granted.min(own * jobs))
     }
 
-    fn with(own: u32, sets: u32, count: u32) -> Self {
+    fn with(own: u32, sets: u32, count: u32, granted: u32, jobs: u32) -> Self {
         Self {
             own,
             sets,
             count,
-            queued: VecDeque::with_capacity(count as usize),
+            granted,
+            jobs,
+            queued: VecDeque::with_capacity(granted as usize),
         }
+    }
+
+    /// Now `own` buffers (more than before) on the same granted indices, while jobs are queued:
+    /// each buffer gets as many own indices as still fit, and the rest are spares. A queued
+    /// index stays taken until it comes back; one that now belongs to another buffer re-attaches
+    /// the first time that buffer is queued at it.
+    pub(super) fn grow(&mut self, own: u32) {
+        if own <= self.own {
+            return;
+        }
+        (self.sets, self.count) = Self::layout(own, self.jobs, self.granted);
+        self.own = own;
     }
 
     /// How many indices to request from the node.
@@ -151,5 +174,38 @@ mod tests {
         assert_eq!((s.sets, s.count()), (3, 32));
         // Small rings keep one own index per job.
         assert_eq!(Slots::fit(2, 4, 32).unwrap().sets, 4);
+    }
+
+    /// Inputs added while streaming: the same granted indices refit over more buffers, and an
+    /// index still queued from before is not handed out again.
+    #[test]
+    fn growing_refits_the_granted_indices_and_keeps_queued_ones_taken() {
+        let mut s = Slots::fit(4, 4, 16).unwrap();
+        assert_eq!((s.sets, s.count()), (4, 16));
+        // Buffer 1 in two jobs: indices 1 and 5.
+        for want in [1, 5] {
+            assert_eq!(s.pick(1), Some(want));
+            s.queued(want);
+        }
+        s.grow(8);
+        // Eight buffers on 16 indices: one own each (8 * 1 + 3 spares fit, 8 * 2 + 2 do not).
+        assert_eq!((s.own, s.sets, s.count()), (8, 1, 16));
+        assert_eq!(s.pick(7), Some(7));
+        // Index 5 is now buffer 5's, but still queued: buffer 5 takes a spare.
+        assert_eq!(s.pick(5), Some(8));
+        // Every buffer can still be in four jobs at once once the old ones come back.
+        s.dequeued();
+        s.dequeued();
+        for buffer in 0..8 {
+            for _ in 0..4 {
+                let i = s.pick(buffer).expect("a free index");
+                assert!(i < 16);
+                s.queued(i);
+            }
+            s.clear();
+        }
+        // Shrinking is ignored.
+        s.grow(2);
+        assert_eq!(s.own, 8);
     }
 }

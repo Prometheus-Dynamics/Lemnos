@@ -447,6 +447,24 @@ impl BackEndStream {
         self.outputs.get(i)?.as_ref().map(|o| o.format)
     }
 
+    /// Adds input buffers while streaming (e.g. [`super::FrontEndDevice::add_image_buffers`]):
+    /// they become inputs `inputs.len()..` in the order given, of the same `input_len` bytes as
+    /// the first. The node keeps the indices it gave at open; they are refitted over the larger
+    /// ring, so with more inputs fewer stay mapped at their own indices and the rest re-attach
+    /// on each queue. Jobs already queued are unaffected. Untested on board.
+    pub fn add_inputs(&mut self, fds: Vec<OwnedFd>) -> Result<()> {
+        let own = u32::try_from(self.inputs.len() + fds.len())
+            .map_err(|_| DeviceError::Setup("too many input buffers".into()))?;
+        self.inputs.extend(fds);
+        self.input_slots.grow(own);
+        Ok(())
+    }
+
+    /// Input buffers: the ones given at open, then those added.
+    pub fn input_count(&self) -> usize {
+        self.inputs.len()
+    }
+
     /// Runs one job on input buffer `input` with `cfg`, waiting up to `timeout`. The output
     /// buffers stay with the caller until [`Self::release`]; fails when an output has no free
     /// buffer.
