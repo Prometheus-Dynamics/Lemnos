@@ -116,7 +116,7 @@ impl Output {
     }
 }
 
-/// The back end set up for a stream. See the [module documentation](self).
+/// The back end set up for a stream (how it streams: this file's module documentation).
 pub struct BackEndStream {
     _media: MediaDevice,
     input: lemnos_v4l2::v4l2::VideoDevice,

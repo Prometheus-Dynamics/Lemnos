@@ -304,7 +304,7 @@ fn main() -> Result<()> {
 mod be {
     use super::Result;
     use lemnos_drivers_pisp::be::ops::demosaic_ccm;
-    use lemnos_drivers_pisp::device::be_module::{BeModule, BeModuleJob};
+    use lemnos_drivers_pisp::device::be_module::{BeModule, BeModuleJob, Done as BeDone};
     use lemnos_drivers_pisp::device::csi2_module::{Done, Start};
     use lemnos_drivers_pisp::uapi::BayerOrder;
     use lemnos_linux::dma::{Access, DmaBuf, DmaHeap};
@@ -363,9 +363,10 @@ mod be {
                 input.as_fd(),
                 [Some(self.out.as_fd()), None],
             )?;
-            let done = self.be.wait(Duration::from_secs(1))?;
+            let mut done = [BeDone::default(); 1];
+            let n = self.be.wait_done(&mut done, Duration::from_secs(1))?;
             let woke = monotonic_now().as_nanos() as u64;
-            let Some(job) = done.first() else {
+            let Some(job) = done[..n].first() else {
                 return Err("the back end did not finish within 1 s".into());
             };
             if job.status != 0 {

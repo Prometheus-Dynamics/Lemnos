@@ -169,17 +169,26 @@ impl BeModule {
     }
 
     /// Waits up to `timeout` for finished jobs and returns those that are (in completion order);
-    /// empty when none finished in time.
+    /// empty when none finished in time. Allocates the list: a per-job loop uses
+    /// [`Self::wait_done`].
     pub fn wait(&self, timeout: Duration) -> Result<Vec<Done>> {
-        let fd = self.file.as_fd();
         let mut out = vec![Done::default(); self.queue_depth().max(1)];
-        let mut n = read_some(fd, &mut out)?;
-        if n == 0 {
-            lemnos_linux_sys::poll::poll_one(fd, lemnos_linux_sys::poll::POLLIN, Some(timeout))?;
-            n = read_some(fd, &mut out)?;
-        }
+        let n = self.wait_done(&mut out, timeout)?;
         out.truncate(n);
         Ok(out)
+    }
+
+    /// Waits up to `timeout` for finished jobs, writes those that are into `out` (in completion
+    /// order, at most `out.len()`), and returns how many; 0 when none finished in time. No
+    /// allocation, like the receiver's `Receiver::wait_done`.
+    pub fn wait_done(&self, out: &mut [Done], timeout: Duration) -> Result<usize> {
+        let fd = self.file.as_fd();
+        let n = read_some(fd, out)?;
+        if n > 0 || out.is_empty() {
+            return Ok(n);
+        }
+        lemnos_linux_sys::poll::poll_one(fd, lemnos_linux_sys::poll::POLLIN, Some(timeout))?;
+        read_some(fd, out)
     }
 
     /// Tries one soft recovery of a stopped block.
