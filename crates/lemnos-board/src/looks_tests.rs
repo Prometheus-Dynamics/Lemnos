@@ -383,6 +383,10 @@ config = {{ count = 16, {light} }}
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn a_board_carries_its_looks_and_validates_them_with_the_board() {
     let registry = crate::DriverRegistry::builtin();
     let ok = crate::BoardDefinition::from_toml_str(&board_text(
@@ -426,6 +430,10 @@ fn look_brightness_is_the_ring_wide_scale_and_the_driver_byte_is_unchanged() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn a_board_names_its_default_look_and_a_light_never_goes_dark_without_one() {
     // Unset: status.ok, the look a light shows when nothing else is held.
     let plain = crate::BoardDefinition::from_toml_str(&board_text("", "")).unwrap();
@@ -472,6 +480,10 @@ fn a_board_names_its_default_look_and_a_light_never_goes_dark_without_one() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn every_retired_look_key_is_refused_with_its_look_named() {
     let registry = crate::DriverRegistry::builtin();
     for (key, looks) in crate::light::RETIRED_LIGHT_KEYS {

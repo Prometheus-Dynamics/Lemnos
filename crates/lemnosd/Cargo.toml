@@ -54,7 +54,7 @@ alloc-stats = ["lemnos-linux-sys/alloc-stats"]
 
 [dependencies]
 embedded-hal.workspace = true
-lemnos-board = { workspace = true, features = ["linux"] }
+lemnos-board = { workspace = true, features = ["linux", "json", "rp1", "drivers"] }
 lemnos-device = { workspace = true, features = ["alloc"] }
 lemnos-fusion = { path = "../lemnos-fusion" }
 lemnos-drivers-linux.workspace = true

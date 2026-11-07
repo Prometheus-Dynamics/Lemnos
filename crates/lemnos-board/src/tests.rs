@@ -175,6 +175,10 @@ impl Buses for MockBuses {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn example_definition_parses_validates_and_round_trips() {
     let board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     board.validate(&DriverRegistry::builtin()).unwrap();
@@ -200,6 +204,10 @@ fn example_definition_parses_validates_and_round_trips() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn validation_reports_every_problem() {
     let mut board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     board.schema_version = 2;
@@ -284,6 +292,10 @@ fn a_wildcard_is_only_valid_at_the_end_of_a_client_entry() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn userspace_drivers_build_from_the_definition() {
     let tree = Tree::new();
     tree.adapters();
@@ -327,6 +339,10 @@ fn userspace_drivers_build_from_the_definition() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn kernel_drivers_win_when_bound() {
     let tree = Tree::new();
     tree.adapters();
@@ -396,6 +412,10 @@ fn kernel_drivers_win_when_bound() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn i2c_buses_are_found_by_name_or_device_tree_node() {
     let tree = Tree::new();
     tree.adapters();
@@ -456,6 +476,10 @@ fn i2c_buses_are_found_by_name_or_device_tree_node() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn raw_lines_pwms_and_owned_resources() {
     use crate::raw::{Resource, line_safe_state, owned_resources};
     use lemnos_hal::raw::SafeState;
@@ -516,6 +540,10 @@ fn raw_lines_pwms_and_owned_resources() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn validate_checks_config_values_against_the_declared_choices() {
     let mut board = BoardDefinition::from_toml_str(EXAMPLE).unwrap();
     let imu = board.devices.iter_mut().find(|d| d.id == "imu").unwrap();
@@ -551,6 +579,10 @@ fn validate_checks_config_values_against_the_declared_choices() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn every_declared_config_choice_is_accepted_when_the_driver_builds() {
     // The registry's lists are what `validate` checks; each must be a value
     // the driver's own parsing takes, or `validate` would refuse a good board.
@@ -630,6 +662,10 @@ fn text(value: &str) -> ConfigValue {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn fusion_config_validates_its_keys_and_values() {
     let registry = DriverRegistry::builtin();
     let entry = registry.get("fusion").unwrap();
@@ -742,6 +778,10 @@ const SYSTEMCORE_OS_RELEASE: &str = "NAME=LIMELIGHTOS_SYSTEMCORE\n\
 const SYSTEMCORE_MODEL: &str = "Raspberry Pi Compute Module 5 Rev 1.0\0";
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn systemcore_board_is_host_owned_read_only_and_names_its_host() {
     let board = BoardDefinition::from_toml_str(SYSTEMCORE).unwrap();
     let registry = DriverRegistry::builtin();
@@ -788,6 +828,10 @@ fn os_release_values_are_read_with_or_without_quotes() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn host_owned_devices_take_no_writers_no_raw_access_and_need_a_read_only_driver() {
     let board = BoardDefinition::from_toml_str(
         r#"
@@ -833,6 +877,10 @@ match = { type = "cpu-thermal" }
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "drivers"),
+    ignore = "needs the built-in drivers (feature `drivers`)"
+)]
 fn host_owned_sensors_build_read_only_and_lemnos_fans_keep_their_control() {
     let tree = Tree::new();
     tree.adapters();

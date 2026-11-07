@@ -698,7 +698,7 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
       (the counter wraps every 655 s).
     - The gyroscope's samples stay placed by its count hull.
     - Without a clock (an MCU host that does not give one), the FIFOs are paired one to one as
-      before. The driver's `align` feature (default, and on in `lemnos-board`) carries the
+      before. The driver's `align` feature (opt-in; on in `lemnos-board`) carries the
       clocks; MCU images built without it are unchanged in size.
   - **The two dies' samples, on board #1** (400 Hz FIFO, 60 s runs, against an offline fit of
     each die's hull over 10 s windows):

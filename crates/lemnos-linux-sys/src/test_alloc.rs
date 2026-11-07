@@ -24,6 +24,8 @@ thread_local! {
     /// Set while this thread records a backtrace, so the recording's own allocations are not
     /// recorded.
     static RECORDING: Cell<bool> = const { Cell::new(false) };
+    /// Cleared by [`leave_out_of_total`]: this thread's allocations are not in [`TOTAL`].
+    static IN_TOTAL: Cell<bool> = const { Cell::new(true) };
 }
 
 /// Every thread's allocations so far, for code that allocates on threads a test does not own
@@ -35,7 +37,9 @@ static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn count() {
     let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
-    TOTAL.fetch_add(1, Ordering::Relaxed);
+    if IN_TOTAL.try_with(Cell::get).unwrap_or(true) {
+        TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
     if RECORD.load(Ordering::Relaxed) {
         record();
     }
@@ -56,6 +60,13 @@ fn record() {
         records.push(trace);
     }
     let _ = RECORDING.try_with(|r| r.set(false));
+}
+
+/// Leaves this thread's allocations out of [`TOTAL`] from now on: for a test's own client
+/// threads, so a count over [`TOTAL`] is the code under test's alone. Exact, unlike sampling the
+/// thread's [`ALLOCATIONS`] from inside its loop, which a starved thread publishes late.
+pub fn leave_out_of_total() {
+    let _ = IN_TOTAL.try_with(|t| t.set(false));
 }
 
 /// Turns backtrace recording of every allocation on or off (all threads), for finding where a

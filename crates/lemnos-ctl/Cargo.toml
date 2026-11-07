@@ -24,7 +24,7 @@ default = ["board"]
 # `led show` from a file or a TOML/JSON body, the board's fans in `fan
 # restore`. Off, those commands are refused with the reason and the rest
 # (the service's client, the stop helper's state file) is unchanged.
-board = ["dep:lemnos-board", "dep:toml"]
+board = ["dep:lemnos-board", "lemnos-board/json", "lemnos-board/rp1", "lemnos-board/drivers", "dep:toml"]
 
 [dependencies]
 lemnos-drivers-linux.workspace = true

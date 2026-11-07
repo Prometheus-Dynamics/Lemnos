@@ -16,7 +16,8 @@ categories = ["hardware-support", "config"]
 workspace = true
 
 [features]
-default = ["json", "rp1", "drivers"]
+# Nothing board-specific by default: lemnosd and lemnos-ctl turn on what they ship.
+default = []
 # JSON board definitions and look bodies (`serde_json`). Off: TOML only.
 json = ["dep:serde_json"]
 # `LinuxBuses`: buses from /dev/i2c-N through `lemnos_linux::hal`.

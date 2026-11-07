@@ -271,6 +271,35 @@ Everything planned, in order. Execution is paused until the user starts it.
       gives them a full read first. `a_one_shot_read_during_a_masked_subscription_read_gets_every_channel`
       (tests/subscribe.rs) fails at read 16 without the fix and passes with it.
 
+## Block-owner move: rulings (2026-11-07, the user's, relayed by the coordinator)
+
+Design notes go to the consumers before any code; the moves are sequenced interface first with
+the camera stack and the OS image's API.
+
+- **Failure handling (all crates):** never give up; retry backoff capped at 5-10 s (never
+  minutes); never auto-off by default. An easy manual off and on (ctl, IPC, `disabled = true`
+  in the board file). Auto-off only as a configured policy or a default the user set. Backed-off
+  and disabled state visible, backoff self-clearing. Applies to the driver-forms containment
+  design (per-driver workers, deadlines, escalation).
+- **GPU:** stage 1 raw DRM, dma-buf import and fences; stage 2 Vulkan device setup in process
+  through a caller-supplied `vkGetInstanceProcAddr` (the consumer dlopens the loader; Lemnos
+  never does, and libvulkan is never NEEDED). Lazy: nothing at link or init, no instance until
+  an explicit call; absent GPU is a typed result. Caller passes extensions, the feature chain and
+  optional debug; Lemnos adds its own, validates, and reports the enabled set, queues with
+  their families and a per-queue lock. Raw `u64` handles, no foreign types.
+- **Out of Lemnos:** the LED look catalogue and its meanings go to the OS image's API (Lemnos
+  keeps ws2812 driving, the ring map and the animator); PiSP tuning defaults and anything 3A-like
+  go to the camera stack (Lemnos exposes the block config).
+- **Fan curve:** becomes config; the current curve is the default.
+- **Into Lemnos:** camera sensor drivers (description-only form), thermal, power, clock and RTC
+  host facts, the hardware watchdog, USB gadget configfs setup; the frame vocabulary, split at
+  memory (pools, buffers, fences, accounting: Lemnos) vs dataflow (graph slots, backpressure:
+  Daedalus). Lemnos carries an opaque `u64` frame identity it never interprets.
+- **Perf counters:** per-thread groups read into a caller-owned array, a ZST when off. Measured
+  on board #1 (A76): group `read()` of 3 counters 413-422 ns; user-mode reads 48.5 ns for 3,
+  7.1 ns for cycles only, with `perf_user_access`=1 and `config1` bit 1. User-mode values are
+  2^32 off `read()` with the documented conversion: settle on board before the backend lands.
+
 ## The leap (go from the user, 2026-11-06)
 
 Lemnos goes first, since the consumers build on it. The joint-round lock (80d5d1e) stays stable

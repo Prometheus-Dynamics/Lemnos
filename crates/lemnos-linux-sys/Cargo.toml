@@ -31,7 +31,7 @@ undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 
 [features]
-default = ["rp1"]
+default = []
 # The RP1 PIO character device (`/dev/pioN`): `rp1_pio`.
 rp1 = []
 # Test support: `test_alloc`, an allocation-counting global allocator another crate's tests

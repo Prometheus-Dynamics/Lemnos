@@ -787,11 +787,13 @@ fn accel_rate(spec: &DeviceSpec) -> Result<lemnos_drivers_bmi088::AccelRate, Boa
 /// sensor makes samples). `None` for a device whose period is not known here.
 pub fn output_period_us(spec: &DeviceSpec) -> Option<u32> {
     match spec.driver.as_str() {
+        #[cfg(feature = "drv-bmi088")]
         "bmi088" => accel_rate(spec).ok().map(|rate| rate.period_us()),
         _ => None,
     }
 }
 
+#[cfg(feature = "drv-bmi088")]
 fn build_bmi088(spec: &DeviceSpec, buses: &mut dyn Buses) -> Result<BoxedDevice, BoardError> {
     use lemnos_drivers_bmi088::{AccelRange, Bmi088, Config, GyroRange, GyroRate};
     let (bus, accel) = i2c(

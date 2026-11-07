@@ -17,7 +17,7 @@ categories = ["embedded", "hardware-support"]
 workspace = true
 
 [features]
-default = ["std", "rp1"]
+default = ["std"]
 # The Raspberry Pi RP1 PIO I2C bus numbers (`PioI2cPins`, `pio-i2c:` selectors).
 rp1 = []
 # Host conveniences: `ErrorKind::from_io` and serde's std support.
