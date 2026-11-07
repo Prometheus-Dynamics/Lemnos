@@ -17,7 +17,7 @@ use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
 use lemnos_device::{BoxedDevice, DeviceClass, DeviceStatus};
 use lemnos_hal::ErrorKind;
 use lemnos_ipc::{
-    Event, LedShow, LightFrame, LightInfo, LooksOp, Message, RawReading, Refusal, Request, VERSION,
+    Event, LedShow, LightInfo, LooksOp, Message, RawReading, Refusal, Request, VERSION,
 };
 use lemnos_light::{Layer, Show, SystemState, valid_look_name};
 use lemnos_linux_sys::poll::{POLLIN, POLLOUT, PollFd, poll_many};
@@ -67,9 +67,17 @@ const FUSION_RETRY_MS: u64 = 1_000;
 /// on it.
 const SHUTDOWN_FADE_MS: u32 = 1_200;
 const SHUTDOWN_CAP_MS: u64 = 1_500;
-/// Reading frames kept for reuse (`Service::frame_pool`): enough for every client queue that
-/// holds a few readings, bounded so a client that stops reading cannot grow it.
+/// Reading and light frames kept for reuse (`Service::frame_pool`): enough for every client
+/// queue that holds a few, bounded so a client that stops reading cannot grow it.
 const FRAME_POOL: usize = 64;
+
+/// A pooled frame nobody else holds (taken out of `pool`), or a new one.
+fn pooled(pool: &mut Vec<Rc<Vec<u8>>>) -> Rc<Vec<u8>> {
+    match pool.iter().position(|f| Rc::strong_count(f) == 1) {
+        Some(free) => pool.swap_remove(free),
+        None => Rc::new(Vec::new()),
+    }
+}
 
 /// What the service needs.
 pub struct ServiceConfig {
@@ -518,15 +526,7 @@ impl Service {
                 Some(at) => at,
                 None => {
                     let mut scratch = [lemnos_device::NO_VALUE; lemnos_device::MAX_CHANNELS];
-                    // A pooled frame nobody else holds, or a new one.
-                    let mut frame = match self
-                        .frame_pool
-                        .iter()
-                        .position(|f| Rc::strong_count(f) == 1)
-                    {
-                        Some(free) => self.frame_pool.swap_remove(free),
-                        None => Rc::new(Vec::new()),
-                    };
+                    let mut frame = pooled(&mut self.frame_pool);
                     if let Some(buf) = Rc::get_mut(&mut frame) {
                         lemnos_ipc::encode_reading_into(
                             buf,
@@ -1121,52 +1121,52 @@ impl Service {
     /// it changes, and its frame when the frame differs from the last one sent
     /// and the watcher's rate allows. Costs nothing for a light nobody watches.
     fn send_frames(&mut self, now_ms: u64) {
-        let mut outgoing: Vec<(u32, Message)> = Vec::new();
         for li in 0..self.lights.len() {
             if self.lights[li].watchers.is_empty() {
                 continue;
             }
             self.refresh_light_info(li);
             let n = self.lights[li].count.min(MAX_LEDS);
-            let light = &mut self.lights[li];
+            let (lights, clients, pool) =
+                (&mut self.lights, &mut self.clients, &mut self.frame_pool);
+            let light = &mut lights[li];
             let current = light.current;
             let Some((_, info)) = light.info.as_ref() else {
                 continue;
             };
             for w in &mut light.watchers {
+                let Some(client) = clients.iter_mut().find(|c| c.id == w.client) else {
+                    continue;
+                };
                 if w.info_sent.as_ref() != Some(info) {
                     w.info_sent = Some(info.clone());
-                    outgoing.push((w.client, Message::LightInfo(info.clone())));
+                    client.send(&Message::LightInfo(info.clone()));
                 }
                 if !differs(w, &current, n) || now_ms < w.next_ms {
                     continue;
                 }
-                let frame = current;
-                w.sent = Some(frame);
+                w.sent = Some(current);
                 w.next_ms = now_ms + w.period_ms;
                 w.seq = w.seq.wrapping_add(1);
-                let pixels = frame[..n]
-                    .iter()
-                    .map(|c| {
-                        u32::from(c.w) << 24
-                            | u32::from(c.r) << 16
-                            | u32::from(c.g) << 8
-                            | u32::from(c.b)
-                    })
-                    .collect();
-                outgoing.push((
-                    w.client,
-                    Message::Frame(LightFrame {
-                        device: info.device.clone(),
-                        seq: w.seq,
-                        pixels,
-                    }),
-                ));
-            }
-        }
-        for (client, message) in outgoing {
-            if let Some(c) = self.clients.iter_mut().find(|c| c.id == client) {
-                c.send(&message);
+                // Encoded into a pooled frame, as readings are: a frame allocates nothing.
+                let mut frame = pooled(pool);
+                if let Some(buf) = Rc::get_mut(&mut frame) {
+                    lemnos_ipc::encode_frame_into(
+                        buf,
+                        &info.device,
+                        w.seq,
+                        current[..n].iter().map(|c| {
+                            u32::from(c.w) << 24
+                                | u32::from(c.r) << 16
+                                | u32::from(c.g) << 8
+                                | u32::from(c.b)
+                        }),
+                    );
+                }
+                client.send_frame(&frame);
+                if pool.len() < FRAME_POOL {
+                    pool.push(frame);
+                }
             }
         }
     }

@@ -1028,3 +1028,20 @@ fn a_read_without_its_appended_id_reads_as_id_zero() {
         }
     );
 }
+
+#[test]
+fn a_frame_encoded_into_a_reused_buffer_is_the_messages_frame() {
+    let frame = crate::LightFrame {
+        device: "status-ring".into(),
+        seq: 7,
+        pixels: vec![0x00ff_0000, 0x0000_ff00, 0x1100_00ff],
+    };
+    let mut buf = vec![0xaa; 300];
+    crate::encode_frame_into(
+        &mut buf,
+        &frame.device,
+        frame.seq,
+        frame.pixels.iter().copied(),
+    );
+    assert_eq!(buf, Message::Frame(frame).encode());
+}

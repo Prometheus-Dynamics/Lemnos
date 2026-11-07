@@ -42,19 +42,39 @@ pub fn encode_reading_into(
     *frame = e.finish();
 }
 
+/// A light frame (`Message::Frame`) encoded into `frame`, reusing its capacity: the service
+/// sends a watched light's frames this way, with no `LightFrame` and no pixel vector. Packed
+/// `0xWWRRGGBB` pixels, at most `u16::MAX`.
+pub fn encode_frame_into(
+    frame: &mut Vec<u8>,
+    device: &str,
+    seq: u32,
+    pixels: impl ExactSizeIterator<Item = u32>,
+) {
+    let count = pixels.len().min(u16::MAX as usize);
+    let device_len = device.len().min(u16::MAX as usize);
+    let size = 6 + 2 + device_len + 4 + 2 + 4 * count;
+    let mut e = Encoder::reuse(FRAME, std::mem::take(frame), size);
+    e.str(device).u32(seq).u16(count as u16);
+    for pixel in pixels.take(count) {
+        e.u32(pixel);
+    }
+    *frame = e.finish();
+}
+
 impl Message {
     /// The frame for this message.
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Self::Frame(frame) => {
-                let mut e = Encoder::new(FRAME);
-                e.str(&frame.device)
-                    .u32(frame.seq)
-                    .u16(frame.pixels.len().min(u16::MAX as usize) as u16);
-                for pixel in frame.pixels.iter().take(u16::MAX as usize) {
-                    e.u32(*pixel);
-                }
-                e.finish()
+                let mut buf = Vec::new();
+                encode_frame_into(
+                    &mut buf,
+                    &frame.device,
+                    frame.seq,
+                    frame.pixels.iter().copied(),
+                );
+                buf
             }
             Self::LightInfo(info) => {
                 let mut e = Encoder::new(LIGHT_INFO);

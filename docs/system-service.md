@@ -579,7 +579,13 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   words, RX words, result bytes and a reply channel. The bus now keeps those buffers for its
   life under its lock and hands the TX words to its helper over bounded channels made once.
   Untested on board. `crates/lemnosd/tests/alloc_board.rs` runs a shipped board definition on
-  mock I2C (no PIO) with no client: 0 allocations over 3 s.
+  mock I2C (no PIO): 0 allocations over 3 s with no client, and 0 with a live-data agent's
+  load (the IMU, magnetometer and orientation subscribed at 10 ms, the rest at 100 ms, the
+  ring's frames watched at 30 fps; about 420 readings and frames in 3 s). The frame watch
+  allocated about 6 times a frame before (the pixel vector, the message, its encoding and
+  the outgoing list): frames are now encoded into the pooled reading frames
+  (`lemnos_ipc::encode_frame_into`). An I2C transaction of up to 42 alternating messages
+  (a power monitor's ten-operation poll) is built on the stack (it was up to 8).
 - **Allocations on a running board.** Built with the `alloc-stats` feature, `lemnosd` runs on a
   counting allocator (`lemnos_linux_sys::alloc_stats`: two relaxed atomic adds per call) and
   sets `FEATURE_ALLOC_STATS` (4). `Request::AllocStats` answers its allocations, frees, bytes

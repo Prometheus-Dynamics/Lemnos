@@ -156,8 +156,8 @@ impl I2cBus {
         let address = u16::from(address);
         let n = operations.len();
         if alternates(operations) && n <= STACK_MESSAGES {
-            // The common case (register reads and writes, every camera frame):
-            // one message per operation, built on the stack.
+            // The common case (register reads and writes, a batched register poll, every
+            // camera frame): one message per operation, built on the stack.
             let mut messages: [I2cMessage<'_>; STACK_MESSAGES] =
                 std::array::from_fn(|_| I2cMessage::Write(&[]));
             for (m, op) in messages.iter_mut().zip(operations.iter_mut()) {
@@ -199,8 +199,10 @@ impl I2cBus {
     }
 }
 
-/// Messages of a transaction built on the stack (longer ones allocate).
-const STACK_MESSAGES: usize = 8;
+/// Messages of a transaction built on the stack: as many as one `I2C_RDWR` takes, so an
+/// alternating transaction never allocates (a power monitor's poll is ten operations: five
+/// register pointers and their reads, about 1 KiB of stack at most).
+const STACK_MESSAGES: usize = sys::MAX_MESSAGES;
 
 /// Whether no two adjacent operations go the same direction (each is its own
 /// message), without allocating.

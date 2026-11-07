@@ -72,5 +72,6 @@ pub use wire::{
     FEATURE_GPU_LEASE, FEATURE_READ_ID, GpuAcquire, GpuHangReport, GpuHolder, GpuInfo,
     GpuLeaseState, GpuMode, I2cOp, LedRequest, LedShow, LightFrame, LightInfo, LineTarget, LooksOp,
     Message, PwmTarget, RawReading, RawRequest, ReadStats, Refusal, Request, SpiXfer, VERSION,
-    WireError, decode_message, decode_request, encode_reading, encode_reading_into,
+    WireError, decode_message, decode_request, encode_frame_into, encode_reading,
+    encode_reading_into,
 };

@@ -135,6 +135,12 @@ impl Client {
         self.enqueue(Class::Reading, Rc::clone(frame));
     }
 
+    /// Queues a watched light's frame (`lemnos_ipc::encode_frame_into`) from the service's
+    /// frame pool. Never dropped for a slow reader, as no answer is.
+    pub fn send_frame(&mut self, frame: &Rc<Vec<u8>>) {
+        self.enqueue(Class::Answer, Rc::clone(frame));
+    }
+
     fn enqueue(&mut self, class: Class, frame: Rc<Vec<u8>>) {
         if self.closed {
             return;

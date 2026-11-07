@@ -7,15 +7,26 @@
 #![allow(clippy::print_stdout)]
 
 use lemnos_hal::register::AddressWidth;
+use lemnos_ipc::ClientOptions;
 use lemnos_linux_sys::test_alloc::{self, ALLOCATIONS, Counting, TOTAL};
 use lemnosd::mock::{MockHardware, MockLemnosd};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
+
+/// The count is process-wide: the tests here run one at a time.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn write(root: &Path, path: &str, contents: &str) {
     let path = root.join(path);
@@ -141,15 +152,100 @@ fn service(name: &str) -> MockLemnosd {
     MockLemnosd::start_in(root, &board, hardware).unwrap()
 }
 
-/// Allocations by every other thread over `span`.
-fn measure(span: Duration, record: bool) -> usize {
+/// A board agent's clients, as a live-data agent runs them when its streams are sampled: the
+/// IMU, the magnetometer and the orientation subscribed at 10 ms, the other sensors at 100 ms,
+/// and the ring's frames watched at 30 fps. Each runs on its own thread and adds its own
+/// allocations (the clients' decoding) to `own`, so [`measure`] counts only the service's.
+struct Agent {
+    stop: Arc<AtomicBool>,
+    own: Arc<AtomicUsize>,
+    events: Arc<AtomicUsize>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Agent {
+    fn start(service: &MockLemnosd) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let own = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        let socket = service.socket().to_path_buf();
+        let (s, o, e, path) = (stop.clone(), own.clone(), events.clone(), socket.clone());
+        threads.push(
+            std::thread::Builder::new()
+                .name("agent-devices".into())
+                .spawn(move || {
+                    let mut last = ALLOCATIONS.with(std::cell::Cell::get);
+                    let mut client = ClientOptions::new(&path, "board-agent").devices().unwrap();
+                    for (device, period) in [
+                        ("imu", 10),
+                        ("magnetometer", 10),
+                        ("orientation", 10),
+                        ("power", 100),
+                        ("fan", 100),
+                        ("cpu-thermal", 100),
+                    ] {
+                        client.subscribe(device, period).unwrap();
+                    }
+                    while !s.load(Ordering::Relaxed) {
+                        if let Ok(Some(_)) = client.next_event_timeout(Duration::from_millis(20)) {
+                            e.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let now = ALLOCATIONS.with(std::cell::Cell::get);
+                        o.fetch_add(now - last, Ordering::Relaxed);
+                        last = now;
+                    }
+                })
+                .unwrap(),
+        );
+        let (s, o, e) = (stop.clone(), own.clone(), events.clone());
+        threads.push(
+            std::thread::Builder::new()
+                .name("agent-light".into())
+                .spawn(move || {
+                    let mut last = ALLOCATIONS.with(std::cell::Cell::get);
+                    let mut client = ClientOptions::new(&socket, "board-agent-light")
+                        .leds()
+                        .unwrap();
+                    client.watch_frames("status-ring", 30).unwrap();
+                    while !s.load(Ordering::Relaxed) {
+                        if let Ok(Some(_)) = client.next_frame(Some(Duration::from_millis(20))) {
+                            e.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let now = ALLOCATIONS.with(std::cell::Cell::get);
+                        o.fetch_add(now - last, Ordering::Relaxed);
+                        last = now;
+                    }
+                })
+                .unwrap(),
+        );
+        Self {
+            stop,
+            own,
+            events,
+            threads,
+        }
+    }
+
+    fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for t in self.threads {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Allocations by every other thread over `span`, less `agent`'s own.
+fn measure(span: Duration, record: bool, agent: Option<&Agent>) -> usize {
     let mine = ALLOCATIONS.with(std::cell::Cell::get);
     let all = TOTAL.load(Ordering::Relaxed);
+    let theirs = agent.map_or(0, |a| a.own.load(Ordering::Relaxed));
     test_alloc::set_recording(record);
     std::thread::sleep(span);
     test_alloc::set_recording(false);
     let mine = ALLOCATIONS.with(std::cell::Cell::get) - mine;
-    (TOTAL.load(Ordering::Relaxed) - all).saturating_sub(mine)
+    let theirs = agent.map_or(0, |a| a.own.load(Ordering::Relaxed)) - theirs;
+    (TOTAL.load(Ordering::Relaxed) - all).saturating_sub(mine + theirs)
 }
 
 /// The board's service with no client allocates nothing once its sensors have been read
@@ -157,22 +253,44 @@ fn measure(span: Duration, record: bool) -> usize {
 /// in it).
 #[test]
 fn a_whole_board_allocates_nothing_without_clients() {
+    let _serial = one_at_a_time();
     let service = service("steady");
-    let _ = measure(Duration::from_secs(3), false);
-    let n = measure(Duration::from_secs(3), false);
+    let _ = measure(Duration::from_secs(3), false, None);
+    let n = measure(Duration::from_secs(3), false, None);
     service.stop();
     assert_eq!(n, 0, "allocations in 3 s");
+}
+
+/// With a board agent's subscriptions and frame watch (fusion running at 100 Hz, frames at
+/// 30 fps), the service still allocates nothing once warm.
+#[test]
+fn a_whole_board_allocates_nothing_while_an_agent_streams_it() {
+    let _serial = one_at_a_time();
+    let service = service("agent");
+    let agent = Agent::start(&service);
+    let _ = measure(Duration::from_secs(3), false, Some(&agent));
+    let before = agent.events.load(Ordering::Relaxed);
+    let n = measure(Duration::from_secs(3), false, Some(&agent));
+    let events = agent.events.load(Ordering::Relaxed) - before;
+    agent.stop();
+    service.stop();
+    println!("{events} readings and frames, {n} allocations");
+    assert!(events >= 300, "only {events} readings and frames in 3 s");
+    assert_eq!(n, 0, "allocations in 3 s over {events} readings and frames");
 }
 
 #[test]
 #[ignore = "diagnosis: prints where a whole board's service allocates with no client"]
 fn where_the_board_allocates() {
+    let _serial = one_at_a_time();
     let service = service("where");
-    let _ = measure(Duration::from_secs(3), false);
-    let n = measure(Duration::from_secs(2), false);
+    let agent = std::env::var_os("WITH_AGENT").map(|_| Agent::start(&service));
+    let _ = measure(Duration::from_secs(3), false, agent.as_ref());
+    let n = measure(Duration::from_secs(2), false, agent.as_ref());
     println!("unrecorded: {n} allocations in 2 s");
-    let n = measure(Duration::from_millis(500), true);
-    let records = test_alloc::take_records();
+    let n = measure(Duration::from_millis(500), true, agent.as_ref());
+    let mut records = test_alloc::take_records();
+    records.retain(|r| !r.starts_with("thread agent-"));
     println!("recorded: {n} allocations, {} traces", records.len());
     let mut seen = std::collections::BTreeMap::<String, usize>::new();
     for r in &records {
@@ -190,6 +308,9 @@ fn where_the_board_allocates() {
     sites.sort_by_key(|s| std::cmp::Reverse(s.1));
     for (site, n) in sites.iter().take(12) {
         println!("{n:6}  {site}");
+    }
+    if let Some(agent) = agent {
+        agent.stop();
     }
     service.stop();
 }
