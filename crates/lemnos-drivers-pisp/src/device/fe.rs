@@ -47,7 +47,9 @@ pub struct FrontEndSetup {
     /// `PC1g`, `PC1B` or `PC1M` by Bayer order) instead of 16-bit: half the bytes. The caller
     /// enables the front end's compression for output 0 (`FrontEnd::set_compress(0, ..)`) and
     /// sets its format from [`FrontEndDevice::image_format`], whose format is then
-    /// `formats::PISP_COMP1`; the back end decompresses its input to match. Untested on board.
+    /// `formats::PISP_COMP1`; the back end decompresses its input to match. On board #1
+    /// (OV9782 1280x800 at 30 fps, fa2e617): 30.2 frames/s and 121 of 121 frames as
+    /// uncompressed, Y planes equal to sensor noise, with temporal denoise on.
     pub image_compressed: bool,
     /// Buffers per queue.
     pub buffers: u32,
@@ -473,7 +475,9 @@ impl FrontEndDevice {
     /// [`Self::release_image`] when it wants the front end to write it.
     ///
     /// They stay until the capture is closed: rp1-cfe has no `VIDIOC_REMOVE_BUFS`. The driver
-    /// may make fewer than asked; an error when it makes none. Untested on board.
+    /// may make fewer than asked; an error when it makes none. On board #1 (38524a9, with
+    /// [`super::BackEndStream::add_inputs`]): a raw consumer joined a running capture with no
+    /// restart, its first frame in 36 ms.
     pub fn add_image_buffers(&mut self, count: u32) -> Result<Vec<OwnedFd>> {
         let q = self
             .image
