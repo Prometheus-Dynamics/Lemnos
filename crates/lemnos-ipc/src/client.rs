@@ -269,6 +269,15 @@ struct Connection {
     connected_once: bool,
     backoff: Duration,
     next_attempt: Instant,
+    /// Polled use ([`DeviceClient::set_nonblocking`]): the socket is
+    /// non-blocking between the blocking calls.
+    nonblocking: bool,
+    /// Whether the socket is non-blocking now.
+    stream_nonblocking: bool,
+    /// Request bytes not yet written (a full socket in polled use).
+    out: Vec<u8>,
+    /// A request frame being built, kept to encode without allocating.
+    scratch: Vec<u8>,
 }
 
 impl Connection {
@@ -289,6 +298,10 @@ impl Connection {
             connected_once: false,
             backoff: RECONNECT_MIN,
             next_attempt: Instant::now(),
+            nonblocking: false,
+            stream_nonblocking: false,
+            out: Vec::new(),
+            scratch: Vec::new(),
         };
         let deadline = conn.options.wait.map(|w| Instant::now() + w);
         let mut pause = Duration::from_millis(20);
@@ -328,7 +341,10 @@ impl Connection {
         stream.set_read_timeout(Some(self.options.timeout))?;
         stream.set_write_timeout(Some(self.options.timeout))?;
         self.stream = Some(stream);
+        self.stream_nonblocking = false;
         self.buf.clear();
+        // Requests not written to the last connection are void.
+        self.out.clear();
         // `Connected` goes ahead of what arrives while connecting (the service's current light
         // owners, say), so a caller sees the connection before the state it brings.
         let mark = self.queue.len();
@@ -398,6 +414,73 @@ impl Connection {
         self.connected_once = true;
         self.backoff = RECONNECT_MIN;
         Ok(())
+    }
+
+    /// Puts the socket in or out of non-blocking mode. Into blocking mode, the
+    /// requests still queued are written first.
+    pub(super) fn set_stream_nonblocking(&mut self, on: bool) -> Result<(), ClientError> {
+        let Some(stream) = self.stream.as_ref() else {
+            return Ok(());
+        };
+        if self.stream_nonblocking != on {
+            stream.set_nonblocking(on)?;
+            self.stream_nonblocking = on;
+        }
+        if !on && !self.out.is_empty() {
+            let out = std::mem::take(&mut self.out);
+            let written = self.stream.as_mut().map(|s| s.write_all(&out));
+            self.out = out;
+            self.out.clear();
+            if let Some(Err(e)) = written {
+                self.lost(ClientError::Io(e));
+                return Err(ClientError::Closed);
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes what the socket takes of the queued requests, without waiting.
+    pub(super) fn flush_out(&mut self) -> Result<(), ClientError> {
+        while !self.out.is_empty() {
+            let stream = self.stream.as_mut().ok_or(ClientError::Closed)?;
+            match stream.write(&self.out) {
+                Ok(0) => {
+                    self.lost(ClientError::Io(io::ErrorKind::WriteZero.into()));
+                    return Err(ClientError::Closed);
+                }
+                Ok(n) => {
+                    self.out.drain(..n);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    self.lost(ClientError::Io(e));
+                    return Err(ClientError::Closed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends the frame in `scratch` (polled use: queued, then written as far as
+    /// the socket takes it).
+    pub(super) fn send_scratch(&mut self) -> Result<(), ClientError> {
+        if self.stream.is_none() {
+            return Err(ClientError::Closed);
+        }
+        if self.scratch.len() > wire::MAX_REQUEST_FRAME {
+            return Err(ClientError::Protocol(WireError(format!(
+                "request of {} bytes exceeds the {}-byte frame limit",
+                self.scratch.len(),
+                wire::MAX_REQUEST_FRAME
+            ))));
+        }
+        self.out.extend_from_slice(&self.scratch);
+        if self.stream_nonblocking {
+            self.flush_out()
+        } else {
+            self.set_stream_nonblocking(false)
+        }
     }
 
     fn send(&mut self, request: &Request) -> Result<(), ClientError> {
@@ -487,6 +570,21 @@ impl Connection {
         if self.stream.is_none() && self.options.reconnect {
             self.connect()?;
         }
+        // A blocking call in polled use blocks for its answer, then hands the
+        // socket back non-blocking.
+        self.set_stream_nonblocking(false)?;
+        let result = self.request_blocking(request, &mut pick);
+        if self.nonblocking {
+            self.set_stream_nonblocking(true)?;
+        }
+        result
+    }
+
+    fn request_blocking<T>(
+        &mut self,
+        request: &Request,
+        pick: &mut impl FnMut(&Message) -> Option<T>,
+    ) -> Result<T, ClientError> {
         self.send(request)?;
         let deadline = Instant::now() + self.options.timeout;
         loop {
@@ -499,6 +597,15 @@ impl Connection {
     }
 
     fn refresh_devices(&mut self) -> Result<(), ClientError> {
+        self.set_stream_nonblocking(false)?;
+        let result = self.refresh_devices_blocking();
+        if self.nonblocking {
+            self.set_stream_nonblocking(true)?;
+        }
+        result
+    }
+
+    fn refresh_devices_blocking(&mut self) -> Result<(), ClientError> {
         self.send(&Request::List)?;
         let deadline = Instant::now() + self.options.timeout;
         loop {
@@ -537,6 +644,19 @@ impl Connection {
     /// The next event, waiting up to `wait` (`None`: forever, retrying
     /// connections when reconnecting).
     fn next(
+        &mut self,
+        wait: Option<Duration>,
+    ) -> Result<Option<ClientEvent<Message>>, ClientError> {
+        // Waiting in polled use: blocking for the wait, non-blocking after.
+        self.set_stream_nonblocking(false)?;
+        let result = self.next_blocking(wait);
+        if self.nonblocking {
+            self.set_stream_nonblocking(true)?;
+        }
+        result
+    }
+
+    fn next_blocking(
         &mut self,
         wait: Option<Duration>,
     ) -> Result<Option<ClientEvent<Message>>, ClientError> {
@@ -588,6 +708,14 @@ fn reply(id: u32) -> impl FnMut(&Message) -> Option<Result<f64, Refusal>> {
 
 #[path = "client/calibration.rs"]
 mod calibration;
+#[path = "client/poll.rs"]
+mod poll;
+pub use poll::Polled;
+#[cfg(feature = "tokio")]
+#[path = "client/async_client.rs"]
+mod async_client;
+#[cfg(feature = "tokio")]
+pub use async_client::AsyncDeviceClient;
 
 /// Reads, subscribes to and controls `lemnosd`'s devices.
 pub struct DeviceClient {

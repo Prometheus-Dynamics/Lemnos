@@ -613,3 +613,31 @@ impl Request {
         })
     }
 }
+
+/// A [`Request::Read`] encoded into `frame` from its parts, replacing what it held: no
+/// allocation once `frame` has room.
+pub(crate) fn encode_read_into(frame: &mut Vec<u8>, id: u32, device: &str) {
+    let mut e = Encoder::reuse_new(frame, READ);
+    e.str(device).u32(id);
+    *frame = e.finish();
+}
+
+/// A [`Request::Set`] encoded into `frame` from its parts (see [`encode_read_into`]).
+pub(crate) fn encode_set_into(
+    frame: &mut Vec<u8>,
+    id: u32,
+    device: &str,
+    control: &str,
+    value: f64,
+) {
+    let mut e = Encoder::reuse_new(frame, SET);
+    e.u32(id).str(device).str(control).f64(value);
+    *frame = e.finish();
+}
+
+/// A [`Request::Get`] encoded into `frame` from its parts (see [`encode_read_into`]).
+pub(crate) fn encode_get_into(frame: &mut Vec<u8>, id: u32, device: &str, control: &str) {
+    let mut e = Encoder::reuse_new(frame, GET);
+    e.u32(id).str(device).str(control);
+    *frame = e.finish();
+}

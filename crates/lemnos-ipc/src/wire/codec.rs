@@ -150,6 +150,14 @@ impl<'a> Decoder<'a> {
         let len = usize::from(self.u16()?);
         String::from_utf8(self.take(len)?.to_vec()).map_err(|_| bad("string is not UTF-8"))
     }
+    /// [`Self::str`] into `out`, replacing it: no allocation once `out` has room.
+    pub(super) fn str_into(&mut self, out: &mut String) -> Result<(), WireError> {
+        let len = usize::from(self.u16()?);
+        let text = std::str::from_utf8(self.take(len)?).map_err(|_| bad("string is not UTF-8"))?;
+        out.clear();
+        out.push_str(text);
+        Ok(())
+    }
     pub(super) fn bytes(&mut self) -> Result<Vec<u8>, WireError> {
         let n = self.u32()? as usize;
         Ok(self.take(n)?.to_vec())

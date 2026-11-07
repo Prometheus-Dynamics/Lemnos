@@ -49,10 +49,12 @@ mod spec_vectors;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "tokio")]
+pub use client::AsyncDeviceClient;
 pub use client::FrameUpdate;
 pub use client::{
     ClientError, ClientEvent, ClientOptions, DEFAULT_SOCKET, DEFAULT_TIMEOUT, DeviceClient,
-    GpuClient, GpuNotice, I2cDevice, LedClient, Line, Pwm, Reading, SpiDevice, Update,
+    GpuClient, GpuNotice, I2cDevice, LedClient, Line, Polled, Pwm, Reading, SpiDevice, Update,
 };
 /// The compact-model types the protocol carries, so clients need no
 /// direct `lemnos-device` or `lemnos-hal` dependency.

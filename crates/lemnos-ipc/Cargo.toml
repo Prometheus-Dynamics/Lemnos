@@ -15,7 +15,16 @@ categories = ["hardware-support", "os::unix-apis"]
 [lints]
 workspace = true
 
+[features]
+# AsyncDeviceClient: a DeviceClient on Tokio's reactor.
+tokio = ["dep:tokio"]
+
 [dependencies]
 lemnos-device.workspace = true
 lemnos-hal.workspace = true
 lemnos-light.workspace = true
+tokio = { workspace = true, optional = true, features = ["net", "time"] }
+
+[dev-dependencies]
+lemnos-linux-sys = { workspace = true, features = ["alloc-count"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }

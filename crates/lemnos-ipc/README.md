@@ -26,6 +26,31 @@ leds.progress(0.4, None)?;
 leds.set_leds(&[(0, 0xff0000)])?;              // logical index 0 is the ring's top
 ```
 
+From an event loop, with no thread per client: `poll` never blocks, requests go out without
+waiting, and in the steady state (readings in, those requests out) nothing allocates:
+
+```rust
+use lemnos_ipc::{Polled, wire::RawReading};
+
+let mut reading = RawReading::default();       // reused: decoded into in place
+let id = devices.send_read("imu")?;            // the answer comes from `poll` with this id
+devices.send_set("fan", "duty", 0.8)?;
+// Register `devices.fd()` with epoll (or tokio's `AsyncFd`) for readable, and for writable
+// while `devices.wants_write()`; on readiness:
+while let Some(polled) = devices.poll(&mut reading)? {
+    match polled {
+        Polled::Reading => {}                        // `reading` holds it (`reading.id`)
+        Polled::Reply { id, result } => {}           // a send_set / send_get answer
+        Polled::Event(e) => {}
+        Polled::Connected { .. } => {}               // a new socket: register `fd()` again
+        Polled::Disconnected { .. } => {}            // retried by `poll` after `retry_at()`
+    }
+}
+```
+
+With the `tokio` feature, `AsyncDeviceClient::new(devices)` does the waiting:
+`client.next(&mut reading).await` (cancel-safe), with requests through `client.get_mut()`.
+
 Raw access through the service (claims end with the connection; see `docs/system-service.md`,
 "Raw bus and line access"):
 

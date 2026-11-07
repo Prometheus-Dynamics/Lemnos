@@ -112,6 +112,7 @@ pub use message::{
     encode_status_event_into,
 };
 pub use raw::{I2cOp, LineTarget, PwmTarget, RawRequest, SpiXfer};
+pub(crate) use request::{encode_get_into, encode_read_into, encode_set_into};
 
 pub use codec::Code;
 use codec::frame;
@@ -188,7 +189,7 @@ pub struct AllocStats {
 }
 
 /// One device reading.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RawReading {
     pub device: String,
     /// Microseconds on `CLOCK_BOOTTIME`, taken when the read started (see the
@@ -723,6 +724,42 @@ pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, WireError>
         Some((kind, payload, used)) => Ok(Some((Request::decode(kind, payload)?, used))),
         None => Ok(None),
     }
+}
+
+/// What [`decode_reading_into`] found at the front of a buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NextFrame {
+    /// Not a whole frame yet.
+    Incomplete,
+    /// A reading, decoded; the frame was this many bytes.
+    Reading(usize),
+    /// Some other message (decode it with [`decode_message`]).
+    Other,
+}
+
+/// Decodes the frame at the front of `buf` into `into` if it is a reading, reusing
+/// `into`'s device name and values: no allocation once they have room.
+pub(crate) fn decode_reading_into(
+    buf: &[u8],
+    into: &mut RawReading,
+) -> Result<NextFrame, WireError> {
+    let Some((kind, payload, used)) = frame(buf, MAX_FRAME)? else {
+        return Ok(NextFrame::Incomplete);
+    };
+    if kind != READING {
+        return Ok(NextFrame::Other);
+    }
+    let mut d = codec::Decoder { buf: payload };
+    d.str_into(&mut into.device)?;
+    into.timestamp_us = d.u64()?;
+    into.status = DeviceStatus::from_code(d.u8()?);
+    let n = d.u16()?;
+    into.values.clear();
+    for _ in 0..n {
+        into.values.push(d.i32()?);
+    }
+    into.id = if d.is_empty() { 0 } else { d.u32()? };
+    Ok(NextFrame::Reading(used))
 }
 
 /// Splits and decodes messages from `buf`.

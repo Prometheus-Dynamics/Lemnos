@@ -685,6 +685,8 @@ dependencies = [
  "lemnos-device",
  "lemnos-hal",
  "lemnos-light",
+ "lemnos-linux-sys",
+ "tokio",
 ]
 
 [[package]]
