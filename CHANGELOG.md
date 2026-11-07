@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-drivers-pisp`: `FrontEndSetup::image_compressed` captures the front end's raw output 0 as PiSP 8-bit compressed (mode 1, rp1-cfe's `PC1R`/`PC1G`/`PC1g`/`PC1B`/`PC1M`), half the bytes of 16-bit. `FrontEndDevice::image_format` is then `formats::PISP_COMP1` with the driver's stride; the caller enables the front end's compression on output 0 and the back end decompresses. A source change for `FrontEndSetup` literals. Untested on board.
 - `lemnos-drivers-rga::cpu` gains conversions and resizes:
   - `convert` turns any `PixelFormat` into any other of the same size, with `Matrix::{Bt601Limited, Bt601Full, Bt709Limited}`, the matrices the units offer. Coefficients are in 1/1024ths with `(sum + 512) >> 10` rounding; 4:2:0 chroma is nearest from YUV and a 2x2 average to it; gray is full-range luma.
   - `resize` does area (integer factor) and bilinear within one format, plane by plane. `Sampling::{Centres, Corners, Origin}` gives the phase each unit is documented to use.

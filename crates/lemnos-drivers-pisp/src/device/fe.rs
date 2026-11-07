@@ -9,7 +9,7 @@ use lemnos_v4l2::subdev::{MbusCode, MbusFormat, Subdev, Which};
 use lemnos_v4l2::v4l2::{BufType, Format, MetaFormat, PixFormat, SelectionTarget, VideoDevice};
 
 use super::line_timer::{LineTimer, LineTimerCounts};
-use super::{DeviceError, Queue, Result, bayer16_fourcc, find_media};
+use super::{DeviceError, Queue, Result, bayer16_fourcc, comp1_fourcc, find_media};
 use crate::fe::FrontEnd;
 use crate::stats::Statistics;
 use crate::uapi::{BayerOrder, FeConfig, ImageFormatConfig, RawStatistics, image_format};
@@ -43,6 +43,12 @@ pub struct FrontEndSetup {
     pub bayer: BayerOrder,
     /// Also capture the front end's raw output 0 (`rp1-cfe-fe_image0`).
     pub image_output: bool,
+    /// Capture that output as PiSP 8-bit compressed raw (mode 1, rp1-cfe's `PC1R`, `PC1G`,
+    /// `PC1g`, `PC1B` or `PC1M` by Bayer order) instead of 16-bit: half the bytes. The caller
+    /// enables the front end's compression for output 0 (`FrontEnd::set_compress(0, ..)`) and
+    /// sets its format from [`FrontEndDevice::image_format`], whose format is then
+    /// `formats::PISP_COMP1`; the back end decompresses its input to match. Untested on board.
+    pub image_compressed: bool,
     /// Buffers per queue.
     pub buffers: u32,
     /// Leave the receiver's embedded data link (`csi2` → `rp1-cfe-embedded`) as it is
@@ -294,10 +300,18 @@ impl FrontEndDevice {
                 ..Default::default()
             }),
         )?;
+        let (image_fourcc, format) = if setup.image_compressed {
+            (
+                comp1_fourcc(setup.bayer),
+                crate::format::formats::PISP_COMP1,
+            )
+        } else {
+            (bayer16_fourcc(setup.bayer), image_format::BPS_16)
+        };
         let mut image_format = ImageFormatConfig {
             width: setup.width as u16,
             height: setup.height as u16,
-            format: image_format::BPS_16,
+            format,
             ..Default::default()
         };
         let image_path = t.devnode_path(image_node);
@@ -308,7 +322,7 @@ impl FrontEndDevice {
                 &Format::Single(PixFormat {
                     width: setup.width,
                     height: setup.height,
-                    fourcc: bayer16_fourcc(setup.bayer),
+                    fourcc: image_fourcc,
                     field: 1,
                     ..Default::default()
                 }),
@@ -316,7 +330,7 @@ impl FrontEndDevice {
             let Format::Single(p) = f else {
                 return Err(DeviceError::Setup("fe_image0 is not single-planar".into()));
             };
-            if p.fourcc != bayer16_fourcc(setup.bayer) {
+            if p.fourcc != image_fourcc {
                 return Err(DeviceError::Setup(format!("fe_image0 gave {}", p.fourcc)));
             }
             image_format.stride = p.bytes_per_line as i32;
@@ -349,7 +363,10 @@ impl FrontEndDevice {
     }
 
     /// The format of the raw output node (for `FrontEnd::set_output_format(0, ..)` and as
-    /// the back end's input).
+    /// the back end's input), with the driver's stride. With
+    /// [`FrontEndSetup::image_compressed`] it is `formats::PISP_COMP1`: the front end compresses
+    /// output 0 with `FrontEnd::set_compress(0, ..)`, and the back end decompresses with the
+    /// same offset and mode.
     pub fn image_format(&self) -> ImageFormatConfig {
         self.image_format
     }

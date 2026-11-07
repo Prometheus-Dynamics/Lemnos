@@ -128,6 +128,18 @@ pub(crate) fn dma_sync(
 /// Media devices whose driver is `driver` (e.g. `rp1-cfe`, `pispbe`), in path order.
 pub use lemnos_v4l2::media::find_media_by_driver as find_media;
 
+/// `V4L2_PIX_FMT_PISP_COMP1_*`: rp1-cfe's 8-bit compressed (mode 1) fourcc for a Bayer order.
+pub fn comp1_fourcc(order: crate::uapi::BayerOrder) -> lemnos_v4l2::FourCc {
+    use crate::uapi::BayerOrder::*;
+    lemnos_v4l2::FourCc::new(match order {
+        Rggb => b"PC1R",
+        Gbrg => b"PC1g",
+        Bggr => b"PC1B",
+        Grbg => b"PC1G",
+        Greyscale => b"PC1M",
+    })
+}
+
 /// `V4L2_PIX_FMT_SBGGR16` and friends: 16-bit Bayer fourcc for a PiSP Bayer order.
 pub fn bayer16_fourcc(order: crate::uapi::BayerOrder) -> lemnos_v4l2::FourCc {
     use crate::uapi::BayerOrder::*;
@@ -138,4 +150,16 @@ pub fn bayer16_fourcc(order: crate::uapi::BayerOrder) -> lemnos_v4l2::FourCc {
         Grbg => b"GR16",
         Greyscale => b"Y16 ",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uapi::BayerOrder::*;
+
+    #[test]
+    fn compressed_fourccs_match_rp1_cfe() {
+        let names = [Rggb, Gbrg, Bggr, Grbg, Greyscale].map(|o| comp1_fourcc(o).to_string());
+        assert_eq!(names, ["PC1R", "PC1g", "PC1B", "PC1G", "PC1M"]);
+    }
 }
