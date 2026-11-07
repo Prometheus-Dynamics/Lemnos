@@ -189,6 +189,33 @@ backend = "userspace"
     assert!(stderr.contains("gyro chip id"), "{stderr}");
 }
 
+/// Several devices, or every device with channels, are read on one connection:
+/// one line each; a device that fails says so by name and the others still print.
+#[test]
+fn read_takes_several_devices_or_all_on_one_connection() {
+    let service = start();
+    let all = ctl(&service, &["read", "--all"]);
+    assert!(all.lines().any(|l| l.starts_with("imu ")), "{all}");
+    assert!(!all.lines().any(|l| l.starts_with("ring ")), "{all}");
+    let two = ctl(&service, &["read", "imu", "imu"]);
+    assert_eq!(
+        two.lines().filter(|l| l.starts_with("imu ")).count(),
+        2,
+        "{two}"
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lemnos-ctl"))
+        .arg("--socket")
+        .arg(service.socket())
+        .args(["read", "nope", "imu"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("nope: "), "{stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.lines().any(|l| l.starts_with("imu ")), "{stdout}");
+}
+
 /// Runs `lemnos-ctl --socket <service> <args>` and returns whether it succeeded
 /// and its stderr.
 fn ctl_result(service: &MockLemnosd, args: &[&str]) -> (bool, String) {

@@ -1045,3 +1045,73 @@ fn a_frame_encoded_into_a_reused_buffer_is_the_messages_frame() {
     );
     assert_eq!(buf, Message::Frame(frame).encode());
 }
+
+#[test]
+fn a_device_list_encoded_from_views_is_the_messages_frame() {
+    use lemnos_device::{Channel, ControlInfo};
+    static CHANNELS: [Channel; 2] = [
+        Channel::new("temperature", Quantity::Temperature, -3),
+        Channel::new("duty", Quantity::Ratio, -3),
+    ];
+    static CONTROLS: [ControlInfo; 1] = [ControlInfo::new("duty", Quantity::Ratio, -3, 0, 1000)];
+    let views = [
+        crate::DeviceView {
+            id: "fan",
+            label: "Fan",
+            class: DeviceClass::Fan,
+            model: "hwmon-fan",
+            status: DeviceStatus::Available,
+            reason: "",
+            channels: &CHANNELS,
+            controls: &CONTROLS,
+            pixels: 0,
+        },
+        crate::DeviceView {
+            id: "ring",
+            label: "ring",
+            class: DeviceClass::Other,
+            model: "ws2812",
+            status: DeviceStatus::Missing,
+            reason: "no /dev/leds0",
+            channels: &[],
+            controls: &[],
+            pixels: 12,
+        },
+    ];
+    let descs: Vec<DeviceDesc> = views
+        .iter()
+        .map(|v| DeviceDesc {
+            id: v.id.into(),
+            label: v.label.into(),
+            class: v.class,
+            model: v.model.into(),
+            status: v.status,
+            reason: v.reason.into(),
+            channels: v
+                .channels
+                .iter()
+                .map(|c| ChannelDesc {
+                    name: c.name.into(),
+                    quantity: c.quantity,
+                    axis: c.axis,
+                    exponent: c.exponent,
+                })
+                .collect(),
+            controls: v
+                .controls
+                .iter()
+                .map(|c| ControlDesc {
+                    name: c.name.into(),
+                    quantity: c.quantity,
+                    exponent: c.exponent,
+                    min: c.min,
+                    max: c.max,
+                })
+                .collect(),
+            pixels: v.pixels,
+        })
+        .collect();
+    let mut buf = vec![0xaa; 500];
+    crate::encode_devices_into(&mut buf, views.iter().copied());
+    assert_eq!(buf, Message::Devices(descs).encode());
+}

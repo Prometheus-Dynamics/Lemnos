@@ -272,7 +272,7 @@ fn light_requests_allocate_nothing() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let running = Running::start("leds");
-    let (_client, _status) = running.clients();
+    let (mut client, _status) = running.clients();
     let mut leds = ClientOptions::new(&running.socket, "app").leds().unwrap();
     let n = 200;
     let mut report = Vec::new();
@@ -312,6 +312,12 @@ fn light_requests_allocate_nothing() {
             .unwrap();
         }),
     ));
+    report.push((
+        "list",
+        per_request(n, |_| {
+            client.list().unwrap();
+        }),
+    ));
     for (kind, allocations) in &report {
         println!("{kind}: {allocations} allocations over {n} requests");
     }
@@ -320,6 +326,8 @@ fn light_requests_allocate_nothing() {
     let cost = |kind: &str| report.iter().find(|(k, _)| *k == kind).unwrap().1;
     assert_eq!(cost("color"), 0);
     assert_eq!(cost("inputs"), 0);
+    // A device list is encoded from the devices as they are.
+    assert_eq!(cost("list"), 0);
     assert!(cost("frame") <= n, "{} for {n} frames", cost("frame"));
     assert!(cost("look") <= n, "{} for {n} looks", cost("look"));
 }

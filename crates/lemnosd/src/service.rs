@@ -1353,8 +1353,12 @@ impl Service {
                 }
             }
             Request::List => {
-                let devices = self.slots.iter().map(Slot::describe).collect();
-                self.clients[ci].send(&Message::Devices(devices));
+                // Encoded from the devices as they are, into the client's
+                // reused frame: no device list is built.
+                let slots = &self.slots;
+                self.clients[ci].send_answer(|frame| {
+                    lemnos_ipc::encode_devices_into(frame, slots.iter().map(Slot::view));
+                });
             }
             Request::AllocStats => {
                 let stats = alloc_stats();

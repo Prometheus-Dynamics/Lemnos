@@ -144,6 +144,21 @@ impl Client {
         self.enqueue(class, frame);
     }
 
+    /// Queues an answer that `encode` writes into a reused frame (the
+    /// frame's bytes are replaced).
+    pub fn send_answer(&mut self, encode: impl FnOnce(&mut Vec<u8>)) {
+        let mut frame = self.spare.pop().unwrap_or_default();
+        match Rc::get_mut(&mut frame) {
+            Some(buf) => encode(buf),
+            None => {
+                let mut buf = Vec::new();
+                encode(&mut buf);
+                frame = Rc::new(buf);
+            }
+        }
+        self.enqueue(Class::Answer, frame);
+    }
+
     /// Queues a reading whose frame (`lemnos_ipc::encode_reading`) the caller
     /// encoded once for every client that gets the same channels.
     pub fn send_reading(&mut self, frame: &Rc<Vec<u8>>) {

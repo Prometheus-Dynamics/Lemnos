@@ -42,6 +42,61 @@ pub fn encode_reading_into(
     *frame = e.finish();
 }
 
+/// A device as the service holds it, borrowed: what [`encode_devices_into`]
+/// writes, with no [`DeviceDesc`] built.
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceView<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
+    pub class: lemnos_device::DeviceClass,
+    pub model: &'a str,
+    pub status: DeviceStatus,
+    pub reason: &'a str,
+    pub channels: &'a [lemnos_device::Channel],
+    pub controls: &'a [lemnos_device::ControlInfo],
+    pub pixels: u16,
+}
+
+/// A device list (`Message::Devices`) encoded into `frame`, reusing its
+/// capacity: the service answers `Request::List` this way, from its devices as
+/// they are. `devices` is walked twice (the reasons follow the list).
+pub fn encode_devices_into<'a, I>(frame: &mut Vec<u8>, devices: I)
+where
+    I: Iterator<Item = DeviceView<'a>> + Clone,
+{
+    let mut e = Encoder::reuse_new(frame, DEVICES);
+    let count = devices.clone().count().min(usize::from(u16::MAX));
+    e.u16(count as u16);
+    for d in devices.clone().take(count) {
+        e.str(d.id)
+            .str(d.label)
+            .u8(d.class.code())
+            .str(d.model)
+            .u8(d.status.code())
+            .u16(d.pixels)
+            .u16(d.channels.len() as u16);
+        for c in d.channels {
+            e.str(c.name)
+                .u8(c.quantity.code())
+                .u8(c.axis.code())
+                .i8(c.exponent);
+        }
+        e.u16(d.controls.len() as u16);
+        for c in d.controls {
+            e.str(c.name)
+                .u8(c.quantity.code())
+                .i8(c.exponent)
+                .i32(c.min)
+                .i32(c.max);
+        }
+    }
+    e.u16(count as u16);
+    for d in devices.take(count) {
+        e.str(d.reason);
+    }
+    *frame = e.finish();
+}
+
 /// A light frame (`Message::Frame`) encoded into `frame`, reusing its capacity: the service
 /// sends a watched light's frames this way, with no `LightFrame` and no pixel vector. Packed
 /// `0xWWRRGGBB` pixels, at most `u16::MAX`.

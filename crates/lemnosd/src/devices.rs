@@ -7,7 +7,6 @@ use lemnos_device::{
 };
 use lemnos_drivers_linux::{FanRestore, RestoreKind};
 use lemnos_hal::{ErrorKind, HalError};
-use lemnos_ipc::{ChannelDesc, ControlDesc, DeviceDesc};
 use lemnos_linux_sys::time::boottime_us;
 
 use crate::schedule::advance;
@@ -592,46 +591,22 @@ impl Slot {
     }
 
     /// The device as clients see it.
-    pub fn describe(&self) -> DeviceDesc {
+    /// The device as `list` shows it, borrowed.
+    pub fn view(&self) -> lemnos_ipc::DeviceView<'_> {
         let info = self.info;
-        DeviceDesc {
-            id: self.spec.id.clone(),
-            label: self
-                .spec
-                .label
-                .clone()
-                .unwrap_or_else(|| self.spec.id.clone()),
+        lemnos_ipc::DeviceView {
+            id: &self.spec.id,
+            label: self.spec.label.as_deref().unwrap_or(&self.spec.id),
             class: info.map_or(lemnos_device::DeviceClass::Other, |i| i.class),
-            model: info.map_or_else(|| self.spec.driver.clone(), |i| i.model.to_string()),
+            model: info.map_or(self.spec.driver.as_str(), |i| i.model),
             status: self.status,
             reason: if self.reason.is_empty() {
-                self.calibration_note.clone()
+                &self.calibration_note
             } else {
-                self.reason.clone()
+                &self.reason
             },
-            channels: info.map_or_else(Vec::new, |i| {
-                i.channels
-                    .iter()
-                    .map(|c| ChannelDesc {
-                        name: c.name.into(),
-                        quantity: c.quantity,
-                        axis: c.axis,
-                        exponent: c.exponent,
-                    })
-                    .collect()
-            }),
-            controls: info.map_or_else(Vec::new, |i| {
-                i.controls
-                    .iter()
-                    .map(|c| ControlDesc {
-                        name: c.name.into(),
-                        quantity: c.quantity,
-                        exponent: c.exponent,
-                        min: c.min,
-                        max: c.max,
-                    })
-                    .collect()
-            }),
+            channels: info.map_or(&[], |i| i.channels),
+            controls: info.map_or(&[], |i| i.controls),
             pixels: self
                 .device
                 .as_ref()

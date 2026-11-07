@@ -280,6 +280,7 @@ led.clear()?;                                // drop this client's intents
 ```
 lemnos-ctl list
 lemnos-ctl read imu
+lemnos-ctl read imu fan power                     # several on one connection (or --all: every device with channels)
 lemnos-ctl stats                                  # read timing per sensor (reads, mean, max, last), and allocations with alloc-stats
 lemnos-ctl watch imu --period 50
 lemnos-ctl watch imu --channels angular_rate.z --period 10   # yaw only: fewer bus bytes
@@ -600,6 +601,13 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   or a named look costs the one allocation its decoding makes (the pixel list, the name).
   `alloc_loops.rs` polls a 40-image status file and the example look files beside the loops
   above (0 allocations), and counts each light request kind. Untested on board.
+- **No allocation for a device list.** `list` was answered by building every device's
+  description (strings, channel and control lists) and encoding it: about 98 allocations a
+  request on board #1, where a status script ran `lemnos-ctl list` and one `lemnos-ctl read`
+  per device every 10 s (2026-11-07, found by logging each connection's peer). It is now
+  encoded from the devices as they are (`lemnos_ipc::encode_devices_into`, the same bytes)
+  into the client's reused frame: 0 allocations a request (`alloc_loops.rs`). `lemnos-ctl
+  read` takes several devices, or `--all`, on one connection.
 - **No wake-ups for files that do not change.** The update status and look directories are
   watched with inotify in the service's poll set: an unchanged file costs no wake-up, no stat
   and no read. A directory that does not exist yet (a writable look directory before the first

@@ -4,7 +4,7 @@
 //! ```text
 //! lemnos-ctl [--socket PATH] [--client NAME] [--priority N] <command>
 //!   list
-//!   read <device>
+//!   read <device>... | --all                      one reading each, on one connection
 //!   watch <device> [--period MS] [--count N] [--channels a.b,c.*]
 //!   set <device> <control> <value>
 //!   get <device> <control>
@@ -1089,28 +1089,50 @@ fn devices(command: &str, mut args: Args, options: ClientOptions) -> ExitCode {
             Err(e) => fail(e),
         },
         "read" => {
-            let Some(device) = args.next() else {
-                return fail("read <device>");
-            };
-            match client.read(&device) {
-                Ok(reading) => {
-                    print_reading(&reading);
-                    ExitCode::SUCCESS
+            // Several devices, or every one with channels (`--all`), on one
+            // connection: one line each, as for one device.
+            let all = args.flag("--all");
+            let mut devices: Vec<String> = std::iter::from_fn(|| args.next()).collect();
+            if all {
+                match client.list() {
+                    Ok(list) => devices.extend(
+                        list.into_iter()
+                            .filter(|d| !d.channels.is_empty())
+                            .map(|d| d.id),
+                    ),
+                    Err(e) => return fail(e),
                 }
-                Err(e) => {
-                    // Say why, not just the error kind.
-                    let why = client
-                        .list()
-                        .ok()
-                        .and_then(|list| list.into_iter().find(|d| d.id == device))
-                        .map(|d| d.reason)
-                        .filter(|r| !r.is_empty());
-                    match why {
-                        Some(why) => fail(format!("{e} ({why})")),
-                        None => fail(e),
+            }
+            if devices.is_empty() {
+                return fail("read <device>... | read --all");
+            }
+            let mut list = None;
+            let mut code = ExitCode::SUCCESS;
+            for device in &devices {
+                match client.read(device) {
+                    Ok(reading) => print_reading(&reading),
+                    Err(e) => {
+                        // Say why, not just the error kind (the list is asked
+                        // for once, at the first failure).
+                        let list = list.get_or_insert_with(|| client.list().unwrap_or_default());
+                        let why = list
+                            .iter()
+                            .find(|d| d.id == *device)
+                            .map(|d| d.reason.as_str())
+                            .filter(|r| !r.is_empty());
+                        let prefix = if devices.len() > 1 {
+                            format!("{device}: ")
+                        } else {
+                            String::new()
+                        };
+                        code = match why {
+                            Some(why) => fail(format!("{prefix}{e} ({why})")),
+                            None => fail(format!("{prefix}{e}")),
+                        };
                     }
                 }
             }
+            code
         }
         "watch" => {
             let Some(device) = args.next() else {
