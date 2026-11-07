@@ -38,6 +38,9 @@ pub static INFO: DeviceInfo = DeviceInfo::new(
 
 /// The raw channels come first; the calibrated ones follow.
 const RAW: usize = 6;
+
+/// A sensor time read and the host times around it (with a host clock).
+type Ticks = Option<(u32, u64, u64)>;
 const CHANNELS: usize = 12;
 
 /// The mainline kernel drivers: `bmi088-accel` (IIO, m/s²) for the
@@ -188,6 +191,9 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
         let t0 = time();
         let bytes = self.accel_fifo_bytes().map_err(DeviceError::Driver)?;
         let t1 = time();
+        // The sensor time right after the count, to place the accelerometer's
+        // samples (with a host clock only).
+        let ticks = self.sensortime(clock).map_err(DeviceError::Driver)?;
         let (na, skipped) = self
             .read_accel_frames(bytes, &mut accel[..cap])
             .map_err(DeviceError::Driver)?;
@@ -200,7 +206,16 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
         let mut ng = self
             .read_gyro_frames(status, &mut gyro)
             .map_err(DeviceError::Driver)?;
-        let aligned = self.track(&config, bytes, na, skipped, status, ng, [t0, t1, t2, t3]);
+        let aligned = self.track(
+            &config,
+            bytes,
+            na,
+            skipped,
+            status,
+            ng,
+            [t0, t1, t2, t3],
+            ticks,
+        );
         if ng == 0 {
             // The gyroscope FIFO is empty: hold its latest value for these.
             gyro[0] = self.read_gyro_raw().map_err(DeviceError::Driver)?;
@@ -336,6 +351,7 @@ impl<I2C: embedded_hal::i2c::I2c> Bmi088<I2C> {
         gyro_fill: usize,
         gyro_read: usize,
         t: [u64; 4],
+        ticks: Ticks,
     ) -> bool {
         if self.now.is_none() {
             return false;
@@ -347,8 +363,18 @@ impl<I2C: embedded_hal::i2c::I2c> Bmi088<I2C> {
         let accel_ns = config.accel_rate.period_us() * 1000;
         let gyro_ns = config.gyro_rate.period_us() * 1000;
         let a = &mut self.align;
-        a.accel
-            .count(accel_bytes / crate::fifo::ACC_FRAME_LEN, t[1], accel_ns);
+        let fill = accel_bytes / crate::fifo::ACC_FRAME_LEN;
+        a.accel.count(fill, t[1], accel_ns);
+        if let Some((counter, before, after)) = ticks {
+            let newest = (a.accel.first_unread() + fill as u64).checked_sub(1);
+            a.ticks.read(
+                counter,
+                before,
+                after,
+                newest,
+                config.accel_rate.period_us(),
+            );
+        }
         a.accel.took(accel_read);
         a.gyro.count(gyro_fill, t[3], gyro_ns);
         a.gyro.took(gyro_read);
@@ -366,8 +392,27 @@ impl<I2C: embedded_hal::i2c::I2c> Bmi088<I2C> {
         _: usize,
         _: usize,
         _: [u64; 4],
+        _: Ticks,
     ) -> bool {
         false
+    }
+
+    /// The accelerometer's sensor time and the host times around its read,
+    /// with a host clock.
+    #[cfg(feature = "align")]
+    fn sensortime(&mut self, clock: Option<fn() -> u64>) -> Result<Ticks, Error<I2C::Error>> {
+        let Some(now) = clock else {
+            return Ok(None);
+        };
+        let before = now();
+        let counter = self.read_sensortime()?;
+        Ok(Some((counter, before, now())))
+    }
+
+    #[cfg(not(feature = "align"))]
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    fn sensortime(&mut self, _: Option<fn() -> u64>) -> Result<Ticks, Error<I2C::Error>> {
+        Ok(None)
     }
 
     /// The host's clock, if it gave one (never without `align`).
@@ -387,7 +432,7 @@ impl<I2C: embedded_hal::i2c::I2c> Bmi088<I2C> {
         let before = self.align.last_gyro;
         let mut resampled = [[0i16; 3]; MAX_SAMPLES];
         for (i, slot) in resampled[..na].iter_mut().enumerate() {
-            let t = self.align.accel.time_of(first_a + i as u64);
+            let t = self.align.accel_time(first_a + i as u64);
             *slot = align::gyro_at(t, &self.align.gyro, first_g, &gyro[..ng], before);
         }
         self.align.last_gyro = Some((first_g + ng as u64 - 1, gyro[ng - 1]));

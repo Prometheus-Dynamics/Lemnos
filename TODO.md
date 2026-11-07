@@ -356,11 +356,12 @@ for consumers: everything below is additive until they switch.
         lengths.
       - **Ruled by the coordinator (2026-11-07):** p99 of about 0.1-0.2 ms is the accepted floor
         on this hardware, and the gyroscope stays hull-resampled as is.
-      - **Next:** the accelerometer's side from its sensor time. Logged on board #1:
-        - its samples sit on a 64-tick grid of its 24-bit counter (39.06 µs a tick), and the
-          counter runs 1.1 % fast with the die;
-        - a 4 s fit of host time against it is good to 15 µs p50 and 46-54 µs p99 per read;
-        - it costs a 3-byte read per batch.
+      - **Done (2026-11-07):** the accelerometer's side from its sensor time (`TickClock` in
+        `align.rs`, a 3-byte read per batch). On board #1, loaded and idle: an accelerometer
+        sample's time is off by 31-38 µs at p50 and 73-84 µs at p99 (from counts: 310-372 µs
+        at p99). The gyroscope's time at it is off by 34-39 µs at p50 and 90-107 µs at p99.
+        The p50 is almost all a constant 31-38 µs offset against the offline fit, cause not
+        traced. The gyroscope's side stays on the count hull, as ruled.
 - [x] **The extra allocation in the light test** (2026-11-07, asked by the coordinator to
       find, not leave):
       - **Found** with `where_look_requests_allocate`, which records backtraces: 4001 service
@@ -535,9 +536,9 @@ Every item below was ruled on by the user. Shas are on `dev`; "host" means this 
   (bus 1 port 1), `usb-a-power` (RP1 GPIO20) the webcam (bus 3 port 1). Cycles this round: #1
   usb-c once (Coral recovery) and usb-a once (mapping); #2 each once (mapping).
 - Polled sensors: repeats are filtered by value within one output period (a still device is
-  still delivered once per period). A sensor-clock index (BMI088 SENSORTIME) was tried and
-  dropped: its rate did not match the samples, and measuring it needs the IMU bus free of
-  lemnosd.
+  still delivered once per period). A sensor-clock index (BMI088 SENSORTIME) for polled reads
+  was tried and dropped: its rate did not match the samples. (It runs 1.1 % fast with the
+  accelerometer's die; FIFO batches now use it to place the accelerometer's samples.)
 - Looks: the retired ws2812 look keys are refused, not ignored (the user: nothing unreleased gets
   compat). A light with no owner, or a look name nothing defines, shows `default_look`.
 - `finish_refresh` stays at about 15 KB: split into its steps it showed no duplicated code.

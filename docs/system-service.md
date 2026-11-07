@@ -636,10 +636,8 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   (`lemnos_board::output_period_us`: the BMI088's `accel_rate`), not from the no_std traits. A read
   that runs late past a sample loses that sample to the next one (the sensor overwrites), so the
   delivered rate falls below the output rate under load; the board run shows it.
-  Not done: the sensor clock. SENSORTIME (0x18..0x1A) could index the samples and show lost
-  ones exactly, but raw reads are refused while lemnosd owns the IMU bus, so its tick rate
-  and the data/clock latch were not measured on a board. An index-based design needs that
-  measurement first.
+  Polled reads do not use the sensor clock. FIFO batches do, to place the accelerometer's
+  samples (below).
 - **Batches.** A driver with a FIFO (`fifo = true` on `bmi088`) returns every sample since
   the last read. Each sample is stamped with its own time, one period apart, and delivered to
   the subscribers (and the orientation fusion) due for it.
@@ -690,6 +688,15 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
     - Lower bounds are not used. On board #1 both counts sometimes show a sample late (the
       accelerometer's by up to about 0.3 ms, the gyroscope's by up to 1.6 ms), so a lower bound
       would be wrong. An upper bound never was.
+    - The accelerometer's samples are placed by its sensor time instead, once it has been
+      read for long enough (16 reads). Its 24-bit counter (`SENSORTIME`, 0x18..0x1A, 39.06 µs a
+      tick) is read after each batch's counts. The samples sit on a grid of that counter (64
+      ticks at 400 Hz), so the counter places a sample to within a tick. The host time of a tick
+      comes from a least-squares fit of the counter against each read's middle, forgetting
+      over 0.5 s. A read that took over 1.5 times the usual was preempted, and is skipped. The
+      fit restarts when the FIFO overflows, the rate changes, or the reads stop for 10 minutes
+      (the counter wraps every 655 s).
+    - The gyroscope's samples stay placed by its count hull.
     - Without a clock (an MCU host that does not give one), the FIFOs are paired one to one as
       before. The driver's `align` feature (default, and on in `lemnos-board`) carries the
       clocks; MCU images built without it are unchanged in size.
@@ -703,6 +710,13 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
     - These are against a fit from the same count reads. Fits over 8 s and 12 s windows
       themselves differ by about 2-5 µs at p50 and about 40-120 µs at p99, so the p99 figures
       are only good to about 0.1 ms.
+    - With the accelerometer on its sensor time (60 s runs, loaded and idle, 2670 batches
+      scored in each; the sensor time was used in all of them): an accelerometer sample's time is off
+      by 31-38 µs at p50 and 73-84 µs at p99 against an offline fit of the sensor time over
+      4 s windows. From the counts alone it was off by 48-49 µs at p50 and 310-372 µs at p99.
+      The p50 is almost all a constant offset (signed p50 31-38 µs) between the driver's
+      online fit and the offline one; its cause was not traced. The gyroscope's time at an
+      accelerometer sample is off by 34-39 µs at p50 and 90-107 µs at p99.
   - **Off by default:** at the installed board's rates (accelerometer 100 Hz, gyroscope
     2000 Hz) a FIFO drain reads every gyroscope frame, which costs far more bus time than
     polling 100 Hz. Turn it on only with output rates that match what is subscribed.

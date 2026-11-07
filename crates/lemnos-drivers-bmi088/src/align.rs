@@ -149,12 +149,158 @@ impl DieClock {
     }
 }
 
+/// The accelerometer's sensor time: a 24-bit counter of the die's own
+/// oscillator, 25.6 kHz nominal (39.0625 µs a tick), read right after the
+/// FIFO count. The die takes its samples on a grid of it: sample `k` at tick
+/// `step * k + phase`, `step` the ticks per sample (64 at 400 Hz). On board #1
+/// the counter read just after the count less `64 k` spanned exactly one
+/// period (1348 to 1412) over 3000 reads, with no late count. The tick times
+/// on the host clock come from a least-squares line through each read's
+/// (tick, transaction midpoint), forgetting with a time constant of
+/// [`FORGET_NS`] as the oscillator drifts. A sample's time is the line at its
+/// tick, less half the transaction (when the count read before it ended).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TickClock {
+    /// Ticks per sample (0: not started).
+    step: u64,
+    /// The last counter value read, unwrapped to 64 bits.
+    ticks: u64,
+    /// The grid's phase: the least `ticks - step * k` seen.
+    phase: Option<u64>,
+    /// The line, relative to the last point (`x0` ticks, `y0` ns): weighted
+    /// sums of the points' offsets from it.
+    x0: u64,
+    y0: u64,
+    w: f64,
+    sx: f64,
+    sy: f64,
+    sxx: f64,
+    sxy: f64,
+    /// The usual transaction length, ns (a running average of the accepted).
+    txn: f64,
+    /// Points taken.
+    points: u32,
+}
+
+/// The line's forgetting time constant, ns.
+const FORGET_NS: f64 = 500_000_000.0;
+/// Points before the line is used.
+const MIN_POINTS: u32 = 16;
+/// A read whose transaction is this much longer than usual was preempted:
+/// its midpoint is not where the counter was latched, so it is skipped.
+const LONG_TXN: f64 = 1.5;
+/// A host-clock gap after which the 24-bit counter may have wrapped unseen
+/// (it wraps every 655 s): start again.
+const WRAP_GAP_NS: u64 = 600_000_000_000;
+
+impl TickClock {
+    pub(crate) const fn new() -> Self {
+        Self {
+            step: 0,
+            ticks: 0,
+            phase: None,
+            x0: 0,
+            y0: 0,
+            w: 0.0,
+            sx: 0.0,
+            sy: 0.0,
+            sxx: 0.0,
+            sxy: 0.0,
+            txn: 0.0,
+            points: 0,
+        }
+    }
+
+    /// The counter read `counter` between `before` and `after` (ns), right
+    /// after a count that showed sample `newest` as the newest; `period_us`
+    /// is the accelerometer's nominal period.
+    pub(crate) fn read(
+        &mut self,
+        counter: u32,
+        before: u64,
+        after: u64,
+        newest: Option<u64>,
+        period_us: u32,
+    ) {
+        let step = u64::from(period_us) * 256 / 10_000;
+        let counter = u64::from(counter & 0x00ff_ffff);
+        if step != self.step
+            || step == 0
+            || before.saturating_sub(self.y0) > WRAP_GAP_NS && self.points > 0
+        {
+            *self = Self::new();
+            self.step = step;
+            self.ticks = counter;
+        } else {
+            let wrapped = (counter + (1 << 24) - (self.ticks & 0x00ff_ffff)) & 0x00ff_ffff;
+            self.ticks += wrapped;
+        }
+        let ticks = self.ticks;
+        if let Some(k) = newest {
+            let p = ticks.saturating_sub(step * k);
+            self.phase = Some(self.phase.map_or(p, |q| q.min(p)));
+        }
+        let txn = after.saturating_sub(before) as f64;
+        if self.points > 0 && txn > self.txn * LONG_TXN {
+            return;
+        }
+        self.txn = if self.points == 0 {
+            txn
+        } else {
+            self.txn + (txn - self.txn) / 16.0
+        };
+        let mid = before + (after - before) / 2;
+        if self.points == 0 {
+            self.x0 = ticks;
+            self.y0 = mid;
+        }
+        // Move the sums to this point and forget by the time since the last.
+        let dx = ticks as f64 - self.x0 as f64;
+        let dy = mid as f64 - self.y0 as f64;
+        let w = self.w;
+        self.sxx += -2.0 * dx * self.sx + w * dx * dx;
+        self.sxy += -dx * self.sy - dy * self.sx + w * dx * dy;
+        self.sx -= w * dx;
+        self.sy -= w * dy;
+        let keep = (1.0 - dy / FORGET_NS).clamp(0.0, 1.0);
+        self.w = self.w * keep + 1.0;
+        self.sx *= keep;
+        self.sy *= keep;
+        self.sxx *= keep;
+        self.sxy *= keep;
+        self.x0 = ticks;
+        self.y0 = mid;
+        self.points = self.points.saturating_add(1);
+    }
+
+    /// The host time of accelerometer sample `k`, ns, once the line is
+    /// measured.
+    pub(crate) fn time_of(&self, k: u64) -> Option<i64> {
+        let phase = self.phase?;
+        if self.points < MIN_POINTS {
+            return None;
+        }
+        let det = self.w * self.sxx - self.sx * self.sx;
+        if det <= 0.0 {
+            return None;
+        }
+        let slope = (self.w * self.sxy - self.sx * self.sy) / det;
+        let at0 = (self.sy - slope * self.sx) / self.w;
+        // The counter reads the tick it is in: its middle is half a tick on.
+        let x = (self.step * k + phase) as f64 + 0.5 - self.x0 as f64;
+        Some(self.y0 as i64 + (at0 + slope * x - self.txn / 2.0) as i64)
+    }
+}
+
 /// Both dies' clocks and the gyroscope sample before the current batch, to
 /// interpolate across a batch boundary.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Align {
     pub(crate) accel: DieClock,
     pub(crate) gyro: DieClock,
+    /// The accelerometer's sensor time, which places its samples closer than
+    /// its counts do.
+    pub(crate) ticks: TickClock,
     /// The last gyroscope sample read, and its number.
     pub(crate) last_gyro: Option<(u64, [i16; 3])>,
 }
@@ -164,12 +310,21 @@ impl Align {
         Self {
             accel: DieClock::new(),
             gyro: DieClock::new(),
+            ticks: TickClock::new(),
             last_gyro: None,
         }
     }
 
     pub(crate) fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// The host time of accelerometer sample `k`: from the sensor time once
+    /// it is measured, from the counts before.
+    pub(crate) fn accel_time(&self, k: u64) -> i64 {
+        self.ticks
+            .time_of(k)
+            .unwrap_or_else(|| self.accel.time_of(k))
     }
 }
 
@@ -277,6 +432,43 @@ mod tests {
             "period {}",
             clock.period()
         );
+    }
+
+    /// A die 1.1 % fast: its counter ticks every 38 638 ns. Samples at tick
+    /// 64 k + 20 (400 Hz). Reads every 20 ms with up to 0.3 ms of jitter; the
+    /// counter read takes 0.2 ms and latches in its middle; one read in nine
+    /// is preempted (2 ms, latched early). The count is read just before the
+    /// counter (ending 10 µs before it starts), so a sample's time as the gyro
+    /// clock defines it (the end of the count read that first shows it) is
+    /// its tick plus 10 µs. The clock lands within 11 µs of it.
+    #[test]
+    fn the_sensor_time_places_the_accelerometer_samples() {
+        const TICK: f64 = 39_062.5 / 1.011;
+        const PHASE: u64 = 20;
+        let host_of_tick = |x: f64| (1.0e9 + x * TICK) as i64;
+        let tick_at = |t: i64| ((t as f64 - 1.0e9) / TICK) as u64;
+        let mut clock = TickClock::new();
+        let mut seed = 777u32;
+        let mut worst = 0i64;
+        for read in 0..500i64 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let before = 2_000_000_000 + read * 20_000_000 + i64::from(seed >> 8) % 300_000;
+            let (after, latch) = if read % 9 == 4 {
+                (before + 2_000_000, before + 100_000)
+            } else {
+                (before + 200_000, before + 100_000)
+            };
+            // The count, read just before: its newest sample.
+            let newest = (tick_at(before - 10_000) - PHASE) / 64;
+            let counter = (tick_at(latch) & 0x00ff_ffff) as u32;
+            clock.read(counter, before as u64, after as u64, Some(newest), 2_500);
+            if read >= 100 {
+                let expect = host_of_tick((64 * newest + PHASE) as f64) + 10_000;
+                let got = clock.time_of(newest).unwrap();
+                worst = worst.max((got - expect).abs());
+            }
+        }
+        assert!(worst < 20_000, "worst {worst} ns");
     }
 
     fn clock_at(period: i64) -> DieClock {

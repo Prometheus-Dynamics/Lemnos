@@ -441,17 +441,18 @@ fn read_batch_with_a_clock_resamples_the_gyro_at_the_accel_times() {
     let mut out = [[0i32; lemnos_device::MAX_CHANNELS]; MAX_SAMPLES];
     let n = lemnos_device::Sensor::read_batch(&mut bmi, &mut out).unwrap();
     assert_eq!(n, 3);
-    // The clock reads 0.1, 0.2 ms around the accelerometer's count and 0.3,
-    // 0.4 ms around the gyroscope's: their newest samples are taken by 0.2
-    // and 0.4 ms, 2.5 ms apart. The accelerometer's samples are at -4.8,
-    // -2.3 and 0.2 ms, the gyroscope's at -2.1 and 0.4 ms.
+    // The clock reads 0.1, 0.2 ms around the accelerometer's count, 0.3, 0.4
+    // around its sensor time (too few reads to use yet) and 0.5, 0.6 ms around
+    // the gyroscope's count: their newest samples are taken by 0.2 and 0.6 ms,
+    // 2.5 ms apart. The accelerometer's samples are at -4.8, -2.3 and 0.2 ms,
+    // the gyroscope's at -1.9 and 0.6 ms.
     let gyro_x = |i: usize| out[i][3];
     let rate = |counts: i16| config.channels([0; 3], [counts, 0, 0])[3];
     // Before the gyroscope's oldest sample: held.
     assert_eq!(gyro_x(0), rate(1000));
     assert_eq!(gyro_x(1), rate(1000));
-    // 2.3 ms of the 2.5 ms from the oldest to the newest.
-    assert_eq!(gyro_x(2), rate(1920));
+    // 2.1 ms of the 2.5 ms from the oldest to the newest.
+    assert_eq!(gyro_x(2), rate(1840));
 }
 
 #[test]

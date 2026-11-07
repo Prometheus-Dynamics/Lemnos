@@ -48,6 +48,9 @@ pub const STANDARD_GRAVITY: f32 = 9.806_65;
 
 pub(crate) const ACC_CHIP_ID: u16 = 0x00;
 pub(crate) const ACC_DATA: u16 = 0x12;
+/// The 24-bit sensor time, least significant byte first.
+#[cfg(feature = "align")]
+pub(crate) const ACC_SENSORTIME_0: u16 = 0x18;
 pub(crate) const ACC_TEMP: u16 = 0x22;
 pub(crate) const ACC_CONF: u16 = 0x40;
 pub(crate) const ACC_RANGE: u16 = 0x41;
@@ -714,6 +717,14 @@ impl<I2C: I2c> Bmi088<I2C> {
     pub fn read_gyro_fifo(&mut self, out: &mut [[i16; 3]]) -> Result<usize, Error<I2C::Error>> {
         let frames = self.gyro_fifo_frames()?;
         self.read_gyro_frames(frames, out)
+    }
+
+    /// The accelerometer's 24-bit sensor time (39.0625 µs a tick).
+    #[cfg(feature = "align")]
+    pub(crate) fn read_sensortime(&mut self) -> Result<u32, Error<I2C::Error>> {
+        let mut bytes = [0u8; 3];
+        self.accel().read_burst(ACC_SENSORTIME_0, &mut bytes)?;
+        Ok(u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16))
     }
 
     /// The gyroscope FIFO's fill, in frames.
