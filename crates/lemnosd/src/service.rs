@@ -1473,12 +1473,10 @@ impl Service {
                     }
                     return;
                 };
-                let (name, owner, priority) = {
-                    let c = &self.clients[ci];
-                    (c.name.clone(), c.owner, c.priority)
-                };
-                if !self.slots[self.lights[li].slot].allows(&name) {
+                let (owner, priority) = (self.clients[ci].owner, self.clients[ci].priority);
+                if !self.slots[self.lights[li].slot].allows(&self.clients[ci].name) {
                     if request.id != 0 {
+                        let name = self.clients[ci].name.clone();
                         let device = self.slots[self.lights[li].slot].id().to_string();
                         self.clients[ci].send(&Message::Text {
                             id: request.id,
@@ -1555,12 +1553,10 @@ impl Service {
                     }
                     return;
                 };
-                let (name, owner) = {
-                    let c = &self.clients[ci];
-                    (c.name.clone(), c.owner)
-                };
-                if !self.slots[self.lights[li].slot].allows(&name) {
+                let owner = self.clients[ci].owner;
+                if !self.slots[self.lights[li].slot].allows(&self.clients[ci].name) {
                     if id != 0 {
+                        let name = self.clients[ci].name.clone();
                         let device = self.slots[self.lights[li].slot].id().to_string();
                         self.clients[ci].send(&Message::Text {
                             id,
@@ -2019,13 +2015,16 @@ impl Service {
         // Requests.
         let now = self.now_ms();
         for ci in 0..self.clients.len() {
-            match self.clients[ci].receive() {
-                Ok(requests) => {
-                    for request in requests {
-                        self.handle(ci, request, now);
+            self.clients[ci].receive();
+            loop {
+                match self.clients[ci].next_request() {
+                    Ok(Some(request)) => self.handle(ci, request, now),
+                    Ok(None) => break,
+                    Err(_) => {
+                        self.clients[ci].closed = true;
+                        break;
                     }
                 }
-                Err(_) => self.clients[ci].closed = true,
             }
             self.clients[ci].flush();
         }

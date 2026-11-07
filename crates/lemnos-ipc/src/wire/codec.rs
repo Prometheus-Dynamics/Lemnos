@@ -26,6 +26,11 @@ impl Encoder {
 
     /// An encoder writing into `buf`, cleared first: a caller that keeps its buffer between
     /// frames encodes without allocating once the buffer is large enough.
+    /// [`Self::reuse`] of `buf`'s buffer (taken; `finish` hands it back).
+    pub(super) fn reuse_new(buf: &mut Vec<u8>, kind: u16) -> Self {
+        Self::reuse(kind, std::mem::take(buf), 64)
+    }
+
     pub(super) fn reuse(kind: u16, mut buf: Vec<u8>, capacity: usize) -> Self {
         buf.clear();
         buf.reserve(capacity.max(6));

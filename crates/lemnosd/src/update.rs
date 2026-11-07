@@ -39,9 +39,46 @@ pub(crate) struct UpdateView {
     pub hold_ms: Option<u64>,
 }
 
+/// What the status file says that the light uses, kept from the last parse.
+#[derive(Default)]
+struct Status {
+    state: String,
+    error: String,
+    /// The file has a `phase` key (a device package that reports the
+    /// self-test's start).
+    has_phase: bool,
+    /// `phase` is `checking` or `failed`: the trial's self-test has begun.
+    checking: bool,
+}
+
+impl Status {
+    fn parse(bytes: &[u8]) -> Self {
+        let json: serde_json::Value = serde_json::from_slice(bytes).unwrap_or_default();
+        let text = |key: &str, default: &str| {
+            json.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or(default)
+                .to_string()
+        };
+        let phase = json.get("phase");
+        Self {
+            state: text("state", "idle"),
+            error: text("error", ""),
+            has_phase: phase.is_some(),
+            checking: matches!(phase.and_then(|v| v.as_str()), Some("checking" | "failed")),
+        }
+    }
+}
+
 pub(crate) struct UpdateWatcher {
     status: PathBuf,
     progress: PathBuf,
+    /// The status file's bytes as last read, and what they said: the file is
+    /// re-parsed only when it changes (it lists every installed image, tens of
+    /// kilobytes, and is polled twice a second).
+    raw: Vec<u8>,
+    next: Vec<u8>,
+    parsed: Option<Status>,
     /// The last state and error text seen, so a held state shows once.
     seen: Option<(String, String)>,
     /// The ember of a trial boot is held until this time (ms on the service
@@ -66,6 +103,9 @@ impl UpdateWatcher {
         Self {
             status,
             progress,
+            raw: Vec::new(),
+            next: Vec::new(),
+            parsed: None,
             seen: None,
             ember_until: None,
             trial_ember_ms,
@@ -75,36 +115,33 @@ impl UpdateWatcher {
     /// Reads the files. `Some(view)` when the light should change: a new
     /// view, or `None` inside when the update is over.
     pub fn poll(&mut self, now_ms: u64) -> Option<Option<UpdateView>> {
-        let text = std::fs::read_to_string(&self.status).unwrap_or_default();
-        let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-        let state = json
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("idle")
-            .to_string();
-        let error = json
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let progress = std::fs::read_to_string(&self.progress)
-            .ok()
-            .and_then(|p| p.trim().parse::<u32>().ok())
-            .map(|copied| (100 + copied.min(1000) * 85 / 100) as u16);
-        let key = (state.clone(), error);
-        let changed = self.seen.as_ref() != Some(&key);
+        self.next.clear();
+        if let Ok(mut file) = std::fs::File::open(&self.status)
+            && std::io::Read::read_to_end(&mut file, &mut self.next).is_err()
+        {
+            self.next.clear();
+        }
+        if self.parsed.is_none() || self.next != self.raw {
+            std::mem::swap(&mut self.raw, &mut self.next);
+            self.parsed = Some(Status::parse(&self.raw));
+        }
+        let progress =
+            read_progress(&self.progress).map(|copied| (100 + copied.min(1000) * 85 / 100) as u16);
+        let status = self.parsed.as_ref()?;
+        let state = status.state.as_str();
+        let seen = self.seen.as_ref();
+        let changed = seen.is_none_or(|(s, e)| *s != status.state || *e != status.error);
         // The state seen last poll (`None`: this is the first look).
-        let previous = self.seen.as_ref().map(|(state, _)| state.as_str());
+        let previous = seen.map(|(state, _)| state.as_str());
         let first = previous.is_none();
         // A trial boot (the status reads `trying`, or `rebooting`, when the
         // service starts) shows the ember first: the restart's look carries on
         // until the trial's self-test begins, then the sparkle fades in.
-        let phase = json.get("phase");
-        let checking = matches!(phase.and_then(|v| v.as_str()), Some("checking" | "failed"));
-        if first && matches!(state.as_str(), "trying" | "rebooting") {
+        let checking = status.checking;
+        if first && matches!(state, "trying" | "rebooting") {
             // With a `phase` key the self-test's start ends the hold; the
             // timer is only a bound. Without one, it is the hand-over.
-            let hold = if phase.is_some() {
+            let hold = if status.has_phase {
                 TRIAL_EMBER_MAX_MS
             } else {
                 self.trial_ember_ms
@@ -112,9 +149,11 @@ impl UpdateWatcher {
             self.ember_until = Some(now_ms + hold);
         }
         if let Some(until) = self.ember_until {
-            let trial = matches!(state.as_str(), "trying" | "rebooting");
+            let trial = matches!(state, "trying" | "rebooting");
             if now_ms < until && trial && !checking {
-                self.seen = Some(key);
+                if changed {
+                    self.seen = Some((status.state.clone(), status.error.clone()));
+                }
                 return if first {
                     Some(Some(UpdateView {
                         state: SystemState::Rebooting,
@@ -126,7 +165,7 @@ impl UpdateWatcher {
             }
             self.ember_until = None;
         }
-        let view = match state.as_str() {
+        let view = match state {
             "staging" => Some(UpdateView {
                 state: match progress {
                     Some(progress) => SystemState::Updating {
@@ -173,7 +212,9 @@ impl UpdateWatcher {
             }),
             _ => None,
         };
-        self.seen = Some(key);
+        if changed {
+            self.seen = Some((status.state.clone(), status.error.clone()));
+        }
         match view {
             // Progress moves within `staging`: report every poll.
             Some(view) if changed || view.hold_ms.is_none() => Some(Some(view)),
@@ -184,6 +225,14 @@ impl UpdateWatcher {
             None => None,
         }
     }
+}
+
+/// The image copy's progress (0-1000), read without allocating.
+fn read_progress(path: &Path) -> Option<u32> {
+    let mut buf = [0u8; 32];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+    std::str::from_utf8(&buf[..n]).ok()?.trim().parse().ok()
 }
 
 #[cfg(test)]

@@ -21,6 +21,10 @@ const MAX_ANSWERS_QUEUED: usize = 4 * lemnos_ipc::wire::MAX_FRAME;
 /// request larger than `READ_SHRINK_ABOVE` (the largest request is ~70 KiB).
 const READ_START: usize = 1024;
 const READ_SHRINK_ABOVE: usize = 16 * 1024;
+/// Written answer frames kept for the next answers, and the largest kept: a client's
+/// replies cost no allocation once it has a few.
+const SPARE_FRAMES: usize = 4;
+const SPARE_MAX: usize = 4 * 1024;
 
 /// What a request needs to know about its client.
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +64,8 @@ pub(crate) struct Client {
     written: usize,
     /// Events dropped and not yet reported.
     dropped: u32,
+    /// Written frames only this client held, for its next answers.
+    spare: Vec<Rc<Vec<u8>>>,
     pub closed: bool,
 }
 
@@ -82,12 +88,13 @@ impl Client {
             queued: 0,
             written: 0,
             dropped: 0,
+            spare: Vec::new(),
             closed: false,
         })
     }
 
-    /// Reads what arrived; returns the complete requests.
-    pub fn receive(&mut self) -> Result<Vec<Request>, WireError> {
+    /// Reads what arrived; [`Self::next_request`] then hands out the complete requests.
+    pub fn receive(&mut self) {
         let mut chunk = [0u8; 4096];
         loop {
             match self.stream.read(&mut chunk) {
@@ -104,17 +111,20 @@ impl Client {
                 }
             }
         }
-        let mut requests = Vec::new();
-        while let Some((request, used)) = decode_request(&self.read)? {
-            self.read.drain(..used);
-            requests.push(request);
-        }
-        // A large request leaves a large buffer behind; give it back once
-        // the buffer is empty again.
-        if self.read.is_empty() && self.read.capacity() > READ_SHRINK_ABOVE {
-            self.read = Vec::with_capacity(READ_START);
-        }
-        Ok(requests)
+    }
+
+    /// The next complete request received, if any.
+    pub fn next_request(&mut self) -> Result<Option<Request>, WireError> {
+        let Some((request, used)) = decode_request(&self.read)? else {
+            // A large request leaves a large buffer behind; give it back once
+            // the buffer is empty again.
+            if self.read.is_empty() && self.read.capacity() > READ_SHRINK_ABOVE {
+                self.read = Vec::with_capacity(READ_START);
+            }
+            return Ok(None);
+        };
+        self.read.drain(..used);
+        Ok(Some(request))
     }
 
     /// Queues a message. When the client falls behind, readings are
@@ -126,7 +136,12 @@ impl Client {
             Message::Event(_) => Class::Event,
             _ => Class::Answer,
         };
-        self.enqueue(class, Rc::new(message.encode()));
+        let mut frame = self.spare.pop().unwrap_or_default();
+        match Rc::get_mut(&mut frame) {
+            Some(buf) => message.encode_into(buf),
+            None => frame = Rc::new(message.encode()),
+        }
+        self.enqueue(class, frame);
     }
 
     /// Queues a reading whose frame (`lemnos_ipc::encode_reading`) the caller
@@ -192,8 +207,14 @@ impl Client {
                     self.written += n;
                     if self.written == frame.len() {
                         self.queued -= frame.len();
-                        self.queue.pop_front();
                         self.written = 0;
+                        if let Some((_, frame)) = self.queue.pop_front()
+                            && Rc::strong_count(&frame) == 1
+                            && frame.capacity() <= SPARE_MAX
+                            && self.spare.len() < SPARE_FRAMES
+                        {
+                            self.spare.push(frame);
+                        }
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,

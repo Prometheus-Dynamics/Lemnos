@@ -65,9 +65,17 @@ pub fn encode_frame_into(
 impl Message {
     /// The frame for this message.
     pub fn encode(&self) -> Vec<u8> {
-        match self {
+        let mut frame = Vec::new();
+        self.encode_into(&mut frame);
+        frame
+    }
+
+    /// The frame for this message, written into `out` (cleared first): a caller that keeps
+    /// its buffers encodes without allocating once they are large enough.
+    pub fn encode_into(&self, out: &mut Vec<u8>) {
+        *out = match self {
             Self::Frame(frame) => {
-                let mut buf = Vec::new();
+                let mut buf = std::mem::take(out);
                 encode_frame_into(
                     &mut buf,
                     &frame.device,
@@ -77,7 +85,7 @@ impl Message {
                 buf
             }
             Self::LightInfo(info) => {
-                let mut e = Encoder::new(LIGHT_INFO);
+                let mut e = Encoder::reuse_new(out, LIGHT_INFO);
                 e.str(&info.device)
                     .u16(info.count)
                     .u16(info.offset)
@@ -89,13 +97,13 @@ impl Message {
                 e.finish()
             }
             Self::CalibrationStatus { id, device, status } => {
-                let mut e = Encoder::new(CALIBRATION_STATUS_REPLY);
+                let mut e = Encoder::reuse_new(out, CALIBRATION_STATUS_REPLY);
                 e.u32(*id).str(device);
                 super::calibration::status_encode(&mut e, status);
                 e.finish()
             }
             Self::Text { id, result } => {
-                let mut e = Encoder::new(TEXT);
+                let mut e = Encoder::reuse_new(out, TEXT);
                 e.u32(*id);
                 match result {
                     Ok(text) => e.u8(0).str(text),
@@ -109,24 +117,24 @@ impl Message {
                 client_id,
                 features,
             } => {
-                let mut e = Encoder::new(WELCOME);
+                let mut e = Encoder::reuse_new(out, WELCOME);
                 e.u16(*version).str(board).u32(*client_id).u32(*features);
                 e.finish()
             }
             Self::GpuLease { id, lease, state } => {
-                let mut e = Encoder::new(GPU_LEASE_REPLY);
+                let mut e = Encoder::reuse_new(out, GPU_LEASE_REPLY);
                 e.u32(*id).u32(*lease);
                 super::gpu::state_encode(&mut e, *state);
                 e.finish()
             }
             Self::GpuState { id, gpus } => {
-                let mut e = Encoder::new(GPU_STATE_REPLY);
+                let mut e = Encoder::reuse_new(out, GPU_STATE_REPLY);
                 e.u32(*id);
                 super::gpu::gpus_encode(&mut e, gpus);
                 e.finish()
             }
             Self::Stats(stats) => {
-                let mut e = Encoder::new(STATS_REPLY);
+                let mut e = Encoder::reuse_new(out, STATS_REPLY);
                 e.u16(stats.len() as u16);
                 for s in stats {
                     e.str(&s.device)
@@ -139,14 +147,14 @@ impl Message {
                 e.finish()
             }
             Self::AllocStats(stats) => {
-                let mut e = Encoder::new(ALLOC_STATS_REPLY);
+                let mut e = Encoder::reuse_new(out, ALLOC_STATS_REPLY);
                 if let Some(s) = stats {
                     e.u64(s.allocs).u64(s.frees).u64(s.bytes).u64(s.live_bytes);
                 }
                 e.finish()
             }
             Self::Devices(devices) => {
-                let mut e = Encoder::new(DEVICES);
+                let mut e = Encoder::reuse_new(out, DEVICES);
                 e.u16(devices.len() as u16);
                 for d in devices {
                     e.str(&d.id)
@@ -180,7 +188,8 @@ impl Message {
                 e.finish()
             }
             Self::Reading(r) => {
-                let mut frame = encode_reading(&r.device, r.timestamp_us, r.status, &r.values);
+                let mut frame = std::mem::take(out);
+                encode_reading_into(&mut frame, &r.device, r.timestamp_us, r.status, &r.values);
                 if r.id != 0 {
                     // Appended within protocol 1, only for an answer to a read with an id.
                     frame.extend_from_slice(&r.id.to_le_bytes());
@@ -190,7 +199,7 @@ impl Message {
                 frame
             }
             Self::Reply { id, result } => {
-                let mut e = Encoder::new(REPLY);
+                let mut e = Encoder::reuse_new(out, REPLY);
                 e.u32(*id);
                 match result {
                     Ok(value) => e.u8(0).u8(0).f64(*value),
@@ -202,7 +211,7 @@ impl Message {
                 e.finish()
             }
             Self::Event(event) => {
-                let mut e = Encoder::new(EVENT);
+                let mut e = Encoder::reuse_new(out, EVENT);
                 match event {
                     Event::Status {
                         device,
@@ -250,7 +259,7 @@ impl Message {
                 e.finish()
             }
             Self::Claimed { id, result } => {
-                let mut e = Encoder::new(CLAIMED);
+                let mut e = Encoder::reuse_new(out, CLAIMED);
                 e.u32(*id);
                 match result {
                     Ok(handle) => e.u8(0).u8(0).u32(*handle),
@@ -262,7 +271,7 @@ impl Message {
                 e.finish()
             }
             Self::Data { id, result } => {
-                let mut e = Encoder::new(DATA);
+                let mut e = Encoder::reuse_new(out, DATA);
                 e.u32(*id);
                 match result {
                     Ok(bytes) => e.u8(0).u8(0).bytes(bytes),
@@ -273,7 +282,7 @@ impl Message {
                 };
                 e.finish()
             }
-        }
+        };
     }
 
     pub(crate) fn decode(kind: u16, payload: &[u8]) -> Result<Self, WireError> {

@@ -46,6 +46,9 @@ pub struct LookTable {
     board_errors: Vec<String>,
     /// The directories, lowest precedence first; the last is writable.
     dirs: Vec<(PathBuf, Source)>,
+    /// Each directory's modification time at the last full scan: a file added,
+    /// removed or renamed in changes it.
+    dir_stamps: Vec<Option<SystemTime>>,
     files: Vec<File>,
     /// The overriding looks (the built-ins are not in here): name, and the
     /// origin shown by `looks list`.
@@ -56,6 +59,16 @@ pub struct LookTable {
     /// board's looks and the look files).
     active: Option<String>,
     preset: Vec<(String, LookSpec)>,
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+/// `(modified, length)`, the change stamp of a look file.
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let m = fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 impl LookTable {
@@ -82,6 +95,7 @@ impl LookTable {
             board: board_looks,
             board_errors,
             dirs,
+            dir_stamps: Vec::new(),
             files: Vec::new(),
             effective: BTreeMap::new(),
             presets: None,
@@ -108,6 +122,12 @@ impl LookTable {
     /// Re-reads the files whose contents changed. Returns whether any look
     /// may have changed (the lights then re-resolve).
     pub fn scan(&mut self) -> bool {
+        // The once-a-second check costs no allocation when nothing changed:
+        // the directories and every known file stat as they did.
+        if self.unchanged() {
+            return false;
+        }
+        self.dir_stamps = self.dirs.iter().map(|(dir, _)| modified(dir)).collect();
         let mut changed = false;
         let mut seen = Vec::new();
         for (index, (dir, _)) in self.dirs.clone().into_iter().enumerate() {
@@ -121,9 +141,7 @@ impl LookTable {
             };
             paths.sort();
             for path in paths {
-                let stamp = fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| Some((m.modified().ok()?, m.len())));
+                let stamp = stamp(&path);
                 seen.push(path.clone());
                 match self.files.iter_mut().find(|f| f.path == path) {
                     Some(file) if file.stamp == stamp && stamp.is_some() => {}
@@ -158,8 +176,25 @@ impl LookTable {
         changed
     }
 
+    /// Whether the directories (or their absence) and the files read stat as
+    /// they did at the last scan (a file that was gone or unreadable is always
+    /// looked at again).
+    fn unchanged(&self) -> bool {
+        self.dir_stamps.len() == self.dirs.len()
+            && self
+                .dirs
+                .iter()
+                .zip(&self.dir_stamps)
+                .all(|((dir, _), stamp)| modified(dir) == *stamp)
+            && self
+                .files
+                .iter()
+                .all(|f| f.stamp.is_some() && stamp(&f.path) == f.stamp)
+    }
+
     /// Re-reads every file now, whether or not it changed. Returns the report.
     pub fn reload(&mut self) -> String {
+        self.dir_stamps.clear();
         for file in &mut self.files {
             file.stamp = None;
         }
@@ -460,6 +495,46 @@ mod preset_tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn a_scan_sees_edits_additions_and_removals_and_nothing_else() {
+        let root = root("scan");
+        let fill = |color: &str| {
+            format!(
+                "[looks.\"detect.searching\"]\nlayers = [{{ block = \"fill\", color = \"{color}\" }}]\n"
+            )
+        };
+        let color = |table: &LookTable| match table.get("detect.searching").unwrap().layers[0]
+            .unwrap()
+            .block
+        {
+            lemnos_light::Block::Fill { color } => color,
+            other => panic!("{other:?}"),
+        };
+        fs::write(root.join("a.toml"), fill("ffffff")).unwrap();
+        let mut table = LookTable::new(&board(), Some(&root), Some(&root.join("missing")));
+        assert!(!table.scan(), "nothing changed");
+        // Edited in place (the directory's time does not move; the length does, as the
+        // modification time may not within a clock tick).
+        fs::write(root.join("a.toml"), fill("ff0000") + "# edited\n").unwrap();
+        assert!(table.scan());
+        assert_eq!(color(&table), lemnos_light::Rgbw::rgb(0xff0000));
+        assert!(!table.scan());
+        // A later file wins the name; removing it hands the name back.
+        fs::write(root.join("b.toml"), fill("00ff00")).unwrap();
+        assert!(table.scan());
+        assert_eq!(color(&table), lemnos_light::Rgbw::rgb(0x00ff00));
+        fs::remove_file(root.join("b.toml")).unwrap();
+        assert!(table.scan());
+        assert_eq!(color(&table), lemnos_light::Rgbw::rgb(0xff0000));
+        // The writable directory appearing is looked at.
+        fs::create_dir_all(root.join("missing")).unwrap();
+        fs::write(root.join("missing/c.toml"), fill("0000ff")).unwrap();
+        assert!(table.scan());
+        assert_eq!(color(&table), lemnos_light::Rgbw::rgb(0x0000ff));
+        assert!(!table.scan());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

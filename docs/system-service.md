@@ -586,6 +586,19 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   the outgoing list): frames are now encoded into the pooled reading frames
   (`lemnos_ipc::encode_frame_into`). An I2C transaction of up to 42 alternating messages
   (a power monitor's ten-operation poll) is built on the stack (it was up to 8).
+- **No allocation in the file pollers or for a light's requests.** On board #1 (2026-11-07,
+  18d5bdc, five clients) the service allocated about 3070 times a second, about 2700 of them
+  in the update watcher: it parsed the update status file (17 KB there, listing every
+  installed image) into a JSON tree twice a second. It now reads the file into a kept buffer
+  and parses it only when its bytes change. The look files' once-a-second scan listed the
+  look directories each time (about 15 a second): it now stats the directories and the files
+  it knows and lists again only when one moved. A light's colour and input updates
+  (an app's progress gauge, up to 60 a second) now cost nothing: answers are encoded into the
+  client's reused frames (`Message::encode_into`), requests are handed out one at a time
+  rather than in a list, and the writer check no longer copies the client's name. A frame
+  or a named look costs the one allocation its decoding makes (the pixel list, the name).
+  `alloc_loops.rs` polls a 40-image status file and the example look files beside the loops
+  above (0 allocations), and counts each light request kind. Untested on board.
 - **Allocations on a running board.** Built with the `alloc-stats` feature, `lemnosd` runs on a
   counting allocator (`lemnos_linux_sys::alloc_stats`: two relaxed atomic adds per call) and
   sets `FEATURE_ALLOC_STATS` (4). `Request::AllocStats` answers its allocations, frees, bytes

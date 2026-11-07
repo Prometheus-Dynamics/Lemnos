@@ -1,6 +1,6 @@
 //! Allocations in lemnosd's steady state over a fake sysfs tree: an LED ring running an
 //! animated status effect, a fan controller stepping its fan from a thermal zone, and that
-//! zone subscribed at 50 Hz. Counted over every thread but this one (the client's decoding is
+//! zone subscribed at 50 Hz, the update status file polled, and the look files re-scanned. Counted over every thread but this one (the client's decoding is
 //! not the service's). Its own test binary: the count is process-wide, so no other test may
 //! run beside it.
 
@@ -8,7 +8,7 @@
 
 use lemnos_board::{BoardDefinition, BoardError, Buses, DynI2c};
 use lemnos_drivers_linux::SysRoot;
-use lemnos_ipc::{ClientEvent, ClientOptions, LedStatus, Update};
+use lemnos_ipc::{ClientEvent, ClientOptions, LedRequest, LedShow, LedStatus, Update};
 use lemnos_linux_sys::test_alloc::{self, ALLOCATIONS, Counting, TOTAL};
 use lemnosd::{Service, ServiceConfig};
 use std::fs;
@@ -75,6 +75,19 @@ fn tree(root: &Path) {
     link(root, &format!("{zone}/cdev0"), cdev);
     link(root, "class/thermal/thermal_zone0", zone);
     write(root, "dev/leds0", "");
+    // The update writer's status file, as large as a board's with forty images installed:
+    // polled twice a second, never changing.
+    let slots: Vec<String> = (0..40)
+        .map(|i| format!(r#"{{"id":"image-{i}","version":"1.0.{i}","size":43122688,"verity":true,"flags":[],"good":"yes","layers":null}}"#))
+        .collect();
+    write(
+        root,
+        "run/board/update.json",
+        &format!(
+            r#"{{"state":"confirmed","phase":null,"progress":1000,"error":null,"slots":[{}]}}"#,
+            slots.join(",")
+        ),
+    );
 }
 
 fn board(root: &Path) -> BoardDefinition {
@@ -181,7 +194,15 @@ impl Running {
         let handle = std::thread::Builder::new()
             .name("lemnosd".into())
             .spawn(move || {
-                let config = ServiceConfig::new(board(&thread_root), thread_socket);
+                let mut config = ServiceConfig::new(board(&thread_root), thread_socket);
+                config.update_status = Some(thread_root.join("run/board/update.json"));
+                // The example look files, re-scanned once a second; the writable directory
+                // missing, as on a board where nothing was saved.
+                config.looks_dir = Some(PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../examples/looks/looks.d"
+                )));
+                config.looks_override_dir = Some(thread_root.join("var/looks.d"));
                 let mut service = Service::new(config, Box::new(SysBuses(thread_root))).unwrap();
                 ready_tx.send(()).unwrap();
                 service.run(&thread_stop).unwrap();
@@ -223,8 +244,91 @@ impl Drop for Running {
 /// After a warm-up (the first reads, the first fan step, the effect's first frames), the
 /// service's loops cost nothing from the allocator: the 50 Hz subscription's reads and
 /// frames, the effect's frames to the ring, and the fan controller's steps (one a second).
+/// The tests count process-wide: one at a time.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Allocations by every other thread (the service's) while `send` runs `n` times, after
+/// `n` warm-up runs.
+fn per_request(n: usize, mut send: impl FnMut(usize)) -> usize {
+    for i in 0..n {
+        send(i);
+    }
+    let mine = ALLOCATIONS.with(std::cell::Cell::get);
+    let all = TOTAL.load(Ordering::Relaxed);
+    for i in n..2 * n {
+        send(i);
+    }
+    let mine = ALLOCATIONS.with(std::cell::Cell::get) - mine;
+    let all = TOTAL.load(Ordering::Relaxed) - all;
+    all.saturating_sub(mine)
+}
+
+/// What a light's clients send many times a second (an app's progress gauge, its frames,
+/// its colours) costs the service nothing from the allocator past the request's own
+/// decoding; the answers go out in reused buffers.
+#[test]
+fn light_requests_allocate_nothing() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let running = Running::start("leds");
+    let (_client, _status) = running.clients();
+    let mut leds = ClientOptions::new(&running.socket, "app").leds().unwrap();
+    let n = 200;
+    let mut report = Vec::new();
+    let pixels: Vec<u32> = (0..12).collect();
+    report.push((
+        "frame",
+        per_request(n, |i| {
+            leds.send_checked(LedRequest::new(LedShow::Frame(
+                pixels[..1 + i % 12].to_vec(),
+            )))
+            .unwrap();
+        }),
+    ));
+    report.push((
+        "color",
+        per_request(n, |i| {
+            leds.send_checked(LedRequest::new(LedShow::Color(i as u32)))
+                .unwrap();
+        }),
+    ));
+    leds.look("system.writing").unwrap();
+    report.push((
+        "inputs",
+        per_request(n, |i| {
+            leds.update_inputs("", Some((i % 100) as f32 / 100.0), None)
+                .unwrap();
+        }),
+    ));
+    report.push((
+        "look",
+        per_request(n, |i| {
+            leds.look(if i % 2 == 0 {
+                "system.writing"
+            } else {
+                "system.writing-unknown"
+            })
+            .unwrap();
+        }),
+    ));
+    for (kind, allocations) in &report {
+        println!("{kind}: {allocations} allocations over {n} requests");
+    }
+    // A colour and an input update cost nothing; a frame and a named look cost the one
+    // allocation their decoding makes (the pixel list, the name), and nothing past it.
+    let cost = |kind: &str| report.iter().find(|(k, _)| *k == kind).unwrap().1;
+    assert_eq!(cost("color"), 0);
+    assert_eq!(cost("inputs"), 0);
+    assert!(cost("frame") <= n, "{} for {n} frames", cost("frame"));
+    assert!(cost("look") <= n, "{} for {n} looks", cost("look"));
+}
+
 #[test]
 fn the_steady_state_loops_allocate_nothing() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let running = Running::start("steady");
     let (mut client, _leds) = running.clients();
     let _ = measure(
@@ -247,6 +351,9 @@ fn the_steady_state_loops_allocate_nothing() {
 #[test]
 #[ignore = "diagnosis: prints where the steady-state loops allocate"]
 fn where_the_loops_allocate() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let running = Running::start("where");
     let (mut client, _leds) = running.clients();
     let _ = measure(
