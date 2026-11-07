@@ -585,10 +585,10 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   sets `FEATURE_ALLOC_STATS` (4). `Request::AllocStats` answers its allocations, frees, bytes
   allocated and bytes live since it started, and `lemnos-ctl stats` prints them. Run it twice
   a while apart: in a steady state `allocs` does not move. Without the feature the service
-  answers that it does not count. Build it on its own, from `crates/lemnosd` with
-  `--features alloc-stats` (or `cargo build -p lemnosd --features alloc-stats`): built
-  together with `-p lemnos-ctl` and `--features lemnosd/alloc-stats`, an OS image got a
-  `lemnosd` without the feature (2026-11-07).
+  answers that it does not count. `cargo build -p lemnosd --features alloc-stats` turns it on,
+  as does `--features lemnosd/alloc-stats` beside other packages. Until 2026-11-07 the latter
+  built lemnosd without it, silently: lemnosd's own test dev-dependency on itself was also
+  named `lemnosd`, and cargo took the feature for that dependency's. It is `lemnosd-mock` now.
 - **New samples only (the duplicate filter).** A polled sensor's reading identical to the last
   one it delivered (every channel value equal, which is every raw byte of a BMI088) is not
   delivered when it is read within one output period of that delivery. The filter is lemnosd's
