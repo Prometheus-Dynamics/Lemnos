@@ -711,12 +711,22 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
       themselves differ by about 2-5 µs at p50 and about 40-120 µs at p99, so the p99 figures
       are only good to about 0.1 ms.
     - With the accelerometer on its sensor time (60 s runs, loaded and idle, 2670 batches
-      scored in each; the sensor time was used in all of them): an accelerometer sample's time is off
-      by 31-38 µs at p50 and 73-84 µs at p99 against an offline fit of the sensor time over
-      4 s windows. From the counts alone it was off by 48-49 µs at p50 and 310-372 µs at p99.
-      The p50 is almost all a constant offset (signed p50 31-38 µs) between the driver's
-      online fit and the offline one; its cause was not traced. The gyroscope's time at an
-      accelerometer sample is off by 34-39 µs at p50 and 90-107 µs at p99.
+      scored in each; the sensor time was used in all of them): an accelerometer sample's time
+      is off by 14-16 µs at p50 and 48-53 µs at p99 against an offline fit of the sensor time
+      over 4 s windows (signed p50 -7 and 0 µs). From the counts alone it was off by 36-51 µs
+      at p50 and 330-391 µs at p99. The gyroscope's time at an accelerometer sample is off by
+      17-19 µs at p50 and 73-84 µs at p99.
+    - The convention: a sample is placed where the first read that shows it would have
+      latched the counter. That read latched somewhere in tick `phase`, so the middle of that
+      tick, as the fit's points are the middle of their reads' ticks. The gyroscope's count
+      hull places its samples the same way, at the end of the count read that first shows
+      them. Against that hull, the accelerometer's sensor-time placement is off by -2 and
+      -1 µs at p50. The time a die actually took a sample is earlier by its own filter delay,
+      which no read can see.
+    - Until 2026-11-07 the driver added half a tick to the fit's points and another half to
+      the sample, so every accelerometer sample was a tick late (31-38 µs at p50 against the
+      offline fit). The figures above are the board traces of that build with each sample
+      moved half a tick back, as the fix does; the fixed build itself is untested on board.
   - **Off by default:** at the installed board's rates (accelerometer 100 Hz, gyroscope
     2000 Hz) a FIFO drain reads every gyroscope frame, which costs far more bus time than
     polling 100 Hz. Turn it on only with output rates that match what is subscribed.

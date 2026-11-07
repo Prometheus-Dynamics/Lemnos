@@ -2,7 +2,9 @@ use super::*;
 
 mod locking;
 
-const NON_BLOCKING_READ_TIMEOUT: Duration = Duration::from_millis(150);
+/// How long a read that must not wait on a held operation may take (see `hold`): far past any
+/// scheduling delay, and under the hold's 20 s.
+const NON_BLOCKING_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn async_runtime_summary_queries_avoid_snapshot_reads_for_common_checks() {
@@ -59,7 +61,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_probe_execution() {
 
         fn discover(&self, _context: &DiscoveryContext) -> Result<ProbeDiscovery, DiscoveryError> {
             self.started.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(200));
+            super::hold(&self.started);
             Ok(ProbeDiscovery::default())
         }
     }
@@ -93,6 +95,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_probe_execution() {
     .await
     .expect("inventory read should not wait on probe execution")
     .expect("inventory read task");
+    started.store(false, Ordering::SeqCst);
     assert_eq!(read, 0);
 
     let refresh = refresh.await.expect("refresh task").expect("refresh");
@@ -174,7 +177,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_request_execution() {
 
         fn execute(&mut self, _request: &InteractionRequest) -> DriverResult<InteractionResponse> {
             self.started.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(200));
+            super::hold(&self.started);
             Ok(InteractionResponse::Standard(StandardResponse::Gpio(
                 GpioResponse::Applied,
             )))
@@ -229,6 +232,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_request_execution() {
     .await
     .expect("inventory read should not wait on request execution")
     .expect("inventory read task");
+    started.store(false, Ordering::SeqCst);
     assert_eq!(read, 1);
 
     let response = request.await.expect("request task").expect("request");
@@ -285,7 +289,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_auto_bind_execution() {
             _context: &DriverBindContext<'_>,
         ) -> DriverResult<Box<dyn BoundDevice>> {
             self.started.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(200));
+            super::hold(&self.started);
             Ok(Box::new(SlowBindBoundDevice {
                 driver_id: self.id().to_string(),
                 device: device.clone(),
@@ -366,6 +370,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_auto_bind_execution() {
     .await
     .expect("inventory read should not wait on auto-bind execution")
     .expect("inventory read task");
+    started.store(false, Ordering::SeqCst);
     assert_eq!(read, 1);
 
     let response = request.await.expect("request task").expect("request");
@@ -426,7 +431,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_bind_execution() {
             _context: &DriverBindContext<'_>,
         ) -> DriverResult<Box<dyn BoundDevice>> {
             self.started.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(200));
+            super::hold(&self.started);
             Ok(Box::new(SlowBindBoundDevice {
                 driver_id: self.id().to_string(),
                 device: device.clone(),
@@ -495,6 +500,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_bind_execution() {
     .await
     .expect("inventory read should not wait on bind execution")
     .expect("inventory read task");
+    started.store(false, Ordering::SeqCst);
     assert_eq!(read, 1);
 
     bind.await.expect("bind task").expect("bind");
@@ -564,6 +570,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_unbind_close() {
     .await
     .expect("inventory read should not wait on close during unbind")
     .expect("inventory read task");
+    close_started.store(false, Ordering::SeqCst);
     assert_eq!(read, 1);
 
     assert!(unbind.await.expect("unbind task").expect("unbind"));
@@ -632,6 +639,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_shutdown_close() {
     .await
     .expect("inventory read should not wait on close during shutdown")
     .expect("inventory read task");
+    close_started.store(false, Ordering::SeqCst);
     assert_eq!(read.0, 1);
     assert!(!read.1);
 

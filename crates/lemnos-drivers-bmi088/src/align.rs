@@ -156,9 +156,14 @@ impl DieClock {
 /// the counter read just after the count less `64 k` spanned exactly one
 /// period (1348 to 1412) over 3000 reads, with no late count. The tick times
 /// on the host clock come from a least-squares line through each read's
-/// (tick, transaction midpoint), forgetting with a time constant of
-/// [`FORGET_NS`] as the oscillator drifts. A sample's time is the line at its
-/// tick, less half the transaction (when the count read before it ended).
+/// (counter, transaction midpoint), forgetting with a time constant of
+/// [`FORGET_NS`] as the oscillator drifts. A read latches the counter anywhere
+/// in a tick, so the line at counter value `c` is the middle of tick `c`.
+/// The phase is the least counter a read showing the sample latched, so that
+/// read latched somewhere in tick `phase`: a sample's time is the line at
+/// `step * k + phase` (the middle of that tick), less half the transaction
+/// (when the count read before it ended, as the gyroscope's count hull
+/// places its samples).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TickClock {
     /// Ticks per sample (0: not started).
@@ -286,8 +291,10 @@ impl TickClock {
         }
         let slope = (self.w * self.sxy - self.sx * self.sy) / det;
         let at0 = (self.sy - slope * self.sx) / self.w;
-        // The counter reads the tick it is in: its middle is half a tick on.
-        let x = (self.step * k + phase) as f64 + 0.5 - self.x0 as f64;
+        // Both the fit's points and the sample are a counter value: the
+        // middle of their tick. (Until 2026-11-07 half a tick was added here
+        // as well, which put every sample one tick late: 31-38 µs on board #1.)
+        let x = (self.step * k + phase) as f64 - self.x0 as f64;
         Some(self.y0 as i64 + (at0 + slope * x - self.txn / 2.0) as i64)
     }
 }

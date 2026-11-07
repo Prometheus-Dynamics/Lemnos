@@ -131,7 +131,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_watcher_probe_execution()
 
         fn discover(&self, _context: &DiscoveryContext) -> Result<ProbeDiscovery, DiscoveryError> {
             self.started.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(200));
+            super::super::hold(&self.started);
             Ok(ProbeDiscovery::default())
         }
     }
@@ -173,6 +173,7 @@ async fn async_runtime_inventory_reads_do_not_wait_for_watcher_probe_execution()
     .await
     .expect("inventory read should not wait on watcher probe execution")
     .expect("inventory read task");
+    started.store(false, Ordering::SeqCst);
     assert_eq!(read, 0);
 
     let report = refresh

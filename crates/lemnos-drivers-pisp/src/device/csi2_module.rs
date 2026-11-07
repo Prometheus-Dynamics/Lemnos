@@ -130,7 +130,10 @@ struct Queued {
 pub struct MockReceiver {
     period: Duration,
     fill: FrameFn,
+    /// The stream, when it started, and the monotonic clock then (ns): frame times are taken
+    /// from that one pair, so they keep their spacing however late `advance` runs.
     start: Option<(Start, Instant)>,
+    mono0: Duration,
     queued: Vec<Queued>,
     done: Vec<Done>,
     frames: u32,
@@ -144,6 +147,7 @@ impl MockReceiver {
             period,
             fill,
             start: None,
+            mono0: Duration::ZERO,
             queued: Vec::new(),
             done: Vec::new(),
             frames: 0,
@@ -166,7 +170,7 @@ impl MockReceiver {
         let now = Instant::now();
         while t0 + self.period * (self.frames + 1) <= now {
             let fs = t0 + self.period * (self.frames + 1);
-            let fs_ns = (monotonic_now() - now.duration_since(fs)).as_nanos() as u64;
+            let fs_ns = (self.mono0 + (fs - t0)).as_nanos() as u64;
             let sequence = self.frames;
             self.frames += 1;
             if self.queued.is_empty() {
@@ -214,6 +218,7 @@ impl Receiver for MockReceiver {
             return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
         }
         self.start = Some((*start, Instant::now()));
+        self.mono0 = monotonic_now();
         self.frames = 0;
         self.dropped = 0;
         Ok(())

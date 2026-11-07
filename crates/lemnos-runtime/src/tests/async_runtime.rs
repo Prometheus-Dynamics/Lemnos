@@ -34,6 +34,17 @@ impl InventoryWatcher for StaticWatcher {
     }
 }
 
+/// Holds a slow operation that set `flag` until the test clears it, at most 20 s. The tests
+/// below read while it is held and release it after: a read that does not wait on the
+/// operation finishes first however loaded the host is, and one that does wait times out
+/// (`inventory_reads::NON_BLOCKING_READ_TIMEOUT` is 10 s, under the hold).
+fn hold(flag: &AtomicBool) {
+    let end = std::time::Instant::now() + Duration::from_secs(20);
+    while flag.load(Ordering::SeqCst) && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 struct SlowCloseDriver {
     close_started: Arc<AtomicBool>,
 }
@@ -85,7 +96,7 @@ impl BoundDevice for SlowCloseBoundDevice {
 
     fn close(&mut self) -> DriverResult<()> {
         self.close_started.store(true, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(200));
+        hold(&self.close_started);
         Ok(())
     }
 

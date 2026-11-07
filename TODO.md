@@ -369,10 +369,18 @@ for consumers: everything below is additive until they switch.
         on this hardware, and the gyroscope stays hull-resampled as is.
       - **Done (2026-11-07):** the accelerometer's side from its sensor time (`TickClock` in
         `align.rs`, a 3-byte read per batch). On board #1, loaded and idle: an accelerometer
-        sample's time is off by 31-38 µs at p50 and 73-84 µs at p99 (from counts: 310-372 µs
-        at p99). The gyroscope's time at it is off by 34-39 µs at p50 and 90-107 µs at p99.
-        The p50 is almost all a constant 31-38 µs offset against the offline fit, cause not
-        traced. The gyroscope's side stays on the count hull, as ruled.
+        sample's time is off by 14-16 µs at p50 and 48-53 µs at p99 (from counts: 330-391 µs
+        at p99). The gyroscope's time at it is off by 17-19 µs at p50 and 73-84 µs at p99.
+        The gyroscope's side stays on the count hull, as ruled.
+      - **The 31-38 µs offset, traced (asked by the coordinator):** the first version added
+        half a tick to the fit's points (a read latches anywhere in its tick) and again to the
+        sample, so every sample was one tick late. Decision: a sample sits at the middle of the
+        tick in which the first read showing it latched the counter, the same convention as the
+        gyroscope's count hull ("the end of the count read that first shows it"). Against the
+        accelerometer's own count hull, an independent reference, that convention is off by
+        -2 and -1 µs at p50; one tick earlier is -21 and -20, the first version +17 and +18.
+        The die's filter delay before a sample appears is not visible to reads. Figures are
+        the board traces with the shift applied; the fixed build is untested on board.
 - [x] **The extra allocation in the light test** (2026-11-07, asked by the coordinator to
       find, not leave):
       - **Found** with `where_look_requests_allocate`, which records backtraces: 4001 service
