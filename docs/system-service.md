@@ -633,8 +633,16 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   and the data/clock latch were not measured on a board. An index-based design needs that
   measurement first.
 - **Batches.** A driver with a FIFO (`fifo = true` on `bmi088`) returns every sample since
-  the last read. Each sample is stamped with its own time (the output period before the
-  read) and delivered to the subscribers due for it. Off by default: at the installed
+  the last read. Each sample is stamped with its own time, one output period apart, and
+  delivered to the subscribers (and the orientation fusion) due for it. The newest sample's
+  stamp follows the stream: one period per sample on from the previous batch, held within
+  what the read proves (the newest sample arrived after one period before the read started,
+  and before it ended), and always after the previous batch's last. Until 2026-11-07 the
+  newest was stamped at the read's start, so a read delayed after it started (the bus thread
+  preempted before the drain) stamped its first samples before the previous batch's last:
+  stamps went back by up to 0.8 ms with drains delayed 7 ms in the mock
+  (`tests/schedule.rs`, `delayed_drains_keep_the_stamps_increasing`), and once by 0.18 ms
+  under a loaded test run. Untested on board. Off by default: at the installed
   board's rates (accelerometer 100 Hz, gyroscope 2000 Hz) a FIFO drain reads every gyroscope
   frame, which costs far more bus time than polling 100 Hz. Turn it on only with output
   rates that match what is subscribed.

@@ -439,6 +439,65 @@ fn a_batched_imu_delivers_every_sample_on_its_own_timestamp() {
     assert!(max <= MAX_GAP_US, "largest gap {max} us");
 }
 
+/// A read delayed after it started (the bus thread preempted before the
+/// drain) finds more samples than its start time allows for: they are stamped
+/// from the stream, so the stamps still increase and keep their spacing.
+#[test]
+fn delayed_drains_keep_the_stamps_increasing() {
+    let _turn = timing_turn();
+    let service = fifo_service();
+    let mut client = ClientOptions::new(service.socket(), "viewer")
+        .devices()
+        .unwrap();
+    client.subscribe("imu", 2).unwrap();
+    service
+        .hardware()
+        .i2c(1)
+        .restart_sampler(0x18, FRAME_PERIOD / 2);
+    // Every transaction on the bus waits 0 or 7 ms, changing every 37 ms.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bus = service.hardware().i2c(1).clone();
+    let stopper = std::sync::Arc::clone(&stop);
+    let jitter = std::thread::spawn(move || {
+        let mut slow = false;
+        while !stopper.load(std::sync::atomic::Ordering::Relaxed) {
+            slow = !slow;
+            bus.set_latency(if slow {
+                Duration::from_millis(7)
+            } else {
+                Duration::ZERO
+            });
+            std::thread::sleep(Duration::from_millis(37));
+        }
+        bus.set_latency(Duration::ZERO);
+    });
+    let warm = Instant::now() + Duration::from_millis(500);
+    let end = warm + Duration::from_secs(3);
+    let mut stamps: Vec<i64> = Vec::new();
+    while Instant::now() < end {
+        if let Ok(Some(ClientEvent::Data(Update::Reading(r)))) =
+            client.next_event_timeout(Duration::from_millis(50))
+            && r.device == "imu"
+            && Instant::now() >= warm
+        {
+            stamps.push(r.timestamp_us as i64);
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    jitter.join().unwrap();
+    service.stop();
+    assert!(stamps.len() > 100, "{}", stamps.len());
+    let deltas: Vec<i64> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(
+        deltas.iter().all(|d| *d > 0),
+        "stamps go back: {:?}",
+        deltas.iter().filter(|d| **d <= 0).collect::<Vec<_>>()
+    );
+    let mut sorted = deltas.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted[sorted.len() / 2], 2_500, "median spacing");
+}
+
 #[test]
 fn read_timing_is_reported_per_sensor() {
     let _turn = timing_turn();

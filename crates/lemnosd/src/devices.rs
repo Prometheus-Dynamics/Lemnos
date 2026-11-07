@@ -162,6 +162,9 @@ pub(crate) struct Slot {
     pub values_mask: u64,
     /// When the last good read started (boot clock, microseconds).
     pub read_us: u64,
+    /// The stamp given to the last sample of the last buffered batch: the
+    /// next batch's stamps come after it.
+    pub batch_last_us: u64,
     pub fresh: bool,
     /// The sensor's next read deadline (boot clock, microseconds).
     pub next_read_us: u64,
@@ -240,6 +243,7 @@ impl Slot {
             values: [NO_VALUE; MAX_CHANNELS],
             values_mask: 0,
             read_us: 0,
+            batch_last_us: 0,
             fresh: false,
             next_read_us: 0,
             read_cost_us: 0,

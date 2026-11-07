@@ -81,6 +81,40 @@ pub(crate) fn choose(sensors: &[Due], now_us: u64) -> Next {
     }
 }
 
+/// The stamp of a buffered batch's last sample: `count` samples `period_us`
+/// apart, drained by a read that ran from `started_us` to `ended_us`, after a
+/// batch whose last sample was stamped `previous_us` (0: none yet).
+///
+/// The newest sample arrived after `started_us - period_us` (the device adds
+/// one each period, and the read found it) and before `ended_us` (the read
+/// took it). Within that window the stamp follows the stream: one period per
+/// sample on from the previous batch, so a read delayed after it started (the
+/// bus thread preempted before the drain) does not move the samples. Outside
+/// it (the device's clock drifting from ours, samples lost to a full buffer,
+/// the first batch) the window's nearer edge wins. A sample's stamp never goes
+/// back: the batch's first comes after `previous_us`.
+pub(crate) fn batch_end_us(
+    started_us: u64,
+    ended_us: u64,
+    count: u64,
+    period_us: u64,
+    previous_us: u64,
+) -> u64 {
+    let earliest = started_us.saturating_sub(period_us);
+    let latest = ended_us.max(started_us);
+    let expected = if previous_us == 0 {
+        started_us
+    } else {
+        previous_us + count * period_us
+    };
+    let stamp = expected.clamp(earliest, latest);
+    if previous_us == 0 {
+        stamp
+    } else {
+        stamp.max(previous_us + count.saturating_sub(1) * period_us + 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +182,30 @@ mod tests {
     fn a_read_a_period_late_runs_anyway() {
         let sensors = [sensor(0, 0, 6_000), sensor(1, 15_000, 200)];
         assert_eq!(choose(&sensors, 10_000), Next::Run(0));
+    }
+
+    #[test]
+    fn batch_stamps_follow_the_stream_and_never_go_back() {
+        let p = 2_500;
+        // The first batch: stamped at the read's start.
+        assert_eq!(batch_end_us(100_000, 100_300, 4, p, 0), 100_000);
+        // On time: four more samples, four periods on.
+        assert_eq!(batch_end_us(110_000, 110_300, 4, p, 100_000), 110_000);
+        // Preempted after starting: the read started at 120 ms but drained
+        // at 125.3 ms and found six samples. Stamped from the stream (the
+        // last at 125 ms), not counted back from 120 ms, which would put the
+        // first at 107.5 ms, before the previous batch's last.
+        assert_eq!(batch_end_us(120_000, 125_300, 6, p, 110_000), 125_000);
+        // The device's clock runs fast against ours: two samples by the
+        // stream put the newest at 129.9 ms, but it is younger than one
+        // period at the read's start (133 ms): the window's edge wins.
+        assert_eq!(batch_end_us(133_000, 133_300, 2, p, 124_900), 130_500);
+        // Samples lost to a full buffer: the stream is behind; snap forward.
+        assert_eq!(batch_end_us(500_000, 500_400, 32, p, 130_500), 497_500);
+        // Never back, even with a read window that says otherwise.
+        assert_eq!(batch_end_us(129_000, 129_100, 4, p, 128_500), 136_001);
+        // One sample a read (no buffer): the read's start, strictly after.
+        assert_eq!(batch_end_us(10_000, 10_200, 1, 0, 0), 10_000);
+        assert_eq!(batch_end_us(10_000, 10_200, 1, 0, 10_000), 10_001);
     }
 }

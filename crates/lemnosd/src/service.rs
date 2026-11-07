@@ -654,8 +654,16 @@ impl Service {
             self.status_event(index, status);
         }
         if count > 0 {
-            self.deliver_batch(index, &samples[..count], done.started_us, period_us);
-            self.feed_fusion(index, &samples[..count], done.started_us, period_us);
+            let last_us = schedule::batch_end_us(
+                done.started_us,
+                done.started_us + done.cost_us,
+                count as u64,
+                period_us,
+                self.slots[index].batch_last_us,
+            );
+            self.slots[index].batch_last_us = last_us;
+            self.deliver_batch(index, &samples[..count], last_us, period_us);
+            self.feed_fusion(index, &samples[..count], last_us, period_us);
         }
         if miss {
             // A one-shot reader is answered from the last reading; with none
