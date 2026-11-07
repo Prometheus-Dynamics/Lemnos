@@ -53,6 +53,7 @@ pub use be_stream::{
     BackEndStream, BeFormat, BeJob, BeOutputSetup, OUTPUT_STRIDE_ALIGN, QUEUED_JOBS, QueuedJob,
     output_stride,
 };
+pub use be_tdn::{TdnMemory, TdnSetup};
 pub use config_buf::ConfigMemory;
 pub use fe::{
     FeFrame, FeHeld, FeHeldRaw, FrontEndDevice, FrontEndSetup, HeldImage, LineEvent, SensorWindow,

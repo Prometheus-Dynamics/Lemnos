@@ -15,7 +15,7 @@ use lemnos_v4l2::v4l2::{
 use super::be::BE_CFG_FOURCC;
 use super::be_output::{OutputMemory, OutputQueue};
 use super::be_spare::{take_buffer, top_up_free};
-use super::be_tdn::TdnBuffers;
+use super::be_tdn::{TdnBuffers, TdnSetup};
 use super::config_buf::{ConfigBuffer, ConfigMemory};
 use super::slots::Slots;
 use super::{DeviceError, Result, bayer16_fourcc, comp1_fourcc, find_media};
@@ -128,6 +128,8 @@ pub struct BackEndStream {
     config: ConfigBuffer,
     /// Input width, height, fourcc and stride (the TDN buffers' format).
     input_layout: (u32, u32, FourCc, u32),
+    /// The input's `PC1x` fourcc, for compressed TDN buffers.
+    tdn_comp1: FourCc,
     tdn: Option<TdnBuffers>,
 }
 
@@ -380,6 +382,7 @@ impl BackEndStream {
                 bayer16_fourcc(bayer),
                 tdn_stride,
             ),
+            tdn_comp1: comp1_fourcc(bayer),
             tdn: None,
         };
         s.input.stream_on(BufType::VideoOutputMplane)?;
@@ -394,6 +397,13 @@ impl BackEndStream {
     /// `pispbe-tdn_output`, swapped every job. Jobs whose config enables `TDN_OUTPUT` (and
     /// `TDN_INPUT`) use them; the config's TDN formats must be [`Self::tdn_format`].
     pub fn enable_tdn(&mut self) -> Result<()> {
+        self.enable_tdn_with(TdnSetup::default())
+    }
+
+    /// [`Self::enable_tdn`] with the buffers' size and heap chosen ([`TdnSetup`]): at
+    /// 1280x800, compressed buffers are 1,024,000 bytes each instead of 2,048,000, and
+    /// [`TdnMemory::System`](super::TdnMemory::System) takes no contiguous memory. A second call keeps the first's.
+    pub fn enable_tdn_with(&mut self, setup: TdnSetup) -> Result<()> {
         if self.tdn.is_some() {
             return Ok(());
         }
@@ -411,10 +421,21 @@ impl BackEndStream {
         self.tdn = Some(TdnBuffers::new(
             node("pispbe-tdn_input")?,
             node("pispbe-tdn_output")?,
-            self.input_layout,
+            self.tdn_layout(setup.compressed),
             QUEUED_JOBS,
+            setup,
         )?);
         Ok(())
+    }
+
+    /// The TDN nodes' format: the input's 16-bit layout, or `PC1x` at the compressed stride.
+    fn tdn_layout(&self, compressed: bool) -> (u32, u32, FourCc, u32) {
+        let (w, h, fourcc, stride) = self.input_layout;
+        if compressed {
+            (w, h, self.tdn_comp1, w.next_multiple_of(16))
+        } else {
+            (w, h, fourcc, stride)
+        }
     }
 
     /// Temporal denoise is set up ([`Self::enable_tdn`]).

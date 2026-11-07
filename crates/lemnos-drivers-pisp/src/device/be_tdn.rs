@@ -16,8 +16,37 @@ use super::slots::Slots;
 use super::{DeviceError, Result};
 use crate::uapi::bayer_enable;
 
-/// Heaps tried for the buffers (the CPU never touches them).
-const HEAPS: [&str; 2] = ["linux,cma", "system"];
+/// How the temporal denoise buffers are set up ([`super::BackEndStream::enable_tdn_with`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TdnSetup {
+    /// Buffers sized for the 8-bit compressed average (PiSP mode 1, the node's `PC1x` fourcc
+    /// at a stride of the width rounded up to 16): half the bytes of 16-bit Bayer. Every job's
+    /// config must then keep the average compressed ([`super::BackEndStream::tdn_format`] with
+    /// `true`); a job that does not is refused. Off: 16-bit buffers, which take either.
+    pub compressed: bool,
+    /// Where the two buffers come from.
+    pub memory: TdnMemory,
+}
+
+/// The heap the temporal denoise buffers come from (the CPU never touches them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TdnMemory {
+    /// Contiguous memory (`linux,cma`), else the `system` heap.
+    #[default]
+    Contiguous,
+    /// The `system` heap (the back end reaches it through its IOMMU), else `linux,cma`: no
+    /// contiguous memory.
+    System,
+}
+
+impl TdnMemory {
+    fn heaps(self) -> [&'static str; 2] {
+        match self {
+            Self::Contiguous => ["linux,cma", "system"],
+            Self::System => ["system", "linux,cma"],
+        }
+    }
+}
 
 const IN: BufType = BufType::VideoOutputMplane;
 const OUT: BufType = BufType::VideoCaptureMplane;
@@ -27,6 +56,8 @@ pub(super) struct TdnBuffers {
     output: VideoDevice,
     fds: [OwnedFd; 2],
     len: u32,
+    /// Sized for the compressed average only ([`TdnSetup::compressed`]).
+    compressed: bool,
     /// The buffer the last job wrote (the long-term average to read next).
     last_written: Option<usize>,
     /// What each job in flight queued, oldest first: (read slot, written slot).
@@ -60,17 +91,21 @@ fn set_format(
 }
 
 impl TdnBuffers {
-    /// Sets both nodes to the input's format (`w`x`h`, 16-bit Bayer `fourcc`, `stride`),
-    /// allocates and imports two buffers and starts streaming.
+    /// Sets both nodes to the average's format (`w`x`h`, `fourcc`: 16-bit Bayer, or `PC1x`
+    /// when `setup.compressed`, `stride`), allocates and imports two buffers and starts
+    /// streaming.
     pub(super) fn new(
         input: VideoDevice,
         output: VideoDevice,
         (w, h, fourcc, stride): (u32, u32, FourCc, u32),
         jobs: usize,
+        setup: TdnSetup,
     ) -> Result<Self> {
         set_format(&input, IN, w, h, fourcc, stride)?;
         set_format(&output, OUT, w, h, fourcc, stride)?;
-        let heap = HEAPS
+        let heap = setup
+            .memory
+            .heaps()
             .iter()
             .find_map(|n| DmaHeap::open(n).ok())
             .ok_or_else(|| DeviceError::Setup("no dma-heap for the TDN buffers".into()))?;
@@ -98,6 +133,7 @@ impl TdnBuffers {
             output,
             fds,
             len: len as u32,
+            compressed: setup.compressed,
             last_written: None,
             in_flight: VecDeque::with_capacity(jobs),
             read_slots,
@@ -114,6 +150,11 @@ impl TdnBuffers {
     /// Queues the buffers a job with `bayer_enables` uses: a frame's first job picks the slots
     /// (`first`), the frame's further jobs reuse them (each reads and writes its own rows).
     pub(super) fn queue_part(&mut self, bayer_enables: u32, first: bool) -> Result<()> {
+        if !fits(self.compressed, bayer_enables) {
+            return Err(DeviceError::Setup(
+                "the TDN buffers hold the compressed average; the job's is 16-bit".into(),
+            ));
+        }
         if first {
             let (r, w) = self.slots(bayer_enables)?;
             self.queue_slots(r, w)?;
@@ -222,6 +263,15 @@ impl TdnBuffers {
     }
 }
 
+/// Whether a job with `bayer_enables` fits the buffers: a 16-bit average would overrun buffers
+/// sized for the compressed one.
+fn fits(compressed: bool, bayer_enables: u32) -> bool {
+    let has = |bit| bayer_enables & bit != 0;
+    !compressed
+        || (!has(bayer_enable::TDN_OUTPUT) || has(bayer_enable::TDN_COMPRESS))
+            && (!has(bayer_enable::TDN_INPUT) || has(bayer_enable::TDN_DECOMPRESS))
+}
+
 fn dequeue(dev: &VideoDevice, ty: BufType, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -233,5 +283,25 @@ fn dequeue(dev: &VideoDevice, ty: BufType, timeout: Duration) -> Result<()> {
             return Err(DeviceError::Timeout("pispbe-tdn"));
         }
         dev.wait(Some(left))?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bayer_enable::{TDN, TDN_COMPRESS, TDN_DECOMPRESS, TDN_INPUT, TDN_OUTPUT};
+
+    #[test]
+    fn compressed_buffers_refuse_a_16_bit_average() {
+        let first = TDN | TDN_OUTPUT;
+        let next = first | TDN_INPUT;
+        // 16-bit buffers take either.
+        assert!(fits(false, first) && fits(false, next | TDN_COMPRESS | TDN_DECOMPRESS));
+        assert!(fits(true, first | TDN_COMPRESS));
+        assert!(fits(true, next | TDN_COMPRESS | TDN_DECOMPRESS));
+        assert!(!fits(true, first));
+        assert!(!fits(true, next | TDN_COMPRESS));
+        assert!(!fits(true, next | TDN_DECOMPRESS));
+        assert!(fits(true, 0), "a job without TDN uses no buffer");
     }
 }
