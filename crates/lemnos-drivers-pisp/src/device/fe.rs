@@ -58,6 +58,19 @@ pub struct FrontEndSetup {
     pub keep_embedded: bool,
 }
 
+/// The front end's second raw output (`rp1-cfe-fe_image1`), from
+/// [`FrontEndDevice::open_with_output1`]: the input's size, in its own format, written for the
+/// same frames as output 0 (the driver runs a job only with a buffer on every streaming node, so
+/// both outputs carry every sequence). The caller configures it on the front end like output 0:
+/// `FrontEnd::set_output_format(1, dev.output_format(1))`, and `set_compress(1, ..)` when
+/// compressed; leaving the crop and downscale of output 1 off keeps the input's size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FeOutputSetup {
+    /// PiSP 8-bit compressed raw (mode 1), as [`FrontEndSetup::image_compressed`]; otherwise
+    /// 16-bit.
+    pub compressed: bool,
+}
+
 /// One frame's worth of front end results.
 #[derive(Debug)]
 pub struct FeFrame {
@@ -69,6 +82,8 @@ pub struct FeFrame {
     pub stats: Statistics,
     /// Raw image `(sequence, bytes)` from output 0, if enabled.
     pub raw: Option<(u32, Vec<u8>)>,
+    /// Raw image `(sequence, bytes)` from output 1, if enabled.
+    pub raw1: Option<(u32, Vec<u8>)>,
 }
 
 /// A raw frame left dequeued by [`FrontEndDevice::next_held`].
@@ -97,6 +112,9 @@ pub struct FeHeld {
     pub stats: Statistics,
     /// The raw frame, if the raw output is enabled.
     pub image: Option<HeldImage>,
+    /// Output 1's frame, if enabled ([`FrontEndDevice::open_with_output1`]); held until
+    /// [`FrontEndDevice::release_output`]`(1, ..)`.
+    pub image1: Option<HeldImage>,
 }
 
 /// One frame's raw frame, held, from [`FrontEndDevice::next_held_raw`] (its statistics are
@@ -109,6 +127,8 @@ pub struct FeHeldRaw {
     pub timestamp: Duration,
     /// The raw frame, if the raw output is enabled.
     pub image: Option<HeldImage>,
+    /// Output 1's frame, if enabled; held until [`FrontEndDevice::release_output`]`(1, ..)`.
+    pub image1: Option<HeldImage>,
 }
 
 /// The front end path, set up and holding its buffers.
@@ -188,6 +208,9 @@ pub struct FrontEndDevice {
     config: Queue,
     image: Option<Queue>,
     image_format: ImageFormatConfig,
+    /// Output 1 (`rp1-cfe-fe_image1`), with [`Self::open_with_output1`].
+    image1: Option<Queue>,
+    image1_format: ImageFormatConfig,
     image_path: Option<std::path::PathBuf>,
     free_configs: Vec<u32>,
 }
@@ -217,6 +240,17 @@ impl FrontEndDevice {
     /// Finds `rp1-cfe`, routes the sensor through `csi2` into `pisp-fe` (disabling every other
     /// mutable link), sets the pad and node formats and allocates buffers.
     pub fn open(setup: &FrontEndSetup) -> Result<Self> {
+        Self::open_inner(setup, None)
+    }
+
+    /// [`Self::open`], with the front end's second raw output (`rp1-cfe-fe_image1`) as well,
+    /// set up as `output1` says. Output 0 is as `setup` says (`image_output` should be on: a
+    /// capture of output 1 alone works, but nothing here was made for it).
+    pub fn open_with_output1(setup: &FrontEndSetup, output1: FeOutputSetup) -> Result<Self> {
+        Self::open_inner(setup, Some(output1))
+    }
+
+    fn open_inner(setup: &FrontEndSetup, output1: Option<FeOutputSetup>) -> Result<Self> {
         let path = find_media("rp1-cfe")
             .into_iter()
             .next()
@@ -228,6 +262,10 @@ impl FrontEndDevice {
         let cfg_node = entity(&t, "rp1-cfe-fe_config")?;
         let stats_node = entity(&t, "rp1-cfe-fe_stats")?;
         let image_node = entity(&t, "rp1-cfe-fe_image0")?;
+        let image1_node = match output1 {
+            Some(_) => Some(entity(&t, "rp1-cfe-fe_image1")?),
+            None => None,
+        };
         let sensor = t
             .links_to(csi2)
             .into_iter()
@@ -243,6 +281,9 @@ impl FrontEndDevice {
         ];
         if setup.image_output {
             wanted.push((pad(fe, 2), pad(image_node, 0)));
+        }
+        if let Some(n) = image1_node {
+            wanted.push((pad(fe, 3), pad(n, 0)));
         }
         let embedded = t.entity_by_name("rp1-cfe-embedded").map(|e| e.id);
         for l in t.data_links() {
@@ -285,6 +326,9 @@ impl FrontEndDevice {
         let fesd = subdev(&t, fe)?;
         fesd.set_format(0, Which::Active, &f16)?;
         fesd.set_format(2, Which::Active, &f16)?;
+        if output1.is_some() {
+            fesd.set_format(3, Which::Active, &f16)?;
+        }
 
         let stats_dev = node(&t, "rp1-cfe-fe_stats")?;
         stats_dev.set_format(
@@ -302,48 +346,69 @@ impl FrontEndDevice {
                 ..Default::default()
             }),
         )?;
-        let (image_fourcc, format) = if setup.image_compressed {
-            (
-                comp1_fourcc(setup.bayer),
-                crate::format::formats::PISP_COMP1,
-            )
-        } else {
-            (bayer16_fourcc(setup.bayer), image_format::BPS_16)
-        };
-        let mut image_format = ImageFormatConfig {
-            width: setup.width as u16,
-            height: setup.height as u16,
-            format,
-            ..Default::default()
-        };
         let image_path = t.devnode_path(image_node);
-        let image = if setup.image_output {
-            let dev = node(&t, "rp1-cfe-fe_image0")?;
-            let f = dev.set_format(
-                BufType::VideoCapture,
-                &Format::Single(PixFormat {
-                    width: setup.width,
-                    height: setup.height,
-                    fourcc: image_fourcc,
-                    field: 1,
+        let raw_output =
+            |name: &'static str, compressed: bool| -> Result<(Queue, ImageFormatConfig)> {
+                let (fourcc, format) = if compressed {
+                    (
+                        comp1_fourcc(setup.bayer),
+                        crate::format::formats::PISP_COMP1,
+                    )
+                } else {
+                    (bayer16_fourcc(setup.bayer), image_format::BPS_16)
+                };
+                let dev = node(&t, &format!("rp1-cfe-{name}"))?;
+                let f = dev.set_format(
+                    BufType::VideoCapture,
+                    &Format::Single(PixFormat {
+                        width: setup.width,
+                        height: setup.height,
+                        fourcc,
+                        field: 1,
+                        ..Default::default()
+                    }),
+                )?;
+                let Format::Single(p) = f else {
+                    return Err(DeviceError::Setup(format!("{name} is not single-planar")));
+                };
+                if p.fourcc != fourcc {
+                    return Err(DeviceError::Setup(format!("{name} gave {}", p.fourcc)));
+                }
+                let config = ImageFormatConfig {
+                    width: setup.width as u16,
+                    height: setup.height as u16,
+                    format,
+                    stride: p.bytes_per_line as i32,
                     ..Default::default()
-                }),
-            )?;
-            let Format::Single(p) = f else {
-                return Err(DeviceError::Setup("fe_image0 is not single-planar".into()));
+                };
+                Ok((
+                    Queue::new(dev, BufType::VideoCapture, setup.buffers, name)?,
+                    config,
+                ))
             };
-            if p.fourcc != image_fourcc {
-                return Err(DeviceError::Setup(format!("fe_image0 gave {}", p.fourcc)));
-            }
-            image_format.stride = p.bytes_per_line as i32;
-            Some(Queue::new(
-                dev,
-                BufType::VideoCapture,
-                setup.buffers,
-                "fe_image0",
-            )?)
+        let (image, image_format) = if setup.image_output {
+            let (q, f) = raw_output("fe_image0", setup.image_compressed)?;
+            (Some(q), f)
         } else {
-            None
+            let format = if setup.image_compressed {
+                crate::format::formats::PISP_COMP1
+            } else {
+                image_format::BPS_16
+            };
+            let f = ImageFormatConfig {
+                width: setup.width as u16,
+                height: setup.height as u16,
+                format,
+                ..Default::default()
+            };
+            (None, f)
+        };
+        let (image1, image1_format) = match output1 {
+            Some(o) => {
+                let (q, f) = raw_output("fe_image1", o.compressed)?;
+                (Some(q), f)
+            }
+            None => (None, ImageFormatConfig::default()),
         };
         Ok(Self {
             queued: Default::default(),
@@ -352,6 +417,8 @@ impl FrontEndDevice {
             config: Queue::new(cfg_dev, BufType::MetaOutput, setup.buffers, "fe_config")?,
             image,
             image_format,
+            image1,
+            image1_format,
             image_path,
             free_configs: Vec::new(),
             _media: media,
@@ -404,6 +471,11 @@ impl FrontEndDevice {
                 self.queued.borrow_mut().push_back(i);
             }
         }
+        if let Some(q) = &self.image1 {
+            for i in 0..q.len() as u32 {
+                q.queue(i, &[])?;
+            }
+        }
         let n = configs.clamp(1, self.config.len()) as u32;
         for i in 0..n {
             let cfg = fe.prepare().map_err(DeviceError::Config)?;
@@ -413,6 +485,9 @@ impl FrontEndDevice {
         self.config.stream_on()?;
         self.stats.stream_on()?;
         if let Some(q) = &self.image {
+            q.stream_on()?;
+        }
+        if let Some(q) = &self.image1 {
             q.stream_on()?;
         }
         Ok(())
@@ -439,6 +514,15 @@ impl FrontEndDevice {
             }
             None => None,
         };
+        let raw1 = match &self.image1 {
+            Some(q) => {
+                let r = q.dequeue(timeout)?;
+                let data = q.maps[r.index as usize][0].as_slice()[..r.bytes_used()].to_vec();
+                q.queue(r.index, &[])?;
+                Some((r.sequence, data))
+            }
+            None => None,
+        };
         while let Some(c) = self
             .config
             .dev
@@ -452,6 +536,7 @@ impl FrontEndDevice {
             timestamp: b.timestamp,
             stats,
             raw,
+            raw1,
         })
     }
 
@@ -530,6 +615,7 @@ impl FrontEndDevice {
             timestamp: f.timestamp,
             stats: Statistics::from_raw(&raw),
             image: f.image,
+            image1: f.image1,
         })
     }
 
@@ -573,6 +659,19 @@ impl FrontEndDevice {
             }
             None => None,
         };
+        let image1 = match &self.image1 {
+            Some(q) => {
+                let r = q.dequeue(timeout)?;
+                Some(HeldImage {
+                    index: r.index,
+                    sequence: r.sequence,
+                    timestamp: r.timestamp,
+                    bytes_used: r.bytes_used(),
+                    error: r.flags.contains(lemnos_v4l2::v4l2::BufferFlags::ERROR),
+                })
+            }
+            None => None,
+        };
         while let Some(c) = super::profile::time("fe_config", "dqbuf", || {
             self.config
                 .dev
@@ -585,6 +684,7 @@ impl FrontEndDevice {
             sequence: b.sequence,
             timestamp: b.timestamp,
             image,
+            image1,
         })
     }
 
@@ -607,6 +707,69 @@ impl FrontEndDevice {
     /// (see [`Self::enable_line_events`]) is about this buffer's frame.
     pub fn image_in_flight(&self) -> Option<u32> {
         self.queued.borrow().front().copied()
+    }
+
+    /// The format of raw output `output` (0 or 1), with the driver's stride: for
+    /// `FrontEnd::set_output_format(output, ..)` and as the back end's input. Output 0 is
+    /// [`Self::image_format`]; output 1 is the default (zero) when it is not open.
+    pub fn output_format(&self, output: usize) -> ImageFormatConfig {
+        if output == 1 {
+            self.image1_format
+        } else {
+            self.image_format
+        }
+    }
+
+    fn output1(&self) -> Result<&Queue> {
+        self.image1
+            .as_ref()
+            .ok_or_else(|| DeviceError::Setup("output 1 is not open".into()))
+    }
+
+    /// [`Self::add_image_buffers`] for raw output `output` (0 or 1).
+    pub fn add_output_buffers(&mut self, output: usize, count: u32) -> Result<Vec<OwnedFd>> {
+        if output != 1 {
+            return self.add_image_buffers(count);
+        }
+        let q = self
+            .image1
+            .as_mut()
+            .ok_or_else(|| DeviceError::Setup("output 1 is not open".into()))?;
+        let added = q.add_buffers(count)?;
+        if added.is_empty() {
+            return Err(DeviceError::Setup("fe_image1 made no buffers".into()));
+        }
+        added
+            .map(|i| Ok(q.dev.export_buffer(q.buf_type, i, 0)?))
+            .collect()
+    }
+
+    /// [`Self::image_dmabufs`] for raw output `output` (0 or 1).
+    pub fn output_dmabufs(&self, output: usize) -> Result<Vec<OwnedFd>> {
+        if output != 1 {
+            return self.image_dmabufs();
+        }
+        let q = self.output1()?;
+        (0..q.len() as u32)
+            .map(|i| Ok(q.dev.export_buffer(q.buf_type, i, 0)?))
+            .collect()
+    }
+
+    /// [`Self::image_data`] for raw output `output` (0 or 1).
+    pub fn output_data(&self, output: usize, index: u32) -> Option<&[u8]> {
+        if output != 1 {
+            return self.image_data(index);
+        }
+        let q = self.image1.as_ref()?;
+        Some(q.maps.get(index as usize)?.first()?.as_slice())
+    }
+
+    /// [`Self::release_image`] for raw output `output` (0 or 1): gives a held frame back.
+    pub fn release_output(&self, output: usize, index: u32) -> Result<()> {
+        if output != 1 {
+            return self.release_image(index);
+        }
+        Ok(self.output1()?.queue(index, &[])?)
     }
 
     /// Line events at `line` rows, from the driver's `FRAME_SYNC` on the raw output and a timer
@@ -683,10 +846,10 @@ impl FrontEndDevice {
     /// Stops streaming and frees the buffers.
     pub fn stop(self) -> Result<()> {
         let mut first = None;
-        if let Some(q) = self.image
-            && let Err(e) = q.close()
-        {
-            first.get_or_insert(e);
+        for q in [self.image, self.image1].into_iter().flatten() {
+            if let Err(e) = q.close() {
+                first.get_or_insert(e);
+            }
         }
         if let Err(e) = self.stats.close() {
             first.get_or_insert(e);
