@@ -439,6 +439,27 @@ impl Connection {
         Ok(())
     }
 
+    /// Into blocking mode for a blocking call: a no-op unless polled. Out of line, so the
+    /// generic blocking calls do not each carry the switch.
+    #[inline(never)]
+    fn begin_blocking(&mut self) -> Result<(), ClientError> {
+        if self.stream_nonblocking || !self.out.is_empty() {
+            self.set_stream_nonblocking(false)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Back to non-blocking mode after a blocking call, when polled.
+    #[inline(never)]
+    fn end_blocking(&mut self) -> Result<(), ClientError> {
+        if self.nonblocking {
+            self.set_stream_nonblocking(true)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Writes what the socket takes of the queued requests, without waiting.
     pub(super) fn flush_out(&mut self) -> Result<(), ClientError> {
         while !self.out.is_empty() {
@@ -572,11 +593,9 @@ impl Connection {
         }
         // A blocking call in polled use blocks for its answer, then hands the
         // socket back non-blocking.
-        self.set_stream_nonblocking(false)?;
+        self.begin_blocking()?;
         let result = self.request_blocking(request, &mut pick);
-        if self.nonblocking {
-            self.set_stream_nonblocking(true)?;
-        }
+        self.end_blocking()?;
         result
     }
 
@@ -597,11 +616,9 @@ impl Connection {
     }
 
     fn refresh_devices(&mut self) -> Result<(), ClientError> {
-        self.set_stream_nonblocking(false)?;
+        self.begin_blocking()?;
         let result = self.refresh_devices_blocking();
-        if self.nonblocking {
-            self.set_stream_nonblocking(true)?;
-        }
+        self.end_blocking()?;
         result
     }
 
@@ -648,11 +665,9 @@ impl Connection {
         wait: Option<Duration>,
     ) -> Result<Option<ClientEvent<Message>>, ClientError> {
         // Waiting in polled use: blocking for the wait, non-blocking after.
-        self.set_stream_nonblocking(false)?;
+        self.begin_blocking()?;
         let result = self.next_blocking(wait);
-        if self.nonblocking {
-            self.set_stream_nonblocking(true)?;
-        }
+        self.end_blocking()?;
         result
     }
 

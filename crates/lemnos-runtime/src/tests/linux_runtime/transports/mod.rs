@@ -174,8 +174,13 @@ fn read_trimmed(path: &std::path::Path) -> Option<String> {
         .map(|value| value.trim().to_string())
 }
 
+/// The export waits' budget in these tests, in 5 ms retries (10 s): the sysfs harness is a
+/// polling thread, which a loaded host (load average about 100 on the CI machine) can starve
+/// for longer than a real kernel would take. A wait returns as soon as the node appears.
+const EXPORT_RETRIES: usize = 2000;
+
 fn wait_for_path_state(path: &std::path::Path, exists: bool, label: &str) {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         if path.exists() == exists {
             return;

@@ -82,7 +82,7 @@ fn runtime_unbind_unexports_gpio_sysfs_line_when_session_exported_it() {
     let backend = LinuxBackend::with_paths_and_config(
         root.paths(),
         lemnos_linux::LinuxTransportConfig::new()
-            .with_sysfs_export_retries(40)
+            .with_sysfs_export_retries(EXPORT_RETRIES)
             .with_sysfs_export_delay_ms(5),
     );
     let gpio_probe = backend.gpio_probe();
@@ -201,7 +201,7 @@ fn runtime_shutdown_unexports_pwm_sysfs_channel_when_session_exported_it() {
     let backend = LinuxBackend::with_paths_and_config(
         root.paths(),
         lemnos_linux::LinuxTransportConfig::new()
-            .with_sysfs_export_retries(40)
+            .with_sysfs_export_retries(EXPORT_RETRIES)
             .with_sysfs_export_delay_ms(5),
     );
     let pwm_probe = backend.pwm_probe();

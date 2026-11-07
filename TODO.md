@@ -344,6 +344,17 @@ for consumers: everything below is additive until they switch.
         process exactly.
       - Default 20: under a client's default of 50.
       Tested in the mock (`tests/absent_look.rs`); untested on board.
+- [x] **Polled `DeviceClient`** (2026-11-07, asked by the coordinator, for board-agent to drop its
+      keeper thread): `poll`, `send_read`/`send_set`/`send_get`, `fd`, feature `tokio`
+      (`AsyncDeviceClient`). 1000 polled read round trips allocate nothing; tested against a
+      fake service, not yet in board-agent. Decisions:
+      - The first `poll` returns `Connected { reconnects: 0 }`, as `next_event` does.
+      - Reconnection happens inside `poll` (its handshake blocks up to the client's timeout).
+        The socket is new, so `Connected` means: register `fd()` again.
+      - Size: lemnos-ctl's text grew 3.7 KB (x86_64 service profile), lemnosd's 272 bytes.
+        About 1.9 KB of that is inlined into lemnos-ctl's `main` and `led`; the mode switch
+        is out of line. Not trimmed further: boxing the polled state (two buffers, two flags)
+        would shrink `Connection`'s drop and construction code, but by an unmeasured amount.
 - [ ] **Gyroscope aligned to the accelerometer** (2026-11-07, asked by the coordinator: no
       duplicates, misalignment well under 0.1 ms, measured before and after):
       - **Done:** the gyroscope is resampled at the accelerometer's sample times, with each
