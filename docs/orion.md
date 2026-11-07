@@ -101,7 +101,7 @@ handler, so Orion routes an action here only while the bridge is connected.
 
 | Name | Arguments | Output on success | Effect |
 |---|---|---|---|
-| `set` | `control` (string, required), `value` (number, required, finite) | `control` (string), `applied` (`F64`, the value lemnosd applied) | writes the control in its unit |
+| `set` | `control` (string, required), `value` (number, required, finite), `for_ms` (whole number, optional, 1 to 600000) | `control` (string), `applied` (`F64`, the value lemnosd applied) | writes the control in its unit; with `for_ms`, only for that long (see *Timed holds*) |
 | `restore` | `control` (string, optional; all of the caller's writes when absent) | none | undoes the caller's writes |
 | `release` | none | none | hands a fan back to the kernel's governor |
 | `read` | none | `status` (string), `read_us` (`UInt`), one `F64` per channel with a value | the device's latest reading |
@@ -143,6 +143,27 @@ write (a control that cannot be read has nothing to restore to, so the write sta
 After every action the bridge reads back each control of the device, so the status lane shows the
 value that lemnosd now holds. lemnosd's restore and release do not name the control they changed.
 
+### Timed holds
+
+A `set` with `for_ms` holds its write for that long, then hands it back by itself: a fan is
+released to the kernel's governor (as `release` does), any other control gets the caller's write
+undone (as `restore` of that control does). The hold belongs to the caller (`requested_by`) and
+the device. Another `set` by the same caller on the device replaces it: with `for_ms` the hold
+restarts from that `set`, without it the write stays until undone. The caller's `restore` or
+`release` ends it at once. The hand-back is logged and the device's controls are read back to
+the status lane, as after an action.
+
+An Orion action has no connection that outlives it, so the bridge cannot see a caller go away.
+A caller that must not leave a fan overridden when it stops (a client of its own that
+disconnects, a crash) holds for a short `for_ms` and renews it while it wants the override: a
+caller that stops renewing is handed back within `for_ms`. The bridge keeps holds in memory: a
+restart of the bridge ends its caller connections, and lemnosd then hands their writes back as
+it does for any writer that disconnects.
+
+Tested against an in-process Orion node and lemnosd's mock service with a fake `pwm-fan`
+(`crates/lemnosd/tests/orion_fan_hold.rs`: expiry, renewal, an early `release`). Untested on
+board.
+
 ### Refusals
 
 A refused action is `Rejected` with the reason. A failure of the device is `Failed`.
@@ -153,7 +174,7 @@ A refused action is `Rejected` with the reason. A failure of the device is `Fail
 | Rejected | `no lemnos device <resource>` | the resource is not on this board |
 | Rejected | `unsupported action `<name>` (one of the names in the actions table)` | unknown name |
 | Rejected | `` `routine` (accel-six, mag-rotate or gyro-hold) is required `` / `` unknown routine `<name>` `` | bad `calibration.start` arguments |
-| Rejected | `` `control` (string) is required `` / `` `value` (number) is required `` / `` `value` must be finite `` | bad `set` arguments |
+| Rejected | `` `control` (string) is required `` / `` `value` (number) is required `` / `` `value` must be finite `` / `` `for_ms` must be a whole number, 1 to 600000 `` | bad `set` arguments |
 | Rejected | `not allowed by the device's write policy` | the caller is not in the device's `writers` |
 | Rejected | `value out of range` | outside the control's range |
 | Rejected | `no such control` | unknown control |

@@ -68,13 +68,22 @@ pub enum LookOp {
     },
 }
 
+/// The longest a `set` may hold its write with `for_ms` (ten minutes). A caller
+/// that wants longer sets again before it ends: each `set` renews the hold.
+pub const MAX_FOR_MS: u64 = 600_000;
+
 /// A parsed action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     /// A light's look or brightness action.
     Look(LookOp),
-    /// `set`: write `value` (in the control's unit) to `control`.
-    Set { control: String, value: f64 },
+    /// `set`: write `value` (in the control's unit) to `control`; with
+    /// `for_ms`, held that long and then handed back (see [`MAX_FOR_MS`]).
+    Set {
+        control: String,
+        value: f64,
+        for_ms: Option<u64>,
+    },
     /// `restore`: undo this caller's writes (to `control`, or all of them).
     Restore { control: Option<String> },
     /// `release`: hand a fan back to the kernel's governor.
@@ -116,7 +125,24 @@ pub fn parse(name: &str, args: &BTreeMap<String, TypedConfigValue>) -> Result<Op
             if !value.is_finite() {
                 return Err("`value` must be finite".to_owned());
             }
-            Ok(Op::Set { control, value })
+            let for_ms = match args.get("for_ms") {
+                None => None,
+                Some(_) => match number(args, "for_ms") {
+                    Some(ms) if ms >= 1.0 && ms <= MAX_FOR_MS as f64 && ms.fract() == 0.0 => {
+                        Some(ms as u64)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "`for_ms` must be a whole number, 1 to {MAX_FOR_MS}"
+                        ));
+                    }
+                },
+            };
+            Ok(Op::Set {
+                control,
+                value,
+                for_ms,
+            })
         }
         "restore" => Ok(Op::Restore {
             control: text(args, "control"),
@@ -133,6 +159,7 @@ pub fn parse(name: &str, args: &BTreeMap<String, TypedConfigValue>) -> Result<Op
             Ok(Op::Set {
                 control: "power.on".to_owned(),
                 value: if on { 1.0 } else { 0.0 },
+                for_ms: None,
             })
         }
         "looks.preset.list" => Ok(Op::Look(LookOp::PresetList)),
@@ -183,6 +210,7 @@ pub fn parse(name: &str, args: &BTreeMap<String, TypedConfigValue>) -> Result<Op
             Ok(Op::Set {
                 control: "power.reset".to_owned(),
                 value: off_ms,
+                for_ms: None,
             })
         }
         "calibration.start" => {
@@ -347,7 +375,8 @@ mod tests {
             parse("set", &ok),
             Ok(Op::Set {
                 control: "duty".into(),
-                value: 1.0
+                value: 1.0,
+                for_ms: None,
             })
         );
         assert!(parse("set", &args(&[("value", TypedConfigValue::F64(1.0))])).is_err());
@@ -356,6 +385,29 @@ mod tests {
             ("value", TypedConfigValue::F64(f64::NAN)),
         ]);
         assert!(parse("set", &nan).is_err());
+        // A timed hold: a whole number of ms, 1 to MAX_FOR_MS.
+        let timed = |ms: TypedConfigValue| {
+            parse(
+                "set",
+                &args(&[
+                    ("control", TypedConfigValue::String("duty".into())),
+                    ("value", TypedConfigValue::F64(0.8)),
+                    ("for_ms", ms),
+                ]),
+            )
+        };
+        assert_eq!(
+            timed(TypedConfigValue::UInt(30_000)),
+            Ok(Op::Set {
+                control: "duty".into(),
+                value: 0.8,
+                for_ms: Some(30_000),
+            })
+        );
+        assert!(timed(TypedConfigValue::UInt(0)).is_err());
+        assert!(timed(TypedConfigValue::UInt(MAX_FOR_MS + 1)).is_err());
+        assert!(timed(TypedConfigValue::F64(1.5)).is_err());
+        assert!(timed(TypedConfigValue::String("5".into())).is_err());
     }
 
     #[test]
@@ -376,7 +428,8 @@ mod tests {
             parse("power.set", &on),
             Ok(Op::Set {
                 control: "power.on".into(),
-                value: 0.0
+                value: 0.0,
+                for_ms: None,
             })
         );
         assert!(parse("power.set", &BTreeMap::new()).is_err());
@@ -385,14 +438,16 @@ mod tests {
             parse("power.reset", &reset),
             Ok(Op::Set {
                 control: "power.reset".into(),
-                value: 250.0
+                value: 250.0,
+                for_ms: None,
             })
         );
         assert_eq!(
             parse("power.reset", &BTreeMap::new()),
             Ok(Op::Set {
                 control: "power.reset".into(),
-                value: 1000.0
+                value: 1000.0,
+                for_ms: None,
             })
         );
         let too_long = args(&[("off_ms", TypedConfigValue::UInt(99_999))]);

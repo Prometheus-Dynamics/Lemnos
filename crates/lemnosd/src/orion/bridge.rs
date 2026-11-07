@@ -290,6 +290,10 @@ struct Shared {
     mirror: Mutex<Option<Mirror>>,
     /// Feeds the main loop (control values read after an action).
     feed: FeedSender,
+    /// Timed `set`s (`for_ms`) still held, by caller and device: the hold's
+    /// number, so a renewed or cancelled hold's timer finds it gone.
+    holds: Mutex<HashMap<(String, String), u64>>,
+    next_hold: std::sync::atomic::AtomicU64,
 }
 
 /// One Orion session: the registered provider, which publishes the resources
@@ -312,6 +316,8 @@ pub async fn run(config: Config) -> Result<(), String> {
         callers: Mutex::new(HashMap::new()),
         mirror: Mutex::new(None),
         feed: feed_tx.clone(),
+        holds: Mutex::new(HashMap::new()),
+        next_hold: std::sync::atomic::AtomicU64::new(1),
     });
     let pump_socket = config.lemnosd_socket.clone();
     let pump_retry = config.retry;
@@ -939,6 +945,16 @@ async fn handle(shared: &Arc<Shared>, request: ActionRequest) -> Outcome {
         Err(reason) => return Outcome::Rejected(reason),
     };
     let caller = format!("orion:{}", request.requested_by);
+    // A `set` with `for_ms` starts (or renews) a timed hold; a `set` without
+    // it, a `restore` or a `release` by the same caller ends one.
+    let hold = match &op {
+        Op::Set {
+            control, for_ms, ..
+        } => Some(for_ms.map(|ms| (control.clone(), ms))),
+        Op::Restore { .. } | Op::Release => Some(None),
+        _ => None,
+    };
+    let hold_key = (caller.clone(), device.clone());
     let controls = {
         let slot = shared.mirror.lock().unwrap_or_else(|e| e.into_inner());
         slot.as_ref()
@@ -966,15 +982,7 @@ async fn handle(shared: &Arc<Shared>, request: ActionRequest) -> Outcome {
         let outcome = run_op(&mut client, &device_for_block, op);
         // lemnosd's restore and release do not name the control they changed,
         // so the controls are read back after every action.
-        let values = controls
-            .iter()
-            .filter_map(|name| {
-                client
-                    .get(&device_for_block, name)
-                    .ok()
-                    .map(|value| (name.clone(), value))
-            })
-            .collect::<Vec<_>>();
+        let values = read_back(&mut client, &device_for_block, &controls);
         (outcome, values, Vec::new())
     })
     .await
@@ -994,14 +1002,99 @@ async fn handle(shared: &Arc<Shared>, request: ActionRequest) -> Outcome {
             value,
         });
     }
+    publish_controls(shared, &device, values);
+    if let (Some(hold), Outcome::Succeeded(_)) = (hold, &outcome) {
+        let mut holds = shared.holds.lock().unwrap_or_else(|e| e.into_inner());
+        match hold {
+            Some((control, ms)) => {
+                let number = shared
+                    .next_hold
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                holds.insert(hold_key.clone(), number);
+                tokio::spawn(expire(shared.clone(), hold_key, control, number, ms));
+            }
+            None => {
+                holds.remove(&hold_key);
+            }
+        }
+    }
+    outcome
+}
+
+/// The device's controls as lemnosd now holds them.
+fn read_back(client: &mut DeviceClient, device: &str, controls: &[String]) -> Vec<(String, f64)> {
+    controls
+        .iter()
+        .filter_map(|name| {
+            client
+                .get(device, name)
+                .ok()
+                .map(|value| (name.clone(), value))
+        })
+        .collect()
+}
+
+fn publish_controls(shared: &Shared, device: &str, values: Vec<(String, f64)>) {
     for (control, value) in values {
         let _ = shared.feed.send(Feed::Control {
-            device: device.clone(),
+            device: device.to_owned(),
             control,
             value,
         });
     }
-    outcome
+}
+
+/// Ends a timed hold after `ms`, unless it was renewed or ended first: a fan
+/// goes back to the kernel's governor (`release`), any other control gets
+/// the caller's write undone (`restore`).
+async fn expire(shared: Arc<Shared>, key: (String, String), control: String, number: u64, ms: u64) {
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+    {
+        let mut holds = shared.holds.lock().unwrap_or_else(|e| e.into_inner());
+        if holds.get(&key) != Some(&number) {
+            return;
+        }
+        holds.remove(&key);
+    }
+    let (caller, device) = key;
+    let controls = {
+        let slot = shared.mirror.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref()
+            .map(|m| m.control_names(&device))
+            .unwrap_or_default()
+    };
+    let for_block = shared.clone();
+    let device_for_block = device.clone();
+    let values = tokio::task::spawn_blocking(move || {
+        let client = match caller_client(&for_block, &caller) {
+            Ok(client) => client,
+            Err(error) => {
+                log(&format!(
+                    "{caller}'s hold on {device_for_block} ended; lemnosd: {error}"
+                ));
+                return Vec::new();
+            }
+        };
+        let mut client = client.lock().unwrap_or_else(|e| e.into_inner());
+        let ended = match client.release(&device_for_block) {
+            Ok(()) => Ok("released"),
+            Err(_) => client
+                .restore(&device_for_block, Some(&control))
+                .map(|()| "restored"),
+        };
+        match ended {
+            Ok(how) => log(&format!(
+                "{caller}'s {ms} ms hold on {device_for_block}.{control} ended ({how})"
+            )),
+            Err(error) => log(&format!(
+                "{caller}'s hold on {device_for_block}.{control} ended; lemnosd: {error}"
+            )),
+        }
+        read_back(&mut client, &device_for_block, &controls)
+    })
+    .await
+    .unwrap_or_default();
+    publish_controls(&shared, &device, values);
 }
 
 /// The caller's connection, created on first use.
@@ -1134,7 +1227,7 @@ fn client_outcome(error: ClientError) -> Outcome {
 fn run_op(client: &mut DeviceClient, device: &str, op: Op) -> Outcome {
     match op {
         Op::Look(_) => Outcome::Failed("internal: look actions run through look_op".to_owned()),
-        Op::Set { control, value } => match client.set(device, &control, value) {
+        Op::Set { control, value, .. } => match client.set(device, &control, value) {
             Ok(applied) => Outcome::Succeeded(ops::set_output(&control, applied)),
             Err(error) => ops::client_error(error),
         },

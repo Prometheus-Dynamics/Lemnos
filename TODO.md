@@ -334,6 +334,12 @@ for consumers: everything below is additive until they switch.
       (2026-11-04, image dev.912): 9 devices published as `lemnos.device` resources, all healthy;
       `read` matches `lemnos-ctl`, `calibration.status`, `set` and `restore` succeed, a bad control
       is rejected.
+- [x] **Timed fan hold for Orion callers** (2026-11-07, asked by the OS image's API for its
+      fan override): `set` takes `for_ms` (1 to 600000); at expiry the bridge releases a fan to its
+      governor (restores any other control). A renewing `set` restarts the hold; the caller's
+      `restore` or `release` ends it. Decision: an Orion action has no connection that outlives it,
+      so "release when the caller goes" is a short `for_ms` the caller renews (docs/orion.md,
+      *Timed holds*). Tested against an in-process node and the mock fan; untested on board.
 - [x] **15. Composites** (6d66b53, 7aac6a3): the `Composite` trait in `lemnos-device`; the fan
       controller is a device slot listed by `lemnos-ctl list` with status, reason, channels and
       controls; client tuning persists in `<state>/fan/<id>.tuning`; the watchdog is pinged only
