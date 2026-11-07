@@ -402,7 +402,13 @@ impl Service {
         if let Some(status) = slot.set_status(status, None) {
             self.status_event(slot_index, status);
         }
-        self.slots[slot_index].reason = reason.to_string();
+        // Replaced only when it changes, in its own capacity: a degraded fan
+        // publishes every tick.
+        let held = &mut self.slots[slot_index].reason;
+        if held != reason {
+            held.clear();
+            held.push_str(reason);
+        }
         self.deliver(slot_index, now_us, now_us);
     }
 

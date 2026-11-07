@@ -73,5 +73,5 @@ pub use wire::{
     GpuLeaseState, GpuMode, I2cOp, LedRequest, LedShow, LightFrame, LightInfo, LineTarget, LooksOp,
     Message, PwmTarget, RawReading, RawRequest, ReadStats, Refusal, Request, SpiXfer, VERSION,
     WireError, decode_message, decode_request, encode_devices_into, encode_frame_into,
-    encode_reading, encode_reading_into,
+    encode_reading, encode_reading_into, encode_status_event_into,
 };

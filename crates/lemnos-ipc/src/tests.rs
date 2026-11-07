@@ -1115,3 +1115,25 @@ fn a_device_list_encoded_from_views_is_the_messages_frame() {
     crate::encode_devices_into(&mut buf, views.iter().copied());
     assert_eq!(buf, Message::Devices(descs).encode());
 }
+
+#[test]
+fn a_status_event_encoded_from_parts_is_the_messages_frame() {
+    for (status, error, reason) in [
+        (DeviceStatus::Available, None, ""),
+        (
+            DeviceStatus::Degraded,
+            Some(ErrorKind::Timeout),
+            "a required input is missing or stale",
+        ),
+    ] {
+        let mut buf = vec![0xaa; 300];
+        crate::encode_status_event_into(&mut buf, "fan", status, error, reason);
+        let event = Event::Status {
+            device: "fan".into(),
+            status,
+            error,
+            reason: reason.into(),
+        };
+        assert_eq!(buf, Message::Event(event).encode());
+    }
+}

@@ -652,6 +652,13 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
     the last 4 s (`schedule::StreamClock`). The latest read, not the earliest: a read preempted
     after its start finds more samples, so it only looks early. Measuring with the earliest
     read put the period 0.02 % off under load.
+  - **The period is saved** in the state directory (`clock/<device>.period_ns`): once
+    measured over a whole window, then when it moves by more than 100 ppm, at most every
+    ten minutes. The next start begins from it, not from the nominal period, and keeps it
+    until its own window is measured. In a simulation of a 1 % fast device, the first 3 s
+    from the nominal period had 1203 steps more than 1 µs off, by up to 1.06 ms. From the
+    saved period there was one, by 0.48 ms: the first batch's place in its period is
+    unknown (it starts in the middle), and settles once.
   - **The newest sample's stamp follows the stream:** one period per sample on from the
     previous batch. It is held within what the read proves: the newest sample arrived after one
     period before the read started, and before the read ended. A stamp is always after the

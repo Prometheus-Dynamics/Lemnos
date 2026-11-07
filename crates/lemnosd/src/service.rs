@@ -375,13 +375,16 @@ impl Service {
         {
             eprintln!("lemnosd: {}: {status:?} {}", slot.id(), slot.reason);
         }
-        let event = Event::Status {
-            device: self.slots[index].id().to_string(),
-            status,
-            error: self.slots[index].error,
-            reason: self.slots[index].reason.clone(),
-        };
-        self.broadcast(&Message::Event(event));
+        // Encoded from the slot as it is, into each client's reused frame: a
+        // status change (a fan's input going stale and back) costs nothing
+        // from the allocator.
+        let slot = &self.slots[index];
+        let (device, error, reason) = (slot.id(), slot.error, slot.reason.as_str());
+        for client in self.clients.iter_mut().filter(|c| c.greeted && c.events) {
+            client.send_event(|frame| {
+                lemnos_ipc::encode_status_event_into(frame, device, status, error, reason);
+            });
+        }
     }
 
     fn build_devices(&mut self, now_ms: u64) {
@@ -657,12 +660,16 @@ impl Service {
             self.status_event(index, status);
         }
         if count > 0 {
+            if period_us != 0 && self.slots[index].batch_clock.unstarted() {
+                self.seed_clock(index);
+            }
             let (last_ns, period_ns) = self.slots[index].batch_clock.batch(
                 done.started_us,
                 done.started_us + done.cost_us,
                 count as u64,
                 period_us,
             );
+            self.save_clock(index, now_us);
             self.deliver_batch(index, &samples[..count], last_ns, period_ns);
             let (last_us, period_us) = (last_ns / 1000, (period_ns + 500) / 1000);
             self.feed_fusion(index, &samples[..count], last_us, period_us);
@@ -694,6 +701,44 @@ impl Service {
             }
         }
         self.answer(index, &waiters, ok);
+    }
+
+    /// Seeds a batched device's clock with the period saved on its last run.
+    fn seed_clock(&mut self, index: usize) {
+        let Some(dir) = &self.state_dir else {
+            return;
+        };
+        let slot = &mut self.slots[index];
+        if let Some(period_ns) = state::load_clock_period(dir, slot.id()) {
+            slot.batch_clock.seed(period_ns);
+            slot.clock_saved = (period_ns, 0);
+        }
+    }
+
+    /// Saves a batched device's measured period: once it is measured over a
+    /// whole window, then when it moves by more than 100 ppm, at most every
+    /// ten minutes (the state directory is flash on a board).
+    // The service logs to stderr (the journal).
+    #[allow(clippy::print_stderr)]
+    fn save_clock(&mut self, index: usize, now_us: u64) {
+        const EVERY_US: u64 = 600_000_000;
+        let Some(dir) = &self.state_dir else {
+            return;
+        };
+        let slot = &mut self.slots[index];
+        let Some(period_ns) = slot.batch_clock.measured_ns() else {
+            return;
+        };
+        let (saved, at_us) = slot.clock_saved;
+        let moved = saved == 0 || period_ns.abs_diff(saved) * 10_000 > saved;
+        let due = at_us == 0 || now_us.saturating_sub(at_us) >= EVERY_US;
+        if !moved || !due {
+            return;
+        }
+        slot.clock_saved = (period_ns, now_us.max(1));
+        if let Err(e) = state::save_clock_period(dir, slot.id(), period_ns) {
+            eprintln!("lemnosd: {}: saving its sample period: {e}", slot.id());
+        }
     }
 
     /// Sends a batch's samples to the subscribers that are due for them. The

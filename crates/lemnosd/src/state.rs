@@ -122,6 +122,23 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// A batched device's measured sample period (`schedule::StreamClock`):
+/// `<dir>/clock/<device>.period_ns`.
+fn clock_path(dir: &Path, device: &str) -> PathBuf {
+    dir.join("clock").join(format!("{device}.period_ns"))
+}
+
+/// The sample period last measured for `device`, in ns, if one was saved.
+pub(crate) fn load_clock_period(dir: &Path, device: &str) -> Option<u64> {
+    let text = fs::read_to_string(clock_path(dir, device)).ok()?;
+    text.trim().parse::<u64>().ok().filter(|p| *p > 0)
+}
+
+/// Saves `device`'s measured sample period (ns).
+pub(crate) fn save_clock_period(dir: &Path, device: &str, period_ns: u64) -> io::Result<()> {
+    write_atomic(&clock_path(dir, device), &format!("{period_ns}\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +165,18 @@ mod tests {
         let dir = dir("garbled");
         write_atomic(&power_path(&dir, "usb-c-power"), "maybe").unwrap();
         assert_eq!(load_power(&dir, "usb-c-power"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sample_period_is_saved_and_loaded() {
+        let dir = std::env::temp_dir().join(format!("lemnosd-clock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(load_clock_period(&dir, "imu"), None);
+        save_clock_period(&dir, "imu", 2_475_123).unwrap();
+        assert_eq!(load_clock_period(&dir, "imu"), Some(2_475_123));
+        fs::write(dir.join("clock/imu.period_ns"), "nonsense").unwrap();
+        assert_eq!(load_clock_period(&dir, "imu"), None);
         let _ = fs::remove_dir_all(&dir);
     }
 }

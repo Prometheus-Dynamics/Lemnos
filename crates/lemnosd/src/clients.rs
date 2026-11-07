@@ -147,6 +147,15 @@ impl Client {
     /// Queues an answer that `encode` writes into a reused frame (the
     /// frame's bytes are replaced).
     pub fn send_answer(&mut self, encode: impl FnOnce(&mut Vec<u8>)) {
+        self.send_encoded(Class::Answer, encode);
+    }
+
+    /// Queues an event that `encode` writes into a reused frame.
+    pub fn send_event(&mut self, encode: impl FnOnce(&mut Vec<u8>)) {
+        self.send_encoded(Class::Event, encode);
+    }
+
+    fn send_encoded(&mut self, class: Class, encode: impl FnOnce(&mut Vec<u8>)) {
         let mut frame = self.spare.pop().unwrap_or_default();
         match Rc::get_mut(&mut frame) {
             Some(buf) => encode(buf),
@@ -156,7 +165,7 @@ impl Client {
                 frame = Rc::new(buf);
             }
         }
-        self.enqueue(Class::Answer, frame);
+        self.enqueue(class, frame);
     }
 
     /// Queues a reading whose frame (`lemnos_ipc::encode_reading`) the caller

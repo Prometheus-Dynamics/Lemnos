@@ -170,6 +170,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnosd`: a device's status change no longer allocates. The event was built with the device's id and reason copied. It is now encoded from the device into each client's reused frame (`lemnos_ipc::encode_status_event_into`). A degraded fan controller also allocated its reason on every tick; the reason is now replaced only when it changes. This was the one extra allocation `light_requests_allocate_nothing` saw once (201 for 200 looks): the fan controller's first change from degraded (no input sample yet) to available, landing in the measured window on a loaded host. `where_look_requests_allocate` (ignored) prints where the service allocates while look requests stream in.
+- `lemnosd`: a batched device's measured period is saved in the state directory (`clock/<device>.period_ns`), and the next start begins from it instead of the nominal period.
 - `lemnos-drivers-bmi088` and `lemnosd`: a batched BMI088 no longer drops samples, and its stamps follow the device's own clock.
   - The driver paired the two FIFOs one to one, so a read returned only as many samples as the scarcer FIFO held. The accelerometer and gyroscope dies run on separate oscillators: on board #1, 403.9 and 399.6 samples a second at a nominal 400 Hz. One accelerometer sample at a time was dropped, 0.4 % of them, with or without load.
   - Every accelerometer sample is now returned. When the gyroscope FIFO holds fewer, its oldest sample is repeated for the oldest accelerometer samples.

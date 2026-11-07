@@ -57,6 +57,25 @@ pub struct DeviceView<'a> {
     pub pixels: u16,
 }
 
+/// A status event (`Event::Status`) encoded into `frame`, reusing its
+/// capacity: the service sends a device's status changes this way, from the
+/// device as it is, with no event built.
+pub fn encode_status_event_into(
+    frame: &mut Vec<u8>,
+    device: &str,
+    status: DeviceStatus,
+    error: Option<ErrorKind>,
+    reason: &str,
+) {
+    let mut e = Encoder::reuse_new(frame, EVENT);
+    e.u8(0)
+        .str(device)
+        .u8(status.code())
+        .u8(error.map_or(255, |k| k.code()))
+        .str(reason);
+    *frame = e.finish();
+}
+
 /// A device list (`Message::Devices`) encoded into `frame`, reusing its
 /// capacity: the service answers `Request::List` this way, from its devices as
 /// they are. `devices` is walked twice (the reasons follow the list).

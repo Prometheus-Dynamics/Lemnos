@@ -163,6 +163,8 @@ pub(crate) struct Slot {
     pub read_us: u64,
     /// Stamps the buffered batches on the device's own clock.
     pub batch_clock: crate::schedule::StreamClock,
+    /// The period last saved for `batch_clock` (ns) and when (boot µs).
+    pub clock_saved: (u64, u64),
     pub fresh: bool,
     /// The sensor's next read deadline (boot clock, microseconds).
     pub next_read_us: u64,
@@ -242,6 +244,7 @@ impl Slot {
             values_mask: 0,
             read_us: 0,
             batch_clock: crate::schedule::StreamClock::default(),
+            clock_saved: (0, 0),
             fresh: false,
             next_read_us: 0,
             read_cost_us: 0,

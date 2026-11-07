@@ -344,14 +344,19 @@ for consumers: everything below is additive until they switch.
         process exactly.
       - Default 20: under a client's default of 50.
       Tested in the mock (`tests/absent_look.rs`); untested on board.
-- [ ] **Allocation tests under host load** (seen 2026-11-07 at load average about 114):
-      - `alloc_board`: 21 allocations with no clients, and under 300 readings in 3 s, in
-        every run at that load. 0 allocations and 423 readings when load fell to about 64,
-        for the build both before and after cef4f36.
-      - `light_requests_allocate_nothing`: 201 allocations for 200 looks once; 5 of 5 passes
-        alone.
-      The 21 look like one burst when the loop stalls (a 1.7 s pause was seen). Where they
-      come from is not found yet.
+- [x] **The extra allocation in the light test** (2026-11-07, asked by the coordinator to
+      find, not leave):
+      - **Found** with `where_look_requests_allocate`, which records backtraces: 4001 service
+        allocations over 4000 looks. 4000 are the look names' decoding. The other is
+        `status_event` from `fan_publish`, the fan controller's first change from degraded (no
+        input sample yet) to available. It copied the device id into an owned event, and on a
+        loaded host it landed in the measured window.
+      - **Fixed:** status events are encoded from the slot into reused frames. A degraded fan's
+        reason is replaced only when it changes (it allocated every tick while degraded). From
+        start, the only fan allocation left is the reason's first growth.
+      - **Still open:** `alloc_board`'s 21 allocations at load average about 114 were not
+        reproduced again. Starvation can make the fan's input stale and flip it, which is the
+        same path, but that is not verified.
 - [x] **Batched IMU: no lost samples, stamps on the device's clock** (2026-11-07, asked by the
       coordinator after the board check of the stamp fix):
       - **Cause.** The 0.4 % lost samples were single samples, with or without load: 79 of 20 078

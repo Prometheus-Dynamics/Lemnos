@@ -109,6 +109,7 @@ pub use gpu::{
 };
 pub use message::{
     DeviceView, encode_devices_into, encode_frame_into, encode_reading, encode_reading_into,
+    encode_status_event_into,
 };
 pub use raw::{I2cOp, LineTarget, PwmTarget, RawRequest, SpiXfer};
 

@@ -397,3 +397,74 @@ fn where_the_loops_allocate() {
         println!("{n:6}  {site}");
     }
 }
+
+#[test]
+#[ignore = "diagnosis: prints where the service allocates while look requests stream in"]
+fn where_look_requests_allocate() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // With FROM_START, recording starts before the first fan steps, so the
+    // fan controller's first status change (degraded until its input's first
+    // sample) is always in it.
+    if std::env::var_os("FROM_START").is_some() {
+        test_alloc::set_recording(true);
+    }
+    let running = Running::start("where-looks");
+    let (_client, _status) = running.clients();
+    let mut leds = ClientOptions::new(&running.socket, "app").leds().unwrap();
+    let rounds: usize = std::env::var("ROUNDS")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(20);
+    let n = 200;
+    let look = |leds: &mut lemnos_ipc::LedClient, i: usize| {
+        leds.look(if i.is_multiple_of(2) {
+            "system.writing"
+        } else {
+            "system.writing-unknown"
+        })
+        .unwrap();
+    };
+    for i in 0..n {
+        look(&mut leds, i);
+    }
+    test_alloc::set_recording(true);
+    for i in 0..rounds * n {
+        look(&mut leds, i);
+    }
+    leds.sync().unwrap();
+    test_alloc::set_recording(false);
+    let mut records = test_alloc::take_records();
+    let me = std::thread::current().name().unwrap_or("?").to_string();
+    records.retain(|r| !r.starts_with(&format!("thread {me}\n")));
+    let mut seen = std::collections::BTreeMap::<String, usize>::new();
+    for r in &records {
+        let site: String = r
+            .lines()
+            .filter(|l| l.contains("lemnos") && !l.contains("test_alloc"))
+            .take(8)
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        *seen
+            .entry(format!("{} :: {site}", r.lines().next().unwrap_or("")))
+            .or_default() += 1;
+    }
+    if let Some(site) = std::env::var_os("SHOW") {
+        let site = site.to_string_lossy();
+        for r in records.iter().filter(|r| r.contains(&*site)) {
+            println!("{r}");
+        }
+    }
+    println!(
+        "{} service allocations over {} looks",
+        records.len(),
+        rounds * n
+    );
+    let mut sites: Vec<_> = seen.into_iter().collect();
+    sites.sort_by_key(|s| s.1);
+    for (site, count) in &sites {
+        println!("{count:6}  {site}");
+    }
+}

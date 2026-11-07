@@ -128,6 +128,11 @@ pub(crate) struct StreamClock {
     blocks: [(u64, u64); BLOCKS],
     filled: usize,
     head: usize,
+    /// `period_ns` is a saved one, not yet checked against the nominal.
+    seeded: bool,
+    /// `period_ns` came from a saved one: kept until a whole window is
+    /// measured (a shorter one is noisier than the saved period).
+    from_saved: bool,
 }
 
 /// Seconds of reads the period is measured over. The oscillator drifts as
@@ -152,6 +157,13 @@ impl StreamClock {
     ) -> (u64, u64) {
         let nominal = nominal_us * 1000;
         let started = started_us * 1000;
+        if self.seeded {
+            self.seeded = false;
+            if nominal == 0 || self.period_ns.abs_diff(nominal) > nominal / 20 {
+                self.period_ns = 0;
+                self.from_saved = false;
+            }
+        }
         let period = if self.period_ns == 0 {
             nominal
         } else {
@@ -180,6 +192,29 @@ impl StreamClock {
         }
         self.last_ns = stamp;
         (stamp, period)
+    }
+
+    /// Starts from a period measured before (the device's last run, saved):
+    /// the first seconds are stamped with it rather than the nominal one,
+    /// until this run's measurement replaces it. Ignored past 5 % off the
+    /// nominal period, as a measurement is.
+    pub(crate) fn seed(&mut self, period_ns: u64) {
+        if self.last_ns == 0 && self.period_ns == 0 {
+            self.period_ns = period_ns;
+            self.seeded = true;
+            self.from_saved = true;
+        }
+    }
+
+    /// Whether the clock has not stamped a batch yet (the time to seed it).
+    pub(crate) fn unstarted(&self) -> bool {
+        self.last_ns == 0
+    }
+
+    /// The period measured over a whole window in this run (ns), the one
+    /// worth saving; `None` before.
+    pub(crate) fn measured_ns(&self) -> Option<u64> {
+        (self.filled == BLOCKS && self.period_ns != 0).then_some(self.period_ns)
     }
 
     fn restart(&mut self) {
@@ -228,6 +263,10 @@ impl StreamClock {
         }
         let period = (t1 - t0) / (n1 - n0);
         // Beyond 5 % off the nominal rate is not the oscillator: ignore it.
+        if self.from_saved && self.filled < BLOCKS {
+            return;
+        }
+        self.from_saved = false;
         if period.abs_diff(nominal) <= nominal / 20 {
             self.period_ns = period;
         }
@@ -396,5 +435,56 @@ mod tests {
             "{:?}",
             late.iter().map(off).max()
         );
+    }
+
+    /// Seeded with the period saved on the device's last run, a 1 % fast
+    /// device's stamps step by it from the first batch on, where the nominal
+    /// period is pulled back at every batch until it is measured. A seed past
+    /// 5 % off the nominal period is ignored.
+    #[test]
+    fn a_saved_period_stamps_the_first_seconds_evenly() {
+        let device_ns = 2_475_000u64;
+        let first_seconds = |seed: Option<u64>| {
+            let mut c = StreamClock::default();
+            if let Some(seed) = seed {
+                c.seed(seed);
+            }
+            let (mut taken, mut stamps) = (0u64, Vec::new());
+            for read in 0..150u64 {
+                let started = 1_000_000 + read * 20_000 + (read * 7_919) % 3_000;
+                let have = ((started - 1_000_000) * 1000) / device_ns;
+                let count = have - taken;
+                taken = have;
+                if count == 0 {
+                    continue;
+                }
+                let (last, period) = c.batch(started, started + 400, count, 2_500);
+                for k in (0..count).rev() {
+                    stamps.push(last - k * period);
+                }
+            }
+            let steps: Vec<u64> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
+            let off: Vec<u64> = steps.iter().map(|s| s.abs_diff(device_ns)).collect();
+            (
+                off.iter().filter(|o| **o > 1_000).count(),
+                off.into_iter().max().unwrap(),
+            )
+        };
+        let (nominal_off, nominal_worst) = first_seconds(None);
+        let (seeded_off, seeded_worst) = first_seconds(Some(device_ns));
+        // The first 3 s from the nominal period: 1203 steps more than 1 µs
+        // off, by up to 1.06 ms (the window pulling the stream back at every
+        // batch until the period is measured).
+        assert!(nominal_off > 1_000, "{nominal_off}");
+        assert!(nominal_worst > 1_000_000, "{nominal_worst}");
+        // From the saved period: one step off, where the first batch's place
+        // in its period (unknown: it starts in the middle) settles, by under
+        // half a period.
+        assert!(seeded_off <= 1, "{seeded_off}");
+        assert!(seeded_worst < device_ns / 2, "{seeded_worst}");
+        let mut c = StreamClock::default();
+        c.seed(2_000_000);
+        let (_, period) = c.batch(1_000_000, 1_000_400, 4, 2_500);
+        assert_eq!(period, 2_500_000);
     }
 }
