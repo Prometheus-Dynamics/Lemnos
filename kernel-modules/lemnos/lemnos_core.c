@@ -45,6 +45,16 @@ MODULE_PARM_DESC(owned,
 		 "Compatibles of the blocks Lemnos owns, comma-separated in pairs "
 		 "(vendor,name); the generic driver claims no other device");
 
+static bool test_map_unconfined;
+module_param(test_map_unconfined, bool, 0444);
+MODULE_PARM_DESC(test_map_unconfined,
+		 "Test only: allow mapping the registers of a block whose DMA is not confined");
+
+static bool test_irq_inject;
+module_param(test_irq_inject, bool, 0444);
+MODULE_PARM_DESC(test_irq_inject,
+		 "Test only: LEMNOS_IOC_TEST_IRQ sets an interrupt pending at its controller");
+
 /*
  * Blocks whose registers are never mapped to user space: their DMA reaches
  * memory the module did not map, so only the module may write their
@@ -520,6 +530,17 @@ static long lem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		return lem_irq_enable(l, index);
 	}
+	case LEMNOS_IOC_TEST_IRQ: {
+		u32 index;
+
+		if (!test_irq_inject)
+			return -EPERM;
+		if (get_user(index, (u32 __user *)uarg))
+			return -EFAULT;
+		if (index >= l->nirqs)
+			return -EINVAL;
+		return irq_set_irqchip_state(l->irq[index].irq, IRQCHIP_STATE_PENDING, true);
+	}
 	default:
 		return -ENOTTY;
 	}
@@ -603,6 +624,12 @@ static int lem_probe(struct platform_device *pdev)
 	       platform_get_resource(pdev, IORESOURCE_MEM, l->regions))
 		l->regions++;
 	l->mappable = device_iommu_mapped(dev) && !lem_unconfined(dev->of_node);
+	if (!l->mappable && test_map_unconfined) {
+		dev_warn(dev, "test_map_unconfined: registers mappable on a block whose DMA is not confined\n");
+		l->mappable = true;
+	}
+	if (test_irq_inject)
+		dev_warn(dev, "test_irq_inject: interrupts can be raised from user space\n");
 
 	/* Clocked while bound, as the stock driver keeps it. */
 	clk = devm_clk_get_optional_enabled(dev, NULL);

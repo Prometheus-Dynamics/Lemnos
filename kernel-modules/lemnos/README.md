@@ -53,9 +53,28 @@ Against the configured and built kernel tree of the image, with its toolchain:
 make KDIR=<the image's linux build tree> ARCH=arm64 CROSS_COMPILE=<its toolchain prefix>
 ```
 
-With `W=1` it builds with no warnings against the board's 7.2.9-v8-16k tree. `test/lemnos_check.c`
-exercises the generic core on a bound block (build it with the image's C compiler; it leaves the
-block's registers alone).
+With `W=1` it builds with no warnings against the board's 7.2.9-v8-16k tree.
+
+`make ... INSTALL_MOD_PATH=<root> modules_install` installs it stripped (`INSTALL_MOD_STRIP=1`
+is the Makefile's default).
+- Shipped module: 59 416 B. That tree has no debug information, so stripping saves only 704 B.
+- Of the file, 11 856 B is relocations and 6 464 B modversions CRCs, both needed to load it.
+- Loaded: text 30 329 B, data 1 868 B, bss 16 B.
+
+Two test programs (build them with the image's C compiler):
+- `test/lemnos_check.c` exercises the generic core on a bound block and leaves its registers
+  alone.
+- `test/lemnos_irq_check.c` exercises the two test-only paths. Load the module with
+  `test_map_unconfined=1 test_irq_inject=1` for it.
+
+## Test parameters
+
+Off by default and settable only at load. Each logs a warning when set.
+
+- `test_map_unconfined=1`: allows mapping the registers of a block whose DMA is not confined.
+- `test_irq_inject=1`: enables `LEMNOS_IOC_TEST_IRQ`, which sets an interrupt pending at its
+  controller (`irq_set_irqchip_state`). The forwarding path runs without the block raising
+  anything. Without the parameter the ioctl is refused with `EPERM`.
 
 ## Load and bind (generic)
 
@@ -84,7 +103,25 @@ echo $D > /sys/bus/platform/drivers/<stock driver>/bind
 - `ENOENT`, `EINVAL`, `EAGAIN` and `EBUSY` where expected.
 
 Before `owned` named the right compatible, the node (`raspberrypi,pispbe`) was refused with
-`ENODEV`. `pispbe` and the camera service were restored after each run.
+`ENODEV`. On a normal load `LEMNOS_IOC_TEST_IRQ` is refused with `EPERM`. `pispbe` and the camera
+service were restored after each run.
+
+**The test-only paths on the same node** (`test_map_unconfined=1 test_irq_inject=1`).
+`lemnos_irq_check` passed every check.
+- **Registers:** region 0 mapped read-only reads 0x02252701, the back end's version register.
+- **Interrupts**, injected at the GIC (GICv2 SPI 104, level):
+  - an enabled one reaches `read()`;
+  - one injected while masked is not delivered;
+  - on enable it is not resent either: genirq resends edge interrupts only, since a real level
+    device still holds its line and fires again;
+  - the next one after enable arrives.
+- **Latency**, 2000 rounds under `SCHED_FIFO` 10: 2000 of 2000 read, 0 lost.
+
+| Run | Injection to handler p50 / p99 / max | Injection to user space p50 / p99 / max |
+| --- | --- | --- |
+| 1 | 0.7 / 0.8 / 4.6 µs | 1.5 / 3.3 / 9.0 µs |
+| 2 | 0.6 / 0.8 / 14.8 µs | 1.5 / 3.4 / 16.9 µs |
+| 3 | 0.6 / 0.8 / 6.0 µs | 1.4 / 3.4 / 8.0 µs |
 
 **The personalities against the modules they replace.** CSI-2 receiver to PiSP back end
 (`csi2_module_check --be --bars`): OV9782 at 1280x800 RAW10, 120 fps, 9000 frames per run. The

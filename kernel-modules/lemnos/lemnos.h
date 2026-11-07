@@ -75,5 +75,7 @@ struct lemnos_irq_event {
 #define LEMNOS_IOC_IMPORT     _IOWR('L', 0xd3, struct lemnos_import)
 #define LEMNOS_IOC_RELEASE    _IOW('L', 0xd4, __u32)
 #define LEMNOS_IOC_IRQ_ENABLE _IOW('L', 0xd5, __u32)
+/* Test only, with the module's test_irq_inject: sets interrupt n pending at its controller. */
+#define LEMNOS_IOC_TEST_IRQ   _IOW('L', 0xdf, __u32)
 
 #endif

@@ -286,8 +286,15 @@ for consumers: everything below is additive until they switch.
       - Size: `lemnos.ko` is 58 264 B unstripped, against 50 432 B for the two modules it
         replaces (the generic core).
 
-      Untested on board: register mapping (no confined block here), and interrupts firing
-      through the generic core (the idle back end raised none).
+      Both paths left untested were then proven on board #1 (2026-11-06) with test-only load
+      parameters:
+      - registers mapped read-only (the back end's version, 0x02252701);
+      - interrupts injected at the GIC through the whole forwarding path: 2000 of 2000, user
+        space woken p99 3.3-3.4 µs after the injection.
+
+      A level interrupt that fires while masked is not resent on enable. That is genirq's rule,
+      since the device's line is still held. The installed module is stripped by default:
+      59 416 B shipped (the tree has no debug information).
       The plan as written: Item 5's
       per-block modules become one:
       - A core that claims any platform device bound through `driver_override` and gives it

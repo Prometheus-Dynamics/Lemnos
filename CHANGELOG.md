@@ -8,6 +8,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos.ko` test parameters `test_map_unconfined` and `test_irq_inject`, off by default and settable only at load.
+  - `test_irq_inject` enables `LEMNOS_IOC_TEST_IRQ`, which sets an interrupt pending at its controller. Without it the ioctl gets `EPERM`.
+  - Board #1, with `test/lemnos_irq_check`: the back end's version register read through the mapping, and 2000 of 2000 injected interrupts delivered, user space woken p99 3.3-3.4 µs after the injection.
+  - `modules_install` strips by default: the shipped module is 59 416 B.
 - `kernel-modules/lemnos`, `lemnos.ko`: one Lemnos kernel module in place of `lemnos-pisp-be` and `lemnos-rp1-csi2`.
   - **The generic core** (driver `lemnos`, `/dev/lemnos-<device>`, uAPI `lemnos.h`) claims a block Lemnos owns through `driver_override`. Only the compatibles in its `owned` parameter are claimed.
     - It gives register regions, mapped only where the block's DMA is confined and only for `CAP_SYS_RAWIO`.

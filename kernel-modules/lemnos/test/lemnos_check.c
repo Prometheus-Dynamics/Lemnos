@@ -127,6 +127,9 @@ int main(int argc, char **argv)
 	uint32_t past_irq = info.irqs;
 	CHECK(ioctl(fd, LEMNOS_IOC_IRQ_ENABLE, &past_irq) < 0 && errno == EINVAL,
 	      "enable irq %u: EINVAL", past_irq);
+	uint32_t irq0 = 0;
+	CHECK(ioctl(fd, LEMNOS_IOC_TEST_IRQ, &irq0) < 0 && errno == EPERM,
+	      "test interrupt without test_irq_inject: EPERM");
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 	CHECK(read(fd, &ev, sizeof(ev)) < 0 && errno == EAGAIN, "read with none pending: EAGAIN");
 
