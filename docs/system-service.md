@@ -678,6 +678,31 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
     - 71 964 of 71 999 steps within 1 µs of the local median;
     - after the first 10 s, 4 steps off by 52-81 µs;
     - in the first 8 s, while the period is measured, steps off by up to 1.7 ms.
+  - **The gyroscope is resampled at the accelerometer's sample times.** Each row of a batch is
+    one accelerometer sample. The gyroscope's value in it is interpolated between the two
+    gyroscope samples around that sample's time, and extrapolated by at most one period past
+    the newest. The driver places each die's samples in time itself (`align.rs` in the BMI088
+    driver), from the host clock `lemnosd` hands it (`Sensor::set_clock`):
+    - It times each die's FIFO count read. The die's newest sample came before the read ended,
+      so every read's end bounds a sample from above, tightly when the read landed just after it.
+    - A die's clock is the lower convex hull of those bounds over the last 6 s. The hull's edge
+      across the middle of the window gives the line of samples, and its slope the die's period.
+    - Lower bounds are not used. On board #1 both counts sometimes show a sample late (the
+      accelerometer's by up to about 0.3 ms, the gyroscope's by up to 1.6 ms), so a lower bound
+      would be wrong. An upper bound never was.
+    - Without a clock (an MCU host that does not give one), the FIFOs are paired one to one as
+      before. The driver's `align` feature (default, and on in `lemnos-board`) carries the
+      clocks; MCU images built without it are unchanged in size.
+  - **The two dies' samples, on board #1** (400 Hz FIFO, 60 s runs, against an offline fit of
+    each die's hull over 10 s windows):
+    - one-to-one pairing put the paired gyroscope sample 1.8 ms from its accelerometer sample at
+      p50, 7.4 ms at p99 (9.5 ms at most), and repeated a gyroscope value in 1.6 % of rows;
+    - resampled, the gyroscope's time is off by 38 µs at p50, 142 µs at p90 and 231 µs at p99
+      with all four cores busy, and 72, 259 and 436 µs idle. No value is repeated (except
+      before the first gyroscope sample, which is held).
+    - These are against a fit from the same count reads. Fits over 8 s and 12 s windows
+      themselves differ by about 2-5 µs at p50 and about 40-120 µs at p99, so the p99 figures
+      are only good to about 0.1 ms.
   - **Off by default:** at the installed board's rates (accelerometer 100 Hz, gyroscope
     2000 Hz) a FIFO drain reads every gyroscope frame, which costs far more bus time than
     polling 100 Hz. Turn it on only with output rates that match what is subscribed.

@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `Sensor::set_clock(now_ns)` (`lemnos-device`): the host's nanosecond clock, given once when a device is opened, for a driver that times its own bus transactions. `lemnosd` gives `lemnos_linux_sys::time::boottime_ns`, which is new.
 - Board key `absent_look` (with `absent_priority`, default 20) on a light: the look shown while the main writer is away. `lemnosd` holds it as its own application intent at that priority, so a writer above it shows over it and the ring falls back to it when the writer goes. It replaces an OS image process that held a status look at priority 20 for this.
 - `lemnos-drivers-pisp`: `BeModule::wait_done(out, timeout)` waits for finished back end jobs into the caller's slice, without allocating, like the receiver's `wait_done`. `wait` now calls it. The chain example uses it: on board #1, 9000 of 9000 frames at 120 fps, back end wake-up p99 957 µs.
 - `lemnos.ko` test parameters `test_map_unconfined` and `test_irq_inject`, off by default and settable only at load.
@@ -170,6 +171,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- BMI088 FIFO batches resample the gyroscope at each accelerometer sample's time instead of pairing the two FIFOs one to one. Each die's sample times come from its timed FIFO counts (the lower hull of the counts' upper bounds over 6 s). On board #1 the gyroscope's time error went from 1.8 ms (p50) and 7.4 ms (p99) to 38-72 µs (p50) and 231-436 µs (p99), and no gyroscope value is repeated (1.6 % of rows before). Without a host clock the pairing is unchanged. The clocks are behind the driver's `align` feature (default; on in `lemnos-board`), so MCU images without it keep their size. `GyroRate::period_us` is new.
 - `lemnosd`: a device's status change no longer allocates. The event was built with the device's id and reason copied. It is now encoded from the device into each client's reused frame (`lemnos_ipc::encode_status_event_into`). A degraded fan controller also allocated its reason on every tick; the reason is now replaced only when it changes. This was the one extra allocation `light_requests_allocate_nothing` saw once (201 for 200 looks): the fan controller's first change from degraded (no input sample yet) to available, landing in the measured window on a loaded host. `where_look_requests_allocate` (ignored) prints where the service allocates while look requests stream in.
 - `lemnosd`: a batched device's measured period is saved in the state directory (`clock/<device>.period_ns`), and the next start begins from it instead of the nominal period.
 - `lemnos-drivers-bmi088` and `lemnosd`: a batched BMI088 no longer drops samples, and its stamps follow the device's own clock.

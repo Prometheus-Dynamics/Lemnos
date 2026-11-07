@@ -14,6 +14,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "align")]
+mod align;
 pub mod asynch;
 #[cfg(feature = "float")]
 mod calibration;
@@ -214,6 +216,17 @@ impl GyroRate {
             Self::Hz100Bw12 => 0x05,
             Self::Hz200Bw64 => 0x06,
             Self::Hz100Bw32 => 0x07,
+        }
+    }
+
+    /// The time between two samples, in microseconds.
+    pub fn period_us(self) -> u32 {
+        match self {
+            Self::Hz2000Bw532 | Self::Hz2000Bw230 => 500,
+            Self::Hz1000Bw116 => 1_000,
+            Self::Hz400Bw47 => 2_500,
+            Self::Hz200Bw23 | Self::Hz200Bw64 => 5_000,
+            Self::Hz100Bw12 | Self::Hz100Bw32 => 10_000,
         }
     }
 }
@@ -454,6 +467,13 @@ pub struct Bmi088<I2C> {
     /// The calibration and its estimators (feature `float`).
     #[cfg(feature = "float")]
     cal: calibration::Calibration,
+    /// The host's nanosecond clock (`Sensor::set_clock`), which times the
+    /// FIFO counts of a batch read (feature `align`).
+    #[cfg(feature = "align")]
+    now: Option<fn() -> u64>,
+    /// Where each die's samples fall in time, from the timed FIFO counts.
+    #[cfg(feature = "align")]
+    align: align::Align,
 }
 
 impl<I2C: I2c> Bmi088<I2C> {
@@ -475,6 +495,10 @@ impl<I2C: I2c> Bmi088<I2C> {
             channels: 0x0fff,
             #[cfg(feature = "float")]
             cal: calibration::Calibration::new(),
+            #[cfg(feature = "align")]
+            now: None,
+            #[cfg(feature = "align")]
+            align: align::Align::new(),
         }
     }
 
@@ -652,12 +676,27 @@ impl<I2C: I2c> Bmi088<I2C> {
         &mut self,
         out: &mut [[i16; 3]],
     ) -> Result<(usize, u32), Error<I2C::Error>> {
-        let cap = out.len().min(MAX_SAMPLES);
+        let bytes = self.accel_fifo_bytes()?;
+        self.read_accel_frames(bytes, out)
+    }
+
+    /// The accelerometer FIFO's fill, in bytes.
+    pub(crate) fn accel_fifo_bytes(&mut self) -> Result<usize, Error<I2C::Error>> {
         let mut length = [0u8; 2];
         self.accel()
             .read_burst(fifo::ACC_FIFO_LENGTH_0, &mut length)?;
         // The byte count is 14 bits; an empty FIFO reads 0x8000.
-        let bytes = usize::from(length[0]) | (usize::from(length[1] & 0x3f) << 8);
+        Ok(usize::from(length[0]) | (usize::from(length[1] & 0x3f) << 8))
+    }
+
+    /// Reads `bytes` of the accelerometer FIFO (its fill) into `out`: the
+    /// samples and the frames skipped.
+    pub(crate) fn read_accel_frames(
+        &mut self,
+        bytes: usize,
+        out: &mut [[i16; 3]],
+    ) -> Result<(usize, u32), Error<I2C::Error>> {
+        let cap = out.len().min(MAX_SAMPLES);
         // Never more frames than `out` takes, so a frame is not read and lost.
         let n = bytes.min(cap * fifo::ACC_FRAME_LEN);
         if n == 0 {
@@ -673,9 +712,24 @@ impl<I2C: I2c> Bmi088<I2C> {
     /// Reads the gyroscope FIFO into `out`, oldest first, at most
     /// [`MAX_SAMPLES`] (and `out.len()`); returns how many were read.
     pub fn read_gyro_fifo(&mut self, out: &mut [[i16; 3]]) -> Result<usize, Error<I2C::Error>> {
-        let cap = out.len().min(MAX_SAMPLES);
-        let status = self.gyro().read8(fifo::GYR_FIFO_STATUS)?;
-        let frames = usize::from(status & 0x7f).min(cap);
+        let frames = self.gyro_fifo_frames()?;
+        self.read_gyro_frames(frames, out)
+    }
+
+    /// The gyroscope FIFO's fill, in frames.
+    pub(crate) fn gyro_fifo_frames(&mut self) -> Result<usize, Error<I2C::Error>> {
+        Ok(usize::from(
+            self.gyro().read8(fifo::GYR_FIFO_STATUS)? & 0x7f,
+        ))
+    }
+
+    /// Reads up to `frames` gyroscope frames into `out`, oldest first.
+    pub(crate) fn read_gyro_frames(
+        &mut self,
+        frames: usize,
+        out: &mut [[i16; 3]],
+    ) -> Result<usize, Error<I2C::Error>> {
+        let frames = frames.min(out.len().min(MAX_SAMPLES));
         if frames == 0 {
             return Ok(0);
         }

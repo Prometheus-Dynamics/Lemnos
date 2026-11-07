@@ -7,7 +7,7 @@ use lemnos_device::{
 };
 use lemnos_drivers_linux::{FanRestore, RestoreKind};
 use lemnos_hal::{ErrorKind, HalError};
-use lemnos_linux_sys::time::boottime_us;
+use lemnos_linux_sys::time::{boottime_ns, boottime_us};
 
 use crate::schedule::advance;
 
@@ -391,7 +391,8 @@ impl Slot {
             self.reason = why;
         }
         match result {
-            Ok(device) => {
+            Ok(mut device) => {
+                device.set_clock(boottime_ns);
                 self.info = Some(device.info());
                 self.placement = Placement::of(&device);
                 self.batched = device.sample_period_us().is_some();

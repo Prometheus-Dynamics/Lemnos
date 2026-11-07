@@ -344,6 +344,23 @@ for consumers: everything below is additive until they switch.
         process exactly.
       - Default 20: under a client's default of 50.
       Tested in the mock (`tests/absent_look.rs`); untested on board.
+- [ ] **Gyroscope aligned to the accelerometer** (2026-11-07, asked by the coordinator: no
+      duplicates, misalignment well under 0.1 ms, measured before and after):
+      - **Done:** the gyroscope is resampled at the accelerometer's sample times, with each
+        die's clock taken from its timed FIFO counts (`align.rs`). On board #1, against an
+        offline fit: before, p50 1.8 ms and p99 7.4 ms, with 1.6 % of gyroscope values
+        repeated. After, p50 38-72 µs and p99 231-436 µs, with no repeats.
+      - **Not met: under 0.1 ms.** Count timing alone gives no better. A read bounds a sample
+        only when it lands just after one, and the counts sometimes show a sample late (so only
+        upper bounds hold). The offline fit itself moves by about 0.1 ms at p99 between window
+        lengths.
+      - **Ruled by the coordinator (2026-11-07):** p99 of about 0.1-0.2 ms is the accepted floor
+        on this hardware, and the gyroscope stays hull-resampled as is.
+      - **Next:** the accelerometer's side from its sensor time. Logged on board #1:
+        - its samples sit on a 64-tick grid of its 24-bit counter (39.06 µs a tick), and the
+          counter runs 1.1 % fast with the die;
+        - a 4 s fit of host time against it is good to 15 µs p50 and 46-54 µs p99 per read;
+        - it costs a 3-byte read per batch.
 - [x] **The extra allocation in the light test** (2026-11-07, asked by the coordinator to
       find, not leave):
       - **Found** with `where_look_requests_allocate`, which records backtraces: 4001 service

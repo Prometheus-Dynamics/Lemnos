@@ -59,6 +59,9 @@ pub trait DynSensor: DynDevice {
     /// See [`Sensor::set_clock_us`].
     fn set_clock_us(&mut self, t_us: u64);
 
+    /// See [`Sensor::set_clock`].
+    fn set_clock(&mut self, now_ns: fn() -> u64);
+
     /// See [`Sensor::calibration_status`].
     fn calibration_status(&self) -> Option<CalibrationStatus>;
 
@@ -156,6 +159,10 @@ impl<T: Sensor + ?Sized> DynSensor for T {
 
     fn set_clock_us(&mut self, t_us: u64) {
         Sensor::set_clock_us(self, t_us);
+    }
+
+    fn set_clock(&mut self, now_ns: fn() -> u64) {
+        Sensor::set_clock(self, now_ns);
     }
 
     fn calibration_status(&self) -> Option<CalibrationStatus> {
@@ -300,6 +307,15 @@ macro_rules! erased_ops {
             match self {
                 Self::Sensor(d) => d.set_clock_us(t_us),
                 Self::Both(d) => DynSensor::set_clock_us(&mut **d, t_us),
+                Self::Control(_) | Self::Light(_) => {}
+            }
+        }
+
+        /// See [`Sensor::set_clock`]; a no-op for a control or light.
+        pub fn set_clock(&mut self, now_ns: fn() -> u64) {
+            match self {
+                Self::Sensor(d) => d.set_clock(now_ns),
+                Self::Both(d) => DynSensor::set_clock(&mut **d, now_ns),
                 Self::Control(_) | Self::Light(_) => {}
             }
         }

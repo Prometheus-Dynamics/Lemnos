@@ -20,6 +20,9 @@ pub(crate) const GYR_FIFO_DATA: u16 = 0x3f;
 /// the accelerometer's 1024 bytes (146 frames), so a read of this many covers
 /// 120 ms at 400 Hz.
 pub const MAX_SAMPLES: usize = 48;
+/// The gyroscope FIFO's capacity, frames: a fill this high has overflowed.
+#[cfg(feature = "align")]
+pub(crate) const GYR_FIFO_FRAMES: usize = 100;
 pub(crate) const ACC_FRAME_LEN: usize = 7;
 pub(crate) const GYR_FRAME_LEN: usize = 6;
 

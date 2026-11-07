@@ -1,5 +1,7 @@
 //! The BMI088 in the Lemnos device model (`lemnos-device`).
 
+#[cfg(feature = "align")]
+use crate::align;
 use crate::{Bmi088, Error, MAX_SAMPLES, asynch};
 use embedded_hal::delay::DelayNs;
 use lemnos_device::kernel::{KernelBinding, KernelChannel, KernelPart, Subsystem};
@@ -178,21 +180,34 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
             .ok_or(DeviceError::Driver(Error::NotInitialized))?;
         let cap = out.len().min(MAX_SAMPLES);
         let mut accel = [[0i16; 3]; MAX_SAMPLES];
-        let (na, _) = self
-            .read_accel_fifo(&mut accel[..cap])
+        let mut gyro = [[0i16; 3]; MAX_SAMPLES];
+        let clock = self.clock();
+        let time = || clock.map_or(0, |now| now());
+        // Each die's count, timed, then its frames (the gyroscope's whole
+        // FIFO, so the newest frames are the ones read).
+        let t0 = time();
+        let bytes = self.accel_fifo_bytes().map_err(DeviceError::Driver)?;
+        let t1 = time();
+        let (na, skipped) = self
+            .read_accel_frames(bytes, &mut accel[..cap])
             .map_err(DeviceError::Driver)?;
         if na == 0 {
             return Ok(0);
         }
-        let mut gyro = [[0i16; 3]; MAX_SAMPLES];
-        // The whole gyroscope FIFO, so the newest frames are the ones paired.
+        let t2 = time();
+        let status = self.gyro_fifo_frames().map_err(DeviceError::Driver)?;
+        let t3 = time();
         let mut ng = self
-            .read_gyro_fifo(&mut gyro)
+            .read_gyro_frames(status, &mut gyro)
             .map_err(DeviceError::Driver)?;
+        let aligned = self.track(&config, bytes, na, skipped, status, ng, [t0, t1, t2, t3]);
         if ng == 0 {
             // The gyroscope FIFO is empty: hold its latest value for these.
             gyro[0] = self.read_gyro_raw().map_err(DeviceError::Driver)?;
             ng = 1;
+        }
+        if aligned {
+            ng = self.resample(&mut gyro, ng, na);
         }
         let n = na;
         #[cfg(feature = "float")]
@@ -225,6 +240,11 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
     /// The channels (bit i: channel i of [`INFO`]). The FIFO batch reads
     /// return every channel (both FIFOs hold both dies); the selection applies
     /// to plain reads.
+    #[cfg(feature = "align")]
+    fn set_clock(&mut self, now_ns: fn() -> u64) {
+        self.now = Some(now_ns);
+    }
+
     fn set_clock_us(&mut self, t_us: u64) {
         #[cfg(feature = "float")]
         self.cal.set_read_us(t_us);
@@ -297,5 +317,87 @@ impl<I2C: embedded_hal_async::i2c::I2c> lemnos_device::asynch::Sensor for asynch
             *slot = NO_VALUE;
         }
         Ok(())
+    }
+}
+
+impl<I2C: embedded_hal::i2c::I2c> Bmi088<I2C> {
+    /// Feeds each die's clock with its timed count (`t`: before and after the
+    /// accelerometer's count, then the gyroscope's) and the frames read.
+    /// Returns whether the batch can be resampled: both clocks running and
+    /// gyroscope frames read. An overflowed FIFO restarts both clocks.
+    #[cfg(feature = "align")]
+    #[allow(clippy::too_many_arguments)]
+    fn track(
+        &mut self,
+        config: &crate::Config,
+        accel_bytes: usize,
+        accel_read: usize,
+        skipped: u32,
+        gyro_fill: usize,
+        gyro_read: usize,
+        t: [u64; 4],
+    ) -> bool {
+        if self.now.is_none() {
+            return false;
+        }
+        if skipped > 0 || gyro_fill >= crate::fifo::GYR_FIFO_FRAMES {
+            self.align.reset();
+            return false;
+        }
+        let accel_ns = config.accel_rate.period_us() * 1000;
+        let gyro_ns = config.gyro_rate.period_us() * 1000;
+        let a = &mut self.align;
+        a.accel
+            .count(accel_bytes / crate::fifo::ACC_FRAME_LEN, t[1], accel_ns);
+        a.accel.took(accel_read);
+        a.gyro.count(gyro_fill, t[3], gyro_ns);
+        a.gyro.took(gyro_read);
+        gyro_read > 0
+    }
+    /// Without the `align` feature nothing is tracked: the FIFOs are paired.
+    #[cfg(not(feature = "align"))]
+    #[allow(clippy::too_many_arguments, clippy::unused_self)]
+    fn track(
+        &mut self,
+        _: &crate::Config,
+        _: usize,
+        _: usize,
+        _: u32,
+        _: usize,
+        _: usize,
+        _: [u64; 4],
+    ) -> bool {
+        false
+    }
+
+    /// The host's clock, if it gave one (never without `align`).
+    fn clock(&self) -> Option<fn() -> u64> {
+        #[cfg(feature = "align")]
+        return self.now;
+        #[cfg(not(feature = "align"))]
+        None
+    }
+
+    /// Resamples the gyroscope (`gyro[..ng]`, just read) at each of the `na`
+    /// accelerometer samples' times into `gyro[..na]`; returns `na`.
+    #[cfg(feature = "align")]
+    fn resample(&mut self, gyro: &mut [[i16; 3]; MAX_SAMPLES], ng: usize, na: usize) -> usize {
+        let first_a = self.align.accel.first_unread() - na as u64;
+        let first_g = self.align.gyro.first_unread() - ng as u64;
+        let before = self.align.last_gyro;
+        let mut resampled = [[0i16; 3]; MAX_SAMPLES];
+        for (i, slot) in resampled[..na].iter_mut().enumerate() {
+            let t = self.align.accel.time_of(first_a + i as u64);
+            *slot = align::gyro_at(t, &self.align.gyro, first_g, &gyro[..ng], before);
+        }
+        self.align.last_gyro = Some((first_g + ng as u64 - 1, gyro[ng - 1]));
+        gyro[..na].copy_from_slice(&resampled[..na]);
+        na
+    }
+
+    #[cfg(not(feature = "align"))]
+    #[allow(clippy::unused_self)]
+    fn resample(&mut self, _: &mut [[i16; 3]; MAX_SAMPLES], ng: usize, _: usize) -> usize {
+        ng
     }
 }

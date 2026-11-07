@@ -16,7 +16,7 @@ categories = ["embedded", "hardware-support", "no-std"]
 workspace = true
 
 [features]
-default = ["float"]
+default = ["float", "align"]
 # SI-unit `f32` readings. Off: integer readings only (`read_fixed`), which keeps
 # software float routines out of images for MCUs without an FPU.
 float = ["lemnos-device/float", "dep:lemnos-fusion"]
@@ -24,6 +24,10 @@ float = ["lemnos-device/float", "dep:lemnos-fusion"]
 # shows why a device faulted. Each step gets its own tag, which costs flash,
 # so MCU images leave it off.
 reasons = []
+# FIFO batches resample the gyroscope at the accelerometer's sample times when
+# the host gives a clock (`Sensor::set_clock`); see `align.rs`. Off: the FIFOs
+# are paired one to one, as on an MCU host that gives no clock.
+align = []
 
 [dependencies]
 embedded-hal.workspace = true

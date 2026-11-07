@@ -18,6 +18,14 @@ pub fn boottime_us() -> u64 {
         .unwrap_or(0)
 }
 
+/// Nanoseconds on `CLOCK_BOOTTIME`, the clock of [`boottime_us`] (same
+/// fallbacks).
+pub fn boottime_ns() -> u64 {
+    clock_ns(libc::CLOCK_BOOTTIME)
+        .or_else(|| clock_ns(libc::CLOCK_MONOTONIC))
+        .unwrap_or(0)
+}
+
 /// Converts a `CLOCK_MONOTONIC` instant (nanoseconds, as the GPIO uAPI v2
 /// stamps its edge events) to microseconds on `CLOCK_BOOTTIME`, the clock of
 /// [`boottime_us`]. Both clocks are read back to back here, so the offset

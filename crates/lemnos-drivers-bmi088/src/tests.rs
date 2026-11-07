@@ -404,6 +404,56 @@ fn read_batch_keeps_every_accel_sample_when_the_gyro_holds_fewer() {
     assert_eq!(row(2), expect([300, 0, 0], [2, 2, 2]));
 }
 
+/// A clock for one test: each reading is 0.1 ms after the last.
+#[cfg(feature = "align")]
+static FAKE_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "align")]
+fn fake_now() -> u64 {
+    FAKE_NS.fetch_add(100_000, core::sync::atomic::Ordering::Relaxed) + 100_000
+}
+
+#[cfg(feature = "align")]
+#[test]
+fn read_batch_with_a_clock_resamples_the_gyro_at_the_accel_times() {
+    let mut accel = [0u8; 21];
+    for (k, x) in [100i16, 200, 300].into_iter().enumerate() {
+        accel[k * 7] = 0x84;
+        accel[k * 7 + 1..k * 7 + 7].copy_from_slice(&axes([x, 0, 0]));
+    }
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, 0x24, &(accel.len() as u16).to_le_bytes())
+        .with_registers(ACCEL_ADDRESS, 0x26, &accel)
+        .with_registers(GYRO_ADDRESS, 0x0e, &[2])
+        .with_registers(
+            GYRO_ADDRESS,
+            0x3f,
+            &[axes([1000, 0, 0]), axes([2000, 0, 0])].concat(),
+        );
+    let config = Config {
+        accel_rate: AccelRate::Hz400,
+        gyro_rate: GyroRate::Hz400Bw47,
+        ..Config::default()
+    };
+    let mut bmi = Bmi088::new(i2c).with_fifo();
+    bmi.init(&mut MockDelay::new(), config).unwrap();
+    lemnos_device::Sensor::set_clock(&mut bmi, fake_now);
+    let mut out = [[0i32; lemnos_device::MAX_CHANNELS]; MAX_SAMPLES];
+    let n = lemnos_device::Sensor::read_batch(&mut bmi, &mut out).unwrap();
+    assert_eq!(n, 3);
+    // The clock reads 0.1, 0.2 ms around the accelerometer's count and 0.3,
+    // 0.4 ms around the gyroscope's: their newest samples are taken by 0.2
+    // and 0.4 ms, 2.5 ms apart. The accelerometer's samples are at -4.8,
+    // -2.3 and 0.2 ms, the gyroscope's at -2.1 and 0.4 ms.
+    let gyro_x = |i: usize| out[i][3];
+    let rate = |counts: i16| config.channels([0; 3], [counts, 0, 0])[3];
+    // Before the gyroscope's oldest sample: held.
+    assert_eq!(gyro_x(0), rate(1000));
+    assert_eq!(gyro_x(1), rate(1000));
+    // 2.3 ms of the 2.5 ms from the oldest to the newest.
+    assert_eq!(gyro_x(2), rate(1920));
+}
+
 #[test]
 fn read_batch_with_an_empty_fifo_is_no_samples() {
     let mut bmi = Bmi088::new(imu()).with_fifo();

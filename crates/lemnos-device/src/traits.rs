@@ -122,6 +122,15 @@ pub trait Sensor: Device {
         let _ = t_us;
     }
 
+    /// A nanosecond clock on the same time base as
+    /// [`set_clock_us`](Self::set_clock_us), for a sensor that times its own
+    /// bus transactions (the IMU times its two FIFO counts, to place each
+    /// die's samples). Given once, when the host opens the device. The default
+    /// ignores it.
+    fn set_clock(&mut self, now_ns: fn() -> u64) {
+        let _ = now_ns;
+    }
+
     /// The calibration this sensor reports (see [`crate::calibration`]), or
     /// `None` for a sensor without one.
     fn calibration_status(&self) -> Option<CalibrationStatus> {
