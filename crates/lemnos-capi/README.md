@@ -14,10 +14,42 @@ keeps that list, the header and the crate's exports in step. On Linux the shared
 SONAME is `liblemnos_capi.so.<LEMNOS_ABI_MAJOR>` (now `liblemnos_capi.so.1`), so install it
 under that name, with `liblemnos_capi.so` as the link for building against it.
 
-The surface's process-wide state is its client handle table. A process should contain the
-surface once: either statically (this crate as an rlib, or `liblemnos_capi.a`) or by loading
-`liblemnos_capi.so`, not both, or handles from one copy are unknown to the other. The crates
-under it (`lemnos-ipc`, `lemnos-abi`) hold no process-wide state.
+The surface's process-wide state is its client handle table. A process contains the surface
+once: either statically (this crate as an rlib, or `liblemnos_capi.a`) or by loading
+`liblemnos_capi.so`, never both. Otherwise a handle from one copy could name another client in
+the other.
+
+This is enforced on Linux. The first copy to open a client claims the process with an abstract
+unix socket named for its pid namespace and pid. Any other copy's `lemnos_client_open` then
+returns `-EBUSY` with a message, before it connects. The socket is close-on-exec, and the kernel
+frees it when the process ends. Without `/proc` the check is skipped.
+
+The crates under the surface (`lemnos-ipc`, `lemnos-abi`) hold no process-wide state.
+
+## Installing both forms
+
+`scripts/install-capi.sh <prefix> [--target <triple>]` builds the crate in release and installs:
+- the headers: `include/lemnos.h` and `include/lemnos/abi.h`;
+- the shared form: `lib/liblemnos_capi.so.1`, with `liblemnos_capi.so` linking to it;
+- the static form: `lib/liblemnos_capi.a`;
+- two pkg-config files: `lemnos-capi` (shared) and `lemnos-capi-static`.
+
+Build a program with one of them, never both:
+
+```sh
+cc app.c $(pkg-config --cflags --libs lemnos-capi)          # shared
+cc app.c $(pkg-config --cflags --libs lemnos-capi-static)   # static
+```
+
+`lemnos-capi-static` adds the system libraries rustc lists for the archive, and
+`-Wl,--gc-sections`. On x86_64 the stripped C test client is 443 952 B static and 10 968 B
+shared, plus the library's 458 472 B stripped. Without `--gc-sections` the static client is
+1 242 944 B.
+
+The surface is versioned by the SONAME's major (`liblemnos_capi.so.1`) and by the
+`lemnos_check_version` handshake (major, minor and layout hash). There is no symbol version
+node: rustc gives a `cdylib` its own anonymous version script, which overrides a named one, so
+every symbol would stay at `Base`.
 
 ## The `shared` feature
 

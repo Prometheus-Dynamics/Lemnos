@@ -330,3 +330,36 @@ fn the_abi_header_is_lemnos_abis() {
         "copy crates/lemnos-abi/include/lemnos/abi.h to include/lemnos/"
     );
 }
+
+/// With `shared`, a test process holds two copies of the surface: the library
+/// (through `Client`) and this crate's own `surface`, called directly. The
+/// library opens first and claims the process, so the second copy's open is
+/// refused with `-EBUSY` and a message, before it connects anywhere.
+#[cfg(feature = "shared")]
+#[test]
+fn a_second_copy_of_the_surface_is_refused() {
+    let service = service();
+    let _first = Client::open(&socket(&service), "capi", 0).unwrap();
+    let socket = std::ffi::CString::new(socket(&service)).unwrap();
+    let mut text = String::new();
+    extern "C" fn collect(context: *mut core::ffi::c_void, text: *const u8, len: usize) {
+        // SAFETY: `text` holds `len` bytes during the callback.
+        let bytes = unsafe { core::slice::from_raw_parts(text, len) };
+        // SAFETY: `context` is the `String` below, alive for the call.
+        let out = unsafe { &mut *context.cast::<String>() };
+        out.push_str(&String::from_utf8_lossy(bytes));
+    }
+    let sink = MessageSink {
+        context: (&raw mut text).cast(),
+        write: Some(collect),
+    };
+    let mut handle = Handle::NULL;
+    // SAFETY: NUL-terminated strings and a live handle, valid for the call.
+    let status = unsafe {
+        surface::lemnos_client_open(socket.as_ptr(), c"second".as_ptr(), 0, &mut handle, sink)
+    };
+    assert_eq!(status, Status::BUSY);
+    assert!(handle.is_null());
+    assert!(text.contains("another copy"), "{text}");
+    service.stop();
+}

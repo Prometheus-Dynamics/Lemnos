@@ -1,0 +1,10 @@
+# The Lemnos C surface, shared form: links liblemnos_capi.so.@MAJOR@.
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: lemnos-capi
+Description: Lemnos C surface (the lemnosd device client), shared library
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -llemnos_capi

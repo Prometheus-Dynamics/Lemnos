@@ -311,6 +311,11 @@ pub unsafe extern "C" fn lemnos_client_open(
         if client.is_null() {
             return Status::INVALID_ARGUMENT;
         }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = crate::single::this_copy() {
+            sink.write_fmt(format_args!("{error}"));
+            return Status::BUSY;
+        }
         // SAFETY: NUL-terminated by the caller's contract, and only read in
         // this call.
         let socket = match unsafe { text(socket) } {

@@ -290,8 +290,12 @@ for consumers: everything below is additive until they switch.
         for byte, so `be-module` and `csi2-module` work unchanged. The two old modules go once
         board #1 passes the same runs.
       - User side: `lemnos-linux-sys::block` (the uAPI) and a safe `lemnos-linux::block`.
-- [ ] **B. Item 7, the static and shared forms of `lemnos-capi`.** It has `staticlib`, `cdylib`,
-      the SONAME and the `shared` feature. Still to do:
+- [x] **B. Item 7, the static and shared forms of `lemnos-capi`** (2026-11-06). Done: pkg-config
+      files for both forms, `scripts/install-capi.sh`, the second-copy refusal (`-EBUSY` at
+      `lemnos_client_open`), and both link modes in the gate (the all-features run covers
+      `shared`). Decided: no symbol version node. rustc's anonymous version script for a
+      `cdylib` overrides a named one, so the SONAME major and the handshake carry the version.
+      The original list:
       - a symbol version node (`LEMNOS_1.0`);
       - pkg-config files for both forms;
       - an install layout;

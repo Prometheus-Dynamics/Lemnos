@@ -17,6 +17,8 @@
 
 mod client;
 mod ffi;
+#[cfg(target_os = "linux")]
+mod single;
 pub mod surface;
 
 pub use client::{Channel, Client, Device, Error, Reading};

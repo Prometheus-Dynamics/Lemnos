@@ -1,0 +1,14 @@
+# The Lemnos C surface, static form: links liblemnos_capi.a into the program.
+# Never link this and the shared form into one process (the second copy's
+# lemnos_client_open is refused with -EBUSY). --gc-sections drops the parts of
+# the Rust standard library the surface does not use (stripped C client:
+# 1 242 944 B without it, 443 952 B with it, on x86_64).
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: lemnos-capi-static
+Description: Lemnos C surface (the lemnosd device client), static library
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: ${libdir}/liblemnos_capi.a @NATIVE@ -Wl,--gc-sections

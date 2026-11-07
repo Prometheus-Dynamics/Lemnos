@@ -8,6 +8,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-capi`: both forms installable, and one copy per process enforced.
+  - `scripts/install-capi.sh <prefix>` installs the headers, `liblemnos_capi.so.1` with its `.so` link, `liblemnos_capi.a`, and two pkg-config files: `lemnos-capi` (shared) and `lemnos-capi-static`.
+  - The static `.pc` file adds rustc's native libraries and `--gc-sections`. On x86_64 the stripped C client is 443 952 B static, against 1 242 944 B without `--gc-sections`.
+  - A second copy of the surface in one process (static and shared at once) is refused at `lemnos_client_open` with `-EBUSY` and a message. The first copy claims the process with an abstract unix socket named for its pid namespace and pid. A shared-mode test exercises the real two-copy case.
 - `lemnos-abi` version 1.0 is frozen as the vocabulary every Lemnos C surface shares.
   - `include/lemnos/abi.h` declares its types for C (`LemnosStatus` and `LEMNOS_E_*`, `LemnosHandle`, `LemnosFeatures`, `LemnosAbiVersion`, `LemnosMessageSink`, `LemnosPlaneDesc`, `LemnosBufferDesc`, `LemnosFenceDesc`). The crate's tests check every value, size and offset against the Rust types with a C compiler.
   - The layout hash `0xa02cfb4a8dd4545b` is asserted at compile time. The README sets the stability rules.
