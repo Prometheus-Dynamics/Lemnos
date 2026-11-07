@@ -18,7 +18,7 @@ use super::be_spare::{take_buffer, top_up_free};
 use super::be_tdn::TdnBuffers;
 use super::config_buf::{ConfigBuffer, ConfigMemory};
 use super::slots::Slots;
-use super::{DeviceError, Result, bayer16_fourcc, find_media};
+use super::{DeviceError, Result, bayer16_fourcc, comp1_fourcc, find_media};
 use crate::format::formats;
 use crate::uapi::{BayerOrder, BeTilesConfig, ImageFormatConfig, rgb_enable};
 
@@ -166,7 +166,8 @@ pub(super) fn mplane(w: u32, h: u32, fourcc: FourCc, bpl: u32) -> Format {
 }
 
 impl BackEndStream {
-    /// Opens node group `group` for 16-bit Bayer `input` frames held in `inputs` (dma-bufs of
+    /// Opens node group `group` for Bayer `input` frames (16-bit, or 8-bit PiSP mode 1 when
+    /// `input.format` is compressed) held in `inputs` (dma-bufs of
     /// `input_len` bytes, e.g. [`super::FrontEndDevice::image_dmabufs`]; input buffer `i` is
     /// `inputs[i]`), with `outputs` (at least output 0) and `buffers` buffers per output.
     pub fn open(
@@ -255,12 +256,26 @@ impl BackEndStream {
             Ok(lemnos_v4l2::v4l2::VideoDevice::open(p)?)
         };
         let in_dev = node("pispbe-input")?;
-        let fmt = mplane(
-            u32::from(input.width),
-            u32::from(input.height),
-            bayer16_fourcc(bayer),
-            input.stride as u32,
-        );
+        let (w, h) = (u32::from(input.width), u32::from(input.height));
+        // Compressed input (8-bit PiSP mode 1, e.g. `FrontEndSetup::image_compressed`): the
+        // node takes the PISP_COMP1 fourcc at the 8-bit stride. Temporal denoise still keeps
+        // 16-bit Bayer, at the stride the node gives that format.
+        let (fourcc, tdn_stride) = if crate::uapi::image_format::is_compressed(input.format) {
+            let Format::Multi(g) = in_dev.set_format(
+                BufType::VideoOutputMplane,
+                &mplane(w, h, bayer16_fourcc(bayer), 0),
+            )?
+            else {
+                return Err(DeviceError::Setup(
+                    "pispbe-input is not multi-planar".into(),
+                ));
+            };
+            let s16 = g.planes.first().map_or(0, |p| p.bytes_per_line);
+            (comp1_fourcc(bayer), s16)
+        } else {
+            (bayer16_fourcc(bayer), input.stride as u32)
+        };
+        let fmt = mplane(w, h, fourcc, input.stride as u32);
         let Format::Multi(g) = in_dev.set_format(BufType::VideoOutputMplane, &fmt)? else {
             return Err(DeviceError::Setup(
                 "pispbe-input is not multi-planar".into(),
@@ -362,7 +377,7 @@ impl BackEndStream {
                 u32::from(input.width),
                 u32::from(input.height),
                 bayer16_fourcc(bayer),
-                input.stride as u32,
+                tdn_stride,
             ),
             tdn: None,
         };
