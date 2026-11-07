@@ -45,11 +45,13 @@ carries the mechanism: the look engine, the filter and the fit.
 
 ## 5. Kernel code
 
-- **One generic Lemnos kernel module per board.** It claims a block, maps DMA buffers and
-  dma-bufs, forwards interrupts and maps registers. The drivers themselves are user-space Rust.
-  Today the module is one block at a time on Pi 5 class boards:
-  - `kernel-modules/lemnos-pisp-be`, the PiSP back end;
-  - `kernel-modules/lemnos-rp1-csi2`, the CSI-2 receiver.
+- **One generic Lemnos kernel module**, `kernel-modules/lemnos` (`lemnos.ko`). It claims a
+  block, maps DMA buffers and dma-bufs, forwards interrupts and maps registers. The drivers
+  themselves are user-space Rust. Its `owned` parameter lists the compatibles of the blocks
+  Lemnos owns, and its generic driver claims no other device. Blocks whose DMA the module must
+  check are personalities with their own uAPI:
+  - the PiSP back end (`lemnos-pisp-be`);
+  - the CSI-2 receiver (`lemnos-rp1-csi2`).
 
   See [kernel-module.md](kernel-module.md).
 - **Kernel-side code only where the kernel's own graph must see the device.** For example, a

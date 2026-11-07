@@ -1,5 +1,5 @@
 //! The back end through Lemnos's own module, `/dev/lemnos-pisp-be` (feature `be-module`;
-//! `kernel-modules/lemnos-pisp-be`), instead of the `pispbe` nodes. Opt-in: the stock V4L2
+//! `kernel-modules/lemnos`), instead of the `pispbe` nodes. Opt-in: the stock V4L2
 //! path ([`super::BeImageDevice`], [`super::BackEndStream`]) stays the default, and the module
 //! binds only where the device's `driver_override` names it, after `pispbe` is unbound.
 //!

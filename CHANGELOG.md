@@ -8,6 +8,13 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `kernel-modules/lemnos`, `lemnos.ko`: one Lemnos kernel module in place of `lemnos-pisp-be` and `lemnos-rp1-csi2`.
+  - **The generic core** (driver `lemnos`, `/dev/lemnos-<device>`, uAPI `lemnos.h`) claims a block Lemnos owns through `driver_override`. Only the compatibles in its `owned` parameter are claimed.
+    - It gives register regions, mapped only where the block's DMA is confined and only for `CAP_SYS_RAWIO`.
+    - Coherent DMA buffers exported as dma-bufs, dma-bufs imported to contiguous device addresses, and interrupts forwarded as reads (masked from firing until re-enabled).
+  - **The back end and the receiver** are personalities in the same module, with their driver names, nodes and ioctls unchanged. Their test parameters are now `lemnos.*`.
+  - **On board #1:** the generic core passed 20 of 20 checks on the back end's node. In interleaved 120 fps chain runs (9000 frames each), the personalities matched the old modules: 0 failed, frame end to back end interrupt p99 923-962 µs for both.
+  - `lemnos-linux-sys::block` is the user-space side of the generic core.
 - Buffers added while streaming (`VIDIOC_CREATE_BUFS`), at the camera stack's request.
   - `lemnos-linux-sys` gains the ioctl and `v4l2_create_buffers` (256 bytes on 64-bit, pinned).
   - `lemnos-v4l2` gains `VideoDevice::create_buffers` and `MmapQueue::add_buffers`.

@@ -10,7 +10,7 @@
  *
  * A fast path, never a requirement: the module has no of_match_table, so it
  * binds only where driver_override names it, after the stock driver is
- * unbound. See kernel-modules/lemnos-pisp-be/README.md.
+ * unbound. See kernel-modules/lemnos/pisp-be.md.
  */
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -32,6 +32,7 @@
 #include <uapi/linux/media/raspberrypi/pisp_be_config.h>
 
 #include "lemnos_pisp_be.h"
+#include "lemnos_personality.h"
 
 #define LPB_NAME "lemnos-pisp-be"
 
@@ -898,15 +899,11 @@ static void lpb_remove(struct platform_device *pdev)
 }
 
 /* No of_match_table: bound only through driver_override. */
-static struct platform_driver lpb_driver = {
+struct platform_driver lemnos_pisp_be_driver = {
 	.probe = lpb_probe,
 	.remove = lpb_remove,
 	.driver = {
 		.name = LPB_NAME,
 	},
 };
-module_platform_driver(lpb_driver);
 
-MODULE_DESCRIPTION("PiSP back end as a character device (Lemnos fast path)");
-MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS("DMA_BUF");

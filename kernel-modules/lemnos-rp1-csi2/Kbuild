@@ -1,2 +1,0 @@
-# SPDX-License-Identifier: GPL-2.0
-obj-m += lemnos_rp1_csi2.o

@@ -14,14 +14,14 @@ back end video nodes. It has no C libraries at run time and forbids `unsafe` cod
 - `debug-hooks` (implies `device`): environment-variable hooks for diffing configurations
   against another stack's (see below). Off, they compile to nothing.
 - `be-module` (implies `device`): `device::be_module`, the back end through Lemnos's own module,
-  `/dev/lemnos-pisp-be` (`kernel-modules/lemnos-pisp-be`), instead of the `pispbe` nodes.
+  `/dev/lemnos-pisp-be` (`kernel-modules/lemnos`), instead of the `pispbe` nodes.
   Opt-in; the `pispbe` path stays the default and does not change. `BeModuleJob::new` prepares a
   `be::ops` op with strides of its own choosing, `BeModule::submit` queues it on the caller's
   dma-bufs and returns at once, and `BeModule::wait` returns the finished jobs, each with its
   interrupt's `CLOCK_MONOTONIC` time. Measured on a board for one op (see the module's README);
   the Bayer path through it is untested.
 - `csi2-module` (implies `device`): the CSI-2 receiver through Lemnos's own module,
-  `/dev/lemnos-rp1-csi2` (`kernel-modules/lemnos-rp1-csi2`), beside the `rp1-cfe` nodes.
+  `/dev/lemnos-rp1-csi2` (`kernel-modules/lemnos`), beside the `rp1-cfe` nodes.
   Opt-in. Three parts:
   - `device::csi2_module`: `Csi2Module` (start the link and stream, queue one dma-buf per frame,
     wait for each frame's start and end times) and the `Receiver` trait it shares with

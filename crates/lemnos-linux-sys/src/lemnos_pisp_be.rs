@@ -1,4 +1,4 @@
-//! Lemnos's own PiSP back end module, `/dev/lemnos-pisp-be` (`kernel-modules/lemnos-pisp-be`):
+//! Lemnos's own PiSP back end module, `/dev/lemnos-pisp-be` (`kernel-modules/lemnos`):
 //! its uAPI, `lemnos_pisp_be.h`, written for this crate by the same authors and reached only
 //! through ioctl and read.
 //!

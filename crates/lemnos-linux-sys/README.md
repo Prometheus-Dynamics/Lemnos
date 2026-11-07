@@ -12,6 +12,9 @@ each system call in a safe function:
 - `netlink`: the kernel's `NETLINK_KOBJECT_UEVENT` socket.
 - `inotify`: init, add and remove watches.
 - `poll`: waiting on one descriptor.
+- `block`: the uAPI of the generic Lemnos block device (`/dev/lemnos-<device>`, `lemnos.ko`'s
+  `lemnos` driver): info, register regions and their mapping, DMA buffers as dma-bufs,
+  dma-buf imports and interrupts.
 - `lemnos_pisp_be`: the uAPI of Lemnos's own PiSP back end module (`/dev/lemnos-pisp-be`):
   info, submit, recover and the finished-job records.
 

@@ -88,8 +88,8 @@ Everything planned, in order. Execution is paused until the user starts it.
           golden-tested word for word against the vendor. Round caps and joins, curves, dashes and
           the swing handling are not ported (refused).
     - [x] K230 and rkisp device layers: `lemnos-drivers-k230isp` and `lemnos-drivers-rkisp`, from the camera stack's `crates/k230isp` and `crates/rkisp` (d17de2ed). Moved: the uAPI layouts and bindgen headers, the K230 register map, `RegisterAccess` and the statistics register reads, `Isp`, `ParamBuffer`, `isp32::{Variant, nodes}`, and both `device` layers (on `lemnos-v4l2` and `lemnos-linux-sys::vvcam_isp`). Stayed in the camera stack: the builders and statistics math (`params.rs`, `stats.rs`, `isp32/params.rs`, `isp32/stats.rs`). Untested on board: both `device` layers (no K230D or Rockchip SoC on this PC), the ISP32 fixed-point scales, and the K230 register map's unconfirmed constants. The uAPI layouts are in `lemnos-rkisp-sys`, whose ISP32 bitfield accessors (bindgen output) and bitfield-unit `Pod` impls are the only unsafe code of the move. The camera stack has not switched to these crates yet.
-- [ ] **5. Kernel module and Rust user-space drivers.** Leap, started 2026-11-06: the per-block
-      modules become one generic module (see "The leap" below). One small module of our own, its sources in
+- [x] **5. Kernel module and Rust user-space drivers.** Done in the leap, 2026-11-06: one module,
+      `kernel-modules/lemnos` (see "The leap" below). One small module of our own, its sources in
       `kernel-modules/` (GPL-2.0, see its README): claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:
       stock V4L2 stays as the fallback, and other boards, the simulator and other kernels stay on
@@ -276,7 +276,19 @@ Everything planned, in order. Execution is paused until the user starts it.
 Lemnos goes first, since the consumers build on it. The joint-round lock (80d5d1e) stays stable
 for consumers: everything below is additive until they switch.
 
-- [ ] **A. One generic kernel module** (`kernel-modules/lemnos`, `lemnos.ko`, GPL-2.0). Item 5's
+- [x] **A. One generic kernel module** (done 2026-11-06, board #1). The generic core passed
+      20 of 20 on the PiSP back end's node. The personalities matched the old modules in four
+      interleaved 120 fps chain runs (record in `kernel-modules/lemnos/README.md`), so the old
+      modules are removed. Decided:
+      - The generic driver claims only the compatibles in its `owned` parameter.
+      - Interrupts are not shared, and start masked.
+      - `lemnos-linux-sys::block` is already a safe API, so no second wrapper in `lemnos-linux`.
+      - Size: `lemnos.ko` is 58 264 B unstripped, against 50 432 B for the two modules it
+        replaces (the generic core).
+
+      Untested on board: register mapping (no confined block here), and interrupts firing
+      through the generic core (the idle back end raised none).
+      The plan as written: Item 5's
       per-block modules become one:
       - A core that claims any platform device bound through `driver_override` and gives it
         `/dev/lemnos-<name>`. It reports the device's register regions and interrupts, allocates

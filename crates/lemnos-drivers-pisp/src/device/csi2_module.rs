@@ -1,5 +1,5 @@
 //! The RP1 CSI-2 receiver through Lemnos's own module, `/dev/lemnos-rp1-csi2` (feature
-//! `csi2-module`; `kernel-modules/lemnos-rp1-csi2`), beside the stock `rp1-cfe` nodes, which stay
+//! `csi2-module`; `kernel-modules/lemnos`), beside the stock `rp1-cfe` nodes, which stay
 //! the default. The module binds only where the device's `driver_override` names it, after
 //! `rp1-cfe` is unbound, and it only receives: the sensor is set up from user space
 //! ([`super::cci`]).

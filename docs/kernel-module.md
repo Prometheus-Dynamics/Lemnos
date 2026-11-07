@@ -15,7 +15,7 @@ tree:
 - `arch/arm64/boot/dts/broadcom/bcm2712-ds.dtsi`
 - `include/uapi/linux/media/raspberrypi/pisp_be_config.h`
 
-Nothing here has been run on a board yet. The open measurements are listed at the end.
+Sections 5 to 7 record the board runs since.
 
 ## The block as the kernel sees it
 
@@ -154,7 +154,7 @@ dma-buf handles.
 ## 5. On the board
 
 Measured 2026-11-06 on board #1 (a Pi 5 class board, 7.2.9-v8-16k) with the module,
-`kernel-modules/lemnos-pisp-be`, and `lemnos-drivers-pisp`'s `be_module_check`. The full table
+`kernel-modules/lemnos`, and `lemnos-drivers-pisp`'s `be_module_check`. The full table
 is in the module's README.
 
 - **Latency.** Interrupt to user-space wake-up: p50 2 µs, p99 20 µs, max 76 µs under
@@ -174,7 +174,7 @@ is in the module's README.
 
 ## 6. The CSI-2 receiver
 
-`kernel-modules/lemnos-rp1-csi2` is the second block: RP1's CSI-2 receiver, without the PiSP
+`kernel-modules/lemnos` is the second block: RP1's CSI-2 receiver, without the PiSP
 front end. The block has the same split:
 - **The module.** GPL-2.0, ported from `rp1_cfe`. It writes every address, and it only receives.
 - **The sensor.** Driven from user space over i2c-dev from a register file read at run time
@@ -198,3 +198,27 @@ Measured 2026-11-06 on board #1 with an OV9782 at 1280x800 RAW10, 2 lanes at 800
   600 frames, frame end to the back end's interrupt p50 757 µs, p99 1324 µs.
 
 The full record is in the module's README.
+
+## 7. One module (2026-11-06)
+
+The per-block modules became one, `kernel-modules/lemnos` (`lemnos.ko`):
+- **A generic core.** Driver `lemnos`, node `/dev/lemnos-<device>`. It claims any block Lemnos
+  owns (the `owned` parameter's compatibles) and gives user space:
+  - its register regions;
+  - coherent DMA buffers exported as dma-bufs;
+  - dma-bufs imported to contiguous device addresses;
+  - interrupts as reads, masked from firing until the driver re-enables them.
+
+  Registers are mapped to user space only where the block's DMA is confined to what the module
+  mapped.
+- **The two blocks above as personalities.** Their DMA is not confined, so the module keeps
+  writing their jobs. Their driver names, nodes and ioctls are unchanged, so `be-module` and
+  `csi2-module` run as before.
+
+On board #1:
+- `test/lemnos_check` passed 20 of 20 with the generic core bound to the back end's node.
+- In four interleaved 120 fps chain runs, receiver to back end, 9000 frames each, the
+  personalities matched the old modules: 0 failed, frame end to back end interrupt p99
+  923-962 µs for both.
+
+The record is in `kernel-modules/lemnos/README.md`.

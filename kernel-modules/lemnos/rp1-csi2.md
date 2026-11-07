@@ -1,4 +1,4 @@
-# lemnos-rp1-csi2
+# lemnos-rp1-csi2 (a personality of `lemnos.ko`)
 
 The Raspberry Pi RP1 CSI-2 receiver as a plain character device, `/dev/lemnos-rp1-csi2`. It
 covers the CFE block's D-PHY, its CSI-2 host and one CSI-2 DMA channel; the PiSP front end is not
@@ -50,6 +50,8 @@ Ltd, notice kept in the source). The uAPI header `lemnos_rp1_csi2.h` is
 
 Against the configured and built kernel tree of the image, with its toolchain:
 
+The receiver is a personality of `lemnos.ko`; build it as [README.md](README.md) says:
+
 ```sh
 make KDIR=<the image's linux build tree> ARCH=arm64 CROSS_COMPILE=<its toolchain prefix>
 ```
@@ -67,11 +69,11 @@ D=1f00110000.csi
 echo $D > /sys/bus/platform/drivers/rp1-cfe/unbind
 echo <bus-addr> > /sys/bus/i2c/drivers/<sensor driver>/unbind
 echo <regulator> > /sys/bus/platform/drivers/reg-fixed-voltage/unbind
-insmod lemnos_rp1_csi2.ko
+insmod lemnos.ko
 echo lemnos-rp1-csi2 > /sys/bus/platform/devices/$D/driver_override
 echo $D > /sys/bus/platform/drivers/lemnos-rp1-csi2/bind
 # and back:
-rmmod lemnos_rp1_csi2
+echo $D > /sys/bus/platform/drivers/lemnos-rp1-csi2/unbind
 echo > /sys/bus/platform/devices/$D/driver_override
 echo <regulator> > /sys/bus/platform/drivers/reg-fixed-voltage/bind
 echo $D > /sys/bus/platform/drivers/rp1-cfe/bind
@@ -99,7 +101,7 @@ Results:
   service started again. This held on each of three runs.
 
 **Receiver to back end**, the same day: `csi2_module_check --be`, with this module and
-`kernel-modules/lemnos-pisp-be` bound, `UNPACK16` at stride 2560, and each frame's buffer
+the back end personality bound, `UNPACK16` at stride 2560, and each frame's buffer
 submitted as the input of a demosaic job (BGGR to RGB888, identity matrix):
 - No copy: the back end reads the receiver's dma-buf.
 - 600 frames at 60.28 fps; none failed in either module, and no frame start went without a

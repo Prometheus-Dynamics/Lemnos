@@ -11,7 +11,7 @@
  * One CSI-2 DMA channel (0) writes raw frames into dma-bufs; the PiSP front
  * end is not used. A fast path, never a requirement: the module has no
  * of_match_table, so it binds only where driver_override names it, after
- * rp1-cfe is unbound. See kernel-modules/lemnos-rp1-csi2/README.md.
+ * rp1-cfe is unbound. See kernel-modules/lemnos/rp1-csi2.md.
  */
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -32,6 +32,7 @@
 #include <linux/wait.h>
 
 #include "lemnos_rp1_csi2.h"
+#include "lemnos_personality.h"
 
 #define LRC_NAME "lemnos-rp1-csi2"
 #define LRC_CACHE 16
@@ -790,15 +791,11 @@ static void lrc_remove(struct platform_device *pdev)
 }
 
 /* No of_match_table: bound only through driver_override. */
-static struct platform_driver lrc_driver = {
+struct platform_driver lemnos_rp1_csi2_driver = {
 	.probe = lrc_probe,
 	.remove = lrc_remove,
 	.driver = {
 		.name = LRC_NAME,
 	},
 };
-module_platform_driver(lrc_driver);
 
-MODULE_DESCRIPTION("RP1 CSI-2 receiver as a character device (Lemnos fast path)");
-MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS("DMA_BUF");

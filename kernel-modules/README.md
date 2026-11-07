@@ -16,14 +16,15 @@ the rest of the repository, which is MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-
 - `lemnos-sensor-bridge/`: the sensor bridge, a V4L2 subdevice that carries a camera sensor driven
   from user space. Its user-space side is the `lemnos-sensor-bridge` crate. See
   `lemnos-sensor-bridge/README.md` and `lemnos-sensor-bridge/PROTOCOL.md`.
-- `lemnos-pisp-be/`: the Raspberry Pi 5 PiSP back end as a character device, an opt-in fast path
-  beside the stock `pispbe` driver, bound only through `driver_override`. Its user-space side is
-  `lemnos-drivers-pisp`'s `be-module` feature. See `lemnos-pisp-be/README.md`.
-- `lemnos-rp1-csi2/`: the Raspberry Pi RP1 CSI-2 receiver (D-PHY, CSI-2 host and one DMA
-  channel) as a character device, an opt-in fast path beside the stock `rp1-cfe` driver, bound
-  only through `driver_override`. The sensor is set up from user space over i2c-dev. Its
-  user-space side is `lemnos-drivers-pisp`'s `csi2-module` feature. See
-  `lemnos-rp1-csi2/README.md`.
+- `lemnos/`: `lemnos.ko`, the one Lemnos kernel module. Its generic core claims a block Lemnos
+  owns through `driver_override`, for a driver in user space: register regions, DMA buffers as
+  dma-bufs, dma-bufs mapped to device addresses, and interrupts as reads. Two blocks are
+  personalities with their own uAPI, each an opt-in fast path beside its stock driver:
+  - the Raspberry Pi 5 PiSP back end (`/dev/lemnos-pisp-be`, `lemnos-drivers-pisp`'s
+    `be-module`);
+  - the RP1 CSI-2 receiver (`/dev/lemnos-rp1-csi2`, `csi2-module`).
+
+  See `lemnos/README.md`.
 - `kernel-env.sh`: the kernel selection that the modules' build scripts source.
 
 ## Licence boundary

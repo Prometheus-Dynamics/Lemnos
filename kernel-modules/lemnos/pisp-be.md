@@ -1,4 +1,4 @@
-# lemnos-pisp-be
+# lemnos-pisp-be (a personality of `lemnos.ko`)
 
 The Raspberry Pi 5 PiSP back end as a plain character device, `/dev/lemnos-pisp-be`. A fast path
 beside the stock `pispbe` V4L2 driver, never a requirement: the module has no `of_match_table`,
@@ -42,6 +42,8 @@ uAPI header `lemnos_pisp_be.h` is `GPL-2.0-only WITH Linux-syscall-note`. The re
 
 Against the configured and built kernel tree of the image, with its toolchain:
 
+The back end is a personality of `lemnos.ko`; build it as [README.md](README.md) says:
+
 ```sh
 make KDIR=<the image's linux build tree> ARCH=arm64 CROSS_COMPILE=<its toolchain prefix>
 ```
@@ -58,9 +60,9 @@ As root, with no `pispbe` user running (the bind takes the block from it):
 D=1000880000.pisp_be
 echo $D > /sys/bus/platform/drivers/pispbe/unbind
 echo lemnos-pisp-be > /sys/bus/platform/devices/$D/driver_override
-insmod lemnos_pisp_be.ko
+insmod lemnos.ko    # binds, the override naming this personality
 # and back:
-rmmod lemnos_pisp_be
+rmmod lemnos        # or unbind it, if another block is on lemnos too
 echo > /sys/bus/platform/devices/$D/driver_override
 echo $D > /sys/bus/platform/drivers/pispbe/bind
 ```

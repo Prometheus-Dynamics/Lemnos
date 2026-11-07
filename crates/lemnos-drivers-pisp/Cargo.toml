@@ -23,11 +23,11 @@ device = ["std", "dep:lemnos-v4l2", "dep:lemnos-linux"]
 # and the back end block patch (`LEMNOS_PISP_BE_PATCH`). Off, they compile to no-ops and the
 # variables are ignored.
 debug-hooks = ["device"]
-# The back end through Lemnos's own module, /dev/lemnos-pisp-be (kernel-modules/lemnos-pisp-be),
+# The back end through Lemnos's own module, /dev/lemnos-pisp-be (kernel-modules/lemnos),
 # beside the pispbe nodes, which stay the default. Opt-in.
 be-module = ["device", "dep:lemnos-linux-sys", "dep:libc"]
 # The CSI-2 receiver through Lemnos's own module, /dev/lemnos-rp1-csi2
-# (kernel-modules/lemnos-rp1-csi2), a sensor's registers over i2c-dev from a register file, and
+# (kernel-modules/lemnos), a sensor's registers over i2c-dev from a register file, and
 # a mock receiver for a simulator. Opt-in; rp1-cfe stays the default.
 csi2-module = ["device", "dep:lemnos-linux-sys", "dep:libc"]
 

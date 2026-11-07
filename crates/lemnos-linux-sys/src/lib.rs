@@ -11,6 +11,7 @@
 
 #![cfg(target_os = "linux")]
 
+pub mod block;
 pub mod dma_buf;
 pub mod dma_heap;
 pub mod drm;

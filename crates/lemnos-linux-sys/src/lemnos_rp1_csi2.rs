@@ -1,4 +1,4 @@
-//! Lemnos's own RP1 CSI-2 receiver module, `/dev/lemnos-rp1-csi2` (`kernel-modules/lemnos-rp1-csi2`):
+//! Lemnos's own RP1 CSI-2 receiver module, `/dev/lemnos-rp1-csi2` (`kernel-modules/lemnos`):
 //! its uAPI, `lemnos_rp1_csi2.h`, written for this crate by the same authors and reached only
 //! through ioctl and read.
 //!
