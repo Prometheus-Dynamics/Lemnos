@@ -334,6 +334,25 @@ for consumers: everything below is additive until they switch.
       (2026-11-04, image dev.912): 9 devices published as `lemnos.device` resources, all healthy;
       `read` matches `lemnos-ctl`, `calibration.status`, `set` and `restore` succeed, a bad control
       is rejected.
+- [x] **Batched IMU: no lost samples, stamps on the device's clock** (2026-11-07, asked by the
+      coordinator after the board check of the stamp fix):
+      - **Cause.** The 0.4 % lost samples were single samples, with or without load: 79 of 20 078
+        unloaded, 294 of 72 293 loaded. A per-read trace on #1 found no skip frames, no partial
+        frames and no FIFO overflow. The two dies' FIFOs filled at 403.9 and 399.6 Hz, and the
+        driver paired them one to one, returning only as many samples as the scarcer FIFO held.
+      - **Driver.** Every accelerometer sample is returned. The gyroscope is paired from the
+        newest end, and its oldest sample is repeated when it holds fewer.
+      - **Stamps.** lemnosd measures the period per batched device: the slope through the latest
+        read of each second, against the sample count, over 4 s. On #1 under 4-core load:
+        403.8 Hz, 0 lost, 0 back, 71 964 of 71 999 steps within 1 µs, after 10 s none beyond
+        81 µs.
+      - **Decisions.**
+        - The latest read, not the earliest: a preempted read only looks early, and the
+          earliest read was 0.02 % off under load.
+        - A 4 s window: the accelerometer's period moved 650 ppm over 90 s under load. In a
+          replay of that run's reads, 16 s gave 95 nudged stamps and 4 s gave 2.
+        - No phase band around the fitted line: it is biased by the time to the length read,
+          and the replay got worse (about 40 nudges).
 - [x] **Timed fan hold for Orion callers** (2026-11-07, asked by the OS image's API for its
       fan override): `set` takes `for_ms` (1 to 600000); at expiry the bridge releases a fan to its
       governor (restores any other control). A renewing `set` restarts the hold; the caller's

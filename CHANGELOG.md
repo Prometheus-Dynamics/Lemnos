@@ -169,6 +169,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- `lemnos-drivers-bmi088` and `lemnosd`: a batched BMI088 no longer drops samples, and its stamps follow the device's own clock.
+  - The driver paired the two FIFOs one to one, so a read returned only as many samples as the scarcer FIFO held. The accelerometer and gyroscope dies run on separate oscillators: on board #1, 403.9 and 399.6 samples a second at a nominal 400 Hz. One accelerometer sample at a time was dropped, 0.4 % of them, with or without load.
+  - Every accelerometer sample is now returned. When the gyroscope FIFO holds fewer, its oldest sample is repeated for the oldest accelerometer samples.
+  - `lemnosd` measures each batched device's period (`schedule::StreamClock`) and stamps with it, in nanoseconds. The nominal period had fallen behind the 1 % fast accelerometer and squeezed a step at every batch.
+  - Board #1, 400 Hz FIFO, all four cores busy, 72 000 readings: 403.8 Hz delivered, no samples lost, no step back, 71 964 of 71 999 steps within 1 µs. Before: 398.4 Hz, 294 samples lost, steps from 2500 to 5076 µs.
 - `lemnos-linux-sys` builds without warnings for musl targets: `libc`'s deprecation of `time_t` and `suseconds_t` there is allowed where the kernel structures name them.
 - `lemnosd`: a polled sensor is read at 90 % of its output period, as its docs said, not at the period itself. At exactly the period the read grid kept one phase to the sensor's samples, and near the sample step timer jitter made one read early and the next one a sample late for the whole run: under load, half the runs of the 400 Hz IMU test delivered 334-338 a second at 15-21 % CPU wait. Now 380-387 at the same load. About 11 % more reads find no new sample (counted as misses). A batched sensor still reads at its output period.
 - `lemnos_linux::dma`: a CMA heap's capacity is `CmaTotal`, not `CmaFree`. `CmaFree` counts only idle pages, and the kernel serves a CMA request beyond it by migrating movable pages out, so the check refused requests the kernel serves: on a board with `CmaFree` at 0 of 64 MiB every `linux,cma` allocation failed before the call, though the kernel gave eight 1.28 MB buffers. Only a request larger than the pool is now refused before the kernel.

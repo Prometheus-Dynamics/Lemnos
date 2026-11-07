@@ -371,6 +371,39 @@ fn read_batch_returns_the_accel_frames_with_gyro_paired_from_the_newest() {
     assert_eq!(row(1), expect([0, -16384, 0], [7, 8, 9]));
 }
 
+/// Three accelerometer frames and one gyroscope frame: the gyroscope's clock
+/// runs slower than the accelerometer's, so a read can find fewer gyroscope
+/// frames. Every accelerometer sample is still returned.
+#[test]
+fn read_batch_keeps_every_accel_sample_when_the_gyro_holds_fewer() {
+    let mut accel = [0u8; 21];
+    for (k, x) in [100i16, 200, 300].into_iter().enumerate() {
+        accel[k * 7] = 0x84;
+        accel[k * 7 + 1..k * 7 + 7].copy_from_slice(&axes([x, 0, 0]));
+    }
+    let i2c = imu()
+        .with_registers(ACCEL_ADDRESS, 0x24, &(accel.len() as u16).to_le_bytes())
+        .with_registers(ACCEL_ADDRESS, 0x26, &accel)
+        .with_registers(GYRO_ADDRESS, 0x0e, &[2])
+        .with_registers(
+            GYRO_ADDRESS,
+            0x3f,
+            &[axes([1, 1, 1]), axes([2, 2, 2])].concat(),
+        );
+    let mut bmi = Bmi088::new(i2c).with_fifo();
+    bmi.init(&mut MockDelay::new(), Config::default()).unwrap();
+    let mut out = [[0i32; lemnos_device::MAX_CHANNELS]; MAX_SAMPLES];
+    let n = lemnos_device::Sensor::read_batch(&mut bmi, &mut out).unwrap();
+    assert_eq!(n, 3);
+    let config = Config::default();
+    let row = |i: usize| out[i][..6].to_vec();
+    let expect = |a: [i16; 3], g: [i16; 3]| config.channels(a, g)[..6].to_vec();
+    // The oldest gyroscope sample is repeated for the oldest accelerometer one.
+    assert_eq!(row(0), expect([100, 0, 0], [1, 1, 1]));
+    assert_eq!(row(1), expect([200, 0, 0], [1, 1, 1]));
+    assert_eq!(row(2), expect([300, 0, 0], [2, 2, 2]));
+}
+
 #[test]
 fn read_batch_with_an_empty_fifo_is_no_samples() {
     let mut bmi = Bmi088::new(imu()).with_fifo();

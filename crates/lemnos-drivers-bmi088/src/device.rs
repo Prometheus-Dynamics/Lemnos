@@ -154,9 +154,12 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
     }
 
     /// With the FIFOs on, every sample since the last read, oldest first (up
-    /// to [`MAX_SAMPLES`]). The accelerometer and gyroscope samples are paired
-    /// from the newest end: when one FIFO holds a sample more than the other
-    /// (a sample came between the two reads), its oldest is not returned.
+    /// to [`MAX_SAMPLES`]). The accelerometer sets the stream: every one of its
+    /// samples is returned. The two dies run on their own clocks (on board #1
+    /// the accelerometer ran 1.1 % faster), so the gyroscope samples are paired
+    /// from the newest end. Extra gyroscope samples (the oldest) are not used.
+    /// When the gyroscope holds fewer, its oldest sample is repeated for the
+    /// oldest accelerometer samples; they are at most a period or two apart.
     /// Every sample feeds the calibration. Without the FIFOs, one sample, as
     /// [`read`](Self::read).
     fn read_batch(
@@ -188,14 +191,14 @@ impl<I2C: embedded_hal::i2c::I2c> lemnos_device::Sensor for Bmi088<I2C> {
             .map_err(DeviceError::Driver)?;
         if ng == 0 {
             // The gyroscope FIFO is empty: hold its latest value for these.
-            gyro[..na].fill(self.read_gyro_raw().map_err(DeviceError::Driver)?);
-            ng = na;
+            gyro[0] = self.read_gyro_raw().map_err(DeviceError::Driver)?;
+            ng = 1;
         }
-        let n = na.min(ng);
+        let n = na;
         #[cfg(feature = "float")]
         let period = u64::from(config.accel_rate.period_us());
         for i in 0..n {
-            let (a, g) = (accel[na - n + i], gyro[ng - n + i]);
+            let (a, g) = (accel[i], gyro[(ng + i).saturating_sub(na)]);
             let mut row = [NO_VALUE; CHANNELS];
             copy_into(&mut row[..RAW], &config.channels(a, g));
             #[cfg(feature = "float")]

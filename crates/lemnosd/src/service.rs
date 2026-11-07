@@ -654,15 +654,14 @@ impl Service {
             self.status_event(index, status);
         }
         if count > 0 {
-            let last_us = schedule::batch_end_us(
+            let (last_ns, period_ns) = self.slots[index].batch_clock.batch(
                 done.started_us,
                 done.started_us + done.cost_us,
                 count as u64,
                 period_us,
-                self.slots[index].batch_last_us,
             );
-            self.slots[index].batch_last_us = last_us;
-            self.deliver_batch(index, &samples[..count], last_us, period_us);
+            self.deliver_batch(index, &samples[..count], last_ns, period_ns);
+            let (last_us, period_us) = (last_ns / 1000, (period_ns + 500) / 1000);
             self.feed_fusion(index, &samples[..count], last_us, period_us);
         }
         if miss {
@@ -695,21 +694,22 @@ impl Service {
     }
 
     /// Sends a batch's samples to the subscribers that are due for them. The
-    /// samples are `period_us` apart and the last was taken at `read_us`; each
+    /// samples are `period_ns` apart and the last was taken at `last_ns`; each
     /// is stamped with its own time, and a subscriber's deadlines move on from
     /// those times, not from when the batch arrived.
     fn deliver_batch(
         &mut self,
         index: usize,
         samples: &[[i32; lemnos_device::MAX_CHANNELS]],
-        read_us: u64,
-        period_us: u64,
+        last_ns: u64,
+        period_ns: u64,
     ) {
         let channels = self.slots[index].info.map_or(0, |i| i.channels.len());
         let last = samples.len() as u64 - 1;
+        let period_us = period_ns / 1000;
         let mut due = std::mem::take(&mut self.due_subscribers);
         for (i, values) in samples.iter().enumerate() {
-            let at_us = read_us.saturating_sub((last - i as u64) * period_us);
+            let at_us = last_ns.saturating_sub((last - i as u64) * period_ns) / 1000;
             // A sample within half a sample period of a deadline is due for it:
             // a request in whole milliseconds (2 ms for a 400 Hz stream) then
             // gets every sample, not one in three.

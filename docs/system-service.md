@@ -641,19 +641,39 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   and the data/clock latch were not measured on a board. An index-based design needs that
   measurement first.
 - **Batches.** A driver with a FIFO (`fifo = true` on `bmi088`) returns every sample since
-  the last read. Each sample is stamped with its own time, one output period apart, and
-  delivered to the subscribers (and the orientation fusion) due for it. The newest sample's
-  stamp follows the stream: one period per sample on from the previous batch, held within
-  what the read proves (the newest sample arrived after one period before the read started,
-  and before it ended), and always after the previous batch's last. Until 2026-11-07 the
-  newest was stamped at the read's start, so a read delayed after it started (the bus thread
-  preempted before the drain) stamped its first samples before the previous batch's last:
-  stamps went back by up to 0.8 ms with drains delayed 7 ms in the mock
-  (`tests/schedule.rs`, `delayed_drains_keep_the_stamps_increasing`), and once by 0.18 ms
-  under a loaded test run. Untested on board. Off by default: at the installed
-  board's rates (accelerometer 100 Hz, gyroscope 2000 Hz) a FIFO drain reads every gyroscope
-  frame, which costs far more bus time than polling 100 Hz. Turn it on only with output
-  rates that match what is subscribed.
+  the last read. Each sample is stamped with its own time, one period apart, and delivered to
+  the subscribers (and the orientation fusion) due for it.
+  - **The period is the device's, measured.** A device's oscillator runs off its nominal rate:
+    on board #1 the BMI088's accelerometer FIFO filled at 403.9 samples a second and its
+    gyroscope's at 399.6, both nominally 400 Hz. Under load, the accelerometer's period also
+    moved by 650 ppm over 90 s, presumably as the board warmed. Every read bounds the device's
+    next sample (it had not arrived when the read started), so the read in each second that
+    started latest against the sample count lies on the device's clock. The period is the slope through those reads over
+    the last 4 s (`schedule::StreamClock`). The latest read, not the earliest: a read preempted
+    after its start finds more samples, so it only looks early. Measuring with the earliest
+    read put the period 0.02 % off under load.
+  - **The newest sample's stamp follows the stream:** one period per sample on from the
+    previous batch. It is held within what the read proves: the newest sample arrived after one
+    period before the read started, and before the read ended. A stamp is always after the
+    previous batch's last.
+  - **Until 2026-11-07 the newest sample was stamped at the read's start,** so a read delayed
+    after it started stamped its first samples before the previous batch's last. With drains
+    delayed 7 ms in the mock, stamps went back by up to 0.8 ms (`tests/schedule.rs`,
+    `delayed_drains_keep_the_stamps_increasing`). They went back once, by 0.18 ms, under a
+    loaded test run.
+  - **Until the same day, the stamps used the nominal period, and the driver paired the two
+    FIFOs one to one,** so a read returned only as many samples as the scarcer FIFO held. On
+    board #1 that dropped one accelerometer sample at a time: 0.4 % of them, under load or not
+    (398.4 Hz delivered). Returning every accelerometer sample instead squeezed a step at every
+    batch (min 1 µs), because the nominal period fell behind the 1 % fast device.
+  - **On board #1 now** (400 Hz FIFO, all four cores busy, 72 000 readings over 178 s):
+    - 403.8 Hz delivered, no samples lost, no step back;
+    - 71 964 of 71 999 steps within 1 µs of the local median;
+    - after the first 10 s, 4 steps off by 52-81 µs;
+    - in the first 8 s, while the period is measured, steps off by up to 1.7 ms.
+  - **Off by default:** at the installed board's rates (accelerometer 100 Hz, gyroscope
+    2000 Hz) a FIFO drain reads every gyroscope frame, which costs far more bus time than
+    polling 100 Hz. Turn it on only with output rates that match what is subscribed.
 - **Bus cost.** On the example board's bit-banged `i2c-gpio` bus the cost follows the bytes moved
   (about 25 µs a bit, so about 0.2 ms a byte): the IMU's accelerometer and gyroscope at 100 Hz
   cost about 37 % of a core, and each doubling of the output rate doubles it. Lowering the
