@@ -118,6 +118,13 @@ impl Message {
                 }
                 e.finish()
             }
+            Self::AllocStats(stats) => {
+                let mut e = Encoder::new(ALLOC_STATS_REPLY);
+                if let Some(s) = stats {
+                    e.u64(s.allocs).u64(s.frees).u64(s.bytes).u64(s.live_bytes);
+                }
+                e.finish()
+            }
             Self::Devices(devices) => {
                 let mut e = Encoder::new(DEVICES);
                 e.u16(devices.len() as u16);
@@ -334,6 +341,16 @@ impl Message {
                 }
                 Self::Stats(stats)
             }
+            ALLOC_STATS_REPLY => Self::AllocStats(if d.is_empty() {
+                None
+            } else {
+                Some(AllocStats {
+                    allocs: d.u64()?,
+                    frees: d.u64()?,
+                    bytes: d.u64()?,
+                    live_bytes: d.u64()?,
+                })
+            }),
             READING => {
                 let device = d.str()?;
                 let timestamp_us = d.u64()?;

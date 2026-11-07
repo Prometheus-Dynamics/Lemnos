@@ -9,7 +9,7 @@ use super::Service;
 use crate::devices::{Placement, Slot};
 use crate::state;
 use lemnos_board::fan_controller::{self, FAN_CONTROLLER, FanControllerSpec};
-use lemnos_device::fan_control::{Health, Point, Settings};
+use lemnos_device::fan_control::{Health, MAX_INPUTS, Point, Settings};
 use lemnos_device::fan_device::{
     CTL_ENABLED, CTL_FLOOR, CTL_HYSTERESIS, CTL_SLEW, FanDevice, PERIOD_MS,
 };
@@ -335,23 +335,21 @@ impl Service {
 
     fn fan_step(&mut self, index: usize, now_ms: u64) {
         let now_us = self.now_us();
-        let samples: Vec<Sample> = self.fan_loops[index]
-            .inputs
-            .iter()
-            .map(|&(slot, channel)| {
-                let slot = &self.slots[slot];
-                let read = slot.read_us != 0 && slot.values_mask & (1 << channel) != 0;
-                if read {
-                    Sample {
-                        value: slot.values[channel],
-                        age_ms: (now_us.saturating_sub(slot.read_us) / 1000) as u32,
-                        present: true,
-                    }
-                } else {
-                    Sample::NONE
-                }
-            })
-            .collect();
+        // On the stack: a step allocates nothing (a controller has at most MAX_INPUTS).
+        let mut samples = [Sample::NONE; MAX_INPUTS];
+        let inputs = &self.fan_loops[index].inputs;
+        let n = inputs.len().min(MAX_INPUTS);
+        for (sample, &(slot, channel)) in samples.iter_mut().zip(inputs) {
+            let slot = &self.slots[slot];
+            if slot.read_us != 0 && slot.values_mask & (1 << channel) != 0 {
+                *sample = Sample {
+                    value: slot.values[channel],
+                    age_ms: (now_us.saturating_sub(slot.read_us) / 1000) as u32,
+                    present: true,
+                };
+            }
+        }
+        let samples = &samples[..n];
         let fan_loop = &mut self.fan_loops[index];
         fan_loop.stepped_ms = Some(now_ms);
         if fan_loop.retry_at_ms.is_some_and(|at| now_ms < at) {
@@ -368,7 +366,7 @@ impl Service {
             slot: &mut self.slots[fan],
             taking: &mut fan_loop.taking,
         };
-        let result = fan_loop.device.step(now_ms, &samples, &mut out);
+        let result = fan_loop.device.step(now_ms, samples, &mut out);
         self.fan_publish(index, now_us);
         if result.is_err() {
             self.fan_fault(index, now_ms);

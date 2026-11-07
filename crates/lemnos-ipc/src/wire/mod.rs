@@ -31,6 +31,10 @@ pub const VERSION: u16 = 1;
 /// so a client tells overlapping reads of one device apart.
 pub const FEATURE_READ_ID: u32 = 2;
 
+/// [`Message::Welcome`] feature bit: the service answers [`Request::AllocStats`] (with `None`
+/// unless it was built to count its allocations).
+pub const FEATURE_ALLOC_STATS: u32 = 4;
+
 /// Frames longer than this are refused.
 pub const MAX_FRAME: usize = 1 << 20;
 /// Requests longer than this are refused. The largest request is a raw
@@ -65,6 +69,8 @@ const LIGHT_INFO: u16 = 110;
 const CALIBRATION_STATUS_REPLY: u16 = 111;
 const STATS: u16 = 17;
 const STATS_REPLY: u16 = 112;
+const ALLOC_STATS: u16 = 33;
+const ALLOC_STATS_REPLY: u16 = 115;
 const CALIBRATION: u16 = 13;
 const CALIBRATION_STATUS: u16 = 14;
 const GPU_ACQUIRE: u16 = 18;
@@ -162,6 +168,20 @@ pub struct ReadStats {
     pub last_us: u64,
     /// Reads that found no new sample (counted in `reads`, not a reading).
     pub misses: u64,
+}
+
+/// The service's heap use since it started, counted by its allocator (see
+/// [`Request::AllocStats`]). A steady state allocates nothing: `allocs` and `frees` stop moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AllocStats {
+    /// Allocations (a reallocation counts as one, and as one free).
+    pub allocs: u64,
+    /// Frees.
+    pub frees: u64,
+    /// Bytes allocated in all.
+    pub bytes: u64,
+    /// Bytes allocated and not yet freed.
+    pub live_bytes: u64,
 }
 
 /// One device reading.
@@ -428,6 +448,9 @@ pub enum Request {
     /// [`Message::Stats`]. Kept by the service per read, so asking costs the
     /// readers nothing.
     Stats,
+    /// The service's allocation counts, as a [`Message::AllocStats`]. Only a service with
+    /// [`FEATURE_ALLOC_STATS`] understands it.
+    AllocStats,
     /// The device's latest reading, as a [`Message::Reading`], or a [`Message::Reply`] refusal.
     /// A service with [`FEATURE_READ_ID`] echoes a nonzero `id` in both (appended within
     /// protocol 1; older clients send none, which reads as 0).
@@ -610,13 +633,15 @@ pub enum Message {
         version: u16,
         board: String,
         client_id: u32,
-        /// Feature bits ([`FEATURE_GPU_LEASE`], [`FEATURE_READ_ID`]); appended within protocol 1,
+        /// Feature bits ([`FEATURE_GPU_LEASE`], [`FEATURE_READ_ID`], [`FEATURE_ALLOC_STATS`]); appended within protocol 1,
         /// 0 from an older service.
         features: u32,
     },
     Devices(Vec<DeviceDesc>),
     /// The answer to [`Request::Stats`].
     Stats(Vec<ReadStats>),
+    /// The answer to [`Request::AllocStats`]: `None` from a service built without counting.
+    AllocStats(Option<AllocStats>),
     Reading(RawReading),
     Reply {
         id: u32,

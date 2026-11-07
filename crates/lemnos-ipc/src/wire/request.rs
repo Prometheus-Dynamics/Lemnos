@@ -152,6 +152,7 @@ impl Request {
             Self::Raw(raw) => raw.encode(),
             Self::List => Encoder::new(LIST).finish(),
             Self::Stats => Encoder::new(STATS).finish(),
+            Self::AllocStats => Encoder::new(ALLOC_STATS).finish(),
             Self::Read { id, device } => {
                 let mut e = Encoder::new(READ);
                 e.str(device).u32(*id);
@@ -410,6 +411,7 @@ impl Request {
             kind if super::raw::is_raw(kind) => Self::Raw(RawRequest::decode(kind, &mut d)?),
             LIST => Self::List,
             STATS => Self::Stats,
+            ALLOC_STATS => Self::AllocStats,
             READ => {
                 let device = d.str()?;
                 // Appended within protocol 1: absent from older clients.

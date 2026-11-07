@@ -280,7 +280,7 @@ led.clear()?;                                // drop this client's intents
 ```
 lemnos-ctl list
 lemnos-ctl read imu
-lemnos-ctl stats                                  # read timing per sensor (reads, mean, max, last)
+lemnos-ctl stats                                  # read timing per sensor (reads, mean, max, last), and allocations with alloc-stats
 lemnos-ctl watch imu --period 50
 lemnos-ctl watch imu --channels angular_rate.z --period 10   # yaw only: fewer bus bytes
 lemnos-ctl set fan duty 0.8
@@ -566,6 +566,19 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   200 readings a second (2026-11-06; it was about 3 a reading, plus a channel block every 31
   messages). The client's decoding (`DeviceClient`) still allocates a reading's device name and
   values.
+- **No allocation in the steady loops.** The LED effect's frames, a 50 Hz subscription to a
+  sysfs sensor (a thermal zone) and the fan controller's steps allocate nothing once running:
+  sysfs numbers are read and written through stack buffers at stack-built paths, and a fan
+  step gathers its inputs on the stack. `crates/lemnosd/tests/alloc_loops.rs` counts every
+  allocation outside the test thread: 0 over 3 s (about 150 readings, 120 ring frames and 3
+  fan steps; 2026-11-06, three runs). Before, each sysfs read or write allocated its path and
+  its text, and each fan step a vector.
+- **Allocations on a running board.** Built with the `alloc-stats` feature, `lemnosd` runs on a
+  counting allocator (`lemnos_linux_sys::alloc_stats`: two relaxed atomic adds per call) and
+  sets `FEATURE_ALLOC_STATS` (4). `Request::AllocStats` answers its allocations, frees, bytes
+  allocated and bytes live since it started, and `lemnos-ctl stats` prints them. Run it twice
+  a while apart: in a steady state `allocs` does not move. Without the feature the service
+  answers that it does not count. Untested on a board.
 - **New samples only (the duplicate filter).** A polled sensor's reading identical to the last
   one it delivered (every channel value equal, which is every raw byte of a BMI088) is not
   delivered when it is read within one output period of that delivery. The filter is lemnosd's

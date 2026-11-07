@@ -629,6 +629,18 @@ impl DeviceClient {
         })
     }
 
+    /// The service's allocation counts since it started: `Ok(None)` from a service built
+    /// without counting (lemnosd's `alloc-stats` feature) or too old to answer.
+    pub fn alloc_stats(&mut self) -> Result<Option<crate::AllocStats>, ClientError> {
+        if self.conn.features & crate::FEATURE_ALLOC_STATS == 0 {
+            return Ok(None);
+        }
+        self.conn.request(&Request::AllocStats, |m| match m {
+            Message::AllocStats(stats) => Some(*stats),
+            _ => None,
+        })
+    }
+
     /// The latest reading of `device`.
     ///
     /// A service with [`FEATURE_READ_ID`](crate::FEATURE_READ_ID) answers with this read's id,

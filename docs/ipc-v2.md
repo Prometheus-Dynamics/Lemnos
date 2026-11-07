@@ -48,6 +48,15 @@ A `Reading` has no id, so two overlapping `Read`s of one device could not be tol
 - **Feature bit `FEATURE_READ_ID` (value 2, bit 1).** The service sets it when it echoes ids. A client then
   matches a read's answer by id alone. Without the bit, it matches by device name as before.
 
+### 2.3 Allocation counts
+
+- **`AllocStats` (request 33), answered by `AllocStats` (message 115).** The reply carries four
+  `u64`s (allocations, frees, bytes allocated, bytes live) from a service that counts, and
+  nothing from one that does not (`None`).
+- **Feature bit `FEATURE_ALLOC_STATS` (value 4, bit 2).** Set by a service that understands the
+  request; a client does not send it otherwise (an older service closes on an unknown
+  request), and `DeviceClient::alloc_stats` answers `None` instead.
+
 ## 3. Negotiation, when a version comes
 
 The rules the next version must follow, so that both sides keep working across the change:

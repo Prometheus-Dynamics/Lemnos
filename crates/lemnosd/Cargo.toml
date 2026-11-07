@@ -47,6 +47,11 @@ orion = [
     "dep:tokio",
 ]
 
+# Counts the service's allocations (`lemnos_linux_sys::alloc_stats`, two relaxed atomic adds
+# per call) and reports them to `lemnos-ctl stats`, to check a running board allocates
+# nothing in its steady state. Off in a release image unless it is wanted.
+alloc-stats = ["lemnos-linux-sys/alloc-stats"]
+
 [dependencies]
 embedded-hal.workspace = true
 lemnos-board = { workspace = true, features = ["linux"] }

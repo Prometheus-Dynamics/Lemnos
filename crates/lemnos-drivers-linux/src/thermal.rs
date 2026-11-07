@@ -66,7 +66,7 @@ impl ThermalZone {
 
     /// The temperature in m°C.
     pub fn temperature_mc(&self) -> Result<i32, SysfsError> {
-        sysfs::read_parsed(&self.root.join("temp"))
+        sysfs::attr(&self.root, "temp", sysfs::read_parsed)
     }
 }
 

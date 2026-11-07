@@ -24,7 +24,8 @@
 //!   led show --spec '<TOML body>' | --file PATH [--name N] | --json '<JSON body>'
 //!                                                     a look given in full, until replaced
 //!   looks list | show <name> | reload | save <name> (--spec|--file|--json)
-//!   stats                                            read timing of each sensor (reads, mean, max, last)
+//!   stats                                            read timing of each sensor (reads, mean, max, last),
+//!                                                    and the service's allocations when it counts them
 //!   calibration show|status|reset|stop|apply|discard <device>
 //!   calibration start <device> <accel-six|mag-rotate|gyro-hold>
 //!                                                     an IMU's or magnetometer's calibration
@@ -322,9 +323,14 @@ fn validate(mut args: Args) -> ExitCode {
 /// `--state PATH`), then the board's fans, then with `--all` every hwmon fan.
 /// `stats`: each sensor's read timing as the service measured it (reads, the
 /// reads that found no new sample, mean, longest and last read, in
-/// microseconds).
+/// microseconds), then the service's allocations since it started when it was
+/// built with `alloc-stats`.
 fn stats(options: ClientOptions) -> ExitCode {
-    match options.devices().and_then(|mut c| c.stats()) {
+    let mut client = match options.devices() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    match client.stats() {
         Ok(mut stats) => {
             stats.sort_by(|a, b| a.device.cmp(&b.device));
             println!(
@@ -338,10 +344,19 @@ fn stats(options: ClientOptions) -> ExitCode {
                     s.device, s.reads, s.misses, mean, s.max_us, s.last_us
                 );
             }
-            ExitCode::SUCCESS
         }
-        Err(e) => fail(e),
+        Err(e) => return fail(e),
     }
+    // Since the service started; run `stats` twice to see whether a steady state allocates.
+    match client.alloc_stats() {
+        Ok(Some(a)) => println!(
+            "allocations: {} allocs, {} frees, {} bytes allocated, {} bytes live",
+            a.allocs, a.frees, a.bytes, a.live_bytes
+        ),
+        Ok(None) => println!("allocations: not counted (lemnosd without alloc-stats)"),
+        Err(e) => return fail(e),
+    }
+    ExitCode::SUCCESS
 }
 
 /// `power <device> on|off|status|reset [--off-ms N]`: a power switch (a

@@ -46,3 +46,6 @@ pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};
 
 #[cfg(any(test, feature = "alloc-count"))]
 pub mod test_alloc;
+
+#[cfg(feature = "alloc-stats")]
+pub mod alloc_stats;

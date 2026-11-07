@@ -52,6 +52,7 @@ fn requests_round_trip() {
     });
     round_trip_request(Request::List);
     round_trip_request(Request::Stats);
+    round_trip_request(Request::AllocStats);
     round_trip_request(Request::Read {
         id: 6,
         device: "imu".into(),
@@ -186,6 +187,13 @@ fn messages_round_trip() {
         client_id: 3,
         features: crate::FEATURE_GPU_LEASE,
     });
+    round_trip_message(Message::AllocStats(None));
+    round_trip_message(Message::AllocStats(Some(crate::AllocStats {
+        allocs: 1_204,
+        frees: 1_180,
+        bytes: 393_216,
+        live_bytes: 61_440,
+    })));
     round_trip_message(Message::Stats(vec![
         ReadStats {
             device: "imu".into(),

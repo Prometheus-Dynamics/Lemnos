@@ -18,6 +18,11 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// With `alloc-stats`: every allocation counted, for `lemnos-ctl stats`.
+#[cfg(feature = "alloc-stats")]
+#[global_allocator]
+static ALLOCATOR: lemnos_linux_sys::alloc_stats::Counter = lemnos_linux_sys::alloc_stats::Counter;
+
 fn main() -> ExitCode {
     let mut board = std::env::var("LEMNOSD_BOARD").unwrap_or_else(|_| DEFAULT_BOARD.into());
     let mut socket = std::env::var("LEMNOSD_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.into());

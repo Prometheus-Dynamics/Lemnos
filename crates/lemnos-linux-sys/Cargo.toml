@@ -37,6 +37,9 @@ rp1 = []
 # Test support: `test_alloc`, an allocation-counting global allocator another crate's tests
 # can install. Never for shipped binaries.
 alloc-count = []
+# `alloc_stats`: a counting global allocator for a shipped binary (lemnosd's `alloc-stats`):
+# two relaxed atomic adds per call, read back with `alloc_stats::snapshot`.
+alloc-stats = []
 
 [dependencies]
 libc.workspace = true

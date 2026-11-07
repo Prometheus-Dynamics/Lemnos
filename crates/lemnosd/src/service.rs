@@ -1290,7 +1290,9 @@ impl Service {
                     version: VERSION,
                     board,
                     client_id: id,
-                    features: lemnos_ipc::FEATURE_GPU_LEASE | lemnos_ipc::FEATURE_READ_ID,
+                    features: lemnos_ipc::FEATURE_GPU_LEASE
+                        | lemnos_ipc::FEATURE_READ_ID
+                        | lemnos_ipc::FEATURE_ALLOC_STATS,
                 });
                 if first && self.clients[ci].events {
                     self.send_light_owners(ci);
@@ -1299,6 +1301,10 @@ impl Service {
             Request::List => {
                 let devices = self.slots.iter().map(Slot::describe).collect();
                 self.clients[ci].send(&Message::Devices(devices));
+            }
+            Request::AllocStats => {
+                let stats = alloc_stats();
+                self.clients[ci].send(&Message::AllocStats(stats));
             }
             Request::Stats => {
                 // Counted per read on the slot already; this only reads them.
@@ -2217,4 +2223,20 @@ fn log_first_frame() {
         .and_then(|t| t.split_whitespace().next().map(str::to_string))
         .unwrap_or_else(|| "?".into());
     eprintln!("lemnosd: first ring frame written at {uptime} s since boot");
+}
+
+/// The process's allocation counts, when lemnosd was built with `alloc-stats` and its counter
+/// is the global allocator.
+fn alloc_stats() -> Option<lemnos_ipc::AllocStats> {
+    #[cfg(feature = "alloc-stats")]
+    {
+        lemnos_linux_sys::alloc_stats::snapshot().map(|s| lemnos_ipc::AllocStats {
+            allocs: s.allocs,
+            frees: s.frees,
+            bytes: s.bytes,
+            live_bytes: s.live_bytes,
+        })
+    }
+    #[cfg(not(feature = "alloc-stats"))]
+    None
 }

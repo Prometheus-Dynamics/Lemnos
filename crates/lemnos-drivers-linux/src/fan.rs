@@ -92,24 +92,26 @@ impl HwmonFan {
     }
 
     pub fn pwm(&self) -> Result<u32, SysfsError> {
-        sysfs::read_parsed(&self.root.join("pwm1"))
+        sysfs::attr(&self.root, "pwm1", sysfs::read_parsed)
     }
 
     pub fn mode(&self) -> Result<i32, SysfsError> {
-        sysfs::read_parsed(&self.root.join("pwm1_enable"))
+        sysfs::attr(&self.root, "pwm1_enable", sysfs::read_parsed)
     }
 
     /// The tachometer, if the fan has one.
     pub fn rpm(&self) -> Result<Option<u32>, SysfsError> {
-        sysfs::read_parsed_optional(&self.root.join("fan1_input"))
+        sysfs::attr(&self.root, "fan1_input", sysfs::read_parsed_optional)
     }
 
     pub fn set_pwm(&self, pwm: u32) -> Result<(), SysfsError> {
-        sysfs::write(&self.root.join("pwm1"), pwm.min(PWM_MAX))
+        sysfs::attr(&self.root, "pwm1", |p| sysfs::write(p, pwm.min(PWM_MAX)))
     }
 
     pub fn set_mode(&self, mode: i32) -> Result<(), SysfsError> {
-        sysfs::write(&self.root.join("pwm1_enable"), mode.clamp(0, MODE_MAX))
+        sysfs::attr(&self.root, "pwm1_enable", |p| {
+            sysfs::write(p, mode.clamp(0, MODE_MAX))
+        })
     }
 
     /// Writes `pwm1_enable = 2`, the automatic control of most fan-controller
