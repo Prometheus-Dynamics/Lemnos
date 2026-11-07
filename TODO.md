@@ -45,9 +45,10 @@ Everything planned, in order. Execution is paused until the user starts it.
         reply; an inline look with no layers closes the connection; edge events ignore the
         `events` flag; a request inside the byte limits can exceed the frame limit and is closed
         without a refusal.
-  - [ ] Smaller ones to rule on: strings cut inside UTF-8, `opt` sentinels colliding with
-        values, lenient raw tags, `SubscribeChannels` requiring its id, reads matched by name,
-        trailing bytes unchecked.
+  - [x] Smaller ones, all settled 2026-11-06 (docs/ipc.md section 14): strings cut at a UTF-8
+        boundary (gap 9), `opt` sentinels saturated (gap 10), lenient raw tags refused (gap 11),
+        `SubscribeChannels` keeps its id (gap 12, kept), reads matched by an appended id
+        (gap 14), trailing bytes left unchecked (gap 8, kept as the rule).
 - [x] **4. Single owner of hardware blocks.** Done 2026-11-06 (dev 1ab6b5e): V4L2, subdev and
       media, RGA, VGLite, PiSP, the K230 and rkisp device layers and the sensor bridge are Lemnos's.
       `crates/rga` and `crates/vglite` came over from the graph runtime, and the generic parts of
@@ -87,7 +88,8 @@ Everything planned, in order. Execution is paused until the user starts it.
           golden-tested word for word against the vendor. Round caps and joins, curves, dashes and
           the swing handling are not ported (refused).
     - [x] K230 and rkisp device layers: `lemnos-drivers-k230isp` and `lemnos-drivers-rkisp`, from the camera stack's `crates/k230isp` and `crates/rkisp` (d17de2ed). Moved: the uAPI layouts and bindgen headers, the K230 register map, `RegisterAccess` and the statistics register reads, `Isp`, `ParamBuffer`, `isp32::{Variant, nodes}`, and both `device` layers (on `lemnos-v4l2` and `lemnos-linux-sys::vvcam_isp`). Stayed in the camera stack: the builders and statistics math (`params.rs`, `stats.rs`, `isp32/params.rs`, `isp32/stats.rs`). Untested on board: both `device` layers (no K230D or Rockchip SoC on this PC), the ISP32 fixed-point scales, and the K230 register map's unconfirmed constants. The uAPI layouts are in `lemnos-rkisp-sys`, whose ISP32 bitfield accessors (bindgen output) and bitfield-unit `Pod` impls are the only unsafe code of the move. The camera stack has not switched to these crates yet.
-- [ ] **5. Kernel module and Rust user-space drivers.** One small module of our own, its sources in
+- [ ] **5. Kernel module and Rust user-space drivers.** Leap, started 2026-11-06: the per-block
+      modules become one generic module (see "The leap" below). One small module of our own, its sources in
       `kernel-modules/` (GPL-2.0, see its README): claim a block, DMA buffers and device addresses, dma-buf export, interrupt forwarding,
       register mapping. The drivers are Rust in user space. It is a fast path, never a requirement:
       stock V4L2 stays as the fallback, and other boards, the simulator and other kernels stay on
@@ -132,7 +134,7 @@ Everything planned, in order. Execution is paused until the user starts it.
         Untested on board: other lanes, rates, data types and virtual channels, and `PACK_BYTES`.
   - [x] Reworded "Lemnos is user-space hardware access" in [docs/dma.md](docs/dma.md) and "no
         kernel modules" in [docs/system-service.md](docs/system-service.md) for the module.
-- [ ] **6. GPU**, per the agreed seam note (kept outside this repository, because it names the
+- [x] **6. GPU** (closed 2026-11-06: the lease is done, the rest closed or dropped below), per the agreed seam note (kept outside this repository, because it names the
       products). Mesa stays, and `lemnosd` coordinates rather than enforces: an advisory lease
       first, `lemnos-gpu` only when a consumer needs it.
   - [x] The advisory lease (2026-11-06): `lemnosd` keeps one per render node (named by driver,
@@ -153,9 +155,10 @@ Everything planned, in order. Execution is paused until the user starts it.
           hold the GPU until the service restarts.
         - Not overtaking: the first waiter is granted first, so a stream of shared leases cannot
           starve an exclusive waiter of the same priority.
-  - [ ] Switch the board runs from their shared `flock` lock file to `lemnos-ctl gpu run` once
-        the image's lemnosd has the lease (the consumers' call).
-  - [ ] `lemnos-gpu`: only when a consumer without wgpu needs it.
+  - [x] Closed 2026-11-06: switching the board runs from the `flock` lock file to
+        `lemnos-ctl gpu run` is the consumers' call, not Lemnos work; the lease is shipped.
+  - [x] Dropped 2026-11-06: `lemnos-gpu`. No consumer without wgpu has asked for it; it comes
+        back as a new item if one does.
 - [ ] **7. Shared and static builds.** Both modes, with core, surface and wrapper for each
       dependency. The workspace's LTO test informs how shared gets built.
   - [x] Decided 2026-11-06, for the image's surface checks: the feature is `shared` on each
@@ -169,7 +172,9 @@ Everything planned, in order. Execution is paused until the user starts it.
   - [x] lemnos-capi's `shared` feature (2026-11-06): `Client` links `liblemnos_capi.so.1` from
         `LEMNOS_CAPI_LIB_DIR` (or one the build script builds, for development), and the crate's
         own exports are left out. The tests, the C program's included, run both ways.
-  - [ ] The other surfaces, as each gets one.
+  - [ ] Leap, started 2026-11-06: the static and shared forms finished for `lemnos-capi`, with
+        `lemnos-abi` as the shared vocabulary (see "The leap" below). Other surfaces follow the
+        same pattern as each gets one.
 - [x] **Consumer compatibility of items 5-7 and the IPC gaps** (decided 2026-11-06, before the
       consumers switch). Each stays additive to what the consumers switch to now:
   - Item 5: the module path is a second, opt-in backend of lemnos-drivers-pisp's device layer.
@@ -200,10 +205,10 @@ Everything planned, in order. Execution is paused until the user starts it.
   - [x] Conversions and resizes on the CPU route (2026-11-06): `cpu::convert` with the three
         matrices the units offer and `cpu::resize` (area, bilinear with each unit's documented
         phase), scalar and RVV, byte-identical under qemu at three VLENs. Untested on board.
-  - [ ] Measure each unit against the CPU route's definitions (coefficient precision, phase,
-        rounding), and fill the `Exactness` of the `caps` rows.
-  - [ ] On a K230: run `cpu`'s tests with `LEMNOS_EXPECT_VECTOR=1` and time each operation against
-        its scalar loop.
+  - [x] Parked 2026-11-06, written, untested on board: measuring each unit against the CPU
+        route's definitions (to fill `caps`' `Exactness`) needs the RGA and VGLite boards, and
+        the RVV rows need a K230 (`LEMNOS_EXPECT_VECTOR=1`, then time against the scalar
+        loops). Both are board runs, picked up when such a board is on the bench.
 - [x] **8. `a_polled_400_hz_imu_delivers_each_sample_once` was intermittent.** Fixed: its rate floor
       is now 90 % of 400 for the time the service's threads had a CPU (their run-queue delay in
       `/proc/self/task/*/schedstat`), not a share set by a 10 ms wakeup probe's p99. Measured on two
@@ -265,6 +270,39 @@ Everything planned, in order. Execution is paused until the user starts it.
       answered only from a read of every channel. Otherwise they stay queued, and the next dispatch
       gives them a full read first. `a_one_shot_read_during_a_masked_subscription_read_gets_every_channel`
       (tests/subscribe.rs) fails at read 16 without the fix and passes with it.
+
+## The leap (go from the user, 2026-11-06)
+
+Lemnos goes first, since the consumers build on it. The joint-round lock (80d5d1e) stays stable
+for consumers: everything below is additive until they switch.
+
+- [ ] **A. One generic kernel module** (`kernel-modules/lemnos`, `lemnos.ko`, GPL-2.0). Item 5's
+      per-block modules become one:
+      - A core that claims any platform device bound through `driver_override` and gives it
+        `/dev/lemnos-<name>`. It reports the device's register regions and interrupts, allocates
+        DMA buffers and exports them as dma-bufs, imports dma-bufs to device addresses held per
+        open file, and forwards interrupts as timestamped reads with `poll`.
+      - Register mapping to user space only for a block whose DMA cannot reach memory the module
+        did not map (behind a confining IOMMU, or no DMA). The PiSP back end and the CSI-2
+        receiver are neither (docs/kernel-module.md), so their jobs keep being written by the
+        module.
+      - Those two become personalities inside the same module, with their ioctl uAPIs kept byte
+        for byte, so `be-module` and `csi2-module` work unchanged. The two old modules go once
+        board #1 passes the same runs.
+      - User side: `lemnos-linux-sys::block` (the uAPI) and a safe `lemnos-linux::block`.
+- [ ] **B. Item 7, the static and shared forms of `lemnos-capi`.** It has `staticlib`, `cdylib`,
+      the SONAME and the `shared` feature. Still to do:
+      - a symbol version node (`LEMNOS_1.0`);
+      - pkg-config files for both forms;
+      - an install layout;
+      - a check that refuses a second copy of the surface in one process;
+      - the C test linked statically and dynamically in the gate.
+- [ ] **C. `lemnos-abi` finalized as the shared vocabulary**:
+      - handles, status, slabs, buffers and fences in a header of their own
+        (`include/lemnos/abi.h`) that every surface includes, generated from the crate and
+        checked against its layout hash;
+      - the stability rules written down;
+      - abi 1.0 frozen.
 
 ## Round 4 (the user's list, 2026-11-03)
 
