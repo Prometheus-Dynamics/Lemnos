@@ -75,7 +75,8 @@ pub(crate) struct UpdateWatcher {
     progress: PathBuf,
     /// The status file's bytes as last read, and what they said: the file is
     /// re-parsed only when it changes (it lists every installed image, tens of
-    /// kilobytes, and is polled twice a second).
+    /// kilobytes). The service polls when inotify reports a change in its
+    /// directory (twice a second where it cannot watch).
     raw: Vec<u8>,
     next: Vec<u8>,
     parsed: Option<Status>,
@@ -110,6 +111,21 @@ impl UpdateWatcher {
             ember_until: None,
             trial_ember_ms,
         }
+    }
+
+    /// The directories whose changes [`Self::poll`] reads: the status
+    /// file's, and the copy progress's.
+    pub fn dirs(&self) -> [&Path; 2] {
+        [
+            self.status.parent().unwrap_or_else(|| Path::new("/")),
+            self.progress.parent().unwrap_or_else(|| Path::new("/")),
+        ]
+    }
+
+    /// When a poll is due with no file changed (ms on the service clock): the
+    /// trial boot's ember hold ending.
+    pub fn wake_at(&self) -> Option<u64> {
+        self.ember_until
     }
 
     /// Reads the files. `Some(view)` when the light should change: a new

@@ -11,6 +11,13 @@ use std::path::Path;
 
 /// `IN_*` event mask bits.
 pub mod mask {
+    /// A file was written to.
+    pub const MODIFY: u32 = 0x0000_0002;
+    /// A file open for writing was closed.
+    pub const CLOSE_WRITE: u32 = 0x0000_0008;
+    /// Add to the watch's mask rather than replace it (one inode watched for
+    /// several reasons).
+    pub const MASK_ADD: u32 = 0x2000_0000;
     /// Metadata changed.
     pub const ATTRIB: u32 = 0x0000_0004;
     /// Moved out of the watched directory.

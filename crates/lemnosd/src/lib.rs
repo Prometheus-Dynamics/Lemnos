@@ -35,6 +35,7 @@ mod service;
 pub mod sim;
 pub mod state;
 mod update;
+mod watch;
 mod workers;
 
 pub use service::{Service, ServiceConfig, ServiceError};

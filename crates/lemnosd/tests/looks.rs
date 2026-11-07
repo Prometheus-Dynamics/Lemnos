@@ -337,3 +337,103 @@ fn the_service_refuses_unknown_and_invalid_looks_and_shows_named_and_inline_ones
     stop.store(true, Ordering::Relaxed);
     handle.join().unwrap();
 }
+
+/// The service's look files and update status are watched (inotify): a new look file is
+/// known, and an update failure shows, well within the one-second poll they replaced.
+#[test]
+fn the_service_sees_a_new_look_file_and_an_update_failure_at_once() {
+    let root = scratch("watched");
+    fs::create_dir_all(root.join("dev")).unwrap();
+    fs::write(root.join("dev/leds0"), "").unwrap();
+    let looks_dir = root.join("looks.d");
+    fs::create_dir_all(&looks_dir).unwrap();
+    // The system states' looks (the failed update's), as on a device.
+    fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/looks/looks.d/system.toml"
+        ),
+        looks_dir.join("system.toml"),
+    )
+    .unwrap();
+    let status = root.join("run/board/update.json");
+    fs::create_dir_all(status.parent().unwrap()).unwrap();
+    fs::write(&status, r#"{"state": "idle"}"#).unwrap();
+    let socket = root.join("lemnosd.sock");
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (thread_stop, thread_root, thread_socket, thread_looks, thread_status) = (
+        Arc::clone(&stop),
+        root.clone(),
+        socket.clone(),
+        looks_dir.clone(),
+        status.clone(),
+    );
+    let handle = std::thread::spawn(move || {
+        let mut config = ServiceConfig::new(ring_board(&thread_root), thread_socket);
+        config.looks_dir = Some(thread_looks);
+        // Not there yet: watched through its parent once it is made.
+        config.looks_override_dir = Some(thread_root.join("var/looks.d"));
+        config.update_status = Some(thread_status);
+        config.booting_ms = None;
+        let mut service = Service::new(config, Box::new(SysBuses(thread_root))).unwrap();
+        ready_tx.send(()).unwrap();
+        service.run(&thread_stop).unwrap();
+        service.shutdown(false);
+    });
+    ready_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    let mut ctl = ClientOptions::new(&socket, "app")
+        .keep_intents()
+        .leds()
+        .unwrap();
+    ctl.status(lemnos_ipc::LedStatus::Ok).unwrap();
+    ctl.sync().unwrap();
+    eventually(&root, || first(&root) == Some([0, 178, 0, 0]));
+
+    // A look file written (whole, by a rename) is known at once.
+    let known_within = |ctl: &mut lemnos_ipc::LedClient, name: &str| {
+        let start = Instant::now();
+        while ctl.look(name).is_err() {
+            assert!(
+                start.elapsed() < Duration::from_millis(400),
+                "{name} unknown after {:?}",
+                start.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ctl.clear().unwrap();
+        ctl.status(lemnos_ipc::LedStatus::Ok).unwrap();
+        ctl.sync().unwrap();
+    };
+    fs::write(root.join("new.tmp"), format!("[looks.\"app.new\"]\n{RED}")).unwrap();
+    fs::rename(root.join("new.tmp"), looks_dir.join("new.toml")).unwrap();
+    known_within(&mut ctl, "app.new");
+    // In the writable directory, made after the service started.
+    fs::create_dir_all(root.join("var/looks.d")).unwrap();
+    fs::write(
+        root.join("var/looks.d/later.toml"),
+        format!("[looks.\"app.later\"]\n{BLUE}"),
+    )
+    .unwrap();
+    known_within(&mut ctl, "app.later");
+
+    // The updater reports a failure: the ring leaves the status green at once.
+    eventually(&root, || first(&root) == Some([0, 178, 0, 0]));
+    fs::write(
+        root.join("status.tmp"),
+        r#"{"state": "error", "error": "no space"}"#,
+    )
+    .unwrap();
+    fs::rename(root.join("status.tmp"), &status).unwrap();
+    let start = Instant::now();
+    eventually(&root, || first(&root) != Some([0, 178, 0, 0]));
+    assert!(
+        start.elapsed() < Duration::from_millis(400),
+        "the failure showed after {:?}",
+        start.elapsed()
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    handle.join().unwrap();
+    let _ = fs::remove_dir_all(&root);
+}

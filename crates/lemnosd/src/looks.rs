@@ -5,8 +5,9 @@
 //! there). Within a directory, files are read in name order and a later one
 //! wins a name.
 //!
-//! Files are watched: the service re-scans them about once a second, and on
-//! `SIGHUP` or `lemnos-ctl looks reload`. A file that fails to parse is
+//! Files are watched: the service re-scans them when inotify reports a change
+//! in their directories (about once a second where a directory cannot be
+//! watched), and on `SIGHUP` or `lemnos-ctl looks reload`. A file that fails to parse is
 //! reported and keeps the looks it had (a broken edit never blanks a look).
 
 use crate::presets::{self, PresetDir};
@@ -174,6 +175,11 @@ impl LookTable {
             self.rebuild();
         }
         changed
+    }
+
+    /// The look directories, lowest precedence first.
+    pub fn dirs(&self) -> impl Iterator<Item = &Path> {
+        self.dirs.iter().map(|(dir, _)| dir.as_path())
     }
 
     /// Whether the directories (or their absence) and the files read stat as

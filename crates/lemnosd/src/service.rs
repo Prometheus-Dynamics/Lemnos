@@ -11,6 +11,7 @@ use crate::notify::Notifier;
 use crate::schedule::{self, Due, Next};
 use crate::state;
 use crate::update::UpdateWatcher;
+use crate::watch::{self, FileWatch};
 use crate::workers::{Done, Job, Workers};
 use lemnos_board::fan_controller::FAN_CONTROLLER;
 use lemnos_board::{BoardDefinition, BoardError, Buses, DriverRegistry};
@@ -188,6 +189,14 @@ pub struct Service {
     owners: Vec<(String, u32)>,
     update: Option<UpdateWatcher>,
     next_update_ms: u64,
+    /// inotify over the update status and look directories: with a watch, a
+    /// file is re-read only when its directory reports a change (`*_dirty`),
+    /// so nothing wakes the loop while nothing changes; without, it is polled.
+    files: FileWatch,
+    update_watched: bool,
+    update_dirty: bool,
+    looks_watched: bool,
+    looks_dirty: bool,
     /// The first frame written to a ring has been logged (boot timing).
     first_frame_logged: bool,
     booting_until: Option<u64>,
@@ -281,6 +290,11 @@ impl Service {
             owners: Vec::new(),
             update: config.update_status.map(UpdateWatcher::new),
             next_update_ms: 0,
+            files: FileWatch::new(),
+            update_watched: false,
+            update_dirty: true,
+            looks_watched: false,
+            looks_dirty: true,
             first_frame_logged: false,
             booting_until: config.booting_ms.map(|ms| now_ms + ms),
             notifier: Notifier::none(),
@@ -302,6 +316,7 @@ impl Service {
             next_calibration_ms: 0,
             gpu: crate::gpu::GpuLeases::new(config.drm_class),
         };
+        service.watch_files();
         service.build_devices(now_ms);
         service.fan_loops = service
             .build_fan_loops()
@@ -891,10 +906,22 @@ impl Service {
     }
 
     fn poll_update(&mut self, now_ms: u64) {
-        if now_ms < self.next_update_ms {
-            return;
+        if self.update_watched {
+            let due = self
+                .update
+                .as_ref()
+                .and_then(UpdateWatcher::wake_at)
+                .is_some_and(|at| now_ms >= at);
+            if !self.update_dirty && !due {
+                return;
+            }
+            self.update_dirty = false;
+        } else {
+            if now_ms < self.next_update_ms {
+                return;
+            }
+            self.next_update_ms = now_ms + UPDATE_POLL_MS;
         }
-        self.next_update_ms = now_ms + UPDATE_POLL_MS;
         let Some(change) = self.update.as_mut().and_then(|u| u.poll(now_ms)) else {
             return;
         };
@@ -910,13 +937,32 @@ impl Service {
         }
     }
 
-    /// Re-reads the look files that changed, about once a second.
+    /// Watches the update status's and the look files' directories, so they
+    /// are re-read when they change; what cannot be watched is polled.
+    fn watch_files(&mut self) {
+        if let Some(update) = &self.update {
+            let dirs = update.dirs();
+            self.update_watched = dirs.iter().all(|dir| self.files.watch(dir, watch::UPDATE));
+        }
+        let dirs: Vec<PathBuf> = self.looks.dirs().map(Path::to_path_buf).collect();
+        self.looks_watched = dirs.iter().all(|dir| self.files.watch(dir, watch::LOOKS));
+    }
+
+    /// Re-reads the look files that changed: when their directories report a
+    /// change, or about once a second where they cannot be watched.
     #[allow(clippy::print_stderr)]
     fn poll_looks(&mut self, now_ms: u64) {
-        if now_ms < self.next_looks_ms {
-            return;
+        if self.looks_watched {
+            if !self.looks_dirty {
+                return;
+            }
+            self.looks_dirty = false;
+        } else {
+            if now_ms < self.next_looks_ms {
+                return;
+            }
+            self.next_looks_ms = now_ms + LOOKS_POLL_MS;
         }
-        self.next_looks_ms = now_ms + LOOKS_POLL_MS;
         if self.looks.scan() {
             eprint!("lemnosd: looks changed: {}", self.looks.report());
             self.invalidate_lights();
@@ -1930,8 +1976,14 @@ impl Service {
                 }
             }
         }
-        if self.update.is_some() {
-            next = next.min(self.next_update_ms * 1000);
+        match &self.update {
+            Some(update) if self.update_watched => {
+                if let Some(at) = update.wake_at() {
+                    next = next.min(at * 1000);
+                }
+            }
+            Some(_) => next = next.min(self.next_update_ms * 1000),
+            None => {}
         }
         if self.raw.polls_edges() {
             next = next.min(now_us + 20_000);
@@ -1989,11 +2041,20 @@ impl Service {
         for fd in self.raw.edge_fds() {
             self.pollfds.push(PollFd::from_raw(fd, POLLIN));
         }
+        let files = self.files.fd().map(|fd| {
+            self.pollfds.push(PollFd::new(fd, POLLIN));
+            self.pollfds.len() - 1
+        });
         if let Some(fd) = extra {
             self.pollfds.push(PollFd::new(fd, POLLIN));
         }
         poll_many(&mut self.pollfds, Some(wait))?;
         let extra_ready = extra.is_some() && self.pollfds.last().is_some_and(|p| p.revents() != 0);
+        if files.is_some_and(|i| self.pollfds[i].revents() != 0) {
+            let changed = self.files.drain();
+            self.update_dirty |= changed & watch::UPDATE != 0;
+            self.looks_dirty |= changed & watch::LOOKS != 0;
+        }
         self.workers.drain_wake();
         self.collect_reads();
 

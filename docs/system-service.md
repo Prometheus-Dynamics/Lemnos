@@ -504,8 +504,9 @@ smooth at any speed. Its brightness is `(1 - d/tail)^2.2` for `d` LEDs behind th
 The device package's updater drives `updating` with no changes beyond what it already does.
 The updater writes a status file (`update.json`) on every state change (`staging`,
 `staged`, `trying`, `confirmed`, `rolled-back`, `error`) and the image copy's progress
-(0-1000) to `update/progress` next to it. `lemnosd` reads both every 500 ms and holds a
-system intent of its own. The status file's path is set only by `LEMNOSD_UPDATE_STATUS`
+(0-1000) to `update/progress` next to it. `lemnosd` watches both directories (inotify) and
+reads the files when one changes (every 500 ms where it cannot watch), and holds a system
+intent of its own. The status file's path is set only by `LEMNOSD_UPDATE_STATUS`
 (the device package's `/etc/default/lemnosd.env`; for example `/run/board/update.json`);
 `lemnosd` has no built-in default and leaves updates off the light without it:
 
@@ -599,6 +600,13 @@ Reads are demand-driven (`crates/lemnosd/src/devices.rs`, `workers.rs`):
   or a named look costs the one allocation its decoding makes (the pixel list, the name).
   `alloc_loops.rs` polls a 40-image status file and the example look files beside the loops
   above (0 allocations), and counts each light request kind. Untested on board.
+- **No wake-ups for files that do not change.** The update status and look directories are
+  watched with inotify in the service's poll set: an unchanged file costs no wake-up, no stat
+  and no read. A directory that does not exist yet (a writable look directory before the first
+  save) is waited for through its nearest existing parent; one removed is waited for again.
+  Where inotify or a watch is not available, the timed polls above remain. `tests/looks.rs`
+  checks that a new look file (also in a directory made after start) is known, and an update
+  failure shows, within 400 ms. Untested on board.
 - **Allocations on a running board.** Built with the `alloc-stats` feature, `lemnosd` runs on a
   counting allocator (`lemnos_linux_sys::alloc_stats`: two relaxed atomic adds per call) and
   sets `FEATURE_ALLOC_STATS` (4). `Request::AllocStats` answers its allocations, frees, bytes
