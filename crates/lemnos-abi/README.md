@@ -26,5 +26,36 @@ No enum crosses the boundary: every type is `#[repr(C)]` or a fixed-size integer
 newer peer sends stays defined behaviour. Surfaces sit at per-frame or per-job granularity:
 calls across a shared-library boundary are not inlined.
 
-`no_std`, no dependencies, no unsafe code. Host-tested only; no C caller exists yet (the C
-header comes with Lemnos's own surface).
+`no_std`, no dependencies, no unsafe code.
+
+## C header
+
+`include/lemnos/abi.h` declares these types for C: `LemnosStatus` and the `LEMNOS_E_*` codes,
+`LemnosHandle`, `LemnosFeatures`, `LemnosAbiVersion`, `LemnosMessageSink`, `LemnosPlaneDesc`,
+`LemnosBufferDesc` and `LemnosFenceDesc`, with `LEMNOS_ABI_TYPES_{MAJOR,MINOR,LAYOUT_HASH}`. Every
+Lemnos surface's header includes it, so a program using two surfaces sees each type once. Each
+surface crate ships a byte-identical copy in its own `include/lemnos/` (a test there checks it),
+and this crate's tests check every value, size and offset in the header against the Rust types
+with a C compiler.
+
+## Stability (version 1.0, frozen 2026-11-06)
+
+- **Frozen layouts.** The layouts in the hash (`Status`, `Handle`, `PlaneDesc`, `BufferDesc`,
+  `FenceDesc`, `AbiVersion`) are frozen at version 1.0, layout hash `0xa02cfb4a8dd4545b`.
+  `src/version.rs` asserts that hash at compile time, so any change to them fails the build.
+- **Major version.** Changing a frozen layout, renaming or renumbering a status code, flag or
+  fence kind, or changing what an existing value means is a new major. That is a new
+  `LEMNOS_ABI_TYPES_MAJOR`, and every surface that embeds these types takes a new major too.
+- **Minor version.** Additions are a minor: a new status code below `PANIC`, a new
+  `BufferDesc` flag or fence kind, or a new type. Peers already accept values they do not know.
+  A receiver refuses a fence kind it does not know, and passes through a status code it does not
+  know.
+- **Growing a struct.** Only the structs with a `struct_size` field (`BufferDesc`,
+  `AbiVersion`) may grow, by fields appended at the end, as a minor. A receiver reads up to the
+  size the sender gave.
+- **No enums.** No Rust enum ever crosses the boundary.
+- **Pointer-width types.** `MessageSink` is outside the hash because its size follows the
+  pointer width. Its shape is frozen with the rest.
+- **Each surface's own version.** A surface has its own `AbiVersion` (for `lemnos-capi`,
+  `LEMNOS_ABI_MAJOR` and `LEMNOS_LAYOUT_HASH`), and its layout hash covers this crate's hash. So
+  a change here shows up in every surface's handshake.

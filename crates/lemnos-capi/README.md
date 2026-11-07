@@ -4,6 +4,11 @@ Lemnos's C surface, version 1.0: the `lemnosd` device client behind ten `extern 
 declared in [`include/lemnos.h`](include/lemnos.h), built as a static and a shared library, and
 `Client`, a Rust wrapper that calls through those same functions.
 
+`lemnos.h` includes [`include/lemnos/abi.h`](include/lemnos/abi.h), the types every Lemnos
+surface shares (status codes, handles, the handshake, message sinks, buffer and fence
+descriptors). That file is a byte-identical copy of `lemnos-abi`'s, and a test checks it; ship
+the whole `include/` directory.
+
 The exported names are listed in [`lemnos.exports`](lemnos.exports), one per line, and a test
 keeps that list, the header and the crate's exports in step. On Linux the shared library's
 SONAME is `liblemnos_capi.so.<LEMNOS_ABI_MAJOR>` (now `liblemnos_capi.so.1`), so install it

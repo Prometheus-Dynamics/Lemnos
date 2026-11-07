@@ -239,3 +239,130 @@ fn out_buffers_take_all_or_nothing_and_report_the_length() {
     );
     assert_eq!(&room, b"abc\0");
 }
+
+/// `include/lemnos/abi.h` declares this crate's values, and (where a C
+/// compiler is installed) its sizes and offsets.
+#[cfg(feature = "std")]
+#[test]
+fn the_header_matches_the_crate() {
+    extern crate std;
+    use core::mem::offset_of;
+    use std::{format, fs, process::Command, string::String};
+
+    let header = include_str!("../include/lemnos/abi.h");
+    let define = |name: &str| {
+        header
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("#define ")?
+                    .strip_prefix(name)?
+                    .strip_prefix(' ')
+            })
+            .unwrap_or_else(|| panic!("{name} in abi.h"))
+            .trim()
+    };
+    let hash = define("LEMNOS_ABI_TYPES_LAYOUT_HASH");
+    let hash = u64::from_str_radix(hash.trim_start_matches("0x").trim_end_matches("ULL"), 16)
+        .expect("hex hash");
+    assert_eq!(
+        hash, LAYOUT_HASH,
+        "LEMNOS_ABI_TYPES_LAYOUT_HASH should be {LAYOUT_HASH:#018x}"
+    );
+    assert_eq!(
+        define("LEMNOS_ABI_TYPES_MAJOR"),
+        format!("{}", VERSION.major)
+    );
+    assert_eq!(
+        define("LEMNOS_ABI_TYPES_MINOR"),
+        format!("{}", VERSION.minor)
+    );
+    assert_eq!(define("LEMNOS_MAX_PLANES"), format!("{MAX_PLANES}"));
+
+    if !Command::new("cc")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        return;
+    }
+    let checks: [(&str, i64); 26] = [
+        ("LEMNOS_OK", Status::OK.0.into()),
+        ("LEMNOS_E_BASE", Status::LEMNOS_BASE.into()),
+        ("LEMNOS_E_STALE_HANDLE", Status::STALE_HANDLE.0.into()),
+        (
+            "LEMNOS_E_VERSION_MISMATCH",
+            Status::VERSION_MISMATCH.0.into(),
+        ),
+        (
+            "LEMNOS_E_BUFFER_TOO_SMALL",
+            Status::BUFFER_TOO_SMALL.0.into(),
+        ),
+        ("LEMNOS_E_PANIC", Status::PANIC.0.into()),
+        ("LEMNOS_BUFFER_OWNED", BufferDesc::OWNED.into()),
+        ("LEMNOS_FENCE_NONE", FenceDesc::NONE.into()),
+        ("LEMNOS_FENCE_SYNC_FILE", FenceDesc::SYNC_FILE.into()),
+        ("LEMNOS_FENCE_SYNCOBJ", FenceDesc::SYNCOBJ.into()),
+        ("sizeof(LemnosStatus)", size_of::<Status>() as i64),
+        ("sizeof(LemnosHandle)", size_of::<Handle>() as i64),
+        ("sizeof(LemnosFeatures)", size_of::<Features>() as i64),
+        ("sizeof(LemnosAbiVersion)", size_of::<AbiVersion>() as i64),
+        (
+            "offsetof(LemnosAbiVersion, layout)",
+            offset_of!(AbiVersion, layout) as i64,
+        ),
+        ("sizeof(LemnosMessageSink)", size_of::<MessageSink>() as i64),
+        ("sizeof(LemnosPlaneDesc)", size_of::<PlaneDesc>() as i64),
+        (
+            "offsetof(LemnosPlaneDesc, offset)",
+            offset_of!(PlaneDesc, offset) as i64,
+        ),
+        (
+            "offsetof(LemnosPlaneDesc, size)",
+            offset_of!(PlaneDesc, size) as i64,
+        ),
+        ("sizeof(LemnosBufferDesc)", size_of::<BufferDesc>() as i64),
+        (
+            "offsetof(LemnosBufferDesc, plane_count)",
+            offset_of!(BufferDesc, plane_count) as i64,
+        ),
+        (
+            "offsetof(LemnosBufferDesc, modifier)",
+            offset_of!(BufferDesc, modifier) as i64,
+        ),
+        (
+            "offsetof(LemnosBufferDesc, planes)",
+            offset_of!(BufferDesc, planes) as i64,
+        ),
+        ("sizeof(LemnosFenceDesc)", size_of::<FenceDesc>() as i64),
+        (
+            "offsetof(LemnosFenceDesc, fd)",
+            offset_of!(FenceDesc, fd) as i64,
+        ),
+        (
+            "offsetof(LemnosFenceDesc, point)",
+            offset_of!(FenceDesc, point) as i64,
+        ),
+    ];
+    let mut source = String::from("#include \"lemnos/abi.h\"\n");
+    for (expr, value) in checks {
+        source.push_str(&format!(
+            "_Static_assert(({expr}) == ({value}), \"{expr}\");\n"
+        ));
+    }
+    let dir = std::env::temp_dir().join(format!("lemnos-abi-header-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("check.c");
+    fs::write(&file, source).unwrap();
+    let out = Command::new("cc")
+        .args(["-std=c11", "-Wall", "-Werror", "-fsyntax-only", "-I"])
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/include"))
+        .arg(&file)
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

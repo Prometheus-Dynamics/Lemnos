@@ -303,12 +303,15 @@ async fn async_runtime_waiter_does_not_block_refresh_progress() {
         .expect("register driver");
     let runtime = AsyncRuntime::from_runtime(runtime);
 
+    // A deadlock check, not a speed check: a refresh blocked by the waiter would
+    // wait out the waiter's 60 s, far past the 10 s bound, while a loaded host
+    // passes (at load 150 on 32 cores it missed the former 250 ms bound).
     let subscription = runtime.subscribe_from_start();
     let waiter = {
         let subscription = subscription.clone();
         tokio::spawn(async move {
             subscription
-                .wait_and_poll_next(Some(Duration::from_secs(1)))
+                .wait_and_poll_next(Some(Duration::from_secs(60)))
                 .await
                 .expect("wait_and_poll_next")
         })
@@ -317,7 +320,7 @@ async fn async_runtime_waiter_does_not_block_refresh_progress() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let refresh = tokio::time::timeout(
-        Duration::from_millis(250),
+        Duration::from_secs(10),
         runtime.refresh(
             DiscoveryContext::new(),
             vec![Arc::new(hardware.clone()) as Arc<dyn DiscoveryProbe>],
@@ -328,7 +331,7 @@ async fn async_runtime_waiter_does_not_block_refresh_progress() {
     .expect("refresh");
     assert_eq!(refresh.diff.added.len(), 1);
 
-    let waited = tokio::time::timeout(Duration::from_millis(250), waiter)
+    let waited = tokio::time::timeout(Duration::from_secs(10), waiter)
         .await
         .expect("waiter should complete")
         .expect("wait task");

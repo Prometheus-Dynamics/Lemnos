@@ -297,7 +297,8 @@ for consumers: everything below is additive until they switch.
       - an install layout;
       - a check that refuses a second copy of the surface in one process;
       - the C test linked statically and dynamically in the gate.
-- [ ] **C. `lemnos-abi` finalized as the shared vocabulary**:
+- [x] **C. `lemnos-abi` finalized as the shared vocabulary** (2026-11-06; abi 1.0, layout hash
+      `0xa02cfb4a8dd4545b` asserted at compile time, rules in the crate's README):
       - handles, status, slabs, buffers and fences in a header of their own
         (`include/lemnos/abi.h`) that every surface includes, generated from the crate and
         checked against its layout hash;

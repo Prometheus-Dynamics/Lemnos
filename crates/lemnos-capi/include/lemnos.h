@@ -21,6 +21,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Status codes, handles, the handshake and message sinks: shared by every surface. */
+#include "lemnos/abi.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,14 +31,6 @@ extern "C" {
 #define LEMNOS_ABI_MAJOR 1
 #define LEMNOS_ABI_MINOR 0
 #define LEMNOS_LAYOUT_HASH 0xfd630e784f3059feULL
-
-/* Status codes (lemnos_abi::Status). */
-#define LEMNOS_OK 0
-#define LEMNOS_E_BASE (-4096)
-#define LEMNOS_E_STALE_HANDLE (LEMNOS_E_BASE)
-#define LEMNOS_E_VERSION_MISMATCH (LEMNOS_E_BASE - 1)
-#define LEMNOS_E_BUFFER_TOO_SMALL (LEMNOS_E_BASE - 2)
-#define LEMNOS_E_PANIC (LEMNOS_E_BASE - 3)
 
 #define LEMNOS_MAX_CHANNELS 16
 #define LEMNOS_NO_VALUE INT32_MIN
@@ -82,25 +77,8 @@ extern "C" {
 #define LEMNOS_AXIS_Y 2
 #define LEMNOS_AXIS_Z 3
 
-/* A handle: slot index in the low 32 bits, generation in the high 32; 0 is null. */
-typedef uint64_t LemnosHandle;
-
-typedef struct LemnosAbiVersion {
-    uint32_t struct_size;
-    uint16_t major;
-    uint16_t minor;
-    uint64_t layout;
-} LemnosAbiVersion;
-
 #define LEMNOS_VERSION_INIT \
     { sizeof(LemnosAbiVersion), LEMNOS_ABI_MAJOR, LEMNOS_ABI_MINOR, LEMNOS_LAYOUT_HASH }
-
-typedef struct LemnosMessageSink {
-    void *context;
-    void (*write)(void *context, const uint8_t *text, size_t len);
-} LemnosMessageSink;
-
-#define LEMNOS_NO_SINK ((LemnosMessageSink){ NULL, NULL })
 
 typedef struct LemnosDeviceInfo {
     uint32_t struct_size;

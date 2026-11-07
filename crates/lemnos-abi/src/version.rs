@@ -110,6 +110,15 @@ const SHAPES: [u64; 32] = concat(&[
 /// then the same on every target, so a C header can carry it as a constant.
 pub const LAYOUT_HASH: u64 = layout_hash(&SHAPES);
 
+/// Version 1.0 is frozen: this is its layout hash, as `include/lemnos/abi.h`
+/// declares it. A change to any hashed layout fails to compile here, and is a
+/// new major version (see the README's stability rules).
+const FROZEN_1_0: u64 = 0xa02c_fb4a_8dd4_545b;
+const _: () = assert!(
+    LAYOUT_HASH == FROZEN_1_0,
+    "a layout of version 1.0 changed: that is a new major"
+);
+
 /// This crate's version. A surface that passes its types embeds it in its own
 /// handshake (or checks it alongside).
 pub const VERSION: AbiVersion = AbiVersion::new(1, 0, LAYOUT_HASH);

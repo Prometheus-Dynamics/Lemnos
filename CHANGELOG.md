@@ -8,6 +8,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-abi` version 1.0 is frozen as the vocabulary every Lemnos C surface shares.
+  - `include/lemnos/abi.h` declares its types for C (`LemnosStatus` and `LEMNOS_E_*`, `LemnosHandle`, `LemnosFeatures`, `LemnosAbiVersion`, `LemnosMessageSink`, `LemnosPlaneDesc`, `LemnosBufferDesc`, `LemnosFenceDesc`). The crate's tests check every value, size and offset against the Rust types with a C compiler.
+  - The layout hash `0xa02cfb4a8dd4545b` is asserted at compile time. The README sets the stability rules.
+  - `lemnos-capi`'s `lemnos.h` now includes a byte-identical copy of the header instead of defining those types itself. Its declarations and layout hash are unchanged.
 - `lemnos-drivers-pisp`: `FrontEndSetup::image_compressed` captures the front end's raw output 0 as PiSP 8-bit compressed (mode 1, rp1-cfe's `PC1R`/`PC1G`/`PC1g`/`PC1B`/`PC1M`), half the bytes of 16-bit. `FrontEndDevice::image_format` is then `formats::PISP_COMP1` with the driver's stride; the caller enables the front end's compression on output 0 and the back end decompresses. A source change for `FrontEndSetup` literals. Untested on board.
 - `lemnos-drivers-rga::cpu` gains conversions and resizes:
   - `convert` turns any `PixelFormat` into any other of the same size, with `Matrix::{Bt601Limited, Bt601Full, Bt709Limited}`, the matrices the units offer. Coefficients are in 1/1024ths with `(sum + 512) >> 10` rounding; 4:2:0 chroma is nearest from YUV and a 2x2 average to it; gray is full-range luma.

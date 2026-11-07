@@ -12,6 +12,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=include/lemnos.h");
+    println!("cargo:rerun-if-changed=include/lemnos/abi.h");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }

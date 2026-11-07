@@ -318,3 +318,15 @@ fn the_shared_wrapper_exports_nothing_of_its_own() {
             .exists()
     );
 }
+
+/// The shared types' header ships here as a copy of `lemnos-abi`'s, byte for
+/// byte, so this crate's `include/` stands alone.
+#[test]
+fn the_abi_header_is_lemnos_abis() {
+    let ours = include_str!("../include/lemnos/abi.h");
+    let theirs = include_str!("../../lemnos-abi/include/lemnos/abi.h");
+    assert!(
+        ours == theirs,
+        "copy crates/lemnos-abi/include/lemnos/abi.h to include/lemnos/"
+    );
+}
