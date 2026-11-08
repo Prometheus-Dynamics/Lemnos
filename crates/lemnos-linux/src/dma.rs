@@ -549,6 +549,62 @@ fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+/// The udmabuf device, which makes a dma-buf from memfd pages.
+const UDMABUF: &str = "/dev/udmabuf";
+
+/// Whether this kernel offers udmabuf and this process may use it (`/dev/udmabuf` opens
+/// read-write).
+pub fn udmabuf_available() -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(UDMABUF)
+        .is_ok()
+}
+
+/// A dma-buf over `len` bytes of `memfd` from `offset`, close-on-exec: memory the process
+/// already has (shared with a peer through the memfd, say) handed to a device without a copy.
+/// `offset` and `len` must be whole pages and the memfd sealed against shrinking
+/// (`F_SEAL_SHRINK`, see [`sealed_memfd`]); both are checked first, with an `InvalidInput`
+/// error naming what is wrong, instead of the kernel's bare `EINVAL`.
+pub fn udmabuf_from_memfd(memfd: BorrowedFd<'_>, offset: u64, len: usize) -> io::Result<DmaBuf> {
+    let page = lemnos_linux_sys::mmap::page_size() as u64;
+    let invalid = |why: String| io::Error::new(io::ErrorKind::InvalidInput, why);
+    if len == 0 || !offset.is_multiple_of(page) || !(len as u64).is_multiple_of(page) {
+        return Err(invalid(format!(
+            "udmabuf: offset {offset} and length {len} must be whole {page}-byte pages"
+        )));
+    }
+    if lemnos_linux_sys::udmabuf::seals(memfd)? & lemnos_linux_sys::udmabuf::SEAL_SHRINK == 0 {
+        return Err(invalid(
+            "udmabuf: the memfd is not sealed against shrinking".into(),
+        ));
+    }
+    let dev = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(UDMABUF)?;
+    let fd = lemnos_linux_sys::udmabuf::create(dev.as_fd(), memfd, offset, len as u64)?;
+    Ok(DmaBuf { fd, len })
+}
+
+/// A memfd of `len` bytes (rounded up to whole pages), named `name` in `/proc`, close-on-exec,
+/// sealed against shrinking: ready for [`udmabuf_from_memfd`]. It can still grow.
+pub fn sealed_memfd(name: &str, len: usize) -> io::Result<OwnedFd> {
+    let page = lemnos_linux_sys::mmap::page_size();
+    let len = len.max(1).next_multiple_of(page);
+    let name = CString::new(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "memfd name contains a NUL byte",
+        )
+    })?;
+    let fd = lemnos_linux_sys::udmabuf::memfd_create(&name)?;
+    File::from(fd.try_clone()?).set_len(len as u64)?;
+    lemnos_linux_sys::udmabuf::add_seals(fd.as_fd(), lemnos_linux_sys::udmabuf::SEAL_SHRINK)?;
+    Ok(fd)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

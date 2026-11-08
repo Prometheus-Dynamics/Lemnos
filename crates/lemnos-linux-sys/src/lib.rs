@@ -36,6 +36,7 @@ pub mod rvv;
 pub mod signal;
 pub mod spi;
 pub mod time;
+pub mod udmabuf;
 pub mod usbfs;
 pub mod v3d;
 pub mod v4l2;
