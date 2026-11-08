@@ -129,11 +129,7 @@ impl LedClient {
         })?;
         match reply {
             Ok(_) => {
-                for held in &mut self.conn.held {
-                    if held.device == device && !held.test && layer_of(held) == 1 {
-                        set_show_inputs(&mut held.show, progress, spots);
-                    }
-                }
+                self.conn.held_inputs(device, progress, spots);
                 Ok(())
             }
             Err(reason) => Err(ClientError::Rejected(reason)),
@@ -161,21 +157,7 @@ impl LedClient {
     /// Bookkeeping for a request sent (or about to be): what a reconnection
     /// sends again.
     fn remember(&mut self, request: &LedRequest) {
-        let request = request.clone();
-        if request.show == LedShow::Clear {
-            self.conn
-                .held
-                .retain(|r| r.device != request.device || (request.test && !r.test));
-        } else {
-            let layer = layer_of(&request);
-            self.conn
-                .held
-                .retain(|r| r.device != request.device || layer_of(r) != layer);
-            // Test intents are leases the caller renews: not re-sent.
-            if request.duration_ms.is_none() && !request.test {
-                self.conn.held.push(request);
-            }
-        }
+        self.conn.remember_led(request);
     }
 
     /// Shows `status` with the light's default effect.
@@ -278,8 +260,43 @@ impl LedClient {
     }
 }
 
+impl super::Connection {
+    /// Bookkeeping for an LED request the service took (or is about to): what
+    /// a reconnection sends again.
+    pub(super) fn remember_led(&mut self, request: &LedRequest) {
+        let request = request.clone();
+        if request.show == LedShow::Clear {
+            self.held
+                .retain(|r| r.device != request.device || (request.test && !r.test));
+        } else {
+            let layer = layer_of(&request);
+            self.held
+                .retain(|r| r.device != request.device || layer_of(r) != layer);
+            // Test intents are leases the caller renews: not re-sent.
+            if request.duration_ms.is_none() && !request.test {
+                self.held.push(request);
+            }
+        }
+    }
+
+    /// New inputs the service took for this client's look on `device`, kept
+    /// for a reconnection (see [`LedClient::update_inputs`]).
+    pub(super) fn held_inputs(
+        &mut self,
+        device: &str,
+        progress: Option<u16>,
+        spots: Option<SpotList>,
+    ) {
+        for held in &mut self.held {
+            if held.device == device && !held.test && layer_of(held) == 1 {
+                set_show_inputs(&mut held.show, progress, spots);
+            }
+        }
+    }
+}
+
 /// A fraction (0 to 1) as thousandths.
-fn permille(fraction: f32) -> u16 {
+pub(super) fn permille(fraction: f32) -> u16 {
     (fraction.clamp(0.0, 1.0) * 1000.0).round() as u16
 }
 

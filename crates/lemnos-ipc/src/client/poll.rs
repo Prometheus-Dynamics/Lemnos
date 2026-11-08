@@ -16,10 +16,22 @@
 //! handshake blocks briefly (up to the client's timeout). A reconnection opens a new socket,
 //! so [`Polled::Connected`] means: register [`DeviceClient::fd`] again.
 //!
+//! LED and light requests go out the same way ([`DeviceClient::send_show`],
+//! [`send_update_inputs`](DeviceClient::send_update_inputs),
+//! [`send_light_brightness`](DeviceClient::send_light_brightness),
+//! [`send_clear`](DeviceClient::send_clear)), on the device connection: no second connection
+//! for a light. Their answers come back from `poll` as [`Polled::Answer`] (the brightness as a
+//! [`Polled::Reply`]), and what the service took is remembered and sent again after a
+//! reconnection, as [`LedClient`](crate::LedClient) does. These encode and keep the request,
+//! so they allocate; the readings path stays allocation-free.
+//!
 //! [`reconnecting`]: crate::ClientOptions::reconnecting
 
 use super::{ClientError, ClientEvent, DeviceClient, RECONNECT_MAX};
-use crate::wire::{self, Event, Message, NextFrame, RawReading, Refusal};
+use crate::wire::{
+    self, Event, LedRequest, LedShow, Message, NextFrame, RawReading, Refusal, Request,
+};
+use lemnos_light::{Spot, SpotList};
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::Arc;
@@ -39,6 +51,11 @@ pub enum Polled {
         id: u32,
         result: Result<f64, Refusal>,
     },
+    /// The answer to a [`DeviceClient::send_show`], [`send_clear`](DeviceClient::send_clear)
+    /// or [`send_update_inputs`](DeviceClient::send_update_inputs) with this id: taken, or
+    /// refused with the service's reason (an unknown look, a look that takes no spots, a light
+    /// this client may not write), the light then keeping what it showed.
+    Answer { id: u32, result: Result<(), String> },
     /// A status, control or light event.
     Event(Event),
     /// Connected, with a new socket: register [`DeviceClient::fd`] again. Subscriptions and
@@ -49,7 +66,105 @@ pub enum Polled {
     Disconnected { error: ClientError },
 }
 
+/// A polled LED or light request waiting for its answer.
+pub(super) enum LedPending {
+    /// A show (or a clear): remembered once taken.
+    Show(LedRequest),
+    /// New look inputs: remembered once taken.
+    Inputs {
+        device: String,
+        progress: Option<u16>,
+        spots: Option<SpotList>,
+    },
+    /// A light's brightness: the answer comes in thousandths.
+    Brightness,
+}
+
 impl DeviceClient {
+    /// Sends an LED request (a look, a look with spots, a frame, a clear, with its fade and
+    /// the rest as built) without waiting; returns its id. The answer comes from
+    /// [`poll`](Self::poll) as a [`Polled::Answer`] with this id; once taken, the request is
+    /// what a reconnection shows again.
+    pub fn send_show(&mut self, request: LedRequest) -> Result<u32, ClientError> {
+        let id = self.conn.next_id();
+        let mut request = request;
+        request.id = id;
+        let request = Request::Led(request);
+        self.send_request(&request)?;
+        let Request::Led(request) = request else {
+            unreachable!("built as an LED request")
+        };
+        self.led_pending.push((id, LedPending::Show(request)));
+        Ok(id)
+    }
+
+    /// Drops this client's intents ([`LedClient::clear`](crate::LedClient::clear)) without
+    /// waiting; returns the request's id (see [`send_show`](Self::send_show)).
+    pub fn send_clear(&mut self) -> Result<u32, ClientError> {
+        self.send_show(LedRequest::new(LedShow::Clear))
+    }
+
+    /// Changes the inputs of the look this client shows on `device`
+    /// ([`LedClient::update_inputs`](crate::LedClient::update_inputs)) without waiting;
+    /// returns the request's id. Refused, with the reason, in a [`Polled::Answer`] when this
+    /// client shows no look or the look takes no such input.
+    pub fn send_update_inputs(
+        &mut self,
+        device: &str,
+        progress: Option<f32>,
+        spots: Option<&[Spot]>,
+    ) -> Result<u32, ClientError> {
+        let id = self.conn.next_id();
+        let progress = progress.map(super::led::permille);
+        let spots = spots.map(SpotList::new);
+        self.send_request(&Request::LedInputs {
+            id,
+            device: device.to_string(),
+            progress,
+            spots,
+        })?;
+        self.led_pending.push((
+            id,
+            LedPending::Inputs {
+                device: device.to_string(),
+                progress,
+                spots,
+            },
+        ));
+        Ok(id)
+    }
+
+    /// Sets a light's ring-wide look brightness (0 to 1; `persist` saves it) without waiting
+    /// ([`light_brightness`](Self::light_brightness)); returns the request's id. The value
+    /// applied (0 to 1) comes from [`poll`](Self::poll) as a [`Polled::Reply`] with this id.
+    pub fn send_light_brightness(
+        &mut self,
+        device: &str,
+        value: f64,
+        persist: bool,
+    ) -> Result<u32, ClientError> {
+        let id = self.conn.next_id();
+        self.send_request(&Request::LightSetting {
+            id,
+            device: device.to_string(),
+            look_brightness: super::permille(value),
+            persist,
+        })?;
+        self.led_pending.push((id, LedPending::Brightness));
+        Ok(id)
+    }
+
+    fn send_request(&mut self, request: &Request) -> Result<(), ClientError> {
+        self.conn.scratch.clear();
+        self.conn.scratch.extend_from_slice(&request.encode());
+        self.conn.send_scratch()
+    }
+
+    fn take_pending(&mut self, id: u32) -> Option<LedPending> {
+        let at = self.led_pending.iter().position(|(i, _)| *i == id)?;
+        Some(self.led_pending.swap_remove(at).1)
+    }
+
     /// Polled use on or off (`poll` turns it on). On, the socket is non-blocking
     /// between the blocking calls.
     pub fn set_nonblocking(&mut self, on: bool) -> Result<(), ClientError> {
@@ -128,6 +243,8 @@ impl DeviceClient {
                         return Ok(Some(Polled::Connected { reconnects }));
                     }
                     ClientEvent::Disconnected { error } => {
+                        // Nothing sent before will be answered now.
+                        self.led_pending.clear();
                         return Ok(Some(Polled::Disconnected { error }));
                     }
                     ClientEvent::Data(message) => {
@@ -211,7 +328,32 @@ impl DeviceClient {
                 *reading = r;
                 Some(Polled::Reading)
             }
-            Message::Reply { id, result } => Some(Polled::Reply { id, result }),
+            Message::Reply { id, result } => match self.take_pending(id) {
+                // The service answers a brightness in thousandths, as it was asked.
+                Some(LedPending::Brightness) => Some(Polled::Reply {
+                    id,
+                    result: result.map(|permille| permille / 1000.0),
+                }),
+                _ => Some(Polled::Reply { id, result }),
+            },
+            Message::Text { id, result } => {
+                let pending = self.take_pending(id)?;
+                if result.is_ok() {
+                    match pending {
+                        LedPending::Show(request) => self.conn.remember_led(&request),
+                        LedPending::Inputs {
+                            device,
+                            progress,
+                            spots,
+                        } => self.conn.held_inputs(&device, progress, spots),
+                        LedPending::Brightness => {}
+                    }
+                }
+                Some(Polled::Answer {
+                    id,
+                    result: result.map(|_| ()),
+                })
+            }
             Message::Event(e) => Some(Polled::Event(e)),
             Message::Devices(devices) => {
                 self.conn.devices = devices

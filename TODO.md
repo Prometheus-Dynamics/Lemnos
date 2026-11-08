@@ -300,6 +300,37 @@ the camera stack and the OS image's API.
   7.1 ns for cycles only, with `perf_user_access`=1 and `config1` bit 1. User-mode values are
   2^32 off `read()` with the documented conversion: settle on board before the backend lands.
 
+### Measured and not landed (2026-11-07)
+
+- **lemnos-orion's lemnosd pump as a tokio task on the polled client** (patch kept outside the
+  tree). On board #1, 60 s windows, two runs each: steady threads 3 → 2 (a blocking-pool thread
+  for about 1 s in every 10 s, for the calibration poll), context switches −6 % (≈2090 → ≈1960
+  per minute), CPU the same (7-9 ticks), but PSS +36 kB (1436 → 1472 kB) and the binary
+  +25 232 B (1 428 496 → 1 453 728 B): tokio's IO driver (mio, epoll, eventfd) costs more than
+  the thread saves. Decided: not landed. Revisit when the light watcher can go polled as well
+  (the polled LED sends make that possible), so the IO driver pays for two threads.
+
+### Camera sensor module (OV9782), given to Lemnos
+
+The upstream ov9282 driver plus the image's OV9782 changes, as our GPL module, with the mode and
+register data in one place (the camera stack's copy retires once ours lands). Beyond parity:
+2x2 analog binning (0x3820[0], 0x3821[0..1], 0x3837), fractional exposure (0x3500-0x3502 carry
+1/16 row; upstream writes whole rows), group hold (0x3208-0x320D) for atomic exposure and gain,
+a test-pattern control (0x5E00), the first-frame drop (0x4242), array crop (0x3800-0x3807). Keep
+RAW8 at 0x030D = 0x60 (96 MHz system clock), as decided. Never write 0x3D80 (OTP program).
+The camera stack runs its parity set on board #1 against it (latch frames, VTS+1 frame length,
+pixel rates, exposure margin 25, black level 64, flips and Bayer order, blanking ranges, line
+time, latency, 120 fps with no drops).
+
+### Asked by the camera stack, shape answered
+
+- Held statistics in place: done (`next_held_mapped`). A cached stats buffer (a dma-heap
+  import with a sync before reading) would make both the copy and in-place reads cheap: to
+  measure against the uncached map.
+- The back end config copy per job: the buffer is a cached dma-heap already, so a per-slot diff
+  reads twice what a copy reads. Not done until the profile's `pispbe-config copy` time on board
+  #1 shows it matters; a caller-supplied dirty list is the shape if it does.
+
 ## The leap (go from the user, 2026-11-06)
 
 Lemnos goes first, since the consumers build on it. The joint-round lock (80d5d1e) stays stable

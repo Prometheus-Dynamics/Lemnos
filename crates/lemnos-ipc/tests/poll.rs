@@ -1,8 +1,12 @@
 //! Polled use of a `DeviceClient` against a fake service: requests sent without
 //! waiting, answers and events drained, and nothing allocated in the steady state.
 
-use lemnos_ipc::wire::{Event, Message, RawReading, Request, decode_request};
+use lemnos_ipc::wire::{Event, LedRequest, LedShow, Message, RawReading, Request, decode_request};
 use lemnos_ipc::{ClientError, ClientOptions, DeviceStatus, FEATURE_READ_ID, Polled};
+use std::sync::Mutex;
+
+/// The LED requests the fake service took, as `connection: look (inputs)` lines.
+static LED_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
 use lemnos_linux_sys::test_alloc::{Counting, allocations};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
@@ -27,14 +31,14 @@ fn services(name: &str, connections: usize) -> (PathBuf, JoinHandle<()>) {
     let path = dir.join("sock");
     let listener = UnixListener::bind(&path).unwrap();
     let handle = std::thread::spawn(move || {
-        for _ in 0..connections {
-            serve(listener.accept().unwrap().0);
+        for c in 0..connections {
+            serve(listener.accept().unwrap().0, c);
         }
     });
     (path, handle)
 }
 
-fn serve(mut stream: std::os::unix::net::UnixStream) {
+fn serve(mut stream: std::os::unix::net::UnixStream, connection: usize) {
     {
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -80,6 +84,41 @@ fn serve(mut stream: std::os::unix::net::UnixStream) {
                     Request::Get { id, .. } => vec![Message::Reply {
                         id,
                         result: Ok(1.5),
+                    }],
+                    // Looks named "nope" are refused; the rest are taken and logged.
+                    Request::Led(r) => {
+                        let refused =
+                            matches!(&r.show, LedShow::Look { name, .. } if name == "nope");
+                        if !refused {
+                            LED_LOG
+                                .lock()
+                                .unwrap()
+                                .push(format!("{connection}: {:?}", r.show));
+                        }
+                        let result = if refused {
+                            Err("unknown look \"nope\"".to_string())
+                        } else {
+                            Ok(String::new())
+                        };
+                        if r.id == 0 {
+                            Vec::new()
+                        } else {
+                            vec![Message::Text { id: r.id, result }]
+                        }
+                    }
+                    Request::LedInputs { id, progress, .. } => vec![Message::Text {
+                        id,
+                        result: progress
+                            .map(|_| String::new())
+                            .ok_or_else(|| "this look takes no spots".to_string()),
+                    }],
+                    Request::LightSetting {
+                        id,
+                        look_brightness,
+                        ..
+                    } => vec![Message::Reply {
+                        id,
+                        result: Ok(f64::from(look_brightness)),
                     }],
                     _ => Vec::new(),
                 };
@@ -253,5 +292,70 @@ async fn the_tokio_adapter_waits_on_the_socket() {
         client.next(&mut reading).await,
         Err(ClientError::Closed)
     ));
+    service.join().unwrap();
+}
+
+/// LED and light requests on the device connection: answered through `poll`, refusals with
+/// their reason, the brightness in 0 to 1, and what was taken shown again after a
+/// reconnection (with its latest inputs), while what was refused is not.
+#[test]
+fn led_requests_are_answered_through_poll_and_held() {
+    let (path, service) = services("led", 2);
+    let mut client = ClientOptions::new(&path, "poll")
+        .reconnecting()
+        .devices()
+        .unwrap();
+    let mut reading = RawReading::default();
+    assert!(matches!(
+        next(&mut client, &mut reading),
+        Polled::Connected { reconnects: 0 }
+    ));
+    let look = |name: &str| {
+        LedRequest::new(LedShow::Look {
+            name: name.into(),
+            progress: None,
+        })
+    };
+    let shown = client.send_show(look("ring")).unwrap();
+    let refused = client.send_show(look("nope")).unwrap();
+    let inputs = client.send_update_inputs("", Some(0.5), None).unwrap();
+    let no_spots = client.send_update_inputs("", None, None).unwrap();
+    let bright = client.send_light_brightness("", 0.25, false).unwrap();
+    let mut got = Vec::new();
+    for _ in 0..5 {
+        got.push(next(&mut client, &mut reading));
+    }
+    assert!(matches!(got[0], Polled::Answer { id, result: Ok(()) } if id == shown));
+    assert!(
+        matches!(&got[1], Polled::Answer { id, result: Err(why) } if *id == refused && why.contains("nope"))
+    );
+    assert!(matches!(got[2], Polled::Answer { id, result: Ok(()) } if id == inputs));
+    assert!(matches!(&got[3], Polled::Answer { id, result: Err(_) } if *id == no_spots));
+    assert!(matches!(got[4], Polled::Reply { id, result: Ok(v) } if id == bright && v == 0.25));
+
+    // Reconnected, the service is shown the look the client holds, with its inputs.
+    client.send_read("close").unwrap();
+    assert!(matches!(
+        next(&mut client, &mut reading),
+        Polled::Disconnected { .. }
+    ));
+    assert!(matches!(
+        next(&mut client, &mut reading),
+        Polled::Connected { reconnects: 1 }
+    ));
+    let id = client.send_clear().unwrap();
+    assert!(
+        matches!(next(&mut client, &mut reading), Polled::Answer { id: got, result: Ok(()) } if got == id)
+    );
+    let log = LED_LOG.lock().unwrap().clone();
+    let again: Vec<_> = log.iter().filter(|l| l.starts_with("1: ")).collect();
+    assert_eq!(again.len(), 2, "{log:?}");
+    assert!(
+        again[0].contains("ring") && again[0].contains("500"),
+        "{log:?}"
+    );
+    assert!(again[1].contains("Clear"), "{log:?}");
+    assert!(!log.iter().any(|l| l.contains("nope")));
+    drop(client);
     service.join().unwrap();
 }

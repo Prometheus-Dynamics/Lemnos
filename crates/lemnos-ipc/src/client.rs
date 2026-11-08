@@ -231,6 +231,7 @@ impl ClientOptions {
         self.events.get_or_insert(true);
         Ok(DeviceClient {
             conn: Connection::open(self)?,
+            led_pending: Vec::new(),
         })
     }
 
@@ -735,6 +736,8 @@ pub use async_client::AsyncDeviceClient;
 /// Reads, subscribes to and controls `lemnosd`'s devices.
 pub struct DeviceClient {
     conn: Connection,
+    /// Polled LED and light requests waiting for their answer (see `poll`).
+    led_pending: Vec<(u32, poll::LedPending)>,
 }
 
 impl DeviceClient {
