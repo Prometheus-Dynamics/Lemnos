@@ -78,6 +78,13 @@ pub struct MockI2cTarget {
     #[cfg(feature = "std")]
     pub sampler: Option<Sampler>,
     pointer: u16,
+    /// Registers keep their own bytes (see [`MockI2c::with_word_register`]).
+    word_registers: bool,
+}
+
+/// Where byte `offset` of a word register lives in [`MockI2cTarget::registers`].
+fn word_key(register: u16, offset: usize) -> u16 {
+    (register << 8) | offset as u16
 }
 
 /// A sensor's output: a sample every `period` on the host's clock. The sample
@@ -243,6 +250,20 @@ impl MockI2c {
             let target = s.targets.entry(address).or_default();
             for (i, b) in bytes.iter().enumerate() {
                 target.registers.insert(register.wrapping_add(i as u16), *b);
+            }
+        });
+        self
+    }
+
+    /// Presets a register of a target whose registers are wider than a byte at consecutive
+    /// addresses (an INA2xx's 16-bit registers): each register keeps its own bytes, so a
+    /// neighbour does not overlap it, and a transfer stays on the register it addressed.
+    pub fn with_word_register(self, address: u8, register: u8, bytes: &[u8]) -> Self {
+        with(&self.state, |s| {
+            let target = s.targets.entry(address).or_default();
+            target.word_registers = true;
+            for (i, b) in bytes.iter().enumerate() {
+                target.registers.insert(word_key(register.into(), i), *b);
             }
         });
         self
@@ -470,9 +491,15 @@ impl I2cState {
                         if !previous_write {
                             data = &data[width.bytes().min(data.len())..];
                         }
-                        for b in data {
-                            target.registers.insert(target.pointer, *b);
-                            target.pointer = target.pointer.wrapping_add(1);
+                        if target.word_registers {
+                            for (i, b) in data.iter().enumerate() {
+                                target.registers.insert(word_key(target.pointer, i), *b);
+                            }
+                        } else {
+                            for b in data {
+                                target.registers.insert(target.pointer, *b);
+                                target.pointer = target.pointer.wrapping_add(1);
+                            }
                         }
                     }
                     previous_write = true;
@@ -490,6 +517,12 @@ impl I2cState {
                                 *b = fifo.queue.pop_front().unwrap_or(0);
                             }
                             fifo.publish_level(&mut target.registers);
+                        }
+                        None if target.word_registers => {
+                            for (i, b) in buf.iter_mut().enumerate() {
+                                let key = word_key(target.pointer, i);
+                                *b = target.registers.get(&key).copied().unwrap_or(0);
+                            }
                         }
                         None => {
                             for b in buf.iter_mut() {
@@ -681,6 +714,21 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
+    #[test]
+    fn word_registers_at_consecutive_addresses_do_not_overlap() {
+        let mut bus = MockI2c::new()
+            .with_target(0x40, AddressWidth::Bits8)
+            .with_word_register(0x40, 0x3e, &[0x54, 0x49])
+            .with_word_register(0x40, 0x3f, &[0x23, 0x81]);
+        let mut read = |register: u8| {
+            let mut data = [0u8; 2];
+            embedded_hal::i2c::I2c::write_read(&mut bus, 0x40, &[register], &mut data).unwrap();
+            data
+        };
+        assert_eq!(read(0x3e), [0x54, 0x49]);
+        assert_eq!(read(0x3f), [0x23, 0x81]);
+    }
+
     #[test]
     fn a_streaming_fifo_buffers_frames_on_the_device_clock() {
         let bus = MockI2c::new()

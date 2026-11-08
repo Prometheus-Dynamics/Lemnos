@@ -144,8 +144,8 @@ fn service(name: &str) -> MockLemnosd {
         .with_registers(0x18, 0x00, &[0x1e])
         .with_registers(0x68, 0x00, &[0x0f])
         .with_registers(0x10, 0x40, &[0x32])
-        .with_registers(0x40, 0x3e, &[0x54, 0x49])
-        .with_registers(0x40, 0x3f, &[0x23, 0x81])
+        .with_word_register(0x40, 0x3e, &[0x54, 0x49])
+        .with_word_register(0x40, 0x3f, &[0x23, 0x81])
         .with_sampler(0x18, 0x12, Duration::from_millis(5))
         .set_logging(false);
     let board = board(&root);
@@ -166,9 +166,11 @@ impl Agent {
     fn start(service: &MockLemnosd) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let events = Arc::new(AtomicUsize::new(0));
+        let set_up = Arc::new(AtomicUsize::new(0));
         let mut threads = Vec::new();
         let socket = service.socket().to_path_buf();
         let (s, e, path) = (stop.clone(), events.clone(), socket.clone());
+        let done = set_up.clone();
         threads.push(
             std::thread::Builder::new()
                 .name("agent-devices".into())
@@ -185,6 +187,7 @@ impl Agent {
                     ] {
                         client.subscribe(device, period).unwrap();
                     }
+                    done.fetch_add(1, Ordering::Relaxed);
                     while !s.load(Ordering::Relaxed) {
                         if let Ok(Some(_)) = client.next_event_timeout(Duration::from_millis(20)) {
                             e.fetch_add(1, Ordering::Relaxed);
@@ -194,6 +197,7 @@ impl Agent {
                 .unwrap(),
         );
         let (s, e) = (stop.clone(), events.clone());
+        let done = set_up.clone();
         threads.push(
             std::thread::Builder::new()
                 .name("agent-light".into())
@@ -203,6 +207,7 @@ impl Agent {
                         .leds()
                         .unwrap();
                     client.watch_frames("status-ring", 30).unwrap();
+                    done.fetch_add(1, Ordering::Relaxed);
                     while !s.load(Ordering::Relaxed) {
                         if let Ok(Some(_)) = client.next_frame(Some(Duration::from_millis(20))) {
                             e.fetch_add(1, Ordering::Relaxed);
@@ -211,6 +216,16 @@ impl Agent {
                 })
                 .unwrap(),
         );
+        // A client's connection and subscriptions make the service allocate, as they may. On a
+        // starved machine they can outlast any fixed warm-up, so wait for them.
+        let deadline = std::time::Instant::now() + Duration::from_secs(180);
+        while set_up.load(Ordering::Relaxed) < threads.len() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the agent's clients did not finish connecting"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         Self {
             stop,
             events,

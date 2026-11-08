@@ -454,9 +454,14 @@ for consumers: everything below is additive until they switch.
       - **Fixed:** status events are encoded from the slot into reused frames. A degraded fan's
         reason is replaced only when it changes (it allocated every tick while degraded). From
         start, the only fan allocation left is the reason's first growth.
-      - **Still open:** `alloc_board`'s 21 allocations at load average about 114 were not
-        reproduced again. Starvation can make the fan's input stale and flip it, which is the
-        same path, but that is not verified.
+      - **`alloc_board`'s 21 allocations, found (2026-11-08):** one failed build of the `power`
+        device, with backtraces from a run starved on one CPU. The test's mock set the INA238's
+        two ID registers byte by byte, so the second overwrote half of the first, the driver
+        read the wrong manufacturer, and `power` never came up. It retried at 1, 3 and 7 s, and a
+        late start put a retry in the measured window. The mock has word registers now and the
+        test waits for its clients to finish connecting. Not a service allocation in steady
+        state. A device that stays absent does allocate on each retry (21 here), now every 8 s
+        at most.
 - [x] **Batched IMU: no lost samples, stamps on the device's clock** (2026-11-07, asked by the
       coordinator after the board check of the stamp fix):
       - **Cause.** The 0.4 % lost samples were single samples, with or without load: 79 of 20 078
