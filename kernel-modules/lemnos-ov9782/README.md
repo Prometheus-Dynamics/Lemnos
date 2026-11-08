@@ -8,27 +8,35 @@ like the rest of `kernel-modules/`.
 A fork of the kernel's `drivers/media/i2c/ov9282.c` (7.2.9) with the OV9782 variant patches the
 camera images carried on top of it. The fork keeps only the OV9782: its compatible
 (`ovti,ov9782`), registers, modes and controls are exactly as the patched driver had them. RAW8
-stays at 96 MHz (`0x030D` = `0x60`). Only the module name (`lemnos-ov9782`), the driver name and
-the module description differ.
+stays at 96 MHz (`0x030D` = `0x60`). The module name (`lemnos-ov9782`), the driver name and the
+module description differ, and so does register access: plain `i2c_transfer` and `i2c_master_send`
+helpers in place of the kernel's `v4l2-cci` and regmap. The transactions are the same by reading
+regmap's I2C code (one write per register, a write then a read for each read); they were not
+captured on the bus.
+
+It loads on a kernel with `VIDEO_OV9282` off and no `V4L2_CCI*`, a symbol pair with no prompt that
+only an in-tree sensor driver can turn on. It needs `videodev`, `v4l2-async`, `v4l2-fwnode` and `mc`.
 
 The baseline was checked: the patched upstream source gives the same `srcversion` as the stock
 module on the board (`srcversion` hashes the source only), so the fork starts from what runs today.
 
 ## Status
 
-Builds clean (`W=1`, 31 440 B unstripped, 16 469 B of text and data) against the image's own
+Builds clean (`W=1`, 31 336 B unstripped, 16 872 B of text and data) against the image's own
 built kernel tree. Not shipped in any image yet.
 
-**Parity with the stock module, board #1** (7.2.9-v8-16k, 2026-11-08, two passes): the module
+**Parity with the stock module, board #1** (7.2.9-v8-16k, 2026-11-08): the module
 probes, the subdevice is named `ov9782 10-0060`, and the receiver takes it with no kernel warnings.
 Every control (range, default, flags, value), mbus code, frame size, active format and selection
 is identical to the stock module's, compared with both in the same state: after the camera
-service had configured the sensor for 1280x800 8-bit at 120 fps.
+service had configured the sensor for 1280x800 8-bit at 120 fps. The one value that varies between
+runs is analogue gain, which auto-exposure sets (64 and 66 in the last pass).
 
 | Driver | Frames | Seconds | fps | Delivered | Sequence gaps | Corrupted | ISP skipped |
 |---|---|---|---|---|---|---|---|
 | stock `ov9282` | 17 443 | 145.38 | 119.98 | 17 390 | 0 | 0 | 0 |
-| `lemnos-ov9782` | 4 191 | 34.94 | 119.96 | 4 171 | 0 | 0 | 0 |
+| `lemnos-ov9782` through regmap | 4 191 | 34.94 | 119.96 | 4 171 | 0 | 0 | 0 |
+| `lemnos-ov9782` plain I2C, this source | 4 194 | 34.97 | 119.95 | 4 164 | 0 | 0 | 0 |
 
 These are separate runs of different lengths through the camera service. Not compared: pixel
 content, per-frame timing, and the register writes themselves (the board has no regmap debugfs for

@@ -325,6 +325,10 @@ The camera stack runs its parity set on board #1 against it (latch frames, VTS+1
 pixel rates, exposure margin 25, black level 64, flips and Bayer order, blanking ranges, line
 time, latency, 120 fps with no drops).
 
+Ruled: register access is plain I2C, no `v4l2-cci` and no regmap. With the in-tree sensor driver
+off nothing selects `V4L2_CCI_I2C`, and `REGMAP_I2C` is only there if something else selects it.
+No caller chained errors through the helpers' `err` argument, so the local ones do not take one.
+
 ### Asked by the camera stack, shape answered
 
 - Held statistics in place: done (`next_held_mapped`). A cached stats buffer (a dma-heap

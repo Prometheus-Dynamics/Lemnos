@@ -17,7 +17,6 @@
 #include <linux/math.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
-#include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 
 #include <media/v4l2-cci.h>
@@ -214,7 +213,7 @@ struct ov9282_mode {
  * @dev: Pointer to generic device
  * @sd: V4L2 sub-device
  * @variant: Selected sensor-family variant
- * @regmap: Regmap for sensor register access
+ * @client: I2C client for sensor register access
  * @pad: Media pad. Only one pad supported
  * @reset_gpio: Sensor reset gpio
  * @inclk: Sensor input clock
@@ -237,7 +236,7 @@ struct ov9282 {
 	struct device *dev;
 	struct v4l2_subdev sd;
 	const struct ov9282_variant *variant;
-	struct regmap *regmap;
+	struct i2c_client *client;
 	struct media_pad pad;
 	struct gpio_desc *reset_gpio;
 	struct clk *inclk;
@@ -273,6 +272,86 @@ static const struct ov9282_variant ov9782_variant = {
 static const s64 link_freq[] = {
 	OV9282_LINK_FREQ,
 };
+
+/*
+ * Sensor register access: plain I2C, one transaction per register, 16-bit
+ * address and big-endian value. The module uses neither regmap nor the kernel's
+ * v4l2-cci helpers, so it needs no module that nothing else in the kernel may
+ * select. From v4l2-cci.h it takes only the header-only macros and table type.
+ */
+
+/* @reg carries its width of 1 to 4 bytes, from CCI_REG8() to CCI_REG32(). */
+static int ov9282_reg_read(const struct i2c_client *client, u32 reg, u32 *val)
+{
+	unsigned int len = CCI_REG_WIDTH_BYTES(reg);
+	u8 addr[2], data[4] = {};
+	struct i2c_msg msgs[] = {
+		{ .addr = client->addr, .len = sizeof(addr), .buf = addr },
+		{ .addr = client->addr, .flags = I2C_M_RD, .len = len, .buf = data },
+	};
+	int ret;
+
+	*val = 0;
+	put_unaligned_be16(CCI_REG_ADDR(reg), addr);
+	ret = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
+	if (ret != ARRAY_SIZE(msgs)) {
+		ret = ret < 0 ? ret : -EIO;
+		dev_err(&client->dev, "Error reading reg 0x%04lx: %d\n",
+			CCI_REG_ADDR(reg), ret);
+		return ret;
+	}
+
+	*val = get_unaligned_be32(data) >> (8 * (4 - len));
+	return 0;
+}
+
+static int ov9282_reg_write(const struct i2c_client *client, u32 reg, u32 val)
+{
+	unsigned int len = CCI_REG_WIDTH_BYTES(reg);
+	u8 buf[6];
+	int ret;
+
+	put_unaligned_be16(CCI_REG_ADDR(reg), buf);
+	put_unaligned_be32(val << (8 * (4 - len)), buf + 2);
+	ret = i2c_master_send(client, buf, 2 + len);
+	if (ret != 2 + len) {
+		ret = ret < 0 ? ret : -EIO;
+		dev_err(&client->dev, "Error writing reg 0x%04lx: %d\n",
+			CCI_REG_ADDR(reg), ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int ov9282_reg_update_bits(const struct i2c_client *client, u32 reg,
+				  u32 mask, u32 val)
+{
+	u32 current_val;
+	int ret;
+
+	ret = ov9282_reg_read(client, reg, &current_val);
+	if (ret)
+		return ret;
+
+	return ov9282_reg_write(client, reg, (current_val & ~mask) | (val & mask));
+}
+
+static int ov9282_reg_write_seq(const struct i2c_client *client,
+				const struct cci_reg_sequence *regs,
+				unsigned int num_regs)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < num_regs; i++) {
+		ret = ov9282_reg_write(client, regs[i].reg, regs[i].val);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
 
 /*
  * Common registers
@@ -583,15 +662,15 @@ static int ov9282_update_exp_gain(struct ov9282 *ov9282, u32 exposure, u32 gain)
 	dev_dbg(ov9282->dev, "Set exp %u (~%u us), analog gain %u",
 		exposure, exposure_us, gain);
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_HOLD, 0x01, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_HOLD, 0x01);
 	if (ret)
 		return ret;
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_EXPOSURE, exposure << 4, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_EXPOSURE, exposure << 4);
 	if (ret)
 		goto error_release_group_hold;
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_AGAIN, gain, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_AGAIN, gain);
 	if (ret)
 		goto error_release_group_hold;
 
@@ -607,7 +686,7 @@ static int ov9282_update_exp_gain(struct ov9282 *ov9282, u32 exposure, u32 gain)
 					     OV9282_STROBE_FRAME_SPAN_DEFAULT));
 
 error_release_group_hold:
-	ret_hold = cci_write(ov9282->regmap, OV9282_REG_HOLD, 0, NULL);
+	ret_hold = ov9282_reg_write(ov9282->client, OV9282_REG_HOLD, 0);
 
 	return ret ? ret : ret_hold;
 }
@@ -692,28 +771,28 @@ static int ov9282_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_VBLANK:
 		lpfr = ov9282->vblank + ov9282->cur_mode->height;
-		ret = cci_write(ov9282->regmap, OV9282_REG_LPFR, lpfr, NULL);
+		ret = ov9282_reg_write(ov9282->client, OV9282_REG_LPFR, lpfr);
 		break;
 	case V4L2_CID_HFLIP:
-		ret = cci_update_bits(ov9282->regmap, OV9282_REG_TIMING_FORMAT_2,
-				      OV9282_FLIP_BIT, ctrl->val ? OV9282_FLIP_BIT : 0, NULL);
+		ret = ov9282_reg_update_bits(ov9282->client, OV9282_REG_TIMING_FORMAT_2,
+					     OV9282_FLIP_BIT, ctrl->val ? OV9282_FLIP_BIT : 0);
 		break;
 	case V4L2_CID_VFLIP:
-		ret = cci_update_bits(ov9282->regmap, OV9282_REG_TIMING_FORMAT_1,
-				      OV9282_FLIP_BIT, ctrl->val ? OV9282_FLIP_BIT : 0, NULL);
+		ret = ov9282_reg_update_bits(ov9282->client, OV9282_REG_TIMING_FORMAT_1,
+					     OV9282_FLIP_BIT, ctrl->val ? OV9282_FLIP_BIT : 0);
 		break;
 	case V4L2_CID_HBLANK:
-		ret = cci_write(ov9282->regmap, OV9282_REG_TIMING_HTS,
-				(ctrl->val + ov9282->cur_mode->width) >> 1, NULL);
+		ret = ov9282_reg_write(ov9282->client, OV9282_REG_TIMING_HTS,
+				       (ctrl->val + ov9282->cur_mode->width) >> 1);
 		break;
 	case V4L2_CID_FLASH_STROBE_OE:
-		ret = cci_update_bits(ov9282->regmap, OV9282_REG_OUTPUT_ENABLE6,
-				      OV9282_OUTPUT_ENABLE6_STROBE,
-				      ctrl->val ? OV9282_OUTPUT_ENABLE6_STROBE : 0, NULL);
+		ret = ov9282_reg_update_bits(ov9282->client, OV9282_REG_OUTPUT_ENABLE6,
+					     OV9282_OUTPUT_ENABLE6_STROBE,
+					     ctrl->val ? OV9282_OUTPUT_ENABLE6_STROBE : 0);
 		break;
 	case V4L2_CID_FLASH_DURATION:
-		ret = cci_write(ov9282->regmap, OV9282_REG_STROBE_FRAME_SPAN,
-				ov9282_us_to_flash_duration(ov9282, ctrl->val), NULL);
+		ret = ov9282_reg_write(ov9282->client, OV9282_REG_STROBE_FRAME_SPAN,
+				       ov9282_us_to_flash_duration(ov9282, ctrl->val));
 		break;
 	default:
 		dev_err(ov9282->dev, "Invalid control %d", ctrl->id);
@@ -958,36 +1037,36 @@ static int ov9282_apply_trigger_config(struct ov9282 *ov9282)
 {
 	int ret;
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_MODE_SELECT,
-			OV9282_MODE_STANDBY, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_MODE_SELECT,
+			       OV9282_MODE_STANDBY);
 	if (ret)
 		return ret;
 
 	/* Low power mode */
-	ret = cci_write(ov9282->regmap, OV9282_REG_POWER_CTRL, 0x01, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_POWER_CTRL, 0x01);
 	if (ret)
 		return ret;
 
 	/* External trigger snapshot */
-	ret = cci_write(ov9282->regmap, OV9282_REG_LOW_POWER_MODE_CTRL, 0x04, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_LOW_POWER_MODE_CTRL, 0x04);
 	if (ret)
 		return ret;
 
 	/* 1 frame per trigger */
-	ret = cci_write(ov9282->regmap, OV9282_REG_NUM_FRAME_ON_TRIG, 0x01, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_NUM_FRAME_ON_TRIG, 0x01);
 	if (ret)
 		return ret;
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_SLEEP_PERIOD_CTRL0, 0x00, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_SLEEP_PERIOD_CTRL0, 0x00);
 	if (ret)
 		return ret;
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_SLEEP_PERIOD_CTRL3, 0x7F, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_SLEEP_PERIOD_CTRL3, 0x7F);
 	if (ret)
 		return ret;
 
 	/* No auto wake */
-	ret = cci_write(ov9282->regmap, OV9282_REG_TIMING_23, 0x00, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_TIMING_23, 0x00);
 	if (ret)
 		return ret;
 
@@ -1017,16 +1096,16 @@ static int ov9282_enable_streams(struct v4l2_subdev *sd,
 		return ret;
 
 	/* Write common registers */
-	ret = cci_multi_reg_write(ov9282->regmap, common_regs,
-				  ARRAY_SIZE(common_regs), NULL);
+	ret = ov9282_reg_write_seq(ov9282->client, common_regs,
+				   ARRAY_SIZE(common_regs));
 	if (ret) {
 		dev_err(ov9282->dev, "fail to write common registers");
 		goto err_pm_put;
 	}
 
 	bitdepth_index = ov9282->code == ov9282->variant->code_10bit ? 0 : 1;
-	ret = cci_multi_reg_write(ov9282->regmap,
-				  bitdepth_regs[bitdepth_index], 2, NULL);
+	ret = ov9282_reg_write_seq(ov9282->client,
+				   bitdepth_regs[bitdepth_index], 2);
 	if (ret) {
 		dev_err(ov9282->dev, "fail to write bitdepth regs");
 		goto err_pm_put;
@@ -1034,8 +1113,8 @@ static int ov9282_enable_streams(struct v4l2_subdev *sd,
 
 	/* Write sensor mode registers */
 	reg_list = &ov9282->cur_mode->reg_list;
-	ret = cci_multi_reg_write(ov9282->regmap, reg_list->regs,
-				  reg_list->num_of_regs, NULL);
+	ret = ov9282_reg_write_seq(ov9282->client, reg_list->regs,
+				   reg_list->num_of_regs);
 	if (ret) {
 		dev_err(ov9282->dev, "fail to write initial registers");
 		goto err_pm_put;
@@ -1056,12 +1135,12 @@ static int ov9282_enable_streams(struct v4l2_subdev *sd,
 			goto err_pm_put;
 		}
 		/* stay in standby mode and wait for trigger signal */
-		ret = cci_write(ov9282->regmap, OV9282_REG_MODE_SELECT,
-				OV9282_MODE_STANDBY, NULL);
+		ret = ov9282_reg_write(ov9282->client, OV9282_REG_MODE_SELECT,
+				       OV9282_MODE_STANDBY);
 	} else {
 		/* Start streaming */
-		ret = cci_write(ov9282->regmap, OV9282_REG_MODE_SELECT,
-				OV9282_MODE_STREAMING, NULL);
+		ret = ov9282_reg_write(ov9282->client, OV9282_REG_MODE_SELECT,
+				       OV9282_MODE_STREAMING);
 	}
 
 	if (ret) {
@@ -1084,8 +1163,8 @@ static int ov9282_disable_streams(struct v4l2_subdev *sd,
 	struct ov9282 *ov9282 = to_ov9282(sd);
 	int ret;
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_MODE_SELECT,
-			OV9282_MODE_STANDBY, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_MODE_SELECT,
+			       OV9282_MODE_STANDBY);
 
 	pm_runtime_put(ov9282->dev);
 
@@ -1102,12 +1181,12 @@ static int ov9282_detect(struct ov9282 *ov9282)
 {
 	unsigned int i;
 	int ret;
-	u64 val, msb;
+	u32 val, msb;
 
-	ret = cci_read(ov9282->regmap, CCI_REG8(0x300b), &val, NULL);
+	ret = ov9282_reg_read(ov9282->client, CCI_REG8(0x300b), &val);
 	if (ret)
 		return ret;
-	ret = cci_read(ov9282->regmap, CCI_REG8(0x300a), &msb, NULL);
+	ret = ov9282_reg_read(ov9282->client, CCI_REG8(0x300a), &msb);
 	if (ret)
 		return ret;
 
@@ -1121,7 +1200,7 @@ static int ov9282_detect(struct ov9282 *ov9282)
 		}
 	}
 
-	dev_err(ov9282->dev, "%s chip id mismatch: got %llx\n",
+	dev_err(ov9282->dev, "%s chip id mismatch: got %x\n",
 		ov9282->variant->name, val);
 
 	return -ENXIO;
@@ -1277,8 +1356,8 @@ static int ov9282_power_on(struct device *dev)
 
 	usleep_range(400, 600);
 
-	ret = cci_write(ov9282->regmap, OV9282_REG_MIPI_CTRL00,
-			ov9282->noncontinuous_clock ? OV9282_GATED_CLOCK : 0, NULL);
+	ret = ov9282_reg_write(ov9282->client, OV9282_REG_MIPI_CTRL00,
+			       ov9282->noncontinuous_clock ? OV9282_GATED_CLOCK : 0);
 	if (ret) {
 		dev_err(ov9282->dev, "fail to write MIPI_CTRL00");
 		goto error_clk;
@@ -1444,10 +1523,7 @@ static int ov9282_probe(struct i2c_client *client)
 		return ret;
 	}
 
-	ov9282->regmap = devm_cci_regmap_init_i2c(client, 16);
-	if (IS_ERR(ov9282->regmap))
-		return dev_err_probe(ov9282->dev, PTR_ERR(ov9282->regmap),
-				     "Failed to init CCI\n");
+	ov9282->client = client;
 
 	ret = ov9282_power_on(ov9282->dev);
 	if (ret)
