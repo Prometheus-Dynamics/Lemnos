@@ -25,6 +25,8 @@ the rest of the repository, which is MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-
   - the RP1 CSI-2 receiver (`/dev/lemnos-rp1-csi2`, `csi2-module`).
 
   See `lemnos/README.md`.
+- `lemnos-ov9782/`: `lemnos-ov9782.ko`, the OV9782 sensor driver, forked from the kernel's ov9282
+  driver with the OV9782 variant. See `lemnos-ov9782/README.md`.
 - `kernel-env.sh`: the kernel selection that the modules' build scripts source.
 
 ## Licence boundary
