@@ -11,11 +11,29 @@
 //! The entry is a device table (`DeviceSpec`), so it reuses the device
 //! deserializer. Roles are `input_<role>` (`<device>.<channel>`) and
 //! `output_<role>` (a device; the controller takes only `output_fan`), each
-//! with a `curve_<role>` for an input. Scalars are the other keys.
+//! with a `curve_<role>` for an input. An input without its `curve_<role>`
+//! uses [`DEFAULT_CURVE`]. Scalars are the other keys.
 
 use crate::schema::{BoardDefinition, ConfigValue, DeviceSpec};
 use lemnos_device::fan_control::{self, Point, Settings};
 use std::collections::BTreeMap;
+
+/// The curve an input gets when its `curve_<role>` is left out: 30 °C at
+/// 300 ‰, 60 °C at 600 ‰, 75 °C at full (values in millidegrees).
+pub const DEFAULT_CURVE: [Point; 3] = [
+    Point {
+        value: 30_000,
+        duty: 300,
+    },
+    Point {
+        value: 60_000,
+        duty: 600,
+    },
+    Point {
+        value: 75_000,
+        duty: 1000,
+    },
+];
 
 /// The driver id of the fan controller composite.
 pub const FAN_CONTROLLER: &str = "fan-controller";
@@ -117,10 +135,7 @@ pub fn parse(board: &BoardDefinition, spec: &DeviceSpec) -> Result<FanController
             }
             let curve = format!("curve_{role}");
             let points = match config.get(&curve) {
-                None => {
-                    problems.push(format!("composite {id:?}: missing config {curve:?}"));
-                    Vec::new()
-                }
+                None => DEFAULT_CURVE.to_vec(),
                 Some(value) => match points(value, &curve) {
                     Ok(points) => match fan_control::check_curve(&points) {
                         Ok(()) => points,
@@ -298,6 +313,15 @@ config = { input_cpu = "cpu-thermal.temperature", output_fan = "fan", floor = 30
         assert_eq!(parsed.inputs[0].device, "cpu-thermal");
         assert_eq!(parsed.inputs[0].channel, "temperature");
         assert_eq!(parsed.inputs[0].points.len(), 3);
+        assert!(check(&b).is_empty());
+    }
+
+    #[test]
+    fn a_missing_curve_takes_the_default() {
+        let mut b = board("");
+        b.composites[0].config.remove("curve_cpu");
+        let parsed = parse(&b, &b.composites[0]).unwrap();
+        assert_eq!(parsed.inputs[0].points, DEFAULT_CURVE);
         assert!(check(&b).is_empty());
     }
 

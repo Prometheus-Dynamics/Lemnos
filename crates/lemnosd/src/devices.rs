@@ -13,7 +13,7 @@ use crate::schedule::advance;
 
 /// The shortest and longest wait before rebuilding a device that failed.
 const RETRY_MIN_MS: u64 = 1_000;
-const RETRY_MAX_MS: u64 = 30_000;
+const RETRY_MAX_MS: u64 = 8_000;
 /// `poll_ms` when the board leaves it out.
 const DEFAULT_POLL_MS: u32 = 1_000;
 /// A sensor that buffers samples (a FIFO) is drained no more often than this:

@@ -290,7 +290,10 @@ the camera stack and the OS image's API.
 - **Out of Lemnos:** the LED look catalogue and its meanings go to the OS image's API (Lemnos
   keeps ws2812 driving, the ring map and the animator); PiSP tuning defaults and anything 3A-like
   go to the camera stack (Lemnos exposes the block config).
-- **Fan curve:** becomes config; the current curve is the default.
+- **Fan curve:** config (`curve_<role>`); left out, an input takes the current curve as the default
+  (`DEFAULT_CURVE`, done 2026-11-07).
+- **Device retry cap:** a failed device is rebuilt after 1 s, doubling to 8 s at most (was 30 s;
+  the ruling allows 5 to 10 s). Done 2026-11-07.
 - **Into Lemnos:** camera sensor drivers (description-only form), thermal, power, clock and RTC
   host facts, the hardware watchdog, USB gadget configfs setup; the frame vocabulary, split at
   memory (pools, buffers, fences, accounting: Lemnos) vs dataflow (graph slots, backpressure:

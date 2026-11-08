@@ -159,6 +159,9 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
+- `lemnosd` retries a device that failed to build after 1 s, doubling to at most 8 s (was 30 s), so a device that comes back is in use within 8 s.
+- A fan controller input without its `curve_<role>` takes the default curve `[[30000, 300], [60000, 600], [75000, 1000]]` (`lemnos_board::fan_controller::DEFAULT_CURVE`) instead of failing the board check.
+
 - Board-specific code is opt-in. `lemnos-board` has no default features (it was `json`, `rp1` and every built-in driver); `lemnos-core` and `lemnos-linux-sys` drop `rp1` from their defaults; `lemnos-drivers-bmi088` drops `align` (on through `lemnos-board`'s `drv-bmi088`). lemnosd and `lemnos-ctl`'s `board` feature turn on what they ship, so their builds are unchanged. Tests that need the built-in drivers are ignored when `drivers` is off.
 
 - `lemnos-drivers-vglite` lines are non-antialiased and not routed. `line_bytes` and `line_dmabuf` draw their stroke with quality LOW (binary coverage, no AA), with the same width-1 square-capped pixel-centre geometry and the goldens regenerated from the vendor library with that quality (the outlines are unchanged; the draw words change). Whether the GPU's pixels equal Bresenham's is not proven: axis and 45-degree lines are expected to, other slopes may cover one pixel more. `lemnos-drivers-rga`'s caps no longer serve `Line` on the K230D VGLite row, so the route is CPU until a board run of `lemnos-drivers-vglite/tests/lines.rs` shows zero mismatches for every slope class. The GPU line functions stay callable directly.

@@ -54,7 +54,8 @@ The entry is a device table, so it reuses the device deserializer. `input_<role>
 `output_fan` is the fan device, and `curve_<role>` is the input's curve; the scalars are the other keys.
 
 Units: duties are per-mille; `curve_<role>` values are in the input's unit (millidegrees for a
-thermal zone), so `50000` is 50 °C. Every `input_<role>` needs its `curve_<role>`.
+thermal zone), so `50000` is 50 °C. An `input_<role>` without its `curve_<role>` uses the default
+curve `[[30000, 300], [60000, 600], [75000, 1000]]`.
 
 **Not built yet:** `override` (a fixed duty with a timeout), `lemnos-ctl fan reset` (clearing
 the saved tuning; delete `<state>/fan/<id>.tuning` and restart until then), a composite in the
