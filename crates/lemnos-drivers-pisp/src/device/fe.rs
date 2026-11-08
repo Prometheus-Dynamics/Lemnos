@@ -131,6 +131,23 @@ pub struct FeHeldRaw {
     pub image1: Option<HeldImage>,
 }
 
+/// One frame's statistics, held in their buffer, and its raw frames, from
+/// [`FrontEndDevice::next_held_mapped`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeHeldStats {
+    /// Statistics buffer sequence.
+    pub sequence: u32,
+    /// Statistics timestamp.
+    pub timestamp: Duration,
+    /// The statistics buffer: [`FrontEndDevice::held_stats`], then
+    /// [`FrontEndDevice::release_stats`].
+    pub stats: u32,
+    /// The raw frame, if the raw output is enabled.
+    pub image: Option<HeldImage>,
+    /// Output 1's frame, if enabled.
+    pub image1: Option<HeldImage>,
+}
+
 /// The front end path, set up and holding its buffers.
 /// Frame `sequence`'s raw output has `line` rows in memory ([`FrontEndDevice::enable_line_events`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -627,6 +644,50 @@ impl FrontEndDevice {
         timeout: Duration,
         stats: Option<&mut RawStatistics>,
     ) -> Result<FeHeldRaw> {
+        Ok(self.next_held_inner(fe, timeout, stats, false)?.0)
+    }
+
+    /// [`Self::next_held_raw`] with the statistics left in their buffer, held, instead of
+    /// copied: read them with [`Self::held_stats`]`(f.stats)` and give the buffer back with
+    /// [`Self::release_stats`]. The front end has [`FrontEndSetup::buffers`] statistics
+    /// buffers, so a hold longer than a frame or two drops statistics.
+    ///
+    /// The buffer is the driver's, mapped uncached: every field read goes to memory. This
+    /// saves the copy when the reader touches less than the whole buffer once; a reader that
+    /// walks all of it, or reads fields more than once, is better off with the copy.
+    pub fn next_held_mapped(
+        &mut self,
+        fe: &mut FrontEnd,
+        timeout: Duration,
+    ) -> Result<FeHeldStats> {
+        let (f, stats) = self.next_held_inner(fe, timeout, None, true)?;
+        Ok(FeHeldStats {
+            sequence: f.sequence,
+            timestamp: f.timestamp,
+            stats,
+            image: f.image,
+            image1: f.image1,
+        })
+    }
+
+    /// The statistics in buffer `index`, held by [`Self::next_held_mapped`], in place.
+    pub fn held_stats(&self, index: u32) -> Option<&RawStatistics> {
+        let src = self.stats.maps.get(index as usize)?.first()?.as_slice();
+        bytemuck::try_from_bytes(src.get(..size_of::<RawStatistics>())?).ok()
+    }
+
+    /// Gives statistics buffer `index` from [`Self::next_held_mapped`] back to the front end.
+    pub fn release_stats(&self, index: u32) -> Result<()> {
+        Ok(self.stats.queue(index, &[])?)
+    }
+
+    fn next_held_inner(
+        &mut self,
+        fe: &mut FrontEnd,
+        timeout: Duration,
+        stats: Option<&mut RawStatistics>,
+        hold_stats: bool,
+    ) -> Result<(FeHeldRaw, u32)> {
         let b = self.stats.dequeue(timeout)?;
         let n = size_of::<RawStatistics>();
         let src = self.stats.maps[b.index as usize][0].as_slice();
@@ -641,7 +702,9 @@ impl FrontEndDevice {
                 bytemuck::bytes_of_mut(stats).copy_from_slice(&src[..n]);
             });
         }
-        self.stats.queue(b.index, &[])?;
+        if !hold_stats {
+            self.stats.queue(b.index, &[])?;
+        }
         let image = match &self.image {
             Some(q) => {
                 let r = q.dequeue(timeout)?;
@@ -680,12 +743,15 @@ impl FrontEndDevice {
             self.free_configs.push(c.index);
         }
         self.feed_configs(fe)?;
-        Ok(FeHeldRaw {
-            sequence: b.sequence,
-            timestamp: b.timestamp,
-            image,
-            image1,
-        })
+        Ok((
+            FeHeldRaw {
+                sequence: b.sequence,
+                timestamp: b.timestamp,
+                image,
+                image1,
+            },
+            b.index,
+        ))
     }
 
     /// Gives a raw frame from [`Self::next_held`] back to the front end.

@@ -56,8 +56,8 @@ pub use be_stream::{
 pub use be_tdn::{TdnMemory, TdnSetup};
 pub use config_buf::ConfigMemory;
 pub use fe::{
-    FeFrame, FeHeld, FeHeldRaw, FeOutputSetup, FrontEndDevice, FrontEndSetup, HeldImage, LineEvent,
-    SensorWindow,
+    FeFrame, FeHeld, FeHeldRaw, FeHeldStats, FeOutputSetup, FrontEndDevice, FrontEndSetup,
+    HeldImage, LineEvent, SensorWindow,
 };
 pub use line_timer::{LATE_BOUNDS_US, LineTimerCounts};
 pub use queue::Queue;

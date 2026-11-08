@@ -153,7 +153,16 @@ pub fn output_stride(width: u32, height: u32, format: u32) -> u32 {
     f.stride.max(0) as u32
 }
 
+/// A one-plane format for a back end node. For `GREY` it names the plane's size: the driver's
+/// `GREY` entry has no plane factor, so it sizes the plane 0 (REQBUFS then fails with EINVAL and
+/// a vb2 warning) unless the caller names one, which it keeps when larger. One byte a pixel, at
+/// `bpl` or the driver's 32-byte row alignment.
 pub(super) fn mplane(w: u32, h: u32, fourcc: FourCc, bpl: u32) -> Format {
+    let size_image = if &fourcc.to_bytes() == b"GREY" {
+        bpl.max(w.next_multiple_of(32)) * h
+    } else {
+        0
+    };
     Format::Multi(lemnos_v4l2::v4l2::PixFormatMplane {
         width: w,
         height: h,
@@ -161,7 +170,7 @@ pub(super) fn mplane(w: u32, h: u32, fourcc: FourCc, bpl: u32) -> Format {
         field: 1,
         planes: vec![lemnos_v4l2::v4l2::PlaneFormat {
             bytes_per_line: bpl,
-            size_image: 0,
+            size_image,
         }],
         ..Default::default()
     })
@@ -841,5 +850,19 @@ mod tests {
         assert_eq!(output_stride(160, 100, grey), 256);
         assert_eq!(output_stride(1280, 800, BeFormat::Nv12.pisp_format()), 1280);
         assert_eq!(output_stride(640, 400, BeFormat::Rgb24.pisp_format()), 2048);
+    }
+
+    /// The driver sizes a `GREY` plane 0 unless asked: `mplane` names the size, at the given
+    /// stride or the driver's 32-byte alignment; other formats leave it to the driver.
+    #[test]
+    fn grey_planes_carry_their_size() {
+        let size = |w, h, f: &[u8; 4], bpl| match mplane(w, h, FourCc::new(f), bpl) {
+            Format::Multi(m) => m.planes[0].size_image,
+            Format::Single(_) | Format::Meta(_) => unreachable!(),
+        };
+        assert_eq!(size(1280, 800, b"GREY", 1280), 1280 * 800);
+        assert_eq!(size(640, 400, b"GREY", 768), 768 * 400);
+        assert_eq!(size(630, 400, b"GREY", 0), 640 * 400);
+        assert_eq!(size(1280, 800, b"NV12", 1280), 0);
     }
 }

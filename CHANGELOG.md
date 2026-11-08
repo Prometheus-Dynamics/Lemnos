@@ -8,6 +8,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-drivers-pisp`'s `FrontEndDevice::next_held_mapped` leaves a frame's statistics in their buffer instead of copying them: `held_stats(index)` reads them in place and `release_stats(index)` gives the buffer back. The buffer is mapped uncached, so this saves the 20 kB copy only for a reader that touches less than all of it once.
+
 - `lemnos-drivers-pisp`'s `FrontEndDevice` streams the front end's second raw output (`rp1-cfe-fe_image1`) beside output 0: `open_with_output1(setup, FeOutputSetup { compressed })` links and formats it at the input's size (16-bit, or mode-1 compressed), and `output_format`, `add_output_buffers`, `output_dmabufs`, `output_data` and `release_output` take the output index. `next_frame` and `next_held`/`next_held_raw` return output 1's frame too (`raw1`, `image1`); the driver runs a job only with a buffer on every streaming node, so both carry the same sequence. For a compressed-vs-uncompressed pair of each frame. Untested on board.
 
 - `BackEndStream::enable_tdn_with(TdnSetup { compressed, memory })` (`lemnos-drivers-pisp`): temporal denoise buffers sized for the 8-bit compressed average (the nodes take the `PC1x` fourcc at the width rounded up to 16: 1,024,000 bytes each at 1280x800 instead of 2,048,000), and from the `system` heap with `TdnMemory::System` instead of contiguous memory. With compressed buffers, a job whose config keeps a 16-bit average is refused before it is queued. `enable_tdn()` is unchanged (16-bit, contiguous first). On board #1 (1280x800 at 120 fps, compressed and system heap) the nodes took `PC1x`, the camera's contiguous memory went to about zero, with no frames dropped and the same latency as 16-bit TDN in contiguous memory (p50 9.7 ms).
@@ -176,6 +178,8 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - `scripts/check-names.sh` no longer exempts look-name tokens or the example board's file: the allowlist had hidden the `pv.*` and `raze` names. The checker now self-tests a list of known leaks against the allowlist before it scans files, and an empty sed script no longer breaks it when the allowlist has no token entries.
 
 ### Fixed
+
+- `lemnos-drivers-pisp`'s `BackEndStream` opens a `GREY` output. The back end driver's `GREY` entry has no plane factor, so it sized the plane 0 and REQBUFS failed with EINVAL (and a vb2 warning in the kernel log). The format helper both back end paths use now names the plane's size for `GREY` (the stride times the height), which the driver keeps; the one-shot ops path had its own copy of this, now shared. Untested on board for the stream path.
 
 - lemnosd's whole-board allocation test no longer charges its own client threads' allocations to the service. The clients published their counts from inside their loops, so a starved client's last event landed after the window closed and showed as 21 service allocations. `lemnos_linux_sys::test_alloc::leave_out_of_total` leaves a thread out of `TOTAL` exactly. The test's streaming floor is 60 events in 3 s (about 1000 idle), since a loaded gate delivered 117.
 
