@@ -1,3 +1,0 @@
-# systemd.preset(5): enables lemnosd.service on images that apply presets.
-# Install as /usr/lib/systemd/system-preset/80-lemnosd.preset.
-enable lemnosd.service
