@@ -1,0 +1,26 @@
+[package]
+name = "lemnos-driver-ws2812"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
+lemnos-contract-pixels = { path = "../../contracts/pixels" }
+
+[dev-dependencies]
+lemnos-sim = { path = "../../backends/sim" }
+
+[features]
+default = []
+# `encode_spi_byte` reads a 256-entry table (768 bytes of flash) instead of expanding the eight
+# bits. Off by default.
+spi-lut = []
+
+[package.metadata.lemnos]
+driver = "Ws2812"
