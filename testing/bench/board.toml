@@ -1,0 +1,73 @@
+# The bench board: a generic BCM2712 board with the devices the reference set
+# uses. It is data. lemnosd reads it, and nothing in the service knows it is a bench.
+#
+# Bus names are the ones the Linux backend opens: i2c-N, spidevB.C, gpiochipN:LINE, and
+# pio-i2c:sda=N,scl=M for an I2C bus made from two GPIO lines. Check each name on the board before a
+# run (the I2C and SPI nodes, gpiodetect for the chip number). A device that does not bind is shown
+# by lemnos-ctl list with its reason. It is never hidden.
+#
+# A device marked disabled needs hardware that may not be fitted. Set disabled = false when it is.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "bcm2712-bench"
+
+# The IMU on the RP1 PIO I2C bus, polled (no FIFO). The reference set reads it at 200 Hz.
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "pio-i2c:sda=8,scl=7"
+config = { accel_rate = 200, gyro_rate = 200, fifo = false }
+
+# The power monitor on an I2C bus, at its address on the board.
+[[devices]]
+id = "power0"
+driver = "ina2xx"
+bus = "i2c-1"
+config = { chip = "ina238", address = 0x40, shunt_ohms = 0.010, max_current_a = 2.0 }
+
+# The fan through the kernel's hwmon node, and the SoC thermal zone.
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+config = { name = "pwmfan" }
+
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+config = { path = "/sys/class/thermal/thermal_zone0" }
+
+[[devices]]
+id = "fan-control"
+driver = "fan-control"
+uses = { fan = "fan", t0 = "cpu-thermal" }
+config = { curve_t0 = "30000:300,60000:600,75000:1000", floor = 300, slew_per_s = 50, max_age_ms = 3000 }
+
+# USB port power. Each switch is on and off only. A cycle is an off, then an on.
+[[devices]]
+id = "usb-c-power"
+driver = "gpio-power-switch"
+bus = "gpiochip0:16"
+config = { default_on = true }
+
+[[devices]]
+id = "usb-a-power"
+driver = "gpio-power-switch"
+bus = "gpiochip0:20"
+config = { default_on = true }
+
+# A WS2812 ring for the status light. Not fitted on every bench, so it stays disabled until it is.
+[[devices]]
+id = "ring-pixels"
+driver = "ws2812"
+bus = "spidev0.0"
+disabled = true
+config = { count = 16, wire = "rgb", brightness = 255 }
+
+[[devices]]
+id = "ring"
+driver = "status-light"
+uses = { pixels = "ring-pixels" }
+disabled = true
+config = { count = 16, look_brightness = 1.0, fade_ms = 250 }
