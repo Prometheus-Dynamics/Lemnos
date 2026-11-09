@@ -16,6 +16,7 @@ lemnos-contract-camera-sensor = { path = "../../contracts/camera-sensor" }
 [dev-dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-wire = { path = "../../engine/wire" }
 
 [package.metadata.lemnos]
 driver = "Ov9782"
