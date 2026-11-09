@@ -62,7 +62,13 @@ mod tests {
         let second = claim(&name).expect_err("second claim");
         assert_eq!(second.kind(), io::ErrorKind::AddrInUse);
         drop(first);
-        claim(&name).expect("free again once the holder is gone");
+        // A process another test is forking can hold the socket until it execs.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while let Err(error) = claim(&name) {
+            assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+            assert!(std::time::Instant::now() < until, "never freed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// In a static build this crate's copy is the process's: it claims the
