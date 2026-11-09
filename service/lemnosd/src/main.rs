@@ -1,11 +1,14 @@
 //! `lemnosd --sim [--board PATH] [--socket PATH] [--check]`
 
 use std::io::Write;
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use lemnos_host::Options;
 use lemnos_host::board::parse;
+use lemnos_linux_sys::poll::{POLLIN, poll_one};
+use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, DEFAULT_BOARD, DEFAULT_SOCKET, Service};
 
@@ -33,6 +36,15 @@ fn drivers() -> Vec<lemnos_host::DriverEntry> {
         ]);
     }
     drivers
+}
+
+fn wait_for_signal(signals: &SignalFd) -> std::io::Result<()> {
+    loop {
+        poll_one(signals.as_fd(), POLLIN, None)?;
+        if signals.read()?.is_some() {
+            return Ok(());
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -65,6 +77,11 @@ fn main() -> ExitCode {
     if !sim {
         return complain("no hardware backend is built in yet; pass --sim");
     }
+    // Before any thread starts, so that every thread has these signals blocked.
+    let signals = match SignalFd::new(&[SIGTERM, SIGINT]) {
+        Ok(signals) => signals,
+        Err(error) => return complain(&format!("signals: {error}")),
+    };
     let service = Service::start(Config {
         socket: PathBuf::from(socket),
         name: board_file.board.id.clone(),
@@ -73,11 +90,14 @@ fn main() -> ExitCode {
         backend: Box::new(SimBoard::new()),
         options: Options::default(),
     });
-    match service {
-        Ok(service) => {
-            service.wait();
-            ExitCode::SUCCESS
-        }
-        Err(error) => complain(&error.to_string()),
+    let service = match service {
+        Ok(service) => service,
+        Err(error) => return complain(&error.to_string()),
+    };
+    // A signal is the normal way out, and stopping is what releases the hardware.
+    if let Err(error) = wait_for_signal(&signals) {
+        let _ = complain(&format!("waiting for a signal: {error}"));
     }
+    service.stop();
+    ExitCode::SUCCESS
 }

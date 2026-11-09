@@ -53,7 +53,7 @@ fn send_changes(core: &Core, last: &mut Vec<(u8, u8, String)>) {
         };
         for client in crate::lock(&core.clients).iter() {
             if client.wants_events() {
-                client.answer(&event);
+                client.event(&event);
             }
         }
         *last = now;
