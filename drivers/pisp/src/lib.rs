@@ -44,6 +44,11 @@ mod be_device;
 pub mod be_hw;
 pub mod be_job;
 pub mod fe;
+#[cfg(all(feature = "device", target_os = "linux"))]
+mod fe_device;
+#[cfg(all(feature = "device", target_os = "linux"))]
+pub mod fe_hw;
+pub mod fe_job;
 pub mod format;
 mod math;
 pub mod stats;
@@ -51,3 +56,5 @@ pub mod uapi;
 
 #[cfg(all(feature = "device", target_os = "linux"))]
 pub use be_device::PispBe;
+#[cfg(all(feature = "device", target_os = "linux"))]
+pub use fe_device::PispFe;

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "PiSP (BCM2712 ISP) configuration: uAPI layouts, front and back end builders, tiling, statistics. No hardware access in the library; the back end driver is behind the `device` feature."
+description = "PiSP (BCM2712 ISP) configuration: uAPI layouts, front and back end builders, tiling, statistics. No hardware access in the library; the back end and front end drivers are behind the `device` feature."
 
 [lints]
 workspace = true
@@ -18,6 +18,7 @@ device = [
   "dep:lemnos-contract-camera-isp",
   "dep:lemnos-contract-isp-pisp",
   "dep:lemnos-driver-pisp-sys",
+  "dep:lemnos-driver-pisp-fe-sys",
   "dep:lemnos-linux-sys",
 ]
 
@@ -27,6 +28,7 @@ lemnos-hal = { path = "../../engine/hal", features = ["std"], optional = true }
 lemnos-contract-camera-isp = { path = "../../contracts/camera-isp", optional = true }
 lemnos-contract-isp-pisp = { path = "../../contracts/isp-pisp", optional = true }
 lemnos-driver-pisp-sys = { path = "../pisp-sys", optional = true }
+lemnos-driver-pisp-fe-sys = { path = "../pisp-fe-sys", optional = true }
 lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }
 
 [dev-dependencies]

@@ -116,6 +116,18 @@ void lem_stream_complete(struct lem_stream *s, const struct lem_stream_slot *slo
 void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot);
 /* The block's DMA can't be shown to have stopped: keep everything pinned for good. */
 void lem_stream_wedge(struct lem_stream *s);
+/*
+ * Reads a job's range through the kernel's mapping of its registered region,
+ * any context, exactly `bytes`. The pool isn't readable here. Needs a stream
+ * that has had lem_stream_cpu_read_enable() and a job still held.
+ */
+int lem_stream_range_read(struct lem_stream *s, const struct lem_job_range *r, void *dst,
+			  size_t bytes);
+/* A held job's range as a device address, computed here. The pool is refused. */
+int lem_stream_range_addr(struct lem_stream *s, const struct lem_job_range *r, u64 *addr);
+/* Test only: writes a word through a held range's kernel mapping, for the module's checks. */
+void lem_stream_range_poke(struct lem_stream *s, const struct lem_job_range *r, size_t offset, u32 val);
+int lem_stream_cpu_read_enable(struct lem_stream *s);
 
 /*
  * For a producer with job_bytes set. Reads the job at the front of the ring

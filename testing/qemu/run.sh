@@ -39,6 +39,8 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
 [[ -d "$source" ]] || source="$KDIR/include/uapi/linux/media/raspberrypi"
 "${compiler[@]}" "${flags[@]}" -I"$source" -pthread -o "$root/lemnos_pisp_be_check" \
   "$work/kernel/test/lemnos_pisp_be_check.c"
+"${compiler[@]}" "${flags[@]}" -I"$source" -o "$root/lemnos_pisp_fe_check" \
+  "$work/kernel/test/lemnos_pisp_fe_check.c"
 cp "$work/kernel/lemnos.ko" "$work/test_block/lemnos_test_block.ko" "$root/"
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
 
