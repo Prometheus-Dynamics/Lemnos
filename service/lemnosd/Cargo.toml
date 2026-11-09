@@ -36,6 +36,7 @@ lemnos-driver-ina2xx = { path = "../../drivers/ina2xx" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
 lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
+lemnos-driver-rp1-csi2 = { path = "../../drivers/rp1-csi2" }
 lemnos-driver-status-light = { path = "../../drivers/status-light" }
 lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
 lemnos-driver-vcm = { path = "../../drivers/vcm" }
