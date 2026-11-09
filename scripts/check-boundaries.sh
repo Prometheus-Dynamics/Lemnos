@@ -36,7 +36,7 @@ runtime_deps() {
 
 may_use_unsafe() {
   case "$1" in
-    engine/abi | engine/capi | backends/linux-sys | drivers/*-sys) return 0 ;;
+    engine/abi | engine/capi | engine/measure | backends/linux-sys | drivers/*-sys) return 0 ;;
     *) return 1 ;;
   esac
 }

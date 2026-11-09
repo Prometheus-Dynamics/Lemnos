@@ -39,8 +39,8 @@ reference, and nothing here changes it. The work is a pre-planned list of PRs in
 - Block drivers follow the block rule in the design: no vendor library in Lemnos, and the driver
   carries the caller's work without knowing what it means.
 - Failure rule in every driver: never give up, backoff capped at 8 s, no auto-off.
-- `unsafe` only in `engine/abi`, `engine/capi`, `backends/linux-sys` and crates named
-  `drivers/*-sys`, with one operation per block and a `SAFETY` comment.
+- `unsafe` only in `engine/abi`, `engine/capi`, `engine/measure`, `backends/linux-sys` and crates
+  named `drivers/*-sys`, with one operation per block and a `SAFETY` comment.
 - Steady-state paths allocate nothing.
 - Hardware you can't reach is marked `untested on board`, with the check written to
   `testing/board-runs/<id>.md`. A PR is not held back for a board run.

@@ -1,0 +1,25 @@
+[package]
+name = "lemnos-measure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Per-thread hardware counters and allocation counts for Lemnos, costing nothing when off"
+
+# This crate needs unsafe for the perf syscall and the global allocator.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_lifetimes = "deny"
+unused_attributes = "deny"
+
+[features]
+default = []
+# Reads hardware counters. Off, PerfGroup is zero-sized and every read is zeros.
+perf = ["dep:libc"]
+# The counting allocators, for shipped stats and for tests.
+alloc-count = []
+
+[dependencies]
+libc = { workspace = true, optional = true }

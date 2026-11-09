@@ -25,6 +25,8 @@ for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-l
   done
 done
 
+step "counters on" cargo test -q -p lemnos-measure --features perf,alloc-count
+
 step boundaries scripts/check-boundaries.sh
 
 echo "gate passed"
