@@ -4,5 +4,17 @@ use lemnos_host::{DriverEntry, entry};
 
 /// Every driver compiled into this service.
 pub fn drivers() -> Vec<DriverEntry> {
-    vec![entry::<lemnos_driver_orientation::Orientation>()]
+    vec![
+        entry::<lemnos_driver_bmi088::Bmi088>(),
+        entry::<lemnos_driver_bmm150::Bmm150>(),
+        entry::<lemnos_driver_gpio_power_switch::GpioPowerSwitch>(),
+        entry::<lemnos_driver_gpu_lease::GpuLeaseDevice>(),
+        entry::<lemnos_driver_hwmon_fan::HwmonFan>(),
+        entry::<lemnos_driver_ina2xx::Ina2xx>(),
+        entry::<lemnos_driver_orientation::Orientation>(),
+        entry::<lemnos_driver_raw_bus::RawBus>(),
+        entry::<lemnos_driver_thermal_zone::ThermalZone>(),
+        entry::<lemnos_driver_vcm::Vcm>(),
+        entry::<lemnos_driver_ws2812::Ws2812>(),
+    ]
 }
