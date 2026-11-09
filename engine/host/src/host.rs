@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use lemnos_core::{
@@ -13,7 +13,7 @@ use lemnos_core::{
 
 use crate::Options;
 use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue};
-use crate::contain::{Lane, LaneError};
+use crate::contain::{Lane, LaneError, Work};
 
 trait Instance: Send {
     fn describe(&self, out: &mut Description);
@@ -110,6 +110,8 @@ pub struct DeviceInfo {
 
 struct Slot {
     index: u32,
+    /// Which lane runs this device: its bus, or itself when it has none.
+    lane_key: String,
     spec: DeviceSpec,
     config: Vec<(String, OwnedValue)>,
     entry: Option<DriverEntry>,
@@ -127,13 +129,6 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Slot {
-    fn lane_key(&self) -> String {
-        match &self.spec.bus {
-            Some(bus) => format!("bus:{bus}"),
-            None => format!("device:{}", self.spec.id),
-        }
-    }
-
     fn is_running(&self) -> bool {
         matches!(*lock(&self.state), DeviceState::Running)
     }
@@ -151,6 +146,8 @@ impl Slot {
 struct Inner {
     slots: RwLock<Vec<Arc<Slot>>>,
     lanes: Mutex<HashMap<String, Arc<Lane>>>,
+    /// Goes up whenever any device changes state.
+    changes: AtomicU64,
     backend: Mutex<Box<dyn Provider + Send>>,
     clock: Arc<dyn HostClock>,
     options: Options,
@@ -161,6 +158,19 @@ struct Inner {
 /// boundary and a deadline around it.
 pub struct Host {
     inner: &'static Inner,
+}
+
+/// One driver call, as handed to its lane.
+pub(crate) struct CallWork {
+    inner: &'static Inner,
+    slot: Arc<Slot>,
+    method: MethodId,
+}
+
+impl CallWork {
+    pub(crate) fn run(self, args: &[u8], reply: &mut [u8]) -> Result<usize> {
+        self.inner.call_here(&self.slot, self.method, args, reply)
+    }
 }
 
 fn counts_as_gone(status: Status) -> bool {
@@ -201,6 +211,7 @@ impl Inner {
             DeviceState::Running => 0,
         };
         *state = self.next_state(attempts, reason);
+        self.changes.fetch_add(1, Ordering::Release);
     }
 
     fn next_state(&self, attempts: u32, reason: &str) -> DeviceState {
@@ -263,19 +274,18 @@ impl Inner {
     }
 
     fn lane(&self, slot: &Slot) -> core::result::Result<Arc<Lane>, LaneError> {
-        let key = slot.lane_key();
         let mut lanes = lock(&self.lanes);
-        if let Some(lane) = lanes.get(&key) {
+        if let Some(lane) = lanes.get(slot.lane_key.as_str()) {
             return Ok(Arc::clone(lane));
         }
         let name = format!("lemnos-lane-{}", lanes.len());
         let lane = Arc::new(Lane::spawn(name, self.options.lane_stack)?);
-        lanes.insert(key, Arc::clone(&lane));
+        lanes.insert(slot.lane_key.clone(), Arc::clone(&lane));
         Ok(lane)
     }
 
     fn abandon_lane(&self, slot: &Slot) {
-        lock(&self.lanes).remove(&slot.lane_key());
+        lock(&self.lanes).remove(slot.lane_key.as_str());
     }
 
     /// Whichever call was running, the lane is gone. Every device on it
@@ -294,9 +304,10 @@ impl Inner {
         reply: &mut [u8],
     ) -> Result<usize> {
         let lane = self.lane(&slot).map_err(|_| Status::NO_MEMORY)?;
-        let target = Arc::clone(&slot);
-        let work = Box::new(move |args: &[u8], reply: &mut [u8]| {
-            self.call_here(&target, method, args, reply)
+        let work = Work::Call(CallWork {
+            inner: self,
+            slot: Arc::clone(&slot),
+            method,
         });
         match lane.run(args, reply, self.options.call_deadline, work) {
             Ok(result) => result,
@@ -332,7 +343,7 @@ impl Inner {
             return;
         };
         let target = Arc::clone(&slot);
-        let work = Box::new(move |_: &[u8], _: &mut [u8]| {
+        let work = Work::Once(Box::new(move |_: &[u8], _: &mut [u8]| {
             let entries: Vec<(&str, ConfigValue<'_>)> = target
                 .config
                 .iter()
@@ -359,11 +370,12 @@ impl Inner {
                 Ok(Err(status)) => Err(status),
                 Err(_) => Err(Status::PANIC),
             }
-        });
+        }));
         match lane.run(&[], &mut [], self.options.call_deadline, work) {
             Ok(Ok(_)) => {
                 slot.errors.store(0, Ordering::Relaxed);
                 *lock(&slot.state) = DeviceState::Running;
+                self.changes.fetch_add(1, Ordering::Release);
             }
             Ok(Err(status)) => {
                 self.record_failed_bind(&slot, &format!("bind failed: {status:?}"));
@@ -385,6 +397,7 @@ impl Inner {
             DeviceState::Running => 0,
         };
         *state = self.next_state(attempts, reason);
+        self.changes.fetch_add(1, Ordering::Release);
     }
 
     fn device_health(&self, slot: &Slot, depth: u32) -> Health {
@@ -603,6 +616,10 @@ impl Host {
             };
             slots.push(Arc::new(Slot {
                 index: index as u32,
+                lane_key: match &spec.bus {
+                    Some(bus) => format!("bus:{bus}"),
+                    None => format!("device:{}", spec.id),
+                },
                 config: spec.owned_config()?,
                 entry: table.get(spec.driver.as_str()).copied(),
                 spec: spec.clone(),
@@ -619,6 +636,7 @@ impl Host {
         let inner: &'static Inner = Box::leak(Box::new(Inner {
             slots: RwLock::new(slots),
             lanes: Mutex::new(HashMap::new()),
+            changes: AtomicU64::new(0),
             backend: Mutex::new(backend),
             clock,
             options,
@@ -760,7 +778,9 @@ impl Host {
     /// When the next retry is due, if one is waiting.
     pub fn next_retry_ns(&self) -> Option<u64> {
         self.inner
-            .all()
+            .slots
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .filter_map(|slot| match &*lock(&slot.state) {
                 DeviceState::Backoff { next_retry_ns, .. } => Some(*next_retry_ns),
@@ -769,10 +789,17 @@ impl Host {
             .min()
     }
 
+    /// Goes up whenever any device changes state, so a caller can tell that
+    /// [`Host::devices`] is worth reading again.
+    pub fn changes(&self) -> u64 {
+        self.inner.changes.load(Ordering::Acquire)
+    }
+
     /// Switches a device off and lets go of its hardware.
     pub fn off(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
         *lock(&slot.state) = DeviceState::Off(OffReason::Manual);
+        self.inner.changes.fetch_add(1, Ordering::Release);
         if let Ok(mut guard) = slot.instance.try_lock() {
             let dead = guard.take();
             drop(guard);
@@ -789,6 +816,7 @@ impl Host {
             next_retry_ns: 0,
             reason: "switched on".to_string(),
         };
+        self.inner.changes.fetch_add(1, Ordering::Release);
         self.inner.bind(slot);
         Ok(())
     }

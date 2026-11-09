@@ -3,7 +3,7 @@
 
 mod lane;
 
-pub(crate) use lane::{Lane, LaneError};
+pub(crate) use lane::{Lane, LaneError, Work};
 
 use std::time::Duration;
 

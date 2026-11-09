@@ -1,0 +1,32 @@
+[package]
+name = "lemnosd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The Lemnos service: one process owns the hardware and serves every client"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Serves the fake devices from `testing/crates/fake-devices`.
+fake-devices = ["dep:lemnos-fake-devices"]
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices", optional = true }
+# generated: begin drivers
+lemnos-driver-orientation = { path = "../../drivers/orientation" }
+# generated: end drivers
+
+[dev-dependencies]
+lemnos-client = { path = "../../engine/client" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

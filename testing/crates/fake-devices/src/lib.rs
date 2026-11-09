@@ -18,6 +18,9 @@ pub trait Counter {
     fn get(&mut self) -> Result<u32>;
     #[method(2)]
     fn set(&mut self, value: u32) -> Result<()>;
+    /// The value, without counting.
+    #[method(7)]
+    fn peek(&mut self) -> Result<u32>;
     /// Panics, to exercise containment.
     #[method(3)]
     fn crash(&mut self) -> Result<()>;
@@ -138,6 +141,10 @@ impl Counter for FakeCounter {
     fn set(&mut self, value: u32) -> Result<()> {
         self.value = value;
         Ok(())
+    }
+
+    fn peek(&mut self) -> Result<u32> {
+        Ok(self.value)
     }
 
     fn crash(&mut self) -> Result<()> {

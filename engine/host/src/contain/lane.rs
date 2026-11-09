@@ -9,8 +9,16 @@ use std::time::{Duration, Instant};
 
 use lemnos_core::Result;
 
+use crate::host::CallWork;
+
 /// What a lane runs: reads `args`, fills `reply`, and returns the reply's length.
-pub(crate) type Work = Box<dyn FnOnce(&[u8], &mut [u8]) -> Result<usize> + Send>;
+pub(crate) enum Work {
+    /// A driver call. The common case, and the one that must not allocate.
+    Call(CallWork),
+    Once(OnceWork),
+}
+
+type OnceWork = Box<dyn FnOnce(&[u8], &mut [u8]) -> Result<usize> + Send>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LaneError {
@@ -67,7 +75,10 @@ fn serve(shared: &Shared) {
         let mut reply = std::mem::take(&mut state.reply);
         drop(state);
 
-        let result = work(&args, &mut reply);
+        let result = match work {
+            Work::Call(call) => call.run(&args, &mut reply),
+            Work::Once(once) => once(&args, &mut reply),
+        };
 
         state = shared.lock();
         state.args = args;

@@ -20,7 +20,7 @@ The engine with no hardware. A1 to A6 go one at a time because everyone builds o
 - [x] [A12](docs/prs/A12.md) Wire format and spec (wave 5; needs A5)
 - [x] [A13](docs/prs/A13.md) Client (wave 6; needs A12)
 - [ ] [A14](docs/prs/A14.md) C surface (wave 7; needs A13, A3)
-- [ ] [A15](docs/prs/A15.md) lemnosd (wave 8; needs A10, A11, A13)
+- [x] [A15](docs/prs/A15.md) lemnosd (wave 8; needs A10, A11, A13)
 - [ ] [A16](docs/prs/A16.md) lemnos-ctl, generic (wave 9; needs A15)
 - [x] [A17](docs/prs/A17.md) Perf counters and allocation counts (wave 5; needs A5; board run)
 
