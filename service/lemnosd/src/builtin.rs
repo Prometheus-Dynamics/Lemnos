@@ -15,6 +15,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_ina2xx::Ina2xx>(),
         entry::<lemnos_driver_orientation::Orientation>(),
         entry::<lemnos_driver_ov9782::Ov9782>(),
+        entry::<lemnos_driver_pisp::PispBe>(),
         entry::<lemnos_driver_raw_bus::RawBus>(),
         entry::<lemnos_driver_rp1_csi2::Rp1Csi2>(),
         entry::<lemnos_driver_status_light::StatusLight>(),
