@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Runs Lemnos drivers: board files, bind order, dispatch, containment and retries"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../core", features = ["std"] }
+serde = { workspace = true, features = ["derive", "std"] }
+toml.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-driver-orientation = { path = "../../drivers/orientation" }
+lemnos-contract-orientation = { path = "../../contracts/orientation" }

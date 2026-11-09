@@ -1,5 +1,5 @@
 [package]
-name = "anchor-contracts"
+name = "lemnos-contract-accelerometer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,3 +7,6 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }

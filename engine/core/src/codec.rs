@@ -251,3 +251,43 @@ impl<'a, T: Decode<'a> + Copy + Default, const N: usize> Decode<'a> for [T; N] {
         Ok(out)
     }
 }
+
+/// Three values, as many devices report them.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Vector3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl Encode for Vector3 {
+    const SHAPE: Shape = Shape::Record(&[
+        Field {
+            name: "x",
+            shape: Shape::F32,
+        },
+        Field {
+            name: "y",
+            shape: Shape::F32,
+        },
+        Field {
+            name: "z",
+            shape: Shape::F32,
+        },
+    ]);
+    fn encode(&self, out: &mut Writer<'_>) -> Result<()> {
+        self.x.encode(out)?;
+        self.y.encode(out)?;
+        self.z.encode(out)
+    }
+}
+
+impl Decode<'_> for Vector3 {
+    fn decode(from: &mut Reader<'_>) -> Result<Self> {
+        Ok(Self {
+            x: f32::decode(from)?,
+            y: f32::decode(from)?,
+            z: f32::decode(from)?,
+        })
+    }
+}

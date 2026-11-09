@@ -21,7 +21,7 @@ mod fixed;
 mod resources;
 mod tag;
 
-pub use codec::{Decode, Encode, Field, Reader, Shape, Writer};
+pub use codec::{Decode, Encode, Field, Reader, Shape, Vector3, Writer};
 pub use config::{Config, ConfigValue};
 pub use contract::{
     Bound, Caller, Contract, ContractInfo, Dev, LOCAL_ARGS, LocalCaller, MethodInfo, Param,

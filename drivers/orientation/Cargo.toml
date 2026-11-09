@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-driver-orientation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-accelerometer = { path = "../../contracts/accelerometer" }
+lemnos-contract-gyroscope = { path = "../../contracts/gyroscope" }
+lemnos-contract-magnetometer = { path = "../../contracts/magnetometer" }
+lemnos-contract-orientation = { path = "../../contracts/orientation" }
+libm = "0.2"
