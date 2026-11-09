@@ -13,6 +13,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_hwmon_fan::HwmonFan>(),
         entry::<lemnos_driver_ina2xx::Ina2xx>(),
         entry::<lemnos_driver_orientation::Orientation>(),
+        entry::<lemnos_driver_ov9782::Ov9782>(),
         entry::<lemnos_driver_raw_bus::RawBus>(),
         entry::<lemnos_driver_status_light::StatusLight>(),
         entry::<lemnos_driver_thermal_zone::ThermalZone>(),
