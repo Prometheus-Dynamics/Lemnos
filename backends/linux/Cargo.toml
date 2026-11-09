@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Linux buses for Lemnos: the hardware traits over i2c-dev and spidev"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-linux-sys = { path = "../linux-sys" }
+libc.workspace = true
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

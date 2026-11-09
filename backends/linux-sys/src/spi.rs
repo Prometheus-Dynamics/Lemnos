@@ -16,6 +16,8 @@ pub const MODE_CS_HIGH: u32 = 0x04;
 
 /// Most transfers in one `SPI_IOC_MESSAGE` (the size field holds 14 bits).
 pub(crate) const MAX_TRANSFERS: usize = 511;
+/// Segments a message can have without allocating.
+const STACK_TRANSFERS: usize = 16;
 
 /// `struct spi_ioc_transfer`.
 #[repr(C)]
@@ -147,11 +149,18 @@ pub fn transfer(fd: BorrowedFd<'_>, transfers: &mut [Transfer<'_>]) -> io::Resul
             format!("{} SPI segments in one message", transfers.len()),
         ));
     }
-    let mut raw = transfers
-        .iter_mut()
-        .map(Transfer::raw)
-        .collect::<io::Result<Vec<_>>>()?;
-    let request = ioc(1, SPI_IOC_MAGIC, 0, raw.len() * size_of::<SpiIocTransfer>());
+    let mut stack = [SpiIocTransfer::default(); STACK_TRANSFERS];
+    let mut heap = Vec::new();
+    let raw: &mut [SpiIocTransfer] = if transfers.len() <= STACK_TRANSFERS {
+        &mut stack[..transfers.len()]
+    } else {
+        heap.resize(transfers.len(), SpiIocTransfer::default());
+        &mut heap
+    };
+    for (slot, transfer) in raw.iter_mut().zip(transfers.iter_mut()) {
+        *slot = transfer.raw()?;
+    }
+    let request = ioc(1, SPI_IOC_MAGIC, 0, std::mem::size_of_val(raw));
     // SAFETY: `raw` is an array of `spi_ioc_transfer` whose length the request
     // encodes; its buffer pointers come from slices borrowed by `transfers`
     // (read buffers exclusively) that stay alive and unmoved during the call,

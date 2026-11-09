@@ -1,4 +1,4 @@
-//! `lemnosd --sim [--board PATH] [--socket PATH] [--check]`
+//! `lemnosd [--sim] [--board PATH] [--socket PATH] [--check]`
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -7,12 +7,13 @@ use std::process::ExitCode;
 
 use lemnos_host::Options;
 use lemnos_host::board::parse;
+use lemnos_linux::LinuxBoard;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
 use lemnosd::{Config, DEFAULT_BOARD, DEFAULT_SOCKET, Service};
 
-const USAGE: &str = "lemnosd --sim [--board PATH] [--socket PATH] [--check]";
+const USAGE: &str = "lemnosd [--sim] [--board PATH] [--socket PATH] [--check]";
 
 fn complain(text: &str) -> ExitCode {
     let _ = writeln!(std::io::stderr(), "lemnosd: {text}");
@@ -74,9 +75,6 @@ fn main() -> ExitCode {
     if check {
         return ExitCode::SUCCESS;
     }
-    if !sim {
-        return complain("no hardware backend is built in yet; pass --sim");
-    }
     // Before any thread starts, so that every thread has these signals blocked.
     let signals = match SignalFd::new(&[SIGTERM, SIGINT]) {
         Ok(signals) => signals,
@@ -87,7 +85,11 @@ fn main() -> ExitCode {
         name: board_file.board.id.clone(),
         board: board_file,
         drivers: drivers(),
-        backend: Box::new(SimBoard::new()),
+        backend: if sim {
+            Box::new(SimBoard::new())
+        } else {
+            Box::new(LinuxBoard::new())
+        },
         options: Options::default(),
     });
     let service = match service {

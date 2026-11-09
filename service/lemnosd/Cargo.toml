@@ -21,6 +21,7 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-wire = { path = "../../engine/wire" }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-linux = { path = "../../backends/linux" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices", optional = true }
 # generated: begin drivers
