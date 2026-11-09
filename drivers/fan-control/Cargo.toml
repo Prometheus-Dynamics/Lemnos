@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-driver-fan-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-fan = { path = "../../contracts/fan" }
+lemnos-contract-fan-control = { path = "../../contracts/fan-control" }
+lemnos-contract-temperature = { path = "../../contracts/temperature" }
+
+[dev-dependencies]
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+
+[package.metadata.lemnos]
+driver = "FanController"
