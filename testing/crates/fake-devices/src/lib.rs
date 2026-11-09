@@ -44,7 +44,7 @@ fn vector(cfg: &Config<'_>, scale: f32) -> Vector3 {
 }
 
 macro_rules! fake_vector {
-    ($name:ident, $needs:ident, $tag:literal, $contract:ident, $unit:ident) => {
+    ($name:ident, $needs:ident, $tag:literal, $contract:ident, $unit:ident, { $($extra:tt)* }) => {
         #[driver($tag, provides = [$contract])]
         pub struct $name {
             value: Vector3,
@@ -77,30 +77,43 @@ macro_rules! fake_vector {
             fn read(&mut self) -> Result<Vector3> {
                 Ok(self.value)
             }
+            $($extra)*
         }
     };
 }
 
+// A fake has one value, not a stream, so it has no batches.
 fake_vector!(
     FakeAccelerometer,
     FakeAccelerometerNeeds,
     "fake-accelerometer",
     Accelerometer,
-    MetrePerSecondSquared
+    MetrePerSecondSquared,
+    {
+        fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
+            Err(Status::NOT_SUPPORTED)
+        }
+    }
 );
 fake_vector!(
     FakeGyroscope,
     FakeGyroscopeNeeds,
     "fake-gyroscope",
     Gyroscope,
-    RadianPerSecond
+    RadianPerSecond,
+    {
+        fn read_batch(&mut self, _into: &mut [u8]) -> Result<usize> {
+            Err(Status::NOT_SUPPORTED)
+        }
+    }
 );
 fake_vector!(
     FakeMagnetometer,
     FakeMagnetometerNeeds,
     "fake-magnetometer",
     Magnetometer,
-    Tesla
+    Tesla,
+    {}
 );
 
 /// How many counters have bound, across the process.
