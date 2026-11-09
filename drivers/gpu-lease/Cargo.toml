@@ -12,5 +12,11 @@ workspace = true
 lemnos-core = { path = "../../engine/core" }
 lemnos-contract-gpu-lease = { path = "../../contracts/gpu-lease" }
 
+[dev-dependencies]
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-host = { path = "../../engine/host" }
+lemnos-client = { path = "../../engine/client" }
+lemnosd = { path = "../../service/lemnosd" }
+
 [package.metadata.lemnos]
 driver = "GpuLeaseDevice"

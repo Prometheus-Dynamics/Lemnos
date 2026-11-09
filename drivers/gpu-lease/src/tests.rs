@@ -210,3 +210,35 @@ fn the_description_lists_the_state() {
     Driver::describe(&dev, &mut out);
     assert_eq!(out.find("state").unwrap().method, STATE);
 }
+
+#[test]
+fn a_gone_caller_loses_its_leases_and_the_next_waiter_is_granted() {
+    let mut q = Queue::new();
+    q.set_caller(CallerId(1));
+    let holder = excl(&mut q, 50, false, 0).unwrap();
+    let also_waiting = excl(&mut q, 50, true, 0).unwrap();
+    q.set_caller(CallerId(2));
+    let other = excl(&mut q, 50, true, 0).unwrap();
+    assert!(!q.poll(other.lease, 0).unwrap().held);
+
+    q.caller_gone(CallerId(1), 5);
+
+    assert!(q.poll(other.lease, 5).unwrap().held);
+    assert_eq!(q.counts(5), (1, 0));
+    q.set_caller(CallerId(1));
+    assert_eq!(q.poll(holder.lease, 5), Err(Status::NOT_FOUND));
+    assert_eq!(q.poll(also_waiting.lease, 5), Err(Status::NOT_FOUND));
+}
+
+#[test]
+fn a_lease_belongs_to_the_caller_that_took_it() {
+    let mut q = Queue::new();
+    q.set_caller(CallerId(1));
+    let lease = excl(&mut q, 50, false, 0).unwrap().lease;
+    q.set_caller(CallerId(2));
+    assert_eq!(q.poll(lease, 0), Err(Status::NOT_FOUND));
+    assert_eq!(q.release(lease, 0), Err(Status::NOT_FOUND));
+    assert!(!q.contains(lease));
+    q.set_caller(CallerId(1));
+    assert!(q.poll(lease, 0).unwrap().held);
+}
