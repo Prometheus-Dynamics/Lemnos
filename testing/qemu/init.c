@@ -133,6 +133,9 @@ int main(void)
 	check(!run((char *const[]){ "/lemnos_check", "/dev/lemnos", BLOCK, (char *)cma_heap(),
 				    NULL }),
 	      "lemnos_check");
+	check(!run((char *const[]){ "/lemnos_stream_check", "/dev/lemnos", BLOCK, UNBIND,
+				    (char *)cma_heap(), "no-source", NULL }),
+	      "lemnos_stream_check, no test source");
 	check(!put(UNBIND, BLOCK), "unbound");
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded");
@@ -146,7 +149,17 @@ int main(void)
 	      "lemnos_unbind_check");
 	check(!run((char *const[]){ "/lemnos_claim_check", "/dev/lemnos", NULL }),
 	      "lemnos_claim_check");
+	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded with nothing left held");
+
+	check(!load("/lemnos.ko", OWNED " test_stream_source=1"),
+	      "module loaded with the test stream source");
+	check(!bind_block(BLOCK), "block bound");
+	check(!run((char *const[]){ "/lemnos_stream_check", "/dev/lemnos", BLOCK, UNBIND,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_stream_check");
+	check(!forget_override(BLOCK), "override cleared");
+	check(!unload("lemnos"), "module unloaded with every stream released");
 	check(!unload("lemnos_test_block"), "test block module unloaded");
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);

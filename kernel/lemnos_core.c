@@ -301,6 +301,15 @@ static int lem_buf_mmap(struct dma_buf *buf, struct vm_area_struct *vma)
 	return dma_mmap_coherent(b->dev, vma, b->cpu, b->addr, b->size);
 }
 
+/* The stream test source writes through this; nothing else in the kernel needs it. */
+static int lem_buf_vmap(struct dma_buf *buf, struct iosys_map *map)
+{
+	struct lem_buf *b = buf->priv;
+
+	iosys_map_set_vaddr(map, b->cpu);
+	return 0;
+}
+
 static void lem_buf_free(struct lem_buf *b)
 {
 	struct lem_block *l = b->l;
@@ -322,6 +331,7 @@ static const struct dma_buf_ops lem_buf_ops = {
 	.map_dma_buf = lem_buf_map,
 	.unmap_dma_buf = lem_buf_unmap,
 	.mmap = lem_buf_mmap,
+	.vmap = lem_buf_vmap,
 	.release = lem_buf_release,
 };
 
@@ -523,6 +533,7 @@ union lem_args {
 	struct lemnos_release release;
 	struct lemnos_irq irq;
 	struct lemnos_claim claim;
+	struct lemnos_stream_create stream;
 };
 
 static long lem_next(struct lemnos_next *n)
@@ -560,6 +571,8 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		return lem_release_import(l, u->release.handle);
 	case LEMNOS_IOC_IRQ_ENABLE:
 		return lem_irq_enable(l, u->irq.index);
+	case LEMNOS_IOC_STREAM_CREATE:
+		return lem_stream_create(l->dev, &u->stream);
 	case LEMNOS_IOC_TEST_IRQ:
 		if (!test_irq_inject)
 			return -EPERM;
@@ -733,6 +746,8 @@ static void lem_remove(struct platform_device *pdev)
 	}
 	lem_imports_free_all(l);
 	xa_destroy(&l->imports);
+	/* A stream pins its dma-bufs mapped to this device. */
+	lem_streams_block_gone(dev);
 	up_write(&lem_blocks_sem);
 
 	/*
