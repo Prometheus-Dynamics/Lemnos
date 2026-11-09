@@ -1,0 +1,27 @@
+[package]
+name = "lemnos-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Inspect and drive any Lemnos device from the command line"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lemnos-ctl"
+path = "src/main.rs"
+
+[dependencies]
+lemnos-client = { path = "../../engine/client" }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-wire = { path = "../../engine/wire" }
+
+[dev-dependencies]
+lemnosd = { path = "../lemnosd" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }

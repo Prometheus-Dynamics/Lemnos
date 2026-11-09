@@ -28,6 +28,7 @@ done
 step "counters on" cargo test -q -p lemnos-measure --features perf,alloc-count
 step "client on tokio" cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
 step "client on tokio" cargo test -q -p lemnos-client --features tokio
+step "C surface, shared form" cargo test -q -p lemnos-capi --features shared
 
 step boundaries scripts/check-boundaries.sh
 

@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 
 use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
-use lemnos_wire::{Frame, MAX_FRAME, VERSION, WireError, decode, encode_description};
+use lemnos_wire::{Frame, MAX_FRAME, VERSION, decode, encode_description};
 
 use crate::Core;
 use crate::conn::Conn;
@@ -67,7 +67,7 @@ impl Client {
             loop {
                 match decode(&buf[start..end]) {
                     Ok(None) => break,
-                    Err(WireError::FrameTooLarge(_) | WireError::Malformed | _) => return,
+                    Err(_) => return,
                     Ok(Some((frame, used))) => {
                         start += used;
                         if !self.handle(frame) {

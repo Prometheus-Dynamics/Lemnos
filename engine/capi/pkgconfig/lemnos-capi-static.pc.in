@@ -1,0 +1,11 @@
+# The Lemnos C surface, static form: links liblemnos_capi.a into the program.
+# Never link this and the shared form into one process: the second copy is refused.
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: lemnos-capi-static
+Description: Lemnos C surface, static library
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: ${libdir}/liblemnos_capi.a @NATIVE@ -Wl,--gc-sections

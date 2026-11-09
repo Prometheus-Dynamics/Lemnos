@@ -1,0 +1,18 @@
+# The functions liblemnos_capi exports: include/lemnos.h, one name per line.
+# src/tests.rs checks this list against the header and the crate's functions.
+lemnos_version
+lemnos_check_version
+lemnos_client_open
+lemnos_client_close
+lemnos_device_count
+lemnos_device_info
+lemnos_device_text
+lemnos_open
+lemnos_call
+lemnos_subscribe
+lemnos_unsubscribe
+lemnos_next_value
+lemnos_set_power
+lemnos_item_count
+lemnos_item_info
+lemnos_item_text
