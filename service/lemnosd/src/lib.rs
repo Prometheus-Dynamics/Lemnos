@@ -81,6 +81,8 @@ pub(crate) struct Core {
     stop: AtomicBool,
     stop_lock: Mutex<()>,
     stop_wake: Condvar,
+    /// A wake arrived while the event loop wasn't waiting. Guarded by `stop_lock`.
+    woken: AtomicBool,
 }
 
 impl Core {
@@ -88,9 +90,16 @@ impl Core {
         self.stop.load(Ordering::Acquire)
     }
 
+    /// Ends the event loop's current wait, or the next one if it isn't waiting.
+    fn wake(&self) {
+        let _guard = lock(&self.stop_lock);
+        self.woken.store(true, Ordering::Relaxed);
+        self.stop_wake.notify_all();
+    }
+
     pub(crate) fn wait_stop(&self, wait: Duration) {
         let guard = lock(&self.stop_lock);
-        if !self.stopping() {
+        if !self.stopping() && !self.woken.swap(false, Ordering::Relaxed) {
             drop(
                 self.stop_wake
                     .wait_timeout(guard, wait)
@@ -153,6 +162,13 @@ impl Service {
             stop: AtomicBool::new(false),
             stop_lock: Mutex::new(()),
             stop_wake: Condvar::new(),
+            woken: AtomicBool::new(false),
+        });
+        let weak = Arc::downgrade(&core);
+        core.host.set_waker(move || {
+            if let Some(core) = weak.upgrade() {
+                core.wake();
+            }
         });
         let notifier = Arc::new(Notifier::from_env());
         let mut threads = Vec::new();

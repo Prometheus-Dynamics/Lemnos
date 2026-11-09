@@ -72,6 +72,8 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
         let changes = core.host.changes();
         if changes != seen || retry.is_some_and(|at| at <= now) {
             core.host.tick();
+        } else if core.host.next_tick_ns().is_some_and(|at| at <= now) {
+            core.host.run_ticks();
         }
         // Read again: the tick may itself have changed something.
         let changes = core.host.changes();
@@ -85,9 +87,14 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
             notifier.ping();
             next_ping = Instant::now() + interval;
         }
-        let until_retry = retry.map_or(MAX_SLEEP, |at| {
+        // Read after the ticks, which is when a driver says when it wants the next one.
+        let wake = match (retry, core.host.next_tick_ns()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let until_wake = wake.map_or(MAX_SLEEP, |at| {
             Duration::from_nanos(at.saturating_sub(core.clock.now_ns()))
         });
-        core.wait_stop(until_retry.clamp(Duration::from_millis(1), MAX_SLEEP));
+        core.wait_stop(until_wake.clamp(Duration::from_millis(1), MAX_SLEEP));
     }
 }

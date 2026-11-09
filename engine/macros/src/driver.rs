@@ -125,6 +125,12 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::health(self)
             }
 
+            const TICKS: bool = <Self as ::lemnos_core::Lifecycle>::TICKS;
+
+            fn tick(&mut self, __now_ns: u64) -> ::core::option::Option<u64> {
+                <Self as ::lemnos_core::Lifecycle>::tick(self, __now_ns)
+            }
+
             fn dispatch(
                 &mut self,
                 __method: ::lemnos_core::MethodId,
