@@ -26,6 +26,8 @@ for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-l
 done
 
 step "counters on" cargo test -q -p lemnos-measure --features perf,alloc-count
+step "client on tokio" cargo clippy -q -p lemnos-client --all-targets --features tokio -- -D warnings
+step "client on tokio" cargo test -q -p lemnos-client --features tokio
 
 step boundaries scripts/check-boundaries.sh
 

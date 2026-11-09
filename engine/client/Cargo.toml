@@ -1,0 +1,26 @@
+[package]
+name = "lemnos-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Use Lemnos devices from another process, by name or by contract"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+tokio = ["dep:tokio"]
+
+[dependencies]
+lemnos-core = { path = "../core", features = ["std"] }
+lemnos-wire = { path = "../wire" }
+tokio = { workspace = true, optional = true, features = ["net", "time"] }
+
+[dev-dependencies]
+lemnos-measure = { path = "../measure", features = ["alloc-count"] }
+lemnos-macros = { path = "../macros" }
+tokio = { workspace = true, features = ["net", "time", "rt"] }

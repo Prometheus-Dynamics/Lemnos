@@ -65,8 +65,9 @@ Each of these closes a way the earlier protocol could go wrong.
 
 1. **The version is checked.** The first frame is Hello. A host answers a different version with
    Refusal and closes. A client refuses a different version in Welcome.
-2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Nothing is ignored
-   in silence. `id` 0 is allowed and is not special.
+2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Unsubscribe and
+   SetPower have no reply of their own and are answered with an empty Reply. Nothing is ignored in
+   silence. `id` 0 is allowed and is not special.
 3. **A malformed frame closes the connection** on either side, because the stream can no longer be
    trusted. That covers an impossible length, an unknown kind, a short field, a bad `bool` and bad
    UTF-8.
