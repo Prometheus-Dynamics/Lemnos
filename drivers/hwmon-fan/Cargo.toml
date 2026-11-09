@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-driver-hwmon-fan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-fan = { path = "../../contracts/fan" }
+
+[package.metadata.lemnos]
+driver = "HwmonFan"
