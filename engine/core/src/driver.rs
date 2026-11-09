@@ -53,3 +53,10 @@ pub trait Lifecycle: Sized {
         Health::Ok
     }
 }
+
+/// Time as the host sees it, supplied by the backend so a simulated board can
+/// run on simulated time.
+pub trait HostClock: Send + Sync {
+    /// Nanoseconds since an arbitrary fixed point. Never goes backwards.
+    fn now_ns(&self) -> u64;
+}
