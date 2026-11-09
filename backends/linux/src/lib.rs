@@ -6,6 +6,7 @@
 mod gpio;
 pub mod hotplug;
 mod i2c;
+mod pio_i2c;
 mod pwm;
 mod spi;
 mod uart;
@@ -125,7 +126,8 @@ fn exists(path: Option<PathBuf>) -> bool {
 
 impl Provider for LinuxBoard {
     fn provided(&self, need: &str) -> bool {
-        exists(self.node(need, I2C))
+        pio_i2c::provided(&self.dev, need)
+            || exists(self.node(need, I2C))
             || exists(self.node(need, SPI))
             || exists(self.node(need, TTY))
             || exists(self.line_node(need).map(|(path, _)| path))
@@ -138,6 +140,9 @@ impl Provider for LinuxBoard {
     }
 
     fn i2c(&mut self, need: &str) -> Result<I2c> {
+        if pio_i2c::names(need) {
+            return Ok(I2c(Box::new(pio_i2c::open(&self.dev, need)?)));
+        }
         // Every device on a bus opens it: the kernel serialises their transfers.
         let path = self.node(need, I2C).ok_or(Status::NOT_FOUND)?;
         let bus = I2cBus::open_path(&path).map_err(|e| open_status(&e))?;
