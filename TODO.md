@@ -7,9 +7,9 @@ Every planned PR into `next`. `python3 scripts/pr-status.py` shows the live stat
 The engine with no hardware. A1 to A6 go one at a time because everyone builds on them. After that the group fans out.
 
 - [x] [A1](docs/prs/A1.md) Clean slate and skeleton (wave 1; needs nothing)
-- [ ] [A2](docs/prs/A2.md) Boundary checks in the gate (wave 2; needs A1)
-- [ ] [A3](docs/prs/A3.md) lemnos-abi (wave 2; needs A1)
-- [ ] [A4](docs/prs/A4.md) lemnos-hal: what every driver is written against (wave 3; needs A3)
+- [x] [A2](docs/prs/A2.md) Boundary checks in the gate (wave 2; needs A1)
+- [x] [A3](docs/prs/A3.md) lemnos-abi (wave 2; needs A1)
+- [x] [A4](docs/prs/A4.md) lemnos-hal: what every driver is written against (wave 3; needs A3)
 - [ ] [A5](docs/prs/A5.md) Driver model (wave 4; needs A4)
 - [ ] [A6](docs/prs/A6.md) #[driver] and #[contract] macros (wave 5; needs A5)
 - [ ] [A7](docs/prs/A7.md) Simulated backend (wave 4; needs A4)

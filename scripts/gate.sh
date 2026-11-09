@@ -17,9 +17,14 @@ step format cargo fmt --all --check
 step clippy cargo clippy --workspace --all-targets -- -D warnings
 step tests cargo test --workspace
 
-# Added by PR A2.
-if [[ -x scripts/check-boundaries.sh ]]; then
-  step boundaries scripts/check-boundaries.sh
-fi
+# What must still build without std, on the targets a microcontroller host uses.
+no_std_crates=(lemnos-abi lemnos-hal)
+for target in thumbv7em-none-eabihf riscv32imac-unknown-none-elf armv7-unknown-linux-gnueabihf; do
+  for crate in "${no_std_crates[@]}"; do
+    step "$crate on $target" cargo check -q -p "$crate" --no-default-features --target "$target"
+  done
+done
+
+step boundaries scripts/check-boundaries.sh
 
 echo "gate passed"

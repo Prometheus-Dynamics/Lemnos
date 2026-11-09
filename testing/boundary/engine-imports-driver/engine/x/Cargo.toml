@@ -1,0 +1,8 @@
+[package]
+name = "x"
+
+[lints]
+workspace = true
+
+[dependencies]
+d = { path = "../../drivers/d" }
