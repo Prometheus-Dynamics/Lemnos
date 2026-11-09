@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-driver-coral-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
+
+[dev-dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+
+[package.metadata.lemnos]
+driver = "CoralLoader"
