@@ -1,0 +1,45 @@
+//! PiSP (the BCM2712 ISP) configuration, with no hardware access.
+//!
+//! - [`uapi`]: `#[repr(C)]` mirrors of the kernel's config and statistics structures, with
+//!   compile-time size and offset checks against the headers, and field-by-field serialisation
+//!   ([`uapi::Wire`]) so nothing here needs `unsafe`.
+//! - [`fe::FrontEnd`]: builds the front end configuration (input, black level, statistics,
+//!   outputs).
+//! - [`be::BackEnd`]: builds the back end configuration and its tiles.
+//! - [`stats::Statistics`]: decodes the front end statistics buffer.
+//!
+//! # Refusing bad configurations before submit
+//!
+//! A bad back end job is not an error the hardware reports and moves past: a job that never
+//! finishes stops the back end for every client of it, and only a reboot clears it. So every
+//! configuration is checked when it is built, and a refusal (for example 8-bit uncompressed
+//! Bayer input) returns an error before anything is submitted. Keeping those refusals is a
+//! hard requirement: a change that lets a bad configuration reach the device is a bug.
+//!
+//! # Tuning
+//!
+//! Gamma curves, resampling filters, sharpening, demosaic settings and colour encodings are the
+//! caller's: the crate carries the mechanics that turn them into hardware tables, not the
+//! values. The README lists the few fixed values that are kept and why.
+//!
+//! # `no_std`, no allocator
+//!
+//! The crate is always `no_std` and never allocates. Buffers are fixed arrays; errors are enums
+//! of `&'static str`. Lengths and sizes from outside (a statistics buffer, a tile count) are
+//! checked and refused, not indexed.
+//!
+//! # Provenance
+//!
+//! The uAPI layouts come from the Linux headers (`GPL-2.0-only WITH Linux-syscall-note`), and
+//! the finalisation rules and tiling are ported from libpisp (BSD-2-Clause). The README has the
+//! details and the licence text.
+
+#![forbid(unsafe_code)]
+#![cfg_attr(not(test), no_std)]
+
+pub mod be;
+pub mod fe;
+pub mod format;
+mod math;
+pub mod stats;
+pub mod uapi;
