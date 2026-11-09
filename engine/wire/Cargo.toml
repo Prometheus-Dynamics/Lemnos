@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The Lemnos socket protocol: calls, values and streams, delivered without reading what they carry"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../core", features = ["std"] }
+
+[dev-dependencies]
+lemnos-measure = { path = "../measure", features = ["alloc-count"] }

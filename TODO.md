@@ -17,7 +17,7 @@ The engine with no hardware. A1 to A6 go one at a time because everyone builds o
 - [x] [A9](docs/prs/A9.md) Host: bind and dispatch (wave 6; needs A6, A7, A8)
 - [x] [A10](docs/prs/A10.md) Host: reads and scheduling (wave 7; needs A9)
 - [x] [A11](docs/prs/A11.md) Containment and the failure rule (wave 7; needs A9)
-- [ ] [A12](docs/prs/A12.md) Wire format and spec (wave 5; needs A5)
+- [x] [A12](docs/prs/A12.md) Wire format and spec (wave 5; needs A5)
 - [ ] [A13](docs/prs/A13.md) Client (wave 6; needs A12)
 - [ ] [A14](docs/prs/A14.md) C surface (wave 7; needs A13, A3)
 - [ ] [A15](docs/prs/A15.md) lemnosd (wave 8; needs A10, A11, A13)
