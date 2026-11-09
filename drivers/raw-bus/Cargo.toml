@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-driver-raw-bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
+lemnos-contract-raw-bus = { path = "../../contracts/raw-bus" }
+
+[dev-dependencies]
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-host = { path = "../../engine/host" }
+lemnos-client = { path = "../../engine/client" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnosd = { path = "../../service/lemnosd" }
+
+[package.metadata.lemnos]
+driver = "RawBus"
