@@ -44,6 +44,11 @@ const GYR_FIFO_DATA: u16 = 0x3f;
 /// Gyroscope FIFO capacity, in frames: a fill this high has overflowed.
 pub(crate) const GYRO_FIFO_FRAMES: usize = 100;
 
+/// The accelerometer FIFO's capacity, bytes. A length the chip reports above it is clamped.
+pub(crate) const ACC_FIFO_BYTES: usize = 1024;
+/// The accelerometer FIFO's capacity, in data frames.
+pub(crate) const ACC_FIFO_FRAMES: usize = ACC_FIFO_BYTES / ACCEL_FRAME;
+
 const ACCEL_FRAME: usize = 7;
 const GYRO_FRAME: usize = 6;
 /// The accelerometer frame header: the top six bits are the signature, the
@@ -104,13 +109,16 @@ impl Kind {
     }
 }
 
-/// A die's range and rate as register values, and the scale of one count.
+/// A die's range and rate as register values, the scale of one count, and the
+/// nominal sample period.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Setting {
     range: u8,
     rate: u8,
     /// SI units per count: m/s² for the accelerometer, rad/s for the gyroscope.
     pub(crate) scale: f32,
+    /// The nominal time between samples, ns.
+    pub(crate) period_ns: u64,
 }
 
 /// The accelerometer's full scale (`range_g`: 3, 6, 12 or 24) and output data
@@ -124,7 +132,8 @@ pub(crate) fn accel_setting(range_g: i64, rate_hz: f64) -> Option<Setting> {
         _ => return None,
     };
     // Tenths of a hertz, so 12.5 is exact.
-    let rate = match (rate_hz * 10.0 + 0.5) as i64 {
+    let tenths = (rate_hz * 10.0 + 0.5) as i64;
+    let rate = match tenths {
         125 => 0x05,
         250 => 0x06,
         500 => 0x07,
@@ -140,6 +149,8 @@ pub(crate) fn accel_setting(range_g: i64, rate_hz: f64) -> Option<Setting> {
         range,
         rate: 0xa0 | rate,
         scale: full_scale_g * STANDARD_GRAVITY / 32_768.0,
+        // 10 s in tenths of a hertz: exact for every rate above.
+        period_ns: 10_000_000_000 / tenths as u64,
     })
 }
 
@@ -167,6 +178,7 @@ pub(crate) fn gyro_setting(range_dps: i64, rate_hz: i64) -> Option<Setting> {
         range,
         rate,
         scale: full_scale_dps / 32_768.0 * PI / 180.0,
+        period_ns: 1_000_000_000 / rate_hz as u64,
     })
 }
 
@@ -295,27 +307,34 @@ pub(crate) fn read_axes(bus: &mut I2c, address: u8, kind: Kind) -> Step<[i16; 3]
     Ok(axes(&bytes))
 }
 
-/// The accelerometer FIFO's fill, in bytes.
+/// The accelerometer FIFO's fill, in bytes, at most the FIFO's capacity. The
+/// count is 14 bits and an empty FIFO reads 0x8000; a count the FIFO cannot
+/// hold is clamped to what it can.
 pub(crate) fn accel_fifo_bytes(bus: &mut I2c, address: u8) -> Step<usize> {
     let mut length = [0u8; 2];
     bus_regs(bus, address).read_burst(ACC_FIFO_LENGTH_0, &mut length)?;
-    // The byte count is 14 bits; an empty FIFO reads 0x8000.
-    Ok(usize::from(length[0]) | (usize::from(length[1] & 0x3f) << 8))
+    let bytes = usize::from(length[0]) | (usize::from(length[1] & 0x3f) << 8);
+    Ok(bytes.min(ACC_FIFO_BYTES))
 }
 
-/// What a drain of the accelerometer FIFO found.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AccelDrain {
-    /// The newest sample drained, if any.
-    pub(crate) last: Option<[i16; 3]>,
-    /// Frames the FIFO dropped on overflow since the last read.
-    pub(crate) skipped: u32,
+/// One thing the accelerometer FIFO held, oldest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// A data frame: one sample.
+    Sample([i16; 3]),
+    /// A skip frame: the FIFO overflowed and this many frames were dropped
+    /// before the frames after it.
+    Skipped(u32),
 }
 
-/// Reads all `bytes` of the accelerometer FIFO, oldest first, keeping only the
-/// newest sample. A frame that straddles two bursts is carried into the next.
-pub(crate) fn drain_accel(bus: &mut I2c, address: u8, bytes: usize) -> Step<AccelDrain> {
-    let mut drain = AccelDrain::default();
+/// Reads all `bytes` of the accelerometer FIFO, oldest first, handing each
+/// frame to `each`. A frame that straddles two bursts is carried into the next.
+pub(crate) fn drain_accel(
+    bus: &mut I2c,
+    address: u8,
+    bytes: usize,
+    each: &mut impl FnMut(Frame),
+) -> Step<()> {
     // Up to one burst plus the carried bytes of a frame cut short (at most 6).
     let mut buf = [0u8; ACCEL_CHUNK + ACCEL_FRAME];
     let mut carried = 0;
@@ -324,19 +343,19 @@ pub(crate) fn drain_accel(bus: &mut I2c, address: u8, bytes: usize) -> Step<Acce
         let n = left.min(ACCEL_CHUNK);
         let end = carried + n;
         bus_regs(bus, address).read_burst(ACC_FIFO_DATA, &mut buf[carried..end])?;
-        let used = scan_accel(&buf[..end], &mut drain);
+        let used = scan_accel(&buf[..end], each);
         buf.copy_within(used..end, 0);
         carried = end - used;
         left -= n;
     }
-    Ok(drain)
+    Ok(())
 }
 
-/// Walks accelerometer FIFO bytes, oldest first: data frames update the newest
-/// sample, skip frames count what was lost, and time, configuration and drop
-/// frames are stepped over. Returns the bytes used; a frame cut short at the
-/// end is left for the caller to carry.
-pub(crate) fn scan_accel(bytes: &[u8], drain: &mut AccelDrain) -> usize {
+/// Walks accelerometer FIFO bytes, oldest first, handing data frames and skip
+/// frames to `each`; time, configuration and drop frames are stepped over.
+/// Returns the bytes used; a frame cut short at the end is left for the caller
+/// to carry.
+pub(crate) fn scan_accel(bytes: &[u8], each: &mut impl FnMut(Frame)) -> usize {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] & HEADER_MASK {
@@ -345,14 +364,14 @@ pub(crate) fn scan_accel(bytes: &[u8], drain: &mut AccelDrain) -> usize {
                 if end > bytes.len() {
                     break;
                 }
-                drain.last = Some(axes(&bytes[i + 1..end]));
+                each(Frame::Sample(axes(&bytes[i + 1..end])));
                 i = end;
             }
             HEADER_SKIP => {
                 let Some(&count) = bytes.get(i + 1) else {
                     break;
                 };
-                drain.skipped = drain.skipped.saturating_add(u32::from(count));
+                each(Frame::Skipped(u32::from(count)));
                 i += 2;
             }
             HEADER_TIME => {
@@ -374,26 +393,33 @@ pub(crate) fn scan_accel(bytes: &[u8], drain: &mut AccelDrain) -> usize {
     i
 }
 
-/// The gyroscope FIFO's fill, in frames.
+/// The gyroscope FIFO's fill, in frames, at most the FIFO's capacity (the
+/// register's top bit is not a count).
 pub(crate) fn gyro_fifo_frames(bus: &mut I2c, address: u8) -> Step<usize> {
-    Ok(usize::from(
-        bus_regs(bus, address).read8(GYR_FIFO_STATUS)? & 0x7f,
-    ))
+    let status = bus_regs(bus, address).read8(GYR_FIFO_STATUS)?;
+    Ok(usize::from(status & 0x7f).min(GYRO_FIFO_FRAMES))
 }
 
-/// Reads `frames` gyroscope frames, oldest first, and returns the newest.
-pub(crate) fn drain_gyro(bus: &mut I2c, address: u8, frames: usize) -> Step<Option<[i16; 3]>> {
-    let mut last = None;
+/// Reads `frames` gyroscope frames, oldest first, handing each to `each`.
+pub(crate) fn drain_gyro(
+    bus: &mut I2c,
+    address: u8,
+    frames: usize,
+    each: &mut impl FnMut([i16; 3]),
+) -> Step<()> {
     let mut buf = [0u8; GYRO_CHUNK_FRAMES * GYRO_FRAME];
     let mut left = frames;
     while left > 0 {
         let n = left.min(GYRO_CHUNK_FRAMES);
         let bytes = n * GYRO_FRAME;
         bus_regs(bus, address).read_burst(GYR_FIFO_DATA, &mut buf[..bytes])?;
-        last = Some(axes(&buf[bytes - GYRO_FRAME..bytes]));
+        let (frames, _) = buf[..bytes].as_chunks::<GYRO_FRAME>();
+        for frame in frames {
+            each(axes(frame));
+        }
         left -= n;
     }
-    Ok(last)
+    Ok(())
 }
 
 /// Three little-endian 16-bit counts from six bytes.
