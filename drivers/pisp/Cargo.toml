@@ -1,0 +1,12 @@
+[package]
+name = "lemnos-driver-pisp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "PiSP (BCM2712 ISP) configuration: uAPI layouts, front and back end builders, tiling, statistics. No hardware access."
+
+[lints]
+workspace = true
+
+# No dependencies, no features: always `no_std`, no allocator.
