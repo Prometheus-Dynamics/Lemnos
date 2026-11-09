@@ -1,0 +1,43 @@
+name: Next kernel module
+
+on:
+  push:
+    branches:
+      - next
+    paths:
+      - "kernel/**"
+      - "testing/qemu/**"
+      - ".github/workflows/next-kernel.yml"
+  pull_request:
+    branches:
+      - next
+    paths:
+      - "kernel/**"
+      - "testing/qemu/**"
+      - ".github/workflows/next-kernel.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qemu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 cpio flex bison bc libelf-dev libssl-dev dwarves
+      - name: Let the job use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/kernel
+          key: qemu-kernel-${{ hashFiles('testing/qemu/build-kernel.sh', 'testing/qemu/kernel.config') }}
+      - run: testing/qemu/build-kernel.sh "$RUNNER_TEMP/kernel"
+      - run: testing/qemu/run.sh
+        env:
+          KDIR: ${{ runner.temp }}/kernel/build
+          KERNEL: ${{ runner.temp }}/kernel/build/arch/x86/boot/bzImage
