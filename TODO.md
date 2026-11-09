@@ -321,17 +321,29 @@ here yet.
 
 | Chip | Has code | Still missing |
 |---|---|---|
-| RK3588S | RGA2 and RGA3 routes, ISP30 | NPU, VPU (`rk-mpp`), IEP, JPEG |
-| RK3566 | RGA2 routes, ISP21 | NPU, VPU (`rk-mpp`), IEP, JPEG |
-| A733 | G2D on `/dev/g2d`, `lemnos-soc` table | VIP9000 NPU, video engine, deinterlacer, camera ISP (`vin`) |
-| RV1126B | ISP35 layouts and nodes, RGA2 route, `rkvpss` offline scaler, `lemnos-soc` table | `rkaiisp`, NPU, VPU (`rk-mpp`), JPEG |
-| K230D | VGLite, ISP registers and statistics, RVV, non-AI 2D conversion | non-AI 2D OSD and border, KPU and AI2D, VPU, GSDMA |
+| RK3588S | RGA2 and RGA3 routes, ISP30, `rkcif` routing | NPU, VPU (`rk-mpp`), IEP, JPEG |
+| RK3566 | RGA2 routes, ISP21, `rkcif` routing | NPU, VPU (`rk-mpp`), IEP, JPEG |
+| A733 | G2D on `/dev/g2d`, `lemnos-soc` table, `VideoDevice::set_input` for `sunxi-vin` | VIP9000 NPU, video engine, deinterlacer, camera ISP (`vin`) |
+| RV1126B | ISP35 layouts and nodes, RGA2 route, `rkvpss` offline scaler, `lemnos-soc` table, `rkcif` routing | `rkaiisp`, NPU, VPU (`rk-mpp`), JPEG |
+| K230D | VGLite, ISP registers and statistics, RVV, non-AI 2D conversion | frame path (see below), non-AI 2D OSD and border, KPU and AI2D, VPU, GSDMA |
 
 - **Non-AI 2D** (`lemnos-drivers-nonai2d`): format conversion done. Left out: OSD and border, whose
   controls pass pointers and physical addresses and need the checks G2D has.
 - **NPUs** (RKNPU, VIP9000, KPU): each runs command streams made by its vendor's model compiler.
   With vendor runtimes ruled out, a submit path would have nothing to run, and raw submit is a path
   to arbitrary DMA. Not started; needs a ruling on where compiled models come from.
+- **K230 frame path**: needs a ruling. The SDK's V4L2 capture nodes (`vvcam`, in `k230_linux_sdk` at
+  `fc6cc21`) depend on `isp_media_server`, a binary-only daemon the SDK downloads from Kendryte. The
+  first format ioctl posts a create-pipeline event and fails with `EIO` after 15 s if the daemon does
+  not answer, and the daemon is what programs the ISP. That is a vendor runtime, so no capture code
+  was written on it. The alternative is a Lemnos path that programs the ISP through `/dev/vvcam-isp.0`
+  (`lemnos-drivers-k230isp` has its register access), which needs the ISP8000 and CSI programming
+  and a board. Either way: the node formats are NV12, NV16, YUYV, BGR24, P010 and 8, 10 and 12-bit
+  Bayer. In the two driver files read, `v4l2_buffer.sequence` and the timestamp are never set
+  (`buf->sequence` is the buffer index), so a frame's sequence and time need checking on a board.
+- **rkcif behind `IspDevice`**: `cif::enable_stream` needs the caller to name the media device,
+  because nothing in the sources read says which `rkcif` instance feeds which ISP. `IspDevice` needs
+  no call for the driver's default links.
 - **Blend with a YUV layer on G2D**: the BSP driver's check refuses every usable size.
 
 ### Camera sensor module (OV9782), given to Lemnos
