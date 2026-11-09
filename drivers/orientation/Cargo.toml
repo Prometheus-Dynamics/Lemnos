@@ -14,7 +14,6 @@ lemnos-contract-accelerometer = { path = "../../contracts/accelerometer" }
 lemnos-contract-gyroscope = { path = "../../contracts/gyroscope" }
 lemnos-contract-magnetometer = { path = "../../contracts/magnetometer" }
 lemnos-contract-orientation = { path = "../../contracts/orientation" }
-libm = "0.2"
 
 [package.metadata.lemnos]
 driver = "Orientation"
