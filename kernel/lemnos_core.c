@@ -548,6 +548,9 @@ union lem_args {
 	struct lemnos_claim claim;
 	struct lemnos_stream_create stream;
 	struct lemnos_pisp_be_create pisp_be;
+	struct lemnos_i2c_transfer i2c;
+	struct lemnos_i2c_smbus smbus;
+	struct lemnos_spi_transfer spi;
 };
 
 static long lem_next(struct lemnos_next *n)
@@ -617,6 +620,12 @@ static long lem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 	if (cmd == LEMNOS_IOC_CLAIM) {
 		ret = lem_claim(&u.claim);
+	} else if (cmd == LEMNOS_IOC_I2C_TRANSFER) {
+		ret = lem_i2c_transfer(&u.i2c);
+	} else if (cmd == LEMNOS_IOC_I2C_SMBUS) {
+		ret = lem_i2c_smbus(&u.smbus);
+	} else if (cmd == LEMNOS_IOC_SPI_TRANSFER) {
+		ret = lem_spi_transfer(&u.spi);
 	} else {
 		down_read(&lem_blocks_sem);
 		if (cmd == LEMNOS_IOC_NEXT) {
@@ -689,7 +698,7 @@ static int lem_probe(struct platform_device *pdev)
 	struct clk *clk;
 	int ret;
 
-	if (!lem_device_listed(dev, owned))
+	if (!lem_block_owned(dev))
 		return dev_err_probe(dev, -ENODEV, "not a block Lemnos owns (see owned=)\n");
 	l = devm_kzalloc(dev, sizeof(*l), GFP_KERNEL);
 	if (!l)
@@ -802,10 +811,13 @@ static struct platform_driver lem_driver = {
 
 static int __init lem_init(void)
 {
-	int ret = platform_driver_register(&lem_driver);
+	int ret = lem_bus_init();
 
 	if (ret)
 		return ret;
+	ret = platform_driver_register(&lem_driver);
+	if (ret)
+		goto bus;
 	ret = lem_rp1_csi2_register();
 	if (ret)
 		goto driver;
@@ -817,6 +829,8 @@ csi2:
 	lem_rp1_csi2_unregister();
 driver:
 	platform_driver_unregister(&lem_driver);
+bus:
+	lem_bus_exit();
 	return ret;
 }
 
@@ -825,6 +839,7 @@ static void __exit lem_exit(void)
 	misc_deregister(&lem_misc);
 	lem_rp1_csi2_unregister();
 	platform_driver_unregister(&lem_driver);
+	lem_bus_exit();
 }
 
 module_init(lem_init);

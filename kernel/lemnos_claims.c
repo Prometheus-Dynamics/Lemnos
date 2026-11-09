@@ -54,6 +54,15 @@ static const struct file_operations lem_claim_fops = {
 	.llseek = noop_llseek,
 };
 
+bool lem_claim_held(int fd, const char *resource)
+{
+	CLASS(fd, f)(fd);
+
+	if (fd_empty(f) || fd_file(f)->f_op != &lem_claim_fops)
+		return false;
+	return !strcmp(((struct lem_held *)fd_file(f)->private_data)->resource, resource);
+}
+
 /* Refused while the name is held or the table is full. */
 static int lem_held_insert(struct lem_held *h)
 {

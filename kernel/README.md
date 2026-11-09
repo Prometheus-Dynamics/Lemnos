@@ -147,6 +147,13 @@ GPL-2.0-only. Register offsets and the start, submit, interrupt and stop sequenc
 the stock `rp1_cfe` driver's `pisp-fe.c` and `cfe.c`, Copyright (C) 2021-2024 Raspberry Pi Ltd.; the
 notice is kept in the file header. The driver is `drivers/pisp/` (`PispFe`, the `device` feature).
 
+## Buses
+
+I2C and SPI transfers go through the kernel's own cores. Every transfer names a claim on its target,
+`i2c-<bus>:0x<addr>` or `spi-<bus>.<cs>`, and is refused without it. An I2C address a kernel driver
+holds gets `EBUSY`. SPI devices are bound like blocks, through `driver_override` and `owned`. The
+`bus_buffer` parameter sets the largest transfer, in bytes each way (default 4096).
+
 ## Unbinding
 
 Requests for a block fail with `ENODEV` from the moment its unbind starts, its register mappings
@@ -161,6 +168,6 @@ make KDIR=<a built kernel tree>
 ```
 
 `testing/qemu/run.sh` builds the module and boots a kernel in QEMU with it loaded, then runs
-`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_stream_check.c`, `test/lemnos_rp1_csi2_check.c` and `test/lemnos_pisp_fe_check.c` on blocks with
+`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_bus_check.c`, `test/lemnos_stream_check.c`, `test/lemnos_rp1_csi2_check.c` and `test/lemnos_pisp_fe_check.c` on blocks with
 nothing behind them. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
 and memory checking on.
