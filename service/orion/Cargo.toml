@@ -1,0 +1,35 @@
+[package]
+name = "lemnos-orion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Publish every Lemnos device to Orion: a lemnosd client and an Orion provider, with no code for any kind of device"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lemnos-orion"
+path = "src/main.rs"
+
+[dependencies]
+lemnos-client = { path = "../../engine/client" }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-wire = { path = "../../engine/wire" }
+# Orion is not published: pinned to the revision the board images ship (protocol 1).
+orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1" }
+orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1" }
+orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1" }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+# The in-process Orion node for the integration tests: IPC only, so no TLS stack is pulled in.
+orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1", default-features = false }
+lemnosd = { path = "../lemnosd" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
