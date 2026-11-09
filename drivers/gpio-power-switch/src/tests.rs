@@ -91,15 +91,13 @@ fn a_line_that_refuses_at_bind_fails_the_bind() {
 }
 
 #[test]
-fn a_non_boolean_setting_or_an_enable_delay_is_refused() {
+fn a_non_boolean_setting_is_refused() {
     let (mut board, line, _) = wired(false);
     assert!(bind(&mut board, &[("default_on", ConfigValue::Int(1))]).is_err());
-    assert!(bind(&mut board, &[("enable_delay_ms", ConfigValue::Int(300))]).is_err());
     assert!(
         line.configs().is_empty(),
         "refused before the line is touched"
     );
-    assert!(bind(&mut board, &[("enable_delay_ms", ConfigValue::Int(0))]).is_ok());
 }
 
 #[test]
@@ -153,35 +151,4 @@ fn no_fault_input_has_one_channel() {
     assert!(description.find("power.on").is_some());
     assert!(description.find("power.fault").is_none());
     assert_eq!(switch.fault().unwrap(), None);
-}
-
-#[test]
-fn cycle_refuses_an_off_time_over_the_limit_without_writing() {
-    let (mut board, line, _) = wired(false);
-    let mut switch = bind(&mut board, &[]).unwrap();
-    assert_eq!(
-        switch.cycle(MAX_CYCLE_OFF_MS + 1),
-        Err(Status::INVALID_ARGUMENT)
-    );
-    assert_eq!(line.level(), Some(true));
-    assert_eq!(line.configs().len(), 1);
-}
-
-#[test]
-fn cycle_zero_does_nothing() {
-    let (mut board, line, _) = wired(false);
-    let mut switch = bind(&mut board, &[]).unwrap();
-    switch.cycle(0).unwrap();
-    assert_eq!(line.level(), Some(true));
-    assert!(switch.is_on().unwrap());
-}
-
-#[test]
-fn cycle_is_not_supported_and_never_cuts_the_load() {
-    let (mut board, line, _) = wired(false);
-    let mut switch = bind(&mut board, &[]).unwrap();
-    assert_eq!(switch.cycle(300), Err(Status::NOT_SUPPORTED));
-    assert_eq!(line.level(), Some(true), "no turn-off without a turn-on");
-    assert!(switch.is_on().unwrap());
-    assert_eq!(line.configs().len(), 1);
 }

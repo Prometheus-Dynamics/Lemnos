@@ -13,7 +13,4 @@ pub trait PowerSwitch {
     /// Whether the switch reports a fault. `None` when it has no fault input.
     #[method(3)]
     fn fault(&mut self) -> Result<Option<bool>>;
-    /// Turns the load off, and back on after `off_ms`. Returns at once.
-    #[method(4)]
-    fn cycle(&mut self, off_ms: u32) -> Result<()>;
 }
