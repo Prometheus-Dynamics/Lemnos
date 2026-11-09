@@ -53,9 +53,41 @@ A job names a buffer and up to four device-address ranges (`struct lemnos_stream
 lie wholly in that buffer's bytes, or wholly in a dma-buf registered on the stream with
 `LEMNOS_STREAM_IOC_REGISTER`, for the full length. The test source (`test_stream_source`, test only)
 fills frames from a kernel mapping and writes each range, so the checks are observable from user
-space. A real block's interrupt path will call the same frame-path functions.
+space. A block's interrupt path calls the same frame-path functions (`lem_stream_next`,
+`lem_stream_complete`).
 
 Refusals and what they mean are listed in `lemnos.h`.
+
+## The rp1-csi2 receiver
+
+`lemnos_rp1_csi2.c` is the camera receiver: the block's D-PHY, CSI-2 host and one DMA channel,
+delivering into a frame stream. It's a second platform driver in this module, `lemnos-rp1-csi2`,
+bound the same way as a block (`driver_override`, and a compatible in `owned`). It has its own node
+for each bound device, `/dev/lemnos-rp1-csi2-<device>`, one opener at a time; interface in
+`lemnos_rp1_csi2.h`. Sensor bring-up is the sensor driver's: nothing here touches a sensor.
+
+`LEMNOS_RP1_CSI2_IOC_START` names the link, the layout and a stream made on this node. There is no
+ioctl carrying an address and no access to the registers. The receiver only arms buffers it gets
+from `lem_stream_next()`: a device address computed in the stream code from the pool it mapped, the
+end address checked against the buffer with overflow-safe arithmetic, the frame's stride, height and
+size checked against the buffer at `START`, and the buffer held as the block's until the frame
+completes or the channel is stopped.
+
+Stopping is one path, whichever of `STOP`, closing the stream's file, closing this node or unbinding
+gets there first. It writes FORCE, flushes it with a read, waits out any running handler, and then
+polls the channel's line counter until it holds still, up to a bounded time. Only then do the buffers
+go back. If the counter never holds still, the DMA can't be shown to have stopped: nothing is
+released, every pin the stream holds is kept until reboot, and the receiver refuses `START` until it
+is bound again (`LEMNOS_RP1_CSI2_INFO_WEDGED`).
+
+Interrupt status bits are only tested, never trusted as counts or lengths: a frame's bytes on the
+ring are what `START` fixed, and a frame the block didn't finish (a frame start with no frame end
+before it) is flagged bad and, on a job-driven stream, comes back with 0 bytes.
+
+GPL-2.0-only. The D-PHY bring-up, the channel's registers and the frame start and end accounting
+are ported from the stock `rp1_cfe` driver, Copyright (C) 2021-2024 Raspberry Pi Ltd., through the
+dev branch's receiver; the notice is kept in the file header. See `drivers/rp1-csi2/` for the driver
+that uses this.
 
 ## Unbinding
 
@@ -71,6 +103,6 @@ make KDIR=<a built kernel tree>
 ```
 
 `testing/qemu/run.sh` builds the module and boots a kernel in QEMU with it loaded, then runs
-`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c` and `test/lemnos_stream_check.c` on a block with
-nothing behind it. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
+`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_stream_check.c` and `test/lemnos_rp1_csi2_check.c` on blocks with
+nothing behind them. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
 and memory checking on.

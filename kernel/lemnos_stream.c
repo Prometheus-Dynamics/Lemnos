@@ -24,12 +24,18 @@
  * here are pinned while the stream holds them, and removed from a stream only
  * when no job uses them.
  *
- * Locking: s->lock is the frame path's, taken by the source (a block, later;
- * the test source today) and by KICK. s->ctl orders registration and teardown
- * and is never taken on the frame path. The source keeps no lock while it
- * writes memory; instead teardown stops it (cancel_delayed_work_sync) before
- * releasing anything, and the regions a job names stay held (users) until the
- * job finishes. Lock order: lem_blocks_sem, lem_streams_lock, s->ctl, s->lock.
+ * Locking: s->lock is the frame path's, taken by the source (a block's
+ * interrupt handler, or the test source) and by KICK. s->ctl orders
+ * registration and teardown and is never taken on the frame path. The source
+ * keeps no lock while it writes memory; instead teardown stops it (the block's
+ * stop callback, cancel_delayed_work_sync) before releasing anything, and the
+ * regions a job names stay held (users) until the job finishes. Lock order:
+ * lem_blocks_sem, lem_streams_lock, s->ctl, s->lock.
+ *
+ * A block attaches as the stream's producer and calls lem_stream_next() for
+ * the buffer it arms and lem_stream_complete() when the block is finished with
+ * it (lemnos_internal.h). Everything those touch is the kernel's own copy; the
+ * block only ever sees device addresses this file computed from the pool.
  *
  * Derived in part from the capture module's buffer queue on the dev branch
  * (a queued buffer names a dma-buf offset; the module keeps the mapping while
@@ -103,20 +109,6 @@ struct lem_stream_region {
 	u32 users;			/* job ranges not finished */
 };
 
-/* A validated range: what the source uses; nothing the consumer can change. */
-struct lem_job_range {
-	u32 region;
-	u64 offset;
-	u64 len;
-};
-
-struct lem_job {
-	u64 identity;
-	u32 buffer;
-	u32 count;
-	struct lem_job_range range[LEMNOS_STREAM_JOB_RANGES];
-};
-
 struct lem_stream {
 	struct list_head node;		/* on lem_streams */
 	struct device *dev;		/* held until the stream is freed */
@@ -148,7 +140,13 @@ struct lem_stream {
 	struct delayed_work source;	/* test source */
 	u32 period_us, left;
 	struct work_struct gone;	/* the block going away, see lem_streams_block_gone */
+
+	struct lem_stream_producer producer;	/* the block feeding this stream, or stop NULL */
+	u32 frame_bytes;		/* what the producer may write per buffer */
+	bool wedged;			/* a block's DMA could not be seen to stop: nothing is unpinned */
 };
+
+static const struct file_operations lem_stream_fops;
 
 static LIST_HEAD(lem_streams);
 static DEFINE_MUTEX(lem_streams_lock);
@@ -374,7 +372,7 @@ static int lem_stream_drain(struct lem_stream *s)
 
 /* Publishes one frame. 0, with *pushed saying if it fit; or -errno for a lying consumer. */
 static int lem_stream_push_frame(struct lem_stream *s, u32 buffer, u32 bytes, u64 sequence,
-				 u64 identity, u32 fence, bool *pushed)
+				 u64 identity, u32 fence, u64 timestamp_ns, bool *pushed)
 {
 	u64 slots = s->frame_slots;
 	u64 tail = lem_ring_read_acquire(s, LEMNOS_RING_FRAMES_TAIL);
@@ -391,7 +389,7 @@ static int lem_stream_push_frame(struct lem_stream *s, u32 buffer, u32 bytes, u6
 	lem_ring_write(s, at, (u64)buffer | (u64)bytes << 32);
 	lem_ring_write(s, at + 1, sequence);
 	lem_ring_write(s, at + 2, identity);
-	lem_ring_write(s, at + 3, ktime_get_ns());
+	lem_ring_write(s, at + 3, timestamp_ns);
 	lem_ring_write(s, at + 4, fence);
 	s->frames_head++;
 	lem_ring_write_release(s, LEMNOS_RING_FRAMES_HEAD, s->frames_head);
@@ -452,6 +450,45 @@ static void lem_stream_fill(struct lem_stream *s, const struct lem_job *job, u64
 	}
 }
 
+/*
+ * Publishes a filled buffer, or gives it back when the stream has ended or the
+ * ring has no room. `bytes` is the kernel's own figure; 0 says the block
+ * flagged the frame as bad. Lock held; bounded.
+ */
+static void lem_stream_finish_locked(struct lem_stream *s, const struct lem_job *job, u32 bytes,
+				     u64 sequence, u64 timestamp_ns)
+{
+	struct lem_stream_buf *b = &s->buf[job->buffer];
+	bool pushed;
+	int ret;
+
+	for (u32 i = 0; i < job->count; i++)
+		s->region[job->range[i].region].users--;
+	if (s->dead || s->fault || (!bytes && !s->jobs)) {
+		/*
+		 * With no job behind it nobody is waiting for this buffer. A
+		 * job-driven stream's consumer is told, so it isn't left
+		 * waiting on an identity that never comes.
+		 */
+		b->state = LEM_BUF_FREE;
+		return;
+	}
+
+	b->fence++;
+	ret = lem_stream_push_frame(s, job->buffer, bytes, sequence, job->identity, b->fence,
+				    timestamp_ns, &pushed);
+	if (ret) {
+		b->state = LEM_BUF_FREE;
+		lem_stream_fault_locked(s, ret);
+	} else if (pushed) {
+		b->state = LEM_BUF_CONSUMER;
+		s->published++;
+	} else {
+		b->state = LEM_BUF_FREE;
+		s->dropped++;
+	}
+}
+
 static void lem_stream_source(struct work_struct *work)
 {
 	struct lem_stream *s = container_of(to_delayed_work(work), struct lem_stream, source);
@@ -475,32 +512,8 @@ static void lem_stream_source(struct work_struct *work)
 		lem_stream_fill(s, &job, sequence);
 
 	spin_lock_irqsave(&s->lock, flags);
-	if (have) {
-		struct lem_stream_buf *b = &s->buf[job.buffer];
-
-		for (u32 i = 0; i < job.count; i++)
-			s->region[job.range[i].region].users--;
-		if (s->dead || s->fault) {
-			b->state = LEM_BUF_FREE;
-		} else {
-			bool pushed;
-			int ret;
-
-			b->fence++;
-			ret = lem_stream_push_frame(s, job.buffer, s->buffer_bytes, sequence,
-						    job.identity, b->fence, &pushed);
-			if (ret) {
-				b->state = LEM_BUF_FREE;
-				lem_stream_fault_locked(s, ret);
-			} else if (pushed) {
-				b->state = LEM_BUF_CONSUMER;
-				s->published++;
-			} else {
-				b->state = LEM_BUF_FREE;
-				s->dropped++;
-			}
-		}
-	}
+	if (have)
+		lem_stream_finish_locked(s, &job, s->buffer_bytes, sequence, ktime_get_ns());
 	if (have && s->left != U32_MAX && s->left)
 		s->left--;
 	again = !s->dead && !s->fault && s->left;
@@ -513,6 +526,149 @@ static void lem_stream_source(struct work_struct *work)
 		/* Nothing to fill: don't spin until the consumer gives one back. */
 		schedule_delayed_work(&s->source, have ? delay : max(delay, 1UL));
 	}
+}
+
+/* --- a block as the producer --- */
+
+/*
+ * The checks every programmed frame must pass, against the module's own copies:
+ * the frame's end, in device addresses, must lie inside the buffer. Lock held
+ * or the values not yet in use.
+ */
+static int lem_stream_check_frame(const struct lem_stream *s, u32 stride, u32 height, u32 bytes)
+{
+	const struct lem_stream_region *pool = &s->region[LEM_STREAM_POOL];
+	u64 lines, last, end;
+
+	if (!stride || !height || !bytes)
+		return -EINVAL;
+	if (check_mul_overflow((u64)stride, (u64)height, &lines) || lines > bytes)
+		return -EINVAL;
+	if (bytes > s->buffer_bytes || (u64)bytes > s->stride)
+		return -EINVAL;
+	if (!pool->buf || (pool->addr & (LEM_STREAM_DMA_ALIGN - 1)))
+		return -EINVAL;
+	if (check_mul_overflow((u64)s->buffers - 1, s->stride, &last) ||
+	    check_add_overflow(pool->addr, last, &last) ||
+	    check_add_overflow(last, (u64)bytes, &end) || end > pool->end)
+		return -EFAULT;
+	return 0;
+}
+
+struct lem_stream *lem_stream_from_file(struct file *file, struct device *dev)
+{
+	struct lem_stream *s;
+
+	if (file->f_op != &lem_stream_fops)
+		return ERR_PTR(-EINVAL);
+	s = file->private_data;
+	if (s->dev != dev)
+		return ERR_PTR(-EXDEV);
+	return s;
+}
+
+int lem_stream_attach(struct lem_stream *s, const struct lem_stream_producer *producer, u32 stride,
+		      u32 height, u32 bytes)
+{
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&s->lock, flags);
+	if (s->dead)
+		ret = -ENODEV;
+	else if (s->fault)
+		ret = s->fault;
+	else if (s->producer.stop || s->left)
+		ret = -EBUSY;
+	else
+		ret = lem_stream_check_frame(s, stride, height, bytes);
+	if (!ret) {
+		s->producer = *producer;
+		s->frame_bytes = bytes;
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	return ret;
+}
+
+bool lem_stream_detach(struct lem_stream *s)
+{
+	unsigned long flags;
+	bool was;
+
+	spin_lock_irqsave(&s->lock, flags);
+	was = s->producer.stop;
+	s->producer.stop = NULL;
+	spin_unlock_irqrestore(&s->lock, flags);
+	return was;
+}
+
+int lem_stream_next(struct lem_stream *s, struct lem_stream_slot *slot)
+{
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&s->lock, flags);
+	if (s->dead) {
+		ret = -ENODEV;
+	} else if (s->fault) {
+		ret = s->fault;
+	} else {
+		ret = lem_stream_drain(s);
+		if (!ret && !lem_stream_take(s, &slot->job))
+			ret = -ENOBUFS;
+		if (!ret) {
+			u64 offset, addr;
+
+			if (check_mul_overflow((u64)slot->job.buffer, s->stride, &offset) ||
+			    check_add_overflow(s->region[LEM_STREAM_POOL].addr, offset, &addr) ||
+			    check_add_overflow(addr, (u64)s->frame_bytes, &offset) ||
+			    offset > s->region[LEM_STREAM_POOL].end) {
+				/* The pool's bounds were checked at creation; never hand this out. */
+				lem_stream_finish_locked(s, &slot->job, 0, 0, 0);
+				ret = -EFAULT;
+			} else {
+				slot->addr = addr;
+				slot->bytes = s->frame_bytes;
+			}
+		}
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (ret && ret != -ENOBUFS && ret != -ENODEV)
+		lem_stream_wake(s);
+	return ret;
+}
+
+void lem_stream_complete(struct lem_stream *s, const struct lem_stream_slot *slot, u32 bytes,
+			 u64 sequence, u64 timestamp_ns)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	/* Never more than this buffer was given for, whatever the block says. */
+	lem_stream_finish_locked(s, &slot->job, min(bytes, slot->bytes), sequence, timestamp_ns);
+	spin_unlock_irqrestore(&s->lock, flags);
+	lem_stream_wake(s);
+}
+
+/* The frame never ran. Returns its buffer and what its job held, without publishing. */
+void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	for (u32 i = 0; i < slot->job.count; i++)
+		s->region[slot->job.range[i].region].users--;
+	s->buf[slot->job.buffer].state = LEM_BUF_FREE;
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+void lem_stream_wedge(struct lem_stream *s)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	s->wedged = true;
+	spin_unlock_irqrestore(&s->lock, flags);
 }
 
 /* --- dma-bufs on the block --- */
@@ -663,6 +819,8 @@ static long lem_stream_test_source(struct lem_stream *s, const struct lemnos_str
 
 	if (!test_stream_source)
 		return -EPERM;
+	if (READ_ONCE(s->producer.stop))
+		return -EBUSY;
 	cancel_delayed_work_sync(&s->source);
 	spin_lock_irqsave(&s->lock, flags);
 	WRITE_ONCE(s->period_us, a->period_us);
@@ -785,7 +943,9 @@ static int lem_stream_mmap(struct file *file, struct vm_area_struct *vma)
  */
 static void lem_stream_shutdown(struct lem_stream *s, u64 state)
 {
+	struct lem_stream_producer producer;
 	unsigned long flags;
+	bool wedged;
 
 	mutex_lock(&s->ctl);
 	if (s->dead) {
@@ -794,11 +954,27 @@ static void lem_stream_shutdown(struct lem_stream *s, u64 state)
 	}
 	spin_lock_irqsave(&s->lock, flags);
 	s->dead = true;
+	producer = s->producer;
+	s->producer.stop = NULL;
 	if (!s->fault)
 		lem_ring_write_release(s, LEMNOS_RING_STATE, state);
 	spin_unlock_irqrestore(&s->lock, flags);
 
 	cancel_delayed_work_sync(&s->source);
+
+	/* The block's DMA stops here, before anything it could write to is released. */
+	if (producer.stop)
+		producer.stop(producer.priv, s);
+
+	spin_lock_irqsave(&s->lock, flags);
+	wedged = s->wedged;
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (wedged) {
+		/* DMA may still run: keep every pin for good. Nothing else is safe. */
+		lem_stream_wake(s);
+		mutex_unlock(&s->ctl);
+		return;
+	}
 
 	spin_lock_irqsave(&s->lock, flags);
 	for (u32 i = 0; i < LEM_STREAM_REGIONS; i++) {
@@ -821,12 +997,14 @@ static void lem_stream_free(struct lem_stream *s)
 {
 	if (s->doorbell)
 		eventfd_ctx_put(s->doorbell);
-	for (u32 i = 0; i < LEM_STREAM_REGIONS; i++)
-		lem_region_unmap(&s->region[i]);
+	if (!s->wedged)
+		for (u32 i = 0; i < LEM_STREAM_REGIONS; i++)
+			lem_region_unmap(&s->region[i]);
 	kvfree(s->queue);
 	kvfree(s->buf);
 	vfree(s->ring);
-	put_device(s->dev);
+	if (!s->wedged)
+		put_device(s->dev);
 	mutex_destroy(&s->ctl);
 	kfree(s);
 }

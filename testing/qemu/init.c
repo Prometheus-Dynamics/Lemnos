@@ -22,6 +22,13 @@
 #define BIND "/sys/bus/platform/drivers/lemnos/bind"
 #define UNBIND "/sys/bus/platform/drivers/lemnos/unbind"
 #define OWNED "owned=lemnos,test-block"
+#define CSI2 "lemnos-test-csi2"
+#define CSI2_DRIVER "lemnos-rp1-csi2"
+#define CSI2_BIND "/sys/bus/platform/drivers/" CSI2_DRIVER "/bind"
+#define CSI2_UNBIND "/sys/bus/platform/drivers/" CSI2_DRIVER "/unbind"
+#define OWNED_CSI2 "owned=lemnos,test-block,lemnos,test-csi2"
+/* The fake receiver's registers: guest memory the kernel left alone (memmap=). */
+#define CSI2_PHYS "csi2_phys=0x20000000"
 
 static int failures;
 
@@ -64,6 +71,16 @@ static int put(const char *path, const char *text)
 		e = errno;
 	close(fd);
 	return e;
+}
+
+static int bind_csi2(void)
+{
+	char path[128];
+
+	snprintf(path, sizeof(path), "/sys/bus/platform/devices/%s/driver_override", CSI2);
+	if (put(path, CSI2_DRIVER))
+		return -1;
+	return put(CSI2_BIND, CSI2);
 }
 
 static int bind_block(const char *dev)
@@ -115,6 +132,7 @@ int main(void)
 	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
 	mount("sysfs", "/sys", "sysfs", 0, NULL);
 	mount("proc", "/proc", "proc", 0, NULL);
+	mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
 	int con = open("/dev/console", O_RDWR);
 
 	if (con >= 0) {
@@ -125,10 +143,12 @@ int main(void)
 	setvbuf(stdout, NULL, _IONBF, 0);
 	printf("lemnos-qemu: start\n");
 
-	check(!load("/lemnos_test_block.ko", ""), "test block module loaded");
+	check(!load("/lemnos_test_block.ko", CSI2_PHYS), "test block module loaded");
 	check(!load("/lemnos.ko", OWNED), "module loaded");
 	check(!access("/dev/lemnos", R_OK), "control node exists");
 	check(bind_block(OTHER) == ENODEV, "a block not listed is refused (ENODEV)");
+	check(bind_csi2() == ENODEV, "the receiver not in owned= is refused (ENODEV)");
+	check(!forget_override(CSI2), "receiver override cleared");
 	check(!bind_block(BLOCK), "block bound");
 	check(!run((char *const[]){ "/lemnos_check", "/dev/lemnos", BLOCK, (char *)cma_heap(),
 				    NULL }),
@@ -160,6 +180,24 @@ int main(void)
 	      "lemnos_stream_check");
 	check(!forget_override(BLOCK), "override cleared");
 	check(!unload("lemnos"), "module unloaded with every stream released");
+
+	check(!load("/lemnos.ko", OWNED_CSI2), "module loaded owning the receiver");
+	check(!bind_block(BLOCK), "test block bound");
+	check(!bind_csi2(), "receiver bound");
+	check(!run((char *const[]){ "/lemnos_rp1_csi2_check", "/dev/lemnos", BLOCK, CSI2, CSI2_UNBIND,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_rp1_csi2_check");
+	check(!put(UNBIND, BLOCK), "test block unbound");
+	check(!forget_override(BLOCK) && !forget_override(CSI2), "overrides cleared");
+	check(!unload("lemnos"), "module unloaded after the receiver checks");
+
+	check(!load("/lemnos.ko", OWNED_CSI2), "module loaded for the stuck-DMA check");
+	check(!bind_csi2(), "receiver bound again");
+	check(!run((char *const[]){ "/lemnos_rp1_csi2_check", "wedge", CSI2, CSI2_UNBIND,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_rp1_csi2_check wedge");
+	check(!forget_override(CSI2), "override cleared");
+	check(!unload("lemnos"), "module unloaded with a wedged stream pinned");
 	check(!unload("lemnos_test_block"), "test block module unloaded");
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);
