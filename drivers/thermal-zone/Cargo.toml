@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-driver-thermal-zone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-temperature = { path = "../../contracts/temperature" }
+
+[package.metadata.lemnos]
+driver = "ThermalZone"
