@@ -51,6 +51,7 @@ reference, and nothing here changes it. The work is a pre-planned list of PRs in
 - Don't estimate how long anything will take. Describe size by scope and risk.
 - Product names appear only in the planning files (this file, `TODO.md`, `docs/design.md`,
   `docs/prs/`). PR F1 removes them.
+- A driver crate names its type under `[package.metadata.lemnos]`, and `scripts/generate-builtins.py` adds it to `lemnosd`. A maintainer runs that after merging, so a driver PR edits no service file.
 
 ## Board runs
 
