@@ -2,7 +2,6 @@
 //! directions, and body-frame synthesis of a tilting board.
 
 use crate::fusion::Vec3;
-use crate::fusion::math::{self, sin_cos, sqrt};
 use crate::fusion::quat::Quat;
 
 /// xorshift32. Enough for test data; not for anything else.
@@ -31,15 +30,6 @@ impl Rng {
     pub(crate) fn signed(&mut self) -> f32 {
         2.0 * self.unit() - 1.0
     }
-}
-
-/// A uniformly distributed unit vector.
-pub(crate) fn random_unit(rng: &mut Rng) -> Vec3 {
-    let z = rng.signed();
-    let phi = rng.unit() * 2.0 * core::f32::consts::PI;
-    let r = sqrt(math::max(0.0, 1.0 - z * z));
-    let (s, c) = sin_cos(phi);
-    [r * c, r * s, z]
 }
 
 /// Body angular velocity (rad/s) of the attitude `Ry(pitch) * Rx(roll)`, for

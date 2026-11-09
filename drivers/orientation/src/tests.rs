@@ -2,11 +2,10 @@
 //! reading, or fails while it holds none, and counts the reads it serves.
 
 use super::*;
-use crate::fusion::words::MAX_CALIBRATION_WORDS;
 use lemnos_core::{ConfigValue, Encode, LocalCaller, Router, Writer};
 use std::boxed::Box;
 use std::format;
-use std::string::{String, ToString};
+
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::vec::Vec;
@@ -104,44 +103,6 @@ fn level_bench() -> &'static Bench {
     b.set(ACCEL, Some(vec3(0.0, 0.0, G)));
     b.set(GYRO, Some(vec3(0.0, 0.0, 0.0)));
     b
-}
-
-/// The words of a magnetometer trained on a sphere of [`FIELD_UT`] with no
-/// distortion, which the driver then uses as its applied calibration.
-fn trained_mag_words() -> Vec<i32> {
-    let mut m = MagCalibrator::new();
-    // A uniform sphere: `z` uniform on [-1, 1] and the azimuth uniform.
-    let mut seed = 12_345u32;
-    let mut uniform = || {
-        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (seed >> 8) as f32 / (1u32 << 24) as f32
-    };
-    let mut t = 0u64;
-    for _ in 0..4500 {
-        let z = 2.0 * uniform() - 1.0;
-        let phi = 2.0 * core::f32::consts::PI * uniform();
-        let r = (1.0 - z * z).max(0.0).sqrt();
-        let b = [
-            FIELD_UT * r * phi.cos(),
-            FIELD_UT * r * phi.sin(),
-            FIELD_UT * z,
-        ];
-        m.push(t, b);
-        t += 10_000;
-    }
-    assert!(m.status().active, "training left the calibration inactive");
-    let mut buf = [0i32; MAX_CALIBRATION_WORDS];
-    let n = m.words(&mut buf);
-    buf[..n].to_vec()
-}
-
-/// Calibration words as the configuration's comma-separated text.
-fn as_text(words: &[i32]) -> String {
-    words
-        .iter()
-        .map(i32::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 #[test]
@@ -280,66 +241,20 @@ fn a_wired_magnetometer_is_used_unless_the_mode_says_otherwise() {
 }
 
 #[test]
-fn an_untrusted_magnetometer_gives_no_heading_and_says_so() {
-    // Factory calibration: the magnetometer is not trusted, so it does not set
-    // the heading, and the health reports that it is ignored.
+fn a_magnetometer_sets_the_heading_from_the_field() {
+    // A board yawed by `psi` sees the field as (h cos psi, -h sin psi, -v) in
+    // its own axes, with h and v the horizontal and vertical parts.
     let b = level_bench();
-    let (h, v) = (FIELD_UT * DIP.cos(), FIELD_UT * DIP.sin());
     let psi = 0.5f32;
+    let (h, v) = (FIELD_UT * DIP.cos(), FIELD_UT * DIP.sin());
     b.set(
         MAG,
         Some(vec3(h * psi.cos() * 1e-6, -h * psi.sin() * 1e-6, -v * 1e-6)),
     );
     let mut o = driver(b, true, &[("mode", ConfigValue::Str("9axis"))]);
     let r = o.read().expect("reads");
-    assert!(r.z.abs() < 1e-3, "yaw {} without a trusted field", r.z);
-    assert_eq!(
-        o.health(),
-        Health::Degraded("magnetometer ignored: disturbed or uncalibrated")
-    );
-}
-
-#[test]
-fn a_calibrated_magnetometer_sets_the_heading_from_the_field() {
-    // A board yawed by `psi` sees the field as (h cos psi, -h sin psi, -v) in
-    // its own axes, with h and v the horizontal and vertical parts.
-    let words = trained_mag_words();
-    let text = as_text(&words);
-    let b = level_bench();
-    let psi = 0.5f32;
-    let (h, v) = (FIELD_UT * DIP.cos(), FIELD_UT * DIP.sin());
-    b.set(
-        MAG,
-        Some(vec3(h * psi.cos() * 1e-6, -h * psi.sin() * 1e-6, -v * 1e-6)),
-    );
-    let mut o = driver(
-        b,
-        true,
-        &[
-            ("mode", ConfigValue::Str("9axis")),
-            ("mag_calibration", ConfigValue::Str(&text)),
-        ],
-    );
-    let r = o.read().expect("reads");
     assert!((r.z - psi).abs() < 0.02, "heading {} for {psi}", r.z);
     assert_eq!(o.health(), Health::Ok);
-}
-
-#[test]
-fn a_constant_gyro_offset_on_a_still_board_is_learned_away() {
-    // 30 s at 100 Hz with a 0.02 rad/s offset on a still, level board: left
-    // alone the yaw would reach 0.6 rad.
-    let b = level_bench();
-    b.set(GYRO, Some(vec3(0.0, 0.0, 0.02)));
-    let mut o = driver(b, false, &[]);
-    let mut last = 0.0;
-    for _ in 0..3000 {
-        last = o.read().expect("reads").z;
-    }
-    assert!(
-        last.abs() < 0.15,
-        "yaw {last} after 30 s of a 0.02 rad/s offset"
-    );
 }
 
 #[test]
@@ -365,32 +280,9 @@ fn bad_settings_are_refused_at_bind() {
     assert!(refuse(&[("mode", ConfigValue::Str("3axis"))]));
     assert!(refuse(&[("algorithm", ConfigValue::Str("ekf"))]));
     assert!(refuse(&[("kp", ConfigValue::Str("high"))]));
-    assert!(refuse(&[("imu_calibration", ConfigValue::Str("1,x"))]));
-    let too_many = as_text(&[1i32; MAX_CALIBRATION_WORDS + 1]);
-    assert!(refuse(&[("imu_calibration", ConfigValue::Str(&too_many))]));
     assert!(refuse(&[("sample_rate_hz", ConfigValue::Float(9.0))]));
     assert!(!refuse(&[("sample_rate_hz", ConfigValue::Float(10.0))]));
     assert!(!refuse(&[("sample_rate_hz", ConfigValue::Int(1000))]));
-}
-
-#[test]
-fn calibration_words_the_layout_refuses_leave_the_factory_state_and_say_so() {
-    let b = level_bench();
-    let refused = driver(b, false, &[("imu_calibration", ConfigValue::Str("9,1,0"))]);
-    assert_eq!(
-        refused.health(),
-        Health::Degraded("calibration words refused: factory calibration")
-    );
-
-    // The factory state's own words load.
-    let mut words = [0i32; MAX_CALIBRATION_WORDS];
-    let n = ImuCalibrator::new().words(&mut words);
-    let text = as_text(&words[..n]);
-    let accepted = driver(b, false, &[("imu_calibration", ConfigValue::Str(&text))]);
-    assert_eq!(
-        accepted.health(),
-        Health::Degraded("six-axis: yaw is relative")
-    );
 }
 
 #[test]

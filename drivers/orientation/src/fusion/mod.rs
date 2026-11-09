@@ -1,15 +1,9 @@
-//! IMU orientation fusion and sensor calibration, for `no_std` targets.
+//! IMU orientation fusion, for `no_std` targets.
 //!
 //! - [`Orientation`]: a Mahony or Madgwick filter over the gyroscope,
 //!   accelerometer and (optionally) magnetometer, with variable `dt`, magnetic
 //!   disturbance rejection and a mount rotation. Output: quaternion, roll,
 //!   pitch, yaw, gravity and linear acceleration in the body frame.
-//! - [`EllipsoidFit`]: an online ellipsoid fit (offset, scale and soft iron)
-//!   used for accelerometer and magnetometer calibration.
-//! - [`ImuCalibrator`] and [`MagCalibrator`]: automatic calibration on every
-//!   sample (gyro zero rate, accelerometer and magnetometer ellipsoids), plus
-//!   forced [`Routine`]s that produce a candidate applied with `apply()`.
-//! - [`words`]: the persisted layout of an applied calibration, as `i32` words.
 //!
 //! Nothing here allocates. All arithmetic is `f32`, and the square root,
 //! trigonometry and linear solves it needs are its own (see `math`), so it
@@ -25,21 +19,15 @@
 //! Timestamps are `u64` microseconds on any monotonic clock. The driver in
 //! the parent module has no clock, so it supplies its own (see `lib.rs`).
 
-mod calibrate;
-mod ellipsoid;
 mod math;
 mod orientation;
 mod quat;
-pub mod words;
 
 #[cfg(test)]
 mod testutil;
 
-pub use calibrate::{Changed, ImuCalibrator, MagCalibrator, PartStatus, Routine};
-pub use ellipsoid::{Ellipsoid, EllipsoidFit, Fit};
 pub use orientation::{Algorithm, Mode, Orientation, OrientationConfig, Output};
 pub use quat::Quat;
-pub use words::WordsError;
 
 /// A 3-vector `[x, y, z]`.
 pub type Vec3 = [f32; 3];

@@ -50,21 +50,6 @@ pub(crate) fn sqrt(x: f32) -> f32 {
     0.5 * (g + x / g)
 }
 
-/// Sine and cosine. The argument is reduced to `[-pi/4, pi/4]` by quadrant,
-/// then two Taylor series of degree 11 and 12 (error below 2e-9).
-/// Cube root of a positive finite `x` (Newton from above, no `libm`).
-/// Returns 0 for a non-positive input.
-pub(crate) fn cbrt(x: f32) -> f32 {
-    if x.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) || !x.is_finite() {
-        return 0.0;
-    }
-    let mut y = max(x, 1.0);
-    for _ in 0..100 {
-        y = (2.0 * y + x / (y * y)) / 3.0;
-    }
-    y
-}
-
 pub(crate) fn sin_cos(x: f32) -> (f32, f32) {
     let k = round_i32(x * FRAC_2_PI);
     let r = x - k as f32 * FRAC_PI_2;
@@ -188,129 +173,6 @@ pub(crate) fn wrap_pi(mut a: f32) -> f32 {
     a
 }
 
-/// Solves the symmetric positive definite system `a x = b` (9x9) in place by
-/// Gaussian elimination with partial pivoting. Returns `None` when a pivot is
-/// not finite or is negligible against the matrix scale.
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn solve9(a: &mut [[f32; 9]; 9], b: &mut [f32; 9], scale_ref: f32) -> Option<[f32; 9]> {
-    const N: usize = 9;
-    let tiny = scale_ref * 1e-9;
-    for col in 0..N {
-        let mut piv = col;
-        for row in col + 1..N {
-            if abs(a[row][col]) > abs(a[piv][col]) {
-                piv = row;
-            }
-        }
-        let pivot_abs = abs(a[piv][col]);
-        if pivot_abs.is_nan() || pivot_abs <= tiny {
-            return None;
-        }
-        if piv != col {
-            a.swap(piv, col);
-            b.swap(piv, col);
-        }
-        let p = a[col][col];
-        for row in col + 1..N {
-            let f = a[row][col] / p;
-            if f != 0.0 {
-                for k in col..N {
-                    a[row][k] -= f * a[col][k];
-                }
-                b[row] -= f * b[col];
-            }
-        }
-    }
-    let mut x = [0.0_f32; N];
-    for row in (0..N).rev() {
-        let mut s = b[row];
-        for k in row + 1..N {
-            s -= a[row][k] * x[k];
-        }
-        x[row] = s / a[row][row];
-    }
-    if x.iter().all(|v| v.is_finite()) {
-        Some(x)
-    } else {
-        None
-    }
-}
-
-/// Solves the 3x3 system `m x = b`. `None` when `m` is singular.
-pub(crate) fn solve3(m: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    if abs(det) <= 1e-30 || !det.is_finite() {
-        return None;
-    }
-    let inv = 1.0 / det;
-    let mut out = [0.0_f32; 3];
-    for (i, o) in out.iter_mut().enumerate() {
-        // Cramer's rule: replace column i with b.
-        let mut t = m;
-        for r in 0..3 {
-            t[r][i] = b[r];
-        }
-        let d = t[0][0] * (t[1][1] * t[2][2] - t[1][2] * t[2][1])
-            - t[0][1] * (t[1][0] * t[2][2] - t[1][2] * t[2][0])
-            + t[0][2] * (t[1][0] * t[2][1] - t[1][1] * t[2][0]);
-        *o = d * inv;
-    }
-    Some(out)
-}
-
-/// Eigendecomposition of a symmetric 3x3 matrix by cyclic Jacobi rotations.
-/// Returns eigenvalues and the matrix whose columns are the eigenvectors.
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn eig3_sym(mut a: [[f32; 3]; 3]) -> ([f32; 3], [[f32; 3]; 3]) {
-    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    for _ in 0..12 {
-        let off = abs(a[0][1]) + abs(a[0][2]) + abs(a[1][2]);
-        let diag = abs(a[0][0]) + abs(a[1][1]) + abs(a[2][2]);
-        if off <= 1e-9 * diag || off == 0.0 {
-            break;
-        }
-        for (p, q) in [(0usize, 1usize), (0, 2), (1, 2)] {
-            if a[p][q] == 0.0 {
-                continue;
-            }
-            let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
-            // t = sign(theta) / (|theta| + sqrt(theta^2 + 1)), the smaller root.
-            let t = {
-                let s = if theta >= 0.0 { 1.0 } else { -1.0 };
-                s / (abs(theta) + sqrt(theta * theta + 1.0))
-            };
-            let c = 1.0 / sqrt(t * t + 1.0);
-            let s = t * c;
-            let app = a[p][p];
-            let aqq = a[q][q];
-            let apq = a[p][q];
-            a[p][p] = app - t * apq;
-            a[q][q] = aqq + t * apq;
-            a[p][q] = 0.0;
-            a[q][p] = 0.0;
-            for r in 0..3 {
-                if r != p && r != q {
-                    let arp = a[r][p];
-                    let arq = a[r][q];
-                    a[r][p] = c * arp - s * arq;
-                    a[p][r] = a[r][p];
-                    a[r][q] = s * arp + c * arq;
-                    a[q][r] = a[r][q];
-                }
-            }
-            for row in v.iter_mut() {
-                let vp = row[p];
-                let vq = row[q];
-                row[p] = c * vp - s * vq;
-                row[q] = s * vp + c * vq;
-            }
-        }
-    }
-    ([a[0][0], a[1][1], a[2][2]], v)
-}
-
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)]
 mod tests {
@@ -377,33 +239,5 @@ mod tests {
             wrap_pi(3.0 * core::f32::consts::PI),
             core::f32::consts::PI
         ));
-    }
-
-    #[test]
-    fn solve9_and_eig3_agree_with_known_systems() {
-        // Diagonal system: solution is b / d.
-        let mut a = [[0.0_f32; 9]; 9];
-        for (i, row) in a.iter_mut().enumerate() {
-            row[i] = (i + 1) as f32;
-        }
-        let mut b = [1.0_f32; 9];
-        let x = solve9(&mut a, &mut b, 9.0).expect("solvable");
-        for (i, xi) in x.iter().enumerate() {
-            assert!(close(*xi, 1.0 / (i + 1) as f32));
-        }
-        // Singular: no solution.
-        let mut z = [[0.0_f32; 9]; 9];
-        let mut zb = [0.0_f32; 9];
-        assert!(solve9(&mut z, &mut zb, 1.0).is_none());
-
-        let (lam, v) = eig3_sym([[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 5.0]]);
-        let mut sorted = lam;
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert!(close(sorted[0], 2.0) && close(sorted[1], 3.0) && close(sorted[2], 5.0));
-        // Orthonormal eigenvectors.
-        for i in 0..3 {
-            let n: f32 = (0..3).map(|k| v[k][i] * v[k][i]).sum();
-            assert!(close(n, 1.0));
-        }
     }
 }
