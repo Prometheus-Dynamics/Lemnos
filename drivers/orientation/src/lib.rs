@@ -1,5 +1,5 @@
 //! Orientation from an accelerometer, a gyroscope and, when the board wants
-//! it, a magnetometer. The fusion filter and the calibrators are in [`fusion`].
+//! it, a magnetometer. The fusion filter is in [`fusion`].
 //!
 //! # Time
 //!
@@ -13,12 +13,8 @@
 //!
 //! # Calibration
 //!
-//! The accelerometer, gyroscope and magnetometer are calibrated here, on every
-//! sample this driver reads: the gyroscope's zero-rate offset, and the
-//! accelerometer's and magnetometer's ellipsoid fits. The estimates are kept
-//! in memory only. The driver model has no persistence, so a restart begins
-//! from the factory calibration, unless the calibration words are set in the
-//! configuration (`imu_calibration`, `mag_calibration`).
+//! This driver doesn't calibrate anything. It uses what the sensor drivers report as it is,
+//! so calibrating them is up to whoever is using them.
 //!
 //! # Configuration
 //!
@@ -32,7 +28,6 @@
 //! | `mount_roll_deg`, `mount_pitch_deg`, `mount_yaw_deg` | 0 | Sensor to body rotation. |
 //! | `declination_deg` | 0 | Magnetic to true north (9-axis). |
 //! | `dip_deg` | learned | Dip reference (9-axis). |
-//! | `imu_calibration`, `mag_calibration` | factory | Comma-separated words from an earlier applied calibration. |
 //!
 //! # Units
 //!
@@ -52,10 +47,7 @@ pub mod fusion;
 #[cfg(test)]
 mod tests;
 
-use fusion::words::MAX_CALIBRATION_WORDS;
-use fusion::{
-    Algorithm, ImuCalibrator, MagCalibrator, Mode, Orientation as Filter, OrientationConfig, Quat,
-};
+use fusion::{Algorithm, Mode, Orientation as Filter, OrientationConfig, Quat};
 use lemnos_contract_accelerometer::Accelerometer;
 use lemnos_contract_gyroscope::Gyroscope;
 use lemnos_contract_magnetometer::Magnetometer;
@@ -81,9 +73,6 @@ const FASTEST_SAMPLE_HZ: f64 = 1000.0;
 const DEG: f32 = core::f32::consts::PI / 180.0;
 /// Tesla to microtesla.
 const UT_PER_T: f32 = 1_000_000.0;
-/// Why a calibration the configuration named is not in use.
-const REFUSED: &str = "calibration words refused: factory calibration";
-
 #[driver("orientation", provides = [OrientationContract])]
 pub struct Orientation {
     #[needs]
@@ -93,16 +82,12 @@ pub struct Orientation {
     #[needs(optional)]
     mag: Option<Dev<dyn Magnetometer>>,
     filter: Filter,
-    imu: ImuCalibrator,
-    mag_cal: MagCalibrator,
     /// The time between two reads, microseconds.
     period_us: u64,
     /// The filter's time of the last successful read, microseconds.
     now_us: u64,
     /// Whether the magnetometer is read and used.
     nine_axis: bool,
-    /// Set when a calibration the configuration named was refused.
-    refused: Option<&'static str>,
 }
 
 impl Lifecycle for Orientation {
@@ -122,34 +107,14 @@ impl Lifecycle for Orientation {
         }
         let filter = Filter::new(filter_config(cfg, nine_axis)?);
 
-        let mut refused = None;
-        let mut imu = ImuCalibrator::new();
-        let mut mag_cal = MagCalibrator::new();
-        let mut buf = [0i32; MAX_CALIBRATION_WORDS];
-        if let Some(text) = setting_text(cfg, "imu_calibration")? {
-            let n = words(text, &mut buf)?;
-            if n > 0 && imu.load(&buf[..n]).is_err() {
-                refused = Some(REFUSED);
-            }
-        }
-        if let Some(text) = setting_text(cfg, "mag_calibration")? {
-            let n = words(text, &mut buf)?;
-            if n > 0 && mag_cal.load(&buf[..n]).is_err() {
-                refused = Some(REFUSED);
-            }
-        }
-
         Ok(Self {
             accel: needs.accel,
             gyro: needs.gyro,
             mag: needs.mag,
             filter,
-            imu,
-            mag_cal,
             period_us: (1_000_000.0 / hz + 0.5) as u64,
             now_us: 0,
             nine_axis,
-            refused,
         })
     }
 
@@ -160,9 +125,6 @@ impl Lifecycle for Orientation {
     }
 
     fn health(&self) -> Health {
-        if let Some(why) = self.refused {
-            return Health::Degraded(why);
-        }
         if !self.nine_axis {
             return Health::Degraded("six-axis: yaw is relative");
         }
@@ -172,7 +134,7 @@ impl Lifecycle for Orientation {
             return Health::Degraded("waiting for a usable accelerometer sample");
         }
         if out.magnetic_disturbance {
-            return Health::Degraded("magnetometer ignored: disturbed or uncalibrated");
+            return Health::Degraded("magnetometer ignored: disturbed");
         }
         Health::Ok
     }
@@ -181,7 +143,7 @@ impl Lifecycle for Orientation {
 impl OrientationContract for Orientation {
     fn read(&mut self) -> Result<Vector3> {
         // Every input is read before any state changes, so a failed read
-        // leaves the filter and the calibrators where they were.
+        // leaves the filter where it was.
         let accel = self.accel.read()?;
         let gyro = self.gyro.read()?;
         let field = match (self.nine_axis, self.mag.as_mut()) {
@@ -192,19 +154,11 @@ impl OrientationContract for Orientation {
         let t = self.now_us.saturating_add(self.period_us);
         let accel = [accel.x, accel.y, accel.z];
         let gyro = [gyro.x, gyro.y, gyro.z];
-        self.imu.push(t, accel, gyro);
-        let accel = self.imu.accel().apply(accel);
-        let bias = self.imu.gyro_bias();
-        let gyro = [gyro[0] - bias[0], gyro[1] - bias[1], gyro[2] - bias[2]];
-
         if let Some(field) = field {
-            let raw = [field.x * UT_PER_T, field.y * UT_PER_T, field.z * UT_PER_T];
-            self.mag_cal.push(t, raw);
-            let trusted = self.mag_cal.status().active;
-            let field = self.mag_cal.field().apply(raw);
+            let field = [field.x * UT_PER_T, field.y * UT_PER_T, field.z * UT_PER_T];
             // The magnetometer goes first, so a heading set on this sample is
             // used by it.
-            self.filter.update_mag(t, field, trusted);
+            self.filter.update_mag(t, field, true);
         }
         self.filter.update_imu(t, gyro, accel);
         self.now_us = t;
@@ -285,22 +239,4 @@ fn filter_config(cfg: &Config<'_>, nine_axis: bool) -> Result<OrientationConfig>
         declination_rad: number(cfg, "declination_deg", 0.0)? * DEG,
         dip_rad,
     })
-}
-
-/// Parses a comma-separated list of calibration words into `out`, returning
-/// how many there are. An empty text is no words.
-fn words(text: &str, out: &mut [i32; MAX_CALIBRATION_WORDS]) -> Result<usize> {
-    let mut n = 0;
-    for part in text.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if n == out.len() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
-        out[n] = part.parse().map_err(|_| Status::INVALID_ARGUMENT)?;
-        n += 1;
-    }
-    Ok(n)
 }
