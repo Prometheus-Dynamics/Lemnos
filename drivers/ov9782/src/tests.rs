@@ -68,6 +68,7 @@ fn sensor_on(bus: &Bus, entries: &[(&str, ConfigValue<'_>)]) -> Ov9782 {
     <Ov9782 as Lifecycle>::start(
         Ov9782Needs {
             bus: I2c(Box::new(bus.clone())),
+            values: None,
         },
         &Config::new(entries),
     )

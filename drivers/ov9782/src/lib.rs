@@ -20,6 +20,17 @@
 //! against the selected mode's limits before anything is written, including an exposure already
 //! held against a shortened frame.
 //!
+//! Values from a ring. A board that gives the sensor a `values` stream (`[devices.streams.values]`
+//! in its board entry, with `job_bytes` of at least 64) takes values as jobs: the consumer pushes an
+//! encoded `FrameValues` on that stream's job queue, and the driver reads the queue every
+//! `VALUES_POLL_NS` while streaming. Each poll applies the last decodable job it read, under group
+//! hold and launched at the next vertical blanking, exactly as `post_values` does. A value is not
+//! written until the poll that reads it, so it can reach a frame only if its group completes before
+//! that frame starts. A consumer that needs a value on a given frame posts it at least one poll and
+//! one group write (six register transactions) before that frame's start. Jobs that are read while
+//! the sensor is stopped or recovering, or that the limits refuse, are dropped and never kept, and a
+//! `start` drops whatever was posted before it. The driver keeps no value across a restart.
+//!
 //! The first frame after a start is dropped at the sensor (one frame masked through the frame
 //! control block), so `Mode::drop_frames` is 0.
 //!
@@ -42,6 +53,9 @@ pub mod chip;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod ring_tests;
+
 use chip::{
     ANA_CORE_2, ANALOGUE_GAIN, BAYER, CHIP_ID, CHIP_IDS, COMMON, DEFAULT_ADDRESS,
     DEFAULT_EXPOSURE_LINES, DIGITAL_BINNING, EXPOSURE, EXPOSURE_FRACTION_BITS, EXPOSURE_MIN,
@@ -54,8 +68,8 @@ use lemnos_contract_camera_sensor::{
     BayerOrder, CameraSensor, Controls, FrameValues, Mode, SensorInfo,
 };
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, I2c, Item, Lifecycle, MethodId, Result, Status,
-    driver,
+    Config, ConfigValue, Decode, Description, Health, I2c, Item, Lifecycle, MethodId, Reader,
+    Result, Status, StreamHandle, driver,
 };
 
 const START: MethodId = MethodId {
@@ -71,6 +85,14 @@ const STOP: MethodId = MethodId {
 const BACKOFF_FIRST_NS: u64 = 250_000_000;
 /// Longest delay between recovery attempts.
 const BACKOFF_MAX_NS: u64 = 8_000_000_000;
+
+/// How often a streaming sensor reads its values ring. A posted value waits at most this long.
+pub const VALUES_POLL_NS: u64 = 1_000_000;
+/// Most jobs one poll reads. The ring holds at most 64 (`lemnos-wire` `MAX_JOB_SLOTS`).
+const MAX_JOBS_PER_POLL: usize = 64;
+/// Bytes read of one job: an encoded `FrameValues` fits, and this runs on small stacks. A longer
+/// job isn't one; the ring refuses to hand it over and stays stuck on it until the stream restarts.
+const JOB_BYTES: usize = 64;
 
 /// The delay before recovery attempt `attempt` (from 0), doubling to the cap.
 const fn backoff_ns(attempt: u32) -> u64 {
@@ -140,6 +162,9 @@ impl Current {
 pub struct Ov9782 {
     #[needs]
     bus: I2c,
+    /// Jobs carrying `FrameValues`, from the consumer. Absent when the board gives no stream.
+    #[needs(optional)]
+    values: Option<StreamHandle>,
     address: u8,
     continuous_clock: bool,
     /// The selected mode and its control values in force.
@@ -158,6 +183,7 @@ impl Lifecycle for Ov9782 {
     fn start(needs: Ov9782Needs, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
             bus: needs.bus,
+            values: needs.values,
             address: address_from_config(cfg)?,
             continuous_clock: continuous_clock_from_config(cfg)?,
             selected: None,
@@ -183,11 +209,35 @@ impl Lifecycle for Ov9782 {
         }
     }
 
-    /// Runs a due recovery attempt. Returns when the next is due.
+    /// Streaming with a values stream: reads the ring and applies its latest job, then waits one
+    /// poll. Recovering: drops what the ring holds and runs a due recovery attempt, polling too when
+    /// there is a ring. Stopped: nothing is due.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
-        let State::Recovering { attempt, due } = self.state else {
-            return None;
-        };
+        match self.state {
+            State::Stopped => None,
+            State::Streaming => {
+                self.take_values();
+                self.values
+                    .as_ref()
+                    .map(|_| now_ns.saturating_add(VALUES_POLL_NS))
+            }
+            State::Recovering { attempt, due } => {
+                self.discard_values();
+                let next = self.recover(now_ns, attempt, due);
+                if self.values.is_some() {
+                    let poll = now_ns.saturating_add(VALUES_POLL_NS);
+                    Some(next.map_or(poll, |at| at.min(poll)))
+                } else {
+                    next
+                }
+            }
+        }
+    }
+}
+
+impl Ov9782 {
+    /// Runs a due recovery attempt. Returns when the next is due.
+    fn recover(&mut self, now_ns: u64, attempt: u32, due: Option<u64>) -> Option<u64> {
         match due {
             None => {
                 let at = now_ns.saturating_add(backoff_ns(attempt));
@@ -215,9 +265,60 @@ impl Lifecycle for Ov9782 {
             },
         }
     }
-}
 
-impl Ov9782 {
+    /// Reads every job the poll finds and applies the last one that decodes. A job that does not
+    /// decode is skipped. A job the limits refuse, or a bus error, drops it: the earlier jobs of the
+    /// same poll are dropped with it, as the later one is the one the sensor would latch.
+    fn take_values(&mut self) {
+        let Some(values) = self.values.as_mut() else {
+            return;
+        };
+        let mut buf = [0u8; JOB_BYTES];
+        let mut latest = None;
+        for _ in 0..MAX_JOBS_PER_POLL {
+            match values.next_job(&mut buf) {
+                Ok(Some(len)) => {
+                    if let Some(decoded) = decode_job(&buf[..len]) {
+                        latest = Some(decoded);
+                    }
+                }
+                _ => break,
+            }
+        }
+        if let Some(values) = latest {
+            let _ = self.apply(values);
+        }
+    }
+
+    /// Reads and drops every job the ring holds, so none of them is applied later.
+    fn discard_values(&mut self) {
+        let Some(values) = self.values.as_mut() else {
+            return;
+        };
+        let mut buf = [0u8; JOB_BYTES];
+        for _ in 0..MAX_JOBS_PER_POLL {
+            if !matches!(values.next_job(&mut buf), Ok(Some(_))) {
+                break;
+            }
+        }
+    }
+
+    /// Writes `values` under group hold, checked against the limits first. A bus error while
+    /// writing starts recovery; nothing is recorded as applied.
+    fn apply(&mut self, values: FrameValues) -> Result<()> {
+        let (entry, current) = self.mode_entry()?;
+        self.check_not_recovering()?;
+        let merged = current.merged(&values.controls, entry)?;
+        match self.write_group(&values.controls) {
+            Ok(()) => {
+                self.keep(merged);
+                self.applied = Some(values);
+                Ok(())
+            }
+            Err(status) => Err(self.fail(status)),
+        }
+    }
+
     /// Writes one register.
     fn reg(&mut self, register: u16, value: u8) -> Result<()> {
         chip::write(&mut self.bus, self.address, register, value)
@@ -420,6 +521,7 @@ impl CameraSensor for Ov9782 {
         if self.state == State::Streaming {
             return Ok(());
         }
+        self.discard_values();
         self.program()?;
         self.state = State::Streaming;
         Ok(())
@@ -449,20 +551,12 @@ impl CameraSensor for Ov9782 {
     }
 
     fn post_values(&mut self, values: FrameValues) -> Result<()> {
-        let (entry, current) = self.mode_entry()?;
+        self.mode_entry()?;
         self.check_not_recovering()?;
         if self.state != State::Streaming {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let merged = current.merged(&values.controls, entry)?;
-        match self.write_group(&values.controls) {
-            Ok(()) => {
-                self.keep(merged);
-                self.applied = Some(values);
-                Ok(())
-            }
-            Err(status) => Err(self.fail(status)),
-        }
+        self.apply(values)
     }
 
     fn applied(&mut self) -> Result<Option<FrameValues>> {
@@ -513,6 +607,13 @@ fn pattern_value(code: u16) -> u8 {
             .copied()
             .unwrap_or(0),
     }
+}
+
+/// One job as the consumer encoded it: exactly one `FrameValues`, with no bytes left over.
+fn decode_job(job: &[u8]) -> Option<FrameValues> {
+    let mut from = Reader::new(job);
+    let values = FrameValues::decode(&mut from).ok()?;
+    (from.remaining() == 0).then_some(values)
 }
 
 /// The `address` config: a 7-bit address that is not reserved.
