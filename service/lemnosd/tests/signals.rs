@@ -16,14 +16,18 @@ fn eventually(mut done: impl FnMut() -> bool, what: &str) {
     }
 }
 
-fn stops_on(signal: &str) {
-    let dir = std::env::temp_dir().join(format!("lemnosd-signal-{}-{signal}", std::process::id()));
+fn stops_on(signal: &str, backend: &[&str]) {
+    let dir = std::env::temp_dir().join(format!(
+        "lemnosd-signal-{}-{signal}-{}",
+        std::process::id(),
+        backend.len()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let board = dir.join("board.toml");
     std::fs::write(&board, BOARD).unwrap();
     let socket = dir.join("sock");
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_lemnosd"))
-        .arg("--sim")
+        .args(backend)
         .arg("--board")
         .arg(&board)
         .arg("--socket")
@@ -61,10 +65,15 @@ fn stops_on(signal: &str) {
 
 #[test]
 fn sigterm_stops_the_daemon_and_removes_the_socket() {
-    stops_on("TERM");
+    stops_on("TERM", &["--sim"]);
 }
 
 #[test]
 fn sigint_stops_the_daemon_and_removes_the_socket() {
-    stops_on("INT");
+    stops_on("INT", &["--sim"]);
+}
+
+#[test]
+fn the_real_backend_is_the_default_and_stops_the_same_way() {
+    stops_on("TERM", &[]);
 }
