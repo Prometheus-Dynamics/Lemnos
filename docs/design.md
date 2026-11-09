@@ -260,6 +260,8 @@ pub trait Lifecycle: Sized {
     fn start(needs: Self::Needs, cfg: &Config<'_>) -> Result<Self>;
     fn describe(&self, out: &mut Description) {}
     fn health(&self) -> Health { Health::Ok }
+    const TICKS: bool = false; // true to be called below
+    fn tick(&mut self, now_ns: u64) -> Option<u64> { None } // does what is due, returns when next
 }
 
 // A method is its contract's position in `provides`, plus the number the contract declared.

@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 
 use lemnos_core::Result;
 
-use crate::host::CallWork;
+use crate::host::{CallWork, TickWork};
 
 /// What a lane runs: reads `args`, fills `reply`, and returns the reply's length.
 pub(crate) enum Work {
     /// A driver call. The common case, and the one that must not allocate.
     Call(CallWork),
+    /// A driver's tick. Also must not allocate.
+    Tick(TickWork),
     Once(OnceWork),
 }
 
@@ -77,6 +79,7 @@ fn serve(shared: &Shared) {
 
         let result = match work {
             Work::Call(call) => call.run(&args, &mut reply),
+            Work::Tick(tick) => tick.run(),
             Work::Once(once) => once(&args, &mut reply),
         };
 

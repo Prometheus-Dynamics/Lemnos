@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
     ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, HostClock, I2c,
@@ -19,6 +19,7 @@ trait Instance: Send {
     fn describe(&self, out: &mut Description);
     fn health(&self) -> Health;
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
+    fn tick(&mut self, now_ns: u64) -> Option<u64>;
 }
 
 impl<D: Driver + Send> Instance for D {
@@ -33,6 +34,10 @@ impl<D: Driver + Send> Instance for D {
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status {
         Driver::dispatch(self, method, args, reply)
     }
+
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        Driver::tick(self, now_ns)
+    }
 }
 
 type Factory = fn(&mut Resources<'_>, &Config<'_>) -> Result<Box<dyn Instance>>;
@@ -42,6 +47,7 @@ type Factory = fn(&mut Resources<'_>, &Config<'_>) -> Result<Box<dyn Instance>>;
 pub struct DriverEntry {
     manifest: Manifest,
     factory: Factory,
+    ticks: bool,
 }
 
 impl DriverEntry {
@@ -61,6 +67,7 @@ pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
     DriverEntry {
         manifest: D::MANIFEST,
         factory: make::<D>,
+        ticks: D::TICKS,
     }
 }
 
@@ -122,7 +129,11 @@ struct Slot {
     errors: AtomicU32,
     /// Optional dependencies that were absent at the last bind.
     missing: Mutex<Vec<String>>,
+    /// When the driver next wants a tick. [`NO_TICK`] when it doesn't.
+    next_tick_ns: AtomicU64,
 }
+
+const NO_TICK: u64 = u64::MAX;
 
 fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -131,6 +142,10 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Slot {
     fn is_running(&self) -> bool {
         matches!(*lock(&self.state), DeviceState::Running)
+    }
+
+    fn ticks(&self) -> bool {
+        self.entry.is_some_and(|entry| entry.ticks)
     }
 
     fn contract_index(&self, tag: Tag) -> Option<u8> {
@@ -152,6 +167,8 @@ struct Inner {
     clock: Arc<dyn HostClock>,
     options: Options,
     drivers: BTreeMap<&'static str, DriverEntry>,
+    /// Called when a device's next tick moves earlier.
+    waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// Runs a board's drivers. Each driver call goes through a lane, with a panic
@@ -170,6 +187,19 @@ pub(crate) struct CallWork {
 impl CallWork {
     pub(crate) fn run(self, args: &[u8], reply: &mut [u8]) -> Result<usize> {
         self.inner.call_here(&self.slot, self.method, args, reply)
+    }
+}
+
+/// One tick, as handed to its lane.
+pub(crate) struct TickWork {
+    inner: &'static Inner,
+    slot: Arc<Slot>,
+}
+
+impl TickWork {
+    pub(crate) fn run(self) -> Result<usize> {
+        self.inner.tick_here(&self.slot);
+        Ok(0)
     }
 }
 
@@ -228,6 +258,50 @@ impl Inner {
         }
     }
 
+    fn set_next_tick(&self, slot: &Slot, next: Option<u64>) {
+        let next = next.unwrap_or(NO_TICK);
+        if next < slot.next_tick_ns.swap(next, Ordering::AcqRel)
+            && let Some(waker) = self.waker.get()
+        {
+            waker();
+        }
+    }
+
+    /// Ticks a device on this thread, inside the panic boundary.
+    fn tick_here(&self, slot: &Slot) {
+        if slot.hung.load(Ordering::Acquire) {
+            return;
+        }
+        let mut guard = lock(&slot.instance);
+        let Some(instance) = guard.as_mut() else {
+            return;
+        };
+        let now = self.clock.now_ns();
+        match catch_unwind(AssertUnwindSafe(|| instance.tick(now))) {
+            Ok(next) => self.set_next_tick(slot, next),
+            Err(_) => {
+                let dead = guard.take();
+                drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+                drop(guard);
+                self.fault(slot, "the driver panicked");
+            }
+        }
+    }
+
+    /// Ticks a device on its lane. A busy lane leaves the tick due, for next time.
+    fn tick(&'static self, slot: Arc<Slot>) {
+        let Ok(lane) = self.lane(&slot) else {
+            return;
+        };
+        let work = Work::Tick(TickWork {
+            inner: self,
+            slot: Arc::clone(&slot),
+        });
+        if let Err(LaneError::Deadline) = lane.run(&[], &mut [], self.options.call_deadline, work) {
+            self.on_deadline(&slot);
+        }
+    }
+
     /// Runs a method on this thread, inside the panic boundary.
     fn call_here(
         &self,
@@ -244,8 +318,13 @@ impl Inner {
             return Err(Status::NO_DEVICE);
         };
         let mut writer = Reply::new(reply);
+        let ticks = slot.ticks();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            instance.dispatch(method, args, &mut writer)
+            let status = instance.dispatch(method, args, &mut writer);
+            if ticks {
+                self.set_next_tick(slot, instance.tick(self.clock.now_ns()));
+            }
+            status
         }));
         let status = match outcome {
             Ok(status) => status,
@@ -375,6 +454,9 @@ impl Inner {
             Ok(Ok(_)) => {
                 slot.errors.store(0, Ordering::Relaxed);
                 *lock(&slot.state) = DeviceState::Running;
+                if slot.ticks() {
+                    self.set_next_tick(&slot, Some(0));
+                }
                 self.changes.fetch_add(1, Ordering::Release);
             }
             Ok(Err(status)) => {
@@ -628,6 +710,7 @@ impl Host {
                 hung: AtomicBool::new(false),
                 errors: AtomicU32::new(0),
                 missing: Mutex::new(Vec::new()),
+                next_tick_ns: AtomicU64::new(NO_TICK),
             }));
         }
 
@@ -641,6 +724,7 @@ impl Host {
             clock,
             options,
             drivers: table,
+            waker: OnceLock::new(),
         }));
         let host = Self { inner };
         let slots = inner.all();
@@ -748,6 +832,38 @@ impl Host {
                 self.inner.bind(Arc::clone(&slot));
             }
         }
+        self.run_ticks();
+    }
+
+    /// Ticks every device whose time has come. Allocates nothing, so it can run on every wake.
+    pub fn run_ticks(&self) {
+        let now = self.inner.clock.now_ns();
+        let mut index = 0;
+        while let Some(slot) = self.inner.slot(index) {
+            index += 1;
+            if slot.next_tick_ns.load(Ordering::Acquire) <= now && slot.is_running() {
+                self.inner.tick(slot);
+            }
+        }
+    }
+
+    /// When the next tick is due, if any running device wants one.
+    pub fn next_tick_ns(&self) -> Option<u64> {
+        self.inner
+            .slots
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|slot| slot.next_tick_ns.load(Ordering::Acquire) != NO_TICK)
+            .filter(|slot| slot.is_running())
+            .map(|slot| slot.next_tick_ns.load(Ordering::Acquire))
+            .min()
+    }
+
+    /// Sets what to call when a device's next tick moves earlier than it was, so a caller
+    /// sleeping until [`Host::next_tick_ns`] can look again. Only the first call takes effect.
+    pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
+        drop(self.inner.waker.set(Box::new(waker)));
     }
 
     fn an_optional_part_arrived(&self, slot: &Slot) -> bool {
