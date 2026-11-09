@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-drivers-rkvpss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Rockchip rkvpss offline scaler (crop, scale and format conversion between dma-bufs, up to six outputs)"
+documentation = "https://docs.rs/lemnos-drivers-rkvpss"
+readme = "README.md"
+keywords = ["rockchip", "rkvpss", "dmabuf", "scaler"]
+categories = ["hardware-support", "multimedia::images"]
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { workspace = true }

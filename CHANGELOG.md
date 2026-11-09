@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-drivers-rkvpss` and `lemnos_linux_sys::rkvpss`: Rockchip's `rkvpss` offline scaler (RV1126B) through the vendor kernel's `rkvpss-offline` node: crop, scale and format conversion from one dma-buf to as many as six. Every frame is checked against its dma-buf's size. Untested on board.
 - `lemnos-drivers-nonai2d`: the K230 non-AI 2D engine, pixel-format conversion between dma-bufs through the K230 Linux SDK's `nonai-2d` V4L2 mem2mem driver, one dma-buf per plane. Untested on board.
 - `lemnos-drivers-rga::caps`: `Soc::Rv1126b`, its RGA2 on the vendor multi-RGA route. Untested on board.
 - `lemnos-drivers-g2d` and `lemnos_linux_sys::g2d`: the Allwinner G2D 2D engine (A733) through the BSP kernel's `/dev/g2d`: fill, copy with scaling and conversion, quarter turns and flips, and Porter-Duff blending of two RGB layers between dma-bufs. The BSP driver does not check an image against its dma-buf, so a job is built only from surfaces checked against the dma-buf's real size. Untested on board.

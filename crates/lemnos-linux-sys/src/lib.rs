@@ -29,6 +29,7 @@ pub mod poll;
 pub mod pool;
 pub mod process;
 pub mod rga;
+pub mod rkvpss;
 
 #[cfg(feature = "rp1")]
 pub mod rp1_pio;
