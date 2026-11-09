@@ -18,7 +18,9 @@ mod queue;
 mod tests;
 
 use lemnos_contract_gpu_lease::{GpuLease, GpuState, LeaseState, Ticket};
-use lemnos_core::{Config, Description, Item, Lifecycle, MethodId, Result, Status, driver};
+use lemnos_core::{
+    CallerId, Config, Description, Item, Lifecycle, MethodId, Result, Status, driver,
+};
 use queue::Queue;
 use std::time::Instant;
 
@@ -45,6 +47,7 @@ pub struct GpuLeaseDevice {
 
 impl Lifecycle for GpuLeaseDevice {
     type Needs = GpuLeaseDeviceNeeds;
+    const TRACKS_CALLERS: bool = true;
 
     fn start(_needs: GpuLeaseDeviceNeeds, _cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
@@ -59,6 +62,15 @@ impl Lifecycle for GpuLeaseDevice {
 
     fn describe(&self, out: &mut Description) {
         out.add(Item::value("state", STATE));
+    }
+
+    fn caller(&mut self, caller: CallerId) {
+        self.queue.set_caller(caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        let now = self.now_ms();
+        self.queue.caller_gone(caller, now);
     }
 }
 

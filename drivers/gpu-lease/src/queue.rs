@@ -5,7 +5,7 @@
 //! `entries[..holders]` and waits in `entries[holders..len]`, in grant order.
 
 use lemnos_contract_gpu_lease::{LeaseState, Ticket};
-use lemnos_core::Status;
+use lemnos_core::{CallerId, Status};
 
 /// Leases held or waiting at once. A full queue refuses with `BUSY` until one ends.
 pub const MAX_LEASES: usize = 16;
@@ -13,6 +13,7 @@ pub const MAX_LEASES: usize = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Entry {
     lease: u32,
+    owner: CallerId,
     shared: bool,
     priority: u8,
     max_hold_ms: u32,
@@ -25,6 +26,7 @@ struct Entry {
 impl Entry {
     const EMPTY: Self = Self {
         lease: 0,
+        owner: CallerId::LOCAL,
         shared: false,
         priority: 0,
         max_hold_ms: 0,
@@ -44,6 +46,8 @@ pub struct Queue {
     holders: usize,
     /// The next lease number. Never 0.
     next: u32,
+    /// Who the method now running is for.
+    calling: CallerId,
 }
 
 impl Default for Queue {
@@ -59,7 +63,30 @@ impl Queue {
             len: 0,
             holders: 0,
             next: 1,
+            calling: CallerId::LOCAL,
         }
+    }
+
+    /// Says who the next calls are for. A lease is only visible to the caller that took it.
+    pub fn set_caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+    }
+
+    /// Ends every lease `caller` held or was waiting on, and grants whoever they held back.
+    pub fn caller_gone(&mut self, caller: CallerId, now_ms: u64) {
+        let mut index = 0;
+        while index < self.len {
+            if self.entries[index].owner == caller {
+                self.entries.copy_within(index + 1..self.len, index);
+                self.len -= 1;
+                if index < self.holders {
+                    self.holders -= 1;
+                }
+            } else {
+                index += 1;
+            }
+        }
+        self.settle(now_ms);
     }
 
     /// Whether a lease of the given sharing could be held beside the current holders.
@@ -95,7 +122,7 @@ impl Queue {
     fn find(&self, lease: u32) -> Option<usize> {
         self.entries[..self.len]
             .iter()
-            .position(|e| e.lease == lease)
+            .position(|e| e.lease == lease && e.owner == self.calling)
     }
 
     fn take_number(&mut self) -> u32 {
@@ -132,6 +159,7 @@ impl Queue {
         self.entries.copy_within(index..self.len, index + 1);
         self.entries[index] = Entry {
             lease,
+            owner: self.calling,
             shared,
             priority,
             max_hold_ms,
