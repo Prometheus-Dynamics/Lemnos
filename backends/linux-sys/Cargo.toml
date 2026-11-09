@@ -29,6 +29,8 @@ multiple_unsafe_ops_per_block = "deny"
 default = []
 # `test_alloc`: an allocation-counting global allocator for another crate's tests.
 alloc-count = []
+# A pseudo-terminal pair, for tests of serial code in other crates.
+test-pty = []
 
 [dependencies]
 libc.workspace = true

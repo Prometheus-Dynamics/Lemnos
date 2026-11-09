@@ -1,26 +1,35 @@
-//! Linux hardware for Lemnos, by the names a board file uses. This module has what is on `/dev`:
-//! `i2c-N` is `/dev/i2c-N` and `spidevB.C` is `/dev/spidevB.C`.
+//! Linux hardware for Lemnos, by the names a board file uses: `i2c-N`, `spidevB.C`,
+//! `gpiochipN:LINE`, `pwmchipN:CHANNEL`, and a tty such as `ttyAMA0`.
 
 #![cfg(target_os = "linux")]
 
+mod gpio;
 mod i2c;
+mod pwm;
 mod spi;
+mod uart;
 
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lemnos_core::{I2c, LocalCaller, Provider, RawSpiBus, Result, Spi, Status, Tag, status_of};
+use lemnos_core::{
+    I2c, Line, LocalCaller, Provider, Pwm, RawSpiBus, Result, Spi, Status, Tag, Uart, status_of,
+};
 use lemnos_hal::ErrorKind;
 
+pub use gpio::GpioLine;
 pub use i2c::I2cBus;
+pub use pwm::SysfsPwm;
 pub use spi::{SpiMode, Spidev};
+pub use uart::TtyUart;
 
 /// The hardware of the machine this runs on.
 #[derive(Clone)]
 pub struct LinuxBoard {
     dev: PathBuf,
+    sys: PathBuf,
     claimed: Claims,
 }
 
@@ -43,7 +52,7 @@ impl Drop for Claim {
 
 impl Default for LinuxBoard {
     fn default() -> Self {
-        Self::at("/dev")
+        Self::at("/dev", "/sys")
     }
 }
 
@@ -52,9 +61,10 @@ impl LinuxBoard {
         Self::default()
     }
 
-    fn at(dev: impl Into<PathBuf>) -> Self {
+    fn at(dev: impl Into<PathBuf>, sys: impl Into<PathBuf>) -> Self {
         Self {
             dev: dev.into(),
+            sys: sys.into(),
             claimed: Claims::default(),
         }
     }
@@ -76,6 +86,19 @@ impl LinuxBoard {
         })
     }
 
+    /// The line a name like `gpiochip0:17` means.
+    fn line_node(&self, need: &str) -> Option<(PathBuf, u32)> {
+        let (chip, offset) = split(need)?;
+        Some((self.node(chip, GPIO)?, offset))
+    }
+
+    /// The chip directory and channel a name like `pwmchip0:1` means.
+    fn pwm_node(&self, need: &str) -> Option<(PathBuf, u32)> {
+        let (chip, channel) = split(need)?;
+        let valid = chip.len() > PWM.len() && chip.starts_with(PWM) && !chip.contains('/');
+        valid.then(|| (self.sys.join("class/pwm").join(chip), channel))
+    }
+
     fn open_spi(&self, need: &str) -> Result<Spidev> {
         let path = self.node(need, SPI).ok_or(Status::NOT_FOUND)?;
         let claim = self.claim(need)?;
@@ -86,6 +109,14 @@ impl LinuxBoard {
 
 const I2C: &str = "i2c-";
 const SPI: &str = "spidev";
+const GPIO: &str = "gpiochip";
+const PWM: &str = "pwmchip";
+const TTY: &str = "tty";
+
+fn split(need: &str) -> Option<(&str, u32)> {
+    let (name, number) = need.split_once(':')?;
+    Some((name, number.parse().ok()?))
+}
 
 fn exists(path: Option<PathBuf>) -> bool {
     path.as_deref().is_some_and(Path::exists)
@@ -93,7 +124,11 @@ fn exists(path: Option<PathBuf>) -> bool {
 
 impl Provider for LinuxBoard {
     fn provided(&self, need: &str) -> bool {
-        exists(self.node(need, I2C)) || exists(self.node(need, SPI))
+        exists(self.node(need, I2C))
+            || exists(self.node(need, SPI))
+            || exists(self.node(need, TTY))
+            || exists(self.line_node(need).map(|(path, _)| path))
+            || exists(self.pwm_node(need).map(|(path, _)| path))
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
@@ -114,6 +149,27 @@ impl Provider for LinuxBoard {
 
     fn raw_spi(&mut self, need: &str) -> Result<RawSpiBus> {
         Ok(Box::new(self.open_spi(need)?))
+    }
+
+    fn line(&mut self, need: &str) -> Result<Line> {
+        // The kernel refuses a line that's held, so this needs no claim of its own.
+        let (path, offset) = self.line_node(need).ok_or(Status::NOT_FOUND)?;
+        let line = GpioLine::open(&path, offset).map_err(|e| open_status(&e))?;
+        Ok(Box::new(line))
+    }
+
+    fn pwm(&mut self, need: &str) -> Result<Pwm> {
+        let (chip, channel) = self.pwm_node(need).ok_or(Status::NOT_FOUND)?;
+        let claim = self.claim(need)?;
+        let pwm = SysfsPwm::open(&chip, channel).map_err(|e| open_status(&e))?;
+        Ok(Box::new(pwm.holding(claim)))
+    }
+
+    fn uart(&mut self, need: &str) -> Result<Uart> {
+        let path = self.node(need, TTY).ok_or(Status::NOT_FOUND)?;
+        let claim = self.claim(need)?;
+        let uart = TtyUart::open_path(&path).map_err(|e| open_status(&e))?;
+        Ok(Box::new(uart.holding(claim)))
     }
 }
 
@@ -144,7 +200,7 @@ mod tests {
     fn temp_board(name: &str) -> (LinuxBoard, PathBuf) {
         let dir = std::env::temp_dir().join(format!("lemnos-linux-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        (LinuxBoard::at(&dir), dir)
+        (LinuxBoard::at(&dir, &dir), dir)
     }
 
     #[test]
@@ -165,6 +221,43 @@ mod tests {
         std::fs::write(dir.join("spidev0.0"), b"").unwrap();
         assert!(board.provided("spidev0.0"));
         assert!(!board.provided("pio-i2c:sda=8,scl=7"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn line_and_channel_names_are_split() {
+        let (board, dir) = temp_board("split");
+        assert_eq!(
+            board.line_node("gpiochip0:17"),
+            Some((dir.join("gpiochip0"), 17))
+        );
+        assert_eq!(board.line_node("gpiochip0"), None);
+        assert_eq!(board.line_node("gpiochip0:x"), None);
+        assert_eq!(board.line_node("gpiochip/../x:1"), None);
+        assert_eq!(
+            board.pwm_node("pwmchip2:1"),
+            Some((dir.join("class/pwm/pwmchip2"), 1))
+        );
+        assert_eq!(board.pwm_node("pwmchip/x:1"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_pwm_channel_has_one_owner_until_it_is_dropped() {
+        let (mut board, dir) = temp_board("pwm");
+        let root = dir.join("class/pwm/pwmchip0/pwm1");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["period", "duty_cycle", "polarity", "enable"] {
+            std::fs::write(root.join(name), "0\n").unwrap();
+        }
+        assert!(board.provided("pwmchip0:1"));
+        let first = board.pwm("pwmchip0:1").map_err(|_| ()).unwrap();
+        assert_eq!(
+            board.pwm("pwmchip0:1").map(|_| ()).unwrap_err(),
+            Status::BUSY
+        );
+        drop(first);
+        assert!(board.pwm("pwmchip0:1").is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
