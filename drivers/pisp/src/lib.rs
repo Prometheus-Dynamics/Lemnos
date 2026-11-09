@@ -24,7 +24,7 @@
 //!
 //! # `no_std`, no allocator
 //!
-//! The crate is always `no_std` and never allocates. Buffers are fixed arrays; errors are enums
+//! Without the `device` feature the crate is `no_std` and never allocates. Buffers are fixed arrays; errors are enums
 //! of `&'static str`. Lengths and sizes from outside (a statistics buffer, a tile count) are
 //! checked and refused, not indexed.
 //!
@@ -35,11 +35,19 @@
 //! details and the licence text.
 
 #![forbid(unsafe_code)]
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "device")), no_std)]
 
 pub mod be;
+#[cfg(all(feature = "device", target_os = "linux"))]
+mod be_device;
+#[cfg(all(feature = "device", target_os = "linux"))]
+pub mod be_hw;
+pub mod be_job;
 pub mod fe;
 pub mod format;
 mod math;
 pub mod stats;
 pub mod uapi;
+
+#[cfg(all(feature = "device", target_os = "linux"))]
+pub use be_device::PispBe;

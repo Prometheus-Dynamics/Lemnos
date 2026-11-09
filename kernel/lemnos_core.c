@@ -37,6 +37,7 @@
 
 #include "lemnos.h"
 #include "lemnos_internal.h"
+#include "lemnos_pisp_be.h"
 
 #define LEM_NAME "lemnos"
 #define LEM_MAX_COMPATIBLE 8
@@ -56,6 +57,12 @@ module_param(confined, charp, 0444);
 MODULE_PARM_DESC(confined,
 		 "Compatibles of the blocks whose DMA their IOMMU really confines; "
 		 "no other block's registers can be mapped");
+
+static char *pisp_be = "";
+module_param(pisp_be, charp, 0444);
+MODULE_PARM_DESC(pisp_be,
+		 "Compatibles of the blocks driven by the PiSP back end code; their "
+		 "registers and interrupts never reach user space");
 
 static bool test_map_unconfined;
 module_param(test_map_unconfined, bool, 0444);
@@ -85,6 +92,7 @@ struct lem_block {
 	bool mappable;
 	u32 regions;
 	u32 nirqs;
+	struct lem_pb *pb;		/* the PiSP back end, or NULL */
 	struct xarray imports;		/* handle -> struct lem_import */
 	atomic_t bufs;			/* DMA buffers not yet freed */
 	struct lem_irq irq[LEMNOS_MAX_IRQS];
@@ -539,6 +547,7 @@ union lem_args {
 	struct lemnos_irq irq;
 	struct lemnos_claim claim;
 	struct lemnos_stream_create stream;
+	struct lemnos_pisp_be_create pisp_be;
 };
 
 static long lem_next(struct lemnos_next *n)
@@ -578,6 +587,10 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		return lem_irq_enable(l, u->irq.index);
 	case LEMNOS_IOC_STREAM_CREATE:
 		return lem_stream_create(l->dev, &u->stream);
+	case LEMNOS_IOC_PISP_BE_CREATE:
+		if (!l->pb)
+			return -ENOTTY;
+		return lem_pb_create(l->pb, l->dev, &u->pisp_be);
 	case LEMNOS_IOC_TEST_IRQ:
 		if (!test_irq_inject)
 			return -EPERM;
@@ -695,6 +708,15 @@ static int lem_probe(struct platform_device *pdev)
 		dev_warn(dev, "test_map_unconfined: registers mappable on a block whose DMA is not confined\n");
 		l->mappable = true;
 	}
+
+	/* The module drives this block itself: nothing of it reaches user space. */
+	if (lem_device_listed(dev, pisp_be)) {
+		l->mappable = false;
+		l->pb = lem_pb_probe(pdev);
+		if (IS_ERR(l->pb))
+			return dev_err_probe(dev, PTR_ERR(l->pb), "PiSP back end\n");
+		goto ready;
+	}
 	if (test_irq_inject)
 		dev_warn(dev, "test_irq_inject: interrupts can be raised from user space\n");
 
@@ -720,6 +742,7 @@ static int lem_probe(struct platform_device *pdev)
 		l->nirqs++;
 	}
 
+ready:
 	ret = xa_alloc_cyclic(&lem_blocks, &l->id, l, XA_LIMIT(1, LEM_MAX_BLOCK), &lem_next_id,
 			      GFP_KERNEL);
 	if (ret < 0)
@@ -753,6 +776,9 @@ static void lem_remove(struct platform_device *pdev)
 	xa_destroy(&l->imports);
 	/* A stream pins its dma-bufs mapped to this device. */
 	lem_streams_block_gone(dev);
+	/* After the streams: every job has stopped or the block is wedged. */
+	if (l->pb)
+		lem_pb_remove(l->pb);
 	up_write(&lem_blocks_sem);
 
 	/*
