@@ -35,6 +35,7 @@ lemnos-driver-hwmon-fan = { path = "../../drivers/hwmon-fan" }
 lemnos-driver-ina2xx = { path = "../../drivers/ina2xx" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
+lemnos-driver-pisp = { path = "../../drivers/pisp" }
 lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
 lemnos-driver-rp1-csi2 = { path = "../../drivers/rp1-csi2" }
 lemnos-driver-status-light = { path = "../../drivers/status-light" }
