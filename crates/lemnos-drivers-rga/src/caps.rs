@@ -21,18 +21,22 @@ pub enum Soc {
     Rk3576,
     Rk3588,
     Rk3562,
+    /// RV1126B: one RGA2 core, on the vendor kernel's multi-RGA driver (`rv1126b.dtsi`,
+    /// `rockchip,rga2`, Rockchip kernel `develop-6.1`).
+    Rv1126b,
     /// Kendryte K230D: VGLite 2.5D GPU (`lemnos-drivers-vglite`) and an Image 2D engine with no
     /// Linux driver.
     K230d,
 }
 
 impl Soc {
-    pub const ALL: [Soc; 6] = [
+    pub const ALL: [Soc; 7] = [
         Soc::Rk3566,
         Soc::Rk3568,
         Soc::Rk3576,
         Soc::Rk3588,
         Soc::Rk3562,
+        Soc::Rv1126b,
         Soc::K230d,
     ];
 }
@@ -406,7 +410,7 @@ const fn vglite(soc: Soc) -> UnitCaps {
     }
 }
 
-static TABLE: [UnitCaps; 12] = [
+static TABLE: [UnitCaps; 13] = [
     v4l2(Soc::Rk3566, Unit::Rga2),
     multirga(Soc::Rk3566, Unit::Rga2),
     v4l2(Soc::Rk3568, Unit::Rga2),
@@ -414,12 +418,14 @@ static TABLE: [UnitCaps; 12] = [
     // No RGA node in the mainline RK3576 and RK3562 device trees (Linux 7.2).
     multirga(Soc::Rk3576, Unit::Rga2),
     multirga(Soc::Rk3562, Unit::Rga2),
+    multirga(Soc::Rv1126b, Unit::Rga2),
     v4l2(Soc::Rk3588, Unit::Rga3),
     v4l2(Soc::Rk3588, Unit::Rga2),
     multirga(Soc::Rk3588, Unit::Rga3),
     multirga(Soc::Rk3588, Unit::Rga2),
     vglite(Soc::K230d),
-    // No Linux driver in the K230 SDK; the RT-Smart side may own it.
+    // The K230 Linux SDK has a V4L2 M2M driver for it (`nonai-2d`, format conversion and OSD up to
+    // 1920x1080); no route here yet: see TODO.md.
     design(Soc::K230d, Unit::K230Image2d),
 ];
 

@@ -313,6 +313,29 @@ the camera stack and the OS image's API.
   the thread saves. Decided: not landed. Revisit when the light watcher can go polled as well
   (the polled LED sends make that possible), so the IO driver pays for two threads.
 
+### Hardware blocks for the next boards (ruled 2026-11-08: block coverage only)
+
+ROCK 5C (RK3588S), ZERO 3E (RK3566), Cubie A7A/A7S/A7Z (A733), Luckfox Aura (RV1126B), K230D
+AI-CAM. Everything here is written from sources and untested on board; none of these boards is
+here yet.
+
+| Chip | Has code | Still missing |
+|---|---|---|
+| RK3588S | RGA2 and RGA3 routes, ISP30 | NPU, VPU (`rk-mpp`), IEP, JPEG |
+| RK3566 | RGA2 routes, ISP21 | NPU, VPU (`rk-mpp`), IEP, JPEG |
+| A733 | G2D on `/dev/g2d` | VIP9000 NPU, video engine, deinterlacer, camera ISP (`vin`), `lemnos-soc` table |
+| RV1126B | ISP35 layouts and nodes, RGA2 route | `rkvpss` scaler, `rkaiisp`, NPU, VPU (`rk-mpp`), JPEG, `lemnos-soc` table |
+| K230D | VGLite, ISP registers and statistics, RVV | non-AI 2D (`nonai-2d`), KPU and AI2D, VPU, GSDMA |
+
+- **Non-AI 2D** (`nonai-2d`, K230 Linux SDK, 1920x1080 at most): a V4L2 M2M device, default mode
+  format conversion. The RGA session cannot drive it as it is: this driver is multi-planar with one
+  buffer per plane for NV12 and I420, where the session uses one. It needs its own session. OSD
+  and border controls pass pointers, so they need the checks G2D has.
+- **NPUs** (RKNPU, VIP9000, KPU): each runs command streams made by its vendor's model compiler.
+  With vendor runtimes ruled out, a submit path would have nothing to run, and raw submit is a path
+  to arbitrary DMA. Not started; needs a ruling on where compiled models come from.
+- **Blend with a YUV layer on G2D**: the BSP driver's check refuses every usable size.
+
 ### Camera sensor module (OV9782), given to Lemnos
 
 The upstream ov9282 driver plus the image's OV9782 changes, as our GPL module, with the mode and
