@@ -1,0 +1,13 @@
+[package]
+name = "lemnos-contract-camera-sensor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-camera-receiver = { path = "../camera-receiver" }
