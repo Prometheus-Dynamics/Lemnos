@@ -19,3 +19,4 @@ libc.workspace = true
 
 [dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-linux-sys = { path = "../linux-sys", features = ["test-pty"] }
