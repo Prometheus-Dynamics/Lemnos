@@ -31,6 +31,8 @@ default = []
 alloc-count = []
 # A pseudo-terminal pair, for tests of serial code in other crates.
 test-pty = []
+# A recording stand-in for usbdevfs, for tests of USB code in other crates.
+test-usbfs = []
 
 [dependencies]
 libc.workspace = true
