@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-driver-status-light"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-light = { path = "../../contracts/light" }
+lemnos-contract-pixels = { path = "../../contracts/pixels" }
+
+[package.metadata.lemnos]
+driver = "StatusLight"
