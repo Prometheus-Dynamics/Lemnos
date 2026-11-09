@@ -7,6 +7,7 @@ pub fn drivers() -> Vec<DriverEntry> {
     vec![
         entry::<lemnos_driver_bmi088::Bmi088>(),
         entry::<lemnos_driver_bmm150::Bmm150>(),
+        entry::<lemnos_driver_coral_loader::CoralLoader>(),
         entry::<lemnos_driver_fan_control::FanController>(),
         entry::<lemnos_driver_gpio_power_switch::GpioPowerSwitch>(),
         entry::<lemnos_driver_gpu_lease::GpuLeaseDevice>(),
