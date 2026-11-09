@@ -1,6 +1,6 @@
 //! Reads one client's requests and answers them.
 
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -27,6 +27,9 @@ pub(crate) struct Client {
     conn: Arc<Conn>,
     greeted: bool,
     reply: Vec<u8>,
+    buf: Vec<u8>,
+    start: usize,
+    end: usize,
 }
 
 impl Client {
@@ -36,43 +39,52 @@ impl Client {
             conn,
             greeted: false,
             reply: vec![0; REPLY_START],
+            buf: vec![0; BUFFER_START],
+            start: 0,
+            end: 0,
         }
     }
 
-    pub(crate) fn read_loop(&mut self, mut stream: UnixStream) {
-        let mut buf = vec![0u8; BUFFER_START];
-        let mut start = 0;
-        let mut end = 0;
-        loop {
-            if start == end {
-                start = 0;
-                end = 0;
-            } else if end == buf.len() {
-                buf.copy_within(start..end, 0);
-                end -= start;
-                start = 0;
-                if end == buf.len() {
-                    if buf.len() >= MAX_FRAME {
-                        return;
-                    }
-                    buf.resize((buf.len() * 2).min(MAX_FRAME), 0);
+    /// Takes what the client has sent. False when the connection should end.
+    pub(crate) fn read_ready(&mut self, stream: &UnixStream) -> Keep {
+        if self.start == self.end {
+            self.start = 0;
+            self.end = 0;
+        } else if self.end == self.buf.len() {
+            self.buf.copy_within(self.start..self.end, 0);
+            self.end -= self.start;
+            self.start = 0;
+            if self.end == self.buf.len() {
+                if self.buf.len() >= MAX_FRAME {
+                    return false;
                 }
+                self.buf.resize((self.buf.len() * 2).min(MAX_FRAME), 0);
             }
-            match stream.read(&mut buf[end..]) {
-                Ok(0) => return,
-                Ok(n) => end += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return,
+        }
+        match (&*stream).read(&mut self.buf[self.end..]) {
+            Ok(0) => return false,
+            Ok(n) => self.end += n,
+            Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {
+                return true;
             }
-            loop {
-                match decode(&buf[start..end]) {
-                    Ok(None) => break,
-                    Err(_) => return,
-                    Ok(Some((frame, used))) => {
-                        start += used;
-                        if !self.handle(frame) {
-                            return;
-                        }
+            Err(_) => return false,
+        }
+        // `handle` borrows the client, and each frame borrows this.
+        let buf = core::mem::take(&mut self.buf);
+        let keep = self.handle_frames(&buf);
+        self.buf = buf;
+        keep
+    }
+
+    fn handle_frames(&mut self, buf: &[u8]) -> Keep {
+        loop {
+            match decode(&buf[self.start..self.end]) {
+                Ok(None) => return true,
+                Err(_) => return false,
+                Ok(Some((frame, used))) => {
+                    self.start += used;
+                    if !self.handle(frame) {
+                        return false;
                     }
                 }
             }
@@ -319,14 +331,12 @@ impl Client {
         true
     }
 
-    /// Ends everything this connection held.
-    pub(crate) fn finish(&self) {
+    /// Ends every subscription this connection held.
+    pub(crate) fn release(&self) {
         let held = core::mem::take(&mut *crate::lock(&self.conn.subscriptions));
         let now = self.core.clock.now_us();
         for subscription in held {
             self.core.readers.unsubscribe(&self.conn, subscription, now);
         }
-        self.conn.finish();
-        crate::lock(&self.core.clients).retain(|c| !Arc::ptr_eq(c, &self.conn));
     }
 }

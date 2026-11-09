@@ -2,8 +2,8 @@
 //! socket. `docs/wire.md` is what it speaks. Nothing here names a kind of
 //! device.
 //!
-//! Each client gets a small reader thread and writer thread. The readers
-//! thread runs subscriptions, and one more keeps devices retrying.
+//! One thread polls the socket and every client. The readers thread runs
+//! subscriptions, and one more keeps devices retrying.
 
 pub mod builtin;
 mod clock;
@@ -12,6 +12,7 @@ mod events;
 mod notify;
 mod readers;
 mod requests;
+mod serve;
 
 use std::fs;
 use std::io;
@@ -28,17 +29,15 @@ use lemnos_host::board::BoardFile;
 use lemnos_host::{DriverEntry, Host, HostError, Options};
 
 use clock::MonotonicClock;
-use conn::Conn;
+use conn::{Conn, Waker};
 use notify::Notifier;
 use readers::Readers;
-use requests::Client;
 
 /// Where a service listens unless told otherwise.
 pub const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 /// The board file a service reads unless told otherwise.
 pub const DEFAULT_BOARD: &str = "/etc/lemnos/board.toml";
 
-const CLIENT_STACK: usize = 128 * 1024;
 const SOCKET_MODE: u32 = 0o660;
 
 pub(crate) fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -78,6 +77,7 @@ pub(crate) struct Core {
     pub(crate) name: String,
     pub(crate) readers: Readers,
     pub(crate) clients: Mutex<Vec<Arc<Conn>>>,
+    pub(crate) waker: Arc<Waker>,
     stop: AtomicBool,
     stop_lock: Mutex<()>,
     stop_wake: Condvar,
@@ -126,39 +126,14 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-fn serve_client(core: &Arc<Core>, stream: UnixStream) -> io::Result<()> {
-    let (read, write) = (stream.try_clone()?, stream.try_clone()?);
-    let conn = Arc::new(Conn::new(stream));
-    lock(&core.clients).push(Arc::clone(&conn));
-    let writer = Arc::clone(&conn);
-    let spawned = thread::Builder::new()
-        .name("lemnosd-write".to_string())
-        .stack_size(CLIENT_STACK)
-        .spawn(move || writer.write_loop(write));
-    if let Err(error) = spawned {
-        conn.close();
-        lock(&core.clients).retain(|c| !Arc::ptr_eq(c, &conn));
-        return Err(error);
-    }
-    let mut client = Client::new(Arc::clone(core), Arc::clone(&conn));
-    let spawned = thread::Builder::new()
-        .name("lemnosd-read".to_string())
-        .stack_size(CLIENT_STACK)
-        .spawn(move || {
-            client.read_loop(read);
-            client.finish();
-        });
-    if let Err(error) = spawned {
-        conn.close();
-        lock(&core.clients).retain(|c| !Arc::ptr_eq(c, &conn));
-        return Err(error);
-    }
-    Ok(())
-}
-
 impl Service {
     pub fn start(config: Config) -> Result<Self, StartError> {
         let listener = bind(&config.socket).map_err(StartError::Socket)?;
+        let (wake_tx, wake_rx) = UnixStream::pair().map_err(StartError::Socket)?;
+        for socket in [&wake_tx, &wake_rx] {
+            socket.set_nonblocking(true).map_err(StartError::Socket)?;
+        }
+        listener.set_nonblocking(true).map_err(StartError::Socket)?;
         let clock = Arc::new(MonotonicClock::new());
         let host = Host::start(
             &config.board,
@@ -174,6 +149,7 @@ impl Service {
             name: config.name,
             readers: Readers::new(),
             clients: Mutex::new(Vec::new()),
+            waker: Arc::new(Waker::new(wake_tx)),
             stop: AtomicBool::new(false),
             stop_lock: Mutex::new(()),
             stop_wake: Condvar::new(),
@@ -187,22 +163,10 @@ impl Service {
                 .spawn(run)
                 .map_err(StartError::Socket)
         };
-        let accepting = Arc::clone(&core);
+        let serving = Arc::clone(&core);
         threads.push(spawn(
-            "lemnosd-accept",
-            Box::new(move || {
-                for stream in listener.incoming() {
-                    if accepting.stopping() {
-                        return;
-                    }
-                    let Ok(stream) = stream else {
-                        thread::sleep(Duration::from_millis(10));
-                        continue;
-                    };
-                    // Out of threads costs this client, not the service.
-                    let _ = serve_client(&accepting, stream);
-                }
-            }),
+            "lemnosd-serve",
+            Box::new(move || serve::run(&serving, &listener, &wake_rx)),
         )?);
         let reading = Arc::clone(&core);
         threads.push(spawn(
@@ -252,8 +216,7 @@ impl Service {
             self.core.stop_wake.notify_all();
         }
         self.core.readers.stop();
-        // Wakes the acceptor, which then sees it should stop.
-        let _ = UnixStream::connect(&self.socket);
+        self.core.waker.wake();
         for client in lock(&self.core.clients).iter() {
             client.close();
         }
