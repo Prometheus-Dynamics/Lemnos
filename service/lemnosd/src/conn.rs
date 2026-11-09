@@ -1,8 +1,10 @@
 //! One client: what's waiting to be written to it. The serving thread does the writing; other
 //! threads queue here and wake it.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::net::Shutdown;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -42,8 +44,16 @@ impl Waker {
     }
 }
 
+/// Descriptors to send with the byte at `at`.
+pub(crate) struct Attachment {
+    pub(crate) at: usize,
+    pub(crate) fds: Vec<OwnedFd>,
+}
+
 struct Outbox {
     bytes: Vec<u8>,
+    /// In byte order, and positions are from the start of `bytes`.
+    attachments: VecDeque<Attachment>,
     closed: bool,
 }
 
@@ -69,6 +79,7 @@ impl Conn {
             stream,
             outbox: Mutex::new(Outbox {
                 bytes: Vec::with_capacity(OUTBOX_START),
+                attachments: VecDeque::new(),
                 closed: false,
             }),
             waker,
@@ -100,6 +111,21 @@ impl Conn {
         }
     }
 
+    /// Queues an answer carrying descriptors. They close here if the connection has gone.
+    pub(crate) fn answer_with_descriptors(&self, frame: &Frame<'_>, fds: Vec<OwnedFd>) {
+        let mut outbox = self.lock();
+        if outbox.closed {
+            return;
+        }
+        let at = outbox.bytes.len();
+        if at > MAX_QUEUED_BYTES || append(frame, &mut outbox.bytes).is_err() {
+            drop(outbox);
+            self.close();
+            return;
+        }
+        outbox.attachments.push_back(Attachment { at, fds });
+    }
+
     /// Queues an answer from another thread.
     pub(crate) fn event(&self, frame: &Frame<'_>) {
         self.answer(frame);
@@ -118,13 +144,19 @@ impl Conn {
         }
     }
 
-    /// Swaps the queued bytes for the empty `sending`. False when nothing is queued.
-    pub(crate) fn take_queued(&self, sending: &mut Vec<u8>) -> bool {
+    /// Swaps the queued bytes for the empty `sending`, moving their descriptors into
+    /// `attachments`. False when nothing is queued.
+    pub(crate) fn take_queued(
+        &self,
+        sending: &mut Vec<u8>,
+        attachments: &mut VecDeque<Attachment>,
+    ) -> bool {
         let mut outbox = self.lock();
         if outbox.bytes.is_empty() {
             return false;
         }
         core::mem::swap(&mut outbox.bytes, sending);
+        core::mem::swap(&mut outbox.attachments, attachments);
         true
     }
 

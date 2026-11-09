@@ -7,6 +7,7 @@ pub mod board;
 mod contain;
 mod host;
 pub mod schedule;
+pub mod stream;
 
 pub use contain::{AutoOff, Options};
 pub use host::{DeviceInfo, DeviceState, DriverEntry, Host, HostError, OffReason, entry};

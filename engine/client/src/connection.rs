@@ -1,12 +1,32 @@
 //! One socket and its two buffers.
 
 use std::io::{self, ErrorKind, Read, Write};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lemnos_wire::MAX_FRAME;
 
+use crate::stream::{DESCRIPTORS, StreamPlatform};
+
 const RX_START: usize = 16 * 1024;
+/// More descriptors than this waiting means the peer isn't following the protocol.
+const MAX_WAITING_FDS: usize = 4 * DESCRIPTORS;
+
+/// While a stream is being opened, the socket is read so that descriptors aren't lost.
+pub(crate) struct Taker {
+    pub(crate) platform: Arc<dyn StreamPlatform>,
+    pub(crate) fds: Vec<OwnedFd>,
+}
+
+impl core::fmt::Debug for Taker {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Taker")
+            .field("fds", &self.fds.len())
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Connection {
@@ -17,6 +37,7 @@ pub(crate) struct Connection {
     pub(crate) tx: Vec<u8>,
     pub(crate) sent: usize,
     wait: Option<Duration>,
+    pub(crate) taker: Option<Taker>,
 }
 
 impl Connection {
@@ -29,6 +50,7 @@ impl Connection {
             tx: Vec::with_capacity(RX_START),
             sent: 0,
             wait: None,
+            taker: None,
         }
     }
 
@@ -79,7 +101,22 @@ impl Connection {
                 self.rx.resize(grown, 0);
             }
         }
-        match self.stream.read(&mut self.rx[self.end..]) {
+        let rx = &mut self.rx[self.end..];
+        let read = match &mut self.taker {
+            None => self.stream.read(rx),
+            Some(taker) => {
+                let read =
+                    taker
+                        .platform
+                        .recv_with_descriptors(self.stream.as_fd(), rx, &mut taker.fds);
+                if taker.fds.len() > MAX_WAITING_FDS {
+                    // Dropped with the connection, which this error ends.
+                    return Err(ErrorKind::InvalidData.into());
+                }
+                read
+            }
+        };
+        match read {
             Ok(0) => Err(ErrorKind::UnexpectedEof.into()),
             Ok(n) => {
                 self.end += n;

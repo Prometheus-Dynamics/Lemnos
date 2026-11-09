@@ -1,14 +1,16 @@
 //! The serving thread: one poll over the socket, the wake-up and every client.
 
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::poll::{POLLIN, POLLOUT, PollFd, poll_many};
+use lemnos_linux_sys::scm::send_with_fds;
 
-use crate::conn::{Conn, OUTBOX_START};
+use crate::conn::{Attachment, Conn, OUTBOX_START};
 use crate::requests::Client;
 use crate::{Core, lock};
 
@@ -25,6 +27,8 @@ struct Slot {
     /// Bytes being written, and how many have gone.
     sending: Vec<u8>,
     sent: usize,
+    /// Descriptors that go with bytes in `sending`.
+    attachments: VecDeque<Attachment>,
     /// Set once the client is done: nothing more is read, and what is queued goes out by then.
     finish_by: Option<Instant>,
 }
@@ -38,6 +42,7 @@ impl Slot {
             conn,
             sending: Vec::with_capacity(OUTBOX_START),
             sent: 0,
+            attachments: VecDeque::new(),
             finish_by: None,
         }
     }
@@ -66,11 +71,40 @@ impl Slot {
             if self.sent == self.sending.len() {
                 self.sending.clear();
                 self.sent = 0;
-                if !self.conn.take_queued(&mut self.sending) {
+                self.attachments.clear();
+                if !self
+                    .conn
+                    .take_queued(&mut self.sending, &mut self.attachments)
+                {
                     return;
                 }
             }
-            match self.conn.stream().write(&self.sending[self.sent..]) {
+            let attached = self.attachments.front().filter(|a| a.at == self.sent);
+            let result = match attached {
+                Some(attachment) => {
+                    let borrowed: Vec<BorrowedFd<'_>> =
+                        attachment.fds.iter().map(AsFd::as_fd).collect();
+                    let sent = send_with_fds(
+                        self.conn.stream().as_fd(),
+                        &self.sending[self.sent..],
+                        &borrowed,
+                    );
+                    if sent.is_ok() {
+                        // The kernel has its own references now.
+                        self.attachments.pop_front();
+                    }
+                    sent
+                }
+                None => {
+                    // Stop before the next attachment, so its bytes go with it.
+                    let end = self
+                        .attachments
+                        .front()
+                        .map_or(self.sending.len(), |a| a.at.min(self.sending.len()));
+                    self.conn.stream().write(&self.sending[self.sent..end])
+                }
+            };
+            match result {
                 Ok(0) => return self.conn.close(),
                 Ok(n) => self.sent += n,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}

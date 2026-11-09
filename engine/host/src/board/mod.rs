@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lemnos_core::ConfigValue;
+use lemnos_wire::ring::Layout;
 use serde::Deserialize;
 
 pub const FORMAT: &str = "lemnos.board";
@@ -23,6 +24,54 @@ pub enum BoardError {
     SelfUse(String),
     #[error("device {0:?} config key {1:?}: values are numbers, booleans or strings")]
     Config(String, String),
+    #[error("device {0:?} stream {1:?}: its numbers are out of range")]
+    Stream(String, String),
+}
+
+/// One frame stream a device offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamSpec {
+    pub buffers: u32,
+    pub buffer_bytes: u32,
+    /// How many jobs the consumer can have waiting.
+    #[serde(default = "default_job_slots")]
+    pub job_slots: u32,
+    /// The largest job. Its meaning is between the consumer and the driver.
+    #[serde(default = "default_job_bytes")]
+    pub job_bytes: u32,
+}
+
+const fn default_job_slots() -> u32 {
+    4
+}
+
+const fn default_job_bytes() -> u32 {
+    256
+}
+
+impl StreamSpec {
+    fn checked_layout(&self) -> Option<Layout> {
+        Layout::new(
+            self.buffers,
+            self.buffer_bytes,
+            self.job_slots,
+            self.job_bytes,
+        )
+        .ok()
+    }
+
+    /// The stream's layout. A spec that didn't come through [`parse`] and is out of range falls
+    /// back to the smallest stream there is.
+    pub(crate) fn layout(&self) -> Layout {
+        self.checked_layout().unwrap_or(Layout {
+            buffers: 1,
+            buffer_bytes: 1,
+            frame_slots: 1,
+            job_slots: 1,
+            job_bytes: 0,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -50,6 +99,9 @@ pub struct DeviceSpec {
     pub config: toml::Table,
     #[serde(default)]
     pub disabled: bool,
+    /// The frame streams this device offers, by the name a consumer asks for and a driver needs.
+    #[serde(default)]
+    pub streams: BTreeMap<String, StreamSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -118,6 +170,11 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
             return Err(BoardError::SelfUse(device.id.clone()));
         }
         device.owned_config()?;
+        for (name, stream) in &device.streams {
+            if stream.checked_layout().is_none() {
+                return Err(BoardError::Stream(device.id.clone(), name.clone()));
+            }
+        }
     }
     Ok(board)
 }
@@ -208,6 +265,29 @@ mod tests {
         assert_eq!(
             with(text),
             Err(BoardError::Config("a".to_string(), "list".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_stream_parses_and_its_job_numbers_default() {
+        let board = with(
+            "[[devices]]\nid = \"a\"\ndriver = \"x\"\n\
+             [devices.streams.out]\nbuffers = 4\nbuffer_bytes = 1024\n",
+        )
+        .unwrap();
+        let stream = board.devices[0].streams["out"];
+        assert_eq!(stream.buffers, 4);
+        assert_eq!(stream.job_slots, 4);
+        assert_eq!(stream.job_bytes, 256);
+    }
+
+    #[test]
+    fn a_stream_out_of_range_is_refused_by_name() {
+        let text = "[[devices]]\nid = \"a\"\ndriver = \"x\"\n\
+                    [devices.streams.out]\nbuffers = 0\nbuffer_bytes = 1024\n";
+        assert_eq!(
+            with(text),
+            Err(BoardError::Stream("a".to_string(), "out".to_string()))
         );
     }
 

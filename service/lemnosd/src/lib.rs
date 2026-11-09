@@ -13,6 +13,7 @@ mod notify;
 mod readers;
 mod requests;
 mod serve;
+mod streams;
 
 use std::fs;
 use std::io;
@@ -32,6 +33,7 @@ use clock::MonotonicClock;
 use conn::{Conn, Waker};
 use notify::Notifier;
 use readers::Readers;
+use streams::MemfdStreams;
 
 /// Where a service listens unless told otherwise.
 pub const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
@@ -144,12 +146,13 @@ impl Service {
         }
         listener.set_nonblocking(true).map_err(StartError::Socket)?;
         let clock = Arc::new(MonotonicClock::new());
-        let host = Host::start(
+        let host = Host::start_with_streams(
             &config.board,
             &config.drivers,
             config.backend,
             Arc::clone(&clock) as Arc<dyn lemnos_core::HostClock>,
             config.options,
+            Arc::new(MemfdStreams),
         )
         .map_err(StartError::Host)?;
         let core = Arc::new(Core {
@@ -207,6 +210,12 @@ impl Service {
 
     pub const fn socket(&self) -> &PathBuf {
         &self.socket
+    }
+
+    /// The host it runs, for software producers in the same process and for inspection.
+    #[must_use]
+    pub fn host(&self) -> &Host {
+        &self.core.host
     }
 
     /// Lets everything go. Clients see the socket close.

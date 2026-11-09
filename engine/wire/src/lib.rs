@@ -8,6 +8,7 @@
 //! a [`Frame`] borrows from the bytes it was read from.
 
 mod description;
+pub mod ring;
 
 pub use description::{
     DeviceDescription, OwnedContract, OwnedItem, OwnedMethod, OwnedParam, OwnedShape,
@@ -145,10 +146,20 @@ frames! {
     16 SetPower { id: u32, device: u32, on: bool }
     17 StreamOpen { id: u32, device: u32, name: &'a str }
     /// `descriptors` file descriptors travel with this frame over `SCM_RIGHTS`.
-    18 StreamReady { id: u32, buffers: u32, descriptors: u8 }
+    18 StreamReady {
+        id: u32,
+        buffers: u32,
+        descriptors: u8,
+        buffer_bytes: u32,
+        frame_slots: u32,
+        job_slots: u32,
+        job_bytes: u32,
+    }
     19 Event { device: u32, state: u8, health: u8, reason: &'a str }
     /// The answer to any request that could not be done.
     20 Refusal { id: u32, status: i32, text: &'a str }
+    /// Answered with an empty Reply.
+    21 StreamClose { id: u32, device: u32, name: &'a str }
 }
 
 /// Writes a frame into `buf` and returns its length.

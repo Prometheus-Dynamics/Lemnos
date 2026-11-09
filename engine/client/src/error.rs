@@ -1,5 +1,6 @@
 use lemnos_core::Status;
 use lemnos_wire::WireError;
+use lemnos_wire::ring::RingError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -19,6 +20,9 @@ pub enum Error {
     TooSmall,
     /// Too many requests are waiting to be written.
     Full,
+    /// A frame stream's shared memory broke the rules, or couldn't be set up. Only that stream is
+    /// affected.
+    Stream(RingError),
 }
 
 impl core::fmt::Display for Error {
@@ -37,6 +41,7 @@ impl core::fmt::Display for Error {
             Self::TimedOut => f.write_str("no answer in time"),
             Self::TooSmall => f.write_str("the buffer is too small"),
             Self::Full => f.write_str("too many requests waiting"),
+            Self::Stream(error) => write!(f, "the frame stream: {error}"),
         }
     }
 }
@@ -60,6 +65,7 @@ impl From<Error> for Status {
             Error::TimedOut => Status::TIMED_OUT,
             Error::TooSmall => Status::BUFFER_TOO_SMALL,
             Error::Full => Status::BUSY,
+            Error::Stream(_) => Status::IO,
         }
     }
 }

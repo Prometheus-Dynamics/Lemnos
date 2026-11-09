@@ -7,6 +7,7 @@ use lemnos_core::{Bound, Caller, Contract, Status};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{DeviceEntry, Event, Handle, Session, Subscription, ValueInfo};
+use crate::stream::{FrameStream, StreamPlatform};
 
 const ARGS: usize = 256;
 
@@ -89,6 +90,21 @@ impl Client {
 
     pub fn set_power(&self, device: u32, on: bool) -> Result<(), Error> {
         self.lock().set_power(device, on)
+    }
+
+    /// See [`Session::open_stream`].
+    pub fn open_stream(
+        &self,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.lock().open_stream(device, name, platform)
+    }
+
+    /// See [`Session::close_stream`].
+    pub fn close_stream(&self, stream: FrameStream) -> Result<(), Error> {
+        self.lock().close_stream(stream)
     }
 
     pub fn next_value(

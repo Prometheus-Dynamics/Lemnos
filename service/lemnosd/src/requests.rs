@@ -134,9 +134,8 @@ impl Client {
             } => self.subscribe(id, device, contract, method, period_us, only_changes),
             Frame::Unsubscribe { id, subscription } => self.unsubscribe(id, subscription),
             Frame::SetPower { id, device, on } => self.set_power(id, device, on),
-            Frame::StreamOpen { id, .. } => {
-                self.refuse(id, Status::NOT_SUPPORTED, "streams are not served yet")
-            }
+            Frame::StreamOpen { id, device, name } => self.stream_open(id, device, name),
+            Frame::StreamClose { id, device, name } => self.stream_close(id, device, name),
             // Only the service sends the rest.
             _ => false,
         }
@@ -333,6 +332,43 @@ impl Client {
         }
         self.conn.answer(&Frame::Reply { id, bytes: &[] });
         true
+    }
+
+    fn stream_open(&self, id: u32, device: u32, name: &str) -> Keep {
+        let lease = match self.core.host.stream_attach(device, name, self.conn.id) {
+            Ok(lease) => lease,
+            Err(status) => return self.refuse(id, status, "can't open the stream"),
+        };
+        let layout = lease.layout;
+        let Ok(descriptors) = u8::try_from(lease.descriptors.len()) else {
+            let _ = self.core.host.stream_detach(device, name, self.conn.id);
+            return self.refuse(id, Status::IO, "too many descriptors");
+        };
+        // The descriptors close here if this connection has already gone. It stays attached
+        // until `release` runs, which it will.
+        self.conn.answer_with_descriptors(
+            &Frame::StreamReady {
+                id,
+                buffers: layout.buffers,
+                descriptors,
+                buffer_bytes: layout.buffer_bytes,
+                frame_slots: layout.frame_slots,
+                job_slots: layout.job_slots,
+                job_bytes: layout.job_bytes,
+            },
+            lease.descriptors,
+        );
+        true
+    }
+
+    fn stream_close(&self, id: u32, device: u32, name: &str) -> Keep {
+        match self.core.host.stream_detach(device, name, self.conn.id) {
+            Ok(()) => {
+                self.conn.answer(&Frame::Reply { id, bytes: &[] });
+                true
+            }
+            Err(status) => self.refuse(id, status, "can't close the stream"),
+        }
     }
 
     /// Ends every subscription this connection held.
