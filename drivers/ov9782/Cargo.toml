@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-driver-ov9782"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
+lemnos-contract-camera-sensor = { path = "../../contracts/camera-sensor" }
+
+[dev-dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+
+[package.metadata.lemnos]
+driver = "Ov9782"
