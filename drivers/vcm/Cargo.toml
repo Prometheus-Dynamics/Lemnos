@@ -1,0 +1,20 @@
+[package]
+name = "lemnos-driver-vcm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
+lemnos-contract-lens = { path = "../../contracts/lens" }
+
+[dev-dependencies]
+lemnos-sim = { path = "../../backends/sim" }
+
+[package.metadata.lemnos]
+driver = "Vcm"
