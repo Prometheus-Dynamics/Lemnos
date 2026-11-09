@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-usb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The USB host for Lemnos: UsbHost and UsbDevice over Linux usbfs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-linux-sys = { path = "../linux-sys" }
+libc.workspace = true
+
+[dev-dependencies]
+lemnos-linux-sys = { path = "../linux-sys", features = ["test-usbfs"] }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

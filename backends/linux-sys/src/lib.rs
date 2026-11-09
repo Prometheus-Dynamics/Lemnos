@@ -26,6 +26,7 @@ pub mod signal;
 pub mod spi;
 pub mod time;
 pub mod udmabuf;
+pub mod usbfs;
 
 pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};
 
