@@ -424,8 +424,8 @@ static TABLE: [UnitCaps; 13] = [
     multirga(Soc::Rk3588, Unit::Rga3),
     multirga(Soc::Rk3588, Unit::Rga2),
     vglite(Soc::K230d),
-    // The K230 Linux SDK has a V4L2 M2M driver for it (`nonai-2d`, format conversion and OSD up to
-    // 1920x1080); no route here yet: see TODO.md.
+    // The K230 Linux SDK drives it as the V4L2 M2M `nonai-2d`, one size, up to 1920x1080: format
+    // conversion is in `lemnos-drivers-nonai2d`, outside these routes.
     design(Soc::K230d, Unit::K230Image2d),
 ];
 

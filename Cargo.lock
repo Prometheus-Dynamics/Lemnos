@@ -567,6 +567,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-drivers-nonai2d"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux",
+ "lemnos-v4l2",
+]
+
+[[package]]
 name = "lemnos-drivers-pisp"
 version = "2.0.1-dev"
 dependencies = [
