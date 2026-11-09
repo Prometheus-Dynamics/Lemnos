@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-camera-proof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Camera proof tool: finds a camera by its sensor tag, follows links, assembles, streams and saves frames"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-wire = { path = "../../../engine/wire" }
+lemnos-sim = { path = "../../../backends/sim" }
+lemnos-contract-camera-isp = { path = "../../../contracts/camera-isp" }
+lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }
+lemnos-contract-camera-sensor = { path = "../../../contracts/camera-sensor" }
+
+[dev-dependencies]
+lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
