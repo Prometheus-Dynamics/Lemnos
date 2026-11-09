@@ -27,12 +27,14 @@ lemnos-fake-devices = { path = "../../testing/crates/fake-devices", optional = t
 # generated: begin drivers
 lemnos-driver-bmi088 = { path = "../../drivers/bmi088" }
 lemnos-driver-bmm150 = { path = "../../drivers/bmm150" }
+lemnos-driver-fan-control = { path = "../../drivers/fan-control" }
 lemnos-driver-gpio-power-switch = { path = "../../drivers/gpio-power-switch" }
 lemnos-driver-gpu-lease = { path = "../../drivers/gpu-lease" }
 lemnos-driver-hwmon-fan = { path = "../../drivers/hwmon-fan" }
 lemnos-driver-ina2xx = { path = "../../drivers/ina2xx" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
+lemnos-driver-status-light = { path = "../../drivers/status-light" }
 lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
 lemnos-driver-vcm = { path = "../../drivers/vcm" }
 lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
