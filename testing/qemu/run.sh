@@ -31,7 +31,7 @@ mkdir -p "$root"/{dev,proc,sys}
 flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter)
 read -r -a compiler <<<"$CC"
 "${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init.c"
-for check in lemnos_check lemnos_irq_check lemnos_unbind_check; do
+for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
 cp "$work/kernel/lemnos.ko" "$work/test_block/lemnos_test_block.ko" "$root/"

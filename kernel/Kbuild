@@ -3,4 +3,4 @@
 ccflags-y := -Werror
 
 obj-m += lemnos.o
-lemnos-y := lemnos_core.o
+lemnos-y := lemnos_core.o lemnos_claims.o

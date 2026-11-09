@@ -36,6 +36,7 @@
 #include <linux/xarray.h>
 
 #include "lemnos.h"
+#include "lemnos_internal.h"
 
 #define LEM_NAME "lemnos"
 #define LEM_MAX_COMPATIBLE 8
@@ -521,6 +522,7 @@ union lem_args {
 	struct lemnos_import import;
 	struct lemnos_release release;
 	struct lemnos_irq irq;
+	struct lemnos_claim claim;
 };
 
 static long lem_next(struct lemnos_next *n)
@@ -582,15 +584,19 @@ static long lem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if ((_IOC_DIR(cmd) & _IOC_WRITE) && copy_from_user(&u, uarg, size))
 		return -EFAULT;
 
-	down_read(&lem_blocks_sem);
-	if (cmd == LEMNOS_IOC_NEXT) {
-		ret = lem_next(&u.next);
+	if (cmd == LEMNOS_IOC_CLAIM) {
+		ret = lem_claim(&u.claim);
 	} else {
-		struct lem_block *l = xa_load(&lem_blocks, u.block);
+		down_read(&lem_blocks_sem);
+		if (cmd == LEMNOS_IOC_NEXT) {
+			ret = lem_next(&u.next);
+		} else {
+			struct lem_block *l = xa_load(&lem_blocks, u.block);
 
-		ret = l ? lem_block_request(l, cmd, &u) : -ENODEV;
+			ret = l ? lem_block_request(l, cmd, &u) : -ENODEV;
+		}
+		up_read(&lem_blocks_sem);
 	}
-	up_read(&lem_blocks_sem);
 
 	/* A failed copy leaves what was made to the close: the caller has lost it. */
 	if (!ret && (_IOC_DIR(cmd) & _IOC_READ) && copy_to_user(uarg, &u, size))

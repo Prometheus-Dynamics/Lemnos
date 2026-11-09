@@ -144,6 +144,8 @@ int main(void)
 	      "lemnos_irq_check");
 	check(!run((char *const[]){ "/lemnos_unbind_check", "/dev/lemnos", BLOCK, UNBIND, NULL }),
 	      "lemnos_unbind_check");
+	check(!run((char *const[]){ "/lemnos_claim_check", "/dev/lemnos", NULL }),
+	      "lemnos_claim_check");
 	check(!unload("lemnos"), "module unloaded with nothing left held");
 	check(!unload("lemnos_test_block"), "test block module unloaded");
 

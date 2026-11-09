@@ -26,6 +26,11 @@
  *   driver clears the cause, then enables it. All start masked, and closing
  *   the file masks them again.
  *
+ * Claims are separate from blocks. LEMNOS_IOC_CLAIM takes a resource by name,
+ * exclusively, and returns a file: whoever holds that file holds the claim,
+ * and it ends when the last copy closes, however its holder ended. The name
+ * means nothing to the module. A name already held is refused with EBUSY.
+ *
  * Copyright (c) 2026 the Lemnos authors.
  */
 #ifndef _UAPI_LEMNOS_H
@@ -102,6 +107,13 @@ struct lemnos_irq_event {
 	__u64 ns;		/* ktime_get_ns() when it last fired */
 };
 
+struct lemnos_claim {
+	char resource[LEMNOS_NAME_MAX];	/* in: NUL-terminated, not empty */
+	__u32 flags;		/* in: zero */
+	__s32 fd;		/* out: the claim, close-on-exec */
+};
+
+#define LEMNOS_IOC_CLAIM      _IOWR('L', 0xce, struct lemnos_claim)
 #define LEMNOS_IOC_NEXT       _IOWR('L', 0xcf, struct lemnos_next)
 #define LEMNOS_IOC_INFO       _IOWR('L', 0xd0, struct lemnos_info)
 #define LEMNOS_IOC_REGION     _IOWR('L', 0xd1, struct lemnos_region)

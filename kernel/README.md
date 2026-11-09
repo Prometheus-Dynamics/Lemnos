@@ -30,6 +30,12 @@ as soon as the module loads.
 | `test_map_unconfined` | Test only. Allows mapping the registers of a block not in `confined`. |
 | `test_irq_inject` | Test only. Enables `LEMNOS_IOC_TEST_IRQ`. |
 
+## Claims
+
+`LEMNOS_IOC_CLAIM` takes a resource by name and returns a file. The claim lasts as long as that file:
+a second claim on the name gets `EBUSY`, and closing the file, or the process dying, releases it. The
+module doesn't interpret names. At most 4096 claims exist at once.
+
 ## Unbinding
 
 Requests for a block fail with `ENODEV` from the moment its unbind starts, its register mappings
@@ -44,6 +50,6 @@ make KDIR=<a built kernel tree>
 ```
 
 `testing/qemu/run.sh` builds the module and boots a kernel in QEMU with it loaded, then runs
-`test/lemnos_check.c`, `test/lemnos_irq_check.c` and `test/lemnos_unbind_check.c` on a block with
+`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c` and `test/lemnos_claim_check.c` on a block with
 nothing behind it. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
 and memory checking on.
