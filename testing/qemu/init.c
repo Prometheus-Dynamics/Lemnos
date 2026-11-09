@@ -19,6 +19,7 @@
 
 #define BLOCK "lemnos-test-block"
 #define OTHER "lemnos-test-other"
+#define PISP "lemnos-test-pisp"
 #define BIND "/sys/bus/platform/drivers/lemnos/bind"
 #define UNBIND "/sys/bus/platform/drivers/lemnos/unbind"
 #define OWNED "owned=lemnos,test-block"
@@ -199,6 +200,31 @@ int main(void)
 	check(!forget_override(CSI2), "override cleared");
 	check(!unload("lemnos"), "module unloaded with a wedged stream pinned");
 	check(!unload("lemnos_test_block"), "test block module unloaded");
+
+	check(!load("/lemnos_test_block.ko", ""), "test block module loaded for the PiSP back end");
+	/* The PiSP back end on its fake block. */
+	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1"),
+	      "module loaded with the PiSP back end");
+	check(!bind_block(PISP), "PiSP block bound");
+	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
+				    (char *)cma_heap(), "refuse", NULL }),
+	      "lemnos_pisp_be_check refuse");
+	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
+				    (char *)cma_heap(), "lifetime", NULL }),
+	      "lemnos_pisp_be_check lifetime");
+	check(!put(UNBIND, PISP), "PiSP block unbound");
+	check(!forget_override(PISP), "PiSP override cleared");
+	check(!unload("lemnos"), "module unloaded with the back end idle");
+
+	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1"),
+	      "module loaded for the wedge checks");
+	check(!bind_block(PISP), "PiSP block bound");
+	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
+				    (char *)cma_heap(), "wedge", NULL }),
+	      "lemnos_pisp_be_check wedge");
+	check(unload("lemnos") && errno == EAGAIN, "a wedged block keeps the module loaded");
+	/* The test block's devices go with it; a wedged block's memory stays pinned regardless. */
+	check(!put(UNBIND, PISP), "wedged PiSP block unbound");
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);
 	sync();

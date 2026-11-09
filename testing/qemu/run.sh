@@ -34,6 +34,11 @@ read -r -a compiler <<<"$CC"
 for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_stream_check lemnos_rp1_csi2_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
+# Its uAPI header is the kernel's own.
+source="$KDIR/source/include/uapi/linux/media/raspberrypi"
+[[ -d "$source" ]] || source="$KDIR/include/uapi/linux/media/raspberrypi"
+"${compiler[@]}" "${flags[@]}" -I"$source" -pthread -o "$root/lemnos_pisp_be_check" \
+  "$work/kernel/test/lemnos_pisp_be_check.c"
 cp "$work/kernel/lemnos.ko" "$work/test_block/lemnos_test_block.ko" "$root/"
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
 

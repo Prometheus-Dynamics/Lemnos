@@ -12,11 +12,23 @@ long lem_claim(struct lemnos_claim *c);
 struct device;
 struct file;
 struct lem_stream;
+struct lem_stream_producer;
+struct vm_area_struct;
 
 /* Whether `dev` is one of the blocks the owned= parameter lists. */
 bool lem_block_owned(struct device *dev);
 
 long lem_stream_create(struct device *dev, struct lemnos_stream_create *c);
+/*
+ * lem_stream_create() for a block whose jobs are its own: the producer is
+ * attached, with a frame of the whole buffer, before the fd exists, so the
+ * consumer never holds a stream without it. *out is set before the fd is
+ * installed. On failure there's no stream and producer->priv is still the
+ * caller's; on success the stream owns it, through producer->release.
+ */
+long lem_stream_create_producer(struct device *dev, struct lemnos_stream_create *c,
+				const struct lem_stream_producer *producer,
+				struct lem_stream **out);
 void lem_streams_block_gone(struct device *dev);
 
 /* A device address a block is programmed with is aligned this much. */
@@ -29,11 +41,17 @@ struct lem_job_range {
 	u64 len;
 };
 
+/*
+ * What a job can hold at once: more than a posted struct lemnos_stream_job can
+ * name, for a block whose jobs name more memory (the PiSP back end: 13 images).
+ */
+#define LEM_JOB_HOLDS 13u
+
 struct lem_job {
 	u64 identity;
 	u32 buffer;
 	u32 count;
-	struct lem_job_range range[LEMNOS_STREAM_JOB_RANGES];
+	struct lem_job_range range[LEM_JOB_HOLDS];
 };
 
 /*
@@ -59,6 +77,27 @@ struct lem_stream_slot {
 struct lem_stream_producer {
 	void (*stop)(void *priv, struct lem_stream *s);
 	void *priv;
+
+	/*
+	 * The rest is for a block whose jobs are its own (the PiSP back end), and
+	 * stays zero for one taking frames with lem_stream_next().
+	 *
+	 * job_bytes: nonzero says the ring's jobs are this block's format and it
+	 * reads them, with lem_stream_job_peek() and _take(); the stream must have
+	 * been created with exactly this size.
+	 * kick: LEMNOS_STREAM_IOC_KICK, no lock held, the stream not yet over when
+	 * called; its errno, other than ENODEV, ends the stream.
+	 * ioctl: requests the stream doesn't know, s->ctl held, stream not over.
+	 * mmap: a mapping at a nonzero offset; no lock held.
+	 * release: the stream's file is gone and nothing can reach priv any more.
+	 * Called once, wedged or not, and it's for release() to keep what a wedged
+	 * block may still be using.
+	 */
+	u32 job_bytes;
+	long (*kick)(void *priv);
+	long (*ioctl)(void *priv, unsigned int cmd, void __user *arg);
+	int (*mmap)(void *priv, struct vm_area_struct *vma);
+	void (*release)(void *priv);
 };
 
 /* The stream open as `file`, if it was created on `dev`; an ERR_PTR otherwise. */
@@ -77,6 +116,31 @@ void lem_stream_complete(struct lem_stream *s, const struct lem_stream_slot *slo
 void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot);
 /* The block's DMA can't be shown to have stopped: keep everything pinned for good. */
 void lem_stream_wedge(struct lem_stream *s);
+
+/*
+ * For a producer with job_bytes set. Reads the job at the front of the ring
+ * into `job` (job_bytes), once: 1 with a job, 0 with none, -errno for a lying
+ * consumer. Doesn't take it: the block copies and checks what it names first.
+ */
+int lem_stream_job_peek(struct lem_stream *s, void *job, size_t bytes);
+/*
+ * The job at the front of the ring passed the block's checks. Resolves every
+ * range against job's buffer and the registered regions and, only if all
+ * resolve and the buffer is free, takes the job and holds them, in one step:
+ * nothing can be unregistered between the check and the hold. `slot` is then
+ * as from lem_stream_next() and ends with lem_stream_complete() or _cancel().
+ */
+int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
+			const struct lemnos_stream_range *range, u32 count,
+			struct lem_stream_slot *slot);
+/* The block found it can't go on: the consumer learns with `err` and the stream ends. */
+void lem_stream_fault(struct lem_stream *s, int err);
+
+struct platform_device;
+struct lem_pb;
+struct lem_pb *lem_pb_probe(struct platform_device *pdev);
+void lem_pb_remove(struct lem_pb *l);
+long lem_pb_create(struct lem_pb *l, struct device *dev, void *args);
 
 int lem_rp1_csi2_register(void);
 void lem_rp1_csi2_unregister(void);

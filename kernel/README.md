@@ -29,6 +29,8 @@ as soon as the module loads.
 | `confined` | Compatibles whose DMA their IOMMU really confines. Registers of any other block can't be mapped. Empty by default. |
 | `test_map_unconfined` | Test only. Allows mapping the registers of a block not in `confined`. |
 | `test_irq_inject` | Test only. Enables `LEMNOS_IOC_TEST_IRQ`. |
+| `pisp_be` | Compatibles driven as the PiSP back end (`lemnos_pisp_be.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
+| `test_pb_fake_regs` | Test only. The back end's register window is ordinary memory, for the fake block in QEMU. |
 | `test_stream_source` | Test only. Enables `LEMNOS_STREAM_IOC_TEST_SOURCE`, a source that fills frames through a kernel mapping. |
 
 ## Claims
@@ -88,6 +90,29 @@ GPL-2.0-only. The D-PHY bring-up, the channel's registers and the frame start an
 are ported from the stock `rp1_cfe` driver, Copyright (C) 2021-2024 Raspberry Pi Ltd., through the
 dev branch's receiver; the notice is kept in the file header. See `drivers/rp1-csi2/` for the driver
 that uses this.
+
+## The PiSP back end
+
+A block listed in `pisp_be` is driven by the module: its registers can't be mapped and its
+interrupts aren't forwarded. `LEMNOS_IOC_PISP_BE_CREATE` makes a frame stream whose jobs are
+`struct lemnos_pisp_be_job` (`lemnos_pisp_be.h`), one stream at a time, with one configuration slot
+per job slot, mapped shared at `config_mmap_offset`. It is a producer on the stream like the
+receiver above, attached before the stream's fd exists, and reads its own jobs from the ring with
+`lem_stream_job_peek()` and `lem_stream_job_take()`.
+
+Each job and its configuration are read once from memory userspace can write, into memory it
+can't. That copy is what's checked and what the block runs. Every address is proved against the
+job's pool buffer or a registered dma-buf for the bytes the block touches, or the job is refused
+and the stream ends; `lpb_validate` lists each address the configuration can name. Nothing is
+clamped.
+
+A job that doesn't finish within a second ends the stream. A block that can't then be shown idle,
+or whose counters say more than its jobs explain, is wedged: its buffers and the stream's memory
+are held until a reboot, `lemnos.ko` can't be unloaded, new streams are refused with `EIO`, and the
+kernel log says so. Closing a stream or unbinding waits for what's on the block first.
+
+`lemnos_pisp_be.c` keeps the stock driver's copyright for its register sequence and job
+accounting; see its header.
 
 ## Unbinding
 

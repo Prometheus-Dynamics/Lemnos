@@ -17,17 +17,25 @@
 #include <linux/irq_sim.h>
 #include <linux/irqdomain.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
+#include <linux/string.h>
+#include <linux/sysfs.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
 #include "lemnos_test_csi2.h"
 
-#define TB_IRQS 3
+#define TB_IRQS 4
 #define TB_BLOCK_IRQS 2
 #define TB_MAGIC 0x4c454d4e
+/* The fake PiSP back end: a window of ordinary memory its driver is told is registers. */
+#define TB_PISP_IRQ 2
+#define TB_PISP_ORDER 1
+#define TB_PISP_BYTES (PAGE_SIZE << TB_PISP_ORDER)
+#define TB_PISP_VERSION 0x02252700
 
 static unsigned long csi2_phys;
 module_param(csi2_phys, ulong, 0444);
@@ -152,7 +160,8 @@ static struct fwnode_handle *tb_fwnode;
 static struct irq_domain *tb_domain;
 static int tb_irq[TB_IRQS];
 static struct page *tb_page;
-static struct platform_device *tb_owned, *tb_other;
+static struct platform_device *tb_owned, *tb_other, *tb_pisp;
+static struct page *tb_pisp_pages;
 
 static const struct property_entry tb_owned_props[] = {
 	PROPERTY_ENTRY_STRING("compatible", "lemnos,test-block"),
@@ -164,8 +173,95 @@ static const struct property_entry tb_other_props[] = {
 	{ }
 };
 
+static const struct property_entry tb_pisp_props[] = {
+	PROPERTY_ENTRY_STRING("compatible", "lemnos,test-pisp-be"),
+	{ }
+};
+
+static u32 __iomem *tb_pisp_regs(void)
+{
+	return page_address(tb_pisp_pages);
+}
+
+/* "offset value": sets a register of the fake block, as hardware would (hex). */
+static ssize_t poke_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			  size_t count)
+{
+	unsigned long offset, value;
+	char tmp[32];
+	char *sep;
+
+	strscpy(tmp, buf, sizeof(tmp));
+	sep = strchr(tmp, ' ');
+	if (!sep)
+		return -EINVAL;
+	*sep++ = 0;
+	if (kstrtoul(strim(tmp), 16, &offset) || kstrtoul(strim(sep), 16, &value))
+		return -EINVAL;
+	if (offset >= TB_PISP_BYTES || offset % 4)
+		return -EINVAL;
+	writel((u32)value, (char __iomem *)tb_pisp_regs() + offset);
+	return count;
+}
+static DEVICE_ATTR_WO(poke);
+
+/* Raises the fake block's interrupt. */
+static ssize_t irq_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			 size_t count)
+{
+	int ret = irq_set_irqchip_state(tb_irq[TB_PISP_IRQ], IRQCHIP_STATE_PENDING, true);
+
+	return ret ?: count;
+}
+static DEVICE_ATTR_WO(irq);
+
+/* Whether a page the driver gave the block is still allocated: write its address, read its count. */
+static u64 tb_pisp_page_addr;
+
+static ssize_t page_refs_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			       size_t count)
+{
+	if (kstrtou64(buf, 16, &tb_pisp_page_addr))
+		return -EINVAL;
+	return count;
+}
+
+static ssize_t page_refs_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	unsigned long pfn = PHYS_PFN(tb_pisp_page_addr);
+
+	return sysfs_emit(buf, "%d\n", pfn_valid(pfn) ? page_ref_count(pfn_to_page(pfn)) : -1);
+}
+static DEVICE_ATTR_RW(page_refs);
+
+/* The fake block's register window, for the test to compare with what it asked for. */
+static ssize_t regs_read(struct file *f, struct kobject *kobj, const struct bin_attribute *a,
+			 char *buf, loff_t off, size_t count)
+{
+	if (off >= TB_PISP_BYTES)
+		return 0;
+	count = min_t(size_t, count, TB_PISP_BYTES - off);
+	memcpy_fromio(buf, (char __iomem *)tb_pisp_regs() + off, count);
+	return count;
+}
+static const BIN_ATTR_RO(regs, TB_PISP_BYTES);
+
+static struct attribute *tb_pisp_attrs[] = { &dev_attr_poke.attr, &dev_attr_irq.attr,
+					   &dev_attr_page_refs.attr, NULL };
+static const struct bin_attribute *const tb_pisp_bin_attrs[] = { &bin_attr_regs, NULL };
+static const struct attribute_group tb_pisp_group = {
+	.attrs = tb_pisp_attrs,
+	.bin_attrs = tb_pisp_bin_attrs,
+};
+
 static void tb_teardown(void)
 {
+	if (!IS_ERR_OR_NULL(tb_pisp)) {
+		sysfs_remove_group(&tb_pisp->dev.kobj, &tb_pisp_group);
+		platform_device_unregister(tb_pisp);
+	}
+	if (tb_pisp_pages)
+		__free_pages(tb_pisp_pages, TB_PISP_ORDER);
 	if (tcsi_misc.minor != MISC_DYNAMIC_MINOR)
 		misc_deregister(&tcsi_misc);
 	cancel_delayed_work_sync(&tcsi_work);
@@ -192,6 +288,15 @@ static void tb_teardown(void)
 static int __init tb_init(void)
 {
 	struct resource res[1 + TB_BLOCK_IRQS];
+	struct resource pisp_res[2];
+	struct platform_device_info pisp = {
+		.name = "lemnos-test-pisp",
+		.id = PLATFORM_DEVID_NONE,
+		.res = pisp_res,
+		.num_res = ARRAY_SIZE(pisp_res),
+		.dma_mask = DMA_BIT_MASK(64),
+		.properties = tb_pisp_props,
+	};
 	struct platform_device_info info = {
 		.name = "lemnos-test-block",
 		.id = PLATFORM_DEVID_NONE,
@@ -276,6 +381,23 @@ static int __init tb_init(void)
 			goto fail;
 		}
 	}
+
+	tb_pisp_pages = alloc_pages(GFP_KERNEL | __GFP_ZERO, TB_PISP_ORDER);
+	if (!tb_pisp_pages) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+	writel(TB_PISP_VERSION, tb_pisp_regs());
+	pisp_res[0] = (struct resource)DEFINE_RES_MEM(page_to_phys(tb_pisp_pages), TB_PISP_BYTES);
+	pisp_res[1] = (struct resource)DEFINE_RES_IRQ(tb_irq[TB_PISP_IRQ]);
+	tb_pisp = platform_device_register_full(&pisp);
+	if (IS_ERR(tb_pisp)) {
+		ret = PTR_ERR(tb_pisp);
+		goto fail;
+	}
+	ret = sysfs_create_group(&tb_pisp->dev.kobj, &tb_pisp_group);
+	if (ret)
+		goto fail;
 	return 0;
 fail:
 	tb_teardown();

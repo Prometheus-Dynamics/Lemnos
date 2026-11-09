@@ -1,8 +1,11 @@
 # lemnos-driver-pisp
 
 Configuration for PiSP, the BCM2712 ISP: the uAPI layouts, the front end and back end builders,
-tiling, and statistics decoding. It touches no hardware (later PRs drive the device nodes), has no
-dependencies and always builds `no_std` without an allocator.
+tiling, and statistics decoding, which touch no hardware; with no features (`--no-default-features`)
+that is the whole crate, with no dependencies and `no_std`, without an allocator. The default
+`device` feature adds the back end driver (`be_device`, `be_hw`), `camera.isp/1` and `isp.pisp/1`
+over the kernel module; all of its `unsafe` is in `drivers/pisp-sys`. `be_job` is the part of that
+which needs no operating system.
 
 ## What is kept and what is not
 
