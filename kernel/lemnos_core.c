@@ -140,6 +140,11 @@ static bool lem_device_listed(struct device *dev, const char *list)
 	return false;
 }
 
+bool lem_block_owned(struct device *dev)
+{
+	return lem_device_listed(dev, owned);
+}
+
 /* --- interrupts --- */
 
 static irqreturn_t lem_isr(int irq, void *data)
@@ -775,15 +780,24 @@ static int __init lem_init(void)
 
 	if (ret)
 		return ret;
+	ret = lem_rp1_csi2_register();
+	if (ret)
+		goto driver;
 	ret = misc_register(&lem_misc);
 	if (ret)
-		platform_driver_unregister(&lem_driver);
+		goto csi2;
+	return 0;
+csi2:
+	lem_rp1_csi2_unregister();
+driver:
+	platform_driver_unregister(&lem_driver);
 	return ret;
 }
 
 static void __exit lem_exit(void)
 {
 	misc_deregister(&lem_misc);
+	lem_rp1_csi2_unregister();
 	platform_driver_unregister(&lem_driver);
 }
 

@@ -28,10 +28,10 @@ make -s -j"$JOBS" -C "$KDIR" M="$work/test_block" modules
 
 root="$work/root"
 mkdir -p "$root"/{dev,proc,sys}
-flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter)
+flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter -I"$work/test_block")
 read -r -a compiler <<<"$CC"
 "${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init.c"
-for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_stream_check; do
+for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_stream_check lemnos_rp1_csi2_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
 cp "$work/kernel/lemnos.ko" "$work/test_block/lemnos_test_block.ko" "$root/"
@@ -43,7 +43,7 @@ log="$work/console.log"
 status=0
 timeout 600 qemu-system-x86_64 -accel "$accel" -cpu max -smp 2 -m 768 -nographic -no-reboot \
   -kernel "$KERNEL" -initrd "$work/initramfs" \
-  -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4" | tee "$log" || status=$?
+  -append "console=ttyS0 panic=-1 oops=panic cma=64M loglevel=4 memmap=64K\$0x20000000" | tee "$log" || status=$?
 
 # Only what happened after the guest started the checks counts.
 after="$(sed -n '/lemnos-qemu: start/,$p' "$log")"

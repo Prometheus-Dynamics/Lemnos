@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-driver-rp1-csi2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
+lemnos-driver-rp1-csi2-sys = { path = "../rp1-csi2-sys" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "Rp1Csi2"
