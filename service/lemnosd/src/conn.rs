@@ -4,9 +4,10 @@
 use std::io::Write;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use lemnos_core::CallerId;
 use lemnos_wire::{Frame, MAX_QUEUED_BYTES, append};
 
 /// Values stop being queued here. Replies have the rest of the room.
@@ -53,7 +54,14 @@ pub(crate) struct Conn {
     pub(crate) events: AtomicBool,
     /// Subscriptions this client holds.
     pub(crate) subscriptions: Mutex<Vec<u64>>,
+    /// Who this client is to a driver.
+    pub(crate) id: CallerId,
+    /// Drivers have been told this client has gone.
+    pub(crate) gone: AtomicBool,
 }
+
+/// The next client's number. Starts above [`CallerId::LOCAL`] and is never reused.
+static NEXT_CALLER: AtomicU64 = AtomicU64::new(1);
 
 impl Conn {
     pub(crate) fn new(stream: UnixStream, waker: Arc<Waker>) -> Self {
@@ -66,6 +74,8 @@ impl Conn {
             waker,
             events: AtomicBool::new(false),
             subscriptions: Mutex::new(Vec::new()),
+            id: CallerId(NEXT_CALLER.fetch_add(1, Ordering::Relaxed)),
+            gone: AtomicBool::new(false),
         }
     }
 

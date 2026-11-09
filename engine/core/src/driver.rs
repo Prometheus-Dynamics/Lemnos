@@ -28,6 +28,16 @@ pub enum Health {
     Failed(&'static str),
 }
 
+/// Who is calling a driver. Numbers mean nothing except that one caller keeps its own for as long
+/// as it is connected, and they aren't reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallerId(pub u64);
+
+impl CallerId {
+    /// A caller in the same process: another driver, or the host itself. It never goes away.
+    pub const LOCAL: Self = Self(0);
+}
+
 /// A driver as the host sees it. `#[driver]` writes this; handwritten
 /// implementations are for tests.
 pub trait Driver: Sized {
@@ -46,6 +56,12 @@ pub trait Driver: Sized {
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
         None
     }
+    /// Whether the host should say who is calling. See [`Lifecycle::TRACKS_CALLERS`].
+    const TRACKS_CALLERS: bool = false;
+    /// See [`Lifecycle::caller`].
+    fn caller(&mut self, _caller: CallerId) {}
+    /// See [`Lifecycle::caller_gone`].
+    fn caller_gone(&mut self, _caller: CallerId) {}
 }
 
 /// The part of a driver its author writes when using `#[driver]`.
@@ -71,6 +87,15 @@ pub trait Lifecycle: Sized {
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
         None
     }
+    /// Set this to `true` for a driver that holds something on a caller's behalf and has to give
+    /// it up when that caller goes. Other drivers cost the host nothing.
+    const TRACKS_CALLERS: bool = false;
+    /// Says who the method about to run is for. Called just before every method, so a driver
+    /// keeps the value in a field and reads it from the method.
+    fn caller(&mut self, _caller: CallerId) {}
+    /// `caller` has gone, by closing its connection or by dying. Give up what it held. Runs on
+    /// the driver's lane, one call at a time with its methods, and must not block.
+    fn caller_gone(&mut self, _caller: CallerId) {}
 }
 
 /// Time as the host sees it, supplied by the backend so a simulated board can

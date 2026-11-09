@@ -131,6 +131,16 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::tick(self, __now_ns)
             }
 
+            const TRACKS_CALLERS: bool = <Self as ::lemnos_core::Lifecycle>::TRACKS_CALLERS;
+
+            fn caller(&mut self, __caller: ::lemnos_core::CallerId) {
+                <Self as ::lemnos_core::Lifecycle>::caller(self, __caller)
+            }
+
+            fn caller_gone(&mut self, __caller: ::lemnos_core::CallerId) {
+                <Self as ::lemnos_core::Lifecycle>::caller_gone(self, __caller)
+            }
+
             fn dispatch(
                 &mut self,
                 __method: ::lemnos_core::MethodId,

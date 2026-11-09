@@ -28,7 +28,7 @@ pub use contract::{
     REPLY_INLINE, Router,
 };
 pub use description::{Description, Item, ItemKind, MAX_ITEMS, Unit};
-pub use driver::{Driver, Health, HostClock, Lifecycle, Manifest, MethodId, Reply};
+pub use driver::{CallerId, Driver, Health, HostClock, Lifecycle, Manifest, MethodId, Reply};
 #[cfg(feature = "float")]
 pub use fixed::to_f32;
 pub use fixed::{NO_VALUE, rescale};

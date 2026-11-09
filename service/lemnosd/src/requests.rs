@@ -250,7 +250,11 @@ impl Client {
         }
         let method = MethodId { contract, method };
         let reply = &mut self.reply[..capacity];
-        match self.core.host.call(device, method, args, reply) {
+        match self
+            .core
+            .host
+            .call_as(self.conn.id, device, method, args, reply)
+        {
             Ok(n) => self.conn.answer(&Frame::Reply {
                 id,
                 bytes: &reply[..n],
@@ -337,6 +341,10 @@ impl Client {
         let now = self.core.clock.now_us();
         for subscription in held {
             self.core.readers.unsubscribe(&self.conn, subscription, now);
+        }
+        // A client that is finishing comes through here twice.
+        if !self.conn.gone.swap(true, Ordering::AcqRel) {
+            self.core.host.caller_gone(self.conn.id);
         }
     }
 }

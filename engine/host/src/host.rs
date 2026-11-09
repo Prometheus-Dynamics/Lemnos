@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
-    ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, HostClock, I2c,
-    InterruptHandle, Line, LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm, RawSpiBus,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Spi, Status, StreamHandle, Tag,
-    Uart, UsbDeviceHandle, UsbFunctionHandle,
+    CallerId, ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, HostClock,
+    I2c, InterruptHandle, Line, LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm,
+    RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Spi, Status,
+    StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 
 use crate::Options;
@@ -20,6 +20,8 @@ trait Instance: Send {
     fn health(&self) -> Health;
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
+    fn caller(&mut self, caller: CallerId);
+    fn caller_gone(&mut self, caller: CallerId);
 }
 
 impl<D: Driver + Send> Instance for D {
@@ -38,6 +40,14 @@ impl<D: Driver + Send> Instance for D {
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         Driver::tick(self, now_ns)
     }
+
+    fn caller(&mut self, caller: CallerId) {
+        Driver::caller(self, caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        Driver::caller_gone(self, caller);
+    }
 }
 
 type Factory = fn(&mut Resources<'_>, &Config<'_>) -> Result<Box<dyn Instance>>;
@@ -48,6 +58,7 @@ pub struct DriverEntry {
     manifest: Manifest,
     factory: Factory,
     ticks: bool,
+    tracks_callers: bool,
 }
 
 impl DriverEntry {
@@ -68,6 +79,7 @@ pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
         manifest: D::MANIFEST,
         factory: make::<D>,
         ticks: D::TICKS,
+        tracks_callers: D::TRACKS_CALLERS,
     }
 }
 
@@ -148,6 +160,10 @@ impl Slot {
         self.entry.is_some_and(|entry| entry.ticks)
     }
 
+    fn tracks_callers(&self) -> bool {
+        self.entry.is_some_and(|entry| entry.tracks_callers)
+    }
+
     fn contract_index(&self, tag: Tag) -> Option<u8> {
         self.entry?
             .manifest
@@ -182,11 +198,13 @@ pub(crate) struct CallWork {
     inner: &'static Inner,
     slot: Arc<Slot>,
     method: MethodId,
+    caller: CallerId,
 }
 
 impl CallWork {
     pub(crate) fn run(self, args: &[u8], reply: &mut [u8]) -> Result<usize> {
-        self.inner.call_here(&self.slot, self.method, args, reply)
+        self.inner
+            .call_here(&self.slot, self.caller, self.method, args, reply)
     }
 }
 
@@ -306,6 +324,7 @@ impl Inner {
     fn call_here(
         &self,
         slot: &Slot,
+        caller: CallerId,
         method: MethodId,
         args: &[u8],
         reply: &mut [u8],
@@ -319,7 +338,11 @@ impl Inner {
         };
         let mut writer = Reply::new(reply);
         let ticks = slot.ticks();
+        let tracks_callers = slot.tracks_callers();
         let outcome = catch_unwind(AssertUnwindSafe(|| {
+            if tracks_callers {
+                instance.caller(caller);
+            }
             let status = instance.dispatch(method, args, &mut writer);
             if ticks {
                 self.set_next_tick(slot, instance.tick(self.clock.now_ns()));
@@ -375,9 +398,42 @@ impl Inner {
         self.fault(slot, "a call did not finish in time");
     }
 
+    /// Tells a device, on its lane and inside the panic boundary, that a caller has gone.
+    fn caller_gone(&'static self, slot: Arc<Slot>, caller: CallerId) {
+        let Ok(lane) = self.lane(&slot) else {
+            return;
+        };
+        let target = Arc::clone(&slot);
+        let work = Work::Once(Box::new(move |_: &[u8], _: &mut [u8]| {
+            let mut guard = lock(&target.instance);
+            let Some(instance) = guard.as_mut() else {
+                return Ok(0);
+            };
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                instance.caller_gone(caller);
+                target.ticks().then(|| instance.tick(self.clock.now_ns()))
+            }));
+            match outcome {
+                Ok(Some(next)) => self.set_next_tick(&target, next),
+                Ok(None) => {}
+                Err(_) => {
+                    let dead = guard.take();
+                    drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+                    drop(guard);
+                    self.fault(&target, "the driver panicked");
+                }
+            }
+            Ok(0)
+        }));
+        if let Err(LaneError::Deadline) = lane.run(&[], &mut [], self.options.call_deadline, work) {
+            self.on_deadline(&slot);
+        }
+    }
+
     fn call(
         &'static self,
         slot: Arc<Slot>,
+        caller: CallerId,
         method: MethodId,
         args: &[u8],
         reply: &mut [u8],
@@ -387,6 +443,7 @@ impl Inner {
             inner: self,
             slot: Arc::clone(&slot),
             method,
+            caller,
         });
         match lane.run(args, reply, self.options.call_deadline, work) {
             Ok(result) => result,
@@ -541,7 +598,7 @@ impl Inner {
 impl Router for Inner {
     fn call(&self, device: u32, method: MethodId, args: &[u8], reply: &mut [u8]) -> Result<usize> {
         let slot = self.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.call_here(&slot, method, args, reply)
+        self.call_here(&slot, CallerId::LOCAL, method, args, reply)
     }
 
     fn health(&self, device: u32) -> Health {
@@ -811,8 +868,33 @@ impl Host {
         args: &[u8],
         reply: &mut [u8],
     ) -> Result<usize> {
+        self.call_as(CallerId::LOCAL, device, method, args, reply)
+    }
+
+    /// [`Host::call`], for a caller that can go away. Tell the host when it does, with
+    /// [`Host::caller_gone`].
+    pub fn call_as(
+        &self,
+        caller: CallerId,
+        device: u32,
+        method: MethodId,
+        args: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize> {
         let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.inner.call(slot, method, args, reply)
+        self.inner.call(slot, caller, method, args, reply)
+    }
+
+    /// Tells every driver that tracks callers that `caller` has gone. Blocks until each has
+    /// answered or its call deadline has passed.
+    pub fn caller_gone(&self, caller: CallerId) {
+        let mut index = 0;
+        while let Some(slot) = self.inner.slot(index) {
+            index += 1;
+            if slot.tracks_callers() && slot.is_running() {
+                self.inner.caller_gone(slot, caller);
+            }
+        }
     }
 
     /// Retries what is due and rebinds devices whose optional parts have

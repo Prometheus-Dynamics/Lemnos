@@ -262,6 +262,9 @@ pub trait Lifecycle: Sized {
     fn health(&self) -> Health { Health::Ok }
     const TICKS: bool = false; // true to be called below
     fn tick(&mut self, now_ns: u64) -> Option<u64> { None } // does what is due, returns when next
+    const TRACKS_CALLERS: bool = false; // true to be told who is calling, and when they go
+    fn caller(&mut self, caller: CallerId) {} // just before each method
+    fn caller_gone(&mut self, caller: CallerId) {} // give up what it held
 }
 
 // A method is its contract's position in `provides`, plus the number the contract declared.
