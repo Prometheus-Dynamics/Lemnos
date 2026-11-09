@@ -1,0 +1,13 @@
+error: a method with an #[out] buffer returns Result<usize>
+ --> tests/fail/out_wrong_return.rs:3:65
+  |
+3 | pub trait T { #[method(1)] fn a(&mut self, #[out] x: &mut [u8]) -> Result<u8>; }
+  |                                                                 ^
+
+warning: unused import: `Result`
+ --> tests/fail/out_wrong_return.rs:1:29
+  |
+1 | use lemnos_core::{contract, Result};
+  |                             ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

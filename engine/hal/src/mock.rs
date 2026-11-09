@@ -11,8 +11,8 @@ pub use raw::{MockLine, MockPwm, MockRawSpi, SpiRecord};
 #[path = "mock_blocks.rs"]
 mod blocks;
 pub use blocks::{
-    MockClocks, MockDma, MockInterrupt, MockRegisters, MockReset, MockStream, MockUsbDevice,
-    MockUsbFunction, MockUsbHost,
+    MockClocks, MockDma, MockInterrupt, MockRegisters, MockReset, MockStream, MockUart,
+    MockUsbDevice, MockUsbFunction, MockUsbHost,
 };
 #[cfg(feature = "std")]
 extern crate std;

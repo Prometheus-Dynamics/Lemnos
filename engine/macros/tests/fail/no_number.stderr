@@ -1,0 +1,13 @@
+error: every contract method declares a stable number: #[method(N)]
+ --> tests/fail/no_number.rs:3:18
+  |
+3 | pub trait T { fn a(&mut self) -> Result<u8>; }
+  |                  ^
+
+warning: unused import: `Result`
+ --> tests/fail/no_number.rs:1:29
+  |
+1 | use lemnos_core::{contract, Result};
+  |                             ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,0 +1,13 @@
+error: a contract method returns Result<T>
+ --> tests/fail/no_result.rs:3:44
+  |
+3 | pub trait T { #[method(1)] fn a(&mut self) -> u8; }
+  |                                            ^
+
+warning: unused import: `Result`
+ --> tests/fail/no_result.rs:1:29
+  |
+1 | use lemnos_core::{contract, Result};
+  |                             ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

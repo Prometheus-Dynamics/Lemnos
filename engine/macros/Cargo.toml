@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "#[contract] and #[driver]: the code a Lemnos driver would otherwise write by hand"
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+lemnos-core = { path = "../core", features = ["std"] }
+trybuild = "1"

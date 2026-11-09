@@ -1,0 +1,29 @@
+[package]
+name = "lemnos-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The Lemnos driver model: tags, needs, resources, contracts and self-describing devices"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Resources are boxed. Without this they are `&'static mut`, for hosts with no allocator.
+alloc = ["lemnos-abi/alloc"]
+std = ["alloc", "lemnos-abi/std", "lemnos-hal/std"]
+# Fixed-point values as floats.
+float = []
+
+[dependencies]
+lemnos-abi = { path = "../abi", default-features = false }
+lemnos-hal = { path = "../hal" }
+lemnos-macros = { path = "../macros" }
+
+[dev-dependencies]
+lemnos-core = { path = ".", features = ["std"] }
+lemnos-hal = { path = "../hal", features = ["std", "mock"] }

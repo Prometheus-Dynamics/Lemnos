@@ -1,0 +1,13 @@
+error: #[out] takes &mut [u8]
+ --> tests/fail/bad_out.rs:3:54
+  |
+3 | pub trait T { #[method(1)] fn a(&mut self, #[out] x: u8) -> Result<usize>; }
+  |                                                      ^^
+
+warning: unused import: `Result`
+ --> tests/fail/bad_out.rs:1:29
+  |
+1 | use lemnos_core::{contract, Result};
+  |                             ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

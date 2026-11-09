@@ -1,0 +1,17 @@
+error[E0277]: the trait bound `D: T` is not satisfied
+ --> tests/fail/driver_missing_contract.rs:4:1
+  |
+4 | #[driver("x", provides = [T])]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `T` is not implemented for `D`
+ --> tests/fail/driver_missing_contract.rs:5:1
+  |
+5 | pub struct D {}
+  | ^^^^^^^^^^^^
+help: the trait `T` is implemented for `lemnos_core::Bound<(dyn T + 'static), __T>`
+ --> tests/fail/driver_missing_contract.rs:2:1
+  |
+2 | #[contract("x", version = 1)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the attribute macro `driver` which comes from the expansion of the attribute macro `contract` (in Nightly builds, run with -Z macro-backtrace for more info)

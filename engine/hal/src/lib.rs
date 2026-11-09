@@ -34,7 +34,7 @@ pub mod raw;
 pub mod register;
 
 pub use blocks::{
-    Clocks, DmaBuffers, Interrupt, Registers, Reset, StreamEndpoint, UsbDevice, UsbFunction,
+    Clocks, DmaBuffers, Interrupt, Registers, Reset, StreamEndpoint, Uart, UsbDevice, UsbFunction,
     UsbHost,
 };
 pub use embedded_hal;

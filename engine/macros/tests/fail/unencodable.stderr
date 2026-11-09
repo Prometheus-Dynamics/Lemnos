@@ -1,0 +1,67 @@
+error[E0277]: the trait bound `NotOnTheWire: Encode` is not satisfied
+ --> tests/fail/unencodable.rs:3:1
+  |
+3 | #[contract("x", version = 1)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `Encode` is not implemented for `NotOnTheWire`
+ --> tests/fail/unencodable.rs:2:1
+  |
+2 | pub struct NotOnTheWire;
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `Encode`:
+            &[u8]
+            &str
+            ()
+            [T; N]
+            [u8]
+            bool
+            f32
+            f64
+          and $N others
+  = note: this error originates in the attribute macro `contract` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `NotOnTheWire: Encode` is not satisfied
+ --> tests/fail/unencodable.rs:4:54
+  |
+4 | pub trait T { #[method(1)] fn a(&mut self) -> Result<NotOnTheWire>; }
+  |                                                      ^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `Encode` is not implemented for `NotOnTheWire`
+ --> tests/fail/unencodable.rs:2:1
+  |
+2 | pub struct NotOnTheWire;
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `Encode`:
+            &[u8]
+            &str
+            ()
+            [T; N]
+            [u8]
+            bool
+            f32
+            f64
+          and $N others
+
+error[E0277]: the trait bound `NotOnTheWire: Decode<'_>` is not satisfied
+ --> tests/fail/unencodable.rs:3:1
+  |
+3 | #[contract("x", version = 1)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `Decode<'_>` is not implemented for `NotOnTheWire`
+ --> tests/fail/unencodable.rs:2:1
+  |
+2 | pub struct NotOnTheWire;
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `Decode<'a>`:
+            `&'a [u8]` implements `Decode<'a>`
+            `&'a str` implements `Decode<'a>`
+            `()` implements `Decode<'_>`
+            `[T; N]` implements `Decode<'a>`
+            `bool` implements `Decode<'_>`
+            `f32` implements `Decode<'_>`
+            `f64` implements `Decode<'_>`
+            `i16` implements `Decode<'_>`
+          and $N others
+  = note: this error originates in the attribute macro `contract` (in Nightly builds, run with -Z macro-backtrace for more info)

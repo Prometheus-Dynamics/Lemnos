@@ -10,7 +10,7 @@ use super::{Shared, with};
 use crate::ErrorKind;
 use crate::blocks::{
     Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt, InterruptEvent, IsoPacket, Registers,
-    Reset, StreamEndpoint, StreamFrame, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction,
+    Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction,
     UsbFunctionEvent, UsbHost,
 };
 
@@ -307,6 +307,61 @@ impl Reset for MockReset {
     fn deassert(&mut self, line: u32) -> Result<(), ErrorKind> {
         with(&self.state, |s| s.push((line, false)));
         Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct UartState {
+    baud: u32,
+    incoming: VecDeque<u8>,
+    sent: Vec<u8>,
+}
+
+/// A serial port with a test at the far end.
+#[derive(Debug, Clone, Default)]
+pub struct MockUart {
+    state: Shared<UartState>,
+}
+
+impl MockUart {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn baud(&self) -> u32 {
+        with(&self.state, |s| s.baud)
+    }
+
+    pub fn receive(&self, data: &[u8]) {
+        with(&self.state, |s| s.incoming.extend(data.iter().copied()));
+    }
+
+    pub fn sent(&self) -> Vec<u8> {
+        with(&self.state, |s| s.sent.clone())
+    }
+}
+
+impl Uart for MockUart {
+    type Error = ErrorKind;
+
+    fn set_baud(&mut self, baud: u32) -> Result<(), ErrorKind> {
+        with(&self.state, |s| s.baud = baud);
+        Ok(())
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
+        with(&self.state, |s| s.sent.extend_from_slice(data));
+        Ok(data.len())
+    }
+
+    fn read(&mut self, out: &mut [u8], _timeout: Duration) -> Result<usize, ErrorKind> {
+        Ok(with(&self.state, |s| {
+            let n = out.len().min(s.incoming.len());
+            for (slot, byte) in out.iter_mut().zip(s.incoming.drain(..n)) {
+                *slot = byte;
+            }
+            n
+        }))
     }
 }
 
@@ -727,6 +782,22 @@ mod tests {
         assert_eq!(clocks.rate_hz(2), Ok(24_000_000));
         clocks.disable(2).unwrap();
         assert!(!clocks.enabled(2));
+    }
+
+    #[test]
+    fn a_uart_moves_bytes_both_ways() {
+        let mut uart = MockUart::new();
+        let far = uart.clone();
+        uart.set_baud(115_200).unwrap();
+        assert_eq!(far.baud(), 115_200);
+        assert_eq!(uart.write(&[1, 2]), Ok(2));
+        assert_eq!(far.sent(), [1, 2]);
+        let mut out = [0; 4];
+        assert_eq!(uart.read(&mut out, WAIT), Ok(0));
+        far.receive(&[3, 4]);
+        assert_eq!(uart.read(&mut out[..1], WAIT), Ok(1));
+        assert_eq!(uart.read(&mut out, WAIT), Ok(1));
+        assert_eq!(out[0], 4);
     }
 
     #[test]

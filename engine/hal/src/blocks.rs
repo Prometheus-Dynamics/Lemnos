@@ -93,6 +93,16 @@ pub trait Reset {
     fn deassert(&mut self, line: u32) -> Result<(), Self::Error>;
 }
 
+/// A serial port.
+pub trait Uart {
+    type Error: HalError;
+
+    fn set_baud(&mut self, baud: u32) -> Result<(), Self::Error>;
+    fn write(&mut self, data: &[u8]) -> Result<usize, Self::Error>;
+    /// Returns what arrived, which is 0 bytes when the timeout passed first.
+    fn read(&mut self, out: &mut [u8], timeout: Duration) -> Result<usize, Self::Error>;
+}
+
 /// One filled buffer, ready for the consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamFrame {

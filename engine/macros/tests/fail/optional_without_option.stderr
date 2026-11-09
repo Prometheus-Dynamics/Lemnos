@@ -1,0 +1,13 @@
+error: #[needs(optional)] and Option<..> go together
+ --> tests/fail/optional_without_option.rs:3:40
+  |
+3 | pub struct D { #[needs(optional)] bus: I2c }
+  |                                        ^^^
+
+warning: unused import: `I2c`
+ --> tests/fail/optional_without_option.rs:1:27
+  |
+1 | use lemnos_core::{driver, I2c};
+  |                           ^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

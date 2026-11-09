@@ -94,21 +94,24 @@ Each driver tags its device with strings such as `camera.sensor/1`, `camera.rece
 // In contracts/. The engine never sees what this means.
 #[contract("accelerometer", version = 1)]
 pub trait Accelerometer {
+    #[method(1)]
     fn read(&mut self) -> Result<Vector3>;
 }
 
-// A driver states what it needs and provides.
-#[driver("bmi088", provides = ["accelerometer/1", "gyroscope/1"])]
-pub struct Bmi088 { bus: I2c, .. }
+// A driver states what it needs and provides. `Lifecycle` holds what its author writes.
+#[driver("bmi088", provides = [Accelerometer, Gyroscope])]
+pub struct Bmi088 { #[needs] bus: I2c, .. }
 
 // A device built from others needs nothing new.
-#[driver("orientation", provides = ["orientation/1"])]
-pub struct Orientation {
+#[driver("orientation", provides = [Orientation])]
+pub struct OrientationDriver {
     #[needs] accel: Dev<dyn Accelerometer>,
     #[needs] gyro:  Dev<dyn Gyroscope>,
     #[needs(optional)] mag: Option<Dev<dyn Magnetometer>>,
 }
 ```
+
+Each contract method declares a stable number with `#[method(N)]`.
 
 Every device carries a self-describing description: values, units, controls and actions. So
 `lemnos-ctl`, Orion and any other tool can show a device they have no code for.
@@ -234,27 +237,40 @@ impossible to contain.
 
 ## Shared interfaces
 
-Everyone builds against these, so they land first (A3 to A6). This is the starting shape; A5 and A6
-may refine it. After that, they change only through an A-series PR.
+Everyone builds against these. `engine/core` and `engine/macros` are the source of truth, and they
+change only through an A-series PR.
 
 ```rust
 // engine/core. A tag is "name/major".
-pub struct Manifest { pub name: &'static str, pub needs: &'static [Need], pub provides: &'static [Tag] }
-pub enum Need { Bus { name: &'static str, kind: BusKind }, Device { name: &'static str, tag: Tag, optional: bool } }
-pub enum BusKind { I2c, Spi, Gpio, Pwm, Uart, Usb, Registers, Interrupt, Dma }
+pub struct Manifest { pub name: &'static str, pub needs: &'static [Need], pub provides: &'static [ContractInfo] }
+pub struct Need { pub name: &'static str, pub kind: NeedKind, pub optional: bool }
+pub enum NeedKind { Bus(BusKind), Device(Tag) }
 
 pub trait Driver: Sized {
     const MANIFEST: Manifest;
-    fn bind(res: &mut Resources<'_>, cfg: &Config) -> Result<Self, Status>;
+    fn bind(res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<Self>;
     fn describe(&self, out: &mut Description);
     fn health(&self) -> Health { Health::Ok }
-    fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status; // from #[contract]
+    fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status; // from #[driver]
 }
 
-// A driver receives what it speaks and the devices it needs from Resources.
+// What a driver's author writes when using #[driver].
+pub trait Lifecycle: Sized {
+    type Needs; // generated from the #[needs] fields
+    fn start(needs: Self::Needs, cfg: &Config<'_>) -> Result<Self>;
+    fn describe(&self, out: &mut Description) {}
+    fn health(&self) -> Health { Health::Ok }
+}
+
+// A method is its contract's position in `provides`, plus the number the contract declared.
+pub struct MethodId { pub contract: u8, pub method: u16 }
+
+// A #[needs] field is anything implementing Resource: I2c, Spi, Line, Pwm, Uart, UsbDeviceHandle,
+// UsbFunctionHandle, RegistersHandle, InterruptHandle, DmaHandle, ClocksHandle, ResetHandle,
+// StreamHandle, Dev<dyn SomeContract>, or an Option of any of those.
 impl Resources<'_> {
-    fn i2c(&mut self, need: &str) -> Result<impl I2c, Status>;
-    fn device<C: Contract + ?Sized>(&mut self, need: &str) -> Result<Dev<C>, Status>;
+    fn i2c(&mut self, need: &str) -> Result<I2c>; // and one for each kind above
+    fn device<C: Contract + ?Sized>(&mut self, need: &str) -> Result<Dev<C>>;
     fn link(&self) -> Option<&str>;
 }
 
@@ -263,7 +279,7 @@ impl Client {
     fn connect(path: &Path, name: &str) -> Result<Self, ClientError>;
     fn list(&mut self) -> Result<&[DeviceInfo], ClientError>;
     fn find(&mut self, tag: Tag) -> Result<DeviceRef, ClientError>;
-    fn open<C: Contract + ?Sized>(&mut self, device: &DeviceRef) -> Result<C::Client, ClientError>;
+    fn open<C: Contract + ?Sized>(&mut self, device: &DeviceRef) -> Result<Bound<C, RemoteCaller>, ClientError>;
     fn describe(&mut self, device: &DeviceRef) -> Result<Description, ClientError>;
 }
 ```

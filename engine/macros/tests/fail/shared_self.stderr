@@ -1,0 +1,13 @@
+error: a contract method takes &mut self
+ --> tests/fail/shared_self.rs:3:31
+  |
+3 | pub trait T { #[method(1)] fn a(&self) -> Result<u8>; }
+  |                               ^
+
+warning: unused import: `Result`
+ --> tests/fail/shared_self.rs:1:29
+  |
+1 | use lemnos_core::{contract, Result};
+  |                             ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
