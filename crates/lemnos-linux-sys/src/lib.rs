@@ -15,6 +15,7 @@ pub mod block;
 pub mod dma_buf;
 pub mod dma_heap;
 pub mod drm;
+pub mod g2d;
 pub mod gpio;
 pub mod i2c;
 pub mod inotify;

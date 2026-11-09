@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-drivers-g2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Allwinner G2D 2D engine (fill, scale, format conversion, rotate, flip, blend between dma-bufs) through the BSP kernel's /dev/g2d"
+documentation = "https://docs.rs/lemnos-drivers-g2d"
+readme = "README.md"
+keywords = ["allwinner", "g2d", "dmabuf", "2d"]
+categories = ["hardware-support", "multimedia::images"]
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { workspace = true }
