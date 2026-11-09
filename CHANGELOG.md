@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-drivers-rga`: a board test for `MultiRga::color_key`, the one `/dev/rga` operation that had none.
 - `lemnos_drivers_rkisp::cif`: the vendor `rkcif` capture block's media devices for the RK3566, RK3588S and RV1126B, and `enable_stream`, which routes a MIPI channel to its capture node. Untested on board.
 - `VideoDevice::set_input` (`lemnos-v4l2`): `VIDIOC_S_INPUT`, which the A733's `sunxi-vin` driver needs before the format is set.
 - `lemnos-soc`: tables for the RV1126B and the A733, from the vendors' device trees. Untested on board.

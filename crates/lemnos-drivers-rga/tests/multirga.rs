@@ -171,6 +171,33 @@ fn palette_matches_the_reference() {
     within_one("palette 8bpp", &out, &want).expect("palette");
 }
 
+/// The block's alpha is the mask: 255 where every colour channel lies in the range, 0 elsewhere,
+/// and the colour of a pixel inside the range is the source's.
+#[test]
+fn color_key_matches_the_reference() {
+    let Some(rga) = device() else { return };
+    let (w, h) = (32u32, 16u32);
+    let (min, max) = ([40, 40, 40], [200, 200, 200]);
+    let src = pattern((w * h * 4) as usize, 9);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    rga.color_key(w, h, Buffer::Read(&src), min, max, Buffer::Write(&mut out))
+        .expect("color key");
+    let inside = |p: &[u8; 4]| (0..3).all(|c| min[c] <= p[c] && p[c] <= max[c]);
+    let source = src.as_chunks::<4>().0;
+    let got = out.as_chunks::<4>().0;
+    assert!(source.iter().any(inside) && !source.iter().all(inside));
+    let want: Vec<u8> = source
+        .iter()
+        .map(|p| if inside(p) { 255 } else { 0 })
+        .collect();
+    let mask: Vec<u8> = got.iter().map(|p| p[3]).collect();
+    let diff = measure("color key mask", &mask, &want).expect("mask");
+    assert_eq!(diff, 0, "the mask must be exact");
+    for (g, s) in got.iter().zip(source).filter(|(_, s)| inside(s)) {
+        within_one("color key colour", &g[..3], &s[..3]).expect("colour");
+    }
+}
+
 #[test]
 fn gray_to_rgba_matches_the_reference() {
     let Some(rga) = device() else { return };

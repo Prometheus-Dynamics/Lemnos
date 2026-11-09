@@ -344,6 +344,11 @@ here yet.
 - **rkcif behind `IspDevice`**: `cif::enable_stream` needs the caller to name the media device,
   because nothing in the sources read says which `rkcif` instance feeds which ISP. `IspDevice` needs
   no call for the driver's default links.
+- **Daedalus's fixed-function cells**: its backend matrix at `f09fe84` lists 13 untested and 2 deferred
+  cells, each waiting on a run of a Lemnos test on a board, none on missing code. All the tests are
+  written (colour key's was the last). `tests/multirga.rs` and `tests/v4l2.rs` need a Rockchip board,
+  and `a_channel_to_gray_is_exact_for_every_byte` must pass before `rgba_red` is routed.
+  `tests/lines.rs` (`gpu_lines_against_bresenham_by_slope_class`) needs a K230 before lines are.
 - **Blend with a YUV layer on G2D**: the BSP driver's check refuses every usable size.
 
 ### Camera sensor module (OV9782), given to Lemnos
