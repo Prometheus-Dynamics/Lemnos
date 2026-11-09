@@ -4,6 +4,7 @@
 #![cfg(target_os = "linux")]
 
 mod gpio;
+pub mod hotplug;
 mod i2c;
 mod pwm;
 mod spi;
