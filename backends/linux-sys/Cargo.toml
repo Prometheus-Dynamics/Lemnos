@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Linux uAPI structures and safe wrappers over the system calls Lemnos needs: i2c-dev, spidev, GPIO, netlink, inotify, poll, signalfd, dma-heap, dma-buf and mappings."
+description = "Linux uAPI structures and safe wrappers over the system calls Lemnos needs: i2c-dev, spidev, GPIO, netlink, inotify, poll, signalfd, dma-heap, dma-buf, mappings, V4L2 and the media controller."
 
 # One of the crates allowed `unsafe`, so it keeps its own lint table: every block carries a
 # `SAFETY` comment and holds one operation.
