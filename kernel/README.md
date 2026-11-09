@@ -29,12 +29,33 @@ as soon as the module loads.
 | `confined` | Compatibles whose DMA their IOMMU really confines. Registers of any other block can't be mapped. Empty by default. |
 | `test_map_unconfined` | Test only. Allows mapping the registers of a block not in `confined`. |
 | `test_irq_inject` | Test only. Enables `LEMNOS_IOC_TEST_IRQ`. |
+| `test_stream_source` | Test only. Enables `LEMNOS_STREAM_IOC_TEST_SOURCE`, a source that fills frames through a kernel mapping. |
 
 ## Claims
 
 `LEMNOS_IOC_CLAIM` takes a resource by name and returns a file. The claim lasts as long as that file:
 a second claim on the name gets `EBUSY`, and closing the file, or the process dying, releases it. The
 module doesn't interpret names. At most 4096 claims exist at once.
+
+## Frame streams
+
+`LEMNOS_IOC_STREAM_CREATE` returns a file for one stream of a block, with its pool of frame buffers
+named by a dma-buf the module maps and pins for the block. `mmap` it for the ring, the same ring
+the socket protocol's streams use (`docs/wire.md`, `lemnos.h`), with the module as its producer. The
+consumer reads frames from the pool and posts jobs on the ring; the module publishes frames, marks
+them and rings the eventfd given at creation (`poll` on the file also waits). Frame buffers and every
+device-address range a job names are checked against what the module holds, with `check_add_overflow`
+and a state for each buffer that lives only in the kernel. Anything else ends the stream with an
+errno, and only that stream. Closing the file, or unbinding the block, stops the frame path and
+releases every dma-buf it held; at most 64 streams exist at once, with up to 16 dma-bufs each.
+
+A job names a buffer and up to four device-address ranges (`struct lemnos_stream_job`). A range must
+lie wholly in that buffer's bytes, or wholly in a dma-buf registered on the stream with
+`LEMNOS_STREAM_IOC_REGISTER`, for the full length. The test source (`test_stream_source`, test only)
+fills frames from a kernel mapping and writes each range, so the checks are observable from user
+space. A real block's interrupt path will call the same frame-path functions.
+
+Refusals and what they mean are listed in `lemnos.h`.
 
 ## Unbinding
 
@@ -50,6 +71,6 @@ make KDIR=<a built kernel tree>
 ```
 
 `testing/qemu/run.sh` builds the module and boots a kernel in QEMU with it loaded, then runs
-`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c` and `test/lemnos_claim_check.c` on a block with
+`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c` and `test/lemnos_stream_check.c` on a block with
 nothing behind it. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
 and memory checking on.

@@ -7,4 +7,9 @@
 
 long lem_claim(struct lemnos_claim *c);
 
+struct device;
+
+long lem_stream_create(struct device *dev, struct lemnos_stream_create *c);
+void lem_streams_block_gone(struct device *dev);
+
 #endif
