@@ -92,7 +92,7 @@ placement the loader makes.
    the kernel's PWM counter mode is not reachable from userspace. If the tach line is
    confirmed: first check `/dev/pio1` (second block) and then decide between a second
    block and a PWM counter driver. Do not free the I2C program's slots for it.
-5. Done, untested on board: the K230D, Rockchip and RV1106 capability tables below, as code in
+5. Done, untested on board: the K230D, Rockchip, RV1106 and A733 capability tables below, as code in
    the `lemnos-soc` crate (`CHIPS`). Board files for those chips are not written (the boards'
    pinouts are not here), so nothing runs on them yet.
 
@@ -110,6 +110,11 @@ Sources. The Rockchip and K230 rows come from the mainline device trees at torva
 the mainline drivers `pwm-rockchip.c` (the `rk3328-pwm` data), `timer-rockchip.c` (the rk3288
 layout) and `timer-clint.c`. A row the description does not give says so; the TRM is named in
 the chip's sources and was **not checked here** (no datasheet was downloaded).
+
+The RV1126B and A733 have no mainline description used here. Their rows come from the vendors'
+kernel trees: rockchip-linux/kernel `develop-6.1` `rv1126b.dtsi`, and radxa/allwinner-bsp
+`cubie-aiot-v1.4.6` `configs/linux-5.15/sun60iw2p1.dtsi`. That BSP's `linux-6.1` file lacks some
+of the nodes and names other PWM versions, so a board's own device tree decides.
 
 Shared facts, checked against the drivers:
 
@@ -221,6 +226,28 @@ Cores as in `rk356x-base.dtsi`: 4 x Cortex-A55. The description has no Rockchip 
 
 Cores as in `rk3562.dtsi`: 4 x Cortex-A53.
 
+### RV1126B (the vendor's `rv1126b.dtsi`)
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| GPIO x8 | levels and edges | unused | gpio cdev |
+| PWM x28 (`rv1126b-pwm`, `rk3506-pwm` layout; four groups) | output | unused | sysfs pwm |
+| arm generic timer | clocksource | used (by the kernel) | `clock_gettime(CLOCK_BOOTTIME)` |
+| Timer (`20c00000`) | timers | unused (kernel) | none |
+| WDT (`20b60000`, `snps,dw-wdt`) | watchdog | unused | `/dev/watchdog` |
+| I2C x6 | controllers | unused | `i2c-dev` |
+| SPI x2 (fspi0 and fspi1 left out) | controllers | unused | `spidev` |
+| UART x8 | serial | unused | `lemnos-drivers-uart` |
+| SAI x3 | audio | unused | ALSA |
+| PDM x1 | microphones | unused | ALSA |
+| SARADC x3 | ADC | unused | IIO sysfs through `KernelDevice` |
+| TSADC x1 | thermal | unused | thermal zones |
+| DMA x2 (`rockchip,dma`, not PL330) | DMA | unused | dmaengine in the kernel |
+| MCU and LPMCU (mailboxes only; no core node) | run firmware | unused | none: firmware, a loader and a message path would be needed |
+
+The description also has two CAN controllers (`21d40000`, `21d50000`), which the tables have no
+kind for. Cores as in `rv1126b.dtsi`: 4 x Cortex-A53.
+
 ### RV1106 (no mainline description)
 
 | Block | Capability | Status | Software path it would replace |
@@ -230,3 +257,23 @@ Cores as in `rk3562.dtsi`: 4 x Cortex-A53.
 The rest of the RV1106 IO map is a datasheet check. `arch/arm/boot/dts/rockchip` has no RV1106
 description at this commit (it has rv1103b, rv1108, rv1109 and rv1126), so the RV1106 rows come from
 the Rockchip datasheet only.
+
+### A733 (the board vendor's `sun60iw2p1.dtsi`)
+
+| Block | Capability | Status | Software path it would replace |
+| --- | --- | --- | --- |
+| GPIO x2 (`pio`, `r_pio`) | levels and edges | unused | gpio cdev |
+| PWM x3 controllers (`pwm0` and `pwm1`, ten channels each; `s_pwm0`) | output | unused | sysfs pwm |
+| arm generic timer | clocksource | used (by the kernel) | `clock_gettime(CLOCK_BOOTTIME)` |
+| Timer (`3009000`) | timers | unused (kernel) | none |
+| WDT (`2050000`) | watchdog | unused | `/dev/watchdog` |
+| TWI x16 (13 plus 3 in the always-on domain) | I2C controllers | unused | `i2c-dev` |
+| SPI x6 | controllers | unused | `spidev` |
+| UART x9 | serial | unused | `lemnos-drivers-uart` |
+| I2S x5 | audio | unused | ALSA |
+| DMIC x1 | microphones | unused | ALSA |
+| GPADC x1 (`lradc` is bound as a keyboard) | ADC | unused | IIO sysfs, if the BSP driver registers there (not checked) |
+| THS x1 | thermal | unused | thermal zones |
+| DMA x1 | DMA | unused | dmaengine in the kernel |
+
+Cores as in `sun60iw2p1.dtsi`: 2 x Cortex-A76, 6 x Cortex-A55.

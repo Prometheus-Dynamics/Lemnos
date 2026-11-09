@@ -224,6 +224,18 @@ mod tests {
         assert_eq!(rk3562.count(Kind::Adc), 2);
         let k230d = Chip::find("K230D").expect("K230D");
         assert_eq!(k230d.count(Kind::Uart), 5);
+        let rv1126b = Chip::find("RV1126B").expect("RV1126B");
+        assert_eq!(rv1126b.count(Kind::Gpio), 8);
+        assert_eq!(rv1126b.count(Kind::Pwm), 28);
+        assert_eq!(rv1126b.count(Kind::I2c), 6);
+        assert_eq!(rv1126b.count(Kind::Uart), 8);
+        assert_eq!(rv1126b.count(Kind::Adc), 3);
+        let a733 = Chip::find("A733").expect("A733");
+        assert_eq!(a733.count(Kind::Pwm), 3);
+        assert_eq!(a733.count(Kind::I2c), 16);
+        assert_eq!(a733.count(Kind::Spi), 6);
+        assert_eq!(a733.count(Kind::Uart), 9);
+        assert_eq!(a733.count(Kind::I2s), 5);
         assert!(Chip::find("RK9999").is_none());
     }
 }

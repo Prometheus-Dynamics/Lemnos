@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos-soc`: tables for the RV1126B and the A733, from the vendors' device trees. Untested on board.
 - `lemnos-drivers-rkvpss` and `lemnos_linux_sys::rkvpss`: Rockchip's `rkvpss` offline scaler (RV1126B) through the vendor kernel's `rkvpss-offline` node: crop, scale and format conversion from one dma-buf to as many as six. Every frame is checked against its dma-buf's size. Untested on board.
 - `lemnos-drivers-nonai2d`: the K230 non-AI 2D engine, pixel-format conversion between dma-bufs through the K230 Linux SDK's `nonai-2d` V4L2 mem2mem driver, one dma-buf per plane. Untested on board.
 - `lemnos-drivers-rga::caps`: `Soc::Rv1126b`, its RGA2 on the vendor multi-RGA route. Untested on board.

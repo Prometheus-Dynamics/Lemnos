@@ -323,8 +323,8 @@ here yet.
 |---|---|---|
 | RK3588S | RGA2 and RGA3 routes, ISP30 | NPU, VPU (`rk-mpp`), IEP, JPEG |
 | RK3566 | RGA2 routes, ISP21 | NPU, VPU (`rk-mpp`), IEP, JPEG |
-| A733 | G2D on `/dev/g2d` | VIP9000 NPU, video engine, deinterlacer, camera ISP (`vin`), `lemnos-soc` table |
-| RV1126B | ISP35 layouts and nodes, RGA2 route, `rkvpss` offline scaler | `rkaiisp`, NPU, VPU (`rk-mpp`), JPEG, `lemnos-soc` table |
+| A733 | G2D on `/dev/g2d`, `lemnos-soc` table | VIP9000 NPU, video engine, deinterlacer, camera ISP (`vin`) |
+| RV1126B | ISP35 layouts and nodes, RGA2 route, `rkvpss` offline scaler, `lemnos-soc` table | `rkaiisp`, NPU, VPU (`rk-mpp`), JPEG |
 | K230D | VGLite, ISP registers and statistics, RVV, non-AI 2D conversion | non-AI 2D OSD and border, KPU and AI2D, VPU, GSDMA |
 
 - **Non-AI 2D** (`lemnos-drivers-nonai2d`): format conversion done. Left out: OSD and border, whose
