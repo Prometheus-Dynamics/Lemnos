@@ -23,4 +23,6 @@ tokio = { workspace = true, optional = true, features = ["net", "time"] }
 [dev-dependencies]
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }
 lemnos-macros = { path = "../macros" }
+lemnos-linux-stream = { path = "../../backends/linux-stream" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
 tokio = { workspace = true, features = ["net", "time", "rt"] }

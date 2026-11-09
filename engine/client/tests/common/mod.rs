@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
@@ -10,7 +11,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use lemnos_linux_sys::scm::send_with_fds;
+use lemnos_wire::ring::Layout;
 use lemnos_wire::{Frame, append, decode, encode_description, health, state};
+
+/// What the fake answers StreamOpen with: a layout, how many descriptors it claims, and the
+/// descriptors it actually sends.
+pub struct StreamScript {
+    pub layout: Layout,
+    pub claimed: u8,
+    pub fds: Vec<OwnedFd>,
+}
 
 #[derive(Default)]
 pub struct Control {
@@ -24,6 +35,7 @@ pub struct Control {
     pub power_calls: AtomicU32,
     pub values_before_reply: AtomicU32,
     pub names: Mutex<Vec<String>>,
+    pub stream: Mutex<Option<StreamScript>>,
 }
 
 pub struct FakeHost {
@@ -274,6 +286,41 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     control.unsubscribed.fetch_add(1, Ordering::SeqCst);
                     send(Frame::Reply { id, bytes: &[] }, &mut out);
                 }
+                Frame::StreamOpen { id, .. } => match control.stream.lock().unwrap().take() {
+                    None => send(
+                        Frame::Refusal {
+                            id,
+                            status: -2,
+                            text: "no stream",
+                        },
+                        &mut out,
+                    ),
+                    Some(script) => {
+                        stream.write_all(&out).unwrap();
+                        out.clear();
+                        let mut ready = Vec::new();
+                        append(
+                            &Frame::StreamReady {
+                                id,
+                                buffers: script.layout.buffers,
+                                descriptors: script.claimed,
+                                buffer_bytes: script.layout.buffer_bytes,
+                                frame_slots: script.layout.frame_slots,
+                                job_slots: script.layout.job_slots,
+                                job_bytes: script.layout.job_bytes,
+                            },
+                            &mut ready,
+                        )
+                        .unwrap();
+                        let borrowed: Vec<_> = script.fds.iter().map(AsFd::as_fd).collect();
+                        if borrowed.is_empty() {
+                            stream.write_all(&ready).unwrap();
+                        } else {
+                            let n = send_with_fds(stream.as_fd(), &ready, &borrowed).unwrap();
+                            assert_eq!(n, ready.len());
+                        }
+                    }
+                },
                 Frame::SetPower { id, .. } => {
                     control.power_calls.fetch_add(1, Ordering::SeqCst);
                     send(Frame::Reply { id, bytes: &[] }, &mut out);

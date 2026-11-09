@@ -129,7 +129,19 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             Frame::StreamReady {
                 id: 11,
                 buffers: 4,
-                descriptors: 2,
+                descriptors: 3,
+                buffer_bytes: 256,
+                frame_slots: 4,
+                job_slots: 2,
+                job_bytes: 8,
+            },
+        ),
+        (
+            "stream-close",
+            Frame::StreamClose {
+                id: 12,
+                device: 3,
+                name: "s",
             },
         ),
         (

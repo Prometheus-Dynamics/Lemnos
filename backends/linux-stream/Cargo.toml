@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-linux-stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Linux support for taking a Lemnos frame stream: receiving descriptors and mapping them"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-client = { path = "../../engine/client" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-linux-sys = { path = "../linux-sys" }

@@ -109,6 +109,28 @@ pub fn memfd(name: &CStr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// A new sealed `memfd` of `len` bytes, close-on-exec: the size can't be changed by anyone holding
+/// it, including whoever receives the descriptor, so a mapping of it can never fault past the end.
+/// The contents stay writable.
+pub fn sealed_memfd(name: &CStr, len: u64) -> io::Result<OwnedFd> {
+    let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+    // SAFETY: `name` is a valid NUL-terminated string for the call.
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `memfd_create` returned a new descriptor that nothing else owns.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    let file = std::fs::File::from(owned);
+    file.set_len(len)?;
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+    // SAFETY: `F_ADD_SEALS` takes an integer of seals, and `file` is open for the call.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(OwnedFd::from(file))
+}
+
 /// A dma-buf's size, from the kernel. The descriptor's file offset is left
 /// where it was: the offset is read, the end found with `lseek`, and the old
 /// offset restored. No duplicate is made, since a duplicate shares the offset.

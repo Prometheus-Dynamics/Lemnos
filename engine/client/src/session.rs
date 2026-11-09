@@ -1,16 +1,19 @@
 use std::collections::VecDeque;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_core::Status;
+use lemnos_wire::ring::Layout;
 use lemnos_wire::{
     DeviceDescription, Frame, MAX_QUEUED_BYTES, VERSION, append, decode, decode_description,
     health, state,
 };
 
-use crate::connection::Connection;
+use crate::connection::{Connection, Taker};
 use crate::error::Error;
+use crate::stream::{FrameStream, StreamPlatform};
 use crate::values::ValueQueue;
 
 /// Picks a request's answer out of the frames that carry its id.
@@ -1022,6 +1025,110 @@ impl Session {
             return Err(Error::Disconnected);
         }
         Ok(id)
+    }
+
+    /// Takes a device's frame stream. `name` is the stream's name under that device. A stream
+    /// has one consumer, and it isn't restored after a reconnect: take it again.
+    ///
+    /// Waiting for the answer reads the socket with `platform`, so nothing may be
+    /// read from this session at the same time, which a `Session` rules out by being owned.
+    pub fn open_stream(
+        &mut self,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.settle()?;
+        let (id, pick) = self.op_open_stream(device, name, &platform)?;
+        let ready = self.wait(id, pick);
+        self.finish_open_stream(ready, device, name, platform)
+    }
+
+    /// Asks for a stream and starts reading the socket so its descriptors are kept.
+    pub(crate) fn op_open_stream(
+        &mut self,
+        device: u32,
+        name: &str,
+        platform: &Arc<dyn StreamPlatform>,
+    ) -> Result<(u32, impl Pick<(Layout, u8)> + use<>), Error> {
+        let id = self.shared.id();
+        self.queue(&Frame::StreamOpen { id, device, name })?;
+        let connection = self.connection.as_mut().ok_or(Error::Disconnected)?;
+        connection.taker = Some(Taker {
+            platform: Arc::clone(platform),
+            fds: Vec::new(),
+        });
+        Ok((id, |frame: Frame<'_>| match frame {
+            Frame::StreamReady {
+                buffers,
+                descriptors,
+                buffer_bytes,
+                frame_slots,
+                job_slots,
+                job_bytes,
+                ..
+            } => Some(Ok((
+                Layout {
+                    buffers,
+                    buffer_bytes,
+                    frame_slots,
+                    job_slots,
+                    job_bytes,
+                },
+                descriptors,
+            ))),
+            _ => None,
+        }))
+    }
+
+    /// Takes the descriptors that came with `ready` and builds the stream. On every path that
+    /// fails, the descriptors close here.
+    pub(crate) fn finish_open_stream(
+        &mut self,
+        ready: Result<(Layout, u8), Error>,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        let taker = self.connection.as_mut().and_then(|c| c.taker.take());
+        let (layout, descriptors) = match ready {
+            Ok(ready) => ready,
+            Err(Error::TimedOut) => {
+                // A late StreamReady would carry descriptors that a plain read
+                // loses, and a stream nobody can use. End it.
+                self.lost();
+                return Err(Error::TimedOut);
+            }
+            Err(error) => return Err(error),
+        };
+        let fds = taker.ok_or(Error::Disconnected)?.fds;
+        if usize::from(descriptors) != fds.len() {
+            // `fds` drops, closing whatever did arrive.
+            self.lost();
+            return Err(Error::Wire(lemnos_wire::WireError::Malformed));
+        }
+        FrameStream::new(device, name, layout, fds, platform)
+    }
+
+    pub(crate) fn op_close_stream(
+        &mut self,
+        stream: &FrameStream,
+    ) -> Result<(u32, impl Pick<()> + use<>), Error> {
+        let id = self.shared.id();
+        self.queue(&Frame::StreamClose {
+            id,
+            device: stream.device(),
+            name: stream.name(),
+        })?;
+        Ok((id, ack))
+    }
+
+    /// Gives a stream back. The host can then give it to someone else. Dropping a [`FrameStream`]
+    /// without this holds it until the connection ends.
+    pub fn close_stream(&mut self, stream: FrameStream) -> Result<(), Error> {
+        self.settle()?;
+        let (id, pick) = self.op_close_stream(&stream)?;
+        self.wait(id, pick)
     }
 
     /// Delivers whatever has arrived, without waiting. Returns how much

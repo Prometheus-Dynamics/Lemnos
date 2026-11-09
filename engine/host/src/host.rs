@@ -14,6 +14,9 @@ use lemnos_core::{
 use crate::Options;
 use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue};
 use crate::contain::{Lane, LaneError, Work};
+use crate::stream::{
+    HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamStats, Streams,
+};
 
 trait Instance: Send {
     fn describe(&self, out: &mut Description);
@@ -185,6 +188,7 @@ struct Inner {
     drivers: BTreeMap<&'static str, DriverEntry>,
     /// Called when a device's next tick moves earlier.
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    streams: Streams,
 }
 
 /// Runs a board's drivers. Each driver call goes through a lane, with a panic
@@ -655,6 +659,9 @@ macro_rules! buses {
 
 impl Provider for Binding<'_> {
     fn provided(&self, need: &str) -> bool {
+        if self.slot.spec.streams.contains_key(need) {
+            return true;
+        }
         if self.slot.spec.uses.contains_key(need) && self.bus_is_absent(need) {
             let running = self.target(need).is_some_and(|target| target.is_running());
             if !running {
@@ -691,7 +698,15 @@ impl Provider for Binding<'_> {
         dma -> DmaHandle;
         clocks -> ClocksHandle;
         reset -> ResetHandle;
-        stream -> StreamHandle;
+    }
+
+    fn stream(&mut self, need: &str) -> Result<StreamHandle> {
+        if self.slot.spec.streams.contains_key(need) {
+            let endpoint = self.inner.streams.producer(self.slot.index, need)?;
+            return Ok(Box::new(endpoint));
+        }
+        let bus = self.bus_name(need)?;
+        lock(&self.inner.backend).stream(&bus)
     }
 }
 
@@ -737,6 +752,25 @@ impl Host {
         clock: Arc<dyn HostClock>,
         options: Options,
     ) -> core::result::Result<Self, HostError> {
+        Self::start_with_streams(
+            board,
+            drivers,
+            backend,
+            clock,
+            options,
+            Arc::new(HeapAllocator),
+        )
+    }
+
+    /// [`Host::start`], with `allocator` making the memory behind each frame stream.
+    pub fn start_with_streams(
+        board: &BoardFile,
+        drivers: &[DriverEntry],
+        backend: Box<dyn Provider + Send>,
+        clock: Arc<dyn HostClock>,
+        options: Options,
+        allocator: Arc<dyn StreamAllocator>,
+    ) -> core::result::Result<Self, HostError> {
         let order = bind_order(&board.devices)?;
         let table: BTreeMap<_, _> = drivers
             .iter()
@@ -771,6 +805,8 @@ impl Host {
             }));
         }
 
+        let streams = Streams::new(allocator, &board.devices);
+
         // Lives as long as the process: drivers hold plain references to it.
         // `shutdown` lets every device go.
         let inner: &'static Inner = Box::leak(Box::new(Inner {
@@ -782,6 +818,7 @@ impl Host {
             options,
             drivers: table,
             waker: OnceLock::new(),
+            streams,
         }));
         let host = Self { inner };
         let slots = inner.all();
@@ -888,6 +925,7 @@ impl Host {
     /// Tells every driver that tracks callers that `caller` has gone. Blocks until each has
     /// answered or its call deadline has passed.
     pub fn caller_gone(&self, caller: CallerId) {
+        self.inner.streams.caller_gone(caller);
         let mut index = 0;
         while let Some(slot) = self.inner.slot(index) {
             index += 1;
@@ -895,6 +933,44 @@ impl Host {
                 self.inner.caller_gone(slot, caller);
             }
         }
+    }
+
+    /// Takes the consumer's end of a device's frame stream for `caller`, until it detaches or
+    /// [`Host::caller_gone`]. A stream has one consumer: another gets `BUSY`. An unknown device or
+    /// name is `NOT_FOUND`.
+    pub fn stream_attach(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+    ) -> core::result::Result<Lease, Status> {
+        self.inner.streams.attach(device, name, caller)
+    }
+
+    /// Gives up a stream `caller` holds. `NOT_FOUND` if it doesn't hold it.
+    pub fn stream_detach(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+    ) -> core::result::Result<(), Status> {
+        self.inner.streams.detach(device, name, caller)
+    }
+
+    /// Takes the producer's end of a stream without a driver: a software producer. A stream
+    /// has one producer at a time, and a driver that needs the stream takes it the same way.
+    pub fn stream_producer(
+        &self,
+        device: u32,
+        name: &str,
+    ) -> core::result::Result<ProducerEndpoint, Status> {
+        self.inner.streams.producer(device, name)
+    }
+
+    /// How a stream stands, or `None` if there's no such stream.
+    #[must_use]
+    pub fn stream_stats(&self, device: u32, name: &str) -> Option<StreamStats> {
+        self.inner.streams.stats(device, name)
     }
 
     /// Retries what is due and rebinds devices whose optional parts have
@@ -1021,6 +1097,7 @@ impl Host {
 
     /// Lets go of every device, parents first, so each releases its hardware.
     pub fn shutdown(&self) {
+        self.inner.streams.close_all();
         let slots = self.inner.all();
         for slot in slots.iter().rev() {
             *lock(&slot.state) = DeviceState::Off(OffReason::Manual);

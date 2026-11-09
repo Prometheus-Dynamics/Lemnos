@@ -4,6 +4,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::NonNull;
+use std::sync::atomic::AtomicU64;
 
 /// A shared mapping of a descriptor's bytes, unmapped on drop.
 #[derive(Debug)]
@@ -83,6 +84,38 @@ impl Mapping {
         // SAFETY: as for `as_slice`, and `&mut self` makes the slice unique.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
+    /// The mapped words, as atomics shared with whoever else maps them. `None` unless the mapping
+    /// is writable and a whole number of aligned words.
+    pub fn as_atomic_words(&self) -> Option<&[AtomicU64]> {
+        let words = self.len / size_of::<AtomicU64>();
+        let first = self.ptr.as_ptr().cast::<AtomicU64>();
+        if !self.writable || !self.len.is_multiple_of(size_of::<AtomicU64>()) || !first.is_aligned()
+        {
+            return None;
+        }
+        // SAFETY: `ptr` maps `len` readable and writable bytes for as long as `&self` lives,
+        // holding `words` whole `AtomicU64`s, aligned as just checked. Every bit pattern is a
+        // valid `AtomicU64`, and the only access this slice gives is atomic operations, which are
+        // well defined when another process writes the same memory.
+        Some(unsafe { std::slice::from_raw_parts(first, words) })
+    }
+
+    /// Copies `data` to `offset` in the mapping. `None`, and nothing written, outside the mapping
+    /// or when the mapping is read-only.
+    pub fn write_bytes(&self, offset: usize, data: &[u8]) -> Option<()> {
+        let end = offset.checked_add(data.len())?;
+        if end > self.len || !self.writable {
+            return None;
+        }
+        let at = self.ptr.as_ptr().wrapping_add(offset);
+        // SAFETY: `at..at + data.len()` lies inside the `len` writable bytes mapped, as just
+        // checked; `data` is a borrowed slice that can't overlap memory this mapping owns unless
+        // the caller passed the mapping itself, which `&self` allows, so use the copy that
+        // tolerates overlap.
+        unsafe { std::ptr::copy(data.as_ptr(), at, data.len()) };
+        Some(())
+    }
+
     /// Reads `N` bytes at `offset` with one volatile load, for memory the device writes at any
     /// time. `None` when the bytes do not all lie inside the mapping.
     pub fn read_volatile<const N: usize>(&self, offset: usize) -> Option<[u8; N]> {
@@ -187,5 +220,48 @@ mod tests {
         }
         assert!(Mapping::new(file.as_fd(), 0, 0, false).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn atomic_words_need_a_writable_whole_word_mapping() {
+        use crate::dma_buf::sealed_memfd;
+        use std::sync::atomic::Ordering;
+        let fd = sealed_memfd(c"words", 4096).unwrap();
+        let map = Mapping::new(fd.as_fd(), 4096, 0, true).unwrap();
+        let words = map.as_atomic_words().unwrap();
+        assert_eq!(words.len(), 512);
+        words[3].store(0xfeed, Ordering::SeqCst);
+        assert_eq!(map.as_slice()[3 * 8..3 * 8 + 2], [0xed, 0xfe]);
+        let read_only = Mapping::new(fd.as_fd(), 4096, 0, false).unwrap();
+        assert!(read_only.as_atomic_words().is_none());
+        let short = Mapping::new(fd.as_fd(), 4092, 0, true).unwrap();
+        assert!(short.as_atomic_words().is_none());
+    }
+
+    #[test]
+    fn write_bytes_is_bounded_and_needs_a_writable_mapping() {
+        use crate::dma_buf::sealed_memfd;
+        let fd = sealed_memfd(c"bytes", 4096).unwrap();
+        let map = Mapping::new(fd.as_fd(), 4096, 0, true).unwrap();
+        assert_eq!(map.write_bytes(4090, &[7; 6]), Some(()));
+        assert_eq!(map.as_slice()[4095], 7);
+        assert_eq!(map.write_bytes(4091, &[1; 6]), None);
+        assert_eq!(map.write_bytes(usize::MAX, &[1]), None);
+        let read_only = Mapping::new(fd.as_fd(), 4096, 0, false).unwrap();
+        assert_eq!(read_only.write_bytes(0, &[1]), None);
+    }
+
+    #[test]
+    fn a_sealed_memfd_cant_be_resized_through_any_descriptor() {
+        use crate::dma_buf::sealed_memfd;
+        let fd = sealed_memfd(c"sealed", 8192).unwrap();
+        let duplicate = fd.try_clone().unwrap();
+        let file = std::fs::File::from(duplicate);
+        assert!(file.set_len(0).is_err());
+        assert!(file.set_len(16384).is_err());
+        assert_eq!(file.metadata().unwrap().len(), 8192);
+        // Contents stay writable.
+        let map = Mapping::new(fd.as_fd(), 8192, 0, true).unwrap();
+        assert_eq!(map.write_bytes(0, &[9]), Some(()));
     }
 }

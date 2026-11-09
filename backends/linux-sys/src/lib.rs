@@ -1,6 +1,6 @@
 //! Linux uAPI structures and safe wrappers over the system calls Lemnos needs: i2c-dev, spidev,
-//! GPIO uAPI v2, netlink uevents, inotify, poll, signalfd, dma-heap, dma-buf, mappings, V4L2 and
-//! the media controller.
+//! GPIO uAPI v2, netlink uevents, inotify, poll, signalfd, dma-heap, dma-buf, mappings, V4L2, the
+//! media controller, descriptor passing and eventfd.
 //!
 //! One of the few crates allowed `unsafe`. Every block states why it is sound in a `SAFETY`
 //! comment, and everything public here is safe to call. Chip-specific layouts arrive with the
@@ -10,6 +10,7 @@
 
 pub mod dma_buf;
 pub mod dma_heap;
+pub mod eventfd;
 pub mod gpio;
 pub mod i2c;
 pub mod inotify;
@@ -23,6 +24,7 @@ pub mod poll;
 pub mod pool;
 pub mod process;
 pub mod rp1_pio;
+pub mod scm;
 pub mod serial;
 pub mod signal;
 pub mod spi;

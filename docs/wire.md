@@ -47,9 +47,10 @@ closes the connection on a larger length, without reading it.
 | 15 | Value | subscription u64, stamp_ns u64, bytes | to client |
 | 16 | SetPower | id u32, device u32, on bool | to host |
 | 17 | StreamOpen | id u32, device u32, name str | to host |
-| 18 | StreamReady | id u32, buffers u32, descriptors u8 | to client |
+| 18 | StreamReady | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32 | to client |
 | 19 | Event | device u32, state u8, health u8, reason str | to client |
 | 20 | Refusal | id u32, status i32, text str | to client |
+| 21 | StreamClose | id u32, device u32, name str | to host |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
@@ -65,8 +66,8 @@ Each of these closes a way the earlier protocol could go wrong.
 
 1. **The version is checked.** The first frame is Hello. A host answers a different version with
    Refusal and closes. A client refuses a different version in Welcome.
-2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Unsubscribe and
-   SetPower have no reply of their own and are answered with an empty Reply. Nothing is ignored in
+2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Unsubscribe,
+   SetPower and StreamClose have no reply of their own and are answered with an empty Reply. Nothing is ignored in
    silence. `id` 0 is allowed and is not special.
 3. **A malformed frame closes the connection** on either side, because the stream can no longer be
    trusted. That covers an impossible length, an unknown kind, a short field, a bad `bool` and bad
@@ -84,7 +85,73 @@ Each of these closes a way the earlier protocol could go wrong.
 
 ## Descriptors
 
-StreamReady says how many file descriptors arrive with it, as `SCM_RIGHTS` on the same `sendmsg`.
+StreamReady says how many file descriptors arrive with it, as `SCM_RIGHTS` on the same `sendmsg`
+that carries the frame's first byte. Three today, in order: the ring, the doorbell, the buffers. A
+client reads the socket with `recvmsg` while a StreamOpen is outstanding, because a plain read
+discards descriptors. Descriptors passed to the host are closed unread.
+
+## Streams
+
+StreamOpen takes one stream of one device for this connection. `name` is the stream's name under
+that device in the board file (`[devices.streams.<name>]`). A stream has one consumer: a second
+StreamOpen gets Refusal with `BUSY`; an unknown device or name gets `NOT_FOUND`. StreamClose gives
+it up; a connection closing gives up every stream it held. After StreamReady nothing about a frame
+crosses the socket.
+
+| Descriptor | What it is |
+|---|---|
+| ring | a shared mapping of `ring_bytes`, read and written by both sides |
+| doorbell | an eventfd. The host adds 1 after each frame. Waiting on it is optional |
+| buffers | `buffers` buffers, one every `stride` bytes from offset 0. Map it read-only |
+
+`stride` is `buffer_bytes` rounded up to a multiple of 4096. The ring is 64-bit words, little-endian
+on every platform this is built for:
+
+| Word | Name | Written by |
+|---|---|---|
+| 0 | magic `LMNSRING` | host, once |
+| 1 | layout version, 1 | host, once |
+| 2 | buffers | host, once |
+| 3 | buffer_bytes | host, once |
+| 4 | frame_slots | host, once |
+| 5 | job_slots | host, once |
+| 6 | job_bytes | host, once |
+| 8 | state: 0 open, 1 closed, 2 faulted | host |
+| 16 | frames head | host |
+| 24 | frames tail | consumer |
+| 32 | returns head | consumer |
+| 40 | returns tail | host |
+| 48 | jobs head | consumer |
+| 56 | jobs tail | host |
+| 64 | frame slots, 5 words each, `frame_slots` of them | host |
+| after | return slots, 1 word each, `frame_slots` of them | consumer |
+| after | job slots, `1 + ceil(job_bytes / 8)` words each, `job_slots` of them | consumer |
+
+`ring_bytes` is 8 times the words above, and a client checks the descriptor is exactly that long
+before mapping it. Every head and tail counts up without wrapping; a slot is the count modulo the
+queue's capacity, which is a power of two. A writer writes the slot, then stores the head with
+release ordering. A reader loads the head with acquire ordering, then the slot.
+
+A frame slot's words are: buffer in the low 32 bits with the length in the high 32, sequence,
+identity, timestamp in ns, fence. Identity is the producer's and is never read. A return slot is
+the buffer in the low 32 bits and the frame's fence in the high 32. A job slot is its length, then
+its bytes, little-endian, the last word zero-padded.
+
+### What each side checks
+
+The peer is not trusted. Every value below is read once from the shared memory and checked against
+limits that side already holds.
+
+- A head more than the queue's capacity ahead of its tail is an error. A tail behind the last one
+  seen or ahead of its head is an error. An unknown state word reads as faulted.
+- A frame's buffer must be below `buffers`, its length at most `buffer_bytes`, and its buffer must
+  not already be held.
+- A returned buffer must be below `buffers`, published and not yet returned, with the fence of
+  its frame. A job must be at most `job_bytes`.
+
+A consumer that breaks these loses the stream: the host marks it faulted (state 2) and rings the
+doorbell. Nothing else is affected: not the connection, not other streams. A fresh StreamOpen starts
+over on new memory.
 
 ## Description
 
@@ -258,11 +325,20 @@ Each vector is one complete frame.
 
 ### stream-ready
 
-`StreamReady { id: 11, buffers: 4, descriptors: 2 }`
+`StreamReady { id: 11, buffers: 4, descriptors: 3, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8 }`
 
 <!-- vector: stream-ready -->
 ```hex
-0b 00 00 00 12 00 0b 00 00 00 04 00 00 00 02
+1b 00 00 00 12 00 0b 00 00 00 04 00 00 00 03 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00
+```
+
+### stream-close
+
+`StreamClose { id: 12, device: 3, name: "s" }`
+
+<!-- vector: stream-close -->
+```hex
+0f 00 00 00 15 00 0c 00 00 00 03 00 00 00 01 00 00 00 73
 ```
 
 ### event

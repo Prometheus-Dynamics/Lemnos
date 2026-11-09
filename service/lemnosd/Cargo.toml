@@ -44,5 +44,7 @@ lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 
 [dev-dependencies]
 lemnos-client = { path = "../../engine/client" }
+lemnos-linux-stream = { path = "../../backends/linux-stream" }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

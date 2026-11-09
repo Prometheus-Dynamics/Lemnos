@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lemnos_wire::Frame;
@@ -10,6 +11,7 @@ use tokio::time::{Instant, timeout_at};
 use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{DeviceEntry, Handle, Mode, Session, Subscription, ValueInfo};
+use crate::stream::{FrameStream, StreamPlatform};
 
 /// [`Session`] for a tokio program. It waits on the socket's readiness and
 /// otherwise runs the same core.
@@ -150,6 +152,27 @@ impl AsyncClient {
             self.session.forget(local);
         }
         result
+    }
+
+    /// See [`Session::open_stream`]. The frames then come off the ring as they do anywhere else.
+    pub async fn open_stream(
+        &mut self,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.settle().await?;
+        let (id, pick) = self.session.op_open_stream(device, name, &platform)?;
+        let ready = self.wait(id, pick).await;
+        self.session
+            .finish_open_stream(ready, device, name, platform)
+    }
+
+    /// See [`Session::close_stream`].
+    pub async fn close_stream(&mut self, stream: FrameStream) -> Result<(), Error> {
+        self.settle().await?;
+        let (id, pick) = self.session.op_close_stream(&stream)?;
+        self.wait(id, pick).await
     }
 
     /// The next value from any subscription, or `None` after `timeout`.
