@@ -10,10 +10,8 @@
 //! - `active_low` (default `false`): the output's polarity.
 //! - `fault_active_low` (default `true`): the fault input's polarity. With the
 //!   default, a fault that pulls the pin low reads `true`.
-//! - `enable_delay_ms`: must be absent or 0. A delay after turning on needs a
-//!   timer the driver model does not give drivers, so any other value is refused.
 //!
-//! The driver never waits. `cycle` is not implemented yet: see its docs.
+//! The driver never waits. It turns the pin on and off, and anything timed is up to the caller.
 
 #![no_std]
 
@@ -26,9 +24,6 @@ use lemnos_core::{
     status_of,
 };
 use lemnos_hal::raw::LineConfig;
-
-/// The longest off time `cycle` accepts, in milliseconds.
-pub const MAX_CYCLE_OFF_MS: u32 = 10_000;
 
 const IS_ON: MethodId = MethodId {
     contract: 0,
@@ -53,9 +48,6 @@ impl Lifecycle for GpioPowerSwitch {
     type Needs = GpioPowerSwitchNeeds;
 
     fn start(mut needs: GpioPowerSwitchNeeds, cfg: &Config<'_>) -> Result<Self> {
-        if !matches!(cfg.get("enable_delay_ms"), None | Some(ConfigValue::Int(0))) {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         let default_on = flag(cfg, "default_on", true)?;
         let mut output = LineConfig::output(default_on);
         output.active_low = flag(cfg, "active_low", false)?;
@@ -96,22 +88,6 @@ impl PowerSwitch for GpioPowerSwitch {
             None => Ok(None),
             Some(fault) => fault.get().map(Some).map_err(status_of),
         }
-    }
-
-    /// Not implemented on this driver model. A turn-back-on has to be scheduled
-    /// by something with a clock, and a driver gets neither a clock nor a
-    /// deadline hook, so the driver cannot promise to restore the load. It
-    /// refuses rather than cut power it cannot restore: an off time above
-    /// [`MAX_CYCLE_OFF_MS`] is `INVALID_ARGUMENT`, zero does nothing, and any
-    /// other time is `NOT_SUPPORTED` with the line untouched.
-    fn cycle(&mut self, off_ms: u32) -> Result<()> {
-        if off_ms > MAX_CYCLE_OFF_MS {
-            return Err(Status::INVALID_ARGUMENT);
-        }
-        if off_ms == 0 {
-            return Ok(());
-        }
-        Err(Status::NOT_SUPPORTED)
     }
 }
 
