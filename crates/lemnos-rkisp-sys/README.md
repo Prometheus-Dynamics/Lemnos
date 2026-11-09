@@ -1,7 +1,7 @@
 # lemnos-rkisp-sys
 
-The Rockchip ISP21 (RK3566, RK3568), ISP30 (RK3588, RK3588S) and ISP32 (RV1106, RV1103, and the
-ISP32-lite of RK3562) uAPI layouts of the vendor kernel's `rkisp` driver: the parameter and
+The Rockchip ISP21 (RK3566, RK3568), ISP30 (RK3588, RK3588S), ISP32 (RV1106, RV1103, and the
+ISP32-lite of RK3562) and ISP35 (RV1126B) uAPI layouts of the vendor kernel's `rkisp` driver: the parameter and
 statistics buffers, the module bits, and the compile-time checks of their sizes and offsets. It is
 the `-sys` crate of `lemnos-drivers-rkisp`, which re-exports it as `uapi`. It is `no_std`, with no
 allocation and no C libraries.

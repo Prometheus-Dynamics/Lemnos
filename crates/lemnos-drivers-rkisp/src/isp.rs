@@ -14,6 +14,8 @@ pub enum Isp {
     Isp32,
     /// RK3562 (the driver's `ISP_V32_L`).
     Isp32Lite,
+    /// RV1126B (the driver's `ISP_V35`).
+    Isp35,
 }
 
 impl Isp {
@@ -27,6 +29,7 @@ impl Isp {
             "rk3588" | "rk3588s" => Self::Isp30,
             "rv1106" | "rv1103" => Self::Isp32,
             "rk3562" => Self::Isp32Lite,
+            "rv1126b" => Self::Isp35,
             _ => return None,
         })
     }

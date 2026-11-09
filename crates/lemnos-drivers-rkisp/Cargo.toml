@@ -2,7 +2,7 @@
 name = "lemnos-drivers-rkisp"
 version.workspace = true
 edition.workspace = true
-description = "Rockchip ISP21 (RK3566/RK3568), ISP30 (RK3588/RK3588S) and ISP32 (RV1106, RK3562) from Rust: the vendor kernel's parameter and statistics uAPI layouts, the ISP each SoC has, and, with the device feature, the vendor rkisp driver's nodes on lemnos-v4l2."
+description = "Rockchip ISP21 (RK3566/RK3568), ISP30 (RK3588/RK3588S), ISP32 (RV1106, RK3562) and ISP35 (RV1126B) from Rust: the vendor kernel's parameter and statistics uAPI layouts, the ISP each SoC has, and, with the device feature, the vendor rkisp driver's nodes on lemnos-v4l2."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

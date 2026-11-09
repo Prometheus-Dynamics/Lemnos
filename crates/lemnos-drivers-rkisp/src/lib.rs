@@ -1,5 +1,5 @@
-//! Rockchip ISP21 (RK3566 / RK3568), ISP30 (RK3588 / RK3588S) and ISP32 (RV1106 / RV1103,
-//! RK3562) image signal processors from Rust: the vendor kernel's `rkisp` driver's parameter and
+//! Rockchip ISP21 (RK3566 / RK3568), ISP30 (RK3588 / RK3588S), ISP32 (RV1106 / RV1103, RK3562)
+//! and ISP35 (RV1126B) image signal processors from Rust: the vendor kernel's `rkisp` driver's parameter and
 //! statistics buffers, which SoC has which ISP, and, with the `device` feature, the driver's
 //! video nodes.
 //!
@@ -12,6 +12,7 @@
 //!   builders implement it.
 //! - [`isp32`]: the ISP32 variant ([`isp32::Variant`]) and the video node names each variant
 //!   exposes.
+//! - [`isp35`]: the video node names the ISP35 exposes.
 //! - `device` (feature `device`, Linux): the vendor driver's ISP, parameter, statistics and
 //!   main path nodes through `lemnos-v4l2`, for every generation.
 //!
@@ -26,6 +27,7 @@ extern crate alloc;
 pub mod device;
 mod isp;
 pub mod isp32;
+pub mod isp35;
 
 pub use isp::{Isp, ParamBuffer};
 /// The uAPI layouts: the `-sys` crate `lemnos-rkisp-sys` (the crate's unsafe code lives there).

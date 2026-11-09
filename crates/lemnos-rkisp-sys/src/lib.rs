@@ -16,6 +16,11 @@ pub mod isp3x;
 pub mod isp32;
 pub mod isp32_layout;
 
+/// The ISP35 layouts (RV1126B), from `rk-isp35-config.h`. Bindgen output: see the module's own
+/// header.
+pub mod isp35;
+pub mod isp35_layout;
+
 pub use isp3x::*;
 
 /// A module's bit in the parameter buffer's `module_*` masks (`ISP2X_ID_*` of

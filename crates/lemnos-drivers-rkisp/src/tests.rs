@@ -14,6 +14,10 @@ fn the_soc_names_its_isp() {
     );
     assert_eq!(root(&["luckfox,pico", "rockchip,rv1106"]), Some(Isp::Isp32));
     assert_eq!(
+        root(&["luckfox,aura", "rockchip,rv1126b"]),
+        Some(Isp::Isp35)
+    );
+    assert_eq!(
         root(&["rockchip,rk3562-evb", "rockchip,rk3562"]),
         Some(Isp::Isp32Lite)
     );

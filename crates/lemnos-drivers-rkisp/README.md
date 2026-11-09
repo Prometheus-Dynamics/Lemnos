@@ -1,7 +1,7 @@
 # lemnos-drivers-rkisp
 
-The Rockchip ISP21 (RK3566, RK3568), ISP30 (RK3588, RK3588S) and ISP32 (RV1106, RV1103, and the
-ISP32-lite of RK3562) image signal processors from Rust: which ISP a SoC has, the ISP's parameter
+The Rockchip ISP21 (RK3566, RK3568), ISP30 (RK3588, RK3588S), ISP32 (RV1106, RV1103, and the
+ISP32-lite of RK3562) and ISP35 (RV1126B) image signal processors from Rust: which ISP a SoC has, the ISP's parameter
 buffer trait, the ISP32 variants and their video node names, and, with the `device` feature, the
 vendor `rkisp` driver's nodes on `lemnos-v4l2`. The uAPI layouts are re-exported as `uapi` from the
 `-sys` crate `lemnos-rkisp-sys`. The crate forbids unsafe code.
