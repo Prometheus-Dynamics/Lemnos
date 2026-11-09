@@ -5,7 +5,7 @@ use std::os::fd::AsFd;
 
 use lemnos_linux_sys::v4l2::device::{
     VIDEO_MAX_PLANES, VIDIOC_ENUM_FMT, VIDIOC_ENUM_FRAMEINTERVALS, VIDIOC_ENUM_FRAMESIZES,
-    VIDIOC_G_FMT, VIDIOC_G_PARM, VIDIOC_G_SELECTION, VIDIOC_S_FMT, VIDIOC_S_PARM,
+    VIDIOC_G_FMT, VIDIOC_G_PARM, VIDIOC_G_SELECTION, VIDIOC_S_FMT, VIDIOC_S_INPUT, VIDIOC_S_PARM,
     VIDIOC_S_SELECTION, VIDIOC_TRY_FMT, v4l2_captureparm, v4l2_fmtdesc, v4l2_format,
     v4l2_frmivalenum, v4l2_frmsizeenum, v4l2_meta_format, v4l2_pix_format, v4l2_pix_format_mplane,
     v4l2_plane_pix_format, v4l2_selection, v4l2_streamparm, zeroed,
@@ -512,6 +512,13 @@ impl VideoDevice {
         let mut raw = format.to_raw(buf_type)?;
         node::ioctl(self.as_fd(), VIDIOC_TRY_FMT, &mut raw)?;
         Format::from_raw(&raw)
+    }
+
+    /// Selects the device's video input (`VIDIOC_S_INPUT`). What an index means is the driver's;
+    /// a driver may also do real work here, and some need this call before the format is set.
+    pub fn set_input(&self, index: u32) -> Result<()> {
+        let mut raw = index.cast_signed();
+        node::ioctl(self.as_fd(), VIDIOC_S_INPUT, &mut raw)
     }
 
     /// The streaming parameters of a queue (`VIDIOC_G_PARM`).

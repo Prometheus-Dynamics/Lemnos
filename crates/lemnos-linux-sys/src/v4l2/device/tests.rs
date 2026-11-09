@@ -98,6 +98,7 @@ fn request_numbers_match_the_kernel_header() {
     assert_eq!(VIDIOC_G_CTRL.nr(), 0xc008_561b);
     assert_eq!(VIDIOC_S_CTRL.nr(), 0xc008_561c);
     assert_eq!(VIDIOC_QUERYMENU.nr(), 0xc02c_5625);
+    assert_eq!(VIDIOC_S_INPUT.nr(), 0xc004_5627);
     assert_eq!(VIDIOC_G_EXT_CTRLS.nr(), 0xc020_5647);
     assert_eq!(VIDIOC_S_EXT_CTRLS.nr(), 0xc020_5648);
     assert_eq!(VIDIOC_TRY_EXT_CTRLS.nr(), 0xc020_5649);

@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `VideoDevice::set_input` (`lemnos-v4l2`): `VIDIOC_S_INPUT`, which the A733's `sunxi-vin` driver needs before the format is set.
 - `lemnos-soc`: tables for the RV1126B and the A733, from the vendors' device trees. Untested on board.
 - `lemnos-drivers-rkvpss` and `lemnos_linux_sys::rkvpss`: Rockchip's `rkvpss` offline scaler (RV1126B) through the vendor kernel's `rkvpss-offline` node: crop, scale and format conversion from one dma-buf to as many as six. Every frame is checked against its dma-buf's size. Untested on board.
 - `lemnos-drivers-nonai2d`: the K230 non-AI 2D engine, pixel-format conversion between dma-bufs through the K230 Linux SDK's `nonai-2d` V4L2 mem2mem driver, one dma-buf per plane. Untested on board.
