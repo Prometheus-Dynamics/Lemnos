@@ -199,6 +199,26 @@ int main(void)
 	      "lemnos_rp1_csi2_check wedge");
 	check(!forget_override(CSI2), "override cleared");
 	check(!unload("lemnos"), "module unloaded with a wedged stream pinned");
+
+	check(!load("/lemnos.ko", OWNED_CSI2 " test_pisp_fe=1"),
+	      "module loaded with the front end test paths");
+	check(!bind_block(BLOCK), "test block bound");
+	check(!bind_csi2(), "receiver with front end bound");
+	check(!run((char *const[]){ "/lemnos_pisp_fe_check", "/dev/lemnos", CSI2, CSI2_UNBIND,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_pisp_fe_check");
+	check(!put(UNBIND, BLOCK), "test block unbound");
+	check(!forget_override(BLOCK) && !forget_override(CSI2), "overrides cleared");
+	check(!unload("lemnos"), "module unloaded after the front end checks");
+
+	check(!load("/lemnos.ko", OWNED_CSI2 " test_pisp_fe=1"),
+	      "module loaded for the front end's stuck-DMA check");
+	check(!bind_csi2(), "receiver bound again");
+	check(!run((char *const[]){ "/lemnos_pisp_fe_check", "wedge", CSI2, CSI2_UNBIND,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_pisp_fe_check wedge");
+	check(!forget_override(CSI2), "override cleared");
+	check(!unload("lemnos"), "module unloaded with a wedged front end stream pinned");
 	check(!unload("lemnos_test_block"), "test block module unloaded");
 
 	check(!load("/lemnos_test_block.ko", ""), "test block module loaded for the PiSP back end");

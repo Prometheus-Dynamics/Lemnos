@@ -10,6 +10,12 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
+/* The front end's window is 4K at csi2_phys + 12K: tcsi_fe_peek reads a register of it. */
+struct tcsi_fe_peek {
+	__u32 offset;	/* in */
+	__u32 value;	/* out */
+};
+
 struct tcsi_regs {
 	__u32 addr0, addr1, length, stride, ctrl, frame_size, debug, reserved;
 };
@@ -22,5 +28,20 @@ struct tcsi_regs {
 #define TCSI_IOC_PEEK	_IOR('T', 2, struct tcsi_regs)
 /* After FORCE, the channel's line counter moves for this many ms. ~0: never stops. */
 #define TCSI_IOC_BUSY	_IOW('T', 3, __u32)
+
+#define TFE_EOF		0x1u
+#define TFE_SOF		0x2u
+
+/*
+ * The front end's interrupt: a start of frame latches the addresses the
+ * configuration registers hold, an end of frame writes them, bounded by the
+ * configuration's own sizes, as the block would.
+ */
+#define TCSI_IOC_FE_FIRE	_IOW('T', 4, __u32)
+#define TCSI_IOC_FE_PEEK	_IOWR('T', 5, struct tcsi_fe_peek)
+/* Sets the front end's STATUS register directly. */
+#define TCSI_IOC_FE_STATUS	_IOW('T', 6, __u32)
+/* STATUS reads busy for this many ms. ~0: never idle. */
+#define TCSI_IOC_FE_BUSY	_IOW('T', 7, __u32)
 
 #endif

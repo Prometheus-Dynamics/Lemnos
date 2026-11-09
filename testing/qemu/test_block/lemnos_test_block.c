@@ -26,6 +26,8 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
+#include <uapi/linux/media/raspberrypi/pisp_fe_config.h>
+
 #include "lemnos_test_csi2.h"
 
 #define TB_IRQS 4
@@ -39,7 +41,7 @@
 
 static unsigned long csi2_phys;
 module_param(csi2_phys, ulong, 0444);
-MODULE_PARM_DESC(csi2_phys, "Physical address of 12K set aside for the fake receiver's registers");
+MODULE_PARM_DESC(csi2_phys, "Physical address of 16K set aside for the fake receiver's registers");
 
 /* Offsets of the fake receiver's registers, as the module under test writes them. */
 #define R_STATUS	0x000
@@ -53,8 +55,17 @@ MODULE_PARM_DESC(csi2_phys, "Physical address of 12K set aside for the fake rece
 #define R_INTS		0x034	/* in the third window */
 #define R_FORCE		BIT(3)
 #define R_INT_DMA	BIT(0)
+#define R_INT_FE	BIT(4)
 
-static void __iomem *tcsi_regs[3];
+/* Offsets of the fake front end's registers. */
+#define FE_R_STATUS	0x008
+#define FE_R_INT_STATUS	0x01c
+#define FE_R_CONFIG	0x040
+#define FE_R_INT_EOF	BIT(0)
+#define FE_R_INT_SOF	BIT(1)
+#define FE_R_BUSY	0x4u	/* FE_STATUS_ACTIVE */
+
+static void __iomem *tcsi_regs[4];	/* third: mipi cfg; fourth: the front end */
 static int tcsi_irq;
 static struct platform_device *tcsi_pdev;
 static DEFINE_MUTEX(tcsi_lock);
@@ -65,6 +76,34 @@ static u8 tcsi_pattern;
 
 static void tcsi_tick(struct work_struct *work);
 static DECLARE_DELAYED_WORK(tcsi_work, tcsi_tick);
+static u64 tfe_stats, tfe_out[2];
+static u32 tfe_out_bytes[2];
+static u8 tfe_pattern;
+
+static void tfe_busy_tick(struct work_struct *work);
+static DECLARE_DELAYED_WORK(tfe_busy_work, tfe_busy_tick);
+
+static void tfe_busy_tick(struct work_struct *work)
+{
+	writel(0, tcsi_regs[3] + FE_R_STATUS);
+}
+
+static u64 tfe_read_addr(unsigned int offset)
+{
+	return ((u64)readl(tcsi_regs[3] + FE_R_CONFIG + offset + 4) << 32) |
+	       readl(tcsi_regs[3] + FE_R_CONFIG + offset);
+}
+
+static u32 tfe_read_out_bytes(unsigned int i)
+{
+	unsigned int at = offsetof(struct pisp_fe_config, ch[i].output.format);
+	struct pisp_image_format_config f;
+
+	memcpy_fromio(&f, tcsi_regs[3] + FE_R_CONFIG + at, sizeof(f));
+	if (f.stride <= 0)
+		return 0;
+	return (u32)f.stride * f.height;
+}
 
 static void tcsi_tick(struct work_struct *work)
 {
@@ -72,7 +111,10 @@ static void tcsi_tick(struct work_struct *work)
 	bool again = true;
 
 	mutex_lock(&tcsi_lock);
-	if (readl(dma + R_CTRL) & R_FORCE) {
+	if (!tcsi_busy) {
+		/* Told to stop, including after "forever": it must not wrap. */
+		again = false;
+	} else if (readl(dma + R_CTRL) & R_FORCE) {
 		writel(readl(dma + R_DEBUG) + 1, dma + R_DEBUG);
 		if (tcsi_busy != U32_MAX && !--tcsi_busy)
 			again = false;
@@ -104,6 +146,64 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		};
 
 		return copy_to_user(uarg, &r, sizeof(r)) ? -EFAULT : 0;
+	}
+	if (cmd == TCSI_IOC_FE_PEEK) {
+		struct tcsi_fe_peek p;
+
+		if (!tcsi_regs[3])
+			return -ENODEV;
+		if (copy_from_user(&p, uarg, sizeof(p)))
+			return -EFAULT;
+		if (p.offset > SZ_4K - 4)
+			return -EINVAL;
+		p.value = readl(tcsi_regs[3] + p.offset);
+		return copy_to_user(uarg, &p, sizeof(p)) ? -EFAULT : 0;
+	}
+	if (cmd == TCSI_IOC_FE_STATUS) {
+		u32 v;
+
+		if (copy_from_user(&v, uarg, sizeof(v)))
+			return -EFAULT;
+		writel(v, tcsi_regs[3] + FE_R_STATUS);
+		return 0;
+	}
+	if (cmd == TCSI_IOC_FE_BUSY) {
+		u32 ms;
+
+		if (copy_from_user(&ms, uarg, sizeof(ms)))
+			return -EFAULT;
+		writel(FE_R_BUSY, tcsi_regs[3] + FE_R_STATUS);
+		cancel_delayed_work(&tfe_busy_work);
+		if (ms != U32_MAX)
+			schedule_delayed_work(&tfe_busy_work, msecs_to_jiffies(ms));
+		return 0;
+	}
+	if (cmd == TCSI_IOC_FE_FIRE) {
+		u32 status;
+
+		if (copy_from_user(&status, uarg, sizeof(status)))
+			return -EFAULT;
+		if (status & FE_R_INT_SOF) {
+			tfe_stats = tfe_read_addr(offsetof(struct pisp_fe_config, stats_buffer));
+			tfe_out[0] = tfe_read_addr(offsetof(struct pisp_fe_config, output_buffer[0]));
+			tfe_out[1] = tfe_read_addr(offsetof(struct pisp_fe_config, output_buffer[1]));
+			tfe_out_bytes[0] = tfe_read_out_bytes(0);
+			tfe_out_bytes[1] = tfe_read_out_bytes(1);
+		}
+		if (status & FE_R_INT_EOF) {
+			++tfe_pattern;
+			for (int i = 0; i < 2; i++)
+				if (tfe_out[i] && tfe_out_bytes[i])
+					memset(phys_to_virt(tfe_out[i]), tfe_pattern, tfe_out_bytes[i]);
+			if (tfe_stats)
+				memset(phys_to_virt(tfe_stats), tfe_pattern,
+				       sizeof(struct pisp_statistics));
+			tfe_stats = 0;
+			tfe_out[0] = tfe_out[1] = 0;
+		}
+		writel(status, tcsi_regs[3] + FE_R_INT_STATUS);
+		writel(R_INT_FE, cfg + R_INTS);
+		return irq_set_irqchip_state(tcsi_irq, IRQCHIP_STATE_PENDING, true);
 	}
 	if (cmd == TCSI_IOC_BUSY) {
 		u32 ms;
@@ -265,6 +365,7 @@ static void tb_teardown(void)
 	if (tcsi_misc.minor != MISC_DYNAMIC_MINOR)
 		misc_deregister(&tcsi_misc);
 	cancel_delayed_work_sync(&tcsi_work);
+	cancel_delayed_work_sync(&tfe_busy_work);
 	if (!IS_ERR_OR_NULL(tcsi_pdev))
 		platform_device_unregister(tcsi_pdev);
 	for (int i = 0; i < ARRAY_SIZE(tcsi_regs); i++)
@@ -348,7 +449,7 @@ static int __init tb_init(void)
 		goto fail;
 	}
 	if (csi2_phys) {
-		struct resource cr[4];
+		struct resource cr[5];
 		struct platform_device_info csi = {
 			.name = "lemnos-test-csi2",
 			.id = PLATFORM_DEVID_NONE,
@@ -359,7 +460,7 @@ static int __init tb_init(void)
 		};
 
 		memset(cr, 0, sizeof(cr));
-		for (int i = 0; i < 3; i++) {
+		for (int i = 0; i < 4; i++) {
 			cr[i] = (struct resource)DEFINE_RES_MEM(csi2_phys + i * SZ_4K, SZ_4K);
 			tcsi_regs[i] = ioremap(csi2_phys + i * SZ_4K, SZ_4K);
 			if (!tcsi_regs[i]) {
@@ -369,7 +470,7 @@ static int __init tb_init(void)
 			memset_io(tcsi_regs[i], 0, SZ_4K);
 		}
 		tcsi_irq = tb_irq[TB_IRQS - 1];
-		cr[3] = (struct resource)DEFINE_RES_IRQ(tcsi_irq);
+		cr[4] = (struct resource)DEFINE_RES_IRQ(tcsi_irq);
 		tcsi_pdev = platform_device_register_full(&csi);
 		if (IS_ERR(tcsi_pdev)) {
 			ret = PTR_ERR(tcsi_pdev);

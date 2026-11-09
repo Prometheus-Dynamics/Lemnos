@@ -141,12 +141,14 @@ struct lem_stream {
 	u32 period_us, left;
 	struct work_struct gone;	/* the block going away, see lem_streams_block_gone */
 
+	bool cpu_read;			/* registered regions keep a kernel mapping */
 	struct lem_stream_producer producer;	/* the block feeding this stream, or stop NULL */
 	u32 frame_bytes;		/* what the producer may write per buffer */
 	bool wedged;			/* a block's DMA could not be seen to stop: nothing is unpinned */
 };
 
 static const struct file_operations lem_stream_fops;
+static int lem_region_vmap(struct lem_stream_region *r);
 
 static LIST_HEAD(lem_streams);
 static DEFINE_MUTEX(lem_streams_lock);
@@ -664,6 +666,96 @@ void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot)
 	spin_unlock_irqrestore(&s->lock, flags);
 }
 
+/* The registered region a range names, or NULL for the pool or an empty slot. Lock held. */
+static const struct lem_stream_region *lem_stream_range_region(const struct lem_stream *s,
+							       const struct lem_job_range *r)
+{
+	const struct lem_stream_region *reg;
+	u64 end;
+
+	if (r->region == LEM_STREAM_POOL || r->region >= LEM_STREAM_REGIONS)
+		return NULL;
+	reg = &s->region[r->region];
+	if (!reg->buf || !reg->users || check_add_overflow(r->offset, r->len, &end) ||
+	    end > reg->size)
+		return NULL;
+	return reg;
+}
+
+int lem_stream_range_read(struct lem_stream *s, const struct lem_job_range *r, void *dst,
+			  size_t bytes)
+{
+	const struct lem_stream_region *reg;
+	unsigned long flags;
+	int ret = -EFAULT;
+
+	spin_lock_irqsave(&s->lock, flags);
+	reg = lem_stream_range_region(s, r);
+	if (reg && !iosys_map_is_null(&reg->map)) {
+		if (r->len == bytes) {
+			memcpy(dst, (const u8 *)reg->map.vaddr + r->offset, bytes);
+			ret = 0;
+		} else {
+			ret = -EINVAL;
+		}
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	return ret;
+}
+
+int lem_stream_range_addr(struct lem_stream *s, const struct lem_job_range *r, u64 *addr)
+{
+	const struct lem_stream_region *reg;
+	unsigned long flags;
+	int ret = -EACCES;
+
+	spin_lock_irqsave(&s->lock, flags);
+	reg = lem_stream_range_region(s, r);
+	if (reg && !check_add_overflow(reg->addr, r->offset, addr))
+		ret = 0;
+	spin_unlock_irqrestore(&s->lock, flags);
+	return ret;
+}
+
+/* Test only, see lemnos_internal.h. */
+void lem_stream_range_poke(struct lem_stream *s, const struct lem_job_range *r, size_t offset,
+			   u32 val)
+{
+	const struct lem_stream_region *reg;
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	reg = lem_stream_range_region(s, r);
+	if (reg && !iosys_map_is_null(&reg->map) && offset + sizeof(val) <= r->len)
+		WRITE_ONCE(*(u32 *)((u8 *)reg->map.vaddr + r->offset + offset), val);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+/*
+ * Registered regions keep a kernel mapping from here on, so a block can read
+ * through lem_stream_range_read(). s->ctl, so never under the block's locks.
+ */
+int lem_stream_cpu_read_enable(struct lem_stream *s)
+{
+	int ret = 0;
+
+	mutex_lock(&s->ctl);
+	if (s->dead) {
+		ret = -ENODEV;
+		goto out;
+	}
+	s->cpu_read = true;
+	for (u32 i = LEM_STREAM_POOL + 1; i < LEM_STREAM_REGIONS && !ret; i++) {
+		struct lem_stream_region *r = &s->region[i];
+
+		if (r->buf && iosys_map_is_null(&r->map))
+			ret = lem_region_vmap(r);
+	}
+out:
+	mutex_unlock(&s->ctl);
+	return ret;
+}
+
 void lem_stream_wedge(struct lem_stream *s)
 {
 	unsigned long flags;
@@ -858,6 +950,19 @@ fail:
 	return ret;
 }
 
+/* A region's kernel mapping, for lem_stream_range_read(). Not for iomem: see lem_region_map. */
+static int lem_region_vmap(struct lem_stream_region *r)
+{
+	int ret = dma_buf_vmap_unlocked(r->buf, &r->map);
+
+	if (!ret && r->map.is_iomem) {
+		dma_buf_vunmap_unlocked(r->buf, &r->map);
+		iosys_map_clear(&r->map);
+		return -EINVAL;
+	}
+	return ret;
+}
+
 /* --- the stream's ioctls --- */
 
 /* Holds s->ctl. */
@@ -871,6 +976,13 @@ static long lem_stream_register(struct lem_stream *s, struct lemnos_stream_regis
 	ret = lem_region_map(s->dev, a->fd, &r);
 	if (ret)
 		return ret;
+	if (s->cpu_read && iosys_map_is_null(&r.map)) {
+		ret = lem_region_vmap(&r);
+		if (ret) {
+			lem_region_unmap(&r);
+			return ret;
+		}
+	}
 
 	spin_lock_irqsave(&s->lock, flags);
 	for (u32 i = 0; i < LEM_STREAM_REGIONS; i++) {

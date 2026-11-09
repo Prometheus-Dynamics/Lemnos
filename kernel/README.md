@@ -32,6 +32,7 @@ as soon as the module loads.
 | `pisp_be` | Compatibles driven as the PiSP back end (`lemnos_pisp_be.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
 | `test_pb_fake_regs` | Test only. The back end's register window is ordinary memory, for the fake block in QEMU. |
 | `test_stream_source` | Test only. Enables `LEMNOS_STREAM_IOC_TEST_SOURCE`, a source that fills frames through a kernel mapping. |
+| `test_pisp_fe` | Test only. Enables the PiSP front end's write log and post-copy overwrite ioctls. |
 
 ## Claims
 
@@ -114,6 +115,38 @@ kernel log says so. Closing a stream or unbinding waits for what's on the block 
 `lemnos_pisp_be.c` keeps the stock driver's copyright for its register sequence and job
 accounting; see its header.
 
+## The PiSP front end
+
+`lemnos_pisp_fe.c` drives the PiSP front end, the block's other half. It has no device of its own:
+it shares the receiver's platform device, node and interrupt, and adds `LEMNOS_PISP_FE_IOC_*`
+(`lemnos_pisp_fe.h`). A stream is made on the node as for the receiver and handed to `START` along
+with the receiver's link and frame; the channel then feeds the front end instead of memory, so the
+receiver's own `START` is refused with `EBUSY` while the front end runs.
+
+A job is one frame on the stream's ring. Its pool buffer is output 0, and its ranges name, in order,
+a configuration in a registered dma-buf, the statistics buffer when a statistics block is on, and
+output 1 when it is on. The configuration is copied once, from a kernel mapping of the dma-buf, into
+kernel memory; only that copy is checked and only that copy is written to the registers. Every
+address field and `ilines` must be zero in it: the module fills them in from the frame's slot and
+the job's ranges, which the stream resolved to its pinned dma-bufs. Sizes are the ones the block
+will use, derived from the crop, downscale and format. An output line is 16 bits a sample, or a
+compressed mode at 8 bits with its compress block on in that mode; every other format bit, and the
+decompress block (`EOPNOTSUPP`; the input is always 16 bits), is refused. Statistics crops and grids
+the block could lock up on are refused, and what's disabled inside a branch is blanked in the copy.
+A refusal, of any kind, leaves the registers alone and ends the stream with its errno.
+
+Sequence, from the stock driver: at `START` the first job is taken and checked before any register
+is written. Then the channel in front end mode, the front end's reset and interrupts, the first job
+and `QUEUE`, and the link last. Each frame's interrupt programs the next job when the block isn't
+holding one. Stopping (`STOP`, closing the stream or node, unbinding) is one path: channel force,
+interrupts off, `ABORT`, waits out any running handler, then `STATUS` must read zero eight times in
+a row. If it doesn't within a bounded time, nothing is released, every pin stays until reboot, and
+`START` is refused until the block is bound again (`LEMNOS_PISP_FE_INFO_WEDGED`).
+
+GPL-2.0-only. Register offsets and the start, submit, interrupt and stop sequences are ported from
+the stock `rp1_cfe` driver's `pisp-fe.c` and `cfe.c`, Copyright (C) 2021-2024 Raspberry Pi Ltd.; the
+notice is kept in the file header. The driver is `drivers/pisp/` (`PispFe`, the `device` feature).
+
 ## Unbinding
 
 Requests for a block fail with `ENODEV` from the moment its unbind starts, its register mappings
@@ -128,6 +161,6 @@ make KDIR=<a built kernel tree>
 ```
 
 `testing/qemu/run.sh` builds the module and boots a kernel in QEMU with it loaded, then runs
-`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_stream_check.c` and `test/lemnos_rp1_csi2_check.c` on blocks with
+`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_stream_check.c`, `test/lemnos_rp1_csi2_check.c` and `test/lemnos_pisp_fe_check.c` on blocks with
 nothing behind them. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
 and memory checking on.

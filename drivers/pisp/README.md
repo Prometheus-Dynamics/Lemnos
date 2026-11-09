@@ -3,9 +3,10 @@
 Configuration for PiSP, the BCM2712 ISP: the uAPI layouts, the front end and back end builders,
 tiling, and statistics decoding, which touch no hardware; with no features (`--no-default-features`)
 that is the whole crate, with no dependencies and `no_std`, without an allocator. The default
-`device` feature adds the back end driver (`be_device`, `be_hw`), `camera.isp/1` and `isp.pisp/1`
-over the kernel module; all of its `unsafe` is in `drivers/pisp-sys`. `be_job` is the part of that
-which needs no operating system.
+`device` feature adds the back end driver (`be_device`, `be_hw`) and the front end driver
+(`fe_device`, `fe_hw`), `camera.isp/1` and `isp.pisp/1` over the kernel module; all of their
+`unsafe` is in `drivers/pisp-sys` and `drivers/pisp-fe-sys`. `be_job` and `fe_job` are the parts of
+that which need no operating system.
 
 ## What is kept and what is not
 

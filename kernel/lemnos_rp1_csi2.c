@@ -62,6 +62,7 @@
 
 #include "lemnos_internal.h"
 #include "lemnos_rp1_csi2.h"
+#include "lemnos_rp1_csi2_priv.h"
 
 #define LRC_NAME	"lemnos-rp1-csi2"
 #define LRC_CH		0
@@ -101,6 +102,8 @@
 #define EOP_IS_EOL		BIT(0)
 #define DMA_EN			BIT(0)
 #define FORCE			BIT(3)
+#define AUTO_ARM		BIT(4)
+#define CSI2_MODE_FE_STREAMING	3
 #define IRQ_EN_FS		BIT(13)
 #define IRQ_EN_FE_ACK		BIT(15)
 #define PACK_LINE		BIT(29)
@@ -114,6 +117,7 @@
 #define MIPICFG_INTS		0x034
 #define MIPICFG_CFG_SEL_CSI	BIT(0)
 #define MIPICFG_INT_CSI_DMA	BIT(0)
+#define MIPICFG_INT_PISP_FE	BIT(4)
 
 /* The windows must cover what's used here, so a short region can't be mistaken for one. */
 #define LRC_DMA_WINDOW		(CSI2_CH_FRAME_SIZE(LRC_CH) + 4)
@@ -135,43 +139,25 @@
 #define LRC_STOP_STILL_READS	8
 #define LRC_STOP_POLLS		250
 
-struct lrc_frame {
-	struct lem_stream_slot slot;
-	bool valid;
-};
-
-struct lrc_dev {
-	struct kref ref;		/* the block, each open file, each attached stream */
-	struct device *dev;		/* held until freed */
-	void __iomem *dma, *host, *cfg;
-	int irq;
-	u32 host_version, max_lanes;
-	u8 polarity[5];			/* clock, then data lanes 0-3 */
-	struct miscdevice misc;
-	char name[64];
-	atomic_t opened;
-
-	struct rw_semaphore going;	/* stream creation against unbinding */
-	struct mutex ctl;		/* START, STOP, close, unbind */
-	bool gone;			/* unbound: every register access is off */
-	bool wedged;			/* a stop couldn't be confirmed */
-
-	spinlock_t lock;		/* the frame path, everything below */
-	struct lem_stream *stream;	/* non-NULL while streaming */
-	bool streaming, fs_int, fe_int;
-	struct lrc_frame cur, next;	/* being written; in the channel's shadow registers */
-	u64 fs_ns;			/* the current frame's start */
-	struct lemnos_rp1_csi2_start start;
-	u64 frames, written, dropped, errors;
-};
-
 static void lrc_free(struct kref *ref)
 {
 	struct lrc_dev *l = container_of(ref, struct lrc_dev, ref);
 
+	if (l->fe)
+		lem_pisp_fe_destroy(l->fe);
 	put_device(l->dev);
 	mutex_destroy(&l->ctl);
 	kfree(l);
+}
+
+void lrc_ref_get(struct lrc_dev *l)
+{
+	kref_get(&l->ref);
+}
+
+void lrc_ref_put(struct lrc_dev *l)
+{
+	kref_put(&l->ref, lrc_free);
 }
 
 static u32 rd(void __iomem *base, unsigned int off)
@@ -321,15 +307,19 @@ static irqreturn_t lrc_isr(int irq, void *data)
 {
 	struct lrc_dev *l = data;
 	u64 now = ktime_get_ns();
-	bool sof, eof;
+	bool sof, eof, handled = false;
 	u32 sts, status;
 
 	sts = rd(l->cfg, MIPICFG_INTS);
+	if (l->fe && (sts & MIPICFG_INT_PISP_FE)) {
+		lem_pisp_fe_isr(l->fe, now);
+		handled = true;
+	}
 	if (!(sts & MIPICFG_INT_CSI_DMA))
-		return IRQ_NONE;
+		return handled ? IRQ_HANDLED : IRQ_NONE;
 	status = rd(l->dma, CSI2_STATUS);
 	if (!status)
-		return IRQ_NONE;
+		return handled ? IRQ_HANDLED : IRQ_NONE;
 	wr(l->dma, CSI2_STATUS, status);	/* write back to clear */
 	sof = status & IRQ_FS(LRC_CH);
 	eof = status & IRQ_FE_ACK(LRC_CH);
@@ -480,7 +470,7 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 		return ret;
 	if (l->wedged)
 		return -EIO;
-	if (l->stream)
+	if (l->stream || (l->fe && lem_pisp_fe_streaming(l->fe)))
 		return -EBUSY;
 
 	file = fget(s->stream_fd);
@@ -534,6 +524,49 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 put_file:
 	fput(file);
 	return ret;
+}
+
+/*
+ * csi2_start_channel(CSI2_MODE_FE_STREAMING, auto arm) and the latch write, in
+ * that order: cfe_start_channel for the channel feeding the front end. The
+ * channel's addresses are zero and never come from anywhere else: it hands the
+ * stream to the front end, and the front end has every DMA address.
+ */
+void lrc_fe_channel_start(struct lrc_dev *l, u32 width, u32 height, u32 vc, u32 dt)
+{
+	u32 ctrl;
+
+	wr(l->dma, CSI2_CH_CTRL(LRC_CH), 0);
+	wr(l->dma, CSI2_CH_DEBUG(LRC_CH), 0);
+	wr(l->dma, CSI2_STATUS, IRQ_CH_MASK(LRC_CH));
+	ctrl = DMA_EN | IRQ_EN_FS | IRQ_EN_FE_ACK | PACK_LINE | AUTO_ARM;
+	ctrl |= CSI2_MODE_FE_STREAMING << CH_MODE_SHIFT;
+	wr(l->dma, CSI2_CH_FRAME_SIZE(LRC_CH), (height << 16) | width);
+	ctrl |= (vc << VC_SHIFT) | (dt << DT_SHIFT);
+	wr(l->dma, CSI2_CH_CTRL(LRC_CH), ctrl);
+	wr(l->dma, CSI2_CH_LENGTH(LRC_CH), 0xffffffffu >> 4);
+	wr(l->dma, CSI2_CH_STRIDE(LRC_CH), 0);
+	wr(l->dma, CSI2_CH_ADDR1(LRC_CH), 0);
+	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
+}
+
+/* cfe_start_streaming's order after the channel and the front end are armed. */
+void lrc_fe_open_rx(struct lrc_dev *l, u32 lanes, u32 mbps)
+{
+	wr(l->cfg, MIPICFG_CFG, MIPICFG_CFG_SEL_CSI);
+	wr(l->cfg, MIPICFG_INTE, MIPICFG_INT_CSI_DMA | MIPICFG_INT_PISP_FE);
+	wr(l->dma, CSI2_IRQ_MASK, 0);
+	dphy_start(l, lanes, mbps);
+	wr(l->dma, CSI2_CTRL, EOP_IS_EOL);
+}
+
+void lrc_fe_channel_stop(struct lrc_dev *l)
+{
+	wr(l->dma, CSI2_CH_CTRL(LRC_CH), FORCE);
+	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
+	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
+	wr(l->dma, CSI2_IRQ_MASK, 0);
+	wr(l->cfg, MIPICFG_INTE, 0);
 }
 
 static long lrc_info(struct lrc_dev *l, void __user *arg)
@@ -606,7 +639,7 @@ static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		mutex_unlock(&l->ctl);
 		return ret;
 	default:
-		return -ENOTTY;
+		return l->fe ? lem_pisp_fe_ioctl(l->fe, cmd, uarg) : -ENOTTY;
 	}
 }
 
@@ -628,6 +661,8 @@ static int lrc_release(struct inode *inode, struct file *file)
 	mutex_lock(&l->ctl);
 	if (l->stream)
 		lrc_stop_locked(l, l->stream);
+	if (l->fe)
+		lem_pisp_fe_stop(l->fe);
 	mutex_unlock(&l->ctl);
 	atomic_set(&l->opened, 0);
 	kref_put(&l->ref, lrc_free);
@@ -710,6 +745,21 @@ static int lrc_probe(struct platform_device *pdev)
 		ret = PTR_ERR(l->cfg);
 		goto fail;
 	}
+	/* The front end's own registers, when the block has them (cfe.c, resource 3). */
+	if (platform_get_resource(pdev, IORESOURCE_MEM, 3)) {
+		void __iomem *fe = lrc_window(pdev, 3, LEM_PISP_FE_WINDOW);
+
+		if (IS_ERR(fe)) {
+			ret = PTR_ERR(fe);
+			goto fail;
+		}
+		l->fe = lem_pisp_fe_create(l, fe);
+		if (IS_ERR(l->fe)) {
+			ret = PTR_ERR(l->fe);
+			l->fe = NULL;
+			goto fail;
+		}
+	}
 	l->irq = platform_get_irq(pdev, 0);
 	if (l->irq <= 0) {
 		ret = l->irq ?: -EINVAL;
@@ -762,6 +812,8 @@ static void lrc_remove(struct platform_device *pdev)
 	mutex_lock(&l->ctl);
 	if (l->stream)
 		lrc_stop_locked(l, l->stream);
+	if (l->fe)
+		lem_pisp_fe_stop(l->fe);
 	wr(l->cfg, MIPICFG_INTE, 0);
 	wr(l->dma, CSI2_IRQ_MASK, 0);
 	mutex_unlock(&l->ctl);
