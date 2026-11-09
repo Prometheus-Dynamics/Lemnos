@@ -7,7 +7,17 @@
 
 #include "lemnos.h"
 
+struct device;
+
 long lem_claim(struct lemnos_claim *c);
+/* Whether `fd` is a claim on exactly `resource`. Allocates nothing. */
+bool lem_claim_held(int fd, const char *resource);
+
+int lem_bus_init(void);
+void lem_bus_exit(void);
+long lem_i2c_transfer(const struct lemnos_i2c_transfer *t);
+long lem_i2c_smbus(struct lemnos_i2c_smbus *s);
+long lem_spi_transfer(const struct lemnos_spi_transfer *t);
 
 struct device;
 struct file;

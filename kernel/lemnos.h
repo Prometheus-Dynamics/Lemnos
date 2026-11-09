@@ -75,6 +75,14 @@
  *   EPERM      a returned buffer that isn't out, or with the wrong fence
  * A malformed consumer faults only its own stream.
  *
+ * Buses go through the kernel's own I2C and SPI cores. Every transfer names a
+ * claim, and the claim's resource must be the target's: "i2c-<bus>:0x<addr>"
+ * in lower-case hex, or "spi-<bus>.<cs>". An I2C address a kernel driver holds
+ * is refused with EBUSY. A SPI device is bound to the module the same way a
+ * block is, through driver_override and owned=. A transfer is all or nothing
+ * as the kernel's core defines it, and carries at most the module's
+ * bus_buffer bytes each way (EMSGSIZE beyond that).
+ *
  * Copyright (c) 2026 the Lemnos authors.
  */
 #ifndef _UAPI_LEMNOS_H
@@ -255,6 +263,67 @@ struct lemnos_stream_test_source {
 #define LEMNOS_STREAM_IOC_STATUS       _IOR('L', 0x84, struct lemnos_stream_status)
 #define LEMNOS_STREAM_IOC_TEST_SOURCE  _IOW('L', 0x85, struct lemnos_stream_test_source)
 
+#define LEMNOS_BUS_MAX_SEGMENTS 16
+
+/* lemnos_i2c_segment.flags */
+#define LEMNOS_I2C_READ		(1u << 0)
+/* lemnos_i2c_transfer.flags */
+#define LEMNOS_I2C_TEN_BIT	(1u << 0)
+
+struct lemnos_i2c_segment {
+	__u64 buf;		/* user pointer */
+	__u32 len;		/* bytes, at most 65535 */
+	__u32 flags;		/* LEMNOS_I2C_* */
+};
+
+/* Repeated starts between segments, one stop at the end, to one target. */
+struct lemnos_i2c_transfer {
+	__s32 claim;		/* a claim on this target */
+	__u32 bus;
+	__u16 addr;
+	__u16 flags;		/* LEMNOS_I2C_TEN_BIT */
+	__u32 count;		/* up to LEMNOS_BUS_MAX_SEGMENTS */
+	__u64 segments;		/* user pointer to lemnos_i2c_segment[count] */
+};
+
+/* One SMBus command, for adapters without plain transfers. */
+struct lemnos_i2c_smbus {
+	__s32 claim;		/* a claim on this target */
+	__u32 bus;
+	__u16 addr;
+	__u16 flags;		/* LEMNOS_I2C_TEN_BIT */
+	__u8 read;		/* 1 to read, 0 to write */
+	__u8 command;
+	__u16 protocol;		/* I2C_SMBUS_QUICK and friends, from <linux/i2c.h> */
+	__u8 data[34];		/* union i2c_smbus_data */
+	__u8 reserved[6];
+};
+
+struct lemnos_spi_segment {
+	__u64 tx;		/* user pointer, or 0 */
+	__u64 rx;		/* user pointer, or 0 */
+	__u32 len;		/* bytes each way */
+	__u32 speed_hz;		/* 0: the device's */
+	__u16 delay_us;		/* after this segment */
+	__u8 bits;		/* 0: the device's */
+	__u8 cs_change;
+	__u32 reserved;
+};
+
+/* Mode bits are SPI_CPHA, SPI_CPOL, SPI_CS_HIGH and SPI_LSB_FIRST. */
+struct lemnos_spi_transfer {
+	__s32 claim;		/* a claim on this device */
+	__u32 bus;
+	__u32 cs;
+	__u32 mode;
+	__u32 count;		/* up to LEMNOS_BUS_MAX_SEGMENTS */
+	__u32 reserved;
+	__u64 segments;		/* user pointer to lemnos_spi_segment[count] */
+};
+
+#define LEMNOS_IOC_I2C_TRANSFER _IOW('L', 0xa8, struct lemnos_i2c_transfer)
+#define LEMNOS_IOC_I2C_SMBUS  _IOWR('L', 0xa9, struct lemnos_i2c_smbus)
+#define LEMNOS_IOC_SPI_TRANSFER _IOW('L', 0xaa, struct lemnos_spi_transfer)
 #define LEMNOS_IOC_CLAIM      _IOWR('L', 0xce, struct lemnos_claim)
 #define LEMNOS_IOC_NEXT       _IOWR('L', 0xcf, struct lemnos_next)
 #define LEMNOS_IOC_INFO       _IOWR('L', 0xd0, struct lemnos_info)

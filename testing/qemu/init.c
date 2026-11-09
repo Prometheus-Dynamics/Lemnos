@@ -19,10 +19,11 @@
 
 #define BLOCK "lemnos-test-block"
 #define OTHER "lemnos-test-other"
+#define SPI "spi-lemnos-test"
 #define PISP "lemnos-test-pisp"
 #define BIND "/sys/bus/platform/drivers/lemnos/bind"
 #define UNBIND "/sys/bus/platform/drivers/lemnos/unbind"
-#define OWNED "owned=lemnos,test-block"
+#define OWNED "owned=lemnos,test-block,lemnos,test-spi"
 #define CSI2 "lemnos-test-csi2"
 #define CSI2_DRIVER "lemnos-rp1-csi2"
 #define CSI2_BIND "/sys/bus/platform/drivers/" CSI2_DRIVER "/bind"
@@ -66,11 +67,15 @@ static int put(const char *path, const char *text)
 	int fd = open(path, O_WRONLY | O_CLOEXEC);
 	int e = 0;
 
-	if (fd < 0)
+	if (fd < 0) {
+		printf("open %s: %s\n", path, strerror(errno));
 		return errno;
+	}
 	if (write(fd, text, strlen(text)) < 0)
 		e = errno;
 	close(fd);
+	if (e && e != ENODEV)
+		printf("write %s: %s\n", path, strerror(e));
 	return e;
 }
 
@@ -170,8 +175,25 @@ int main(void)
 	      "lemnos_unbind_check");
 	check(!run((char *const[]){ "/lemnos_claim_check", "/dev/lemnos", NULL }),
 	      "lemnos_claim_check");
+
+	check(!load("/i2c-stub.ko", "chip_addr=0x30"), "i2c-stub loaded");
+	check(!load("/lemnos_test_bus.ko", ""), "test buses loaded");
+	check(!load("/spi-loopback-test.ko", "loopback=1"), "spi-loopback-test loaded");
+	check(!access("/sys/bus/spi/devices/spi40.1/driver", F_OK),
+	      "spi-loopback-test passed on the test controller");
+	check(!put("/sys/bus/spi/devices/" SPI "/driver_override", "lemnos") &&
+		      !put("/sys/bus/spi/drivers/lemnos/bind", SPI),
+	      "SPI device bound");
+	check(!run((char *const[]){ "/lemnos_bus_check", "/dev/lemnos", NULL }),
+	      "lemnos_bus_check");
+	check(!put("/sys/bus/spi/drivers/lemnos/unbind", SPI), "SPI device unbound");
+	check(!put("/sys/bus/spi/devices/" SPI "/driver_override", "\n"), "override cleared");
+
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded with nothing left held");
+	check(!unload("spi_loopback_test"), "spi-loopback-test unloaded");
+	check(!unload("lemnos_test_bus"), "test buses unloaded");
+	check(!unload("i2c_stub"), "i2c-stub unloaded");
 
 	check(!load("/lemnos.ko", OWNED " test_stream_source=1"),
 	      "module loaded with the test stream source");
