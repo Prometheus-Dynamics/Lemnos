@@ -13,6 +13,8 @@
 //! - [`isp32`]: the ISP32 variant ([`isp32::Variant`]) and the video node names each variant
 //!   exposes.
 //! - [`isp35`]: the video node names the ISP35 exposes.
+//! - `cif` (feature `device`, Linux): the vendor `rkcif` capture block: its media devices per
+//!   chip, and the call that routes a MIPI channel to its capture node.
 //! - `device` (feature `device`, Linux): the vendor driver's ISP, parameter, statistics and
 //!   main path nodes through `lemnos-v4l2`, for every generation.
 //!
@@ -23,6 +25,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "device")]
+pub mod cif;
 #[cfg(feature = "device")]
 pub mod device;
 mod isp;

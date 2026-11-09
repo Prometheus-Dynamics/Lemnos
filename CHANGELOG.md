@@ -8,6 +8,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Added
 
+- `lemnos_drivers_rkisp::cif`: the vendor `rkcif` capture block's media devices for the RK3566, RK3588S and RV1126B, and `enable_stream`, which routes a MIPI channel to its capture node. Untested on board.
 - `VideoDevice::set_input` (`lemnos-v4l2`): `VIDIOC_S_INPUT`, which the A733's `sunxi-vin` driver needs before the format is set.
 - `lemnos-soc`: tables for the RV1126B and the A733, from the vendors' device trees. Untested on board.
 - `lemnos-drivers-rkvpss` and `lemnos_linux_sys::rkvpss`: Rockchip's `rkvpss` offline scaler (RV1126B) through the vendor kernel's `rkvpss-offline` node: crop, scale and format conversion from one dma-buf to as many as six. Every frame is checked against its dma-buf's size. Untested on board.
