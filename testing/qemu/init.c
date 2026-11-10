@@ -200,6 +200,7 @@ int main(void)
 	setvbuf(stdout, NULL, _IONBF, 0);
 	printf("lemnos-qemu: start\n");
 
+	check(!load("/rp1_pio_mock.ko", ""), "stand-in PIO driver loaded");
 	check(!load("/lemnos_test_block.ko", CSI2_PHYS), "test block module loaded");
 	check(!load("/lemnos.ko", OWNED), "module loaded");
 	check(!access("/dev/lemnos", R_OK), "control node exists");
@@ -250,6 +251,8 @@ int main(void)
 				    NULL }),
 	      "lemnos_power_check");
 
+	check(!run((char *const[]){ "/lemnos_pio_check", "/dev/lemnos", NULL }),
+	      "lemnos_pio_check");
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded with nothing left held");
 	check(!unload("spi_loopback_test"), "spi-loopback-test unloaded");
@@ -328,6 +331,7 @@ int main(void)
 	check(unload("lemnos") && errno == EAGAIN, "a wedged block keeps the module loaded");
 	/* The test block's devices go with it; a wedged block's memory stays pinned regardless. */
 	check(!put(UNBIND, PISP), "wedged PiSP block unbound");
+	/* The stand-in PIO driver stays: the wedged module above depends on it. */
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);
 	sync();
