@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The RGA driver's unsafe layer: the vendor kernel's multi-RGA request (dma-bufs only, every extent checked) and the RISC-V vector rows of the CPU route"
+description = "The RGA driver's unsafe layer: the vendor kernel's multi-RGA request (dma-bufs only, every extent checked)"
 
 # One of the crates allowed `unsafe`, with the same lint table as lemnos-linux-sys: every block
 # carries a `SAFETY` comment and holds one operation.

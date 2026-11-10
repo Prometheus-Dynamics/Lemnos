@@ -1,41 +1,30 @@
 //! The image contracts' jobs (`image.scaler/1`, `image.convert/1`, `image.blend/1`): their
-//! checks, and the CPU route that runs them.
+//! checks and their counters. Nothing here computes a pixel: a checked job runs on a hardware
+//! route or fails (see [`crate::serve`]).
 //!
-//! [`Jobs`] takes one decoded job and the bytes of the buffers it names, checks it, runs it and
-//! answers the bytes written, or 0 for a job it refuses, as the contracts' completions carry
-//! them. It keeps the contracts' counters. Its working rows are sized for
-//! [`Settings::max_width`] up front, so a job allocates nothing.
-//!
-//! What a job names, and what bounds it: each image's buffer is the slice the caller hands in
-//! with the job, so a job can only reach memory the caller holds. Within a slice, an image's
-//! extent (its stride times its rows, over every plane of its format) must fit, with
-//! overflow-free arithmetic, and its stride must hold a row; its width and height must lie in
-//! `1..=` the configured maximum. A job whose buffers are not distinct is refused, as the
-//! contracts require, and so is one whose sides differ where its contract says they match: a
-//! conversion keeps the size, a resize keeps the format, a blend's three images share size and
-//! format.
+//! What a job names, and what bounds it: an image's extent (its stride times its rows, over
+//! every plane of its format) must fit its buffer, with overflow-free arithmetic, and its stride
+//! must hold a row; its width and height must lie in `1..=` the configured maximum. A job whose
+//! buffers are not distinct is refused, as the contracts require, and so is one whose sides
+//! differ where its contract says they match: a conversion keeps the size, a resize keeps the
+//! format, a blend's three images share size and format.
 //!
 //! The job streams (see the crate docs) check a job here first, as a [`Plan`], and then choose
 //! the route that runs it.
 
-use lemnos_contract_image_blend::{self as blend, BlendJob, BlendOp as JobBlendOp};
+use lemnos_contract_image_blend::{self as blend, BlendJob, BlendOp};
 use lemnos_contract_image_convert::{self as convert, ConvertJob};
 use lemnos_contract_image_scaler::{self as scaler, Filter as JobFilter, ScaleJob};
 
-use crate::cpu::{self, BlendOp, Matrix, Sampling, Scratch};
 use crate::{BLEND_FORMATS, Filter, Layout, PixelFormat};
 
-/// How jobs are run.
+/// The limits jobs are checked against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// The largest width of an image in a job, in pixels.
     pub max_width: u32,
     /// The largest height of an image in a job, in pixels.
     pub max_height: u32,
-    /// The matrix where RGB and YUV meet in a conversion.
-    pub matrix: Matrix,
-    /// The bilinear phase of a resize.
-    pub sampling: Sampling,
 }
 
 impl Default for Settings {
@@ -43,8 +32,6 @@ impl Default for Settings {
         Self {
             max_width: 8192,
             max_height: 8192,
-            matrix: Matrix::Bt601Limited,
-            sampling: Sampling::Centres,
         }
     }
 }
@@ -95,7 +82,7 @@ impl From<blend::ImageRef> for Image {
     }
 }
 
-/// The counters of one contract: jobs completed with an output, and jobs refused.
+/// The counters of one contract: jobs completed with an output, and jobs that failed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
     pub jobs: u64,
@@ -165,19 +152,21 @@ impl Plan {
     }
 }
 
-/// Copies of a job's images in the driver's own memory, for the routes that work on bytes: the
-/// consumer shares a stream's buffers and can change them at any time, so an input is read
-/// once into here and only this copy is used. Each grows to the largest image it has held and
-/// is kept, so jobs of sizes seen before allocate nothing. An image only lands here once its
-/// extent was found to fit its stream buffer, so they never outgrow what the stream holds.
+/// Copies of a job's images in the driver's own memory, for the mainline route when its device
+/// takes bytes instead of the stream's dma-bufs: the consumer shares a stream's buffers and can
+/// change them at any time, so an input is read once into here and only this copy is handed to
+/// the device. Each grows to the largest image it has held and is kept, so jobs of sizes seen
+/// before allocate nothing. An image only lands here once its extent was found to fit its stream
+/// buffer, so they never outgrow what the stream holds.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Default)]
 pub(crate) struct Frames {
     pub input: Vec<u8>,
-    pub second: Vec<u8>,
     pub output: Vec<u8>,
 }
 
 /// The first `len` bytes of `frame`, grown to hold them.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn sized(frame: &mut Vec<u8>, len: usize) -> &mut [u8] {
     if frame.len() < len {
         frame.resize(len, 0);
@@ -185,22 +174,20 @@ pub(crate) fn sized(frame: &mut Vec<u8>, len: usize) -> &mut [u8] {
     &mut frame[..len]
 }
 
-/// Runs jobs, and counts them.
+/// Checks jobs, and counts them.
 #[derive(Debug)]
 pub struct Jobs {
     settings: Settings,
-    scratch: Scratch,
     scale: Counts,
     convert: Counts,
     blend: Counts,
 }
 
 impl Jobs {
-    /// Jobs up to `settings`' sizes, with working rows for the widest.
+    /// Jobs up to `settings`' sizes.
     pub fn new(settings: Settings) -> Self {
         Self {
             settings,
-            scratch: Scratch::with_width(settings.max_width as usize),
             scale: Counts::default(),
             convert: Counts::default(),
             blend: Counts::default(),
@@ -260,6 +247,7 @@ impl Jobs {
     }
 
     /// Whether `layout`'s extent fits a buffer of `len` bytes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn fits(layout: Layout, len: usize) -> bool {
         layout.frame_len() <= len
     }
@@ -315,13 +303,8 @@ impl Jobs {
         if shape(f) != shape(b) || shape(f) != shape(o) {
             return None;
         }
-        let op = match job.op {
-            JobBlendOp::Src => BlendOp::Src,
-            JobBlendOp::SrcOver => BlendOp::SrcOver,
-            JobBlendOp::DstOver => BlendOp::DstOver,
-        };
         let plan = Plan {
-            work: Work::Blend(op),
+            work: Work::Blend(job.op),
             input: self.side(f)?,
             second: Some(self.side(b)?),
             output: self.side(o)?,
@@ -329,71 +312,5 @@ impl Jobs {
         BLEND_FORMATS
             .contains(&plan.output.layout.format)
             .then_some(plan)
-    }
-
-    /// Runs `plan` on the CPU: `input` (and `second`, for a blend) into `output`. The bytes
-    /// written, or `None` when a buffer can't hold its image or the work is refused.
-    pub(crate) fn run_cpu(
-        &mut self,
-        plan: &Plan,
-        input: &[u8],
-        second: &[u8],
-        output: &mut [u8],
-    ) -> Option<u32> {
-        let (src, dst) = (plan.input.layout, plan.output.layout);
-        if !Self::fits(src, input.len()) || !Self::fits(dst, output.len()) {
-            return None;
-        }
-        match plan.work {
-            Work::Scale(filter) => {
-                let sampling = self.settings.sampling;
-                cpu::resize(src, input, dst, output, filter, sampling, &mut self.scratch).ok()?;
-            }
-            Work::Convert => {
-                let matrix = self.settings.matrix;
-                cpu::convert(src, input, dst, output, matrix, &mut self.scratch).ok()?;
-            }
-            Work::Blend(op) => {
-                let bg = plan.second?.layout;
-                if !Self::fits(bg, second.len()) {
-                    return None;
-                }
-                cpu::blend(op, src, input, bg, second, dst, output).ok()?;
-            }
-        }
-        Self::written(dst)
-    }
-
-    /// Resizes `input` into `output`, the buffers `job` names. Returns the bytes written, or 0
-    /// for a job refused.
-    pub fn scale(&mut self, job: &ScaleJob, input: &[u8], output: &mut [u8]) -> u32 {
-        let written = self
-            .plan_scale(job)
-            .and_then(|plan| self.run_cpu(&plan, input, &[], output));
-        self.scale.count(written)
-    }
-
-    /// Converts `input` into `output`, the buffers `job` names. Returns the bytes written, or 0
-    /// for a job refused.
-    pub fn convert(&mut self, job: &ConvertJob, input: &[u8], output: &mut [u8]) -> u32 {
-        let written = self
-            .plan_convert(job)
-            .and_then(|plan| self.run_cpu(&plan, input, &[], output));
-        self.convert.count(written)
-    }
-
-    /// Composites `foreground` and `background` into `output`, the buffers `job` names.
-    /// Returns the bytes written, or 0 for a job refused.
-    pub fn blend(
-        &mut self,
-        job: &BlendJob,
-        foreground: &[u8],
-        background: &[u8],
-        output: &mut [u8],
-    ) -> u32 {
-        let written = self
-            .plan_blend(job)
-            .and_then(|plan| self.run_cpu(&plan, foreground, background, output));
-        self.blend.count(written)
     }
 }

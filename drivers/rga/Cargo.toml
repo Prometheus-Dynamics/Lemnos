@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "A 2D image block (scale, convert, crop, flip and turn, blend, fill, masks) through the kernel's V4L2 mem2mem driver or the vendor kernel's multi-RGA node, with CPU fallbacks (RISC-V vector rows on riscv64) and the image contracts. No vendor library"
+description = "A 2D image block (scale, convert, crop, flip and turn, blend, fill, masks) through the kernel's V4L2 mem2mem driver or the vendor kernel's multi-RGA node, serving the image contracts. A job the hardware can't do fails; nothing runs on the CPU. No vendor library"
 
 [lints]
 workspace = true

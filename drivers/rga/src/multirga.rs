@@ -4,7 +4,8 @@
 //!
 //! Every image is a dma-buf the caller holds, checked to hold the whole image before the request
 //! leaves (see `lemnos_driver_rga_sys::request` for why byte buffers and the palette table are
-//! not sent). Byte buffers go to the CPU route or the V4L2 route.
+//! not sent). Byte buffers reach only the V4L2 route; a job this route would serve on a stream
+//! without dma-bufs fails.
 //!
 //! The formats and enums here are the Apache-2.0 header's values (librga `rga.h` at commit
 //! 331d5750, and `im2d_type.h` for the ROP and blend codes). Each operation's field mapping is
@@ -88,8 +89,7 @@ impl Image {
     }
 }
 
-/// One colour channel of an RGBA8888 pixel (see `MultiRga::channel_to_gray` and
-/// [`crate::cpu::channel_to_gray`]).
+/// One colour channel of an RGBA8888 pixel (see `MultiRga::channel_to_gray`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Channel {
     Red,

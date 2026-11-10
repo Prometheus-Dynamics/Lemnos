@@ -32,7 +32,6 @@ use lemnos_contract_image_scaler::ImageScaler;
 use super::hardware::Opener;
 use super::*;
 use crate::caps::Soc;
-use crate::cpu::Matrix;
 use crate::jobs::Settings;
 use crate::multirga::Submit;
 use crate::v4l2::M2mRoute;
@@ -226,7 +225,7 @@ fn producer(host: &Host, name: &str) -> Producer {
 fn driver(
     host: &Host,
     settings: Settings,
-    soc: Option<Soc>,
+    soc: Soc,
     m2m: Option<&Mock>,
     multi: Option<&Recorder>,
 ) -> Rga {
@@ -241,11 +240,7 @@ fn driver(
         convert: Some(producer(host, "convert")),
         blend: Some(producer(host, "blend")),
     };
-    Rga::serving(needs, settings, Routes::new(soc, m2m, multi))
-}
-
-fn cpu_driver(host: &Host) -> Rga {
-    driver(host, Settings::default(), None, None, None)
+    Rga::serving(needs, settings, soc, Routes::new(soc, m2m, multi))
 }
 
 /// A consumer attached to stream `name`.
@@ -351,102 +346,87 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
-/// What the CPU route makes of a resize, from the crate's own checked `Jobs` on plain slices.
-fn reference_scale(job: &ScaleJob, input: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; (job.output.stride * job.output.height) as usize];
-    let mut jobs = Jobs::new(Settings::default());
-    assert_ne!(jobs.scale(job, input, &mut out), 0);
-    out
+/// What an output buffer holds before a job: a job that fails must leave it so.
+const UNTOUCHED: u8 = 0x5a;
+
+/// Fills `buffer` of `client` with [`UNTOUCHED`].
+fn mark(client: &Client, buffer: u32, len: usize) {
+    client.fill(buffer, &vec![UNTOUCHED; len]);
+}
+
+/// Whether `buffer`'s first `len` bytes are still [`UNTOUCHED`].
+fn untouched(client: &Client, buffer: u32, len: usize) -> bool {
+    client.bytes(buffer, len).iter().all(|&b| b == UNTOUCHED)
+}
+
+/// RK3588 with both units there, on `memory`: the driver, the mainline node, the `/dev/rga`
+/// stand-in.
+fn on_rk3588(memory: Memory) -> (Host, Rga, Mock, Recorder) {
+    let host = host(memory);
+    let (mock, _) = m2m_mock();
+    let rec = Recorder::default();
+    let rga = rk3588(&host, &mock, &rec);
+    (host, rga, mock, rec)
 }
 
 #[test]
-fn the_cpu_route_serves_all_three_contracts_with_real_pixels_on_a_plain_stream() {
-    let host = host(Memory::Plain);
-    let mut rga = cpu_driver(&host);
+fn a_job_no_hardware_route_does_fails_and_nothing_is_written() {
+    let (host, mut rga, mock, rec) = on_rk3588(Memory::Handles);
     let mut scale = Client::attach(&host, "scale", 1);
     let mut conv = Client::attach(&host, "convert", 2);
-    let mut blend = Client::attach(&host, "blend", 3);
-    assert_eq!(
-        rga.tick(0),
-        Some(MS),
-        "holds the free buffers, and looks again in 1 ms"
+    rga.tick(0);
+    scale.fill(0, &pattern(16 * 16 * 4, 1));
+    mark(&scale, 1, 8 * 8 * 4);
+    // A bilinear downscale: neither unit's filter does it.
+    scale.post(&ScaleJob {
+        filter: Filter::Bilinear,
+        ..scale_job(0xA, 0, 1, 16, 8)
+    });
+    rga.tick(MS);
+    let done = scale.done();
+    assert_eq!((done.buffer, done.identity, done.bytes), (1, 0xA, 0));
+    assert_eq!(rga.last_failure(), Some(Failure::NoRoute));
+    assert!(
+        untouched(&scale, 1, 8 * 8 * 4),
+        "nothing computed in software"
     );
-
-    // A 2x area downscale of 8 by 8: each output pixel is its 2 by 2 block's mean.
-    let input: Vec<u8> = (0..=255).collect();
-    scale.fill(0, &input);
-    let job = scale_job(0xA, 0, 1, 8, 4);
-    scale.post(&job);
-    // RGB to B, G, R, A.
+    // RGB to AR24 at 2 by 1: below both units' smallest frame.
     conv.fill(0, &[10, 20, 30, 40, 50, 60]);
+    mark(&conv, 1, 8);
     conv.post(&ConvertJob {
         identity: 0xB,
         input: convert_ref(0, 2, 1, RGB3, 3),
         output: convert_ref(1, 2, 1, AR24, 4),
     });
-    // Half-transparent red over opaque blue, premultiplied.
-    blend.fill(0, &[0, 0, 128, 128].repeat(4));
-    blend.fill(1, &[200, 0, 0, 255].repeat(4));
-    blend.post(&blend_job(0xC, 0, 1, 2));
-    rga.tick(MS);
-
-    let done = scale.done();
-    assert_eq!(
-        (done.buffer, done.identity, done.bytes),
-        (1, 0xA, 4 * 4 * 4)
-    );
-    let got = scale.bytes(1, 64);
-    // The first byte of the first block: bytes 0, 4, 32 and 36, whose mean is 18.
-    assert_eq!(got[0], 18);
-    assert_eq!(got, reference_scale(&job, &input));
-
+    rga.tick(2 * MS);
     let done = conv.done();
-    assert_eq!((done.buffer, done.identity, done.bytes), (1, 0xB, 8));
-    assert_eq!(conv.bytes(1, 8), [30, 20, 10, 255, 60, 50, 40, 255]);
+    assert_eq!((done.buffer, done.identity, done.bytes), (1, 0xB, 0));
+    assert_eq!(rga.last_failure(), Some(Failure::NoRoute));
+    assert!(untouched(&conv, 1, 8));
 
-    let done = blend.done();
-    assert_eq!((done.buffer, done.identity, done.bytes), (2, 0xC, 16));
-    // Blue: 200 * (255 - 128) / 255 rounds to 100; alpha: 128 + 255 * 127 / 255.
-    assert_eq!(blend.bytes(2, 16), [100, 0, 128, 255].repeat(4));
-
-    assert_eq!(ImageScaler::counters(&mut rga).unwrap().jobs, 1);
-    assert_eq!(ImageConvert::counters(&mut rga).unwrap().jobs, 1);
-    assert_eq!(ImageBlend::counters(&mut rga).unwrap().jobs, 1);
-    let mut name = [0u8; 32];
-    assert_eq!(ImageBlend::job_stream(&mut rga, &mut name), Ok(5));
-    assert_eq!(&name[..5], b"blend");
-    for stream in ["scale", "convert", "blend"] {
+    // No unit was asked, and none is at fault.
+    assert_eq!(mock.with(|d| d.opens), 0);
+    assert!(rec.take().is_empty());
+    assert_eq!(rga.health(), Health::Ok);
+    let c = ImageScaler::counters(&mut rga).unwrap();
+    assert_eq!((c.jobs, c.errors), (0, 1));
+    let c = ImageConvert::counters(&mut rga).unwrap();
+    assert_eq!((c.jobs, c.errors), (0, 1));
+    for stream in ["scale", "convert"] {
         let stats = host.stream_stats(0, stream).unwrap();
         assert_eq!((stats.faults, stats.dropped), (0, 0), "{stream}");
     }
 }
 
 #[test]
-fn the_cpu_route_works_the_same_on_a_stream_with_handles() {
-    let host = host(Memory::Handles);
-    let mut rga = cpu_driver(&host);
-    let mut scale = Client::attach(&host, "scale", 1);
-    rga.tick(0);
-    let input = pattern(16 * 16 * 4, 2);
-    scale.fill(2, &input);
-    let job = scale_job(5, 2, 3, 16, 8);
-    scale.post(&job);
-    rga.tick(1);
-    let done = scale.done();
-    assert_eq!((done.buffer, done.identity, done.bytes), (3, 5, 256));
-    assert_eq!(scale.bytes(3, 256), reference_scale(&job, &input));
-}
-
-#[test]
 fn jobs_the_driver_cannot_run_complete_as_failed_and_are_counted() {
-    let host = host(Memory::Plain);
-    let mut rga = cpu_driver(&host);
+    let (host, mut rga, _mock, _rec) = on_rk3588(Memory::Plain);
     let mut scale = Client::attach(&host, "scale", 1);
     rga.tick(0);
-    scale.post(&scale_job(1, 0, 1, 8, 4));
+    scale.post(&scale_job(1, 0, 1, 256, 128));
     rga.tick(1);
     let first = scale.done();
-    assert_eq!(first.bytes, 64);
+    assert_eq!(first.bytes, 128 * 128 * 4);
 
     // Buffer 1 is the consumer's until it is returned: not an input.
     scale.post(&scale_job(2, 1, 2, 4, 2));
@@ -493,41 +473,46 @@ fn jobs_the_driver_cannot_run_complete_as_failed_and_are_counted() {
 
 #[test]
 fn an_image_past_its_buffer_is_refused_before_any_memory_is_taken_for_it() {
-    let host = host(Memory::Plain);
-    let mut rga = cpu_driver(&host);
+    let (host, mut rga, mock, _rec) = on_rk3588(Memory::Plain);
     let mut scale = Client::attach(&host, "scale", 1);
     rga.tick(0);
     // Inside the configured limits, 64 MiB, far past the stream's 256 KiB buffer.
-    scale.post(&scale_job(1, 0, 1, 4096, 8));
+    scale.post(&scale_job(1, 0, 1, 4096, 2048));
     let ((), count) = allocations(|| {
         rga.tick(1);
     });
     assert_eq!(rga.last_failure(), Some(Failure::Size));
     assert_eq!(scale.done().bytes, 0);
     assert_eq!(count, 0, "allocations for a job its buffer can't hold");
+    assert_eq!(mock.with(|d| d.opens), 0);
 }
 
 #[test]
-fn a_thousand_cpu_jobs_through_the_stream_allocate_nothing() {
-    let host = host(Memory::Plain);
-    let mut rga = cpu_driver(&host);
+fn a_thousand_failed_jobs_through_the_stream_allocate_nothing() {
+    let (host, mut rga, _mock, _rec) = on_rk3588(Memory::Plain);
     let mut scale = Client::attach(&host, "scale", 1);
     let mut conv = Client::attach(&host, "convert", 2);
     let mut blend = Client::attach(&host, "blend", 3);
     rga.tick(0);
     let mut cycle = |n: u64| {
         let out = 1 + (n % 3) as u32;
-        scale.post(&scale_job(n, 0, out, 32, 16));
+        // No route: a bilinear downscale.
+        scale.post(&ScaleJob {
+            filter: Filter::Bilinear,
+            ..scale_job(n, 0, out, 32, 16)
+        });
+        // No route: below the units' smallest frame.
         conv.post(&ConvertJob {
             identity: n,
             input: convert_ref(0, 32, 32, AR24, 4),
             output: convert_ref(out, 32, 32, u32::from_le_bytes(*b"NV12"), 1),
         });
+        // `/dev/rga` takes dma-bufs only, and this stream has none.
         blend.post(&blend_job(n, 0, if out == 1 { 2 } else { 1 }, out));
         rga.tick(n * MS);
-        for (client, bytes) in [(&mut scale, 1024), (&mut conv, 1536), (&mut blend, 16)] {
+        for client in [&mut scale, &mut conv, &mut blend] {
             let done = client.done();
-            assert_eq!((done.identity, done.bytes), (n, bytes));
+            assert_eq!((done.identity, done.bytes), (n, 0));
             client.release(done);
         }
     };
@@ -539,13 +524,13 @@ fn a_thousand_cpu_jobs_through_the_stream_allocate_nothing() {
             cycle(n);
         }
     });
-    assert_eq!(count, 0, "allocations in 990 jobs");
+    assert_eq!(count, 0, "allocations in 990 failed jobs");
+    assert_eq!(ImageBlend::counters(&mut rga).unwrap().errors, 340);
 }
 
 #[test]
 fn a_new_consumer_on_a_plain_stream_gets_its_completions() {
-    let host = host(Memory::Plain);
-    let mut rga = cpu_driver(&host);
+    let (host, mut rga, _mock, _rec) = on_rk3588(Memory::Plain);
     let first = Client::attach(&host, "scale", 1);
     rga.tick(0);
     drop(first);
@@ -554,25 +539,30 @@ fn a_new_consumer_on_a_plain_stream_gets_its_completions() {
     rga.tick(1);
     rga.tick(2);
     let mut second = Client::attach(&host, "scale", 2);
-    second.post(&scale_job(9, 0, 1, 8, 4));
+    second.post(&scale_job(9, 0, 1, 256, 128));
     rga.tick(3);
     let done = second.done();
-    assert_eq!((done.buffer, done.identity, done.bytes), (1, 9, 64));
+    assert_eq!(
+        (done.buffer, done.identity, done.bytes),
+        (1, 9, 128 * 128 * 4)
+    );
 }
 
 #[test]
 fn a_new_consumer_on_a_stream_with_handles_gets_its_completions_at_once() {
-    let host = host(Memory::Handles);
-    let mut rga = cpu_driver(&host);
+    let (host, mut rga, _mock, _rec) = on_rk3588(Memory::Handles);
     let _first = Client::attach(&host, "scale", 1);
     rga.tick(0);
     host.stream_detach(0, "scale", CallerId(1)).unwrap();
     // A new consumer before the driver looks again: the job's buffers are renewed by handle.
     let mut second = Client::attach(&host, "scale", 2);
-    second.post(&scale_job(9, 2, 3, 8, 4));
+    second.post(&scale_job(9, 2, 3, 256, 128));
     rga.tick(1);
     let done = second.done();
-    assert_eq!((done.buffer, done.identity, done.bytes), (3, 9, 64));
+    assert_eq!(
+        (done.buffer, done.identity, done.bytes),
+        (3, 9, 128 * 128 * 4)
+    );
 }
 
 /// The mainline route on the played-back node, set to report a whole 128 by 128 frame written.
@@ -587,7 +577,7 @@ fn rk3588(host: &Host, mock: &Mock, rec: &Recorder) -> Rga {
     driver(
         host,
         Settings::default(),
-        Some(Soc::Rk3588),
+        Soc::Rk3588,
         Some(mock),
         Some(rec),
     )
@@ -661,53 +651,95 @@ fn a_resize_on_a_plain_stream_goes_to_the_mainline_route_as_bytes() {
 }
 
 #[test]
-fn a_failed_unit_hands_its_jobs_to_the_cpu_and_is_retried_capped_at_eight_seconds() {
-    let host = host(Memory::Handles);
-    let (mock, frame) = m2m_mock();
+fn a_failed_unit_fails_its_jobs_and_is_retried_capped_at_eight_seconds() {
+    let host = host(Memory::Plain);
+    let (mock, _) = m2m_mock();
     let rec = Recorder::default();
     let mut rga = rk3588(&host, &mock, &rec);
     let mut scale = Client::attach(&host, "scale", 1);
     rga.tick(0);
-    let input = pattern(BYTES as usize, 4);
-    scale.fill(0, &input);
+    scale.fill(0, &pattern(BYTES as usize, 4));
     let job = scale_job(1, 0, 1, 256, 128);
-    let reference = reference_scale(&job, &input);
-    assert_ne!(reference, frame);
     mock.with(|d| d.fail = true);
 
     let mut now = 1_000 * MS;
+    // Each job completes, as failed and with nothing written, or with the unit's result.
     let run = |scale: &mut Client, rga: &mut Rga, now: u64| {
+        mark(scale, 1, 128 * 128 * 4);
         scale.post(&job);
         rga.tick(now);
         let done = scale.done();
-        assert_eq!(done.bytes, 128 * 128 * 4, "every job completes");
-        let out = scale.bytes(1, done.bytes as usize);
+        let written = done.bytes;
+        let left = untouched(scale, 1, 128 * 128 * 4);
         scale.release(done);
-        out
+        (written, left, rga.last_failure())
     };
-    // It fails: the CPU's result, and a wait.
-    assert_eq!(run(&mut scale, &mut rga, now), reference);
-    assert!(matches!(rga.health(), Health::Degraded(_)));
+    // It fails: the job fails with it, and the unit waits.
+    assert_eq!(
+        run(&mut scale, &mut rga, now),
+        (0, true, Some(Failure::UnitFailed))
+    );
+    assert_eq!(rga.health(), Health::Degraded(crate::UNIT_FAILED));
+    assert!(!rga.server.routes().m2m().unwrap().is_open());
     let mut waits = Vec::new();
     for _ in 0..8 {
         let due = rga_due(&rga);
         waits.push((due - now) / MS);
-        // Before the wait is over the node isn't opened again; the CPU serves.
+        // Before the wait is over the node isn't opened again, and the job runs nowhere else.
         let opens = mock.with(|d| d.opens);
-        assert_eq!(run(&mut scale, &mut rga, due - 1), reference);
+        assert_eq!(
+            run(&mut scale, &mut rga, due - 1),
+            (0, true, Some(Failure::UnitDown))
+        );
         assert_eq!(mock.with(|d| d.opens), opens);
         now = due;
-        assert_eq!(run(&mut scale, &mut rga, now), reference);
+        assert_eq!(
+            run(&mut scale, &mut rga, now),
+            (0, true, Some(Failure::UnitFailed))
+        );
         assert_eq!(mock.with(|d| d.opens), opens + 1, "opened again once");
+        assert!(matches!(rga.health(), Health::Degraded(_)));
     }
     assert_eq!(waits, [250, 500, 1000, 2000, 4000, 8000, 8000, 8000]);
     // It answers again: the job is the unit's, and the driver is healthy.
     mock.with(|d| d.fail = false);
     let due = rga_due(&rga);
-    run(&mut scale, &mut rga, due);
-    assert_eq!(mock.with(|d| d.queued_dmabuf), 2);
+    let (written, left, _) = run(&mut scale, &mut rga, due);
+    assert_eq!((written, left), (128 * 128 * 4, false));
     assert_eq!(rga.health(), Health::Ok);
     assert!(rga.server.routes().m2m().unwrap().is_open());
+    let c = ImageScaler::counters(&mut rga).unwrap();
+    assert_eq!((c.jobs, c.errors), (1, 17));
+}
+
+#[test]
+fn a_unit_whose_node_is_not_there_fails_its_jobs_and_is_looked_for_again() {
+    let host = host(Memory::Plain);
+    let rec = Recorder::default();
+    let missing: Opener<Box<dyn M2mRoute>> =
+        Box::new(|| Err(io::Error::from(io::ErrorKind::NotFound)));
+    let multi: Opener<Box<dyn Submit>> = {
+        let rec = rec.clone();
+        Box::new(move || Ok(Box::new(rec.clone())))
+    };
+    let needs = RgaNeeds {
+        scale: Some(producer(&host, "scale")),
+        convert: None,
+        blend: None,
+    };
+    let soc = Soc::Rk3588;
+    let routes = Routes::new(soc, Some(missing), Some(multi));
+    let mut rga = Rga::serving(needs, Settings::default(), soc, routes);
+    let mut scale = Client::attach(&host, "scale", 1);
+    rga.tick(0);
+    mark(&scale, 1, 128 * 128 * 4);
+    scale.post(&scale_job(1, 0, 1, 256, 128));
+    rga.tick(MS);
+    assert_eq!(scale.done().bytes, 0);
+    assert_eq!(rga.last_failure(), Some(Failure::UnitDown));
+    assert!(untouched(&scale, 1, 128 * 128 * 4));
+    assert_eq!(rga.health(), Health::Degraded(crate::UNIT_MISSING));
+    assert_eq!(rga_due(&rga), MS + 250 * MS);
 }
 
 fn rga_due(rga: &Rga) -> u64 {
@@ -765,20 +797,25 @@ fn a_blend_goes_to_dev_rga_as_a_copy_and_a_blend_on_the_streams_dma_bufs() {
 }
 
 #[test]
-fn dev_rga_takes_dma_bufs_only_so_a_plain_stream_blends_on_the_cpu() {
-    let host = host(Memory::Plain);
-    let (mock, _) = m2m_mock();
-    let rec = Recorder::default();
-    let mut rga = rk3588(&host, &mock, &rec);
+fn dev_rga_takes_dma_bufs_only_so_a_blend_on_a_plain_stream_fails() {
+    let (host, mut rga, mock, rec) = on_rk3588(Memory::Plain);
     let mut blend = Client::attach(&host, "blend", 1);
     rga.tick(0);
     blend.fill(0, &[0, 0, 128, 128].repeat(4));
     blend.fill(1, &[200, 0, 0, 255].repeat(4));
+    mark(&blend, 2, 16);
     blend.post(&blend_job(7, 0, 1, 2));
     rga.tick(1);
-    assert_eq!(blend.done().bytes, 16);
-    assert_eq!(blend.bytes(2, 16), [100, 0, 128, 255].repeat(4));
+    let done = blend.done();
+    assert_eq!((done.buffer, done.identity, done.bytes), (2, 7, 0));
+    assert_eq!(rga.last_failure(), Some(Failure::NoHandles));
+    assert!(untouched(&blend, 2, 16), "nothing blended in software");
     assert!(rec.take().is_empty());
+    assert_eq!(mock.with(|d| d.opens), 0);
+    // The board file has to change, and health says so.
+    assert_eq!(rga.health(), Health::Degraded(crate::NO_HANDLES));
+    let c = ImageBlend::counters(&mut rga).unwrap();
+    assert_eq!((c.jobs, c.errors), (0, 1));
 }
 
 #[test]
@@ -803,24 +840,13 @@ fn a_handle_shorter_than_its_image_is_caught_by_its_real_size() {
 }
 
 #[test]
-fn packed_gray_input_goes_to_dev_rga_and_padded_gray_to_the_cpu() {
-    // The node's full-range gray input repeats the byte, as the CPU does under every matrix.
-    for (matrix, stride, to_unit) in [
-        (Matrix::Bt601Limited, 4, true),
-        (Matrix::Bt709Limited, 4, true),
-        (Matrix::Bt601Limited, 8, false),
-    ] {
-        let host = host(Memory::Handles);
-        let (mock, _) = m2m_mock();
-        let rec = Recorder::default();
-        let settings = Settings {
-            matrix,
-            ..Settings::default()
-        };
-        let mut rga = driver(&host, settings, Some(Soc::Rk3588), Some(&mock), Some(&rec));
+fn packed_gray_input_goes_to_dev_rga_and_padded_gray_fails() {
+    for (stride, to_unit) in [(4, true), (8, false)] {
+        let (host, mut rga, _mock, rec) = on_rk3588(Memory::Handles);
         let mut conv = Client::attach(&host, "convert", 1);
         rga.tick(0);
         conv.fill(0, &[16, 235, 128, 0, 9, 9, 9, 9]);
+        mark(&conv, 1, 16);
         conv.post(&ConvertJob {
             identity: 4,
             input: convert::ImageRef {
@@ -830,58 +856,64 @@ fn packed_gray_input_goes_to_dev_rga_and_padded_gray_to_the_cpu() {
             output: convert_ref(1, 4, 1, AR24, 4),
         });
         rga.tick(1);
-        assert_eq!(conv.done().bytes, 16);
         let seen = rec.take();
         if to_unit {
-            assert_eq!(seen.len(), 1, "{matrix:?}");
+            assert_eq!(conv.done().bytes, 16);
+            assert_eq!(seen.len(), 1);
             let gray = RgaFormat::Gray8.code() as u32;
             let rgba = RgaFormat::Rgba8888.code() as u32;
             assert_eq!(seen[0].src, (conv.fd(0), gray, 4, 1));
             assert_eq!(seen[0].dst, (conv.fd(1), rgba, 4, 1));
             assert_eq!(seen[0].yuv2rgb_mode, 1);
         } else {
+            // The request can't carry the padded row: the route refuses it, and the unit is
+            // not at fault.
+            assert_eq!(conv.done().bytes, 0);
+            assert_eq!(rga.last_failure(), Some(Failure::RouteRefused));
             assert!(seen.is_empty());
-            let want: Vec<u8> = [16, 235, 128, 0]
-                .iter()
-                .flat_map(|&g| [g, g, g, 255])
-                .collect();
-            assert_eq!(conv.bytes(1, 16), want);
+            assert!(untouched(&conv, 1, 16));
+            assert_eq!(rga.health(), Health::Ok);
         }
     }
 }
 
 #[test]
-fn without_a_soc_no_unit_is_ever_opened() {
-    let host = host(Memory::Handles);
-    let (mock, _) = m2m_mock();
-    let rec = Recorder::default();
-    let mut rga = driver(&host, Settings::default(), None, Some(&mock), Some(&rec));
-    let mut scale = Client::attach(&host, "scale", 1);
-    rga.tick(0);
-    scale.post(&scale_job(1, 0, 1, 256, 128));
-    rga.tick(1);
-    assert_eq!(scale.done().bytes, 128 * 128 * 4);
-    assert_eq!(mock.with(|d| d.opens), 0);
-    assert!(rec.take().is_empty());
-}
-
-#[test]
-fn a_failing_dev_rga_leaves_the_blend_to_the_cpu_with_the_same_result() {
-    let host = host(Memory::Handles);
-    let (mock, _) = m2m_mock();
-    let rec = Recorder::default();
+fn a_failing_dev_rga_fails_the_blend_and_runs_it_nowhere_else() {
+    let (host, mut rga, mock, rec) = on_rk3588(Memory::Handles);
     rec.with(|r| r.fail = true);
-    let mut rga = rk3588(&host, &mock, &rec);
     let mut blend = Client::attach(&host, "blend", 1);
     rga.tick(0);
     blend.fill(0, &[0, 0, 128, 128].repeat(4));
     blend.fill(1, &[200, 0, 0, 255].repeat(4));
+    mark(&blend, 2, 16);
     blend.post(&blend_job(7, 0, 1, 2));
     rga.tick(MS);
-    assert_eq!(blend.done().bytes, 16);
-    assert_eq!(blend.bytes(2, 16), [100, 0, 128, 255].repeat(4));
-    assert!(matches!(rga.health(), Health::Degraded(_)));
+    let done = blend.done();
+    assert_eq!(done.bytes, 0);
+    assert_eq!(rga.last_failure(), Some(Failure::UnitFailed));
+    assert!(untouched(&blend, 2, 16));
+    assert_eq!(rga.health(), Health::Degraded(crate::UNIT_FAILED));
     let slot = rga.server.routes().multi().unwrap();
     assert!(!slot.is_open());
     assert_eq!(slot.due_ns(), MS + 250 * MS);
+    // The mainline unit is not asked in its place.
+    assert_eq!(mock.with(|d| d.opens), 0);
+    blend.release(done);
+
+    // While it waits, a blend fails at once without a request.
+    rec.with(|r| r.fail = false);
+    blend.post(&blend_job(8, 0, 1, 2));
+    rga.tick(2 * MS);
+    let done = blend.done();
+    assert_eq!(done.bytes, 0);
+    assert_eq!(rga.last_failure(), Some(Failure::UnitDown));
+    assert_eq!(rec.with(|r| r.count), 0);
+    blend.release(done);
+
+    // Opened again after the wait, it serves, and health clears.
+    blend.post(&blend_job(9, 0, 1, 2));
+    rga.tick(MS + 250 * MS);
+    assert_eq!(blend.done().bytes, 16);
+    assert_eq!(rec.take().len(), 2);
+    assert_eq!(rga.health(), Health::Ok);
 }

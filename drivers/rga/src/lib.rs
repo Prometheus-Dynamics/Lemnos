@@ -1,22 +1,27 @@
 //! A 2D image block (Rockchip's RGA, and the routes around it): scaling, cropping, pixel-format
-//! conversion, flips and quarter turns, fills, masks, blends and colour keys, with a CPU route for
-//! what no unit serves.
+//! conversion, flips and quarter turns, fills, masks, blends and colour keys, on the hardware.
 //!
 //! - [`caps`]: which unit each chip has, by which route, and what it does with each filter;
 //!   [`caps::route_for`] answers which route serves an operation, and [`route_on_system`] also
-//!   checks that the device node is there. `None` means the CPU.
+//!   checks that the device node is there. `None` means no hardware route does it.
 //! - [`M2mRga`] (Linux): the mainline `rockchip-rga` V4L2 mem2mem driver, through
 //!   `lemnos-driver-m2m-decode`'s session. Convert, scale (area downscale, bilinear upscale),
 //!   crop, flips and turns, between byte buffers or dma-bufs.
 //! - [`MultiRga`] (Linux): the vendor kernel's `/dev/rga` node, through
 //!   `lemnos-driver-rga-sys`. Fill, mask ROP, blend, colour key, gray input, channel to gray,
 //!   flips and turns, between dma-bufs only, each checked to hold its image.
-//! - [`cpu`]: every conversion between the [`PixelFormat`]s, area and bilinear resizes, blends,
-//!   and the per-pixel operations, as scalar loops with RISC-V vector rows on riscv64 Linux.
 //! - [`Rga`]: the driver, providing `image.scaler/1`, `image.convert/1` and `image.blend/1`,
 //!   serving their job streams.
 //!
 //! No vendor library: nothing here links or loads one, and the block's work is the caller's.
+//!
+//! # A job runs on the hardware, or fails
+//!
+//! Lemnos gives the caller the hardware; it doesn't do the hardware's work itself. A job runs on
+//! the hardware route [`caps::route_for`] picks for it on the configured chip, or it completes
+//! as failed with its reason in [`Rga::last_failure`] and its contract's `errors` counted.
+//! Nothing is ever computed in software, and a job is never sent to another route because its
+//! own failed. The reasons, and how a failed unit is retried, are in [`serve`].
 //!
 //! # The driver and its job streams
 //!
@@ -26,49 +31,51 @@
 //! the board doesn't give. The driver ticks every millisecond while it has a stream, and takes up
 //! to [`serve::MAX_JOBS_PER_ROUND`] jobs from each per tick. A job names buffers of its stream;
 //! its completion is its output buffer published with the job's identity and the bytes written,
-//! 0 for a job refused. How buffers are held, everything a job is checked for, and what happens
-//! when a unit fails: [`serve`].
-//!
-//! Each job runs where [`caps::route_for`] sends it for the board's `soc`, when that unit's device
-//! is there and the stream can give it what it takes; otherwise on the CPU:
+//! 0 for a job that failed. How buffers are held, everything a job is checked for, and what
+//! happens when a unit fails: [`serve`].
 //!
 //! | contract | route `caps` chooses | stream with dma-buf handles | stream without |
 //! |---|---|---|---|
-//! | `image.scaler/1` | mainline (area downscale, bilinear upscale) | the dma-bufs, or bytes if the device refuses them | bytes, copied through the driver |
+//! | `image.scaler/1` | mainline (area downscale, bilinear upscale) | the dma-bufs, or bytes if the device refuses them | bytes, copied through the driver to the device |
 //! | `image.convert/1` | mainline (no gray) | the dma-bufs, or bytes if refused | bytes, copied |
-//! | `image.convert/1` | `/dev/rga` (gray to `AR24`/`XR24`, both packed) | the dma-bufs | CPU |
-//! | `image.blend/1` | `/dev/rga` (one stride for all three, whole pixels) | the dma-bufs: the background copied into the output, then the foreground blended onto it | CPU |
-//! | any | none | CPU | CPU |
+//! | `image.convert/1` | `/dev/rga` (gray to `AR24`/`XR24`, both packed) | the dma-bufs | fails: `NoHandles` |
+//! | `image.blend/1` | `/dev/rga` (one stride for all three, whole pixels) | the dma-bufs: the background copied into the output, then the foreground blended onto it | fails: `NoHandles` |
+//! | any | none | fails: `NoRoute` | fails: `NoRoute` |
 //!
-//! The mainline device is told the formats only, not `matrix`: where a conversion meets YUV, its
-//! matrix is the device's own, and how close it comes to the CPU's is unmeasured (see [`caps`]).
-//! The `/dev/rga` gray input is full-range BT.601, which repeats the byte as the CPU does.
+//! What each contract lists (`format`, `conversion`) is what the chip's routes take, not every
+//! format this crate knows: a format or pair is listed when [`caps::route_for`] has a route for
+//! it at [`LISTED_SIZE`] by [`LISTED_SIZE`] (a scale: halved with the area filter or doubled with
+//! the bilinear one). A listed job of another size can still have no route (the units' smallest
+//! frames and largest factors are in [`caps`]).
 //!
-//! The CPU route reads each input once from the stream into the driver's memory and works only
-//! on that copy, since the consumer shares the buffers and can change them at any time; the
-//! result is written back with one copy. The driver's memory for this grows to the largest
-//! images it has held, which a stream's buffer bounds, and is kept, so jobs of sizes seen
-//! before allocate nothing.
+//! The mainline device is told the formats only: where a conversion meets YUV, its matrix and
+//! range are the device's own. The `/dev/rga` gray input is full-range BT.601, which repeats the
+//! byte.
 //!
 //! Settings come from the device's `config` in the board file:
 //!
+//! - `soc` (required): `rk3566`, `rk3568`, `rk3576`, `rk3588`, `rk3562` or `rv1126b`, whose units
+//!   [`caps`] lists. Without it the driver has no route for anything, so binding fails with
+//!   `INVALID_ARGUMENT`, as other drivers refuse a missing required key. `k230d` names a chip
+//!   whose units have no route here yet (see [`caps`]), so binding to it fails with
+//!   `NOT_SUPPORTED`. A unit's node is opened when a job first wants it; a node that isn't there
+//!   is looked for again after the same waits as a unit that failed.
 //! - `max_width`, `max_height`: the largest image in a job, 1 to 65535, default 8192.
-//! - `matrix`: `bt601-limited` (default), `bt601-full` or `bt709-limited`, for conversions
-//!   between RGB and YUV.
-//! - `sampling`: the bilinear phase, `centres` (default), `corners` or `origin`.
-//! - `soc`: `rk3566`, `rk3568`, `rk3576`, `rk3588`, `rk3562`, `rv1126b` or `k230d`, whose units
-//!   [`caps`] lists. Without it no device is opened and every job runs on the CPU. With it, a
-//!   unit's node is opened when a job first wants it; a node that isn't there is looked for again
-//!   after the same waits as a unit that failed.
+//! - `matrix` and `sampling` are refused (`INVALID_ARGUMENT`): they chose the CPU route's
+//!   conversion matrix and bilinear phase, and the hardware uses its own. Ignoring them would
+//!   give a board file that asks for one something else without saying so.
+//!
+//! Health: `Degraded` while a unit that failed a job is closed, waiting to be opened again; while
+//! a unit's device node isn't there; and once a job failed because its stream has no dma-bufs
+//! (the board file has to give that stream `memory = "dma-buf"`). Each says why.
 //!
 //! # Status
 //!
 //! Untested on board: the mainline route is tested on a played-back node (and on the kernel's
-//! `vim2m` where a test run turns it on), the `/dev/rga` route by the requests it builds, and
-//! the CPU route against a reference written per pixel from its definitions, on x86-64 and under
-//! qemu's riscv64 with V at VLEN 128, 256 and 512. The job streams are tested through the host's
-//! own stream, with sealed memfds standing in for dma-bufs and the played-back node and a
-//! request-recording stand-in for the units. The board checks are `testing/board-runs/E2.md`.
+//! `vim2m` where a test run turns it on), the `/dev/rga` route by the requests it builds. The job
+//! streams are tested through the host's own stream, with sealed memfds standing in for dma-bufs
+//! and the played-back node and a request-recording stand-in for the units. The board checks are
+//! `testing/board-runs/E2.md`.
 //!
 //! Not delivered: the contracts fault the stream of a consumer that posts bytes that are no job,
 //! and the producer's end has no way to; such a job is counted as failed and dropped instead. On a
@@ -81,7 +88,6 @@
 #![forbid(unsafe_code)]
 
 pub mod caps;
-pub mod cpu;
 mod format;
 pub mod jobs;
 mod multirga;
@@ -108,13 +114,12 @@ use lemnos_contract_image_convert::{self as convert, ConversionPair, ConvertInfo
 use lemnos_contract_image_scaler::{self as scaler, ImageScaler, ScalerInfo};
 use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
 
-use cpu::{Matrix, Sampling};
 use jobs::{Contract, Jobs, Settings};
 use serve::{Failure, Lane, Routes, Server};
 
 /// The route that serves `op` from `src` to `dst` on `soc` with the devices this system has:
-/// [`caps::route_for`], and the V4L2 route only when the `rockchip-rga` node exists. `None`
-/// means the work goes to the CPU.
+/// [`caps::route_for`], and each route only when its device node exists. `None` means no
+/// hardware here does it.
 #[cfg(target_os = "linux")]
 pub fn route_on_system(
     soc: caps::Soc,
@@ -143,6 +148,59 @@ pub fn route_on_system(
 /// The formats a blend takes: premultiplied B, G, R, A.
 const BLEND_FORMATS: [PixelFormat; 1] = [PixelFormat::Abgr32];
 
+/// The side of the frame the contracts' format lists are asked of [`caps::route_for`] at.
+pub const LISTED_SIZE: u32 = 256;
+
+/// What health says while a unit that failed a job is closed.
+pub const UNIT_FAILED: &str =
+    "a 2D unit failed a job: it is closed and opened again after a wait; its jobs fail meanwhile";
+
+/// What health says while a unit's device node isn't there.
+pub const UNIT_MISSING: &str =
+    "a 2D unit's device node is not there: looked for again after a wait; its jobs fail meanwhile";
+
+/// What health says once a job failed because its stream has no dma-bufs.
+pub const NO_HANDLES: &str = "a job's route takes dma-bufs only and its stream has none: give \
+                              that stream memory = \"dma-buf\" in the board file";
+
+/// Whether `soc` has a route for a scale of `format`: halved with the area filter, or doubled
+/// with the bilinear one.
+fn scales(soc: caps::Soc, format: PixelFormat) -> bool {
+    let (big, small) = (LISTED_SIZE, LISTED_SIZE / 2);
+    let at = |side| Layout::packed(format, side, side);
+    caps::route_for(soc, caps::Op::Resize(Filter::Area), at(big), at(small)).is_some()
+        || caps::route_for(soc, caps::Op::Resize(Filter::Bilinear), at(small), at(big)).is_some()
+}
+
+/// Whether `soc` has a route for a conversion from `from` to `to`.
+fn converts(soc: caps::Soc, from: PixelFormat, to: PixelFormat) -> bool {
+    let at = |format| Layout::packed(format, LISTED_SIZE, LISTED_SIZE);
+    caps::route_for(soc, caps::Op::Convert, at(from), at(to)).is_some()
+}
+
+/// Whether `soc` has a route for a blend of `format`.
+fn blends(soc: caps::Soc, format: PixelFormat) -> bool {
+    let at = Layout::packed(format, LISTED_SIZE, LISTED_SIZE);
+    caps::route_for(soc, caps::Op::Fixed(caps::FixedOp::Blend), at, at).is_some()
+}
+
+/// Every pair of formats, `from` major.
+fn pairs() -> impl Iterator<Item = (PixelFormat, PixelFormat)> {
+    PixelFormat::ALL
+        .into_iter()
+        .flat_map(|from| PixelFormat::ALL.into_iter().map(move |to| (from, to)))
+}
+
+/// How many of `items` there are, as a contract's count.
+fn count<T>(items: impl Iterator<Item = T>) -> u16 {
+    u16::try_from(items.count()).unwrap_or(u16::MAX)
+}
+
+/// Entry `index` of `items`, or `NOT_FOUND`.
+fn nth<T>(mut items: impl Iterator<Item = T>, index: u16) -> Result<T> {
+    items.nth(usize::from(index)).ok_or(Status::NOT_FOUND)
+}
+
 /// The 2D block as the image contracts.
 #[driver("rga", provides = [ImageScaler, ImageConvert, ImageBlend])]
 pub struct Rga {
@@ -155,30 +213,35 @@ pub struct Rga {
     /// `image.blend/1` jobs.
     #[needs(optional)]
     blend: Option<StreamHandle>,
+    soc: caps::Soc,
     lanes: [Lane; 3],
     server: Server,
 }
 
 /// The `soc` names of the config.
-const SOCS: [(&str, Option<caps::Soc>); 7] = [
-    ("rk3566", Some(caps::Soc::Rk3566)),
-    ("rk3568", Some(caps::Soc::Rk3568)),
-    ("rk3576", Some(caps::Soc::Rk3576)),
-    ("rk3588", Some(caps::Soc::Rk3588)),
-    ("rk3562", Some(caps::Soc::Rk3562)),
-    ("rv1126b", Some(caps::Soc::Rv1126b)),
-    ("k230d", Some(caps::Soc::K230d)),
+const SOCS: [(&str, caps::Soc); 7] = [
+    ("rk3566", caps::Soc::Rk3566),
+    ("rk3568", caps::Soc::Rk3568),
+    ("rk3576", caps::Soc::Rk3576),
+    ("rk3588", caps::Soc::Rk3588),
+    ("rk3562", caps::Soc::Rk3562),
+    ("rv1126b", caps::Soc::Rv1126b),
+    ("k230d", caps::Soc::K230d),
 ];
 
-/// `INVALID_ARGUMENT` unless `name` is one of `names`.
-fn choose<T: Copy>(name: Option<&str>, names: &[(&str, T)], default: T) -> Result<T> {
-    match name {
-        None => Ok(default),
-        Some(name) => names
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|&(_, v)| v)
-            .ok_or(Status::INVALID_ARGUMENT),
+/// The chip `name` names: `INVALID_ARGUMENT` when there is no name or it is none of [`SOCS`],
+/// `NOT_SUPPORTED` when the chip has no implemented route.
+fn soc(name: Option<&str>) -> Result<caps::Soc> {
+    let name = name.ok_or(Status::INVALID_ARGUMENT)?;
+    let soc = SOCS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, soc)| soc)
+        .ok_or(Status::INVALID_ARGUMENT)?;
+    if caps::caps(soc).any(|c| c.implemented) {
+        Ok(soc)
+    } else {
+        Err(Status::NOT_SUPPORTED)
     }
 }
 
@@ -197,32 +260,26 @@ impl Lifecycle for Rga {
         let settings = Settings {
             max_width: side("max_width")?,
             max_height: side("max_height")?,
-            matrix: choose(
-                cfg.str("matrix"),
-                &[
-                    ("bt601-limited", Matrix::Bt601Limited),
-                    ("bt601-full", Matrix::Bt601Full),
-                    ("bt709-limited", Matrix::Bt709Limited),
-                ],
-                Matrix::Bt601Limited,
-            )?,
-            sampling: choose(
-                cfg.str("sampling"),
-                &[
-                    ("centres", Sampling::Centres),
-                    ("corners", Sampling::Corners),
-                    ("origin", Sampling::Origin),
-                ],
-                Sampling::Centres,
-            )?,
         };
-        let soc = choose(cfg.str("soc"), &SOCS, None)?;
-        Ok(Self::serving(needs, settings, Routes::on_system(soc)))
+        // The CPU route's settings: the hardware has its own, so naming one is refused.
+        if ["matrix", "sampling"]
+            .iter()
+            .any(|key| cfg.str(key).is_some())
+        {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        let soc = soc(cfg.str("soc"))?;
+        Ok(Self::serving(needs, settings, soc, Routes::on_system(soc)))
     }
 
     fn health(&self) -> Health {
-        if self.server.routes().failing() {
-            Health::Degraded("a 2D unit failed: its jobs run on the CPU until it is reopened")
+        let routes = self.server.routes();
+        if routes.failing() {
+            Health::Degraded(UNIT_FAILED)
+        } else if routes.missing() {
+            Health::Degraded(UNIT_MISSING)
+        } else if self.server.needs_handles() {
+            Health::Degraded(NO_HANDLES)
         } else {
             Health::Ok
         }
@@ -270,24 +327,13 @@ fn stream_name(stream: Option<&StreamHandle>, name: &str, into: &mut [u8]) -> Re
 }
 
 impl Rga {
-    /// The driver with `settings`, no streams and no unit, for a test or a host that builds it
-    /// directly.
-    #[must_use]
-    pub fn new(settings: Settings) -> Self {
-        let needs = RgaNeeds {
-            scale: None,
-            convert: None,
-            blend: None,
-        };
-        Self::serving(needs, settings, Routes::cpu())
-    }
-
-    /// The driver on `needs`' streams, running jobs on `routes`.
-    fn serving(needs: RgaNeeds, settings: Settings, routes: Routes) -> Self {
+    /// The driver for `soc` on `needs`' streams, running jobs on `routes`.
+    fn serving(needs: RgaNeeds, settings: Settings, soc: caps::Soc, routes: Routes) -> Self {
         Self {
             scale: needs.scale,
             convert: needs.convert,
             blend: needs.blend,
+            soc,
             lanes: Default::default(),
             server: Server::new(Jobs::new(settings), routes),
         }
@@ -304,13 +350,6 @@ impl Rga {
     }
 }
 
-/// Entry `index` of `list`, or `NOT_FOUND`.
-fn entry<T: Copy>(list: &[T], index: u16) -> Result<T> {
-    list.get(usize::from(index))
-        .copied()
-        .ok_or(Status::NOT_FOUND)
-}
-
 impl ImageScaler for Rga {
     fn info(&mut self) -> Result<ScalerInfo> {
         let s = self.server.jobs.settings();
@@ -321,11 +360,16 @@ impl ImageScaler for Rga {
     }
 
     fn format_count(&mut self) -> Result<u16> {
-        Ok(PixelFormat::ALL.len() as u16)
+        let soc = self.soc;
+        Ok(count(
+            PixelFormat::ALL.into_iter().filter(|&f| scales(soc, f)),
+        ))
     }
 
     fn format(&mut self, index: u16) -> Result<u32> {
-        entry(&PixelFormat::ALL, index).map(PixelFormat::fourcc)
+        let soc = self.soc;
+        let listed = PixelFormat::ALL.into_iter().filter(|&f| scales(soc, f));
+        nth(listed, index).map(PixelFormat::fourcc)
     }
 
     fn job_stream(&mut self, into: &mut [u8]) -> Result<usize> {
@@ -351,18 +395,16 @@ impl ImageConvert for Rga {
     }
 
     fn conversion_count(&mut self) -> Result<u16> {
-        Ok((PixelFormat::ALL.len() * PixelFormat::ALL.len()) as u16)
+        let soc = self.soc;
+        Ok(count(pairs().filter(|&(from, to)| converts(soc, from, to))))
     }
 
     fn conversion(&mut self, index: u16) -> Result<ConversionPair> {
-        let n = PixelFormat::ALL.len();
-        let i = usize::from(index);
-        if i >= n * n {
-            return Err(Status::NOT_FOUND);
-        }
-        Ok(ConversionPair {
-            from: PixelFormat::ALL[i / n].fourcc(),
-            to: PixelFormat::ALL[i % n].fourcc(),
+        let soc = self.soc;
+        let listed = pairs().filter(|&(from, to)| converts(soc, from, to));
+        nth(listed, index).map(|(from, to)| ConversionPair {
+            from: from.fourcc(),
+            to: to.fourcc(),
         })
     }
 
@@ -389,11 +431,14 @@ impl ImageBlend for Rga {
     }
 
     fn format_count(&mut self) -> Result<u16> {
-        Ok(BLEND_FORMATS.len() as u16)
+        let soc = self.soc;
+        Ok(count(BLEND_FORMATS.into_iter().filter(|&f| blends(soc, f))))
     }
 
     fn format(&mut self, index: u16) -> Result<u32> {
-        entry(&BLEND_FORMATS, index).map(PixelFormat::fourcc)
+        let soc = self.soc;
+        let listed = BLEND_FORMATS.into_iter().filter(|&f| blends(soc, f));
+        nth(listed, index).map(PixelFormat::fourcc)
     }
 
     fn job_stream(&mut self, into: &mut [u8]) -> Result<usize> {

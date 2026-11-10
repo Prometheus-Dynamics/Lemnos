@@ -28,17 +28,33 @@
 //! 3. Each image's extent (stride times rows, every plane, overflow-free) must fit its stream
 //!    buffer: its last byte is read from the stream, which refuses a range outside the buffer.
 //!    This comes before any memory is taken for the job.
-//! 4. Then per route: the CPU reads each input once into the driver's own memory ([`Frames`])
-//!    and works on that copy, never on the shared buffer; the hardware routes check each extent
-//!    again against the real size of the dma-buf behind the handle, asked of the kernel, and the
-//!    route's own request builders check it once more.
+//! 4. Then per route: a route on dma-bufs checks each extent again against the real size of the
+//!    dma-buf behind the handle, asked of the kernel, and the route's own request builders check
+//!    it once more; the mainline route on bytes reads each input once into the driver's own
+//!    memory ([`Frames`]) and hands the device that copy, never the shared buffer.
 //!
-//! # Failures
+//! # A job runs on the hardware, or fails
 //!
-//! A unit that fails a job is closed, its job runs on the CPU, and the unit is tried again after a
-//! wait doubling from 250 ms and capped at 8 s, cleared by a job it completes. The driver never
-//! gives up on it and never turns itself off. A job the unit's route can't take (a format or size
-//! its device refuses) runs on the CPU without counting against the unit.
+//! The driver never computes a result itself and never sends a job anywhere but the route
+//! [`caps::route_for`](crate::caps::route_for) picks for it on the configured chip. A job that
+//! can't run there completes as failed (its output published empty, nothing written to it), is
+//! counted in its contract's `errors`, and leaves its reason in [`Failure`]:
+//!
+//! - [`Failure::NoRoute`]: no hardware route on this chip does this job.
+//! - [`Failure::NoHandles`]: the route takes dma-bufs only and the stream has none for its
+//!   buffers.
+//! - [`Failure::RouteRefused`]: the route `caps` picked can't take this job after all (a stride
+//!   or layout its request can't carry, or the device refusing the format or size). The unit is
+//!   not at fault and stays open.
+//! - [`Failure::UnitFailed`]: the unit failed the job. It is closed and opened again after a wait
+//!   of 250 ms doubling to a cap of 8 s, cleared by a job it completes; the driver never gives up
+//!   on it and never turns itself off.
+//! - [`Failure::UnitDown`]: the unit is closed, waiting to be opened again (after a failure, or
+//!   because its device node wasn't there when last looked for). The job doesn't wait for it and
+//!   runs nowhere else.
+//!
+//! The mainline device that won't import the stream's dma-bufs is handed the images as bytes
+//! through `read`/`write` instead: the same unit doing the same work, so that is not a failure.
 
 use lemnos_contract_image_blend::{self as blend, BlendJob};
 use lemnos_contract_image_convert::{self as convert, ConvertJob};
@@ -47,7 +63,7 @@ use lemnos_core::{Decode, ErrorKind, Reader};
 use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::StreamFrame;
 
-use crate::jobs::{Contract, Frames, Jobs, Plan, Side, sized};
+use crate::jobs::{Contract, Frames, Jobs, Plan, Side};
 
 /// Buffers of a stream this driver can hold. A job naming one past these is refused.
 pub const MAX_BUFFERS: u32 = 64;
@@ -87,6 +103,17 @@ pub enum Failure {
     NoConsumer,
     /// The stream refused the completion.
     Completion,
+    /// No hardware route on the configured chip does this job.
+    NoRoute,
+    /// The route takes dma-bufs only, and the stream has no handle for a buffer of the job.
+    NoHandles,
+    /// The route chosen for the job can't take it: a layout its request can't carry, or its
+    /// device refusing the format or size.
+    RouteRefused,
+    /// The unit failed the job: it is closed, and opened again after a wait.
+    UnitFailed,
+    /// The unit is closed, waiting to be opened again, so the job didn't run.
+    UnitDown,
 }
 
 /// One stream's state.
@@ -189,6 +216,7 @@ fn moved(result: Result<bool, ErrorKind>) -> Result<(), Failure> {
 }
 
 /// Copies `buffer`'s first `into.len()` bytes into `into`, once.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn read_into<S: StreamEndpoint<Error = ErrorKind> + ?Sized>(
     stream: &mut S,
     buffer: u32,
@@ -215,6 +243,8 @@ pub(crate) struct Server {
     frames: Frames,
     routes: Routes,
     last_failure: Option<Failure>,
+    /// A job failed because its stream has no dma-bufs: the board file has to change.
+    needs_handles: bool,
 }
 
 impl Server {
@@ -224,11 +254,17 @@ impl Server {
             frames: Frames::default(),
             routes,
             last_failure: None,
+            needs_handles: false,
         }
     }
 
     pub(crate) fn last_failure(&self) -> Option<Failure> {
         self.last_failure
+    }
+
+    /// Whether a job has failed because its stream has no dma-bufs.
+    pub(crate) fn needs_handles(&self) -> bool {
+        self.needs_handles
     }
 
     pub(crate) fn routes(&self) -> &Routes {
@@ -402,12 +438,14 @@ impl Server {
             Err(failure) => {
                 self.jobs.count(contract, None);
                 self.last_failure = Some(failure);
+                self.needs_handles |= failure == Failure::NoHandles;
             }
         }
         published
     }
 
-    /// Runs one checked job. The bytes written to its output, or why it didn't run.
+    /// Runs one checked job on its hardware route. The bytes written to its output, or why it
+    /// didn't run.
     fn run<S: StreamEndpoint<Error = ErrorKind> + ?Sized>(
         &mut self,
         stream: &mut S,
@@ -422,57 +460,28 @@ impl Server {
         for side in plan.sides() {
             fits_stream(stream, side)?;
         }
-        let Self {
-            jobs,
-            frames,
-            routes,
-            ..
-        } = self;
-        if let Some(served) = routes.run(stream, plan, frames, now_ns) {
-            return served;
-        }
-        // The CPU: each input read once into the driver's memory, and only that copy used.
-        let input = sized(&mut frames.input, plan.input.layout.frame_len());
-        read_into(stream, plan.input.buffer, input)?;
-        let second: &[u8] = match plan.second {
-            Some(side) => {
-                let second = sized(&mut frames.second, side.layout.frame_len());
-                read_into(stream, side.buffer, second)?;
-                second
-            }
-            None => &[],
-        };
-        let output = sized(&mut frames.output, plan.output.layout.frame_len());
-        // Bytes the work leaves alone (a row's padding) are written as zero, never as an
-        // earlier job's.
-        output.fill(0);
-        let written = jobs
-            .run_cpu(plan, input, second, output)
-            .ok_or(Failure::Refused)?;
-        moved(stream.write(plan.output.buffer, 0, output))?;
-        Ok(written)
+        self.routes.run(stream, plan, &mut self.frames, now_ns)
     }
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) use hardware::Routes;
 
-/// No unit is reached off Linux: every job runs on the CPU.
+/// No unit is reached off Linux: every job fails with [`Failure::NoRoute`].
 #[cfg(not(target_os = "linux"))]
-#[derive(Default)]
 pub(crate) struct Routes;
 
 #[cfg(not(target_os = "linux"))]
 impl Routes {
-    pub(crate) fn cpu() -> Self {
-        Self
-    }
-
-    pub(crate) fn on_system(_soc: Option<crate::caps::Soc>) -> Self {
+    pub(crate) fn on_system(_soc: crate::caps::Soc) -> Self {
         Self
     }
 
     pub(crate) fn failing(&self) -> bool {
+        false
+    }
+
+    pub(crate) fn missing(&self) -> bool {
         false
     }
 
@@ -482,8 +491,8 @@ impl Routes {
         _plan: &Plan,
         _frames: &mut Frames,
         _now_ns: u64,
-    ) -> Option<Result<u32, Failure>> {
-        None
+    ) -> Result<u32, Failure> {
+        Err(Failure::NoRoute)
     }
 }
 
@@ -491,13 +500,13 @@ impl Routes {
 mod hardware {
     use std::io;
 
+    use lemnos_contract_image_blend::BlendOp;
     use lemnos_core::ErrorKind;
     use lemnos_hal::StreamEndpoint;
     use lemnos_hal::blocks::BufferHandle;
 
     use super::{Failure, backoff_ns, moved, read_into};
     use crate::caps::{self, FixedOp, Op, Route, Soc};
-    use crate::cpu::BlendOp;
     use crate::jobs::{Frames, Jobs, Plan, Side, Work, sized};
     use crate::multirga::{Submit, blend_on, copy_on, gray_on};
     use crate::v4l2::M2mRoute;
@@ -515,6 +524,8 @@ mod hardware {
         due_ns: u64,
         /// It failed a job and none has run on it since.
         failing: bool,
+        /// Its device wasn't there when last looked for.
+        missing: bool,
     }
 
     impl<D> Slot<D> {
@@ -525,25 +536,31 @@ mod hardware {
                 attempt: 0,
                 due_ns: 0,
                 failing: false,
+                missing: false,
             }
         }
 
-        /// The device, opened if it isn't and its wait is over.
-        fn get(&mut self, now_ns: u64) -> Option<&mut D> {
+        /// The device, opened if it isn't and its wait is over; [`Failure::UnitDown`] while it
+        /// is closed.
+        fn get(&mut self, now_ns: u64) -> Result<&mut D, Failure> {
             if self.device.is_none() {
                 if now_ns < self.due_ns {
-                    return None;
+                    return Err(Failure::UnitDown);
                 }
                 match (self.open)() {
-                    Ok(device) => self.device = Some(device),
+                    Ok(device) => {
+                        self.device = Some(device);
+                        self.missing = false;
+                    }
                     Err(_) => {
                         // Not there (yet): looked for again after the wait.
+                        self.missing = true;
                         self.wait(now_ns);
-                        return None;
+                        return Err(Failure::UnitDown);
                     }
                 }
             }
-            self.device.as_mut()
+            self.device.as_mut().ok_or(Failure::UnitDown)
         }
 
         fn wait(&mut self, now_ns: u64) {
@@ -552,9 +569,11 @@ mod hardware {
             self.attempt = self.attempt.saturating_add(1);
         }
 
-        fn failed(&mut self, now_ns: u64) {
+        /// Closes it after it failed a job: [`Failure::UnitFailed`].
+        fn failed(&mut self, now_ns: u64) -> Failure {
             self.failing = true;
             self.wait(now_ns);
+            Failure::UnitFailed
         }
 
         fn worked(&mut self) {
@@ -576,12 +595,16 @@ mod hardware {
         pub(crate) fn is_failing(&self) -> bool {
             self.failing
         }
+
+        pub(crate) fn is_missing(&self) -> bool {
+            self.missing
+        }
     }
 
     /// What became of a job a unit was given.
     enum Ran {
         Done,
-        /// The route can't take this job: the CPU runs it, and the unit is not at fault.
+        /// The device can't take this job: the unit is not at fault.
         NotTaken,
         Failed,
     }
@@ -620,7 +643,7 @@ mod hardware {
 
     /// The units a SoC has, by route.
     pub(crate) struct Routes {
-        soc: Option<Soc>,
+        soc: Soc,
         m2m: Option<Slot<Box<dyn M2mRoute>>>,
         /// Whether the mainline device took the stream's dma-bufs: cleared when it refused them
         /// and took bytes, and set again when it is opened afresh.
@@ -629,14 +652,10 @@ mod hardware {
     }
 
     impl Routes {
-        /// No unit: every job runs on the CPU.
-        pub(crate) fn cpu() -> Self {
-            Self::new(None, None, None)
-        }
-
-        /// The units of `soc` (none when `None`), each a slot over its opener.
+        /// The units of `soc`, each a slot over its opener. A route without an opener has no
+        /// unit: its jobs fail with [`Failure::UnitDown`].
         pub(crate) fn new(
-            soc: Option<Soc>,
+            soc: Soc,
             m2m: Option<Opener<Box<dyn M2mRoute>>>,
             multi: Option<Opener<Box<dyn Submit>>>,
         ) -> Self {
@@ -649,11 +668,8 @@ mod hardware {
         }
 
         /// The units of `soc` on this system: the `rockchip-rga` mem2mem node and `/dev/rga`,
-        /// each opened when a job first wants it. Nothing is opened for `None`.
-        pub(crate) fn on_system(soc: Option<Soc>) -> Self {
-            if soc.is_none() {
-                return Self::cpu();
-            }
+        /// each opened when a job first wants it.
+        pub(crate) fn on_system(soc: Soc) -> Self {
             let missing = || io::Error::from(io::ErrorKind::NotFound);
             Self::new(
                 soc,
@@ -676,6 +692,12 @@ mod hardware {
                 || self.multi.as_ref().is_some_and(Slot::is_failing)
         }
 
+        /// Whether a unit's device wasn't there when a job last looked for it.
+        pub(crate) fn missing(&self) -> bool {
+            self.m2m.as_ref().is_some_and(Slot::is_missing)
+                || self.multi.as_ref().is_some_and(Slot::is_missing)
+        }
+
         #[cfg(test)]
         pub(crate) fn m2m(&self) -> Option<&Slot<Box<dyn M2mRoute>>> {
             self.m2m.as_ref()
@@ -686,50 +708,49 @@ mod hardware {
             self.multi.as_ref()
         }
 
-        /// The route `caps` chooses for `plan`, `None` for the CPU.
+        /// The route `caps` chooses for `plan`, if any.
         pub(crate) fn choose(&self, plan: &Plan) -> Option<Route> {
-            let soc = self.soc?;
             let op = match plan.work {
                 Work::Scale(filter) => Op::Resize(filter),
                 Work::Convert => Op::Convert,
                 Work::Blend(_) => Op::Fixed(FixedOp::Blend),
             };
-            caps::route_for(soc, op, plan.input.layout, plan.output.layout)
+            caps::route_for(self.soc, op, plan.input.layout, plan.output.layout)
         }
 
-        /// Runs `plan` on the unit `caps` chooses, when that unit is there and can take it.
-        /// `None` sends the job to the CPU.
+        /// Runs `plan` on the unit `caps` chooses. The bytes written, or why the job failed:
+        /// nothing else runs it.
         pub(super) fn run<S: StreamEndpoint<Error = ErrorKind> + ?Sized>(
             &mut self,
             stream: &mut S,
             plan: &Plan,
             frames: &mut Frames,
             now_ns: u64,
-        ) -> Option<Result<u32, Failure>> {
-            let written = Jobs::written(plan.output.layout)?;
-            match self.choose(plan)? {
-                Route::V4l2 => self.run_m2m(stream, plan, frames, now_ns),
-                Route::MultiRga => self.run_multi(stream, plan, now_ns),
-                _ => None,
+        ) -> Result<u32, Failure> {
+            let written = Jobs::written(plan.output.layout).ok_or(Failure::Size)?;
+            match self.choose(plan) {
+                Some(Route::V4l2) => self.run_m2m(stream, plan, frames, now_ns),
+                Some(Route::MultiRga) => self.run_multi(stream, plan, now_ns),
+                _ => Err(Failure::NoRoute),
             }
-            .map(|served| served.map(|()| written))
+            .map(|()| written)
         }
 
         /// The mainline route: the stream's dma-bufs where the device takes them, else the
-        /// images copied through the driver's memory.
+        /// images copied through the driver's memory to the same device.
         fn run_m2m<S: StreamEndpoint<Error = ErrorKind> + ?Sized>(
             &mut self,
             stream: &mut S,
             plan: &Plan,
             frames: &mut Frames,
             now_ns: u64,
-        ) -> Option<Result<(), Failure>> {
+        ) -> Result<(), Failure> {
             let filter = match plan.work {
                 Work::Scale(filter) => Some(filter),
                 Work::Convert => None,
-                Work::Blend(_) => return None,
+                Work::Blend(_) => return Err(Failure::RouteRefused),
             };
-            let slot = self.m2m.as_mut()?;
+            let slot = self.m2m.as_mut().ok_or(Failure::UnitDown)?;
             let reopened = !slot.is_open();
             let device = slot.get(now_ns)?;
             if reopened {
@@ -742,7 +763,7 @@ mod hardware {
                 && let (Some(i), Some(o)) = (handle(stream, src), handle(stream, dst))
             {
                 if !(fits_handle(src, i) && fits_handle(dst, o)) {
-                    return Some(Err(Failure::Size));
+                    return Err(Failure::Size);
                 }
                 let result = match filter {
                     Some(f) => device.resize(src.layout, i.fd(), dst.layout, o.fd(), f),
@@ -751,21 +772,16 @@ mod hardware {
                 match ran(short(result, want)) {
                     Ran::Done => {
                         slot.worked();
-                        return Some(Ok(()));
+                        return Ok(());
                     }
-                    Ran::Failed => {
-                        slot.failed(now_ns);
-                        return None;
-                    }
-                    // The device doesn't take the dma-bufs: bytes, below.
+                    Ran::Failed => return Err(slot.failed(now_ns)),
+                    // The device doesn't take the dma-bufs: bytes, below, on the same device.
                     Ran::NotTaken => tried = true,
                 }
             }
             // Bytes: the input read once into the driver's memory, the output written back.
             let input = sized(&mut frames.input, src.layout.frame_len());
-            if let Err(failure) = read_into(stream, src.buffer, input) {
-                return Some(Err(failure));
-            }
+            read_into(stream, src.buffer, input)?;
             let output = sized(&mut frames.output, want);
             output.fill(0);
             let result = match filter {
@@ -779,53 +795,50 @@ mod hardware {
                         self.imports = false;
                     }
                     slot.worked();
-                    Some(moved(stream.write(dst.buffer, 0, output)))
+                    moved(stream.write(dst.buffer, 0, output))
                 }
-                Ran::NotTaken => None,
-                Ran::Failed => {
-                    slot.failed(now_ns);
-                    None
-                }
+                Ran::NotTaken => Err(Failure::RouteRefused),
+                Ran::Failed => Err(slot.failed(now_ns)),
             }
         }
 
-        /// The `/dev/rga` route: dma-bufs only, so only a stream with handles reaches it.
+        /// The `/dev/rga` route: dma-bufs only, so a stream without handles can't reach it.
         fn run_multi<S: StreamEndpoint<Error = ErrorKind> + ?Sized>(
             &mut self,
             stream: &mut S,
             plan: &Plan,
             now_ns: u64,
-        ) -> Option<Result<(), Failure>> {
+        ) -> Result<(), Failure> {
             let stream = &*stream;
             let mut handles = [None; 3];
             for (slot, side) in handles.iter_mut().zip(plan.sides()) {
-                let h = handle(stream, side)?;
+                let h = handle(stream, side).ok_or(Failure::NoHandles)?;
                 // Every check, on the real size of the dma-buf behind the handle.
                 if !fits_handle(side, h) {
-                    return Some(Err(Failure::Size));
+                    return Err(Failure::Size);
                 }
                 *slot = Some(h);
             }
-            let slot = self.multi.as_mut()?;
+            let slot = self.multi.as_mut().ok_or(Failure::UnitDown)?;
             let (src, dst) = (plan.input.layout, plan.output.layout);
             let result = match (plan.work, handles) {
                 (Work::Convert, [Some(i), Some(o), None]) => {
-                    // The node's gray input is full-range BT.601, which repeats the byte as the
-                    // CPU does, whatever the driver's matrix; its images are packed.
+                    // The node's gray input is full-range BT.601, which repeats the byte; its
+                    // images are packed.
                     let packed = src.stride == src.width && dst.stride == src.width * 4;
                     let gray = src.format == PixelFormat::Grey
                         && matches!(dst.format, PixelFormat::Abgr32 | PixelFormat::Xbgr32);
                     if !packed || !gray {
-                        return None;
+                        return Err(Failure::RouteRefused);
                     }
                     let device = slot.get(now_ns)?;
                     gray_on(&**device, src.width, src.height, i.fd(), o.fd())
                 }
                 (Work::Blend(op), [Some(fg), Some(bg), Some(out)]) => {
-                    let second = plan.second?.layout;
+                    let second = plan.second.ok_or(Failure::RouteRefused)?.layout;
                     let strides = src.stride == second.stride && src.stride == dst.stride;
                     if !strides || !src.stride.is_multiple_of(4) {
-                        return None;
+                        return Err(Failure::RouteRefused);
                     }
                     let image = Image {
                         format: RgaFormat::Bgra8888,
@@ -844,18 +857,15 @@ mod hardware {
                     copy_on(&**device, image, bg.fd(), out.fd())
                         .and_then(|()| blend_on(&**device, image, fg.fd(), out.fd(), mode, true))
                 }
-                _ => return None,
+                _ => return Err(Failure::RouteRefused),
             };
             match ran(result) {
                 Ran::Done => {
                     slot.worked();
-                    Some(Ok(()))
+                    Ok(())
                 }
-                Ran::NotTaken => None,
-                Ran::Failed => {
-                    slot.failed(now_ns);
-                    None
-                }
+                Ran::NotTaken => Err(Failure::RouteRefused),
+                Ran::Failed => Err(slot.failed(now_ns)),
             }
         }
     }

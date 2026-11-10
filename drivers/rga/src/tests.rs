@@ -4,7 +4,6 @@ use lemnos_contract_image_blend::{self as blend, BlendJob, BlendOp};
 use lemnos_contract_image_convert::{self as convert, ConvertJob};
 use lemnos_contract_image_scaler::{self as scaler, Filter, ScaleJob};
 use lemnos_core::{ConfigValue, Driver};
-use lemnos_measure::test_alloc::allocations;
 
 use super::*;
 
@@ -15,6 +14,10 @@ fn start(entries: &[(&str, ConfigValue<'_>)]) -> Result<Rga> {
         blend: None,
     };
     Rga::start(needs, &Config::new(entries))
+}
+
+fn on(soc: &str) -> Rga {
+    start(&[("soc", ConfigValue::Str(soc))]).unwrap()
 }
 
 fn fourcc(code: &[u8; 4]) -> u32 {
@@ -72,35 +75,49 @@ fn the_manifest_names_the_three_contracts() {
 }
 
 #[test]
-fn defaults_answer_the_contracts() {
-    let mut rga = start(&[]).unwrap();
+fn the_contracts_list_what_the_chips_hardware_does() {
+    // RK3588: the mainline driver scales and converts every format but gray; `/dev/rga` adds
+    // gray to AR24 and XR24, and blends.
+    let mut rga = on("rk3588");
     let info = ImageScaler::info(&mut rga).unwrap();
     assert_eq!((info.max_width, info.max_height), (8192, 8192));
-    assert_eq!(ImageScaler::format_count(&mut rga), Ok(8));
-    let formats: Vec<u32> = (0..8)
+    assert_eq!(ImageScaler::format_count(&mut rga), Ok(7));
+    let formats: Vec<u32> = (0..7)
         .map(|i| ImageScaler::format(&mut rga, i).unwrap())
         .collect();
     assert_eq!(formats[0], fourcc(b"RGB3"));
-    assert_eq!(formats[7], fourcc(b"YU12"));
-    assert_eq!(ImageScaler::format(&mut rga, 8), Err(Status::NOT_FOUND));
+    assert!(!formats.contains(&fourcc(b"GREY")));
+    assert_eq!(formats[6], fourcc(b"YU12"));
+    assert_eq!(ImageScaler::format(&mut rga, 7), Err(Status::NOT_FOUND));
 
-    assert_eq!(rga.conversion_count(), Ok(64));
-    let first = rga.conversion(0).unwrap();
-    assert_eq!((first.from, first.to), (fourcc(b"RGB3"), fourcc(b"RGB3")));
-    let last = rga.conversion(63).unwrap();
-    assert_eq!((last.from, last.to), (fourcc(b"YU12"), fourcc(b"YU12")));
-    let some = rga.conversion(8 * 2 + 5).unwrap();
-    assert_eq!((some.from, some.to), (fourcc(b"AR24"), fourcc(b"NV12")));
-    assert_eq!(rga.conversion(64), Err(Status::NOT_FOUND));
+    assert_eq!(rga.conversion_count(), Ok(7 * 7 + 2));
+    let pairs: Vec<(u32, u32)> = (0..51)
+        .map(|i| rga.conversion(i).map(|p| (p.from, p.to)).unwrap())
+        .collect();
+    assert_eq!(pairs[0], (fourcc(b"RGB3"), fourcc(b"RGB3")));
+    assert!(pairs.contains(&(fourcc(b"GREY"), fourcc(b"AR24"))));
+    assert!(pairs.contains(&(fourcc(b"GREY"), fourcc(b"XR24"))));
+    assert!(!pairs.contains(&(fourcc(b"GREY"), fourcc(b"NV12"))));
+    assert!(!pairs.contains(&(fourcc(b"AR24"), fourcc(b"GREY"))));
+    assert_eq!(rga.conversion(51), Err(Status::NOT_FOUND));
 
     assert_eq!(ImageBlend::format_count(&mut rga), Ok(1));
     assert_eq!(ImageBlend::format(&mut rga, 0), Ok(fourcc(b"AR24")));
     assert_eq!(ImageBlend::format(&mut rga, 1), Err(Status::NOT_FOUND));
+
+    // RK3576: `/dev/rga` only, which scales nothing here and converts only from gray.
+    let mut rga = on("rk3576");
+    assert_eq!(ImageScaler::format_count(&mut rga), Ok(0));
+    assert_eq!(ImageScaler::format(&mut rga, 0), Err(Status::NOT_FOUND));
+    assert_eq!(rga.conversion_count(), Ok(2));
+    let first = rga.conversion(0).unwrap();
+    assert_eq!((first.from, first.to), (fourcc(b"GREY"), fourcc(b"AR24")));
+    assert_eq!(ImageBlend::format_count(&mut rga), Ok(1));
 }
 
 #[test]
 fn job_streams_the_board_gives_none_of_are_not_offered() {
-    let mut rga = start(&[]).unwrap();
+    let mut rga = on("rk3588");
     let mut name = [0u8; 64];
     assert_eq!(
         ImageScaler::job_stream(&mut rga, &mut name),
@@ -117,31 +134,53 @@ fn job_streams_the_board_gives_none_of_are_not_offered() {
 }
 
 #[test]
-fn config_sets_the_limits_and_the_matrix() {
+fn config_sets_the_limits() {
     let mut rga = start(&[
+        ("soc", ConfigValue::Str("rk3568")),
         ("max_width", ConfigValue::Int(640)),
         ("max_height", ConfigValue::Int(480)),
-        ("matrix", ConfigValue::Str("bt709-limited")),
-        ("sampling", ConfigValue::Str("corners")),
     ])
     .unwrap();
     let info = ImageConvert::info(&mut rga).unwrap();
     assert_eq!((info.max_width, info.max_height), (640, 480));
-    let s = rga.jobs().settings();
-    assert_eq!(s.matrix, Matrix::Bt709Limited);
-    assert_eq!(s.sampling, Sampling::Corners);
+    assert_eq!(Lifecycle::health(&rga), Health::Ok);
+}
+
+#[test]
+fn without_a_soc_or_with_a_chip_that_has_no_route_the_driver_does_not_bind() {
+    // No `soc`: no route for anything, so no driver that would fail every job.
+    assert_eq!(start(&[]).err(), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(
+        start(&[("max_width", ConfigValue::Int(64))]).err(),
+        Some(Status::INVALID_ARGUMENT)
+    );
+    // A chip this crate knows whose units have no route here yet.
+    assert_eq!(
+        start(&[("soc", ConfigValue::Str("k230d"))]).err(),
+        Some(Status::NOT_SUPPORTED)
+    );
+    for soc in ["rk3566", "rk3568", "rk3576", "rk3588", "rk3562", "rv1126b"] {
+        assert!(start(&[("soc", ConfigValue::Str(soc))]).is_ok(), "{soc}");
+    }
 }
 
 #[test]
 fn bad_config_is_refused() {
-    for entries in [
-        [("max_width", ConfigValue::Int(0))],
-        [("max_width", ConfigValue::Int(65536))],
-        [("max_height", ConfigValue::Int(-1))],
-        [("matrix", ConfigValue::Str("bt2020"))],
-        [("sampling", ConfigValue::Str("middle"))],
-        [("soc", ConfigValue::Str("rk9999"))],
+    let soc = ("soc", ConfigValue::Str("rk3588"));
+    for entry in [
+        ("max_width", ConfigValue::Int(0)),
+        ("max_width", ConfigValue::Int(65536)),
+        ("max_height", ConfigValue::Int(-1)),
+        ("soc", ConfigValue::Str("rk9999")),
+        // The CPU route's settings: the hardware has its own matrix and phase.
+        ("matrix", ConfigValue::Str("bt601-limited")),
+        ("sampling", ConfigValue::Str("centres")),
     ] {
+        let entries = if entry.0 == "soc" {
+            vec![entry]
+        } else {
+            vec![soc, entry]
+        };
         assert_eq!(
             start(&entries).err(),
             Some(Status::INVALID_ARGUMENT),
@@ -151,48 +190,46 @@ fn bad_config_is_refused() {
 }
 
 #[test]
-fn a_scale_job_runs_and_counts() {
-    let mut rga = start(&[]).unwrap();
-    let input: Vec<u8> = (0..8 * 4 * 4).map(|n| n as u8).collect();
-    let mut output = vec![0u8; 4 * 2 * 4];
-    let job = ScaleJob {
-        identity: 1,
-        input: scale_ref(0, 8, 4, b"AR24", 32),
-        output: scale_ref(1, 4, 2, b"AR24", 16),
-        filter: Filter::Area,
-    };
-    assert_eq!(rga.jobs().scale(&job, &input, &mut output), 32);
-    // A 2x2 box over the first two pixels of rows 0 and 1: bytes 0, 4, 32, 36 average to 18.
-    assert_eq!(output[0], 18);
-    let c = ImageScaler::counters(&mut rga).unwrap();
-    assert_eq!((c.jobs, c.errors), (1, 0));
-}
-
-#[test]
 fn scale_jobs_that_overrun_their_buffers_are_refused() {
-    let mut rga = start(&[("max_width", ConfigValue::Int(64))]).unwrap();
-    let input = vec![0u8; 8 * 4 * 4];
-    let mut output = vec![0u8; 4 * 2 * 4];
+    let mut rga = start(&[
+        ("soc", ConfigValue::Str("rk3588")),
+        ("max_width", ConfigValue::Int(64)),
+    ])
+    .unwrap();
+    let jobs = rga.jobs();
+    // The buffers the jobs name, by length.
+    let (input, output) = (8 * 4 * 4, 4 * 2 * 4);
     let good = ScaleJob {
         identity: 1,
         input: scale_ref(0, 8, 4, b"AR24", 32),
         output: scale_ref(1, 4, 2, b"AR24", 16),
         filter: Filter::Bilinear,
     };
-    let bad = [
+    let fits = |plan: &jobs::Plan| {
+        Jobs::fits(plan.input.layout, input) && Jobs::fits(plan.output.layout, output)
+    };
+    assert!(jobs.plan_scale(&good).is_some_and(|p| fits(&p)));
+    // Planned, but past their buffers.
+    for job in [
         // The input claims one row more than its buffer holds.
         ScaleJob {
             input: scale_ref(0, 8, 5, b"AR24", 32),
             ..good
         },
-        // A stride shorter than a row.
-        ScaleJob {
-            output: scale_ref(1, 4, 2, b"AR24", 15),
-            ..good
-        },
         // A stride so large its extent would wrap a 32-bit product.
         ScaleJob {
             input: scale_ref(0, 8, 4, b"AR24", u32::MAX),
+            ..good
+        },
+    ] {
+        let plan = jobs.plan_scale(&job).unwrap();
+        assert!(!fits(&plan), "{job:?}");
+    }
+    // Refused by the job alone.
+    for job in [
+        // A stride shorter than a row.
+        ScaleJob {
+            output: scale_ref(1, 4, 2, b"AR24", 15),
             ..good
         },
         // Wider than configured.
@@ -221,40 +258,37 @@ fn scale_jobs_that_overrun_their_buffers_are_refused() {
             output: scale_ref(1, 4, 2, b"ZZZZ", 16),
             ..good
         },
-    ];
-    for job in &bad {
-        assert_eq!(rga.jobs().scale(job, &input, &mut output), 0, "{job:?}");
+    ] {
+        assert_eq!(jobs.plan_scale(&job), None, "{job:?}");
     }
-    assert_eq!(rga.jobs().scale(&good, &input, &mut output), 32);
-    let c = ImageScaler::counters(&mut rga).unwrap();
-    assert_eq!((c.jobs, c.errors), (1, bad.len() as u64));
 }
 
 #[test]
-fn a_convert_job_runs_and_checks_both_planes_of_yuv() {
-    let mut rga = start(&[]).unwrap();
-    let input = vec![128u8; 4 * 4 * 3];
+fn a_convert_job_is_checked_on_both_planes_of_yuv() {
+    let mut rga = on("rk3588");
+    let jobs = rga.jobs();
     // NV12 of 4x4 with stride 4: 16 bytes of luma and 8 of chroma.
-    let mut output = vec![0u8; 24];
     let job = ConvertJob {
         identity: 2,
         input: convert_ref(0, 4, 4, b"RGB3", 12),
         output: convert_ref(1, 4, 4, b"NV12", 4),
     };
-    assert_eq!(rga.jobs().convert(&job, &input, &mut output), 24);
+    let plan = jobs.plan_convert(&job).unwrap();
+    assert!(Jobs::fits(plan.output.layout, 24));
     // One byte short of the chroma plane.
-    let mut short = vec![0u8; 23];
-    assert_eq!(rga.jobs().convert(&job, &input, &mut short), 0);
-    let c = ImageConvert::counters(&mut rga).unwrap();
-    assert_eq!((c.jobs, c.errors), (1, 1));
+    assert!(!Jobs::fits(plan.output.layout, 23));
+    // A conversion keeps the size.
+    let resized = ConvertJob {
+        output: convert_ref(1, 4, 2, b"NV12", 4),
+        ..job
+    };
+    assert_eq!(jobs.plan_convert(&resized), None);
 }
 
 #[test]
-fn a_blend_job_runs_and_needs_three_buffers() {
-    let mut rga = start(&[]).unwrap();
-    let fg = [0u8, 0, 128, 128].repeat(4);
-    let bg = [200u8, 0, 0, 255].repeat(4);
-    let mut out = vec![0u8; 16];
+fn a_blend_job_needs_three_buffers_of_one_shape_in_its_format() {
+    let mut rga = on("rk3588");
+    let jobs = rga.jobs();
     let job = BlendJob {
         identity: 3,
         op: BlendOp::SrcOver,
@@ -262,48 +296,27 @@ fn a_blend_job_runs_and_needs_three_buffers() {
         background: blend_ref(1, 2, 2),
         output: blend_ref(2, 2, 2),
     };
-    assert_eq!(rga.jobs().blend(&job, &fg, &bg, &mut out), 16);
-    // Blue: 0 + 200 * (255 - 128) / 255, rounded, is 100; alpha: 128 + 255 * 127 / 255.
-    assert_eq!(&out[..4], &[100, 0, 128, 255]);
+    assert!(jobs.plan_blend(&job).is_some());
     let same = BlendJob {
         output: blend_ref(1, 2, 2),
         ..job
     };
-    assert_eq!(rga.jobs().blend(&same, &fg, &bg, &mut out), 0);
-    let c = ImageBlend::counters(&mut rga).unwrap();
-    assert_eq!((c.jobs, c.errors), (1, 1));
-}
-
-#[test]
-fn jobs_allocate_nothing_once_made() {
-    let mut rga = start(&[("max_width", ConfigValue::Int(64))]).unwrap();
-    let input = vec![7u8; 64 * 32 * 4];
-    let mut output = vec![0u8; 48 * 24 * 3 / 2];
-    let mut nv = vec![0u8; 64 * 32 * 3 / 2];
-    let scale = ScaleJob {
-        identity: 1,
-        input: scale_ref(0, 64, 32, b"AR24", 256),
-        output: scale_ref(1, 30, 20, b"AR24", 120),
-        filter: Filter::Bilinear,
+    assert_eq!(jobs.plan_blend(&same), None);
+    let smaller = BlendJob {
+        output: blend_ref(2, 2, 1),
+        ..job
     };
-    let area = ScaleJob {
-        filter: Filter::Area,
-        output: scale_ref(1, 32, 16, b"AR24", 128),
-        ..scale
+    assert_eq!(jobs.plan_blend(&smaller), None);
+    let rgb = |buffer| blend::ImageRef {
+        fourcc: fourcc(b"RGB3"),
+        stride: 6,
+        ..blend_ref(buffer, 2, 2)
     };
-    let conv = ConvertJob {
-        identity: 2,
-        input: convert_ref(0, 64, 32, b"AR24", 256),
-        output: convert_ref(1, 64, 32, b"NV12", 64),
+    let not_rgba = BlendJob {
+        foreground: rgb(0),
+        background: rgb(1),
+        output: rgb(2),
+        ..job
     };
-    let mut big = vec![0u8; 30 * 20 * 4];
-    let ((), count) = allocations(|| {
-        for _ in 0..100 {
-            assert_ne!(rga.jobs().scale(&scale, &input, &mut big), 0);
-            assert_ne!(rga.jobs().scale(&area, &input, &mut big[..]), 0);
-            assert_ne!(rga.jobs().convert(&conv, &input, &mut nv), 0);
-            assert_eq!(rga.jobs().convert(&conv, &input, &mut output), 0);
-        }
-    });
-    assert_eq!(count, 0, "allocations in 400 jobs");
+    assert_eq!(jobs.plan_blend(&not_rgba), None);
 }
