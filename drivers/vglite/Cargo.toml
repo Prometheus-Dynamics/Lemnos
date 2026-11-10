@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-driver-vglite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The VGLite 2.5D GPU on /dev/vg_lite: resize, crop, flips and quarter turns, fill, blend, palette and width-1 lines (a stroke), its command streams ported from the vendor's library and checked as they are built, reopened after a failure. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: every system call goes through lemnos-driver-vglite-sys, which holds the `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-vglite-sys = { path = "../vglite-sys" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
