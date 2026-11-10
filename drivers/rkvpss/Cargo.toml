@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-driver-rkvpss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The rkvpss offline scaler: dma-buf to dma-buf crop, scale and format conversion on up to six output channels, through the vendor kernel's rkvpss-offline node, reopening itself after a failure. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: every system call goes through lemnos-driver-rkvpss-sys, which holds the `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-rkvpss-sys = { path = "../rkvpss-sys" }
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
