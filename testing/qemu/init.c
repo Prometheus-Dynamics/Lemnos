@@ -246,6 +246,10 @@ int main(void)
 	      "lemnos_gpio_check");
 	gpio_sim_down();
 
+	check(!run((char *const[]){ "/lemnos_power_check", "/dev/lemnos", BLOCK, BIND, UNBIND,
+				    NULL }),
+	      "lemnos_power_check");
+
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded with nothing left held");
 	check(!unload("spi_loopback_test"), "spi-loopback-test unloaded");

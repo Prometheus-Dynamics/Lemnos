@@ -20,11 +20,16 @@
  * - LEMNOS_IOC_IMPORT / LEMNOS_IOC_RELEASE: a dma-buf mapped on the block,
  *   contiguous in its address space, held until released, the block is
  *   unbound, or the file closes.
- * - Interrupts: read() returns struct lemnos_irq_event, oldest first, one per
- *   interrupt that fired since its last enable, and poll() waits for one. An
- *   interrupt is masked from when it fires until LEMNOS_IOC_IRQ_ENABLE: the
- *   driver clears the cause, then enables it. All start masked, and closing
- *   the file masks them again.
+ * - Interrupts arrive on the event stream, one per interrupt that fired since
+ *   its last enable. An interrupt is masked from when it fires until
+ *   LEMNOS_IOC_IRQ_ENABLE: the driver clears the cause, then enables it. All
+ *   start masked, and closing the file masks them again.
+ * - LEMNOS_IOC_POWER: a block's clocks, supplies and resets, by the names its
+ *   firmware description gives them.
+ *
+ * The event stream is read() and poll() on this file: struct lemnos_event,
+ * for interrupts, blocks bound and unbound, supply faults and temperature
+ * limits crossed. It starts empty at open.
  *
  * Claims are separate from blocks. LEMNOS_IOC_CLAIM takes a resource by name,
  * exclusively, and returns a file: whoever holds that file holds the claim,
@@ -102,6 +107,9 @@
 #define LEMNOS_MAX_REGIONS 8
 #define LEMNOS_MAX_IRQS 4
 #define LEMNOS_NAME_MAX 64
+#define LEMNOS_POWER_NAME 32
+#define LEMNOS_MAX_POWER 12
+#define LEMNOS_MAX_THERMAL_WATCHES 8
 
 /* The registers may be mapped (see above). */
 #define LEMNOS_INFO_MMIO_MAPPABLE	(1u << 0)
@@ -158,12 +166,23 @@ struct lemnos_irq {
 	__u32 index;		/* in: below lemnos_info.irqs */
 };
 
-struct lemnos_irq_event {
+#define LEMNOS_EVENT_IRQ		0	/* index: the interrupt; count: times it fired */
+#define LEMNOS_EVENT_BLOCK_BOUND	1
+#define LEMNOS_EVENT_BLOCK_UNBOUND	2
+#define LEMNOS_EVENT_SUPPLY_FAULT	3	/* index: the supply's handle; value: REGULATOR_EVENT_* */
+#define LEMNOS_EVENT_TEMPERATURE	4	/* index: the watch; value: millidegrees */
+
+/*
+ * count on the non-interrupt kinds numbers them, so a gap means some were
+ * lost to a full queue.
+ */
+struct lemnos_event {
 	__u32 block;
-	__u32 irq;		/* index, below lemnos_info.irqs */
-	__u32 count;		/* times it fired since the block was bound */
-	__u32 reserved;
-	__u64 ns;		/* ktime_get_ns() when it last fired */
+	__u32 index;
+	__u32 count;
+	__u32 kind;		/* LEMNOS_EVENT_* */
+	__u64 ns;		/* ktime_get_ns() when it happened */
+	__s64 value;
 };
 
 struct lemnos_claim {
@@ -327,6 +346,48 @@ struct lemnos_spi_transfer {
 	__u32 reserved;
 	__u64 segments;		/* user pointer to lemnos_spi_segment[count] */
 };
+
+#define LEMNOS_POWER_CLOCK	0
+#define LEMNOS_POWER_SUPPLY	1
+#define LEMNOS_POWER_RESET	2
+
+#define LEMNOS_POWER_ENABLE	0	/* clock, supply; deasserts a reset */
+#define LEMNOS_POWER_DISABLE	1	/* clock, supply; asserts a reset */
+#define LEMNOS_POWER_STATUS	2	/* value: 1 if on, or asserted for a reset */
+#define LEMNOS_POWER_GET	3	/* value: hertz, or microvolts */
+#define LEMNOS_POWER_SET	4	/* value: hertz, or minimum microvolts; value2: maximum */
+#define LEMNOS_POWER_PULSE	5	/* reset only */
+
+struct lemnos_power {
+	__u32 block;		/* in */
+	__u32 kind;		/* in: LEMNOS_POWER_CLOCK, SUPPLY or RESET */
+	__u32 op;		/* in */
+	__u32 handle;		/* out: which handle this is, for events */
+	char name[LEMNOS_POWER_NAME];	/* in: empty for a block's only clock */
+	__u64 value;		/* in, out */
+	__u64 value2;		/* in */
+};
+
+struct lemnos_thermal {
+	char zone[LEMNOS_NAME_MAX];	/* in: the thermal zone's type */
+	__s64 temperature;	/* out: millidegrees, now */
+};
+
+/*
+ * LEMNOS_EVENT_TEMPERATURE when the zone rises to high_mc, and again once it
+ * has fallen to low_mc. Ends when the file closes.
+ */
+struct lemnos_thermal_watch {
+	char zone[LEMNOS_NAME_MAX];	/* in */
+	__s32 low_mc;		/* in */
+	__s32 high_mc;		/* in */
+	__u32 period_ms;	/* in */
+	__u32 watch;		/* out: the event's index */
+};
+
+#define LEMNOS_IOC_THERMAL_READ _IOWR('L', 0xa0, struct lemnos_thermal)
+#define LEMNOS_IOC_THERMAL_WATCH _IOWR('L', 0xa1, struct lemnos_thermal_watch)
+#define LEMNOS_IOC_POWER      _IOWR('L', 0xd6, struct lemnos_power)
 
 #define LEMNOS_GPIO_OUTPUT	(1u << 0)
 #define LEMNOS_GPIO_ACTIVE_LOW	(1u << 1)

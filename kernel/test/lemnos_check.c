@@ -135,7 +135,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Interrupts start masked: nothing to read, and enabling past the end is refused. */
-	struct lemnos_irq_event ev;
+	struct lemnos_event ev;
 	struct pollfd p = { .fd = fd, .events = POLLIN };
 
 	CHECK(poll(&p, 1, 100) == 0, "no interrupt pending (poll 100 ms)");

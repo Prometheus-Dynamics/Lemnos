@@ -161,6 +161,20 @@ or `pwm-<provider>:<channel>`, where the provider is the PWM chip's parent platf
 the claim lets go and leaves the output as it was. A line's edges arrive through `read()` and `poll()`
 on the claim's file. Each carries a sequence number, so a gap shows a lost edge.
 
+## Clocks, supplies, resets
+
+`LEMNOS_IOC_POWER` reaches a block's clocks, supplies and resets by the names its firmware description
+gives them. A handle is taken on first use and kept until the block is unbound. An enabled clock or
+supply stays on when the file closes, and a later `enable` doesn't enable it again; unbinding turns
+off only what the module turned on.
+
+## Events
+
+`read()` and `poll()` on `/dev/lemnos` are one stream of `struct lemnos_event`: interrupts, blocks
+bound and unbound, supply faults, and temperature limits crossed. Interrupts can't be lost, and the
+other kinds carry a sequence number, so a gap shows a loss from a full queue. The stream starts
+empty at open, and watches end on close.
+
 ## Unbinding
 
 Requests for a block fail with `ENODEV` from the moment its unbind starts, its register mappings
@@ -175,6 +189,6 @@ make KDIR=<a built kernel tree>
 ```
 
 `testing/qemu/run.sh` builds the module and boots a kernel in QEMU with it loaded, then runs
-`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_bus_check.c`, `test/lemnos_gpio_check.c`, `test/lemnos_stream_check.c`, `test/lemnos_rp1_csi2_check.c` and `test/lemnos_pisp_fe_check.c` on blocks with
+`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_bus_check.c`, `test/lemnos_gpio_check.c`, `test/lemnos_power_check.c`, `test/lemnos_stream_check.c`, `test/lemnos_rp1_csi2_check.c` and `test/lemnos_pisp_fe_check.c` on blocks with
 nothing behind them. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
 and memory checking on.

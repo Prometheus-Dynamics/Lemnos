@@ -65,7 +65,7 @@ int main(int argc, char **argv)
 	const char *node = argc > 1 ? argv[1] : "/dev/lemnos";
 	const char *name = argc > 2 ? argv[2] : "";
 	int rounds = argc > 3 ? atoi(argv[3]) : 2000;
-	struct lemnos_irq_event ev;
+	struct lemnos_event ev;
 	struct pollfd p;
 	int fd = open(node, O_RDWR | O_CLOEXEC | O_NONBLOCK);
 
@@ -104,8 +104,8 @@ int main(int argc, char **argv)
 
 	CHECK(!e, "inject irq 0 (%s)", e ? strerror(errno) : "ok");
 	CHECK(poll(&p, 1, 1000) == 1, "event within 1 s");
-	CHECK(read(fd, &ev, sizeof(ev)) == sizeof(ev) && ev.block == block && ev.irq == 0,
-	      "read: block %u, irq %u, count %u", ev.block, ev.irq, ev.count);
+	CHECK(read(fd, &ev, sizeof(ev)) == sizeof(ev) && ev.block == block && ev.index == 0 && ev.kind == LEMNOS_EVENT_IRQ,
+	      "read: block %u, irq %u, count %u", ev.block, ev.index, ev.count);
 	uint32_t first = ev.count;
 
 	/*

@@ -8,9 +8,14 @@
  *   is for the module; 1 is for the kernel's spi-loopback-test.
  * - A two-channel PWM chip that stores what it is told, under the platform
  *   device lemnos-test-parent.
+ * - For the block lemnos-test-block: a supply "vdd" that can be made to report
+ *   a fault and a clock "core", found by device name.
+ * - A thermal zone "lemnos-test" whose temperature is the parameter temp_mc.
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
+#include <linux/clk-provider.h>
+#include <linux/clkdev.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/math64.h>
@@ -18,12 +23,17 @@
 #include <linux/platform_device.h>
 #include <linux/property.h>
 #include <linux/pwm.h>
+#include <linux/regulator/driver.h>
+#include <linux/regulator/machine.h>
+#include <linux/thermal.h>
 #include <linux/spi/spi.h>
 #include <linux/string.h>
 
 #define TB_BUS 40
 #define TB_MEM_ADDR 0x50
 #define TB_HELD_ADDR 0x51
+
+static struct platform_device *tb_parent;
 
 static u8 tb_mem[256];
 static u8 tb_pos;
@@ -124,7 +134,148 @@ static const struct software_node tb_spi_node = {
 	.properties = tb_spi_props,
 };
 
-static struct platform_device *tb_parent;
+static int temp_mc = 40000;
+module_param(temp_mc, int, 0644);
+
+static int tb_get_temp(struct thermal_zone_device *tz, int *temp)
+{
+	*temp = READ_ONCE(temp_mc);
+	return 0;
+}
+
+static const struct thermal_zone_device_ops tb_tz_ops = {
+	.get_temp = tb_get_temp,
+};
+
+static struct thermal_zone_device *tb_tz;
+
+/* A supply from 1.0 V to 3.3 V in 100 mV steps. */
+static unsigned int tb_sel;
+static bool tb_on;
+static struct regulator_dev *tb_rdev;
+
+static int tb_reg_enable(struct regulator_dev *rdev)
+{
+	tb_on = true;
+	return 0;
+}
+
+static int tb_reg_disable(struct regulator_dev *rdev)
+{
+	tb_on = false;
+	return 0;
+}
+
+static int tb_reg_is_enabled(struct regulator_dev *rdev)
+{
+	return tb_on;
+}
+
+static int tb_reg_get_sel(struct regulator_dev *rdev)
+{
+	return tb_sel;
+}
+
+static int tb_reg_set_sel(struct regulator_dev *rdev, unsigned int sel)
+{
+	tb_sel = sel;
+	return 0;
+}
+
+static const struct regulator_ops tb_reg_ops = {
+	.enable = tb_reg_enable,
+	.disable = tb_reg_disable,
+	.is_enabled = tb_reg_is_enabled,
+	.list_voltage = regulator_list_voltage_linear,
+	.map_voltage = regulator_map_voltage_linear,
+	.get_voltage_sel = tb_reg_get_sel,
+	.set_voltage_sel = tb_reg_set_sel,
+};
+
+static const struct regulator_desc tb_reg_desc = {
+	.name = "lemnos-test-vdd",
+	.ops = &tb_reg_ops,
+	.type = REGULATOR_VOLTAGE,
+	.owner = THIS_MODULE,
+	.n_voltages = 24,
+	.min_uV = 1000000,
+	.uV_step = 100000,
+};
+
+static struct regulator_consumer_supply tb_supply =
+	REGULATOR_SUPPLY("vdd", "lemnos-test-block");
+
+static struct regulator_init_data tb_reg_init = {
+	.constraints = {
+		.min_uV = 1000000,
+		.max_uV = 3300000,
+		.valid_ops_mask = REGULATOR_CHANGE_VOLTAGE | REGULATOR_CHANGE_STATUS,
+	},
+	.num_consumer_supplies = 1,
+	.consumer_supplies = &tb_supply,
+};
+
+/* Writing anything here makes the supply report an over-current. */
+static int tb_fault_set(const char *val, const struct kernel_param *kp)
+{
+	if (!tb_rdev)
+		return -ENODEV;
+	regulator_notifier_call_chain(tb_rdev, REGULATOR_EVENT_OVER_CURRENT, NULL);
+	return 0;
+}
+
+static const struct kernel_param_ops tb_fault_ops = {
+	.set = tb_fault_set,
+};
+module_param_cb(fault, &tb_fault_ops, NULL, 0200);
+
+static struct clk_hw *tb_clk;
+static struct clk_lookup *tb_clk_lookup;
+
+static int tb_power_setup(void)
+{
+	struct regulator_config cfg = {
+		.dev = &tb_parent->dev,
+		.init_data = &tb_reg_init,
+	};
+	int ret;
+
+	tb_rdev = regulator_register(&tb_parent->dev, &tb_reg_desc, &cfg);
+	if (IS_ERR(tb_rdev)) {
+		ret = PTR_ERR(tb_rdev);
+		tb_rdev = NULL;
+		return ret;
+	}
+	tb_clk = clk_hw_register_fixed_rate(&tb_parent->dev, "lemnos-test-clk", NULL, 0, 25000000);
+	if (IS_ERR(tb_clk)) {
+		ret = PTR_ERR(tb_clk);
+		tb_clk = NULL;
+		return ret;
+	}
+	tb_clk_lookup = clkdev_hw_create(tb_clk, "core", "lemnos-test-block");
+	if (!tb_clk_lookup)
+		return -ENOMEM;
+	tb_tz = thermal_tripless_zone_device_register("lemnos-test", NULL, &tb_tz_ops, NULL);
+	if (IS_ERR(tb_tz)) {
+		ret = PTR_ERR(tb_tz);
+		tb_tz = NULL;
+		return ret;
+	}
+	return thermal_zone_device_enable(tb_tz);
+}
+
+static void tb_power_teardown(void)
+{
+	if (tb_tz)
+		thermal_zone_device_unregister(tb_tz);
+	if (tb_clk_lookup)
+		clkdev_drop(tb_clk_lookup);
+	if (tb_clk)
+		clk_hw_unregister_fixed_rate(tb_clk);
+	if (tb_rdev)
+		regulator_unregister(tb_rdev);
+}
+
 static struct spi_controller *tb_ctlr;
 static struct spi_device *tb_spi[2];
 
@@ -133,6 +284,7 @@ static void tb_spi_teardown(void)
 	for (int i = 0; i < 2; i++)
 		if (tb_spi[i])
 			spi_unregister_device(tb_spi[i]);
+	tb_power_teardown();
 	if (tb_pwm) {
 		pwmchip_remove(tb_pwm);
 		pwmchip_put(tb_pwm);
@@ -188,6 +340,9 @@ static int tb_spi_setup(void)
 		tb_pwm = NULL;
 		return ret;
 	}
+	ret = tb_power_setup();
+	if (ret)
+		return ret;
 	tb_spi[0] = spi_new_device(tb_ctlr, &info);
 	if (!tb_spi[0])
 		return -ENODEV;
