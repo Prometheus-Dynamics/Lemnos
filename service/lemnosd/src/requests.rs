@@ -15,6 +15,7 @@ use lemnos_wire::{
 use crate::Core;
 use crate::conn::Conn;
 use crate::events::wire_state;
+use crate::readers::Point;
 
 const BUFFER_START: usize = 16 * 1024;
 const DESCRIPTION_MAX: usize = 64 * 1024;
@@ -290,20 +291,26 @@ impl Client {
         }
         let target = MethodId { contract, method };
         let now = self.core.clock.now_us();
-        match self
-            .core
-            .readers
-            .subscribe(&self.conn, device, target, period_us, only_changes, now)
-        {
-            Ok((subscription, period_us)) => {
+        let subscribed = self.core.readers.subscribe(
+            &self.conn,
+            Point {
+                device,
+                method: target,
+            },
+            period_us,
+            only_changes,
+            now,
+            |subscription, period_us| {
                 crate::lock(&self.conn.subscriptions).push(subscription);
                 self.conn.answer(&Frame::Subscribed {
                     id,
                     subscription,
                     period_us,
                 });
-                true
-            }
+            },
+        );
+        match subscribed {
+            Ok(()) => true,
             Err(status) => self.refuse(id, status, "can't subscribe"),
         }
     }

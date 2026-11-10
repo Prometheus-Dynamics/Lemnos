@@ -14,9 +14,9 @@ use crate::conn::Conn;
 
 /// One method of one device, read on behalf of however many subscribers.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Point {
-    device: u32,
-    method: MethodId,
+pub(crate) struct Point {
+    pub(crate) device: u32,
+    pub(crate) method: MethodId,
 }
 
 struct State {
@@ -55,17 +55,20 @@ impl Readers {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Adds a subscription. `announce` is called with its id and granted period while the
+    /// readers are still locked, so the reply that names the subscription is sent before any
+    /// value for it can be: a client drops a value for a subscription it has not been told of,
+    /// and with `only_changes` the value it lost would not come again.
     pub(crate) fn subscribe(
         &self,
         owner: &Arc<Conn>,
-        device: u32,
-        method: MethodId,
+        wanted: Point,
         period_us: u64,
         only_changes: bool,
         now_us: u64,
-    ) -> Result<(u64, u64), Status> {
+        announce: impl FnOnce(u64, u64),
+    ) -> Result<(), Status> {
         let mut state = self.lock();
-        let wanted = Point { device, method };
         let point = match state.points.iter().position(|p| *p == wanted) {
             Some(point) => point as u32,
             None => {
@@ -86,8 +89,9 @@ impl Readers {
             .subscribe(point, 1, period_us, only_changes, now_us)
             .map_err(refusal_status)?;
         state.owners.insert(grant.id, Arc::clone(owner));
+        announce(grant.id, grant.period_us);
         self.wake.notify_all();
-        Ok((grant.id, grant.period_us))
+        Ok(())
     }
 
     /// Whether `owner` held that subscription.
