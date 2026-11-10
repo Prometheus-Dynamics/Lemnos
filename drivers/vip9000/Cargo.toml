@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-driver-vip9000"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The VeriSilicon VIP9000 NPU behind the vendor kernel's vipcore node: its uAPI layouts pinned against the C compiler, checked builders for the requests a run needs, and the confinement check that refuses runs while the block's address translation reaches past a job's own buffers. The caller's program is carried, never read"
+
+[lints]
+workspace = true
+
+# No `unsafe` here and no device access of its own: the node is reached through the `Device` trait.
+[dependencies]
+lemnos-contract-npu = { path = "../../contracts/npu" }
+lemnos-core = { path = "../../engine/core" }
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
