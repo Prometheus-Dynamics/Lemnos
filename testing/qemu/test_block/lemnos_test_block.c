@@ -313,6 +313,27 @@ static struct reset_controller_dev tb_rst = {
 	.fwnode_reset_n_cells = 1,
 };
 
+/*
+ * The reset line's provider is a device with a driver, as a real one is: a
+ * consumer that refers to a node nothing has probed is deferred.
+ */
+static int tb_rst_probe(struct platform_device *pdev)
+{
+	tb_rst.dev = &pdev->dev;
+	tb_rst.fwnode = dev_fwnode(&pdev->dev);
+	return devm_reset_controller_register(&pdev->dev, &tb_rst);
+}
+
+static struct platform_driver tb_rst_driver = {
+	.probe = tb_rst_probe,
+	.driver = {
+		.name = "lemnos-test-reset",
+	},
+};
+
+static struct platform_device *tb_rst_pdev;
+static bool tb_rst_driver_up;
+
 static const struct property_entry tb_owned_props[] = {
 	PROPERTY_ENTRY_STRING("compatible", "lemnos,test-block"),
 	PROPERTY_ENTRY_REF("resets", &tb_rst_node, 0),
@@ -427,11 +448,12 @@ static void tb_teardown(void)
 		platform_device_unregister(tb_other);
 	if (!IS_ERR_OR_NULL(tb_owned))
 		platform_device_unregister(tb_owned);
-	if (tb_rst.fwnode) {
-		reset_controller_unregister(&tb_rst);
-		software_node_unregister(&tb_rst_node);
-		tb_rst.fwnode = NULL;
-	}
+	if (!IS_ERR_OR_NULL(tb_rst_pdev))
+		platform_device_unregister(tb_rst_pdev);
+	tb_rst_pdev = NULL;
+	if (tb_rst_driver_up)
+		platform_driver_unregister(&tb_rst_driver);
+	tb_rst_driver_up = false;
 	for (int i = 0; i < TB_IRQS; i++)
 		if (tb_irq[i])
 			irq_dispose_mapping(tb_irq[i]);
@@ -495,14 +517,22 @@ static int __init tb_init(void)
 		if (i < TB_BLOCK_IRQS)
 			res[1 + i] = (struct resource)DEFINE_RES_IRQ(tb_irq[i]);
 	}
-	ret = software_node_register(&tb_rst_node);
+	ret = platform_driver_register(&tb_rst_driver);
 	if (ret)
 		goto fail;
-	tb_rst.fwnode = software_node_fwnode(&tb_rst_node);
-	ret = reset_controller_register(&tb_rst);
-	if (ret) {
-		software_node_unregister(&tb_rst_node);
-		tb_rst.fwnode = NULL;
+	tb_rst_driver_up = true;
+	tb_rst_pdev = platform_device_register_full(&(struct platform_device_info){
+		.name = "lemnos-test-reset",
+		.id = PLATFORM_DEVID_NONE,
+		.swnode = &tb_rst_node,
+	});
+	if (IS_ERR(tb_rst_pdev)) {
+		ret = PTR_ERR(tb_rst_pdev);
+		tb_rst_pdev = NULL;
+		goto fail;
+	}
+	if (!tb_rst_pdev->dev.driver) {
+		ret = -ENODEV;
 		goto fail;
 	}
 	tb_owned = platform_device_register_full(&info);

@@ -32,11 +32,18 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: kernel
         with:
           path: ${{ runner.temp }}/kernel
           key: qemu-kernel-${{ hashFiles('testing/qemu/build-kernel.sh', 'testing/qemu/kernel.config') }}
       - run: testing/qemu/build-kernel.sh "$RUNNER_TEMP/kernel"
+      # Saved before the checks run, so a failing check doesn't cost the next run a kernel build.
+      - uses: actions/cache/save@v4
+        if: steps.kernel.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/kernel
+          key: ${{ steps.kernel.outputs.cache-primary-key }}
       - run: testing/qemu/run.sh
         env:
           KDIR: ${{ runner.temp }}/kernel/build
