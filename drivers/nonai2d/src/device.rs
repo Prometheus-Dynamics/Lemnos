@@ -12,9 +12,11 @@
 //!   checks the size again on import, and the driver checks each plane against its layout.
 //! - Nothing a caller gives becomes an address: the engine is given each dma-buf's own start.
 //!
-//! A conversion on an open device allocates nothing.
+//! A conversion on an open device allocates nothing, and so does drawing on a frame
+//! ([`Device::draw`]; the checks on what is drawn are [`crate::overlay`]'s).
 
 use std::io;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -23,9 +25,11 @@ use lemnos_driver_m2m_decode::{
     PlaneMemory, QueuePlane, QueueSetup, Ready,
 };
 use lemnos_linux_sys::v4l2::BUF_FLAG_ERROR;
+use lemnos_linux_sys::v4l2::device::ExtControl;
 
 use crate::frame::Frame;
 use crate::layout::{self, Layout};
+use crate::overlay::{self, BORDERS, Mode, Overlay};
 
 /// The driver's name, as `VIDIOC_QUERYCAP` reports it.
 pub const DRIVER: &str = "nonai-2d";
@@ -109,12 +113,32 @@ fn queue_planes<'fd>(
     (out, planes.len())
 }
 
+/// Setting a control whose value is a byte array (`VIDIOC_S_EXT_CTRLS`), on the handle the
+/// queues are on: what [`Device::draw`] needs beside [`Node`].
+pub trait Payloads {
+    /// Sets control `id` to `payload`. The kernel reads the payload during the call.
+    fn set_payload(&self, id: u32, payload: &mut [u8]) -> io::Result<()>;
+}
+
+impl Payloads for LinuxNode {
+    fn set_payload(&self, id: u32, payload: &mut [u8]) -> io::Result<()> {
+        let mut controls = [ExtControl::payload(id, payload)];
+        lemnos_linux_sys::v4l2::s_ext_ctrls_in_place(self.as_fd(), None, &mut controls)
+    }
+}
+
 /// The engine set up to convert frames of one layout into frames of another, of the same size.
-/// Dropping it closes the node; the kernel stops streaming and lets go of the dma-bufs.
+/// Dropping it closes the node; the kernel stops streaming and lets go of the dma-bufs and of
+/// the OSD images it copied.
 pub struct Device<N: Node = LinuxNode> {
     session: M2mSession<N>,
     src: Layout,
     dst: Layout,
+    /// The engine's mode as last set, `None` when a draw failed part way and it is not known.
+    /// The kernel starts every open in conversion mode.
+    mode: Option<Mode>,
+    /// Borders set on this open: the kernel keeps each until the node is closed.
+    borders: usize,
 }
 
 impl<N: Node> std::fmt::Debug for Device<N> {
@@ -160,7 +184,13 @@ impl<N: Node> Device<N> {
             return Err(invalid("the device did not keep a format it was given"));
         }
         session.stream_on()?;
-        Ok(Self { session, src, dst })
+        Ok(Self {
+            session,
+            src,
+            dst,
+            mode: Some(Mode::Convert),
+            borders: 0,
+        })
     }
 
     /// The source and destination layouts the device was set up for.
@@ -175,12 +205,77 @@ impl<N: Node> Device<N> {
         if src.layout() != self.src || dst.layout() != self.dst {
             return Err(invalid("a frame in another layout than the device's"));
         }
+        self.converting()?;
         let (capture, capture_len) = queue_planes(dst, false);
         let (output, output_len) = queue_planes(src, true);
         self.session.queue_capture(0, &capture[..capture_len])?;
         self.session
             .queue_output(0, &output[..output_len], Duration::ZERO)?;
         self.finish()
+    }
+
+    /// Draws `overlay` on `frame` in place and waits for it. The device must be set up with one
+    /// layout on both sides ([`Device::open`] with `src == dst`), `frame` and `overlay` in it,
+    /// and `overlay` must have something to draw and no fewer borders than this open of the
+    /// node was given before (the kernel keeps them until it is closed): otherwise
+    /// [`io::ErrorKind::InvalidInput`] before anything is set or queued.
+    ///
+    /// The frame is queued on the capture side while the engine is in conversion mode, where
+    /// it starts nothing; the regions, borders and mode are set; then the frame is queued on
+    /// the output side, which runs the engine once (the kernel's own start on queueing a
+    /// capture buffer in a drawing mode would run it a second time). The output side is never
+    /// read in a drawing mode. The engine goes back to conversion mode after.
+    pub fn draw(&mut self, frame: &Frame<'_>, overlay: &Overlay<'_>) -> io::Result<()>
+    where
+        N: Payloads,
+    {
+        if self.src != self.dst {
+            return Err(invalid("drawing needs one layout on both sides"));
+        }
+        if frame.layout() != self.dst || overlay.layout() != self.dst {
+            return Err(invalid("a frame in another layout than the device's"));
+        }
+        let mode = overlay.mode().ok_or_else(|| invalid("nothing to draw"))?;
+        let borders = overlay.borders().len();
+        if borders > 0 && borders < self.borders {
+            return Err(invalid(
+                "the node keeps the borders it was given until it is reopened",
+            ));
+        }
+        self.converting()?;
+        let node = self.session.node();
+        let mut osd = overlay.osd_control();
+        node.set_payload(overlay::CID_OSD_ATTR, &mut osd)?;
+        for index in 0..borders.min(BORDERS) {
+            if let Some(mut control) = overlay.border_control(index) {
+                node.set_payload(overlay::CID_BORDER_ATTR, &mut control)?;
+                self.borders = self.borders.max(index + 1);
+            }
+        }
+        let (capture, capture_len) = queue_planes(frame, false);
+        self.session.queue_capture(0, &capture[..capture_len])?;
+        // From here on a failure leaves the node in a state this side cannot know.
+        self.mode = None;
+        self.session.set_control(overlay::CID_MODE, mode as i32)?;
+        let (output, output_len) = queue_planes(frame, true);
+        self.session
+            .queue_output(0, &output[..output_len], Duration::ZERO)?;
+        self.finish()?;
+        self.session
+            .set_control(overlay::CID_MODE, Mode::Convert as i32)?;
+        self.mode = Some(Mode::Convert);
+        Ok(())
+    }
+
+    /// Refuses to queue anything unless the engine is known to be in conversion mode.
+    fn converting(&self) -> io::Result<()> {
+        if self.mode == Some(Mode::Convert) {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "a draw failed part way and the node's state is unknown: reopen it",
+            ))
+        }
     }
 
     /// Waits for the device to give both buffers back.

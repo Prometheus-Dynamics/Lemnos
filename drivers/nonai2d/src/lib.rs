@@ -14,16 +14,18 @@
 //!   failure closes and reopens, with a backoff doubling from 250 ms and capped at 8 s. It never
 //!   gives up and never turns itself off. A conversion in the layouts it is open for allocates
 //!   nothing.
+//! - [`Overlay`] and [`Device::draw`]: the OSD and border modes, images blended into a frame and
+//!   rectangles drawn on it in place, every rectangle checked to lie inside the frame. See
+//!   [`overlay`] for what reaches the engine and what checks it.
 //! - [`Converter`]: `image.convert/1` jobs served from a stream whose buffers are dma-bufs. A job
 //!   names two of the stream's buffers; the driver borrows their handles from the stream and
 //!   builds checked frames over them. See [`convert`].
 //!
 //! # Not covered
 //!
-//! - The OSD and border modes: their controls carry user pointers and physical addresses the
-//!   kernel driver writes into the engine, which nothing in user space can check. No control is
-//!   ever set, so the engine stays in its conversion mode.
-//! - The conversion coefficient control, and the driver's three-plane RGB.
+//! - Drawing through jobs or through [`Nonai2d`]'s reopening: no contract carries an overlay, so
+//!   it is [`Device::draw`] on a device the caller opens, and a caller reopens it after a failure.
+//! - The conversion coefficient and colour gamut controls, and the driver's three-plane RGB.
 //! - The 4:2:0 formats through jobs: a job names one buffer and the engine takes each plane from
 //!   the start of its own dma-buf. They go through [`Device`] and [`Nonai2d`] with a dma-buf per
 //!   plane.
@@ -46,13 +48,15 @@
 //! mode being the default (`K_2D_CALC_MODE_CSC`). Ported from the dev branch
 //! (`crates/lemnos-drivers-nonai2d`).
 //!
-//! Hardware status: untested on board. The board check is in `testing/board-runs/E5.md`.
+//! Hardware status: untested on board. The board checks are in `testing/board-runs/E5.md` and,
+//! for drawing, `testing/board-runs/E6.md`.
 //! Unverified until it runs: that the engine's byte order for each format is the V4L2 name's, and
 //! that a 4:2:0 frame's chroma order is as named.
 
 #![forbid(unsafe_code)]
 
 pub mod layout;
+pub mod overlay;
 
 #[cfg(target_os = "linux")]
 pub mod convert;
@@ -66,7 +70,7 @@ mod frame;
 #[cfg(target_os = "linux")]
 pub use convert::Converter;
 #[cfg(target_os = "linux")]
-pub use device::{CONVERT_TIMEOUT, DRIVER, Device, find};
+pub use device::{CONVERT_TIMEOUT, DRIVER, Device, Payloads, find};
 #[cfg(target_os = "linux")]
 pub use engine::{Engine, Nonai2d, RunError, State, backoff_ns, node};
 #[cfg(target_os = "linux")]
@@ -74,6 +78,7 @@ pub use frame::{Frame, FrameError};
 pub use layout::{
     Layout, LayoutError, MAX_HEIGHT, MAX_PLANES, MAX_WIDTH, PixelFormat, Plane, Planes,
 };
+pub use overlay::{Border, Mode, Order, OsdFormat, Overlay, OverlayError, Rect, Region};
 
 #[cfg(all(test, target_os = "linux"))]
 #[global_allocator]
