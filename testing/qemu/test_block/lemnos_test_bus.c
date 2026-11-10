@@ -6,6 +6,8 @@
  *   memory with a one-byte address, and 0x51 is held by a kernel driver.
  * - SPI controller 40, with its data output wired to its input. Chip select 0
  *   is for the module; 1 is for the kernel's spi-loopback-test.
+ * - A two-channel PWM chip that stores what it is told, under the platform
+ *   device lemnos-test-parent.
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
@@ -15,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
+#include <linux/pwm.h>
 #include <linux/spi/spi.h>
 #include <linux/string.h>
 
@@ -98,6 +101,18 @@ static int tb_spi_transfer_one(struct spi_controller *ctlr, struct spi_device *s
 	return 0;
 }
 
+static int tb_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+			const struct pwm_state *state)
+{
+	return 0;
+}
+
+static const struct pwm_ops tb_pwm_ops = {
+	.apply = tb_pwm_apply,
+};
+
+static struct pwm_chip *tb_pwm;
+
 static const struct property_entry tb_spi_props[] = {
 	PROPERTY_ENTRY_STRING("compatible", "lemnos,test-spi"),
 	{ }
@@ -118,6 +133,10 @@ static void tb_spi_teardown(void)
 	for (int i = 0; i < 2; i++)
 		if (tb_spi[i])
 			spi_unregister_device(tb_spi[i]);
+	if (tb_pwm) {
+		pwmchip_remove(tb_pwm);
+		pwmchip_put(tb_pwm);
+	}
 	if (tb_ctlr)
 		spi_unregister_controller(tb_ctlr);
 	if (!IS_ERR_OR_NULL(tb_parent))
@@ -138,7 +157,7 @@ static int tb_spi_setup(void)
 
 	if (ret)
 		return ret;
-	tb_parent = platform_device_register_simple("lemnos-test-spi-parent", -1, NULL, 0);
+	tb_parent = platform_device_register_simple("lemnos-test-parent", -1, NULL, 0);
 	if (IS_ERR(tb_parent))
 		return PTR_ERR(tb_parent);
 	tb_ctlr = spi_alloc_host(&tb_parent->dev, 0);
@@ -154,6 +173,19 @@ static int tb_spi_setup(void)
 	if (ret) {
 		spi_controller_put(tb_ctlr);
 		tb_ctlr = NULL;
+		return ret;
+	}
+	tb_pwm = pwmchip_alloc(&tb_parent->dev, 2, 0);
+	if (IS_ERR(tb_pwm)) {
+		ret = PTR_ERR(tb_pwm);
+		tb_pwm = NULL;
+		return ret;
+	}
+	tb_pwm->ops = &tb_pwm_ops;
+	ret = pwmchip_add(tb_pwm);
+	if (ret) {
+		pwmchip_put(tb_pwm);
+		tb_pwm = NULL;
 		return ret;
 	}
 	tb_spi[0] = spi_new_device(tb_ctlr, &info);

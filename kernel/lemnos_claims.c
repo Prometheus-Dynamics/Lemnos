@@ -27,6 +27,8 @@ struct lem_held {
 	struct hlist_node node;
 	u32 hash;
 	char resource[LEMNOS_NAME_MAX];
+	void *data;
+	const struct lem_claim_ops *ops;	/* set once, after data; NULL until */
 };
 
 static DEFINE_HASHTABLE(lem_held, LEM_CLAIM_HASH_BITS);
@@ -42,25 +44,88 @@ static void lem_held_remove(struct lem_held *h)
 	kfree(h);
 }
 
+static const struct lem_claim_ops *lem_held_ops(struct lem_held *h)
+{
+	return smp_load_acquire(&h->ops);
+}
+
 static int lem_claim_release(struct inode *inode, struct file *file)
 {
-	lem_held_remove(file->private_data);
+	struct lem_held *h = file->private_data;
+	const struct lem_claim_ops *ops = lem_held_ops(h);
+
+	/* Ended before the name comes free, so the next holder finds it let go. */
+	if (ops)
+		ops->release(h->data);
+	lem_held_remove(h);
 	return 0;
+}
+
+static ssize_t lem_claim_read(struct file *file, char __user *buf, size_t len, loff_t *ppos)
+{
+	struct lem_held *h = file->private_data;
+	const struct lem_claim_ops *ops = lem_held_ops(h);
+
+	return ops && ops->read ? ops->read(h->data, file, buf, len) : -EINVAL;
+}
+
+static __poll_t lem_claim_poll(struct file *file, poll_table *wait)
+{
+	struct lem_held *h = file->private_data;
+	const struct lem_claim_ops *ops = lem_held_ops(h);
+
+	return ops && ops->poll ? ops->poll(h->data, file, wait) : 0;
 }
 
 static const struct file_operations lem_claim_fops = {
 	.owner = THIS_MODULE,
 	.release = lem_claim_release,
+	.read = lem_claim_read,
+	.poll = lem_claim_poll,
 	.llseek = noop_llseek,
 };
+
+static bool lem_is_claim_on(struct file *file, const char *resource)
+{
+	return file && file->f_op == &lem_claim_fops &&
+	       !strcmp(((struct lem_held *)file->private_data)->resource, resource);
+}
 
 bool lem_claim_held(int fd, const char *resource)
 {
 	CLASS(fd, f)(fd);
 
-	if (fd_empty(f) || fd_file(f)->f_op != &lem_claim_fops)
-		return false;
-	return !strcmp(((struct lem_held *)fd_file(f)->private_data)->resource, resource);
+	return lem_is_claim_on(fd_file(f), resource);
+}
+
+int lem_claim_attach(int fd, const char *resource, const struct lem_claim_ops *ops, void *data)
+{
+	CLASS(fd, f)(fd);
+	struct lem_held *h;
+	int ret = 0;
+
+	if (!lem_is_claim_on(fd_file(f), resource))
+		return -EPERM;
+	h = fd_file(f)->private_data;
+	mutex_lock(&lem_held_lock);
+	if (h->ops) {
+		ret = -EBUSY;
+	} else {
+		h->data = data;
+		smp_store_release(&h->ops, ops);
+	}
+	mutex_unlock(&lem_held_lock);
+	return ret;
+}
+
+void *lem_claim_attached(struct file *file, const struct lem_claim_ops *ops)
+{
+	struct lem_held *h;
+
+	if (!file || file->f_op != &lem_claim_fops)
+		return NULL;
+	h = file->private_data;
+	return lem_held_ops(h) == ops ? h->data : NULL;
 }
 
 /* Refused while the name is held or the table is full. */

@@ -83,6 +83,13 @@
  * as the kernel's core defines it, and carries at most the module's
  * bus_buffer bytes each way (EMSGSIZE beyond that).
  *
+ * GPIO lines and PWM channels go through gpiolib and the PWM core, and belong
+ * to a claim named "gpio-<chip>:<offset>" (gpiochip number) or
+ * "pwm-<provider>:<channel>" (the PWM chip's parent device name). A request
+ * binds the line or channel to the claim's file; later calls just name the
+ * claim, and read() and poll() on that file give a line's edges. Closing the
+ * claim lets go of the line or channel and leaves its output as it was.
+ *
  * Copyright (c) 2026 the Lemnos authors.
  */
 #ifndef _UAPI_LEMNOS_H
@@ -320,6 +327,65 @@ struct lemnos_spi_transfer {
 	__u32 reserved;
 	__u64 segments;		/* user pointer to lemnos_spi_segment[count] */
 };
+
+#define LEMNOS_GPIO_OUTPUT	(1u << 0)
+#define LEMNOS_GPIO_ACTIVE_LOW	(1u << 1)
+#define LEMNOS_GPIO_PULL_UP	(1u << 2)
+#define LEMNOS_GPIO_PULL_DOWN	(1u << 3)
+#define LEMNOS_GPIO_BIAS_OFF	(1u << 4)
+#define LEMNOS_GPIO_OPEN_DRAIN	(1u << 5)
+#define LEMNOS_GPIO_OPEN_SOURCE	(1u << 6)
+#define LEMNOS_GPIO_RISING	(1u << 7)
+#define LEMNOS_GPIO_FALLING	(1u << 8)
+
+struct lemnos_gpio_request {
+	__s32 claim;		/* a claim on this line */
+	__u32 chip;		/* N in gpiochipN */
+	__u32 offset;
+	__u32 reserved;
+};
+
+struct lemnos_gpio_config {
+	__s32 claim;
+	__u32 flags;		/* LEMNOS_GPIO_* */
+	__u32 value;		/* for an output, 0 or 1 */
+	__u32 debounce_us;
+};
+
+struct lemnos_gpio_value {
+	__s32 claim;
+	__u32 value;		/* 0 or 1, after LEMNOS_GPIO_ACTIVE_LOW */
+};
+
+/* What read() on a line's claim returns. seq counts every edge, so a gap is a loss. */
+struct lemnos_gpio_event {
+	__u64 ns;		/* ktime_get_ns() at the edge */
+	__u32 seq;
+	__u32 rising;		/* 1 for rising, 0 for falling, in line level */
+};
+
+struct lemnos_pwm_request {
+	__s32 claim;		/* a claim on this channel */
+	__u32 channel;
+	char provider[LEMNOS_NAME_MAX - 16];	/* the PWM chip's parent device name */
+};
+
+struct lemnos_pwm_state {
+	__s32 claim;
+	__u32 enabled;
+	__u32 inverted;
+	__u32 reserved;
+	__u64 period_ns;
+	__u64 duty_ns;
+};
+
+#define LEMNOS_IOC_GPIO_REQUEST _IOW('L', 0x98, struct lemnos_gpio_request)
+#define LEMNOS_IOC_GPIO_CONFIG  _IOW('L', 0x99, struct lemnos_gpio_config)
+#define LEMNOS_IOC_GPIO_GET     _IOWR('L', 0x9a, struct lemnos_gpio_value)
+#define LEMNOS_IOC_GPIO_SET     _IOW('L', 0x9b, struct lemnos_gpio_value)
+#define LEMNOS_IOC_PWM_REQUEST  _IOW('L', 0xb8, struct lemnos_pwm_request)
+#define LEMNOS_IOC_PWM_APPLY    _IOW('L', 0xb9, struct lemnos_pwm_state)
+#define LEMNOS_IOC_PWM_GET      _IOWR('L', 0xba, struct lemnos_pwm_state)
 
 #define LEMNOS_IOC_I2C_TRANSFER _IOW('L', 0xa8, struct lemnos_i2c_transfer)
 #define LEMNOS_IOC_I2C_SMBUS  _IOWR('L', 0xa9, struct lemnos_i2c_smbus)
