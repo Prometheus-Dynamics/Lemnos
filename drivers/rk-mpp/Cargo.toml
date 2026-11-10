@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-driver-rk-mpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The video codec blocks behind the vendor kernel's /dev/mpp_service: a claim on one block, the caller's dma-bufs, register-set jobs submitted and completed, every buffer reference checked. No vendor library"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
