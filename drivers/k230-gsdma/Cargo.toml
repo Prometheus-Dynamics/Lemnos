@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-driver-k230-gsdma"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 graphics DMA engine (rotate, mirror and copy image planes): its registers and descriptor, jobs with every source, destination, stride and rotated extent proved inside buffers the caller holds, and a claim over a small device trait. No vendor library"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
