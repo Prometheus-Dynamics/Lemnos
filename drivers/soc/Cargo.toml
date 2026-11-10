@@ -1,0 +1,10 @@
+[package]
+name = "lemnos-soc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "no_std chip descriptors for Lemnos: each SoC's IO blocks and their capabilities (used, unused or impossible), with the software path each would replace, and the typed register layouts of the userspace-reachable timers and PWMs"
+
+[lints]
+workspace = true
