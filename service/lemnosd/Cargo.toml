@@ -36,6 +36,9 @@ lemnos-driver-host-clock = { path = "../../drivers/host-clock" }
 lemnos-driver-hw-watchdog = { path = "../../drivers/hw-watchdog" }
 lemnos-driver-hwmon-fan = { path = "../../drivers/hwmon-fan" }
 lemnos-driver-ina2xx = { path = "../../drivers/ina2xx" }
+lemnos-driver-isp600 = { path = "../../drivers/isp600" }
+lemnos-driver-k230-capture = { path = "../../drivers/k230-capture" }
+lemnos-driver-k230isp = { path = "../../drivers/k230isp" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
 lemnos-driver-pisp = { path = "../../drivers/pisp" }
@@ -47,6 +50,7 @@ lemnos-driver-rp1-csi2 = { path = "../../drivers/rp1-csi2" }
 lemnos-driver-status-light = { path = "../../drivers/status-light" }
 lemnos-driver-sunxi-vin = { path = "../../drivers/sunxi-vin" }
 lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
+lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget" }
 lemnos-driver-uvc = { path = "../../drivers/uvc" }
 lemnos-driver-vcm = { path = "../../drivers/vcm" }
 lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
