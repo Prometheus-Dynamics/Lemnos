@@ -29,6 +29,7 @@ lemnos-driver-bmi088 = { path = "../../drivers/bmi088" }
 lemnos-driver-bmm150 = { path = "../../drivers/bmm150" }
 lemnos-driver-coral-loader = { path = "../../drivers/coral-loader" }
 lemnos-driver-fan-control = { path = "../../drivers/fan-control" }
+lemnos-driver-g2d = { path = "../../drivers/g2d" }
 lemnos-driver-generic-sensor = { path = "../../drivers/generic-sensor" }
 lemnos-driver-gpio-power-switch = { path = "../../drivers/gpio-power-switch" }
 lemnos-driver-gpu-lease = { path = "../../drivers/gpu-lease" }
@@ -46,6 +47,7 @@ lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
 lemnos-driver-rga = { path = "../../drivers/rga" }
 lemnos-driver-rkcif = { path = "../../drivers/rkcif" }
 lemnos-driver-rkisp = { path = "../../drivers/rkisp" }
+lemnos-driver-rkvpss = { path = "../../drivers/rkvpss" }
 lemnos-driver-rp1-csi2 = { path = "../../drivers/rp1-csi2" }
 lemnos-driver-status-light = { path = "../../drivers/status-light" }
 lemnos-driver-sunxi-vin = { path = "../../drivers/sunxi-vin" }
