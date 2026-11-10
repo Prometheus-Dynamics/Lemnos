@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-driver-host-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "HostClock"
