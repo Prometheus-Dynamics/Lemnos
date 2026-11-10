@@ -1,0 +1,20 @@
+[package]
+name = "lemnos-driver-k230-ai2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 AI2D block: its kernel interface's layouts, jobs checked against the dma-bufs a caller holds, and image.scaler/1 jobs served from a stream over a block that reopens itself after a failure. No vendor library"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-image-scaler = { path = "../../contracts/image-scaler" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
