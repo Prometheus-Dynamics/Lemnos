@@ -1,0 +1,20 @@
+[package]
+name = "lemnos-driver-m2m-decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Stateless video decode through the kernel's V4L2 memory-to-memory and request interfaces: a session over one M2M node, media requests, HEVC controls from parsed headers, and a frame decoder that recovers by itself. No vendor library"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-driver-hevc = { path = "../hevc" }
+
+# Linux only: every system call goes through lemnos-linux-sys, the one crate allowed `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

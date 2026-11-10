@@ -1,0 +1,10 @@
+[package]
+name = "lemnos-driver-hevc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "no_std HEVC (H.265) bitstream parser for a stateless decoder's controls: Annex B NAL units, VPS, SPS and PPS, and the header of an intra IDR slice. Parses untrusted input without panicking; does not decode"
+
+[lints]
+workspace = true
