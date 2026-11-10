@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use lemnos_host::Options;
 use lemnos_host::board::parse;
 use lemnos_linux::LinuxBoard;
+use lemnos_linux::hotplug::UsbHints;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
@@ -86,6 +87,13 @@ fn main() -> ExitCode {
     if check {
         return ExitCode::SUCCESS;
     }
+    // What the board file calls its hardware, for the backend to say which of it comes and goes.
+    let names: Vec<String> = board_file
+        .devices
+        .iter()
+        .flat_map(|device| device.bus.iter().chain(device.uses.values()))
+        .cloned()
+        .collect();
     // Before any thread starts, so that every thread has these signals blocked.
     let signals = match SignalFd::new(&[SIGTERM, SIGINT]) {
         Ok(signals) => signals,
@@ -103,10 +111,17 @@ fn main() -> ExitCode {
         },
         options: Options::default(),
     });
-    let service = match service {
+    let mut service = match service {
         Ok(service) => service,
         Err(error) => return complain(&error.to_string()),
     };
+    // Hints only: without them devices still bind, when their retries come round.
+    if !sim
+        && let Some(hints) = UsbHints::open(names.iter().map(String::as_str))
+        && let Err(error) = service.watch(Box::new(hints))
+    {
+        let _ = complain(&format!("not watching for USB devices: {error}"));
+    }
     // A signal is the normal way out, and stopping is what releases the hardware.
     if let Err(error) = wait_for_signal(&signals) {
         let _ = complain(&format!("waiting for a signal: {error}"));

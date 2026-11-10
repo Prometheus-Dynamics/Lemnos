@@ -320,3 +320,66 @@ fn unrelated_resources_work_from_different_threads() {
         thread.join().unwrap();
     }
 }
+
+fn hints_of(board: &SimBoard) -> Vec<String> {
+    let mut seen = Vec::new();
+    board.hints().drain(|hint| seen.push(format!("{hint:?}")));
+    seen
+}
+
+#[test]
+fn adding_and_removing_a_resource_is_hinted_in_order_and_once() {
+    let board = SimBoard::new();
+    board.add_usb_device("cam", &[9]);
+    board.remove("cam");
+    board.remove("never-there");
+    board.add_usb_device("cam", &[9]);
+    assert_eq!(
+        hints_of(&board),
+        [
+            "Changed(\"cam\")".to_string(),
+            "Changed(\"cam\")".to_string(),
+            "Changed(\"cam\")".to_string()
+        ]
+    );
+    assert_eq!(hints_of(&board), Vec::<String>::new());
+}
+
+#[test]
+fn hints_nobody_reads_are_lost_and_the_reader_hears_only_that_something_changed() {
+    let board = SimBoard::new();
+    for _ in 0..200 {
+        board.add_line("pin");
+    }
+    assert_eq!(hints_of(&board), ["Any".to_string()]);
+    board.add_line("pin");
+    assert_eq!(hints_of(&board), ["Changed(\"pin\")".to_string()]);
+    board.add_line("pin");
+    assert_eq!(board.hints().lose(), 1);
+    assert_eq!(hints_of(&board), Vec::<String>::new());
+}
+
+#[test]
+fn waiting_for_a_hint_ends_when_one_comes_or_the_time_is_up() {
+    use lemnos_core::HintSource;
+    use std::time::Instant;
+
+    let board = SimBoard::new();
+    let mut hints = board.hints();
+    let mut seen = 0;
+    let start = Instant::now();
+    assert!(hints.wait(Duration::from_millis(20), &mut |_| seen += 1));
+    assert_eq!(seen, 0);
+    assert!(start.elapsed() >= Duration::from_millis(20));
+
+    let plugger = board.clone();
+    let plugging = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(20));
+        plugger.add_line("pin");
+    });
+    let start = Instant::now();
+    assert!(hints.wait(Duration::from_secs(20), &mut |_| seen += 1));
+    assert_eq!(seen, 1);
+    assert!(start.elapsed() < Duration::from_secs(10));
+    plugging.join().unwrap();
+}

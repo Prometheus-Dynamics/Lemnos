@@ -756,6 +756,8 @@ fn a_device_that_disappears_is_retried_and_reported() {
     usb.state().silent_after = Some((0, ErrorKind::Unavailable));
     let mut rig = Rig::new(usb, &[1]);
     assert_eq!(rig.run_to_fault(), GONE);
+    // This is what has the host bind the driver again. Left in place, it keeps trying.
+    assert_eq!(rig.health(), Health::Gone(GONE));
     for _ in 0..20 {
         assert!(rig.step().is_some());
     }

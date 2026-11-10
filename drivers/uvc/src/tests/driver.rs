@@ -352,10 +352,10 @@ fn a_camera_unplugged_mid_stream_is_retried_for_ever_and_answers_no_device() {
     let mut rig = Rig::streaming(4096, MODE_QVGA_MIN);
     rig.usb.unplug();
     rig.tick();
-    assert_eq!(Lifecycle::health(&rig.uvc), Health::Failed(GONE));
+    assert_eq!(Lifecycle::health(&rig.uvc), Health::Gone(GONE));
     assert!(rig.describe().iter().any(|item| item.name == GONE));
-    // Every method but the stream's name says the device is gone, which is what makes the host
-    // drop this driver and open the device again by name.
+    // That health is what makes the host drop this driver and open the device again by name.
+    // Left in place, every method but the stream's name says the device is gone.
     assert_eq!(rig.uvc.counters(), Err(Status::NO_DEVICE));
     assert_eq!(rig.uvc.format_count(), Err(Status::NO_DEVICE));
     assert_eq!(rig.uvc.format(0), Err(Status::NO_DEVICE));
@@ -366,14 +366,15 @@ fn a_camera_unplugged_mid_stream_is_retried_for_ever_and_answers_no_device() {
     let mut name = [0u8; 32];
     assert_eq!(rig.uvc.frame_stream(&mut name), Ok(6));
 
-    // It never gives up: a read of the descriptors at each backoff, never more than 8 s apart.
+    // Left in place it never gives up: a read of the descriptors at each backoff, never more
+    // than 8 s apart.
     let (first, cap) = (BACKOFF_FIRST_NS, BACKOFF_CAP_NS);
     for wait in [first, first * 2, first * 4, cap, cap, cap, cap, cap, cap] {
         let due = rig.tick().unwrap();
         assert_eq!(due - rig.now_ns, wait);
         rig.now_ns = due;
         rig.tick();
-        assert_eq!(Lifecycle::health(&rig.uvc), Health::Failed(GONE));
+        assert_eq!(Lifecycle::health(&rig.uvc), Health::Gone(GONE));
         assert_eq!(rig.uvc.counters(), Err(Status::NO_DEVICE));
     }
 }
@@ -384,7 +385,7 @@ fn a_camera_that_answers_again_is_read_afresh_detached_and_claimed() {
     let mut rig = Rig::streaming(4096, MODE_MJPEG);
     rig.usb.state().gone = true;
     rig.tick();
-    assert_eq!(Lifecycle::health(&rig.uvc), Health::Failed(GONE));
+    assert_eq!(Lifecycle::health(&rig.uvc), Health::Gone(GONE));
     {
         let mut device = rig.usb.state();
         device.gone = false;
@@ -470,4 +471,17 @@ fn a_tick_that_comes_early_does_nothing() {
     let due = rig.tick().unwrap();
     assert_eq!(due, rig.now_ns + BACKOFF_FIRST_NS);
     assert_eq!(rig.usb.state().claims, claims);
+}
+
+#[test]
+fn an_idle_camera_that_is_unplugged_is_seen_at_the_next_tick() {
+    let mut rig = Rig::webcam(4096);
+    rig.settle();
+    assert_eq!(rig.uvc.session.state(), IDLE);
+    assert_eq!(rig.tick(), None, "idle: it asks for no tick");
+    assert_eq!(Lifecycle::health(&rig.uvc), Health::Ok);
+
+    rig.usb.unplug();
+    assert!(rig.tick().is_some());
+    assert_eq!(Lifecycle::health(&rig.uvc), Health::Gone(GONE));
 }

@@ -232,6 +232,16 @@ Never give up. Retry backoff is capped at 8 s and clears itself. No default auto
 on are easy. Auto-off exists only as a configured policy. Backed-off and disabled state are visible.
 Access paths (USB gadget, serial, network, SSH) are never backed off.
 
+A driver whose resources are dead for good (an unplugged device's handle) reports `Health::Gone`,
+and the host drops it and binds it again under this rule. The backoff clears once a driver has
+stayed up for 8 s, so a driver that fails straight after every bind is bound less and less often,
+never in a loop.
+
+Hotplug events are hints. The backend turns an event into the board-file names it may be about, and
+the host tries the devices waiting on those names now and ticks the running ones so their drivers
+can look. A hint only brings a retry forward, never closer than 250 ms to the device's last bind, so
+a lost event costs time and a storm of them costs nothing. The host never learns what arrived.
+
 `next` builds services with `panic = "unwind"`. Dev's `panic = "abort"` makes a driver panic
 impossible to contain.
 

@@ -27,7 +27,7 @@ pub(crate) fn wire_state(info: &DeviceInfo) -> (u8, u8, String) {
             }
             health::DEGRADED
         }
-        Health::Failed(text) => {
+        Health::Failed(text) | Health::Gone(text) => {
             if reason.is_empty() {
                 reason = (*text).to_string();
             }

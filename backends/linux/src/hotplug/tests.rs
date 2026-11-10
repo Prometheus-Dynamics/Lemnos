@@ -333,3 +333,86 @@ fn paths_helpers_name_the_sysfs_mount() {
     let custom = LinuxPaths::new().with_sys_class_root("/tmp/fake/sys/class");
     assert_eq!(custom.sys_root(), Path::new("/tmp/fake/sys"));
 }
+
+fn hints_read(hints: &mut UsbHints) -> Vec<String> {
+    let mut seen = Vec::new();
+    hints.read(&mut |hint| seen.push(format!("{hint:?}")));
+    seen
+}
+
+#[test]
+fn a_camera_leaving_and_returning_hints_the_board_names_it_goes_by() {
+    let camera = Camera::new();
+    let names = ["usb:3-1", "usb:046d:0825", "usb:9-9", "usb:1a2b:3c4d"];
+    for inotify in [false, true] {
+        let watcher = if inotify {
+            DeviceWatcher::inotify(camera.paths(), USB).expect("inotify")
+        } else {
+            DeviceWatcher::rescan(camera.paths(), USB)
+        };
+        let source = watcher.source();
+        let mut hints = UsbHints::new(watcher, names).unwrap();
+        assert_eq!(hints_read(&mut hints), Vec::<String>::new(), "{source:?}");
+
+        // Unplugged: the device and its interface leave the bus's list.
+        let bus = camera.sys("bus/usb/devices");
+        fs::remove_file(bus.join("3-1:1.0")).unwrap();
+        fs::remove_file(bus.join("3-1")).unwrap();
+        let left = hints_read(&mut hints);
+        assert!(
+            left.contains(&"Changed(\"usb:3-1\")".to_string()),
+            "{source:?} {left:?}"
+        );
+        assert!(
+            left.contains(&"Changed(\"usb:046d:0825\")".to_string()),
+            "{source:?} {left:?}"
+        );
+        assert!(
+            !left.contains(&"Changed(\"usb:9-9\")".to_string()),
+            "{source:?} {left:?}"
+        );
+        assert_eq!(hints_read(&mut hints), Vec::<String>::new(), "{source:?}");
+
+        // Plugged back in.
+        symlink(camera.sys("devices/platform/usb3/3-1"), bus.join("3-1")).unwrap();
+        symlink(
+            camera.sys("devices/platform/usb3/3-1/3-1:1.0"),
+            bus.join("3-1:1.0"),
+        )
+        .unwrap();
+        let back = hints_read(&mut hints);
+        assert!(
+            back.contains(&"Changed(\"usb:3-1\")".to_string()),
+            "{source:?} {back:?}"
+        );
+        assert!(
+            back.contains(&"Changed(\"usb:046d:0825\")".to_string()),
+            "{source:?} {back:?}"
+        );
+    }
+}
+
+#[test]
+fn waiting_for_hints_comes_back_by_the_timeout_and_with_what_happened() {
+    use lemnos_core::HintSource;
+    use std::time::{Duration, Instant};
+
+    let camera = Camera::new();
+    let watcher = DeviceWatcher::inotify(camera.paths(), USB).expect("inotify");
+    let mut hints = UsbHints::new(watcher, ["usb:3-1"]).unwrap();
+    let mut seen = Vec::new();
+    let start = Instant::now();
+    assert!(hints.wait(Duration::from_millis(30), &mut |hint| {
+        seen.push(format!("{hint:?}"))
+    }));
+    assert!(seen.is_empty(), "{seen:?}");
+    assert!(start.elapsed() >= Duration::from_millis(30));
+
+    fs::remove_file(camera.sys("bus/usb/devices/3-1")).unwrap();
+    let start = Instant::now();
+    assert!(hints.wait(Duration::from_secs(20), &mut |hint| {
+        seen.push(format!("{hint:?}"))
+    }));
+    assert_eq!(seen, ["Changed(\"usb:3-1\")"]);
+    assert!(start.elapsed() < Duration::from_secs(10));
+}

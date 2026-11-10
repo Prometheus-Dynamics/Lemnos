@@ -8,9 +8,9 @@
 //!
 //! A device that has gone (unplugged, or come back from a reset as a new device) makes every call
 //! on its handle fail with `Unavailable` from then on. The session then forgets everything it
-//! knew about the device, reports [`GONE`], and keeps retrying from the start; the contract's
-//! methods answer `NO_DEVICE`, which is how the host learns to drop the driver and bind it again,
-//! opening the device afresh by its name.
+//! knew about the device, reports [`GONE`] and [`Session::is_gone`], which the driver turns into
+//! the health that asks the host to bind it again, and keeps retrying from the start in case
+//! the host doesn't.
 
 use core::time::Duration;
 
@@ -32,6 +32,9 @@ pub const PACKETS: usize = 32;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
 const ISO_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// The length of a configuration descriptor's own header.
+const CONFIG_HEADER: usize = 9;
 
 const NS_PER_MS: u64 = 1_000_000;
 /// The first wait after a failure. Each further failure doubles it.
@@ -329,7 +332,7 @@ impl Session {
         match self.phase {
             Phase::Discover => self.discover(usb).map(|()| Some(now_ns)),
             Phase::Claim => self.claim(usb).map(|()| Some(now_ns)),
-            Phase::Idle => Ok(self.idle(now_ns)),
+            Phase::Idle => self.idle(usb, now_ns),
             Phase::SetProbe => self.set_probe(usb).map(|()| Some(now_ns)),
             Phase::GetProbe => self.get_probe(usb).map(|()| Some(now_ns)),
             Phase::Commit => self.commit(usb).map(|()| Some(now_ns)),
@@ -391,17 +394,24 @@ impl Session {
         Ok(())
     }
 
-    fn idle(&mut self, now_ns: u64) -> Option<u64> {
+    fn idle(&mut self, usb: &mut Usb, now_ns: u64) -> Result<Option<u64>, &'static str> {
         if self.want {
             self.phase = Phase::SetProbe;
-            return Some(now_ns);
+            return Ok(Some(now_ns));
         }
         if self.alternate_set {
             // A stop that failed: the camera is still on.
             self.phase = Phase::Stop;
-            return Some(now_ns);
+            return Ok(Some(now_ns));
         }
-        None
+        // An idle camera is sent nothing, so it would never be seen to leave. Each idle tick
+        // (after a method, or when the host hears the device may have changed) reads the start
+        // of the descriptor, which a host keeps a copy of. Only a dead handle counts.
+        let mut header = [0u8; CONFIG_HEADER];
+        if usb.config_descriptor(0, &mut header) == Err(ErrorKind::Unavailable) {
+            return Err(GONE);
+        }
+        Ok(None)
     }
 
     /// The mode to negotiate. `None` when `stop` got in first.

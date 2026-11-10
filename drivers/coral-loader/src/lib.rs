@@ -23,6 +23,11 @@
 //! never sleeps. Waits the device asks for become the time of the next tick, up to a limit, since
 //! `bwPollTimeout` can claim hours.
 //!
+//! A device that leaves before the download has ended (unplugged, say) leaves the handle dead
+//! too. The driver's health is then [`Health::Gone`], which has the host drop it and bind it
+//! again under the failure rule: the device is opened afresh by its board name once it is back,
+//! and the download starts over.
+//!
 //! Everything the device says is untrusted. A short reply, a bad descriptor, an error state, a
 //! device that stops answering or never stops being busy: each ends this attempt, the driver backs
 //! off (at most 8 s) and starts again from block 0. A reset that was not carried out is made
@@ -43,7 +48,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use lemnos_core::{Config, Health, Lifecycle, Result, Status, UsbDeviceHandle, driver};
-use loader::{Ended, IN_PROGRESS, Loader, UNCHANGED, UNCONFIRMED};
+use loader::{Ended, GONE, IN_PROGRESS, Loader, UNCHANGED, UNCONFIRMED};
 
 /// The largest image accepted. A DFU image is a boot-time payload, not a filesystem.
 pub const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
@@ -77,6 +82,9 @@ impl Lifecycle for CoralLoader {
             (Some(Ended::Loaded), _) => Health::Ok,
             (Some(Ended::Unconfirmed), _) => Health::Degraded(UNCONFIRMED),
             (Some(Ended::Unchanged), _) => Health::Degraded(UNCHANGED),
+            // The handle is dead before the download ended: only a new bind opens the device
+            // again, and nothing calls this driver, so it has to ask.
+            (None, Some(GONE)) => Health::Gone(GONE),
             (None, Some(fault)) => Health::Failed(fault),
             (None, None) => Health::Degraded(IN_PROGRESS),
         }

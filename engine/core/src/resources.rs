@@ -92,6 +92,31 @@ pub type ClocksHandle = Held<dyn Clocks<Error = ErrorKind> + Send>;
 pub type ResetHandle = Held<dyn Reset<Error = ErrorKind> + Send>;
 pub type StreamHandle = Held<dyn StreamEndpoint<Error = ErrorKind> + Send>;
 
+/// What a backend tells the host when hardware comes or goes, by the names a board file uses.
+/// The host never learns what the hardware is: it looks for devices whose board entry has the
+/// name.
+///
+/// A hint only makes the host act sooner. Everything it brings about also happens without it, by
+/// the retries of the failure rule, so a hint that is lost or wrong costs time and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint<'a> {
+    /// What is behind this name may have arrived, left or changed. A device waiting to bind
+    /// with it is tried now. A running device bound with it is ticked now, if its driver ticks,
+    /// so the driver can look at what it holds and report [`Health::Gone`](crate::Health::Gone)
+    /// if that is dead. The host drops no running driver on a hint alone.
+    Changed(&'a str),
+    /// Something changed and the backend can't say what: the same, for every device.
+    Any,
+}
+
+/// Where a backend's [`Hint`]s come from. A host that wants them gives this a thread.
+pub trait HintSource: Send {
+    /// Waits up to `timeout` for hardware to come or go and reports what did. Returns `false`
+    /// when there will never be more to report. It must come back by `timeout`, hints or not, so
+    /// that whoever runs it can stop.
+    fn wait(&mut self, timeout: core::time::Duration, report: &mut dyn FnMut(Hint<'_>)) -> bool;
+}
+
 /// What a host implements so drivers can get what they need. The default for
 /// anything this target lacks is `NOT_SUPPORTED`.
 pub trait Provider {

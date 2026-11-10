@@ -15,14 +15,21 @@
 //! written into a buffer of the stream and published. With no consumer attached, or no buffer
 //! free, the frame is dropped and counted, and capture carries on.
 //!
-//! A device that has gone (its handle answers `Unavailable`) is retried for ever, and every
-//! method but `frame_stream` answers `NO_DEVICE` until it is back. The host takes enough of those
-//! in a row to mean the device has gone, drops this driver and binds it again, which opens the
-//! device afresh by its board name. That needs something to call a method: a driver that is only
-//! ticking can't ask the host to bind it again.
+//! A device that has gone (its handle answers `Unavailable`) can't be reached through that handle
+//! again, so the driver's health becomes [`Health::Gone`]. The host then drops this driver and
+//! binds it again under the failure rule, which opens whatever is plugged in under the board name
+//! now. Nobody has to call a method for that: the tick that finds the handle dead is enough.
+//! What was selected and whether it was streaming are not kept across it. A host that does not
+//! bind again leaves the driver retrying for ever, and every method but `frame_stream` answers
+//! `NO_DEVICE` until the handle answers again.
 //!
-//! The driver has to be given a device by the board file. Nothing binds a driver from a hotplug
-//! event.
+//! An idle camera is sent nothing, so each idle tick reads the start of its descriptor to see
+//! that the handle is alive. Idle ticks come after a method and when the backend hints that the
+//! device may have changed, so an idle camera that is unplugged is noticed at the hint, or at the
+//! next method without one.
+//!
+//! The driver has to be given a device by the board file, by port or by vendor and product. A
+//! camera that is absent when the service starts is bound when it arrives.
 //!
 //! Everything from the device is untrusted: see the module docs of [`descriptors`] and
 //! [`payload`]. A frame's identity holds its PTS and source clock reference, see
@@ -98,6 +105,10 @@ impl Lifecycle for Uvc {
     }
 
     fn health(&self) -> Health {
+        if self.session.is_gone() {
+            // The handle is dead: only being bound again opens the device afresh.
+            return Health::Gone(session::GONE);
+        }
         match (self.session.fault(), self.session.warning()) {
             (Some(fault), _) => Health::Failed(fault),
             (None, Some(warning)) => Health::Degraded(warning),
@@ -111,7 +122,7 @@ impl Lifecycle for Uvc {
 }
 
 impl Uvc {
-    /// `NO_DEVICE` while the device is gone, so the host can bind this driver again.
+    /// `NO_DEVICE` while the device is gone, for a host that leaves this driver in place.
     fn present(&self) -> Result<()> {
         if self.session.is_gone() {
             Err(Status::NO_DEVICE)

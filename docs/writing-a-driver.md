@@ -83,6 +83,14 @@ rule: it never gives up, it reports the fault, and the next read tries again. Pa
 attempts, capped at 8 s, is the host's job, because the host decides how often it reads. A driver
 never switches the part off on its own.
 
+One failure a driver can't get past by trying again: what it was bound with is dead, such as the
+handle of a USB device that was unplugged. Its `health` then returns `Health::Gone(reason)`. The
+host looks after every method and every tick, drops the driver and binds it again under the same
+rule, which opens whatever is there now by its board name. Use `Health::Failed` for everything the
+driver can recover from itself. A driver that holds something that can be unplugged should set
+`TICKS` and look at it in `tick`: the host ticks it when the backend hints that its hardware may
+have changed, so it finds out without waiting for a caller.
+
 Tests run against the simulated bus (`lemnos-sim`), where the chip's registers are plain bytes that
 a test sets and reads back. Steady-state reads must allocate nothing; prove it with the counting
 allocator in `lemnos-measure`, as `drivers/generic-sensor` does.
