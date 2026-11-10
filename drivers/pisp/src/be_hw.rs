@@ -1,7 +1,7 @@
 //! The back end as the driver sees it, and the Linux implementation over the kernel module.
 
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use lemnos_core::{Result, Status};
 use lemnos_driver_pisp_sys::{self as sys, BeStream, CONFIG_BYTES, Control, Job, StreamParams};
@@ -56,6 +56,17 @@ pub struct Finished {
     pub timestamp_ns: u64,
 }
 
+/// A dma-buf the block may write, as the module pinned it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Registered {
+    /// What [`Hardware::unregister`] takes.
+    pub region: u32,
+    /// Its first byte, as a device address.
+    pub addr: u64,
+    /// Its real size in bytes, which may be more than asked for: a heap rounds up.
+    pub size: u64,
+}
+
 /// What the driver asks of the block. The real one is [`LinuxHardware`]; tests use a stand-in.
 pub trait Hardware: Send {
     /// The block's version register, once a stream has run; 0 before.
@@ -67,6 +78,12 @@ pub trait Hardware: Send {
     fn stop(&mut self);
     /// Copies configuration slot `slot`.
     fn read_config(&mut self, slot: u32, out: &mut [u8; CONFIG_BYTES]) -> Result<()>;
+    /// Lets the block reach `memory`, a dma-buf, until it is unregistered or the stream ends.
+    /// The module checks every range a job names against what is registered, and refuses an
+    /// unregister while a job still uses it.
+    fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered>;
+    /// Lets go of what `register` gave.
+    fn unregister(&mut self, region: u32) -> Result<()>;
     /// Posts a job and has the module take it. An error ends the stream.
     fn post(&mut self, job: &KernelJob) -> Result<()>;
     /// The next finished job.
@@ -218,6 +235,26 @@ impl Hardware for LinuxHardware {
         self.running()?
             .stream
             .read_config(slot, out)
+            .map_err(|e| status(&e))
+    }
+
+    fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {
+        let r = self
+            .running()?
+            .stream
+            .register_region(memory)
+            .map_err(|e| status(&e))?;
+        Ok(Registered {
+            region: r.region,
+            addr: r.addr,
+            size: r.size,
+        })
+    }
+
+    fn unregister(&mut self, region: u32) -> Result<()> {
+        self.running()?
+            .stream
+            .unregister(region)
             .map_err(|e| status(&e))
     }
 

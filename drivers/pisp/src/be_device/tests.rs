@@ -10,7 +10,7 @@ use lemnos_measure::test_alloc::allocations;
 
 use super::{Options, PispBe, backoff_ns};
 use crate::be::BackEnd;
-use crate::be_hw::{Finished, Hardware, Placed, Plan};
+use crate::be_hw::{Finished, Hardware, Placed, Plan, Registered};
 use crate::be_job::{KernelJob, addr_output};
 use crate::format::{compute_stride_align, formats};
 use crate::uapi::{BayerOrder as Order, BeCcmConfig, BeTilesConfig, ImageFormatConfig, Wire};
@@ -95,6 +95,14 @@ impl Hardware for Hw {
     fn read_config(&mut self, _slot: u32, out: &mut [u8; CONFIG_BYTES]) -> Result<()> {
         self.with(|m| out.copy_from_slice(&m.config[..]));
         Ok(())
+    }
+
+    fn register(&mut self, _memory: std::os::fd::BorrowedFd<'_>) -> Result<Registered> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn unregister(&mut self, _region: u32) -> Result<()> {
+        Err(Status::NOT_FOUND)
     }
 
     fn post(&mut self, job: &KernelJob) -> Result<()> {
@@ -302,7 +310,9 @@ fn a_config_the_module_would_refuse_is_never_posted() {
 }
 
 #[test]
-fn finished_frames_are_published_and_only_what_was_published_comes_back() {
+fn a_finished_buffer_no_job_was_lent_goes_straight_back_and_reaches_no_one() {
+    // What the block wrote into the pool is nobody's: the consumer never sees it. The path
+    // through a lent buffer is in `tests/be_frames.rs`, against the host's own stream.
     let frames = MockStream::new(4);
     let (mut be, hw) = setup(None, Some(&frames));
     CameraIsp::start(&mut be).unwrap();
@@ -316,18 +326,21 @@ fn finished_frames_are_published_and_only_what_was_published_comes_back() {
         });
     });
     run_once(&mut be, 1);
-    let f = frames.take_frame().unwrap();
-    assert_eq!((f.buffer, f.bytes, f.sequence, f.identity), (2, 7, 5, 11));
-    assert_eq!(CameraIsp::counters(&mut be).unwrap().jobs, 1);
-    // The stream's initial free buffers went by without being given back to the module.
-    assert!(hw.with(|m| m.given_back.is_empty()));
-    frames.return_buffer(2);
-    run_once(&mut be, 2);
+    assert!(frames.take_frame().is_none());
     assert_eq!(hw.with(|m| m.given_back.clone()), [2]);
-    // Twice is not a second return.
-    frames.return_buffer(2);
-    run_once(&mut be, 3);
-    assert_eq!(hw.with(|m| m.given_back.clone()), [2]);
+}
+
+#[test]
+fn with_buffers_that_have_no_handles_a_job_is_dropped_before_the_block() {
+    let jobs = MockStream::new(4);
+    let frames = MockStream::new(4);
+    let (mut be, hw) = setup(Some(&jobs), Some(&frames));
+    hw.set_config(&config());
+    CameraIsp::start(&mut be).unwrap();
+    post(&jobs, &job(1, 0, 2));
+    run_once(&mut be, 1);
+    assert!(hw.with(|m| m.posted.is_empty()));
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
 }
 
 #[test]

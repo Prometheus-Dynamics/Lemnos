@@ -35,5 +35,13 @@ lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-driver-pisp-sys = { path = "../pisp-sys" }
+
 [package.metadata.lemnos]
 driver = "PispBe"
