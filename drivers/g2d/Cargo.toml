@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-driver-g2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The G2D 2D engine (fill, scale, format conversion, quarter turns and flips, blending between dma-bufs) through the BSP kernel's /dev/g2d, reopened after a failure. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: every system call goes through lemnos-driver-g2d-sys, which holds the `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-g2d-sys = { path = "../g2d-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
