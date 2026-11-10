@@ -1,0 +1,25 @@
+[package]
+name = "lemnos-driver-isp600"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The ISP600 as camera.isp/1 and isp.isp600/1, through the vendor kernel's vin driver: load images in, statistics and images out, carried and never read past the address words they are checked for"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }
+lemnos-contract-isp-isp600 = { path = "../../contracts/isp-isp600" }
+lemnos-driver-isp600-sys = { path = "../isp600-sys" }
+lemnos-v4l2 = { path = "../../backends/v4l2" }
+
+[dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "Isp600"
