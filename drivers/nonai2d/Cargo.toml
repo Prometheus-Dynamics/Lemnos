@@ -1,0 +1,27 @@
+[package]
+name = "lemnos-driver-nonai2d"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 non-AI 2D engine: pixel-format conversion between dma-bufs through the SDK kernel's nonai-2d V4L2 mem2mem driver, image.convert/1 jobs from a stream, reopened after a failure. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: the session goes through lemnos-driver-m2m-decode, and every system call through
+# lemnos-linux-sys, which holds the `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-image-convert = { path = "../../contracts/image-convert" }
+lemnos-driver-m2m-decode = { path = "../m2m-decode" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
