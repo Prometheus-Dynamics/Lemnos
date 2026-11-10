@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-driver-rknpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The Rockchip NPU behind the vendor kernel's DRM node, serving npu/1: the caller's program carried as bytes, each program in an IOMMU domain of its own holding only its buffers, every task field the kernel takes checked. No vendor library"
+
+[lints]
+workspace = true
+
+# No `unsafe` here and no device access of its own: the node is reached through the `Device` and
+# `Session` traits, implemented by `lemnos-driver-rknpu-sys`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-npu = { path = "../../contracts/npu" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
