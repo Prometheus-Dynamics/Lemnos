@@ -1,7 +1,9 @@
 //! Linux hardware for Lemnos, by the names a board file uses: `i2c-N`, `spidevB.C`,
 //! `gpiochipN:LINE`, `pwmchipN:CHANNEL`, a tty such as `ttyAMA0`, a USB device by its port
 //! (`usb:1-1.4`) or its vendor and product (`usb:1a2b:3c4d`), and this board as a USB device by
-//! the controller it appears through (`udc:fe980000.usb`, see [`FunctionFsGadget`]).
+//! the controller it appears through (`udc:fe980000.usb`, see [`FunctionFsGadget`]), and DMA
+//! memory for a block bound to the kernel module by the block's device name (`dma:91400000.isp`,
+//! see [`ModuleDma`]).
 
 #![cfg(target_os = "linux")]
 
@@ -22,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lemnos_core::{
-    I2c, Line, LocalCaller, Provider, Pwm, RawSpiBus, Result, Spi, Status, Tag, Uart,
+    DmaHandle, I2c, Line, LocalCaller, Provider, Pwm, RawSpiBus, Result, Spi, Status, Tag, Uart,
     UsbDeviceHandle, UsbFunctionHandle, status_of,
 };
 use lemnos_hal::ErrorKind;
@@ -30,6 +32,7 @@ use lemnos_hal::ErrorKind;
 pub use gadget::FunctionFsGadget;
 pub use gpio::GpioLine;
 pub use i2c::I2cBus;
+pub use module::ModuleDma;
 pub use pwm::SysfsPwm;
 pub use spi::{SpiMode, Spidev};
 pub use uart::TtyUart;
@@ -216,6 +219,7 @@ impl Provider for LinuxBoard {
             || usb::UsbName::parse(need)
                 .is_some_and(|name| usb::locate(&self.dev, &self.sys, name).is_ok())
             || exists(gadget::controller(need).map(|name| self.udc_class().join(name)))
+            || self.module_has_block(need)
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
@@ -290,9 +294,33 @@ impl Provider for LinuxBoard {
     fn usb_function(&mut self, need: &str) -> Result<UsbFunctionHandle> {
         Ok(Box::new(self.open_usb_function(need)?))
     }
+
+    fn dma(&mut self, need: &str) -> Result<DmaHandle> {
+        Ok(Box::new(self.module_dma(need)?))
+    }
 }
 
 impl LinuxBoard {
+    /// Whether `need` is `dma:<block>` and that block is bound to the open module.
+    fn module_has_block(&self, need: &str) -> bool {
+        let (Some(block), Some(node)) = (module::dma::block_name(need), self.module.as_ref())
+        else {
+            return false;
+        };
+        node.has_block(block)
+    }
+
+    /// DMA memory for the block a `dma:<block>` name names, from the kernel module: see
+    /// [`ModuleDma`]. There is no other source of DMA memory, so this is refused, with no
+    /// fallback, unless the module is open ([`Self::open_module`]) and has that block bound:
+    /// `NOT_FOUND` for a name that isn't `dma:<block>`, `NOT_SUPPORTED` without the module,
+    /// `NO_DEVICE` for a block the module doesn't have.
+    pub fn module_dma(&self, need: &str) -> Result<ModuleDma> {
+        let block = module::dma::block_name(need).ok_or(Status::NOT_FOUND)?;
+        let node = self.module.clone().ok_or(Status::NOT_SUPPORTED)?;
+        ModuleDma::open(node, block).map_err(status_of)
+    }
+
     /// The gadget for a `udc:NAME` name: see [`FunctionFsGadget`]. The controller must be
     /// there, and one owner holds it at a time. Nothing is set up until the function is
     /// enabled.
@@ -338,6 +366,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lemnos-linux-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         (LinuxBoard::at(&dir, &dir), dir)
+    }
+
+    #[test]
+    fn dma_memory_comes_only_from_the_module() {
+        let (mut board, dir) = temp_board("dma");
+        // Not a `dma:<block>` name.
+        for name in ["dma:", "dma:a/b", "i2c-1", "91400000.isp"] {
+            assert_eq!(board.dma(name).err(), Some(Status::NOT_FOUND), "{name}");
+            assert!(!board.provided(name));
+        }
+        // No module: refused, with nothing else tried.
+        assert_eq!(
+            board.dma("dma:91400000.isp").err(),
+            Some(Status::NOT_SUPPORTED)
+        );
+        assert!(!board.provided("dma:91400000.isp"));
+        // A node that isn't the module answers no block request.
+        board.module = Some(module::Node::open("/dev/null").unwrap());
+        assert_eq!(
+            board.dma("dma:91400000.isp").err(),
+            Some(Status::NOT_SUPPORTED)
+        );
+        assert!(!board.provided("dma:91400000.isp"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

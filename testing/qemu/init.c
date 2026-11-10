@@ -277,6 +277,7 @@ int main(void)
 	      "lemnos_pio_check");
 
 	/* One binary, the real backend: the module where it serves a bus, stock elsewhere. */
+	check(!bind_block(BLOCK), "block bound for the backend's DMA memory");
 	check(!spi_bind("lemnos"), "SPI device bound to the module");
 	check(!backend_check("module", "module"), "backend: everything through the module");
 	check(!spi_unbind("lemnos"), "SPI device unbound from the module");
@@ -284,6 +285,8 @@ int main(void)
 		check(!load("/spidev.ko", ""), "spidev loaded");
 	check(!spi_bind("spidev"), "SPI device bound to spidev");
 	check(!backend_check("module", "stock"), "backend: SPI alone stays stock");
+	/* Waits for every buffer the backend allocated: it returns only if none is left. */
+	check(!put(UNBIND, BLOCK), "block unbound after the backend's DMA memory");
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded with nothing left held");
 	check(!backend_check("stock", "stock"), "backend: no module, everything stock");

@@ -2,7 +2,9 @@
 //! each one took the expected route and behaved the same on it.
 //!
 //! `lemnos-module-check <route> <spi route> <gpio chip number> <simulated chip directory>`, where
-//! a route is `module` or `stock`. The first covers I2C, GPIO and PWM.
+//! a route is `module` or `stock`. The first covers I2C, GPIO and PWM, and DMA memory for the
+//! test block, which must be bound to the module on the module route (on the stock route there
+//! is none).
 //!
 //! Each bus also prints a `measure` line per operation: the time it takes on the route it took
 //! (median and 99th percentile, from the monotonic clock) and what it allocated. They are numbers
@@ -14,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_core::{Provider, Status};
 use lemnos_hal::ErrorKind;
+use lemnos_hal::blocks::DmaBuffers;
 use lemnos_hal::i2c::{I2c as _, Operation as I2cOp};
 use lemnos_hal::raw::{
     Bias, Direction, Edge, EdgeDetect, LineConfig, Polarity, PwmConfig, RawLine, SpiConfig,
@@ -27,6 +30,10 @@ use lemnos_measure::test_alloc::{Counting, allocations};
 static ALLOCATOR: Counting = Counting;
 
 const SPI_NAME: &str = "spidev40.0";
+/// DMA memory for the test block, which the harness binds to the module.
+const DMA_NAME: &str = "dma:lemnos-test-block";
+/// A block the module refuses to bind (not in `owned=`).
+const DMA_NOT_OWNED: &str = "dma:lemnos-test-other";
 const TEST_BUS: &str = "i2c-40";
 const STUB_ADDR: u8 = 0x30;
 const MEM_ADDR: u8 = 0x50;
@@ -550,6 +557,114 @@ fn check_pwm(report: &mut Report, board: &mut LinuxBoard, through_module: bool) 
     report.check(board.pwm(&name).is_ok(), "dropping it let go");
 }
 
+/// DMA memory through the module for the test block: the address the provider hands out is the
+/// one the module reports for the block, the CPU sees the memory, and it is let go on release and
+/// on drop. Without the module there is none.
+fn check_dma(report: &mut Report, board: &mut LinuxBoard, through_module: bool) {
+    if !through_module {
+        report.check(
+            !board.provided(DMA_NAME),
+            "no DMA memory without the module",
+        );
+        report.check(
+            board.dma(DMA_NAME).err() == Some(Status::NOT_SUPPORTED),
+            "DMA memory refused without the module (NOT_SUPPORTED)",
+        );
+        return;
+    }
+    report.check(
+        board.provided(DMA_NAME),
+        "the bound block's DMA memory is provided",
+    );
+    report.check(
+        !board.provided(DMA_NOT_OWNED) && board.dma(DMA_NOT_OWNED).err() == Some(Status::NO_DEVICE),
+        "a block the module doesn't own has none (NO_DEVICE)",
+    );
+    report.check(
+        board.dma("dma:").err() == Some(Status::NOT_FOUND),
+        "a name with no block is refused (NOT_FOUND)",
+    );
+    let Ok(mut dma) = board.module_dma(DMA_NAME) else {
+        report.check(false, "DMA memory opened");
+        return;
+    };
+    let before = open_files("dmabuf");
+    let Ok(buffer) = dma.allocate(10_000) else {
+        report.check(false, "10000 bytes allocated");
+        return;
+    };
+    let _ = writeln!(
+        std::io::stdout(),
+        "dma: buffer {} of {} bytes at device address {:#x}",
+        buffer.id,
+        buffer.len,
+        buffer.device_address
+    );
+    report.check(
+        buffer.len >= 10_000 && buffer.len % 4096 == 0 && open_files("dmabuf") == before + 1,
+        "allocated: at least what was asked, in pages, one dma-buf held",
+    );
+    let imported = dma.import_address(buffer.id);
+    let _ = writeln!(
+        std::io::stdout(),
+        "dma: the module maps it on the block again at {imported:#x?}"
+    );
+    report.check(
+        buffer.device_address != 0
+            && buffer.device_address % 4096 == 0
+            && imported.is_ok_and(|address| address == buffer.device_address),
+        "the address is the one the module reports for the block",
+    );
+    let pattern: Vec<u8> = (0..buffer.len).map(|i| (i * 7) as u8).collect();
+    let mut back = vec![0; pattern.len()];
+    report.check(
+        dma.write(buffer.id, 0, &pattern).is_ok()
+            && dma.read(buffer.id, 0, &mut back).is_ok()
+            && back == pattern,
+        "the CPU writes and reads the whole buffer",
+    );
+    report.check(
+        dma.read(buffer.id, buffer.len - 1, &mut [0; 2]) == Err(ErrorKind::InvalidInput),
+        "a read past the end is refused",
+    );
+    report.check(
+        dma.sync_for_device(buffer.id).is_ok()
+            && dma.read(buffer.id, 0, &mut [0; 1]) == Err(ErrorKind::Busy)
+            && dma.sync_for_cpu(buffer.id).is_ok()
+            && dma.read(buffer.id, 0, &mut [0; 1]).is_ok(),
+        "the CPU keeps out while the block has it",
+    );
+    let mut word = [0u8; 64];
+    let ((), allocated) = lemnos_measure::test_alloc::allocations(|| {
+        for i in 0..100u64 {
+            let _ = dma.sync_for_cpu(buffer.id);
+            let _ = dma.write(buffer.id, i * 64, &word);
+            let _ = dma.read(buffer.id, i * 64, &mut word);
+            let _ = dma.sync_for_device(buffer.id);
+        }
+    });
+    report.check(
+        allocated == 0,
+        "syncing, reading and writing allocate nothing",
+    );
+    report.check(
+        dma.release(buffer.id).is_ok()
+            && open_files("dmabuf") == before
+            && dma.release(buffer.id) == Err(ErrorKind::NotFound),
+        "released: the dma-buf is closed, and a second release is refused",
+    );
+    let kept = dma.allocate(4096).is_ok() && dma.allocate(4096).is_ok();
+    report.check(
+        kept && open_files("dmabuf") == before + 2,
+        "two more allocated",
+    );
+    drop(dma);
+    report.check(
+        open_files("dmabuf") == before,
+        "dropping the memory lets every buffer go",
+    );
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [route, spi_route, chip, dir] = args.as_slice() else {
@@ -582,6 +697,7 @@ fn main() -> ExitCode {
     check_spi(&mut report, &mut board, spi_module);
     check_line(&mut report, &mut board, module, chip, dir);
     check_pwm(&mut report, &mut board, module);
+    check_dma(&mut report, &mut board, module);
 
     let _ = writeln!(
         std::io::stdout(),

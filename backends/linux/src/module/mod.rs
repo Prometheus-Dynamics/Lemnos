@@ -1,9 +1,11 @@
-//! The hardware traits through the Lemnos kernel module, for the buses it serves.
+//! The hardware traits through the Lemnos kernel module, for the buses it serves, and DMA
+//! memory for the blocks bound to it.
 //!
 //! Claims here belong to the kernel: a holder that dies lets go, and a name someone holds is
 //! refused. `LinuxBoard` chooses per bus, so anything the module doesn't serve stays on the stock
-//! path.
+//! path. DMA memory has no stock path: only the module gives it (see [`dma`]).
 
+pub(crate) mod dma;
 mod gpio;
 mod i2c;
 mod pwm;
@@ -18,6 +20,7 @@ use std::sync::Arc;
 
 use lemnos_linux_sys::module as sys;
 
+pub use dma::ModuleDma;
 pub(crate) use gpio::ModuleLine;
 pub(crate) use i2c::ModuleI2c;
 pub(crate) use pwm::ModulePwm;
@@ -65,6 +68,11 @@ impl Node {
         let text = std::str::from_utf8(&name.bytes[..name.len])
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         sys::claim(self.fd(), text)
+    }
+
+    /// Whether a block of this device name is bound to the module.
+    pub(crate) fn has_block(&self, name: &str) -> bool {
+        matches!(sys::find_block(self.fd(), name), Ok(Some(_)))
     }
 
     /// Whether the module has this SPI device bound.

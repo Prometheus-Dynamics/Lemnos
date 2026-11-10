@@ -1,5 +1,6 @@
 //! The Lemnos kernel module's control node, `/dev/lemnos`: claims, and the buses, lines and
-//! channels that belong to them. The interface is `kernel/lemnos.h`.
+//! channels that belong to them, and a bound block's DMA memory. The interface is
+//! `kernel/lemnos.h`.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -190,6 +191,101 @@ pub struct PwmState {
     pub duty_ns: u64,
 }
 
+/// `struct lemnos_next`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Next {
+    after: u32,
+    block: u32,
+    name: [u8; NAME_MAX],
+}
+
+/// `struct lemnos_info`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InfoRaw {
+    block: u32,
+    abi: u32,
+    flags: u32,
+    regions: u32,
+    irqs: u32,
+    dma_bits: u32,
+    reserved: [u32; 2],
+}
+
+/// `struct lemnos_alloc`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AllocRaw {
+    block: u32,
+    flags: u32,
+    size: u64,
+    addr: u64,
+    fd: i32,
+    reserved: u32,
+}
+
+/// `struct lemnos_import`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ImportRaw {
+    block: u32,
+    fd: i32,
+    addr: u64,
+    size: u64,
+    handle: u32,
+    reserved: u32,
+}
+
+/// `struct lemnos_release`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ReleaseRaw {
+    block: u32,
+    handle: u32,
+}
+
+/// `LEMNOS_ABI`: the interface these structures are.
+pub const ABI: u32 = 1;
+
+/// What the module says about a bound block (`LEMNOS_IOC_INFO`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockInfo {
+    /// `LEMNOS_ABI` of the module.
+    pub abi: u32,
+    /// `LEMNOS_INFO_*`.
+    pub flags: u32,
+    /// Register regions.
+    pub regions: u32,
+    /// Interrupts forwarded.
+    pub irqs: u32,
+    /// Every device address of the block is below `2^dma_bits`.
+    pub dma_bits: u32,
+}
+
+/// DMA memory the module allocated for a block (`LEMNOS_IOC_ALLOC`).
+#[derive(Debug)]
+pub struct BlockMemory {
+    /// The memory as a dma-buf: `mmap` it for the CPU. The module frees the memory when the last
+    /// reference to it goes, and the block can't be unbound before then.
+    pub fd: OwnedFd,
+    /// The address the module mapped it at for the block, from its own allocation.
+    pub addr: u64,
+    /// Bytes, the size asked rounded up to pages.
+    pub size: u64,
+}
+
+/// A dma-buf mapped on a block (`LEMNOS_IOC_IMPORT`), until [`release`] or the node closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Imported {
+    /// Its device address.
+    pub addr: u64,
+    /// Bytes mapped.
+    pub size: u64,
+    /// For [`release`]; never zero.
+    pub handle: u32,
+}
+
 pod!(
     Claim,
     I2cSmbus,
@@ -200,6 +296,11 @@ pod!(
     GpioEvent,
     PwmRequest,
     PwmStateRaw,
+    Next,
+    InfoRaw,
+    AllocRaw,
+    ImportRaw,
+    ReleaseRaw,
 );
 
 const CLAIM: Ioctl<Claim> = Ioctl::new(iowr::<Claim>(TYPE, 0xce), "LEMNOS_IOC_CLAIM");
@@ -217,6 +318,12 @@ const PWM_APPLY: Ioctl<PwmStateRaw> =
     Ioctl::new(iow::<PwmStateRaw>(TYPE, 0xb9), "LEMNOS_IOC_PWM_APPLY");
 const PWM_GET: Ioctl<PwmStateRaw> =
     Ioctl::new(iowr::<PwmStateRaw>(TYPE, 0xba), "LEMNOS_IOC_PWM_GET");
+
+const NEXT: Ioctl<Next> = Ioctl::new(iowr::<Next>(TYPE, 0xcf), "LEMNOS_IOC_NEXT");
+const INFO: Ioctl<InfoRaw> = Ioctl::new(iowr::<InfoRaw>(TYPE, 0xd0), "LEMNOS_IOC_INFO");
+const ALLOC: Ioctl<AllocRaw> = Ioctl::new(iowr::<AllocRaw>(TYPE, 0xd2), "LEMNOS_IOC_ALLOC");
+const IMPORT: Ioctl<ImportRaw> = Ioctl::new(iowr::<ImportRaw>(TYPE, 0xd3), "LEMNOS_IOC_IMPORT");
+const RELEASE: Ioctl<ReleaseRaw> = Ioctl::new(iow::<ReleaseRaw>(TYPE, 0xd4), "LEMNOS_IOC_RELEASE");
 
 // These carry pointers the kernel follows, so they aren't `Ioctl`s.
 const I2C_TRANSFER: u32 = iow::<I2cTransfer>(TYPE, 0xa8);
@@ -510,6 +617,85 @@ pub fn pwm_get(node: BorrowedFd<'_>, claim: BorrowedFd<'_>) -> io::Result<PwmSta
     })
 }
 
+/// The number of the bound block whose device name is `name`, walking `LEMNOS_IOC_NEXT`. `None`
+/// when no block bound to the module has that name. Allocates nothing.
+pub fn find_block(node: BorrowedFd<'_>, name: &str) -> io::Result<Option<u32>> {
+    let wanted = name.as_bytes();
+    if wanted.is_empty() || wanted.len() >= NAME_MAX || wanted.contains(&0) {
+        return Err(invalid());
+    }
+    let mut after = 0;
+    loop {
+        let mut arg: Next = zeroed();
+        arg.after = after;
+        match NEXT.call(node, &mut arg) {
+            Ok(_) => {}
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        let len = arg.name.iter().position(|&b| b == 0).unwrap_or(NAME_MAX);
+        if &arg.name[..len] == wanted {
+            return Ok(Some(arg.block));
+        }
+        // Numbers only grow; one that doesn't is a module this code doesn't know.
+        if arg.block <= after {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        after = arg.block;
+    }
+}
+
+/// What the module says about block `block`. `ENODEV` once it is unbound.
+pub fn block_info(node: BorrowedFd<'_>, block: u32) -> io::Result<BlockInfo> {
+    let mut arg: InfoRaw = zeroed();
+    arg.block = block;
+    INFO.call(node, &mut arg)?;
+    Ok(BlockInfo {
+        abi: arg.abi,
+        flags: arg.flags,
+        regions: arg.regions,
+        irqs: arg.irqs,
+        dma_bits: arg.dma_bits,
+    })
+}
+
+/// Allocates `size` bytes of DMA memory for block `block`, as a dma-buf with the device address
+/// the module mapped it at. `ENODEV` once the block is unbound.
+pub fn alloc(node: BorrowedFd<'_>, block: u32, size: u64) -> io::Result<BlockMemory> {
+    let mut arg: AllocRaw = zeroed();
+    arg.block = block;
+    arg.size = size;
+    ALLOC.call(node, &mut arg)?;
+    // SAFETY: the kernel just made `arg.fd` for this process, and nothing else owns it.
+    let fd = unsafe { OwnedFd::from_raw_fd(arg.fd) };
+    Ok(BlockMemory {
+        fd,
+        addr: arg.addr,
+        size: arg.size,
+    })
+}
+
+/// Maps the dma-buf `dmabuf` on block `block`, contiguous in its address space, until
+/// [`release`] or the node closes.
+pub fn import(node: BorrowedFd<'_>, block: u32, dmabuf: BorrowedFd<'_>) -> io::Result<Imported> {
+    let mut arg: ImportRaw = zeroed();
+    arg.block = block;
+    arg.fd = dmabuf.as_raw_fd();
+    IMPORT.call(node, &mut arg)?;
+    Ok(Imported {
+        addr: arg.addr,
+        size: arg.size,
+        handle: arg.handle,
+    })
+}
+
+/// Ends an [`import`].
+pub fn release(node: BorrowedFd<'_>, block: u32, handle: u32) -> io::Result<()> {
+    let mut arg = ReleaseRaw { block, handle };
+    RELEASE.call(node, &mut arg)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +715,129 @@ mod tests {
         assert_eq!(GPIO_EVENT_SIZE, 16);
         assert_eq!(size_of::<PwmRequest>(), 56);
         assert_eq!(size_of::<PwmStateRaw>(), 32);
+        assert_eq!(size_of::<Next>(), 72);
+        assert_eq!(size_of::<InfoRaw>(), 32);
+        assert_eq!(size_of::<AllocRaw>(), 32);
+        assert_eq!(size_of::<ImportRaw>(), 32);
+        assert_eq!(size_of::<ReleaseRaw>(), 8);
+    }
+
+    #[test]
+    fn block_fields_are_where_the_kernel_puts_them() {
+        use std::mem::offset_of;
+        assert_eq!(offset_of!(Next, block), 4);
+        assert_eq!(offset_of!(Next, name), 8);
+        assert_eq!(offset_of!(InfoRaw, abi), 4);
+        assert_eq!(offset_of!(InfoRaw, dma_bits), 20);
+        assert_eq!(offset_of!(AllocRaw, flags), 4);
+        assert_eq!(offset_of!(AllocRaw, size), 8);
+        assert_eq!(offset_of!(AllocRaw, addr), 16);
+        assert_eq!(offset_of!(AllocRaw, fd), 24);
+        assert_eq!(offset_of!(ImportRaw, fd), 4);
+        assert_eq!(offset_of!(ImportRaw, addr), 8);
+        assert_eq!(offset_of!(ImportRaw, size), 16);
+        assert_eq!(offset_of!(ImportRaw, handle), 24);
+        assert_eq!(offset_of!(ReleaseRaw, handle), 4);
+    }
+
+    /// The block requests as `kernel/lemnos.h` defines them, read from the header itself, so a
+    /// change there that this file doesn't follow fails here.
+    #[test]
+    fn block_requests_are_the_headers() {
+        let header = include_str!("../../../kernel/lemnos.h");
+        let defined = |name: &str, text: &str| {
+            header.lines().any(|line| {
+                let mut words = line.split_whitespace();
+                words.next() == Some("#define")
+                    && words.next() == Some(name)
+                    && words.collect::<Vec<_>>().join(" ") == text
+            })
+        };
+        assert!(defined("LEMNOS_ABI", "1"));
+        assert!(defined("LEMNOS_NAME_MAX", "64"));
+        assert!(defined(
+            "LEMNOS_IOC_NEXT",
+            "_IOWR('L', 0xcf, struct lemnos_next)"
+        ));
+        assert!(defined(
+            "LEMNOS_IOC_INFO",
+            "_IOWR('L', 0xd0, struct lemnos_info)"
+        ));
+        assert!(defined(
+            "LEMNOS_IOC_ALLOC",
+            "_IOWR('L', 0xd2, struct lemnos_alloc)"
+        ));
+        assert!(defined(
+            "LEMNOS_IOC_IMPORT",
+            "_IOWR('L', 0xd3, struct lemnos_import)"
+        ));
+        assert!(defined(
+            "LEMNOS_IOC_RELEASE",
+            "_IOW('L', 0xd4, struct lemnos_release)"
+        ));
+        // Each structure's fields, in order, as the header lists them.
+        let fields = |name: &str| -> Vec<String> {
+            let start = header
+                .find(&format!("struct {name} {{"))
+                .unwrap_or_else(|| panic!("struct {name}"));
+            let body = &header[start..start + header[start..].find("};").unwrap()];
+            body.lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let decl = line.split(';').next()?.trim();
+                    (!decl.is_empty() && !decl.starts_with("/*")).then(|| decl.to_string())
+                })
+                .collect()
+        };
+        assert_eq!(
+            fields("lemnos_next"),
+            ["__u32 after", "__u32 block", "char name[LEMNOS_NAME_MAX]"]
+        );
+        assert_eq!(
+            fields("lemnos_info"),
+            [
+                "__u32 block",
+                "__u32 abi",
+                "__u32 flags",
+                "__u32 regions",
+                "__u32 irqs",
+                "__u32 dma_bits",
+                "__u32 reserved[2]"
+            ]
+        );
+        assert_eq!(
+            fields("lemnos_alloc"),
+            [
+                "__u32 block",
+                "__u32 flags",
+                "__u64 size",
+                "__u64 addr",
+                "__s32 fd",
+                "__u32 reserved"
+            ]
+        );
+        assert_eq!(
+            fields("lemnos_import"),
+            [
+                "__u32 block",
+                "__s32 fd",
+                "__u64 addr",
+                "__u64 size",
+                "__u32 handle",
+                "__u32 reserved"
+            ]
+        );
+        assert_eq!(fields("lemnos_release"), ["__u32 block", "__u32 handle"]);
+    }
+
+    #[test]
+    fn block_names_that_cant_be_one_are_refused_before_the_kernel() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let fd = std::os::fd::AsFd::as_fd(&file);
+        for name in ["", "a\0b", &"x".repeat(64)] {
+            let error = find_block(fd, name).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+        }
     }
 
     #[test]
@@ -537,6 +846,11 @@ mod tests {
         assert_eq!(I2C_TRANSFER, 0x4018_4ca8);
         assert_eq!(SPI_TRANSFER, 0x4020_4caa);
         assert_eq!(PWM_GET.nr(), 0xc020_4cba);
+        assert_eq!(NEXT.nr(), 0xc048_4ccf);
+        assert_eq!(INFO.nr(), 0xc020_4cd0);
+        assert_eq!(ALLOC.nr(), 0xc020_4cd2);
+        assert_eq!(IMPORT.nr(), 0xc020_4cd3);
+        assert_eq!(RELEASE.nr(), 0x4008_4cd4);
     }
 
     #[test]
