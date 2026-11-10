@@ -1,0 +1,29 @@
+[package]
+name = "lemnos-driver-rga"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "A 2D image block (scale, convert, crop, flip and turn, blend, fill, masks) through the kernel's V4L2 mem2mem driver or the vendor kernel's multi-RGA node, with CPU fallbacks (RISC-V vector rows on riscv64) and the image contracts. No vendor library"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-image-scaler = { path = "../../contracts/image-scaler" }
+lemnos-contract-image-blend = { path = "../../contracts/image-blend" }
+lemnos-contract-image-convert = { path = "../../contracts/image-convert" }
+
+# Linux only: the device routes, and every system call through the two crates allowed `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-rga-sys = { path = "../rga-sys" }
+lemnos-driver-m2m-decode = { path = "../m2m-decode" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-wire = { path = "../../engine/wire" }
+
+[package.metadata.lemnos]
+driver = "Rga"
