@@ -1,0 +1,12 @@
+# A made-up three-axis magnetometer for the simulated bus. It is not any real
+# part, and its registers exist only as the simulated bus's bytes.
+
+identity 0x00 0x48                      # the chip ID register reads 0x48
+
+init 0x0a 0x80                          # soft reset
+wait 2                                  # ms before the chip takes its next write
+init 0x09 0x1d                          # continuous measurement
+
+axis x 0x01 16 little signed 0.000001   # tesla per count
+axis y 0x03 16 big signed 0.000001
+axis z 0x05 24 little signed 0.000001
