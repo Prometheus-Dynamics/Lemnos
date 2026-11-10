@@ -1,13 +1,14 @@
-//! The driver bound by the host from a board file, its three job streams declared there: a
-//! consumer finds a stream by the name `job_stream` answers, attaches on the real ring, posts a
-//! job, and the host's own ticks run it. No `soc` is configured, so no device is opened and the
-//! jobs run on the CPU.
+//! The driver bound by the host from a board file, its job stream declared there: a consumer
+//! finds a stream by the name `job_stream` answers, attaches on the real ring, posts a job, and
+//! the host's own ticks complete it. The chip is RK3576, whose only unit is `/dev/rga`: a
+//! conversion from RGB has no route on it, so the job completes as failed before any device is
+//! looked for, and nothing is written to its output. Without a `soc` the driver doesn't bind.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lemnos_contract_image_convert::{ConvertJob, ImageRef};
-use lemnos_core::{CallerId, Encode, HostClock, MethodId, Writer};
+use lemnos_contract_image_convert::{ConvertJob, Counters, ImageRef};
+use lemnos_core::{CallerId, Decode, Encode, HostClock, MethodId, Reader, Writer};
 use lemnos_driver_rga::Rga;
 use lemnos_host::board::parse;
 use lemnos_host::{DeviceState, Host, Options, entry};
@@ -26,14 +27,16 @@ impl HostClock for Clock {
 const RGB3: u32 = u32::from_le_bytes(*b"RGB3");
 const AR24: u32 = u32::from_le_bytes(*b"AR24");
 
-fn start() -> (Host, Clock, u32) {
-    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
-                [[devices]]\nid = \"rga\"\ndriver = \"rga\"\n\
-                [devices.streams.convert]\nbuffers = 4\nbuffer_bytes = 4096\n\
-                job_slots = 8\njob_bytes = 64\n";
+fn start(config: &str) -> (Host, Clock, u32) {
+    let text = format!(
+        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+         [[devices]]\nid = \"rga\"\ndriver = \"rga\"\n{config}\
+         [devices.streams.convert]\nbuffers = 4\nbuffer_bytes = 4096\n\
+         job_slots = 8\njob_bytes = 64\n"
+    );
     let clock = Clock::default();
     let host = Host::start(
-        &parse(text).unwrap(),
+        &parse(&text).unwrap(),
         &[entry::<Rga>()],
         Box::new(SimBoard::new()),
         Arc::new(clock.clone()),
@@ -60,8 +63,14 @@ fn job_stream(host: &Host, index: u32, contract: u8) -> Result<String, lemnos_co
 }
 
 #[test]
-fn a_job_posted_on_the_stream_the_board_declares_is_run_by_the_hosts_ticks() {
-    let (host, clock, index) = start();
+fn without_a_soc_the_driver_does_not_bind() {
+    let (host, _clock, _index) = start("");
+    assert_ne!(host.device("rga").unwrap().state, DeviceState::Running);
+}
+
+#[test]
+fn a_job_with_no_route_on_the_chip_completes_as_failed_through_the_hosts_ticks() {
+    let (host, clock, index) = start("config = { soc = \"rk3576\" }\n");
     assert_eq!(host.device("rga").unwrap().state, DeviceState::Running);
     // Only the stream the board gives is offered.
     let name = job_stream(&host, index, 1).unwrap();
@@ -77,6 +86,8 @@ fn a_job_posted_on_the_stream_the_board_declares_is_run_by_the_hosts_ticks() {
     }
     let offset = lease.layout.buffer_offset(0).unwrap();
     assert!(lease.buffers.write(offset, &[1, 2, 3, 4, 5, 6]));
+    let output = lease.layout.buffer_offset(1).unwrap();
+    assert!(lease.buffers.write(output, &[0x5a; 8]));
     let job = ConvertJob {
         identity: 77,
         input: ImageRef {
@@ -109,9 +120,18 @@ fn a_job_posted_on_the_stream_the_board_declares_is_run_by_the_hosts_ticks() {
         }
     }
     let done = done.expect("a completion from the host's ticks");
-    assert_eq!((done.buffer, done.identity, done.bytes), (1, 77, 8));
+    assert_eq!((done.buffer, done.identity, done.bytes), (1, 77, 0));
+    // Nothing was computed in software.
     let mut out = [0u8; 8];
-    let offset = lease.layout.buffer_offset(1).unwrap();
-    assert!(lease.buffers.read(offset, &mut out));
-    assert_eq!(out, [3, 2, 1, 255, 6, 5, 4, 255]);
+    assert!(lease.buffers.read(output, &mut out));
+    assert_eq!(out, [0x5a; 8]);
+    // Counted as an error of the contract.
+    let id = MethodId {
+        contract: 1,
+        method: 5,
+    };
+    let mut reply = [0u8; 64];
+    let n = host.call(index, id, &[], &mut reply).unwrap();
+    let counters = Counters::decode(&mut Reader::new(&reply[..n])).unwrap();
+    assert_eq!((counters.jobs, counters.errors), (0, 1));
 }

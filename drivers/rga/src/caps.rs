@@ -73,7 +73,7 @@ pub enum Route {
     Design,
 }
 
-/// How close a unit's result is to the scalar reference.
+/// How close a unit's result is to the operation's definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Exactness {
     Exact,
@@ -121,7 +121,7 @@ pub enum FixedOp {
     /// `/dev/rga` route as `MultiRga::channel_to_gray` (RGA2 cores, the user colour-space
     /// conversion), untested on board. No row lists it until the board test
     /// (`tests/multirga.rs`, every byte of each channel) matches, so `route_for` answers `None`
-    /// and the caller keeps it on the CPU.
+    /// and the operation has no route.
     Channel,
 }
 
@@ -393,7 +393,7 @@ const fn vglite(soc: Soc) -> UnitCaps {
         route: Route::Vglite,
         // Described from the dev branch's VGLite driver (untested on board): blits and fills.
         // Lines are not in its rows: the GPU's stroke is not shown to match Bresenham on board,
-        // so `FixedOp::Line` stays on the CPU. Not implemented here: that driver is not on this
+        // so `FixedOp::Line` has no route. Not implemented here: that driver is not on this
         // branch yet.
         implemented: false,
         min_size: None,
@@ -431,7 +431,7 @@ pub fn caps(soc: Soc) -> impl Iterator<Item = &'static UnitCaps> {
 }
 
 /// The route that would serve `op` from `src` to `dst` on `soc`, or `None` when no implemented
-/// route can: the caller then sends the work to the CPU. Looks only at the table: no device is
+/// route can: a job then fails, it is never computed in software. Looks only at the table: no device is
 /// probed (see `route_on_system` for that). The formats and sizes of each side are checked
 /// against the unit's rules; a route refuses anything else as `Unsupported` when it runs.
 pub fn route_for(soc: Soc, op: Op, src: Layout, dst: Layout) -> Option<Route> {
@@ -663,8 +663,8 @@ mod tests {
             route_for(Soc::Rk3588, Op::Convert, small, small),
             Some(Route::V4l2)
         );
-        // The K230D's VGLite row is described but its driver is not here: everything on the
-        // K230D goes to the CPU. Its rules still say what that driver will serve: a fill, a 2x
+        // The K230D's VGLite row is described but its driver is not here: nothing on the K230D
+        // has a route (the driver refuses to bind to it). Its rules still say what that driver will serve: a fill, a 2x
         // area downscale, a bilinear resize; no lines, and no 3x area downscale.
         let vglite = caps(Soc::K230d).next().unwrap();
         for op in [
