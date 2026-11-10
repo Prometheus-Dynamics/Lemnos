@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-driver-rkcif"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-v4l2 = { path = "../../backends/v4l2" }
+libc.workspace = true
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "Rkcif"
