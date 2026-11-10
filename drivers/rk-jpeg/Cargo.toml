@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-driver-rk-jpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The Rockchip JPEG decoder and encoder behind the vendor kernel's mpp_service: their register-file layouts, address placements checked against the caller's dma-bufs, result decoding, and a session that reopens itself after a failure. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only. No `unsafe` here: the call into the service comes through the `Device` trait.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
