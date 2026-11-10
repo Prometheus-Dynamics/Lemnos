@@ -1,11 +1,13 @@
-//! The back end's output 0 through the host's own frame stream, end to end: a consumer attaches
-//! to the `frames` stream as a client of the daemon does, posts a job on the `jobs` stream, and
-//! reads the frame through the descriptor it was handed for the buffer. A stand-in for the block
-//! writes a known pattern into the memory the driver gave it for that job, by device address, as
-//! the block's DMA would. The consumer must read that pattern: correct numbers on the ring over a
-//! buffer holding nothing the block wrote is the failure this test exists for.
+//! The back end end to end through the host's own streams, as a client of the daemon holds them.
+//! The client writes a raw frame into an `input` buffer and a configuration into a `config`
+//! buffer, posts a job on the `config` stream, and reads the image through the descriptor it was
+//! handed for the `output0` buffer. A stand-in for the block reads the input by device address
+//! from the memory the driver gave it for the job, and writes an image derived from the input and
+//! from the configuration it was given into the output's memory, as the block's DMA would. The
+//! client must read exactly that image: right numbers on the ring over memory the block never
+//! touched, or an image made from memory the client never wrote, is the failure this test is for.
 //!
-//! Sealed memfds stand in for the stream's dma-bufs, and for the driver's own pool.
+//! Sealed memfds stand in for the streams' dma-bufs and for the module's pool.
 
 #![cfg(target_os = "linux")]
 
@@ -22,35 +24,50 @@ use lemnos_driver_pisp::be_hw::{Finished, Hardware, Placed, Plan, Registered};
 use lemnos_driver_pisp::be_job::{KernelJob, addr_output};
 use lemnos_driver_pisp::format::{compute_stride_align, formats};
 use lemnos_driver_pisp::uapi::{BayerOrder as Order, BeTilesConfig, ImageFormatConfig, Wire};
-use lemnos_driver_pisp::{BeOptions as Options, PispBe};
+use lemnos_driver_pisp::{BeOptions as Options, PispBe, PispBeNeeds};
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
 use lemnos_host::{Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
+use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_wire::ring::{Consumer, Layout};
 
+#[global_allocator]
+static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
+
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 32;
+/// RAW16 at 64 by 32, lines on 64 bytes.
+const INPUT_BYTES: u32 = WIDTH * 2 * HEIGHT;
 /// NV12 at 64 by 32: the luma plane, then the chroma plane at half height.
 const OUTPUT_BYTES: u32 = WIDTH * HEIGHT * 3 / 2;
 const BUFFERS: u32 = 4;
-/// Where the stand-in puts the driver's own pool, and where it puts what is registered.
+/// Where the stand-in puts the module's pool, and where it puts what is registered.
 const POOL: u64 = 0x1000_0000;
-const POOL_STRIDE: u64 = 0x1000;
-const INPUT: u64 = 0x2000_0000;
 const REGIONS: u64 = 0x8000_0000;
 const REGION_SPAN: u64 = 0x0100_0000;
 const CALLER: CallerId = CallerId(5);
 
-/// What the block writes into output 0 for the job with `identity`.
-fn pattern(identity: u64, at: usize) -> u8 {
-    (identity as usize).wrapping_mul(31).wrapping_add(at * 7) as u8 | 1
+/// The raw frame the client writes for a job.
+fn raw(seed: u64, at: usize) -> u8 {
+    (seed as usize).wrapping_mul(13).wrapping_add(at * 5) as u8
 }
 
-// ---- The stream's memory, as the daemon makes it: one descriptor per buffer.
+/// What the block makes of `input` under a configuration with `key`: every output byte comes
+/// from an input byte, so an image made from the wrong memory or the wrong configuration shows.
+fn derived(input: &[u8], key: u8, at: usize) -> u8 {
+    input[at % input.len()].wrapping_add(key) | 1
+}
+
+/// The configuration's mark: its red gain, which the block reads like any other setting.
+fn key_of(config: &BeTilesConfig) -> u8 {
+    config.config.wbg.gain_r as u8
+}
+
+// ---- The streams' memory, as the daemon makes it: one descriptor per buffer.
 
 struct PerBuffer {
     files: Vec<File>,
@@ -112,18 +129,23 @@ impl StreamAllocator for Handles {
     }
 }
 
-fn host() -> Host {
-    let text = format!(
+fn board(input_memory: &str, output_memory: &str) -> String {
+    format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"isp\"\ndriver = \"fake-counter\"\n\
-         [devices.streams.jobs]\nbuffers = 1\nbuffer_bytes = 64\njob_slots = 4\njob_bytes = 128\n\
-         [devices.streams.frames]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n\
-         memory = \"dma-buf\"\n"
-    );
+         [devices.streams.config]\nbuffers = 2\nbuffer_bytes = {CONFIG_BYTES}\n\
+         job_slots = 8\njob_bytes = 128\n\
+         [devices.streams.input]\nbuffers = {BUFFERS}\nbuffer_bytes = {INPUT_BYTES}\n{input_memory}\n\
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n\
+         {output_memory}\n"
+    )
+}
+
+fn host_with(text: &str) -> Host {
     let sim = SimBoard::new();
     let clock = sim.clock();
     Host::start_with_streams(
-        &parse(&text).unwrap(),
+        &parse(text).unwrap(),
         &[entry::<FakeCounter>()],
         Box::new(sim),
         Arc::new(clock),
@@ -133,7 +155,12 @@ fn host() -> Host {
     .unwrap()
 }
 
-// ---- The block: writes what a job says, where the job says, by device address.
+fn host() -> Host {
+    let dma = "memory = \"dma-buf\"";
+    host_with(&board(dma, dma))
+}
+
+// ---- The block: reads and writes where a job says, by device address, from the config it got.
 
 /// Memory the block can reach, by device address.
 struct Region {
@@ -142,24 +169,98 @@ struct Region {
     size: u64,
 }
 
-#[derive(Default)]
+/// What the block is working on: a job and the configuration it was posted with.
+struct Pending {
+    job: KernelJob,
+    config: usize,
+}
+
 struct Block {
-    config: Vec<u8>,
-    /// The driver's pool, then what it registered.
+    /// The pool, then what was registered; a slot let go of is `None` and is used again.
     regions: Vec<Option<Region>>,
+    pending: Vec<Pending>,
+    /// Configuration copies, made once so the block allocates nothing while running.
+    configs: Vec<Box<[u8; CONFIG_BYTES]>>,
+    next_config: usize,
     finished: Vec<Finished>,
-    /// Jobs whose output 0 address was in no memory the block was given.
+    input: Vec<u8>,
+    output: Vec<u8>,
+    parsed: Box<BeTilesConfig>,
+    /// Jobs with an image in no memory the block was given.
     lost: u32,
+    /// The configuration of each job run, by its key.
+    keys: Vec<u8>,
+}
+
+impl Default for Block {
+    fn default() -> Self {
+        Self {
+            regions: Vec::with_capacity(16),
+            pending: Vec::with_capacity(16),
+            configs: (0..16).map(|_| Box::new([0; CONFIG_BYTES])).collect(),
+            next_config: 0,
+            finished: Vec::with_capacity(16),
+            input: Vec::with_capacity(INPUT_BYTES as usize),
+            output: Vec::with_capacity(OUTPUT_BYTES as usize),
+            parsed: Box::default(),
+            lost: 0,
+            keys: Vec::with_capacity(1024),
+        }
+    }
+}
+
+/// The memory `len` bytes at `addr` are in, and where in it.
+fn region(regions: &[Option<Region>], addr: u64, len: usize) -> Option<(&File, u64)> {
+    regions.iter().flatten().find_map(|r| {
+        let end = addr.checked_add(len as u64)?;
+        (addr >= r.addr && end <= r.addr + r.size).then(|| (&r.file, addr - r.addr))
+    })
 }
 
 impl Block {
-    fn write(&self, addr: u64, data: &[u8]) -> bool {
-        self.regions.iter().flatten().any(|r| {
-            let end = addr.checked_add(data.len() as u64);
-            addr >= r.addr
-                && end.is_some_and(|end| end <= r.addr + r.size)
-                && r.file.write_all_at(data, addr - r.addr).is_ok()
-        })
+    /// Runs the oldest job, as the block would once it got to it.
+    fn run(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let Pending { job, config } = self.pending.remove(0);
+        let bytes = &self.configs[config];
+        self.parsed.read_from(&bytes[..]).unwrap();
+        let key = key_of(&self.parsed);
+        let input = &self.parsed.config.input_format;
+        let input_len = input.stride as usize * usize::from(input.height);
+        self.input.resize(input_len, 0);
+        let read = match region(&self.regions, job.addr[0], input_len) {
+            Some((file, at)) => file.read_exact_at(&mut self.input, at).is_ok(),
+            None => false,
+        };
+        let luma = (WIDTH * HEIGHT) as usize;
+        self.output.clear();
+        let input = &self.input;
+        self.output
+            .extend((0..OUTPUT_BYTES as usize).map(|at| derived(input, key, at)));
+        let wrote = read
+            && [
+                (job.addr[addr_output(0, 0)], 0..luma),
+                (job.addr[addr_output(0, 1)], luma..OUTPUT_BYTES as usize),
+            ]
+            .into_iter()
+            .all(|(addr, range)| {
+                let data = &self.output[range];
+                region(&self.regions, addr, data.len())
+                    .is_some_and(|(file, at)| file.write_all_at(data, at).is_ok())
+            });
+        if !wrote {
+            self.lost += 1;
+        }
+        self.keys.push(key);
+        self.finished.push(Finished {
+            buffer: job.buffer,
+            bytes: 4096,
+            sequence: job.identity,
+            identity: job.identity,
+            timestamp_ns: 1,
+        });
     }
 }
 
@@ -170,6 +271,10 @@ impl Hw {
     fn with<R>(&self, f: impl FnOnce(&mut Block) -> R) -> R {
         f(&mut self.0.lock().unwrap())
     }
+
+    fn registered(&self) -> usize {
+        self.with(|b| b.regions.iter().skip(1).flatten().count())
+    }
 }
 
 impl Hardware for Hw {
@@ -178,8 +283,8 @@ impl Hardware for Hw {
     }
 
     fn start(&mut self, plan: &Plan) -> Result<Placed> {
-        let pool_bytes = POOL_STRIDE * u64::from(plan.buffers);
-        assert!(u64::from(plan.output0_bytes) <= POOL_STRIDE);
+        assert_eq!(plan.tdn_bytes, None);
+        let pool_bytes = 4096 * u64::from(plan.buffers);
         let pool = sealed_memfd(c"be-pool", pool_bytes).map_err(|_| Status::IO)?;
         self.with(|b| {
             b.regions.clear();
@@ -189,32 +294,32 @@ impl Hardware for Hw {
                 size: pool_bytes,
             }));
         });
-        Ok(Placed {
-            pool: POOL,
-            pool_stride: POOL_STRIDE,
-            input: INPUT,
-            output1: None,
-            tdn: None,
-        })
+        Ok(Placed { tdn: None })
     }
 
     fn stop(&mut self) {
         self.with(|b| b.regions.clear());
     }
 
-    fn read_config(&mut self, _slot: u32, out: &mut [u8; CONFIG_BYTES]) -> Result<()> {
-        self.with(|b| out.copy_from_slice(&b.config));
-        Ok(())
-    }
-
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {
         let file = File::from(memory.try_clone_to_owned().map_err(|_| Status::IO)?);
         let size = file.metadata().map_err(|_| Status::IO)?.len();
         self.with(|b| {
-            let region = b.regions.len() as u32;
-            let addr = REGIONS + u64::from(region) * REGION_SPAN;
-            b.regions.push(Some(Region { addr, file, size }));
-            Ok(Registered { region, addr, size })
+            let free = b.regions.iter().skip(1).position(Option::is_none);
+            let region = match free {
+                Some(at) => at + 1,
+                None => {
+                    b.regions.push(None);
+                    b.regions.len() - 1
+                }
+            };
+            let addr = REGIONS + region as u64 * REGION_SPAN;
+            b.regions[region] = Some(Region { addr, file, size });
+            Ok(Registered {
+                region: region as u32,
+                addr,
+                size,
+            })
         })
     }
 
@@ -228,23 +333,14 @@ impl Hardware for Hw {
         })
     }
 
-    fn post(&mut self, job: &KernelJob) -> Result<()> {
+    fn post(&mut self, job: &KernelJob, config: &[u8; CONFIG_BYTES]) -> Result<()> {
         self.with(|b| {
-            let luma = (WIDTH * HEIGHT) as usize;
-            let image: Vec<u8> = (0..OUTPUT_BYTES as usize)
-                .map(|at| pattern(job.identity, at))
-                .collect();
-            let wrote = b.write(job.addr[addr_output(0, 0)], &image[..luma])
-                && b.write(job.addr[addr_output(0, 1)], &image[luma..]);
-            if !wrote {
-                b.lost += 1;
-            }
-            b.finished.push(Finished {
-                buffer: job.buffer,
-                bytes: OUTPUT_BYTES,
-                sequence: job.identity,
-                identity: job.identity,
-                timestamp_ns: 1,
+            let at = b.next_config;
+            b.next_config = (at + 1) % b.configs.len();
+            b.configs[at].copy_from_slice(config);
+            b.pending.push(Pending {
+                job: *job,
+                config: at,
             });
         });
         Ok(())
@@ -252,6 +348,7 @@ impl Hardware for Hw {
 
     fn next_finished(&mut self) -> Result<Option<Finished>> {
         Ok(self.with(|b| {
+            b.run();
             if b.finished.is_empty() {
                 None
             } else {
@@ -269,7 +366,8 @@ impl Hardware for Hw {
     }
 }
 
-fn config() -> Vec<u8> {
+/// A configuration for 64 by 32 RAW16 in, NV12 out, marked with `key`.
+fn config_for(key: u8) -> Vec<u8> {
     let mut input = ImageFormatConfig {
         width: WIDTH as u16,
         height: HEIGHT as u16,
@@ -277,7 +375,7 @@ fn config() -> Vec<u8> {
         ..Default::default()
     };
     compute_stride_align(&mut input, 64);
-    let cfg: BeTilesConfig = BackEnd::simple_bayer(
+    let mut cfg: BeTilesConfig = BackEnd::simple_bayer(
         input,
         Order::Bggr,
         4096,
@@ -288,6 +386,8 @@ fn config() -> Vec<u8> {
     )
     .prepare()
     .unwrap();
+    cfg.config.wbg.gain_r = u16::from(key) | 0x100;
+    assert_eq!(key_of(&cfg), key);
     let mut bytes = vec![0; CONFIG_BYTES];
     cfg.write_to(&mut bytes[..]).unwrap();
     bytes
@@ -297,9 +397,13 @@ fn driver(host: &Host, hw: &Hw) -> PispBe {
     let stream = |name| -> StreamHandle { Box::new(host.stream_producer(0, name).unwrap()) };
     let mut be = PispBe::with_hardware(
         Box::new(hw.clone()),
-        Some(stream("jobs")),
-        Some(stream("frames")),
-        Options::new(BUFFERS, 4, "cfg", ["frames", "b"]).unwrap(),
+        PispBeNeeds {
+            config: stream("config"),
+            input: stream("input"),
+            output0: stream("output0"),
+            output1: None,
+        },
+        Options::new(BUFFERS, 4).unwrap(),
     );
     CameraIsp::set_input(
         &mut be,
@@ -326,7 +430,7 @@ fn driver(host: &Host, hw: &Hw) -> PispBe {
     be
 }
 
-/// The consumer's end of a stream, as a client holds it.
+/// The client's end of a stream.
 struct Client {
     lease: Lease,
     ring: Consumer,
@@ -339,12 +443,18 @@ impl Client {
         Self { lease, ring }
     }
 
-    fn post(&mut self, identity: u64, output: u32) {
+    /// Writes `data` at the start of `buffer`, through the memory the client was given.
+    fn fill(&self, buffer: u32, data: &[u8]) {
+        let at = self.lease.layout.buffer_offset(buffer).unwrap();
+        assert!(self.lease.buffers.write(at, data));
+    }
+
+    fn post(&mut self, identity: u64, config: u32, input: u32, output: u32) {
         let job = IspJob {
             identity,
             layout: LAYOUT_BACK_END,
-            config_buffer: 0,
-            input_buffer: 0,
+            config_buffer: config,
+            input_buffer: input,
             outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
         };
         let mut buf = [0; 128];
@@ -354,7 +464,7 @@ impl Client {
         assert!(self.ring.push_job(&buf[..n]).unwrap());
     }
 
-    /// What the descriptor the consumer was handed for `buffer` holds.
+    /// What the descriptor the client was handed for `buffer` holds.
     fn read(&self, buffer: u32, bytes: u32) -> Vec<u8> {
         let handles = self.lease.handles.as_ref().expect("a stream of dma-bufs");
         let fd: BorrowedFd<'_> = handles[buffer as usize].as_fd();
@@ -365,23 +475,59 @@ impl Client {
     }
 }
 
+/// The client of all three streams.
+struct App {
+    config: Client,
+    input: Client,
+    output: Client,
+}
+
+impl App {
+    fn attach(host: &Host) -> Self {
+        Self {
+            config: Client::attach(host, "config"),
+            input: Client::attach(host, "input"),
+            output: Client::attach(host, "output0"),
+        }
+    }
+
+    /// The raw frame for `seed`, written into input buffer `buffer`.
+    fn give_input(&self, buffer: u32, seed: u64) -> Vec<u8> {
+        let frame: Vec<u8> = (0..INPUT_BYTES as usize).map(|at| raw(seed, at)).collect();
+        self.input.fill(buffer, &frame);
+        frame
+    }
+}
+
+fn expected(input: &[u8], key: u8) -> Vec<u8> {
+    (0..OUTPUT_BYTES as usize)
+        .map(|at| derived(input, key, at))
+        .collect()
+}
+
 #[test]
-fn the_consumer_reads_what_the_block_wrote_for_its_job() {
+fn the_client_reads_what_the_block_made_from_its_input_and_config() {
     let host = host();
     let hw = Hw::default();
-    hw.with(|b| b.config = config());
-    let mut frames = Client::attach(&host, "frames");
-    let mut jobs = Client::attach(&host, "jobs");
+    let mut app = App::attach(&host);
     let mut be = driver(&host, &hw);
     CameraIsp::start(&mut be).unwrap();
 
     let mut now = 1;
-    for (identity, output) in [(0x51, 2), (0x52, 0), (0x53, 3)] {
-        jobs.post(identity, output);
+    for (identity, config, input, output, key) in [
+        (0x51, 0, 1, 2, 0x11),
+        (0x52, 1, 3, 0, 0x22),
+        (0x53, 0, 0, 3, 0x33),
+        (0x54, 1, 1, 1, 0x44),
+    ] {
+        app.config.fill(config, &config_for(key));
+        let frame_in = app.give_input(input, identity);
+        app.config.post(identity, config, input, output);
         // One tick posts the job, the next finds it finished.
         now = be.tick(now).unwrap();
         now = be.tick(now).unwrap();
-        let frame = frames
+        let frame = app
+            .output
             .ring
             .pop_frame()
             .unwrap()
@@ -390,149 +536,193 @@ fn the_consumer_reads_what_the_block_wrote_for_its_job() {
             (frame.buffer, frame.identity, frame.bytes),
             (output, identity, OUTPUT_BYTES)
         );
-        let seen = frames.read(frame.buffer, frame.bytes);
-        let expected: Vec<u8> = (0..OUTPUT_BYTES as usize)
-            .map(|at| pattern(identity, at))
-            .collect();
+        let seen = app.output.read(frame.buffer, frame.bytes);
+        let want = expected(&frame_in, key);
         assert!(
-            seen == expected,
-            "frame {identity:#x} in buffer {output}: the consumer's buffer doesn't hold what the \
-             block wrote (first bytes {:?}, expected {:?})",
+            seen == want,
+            "job {identity:#x}: the client's output doesn't hold what the block made of its \
+             input {input} and config {config} (first bytes {:?}, expected {:?})",
             &seen[..8],
-            &expected[..8]
+            &want[..8]
         );
-        assert!(frames.ring.release(frame.buffer, frame.fence).unwrap());
+        assert!(app.output.ring.release(frame.buffer, frame.fence).unwrap());
         now = be.tick(now).unwrap();
     }
     assert_eq!(
         hw.with(|b| b.lost),
         0,
-        "every job's output was memory the block was given"
+        "every image was memory the block was given"
     );
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 0);
-    // Nothing the block was lent for a job is still registered once the job is done.
-    assert_eq!(hw.with(|b| b.regions.iter().skip(1).flatten().count()), 0);
-}
-
-#[test]
-fn a_job_on_a_buffer_the_consumer_holds_is_dropped() {
-    let host = host();
-    let hw = Hw::default();
-    hw.with(|b| b.config = config());
-    let mut frames = Client::attach(&host, "frames");
-    let mut jobs = Client::attach(&host, "jobs");
-    let mut be = driver(&host, &hw);
-    CameraIsp::start(&mut be).unwrap();
-    jobs.post(1, 1);
-    let mut now = be.tick(1).unwrap();
-    now = be.tick(now).unwrap();
-    let frame = frames.ring.pop_frame().unwrap().unwrap();
-    // Buffer 1 is the consumer's now: the block must not write it again.
-    jobs.post(2, 1);
-    now = be.tick(now).unwrap();
-    be.tick(now).unwrap();
-    assert!(frames.ring.pop_frame().unwrap().is_none());
-    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
-    assert_eq!(frames.read(1, OUTPUT_BYTES)[0], pattern(1, 0), "untouched");
-    assert!(frames.ring.release(frame.buffer, frame.fence).unwrap());
-}
-
-#[test]
-fn a_second_job_on_a_buffer_the_block_is_writing_is_dropped() {
-    let host = host();
-    let hw = Hw::default();
-    hw.with(|b| b.config = config());
-    let mut frames = Client::attach(&host, "frames");
-    let mut jobs = Client::attach(&host, "jobs");
-    let mut be = driver(&host, &hw);
-    CameraIsp::start(&mut be).unwrap();
-    // Both are taken in one look, while the first is still on the block.
-    jobs.post(1, 2);
-    jobs.post(2, 2);
-    let now = be.tick(1).unwrap();
-    be.tick(now).unwrap();
-    let frame = frames.ring.pop_frame().unwrap().unwrap();
-    assert_eq!((frame.buffer, frame.identity), (2, 1));
-    assert!(frames.ring.pop_frame().unwrap().is_none());
-    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
-    let expected: Vec<u8> = (0..OUTPUT_BYTES as usize)
-        .map(|at| pattern(1, at))
-        .collect();
-    assert!(
-        frames.read(2, OUTPUT_BYTES) == expected,
-        "the first job's image, whole"
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().jobs, 4);
+    assert_eq!(
+        hw.registered(),
+        0,
+        "nothing lent for a job is still registered"
     );
 }
 
 #[test]
-fn a_new_consumer_gets_frames_in_its_own_memory() {
+fn a_config_changed_after_the_driver_read_it_changes_nothing_the_block_runs() {
     let host = host();
     let hw = Hw::default();
-    hw.with(|b| b.config = config());
-    let mut jobs = Client::attach(&host, "jobs");
-    let first = Client::attach(&host, "frames");
+    let mut app = App::attach(&host);
+    let mut be = driver(&host, &hw);
+    CameraIsp::start(&mut be).unwrap();
+    let posted = config_for(0x5a);
+    app.config.fill(0, &posted);
+    let frame_in = app.give_input(2, 9);
+    app.config.post(9, 0, 2, 1);
+    let now = be.tick(1).unwrap();
+    // The driver has taken the job and the block not yet run it: the client changes its mind.
+    let mut changed = config_for(0xa5);
+    changed[200] ^= 0xff;
+    app.config.fill(0, &changed);
+    be.tick(now).unwrap();
+    assert_eq!(
+        &hw.with(|b| b.configs[0].to_vec())[..],
+        &posted[..],
+        "the module got the configuration as it was when the job was taken"
+    );
+    assert_eq!(hw.with(|b| b.keys.clone()), [0x5a]);
+    let frame = app.output.ring.pop_frame().unwrap().unwrap();
+    assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_in, 0x5a));
+}
+
+#[test]
+fn a_job_naming_an_input_buffer_the_driver_does_not_hold_is_dropped() {
+    let host = host();
+    let hw = Hw::default();
+    let mut app = App::attach(&host);
+    let mut be = driver(&host, &hw);
+    CameraIsp::start(&mut be).unwrap();
+    app.config.fill(0, &config_for(1));
+    app.give_input(1, 1);
+    // Not on the stream at all.
+    app.config.post(1, 0, BUFFERS, 0);
+    // The same input twice in one look: the second while the block has it.
+    app.config.post(2, 0, 1, 1);
+    app.config.post(3, 0, 1, 2);
+    let now = be.tick(1).unwrap();
+    be.tick(now).unwrap();
+    let frame = app.output.ring.pop_frame().unwrap().unwrap();
+    assert_eq!((frame.identity, frame.buffer), (2, 1));
+    assert!(app.output.ring.pop_frame().unwrap().is_none());
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 2);
+    assert_eq!(hw.with(|b| b.lost), 0);
+    assert_eq!(hw.registered(), 0);
+}
+
+#[test]
+fn a_new_input_client_gives_frames_from_its_own_memory() {
+    let host = host();
+    let hw = Hw::default();
+    let mut app = App::attach(&host);
     let mut be = driver(&host, &hw);
     CameraIsp::start(&mut be).unwrap();
     let mut now = be.tick(1).unwrap();
-    drop(first);
-    host.stream_detach(0, "frames", CALLER).unwrap();
-    let mut second = Client::attach(&host, "frames");
+    // The input's client goes; another takes its place. The driver still holds every input
+    // buffer from before, with nothing behind them now.
+    drop(app.input);
+    host.stream_detach(0, "input", CALLER).unwrap();
+    app.input = Client::attach(&host, "input");
+    app.config.fill(0, &config_for(3));
+    let frame_in = app.give_input(2, 77);
 
-    // The driver still holds buffer 3 from the first consumer, with nothing behind it now: the
-    // job is dropped and the buffer given up, then taken again as the second consumer's.
-    jobs.post(7, 3);
+    // Dropped, and buffer 2 given up and taken again as the new client's.
+    app.config.post(1, 0, 2, 0);
     now = be.tick(now).unwrap();
     now = be.tick(now).unwrap();
-    assert!(second.ring.pop_frame().unwrap().is_none());
-    assert_eq!(hw.with(|b| b.finished.len() + b.lost as usize), 0);
+    assert!(app.output.ring.pop_frame().unwrap().is_none());
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
 
-    jobs.post(8, 3);
+    app.config.post(2, 0, 2, 0);
     now = be.tick(now).unwrap();
     be.tick(now).unwrap();
-    let frame = second
-        .ring
-        .pop_frame()
-        .unwrap()
-        .expect("a frame for the job");
-    assert_eq!((frame.buffer, frame.identity), (3, 8));
-    let expected: Vec<u8> = (0..OUTPUT_BYTES as usize)
-        .map(|at| pattern(8, at))
-        .collect();
-    assert!(second.read(3, OUTPUT_BYTES) == expected);
+    let frame = app.output.ring.pop_frame().unwrap().expect("a frame");
+    assert_eq!(frame.identity, 2);
+    assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_in, 3));
     assert_eq!(hw.with(|b| b.lost), 0);
 }
 
 #[test]
-fn a_stream_without_handles_gets_no_job_and_no_garbage() {
-    // `frames` declared as plain shared memory: there is nothing to give the block, so the job
-    // is dropped rather than run into memory the consumer never sees.
-    let text = format!(
-        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
-         [[devices]]\nid = \"isp\"\ndriver = \"fake-counter\"\n\
-         [devices.streams.jobs]\nbuffers = 1\nbuffer_bytes = 64\njob_slots = 4\njob_bytes = 128\n\
-         [devices.streams.frames]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n"
-    );
-    let sim = SimBoard::new();
-    let clock = sim.clock();
-    let host = Host::start_with_streams(
-        &parse(&text).unwrap(),
-        &[entry::<FakeCounter>()],
-        Box::new(sim),
-        Arc::new(clock),
-        HostOptions::default(),
-        Arc::new(Handles),
-    )
-    .unwrap();
+fn a_job_on_an_output_the_client_holds_is_dropped() {
+    let host = host();
     let hw = Hw::default();
-    hw.with(|b| b.config = config());
-    let mut frames = Client::attach(&host, "frames");
-    let mut jobs = Client::attach(&host, "jobs");
+    let mut app = App::attach(&host);
     let mut be = driver(&host, &hw);
     CameraIsp::start(&mut be).unwrap();
-    jobs.post(1, 1);
-    let now = be.tick(1).unwrap();
+    app.config.fill(0, &config_for(1));
+    let first = app.give_input(0, 1);
+    app.config.post(1, 0, 0, 1);
+    let mut now = be.tick(1).unwrap();
+    now = be.tick(now).unwrap();
+    let frame = app.output.ring.pop_frame().unwrap().unwrap();
+    // Output 1 is the client's now: the block must not write it again.
+    app.give_input(0, 2);
+    app.config.post(2, 0, 0, 1);
+    now = be.tick(now).unwrap();
     be.tick(now).unwrap();
-    assert!(frames.ring.pop_frame().unwrap().is_none());
+    assert!(app.output.ring.pop_frame().unwrap().is_none());
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
-    assert_eq!(hw.with(|b| b.finished.len() + b.lost as usize), 0);
+    assert!(
+        app.output.read(1, OUTPUT_BYTES) == expected(&first, 1),
+        "untouched"
+    );
+    assert!(app.output.ring.release(frame.buffer, frame.fence).unwrap());
+}
+
+#[test]
+fn streams_without_handles_get_no_job_and_no_garbage() {
+    let dma = "memory = \"dma-buf\"";
+    for text in [board("", dma), board(dma, "")] {
+        let host = host_with(&text);
+        let hw = Hw::default();
+        let mut app = App::attach(&host);
+        let mut be = driver(&host, &hw);
+        CameraIsp::start(&mut be).unwrap();
+        app.config.fill(0, &config_for(1));
+        app.give_input(0, 1);
+        app.config.post(1, 0, 0, 1);
+        let now = be.tick(1).unwrap();
+        be.tick(now).unwrap();
+        assert!(app.output.ring.pop_frame().unwrap().is_none());
+        assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
+        assert_eq!(hw.with(|b| b.finished.len() + b.lost as usize), 0);
+        assert_eq!(hw.registered(), 0);
+    }
+}
+
+#[test]
+fn jobs_in_steady_state_allocate_nothing() {
+    let host = host();
+    let hw = Hw::default();
+    let mut app = App::attach(&host);
+    let mut be = driver(&host, &hw);
+    CameraIsp::start(&mut be).unwrap();
+    app.config.fill(0, &config_for(7));
+    app.config.fill(1, &config_for(8));
+    for input in 0..BUFFERS {
+        app.give_input(input, u64::from(input));
+    }
+    let mut now = 1;
+    let mut allocated = 0;
+    for identity in 0..64u64 {
+        let buffer = (identity % u64::from(BUFFERS)) as u32;
+        app.config.post(identity, buffer % 2, buffer, buffer);
+        for _ in 0..2 {
+            let (next, n) = allocations(|| be.tick(now));
+            now = next.unwrap();
+            // The first jobs size what the stand-in and the host keep.
+            if identity >= 8 {
+                allocated += n;
+            }
+        }
+        let frame = app.output.ring.pop_frame().unwrap().expect("a frame");
+        assert_eq!(frame.identity, identity);
+        assert!(app.output.ring.release(frame.buffer, frame.fence).unwrap());
+    }
+    assert_eq!(allocated, 0, "taking, running and publishing jobs");
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().jobs, 64);
+    assert_eq!(hw.with(|b| b.lost), 0);
 }

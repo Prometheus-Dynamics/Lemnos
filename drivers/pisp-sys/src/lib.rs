@@ -375,6 +375,18 @@ impl BeStream {
             .ok_or_else(|| io::ErrorKind::InvalidInput.into())
     }
 
+    /// The configuration slot that goes with the next job [`post`](Self::post) puts on the ring,
+    /// or `None` while the ring is full. A slot is the ring position's: the module copies it when
+    /// it takes the job from that position, so it is not written again until the ring has moved
+    /// past it, and a job waiting on the ring keeps the configuration it was posted with.
+    pub fn next_config_slot(&self) -> io::Result<Option<u32>> {
+        let tail = self.word(WORD_JOBS_TAIL)?.load(Ordering::Acquire);
+        if self.jobs_head.wrapping_sub(tail) >= self.job_slots as u64 {
+            return Ok(None);
+        }
+        Ok(u32::try_from(self.jobs_head as usize & (self.job_slots - 1)).ok())
+    }
+
     /// Posts a job. `WouldBlock` when the job ring is full.
     pub fn post(&mut self, job: &Job) -> io::Result<()> {
         let tail = self.word(WORD_JOBS_TAIL)?.load(Ordering::Acquire);
