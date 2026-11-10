@@ -11,10 +11,14 @@
 //! it, and a consumer that gets anything wrong loses the stream and nothing else.
 //!
 //! A stream's buffers can also be dma-bufs, one per buffer, for a driver whose hardware takes an
-//! image only as a kernel buffer handle. Whether they are is the [`StreamAllocator`]'s choice:
-//! it puts them in [`Backing::handles`], and the driver borrows the one behind a buffer it holds
-//! with `StreamEndpoint::buffer_handle`. The checks are the same either way, and so is the
-//! memory's life: it is made for one attachment and never reaches the next consumer.
+//! image only as a kernel buffer handle. The board file says so (`memory = "dma-buf"`), and the
+//! host then asks its [`StreamAllocator`] for them with
+//! [`allocate_handles`](StreamAllocator::allocate_handles). The allocator puts them in
+//! [`Backing::handles`], and the driver borrows the one behind a buffer it holds with
+//! `StreamEndpoint::buffer_handle`. An allocator that can't make them fails the attachment: a
+//! stream declared as dma-bufs is never quietly made of anything else. The checks are the same
+//! either way, and so is the memory's life: it is made for one attachment and never reaches the
+//! next consumer.
 
 mod endpoint;
 mod pool;
@@ -30,6 +34,7 @@ use endpoint::StreamCore;
 pub use endpoint::{BufferWriter, ProducerEndpoint};
 
 use crate::board::DeviceSpec;
+pub use crate::board::StreamMemory;
 
 /// Writes the buffers a stream hands the consumer. One per attachment.
 pub trait BufferMemory: Send + Sync {
@@ -63,7 +68,17 @@ pub struct Backing {
 /// Makes the memory behind a stream. Called once per attachment, so a consumer that goes never
 /// keeps a view of the next one's frames.
 pub trait StreamAllocator: Send + Sync {
+    /// Memory for a stream the board file leaves as shared memory.
     fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status>;
+
+    /// Memory for a stream the board file declares as dma-bufs from `heap`: the backing's
+    /// [`handles`](Backing::handles) must be `Some`, one per buffer. The status of a failure
+    /// goes to whoever asked for the stream. An allocator that has no dma-bufs to give keeps
+    /// this, which refuses.
+    fn allocate_handles(&self, name: &str, layout: &Layout, heap: &str) -> Result<Backing, Status> {
+        let _ = (name, layout, heap);
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// Heap memory, for a consumer in the same process: a host that's a library rather than a service.
@@ -199,7 +214,13 @@ impl Streams {
         if core.is_attached() {
             return Err(Status::BUSY);
         }
-        let backing = self.allocator.allocate(name, &layout)?;
+        let memory = core.memory();
+        let backing = match memory {
+            StreamMemory::Shared => self.allocator.allocate(name, &layout)?,
+            StreamMemory::DmaBuf => self
+                .allocator
+                .allocate_handles(name, &layout, core.heap())?,
+        };
         let Backing {
             ring,
             buffers,
@@ -211,6 +232,10 @@ impl Streams {
             .as_ref()
             .is_some_and(|handles| handles.len() != layout.buffers as usize)
         {
+            return Err(Status::IO);
+        }
+        // What the board file declared is what a driver was written against.
+        if memory == StreamMemory::DmaBuf && handles.is_none() {
             return Err(Status::IO);
         }
         core.attach(
@@ -241,6 +266,11 @@ impl Streams {
         for core in self.table.values() {
             let _ = lock(core).detach_if(caller);
         }
+    }
+
+    /// What the board file says the stream's buffers are.
+    pub(crate) fn memory(&self, device: u32, name: &str) -> Option<StreamMemory> {
+        self.core(device, name).map(|core| lock(core).memory())
     }
 
     pub(crate) fn stats(&self, device: u32, name: &str) -> Option<StreamStats> {

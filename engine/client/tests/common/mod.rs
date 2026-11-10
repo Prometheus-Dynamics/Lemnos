@@ -6,7 +6,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -36,6 +36,13 @@ pub struct Control {
     pub values_before_reply: AtomicU32,
     pub names: Mutex<Vec<String>>,
     pub stream: Mutex<Option<StreamScript>>,
+    /// The `features` of Welcome. 0 is a service from before any were added.
+    pub features: AtomicU64,
+    /// Answer a stream being opened with StreamHandles, not StreamReady.
+    pub answer_handles: AtomicBool,
+    /// The kind of every frame that asked for a stream, in order.
+    pub opens: Mutex<Vec<u16>>,
+    pub stream_closes: AtomicU32,
 }
 
 pub struct FakeHost {
@@ -137,6 +144,12 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
         while let Ok(Some((frame, n))) = decode(&buf[used..have]) {
             used += n;
             let send = |frame: Frame<'_>, out: &mut Vec<u8>| append(&frame, out).unwrap();
+            if matches!(
+                frame,
+                Frame::StreamOpen { .. } | Frame::StreamOpenHandles { .. }
+            ) {
+                control.opens.lock().unwrap().push(frame.kind());
+            }
             match frame {
                 Frame::Hello { version, name, .. } => {
                     control.names.lock().unwrap().push(name.to_string());
@@ -145,7 +158,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     send(
                         Frame::Welcome {
                             version: answer,
-                            features: 0,
+                            features: control.features.load(Ordering::SeqCst),
                             host: "fake",
                         },
                         &mut out,
@@ -286,41 +299,64 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     control.unsubscribed.fetch_add(1, Ordering::SeqCst);
                     send(Frame::Reply { id, bytes: &[] }, &mut out);
                 }
-                Frame::StreamOpen { id, .. } => match control.stream.lock().unwrap().take() {
-                    None => send(
-                        Frame::Refusal {
-                            id,
-                            status: -2,
-                            text: "no stream",
-                        },
-                        &mut out,
-                    ),
-                    Some(script) => {
-                        stream.write_all(&out).unwrap();
-                        out.clear();
-                        let mut ready = Vec::new();
-                        append(
-                            &Frame::StreamReady {
+                Frame::StreamClose { id, .. } => {
+                    control.stream_closes.fetch_add(1, Ordering::SeqCst);
+                    send(Frame::Reply { id, bytes: &[] }, &mut out);
+                }
+                Frame::StreamOpen { id, .. } | Frame::StreamOpenHandles { id, .. } => {
+                    match control.stream.lock().unwrap().take() {
+                        None => send(
+                            Frame::Refusal {
                                 id,
-                                buffers: script.layout.buffers,
-                                descriptors: script.claimed,
-                                buffer_bytes: script.layout.buffer_bytes,
-                                frame_slots: script.layout.frame_slots,
-                                job_slots: script.layout.job_slots,
-                                job_bytes: script.layout.job_bytes,
+                                status: -2,
+                                text: "no stream",
                             },
-                            &mut ready,
-                        )
-                        .unwrap();
-                        let borrowed: Vec<_> = script.fds.iter().map(AsFd::as_fd).collect();
-                        if borrowed.is_empty() {
-                            stream.write_all(&ready).unwrap();
-                        } else {
-                            let n = send_with_fds(stream.as_fd(), &ready, &borrowed).unwrap();
-                            assert_eq!(n, ready.len());
+                            &mut out,
+                        ),
+                        Some(script) => {
+                            stream.write_all(&out).unwrap();
+                            out.clear();
+                            let mut ready = Vec::new();
+                            let Layout {
+                                buffers,
+                                buffer_bytes,
+                                frame_slots,
+                                job_slots,
+                                job_bytes,
+                            } = script.layout;
+                            let descriptors = script.claimed;
+                            let answer = if control.answer_handles.load(Ordering::SeqCst) {
+                                Frame::StreamHandles {
+                                    id,
+                                    buffers,
+                                    descriptors,
+                                    buffer_bytes,
+                                    frame_slots,
+                                    job_slots,
+                                    job_bytes,
+                                }
+                            } else {
+                                Frame::StreamReady {
+                                    id,
+                                    buffers,
+                                    descriptors,
+                                    buffer_bytes,
+                                    frame_slots,
+                                    job_slots,
+                                    job_bytes,
+                                }
+                            };
+                            append(&answer, &mut ready).unwrap();
+                            let borrowed: Vec<_> = script.fds.iter().map(AsFd::as_fd).collect();
+                            if borrowed.is_empty() {
+                                stream.write_all(&ready).unwrap();
+                            } else {
+                                let n = send_with_fds(stream.as_fd(), &ready, &borrowed).unwrap();
+                                assert_eq!(n, ready.len());
+                            }
                         }
                     }
-                },
+                }
                 Frame::SetPower { id, .. } => {
                     control.power_calls.fetch_add(1, Ordering::SeqCst);
                     send(Frame::Reply { id, bytes: &[] }, &mut out);

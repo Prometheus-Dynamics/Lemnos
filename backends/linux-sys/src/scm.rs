@@ -8,8 +8,9 @@ use std::io;
 use std::mem::{align_of, size_of};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
-/// The most descriptors carried in one message.
-pub const MAX_FDS: usize = 16;
+/// The most descriptors carried in one message: the kernel's own limit (`SCM_MAX_FD`). A
+/// receive has room for as many, so nothing a peer may send in one message is cut off.
+pub const MAX_FDS: usize = 253;
 
 const FD_BYTES: usize = size_of::<RawFd>();
 const CONTROL_ALIGN: usize = align_of::<usize>();
@@ -205,6 +206,18 @@ mod tests {
         let many = vec![fd; MAX_FDS + 1];
         assert!(send_with_fds(fd, b"x", &many).is_err());
         assert!(send_with_fds(fd, b"", &[fd]).is_err());
+    }
+
+    #[test]
+    fn as_many_descriptors_as_one_message_holds_all_arrive() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let memory = memfd(c"scm-many").unwrap();
+        let many = vec![memory.as_fd(); MAX_FDS];
+        assert_eq!(send_with_fds(a.as_fd(), b"x", &many).unwrap(), 1);
+        let mut buf = [0u8; 4];
+        let mut fds = Vec::new();
+        assert_eq!(recv_with_fds(b.as_fd(), &mut buf, &mut fds).unwrap(), 1);
+        assert_eq!(fds.len(), MAX_FDS);
     }
 
     #[test]

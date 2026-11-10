@@ -49,6 +49,18 @@ fn exactly(fd: BorrowedFd<'_>, bytes: usize) -> io::Result<()> {
     }
 }
 
+/// The descriptor must hold at least `bytes` and never be able to hold less: it is a dma-buf,
+/// whose size is fixed, or it is sealed against shrinking.
+fn at_least(fd: BorrowedFd<'_>, bytes: usize) -> io::Result<()> {
+    let long_enough = dma_buf::size(fd)? >= bytes as u64;
+    let fixed = dma_buf::is_dma_buf(fd)? || seals(fd).is_ok_and(|seals| seals & SEAL_SHRINK != 0);
+    if long_enough && fixed {
+        Ok(())
+    } else {
+        Err(io::ErrorKind::InvalidData.into())
+    }
+}
+
 impl StreamPlatform for LinuxStreams {
     fn recv_with_descriptors(
         &self,
@@ -70,6 +82,11 @@ impl StreamPlatform for LinuxStreams {
 
     fn map_buffers(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Box<dyn ByteMemory>> {
         exactly(fd, bytes)?;
+        Ok(Box::new(SharedBuffers(Mapping::new(fd, bytes, 0, false)?)))
+    }
+
+    fn map_buffer(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Box<dyn ByteMemory>> {
+        at_least(fd, bytes)?;
         Ok(Box::new(SharedBuffers(Mapping::new(fd, bytes, 0, false)?)))
     }
 
@@ -117,6 +134,40 @@ mod tests {
         assert_eq!(ring.words().len(), 512);
         let buffers = streams.map_buffers(fd.as_fd(), 4096).unwrap();
         assert_eq!(buffers.bytes().len(), 4096);
+    }
+
+    #[test]
+    fn one_buffer_maps_when_it_is_long_enough_and_cant_shrink() {
+        let streams = LinuxStreams;
+        // A heap rounds up, so a buffer may be longer than asked.
+        let fd = sealed_memfd(c"buffer", 8192).unwrap();
+        assert_eq!(
+            streams.map_buffer(fd.as_fd(), 5000).unwrap().bytes().len(),
+            5000
+        );
+        assert_eq!(
+            streams.map_buffer(fd.as_fd(), 8192).unwrap().bytes().len(),
+            8192
+        );
+        assert!(streams.map_buffer(fd.as_fd(), 8193).is_err());
+        let unsealed = dma_buf::memfd(c"unsealed").unwrap();
+        std::fs::File::from(unsealed.try_clone().unwrap())
+            .set_len(8192)
+            .unwrap();
+        assert!(streams.map_buffer(unsealed.as_fd(), 4096).is_err());
+    }
+
+    /// Only with `LEMNOS_TEST_DMA_HEAP` naming a heap this process may open.
+    #[test]
+    fn a_real_dma_buf_maps_as_one_buffer_when_a_heap_is_named() {
+        let Some(heap) = std::env::var_os("LEMNOS_TEST_DMA_HEAP") else {
+            return;
+        };
+        let heap = std::fs::File::open(heap).unwrap();
+        let buffer = lemnos_linux_sys::dma_heap::allocate(heap.as_fd(), 5000).unwrap();
+        let mapped = LinuxStreams.map_buffer(buffer.as_fd(), 5000).unwrap();
+        assert_eq!(mapped.bytes().len(), 5000);
+        assert!(LinuxStreams.map_buffer(buffer.as_fd(), 1 << 20).is_err());
     }
 
     #[test]

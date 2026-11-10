@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::start_with;
+use common::{StandIn, start_with_buffers};
 use lemnos_client::{Session, StreamPlatform};
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_wire::{Frame, VERSION, append};
@@ -29,9 +29,11 @@ fn settle_to(expected: usize) -> usize {
 
 #[test]
 fn no_path_leaks_a_descriptor() {
-    let running = start_with(
+    let running = start_with_buffers(
         "[[devices]]\nid = \"s\"\ndriver = \"fake-counter\"\n\
-         [devices.streams.frames]\nbuffers = 4\nbuffer_bytes = 4096\n",
+         [devices.streams.frames]\nbuffers = 4\nbuffer_bytes = 4096\n\
+         [devices.streams.handles]\nbuffers = 16\nbuffer_bytes = 4096\nmemory = \"dma-buf\"\n",
+        Arc::new(StandIn::default()),
     );
     let platform: Arc<dyn StreamPlatform> = Arc::new(LinuxStreams);
 
@@ -96,4 +98,60 @@ fn no_path_leaks_a_descriptor() {
         }
     }
     assert_eq!(settle_to(baseline), baseline, "answer never read");
+
+    // The same for a stream with a descriptor per buffer: eighteen cross each time, and the
+    // service holds sixteen of them while the stream is attached.
+    for _ in 0..25 {
+        let mut session = Session::connect(&running.socket, "cycle").unwrap();
+        let stream = session
+            .open_stream(0, "handles", Arc::clone(&platform))
+            .unwrap();
+        assert!(stream.has_buffer_handles());
+        session.close_stream(stream).unwrap();
+        let held = session
+            .open_stream(0, "handles", Arc::clone(&platform))
+            .unwrap();
+        drop(held);
+        drop(session);
+        let host = running.service.as_ref().unwrap().host();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.stream_stats(0, "handles").unwrap().attached && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(settle_to(baseline), baseline, "a descriptor per buffer");
+
+    for _ in 0..25 {
+        let mut raw = UnixStream::connect(&running.socket).unwrap();
+        let mut out = Vec::new();
+        for frame in [
+            Frame::Hello {
+                version: VERSION,
+                name: "x",
+                events: false,
+            },
+            Frame::StreamOpenHandles {
+                id: 1,
+                device: 0,
+                name: "handles",
+            },
+        ] {
+            append(&frame, &mut out).unwrap();
+        }
+        std::io::Write::write_all(&mut raw, &out).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let host = running.service.as_ref().unwrap().host();
+        while !host.stream_stats(0, "handles").unwrap().attached && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(raw);
+        while host.stream_stats(0, "handles").unwrap().attached && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert_eq!(
+        settle_to(baseline),
+        baseline,
+        "a descriptor per buffer, answer never read"
+    );
 }

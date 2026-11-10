@@ -172,6 +172,25 @@ pub fn size(dmabuf: BorrowedFd<'_>) -> io::Result<u64> {
     Ok(end as u64)
 }
 
+/// The filesystem magic of a dma-buf's file (`DMA_BUF_MAGIC` in `linux/magic.h`, "DMAB").
+const DMA_BUF_MAGIC: u64 = 0x444d_4142;
+
+/// Whether `fd` is a dma-buf, by the filesystem its file is on (`fstatfs`). A dma-buf's size is
+/// fixed when it is made, so nobody holding it can make a mapping of it fault past the end.
+/// Anything else, a memfd included, answers `false`.
+pub fn is_dma_buf(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    // SAFETY: an all-zero `statfs` is a valid value; `fstatfs` fills it in.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `fstatfs` writes one `statfs` through the pointer, which is live.
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), &raw mut st) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // `f_type` is signed or unsigned, 32 or 64 bits wide, by platform and C library.
+    #[allow(clippy::unnecessary_cast, clippy::cast_sign_loss)]
+    let magic = st.f_type as u64;
+    Ok(magic == DMA_BUF_MAGIC)
+}
+
 /// The buffer's identity, its device and inode numbers (`fstat`): the same for
 /// every descriptor of one dma-buf. No duplicate is made.
 pub fn identity(dmabuf: BorrowedFd<'_>) -> io::Result<(u64, u64)> {
@@ -211,5 +230,25 @@ mod tests {
         assert_eq!(IMPORT_SYNC_FILE, 0x4008_6203);
         assert_eq!(SYNC_START | SYNC_READ, 1);
         assert_eq!(SYNC_END | SYNC_WRITE, 6);
+    }
+
+    #[test]
+    fn a_memfd_is_not_a_dma_buf() {
+        use std::os::fd::AsFd;
+        let memory = sealed_memfd(c"not-a-dma-buf", 4096).unwrap();
+        assert!(!is_dma_buf(memory.as_fd()).unwrap());
+    }
+
+    /// Only with `LEMNOS_TEST_DMA_HEAP` naming a heap this process may open.
+    #[test]
+    fn a_heap_allocation_is_a_dma_buf_when_a_heap_is_named() {
+        use std::os::fd::AsFd;
+        let Some(heap) = std::env::var_os("LEMNOS_TEST_DMA_HEAP") else {
+            return;
+        };
+        let heap = std::fs::File::open(heap).unwrap();
+        let buffer = crate::dma_heap::allocate(heap.as_fd(), 4096).unwrap();
+        assert!(is_dma_buf(buffer.as_fd()).unwrap());
+        assert!(size(buffer.as_fd()).unwrap() >= 4096);
     }
 }

@@ -15,7 +15,7 @@ use crate::Options;
 use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue, Owner};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
-    HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamStats, Streams,
+    HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
 };
 
 trait Instance: Send {
@@ -993,6 +993,14 @@ impl Host {
         name: &str,
     ) -> core::result::Result<ProducerEndpoint, Status> {
         self.inner.streams.producer(device, name)
+    }
+
+    /// What the board file says a stream's buffers are, or `None` if there's no such stream.
+    /// Whoever attaches a consumer can know before it does whether the lease will carry one
+    /// descriptor per buffer.
+    #[must_use]
+    pub fn stream_memory(&self, device: u32, name: &str) -> Option<StreamMemory> {
+        self.inner.streams.memory(device, name)
     }
 
     /// How a stream stands, or `None` if there's no such stream.
