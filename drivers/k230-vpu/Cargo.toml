@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-driver-k230-vpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 video codec block through the SDK kernel's mvx V4L2 memory-to-memory driver: a claim on a codec session, the caller's dma-bufs, bitstream and frames submitted and completed, every plane checked against the buffer the caller holds. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: the session goes through lemnos-driver-m2m-decode, and every system call through
+# lemnos-linux-sys, which holds the `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-m2m-decode = { path = "../m2m-decode" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
