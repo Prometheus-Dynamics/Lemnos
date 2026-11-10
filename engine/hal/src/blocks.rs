@@ -127,6 +127,11 @@ pub trait StreamEndpoint {
     /// Copies the consumer's next job into `out` and returns its length. What
     /// the bytes mean is between the driver and the consumer.
     fn next_job(&mut self, out: &mut [u8]) -> Result<Option<usize>, Self::Error>;
+    /// Copies `data` into `buffer` at `offset`, for a producer whose hardware doesn't fill the
+    /// buffer itself. `false` when no consumer is attached, so there was nowhere for it to land.
+    /// Refused for a buffer the producer doesn't hold (taken with `next_buffer` and not yet
+    /// published) and for a range outside the buffer. Allocates nothing.
+    fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<bool, Self::Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

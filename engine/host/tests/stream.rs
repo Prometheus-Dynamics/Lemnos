@@ -260,6 +260,48 @@ fn a_producer_cant_publish_or_write_what_it_doesnt_hold() {
     assert_eq!(writer.write(buffer, 60, &[0; 4]), Ok(true));
 }
 
+/// What a driver has: the endpoint behind the trait, with nothing of the host's own type.
+fn write_and_publish(stream: &mut dyn StreamEndpoint<Error = ErrorKind>, bytes: &[u8]) -> u32 {
+    let buffer = stream.next_buffer().unwrap().unwrap();
+    assert_eq!(stream.write(buffer, 0, bytes), Ok(true));
+    stream
+        .publish(StreamFrame {
+            buffer,
+            bytes: bytes.len() as u32,
+            sequence: 1,
+            identity: 2,
+            timestamp_ns: 3,
+        })
+        .unwrap();
+    buffer
+}
+
+#[test]
+fn a_driver_writes_a_frame_through_the_trait_and_the_consumer_reads_it() {
+    let host = start();
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    assert_eq!(
+        StreamEndpoint::write(&mut producer, 0, 0, &[1]),
+        Err(ErrorKind::InvalidInput),
+        "a buffer the producer doesn't hold"
+    );
+    let lease = host.stream_attach(0, "frames", CONSUMER).unwrap();
+    let mut consumer = consumer(&lease);
+    let sent: [u8; FRAME_BYTES] = std::array::from_fn(|i| i as u8 ^ 0x5a);
+    let buffer = write_and_publish(&mut producer, &sent);
+    let frame = consumer.pop_frame().unwrap().unwrap();
+    assert_eq!(frame.buffer, buffer);
+    let mut read = [0u8; FRAME_BYTES];
+    let offset = lease.layout.buffer_offset(frame.buffer).unwrap();
+    assert!(lease.buffers.read(offset, &mut read));
+    assert_eq!(read, sent);
+    assert_eq!(
+        StreamEndpoint::write(&mut producer, buffer, 0, &[1]),
+        Err(ErrorKind::InvalidInput),
+        "published, so no longer the producer's"
+    );
+}
+
 #[test]
 fn jobs_reach_the_producer_with_their_bytes() {
     let host = start();

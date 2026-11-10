@@ -300,6 +300,10 @@ impl StreamEndpoint for ProducerEndpoint {
     fn next_job(&mut self, out: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
         lock(&self.core).next_job(out)
     }
+
+    fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<bool, ErrorKind> {
+        lock(&self.core).write(buffer, offset, data)
+    }
 }
 
 impl Drop for ProducerEndpoint {

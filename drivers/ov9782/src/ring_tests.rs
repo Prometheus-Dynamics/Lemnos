@@ -127,6 +127,15 @@ impl StreamEndpoint for RingEnd {
     fn next_job(&mut self, out: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
         self.0.pop_job(out).map_err(|_| ErrorKind::InvalidInput)
     }
+
+    fn write(
+        &mut self,
+        _buffer: u32,
+        _offset: usize,
+        _data: &[u8],
+    ) -> core::result::Result<bool, ErrorKind> {
+        Err(ErrorKind::Unsupported)
+    }
 }
 
 /// A group the sensor would latch: the launch that closed it, and its exposure.

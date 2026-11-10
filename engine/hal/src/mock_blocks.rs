@@ -371,6 +371,9 @@ struct StreamState {
     published: VecDeque<StreamFrame>,
     returned: VecDeque<u32>,
     jobs: VecDeque<Vec<u8>>,
+    /// What each buffer holds, and whether the producer has it.
+    contents: Vec<Vec<u8>>,
+    held: Vec<bool>,
 }
 
 /// A stream with a test playing the consumer.
@@ -380,14 +383,28 @@ pub struct MockStream {
 }
 
 impl MockStream {
-    /// Starts with every buffer free.
+    /// Starts with every buffer free. The buffers hold no bytes, so nothing can be written.
     pub fn new(buffers: u32) -> Self {
+        Self::with_bytes(buffers, 0)
+    }
+
+    /// Starts with every buffer free and `buffer_bytes` long, for a producer that writes them.
+    pub fn with_bytes(buffers: u32, buffer_bytes: usize) -> Self {
         let mock = Self::default();
         with(&mock.state, |s| {
             s.buffers = buffers;
             s.returned.extend(0..buffers);
+            s.contents = vec![vec![0; buffer_bytes]; buffers as usize];
+            s.held = vec![false; buffers as usize];
         });
         mock
+    }
+
+    /// What `buffer` holds now.
+    pub fn contents(&self, buffer: u32) -> Vec<u8> {
+        with(&self.state, |s| {
+            s.contents.get(buffer as usize).cloned().unwrap_or_default()
+        })
     }
 
     pub fn take_frame(&self) -> Option<StreamFrame> {
@@ -415,13 +432,20 @@ impl StreamEndpoint for MockStream {
             if frame.buffer >= s.buffers {
                 return Err(ErrorKind::InvalidInput);
             }
+            s.held[frame.buffer as usize] = false;
             s.published.push_back(frame);
             Ok(())
         })
     }
 
     fn next_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {
-        Ok(with(&self.state, |s| s.returned.pop_front()))
+        Ok(with(&self.state, |s| {
+            let buffer = s.returned.pop_front()?;
+            if let Some(held) = s.held.get_mut(buffer as usize) {
+                *held = true;
+            }
+            Some(buffer)
+        }))
     }
 
     fn next_job(&mut self, out: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
@@ -433,6 +457,18 @@ impl StreamEndpoint for MockStream {
                 s.jobs.pop_front();
                 Ok(Some(n))
             }
+        })
+    }
+
+    fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<bool, ErrorKind> {
+        with(&self.state, |s| {
+            if s.held.get(buffer as usize) != Some(&true) {
+                return Err(ErrorKind::InvalidInput);
+            }
+            let end = offset.checked_add(data.len());
+            let range = end.and_then(|end| s.contents[buffer as usize].get_mut(offset..end));
+            range.ok_or(ErrorKind::InvalidInput)?.copy_from_slice(data);
+            Ok(true)
         })
     }
 }
@@ -831,6 +867,34 @@ mod tests {
         assert_eq!(stream.next_job(&mut job), Ok(None));
         let bad = StreamFrame { buffer: 2, ..frame };
         assert_eq!(stream.publish(bad), Err(ErrorKind::InvalidInput));
+    }
+
+    #[test]
+    fn a_stream_keeps_what_the_producer_writes_into_a_held_buffer() {
+        let mut stream = MockStream::with_bytes(2, 8);
+        let consumer = stream.clone();
+        assert_eq!(stream.write(0, 0, &[1]), Err(ErrorKind::InvalidInput));
+        let buffer = stream.next_buffer().unwrap().unwrap();
+        assert_eq!(stream.write(buffer, 6, &[7, 8]), Ok(true));
+        assert_eq!(
+            stream.write(buffer, 7, &[7, 8]),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            stream.write(buffer, usize::MAX, &[1]),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(consumer.contents(buffer), [0, 0, 0, 0, 0, 0, 7, 8]);
+        let frame = StreamFrame {
+            buffer,
+            bytes: 8,
+            sequence: 1,
+            identity: 0,
+            timestamp_ns: 0,
+        };
+        stream.publish(frame).unwrap();
+        assert_eq!(stream.write(buffer, 0, &[1]), Err(ErrorKind::InvalidInput));
+        assert_eq!(MockStream::new(1).contents(0), []);
     }
 
     fn info(address: u8) -> UsbDeviceInfo {
