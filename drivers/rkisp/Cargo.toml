@@ -1,0 +1,19 @@
+[package]
+name = "lemnos-driver-rkisp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The vendor rkisp ISP (ISP21, ISP30, ISP35): which generation a chip has, its parameter and statistics layouts as camera.isp/1 numbers them, the ISP path in its media graph, and the checks every job passes. No driver yet: see the crate documentation."
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }
+lemnos-driver-rkisp-sys = { path = "../rkisp-sys" }
+lemnos-v4l2 = { path = "../../backends/v4l2" }
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
