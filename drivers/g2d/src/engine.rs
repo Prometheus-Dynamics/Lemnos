@@ -34,6 +34,16 @@ pub trait Engine {
     fn run(&self, job: &Job<'_>) -> io::Result<()>;
 }
 
+impl<E: Engine + ?Sized> Engine for Box<E> {
+    fn version(&self) -> io::Result<HardwareVersion> {
+        (**self).version()
+    }
+
+    fn run(&self, job: &Job<'_>) -> io::Result<()> {
+        (**self).run(job)
+    }
+}
+
 impl Engine for Device {
     fn version(&self) -> io::Result<HardwareVersion> {
         Device::version(self)

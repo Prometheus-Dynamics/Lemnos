@@ -14,6 +14,9 @@
 //!   job names two of the stream's buffers; the driver borrows their handles from the stream
 //!   and builds the checked request over them. See [`convert`].
 //!
+//! - [`G2dDriver`]: the driver, providing `image.convert/1` over [`Converter`] on the device's
+//!   job stream, whose buffers must be dma-bufs (`memory = "dma-buf"`). See [`driver`].
+//!
 //! The driver carries the caller's work and never reads a pixel. Running a job allocates nothing.
 //!
 //! Not covered: mask ROPs, batched mixer tasks, LBC rotation, stride alignment (a padded row is a
@@ -31,9 +34,11 @@
 #![forbid(unsafe_code)]
 
 pub mod convert;
+pub mod driver;
 mod engine;
 
 pub use convert::Converter;
+pub use driver::{G2dDriver, G2dDriverNeeds};
 pub use engine::{Engine, G2d, RunError, State, backoff_ns, node};
 pub use lemnos_driver_g2d_sys::{
     Blend, ColorRange, DEVICE, Device, Gamut, HardwareVersion, Job, MAX_FRAME_BYTES, MAX_SIZE,

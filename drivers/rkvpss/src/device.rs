@@ -29,6 +29,20 @@ pub trait Device {
     fn release_buffers(&mut self) -> io::Result<()>;
 }
 
+impl<D: Device + ?Sized> Device for Box<D> {
+    fn select_offline(&mut self, mask: u8) -> io::Result<()> {
+        (**self).select_offline(mask)
+    }
+
+    fn run(&mut self, job: &mut Job<'_>) -> io::Result<()> {
+        (**self).run(job)
+    }
+
+    fn release_buffers(&mut self) -> io::Result<()> {
+        (**self).release_buffers()
+    }
+}
+
 impl Device for Node {
     fn select_offline(&mut self, mask: u8) -> io::Result<()> {
         Node::select_offline(self, mask)

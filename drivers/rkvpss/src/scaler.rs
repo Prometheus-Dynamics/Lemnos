@@ -151,6 +151,13 @@ impl<D: Device, F: FnMut() -> io::Result<D>> Scaler<D, F> {
         }
     }
 
+    /// Opens the node and selects the channels if it is closed and no backoff is pending, as
+    /// [`Self::run`] does first. A failure here is one of opening, never of a job: no frame was
+    /// started.
+    pub fn open(&mut self, now_ns: u64) -> Result<(), RunError> {
+        self.ready(now_ns).map(|_| ())
+    }
+
     /// Lets go of the dma-bufs the node holds attached from earlier jobs. Nothing is held while
     /// the node is closed, so then this does nothing.
     pub fn release_buffers(&mut self, now_ns: u64) -> Result<(), RunError> {
