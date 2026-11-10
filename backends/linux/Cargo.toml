@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Linux buses for Lemnos: the hardware traits over i2c-dev and spidev"
+description = "Linux buses for Lemnos: the hardware traits over i2c-dev, spidev and usbfs"
 
 [lints]
 workspace = true
@@ -15,6 +15,7 @@ workspace = true
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-linux-sys = { path = "../linux-sys" }
+lemnos-usb = { path = "../usb" }
 libc.workspace = true
 
 [dev-dependencies]

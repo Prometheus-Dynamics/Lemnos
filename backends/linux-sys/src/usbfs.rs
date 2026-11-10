@@ -1,6 +1,7 @@
 //! usbdevfs (`/dev/bus/usb/BBB/DDD`): control and bulk transfers, interface claims, alternate
-//! settings, the descriptor read and a ring of isochronous URBs. Ported from
-//! `<linux/usbdevice_fs.h>`.
+//! settings, detaching a kernel driver, the port reset, the descriptor read and a ring of
+//! isochronous URBs. Ported from `<linux/usbdevice_fs.h>`; what the kernel answers to the
+//! detach and reset requests is from `drivers/usb/core/devio.c` and `hub.c`.
 //!
 //! Every pointer the kernel is given comes from a slice or from memory this module owns, and its
 //! length from that slice or allocation: there is no call that takes an address, or a length apart
@@ -33,11 +34,22 @@ const USB: u8 = b'U';
 const CONTROL: u32 = crate::iowr::<CtrlTransfer>(USB, 0);
 const BULK: u32 = crate::iowr::<BulkTransfer>(USB, 2);
 const SETINTERFACE: u32 = crate::ior::<SetInterface>(USB, 4);
+const GETDRIVER: u32 = crate::iow::<GetDriver>(USB, 8);
 const SUBMITURB: u32 = crate::ior::<UrbHeader>(USB, 10);
 const DISCARDURB: u32 = crate::ioc(0, USB, 11, 0);
 const REAPURBNDELAY: u32 = crate::iow::<*mut c_void>(USB, 13);
 const CLAIMINTERFACE: u32 = crate::ior::<libc::c_uint>(USB, 15);
 const RELEASEINTERFACE: u32 = crate::ior::<libc::c_uint>(USB, 16);
+const IOCTL: u32 = crate::iowr::<InterfaceIoctl>(USB, 18);
+const RESET: u32 = crate::ioc(0, USB, 20, 0);
+/// Not issued on the file itself: it is the `ioctl_code` of a [`IOCTL`] on one interface.
+const DISCONNECT: u32 = crate::ioc(0, USB, 22, 0);
+
+/// `USBDEVFS_MAXDRIVERNAME + 1`.
+const DRIVER_NAME_BYTES: usize = 256;
+/// The driver name the kernel reports for an interface claimed through usbdevfs, by this file
+/// or by any other process.
+const USBFS_DRIVER: &[u8] = b"usbfs";
 
 /// `USBDEVFS_URB_TYPE_ISO`.
 const URB_TYPE_ISO: u8 = 0;
@@ -80,6 +92,23 @@ struct BulkTransfer {
 struct SetInterface {
     interface: u32,
     alternate: u32,
+}
+
+/// `struct usbdevfs_getdriver`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GetDriver {
+    interface: u32,
+    driver: [u8; DRIVER_NAME_BYTES],
+}
+
+/// `struct usbdevfs_ioctl`: a request passed on to one interface.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InterfaceIoctl {
+    ifno: i32,
+    ioctl_code: i32,
+    data: *mut c_void,
 }
 
 /// `struct usbdevfs_urb`: the header the kernel reads on submit and writes on completion. Its
@@ -176,7 +205,7 @@ impl Channel {
                 }
             },
             #[cfg(any(test, feature = "test-usbfs"))]
-            Self::Fake(fake) => Ok(fake.read_at(out, offset)),
+            Self::Fake(fake) => fake.read_at(out, offset),
         }
     }
 
@@ -364,11 +393,69 @@ impl UsbfsFile {
         Ok(())
     }
 
+    /// Unbinds the kernel driver bound to interface `number`, and returns whether there was one.
+    /// Nothing bound is `Ok(false)`, and so is an interface held through usbdevfs (the kernel
+    /// names that driver `usbfs`): that is a claim, this file's or another process's, and
+    /// disconnecting it would take the claim away. The kernel does not bind the driver again on
+    /// its own when the interface is released or the file closed.
+    ///
+    /// The kernel answers the question for an interface the device doesn't have the same way as
+    /// for one with nothing bound, so that is `Ok(false)` too.
+    pub fn detach_kernel_driver(&self, number: u8) -> io::Result<bool> {
+        let mut query = GetDriver {
+            interface: u32::from(number),
+            driver: [0; DRIVER_NAME_BYTES],
+        };
+        // SAFETY: `query` is a live `usbdevfs_getdriver` the kernel reads and fills.
+        let asked = unsafe { self.channel.ioctl_ptr(GETDRIVER, &raw mut query) };
+        if nothing_bound(asked)? || driver_name(&query.driver) == USBFS_DRIVER {
+            return Ok(false);
+        }
+        let mut arg = InterfaceIoctl {
+            ifno: i32::from(number),
+            ioctl_code: DISCONNECT as i32,
+            data: std::ptr::null_mut(),
+        };
+        // SAFETY: `arg` is a live `usbdevfs_ioctl`. Its `ioctl_code` encodes no data, so the
+        // kernel never reads through the null `data`.
+        let detached = unsafe { self.channel.ioctl_ptr(IOCTL, &raw mut arg) };
+        // The driver can let go by itself between the question and the request.
+        Ok(!nothing_bound(detached)?)
+    }
+
+    /// Resets the device at its port. `ENODEV` when the device is no longer the one this file
+    /// opened: it came back with other descriptors, so the kernel disconnected it and
+    /// enumerates it as a new device, or it had already left. Every later call on the file then
+    /// fails with `ENODEV` as well. When the device comes back unchanged, the file's claims
+    /// stand.
+    pub fn reset(&self) -> io::Result<()> {
+        self.channel.ioctl_int(RESET, 0)?;
+        Ok(())
+    }
+
     /// A ring of isochronous URBs on this file. Nothing else may submit or reap on the file while
     /// the ring exists (see [`UrbRing`]). Control and bulk calls carry on: they don't reap.
     pub fn urb_ring(&self, config: RingConfig) -> io::Result<UrbRing> {
         UrbRing::new(self.channel.duplicate()?, config)
     }
+}
+
+/// Whether the kernel said no driver is bound (`ENODATA`). Any other failure is the caller's.
+fn nothing_bound(result: io::Result<libc::c_int>) -> io::Result<bool> {
+    match result {
+        Ok(_) => Ok(false),
+        Err(error) if error.raw_os_error() == Some(libc::ENODATA) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+/// The driver name up to its terminator, or all of it when the kernel left none.
+fn driver_name(driver: &[u8; DRIVER_NAME_BYTES]) -> &[u8] {
+    let end = driver
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(driver.len());
+    &driver[..end]
 }
 
 /// The count an ioctl returned, as long as it fits the buffer it describes.

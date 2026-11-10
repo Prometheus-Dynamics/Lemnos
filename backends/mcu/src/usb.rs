@@ -337,6 +337,11 @@ pub trait HostPort: Clone {
     fn enumerate(&mut self, out: &mut [UsbDeviceInfo]) -> Result<usize, Self::Error>;
     /// Makes ready to talk to `device`, failing if it isn't plugged in.
     fn open(&mut self, device: UsbDeviceId) -> Result<(), Self::Error>;
+    /// Resets `device` at its port, with the result [`UsbDevice::reset`] defines: `Ok` when it
+    /// is still the same device, an error of kind `Unavailable` when it left or came back as a
+    /// different one (and for every call on `device` after that), any other error when the
+    /// reset was not carried out.
+    fn reset(&mut self, device: UsbDeviceId) -> Result<(), Self::Error>;
     /// A control transfer; `wLength` is `data.len()`.
     fn control_in(
         &mut self,
@@ -451,6 +456,16 @@ impl<P: HostPort> UsbDevice for HostDevice<P> {
         self.port
             .control_in(self.id, setup, out, STANDARD_TIMEOUT)
             .map_err(port_error)
+    }
+
+    /// The port's reset. Claims are kept here, so they stand when the device does.
+    fn reset(&mut self) -> Result<(), ErrorKind> {
+        self.port.reset(self.id).map_err(port_error)
+    }
+
+    /// Firmware has no drivers of its own bound to anything, so there is never one to detach.
+    fn detach_kernel_driver(&mut self, _interface: u8) -> Result<(), ErrorKind> {
+        Ok(())
     }
 
     fn claim_interface(&mut self, interface: u8) -> Result<(), ErrorKind> {

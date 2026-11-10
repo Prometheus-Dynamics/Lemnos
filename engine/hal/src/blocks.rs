@@ -202,6 +202,39 @@ pub trait UsbDevice {
     type Error: HalError;
 
     fn config_descriptor(&mut self, index: u8, out: &mut [u8]) -> Result<usize, Self::Error>;
+    /// Resets the device at its port. What the caller sees is one of three things:
+    ///
+    /// - `Ok`: the device took the reset and is still the device this handle opened, with the
+    ///   descriptors it had. The handle is good and its interface claims stand. The device is in
+    ///   its default state, so set any alternate setting again; a host may or may not put them
+    ///   back.
+    /// - An error of kind [`Unavailable`](crate::ErrorKind::Unavailable): this handle's device is
+    ///   no longer there. The reset made it leave the bus or come back as a different device
+    ///   (what a firmware load ends in), or it had already gone; a host can't always tell these
+    ///   apart, so neither can the caller. The handle is dead for good: every later call on it,
+    ///   `reset` included, fails with `Unavailable`. Drop it. Whatever the device is now is
+    ///   opened afresh.
+    /// - Any other error: the reset was not carried out. The handle is as it was and the call
+    ///   can be made again.
+    ///
+    /// Allocates nothing.
+    fn reset(&mut self) -> Result<(), Self::Error>;
+    /// Takes `interface` away from a driver of the host's own that is bound to it (a kernel
+    /// driver), so that [`claim_interface`](Self::claim_interface) no longer finds it `Busy`.
+    /// This does not claim the interface.
+    ///
+    /// `Ok` when no such driver is bound afterwards, which includes when none was bound before
+    /// and a host that has no drivers of its own. A claim held through a handle, this one or
+    /// another, is not a kernel driver and is left alone.
+    ///
+    /// Nothing puts the driver back: not [`release_interface`](Self::release_interface), not
+    /// dropping the handle. The interface stays unbound until the host binds it again, which a
+    /// reset or a replug can do, so detach again before claiming after either.
+    ///
+    /// Allocates nothing.
+    fn detach_kernel_driver(&mut self, interface: u8) -> Result<(), Self::Error>;
+    /// Claims `interface` for this handle. `Busy` when something else holds it, a driver of the
+    /// host's own included: see [`detach_kernel_driver`](Self::detach_kernel_driver).
     fn claim_interface(&mut self, interface: u8) -> Result<(), Self::Error>;
     fn release_interface(&mut self, interface: u8) -> Result<(), Self::Error>;
     fn set_alternate(&mut self, interface: u8, alternate: u8) -> Result<(), Self::Error>;

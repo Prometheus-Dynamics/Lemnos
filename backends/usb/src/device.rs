@@ -66,6 +66,24 @@ impl UsbDevice for UsbfsDevice {
         descriptors::config_descriptor(&self.file, index, out)
     }
 
+    /// The kernel's port reset. When the device comes back with the descriptors it had, the
+    /// kernel keeps this file's claims and puts the alternate settings back. When it comes back
+    /// different, or was already gone, the kernel disconnects it: this is `Unavailable`, and so
+    /// is every call after it.
+    fn reset(&mut self) -> Result<(), ErrorKind> {
+        self.file.reset().map_err(|e| kind_of(&e))
+    }
+
+    /// Unbinds the kernel driver from `interface`. An interface held through usbfs, by this
+    /// device or another process, is left as it is. The kernel does not bind the driver again
+    /// when the interface is released or this device dropped.
+    fn detach_kernel_driver(&mut self, interface: u8) -> Result<(), ErrorKind> {
+        self.file
+            .detach_kernel_driver(interface)
+            .map(drop)
+            .map_err(|e| kind_of(&e))
+    }
+
     /// Claims `interface` without unbinding a kernel driver. One that holds it makes this `Busy`.
     fn claim_interface(&mut self, interface: u8) -> Result<(), ErrorKind> {
         self.file

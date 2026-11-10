@@ -276,6 +276,8 @@ impl<T: UsbDevice<Error = ErrorKind>> UsbDevice for Faulty<T> {
     type Error = ErrorKind;
     forward! {
         config_descriptor(index: u8, out: &mut [u8]) -> usize;
+        reset() -> ();
+        detach_kernel_driver(interface: u8) -> ();
         claim_interface(interface: u8) -> ();
         release_interface(interface: u8) -> ();
         set_alternate(interface: u8, alternate: u8) -> ();

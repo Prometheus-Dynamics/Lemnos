@@ -551,6 +551,144 @@ fn interface_calls_reach_the_kernel() {
 }
 
 #[test]
+fn a_kernel_driver_is_detached_once_and_the_claim_then_succeeds() {
+    let (mut device, fake) = device();
+    fake.bind_driver(1, "uvcvideo");
+    assert_eq!(device.claim_interface(1), Err(ErrorKind::Busy));
+    assert_eq!(device.detach_kernel_driver(1), Ok(()));
+    assert_eq!(fake.driver(1), None);
+    assert_eq!(device.claim_interface(1), Ok(()));
+    // Nothing bound any more: still fine, and nothing is disconnected.
+    assert_eq!(device.detach_kernel_driver(1), Ok(()));
+    assert_eq!(device.detach_kernel_driver(7), Ok(()));
+    let disconnects = fake
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, Call::InterfaceIoctl { .. }))
+        .count();
+    assert_eq!(disconnects, 1);
+}
+
+#[test]
+fn detaching_never_takes_a_usbfs_claim_away() {
+    let (mut device, fake) = device();
+    fake.bind_driver(0, "usbfs");
+    assert_eq!(device.detach_kernel_driver(0), Ok(()));
+    assert_eq!(fake.driver(0).as_deref(), Some("usbfs"));
+}
+
+#[test]
+fn releasing_and_dropping_do_not_put_the_kernel_driver_back() {
+    let (mut device, fake) = device();
+    fake.bind_driver(2, "cdc_acm");
+    device.detach_kernel_driver(2).unwrap();
+    device.claim_interface(2).unwrap();
+    device.release_interface(2).unwrap();
+    drop(device);
+    assert_eq!(fake.driver(2), None);
+    assert_eq!(
+        fake.calls(),
+        vec![
+            Call::GetDriver(2),
+            Call::InterfaceIoctl {
+                interface: 2,
+                code: 0x5516,
+                data: 0
+            },
+            Call::Claim(2),
+            Call::Release(2),
+        ],
+        "no connect request, on release or on drop"
+    );
+}
+
+#[test]
+fn a_detach_the_kernel_refuses_says_why() {
+    let (mut device, fake) = device();
+    fake.fail_next(libc::EACCES);
+    assert_eq!(
+        device.detach_kernel_driver(0),
+        Err(ErrorKind::PermissionDenied)
+    );
+    fake.fail_next(libc::ENODEV);
+    assert_eq!(device.detach_kernel_driver(0), Err(ErrorKind::Unavailable));
+}
+
+#[test]
+fn a_reset_that_keeps_the_device_leaves_it_usable() {
+    let (mut device, fake) = device();
+    fake.set_descriptors(&blob());
+    device.claim_interface(0).unwrap();
+    assert_eq!(device.reset(), Ok(()));
+    let mut out = [0u8; 12];
+    assert_eq!(device.config_descriptor(0, &mut out), Ok(12));
+    assert_eq!(fake.calls(), vec![Call::Claim(0), Call::Reset]);
+}
+
+#[test]
+fn a_reset_that_was_not_carried_out_can_be_made_again() {
+    let (mut device, fake) = device();
+    fake.fail_next(libc::EBUSY);
+    assert_eq!(device.reset(), Err(ErrorKind::Busy));
+    fake.fail_next(libc::EACCES);
+    assert_eq!(device.reset(), Err(ErrorKind::PermissionDenied));
+    assert_eq!(device.reset(), Ok(()));
+    assert_eq!(device.claim_interface(0), Ok(()));
+}
+
+#[test]
+fn a_reset_that_re_enumerates_is_unavailable_and_so_is_every_call_after_it() {
+    let (mut device, fake) = device();
+    fake.set_descriptors(&blob());
+    fake.set_steady_reply(Reply {
+        data: vec![1, 2, 3, 4],
+        returned: None,
+    });
+    fake.set_reset_reenumerates(true);
+    let gone = Err(ErrorKind::Unavailable);
+    assert_eq!(device.reset(), Err(ErrorKind::Unavailable));
+
+    let mut data = [0u8; 12];
+    let mut packets = iso_packets([4, 5, 3]);
+    assert_eq!(device.reset(), Err(ErrorKind::Unavailable));
+    assert_eq!(device.config_descriptor(0, &mut data), gone);
+    assert_eq!(device.detach_kernel_driver(0), Err(ErrorKind::Unavailable));
+    assert_eq!(device.claim_interface(0), Err(ErrorKind::Unavailable));
+    assert_eq!(device.release_interface(0), Err(ErrorKind::Unavailable));
+    assert_eq!(device.set_alternate(0, 1), Err(ErrorKind::Unavailable));
+    assert_eq!(device.control_in(VENDOR_IN, &mut data, TIMEOUT), gone);
+    assert_eq!(device.bulk_in(0x81, &mut data, TIMEOUT), gone);
+    assert_eq!(device.bulk_out(0x01, &data, TIMEOUT), gone);
+    assert_eq!(device.interrupt_in(0x82, &mut data, TIMEOUT), gone);
+    assert_eq!(
+        device.iso_in(0x81, &mut data, &mut packets, TIMEOUT),
+        Err(ErrorKind::Unavailable)
+    );
+}
+
+/// On a regular file the kernel refuses both requests, which is a real ioctl path that can't
+/// touch a USB device.
+#[test]
+fn a_node_that_is_not_a_usb_device_refuses_reset_and_detach() {
+    let fixture = Fixture::new();
+    let mut device = open_descriptor_file(&fixture, &blob());
+    assert_eq!(device.reset(), Err(ErrorKind::Unsupported));
+    assert_eq!(device.detach_kernel_driver(0), Err(ErrorKind::Unsupported));
+}
+
+#[test]
+fn resets_and_detaches_allocate_nothing() {
+    let (mut device, fake) = device();
+    fake.stop_recording();
+    let start = ALLOCATIONS.with(Cell::get);
+    for _ in 0..1000 {
+        device.detach_kernel_driver(0).unwrap();
+        device.reset().unwrap();
+    }
+    assert_eq!(ALLOCATIONS.with(Cell::get) - start, 0);
+}
+
+#[test]
 fn errnos_become_kinds() {
     let table = [
         (libc::ENODEV, ErrorKind::Unavailable),

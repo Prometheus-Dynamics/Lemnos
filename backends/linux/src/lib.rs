@@ -1,5 +1,6 @@
 //! Linux hardware for Lemnos, by the names a board file uses: `i2c-N`, `spidevB.C`,
-//! `gpiochipN:LINE`, `pwmchipN:CHANNEL`, and a tty such as `ttyAMA0`.
+//! `gpiochipN:LINE`, `pwmchipN:CHANNEL`, a tty such as `ttyAMA0`, and a USB device by its port
+//! (`usb:1-1.4`) or its vendor and product (`usb:1a2b:3c4d`).
 
 #![cfg(target_os = "linux")]
 
@@ -11,6 +12,7 @@ mod pio_i2c;
 mod pwm;
 mod spi;
 mod uart;
+mod usb;
 
 use std::collections::BTreeSet;
 use std::io;
@@ -18,7 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lemnos_core::{
-    I2c, Line, LocalCaller, Provider, Pwm, RawSpiBus, Result, Spi, Status, Tag, Uart, status_of,
+    I2c, Line, LocalCaller, Provider, Pwm, RawSpiBus, Result, Spi, Status, Tag, Uart,
+    UsbDeviceHandle, status_of,
 };
 use lemnos_hal::ErrorKind;
 
@@ -202,6 +205,8 @@ impl Provider for LinuxBoard {
             || exists(self.pwm_node(need).map(|(path, _)| path))
             || self.module_i2c(need).is_some()
             || self.module_spi(need).is_some()
+            || usb::UsbName::parse(need)
+                .is_some_and(|name| usb::locate(&self.dev, &self.sys, name).is_ok())
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
@@ -261,6 +266,16 @@ impl Provider for LinuxBoard {
         let claim = self.claim(need)?;
         let uart = TtyUart::open_path(&path).map_err(|e| open_status(&e))?;
         Ok(Box::new(uart.holding(claim)))
+    }
+
+    /// The device is found by its name each time, so after it re-enumerates the same name, or
+    /// the one for its new vendor and product, opens what is there now. One owner at a time,
+    /// however the device was named.
+    fn usb_device(&mut self, need: &str) -> Result<UsbDeviceHandle> {
+        let name = usb::UsbName::parse(need).ok_or(Status::NOT_FOUND)?;
+        let id = usb::locate(&self.dev, &self.sys, name)?;
+        let claim = self.claim(&usb::claim_key(id))?;
+        Ok(Box::new(usb::open(&self.dev, &self.sys, id, claim)?))
     }
 }
 
@@ -382,6 +397,174 @@ mod tests {
             board.spi("spidev9.9").map(|_| ()).unwrap_err(),
             Status::NO_DEVICE
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A sysfs entry for a device, and a regular file where its node would be. No test goes
+    /// near a real one.
+    fn plug(dir: &Path, port: &str, bus: u8, address: u8, vendor: &str, product: &str) {
+        assert!(!dir.starts_with("/dev") && !dir.starts_with("/sys"));
+        let entry = dir.join("bus/usb/devices").join(port);
+        std::fs::create_dir_all(&entry).unwrap();
+        let attributes = [
+            ("busnum", bus.to_string()),
+            ("devnum", address.to_string()),
+            ("idVendor", vendor.to_string()),
+            ("idProduct", product.to_string()),
+            ("bDeviceClass", "ef".to_string()),
+            ("speed", "480".to_string()),
+        ];
+        for (name, value) in attributes {
+            std::fs::write(entry.join(name), format!("{value}\n")).unwrap();
+        }
+        let node = dir.join(format!("bus/usb/{bus:03}"));
+        std::fs::create_dir_all(&node).unwrap();
+        // A device descriptor with one configuration, then that configuration.
+        let mut descriptors = vec![18, 1, 0, 2, 0, 0, 0, 64, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1];
+        descriptors.extend_from_slice(&[9, 2, 9, 0, 1, 1, 0, 0x80, 50]);
+        std::fs::write(node.join(format!("{address:03}")), descriptors).unwrap();
+    }
+
+    #[test]
+    fn usb_names_are_a_port_or_a_vendor_and_product() {
+        use usb::UsbName;
+        assert_eq!(UsbName::parse("usb:1-1"), Some(UsbName::Port("1-1")));
+        assert_eq!(
+            UsbName::parse("usb:3-1.4.2"),
+            Some(UsbName::Port("3-1.4.2"))
+        );
+        assert_eq!(
+            UsbName::parse("usb:1A2b:00ff"),
+            Some(UsbName::Id {
+                vendor: 0x1a2b,
+                product: 0x00ff
+            })
+        );
+        let refused = [
+            "usb:",
+            "usb:1",
+            "usb:usb1",
+            "usb:1-",
+            "usb:-1",
+            "usb:1-1.",
+            "usb:1-1..2",
+            "usb:1-1:1.0",
+            "usb:1-../../x",
+            "usb:1-1/x",
+            "usb:1a2b",
+            "usb:1a2b:3c4",
+            "usb:1a2b:3c4d5",
+            "usb:+a2b:3c4d",
+            "usb:1a2b:3c4d:1",
+            "1-1",
+            "ttyUSB0",
+        ];
+        for name in refused {
+            assert_eq!(UsbName::parse(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_usb_device_is_provided_while_its_name_finds_it() {
+        let (mut board, dir) = temp_board("usb-provided");
+        assert!(!board.provided("usb:1-4"));
+        assert!(!board.provided("usb:1a2b:3c4d"));
+        assert_eq!(
+            board.usb_device("usb:1-4").map(|_| ()).unwrap_err(),
+            Status::NO_DEVICE
+        );
+        assert_eq!(
+            board.usb_device("usb:1a2b:3c4d").map(|_| ()).unwrap_err(),
+            Status::NO_DEVICE
+        );
+        assert_eq!(
+            board.usb_device("usb:bogus").map(|_| ()).unwrap_err(),
+            Status::NOT_FOUND
+        );
+        plug(&dir, "1-4", 1, 7, "1a2b", "3c4d");
+        assert!(board.provided("usb:1-4"));
+        assert!(board.provided("usb:1a2b:3c4d"));
+        assert!(!board.provided("usb:1-5"));
+        assert!(!board.provided("usb:1a2b:3c4e"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_usb_name_opens_the_node_of_the_device_it_finds() {
+        let (mut board, dir) = temp_board("usb-open");
+        plug(&dir, "1-4", 1, 7, "1a2b", "3c4d");
+        plug(&dir, "2-1.3", 2, 12, "0001", "0002");
+        for name in ["usb:1-4", "usb:1a2b:3c4d", "usb:2-1.3", "usb:0001:0002"] {
+            let mut device = board.usb_device(name).map_err(|_| ()).unwrap();
+            let mut config = [0u8; 16];
+            assert_eq!(device.config_descriptor(0, &mut config), Ok(9), "{name}");
+            // The node is a regular file, so the kernel refuses what only a USB device takes.
+            assert_eq!(device.reset(), Err(ErrorKind::Unsupported));
+            assert_eq!(device.detach_kernel_driver(0), Err(ErrorKind::Unsupported));
+            assert_eq!(device.claim_interface(0), Err(ErrorKind::Unsupported));
+        }
+        // A sysfs entry with no node behind it: the device left in between.
+        std::fs::remove_file(dir.join("bus/usb/002/012")).unwrap();
+        assert_eq!(
+            board.usb_device("usb:2-1.3").map(|_| ()).unwrap_err(),
+            Status::NO_DEVICE
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_usb_device_has_one_owner_until_it_is_dropped_however_it_is_named() {
+        let (mut board, dir) = temp_board("usb-claim");
+        plug(&dir, "1-4", 1, 7, "1a2b", "3c4d");
+        let first = board.usb_device("usb:1-4").map_err(|_| ()).unwrap();
+        for name in ["usb:1-4", "usb:1a2b:3c4d"] {
+            assert_eq!(
+                board.usb_device(name).map(|_| ()).unwrap_err(),
+                Status::BUSY
+            );
+        }
+        drop(first);
+        assert!(board.usb_device("usb:1a2b:3c4d").is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_vendor_and_product_that_fit_two_devices_name_neither() {
+        let (mut board, dir) = temp_board("usb-twins");
+        plug(&dir, "1-4", 1, 7, "1a2b", "3c4d");
+        plug(&dir, "1-5", 1, 8, "1a2b", "3c4d");
+        assert!(!board.provided("usb:1a2b:3c4d"));
+        assert_eq!(
+            board.usb_device("usb:1a2b:3c4d").map(|_| ()).unwrap_err(),
+            Status::INVALID_ARGUMENT
+        );
+        assert!(board.usb_device("usb:1-4").is_ok());
+        assert!(board.usb_device("usb:1-5").is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_device_that_re_enumerated_is_found_by_the_name_that_fits_it_now() {
+        let (mut board, dir) = temp_board("usb-again");
+        plug(&dir, "1-4", 1, 7, "1a2b", "3c4d");
+        drop(board.usb_device("usb:1a2b:3c4d").map_err(|_| ()).unwrap());
+        // The same port, a new address and a new identity, as after a firmware load.
+        std::fs::remove_dir_all(dir.join("bus/usb")).unwrap();
+        plug(&dir, "1-4", 1, 8, "5e6f", "0001");
+        assert!(!board.provided("usb:1a2b:3c4d"));
+        assert!(board.usb_device("usb:5e6f:0001").is_ok());
+        assert!(board.usb_device("usb:1-4").is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn many_usb_devices_are_all_looked_through() {
+        let (board, dir) = temp_board("usb-many");
+        for n in 1..=40u8 {
+            plug(&dir, &format!("1-{n}"), 1, n, "1a2b", &format!("{n:04x}"));
+        }
+        assert!(board.provided("usb:1a2b:0028"));
+        assert!(!board.provided("usb:1a2b:0029"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
