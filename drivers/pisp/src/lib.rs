@@ -55,6 +55,6 @@ pub mod stats;
 pub mod uapi;
 
 #[cfg(all(feature = "device", target_os = "linux"))]
-pub use be_device::PispBe;
+pub use be_device::{Options as BeOptions, PispBe};
 #[cfg(all(feature = "device", target_os = "linux"))]
 pub use fe_device::PispFe;
