@@ -12,31 +12,18 @@ use crate::be_job::KernelJob;
 /// What a stream needs set aside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
-    /// Buffers in each set.
+    /// Jobs the block may hold at once: the module's pool buffers, one per job.
     pub buffers: u32,
     /// Job and configuration slots, a power of two.
     pub job_slots: u32,
-    /// Bytes per input frame.
-    pub input_bytes: u32,
-    /// Bytes per buffer of output 0.
-    pub output0_bytes: u32,
-    /// Bytes per buffer of output 1, when it's on.
-    pub output1_bytes: Option<u32>,
     /// Bytes of each of the two temporal denoise averages, when it's on.
     pub tdn_bytes: Option<u32>,
 }
 
-/// Where the stream's memory is, as device addresses.
+/// Where the driver's own memory is, as device addresses. Images are the clients' and are
+/// registered job by job; what is left is the block's own working memory.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Placed {
-    /// Output 0's buffer 0, the pool.
-    pub pool: u64,
-    /// Bytes between output 0's buffers.
-    pub pool_stride: u64,
-    /// Input frame 0.
-    pub input: u64,
-    /// Output 1's buffer 0, when it's on.
-    pub output1: Option<u64>,
     /// The two temporal denoise averages, when it's on.
     pub tdn: Option<[u64; 2]>,
 }
@@ -44,9 +31,9 @@ pub struct Placed {
 /// A finished job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Finished {
-    /// The pool buffer.
+    /// The pool buffer the job was counted by.
     pub buffer: u32,
-    /// Bytes.
+    /// Bytes, as the module reports them; 0 when the block flagged the job as failed.
     pub bytes: u32,
     /// Counts frames from the start of the stream.
     pub sequence: u64,
@@ -76,16 +63,17 @@ pub trait Hardware: Send {
     /// Ends the stream. The module returns once the block's DMA has stopped, or keeps every
     /// buffer it could not prove idle.
     fn stop(&mut self);
-    /// Copies configuration slot `slot`.
-    fn read_config(&mut self, slot: u32, out: &mut [u8; CONFIG_BYTES]) -> Result<()>;
     /// Lets the block reach `memory`, a dma-buf, until it is unregistered or the stream ends.
     /// The module checks every range a job names against what is registered, and refuses an
     /// unregister while a job still uses it.
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered>;
     /// Lets go of what `register` gave.
     fn unregister(&mut self, region: u32) -> Result<()>;
-    /// Posts a job and has the module take it. An error ends the stream.
-    fn post(&mut self, job: &KernelJob) -> Result<()>;
+    /// Puts `config`, the driver's own checked copy of the job's configuration, in a
+    /// configuration slot, posts the job naming that slot, and has the module take it. `BUSY`
+    /// when the job ring is full: nothing was posted and the stream goes on. Any other error ends
+    /// the stream.
+    fn post(&mut self, job: &KernelJob, config: &[u8; CONFIG_BYTES]) -> Result<()>;
     /// The next finished job.
     fn next_finished(&mut self) -> Result<Option<Finished>>;
     /// Gives a finished job's buffer back.
@@ -126,6 +114,10 @@ fn status(e: &io::Error) -> Status {
 }
 
 const PAGE: u64 = 4096;
+/// Bytes of a pool buffer. The pool holds no image: a buffer is only how the module counts a job
+/// and publishes its end. The module's stream still needs a pool, at least a byte per buffer,
+/// each buffer on its own page.
+const TOKEN_BYTES: u32 = PAGE as u32;
 
 fn page_align(v: u64) -> u64 {
     v.div_ceil(PAGE) * PAGE
@@ -133,7 +125,7 @@ fn page_align(v: u64) -> u64 {
 
 struct Running {
     stream: BeStream,
-    /// Pool and registered memory, held as long as the stream is.
+    /// The pool and the temporal denoise averages, held as long as the stream is.
     _memory: Vec<OwnedFd>,
     /// What each buffer's return must carry; a job gives its buffer a new one.
     fences: Vec<u32>,
@@ -162,44 +154,29 @@ impl LinuxHardware {
         let control = Control::open("/dev/lemnos")?;
         let block = control.find_block(&self.settings.device)?;
         let heap = std::fs::File::open(format!("/dev/dma_heap/{}", self.settings.heap))?;
-        let buffers = u64::from(plan.buffers);
-        let pool_stride = page_align(u64::from(plan.output0_bytes));
-        let pool = dma_heap::allocate(heap.as_fd(), buffers * pool_stride)?;
+        let pool = dma_heap::allocate(
+            heap.as_fd(),
+            u64::from(plan.buffers) * u64::from(TOKEN_BYTES),
+        )?;
         let stream = control.create(
             block,
             &StreamParams {
                 buffers: plan.buffers,
-                buffer_bytes: plan.output0_bytes,
+                buffer_bytes: TOKEN_BYTES,
                 frame_slots: plan.buffers.next_power_of_two(),
                 job_slots: plan.job_slots,
             },
             pool.as_fd(),
         )?;
         let mut memory = vec![pool];
-        let region = |bytes: u64, memory: &mut Vec<OwnedFd>| -> io::Result<u64> {
-            let fd = dma_heap::allocate(heap.as_fd(), page_align(bytes))?;
-            let addr = stream.register(fd.as_fd())?;
-            memory.push(fd);
-            Ok(addr)
-        };
-        let input = region(buffers * u64::from(plan.input_bytes), &mut memory)?;
-        let output1 = match plan.output1_bytes {
-            Some(bytes) => Some(region(buffers * u64::from(bytes), &mut memory)?),
-            None => None,
-        };
         let tdn = match plan.tdn_bytes {
             Some(bytes) => {
-                let base = region(2 * u64::from(bytes), &mut memory)?;
+                let fd = dma_heap::allocate(heap.as_fd(), page_align(2 * u64::from(bytes)))?;
+                let base = stream.register(fd.as_fd())?;
+                memory.push(fd);
                 Some([base, base + u64::from(bytes)])
             }
             None => None,
-        };
-        let placed = Placed {
-            pool: stream.pool_addr(),
-            pool_stride,
-            input,
-            output1,
-            tdn,
         };
         self.hw_version = stream.hw_version();
         self.running = Some(Running {
@@ -207,7 +184,7 @@ impl LinuxHardware {
             _memory: memory,
             fences: vec![0; plan.buffers as usize],
         });
-        Ok(placed)
+        Ok(Placed { tdn })
     }
 
     fn running(&mut self) -> Result<&mut Running> {
@@ -231,13 +208,6 @@ impl Hardware for LinuxHardware {
         self.running = None;
     }
 
-    fn read_config(&mut self, slot: u32, out: &mut [u8; CONFIG_BYTES]) -> Result<()> {
-        self.running()?
-            .stream
-            .read_config(slot, out)
-            .map_err(|e| status(&e))
-    }
-
     fn register(&mut self, memory: BorrowedFd<'_>) -> Result<Registered> {
         let r = self
             .running()?
@@ -258,17 +228,26 @@ impl Hardware for LinuxHardware {
             .map_err(|e| status(&e))
     }
 
-    fn post(&mut self, job: &KernelJob) -> Result<()> {
+    fn post(&mut self, job: &KernelJob, config: &[u8; CONFIG_BYTES]) -> Result<()> {
         let stream = &mut self.running()?.stream;
+        let Some(slot) = stream.next_config_slot().map_err(|e| status(&e))? else {
+            return Err(Status::BUSY);
+        };
+        // Past the room check, every failure ends the stream: `BUSY` means only a full ring.
+        let ended = |e: io::Error| match status(&e) {
+            Status::BUSY => Status::IO,
+            other => other,
+        };
+        stream.write_config(slot, config).map_err(ended)?;
         stream
             .post(&Job {
                 identity: job.identity,
                 buffer: job.buffer,
-                config: job.config,
+                config: slot,
                 addr: job.addr,
             })
-            .map_err(|e| status(&e))?;
-        stream.kick().map_err(|e| status(&e))
+            .map_err(ended)?;
+        stream.kick().map_err(ended)
     }
 
     fn next_finished(&mut self) -> Result<Option<Finished>> {

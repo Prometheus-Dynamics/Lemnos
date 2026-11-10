@@ -1,31 +1,53 @@
 //! The PiSP back end as `camera.isp/1` and `isp.pisp/1`.
 //!
 //! Everything that touches the block happens in the kernel (`kernel/lemnos_pisp_be.c`): this
-//! driver sets up the memory, posts jobs on the module's ring and watches it. It does no 3A and
-//! holds no tuning. Each job's configuration is the caller's, in the layout
+//! driver hands the module the clients' memory, posts jobs on the module's ring and watches it. It
+//! does no 3A and holds no tuning. Each job's configuration is the caller's, in the layout
 //! [`LAYOUT_BACK_END`](lemnos_contract_isp_pisp::LAYOUT_BACK_END); the driver only reads it to
 //! find where each image's planes go, and the module proves the result independently.
 //!
 //! Settings come from the device's `config` in the board file:
 //!
 //! - `device`: the platform device name of the block. Required.
-//! - `heap`: the DMA heap for images, under `/dev/dma_heap`. Default `linux,cma`.
-//! - `buffers`: how many images each stream has, 2 to 32, default 4.
-//! - `job_slots`: jobs that may be queued, a power of two up to 16, default 4.
-//! - `config_stream`, `output0_stream`, `output1_stream`: stream names, for callers.
+//! - `heap`: the DMA heap for the driver's own memory, under `/dev/dma_heap`. Default
+//!   `linux,cma`.
+//! - `buffers`: jobs the block may hold at once, 2 to 32, default 4.
+//! - `job_slots`: jobs that may wait on the module's ring, a power of two up to 16, default 4.
 //!
-//! Streams: `jobs`, when the board provides it, carries [`IspJob`]s, and `frames`, when provided,
-//! receives output 0's frames. Without `frames` a finished buffer goes straight back.
+//! # Streams
 //!
-//! Output 0 is written straight into the `frames` buffer a job names, which must be declared
-//! `memory = "dma-buf"`: the driver borrows that buffer's dma-buf from the stream, registers it
-//! with the module for the one job, and points output 0's planes into it, so the block's DMA lands
-//! in the memory the consumer was handed. The module checks every plane against what is
-//! registered, as it does every other address. A job may name only a buffer the driver holds: one
-//! the consumer has never had, or has given back. A job naming any other, or on a stream whose
-//! buffers have no handles, is dropped; nothing is written where the consumer can't see it. The
-//! pool buffer of the same number is what the module counts the job by, and is given straight
-//! back when the job finishes.
+//! Named after the needs, as [`CameraIsp::config_stream`] and the others answer:
+//!
+//! - `config`: jobs ([`IspJob`]) are posted on its ring, and its buffers hold configurations,
+//!   each at least [`BeTilesConfig::SIZE`] bytes. Every buffer stays with the driver. The client
+//!   writes a configuration into one and posts a job naming it; the driver reads it **once**,
+//!   when it takes the job, into its own memory. Only that copy is checked, and only that copy
+//!   goes to the module's configuration slot, so the client changing the buffer afterwards
+//!   changes nothing the block runs. The module copies the slot again and proves it on its own.
+//! - `input`: the raw frames, `memory = "dma-buf"`. Every buffer stays with the driver too; the
+//!   client writes a frame into one and names it in a job.
+//! - `output0`, and `output1` when the board has it: the images, `memory = "dma-buf"`. A job
+//!   names a buffer the driver holds on each output its configuration turns on: one the client
+//!   has never had or has given back.
+//!
+//! For each image of a job, the driver borrows that buffer's dma-buf from its stream, registers
+//! it with the module for the one job, and points the image's planes into it, so the block reads
+//! and writes the memory the client was handed. When the job ends the driver unregisters it and
+//! publishes the outputs. A job is dropped, and nothing posted, when an image names a buffer the
+//! driver doesn't hold or one another job still has on the block, when its stream's buffers have
+//! no handles, when the client it was taken for has gone (the buffer is given up and taken again
+//! as the new client's), when the module won't register it, or when the buffer is smaller than
+//! the image the configuration describes.
+//!
+//! What a client's configuration may not name: the bytes where older layouts kept addresses
+//! (the head of `pisp_be_config`), the HOG address, the reserved tail and the bus settings are
+//! the module's, and a configuration with any of them non-zero is dropped here, as the module
+//! would refuse it. Every address the block uses comes from the driver: the client's tiles carry
+//! offsets, which the module proves against the images.
+//!
+//! The module's pool is one page per job: a pool buffer holds no image, it is only how the
+//! module counts a job and publishes its end. The two temporal denoise averages are the only
+//! image-sized memory the driver makes, because they are the block's own state between frames.
 //!
 //! Failures. A stream that faulted, a job the module refused, or a wedged block starts recovery:
 //! the next ticks stop what's left and make everything again, with the delay between attempts
@@ -65,8 +87,17 @@ const STOP: MethodId = MethodId {
     method: 11,
 };
 
-/// Buffers of a stream the driver tracks, the most `buffers` allows.
+/// The stream jobs are posted on, whose buffers hold configurations.
+pub const CONFIG_STREAM: &str = "config";
+/// The stream of raw frames a client gives the block.
+pub const INPUT_STREAM: &str = "input";
+/// Each output's stream.
+pub const OUTPUT_STREAMS: [&str; BE_NUM_OUTPUTS] = ["output0", "output1"];
+
+/// Buffers of a stream the driver tracks: a job naming a later one is dropped.
 const MAX_BUFFERS: usize = 32;
+/// Jobs the block may hold at once, the most `buffers` allows.
+const MAX_JOBS: usize = 32;
 /// A buffer's largest size (`LEMNOS_STREAM_MAX_BUFFER_BYTES`).
 const MAX_IMAGE_BYTES: u64 = 1 << 28;
 /// The input's alignment; the block needs 4, and importers like more.
@@ -82,6 +113,14 @@ const POLL_NS: u64 = 1_000_000;
 /// How often the module's state is read while running.
 const CHECK_NS: u64 = 1_000_000_000;
 
+const _: () = {
+    assert!(CONFIG_STREAM.len() <= MAX_STREAM_NAME);
+    assert!(INPUT_STREAM.len() <= MAX_STREAM_NAME);
+    assert!(OUTPUT_STREAMS[0].len() <= MAX_STREAM_NAME);
+    assert!(OUTPUT_STREAMS[1].len() <= MAX_STREAM_NAME);
+    assert!(BeTilesConfig::SIZE == CONFIG_BYTES);
+};
+
 /// The delay before recovery attempt `attempt` (from 0), doubling to the 8 s cap.
 const fn backoff_ns(attempt: u32) -> u64 {
     BACKOFF_FIRST_NS << if attempt > 5 { 5 } else { attempt }
@@ -94,83 +133,104 @@ enum State {
     Recovering { attempt: u32, due: Option<u64> },
 }
 
-/// A stream name, held by value.
-#[derive(Clone, Copy)]
-struct Name {
-    bytes: [u8; MAX_STREAM_NAME],
-    len: usize,
-}
-
-impl Name {
-    fn new(name: &str) -> Result<Self> {
-        let from = name.as_bytes();
-        if from.is_empty() || from.len() > MAX_STREAM_NAME {
-            return Err(Status::INVALID_ARGUMENT);
-        }
-        let mut bytes = [0; MAX_STREAM_NAME];
-        bytes
-            .get_mut(..from.len())
-            .ok_or(Status::INVALID_ARGUMENT)?
-            .copy_from_slice(from);
-        Ok(Self {
-            bytes,
-            len: from.len(),
-        })
-    }
-
-    fn write(&self, into: &mut [u8]) -> Result<usize> {
-        let name = self.bytes.get(..self.len).unwrap_or(&[]);
-        into.get_mut(..name.len())
-            .ok_or(Status::BUFFER_TOO_SMALL)?
-            .copy_from_slice(name);
-        Ok(name.len())
-    }
-}
-
-/// The configured stream names and sizes.
+/// How many jobs the block may hold and wait for.
 #[derive(Clone, Copy)]
 pub struct Options {
     buffers: u32,
     job_slots: u32,
-    config_stream: Name,
-    output_stream: [Name; BE_NUM_OUTPUTS],
 }
 
 impl Options {
-    /// `INVALID_ARGUMENT` for a count out of range or an empty or long name.
-    pub fn new(
-        buffers: u32,
-        job_slots: u32,
-        config_stream: &str,
-        output_stream: [&str; BE_NUM_OUTPUTS],
-    ) -> Result<Self> {
-        if !(2..=32).contains(&buffers) || !job_slots.is_power_of_two() || job_slots > 16 {
+    /// `INVALID_ARGUMENT` for a count out of range.
+    pub fn new(buffers: u32, job_slots: u32) -> Result<Self> {
+        if !(2..=MAX_JOBS as u32).contains(&buffers)
+            || !job_slots.is_power_of_two()
+            || job_slots > 16
+        {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let [zero, one] = output_stream;
-        Ok(Self {
-            buffers,
-            job_slots,
-            config_stream: Name::new(config_stream)?,
-            output_stream: [Name::new(zero)?, Name::new(one)?],
-        })
+        Ok(Self { buffers, job_slots })
     }
+}
+
+/// Which buffers of one stream the driver may name in a job.
+#[derive(Clone, Copy)]
+struct Buffers {
+    /// Taken from the stream and not given up: the driver's.
+    held: [bool; MAX_BUFFERS],
+    /// On the block for a job now.
+    busy: [bool; MAX_BUFFERS],
+}
+
+impl Buffers {
+    const NONE: Self = Self {
+        held: [false; MAX_BUFFERS],
+        busy: [false; MAX_BUFFERS],
+    };
+
+    fn free(&self, buffer: u32) -> bool {
+        let at = buffer as usize;
+        self.held.get(at) == Some(&true) && self.busy.get(at) == Some(&false)
+    }
+
+    fn set(flags: &mut [bool; MAX_BUFFERS], buffer: u32, value: bool) {
+        if let Some(flag) = flags.get_mut(buffer as usize) {
+            *flag = value;
+        }
+    }
+
+    /// Takes every buffer the stream has free: never handed out, or given back.
+    fn take(&mut self, stream: &mut StreamHandle) -> Result<()> {
+        while let Some(buffer) = stream.next_buffer().map_err(|_| Status::IO)? {
+            Self::set(&mut self.held, buffer, true);
+        }
+        Ok(())
+    }
+}
+
+/// One image of a job, on the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Lent {
+    /// Its stream's buffer.
+    buffer: u32,
+    /// What the module registered it as.
+    region: u32,
+    /// Its bytes, as the configuration lays it out.
+    bytes: u32,
+}
+
+/// A job the block has, by the pool buffer the module counts it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InFlight {
+    input: Lent,
+    outputs: [Option<Lent>; BE_NUM_OUTPUTS],
+}
+
+/// Which stream an image is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Image {
+    Input,
+    Output(usize),
 }
 
 /// The PiSP back end.
 #[driver("pisp-be", provides = [CameraIsp, IspPisp])]
 pub struct PispBe {
+    #[needs]
+    config: StreamHandle,
+    #[needs]
+    input: StreamHandle,
+    #[needs]
+    output0: StreamHandle,
     #[needs(optional)]
-    jobs: Option<StreamHandle>,
-    #[needs(optional)]
-    frames: Option<StreamHandle>,
+    output1: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
     options: Options,
-    input: Option<IspInput>,
-    /// Input bytes per frame, set with `input`.
-    input_bytes: u32,
+    raw: Option<IspInput>,
     output_bytes: [Option<u32>; BE_NUM_OUTPUTS],
     tdn_compressed: Option<bool>,
+    /// Bytes of each temporal denoise average, while it's on.
+    tdn_bytes: Option<u32>,
     state: State,
     placed: Placed,
     counters: Counters,
@@ -178,11 +238,15 @@ pub struct PispBe {
     tdn_valid: bool,
     tdn_next: usize,
     tdn_reset: bool,
-    /// The `frames` buffers the driver holds and no job is writing: what a job may name.
-    held: [bool; MAX_BUFFERS],
-    /// The `frames` buffers the block is writing, by the region they were registered as.
-    lent: [Option<u32>; MAX_BUFFERS],
-    config: Box<BeTilesConfig>,
+    /// The `config` buffers the driver holds; never lent, only read.
+    configs: Buffers,
+    inputs: Buffers,
+    outputs: [Buffers; BE_NUM_OUTPUTS],
+    /// Jobs on the block, by pool buffer.
+    jobs: [Option<InFlight>; MAX_JOBS],
+    /// The driver's copy of the job being taken, parsed.
+    parsed: Box<BeTilesConfig>,
+    /// The driver's copy of the job being taken, as read: what goes to the module.
     bytes: Box<[u8; CONFIG_BYTES]>,
 }
 
@@ -197,19 +261,10 @@ impl Lifecycle for PispBe {
             Some(v) => u32::try_from(v).map_err(|_| Status::INVALID_ARGUMENT),
             None => Ok(default),
         };
-        let options = Options::new(
-            int("buffers", 4)?,
-            int("job_slots", 4)?,
-            cfg.str("config_stream").unwrap_or("isp-config"),
-            [
-                cfg.str("output0_stream").unwrap_or("isp-output0"),
-                cfg.str("output1_stream").unwrap_or("isp-output1"),
-            ],
-        )?;
+        let options = Options::new(int("buffers", 4)?, int("job_slots", 4)?)?;
         Ok(Self::with_hardware(
             Box::new(LinuxHardware::new(settings)),
-            needs.jobs,
-            needs.frames,
+            needs,
             options,
         ))
     }
@@ -279,44 +334,75 @@ impl Lifecycle for PispBe {
 }
 
 impl PispBe {
-    /// A driver over `hw`, for a simulated board or a test.
+    /// A driver over `hw` with the streams in `needs`, for a simulated board or a test.
     #[must_use]
-    pub fn with_hardware(
-        hw: Box<dyn Hardware>,
-        jobs: Option<StreamHandle>,
-        frames: Option<StreamHandle>,
-        options: Options,
-    ) -> Self {
+    pub fn with_hardware(hw: Box<dyn Hardware>, needs: PispBeNeeds, options: Options) -> Self {
         Self {
-            jobs,
-            frames,
+            config: needs.config,
+            input: needs.input,
+            output0: needs.output0,
+            output1: needs.output1,
             hw,
             options,
-            input: None,
-            input_bytes: 0,
+            raw: None,
             output_bytes: [None; BE_NUM_OUTPUTS],
             tdn_compressed: None,
+            tdn_bytes: None,
             state: State::Stopped,
             placed: Placed::default(),
             counters: Counters::default(),
             tdn_valid: false,
             tdn_next: 0,
             tdn_reset: false,
-            held: [false; MAX_BUFFERS],
-            lent: [None; MAX_BUFFERS],
-            config: Box::default(),
+            configs: Buffers::NONE,
+            inputs: Buffers::NONE,
+            outputs: [Buffers::NONE; BE_NUM_OUTPUTS],
+            jobs: [None; MAX_JOBS],
+            parsed: Box::default(),
             bytes: Box::new([0; CONFIG_BYTES]),
         }
     }
 
+    /// An image's stream, the buffers of it the driver holds, and the block, borrowed apart.
+    fn parts(
+        &mut self,
+        image: Image,
+    ) -> (
+        Option<&mut StreamHandle>,
+        Option<&mut Buffers>,
+        &mut dyn Hardware,
+    ) {
+        let (stream, buffers) = match image {
+            Image::Input => (Some(&mut self.input), Some(&mut self.inputs)),
+            Image::Output(o) => {
+                let stream = match o {
+                    0 => Some(&mut self.output0),
+                    1 => self.output1.as_mut(),
+                    _ => None,
+                };
+                (stream, self.outputs.get_mut(o))
+            }
+        };
+        (stream, buffers, &mut *self.hw)
+    }
+
+    /// Outputs this back end has: output 1 needs its stream.
+    fn output_count(&self) -> usize {
+        if self.output1.is_some() {
+            BE_NUM_OUTPUTS
+        } else {
+            1
+        }
+    }
+
     /// Ends the module's stream. What it had registered went with it, so the buffers the block
-    /// was writing are the driver's again.
+    /// had are the driver's again.
     fn stop_block(&mut self) {
         self.hw.stop();
-        for (lent, held) in self.lent.iter_mut().zip(self.held.iter_mut()) {
-            if lent.take().is_some() {
-                *held = true;
-            }
+        self.jobs = [None; MAX_JOBS];
+        self.inputs.busy = [false; MAX_BUFFERS];
+        for o in &mut self.outputs {
+            o.busy = [false; MAX_BUFFERS];
         }
     }
 
@@ -332,8 +418,7 @@ impl PispBe {
 
     /// Makes everything from nothing.
     fn begin(&mut self) -> Result<()> {
-        let output0_bytes = self.output_bytes[0].ok_or(Status::INVALID_ARGUMENT)?;
-        let tdn_bytes = match (self.tdn_compressed, self.input) {
+        let tdn_bytes = match (self.tdn_compressed, self.raw) {
             (Some(compressed), Some(input)) => {
                 let per_pixel = if compressed { 1 } else { 2 };
                 let stride = (input.width * per_pixel + 63) & !63;
@@ -348,13 +433,11 @@ impl PispBe {
         self.stop_block();
         self.tdn_valid = false;
         self.tdn_next = 0;
+        self.tdn_bytes = tdn_bytes;
         self.take_returns()?;
         self.placed = self.hw.start(&Plan {
             buffers: self.options.buffers,
             job_slots: self.options.job_slots,
-            input_bytes: self.input_bytes,
-            output0_bytes,
-            output1_bytes: self.output_bytes[1],
             tdn_bytes,
         })?;
         Ok(())
@@ -363,210 +446,270 @@ impl PispBe {
     /// Finished frames out, returned buffers back, new jobs in. An error means the stream is over.
     fn pump(&mut self) -> Result<()> {
         while let Some(done) = self.hw.next_finished()? {
-            self.counters.jobs = self.counters.jobs.saturating_add(1);
             self.finished(&done)?;
         }
         self.take_returns()?;
         let mut encoded = [0u8; MAX_JOB_BYTES];
-        while let Some(len) = match self.jobs.as_mut() {
-            Some(jobs) => jobs.next_job(&mut encoded).map_err(|_| Status::IO)?,
-            None => None,
-        } {
+        while let Some(len) = self.config.next_job(&mut encoded).map_err(|_| Status::IO)? {
             let job = encoded
                 .get(..len)
                 .and_then(|bytes| IspJob::decode(&mut Reader::new(bytes)).ok());
-            match job {
+            let sent = match job {
                 Some(job) => self.submit(&job)?,
-                None => self.counters.dropped = self.counters.dropped.saturating_add(1),
+                None => false,
+            };
+            if !sent {
+                self.counters.dropped = self.counters.dropped.saturating_add(1);
             }
         }
         Ok(())
     }
 
-    /// Takes every `frames` buffer the stream has free: the ones never handed out, and the ones
-    /// the consumer gave back. Each is the driver's to name in a job.
+    /// Takes every buffer each stream has free.
     fn take_returns(&mut self) -> Result<()> {
-        if let Some(frames) = self.frames.as_mut() {
-            while let Some(buffer) = frames.next_buffer().map_err(|_| Status::IO)? {
-                if let Some(held) = self.held.get_mut(buffer as usize) {
-                    *held = true;
-                }
-            }
+        self.configs.take(&mut self.config)?;
+        self.inputs.take(&mut self.input)?;
+        self.outputs[0].take(&mut self.output0)?;
+        if let Some(output1) = self.output1.as_mut() {
+            self.outputs[1].take(output1)?;
         }
         Ok(())
     }
 
     fn finished(&mut self, done: &Finished) -> Result<()> {
-        let lent = self
-            .lent
+        let job = self
+            .jobs
             .get_mut(done.buffer as usize)
             .and_then(Option::take);
-        // The pool buffer only counted the job: nothing in it is anyone's.
-        let Some(region) = lent else {
+        let Some(job) = job else {
+            // Not a job of this driver's: only the pool buffer to give back.
             return self.hw.give_back(done.buffer);
         };
-        // The block is done with it: the module has released the job's hold.
-        self.hw.unregister(region)?;
+        // The block is done with them: the module has released the job's hold.
+        self.hw.unregister(job.input.region)?;
+        Buffers::set(&mut self.inputs.busy, job.input.buffer, false);
+        for lent in job.outputs.iter().flatten() {
+            self.hw.unregister(lent.region)?;
+        }
         self.hw.give_back(done.buffer)?;
-        let frame = StreamFrame {
-            buffer: done.buffer,
-            bytes: done.bytes,
-            sequence: done.sequence,
-            identity: done.identity,
-            timestamp_ns: done.timestamp_ns,
-        };
-        let published = self.frames.as_mut().map(|frames| frames.publish(frame));
-        if !matches!(published, Some(Ok(()))) {
-            self.counters.dropped = self.counters.dropped.saturating_add(1);
-            if let Some(held) = self.held.get_mut(done.buffer as usize) {
-                *held = true;
-            }
-        }
-        Ok(())
-    }
-
-    /// Sends one job, or counts it as dropped. An error means the stream is over.
-    fn submit(&mut self, job: &IspJob) -> Result<()> {
-        if let Some((kernel, region)) = self.translate(job)? {
-            if let Some(region) = region {
-                let at = kernel.buffer as usize;
-                if let (Some(lent), Some(held)) = (self.lent.get_mut(at), self.held.get_mut(at)) {
-                    *lent = Some(region);
-                    *held = false;
-                }
-            }
-            self.hw.post(&kernel)?;
-            if self.config.config.global.bayer_enables & bayer_enable::TDN_OUTPUT != 0 {
-                self.tdn_valid = true;
-                self.tdn_next = 1 - self.tdn_next;
-                self.tdn_reset = false;
-            }
+        let failed = done.bytes == 0;
+        if failed {
+            self.counters.errors = self.counters.errors.saturating_add(1);
         } else {
-            self.counters.dropped = self.counters.dropped.saturating_add(1);
+            self.counters.jobs = self.counters.jobs.saturating_add(1);
+        }
+        for (o, lent) in job.outputs.iter().enumerate() {
+            let Some(lent) = lent else { continue };
+            if let Some(buffers) = self.outputs.get_mut(o) {
+                Buffers::set(&mut buffers.busy, lent.buffer, false);
+            }
+            if failed {
+                // The driver keeps it: nothing in it is the job's image.
+                continue;
+            }
+            let frame = StreamFrame {
+                buffer: lent.buffer,
+                bytes: lent.bytes,
+                sequence: done.sequence,
+                identity: done.identity,
+                timestamp_ns: done.timestamp_ns,
+            };
+            let (stream, buffers, _) = self.parts(Image::Output(o));
+            let published = stream.map(|stream| stream.publish(frame));
+            if matches!(published, Some(Ok(()))) {
+                if let Some(buffers) = buffers {
+                    Buffers::set(&mut buffers.held, lent.buffer, false);
+                }
+            } else {
+                self.counters.dropped = self.counters.dropped.saturating_add(1);
+            }
         }
         Ok(())
     }
 
-    /// `None` for a job that can't be sent: a caller's mistake, not the stream's end. With a
-    /// `frames` stream, the region its output 0 buffer was registered as comes with it.
-    fn translate(&mut self, job: &IspJob) -> Result<Option<(KernelJob, Option<u32>)>> {
-        let buffers = self.options.buffers;
-        let extra = |index: usize| job.outputs.get(index).copied().unwrap_or(NO_BUFFER);
-        let output0 = extra(0);
-        let output1 = extra(1);
+    /// Sends one job. `false` for a job that can't be sent, a caller's mistake or no room; an
+    /// error means the stream is over.
+    fn submit(&mut self, job: &IspJob) -> Result<bool> {
+        let named = |index: usize| job.outputs.get(index).copied().unwrap_or(NO_BUFFER);
         if job.layout != LAYOUT_BACK_END
-            || job.config_buffer >= self.options.job_slots
-            || job.input_buffer >= buffers
-            || output0 >= buffers
-            || (output1 != NO_BUFFER && output1 >= buffers)
-            || (2..MAX_OUTPUTS).any(|i| extra(i) != NO_BUFFER)
+            || !self.configs.free(job.config_buffer)
+            || !self.inputs.free(job.input_buffer)
+            || (BE_NUM_OUTPUTS..MAX_OUTPUTS).any(|i| named(i) != NO_BUFFER)
         {
-            return Ok(None);
+            return Ok(false);
         }
-        if self.frames.is_some() && !self.held.get(output0 as usize).copied().unwrap_or(false) {
-            // Not the driver's to give: the consumer has it, or the block is writing it.
-            return Ok(None);
+        for o in 0..BE_NUM_OUTPUTS {
+            let buffer = named(o);
+            if buffer == NO_BUFFER {
+                continue;
+            }
+            let on = self.output_bytes.get(o).copied().flatten().is_some();
+            if !on || !self.outputs.get(o).is_some_and(|b| b.free(buffer)) {
+                // An output that's off, or a buffer the client has or the block is writing.
+                return Ok(false);
+            }
         }
-        self.hw.read_config(job.config_buffer, &mut self.bytes)?;
-        if self.config.read_from(&self.bytes[..]).is_err() || be_job::check(&self.config).is_err() {
-            return Ok(None);
-        }
-        let bayer = self.config.config.global.bayer_enables;
-        let tdn = self.placed.tdn;
-        let reads_average = bayer & bayer_enable::TDN_INPUT != 0;
-        if reads_average && (!self.tdn_valid || self.tdn_reset) {
-            return Ok(None);
-        }
-        let average = |index: usize| tdn.and_then(|t| t.get(index).copied());
-        let mut memory = JobMemory {
-            input: self
-                .placed
-                .input
-                .saturating_add(u64::from(job.input_buffer) * u64::from(self.input_bytes)),
-            ..Default::default()
+        let Some(token) = (0..self.options.buffers as usize)
+            .find(|&at| self.jobs.get(at).is_some_and(Option::is_none))
+        else {
+            return Ok(false);
         };
+        // The one read of the client's buffer. Everything after uses the copy.
+        match self.config.read(job.config_buffer, 0, &mut self.bytes[..]) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return Ok(false),
+        }
+        if self.parsed.read_from(&self.bytes[..]).is_err() || be_job::check(&self.parsed).is_err() {
+            return Ok(false);
+        }
+        let c = &self.parsed.config;
+        let bayer = c.global.bayer_enables;
+        let reads_average = bayer & bayer_enable::TDN_INPUT != 0;
+        let writes_average = bayer & bayer_enable::TDN_OUTPUT != 0;
+        if reads_average && (!self.tdn_valid || self.tdn_reset) {
+            return Ok(false);
+        }
+        // The averages are the driver's memory: an image larger than they are is refused here
+        // rather than by the module, which would end the stream.
+        let average_fits = |on: bool, image: &ImageFormatConfig| {
+            !on || be_job::image_bytes(image)
+                .is_some_and(|b| b <= u64::from(self.tdn_bytes.unwrap_or(0)))
+        };
+        if !average_fits(reads_average, &c.tdn_input_format)
+            || !average_fits(writes_average, &c.tdn_output_format)
+        {
+            return Ok(false);
+        }
+        let input_bytes = be_job::image_bytes(&c.input_format);
+        let output_bytes = c.output_format.map(|o| be_job::image_bytes(&o.image));
+        let average = |index: usize| self.placed.tdn.and_then(|t| t.get(index).copied());
+        let mut memory = JobMemory::default();
         if reads_average {
             memory.tdn_input = average(1 - self.tdn_next);
         }
-        if bayer & bayer_enable::TDN_OUTPUT != 0 {
+        if writes_average {
             memory.tdn_output = average(self.tdn_next);
         }
-        let region = match self.lend(output0)? {
-            Lend::Pool => {
-                memory.output[0] = Some(
-                    self.placed
-                        .pool
-                        .saturating_add(u64::from(output0) * self.placed.pool_stride),
-                );
-                None
-            }
-            Lend::Registered(r) => {
-                memory.output[0] = Some(r.addr);
-                Some(r.region)
-            }
-            Lend::Nothing => return Ok(None),
+
+        let Some(input) = self.lend(Image::Input, job.input_buffer, input_bytes)? else {
+            return Ok(false);
         };
-        if output1 != NO_BUFFER {
-            let bytes = u64::from(self.output_bytes[1].unwrap_or(0));
-            memory.output[1] = self
-                .placed
-                .output1
-                .map(|base| base.saturating_add(u64::from(output1) * bytes));
+        memory.input = input.0;
+        let mut flight = InFlight {
+            input: input.1,
+            outputs: [None; BE_NUM_OUTPUTS],
+        };
+        for (o, bytes) in output_bytes.into_iter().enumerate() {
+            let buffer = named(o);
+            if buffer == NO_BUFFER {
+                continue;
+            }
+            match self.lend(Image::Output(o), buffer, bytes)? {
+                Some((addr, lent)) => {
+                    memory.output[o] = Some(addr);
+                    flight.outputs[o] = Some(lent);
+                }
+                None => {
+                    self.release(&flight)?;
+                    return Ok(false);
+                }
+            }
         }
-        let Ok(addr) = be_job::addresses(&self.config.config, &memory) else {
-            if let Some(region) = region {
-                self.hw.unregister(region)?;
-            }
-            return Ok(None);
+        let Ok(addr) = be_job::addresses(&self.parsed.config, &memory) else {
+            self.release(&flight)?;
+            return Ok(false);
         };
-        Ok(Some((
-            KernelJob {
-                identity: job.identity,
-                buffer: output0,
-                config: job.config_buffer,
-                addr,
-            },
-            region,
-        )))
+        let kernel = KernelJob {
+            identity: job.identity,
+            buffer: token as u32,
+            config: 0,
+            addr,
+        };
+        match self.hw.post(&kernel, &self.bytes) {
+            Ok(()) => {}
+            Err(Status::BUSY) => {
+                self.release(&flight)?;
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        }
+        Buffers::set(&mut self.inputs.busy, flight.input.buffer, true);
+        for (o, lent) in flight.outputs.iter().enumerate() {
+            if let (Some(lent), Some(buffers)) = (lent, self.outputs.get_mut(o)) {
+                Buffers::set(&mut buffers.busy, lent.buffer, true);
+            }
+        }
+        if let Some(slot) = self.jobs.get_mut(token) {
+            *slot = Some(flight);
+        }
+        if writes_average {
+            self.tdn_valid = true;
+            self.tdn_next = 1 - self.tdn_next;
+            self.tdn_reset = false;
+        }
+        Ok(true)
     }
 
-    /// Where output 0 of a job on `buffer` goes: the pool when there is no `frames` stream, and
-    /// otherwise that buffer's own dma-buf, registered for the job. The driver holds `buffer`.
-    fn lend(&mut self, buffer: u32) -> Result<Lend> {
-        let Some(frames) = self.frames.as_mut() else {
-            return Ok(Lend::Pool);
+    /// Lets go of what a job that won't be sent had registered.
+    fn release(&mut self, flight: &InFlight) -> Result<()> {
+        self.hw.unregister(flight.input.region)?;
+        for lent in flight.outputs.iter().flatten() {
+            self.hw.unregister(lent.region)?;
+        }
+        Ok(())
+    }
+
+    /// Registers `buffer` of `image`'s stream for one job, when it can hold `bytes`: its device
+    /// address and what to let go of afterwards. `None` drops the job; the driver holds `buffer`
+    /// and no job has it.
+    fn lend(
+        &mut self,
+        image: Image,
+        buffer: u32,
+        bytes: Option<u64>,
+    ) -> Result<Option<(u64, Lent)>> {
+        let Some(need) = bytes.filter(|&b| b > 0 && b <= MAX_IMAGE_BYTES) else {
+            return Ok(None);
         };
-        let need = u64::from(self.output_bytes[0].unwrap_or(u32::MAX));
-        let registered = match frames.buffer_handle(buffer) {
-            Ok(Some(handle)) => self.hw.register(handle.fd()),
+        let (Some(stream), Some(buffers), hw) = self.parts(image) else {
+            return Ok(None);
+        };
+        let registered = match stream.buffer_handle(buffer) {
+            Ok(Some(handle)) => hw.register(handle.fd()),
             Ok(None) => {
-                // The consumer it was taken for has gone. Publishing it reaches no one and gives
-                // it up; the stream's free buffers, the new consumer's, come with the next look.
-                if let Some(held) = self.held.get_mut(buffer as usize) {
-                    *held = false;
-                }
-                let _ = frames.publish(StreamFrame {
+                // The client it was taken for has gone. Publishing it reaches no one and gives
+                // it up; the stream's free buffers, the new client's, come with the next look.
+                let _ = stream.publish(StreamFrame {
                     buffer,
                     bytes: 0,
                     sequence: 0,
                     identity: 0,
                     timestamp_ns: 0,
                 });
-                return Ok(Lend::Nothing);
+                Buffers::set(&mut buffers.held, buffer, false);
+                return Ok(None);
             }
-            // Buffers without handles: nothing the block can write reaches the consumer.
-            Err(_) => return Ok(Lend::Nothing),
+            // Buffers without handles: nothing the block touches reaches the client.
+            Err(_) => return Ok(None),
         };
         // Full of registrations, or a buffer the module won't take: this job only.
-        let Ok(r) = registered else {
-            return Ok(Lend::Nothing);
+        let Ok(Registered { region, addr, size }) = registered else {
+            return Ok(None);
         };
         // The real size, not the stream's: the image must fit in what the block was given.
-        if r.size < need {
-            self.hw.unregister(r.region)?;
-            return Ok(Lend::Nothing);
+        if size < need {
+            self.hw.unregister(region)?;
+            return Ok(None);
         }
-        Ok(Lend::Registered(r))
+        let bytes = u32::try_from(need).map_err(|_| Status::INVALID_ARGUMENT)?;
+        Ok(Some((
+            addr,
+            Lent {
+                buffer,
+                region,
+                bytes,
+            },
+        )))
     }
 
     fn stopped(&self) -> Result<()> {
@@ -578,14 +721,13 @@ impl PispBe {
     }
 }
 
-/// Where a job's output 0 goes.
-enum Lend {
-    /// The module's pool: there is no `frames` stream.
-    Pool,
-    /// The `frames` buffer's dma-buf, registered for the job.
-    Registered(Registered),
-    /// Nowhere the consumer would see: the job is dropped.
-    Nothing,
+/// Writes a stream name into `into`.
+fn name(name: &str, into: &mut [u8]) -> Result<usize> {
+    let bytes = name.as_bytes();
+    into.get_mut(..bytes.len())
+        .ok_or(Status::BUFFER_TOO_SMALL)?
+        .copy_from_slice(bytes);
+    Ok(bytes.len())
 }
 
 /// The block's pixel format for a four-character code.
@@ -612,7 +754,7 @@ fn dimension(v: u32) -> Result<u16> {
 impl CameraIsp for PispBe {
     fn info(&mut self) -> Result<IspInfo> {
         Ok(IspInfo {
-            max_outputs: BE_NUM_OUTPUTS as u8,
+            max_outputs: self.output_count() as u8,
             max_width: MAX_DIMENSION,
             max_height: MAX_DIMENSION,
             config_layouts: 1,
@@ -644,16 +786,15 @@ impl CameraIsp for PispBe {
             ..Default::default()
         };
         compute_stride_align(&mut image, INPUT_ALIGN);
-        let bytes = be_job::image_bytes(&image)
+        be_job::image_bytes(&image)
             .filter(|&b| b <= MAX_IMAGE_BYTES)
             .ok_or(Status::INVALID_ARGUMENT)?;
-        self.input_bytes = u32::try_from(bytes).map_err(|_| Status::INVALID_ARGUMENT)?;
-        self.input = Some(input);
+        self.raw = Some(input);
         Ok(())
     }
 
     fn set_output(&mut self, output: u8, image: IspOutput) -> Result<OutputLayout> {
-        if usize::from(output) >= BE_NUM_OUTPUTS {
+        if usize::from(output) >= self.output_count() {
             return Err(Status::NOT_FOUND);
         }
         self.stopped()?;
@@ -678,7 +819,7 @@ impl CameraIsp for PispBe {
     }
 
     fn clear_output(&mut self, output: u8) -> Result<()> {
-        if usize::from(output) >= BE_NUM_OUTPUTS {
+        if usize::from(output) >= self.output_count() {
             return Err(Status::NOT_FOUND);
         }
         self.stopped()?;
@@ -690,7 +831,7 @@ impl CameraIsp for PispBe {
     }
 
     fn config_stream(&mut self, into: &mut [u8]) -> Result<usize> {
-        self.options.config_stream.write(into)
+        name(CONFIG_STREAM, into)
     }
 
     fn statistics_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
@@ -698,21 +839,20 @@ impl CameraIsp for PispBe {
         Err(Status::NOT_SUPPORTED)
     }
 
-    fn input_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
-        // The input is memory this driver makes; no stream hands it over yet.
-        Err(Status::NOT_SUPPORTED)
+    fn input_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        name(INPUT_STREAM, into)
     }
 
     fn output_stream(&mut self, output: u8, into: &mut [u8]) -> Result<usize> {
-        self.options
-            .output_stream
-            .get(usize::from(output))
-            .ok_or(Status::NOT_FOUND)?
-            .write(into)
+        let o = usize::from(output);
+        if o >= self.output_count() {
+            return Err(Status::NOT_FOUND);
+        }
+        name(OUTPUT_STREAMS.get(o).ok_or(Status::NOT_FOUND)?, into)
     }
 
     fn start(&mut self) -> Result<()> {
-        if self.input.is_none() || self.output_bytes[0].is_none() {
+        if self.raw.is_none() || self.output_bytes.iter().all(Option::is_none) {
             return Err(Status::INVALID_ARGUMENT);
         }
         self.stopped()?;

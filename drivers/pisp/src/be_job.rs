@@ -71,9 +71,10 @@ pub struct JobMemory {
 pub struct KernelJob {
     /// Carried to the frame.
     pub identity: u64,
-    /// The pool buffer the frame fills.
+    /// The pool buffer the module counts the job by.
     pub buffer: u32,
-    /// The configuration slot.
+    /// The configuration slot. The driver leaves it to the layer that writes the slot, which
+    /// picks the one that goes with the job's place on the ring.
     pub config: u32,
     /// Device addresses by slot; zero where the job has no such image.
     pub addr: [u64; JOB_ADDRS],
