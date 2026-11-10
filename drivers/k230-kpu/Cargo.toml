@@ -1,0 +1,18 @@
+[package]
+name = "lemnos-driver-k230-kpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The K230 KPU behind the kernel's k230-gnne node: its kernel interface's layouts and numbers pinned against the C compiler, checked builders for the memory-zone requests, and the confinement check that refuses runs while the block reaches physical memory unchecked. The caller's program is carried, never read"
+
+[lints]
+workspace = true
+
+# No `unsafe` here and no device access of its own: the node is reached through the `Device` trait.
+[dependencies]
+lemnos-contract-npu = { path = "../../contracts/npu" }
+lemnos-core = { path = "../../engine/core" }
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
