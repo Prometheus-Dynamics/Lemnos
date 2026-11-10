@@ -10,13 +10,20 @@
 //!   failure closes the node and backs off (250 ms doubling to an 8 s cap, cleared by a job that
 //!   runs); it never gives up and never turns itself off.
 //! - [`find`]: the node's path, by its name in sysfs.
+//! - [`Jobs`]: `image.scaler/1` jobs from a stream of dma-bufs, run on one channel, with the
+//!   outputs of a frame that failed while the block may still write them held back until the
+//!   block is seen to finish another. See [`jobs`].
+//! - [`Rkvpss`]: the driver, providing `image.scaler/1` over [`Jobs`] on the device's job
+//!   stream, whose buffers must be dma-bufs (`memory = "dma-buf"`). See [`driver`].
 //!
 //! The device side lives in `lemnos-driver-rkvpss-sys`, which holds all the `unsafe`; this crate
 //! has none. A job run on an open node allocates nothing.
 //!
 //! Left out: tiled and compressed (FBC) formats, privacy masks, background fill, the encoder ring,
 //! mirroring, quarter turns, the average scaler, and the driver's two-pass path for images wider
-//! than 4096.
+//! than 4096. The driver serves `image.scaler/1`, one input and one output a job, on the one
+//! channel the board file gives it; several outputs of one frame are only reachable through
+//! [`Job`] directly.
 //!
 //! Hardware status: untested on board. Written from the vendor driver's source; the check is
 //! `testing/board-runs/E7.md`.
@@ -27,12 +34,16 @@
 #![forbid(unsafe_code)]
 
 mod device;
+pub mod driver;
+pub mod jobs;
 mod scaler;
 
 #[cfg(test)]
 mod tests;
 
 pub use device::{Device, find};
+pub use driver::{Rkvpss, RkvpssNeeds};
+pub use jobs::Jobs;
 pub use lemnos_driver_rkvpss_sys::{
     CHANNELS, Channel, Crop, Job, MAX_HEIGHT, MAX_RATIO, MAX_SCALED_HEIGHT, MAX_SCALED_WIDTH,
     MAX_STRIDE, MAX_WIDTH, MIN_SIZE, Node, OUTPUT_STRIDE_ALIGN, Output, PixelFormat, Surface,

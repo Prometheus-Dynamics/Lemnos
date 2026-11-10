@@ -13,7 +13,18 @@ workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-driver-rkvpss-sys = { path = "../rkvpss-sys" }
 libc.workspace = true
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-image-scaler = { path = "../../contracts/image-scaler" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+
+[package.metadata.lemnos]
+driver = "Rkvpss"

@@ -24,3 +24,6 @@ lemnos-wire = { path = "../../engine/wire" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "G2dDriver"
