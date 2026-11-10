@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use lemnos_core::ErrorKind;
 use lemnos_hal::blocks::{
-    Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt, InterruptEvent, IsoPacket, Registers,
-    Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice, UsbFunction, UsbFunctionEvent,
+    BufferHandle, Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt, InterruptEvent,
+    IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice, UsbFunction,
+    UsbFunctionEvent,
 };
 use lemnos_hal::i2c::{self, I2c, Operation};
 use lemnos_hal::raw::{Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, SpiSegment};
@@ -269,6 +270,11 @@ impl<T: StreamEndpoint<Error = ErrorKind>> StreamEndpoint for Faulty<T> {
         next_job(out: &mut [u8]) -> Option<usize>;
         write(buffer: u32, offset: usize, data: &[u8]) -> bool;
         read(buffer: u32, offset: usize, out: &mut [u8]) -> bool;
+    }
+
+    fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {
+        self.faults.check("buffer_handle")?;
+        self.inner.buffer_handle(buffer)
     }
 }
 

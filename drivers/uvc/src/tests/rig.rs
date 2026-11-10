@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use lemnos_core::ErrorKind;
 use lemnos_hal::StreamEndpoint;
-use lemnos_hal::blocks::StreamFrame;
+use lemnos_hal::blocks::{BufferHandle, StreamFrame};
 use lemnos_hal::mock::MockStream;
 
 use super::fixture;
@@ -117,6 +117,15 @@ impl StreamEndpoint for Consumer {
         out: &mut [u8],
     ) -> core::result::Result<bool, ErrorKind> {
         self.stream.read(buffer, offset, out)
+    }
+    fn buffer_handle(
+        &self,
+        buffer: u32,
+    ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
+        if !self.attached.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        self.stream.buffer_handle(buffer)
     }
 }
 

@@ -9,6 +9,12 @@
 //! The ring's memory is shared with the consumer, which is not trusted. The pool in this module
 //! never leaves the host. Every buffer number and fence read back from the ring is checked against
 //! it, and a consumer that gets anything wrong loses the stream and nothing else.
+//!
+//! A stream's buffers can also be dma-bufs, one per buffer, for a driver whose hardware takes an
+//! image only as a kernel buffer handle. Whether they are is the [`StreamAllocator`]'s choice:
+//! it puts them in [`Backing::handles`], and the driver borrows the one behind a buffer it holds
+//! with `StreamEndpoint::buffer_handle`. The checks are the same either way, and so is the
+//! memory's life: it is made for one attachment and never reaches the next consumer.
 
 mod endpoint;
 mod pool;
@@ -46,6 +52,12 @@ pub struct Backing {
     /// Handed to the consumer as they are: the ring, the doorbell and the buffers. Empty for a
     /// consumer in this process.
     pub descriptors: Vec<OwnedFd>,
+    /// The buffers as hardware takes them, when they are dma-bufs: one descriptor per buffer,
+    /// in order, each holding that buffer from its first byte and at least the layout's
+    /// `buffer_bytes` long. `buffers` must reach the same memory, so that what a producer
+    /// writes and what its hardware writes land in one place. `None` when the buffers are
+    /// plain memory. An attachment whose count differs from the layout's is refused.
+    pub handles: Option<Arc<[OwnedFd]>>,
 }
 
 /// Makes the memory behind a stream. Called once per attachment, so a consumer that goes never
@@ -105,6 +117,7 @@ impl StreamAllocator for HeapAllocator {
             }),
             doorbell: Arc::new(NoDoorbell),
             descriptors: Vec::new(),
+            handles: None,
         })
     }
 }
@@ -141,6 +154,8 @@ pub struct Lease {
     pub ring: Arc<dyn WordMemory>,
     pub buffers: Arc<dyn BufferMemory>,
     pub doorbell: Arc<dyn Doorbell>,
+    /// The buffers as dma-bufs, when they are: see [`Backing::handles`].
+    pub handles: Option<Arc<[OwnedFd]>>,
 }
 
 /// Every declared stream. Built once and never resized.
@@ -190,12 +205,20 @@ impl Streams {
             buffers,
             doorbell,
             descriptors,
+            handles,
         } = backing;
+        if handles
+            .as_ref()
+            .is_some_and(|handles| handles.len() != layout.buffers as usize)
+        {
+            return Err(Status::IO);
+        }
         core.attach(
             caller,
             Arc::clone(&ring),
             Arc::clone(&buffers),
             Arc::clone(&doorbell),
+            handles.clone(),
         )?;
         Ok(Lease {
             layout,
@@ -203,6 +226,7 @@ impl Streams {
             ring,
             buffers,
             doorbell,
+            handles,
         })
     }
 

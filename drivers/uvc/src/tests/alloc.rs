@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lemnos_contract_camera_frames::CameraFrames;
 use lemnos_core::{ErrorKind, Lifecycle};
-use lemnos_hal::blocks::{ControlSetup, IsoPacket, StreamFrame};
+use lemnos_hal::blocks::{BufferHandle, ControlSetup, IsoPacket, StreamFrame};
 use lemnos_hal::{StreamEndpoint, UsbDevice};
 use lemnos_measure::test_alloc::{Counting, allocations};
 
@@ -129,6 +129,9 @@ impl StreamEndpoint for Endless {
     }
     fn read(&mut self, _: u32, _: usize, _: &mut [u8]) -> Result<bool, ErrorKind> {
         Ok(false)
+    }
+    fn buffer_handle(&self, _: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {
+        Err(ErrorKind::Unsupported)
     }
 }
 

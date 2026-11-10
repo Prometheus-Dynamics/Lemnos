@@ -10,6 +10,10 @@
 //!   a backoff doubling from 250 ms and capped at 8 s. It never gives up and never turns itself
 //!   off.
 //!
+//! - [`Converter`]: `image.convert/1` jobs served from a stream whose buffers are dma-bufs. A
+//!   job names two of the stream's buffers; the driver borrows their handles from the stream
+//!   and builds the checked request over them. See [`convert`].
+//!
 //! The driver carries the caller's work and never reads a pixel. Running a job allocates nothing.
 //!
 //! Not covered: mask ROPs, batched mixer tasks, LBC rotation, stride alignment (a padded row is a
@@ -26,8 +30,10 @@
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
+pub mod convert;
 mod engine;
 
+pub use convert::Converter;
 pub use engine::{Engine, G2d, RunError, State, backoff_ns, node};
 pub use lemnos_driver_g2d_sys::{
     Blend, ColorRange, DEVICE, Device, Gamut, HardwareVersion, Job, MAX_FRAME_BYTES, MAX_SIZE,

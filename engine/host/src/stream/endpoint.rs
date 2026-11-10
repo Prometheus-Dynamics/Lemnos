@@ -1,9 +1,10 @@
 //! The producer's end of a stream, and the state both ends share under one lock.
 
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lemnos_core::{CallerId, Status};
-use lemnos_hal::blocks::StreamFrame;
+use lemnos_hal::blocks::{BufferHandle, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_wire::ring::{
     FrameSlot, Layout, Producer, RingError, STATE_CLOSED, STATE_FAULT, WordMemory,
@@ -18,6 +19,8 @@ struct Attached {
     ring: Producer,
     buffers: Arc<dyn BufferMemory>,
     doorbell: Arc<dyn Doorbell>,
+    /// One dma-buf per buffer, when the buffers are dma-bufs.
+    handles: Option<Arc<[OwnedFd]>>,
 }
 
 /// Counts that aren't buffer states.
@@ -74,6 +77,7 @@ impl StreamCore {
         ring: Arc<dyn WordMemory>,
         buffers: Arc<dyn BufferMemory>,
         doorbell: Arc<dyn Doorbell>,
+        handles: Option<Arc<[OwnedFd]>>,
     ) -> Result<(), Status> {
         let producer = Producer::new(ring, self.layout).map_err(|_| Status::IO)?;
         self.epoch += 1;
@@ -83,6 +87,7 @@ impl StreamCore {
             ring: producer,
             buffers,
             doorbell,
+            handles,
         });
         Ok(())
     }
@@ -236,6 +241,22 @@ impl StreamCore {
         Ok(attached.buffers.read(start, out))
     }
 
+    /// Whether `buffer`'s handle can be lent: the epoch it was taken in when that attachment
+    /// still stands, `None` when nothing is behind it now. Refused for a buffer the producer
+    /// doesn't hold, and `Unsupported` when the attached buffers aren't dma-bufs.
+    fn lendable(&self, buffer: u32) -> Result<Option<u64>, ErrorKind> {
+        let Some(BufferState::Producer { epoch }) = self.pool.state(buffer) else {
+            return Err(ErrorKind::InvalidInput);
+        };
+        let Some(attached) = self.attached.as_ref() else {
+            return Ok(None);
+        };
+        if attached.handles.is_none() {
+            return Err(ErrorKind::Unsupported);
+        }
+        Ok((epoch == self.epoch).then_some(epoch))
+    }
+
     pub(crate) fn stats(&self) -> StreamStats {
         let (free, producer_held, consumer_held) = self.pool.counts();
         StreamStats {
@@ -260,6 +281,12 @@ impl StreamCore {
 pub struct ProducerEndpoint {
     core: Arc<Mutex<StreamCore>>,
     buffers: u32,
+    /// The dma-bufs of the attachment the last buffer was taken in, kept here so one can be
+    /// lent for as long as this end is borrowed. Changed only when a buffer is taken, which
+    /// needs this end exclusively, so never while a handle is out.
+    lent: Option<Arc<[OwnedFd]>>,
+    /// The epoch `lent` belongs to.
+    lent_epoch: u64,
 }
 
 impl ProducerEndpoint {
@@ -272,7 +299,12 @@ impl ProducerEndpoint {
             guard.claimed = true;
             guard.layout.buffers
         };
-        Ok(Self { core, buffers })
+        Ok(Self {
+            core,
+            buffers,
+            lent: None,
+            lent_epoch: 0,
+        })
     }
 
     /// A handle for writing the buffers this producer holds, as a device would.
@@ -316,7 +348,14 @@ impl StreamEndpoint for ProducerEndpoint {
     }
 
     fn next_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {
-        Ok(lock(&self.core).next_buffer())
+        let mut core = lock(&self.core);
+        let buffer = core.next_buffer();
+        if buffer.is_some() && self.lent_epoch != core.epoch {
+            // Cloning shares the descriptors, and allocates nothing.
+            self.lent = core.attached.as_ref().and_then(|a| a.handles.clone());
+            self.lent_epoch = core.epoch;
+        }
+        Ok(buffer)
     }
 
     fn next_job(&mut self, out: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
@@ -329,6 +368,19 @@ impl StreamEndpoint for ProducerEndpoint {
 
     fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
         lock(&self.core).read(buffer, offset, out)
+    }
+
+    fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {
+        let current = lock(&self.core).lendable(buffer)?;
+        // A buffer taken in the attachment that still stands was taken through this end, so
+        // `lent` is that attachment's.
+        if current != Some(self.lent_epoch) {
+            return Ok(None);
+        }
+        let handles = self.lent.as_ref();
+        Ok(handles
+            .and_then(|handles| handles.get(buffer as usize))
+            .map(|fd| BufferHandle::from(fd.as_fd())))
     }
 }
 

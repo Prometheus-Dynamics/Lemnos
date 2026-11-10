@@ -19,7 +19,7 @@ use chip::{
 use lemnos_core::{Driver, Encode, Writer};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::StreamEndpoint;
-use lemnos_hal::blocks::StreamFrame;
+use lemnos_hal::blocks::{BufferHandle, StreamFrame};
 use lemnos_hal::i2c::{ErrorType, I2c as HalI2c, Operation};
 use lemnos_hal::mock::MockI2c;
 use lemnos_hal::register::AddressWidth;
@@ -143,6 +143,13 @@ impl StreamEndpoint for RingEnd {
         _offset: usize,
         _out: &mut [u8],
     ) -> core::result::Result<bool, ErrorKind> {
+        Err(ErrorKind::Unsupported)
+    }
+
+    fn buffer_handle(
+        &self,
+        _buffer: u32,
+    ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
         Err(ErrorKind::Unsupported)
     }
 }

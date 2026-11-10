@@ -9,10 +9,14 @@ use super::alloc::vec::Vec;
 use super::{Shared, with};
 use crate::ErrorKind;
 use crate::blocks::{
-    Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt, InterruptEvent, IsoPacket, Registers,
-    Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction,
-    UsbFunctionEvent, UsbHost,
+    BufferHandle, Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt, InterruptEvent,
+    IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice, UsbDeviceId,
+    UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
 };
+
+/// The descriptors behind a stream whose buffers have handles, one file per buffer.
+#[cfg(all(feature = "std", unix))]
+type Files = super::alloc::sync::Arc<[super::std::fs::File]>;
 
 fn copy(from: &[u8], to: &mut [u8]) -> usize {
     let n = from.len().min(to.len());
@@ -371,15 +375,22 @@ struct StreamState {
     published: VecDeque<StreamFrame>,
     returned: VecDeque<u32>,
     jobs: VecDeque<Vec<u8>>,
-    /// What each buffer holds, and whether the producer has it.
+    /// What each buffer holds, and whether the producer has it. A buffer with a handle keeps
+    /// its bytes behind the handle, and only its length here.
     contents: Vec<Vec<u8>>,
     held: Vec<bool>,
+    /// Held since before the consumer changed: nothing is behind it until it is taken again.
+    stale: Vec<bool>,
 }
 
 /// A stream with a test playing the consumer.
 #[derive(Debug, Clone, Default)]
 pub struct MockStream {
     state: Shared<StreamState>,
+    /// Set when the buffers have handles. Fixed when the stream is made, so a handle can be
+    /// lent for as long as the stream is borrowed.
+    #[cfg(all(feature = "std", unix))]
+    files: Option<Files>,
 }
 
 impl MockStream {
@@ -396,26 +407,118 @@ impl MockStream {
             s.returned.extend(0..buffers);
             s.contents = vec![vec![0; buffer_bytes]; buffers as usize];
             s.held = vec![false; buffers as usize];
+            s.stale = vec![false; buffers as usize];
         });
         mock
+    }
+
+    /// Starts with every buffer free and behind a handle, as a stream of dma-bufs is: one
+    /// descriptor per buffer, each as long as its file. `write`, `read`, [`fill`](Self::fill)
+    /// and [`contents`](Self::contents) go to the same memory the handle names, by `pread` and
+    /// `pwrite`. A sealed memfd stands in for a dma-buf, which takes neither call.
+    #[cfg(all(feature = "std", unix))]
+    pub fn with_handles(buffers: Vec<super::std::os::fd::OwnedFd>) -> Self {
+        let files: Files = buffers
+            .into_iter()
+            .map(super::std::fs::File::from)
+            .collect();
+        let lengths = files.iter().map(|file| {
+            let bytes = file.metadata().map_or(0, |m| m.len());
+            usize::try_from(bytes).unwrap_or(usize::MAX)
+        });
+        let mut mock = Self::default();
+        with(&mock.state, |s| {
+            s.buffers = files.len() as u32;
+            s.returned.extend(0..s.buffers);
+            s.contents = lengths.map(|bytes| vec![0; bytes]).collect();
+            s.held = vec![false; files.len()];
+            s.stale = vec![false; files.len()];
+        });
+        mock.files = Some(files);
+        mock
+    }
+
+    /// The file behind `buffer`, when the buffers have handles.
+    #[cfg(all(feature = "std", unix))]
+    fn file(&self, buffer: u32) -> Option<&super::std::fs::File> {
+        self.files.as_ref()?.get(buffer as usize)
+    }
+
+    /// Copies `data` to `offset` of the memory behind `buffer`'s handle. `None` when the buffer
+    /// has no handle, so its bytes are the ones kept here.
+    #[cfg(all(feature = "std", unix))]
+    fn store(&self, buffer: u32, offset: usize, data: &[u8]) -> Option<Result<(), ErrorKind>> {
+        use super::std::os::unix::fs::FileExt;
+        let file = self.file(buffer)?;
+        Some(
+            file.write_all_at(data, offset as u64)
+                .map_err(|_| ErrorKind::Failed),
+        )
+    }
+
+    #[cfg(not(all(feature = "std", unix)))]
+    fn store(&self, _: u32, _: usize, _: &[u8]) -> Option<Result<(), ErrorKind>> {
+        None
+    }
+
+    /// Copies from `offset` of the memory behind `buffer`'s handle into `out`. `None` when the
+    /// buffer has no handle.
+    #[cfg(all(feature = "std", unix))]
+    fn load(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Option<Result<(), ErrorKind>> {
+        use super::std::os::unix::fs::FileExt;
+        let file = self.file(buffer)?;
+        Some(
+            file.read_exact_at(out, offset as u64)
+                .map_err(|_| ErrorKind::Failed),
+        )
+    }
+
+    #[cfg(not(all(feature = "std", unix)))]
+    fn load(&self, _: u32, _: usize, _: &mut [u8]) -> Option<Result<(), ErrorKind>> {
+        None
+    }
+
+    /// The consumer goes and another takes its place, on memory of its own. Whatever the
+    /// consumer had comes back free and its jobs are forgotten. A buffer the producer holds
+    /// stays held with nothing behind it: it has no handle, and publishing it reaches no one
+    /// and frees it.
+    pub fn change_consumer(&self) {
+        with(&self.state, |s| {
+            s.published.clear();
+            s.jobs.clear();
+            for buffer in 0..s.buffers {
+                let held = s.held.get(buffer as usize) == Some(&true);
+                if let Some(stale) = s.stale.get_mut(buffer as usize) {
+                    *stale = held;
+                }
+                if !held && !s.returned.contains(&buffer) {
+                    s.returned.push_back(buffer);
+                }
+            }
+        });
     }
 
     /// Puts `data` at the start of `buffer`, as a consumer handing the producer input would.
     /// Nothing happens when it doesn't fit.
     pub fn fill(&self, buffer: u32, data: &[u8]) {
-        with(&self.state, |s| {
+        let fits = with(&self.state, |s| {
             let to = s.contents.get_mut(buffer as usize);
-            if let Some(to) = to.and_then(|to| to.get_mut(..data.len())) {
-                to.copy_from_slice(data);
-            }
+            to.and_then(|to| to.get_mut(..data.len()))
+                .map(|to| to.copy_from_slice(data))
+                .is_some()
         });
+        if fits {
+            let _ = self.store(buffer, 0, data);
+        }
     }
 
     /// What `buffer` holds now.
     pub fn contents(&self, buffer: u32) -> Vec<u8> {
-        with(&self.state, |s| {
+        let mut contents = with(&self.state, |s| {
             s.contents.get(buffer as usize).cloned().unwrap_or_default()
-        })
+        });
+        let _ = self.load(buffer, 0, &mut contents);
+        contents
     }
 
     pub fn take_frame(&self) -> Option<StreamFrame> {
@@ -444,7 +547,12 @@ impl StreamEndpoint for MockStream {
                 return Err(ErrorKind::InvalidInput);
             }
             s.held[frame.buffer as usize] = false;
-            s.published.push_back(frame);
+            if core::mem::take(&mut s.stale[frame.buffer as usize]) {
+                // Taken under a consumer that has gone: it reaches no one and is free again.
+                s.returned.push_back(frame.buffer);
+            } else {
+                s.published.push_back(frame);
+            }
             Ok(())
         })
     }
@@ -454,6 +562,9 @@ impl StreamEndpoint for MockStream {
             let buffer = s.returned.pop_front()?;
             if let Some(held) = s.held.get_mut(buffer as usize) {
                 *held = true;
+            }
+            if let Some(stale) = s.stale.get_mut(buffer as usize) {
+                *stale = false;
             }
             Some(buffer)
         }))
@@ -480,7 +591,9 @@ impl StreamEndpoint for MockStream {
             let range = end.and_then(|end| s.contents[buffer as usize].get_mut(offset..end));
             range.ok_or(ErrorKind::InvalidInput)?.copy_from_slice(data);
             Ok(true)
-        })
+        })?;
+        self.store(buffer, offset, data).transpose()?;
+        Ok(true)
     }
 
     fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
@@ -492,7 +605,25 @@ impl StreamEndpoint for MockStream {
             let range = end.and_then(|end| s.contents[buffer as usize].get(offset..end));
             out.copy_from_slice(range.ok_or(ErrorKind::InvalidInput)?);
             Ok(true)
-        })
+        })?;
+        self.load(buffer, offset, out).transpose()?;
+        Ok(true)
+    }
+
+    fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {
+        let stale = with(&self.state, |s| {
+            if s.held.get(buffer as usize) != Some(&true) {
+                return Err(ErrorKind::InvalidInput);
+            }
+            Ok(s.stale.get(buffer as usize) == Some(&true))
+        })?;
+        #[cfg(all(feature = "std", unix))]
+        if let Some(file) = self.file(buffer) {
+            use super::std::os::fd::AsFd;
+            return Ok((!stale).then(|| BufferHandle::from(file.as_fd())));
+        }
+        let _ = stale;
+        Err(ErrorKind::Unsupported)
     }
 }
 
@@ -888,6 +1019,7 @@ impl UsbFunction for MockUsbFunction {
 
 #[cfg(test)]
 mod tests {
+    use super::super::std;
     use super::*;
 
     const WAIT: Duration = Duration::from_millis(1);
@@ -1050,6 +1182,142 @@ mod tests {
             Err(ErrorKind::InvalidInput)
         );
         assert_eq!(consumer.contents(1), [0; 4]);
+    }
+
+    #[test]
+    fn a_stream_without_handles_says_so() {
+        let mut stream = MockStream::with_bytes(1, 8);
+        assert_eq!(
+            stream.buffer_handle(0).map(|_| ()),
+            Err(ErrorKind::InvalidInput),
+            "not held"
+        );
+        let buffer = stream.next_buffer().unwrap().unwrap();
+        assert_eq!(
+            stream.buffer_handle(buffer).map(|_| ()),
+            Err(ErrorKind::Unsupported)
+        );
+    }
+
+    /// A file of `len` bytes with no name left, standing in for a dma-buf.
+    #[cfg(unix)]
+    fn backing(len: u64) -> std::os::fd::OwnedFd {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let name = std::format!(
+            "lemnos-hal-mock-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(name);
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        file.set_len(len).unwrap();
+        file.into()
+    }
+
+    #[cfg(unix)]
+    fn through(handle: BufferHandle<'_>) -> std::fs::File {
+        handle.fd().try_clone_to_owned().unwrap().into()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stream_lends_the_handle_of_a_buffer_the_producer_holds() {
+        use std::os::unix::fs::FileExt;
+        let mut stream = MockStream::with_handles(vec![backing(8), backing(16)]);
+        let consumer = stream.clone();
+        assert_eq!(stream.buffer_count(), 2);
+        assert_eq!(
+            stream.buffer_handle(0).map(|_| ()),
+            Err(ErrorKind::InvalidInput),
+            "not held"
+        );
+        assert_eq!(
+            stream.buffer_handle(2).map(|_| ()),
+            Err(ErrorKind::InvalidInput),
+            "no such buffer"
+        );
+        let first = stream.next_buffer().unwrap().unwrap();
+        let second = stream.next_buffer().unwrap().unwrap();
+        // Two at once, as a block with an input and an output needs.
+        let a = stream.buffer_handle(first).unwrap().unwrap();
+        let b = stream.buffer_handle(second).unwrap().unwrap();
+        assert_eq!(through(a).metadata().unwrap().len(), 8);
+        assert_eq!(through(b).metadata().unwrap().len(), 16);
+        // What hardware writes through the handle is what the consumer and `read` see.
+        through(a).write_all_at(&[1, 2, 3], 5).unwrap();
+        assert_eq!(consumer.contents(first), [0, 0, 0, 0, 0, 1, 2, 3]);
+        let mut out = [0; 3];
+        assert_eq!(stream.read(first, 5, &mut out), Ok(true));
+        assert_eq!(out, [1, 2, 3]);
+        // And what `write` and the consumer put in is behind the handle.
+        assert_eq!(stream.write(first, 0, &[9, 8]), Ok(true));
+        consumer.fill(second, &[7; 16]);
+        let handle = stream.buffer_handle(first).unwrap().unwrap();
+        through(handle).read_exact_at(&mut out, 0).unwrap();
+        assert_eq!(out, [9, 8, 0]);
+        let handle = stream.buffer_handle(second).unwrap().unwrap();
+        through(handle).read_exact_at(&mut out, 13).unwrap();
+        assert_eq!(out, [7; 3]);
+        assert_eq!(
+            stream.write(first, 7, &[1, 2]),
+            Err(ErrorKind::InvalidInput),
+            "the range check is the one a stream without handles makes"
+        );
+        // Published, it isn't the producer's to lend.
+        let frame = StreamFrame {
+            buffer: first,
+            bytes: 8,
+            sequence: 1,
+            identity: 0,
+            timestamp_ns: 0,
+        };
+        stream.publish(frame).unwrap();
+        assert_eq!(
+            stream.buffer_handle(first).map(|_| ()),
+            Err(ErrorKind::InvalidInput)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_buffer_held_across_a_change_of_consumer_has_no_handle_until_taken_again() {
+        let mut stream = MockStream::with_handles(vec![backing(8), backing(8)]);
+        let consumer = stream.clone();
+        let kept = stream.next_buffer().unwrap().unwrap();
+        let sent = stream.next_buffer().unwrap().unwrap();
+        let frame = StreamFrame {
+            buffer: sent,
+            bytes: 8,
+            sequence: 1,
+            identity: 0,
+            timestamp_ns: 0,
+        };
+        stream.publish(frame).unwrap();
+        consumer.post_job(&[1]);
+        consumer.change_consumer();
+        assert!(stream.buffer_handle(kept).unwrap().is_none());
+        assert_eq!(consumer.take_frame(), None, "the old consumer's frame");
+        assert_eq!(stream.next_job(&mut [0; 4]), Ok(None), "and its job");
+        // What the old consumer had is free again, and has a handle when taken.
+        assert_eq!(stream.next_buffer(), Ok(Some(sent)));
+        assert!(stream.buffer_handle(sent).unwrap().is_some());
+        // Publishing the stale buffer reaches no one and frees it.
+        stream
+            .publish(StreamFrame {
+                buffer: kept,
+                ..frame
+            })
+            .unwrap();
+        assert_eq!(consumer.take_frame(), None);
+        assert_eq!(stream.next_buffer(), Ok(Some(kept)));
+        assert!(stream.buffer_handle(kept).unwrap().is_some());
     }
 
     fn info(address: u8) -> UsbDeviceInfo {

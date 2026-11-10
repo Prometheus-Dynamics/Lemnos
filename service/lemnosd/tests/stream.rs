@@ -130,6 +130,19 @@ fn jobs_travel_back_to_the_producer_on_the_ring() {
 }
 
 #[test]
+fn the_services_buffers_are_one_memfd_so_none_has_a_handle_for_hardware() {
+    let running = service();
+    let (_session, _stream) = open(&running);
+    let mut producing = producer(&running);
+    let buffer = producing.next_buffer().unwrap().unwrap();
+    assert_eq!(
+        producing.buffer_handle(buffer).map(|_| ()),
+        Err(lemnos_hal::ErrorKind::Unsupported)
+    );
+    assert_eq!(producing.write(buffer, 0, &[1]), Ok(true));
+}
+
+#[test]
 fn an_unknown_device_or_stream_is_refused_with_a_status() {
     let running = service();
     let mut session = Session::connect(&running.socket, "consumer").unwrap();

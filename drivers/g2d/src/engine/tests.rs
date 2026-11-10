@@ -16,16 +16,16 @@ const VERSION: HardwareVersion = HardwareVersion {
 
 /// What the played-back engine does, shared between the test and every engine it opens.
 #[derive(Default)]
-struct Plan {
+pub(crate) struct Plan {
     /// Opens that fail before one succeeds.
-    open_failures: Cell<u32>,
+    pub(crate) open_failures: Cell<u32>,
     /// The errno the next runs fail with, or none.
-    run_errno: Cell<Option<i32>>,
-    opens: Cell<u32>,
-    runs: Cell<u32>,
+    pub(crate) run_errno: Cell<Option<i32>>,
+    pub(crate) opens: Cell<u32>,
+    pub(crate) runs: Cell<u32>,
 }
 
-struct Mock(Rc<Plan>);
+pub(crate) struct Mock(Rc<Plan>);
 
 impl Engine for Mock {
     fn version(&self) -> io::Result<HardwareVersion> {
@@ -41,7 +41,7 @@ impl Engine for Mock {
     }
 }
 
-fn engine(plan: &Rc<Plan>) -> G2d<Mock, impl FnMut() -> io::Result<Mock>> {
+pub(crate) fn engine(plan: &Rc<Plan>) -> G2d<Mock, impl FnMut() -> io::Result<Mock> + use<>> {
     let plan = Rc::clone(plan);
     G2d::new(move || {
         plan.opens.set(plan.opens.get() + 1);
@@ -54,7 +54,7 @@ fn engine(plan: &Rc<Plan>) -> G2d<Mock, impl FnMut() -> io::Result<Mock>> {
     })
 }
 
-fn buffer(len: u64) -> OwnedFd {
+pub(crate) fn buffer(len: u64) -> OwnedFd {
     dma_buf::sealed_memfd(c"g2d-test", len).expect("memfd")
 }
 
