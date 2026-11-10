@@ -77,6 +77,8 @@ impl StreamAllocator for MemfdStreams {
             buffers: Arc::new(SharedBuffers(buffers)),
             doorbell: Arc::new(EventDoorbell(bell)),
             descriptors: vec![ring_fd, bell_for_client, buffers_fd],
+            // One memfd for the whole pool: nothing here is a dma-buf, so no buffer has a handle.
+            handles: None,
         })
     }
 }

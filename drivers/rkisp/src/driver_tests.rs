@@ -10,7 +10,7 @@ use lemnos_contract_camera_isp::{
 };
 use lemnos_core::{Encode, Health, Lifecycle, Result, Status, StreamHandle, Writer};
 use lemnos_hal::ErrorKind;
-use lemnos_hal::blocks::{StreamEndpoint, StreamFrame};
+use lemnos_hal::blocks::{BufferHandle, StreamEndpoint, StreamFrame};
 use lemnos_hal::mock::MockStream;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_v4l2::media::{
@@ -378,6 +378,13 @@ impl StreamEndpoint for Racing {
             self.inner.fill(buffer, &self.scribble);
         }
         read
+    }
+
+    fn buffer_handle(
+        &self,
+        buffer: u32,
+    ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
+        self.inner.buffer_handle(buffer)
     }
 }
 

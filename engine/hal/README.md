@@ -13,7 +13,8 @@
 - `power`: `Regulator` and `ClockOutput` traits plus `GpioRegulator` and `FixedClock`.
 - `blocks`: what a driver asks of a hardware block (`Registers`, `Interrupt`, `DmaBuffers`,
   `Clocks`, `Reset`), `StreamEndpoint`, and USB in both roles (`UsbHost`, `UsbDevice`,
-  `UsbFunction`).
+  `UsbFunction`). A stream's producer copies into a buffer with `write`, or borrows the buffer's
+  `BufferHandle` (a dma-buf descriptor, with `std` on Unix) for hardware that fills it itself.
 - `ErrorKind` / `HalError`: one portable classification of failures, shared with the rest of Lemnos.
 - `mock` (feature): in-memory I2C targets, SPI, pins, delay, regulators and clocks for tests,
   implementing both the blocking and the async traits. `MockI2c` clones share the bus (behind a

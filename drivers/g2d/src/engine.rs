@@ -203,4 +203,4 @@ impl<E: Engine, F: FnMut() -> io::Result<E>> G2d<E, F> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

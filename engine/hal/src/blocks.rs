@@ -114,6 +114,57 @@ pub struct StreamFrame {
     pub timestamp_ns: u64,
 }
 
+#[cfg(all(feature = "std", unix))]
+extern crate std;
+
+/// What names a buffer on a host that has file descriptors.
+#[cfg(all(feature = "std", unix))]
+type HandleInner<'a> = std::os::fd::BorrowedFd<'a>;
+
+/// Nothing: there is no value of this type, so no handle can be made here.
+#[cfg(not(all(feature = "std", unix)))]
+type HandleInner<'a> = (core::convert::Infallible, core::marker::PhantomData<&'a ()>);
+
+/// One stream buffer's memory, borrowed, in the form hardware takes it. On a host with file
+/// descriptors it is the buffer's dma-buf descriptor: one dma-buf per buffer, holding the whole
+/// buffer from its first byte. Nowhere else can one be made, so a stream there answers
+/// [`StreamEndpoint::buffer_handle`] without one.
+///
+/// The type is the same with every feature. `fd` and the conversion from a descriptor come
+/// with the `std` feature on Unix.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferHandle<'a> {
+    #[cfg_attr(
+        not(all(feature = "std", unix)),
+        expect(dead_code, reason = "no handle exists here, so nothing reads one")
+    )]
+    inner: HandleInner<'a>,
+}
+
+#[cfg(all(feature = "std", unix))]
+impl<'a> BufferHandle<'a> {
+    /// The buffer's dma-buf. It is as large as the stream's buffers or larger (a heap rounds
+    /// up), so check what hardware is told to write against its real size, not the stream's.
+    #[must_use]
+    pub fn fd(&self) -> std::os::fd::BorrowedFd<'a> {
+        self.inner
+    }
+}
+
+#[cfg(all(feature = "std", unix))]
+impl<'a> From<std::os::fd::BorrowedFd<'a>> for BufferHandle<'a> {
+    fn from(fd: std::os::fd::BorrowedFd<'a>) -> Self {
+        Self { inner: fd }
+    }
+}
+
+#[cfg(all(feature = "std", unix))]
+impl std::os::fd::AsFd for BufferHandle<'_> {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.inner
+    }
+}
+
 /// The producer's end of a stream of buffers. Whoever opened the stream reads
 /// the other end.
 pub trait StreamEndpoint {
@@ -138,6 +189,40 @@ pub trait StreamEndpoint {
     /// buffer. The consumer shares this memory and can change it at any time, so read once and
     /// check the copy, never the buffer. Allocates nothing.
     fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, Self::Error>;
+    /// Borrows `buffer`'s memory in the form hardware takes it, for a producer whose hardware
+    /// reads or fills the buffer itself. Allocates nothing.
+    ///
+    /// - `Ok(Some(handle))`: the buffer is behind `handle`, and a consumer is attached to it.
+    /// - `Ok(None)`: nothing is behind the buffer now. No consumer is attached, or the consumer
+    ///   that was attached when the buffer was taken with `next_buffer` has gone. Publishing the
+    ///   buffer reaches no one, and that is how to give it up; one taken afterwards has a handle
+    ///   again.
+    /// - An error of kind [`Unsupported`](crate::ErrorKind::Unsupported): this stream's buffers
+    ///   have no handles (plain shared memory, a microcontroller). `write` and `read` are the
+    ///   only way into them.
+    /// - Refused, as `write` is, for a buffer the producer doesn't hold.
+    ///
+    /// `write` and `read` reach the same memory as the handle does, so a producer that fills a
+    /// buffer in software needn't ask which kind of stream it has.
+    ///
+    /// How long things last:
+    ///
+    /// - The borrow ends at the endpoint's next `&mut` call. Hardware that works past that needs
+    ///   its own hold on the memory: the kernel takes one when it is given the descriptor in a
+    ///   request, and a duplicate of the descriptor is one. Either keeps the memory alive for as
+    ///   long as it is held, whatever the stream does meanwhile, so hardware can never be left
+    ///   writing memory that was freed or given to someone else. The worst a late write does is
+    ///   land where nobody reads it.
+    /// - Hardware must have finished with a buffer before it is published. After `publish` the
+    ///   consumer reads the buffer, and may hand it back to be taken again.
+    /// - A handle is good for one taking of the buffer. A stream's memory is made anew for each
+    ///   consumer, so buffer 3 of this consumer and buffer 3 of the next are different memory:
+    ///   ask again for every buffer `next_buffer` gives, and keep no handle by buffer number.
+    ///   Memory handed to hardware under a consumer that has since gone stays that consumer's
+    ///   alone. The next consumer never sees it, and it never sees the next consumer's.
+    /// - The consumer shares the memory and can change it at any time, as with `read`: hardware
+    ///   given a consumer's image must take nothing in it on trust.
+    fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, Self::Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
