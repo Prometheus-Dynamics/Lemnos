@@ -3,7 +3,8 @@
  * Two platform devices with nothing behind them, so the module can be tested
  * in a guest with no hardware to claim. One has the compatible the guest's
  * owned= lists, a page of ordinary memory for its register region, and two
- * interrupts from a simulated controller. The other has a compatible nothing
+ * interrupts from a simulated controller, and a reset "rst" this module
+ * provides. The other has a compatible nothing
  * lists, and must be refused. A third, when csi2_phys names memory the guest
  * set aside (memmap=), is a fake camera receiver: see lemnos_test_csi2.h.
  *
@@ -21,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
+#include <linux/reset-controller.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
 #include <linux/uaccess.h>
@@ -263,8 +265,58 @@ static struct page *tb_page;
 static struct platform_device *tb_owned, *tb_other, *tb_pisp;
 static struct page *tb_pisp_pages;
 
+static const struct property_entry tb_rst_props[] = {
+	PROPERTY_ENTRY_U32("#reset-cells", 1),
+	{ }
+};
+
+static const struct software_node tb_rst_node = {
+	.name = "lemnos-test-reset",
+	.properties = tb_rst_props,
+};
+
+static bool tb_asserted;
+
+static int tb_rst_assert(struct reset_controller_dev *rc, unsigned long id)
+{
+	tb_asserted = true;
+	return 0;
+}
+
+static int tb_rst_deassert(struct reset_controller_dev *rc, unsigned long id)
+{
+	tb_asserted = false;
+	return 0;
+}
+
+static int tb_rst_status(struct reset_controller_dev *rc, unsigned long id)
+{
+	return tb_asserted;
+}
+
+static int tb_rst_reset(struct reset_controller_dev *rc, unsigned long id)
+{
+	return 0;
+}
+
+static const struct reset_control_ops tb_rst_ops = {
+	.assert = tb_rst_assert,
+	.deassert = tb_rst_deassert,
+	.status = tb_rst_status,
+	.reset = tb_rst_reset,
+};
+
+static struct reset_controller_dev tb_rst = {
+	.ops = &tb_rst_ops,
+	.owner = THIS_MODULE,
+	.nr_resets = 1,
+	.fwnode_reset_n_cells = 1,
+};
+
 static const struct property_entry tb_owned_props[] = {
 	PROPERTY_ENTRY_STRING("compatible", "lemnos,test-block"),
+	PROPERTY_ENTRY_REF("resets", &tb_rst_node, 0),
+	PROPERTY_ENTRY_STRING("reset-names", "rst"),
 	{ }
 };
 
@@ -375,6 +427,11 @@ static void tb_teardown(void)
 		platform_device_unregister(tb_other);
 	if (!IS_ERR_OR_NULL(tb_owned))
 		platform_device_unregister(tb_owned);
+	if (tb_rst.fwnode) {
+		reset_controller_unregister(&tb_rst);
+		software_node_unregister(&tb_rst_node);
+		tb_rst.fwnode = NULL;
+	}
 	for (int i = 0; i < TB_IRQS; i++)
 		if (tb_irq[i])
 			irq_dispose_mapping(tb_irq[i]);
@@ -437,6 +494,16 @@ static int __init tb_init(void)
 		}
 		if (i < TB_BLOCK_IRQS)
 			res[1 + i] = (struct resource)DEFINE_RES_IRQ(tb_irq[i]);
+	}
+	ret = software_node_register(&tb_rst_node);
+	if (ret)
+		goto fail;
+	tb_rst.fwnode = software_node_fwnode(&tb_rst_node);
+	ret = reset_controller_register(&tb_rst);
+	if (ret) {
+		software_node_unregister(&tb_rst_node);
+		tb_rst.fwnode = NULL;
+		goto fail;
 	}
 	tb_owned = platform_device_register_full(&info);
 	if (IS_ERR(tb_owned)) {

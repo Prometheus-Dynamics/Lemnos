@@ -95,6 +95,7 @@ struct lem_block {
 	struct lem_pb *pb;		/* the PiSP back end, or NULL */
 	struct xarray imports;		/* handle -> struct lem_import */
 	atomic_t bufs;			/* DMA buffers not yet freed */
+	struct lem_power *power;
 	struct lem_irq irq[LEMNOS_MAX_IRQS];
 };
 
@@ -112,7 +113,7 @@ static struct address_space *lem_mapping;	/* the open file's; NULL when closed *
 static atomic_t lem_opened = ATOMIC_INIT(0);
 static DEFINE_SPINLOCK(lem_lock);		/* lem_ready, and every lem_irq */
 static LIST_HEAD(lem_ready);
-static DECLARE_WAIT_QUEUE_HEAD(lem_wait);
+DECLARE_WAIT_QUEUE_HEAD(lem_wait);
 /* Global: the last buffer's free may race the block being freed. */
 static DECLARE_WAIT_QUEUE_HEAD(lem_drained);
 
@@ -180,7 +181,7 @@ static bool lem_any_ready(void)
 	spin_lock_irqsave(&lem_lock, flags);
 	any = !list_empty(&lem_ready);
 	spin_unlock_irqrestore(&lem_lock, flags);
-	return any;
+	return any || lem_event_pending();
 }
 
 static long lem_irq_enable(struct lem_block *l, u32 index)
@@ -223,7 +224,7 @@ static void lem_irq_mask_all(struct lem_block *l)
 
 static ssize_t lem_read(struct file *file, char __user *ubuf, size_t len, loff_t *ppos)
 {
-	struct lemnos_irq_event ev[LEM_READ_BATCH];
+	struct lemnos_event ev[LEM_READ_BATCH];
 	size_t want = min_t(size_t, len / sizeof(ev[0]), ARRAY_SIZE(ev));
 	size_t n = 0;
 	unsigned long flags;
@@ -238,14 +239,17 @@ static ssize_t lem_read(struct file *file, char __user *ubuf, size_t len, loff_t
 		while (n < want &&
 		       (q = list_first_entry_or_null(&lem_ready, struct lem_irq, ready))) {
 			list_del_init(&q->ready);
-			ev[n++] = (struct lemnos_irq_event){
+			ev[n++] = (struct lemnos_event){
 				.block = q->l->id,
-				.irq = q - q->l->irq,
+				.index = q - q->l->irq,
 				.count = q->count,
+				.kind = LEMNOS_EVENT_IRQ,
 				.ns = q->ns,
 			};
 		}
 		spin_unlock_irqrestore(&lem_lock, flags);
+		while (n < want && lem_event_take(&ev[n]))
+			n++;
 		if (n)
 			break;
 		if (file->f_flags & O_NONBLOCK)
@@ -556,6 +560,9 @@ union lem_args {
 	struct lemnos_gpio_value gpio_value;
 	struct lemnos_pwm_request pwm_request;
 	struct lemnos_pwm_state pwm_state;
+	struct lemnos_power power;
+	struct lemnos_thermal thermal;
+	struct lemnos_thermal_watch thermal_watch;
 };
 
 static long lem_next(struct lemnos_next *n)
@@ -599,6 +606,11 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		if (!l->pb)
 			return -ENOTTY;
 		return lem_pb_create(l->pb, l->dev, &u->pisp_be);
+	case LEMNOS_IOC_POWER:
+		/* A block the module drives keeps its own clocks. */
+		if (l->pb)
+			return -ENOTTY;
+		return lem_power_request(l->power, &u->power);
 	case LEMNOS_IOC_TEST_IRQ:
 		if (!test_irq_inject)
 			return -EPERM;
@@ -637,6 +649,10 @@ static long lem_unit_request(unsigned int cmd, union lem_args *u)
 		return lem_pwm_apply(&u->pwm_state);
 	case LEMNOS_IOC_PWM_GET:
 		return lem_pwm_get(&u->pwm_state);
+	case LEMNOS_IOC_THERMAL_READ:
+		return lem_thermal_read(&u->thermal);
+	case LEMNOS_IOC_THERMAL_WATCH:
+		return lem_thermal_watch(&u->thermal_watch);
 	default:
 		return -ENOIOCTLCMD;
 	}
@@ -677,6 +693,7 @@ static int lem_open(struct inode *inode, struct file *file)
 {
 	if (atomic_xchg(&lem_opened, 1))
 		return -EBUSY;
+	lem_events_reset();
 	down_write(&lem_blocks_sem);
 	lem_mapping = file->f_mapping;
 	up_write(&lem_blocks_sem);
@@ -696,6 +713,7 @@ static int lem_release(struct inode *inode, struct file *file)
 		lem_imports_free_all(l);
 	}
 	up_write(&lem_blocks_sem);
+	lem_events_reset();
 	atomic_set(&lem_opened, 0);
 	return 0;
 }
@@ -781,10 +799,17 @@ static int lem_probe(struct platform_device *pdev)
 	}
 
 ready:
+	l->power = lem_power_create(dev);
+	if (IS_ERR(l->power))
+		return PTR_ERR(l->power);
 	ret = xa_alloc_cyclic(&lem_blocks, &l->id, l, XA_LIMIT(1, LEM_MAX_BLOCK), &lem_next_id,
 			      GFP_KERNEL);
-	if (ret < 0)
+	if (ret < 0) {
+		lem_power_destroy(l->power);
 		return ret;
+	}
+	lem_power_set_block(l->power, l->id);
+	lem_event_post(LEMNOS_EVENT_BLOCK_BOUND, l->id, 0, 0);
 	dev_info(dev, "block %u: %u regions, %u interrupts, %u-bit DMA, registers %smappable\n",
 		 l->id, l->regions, l->nirqs, fls64(dma_get_mask(dev)),
 		 l->mappable ? "" : "not ");
@@ -817,7 +842,9 @@ static void lem_remove(struct platform_device *pdev)
 	/* After the streams: every job has stopped or the block is wedged. */
 	if (l->pb)
 		lem_pb_remove(l->pb);
+	lem_power_destroy(l->power);
 	up_write(&lem_blocks_sem);
+	lem_event_post(LEMNOS_EVENT_BLOCK_UNBOUND, l->id, 0, 0);
 
 	/*
 	 * A buffer can only be freed while the device still has its DMA setup,

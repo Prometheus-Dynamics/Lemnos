@@ -6,6 +6,7 @@
 #include <linux/fs.h>
 #include <linux/poll.h>
 #include <linux/types.h>
+#include <linux/wait.h>
 
 #include "lemnos.h"
 
@@ -37,6 +38,23 @@ long lem_gpio_set(const struct lemnos_gpio_value *v);
 long lem_pwm_request(struct lemnos_pwm_request *r);
 long lem_pwm_apply(const struct lemnos_pwm_state *s);
 long lem_pwm_get(struct lemnos_pwm_state *s);
+
+/* The event stream's queue. Interrupts have their own list in the core. */
+extern wait_queue_head_t lem_wait;
+void lem_event_post(u32 kind, u32 block, u32 index, s64 value);
+bool lem_event_pending(void);
+bool lem_event_take(struct lemnos_event *e);
+long lem_thermal_read(struct lemnos_thermal *t);
+long lem_thermal_watch(struct lemnos_thermal_watch *w);
+/* Ends the watches and empties the queue: the file closed. */
+void lem_events_reset(void);
+
+/* A block's clocks, supplies and resets. */
+struct lem_power;
+struct lem_power *lem_power_create(struct device *dev);
+void lem_power_set_block(struct lem_power *p, u32 block);
+long lem_power_request(struct lem_power *p, struct lemnos_power *r);
+void lem_power_destroy(struct lem_power *p);
 
 int lem_bus_init(void);
 void lem_bus_exit(void);

@@ -3,4 +3,4 @@
 ccflags-y := -Werror
 
 obj-m += lemnos.o
-lemnos-y := lemnos_core.o lemnos_claims.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_bus.o lemnos_gpio.o lemnos_pwm.o
+lemnos-y := lemnos_core.o lemnos_claims.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_bus.o lemnos_gpio.o lemnos_pwm.o lemnos_power.o lemnos_events.o
