@@ -1,0 +1,27 @@
+[package]
+name = "lemnos-driver-usb-gadget"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# The `interfaces` setting is a path to a file holding the text, read at bind, instead of the
+# text itself.
+std = []
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
+
+[dev-dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["mock"] }
+lemnos-linux = { path = "../../backends/linux" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "UsbGadget"

@@ -2,8 +2,9 @@
 //!
 //! - [`Function`]: this board as a USB device ([`UsbFunction`]) over a [`FunctionPort`]. The
 //!   port moves packets and reports bus events; [`Function`] keeps the descriptors, configures
-//!   the endpoints they name, answers the host's `GET_DESCRIPTOR` from its copy, and turns the
-//!   port's "not yet" into the hal's timeouts.
+//!   the endpoints they name, answers the host's `GET_DESCRIPTOR` from its copy, keeps track of
+//!   the control request being answered, and turns the port's "not yet" into the hal's
+//!   timeouts.
 //! - [`Host`] and [`HostDevice`]: the board's USB host ([`UsbHost`], [`UsbDevice`]) over a
 //!   [`HostPort`]. The port runs the transfers; [`HostDevice`] keeps the claims and makes the
 //!   standard requests.
@@ -12,11 +13,11 @@
 //!
 //! # Descriptors
 //!
-//! [`UsbFunction::enable`] takes the device descriptor (18 bytes), then the whole configuration
-//! descriptor (`wTotalLength` bytes, interfaces and endpoints included), then any string
-//! descriptors in index order starting at 0 (the language list). One configuration, full speed.
+//! [`UsbFunction::enable`] takes a descriptor set in the layout of
+//! [`lemnos_hal::usb_descriptors`], checked there. The device descriptor, the full-speed
+//! configuration and the strings are served to the host as they stand. The port runs at full
+//! speed, so a high-speed configuration in the set is kept and not used.
 
-use core::ops::Range;
 use core::time::Duration;
 
 use lemnos_core::HostClock;
@@ -24,6 +25,7 @@ use lemnos_hal::blocks::{
     ControlSetup, IsoPacket, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent,
     UsbHost,
 };
+use lemnos_hal::usb_descriptors::{self, UsbDescriptors, UsbEndpoint};
 use lemnos_hal::{ErrorKind, HalError};
 
 /// How an endpoint moves data, from the low two bits of `bmAttributes`.
@@ -56,16 +58,30 @@ pub struct Endpoint {
     pub interval: u8,
 }
 
+impl From<UsbEndpoint> for Endpoint {
+    fn from(endpoint: UsbEndpoint) -> Self {
+        Self {
+            address: endpoint.address,
+            kind: TransferKind::from_attributes(endpoint.attributes),
+            max_packet: endpoint.max_packet,
+            interval: endpoint.interval,
+        }
+    }
+}
+
 /// What the port saw on the bus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortEvent {
+    /// A bus reset, or the host went away. The port has dropped the configuration, any control
+    /// request and every halt.
     Reset,
     Configured,
     Deconfigured,
     Suspended,
     Resumed,
     /// A control request on endpoint 0, waiting for [`FunctionPort::control_in`],
-    /// [`FunctionPort::stall`] or the caller. `length` is the setup's `wLength`.
+    /// [`FunctionPort::control_out`] or [`FunctionPort::stall`]. `length` is the setup's
+    /// `wLength`. A request that arrives while another waits replaces it.
     Setup {
         setup: ControlSetup,
         length: u16,
@@ -80,96 +96,39 @@ pub trait FunctionPort {
     fn configure(&mut self, endpoint: Endpoint) -> Result<(), Self::Error>;
     /// Pulls up the data line so the host sees the device.
     fn connect(&mut self) -> Result<(), Self::Error>;
+    /// Lets go of the data line and forgets the endpoints that were configured.
     fn disconnect(&mut self) -> Result<(), Self::Error>;
     fn poll(&mut self) -> Result<Option<PortEvent>, Self::Error>;
-    /// Sends the data stage of the pending control-IN request (the port splits it in packets).
+    /// Sends `data` as the data stage of the waiting control request, which is one whose data
+    /// goes to the host, and takes the host's status stage. The port splits `data` in packets
+    /// and ends the stage short when `data` is shorter than the request's `wLength`; `data` is
+    /// never longer. An error of kind `Unavailable` when the request is no longer waiting.
     fn control_in(&mut self, data: &[u8]) -> Result<(), Self::Error>;
-    /// Refuses the pending control request.
+    /// The data stage of the waiting control request, which is one whose data comes from the
+    /// host, once all of it has come, and the status stage that accepts the request. `None`
+    /// while data is still to come. A request with a `wLength` of 0 is accepted at once with
+    /// `Some(0)`. `data` holds the request's `wLength` bytes. An error of kind `Unavailable`
+    /// when the request is no longer waiting.
+    fn control_out(&mut self, data: &mut [u8]) -> Result<Option<usize>, Self::Error>;
+    /// Refuses the waiting control request with a protocol stall on endpoint 0, which the next
+    /// setup packet clears.
     fn stall(&mut self) -> Result<(), Self::Error>;
+    /// Halts `endpoint` so it answers the host with a stall, or clears the halt and resets the
+    /// endpoint's data toggle. The port clears a halt by itself when the host asks
+    /// (`CLEAR_FEATURE(ENDPOINT_HALT)`) and on a reset.
+    fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<(), Self::Error>;
     /// A packet the host sent to `endpoint`, or `None` if none has come.
     fn read(&mut self, endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, Self::Error>;
     /// Queues `data` for the host on `endpoint`, or `None` if the endpoint is still busy.
     fn write(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, Self::Error>;
 }
 
-const DESCRIPTOR_DEVICE: u8 = 1;
-const DESCRIPTOR_CONFIGURATION: u8 = 2;
-const DESCRIPTOR_STRING: u8 = 3;
-const DESCRIPTOR_ENDPOINT: u8 = 5;
-const DEVICE_LEN: usize = 18;
 const GET_DESCRIPTOR: u8 = 6;
 const SET_INTERFACE: u8 = 11;
 /// Device to host, standard, to the device.
 const STANDARD_IN: u8 = 0x80;
 /// Host to device, standard, to an interface.
 const STANDARD_OUT_INTERFACE: u8 = 0x01;
-
-/// Where each part of the descriptors sits in a [`Function`]'s copy.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Layout {
-    /// End of the configuration descriptor.
-    config_end: usize,
-    /// End of all of it.
-    end: usize,
-}
-
-/// Checks `bytes` against the layout in the module docs, and calls `each` on every endpoint.
-fn parse(bytes: &[u8], mut each: impl FnMut(Endpoint)) -> Result<Layout, ErrorKind> {
-    let bad = ErrorKind::InvalidInput;
-    let device = bytes.get(..DEVICE_LEN).ok_or(bad)?;
-    if usize::from(device[0]) != DEVICE_LEN || device[1] != DESCRIPTOR_DEVICE {
-        return Err(bad);
-    }
-    let config = bytes.get(DEVICE_LEN..DEVICE_LEN + 4).ok_or(bad)?;
-    if config[1] != DESCRIPTOR_CONFIGURATION {
-        return Err(bad);
-    }
-    let total = usize::from(u16::from_le_bytes([config[2], config[3]]));
-    let config_end = DEVICE_LEN + total;
-    let config = bytes.get(DEVICE_LEN..config_end).ok_or(bad)?;
-    walk(config, |kind, body| {
-        if kind == DESCRIPTOR_ENDPOINT {
-            let [address, attributes, low, high, interval, ..] = *body else {
-                return Err(bad);
-            };
-            each(Endpoint {
-                address,
-                kind: TransferKind::from_attributes(attributes),
-                max_packet: u16::from_le_bytes([low, high]),
-                interval,
-            });
-        }
-        Ok(())
-    })?;
-    walk(&bytes[config_end..], |kind, _| {
-        if kind == DESCRIPTOR_STRING {
-            Ok(())
-        } else {
-            Err(bad)
-        }
-    })?;
-    Ok(Layout {
-        config_end,
-        end: bytes.len(),
-    })
-}
-
-/// Calls `each` with the type and the bytes after the header of every descriptor in `bytes`.
-fn walk(
-    bytes: &[u8],
-    mut each: impl FnMut(u8, &[u8]) -> Result<(), ErrorKind>,
-) -> Result<(), ErrorKind> {
-    let mut at = 0;
-    while at < bytes.len() {
-        let len = usize::from(bytes[at]);
-        if len < 2 || at + len > bytes.len() {
-            return Err(ErrorKind::InvalidInput);
-        }
-        each(bytes[at + 1], &bytes[at + 2..at + len])?;
-        at += len;
-    }
-    Ok(())
-}
 
 fn port_error<E: HalError>(error: E) -> ErrorKind {
     error.kind()
@@ -185,12 +144,31 @@ fn deadline(clock: &dyn HostClock, timeout: Duration) -> u64 {
     clock.now_ns().saturating_add(timeout)
 }
 
+/// The bit that stands for an endpoint address: 1 to 15 for OUT, 17 to 31 for IN.
+const fn endpoint_bit(address: u8) -> u32 {
+    1 << ((address & 0x0f) as u32 + (address >> 7) as u32 * 16)
+}
+
+/// What an enabled [`Function`] knows of its descriptors without reading them again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Enabled {
+    /// Bytes of the descriptor copy in use.
+    len: usize,
+    /// The endpoints the full-speed configuration names, by [`endpoint_bit`].
+    named: u32,
+    /// Those of them that are isochronous.
+    isochronous: u32,
+}
+
 /// This board as a USB device over port `P`, keeping up to `N` bytes of descriptors.
 pub struct Function<P, const N: usize> {
     port: P,
     clock: &'static dyn HostClock,
     descriptors: [u8; N],
-    layout: Option<Layout>,
+    enabled: Option<Enabled>,
+    configured: bool,
+    /// The control request waiting for the function's answer, and its `wLength`.
+    pending: Option<(ControlSetup, u16)>,
 }
 
 impl<P: FunctionPort, const N: usize> Function<P, N> {
@@ -199,7 +177,9 @@ impl<P: FunctionPort, const N: usize> Function<P, N> {
             port,
             clock,
             descriptors: [0; N],
-            layout: None,
+            enabled: None,
+            configured: false,
+            pending: None,
         }
     }
 
@@ -211,33 +191,72 @@ impl<P: FunctionPort, const N: usize> Function<P, N> {
     fn answer(&mut self, setup: ControlSetup, length: u16) -> Result<(), ErrorKind> {
         let [index, kind] = setup.value.to_le_bytes();
         let found = self
-            .layout
-            .and_then(|layout| find(&self.descriptors[..layout.end], layout, kind, index));
+            .enabled
+            .and_then(|enabled| UsbDescriptors::parse(&self.descriptors[..enabled.len]).ok())
+            .and_then(|set| match (kind, index) {
+                (usb_descriptors::DEVICE, 0) => Some(set.device()),
+                (usb_descriptors::CONFIGURATION, 0) => Some(set.full_speed()),
+                (usb_descriptors::STRING, _) => set.string(index),
+                _ => None,
+            });
         match found {
-            Some(range) => {
-                let len = range.len().min(usize::from(length));
-                let bytes = &self.descriptors[range.start..range.start + len];
-                self.port.control_in(bytes).map_err(port_error)
+            Some(bytes) => {
+                let len = bytes.len().min(usize::from(length));
+                self.port.control_in(&bytes[..len]).map_err(port_error)
             }
             None => self.port.stall().map_err(port_error),
         }
     }
-}
 
-/// Where the descriptor of `kind` and `index` is in `bytes`.
-fn find(bytes: &[u8], layout: Layout, kind: u8, index: u8) -> Option<Range<usize>> {
-    match (kind, index) {
-        (DESCRIPTOR_DEVICE, 0) => Some(0..DEVICE_LEN),
-        (DESCRIPTOR_CONFIGURATION, 0) => Some(DEVICE_LEN..layout.config_end),
-        (DESCRIPTOR_STRING, _) => {
-            let mut at = layout.config_end;
-            for _ in 0..index {
-                at += usize::from(*bytes.get(at)?);
+    /// Puts the endpoints on the port and connects.
+    fn bring_up(&mut self, descriptors: &[u8]) -> Result<Enabled, ErrorKind> {
+        let set = UsbDescriptors::parse(descriptors)?;
+        let mut enabled = Enabled {
+            len: descriptors.len(),
+            named: 0,
+            isochronous: 0,
+        };
+        for endpoint in usb_descriptors::endpoints(set.full_speed()) {
+            let endpoint = Endpoint::from(endpoint);
+            // An address that comes again in another alternate setting is the same endpoint.
+            if enabled.named & endpoint_bit(endpoint.address) == 0 {
+                self.port.configure(endpoint).map_err(port_error)?;
             }
-            let len = usize::from(*bytes.get(at)?);
-            (at + len <= bytes.len()).then_some(at..at + len)
+            enabled.named |= endpoint_bit(endpoint.address);
+            if endpoint.kind == TransferKind::Isochronous {
+                enabled.isochronous |= endpoint_bit(endpoint.address);
+            }
         }
-        _ => None,
+        self.port.connect().map_err(port_error)?;
+        Ok(enabled)
+    }
+
+    /// The `wLength` of the pending request, if its data goes to the host (`to_host`) or
+    /// comes from it.
+    fn pending(&self, to_host: bool) -> Result<usize, ErrorKind> {
+        if self.enabled.is_none() {
+            return Err(ErrorKind::Unavailable);
+        }
+        match self.pending {
+            Some((setup, length)) if setup.is_in() == to_host => Ok(usize::from(length)),
+            _ => Err(ErrorKind::InvalidInput),
+        }
+    }
+
+    /// Checks that `endpoint` is one the descriptors name, in the direction asked for if one
+    /// is, and that the host has configured the function.
+    fn usable(&self, endpoint: u8, to_host: Option<bool>) -> Result<Enabled, ErrorKind> {
+        let enabled = self.enabled.ok_or(ErrorKind::Unavailable)?;
+        let named = endpoint & 0x70 == 0
+            && endpoint & 0x0f != 0
+            && enabled.named & endpoint_bit(endpoint) != 0;
+        if !named || to_host.is_some_and(|to_host| to_host != (endpoint & 0x80 != 0)) {
+            return Err(ErrorKind::InvalidInput);
+        }
+        if !self.configured {
+            return Err(ErrorKind::Unavailable);
+        }
+        Ok(enabled)
     }
 }
 
@@ -245,39 +264,57 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
     type Error = ErrorKind;
 
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
+        if self.enabled.is_some() {
+            return Err(ErrorKind::Busy);
+        }
         if descriptors.len() > N {
             return Err(ErrorKind::InvalidInput);
         }
         // Checked whole before any endpoint is configured.
-        parse(descriptors, |_| {})?;
-        let port = &mut self.port;
-        let mut failed = None;
-        let layout = parse(descriptors, |endpoint| {
-            if failed.is_none()
-                && let Err(error) = port.configure(endpoint)
-            {
-                failed = Some(error.kind());
+        UsbDescriptors::parse(descriptors)?;
+        match self.bring_up(descriptors) {
+            Ok(enabled) => {
+                self.descriptors[..descriptors.len()].copy_from_slice(descriptors);
+                self.enabled = Some(enabled);
+                Ok(())
             }
-        })?;
-        if let Some(error) = failed {
-            return Err(error);
+            Err(error) => {
+                // Nothing of the attempt stays: the port forgets the endpoints it was given.
+                let _ = self.port.disconnect();
+                Err(error)
+            }
         }
-        self.descriptors[..descriptors.len()].copy_from_slice(descriptors);
-        self.layout = Some(layout);
-        self.port.connect().map_err(port_error)
     }
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
-        self.layout = None;
+        self.pending = None;
+        self.configured = false;
+        if self.enabled.take().is_none() {
+            return Ok(());
+        }
         self.port.disconnect().map_err(port_error)
     }
 
     fn next_event(&mut self) -> Result<Option<UsbFunctionEvent>, ErrorKind> {
+        if self.enabled.is_none() {
+            return Err(ErrorKind::Unavailable);
+        }
+        if self.pending.take().is_some() {
+            self.port.stall().map_err(port_error)?;
+        }
         loop {
             let event = match self.port.poll().map_err(port_error)? {
                 None => return Ok(None),
-                Some(PortEvent::Reset | PortEvent::Deconfigured) => UsbFunctionEvent::Deconfigured,
-                Some(PortEvent::Configured) => UsbFunctionEvent::Configured,
+                Some(PortEvent::Reset | PortEvent::Deconfigured) => {
+                    if !core::mem::take(&mut self.configured) {
+                        continue;
+                    }
+                    UsbFunctionEvent::Deconfigured
+                }
+                Some(PortEvent::Configured) => {
+                    self.configured = true;
+                    UsbFunctionEvent::Configured
+                }
                 Some(PortEvent::Suspended) => UsbFunctionEvent::Suspended,
                 Some(PortEvent::Resumed) => UsbFunctionEvent::Resumed,
                 Some(PortEvent::Setup { setup, length }) => {
@@ -285,11 +322,56 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
                         self.answer(setup, length)?;
                         continue;
                     }
-                    UsbFunctionEvent::Setup(setup)
+                    self.pending = Some((setup, length));
+                    UsbFunctionEvent::Setup { setup, length }
                 }
             };
             return Ok(Some(event));
         }
+    }
+
+    /// The port takes the whole data stage at once, so this never waits.
+    fn control_in(&mut self, data: &[u8], _timeout: Duration) -> Result<usize, ErrorKind> {
+        let length = self.pending(true)?;
+        self.pending = None;
+        let len = data.len().min(length);
+        self.port.control_in(&data[..len]).map_err(port_error)?;
+        Ok(len)
+    }
+
+    fn control_out(&mut self, data: &mut [u8], timeout: Duration) -> Result<usize, ErrorKind> {
+        let length = self.pending(false)?;
+        let data = data.get_mut(..length).ok_or(ErrorKind::InvalidInput)?;
+        self.pending = None;
+        let until = deadline(self.clock, timeout);
+        loop {
+            if let Some(n) = self.port.control_out(data).map_err(port_error)? {
+                return Ok(n.min(length));
+            }
+            if passed(self.clock, until) {
+                // The host never sent its data: the request ends here, refused.
+                let _ = self.port.stall();
+                return Err(ErrorKind::Timeout);
+            }
+        }
+    }
+
+    fn control_stall(&mut self) -> Result<(), ErrorKind> {
+        if self.enabled.is_none() {
+            return Err(ErrorKind::Unavailable);
+        }
+        if self.pending.take().is_none() {
+            return Err(ErrorKind::InvalidInput);
+        }
+        self.port.stall().map_err(port_error)
+    }
+
+    fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<(), ErrorKind> {
+        let enabled = self.usable(endpoint, None)?;
+        if enabled.isochronous & endpoint_bit(endpoint) != 0 {
+            return Err(ErrorKind::Unsupported);
+        }
+        self.port.set_halt(endpoint, halted).map_err(port_error)
     }
 
     fn read(
@@ -298,9 +380,7 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
         data: &mut [u8],
         timeout: Duration,
     ) -> Result<usize, ErrorKind> {
-        if self.layout.is_none() {
-            return Err(ErrorKind::Unavailable);
-        }
+        self.usable(endpoint, Some(false))?;
         let until = deadline(self.clock, timeout);
         loop {
             if let Some(n) = self.port.read(endpoint, data).map_err(port_error)? {
@@ -313,9 +393,7 @@ impl<P: FunctionPort, const N: usize> UsbFunction for Function<P, N> {
     }
 
     fn write(&mut self, endpoint: u8, data: &[u8], timeout: Duration) -> Result<usize, ErrorKind> {
-        if self.layout.is_none() {
-            return Err(ErrorKind::Unavailable);
-        }
+        self.usable(endpoint, Some(true))?;
         let until = deadline(self.clock, timeout);
         loop {
             if let Some(n) = self.port.write(endpoint, data).map_err(port_error)? {
@@ -450,7 +528,7 @@ impl<P: HostPort> UsbDevice for HostDevice<P> {
         let setup = ControlSetup {
             request_type: STANDARD_IN,
             request: GET_DESCRIPTOR,
-            value: u16::from_le_bytes([index, DESCRIPTOR_CONFIGURATION]),
+            value: u16::from_le_bytes([index, usb_descriptors::CONFIGURATION]),
             index: 0,
         };
         self.port

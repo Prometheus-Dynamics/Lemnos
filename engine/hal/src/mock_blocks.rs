@@ -13,6 +13,7 @@ use crate::blocks::{
     IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice, UsbDeviceId,
     UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
 };
+use crate::usb_descriptors::{self, UsbDescriptors, UsbEndpoint};
 
 /// The descriptors behind a stream whose buffers have handles, one file per buffer.
 #[cfg(all(feature = "std", unix))]
@@ -946,15 +947,72 @@ impl UsbHost for MockUsbHost {
     }
 }
 
+/// How a [`MockUsbFunction`] dealt with a control request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlAnswer {
+    /// The data stage it sent.
+    In(Vec<u8>),
+    /// It took the host's data stage.
+    Out,
+    Stalled,
+}
+
 #[derive(Debug, Default)]
 struct UsbFunctionState {
     descriptors: Option<Vec<u8>>,
-    events: VecDeque<UsbFunctionEvent>,
-    from_host: VecDeque<Vec<u8>>,
+    configured: bool,
+    /// The controller let go: `next_event` fails until the function is enabled again.
+    released: bool,
+    refuse_enable: Option<ErrorKind>,
+    enables: u32,
+    events: VecDeque<(UsbFunctionEvent, Vec<u8>)>,
+    /// The request being answered, its `wLength`, and the data stage the host sends with it.
+    pending: Option<(ControlSetup, u16, Vec<u8>)>,
+    answers: Vec<(ControlSetup, ControlAnswer)>,
+    halted: Vec<u8>,
+    from_host: VecDeque<(u8, Vec<u8>)>,
     to_host: Vec<(u8, Vec<u8>)>,
 }
 
-/// This board as a USB device, with a test playing the host.
+impl UsbFunctionState {
+    fn named(&self, endpoint: u8) -> Option<UsbEndpoint> {
+        let set = UsbDescriptors::parse(self.descriptors.as_deref()?).ok()?;
+        usb_descriptors::endpoints(set.full_speed()).find(|e| e.address == endpoint)
+    }
+
+    /// The endpoint, if the function is in a state to use it.
+    fn usable(&self, endpoint: u8) -> Result<UsbEndpoint, ErrorKind> {
+        if self.descriptors.is_none() {
+            return Err(ErrorKind::Unavailable);
+        }
+        let named = self.named(endpoint).ok_or(ErrorKind::InvalidInput)?;
+        if !self.configured {
+            return Err(ErrorKind::Unavailable);
+        }
+        Ok(named)
+    }
+
+    fn answer(&mut self, answer: ControlAnswer) {
+        if let Some((setup, _, _)) = self.pending.take() {
+            self.answers.push((setup, answer));
+        }
+    }
+
+    /// The `wLength` of the pending request, if it is one whose data goes to the host
+    /// (`to_host`) or from it.
+    fn pending(&self, to_host: bool) -> Result<u16, ErrorKind> {
+        if self.descriptors.is_none() {
+            return Err(ErrorKind::Unavailable);
+        }
+        match &self.pending {
+            Some((setup, length, _)) if setup.is_in() == to_host => Ok(*length),
+            _ => Err(ErrorKind::InvalidInput),
+        }
+    }
+}
+
+/// This board as a USB device, with a test playing the host. It keeps to what
+/// [`UsbFunction`] says of states, pending requests and halts, and checks the descriptors.
 #[derive(Debug, Clone, Default)]
 pub struct MockUsbFunction {
     state: Shared<UsbFunctionState>,
@@ -965,16 +1023,58 @@ impl MockUsbFunction {
         Self::default()
     }
 
+    /// The descriptors the function is enabled with.
     pub fn descriptors(&self) -> Option<Vec<u8>> {
         with(&self.state, |s| s.descriptors.clone())
     }
 
-    pub fn event(&self, event: UsbFunctionEvent) {
-        with(&self.state, |s| s.events.push_back(event));
+    /// How many times `enable` has succeeded.
+    pub fn enables(&self) -> u32 {
+        with(&self.state, |s| s.enables)
     }
 
-    pub fn host_sends(&self, data: &[u8]) {
-        with(&self.state, |s| s.from_host.push_back(data.to_vec()));
+    /// Makes `enable` fail with `kind` until this is called with `None`.
+    pub fn refuse_enable(&self, kind: Option<ErrorKind>) {
+        with(&self.state, |s| s.refuse_enable = kind);
+    }
+
+    /// The controller lets go of the function: `next_event` fails with `Unavailable` until it
+    /// is disabled and enabled again.
+    pub fn release(&self) {
+        with(&self.state, |s| s.released = true);
+    }
+
+    /// Something happens on the wire. Use [`request`](Self::request) for a control request
+    /// that carries data from the host.
+    pub fn event(&self, event: UsbFunctionEvent) {
+        with(&self.state, |s| s.events.push_back((event, Vec::new())));
+    }
+
+    /// The host makes a control request with a `wLength` of `length`, and `data` as its data
+    /// stage if it sends one.
+    pub fn request(&self, setup: ControlSetup, length: u16, data: &[u8]) {
+        let event = UsbFunctionEvent::Setup { setup, length };
+        with(&self.state, |s| s.events.push_back((event, data.to_vec())));
+    }
+
+    /// Every control request the function has dealt with, and how.
+    pub fn answers(&self) -> Vec<(ControlSetup, ControlAnswer)> {
+        with(&self.state, |s| s.answers.clone())
+    }
+
+    pub fn is_configured(&self) -> bool {
+        with(&self.state, |s| s.configured)
+    }
+
+    pub fn is_halted(&self, endpoint: u8) -> bool {
+        with(&self.state, |s| s.halted.contains(&endpoint))
+    }
+
+    /// The host sends `data` to the OUT endpoint `endpoint`.
+    pub fn host_sends(&self, endpoint: u8, data: &[u8]) {
+        with(&self.state, |s| {
+            s.from_host.push_back((endpoint, data.to_vec()));
+        });
     }
 
     pub fn host_received(&self) -> Vec<(u8, Vec<u8>)> {
@@ -986,34 +1086,133 @@ impl UsbFunction for MockUsbFunction {
     type Error = ErrorKind;
 
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), ErrorKind> {
-        with(&self.state, |s| s.descriptors = Some(descriptors.to_vec()));
-        Ok(())
+        with(&self.state, |s| {
+            if s.descriptors.is_some() {
+                return Err(ErrorKind::Busy);
+            }
+            UsbDescriptors::parse(descriptors)?;
+            if let Some(kind) = s.refuse_enable {
+                return Err(kind);
+            }
+            s.descriptors = Some(descriptors.to_vec());
+            s.released = false;
+            s.enables += 1;
+            Ok(())
+        })
     }
 
     fn disable(&mut self) -> Result<(), ErrorKind> {
-        with(&self.state, |s| s.descriptors = None);
+        with(&self.state, |s| {
+            s.descriptors = None;
+            s.configured = false;
+            s.pending = None;
+            s.halted.clear();
+            s.events.clear();
+        });
         Ok(())
     }
 
     fn next_event(&mut self) -> Result<Option<UsbFunctionEvent>, ErrorKind> {
-        Ok(with(&self.state, |s| s.events.pop_front()))
+        with(&self.state, |s| {
+            if s.descriptors.is_none() || s.released {
+                return Err(ErrorKind::Unavailable);
+            }
+            s.answer(ControlAnswer::Stalled);
+            let Some((event, data)) = s.events.pop_front() else {
+                return Ok(None);
+            };
+            match event {
+                UsbFunctionEvent::Configured => {
+                    s.configured = true;
+                    s.halted.clear();
+                }
+                UsbFunctionEvent::Deconfigured => {
+                    s.configured = false;
+                    s.halted.clear();
+                }
+                UsbFunctionEvent::Setup { setup, length } => {
+                    s.pending = Some((setup, length, data));
+                }
+                UsbFunctionEvent::Suspended | UsbFunctionEvent::Resumed => {}
+            }
+            Ok(Some(event))
+        })
+    }
+
+    fn control_in(&mut self, data: &[u8], _timeout: Duration) -> Result<usize, ErrorKind> {
+        with(&self.state, |s| {
+            let length = s.pending(true)?;
+            let sent = &data[..data.len().min(usize::from(length))];
+            s.answer(ControlAnswer::In(sent.to_vec()));
+            Ok(sent.len())
+        })
+    }
+
+    fn control_out(&mut self, data: &mut [u8], _timeout: Duration) -> Result<usize, ErrorKind> {
+        with(&self.state, |s| {
+            let length = usize::from(s.pending(false)?);
+            if data.len() < length {
+                return Err(ErrorKind::InvalidInput);
+            }
+            let sent = s.pending.as_ref().map_or(&[][..], |(_, _, sent)| sent);
+            let n = copy(&sent[..sent.len().min(length)], data);
+            s.answer(ControlAnswer::Out);
+            Ok(n)
+        })
+    }
+
+    fn control_stall(&mut self) -> Result<(), ErrorKind> {
+        with(&self.state, |s| {
+            if s.descriptors.is_none() {
+                return Err(ErrorKind::Unavailable);
+            }
+            if s.pending.is_none() {
+                return Err(ErrorKind::InvalidInput);
+            }
+            s.answer(ControlAnswer::Stalled);
+            Ok(())
+        })
+    }
+
+    fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<(), ErrorKind> {
+        with(&self.state, |s| {
+            if s.usable(endpoint)?.attributes & 3 == 1 {
+                return Err(ErrorKind::Unsupported);
+            }
+            s.halted.retain(|e| *e != endpoint);
+            if halted {
+                s.halted.push(endpoint);
+            }
+            Ok(())
+        })
     }
 
     fn read(
         &mut self,
-        _endpoint: u8,
+        endpoint: u8,
         data: &mut [u8],
         _timeout: Duration,
     ) -> Result<usize, ErrorKind> {
         with(&self.state, |s| {
-            let next = s.from_host.pop_front().ok_or(ErrorKind::Timeout)?;
+            if s.usable(endpoint)?.address & 0x80 != 0 {
+                return Err(ErrorKind::InvalidInput);
+            }
+            let at = s.from_host.iter().position(|(e, _)| *e == endpoint);
+            let (_, next) = at
+                .and_then(|at| s.from_host.remove(at))
+                .ok_or(ErrorKind::Timeout)?;
             Ok(copy(&next, data))
         })
     }
 
     fn write(&mut self, endpoint: u8, data: &[u8], _timeout: Duration) -> Result<usize, ErrorKind> {
-        with(&self.state, |s| s.to_host.push((endpoint, data.to_vec())));
-        Ok(data.len())
+        with(&self.state, |s| {
+            if s.usable(endpoint)?.address & 0x80 == 0 {
+                return Err(ErrorKind::InvalidInput);
+            }
+            s.to_host.push((endpoint, data.to_vec()));
+            Ok(data.len())
+        })
     }
 }
 
@@ -1470,25 +1669,171 @@ mod tests {
         assert_eq!(probe.written(), []);
     }
 
+    /// One vendor interface with a bulk endpoint each way, at full speed, and no strings.
+    const GADGET: [u8; 50] = [
+        18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x09, 0x12, 0x01, 0x00, 0x00, 0x01, 0, 0, 0,
+        1, // device
+        9, 2, 32, 0, 1, 1, 0, 0x80, 50, // configuration
+        9, 4, 0, 0, 2, 0xff, 0, 0, 0, // interface
+        7, 5, 0x81, 2, 64, 0, 0, // bulk IN 1
+        7, 5, 0x02, 2, 64, 0, 0, // bulk OUT 2
+    ];
+
+    fn vendor_request(request_type: u8, request: u8) -> ControlSetup {
+        ControlSetup {
+            request_type,
+            request,
+            value: 2,
+            index: 0,
+        }
+    }
+
     #[test]
-    fn a_usb_function_connects_and_moves_data() {
+    fn a_usb_function_connects_and_moves_data_only_while_configured() {
         let mut function = MockUsbFunction::new();
         let host = function.clone();
-        function.enable(&[1, 2]).unwrap();
-        assert_eq!(host.descriptors(), Some([1, 2].to_vec()));
+        let mut data = [0; 2];
+        let off = Err(ErrorKind::Unavailable);
+        assert_eq!(function.next_event(), Err(ErrorKind::Unavailable));
+        assert_eq!(function.read(2, &mut data, WAIT), off);
+        assert_eq!(function.enable(&[1, 2]), Err(ErrorKind::InvalidInput));
+        function.enable(&GADGET).unwrap();
+        assert_eq!(function.enable(&GADGET), Err(ErrorKind::Busy));
+        assert_eq!(host.descriptors(), Some(GADGET.to_vec()));
+
+        assert_eq!(function.write(0x81, &[6], WAIT), off, "not configured yet");
         host.event(UsbFunctionEvent::Configured);
         assert_eq!(
             function.next_event(),
             Ok(Some(UsbFunctionEvent::Configured))
         );
         assert_eq!(function.next_event(), Ok(None));
-        host.host_sends(&[5]);
-        let mut data = [0; 2];
-        assert_eq!(function.read(1, &mut data, WAIT), Ok(1));
-        assert_eq!(function.read(1, &mut data, WAIT), Err(ErrorKind::Timeout));
-        assert_eq!(function.write(2, &[6], WAIT), Ok(1));
-        assert_eq!(host.host_received(), [(2, [6].to_vec())]);
+        host.host_sends(2, &[5]);
+        assert_eq!(function.read(2, &mut data, WAIT), Ok(1));
+        assert_eq!(function.read(2, &mut data, WAIT), Err(ErrorKind::Timeout));
+        assert_eq!(function.write(0x81, &[6], WAIT), Ok(1));
+        assert_eq!(host.host_received(), [(0x81, [6].to_vec())]);
+        let wrong = Err(ErrorKind::InvalidInput);
+        assert_eq!(
+            function.read(0x81, &mut data, WAIT),
+            wrong,
+            "an IN endpoint"
+        );
+        assert_eq!(function.write(2, &[1], WAIT), wrong, "an OUT endpoint");
+        assert_eq!(function.write(0x83, &[1], WAIT), wrong, "not in the set");
+
+        function.set_halt(0x81, true).unwrap();
+        assert!(host.is_halted(0x81));
+        function.set_halt(0x81, false).unwrap();
+        assert!(!host.is_halted(0x81));
+        function.set_halt(2, true).unwrap();
+        assert_eq!(function.set_halt(3, true), Err(ErrorKind::InvalidInput));
+
+        // A reset or a pull: no configuration, no halts, and no need to enable again.
+        host.event(UsbFunctionEvent::Deconfigured);
+        assert_eq!(
+            function.next_event(),
+            Ok(Some(UsbFunctionEvent::Deconfigured))
+        );
+        assert!(!host.is_halted(2));
+        assert_eq!(function.write(0x81, &[6], WAIT), off);
+        assert_eq!(function.set_halt(2, true), Err(ErrorKind::Unavailable));
+        host.event(UsbFunctionEvent::Configured);
+        function.next_event().unwrap();
+        assert_eq!(function.write(0x81, &[7], WAIT), Ok(1));
+
         function.disable().unwrap();
+        assert_eq!(function.disable(), Ok(()));
         assert_eq!(host.descriptors(), None);
+        assert_eq!(function.write(0x81, &[6], WAIT), off);
+        function.enable(&GADGET).unwrap();
+        assert_eq!(host.enables(), 2);
+    }
+
+    #[test]
+    fn a_usb_function_answers_takes_or_stalls_a_control_request() {
+        let mut function = MockUsbFunction::new();
+        let host = function.clone();
+        function.enable(&GADGET).unwrap();
+        let none = Err(ErrorKind::InvalidInput);
+        assert_eq!(function.control_in(&[1], WAIT), none);
+        assert_eq!(function.control_stall(), Err(ErrorKind::InvalidInput));
+
+        let to_host = vendor_request(0xc0, 1);
+        host.request(to_host, 2, &[]);
+        assert_eq!(
+            function.next_event(),
+            Ok(Some(UsbFunctionEvent::Setup {
+                setup: to_host,
+                length: 2
+            }))
+        );
+        assert_eq!(function.control_out(&mut [0; 2], WAIT), none, "wrong way");
+        assert_eq!(
+            function.control_in(&[1, 2, 3], WAIT),
+            Ok(2),
+            "wLength bounds it"
+        );
+        assert_eq!(function.control_in(&[1], WAIT), none, "answered once");
+
+        let from_host = vendor_request(0x40, 2);
+        host.request(from_host, 3, &[7, 8, 9]);
+        function.next_event().unwrap();
+        let mut data = [0; 4];
+        assert_eq!(function.control_in(&[1], WAIT), none, "wrong way");
+        assert_eq!(
+            function.control_out(&mut data[..2], WAIT),
+            none,
+            "too small"
+        );
+        assert_eq!(function.control_out(&mut data, WAIT), Ok(3));
+        assert_eq!(data, [7, 8, 9, 0]);
+
+        let no_data = vendor_request(0x40, 3);
+        host.request(no_data, 0, &[]);
+        function.next_event().unwrap();
+        assert_eq!(function.control_out(&mut [], WAIT), Ok(0));
+
+        host.request(to_host, 2, &[]);
+        function.next_event().unwrap();
+        assert_eq!(function.control_stall(), Ok(()));
+
+        // Reading on without answering stalls the request.
+        host.request(from_host, 3, &[1, 2, 3]);
+        function.next_event().unwrap();
+        assert_eq!(function.next_event(), Ok(None));
+        assert_eq!(function.control_out(&mut data, WAIT), none);
+
+        assert_eq!(
+            host.answers(),
+            [
+                (to_host, ControlAnswer::In([1, 2].to_vec())),
+                (from_host, ControlAnswer::Out),
+                (no_data, ControlAnswer::Out),
+                (to_host, ControlAnswer::Stalled),
+                (from_host, ControlAnswer::Stalled),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_usb_function_the_controller_let_go_of_fails_until_it_is_enabled_again() {
+        let mut function = MockUsbFunction::new();
+        let host = function.clone();
+        host.refuse_enable(Some(ErrorKind::NotFound));
+        assert_eq!(function.enable(&GADGET), Err(ErrorKind::NotFound));
+        assert_eq!(
+            host.descriptors(),
+            None,
+            "nothing is left of a failed enable"
+        );
+        host.refuse_enable(None);
+        function.enable(&GADGET).unwrap();
+        host.release();
+        assert_eq!(function.next_event(), Err(ErrorKind::Unavailable));
+        assert_eq!(function.next_event(), Err(ErrorKind::Unavailable));
+        function.disable().unwrap();
+        function.enable(&GADGET).unwrap();
+        assert_eq!(function.next_event(), Ok(None));
     }
 }
