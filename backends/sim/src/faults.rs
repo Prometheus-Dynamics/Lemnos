@@ -268,6 +268,7 @@ impl<T: StreamEndpoint<Error = ErrorKind>> StreamEndpoint for Faulty<T> {
         next_buffer() -> Option<u32>;
         next_job(out: &mut [u8]) -> Option<usize>;
         write(buffer: u32, offset: usize, data: &[u8]) -> bool;
+        read(buffer: u32, offset: usize, out: &mut [u8]) -> bool;
     }
 }
 

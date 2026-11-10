@@ -468,6 +468,14 @@ impl StreamEndpoint for Unattached {
     ) -> core::result::Result<bool, ErrorKind> {
         Ok(false)
     }
+    fn read(
+        &mut self,
+        _buffer: u32,
+        _offset: usize,
+        _out: &mut [u8],
+    ) -> core::result::Result<bool, ErrorKind> {
+        Ok(false)
+    }
 }
 
 #[test]
