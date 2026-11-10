@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-driver-a733-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The A733 video engine through the vendor kernel's /dev/cedar_dev_ve2: claim, buffers with checked bus addresses, bounded register reads, completion. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: a dma-buf's size, from the crate allowed `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
