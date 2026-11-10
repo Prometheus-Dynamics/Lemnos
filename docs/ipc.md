@@ -40,11 +40,11 @@ the same values with the crate and compares the bytes with the hex here.
 
 | Item | Value | Source |
 |---|---|---|
-| Socket type | Unix domain, stream (`SOCK_STREAM`) | `lemnos-ipc/src/client.rs:15`, `lemnosd/src/service.rs:214` |
-| Default path | `/run/lemnos/lemnosd.sock` | `lemnos-ipc/src/client.rs:28` |
+| Socket type | Unix domain, stream (`SOCK_STREAM`) | `lemnos-ipc/src/client.rs` `Connection::connect`, `lemnosd/src/service.rs:214` |
+| Default path | `/run/lemnos/lemnosd.sock` | `lemnos-ipc/src/client.rs` `DEFAULT_SOCKET` |
 | Path override (service) | `LEMNOSD_SOCKET` | `lemnosd/src/main.rs:23` |
 | Listener | `lemnosd` binds. It removes a stale file at the path first, and creates the parent directory. | `lemnosd/src/service.rs:211-215` |
-| Connecting side | Clients. The service never connects out. | `lemnos-ipc/src/client.rs:313` |
+| Connecting side | Clients. The service never connects out. | `lemnos-ipc/src/client.rs` `Connection::connect` |
 | Permissions | `lemnosd` sets the socket to 0660 after binding, whatever the umask. The packaged unit also sets `UMask=0007`, `RuntimeDirectory=lemnos`, `RuntimeDirectoryMode=0750`, `User=lemnos`, `Group=lemnos`. | `packaging/systemd/lemnosd.service:49-58` |
 | Byte order | Little-endian for every integer and for `f64` bits | `wire/codec.rs:23-51` |
 | Direction | Both sides send at any time. The client sends requests; the service sends replies and unsolicited messages. | `wire/mod.rs:1-16` |
@@ -111,7 +111,7 @@ physical value is:
 value = count x 10^exponent
 ```
 
-(`lemnos-ipc/src/client.rs:137-144`.) The device list gives each channel's
+(`lemnos-ipc/src/client.rs`, `scaled`.) The device list gives each channel's
 exponent. Readings give only counts. Example: the BMI088 acceleration channel
 has exponent -3, so its counts are mm/s^2.
 
@@ -194,7 +194,7 @@ In `Event::Status` the error byte is `255` for "no error" (`wire/message.rs:153`
 
 ## 5. Handshake and version
 
-The steps the client library takes, in order (`lemnos-ipc/src/client.rs:312-370`):
+The steps the client library takes, in order (`lemnos-ipc/src/client.rs`, `Connection::connect`):
 
 1. Connect to the socket path.
 2. Send `Hello` (request kind 1). It carries `VERSION` (1), the client's name,
@@ -542,7 +542,7 @@ sends `restore`. The value is 0 in each case
 ## 8. Replies and correlation
 
 - The client chooses each `id`. Ids are `u32`. The client library starts at 1
-  and wraps past 0, so it never sends 0 as a live id (`client.rs:304-308`).
+  and wraps past 0, so it never sends 0 as a live id (`client.rs`, `Connection::next_id`).
 - The service echoes the id. It does not generate ids.
 - An id of 0 means "no id". Clients before protocol 1 send 0 everywhere. The
   service sends a reply with id 0 only where the table says so.
@@ -652,22 +652,26 @@ another language need not follow them, but the server's behaviour in section 10
 is what it will see.
 
 - **Timeouts.** Connecting sets the socket's read and write timeouts to the
-  client's timeout. The default is 2 s (`client.rs:30`, `:313-315`). Each
-  request waits up to that long for its answer (`client.rs:430-447`).
+  client's timeout. The default is 2 s (`client.rs`, `DEFAULT_TIMEOUT`,
+  `Connection::connect`). Each request waits up to that long for its answer
+  (`client.rs`, `Connection::request_blocking`).
 - **Waiting for an answer.** While a request waits, other messages are queued
   as events. A late answer is not discarded. It arrives later as an ordinary
-  message (`client.rs:430-447`).
+  message (`client.rs`, `Connection::request_blocking`).
 - **Reconnecting.** Off unless asked for. Retries back off from 100 ms, doubling
-  up to 5 s, and reset to 100 ms after a successful connect (`client.rs:31-32`,
-  `:286-298`, `:506-516`, `:368`).
+  up to 5 s, and reset to 100 ms after a successful connect (`client.rs`,
+  `RECONNECT_MIN`, `RECONNECT_MAX`, `ClientOptions::reconnecting`,
+  `Connection::lost`, `Connection::next_blocking`, `Connection::connect`).
 - **After a (re)connect.** The client re-sends, in order: `Hello`, `List`, each
   subscription with id 0 (`Subscribe` or `SubscribeChannels`), then held LED
-  requests (`client.rs:318-360`).
+  requests (`client.rs`, `Connection::connect`).
 - **Subscriptions.** `Subscribe` with period 0 ends the subscription. A refused
-  subscription is not kept (`client.rs:609-629`).
+  subscription is not kept (`client.rs`, `DeviceClient::subscribe`,
+  `DeviceClient::subscribe_channels`).
 - **Events flag.** Device clients send `events = 1` by default. LED clients send
-  0 (`client.rs:227-239`, `:323`).
-- **Priority.** Default 50 (`client.rs:173`).
+  0 (`client.rs`, `ClientOptions::devices`, `ClientOptions::leds`,
+  `Connection::connect`).
+- **Priority.** Default 50 (`client.rs`, `ClientOptions::new`).
 - **Bad frames.** A message that does not decode drops the connection: the
   buffer is cleared, `Disconnected` is reported, and the call returns the
   protocol error. A client that reconnects starts clean.
@@ -771,7 +775,7 @@ Facts about the code as it stood when this file was written. Entries marked fixe
 4. **Fixed (2026-11-05):** a bad frame drops the connection (section 11). Was: **The client does not close on a bad message.** When `decode_message` fails,
    the bytes stay in the buffer and the client returns the protocol error. The
    next receive decodes the same bytes and fails the same way
-   (`lemnos-ipc/src/client.rs:392-395`). The client stays connected. A caller
+   (`lemnos-ipc/src/client.rs`, `Connection::receive`). The client stays connected. A caller
    must reconnect itself.
 5. **Fixed (2026-11-05):** `client_closed` runs for every connection, and an ungreeted connection owns its intents alone (section 10). Was: **Requests from a connection that never sent `Hello` are cleaned up only if
    the connection is greeted.** `drop_closed` calls `client_closed` only for
