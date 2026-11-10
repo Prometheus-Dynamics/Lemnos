@@ -1,9 +1,11 @@
 //! Linux hardware for Lemnos, by the names a board file uses: `i2c-N`, `spidevB.C`,
-//! `gpiochipN:LINE`, `pwmchipN:CHANNEL`, a tty such as `ttyAMA0`, and a USB device by its port
-//! (`usb:1-1.4`) or its vendor and product (`usb:1a2b:3c4d`).
+//! `gpiochipN:LINE`, `pwmchipN:CHANNEL`, a tty such as `ttyAMA0`, a USB device by its port
+//! (`usb:1-1.4`) or its vendor and product (`usb:1a2b:3c4d`), and this board as a USB device by
+//! the controller it appears through (`udc:fe980000.usb`, see [`FunctionFsGadget`]).
 
 #![cfg(target_os = "linux")]
 
+mod gadget;
 mod gpio;
 pub mod hotplug;
 mod i2c;
@@ -21,10 +23,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lemnos_core::{
     I2c, Line, LocalCaller, Provider, Pwm, RawSpiBus, Result, Spi, Status, Tag, Uart,
-    UsbDeviceHandle, status_of,
+    UsbDeviceHandle, UsbFunctionHandle, status_of,
 };
 use lemnos_hal::ErrorKind;
 
+pub use gadget::FunctionFsGadget;
 pub use gpio::GpioLine;
 pub use i2c::I2cBus;
 pub use pwm::SysfsPwm;
@@ -163,6 +166,11 @@ impl LinuxBoard {
         valid.then(|| (self.sys.join("class/pwm").join(chip), channel))
     }
 
+    /// Where the kernel lists the USB device controllers.
+    fn udc_class(&self) -> PathBuf {
+        self.sys.join("class/udc")
+    }
+
     fn open_spi(&self, need: &str) -> Result<Spidev> {
         let path = self.node(need, SPI).ok_or(Status::NOT_FOUND)?;
         let claim = self.claim(need)?;
@@ -207,6 +215,7 @@ impl Provider for LinuxBoard {
             || self.module_spi(need).is_some()
             || usb::UsbName::parse(need)
                 .is_some_and(|name| usb::locate(&self.dev, &self.sys, name).is_ok())
+            || exists(gadget::controller(need).map(|name| self.udc_class().join(name)))
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
@@ -276,6 +285,28 @@ impl Provider for LinuxBoard {
         let id = usb::locate(&self.dev, &self.sys, name)?;
         let claim = self.claim(&usb::claim_key(id))?;
         Ok(Box::new(usb::open(&self.dev, &self.sys, id, claim)?))
+    }
+
+    fn usb_function(&mut self, need: &str) -> Result<UsbFunctionHandle> {
+        Ok(Box::new(self.open_usb_function(need)?))
+    }
+}
+
+impl LinuxBoard {
+    /// The gadget for a `udc:NAME` name: see [`FunctionFsGadget`]. The controller must be
+    /// there, and one owner holds it at a time. Nothing is set up until the function is
+    /// enabled.
+    fn open_usb_function(&self, need: &str) -> Result<FunctionFsGadget> {
+        let name = gadget::controller(need).ok_or(Status::NOT_FOUND)?;
+        let class = self.udc_class();
+        if !class.join(name).exists() {
+            return Err(Status::NO_DEVICE);
+        }
+        let claim = self.claim(need)?;
+        let configfs = self.sys.join("kernel/config");
+        let gadget = FunctionFsGadget::new(&configfs, &self.dev.join("usb-ffs"), &class, name)
+            .ok_or(Status::NOT_FOUND)?;
+        Ok(gadget.holding(claim))
     }
 }
 

@@ -280,15 +280,44 @@ struct DevicePort {
     events: VecDeque<PortEvent>,
     answered: Vec<Vec<u8>>,
     stalls: usize,
+    /// Polls before the data stage of a control request has come, then the data.
+    control_data: Option<(usize, Vec<u8>)>,
+    /// Data stages taken, which accepts their requests.
+    accepted: usize,
+    halts: Vec<(u8, bool)>,
+    /// What `configure` answers for this address, if not `Ok`.
+    refuse: Option<(u8, ErrorKind)>,
     /// Polls before a packet arrives, then the packet.
     incoming: Option<(usize, Vec<u8>)>,
     written: Vec<(u8, Vec<u8>)>,
+}
+
+/// The packet in `slot` once its polls have run out.
+fn arrive(slot: &mut Option<(usize, Vec<u8>)>, data: &mut [u8]) -> Option<usize> {
+    match slot.as_mut() {
+        Some((0, packet)) => {
+            let n = packet.len().min(data.len());
+            data[..n].copy_from_slice(&packet[..n]);
+            *slot = None;
+            Some(n)
+        }
+        Some((waits, _)) => {
+            *waits -= 1;
+            None
+        }
+        None => None,
+    }
 }
 
 impl FunctionPort for DevicePort {
     type Error = ErrorKind;
 
     fn configure(&mut self, endpoint: Endpoint) -> Result<(), ErrorKind> {
+        if let Some((address, kind)) = self.refuse
+            && address == endpoint.address
+        {
+            return Err(kind);
+        }
         self.endpoints.push(endpoint);
         Ok(())
     }
@@ -300,6 +329,7 @@ impl FunctionPort for DevicePort {
 
     fn disconnect(&mut self) -> Result<(), ErrorKind> {
         self.connected = false;
+        self.endpoints.clear();
         Ok(())
     }
 
@@ -312,25 +342,28 @@ impl FunctionPort for DevicePort {
         Ok(())
     }
 
+    fn control_out(&mut self, data: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
+        if data.is_empty() {
+            self.accepted += 1;
+            return Ok(Some(0));
+        }
+        let got = arrive(&mut self.control_data, data);
+        self.accepted += usize::from(got.is_some());
+        Ok(got)
+    }
+
     fn stall(&mut self) -> Result<(), ErrorKind> {
         self.stalls += 1;
         Ok(())
     }
 
+    fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<(), ErrorKind> {
+        self.halts.push((endpoint, halted));
+        Ok(())
+    }
+
     fn read(&mut self, _endpoint: u8, data: &mut [u8]) -> Result<Option<usize>, ErrorKind> {
-        match self.incoming.as_mut() {
-            Some((0, packet)) => {
-                let n = packet.len().min(data.len());
-                data[..n].copy_from_slice(&packet[..n]);
-                self.incoming = None;
-                Ok(Some(n))
-            }
-            Some((waits, _)) => {
-                *waits -= 1;
-                Ok(None)
-            }
-            None => Ok(None),
-        }
+        Ok(arrive(&mut self.incoming, data))
     }
 
     fn write(&mut self, endpoint: u8, data: &[u8]) -> Result<Option<usize>, ErrorKind> {
@@ -353,22 +386,68 @@ fn descriptors() -> Vec<u8> {
     out
 }
 
-fn get_descriptor(kind: u8, index: u8) -> PortEvent {
+/// The same device with the configuration at high speed after the one at full speed.
+fn two_speeds() -> Vec<u8> {
+    let full = descriptors();
+    let mut out = full[..50].to_vec();
+    out.extend_from_slice(&[9, 2, 32, 0, 1, 1, 0, 0x80, 50]);
+    out.extend_from_slice(&[9, 4, 0, 0, 2, 0xff, 0, 0, 0]);
+    out.extend_from_slice(&[7, 5, 0x81, 2, 0, 2, 0]);
+    out.extend_from_slice(&[7, 5, 0x02, 2, 0, 2, 0]);
+    out.extend_from_slice(&full[50..]);
+    out
+}
+
+/// A request on the port, with its `wLength`.
+fn setup(request_type: u8, request: u8, value: u16, length: u16) -> PortEvent {
     PortEvent::Setup {
         setup: ControlSetup {
-            request_type: 0x80,
-            request: 6,
-            value: u16::from_le_bytes([index, kind]),
+            request_type,
+            request,
+            value,
             index: 0,
         },
-        length: 255,
+        length,
     }
 }
 
+/// What the function reports for a request the port saw.
+fn reported(event: PortEvent) -> UsbFunctionEvent {
+    let PortEvent::Setup { setup, length } = event else {
+        panic!("not a request");
+    };
+    UsbFunctionEvent::Setup { setup, length }
+}
+
+fn get_descriptor(kind: u8, index: u8) -> PortEvent {
+    setup(0x80, 6, u16::from_le_bytes([index, kind]), 255)
+}
+
+type TestFunction = Function<DevicePort, 128>;
+
+fn function() -> TestFunction {
+    Function::new(DevicePort::default(), &CLOCK)
+}
+
+/// A function the host has configured.
+fn configured() -> TestFunction {
+    let mut function = function();
+    function.enable(&descriptors()).unwrap();
+    function.port().events.push_back(PortEvent::Configured);
+    assert_eq!(
+        function.next_event(),
+        Ok(Some(UsbFunctionEvent::Configured))
+    );
+    function
+}
+
+const SHORT: Duration = Duration::from_millis(5);
+
 #[test]
 fn a_function_configures_the_endpoints_its_descriptors_name_and_connects() {
-    let mut function: Function<DevicePort, 128> = Function::new(DevicePort::default(), &CLOCK);
+    let mut function = function();
     function.enable(&descriptors()).unwrap();
+    assert_eq!(function.enable(&descriptors()), Err(ErrorKind::Busy));
     let port = function.port();
     assert!(port.connected);
     assert_eq!(
@@ -390,26 +469,48 @@ fn a_function_configures_the_endpoints_its_descriptors_name_and_connects() {
     );
     function.disable().unwrap();
     assert!(!function.port().connected);
+    assert_eq!(function.disable(), Ok(()), "already disabled");
+    function.enable(&descriptors()).unwrap();
 }
 
 #[test]
 fn a_function_refuses_descriptors_it_cannot_keep_or_read() {
     let mut small: Function<DevicePort, 32> = Function::new(DevicePort::default(), &CLOCK);
     assert_eq!(small.enable(&descriptors()), Err(ErrorKind::InvalidInput));
-    let mut function: Function<DevicePort, 128> = Function::new(DevicePort::default(), &CLOCK);
+    let mut function = function();
     let mut short = descriptors();
     short[20] = 200; // wTotalLength past the end
     assert_eq!(function.enable(&short), Err(ErrorKind::InvalidInput));
     let mut zero = descriptors();
     zero[18 + 9] = 0; // a descriptor of length 0
     assert_eq!(function.enable(&zero), Err(ErrorKind::InvalidInput));
+    let mut control = descriptors();
+    control[18 + 18 + 3] = 0; // an endpoint that says it is a control endpoint
+    assert_eq!(function.enable(&control), Err(ErrorKind::InvalidInput));
     assert!(function.port().endpoints.is_empty(), "nothing configured");
     assert!(!function.port().connected);
+    assert_eq!(function.next_event(), Err(ErrorKind::Unavailable));
+}
+
+#[test]
+fn an_enable_the_port_refuses_part_way_leaves_nothing_behind() {
+    let mut function = function();
+    function.port().refuse = Some((0x02, ErrorKind::Unsupported));
+    assert_eq!(function.enable(&descriptors()), Err(ErrorKind::Unsupported));
+    assert!(
+        function.port().endpoints.is_empty(),
+        "the first endpoint is gone again"
+    );
+    assert!(!function.port().connected);
+    assert_eq!(function.next_event(), Err(ErrorKind::Unavailable));
+    function.port().refuse = None;
+    function.enable(&descriptors()).unwrap();
+    assert_eq!(function.port().endpoints.len(), 2);
 }
 
 #[test]
 fn a_function_answers_get_descriptor_from_its_copy() {
-    let mut function: Function<DevicePort, 128> = Function::new(DevicePort::default(), &CLOCK);
+    let mut function = function();
     let bytes = descriptors();
     function.enable(&bytes).unwrap();
     let port = function.port();
@@ -418,15 +519,7 @@ fn a_function_answers_get_descriptor_from_its_copy() {
         get_descriptor(2, 0),
         get_descriptor(3, 1),
         get_descriptor(3, 7),
-        PortEvent::Setup {
-            setup: ControlSetup {
-                request_type: 0x80,
-                request: 6,
-                value: 0x0200,
-                index: 0,
-            },
-            length: 9,
-        },
+        setup(0x80, 6, 0x0200, 9),
         PortEvent::Configured,
     ]);
     assert_eq!(
@@ -447,57 +540,237 @@ fn a_function_answers_get_descriptor_from_its_copy() {
 }
 
 #[test]
+fn a_function_serves_the_full_speed_configuration_of_a_set_with_two() {
+    let mut function = function();
+    let bytes = two_speeds();
+    function.enable(&bytes).unwrap();
+    assert_eq!(function.port().endpoints.len(), 2);
+    assert_eq!(function.port().endpoints[0].max_packet, 64);
+    function
+        .port()
+        .events
+        .extend([get_descriptor(2, 0), get_descriptor(3, 1)]);
+    assert_eq!(function.next_event(), Ok(None));
+    assert_eq!(
+        function.port().answered,
+        [bytes[18..50].to_vec(), bytes[86..92].to_vec()]
+    );
+}
+
+#[test]
 fn a_function_passes_other_requests_and_bus_events_up() {
-    let mut function: Function<DevicePort, 128> = Function::new(DevicePort::default(), &CLOCK);
+    let mut function = function();
     function.enable(&descriptors()).unwrap();
-    let vendor = ControlSetup {
-        request_type: 0xc0,
-        request: 1,
-        value: 2,
-        index: 3,
-    };
+    let vendor = setup(0xc0, 1, 2, 4);
     function.port().events.extend([
-        PortEvent::Setup {
-            setup: vendor,
-            length: 4,
-        },
         PortEvent::Reset,
+        PortEvent::Configured,
+        vendor,
+        PortEvent::Reset,
+        PortEvent::Deconfigured,
         PortEvent::Suspended,
+        PortEvent::Resumed,
     ]);
+    let mut seen = Vec::new();
+    while let Some(event) = function.next_event().unwrap() {
+        seen.push(event);
+    }
     assert_eq!(
-        function.next_event().unwrap(),
-        Some(UsbFunctionEvent::Setup(vendor))
+        seen,
+        [
+            // The reset before any configuration changed nothing the function knew of.
+            UsbFunctionEvent::Configured,
+            reported(vendor),
+            UsbFunctionEvent::Deconfigured,
+            UsbFunctionEvent::Suspended,
+            UsbFunctionEvent::Resumed,
+        ]
+    );
+    assert_eq!(function.port().stalls, 1, "the request nobody answered");
+}
+
+#[test]
+fn a_function_answers_a_control_request_with_data_bounded_by_its_length() {
+    let mut function = configured();
+    let none = Err(ErrorKind::InvalidInput);
+    assert_eq!(function.control_in(&[1], SHORT), none, "nothing pending");
+    assert_eq!(function.control_stall(), Err(ErrorKind::InvalidInput));
+
+    let request = setup(0xc0, 1, 2, 2);
+    function.port().events.push_back(request);
+    assert_eq!(function.next_event(), Ok(Some(reported(request))));
+    assert_eq!(function.control_out(&mut [0; 2], SHORT), none, "wrong way");
+    assert_eq!(function.control_in(&[1, 2, 3], SHORT), Ok(2));
+    assert_eq!(function.port().answered, [vec![1, 2]]);
+    assert_eq!(function.control_in(&[1], SHORT), none, "answered once");
+    assert_eq!(function.next_event(), Ok(None));
+    assert_eq!(function.port().stalls, 0);
+}
+
+#[test]
+fn a_function_takes_the_data_of_a_control_request_or_times_out_and_stalls_it() {
+    let mut function = configured();
+    let request = setup(0x40, 1, 2, 3);
+    let mut data = [0; 8];
+
+    function.port().events.push_back(request);
+    function.next_event().unwrap();
+    assert_eq!(
+        function.control_in(&[1], SHORT),
+        Err(ErrorKind::InvalidInput),
+        "wrong way"
     );
     assert_eq!(
-        function.next_event().unwrap(),
-        Some(UsbFunctionEvent::Deconfigured)
+        function.control_out(&mut data[..2], SHORT),
+        Err(ErrorKind::InvalidInput),
+        "too small for wLength"
+    );
+    function.port().control_data = Some((3, vec![7, 8, 9]));
+    assert_eq!(
+        function.control_out(&mut data, Duration::from_millis(50)),
+        Ok(3)
+    );
+    assert_eq!(data[..4], [7, 8, 9, 0], "no more than wLength is taken");
+    assert_eq!(function.port().accepted, 1);
+
+    // No data stage: taking it accepts the request.
+    function.port().events.push_back(setup(0x40, 1, 2, 0));
+    function.next_event().unwrap();
+    assert_eq!(function.control_out(&mut [], SHORT), Ok(0));
+    assert_eq!(function.port().accepted, 2);
+
+    // The host never sends its data.
+    function.port().events.push_back(request);
+    function.next_event().unwrap();
+    assert_eq!(
+        function.control_out(&mut data, SHORT),
+        Err(ErrorKind::Timeout)
+    );
+    assert_eq!(function.port().stalls, 1);
+    assert_eq!(
+        function.control_stall(),
+        Err(ErrorKind::InvalidInput),
+        "nothing is pending after a timeout"
+    );
+}
+
+#[test]
+fn a_function_stalls_a_request_it_refuses_and_one_it_reads_past() {
+    let mut function = configured();
+    let request = setup(0xc0, 9, 0, 1);
+    function.port().events.push_back(request);
+    function.next_event().unwrap();
+    assert_eq!(function.control_stall(), Ok(()));
+    assert_eq!(function.port().stalls, 1);
+    assert_eq!(function.next_event(), Ok(None));
+    assert_eq!(function.port().stalls, 1, "stalled once");
+
+    function.port().events.push_back(request);
+    function.next_event().unwrap();
+    assert_eq!(function.next_event(), Ok(None));
+    assert_eq!(function.port().stalls, 2, "read past without an answer");
+    assert_eq!(
+        function.control_in(&[1], SHORT),
+        Err(ErrorKind::InvalidInput)
+    );
+}
+
+#[test]
+fn a_reset_ends_the_configuration_and_the_pending_request_without_disabling() {
+    let mut function = configured();
+    let mut data = [0; 4];
+    function
+        .port()
+        .events
+        .extend([setup(0xc0, 1, 0, 1), PortEvent::Reset, PortEvent::Reset]);
+    function.next_event().unwrap();
+    assert_eq!(
+        function.next_event(),
+        Ok(Some(UsbFunctionEvent::Deconfigured))
     );
     assert_eq!(
-        function.next_event().unwrap(),
-        Some(UsbFunctionEvent::Suspended)
+        function.next_event(),
+        Ok(None),
+        "a second reset says nothing"
     );
-    assert_eq!(function.next_event().unwrap(), None);
+    let off = Err(ErrorKind::Unavailable);
+    assert_eq!(function.read(2, &mut data, SHORT), off);
+    assert_eq!(function.write(0x81, &[1], SHORT), off);
+    assert_eq!(function.set_halt(2, true), Err(ErrorKind::Unavailable));
+    assert_eq!(
+        function.control_in(&[1], SHORT),
+        Err(ErrorKind::InvalidInput),
+        "the request went with the reset"
+    );
+    // The host comes back: no enable needed.
+    function.port().events.push_back(PortEvent::Configured);
+    function.next_event().unwrap();
+    assert_eq!(function.write(0x81, &[1], SHORT), Ok(1));
+    assert!(function.port().connected);
+}
+
+#[test]
+fn a_function_halts_only_endpoints_its_descriptors_name() {
+    let mut function = configured();
+    function.set_halt(0x81, true).unwrap();
+    function.set_halt(0x81, false).unwrap();
+    function.set_halt(2, true).unwrap();
+    assert_eq!(
+        function.port().halts,
+        [(0x81, true), (0x81, false), (2, true)]
+    );
+    for endpoint in [0, 0x80, 1, 0x82, 3, 0x12, 0xff] {
+        assert_eq!(
+            function.set_halt(endpoint, true),
+            Err(ErrorKind::InvalidInput),
+            "{endpoint:#x}"
+        );
+    }
+    assert_eq!(function.port().halts.len(), 3);
+
+    // An isochronous endpoint has no halt.
+    let mut iso = descriptors();
+    iso[18 + 18 + 3] = 1;
+    let mut function = Function::<DevicePort, 128>::new(DevicePort::default(), &CLOCK);
+    function.enable(&iso).unwrap();
+    function.port().events.push_back(PortEvent::Configured);
+    function.next_event().unwrap();
+    assert_eq!(function.set_halt(0x81, true), Err(ErrorKind::Unsupported));
+    assert!(function.port().halts.is_empty());
 }
 
 #[test]
 fn a_function_waits_for_a_packet_until_its_timeout() {
-    let mut function: Function<DevicePort, 128> = Function::new(DevicePort::default(), &CLOCK);
+    let mut function = function();
     let mut out = [0; 8];
     assert_eq!(
-        function.read(2, &mut out, Duration::from_millis(5)),
+        function.read(2, &mut out, SHORT),
         Err(ErrorKind::Unavailable),
         "not enabled"
     );
     function.enable(&descriptors()).unwrap();
+    assert_eq!(
+        function.read(2, &mut out, SHORT),
+        Err(ErrorKind::Unavailable),
+        "not configured"
+    );
+    function.port().events.push_back(PortEvent::Configured);
+    function.next_event().unwrap();
     function.port().incoming = Some((3, vec![1, 2, 3]));
     assert_eq!(function.read(2, &mut out, Duration::from_millis(50)), Ok(3));
     assert_eq!(out[..3], [1, 2, 3]);
-    assert_eq!(
-        function.read(2, &mut out, Duration::from_millis(5)),
-        Err(ErrorKind::Timeout)
-    );
-    assert_eq!(function.write(0x81, &[9], Duration::from_millis(5)), Ok(1));
+    assert_eq!(function.read(2, &mut out, SHORT), Err(ErrorKind::Timeout));
+    assert_eq!(function.write(0x81, &[9], SHORT), Ok(1));
     assert_eq!(function.port().written, [(0x81, vec![9])]);
+    let wrong = Err(ErrorKind::InvalidInput);
+    assert_eq!(
+        function.read(0x81, &mut out, SHORT),
+        wrong,
+        "an IN endpoint"
+    );
+    assert_eq!(function.write(2, &[9], SHORT), wrong, "an OUT endpoint");
+    assert_eq!(function.write(0x83, &[9], SHORT), wrong, "not named");
+    assert_eq!(function.port().written.len(), 1);
 }
 
 /// What a [`HostPort`] was asked, shared by every clone.

@@ -260,6 +260,16 @@ pub struct ControlSetup {
     pub index: u16,
 }
 
+impl ControlSetup {
+    /// Bit 7 of `request_type`: the data stage goes from the device to the host.
+    pub const DIRECTION_IN: u8 = 0x80;
+
+    /// Whether the data stage, if there is one, goes from the device to the host.
+    pub const fn is_in(&self) -> bool {
+        self.request_type & Self::DIRECTION_IN != 0
+    }
+}
+
 /// One packet of an isochronous transfer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IsoPacket {
@@ -367,27 +377,142 @@ pub trait UsbDevice {
 /// What happened on the wire to this board acting as a USB device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsbFunctionEvent {
+    /// The host chose the configuration. Endpoints carry data from now on, none of them halted.
     Configured,
+    /// The configuration is no longer in force: the host chose configuration 0, reset the bus,
+    /// or the cable was pulled. A backend can't always tell these apart, so neither can the
+    /// function. Endpoints carry nothing until the next [`Configured`](Self::Configured), and a
+    /// control request that was pending is gone.
     Deconfigured,
+    /// The bus went idle. Nothing moves until [`Resumed`](Self::Resumed); the configuration
+    /// stands.
     Suspended,
     Resumed,
-    Setup(ControlSetup),
+    /// A control request for the function to answer. It is pending until it is answered with
+    /// [`UsbFunction::control_in`] or [`UsbFunction::control_out`], refused with
+    /// [`UsbFunction::control_stall`], or abandoned by the host.
+    Setup {
+        setup: ControlSetup,
+        /// `wLength`: how many bytes the data stage may carry, and 0 when there is none. It
+        /// bounds what `control_in` sends and is what `control_out` takes.
+        length: u16,
+    },
 }
 
 /// This board appearing as a USB device.
+///
+/// # States
+///
+/// A function is disabled until [`enable`](Self::enable) succeeds and after
+/// [`disable`](Self::disable). While it is disabled every call but `enable` and `disable` fails
+/// with [`Unavailable`](crate::ErrorKind::Unavailable).
+///
+/// While it is enabled the host decides the rest. Endpoints carry data only between a
+/// [`Configured`](UsbFunctionEvent::Configured) and the next
+/// [`Deconfigured`](UsbFunctionEvent::Deconfigured); outside that, [`read`](Self::read),
+/// [`write`](Self::write) and [`set_halt`](Self::set_halt) fail with `Unavailable`. While the
+/// bus is suspended nothing moves, so a transfer runs into its timeout.
+///
+/// # A host reset or a cable pull
+///
+/// Neither disables the function, and neither needs `enable` again:
+///
+/// - [`next_event`](Self::next_event) reports `Deconfigured` if the function was configured.
+/// - A `read` or `write` under way ends with `Unavailable`, and so does every one after it
+///   until the next `Configured`. Bytes of the transfer that was cut are lost.
+/// - A pending control request is gone: answering or stalling it fails with `Unavailable`.
+/// - Every endpoint halt is cleared.
+/// - When the host comes back and configures the function, `Configured` is reported and the
+///   endpoints work again, with the descriptors `enable` was given.
+///
+/// When the controller itself lets go of the function (it was taken away, or switched to
+/// another role), `next_event` fails with `Unavailable` and keeps failing: the function is
+/// enabled in name only. Call `disable`, then `enable` once the controller is back; `enable`
+/// says whether it is. A handle is never dead for good: `disable` then `enable` always starts
+/// over.
+///
+/// # What the backend answers
+///
+/// The backend answers the requests any USB device answers from what `enable` was given
+/// (`GET_DESCRIPTOR`, `SET_ADDRESS`, `SET_CONFIGURATION`, `GET_STATUS` and the like), and the
+/// host's `CLEAR_FEATURE(ENDPOINT_HALT)`. The function sees the rest as
+/// [`Setup`](UsbFunctionEvent::Setup): class and vendor requests, and standard requests to an
+/// interface or endpoint that the backend does not answer.
+///
+/// A backend whose controller assigns them may show the host other endpoint addresses,
+/// interface numbers and string indexes than the descriptors carry. The function always uses
+/// the ones it gave: in `read`, `write` and `set_halt`, and in the `index` of a request sent to
+/// one of its interfaces or endpoints.
+///
+/// Nothing here allocates once `enable` has returned.
 pub trait UsbFunction {
     type Error: HalError;
 
-    /// Presents `descriptors` to the host and connects.
+    /// Presents `descriptors` to the host and connects. The bytes are a descriptor set in the
+    /// layout [`UsbDescriptors`](crate::usb_descriptors::UsbDescriptors) defines and checks;
+    /// a set that fails the check is `InvalidInput` and nothing is presented. A valid set the
+    /// controller can't carry (an endpoint it doesn't have, a descriptor its framework
+    /// refuses) is `Unsupported` or `InvalidInput`, and nothing is presented either.
+    ///
+    /// `Busy` when the function is already enabled: `disable` it first. `NotFound` when the
+    /// controller, or something the board has to set up for it, isn't there. After any error
+    /// the function is disabled and nothing of the attempt is left behind, so `enable` can be
+    /// called again.
     fn enable(&mut self, descriptors: &[u8]) -> Result<(), Self::Error>;
+    /// Disconnects from the host and forgets the descriptors. `Ok` on a function that is
+    /// already disabled. A pending control request and every halt go with it.
     fn disable(&mut self) -> Result<(), Self::Error>;
+    /// What happened since the last call, oldest first, or `None`. Never waits.
+    ///
+    /// A control request still pending when this is called is stalled by it: a function that
+    /// reads on has not answered. An error of kind `Unavailable` means the controller let go
+    /// of the function, as the trait's docs say.
     fn next_event(&mut self) -> Result<Option<UsbFunctionEvent>, Self::Error>;
+    /// Answers the pending control request, which must be one whose data goes to the host
+    /// ([`ControlSetup::is_in`]), with `data` as its data stage. At most the request's
+    /// `length` bytes are sent, and fewer end the stage short. Returns how many were sent.
+    ///
+    /// `InvalidInput` when no request is pending or the pending one goes the other way; it
+    /// stays pending. `Unavailable` when the host abandoned the request (a new request, a
+    /// reset, a pull): nothing is pending afterwards. After `Ok` and after any other error
+    /// nothing is pending either.
+    ///
+    /// Waits at most `timeout` for the host to take the data, then fails with `Timeout`. A
+    /// backend that can't abandon a data stage once it has begun waits until the host ends
+    /// it, which a host does within its own control timeout or by a reset.
+    fn control_in(&mut self, data: &[u8], timeout: Duration) -> Result<usize, Self::Error>;
+    /// Takes the data stage of the pending control request, which must be one whose data
+    /// comes from the host, into `data`, and so accepts the request. `data` must hold the
+    /// request's `length` bytes. A request with a `length` of 0 has no data stage and is
+    /// accepted by this call with an empty `data`. Returns how many bytes came.
+    ///
+    /// Errors, what stays pending and `timeout` are as for [`control_in`](Self::control_in).
+    fn control_out(&mut self, data: &mut [u8], timeout: Duration) -> Result<usize, Self::Error>;
+    /// Refuses the pending control request with a protocol stall, which the host sees as
+    /// "request not supported". Nothing is pending afterwards. `InvalidInput` when no request
+    /// is pending, `Unavailable` when the host had already abandoned it.
+    fn control_stall(&mut self) -> Result<(), Self::Error>;
+    /// Halts `endpoint` (`halted` true: it answers the host with a stall until the halt is
+    /// cleared) or clears its halt and resets its data toggle (`halted` false). The host can
+    /// clear a halt too, and the function is not told.
+    ///
+    /// `InvalidInput` for an endpoint the descriptors don't name, `Unsupported` for one that
+    /// can't be halted (an isochronous endpoint), `Unavailable` while not configured.
+    fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<(), Self::Error>;
+    /// Takes what the host sent to the OUT endpoint `endpoint` (its address in the
+    /// descriptors) into `data`, waiting at most `timeout`. Returns how many bytes came.
+    ///
+    /// `InvalidInput` for an endpoint the descriptors don't name or one of the other
+    /// direction, `Timeout` when nothing came, `Unavailable` while not configured.
     fn read(
         &mut self,
         endpoint: u8,
         data: &mut [u8],
         timeout: Duration,
     ) -> Result<usize, Self::Error>;
+    /// Sends `data` to the host on the IN endpoint `endpoint` (its address in the
+    /// descriptors, bit 7 set), waiting at most `timeout` for the host to take it. Returns
+    /// how many bytes went. Errors are as for [`read`](Self::read).
     fn write(&mut self, endpoint: u8, data: &[u8], timeout: Duration)
     -> Result<usize, Self::Error>;
 }

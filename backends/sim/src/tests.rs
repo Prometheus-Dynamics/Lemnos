@@ -228,8 +228,16 @@ fn every_resource_round_trips_through_the_provider() {
     assert_eq!(usb.config_descriptor(0, &mut descriptor), Ok(2));
 
     let function = board.add_usb_function("gadget");
-    board.usb_function("gadget").unwrap().enable(&[1]).unwrap();
-    assert_eq!(function.descriptors(), Some([1].to_vec()));
+    // A device with one vendor interface and no endpoints.
+    let set = [
+        18, 1, 0, 2, 0, 0, 0, 64, 9, 0x12, 1, 0, 0, 1, 0, 0, 0, 1, // device
+        9, 2, 18, 0, 1, 1, 0, 0x80, 50, // configuration
+        9, 4, 0, 0, 0, 0xff, 0, 0, 0, // interface
+    ];
+    let mut gadget = board.usb_function("gadget").unwrap();
+    assert_eq!(gadget.enable(&[1]), Err(ErrorKind::InvalidInput));
+    gadget.enable(&set).unwrap();
+    assert_eq!(function.descriptors(), Some(set.to_vec()));
 
     let regs = board.add_registers("regs", 16);
     board.registers("regs").unwrap().write32(4, 7).unwrap();

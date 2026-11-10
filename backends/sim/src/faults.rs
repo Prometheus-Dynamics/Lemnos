@@ -302,6 +302,10 @@ impl<T: UsbFunction<Error = ErrorKind>> UsbFunction for Faulty<T> {
         enable(descriptors: &[u8]) -> ();
         disable() -> ();
         next_event() -> Option<UsbFunctionEvent>;
+        control_in(data: &[u8], timeout: Duration) -> usize;
+        control_out(data: &mut [u8], timeout: Duration) -> usize;
+        control_stall() -> ();
+        set_halt(endpoint: u8, halted: bool) -> ();
         read(endpoint: u8, data: &mut [u8], timeout: Duration) -> usize;
         write(endpoint: u8, data: &[u8], timeout: Duration) -> usize;
     }
