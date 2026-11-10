@@ -3,6 +3,8 @@
 #ifndef LEMNOS_INTERNAL_H
 #define LEMNOS_INTERNAL_H
 
+#include <linux/fs.h>
+#include <linux/poll.h>
 #include <linux/types.h>
 
 #include "lemnos.h"
@@ -12,6 +14,29 @@ struct device;
 long lem_claim(struct lemnos_claim *c);
 /* Whether `fd` is a claim on exactly `resource`. Allocates nothing. */
 bool lem_claim_held(int fd, const char *resource);
+
+/*
+ * What a claim's file is bound to: read and poll may be NULL; release runs
+ * when the file's last copy closes.
+ */
+struct lem_claim_ops {
+	void (*release)(void *data);
+	ssize_t (*read)(void *data, struct file *file, char __user *buf, size_t len);
+	__poll_t (*poll)(void *data, struct file *file, poll_table *wait);
+};
+
+/* Binds `data` to the claim `fd`, which must be on exactly `resource`. Once per claim. */
+int lem_claim_attach(int fd, const char *resource, const struct lem_claim_ops *ops, void *data);
+/* What `file` is bound to with `ops`, or NULL. `file` may be NULL. Allocates nothing. */
+void *lem_claim_attached(struct file *file, const struct lem_claim_ops *ops);
+
+long lem_gpio_request(const struct lemnos_gpio_request *r);
+long lem_gpio_config(const struct lemnos_gpio_config *c);
+long lem_gpio_get(struct lemnos_gpio_value *v);
+long lem_gpio_set(const struct lemnos_gpio_value *v);
+long lem_pwm_request(struct lemnos_pwm_request *r);
+long lem_pwm_apply(const struct lemnos_pwm_state *s);
+long lem_pwm_get(struct lemnos_pwm_state *s);
 
 int lem_bus_init(void);
 void lem_bus_exit(void);

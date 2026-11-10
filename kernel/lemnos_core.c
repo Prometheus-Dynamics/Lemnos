@@ -551,6 +551,11 @@ union lem_args {
 	struct lemnos_i2c_transfer i2c;
 	struct lemnos_i2c_smbus smbus;
 	struct lemnos_spi_transfer spi;
+	struct lemnos_gpio_request gpio_request;
+	struct lemnos_gpio_config gpio_config;
+	struct lemnos_gpio_value gpio_value;
+	struct lemnos_pwm_request pwm_request;
+	struct lemnos_pwm_state pwm_state;
 };
 
 static long lem_next(struct lemnos_next *n)
@@ -606,6 +611,37 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 	}
 }
 
+/* Requests that don't name a block. */
+static long lem_unit_request(unsigned int cmd, union lem_args *u)
+{
+	switch (cmd) {
+	case LEMNOS_IOC_CLAIM:
+		return lem_claim(&u->claim);
+	case LEMNOS_IOC_I2C_TRANSFER:
+		return lem_i2c_transfer(&u->i2c);
+	case LEMNOS_IOC_I2C_SMBUS:
+		return lem_i2c_smbus(&u->smbus);
+	case LEMNOS_IOC_SPI_TRANSFER:
+		return lem_spi_transfer(&u->spi);
+	case LEMNOS_IOC_GPIO_REQUEST:
+		return lem_gpio_request(&u->gpio_request);
+	case LEMNOS_IOC_GPIO_CONFIG:
+		return lem_gpio_config(&u->gpio_config);
+	case LEMNOS_IOC_GPIO_GET:
+		return lem_gpio_get(&u->gpio_value);
+	case LEMNOS_IOC_GPIO_SET:
+		return lem_gpio_set(&u->gpio_value);
+	case LEMNOS_IOC_PWM_REQUEST:
+		return lem_pwm_request(&u->pwm_request);
+	case LEMNOS_IOC_PWM_APPLY:
+		return lem_pwm_apply(&u->pwm_state);
+	case LEMNOS_IOC_PWM_GET:
+		return lem_pwm_get(&u->pwm_state);
+	default:
+		return -ENOIOCTLCMD;
+	}
+}
+
 static long lem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *uarg = (void __user *)arg;
@@ -618,15 +654,8 @@ static long lem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	if ((_IOC_DIR(cmd) & _IOC_WRITE) && copy_from_user(&u, uarg, size))
 		return -EFAULT;
 
-	if (cmd == LEMNOS_IOC_CLAIM) {
-		ret = lem_claim(&u.claim);
-	} else if (cmd == LEMNOS_IOC_I2C_TRANSFER) {
-		ret = lem_i2c_transfer(&u.i2c);
-	} else if (cmd == LEMNOS_IOC_I2C_SMBUS) {
-		ret = lem_i2c_smbus(&u.smbus);
-	} else if (cmd == LEMNOS_IOC_SPI_TRANSFER) {
-		ret = lem_spi_transfer(&u.spi);
-	} else {
+	ret = lem_unit_request(cmd, &u);
+	if (ret == -ENOIOCTLCMD) {
 		down_read(&lem_blocks_sem);
 		if (cmd == LEMNOS_IOC_NEXT) {
 			ret = lem_next(&u.next);

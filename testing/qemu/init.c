@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
 #include <sys/reboot.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -133,6 +134,56 @@ static const char *cma_heap(void)
 	return heaps[1];
 }
 
+#define SIM "/sys/kernel/config/gpio-sim/lemnos"
+
+static char gpio_chip[16], gpio_dir[128];
+
+/* The contents of a one-line file, without the newline. */
+static int get_text(const char *path, char *out, size_t size)
+{
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	ssize_t n = fd < 0 ? -1 : read(fd, out, size - 1);
+
+	if (fd >= 0)
+		close(fd);
+	if (n <= 0)
+		return -1;
+	out[n] = 0;
+	out[strcspn(out, "\n")] = 0;
+	return 0;
+}
+
+/* An eight-line simulated chip, through configfs. */
+static int gpio_sim_up(void)
+{
+	char dev[64], chip[32];
+
+	if (mkdir("/sys/kernel/config", 0755) && errno != EEXIST && errno != EROFS)
+		return -1;
+	if (mount("configfs", "/sys/kernel/config", "configfs", 0, NULL) && errno != EBUSY)
+		return -1;
+	if (!access("/gpio-sim.ko", R_OK) && load("/gpio-sim.ko", ""))
+		return -1;
+	if (mkdir(SIM, 0755) || mkdir(SIM "/bank0", 0755) || put(SIM "/bank0/num_lines", "8") ||
+	    put(SIM "/live", "1"))
+		return -1;
+	if (get_text(SIM "/dev_name", dev, sizeof(dev)) ||
+	    get_text(SIM "/bank0/chip_name", chip, sizeof(chip)))
+		return -1;
+	snprintf(gpio_chip, sizeof(gpio_chip), "%s", chip + strlen("gpiochip"));
+	snprintf(gpio_dir, sizeof(gpio_dir), "/sys/devices/platform/%s/%s", dev, chip);
+	return 0;
+}
+
+static void gpio_sim_down(void)
+{
+	put(SIM "/live", "0");
+	rmdir(SIM "/bank0");
+	rmdir(SIM);
+	if (!access("/gpio-sim.ko", R_OK))
+		unload("gpio_sim");
+}
+
 int main(void)
 {
 	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
@@ -188,6 +239,12 @@ int main(void)
 	      "lemnos_bus_check");
 	check(!put("/sys/bus/spi/drivers/lemnos/unbind", SPI), "SPI device unbound");
 	check(!put("/sys/bus/spi/devices/" SPI "/driver_override", "\n"), "override cleared");
+
+	check(!gpio_sim_up(), "simulated GPIO chip up");
+	check(!run((char *const[]){ "/lemnos_gpio_check", "/dev/lemnos", gpio_chip, gpio_dir,
+				    "lemnos-test-parent", NULL }),
+	      "lemnos_gpio_check");
+	gpio_sim_down();
 
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded with nothing left held");

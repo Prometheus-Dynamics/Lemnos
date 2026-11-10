@@ -31,7 +31,7 @@ mkdir -p "$root"/{dev,proc,sys}
 flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter -I"$work/test_block")
 read -r -a compiler <<<"$CC"
 "${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init.c"
-for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_bus_check lemnos_stream_check lemnos_rp1_csi2_check; do
+for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_bus_check lemnos_gpio_check lemnos_stream_check lemnos_rp1_csi2_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
 # Its uAPI header is the kernel's own.
@@ -43,10 +43,18 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   "$work/kernel/test/lemnos_pisp_fe_check.c"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
-for module in i2c-stub spi-loopback-test; do
-  found="$(find -L "$KDIR/drivers" "/lib/modules/$release/kernel/drivers" -name "$module.ko*" 2>/dev/null | head -1 || true)"
+# gpio-sim may be built in instead, and then there's no file to bring.
+# Installed modules only fit this machine's kernel, so they're only looked at when that's what boots.
+places=("$KDIR/drivers")
+if [[ "$KERNEL" == "/boot/vmlinuz-$release" ]]; then places+=("/lib/modules/$release/kernel/drivers"); fi
+for module in i2c-stub spi-loopback-test gpio-sim; do
+  found="$(find -L "${places[@]}" -name "$module.ko*" 2>/dev/null | head -1 || true)"
   case "$found" in
-    "") echo "qemu: $module not found under $KDIR" >&2; exit 1 ;;
+    "")
+      [[ "$module" == gpio-sim ]] && continue
+      echo "qemu: $module not found under $KDIR" >&2
+      exit 1
+      ;;
     *.zst) zstd -q -d -o "$root/$module.ko" "$found" ;;
     *.xz) xz -d -c "$found" >"$root/$module.ko" ;;
     *) cp "$found" "$root/$module.ko" ;;
