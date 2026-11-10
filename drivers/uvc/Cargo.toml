@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-driver-uvc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-hal = { path = "../../engine/hal" }
+lemnos-contract-camera-frames = { path = "../../contracts/camera-frames" }
+
+[dev-dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["mock"] }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-wire = { path = "../../engine/wire" }
+
+[package.metadata.lemnos]
+driver = "Uvc"
