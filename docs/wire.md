@@ -51,10 +51,21 @@ closes the connection on a larger length, without reading it.
 | 19 | Event | device u32, state u8, health u8, reason str | to client |
 | 20 | Refusal | id u32, status i32, text str | to client |
 | 21 | StreamClose | id u32, device u32, name str | to host |
+| 22 | StreamOpenHandles | id u32, device u32, name str | to host |
+| 23 | StreamHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32 | to client |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
 `tags` is comma-separated. An empty `device` in Open means any device with that tag.
+
+`features` in Welcome is a set of bits, each saying the host can do one thing added to version 1
+after its first form. A host leaves the bits it doesn't know clear, and a client ignores the bits
+it doesn't know. A client uses what a bit stands for only when the host set it: an older host
+closes the connection on a kind it doesn't know (rule 3).
+
+| Bit | Value | The host |
+|---|---|---|
+| 0 | 1 | takes StreamOpenHandles, and may answer it with StreamHandles |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never
@@ -82,13 +93,24 @@ Each of these closes a way the earlier protocol could go wrong.
 8. **Trailing bytes after the known fields are ignored.** This is how a field is appended
    compatibly: an older reader stops before it.
 9. **The socket is mode 0660** after binding, whatever the umask.
+10. **An addition is announced before it is used.** A kind added to version 1 is sent to a host
+    only when its bit is set in Welcome's `features`, and to a client only in answer to a kind
+    that says the client knows it. So neither side is ever sent a kind it would close on.
 
 ## Descriptors
 
 StreamReady says how many file descriptors arrive with it, as `SCM_RIGHTS` on the same `sendmsg`
-that carries the frame's first byte. Three today, in order: the ring, the doorbell, the buffers. A
+that carries the frame's first byte. Three, in order: the ring, the doorbell, the buffers. A
 client reads the socket with `recvmsg` while a StreamOpen is outstanding, because a plain read
 discards descriptors. Descriptors passed to the host are closed unread.
+
+StreamHandles carries its descriptors the same way, in one message: the ring, the doorbell, then
+one descriptor per buffer, in buffer order. `descriptors` is `2 + buffers`, and `buffers` is at
+most 128, so at most 130 descriptors arrive. A client that sends StreamOpenHandles gives its
+`recvmsg` room for 130 descriptors: what doesn't fit is lost, and the stream with it. A client
+refuses a StreamHandles whose `buffers` is 0 or over 128, whose `descriptors` isn't `2 + buffers`,
+or that came with a different number of descriptors, and closes the connection, as for any frame
+that can't be trusted.
 
 ## Streams
 
@@ -103,6 +125,39 @@ crosses the socket.
 | ring | a shared mapping of `ring_bytes`, read and written by both sides |
 | doorbell | an eventfd. The host adds 1 after each frame. Waiting on it is optional |
 | buffers | `buffers` buffers, one every `stride` bytes from offset 0. Map it read-only |
+
+### Streams whose buffers are dma-bufs
+
+A board file can say a stream's buffers are dma-bufs (`memory = "dma-buf"`), one per buffer, so
+that a driver can hand a buffer to hardware. Such a stream can't be answered with StreamReady,
+which carries one descriptor for all the buffers.
+
+- A client that can take one descriptor per buffer sends StreamOpenHandles in place of StreamOpen,
+  and only to a host that set bit 0 of `features`. It means the same as StreamOpen, and the answer
+  is StreamReady for a stream of shared memory and StreamHandles for a stream of dma-bufs.
+- StreamOpen for a stream of dma-bufs gets Refusal with `NOT_SUPPORTED` (-95), and the stream is
+  left untaken. This is what a client from before this addition sees.
+- StreamOpenHandles to a host from before this addition is an unknown kind and closes the
+  connection, which is why a client looks at `features` first. Such a host has no streams of
+  dma-bufs, and StreamOpen takes every stream it has.
+- When the host can't get the dma-bufs (no such heap, or the heap refuses), the answer is Refusal
+  with the reason as a status: `NOT_FOUND` for a heap that isn't there, `ACCESS`, `NO_MEMORY`, or
+  `IO`. The host never makes such a stream out of shared memory instead.
+
+StreamClose is the same for both.
+
+| Descriptor | What it is |
+|---|---|
+| ring | as above |
+| doorbell | as above |
+| buffer 0 to `buffers - 1` | one dma-buf each, holding that buffer from offset 0 and at least `buffer_bytes` long. A heap rounds up, so it may be longer |
+
+A client maps the first `buffer_bytes` of each, after
+checking that the descriptor is at least that long and that its size can't change: it is a
+dma-buf (`fstatfs` gives `DMA_BUF_MAGIC`), or it is sealed against shrinking. The ring, its words
+and every check below are the same as for a stream of shared memory; only where buffer `n`'s bytes
+are differs. The same memory is what the driver's hardware is given, so a frame is in the buffer
+with no copy.
 
 `stride` is `buffer_bytes` rounded up to a multiple of 4096. The ring is 64-bit words, little-endian
 on every platform this is built for:
@@ -339,6 +394,24 @@ Each vector is one complete frame.
 <!-- vector: stream-close -->
 ```hex
 0f 00 00 00 15 00 0c 00 00 00 03 00 00 00 01 00 00 00 73
+```
+
+### stream-open-handles
+
+`StreamOpenHandles { id: 13, device: 3, name: "s" }`
+
+<!-- vector: stream-open-handles -->
+```hex
+0f 00 00 00 16 00 0d 00 00 00 03 00 00 00 01 00 00 00 73
+```
+
+### stream-handles
+
+`StreamHandles { id: 13, buffers: 4, descriptors: 6, buffer_bytes: 256, frame_slots: 4, job_slots: 2, job_bytes: 8 }`
+
+<!-- vector: stream-handles -->
+```hex
+1b 00 00 00 17 00 0d 00 00 00 04 00 00 00 06 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00
 ```
 
 ### event

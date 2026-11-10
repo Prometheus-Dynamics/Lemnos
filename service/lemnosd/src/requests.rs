@@ -7,7 +7,10 @@ use std::sync::atomic::Ordering;
 
 use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
-use lemnos_wire::{Frame, MAX_FRAME, VERSION, decode, encode_description};
+use lemnos_host::stream::StreamMemory;
+use lemnos_wire::{
+    Frame, MAX_FRAME, VERSION, decode, encode_description, feature, handle_descriptors,
+};
 
 use crate::Core;
 use crate::conn::Conn;
@@ -134,7 +137,10 @@ impl Client {
             } => self.subscribe(id, device, contract, method, period_us, only_changes),
             Frame::Unsubscribe { id, subscription } => self.unsubscribe(id, subscription),
             Frame::SetPower { id, device, on } => self.set_power(id, device, on),
-            Frame::StreamOpen { id, device, name } => self.stream_open(id, device, name),
+            Frame::StreamOpen { id, device, name } => self.stream_open(id, device, name, false),
+            Frame::StreamOpenHandles { id, device, name } => {
+                self.stream_open(id, device, name, true)
+            }
             Frame::StreamClose { id, device, name } => self.stream_close(id, device, name),
             // Only the service sends the rest.
             _ => false,
@@ -152,7 +158,7 @@ impl Client {
         }
         self.conn.answer(&Frame::Welcome {
             version: VERSION,
-            features: 0,
+            features: feature::STREAM_HANDLES,
             host: &self.core.name,
         });
         true
@@ -334,12 +340,58 @@ impl Client {
         true
     }
 
-    fn stream_open(&self, id: u32, device: u32, name: &str) -> Keep {
+    /// `takes_handles` is whether the client asked in the way that says it can take one
+    /// descriptor per buffer for an answer.
+    fn stream_open(&self, id: u32, device: u32, name: &str, takes_handles: bool) -> Keep {
+        let Some(memory) = self.core.host.stream_memory(device, name) else {
+            return self.refuse(id, Status::NOT_FOUND, "can't open the stream");
+        };
+        let dma_bufs = memory == StreamMemory::DmaBuf;
+        // Before anything is taken or allocated: a client from before streams of dma-bufs gets
+        // an answer it understands, and the stream stays free.
+        if dma_bufs && !takes_handles {
+            return self.refuse(
+                id,
+                Status::NOT_SUPPORTED,
+                "the stream's buffers are dma-bufs, which this client can't take",
+            );
+        }
         let lease = match self.core.host.stream_attach(device, name, self.conn.id) {
             Ok(lease) => lease,
+            Err(Status::BUSY) => return self.refuse(id, Status::BUSY, "can't open the stream"),
+            Err(status) if dma_bufs => {
+                return self.refuse(id, status, "can't get dma-bufs for the stream");
+            }
             Err(status) => return self.refuse(id, status, "can't open the stream"),
         };
         let layout = lease.layout;
+        if let Some(handles) = lease.handles {
+            let descriptors = handle_descriptors(layout.buffers).filter(|_| {
+                takes_handles
+                    && lease.descriptors.len() == 2
+                    && handles.len() == layout.buffers as usize
+            });
+            let Some(descriptors) = descriptors else {
+                let _ = self.core.host.stream_detach(device, name, self.conn.id);
+                return self.refuse(id, Status::IO, "the stream's descriptors can't be sent");
+            };
+            // The ring and the doorbell close here if this connection has already gone, and
+            // this hold on the buffers goes with them.
+            self.conn.answer_with_handles(
+                &Frame::StreamHandles {
+                    id,
+                    buffers: layout.buffers,
+                    descriptors,
+                    buffer_bytes: layout.buffer_bytes,
+                    frame_slots: layout.frame_slots,
+                    job_slots: layout.job_slots,
+                    job_bytes: layout.job_bytes,
+                },
+                lease.descriptors,
+                Some(handles),
+            );
+            return true;
+        }
         let Ok(descriptors) = u8::try_from(lease.descriptors.len()) else {
             let _ = self.core.host.stream_detach(device, name, self.conn.id);
             return self.refuse(id, Status::IO, "too many descriptors");

@@ -33,7 +33,8 @@ use clock::MonotonicClock;
 use conn::{Conn, Waker};
 use notify::Notifier;
 use readers::Readers;
-use streams::MemfdStreams;
+use streams::ServiceStreams;
+pub use streams::{BufferSource, DmaHeaps};
 
 /// Where a service listens unless told otherwise.
 pub const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
@@ -138,7 +139,17 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 impl Service {
+    /// Starts a service whose streams of dma-bufs come from the kernel's dma-heaps.
     pub fn start(config: Config) -> Result<Self, StartError> {
+        Self::start_with_buffers(config, Arc::new(DmaHeaps::default()))
+    }
+
+    /// [`Service::start`], with `buffers` giving the buffers of every stream the board file
+    /// declares as dma-bufs.
+    pub fn start_with_buffers(
+        config: Config,
+        buffers: Arc<dyn BufferSource>,
+    ) -> Result<Self, StartError> {
         let listener = bind(&config.socket).map_err(StartError::Socket)?;
         let (wake_tx, wake_rx) = UnixStream::pair().map_err(StartError::Socket)?;
         for socket in [&wake_tx, &wake_rx] {
@@ -152,7 +163,7 @@ impl Service {
             config.backend,
             Arc::clone(&clock) as Arc<dyn lemnos_core::HostClock>,
             config.options,
-            Arc::new(MemfdStreams),
+            Arc::new(ServiceStreams { source: buffers }),
         )
         .map_err(StartError::Host)?;
         let core = Arc::new(Core {

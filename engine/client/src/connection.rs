@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use lemnos_wire::MAX_FRAME;
 
-use crate::stream::{DESCRIPTORS, StreamPlatform};
+use crate::stream::{MAX_DESCRIPTORS, StreamPlatform};
 
 const RX_START: usize = 16 * 1024;
 /// More descriptors than this waiting means the peer isn't following the protocol.
-const MAX_WAITING_FDS: usize = 4 * DESCRIPTORS;
+const MAX_WAITING_FDS: usize = 2 * MAX_DESCRIPTORS;
 
 /// While a stream is being opened, the socket is read so that descriptors aren't lost.
 pub(crate) struct Taker {

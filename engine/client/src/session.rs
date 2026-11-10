@@ -8,7 +8,7 @@ use lemnos_core::Status;
 use lemnos_wire::ring::Layout;
 use lemnos_wire::{
     DeviceDescription, Frame, MAX_QUEUED_BYTES, VERSION, append, decode, decode_description,
-    health, state,
+    feature, handle_descriptors, health, state,
 };
 
 use crate::connection::{Connection, Taker};
@@ -170,8 +170,23 @@ struct Shared {
     values: ValueQueue,
     events: VecDeque<Event>,
     host: String,
+    /// What the service said it can do, in its Welcome.
+    features: u64,
+    /// A request whose answer nobody waits for: giving back a stream that couldn't be set up.
+    unheard: Option<u32>,
     rejected: Option<Error>,
     close: bool,
+}
+
+/// What the service answered a stream being opened with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StreamAnswer {
+    layout: Layout,
+    descriptors: u8,
+    /// StreamHandles: a descriptor per buffer. Otherwise StreamReady.
+    handles: bool,
+    /// Whether the request said this client takes StreamHandles.
+    asked_handles: bool,
 }
 
 impl Shared {
@@ -210,7 +225,15 @@ impl Shared {
     /// on to whoever is waiting.
     fn route(&mut self, frame: Frame<'_>, tx: &mut Vec<u8>) -> bool {
         match frame {
-            Frame::Welcome { version, host, .. } => {
+            Frame::Reply { id, .. } | Frame::Refusal { id, .. } if self.unheard == Some(id) => {
+                self.unheard = None;
+                false
+            }
+            Frame::Welcome {
+                version,
+                features,
+                host,
+            } => {
                 if version != VERSION {
                     self.rejected = Some(Error::Version {
                         ours: VERSION,
@@ -220,6 +243,7 @@ impl Shared {
                     return false;
                 }
                 host.clone_into(&mut self.host);
+                self.features = features;
                 self.ready = true;
                 self.retry_delay = RETRY_FIRST;
                 self.sub_retry = None;
@@ -325,6 +349,7 @@ const fn answers(frame: &Frame<'_>) -> Option<u32> {
         | Frame::Reply { id, .. }
         | Frame::Subscribed { id, .. }
         | Frame::StreamReady { id, .. }
+        | Frame::StreamHandles { id, .. }
         | Frame::Refusal { id, .. } => Some(id),
         _ => None,
     }
@@ -390,6 +415,8 @@ impl Session {
                 values: ValueQueue::new(),
                 events: VecDeque::new(),
                 host: String::new(),
+                features: 0,
+                unheard: None,
                 rejected: None,
                 close: false,
             },
@@ -445,6 +472,8 @@ impl Session {
     fn lost(&mut self) {
         self.connection = None;
         self.shared.ready = false;
+        self.shared.features = 0;
+        self.shared.unheard = None;
         self.shared.close = false;
         self.generation += 1;
         for sub in &mut self.shared.subs {
@@ -1030,6 +1059,11 @@ impl Session {
     /// Takes a device's frame stream. `name` is the stream's name under that device. A stream
     /// has one consumer, and it isn't restored after a reconnect: take it again.
     ///
+    /// A stream whose buffers are dma-bufs is taken the same way and reads the same way. It
+    /// needs a service that offers such streams and a `platform` that can map them
+    /// ([`StreamPlatform::map_buffer`]); without the second this is
+    /// [`Error::StreamUnsupported`], and the stream is given back.
+    ///
     /// Waiting for the answer reads the socket with `platform`, so nothing may be
     /// read from this session at the same time, which a `Session` rules out by being owned.
     pub fn open_stream(
@@ -1050,25 +1084,62 @@ impl Session {
         device: u32,
         name: &str,
         platform: &Arc<dyn StreamPlatform>,
-    ) -> Result<(u32, impl Pick<(Layout, u8)> + use<>), Error> {
+    ) -> Result<(u32, impl Pick<StreamAnswer> + use<>), Error> {
         let id = self.shared.id();
-        self.queue(&Frame::StreamOpen { id, device, name })?;
+        // Only a service that said so knows the second way of asking. To any other it is an
+        // unknown kind, which ends the connection.
+        let asked_handles = self.shared.features & feature::STREAM_HANDLES != 0;
+        if asked_handles {
+            self.queue(&Frame::StreamOpenHandles { id, device, name })?;
+        } else {
+            self.queue(&Frame::StreamOpen { id, device, name })?;
+        }
         let connection = self.connection.as_mut().ok_or(Error::Disconnected)?;
         connection.taker = Some(Taker {
             platform: Arc::clone(platform),
             fds: Vec::new(),
         });
-        Ok((id, |frame: Frame<'_>| match frame {
-            Frame::StreamReady {
-                buffers,
-                descriptors,
-                buffer_bytes,
-                frame_slots,
-                job_slots,
-                job_bytes,
-                ..
-            } => Some(Ok((
-                Layout {
+        Ok((id, move |frame: Frame<'_>| {
+            let (handles, buffers, descriptors, buffer_bytes, frame_slots, job_slots, job_bytes) =
+                match frame {
+                    Frame::StreamReady {
+                        buffers,
+                        descriptors,
+                        buffer_bytes,
+                        frame_slots,
+                        job_slots,
+                        job_bytes,
+                        ..
+                    } => (
+                        false,
+                        buffers,
+                        descriptors,
+                        buffer_bytes,
+                        frame_slots,
+                        job_slots,
+                        job_bytes,
+                    ),
+                    Frame::StreamHandles {
+                        buffers,
+                        descriptors,
+                        buffer_bytes,
+                        frame_slots,
+                        job_slots,
+                        job_bytes,
+                        ..
+                    } => (
+                        true,
+                        buffers,
+                        descriptors,
+                        buffer_bytes,
+                        frame_slots,
+                        job_slots,
+                        job_bytes,
+                    ),
+                    _ => return None,
+                };
+            Some(Ok(StreamAnswer {
+                layout: Layout {
                     buffers,
                     buffer_bytes,
                     frame_slots,
@@ -1076,8 +1147,9 @@ impl Session {
                     job_bytes,
                 },
                 descriptors,
-            ))),
-            _ => None,
+                handles,
+                asked_handles,
+            }))
         }))
     }
 
@@ -1085,13 +1157,13 @@ impl Session {
     /// fails, the descriptors close here.
     pub(crate) fn finish_open_stream(
         &mut self,
-        ready: Result<(Layout, u8), Error>,
+        ready: Result<StreamAnswer, Error>,
         device: u32,
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         let taker = self.connection.as_mut().and_then(|c| c.taker.take());
-        let (layout, descriptors) = match ready {
+        let answer = match ready {
             Ok(ready) => ready,
             Err(Error::TimedOut) => {
                 // A late StreamReady would carry descriptors that a plain read
@@ -1102,12 +1174,43 @@ impl Session {
             Err(error) => return Err(error),
         };
         let fds = taker.ok_or(Error::Disconnected)?.fds;
-        if usize::from(descriptors) != fds.len() {
+        let StreamAnswer {
+            layout,
+            descriptors,
+            handles,
+            asked_handles,
+        } = answer;
+        // Every number here came off the socket. For a descriptor per buffer, the count must be
+        // the one the buffers give, the buffers no more than one message carries, and the answer
+        // one this client asked for.
+        let consistent =
+            !handles || (asked_handles && handle_descriptors(layout.buffers) == Some(descriptors));
+        if !consistent || usize::from(descriptors) != fds.len() {
             // `fds` drops, closing whatever did arrive.
             self.lost();
             return Err(Error::Wire(lemnos_wire::WireError::Malformed));
         }
-        FrameStream::new(device, name, layout, fds, platform)
+        let built = if handles {
+            FrameStream::with_handles(device, name, layout, fds, platform)
+        } else {
+            FrameStream::new(device, name, layout, fds, platform)
+        };
+        if built.is_err() {
+            self.give_back(device, name);
+        }
+        built
+    }
+
+    /// Gives back a stream the service handed over and this side couldn't set up, so it isn't
+    /// held, unusable, until the connection ends. Nobody waits for the answer.
+    fn give_back(&mut self, device: u32, name: &str) {
+        let id = self.shared.id();
+        if self.queue(&Frame::StreamClose { id, device, name }).is_ok() {
+            self.shared.unheard = Some(id);
+            if let Some(connection) = self.connection.as_mut() {
+                let _ = connection.flush();
+            }
+        }
     }
 
     pub(crate) fn op_close_stream(

@@ -12,7 +12,7 @@ use lemnos_wire::ring::{
 
 use super::pool::{BufferPool, BufferState};
 use super::{BufferMemory, Doorbell, StreamStats};
-use crate::board::StreamSpec;
+use crate::board::{StreamMemory, StreamSpec};
 
 struct Attached {
     caller: CallerId,
@@ -36,6 +36,9 @@ struct Counters {
 
 pub(crate) struct StreamCore {
     layout: Layout,
+    /// What the board file says the buffers are, and the heap dma-bufs come from.
+    memory: StreamMemory,
+    heap: Box<str>,
     pool: BufferPool,
     attached: Option<Attached>,
     claimed: bool,
@@ -56,6 +59,8 @@ impl StreamCore {
         Self {
             pool: BufferPool::new(layout.buffers),
             layout,
+            memory: spec.memory,
+            heap: spec.heap_name().into(),
             attached: None,
             claimed: false,
             epoch: 0,
@@ -65,6 +70,14 @@ impl StreamCore {
 
     pub(crate) const fn layout(&self) -> Layout {
         self.layout
+    }
+
+    pub(crate) const fn memory(&self) -> StreamMemory {
+        self.memory
+    }
+
+    pub(crate) fn heap(&self) -> &str {
+        &self.heap
     }
 
     pub(crate) const fn is_attached(&self) -> bool {

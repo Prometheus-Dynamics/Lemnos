@@ -11,6 +11,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lemnos_wire::handle_descriptors;
 use lemnos_wire::ring::{ByteMemory, Consumer, Layout, RingError, STATE_OPEN, WordMemory};
 
 use crate::error::Error;
@@ -33,6 +34,18 @@ pub trait StreamPlatform: Debug + Send + Sync {
 
     /// Maps `bytes` of `fd` shared and read-only, with the same check of its length.
     fn map_buffers(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Box<dyn ByteMemory>>;
+
+    /// Maps the first `bytes` of `fd` shared and read-only: one buffer of a stream whose buffers
+    /// are a descriptor each (dma-bufs). Fails unless `fd` is at least `bytes` long and can never
+    /// get shorter, since a mapping past the end would fault when touched. It may be longer: a
+    /// dma-heap rounds up.
+    ///
+    /// A platform without this can't take such a stream, and opening one fails with nothing
+    /// mapped. That is what this default does.
+    fn map_buffer(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Box<dyn ByteMemory>> {
+        let _ = (fd, bytes);
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// Waits for `fd` to be signalled, then clears it. `false` means `timeout` passed first.
     fn wait_doorbell(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool>;
@@ -96,7 +109,12 @@ pub struct FrameStream {
 }
 
 /// The buffer memory. Debug-printable so a stream can derive it.
-struct Pool(Box<dyn ByteMemory>);
+enum Pool {
+    /// One mapping, a buffer every `stride` bytes.
+    Whole(Box<dyn ByteMemory>),
+    /// A mapping per buffer, each from its first byte.
+    Each(Box<[Box<dyn ByteMemory>]>),
+}
 
 impl Debug for Pool {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -106,6 +124,9 @@ impl Debug for Pool {
 
 /// The ring, the doorbell and the buffers.
 pub(crate) const DESCRIPTORS: usize = 3;
+/// The most descriptors one answer brings: a stream with a descriptor per buffer, at its limit.
+pub(crate) const MAX_DESCRIPTORS: usize =
+    (lemnos_wire::HANDLE_DESCRIPTORS_BEFORE + lemnos_wire::MAX_HANDLE_BUFFERS) as usize;
 
 impl FrameStream {
     /// Builds the stream from what StreamReady carried. Any failure closes every descriptor.
@@ -133,10 +154,64 @@ impl FrameStream {
             device,
             name: name.to_string(),
             ring,
-            pool: Pool(pool),
+            pool: Pool::Whole(pool),
             doorbell,
             platform,
         })
+    }
+
+    /// Builds the stream from what StreamHandles carried: the ring, the doorbell, then one
+    /// descriptor per buffer. Any failure closes every descriptor. The buffers' descriptors
+    /// close once they are mapped; the mappings keep the memory.
+    pub(crate) fn with_handles(
+        device: u32,
+        name: &str,
+        layout: Layout,
+        fds: Vec<OwnedFd>,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<Self, Error> {
+        let layout = layout.checked().map_err(Error::Stream)?;
+        // Checked by the session too. Here it is what makes the split below right.
+        let expected = handle_descriptors(layout.buffers).map(usize::from);
+        if expected != Some(fds.len()) {
+            return Err(Error::Stream(RingError::BadHeader));
+        }
+        let mut fds = fds.into_iter();
+        let (Some(ring_fd), Some(doorbell)) = (fds.next(), fds.next()) else {
+            return Err(Error::Stream(RingError::BadHeader));
+        };
+        let failed = |_: io::Error| Error::Stream(RingError::TooSmall);
+        let ring_memory = platform
+            .map_ring(ring_fd.as_fd(), layout.ring_bytes())
+            .map_err(failed)?;
+        let buffer_bytes = layout.buffer_bytes as usize;
+        let mut buffers = Vec::with_capacity(fds.len());
+        for fd in fds {
+            buffers.push(
+                platform
+                    .map_buffer(fd.as_fd(), buffer_bytes)
+                    .map_err(|error| match error.kind() {
+                        io::ErrorKind::Unsupported => Error::StreamUnsupported,
+                        _ => failed(error),
+                    })?,
+            );
+        }
+        let ring = Consumer::attach(ring_memory, layout).map_err(Error::Stream)?;
+        Ok(Self {
+            device,
+            name: name.to_string(),
+            ring,
+            pool: Pool::Each(buffers.into()),
+            doorbell,
+            platform,
+        })
+    }
+
+    /// Whether each buffer is its own mapping, which is how a stream of dma-bufs arrives.
+    /// Frames read the same either way.
+    #[must_use]
+    pub const fn has_buffer_handles(&self) -> bool {
+        matches!(self.pool, Pool::Each(_))
     }
 
     #[must_use]
@@ -198,12 +273,20 @@ impl FrameStream {
     /// its numbers fall on here, and within this stream's memory.
     #[must_use]
     pub fn bytes(&self, frame: &HeldFrame) -> &[u8] {
-        let layout = self.ring.layout();
-        let Some(offset) = layout.buffer_offset(frame.buffer) else {
-            return &[];
-        };
-        let end = offset.saturating_add(frame.bytes as usize);
-        self.pool.0.bytes().get(offset..end).unwrap_or(&[])
+        match &self.pool {
+            Pool::Whole(pool) => {
+                let layout = self.ring.layout();
+                let Some(offset) = layout.buffer_offset(frame.buffer) else {
+                    return &[];
+                };
+                let end = offset.saturating_add(frame.bytes as usize);
+                pool.bytes().get(offset..end).unwrap_or(&[])
+            }
+            Pool::Each(buffers) => buffers
+                .get(frame.buffer as usize)
+                .and_then(|buffer| buffer.bytes().get(..frame.bytes as usize))
+                .unwrap_or(&[]),
+        }
     }
 
     /// Gives a frame's buffer back to the producer. The frame is gone either way.

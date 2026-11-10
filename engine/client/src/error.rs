@@ -23,6 +23,9 @@ pub enum Error {
     /// A frame stream's shared memory broke the rules, or couldn't be set up. Only that stream is
     /// affected.
     Stream(RingError),
+    /// The stream's buffers are dma-bufs, and the [`StreamPlatform`](crate::StreamPlatform) in
+    /// use can't map them. The stream was given back.
+    StreamUnsupported,
 }
 
 impl core::fmt::Display for Error {
@@ -42,6 +45,9 @@ impl core::fmt::Display for Error {
             Self::TooSmall => f.write_str("the buffer is too small"),
             Self::Full => f.write_str("too many requests waiting"),
             Self::Stream(error) => write!(f, "the frame stream: {error}"),
+            Self::StreamUnsupported => {
+                f.write_str("the frame stream's buffers are dma-bufs, which can't be mapped here")
+            }
         }
     }
 }
@@ -66,6 +72,7 @@ impl From<Error> for Status {
             Error::TooSmall => Status::BUFFER_TOO_SMALL,
             Error::Full => Status::BUSY,
             Error::Stream(_) => Status::IO,
+            Error::StreamUnsupported => Status::NOT_SUPPORTED,
         }
     }
 }

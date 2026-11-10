@@ -23,6 +23,23 @@ pub const VERSION: u16 = 1;
 pub const MAX_FRAME: usize = 1 << 20;
 /// Answers queued for one client before that client is closed.
 pub const MAX_QUEUED_BYTES: usize = 4 << 20;
+/// What a host can do beyond the first form of this version, as bits of `features` in Welcome.
+/// A client uses what a bit stands for only when the host set it; a host that doesn't know a bit
+/// leaves it clear.
+pub mod feature {
+    /// The host takes StreamOpenHandles and may answer it with StreamHandles: a stream whose
+    /// buffers are one descriptor each.
+    pub const STREAM_HANDLES: u64 = 1;
+    /// Every bit this build knows.
+    pub const ALL: u64 = STREAM_HANDLES;
+}
+
+/// The most buffers a stream may have when each is its own descriptor. Its descriptors, and
+/// the ring's and the doorbell's, travel in one `SCM_RIGHTS` message, which holds 253.
+pub const MAX_HANDLE_BUFFERS: u32 = 128;
+/// The descriptors that come before the buffers' in StreamHandles: the ring and the doorbell.
+pub const HANDLE_DESCRIPTORS_BEFORE: u32 = 2;
+
 /// Bytes before a frame's kind that say how long it is.
 const LENGTH_BYTES: usize = 4;
 const HEADER: usize = LENGTH_BYTES + 2;
@@ -160,6 +177,32 @@ frames! {
     20 Refusal { id: u32, status: i32, text: &'a str }
     /// Answered with an empty Reply.
     21 StreamClose { id: u32, device: u32, name: &'a str }
+    /// StreamOpen from a client that can also take StreamHandles for an answer. Sent only to a
+    /// host whose Welcome set [`feature::STREAM_HANDLES`].
+    22 StreamOpenHandles { id: u32, device: u32, name: &'a str }
+    /// StreamReady for a stream whose buffers are one descriptor each. `descriptors` is 2 plus
+    /// `buffers`, all with this frame over `SCM_RIGHTS`: the ring, the doorbell, then the buffers
+    /// in order. `buffers` is at most [`MAX_HANDLE_BUFFERS`].
+    23 StreamHandles {
+        id: u32,
+        buffers: u32,
+        descriptors: u8,
+        buffer_bytes: u32,
+        frame_slots: u32,
+        job_slots: u32,
+        job_bytes: u32,
+    }
+}
+
+/// How many descriptors StreamHandles carries for a stream of `buffers` buffers, or `None` when
+/// that many buffers can't each be a descriptor.
+#[must_use]
+pub const fn handle_descriptors(buffers: u32) -> Option<u8> {
+    if buffers == 0 || buffers > MAX_HANDLE_BUFFERS {
+        return None;
+    }
+    // At most 130, so it fits.
+    Some((HANDLE_DESCRIPTORS_BEFORE + buffers) as u8)
 }
 
 /// Writes a frame into `buf` and returns its length.

@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lemnos_core::ConfigValue;
+use lemnos_wire::MAX_HANDLE_BUFFERS;
 use lemnos_wire::ring::Layout;
 use serde::Deserialize;
 
@@ -26,10 +27,34 @@ pub enum BoardError {
     Config(String, String),
     #[error("device {0:?} stream {1:?}: its numbers are out of range")]
     Stream(String, String),
+    #[error(
+        "device {0:?} stream {1:?}: {2} buffers, and a stream of dma-bufs has at most \
+         {MAX_HANDLE_BUFFERS}"
+    )]
+    StreamHandles(String, String, u32),
+    #[error("device {0:?} stream {1:?}: heap {2:?} is not the name of a heap")]
+    StreamHeap(String, String, String),
+    #[error("device {0:?} stream {1:?}: `heap` is only for `memory = \"dma-buf\"`")]
+    StreamHeapUnused(String, String),
 }
 
+/// What a stream's buffers are made of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum StreamMemory {
+    /// Memory shared with the consumer, and nothing more. A driver fills it with `write`.
+    #[default]
+    #[serde(rename = "shared")]
+    Shared,
+    /// One dma-buf per buffer, so a driver can also hand a buffer to hardware.
+    #[serde(rename = "dma-buf")]
+    DmaBuf,
+}
+
+/// The heap a stream of dma-bufs comes from when its board file names none.
+pub const DEFAULT_HEAP: &str = "system";
+
 /// One frame stream a device offers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamSpec {
     pub buffers: u32,
@@ -40,6 +65,13 @@ pub struct StreamSpec {
     /// The largest job. Its meaning is between the consumer and the driver.
     #[serde(default = "default_job_bytes")]
     pub job_bytes: u32,
+    /// `"shared"` when left out, or `"dma-buf"`.
+    #[serde(default)]
+    pub memory: StreamMemory,
+    /// The dma-heap the buffers come from, by its name under `/dev/dma_heap`. Only with
+    /// `memory = "dma-buf"`, where it is [`DEFAULT_HEAP`] when left out.
+    #[serde(default)]
+    pub heap: Option<String>,
 }
 
 const fn default_job_slots() -> u32 {
@@ -61,6 +93,32 @@ impl StreamSpec {
         .ok()
     }
 
+    /// The heap this stream's dma-bufs come from. Means nothing for a stream of shared memory.
+    #[must_use]
+    pub fn heap_name(&self) -> &str {
+        self.heap.as_deref().unwrap_or(DEFAULT_HEAP)
+    }
+
+    /// Checks what [`Layout`] doesn't: the memory the stream asks for.
+    fn check_memory(&self, device: &str, name: &str) -> Result<(), BoardError> {
+        let (device, name) = (device.to_string(), name.to_string());
+        match (self.memory, &self.heap) {
+            (StreamMemory::Shared, None) => Ok(()),
+            (StreamMemory::Shared, Some(_)) => Err(BoardError::StreamHeapUnused(device, name)),
+            (StreamMemory::DmaBuf, heap) => {
+                if self.buffers > MAX_HANDLE_BUFFERS {
+                    return Err(BoardError::StreamHandles(device, name, self.buffers));
+                }
+                match heap {
+                    Some(heap) if !is_heap_name(heap) => {
+                        Err(BoardError::StreamHeap(device, name, heap.clone()))
+                    }
+                    _ => Ok(()),
+                }
+            }
+        }
+    }
+
     /// The stream's layout. A spec that didn't come through [`parse`] and is out of range falls
     /// back to the smallest stream there is.
     pub(crate) fn layout(&self) -> Layout {
@@ -72,6 +130,17 @@ impl StreamSpec {
             job_bytes: 0,
         })
     }
+}
+
+/// A heap's name is one file name: it is looked up in one directory and never leads out of it.
+fn is_heap_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b','))
 }
 
 /// Who owns a device's hardware.
@@ -189,6 +258,7 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
             if stream.checked_layout().is_none() {
                 return Err(BoardError::Stream(device.id.clone(), name.clone()));
             }
+            stream.check_memory(&device.id, name)?;
         }
     }
     Ok(board)
@@ -291,10 +361,94 @@ mod tests {
              [devices.streams.out]\nbuffers = 4\nbuffer_bytes = 1024\n",
         )
         .unwrap();
-        let stream = board.devices[0].streams["out"];
+        let stream = &board.devices[0].streams["out"];
         assert_eq!(stream.buffers, 4);
         assert_eq!(stream.job_slots, 4);
         assert_eq!(stream.job_bytes, 256);
+        assert_eq!(stream.memory, StreamMemory::Shared);
+        assert_eq!(stream.heap, None);
+    }
+
+    fn stream(keys: &str) -> Result<StreamSpec, BoardError> {
+        with(&format!(
+            "[[devices]]\nid = \"a\"\ndriver = \"x\"\n\
+             [devices.streams.out]\nbuffers = 4\nbuffer_bytes = 1024\n{keys}"
+        ))
+        .map(|board| board.devices[0].streams["out"].clone())
+    }
+
+    #[test]
+    fn a_stream_is_shared_memory_unless_it_asks_for_dma_bufs() {
+        assert_eq!(stream("").unwrap().memory, StreamMemory::Shared);
+        assert_eq!(
+            stream("memory = \"shared\"\n").unwrap().memory,
+            StreamMemory::Shared
+        );
+        let asked = stream("memory = \"dma-buf\"\n").unwrap();
+        assert_eq!(asked.memory, StreamMemory::DmaBuf);
+        assert_eq!(asked.heap_name(), "system");
+        let named = stream("memory = \"dma-buf\"\nheap = \"linux,cma\"\n").unwrap();
+        assert_eq!(named.heap_name(), "linux,cma");
+    }
+
+    #[test]
+    fn a_memory_that_isnt_known_is_refused_by_name() {
+        let error = stream("memory = \"dmabuf\"\n").unwrap_err();
+        assert!(error.to_string().contains("dmabuf"), "{error}");
+        assert!(error.to_string().contains("memory"), "{error}");
+        assert!(error.to_string().contains("dma-buf"), "{error}");
+    }
+
+    #[test]
+    fn a_heap_is_one_file_name_and_only_for_dma_bufs() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../mem",
+            "a/b",
+            "/dev/dma_heap/system",
+            "a b",
+        ] {
+            assert_eq!(
+                stream(&format!("memory = \"dma-buf\"\nheap = \"{bad}\"\n")),
+                Err(BoardError::StreamHeap(
+                    "a".to_string(),
+                    "out".to_string(),
+                    bad.to_string()
+                )),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            stream("heap = \"system\"\n"),
+            Err(BoardError::StreamHeapUnused(
+                "a".to_string(),
+                "out".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_stream_of_dma_bufs_has_at_most_as_many_buffers_as_one_message_carries() {
+        let board = |buffers: u32, memory: &str| {
+            with(&format!(
+                "[[devices]]\nid = \"a\"\ndriver = \"x\"\n\
+                 [devices.streams.out]\nbuffers = {buffers}\nbuffer_bytes = 64\n{memory}"
+            ))
+        };
+        let dma = "memory = \"dma-buf\"\n";
+        assert!(board(MAX_HANDLE_BUFFERS, dma).is_ok());
+        assert_eq!(
+            board(MAX_HANDLE_BUFFERS + 1, dma),
+            Err(BoardError::StreamHandles(
+                "a".to_string(),
+                "out".to_string(),
+                MAX_HANDLE_BUFFERS + 1
+            ))
+        );
+        // Shared memory keeps the limit it had.
+        assert!(board(MAX_HANDLE_BUFFERS + 1, "").is_ok());
     }
 
     #[test]

@@ -145,6 +145,26 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             },
         ),
         (
+            "stream-open-handles",
+            Frame::StreamOpenHandles {
+                id: 13,
+                device: 3,
+                name: "s",
+            },
+        ),
+        (
+            "stream-handles",
+            Frame::StreamHandles {
+                id: 13,
+                buffers: 4,
+                descriptors: 6,
+                buffer_bytes: 256,
+                frame_slots: 4,
+                job_slots: 2,
+                job_bytes: 8,
+            },
+        ),
+        (
             "event",
             Frame::Event {
                 device: 3,
@@ -204,6 +224,15 @@ fn every_vector_in_the_spec_matches_byte_for_byte() {
         assert_eq!(back, frame, "decoding {name}");
         assert_eq!(used, spec[name].len());
     }
+}
+
+#[test]
+fn a_stream_of_handles_has_two_descriptors_more_than_buffers_and_at_most_128_buffers() {
+    assert_eq!(handle_descriptors(0), None);
+    assert_eq!(handle_descriptors(1), Some(3));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS), Some(130));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS + 1), None);
+    assert_eq!(handle_descriptors(u32::MAX), None);
 }
 
 #[test]

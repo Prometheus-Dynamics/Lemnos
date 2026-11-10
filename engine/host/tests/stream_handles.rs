@@ -15,7 +15,7 @@ use lemnos_hal::blocks::{BufferHandle, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_host::board::parse;
 use lemnos_host::stream::{
-    Backing, BufferMemory, HeapAllocator, Lease, ProducerEndpoint, StreamAllocator,
+    Backing, BufferMemory, HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamMemory,
 };
 use lemnos_host::{Host, Options, entry};
 use lemnos_measure::test_alloc::{Counting, allocations};
@@ -109,10 +109,17 @@ impl StreamAllocator for FileStreams {
 }
 
 fn start(allocator: Arc<dyn StreamAllocator>) -> Host {
+    start_declared(allocator, "")
+}
+
+/// A host whose `frames` stream has `keys` added to it in the board file, and a `plain` stream
+/// beside it.
+fn start_declared(allocator: Arc<dyn StreamAllocator>, keys: &str) -> Host {
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"a\"\ndriver = \"fake-counter\"\n\
-         [devices.streams.frames]\nbuffers = {BUFFERS}\nbuffer_bytes = {BYTES}\n"
+         [devices.streams.frames]\nbuffers = {BUFFERS}\nbuffer_bytes = {BYTES}\n{keys}\
+         [devices.streams.plain]\nbuffers = 2\nbuffer_bytes = {BYTES}\n"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();
@@ -368,4 +375,86 @@ fn a_thousand_frames_filled_through_their_handles_allocate_nothing() {
         }
     });
     assert_eq!(count, 0, "allocations in 1000 frames");
+}
+
+/// Gives dma-bufs (files, here) only when asked for them, and notes the heap it was asked for.
+/// `empty_handed` answers such a request with plain memory, which no allocator should.
+#[derive(Default)]
+struct Declared {
+    asked: std::sync::Mutex<Vec<(String, String)>>,
+    empty_handed: bool,
+}
+
+impl StreamAllocator for Declared {
+    fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
+        HeapAllocator.allocate(name, layout)
+    }
+
+    fn allocate_handles(&self, name: &str, layout: &Layout, heap: &str) -> Result<Backing, Status> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((name.to_string(), heap.to_string()));
+        if self.empty_handed {
+            return HeapAllocator.allocate(name, layout);
+        }
+        FileStreams { short: 0 }.allocate(name, layout)
+    }
+}
+
+#[test]
+fn a_stream_the_board_declares_as_dma_bufs_is_asked_of_the_allocator_with_its_heap() {
+    for (keys, heap) in [
+        ("memory = \"dma-buf\"\n", "system"),
+        ("memory = \"dma-buf\"\nheap = \"linux,cma\"\n", "linux,cma"),
+    ] {
+        let allocator = Arc::new(Declared::default());
+        let host = start_declared(Arc::clone(&allocator) as Arc<dyn StreamAllocator>, keys);
+        assert_eq!(host.stream_memory(0, "frames"), Some(StreamMemory::DmaBuf));
+        assert_eq!(host.stream_memory(0, "plain"), Some(StreamMemory::Shared));
+        assert_eq!(host.stream_memory(0, "none"), None);
+        assert_eq!(host.stream_memory(9, "frames"), None);
+
+        let mut producer = host.stream_producer(0, "frames").unwrap();
+        let lease = host.stream_attach(0, "frames", FIRST).unwrap();
+        assert_eq!(lease.handles.as_ref().unwrap().len(), BUFFERS as usize);
+        let buffer = producer.next_buffer().unwrap().unwrap();
+        assert!(producer.buffer_handle(buffer).unwrap().is_some());
+        // The stream beside it is shared memory, and is asked for as it always was.
+        let plain = host.stream_attach(0, "plain", FIRST).unwrap();
+        assert!(plain.handles.is_none());
+        assert_eq!(
+            *allocator.asked.lock().unwrap(),
+            [("frames".to_string(), heap.to_string())]
+        );
+    }
+}
+
+#[test]
+fn an_allocator_with_no_dma_bufs_refuses_a_stream_declared_as_them_and_never_makes_it_plain() {
+    // The host's own allocator, for a consumer in the same process, has none.
+    let host = start_declared(Arc::new(HeapAllocator), "memory = \"dma-buf\"\n");
+    assert_eq!(
+        host.stream_attach(0, "frames", FIRST).err(),
+        Some(Status::NOT_SUPPORTED)
+    );
+    let stats = host.stream_stats(0, "frames").unwrap();
+    assert!(!stats.attached);
+    assert_eq!(stats.attachments, 0);
+    // The stream beside it is untouched by that.
+    assert!(host.stream_attach(0, "plain", FIRST).is_ok());
+}
+
+#[test]
+fn plain_memory_handed_over_for_a_stream_declared_as_dma_bufs_is_refused() {
+    let allocator = Arc::new(Declared {
+        empty_handed: true,
+        ..Declared::default()
+    });
+    let host = start_declared(allocator, "memory = \"dma-buf\"\n");
+    assert_eq!(
+        host.stream_attach(0, "frames", FIRST).err(),
+        Some(Status::IO)
+    );
+    assert!(!host.stream_stats(0, "frames").unwrap().attached);
 }

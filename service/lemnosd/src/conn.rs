@@ -48,6 +48,8 @@ impl Waker {
 pub(crate) struct Attachment {
     pub(crate) at: usize,
     pub(crate) fds: Vec<OwnedFd>,
+    /// Sent after `fds`, in the same message: a stream's buffers, which the host keeps too.
+    pub(crate) handles: Option<Arc<[OwnedFd]>>,
 }
 
 struct Outbox {
@@ -113,6 +115,16 @@ impl Conn {
 
     /// Queues an answer carrying descriptors. They close here if the connection has gone.
     pub(crate) fn answer_with_descriptors(&self, frame: &Frame<'_>, fds: Vec<OwnedFd>) {
+        self.answer_with_handles(frame, fds, None);
+    }
+
+    /// Queues an answer carrying `fds` and then `handles`, all in one message.
+    pub(crate) fn answer_with_handles(
+        &self,
+        frame: &Frame<'_>,
+        fds: Vec<OwnedFd>,
+        handles: Option<Arc<[OwnedFd]>>,
+    ) {
         let mut outbox = self.lock();
         if outbox.closed {
             return;
@@ -123,7 +135,9 @@ impl Conn {
             self.close();
             return;
         }
-        outbox.attachments.push_back(Attachment { at, fds });
+        outbox
+            .attachments
+            .push_back(Attachment { at, fds, handles });
     }
 
     /// Queues an answer from another thread.
