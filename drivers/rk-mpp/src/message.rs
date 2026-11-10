@@ -126,9 +126,15 @@ impl<'a> Message<'a> {
         &self.payload
     }
 
-    /// The payload, for a session to point the message at.
-    pub fn payload_mut(&mut self) -> &mut Payload<'a> {
-        &mut self.payload
+    /// The bytes of an [`Payload::InOut`], which the kernel writes during the call; `None` for any
+    /// other payload. A session reaches the payload only through [`Self::payload`] and this, so
+    /// it cannot swap one message's memory for another's: a message's size always describes the
+    /// memory it was built with.
+    pub fn in_out_mut(&mut self) -> Option<&mut [u8]> {
+        match &mut self.payload {
+            Payload::InOut(data) => Some(data),
+            _ => None,
+        }
     }
 
     /// The message as the kernel reads it, with `data_ptr` (0 for [`Payload::None`]).
