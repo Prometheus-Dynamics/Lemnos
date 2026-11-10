@@ -3,6 +3,10 @@
 //!
 //! `lemnos-module-check <route> <spi route> <gpio chip number> <simulated chip directory>`, where
 //! a route is `module` or `stock`. The first covers I2C, GPIO and PWM.
+//!
+//! Each bus also prints a `measure` line per operation: the time it takes on the route it took
+//! (median and 99th percentile, from the monotonic clock) and what it allocated. They are numbers
+//! to read, not checks: nothing fails on time.
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -29,6 +33,9 @@ const MEM_ADDR: u8 = 0x50;
 const HELD_ADDR: u8 = 0x51;
 const NOBODY_ADDR: u8 = 0x60;
 const REPEATS: usize = 200;
+/// Runs of each measured operation, after `WARMUP` untimed ones.
+const SAMPLES: usize = 2000;
+const WARMUP: usize = 100;
 
 struct Report {
     failures: u32,
@@ -43,6 +50,33 @@ impl Report {
         );
         self.failures += u32::from(!ok);
     }
+}
+
+fn route(through_module: bool) -> &'static str {
+    if through_module { "module" } else { "stock" }
+}
+
+/// Runs `op` many times and prints its median and 99th percentile time and its allocations.
+fn measure(through_module: bool, what: &str, mut op: impl FnMut(usize) -> bool) {
+    let mut times = [0u64; SAMPLES];
+    let (ok, allocated) = allocations(|| {
+        let mut ok = (0..WARMUP).all(&mut op);
+        for (n, time) in times.iter_mut().enumerate() {
+            let start = Instant::now();
+            ok &= op(n);
+            *time = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        }
+        ok
+    });
+    times.sort_unstable();
+    let _ = writeln!(
+        std::io::stdout(),
+        "measure {:<6} {what:<22} median {:>7} ns  p99 {:>7} ns  {allocated} allocations{}",
+        route(through_module),
+        times[SAMPLES / 2],
+        times[SAMPLES * 99 / 100],
+        if ok { "" } else { "  (some runs failed)" }
+    );
 }
 
 /// Files this process has open whose target contains `text`.
@@ -131,6 +165,14 @@ fn check_smbus_adapter(report: &mut Report, board: &mut LinuxBoard, through_modu
         })
     });
     report.check(ok && allocated == 0, "SMBus reads allocate nothing");
+    measure(through_module, "i2c smbus write+read", |_| {
+        let mut out = [0u8; 1];
+        bus.transaction(
+            STUB_ADDR,
+            &mut [I2cOp::Write(&[0x10]), I2cOp::Read(&mut out)],
+        )
+        .is_ok()
+    });
 }
 
 fn check_plain_adapter(report: &mut Report, board: &mut LinuxBoard, through_module: bool) {
@@ -195,6 +237,14 @@ fn check_plain_adapter(report: &mut Report, board: &mut LinuxBoard, through_modu
         })
     });
     report.check(ok && allocated == 0, "transfers allocate nothing");
+    measure(through_module, "i2c write+read", |_| {
+        let mut out = [0u8; 4];
+        bus.transaction(
+            MEM_ADDR,
+            &mut [I2cOp::Write(&[0x10]), I2cOp::Read(&mut out)],
+        )
+        .is_ok()
+    });
 }
 
 fn check_spi(report: &mut Report, board: &mut LinuxBoard, through_module: bool) {
@@ -240,6 +290,12 @@ fn check_spi(report: &mut Report, board: &mut LinuxBoard, through_module: bool) 
         })
     });
     report.check(ok && allocated == 0, "SPI transfers allocate nothing");
+    measure(through_module, "spi duplex 4 bytes", |_| {
+        let mut out = [0u8; 4];
+        spi.transaction(&mut [SpiOp::Transfer(&mut out, &[1, 2, 3, 4])])
+            .is_ok()
+            && out == [1, 2, 3, 4]
+    });
     drop(spi);
 
     let Ok(mut raw) = board.raw_spi(SPI_NAME) else {
@@ -421,6 +477,8 @@ fn check_line(
     let (ok, allocated) =
         allocations(|| (0..REPEATS).all(|n| line.set(n % 2 == 0).is_ok() && line.get().is_ok()));
     report.check(ok && allocated == 0, "setting and reading allocate nothing");
+    measure(through_module, "gpio set", |n| line.set(n % 2 == 0).is_ok());
+    measure(through_module, "gpio get", |_| line.get().is_ok());
     check_edges(report, &mut *line, dir, false);
     check_edges(report, &mut *line, dir, true);
     let quiet = line.configure(&input(false, EdgeDetect::None));
@@ -483,6 +541,10 @@ fn check_pwm(report: &mut Report, board: &mut LinuxBoard, through_module: bool) 
         polarity: Polarity::Normal,
         ..inverted
     };
+    measure(through_module, "pwm configure", |n| {
+        let duty_ns = if n % 2 == 0 { 250_000 } else { 300_000 };
+        pwm.configure(&PwmConfig { duty_ns, ..running }).is_ok()
+    });
     report.check(pwm.configure(&idle).is_ok(), "left off");
     drop(pwm);
     report.check(board.pwm(&name).is_ok(), "dropping it let go");
