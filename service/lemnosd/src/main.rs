@@ -48,6 +48,17 @@ fn wait_for_signal(signals: &SignalFd) -> std::io::Result<()> {
     }
 }
 
+/// The machine's hardware, through the kernel module where it's loaded.
+fn linux_board() -> LinuxBoard {
+    let mut board = LinuxBoard::new();
+    if let Err(error) = board.open_module()
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        let _ = complain(&format!("not using the kernel module: {error}"));
+    }
+    board
+}
+
 fn main() -> ExitCode {
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     let mut board = var("LEMNOSD_BOARD", DEFAULT_BOARD);
@@ -88,7 +99,7 @@ fn main() -> ExitCode {
         backend: if sim {
             Box::new(SimBoard::new())
         } else {
-            Box::new(LinuxBoard::new())
+            Box::new(linux_board())
         },
         options: Options::default(),
     });

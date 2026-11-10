@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-module-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Runs the Linux backend's buses in the QEMU harness, with and without the kernel module"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
+lemnos-linux = { path = "../../../backends/linux" }
+lemnos-measure = { path = "../../../engine/measure", features = ["alloc-count"] }
+libc.workspace = true

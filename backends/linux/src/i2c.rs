@@ -61,78 +61,102 @@ impl I2cBus {
             self.claim(address)?;
             return run_smbus(&mut Target(&self.file), operations);
         }
-        if alternates(operations) && operations.len() <= MAX_MESSAGES {
-            let n = operations.len();
-            let mut messages: [Message<'_>; MAX_MESSAGES] =
-                std::array::from_fn(|_| Message::Write(&[]));
-            for (message, operation) in messages.iter_mut().zip(operations.iter_mut()) {
-                *message = match operation {
-                    Operation::Write(data) => Message::Write(data),
-                    Operation::Read(buffer) => Message::Read(buffer),
-                };
-            }
-            return self.transfer(address, &mut messages[..n]);
-        }
-        self.run_joined(address, operations)
+        run_plain(self, address, operations)
     }
+}
 
-    /// embedded-hal's adjacent operations of one direction are one contiguous transfer, with no
-    /// restart between them, so each such run becomes one message.
-    fn run_joined(&mut self, address: u16, operations: &mut [Operation<'_>]) -> io::Result<()> {
-        let total = operations.iter().map(length).sum();
-        let mut stack = [0u8; JOIN_ON_STACK];
-        let mut heap = Vec::new();
-        let joined: &mut [u8] = if total <= JOIN_ON_STACK {
-            &mut stack[..total]
-        } else {
-            heap.resize(total, 0);
-            &mut heap
-        };
-        let mut at = 0;
-        for operation in operations.iter() {
-            if let Operation::Write(data) = operation {
-                joined[at..at + data.len()].copy_from_slice(data);
-            }
-            at += length(operation);
-        }
-        {
-            let mut messages: [Message<'_>; MAX_MESSAGES] =
-                std::array::from_fn(|_| Message::Write(&[]));
-            let mut count = 0;
-            let mut rest = &mut *joined;
-            let mut index = 0;
-            while index < operations.len() {
-                let read = is_read(&operations[index]);
-                let run = operations[index..]
-                    .iter()
-                    .take_while(|operation| is_read(operation) == read)
-                    .count();
-                let length = operations[index..index + run].iter().map(length).sum();
-                if count == MAX_MESSAGES {
-                    return Err(io::ErrorKind::InvalidInput.into());
-                }
-                let (part, tail) = core::mem::take(&mut rest).split_at_mut(length);
-                rest = tail;
-                messages[count] = if read {
-                    Message::Read(part)
-                } else {
-                    Message::Write(part)
-                };
-                count += 1;
-                index += run;
-            }
-            self.transfer(address, &mut messages[..count])?;
-        }
-        let mut at = 0;
-        for operation in operations.iter_mut() {
-            let n = length(operation);
-            if let Operation::Read(buffer) = operation {
-                buffer.copy_from_slice(&joined[at..at + n]);
-            }
-            at += n;
-        }
-        Ok(())
+impl Wire for I2cBus {
+    fn send(&mut self, address: u16, messages: &mut [Message<'_>]) -> io::Result<()> {
+        self.transfer(address, messages)
     }
+}
+
+/// How a transfer list reaches the adapter.
+pub(crate) trait Wire {
+    fn send(&mut self, address: u16, messages: &mut [Message<'_>]) -> io::Result<()>;
+}
+
+/// Runs `operations` as one plain transfer.
+pub(crate) fn run_plain(
+    wire: &mut impl Wire,
+    address: u16,
+    operations: &mut [Operation<'_>],
+) -> io::Result<()> {
+    if alternates(operations) && operations.len() <= MAX_MESSAGES {
+        let n = operations.len();
+        let mut messages: [Message<'_>; MAX_MESSAGES] =
+            std::array::from_fn(|_| Message::Write(&[]));
+        for (message, operation) in messages.iter_mut().zip(operations.iter_mut()) {
+            *message = match operation {
+                Operation::Write(data) => Message::Write(data),
+                Operation::Read(buffer) => Message::Read(buffer),
+            };
+        }
+        return wire.send(address, &mut messages[..n]);
+    }
+    run_joined(wire, address, operations)
+}
+
+/// embedded-hal's adjacent operations of one direction are one contiguous transfer, with no
+/// restart between them, so each such run becomes one message.
+fn run_joined(
+    wire: &mut impl Wire,
+    address: u16,
+    operations: &mut [Operation<'_>],
+) -> io::Result<()> {
+    let total = operations.iter().map(length).sum();
+    let mut stack = [0u8; JOIN_ON_STACK];
+    let mut heap = Vec::new();
+    let joined: &mut [u8] = if total <= JOIN_ON_STACK {
+        &mut stack[..total]
+    } else {
+        heap.resize(total, 0);
+        &mut heap
+    };
+    let mut at = 0;
+    for operation in operations.iter() {
+        if let Operation::Write(data) = operation {
+            joined[at..at + data.len()].copy_from_slice(data);
+        }
+        at += length(operation);
+    }
+    {
+        let mut messages: [Message<'_>; MAX_MESSAGES] =
+            std::array::from_fn(|_| Message::Write(&[]));
+        let mut count = 0;
+        let mut rest = &mut *joined;
+        let mut index = 0;
+        while index < operations.len() {
+            let read = is_read(&operations[index]);
+            let run = operations[index..]
+                .iter()
+                .take_while(|operation| is_read(operation) == read)
+                .count();
+            let length = operations[index..index + run].iter().map(length).sum();
+            if count == MAX_MESSAGES {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let (part, tail) = core::mem::take(&mut rest).split_at_mut(length);
+            rest = tail;
+            messages[count] = if read {
+                Message::Read(part)
+            } else {
+                Message::Write(part)
+            };
+            count += 1;
+            index += run;
+        }
+        wire.send(address, &mut messages[..count])?;
+    }
+    let mut at = 0;
+    for operation in operations.iter_mut() {
+        let n = length(operation);
+        if let Operation::Read(buffer) = operation {
+            buffer.copy_from_slice(&joined[at..at + n]);
+        }
+        at += n;
+    }
+    Ok(())
 }
 
 fn is_read(operation: &Operation<'_>) -> bool {
@@ -171,7 +195,7 @@ impl I2c for I2cBus {
 }
 
 /// The SMBus calls an adapter without plain transfers is left with, on the claimed target.
-trait Smbus {
+pub(crate) trait Smbus {
     fn write_byte(&mut self, value: u8) -> io::Result<()>;
     fn write_byte_data(&mut self, register: u8, value: u8) -> io::Result<()>;
     fn write_block(&mut self, register: u8, values: &[u8]) -> io::Result<()>;
@@ -204,7 +228,10 @@ impl Smbus for Target<'_> {
 }
 
 /// What SMBus can express: a write, or one register byte then a read.
-fn run_smbus(device: &mut impl Smbus, operations: &mut [Operation<'_>]) -> io::Result<()> {
+pub(crate) fn run_smbus(
+    device: &mut impl Smbus,
+    operations: &mut [Operation<'_>],
+) -> io::Result<()> {
     match operations {
         [Operation::Write(bytes)] => smbus_write(device, bytes),
         [Operation::Write([register]), Operation::Read(out)] => smbus_read(device, *register, out),

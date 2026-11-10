@@ -555,6 +555,7 @@ union lem_args {
 	struct lemnos_i2c_transfer i2c;
 	struct lemnos_i2c_smbus smbus;
 	struct lemnos_spi_transfer spi;
+	struct lemnos_spi_info spi_info;
 	struct lemnos_gpio_request gpio_request;
 	struct lemnos_gpio_config gpio_config;
 	struct lemnos_gpio_value gpio_value;
@@ -639,6 +640,8 @@ static long lem_unit_request(unsigned int cmd, union lem_args *u)
 		return lem_i2c_smbus(&u->smbus);
 	case LEMNOS_IOC_SPI_TRANSFER:
 		return lem_spi_transfer(&u->spi);
+	case LEMNOS_IOC_SPI_INFO:
+		return lem_spi_info(&u->spi_info);
 	case LEMNOS_IOC_GPIO_REQUEST:
 		return lem_gpio_request(&u->gpio_request);
 	case LEMNOS_IOC_GPIO_CONFIG:

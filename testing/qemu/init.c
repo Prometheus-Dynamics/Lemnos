@@ -184,6 +184,29 @@ static void gpio_sim_down(void)
 		unload("gpio_sim");
 }
 
+static int spi_bind(const char *driver)
+{
+	char path[96];
+
+	snprintf(path, sizeof(path), "/sys/bus/spi/drivers/%s/bind", driver);
+	return put("/sys/bus/spi/devices/" SPI "/driver_override", driver) || put(path, SPI);
+}
+
+static int spi_unbind(const char *driver)
+{
+	char path[96];
+
+	snprintf(path, sizeof(path), "/sys/bus/spi/drivers/%s/unbind", driver);
+	return put(path, SPI) || put("/sys/bus/spi/devices/" SPI "/driver_override", "\n");
+}
+
+/* route is how I2C, GPIO and PWM should go; spi_route is how SPI should. */
+static int backend_check(const char *route, const char *spi_route)
+{
+	return run((char *const[]){ "/lemnos-module-check", (char *)route, (char *)spi_route,
+				    gpio_chip, gpio_dir, NULL });
+}
+
 int main(void)
 {
 	mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
@@ -245,7 +268,6 @@ int main(void)
 	check(!run((char *const[]){ "/lemnos_gpio_check", "/dev/lemnos", gpio_chip, gpio_dir,
 				    "lemnos-test-parent", NULL }),
 	      "lemnos_gpio_check");
-	gpio_sim_down();
 
 	check(!run((char *const[]){ "/lemnos_power_check", "/dev/lemnos", BLOCK, BIND, UNBIND,
 				    NULL }),
@@ -253,8 +275,22 @@ int main(void)
 
 	check(!run((char *const[]){ "/lemnos_pio_check", "/dev/lemnos", NULL }),
 	      "lemnos_pio_check");
+
+	/* One binary, the real backend: the module where it serves a bus, stock elsewhere. */
+	check(!spi_bind("lemnos"), "SPI device bound to the module");
+	check(!backend_check("module", "module"), "backend: everything through the module");
+	check(!spi_unbind("lemnos"), "SPI device unbound from the module");
+	if (!access("/spidev.ko", R_OK))
+		check(!load("/spidev.ko", ""), "spidev loaded");
+	check(!spi_bind("spidev"), "SPI device bound to spidev");
+	check(!backend_check("module", "stock"), "backend: SPI alone stays stock");
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded with nothing left held");
+	check(!backend_check("stock", "stock"), "backend: no module, everything stock");
+	check(!spi_unbind("spidev"), "SPI device unbound from spidev");
+	if (!access("/spidev.ko", R_OK))
+		check(!unload("spidev"), "spidev unloaded");
+	gpio_sim_down();
 	check(!unload("spi_loopback_test"), "spi-loopback-test unloaded");
 	check(!unload("lemnos_test_bus"), "test buses unloaded");
 	check(!unload("i2c_stub"), "i2c-stub unloaded");

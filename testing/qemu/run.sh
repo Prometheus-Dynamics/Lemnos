@@ -45,17 +45,21 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   "$work/kernel/test/lemnos_pisp_be_check.c"
 "${compiler[@]}" "${flags[@]}" -I"$source" -o "$root/lemnos_pisp_fe_check" \
   "$work/kernel/test/lemnos_pisp_fe_check.c"
+# The real backend, static so the image needs no libraries.
+target=x86_64-unknown-linux-musl
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check --target "$target")
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
-# gpio-sim may be built in instead, and then there's no file to bring.
+# gpio-sim and spidev may be built in instead, and then there's no file to bring.
 # Installed modules only fit this machine's kernel, so they're only looked at when that's what boots.
 places=("$KDIR/drivers")
 if [[ "$KERNEL" == "/boot/vmlinuz-$release" ]]; then places+=("/lib/modules/$release/kernel/drivers"); fi
-for module in i2c-stub spi-loopback-test gpio-sim; do
+for module in i2c-stub spi-loopback-test gpio-sim spidev; do
   found="$(find -L "${places[@]}" -name "$module.ko*" 2>/dev/null | head -1 || true)"
   case "$found" in
     "")
-      [[ "$module" == gpio-sim ]] && continue
+      [[ "$module" == gpio-sim || "$module" == spidev ]] && continue
       echo "qemu: $module not found under $KDIR" >&2
       exit 1
       ;;

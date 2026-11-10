@@ -7,6 +7,9 @@ on:
     paths:
       - "kernel/**"
       - "testing/qemu/**"
+      - "backends/linux/**"
+      - "backends/linux-sys/**"
+      - "testing/crates/module-check/**"
       - ".github/workflows/next-kernel.yml"
   pull_request:
     branches:
@@ -14,6 +17,9 @@ on:
     paths:
       - "kernel/**"
       - "testing/qemu/**"
+      - "backends/linux/**"
+      - "backends/linux-sys/**"
+      - "testing/crates/module-check/**"
       - ".github/workflows/next-kernel.yml"
   workflow_dispatch:
 
@@ -44,6 +50,8 @@ jobs:
         with:
           path: ${{ runner.temp }}/kernel
           key: ${{ steps.kernel.outputs.cache-primary-key }}
+      # rust-toolchain.toml selects the toolchain.
+      - run: rustup target add x86_64-unknown-linux-musl
       - run: testing/qemu/run.sh
         env:
           KDIR: ${{ runner.temp }}/kernel/build
