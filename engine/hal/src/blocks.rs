@@ -132,6 +132,12 @@ pub trait StreamEndpoint {
     /// Refused for a buffer the producer doesn't hold (taken with `next_buffer` and not yet
     /// published) and for a range outside the buffer. Allocates nothing.
     fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<bool, Self::Error>;
+    /// Copies from `buffer` at `offset` into `out`, for a producer whose consumer hands it input
+    /// in a buffer (a job's configuration, an image to work on). `false` when no consumer is
+    /// attached. Refused for a buffer the producer doesn't hold and for a range outside the
+    /// buffer. The consumer shares this memory and can change it at any time, so read once and
+    /// check the copy, never the buffer. Allocates nothing.
+    fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, Self::Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

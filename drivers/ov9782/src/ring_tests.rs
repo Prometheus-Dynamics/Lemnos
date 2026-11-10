@@ -136,6 +136,15 @@ impl StreamEndpoint for RingEnd {
     ) -> core::result::Result<bool, ErrorKind> {
         Err(ErrorKind::Unsupported)
     }
+
+    fn read(
+        &mut self,
+        _buffer: u32,
+        _offset: usize,
+        _out: &mut [u8],
+    ) -> core::result::Result<bool, ErrorKind> {
+        Err(ErrorKind::Unsupported)
+    }
 }
 
 /// A group the sensor would latch: the launch that closed it, and its exposure.

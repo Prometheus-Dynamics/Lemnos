@@ -400,6 +400,17 @@ impl MockStream {
         mock
     }
 
+    /// Puts `data` at the start of `buffer`, as a consumer handing the producer input would.
+    /// Nothing happens when it doesn't fit.
+    pub fn fill(&self, buffer: u32, data: &[u8]) {
+        with(&self.state, |s| {
+            let to = s.contents.get_mut(buffer as usize);
+            if let Some(to) = to.and_then(|to| to.get_mut(..data.len())) {
+                to.copy_from_slice(data);
+            }
+        });
+    }
+
     /// What `buffer` holds now.
     pub fn contents(&self, buffer: u32) -> Vec<u8> {
         with(&self.state, |s| {
@@ -468,6 +479,18 @@ impl StreamEndpoint for MockStream {
             let end = offset.checked_add(data.len());
             let range = end.and_then(|end| s.contents[buffer as usize].get_mut(offset..end));
             range.ok_or(ErrorKind::InvalidInput)?.copy_from_slice(data);
+            Ok(true)
+        })
+    }
+
+    fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
+        with(&self.state, |s| {
+            if s.held.get(buffer as usize) != Some(&true) {
+                return Err(ErrorKind::InvalidInput);
+            }
+            let end = offset.checked_add(out.len());
+            let range = end.and_then(|end| s.contents[buffer as usize].get(offset..end));
+            out.copy_from_slice(range.ok_or(ErrorKind::InvalidInput)?);
             Ok(true)
         })
     }
@@ -895,6 +918,28 @@ mod tests {
         stream.publish(frame).unwrap();
         assert_eq!(stream.write(buffer, 0, &[1]), Err(ErrorKind::InvalidInput));
         assert_eq!(MockStream::new(1).contents(0), []);
+    }
+
+    #[test]
+    fn a_producer_reads_what_the_consumer_put_in_a_buffer_it_holds() {
+        let mut stream = MockStream::with_bytes(2, 4);
+        let consumer = stream.clone();
+        consumer.fill(0, &[1, 2, 3, 4]);
+        consumer.fill(1, &[0; 5]);
+        let mut out = [0; 2];
+        assert_eq!(stream.read(0, 0, &mut out), Err(ErrorKind::InvalidInput));
+        let buffer = stream.next_buffer().unwrap().unwrap();
+        assert_eq!(stream.read(buffer, 2, &mut out), Ok(true));
+        assert_eq!(out, [3, 4]);
+        assert_eq!(
+            stream.read(buffer, 3, &mut out),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            stream.read(buffer, usize::MAX, &mut out),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(consumer.contents(1), [0; 4]);
     }
 
     fn info(address: u8) -> UsbDeviceInfo {

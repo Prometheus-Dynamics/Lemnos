@@ -303,6 +303,39 @@ fn a_driver_writes_a_frame_through_the_trait_and_the_consumer_reads_it() {
 }
 
 #[test]
+fn a_driver_reads_what_the_consumer_put_in_a_buffer_through_the_trait() {
+    let host = start();
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    let mut out = [0u8; 4];
+    assert_eq!(
+        StreamEndpoint::read(&mut producer, 0, 0, &mut out),
+        Err(ErrorKind::InvalidInput),
+        "a buffer the producer doesn't hold"
+    );
+    let buffer = producer.next_buffer().unwrap().unwrap();
+    assert_eq!(
+        StreamEndpoint::read(&mut producer, buffer, 0, &mut out),
+        Ok(false),
+        "no consumer, so nothing to read"
+    );
+    let lease = host.stream_attach(0, "frames", CONSUMER).unwrap();
+    let offset = lease.layout.buffer_offset(buffer).unwrap();
+    assert!(lease.buffers.write(offset + 8, &[9, 8, 7, 6]));
+    let stream: &mut dyn StreamEndpoint<Error = ErrorKind> = &mut producer;
+    assert_eq!(stream.read(buffer, 8, &mut out), Ok(true));
+    assert_eq!(out, [9, 8, 7, 6]);
+    assert_eq!(
+        stream.read(buffer, FRAME_BYTES - 2, &mut out),
+        Err(ErrorKind::InvalidInput),
+        "past the end of the buffer"
+    );
+    assert_eq!(
+        stream.read(buffer, usize::MAX, &mut out),
+        Err(ErrorKind::InvalidInput)
+    );
+}
+
+#[test]
 fn jobs_reach_the_producer_with_their_bytes() {
     let host = start();
     let mut producer = host.stream_producer(0, "frames").unwrap();

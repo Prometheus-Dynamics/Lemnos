@@ -214,6 +214,28 @@ impl StreamCore {
         Ok(attached.buffers.write(start, data))
     }
 
+    fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
+        match self.pool.state(buffer) {
+            Some(BufferState::Producer { .. }) => {}
+            _ => return Err(ErrorKind::InvalidInput),
+        }
+        let in_buffer = offset
+            .checked_add(out.len())
+            .is_some_and(|end| end <= self.layout.buffer_bytes as usize);
+        if !in_buffer {
+            return Err(ErrorKind::InvalidInput);
+        }
+        let Some(attached) = self.attached.as_ref() else {
+            return Ok(false);
+        };
+        let start = self
+            .layout
+            .buffer_offset(buffer)
+            .and_then(|at| at.checked_add(offset))
+            .ok_or(ErrorKind::InvalidInput)?;
+        Ok(attached.buffers.read(start, out))
+    }
+
     pub(crate) fn stats(&self) -> StreamStats {
         let (free, producer_held, consumer_held) = self.pool.counts();
         StreamStats {
@@ -303,6 +325,10 @@ impl StreamEndpoint for ProducerEndpoint {
 
     fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<bool, ErrorKind> {
         lock(&self.core).write(buffer, offset, data)
+    }
+
+    fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
+        lock(&self.core).read(buffer, offset, out)
     }
 }
 
