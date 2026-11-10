@@ -13,15 +13,14 @@
 //! - [`uapi`]: the kernel's request number, message layout, commands, flags and client types.
 //! - [`Session`] and [`Device`]: the system side, which issues the request.
 //!
-//! # Not yet on a device
+//! # On a device
 //!
 //! The request carries a chain of messages whose `data_ptr` the kernel follows, and a register
-//! read-back the kernel writes during a later call, so issuing it needs `unsafe`. This crate has
-//! none, and neither `lemnos-linux-sys` nor a `-sys` crate offers a safe call that issues it
-//! ([`lemnos_linux_sys::Ioctl`] can only be made inside that crate, and is for arguments without
-//! pointers). So no [`Session`] that opens the node ships here: the driver is complete up to the
-//! [`Session`] trait and is exercised against a played session in the tests. What a session must
-//! do is stated on the trait.
+//! read-back the kernel writes during a later call, so issuing it needs `unsafe`, which this crate
+//! does not hold. The [`Session`] and [`Device`] that reach the node are in
+//! `lemnos-driver-rk-mpp-sys` (`ServiceSession` and `ServiceNode`), which depends on this crate
+//! for the traits, the messages and the layouts; this crate does not depend on it. The tests here
+//! run the driver against a played session. What a session must do is stated on the trait.
 //!
 //! Hardware status: untested on board. Written from the vendor kernel driver's source; the check
 //! is `testing/board-runs/E16.md`.

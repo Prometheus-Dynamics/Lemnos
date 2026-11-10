@@ -292,10 +292,12 @@ impl Kernel {
         for m in messages.iter_mut() {
             let size = m.size() as usize;
             let at = m.offset() as usize;
-            match (m.cmd(), m.payload_mut()) {
-                (Command::QueryHwSupport, Payload::InOut(data)) => {
-                    data.copy_from_slice(&self.hw_support.to_ne_bytes());
-                }
+            if m.cmd() == Command::QueryHwSupport {
+                let data = m.in_out_mut().expect("the answer's memory");
+                data.copy_from_slice(&self.hw_support.to_ne_bytes());
+                continue;
+            }
+            match (m.cmd(), m.payload()) {
                 (Command::InitClientType, Payload::In(data)) => {
                     self.client = Some(u32::from_ne_bytes((*data).try_into().unwrap()));
                 }
