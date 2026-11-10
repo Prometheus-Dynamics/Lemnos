@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-host-static"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Runs Lemnos drivers from a table compiled into the firmware: no allocator, no threads, direct calls"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../core" }
+
+[dev-dependencies]
+embedded-hal.workspace = true
+lemnos-mcu = { path = "../../backends/mcu" }
+lemnos-measure = { path = "../measure", features = ["alloc-count"] }
+lemnos-driver-bmi088 = { path = "../../drivers/bmi088" }
+lemnos-driver-orientation = { path = "../../drivers/orientation" }
