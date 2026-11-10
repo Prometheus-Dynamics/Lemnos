@@ -13,8 +13,8 @@ use super::*;
 use crate::dfu::{self, DfuInterface, find_interface};
 use crate::loader::{
     BACKOFF_CAP_NS, BACKOFF_FIRST_NS, BUSY_BUDGET_NS, CLAIM_BUSY, GONE, MAX_BLOCK, MAX_POLL_MS,
-    NOT_DFU_MODE, NOT_IDLE, REFUSED, SHORT_DOWNLOAD, SILENT, STAYED_BUSY, UNKNOWN_STATE,
-    WRONG_STATE,
+    NOT_DFU_MODE, NOT_IDLE, REFUSED, RESET_FAILED, SHORT_DOWNLOAD, SILENT, STAYED_BUSY,
+    UNKNOWN_STATE, WRONG_STATE,
 };
 use crate::mock::{ERR_VERIFY, ERR_WRITE, MockUsb, Transfer};
 
@@ -219,9 +219,17 @@ impl Rig {
         self.usb.state().received.clone()
     }
 
-    fn assert_waiting_for_reset(&self) {
-        assert_eq!(self.health(), Health::Degraded(NEEDS_RESET));
-        assert_eq!(self.usb.state().early_polls, Vec::<u64>::new());
+    /// The download was confirmed, and one reset went out after everything else and took the
+    /// device off the bus. Nothing was asked of the dead handle.
+    fn assert_loaded(&self) {
+        assert_eq!(self.health(), Health::Ok);
+        assert_eq!(self.driver.loader.ended(), Some(Ended::Loaded));
+        let device = self.usb.state();
+        assert_eq!(device.early_polls, Vec::<u64>::new());
+        assert_eq!(device.resets.len(), 1, "exactly one reset");
+        assert_eq!(device.resets[0].0, device.transfers.len(), "after it all");
+        assert!(device.gone);
+        assert_eq!(device.calls_after_gone, Vec::<&str>::new());
     }
 }
 
@@ -254,7 +262,7 @@ fn the_download_is_the_exact_sequence_dfu_defines() {
     assert_eq!(rig.received(), image);
     assert_eq!(rig.usb.state().state, dfu::MANIFEST_WAIT_RESET);
     assert_eq!(rig.usb.state().claimed, vec![0]);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -328,7 +336,7 @@ fn the_block_number_wraps_at_65535_as_dfu_defines() {
     assert_eq!(downloads[65_537], (1, 1));
     assert_eq!(downloads[65_538], (2, 0), "the ending block carries on");
     assert_eq!(rig.received(), image);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -527,7 +535,7 @@ fn a_device_busy_forever_runs_out_its_budget_and_is_retried() {
     rig.usb.state().busy_forever = false;
     rig.run();
     assert_eq!(rig.received(), vec![1, 2, 3, 4]);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -551,7 +559,7 @@ fn a_short_status_reply_restarts_the_download() {
             .any(|transfer| transfer.request == dfu::ABORT),
         "the leftover download was aborted first"
     );
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -589,7 +597,7 @@ fn a_block_the_device_refuses_clears_the_error_and_starts_again() {
         &transfers[..refused_at + 1]
     );
     assert_eq!(rig.received(), image);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -600,7 +608,7 @@ fn an_image_the_device_rejects_when_manifesting_is_sent_again() {
     assert_eq!(rig.run_to_fault(), REFUSED);
     rig.run();
     assert_eq!(rig.downloads(), vec![(0, 4), (1, 0), (0, 4), (1, 0)]);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -619,7 +627,7 @@ fn a_device_left_in_error_is_cleared_first() {
         ]
     );
     assert_eq!(rig.downloads(), vec![(0, 1), (1, 0)]);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -637,18 +645,17 @@ fn a_download_left_over_from_before_a_restart_is_aborted_first() {
         ]
     );
     assert_eq!(rig.downloads(), vec![(0, 1), (1, 0)]);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
-fn a_device_already_waiting_for_reset_is_not_downloaded_to_again() {
+fn a_device_already_waiting_for_reset_is_reset_and_not_downloaded_to_again() {
     let usb = device(4);
     usb.state().state = dfu::MANIFEST_WAIT_RESET;
     let mut rig = Rig::new(usb, &[1, 2, 3]);
     rig.run();
     assert_eq!(rig.downloads(), vec![]);
-    assert_eq!(rig.driver.loader.ended(), Some(Ended::Manifested));
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -671,7 +678,7 @@ fn a_device_that_jumps_out_of_the_download_states_is_reported_and_retried() {
     assert_eq!(rig.run_to_fault(), WRONG_STATE);
     rig.run();
     assert_eq!(rig.received(), vec![1, 2, 3, 4, 5]);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -715,7 +722,7 @@ fn a_device_that_stops_responding_backs_off_to_the_cap_and_never_gives_up() {
     rig.usb.state().silent_after = None;
     rig.run();
     assert_eq!(rig.received(), image);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -767,13 +774,12 @@ fn a_held_interface_is_reported_as_held() {
 }
 
 #[test]
-fn a_tolerant_device_ends_idle_and_still_needs_a_reset() {
+fn a_tolerant_device_ends_idle_and_is_reset_too() {
     let mut rig = Rig::new(tolerant_device(4), &[1, 2, 3, 4, 5]);
     rig.run();
     assert_eq!(rig.usb.state().state, dfu::IDLE);
     assert_eq!(rig.received(), vec![1, 2, 3, 4, 5]);
-    assert_eq!(rig.driver.loader.ended(), Some(Ended::Manifested));
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -785,7 +791,7 @@ fn manifestation_is_polled_at_the_rate_the_device_asks() {
     rig.run();
     assert_eq!(rig.now, 30 * MS);
     assert_eq!(rig.usb.state().early_polls, Vec::<u64>::new());
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
@@ -797,6 +803,7 @@ fn a_device_silent_while_manifesting_ends_unconfirmed_and_says_so() {
     assert_eq!(rig.driver.loader.ended(), Some(Ended::Unconfirmed));
     assert_eq!(rig.health(), Health::Degraded(UNCONFIRMED));
     assert_eq!(rig.downloads(), vec![(0, 4), (1, 0)], "nothing resent");
+    assert_eq!(rig.usb.state().resets.len(), 1, "it is still reset");
 }
 
 #[test]
@@ -829,17 +836,144 @@ fn nothing_is_sent_once_the_download_has_ended_and_the_image_is_released() {
         assert_eq!(rig.tick(), None);
     }
     assert_eq!(rig.transfers().len(), before);
-    rig.assert_waiting_for_reset();
+    rig.assert_loaded();
 }
 
 #[test]
-fn health_never_claims_success_at_any_point() {
+fn health_claims_success_only_once_the_reset_has_taken_the_device_away() {
     let mut rig = Rig::new(device(4), &[1, 2, 3, 4]);
     assert_eq!(rig.health(), Health::Degraded(IN_PROGRESS));
     while rig.step().is_some() {
         assert_ne!(rig.health(), Health::Ok);
+        assert!(!rig.usb.state().gone);
     }
-    assert_ne!(rig.health(), Health::Ok);
+    assert_eq!(rig.health(), Health::Ok);
+    assert!(rig.usb.state().gone);
+}
+
+#[test]
+fn the_reset_is_issued_once_after_the_final_dfu_stage() {
+    let mut rig = Rig::new(device(4), &[1, 2, 3, 4, 5]);
+    rig.run();
+    // Two blocks and the zero-length one, each with its GETSTATUS, after the first GETSTATUS.
+    assert_eq!(rig.transfers().len(), 7);
+    assert_eq!(
+        rig.usb.state().resets,
+        vec![(7, dfu::MANIFEST_WAIT_RESET)],
+        "one reset, after the last transfer, with the device waiting for it"
+    );
+    for _ in 0..5 {
+        rig.now += 10 * SECOND;
+        assert_eq!(rig.tick(), None);
+    }
+    assert_eq!(rig.usb.state().resets.len(), 1, "never a second reset");
+    rig.assert_loaded();
+}
+
+#[test]
+fn no_reset_goes_out_before_the_download_is_over() {
+    let usb = device(4);
+    usb.state().reject_block_once = Some(1);
+    usb.state().reject_manifest_once = Some(ERR_VERIFY);
+    let mut rig = Rig::new(usb, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    while rig.step().is_some() {
+        let device = rig.usb.state();
+        if device.state != dfu::MANIFEST_WAIT_RESET {
+            assert_eq!(device.resets, vec![], "in DFU state {}", device.state);
+        }
+    }
+    rig.assert_loaded();
+}
+
+#[test]
+fn a_reset_that_fails_is_retried_backing_off_to_the_cap_and_never_gives_up() {
+    let usb = device(4);
+    usb.state().reset_errors = [ErrorKind::Timeout; 6].into();
+    let mut rig = Rig::new(usb, &[1, 2, 3, 4]);
+    assert_eq!(rig.run_to_fault(), RESET_FAILED);
+    assert_eq!(rig.health(), Health::Failed(RESET_FAILED));
+    let sent = rig.transfers().len();
+
+    // `run_to_fault` has already moved the clock past the first wait.
+    let mut waits = vec![rig.now / SECOND];
+    while rig.usb.state().resets.len() < 6 {
+        let before = rig.now;
+        let next = rig.step().expect("never gives up");
+        waits.push((next - before) / SECOND);
+    }
+    assert_eq!(waits, vec![1, 2, 4, 8, 8, 8]);
+    assert_eq!(rig.health(), Health::Failed(RESET_FAILED));
+    assert_eq!(rig.transfers().len(), sent, "only the reset is made again");
+
+    rig.run();
+    assert_eq!(rig.usb.state().resets.len(), 7);
+    assert_eq!(rig.transfers().len(), sent);
+    assert_eq!(
+        rig.downloads(),
+        vec![(0, 4), (1, 0)],
+        "nothing downloaded again"
+    );
+    assert_eq!(rig.health(), Health::Ok);
+    assert_eq!(rig.driver.loader.ended(), Some(Ended::Loaded));
+}
+
+#[test]
+fn a_reset_refused_for_any_reason_is_still_being_retried_much_later() {
+    let usb = device(4);
+    let refusals = [
+        ErrorKind::Busy,
+        ErrorKind::PermissionDenied,
+        ErrorKind::Unsupported,
+        ErrorKind::Failed,
+        ErrorKind::NotFound,
+    ];
+    usb.state().reset_errors = refusals.iter().copied().cycle().take(500).collect();
+    let mut rig = Rig::new(usb, &[1]);
+    while rig.usb.state().resets.len() < 500 {
+        let before = rig.now;
+        let next = rig.step().expect("never gives up");
+        assert!(next - before <= BACKOFF_CAP_NS);
+    }
+    assert_eq!(rig.health(), Health::Failed(RESET_FAILED));
+    rig.run();
+    assert_eq!(rig.health(), Health::Ok);
+}
+
+#[test]
+fn the_backoff_of_the_download_does_not_carry_into_the_reset() {
+    let usb = device(4);
+    usb.state().manifest_polls = 1;
+    usb.state().reject_manifest_once = Some(ERR_VERIFY);
+    usb.state().reset_errors = [ErrorKind::Failed].into();
+    let mut rig = Rig::new(usb, &[1, 2, 3, 4]);
+    assert_eq!(rig.run_to_fault(), REFUSED);
+    rig.step();
+    assert_eq!(rig.driver.loader.fault(), None);
+    loop {
+        let before = rig.now;
+        let next = rig.step().expect("retrying");
+        if rig.driver.loader.fault() == Some(RESET_FAILED) {
+            assert_eq!(next - before, BACKOFF_FIRST_NS, "the backoff started over");
+            break;
+        }
+    }
+    rig.run();
+    assert_eq!(rig.health(), Health::Ok);
+}
+
+#[test]
+fn a_device_that_comes_back_from_the_reset_unchanged_is_reported_and_left_alone() {
+    let usb = device(4);
+    usb.state().reset_keeps_identity = true;
+    let mut rig = Rig::new(usb, &[1, 2, 3, 4]);
+    rig.run();
+    assert_eq!(rig.driver.loader.ended(), Some(Ended::Unchanged));
+    assert_eq!(rig.health(), Health::Degraded(UNCHANGED));
+    let sent = rig.transfers().len();
+    rig.now += 60 * SECOND;
+    assert_eq!(rig.tick(), None);
+    assert_eq!(rig.usb.state().resets.len(), 1);
+    assert_eq!(rig.transfers().len(), sent);
 }
 
 #[test]

@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use super::ring::UrbStorage;
 use super::{
-    BULK, BulkTransfer, CLAIMINTERFACE, CONTROL, CtrlTransfer, DIR_IN, DISCARDURB, IsoPacketDesc,
-    REAPURBNDELAY, RELEASEINTERFACE, SETINTERFACE, SUBMITURB, SetInterface, UrbHeader,
+    BULK, BulkTransfer, CLAIMINTERFACE, CONTROL, CtrlTransfer, DIR_IN, DISCARDURB, DISCONNECT,
+    GETDRIVER, GetDriver, IOCTL, InterfaceIoctl, IsoPacketDesc, REAPURBNDELAY, RELEASEINTERFACE,
+    RESET, SETINTERFACE, SUBMITURB, SetInterface, UrbHeader,
 };
 use crate::poll::{POLLHUP, POLLOUT};
 
@@ -80,6 +81,19 @@ pub enum Call {
     },
     /// `USBDEVFS_DISCARDURB`.
     Discard(usize),
+    /// `USBDEVFS_GETDRIVER`, with the interface number.
+    GetDriver(u32),
+    /// `USBDEVFS_IOCTL` passing a request on to an interface.
+    InterfaceIoctl {
+        /// `usbdevfs_ioctl.ifno`.
+        interface: i32,
+        /// `usbdevfs_ioctl.ioctl_code`.
+        code: u32,
+        /// The data pointer's address.
+        data: usize,
+    },
+    /// `USBDEVFS_RESET`.
+    Reset,
 }
 
 /// One crafted completion: every field a real completion carries, and the header fields the
@@ -136,6 +150,12 @@ struct State {
     /// Reaps fail with `ENODEV` once nothing is ready, and polls report a hang-up.
     gone: bool,
     duplicate: Option<usize>,
+    /// The driver bound to each interface that has one.
+    drivers: Vec<(u32, String)>,
+    /// A reset brings the device back as a different one.
+    reset_reenumerates: bool,
+    /// The device this file opened is no longer there: every ioctl fails with `ENODEV`.
+    left: bool,
 }
 
 /// The fake kernel. Clones share state.
@@ -209,22 +229,53 @@ impl FakeUsbfs {
         self.lock().gone = gone;
     }
 
+    /// Binds the driver called `name` to `interface`, as the kernel does when it probes. A
+    /// claim of that interface then fails with `EBUSY`. The name `usbfs` is a claim made through
+    /// usbdevfs.
+    pub fn bind_driver(&self, interface: u8, name: &str) {
+        let mut state = self.lock();
+        state
+            .drivers
+            .retain(|(bound, _)| *bound != u32::from(interface));
+        state.drivers.push((u32::from(interface), name.to_owned()));
+    }
+
+    /// The driver bound to `interface`, if any.
+    pub fn driver(&self, interface: u8) -> Option<String> {
+        let state = self.lock();
+        let bound = |(number, _): &&(u32, String)| *number == u32::from(interface);
+        state
+            .drivers
+            .iter()
+            .find(bound)
+            .map(|(_, name)| name.clone())
+    }
+
+    /// Whether a reset brings the device back as a different one: the reset then fails with
+    /// `ENODEV`, and so does every ioctl after it.
+    pub fn set_reset_reenumerates(&self, reenumerates: bool) {
+        self.lock().reset_reenumerates = reenumerates;
+    }
+
     /// URBs the kernel holds.
     pub fn in_flight(&self) -> usize {
         self.lock().in_flight.len()
     }
 
-    pub(super) fn read_at(&self, out: &mut [u8], offset: u64) -> usize {
+    pub(super) fn read_at(&self, out: &mut [u8], offset: u64) -> std::io::Result<usize> {
         let state = self.lock();
+        if state.left {
+            return Err(errno(libc::ENODEV));
+        }
         let Some(rest) = usize::try_from(offset)
             .ok()
             .and_then(|offset| state.descriptors.get(offset..))
         else {
-            return 0;
+            return Ok(0);
         };
         let n = rest.len().min(out.len());
         out[..n].copy_from_slice(&rest[..n]);
-        n
+        Ok(n)
     }
 
     /// `poll` on the device file, for `POLLOUT`.
@@ -250,8 +301,11 @@ impl FakeUsbfs {
         request: u32,
         arg: libc::c_ulong,
     ) -> std::io::Result<libc::c_int> {
-        assert_eq!(request, DISCARDURB, "the only by-value request");
         let mut state = self.lock();
+        if request == RESET {
+            return state.reset();
+        }
+        assert_eq!(request, DISCARDURB, "the only other by-value request");
         let urb = arg as usize;
         if state.recording {
             state.calls.push(Call::Discard(urb));
@@ -282,12 +336,55 @@ impl FakeUsbfs {
         arg: *mut c_void,
     ) -> std::io::Result<libc::c_int> {
         let mut state = self.lock();
+        if state.left {
+            return Err(errno(libc::ENODEV));
+        }
         if request != REAPURBNDELAY
             && let Some(code) = state.fail_next.take()
         {
             return Err(errno(code));
         }
         match request {
+            GETDRIVER => {
+                let query = arg.cast::<GetDriver>();
+                // SAFETY: the caller promises `arg` is a live `usbdevfs_getdriver`.
+                let interface = unsafe { (*query).interface };
+                if state.recording {
+                    state.calls.push(Call::GetDriver(interface));
+                }
+                let Some((_, name)) = state.drivers.iter().find(|(n, _)| *n == interface) else {
+                    return Err(errno(libc::ENODATA));
+                };
+                let mut driver = [0u8; super::DRIVER_NAME_BYTES];
+                let length = name.len().min(driver.len() - 1);
+                driver[..length].copy_from_slice(&name.as_bytes()[..length]);
+                // SAFETY: the caller promises `arg` is live and writable, as the request needs.
+                unsafe { (*query).driver = driver };
+                Ok(0)
+            }
+            IOCTL => {
+                // SAFETY: the caller promises `arg` is a live `usbdevfs_ioctl`.
+                let passed = unsafe { arg.cast::<InterfaceIoctl>().read() };
+                if state.recording {
+                    state.calls.push(Call::InterfaceIoctl {
+                        interface: passed.ifno,
+                        code: passed.ioctl_code as u32,
+                        data: passed.data as usize,
+                    });
+                }
+                assert_eq!(
+                    passed.ioctl_code as u32, DISCONNECT,
+                    "the only passed-on request"
+                );
+                let before = state.drivers.len();
+                state
+                    .drivers
+                    .retain(|(n, _)| i64::from(*n) != i64::from(passed.ifno));
+                if state.drivers.len() == before {
+                    return Err(errno(libc::ENODATA));
+                }
+                Ok(0)
+            }
             CONTROL => {
                 // SAFETY: the caller promises `arg` is a live `usbdevfs_ctrltransfer`.
                 let transfer = unsafe { arg.cast::<CtrlTransfer>().read() };
@@ -344,6 +441,9 @@ impl FakeUsbfs {
                 if state.recording {
                     state.calls.push(call);
                 }
+                if request == CLAIMINTERFACE && state.drivers.iter().any(|(n, _)| *n == number) {
+                    return Err(errno(libc::EBUSY));
+                }
                 Ok(0)
             }
             SETINTERFACE => {
@@ -373,6 +473,24 @@ impl FakeUsbfs {
 }
 
 impl State {
+    /// `USBDEVFS_RESET`.
+    fn reset(&mut self) -> std::io::Result<libc::c_int> {
+        if self.recording {
+            self.calls.push(Call::Reset);
+        }
+        if self.left {
+            return Err(errno(libc::ENODEV));
+        }
+        if let Some(code) = self.fail_next.take() {
+            return Err(errno(code));
+        }
+        if self.reset_reenumerates {
+            self.left = true;
+            return Err(errno(libc::ENODEV));
+        }
+        Ok(0)
+    }
+
     /// # Safety
     ///
     /// `data` holds `length` bytes, writable when `is_in`.

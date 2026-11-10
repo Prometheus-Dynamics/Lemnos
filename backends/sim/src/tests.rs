@@ -265,6 +265,42 @@ fn every_resource_round_trips_through_the_provider() {
 }
 
 #[test]
+fn a_usb_reset_and_detach_reach_the_device_and_can_be_made_to_fail() {
+    let mut board = SimBoard::new();
+    let device = board.add_usb_device("usb", &[9, 2]);
+    device.bind_kernel_driver(1);
+    let mut usb = board.usb_device("usb").unwrap();
+
+    assert_eq!(usb.claim_interface(1), Err(ErrorKind::Busy));
+    usb.detach_kernel_driver(1).unwrap();
+    usb.claim_interface(1).unwrap();
+    assert_eq!(device.detaches(), [1]);
+
+    let faults = board.faults("usb").unwrap();
+    faults.fail_next_op("reset", ErrorKind::Timeout);
+    faults.fail_next_op("detach_kernel_driver", ErrorKind::PermissionDenied);
+    assert_eq!(usb.reset(), Err(ErrorKind::Timeout));
+    assert_eq!(
+        device.resets(),
+        0,
+        "a scripted fault never reaches the device"
+    );
+    assert_eq!(
+        usb.detach_kernel_driver(0),
+        Err(ErrorKind::PermissionDenied)
+    );
+    assert_eq!(usb.reset(), Ok(()));
+    assert_eq!(device.resets(), 1);
+
+    device.reset_reenumerates(true);
+    assert_eq!(usb.reset(), Err(ErrorKind::Unavailable));
+    assert_eq!(
+        usb.config_descriptor(0, &mut [0; 2]),
+        Err(ErrorKind::Unavailable)
+    );
+}
+
+#[test]
 fn unrelated_resources_work_from_different_threads() {
     let mut board = SimBoard::new();
     board.add_i2c("a").attach(0x10, Layout::Bytes);

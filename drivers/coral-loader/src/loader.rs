@@ -2,11 +2,14 @@
 //!
 //! The order is the one DFU 1.1 defines: bring the device to `dfuIDLE`, then for each block a
 //! DNLOAD and GETSTATUS until the device is idle again, then a zero-length DNLOAD and GETSTATUS
-//! until the device has manifested. Block numbers count up from 0 and wrap at 65535, as the
-//! specification says.
+//! until the device has manifested, then one USB reset, which is what makes the device start the
+//! firmware and come back under its new identity. Block numbers count up from 0 and wrap at
+//! 65535, as the specification says.
 //!
-//! Any failure restarts the download from block 0 after a backoff. DFU has no way to resend one
-//! block, so the block a device saw last cannot be trusted after a fault.
+//! A failure during the download restarts it from block 0 after a backoff. DFU has no way to
+//! resend one block, so the block a device saw last cannot be trusted after a fault. A reset
+//! that was not carried out is made again after the same backoff, and nothing is downloaded
+//! again for it.
 
 use core::time::Duration;
 
@@ -44,10 +47,11 @@ pub const BACKOFF_FIRST_NS: u64 = 1_000 * NS_PER_MS;
 pub const BACKOFF_CAP_NS: u64 = 8_000 * NS_PER_MS;
 
 pub const IN_PROGRESS: &str = "firmware download in progress: not running yet";
-pub const NEEDS_RESET: &str = "firmware downloaded and manifested: the device needs a USB reset, which this driver cannot issue";
 pub const UNCONFIRMED: &str = "firmware download ended and the device stopped answering while it \
-                               manifested: not confirmed, and it still needs a USB reset, which \
-                               this driver cannot issue";
+                               manifested: it was reset and left the bus, but the load is not \
+                               confirmed";
+pub const UNCHANGED: &str = "firmware downloaded and the device reset, but it came back as the \
+                             device it was: not running the firmware";
 
 pub const GONE: &str = "the device is gone: retrying";
 pub const SILENT: &str = "the device stopped responding: retrying";
@@ -60,14 +64,21 @@ pub const UNKNOWN_STATE: &str = "the device reported an unknown DFU state: retry
 pub const WRONG_STATE: &str = "the device left the download states: retrying";
 pub const NOT_IDLE: &str = "the device would not return to its idle state: retrying";
 pub const STAYED_BUSY: &str = "the device stayed busy past its budget: retrying";
+pub const RESET_FAILED: &str = "firmware downloaded, but the USB reset was not carried out: \
+                                retrying the reset";
 
-/// What the loader knows at the end of a download.
+/// What the loader knows once the reset has gone out. The device handle is of no more use in
+/// any of these, and the driver cannot see what the device comes back as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
-    /// The device says it has manifested and is waiting for a reset, or for the host.
-    Manifested,
-    /// The device stopped answering while it manifested, which DFU allows.
+    /// The device said it had manifested, and the reset took it off the bus under the identity
+    /// it had: it comes back running the firmware.
+    Loaded,
+    /// The device stopped answering while it manifested, which DFU allows, and the reset took
+    /// it off the bus.
     Unconfirmed,
+    /// The reset was carried out and the device is still the one it was.
+    Unchanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +93,9 @@ enum Phase {
     Poll,
     /// The download is over: wait for the device to manifest.
     Manifest,
-    /// A failure: wait, then go back to the start of the download.
+    /// The download is over, confirmed by the device or not: reset the device.
+    Reset { confirmed: bool },
+    /// A failure: wait, then go back to the start of the download, or to the reset.
     Backoff,
     /// Nothing more this driver can do. Stays here for good.
     Ended(Ended),
@@ -96,7 +109,7 @@ enum Failure {
 
 /// The download of one image to one device.
 pub struct Loader {
-    /// Released when the download ends. Everything before that may need it again.
+    /// Released when the last block has gone. Everything before that may need it again.
     image: Vec<u8>,
     phase: Phase,
     /// When the next step is due. A tick can come early.
@@ -113,6 +126,9 @@ pub struct Loader {
     claimed: bool,
     /// A CLRSTATUS or ABORT has gone out since the last `dfuIDLE`, so another is pointless.
     recovering: bool,
+    /// Set once the download is over: whether the device confirmed it. From then on only the
+    /// reset is left, and a failure comes back to it.
+    downloaded: Option<bool>,
     /// Failures in a row.
     attempts: u32,
     fault: &'static str,
@@ -131,6 +147,7 @@ impl Loader {
             block: 0,
             claimed: false,
             recovering: false,
+            downloaded: None,
             attempts: 0,
             fault: IN_PROGRESS,
         }
@@ -156,7 +173,7 @@ impl Loader {
     }
 
     /// Does what is due at `now_ns`, and returns when to be called next, or `None` once the
-    /// download has ended.
+    /// reset has gone out.
     pub fn tick(&mut self, usb: &mut Usb, now_ns: u64) -> Option<u64> {
         if self.ended().is_some() {
             return None;
@@ -186,19 +203,21 @@ impl Loader {
             Phase::Sync => self.sync(usb, now_ns),
             Phase::Send => self.send(usb, now_ns).map(Some),
             Phase::Poll => self.poll(usb, now_ns).map(Some),
-            Phase::Manifest => self.manifest(usb, now_ns),
+            Phase::Manifest => self.manifest(usb, now_ns).map(Some),
+            Phase::Reset { confirmed } => self.reset(usb, confirmed),
             // `tick` has already moved on from these.
             Phase::Backoff | Phase::Ended(_) => Ok(Some(now_ns)),
         }
     }
 
-    /// Picks up from the top after a failure: the device is whatever it now says it is.
+    /// Picks up from the top after a failure: the device is whatever it now says it is. Once
+    /// the download is over, only the reset is picked up again.
     fn restart(&mut self, now_ns: u64) {
         self.recovering = false;
-        self.phase = if self.dfu.is_some() {
-            Phase::Sync
-        } else {
-            Phase::Probe
+        self.phase = match (self.downloaded, self.dfu) {
+            (Some(confirmed), _) => Phase::Reset { confirmed },
+            (None, Some(_)) => Phase::Sync,
+            (None, None) => Phase::Probe,
         };
         self.deadline_ns = now_ns.saturating_add(BUSY_BUDGET_NS);
     }
@@ -215,10 +234,28 @@ impl Loader {
         now_ns.saturating_add(wait).max(self.poll_after_ns)
     }
 
-    /// The download is over. Nothing more will be sent, so the image can go.
-    fn end(&mut self, ended: Ended) {
-        self.phase = Phase::Ended(ended);
+    /// The download is over. Nothing more will be sent, so the image can go, and what is left
+    /// is the reset. A failure that came before this has been got past.
+    fn downloaded(&mut self, confirmed: bool, now_ns: u64) -> u64 {
         self.image = Vec::new();
+        self.downloaded = Some(confirmed);
+        self.attempts = 0;
+        self.phase = Phase::Reset { confirmed };
+        now_ns
+    }
+
+    /// Resets the device, which starts the firmware. A device that leaves the bus under this
+    /// identity is the reset working: the handle is dead from then on, so there is no more to
+    /// ask. A reset that was not carried out is made again after the backoff.
+    fn reset(&mut self, usb: &mut Usb, confirmed: bool) -> Result<Option<u64>, &'static str> {
+        let ended = match usb.reset() {
+            Ok(()) => Ended::Unchanged,
+            Err(ErrorKind::Unavailable) if confirmed => Ended::Loaded,
+            Err(ErrorKind::Unavailable) => Ended::Unconfirmed,
+            Err(_) => return Err(RESET_FAILED),
+        };
+        self.phase = Phase::Ended(ended);
+        Ok(None)
     }
 
     fn interface(&self) -> u8 {
@@ -266,10 +303,8 @@ impl Loader {
             dfu::DNLOAD_SYNC | dfu::DNBUSY | dfu::MANIFEST => {
                 self.wait(status.poll_ms, now_ns).map(Some)
             }
-            dfu::MANIFEST_WAIT_RESET => {
-                self.end(Ended::Manifested);
-                Ok(None)
-            }
+            // Left there by a download before a restart: all it needs is the reset.
+            dfu::MANIFEST_WAIT_RESET => Ok(Some(self.downloaded(true, now_ns))),
             dfu::APP_IDLE | dfu::APP_DETACH => Err(NOT_DFU_MODE),
             _ => Err(UNKNOWN_STATE),
         }
@@ -334,13 +369,12 @@ impl Loader {
 
     /// Waits for the end of manifestation. A device that isn't manifestation tolerant may stop
     /// answering here, and one may reset itself: either way there is no more to send.
-    fn manifest(&mut self, usb: &mut Usb, now_ns: u64) -> Result<Option<u64>, &'static str> {
+    fn manifest(&mut self, usb: &mut Usb, now_ns: u64) -> Result<u64, &'static str> {
         let tolerant = self.dfu.is_some_and(|dfu| dfu.manifestation_tolerant);
         let status = match self.status(usb) {
             Ok(status) => status,
             Err(Failure::Usb(kind)) if !tolerant || is_gone(kind) => {
-                self.end(Ended::Unconfirmed);
-                return Ok(None);
+                return Ok(self.downloaded(false, now_ns));
             }
             Err(failure) => return Err(failure_fault(failure)),
         };
@@ -348,11 +382,8 @@ impl Loader {
             return Err(REFUSED);
         }
         match status.state {
-            dfu::MANIFEST_WAIT_RESET | dfu::IDLE => {
-                self.end(Ended::Manifested);
-                Ok(None)
-            }
-            dfu::MANIFEST_SYNC | dfu::MANIFEST => self.wait(status.poll_ms, now_ns).map(Some),
+            dfu::MANIFEST_WAIT_RESET | dfu::IDLE => Ok(self.downloaded(true, now_ns)),
+            dfu::MANIFEST_SYNC | dfu::MANIFEST => self.wait(status.poll_ms, now_ns),
             _ => Err(WRONG_STATE),
         }
     }

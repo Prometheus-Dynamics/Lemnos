@@ -505,9 +505,21 @@ struct UsbDeviceState {
     iso: VecDeque<Vec<u8>>,
     written: Vec<(u8, Vec<u8>)>,
     controls: Vec<ControlSetup>,
+    /// Interfaces a kernel driver holds.
+    kernel_drivers: Vec<u8>,
+    /// Every `detach_kernel_driver`, by interface.
+    detaches: Vec<u8>,
+    /// Resets asked for, whether or not they were carried out.
+    resets: u32,
+    reset_reenumerates: bool,
+    reset_errors: VecDeque<ErrorKind>,
+    /// The device this handle opened has left.
+    gone: bool,
 }
 
-/// A USB device a test feeds. A read with nothing queued times out.
+/// A USB device a test feeds. A read with nothing queued times out. Once it has left (see
+/// [`reset_reenumerates`](Self::reset_reenumerates) and [`unplug`](Self::unplug)), every call
+/// fails with `Unavailable`.
 #[derive(Debug, Clone, Default)]
 pub struct MockUsbDevice {
     state: Shared<UsbDeviceState>,
@@ -545,6 +557,61 @@ impl MockUsbDevice {
         with(&self.state, |s| s.alternates.get(&interface).copied())
     }
 
+    /// Binds a kernel driver to `interface`: a claim finds it `Busy` until it is detached.
+    pub fn bind_kernel_driver(&self, interface: u8) {
+        with(&self.state, |s| {
+            if !s.kernel_drivers.contains(&interface) {
+                s.kernel_drivers.push(interface);
+            }
+        });
+    }
+
+    /// Whether a kernel driver holds `interface`.
+    pub fn kernel_driver_bound(&self, interface: u8) -> bool {
+        with(&self.state, |s| s.kernel_drivers.contains(&interface))
+    }
+
+    /// Every `detach_kernel_driver` so far, by interface, in order.
+    pub fn detaches(&self) -> Vec<u8> {
+        with(&self.state, |s| s.detaches.clone())
+    }
+
+    /// How many times `reset` was called, whatever it returned.
+    pub fn resets(&self) -> u32 {
+        with(&self.state, |s| s.resets)
+    }
+
+    /// Whether a reset makes the device come back as a different one, as a firmware load does:
+    /// the reset then returns `Unavailable` and the handle is dead.
+    pub fn reset_reenumerates(&self, reenumerates: bool) {
+        with(&self.state, |s| s.reset_reenumerates = reenumerates);
+    }
+
+    /// The next reset fails with `error` and is not carried out. Queued errors go in order.
+    pub fn fail_next_reset(&self, error: ErrorKind) {
+        with(&self.state, |s| s.reset_errors.push_back(error));
+    }
+
+    /// The device leaves the bus: every call on the handle fails with `Unavailable` from now on.
+    pub fn unplug(&self) {
+        with(&self.state, |s| s.gone = true);
+    }
+
+    /// Whether the device this handle opened has left.
+    pub fn is_gone(&self) -> bool {
+        with(&self.state, |s| s.gone)
+    }
+
+    fn present(&self) -> Result<(), ErrorKind> {
+        with(&self.state, |s| {
+            if s.gone {
+                Err(ErrorKind::Unavailable)
+            } else {
+                Ok(())
+            }
+        })
+    }
+
     fn pop_in(&self, data: &mut [u8]) -> Result<usize, ErrorKind> {
         with(&self.state, |s| {
             let next = s.in_data.pop_front().ok_or(ErrorKind::Timeout)?;
@@ -562,12 +629,47 @@ impl UsbDevice for MockUsbDevice {
     type Error = ErrorKind;
 
     fn config_descriptor(&mut self, _index: u8, out: &mut [u8]) -> Result<usize, ErrorKind> {
+        self.present()?;
         Ok(with(&self.state, |s| copy(&s.descriptor, out)))
+    }
+
+    /// Claims stand across a reset that keeps the device, and alternate settings go back to
+    /// none, the stricter of what hosts do.
+    fn reset(&mut self) -> Result<(), ErrorKind> {
+        with(&self.state, |s| {
+            s.resets += 1;
+            if s.gone {
+                return Err(ErrorKind::Unavailable);
+            }
+            if let Some(error) = s.reset_errors.pop_front() {
+                return Err(error);
+            }
+            s.alternates.clear();
+            if s.reset_reenumerates {
+                s.gone = true;
+                return Err(ErrorKind::Unavailable);
+            }
+            Ok(())
+        })
+    }
+
+    fn detach_kernel_driver(&mut self, interface: u8) -> Result<(), ErrorKind> {
+        with(&self.state, |s| {
+            if s.gone {
+                return Err(ErrorKind::Unavailable);
+            }
+            s.detaches.push(interface);
+            s.kernel_drivers.retain(|i| *i != interface);
+            Ok(())
+        })
     }
 
     fn claim_interface(&mut self, interface: u8) -> Result<(), ErrorKind> {
         with(&self.state, |s| {
-            if s.claimed.contains(&interface) {
+            if s.gone {
+                return Err(ErrorKind::Unavailable);
+            }
+            if s.claimed.contains(&interface) || s.kernel_drivers.contains(&interface) {
                 return Err(ErrorKind::Busy);
             }
             s.claimed.push(interface);
@@ -576,11 +678,13 @@ impl UsbDevice for MockUsbDevice {
     }
 
     fn release_interface(&mut self, interface: u8) -> Result<(), ErrorKind> {
+        self.present()?;
         with(&self.state, |s| s.claimed.retain(|i| *i != interface));
         Ok(())
     }
 
     fn set_alternate(&mut self, interface: u8, alternate: u8) -> Result<(), ErrorKind> {
+        self.present()?;
         with(&self.state, |s| s.alternates.insert(interface, alternate));
         Ok(())
     }
@@ -591,6 +695,7 @@ impl UsbDevice for MockUsbDevice {
         data: &mut [u8],
         _timeout: Duration,
     ) -> Result<usize, ErrorKind> {
+        self.present()?;
         with(&self.state, |s| s.controls.push(setup));
         self.pop_in(data)
     }
@@ -601,6 +706,7 @@ impl UsbDevice for MockUsbDevice {
         data: &[u8],
         _timeout: Duration,
     ) -> Result<usize, ErrorKind> {
+        self.present()?;
         with(&self.state, |s| s.controls.push(setup));
         Ok(self.record_out(0, data))
     }
@@ -611,6 +717,7 @@ impl UsbDevice for MockUsbDevice {
         data: &mut [u8],
         _timeout: Duration,
     ) -> Result<usize, ErrorKind> {
+        self.present()?;
         self.pop_in(data)
     }
 
@@ -620,6 +727,7 @@ impl UsbDevice for MockUsbDevice {
         data: &[u8],
         _timeout: Duration,
     ) -> Result<usize, ErrorKind> {
+        self.present()?;
         Ok(self.record_out(endpoint, data))
     }
 
@@ -629,6 +737,7 @@ impl UsbDevice for MockUsbDevice {
         data: &mut [u8],
         _timeout: Duration,
     ) -> Result<usize, ErrorKind> {
+        self.present()?;
         self.pop_in(data)
     }
 
@@ -639,6 +748,7 @@ impl UsbDevice for MockUsbDevice {
         packets: &mut [IsoPacket],
         _timeout: Duration,
     ) -> Result<(), ErrorKind> {
+        self.present()?;
         with(&self.state, |s| {
             let mut offset = 0;
             for packet in packets {
@@ -1011,6 +1121,85 @@ mod tests {
         assert_eq!((packets[0].received, packets[0].ok), (2, true));
         assert_eq!((packets[1].received, packets[1].ok), (0, false));
         assert_eq!(iso, [7, 7, 0, 0]);
+    }
+
+    #[test]
+    fn a_kernel_driver_holds_an_interface_until_it_is_detached_and_is_not_put_back() {
+        let mut device = MockUsbDevice::new(&[]);
+        let probe = device.clone();
+        probe.bind_kernel_driver(1);
+        assert_eq!(device.claim_interface(1), Err(ErrorKind::Busy));
+        assert_eq!(device.detach_kernel_driver(1), Ok(()));
+        assert!(!probe.kernel_driver_bound(1));
+        device.claim_interface(1).unwrap();
+        // Nothing bound: still fine, and it doesn't take the claim away.
+        assert_eq!(device.detach_kernel_driver(1), Ok(()));
+        assert_eq!(device.detach_kernel_driver(0), Ok(()));
+        assert_eq!(probe.claimed(), [1]);
+        assert_eq!(probe.detaches(), [1, 1, 0]);
+        device.release_interface(1).unwrap();
+        assert!(!probe.kernel_driver_bound(1), "release re-attaches nothing");
+    }
+
+    #[test]
+    fn a_reset_that_keeps_the_device_keeps_the_handle_and_its_claims() {
+        let mut device = MockUsbDevice::new(&[9, 2]);
+        let probe = device.clone();
+        device.claim_interface(0).unwrap();
+        device.set_alternate(0, 3).unwrap();
+        probe.fail_next_reset(ErrorKind::Timeout);
+        assert_eq!(device.reset(), Err(ErrorKind::Timeout));
+        assert_eq!(
+            probe.alternate(0),
+            Some(3),
+            "a failed reset changes nothing"
+        );
+        assert_eq!(device.reset(), Ok(()));
+        assert_eq!(probe.resets(), 2);
+        assert_eq!(probe.claimed(), [0]);
+        assert_eq!(probe.alternate(0), None);
+        assert_eq!(device.config_descriptor(0, &mut [0; 2]), Ok(2));
+    }
+
+    #[test]
+    fn a_reset_that_re_enumerates_leaves_the_handle_dead_for_every_call() {
+        let mut device = MockUsbDevice::new(&[9, 2]);
+        let probe = device.clone();
+        probe.reset_reenumerates(true);
+        probe.queue_in(&[1]);
+        probe.queue_iso(&[1]);
+        assert_eq!(device.reset(), Err(ErrorKind::Unavailable));
+        assert!(probe.is_gone());
+
+        let gone = Err(ErrorKind::Unavailable);
+        let setup = ControlSetup {
+            request_type: 0x80,
+            request: 6,
+            value: 0,
+            index: 0,
+        };
+        let mut data = [0; 4];
+        let mut packets = [IsoPacket {
+            capacity: 2,
+            ..IsoPacket::default()
+        }];
+        assert_eq!(device.reset(), Err(ErrorKind::Unavailable));
+        assert_eq!(device.config_descriptor(0, &mut data), gone);
+        assert_eq!(device.detach_kernel_driver(0), Err(ErrorKind::Unavailable));
+        assert_eq!(device.claim_interface(0), Err(ErrorKind::Unavailable));
+        assert_eq!(device.release_interface(0), Err(ErrorKind::Unavailable));
+        assert_eq!(device.set_alternate(0, 1), Err(ErrorKind::Unavailable));
+        assert_eq!(device.control_in(setup, &mut data, WAIT), gone);
+        assert_eq!(device.control_out(setup, &[1], WAIT), gone);
+        assert_eq!(device.bulk_in(1, &mut data, WAIT), gone);
+        assert_eq!(device.bulk_out(1, &[1], WAIT), gone);
+        assert_eq!(device.interrupt_in(1, &mut data, WAIT), gone);
+        assert_eq!(
+            device.iso_in(1, &mut data, &mut packets, WAIT),
+            Err(ErrorKind::Unavailable)
+        );
+        assert_eq!(probe.resets(), 2);
+        assert_eq!(probe.written(), []);
     }
 
     #[test]

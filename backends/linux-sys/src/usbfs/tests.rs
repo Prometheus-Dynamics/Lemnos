@@ -42,6 +42,15 @@ fn request_numbers_match_the_kernel() {
     assert_eq!(CLAIMINTERFACE, 0x8004_550f);
     assert_eq!(RELEASEINTERFACE, 0x8004_5510);
     assert_eq!(SETINTERFACE, 0x8008_5504);
+    assert_eq!(GETDRIVER, 0x4104_5508);
+    assert_eq!(RESET, 0x0000_5514);
+    assert_eq!(DISCONNECT, 0x0000_5516);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn the_passed_on_request_number_matches_the_kernel_on_64_bit() {
+    assert_eq!(IOCTL, 0xc010_5512);
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -52,6 +61,118 @@ fn structures_match_the_kernel_layout_on_64_bit() {
     assert_eq!(size_of::<SetInterface>(), 8);
     assert_eq!(size_of::<IsoPacketDesc>(), 12);
     assert_eq!(size_of::<UrbHeader>(), 56);
+    assert_eq!(size_of::<InterfaceIoctl>(), 16);
+    assert_eq!(std::mem::offset_of!(InterfaceIoctl, ioctl_code), 4);
+    assert_eq!(std::mem::offset_of!(InterfaceIoctl, data), 8);
+}
+
+#[test]
+fn the_driver_query_matches_the_kernel_layout() {
+    assert_eq!(DRIVER_NAME_BYTES, 255 + 1);
+    assert_eq!(size_of::<GetDriver>(), 260);
+    assert_eq!(std::mem::offset_of!(GetDriver, driver), 4);
+}
+
+#[test]
+fn detaching_asks_who_holds_the_interface_and_disconnects_a_kernel_driver() {
+    let (file, fake) = file();
+    fake.bind_driver(2, "uvcvideo");
+    assert_eq!(
+        file.claim_interface(2).unwrap_err().raw_os_error(),
+        Some(libc::EBUSY)
+    );
+    assert!(file.detach_kernel_driver(2).unwrap());
+    assert_eq!(fake.driver(2), None);
+    file.claim_interface(2).unwrap();
+    assert_eq!(
+        fake.calls(),
+        vec![
+            Call::Claim(2),
+            Call::GetDriver(2),
+            Call::InterfaceIoctl {
+                interface: 2,
+                code: 0x5516,
+                data: 0,
+            },
+            Call::Claim(2),
+        ]
+    );
+}
+
+#[test]
+fn detaching_with_nothing_bound_sends_no_disconnect() {
+    let (file, fake) = file();
+    assert!(!file.detach_kernel_driver(1).unwrap());
+    assert!(!file.detach_kernel_driver(1).unwrap());
+    assert_eq!(fake.calls(), vec![Call::GetDriver(1), Call::GetDriver(1)]);
+}
+
+#[test]
+fn detaching_leaves_a_claim_made_through_usbdevfs_alone() {
+    let (file, fake) = file();
+    fake.bind_driver(0, "usbfs");
+    assert!(!file.detach_kernel_driver(0).unwrap());
+    assert_eq!(fake.driver(0).as_deref(), Some("usbfs"));
+    assert_eq!(fake.calls(), vec![Call::GetDriver(0)]);
+}
+
+#[test]
+fn a_driver_name_is_read_up_to_its_terminator_or_its_end() {
+    let mut driver = [0u8; DRIVER_NAME_BYTES];
+    assert_eq!(driver_name(&driver), b"");
+    driver[..5].copy_from_slice(b"usbfs");
+    assert_eq!(driver_name(&driver), b"usbfs");
+    driver[5] = b'2';
+    assert_eq!(driver_name(&driver), b"usbfs2");
+    // A name the kernel didn't terminate is all of the field, never past it.
+    assert_eq!(
+        driver_name(&[b'a'; DRIVER_NAME_BYTES]).len(),
+        DRIVER_NAME_BYTES
+    );
+}
+
+#[test]
+fn a_failed_detach_comes_back_with_its_errno_and_detaches_nothing() {
+    let (file, fake) = file();
+    fake.bind_driver(0, "cdc_acm");
+    fake.fail_next(libc::EACCES);
+    assert_eq!(
+        file.detach_kernel_driver(0).unwrap_err().raw_os_error(),
+        Some(libc::EACCES)
+    );
+    assert_eq!(fake.driver(0).as_deref(), Some("cdc_acm"));
+}
+
+#[test]
+fn a_reset_that_keeps_the_device_is_one_request_and_the_file_stays_good() {
+    let (file, fake) = file();
+    file.reset().unwrap();
+    file.claim_interface(0).unwrap();
+    assert_eq!(fake.calls(), vec![Call::Reset, Call::Claim(0)]);
+    fake.fail_next(libc::EBUSY);
+    assert_eq!(file.reset().unwrap_err().raw_os_error(), Some(libc::EBUSY));
+    file.reset().unwrap();
+}
+
+#[test]
+fn a_reset_that_re_enumerates_is_enodev_and_so_is_everything_after_it() {
+    let (file, fake) = file();
+    fake.set_reset_reenumerates(true);
+    let gone = Some(libc::ENODEV);
+    assert_eq!(file.reset().unwrap_err().raw_os_error(), gone);
+    assert_eq!(file.reset().unwrap_err().raw_os_error(), gone);
+    assert_eq!(file.claim_interface(0).unwrap_err().raw_os_error(), gone);
+    assert_eq!(
+        file.detach_kernel_driver(0).unwrap_err().raw_os_error(),
+        gone
+    );
+    let mut data = [0u8; 2];
+    assert_eq!(
+        file.control_in(VENDOR_IN, &mut data, 10)
+            .unwrap_err()
+            .raw_os_error(),
+        gone
+    );
 }
 
 #[test]
@@ -257,6 +378,11 @@ fn a_device_file_that_refuses_the_request_reports_it() {
         file.control_in(VENDOR_IN, &mut data, 10)
             .unwrap_err()
             .raw_os_error(),
+        Some(libc::ENOTTY)
+    );
+    assert_eq!(file.reset().unwrap_err().raw_os_error(), Some(libc::ENOTTY));
+    assert_eq!(
+        file.detach_kernel_driver(0).unwrap_err().raw_os_error(),
         Some(libc::ENOTTY)
     );
     std::fs::remove_file(&path).unwrap();

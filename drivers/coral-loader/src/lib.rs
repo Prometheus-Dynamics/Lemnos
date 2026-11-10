@@ -5,9 +5,14 @@
 //!
 //! - `firmware` (string, required): the absolute path of the image.
 //!
-//! **This driver cannot finish the job.** A DFU download ends in a USB bus reset, and the USB
-//! interface drivers are written against has no reset. The driver runs the download until the
-//! device has manifested and is ready for that reset, then says so through its health. It never reports success, because the device is not running the firmware yet.
+//! A DFU download ends in a USB reset, which is what starts the firmware. The driver runs the
+//! download until the device has manifested, then resets it, once. The device then leaves the
+//! bus and comes back under the identity its firmware gives it, and the handle this driver holds
+//! is dead from that moment: the driver sends nothing more, and it cannot see what the device
+//! came back as. Its health is `Ok` only when the device confirmed the download and the reset
+//! took it off the bus. A device that stopped answering while it manifested, or that came back
+//! from the reset as the device it was, is reported as `Degraded` with the reason. Binding the
+//! device's new identity to another driver is the board file's and the host's business.
 //!
 //! The image is read once, when the device binds, and held in memory until the download ends. The
 //! driver never looks inside it. A file that is missing, unreadable, empty or larger than
@@ -20,8 +25,9 @@
 //!
 //! Everything the device says is untrusted. A short reply, a bad descriptor, an error state, a
 //! device that stops answering or never stops being busy: each ends this attempt, the driver backs
-//! off (at most 8 s) and starts again from block 0. It never gives up and never switches itself
-//! off. The driver keeps nothing across restarts: each start reads what state the device is in and
+//! off (at most 8 s) and starts again from block 0. A reset that was not carried out is made
+//! again after the same backoff, without another download. It never gives up and never switches
+//! itself off. The driver keeps nothing across restarts: each start reads what state the device is in and
 //! brings it back to idle first.
 
 mod dfu;
@@ -37,7 +43,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use lemnos_core::{Config, Health, Lifecycle, Result, Status, UsbDeviceHandle, driver};
-use loader::{Ended, IN_PROGRESS, Loader, NEEDS_RESET, UNCONFIRMED};
+use loader::{Ended, IN_PROGRESS, Loader, UNCHANGED, UNCONFIRMED};
 
 /// The largest image accepted. A DFU image is a boot-time payload, not a filesystem.
 pub const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
@@ -68,8 +74,9 @@ impl Lifecycle for CoralLoader {
 
     fn health(&self) -> Health {
         match (self.loader.ended(), self.loader.fault()) {
-            (Some(Ended::Manifested), _) => Health::Degraded(NEEDS_RESET),
+            (Some(Ended::Loaded), _) => Health::Ok,
             (Some(Ended::Unconfirmed), _) => Health::Degraded(UNCONFIRMED),
+            (Some(Ended::Unchanged), _) => Health::Degraded(UNCHANGED),
             (None, Some(fault)) => Health::Failed(fault),
             (None, None) => Health::Degraded(IN_PROGRESS),
         }

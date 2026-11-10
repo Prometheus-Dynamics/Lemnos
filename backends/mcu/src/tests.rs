@@ -506,6 +506,9 @@ struct HostLog {
     opened: Vec<UsbDeviceId>,
     control: Vec<(UsbDeviceId, ControlSetup, usize)>,
     transfers: Vec<(u8, TransferKind, usize)>,
+    resets: Vec<UsbDeviceId>,
+    /// What the next reset answers, if not `Ok`.
+    reset_error: Option<ErrorKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -535,6 +538,12 @@ impl HostPort for HostDouble {
         }
         self.0.lock().unwrap().opened.push(device);
         Ok(())
+    }
+
+    fn reset(&mut self, device: UsbDeviceId) -> Result<(), ErrorKind> {
+        let mut log = self.0.lock().unwrap();
+        log.resets.push(device);
+        log.reset_error.take().map_or(Ok(()), Err)
     }
 
     fn control_in(
@@ -655,6 +664,22 @@ fn a_host_device_keeps_claims_and_makes_the_standard_requests() {
         (set.request_type, set.request, set.value, set.index),
         (0x01, 11, 2, 1)
     );
+}
+
+#[test]
+fn a_host_device_resets_through_its_port_and_has_no_kernel_driver_to_detach() {
+    let log = HostDouble(Default::default());
+    let mut device = Host::new(log.clone()).open(PLUGGED.id).unwrap();
+    device.claim_interface(1).unwrap();
+    assert_eq!(device.detach_kernel_driver(1), Ok(()));
+    assert_eq!(device.detach_kernel_driver(200), Ok(()));
+    assert_eq!(device.reset(), Ok(()));
+    assert!(device.holds(1), "claims stand when the device does");
+    log.0.lock().unwrap().reset_error = Some(ErrorKind::Unavailable);
+    assert_eq!(device.reset(), Err(ErrorKind::Unavailable));
+    let log = log.0.lock().unwrap();
+    assert_eq!(log.resets, [PLUGGED.id, PLUGGED.id]);
+    assert!(log.control.is_empty(), "detaching sends nothing");
 }
 
 #[test]

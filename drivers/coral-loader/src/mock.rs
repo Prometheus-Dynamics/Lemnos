@@ -3,6 +3,7 @@
 //! also records every transfer it sees and when.
 
 use core::time::Duration;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use lemnos_core::ErrorKind;
@@ -105,6 +106,18 @@ pub struct DeviceState {
     pub alternate_error_once: Option<ErrorKind>,
     /// The next claim fails with this, once.
     pub claim_error_once: Option<ErrorKind>,
+
+    /// Every reset asked for: how many transfers had been seen, and the DFU state, at that
+    /// moment. One that failed is here too.
+    pub resets: Vec<(usize, u8)>,
+    /// The next resets fail with these, in order, and are not carried out.
+    pub reset_errors: VecDeque<ErrorKind>,
+    /// A reset leaves the device as it is, where it would otherwise come back as another one.
+    pub reset_keeps_identity: bool,
+    /// The device has left the bus under this identity: every call fails with `Unavailable`.
+    pub gone: bool,
+    /// Every call made after the device left, by name.
+    pub calls_after_gone: Vec<&'static str>,
 }
 
 /// The device, cloned between the driver and the test.
@@ -144,6 +157,11 @@ impl MockUsb {
             ignore_recovery: false,
             alternate_error_once: None,
             claim_error_once: None,
+            resets: Vec::new(),
+            reset_errors: VecDeque::new(),
+            reset_keeps_identity: false,
+            gone: false,
+            calls_after_gone: Vec::new(),
         })))
     }
 
@@ -153,6 +171,30 @@ impl MockUsb {
 }
 
 impl DeviceState {
+    /// Fails the call, and records it, if the device has left the bus.
+    fn check_present(&mut self, call: &'static str) -> Result<(), ErrorKind> {
+        if self.gone {
+            self.calls_after_gone.push(call);
+            return Err(ErrorKind::Unavailable);
+        }
+        Ok(())
+    }
+
+    /// A port reset: the device starts what it was given and comes back as another device,
+    /// unless the test says it keeps its identity.
+    fn reset(&mut self) -> Result<(), ErrorKind> {
+        self.resets.push((self.transfers.len(), self.state));
+        self.check_present("reset")?;
+        if let Some(kind) = self.reset_errors.pop_front() {
+            return Err(kind);
+        }
+        if self.reset_keeps_identity {
+            return Ok(());
+        }
+        self.gone = true;
+        Err(ErrorKind::Unavailable)
+    }
+
     /// Fails the transfer if the device has gone silent.
     fn check_silent(&self) -> Result<(), ErrorKind> {
         match self.silent_after {
@@ -289,14 +331,24 @@ impl UsbDevice for MockUsb {
     fn config_descriptor(&mut self, index: u8, out: &mut [u8]) -> Result<usize, ErrorKind> {
         assert_eq!(index, 0, "a DFU device has one configuration");
         let mut device = self.state();
+        device.check_present("config_descriptor")?;
         device.descriptor_reads += 1;
         let length = device.descriptors.len().min(out.len());
         out[..length].copy_from_slice(&device.descriptors[..length]);
         Ok(length)
     }
 
+    fn reset(&mut self) -> Result<(), ErrorKind> {
+        self.state().reset()
+    }
+
+    fn detach_kernel_driver(&mut self, _interface: u8) -> Result<(), ErrorKind> {
+        panic!("a DFU interface has no kernel driver for this driver to detach");
+    }
+
     fn claim_interface(&mut self, interface: u8) -> Result<(), ErrorKind> {
         let mut device = self.state();
+        device.check_present("claim_interface")?;
         if let Some(kind) = device.claim_error_once.take() {
             return Err(kind);
         }
@@ -310,6 +362,7 @@ impl UsbDevice for MockUsb {
 
     fn set_alternate(&mut self, interface: u8, alternate: u8) -> Result<(), ErrorKind> {
         let mut device = self.state();
+        device.check_present("set_alternate")?;
         if let Some(kind) = device.alternate_error_once.take() {
             return Err(kind);
         }
@@ -325,6 +378,7 @@ impl UsbDevice for MockUsb {
     ) -> Result<usize, ErrorKind> {
         assert!(timeout < Duration::from_secs(2), "under the call deadline");
         let mut device = self.state();
+        device.check_present("control_in")?;
         device.check_silent()?;
         device.transfers.push(Transfer {
             request_type: setup.request_type,
@@ -354,6 +408,7 @@ impl UsbDevice for MockUsb {
     ) -> Result<usize, ErrorKind> {
         assert!(timeout < Duration::from_secs(2), "under the call deadline");
         let mut device = self.state();
+        device.check_present("control_out")?;
         device.check_silent()?;
         device.transfers.push(Transfer {
             request_type: setup.request_type,
