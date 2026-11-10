@@ -1,10 +1,9 @@
-//! The driver's jobs over a simulated job ring, the way the image contracts carry them: the
-//! consumer posts a job, the block's end decodes it, runs it on the buffers both sides can see,
-//! and publishes a completion with the job's identity and the bytes written (0 when refused).
+//! The driver's jobs over a bare job ring, the way the image contracts carry them: the consumer
+//! posts a job, the block's end decodes it, runs it on the buffers both sides can see, and
+//! publishes a completion with the job's identity and the bytes written (0 when refused).
 //!
-//! The buffers are a heap pool standing in for the frame stream's: the stream endpoint does not
-//! yet hand a driver a job's input (see the crate docs), so the block's end here reads the pool
-//! directly.
+//! This exercises [`Jobs`] alone, on buffers the test hands it. The driver serving the real
+//! host stream, on every route, is tested in `src/serve/tests.rs` and `tests/stream.rs`.
 
 use lemnos_contract_image_scaler::{Filter, ImageRef, JOB_BYTES, ScaleJob};
 use lemnos_core::{Decode, Encode, Reader, Writer};

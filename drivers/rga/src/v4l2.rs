@@ -306,7 +306,7 @@ type Key = (Layout, Layout, Option<Rect>, Option<Transform>, Memory);
 /// transform, memory) gets its own session on its own open of the node, configured once and
 /// reused.
 pub struct M2mRga<N: Node = LinuxNode> {
-    open: Box<dyn FnMut() -> io::Result<N>>,
+    open: Box<dyn FnMut() -> io::Result<N> + Send>,
     sessions: Vec<(Key, Session<N>)>,
 }
 
@@ -325,7 +325,7 @@ impl M2mRga<LinuxNode> {
 
 impl<N: Node> M2mRga<N> {
     /// The engine on the nodes `open` gives, one per session (a test's played-back device).
-    pub fn with_opener(open: impl FnMut() -> io::Result<N> + 'static) -> Self {
+    pub fn with_opener(open: impl FnMut() -> io::Result<N> + Send + 'static) -> Self {
         Self {
             open: Box::new(open),
             sessions: Vec::with_capacity(MAX_SESSIONS),
@@ -550,5 +550,86 @@ impl<N: Node> M2mRga<N> {
     }
 }
 
+/// What the job streams use of the mainline route, over any node: [`M2mRga`] behind one type.
+pub(crate) trait M2mRoute: Send {
+    fn resize(
+        &mut self,
+        src: Layout,
+        src_fd: BorrowedFd<'_>,
+        dst: Layout,
+        dst_fd: BorrowedFd<'_>,
+        filter: Filter,
+    ) -> io::Result<usize>;
+    fn resize_bytes(
+        &mut self,
+        src: Layout,
+        src_bytes: &[u8],
+        dst: Layout,
+        dst_bytes: &mut [u8],
+        filter: Filter,
+    ) -> io::Result<usize>;
+    fn blit(
+        &mut self,
+        src: Layout,
+        src_fd: BorrowedFd<'_>,
+        dst: Layout,
+        dst_fd: BorrowedFd<'_>,
+    ) -> io::Result<usize>;
+    fn convert(
+        &mut self,
+        src: Layout,
+        src_bytes: &[u8],
+        dst: Layout,
+        dst_bytes: &mut [u8],
+    ) -> io::Result<usize>;
+}
+
+impl<N: Node + 'static> M2mRoute for M2mRga<N>
+where
+    M2mRga<N>: Send,
+{
+    fn resize(
+        &mut self,
+        src: Layout,
+        src_fd: BorrowedFd<'_>,
+        dst: Layout,
+        dst_fd: BorrowedFd<'_>,
+        filter: Filter,
+    ) -> io::Result<usize> {
+        M2mRga::resize(self, src, src_fd, dst, dst_fd, filter)
+    }
+
+    fn resize_bytes(
+        &mut self,
+        src: Layout,
+        src_bytes: &[u8],
+        dst: Layout,
+        dst_bytes: &mut [u8],
+        filter: Filter,
+    ) -> io::Result<usize> {
+        M2mRga::resize_bytes(self, src, src_bytes, dst, dst_bytes, filter)
+    }
+
+    fn blit(
+        &mut self,
+        src: Layout,
+        src_fd: BorrowedFd<'_>,
+        dst: Layout,
+        dst_fd: BorrowedFd<'_>,
+    ) -> io::Result<usize> {
+        M2mRga::blit(self, src, src_fd, None, dst, dst_fd)
+    }
+
+    fn convert(
+        &mut self,
+        src: Layout,
+        src_bytes: &[u8],
+        dst: Layout,
+        dst_bytes: &mut [u8],
+    ) -> io::Result<usize> {
+        M2mRga::convert(self, src, src_bytes, None, dst, dst_bytes)
+    }
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

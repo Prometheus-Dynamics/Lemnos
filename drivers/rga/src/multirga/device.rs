@@ -51,6 +51,11 @@ impl MultiRga {
         rga::blit_sync(self.file.as_fd(), job)
     }
 
+    /// Copies `src` into `dst`, both of `image` (a plain blit: no conversion, blend or turn).
+    pub fn copy(&self, image: Image, src: BorrowedFd<'_>, dst: BorrowedFd<'_>) -> io::Result<()> {
+        self.run(&mut copy_job(image, src, dst)?)
+    }
+
     /// Fills `rect` (left, top, width, height) of `dst` with `rgba` (a solid colour fill).
     /// Field mapping unverified: the colour's byte order (`0xAABBGGRR` as the crate packs it),
     /// and whether the active rectangle is the fill area.
@@ -157,6 +162,52 @@ impl MultiRga {
     }
 }
 
+/// Where a built request goes: the node, or a test's stand-in that sees each request as it would
+/// leave. Every request reaching it was built by this module's builders, so it carries their
+/// checks (each image against its dma-buf's real size).
+pub(crate) trait Submit: Send {
+    fn submit(&self, job: &mut Job<'_>) -> io::Result<()>;
+}
+
+impl Submit for MultiRga {
+    fn submit(&self, job: &mut Job<'_>) -> io::Result<()> {
+        self.run(job)
+    }
+}
+
+/// [`MultiRga::copy`] on any [`Submit`].
+pub(crate) fn copy_on(
+    device: &dyn Submit,
+    image: Image,
+    src: BorrowedFd<'_>,
+    dst: BorrowedFd<'_>,
+) -> io::Result<()> {
+    device.submit(&mut copy_job(image, src, dst)?)
+}
+
+/// [`MultiRga::blend`] on any [`Submit`].
+pub(crate) fn blend_on(
+    device: &dyn Submit,
+    image: Image,
+    fg: BorrowedFd<'_>,
+    dst: BorrowedFd<'_>,
+    mode: BlendMode,
+    premultiplied: bool,
+) -> io::Result<()> {
+    device.submit(&mut blend_job(image, fg, dst, mode, premultiplied)?)
+}
+
+/// [`MultiRga::gray_to_rgba`] on any [`Submit`].
+pub(crate) fn gray_on(
+    device: &dyn Submit,
+    width: u32,
+    height: u32,
+    src: BorrowedFd<'_>,
+    dst: BorrowedFd<'_>,
+) -> io::Result<()> {
+    device.submit(&mut gray_job(width, height, src, dst)?)
+}
+
 /// The request's dimension fields are 16-bit.
 fn dim(v: u32) -> io::Result<u16> {
     u16::try_from(v).map_err(|_| {
@@ -226,6 +277,15 @@ fn fill_job(
     let mut job = Job::new(Mode::Fill);
     job.set_dst(target, dst)?;
     job.set_fill_color(u32::from_le_bytes(rgba));
+    job.set_clip(full_clip(image)?);
+    Ok(job)
+}
+
+/// The request of a plain copy of `image` from `src` to `dst`.
+fn copy_job<'a>(image: Image, src: BorrowedFd<'a>, dst: BorrowedFd<'a>) -> io::Result<Job<'a>> {
+    let mut job = Job::new(Mode::Blit);
+    job.set_src(info(image)?, src)?;
+    job.set_dst(info(image)?, dst)?;
     job.set_clip(full_clip(image)?);
     Ok(job)
 }
@@ -447,6 +507,24 @@ mod tests {
         assert_eq!(job.request().alpha_rop_flag, 0x1 | 0x8);
         assert_eq!(job.request().alpha_rop_mode, 1);
         assert_eq!(job.request().pd_mode, BlendMode::SrcOver.pd_code());
+    }
+
+    #[test]
+    fn a_copy_is_a_plain_blit_checked_against_both_dma_bufs() {
+        let image = Image::packed(RgaFormat::Bgra8888, 4, 2);
+        let (src, dst) = (buffer(32), buffer(32));
+        let job = copy_job(image, src.as_fd(), dst.as_fd()).unwrap();
+        let req = job.request();
+        assert_eq!(
+            (req.render_mode, req.alpha_rop_flag, req.rotate_mode),
+            (0, 0, 0)
+        );
+        assert_eq!(req.src().yrgb_addr, src.as_raw_fd() as u64);
+        assert_eq!(req.dst().yrgb_addr, dst.as_raw_fd() as u64);
+        job.check().unwrap();
+        let short = buffer(31);
+        assert!(copy_job(image, short.as_fd(), dst.as_fd()).is_err());
+        assert!(copy_job(image, src.as_fd(), short.as_fd()).is_err());
     }
 
     #[test]
