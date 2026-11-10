@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-driver-rkaiisp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The Rockchip AI-ISP behind the vendor kernel's rkaiisp node: its uAPI layouts pinned against the C compiler, the checks the vendor driver leaves out, and a parameter ring that recovers after a failure. The caller's model and weights are carried, never read"
+
+[lints]
+workspace = true
+
+# No `unsafe` here and no device access of its own: the node is reached through the `Device` trait.
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
