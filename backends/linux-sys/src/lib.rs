@@ -19,6 +19,7 @@ pub mod media;
 #[allow(dead_code, unused_imports, unused_macros)]
 mod ioctl;
 pub mod mmap;
+pub mod module;
 pub mod netlink;
 pub mod poll;
 pub mod pool;

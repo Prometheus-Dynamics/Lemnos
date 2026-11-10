@@ -22,14 +22,14 @@ const STACK_TRANSFERS: usize = 16;
 /// `struct spi_ioc_transfer`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-struct SpiIocTransfer {
-    tx_buf: u64,
-    rx_buf: u64,
-    len: u32,
-    speed_hz: u32,
-    delay_usecs: u16,
-    bits_per_word: u8,
-    cs_change: u8,
+pub(crate) struct SpiIocTransfer {
+    pub(crate) tx_buf: u64,
+    pub(crate) rx_buf: u64,
+    pub(crate) len: u32,
+    pub(crate) speed_hz: u32,
+    pub(crate) delay_usecs: u16,
+    pub(crate) bits_per_word: u8,
+    pub(crate) cs_change: u8,
     tx_nbits: u8,
     rx_nbits: u8,
     word_delay_usecs: u8,
@@ -115,7 +115,7 @@ impl<'a> Transfer<'a> {
         self.len == 0
     }
 
-    fn raw(&mut self) -> io::Result<SpiIocTransfer> {
+    pub(crate) fn raw(&mut self) -> io::Result<SpiIocTransfer> {
         let len = u32::try_from(self.len)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SPI transfer too long"))?;
         let rx_ptr = self.rx.as_mut().map_or(0, |b| b.as_mut_ptr() as u64);

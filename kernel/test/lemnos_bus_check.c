@@ -228,6 +228,13 @@ static void check_spi(void)
 	CHECK(!spi(c, 0, 0, &one, 1) && !memcmp(tx, rx, sizeof(tx)), "full duplex: 8 bytes came back");
 	CHECK(!spi(c, 0, 0, two, 2) && rx2[0] == 7 && rx2[1] == 8, "two segments: %u %u", rx2[0], rx2[1]);
 	CHECK(!spi(c, 0, 3, &one, 1), "mode 3 applied");
+	struct lemnos_spi_info info = { .bus = TEST_BUS, .cs = 0 };
+
+	CHECK(!ioctl(fd, LEMNOS_IOC_SPI_INFO, &info) && info.mode == 3,
+	      "info: bound, and in the mode last applied (%u)", info.mode);
+	info.cs = 1;
+	CHECK(ioctl(fd, LEMNOS_IOC_SPI_INFO, &info) && errno == ENODEV,
+	      "info on a device not bound here: ENODEV");
 	CHECK(spi(c, 0, 0x1000, &one, 1) == -EINVAL, "an unknown mode bit: EINVAL");
 	CHECK(spi(-1, 0, 0, &one, 1) == -EPERM, "no claim: EPERM");
 	struct lemnos_spi_segment neither = { .len = 4 };

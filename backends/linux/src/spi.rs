@@ -107,75 +107,11 @@ impl Spidev {
         self.mode = Some(mode);
         Ok(())
     }
+}
 
-    fn run(&mut self, operations: &mut [Operation<'_, u8>]) -> io::Result<()> {
-        // Only unequal halves need these, and an empty Vec allocates nothing.
-        let mut scratch: Vec<(Vec<u8>, Vec<u8>)> = operations
-            .iter()
-            .filter_map(|operation| match operation {
-                Operation::Transfer(read, write) if read.len() != write.len() => {
-                    Some(padded(write, read.len().max(write.len())))
-                }
-                _ => None,
-            })
-            .collect();
-        let needed = operations
-            .iter()
-            .map(|operation| match operation {
-                Operation::DelayNs(ns) => delay_segments(*ns),
-                _ => 1,
-            })
-            .sum();
-        {
-            let mut stack: [Transfer<'_>; STACK_SEGMENTS] =
-                std::array::from_fn(|_| Transfer::delay(0));
-            let mut heap = Vec::new();
-            let segments = slots(&mut stack, &mut heap, needed);
-            let mut spare = scratch.iter_mut();
-            let mut count = 0usize;
-            for operation in operations.iter_mut() {
-                let segment = match operation {
-                    Operation::Write(data) => Transfer::write(data),
-                    Operation::Read(buffer) => Transfer::read(buffer),
-                    Operation::Transfer(read, write) if read.len() == write.len() => {
-                        Transfer::duplex(read, write)?
-                    }
-                    Operation::Transfer(_, _) => {
-                        let (tx, rx) = spare.next().ok_or(io::ErrorKind::InvalidInput)?;
-                        Transfer::duplex(rx, tx)?
-                    }
-                    Operation::TransferInPlace(buffer) => Transfer::in_place(buffer),
-                    Operation::DelayNs(ns) => {
-                        let mut us = (*ns as usize).div_ceil(1000);
-                        while us > 0 {
-                            let step = us.min(usize::from(u16::MAX));
-                            match count.checked_sub(1).map(|last| &mut segments[last]) {
-                                Some(last) if last.delay_us == 0 => last.delay_us = step as u16,
-                                _ => {
-                                    segments[count] = Transfer::delay(step as u16);
-                                    count += 1;
-                                }
-                            }
-                            us -= step;
-                        }
-                        continue;
-                    }
-                };
-                segments[count] = segment;
-                count += 1;
-            }
-            sys::transfer(self.file.as_fd(), &mut segments[..count])?;
-        }
-        let mut filled = scratch.iter();
-        for operation in operations.iter_mut() {
-            if let Operation::Transfer(read, write) = operation
-                && read.len() != write.len()
-                && let Some((_, rx)) = filled.next()
-            {
-                read.copy_from_slice(&rx[..read.len()]);
-            }
-        }
-        Ok(())
+impl Wire for Spidev {
+    fn send(&mut self, transfers: &mut [Transfer<'_>]) -> io::Result<()> {
+        sys::transfer(self.file.as_fd(), transfers)
     }
 
     fn select_mode(&mut self, mode: SpiMode) -> io::Result<()> {
@@ -187,63 +123,145 @@ impl Spidev {
         }
         Ok(())
     }
+}
 
-    fn run_raw(&mut self, segments: &mut [SpiSegment<'_>]) -> io::Result<()> {
-        let Some(first) = segments.first() else {
-            return Ok(());
-        };
-        let mode = first.config.mode;
-        if segments.iter().any(|s| s.config.mode != mode) {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        self.select_mode(SpiMode::from_bits(u32::from(mode.bits())))?;
-        let unequal =
-            |s: &SpiSegment<'_>| !s.tx.is_empty() && !s.rx.is_empty() && s.tx.len() != s.rx.len();
-        let mut scratch: Vec<(Vec<u8>, Vec<u8>)> = segments
-            .iter()
-            .filter(|s| unequal(s))
-            .map(|s| padded(s.tx, s.tx.len().max(s.rx.len())))
-            .collect();
-        {
-            let mut stack: [Transfer<'_>; STACK_SEGMENTS] =
-                std::array::from_fn(|_| Transfer::delay(0));
-            let mut heap = Vec::new();
-            let transfers = slots(&mut stack, &mut heap, segments.len());
-            let mut spare = scratch.iter_mut();
-            for (segment, transfer) in segments.iter_mut().zip(transfers.iter_mut()) {
-                let mut built = if !segment.tx.is_empty() && !segment.rx.is_empty() {
-                    if segment.tx.len() == segment.rx.len() {
-                        Transfer::duplex(segment.rx, segment.tx)?
-                    } else {
-                        let (tx, rx) = spare.next().ok_or(io::ErrorKind::InvalidInput)?;
-                        Transfer::duplex(rx, tx)?
+/// How a built message reaches the device.
+pub(crate) trait Wire {
+    fn send(&mut self, transfers: &mut [Transfer<'_>]) -> io::Result<()>;
+    fn select_mode(&mut self, mode: SpiMode) -> io::Result<()>;
+}
+
+/// Runs `operations` as one message.
+pub(crate) fn run_operations(
+    wire: &mut impl Wire,
+    operations: &mut [Operation<'_, u8>],
+) -> io::Result<()> {
+    // Only unequal halves need these, and an empty Vec allocates nothing.
+    let mut scratch: Vec<(Vec<u8>, Vec<u8>)> = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Transfer(read, write) if read.len() != write.len() => {
+                Some(padded(write, read.len().max(write.len())))
+            }
+            _ => None,
+        })
+        .collect();
+    let needed = operations
+        .iter()
+        .map(|operation| match operation {
+            Operation::DelayNs(ns) => delay_segments(*ns),
+            _ => 1,
+        })
+        .sum();
+    {
+        let mut stack: [Transfer<'_>; STACK_SEGMENTS] = std::array::from_fn(|_| Transfer::delay(0));
+        let mut heap = Vec::new();
+        let segments = slots(&mut stack, &mut heap, needed);
+        let mut spare = scratch.iter_mut();
+        let mut count = 0usize;
+        for operation in operations.iter_mut() {
+            let segment = match operation {
+                Operation::Write(data) => Transfer::write(data),
+                Operation::Read(buffer) => Transfer::read(buffer),
+                Operation::Transfer(read, write) if read.len() == write.len() => {
+                    Transfer::duplex(read, write)?
+                }
+                Operation::Transfer(_, _) => {
+                    let (tx, rx) = spare.next().ok_or(io::ErrorKind::InvalidInput)?;
+                    Transfer::duplex(rx, tx)?
+                }
+                Operation::TransferInPlace(buffer) => Transfer::in_place(buffer),
+                Operation::DelayNs(ns) => {
+                    let mut us = (*ns as usize).div_ceil(1000);
+                    while us > 0 {
+                        let step = us.min(usize::from(u16::MAX));
+                        match count.checked_sub(1).map(|last| &mut segments[last]) {
+                            Some(last) if last.delay_us == 0 => last.delay_us = step as u16,
+                            _ => {
+                                segments[count] = Transfer::delay(step as u16);
+                                count += 1;
+                            }
+                        }
+                        us -= step;
                     }
-                } else if !segment.tx.is_empty() {
-                    Transfer::write(segment.tx)
-                } else if !segment.rx.is_empty() {
-                    Transfer::read(segment.rx)
-                } else {
-                    Transfer::delay(0)
-                };
-                built.speed_hz = segment.config.speed_hz;
-                built.bits_per_word = segment.config.bits_per_word;
-                built.cs_change = segment.cs_change;
-                built.delay_us = segment.delay_us;
-                *transfer = built;
-            }
-            sys::transfer(self.file.as_fd(), transfers)?;
+                    continue;
+                }
+            };
+            segments[count] = segment;
+            count += 1;
         }
-        let mut filled = scratch.iter();
-        for segment in segments.iter_mut() {
-            if unequal(segment)
-                && let Some((_, rx)) = filled.next()
-            {
-                let n = segment.rx.len();
-                segment.rx.copy_from_slice(&rx[..n]);
-            }
-        }
-        Ok(())
+        wire.send(&mut segments[..count])?;
     }
+    let mut filled = scratch.iter();
+    for operation in operations.iter_mut() {
+        if let Operation::Transfer(read, write) = operation
+            && read.len() != write.len()
+            && let Some((_, rx)) = filled.next()
+        {
+            read.copy_from_slice(&rx[..read.len()]);
+        }
+    }
+    Ok(())
+}
+
+/// Runs raw segments as one message, all in the first one's mode.
+pub(crate) fn run_segments(
+    wire: &mut impl Wire,
+    segments: &mut [SpiSegment<'_>],
+) -> io::Result<()> {
+    let Some(first) = segments.first() else {
+        return Ok(());
+    };
+    let mode = first.config.mode;
+    if segments.iter().any(|s| s.config.mode != mode) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    wire.select_mode(SpiMode::from_bits(u32::from(mode.bits())))?;
+    let unequal =
+        |s: &SpiSegment<'_>| !s.tx.is_empty() && !s.rx.is_empty() && s.tx.len() != s.rx.len();
+    let mut scratch: Vec<(Vec<u8>, Vec<u8>)> = segments
+        .iter()
+        .filter(|s| unequal(s))
+        .map(|s| padded(s.tx, s.tx.len().max(s.rx.len())))
+        .collect();
+    {
+        let mut stack: [Transfer<'_>; STACK_SEGMENTS] = std::array::from_fn(|_| Transfer::delay(0));
+        let mut heap = Vec::new();
+        let transfers = slots(&mut stack, &mut heap, segments.len());
+        let mut spare = scratch.iter_mut();
+        for (segment, transfer) in segments.iter_mut().zip(transfers.iter_mut()) {
+            let mut built = if !segment.tx.is_empty() && !segment.rx.is_empty() {
+                if segment.tx.len() == segment.rx.len() {
+                    Transfer::duplex(segment.rx, segment.tx)?
+                } else {
+                    let (tx, rx) = spare.next().ok_or(io::ErrorKind::InvalidInput)?;
+                    Transfer::duplex(rx, tx)?
+                }
+            } else if !segment.tx.is_empty() {
+                Transfer::write(segment.tx)
+            } else if !segment.rx.is_empty() {
+                Transfer::read(segment.rx)
+            } else {
+                Transfer::delay(0)
+            };
+            built.speed_hz = segment.config.speed_hz;
+            built.bits_per_word = segment.config.bits_per_word;
+            built.cs_change = segment.cs_change;
+            built.delay_us = segment.delay_us;
+            *transfer = built;
+        }
+        wire.send(transfers)?;
+    }
+    let mut filled = scratch.iter();
+    for segment in segments.iter_mut() {
+        if unequal(segment)
+            && let Some((_, rx)) = filled.next()
+        {
+            let n = segment.rx.len();
+            segment.rx.copy_from_slice(&rx[..n]);
+        }
+    }
+    Ok(())
 }
 
 impl ErrorType for Spidev {
@@ -252,13 +270,13 @@ impl ErrorType for Spidev {
 
 impl SpiDevice for Spidev {
     fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), ErrorKind> {
-        self.run(operations).map_err(|e| kind_of(&e))
+        run_operations(self, operations).map_err(|e| kind_of(&e))
     }
 }
 
 impl RawSpi for Spidev {
     fn transfer(&mut self, segments: &mut [SpiSegment<'_>]) -> Result<(), ErrorKind> {
-        self.run_raw(segments).map_err(|e| kind_of(&e))
+        run_segments(self, segments).map_err(|e| kind_of(&e))
     }
 }
 

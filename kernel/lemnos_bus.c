@@ -346,6 +346,25 @@ long lem_spi_transfer(const struct lemnos_spi_transfer *t)
 	return ret;
 }
 
+long lem_spi_info(struct lemnos_spi_info *t)
+{
+	struct lem_spi *d;
+	long ret = -ENODEV;
+
+	if (t->reserved || t->cs > U8_MAX)
+		return -EINVAL;
+	down_read(&lem_spi_sem);
+	d = xa_load(&lem_spis, lem_spi_key(t->bus, t->cs));
+	if (d) {
+		mutex_lock(&d->lock);
+		t->mode = d->mode;
+		mutex_unlock(&d->lock);
+		ret = 0;
+	}
+	up_read(&lem_spi_sem);
+	return ret;
+}
+
 static int lem_spi_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;

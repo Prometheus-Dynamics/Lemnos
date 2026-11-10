@@ -6,6 +6,7 @@
 mod gpio;
 pub mod hotplug;
 mod i2c;
+mod module;
 mod pio_i2c;
 mod pwm;
 mod spi;
@@ -33,6 +34,8 @@ pub struct LinuxBoard {
     dev: PathBuf,
     sys: PathBuf,
     claimed: Claims,
+    /// The kernel module's control node, once [`Self::open_module`] has it.
+    module: Option<module::Node>,
 }
 
 type Claims = Arc<Mutex<BTreeSet<String>>>;
@@ -68,7 +71,63 @@ impl LinuxBoard {
             dev: dev.into(),
             sys: sys.into(),
             claimed: Claims::default(),
+            module: None,
         }
+    }
+
+    /// Opens the kernel module, so the buses it serves go through it and the rest stay stock. The
+    /// module has one opener, so only the host of a machine's hardware calls this.
+    pub fn open_module(&mut self) -> io::Result<()> {
+        self.module = Some(module::Node::open(self.dev.join("lemnos"))?);
+        Ok(())
+    }
+
+    /// The module and adapter number, if the module can reach this adapter.
+    fn module_i2c(&self, need: &str) -> Option<(module::Node, u32)> {
+        let node = self.module.as_ref()?;
+        let bus = need.strip_prefix(I2C)?.parse().ok()?;
+        exists(Some(self.sys.join("bus/i2c/devices").join(need))).then(|| (node.clone(), bus))
+    }
+
+    /// The module, bus and chip select, if the module has this SPI device bound.
+    fn module_spi(&self, need: &str) -> Option<(module::Node, u32, u32)> {
+        let node = self.module.as_ref()?;
+        let (bus, cs) = need.strip_prefix(SPI)?.split_once('.')?;
+        let (bus, cs) = (bus.parse().ok()?, cs.parse().ok()?);
+        node.serves_spi(bus, cs).then(|| (node.clone(), bus, cs))
+    }
+
+    fn open_module_spi(&self, need: &str) -> Result<Option<module::ModuleSpi>> {
+        let Some((node, bus, cs)) = self.module_spi(need) else {
+            return Ok(None);
+        };
+        served(module::ModuleSpi::open(node, bus, cs))
+    }
+
+    fn open_module_line(&self, need: &str) -> Result<Option<module::ModuleLine>> {
+        let Some(node) = self.module.clone() else {
+            return Ok(None);
+        };
+        let Some((chip, offset)) = split(need) else {
+            return Ok(None);
+        };
+        let Some(Ok(chip)) = chip.strip_prefix(GPIO).map(str::parse) else {
+            return Ok(None);
+        };
+        served(module::ModuleLine::open(node, chip, offset))
+    }
+
+    fn open_module_pwm(&self, need: &str) -> Result<Option<module::ModulePwm>> {
+        let (Some(node), Some((chip, channel))) = (self.module.clone(), self.pwm_node(need)) else {
+            return Ok(None);
+        };
+        let Ok(parent) = std::fs::read_link(chip.join("device")) else {
+            return Ok(None);
+        };
+        let Some(provider) = parent.file_name().and_then(|name| name.to_str()) else {
+            return Ok(None);
+        };
+        served(module::ModulePwm::open(node, provider, channel))
     }
 
     /// The node a board file's name means, if the name is one of ours.
@@ -120,6 +179,15 @@ fn split(need: &str) -> Option<(&str, u32)> {
     Some((name, number.parse().ok()?))
 }
 
+/// What opening through the module came to: the device, or `None` to take the stock path.
+fn served<T>(opened: io::Result<T>) -> Result<Option<T>> {
+    match opened {
+        Ok(device) => Ok(Some(device)),
+        Err(error) if module::not_served(&error) => Ok(None),
+        Err(error) => Err(open_status(&error)),
+    }
+}
+
 fn exists(path: Option<PathBuf>) -> bool {
     path.as_deref().is_some_and(Path::exists)
 }
@@ -132,6 +200,8 @@ impl Provider for LinuxBoard {
             || exists(self.node(need, TTY))
             || exists(self.line_node(need).map(|(path, _)| path))
             || exists(self.pwm_node(need).map(|(path, _)| path))
+            || self.module_i2c(need).is_some()
+            || self.module_spi(need).is_some()
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
@@ -143,6 +213,9 @@ impl Provider for LinuxBoard {
         if pio_i2c::names(need) {
             return Ok(I2c(Box::new(pio_i2c::open(&self.dev, need)?)));
         }
+        if let Some((node, bus)) = self.module_i2c(need) {
+            return Ok(I2c(Box::new(module::ModuleI2c::new(node, bus))));
+        }
         // Every device on a bus opens it: the kernel serialises their transfers.
         let path = self.node(need, I2C).ok_or(Status::NOT_FOUND)?;
         let bus = I2cBus::open_path(&path).map_err(|e| open_status(&e))?;
@@ -150,14 +223,23 @@ impl Provider for LinuxBoard {
     }
 
     fn spi(&mut self, need: &str) -> Result<Spi> {
+        if let Some(device) = self.open_module_spi(need)? {
+            return Ok(Spi(Box::new(device)));
+        }
         Ok(Spi(Box::new(self.open_spi(need)?)))
     }
 
     fn raw_spi(&mut self, need: &str) -> Result<RawSpiBus> {
+        if let Some(device) = self.open_module_spi(need)? {
+            return Ok(Box::new(device));
+        }
         Ok(Box::new(self.open_spi(need)?))
     }
 
     fn line(&mut self, need: &str) -> Result<Line> {
+        if let Some(line) = self.open_module_line(need)? {
+            return Ok(Box::new(line));
+        }
         // The kernel refuses a line that's held, so this needs no claim of its own.
         let (path, offset) = self.line_node(need).ok_or(Status::NOT_FOUND)?;
         let line = GpioLine::open(&path, offset).map_err(|e| open_status(&e))?;
@@ -165,6 +247,9 @@ impl Provider for LinuxBoard {
     }
 
     fn pwm(&mut self, need: &str) -> Result<Pwm> {
+        if let Some(pwm) = self.open_module_pwm(need)? {
+            return Ok(Box::new(pwm));
+        }
         let (chip, channel) = self.pwm_node(need).ok_or(Status::NOT_FOUND)?;
         let claim = self.claim(need)?;
         let pwm = SysfsPwm::open(&chip, channel).map_err(|e| open_status(&e))?;

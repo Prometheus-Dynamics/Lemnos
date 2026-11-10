@@ -353,6 +353,14 @@ struct lemnos_spi_transfer {
 	__u64 segments;		/* user pointer to lemnos_spi_segment[count] */
 };
 
+/* Whether a SPI device is bound to the module (ENODEV if not), and its mode bits. */
+struct lemnos_spi_info {
+	__u32 bus;
+	__u32 cs;
+	__u32 mode;		/* out */
+	__u32 reserved;
+};
+
 #define LEMNOS_POWER_CLOCK	0
 #define LEMNOS_POWER_SUPPLY	1
 #define LEMNOS_POWER_RESET	2
@@ -526,6 +534,7 @@ struct lemnos_pwm_state {
 #define LEMNOS_IOC_I2C_TRANSFER _IOW('L', 0xa8, struct lemnos_i2c_transfer)
 #define LEMNOS_IOC_I2C_SMBUS  _IOWR('L', 0xa9, struct lemnos_i2c_smbus)
 #define LEMNOS_IOC_SPI_TRANSFER _IOW('L', 0xaa, struct lemnos_spi_transfer)
+#define LEMNOS_IOC_SPI_INFO   _IOWR('L', 0xab, struct lemnos_spi_info)
 #define LEMNOS_IOC_CLAIM      _IOWR('L', 0xce, struct lemnos_claim)
 #define LEMNOS_IOC_NEXT       _IOWR('L', 0xcf, struct lemnos_next)
 #define LEMNOS_IOC_INFO       _IOWR('L', 0xd0, struct lemnos_info)

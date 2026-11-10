@@ -73,6 +73,7 @@ void lem_bus_exit(void);
 long lem_i2c_transfer(const struct lemnos_i2c_transfer *t);
 long lem_i2c_smbus(struct lemnos_i2c_smbus *s);
 long lem_spi_transfer(const struct lemnos_spi_transfer *t);
+long lem_spi_info(struct lemnos_spi_info *t);
 
 struct device;
 struct file;
