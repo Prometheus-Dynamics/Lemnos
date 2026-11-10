@@ -1,11 +1,34 @@
 //! The rp1-csi2 camera receiver as `camera.receiver/1`: the block's D-PHY, its CSI-2 host and one
-//! DMA channel, delivering frames through a frame stream the module produces. It only receives:
-//! the sensor is set up by its own driver, and the consumer asks this one for the link.
+//! DMA channel, delivering frames on the board's `frames` stream. It only receives: the sensor is
+//! set up by its own driver, and the consumer asks this one for the link.
 //!
 //! Everything that touches the block happens in the kernel (`kernel/lemnos_rp1_csi2.c`); this crate
-//! configures it and watches it, through the node `/dev/lemnos-rp1-csi2-<device>`. Frames never
-//! cross this crate, and it never names a memory address: the module writes only to the pool of the
-//! stream it was started on.
+//! configures it and watches it, through the node `/dev/lemnos-rp1-csi2-<device>`. A frame's bytes
+//! never cross this crate, and it never names a memory address: the block writes each frame
+//! straight into a buffer of the `frames` stream, the memory its consumer reads.
+//!
+//! How a frame gets there. The board declares the stream on this device with
+//! `memory = "dma-buf"`, so each of its buffers is a dma-buf of its own. The module's stream is
+//! made with no pool, and the driver hands the module the dma-buf of every `frames` buffer it
+//! holds (`StreamEndpoint::buffer_handle`); the module pins it, checks its size and makes it that
+//! buffer's memory. When the block finishes buffer *n* the driver publishes buffer *n* on
+//! `frames`, and when the consumer gives *n* back the driver gives it back to the module. Before a
+//! frame is published, and before a buffer goes back to the block, the module has been shown the
+//! handle behind the driver's hold on that buffer, so what the consumer reads is what the block
+//! wrote ([`relay`]).
+//!
+//! A consumer that leaves, and the next one. The stream's memory is made anew for each consumer.
+//! The block is not stopped: the module keeps the old memory pinned for as long as the block may
+//! be writing it, so nothing is ever written to freed memory, and frames finished into it are
+//! dropped. Each buffer is given the new consumer's memory as soon as the block is done with it
+//! (at once for a buffer the block isn't using). With no consumer no buffer has memory the driver
+//! may use, and the block drops frames until one comes.
+//!
+//! What is refused. `start` without a `frames` stream on the device is `NOT_FOUND`. A stream
+//! whose buffers have no handles (plain shared memory, not `memory = "dma-buf"`) is
+//! `NOT_SUPPORTED` at `start` when a consumer is already attached, and otherwise shows as degraded
+//! health once one is: no frame is ever published over memory the block didn't write. Buffers
+//! smaller than a frame, or more than 64 of them, are refused the same two ways.
 //!
 //! Provenance: ported from the dev branch (`crates/lemnos-drivers-pisp/src/device/csi2_module.rs`
 //! and the receiver module); the kernel part keeps the stock driver's copyright and is GPL-2.0, as
@@ -15,33 +38,38 @@
 //!
 //! - `device`: the platform device name, whose `/dev/lemnos-rp1-csi2-<device>` node is opened. With
 //!   only one receiver bound, this may be left out.
-//! - `heap`: the DMA heap for the frame pool, under `/dev/dma_heap`. Default `linux,cma`.
-//! - `buffers`: frame buffers in the pool, 2 to 64, default 8.
-//! - `stream`: the name the frame stream is opened by, default `frames`, at most
-//!   [`MAX_STREAM_NAME`] bytes.
 //!
-//! The stream is created by `start` and ends at `stop`. Nothing is kept across a restart: `start`
-//! opens the node, makes the pool and the stream, and starts the block from nothing.
+//! The frame memory is the stream's, so its buffer count and size are the board file's
+//! (`[devices.streams.frames]`: `buffers`, at most 64, and `buffer_bytes`, at least a frame).
 //!
-//! Failures. While streaming, every second the driver reads the module's state. A stream that has
-//! ended or faulted, or a receiver that has stopped, starts recovery: the next ticks stop what's
-//! left, make a new pool and stream and start again, with the delay between attempts doubling from
+//! The module's stream is created by `start` and ends at `stop`. Nothing of it is kept across a
+//! restart: `start` opens the node, makes the module's stream, gives it the buffers the driver
+//! holds, and starts the block from nothing.
+//!
+//! Failures. While streaming, every millisecond the driver moves finished frames and returned
+//! buffers, and every second it reads the module's state. A stream that has ended or faulted, or
+//! a receiver that has stopped, starts recovery: the next ticks stop what's left, make a new
+//! module stream and start again, with the delay between attempts doubling from
 //! 250 ms and capped at 8 s, and clearing when one succeeds. The driver never gives up and never
 //! turns itself off; `stop` is what ends it. While recovering, health is degraded and `start` is
 //! refused with `BUSY`. A failed `start` or `stop` is reported to its caller, who retries it.
 
 mod hw;
+pub mod relay;
 
 #[cfg(test)]
 mod tests;
 
 use lemnos_contract_camera_receiver::{
-    CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, MAX_STREAM_NAME, Packing,
+    CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, Packing,
 };
-use lemnos_core::{Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, driver};
+use lemnos_core::{
+    Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
+};
 
-pub use hw::{Hardware, LinuxHardware, Settings};
+pub use hw::{Finished, Hardware, LinuxHardware, Settings, StartParams};
 pub use lemnos_driver_rp1_csi2_sys as sys;
+use relay::{MAX_BUFFERS, Relay};
 
 const START: MethodId = MethodId {
     contract: 0,
@@ -65,6 +93,10 @@ const MAX_FRAME_BYTES: u32 = 1 << 28;
 const BACKOFF_FIRST_NS: u64 = 250_000_000;
 /// How often the module's state is read while streaming.
 const CHECK_NS: u64 = 1_000_000_000;
+/// How often finished frames and returned buffers are looked for.
+const POLL_NS: u64 = 1_000_000;
+/// The stream the board declares on the device, and the name its consumer opens it by.
+const STREAM: &str = "frames";
 
 /// The delay before recovery attempt `attempt` (from 0), doubling to the cap.
 const fn backoff_ns(attempt: u32) -> u64 {
@@ -89,49 +121,15 @@ enum State {
 /// The rp1-csi2 camera receiver.
 #[driver("rp1-csi2", provides = [CameraReceiver])]
 pub struct Rp1Csi2 {
+    /// Where frames go: the board's `frames` stream on this device.
+    #[needs(optional)]
+    frames: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
-    buffers: u32,
-    stream: StreamName,
+    relay: Relay,
     link: Option<LinkConfig>,
     packing: Packing,
     layout: Option<FrameLayout>,
     state: State,
-}
-
-/// The stream's name, held by value so reading it allocates nothing.
-#[derive(Clone, Copy)]
-pub struct StreamName {
-    bytes: [u8; MAX_STREAM_NAME],
-    len: usize,
-}
-
-impl StreamName {
-    /// `name`, when it's 1 to [`MAX_STREAM_NAME`] bytes.
-    pub fn new(name: &str) -> Option<Self> {
-        let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.len() > MAX_STREAM_NAME {
-            return None;
-        }
-        let mut out = [0; MAX_STREAM_NAME];
-        out.get_mut(..bytes.len())?.copy_from_slice(bytes);
-        Some(Self {
-            bytes: out,
-            len: bytes.len(),
-        })
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.bytes.get(..self.len).unwrap_or(&[])
-    }
-}
-
-/// The frame buffers a `buffers` setting allows.
-const fn check_buffers(buffers: i64) -> Option<u32> {
-    if buffers >= 2 && buffers <= 64 {
-        Some(buffers as u32)
-    } else {
-        None
-    }
 }
 
 /// The smallest ring holding `buffers` frames, a power of two.
@@ -174,27 +172,14 @@ fn layout(link: &LinkConfig, packing: Packing) -> Result<FrameLayout> {
     })
 }
 
-fn settings(cfg: &Config<'_>) -> Result<(hw::Settings, u32, StreamName)> {
-    let device = cfg.str("device");
-    let heap = cfg.str("heap").unwrap_or("linux,cma");
-    let buffers = match cfg.int("buffers") {
-        Some(buffers) => check_buffers(buffers).ok_or(Status::INVALID_ARGUMENT)?,
-        None => 8,
-    };
-    let stream =
-        StreamName::new(cfg.str("stream").unwrap_or("frames")).ok_or(Status::INVALID_ARGUMENT)?;
-    let settings = hw::Settings::new(device, heap)?;
-    Ok((settings, buffers, stream))
-}
-
 impl Lifecycle for Rp1Csi2 {
     type Needs = Rp1Csi2Needs;
     const TICKS: bool = true;
 
-    fn start(_needs: Rp1Csi2Needs, cfg: &Config<'_>) -> Result<Self> {
-        let (settings, buffers, stream) = settings(cfg)?;
+    fn start(needs: Rp1Csi2Needs, cfg: &Config<'_>) -> Result<Self> {
+        let settings = hw::Settings::new(cfg.str("device"))?;
         let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(settings));
-        Ok(Self::with_hardware(hw, buffers, stream))
+        Ok(Self::with_hardware(hw, needs.frames))
     }
 
     fn describe(&self, out: &mut Description) {
@@ -207,37 +192,40 @@ impl Lifecycle for Rp1Csi2 {
             State::Recovering { .. } => {
                 Health::Degraded("the receiver stopped while streaming: restarting it")
             }
+            State::Streaming { .. } if self.relay.no_handles() => Health::Degraded(
+                "the frames stream's buffers have no handles (not memory = \"dma-buf\"): \
+                 no frame can reach its consumer",
+            ),
+            State::Streaming { .. } if self.relay.refused() => Health::Degraded(
+                "the frames stream's buffers are not memory the block can take \
+                 (smaller than a frame?): no frame can reach its consumer",
+            ),
             _ => Health::Ok,
         }
     }
 
-    /// Looks at the module when streaming, and runs a due recovery attempt. Returns when next.
+    /// Moves frames and buffers and looks at the module when streaming, and runs a due
+    /// recovery attempt. Returns when next.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         match self.state {
             State::Stopped => None,
-            State::Streaming { next_check: None } => {
-                let at = now_ns.saturating_add(CHECK_NS);
-                self.state = State::Streaming {
-                    next_check: Some(at),
-                };
-                Some(at)
-            }
-            State::Streaming {
-                next_check: Some(at),
-            } if now_ns < at => Some(at),
-            State::Streaming { .. } => {
-                if self.hw.check().is_err() {
+            State::Streaming { next_check } => {
+                let due = next_check.is_some_and(|at| now_ns >= at);
+                if self.pump().is_err() || (due && self.hw.check().is_err()) {
                     self.state = State::Recovering {
                         attempt: 0,
                         due: None,
                     };
                     return self.tick(now_ns);
                 }
-                let at = now_ns.saturating_add(CHECK_NS);
-                self.state = State::Streaming {
-                    next_check: Some(at),
+                let check_at = match next_check {
+                    Some(at) if !due => at,
+                    _ => now_ns.saturating_add(CHECK_NS),
                 };
-                Some(at)
+                self.state = State::Streaming {
+                    next_check: Some(check_at),
+                };
+                Some(now_ns.saturating_add(POLL_NS).min(check_at))
             }
             State::Recovering { attempt, due: None } => {
                 let at = now_ns.saturating_add(backoff_ns(attempt));
@@ -250,11 +238,10 @@ impl Lifecycle for Rp1Csi2 {
             State::Recovering { due: Some(at), .. } if now_ns < at => Some(at),
             State::Recovering { attempt, .. } => match self.begin() {
                 Ok(()) => {
-                    let at = now_ns.saturating_add(CHECK_NS);
                     self.state = State::Streaming {
-                        next_check: Some(at),
+                        next_check: Some(now_ns.saturating_add(CHECK_NS)),
                     };
-                    Some(at)
+                    Some(now_ns.saturating_add(POLL_NS))
                 }
                 Err(_) => {
                     let attempt = attempt.saturating_add(1);
@@ -273,11 +260,11 @@ impl Lifecycle for Rp1Csi2 {
 impl Rp1Csi2 {
     /// A driver over `hw`, for a simulated board or a test.
     #[must_use]
-    pub fn with_hardware(hw: Box<dyn Hardware>, buffers: u32, stream: StreamName) -> Self {
+    pub fn with_hardware(hw: Box<dyn Hardware>, frames: Option<StreamHandle>) -> Self {
         Self {
+            frames,
             hw,
-            buffers,
-            stream,
+            relay: Relay::new(),
             link: None,
             packing: Packing::Packed,
             layout: None,
@@ -285,16 +272,39 @@ impl Rp1Csi2 {
         }
     }
 
-    /// Stops the block, then starts it again as configured. Takes the configured link and
-    /// layout: called with both set.
+    /// Finished frames out to the stream, returned buffers back to the block, and each buffer
+    /// the driver holds matched to the memory behind it. An error means the module's stream is
+    /// over.
+    fn pump(&mut self) -> Result<()> {
+        let Some(frames) = self.frames.as_mut() else {
+            return Ok(());
+        };
+        while let Some(done) = self.hw.next_frame()? {
+            self.relay.finished(&done, &mut **frames, &mut *self.hw)?;
+        }
+        self.relay.sweep(&mut **frames);
+        self.relay.take(&mut **frames, &mut *self.hw)
+    }
+
+    /// Stops the block, then starts it again as configured: a new module stream, given the
+    /// memory of every `frames` buffer the driver holds before the block is started. Takes the
+    /// configured link and layout: called with both set.
     fn begin(&mut self) -> Result<()> {
         let (link, layout) = match (self.link, self.layout) {
             (Some(link), Some(layout)) => (link, layout),
             _ => return Err(Status::INVALID_ARGUMENT),
         };
+        let Some(frames) = self.frames.as_mut() else {
+            // Nowhere for a frame to go.
+            return Err(Status::NOT_FOUND);
+        };
+        let buffers = frames.buffer_count();
+        if buffers == 0 || buffers as usize > MAX_BUFFERS {
+            return Err(Status::INVALID_ARGUMENT);
+        }
         // Whatever was running ends first; a failure here is not a reason to not try the start.
         let _ = self.hw.stop();
-        self.hw.start(&hw::StartParams {
+        self.hw.make(&hw::StartParams {
             lanes: u32::from(link.lanes),
             mbps: link.link_rate_mbps,
             vc: u32::from(link.virtual_channel),
@@ -304,9 +314,27 @@ impl Rp1Csi2 {
             stride: layout.stride,
             size: layout.size,
             unpack16: self.packing == Packing::Unpacked16,
-            buffers: self.buffers,
-            frame_slots: frame_slots_for(self.buffers),
-        })
+            buffers,
+            frame_slots: frame_slots_for(buffers),
+        })?;
+        self.relay.restart(buffers);
+        let ready = match self.relay.settle_all(&mut **frames, &mut *self.hw) {
+            Ok(()) => self.relay.take(&mut **frames, &mut *self.hw),
+            Err(status) => Err(status),
+        };
+        let refusal = if self.relay.no_handles() {
+            // A consumer is attached to plain shared memory: the block can't be given it.
+            Err(Status::NOT_SUPPORTED)
+        } else if self.relay.refused() {
+            Err(Status::INVALID_ARGUMENT)
+        } else {
+            ready
+        };
+        if let Err(status) = refusal.and_then(|()| self.hw.go()) {
+            let _ = self.hw.stop();
+            return Err(status);
+        }
+        Ok(())
     }
 }
 
@@ -349,7 +377,10 @@ impl CameraReceiver for Rp1Csi2 {
     }
 
     fn frame_stream(&mut self, into: &mut [u8]) -> Result<usize> {
-        let name = self.stream.as_bytes();
+        if self.frames.is_none() {
+            return Err(Status::NOT_FOUND);
+        }
+        let name = STREAM.as_bytes();
         if into.len() < name.len() {
             return Err(Status::BUFFER_TOO_SMALL);
         }
@@ -378,6 +409,9 @@ impl CameraReceiver for Rp1Csi2 {
     }
 
     fn counters(&mut self) -> Result<Counters> {
-        self.hw.counters()
+        let mut counters = self.hw.counters()?;
+        // Finished by the block, but into memory nobody was reading by then.
+        counters.dropped = counters.dropped.saturating_add(self.relay.lost());
+        Ok(counters)
     }
 }

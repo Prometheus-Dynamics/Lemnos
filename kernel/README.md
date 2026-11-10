@@ -50,7 +50,28 @@ them and rings the eventfd given at creation (`poll` on the file also waits). Fr
 device-address range a job names are checked against what the module holds, with `check_add_overflow`
 and a state for each buffer that lives only in the kernel. Anything else ends the stream with an
 errno, and only that stream. Closing the file, or unbinding the block, stops the frame path and
-releases every dma-buf it held; at most 64 streams exist at once, with up to 16 dma-bufs each.
+releases every dma-buf it held; at most 64 streams exist at once, with up to 16 dma-bufs each
+(the pool and 15 registered).
+
+A stream made with `LEMNOS_STREAM_CREATE_BUFFERS` has no pool. It is for frame memory that already
+exists as one dma-buf per buffer, which is what `lemnosd` hands a stream's consumer: the block then
+writes straight into the memory that consumer reads. `LEMNOS_STREAM_IOC_BUFFER` gives buffer *n* a
+dma-buf, pinned and mapped for the block exactly as a pool is, and from then on buffer *n*'s device
+address is that dma-buf's start, with only `buffer_bytes` of it reachable. The rules:
+
+- A buffer with no memory is never filled: no frame takes it, and a job naming it is refused.
+- Giving a buffer that has memory another dma-buf swaps it: the old one is unpinned, the buffer's
+  state and fence stay. That is refused (`EBUSY`) while a job names the buffer or the block is
+  filling it, so a block is never left pointed at memory the module has let go of; it is allowed
+  while the buffer is free or with the consumer.
+- Naming the dma-buf the buffer already has changes nothing and succeeds, which is how the consumer
+  checks that buffer *n* is still the memory it thinks it is.
+- A dma-buf that is another buffer's or registered, or overlaps one, is refused (`EBUSY`); one
+  smaller than a buffer, not contiguous for the block or not aligned for it, `EINVAL`.
+- Once a block's DMA could not be seen to stop, no buffer's memory changes (`EIO`), and every pin
+  is kept as for a pool. Otherwise the end of the stream unpins every buffer.
+- At most 64 buffers. Everything else is the same: the ring, buffer states, jobs (a range may lie
+  in the job's own buffer or a registered dma-buf, never in another buffer's), and registration.
 
 A job names a buffer and up to four device-address ranges (`struct lemnos_stream_job`). A range must
 lie wholly in that buffer's bytes, or wholly in a dma-buf registered on the stream with
@@ -71,7 +92,8 @@ for each bound device, `/dev/lemnos-rp1-csi2-<device>`, one opener at a time; in
 
 `LEMNOS_RP1_CSI2_IOC_START` names the link, the layout and a stream made on this node. There is no
 ioctl carrying an address and no access to the registers. The receiver only arms buffers it gets
-from `lem_stream_next()`: a device address computed in the stream code from the pool it mapped, the
+from `lem_stream_next()`: a device address computed in the stream code from the memory it mapped
+(the pool, or the buffer's own dma-buf on a stream made with `LEMNOS_STREAM_CREATE_BUFFERS`), the
 end address checked against the buffer with overflow-safe arithmetic, the frame's stride, height and
 size checked against the buffer at `START`, and the buffer held as the block's until the frame
 completes or the channel is stopped.
@@ -123,7 +145,8 @@ it shares the receiver's platform device, node and interrupt, and adds `LEMNOS_P
 with the receiver's link and frame; the channel then feeds the front end instead of memory, so the
 receiver's own `START` is refused with `EBUSY` while the front end runs.
 
-A job is one frame on the stream's ring. Its pool buffer is output 0, and its ranges name, in order,
+A job is one frame on the stream's ring. Its buffer is output 0 (a pool buffer, or the buffer's own
+dma-buf on a stream made with `LEMNOS_STREAM_CREATE_BUFFERS`), and its ranges name, in order,
 a configuration in a registered dma-buf, the statistics buffer when a statistics block is on, and
 output 1 when it is on. The configuration is copied once, from a kernel mapping of the dma-buf, into
 kernel memory; only that copy is checked and only that copy is written to the registers. Every

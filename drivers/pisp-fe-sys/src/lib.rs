@@ -4,7 +4,9 @@
 //! The front end shares the receiver's node, `/dev/lemnos-rp1-csi2-<device>`. A job names device
 //! addresses and nothing here checks them, because nothing here needs to be believed: the module
 //! reads a job's configuration once, into its own memory, and proves every field and range there
-//! before the block sees any of it. A wrong address from this crate is a refused job.
+//! before the block sees any of it. A wrong address from this crate is a refused job. Output 0
+//! is never an address at all: it is the job's buffer, whose memory is the dma-buf
+//! [`Stream::set_buffer`] gave the module to pin.
 //!
 //! Provenance: written for the frame stream, from `crates/lemnos-linux-sys` on the dev branch.
 
@@ -28,6 +30,10 @@ pub const INFO_WEDGED: u32 = 1;
 pub const STATE_OPEN: u32 = 0;
 /// `LEMNOS_STREAM_JOB_RANGES`.
 pub const JOB_RANGES: usize = 4;
+/// `LEMNOS_STREAM_MAX_OWN_BUFFERS`: the most buffers a stream of dma-bufs may have.
+pub const MAX_BUFFERS: u32 = 64;
+/// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
+const CREATE_BUFFERS: u32 = 1;
 
 const FRAME_WORDS: usize = 5;
 const WORD_JOB_SLOTS: usize = 5;
@@ -150,6 +156,25 @@ struct Register {
     size: u64,
 }
 
+/// `struct lemnos_stream_buffer`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct StreamBuffer {
+    buffer: u32,
+    fd: i32,
+    addr: u64,
+    size: u64,
+}
+
+/// A buffer's memory as the module pinned it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferMemory {
+    /// The buffer's device address.
+    pub addr: u64,
+    /// Bytes of it the block may reach.
+    pub size: u64,
+}
+
 /// `struct lemnos_stream_status`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -175,11 +200,12 @@ const IOC_FE_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xca, 0);
 const IOC_KICK: u32 = lemnos_linux_sys::ioc(0, b'L', 0x81, 0);
 const IOC_REGISTER: u32 = iowr::<Register>(b'L', 0x82);
 const IOC_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
+const IOC_BUFFER: u32 = iowr::<StreamBuffer>(b'L', 0x86);
 
 /// What a stream asks of the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamParams {
-    /// Buffers in the pool.
+    /// Buffers, at most [`MAX_BUFFERS`].
     pub buffers: u32,
     /// Bytes per buffer.
     pub buffer_bytes: u32,
@@ -192,7 +218,7 @@ pub struct StreamParams {
 /// One frame the module published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
-    /// The pool buffer.
+    /// The buffer it is in.
     pub buffer: u32,
     /// Bytes.
     pub bytes: u32,
@@ -235,15 +261,17 @@ impl Node {
         Ok(info)
     }
 
-    /// Makes a stream on this block, its buffers in `pool`.
-    pub fn stream_create(&self, params: &StreamParams, pool: BorrowedFd<'_>) -> io::Result<Stream> {
+    /// Makes a stream on this block with no pool: each buffer is a dma-buf of its own, given
+    /// with [`Stream::set_buffer`], and a job on a buffer without memory is refused.
+    pub fn stream_create(&self, params: &StreamParams) -> io::Result<Stream> {
         let mut create = StreamCreate {
+            flags: CREATE_BUFFERS,
             buffers: params.buffers,
             buffer_bytes: params.buffer_bytes,
             frame_slots: params.frame_slots,
             job_slots: params.job_slots,
             job_bytes: u32::try_from(size_of::<Job>()).unwrap_or(0),
-            pool_fd: pool.as_raw_fd(),
+            pool_fd: -1,
             doorbell_fd: -1,
             fd: -1,
             ..Default::default()
@@ -272,7 +300,6 @@ impl Node {
             jobs_head: 0,
             frames_tail: 0,
             returns_head: 0,
-            pool_addr: create.pool_addr,
         };
         // Checks the mapping is what the module says it made, before anything relies on it.
         if stream.word(WORD_JOB_SLOTS)?.load(Ordering::Acquire) != u64::from(params.job_slots) {
@@ -307,16 +334,9 @@ pub struct Stream {
     jobs_head: u64,
     frames_tail: u64,
     returns_head: u64,
-    pool_addr: u64,
 }
 
 impl Stream {
-    /// Buffer 0's device address.
-    #[must_use]
-    pub fn pool_addr(&self) -> u64 {
-        self.pool_addr
-    }
-
     /// The descriptor, for [`Start::stream_fd`].
     #[must_use]
     pub fn raw_fd(&self) -> i32 {
@@ -338,6 +358,25 @@ impl Stream {
         };
         ioctl(self.fd.as_fd(), IOC_REGISTER, (&raw mut reg).cast())?;
         Ok(reg.addr)
+    }
+
+    /// Gives `buffer` the dma-buf `memory`, which the module pins for as long as the buffer has
+    /// it, or swaps it for what the buffer had. Naming the dma-buf the buffer already has
+    /// changes nothing and succeeds. `EBUSY` while a job names the buffer or the block is
+    /// writing it, or when the dma-buf is another buffer's; `EINVAL` for one that isn't a
+    /// dma-buf the block can take or is smaller than a buffer; `EIO` once the block's DMA could
+    /// not be seen to stop.
+    pub fn set_buffer(&self, buffer: u32, memory: BorrowedFd<'_>) -> io::Result<BufferMemory> {
+        let mut arg = StreamBuffer {
+            buffer,
+            fd: memory.as_raw_fd(),
+            ..Default::default()
+        };
+        ioctl(self.fd.as_fd(), IOC_BUFFER, (&raw mut arg).cast())?;
+        Ok(BufferMemory {
+            addr: arg.addr,
+            size: arg.size,
+        })
     }
 
     /// Posts a job. `WouldBlock` when the job ring is full.
@@ -458,6 +497,11 @@ mod tests {
         assert_eq!(size_of::<StreamCreate>(), 56);
         assert_eq!(size_of::<Register>(), 24);
         assert_eq!(size_of::<StreamStatus>(), 40);
+        assert_eq!(size_of::<StreamBuffer>(), 24);
+        assert_eq!(offset_of!(StreamBuffer, fd), 4);
+        assert_eq!(offset_of!(StreamBuffer, addr), 8);
+        assert_eq!(offset_of!(StreamBuffer, size), 16);
+        assert_eq!(IOC_BUFFER, 0xc018_4c86);
         assert_eq!(IOC_STREAM_CREATE, 0xc038_4cc1);
         assert_eq!(IOC_FE_INFO, 0x8038_4cc8);
         assert_eq!(IOC_FE_START, 0x403c_4cc9);

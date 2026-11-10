@@ -8,9 +8,12 @@
  * The sensor is user space's: nothing here talks to it. START takes the link
  * the sensor was set up for and the stream to keep (virtual channel, data
  * type, layout) and the stream's file, and the receiver fills that stream's
- * pool: which buffer each frame goes to is the stream's business (a posted
- * job, or a free buffer before the first job). There is no call that takes a
- * memory address, and no way to read or write the block's registers.
+ * buffers: which buffer each frame goes to is the stream's business (a posted
+ * job, or a free buffer before the first job), and so is where a buffer is (a
+ * slice of the stream's pool, or the buffer's own dma-buf on a stream made
+ * with LEMNOS_STREAM_CREATE_BUFFERS, where a buffer with no memory yet is
+ * never armed). There is no call that takes a memory address, and no way to
+ * read or write the block's registers.
  *
  * A stream's file carries one receiver at most; closing the stream's file,
  * STOP, closing this node and unbinding the block all stop the receiver, and

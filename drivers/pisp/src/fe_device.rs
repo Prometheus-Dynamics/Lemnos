@@ -14,13 +14,33 @@
 //!   link, and it is the sensor's, fixed by the board.
 //! - `vc`: the virtual channel, default 0.
 //! - `heap`: the DMA heap, under `/dev/dma_heap`. Default `linux,cma`.
-//! - `buffers`: how many images each output has, 2 to 32, default 4.
+//! - `buffers`: how many images output 1 has, 2 to 32, default 4.
 //! - `job_slots`: jobs that may be queued, a power of two up to 16, default 4.
 //! - `config_stream`, `statistics_stream`, `output0_stream`, `output1_stream`: stream names.
 //!
-//! Streams: `jobs`, when the board provides it, carries [`IspJob`]s, and `frames`, when provided,
-//! receives output 0's frames. A job's `outputs` index is by [`OUTPUT_FRONT_END_0`] and
-//! [`OUTPUT_FRONT_END_1`]; its statistics go in the slot numbered as its configuration.
+//! Streams: `jobs`, when the board provides it, carries [`IspJob`]s, and `frames` receives output
+//! 0's frames. A job's `outputs` index is by [`OUTPUT_FRONT_END_0`] and [`OUTPUT_FRONT_END_1`];
+//! its statistics go in the slot numbered as its configuration.
+//!
+//! Output 0 is written straight into the `frames` buffer a job names. The board declares that
+//! stream `memory = "dma-buf"`, so each buffer is a dma-buf of its own; the module's stream is
+//! made with no pool, and the driver hands the module the dma-buf of every `frames` buffer it
+//! holds (`StreamEndpoint::buffer_handle`), which the module pins, checks against output 0's
+//! size and makes that buffer's memory. Output 0's address is never the driver's to give: the
+//! module takes it from the job's buffer. A job may name only a buffer the driver holds whose
+//! memory the module has been shown: one the consumer has never had or has given back, and not
+//! one another job has. Any other job is dropped, and so is every job on a stream whose buffers
+//! have no handles; nothing is written where the consumer can't see it.
+//!
+//! A consumer that leaves, and the next one. The stream's memory is made anew for each consumer.
+//! The block is not stopped: the module keeps the old memory pinned while a job may be writing
+//! it, so nothing is ever written to freed memory, and its frame reaches no one. Each buffer is
+//! given the new consumer's memory as soon as no job has it (`fe_device/relay.rs`).
+//!
+//! `start` without a `frames` stream on the device is `NOT_FOUND`; with one whose buffers have no
+//! handles and a consumer attached, `NOT_SUPPORTED`; with buffers smaller than output 0, or more
+//! than 64 of them, `INVALID_ARGUMENT`. Found later (a consumer attaching after `start`), the
+//! last two show as degraded health.
 //!
 //! Failures. A stream that faulted, a job the module refused or a wedged block starts recovery:
 //! the next ticks stop what's left and make everything again, with the delay between attempts
@@ -42,7 +62,10 @@ use lemnos_core::{
     StreamHandle, driver,
 };
 use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
-use lemnos_hal::blocks::StreamFrame;
+
+mod relay;
+
+use relay::{MAX_BUFFERS, Relay};
 
 use crate::fe::FE_OUTPUT_ALIGN;
 use crate::fe_hw::{Finished, Hardware, LinuxHardware, Placed, Plan, Settings, slot_bytes};
@@ -191,8 +214,8 @@ pub struct PispFe {
     /// Whether the block has been started on this stream: the first job does that.
     started: bool,
     counters: Counters,
-    /// Whose return the `frames` stream may give back: only what was published.
-    out: [bool; 32],
+    /// Where each `frames` buffer is, and whether the module's memory for it is the stream's.
+    relay: Relay,
     config: Box<FeConfig>,
     bytes: Box<[u8; CONFIG_BYTES]>,
 }
@@ -243,6 +266,14 @@ impl Lifecycle for PispFe {
             State::Recovering { .. } => {
                 Health::Degraded("the front end's stream ended while running: restarting it")
             }
+            State::Running { .. } if self.relay.no_handles() => Health::Degraded(
+                "the frames stream's buffers have no handles (not memory = \"dma-buf\"): \
+                 every job is dropped",
+            ),
+            State::Running { .. } if self.relay.refused() => Health::Degraded(
+                "the frames stream's buffers are not memory the block can take \
+                 (smaller than output 0?): jobs on them are dropped",
+            ),
             _ => Health::Ok,
         }
     }
@@ -318,7 +349,7 @@ impl PispFe {
             placed: Placed::default(),
             started: false,
             counters: Counters::default(),
-            out: [false; 32],
+            relay: Relay::new(),
             config: Box::default(),
             bytes: Box::new([0; CONFIG_BYTES]),
         }
@@ -334,23 +365,44 @@ impl PispFe {
         self.tick(now_ns)
     }
 
-    /// Makes everything from nothing. The block starts with the first job.
+    /// Makes everything from nothing: a new module stream, given the memory of every `frames`
+    /// buffer the driver holds. The block starts with the first job.
     fn begin(&mut self) -> Result<()> {
         let output0 = self.outputs[0].ok_or(Status::INVALID_ARGUMENT)?;
+        let Some(frames) = self.frames.as_mut() else {
+            // Nowhere for output 0 to go.
+            return Err(Status::NOT_FOUND);
+        };
+        let buffers = frames.buffer_count();
+        if buffers == 0 || buffers as usize > MAX_BUFFERS {
+            return Err(Status::INVALID_ARGUMENT);
+        }
         self.hw.stop();
         self.started = false;
-        self.out = [false; 32];
-        // A stream's free buffers come out of `next_buffer` first. None of them is a return.
-        if let Some(frames) = self.frames.as_mut() {
-            while frames.next_buffer().map_err(|_| Status::IO)?.is_some() {}
-        }
         self.placed = self.hw.make(&Plan {
-            buffers: self.options.buffers,
+            buffers,
+            output1_buffers: self.options.buffers,
             job_slots: self.options.job_slots,
             output0_bytes: output0.layout.size,
             output1_bytes: self.outputs[1].map(|o| o.layout.size),
         })?;
-        Ok(())
+        self.relay.restart(buffers);
+        let ready = match self.relay.settle_all(&mut **frames, &mut *self.hw) {
+            Ok(()) => self.relay.take(&mut **frames, &mut *self.hw),
+            Err(status) => Err(status),
+        };
+        let refusal = if self.relay.no_handles() {
+            // A consumer is attached to plain shared memory: the block can't be given it.
+            Err(Status::NOT_SUPPORTED)
+        } else if self.relay.refused() {
+            Err(Status::INVALID_ARGUMENT)
+        } else {
+            ready
+        };
+        if refusal.is_err() {
+            self.hw.stop();
+        }
+        refusal
     }
 
     /// Finished frames out, returned buffers back, new jobs in. An error means the stream is over.
@@ -360,13 +412,8 @@ impl PispFe {
             self.finished(&done)?;
         }
         if let Some(frames) = self.frames.as_mut() {
-            while let Some(buffer) = frames.next_buffer().map_err(|_| Status::IO)? {
-                // Only what was published comes back; a stream's initial free buffers don't.
-                if let Some(held @ true) = self.out.get_mut(buffer as usize) {
-                    *held = false;
-                    self.hw.give_back(buffer)?;
-                }
-            }
+            self.relay.sweep(&mut **frames);
+            self.relay.take(&mut **frames, &mut *self.hw)?;
         }
         let mut encoded = [0u8; MAX_JOB_BYTES];
         while let Some(len) = match self.jobs.as_mut() {
@@ -388,22 +435,11 @@ impl PispFe {
         let Some(frames) = self.frames.as_mut() else {
             return self.hw.give_back(done.buffer);
         };
-        let frame = StreamFrame {
-            buffer: done.buffer,
-            bytes: done.bytes,
-            sequence: done.sequence,
-            identity: done.identity,
-            timestamp_ns: done.timestamp_ns,
-        };
-        if frames.publish(frame).is_ok() {
-            if let Some(held) = self.out.get_mut(done.buffer as usize) {
-                *held = true;
-            }
-            Ok(())
-        } else {
+        if !self.relay.finished(done, &mut **frames, &mut *self.hw)? {
+            // Written where its consumer no longer is, or not taken by the stream.
             self.counters.dropped = self.counters.dropped.saturating_add(1);
-            self.hw.give_back(done.buffer)
         }
+        Ok(())
     }
 
     /// Sends one job, or counts it as dropped. An error means the stream is over.
@@ -470,7 +506,7 @@ impl PispFe {
         if job.layout != LAYOUT_FRONT_END
             || job.input_buffer != NO_BUFFER
             || job.config_buffer >= self.options.job_slots
-            || output0 >= buffers
+            || output0 == NO_BUFFER
             || (output1 != NO_BUFFER && output1 >= buffers)
         {
             return Ok(None);
@@ -522,7 +558,13 @@ impl PispFe {
             );
         }
         out.count = count as u32;
-        Ok(Some(out))
+        // Last, so nothing above leaves a buffer marked as a job's: output 0 must be a `frames`
+        // buffer the driver holds, on memory the module was shown, that no job has.
+        let claimed = match self.frames.as_mut() {
+            Some(frames) => self.relay.claim(output0, &mut **frames),
+            None => false,
+        };
+        Ok(claimed.then_some(out))
     }
 
     fn stopped(&self) -> Result<()> {
@@ -717,5 +759,7 @@ impl IspPisp for PispFe {
     }
 }
 
+#[cfg(test)]
+mod frames_tests;
 #[cfg(test)]
 mod tests;

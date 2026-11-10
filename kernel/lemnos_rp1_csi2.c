@@ -18,7 +18,8 @@
  * Everything the block can name or be told comes from somewhere the kernel
  * holds:
  *  - Only device addresses from lem_stream_next() reach the DMA registers:
- *    pool memory this module pinned and mapped, the end checked against the
+ *    memory this module pinned and mapped (the stream's pool, or the
+ *    buffer's own dma-buf), the end checked against the
  *    buffer. No ioctl carries an address. There is no register passthrough.
  *  - The register offsets here are constants, inside windows checked at probe.
  *  - Interrupt status is only tested for known bits. No count or length from

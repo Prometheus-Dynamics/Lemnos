@@ -24,6 +24,15 @@
  * here are pinned while the stream holds them, and removed from a stream only
  * when no job uses them.
  *
+ * A stream made with LEMNOS_STREAM_CREATE_BUFFERS has no pool: buffer n's
+ * memory is a dma-buf of its own (s->own[n]), given and swapped with
+ * LEMNOS_STREAM_IOC_BUFFER, and pinned and mapped exactly as a pool is. A
+ * buffer without memory is LEM_BUF_ABSENT, a state nothing takes a buffer
+ * from, and a buffer's memory changes only while the buffer is free or with
+ * the consumer, under s->lock: never while a job names it or the source has
+ * it. lem_stream_buffer_addr() is the one place a buffer's device address is
+ * computed, for either kind of stream.
+ *
  * Locking: s->lock is the frame path's, taken by the source (a block's
  * interrupt handler, or the test source) and by KICK. s->ctl orders
  * registration and teardown and is never taken on the frame path. The source
@@ -35,7 +44,8 @@
  * A block attaches as the stream's producer and calls lem_stream_next() for
  * the buffer it arms and lem_stream_complete() when the block is finished with
  * it (lemnos_internal.h). Everything those touch is the kernel's own copy; the
- * block only ever sees device addresses this file computed from the pool.
+ * block only ever sees device addresses this file computed from the pool, or
+ * from the buffer's own dma-buf.
  *
  * Derived in part from the capture module's buffer queue on the dev branch
  * (a queued buffer names a dma-buf offset; the module keeps the mapping while
@@ -75,7 +85,10 @@
 
 /* Each stream is kernel memory, so their number has an end. */
 #define LEM_STREAM_MAX 64
-/* The pool, then the dma-bufs the consumer registers. */
+/*
+ * The pool, then the dma-bufs the consumer registers. A range's region at or
+ * past LEM_STREAM_REGIONS is a buffer's own dma-buf: s->own[region - this].
+ */
 #define LEM_STREAM_REGIONS 16
 #define LEM_STREAM_POOL 0
 
@@ -92,6 +105,7 @@ enum lem_buf_state {
 	LEM_BUF_QUEUED,		/* a job names it */
 	LEM_BUF_ACTIVE,		/* the source is filling it */
 	LEM_BUF_CONSUMER,	/* published, due back with its fence */
+	LEM_BUF_ABSENT,		/* no memory yet: only on a stream without a pool */
 };
 
 struct lem_stream_buf {
@@ -128,6 +142,7 @@ struct lem_stream {
 	struct lem_job *queue;		/* job_slots validated jobs */
 	u64 queue_head, queue_tail;
 	struct lem_stream_region region[LEM_STREAM_REGIONS];
+	struct lem_stream_region *own;	/* without a pool: each buffer's dma-buf; NULL with one */
 	u32 cursor;			/* where the next jobless frame looks */
 
 	/* The producer's own counts, never read back from the ring. */
@@ -235,6 +250,36 @@ static int lem_stream_collect_returns(struct lem_stream *s)
 	return 0;
 }
 
+/* The region a resolved range names: the table, or a buffer's own dma-buf. Lock held. */
+static struct lem_stream_region *lem_stream_region_at(struct lem_stream *s, u32 region)
+{
+	if (region < LEM_STREAM_REGIONS)
+		return &s->region[region];
+	return &s->own[region - LEM_STREAM_REGIONS];
+}
+
+/*
+ * Where `buffer` is for the block, and that `bytes` from there are inside
+ * memory this stream has pinned: its slice of the pool, or its own dma-buf.
+ * The only place a buffer's address comes from. Lock held, or nothing running.
+ */
+static int lem_stream_buffer_addr(const struct lem_stream *s, u32 buffer, u64 bytes, u64 *addr)
+{
+	const struct lem_stream_region *reg = &s->region[LEM_STREAM_POOL];
+	u64 offset = 0, end;
+
+	if (buffer >= s->buffers)
+		return -EINVAL;
+	if (s->own)
+		reg = &s->own[buffer];
+	else if (check_mul_overflow((u64)buffer, s->stride, &offset))
+		return -EFAULT;
+	if (!reg->buf || check_add_overflow(reg->addr, offset, addr) ||
+	    check_add_overflow(*addr, bytes, &end) || end > reg->end)
+		return -EFAULT;
+	return 0;
+}
+
 /*
  * Checks one range and resolves it to a region and offset. Touches nothing.
  * `addr` and `len` are kernel locals: the job was copied before this.
@@ -250,7 +295,20 @@ static int lem_stream_resolve(const struct lem_stream *s, u32 buffer, u64 addr, 
 	if (check_add_overflow(addr, len, &end))
 		return -EOVERFLOW;
 
-	if (addr >= pool->addr && end <= pool->end) {
+	/* Without a pool: inside one buffer's memory, which must be the job's own. */
+	for (u32 b = 0; s->own && b < s->buffers; b++) {
+		const struct lem_stream_region *reg = &s->own[b];
+
+		if (!reg->buf || addr < reg->addr || end > reg->end)
+			continue;
+		if (b != buffer)
+			return -EACCES;
+		out->region = LEM_STREAM_REGIONS + b;
+		out->offset = addr - reg->addr;
+		out->len = len;
+		return 0;
+	}
+	if (pool->buf && addr >= pool->addr && end <= pool->end) {
 		offset = addr - pool->addr;
 		index = div64_u64(offset, s->stride);
 		in = offset - index * s->stride;
@@ -287,6 +345,8 @@ static int lem_stream_accept(struct lem_stream *s, const struct lemnos_stream_jo
 	if (in->buffer >= s->buffers)
 		return -EINVAL;
 	b = &s->buf[in->buffer];
+	if (b->state == LEM_BUF_ABSENT)
+		return -EFAULT;
 	if (b->state == LEM_BUF_QUEUED || b->state == LEM_BUF_ACTIVE)
 		return -EBUSY;
 	if (b->state != LEM_BUF_FREE)
@@ -307,7 +367,7 @@ static int lem_stream_accept(struct lem_stream *s, const struct lemnos_stream_jo
 			return ret;
 	}
 	for (u32 i = 0; i < count; i++)
-		s->region[job.range[i].region].users++;
+		lem_stream_region_at(s, job.range[i].region)->users++;
 	b->state = LEM_BUF_QUEUED;
 	s->queue[s->queue_head & (s->job_slots - 1)] = job;
 	s->queue_head++;
@@ -436,8 +496,8 @@ static bool lem_stream_take(struct lem_stream *s, struct lem_job *job)
  */
 static void lem_stream_fill(struct lem_stream *s, const struct lem_job *job, u64 sequence)
 {
-	void *pool = s->region[LEM_STREAM_POOL].map.vaddr;
-	u8 *p = (u8 *)pool + (u64)job->buffer * s->stride;
+	u8 *p = s->own ? s->own[job->buffer].map.vaddr :
+			 (u8 *)s->region[LEM_STREAM_POOL].map.vaddr + (u64)job->buffer * s->stride;
 	u64 *w = (u64 *)p;
 	size_t bytes = s->buffer_bytes;
 
@@ -448,7 +508,8 @@ static void lem_stream_fill(struct lem_stream *s, const struct lem_job *job, u64
 	for (u32 i = 0; i < job->count; i++) {
 		const struct lem_job_range *r = &job->range[i];
 
-		memset((u8 *)s->region[r->region].map.vaddr + r->offset, 0xa5 ^ i, r->len);
+		memset((u8 *)lem_stream_region_at(s, r->region)->map.vaddr + r->offset, 0xa5 ^ i,
+		       r->len);
 	}
 }
 
@@ -465,7 +526,7 @@ static void lem_stream_finish_locked(struct lem_stream *s, const struct lem_job 
 	int ret;
 
 	for (u32 i = 0; i < job->count; i++)
-		s->region[job->range[i].region].users--;
+		lem_stream_region_at(s, job->range[i].region)->users--;
 	if (s->dead || s->fault || (!bytes && !s->jobs)) {
 		/*
 		 * With no job behind it nobody is waiting for this buffer. A
@@ -535,7 +596,9 @@ static void lem_stream_source(struct work_struct *work)
 /*
  * The checks every programmed frame must pass, against the module's own copies:
  * the frame's end, in device addresses, must lie inside the buffer. Lock held
- * or the values not yet in use.
+ * or the values not yet in use. Without a pool each buffer was held to
+ * buffer_bytes and the alignment when it was given its memory, and is again
+ * each time it is handed out.
  */
 static int lem_stream_check_frame(const struct lem_stream *s, u32 stride, u32 height, u32 bytes)
 {
@@ -548,6 +611,8 @@ static int lem_stream_check_frame(const struct lem_stream *s, u32 stride, u32 he
 		return -EINVAL;
 	if (bytes > s->buffer_bytes || (u64)bytes > s->stride)
 		return -EINVAL;
+	if (s->own)
+		return 0;
 	if (!pool->buf || (pool->addr & (LEM_STREAM_DMA_ALIGN - 1)))
 		return -EINVAL;
 	if (check_mul_overflow((u64)s->buffers - 1, s->stride, &last) ||
@@ -621,13 +686,10 @@ int lem_stream_next(struct lem_stream *s, struct lem_stream_slot *slot)
 		if (!ret && !lem_stream_take(s, &slot->job))
 			ret = -ENOBUFS;
 		if (!ret) {
-			u64 offset, addr;
+			u64 addr;
 
-			if (check_mul_overflow((u64)slot->job.buffer, s->stride, &offset) ||
-			    check_add_overflow(s->region[LEM_STREAM_POOL].addr, offset, &addr) ||
-			    check_add_overflow(addr, (u64)s->frame_bytes, &offset) ||
-			    offset > s->region[LEM_STREAM_POOL].end) {
-				/* The pool's bounds were checked at creation; never hand this out. */
+			if (lem_stream_buffer_addr(s, slot->job.buffer, s->frame_bytes, &addr)) {
+				/* The bounds were checked when the memory came; never hand this out. */
 				lem_stream_finish_locked(s, &slot->job, 0, 0, 0);
 				ret = -EFAULT;
 			} else {
@@ -661,7 +723,7 @@ void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot)
 
 	spin_lock_irqsave(&s->lock, flags);
 	for (u32 i = 0; i < slot->job.count; i++)
-		s->region[slot->job.range[i].region].users--;
+		lem_stream_region_at(s, slot->job.range[i].region)->users--;
 	s->buf[slot->job.buffer].state = LEM_BUF_FREE;
 	spin_unlock_irqrestore(&s->lock, flags);
 }
@@ -815,7 +877,7 @@ int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
 {
 	struct lem_stream_buf *b;
 	unsigned long flags;
-	u64 offset, addr, end;
+	u64 addr;
 	int ret = 0;
 
 	if (count > LEM_JOB_HOLDS)
@@ -836,6 +898,10 @@ int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
 			goto out;
 	}
 	b = &s->buf[buffer];
+	if (b->state == LEM_BUF_ABSENT) {
+		ret = -EFAULT;
+		goto out;
+	}
 	if (b->state == LEM_BUF_QUEUED || b->state == LEM_BUF_ACTIVE) {
 		ret = -EBUSY;
 		goto out;
@@ -844,15 +910,12 @@ int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
 		ret = -EACCES;
 		goto out;
 	}
-	if (check_mul_overflow((u64)buffer, s->stride, &offset) ||
-	    check_add_overflow(s->region[LEM_STREAM_POOL].addr, offset, &addr) ||
-	    check_add_overflow(addr, (u64)s->frame_bytes, &end) ||
-	    end > s->region[LEM_STREAM_POOL].end) {
+	if (lem_stream_buffer_addr(s, buffer, s->frame_bytes, &addr)) {
 		ret = -EFAULT;
 		goto out;
 	}
 	for (u32 i = 0; i < count; i++)
-		s->region[slot->job.range[i].region].users++;
+		lem_stream_region_at(s, slot->job.range[i].region)->users++;
 	slot->job.identity = identity;
 	slot->job.buffer = buffer;
 	slot->job.count = count;
@@ -965,6 +1028,26 @@ static int lem_region_vmap(struct lem_stream_region *r)
 
 /* --- the stream's ioctls --- */
 
+/*
+ * Whether `r` is, or overlaps, memory the stream already has, other than
+ * `except`: a region overlapping another would be another path past the
+ * checks. Lock held.
+ */
+static bool lem_stream_region_taken(const struct lem_stream *s, const struct lem_stream_region *r,
+				    const struct lem_stream_region *except)
+{
+	for (u32 i = 0; i < LEM_STREAM_REGIONS + (s->own ? s->buffers : 0); i++) {
+		const struct lem_stream_region *other =
+			i < LEM_STREAM_REGIONS ? &s->region[i] : &s->own[i - LEM_STREAM_REGIONS];
+
+		if (other == except || !other->buf)
+			continue;
+		if (other->buf == r->buf || (r->addr < other->end && other->addr < r->end))
+			return true;
+	}
+	return false;
+}
+
 /* Holds s->ctl. */
 static long lem_stream_register(struct lem_stream *s, struct lemnos_stream_register *a)
 {
@@ -985,19 +1068,15 @@ static long lem_stream_register(struct lem_stream *s, struct lemnos_stream_regis
 	}
 
 	spin_lock_irqsave(&s->lock, flags);
-	for (u32 i = 0; i < LEM_STREAM_REGIONS; i++) {
-		struct lem_stream_region *other = &s->region[i];
-
-		if (!other->buf) {
-			if (i != LEM_STREAM_POOL && slot == LEM_STREAM_REGIONS)
-				slot = i;
-			continue;
-		}
-		/* A region overlapping another would be another path past the checks. */
-		if (other->buf == r.buf || (r.addr < other->end && other->addr < r.end)) {
-			spin_unlock_irqrestore(&s->lock, flags);
-			lem_region_unmap(&r);
-			return -EBUSY;
+	if (lem_stream_region_taken(s, &r, NULL)) {
+		spin_unlock_irqrestore(&s->lock, flags);
+		lem_region_unmap(&r);
+		return -EBUSY;
+	}
+	for (u32 i = LEM_STREAM_POOL + 1; i < LEM_STREAM_REGIONS; i++) {
+		if (!s->region[i].buf) {
+			slot = i;
+			break;
 		}
 	}
 	if (slot == LEM_STREAM_REGIONS) {
@@ -1036,6 +1115,64 @@ static long lem_stream_unregister(struct lem_stream *s, u32 region)
 	spin_unlock_irqrestore(&s->lock, flags);
 	lem_region_unmap(&r);
 	return 0;
+}
+
+/*
+ * LEMNOS_STREAM_IOC_BUFFER: gives buffer a->buffer its memory, or swaps it.
+ * The new dma-buf is pinned and checked first; it takes the buffer's place in
+ * one step under s->lock, only while nothing can be writing the buffer; the
+ * old one is unpinned after. Holds s->ctl.
+ */
+static long lem_stream_set_buffer(struct lem_stream *s, struct lemnos_stream_buffer *a)
+{
+	struct lem_stream_region r, old = {};
+	struct lem_stream_region *at;
+	unsigned long flags;
+	long ret = 0;
+	u8 state;
+
+	if (!s->own)
+		return -EOPNOTSUPP;
+	if (a->buffer >= s->buffers)
+		return -EINVAL;
+	ret = lem_region_map(s->dev, a->fd, &r);
+	if (ret)
+		return ret;
+	/* Only what the buffer uses is reachable, however big the dma-buf. */
+	if (r.size < s->buffer_bytes || (r.addr & (LEM_STREAM_DMA_ALIGN - 1))) {
+		lem_region_unmap(&r);
+		return -EINVAL;
+	}
+	r.size = s->buffer_bytes;
+	r.end = r.addr + s->buffer_bytes;
+
+	at = &s->own[a->buffer];
+	spin_lock_irqsave(&s->lock, flags);
+	state = s->buf[a->buffer].state;
+	if (s->wedged) {
+		ret = -EIO;
+	} else if (at->buf == r.buf) {
+		/* What it already has: nothing changes, and the new pin is dropped below. */
+		a->addr = at->addr;
+		a->size = at->size;
+		old = r;
+	} else if (state == LEM_BUF_QUEUED || state == LEM_BUF_ACTIVE || at->users ||
+		   lem_stream_region_taken(s, &r, at)) {
+		ret = -EBUSY;
+	} else {
+		old = *at;
+		*at = r;
+		if (state == LEM_BUF_ABSENT)
+			s->buf[a->buffer].state = LEM_BUF_FREE;
+		a->addr = r.addr;
+		a->size = r.size;
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (ret)
+		lem_region_unmap(&r);
+	else
+		lem_region_unmap(&old);
+	return ret;
 }
 
 /* Holds s->ctl. */
@@ -1127,6 +1264,19 @@ static long lem_stream_ioctl(struct file *file, unsigned int cmd, unsigned long 
 		mutex_lock(&s->ctl);
 		ret = s->dead ? -ENODEV : lem_stream_unregister(s, a.region);
 		mutex_unlock(&s->ctl);
+		return ret;
+	}
+
+	if (cmd == LEMNOS_STREAM_IOC_BUFFER) {
+		struct lemnos_stream_buffer a;
+
+		if (copy_from_user(&a, uarg, sizeof(a)))
+			return -EFAULT;
+		mutex_lock(&s->ctl);
+		ret = s->dead ? -ENODEV : s->fault ? s->fault : lem_stream_set_buffer(s, &a);
+		mutex_unlock(&s->ctl);
+		if (!ret && copy_to_user(uarg, &a, sizeof(a)))
+			ret = -EFAULT;
 		return ret;
 	}
 
@@ -1223,12 +1373,13 @@ static void lem_stream_shutdown(struct lem_stream *s, u64 state)
 	}
 
 	spin_lock_irqsave(&s->lock, flags);
-	for (u32 i = 0; i < LEM_STREAM_REGIONS; i++) {
-		struct lem_stream_region r = s->region[i];
+	for (u32 i = 0; i < LEM_STREAM_REGIONS + (s->own ? s->buffers : 0); i++) {
+		struct lem_stream_region *at = lem_stream_region_at(s, i);
+		struct lem_stream_region r = *at;
 
 		if (!r.buf)
 			continue;
-		memset(&s->region[i], 0, sizeof(s->region[i]));
+		memset(at, 0, sizeof(*at));
 		spin_unlock_irqrestore(&s->lock, flags);
 		lem_region_unmap(&r);
 		spin_lock_irqsave(&s->lock, flags);
@@ -1245,9 +1396,13 @@ static void lem_stream_free(struct lem_stream *s)
 		s->producer.release(s->producer.priv);
 	if (s->doorbell)
 		eventfd_ctx_put(s->doorbell);
-	if (!s->wedged)
+	if (!s->wedged) {
 		for (u32 i = 0; i < LEM_STREAM_REGIONS; i++)
 			lem_region_unmap(&s->region[i]);
+		for (u32 i = 0; s->own && i < s->buffers; i++)
+			lem_region_unmap(&s->own[i]);
+	}
+	kvfree(s->own);
 	kvfree(s->queue);
 	kvfree(s->buf);
 	vfree(s->ring);
@@ -1290,9 +1445,13 @@ static int lem_stream_check_layout(const struct lemnos_stream_create *c)
 {
 	u64 stride;
 
-	if (c->flags)
+	if (c->flags & ~LEMNOS_STREAM_CREATE_BUFFERS)
 		return -EINVAL;
 	if (!c->buffers || c->buffers > LEMNOS_STREAM_MAX_BUFFERS)
+		return -EINVAL;
+	/* No pool: no pool descriptor either, and a table of dma-bufs with an end. */
+	if ((c->flags & LEMNOS_STREAM_CREATE_BUFFERS) &&
+	    (c->pool_fd != -1 || c->buffers > LEMNOS_STREAM_MAX_OWN_BUFFERS))
 		return -EINVAL;
 	if (!c->buffer_bytes || c->buffer_bytes > LEMNOS_STREAM_MAX_BUFFER_BYTES)
 		return -EINVAL;
@@ -1377,6 +1536,13 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	s->queue = kvcalloc(s->job_slots, sizeof(*s->queue), GFP_KERNEL);
 	if (!s->buf || !s->queue)
 		goto free;
+	if (c->flags & LEMNOS_STREAM_CREATE_BUFFERS) {
+		s->own = kvcalloc(s->buffers, sizeof(*s->own), GFP_KERNEL);
+		if (!s->own)
+			goto free;
+		for (u32 i = 0; i < s->buffers; i++)
+			s->buf[i].state = LEM_BUF_ABSENT;
+	}
 	s->ring = vmalloc_user(PAGE_ALIGN(s->ring_bytes));
 	if (!s->ring)
 		goto free;
@@ -1389,16 +1555,18 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 			goto free;
 		}
 	}
-	ret = lem_region_map(dev, c->pool_fd, &s->region[LEM_STREAM_POOL]);
-	if (ret)
-		goto free;
-	/* Only what the buffers use is reachable, however big the dma-buf. */
-	if (s->region[LEM_STREAM_POOL].size < pool_bytes) {
-		ret = -EINVAL;
-		goto free;
+	if (!s->own) {
+		ret = lem_region_map(dev, c->pool_fd, &s->region[LEM_STREAM_POOL]);
+		if (ret)
+			goto free;
+		/* Only what the buffers use is reachable, however big the dma-buf. */
+		if (s->region[LEM_STREAM_POOL].size < pool_bytes) {
+			ret = -EINVAL;
+			goto free;
+		}
+		s->region[LEM_STREAM_POOL].size = pool_bytes;
+		s->region[LEM_STREAM_POOL].end = s->region[LEM_STREAM_POOL].addr + pool_bytes;
 	}
-	s->region[LEM_STREAM_POOL].size = pool_bytes;
-	s->region[LEM_STREAM_POOL].end = s->region[LEM_STREAM_POOL].addr + pool_bytes;
 
 	lem_stream_init_ring(s);
 

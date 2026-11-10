@@ -3,10 +3,13 @@
  * The rp1-csi2 receiver on the fake block in the test module: frames reach the
  * stream with every programmed address taken from the pool, a bad START or a
  * hostile interrupt status is refused, and stopping (STOP, closing either file,
- * unbinding) waits for the channel's DMA before anything is released.
+ * unbinding) waits for the channel's DMA before anything is released. The same
+ * on a stream whose buffers are dma-bufs of their own: the channel is armed
+ * with each buffer's own address, writes there, and follows a swap.
  *
  * Usage: lemnos_rp1_csi2_check /dev/lemnos <block> <csi2 device> <unbind> <heap>
  *    or: lemnos_rp1_csi2_check wedge <csi2 device> <unbind> <heap>
+ *    or: lemnos_rp1_csi2_check wedge-own <csi2 device> <unbind> <heap>
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
@@ -130,9 +133,11 @@ static void fire(uint32_t status)
 	sleep_ms(3);
 }
 
+/* pool_fd -1: a stream with no pool, each buffer a dma-buf of its own. */
 static int stream_open(struct stream *s, int pool_fd)
 {
 	struct lemnos_stream_create c = {
+		.flags = pool_fd < 0 ? LEMNOS_STREAM_CREATE_BUFFERS : 0,
 		.buffers = BUFFERS,
 		.buffer_bytes = BUFFER_BYTES,
 		.frame_slots = FRAME_SLOTS,
@@ -613,20 +618,180 @@ static void test_unbind(const char *node, const char *unbind, const char *dev, i
 	ctl = -1;
 }
 
+/* How many dma-bufs are attached to `dev`, from the kernel's own list. */
 static int bufinfo_attached(const char *dev)
 {
-	static char buf[65536];
+	static char buf[1 << 18];
+	char line[160];
 	int fd = open("/sys/kernel/debug/dma_buf/bufinfo", O_RDONLY | O_CLOEXEC);
-	ssize_t n;
+	ssize_t n, total = 0;
+	int count = 0;
 
 	if (fd < 0)
 		return -1;
-	n = read(fd, buf, sizeof(buf) - 1);
+	while (total < (ssize_t)sizeof(buf) - 1 &&
+	       (n = read(fd, buf + total, sizeof(buf) - 1 - total)) > 0)
+		total += n;
 	close(fd);
-	if (n < 0)
-		return -1;
-	buf[n] = 0;
-	return strstr(buf, dev) != NULL;
+	buf[total] = 0;
+	snprintf(line, sizeof(line), "\t%s\n", dev);
+	for (const char *at = buf; (at = strstr(at, line)); at += strlen(line))
+		count++;
+	return count;
+}
+
+/* --- a stream whose buffers are dma-bufs of their own --- */
+
+struct own {
+	int fd;
+	uint64_t addr;
+	uint8_t *cpu;
+};
+
+static struct own own_make(const char *heap)
+{
+	int h = open(heap, O_RDONLY | O_CLOEXEC);
+	struct dma_heap_allocation_data alloc = { .len = BUFFER_BYTES, .fd_flags = O_RDWR | O_CLOEXEC };
+	struct own o = { .fd = -1 };
+
+	if (h < 0 || ioctl(h, DMA_HEAP_IOCTL_ALLOC, &alloc)) {
+		if (h >= 0)
+			close(h);
+		return o;
+	}
+	close(h);
+	o.fd = (int)alloc.fd;
+	o.cpu = mmap(NULL, BUFFER_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, o.fd, 0);
+	if (o.cpu == MAP_FAILED) {
+		close(o.fd);
+		o.fd = -1;
+	} else {
+		memset(o.cpu, 0, BUFFER_BYTES);
+	}
+	return o;
+}
+
+static void own_drop(struct own *o)
+{
+	if (o->fd < 0)
+		return;
+	munmap(o->cpu, BUFFER_BYTES);
+	close(o->fd);
+	o->fd = -1;
+}
+
+/* Gives buffer `b` the memory `o`, and learns its device address. */
+static int own_set(const struct stream *s, uint32_t b, struct own *o)
+{
+	struct lemnos_stream_buffer a = { .buffer = b, .fd = o->fd };
+
+	if (ioctl(s->fd, LEMNOS_STREAM_IOC_BUFFER, &a))
+		return -errno;
+	o->addr = a.addr;
+	return 0;
+}
+
+static uint64_t armed_addr(void)
+{
+	struct tcsi_regs r = peek();
+
+	return (uint64_t)r.addr1 << 36 | (uint64_t)r.addr0 << 4;
+}
+
+static void test_own_buffers(const char *heap, const char *dev)
+{
+	struct stream s;
+	struct frame f, f1;
+	struct lemnos_rp1_csi2_start a;
+	struct own o[BUFFERS], fresh;
+	uint64_t ms;
+	int before = bufinfo_attached(dev);
+
+	for (uint32_t i = 0; i < BUFFERS; i++)
+		o[i] = own_make(heap);
+	fresh = own_make(heap);
+	CHECK(o[0].fd >= 0 && o[1].fd >= 0 && o[2].fd >= 0 && o[3].fd >= 0 && fresh.fd >= 0,
+	      "own buffers: five dma-bufs");
+	CHECK(!stream_open(&s, -1) && s.pool_addr == 0, "a stream with no pool on the receiver");
+
+	/* Started with no buffer having memory: nothing is armed and frames are dropped. */
+	a = good_start(s.fd);
+	CHECK(!start(&a), "START with no buffer having memory");
+	CHECK(armed_addr() == 0, "no address reaches the channel (%llx)",
+	      (unsigned long long)armed_addr());
+	fire(TCSI_FS);
+	fire(TCSI_FE_ACK);
+	CHECK(info().dropped == 1 && !pop_frame(&s, &f) && armed_addr() == 0,
+	      "a frame with nowhere to go is dropped, and nothing is armed");
+
+	/* Memory arrives: the next frame start arms it, at its own address. */
+	CHECK(!own_set(&s, 0, &o[0]) && !own_set(&s, 1, &o[1]), "buffers 0 and 1 get memory");
+	CHECK(o[0].addr && o[1].addr && o[0].addr != o[1].addr, "each at an address of its own");
+	fire(TCSI_FS);
+	CHECK(armed_addr() == o[0].addr, "buffer 0's own dma-buf is armed (%llx, its %llx)",
+	      (unsigned long long)armed_addr(), (unsigned long long)o[0].addr);
+	fire(TCSI_FE_ACK);
+	fire(TCSI_FS);
+	CHECK(armed_addr() == o[1].addr, "then buffer 1's (%llx, its %llx)",
+	      (unsigned long long)armed_addr(), (unsigned long long)o[1].addr);
+	/* Buffer 0 is being written and buffer 1 is armed: neither may change memory. */
+	CHECK(own_set(&s, 0, &fresh) == -EBUSY, "swapping the buffer being written: EBUSY");
+	CHECK(own_set(&s, 1, &fresh) == -EBUSY, "swapping the armed buffer: EBUSY");
+	fire(TCSI_FE_ACK);
+	CHECK(pop_frame(&s, &f) && f.buffer == 0 && f.bytes == F_SIZE, "the frame is buffer 0's");
+	CHECK(o[0].cpu[0] && o[0].cpu[F_SIZE - 1] == o[0].cpu[0] && !o[0].cpu[F_SIZE],
+	      "the channel wrote the frame into buffer 0's own dma-buf (byte %x)", o[0].cpu[0]);
+	CHECK(!o[1].cpu[0] && !o[2].cpu[0] && !fresh.cpu[0], "and into nothing else");
+
+	/* The consumer has buffer 0. It gets new memory, goes back, and is armed there. */
+	CHECK(!own_set(&s, 0, &fresh) && fresh.addr && fresh.addr != o[0].addr,
+	      "a buffer the consumer holds is given new memory");
+	memset(o[0].cpu, 0, BUFFER_BYTES);
+	give_back(&s, f.buffer, f.fence);
+	fire(TCSI_FS);
+	CHECK(armed_addr() == fresh.addr, "the returned buffer is armed at its new address (%llx, its %llx)",
+	      (unsigned long long)armed_addr(), (unsigned long long)fresh.addr);
+	fire(TCSI_FE_ACK);
+	CHECK(pop_frame(&s, &f1) && f1.buffer == 1 && o[1].cpu[0], "buffer 1's frame in its own memory");
+	fire(TCSI_FS);
+	fire(TCSI_FE_ACK);
+	CHECK(pop_frame(&s, &f) && f.buffer == 0 && fresh.cpu[0] && fresh.cpu[F_SIZE - 1] == fresh.cpu[0],
+	      "buffer 0's next frame is in its new memory (byte %x)", fresh.cpu[0]);
+	CHECK(!o[0].cpu[0] && !o[0].cpu[F_SIZE - 1], "and the memory it had is not written again");
+	CHECK(bufinfo_attached(dev) == before + 2, "two buffers pinned, the swapped one's old memory not");
+
+	/* Stopping with a frame in flight still waits for the DMA, and gives the buffers back. */
+	give_back(&s, 0, f.fence);
+	give_back(&s, 1, f1.fence);
+	fire(TCSI_FS);
+	ms = timed_stop(act_stop, NULL, 40);
+	CHECK(ms >= 30, "STOP waits for DMA on its own buffers (took %llu ms)", (unsigned long long)ms);
+	busy(0);
+	CHECK(!own_set(&s, 0, &o[0]) && !own_set(&s, 1, &o[1]) && !own_set(&s, 2, &o[2]) &&
+		      !own_set(&s, 3, &o[3]),
+	      "stopped: every buffer is free to take memory");
+	CHECK(!start(&a), "START again");
+	{
+		unsigned int seen = 0;
+
+		for (int n = 0; n < 5; n++) {
+			fire(TCSI_FS);
+			fire(TCSI_FE_ACK);
+			if (pop_frame(&s, &f) && f.buffer < BUFFERS && o[f.buffer].cpu[0])
+				seen |= 1u << f.buffer;
+		}
+		CHECK(seen == 0xf, "all four fill, each in its own dma-buf (%x)", seen);
+	}
+	fire(TCSI_FS);
+	ms = timed_stop(act_close_stream, &s, 30);
+	CHECK(ms >= 20, "closing it with a frame in flight waits for DMA (took %llu ms)",
+	      (unsigned long long)ms);
+	busy(0);
+	CHECK(!info().streaming, "and stops the receiver");
+	CHECK(bufinfo_attached(dev) == before, "closing released every buffer's pin");
+	for (uint32_t i = 0; i < BUFFERS; i++)
+		own_drop(&o[i]);
+	own_drop(&fresh);
 }
 
 static int make_pool(const char *heap_path)
@@ -687,6 +852,50 @@ static int run_wedge(const char *node, const char *dev, const char *heap)
 	return failures ? 1 : 0;
 }
 
+/* The same on a stream with no pool: each buffer's own dma-buf stays pinned, and none can be swapped. */
+static int run_wedge_own(const char *node, const char *dev, const char *heap)
+{
+	struct stream s;
+	struct lemnos_rp1_csi2_start a;
+	struct own o[2], fresh;
+	uint32_t forever = 0xffffffffu;
+	int before = bufinfo_attached(dev), fd;
+
+	ctl = open(node, O_RDWR | O_CLOEXEC);
+	hw = open("/dev/lemnos-test-csi2", O_RDWR | O_CLOEXEC);
+	o[0] = own_make(heap);
+	o[1] = own_make(heap);
+	fresh = own_make(heap);
+	CHECK(ctl >= 0 && hw >= 0 && o[0].fd >= 0 && o[1].fd >= 0 && fresh.fd >= 0,
+	      "wedge, own buffers: set up");
+	CHECK(!stream_open(&s, -1) && !own_set(&s, 0, &o[0]) && !own_set(&s, 1, &o[1]),
+	      "a stream with no pool, two buffers with memory");
+	a = good_start(s.fd);
+	CHECK(!start(&a), "START");
+	fire(TCSI_FS);
+	busy(forever);
+	CHECK(!stop(), "STOP returns, DMA never seen to stop");
+	busy(0);
+	CHECK(info().flags & LEMNOS_RP1_CSI2_INFO_WEDGED, "wedged is reported");
+	CHECK(own_set(&s, 0, &fresh) == -EIO && own_set(&s, 1, &fresh) == -EIO,
+	      "no buffer's memory can be swapped out from under a block that may be writing: EIO");
+	CHECK(own_set(&s, 2, &fresh) == -EIO, "and none is added: EIO");
+	stream_close(&s);
+	own_drop(&o[0]);
+	own_drop(&o[1]);
+	own_drop(&fresh);
+	sleep_ms(5);
+	CHECK(bufinfo_attached(dev) == before + 2,
+	      "both buffers' dma-bufs stay attached after every close (%d more)",
+	      bufinfo_attached(dev) - before);
+	fd = open("/sys/bus/platform/drivers/lemnos-rp1-csi2/unbind", O_WRONLY | O_CLOEXEC);
+	CHECK(fd >= 0 && write(fd, dev, strlen(dev)) == (ssize_t)strlen(dev), "unbound while wedged");
+	close(fd);
+	close(ctl);
+	close(hw);
+	return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *dev, *heap, *unbind, *block;
@@ -697,6 +906,10 @@ int main(int argc, char **argv)
 	if (argc == 5 && !strcmp(argv[1], "wedge")) {
 		snprintf(node, sizeof(node), "/dev/lemnos-rp1-csi2-%s", argv[2]);
 		return run_wedge(node, argv[2], argv[4]);
+	}
+	if (argc == 5 && !strcmp(argv[1], "wedge-own")) {
+		snprintf(node, sizeof(node), "/dev/lemnos-rp1-csi2-%s", argv[2]);
+		return run_wedge_own(node, argv[2], argv[4]);
 	}
 	if (argc != 6)
 		return 2;
@@ -723,6 +936,7 @@ int main(int argc, char **argv)
 	test_frames(pool_fd);
 	test_hostile_hw(pool_fd);
 	test_jobs(pool_fd);
+	test_own_buffers(heap, dev);
 	test_stop_waits(pool_fd);
 	test_close_node(node, pool_fd);
 	test_unbind(node, unbind, dev, pool_fd);

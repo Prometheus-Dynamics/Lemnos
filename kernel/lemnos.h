@@ -47,7 +47,9 @@
  * mapper the consumer. Everything in it is untrusted, so each word is read
  * once and checked against what the module holds. Buffers are at multiples of
  * the stride in the pool, the dma-buf named at creation, and consumers map
- * that dma-buf to read them. The module publishes frames, takes returned
+ * that dma-buf to read them; or, for a stream made with
+ * LEMNOS_STREAM_CREATE_BUFFERS, each buffer is a dma-buf of its own (see
+ * "Buffers of their own" below). The module publishes frames, takes returned
  * buffers (their fence must match), and takes jobs: a job says which buffer
  * the next frame fills and which device-address ranges the block may use for
  * it, as struct lemnos_stream_job. Any range outside the job's buffer or the
@@ -68,13 +70,43 @@
  * - LEMNOS_STREAM_IOC_UNREGISTER: release one; refused (EBUSY) while a job
  *   uses it.
  * - LEMNOS_STREAM_IOC_STATUS: how the stream is doing.
+ * - LEMNOS_STREAM_IOC_BUFFER: gives one buffer its dma-buf, on a stream made
+ *   with LEMNOS_STREAM_CREATE_BUFFERS.
+ *
+ * Buffers of their own. A stream made with LEMNOS_STREAM_CREATE_BUFFERS has no
+ * pool (pool_fd is -1, at most LEMNOS_STREAM_MAX_OWN_BUFFERS buffers): it is
+ * for a consumer whose frame memory already exists as one dma-buf per buffer,
+ * so the block writes where that memory's reader will look. Every buffer
+ * starts with no memory, and one without memory is never filled: no frame
+ * takes it, and a job naming it is refused (EFAULT). LEMNOS_STREAM_IOC_BUFFER
+ * gives buffer n a dma-buf, pinned and mapped for the block exactly as a pool
+ * is, and from then on buffer n's device address is that dma-buf's start; only
+ * its first buffer_bytes are reachable, however big it is. Called again for a
+ * buffer that has memory, it swaps the memory: the old dma-buf is unpinned
+ * and the new one takes its place, with the buffer's state and fence as they
+ * were. That is allowed whenever the block can't be writing the buffer: while
+ * it is free or with the consumer. Naming the dma-buf the buffer already has
+ * changes nothing and succeeds, which is how a consumer asks whether buffer n
+ * is still the memory it thinks it is. Everything else about the stream is the
+ * same: the ring, jobs, registered dma-bufs, and the end of the stream, which
+ * unpins every buffer (or none, if the block's DMA could not be seen to stop).
+ *
+ * LEMNOS_STREAM_IOC_BUFFER's refusals, none of which ends the stream:
+ *   EOPNOTSUPP the stream has a pool
+ *   EINVAL     buffer number too large; not a dma-buf; not contiguous for the
+ *              block; smaller than buffer_bytes; not aligned for the block
+ *   EBADF      not an open file
+ *   EBUSY      a job names the buffer or the block is filling it; or the
+ *              dma-buf is another buffer's or registered, or overlaps one
+ *   EIO        the block's DMA could not be seen to stop: nothing changes hands
+ *   ENODEV     the stream is over
  *
  * A job's refusals (the errno of KICK and of STATUS.fault):
  *   EINVAL     buffer number too large, zero length, unknown count, non-zero spare
  *   EMSGSIZE   a job length other than sizeof(struct lemnos_stream_job)
  *   ERANGE     a ring head or tail that can't be (more than the capacity away)
  *   EOVERFLOW  addr + len wraps
- *   EFAULT     a range outside every registered region
+ *   EFAULT     a range outside every registered region; a buffer with no memory yet
  *   EACCES     a range in another buffer of the pool, or a buffer the consumer holds
  *   EBUSY      the buffer is already posted (double posting)
  *   EPERM      a returned buffer that isn't out, or with the wrong fence
@@ -205,6 +237,8 @@ struct lemnos_claim {
 #define LEMNOS_STREAM_MAX_JOB_BYTES	4096u
 #define LEMNOS_STREAM_BUFFER_ALIGN	4096u
 #define LEMNOS_STREAM_FRAME_WORDS	5
+/* Buffers a stream made with LEMNOS_STREAM_CREATE_BUFFERS may have. */
+#define LEMNOS_STREAM_MAX_OWN_BUFFERS	64u
 #define LEMNOS_STREAM_JOB_RANGES	4
 
 /* Words from the start of the ring. Host-endian on every target, which is little. */
@@ -230,15 +264,21 @@ struct lemnos_claim {
 #define LEMNOS_RING_STATE_CLOSED	1ull
 #define LEMNOS_RING_STATE_FAULT		2ull
 
+/*
+ * lemnos_stream_create.flags: no pool. Each buffer is a dma-buf of its own,
+ * given with LEMNOS_STREAM_IOC_BUFFER; pool_fd must be -1 and pool_addr reads 0.
+ */
+#define LEMNOS_STREAM_CREATE_BUFFERS	(1u << 0)
+
 struct lemnos_stream_create {
 	__u32 block;		/* in */
-	__u32 flags;		/* in: zero */
+	__u32 flags;		/* in: LEMNOS_STREAM_CREATE_* */
 	__u32 buffers;		/* in: up to LEMNOS_STREAM_MAX_BUFFERS */
 	__u32 buffer_bytes;	/* in: up to LEMNOS_STREAM_MAX_BUFFER_BYTES */
 	__u32 frame_slots;	/* in: a power of two, at least buffers */
 	__u32 job_slots;	/* in: a power of two, up to LEMNOS_STREAM_MAX_JOB_SLOTS */
 	__u32 job_bytes;	/* in: at least sizeof(struct lemnos_stream_job) */
-	__s32 pool_fd;		/* in: a dma-buf holding buffers * stride bytes */
+	__s32 pool_fd;		/* in: a dma-buf holding buffers * stride bytes; -1 without a pool */
 	__s32 doorbell_fd;	/* in: an eventfd, or -1 */
 	__s32 fd;		/* out: the stream, close-on-exec */
 	__u64 ring_bytes;	/* out: what to mmap() */
@@ -271,6 +311,14 @@ struct lemnos_stream_unregister {
 	__u32 reserved;
 };
 
+/* One buffer's memory, on a stream made with LEMNOS_STREAM_CREATE_BUFFERS. */
+struct lemnos_stream_buffer {
+	__u32 buffer;		/* in: below the stream's buffers */
+	__s32 fd;		/* in: a dma-buf of at least buffer_bytes, kept pinned */
+	__u64 addr;		/* out: the buffer's device address */
+	__u64 size;		/* out: bytes of it the block may reach: buffer_bytes */
+};
+
 struct lemnos_stream_status {
 	__u32 state;		/* LEMNOS_RING_STATE_*, held in the kernel */
 	__s32 fault;		/* the errno that ended it, or 0 */
@@ -294,6 +342,7 @@ struct lemnos_stream_test_source {
 #define LEMNOS_STREAM_IOC_UNREGISTER   _IOW('L', 0x83, struct lemnos_stream_unregister)
 #define LEMNOS_STREAM_IOC_STATUS       _IOR('L', 0x84, struct lemnos_stream_status)
 #define LEMNOS_STREAM_IOC_TEST_SOURCE  _IOW('L', 0x85, struct lemnos_stream_test_source)
+#define LEMNOS_STREAM_IOC_BUFFER       _IOWR('L', 0x86, struct lemnos_stream_buffer)
 
 #define LEMNOS_BUS_MAX_SEGMENTS 16
 
