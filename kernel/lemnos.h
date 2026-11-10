@@ -95,6 +95,12 @@
  * claim, and read() and poll() on that file give a line's edges. Closing the
  * claim lets go of the line or channel and leaves its output as it was.
  *
+ * PIO, on a kernel that has the RP1 PIO driver, belongs to a claim on "pio-0".
+ * LEMNOS_IOC_PIO_OPEN binds a client to the claim and LEMNOS_IOC_PIO_CALL runs
+ * one allowed operation; closing the claim ends the client, which frees its
+ * state machines and programs. Raw register access isn't offered. DMA data
+ * goes through kernel buffers the module owns, so no caller names an address.
+ *
  * Copyright (c) 2026 the Lemnos authors.
  */
 #ifndef _UAPI_LEMNOS_H
@@ -384,6 +390,75 @@ struct lemnos_thermal_watch {
 	__u32 period_ms;	/* in */
 	__u32 watch;		/* out: the event's index */
 };
+
+/* LEMNOS_PIO_* : each one's args are the same-named rp1_pio_*_args from rp1_pio_if.h. */
+enum lemnos_pio_op {
+	LEMNOS_PIO_ADD_PROGRAM,
+	LEMNOS_PIO_REMOVE_PROGRAM,
+	LEMNOS_PIO_SM_CLAIM,
+	LEMNOS_PIO_SM_UNCLAIM,
+	LEMNOS_PIO_SM_INIT,
+	LEMNOS_PIO_SM_SET_CONFIG,
+	LEMNOS_PIO_SM_EXEC,
+	LEMNOS_PIO_SM_CLEAR_FIFOS,
+	LEMNOS_PIO_SM_SET_CLKDIV,
+	LEMNOS_PIO_SM_SET_PINS,
+	LEMNOS_PIO_SM_SET_PINDIRS,
+	LEMNOS_PIO_SM_SET_ENABLED,
+	LEMNOS_PIO_SM_RESTART,
+	LEMNOS_PIO_SM_PUT,
+	LEMNOS_PIO_SM_GET,
+	LEMNOS_PIO_SM_FIFO_STATE,
+	LEMNOS_PIO_SM_DRAIN_TX,
+	LEMNOS_PIO_SM_GET_FLAGS,
+	LEMNOS_PIO_GPIO_INIT,
+	LEMNOS_PIO_GPIO_SET_FUNCTION,
+	LEMNOS_PIO_GPIO_SET_PULLS,
+	LEMNOS_PIO_GPIO_SET_OUTOVER,
+	LEMNOS_PIO_GPIO_SET_INPUT_ENABLED,
+	LEMNOS_PIO_OP_COUNT,
+};
+
+#define LEMNOS_PIO_ARGS 72
+#define LEMNOS_PIO_TO_SM 0
+#define LEMNOS_PIO_FROM_SM 1
+
+struct lemnos_pio_open {
+	__s32 claim;		/* a claim on "pio-0" */
+};
+
+struct lemnos_pio_call {
+	__s32 claim;
+	__u32 op;		/* enum lemnos_pio_op */
+	__s64 result;		/* out: the operation's return value */
+	__u8 args[LEMNOS_PIO_ARGS];	/* in, out */
+};
+
+/* Sets a machine's DMA up. Bytes per buffer, at most 256 KiB, and how many buffers. */
+struct lemnos_pio_config_xfer {
+	__s32 claim;
+	__u32 sm;
+	__u32 dir;		/* LEMNOS_PIO_TO_SM or LEMNOS_PIO_FROM_SM */
+	__u32 buf_size;
+	__u32 buf_count;
+	__u32 reserved;
+};
+
+/* Moves `len` bytes, split into buf_size pieces. Returns when all have moved. */
+struct lemnos_pio_xfer {
+	__s32 claim;
+	__u32 sm;
+	__u32 dir;
+	__u32 len;
+	__u64 data;		/* user pointer */
+	__u32 timeout_ms;	/* 0: one second */
+	__u32 reserved;
+};
+
+#define LEMNOS_IOC_PIO_OPEN   _IOW('L', 0x90, struct lemnos_pio_open)
+#define LEMNOS_IOC_PIO_CALL   _IOWR('L', 0x91, struct lemnos_pio_call)
+#define LEMNOS_IOC_PIO_CONFIG_XFER _IOW('L', 0x92, struct lemnos_pio_config_xfer)
+#define LEMNOS_IOC_PIO_XFER   _IOW('L', 0x93, struct lemnos_pio_xfer)
 
 #define LEMNOS_IOC_THERMAL_READ _IOWR('L', 0xa0, struct lemnos_thermal)
 #define LEMNOS_IOC_THERMAL_WATCH _IOWR('L', 0xa1, struct lemnos_thermal_watch)

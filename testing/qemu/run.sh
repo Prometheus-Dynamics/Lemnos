@@ -23,15 +23,19 @@ trap 'rm -rf -- "$work"' EXIT
 # Copies, so the build leaves nothing in the source tree.
 cp -r "$repo/kernel" "$work/kernel"
 cp -r "$here/test_block" "$work/test_block"
-make -s -j"$JOBS" -C "$KDIR" M="$work/kernel" modules
+cp -r "$here/mock_rp1" "$work/mock_rp1"
 make -s -j"$JOBS" -C "$KDIR" M="$work/test_block" modules
+# The real PIO driver only exists on one family of boards, so this guest gets a stand-in for it.
+make -s -j"$JOBS" -C "$KDIR" M="$work/mock_rp1" LEMNOS_MOCK_RP1=1 modules
+make -s -j"$JOBS" -C "$KDIR" M="$work/kernel" CONFIG_RP1_PIO=m \
+  LEMNOS_EXTRA_CFLAGS="-I$work/mock_rp1" KBUILD_EXTRA_SYMBOLS="$work/mock_rp1/Module.symvers" modules
 
 root="$work/root"
 mkdir -p "$root"/{dev,proc,sys}
 flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter -I"$work/test_block")
 read -r -a compiler <<<"$CC"
 "${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init.c"
-for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_bus_check lemnos_gpio_check lemnos_power_check lemnos_stream_check lemnos_rp1_csi2_check; do
+for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_bus_check lemnos_gpio_check lemnos_power_check lemnos_pio_check lemnos_stream_check lemnos_rp1_csi2_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
 # Its uAPI header is the kernel's own.
@@ -41,7 +45,7 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   "$work/kernel/test/lemnos_pisp_be_check.c"
 "${compiler[@]}" "${flags[@]}" -I"$source" -o "$root/lemnos_pisp_fe_check" \
   "$work/kernel/test/lemnos_pisp_fe_check.c"
-cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$root/"
+cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim may be built in instead, and then there's no file to bring.
 # Installed modules only fit this machine's kernel, so they're only looked at when that's what boots.

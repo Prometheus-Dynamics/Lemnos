@@ -563,6 +563,10 @@ union lem_args {
 	struct lemnos_power power;
 	struct lemnos_thermal thermal;
 	struct lemnos_thermal_watch thermal_watch;
+	struct lemnos_pio_open pio_open;
+	struct lemnos_pio_call pio_call;
+	struct lemnos_pio_config_xfer pio_config;
+	struct lemnos_pio_xfer pio_xfer;
 };
 
 static long lem_next(struct lemnos_next *n)
@@ -649,6 +653,14 @@ static long lem_unit_request(unsigned int cmd, union lem_args *u)
 		return lem_pwm_apply(&u->pwm_state);
 	case LEMNOS_IOC_PWM_GET:
 		return lem_pwm_get(&u->pwm_state);
+	case LEMNOS_IOC_PIO_OPEN:
+		return lem_pio_open(&u->pio_open);
+	case LEMNOS_IOC_PIO_CALL:
+		return lem_pio_call(&u->pio_call);
+	case LEMNOS_IOC_PIO_CONFIG_XFER:
+		return lem_pio_config_xfer(&u->pio_config);
+	case LEMNOS_IOC_PIO_XFER:
+		return lem_pio_xfer(&u->pio_xfer);
 	case LEMNOS_IOC_THERMAL_READ:
 		return lem_thermal_read(&u->thermal);
 	case LEMNOS_IOC_THERMAL_WATCH:

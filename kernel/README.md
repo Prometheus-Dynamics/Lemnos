@@ -175,6 +175,13 @@ bound and unbound, supply faults, and temperature limits crossed. Interrupts can
 other kinds carry a sequence number, so a gap shows a loss from a full queue. The stream starts
 empty at open, and watches end on close.
 
+## PIO
+
+On a kernel with the RP1 PIO driver, a claim on `pio-0` carries a driver client and a table of allowed
+operations. The driver's raw register calls aren't in the table. DMA data goes through kernel
+buffers, so no caller names an address. Closing the claim ends the client, which frees its state
+machines and programs.
+
 ## Unbinding
 
 Requests for a block fail with `ENODEV` from the moment its unbind starts, its register mappings

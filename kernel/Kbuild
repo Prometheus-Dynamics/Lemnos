@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0
 
 ccflags-y := -Werror
+# Set by the test harness, to build the PIO file against a stand-in for the driver.
+ccflags-y += $(LEMNOS_EXTRA_CFLAGS)
 
 obj-m += lemnos.o
 lemnos-y := lemnos_core.o lemnos_claims.o lemnos_stream.o lemnos_rp1_csi2.o lemnos_pisp_be.o lemnos_pisp_fe.o lemnos_bus.o lemnos_gpio.o lemnos_pwm.o lemnos_power.o lemnos_events.o
+# The PIO file only exists for a kernel that has the RP1 PIO driver, built in or as a module.
+ifneq ($(CONFIG_RP1_PIO),)
+ccflags-y += -DLEMNOS_HAVE_PIO
+lemnos-y += lemnos_pio.o
+endif
