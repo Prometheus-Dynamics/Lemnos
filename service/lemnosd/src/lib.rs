@@ -3,7 +3,8 @@
 //! device.
 //!
 //! One thread polls the socket and every client. The readers thread runs
-//! subscriptions, and one more keeps devices retrying.
+//! subscriptions, and one more keeps devices retrying. A backend that can say
+//! when hardware comes and goes gets a thread too: see [`Service::watch`].
 
 pub mod builtin;
 mod clock;
@@ -25,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use lemnos_core::Provider;
+use lemnos_core::{HintSource, Provider};
 use lemnos_host::board::BoardFile;
 use lemnos_host::{DriverEntry, Host, HostError, Options};
 
@@ -42,6 +43,8 @@ pub const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 pub const DEFAULT_BOARD: &str = "/etc/lemnos/board.toml";
 
 const SOCKET_MODE: u32 = 0o660;
+/// The longest a hint source is left waiting before the service looks whether it is stopping.
+const WATCH_WAIT: Duration = Duration::from_millis(250);
 
 pub(crate) fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -227,6 +230,22 @@ impl Service {
     #[must_use]
     pub fn host(&self) -> &Host {
         &self.core.host
+    }
+
+    /// Has the host hear `source`'s hints that hardware came or went, on a thread of its own,
+    /// until the service stops or the source ends. Without one, a device that is absent binds
+    /// when its retry comes round and no sooner.
+    pub fn watch(&mut self, mut source: Box<dyn HintSource>) -> io::Result<()> {
+        let core = Arc::clone(&self.core);
+        let thread = thread::Builder::new()
+            .name("lemnosd-hotplug".to_string())
+            .spawn(move || {
+                while !core.stopping() && source.wait(WATCH_WAIT, &mut |hint| core.host.hint(hint))
+                {
+                }
+            })?;
+        self.threads.push(thread);
+        Ok(())
     }
 
     /// Lets everything go. Clients see the socket close.

@@ -230,7 +230,7 @@ impl Table {
             return Health::Failed("missing");
         };
         let own = entry.health();
-        if depth == 0 || matches!(own, Health::Failed(_)) {
+        if depth == 0 || matches!(own, Health::Failed(_) | Health::Gone(_)) {
             return own;
         }
         let mut combined = own;
@@ -244,8 +244,12 @@ impl Table {
                 None => Health::Failed("missing"),
             };
             match (child, need.optional) {
-                (Health::Failed(_), false) => return Health::Failed("a required device failed"),
-                (Health::Failed(_), true) if used.is_some() && combined == Health::Ok => {
+                (Health::Failed(_) | Health::Gone(_), false) => {
+                    return Health::Failed("a required device failed");
+                }
+                (Health::Failed(_) | Health::Gone(_), true)
+                    if used.is_some() && combined == Health::Ok =>
+                {
                     combined = Health::Degraded("an optional device is missing");
                 }
                 (Health::Degraded(why), _) if combined == Health::Ok => {

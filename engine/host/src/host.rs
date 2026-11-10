@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
-    CallerId, ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, HostClock,
-    I2c, InterruptHandle, ItemKind, Line, LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm,
-    RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Spi, Status,
-    StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    CallerId, ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, Hint,
+    HostClock, I2c, InterruptHandle, ItemKind, Line, LocalCaller, Manifest, MethodId, NeedKind,
+    Provider, Pwm, RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Spi,
+    Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 
 use crate::Options;
@@ -146,6 +146,16 @@ struct Slot {
     missing: Mutex<Vec<String>>,
     /// When the driver next wants a tick. [`NO_TICK`] when it doesn't.
     next_tick_ns: AtomicU64,
+    /// When a bind was last tried. A hint never brings on another sooner than
+    /// [`Options::hint_gap`] after it.
+    tried_ns: AtomicU64,
+    /// When the driver last bound.
+    bound_ns: AtomicU64,
+    /// Runs in a row that ended sooner than the retry cap after their bind. A driver that fails
+    /// straight after each bind waits longer each time, as a bind that fails does.
+    short_runs: AtomicU32,
+    /// A hint has named this running device and its driver has not been ticked since.
+    hinted: AtomicBool,
 }
 
 const NO_TICK: u64 = u64::MAX;
@@ -165,6 +175,11 @@ impl Slot {
 
     fn tracks_callers(&self) -> bool {
         self.entry.is_some_and(|entry| entry.tracks_callers)
+    }
+
+    /// Whether the board entry names `name` as its bus or as something it uses.
+    fn names(&self, name: &str) -> bool {
+        self.spec.bus.as_deref() == Some(name) || self.spec.uses.values().any(|used| used == name)
     }
 
     fn contract_index(&self, tag: Tag) -> Option<u8> {
@@ -251,6 +266,14 @@ fn counts_as_gone(status: Status) -> bool {
     status == Status::IO || status == Status::NO_DEVICE || status == Status::TIMED_OUT
 }
 
+/// Why the driver wants to be bound again, if it says what it was bound with is dead.
+fn asks_rebind(instance: &dyn Instance) -> Option<&'static str> {
+    match instance.health() {
+        Health::Gone(reason) => Some(reason),
+        _ => None,
+    }
+}
+
 impl Inner {
     fn slot(&self, index: u32) -> Option<Arc<Slot>> {
         self.slots
@@ -277,15 +300,102 @@ impl Inner {
     }
 
     /// The device stopped working: let go of it and schedule a retry.
+    ///
+    /// The wait starts again from the shortest only once a driver has run for as long as the
+    /// retry cap. One that fails sooner than that after each bind waits twice as long each time,
+    /// up to the cap, so no driver can keep the host binding it.
     fn fault(&self, slot: &Slot, reason: &str) {
         let mut state = lock(&slot.state);
         let attempts = match &*state {
             DeviceState::Off(_) => return,
             DeviceState::Backoff { attempts, .. } => *attempts,
-            DeviceState::Running => 0,
+            DeviceState::Running => {
+                let ran = self
+                    .clock
+                    .now_ns()
+                    .saturating_sub(slot.bound_ns.load(Ordering::Acquire));
+                if u128::from(ran) < self.options.retry_cap.as_nanos() {
+                    slot.short_runs.fetch_add(1, Ordering::AcqRel)
+                } else {
+                    slot.short_runs.store(0, Ordering::Release);
+                    0
+                }
+            }
         };
         *state = self.next_state(attempts, reason);
         self.changes.fetch_add(1, Ordering::Release);
+    }
+
+    /// Lets go of a driver that is not in a call, outside its lock, with a panic in its drop
+    /// contained.
+    fn let_go(mut guard: MutexGuard<'_, Option<Box<dyn Instance>>>) {
+        let dead = guard.take();
+        drop(guard);
+        drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
+    }
+
+    fn wake(&self) {
+        if let Some(waker) = self.waker.get() {
+            waker();
+        }
+    }
+
+    /// Brings a waiting device's next bind forward to now, or to [`Options::hint_gap`] after its
+    /// last one if that is later. Never moves it later. Allocates nothing.
+    fn bring_forward(&self, slot: &Slot) -> bool {
+        let mut state = lock(&slot.state);
+        let DeviceState::Backoff { next_retry_ns, .. } = &mut *state else {
+            return false;
+        };
+        let gap = self.options.hint_gap.as_nanos() as u64;
+        let soonest = slot
+            .tried_ns
+            .load(Ordering::Acquire)
+            .saturating_add(gap)
+            .max(self.clock.now_ns());
+        if soonest >= *next_retry_ns {
+            return false;
+        }
+        *next_retry_ns = soonest;
+        drop(state);
+        self.changes.fetch_add(1, Ordering::Release);
+        true
+    }
+
+    /// Acts on a hint for one device it names: a waiting one is tried sooner, and a running one
+    /// that ticks is ticked now, so its driver can look at what it holds.
+    fn hinted(&self, slot: &Slot) -> bool {
+        if slot.ticks() && slot.is_running() {
+            slot.hinted.store(true, Ordering::Release);
+            self.set_next_tick(slot, Some(0));
+        }
+        self.bring_forward(slot)
+    }
+
+    /// The driver says what it was bound with is dead: let go of it and bind it again under
+    /// the failure rule. If a hint is what made it look, the hardware may already be back, so
+    /// the bind is brought forward as the hint would have brought it.
+    fn rebind(&self, slot: &Slot, guard: MutexGuard<'_, Option<Box<dyn Instance>>>, why: &str) {
+        Self::let_go(guard);
+        self.fault(slot, why);
+        if slot.hinted.swap(false, Ordering::AcqRel) {
+            self.bring_forward(slot);
+        }
+    }
+
+    /// A device came up: whatever was waiting to use it is tried now, not when its wait ends.
+    fn bring_users_forward(&self, id: &str) {
+        let mut index = 0;
+        let mut any = false;
+        while let Some(user) = self.slot(index) {
+            index += 1;
+            if user.spec.uses.values().any(|used| used == id) {
+                any |= self.bring_forward(&user);
+            }
+        }
+        if any {
+            self.wake();
+        }
     }
 
     fn next_state(&self, attempts: u32, reason: &str) -> DeviceState {
@@ -321,8 +431,16 @@ impl Inner {
             return;
         };
         let now = self.clock.now_ns();
-        match catch_unwind(AssertUnwindSafe(|| instance.tick(now))) {
-            Ok(next) => self.set_next_tick(slot, next),
+        let ticked = catch_unwind(AssertUnwindSafe(|| {
+            let next = instance.tick(now);
+            (next, asks_rebind(instance.as_ref()))
+        }));
+        match ticked {
+            Ok((next, None)) => {
+                slot.hinted.store(false, Ordering::Release);
+                self.set_next_tick(slot, next);
+            }
+            Ok((_, Some(reason))) => self.rebind(slot, guard, reason),
             Err(_) => {
                 let dead = guard.take();
                 drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
@@ -368,7 +486,7 @@ impl Inner {
         let guest = slot.spec.owner == Owner::Host;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             if guest && !only_reads(instance.as_ref(), method) {
-                return NOT_OURS;
+                return (NOT_OURS, None);
             }
             if tracks_callers {
                 instance.caller(caller);
@@ -377,10 +495,19 @@ impl Inner {
             if ticks {
                 self.set_next_tick(slot, instance.tick(self.clock.now_ns()));
             }
-            status
+            (status, asks_rebind(instance.as_ref()))
         }));
         let status = match outcome {
-            Ok(status) => status,
+            Ok((status, None)) => status,
+            // The call's own answer stands. The driver goes, and is bound again.
+            Ok((status, Some(reason))) => {
+                self.rebind(slot, guard, reason);
+                return if status.is_ok() {
+                    Ok(writer.len())
+                } else {
+                    Err(status)
+                };
+            }
             Err(_) => {
                 let dead = guard.take();
                 drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
@@ -441,11 +568,13 @@ impl Inner {
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 instance.caller_gone(caller);
-                target.ticks().then(|| instance.tick(self.clock.now_ns()))
+                let next = target.ticks().then(|| instance.tick(self.clock.now_ns()));
+                (next, asks_rebind(instance.as_ref()))
             }));
             match outcome {
-                Ok(Some(next)) => self.set_next_tick(&target, next),
-                Ok(None) => {}
+                Ok((_, Some(reason))) => self.rebind(&target, guard, reason),
+                Ok((Some(next), None)) => self.set_next_tick(&target, next),
+                Ok((None, None)) => {}
                 Err(_) => {
                     let dead = guard.take();
                     drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
@@ -488,6 +617,7 @@ impl Inner {
 
     /// Builds the driver, on its lane, inside the panic boundary.
     fn bind(&'static self, slot: Arc<Slot>) {
+        slot.tried_ns.store(self.clock.now_ns(), Ordering::Release);
         let Some(entry) = slot.entry else {
             let reason = format!("no driver named {:?}", slot.spec.driver);
             self.record_failed_bind(&slot, &reason);
@@ -540,11 +670,13 @@ impl Inner {
         match lane.run(&[], &mut [], self.options.call_deadline, work) {
             Ok(Ok(_)) => {
                 slot.errors.store(0, Ordering::Relaxed);
+                slot.bound_ns.store(self.clock.now_ns(), Ordering::Release);
                 *lock(&slot.state) = DeviceState::Running;
                 if slot.ticks() {
                     self.set_next_tick(&slot, Some(0));
                 }
                 self.changes.fetch_add(1, Ordering::Release);
+                self.bring_users_forward(&slot.spec.id);
             }
             Ok(Err(status)) => {
                 self.record_failed_bind(&slot, &format!("bind failed: {status:?}"));
@@ -589,7 +721,7 @@ impl Inner {
                 DeviceState::Off(_) => Health::Failed("off"),
             }
         };
-        if depth == 0 || matches!(own, Health::Failed(_)) {
+        if depth == 0 || matches!(own, Health::Failed(_) | Health::Gone(_)) {
             return own;
         }
         let Some(entry) = slot.entry else {
@@ -611,8 +743,10 @@ impl Inner {
             };
             let named = slot.spec.uses.contains_key(need.name);
             match (child_health, need.optional) {
-                (Health::Failed(_), false) => return Health::Failed("a required device failed"),
-                (Health::Failed(_), true) if named && combined == Health::Ok => {
+                (Health::Failed(_) | Health::Gone(_), false) => {
+                    return Health::Failed("a required device failed");
+                }
+                (Health::Failed(_) | Health::Gone(_), true) if named && combined == Health::Ok => {
                     combined = Health::Degraded("an optional device is missing");
                 }
                 (Health::Degraded(why), _) if combined == Health::Ok => {
@@ -828,6 +962,10 @@ impl Host {
                 errors: AtomicU32::new(0),
                 missing: Mutex::new(Vec::new()),
                 next_tick_ns: AtomicU64::new(NO_TICK),
+                tried_ns: AtomicU64::new(0),
+                bound_ns: AtomicU64::new(0),
+                short_runs: AtomicU32::new(0),
+                hinted: AtomicBool::new(false),
             }));
         }
 
@@ -1029,6 +1167,27 @@ impl Host {
         self.run_ticks();
     }
 
+    /// Takes a backend's word that hardware came or went. See [`Hint`].
+    ///
+    /// This only marks what is to be done and wakes whoever calls [`Host::tick`], which does it:
+    /// any number of hints before the next tick bring on one bind of a device, and never one
+    /// sooner than [`Options::hint_gap`] after its last. Callable from any thread. Allocates
+    /// nothing.
+    pub fn hint(&self, hint: Hint<'_>) {
+        let mut index = 0;
+        let mut any = false;
+        while let Some(slot) = self.inner.slot(index) {
+            index += 1;
+            any |= match hint {
+                Hint::Any => self.inner.hinted(&slot),
+                Hint::Changed(name) => slot.names(name) && self.inner.hinted(&slot),
+            };
+        }
+        if any {
+            self.inner.wake();
+        }
+    }
+
     /// Ticks every device whose time has come. Allocates nothing, so it can run on every wake.
     pub fn run_ticks(&self) {
         let now = self.inner.clock.now_ns();
@@ -1121,6 +1280,7 @@ impl Host {
     /// Switches a device on, whatever turned it off, and binds it now.
     pub fn on(&self, id: &str) -> core::result::Result<(), HostError> {
         let slot = self.require(id)?;
+        slot.short_runs.store(0, Ordering::Release);
         *lock(&slot.state) = DeviceState::Backoff {
             attempts: 0,
             next_retry_ns: 0,

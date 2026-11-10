@@ -12,7 +12,7 @@ use lemnos_hal::mock::{
 };
 
 use crate::faults::Release;
-use crate::{FaultScript, Faulty, SimClock, SimI2c, SimSpi};
+use crate::{FaultScript, Faulty, SimClock, SimHints, SimI2c, SimSpi};
 
 /// One way of wiring a resource.
 #[derive(Clone)]
@@ -52,6 +52,7 @@ struct Parts {
 pub struct SimBoard {
     state: Arc<Mutex<Parts>>,
     clock: SimClock,
+    hints: SimHints,
 }
 
 macro_rules! add {
@@ -89,14 +90,23 @@ impl SimBoard {
         f(&mut self.state.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
+    /// What this board says as resources are added and removed: a [`Hint`](lemnos_core::Hint)
+    /// for each, for a test to hand to the host, or to lose.
+    pub fn hints(&self) -> SimHints {
+        self.hints.clone()
+    }
+
     fn insert(&self, name: &str, part: Part) {
         let faults = FaultScript::on_clock(self.clock.clone());
         self.with(|s| s.parts.insert(name.to_string(), (part, faults)));
+        self.hints.push(name);
     }
 
-    /// Removes a resource, as unplugging a device does.
+    /// Removes a resource, as unplugging a device does. Whoever holds it keeps what they hold.
     pub fn remove(&self, name: &str) {
-        self.with(|s| s.parts.remove(name));
+        if self.with(|s| s.parts.remove(name)).is_some() {
+            self.hints.push(name);
+        }
     }
 
     /// The fault script of a named resource.

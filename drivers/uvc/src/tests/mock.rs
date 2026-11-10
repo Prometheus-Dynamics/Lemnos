@@ -85,6 +85,8 @@ pub struct DeviceState {
     pub detach_errors: VecDeque<ErrorKind>,
     /// The device has left: every call fails with `Unavailable`.
     pub gone: bool,
+    /// Requests made of the handle after the device had gone.
+    pub refused: u32,
     probe_block: Vec<u8>,
 }
 
@@ -121,8 +123,9 @@ impl MockUsb {
     }
 
     fn present(&self) -> Result<MutexGuard<'_, DeviceState>, ErrorKind> {
-        let device = self.state();
+        let mut device = self.state();
         if device.gone {
+            device.refused += 1;
             return Err(ErrorKind::Unavailable);
         }
         Ok(device)

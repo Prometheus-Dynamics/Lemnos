@@ -26,6 +26,15 @@ pub enum Health {
     /// Working, with something missing.
     Degraded(&'static str),
     Failed(&'static str),
+    /// What the driver was bound with is dead for good, and only a new bind can bring it back: a
+    /// handle to a device that was unplugged, say. The host drops the driver and binds it again
+    /// under the failure rule, as it does a bind that failed. A driver that can recover by itself
+    /// reports [`Health::Failed`] and keeps trying; this is for when it can't.
+    ///
+    /// The host looks after every method call and every tick, so a driver that only ticks can
+    /// ask too. Asking again straight after each bind is answered more and more slowly, up to the
+    /// retry cap.
+    Gone(&'static str),
 }
 
 /// Who is calling a driver. Numbers mean nothing except that one caller keeps its own for as long

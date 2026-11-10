@@ -26,6 +26,9 @@ pub struct Options {
     pub auto_off: Option<AutoOff>,
     /// Stack of each lane thread.
     pub lane_stack: usize,
+    /// The least time between two binds of one device that hints from the backend can bring
+    /// about, however many arrive.
+    pub hint_gap: Duration,
 }
 
 impl Default for Options {
@@ -37,6 +40,7 @@ impl Default for Options {
             error_limit: 5,
             auto_off: None,
             lane_stack: 256 * 1024,
+            hint_gap: Duration::from_millis(250),
         }
     }
 }

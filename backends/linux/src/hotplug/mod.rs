@@ -11,9 +11,13 @@
 //! - [`DeviceWatchSource::Rescan`]: no descriptor. Every read diffs a fresh sysfs walk against the
 //!   last one. For hosts where neither of the above is allowed.
 //!
+//! [`UsbHints`] turns a watcher's events into the hints a host takes: which of a board file's
+//! names may have changed.
+//!
 //! Events have the shape of the kernel's uevents. Coldplug and rescan events are synthesized in
 //! that shape, so one consumer parses all of them.
 
+mod hints;
 mod inotify;
 mod paths;
 mod sysfs;
@@ -22,6 +26,7 @@ mod uevent;
 #[cfg(test)]
 mod tests;
 
+pub use hints::{USB, UsbHints};
 pub use paths::LinuxPaths;
 pub use uevent::{Action, Uevent, UeventMsg, UeventRecv, UeventRef, UeventSocket};
 

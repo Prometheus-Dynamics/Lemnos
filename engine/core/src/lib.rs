@@ -36,9 +36,9 @@ pub use lemnos_abi::Status;
 pub use lemnos_hal::ErrorKind;
 pub use lemnos_macros::{Decode, Encode, contract, driver};
 pub use resources::{
-    BusKind, ClocksHandle, DmaHandle, Held, I2c, InterruptHandle, Line, Need, NeedKind, Provider,
-    Pwm, RawSpiBus, RegistersHandle, ResetHandle, Resource, Resources, Spi, StreamHandle, Uart,
-    UsbDeviceHandle, UsbFunctionHandle,
+    BusKind, ClocksHandle, DmaHandle, Held, Hint, HintSource, I2c, InterruptHandle, Line, Need,
+    NeedKind, Provider, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Resource, Resources, Spi,
+    StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 pub use tag::Tag;
 
