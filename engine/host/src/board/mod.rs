@@ -74,6 +74,18 @@ impl StreamSpec {
     }
 }
 
+/// Who owns a device's hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Owner {
+    /// Lemnos drives it.
+    #[default]
+    Lemnos,
+    /// The operating system's own driver does, and Lemnos is a guest on it: a call reaches the
+    /// driver only when the device's description says the method only reads.
+    Host,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoardInfo {
@@ -99,6 +111,9 @@ pub struct DeviceSpec {
     pub config: toml::Table,
     #[serde(default)]
     pub disabled: bool,
+    /// `"lemnos"` when left out.
+    #[serde(default)]
+    pub owner: Owner,
     /// The frame streams this device offers, by the name a consumer asks for and a driver needs.
     #[serde(default)]
     pub streams: BTreeMap<String, StreamSpec>,
@@ -208,6 +223,7 @@ mod tests {
         assert_eq!(device.bus.as_deref(), Some("i2c-cam0"));
         assert_eq!(device.link.as_deref(), Some("csi0"));
         assert!(device.disabled);
+        assert_eq!(device.owner, Owner::Lemnos);
         assert_eq!(device.uses["supply"], "rail");
         let config = device.owned_config().unwrap();
         assert!(config.contains(&("rate".to_string(), OwnedValue::Int(120))));
@@ -289,6 +305,24 @@ mod tests {
             with(text),
             Err(BoardError::Stream("a".to_string(), "out".to_string()))
         );
+    }
+
+    #[test]
+    fn owner_is_lemnos_or_host_and_anything_else_is_refused_by_name() {
+        let device =
+            |owner: &str| with(&format!("[[devices]]\nid = \"a\"\ndriver = \"x\"\n{owner}"));
+        assert_eq!(device("").unwrap().devices[0].owner, Owner::Lemnos);
+        assert_eq!(
+            device("owner = \"lemnos\"\n").unwrap().devices[0].owner,
+            Owner::Lemnos
+        );
+        assert_eq!(
+            device("owner = \"host\"\n").unwrap().devices[0].owner,
+            Owner::Host
+        );
+        let error = device("owner = \"guest\"\n").unwrap_err();
+        assert!(error.to_string().contains("guest"), "{error}");
+        assert!(error.to_string().contains("owner"), "{error}");
     }
 
     #[test]

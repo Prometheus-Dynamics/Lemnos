@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
     CallerId, ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, HostClock,
-    I2c, InterruptHandle, Line, LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm,
+    I2c, InterruptHandle, ItemKind, Line, LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm,
     RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Spi, Status,
     StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 
 use crate::Options;
-use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue};
+use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue, Owner};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
     HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamStats, Streams,
@@ -225,6 +225,28 @@ impl TickWork {
     }
 }
 
+/// What a call that would change a host-owned device gets.
+const NOT_OURS: Status = Status::NOT_PERMITTED;
+
+/// Whether `method` only reads, by the device's own description: an item names it as a value and
+/// none as a control or an action. A method the description doesn't name, or a description that
+/// overflowed, isn't known to only read. Allocates nothing.
+fn only_reads(instance: &dyn Instance, method: MethodId) -> bool {
+    let mut description = Description::new();
+    instance.describe(&mut description);
+    if description.dropped() > 0 {
+        return false;
+    }
+    let mut named = false;
+    for item in description.items().filter(|item| item.method == method) {
+        if item.kind != ItemKind::Value {
+            return false;
+        }
+        named = true;
+    }
+    named
+}
+
 fn counts_as_gone(status: Status) -> bool {
     status == Status::IO || status == Status::NO_DEVICE || status == Status::TIMED_OUT
 }
@@ -343,7 +365,11 @@ impl Inner {
         let mut writer = Reply::new(reply);
         let ticks = slot.ticks();
         let tracks_callers = slot.tracks_callers();
+        let guest = slot.spec.owner == Owner::Host;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
+            if guest && !only_reads(instance.as_ref(), method) {
+                return NOT_OURS;
+            }
             if tracks_callers {
                 instance.caller(caller);
             }
@@ -897,7 +923,9 @@ impl Host {
         Ok(out)
     }
 
-    /// Runs a method on a device's lane, and returns the reply's length.
+    /// Runs a method on a device's lane, and returns the reply's length. A device the board
+    /// marks `owner = "host"` runs only methods its description names as values; any other call
+    /// is `NOT_PERMITTED`, and so is one from another driver.
     pub fn call(
         &self,
         device: u32,

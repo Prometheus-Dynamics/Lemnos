@@ -1,0 +1,31 @@
+# A guest board: a machine whose operating system already drives its hardware through the stock
+# kernel drivers. Every device is host-owned, so Lemnos binds each driver read-only: a call reaches
+# a driver only when the device's description names the method as a value, and anything that would
+# change the hardware is refused with NOT_PERMITTED. Lemnos drives nothing here.
+
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "guest"
+
+# The SoC temperature, from the thermal zone's `temp` (millidegrees C).
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+owner = "host"
+config = { path = "/sys/class/thermal/thermal_zone0" }
+
+# The fan the kernel's thermal governor drives. Its duty and speed are read; `set_duty` and
+# `release` are refused, so the governor keeps it.
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+owner = "host"
+config = { name = "pwmfan" }
+
+# The clock facts: the kernel's clock source and whether an RTC set the clock at boot.
+[[devices]]
+id = "clock"
+driver = "host-clock"
+owner = "host"
