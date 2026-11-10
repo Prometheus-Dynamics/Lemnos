@@ -3,11 +3,10 @@
 //! the test's (it fills each capture mapping with the frame the test expects), so these check the
 //! route, not a unit's arithmetic; `tests/v4l2.rs` runs the same calls on the kernel's `vim2m`.
 
-use std::cell::RefCell;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use lemnos_driver_m2m_decode::{
     BufType, Capability, Dequeued, Event, Format, MAX_PLANES, Memory as QueueMemory, Node,
@@ -25,48 +24,53 @@ use super::*;
 
 /// What the device saw last on each side (output, capture).
 #[derive(Default)]
-struct Device {
-    multiplanar: bool,
-    opens: u32,
-    formats: [Option<Format>; 2],
-    crop: Option<V4l2Rect>,
+pub(crate) struct Device {
+    pub(crate) multiplanar: bool,
+    pub(crate) opens: u32,
+    pub(crate) formats: [Option<Format>; 2],
+    pub(crate) crop: Option<V4l2Rect>,
     /// The crop the device keeps instead of the one asked for.
-    crop_kept: Option<V4l2Rect>,
+    pub(crate) crop_kept: Option<V4l2Rect>,
     /// The control value the device keeps instead of the one asked for.
-    control_kept: Option<i32>,
-    controls: [(u32, i32); 4],
-    control_count: usize,
+    pub(crate) control_kept: Option<i32>,
+    pub(crate) controls: [(u32, i32); 4],
+    pub(crate) control_count: usize,
     /// The frame a capture mapping is filled with.
-    capture_fill: Vec<u8>,
+    pub(crate) capture_fill: Vec<u8>,
     /// What the device reports it wrote, when not the capture frame's size.
-    written: Option<u32>,
-    queued: [bool; 2],
+    pub(crate) written: Option<u32>,
+    pub(crate) queued: [bool; 2],
     /// The last queued plane on each side: bytes used, length, and the dma-buf descriptor.
-    planes: [(u32, u32, Option<i32>); 2],
+    pub(crate) planes: [(u32, u32, Option<i32>); 2],
+    /// Every queued buffer fails, as a device that has stopped answering.
+    pub(crate) fail: bool,
+    /// Buffers queued with a dma-buf, and with the device's own memory.
+    pub(crate) queued_dmabuf: u32,
+    pub(crate) queued_mmap: u32,
 }
 
 #[derive(Clone, Default)]
-struct Mock(Rc<RefCell<Device>>);
+pub(crate) struct Mock(Arc<Mutex<Device>>);
 
 impl Mock {
-    fn open(&self) -> io::Result<MockNode> {
-        self.0.borrow_mut().opens += 1;
+    pub(crate) fn open(&self) -> io::Result<MockNode> {
+        self.with(|d| d.opens += 1);
         Ok(MockNode(self.clone()))
     }
 
-    fn with<T>(&self, f: impl FnOnce(&mut Device) -> T) -> T {
-        f(&mut self.0.borrow_mut())
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&mut Device) -> T) -> T {
+        f(&mut self.0.lock().unwrap())
     }
 
-    fn rga(&self) -> M2mRga<MockNode> {
+    pub(crate) fn rga(&self) -> M2mRga<MockNode> {
         let me = self.clone();
         M2mRga::with_opener(move || me.open())
     }
 }
 
-struct MockNode(Mock);
+pub(crate) struct MockNode(Mock);
 
-struct MockMap(Box<[u8]>);
+pub(crate) struct MockMap(Box<[u8]>);
 
 impl PlaneMap for MockMap {
     fn bytes(&self) -> &[u8] {
@@ -173,6 +177,9 @@ impl Node for MockNode {
     }
 
     fn queue(&self, buffer: &Queued<'_, ()>) -> io::Result<()> {
+        if self.0.with(|d| d.fail) {
+            return Err(io::Error::from_raw_os_error(5));
+        }
         let plane = buffer.planes[0];
         let fd = match plane.memory {
             PlaneMemory::Mmap => None,
@@ -182,6 +189,10 @@ impl Node for MockNode {
             let s = side(buffer.buf_type);
             d.queued[s] = true;
             d.planes[s] = (plane.bytes_used, plane.length, fd);
+            match fd {
+                Some(_) => d.queued_dmabuf += 1,
+                None => d.queued_mmap += 1,
+            }
         });
         Ok(())
     }

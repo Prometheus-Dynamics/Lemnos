@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-contract-image-scaler = { path = "../../contracts/image-scaler" }
 lemnos-contract-image-blend = { path = "../../contracts/image-blend" }
 lemnos-contract-image-convert = { path = "../../contracts/image-convert" }
@@ -22,7 +23,10 @@ lemnos-driver-m2m-decode = { path = "../m2m-decode" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 
 [dev-dependencies]
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-host = { path = "../../engine/host" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-sim = { path = "../../backends/sim" }
 lemnos-wire = { path = "../../engine/wire" }
 
 [package.metadata.lemnos]

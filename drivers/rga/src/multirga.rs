@@ -15,6 +15,8 @@
 mod device;
 #[cfg(target_os = "linux")]
 pub use device::MultiRga;
+#[cfg(target_os = "linux")]
+pub(crate) use device::{Submit, blend_on, copy_on, gray_on};
 
 /// A pixel format of [`Image`], with the value of `RK_FORMAT_*` in `rga.h` (Apache-2.0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

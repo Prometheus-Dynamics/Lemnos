@@ -13,20 +13,42 @@
 //!   flips and turns, between dma-bufs only, each checked to hold its image.
 //! - [`cpu`]: every conversion between the [`PixelFormat`]s, area and bilinear resizes, blends,
 //!   and the per-pixel operations, as scalar loops with RISC-V vector rows on riscv64 Linux.
-//! - [`Rga`]: the driver, providing `image.scaler/1`, `image.convert/1` and `image.blend/1`, its
-//!   jobs run by [`jobs::Jobs`] on the CPU route.
+//! - [`Rga`]: the driver, providing `image.scaler/1`, `image.convert/1` and `image.blend/1`,
+//!   serving their job streams.
 //!
 //! No vendor library: nothing here links or loads one, and the block's work is the caller's.
 //!
 //! # The driver and its job streams
 //!
-//! [`Rga`] answers what the block takes (sizes, formats, conversions) and counts its jobs, but
-//! answers `job_stream` with `NOT_SUPPORTED`. A job's input is a buffer of the job stream that
-//! the consumer filled, and the producer's end of a stream (`StreamEndpoint`) gives a driver no
-//! way to read a buffer, nor its dma-buf for a unit to read: it can only publish, take returned
-//! buffers, read jobs, and write into buffers it holds. Until it can, the job path is
-//! [`jobs::Jobs`], which takes the buffers' bytes from whoever holds them; its tests run it over
-//! the frame stream's ring with the buffers in the test's hands.
+//! Each contract's jobs come on its own stream, the optional needs `scale`, `convert` and
+//! `blend` in the board file (`[devices.streams.scale]` and so on, `job_bytes` at least the
+//! contract's `JOB_BYTES`); `job_stream` answers the need's name, and `NOT_SUPPORTED` for a stream
+//! the board doesn't give. The driver ticks every millisecond while it has a stream, and takes up
+//! to [`serve::MAX_JOBS_PER_ROUND`] jobs from each per tick. A job names buffers of its stream;
+//! its completion is its output buffer published with the job's identity and the bytes written,
+//! 0 for a job refused. How buffers are held, everything a job is checked for, and what happens
+//! when a unit fails: [`serve`].
+//!
+//! Each job runs where [`caps::route_for`] sends it for the board's `soc`, when that unit's device
+//! is there and the stream can give it what it takes; otherwise on the CPU:
+//!
+//! | contract | route `caps` chooses | stream with dma-buf handles | stream without |
+//! |---|---|---|---|
+//! | `image.scaler/1` | mainline (area downscale, bilinear upscale) | the dma-bufs, or bytes if the device refuses them | bytes, copied through the driver |
+//! | `image.convert/1` | mainline (no gray) | the dma-bufs, or bytes if refused | bytes, copied |
+//! | `image.convert/1` | `/dev/rga` (gray to `AR24`/`XR24`, both packed) | the dma-bufs | CPU |
+//! | `image.blend/1` | `/dev/rga` (one stride for all three, whole pixels) | the dma-bufs: the background copied into the output, then the foreground blended onto it | CPU |
+//! | any | none | CPU | CPU |
+//!
+//! The mainline device is told the formats only, not `matrix`: where a conversion meets YUV, its
+//! matrix is the device's own, and how close it comes to the CPU's is unmeasured (see [`caps`]).
+//! The `/dev/rga` gray input is full-range BT.601, which repeats the byte as the CPU does.
+//!
+//! The CPU route reads each input once from the stream into the driver's memory and works only
+//! on that copy, since the consumer shares the buffers and can change them at any time; the
+//! result is written back with one copy. The driver's memory for this grows to the largest
+//! images it has held, which a stream's buffer bounds, and is kept, so jobs of sizes seen
+//! before allocate nothing.
 //!
 //! Settings come from the device's `config` in the board file:
 //!
@@ -34,16 +56,25 @@
 //! - `matrix`: `bt601-limited` (default), `bt601-full` or `bt709-limited`, for conversions
 //!   between RGB and YUV.
 //! - `sampling`: the bilinear phase, `centres` (default), `corners` or `origin`.
-//!
-//! The driver opens no device and keeps no state that can fail, so it has nothing to retry.
+//! - `soc`: `rk3566`, `rk3568`, `rk3576`, `rk3588`, `rk3562`, `rv1126b` or `k230d`, whose units
+//!   [`caps`] lists. Without it no device is opened and every job runs on the CPU. With it, a
+//!   unit's node is opened when a job first wants it; a node that isn't there is looked for again
+//!   after the same waits as a unit that failed.
 //!
 //! # Status
 //!
 //! Untested on board: the mainline route is tested on a played-back node (and on the kernel's
 //! `vim2m` where a test run turns it on), the `/dev/rga` route by the requests it builds, and
 //! the CPU route against a reference written per pixel from its definitions, on x86-64 and under
-//! qemu's riscv64 with V at VLEN 128, 256 and 512. The board checks are
-//! `testing/board-runs/E2.md`.
+//! qemu's riscv64 with V at VLEN 128, 256 and 512. The job streams are tested through the host's
+//! own stream, with sealed memfds standing in for dma-bufs and the played-back node and a
+//! request-recording stand-in for the units. The board checks are `testing/board-runs/E2.md`.
+//!
+//! Not delivered: the contracts fault the stream of a consumer that posts bytes that are no job,
+//! and the producer's end has no way to; such a job is counted as failed and dropped instead. On a
+//! stream without handles a consumer that leaves and another that comes between two ticks is not
+//! seen, so jobs of the second naming buffers held from the first complete into nothing (the
+//! producer's end can't say which consumer a held buffer was taken under unless it has handles).
 //!
 //! Provenance: ported from the dev branch (`crates/lemnos-drivers-rga`).
 
@@ -54,6 +85,7 @@ pub mod cpu;
 mod format;
 pub mod jobs;
 mod multirga;
+pub mod serve;
 // The shared checks serve the Linux routes only.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod resize;
@@ -74,10 +106,11 @@ pub use v4l2::{M2mRga, MAX_SESSIONS, find_m2m_device};
 use lemnos_contract_image_blend::{self as blend, BlendInfo, ImageBlend};
 use lemnos_contract_image_convert::{self as convert, ConversionPair, ConvertInfo, ImageConvert};
 use lemnos_contract_image_scaler::{self as scaler, ImageScaler, ScalerInfo};
-use lemnos_core::{Config, Lifecycle, Result, Status, driver};
+use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
 
 use cpu::{Matrix, Sampling};
-use jobs::{Jobs, Settings};
+use jobs::{Contract, Jobs, Settings};
+use serve::{Failure, Lane, Routes, Server};
 
 /// The route that serves `op` from `src` to `dst` on `soc` with the devices this system has:
 /// [`caps::route_for`], and the V4L2 route only when the `rockchip-rga` node exists. `None`
@@ -113,8 +146,29 @@ const BLEND_FORMATS: [PixelFormat; 1] = [PixelFormat::Abgr32];
 /// The 2D block as the image contracts.
 #[driver("rga", provides = [ImageScaler, ImageConvert, ImageBlend])]
 pub struct Rga {
-    jobs: Jobs,
+    /// `image.scaler/1` jobs.
+    #[needs(optional)]
+    scale: Option<StreamHandle>,
+    /// `image.convert/1` jobs.
+    #[needs(optional)]
+    convert: Option<StreamHandle>,
+    /// `image.blend/1` jobs.
+    #[needs(optional)]
+    blend: Option<StreamHandle>,
+    lanes: [Lane; 3],
+    server: Server,
 }
+
+/// The `soc` names of the config.
+const SOCS: [(&str, Option<caps::Soc>); 7] = [
+    ("rk3566", Some(caps::Soc::Rk3566)),
+    ("rk3568", Some(caps::Soc::Rk3568)),
+    ("rk3576", Some(caps::Soc::Rk3576)),
+    ("rk3588", Some(caps::Soc::Rk3588)),
+    ("rk3562", Some(caps::Soc::Rk3562)),
+    ("rv1126b", Some(caps::Soc::Rv1126b)),
+    ("k230d", Some(caps::Soc::K230d)),
+];
 
 /// `INVALID_ARGUMENT` unless `name` is one of `names`.
 fn choose<T: Copy>(name: Option<&str>, names: &[(&str, T)], default: T) -> Result<T> {
@@ -130,8 +184,9 @@ fn choose<T: Copy>(name: Option<&str>, names: &[(&str, T)], default: T) -> Resul
 
 impl Lifecycle for Rga {
     type Needs = RgaNeeds;
+    const TICKS: bool = true;
 
-    fn start(_needs: RgaNeeds, cfg: &Config<'_>) -> Result<Self> {
+    fn start(needs: RgaNeeds, cfg: &Config<'_>) -> Result<Self> {
         let side = |key| match cfg.int(key) {
             None => Ok(8192),
             Some(v) => u32::try_from(v)
@@ -161,22 +216,91 @@ impl Lifecycle for Rga {
                 Sampling::Centres,
             )?,
         };
-        Ok(Self::new(settings))
+        let soc = choose(cfg.str("soc"), &SOCS, None)?;
+        Ok(Self::serving(needs, settings, Routes::on_system(soc)))
+    }
+
+    fn health(&self) -> Health {
+        if self.server.routes().failing() {
+            Health::Degraded("a 2D unit failed: its jobs run on the CPU until it is reopened")
+        } else {
+            Health::Ok
+        }
+    }
+
+    /// Runs the jobs waiting on each stream. Again in a millisecond, or at once when a stream
+    /// had more than one round's jobs.
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let mut any = false;
+        let mut more = false;
+        let streams = [
+            (Contract::Scale, &mut self.scale),
+            (Contract::Convert, &mut self.convert),
+            (Contract::Blend, &mut self.blend),
+        ];
+        for ((contract, stream), lane) in streams.into_iter().zip(&mut self.lanes) {
+            let Some(stream) = stream.as_deref_mut() else {
+                continue;
+            };
+            any = true;
+            // A stream's error leaves its jobs where they are, for the next tick.
+            if let Ok(read) = self.server.serve(contract, stream, lane, now_ns) {
+                more |= read >= serve::MAX_JOBS_PER_ROUND;
+            }
+        }
+        any.then(|| {
+            if more {
+                now_ns
+            } else {
+                now_ns.saturating_add(serve::POLL_NS)
+            }
+        })
     }
 }
 
+/// The name a provided stream is opened by: its need's.
+fn stream_name(stream: Option<&StreamHandle>, name: &str, into: &mut [u8]) -> Result<usize> {
+    if stream.is_none() {
+        return Err(Status::NOT_SUPPORTED);
+    }
+    into.get_mut(..name.len())
+        .ok_or(Status::BUFFER_TOO_SMALL)?
+        .copy_from_slice(name.as_bytes());
+    Ok(name.len())
+}
+
 impl Rga {
-    /// The driver with `settings`, for a test or a host that builds it directly.
+    /// The driver with `settings`, no streams and no unit, for a test or a host that builds it
+    /// directly.
     #[must_use]
     pub fn new(settings: Settings) -> Self {
+        let needs = RgaNeeds {
+            scale: None,
+            convert: None,
+            blend: None,
+        };
+        Self::serving(needs, settings, Routes::cpu())
+    }
+
+    /// The driver on `needs`' streams, running jobs on `routes`.
+    fn serving(needs: RgaNeeds, settings: Settings, routes: Routes) -> Self {
         Self {
-            jobs: Jobs::new(settings),
+            scale: needs.scale,
+            convert: needs.convert,
+            blend: needs.blend,
+            lanes: Default::default(),
+            server: Server::new(Jobs::new(settings), routes),
         }
     }
 
     /// The jobs this block runs, and their counters.
     pub fn jobs(&mut self) -> &mut Jobs {
-        &mut self.jobs
+        &mut self.server.jobs
+    }
+
+    /// Why the last job that failed on a stream failed.
+    pub fn last_failure(&self) -> Option<Failure> {
+        self.server.last_failure()
     }
 }
 
@@ -189,7 +313,7 @@ fn entry<T: Copy>(list: &[T], index: u16) -> Result<T> {
 
 impl ImageScaler for Rga {
     fn info(&mut self) -> Result<ScalerInfo> {
-        let s = self.jobs.settings();
+        let s = self.server.jobs.settings();
         Ok(ScalerInfo {
             max_width: s.max_width,
             max_height: s.max_height,
@@ -204,13 +328,12 @@ impl ImageScaler for Rga {
         entry(&PixelFormat::ALL, index).map(PixelFormat::fourcc)
     }
 
-    fn job_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
-        // See the crate docs: the stream endpoint can't hand a driver a job's input.
-        Err(Status::NOT_SUPPORTED)
+    fn job_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        stream_name(self.scale.as_ref(), "scale", into)
     }
 
     fn counters(&mut self) -> Result<scaler::Counters> {
-        let c = self.jobs.scale_counts();
+        let c = self.server.jobs.scale_counts();
         Ok(scaler::Counters {
             jobs: c.jobs,
             errors: c.errors,
@@ -220,7 +343,7 @@ impl ImageScaler for Rga {
 
 impl ImageConvert for Rga {
     fn info(&mut self) -> Result<ConvertInfo> {
-        let s = self.jobs.settings();
+        let s = self.server.jobs.settings();
         Ok(ConvertInfo {
             max_width: s.max_width,
             max_height: s.max_height,
@@ -243,12 +366,12 @@ impl ImageConvert for Rga {
         })
     }
 
-    fn job_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
-        Err(Status::NOT_SUPPORTED)
+    fn job_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        stream_name(self.convert.as_ref(), "convert", into)
     }
 
     fn counters(&mut self) -> Result<convert::Counters> {
-        let c = self.jobs.convert_counts();
+        let c = self.server.jobs.convert_counts();
         Ok(convert::Counters {
             jobs: c.jobs,
             errors: c.errors,
@@ -258,7 +381,7 @@ impl ImageConvert for Rga {
 
 impl ImageBlend for Rga {
     fn info(&mut self) -> Result<BlendInfo> {
-        let s = self.jobs.settings();
+        let s = self.server.jobs.settings();
         Ok(BlendInfo {
             max_width: s.max_width,
             max_height: s.max_height,
@@ -273,12 +396,12 @@ impl ImageBlend for Rga {
         entry(&BLEND_FORMATS, index).map(PixelFormat::fourcc)
     }
 
-    fn job_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
-        Err(Status::NOT_SUPPORTED)
+    fn job_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        stream_name(self.blend.as_ref(), "blend", into)
     }
 
     fn counters(&mut self) -> Result<blend::Counters> {
-        let c = self.jobs.blend_counts();
+        let c = self.server.jobs.blend_counts();
         Ok(blend::Counters {
             jobs: c.jobs,
             errors: c.errors,

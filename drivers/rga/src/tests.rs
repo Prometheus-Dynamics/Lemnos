@@ -9,7 +9,12 @@ use lemnos_measure::test_alloc::allocations;
 use super::*;
 
 fn start(entries: &[(&str, ConfigValue<'_>)]) -> Result<Rga> {
-    Rga::start(RgaNeeds {}, &Config::new(entries))
+    let needs = RgaNeeds {
+        scale: None,
+        convert: None,
+        blend: None,
+    };
+    Rga::start(needs, &Config::new(entries))
 }
 
 fn fourcc(code: &[u8; 4]) -> u32 {
@@ -94,7 +99,7 @@ fn defaults_answer_the_contracts() {
 }
 
 #[test]
-fn job_streams_are_not_offered() {
+fn job_streams_the_board_gives_none_of_are_not_offered() {
     let mut rga = start(&[]).unwrap();
     let mut name = [0u8; 64];
     assert_eq!(
@@ -135,6 +140,7 @@ fn bad_config_is_refused() {
         [("max_height", ConfigValue::Int(-1))],
         [("matrix", ConfigValue::Str("bt2020"))],
         [("sampling", ConfigValue::Str("middle"))],
+        [("soc", ConfigValue::Str("rk9999"))],
     ] {
         assert_eq!(
             start(&entries).err(),
