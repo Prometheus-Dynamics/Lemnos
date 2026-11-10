@@ -19,8 +19,8 @@
 //! on the way. When no consumer is attached or every stream buffer is out, the frame is dropped.
 //!
 //! The block cannot fill the stream's own buffers, so a stream with dma-buf handles is filled the
-//! same way: nothing on this kernel gives user space the bus address of a dma-buf (see the sys
-//! crate's documentation), and the memory interface takes nothing else.
+//! same way: nothing on this kernel gives user space the bus address of the stream's dma-buf
+//! (see the sys crate's documentation), and the memory interface takes nothing else.
 //!
 //! The vendor driver never sets a frame's sequence or time. Each published frame carries the
 //! driver's own count of frame ends since `start` (frames dropped included, so a gap shows a
@@ -60,8 +60,14 @@
 //!
 //! # Not delivered
 //!
-//! - The host must provide the `dma` need. `lemnosd` on Linux does not provide DMA memory yet, so
-//!   on a board this driver does not bind until it does; it is not registered in `lemnosd`.
+//! - The host must provide the `dma` need. `LinuxBoard` answers `dma:<block>` through the Lemnos
+//!   kernel module (`backends/linux/src/module/`): each buffer is the module's allocation for the
+//!   named block, with the device address the module reports. That address is valid for the DMA
+//!   setup of the block the module owns, and is the address the ISP sees only if both blocks have
+//!   the same view of memory (no IOMMU, the same `dma-ranges`). The ISP is bound to the vendor's
+//!   `vvcam-isp` driver, so the module cannot own it; which block to name, and whether the two
+//!   agree, is checked on a board (`testing/board-runs/B23.md`, step 2). If that cannot be shown,
+//!   the memory must not be handed to the ISP. The driver is not registered in `lemnosd`.
 //! - Scaling, cropping and the self paths: the main path writes the sensor's full frame.
 //!
 //! Untested on board: written from the vendor driver's interface and the ISP8000's open register
