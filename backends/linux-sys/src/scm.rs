@@ -220,25 +220,44 @@ mod tests {
         assert_eq!(fds.len(), MAX_FDS);
     }
 
+    /// Whether every write end of the pipe behind `reader` is closed. Asked of the pipe
+    /// itself, so it holds however many other tests open and close descriptors meanwhile,
+    /// and reuse the same numbers.
+    fn pipe_writers_all_closed(reader: BorrowedFd<'_>) -> bool {
+        let mut poll = libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: 0,
+            revents: 0,
+        };
+        // SAFETY: `poll` is one live, writable `pollfd` and the count is 1; a zero timeout
+        // returns at once.
+        let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
+        assert!(ready >= 0, "poll failed");
+        poll.revents & libc::POLLHUP != 0
+    }
+
     #[test]
     fn descriptors_close_when_dropped() {
         let (a, b) = UnixStream::pair().unwrap();
-        let (r, w) = (
-            a.as_fd().try_clone_to_owned().unwrap(),
-            a.as_fd().try_clone_to_owned().unwrap(),
-        );
-        send_with_fds(a.as_fd(), b"x", &[r.as_fd(), w.as_fd()]).unwrap();
-        drop((r, w));
+        let (reader, writer) = std::io::pipe().unwrap();
+        let reader = OwnedFd::from(reader);
+        let writer = OwnedFd::from(writer);
+        send_with_fds(a.as_fd(), b"x", &[writer.as_fd()]).unwrap();
+        // Only the received copy keeps the pipe's write end open now.
+        drop(writer);
         let mut buf = [0u8; 4];
         let mut fds = Vec::new();
         recv_with_fds(b.as_fd(), &mut buf, &mut fds).unwrap();
-        let numbers: Vec<RawFd> = fds.iter().map(|f| f.as_raw_fd()).collect();
+        assert_eq!(fds.len(), 1);
+        assert!(
+            !pipe_writers_all_closed(reader.as_fd()),
+            "the received descriptor is not the write end"
+        );
         drop(fds);
-        for number in numbers {
-            // SAFETY: `fcntl(F_GETFD)` reads a descriptor number; `EBADF` is the expected answer.
-            let result = unsafe { libc::fcntl(number, libc::F_GETFD) };
-            assert_eq!(result, -1, "descriptor {number} still open");
-        }
+        assert!(
+            pipe_writers_all_closed(reader.as_fd()),
+            "the write end is still open"
+        );
     }
 
     #[test]

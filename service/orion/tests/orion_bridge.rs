@@ -189,19 +189,16 @@ async fn devices_are_resources_their_values_are_pushed_and_changes_follow() {
     .await;
     assert!(labels.contains(&"lemnos.driver=fake-counter".to_owned()));
 
-    // The accelerometer's fields are its values, published as they are read.
-    wait_for(15, "the imu's x", || {
-        (status_of(&node.app, &imu, "x") == Some(TypedConfigValue::F64(1.5))).then_some(())
+    // The accelerometer's fields are its values, published as they are read. Each is published
+    // on its own, so wait for all of them rather than for one and then look at the others.
+    wait_for(15, "the imu's x, z and status", || {
+        let published = status_of(&node.app, &imu, "x") == Some(TypedConfigValue::F64(1.5))
+            && status_of(&node.app, &imu, "z") == Some(TypedConfigValue::F64(2.0))
+            && status_of(&node.app, &imu, "status")
+                == Some(TypedConfigValue::String("running".to_owned()));
+        published.then_some(())
     })
     .await;
-    assert_eq!(
-        status_of(&node.app, &imu, "z"),
-        Some(TypedConfigValue::F64(2.0))
-    );
-    assert_eq!(
-        status_of(&node.app, &imu, "status"),
-        Some(TypedConfigValue::String("running".to_owned()))
-    );
 
     // The counter counts on every read, so its value moves with no timer of ours.
     let first = wait_for(15, "the counter's first value", || {

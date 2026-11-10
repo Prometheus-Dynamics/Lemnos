@@ -113,11 +113,23 @@ mod tests {
 
     #[test]
     fn monotonic_stamps_land_between_the_boot_clock_readings() {
-        let before = boottime_us();
+        let before = boottime_ns();
         let mono = clock_ns(libc::CLOCK_MONOTONIC).expect("monotonic clock");
-        let converted = boottime_us_of_monotonic_ns(mono);
-        let after = boottime_us();
-        assert!(converted >= before, "{converted} < {before}");
-        assert!(converted <= after, "{converted} > {after}");
+        let call_start = boottime_ns();
+        let converted_us = boottime_us_of_monotonic_ns(mono);
+        let call_end = boottime_ns();
+        let after = boottime_ns();
+        // The conversion reads the boot clock and then the monotonic clock, so the offset it
+        // applies is short by the gap between those two reads, which is inside the call. The
+        // result is also cut to microseconds. Both are bounded here by what was measured
+        // around the call: a stamp taken after `before` cannot map to a boot time more than
+        // that gap and one microsecond below it.
+        let gap_ns = call_end - call_start;
+        let converted_ns = converted_us * 1_000;
+        assert!(
+            converted_ns + gap_ns + 1_000 > before,
+            "{converted_ns} + {gap_ns} <= {before}"
+        );
+        assert!(converted_ns <= after, "{converted_ns} > {after}");
     }
 }

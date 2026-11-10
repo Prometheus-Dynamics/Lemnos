@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
@@ -40,12 +41,23 @@ fn start() -> Running {
     }
 }
 
+/// Runs the tool. A device answers `BUSY` to a describe while its driver holds it (a tick, a
+/// call): the host never waits on a driver, which may be stuck. So a busy answer is not the
+/// answer; ask again until the device is free, or fail after a deadline.
 fn ctl(running: &Running, words: &[&str]) -> Result<String, String> {
     let mut args = vec!["--socket".to_string(), running.socket.display().to_string()];
     args.extend(words.iter().map(ToString::to_string));
-    let mut out = Vec::new();
-    lemnos_ctl::run(&args, &mut out)?;
-    Ok(String::from_utf8(out).unwrap())
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut out = Vec::new();
+        match lemnos_ctl::run(&args, &mut out) {
+            Err(error) if error.starts_with("refused (-16)") && Instant::now() < deadline => {
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error),
+            Ok(()) => return Ok(String::from_utf8(out).unwrap()),
+        }
+    }
 }
 
 #[test]
