@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-driver-a733-di"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The A733 deinterlacer through the vendor kernel's /dev/deinterlace: weave, bob, motion-adaptive and temporal noise reduction between dma-bufs, every request built from frames checked against the buffers the caller holds. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: request encodings and a dma-buf's size, from the crate allowed `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
