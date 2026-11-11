@@ -123,8 +123,9 @@ struct lem_job {
 /*
  * One frame a block holds, from lem_stream_next() until lem_stream_complete()
  * or lem_stream_cancel(). The buffer and every region its job names stay pinned
- * for that long. `addr` is the start of that buffer's memory, computed here
- * with overflow checks from what the module mapped; `bytes` are the frame's,
+ * for that long. `addr` is the start of that buffer's memory (its slice of
+ * the pool, or its own dma-buf), computed here with overflow checks from what
+ * the module mapped; `bytes` are the frame's,
  * checked against the buffer when the producer attached.
  */
 struct lem_stream_slot {
@@ -184,12 +185,13 @@ void lem_stream_cancel(struct lem_stream *s, const struct lem_stream_slot *slot)
 void lem_stream_wedge(struct lem_stream *s);
 /*
  * Reads a job's range through the kernel's mapping of its registered region,
- * any context, exactly `bytes`. The pool isn't readable here. Needs a stream
+ * any context, exactly `bytes`. The pool and a buffer's own dma-buf aren't
+ * readable here. Needs a stream
  * that has had lem_stream_cpu_read_enable() and a job still held.
  */
 int lem_stream_range_read(struct lem_stream *s, const struct lem_job_range *r, void *dst,
 			  size_t bytes);
-/* A held job's range as a device address, computed here. The pool is refused. */
+/* A held job's range as a device address, computed here. The pool and a buffer's own dma-buf are refused. */
 int lem_stream_range_addr(struct lem_stream *s, const struct lem_job_range *r, u64 *addr);
 /* Test only: writes a word through a held range's kernel mapping, for the module's checks. */
 void lem_stream_range_poke(struct lem_stream *s, const struct lem_job_range *r, size_t offset, u32 val);

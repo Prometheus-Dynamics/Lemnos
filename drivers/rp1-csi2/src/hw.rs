@@ -1,13 +1,14 @@
 //! The block as the driver sees it, and the Linux implementation over the kernel node.
 
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 
 use lemnos_contract_camera_receiver::Counters;
 use lemnos_core::{Result, Status};
-use lemnos_driver_rp1_csi2_sys::{self as sys, Node, Start, StreamParams, UNPACK16};
-use lemnos_linux_sys::dma_heap;
+use lemnos_driver_rp1_csi2_sys::{self as sys, Node, Start, Stream, StreamParams, UNPACK16};
+
+use crate::relay::Set;
 
 /// What a stream start names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,38 +26,62 @@ pub struct StartParams {
     pub frame_slots: u32,
 }
 
+/// A frame the block finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Finished {
+    /// The buffer it is in.
+    pub buffer: u32,
+    /// Bytes.
+    pub bytes: u32,
+    /// Counts frame starts from the start of the stream.
+    pub sequence: u64,
+    /// When the frame started.
+    pub timestamp_ns: u64,
+    /// What giving the buffer back must carry.
+    pub fence: u32,
+}
+
 /// What the driver asks of the block. The real one is [`LinuxHardware`]; tests use a stand-in.
 pub trait Hardware: Send {
     /// Data lanes wired.
     fn max_lanes(&mut self) -> Result<u8>;
-    /// Makes the stream and starts receiving into it.
-    fn start(&mut self, params: &StartParams) -> Result<()>;
-    /// Stops receiving and returns every buffer; the kernel waits for the DMA.
+    /// Ends whatever ran and makes the module's stream, with no buffer having memory yet.
+    /// Nothing is received.
+    fn make(&mut self, params: &StartParams) -> Result<()>;
+    /// Starts receiving into the stream [`make`](Self::make) made.
+    fn go(&mut self) -> Result<()>;
+    /// Stops receiving and ends the module's stream; the kernel waits for the DMA, and then
+    /// lets go of every buffer's memory (or of none, if the DMA couldn't be seen to stop).
     fn stop(&mut self) -> Result<()>;
+    /// Gives `buffer` its memory, or swaps it: the module pins `memory` and, from then on,
+    /// that is where the block writes the buffer's frames. An error means the stream is over.
+    fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set>;
+    /// The next frame the block finished.
+    fn next_frame(&mut self) -> Result<Option<Finished>>;
+    /// Gives a finished frame's buffer back to the block.
+    fn give_back(&mut self, buffer: u32, fence: u32) -> Result<()>;
     /// Whether the stream is still running.
     fn check(&mut self) -> Result<()>;
     /// The module's counters since the last start.
     fn counters(&mut self) -> Result<Counters>;
 }
 
-/// Where the block is and what to allocate from.
+/// Where the block is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// Device name from `/dev/lemnos-rp1-csi2-<device>`, or `None` to use the only one.
     device: Option<String>,
-    heap: String,
 }
 
 impl Settings {
-    /// `INVALID_ARGUMENT` for a device or heap name that could name a path elsewhere.
-    pub fn new(device: Option<&str>, heap: &str) -> Result<Self> {
+    /// `INVALID_ARGUMENT` for a device name that could name a path elsewhere.
+    pub fn new(device: Option<&str>) -> Result<Self> {
         let ok = |name: &str| !name.is_empty() && !name.contains('/') && !name.contains('\0');
-        if !ok(heap) || device.is_some_and(|d| !ok(d)) {
+        if device.is_some_and(|d| !ok(d)) {
             return Err(Status::INVALID_ARGUMENT);
         }
         Ok(Self {
             device: device.map(str::to_owned),
-            heap: heap.to_owned(),
         })
     }
 
@@ -76,10 +101,6 @@ impl Settings {
             (Some(_), Some(_)) => Err(io::ErrorKind::InvalidInput.into()),
         }
     }
-
-    fn heap_path(&self) -> PathBuf {
-        PathBuf::from(format!("/dev/dma_heap/{}", self.heap))
-    }
 }
 
 /// The block through `/dev/lemnos-rp1-csi2-<device>`. Opened as it's needed, so a block not yet
@@ -87,8 +108,9 @@ impl Settings {
 pub struct LinuxHardware {
     settings: Settings,
     node: Option<Node>,
-    /// The running stream and its pool, held until stopped.
-    running: Option<(OwnedFd, OwnedFd)>,
+    /// The module's stream and what it is started with, held until stopped. Dropping the
+    /// stream ends it: the module stops the block first and then unpins every buffer.
+    running: Option<(Stream, StartParams)>,
 }
 
 impl LinuxHardware {
@@ -120,36 +142,35 @@ fn status(error: io::Error) -> Status {
     }
 }
 
-/// A pool buffer's offset from the next, `LEMNOS_STREAM_BUFFER_ALIGN`.
-const POOL_ALIGN: u32 = 4096;
-
 impl Hardware for LinuxHardware {
     fn max_lanes(&mut self) -> Result<u8> {
         let info = self.node()?.info().map_err(status)?;
         u8::try_from(info.max_lanes).map_err(|_| Status::IO)
     }
 
-    fn start(&mut self, params: &StartParams) -> Result<()> {
-        let size = params.size;
-        let stride = size.next_multiple_of(POOL_ALIGN);
-        let pool_bytes = u64::from(stride) * u64::from(params.buffers);
-        let heap = std::fs::File::open(self.settings.heap_path()).map_err(status)?;
-        let pool = dma_heap::allocate(heap.as_fd(), pool_bytes).map_err(status)?;
+    fn make(&mut self, params: &StartParams) -> Result<()> {
+        let _ = self.stop();
         let stream = self
             .node()?
-            .stream_create(
-                &StreamParams {
-                    buffers: params.buffers,
-                    buffer_bytes: size,
-                    frame_slots: params.frame_slots,
-                    job_slots: 8,
-                },
-                pool.as_fd(),
-            )
+            .stream_create(&StreamParams {
+                buffers: params.buffers,
+                buffer_bytes: params.size,
+                frame_slots: params.frame_slots,
+                job_slots: 8,
+            })
             .map_err(status)?;
+        self.running = Some((stream, *params));
+        Ok(())
+    }
+
+    fn go(&mut self) -> Result<()> {
+        let Some((stream, params)) = &self.running else {
+            return Err(Status::NO_DEVICE);
+        };
+        let (stream_fd, params) = (stream.raw_fd(), *params);
         self.node()?
             .start(&Start {
-                stream_fd: stream.as_raw_fd(),
+                stream_fd,
                 lanes: params.lanes,
                 mbps: params.mbps,
                 vc: params.vc,
@@ -161,9 +182,7 @@ impl Hardware for LinuxHardware {
                 flags: if params.unpack16 { UNPACK16 } else { 0 },
                 reserved: [0; 2],
             })
-            .map_err(status)?;
-        self.running = Some((stream, pool));
-        Ok(())
+            .map_err(status)
     }
 
     fn stop(&mut self) -> Result<()> {
@@ -183,11 +202,46 @@ impl Hardware for LinuxHardware {
         let Some((stream, _)) = &self.running else {
             return Err(Status::IO);
         };
-        let state = sys::stream_status(stream.as_fd()).map_err(status)?;
+        let state = stream.status().map_err(status)?;
         if state.state != sys::STATE_OPEN {
             return Err(Status::IO);
         }
         Ok(())
+    }
+
+    fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set> {
+        let Some((stream, _)) = &self.running else {
+            return Err(Status::NO_DEVICE);
+        };
+        match stream.set_buffer(buffer, memory) {
+            Ok(_) => Ok(Set::Done),
+            Err(e) => match e.raw_os_error() {
+                // The block has the buffer, or the dma-buf is another buffer's.
+                Some(libc_errno::EBUSY) => Ok(Set::Busy),
+                Some(libc_errno::EINVAL | libc_errno::EBADF) => Ok(Set::Refused),
+                _ => Err(status(e)),
+            },
+        }
+    }
+
+    fn next_frame(&mut self) -> Result<Option<Finished>> {
+        let Some((stream, _)) = &mut self.running else {
+            return Err(Status::NO_DEVICE);
+        };
+        Ok(stream.next_frame().map_err(status)?.map(|f| Finished {
+            buffer: f.buffer,
+            bytes: f.bytes,
+            sequence: f.sequence,
+            timestamp_ns: f.timestamp_ns,
+            fence: f.fence,
+        }))
+    }
+
+    fn give_back(&mut self, buffer: u32, fence: u32) -> Result<()> {
+        let Some((stream, _)) = &mut self.running else {
+            return Err(Status::NO_DEVICE);
+        };
+        stream.return_buffer(buffer, fence).map_err(status)
     }
 
     fn counters(&mut self) -> Result<Counters> {
@@ -198,4 +252,11 @@ impl Hardware for LinuxHardware {
             errors: info.errors,
         })
     }
+}
+
+/// The errnos the module answers a buffer's memory with (`kernel/lemnos.h`).
+mod libc_errno {
+    pub const EBADF: i32 = 9;
+    pub const EBUSY: i32 = 16;
+    pub const EINVAL: i32 = 22;
 }

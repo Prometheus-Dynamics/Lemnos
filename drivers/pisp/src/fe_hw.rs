@@ -1,24 +1,39 @@
 //! The front end as the driver sees it, and the Linux implementation over the kernel module.
 
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use lemnos_contract_camera_isp::Counters;
 use lemnos_core::{Result, Status};
-use lemnos_driver_pisp_fe_sys::{self as sys, Job, Node, Start, Stream, StreamParams};
+use lemnos_driver_pisp_fe_sys::{self as sys, Node, Stream, StreamParams};
+pub use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
 use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
 
 use crate::fe_job::{ALIGN, CONFIG_BYTES, STATS_BYTES};
 
+/// What the module said to a buffer's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Set {
+    /// The buffer's memory is that dma-buf now (or already was).
+    Done,
+    /// A job names the buffer or the block is writing it: ask again when its frame is finished.
+    Busy,
+    /// Not memory the block can take: not a dma-buf it can map, or smaller than output 0.
+    Refused,
+}
+
 /// What a stream needs set aside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plan {
-    /// Pool buffers, and the buffers of output 1.
+    /// The stream's buffers, which are output 0's: as many as the `frames` stream has. Their
+    /// memory is that stream's, given a buffer at a time with [`Hardware::set_buffer`].
     pub buffers: u32,
+    /// The buffers of output 1.
+    pub output1_buffers: u32,
     /// Job slots, and configuration and statistics slots: a power of two.
     pub job_slots: u32,
-    /// Bytes per pool buffer: output 0.
+    /// Bytes of output 0: what each of the stream's buffers must hold.
     pub output0_bytes: u32,
     /// Bytes per buffer of output 1, when it's on.
     pub output1_bytes: Option<u32>,
@@ -38,7 +53,7 @@ pub struct Placed {
 /// A finished job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Finished {
-    /// The pool buffer.
+    /// The buffer output 0 is in.
     pub buffer: u32,
     /// Bytes.
     pub bytes: u32,
@@ -54,8 +69,13 @@ pub struct Finished {
 pub trait Hardware: Send {
     /// The block's version register; 0 before the node has been opened.
     fn hw_version(&self) -> u32;
-    /// Makes the memory and the stream, starting nothing.
+    /// Makes the stream and the configuration, statistics and output 1 memory, starting
+    /// nothing. No buffer of the stream has memory yet.
     fn make(&mut self, plan: &Plan) -> Result<Placed>;
+    /// Gives `buffer` its memory, or swaps it: the module pins `memory` and, from then on,
+    /// that is where the block writes output 0 of a job on that buffer. An error means the
+    /// stream is over.
+    fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set>;
     /// Starts the block on the stream, which must hold its first job.
     fn go(&mut self, start: &Start) -> Result<()>;
     /// Ends the stream. The module returns once the block's DMA has stopped, or keeps every
@@ -106,10 +126,10 @@ fn status(e: &io::Error) -> Status {
     }
 }
 
-/// `LEMNOS_STREAM_BUFFER_ALIGN`, which fixes the pool's stride whatever the kernel's page size.
+/// What a dma-heap allocation is rounded up to.
 const PAGE: u64 = 4096;
 
-/// `v` rounded up to the pool's stride.
+/// `v` rounded up to whole pages.
 fn page_align(v: u64) -> u64 {
     v.div_ceil(PAGE) * PAGE
 }
@@ -125,7 +145,7 @@ struct Running {
     stream: Stream,
     node: Node,
     configs: Mapping,
-    /// Pool and registered memory, held as long as the stream is.
+    /// Registered memory, held as long as the stream is.
     _memory: Vec<OwnedFd>,
     /// What each buffer's return must carry; a frame gives its buffer a new one.
     fences: Vec<u32>,
@@ -153,22 +173,15 @@ impl LinuxHardware {
     fn open(&mut self, plan: &Plan) -> io::Result<Placed> {
         let node = Node::open(format!("/dev/lemnos-rp1-csi2-{}", self.settings.device))?;
         let heap = std::fs::File::open(format!("/dev/dma_heap/{}", self.settings.heap))?;
-        let buffers = u64::from(plan.buffers);
+        let buffers = u64::from(plan.output1_buffers);
         let slots = u64::from(plan.job_slots);
-        let pool = dma_heap::allocate(
-            heap.as_fd(),
-            buffers * page_align(u64::from(plan.output0_bytes)),
-        )?;
-        let stream = node.stream_create(
-            &StreamParams {
-                buffers: plan.buffers,
-                buffer_bytes: plan.output0_bytes,
-                frame_slots: plan.buffers.next_power_of_two(),
-                job_slots: plan.job_slots,
-            },
-            pool.as_fd(),
-        )?;
-        let mut memory = vec![pool];
+        let stream = node.stream_create(&StreamParams {
+            buffers: plan.buffers,
+            buffer_bytes: plan.output0_bytes,
+            frame_slots: plan.buffers.next_power_of_two(),
+            job_slots: plan.job_slots,
+        })?;
+        let mut memory = Vec::new();
         let region = |bytes: u64, memory: &mut Vec<OwnedFd>| -> io::Result<u64> {
             let fd = dma_heap::allocate(heap.as_fd(), page_align(bytes))?;
             let addr = stream.register(fd.as_fd())?;
@@ -185,7 +198,7 @@ impl LinuxHardware {
         let len = usize::try_from(page_align(config_bytes))
             .map_err(|_| io::Error::from_raw_os_error(7))?;
         let fd = memory
-            .get(1)
+            .first()
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
         let configs = Mapping::new(fd.as_fd(), len, 0, false)?;
         self.hw_version = node.info()?.hw_version;
@@ -216,6 +229,19 @@ impl Hardware for LinuxHardware {
     fn make(&mut self, plan: &Plan) -> Result<Placed> {
         self.stop();
         self.open(plan).map_err(|e| status(&e))
+    }
+
+    fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set> {
+        match self.running()?.stream.set_buffer(buffer, memory) {
+            Ok(_) => Ok(Set::Done),
+            Err(e) => match e.raw_os_error() {
+                // EBUSY: a job names it or the block has it, or the dma-buf is another buffer's.
+                Some(16) => Ok(Set::Busy),
+                // EINVAL, EBADF.
+                Some(22 | 9) => Ok(Set::Refused),
+                _ => Err(status(&e)),
+            },
+        }
     }
 
     fn go(&mut self, start: &Start) -> Result<()> {

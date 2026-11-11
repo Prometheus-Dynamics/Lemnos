@@ -325,6 +325,14 @@ int main(void)
 	check(!forget_override(CSI2), "override cleared");
 	check(!unload("lemnos"), "module unloaded with a wedged stream pinned");
 
+	check(!load("/lemnos.ko", OWNED_CSI2), "module loaded for the stuck-DMA check on own buffers");
+	check(!bind_csi2(), "receiver bound again");
+	check(!run((char *const[]){ "/lemnos_rp1_csi2_check", "wedge-own", CSI2, CSI2_UNBIND,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_rp1_csi2_check wedge-own");
+	check(!forget_override(CSI2), "override cleared");
+	check(!unload("lemnos"), "module unloaded with a wedged stream's own buffers pinned");
+
 	check(!load("/lemnos.ko", OWNED_CSI2 " test_pisp_fe=1"),
 	      "module loaded with the front end test paths");
 	check(!bind_block(BLOCK), "test block bound");

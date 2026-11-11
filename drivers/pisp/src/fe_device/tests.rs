@@ -1,5 +1,6 @@
 //! The driver against a stand-in for the block: every expected value here is written out by hand.
 
+use std::os::fd::BorrowedFd;
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_isp::{
@@ -9,11 +10,12 @@ use lemnos_contract_isp_pisp::{IspPisp, LAYOUT_FRONT_END};
 use lemnos_core::{Encode, Health, Lifecycle, Result, Status, Writer};
 use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
 use lemnos_hal::mock::MockStream;
+use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 
 use super::{Link, Options, PispFe, backoff_ns};
 use crate::fe::FrontEnd;
-use crate::fe_hw::{Finished, Hardware, Placed, Plan};
+use crate::fe_hw::{Finished, Hardware, Placed, Plan, Set};
 use crate::fe_job::{CONFIG_BYTES, STATS_BYTES};
 use crate::format::formats;
 use crate::uapi::{Branch, FeConfig, ImageFormatConfig, Wire, fe_enable as en};
@@ -35,6 +37,10 @@ struct Mock {
     posted: Vec<Job>,
     finished: Vec<Finished>,
     given_back: Vec<u32>,
+    /// Buffers given memory on the stream now, in order; cleared when a stream is made.
+    set: Vec<u32>,
+    /// What the module says to the next memory offered for a buffer.
+    answer: Option<(u32, Set)>,
 }
 
 impl Default for Mock {
@@ -49,7 +55,9 @@ impl Default for Mock {
             config: Box::new([0; CONFIG_BYTES]),
             posted: Vec::with_capacity(64),
             finished: Vec::with_capacity(64),
-            given_back: Vec::with_capacity(64),
+            given_back: Vec::with_capacity(4096),
+            set: Vec::with_capacity(4096),
+            answer: None,
         }
     }
 }
@@ -79,6 +87,7 @@ impl Hardware for Hw {
             Some(status) => Err(status),
             None => {
                 m.plans.push(*plan);
+                m.set.clear();
                 Ok(Placed {
                     config: CONFIG,
                     stats: STATS,
@@ -86,6 +95,16 @@ impl Hardware for Hw {
                 })
             }
         })
+    }
+
+    fn set_buffer(&mut self, buffer: u32, _memory: BorrowedFd<'_>) -> Result<Set> {
+        Ok(self.with(|m| match m.answer {
+            Some((b, answer)) if b == buffer => answer,
+            _ => {
+                m.set.push(buffer);
+                Set::Done
+            }
+        }))
     }
 
     fn go(&mut self, start: &Start) -> Result<()> {
@@ -175,13 +194,21 @@ fn image() -> IspOutput {
     }
 }
 
+/// A `frames` stream of `buffers` buffers, each behind a handle as a dma-buf stream's are.
+fn stream(buffers: u32) -> MockStream {
+    let memory = (0..buffers).map(|_| sealed_memfd(c"frames", 4096).unwrap());
+    MockStream::with_handles(memory.collect())
+}
+
+/// With no `frames` given, a stream of four buffers with handles.
 fn setup(jobs: Option<&MockStream>, frames: Option<&MockStream>) -> (PispFe, Hw) {
     let hw = Hw::default();
     let hold = |s: &MockStream| Box::new(s.clone()) as lemnos_core::StreamHandle;
+    let frames = frames.cloned().unwrap_or_else(|| stream(4));
     let mut fe = PispFe::with_hardware(
         Box::new(hw.clone()),
         jobs.map(hold),
-        frames.map(hold),
+        Some(hold(&frames)),
         options(),
     );
     CameraIsp::set_input(
@@ -228,6 +255,7 @@ fn a_job_names_its_slots_and_the_first_one_starts_the_block() {
         hw.with(|m| m.plans[0]),
         Plan {
             buffers: 4,
+            output1_buffers: 4,
             job_slots: 4,
             output0_bytes: FRAME,
             output1_bytes: Some(FRAME),
@@ -440,47 +468,205 @@ fn compression_changes_the_layout_and_is_stopped_only() {
     );
 }
 
+fn done(buffer: u32, identity: u64) -> Finished {
+    Finished {
+        buffer,
+        bytes: FRAME,
+        sequence: identity,
+        identity,
+        timestamp_ns: 5,
+    }
+}
+
 #[test]
-fn only_a_published_buffer_can_come_back() {
-    let frames = MockStream::new(4);
-    let (mut fe, hw) = setup(None, Some(&frames));
+fn a_finished_job_is_published_and_its_buffer_goes_back_when_returned() {
+    let frames = stream(4);
+    let jobs = MockStream::new(4);
+    let (mut fe, hw) = setup(Some(&jobs), Some(&frames));
+    hw.set_config(&config(0));
     CameraIsp::start(&mut fe).unwrap();
-    hw.with(|m| {
-        m.finished.push(Finished {
-            buffer: 2,
-            bytes: FRAME,
-            sequence: 1,
-            identity: 7,
-            timestamp_ns: 5,
-        });
-    });
+    assert_eq!(
+        hw.with(|m| m.set.clone()),
+        [0, 1, 2, 3],
+        "every buffer of the stream was given to the module"
+    );
+    post(&jobs, &job(7, 0, 2, NO_BUFFER));
     fe.tick(1);
+    assert_eq!(hw.with(|m| m.posted.len()), 1);
+    hw.with(|m| m.finished.push(done(2, 7)));
+    fe.tick(2);
     assert_eq!(fe.counters.jobs, 1);
     assert_eq!(frames.take_frame().unwrap().identity, 7);
-    frames.return_buffer(1);
+    assert_eq!(hw.with(|m| m.given_back.clone()), [], "the consumer has it");
+
+    // A job on the buffer the consumer holds isn't sent.
+    post(&jobs, &job(8, 0, 2, NO_BUFFER));
+    fe.tick(3);
+    assert_eq!(hw.with(|m| m.posted.len()), 1);
+    assert_eq!(fe.counters.dropped, 1);
+
     frames.return_buffer(2);
-    fe.tick(2);
+    fe.tick(4);
     assert_eq!(hw.with(|m| m.given_back.clone()), [2]);
+    assert_eq!(
+        hw.with(|m| m.set.clone()),
+        [0, 1, 2, 3, 2],
+        "back to the block only after the module was shown the memory behind it again"
+    );
+    post(&jobs, &job(9, 0, 2, NO_BUFFER));
+    fe.tick(5);
+    assert_eq!(hw.with(|m| m.posted.len()), 2);
+}
+
+#[test]
+fn a_second_job_on_a_buffer_a_job_already_has_is_dropped() {
+    let jobs = MockStream::new(4);
+    let (mut fe, hw) = setup(Some(&jobs), None);
+    hw.set_config(&config(0));
+    CameraIsp::start(&mut fe).unwrap();
+    post(&jobs, &job(1, 0, 3, NO_BUFFER));
+    post(&jobs, &job(2, 0, 3, NO_BUFFER));
+    fe.tick(1);
+    assert_eq!(hw.with(|m| m.posted.len()), 1);
+    assert_eq!(hw.with(|m| m.posted[0].identity), 1);
+    assert_eq!(fe.counters.dropped, 1);
+}
+
+#[test]
+fn a_job_on_a_buffer_whose_memory_the_module_does_not_have_is_dropped() {
+    let frames = stream(4);
+    let jobs = MockStream::new(4);
+    let (mut fe, hw) = setup(Some(&jobs), Some(&frames));
+    hw.set_config(&config(0));
+    // The module won't take buffer 1's memory yet.
+    hw.with(|m| m.answer = Some((1, Set::Busy)));
+    CameraIsp::start(&mut fe).unwrap();
+    post(&jobs, &job(1, 0, 1, NO_BUFFER));
+    fe.tick(1);
+    assert!(hw.with(|m| m.posted.is_empty()));
+    assert_eq!(fe.counters.dropped, 1);
+    post(&jobs, &job(2, 0, 0, NO_BUFFER));
+    fe.tick(2);
+    assert_eq!(
+        hw.with(|m| m.posted.len()),
+        1,
+        "a buffer it does have is fine"
+    );
+}
+
+#[test]
+fn a_consumer_that_leaves_gets_nothing_more_and_the_next_one_gets_its_own_memory() {
+    let frames = stream(4);
+    let jobs = MockStream::new(4);
+    let (mut fe, hw) = setup(Some(&jobs), Some(&frames));
+    hw.set_config(&config(0));
+    CameraIsp::start(&mut fe).unwrap();
+    post(&jobs, &job(1, 0, 1, NO_BUFFER));
+    fe.tick(1);
+    assert_eq!(hw.with(|m| m.posted.len()), 1);
+
+    // The consumer goes while the block has buffer 1 for that job.
+    frames.change_consumer();
+    hw.with(|m| {
+        m.set.clear();
+        m.answer = Some((1, Set::Busy));
+    });
+    fe.tick(2);
+    assert_eq!(
+        hw.with(|m| m.set.clone()),
+        [0, 2, 3],
+        "every hold was given up and taken again; the module has the new memory of all but 1"
+    );
+    // The job finishes in the old consumer's memory: not published, and only then swapped.
+    hw.with(|m| {
+        m.answer = None;
+        m.finished.push(done(1, 1));
+    });
+    fe.tick(3);
+    assert!(
+        frames.take_frame().is_none(),
+        "the new consumer never sees it"
+    );
+    assert_eq!(fe.counters.dropped, 1);
+    assert_eq!(hw.with(|m| m.set.clone()), [0, 2, 3, 1]);
+    assert_eq!(hw.with(|m| m.given_back.clone()), [1]);
+    assert_eq!(hw.with(|m| m.plans.len()), 1, "the block was never stopped");
+}
+
+#[test]
+fn a_stream_whose_buffers_have_no_handles_is_refused() {
+    // Plain shared memory: there is nothing to give the block.
+    let frames = MockStream::with_bytes(4, 4096);
+    let (mut fe, hw) = setup(None, Some(&frames));
+    assert_eq!(CameraIsp::start(&mut fe), Err(Status::NOT_SUPPORTED));
+    assert!(hw.with(|m| m.set.is_empty()));
+    assert_eq!(fe.tick(1), None, "not running");
+}
+
+#[test]
+fn memory_the_module_refuses_is_a_refused_start() {
+    let frames = stream(4);
+    let (mut fe, hw) = setup(None, Some(&frames));
+    hw.with(|m| m.answer = Some((0, Set::Refused)));
+    assert_eq!(CameraIsp::start(&mut fe), Err(Status::INVALID_ARGUMENT));
+}
+
+#[test]
+fn without_a_frames_stream_there_is_nothing_to_start() {
+    let hw = Hw::default();
+    let mut fe = PispFe::with_hardware(Box::new(hw.clone()), None, None, options());
+    let input = IspInput {
+        width: 640,
+        height: 480,
+        bit_depth: 12,
+        bayer: BayerOrder::default(),
+    };
+    CameraIsp::set_input(&mut fe, input).unwrap();
+    CameraIsp::set_output(&mut fe, 2, image()).unwrap();
+    assert_eq!(CameraIsp::start(&mut fe), Err(Status::NOT_FOUND));
+    assert!(
+        hw.with(|m| m.plans.is_empty()),
+        "the block was never touched"
+    );
 }
 
 #[test]
 fn the_steady_state_allocates_nothing() {
     let jobs = MockStream::new(4);
-    let (mut fe, hw) = setup(Some(&jobs), None);
+    let frames = stream(4);
+    let (mut fe, hw) = setup(Some(&jobs), Some(&frames));
     hw.set_config(&config(en::AWB_STATS));
     CameraIsp::start(&mut fe).unwrap();
     fe.tick(1);
     post(&jobs, &job(1, 0, 0, NO_BUFFER));
     fe.tick(2);
+    // A frame finished, published, read, returned and given back to the block, every round.
+    let mut now = 3;
+    let mut round = |fe: &mut PispFe| {
+        hw.with(|m| {
+            m.finished.push(done(0, now));
+            m.given_back.clear();
+            m.set.clear();
+        });
+        fe.tick(now);
+        assert_eq!(frames.take_frame().map(|f| f.identity), Some(now));
+        frames.return_buffer(0);
+        fe.tick(now + 1);
+        assert!(hw.with(|m| m.given_back == [0]));
+        let _ = CameraIsp::counters(fe);
+        let _ = fe.health();
+        now += 2;
+    };
+    for _ in 0..16 {
+        round(&mut fe);
+    }
     let ((), allocated) = allocations(|| {
-        for i in 0..64 {
-            fe.tick(3 + i);
-            let _ = CameraIsp::counters(&mut fe);
-            let _ = fe.health();
+        for _ in 0..64 {
+            round(&mut fe);
         }
     });
     assert_eq!(
         allocated, 0,
-        "ticks with no work, counters and the health check"
+        "frames out, buffers back, idle ticks, counters and the health check"
     );
 }

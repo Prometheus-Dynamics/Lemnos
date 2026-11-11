@@ -22,14 +22,15 @@
  *  - The front end's DMA addresses (statistics, output 0, output 1, the unused
  *    memory input) all live in the configuration. None is taken from it: every
  *    one must be zero in the copy and is filled in here, from the frame's
- *    pool buffer and its job's ranges, which are the stream's checks and are
+ *    stream buffer and its job's ranges, which are the stream's checks and are
  *    resolved to pinned dma-bufs.
  *  - Sizes are the ones the block will really use: the input is fixed by
  *    START, an output's size is derived from its crop and downscale and must
  *    agree with its format, and an output's stride times height must fit
  *    the buffer its address came from. Refused, not clamped, on any
  *    disagreement.
- *  - Output 0's address is the frame's pool buffer, from lem_stream_next().
+ *  - Output 0's address is the frame's buffer, from lem_stream_next(): its
+ *    slice of the pool, or its own dma-buf on a stream without a pool.
  *  - Every register of the configuration is written from the checked copy on
  *    every job; the caller's dirty flags are ignored. The hardware cannot end
  *    up running a stale value the checks never saw.
@@ -410,7 +411,7 @@ static int lpf_validate(struct lem_pisp_fe *fe, struct pisp_fe_config *cfg,
 			memset(&cfg->ch[i].compress, 0, sizeof(cfg->ch[i].compress));
 	}
 
-	/* Output 0: fixed at START, into the frame's pool buffer. */
+	/* Output 0: fixed at START, into the frame's buffer of the stream. */
 	ret = lpf_check_output(cfg, 0, &bytes);
 	if (ret)
 		return ret;

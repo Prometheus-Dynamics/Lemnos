@@ -3,18 +3,21 @@
  * The PiSP front end, driven through the receiver's node
  * (/dev/lemnos-rp1-csi2-<device>, lemnos_rp1_csi2.h). It is the same block: the
  * receiver's channel hands its frames to the front end instead of memory. A
- * frame's image (output 0) goes to the stream's pool, its statistics and a
- * second raw output to registered dma-bufs. The stream is made with
+ * frame's image (output 0) goes to the job's buffer of the stream (a slice
+ * of its pool, or the buffer's own dma-buf on a stream made with
+ * LEMNOS_STREAM_CREATE_BUFFERS), its statistics and a second raw output to
+ * registered dma-bufs. The stream is made with
  * LEMNOS_RP1_CSI2_IOC_STREAM_CREATE and started here, not with
  * LEMNOS_RP1_CSI2_IOC_START.
  *
- * A job on the stream's ring is one frame. Its pool buffer is output 0, and
+ * A job on the stream's ring is one frame. Its buffer is output 0, and
  * its ranges are, in this order: the configuration (exactly
  * sizeof(struct pisp_fe_config) in a registered dma-buf, the module's copy is
  * what the hardware runs), then the statistics buffer (exactly
  * sizeof(struct pisp_statistics), named when and only when a statistics block
  * is enabled), then output 1 when it is enabled (its stride times its height,
- * at least). Nothing else may be named, and neither buffer may be the pool.
+ * at least). Nothing else may be named, and neither buffer may be the pool
+ * or a stream buffer's own dma-buf.
  *
  * The configuration's address fields, ilines and the dirty flags are not taken
  * from the caller: the module fills them in. Every address field a caller
@@ -68,7 +71,7 @@ struct lemnos_pisp_fe_start {
 	__u32 output_width;
 	__u32 output_height;
 	__u32 output_stride;	/* bytes per line, a multiple of 16 */
-	__u32 output_size;	/* bytes per frame, within a pool buffer */
+	__u32 output_size;	/* bytes per frame, within a buffer of the stream */
 	__u32 output_format;	/* BPS_16, or a COMPRESSION_MODE_n with BPS_8; nothing else */
 	__u32 flags;		/* zero */
 	__u32 reserved[2];	/* zero */

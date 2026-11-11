@@ -11,11 +11,17 @@ workspace = true
 [dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-driver-rp1-csi2-sys = { path = "../rp1-csi2-sys" }
-lemnos-linux-sys = { path = "../../backends/linux-sys" }
 
 [dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
 
 [package.metadata.lemnos]
 driver = "Rp1Csi2"

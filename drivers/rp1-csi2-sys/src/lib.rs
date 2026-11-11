@@ -2,8 +2,10 @@
 //! `kernel/lemnos.h`): its uAPI and safe wrappers over its ioctls, nothing else.
 //!
 //! The node never takes a memory address. The only addresses the receiver writes are computed in
-//! the kernel from the pool of the stream [`Node::start`] names, so nothing here can name memory.
-//! Everything here is one ioctl per function, and every one is safe to call.
+//! the kernel from the buffers of the stream [`Node::start`] names, each of which is a dma-buf the
+//! module pinned when [`Stream::set_buffer`] gave it, so nothing here can name memory. Every
+//! request is one ioctl per function, and every one is safe to call; the rest reads and writes
+//! the stream's ring, which the module treats as untrusted.
 //!
 //! Provenance: ported from `crates/lemnos-linux-sys/src/lemnos_rp1_csi2.rs` on the dev branch, for
 //! the frame stream.
@@ -15,7 +17,9 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use lemnos_linux_sys::mmap::Mapping;
 use lemnos_linux_sys::{ior, iow, iowr};
 
 /// `LEMNOS_RP1_CSI2_ABI`: the node's interface revision this crate speaks.
@@ -27,6 +31,18 @@ pub const INFO_WEDGED: u32 = 1;
 pub const UNPACK16: u32 = 1;
 /// `LEMNOS_RING_STATE_OPEN`: the frame stream is running.
 pub const STATE_OPEN: u32 = 0;
+/// `LEMNOS_STREAM_MAX_OWN_BUFFERS`: the most buffers a stream of dma-bufs may have.
+pub const MAX_BUFFERS: u32 = 64;
+/// `LEMNOS_STREAM_CREATE_BUFFERS`: no pool, each buffer a dma-buf of its own.
+const CREATE_BUFFERS: u32 = 1;
+
+const FRAME_WORDS: usize = 5;
+const WORD_FRAME_SLOTS: usize = 4;
+const WORD_FRAMES_HEAD: usize = 16;
+const WORD_FRAMES_TAIL: usize = 24;
+const WORD_RETURNS_HEAD: usize = 32;
+const WORD_RETURNS_TAIL: usize = 40;
+const WORD_FRAMES: usize = 64;
 
 /// `struct lemnos_rp1_csi2_info`.
 #[repr(C)]
@@ -100,6 +116,16 @@ struct StreamCreate {
     pool_addr: u64,
 }
 
+/// `struct lemnos_stream_buffer`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct StreamBuffer {
+    buffer: u32,
+    fd: i32,
+    addr: u64,
+    size: u64,
+}
+
 /// `struct lemnos_stream_status`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -123,13 +149,29 @@ const IOC_STREAM_CREATE: u32 = iowr::<StreamCreate>(b'L', 0xc1);
 const IOC_START: u32 = iow::<Start>(b'L', 0xc2);
 const IOC_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xc3, 0);
 const IOC_STREAM_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
+const IOC_STREAM_BUFFER: u32 = iowr::<StreamBuffer>(b'L', 0x86);
 /// `sizeof(struct lemnos_stream_job)`: a job's fixed size.
 const JOB_BYTES: u32 = 8 + 8 + 16 * 4;
+
+/// One frame the module published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame {
+    /// The buffer it is in.
+    pub buffer: u32,
+    /// Bytes.
+    pub bytes: u32,
+    /// Counts frame starts from the start of the stream.
+    pub sequence: u64,
+    /// When the frame started.
+    pub timestamp_ns: u64,
+    /// What its return must carry.
+    pub fence: u32,
+}
 
 /// What a stream asks of the node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamParams {
-    /// Buffers in the pool.
+    /// Buffers, at most [`MAX_BUFFERS`].
     pub buffers: u32,
     /// Bytes per buffer.
     pub buffer_bytes: u32,
@@ -171,21 +213,18 @@ impl Node {
         Ok(info)
     }
 
-    /// Makes a frame stream on this block, its buffers in `pool`, and returns its descriptor.
-    pub fn stream_create(
-        &self,
-        params: &StreamParams,
-        pool: BorrowedFd<'_>,
-    ) -> io::Result<OwnedFd> {
+    /// Makes a frame stream on this block with no pool: each buffer is a dma-buf of its own,
+    /// given with [`Stream::set_buffer`], and one without memory is never filled.
+    pub fn stream_create(&self, params: &StreamParams) -> io::Result<Stream> {
         let mut create = StreamCreate {
             block: 0,
-            flags: 0,
+            flags: CREATE_BUFFERS,
             buffers: params.buffers,
             buffer_bytes: params.buffer_bytes,
             frame_slots: params.frame_slots,
             job_slots: params.job_slots,
             job_bytes: JOB_BYTES,
-            pool_fd: pool.as_raw_fd(),
+            pool_fd: -1,
             doorbell_fd: -1,
             fd: -1,
             ring_bytes: 0,
@@ -194,7 +233,28 @@ impl Node {
         self.ioctl(IOC_STREAM_CREATE, &raw mut create)?;
         // SAFETY: a successful create returns a new close-on-exec descriptor that nothing else
         // owns.
-        Ok(unsafe { OwnedFd::from_raw_fd(create.fd) })
+        let fd = unsafe { OwnedFd::from_raw_fd(create.fd) };
+        let len = usize::try_from(create.ring_bytes)
+            .map_err(|_| io::Error::from_raw_os_error(libc::E2BIG))?;
+        let ring = Mapping::new(fd.as_fd(), len, 0, true)?;
+        let frame_slots = params.frame_slots as usize;
+        let stream = Stream {
+            fd,
+            ring,
+            frame_slots,
+            buffers: params.buffers,
+            returns_at: WORD_FRAMES + frame_slots * FRAME_WORDS,
+            frames_tail: 0,
+            returns_head: 0,
+        };
+        // Checks the mapping is what the module says it made, before anything relies on it.
+        if !frame_slots.is_power_of_two()
+            || stream.word(WORD_FRAME_SLOTS)?.load(Ordering::Acquire)
+                != u64::from(params.frame_slots)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(stream)
     }
 
     /// Starts receiving into the stream `start.stream_fd` names.
@@ -209,11 +269,107 @@ impl Node {
     }
 }
 
-/// How a stream the node made is doing.
-pub fn stream_status(stream: BorrowedFd<'_>) -> io::Result<StreamStatus> {
-    let mut status = StreamStatus::default();
-    ioctl(stream, IOC_STREAM_STATUS, (&raw mut status).cast())?;
-    Ok(status)
+/// A buffer's memory as the module pinned it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferMemory {
+    /// The buffer's device address.
+    pub addr: u64,
+    /// Bytes of it the block may reach.
+    pub size: u64,
+}
+
+/// A stream: its mapped ring and where this end is on it.
+#[derive(Debug)]
+pub struct Stream {
+    fd: OwnedFd,
+    ring: Mapping,
+    frame_slots: usize,
+    buffers: u32,
+    returns_at: usize,
+    frames_tail: u64,
+    returns_head: u64,
+}
+
+impl Stream {
+    /// The descriptor, for [`Start::stream_fd`].
+    #[must_use]
+    pub fn raw_fd(&self) -> i32 {
+        self.fd.as_raw_fd()
+    }
+
+    fn word(&self, at: usize) -> io::Result<&AtomicU64> {
+        self.ring
+            .as_atomic_words()
+            .and_then(|w| w.get(at))
+            .ok_or_else(|| io::ErrorKind::InvalidData.into())
+    }
+
+    /// Gives `buffer` the dma-buf `memory`, which the module pins for as long as the buffer has
+    /// it, or swaps it for what the buffer had. Naming the dma-buf the buffer already has
+    /// changes nothing and succeeds. `EBUSY` while the block is writing the buffer, or when the
+    /// dma-buf is another buffer's; `EINVAL` for one that isn't a dma-buf the block can take or
+    /// is smaller than a buffer; `EIO` once the block's DMA could not be seen to stop.
+    pub fn set_buffer(&self, buffer: u32, memory: BorrowedFd<'_>) -> io::Result<BufferMemory> {
+        let mut arg = StreamBuffer {
+            buffer,
+            fd: memory.as_raw_fd(),
+            ..Default::default()
+        };
+        ioctl(self.fd.as_fd(), IOC_STREAM_BUFFER, (&raw mut arg).cast())?;
+        Ok(BufferMemory {
+            addr: arg.addr,
+            size: arg.size,
+        })
+    }
+
+    /// The next frame published, if any.
+    pub fn next_frame(&mut self) -> io::Result<Option<Frame>> {
+        let head = self.word(WORD_FRAMES_HEAD)?.load(Ordering::Acquire);
+        if head == self.frames_tail {
+            return Ok(None);
+        }
+        let at = WORD_FRAMES + (self.frames_tail as usize & (self.frame_slots - 1)) * FRAME_WORDS;
+        let word = self.word(at)?.load(Ordering::Relaxed);
+        let buffer = word as u32;
+        if buffer >= self.buffers {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let frame = Frame {
+            buffer,
+            bytes: (word >> 32) as u32,
+            sequence: self.word(at + 1)?.load(Ordering::Relaxed),
+            timestamp_ns: self.word(at + 3)?.load(Ordering::Relaxed),
+            fence: self.word(at + 4)?.load(Ordering::Relaxed) as u32,
+        };
+        self.frames_tail += 1;
+        self.word(WORD_FRAMES_TAIL)?
+            .store(self.frames_tail, Ordering::Release);
+        Ok(Some(frame))
+    }
+
+    /// Gives a frame's buffer back. `WouldBlock` when the return ring is full.
+    pub fn return_buffer(&mut self, buffer: u32, fence: u32) -> io::Result<()> {
+        let tail = self.word(WORD_RETURNS_TAIL)?.load(Ordering::Acquire);
+        if self.returns_head.wrapping_sub(tail) >= self.frame_slots as u64 {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let slot = self.returns_head as usize & (self.frame_slots - 1);
+        self.word(self.returns_at + slot)?.store(
+            u64::from(buffer) | u64::from(fence) << 32,
+            Ordering::Relaxed,
+        );
+        self.returns_head += 1;
+        self.word(WORD_RETURNS_HEAD)?
+            .store(self.returns_head, Ordering::Release);
+        Ok(())
+    }
+
+    /// How the stream is doing.
+    pub fn status(&self) -> io::Result<StreamStatus> {
+        let mut status = StreamStatus::default();
+        ioctl(self.fd.as_fd(), IOC_STREAM_STATUS, (&raw mut status).cast())?;
+        Ok(status)
+    }
 }
 
 fn ioctl(fd: BorrowedFd<'_>, request: u32, arg: *mut libc::c_void) -> io::Result<libc::c_int> {
@@ -248,6 +404,11 @@ mod tests {
         assert_eq!(offset_of!(StreamCreate, fd), 36);
         assert_eq!(offset_of!(StreamCreate, ring_bytes), 40);
         assert_eq!(size_of::<StreamStatus>(), 40);
+        assert_eq!(size_of::<StreamBuffer>(), 24);
+        assert_eq!(offset_of!(StreamBuffer, fd), 4);
+        assert_eq!(offset_of!(StreamBuffer, addr), 8);
+        assert_eq!(offset_of!(StreamBuffer, size), 16);
+        assert_eq!(IOC_STREAM_BUFFER, 0xc018_4c86);
         assert_eq!(IOC_INFO, 0x8038_4cc0);
         assert_eq!(IOC_STREAM_CREATE, 0xc038_4cc1);
         assert_eq!(IOC_START, 0x4030_4cc2);

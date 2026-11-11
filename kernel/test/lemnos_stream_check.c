@@ -2,17 +2,23 @@
 /*
  * Frame streams: frames round trip over the ring with the test source, and
  * every way a consumer can lie about the ring or an address is refused with
- * an errno, faulting only its own stream, with nothing left held.
+ * an errno, faulting only its own stream, with nothing left held. The same
+ * for a stream whose buffers are dma-bufs of their own
+ * (LEMNOS_STREAM_CREATE_BUFFERS): each frame lands in its buffer's own memory,
+ * a buffer without memory is never filled, memory swaps only while the block
+ * can't be writing it, and every pin ends with the stream.
  *
  * Usage: lemnos_stream_check /dev/lemnos <device name> <unbind path> <heap> [no-source]
  *   no-source: the module has no test_stream_source. Only the checks that
  *   need no frames run. Otherwise the block ends up unbound.
  * Copyright (c) 2026 the Lemnos authors.
  */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/dma-heap.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -84,13 +90,11 @@ static struct lemnos_stream_create good_layout(uint32_t block, int pool_fd, int 
 	};
 }
 
-static int stream_open(struct stream *s, int ctl, uint32_t block, int pool_fd, int doorbell)
+static int stream_make(struct stream *s, int ctl, struct lemnos_stream_create c)
 {
-	struct lemnos_stream_create c = good_layout(block, pool_fd, doorbell);
-
 	memset(s, 0, sizeof(*s));
 	s->fd = -1;
-	s->doorbell = doorbell;
+	s->doorbell = c.doorbell_fd;
 	if (ioctl(ctl, LEMNOS_IOC_STREAM_CREATE, &c))
 		return -errno;
 	s->fd = c.fd;
@@ -106,6 +110,32 @@ static int stream_open(struct stream *s, int ctl, uint32_t block, int pool_fd, i
 		s->fd = -1;
 		return -errno;
 	}
+	return 0;
+}
+
+static int stream_open(struct stream *s, int ctl, uint32_t block, int pool_fd, int doorbell)
+{
+	return stream_make(s, ctl, good_layout(block, pool_fd, doorbell));
+}
+
+/* A stream with no pool: each buffer gets a dma-buf of its own. */
+static int own_open(struct stream *s, int ctl, uint32_t block)
+{
+	struct lemnos_stream_create c = good_layout(block, -1, -1);
+
+	c.flags = LEMNOS_STREAM_CREATE_BUFFERS;
+	return stream_make(s, ctl, c);
+}
+
+static int set_buffer(const struct stream *s, uint32_t buffer, int fd,
+		      struct lemnos_stream_buffer *out)
+{
+	struct lemnos_stream_buffer a = { .buffer = buffer, .fd = fd };
+
+	if (ioctl(s->fd, LEMNOS_STREAM_IOC_BUFFER, &a))
+		return -errno;
+	if (out)
+		*out = a;
 	return 0;
 }
 
@@ -812,7 +842,9 @@ static void test_refusals_at_create(int ctl, uint32_t block, int pool)
 		      "%s: EINVAL", name);                                        \
 	} while (0)
 
-	BAD_LAYOUT(flags, 1, "unknown flags");
+	BAD_LAYOUT(flags, 2, "unknown flags");
+	BAD_LAYOUT(flags, 3, "a known flag with an unknown one");
+	BAD_LAYOUT(flags, LEMNOS_STREAM_CREATE_BUFFERS, "own buffers and a pool descriptor");
 	BAD_LAYOUT(buffers, 0, "no buffers");
 	BAD_LAYOUT(buffers, LEMNOS_STREAM_MAX_BUFFERS + 1, "too many buffers");
 	BAD_LAYOUT(buffer_bytes, 0, "zero buffer bytes");
@@ -937,6 +969,301 @@ static int alloc_pool(int ctl, uint32_t block, uint64_t size)
 	return ioctl(ctl, LEMNOS_IOC_ALLOC, &a) ? -1 : a.fd;
 }
 
+/* --- buffers of their own (LEMNOS_STREAM_CREATE_BUFFERS) --- */
+
+/* One buffer's memory: from the block, so its device address is known here too. */
+struct own {
+	int fd;
+	uint64_t addr, size;
+	uint8_t *cpu;
+};
+
+static struct own own_alloc(int ctl, uint32_t block, uint64_t size)
+{
+	struct lemnos_alloc a = { .block = block, .size = size };
+	struct own o = { .fd = -1, .size = size };
+
+	if (ioctl(ctl, LEMNOS_IOC_ALLOC, &a))
+		return o;
+	o.fd = a.fd;
+	o.addr = a.addr;
+	o.cpu = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, a.fd, 0);
+	if (o.cpu == MAP_FAILED) {
+		close(o.fd);
+		o.fd = -1;
+	}
+	return o;
+}
+
+static void own_free(struct own *o)
+{
+	if (o->fd < 0)
+		return;
+	munmap(o->cpu, o->size);
+	close(o->fd);
+	o->fd = -1;
+}
+
+/* How many dma-bufs are attached to the device `name`, from the kernel's own list. */
+static int attached(const char *name)
+{
+	static char buf[1 << 18];
+	char line[160];
+	int fd = open("/sys/kernel/debug/dma_buf/bufinfo", O_RDONLY | O_CLOEXEC);
+	ssize_t n, total = 0;
+	int count = 0;
+
+	if (fd < 0)
+		return -1;
+	while (total < (ssize_t)sizeof(buf) - 1 &&
+	       (n = read(fd, buf + total, sizeof(buf) - 1 - total)) > 0)
+		total += n;
+	close(fd);
+	buf[total] = 0;
+	snprintf(line, sizeof(line), "\t%s\n", name);
+	for (const char *at = buf; (at = strstr(at, line)); at += strlen(line))
+		count++;
+	return count;
+}
+
+/* Runs this process on one CPU. The test source's work runs on the CPU that started it. */
+static void pin(int cpu)
+{
+	cpu_set_t set;
+
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	sched_setaffinity(0, sizeof(set), &set);
+}
+
+/* Everything LEMNOS_STREAM_IOC_BUFFER and the create flag refuse. No frames needed. */
+static void test_own_refusals(int ctl, uint32_t block, const char *name, int pool, int aux,
+			      int heap_fd)
+{
+	struct lemnos_stream_create c = good_layout(block, -1, -1);
+	struct lemnos_stream_buffer out;
+	struct lemnos_stream_register r;
+	struct lemnos_stream_job j;
+	struct stream s, s2;
+	struct own o[BUFFERS], spare;
+	struct dma_heap_allocation_data small = { .len = 4096, .fd_flags = O_RDWR | O_CLOEXEC };
+	int before = attached(name), ret;
+
+	c.flags = LEMNOS_STREAM_CREATE_BUFFERS;
+	c.buffers = LEMNOS_STREAM_MAX_OWN_BUFFERS + 1;
+	c.frame_slots = 128;
+	CHECK(ioctl(ctl, LEMNOS_IOC_STREAM_CREATE, &c) < 0 && errno == EINVAL,
+	      "own buffers: more than the table holds: EINVAL");
+
+	CHECK(!stream_open(&s, ctl, block, pool, -1), "a stream with a pool");
+	CHECK(set_buffer(&s, 0, aux, NULL) == -EOPNOTSUPP,
+	      "giving a buffer memory on a stream with a pool: EOPNOTSUPP");
+	stream_close(&s);
+
+	CHECK(!own_open(&s, ctl, block) && s.pool_addr == 0, "a stream with no pool, pool_addr 0");
+	CHECK(attached(name) == before, "it pins nothing yet");
+	for (uint32_t i = 0; i < BUFFERS; i++)
+		o[i] = own_alloc(ctl, block, i == 3 ? 2 * BUFFER_BYTES : BUFFER_BYTES);
+	spare = own_alloc(ctl, block, BUFFER_BYTES);
+	CHECK(o[0].fd >= 0 && o[1].fd >= 0 && o[2].fd >= 0 && o[3].fd >= 0 && spare.fd >= 0,
+	      "five dma-bufs of the block's");
+
+	CHECK(set_buffer(&s, BUFFERS, o[0].fd, NULL) == -EINVAL, "a buffer number past the last: EINVAL");
+	CHECK(set_buffer(&s, 0, -1, NULL) == -EBADF, "a bad fd: EBADF");
+	CHECK(set_buffer(&s, 0, ctl, NULL) == -EINVAL, "a file that isn't a dma-buf: EINVAL");
+	CHECK(heap_fd >= 0 && !ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &small) &&
+		      set_buffer(&s, 0, (int)small.fd, NULL) == -EINVAL,
+	      "a dma-buf smaller than a buffer: EINVAL");
+	close((int)small.fd);
+	CHECK(attached(name) == before, "a refused dma-buf isn't left pinned");
+
+	/* A job on a buffer with no memory, on a stream of its own because it ends it. */
+	CHECK(!own_open(&s2, ctl, block), "another stream with no pool");
+	j = job(0, 1, 0);
+	post(&s2, &j);
+	expect_fault(&s2, EFAULT, "a job on a buffer with no memory");
+	CHECK(set_buffer(&s2, 0, o[0].fd, NULL) == -EFAULT, "a faulted stream takes no memory");
+	stream_close(&s2);
+
+	for (uint32_t i = 0; i < BUFFERS; i++) {
+		ret = set_buffer(&s, i, o[i].fd, &out);
+		CHECK(!ret && out.addr == o[i].addr && out.size == BUFFER_BYTES,
+		      "buffer %u has its own dma-buf: %d, at %llx (the block's %llx), %llu bytes", i,
+		      ret, (unsigned long long)out.addr, (unsigned long long)o[i].addr,
+		      (unsigned long long)out.size);
+	}
+	CHECK(attached(name) == before + (int)BUFFERS, "one pin for each");
+	memset(&out, 0, sizeof(out));
+	CHECK(!set_buffer(&s, 0, o[0].fd, &out) && out.addr == o[0].addr,
+	      "the dma-buf a buffer already has: nothing changes, same address");
+	CHECK(attached(name) == before + (int)BUFFERS, "and no second pin");
+	CHECK(set_buffer(&s, 1, o[0].fd, NULL) == -EBUSY, "another buffer's dma-buf: EBUSY");
+	r = (struct lemnos_stream_register){ .fd = o[2].fd };
+	CHECK(ioctl(s.fd, LEMNOS_STREAM_IOC_REGISTER, &r) < 0 && errno == EBUSY,
+	      "registering a buffer's dma-buf: EBUSY");
+	r = (struct lemnos_stream_register){ .fd = aux };
+	CHECK(!ioctl(s.fd, LEMNOS_STREAM_IOC_REGISTER, &r), "a dma-buf registered beside them");
+	CHECK(set_buffer(&s, 3, aux, NULL) == -EBUSY, "a registered dma-buf as a buffer: EBUSY");
+
+	/* Swapping a free buffer's memory: the old pin goes, the new address is the buffer's. */
+	CHECK(!set_buffer(&s, 3, spare.fd, &out) && out.addr == spare.addr,
+	      "a free buffer's memory is swapped");
+	CHECK(attached(name) == before + (int)BUFFERS + 1, "the old dma-buf's pin went with it");
+	CHECK(!set_buffer(&s, 3, o[3].fd, &out) && out.addr == o[3].addr && out.size == BUFFER_BYTES,
+	      "and swapped back: a longer dma-buf reaches only a buffer's bytes");
+
+	/* A job holds its buffer: its memory can't change under it. */
+	j = job(1, 7, 1);
+	j.range[0] = (struct lemnos_stream_range){ .addr = o[1].addr + 512, .len = 16 };
+	post(&s, &j);
+	CHECK(kick(&s) == 0 && status(&s).jobs == 1, "a job naming a range in its own buffer: accepted");
+	CHECK(set_buffer(&s, 1, spare.fd, NULL) == -EBUSY, "swapping a buffer a job names: EBUSY");
+	CHECK(!set_buffer(&s, 1, o[1].fd, NULL), "naming what it has is still answered");
+	j = job(2, 8, 1);
+	j.range[0] = (struct lemnos_stream_range){ .addr = o[3].addr, .len = 16 };
+	post(&s, &j);
+	expect_fault(&s, EACCES, "a range in another buffer's dma-buf");
+	stream_close(&s);
+
+	/* Past a buffer's bytes but inside its (longer) dma-buf: not the buffer's, so nowhere. */
+	CHECK(!own_open(&s, ctl, block) && !set_buffer(&s, 3, o[3].fd, NULL), "again, one buffer");
+	j = job(3, 1, 1);
+	j.range[0] = (struct lemnos_stream_range){ .addr = o[3].addr + BUFFER_BYTES - 8, .len = 16 };
+	post(&s, &j);
+	expect_fault(&s, EFAULT, "a range running past the buffer's bytes");
+	stream_close(&s);
+
+	CHECK(attached(name) == before, "closing the streams released every pin (%d left)",
+	      attached(name) - before);
+	for (uint32_t i = 0; i < BUFFERS; i++)
+		own_free(&o[i]);
+	own_free(&spare);
+}
+
+/* Frames land in each buffer's own dma-buf, and in the new one after a swap. */
+static void test_own_frames(int ctl, uint32_t block, const char *name)
+{
+	struct stream s;
+	struct frame f, held[BUFFERS];
+	struct own o[BUFFERS], fresh, other;
+	struct lemnos_stream_buffer out;
+	int before = attached(name), swapped = 0, busy = 0, odd = 0;
+	unsigned int seen = 0;
+
+	for (uint32_t i = 0; i < BUFFERS; i++)
+		o[i] = own_alloc(ctl, block, BUFFER_BYTES);
+	fresh = own_alloc(ctl, block, BUFFER_BYTES);
+	other = own_alloc(ctl, block, BUFFER_BYTES);
+	CHECK(!own_open(&s, ctl, block) && fresh.fd >= 0 && other.fd >= 0 && o[3].fd >= 0,
+	      "own buffers: stream and memory");
+
+	CHECK(!run_source(&s, 0, 2), "the source runs with no buffer having memory");
+	poll(NULL, 0, 50);
+	CHECK(!pop_frame(&s, &f) && status(&s).frames == 0, "and no frame is made");
+	memset(o[2].cpu, 0x11, BUFFER_BYTES);
+	CHECK(!set_buffer(&s, 2, o[2].fd, NULL), "buffer 2 gets memory");
+	for (int n = 0; n < 2; n++) {
+		const uint64_t *w = (const uint64_t *)o[2].cpu;
+
+		CHECK(wait_frame(&s, &f, 5000) && f.buffer == 2 && w[0] == f.sequence &&
+			      w[BUFFER_BYTES / 8 - 1] == f.sequence,
+		      "frame %d is on the only buffer with memory, in that memory (buffer %u, content %llu)",
+		      n, f.buffer, (unsigned long long)w[0]);
+		give_back(&s, f.buffer, f.fence);
+	}
+
+	for (uint32_t i = 0; i < BUFFERS; i++) {
+		memset(o[i].cpu, 0x11, BUFFER_BYTES);
+		if (i != 2)
+			CHECK(!set_buffer(&s, i, o[i].fd, NULL), "buffer %u gets memory", i);
+	}
+	CHECK(!run_source(&s, 0, BUFFERS), "one frame for each buffer");
+	for (uint32_t n = 0; n < BUFFERS; n++) {
+		CHECK(wait_frame(&s, &f, 5000) && f.buffer < BUFFERS, "frame %u arrived", n);
+		if (f.buffer >= BUFFERS)
+			continue;
+		const uint64_t *w = (const uint64_t *)o[f.buffer].cpu;
+
+		CHECK(w[0] == f.sequence && w[BUFFER_BYTES / 8 - 1] == f.sequence,
+		      "buffer %u's frame is in buffer %u's own dma-buf (content %llu, sequence %llu)",
+		      f.buffer, f.buffer, (unsigned long long)w[0], (unsigned long long)f.sequence);
+		seen |= 1u << f.buffer;
+		held[f.buffer] = f;
+	}
+	CHECK(seen == (1u << BUFFERS) - 1, "every buffer was filled once (%x)", seen);
+
+	/* The consumer holds them all. Buffer 1 gets new memory before it goes back. */
+	memset(o[1].cpu, 0x22, BUFFER_BYTES);
+	memset(fresh.cpu, 0x33, BUFFER_BYTES);
+	CHECK(!set_buffer(&s, 1, fresh.fd, &out) && out.addr == fresh.addr,
+	      "a buffer the consumer holds is given new memory");
+	for (uint32_t i = 0; i < BUFFERS; i++)
+		give_back(&s, i, held[i].fence);
+	CHECK(!run_source(&s, 0, BUFFERS), "four more frames");
+	for (uint32_t n = 0; n < BUFFERS; n++) {
+		if (!wait_frame(&s, &f, 5000)) {
+			CHECK(0, "frame %u after the swap", n);
+			break;
+		}
+		if (f.buffer == 1) {
+			const uint64_t *w = (const uint64_t *)fresh.cpu;
+
+			CHECK(w[0] == f.sequence && w[BUFFER_BYTES / 8 - 1] == f.sequence,
+			      "buffer 1's next frame is in its new memory (content %llu, sequence %llu)",
+			      (unsigned long long)w[0], (unsigned long long)f.sequence);
+			swapped = 1;
+		}
+		give_back(&s, f.buffer, f.fence);
+	}
+	CHECK(swapped && o[1].cpu[0] == 0x22 && o[1].cpu[BUFFER_BYTES - 1] == 0x22,
+	      "and the memory it had is not written again (%x)", o[1].cpu[0]);
+	CHECK(attached(name) == before + (int)BUFFERS, "one pin a buffer, the old one's gone");
+
+	/*
+	 * Swapping under a running source: each call either swaps (the buffer was
+	 * free or with us) or is refused because the source had it. Nothing else.
+	 */
+	CHECK(kick(&s) == 0, "the stream is sound before the race");
+	/* The source on one CPU and the swaps on another, so they really overlap. */
+	pin(1);
+	CHECK(!run_source(&s, 0, ~0u), "the source runs flat out");
+	pin(0);
+	for (int round = 0; round < 20000; round++) {
+		int ret = set_buffer(&s, 1, round & 1 ? fresh.fd : other.fd, NULL);
+
+		swapped += ret == 0;
+		busy += ret == -EBUSY;
+		odd += ret && ret != -EBUSY;
+		/* The source sleeps when it has no buffer: keep it fed. */
+		while (pop_frame(&s, &f))
+			give_back(&s, f.buffer, f.fence);
+	}
+	CHECK(!odd && swapped > 1,
+	      "20000 swaps under the source: %d swapped, %d busy, %d anything else", swapped - 1,
+	      busy, odd);
+	{
+		cpu_set_t all;
+
+		memset(&all, 0xff, sizeof(all));
+		sched_setaffinity(0, sizeof(all), &all);
+	}
+	CHECK(!run_source(&s, 0, 0), "the source stops");
+	while (pop_frame(&s, &f))
+		give_back(&s, f.buffer, f.fence);
+	CHECK(kick(&s) == 0 && status(&s).state == LEMNOS_RING_STATE_OPEN,
+	      "and the stream is still sound");
+
+	/* Closed with frames in flight: every buffer's pin goes with the stream. */
+	CHECK(!run_source(&s, 0, ~0u), "running again");
+	stream_close(&s);
+	CHECK(attached(name) == before, "closing released every buffer's pin (%d left)",
+	      attached(name) - before);
+	for (uint32_t i = 0; i < BUFFERS; i++)
+		own_free(&o[i]);
+	own_free(&fresh);
+	own_free(&other);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 5) {
@@ -976,6 +1303,7 @@ int main(int argc, char **argv)
 		struct stream s;
 
 		test_refusals_at_create(ctl, block, pool);
+		test_own_refusals(ctl, block, name, pool, aux, h);
 		CHECK(!stream_open(&s, ctl, block, pool, -1), "a stream without the test source");
 		CHECK(run_source(&s, 0, 1) == -EPERM, "the test source is off: EPERM");
 		struct lemnos_stream_job j = job(0, 1, 1);
@@ -997,6 +1325,8 @@ int main(int argc, char **argv)
 	test_refusals_at_create(ctl, block, pool);
 	test_register(ctl, block, pool, aux);
 	test_limits(ctl, block, pool, h);
+	test_own_refusals(ctl, block, name, pool, aux, h);
+	test_own_frames(ctl, block, name);
 	test_with_frames(ctl, block, pool, pool_cpu, aux, aux_cpu);
 	test_job_driven(ctl, block, pool);
 	test_bad_jobs(ctl, block, pool, aux);
@@ -1036,9 +1366,20 @@ int main(int argc, char **argv)
 		int fresh = alloc_pool(ctl, block, POOL_BYTES);
 		struct stream s;
 
+		struct stream own;
+		struct own mem[BUFFERS];
+
 		CHECK(fresh >= 0 && !stream_open(&s, ctl, block, fresh, -1), "a stream before the unbind");
 		CHECK(!run_source(&s, 100, ~0u), "running");
 		close(fresh); /* only the stream's pin holds it now */
+		/* And one with buffers of their own, each held by nothing but its pin. */
+		CHECK(!own_open(&own, ctl, block), "a stream with no pool before the unbind");
+		for (uint32_t i = 0; i < BUFFERS; i++) {
+			mem[i] = own_alloc(ctl, block, BUFFER_BYTES);
+			CHECK(!set_buffer(&own, i, mem[i].fd, NULL), "its buffer %u has memory", i);
+			own_free(&mem[i]);
+		}
+		CHECK(!run_source(&own, 100, ~0u), "running too");
 		pid_t child = fork();
 
 		if (!child) {
@@ -1058,6 +1399,11 @@ int main(int argc, char **argv)
 
 		CHECK(poll(&p, 1, 0) == 1 && (p.revents & POLLHUP), "and poll says it ended");
 		stream_close(&s);
+		CHECK(status(&own).state == LEMNOS_RING_STATE_CLOSED, "the stream with no pool ended too");
+		CHECK(set_buffer(&own, 0, aux, NULL) == -ENODEV,
+		      "and takes no memory once the block went: ENODEV");
+		CHECK(attached(name) == 0, "nothing is left attached to the block (%d)", attached(name));
+		stream_close(&own);
 	}
 
 	close(aux);

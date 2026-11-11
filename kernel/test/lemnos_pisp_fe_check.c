@@ -169,15 +169,19 @@ static void fe_set_status(uint32_t v)
 	ioctl(hw, TCSI_IOC_FE_STATUS, &v);
 }
 
+/* Set for a stream with no pool: each buffer a dma-buf of its own. */
+static int own_buffers;
+
 static int stream_open(struct stream *s)
 {
 	struct lemnos_stream_create c = {
+		.flags = own_buffers ? LEMNOS_STREAM_CREATE_BUFFERS : 0,
 		.buffers = BUFFERS,
 		.buffer_bytes = BUFFER_BYTES,
 		.frame_slots = FRAME_SLOTS,
 		.job_slots = JOB_SLOTS,
 		.job_bytes = JOB_BYTES,
-		.pool_fd = pool_fd,
+		.pool_fd = own_buffers ? -1 : pool_fd,
 		.doorbell_fd = -1,
 	};
 
@@ -1613,6 +1617,167 @@ static int bufinfo_attached(const char *dev)
 	return n;
 }
 
+/* --- output 0 into a buffer's own dma-buf (LEMNOS_STREAM_CREATE_BUFFERS) --- */
+
+struct own {
+	int fd;
+	uint64_t addr;
+	uint8_t *cpu;
+};
+
+static struct own own_make(const char *heap)
+{
+	struct own o = { .fd = make_buf(heap, BUFFER_BYTES) };
+
+	if (o.fd < 0)
+		return o;
+	o.cpu = mmap(NULL, BUFFER_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, o.fd, 0);
+	if (o.cpu == MAP_FAILED) {
+		close(o.fd);
+		o.fd = -1;
+	} else {
+		memset(o.cpu, 0, BUFFER_BYTES);
+	}
+	return o;
+}
+
+static void own_drop(struct own *o)
+{
+	if (o->fd < 0)
+		return;
+	munmap(o->cpu, BUFFER_BYTES);
+	close(o->fd);
+	o->fd = -1;
+}
+
+static int own_set(const struct stream *s, uint32_t b, struct own *o)
+{
+	struct lemnos_stream_buffer a = { .buffer = b, .fd = o->fd };
+
+	if (ioctl(s->fd, LEMNOS_STREAM_IOC_BUFFER, &a))
+		return -errno;
+	o->addr = a.addr;
+	return 0;
+}
+
+static void simple(struct pisp_fe_config *c)
+{
+	valid(c);
+	c->global.enables &= ~(uint32_t)(0x1fe0 | PISP_FE_ENABLE_OUTPUT1);
+}
+
+static void test_own_buffers(const char *heap, const char *dev)
+{
+	struct stream s;
+	struct lemnos_pisp_fe_start a;
+	struct lemnos_stream_job j;
+	struct own o[2], fresh;
+	uint32_t buf, bytes;
+	uint64_t ident, t;
+	int ret, before = bufinfo_attached(dev);
+
+	own_buffers = 1;
+	o[0] = own_make(heap);
+	o[1] = own_make(heap);
+	fresh = own_make(heap);
+	CHECK(o[0].fd >= 0 && o[1].fd >= 0 && fresh.fd >= 0, "own buffers: three dma-bufs");
+
+	/* A job whose buffer has no memory never reaches the block. */
+	CHECK(!stream_setup(&s) && s.pool_addr == 0, "own buffers: a stream with no pool");
+	simple(cfg_slot(0));
+	j = job_for(0, 1);
+	post(&s, &j);
+	ret = kick(&s);
+	CHECK(ret == -EFAULT, "a job on a buffer with no memory is refused by the ring (got %d)", ret);
+	a = good_start(&s);
+	ret = start(&a);
+	CHECK(ret == -EFAULT && !fe_info().streaming, "and START on that stream is refused (got %d)", ret);
+	stream_close(&s);
+
+	CHECK(!stream_setup(&s), "own buffers: stream");
+	CHECK(!own_set(&s, 0, &o[0]) && !own_set(&s, 1, &o[1]) && o[0].addr != o[1].addr,
+	      "buffers 0 and 1 get memory of their own");
+	simple(cfg_slot(0));
+	j = job_for(0, 1);
+	post(&s, &j);
+	CHECK(!kick(&s), "job on buffer 1 accepted");
+	CHECK(own_set(&s, 1, &fresh) == -EBUSY, "a buffer a job names can't change memory: EBUSY");
+	a = good_start(&s);
+	ret = start(&a);
+	CHECK(!ret, "it starts (got %d)", ret);
+	expect_addr("output 0 is buffer 1's own dma-buf", OFF(output_buffer[0]), o[1].addr);
+	CHECK(own_set(&s, 1, &fresh) == -EBUSY, "nor once the block has it: EBUSY");
+	fe_fire(TFE_SOF);
+	fe_fire(TFE_EOF);
+	CHECK(pop_frame(&s, &buf, &bytes, &ident) == 1 && buf == 1 && bytes == OUT0_BYTES,
+	      "the frame was published on buffer 1");
+	CHECK(o[1].cpu[0] && o[1].cpu[OUT0_BYTES - 1] && !o[1].cpu[OUT0_BYTES],
+	      "the block's output 0 filled exactly the frame's bytes of buffer 1's own dma-buf");
+	CHECK(!o[0].cpu[0] && !fresh.cpu[0], "and nothing else");
+
+	/* The consumer holds buffer 1: it may be given new memory, and the next job writes there. */
+	CHECK(!own_set(&s, 1, &fresh) && fresh.addr != o[1].addr, "a held buffer is given new memory");
+	memset(o[1].cpu, 0, BUFFER_BYTES);
+	{
+		size_t at = s.returns_at + (s.returns_head & (FRAME_SLOTS - 1));
+
+		store(&s, at, 1ull | (uint64_t)load(&s, LEMNOS_RING_FRAMES + 4) << 32);
+		s.returns_head++;
+		store(&s, LEMNOS_RING_RETURNS_HEAD, s.returns_head);
+	}
+	simple(cfg_slot(1));
+	j = job_for(1, 1);
+	post(&s, &j);
+	CHECK(!kick(&s), "the next job on buffer 1 accepted");
+	/* This frame start has no job latched; it queues the new one for the next. */
+	fe_fire(TFE_SOF);
+	expect_addr("output 0 follows the swap", OFF(output_buffer[0]), fresh.addr);
+	fe_fire(TFE_SOF);
+	fe_fire(TFE_EOF);
+	CHECK(pop_frame(&s, &buf, &bytes, &ident) == 1 && buf == 1 && fresh.cpu[0] &&
+		      fresh.cpu[OUT0_BYTES - 1],
+	      "its frame is in the new memory");
+	CHECK(!o[1].cpu[0] && !o[1].cpu[OUT0_BYTES - 1], "and the memory it had is not written again");
+
+	/* Statistics may not be a buffer's memory any more than the pool. */
+	stream_close(&s);
+	CHECK(!stream_setup(&s) && !own_set(&s, 0, &o[0]), "stats in a buffer: stream");
+	valid(cfg_slot(0));
+	cfg_slot(0)->global.enables &= ~(uint32_t)PISP_FE_ENABLE_OUTPUT1;
+	j = job_for(0, 0);
+	j.range[1].addr = o[0].addr;
+	j.range[1].len = STATS_SIZE;
+	post(&s, &j);
+	CHECK(!kick(&s), "the ring accepts the range in the job's own buffer");
+	a = good_start(&s);
+	ret = start(&a);
+	CHECK(ret == -EACCES, "statistics in a buffer's own dma-buf is refused (got %d)", ret);
+	stream_close(&s);
+
+	/* Stopping with a frame in flight waits, and the pins end with the stream. */
+	CHECK(!stream_setup(&s) && !own_set(&s, 0, &o[0]), "stop in flight: stream");
+	simple(cfg_slot(0));
+	j = job_for(0, 0);
+	post(&s, &j);
+	a = good_start(&s);
+	CHECK(!kick(&s) && !start(&a), "started");
+	fe_fire(TFE_SOF);
+	fe_busy(40);
+	t = now_ms();
+	stream_close(&s);
+	CHECK(now_ms() - t >= 30, "closing it with a frame in flight waits for the block (%llu ms)",
+	      (unsigned long long)(now_ms() - t));
+	fe_busy(0);
+	CHECK(!fe_info().streaming, "and stops it");
+	sleep_ms(5);
+	CHECK(bufinfo_attached(dev) == before, "every pin released (%d left)",
+	      bufinfo_attached(dev) - before);
+	own_drop(&o[0]);
+	own_drop(&o[1]);
+	own_drop(&fresh);
+	own_buffers = 0;
+}
+
 /* Stops with a frame in flight and the block busy a while: every path waits. */
 static void test_stop_in_flight(const char *node, const char *unbind, const char *dev)
 {
@@ -1808,6 +1973,7 @@ int main(int argc, char **argv)
 	test_sequence();
 	test_toctou();
 	test_hostile_hw();
+	test_own_buffers(heap, dev);
 	test_stop_in_flight(node, unbind, dev);
 	printf("lemnos_pisp_fe_check: %d failures\n", failures);
 	return failures ? 1 : 0;
