@@ -192,6 +192,8 @@ consumer learns a stream's role from the contract method that named it:
 |---|---|---|
 | `image.convert/1`, `image.scaler/1`, `image.blend/1` | the job stream (a job's input images) | |
 | `npu/1` | the job stream (programs, tensors) | |
+| `codec.block/1` | the job stream (a job's work and input buffers) | |
+| `usb.function/1` | the data stream (bytes to send) | |
 | `camera.isp/1` | the config stream; the input stream | the statistics and output streams |
 | `camera.receiver/1`, `camera.frames/1` | | the frame stream |
 

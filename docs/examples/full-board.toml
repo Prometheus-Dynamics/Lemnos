@@ -1,0 +1,144 @@
+# Every key a board file has, on made-up wiring. `lemnosd --check` accepts it, and `lemnosd --sim`
+# starts on it. The simulated board has none of these buses, so a device that needs one is listed
+# as retrying with its reason, which is also what a real board shows for hardware that is not
+# there. (A driver that opens its block only when it is started shows as running until then.)
+format = "lemnos.board"        # always this text
+schema_version = 1             # a file newer than the service is refused
+
+[board]
+id = "example"                 # the name the service gives itself to clients
+
+# `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
+[[devices]]
+id = "power0"
+driver = "ina2xx"
+bus = "i2c-1"
+config = { chip = "ina238", address = 0x40, shunt_ohms = 0.010, max_current_a = 2.0 }
+
+# An I2C bus made from two GPIO lines by the RP1's PIO block. `hz` is optional.
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "pio-i2c:sda=8,scl=7,hz=400000"
+config = { accel_rate = 200, gyro_rate = 200, fifo = false }
+
+# `disabled`: listed and left alone until someone turns it on.
+[[devices]]
+id = "mag"
+driver = "bmm150"
+bus = "i2c-1"
+disabled = true
+
+# `uses`: need name to device id. A device built from other devices has no bus.
+[[devices]]
+id = "orientation"
+driver = "orientation"
+uses = { accel = "imu", gyro = "imu", mag = "mag" }
+config = { sample_rate_hz = 200 }
+
+# `uses` also names a resource for one need, when a driver has more than one.
+# A GPIO line is `gpiochipN:LINE`.
+[[devices]]
+id = "port-power"
+driver = "gpio-power-switch"
+uses = { line = "gpiochip0:16", fault = "gpiochip0:17" }
+config = { default_on = true }
+
+# An SPI device is `spidevBUS.CS`, a PWM channel `pwmchipN:CHANNEL`, a serial port its tty name.
+[[devices]]
+id = "ring-pixels"
+driver = "ws2812"
+bus = "spidev0.0"
+config = { count = 16, wire = "rgb", brightness = 255 }
+
+[[devices]]
+id = "bench"
+driver = "raw-bus"
+uses = { i2c = "i2c-1", pwm = "pwmchip0:1" }
+
+# `owner = "host"`: the operating system's own driver has this hardware. Lemnos reads it and
+# changes nothing.
+[[devices]]
+id = "fan"
+driver = "hwmon-fan"
+owner = "host"
+config = { name = "pwmfan" }
+
+# A USB device by the port it is plugged into, or by vendor and product (`usb:1a2b:3c4d`).
+# `[devices.streams.NAME]` gives the device a frame stream of shared memory.
+[[devices]]
+id = "webcam"
+driver = "uvc"
+uses = { usb = "usb:1-1.4" }
+config = { frame_bytes = 1048576 }
+
+[devices.streams.frames]
+buffers = 4                    # how many buffers the stream has
+buffer_bytes = 1048576         # the size of each
+
+# This board as a USB device, through the controller `udc:NAME` names. Its `data` stream carries
+# jobs: `job_slots` is how many can wait, `job_bytes` the largest one.
+[[devices]]
+id = "gadget"
+driver = "usb-gadget"
+uses = { function = "udc:fe980000.usb" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Example", product_name = "Example", serial = "0001", interfaces = "interface 0xff 0 0 example\nendpoint in bulk\nendpoint out bulk\n" }
+
+[devices.streams.data]
+buffers = 8
+buffer_bytes = 69632
+job_slots = 16
+job_bytes = 18
+
+# A camera: sensor, receiver and ISP are three devices. `link` says what each is wired to.
+[[devices]]
+id = "cam0-sensor"
+driver = "ov9782"
+uses = { bus = "i2c-10" }
+link = "cam0-receiver"
+
+# `memory = "dma-buf"`: one dma-buf per buffer, so the block writes straight into the memory the
+# consumer reads. `heap` names the dma-heap they come from ("system" when left out).
+[[devices]]
+id = "cam0-receiver"
+driver = "rp1-csi2"
+link = "cam0-isp"
+config = { device = "1f00110000.csi" }
+
+[devices.streams.frames]
+buffers = 8
+buffer_bytes = 2097152
+memory = "dma-buf"
+heap = "linux,cma"
+
+[[devices]]
+id = "cam0-isp"
+driver = "pisp-be"
+config = { device = "1000880000.pisp_be" }
+
+[devices.streams.config]
+buffers = 4
+buffer_bytes = 8192
+
+[devices.streams.input]
+buffers = 4
+buffer_bytes = 2097152
+memory = "dma-buf"
+heap = "linux,cma"
+
+[devices.streams.output0]
+buffers = 4
+buffer_bytes = 4194304
+memory = "dma-buf"
+heap = "linux,cma"
+
+# DMA memory for a block bound to the kernel module: `dma:` and the block's device name.
+[[devices]]
+id = "capture"
+driver = "k230-capture"
+uses = { dma = "dma:90009000.isp" }
+config = { isp = "/dev/vvcam-isp.0", mipi = "/dev/vvcam-mipi.0" }
+
+[devices.streams.frames]
+buffers = 4
+buffer_bytes = 4194304

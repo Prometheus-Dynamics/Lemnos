@@ -1,0 +1,154 @@
+# Drivers and contracts
+
+Every driver and every contract in the repository, with the state each is in. Three states:
+
+- **Serves its contract**: built into the daemon, and its contract's methods do real work.
+- **Refuses to run**: the code is there and checked, but it refuses its main job, and the row says
+  why.
+- **Library only**: code that other crates build on, or a driver that is not built into the daemon.
+  A board file cannot name it.
+
+A state says what the code does. It does not say the driver has run on hardware. **No driver here
+has been run on hardware in this form.** [Hardware status](hardware-status.md) lists what that
+leaves open, driver by driver.
+
+Each driver's own settings are documented at the top of its crate, `drivers/<crate>/src/lib.rs`.
+The name in the first column is what a board file writes after `driver =`. The commands below show
+that the names are the ones the daemon knows:
+
+```sh
+grep -c 'entry::<' service/lemnosd/src/builtin.rs
+python3 scripts/generate-builtins.py --check
+```
+
+## Chips and small parts
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C | Serves its contract. Batches only with `fifo = true` |
+| `bmm150` | `magnetometer/1` | `bus`: I2C | Serves its contract. Reads only on a host-owned device |
+| `generic-sensor` | `magnetometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. This is the [description form](writing-a-driver.md#the-description-form); a magnetometer is the only kind it covers |
+| `ina2xx` | `power-monitor/1` | `bus`: I2C; `chip`: `ina226`, `ina238` or `ina260` | Serves its contract |
+| `vcm` | `lens/1` | `bus`: I2C; `chip` | Serves its contract. The position is unknown until the first move |
+| `ws2812` | `pixels/1` | `spi`: SPI | Serves its contract |
+| `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
+| `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm` | Serves its contract. Closed by default: writes and each bus are allowed only by `config` |
+| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. When a posted exposure takes effect is an assumption until a board run |
+
+## Devices with no bus of their own
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `orientation` | `orientation/1` | `accel`, `gyro`, optional `mag`: devices | Serves its contract. No calibration: that is the caller's |
+| `fan-control` | `fan-control/1` | `fan`, `t0` and optional `t1` to `t3`: devices | Serves its contract |
+| `status-light` | `light/1` | `pixels`: a device | Serves its contract |
+| `hwmon-fan` | `fan/1` | a hwmon node, by `name` or `hwmon` | Serves its contract. Takes the fan over at the first `set_duty` and gives it back on release. A killed daemon leaves the last duty |
+| `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract |
+| `gpu-lease` | `gpu-lease/1` | nothing | Serves its contract. The lease is advisory: nothing is enforced on the GPU |
+| `host-clock` | no contract | nothing | Runs. Shows the kernel's clock source and whether an RTC set the clock, as values |
+| `hw-watchdog` | no contract | `device`: a watchdog node | Runs. Opening the node arms the watchdog; the driver feeds it. It never sets the timeout |
+
+## USB
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `uvc` | `camera.frames/1` | `usb`: a USB device; `frames` stream | Serves its contract. A frame larger than `frame_bytes` is dropped and counted |
+| `coral-loader` | no contract | `usb`: a USB device; `firmware`: a file | Runs. Loads the firmware file the board file names over DFU, then resets the device. It never reads the firmware |
+| `usb-gadget` | `usb.function/1` | `function`: `udc:NAME`; optional `data` stream | Serves its contract. A caller serves the endpoints. No isochronous endpoints |
+
+## Camera receivers and ISPs
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `rp1-csi2` | `camera.receiver/1` | the kernel module; `frames` stream of dma-bufs | Serves its contract |
+| `pisp-fe` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config` stream, optional `statistics`, `output0`, `output1` | Serves its contract. Temporal denoise and line events are not supported |
+| `pisp-be` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config`, `input`, `output0` streams, optional `output1` | Serves its contract. No statistics stream, no line events |
+| `rkcif` | `camera.receiver/1` | the vendor kernel's media graph; optional `frames` stream | Serves its contract. Routes a MIPI channel and says which ISP it feeds. Frames only on the raw path, when `frames` and `capture` are set |
+| `rkisp` | `camera.isp/1` | the vendor kernel's ISP nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream: frames come from the receiver |
+| `sunxi-vin` | `camera.receiver/1` | the vendor kernel's capture node; `frames` stream | Serves its contract |
+| `isp600` | `camera.isp/1`, `isp.isp600/1` | the vendor kernel's nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream |
+| `k230-capture` | `camera.receiver/1` | `dma`: `dma:BLOCK` from the kernel module; `frames` stream | Serves its contract. The register facts it relies on are unconfirmed |
+| `k230isp` | `camera.isp/1` | the vendor node; `config`, `statistics` streams | Refuses to run frames. Configuration and statistics only: inputs and outputs are refused, and no register that takes an address can be written |
+
+## Image blocks
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `rga` | `image.scaler/1`, `image.convert/1`, `image.blend/1` | optional `scale`, `convert`, `blend` streams; `soc` | Serves its contract. Nothing is computed in software: an operation the hardware route lacks is `NOT_SUPPORTED` |
+| `g2d` | `image.convert/1` | `jobs` stream of dma-bufs | Serves its contract |
+| `rkvpss` | `image.scaler/1` | `jobs` stream of dma-bufs | Serves its contract |
+
+## Codec blocks
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `rk-mpp` (crate `rk-mpp-codec`) | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. The caller writes the register set; the driver checks every descriptor, offset and length. JPEG blocks included |
+| `rk-iep` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract |
+| `v4l2-stateless` (crate `m2m-decode`) | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. One media request per job, with the caller's controls as bytes |
+| `a733-di` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract |
+| `k230-vpu` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. Some of the node's private requests are refused |
+| `a733-video` | `codec.block/1` | `jobs` stream | Refuses to run. It answers register reads only. Every encode or decode job and every register write is refused, because an address written into a register cannot be bounded from user space on this block |
+
+## Library crates
+
+A board file cannot name these.
+
+| Crate | What it is | Why it is not a driver |
+|---|---|---|
+| `rknpu` | `npu/1` over the vendor kernel's NPU node, each program in an IOMMU domain of its own | Not built into the daemon. Confinement holds only while the daemon is the node's sole opener, and whether a program can reach the IOMMU's own registers is not known |
+| `vip9000` | `npu/1`, with the checks | Refuses to run: `load` answers `NOT_SUPPORTED`. The block has one page table for every opener, so a job cannot be kept to its own buffers from user space. It needs a kernel-module path |
+| `k230-kpu` | `npu/1`, with the checks | Refuses to run: `load` answers `NOT_SUPPORTED`. The block has no IOMMU and no bus protection, so a job cannot be confined at all without reading the program |
+| `k230-ai2d` | The AI2D block's kernel interface, checked jobs and a scaler loop | No job reaches the block: its register map is not in the public sources. It implements no contract |
+| `k230-gsdma` | Job checks and descriptors for the DMA engine | The kernel gives user space no way to the block. It needs a kernel-module path |
+| `rkaiisp` | The AI-ISP's layouts, parameter checks and ring | Never run on the block. No contract |
+| `rk-jpeg` | The JPEG block's register and address model | Builds no job: the field layout is not public. JPEG jobs go through `rk-mpp` with the caller's registers |
+| `nonai2d` | Format conversion and overlay on the vendor's V4L2 node | Complete as a library. No contract driver wraps it |
+| `vglite` | The GPU's 2D command and stroke logic | No contract driver wraps it |
+| `rk-mpp` | The MPP service's checked jobs | Used by `rk-mpp-codec` and `rk-iep` |
+| `codec-jobs` | The job server every `codec.block/1` driver shares | A building block |
+| `v4l2-capture` | A capture node that fills a stream's own buffers | Used by `rkcif` and `sunxi-vin` |
+| `hevc` | A parameter-set and slice-header parser | Used by the library decoder in `m2m-decode`. IDR slices only |
+| `soc` | Chip description tables | Data |
+
+Crates named `drivers/<name>-sys` hold a driver's kernel interface: structures, request numbers
+and the `unsafe` that issues them. They are not drivers.
+
+## Contracts
+
+One crate each under `contracts/`. The numbers are the method numbers on the wire.
+
+| Tag | Methods | Served by |
+|---|---|---|
+| `accelerometer/1` | 1 read, 2 read_batch | `bmi088` |
+| `gyroscope/1` | 1 read, 2 read_batch | `bmi088` |
+| `magnetometer/1` | 1 read | `bmm150`, `generic-sensor` |
+| `orientation/1` | 1 read | `orientation` |
+| `temperature/1` | 1 read | `thermal-zone` |
+| `power-monitor/1` | 1 read | `ina2xx` |
+| `power-switch/1` | 1 set, 2 is_on, 3 fault | `gpio-power-switch` |
+| `fan/1` | 1 set_duty, 2 duty, 3 rpm, 4 release | `hwmon-fan` |
+| `fan-control/1` | 1 state, 2 settings, 3 set_settings, 4 curve, 5 set_curve, 6 hold, 7 release_hold, 8 set_enabled | `fan-control` |
+| `pixels/1` | 1 pixel_count, 2 set, 3 show | `ws2812` |
+| `light/1` | 1 layout, 2 show, 3 clear, 4 clear_all, 5 set_brightness | `status-light` |
+| `lens/1` | 1 range, 2 set_position, 3 position | `vcm` |
+| `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set | `raw-bus` |
+| `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
+| `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern | `ov9782` |
+| `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |
+| `camera.isp/1` | 1 info, 2 config_layout, 3 set_input, 4 set_output, 5 clear_output, 6 config_stream, 7 statistics_stream, 8 input_stream, 9 output_stream, 10 start, 11 stop, 12 counters | `pisp-be`, `pisp-fe`, `rkisp`, `isp600`, `k230isp` |
+| `isp.pisp/1` | 1 info, 2 set_front_end_compression, 3 enable_temporal_denoise, 4 reset_temporal_denoise, 5 set_line_event | `pisp-be`, `pisp-fe` |
+| `isp.isp600/1` | 1 info, 2 load_region, 3 statistics_region | `isp600` |
+| `camera.frames/1` | 1 format_count, 2 format, 3 select_format, 4 selected, 5 frame_stream, 6 start, 7 stop, 8 counters | `uvc` |
+| `image.scaler/1` | 1 info, 2 format_count, 3 format, 4 job_stream, 5 counters | `rga`, `rkvpss` |
+| `image.convert/1` | 1 info, 2 conversion_count, 3 conversion, 4 job_stream, 5 counters | `rga`, `g2d` |
+| `image.blend/1` | 1 info, 2 format_count, 3 format, 4 job_stream, 5 counters | `rga` |
+| `codec.block/1` | 1 info, 2 block, 3 job_stream, 4 counters | `rk-mpp`, `rk-iep`, `v4l2-stateless`, `a733-di`, `k230-vpu`, `a733-video` |
+| `npu/1` | 1 info, 2 job_stream, 3 load, 4 unload, 5 attach, 6 detach, 7 counters | No driver in the daemon. See the library crates above |
+| `usb.function/1` | 1 info, 2 endpoint, 3 data_stream, 4 state, 5 control_in, 6 control_out, 7 control_stall, 8 set_halt, 9 cancel, 10 counters | `usb-gadget` |
+
+A camera is not one contract. A consumer finds a `camera.sensor/1` device and follows the board
+file's `link` to its receiver and from there to its ISP. A USB camera is one device with
+`camera.frames/1`.
+
+Exposure, white balance, tuning and the rest of a camera pipeline are the caller's. So is every
+codec's bitstream work and every model: the contracts carry the caller's bytes to the block.

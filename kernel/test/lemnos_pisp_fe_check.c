@@ -1002,7 +1002,7 @@ static void test_start_format(void)
 	stream_close(&s);
 }
 
-/* The range checks of the stream, on the job ranges (D2): the ring refuses these. */
+/* The range checks of the stream, on the job ranges: the ring refuses these. */
 static void one_bad_range(const char *name, unsigned int i, uint64_t addr, uint64_t len, int err)
 {
 	struct stream s;

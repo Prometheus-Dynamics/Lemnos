@@ -1,7 +1,7 @@
 # Lemnos: the design
 
-This is the design the `next` branch builds. It is the source of truth for every brief in
-[`docs/prs/`](prs/). It is written so that an agent with no other context can work from it.
+This is the design Lemnos is built to: what it is, where its lines are drawn, and why. The other
+documents say how to use it; start from the [README](../README.md) for those.
 
 ## What Lemnos is
 
@@ -25,7 +25,7 @@ whoever needs it.
 ## The system
 
 ```text
-   helios-engine     helios-api      lemnos-orion      lemnos-ctl, tools
+   an application   another one     lemnos-orion      lemnos-ctl, tools
         |                |                |                  |
         +----------------+-------+--------+------------------+
         |                        v
@@ -47,7 +47,7 @@ whoever needs it.
         |              |                |            |          |
         |     Linux through      Linux stock        MCU     Simulated
         |       lemnos.ko         interfaces    embedded-hal  QEMU, CI
-        |      (standard)       SystemCore, PC
+        |      (standard)      guest boards, PC
         |              |
         |          lemnos.ko
         |              |
@@ -63,13 +63,13 @@ no frame crosses a socket.
 
 ```text
 engine/      abi, hal, core, macros, host, wire, client, capi, measure, package, host-static
-backends/    linux-sys, linux, v4l2, usb, mcu, sim
+backends/    linux-sys, linux, linux-stream, v4l2, usb, mcu, sim
 service/     lemnosd, ctl, orion
 kernel/      lemnos.ko source
 contracts/   one small crate per tag family
 drivers/     one flat folder per driver (and drivers/<name>-sys for its unsafe layer)
 testing/     crates/ (test tools), boards/, bench/, qemu/, boundary/, board-runs/
-docs/        this file, prs/, wire.md
+docs/        this file, the protocol specification, and the guides
 ```
 
 Rules:
@@ -144,53 +144,58 @@ uses = { accel = "imu", gyro = "imu", mag = "mag" }
 [[devices]]
 id = "cam0-sensor"
 driver = "ov9782"
-bus = "i2c-cam0"
+uses = { bus = "i2c-10" }
 link = "csi0"
 
 [[devices]]
 id = "csi0"
 driver = "rp1-csi2"
+link = "isp0"
 
 [[devices]]
 id = "isp0"
-driver = "pisp"
+driver = "pisp-fe"
 ```
+
+[Board files](boards.md) has every key.
 
 ## Cameras
 
-There is no camera driver. A camera is a sensor driver (`ov9782`, `imx296`; any chip), a receiver
-driver (`rp1-csi2`, `rkcif`, `sunxi-vin`; per chip family) and an ISP driver (`pisp`, `rkisp`; per
-chip family). The consumer finds a `camera.sensor/1` tag and follows `link` to its receiver and ISP.
+There is no camera driver. A camera is a sensor driver (`ov9782`; any chip), a receiver
+driver (`rp1-csi2`, `rkcif`, `sunxi-vin`; per chip family) and an ISP driver (`pisp-fe`, `rkisp`;
+per chip family). The consumer finds a `camera.sensor/1` tag and follows `link` to its receiver and ISP.
 On another board only the receiver and ISP drivers change, and only if the chip family is new. A USB
-camera is one driver providing `camera.frames/1`, matched on hotplug, with no board entry and no
-ISP. The sensor is driven through Lemnos, so the standard path has no kernel sensor driver and no
+camera is one driver providing `camera.frames/1`, with a board entry that names its port or its
+vendor and product, and no ISP. It binds when the camera is plugged in. The sensor is driven through Lemnos, so the standard path has no kernel sensor driver and no
 device tree sensor entry.
 
 3A, tuning and the camera pipeline are the camera stack's, not Lemnos's. A proof tool
-(`testing/crates/camera-proof`, PR D9) does what the camera stack will do later.
+(`testing/crates/camera-proof`) does what a camera stack does, as far as the contracts go.
 
 ## The block rule
 
-The Pi is the template for every hardware block. Each block gets a driver that knows how to talk to
+The BCM2712 board is the template for every hardware block. Each block gets a driver that knows how to talk to
 it and takes work from whoever calls it. No vendor library lives in Lemnos. What runs on a block (a
 compiled model, an encoder's settings, 3A) is the caller's business.
 
-| Block on the Pi | How it works |
+| Block on that board | How it works |
 |---|---|
-| Video decode | The kernel's `rpi-hevc-dec`, with our own parser on top. No vendor library. |
+| Video decode | The kernel's stateless decoder, given to a caller as `codec.block/1`. The caller parses the bitstream and supplies the controls. No vendor library. |
 | ISP (PiSP) | Lemnos exposes config and statistics. The camera stack does 3A and tuning. |
-| Coral USB | Lemnos loads firmware and carries data it never reads. |
+| A USB accelerator | Lemnos loads the firmware the board file names, and never reads it. |
 
 An NPU driver takes a compiled program as bytes and runs it. Lemnos never reads or compiles it.
 Because a program can name memory addresses, each NPU driver must confine a job to its own buffers
-using the chip's memory protection. Each NPU PR confirms this is possible on its chip.
+using the chip's memory protection. Where a chip gives user space no way to do that, the driver
+refuses to run programs, and says what a kernel path would need. [Drivers and
+contracts](drivers.md#library-crates) has the state of each.
 
 ## Backends and targets
 
 | Target | Host | Backend | Board data |
 |---|---|---|---|
 | Boards we manage | lemnosd | Linux through `lemnos.ko` | board file in the device package |
-| SystemCore | lemnosd as a guest | Linux stock interfaces, `owner = "host"` read-only | board file |
+| A board its own operating system runs | lemnosd as a guest | Linux stock interfaces, `owner = "host"` read-only | board file |
 | MCU | static table, no allocator | embedded-hal, direct calls | compiled in |
 | Other Linux boards | lemnosd | `lemnos.ko`, or the vendor kernel driver per block until module code exists | board file |
 | PC and tests | library, no daemon | stock or simulated | test data |
@@ -212,10 +217,12 @@ USB is in the backend interface on every target, in both roles: talking to somet
 
 ## The frame stream
 
-lemnosd creates buffers and a shared ring. The module marks frames and wakes the consumer. The
-consumer posts the next job (exposure, ISP config) on the ring. The module checks every address.
-Lemnos carries an opaque `u64` frame identity it never interprets. Image-block jobs use the same
-ring pattern.
+lemnosd creates buffers and a shared ring. The buffers are shared memory, or one dma-buf each when
+hardware fills them. The producer (a driver, or the module for a block whose DMA it checks) marks
+frames and wakes the consumer. The consumer posts the next job (an ISP config, an image to scale)
+on the ring. Whoever hands a job to hardware checks every buffer it names. Lemnos carries an opaque
+`u64` frame identity it never interprets. Image, codec and USB jobs use the same ring.
+[Frame streams](streams.md) has the details.
 
 ## Driver forms
 
@@ -244,13 +251,13 @@ the host tries the devices waiting on those names now and ticks the running ones
 can look. A hint only brings a retry forward, never closer than 250 ms to the device's last bind, so
 a lost event costs time and a storm of them costs nothing. The host never learns what arrived.
 
-`next` builds services with `panic = "unwind"`. Dev's `panic = "abort"` makes a driver panic
-impossible to contain.
+Services are built with `panic = "unwind"`. With `panic = "abort"` a driver's panic could not be
+contained.
 
 ## Shared interfaces
 
-Everyone builds against these. `engine/core` and `engine/macros` are the source of truth, and they
-change only through an A-series PR.
+Everyone builds against these. `engine/core`, `engine/macros` and `engine/client` are the source of
+truth; what follows is abridged.
 
 ```rust
 // engine/core. A tag is "name/major".
@@ -277,6 +284,7 @@ pub trait Lifecycle: Sized {
     const TRACKS_CALLERS: bool = false; // true to be told who is calling, and when they go
     fn caller(&mut self, caller: CallerId) {} // just before each method
     fn caller_gone(&mut self, caller: CallerId) {} // give up what it held
+    const HOST_OWNED: HostOwned = HostOwned::Refused; // whether it may bind to a host-owned device
 }
 
 // A method is its contract's position in `provides`, plus the number the contract declared.
@@ -293,22 +301,23 @@ impl Resources<'_> {
 
 // engine/client. The one way in.
 impl Client {
-    fn connect(path: &Path, name: &str) -> Result<Self, ClientError>;
-    fn list(&mut self) -> Result<&[DeviceInfo], ClientError>;
-    fn find(&mut self, tag: Tag) -> Result<DeviceRef, ClientError>;
-    fn open<C: Contract + ?Sized>(&mut self, device: &DeviceRef) -> Result<Bound<C, RemoteCaller>, ClientError>;
-    fn describe(&mut self, device: &DeviceRef) -> Result<Description, ClientError>;
+    fn connect(path: impl AsRef<Path>, name: &str) -> Result<Self, Error>;
+    fn list(&self) -> Result<Vec<DeviceEntry>, Error>;
+    fn find(&self, tag: &str) -> Result<Option<DeviceEntry>, Error>;
+    fn open<C: Contract + ?Sized>(&self, name: &str) -> Result<Bound<C, RemoteCaller>, Error>;
+    fn describe(&self, device: u32) -> Result<DeviceDescription, Error>;
 }
 ```
 
 Non-negotiable properties: 0 allocations on steady-state call, value and stream paths; nothing on
 the wire names a kind of device; bounded queues.
 
-## What comes from dev
+## What came from the earlier version
 
-`dev` is the reference and stays untouched. Read it with `git show origin/dev:<path>`.
+Lemnos was rebuilt from an empty tree. The earlier version is the `dev` branch, which stays as it
+was. Read it with `git show origin/dev:<path>`.
 
-| | From dev |
+| | From the earlier version |
 |---|---|
 | **Ported and adapted** (proven on hardware) | `abi`, `linux-sys`, `v4l2`, `usb`, `uevent`, `capi`, chip drivers, `fusion`, `light`, `pisp` and other block drivers, register maps, module personalities, `soc` |
 | **Cut down** | `hal`, `linux`, `mock`, the board parser |
@@ -317,39 +326,46 @@ the wire names a kind of device; bounded queues.
 
 ## Proof on hardware
 
-Cloud sessions can't reach a board, so board checks run afterwards in a local session on a CM5
-(Raze #2), using Lemnos's own tools with the old services stopped, compared against dev's lemnosd on
-the same scene. Timings are CM5 only.
+The code is written and tested without boards, so board checks run afterwards, one per piece of
+hardware-facing code, from the files in `testing/board-runs/`. Timings are quoted only from the
+reference board, a BCM2712 compute module, using Lemnos's own tools with the board's other
+services stopped, beside the earlier version's daemon on the same scene.
+[Testing](testing.md#board-runs) says how a run is done, and [Hardware
+status](hardware-status.md) what is still unproven.
 
-The reference set (PR B22 builds the harness):
+The reference set (`testing/bench` is its harness):
 
-- IMU at 200 Hz: delivered, misses, largest gap, read time. Board #1 earlier: 9000 of 9000, 5.1-5.2 ms
-  gap, 555-576 µs reads.
-- lemnosd CPU at idle, 50 Hz and 200 Hz. Earlier: 0.7-0.8 %, 1.4-1.5 %, 3.1-3.2 %.
-- Steady-state allocations (0 on dev), memory, thread count and binary size of `lemnosd` and
-  `lemnos-orion`.
+- IMU at 200 Hz: delivered, misses, largest gap, read time. The earlier version: 9000 of 9000,
+  5.1-5.2 ms gap, 555-576 µs reads.
+- lemnosd CPU at idle, 50 Hz and 200 Hz. The earlier version: 0.7-0.8 %, 1.4-1.5 %, 3.1-3.2 %.
+- Steady-state allocations (0 in the earlier version), memory, thread count and binary size of
+  `lemnosd` and `lemnos-orion`.
 - Light frame rate, fan steps, power readings, USB port power cycle.
 - Camera chain at 120 fps: drops, end-to-end latency, 3A latch frames.
 
 ## Known risks
 
-- **The PiSP front end (D7)** has never run through the module. The receiver is proven only at RAW10
-  60 fps. The back end round trip is 511 µs against 505 µs stock, so the gain is ownership, not
-  speed. A stuck back end still needs a reboot.
-- **Exposure and gain at frame cadence (D10)** must hit latch frames. If posting values on the ring
-  misses them, the module runs a prepared register list at frame start.
-- **Bus calls through the module (C3 to C5)** are unmeasured against the stock paths. A bus that loses
-  stays on its stock path while it's fixed.
+- **The PiSP front end** has never run through the module. The receiver was proven, in the earlier
+  version, only at RAW10 60 fps. The back end round trip there was 511 µs against 505 µs stock, so
+  the gain is ownership, not speed. A stuck back end still needs a reboot.
+- **Exposure and gain at frame cadence** must hit latch frames. If posting values on the ring
+  misses them, the module would have to run a prepared register list at frame start.
+- **Bus calls through the module** are unmeasured against the stock paths on a real bus. A bus
+  that loses stays on its stock path while it's fixed.
 - **The module has to build for every kernel we ship,** including vendor kernels.
+- **Blocks that user space cannot confine.** Some vendor kernel interfaces let any opener name any
+  address. Those drivers refuse the work until the module has a path for the block.
 
 ## Settled decisions
 
 - Lemnos is the engine; drivers and contracts are folders in this repository for now.
-- `next` is a clean slate; `dev` is a frozen reference.
-- Breaking other repositories doesn't count against a PR. The only outside test is whether the
-  capability exists. Other repositories read `next` and send requests afterwards.
+- The rebuild started from a clean slate; `dev` is a frozen reference.
+- Breaking other repositories doesn't count against a change. The only outside test is whether the
+  capability exists.
 - The GPU stays with Mesa. Lemnos holds only an advisory lease.
 - USB on Linux stays on `usbfs`.
 - K230 capture is direct through `/dev/vvcam-isp.0`. The vendor daemon is never used.
-- No vendor library lives in Lemnos (see the block rule).
+- No vendor library lives in Lemnos (see the block rule). The dynamic loader is used for one thing:
+  Lemnos's own driver packages.
+- Hardware's work is never done in software in its place. A job a block cannot do fails.
 - No sensor bridge. No look catalogue in Lemnos.

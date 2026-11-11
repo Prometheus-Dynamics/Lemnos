@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The reference set's harness. docs/design.md ("Proof on hardware") lists what it measures. The
-# methods are the ones dev's earlier figures came from (TODO.md at ed43ff3).
+# methods are the ones dev's earlier figures came from (`git show ed43ff3:TODO.md`).
 #
 #   testing/bench/bench.sh [--out DIR]
 #       Dry run, the default. Simulation only: starts lemnosd --sim on the bench board file, records

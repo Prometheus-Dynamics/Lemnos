@@ -1,0 +1,12 @@
+# A board whose one device runs a driver that is not built into the daemon: the fixture package
+# from engine/package/tests/fixture. docs/writing-a-driver.md builds, signs and loads it.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "package-example"
+
+[[devices]]
+id = "thing"
+driver = "package-fixture"
+config = { start = 41 }
