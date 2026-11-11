@@ -308,7 +308,25 @@ struct Binding<'a> {
 impl Binding<'_> {
     fn bus_name(&self, need: &str) -> Result<&'static str> {
         let spec = self.entry.spec();
-        spec.used(need).or(spec.bus).ok_or(Status::NOT_FOUND)
+        spec.used(need)
+            .or(self.bus_for(need))
+            .ok_or(Status::NOT_FOUND)
+    }
+
+    /// `bus`, when it stands in for `need`: for any need the driver doesn't declare optional.
+    /// An optional need is filled only by its own name, so one the spec doesn't name is absent.
+    fn bus_for(&self, need: &str) -> Option<&'static str> {
+        let optional = self
+            .entry
+            .manifest()
+            .needs
+            .iter()
+            .any(|declared| declared.name == need && declared.optional);
+        if optional {
+            None
+        } else {
+            self.entry.spec().bus
+        }
     }
 }
 
@@ -332,7 +350,9 @@ impl Provider for Binding<'_> {
                 })
             }
             Some(_) => true,
-            None => spec.bus.is_some_and(|bus| self.buses.provided(bus)),
+            None => self
+                .bus_for(need)
+                .is_some_and(|bus| self.buses.provided(bus)),
         }
     }
 

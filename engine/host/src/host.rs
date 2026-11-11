@@ -896,9 +896,26 @@ impl Binding<'_> {
             .spec
             .uses
             .get(need)
-            .or(self.slot.spec.bus.as_ref())
+            .or(self.bus_for(need))
             .cloned()
             .ok_or(Status::NOT_FOUND)
+    }
+
+    /// `bus`, when it stands in for `need`: for any need the driver doesn't declare optional.
+    /// An optional need is filled only by its own name, so one the board doesn't name is absent.
+    fn bus_for(&self, need: &str) -> Option<&String> {
+        let optional = self.slot.entry.is_some_and(|entry| {
+            entry
+                .manifest
+                .needs
+                .iter()
+                .any(|declared| declared.name == need && declared.optional)
+        });
+        if optional {
+            None
+        } else {
+            self.slot.spec.bus.as_ref()
+        }
     }
 
     /// The name in `uses` isn't a bus on this board, so it must be a device.

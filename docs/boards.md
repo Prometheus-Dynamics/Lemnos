@@ -63,12 +63,11 @@ order:
 1. A stream of that name under the device's `streams`.
 2. The entry of that name in `uses`. If it is the `id` of another device, the driver gets that
    device, and that device is bound first. Otherwise it is a resource name for the backend.
-3. `bus`, for any need not named in `uses`.
+3. `bus`, for any need the driver does not mark optional.
 
-So a driver with one need takes `bus`, and a driver with several names each under `uses`. A device
-with a `bus` and an optional need it does not use is the one trap: `bus` stands in for the optional
-need too, the bus is not that kind of resource, and the bind fails. Name the bus under `uses`
-instead, as the camera sensor in the example below does.
+So a driver with one need takes `bus`, and a driver with several names each under `uses`. An
+optional need is filled only by its own name, under `streams` or `uses`. When nothing names it, the
+driver runs without it, whatever `bus` says.
 
 A device that uses another is bound after it, wherever it is in the file, and waits for it to be
 running. A device may not use itself.
@@ -252,7 +251,7 @@ job_bytes = 18
 [[devices]]
 id = "cam0-sensor"
 driver = "ov9782"
-uses = { bus = "i2c-10" }
+bus = "i2c-10"
 link = "cam0-receiver"
 
 # `memory = "dma-buf"`: one dma-buf per buffer, so the block writes straight into the memory the

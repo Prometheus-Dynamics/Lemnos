@@ -144,7 +144,7 @@ uses = { accel = "imu", gyro = "imu", mag = "mag" }
 [[devices]]
 id = "cam0-sensor"
 driver = "ov9782"
-uses = { bus = "i2c-10" }
+bus = "i2c-10"
 link = "csi0"
 
 [[devices]]

@@ -94,7 +94,7 @@ job_bytes = 18
 [[devices]]
 id = "cam0-sensor"
 driver = "ov9782"
-uses = { bus = "i2c-10" }
+bus = "i2c-10"
 link = "cam0-receiver"
 
 # `memory = "dma-buf"`: one dma-buf per buffer, so the block writes straight into the memory the
