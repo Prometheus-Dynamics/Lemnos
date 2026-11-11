@@ -25,7 +25,11 @@
 //! no Rust enum crosses. Surfaces sit at per-frame or per-job granularity, not
 //! per pixel: a call across a shared-library boundary is not inlined.
 //!
-//! No dependencies, no unsafe code, `no_std`.
+//! [`package`] is the boundary between a compiled driver file and the host that loads it, and
+//! [`load`] (feature `load`, Linux) is how the host gets such a file into its process.
+//!
+//! `no_std`. No dependencies unless feature `load` is on. Unsafe code only in [`package`] and
+//! [`load`].
 
 #![no_std]
 
@@ -39,7 +43,10 @@ mod features;
 #[cfg(feature = "std")]
 mod guard;
 mod handle;
+#[cfg(all(feature = "load", target_os = "linux"))]
+pub mod load;
 mod out;
+pub mod package;
 mod sink;
 #[cfg(feature = "alloc")]
 mod slab;

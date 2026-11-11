@@ -18,7 +18,7 @@ wrappers do not each invent their own.
   `AbiVersion`, so the handshake's layout and every layout hash stay as they are.
 - `write_out` / `write_text`: a value into a buffer the caller supplies, all or nothing, with the
   length it needs and `Status::BUFFER_TOO_SMALL` when it does not fit (text also needs room for
-  its NUL). The surface makes the slice from its pointer; this crate has no unsafe code.
+  its NUL). The surface makes the slice from its pointer.
 - `guard` / `guard_or` (feature `std`): runs an `extern "C"` body and returns `Status::PANIC`
   (or a given value) instead of unwinding into C.
 
@@ -26,7 +26,35 @@ No enum crosses the boundary: every type is `#[repr(C)]` or a fixed-size integer
 newer peer sends stays defined behaviour. Surfaces sit at per-frame or per-job granularity:
 calls across a shared-library boundary are not inlined.
 
-`no_std`, no dependencies, no unsafe code.
+`no_std`. No dependencies unless feature `load` is on. Unsafe code only in `package` and `load`.
+
+## Driver packages
+
+`package` is the boundary between a compiled driver file (a package) and the host that loads it.
+It has its own version, `PACKAGE_VERSION` (1.0), and its own layout hash, `PACKAGE_LAYOUT_HASH`,
+which covers every type below and this crate's frozen hash. Its types hold pointers, so the hash
+follows the target's pointer width; a package and its host are one process and share it. The
+frozen 1.0 layouts above are untouched.
+
+- A package exports one data symbol, `lemnos_package` (`PACKAGE_ENTRY`): a `PackageDescriptor` of
+  `magic` (`PACKAGE_MAGIC`, the bytes `LEMNOSPK`), `version` (an `AbiVersion`) and `register`.
+  A host reads the first two and calls nothing unless both are right.
+- `register` hands the host one `PackageDriver`: a `PackageManifest` (the driver's name, its
+  needs, and the contracts it provides with their methods and shapes) and a `DriverTable` (bind,
+  describe, health, dispatch, tick, caller, caller_gone, drop).
+- When a driver binds, the host gives it a `HostTable`: `provided` and `take` while it binds,
+  then `release`, `device_call`, `device_health` and `i2c_transaction` on the `Handle`s it took.
+- Pointers cross inside `Str`, `Slice`, `SliceMut` and `Out`, which are made only from Rust
+  references. A null or misaligned pointer, or text that is not UTF-8, reads as empty.
+- `driver_table::<T>()` (feature `std`) builds a `DriverTable` over a `PackageInstance`, and
+  `host_table::<B, H>()` a `HostTable` over a `PackageBinding` and a `PackageHost`. Every function
+  in both runs inside `guard`. `Loaded` is a package's bound driver as the host holds it.
+
+`load` (feature `load`, Linux) gets a package into the process: `seal` copies a file's bytes into
+a sealed memfd, and `load` has the dynamic loader map that memory and returns the descriptor. It
+can look up the package entry and nothing else, and it is the only use of the dynamic loader in
+Lemnos: for Lemnos driver packages, never for a vendor library. A package is never unloaded.
+`lemnos-package` does the checking in between and is what a host uses.
 
 ## C header
 

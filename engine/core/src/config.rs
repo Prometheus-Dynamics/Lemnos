@@ -18,6 +18,11 @@ impl<'a> Config<'a> {
         Self { entries }
     }
 
+    /// Every setting, in the board file's order.
+    pub const fn entries(&self) -> &'a [(&'a str, ConfigValue<'a>)] {
+        self.entries
+    }
+
     pub fn get(&self, key: &str) -> Option<ConfigValue<'a>> {
         self.entries
             .iter()

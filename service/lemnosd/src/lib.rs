@@ -11,6 +11,7 @@ mod clock;
 mod conn;
 mod events;
 mod notify;
+pub mod packages;
 mod readers;
 mod requests;
 mod serve;

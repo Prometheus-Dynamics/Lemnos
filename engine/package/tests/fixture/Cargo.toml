@@ -1,0 +1,33 @@
+# A driver package for this crate's tests, and the example in docs/writing-a-driver.md. The tests
+# build it with cargo and load the file it makes. It is not a member of the workspace: a package
+# is built on its own, against the Lemnos crates, like any driver outside the tree.
+[package]
+name = "lemnos-package-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+# A package is a shared object.
+crate-type = ["cdylib"]
+
+[features]
+# The package's registration panics, for the test of that refusal.
+panics-registering = []
+
+[dependencies]
+lemnos-core = { path = "../../../core", features = ["std"] }
+lemnos-abi = { path = "../../../abi", features = ["std"] }
+lemnos-hal = { path = "../../../hal", features = ["std"] }
+# Test support: counts this package's own allocations.
+lemnos-measure = { path = "../../../measure", features = ["alloc-count"] }
+
+# Panics must unwind, so the package can hand them to the host as a status. This is the default;
+# it is written out because a package built with `panic = "abort"` takes the service down.
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+
+[workspace]

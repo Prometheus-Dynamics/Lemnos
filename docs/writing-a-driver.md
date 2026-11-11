@@ -8,7 +8,7 @@ are three ways to write a driver. Pick the first that fits.
 |---|---|---|
 | **Description** | A text file that describes the chip's registers. No code. | A register-based sensor with a contract that already exists, and a generic driver (`drivers/generic-sensor`) covers it. |
 | **Built in** | A crate under `drivers/` with a `#[driver]` type. | The part needs code: a state machine, a block, a protocol. |
-| **Package** | A compiled file that lemnosd loads through `lemnos-abi`. | A part that must be added to a device after the image is built. Not built yet for most drivers. |
+| **Package** | A compiled file that lemnosd loads through `lemnos-abi`. | A part that must be added to a device after the image is built. The driver is written exactly as a built-in one. |
 
 The test for where a driver lives: it goes in Lemnos when a second, unrelated product would use it
 unchanged. Which bus, address, pin or interrupt a part is wired to belongs in the board file, not in
@@ -98,9 +98,154 @@ allocator in `lemnos-measure`, as `drivers/generic-sensor` does.
 
 ## The package form
 
-Not built yet. A compiled driver loaded through `lemnos-abi` will be documented with the PR that adds
-the loader. Until then, a driver for a part that cannot be built in is a built-in driver in the
-product's own repository, linked into that product's lemnosd.
+A package is a built-in driver compiled on its own into a shared object, which lemnosd loads when
+it starts. The driver code is the same: a `#[driver]` type, `Lifecycle`, a contract. One line makes
+the crate a package. The whole example is `engine/package/tests/fixture`, which the loader's tests
+build and load.
+
+`Cargo.toml`:
+
+```toml
+[lib]
+crate-type = ["cdylib"]          # a package is a shared object
+
+[dependencies]
+lemnos-core = { path = "...", features = ["std"] }
+
+[profile.release]
+panic = "unwind"                 # the default. Never "abort": see below.
+```
+
+`src/lib.rs`, cut down from the fixture:
+
+```rust
+use lemnos_core::{Config, Dev, I2c, Lifecycle, Result, contract, driver};
+
+#[contract("example.package", version = 1)]
+pub trait Example {
+    #[method(1)]
+    fn count(&mut self) -> Result<u32>;
+    #[method(2)]
+    fn add(&mut self, a: u32, b: u32) -> Result<u32>;
+}
+
+#[driver("package-fixture", provides = [Example])]
+pub struct Fixture {
+    #[needs(optional)]
+    peer: Option<Dev<dyn Example>>,
+    #[needs(optional)]
+    bus: Option<I2c>,
+    count: u32,
+}
+
+impl Lifecycle for Fixture {
+    type Needs = FixtureNeeds;
+
+    fn start(needs: FixtureNeeds, cfg: &Config<'_>) -> Result<Self> {
+        Ok(Self {
+            peer: needs.peer,
+            bus: needs.bus,
+            count: cfg.int("start").unwrap_or(0) as u32,
+        })
+    }
+}
+
+impl Example for Fixture {
+    fn count(&mut self) -> Result<u32> {
+        self.count += 1;
+        Ok(self.count)
+    }
+
+    fn add(&mut self, a: u32, b: u32) -> Result<u32> {
+        Ok(a + b)
+    }
+}
+
+// The whole of what makes this crate a package.
+lemnos_core::export_package!(Fixture);
+```
+
+`cargo build --release` makes `liblemnos_package_fixture.so`. The board file names the driver as it
+names any other (`driver = "package-fixture"`), and tools see its contract and methods as they see a
+built-in driver's.
+
+### What the one line does
+
+`export_package!` exports one data symbol, `lemnos_package`: a descriptor holding the package magic,
+the version of the package boundary the crate was built against (with a hash of every layout that
+crosses it) and a `register` function. The service reads the magic and version first. Only when
+they match its own does it call `register`, which hands over the driver's manifest and a table of
+functions: bind, describe, health, dispatch, tick, caller, caller_gone and drop. Each of them stops a
+panic and returns it as a status. What the driver asks for when it binds comes back from the host as
+handles, so the package links none of the host's types. The types are in `lemnos_abi::package`.
+
+A package's driver can be given other devices (`Dev<dyn Contract>`) and I2C buses (`I2c`). Any other
+kind of bus is `NOT_SUPPORTED` when it binds, for now. A driver that needs one is a built-in driver.
+
+A package is built against one version of the Lemnos crates and runs only in a service built with
+the same package boundary: the same major version and the same layout hash. Anything else is
+refused with the reason, before any of its code runs.
+
+### Loading
+
+Packages are off unless lemnosd is given a directory:
+
+```text
+lemnosd --packages /usr/lib/lemnos/packages --package-keys /etc/lemnos/package-keys
+lemnosd --packages /usr/lib/lemnos/packages --package-mode open
+```
+
+`LEMNOSD_PACKAGES`, `LEMNOSD_PACKAGE_KEYS` and `LEMNOSD_PACKAGE_MODE` say the same from the
+environment. With no directory, nothing is scanned and nothing is loaded. With one, lemnosd loads
+every file in it whose name ends in `.so`, in order of name, and says on its error output what it
+loaded and what it refused and why. A file that is refused never stops another, or the service.
+
+A driver's name is taken once. A built-in driver always keeps its name: a package with the same
+name is refused. Between two packages the first by file name wins.
+
+`--package-mode` is the one switch:
+
+- **signed** (the default): a package runs only if `<file>.sig` beside it is an Ed25519 signature
+  of the whole package file, 64 raw bytes, by a key in the key file. The key file has one public key
+  per line as 64 hex digits; blank lines and lines starting with `#` are skipped. No key file, no
+  signature or a wrong one: refused.
+- **open**: any package in the directory runs.
+
+Signing with OpenSSL 3:
+
+```sh
+openssl genpkey -algorithm ed25519 -out key.pem
+openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | xxd -p -c 32 >> package-keys
+openssl pkeyutl -sign -inkey key.pem -rawin -in libdriver.so -out libdriver.so.sig
+```
+
+The file is read once, into memory that can't be changed afterwards. The signature is checked over
+those bytes and the same bytes are what gets loaded, so a file swapped after the check changes
+nothing.
+
+Lemnos loads no vendor library. The loader is for Lemnos driver packages only: a file that is not a
+whole shared object for this machine exporting `lemnos_package` with the right magic and version is
+refused without any of it being run or mapped. A package must not load a vendor library either: the
+block rule in `docs/design.md` holds for a package's driver as for any other.
+
+### What a package can break
+
+A package runs inside lemnosd's process.
+
+- **Panics and hangs are contained**, by the same code that contains a built-in driver's. A panic in
+  bind or in a method comes back as a failure, the driver is dropped, and the host binds it again
+  with the usual backoff, capped at 8 s. A call that does not return is given up on at the call
+  deadline, and the device is retried once the stuck call lets go. Other devices carry on.
+- **Memory corruption is not contained, and can't be.** A package that writes where it should not
+  can break anything in the service. Signed mode says who built a package, not that it is correct.
+- **`panic = "abort"` takes the service down.** A package must be built to unwind.
+- **A package is never unloaded.** Replacing one means restarting lemnosd.
+
+### Tests
+
+Test the driver as a built-in driver is tested, on the simulated bus: it is the same type. To test
+it as a package, do what `engine/package/tests` does: build the `cdylib`, load it with
+`lemnos_package::Loader` and run it under `lemnos_host::Host`.
 
 ## Checklist
 
