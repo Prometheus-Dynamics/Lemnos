@@ -26,6 +26,9 @@ pub enum Error {
     /// The stream's buffers are dma-bufs, and the [`StreamPlatform`](crate::StreamPlatform) in
     /// use can't map them. The stream was given back.
     StreamUnsupported,
+    /// A write to a stream that was taken to be read only
+    /// ([`Session::open_stream`](crate::Session::open_stream)). Nothing was written.
+    StreamReadOnly,
 }
 
 impl core::fmt::Display for Error {
@@ -47,6 +50,9 @@ impl core::fmt::Display for Error {
             Self::Stream(error) => write!(f, "the frame stream: {error}"),
             Self::StreamUnsupported => {
                 f.write_str("the frame stream's buffers are dma-bufs, which can't be mapped here")
+            }
+            Self::StreamReadOnly => {
+                f.write_str("the frame stream was taken to be read, not written")
             }
         }
     }
@@ -73,6 +79,7 @@ impl From<Error> for Status {
             Error::Full => Status::BUSY,
             Error::Stream(_) => Status::IO,
             Error::StreamUnsupported => Status::NOT_SUPPORTED,
+            Error::StreamReadOnly => Status::ACCESS,
         }
     }
 }

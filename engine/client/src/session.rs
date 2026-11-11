@@ -1072,10 +1072,47 @@ impl Session {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, false, platform)
+    }
+
+    /// Takes a stream this consumer fills as well as reads, as [`open_stream`](Self::open_stream)
+    /// takes one it only reads. Its buffers are mapped writable, so
+    /// [`FrameStream::write`] works: on a stream of shared memory and on a stream of dma-bufs
+    /// alike.
+    ///
+    /// Which streams those are is the device's contract's to say, and the consumer knows it
+    /// from the method that named the stream:
+    ///
+    /// - the job stream of `image.convert/1`, `image.scaler/1`, `image.blend/1` and `npu/1`:
+    ///   the consumer writes a job's input images, or a program and its tensors;
+    /// - the config stream and the input stream of `camera.isp/1`: the consumer writes each
+    ///   job's configuration, and the raw image where the ISP takes one from memory.
+    ///
+    /// Every other stream is filled by its producer alone (`camera.receiver/1` and
+    /// `camera.frames/1` frames, `camera.isp/1` statistics and outputs) and is taken with
+    /// [`open_stream`](Self::open_stream). Nothing is asked of the service that
+    /// `open_stream` doesn't ask: the memory is this consumer's and the producer's alone, and
+    /// the producer takes nothing in it on trust either way.
+    pub fn open_stream_writable(
+        &mut self,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, true, platform)
+    }
+
+    fn open_stream_as(
+        &mut self,
+        device: u32,
+        name: &str,
+        writable: bool,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
         self.settle()?;
         let (id, pick) = self.op_open_stream(device, name, &platform)?;
         let ready = self.wait(id, pick);
-        self.finish_open_stream(ready, device, name, platform)
+        self.finish_open_stream(ready, device, name, writable, platform)
     }
 
     /// Asks for a stream and starts reading the socket so its descriptors are kept.
@@ -1160,6 +1197,7 @@ impl Session {
         ready: Result<StreamAnswer, Error>,
         device: u32,
         name: &str,
+        writable: bool,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
         let taker = self.connection.as_mut().and_then(|c| c.taker.take());
@@ -1191,9 +1229,9 @@ impl Session {
             return Err(Error::Wire(lemnos_wire::WireError::Malformed));
         }
         let built = if handles {
-            FrameStream::with_handles(device, name, layout, fds, platform)
+            FrameStream::with_handles(device, name, layout, fds, writable, platform)
         } else {
-            FrameStream::new(device, name, layout, fds, platform)
+            FrameStream::new(device, name, layout, fds, writable, platform)
         };
         if built.is_err() {
             self.give_back(device, name);

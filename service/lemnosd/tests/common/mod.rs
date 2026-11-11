@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod filled;
+
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -20,6 +22,17 @@ pub struct Running {
     pub service: Option<Service>,
     pub socket: PathBuf,
     dir: PathBuf,
+}
+
+impl Running {
+    /// A running service and the directory to remove when it goes.
+    pub fn new(service: Service, socket: PathBuf, dir: PathBuf) -> Self {
+        Self {
+            service: Some(service),
+            socket,
+            dir,
+        }
+    }
 }
 
 impl Drop for Running {

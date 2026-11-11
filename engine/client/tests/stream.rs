@@ -505,8 +505,9 @@ impl StreamPlatform for Older {
         &self,
         fd: std::os::fd::BorrowedFd<'_>,
         bytes: usize,
+        writable: bool,
     ) -> std::io::Result<Box<dyn ByteMemory>> {
-        LinuxStreams.map_buffers(fd, bytes)
+        LinuxStreams.map_buffers(fd, bytes, writable)
     }
 
     fn wait_doorbell(
@@ -539,4 +540,244 @@ fn a_platform_that_cant_map_one_buffer_fails_cleanly_and_gives_the_stream_back()
         fds,
     });
     assert!(session.open_stream(1, "s", Arc::new(Older)).is_ok());
+}
+
+// Streams the consumer fills.
+
+#[test]
+fn a_stream_taken_to_be_filled_takes_writes_and_the_producer_sees_them() {
+    let (_memory, _producer, fds, pool) = good();
+    let (_host, mut session) = host_with(layout(), 3, fds);
+    let mut stream = session.open_stream_writable(7, "s", platform()).unwrap();
+    assert!(stream.is_writable());
+    stream.write(1, 5, &[1, 2, 3]).unwrap();
+    assert_eq!(&pool.as_slice()[4096 + 5..4096 + 8], [1, 2, 3]);
+    assert_eq!(&pool.as_slice()[5..8], [0, 0, 0], "buffer 0 is untouched");
+    // And reads back what the producer left in a buffer that is no frame.
+    pool.write_bytes(100, &[9; 28]).unwrap();
+    let mut out = [0u8; 28];
+    stream.read(0, 100, &mut out).unwrap();
+    assert_eq!(out, [9; 28]);
+}
+
+#[test]
+fn a_write_outside_a_buffer_is_refused_and_lands_nowhere() {
+    let (_memory, _producer, fds, pool) = good();
+    let (_host, mut session) = host_with(layout(), 3, fds);
+    let mut stream = session.open_stream_writable(7, "s", platform()).unwrap();
+    let before = pool.as_slice().to_vec();
+    // The layout has two buffers of 128 bytes, a page apart.
+    for (buffer, offset, len) in [
+        (2, 0, 1),
+        (u32::MAX, 0, 1),
+        (0, 128, 1),
+        (0, 127, 2),
+        (1, 0, 129),
+        (0, usize::MAX, 2),
+    ] {
+        let data = vec![0xEE; len];
+        assert!(
+            matches!(stream.write(buffer, offset, &data), Err(Error::Stream(_))),
+            "{buffer} {offset} {len}"
+        );
+        let mut out = vec![0; len];
+        assert!(
+            matches!(stream.read(buffer, offset, &mut out), Err(Error::Stream(_))),
+            "{buffer} {offset} {len}"
+        );
+    }
+    assert!(pool.as_slice() == before.as_slice(), "nothing was written");
+    // The last byte of a buffer is inside it.
+    stream.write(1, 127, &[4]).unwrap();
+    assert_eq!(pool.as_slice()[4096 + 127], 4);
+    assert!(session.is_connected());
+}
+
+#[test]
+fn a_stream_taken_to_be_read_refuses_a_write() {
+    let (_memory, _producer, fds, pool) = good();
+    let (_host, mut session) = host_with(layout(), 3, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    assert!(!stream.is_writable());
+    assert_eq!(stream.write(0, 0, &[1]), Err(Error::StreamReadOnly));
+    assert_eq!(pool.as_slice()[0], 0);
+    assert_eq!(Status::from(Error::StreamReadOnly), Status::ACCESS);
+    // Reading a buffer needs nothing more.
+    pool.write_bytes(4096, &[3]).unwrap();
+    let mut out = [0u8; 1];
+    stream.read(1, 0, &mut out).unwrap();
+    assert_eq!(out, [3]);
+}
+
+#[test]
+fn a_stream_of_handles_is_filled_buffer_by_buffer_within_each_buffers_own_bytes() {
+    let (layout, _producer, fds, maps) = good_handles(3);
+    let (_host, mut session) = handles_host(layout, 5, fds);
+    let mut stream = session.open_stream_writable(7, "s", platform()).unwrap();
+    assert!(stream.has_buffer_handles() && stream.is_writable());
+    stream.write(2, 120, &[7; 8]).unwrap();
+    assert_eq!(&maps[2].as_slice()[120..128], [7; 8]);
+    assert!(maps[0].as_slice().iter().all(|b| *b == 0));
+    assert!(maps[1].as_slice().iter().all(|b| *b == 0));
+    // The descriptor is a page long, as a heap rounds it; the buffer is its first 128 bytes.
+    assert!(matches!(
+        stream.write(2, 121, &[7; 8]),
+        Err(Error::Stream(_))
+    ));
+    assert_eq!(maps[2].as_slice()[128], 0);
+    assert!(matches!(stream.write(3, 0, &[1]), Err(Error::Stream(_))));
+    let mut out = [0u8; 8];
+    stream.read(2, 120, &mut out).unwrap();
+    assert_eq!(out, [7; 8]);
+}
+
+/// What a buffer's memory was told, in order: which buffer, and what.
+type Calls = Arc<std::sync::Mutex<Vec<(usize, &'static str)>>>;
+
+/// One buffer's memory, saying what is done to it.
+struct Told {
+    inner: Box<dyn ByteMemory>,
+    buffer: usize,
+    calls: Calls,
+}
+
+impl Told {
+    fn say(&self, what: &'static str) {
+        self.calls.lock().unwrap().push((self.buffer, what));
+    }
+}
+
+impl ByteMemory for Told {
+    fn bytes(&self) -> &[u8] {
+        self.inner.bytes()
+    }
+
+    fn write(&self, offset: usize, data: &[u8]) -> bool {
+        self.say("write");
+        self.inner.write(offset, data)
+    }
+
+    fn begin_read(&self) {
+        self.say("begin read");
+    }
+
+    fn end_read(&self) {
+        self.say("end read");
+    }
+}
+
+/// The Linux platform, with each buffer's memory wrapped in a [`Told`], numbered as mapped.
+#[derive(Debug, Default)]
+struct Telling {
+    calls: Calls,
+    mapped: std::sync::atomic::AtomicUsize,
+    writable: std::sync::Mutex<Vec<bool>>,
+}
+
+impl StreamPlatform for Telling {
+    fn recv_with_descriptors(
+        &self,
+        socket: std::os::fd::BorrowedFd<'_>,
+        buf: &mut [u8],
+        fds: &mut Vec<OwnedFd>,
+    ) -> std::io::Result<usize> {
+        LinuxStreams.recv_with_descriptors(socket, buf, fds)
+    }
+
+    fn map_ring(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+        bytes: usize,
+    ) -> std::io::Result<Arc<dyn WordMemory>> {
+        LinuxStreams.map_ring(fd, bytes)
+    }
+
+    fn map_buffers(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+        bytes: usize,
+        writable: bool,
+    ) -> std::io::Result<Box<dyn ByteMemory>> {
+        self.writable.lock().unwrap().push(writable);
+        LinuxStreams.map_buffers(fd, bytes, writable)
+    }
+
+    fn map_buffer(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+        bytes: usize,
+        writable: bool,
+    ) -> std::io::Result<Box<dyn ByteMemory>> {
+        self.writable.lock().unwrap().push(writable);
+        Ok(Box::new(Told {
+            inner: LinuxStreams.map_buffer(fd, bytes, writable)?,
+            buffer: self.mapped.fetch_add(1, Ordering::SeqCst),
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+
+    fn wait_doorbell(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+        timeout: Duration,
+    ) -> std::io::Result<bool> {
+        LinuxStreams.wait_doorbell(fd, timeout)
+    }
+}
+
+#[test]
+fn a_buffer_of_its_own_is_told_when_the_consumer_reads_and_writes_it() {
+    let (layout, mut producer, fds, _maps) = good_handles(3);
+    let (_host, mut session) = handles_host(layout, 5, fds);
+    let telling = Arc::new(Telling::default());
+    let mut stream = session
+        .open_stream_writable(7, "s", Arc::clone(&telling) as _)
+        .unwrap();
+    assert_eq!(*telling.writable.lock().unwrap(), [true; 3]);
+    let told = || std::mem::take(&mut *telling.calls.lock().unwrap());
+    assert!(told().is_empty(), "mapping a buffer is no access");
+
+    // A frame is read in place from the moment it is taken until it is given back.
+    assert!(producer.push_frame(slot(1, 128)).unwrap());
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(told(), [(1, "begin read")]);
+    assert_eq!(stream.bytes(&frame).len(), 128);
+    assert!(told().is_empty());
+    stream.release(frame).unwrap();
+    assert_eq!(told(), [(1, "end read")]);
+    assert_eq!(stream.try_next().unwrap(), None);
+    assert!(told().is_empty(), "no frame, no access");
+
+    // A write goes to the buffer's memory, which brackets it itself; a copy out is bracketed.
+    stream.write(2, 0, &[1, 2]).unwrap();
+    assert_eq!(told(), [(2, "write")]);
+    let mut out = [0u8; 2];
+    stream.read(2, 0, &mut out).unwrap();
+    assert_eq!(told(), [(2, "begin read"), (2, "end read")]);
+    assert_eq!(out, [1, 2]);
+    // What is refused touches nothing.
+    assert!(stream.write(2, 127, &[0; 2]).is_err());
+    assert!(stream.read(3, 0, &mut out).is_err());
+    assert!(told().is_empty());
+}
+
+#[test]
+fn a_stream_taken_to_be_read_is_mapped_read_only() {
+    let (layout, _producer, fds, _maps) = good_handles(2);
+    let (_host, mut session) = handles_host(layout, 4, fds);
+    let telling = Arc::new(Telling::default());
+    let mut stream = session
+        .open_stream(7, "s", Arc::clone(&telling) as _)
+        .unwrap();
+    assert_eq!(*telling.writable.lock().unwrap(), [false; 2]);
+    assert_eq!(stream.write(0, 0, &[1]), Err(Error::StreamReadOnly));
+    assert!(telling.calls.lock().unwrap().is_empty());
+
+    let (_memory, _producer, fds, _pool) = good();
+    let (_host, mut session) = host_with(self::layout(), 3, fds);
+    let telling = Arc::new(Telling::default());
+    session
+        .open_stream(7, "s", Arc::clone(&telling) as _)
+        .unwrap();
+    assert_eq!(*telling.writable.lock().unwrap(), [false]);
 }

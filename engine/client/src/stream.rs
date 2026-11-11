@@ -1,6 +1,11 @@
 //! Taking a frame stream: the descriptors arrive once, and after that frames come off the shared
 //! ring with no socket involved.
 //!
+//! A consumer reads frames, and on a stream its contract has it fill it also writes buffers: a
+//! job's input image, a configuration. Such a stream is taken writable
+//! ([`Session::open_stream_writable`](crate::Session::open_stream_writable)); every other is
+//! mapped read-only, so a frame can't be scribbled on by mistake.
+//!
 //! Passing descriptors and mapping memory need `unsafe`, which this crate doesn't allow. So the
 //! few things a stream needs from the operating system are the [`StreamPlatform`] trait, and the
 //! program brings the implementation: on Linux, `lemnos-linux-stream`.
@@ -32,18 +37,35 @@ pub trait StreamPlatform: Debug + Send + Sync {
     /// a mapping past the end would fault when touched.
     fn map_ring(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Arc<dyn WordMemory>>;
 
-    /// Maps `bytes` of `fd` shared and read-only, with the same check of its length.
-    fn map_buffers(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Box<dyn ByteMemory>>;
+    /// Maps `bytes` of `fd` shared, with the same check of its length: read-only, or writable
+    /// too when `writable` is set, which a consumer asks for on a stream it fills. The memory's
+    /// [`ByteMemory::write`] works only on a writable mapping.
+    fn map_buffers(
+        &self,
+        fd: BorrowedFd<'_>,
+        bytes: usize,
+        writable: bool,
+    ) -> io::Result<Box<dyn ByteMemory>>;
 
-    /// Maps the first `bytes` of `fd` shared and read-only: one buffer of a stream whose buffers
-    /// are a descriptor each (dma-bufs). Fails unless `fd` is at least `bytes` long and can never
+    /// Maps the first `bytes` of `fd` shared, read-only or writable as
+    /// [`map_buffers`](Self::map_buffers) does: one buffer of a stream whose buffers are a
+    /// descriptor each (dma-bufs). Fails unless `fd` is at least `bytes` long and can never
     /// get shorter, since a mapping past the end would fault when touched. It may be longer: a
     /// dma-heap rounds up.
     ///
+    /// A device shares this memory. The mapping tells the kernel around each access by the
+    /// processor (`DMA_BUF_IOCTL_SYNC` on Linux): inside [`ByteMemory::write`], and between
+    /// [`ByteMemory::begin_read`] and [`ByteMemory::end_read`].
+    ///
     /// A platform without this can't take such a stream, and opening one fails with nothing
     /// mapped. That is what this default does.
-    fn map_buffer(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Box<dyn ByteMemory>> {
-        let _ = (fd, bytes);
+    fn map_buffer(
+        &self,
+        fd: BorrowedFd<'_>,
+        bytes: usize,
+        writable: bool,
+    ) -> io::Result<Box<dyn ByteMemory>> {
+        let _ = (fd, bytes, writable);
         Err(io::ErrorKind::Unsupported.into())
     }
 
@@ -104,6 +126,8 @@ pub struct FrameStream {
     name: String,
     ring: Consumer,
     pool: Pool,
+    /// Whether the buffers were mapped to be written too.
+    writable: bool,
     doorbell: OwnedFd,
     platform: Arc<dyn StreamPlatform>,
 }
@@ -135,6 +159,7 @@ impl FrameStream {
         name: &str,
         layout: Layout,
         fds: Vec<OwnedFd>,
+        writable: bool,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<Self, Error> {
         let layout = layout.checked().map_err(Error::Stream)?;
@@ -147,7 +172,7 @@ impl FrameStream {
             .map_ring(ring_fd.as_fd(), layout.ring_bytes())
             .map_err(failed)?;
         let pool = platform
-            .map_buffers(buffers_fd.as_fd(), pool_bytes)
+            .map_buffers(buffers_fd.as_fd(), pool_bytes, writable)
             .map_err(failed)?;
         let ring = Consumer::attach(ring_memory, layout).map_err(Error::Stream)?;
         Ok(Self {
@@ -155,6 +180,7 @@ impl FrameStream {
             name: name.to_string(),
             ring,
             pool: Pool::Whole(pool),
+            writable,
             doorbell,
             platform,
         })
@@ -162,12 +188,14 @@ impl FrameStream {
 
     /// Builds the stream from what StreamHandles carried: the ring, the doorbell, then one
     /// descriptor per buffer. Any failure closes every descriptor. The buffers' descriptors
-    /// close once they are mapped; the mappings keep the memory.
+    /// close once they are mapped; the mappings keep the memory, and whatever hold on it the
+    /// platform needs to tell the kernel about its accesses.
     pub(crate) fn with_handles(
         device: u32,
         name: &str,
         layout: Layout,
         fds: Vec<OwnedFd>,
+        writable: bool,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<Self, Error> {
         let layout = layout.checked().map_err(Error::Stream)?;
@@ -189,7 +217,7 @@ impl FrameStream {
         for fd in fds {
             buffers.push(
                 platform
-                    .map_buffer(fd.as_fd(), buffer_bytes)
+                    .map_buffer(fd.as_fd(), buffer_bytes, writable)
                     .map_err(|error| match error.kind() {
                         io::ErrorKind::Unsupported => Error::StreamUnsupported,
                         _ => failed(error),
@@ -202,6 +230,7 @@ impl FrameStream {
             name: name.to_string(),
             ring,
             pool: Pool::Each(buffers.into()),
+            writable,
             doorbell,
             platform,
         })
@@ -238,6 +267,10 @@ impl FrameStream {
     /// The next frame, if one has arrived. Never waits and allocates nothing.
     pub fn try_next(&mut self) -> Result<Option<HeldFrame>, Error> {
         let frame = self.ring.pop_frame().map_err(Error::Stream)?;
+        if let Some(memory) = frame.as_ref().and_then(|slot| self.own_memory(slot.buffer)) {
+            // The frame is read in place from here until it is given back.
+            memory.begin_read();
+        }
         Ok(frame.map(|slot| HeldFrame {
             buffer: slot.buffer,
             bytes: slot.bytes,
@@ -289,8 +322,103 @@ impl FrameStream {
         }
     }
 
+    /// The mapping of `buffer` alone, on a stream whose buffers are a descriptor each.
+    fn own_memory(&self, buffer: u32) -> Option<&dyn ByteMemory> {
+        match &self.pool {
+            Pool::Whole(_) => None,
+            Pool::Each(buffers) => buffers.get(buffer as usize).map(|memory| &**memory),
+        }
+    }
+
+    /// The memory `len` bytes at `offset` of `buffer` are in, and where in it. Refused for a
+    /// buffer the stream doesn't have and for a range that isn't inside the buffer.
+    fn place(
+        &self,
+        buffer: u32,
+        offset: usize,
+        len: usize,
+    ) -> Result<(&dyn ByteMemory, usize), Error> {
+        let layout = self.ring.layout();
+        if buffer >= layout.buffers {
+            return Err(Error::Stream(RingError::BadBuffer));
+        }
+        let inside = offset
+            .checked_add(len)
+            .is_some_and(|end| end <= layout.buffer_bytes as usize);
+        if !inside {
+            return Err(Error::Stream(RingError::BadLength));
+        }
+        match &self.pool {
+            Pool::Whole(pool) => {
+                let start = layout
+                    .buffer_offset(buffer)
+                    .and_then(|at| at.checked_add(offset))
+                    .ok_or(Error::Stream(RingError::BadBuffer))?;
+                Ok((&**pool, start))
+            }
+            Pool::Each(buffers) => buffers
+                .get(buffer as usize)
+                .map(|memory| (&**memory, offset))
+                .ok_or(Error::Stream(RingError::BadBuffer)),
+        }
+    }
+
+    /// Whether the stream was taken to be filled ([`Session::open_stream_writable`]), so that
+    /// [`write`](Self::write) works.
+    ///
+    /// [`Session::open_stream_writable`]: crate::Session::open_stream_writable
+    #[must_use]
+    pub const fn is_writable(&self) -> bool {
+        self.writable
+    }
+
+    /// Copies `data` into `buffer` at `offset`: a job's input image, a configuration, a
+    /// program. Only on a stream taken with [`Session::open_stream_writable`]; on any other it
+    /// is [`Error::StreamReadOnly`]. A buffer the stream doesn't have, or a range that isn't
+    /// inside the buffer, is refused and nothing is written. Never waits and allocates nothing.
+    ///
+    /// The memory is shared with the producer, and nothing here knows which buffer is whose at
+    /// the moment: the stream's contract does. Write a buffer before posting the job that names
+    /// it, and not again until that job has completed; never write a frame the producer may
+    /// still be filling. The producer takes nothing in a buffer on trust, so a write at the
+    /// wrong time costs the writer its own result and nothing else.
+    ///
+    /// On a stream of dma-bufs the kernel is told around the copy, so a device that is handed
+    /// the buffer next sees what was written.
+    ///
+    /// [`Session::open_stream_writable`]: crate::Session::open_stream_writable
+    pub fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Result<(), Error> {
+        if !self.writable {
+            return Err(Error::StreamReadOnly);
+        }
+        let (memory, start) = self.place(buffer, offset, data.len())?;
+        if memory.write(start, data) {
+            Ok(())
+        } else {
+            Err(Error::Stream(RingError::BadLength))
+        }
+    }
+
+    /// Copies from `buffer` at `offset` into `out`, for a buffer that isn't a frame: what a
+    /// job left in a buffer the consumer named (a program's outputs, say). A frame is read in
+    /// place with [`bytes`](Self::bytes). Refused as [`write`](Self::write) is for a buffer or
+    /// a range the stream doesn't have. Never waits and allocates nothing.
+    pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<(), Error> {
+        let (memory, start) = self.place(buffer, offset, out.len())?;
+        memory.begin_read();
+        let copied = start
+            .checked_add(out.len())
+            .and_then(|end| memory.bytes().get(start..end))
+            .map(|from| out.copy_from_slice(from));
+        memory.end_read();
+        copied.ok_or(Error::Stream(RingError::BadLength))
+    }
+
     /// Gives a frame's buffer back to the producer. The frame is gone either way.
     pub fn release(&mut self, frame: HeldFrame) -> Result<(), Error> {
+        if let Some(memory) = self.own_memory(frame.buffer) {
+            memory.end_read();
+        }
         match self.ring.release(frame.buffer, frame.fence) {
             Ok(true) => Ok(()),
             Ok(false) => Err(Error::Stream(RingError::BadIndex)),

@@ -161,11 +161,31 @@ impl AsyncClient {
         name: &str,
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, false, platform).await
+    }
+
+    /// See [`Session::open_stream_writable`].
+    pub async fn open_stream_writable(
+        &mut self,
+        device: u32,
+        name: &str,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
+        self.open_stream_as(device, name, true, platform).await
+    }
+
+    async fn open_stream_as(
+        &mut self,
+        device: u32,
+        name: &str,
+        writable: bool,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<FrameStream, Error> {
         self.settle().await?;
         let (id, pick) = self.session.op_open_stream(device, name, &platform)?;
         let ready = self.wait(id, pick).await;
         self.session
-            .finish_open_stream(ready, device, name, platform)
+            .finish_open_stream(ready, device, name, writable, platform)
     }
 
     /// See [`Session::close_stream`].

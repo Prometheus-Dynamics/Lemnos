@@ -4,7 +4,9 @@
 //! [`Session`] is the same thing owned by one thread, with
 //! [`Session::send_call`] and [`Session::poll`] for code that must never wait.
 //! A device's frame stream is taken with [`Session::open_stream`], which needs a
-//! [`StreamPlatform`] for what only the operating system can do.
+//! [`StreamPlatform`] for what only the operating system can do. A stream whose buffers the
+//! consumer fills (a job's input image, a configuration) is taken with
+//! [`Session::open_stream_writable`] and filled with [`FrameStream::write`].
 //! The `tokio` feature adds `AsyncClient`. All three share one connection
 //! core, which reconnects by itself, restores subscriptions, and finds handles
 //! again by name and tag after the service restarts.

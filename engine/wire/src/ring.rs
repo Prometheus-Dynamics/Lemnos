@@ -21,9 +21,25 @@ pub trait WordMemory: Send + Sync {
     fn words(&self) -> &[AtomicU64];
 }
 
-/// The frame buffers, as the consumer reads them.
+/// The frame buffers, as the consumer reads them and, on a stream it fills, writes them.
 pub trait ByteMemory: Send + Sync {
     fn bytes(&self) -> &[u8];
+
+    /// Copies `data` to `offset`. `false`, and nothing written, when the range isn't inside the
+    /// memory or the memory was mapped to be read only, which is what this default is.
+    fn write(&self, offset: usize, data: &[u8]) -> bool {
+        let _ = (offset, data);
+        false
+    }
+
+    /// The consumer starts reading this memory in place, and goes on until
+    /// [`end_read`](Self::end_read). Memory a device also uses (a dma-buf) tells the kernel, so
+    /// the processor sees what the device wrote. Nothing for any other memory, which is this
+    /// default.
+    fn begin_read(&self) {}
+
+    /// The consumer has finished the reading it began with [`begin_read`](Self::begin_read).
+    fn end_read(&self) {}
 }
 
 impl WordMemory for Box<[AtomicU64]> {
