@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The rknpu driver's unsafe layer: a session on the vendor kernel's NPU DRM node that issues the driver's checked requests and maps only the objects it made"
+description = "The rknpu driver's kernel interface: the NPU DRM node's layouts, the checked requests, and a session that issues only those and maps only the objects it made"
 
 # One of the crates allowed `unsafe`, with the same lint table as lemnos-linux-sys: every block
 # carries a `SAFETY` comment and holds one operation.
@@ -23,9 +23,8 @@ unimplemented = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 
-# Linux only. The traits, requests and layouts come from `lemnos-driver-rknpu`, which holds no
-# `unsafe` and does not depend on this crate.
+# Linux only. The kernel's layouts and the checked requests are here; `lemnos-driver-rknpu`, which
+# holds no `unsafe`, depends on this crate and implements its traits on these types.
 [target.'cfg(target_os = "linux")'.dependencies]
-lemnos-driver-rknpu = { path = "../rknpu" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 libc.workspace = true

@@ -174,6 +174,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | Check | What a board has to show |
 |---|---|
 | [`E32.md`](../testing/board-runs/E32.md) | `rknpu`: a domain per program, fault handling, whether a program can reach the IOMMU's own registers, a real program |
+| [`G2.md`](../testing/board-runs/G2.md) | `rknpu` in the daemon: bound from a board file, a run through `lemnos-ctl`, a caller that goes, the node unbound and bound again |
 | [`E33.md`](../testing/board-runs/E33.md) | `vip9000`: confirms the facts behind its refusal to run |
 | [`E34.md`](../testing/board-runs/E34.md) | `k230-kpu`: confirms the facts behind its refusal to run |
 | [`E10.md`](../testing/board-runs/E10.md) | `rkaiisp`: layouts, node order, what the kernel refuses |

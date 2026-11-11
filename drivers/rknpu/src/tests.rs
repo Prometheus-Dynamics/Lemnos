@@ -5,11 +5,10 @@
 //! addresses a program holds through that mapping, so a program that names an address outside
 //! its domain faults. No device node is opened.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io;
 use std::mem::{align_of, offset_of, size_of};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use lemnos_contract_npu::{Npu, RESULT_BYTES, RunJob, RunResult, RunStatus};
 use lemnos_core::{Decode, Encode, Reader, Status, Writer};
@@ -386,6 +385,7 @@ fn queries_are_reads_and_the_domain_probe() {
 // The played kernel
 
 const BASE_IOVA: u64 = 0x1000_0000;
+const ENODEV: i32 = 19;
 const PAGE: u64 = 4096;
 
 #[derive(Clone, Debug)]
@@ -417,17 +417,19 @@ struct Kernel {
     files: u32,
     fail_opens: u32,
     fail_destroys: u32,
+    /// The device was removed: opens fail, and every call on an open file answers `ENODEV`.
+    gone: bool,
     record: bool,
     seen: Vec<Seen>,
     submits: u64,
     /// Called as each run starts, with the runs so far, so a test can act on the stream while
     /// the block runs.
-    hook: Option<Box<dyn FnMut(u64)>>,
+    hook: Option<Box<dyn FnMut(u64) + Send>>,
 }
 
 impl Kernel {
-    fn new(switching: bool) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(Self {
+    fn new(switching: bool) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self {
             iommu: true,
             switching,
             next_handle: 1,
@@ -472,14 +474,17 @@ impl Kernel {
 }
 
 struct Node {
-    kernel: Rc<RefCell<Kernel>>,
+    kernel: Arc<Mutex<Kernel>>,
 }
 
 impl Device for Node {
     type Session = PlayedSession;
 
     fn open(&mut self) -> io::Result<PlayedSession> {
-        let mut k = self.kernel.borrow_mut();
+        let mut k = self.kernel.lock().unwrap();
+        if k.gone {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
         if k.fail_opens > 0 {
             k.fail_opens -= 1;
             return Err(io::Error::from(io::ErrorKind::NotFound));
@@ -494,7 +499,7 @@ impl Device for Node {
 }
 
 struct PlayedSession {
-    kernel: Rc<RefCell<Kernel>>,
+    kernel: Arc<Mutex<Kernel>>,
     file: u32,
     memory: BTreeMap<u32, Vec<u8>>,
 }
@@ -536,7 +541,10 @@ impl PlayedSession {
 
 impl Session for PlayedSession {
     fn query(&mut self, query: Query) -> io::Result<u32> {
-        let mut k = self.kernel.borrow_mut();
+        let mut k = self.kernel.lock().unwrap();
+        if k.gone {
+            return Err(io::Error::from_raw_os_error(ENODEV));
+        }
         Ok(match query {
             Query::IommuEnabled => u32::from(k.iommu),
             Query::Domain => k.current,
@@ -551,12 +559,15 @@ impl Session for PlayedSession {
     }
 
     fn create(&mut self, request: Create) -> io::Result<Object> {
+        if self.kernel.lock().unwrap().gone {
+            return Err(io::Error::from_raw_os_error(ENODEV));
+        }
         let raw = request.to_raw();
         assert_eq!(raw.handle, 0);
         assert!(raw.size > 0);
         let size = raw.size.div_ceil(PAGE) * PAGE;
         let kernel_mapped = raw.flags & uapi::mem::KERNEL_MAPPING != 0;
-        let (handle, iova) = self.kernel.borrow_mut().make(
+        let (handle, iova) = self.kernel.lock().unwrap().make(
             self.file,
             raw.iommu_domain_id as u32,
             size,
@@ -578,7 +589,10 @@ impl Session for PlayedSession {
     }
 
     fn destroy(&mut self, handle: u32) -> io::Result<()> {
-        let mut k = self.kernel.borrow_mut();
+        let mut k = self.kernel.lock().unwrap();
+        if k.gone {
+            return Err(io::Error::from_raw_os_error(ENODEV));
+        }
         if k.fail_destroys > 0 {
             // `rknpu_gem_destroy_ioctl` gives up when the device stays in another domain.
             k.fail_destroys -= 1;
@@ -592,8 +606,11 @@ impl Session for PlayedSession {
     }
 
     fn submit(&mut self, run: &Run) -> io::Result<()> {
-        let mut guard = self.kernel.borrow_mut();
+        let mut guard = self.kernel.lock().unwrap();
         let k = &mut *guard;
+        if k.gone {
+            return Err(io::Error::from_raw_os_error(ENODEV));
+        }
         let body = k
             .objects
             .get(&run.body())
@@ -720,7 +737,7 @@ fn completion(stream: &MockStream) -> (u64, RunStatus) {
 
 /// Loads `framed` from `buffer` and attaches `slots` (buffer, bytes) in order.
 fn load<D: Device>(
-    claim: &mut Claim<'_, D>,
+    claim: &mut Claim<D>,
     stream: &mut MockStream,
     buffer: u32,
     framed: &Framed,
@@ -736,7 +753,7 @@ fn load<D: Device>(
 }
 
 fn run_one<D: Device>(
-    claim: &mut Claim<'_, D>,
+    claim: &mut Claim<D>,
     stream: &mut MockStream,
     job: RunJob,
 ) -> (u64, RunStatus) {
@@ -754,9 +771,10 @@ fn job(identity: u64, program: u32, result: u32) -> RunJob {
 }
 
 /// The handles the claim holds for program `program`'s domain, sorted.
-fn handles_in(kernel: &Rc<RefCell<Kernel>>, domain: u32) -> Vec<u32> {
+fn handles_in(kernel: &Arc<Mutex<Kernel>>, domain: u32) -> Vec<u32> {
     kernel
-        .borrow()
+        .lock()
+        .unwrap()
         .objects
         .iter()
         .filter(|(_, o)| o.domain == domain)
@@ -787,7 +805,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
     // While the block runs the second job, the consumer takes the first one's result, gives its
     // buffer back and posts a third job whose result is written into that buffer.
     let shared = stream.clone();
-    kernel.borrow_mut().hook = Some(Box::new(move |run| {
+    kernel.lock().unwrap().hook = Some(Box::new(move |run| {
         if run != 2 {
             return;
         }
@@ -809,7 +827,7 @@ fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
 #[test]
 fn a_block_without_an_iommu_is_not_claimed() {
     let kernel = Kernel::new(true);
-    kernel.borrow_mut().iommu = false;
+    kernel.lock().unwrap().iommu = false;
     let mut service = Service::new(Node {
         kernel: kernel.clone(),
     });
@@ -823,7 +841,7 @@ fn a_failed_open_backs_off_doubling_to_eight_seconds_and_never_gives_up() {
     assert_eq!(backoff_ns(6), 8_000_000_000);
     assert_eq!(backoff_ns(60), 8_000_000_000);
     let kernel = Kernel::new(true);
-    kernel.borrow_mut().fail_opens = 3;
+    kernel.lock().unwrap().fail_opens = 3;
     let mut service = Service::new(Node {
         kernel: kernel.clone(),
     });
@@ -894,7 +912,7 @@ fn a_loaded_program_runs_on_copies_of_its_attached_buffers() {
     assert_eq!(claim.counters().jobs, 1);
     // The run named its program's domain, and the block could reach exactly its body and the
     // two slots' objects.
-    let seen = kernel.borrow().seen.clone();
+    let seen = kernel.lock().unwrap().seen.clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].domain, 1);
     assert_eq!(seen[0].reachable.len(), 3);
@@ -936,7 +954,7 @@ fn a_run_that_cannot_start_is_refused_and_nothing_reaches_the_block() {
         run_one(&mut claim, &mut stream, job(5, program, 3)).1,
         RunStatus::Refused
     );
-    assert_eq!(kernel.borrow().submits, 0);
+    assert_eq!(kernel.lock().unwrap().submits, 0);
     assert_eq!(claim.counters().errors, 5);
     assert_eq!(claim.last_failure(), Some(Failure::Refused));
 }
@@ -1105,7 +1123,7 @@ fn each_program_runs_in_a_domain_holding_only_its_own_objects() {
         run_one(&mut claim, &mut stream, job(2, b, 7)).1,
         RunStatus::Done
     );
-    let seen = kernel.borrow().seen.clone();
+    let seen = kernel.lock().unwrap().seen.clone();
     // Body, scratch and two slots for a; body and two slots for b; nothing of the other.
     assert_eq!(seen[0].domain, da.id());
     assert_eq!(seen[0].reachable, handles_in(&kernel, da.id()));
@@ -1144,7 +1162,8 @@ fn a_program_naming_another_programs_address_faults() {
     );
     // Every address a's objects have, in a's domain.
     let targets: Vec<(u64, u64)> = kernel
-        .borrow()
+        .lock()
+        .unwrap()
         .objects
         .values()
         .map(|o| (o.iova, o.size))
@@ -1215,7 +1234,7 @@ fn a_kernel_without_domain_switching_takes_one_program_at_a_time() {
         run_one(&mut claim, &mut stream, job(1, a, 3)).1,
         RunStatus::Done
     );
-    let seen = kernel.borrow().seen.clone();
+    let seen = kernel.lock().unwrap().seen.clone();
     assert_eq!(seen[0].reachable, handles_in(&kernel, 0));
     assert_eq!(seen[0].reachable.len(), 3);
     claim.unload(a).unwrap();
@@ -1232,7 +1251,7 @@ fn a_kernel_without_domain_switching_takes_one_program_at_a_time() {
         run_one(&mut claim, &mut stream, job(2, b, 7)).1,
         RunStatus::Done
     );
-    assert_eq!(kernel.borrow().seen[1].reachable.len(), 3);
+    assert_eq!(kernel.lock().unwrap().seen[1].reachable.len(), 3);
 }
 
 #[test]
@@ -1254,7 +1273,7 @@ fn an_object_whose_destroy_failed_keeps_its_domain_out_of_use() {
     let domain = claim.program_domain(a).unwrap();
     // Re-attaching slot 0 destroys the old copy; the kernel refuses, so the old copy stays
     // mapped in a's domain, attached to nothing.
-    kernel.borrow_mut().fail_destroys = 2;
+    kernel.lock().unwrap().fail_destroys = 2;
     claim.attach(&mut stream, a, 0, 8, 4).unwrap();
     assert_eq!(handles_in(&kernel, domain.id()).len(), 4);
     // The run first tries again (refused once more), then refuses to start beside it.
@@ -1262,22 +1281,20 @@ fn an_object_whose_destroy_failed_keeps_its_domain_out_of_use() {
         run_one(&mut claim, &mut stream, job(1, a, 3)).1,
         RunStatus::Refused
     );
-    assert_eq!(kernel.borrow().submits, 0);
+    assert_eq!(kernel.lock().unwrap().submits, 0);
     // The next try frees it, and the run sees only what is attached.
     assert_eq!(
         run_one(&mut claim, &mut stream, job(2, a, 3)).1,
         RunStatus::Done
     );
-    assert_eq!(
-        kernel.borrow().seen[0].reachable,
-        handles_in(&kernel, domain.id())
-    );
-    assert_eq!(kernel.borrow().seen[0].reachable.len(), 3);
+    let handles = handles_in(&kernel, domain.id());
+    assert_eq!(kernel.lock().unwrap().seen[0].reachable, handles);
+    assert_eq!(kernel.lock().unwrap().seen[0].reachable.len(), 3);
     // An unload whose destroys fail leaves the domain dirty: the next load takes another one.
-    kernel.borrow_mut().fail_destroys = 1;
+    kernel.lock().unwrap().fail_destroys = 1;
     claim.unload(a).unwrap();
     assert_eq!(handles_in(&kernel, domain.id()).len(), 1);
-    kernel.borrow_mut().fail_destroys = 1;
+    kernel.lock().unwrap().fail_destroys = 1;
     let b = load(
         &mut claim,
         &mut stream,
@@ -1321,11 +1338,11 @@ fn unload_and_detach_unmap_everything_they_made() {
         run_one(&mut claim, &mut stream, job(1, b, 7)).1,
         RunStatus::Done
     );
-    assert_eq!(kernel.borrow().seen[0].reachable.len(), 3);
+    assert_eq!(kernel.lock().unwrap().seen[0].reachable.len(), 3);
     // Dropping the claim destroys the rest.
     let file = 1;
     drop(claim);
-    assert_eq!(kernel.borrow().ours(file), 0);
+    assert_eq!(kernel.lock().unwrap().ours(file), 0);
 }
 
 #[test]
@@ -1347,12 +1364,12 @@ fn another_opener_in_the_same_domain_is_beyond_the_driver() {
     )
     .unwrap();
     let domain = claim.program_domain(a).unwrap().id();
-    kernel.borrow_mut().make(99, domain, PAGE, false);
+    kernel.lock().unwrap().make(99, domain, PAGE, false);
     assert_eq!(
         run_one(&mut claim, &mut stream, job(1, a, 3)).1,
         RunStatus::Done
     );
-    assert_eq!(kernel.borrow().seen[0].foreign, 1);
+    assert_eq!(kernel.lock().unwrap().seen[0].foreign, 1);
 }
 
 #[test]
@@ -1401,9 +1418,9 @@ fn runs_in_a_row_allocate_nothing() {
         &[(1, 64), (2, 64)],
     )
     .unwrap();
-    kernel.borrow_mut().record = false;
+    kernel.lock().unwrap().record = false;
     let results = [3u32, 4, 5, 6];
-    let round = |n: u64, stream: &mut MockStream, claim: &mut Claim<'_, Node>| {
+    let round = |n: u64, stream: &mut MockStream, claim: &mut Claim<Node>| {
         assert_eq!(claim.serve(stream, n), Ok(results.len() as u32));
         for _ in results {
             let frame = stream.take_frame().unwrap();
@@ -1426,5 +1443,33 @@ fn runs_in_a_row_allocate_nothing() {
     }
     assert_eq!(count, 0, "allocations in 1000 runs");
     assert_eq!(claim.counters().jobs, jobs);
-    assert_eq!(kernel.borrow().submits, jobs);
+    assert_eq!(kernel.lock().unwrap().submits, jobs);
 }
+
+#[test]
+fn the_node_is_the_one_render_node_bound_to_the_npu_driver() {
+    let root = std::env::temp_dir().join(format!("rknpu-find-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let drivers = root.join("bus/platform/drivers");
+    let bind = |node: &str, driver: &str| {
+        std::fs::create_dir_all(drivers.join(driver)).unwrap();
+        let device = root.join("class/drm").join(node).join("device");
+        std::fs::create_dir_all(&device).unwrap();
+        std::os::unix::fs::symlink(drivers.join(driver), device.join("driver")).unwrap();
+    };
+    assert_eq!(crate::node::find_in(&root), None);
+    bind("renderD128", "rockchip-drm");
+    bind("card1", uapi::DRIVER_NAME);
+    assert_eq!(crate::node::find_in(&root), None);
+    bind("renderD129", uapi::DRIVER_NAME);
+    assert_eq!(
+        crate::node::find_in(&root).as_deref(),
+        Some(std::path::Path::new("/dev/dri/renderD129"))
+    );
+    // Two would be a guess.
+    bind("renderD130", uapi::DRIVER_NAME);
+    assert_eq!(crate::node::find_in(&root), None);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+mod host;

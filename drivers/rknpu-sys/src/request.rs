@@ -1,7 +1,8 @@
 //! The requests the driver sends, each built only by a checked constructor, and what each field
-//! becomes in the kernel's structure. These are the only shapes a [`crate::Session`] is asked
-//! to issue; the session in `lemnos-driver-rknpu-sys` checks them again against the objects it
-//! made before anything reaches the kernel.
+//! becomes in the kernel's structure. These are the only shapes an [`NpuSession`] is asked to
+//! issue; it checks them again against the objects it made before anything reaches the kernel.
+//!
+//! [`NpuSession`]: crate::NpuSession
 //!
 //! # Every field the kernel takes from user space
 //!

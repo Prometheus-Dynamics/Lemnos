@@ -89,13 +89,18 @@ python3 scripts/generate-builtins.py --check
 | `k230-vpu` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. Some of the node's private requests are refused |
 | `a733-video` | `codec.block/1` | `jobs` stream | Refuses to run. It answers register reads only. Every encode or decode job and every register write is refused, because an address written into a register cannot be bounded from user space on this block |
 
+## Neural accelerators
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `rknpu` | `npu/1` | the vendor kernel's NPU render node (`node`, or found by its driver); `jobs` stream | Serves its contract. Each program runs in an IOMMU domain of its own that holds only its objects, checked before every run. A program belongs to the caller that loaded it and is unloaded when that caller goes. Confinement holds only while the daemon is the node's sole opener, and whether a program can reach the IOMMU's own registers is not known |
+
 ## Library crates
 
 A board file cannot name these.
 
 | Crate | What it is | Why it is not a driver |
 |---|---|---|
-| `rknpu` | `npu/1` over the vendor kernel's NPU node, each program in an IOMMU domain of its own | Not built into the daemon. Confinement holds only while the daemon is the node's sole opener, and whether a program can reach the IOMMU's own registers is not known |
 | `vip9000` | `npu/1`, with the checks | Refuses to run: `load` answers `NOT_SUPPORTED`. The block has one page table for every opener, so a job cannot be kept to its own buffers from user space. It needs a kernel-module path |
 | `k230-kpu` | `npu/1`, with the checks | Refuses to run: `load` answers `NOT_SUPPORTED`. The block has no IOMMU and no bus protection, so a job cannot be confined at all without reading the program |
 | `k230-ai2d` | The AI2D block's kernel interface, checked jobs and a scaler loop | No job reaches the block: its register map is not in the public sources. It implements no contract |
@@ -143,7 +148,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `image.convert/1` | 1 info, 2 conversion_count, 3 conversion, 4 job_stream, 5 counters | `rga`, `g2d` |
 | `image.blend/1` | 1 info, 2 format_count, 3 format, 4 job_stream, 5 counters | `rga` |
 | `codec.block/1` | 1 info, 2 block, 3 job_stream, 4 counters | `rk-mpp`, `rk-iep`, `v4l2-stateless`, `a733-di`, `k230-vpu`, `a733-video` |
-| `npu/1` | 1 info, 2 job_stream, 3 load, 4 unload, 5 attach, 6 detach, 7 counters | No driver in the daemon. See the library crates above |
+| `npu/1` | 1 info, 2 job_stream, 3 load, 4 unload, 5 attach, 6 detach, 7 counters | `rknpu` |
 | `usb.function/1` | 1 info, 2 endpoint, 3 data_stream, 4 state, 5 control_in, 6 control_out, 7 control_stall, 8 set_halt, 9 cancel, 10 counters | `usb-gadget` |
 
 A camera is not one contract. A consumer finds a `camera.sensor/1` device and follows the board

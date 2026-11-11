@@ -6,10 +6,9 @@ use std::io;
 use std::mem::size_of;
 use std::path::PathBuf;
 
-use lemnos_driver_rknpu::uapi::{self, Action, MemCreate, MemDestroy, MemMap, Submit};
-use lemnos_driver_rknpu::{Create, Device, Domain, Kind, Object, Query, Run, Session};
-
+use crate::request::{Create, Domain, Kind, Object, Query, Run};
 use crate::session::Request;
+use crate::uapi::{self, Action, MemCreate, MemDestroy, MemMap, Submit};
 use crate::{NpuNode, NpuSession};
 
 #[test]
@@ -69,7 +68,7 @@ fn only_the_npu_drivers_character_device_is_taken() {
     // A regular file is no character device, and is refused before it is opened.
     let file = scratch("file").join("node");
     std::fs::write(&file, b"").unwrap();
-    let mut node = NpuNode::with_sysfs(&file, &npu);
+    let node = NpuNode::with_sysfs(&file, &npu);
     assert_eq!(node.open().unwrap_err().kind(), io::ErrorKind::Unsupported);
     for dir in [other, npu, empty] {
         let _ = std::fs::remove_dir_all(dir);

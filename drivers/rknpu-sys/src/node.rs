@@ -4,10 +4,8 @@ use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
-use lemnos_driver_rknpu::Device;
-use lemnos_driver_rknpu::uapi::DRIVER_NAME;
-
 use crate::session::NpuSession;
+use crate::uapi::DRIVER_NAME;
 
 /// The node at a path the caller gives, and the sysfs it checks it against.
 #[derive(Clone, Debug)]
@@ -70,10 +68,9 @@ impl NpuNode {
     }
 }
 
-impl Device for NpuNode {
-    type Session = NpuSession;
-
-    fn open(&mut self) -> io::Result<NpuSession> {
+impl NpuNode {
+    /// [`Self::check`]s the node, then opens a session on it.
+    pub fn open(&self) -> io::Result<NpuSession> {
         self.check()?;
         NpuSession::open(&self.node)
     }
