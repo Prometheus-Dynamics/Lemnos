@@ -18,11 +18,13 @@
 //!
 //! # Not covered
 //!
-//! - **The private requests** (`VIDIOC_S_MVX_*`: regions of interest, QP maps, SEI user data, the
-//!   rate-control block, downscaling, OSD, crops, colour description and the rest). They are
-//!   transcribed and pinned in [`uapi`] but never issued: issuing them needs a request
-//!   `lemnos-linux-sys` does not make public, and so a crate allowed `unsafe`. Their settings that
-//!   are also controls go through [`Claim::set_control`].
+//! - **Some private requests** (`VIDIOC_S_MVX_*`). [`Claim::private`] issues the ones
+//!   `lemnos-driver-k230-vpu-sys` found sound after reading what the kernel does with each
+//!   (colour description, regions of interest with their count bounded, QP, rate control,
+//!   long-term references, statistics mode, Huffman tables, the colour-conversion
+//!   coefficients). The OSD requests, the downscale, mini-frame, seamless-target and crop
+//!   requests, SEI user data and the change-rectangle request are never issued; that crate's
+//!   docs say why for each.
 //! - **The private buffer flags and `reserved2` bits** on queued buffers (rotation, mirroring,
 //!   scaling, regions, general buffers, mini-frames, OSD): queued buffers carry none. The general
 //!   and mini-frame bits make the kernel read headers and offsets from the planes' reserved
@@ -31,8 +33,11 @@
 //! - **Single-planar formats.** Multi-planar only; the driver's single-planar path moves
 //!   `bytesused` and offsets around on dequeue.
 //! - **Two controls**: [`REFUSED_CONTROLS`].
-//! - **A contract.** No merged contract describes a codec session; this is a library, and nothing
-//!   is registered in `lemnosd`.
+//! - **A contract.** The block is not served as `codec.block/1` yet. It is a stateful codec:
+//!   bitstream goes in and pictures come out on their own schedule, so a session's sources
+//!   and destinations complete separately, and the claim here borrows its [`Vpu`]. Serving it
+//!   needs a claim a driver can own and the mapping of sources and destinations to jobs.
+//!   Nothing is registered in `lemnosd`.
 //!
 //! # Source
 //!

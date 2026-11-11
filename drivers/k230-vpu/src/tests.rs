@@ -1094,3 +1094,45 @@ fn an_encoders_bitstream_reports_only_its_own_plane() {
     );
     assert_eq!(done.flags, 0);
 }
+
+#[test]
+fn the_private_requests_issued_are_the_ones_read_to_be_sound_at_their_sizes() {
+    use crate::uapi::*;
+    use lemnos_driver_k230_vpu_sys as sys;
+    use std::mem::{offset_of, size_of};
+
+    fn taken<T>(request: u32) -> bool {
+        sys::takes(request, &vec![0u8; size_of::<T>()])
+    }
+    assert!(taken::<ColorDesc>(VIDIOC_G_MVX_COLORDESC));
+    assert!(taken::<RoiRegions>(VIDIOC_S_MVX_ROI_REGIONS));
+    assert!(taken::<ParamQp>(VIDIOC_S_MVX_QP_EPR));
+    assert!(taken::<ColorDesc>(VIDIOC_S_MVX_COLORDESC));
+    assert!(taken::<RateControl>(VIDIOC_S_MVX_RATE_CONTROL));
+    assert!(taken::<LongTermRef>(VIDIOC_S_MVX_LONG_TERM_REF));
+    assert!(taken::<EncStats>(VIDIOC_S_MVX_STATS_MODE));
+    assert!(taken::<HuffTable>(VIDIOC_S_MVX_HUFF_TABLE));
+    assert!(taken::<ColorConvCoef>(VIDIOC_S_MVX_COLOR_CONV_COEF));
+    assert!(taken::<Rgb2YuvColorConvCoef>(
+        VIDIOC_S_MVX_RGB2YUV_COLOR_CONV_COEF
+    ));
+
+    assert!(!taken::<SeiUserData>(VIDIOC_S_MVX_SEI_USERDATA));
+    assert!(!taken::<DslFrame>(VIDIOC_S_MVX_DSL_FRAME));
+    assert!(!taken::<DslRatio>(VIDIOC_S_MVX_DSL_RATIO));
+    assert!(!taken::<i32>(VIDIOC_S_MVX_DSL_MODE));
+    assert!(!taken::<i32>(VIDIOC_S_MVX_MINI_FRAME_HEIGHT));
+    assert!(!taken::<ChrConfig>(VIDIOC_S_MVX_CHR_CFG));
+    assert!(!taken::<SeamlessTarget>(VIDIOC_S_MVX_SEAMLESS_TARGET));
+    assert!(!taken::<CropCfg>(VIDIOC_S_MVX_ENC_SRC_CROP));
+    assert!(!taken::<CropCfg>(VIDIOC_S_MVX_DEC_DST_CROP));
+    assert!(!taken::<OsdConfig>(VIDIOC_S_MVX_OSD_CONFIG));
+    assert!(!taken::<OsdInfo>(VIDIOC_S_MVX_OSD_INFO));
+
+    // The count the unsafe layer bounds is where the structure has it.
+    assert_eq!(offset_of!(RoiRegions, num_roi), sys::ROI_COUNT_AT);
+    assert_eq!(offset_of!(RoiRegions, roi), sys::ROI_HEADER_BYTES);
+    assert_eq!(size_of::<Region>(), sys::ROI_REGION_BYTES);
+    assert_eq!(MAX_FRAME_REGIONS, sys::MAX_ROI);
+    assert_eq!(u32::from(BASE_VIDIOC_PRIVATE), sys::BASE_PRIVATE);
+}

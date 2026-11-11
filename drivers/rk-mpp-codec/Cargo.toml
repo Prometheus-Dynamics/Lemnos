@@ -1,0 +1,32 @@
+[package]
+name = "lemnos-driver-rk-mpp-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The driver that gives a caller one codec block of the vendor kernel's /dev/mpp_service as codec.block/1: lemnos-driver-rk-mpp's block on the real node of lemnos-driver-rk-mpp-sys, serving a job stream of dma-bufs. No vendor library"
+
+[lints]
+workspace = true
+
+# Linux only: the node is reached through lemnos-driver-rk-mpp-sys, which holds the `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
+lemnos-driver-codec-jobs = { path = "../codec-jobs" }
+lemnos-driver-rk-mpp = { path = "../rk-mpp" }
+lemnos-driver-rk-mpp-sys = { path = "../rk-mpp-sys" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
+lemnos-driver-rk-mpp = { path = "../rk-mpp", features = ["played"] }
+
+[package.metadata.lemnos]
+driver = "RkMpp"

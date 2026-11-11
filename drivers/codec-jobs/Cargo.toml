@@ -1,0 +1,30 @@
+[package]
+name = "lemnos-driver-codec-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The job stream of codec.block/1, shared by the codec block drivers: buffers held, jobs taken and checked, work read once, completions written. A block driver supplies only what its block does with a checked job"
+
+[lints]
+workspace = true
+
+[features]
+# What the block drivers' tests share: a caller on a real host's job stream, with sealed memfds
+# standing in for the stream's dma-bufs. Test support only.
+testing = ["dep:lemnos-host", "dep:lemnos-wire", "dep:lemnos-linux-sys"]
+
+[dependencies]
+lemnos-host = { path = "../../engine/host", optional = true }
+lemnos-wire = { path = "../../engine/wire", optional = true }
+lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
+
+[dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys" }

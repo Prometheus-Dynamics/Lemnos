@@ -22,6 +22,7 @@
 //! Taking a claim allocates. Adding a buffer, submitting and completing allocate nothing.
 
 use std::io;
+use std::ops::DerefMut;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::block::{Block, Facts};
@@ -173,6 +174,27 @@ impl<D: Device> Service<D> {
     /// Takes a claim on `block`: a new session, checked to have the block behind an IOMMU, bound
     /// to it. `now_ns` is the caller's clock, for the backoff.
     pub fn claim(&mut self, block: Block, now_ns: u64) -> Result<Claim<'_, D>, ClaimError> {
+        let session = self.session_for(block, now_ns)?;
+        Ok(ClaimOf::new(self, session, block))
+    }
+
+    /// [`Self::claim`], for a holder that keeps the claim past this borrow (a driver, which
+    /// holds its claim for as long as it serves one consumer): the claim owns the service, and
+    /// gives it back with [`ClaimOf::release`]. When no claim is taken the service comes back
+    /// with the reason.
+    pub fn claim_owned(
+        mut self: Box<Self>,
+        block: Block,
+        now_ns: u64,
+    ) -> Result<OwnedClaim<D>, (Box<Self>, ClaimError)> {
+        match self.session_for(block, now_ns) {
+            Ok(session) => Ok(ClaimOf::new(self, session, block)),
+            Err(error) => Err((self, error)),
+        }
+    }
+
+    /// A session bound to `block`, or why not, with the backoff kept.
+    fn session_for(&mut self, block: Block, now_ns: u64) -> Result<D::Session, ClaimError> {
         if self.failures > 0 && now_ns < self.retry_at_ns {
             return Err(ClaimError::BackingOff {
                 retry_at_ns: self.retry_at_ns,
@@ -181,7 +203,7 @@ impl<D: Device> Service<D> {
         match self.bind(block) {
             Ok(Ok(session)) => {
                 self.failures = 0;
-                Ok(Claim::new(self, session, block))
+                Ok(session)
             }
             Ok(Err(refused)) => Err(refused),
             Err(error) => {
@@ -229,9 +251,18 @@ struct Pending {
     buffers: u64,
 }
 
-/// A claim on one block: its session, the buffers it holds, and its jobs in flight.
-pub struct Claim<'s, D: Device> {
-    service: &'s mut Service<D>,
+/// A claim that borrows its service: the usual form.
+pub type Claim<'s, D> = ClaimOf<&'s mut Service<D>, D>;
+
+/// A claim that owns its service, from [`Service::claim_owned`].
+pub type OwnedClaim<D> = ClaimOf<Box<Service<D>>, D>;
+
+/// A claim on one block: its session, the buffers it holds, and its jobs in flight. `H` is
+/// how it holds its service, borrowed ([`Claim`]) or owned ([`OwnedClaim`]); either way the
+/// service has this one claim and no other.
+pub struct ClaimOf<H: DerefMut<Target = Service<D>>, D: Device> {
+    /// `None` only once the claim has been wound up.
+    service: Option<H>,
     session: D::Session,
     block: Block,
     facts: Facts,
@@ -244,10 +275,10 @@ pub struct Claim<'s, D: Device> {
     in_flight: usize,
 }
 
-impl<'s, D: Device> Claim<'s, D> {
-    fn new(service: &'s mut Service<D>, session: D::Session, block: Block) -> Self {
+impl<H: DerefMut<Target = Service<D>>, D: Device> ClaimOf<H, D> {
+    fn new(service: H, session: D::Session, block: Block) -> Self {
         Self {
-            service,
+            service: Some(service),
             session,
             block,
             facts: block.facts(),
@@ -288,8 +319,8 @@ impl<'s, D: Device> Claim<'s, D> {
             .iter()
             .position(Option::is_none)
             .ok_or(BufferError::Full)?;
-        let size = self
-            .service
+        let service = self.service.as_mut().ok_or(BufferError::Size(None))?;
+        let size = service
             .device
             .buffer_size(fd.as_fd())
             .map_err(|e| BufferError::Size(Some(e)))?;
@@ -450,9 +481,10 @@ fn send_job<S: Session>(
     session.send(messages)
 }
 
-impl<D: Device> Drop for Claim<'_, D> {
-    fn drop(&mut self) {
-        // Wait for every job, so no task still holds a mapping, then unmap the session's buffers.
+impl<H: DerefMut<Target = Service<D>>, D: Device> ClaimOf<H, D> {
+    /// Waits for every job, so no task still holds a mapping, then has the kernel unmap the
+    /// session's buffers. Done once, by whichever of [`Self::release`] and the drop is first.
+    fn wind_up(&mut self) {
         while self.in_flight > 0 {
             if self
                 .session
@@ -467,5 +499,21 @@ impl<D: Device> Drop for Claim<'_, D> {
         let _ = self
             .session
             .send(&mut [Message::bare(Command::ResetSession)]);
+    }
+
+    /// Ends the claim as dropping it does, and gives back how the service was held: for an
+    /// [`OwnedClaim`], the service itself, with its backoff, to claim again.
+    pub fn release(mut self) -> Option<H> {
+        self.wind_up();
+        self.service.take()
+    }
+}
+
+impl<H: DerefMut<Target = Service<D>>, D: Device> Drop for ClaimOf<H, D> {
+    fn drop(&mut self) {
+        // A claim that was released has been wound up already.
+        if self.service.is_some() {
+            self.wind_up();
+        }
     }
 }
