@@ -43,6 +43,13 @@ impl Root {
 /// (inotify), by subsystem. Netlink needs no table: it reports every
 /// subsystem the filter names.
 pub(crate) const ROOTS: &[Root] = &[
+    // The chips as their nodes are numbered (`gpiochip0`). The legacy class below numbers
+    // them by their first line, so it comes second: the first root wins for a device.
+    Root {
+        subsystem: "gpio",
+        dir: Dir::Bus("gpio"),
+        children: false,
+    },
     Root {
         subsystem: "gpio",
         dir: Dir::Class("gpio"),
@@ -76,6 +83,11 @@ pub(crate) const ROOTS: &[Root] = &[
     Root {
         subsystem: "spi",
         dir: Dir::Bus("spi"),
+        children: false,
+    },
+    Root {
+        subsystem: "spidev",
+        dir: Dir::Class("spidev"),
         children: false,
     },
     Root {

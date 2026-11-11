@@ -237,7 +237,9 @@ and the host drops it and binds it again under this rule. The backoff clears onc
 stayed up for 8 s, so a driver that fails straight after every bind is bound less and less often,
 never in a loop.
 
-Hotplug events are hints. The backend turns an event into the board-file names it may be about, and
+Hotplug events are hints, for every board-file name the kernel announces: a USB device, an I2C
+adapter, a spidev node, a GPIO chip, a PWM chip, a tty, a video or media node. The backend turns
+an event into the board-file names it may be about, and
 the host tries the devices waiting on those names now and ticks the running ones so their drivers
 can look. A hint only brings a retry forward, never closer than 250 ms to the device's last bind, so
 a lost event costs time and a storm of them costs nothing. The host never learns what arrived.

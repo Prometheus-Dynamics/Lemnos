@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use lemnos_host::Options;
 use lemnos_host::board::parse;
 use lemnos_linux::LinuxBoard;
-use lemnos_linux::hotplug::UsbHints;
+use lemnos_linux::hotplug::BoardHints;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
@@ -147,10 +147,12 @@ fn main() -> ExitCode {
     };
     // Hints only: without them devices still bind, when their retries come round.
     if !sim
-        && let Some(hints) = UsbHints::open(names.iter().map(String::as_str))
+        && let Some(hints) = BoardHints::open(names.iter().map(String::as_str))
         && let Err(error) = service.watch(Box::new(hints))
     {
-        let _ = complain(&format!("not watching for USB devices: {error}"));
+        let _ = complain(&format!(
+            "not watching for hardware coming and going: {error}"
+        ));
     }
     // A signal is the normal way out, and stopping is what releases the hardware.
     if let Err(error) = wait_for_signal(&signals) {
