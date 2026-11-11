@@ -145,6 +145,40 @@ impl Mapping {
     }
 }
 
+impl Mapping {
+    /// Reads the 32-bit word at `offset` with one aligned volatile load, as a device register
+    /// needs. `None` when the word is not wholly inside the mapping or `offset` is not a multiple
+    /// of 4.
+    pub fn read32(&self, offset: usize) -> Option<u32> {
+        let at = self.word(offset)?;
+        // SAFETY: `word` checked that the four bytes at `at` lie inside the `len` bytes `new`
+        // mapped and that `at` is aligned for `u32` (the mapping starts on a page); the mapping
+        // stays mapped while `&self` lives. Any bit pattern is a `u32`.
+        Some(unsafe { at.read_volatile() })
+    }
+
+    /// Writes `value` to the 32-bit word at `offset` with one aligned volatile store. `None`, and
+    /// nothing written, when the word is not wholly inside the mapping, `offset` is not a
+    /// multiple of 4, or the mapping is read-only.
+    pub fn write32(&mut self, offset: usize, value: u32) -> Option<()> {
+        if !self.writable {
+            return None;
+        }
+        let at = self.word(offset)?;
+        // SAFETY: as for `read32`; the store also needs a writable mapping, checked above, and
+        // `&mut self` makes it exclusive.
+        unsafe { at.write_volatile(value) };
+        Some(())
+    }
+
+    /// The word at `offset`, if it is aligned and wholly inside the mapping.
+    fn word(&self, offset: usize) -> Option<*mut u32> {
+        let end = offset.checked_add(size_of::<u32>())?;
+        let at = self.ptr.as_ptr().wrapping_add(offset).cast::<u32>();
+        (end <= self.len && at.is_aligned()).then_some(at)
+    }
+}
+
 impl Drop for Mapping {
     fn drop(&mut self) {
         // SAFETY: the range was mapped by `new` and is unmapped only here. An
@@ -164,6 +198,37 @@ pub fn page_size() -> usize {
 mod tests {
     use super::*;
     use std::os::fd::AsFd;
+
+    #[test]
+    fn words_are_aligned_inside_and_respect_writability() {
+        let path = std::env::temp_dir().join(format!("lemnos-mmap-words-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(4096).unwrap();
+        {
+            let mut map = Mapping::new(file.as_fd(), 4096, 0, true).unwrap();
+            assert_eq!(map.write32(4092, 0x1234_5678), Some(()));
+            assert_eq!(map.read32(4092), Some(0x1234_5678));
+            assert_eq!(map.as_slice()[4092..], 0x1234_5678u32.to_ne_bytes());
+            // Past the end, unaligned, and an offset that overflows: refused, nothing written.
+            assert_eq!(map.write32(4096, 1), None);
+            assert_eq!(map.write32(2, 1), None);
+            assert_eq!(map.read32(2), None);
+            assert_eq!(map.read32(usize::MAX - 1), None);
+            assert_eq!(map.as_slice()[..8], [0; 8]);
+        }
+        {
+            let mut map = Mapping::new(file.as_fd(), 4096, 0, false).unwrap();
+            assert_eq!(map.read32(4092), Some(0x1234_5678));
+            assert_eq!(map.write32(0, 1), None, "read-only");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn volatile_accessors_are_bounds_checked_and_respect_writability() {

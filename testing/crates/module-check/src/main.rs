@@ -2,9 +2,10 @@
 //! each one took the expected route and behaved the same on it.
 //!
 //! `lemnos-module-check <route> <spi route> <gpio chip number> <simulated chip directory>`, where
-//! a route is `module` or `stock`. The first covers I2C, GPIO and PWM, and DMA memory for the
-//! test block, which must be bound to the module on the module route (on the stock route there
-//! is none).
+//! a route is `module` or `stock`. The first covers I2C, GPIO and PWM, and the test block's DMA
+//! memory, registers, interrupts, clock and reset, which must be bound to the module on the
+//! module route, loaded with `test_map_unconfined` and `test_irq_inject` (on the stock route there
+//! are none).
 //!
 //! Each bus also prints a `measure` line per operation: the time it takes on the route it took
 //! (median and 99th percentile, from the monotonic clock) and what it allocated. They are numbers
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use lemnos_core::{Provider, Status};
 use lemnos_hal::ErrorKind;
-use lemnos_hal::blocks::DmaBuffers;
+use lemnos_hal::blocks::{Clocks, DmaBuffers, Interrupt, Registers, Reset};
 use lemnos_hal::i2c::{I2c as _, Operation as I2cOp};
 use lemnos_hal::raw::{
     Bias, Direction, Edge, EdgeDetect, LineConfig, Polarity, PwmConfig, RawLine, SpiConfig,
@@ -34,6 +35,16 @@ const SPI_NAME: &str = "spidev40.0";
 const DMA_NAME: &str = "dma:lemnos-test-block";
 /// A block the module refuses to bind (not in `owned=`).
 const DMA_NOT_OWNED: &str = "dma:lemnos-test-other";
+/// The test block's register page, its interrupts, its clock and its reset line.
+const REGS_NAME: &str = "regs:lemnos-test-block";
+const IRQ0_NAME: &str = "irq:lemnos-test-block";
+const IRQ1_NAME: &str = "irq:lemnos-test-block/1";
+const CLOCK_NAME: &str = "clocks:lemnos-test-block/core";
+const RESET_NAME: &str = "resets:lemnos-test-block/rst";
+/// What the test block's module writes to word 0 of the block's register page.
+const TEST_BLOCK_MAGIC: u32 = 0x4c45_4d4e;
+/// The rate of the test clock, a fixed one.
+const TEST_CLOCK_HZ: u64 = 25_000_000;
 const TEST_BUS: &str = "i2c-40";
 const STUB_ADDR: u8 = 0x30;
 const MEM_ADDR: u8 = 0x50;
@@ -665,6 +676,237 @@ fn check_dma(report: &mut Report, board: &mut LinuxBoard, through_module: bool) 
     );
 }
 
+/// The test block's registers, interrupts, clock and reset through the module, by board-file
+/// names: what is handed out is the block's own, and nothing is handed out without the module.
+fn check_block(report: &mut Report, board: &mut LinuxBoard, through_module: bool) {
+    let names = [REGS_NAME, IRQ0_NAME, CLOCK_NAME, RESET_NAME];
+    if !through_module {
+        report.check(
+            names.iter().all(|name| !board.provided(name)),
+            "no block registers, interrupts, clocks or resets without the module",
+        );
+        report.check(
+            board.registers(REGS_NAME).err() == Some(Status::NOT_SUPPORTED)
+                && board.interrupt(IRQ0_NAME).err() == Some(Status::NOT_SUPPORTED)
+                && board.clocks(CLOCK_NAME).err() == Some(Status::NOT_SUPPORTED)
+                && board.reset(RESET_NAME).err() == Some(Status::NOT_SUPPORTED),
+            "each is refused without the module (NOT_SUPPORTED)",
+        );
+        return;
+    }
+    report.check(
+        names.iter().all(|name| board.provided(name)),
+        "the bound block's registers, interrupt, clock and reset are provided",
+    );
+    report.check(
+        !board.provided("regs:lemnos-test-other")
+            && board.registers("regs:lemnos-test-other").err() == Some(Status::NO_DEVICE)
+            && board.interrupt("irq:lemnos-test-other").err() == Some(Status::NO_DEVICE)
+            && board.reset("resets:lemnos-test-other/rst").err() == Some(Status::NO_DEVICE),
+        "a block the module doesn't own has none (NO_DEVICE)",
+    );
+    report.check(
+        board.registers("regs:lemnos-test-block/1").err() == Some(Status::NOT_FOUND)
+            && board.interrupt("irq:lemnos-test-block/2").err() == Some(Status::NOT_FOUND)
+            && board.registers("regs:").err() == Some(Status::NOT_FOUND),
+        "a region or interrupt the block doesn't have is refused (NOT_FOUND)",
+    );
+    report.check(
+        board.registers(REGS_NAME).is_ok()
+            && board.interrupt(IRQ0_NAME).is_ok()
+            && board.clocks(CLOCK_NAME).is_ok()
+            && board.reset(RESET_NAME).is_ok(),
+        "each opens through the driver interface",
+    );
+    check_registers(report, board);
+    check_interrupts(report, board);
+    check_power(report, board);
+}
+
+fn check_registers(report: &mut Report, board: &mut LinuxBoard) {
+    let Ok(mut regs) = board.module_registers(REGS_NAME) else {
+        report.check(false, "registers mapped");
+        return;
+    };
+    report.check(
+        board.module_registers(REGS_NAME).err() == Some(Status::BUSY),
+        "one holder of a register region at a time (BUSY)",
+    );
+    let magic = regs.read32(0);
+    let _ = writeln!(
+        std::io::stdout(),
+        "registers: {} bytes, word 0 {:#x}",
+        regs.size(),
+        magic.unwrap_or(0)
+    );
+    report.check(
+        regs.size() == 4096 && magic == Ok(TEST_BLOCK_MAGIC),
+        "the region is the test block's page: its module's marker is at word 0",
+    );
+    let written = regs.write32(0x40, 0xa5a5_0001).is_ok()
+        && regs.modify32(0x40, 0xff, 0x7e).is_ok()
+        && regs.read32(0x40) == Ok(0xa5a5_007e);
+    report.check(written, "a register write reads back");
+    report.check(
+        regs.read32(4096) == Err(ErrorKind::InvalidInput)
+            && regs.write32(4094, 1) == Err(ErrorKind::InvalidInput)
+            && regs.read32(2) == Err(ErrorKind::InvalidInput),
+        "a word past the end or out of line is refused",
+    );
+    let ((), allocated) = allocations(|| {
+        for i in 0..1000u32 {
+            let _ = regs.write32(0x80, i);
+            let _ = regs.read32(0x80);
+        }
+    });
+    report.check(allocated == 0, "register reads and writes allocate nothing");
+    measure(true, "register read32", |_| regs.read32(0).is_ok());
+    drop(regs);
+    // A fresh mapping sees what the first wrote: it went to the block's memory, not a copy.
+    let Ok(mut again) = board.module_registers(REGS_NAME) else {
+        report.check(false, "registers mapped again");
+        return;
+    };
+    report.check(
+        again.read32(0x40) == Ok(0xa5a5_007e) && again.read32(0x80) == Ok(999),
+        "the writes landed in the block's register page",
+    );
+    let _ = again.write32(0x40, 0);
+    let _ = again.write32(0x80, 0);
+}
+
+/// Waits for `irq`, up to `ms`.
+fn fired(irq: &mut impl Interrupt<Error = ErrorKind>, ms: u64) -> Option<u32> {
+    irq.wait(Some(Duration::from_millis(ms)))
+        .ok()
+        .flatten()
+        .map(|event| event.count)
+}
+
+fn check_interrupts(report: &mut Report, board: &mut LinuxBoard) {
+    let (Ok(mut irq0), Ok(mut irq1)) = (
+        board.module_interrupt(IRQ0_NAME),
+        board.module_interrupt(IRQ1_NAME),
+    ) else {
+        report.check(false, "both interrupts opened");
+        return;
+    };
+    report.check(
+        board.module_interrupt(IRQ0_NAME).err() == Some(Status::BUSY),
+        "one holder of an interrupt at a time (BUSY)",
+    );
+    report.check(
+        irq0.wait(Some(Duration::ZERO)) == Ok(None),
+        "nothing waiting at first",
+    );
+    report.check(
+        irq0.enable().is_ok()
+            && irq0.inject_for_test().is_ok()
+            && fired(&mut irq0, 1000) == Some(1),
+        "an injected interrupt is delivered",
+    );
+    report.check(
+        irq0.inject_for_test().is_ok() && fired(&mut irq0, 200).is_none(),
+        "masked once it fired: the next is not delivered before enable",
+    );
+    // The one injected while masked may be resent on enable, depending on the controller.
+    let resent = irq0.enable().is_ok() && fired(&mut irq0, 200).is_some();
+    let _ = writeln!(
+        std::io::stdout(),
+        "interrupt: the masked one was {}resent on enable",
+        if resent { "" } else { "not " }
+    );
+    report.check(
+        irq0.enable().is_ok() && irq0.inject_for_test().is_ok() && fired(&mut irq0, 1000).is_some(),
+        "re-enabled, the next one is delivered",
+    );
+    report.check(
+        irq0.enable().is_ok()
+            && irq1.enable().is_ok()
+            && irq1.inject_for_test().is_ok()
+            && fired(&mut irq1, 1000).is_some()
+            && fired(&mut irq0, 100).is_none(),
+        "each interrupt gets its own events",
+    );
+    report.check(
+        irq0.disable().is_ok()
+            && irq0.inject_for_test().is_ok()
+            && fired(&mut irq0, 200).is_none()
+            && irq0.enable().is_ok()
+            && fired(&mut irq0, 100).is_none(),
+        "disabled, what fires is dropped",
+    );
+    let ((), allocated) = allocations(|| {
+        for _ in 0..100 {
+            let _ = irq0.enable();
+            let _ = irq0.inject_for_test();
+            let _ = irq0.wait(Some(Duration::from_secs(1)));
+        }
+    });
+    report.check(allocated == 0, "enabling and waiting allocate nothing");
+    measure(true, "interrupt round trip", |_| {
+        irq0.enable().is_ok() && irq0.inject_for_test().is_ok() && fired(&mut irq0, 1000).is_some()
+    });
+}
+
+fn check_power(report: &mut Report, board: &mut LinuxBoard) {
+    report.check(
+        board.clocks("clocks:lemnos-test-block/nope").err() == Some(Status::NOT_FOUND),
+        "a clock the block doesn't have is refused when opened (NOT_FOUND)",
+    );
+    report.check(
+        board.reset("resets:lemnos-test-block/nope").is_err(),
+        "a reset line the block doesn't have is refused when opened",
+    );
+    match board.module_clocks(CLOCK_NAME) {
+        Ok(mut clocks) => {
+            report.check(
+                clocks.rate_hz(0) == Ok(TEST_CLOCK_HZ),
+                "the clock's rate reads back",
+            );
+            report.check(
+                clocks.enable(0).is_ok()
+                    && clocks.is_on(0) == Ok(true)
+                    && clocks.disable(0).is_ok()
+                    && clocks.is_on(0) == Ok(false),
+                "the clock turns on and off, and reads back each time",
+            );
+            report.check(
+                clocks.enable(1) == Err(ErrorKind::NotFound),
+                "a clock index past the names is refused",
+            );
+            report.check(
+                board.module_clocks(CLOCK_NAME).err() == Some(Status::BUSY),
+                "one holder of a clock at a time (BUSY)",
+            );
+        }
+        Err(status) => report.check(false, &format!("clock opened ({status:?})")),
+    }
+    match board.module_reset(RESET_NAME) {
+        Ok(mut reset) => {
+            report.check(
+                reset.assert(0).is_ok()
+                    && reset.is_asserted(0) == Ok(true)
+                    && reset.deassert(0).is_ok()
+                    && reset.is_asserted(0) == Ok(false),
+                "the reset line asserts and releases, and reads back each time",
+            );
+            let ((), allocated) = allocations(|| {
+                for _ in 0..100 {
+                    let _ = reset.assert(0);
+                    let _ = reset.deassert(0);
+                }
+            });
+            report.check(allocated == 0, "toggling the reset allocates nothing");
+            report.check(
+                reset.is_asserted(0) == Ok(false),
+                "the reset is left released",
+            );
+        }
+        Err(status) => report.check(false, &format!("reset opened ({status:?})")),
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [route, spi_route, chip, dir] = args.as_slice() else {
@@ -698,6 +940,7 @@ fn main() -> ExitCode {
     check_line(&mut report, &mut board, module, chip, dir);
     check_pwm(&mut report, &mut board, module);
     check_dma(&mut report, &mut board, module);
+    check_block(&mut report, &mut board, module);
 
     let _ = writeln!(
         std::io::stdout(),

@@ -42,9 +42,7 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Unfinished in the code
 
-- [ ] **The Linux backend does not hand out register windows, interrupts, clocks or resets**,
-      though the driver interface and the kernel module have them. A PIO-made I2C bus does not go
-      through the module either.
+- [ ] **A PIO-made I2C bus does not go through the kernel module.**
 - [ ] **Libraries with no contract driver**: `drivers/nonai2d`, `drivers/vglite`,
       `drivers/k230-ai2d` (its register map is not public), `drivers/rk-jpeg` (builds no job: the
       field layout is not public; JPEG runs through `rk-mpp` with the caller's registers).

@@ -1,9 +1,12 @@
 //! Linux hardware for Lemnos, by the names a board file uses: `i2c-N`, `spidevB.C`,
 //! `gpiochipN:LINE`, `pwmchipN:CHANNEL`, a tty such as `ttyAMA0`, a USB device by its port
 //! (`usb:1-1.4`) or its vendor and product (`usb:1a2b:3c4d`), and this board as a USB device by
-//! the controller it appears through (`udc:fe980000.usb`, see [`FunctionFsGadget`]), and DMA
-//! memory for a block bound to the kernel module by the block's device name (`dma:91400000.isp`,
-//! see [`ModuleDma`]).
+//! the controller it appears through (`udc:fe980000.usb`, see [`FunctionFsGadget`]), and, for a
+//! block bound to the kernel module, by the block's device name: its DMA memory
+//! (`dma:91400000.isp`, see [`ModuleDma`]), a register region (`regs:BLOCK/N`, see
+//! [`ModuleRegisters`]), an interrupt (`irq:BLOCK/N`, see [`ModuleInterrupt`]), its clocks
+//! (`clocks:BLOCK/NAME,...`, see [`ModuleClocks`]) and its reset lines (`resets:BLOCK/NAME,...`,
+//! see [`ModuleReset`]).
 
 #![cfg(target_os = "linux")]
 
@@ -24,15 +27,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lemnos_core::{
-    DmaHandle, I2c, Line, LocalCaller, Provider, Pwm, RawSpiBus, Result, Spi, Status, Tag, Uart,
-    UsbDeviceHandle, UsbFunctionHandle, status_of,
+    ClocksHandle, DmaHandle, I2c, InterruptHandle, Line, LocalCaller, Provider, Pwm, RawSpiBus,
+    RegistersHandle, ResetHandle, Result, Spi, Status, Tag, Uart, UsbDeviceHandle,
+    UsbFunctionHandle, status_of,
 };
 use lemnos_hal::ErrorKind;
 
 pub use gadget::FunctionFsGadget;
 pub use gpio::GpioLine;
 pub use i2c::I2cBus;
-pub use module::ModuleDma;
+pub use module::{ModuleClocks, ModuleDma, ModuleInterrupt, ModuleRegisters, ModuleReset};
 pub use pwm::SysfsPwm;
 pub use spi::{SpiMode, Spidev};
 pub use uart::TtyUart;
@@ -308,16 +312,82 @@ impl Provider for LinuxBoard {
     fn dma(&mut self, need: &str) -> Result<DmaHandle> {
         Ok(lemnos_core::Held::boxed(Box::new(self.module_dma(need)?)))
     }
+
+    fn registers(&mut self, need: &str) -> Result<RegistersHandle> {
+        Ok(lemnos_core::Held::boxed(Box::new(
+            self.module_registers(need)?,
+        )))
+    }
+
+    fn interrupt(&mut self, need: &str) -> Result<InterruptHandle> {
+        Ok(lemnos_core::Held::boxed(Box::new(
+            self.module_interrupt(need)?,
+        )))
+    }
+
+    fn clocks(&mut self, need: &str) -> Result<ClocksHandle> {
+        Ok(lemnos_core::Held::boxed(Box::new(
+            self.module_clocks(need)?,
+        )))
+    }
+
+    fn reset(&mut self, need: &str) -> Result<ResetHandle> {
+        Ok(lemnos_core::Held::boxed(Box::new(self.module_reset(need)?)))
+    }
 }
 
 impl LinuxBoard {
-    /// Whether `need` is `dma:<block>` and that block is bound to the open module.
+    /// Whether `need` names one of a block's resources (`dma:`, `regs:`, `irq:`, `clocks:`,
+    /// `resets:`) and that block is bound to the open module.
     fn module_has_block(&self, need: &str) -> bool {
-        let (Some(block), Some(node)) = (module::dma::block_name(need), self.module.as_ref())
-        else {
+        let block = module::dma::block_name(need).or_else(|| module::block::names_a_block(need));
+        let (Some(block), Some(node)) = (block, self.module.as_ref()) else {
             return false;
         };
         node.has_block(block)
+    }
+
+    /// The open module, for a name that `parsed` says is one of a block's: `NOT_FOUND` for a
+    /// name that isn't, `NOT_SUPPORTED` without the module. A block's resources come from the
+    /// module alone, so nothing falls back.
+    fn block_node<T>(&self, parsed: Option<T>) -> Result<(&module::Node, T)> {
+        let parsed = parsed.ok_or(Status::NOT_FOUND)?;
+        let node = self.module.as_ref().ok_or(Status::NOT_SUPPORTED)?;
+        Ok((node, parsed))
+    }
+
+    /// The register region a `regs:<block>/<n>` name names, mapped through the module: see
+    /// [`ModuleRegisters`]. Refused unless the module is open and has that block bound
+    /// (`NOT_SUPPORTED`, `NO_DEVICE`), the region exists (`NOT_FOUND`), and the module says the
+    /// block's registers may be mapped (`ACCESS`).
+    pub fn module_registers(&self, need: &str) -> Result<ModuleRegisters> {
+        let (node, (block, index)) =
+            self.block_node(module::block::indexed(need, module::block::REGS))?;
+        ModuleRegisters::open(node, block, index).map_err(status_of)
+    }
+
+    /// The interrupt an `irq:<block>/<n>` name names, through the module: see
+    /// [`ModuleInterrupt`]. Refused as [`Self::module_registers`] is, but for mapping.
+    pub fn module_interrupt(&self, need: &str) -> Result<ModuleInterrupt> {
+        let (node, (block, index)) =
+            self.block_node(module::block::indexed(need, module::block::IRQ))?;
+        ModuleInterrupt::open(node, block, index).map_err(status_of)
+    }
+
+    /// The clocks a `clocks:<block>/<a>,<b>` name names, through the module: see
+    /// [`ModuleClocks`]. A name the block doesn't have is refused here (`NOT_FOUND`).
+    pub fn module_clocks(&self, need: &str) -> Result<ModuleClocks> {
+        let (node, (block, names)) =
+            self.block_node(module::block::named(need, module::block::CLOCKS))?;
+        ModuleClocks::open(node, block, &names).map_err(status_of)
+    }
+
+    /// The reset lines a `resets:<block>/<a>,<b>` name names, through the module: see
+    /// [`ModuleReset`]. A name the block doesn't have is refused here (`NOT_FOUND`).
+    pub fn module_reset(&self, need: &str) -> Result<ModuleReset> {
+        let (node, (block, names)) =
+            self.block_node(module::block::named(need, module::block::RESETS))?;
+        ModuleReset::open(node, block, &names).map_err(status_of)
     }
 
     /// DMA memory for the block a `dma:<block>` name names, from the kernel module: see
@@ -498,6 +568,45 @@ mod tests {
             Some(Status::NOT_SUPPORTED)
         );
         assert!(!board.provided("dma:91400000.isp"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_blocks_registers_interrupts_clocks_and_resets_come_only_from_the_module() {
+        let (mut board, dir) = temp_board("block");
+        let names = ["regs:blk/1", "irq:blk", "clocks:blk/core", "resets:blk/rst"];
+        let open = |board: &mut LinuxBoard, name: &str| -> Vec<Option<Status>> {
+            vec![
+                board.registers(name).err(),
+                board.interrupt(name).err(),
+                board.clocks(name).err(),
+                board.reset(name).err(),
+            ]
+        };
+        // Not one of the names: each getter refuses what isn't its own.
+        for (i, name) in names.iter().enumerate() {
+            let mut expected = vec![Some(Status::NOT_FOUND); 4];
+            expected[i] = Some(Status::NOT_SUPPORTED);
+            assert_eq!(open(&mut board, name), expected, "{name}");
+            assert!(!board.provided(name));
+        }
+        for name in ["regs:", "irq:blk/x", "clocks:blk/", "i2c-1", "blk"] {
+            assert_eq!(
+                open(&mut board, name),
+                vec![Some(Status::NOT_FOUND); 4],
+                "{name}"
+            );
+        }
+        // A node that isn't the module answers no block request.
+        board.module = Some(module::Node::open("/dev/null").unwrap());
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(
+                open(&mut board, name)[i],
+                Some(Status::NOT_SUPPORTED),
+                "{name}"
+            );
+            assert!(!board.provided(name));
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

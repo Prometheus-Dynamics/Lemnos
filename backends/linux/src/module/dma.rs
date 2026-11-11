@@ -38,8 +38,7 @@ pub(crate) const PREFIX: &str = "dma:";
 /// names, and no NUL or `/`.
 pub(crate) fn block_name(need: &str) -> Option<&str> {
     let block = need.strip_prefix(PREFIX)?;
-    let valid = !block.is_empty() && block.len() < 64 && !block.contains(['\0', '/']);
-    valid.then_some(block)
+    super::block::valid(block).then_some(block)
 }
 
 /// DMA memory for one block bound to the kernel module. Each buffer is the module's allocation
@@ -60,11 +59,7 @@ impl ModuleDma {
     /// The memory of the block bound to the module as `name`. `Unavailable` when no block of
     /// that name is bound, `Unsupported` when the module speaks another interface.
     pub(crate) fn open(node: Node, name: &str) -> Result<Self, ErrorKind> {
-        let block = block_number(sys::find_block(node.fd(), name))?;
-        let info = sys::block_info(node.fd(), block).map_err(|e| kind_of(&e))?;
-        if info.abi != sys::ABI {
-            return Err(ErrorKind::Unsupported);
-        }
+        let (block, info) = super::block::find(&node, name)?;
         Ok(Self {
             node,
             block,
@@ -98,14 +93,6 @@ impl ModuleDma {
         slot.device = device;
         Ok(())
     }
-}
-
-/// What looking a block up came to: its number, `Unavailable` when the module has no block of
-/// that name bound (it doesn't own it, or it isn't bound now), or the failure.
-fn block_number(found: io::Result<Option<u32>>) -> Result<u32, ErrorKind> {
-    found
-        .map_err(|e| kind_of(&e))?
-        .ok_or(ErrorKind::Unavailable)
 }
 
 /// What the module answered for an allocation of `asked` bytes, checked: at least that much, the
@@ -257,21 +244,6 @@ mod tests {
         );
         assert_eq!(block_name("i2c-1"), None);
         assert_eq!(block_name("91400000.isp"), None);
-    }
-
-    #[test]
-    fn a_block_the_module_doesnt_have_is_no_device() {
-        assert_eq!(block_number(Ok(Some(3))), Ok(3));
-        assert_eq!(block_number(Ok(None)), Err(ErrorKind::Unavailable));
-        assert_eq!(
-            lemnos_core::status_of(ErrorKind::Unavailable),
-            lemnos_core::Status::NO_DEVICE
-        );
-        let not_the_module = io::Error::from_raw_os_error(libc::ENOTTY);
-        assert_eq!(
-            block_number(Err(not_the_module)),
-            Err(ErrorKind::Unsupported)
-        );
     }
 
     #[test]
