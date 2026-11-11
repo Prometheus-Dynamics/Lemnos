@@ -109,6 +109,40 @@ fn a_job_runs_on_the_buffers_it_names_and_completes_on_its_output() {
 }
 
 #[test]
+fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
+    let mut stream = backed(&[BYTES; 4]);
+    let consumer = stream.clone();
+    let plan = Rc::new(Plan::default());
+    let mut scaler = Scaler::new(block(&plan));
+    // While the block runs the second job, the consumer takes the first one's completion,
+    // gives its buffer back and posts a third job writing into that buffer.
+    let acting = consumer.clone();
+    *plan.during_run.borrow_mut() = Some(Box::new(move |run| {
+        if run != 2 {
+            return;
+        }
+        let done = acting.take_frame().expect("a completion");
+        assert_eq!((done.buffer, done.identity), (1, 1));
+        acting.return_buffer(done.buffer);
+        post(&acting, &job(3, 0, 1));
+    }));
+    post(&consumer, &job(1, 0, 1));
+    post(&consumer, &job(2, 0, 2));
+    // One round reads all three: every job read gets its completion.
+    assert_eq!(scaler.serve(&mut stream, 5), Ok(3));
+    assert_eq!(plan.runs.get(), 3);
+    assert_eq!(scaler.counters(), Counters { jobs: 3, errors: 0 });
+    let second = consumer.take_frame().expect("a completion");
+    assert_eq!((second.buffer, second.identity), (2, 2));
+    let third = consumer.take_frame().expect("a completion");
+    assert_eq!(
+        (third.buffer, third.identity, third.bytes),
+        (1, 3, 32 * 32 * 3)
+    );
+    assert_eq!(consumer.take_frame(), None);
+}
+
+#[test]
 fn an_image_larger_than_the_dma_buf_behind_its_buffer_never_reaches_the_block() {
     // The last buffer's dma-buf is one page.
     let tall_in = ScaleJob {

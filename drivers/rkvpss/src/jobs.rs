@@ -266,6 +266,9 @@ impl<D: Device, F: FnMut() -> io::Result<D>> Jobs<D, F> {
                 self.fault(stream)?;
                 break;
             };
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            self.take_free(stream)?;
             // Buffers held since before this consumer came have nothing behind them: they are
             // given up and taken again first, so that even a failed job completes to it.
             let renewed =

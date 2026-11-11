@@ -412,6 +412,9 @@ impl K230Isp {
             let job = encoded
                 .get(..len)
                 .and_then(|bytes| IspJob::decode(&mut Reader::new(bytes)).ok());
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            take_returned(&mut self.config, &mut self.held_config)?;
             let sent = match job {
                 Some(job) => self.submit(&job, now_ns)?,
                 None => false,

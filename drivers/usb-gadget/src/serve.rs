@@ -370,6 +370,9 @@ impl Serve {
             let Some(len) = stream.next_job(&mut encoded)? else {
                 break;
             };
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            self.take_free(stream)?;
             let job = encoded
                 .get(..len)
                 .filter(|bytes| bytes.len() <= JOB_BYTES)

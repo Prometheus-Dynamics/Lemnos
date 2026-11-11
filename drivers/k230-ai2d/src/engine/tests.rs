@@ -17,6 +17,9 @@ pub(crate) const LIMITS: Limits = Limits {
     max_height: 1024,
 };
 
+/// What a test does while the block runs a job, given the number of the run.
+pub(crate) type DuringRun = Box<dyn FnMut(u32)>;
+
 /// What the played-back block does and saw, shared between the test and every device it opens.
 #[derive(Default)]
 pub(crate) struct Plan {
@@ -34,6 +37,8 @@ pub(crate) struct Plan {
     pub(crate) live: RefCell<Vec<i32>>,
     /// The last job run.
     pub(crate) last: Cell<Option<Job>>,
+    /// Called while the block runs a job, with the number of the run.
+    pub(crate) during_run: RefCell<Option<DuringRun>>,
 }
 
 pub(crate) struct Mock {
@@ -75,6 +80,9 @@ impl Device for Mock {
     fn run(&mut self, job: &Job) -> io::Result<()> {
         self.plan.runs.set(self.plan.runs.get() + 1);
         self.plan.last.set(Some(*job));
+        if let Some(during) = self.plan.during_run.borrow_mut().as_mut() {
+            during(self.plan.runs.get());
+        }
         match self.plan.run_errno.get() {
             Some(errno) => Err(io::Error::from_raw_os_error(errno)),
             None => Ok(()),

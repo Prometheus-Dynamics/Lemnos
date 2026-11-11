@@ -532,6 +532,9 @@ impl PispFe {
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
                 return self.fault_config();
             };
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            self.take_returns()?;
             if !self.submit(&job)? {
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
             }

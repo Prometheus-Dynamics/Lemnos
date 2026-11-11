@@ -218,6 +218,8 @@ struct Block {
     lost: u32,
     /// The configuration of each job run, by its key.
     keys: Vec<u8>,
+    /// Run once, after the job with this identity is posted: the client's part of a race.
+    hook: Option<(u64, Box<dyn FnOnce() + Send>)>,
 }
 
 impl Default for Block {
@@ -235,6 +237,7 @@ impl Default for Block {
             scratch: Vec::with_capacity(OUTPUT_BYTES as usize),
             lost: 0,
             keys: Vec::with_capacity(1024),
+            hook: None,
         }
     }
 }
@@ -339,6 +342,12 @@ impl Hw {
 
     fn registered(&self) -> usize {
         self.with(|b| b.regions.iter().flatten().count())
+    }
+
+    /// Makes the client's move in the middle of the driver's pump: `run` runs once, right after
+    /// the job with `identity` is posted to the block.
+    fn hook_after_post(&self, identity: u64, run: impl FnOnce() + Send + 'static) {
+        self.with(|b| b.hook = Some((identity, Box::new(run))));
     }
 }
 
@@ -447,7 +456,20 @@ impl Hardware for Hw {
     }
 
     fn post(&mut self, job: &Job) -> Result<()> {
-        self.with(|b| b.pending.push_back(*job));
+        let hook = self.with(|b| {
+            b.pending.push_back(*job);
+            match b.hook.take() {
+                Some((identity, run)) if identity == job.identity => Some(run),
+                other => {
+                    b.hook = other;
+                    None
+                }
+            }
+        });
+        // Outside the block's lock: the client may use the streams, not the block.
+        if let Some(run) = hook {
+            run();
+        }
         Ok(())
     }
 
@@ -954,4 +976,91 @@ fn a_board_with_an_image_or_statistics_stream_of_plain_memory_is_refused_at_bind
     let host = bound(dma, dma, dma);
     host.tick();
     assert_eq!(host.device("isp").unwrap().state, DeviceState::Running);
+}
+
+#[test]
+fn an_output_1_buffer_given_back_and_named_again_within_one_pump_completes_its_job() {
+    let host = host();
+    let hw = Hw::default();
+    let app = Arc::new(Mutex::new(App::attach(&host)));
+    let mut fe = driver(&host, &hw);
+    CameraIsp::start(&mut fe).unwrap();
+    {
+        let mut app = app.lock().unwrap();
+        app.config.fill(0, &config_for(0x11, false, true));
+        app.config.fill(1, &config_for(0x22, false, false));
+        app.post(1, 0, 1, 0);
+    }
+    // Job A runs and publishes its output 1 frame on buffer 0. The consumer has not popped it.
+    let now = two_ticks(&mut fe, 1);
+
+    // Job X is queued before the pump. When the pump posts X to the block, the consumer pops
+    // A's output 1 frame, gives buffer 0 back and names it in job B, all before the pump reads B.
+    app.lock().unwrap().post(2, 1, 3, NO_BUFFER);
+    let shared = Arc::clone(&app);
+    hw.hook_after_post(2, move || {
+        let mut app = shared.lock().unwrap();
+        let frame = app
+            .output1
+            .ring
+            .pop_frame()
+            .unwrap()
+            .expect("job A's output 1");
+        assert_eq!((frame.buffer, frame.identity), (0, 1));
+        assert!(
+            app.output1.read(frame.buffer, OUTPUT_BYTES as usize)
+                == expected(1, 0x11, 1, OUTPUT_BYTES as usize)
+        );
+        assert!(app.output1.ring.release(frame.buffer, frame.fence).unwrap());
+        app.post(3, 0, 2, 0);
+    });
+    let now = fe.tick(now).unwrap();
+    fe.tick(now).unwrap();
+
+    let mut app = app.lock().unwrap();
+    let a = app
+        .output0
+        .ring
+        .pop_frame()
+        .unwrap()
+        .expect("job A's output 0");
+    assert_eq!((a.buffer, a.identity), (1, 1));
+    let x = app
+        .output0
+        .ring
+        .pop_frame()
+        .unwrap()
+        .expect("job X's output 0");
+    assert_eq!((x.buffer, x.identity), (3, 2));
+    assert!(
+        app.output0.read(x.buffer, OUTPUT_BYTES as usize)
+            == expected(0, 0x22, 2, OUTPUT_BYTES as usize)
+    );
+    let b = app
+        .output0
+        .ring
+        .pop_frame()
+        .unwrap()
+        .expect("job B's output 0");
+    assert_eq!((b.buffer, b.identity), (2, 3));
+    assert!(
+        app.output0.read(b.buffer, OUTPUT_BYTES as usize)
+            == expected(0, 0x11, 3, OUTPUT_BYTES as usize)
+    );
+    let second = app
+        .output1
+        .ring
+        .pop_frame()
+        .unwrap()
+        .expect("job B's output 1");
+    assert_eq!((second.buffer, second.identity), (0, 3));
+    assert!(
+        app.output1.read(second.buffer, OUTPUT_BYTES as usize)
+            == expected(1, 0x11, 3, OUTPUT_BYTES as usize)
+    );
+    assert_eq!(hw.with(|b| b.keys.clone()), [0x11, 0x22, 0x11]);
+    assert_eq!(hw.with(|b| b.lost), 0, "every result was in memory given");
+    let counters = CameraIsp::counters(&mut fe).unwrap();
+    assert_eq!((counters.jobs, counters.dropped), (3, 0));
+    assert_eq!(hw.registered(), 0);
 }

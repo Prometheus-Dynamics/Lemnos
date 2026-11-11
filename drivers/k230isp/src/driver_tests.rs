@@ -156,6 +156,8 @@ impl Streams {
 struct Racing {
     inner: MockStream,
     scribble: Vec<u8>,
+    /// A buffer the consumer hands over just before the driver reads the next job.
+    hands_over: Option<u32>,
 }
 
 impl StreamEndpoint for Racing {
@@ -178,6 +180,9 @@ impl StreamEndpoint for Racing {
     }
 
     fn next_job(&mut self, out: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
+        if let Some(buffer) = self.hands_over.take() {
+            self.inner.return_buffer(buffer);
+        }
         self.inner.next_job(out)
     }
 
@@ -427,6 +432,7 @@ fn the_driver_uses_its_copy_when_the_caller_changes_the_buffer_after_the_read() 
     let config = Racing {
         inner: streams.config.clone(),
         scribble: list(&[(MI_BASE, 1), (WINDOW_BYTES, 0)]),
+        hands_over: None,
     };
     let (mut d, b) = driver_on(&streams, Box::new(config));
     d.start().unwrap();
@@ -507,6 +513,35 @@ fn a_config_buffer_the_driver_does_not_hold_drops_the_job() {
     d.tick(STRIDE);
     assert_eq!(b.writes(), []);
     assert_eq!(d.counters().unwrap().dropped, 1);
+}
+
+#[test]
+fn a_config_buffer_handed_over_and_named_while_a_tick_runs_is_held_for_that_job() {
+    let streams = Streams::new();
+    let good = list(&[(AE_V_SIZE, 6)]);
+    // The consumer hands buffer 3 over after the tick's look at the buffers, then posts the
+    // job that names it; the tick reads that job.
+    let config = Racing {
+        inner: streams.config.clone(),
+        scribble: good.clone(),
+        hands_over: Some(3),
+    };
+    let (mut d, b) = driver_on(&streams, Box::new(config));
+    // The consumer kept buffer 3: take it before the driver can.
+    let mut consumer = streams.config.clone();
+    let mut taken = Vec::new();
+    while let Some(buffer) = consumer.next_buffer().unwrap() {
+        taken.push(buffer);
+    }
+    for buffer in taken.into_iter().filter(|&x| x != 3) {
+        streams.config.return_buffer(buffer);
+    }
+    d.start().unwrap();
+    streams.config.fill(3, &good);
+    post(&streams.config, &job(1, 3));
+    d.tick(0);
+    assert_eq!(b.writes(), [(AE_V_SIZE, 6), (ISP_CTRL, CTRL_GEN_CFG_UPD)]);
+    assert_eq!(d.counters().unwrap().dropped, 0);
 }
 
 #[test]

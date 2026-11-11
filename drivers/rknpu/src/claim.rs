@@ -696,6 +696,9 @@ impl<'a, D: Device> Claim<'a, D> {
                 self.fault(stream, Failure::Result)?;
                 break;
             }
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            self.take_free(stream)?;
             if !self.holds(job.result) {
                 // On the stream but not the driver's now: there is nothing to complete on.
                 self.failed(Failure::Result);

@@ -318,6 +318,10 @@ impl Streams {
     }
 }
 
+/// Runs before each read of the config ring while set: the consumer acting between the driver's
+/// looks.
+type Hook = Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>;
+
 /// A consumer that scribbles over a config buffer right after the driver read it, as a caller
 /// racing the driver would, and that can keep one config buffer from the driver.
 struct Racing {
@@ -326,6 +330,7 @@ struct Racing {
     withhold: Option<u32>,
     /// Jobs let through before the ring looks empty; `None` lets every job through.
     allow: Option<Arc<AtomicUsize>>,
+    hook: Hook,
 }
 
 impl StreamEndpoint for Racing {
@@ -353,6 +358,9 @@ impl StreamEndpoint for Racing {
     }
 
     fn next_job(&mut self, out: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
+        if let Some(hook) = self.hook.lock().unwrap().as_mut() {
+            hook();
+        }
         if let Some(allow) = &self.allow {
             if allow.load(Ordering::Relaxed) == 0 {
                 return Ok(None);
@@ -759,6 +767,7 @@ fn the_driver_uses_its_copy_when_the_caller_changes_the_buffer_after_the_read() 
         scribble: vec![0xff; PARAMS],
         withhold: None,
         allow: None,
+        hook: Hook::default(),
     };
     let (mut d, k) = driver_on(&streams, Box::new(config));
     configured(&mut d);
@@ -787,6 +796,7 @@ fn a_job_the_driver_cannot_run_is_dropped_before_anything_reaches_the_kernel() {
         scribble: Vec::new(),
         withhold: Some(3),
         allow: None,
+        hook: Hook::default(),
     };
     let (mut d, k) = driver_on(&streams, Box::new(config));
     configured(&mut d);
@@ -882,6 +892,51 @@ fn an_output_buffer_is_used_once_until_the_consumer_gives_it_back() {
     d.tick(4);
     assert_eq!(d.counters().unwrap().dropped, 2);
     assert_eq!(k.queued_params().len(), 2);
+}
+
+#[test]
+fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
+    let streams = Streams::new();
+    let config = Racing {
+        inner: streams.config.clone(),
+        scribble: Vec::new(),
+        withhold: None,
+        allow: None,
+        hook: Hook::default(),
+    };
+    let hook = Arc::clone(&config.hook);
+    let (mut d, k) = driver_on(&streams, Box::new(config));
+    configured(&mut d);
+    d.start().unwrap();
+    d.tick(0);
+    post(&streams.config, &job(1, 0, 0));
+    d.tick(1);
+    k.apply(0, 7);
+    k.finish(Queue::Statistics, 0, 7, &[1; 8]);
+    k.finish(Queue::Main, 0, 7, &[2; 8]);
+    d.tick(2);
+    assert_eq!(d.counters().unwrap().jobs, 1);
+    // Job 2 is read first. Before job 3 is read, the consumer takes the frame job 1 published,
+    // gives its buffer back and names it in job 3, all after this pump's first look at returns.
+    post(&streams.config, &job(2, 1, NO_BUFFER));
+    let mut reads = 0;
+    let consumer = streams.clone();
+    *hook.lock().unwrap() = Some(Box::new(move || {
+        reads += 1;
+        if reads == 2 {
+            let frame = consumer.output0.take_frame().unwrap();
+            consumer.output0.return_buffer(frame.buffer);
+            post(&consumer.config, &job(3, 2, frame.buffer));
+        }
+    }));
+    let params = pattern(8, PARAMS);
+    streams.config.fill(2, &params);
+    d.tick(3);
+    // Job 3 reached the kernel, and nothing was dropped.
+    assert_eq!(k.queued_params().len(), 3);
+    assert_eq!(k.params_seen(k.queued_params()[2].0), params);
+    assert_eq!(d.counters().unwrap().dropped, 0);
+    assert_eq!(d.health(), Health::Ok);
 }
 
 #[test]
@@ -1154,6 +1209,7 @@ fn the_steady_state_allocates_nothing() {
         scribble: Vec::new(),
         withhold: None,
         allow: Some(Arc::clone(&allow)),
+        hook: Hook::default(),
     };
     let (mut d, k) = driver_on(&streams, Box::new(config));
     configured(&mut d);

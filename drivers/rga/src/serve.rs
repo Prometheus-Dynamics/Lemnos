@@ -389,6 +389,9 @@ impl Server {
                 lane.attached = false;
                 break;
             };
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            Self::take_free(stream, lane)?;
             // Buffers held since before this consumer came have nothing behind them: they are
             // given up and taken again first, so that even a failed job completes to it.
             let mut renewed = false;
