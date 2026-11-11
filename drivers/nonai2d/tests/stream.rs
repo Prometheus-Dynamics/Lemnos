@@ -12,7 +12,7 @@
     reason = "the heap test says whether it ran, for the record"
 )]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
@@ -276,6 +276,76 @@ fn jobs_on_the_ring_run_on_the_streams_dma_bufs_and_complete_on_the_ring() {
     assert_eq!(completion(&mut consumer).identity, 4);
     let stats = host.stream_stats(0, "jobs").unwrap();
     assert_eq!((stats.faults, stats.dropped), (0, 0));
+}
+
+/// An engine that lets the consumer act while it runs a job: `between` is called with the
+/// number of each conversion, as the engine is given it.
+struct Interleaved {
+    runs: Rc<Cell<u32>>,
+    layouts: (FrameLayout, FrameLayout),
+    between: Rc<RefCell<dyn FnMut(u32)>>,
+}
+
+impl Engine for Interleaved {
+    fn layouts(&self) -> (FrameLayout, FrameLayout) {
+        self.layouts
+    }
+
+    fn convert(&mut self, _src: &Frame<'_>, _dst: &Frame<'_>) -> io::Result<()> {
+        self.runs.set(self.runs.get() + 1);
+        (self.between.borrow_mut())(self.runs.get());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
+    let host = start();
+    let mut producer = host.stream_producer(0, "jobs").unwrap();
+    let lease = host.stream_attach(0, "jobs", CallerId(1)).unwrap();
+    let consumer = Rc::new(RefCell::new(consumer(&lease)));
+    let runs = Rc::new(Cell::new(0));
+    // While the engine runs the second job, the consumer takes the first one's completion,
+    // gives its buffer back and posts a third job writing into that buffer.
+    let between: Rc<RefCell<dyn FnMut(u32)>> = {
+        let consumer = Rc::clone(&consumer);
+        Rc::new(RefCell::new(move |run| {
+            if run != 2 {
+                return;
+            }
+            let mut consumer = consumer.borrow_mut();
+            let done = completion(&mut consumer);
+            assert_eq!((done.buffer, done.identity, done.bytes), (1, 1, BYTES));
+            assert!(consumer.release(done.buffer, done.fence).unwrap());
+            post(&mut consumer, &job(3, 0, 1, 32, 32));
+        }))
+    };
+    let mut converter = {
+        let runs = Rc::clone(&runs);
+        Converter::new(Nonai2d::new(move |src, dst| {
+            Ok(Interleaved {
+                runs: Rc::clone(&runs),
+                layouts: (src, dst),
+                between: Rc::clone(&between),
+            })
+        }))
+    };
+    assert_eq!(converter.serve(&mut producer, 0), Ok(0));
+    post(&mut consumer.borrow_mut(), &job(1, 0, 1, 32, 32));
+    post(&mut consumer.borrow_mut(), &job(2, 0, 2, 32, 32));
+    // One round reads all three: every job read gets its completion.
+    assert_eq!(converter.serve(&mut producer, 1), Ok(3));
+    assert_eq!(runs.get(), 3);
+    assert_eq!(converter.counters(), Counters { jobs: 3, errors: 0 });
+    let mut consumer = consumer.borrow_mut();
+    let second = completion(&mut consumer);
+    assert_eq!(
+        (second.buffer, second.identity, second.bytes),
+        (2, 2, BYTES)
+    );
+    let third = completion(&mut consumer);
+    assert_eq!((third.buffer, third.identity, third.bytes), (1, 3, BYTES));
+    assert_eq!(consumer.pop_frame().unwrap(), None);
 }
 
 #[test]

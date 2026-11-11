@@ -588,12 +588,7 @@ impl Rkisp {
     /// Stream buffers back, finished kernel buffers out, new jobs in. An error means a kernel
     /// queue or a stream failed.
     fn pump(&mut self) -> Result<()> {
-        take_returned(&mut self.config, &mut self.held.config)?;
-        take_returned(&mut self.statistics, &mut self.held.statistics)?;
-        take_returned(&mut self.output0, &mut self.held.outputs[0])?;
-        if let Some(stream) = self.output1.as_mut() {
-            take_returned(stream, &mut self.held.outputs[1])?;
-        }
+        self.take_returns()?;
         self.drain_params()?;
         for queue in [Queue::Statistics, Queue::Main, Queue::SelfPath] {
             self.drain(queue)?;
@@ -745,6 +740,17 @@ impl Rkisp {
         }
     }
 
+    /// Takes the buffers every stream has handed back.
+    fn take_returns(&mut self) -> Result<()> {
+        take_returned(&mut self.config, &mut self.held.config)?;
+        take_returned(&mut self.statistics, &mut self.held.statistics)?;
+        take_returned(&mut self.output0, &mut self.held.outputs[0])?;
+        if let Some(stream) = self.output1.as_mut() {
+            take_returned(stream, &mut self.held.outputs[1])?;
+        }
+        Ok(())
+    }
+
     /// Takes every job posted, and sends each or counts it as dropped.
     fn take_jobs(&mut self) -> Result<()> {
         let mut encoded = [0u8; MAX_JOB_BYTES];
@@ -761,6 +767,9 @@ impl Rkisp {
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
                 return self.fault_config();
             };
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            self.take_returns()?;
             let sent = self.submit(&job)?;
             if !sent {
                 self.counters.dropped = self.counters.dropped.saturating_add(1);

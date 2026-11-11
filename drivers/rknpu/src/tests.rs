@@ -406,7 +406,7 @@ struct Seen {
     foreign: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Kernel {
     iommu: bool,
     switching: bool,
@@ -420,6 +420,9 @@ struct Kernel {
     record: bool,
     seen: Vec<Seen>,
     submits: u64,
+    /// Called as each run starts, with the runs so far, so a test can act on the stream while
+    /// the block runs.
+    hook: Option<Box<dyn FnMut(u64)>>,
 }
 
 impl Kernel {
@@ -625,6 +628,9 @@ impl Session for PlayedSession {
         // `rknpu_job_schedule`: the device switches to the job's domain for the run.
         k.current = domain;
         k.submits += 1;
+        if let Some(hook) = k.hook.as_mut() {
+            hook(k.submits);
+        }
         let mut own = [(0u32, 0u64, 0u64); 64];
         let mut count = 0;
         let mut foreign = 0;
@@ -760,6 +766,45 @@ fn handles_in(kernel: &Rc<RefCell<Kernel>>, domain: u32) -> Vec<u32> {
 
 // ---------------------------------------------------------------------------------------------
 // The claim
+
+#[test]
+fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
+    let kernel = Kernel::new(true);
+    let mut service = Service::new(Node {
+        kernel: kernel.clone(),
+    });
+    let mut claim = service.claim(0).unwrap();
+    let mut stream = stream();
+    let program = load(
+        &mut claim,
+        &mut stream,
+        0,
+        &Framed::copy(4),
+        &[(1, 4), (2, 4)],
+    )
+    .unwrap();
+    stream.fill(1, &[10, 20, 30, 40]);
+    // While the block runs the second job, the consumer takes the first one's result, gives its
+    // buffer back and posts a third job whose result is written into that buffer.
+    let shared = stream.clone();
+    kernel.borrow_mut().hook = Some(Box::new(move |run| {
+        if run != 2 {
+            return;
+        }
+        assert_eq!(completion(&shared), (0xa, RunStatus::Done));
+        post(&shared, job(0xc, program, 3));
+    }));
+    post(&stream, job(0xa, program, 3));
+    post(&stream, job(0xb, program, 4));
+    // One round reads all three: every job read gets its completion.
+    assert_eq!(claim.serve(&mut stream, 0), Ok(3));
+    assert_eq!(completion(&stream), (0xb, RunStatus::Done));
+    assert_eq!(completion(&stream), (0xc, RunStatus::Done));
+    assert!(stream.take_frame().is_none());
+    assert_eq!(claim.counters().jobs, 3);
+    assert_eq!(claim.counters().errors, 0);
+    assert_eq!(&stream.contents(2)[..4], &[11, 21, 31, 41]);
+}
 
 #[test]
 fn a_block_without_an_iommu_is_not_claimed() {

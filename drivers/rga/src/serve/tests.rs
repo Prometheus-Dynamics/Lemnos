@@ -175,6 +175,9 @@ struct Requests {
     seen: [Option<Seen>; 2],
     count: usize,
     fail: bool,
+    /// Called as each request starts, with the requests before it, so a test can act on the
+    /// consumer while the unit runs.
+    between: Option<Box<dyn FnMut(usize) + Send>>,
 }
 
 /// `/dev/rga` as the driver reaches it: each request built by the crate's own builders, checked
@@ -217,6 +220,9 @@ impl Submit for Recorder {
         self.with(|r| {
             if r.fail {
                 return Err(io::Error::from_raw_os_error(5));
+            }
+            if let Some(hook) = r.between.as_mut() {
+                hook(r.count);
             }
             if let Some(slot) = r.seen.get_mut(r.count) {
                 *slot = Some(seen);
@@ -575,6 +581,49 @@ fn a_thousand_failed_jobs_through_the_stream_allocate_nothing() {
     });
     assert_eq!(count, 0, "allocations in 990 failed jobs");
     assert_eq!(ImageBlend::counters(&mut rga).unwrap().errors, 340);
+}
+
+#[test]
+fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
+    let host = host(Memory::Handles);
+    let (mock, _) = m2m_mock();
+    let rec = Recorder::default();
+    let mut rga = rk3588(&host, &mock, &rec);
+    let shared = Arc::new(Mutex::new(Client::attach(&host, "blend", 1)));
+    rga.tick(0);
+    // While the unit runs the second blend's copy, the consumer takes the first one's
+    // completion, gives its buffer back and posts a third blend writing into that buffer.
+    let hook = {
+        let shared = Arc::clone(&shared);
+        move |request: usize| {
+            if request != 2 {
+                return;
+            }
+            let mut blend = shared.lock().unwrap();
+            let done = blend.done();
+            assert_eq!((done.buffer, done.identity, done.bytes), (2, 7, 16));
+            blend.release(done);
+            blend.post(&blend_job(9, 0, 1, 2));
+        }
+    };
+    rec.with(|r| r.between = Some(Box::new(hook)));
+    {
+        let mut blend = shared.lock().unwrap();
+        blend.post(&blend_job(7, 0, 1, 2));
+        blend.post(&blend_job(8, 0, 1, 3));
+    }
+    // One round reads all three: each blend is two requests on the unit.
+    rga.tick(MS);
+    assert_eq!(rec.with(|r| r.count), 6);
+    assert_eq!(rga.last_failure(), None);
+    let c = ImageBlend::counters(&mut rga).unwrap();
+    assert_eq!((c.jobs, c.errors), (3, 0));
+    let mut blend = shared.lock().unwrap();
+    let second = blend.done();
+    assert_eq!((second.buffer, second.identity, second.bytes), (3, 8, 16));
+    let third = blend.done();
+    assert_eq!((third.buffer, third.identity, third.bytes), (2, 9, 16));
+    assert_eq!(blend.ring.pop_frame().unwrap(), None);
 }
 
 #[test]

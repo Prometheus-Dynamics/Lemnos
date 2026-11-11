@@ -279,6 +279,8 @@ fn a_stream_of_plain_shared_memory_is_refused_at_bind_before_any_consumer_comes(
     assert_eq!(rig.host.device("v").unwrap().state, DeviceState::Running);
 }
 
+type Hook = Box<dyn FnMut(usize) + Send>;
+
 /// What the played node saw, and how it is to fail.
 #[derive(Default)]
 struct Log {
@@ -290,6 +292,9 @@ struct Log {
     releases: AtomicU32,
     /// Each run: its input's width, and its input and output descriptors.
     runs: Mutex<Vec<(i32, i32, i32)>>,
+    /// Called as each run starts, with the run's number from 1, so a test can act on the
+    /// consumer while the block runs.
+    hook: Mutex<Option<Hook>>,
 }
 
 impl Log {
@@ -319,6 +324,10 @@ impl Device for Played {
             runs.push(({ input.width }, { input.buf_fd }, { output.buf_fd }));
         }
         drop(runs);
+        let number = self.0.runs();
+        if let Some(hook) = self.0.hook.lock().unwrap().as_mut() {
+            hook(number);
+        }
         let left = self.0.run_failures.load(Ordering::Relaxed);
         if left > 0 {
             self.0.run_failures.store(left - 1, Ordering::Relaxed);
@@ -396,6 +405,53 @@ fn jobs_run_on_the_handles_of_their_buffers_and_complete_on_the_ring() {
     assert_eq!((done.buffer, done.identity, done.bytes), (3, 2, OUT_BYTES));
     assert_eq!(log.releases.load(Ordering::Relaxed), 1);
     assert_eq!(driver.counters().unwrap(), Counters { jobs: 2, errors: 0 });
+}
+
+#[test]
+fn a_buffer_given_back_and_named_again_while_a_round_runs_completes_its_job() {
+    let rig = counter_rig();
+    let log = log(16);
+    let mut driver = driver_on(&rig.host, &log);
+    assert_eq!(driver.tick(0), Some(POLL_NS));
+    let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
+    let shared = Arc::new(Mutex::new(consumer(&lease)));
+    // While the block runs the second job, the consumer takes the first one's completion,
+    // gives its buffer back and posts a third job writing into that buffer.
+    let hook = {
+        let shared = Arc::clone(&shared);
+        move |run: usize| {
+            if run != 2 {
+                return;
+            }
+            let mut consumer = shared.lock().unwrap();
+            let done = completion(&mut consumer);
+            assert_eq!((done.buffer, done.identity, done.bytes), (1, 1, OUT_BYTES));
+            assert!(consumer.release(done.buffer, done.fence).unwrap());
+            post(&mut consumer, &job(3, 0, 1));
+        }
+    };
+    *log.hook.lock().unwrap() = Some(Box::new(hook));
+    {
+        let mut consumer = shared.lock().unwrap();
+        post(&mut consumer, &job(1, 0, 1));
+        post(&mut consumer, &job(2, 0, 2));
+    }
+    // One round reads all three: every job read gets its completion.
+    driver.tick(MS);
+    assert_eq!(log.runs(), 3);
+    assert_eq!(driver.counters().unwrap(), Counters { jobs: 3, errors: 0 });
+    let mut consumer = shared.lock().unwrap();
+    let second = completion(&mut consumer);
+    assert_eq!(
+        (second.buffer, second.identity, second.bytes),
+        (2, 2, OUT_BYTES)
+    );
+    let third = completion(&mut consumer);
+    assert_eq!(
+        (third.buffer, third.identity, third.bytes),
+        (1, 3, OUT_BYTES)
+    );
+    assert_eq!(consumer.pop_frame().unwrap(), None);
 }
 
 #[test]

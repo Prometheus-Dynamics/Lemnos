@@ -479,9 +479,7 @@ impl Isp600 {
     /// Stream buffers back, finished kernel buffers out, a new job in. An error means a kernel
     /// node or a stream failed.
     fn pump(&mut self) -> Result<()> {
-        take_returned(&mut self.config, &mut self.held.config)?;
-        take_returned(&mut self.statistics, &mut self.held.statistics)?;
-        take_returned(&mut self.output0, &mut self.held.output)?;
+        self.take_returns()?;
         self.drain_statistics()?;
         self.drain_images()?;
         self.retire();
@@ -608,6 +606,14 @@ impl Isp600 {
         self.pending = None;
     }
 
+    /// Takes the buffers every stream has handed back.
+    fn take_returns(&mut self) -> Result<()> {
+        take_returned(&mut self.config, &mut self.held.config)?;
+        take_returned(&mut self.statistics, &mut self.held.statistics)?;
+        take_returned(&mut self.output0, &mut self.held.output)?;
+        Ok(())
+    }
+
     /// Takes posted jobs until one is sent, counting each it can't send as dropped.
     fn take_job(&mut self) -> Result<()> {
         let mut encoded = [0u8; MAX_JOB_BYTES];
@@ -624,6 +630,9 @@ impl Isp600 {
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
                 return self.fault_config();
             };
+            // Again for each job: its consumer may have given a buffer back and named it in
+            // this job since the last look.
+            self.take_returns()?;
             let sent = self.submit(&job)?;
             if sent {
                 break;

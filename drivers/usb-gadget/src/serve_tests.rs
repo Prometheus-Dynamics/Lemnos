@@ -14,7 +14,7 @@ use lemnos_core::{
     ConfigValue, Decode, Driver, Encode, LocalCaller, Provider, Reader, Resources, StreamHandle,
     Tag, Writer,
 };
-use lemnos_hal::blocks::{ControlSetup, StreamFrame, UsbFunctionEvent};
+use lemnos_hal::blocks::{BufferHandle, BufferKind, ControlSetup, StreamFrame, UsbFunctionEvent};
 use lemnos_hal::mock::{ControlAnswer, MockStream, MockUsbFunction};
 use lemnos_hal::{StreamEndpoint, UsbFunction as HalFunction};
 use lemnos_measure::test_alloc::allocations;
@@ -412,6 +412,124 @@ fn a_job_that_asks_for_what_it_may_not_is_refused_and_nothing_moves() {
         0,
         "a refused job is no broken consumer"
     );
+}
+
+/// What the consumer does with a frame the driver has just published.
+type After = Box<dyn FnMut(&MockStream, &StreamFrame) + Send>;
+
+/// A consumer that acts while the driver serves it: `after` is called with each frame the
+/// driver publishes, right after it is published.
+struct Acting {
+    inner: MockStream,
+    after: After,
+}
+
+impl StreamEndpoint for Acting {
+    type Error = ErrorKind;
+
+    fn buffer_count(&self) -> u32 {
+        self.inner.buffer_count()
+    }
+
+    fn buffer_current(&self, buffer: u32) -> core::result::Result<bool, ErrorKind> {
+        self.inner.buffer_current(buffer)
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        self.inner.buffer_kind()
+    }
+
+    fn publish(&mut self, frame: StreamFrame) -> core::result::Result<(), ErrorKind> {
+        self.inner.publish(frame)?;
+        (self.after)(&self.inner, &frame);
+        Ok(())
+    }
+
+    fn next_buffer(&mut self) -> core::result::Result<Option<u32>, ErrorKind> {
+        self.inner.next_buffer()
+    }
+
+    fn next_job(&mut self, out: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
+        self.inner.next_job(out)
+    }
+
+    fn write(
+        &mut self,
+        buffer: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> core::result::Result<bool, ErrorKind> {
+        self.inner.write(buffer, offset, data)
+    }
+
+    fn read(
+        &mut self,
+        buffer: u32,
+        offset: usize,
+        out: &mut [u8],
+    ) -> core::result::Result<bool, ErrorKind> {
+        self.inner.read(buffer, offset, out)
+    }
+
+    fn buffer_handle(
+        &self,
+        buffer: u32,
+    ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
+        self.inner.buffer_handle(buffer)
+    }
+
+    fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
+        self.inner.fault_consumer()
+    }
+}
+
+/// A consumer may take a completion, give its buffer back and name it in its next job while
+/// the driver is still reading jobs. The driver holds the buffer by then: that job is served,
+/// not taken for a broken consumer's.
+#[test]
+fn a_buffer_given_back_and_named_again_while_jobs_are_read_is_no_broken_consumer() {
+    let again = Job {
+        identity: 2,
+        kind: JobKind::Send,
+        endpoint: 0x85,
+        buffer: 0,
+        length: 1,
+    };
+    let host = MockUsbFunction::new();
+    let consumer = MockStream::with_bytes(BUFFERS, BYTES);
+    let acting = Acting {
+        inner: consumer.clone(),
+        after: Box::new(move |consumer, frame| {
+            if frame.identity != 1 {
+                return;
+            }
+            // The first job's completion: taken, its buffer given back and named again.
+            let done = consumer.take_frame().expect("a completion");
+            assert_eq!((done.buffer, done.identity), (0, 1));
+            consumer.return_buffer(done.buffer);
+            let mut bytes = [0u8; JOB_BYTES];
+            let mut writer = Writer::new(&mut bytes);
+            again.encode(&mut writer).unwrap();
+            let used = writer.len();
+            consumer.post_job(&bytes[..used]);
+        }),
+    };
+    let driver = bind_on(Box::new(host.clone()), Some(Box::new(acting)), &[]);
+    let mut rig = Rig {
+        driver,
+        host,
+        consumer,
+        now: 0,
+    };
+    rig.tick();
+    rig.host.event(UsbFunctionEvent::Configured);
+    rig.tick();
+    // No endpoint of that address: refused, which completes it as the jobs are read.
+    rig.send(1, 0x85, 0, b"x");
+    rig.tick();
+    assert_eq!(rig.consumer.faults(), 0);
+    assert_eq!(rig.failed(2), JobStatus::Refused);
+    assert!(rig.completion().is_none());
 }
 
 /// How a test posts one job.

@@ -194,11 +194,16 @@ impl Streams {
     }
 }
 
+/// Runs before each read of the config ring while set: the consumer acting between the driver's
+/// looks.
+type Hook = Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>;
+
 /// A consumer that scribbles over a config buffer right after the driver read it, as a caller
 /// racing the driver would.
 struct Racing {
     inner: MockStream,
     scribble: Vec<u8>,
+    hook: Hook,
 }
 
 impl StreamEndpoint for Racing {
@@ -221,6 +226,9 @@ impl StreamEndpoint for Racing {
     }
 
     fn next_job(&mut self, out: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
+        if let Some(hook) = self.hook.lock().unwrap().as_mut() {
+            hook();
+        }
         self.inner.next_job(out)
     }
 
@@ -603,6 +611,7 @@ fn the_driver_hands_in_its_copy_when_the_caller_changes_the_buffer_after_the_rea
     let config = Racing {
         inner: streams.config.clone(),
         scribble: vec![0xff; LOAD_BYTES],
+        hook: Hook::default(),
     };
     let (mut d, k) = driver_on(&streams, Box::new(config), SETTLE);
     configured(&mut d);
@@ -680,6 +689,75 @@ fn a_job_naming_what_the_driver_does_not_hold_is_dropped() {
     d.tick(1);
     assert!(k.loads().is_empty());
     assert_eq!(d.counters().unwrap().dropped, 1);
+}
+
+#[test]
+fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
+    let streams = Streams::new();
+    let config = Racing {
+        inner: streams.config.clone(),
+        scribble: Vec::new(),
+        hook: Hook::default(),
+    };
+    let hook = Arc::clone(&config.hook);
+    let (mut d, k) = driver_on(&streams, Box::new(config), SETTLE);
+    configured(&mut d);
+    d.start().unwrap();
+    d.tick(0);
+    streams.config.fill(0, &image(1));
+    post(&streams.config, &job(1, 0, 0));
+    d.tick(1);
+    // Job 1 finishes after its settle frame, and its frame is published on output buffer 0.
+    k.frame(4, &pattern(9, STATISTICS_BYTES), &pattern(9, IMAGE));
+    d.tick(2);
+    k.frame(5, &pattern(2, STATISTICS_BYTES), &pattern(3, IMAGE));
+    d.tick(3);
+    let s = streams.statistics.take_frame().unwrap();
+    streams.statistics.return_buffer(s.buffer);
+    assert_eq!(d.counters().unwrap().jobs, 1);
+
+    // Job 2 names a config buffer past the ring, so it is dropped. Then, before job 3 is read,
+    // the consumer takes job 1's frame, gives its buffer back and names it in job 3.
+    streams.config.fill(2, &image(2));
+    post(&streams.config, &job(2, 4, NO_BUFFER));
+    let mut reads = 0;
+    let consumer = streams.clone();
+    *hook.lock().unwrap() = Some(Box::new(move || {
+        reads += 1;
+        if reads == 2 {
+            let frame = consumer.output0.take_frame().unwrap();
+            consumer.output0.return_buffer(frame.buffer);
+            post(&consumer.config, &job(3, 2, frame.buffer));
+        }
+    }));
+    d.tick(4);
+    // Job 3 reached the kernel; only job 2 was dropped.
+    assert_eq!(k.loads(), vec![image(1), image(2)]);
+    assert_eq!(
+        d.counters().unwrap(),
+        Counters {
+            jobs: 1,
+            dropped: 1,
+            errors: 0
+        }
+    );
+    // And its frame comes out on the buffer the consumer gave back.
+    let picture = pattern(5, IMAGE);
+    k.frame(6, &pattern(4, STATISTICS_BYTES), &pattern(4, IMAGE));
+    d.tick(5);
+    k.frame(7, &pattern(5, STATISTICS_BYTES), &picture);
+    d.tick(6);
+    let o = streams.output0.take_frame().unwrap();
+    assert_eq!((o.buffer, o.identity, o.sequence), (0, 3, 7));
+    assert_eq!(streams.output0.contents(0), picture);
+    assert_eq!(
+        d.counters().unwrap(),
+        Counters {
+            jobs: 2,
+            dropped: 1,
+            errors: 0
+        }
+    );
 }
 
 #[test]
