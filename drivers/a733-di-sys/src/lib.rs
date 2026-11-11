@@ -79,7 +79,7 @@ impl Node {
     fn bare(&self, request: u32) -> io::Result<i32> {
         // SAFETY: the request takes no argument (its encoded size is 0, and the kernel's
         // handler reads none); the descriptor is this node's open file.
-        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), libc::c_ulong::from(request), 0) };
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), request as _, 0) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -95,8 +95,7 @@ impl Node {
         // SAFETY: the request copies one `T` in from the pointer and, for a read, back out;
         // `pointer` is to a live, exclusively borrowed `T` that outlives the call, and every
         // `T` passed here is a `repr(C)` structure of integers with no pointer in it.
-        let ret =
-            unsafe { libc::ioctl(self.file.as_raw_fd(), libc::c_ulong::from(request), pointer) };
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), request as _, pointer) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }

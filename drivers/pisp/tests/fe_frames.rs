@@ -873,7 +873,7 @@ fn a_new_statistics_client_gets_statistics_in_its_own_memory() {
     let mut app = App::attach(&host);
     let mut fe = driver(&host, &hw);
     CameraIsp::start(&mut fe).unwrap();
-    let mut now = fe.tick(1).unwrap();
+    let now = fe.tick(1).unwrap();
     // The statistics client goes; another takes its place. The driver still holds every
     // statistics buffer from before, with nothing behind them now.
     drop(app.stats);
@@ -881,18 +881,14 @@ fn a_new_statistics_client_gets_statistics_in_its_own_memory() {
     app.stats = Client::attach(&host, "statistics");
     app.config.fill(1, &config_for(7, true, false));
 
-    // Dropped, and buffer 1 given up and taken again as the new client's.
+    // Buffer 1 is given up and taken again as the new client's within the job, which runs and
+    // writes the new client's memory: nothing is dropped.
     app.post(1, 1, 0, NO_BUFFER);
-    now = two_ticks(&mut fe, now);
-    assert!(app.stats.ring.pop_frame().unwrap().is_none());
-    assert!(app.output0.ring.pop_frame().unwrap().is_none());
-    assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
-
-    app.post(2, 1, 0, NO_BUFFER);
     two_ticks(&mut fe, now);
     let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
-    assert_eq!((stats.buffer, stats.identity), (1, 2));
-    assert!(app.stats.read(1, STATS_BYTES) == expected(2, 7, 2, STATS_BYTES));
+    assert_eq!((stats.buffer, stats.identity), (1, 1));
+    assert!(app.stats.read(1, STATS_BYTES) == expected(2, 7, 1, STATS_BYTES));
+    assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 0);
     assert_eq!(hw.with(|b| b.lost), 0);
 }
 

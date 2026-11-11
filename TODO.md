@@ -6,16 +6,22 @@ done and shown.
 
 ## Hardware runs
 
-Nothing has been run on hardware in its present form. Every piece of hardware-facing code has a
-written check under `testing/board-runs/`, and none records a result.
-[`docs/hardware-status.md`](docs/hardware-status.md) lists them by area, and
+One run on the reference board (2026-11-11) covered the kernel module, the backend's buses through
+it, and the camera path; [`docs/hardware-status.md`](docs/hardware-status.md#the-first-board-run)
+lists what it showed. Every other check under `testing/board-runs/` has no result yet, and
 [`docs/testing.md`](docs/testing.md#board-runs) says how a run is done.
 
-- [ ] Every check in `testing/board-runs/`.
+- [ ] Every check in `testing/board-runs/` that has no result.
+- [ ] What the first run on the reference board left out: SPI and driven outputs through the
+      module (`C3.md`, `C4.md`); the reset pulse (`C6.md`); the receiver's register, every-way stop
+      and second-camera checks (`D5.md` 3, 5, 7, 8); the front end's output 1, queue pressure, 200
+      stop cycles of each kind and bad configurations (`D7.md`, `D16.md`, `D18.md`); the back end's
+      raw round trip against the stock driver and its checks 3 to 8 (`D6.md`, `D15.md`,
+      `D17.md`); the sensor's mode 1 and its exposure checks (`D8.md`, `D10.md`); the chip, fan and
+      thermal drivers' own checks (`B8.md` to `B15.md`); a host-owned chip (`A35.md`).
 - [ ] The bench's reference set on the reference board, beside the earlier version's figures
       (`testing/bench/bench.sh --real`). The harness has no step for the camera, light and fan
       rows: their figures come only from the board runs `testing/bench/reference.tsv` names.
-- [ ] The whole system on the kernel-module route against the stock route, on a real bus.
 - [ ] `lemnos-orion` against a running node.
 
 ## Blocks that cannot be made safe from user space
@@ -52,8 +58,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       (`regs:`, `irq:`, `clocks:`, `resets:`). The block drivers built in open their own kernel
       nodes.
 - [ ] **The C API has no frame streams and no package list.**
-- [ ] **The camera proof tool runs in one process.** It has no way to reach devices through the
-      daemon's socket.
 - [ ] **A USB camera needs a board entry.** There is no binding by device class.
 - [ ] **USB**: the gadget has no isochronous endpoints, and `uvc` reads one isochronous transfer
       at a time.

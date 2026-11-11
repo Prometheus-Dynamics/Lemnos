@@ -17,10 +17,8 @@ mod registers;
 mod spi;
 
 use std::fmt::{self, Write};
-use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -41,7 +39,7 @@ pub(crate) use spi::ModuleSpi;
 pub(crate) struct Node(Arc<Inner>);
 
 struct Inner {
-    fd: OwnedFd,
+    fd: Arc<OwnedFd>,
     events: events::Events,
 }
 
@@ -65,15 +63,12 @@ impl Write for Name {
 
 impl Node {
     /// Opens the node non-blocking: reading it is only the event stream, which [`events`] reads
-    /// after `poll` says there is something, and nothing else on it looks at the flag.
+    /// after `poll` says there is something, and nothing else on it looks at the flag. The open
+    /// file is the process's one (`lemnos_linux_sys::module::open_shared`), so a block driver in
+    /// the same process that opens the node itself gets this file rather than a refusal.
     pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)?;
         Ok(Self(Arc::new(Inner {
-            fd: file.into(),
+            fd: lemnos_linux_sys::module::open_shared(path.as_ref())?,
             events: events::Events::default(),
         })))
     }

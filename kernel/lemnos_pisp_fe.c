@@ -60,6 +60,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/workqueue.h>
 
 #include <uapi/linux/media/raspberrypi/pisp_fe_config.h>
 
@@ -124,6 +125,9 @@ MODULE_PARM_DESC(test_pisp_fe,
 #define LPF_STOP_STILL_READS	8
 #define LPF_STOP_POLLS		250
 
+/* How often a front end with no job queued looks for a free buffer again. */
+#define LPF_RETRY_MS		1
+
 /* Test only: entries the write log holds. */
 #define LPF_TRACE_ENTRIES	2048
 
@@ -151,6 +155,9 @@ struct lem_pisp_fe {
 	struct pisp_fe_config cfg;
 	struct lemnos_pisp_fe_start start;
 	u64 frames, written, dropped, errors, stalled;
+
+	/* Queues again while nothing is queued and no buffer was free; see lpf_arm(). */
+	struct delayed_work retry;
 
 	/* Test only, NULL unless test_pisp_fe. */
 	struct lemnos_pisp_fe_trace_entry *trace;
@@ -502,7 +509,12 @@ static void lpf_program(struct lem_pisp_fe *fe)
 	lpf_wr(fe, FE_CONTROL, FE_CONTROL_QUEUE);
 }
 
-/* Gives the block the stream's next job when it has none queued. Lock held. */
+/*
+ * Gives the block the stream's next job when it has none queued. Lock held.
+ * As the receiver's: with no buffer free, this tries again every LPF_RETRY_MS
+ * until one is or the block stops, since a block with nothing queued may make
+ * no interrupt that would.
+ */
 static void lpf_arm(struct lem_pisp_fe *fe)
 {
 	int ret;
@@ -514,8 +526,13 @@ static void lpf_arm(struct lem_pisp_fe *fe)
 		fe->stalled++;
 		return;
 	}
-	if (lem_stream_next(fe->stream, &fe->next.slot))
-		return;			/* none free, or the stream's own error */
+	ret = lem_stream_next(fe->stream, &fe->next.slot);
+	if (ret) {
+		if (ret == -ENOBUFS)
+			queue_delayed_work(system_highpri_wq, &fe->retry,
+					   msecs_to_jiffies(LPF_RETRY_MS));
+		return;		/* none free, or the stream's own error */
+	}
 	ret = lpf_prepare(fe, &fe->next.slot);
 	if (ret) {
 		lem_stream_cancel(fe->stream, &fe->next.slot);
@@ -524,6 +541,16 @@ static void lpf_arm(struct lem_pisp_fe *fe)
 	}
 	lpf_program(fe);
 	fe->next.valid = true;
+}
+
+static void lpf_retry(struct work_struct *work)
+{
+	struct lem_pisp_fe *fe = container_of(to_delayed_work(work), struct lem_pisp_fe, retry);
+	unsigned long flags;
+
+	spin_lock_irqsave(&fe->lock, flags);
+	lpf_arm(fe);
+	spin_unlock_irqrestore(&fe->lock, flags);
 }
 
 /* As the receiver's: a start before the last frame's end is a frame not called complete. */
@@ -629,6 +656,8 @@ void lem_pisp_fe_stop(struct lem_pisp_fe *fe)
 	spin_lock_irqsave(&fe->lock, flags);
 	fe->streaming = false;
 	spin_unlock_irqrestore(&fe->lock, flags);
+	/* Not streaming, so a retry finds nothing to do and doesn't come again. */
+	cancel_delayed_work_sync(&fe->retry);
 
 	lpf_trace(fe, LEMNOS_PISP_FE_MARK_CHANNEL_STOP, 0);
 	lrc_fe_channel_stop(l);
@@ -891,6 +920,7 @@ struct lem_pisp_fe *lem_pisp_fe_create(struct lrc_dev *l, void __iomem *window)
 	fe->l = l;
 	fe->base = window;
 	spin_lock_init(&fe->lock);
+	INIT_DELAYED_WORK(&fe->retry, lpf_retry);
 	if (test_pisp_fe) {
 		fe->trace = kcalloc(LPF_TRACE_ENTRIES, sizeof(*fe->trace), GFP_KERNEL);
 		if (!fe->trace) {
@@ -907,6 +937,7 @@ struct lem_pisp_fe *lem_pisp_fe_create(struct lrc_dev *l, void __iomem *window)
 
 void lem_pisp_fe_destroy(struct lem_pisp_fe *fe)
 {
+	cancel_delayed_work_sync(&fe->retry);
 	kfree(fe->trace);
 	kfree(fe);
 }

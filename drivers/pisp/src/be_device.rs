@@ -33,11 +33,11 @@
 //! For each image of a job, the driver borrows that buffer's dma-buf from its stream, registers
 //! it with the module for the one job, and points the image's planes into it, so the block reads
 //! and writes the memory the client was handed. When the job ends the driver unregisters it and
-//! publishes the outputs. A job is dropped, and nothing posted, when an image names a buffer the
-//! driver doesn't hold or one another job still has on the block, when its stream's buffers have
-//! no handles, when the client it was taken for has gone (the buffer is given up and taken again
-//! as the new client's), when the module won't register it, or when the buffer is smaller than
-//! the image the configuration describes.
+//! publishes the outputs. A buffer still held for a client that has gone is given up and taken
+//! again as the new client's within the job, which then runs. A job is dropped, and nothing
+//! posted, when an image names a buffer the driver doesn't hold or one another job still has on
+//! the block, when its stream's buffers have no handles, when the module won't register it, or
+//! when the buffer is smaller than the image the configuration describes.
 //!
 //! Bytes on the config stream's job queue that are no job are a broken consumer, as the
 //! contract says: they are counted as dropped, that consumer's config stream is faulted, and the
@@ -731,21 +731,29 @@ impl PispBe {
         let (Some(stream), Some(buffers), hw) = self.parts(image) else {
             return Ok(None);
         };
-        let registered = match stream.buffer_handle(buffer) {
-            Ok(Some(handle)) => hw.register(handle.fd()),
-            Ok(None) => {
-                // The client it was taken for has gone. Publishing it reaches no one and gives
-                // it up; the stream's free buffers, the new client's, come with the next look.
-                let _ = stream.publish(StreamFrame {
-                    buffer,
-                    bytes: 0,
-                    sequence: 0,
-                    identity: 0,
-                    timestamp_ns: 0,
-                });
-                Buffers::set(&mut buffers.held, buffer, false);
+        let mut handle = stream.buffer_handle(buffer);
+        if matches!(handle, Ok(None)) {
+            // Taken for a client that has gone, or before any came (a buffer held since the
+            // driver bound). Publishing it reaches no one and gives it up; it is free again at
+            // once as the client's now, so it is taken again and lent under that client, and the
+            // job runs. Still not the client's: dropped.
+            let _ = stream.publish(StreamFrame {
+                buffer,
+                bytes: 0,
+                sequence: 0,
+                identity: 0,
+                timestamp_ns: 0,
+            });
+            Buffers::set(&mut buffers.held, buffer, false);
+            buffers.take(stream)?;
+            if !buffers.free(buffer) {
                 return Ok(None);
             }
+            handle = stream.buffer_handle(buffer);
+        }
+        let registered = match handle {
+            Ok(Some(handle)) => hw.register(handle.fd()),
+            Ok(None) => return Ok(None),
             // Buffers without handles: nothing the block touches reaches the client.
             Err(_) => return Ok(None),
         };

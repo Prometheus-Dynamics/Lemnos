@@ -37,6 +37,20 @@ static int failures;
 		printf("\n");                                              \
 	} while (0)
 
+/* Whether the module was loaded with test_irq_inject. */
+static int injecting(void)
+{
+	char c = 'N';
+	int f = open("/sys/module/lemnos/parameters/test_irq_inject", O_RDONLY);
+
+	if (f >= 0) {
+		if (read(f, &c, 1) != 1)
+			c = 'N';
+		close(f);
+	}
+	return c == 'Y';
+}
+
 int main(int argc, char **argv)
 {
 	const char *node = argc > 1 ? argv[1] : "/dev/lemnos";
@@ -149,12 +163,19 @@ int main(int argc, char **argv)
 
 	CHECK(ioctl(fd, LEMNOS_IOC_IRQ_ENABLE, &past_irq) < 0 && errno == EINVAL,
 	      "enable irq %u: EINVAL", past_irq.index);
-	CHECK(ioctl(fd, LEMNOS_IOC_TEST_IRQ, &zero) < 0 && errno == EPERM,
-	      "test interrupt without test_irq_inject: EPERM");
+	/* lemnos_irq_check covers injection; a board run may load the module with it on. */
+	if (!injecting())
+		CHECK(ioctl(fd, LEMNOS_IOC_TEST_IRQ, &zero) < 0 && errno == EPERM,
+		      "test interrupt without test_irq_inject: EPERM");
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 	CHECK(read(fd, &ev, sizeof(ev)) < 0 && errno == EAGAIN, "read with none pending: EAGAIN");
 	CHECK(read(fd, &ev, sizeof(ev) - 1) < 0 && errno == EINVAL, "read too short: EINVAL");
 
+	/* A mapping holds the file open as a descriptor does: let go of both before reopening. */
+	if (regs != MAP_FAILED)
+		munmap(regs, page);
+	if (cpu != MAP_FAILED)
+		munmap(cpu, a.size);
 	close(a.fd);
 	close(fd);
 	fd = open(node, O_RDWR | O_CLOEXEC);

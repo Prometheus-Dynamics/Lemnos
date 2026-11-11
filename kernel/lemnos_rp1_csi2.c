@@ -24,7 +24,8 @@
  *  - The register offsets here are constants, inside windows checked at probe.
  *  - Interrupt status is only tested for known bits. No count or length from
  *    the block reaches a frame or a publish: a frame's size is the one fixed
- *    at START, already checked against the buffer.
+ *    at START, already checked against the buffer. The channel's line count
+ *    only decides whether a frame is published or counted as gone wrong.
  *  - A buffer is the block's from lem_stream_next() until the channel is known
  *    not to be using it. Stopping runs FORCE, then waits until the channel's
  *    counter is still, then gives the buffers back; if it won't go still the
@@ -139,6 +140,9 @@
  */
 #define LRC_STOP_STILL_READS	8
 #define LRC_STOP_POLLS		250
+
+/* How often a channel with nothing armed looks for a free buffer again. */
+#define LRC_RETRY_MS		1
 
 static void lrc_free(struct kref *ref)
 {
@@ -258,15 +262,45 @@ static void lrc_set_buffer(struct lrc_dev *l, const struct lem_stream_slot *slot
 	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), addr & 0xffffffff);
 }
 
-/* Gives the channel the stream's next buffer when it has none waiting. Lock held. */
+/*
+ * Gives the channel the stream's next buffer when it has none waiting. Lock held.
+ *
+ * With nothing armed the channel makes no frame start, so no interrupt would
+ * ever come to try again: a stream started before its consumer gave memory, or
+ * a consumer holding every buffer, would stop the camera for good. So when no
+ * buffer is free, this tries again every LRC_RETRY_MS until one is or the
+ * channel stops, on the high-priority queue so a busy CPU delays it least. A
+ * stream's own error is not retried: the stream is over.
+ *
+ * The frames that start while nothing is armed are never seen here: no frame
+ * start, no sequence number, no drop counted. The stock driver is the same.
+ * Only the time between the frame starts on either side shows them.
+ */
 static void lrc_arm(struct lrc_dev *l)
 {
+	int ret;
+
 	if (!l->streaming || l->next.valid)
 		return;
-	if (lem_stream_next(l->stream, &l->next.slot))
-		return;			/* none free, or the stream's own error */
+	ret = lem_stream_next(l->stream, &l->next.slot);
+	if (ret) {
+		if (ret == -ENOBUFS)
+			queue_delayed_work(system_highpri_wq, &l->retry,
+					   msecs_to_jiffies(LRC_RETRY_MS));
+		return;
+	}
 	l->next.valid = true;
 	lrc_set_buffer(l, &l->next.slot);
+}
+
+static void lrc_retry(struct work_struct *work)
+{
+	struct lrc_dev *l = container_of(to_delayed_work(work), struct lrc_dev, retry);
+	unsigned long flags;
+
+	spin_lock_irqsave(&l->lock, flags);
+	lrc_arm(l);
+	spin_unlock_irqrestore(&l->lock, flags);
 }
 
 /* cfe_sof_isr_handler. Lock held. */
@@ -289,14 +323,30 @@ static void lrc_sof(struct lrc_dev *l, u64 now)
 	lrc_arm(l);
 }
 
-/* cfe_eof_isr_handler. Lock held. */
-static void lrc_eof(struct lrc_dev *l)
+/*
+ * cfe_eof_isr_handler. Lock held. `line` is the channel's line count now (the
+ * low half of CSI2_CH_DEBUG): it counts the lines the channel wrote, and none
+ * while nothing is armed, so the lines since the last frame end are this
+ * frame's. A frame is published only when that is the height START set: a
+ * frame cut short (one caught mid-transmission at a start, measured on the
+ * board as a single line) is a frame gone wrong. Read at the frame end, which
+ * the next frame's lines can't reach before its vertical blanking is over.
+ */
+static void lrc_eof(struct lrc_dev *l, u16 line)
 {
+	u16 lines = line - l->fe_line;
+
+	l->fe_line = line;
 	if (l->cur.valid) {
-		l->written++;
-		/* frames is the FS count: this frame's number is one below it. */
-		lem_stream_complete(l->stream, &l->cur.slot, l->cur.slot.bytes, l->frames - 1,
-				    l->fs_ns);
+		if (lines == (u16)l->start.height) {
+			l->written++;
+			/* frames is the FS count: this frame's number is one below it. */
+			lem_stream_complete(l->stream, &l->cur.slot, l->cur.slot.bytes,
+					    l->frames - 1, l->fs_ns);
+		} else {
+			lem_stream_complete(l->stream, &l->cur.slot, 0, l->frames - 1, l->fs_ns);
+			l->errors++;
+		}
 		l->cur.valid = false;
 	}
 	l->fe_int = true;
@@ -310,6 +360,7 @@ static irqreturn_t lrc_isr(int irq, void *data)
 	u64 now = ktime_get_ns();
 	bool sof, eof, handled = false;
 	u32 sts, status;
+	u16 line;
 
 	sts = rd(l->cfg, MIPICFG_INTS);
 	if (l->fe && (sts & MIPICFG_INT_PISP_FE)) {
@@ -324,6 +375,7 @@ static irqreturn_t lrc_isr(int irq, void *data)
 	wr(l->dma, CSI2_STATUS, status);	/* write back to clear */
 	sof = status & IRQ_FS(LRC_CH);
 	eof = status & IRQ_FE_ACK(LRC_CH);
+	line = eof ? rd(l->dma, CSI2_CH_DEBUG(LRC_CH)) & 0xffff : 0;
 
 	spin_lock(&l->lock);
 	if (l->streaming) {
@@ -338,7 +390,7 @@ static irqreturn_t lrc_isr(int irq, void *data)
 				lrc_sof(l, now);
 				sof = false;
 			}
-			lrc_eof(l);
+			lrc_eof(l, line);
 		}
 		if (sof)
 			lrc_sof(l, now);
@@ -394,6 +446,8 @@ static void lrc_stop_locked(struct lrc_dev *l, struct lem_stream *s)
 	wr(l->dma, CSI2_IRQ_MASK, 0);
 	wr(l->cfg, MIPICFG_INTE, 0);
 	spin_unlock_irqrestore(&l->lock, flags);
+	/* Not streaming, so a retry finds nothing to do and doesn't come again. */
+	cancel_delayed_work_sync(&l->retry);
 
 	/* Everything written above is posted across a bus: a read makes it land first. */
 	(void)rd(l->dma, CSI2_CH_CTRL(LRC_CH));
@@ -496,6 +550,7 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	l->cur.valid = l->next.valid = false;
 	l->frames = l->written = l->dropped = l->errors = 0;
 	l->fs_int = l->fe_int = false;
+	l->fe_line = 0;		/* the line count is cleared below */
 	spin_unlock_irqrestore(&l->lock, flags);
 
 	/* csi2_start_channel, the caller's vc and dt. */
@@ -729,6 +784,7 @@ static int lrc_probe(struct platform_device *pdev)
 	mutex_init(&l->ctl);
 	init_rwsem(&l->going);
 	spin_lock_init(&l->lock);
+	INIT_DELAYED_WORK(&l->retry, lrc_retry);
 	platform_set_drvdata(pdev, l);
 
 	l->dma = lrc_window(pdev, 0, LRC_DMA_WINDOW);

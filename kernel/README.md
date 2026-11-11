@@ -98,6 +98,15 @@ end address checked against the buffer with overflow-safe arithmetic, the frame'
 size checked against the buffer at `START`, and the buffer held as the block's until the frame
 completes or the channel is stopped.
 
+The channel makes no frame start while it has no address, and doesn't count the frame either: a
+frame that starts with nothing armed is never seen, by this module or by the stock driver. Arming
+happens at start and at each frame start and end; when it finds no buffer free (no consumer yet, or
+every buffer held), it tries again 1 ms later from a high-priority work item, so a consumer that
+attaches late or gives buffers back late gets frames within a frame or two. At frame end the
+channel's line count since the last frame end must equal the frame's height: a short frame (on the
+board, the first frame after a quick restart can arrive with frame start and end together and one
+line written) is counted as an error and never published.
+
 Stopping is one path, whichever of `STOP`, closing the stream's file, closing this node or unbinding
 gets there first. It writes FORCE, flushes it with a read, waits out any running handler, and then
 polls the channel's line counter until it holds still, up to a bounded time. Only then do the buffers
@@ -161,7 +170,7 @@ A refusal, of any kind, leaves the registers alone and ends the stream with its 
 Sequence, from the stock driver: at `START` the first job is taken and checked before any register
 is written. Then the channel in front end mode, the front end's reset and interrupts, the first job
 and `QUEUE`, and the link last. Each frame's interrupt programs the next job when the block isn't
-holding one. Stopping (`STOP`, closing the stream or node, unbinding) is one path: channel force,
+holding one. When the stream has no job ready, it tries again 1 ms later, as the receiver does. Stopping (`STOP`, closing the stream or node, unbinding) is one path: channel force,
 interrupts off, `ABORT`, waits out any running handler, then `STATUS` must read zero eight times in
 a row. If it doesn't within a bounded time, nothing is released, every pin stays until reboot, and
 `START` is refused until the block is bound again (`LEMNOS_PISP_FE_INFO_WEDGED`).
@@ -203,7 +212,9 @@ empty at open, and watches end on close.
 On a kernel with the RP1 PIO driver, a claim on `pio-0` carries a driver client and a table of allowed
 operations. The driver's raw register calls aren't in the table. DMA data goes through kernel
 buffers, so no caller names an address. Closing the claim ends the client, which frees its state
-machines and programs.
+machines and programs. A transfer waits killably: a holder killed mid-transfer ends at once and its
+state machines and programs are free again (on the reference board the waits were uninterruptible
+and a killed holder lived for a minute).
 
 ## Unbinding
 

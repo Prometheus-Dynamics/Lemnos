@@ -53,7 +53,7 @@ struct lemnos_rp1_csi2_info {
 	__u64 frames;		/* frame starts since START */
 	__u64 written;		/* frames completed */
 	__u64 dropped;		/* frame starts with no buffer armed */
-	__u64 errors;		/* frames the block flagged as bad */
+	__u64 errors;		/* frames gone wrong: a start with one open, or the wrong line count */
 };
 
 struct lemnos_rp1_csi2_start {

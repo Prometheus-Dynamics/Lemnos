@@ -130,6 +130,22 @@ impl LinuxHardware {
         }
         self.node.as_ref().ok_or(Status::NO_DEVICE)
     }
+
+    /// An error from the node. A node whose block was unbound answers `ENODEV` to everything
+    /// for good, and a block bound again is a new node at the same path: the old one is
+    /// dropped, so the next call opens the new one.
+    fn node_error(&mut self, error: io::Error) -> Status {
+        if node_is_gone(&error) {
+            self.node = None;
+            self.running = None;
+        }
+        status(error)
+    }
+}
+
+/// Whether the node answered that its block is gone.
+fn node_is_gone(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc_errno::ENODEV)
 }
 
 fn status(error: io::Error) -> Status {
@@ -150,15 +166,13 @@ impl Hardware for LinuxHardware {
 
     fn make(&mut self, params: &StartParams) -> Result<()> {
         let _ = self.stop();
-        let stream = self
-            .node()?
-            .stream_create(&StreamParams {
-                buffers: params.buffers,
-                buffer_bytes: params.size,
-                frame_slots: params.frame_slots,
-                job_slots: 8,
-            })
-            .map_err(status)?;
+        let made = self.node()?.stream_create(&StreamParams {
+            buffers: params.buffers,
+            buffer_bytes: params.size,
+            frame_slots: params.frame_slots,
+            job_slots: 8,
+        });
+        let stream = made.map_err(|e| self.node_error(e))?;
         self.running = Some((stream, *params));
         Ok(())
     }
@@ -168,30 +182,37 @@ impl Hardware for LinuxHardware {
             return Err(Status::NO_DEVICE);
         };
         let (stream_fd, params) = (stream.raw_fd(), *params);
-        self.node()?
-            .start(&Start {
-                stream_fd,
-                lanes: params.lanes,
-                mbps: params.mbps,
-                vc: params.vc,
-                dt: params.data_type,
-                width: params.width,
-                height: params.height,
-                stride: params.stride,
-                size: params.size,
-                flags: if params.unpack16 { UNPACK16 } else { 0 },
-                reserved: [0; 2],
-            })
-            .map_err(status)
+        let started = self.node()?.start(&Start {
+            stream_fd,
+            lanes: params.lanes,
+            mbps: params.mbps,
+            vc: params.vc,
+            dt: params.data_type,
+            width: params.width,
+            height: params.height,
+            stride: params.stride,
+            size: params.size,
+            flags: if params.unpack16 { UNPACK16 } else { 0 },
+            reserved: [0; 2],
+        });
+        started.map_err(|e| self.node_error(e))
     }
 
     fn stop(&mut self) -> Result<()> {
         let result = match &self.node {
-            Some(node) => node.stop().map_err(status),
+            Some(node) => node.stop(),
             None => Ok(()),
         };
         self.running = None;
-        result
+        match result {
+            Ok(()) => Ok(()),
+            // Unbinding stopped the block: there's nothing left to stop.
+            Err(e) if node_is_gone(&e) => {
+                self.node = None;
+                Ok(())
+            }
+            Err(e) => Err(status(e)),
+        }
     }
 
     fn check(&mut self) -> Result<()> {
@@ -258,5 +279,24 @@ impl Hardware for LinuxHardware {
 mod libc_errno {
     pub const EBADF: i32 = 9;
     pub const EBUSY: i32 = 16;
+    pub const ENODEV: i32 = 19;
     pub const EINVAL: i32 = 22;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::{libc_errno, node_is_gone};
+
+    #[test]
+    fn only_enodev_means_the_node_is_gone() {
+        assert!(node_is_gone(&io::Error::from_raw_os_error(
+            libc_errno::ENODEV
+        )));
+        for errno in [libc_errno::EBUSY, libc_errno::EINVAL, libc_errno::EBADF, 5] {
+            assert!(!node_is_gone(&io::Error::from_raw_os_error(errno)));
+        }
+        assert!(!node_is_gone(&io::ErrorKind::NotFound.into()));
+    }
 }

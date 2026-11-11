@@ -10,6 +10,12 @@
 //! Each bus also prints a `measure` line per operation: the time it takes on the route it took
 //! (median and 99th percentile, from the monotonic clock) and what it allocated. They are numbers
 //! to read, not checks: nothing fails on time.
+//!
+//! `lemnos-module-check board ...` is the mode for a real board: it touches only the devices
+//! named on its command line, in the ways [`board`] lists, and never the harness's fixed test
+//! addresses.
+
+mod board;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -909,6 +915,27 @@ fn check_power(report: &mut Report, board: &mut LinuxBoard) {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [mode, targets @ ..] = args.as_slice()
+        && mode == "board"
+    {
+        let Some(targets) = targets
+            .iter()
+            .map(|t| board::parse(t))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return ExitCode::from(2);
+        };
+        let failures = board::run(&targets);
+        let _ = writeln!(
+            std::io::stdout(),
+            "lemnos-module-check board: {failures} failed"
+        );
+        return if failures == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     let [route, spi_route, chip, dir] = args.as_slice() else {
         return ExitCode::from(2);
     };
@@ -927,10 +954,17 @@ fn main() -> ExitCode {
         "the module opens exactly when it's loaded",
     );
     if module {
-        let second = LinuxBoard::new().open_module();
+        // The module has one opener; within it, every board and driver shares the one open
+        // file. Another process is refused (`lemnos_claim_check`).
+        let mut second = LinuxBoard::new();
         report.check(
-            second.is_err_and(|e| e.raw_os_error() == Some(libc::EBUSY)),
-            "the node has one opener",
+            second.open_module().is_ok() && open_files("/dev/lemnos") == 1,
+            "a second board in the process shares the one open file",
+        );
+        drop(second);
+        report.check(
+            open_files("/dev/lemnos") == 1,
+            "and the first board still holds it",
         );
     }
 

@@ -43,5 +43,11 @@ struct tcsi_regs {
 #define TCSI_IOC_FE_STATUS	_IOW('T', 6, __u32)
 /* STATUS reads busy for this many ms. ~0: never idle. */
 #define TCSI_IOC_FE_BUSY	_IOW('T', 7, __u32)
+/*
+ * A frame end adds the lines the channel wrote to the line count (the low half
+ * of DEBUG), the frame size's height when armed and none when not, as the
+ * block does. LINES makes the next armed frame end add this many instead.
+ */
+#define TCSI_IOC_LINES	_IOW('T', 8, __u32)
 
 #endif

@@ -127,7 +127,7 @@ pub fn private(node: BorrowedFd<'_>, request: u32, payload: &mut [u8]) -> io::Re
     // `takes`), so the V4L2 core copies exactly that many bytes in from `pointer` and back
     // out to it; `payload` is a live, exclusively borrowed slice of that length for the whole
     // call, and the structures of the allowed requests hold no pointer the kernel follows.
-    let ret = unsafe { libc::ioctl(node.as_raw_fd(), libc::c_ulong::from(request), pointer) };
+    let ret = unsafe { libc::ioctl(node.as_raw_fd(), request as _, pointer) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }

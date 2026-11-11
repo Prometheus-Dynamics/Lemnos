@@ -67,6 +67,20 @@ What the run shows, within the limits above:
 - The 99th percentiles are host scheduling noise as much as anything; a single run on a virtual
   machine does not say which route has the steadier tail.
 
+## Board figures
+
+On the reference board, 2026-11-11 (`testing/board-runs/C8.md`): three rounds of
+`lemnos-module-check board`, alternating the routes, 0 allocations everywhere.
+
+| Operation | Stock, median / p99 | Module, median / p99 |
+| --- | --- | --- |
+| I2C register read, 1 byte out and 2 in, on a real chip | about 505.4 µs / 524 µs | about 505.6 µs / 525 µs |
+| GPIO get, a free input | 1278 ns / 1408 ns | 1241 ns |
+| PWM configure, output off | about 25.1 µs / 33 to 40 µs | 3945 ns / about 4.5 µs |
+
+The I2C time is the wire's on both routes. SPI was not measured: the board has no SPI device that
+may be touched.
+
 ## Behaviour that differs between the routes
 
 These are in the merged code (`kernel/`, `backends/linux/src/lib.rs`, `backends/linux/src/module/`),
@@ -99,3 +113,5 @@ whatever the timings say.
     around a claim.
 - **The control node has one opener.** Only one process can open `/dev/lemnos`, so only the host
   of a machine's hardware uses the module route; anything else on the machine is on stock nodes.
+  Inside that process the backend and every block driver share one open file
+  (`lemnos_linux_sys::module::open_shared`).

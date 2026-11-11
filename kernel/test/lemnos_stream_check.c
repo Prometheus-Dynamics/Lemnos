@@ -1004,6 +1004,25 @@ static void own_free(struct own *o)
 	o->fd = -1;
 }
 
+/*
+ * Whether the block is behind an IOMMU. There every attachment of a dma-buf is a mapping of its
+ * own, so the address a stream gives a buffer is not the address the dma-buf was made at: what a
+ * job names is the stream's address, which set_buffer returns.
+ */
+static int behind_iommu(const char *name)
+{
+	char path[160];
+
+	snprintf(path, sizeof(path), "/sys/bus/platform/devices/%s/iommu_group", name);
+	return access(path, F_OK) == 0;
+}
+
+/* The stream's address for a buffer's memory: the dma-buf's own without an IOMMU. */
+static int same_place(const char *name, uint64_t stream_addr, uint64_t made_at)
+{
+	return stream_addr && (stream_addr == made_at || behind_iommu(name));
+}
+
 /* How many dma-bufs are attached to the device `name`, from the kernel's own list. */
 static int attached(const char *name)
 {
@@ -1087,10 +1106,11 @@ static void test_own_refusals(int ctl, uint32_t block, const char *name, int poo
 
 	for (uint32_t i = 0; i < BUFFERS; i++) {
 		ret = set_buffer(&s, i, o[i].fd, &out);
-		CHECK(!ret && out.addr == o[i].addr && out.size == BUFFER_BYTES,
+		CHECK(!ret && same_place(name, out.addr, o[i].addr) && out.size == BUFFER_BYTES,
 		      "buffer %u has its own dma-buf: %d, at %llx (the block's %llx), %llu bytes", i,
 		      ret, (unsigned long long)out.addr, (unsigned long long)o[i].addr,
 		      (unsigned long long)out.size);
+		o[i].addr = out.addr;
 	}
 	CHECK(attached(name) == before + (int)BUFFERS, "one pin for each");
 	memset(&out, 0, sizeof(out));
@@ -1106,11 +1126,15 @@ static void test_own_refusals(int ctl, uint32_t block, const char *name, int poo
 	CHECK(set_buffer(&s, 3, aux, NULL) == -EBUSY, "a registered dma-buf as a buffer: EBUSY");
 
 	/* Swapping a free buffer's memory: the old pin goes, the new address is the buffer's. */
-	CHECK(!set_buffer(&s, 3, spare.fd, &out) && out.addr == spare.addr,
+	CHECK(!set_buffer(&s, 3, spare.fd, &out) && same_place(name, out.addr, spare.addr),
 	      "a free buffer's memory is swapped");
 	CHECK(attached(name) == before + (int)BUFFERS + 1, "the old dma-buf's pin went with it");
-	CHECK(!set_buffer(&s, 3, o[3].fd, &out) && out.addr == o[3].addr && out.size == BUFFER_BYTES,
+	uint64_t made_at = o[3].addr;
+
+	CHECK(!set_buffer(&s, 3, o[3].fd, &out) && same_place(name, out.addr, made_at) &&
+		      out.size == BUFFER_BYTES,
 	      "and swapped back: a longer dma-buf reaches only a buffer's bytes");
+	o[3].addr = out.addr;
 
 	/* A job holds its buffer: its memory can't change under it. */
 	j = job(1, 7, 1);
@@ -1126,7 +1150,8 @@ static void test_own_refusals(int ctl, uint32_t block, const char *name, int poo
 	stream_close(&s);
 
 	/* Past a buffer's bytes but inside its (longer) dma-buf: not the buffer's, so nowhere. */
-	CHECK(!own_open(&s, ctl, block) && !set_buffer(&s, 3, o[3].fd, NULL), "again, one buffer");
+	CHECK(!own_open(&s, ctl, block) && !set_buffer(&s, 3, o[3].fd, &out), "again, one buffer");
+	o[3].addr = out.addr;
 	j = job(3, 1, 1);
 	j.range[0] = (struct lemnos_stream_range){ .addr = o[3].addr + BUFFER_BYTES - 8, .len = 16 };
 	post(&s, &j);
@@ -1195,7 +1220,7 @@ static void test_own_frames(int ctl, uint32_t block, const char *name)
 	/* The consumer holds them all. Buffer 1 gets new memory before it goes back. */
 	memset(o[1].cpu, 0x22, BUFFER_BYTES);
 	memset(fresh.cpu, 0x33, BUFFER_BYTES);
-	CHECK(!set_buffer(&s, 1, fresh.fd, &out) && out.addr == fresh.addr,
+	CHECK(!set_buffer(&s, 1, fresh.fd, &out) && same_place(name, out.addr, fresh.addr),
 	      "a buffer the consumer holds is given new memory");
 	for (uint32_t i = 0; i < BUFFERS; i++)
 		give_back(&s, i, held[i].fence);

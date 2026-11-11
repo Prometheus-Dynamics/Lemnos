@@ -399,6 +399,39 @@ static void test_frames(int pool_fd)
 	CHECK(!info().streaming, "closing the stream stopped the receiver");
 }
 
+/*
+ * A frame cut short: its frame start and end came, but the channel wrote one
+ * line of it (seen on the board when a start catches a frame mid-way). It is
+ * a frame gone wrong, not published; the next whole frame is.
+ */
+static void test_short_frame(int pool_fd)
+{
+	struct stream s;
+	struct frame f;
+	struct lemnos_rp1_csi2_start a;
+	struct lemnos_rp1_csi2_info i;
+	uint32_t one = 1;
+
+	CHECK(!stream_open(&s, pool_fd), "stream made");
+	a = good_start(s.fd);
+	CHECK(!start(&a), "START");
+	fire(TCSI_FS);
+	CHECK(!ioctl(hw, TCSI_IOC_LINES, &one), "the next frame has one line");
+	fire(TCSI_FE_ACK);
+	i = info();
+	CHECK(!pop_frame(&s, &f), "a frame with one line of %u isn't published", F_HEIGHT);
+	CHECK(i.frames == 1 && i.written == 0 && i.errors == 1,
+	      "it's an error (frames %llu written %llu errors %llu)", (unsigned long long)i.frames,
+	      (unsigned long long)i.written, (unsigned long long)i.errors);
+	fire(TCSI_FS);
+	fire(TCSI_FE_ACK);
+	CHECK(pop_frame(&s, &f) && f.buffer == 1 && f.bytes == F_SIZE && f.sequence == 1,
+	      "the next whole frame is (buffer %u sequence %llu)", f.buffer,
+	      (unsigned long long)f.sequence);
+	CHECK(info().written == 1, "and counted written");
+	stream_close(&s);
+}
+
 /* Hostile interrupt status: whatever the block says, only bounded, kernel-held work is done. */
 static void test_hostile_hw(int pool_fd)
 {
@@ -724,13 +757,17 @@ static void test_own_buffers(const char *heap, const char *dev)
 	CHECK(info().dropped == 1 && !pop_frame(&s, &f) && armed_addr() == 0,
 	      "a frame with nowhere to go is dropped, and nothing is armed");
 
-	/* Memory arrives: the next frame start arms it, at its own address. */
+	/*
+	 * Memory arrives: it is armed at its own address with no frame start,
+	 * since a real channel with nothing armed makes none.
+	 */
 	CHECK(!own_set(&s, 0, &o[0]) && !own_set(&s, 1, &o[1]), "buffers 0 and 1 get memory");
 	CHECK(o[0].addr && o[1].addr && o[0].addr != o[1].addr, "each at an address of its own");
-	fire(TCSI_FS);
-	CHECK(armed_addr() == o[0].addr, "buffer 0's own dma-buf is armed (%llx, its %llx)",
+	for (int n = 0; n < 200 && armed_addr() != o[0].addr; n++)
+		sleep_ms(1);
+	CHECK(armed_addr() == o[0].addr,
+	      "buffer 0's own dma-buf is armed with no frame start (%llx, its %llx)",
 	      (unsigned long long)armed_addr(), (unsigned long long)o[0].addr);
-	fire(TCSI_FE_ACK);
 	fire(TCSI_FS);
 	CHECK(armed_addr() == o[1].addr, "then buffer 1's (%llx, its %llx)",
 	      (unsigned long long)armed_addr(), (unsigned long long)o[1].addr);
@@ -934,6 +971,7 @@ int main(int argc, char **argv)
 	CHECK(!stream_open(&s, pool_fd), "a stream can be made and dropped untouched");
 	stream_close(&s);
 	test_frames(pool_fd);
+	test_short_frame(pool_fd);
 	test_hostile_hw(pool_fd);
 	test_jobs(pool_fd);
 	test_own_buffers(heap, dev);
