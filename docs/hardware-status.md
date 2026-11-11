@@ -3,7 +3,7 @@
 **Nothing in this repository has been run on hardware in its present form.** Every driver, every
 backend and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour. Each is marked *untested on board*, and each has a written check waiting
-under `testing/board-runs/`. None of those 83 files records a result yet.
+under `testing/board-runs/`. None of those 85 files records a result yet.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
 run and where its result goes.

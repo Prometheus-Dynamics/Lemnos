@@ -65,10 +65,11 @@ microcontroller, anything a test adds on the simulated board.
 Most resources have one holder at a time. An I2C bus is shared by every device on it. When a
 driver is dropped, everything it held goes back.
 
-The Linux backend hands out I2C, SPI, GPIO, PWM, UART, USB devices, the USB device port and DMA
-memory. Register windows, interrupts, clocks and resets are in the driver interface and in the
-kernel module, but the Linux backend does not hand them to drivers yet. A block driver on Linux
-opens its own kernel node instead, through its `-sys` crate.
+The Linux backend hands out I2C, SPI, GPIO, PWM, UART, USB devices and the USB device port. For a
+block bound to the [kernel module](kernel-module.md) it also hands out the block's DMA memory,
+register windows, interrupts, clocks and resets, and nothing else stands in for them (see
+[the resource names](boards.md#resource-names)). The block drivers built in today open their own
+kernel nodes instead, through their `-sys` crates.
 
 ## State and health
 

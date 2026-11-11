@@ -48,6 +48,9 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       field layout is not public; JPEG runs through `rk-mpp` with the caller's registers).
 - [ ] **The description form covers one contract**, `magnetometer/1`.
 - [ ] **No built-in driver takes a UART.**
+- [ ] **No built-in driver takes a block's registers, interrupt, clocks or resets** from the module
+      (`regs:`, `irq:`, `clocks:`, `resets:`). The block drivers built in open their own kernel
+      nodes.
 - [ ] **The C API has no frame streams and no package list.**
 - [ ] **The camera proof tool runs in one process.** It has no way to reach devices through the
       daemon's socket.
