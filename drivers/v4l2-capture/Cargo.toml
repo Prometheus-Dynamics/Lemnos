@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-driver-v4l2-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "What the receivers that run a stock V4L2 capture node share: the node as a driver sees it, and the pump that moves its frames into a frame stream, by having the node fill the stream's own dma-bufs or by one copy. No driver of its own"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
+lemnos-v4l2 = { path = "../../backends/v4l2" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }

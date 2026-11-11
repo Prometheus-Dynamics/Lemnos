@@ -16,6 +16,8 @@ use crate::hw::Hardware;
 use crate::route::{self, ISP_ENTITY, IspGraph, IspLink, STREAM_ENTITIES};
 use crate::{Rkcif, backoff_ns, link_on};
 
+mod raw;
+
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
 

@@ -17,9 +17,11 @@ use lemnos_v4l2::media::{
     Entity, EntityFlags, EntityFunction, Link, LinkFlags, Pad, PadFlags, Topology,
 };
 
-use crate::hw::{Frame, Granted, Graph, Hardware, Wanted};
 use crate::route::{Feeds, feeds};
+use crate::{Frame, Granted, Graph, Hardware, Wanted};
 use crate::{Options, SunxiVin, backoff_ns, fourcc, parse_order};
+
+mod direct;
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -29,6 +31,15 @@ static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_al
 struct Node {
     opened: Vec<Wanted>,
     streamed: Vec<u32>,
+    /// Slots asked for with the node filling the caller's dma-bufs, and whether it takes them.
+    importing: Vec<u32>,
+    refuse_import: bool,
+    /// How many dma-bufs were queued, and the last: its slot, and the dma-buf's size as the
+    /// kernel sees it.
+    handles: u32,
+    last_handle: Option<(u32, u64)>,
+    /// What the node holds of them, by slot: its own hold on the memory, as the kernel takes.
+    held: Vec<Option<std::fs::File>>,
     stopped: u32,
     /// Frames the node will fill: buffer index, sequence, bad, and each plane's bytes.
     filled: VecDeque<(u32, u32, bool, Vec<Vec<u8>>)>,
@@ -83,6 +94,30 @@ impl Hardware for Hw {
         Ok(())
     }
 
+    fn stream_on_importing(&mut self, slots: u32) -> Result<()> {
+        let mut n = self.node.lock().unwrap();
+        if n.refuse_import {
+            return Err(Status::NOT_SUPPORTED);
+        }
+        n.importing.push(slots);
+        n.held = (0..slots).map(|_| None).collect();
+        Ok(())
+    }
+
+    fn queue_handle(&mut self, index: u32, handle: BufferHandle<'_>) -> Result<()> {
+        let file = std::fs::File::from(handle.fd().try_clone_to_owned().map_err(|_| Status::IO)?);
+        let size = file.metadata().map_err(|_| Status::IO)?.len();
+        let mut n = self.node.lock().unwrap();
+        n.handles += 1;
+        n.last_handle = Some((index, size));
+        let slot = n
+            .held
+            .get_mut(index as usize)
+            .ok_or(Status::INVALID_ARGUMENT)?;
+        *slot = Some(file);
+        Ok(())
+    }
+
     fn stop(&mut self) -> Result<()> {
         self.node.lock().unwrap().stopped += 1;
         Ok(())
@@ -107,6 +142,7 @@ impl Hardware for Hw {
             timestamp_ns: u64::from(sequence) * 1000,
             bad,
             planes: planes.len(),
+            bytes: planes.iter().map(|p| p.len() as u32).sum(),
         }))
     }
 
@@ -309,7 +345,7 @@ fn start_requires_configure_and_asks_the_node_for_the_layout() {
     assert_eq!(
         node.with(|n| n.opened.clone()),
         vec![Wanted {
-            input: 0,
+            input: Some(0),
             fourcc: FourCc::new(b"RG10"),
             width: 64,
             height: 32,

@@ -4,12 +4,20 @@
 //!
 //! There is no Lemnos kernel code for this block yet, so the vendor kernel driver stays bound and
 //! this driver runs its capture node through `lemnos-v4l2`: it selects the node's input, sets the
-//! format, keeps a ring of MMAP buffers queued and streams. For each frame the node fills, it takes
-//! a buffer of the `frames` stream, copies the node's bytes into it and publishes it, then gives
-//! the node its buffer back. That is one copy per frame, and nothing is allocated on the way. When
-//! no consumer is attached, or every stream buffer is out, the frame is dropped and the node's
-//! buffer goes straight back, so capture never waits on a consumer. The bytes are the node's as
-//! they are: the driver never reads them.
+//! format and streams. How a frame then reaches the `frames` stream is
+//! `lemnos-driver-v4l2-capture`'s pump:
+//!
+//! - When the stream's buffers are dma-bufs (`memory = "dma-buf"` in the board file) and the
+//!   node takes them, the node fills the stream's own buffers: each free stream buffer is
+//!   queued on the node, and a filled one is published as it is. Nothing is copied.
+//! - Otherwise the node fills a ring of its own MMAP buffers and each frame is copied into a
+//!   stream buffer: one copy per frame.
+//!
+//! Nothing is allocated either way. By copy, a frame with no consumer or no free stream buffer
+//! is dropped and the node's buffer goes straight back, so capture never waits on a consumer.
+//! With the node filling the stream's buffers there is nothing to fill until a consumer
+//! attaches, and the node idles meanwhile. The bytes are the node's as they are: the driver
+//! never reads them.
 //!
 //! Provenance: interface facts only, from the vendor kernel's `drivers/vin` (GPL-2.0, no code
 //! copied): the capture node is multi-planar (`vin-video/vin_video.c`, `vin_init_video`), selecting
@@ -48,7 +56,6 @@
 //! or `stop` is reported to its caller, who retries it. A frame the node flags as bad, or one that
 //! doesn't fit a stream buffer, is counted in `errors` and dropped; it is not a reason to restart.
 
-mod hw;
 pub mod route;
 
 #[cfg(test)]
@@ -60,10 +67,11 @@ use lemnos_contract_camera_receiver::{
 use lemnos_core::{
     Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
 };
-use lemnos_hal::blocks::StreamFrame;
-use lemnos_v4l2::FourCc;
 
-pub use hw::{Frame, Granted, Graph, Hardware, LinuxHardware, Settings, Wanted};
+pub use lemnos_driver_v4l2_capture::{
+    Frame, Granted, Graph, Hardware, LinuxHardware, Mode, Pump, Settings, Wanted, fourcc,
+    parse_order,
+};
 pub use route::Feeds;
 
 const START: MethodId = MethodId {
@@ -110,49 +118,6 @@ enum State {
         /// When the next attempt is due; `None` until a tick has had the host's clock.
         due: Option<u64>,
     },
-}
-
-/// The node's pixel format for raw frames of `depth` bits in `order` (`videodev2.h`).
-#[must_use]
-pub const fn fourcc(order: BayerOrder, depth: u8) -> Option<FourCc> {
-    let code: &[u8; 4] = match (depth, order) {
-        (8, BayerOrder::Mono) => b"GREY",
-        (8, BayerOrder::Bggr) => b"BA81",
-        (8, BayerOrder::Gbrg) => b"GBRG",
-        (8, BayerOrder::Grbg) => b"GRBG",
-        (8, BayerOrder::Rggb) => b"RGGB",
-        (10, BayerOrder::Bggr) => b"BG10",
-        (10, BayerOrder::Gbrg) => b"GB10",
-        (10, BayerOrder::Grbg) => b"BA10",
-        (10, BayerOrder::Rggb) => b"RG10",
-        (12, BayerOrder::Bggr) => b"BG12",
-        (12, BayerOrder::Gbrg) => b"GB12",
-        (12, BayerOrder::Grbg) => b"BA12",
-        (12, BayerOrder::Rggb) => b"RG12",
-        (14, BayerOrder::Bggr) => b"BG14",
-        (14, BayerOrder::Gbrg) => b"GB14",
-        (14, BayerOrder::Grbg) => b"GR14",
-        (14, BayerOrder::Rggb) => b"RG14",
-        (16, BayerOrder::Bggr) => b"BYR2",
-        (16, BayerOrder::Gbrg) => b"GB16",
-        (16, BayerOrder::Grbg) => b"GR16",
-        (16, BayerOrder::Rggb) => b"RG16",
-        _ => return None,
-    };
-    Some(FourCc::new(code))
-}
-
-/// `order` from its board file spelling.
-#[must_use]
-pub fn parse_order(order: &str) -> Option<BayerOrder> {
-    Some(match order {
-        "mono" => BayerOrder::Mono,
-        "rggb" => BayerOrder::Rggb,
-        "grbg" => BayerOrder::Grbg,
-        "gbrg" => BayerOrder::Gbrg,
-        "bggr" => BayerOrder::Bggr,
-        _ => return None,
-    })
 }
 
 /// How the node lays a frame out. Depth 8 is packed; depths 10 to 14 come one 16-bit word per
@@ -222,32 +187,6 @@ fn options(cfg: &Config<'_>) -> Result<Options> {
     })
 }
 
-/// The node's sequence number, widened to 64 bits across its wraps.
-#[derive(Debug, Clone, Copy, Default)]
-struct Sequence {
-    last: Option<u32>,
-    wraps: u64,
-}
-
-impl Sequence {
-    fn widen(&mut self, sequence: u32) -> u64 {
-        if self.last.is_some_and(|last| sequence < last) {
-            self.wraps = self.wraps.wrapping_add(1);
-        }
-        self.last = Some(sequence);
-        (self.wraps << 32) | u64::from(sequence)
-    }
-}
-
-/// What became of one frame.
-enum Delivery {
-    Published,
-    /// No consumer, or no stream buffer free.
-    Dropped,
-    /// Flagged bad by the node, or didn't fit.
-    Bad,
-}
-
 /// The sunxi-vin camera receiver.
 #[driver("sunxi-vin", provides = [CameraReceiver])]
 pub struct SunxiVin {
@@ -258,10 +197,8 @@ pub struct SunxiVin {
     link: Option<LinkConfig>,
     layout: Option<FrameLayout>,
     state: State,
-    counters: Counters,
-    sequence: Sequence,
-    /// A stream buffer kept from a frame that didn't fit, for the next one.
-    held: Option<u32>,
+    /// What moves the node's frames into the stream.
+    pump: Pump,
 }
 
 impl Lifecycle for SunxiVin {
@@ -295,7 +232,7 @@ impl Lifecycle for SunxiVin {
         match self.state {
             State::Stopped => None,
             State::Streaming => {
-                if self.pump().is_err() {
+                if self.pump.pump(&mut *self.hw, &mut *self.frames).is_err() {
                     self.state = State::Recovering {
                         attempt: 0,
                         due: None,
@@ -343,9 +280,7 @@ impl SunxiVin {
             link: None,
             layout: None,
             state: State::Stopped,
-            counters: Counters::default(),
-            sequence: Sequence::default(),
-            held: None,
+            pump: Pump::new(),
         }
     }
 
@@ -364,105 +299,23 @@ impl SunxiVin {
             return Err(Status::INVALID_ARGUMENT);
         };
         let fourcc = fourcc(self.options.order, link.bit_depth).ok_or(Status::INVALID_ARGUMENT)?;
-        // Whatever was running ends first; a failure here is not a reason to not try the start.
-        let _ = self.hw.stop();
-        let granted = self.hw.open(&Wanted {
-            input: self.options.input,
+        let wanted = Wanted {
+            input: Some(self.options.input),
             fourcc,
             width: layout.width,
             height: layout.height,
             stride: layout.stride,
             size: layout.size,
-        })?;
-        let as_asked = granted.fourcc == fourcc
-            && granted.width == layout.width
-            && granted.height == layout.height
-            && granted.stride == layout.stride
-            && granted.size >= layout.size;
-        if !as_asked {
-            let _ = self.hw.stop();
-            return Err(Status::NOT_SUPPORTED);
-        }
-        self.hw.stream_on(self.options.buffers)?;
-        self.counters = Counters::default();
-        self.sequence = Sequence::default();
-        Ok(())
+        };
+        self.pump
+            .begin(&mut *self.hw, &*self.frames, &wanted, self.options.buffers)
     }
 
-    /// Takes every buffer the node has filled, at most one round of the ring, and gives each
-    /// back. An error means the node failed.
-    fn pump(&mut self) -> Result<()> {
-        for _ in 0..self.options.buffers {
-            let Some(frame) = self.hw.dequeue()? else {
-                return Ok(());
-            };
-            let counter = match self.deliver(&frame) {
-                Delivery::Published => &mut self.counters.frames,
-                Delivery::Dropped => &mut self.counters.dropped,
-                Delivery::Bad => &mut self.counters.errors,
-            };
-            *counter = counter.saturating_add(1);
-            self.hw.requeue(frame.index)?;
-        }
-        Ok(())
-    }
-
-    /// Copies one frame into a stream buffer and publishes it.
-    fn deliver(&mut self, frame: &Frame) -> Delivery {
-        let sequence = self.sequence.widen(frame.sequence);
-        if frame.bad {
-            return Delivery::Bad;
-        }
-        let buffer = match self.held.take() {
-            Some(buffer) => buffer,
-            None => match self.frames.next_buffer() {
-                Ok(Some(buffer)) => buffer,
-                Ok(None) | Err(_) => return Delivery::Dropped,
-            },
-        };
-        let mut offset = 0usize;
-        for plane in 0..frame.planes {
-            let Ok(bytes) = self.hw.payload(frame, plane) else {
-                self.held = Some(buffer);
-                return Delivery::Bad;
-            };
-            match self.frames.write(buffer, offset, bytes) {
-                Ok(true) => offset = offset.saturating_add(bytes.len()),
-                // Nobody to land on: hand the buffer back empty, which the stream drops.
-                Ok(false) => {
-                    let _ = self.frames.publish(StreamFrame {
-                        buffer,
-                        bytes: 0,
-                        sequence,
-                        identity: 0,
-                        timestamp_ns: frame.timestamp_ns,
-                    });
-                    return Delivery::Dropped;
-                }
-                Err(_) => {
-                    self.held = Some(buffer);
-                    return Delivery::Bad;
-                }
-            }
-        }
-        let Ok(bytes) = u32::try_from(offset) else {
-            self.held = Some(buffer);
-            return Delivery::Bad;
-        };
-        let published = self.frames.publish(StreamFrame {
-            buffer,
-            bytes,
-            sequence,
-            identity: 0,
-            timestamp_ns: frame.timestamp_ns,
-        });
-        match published {
-            Ok(()) => Delivery::Published,
-            Err(_) => {
-                self.held = Some(buffer);
-                Delivery::Dropped
-            }
-        }
+    /// How frames reach the stream since the last start: filled by the node in the stream's
+    /// own buffers, or copied.
+    #[must_use]
+    pub fn mode(&self) -> Mode {
+        self.pump.mode()
     }
 }
 
@@ -530,7 +383,7 @@ impl CameraReceiver for SunxiVin {
     }
 
     fn counters(&mut self) -> Result<Counters> {
-        Ok(self.counters)
+        Ok(self.pump.counters())
     }
 
     /// The ISP the frames pass through on the way to the capture node, by its media entity

@@ -1,10 +1,12 @@
-//! The capture node as the driver sees it, and the Linux implementation over the stock V4L2
+//! The capture node as a driver sees it, and the Linux implementation over the stock V4L2
 //! device through `lemnos-v4l2`.
 
 use std::io;
 use std::path::PathBuf;
 
 use lemnos_core::{Result, Status};
+use lemnos_hal::blocks::BufferHandle;
+use lemnos_linux_sys::dma_buf;
 use lemnos_v4l2::media::{self, InterfaceType, MediaDevice, Topology};
 use lemnos_v4l2::v4l2::{
     BufType, BufferFlags, CapabilityFlags, DequeuedBuffer, Format, MmapQueue, PixFormat,
@@ -18,8 +20,9 @@ const FIELD_NONE: u32 = 1;
 /// The format the driver asks the node for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wanted {
-    /// The `VIDIOC_S_INPUT` index.
-    pub input: u32,
+    /// The `VIDIOC_S_INPUT` index to select before the format, for a node whose kernel driver
+    /// sets its pipeline up there. `None` selects nothing.
+    pub input: Option<u32>,
     pub fourcc: FourCc,
     pub width: u32,
     pub height: u32,
@@ -49,6 +52,8 @@ pub struct Frame {
     pub bad: bool,
     /// Planes holding data.
     pub planes: usize,
+    /// Bytes the node wrote, over all planes.
+    pub bytes: u32,
 }
 
 /// The media graph the node is in, and the node's entity in it.
@@ -65,6 +70,16 @@ pub trait Hardware: Send {
     fn open(&mut self, wanted: &Wanted) -> Result<Granted>;
     /// Asks for `buffers` buffers, queues them all and starts streaming. After `open`.
     fn stream_on(&mut self, buffers: u32) -> Result<()>;
+    /// Asks for `slots` slots that take the caller's dma-bufs and starts streaming with
+    /// nothing queued: the node fills what [`queue_handle`](Self::queue_handle) gives it.
+    /// After `open`, in place of `stream_on`. `NOT_SUPPORTED` when the node can't: its frames
+    /// have more than one memory plane, or its queue takes no dma-bufs. Open the node again
+    /// before trying `stream_on`.
+    fn stream_on_importing(&mut self, slots: u32) -> Result<()>;
+    /// Queues slot `index` on the dma-buf behind `handle`, for the node to fill. The node
+    /// takes its own hold on the memory, so the borrow ends with the call. Refused when the
+    /// dma-buf is smaller than a frame.
+    fn queue_handle(&mut self, index: u32, handle: BufferHandle<'_>) -> Result<()>;
     /// Stops streaming, frees the buffers and closes the node. Nothing to stop is not an error.
     fn stop(&mut self) -> Result<()>;
     /// The next filled buffer, if one is ready. Never blocks.
@@ -109,8 +124,12 @@ pub struct LinuxHardware {
     found: Option<Found>,
     /// The node and its format, between `open` and `stream_on`.
     opened: Option<(VideoDevice, BufType)>,
-    /// The node's mapped queue, while streaming.
+    /// The node's queue, while streaming: mapped, or importing dma-bufs.
     queue: Option<MmapQueue>,
+    /// Bytes of a frame, as the node's format has them: what a dma-buf must hold.
+    frame_bytes: u32,
+    /// Memory planes of the node's format.
+    frame_planes: usize,
     /// The buffer `dequeue` returned last, for `payload`.
     current: Option<DequeuedBuffer>,
 }
@@ -123,6 +142,8 @@ impl LinuxHardware {
             found: None,
             opened: None,
             queue: None,
+            frame_bytes: 0,
+            frame_planes: 0,
             current: None,
         }
     }
@@ -208,8 +229,10 @@ impl Hardware for LinuxHardware {
         } else {
             return Err(Status::NOT_SUPPORTED);
         };
-        // The kernel driver sets up its pipeline here, and needs this before the format.
-        dev.set_input(wanted.input).map_err(|e| status(&e))?;
+        // A kernel driver that sets up its pipeline here needs this before the format.
+        if let Some(input) = wanted.input {
+            dev.set_input(input).map_err(|e| status(&e))?;
+        }
         let format = if buf_type.is_multiplanar() {
             Format::Multi(PixFormatMplane {
                 width: wanted.width,
@@ -235,6 +258,11 @@ impl Hardware for LinuxHardware {
         };
         let chosen = dev.set_format(buf_type, &format).map_err(|e| status(&e))?;
         let granted = granted(&chosen)?;
+        self.frame_bytes = granted.size;
+        self.frame_planes = match &chosen {
+            Format::Multi(p) => p.planes.len(),
+            _ => 1,
+        };
         self.opened = Some((dev, buf_type));
         Ok(granted)
     }
@@ -249,6 +277,32 @@ impl Hardware for LinuxHardware {
         queue.stream_on().map_err(|e| status(&e))?;
         self.queue = Some(queue);
         Ok(())
+    }
+
+    fn stream_on_importing(&mut self, slots: u32) -> Result<()> {
+        // One dma-buf holds one memory plane: a frame in several can't land in a stream buffer.
+        if self.frame_planes != 1 {
+            return Err(Status::NOT_SUPPORTED);
+        }
+        let (dev, buf_type) = self.opened.take().ok_or(Status::INVALID_ARGUMENT)?;
+        // A queue that takes no dma-bufs refuses the request, and the node is closed with it.
+        let queue = MmapQueue::importing(dev, buf_type, slots, "capture")
+            .map_err(|_| Status::NOT_SUPPORTED)?;
+        queue.stream_on().map_err(|e| status(&e))?;
+        self.queue = Some(queue);
+        Ok(())
+    }
+
+    fn queue_handle(&mut self, index: u32, handle: BufferHandle<'_>) -> Result<()> {
+        let queue = self.queue.as_ref().ok_or(Status::IO)?;
+        // The node writes a whole frame: the dma-buf's real size must hold one.
+        let size = dma_buf::size(handle.fd()).map_err(|_| Status::IO)?;
+        if size < u64::from(self.frame_bytes) {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        queue
+            .queue_dmabuf(index, &[handle.fd()])
+            .map_err(|e| status(&e))
     }
 
     fn stop(&mut self) -> Result<()> {
@@ -273,6 +327,7 @@ impl Hardware for LinuxHardware {
             timestamp_ns: u64::try_from(done.timestamp.as_nanos()).unwrap_or(u64::MAX),
             bad: done.flags.contains(BufferFlags::ERROR),
             planes: done.planes.len(),
+            bytes: u32::try_from(done.bytes_used()).unwrap_or(u32::MAX),
         };
         self.current = Some(done);
         Ok(Some(frame))

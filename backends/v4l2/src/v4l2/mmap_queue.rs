@@ -2,6 +2,7 @@
 //! DMABUF slots importing the caller's dma-bufs ([`MmapQueue::importing`]).
 
 use std::ops::Range;
+use std::os::fd::BorrowedFd;
 use std::time::{Duration, Instant};
 
 use lemnos_linux_sys::mmap::Mapping;
@@ -198,6 +199,23 @@ impl MmapQueue {
         self.timed("qbuf", || self.dev.queue(&q))
     }
 
+    /// Queues slot `index` of a queue importing dma-bufs ([`Self::importing`]) on `planes`, one
+    /// dma-buf per plane. The device takes its own hold on each, so the borrow ends with the
+    /// call. An error when the queue maps its own buffers, or has no such slot.
+    pub fn queue_dmabuf(&self, index: u32, planes: &[BorrowedFd<'_>]) -> Result<()> {
+        if self.memory != Memory::DmaBuf {
+            return Err(Error::Invalid(format!(
+                "{}: the queue does not import dma-bufs",
+                self.name
+            )));
+        }
+        if index as usize >= self.maps.len() {
+            return Err(Error::Invalid(format!("{}: no slot {index}", self.name)));
+        }
+        let q = QueueBuffer::dmabuf(self.buf_type, index, planes);
+        self.timed("qbuf", || self.dev.queue(&q))
+    }
+
     /// Dequeues a buffer if one is ready. An error, rather than an index past the queue, when
     /// the kernel names a buffer this queue does not hold.
     pub fn try_dequeue(&self) -> Result<Option<DequeuedBuffer>> {
@@ -308,6 +326,23 @@ mod tests {
             timer: None,
         };
         (queue, file)
+    }
+
+    #[test]
+    fn only_a_queue_that_imports_takes_a_dma_buf_and_only_in_a_slot_it_has() {
+        let (mapped, file) = queue_of(2, 64, false);
+        let error = mapped.queue_dmabuf(0, &[file.as_fd()]).unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+        let importing = MmapQueue {
+            memory: Memory::DmaBuf,
+            maps: vec![Vec::new(), Vec::new()],
+            ..mapped
+        };
+        let error = importing.queue_dmabuf(2, &[file.as_fd()]).unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+        // A slot it has is handed to the device, which here is a plain file and says no.
+        let error = importing.queue_dmabuf(1, &[file.as_fd()]).unwrap_err();
+        assert!(!matches!(error, Error::Invalid(_)), "{error:?}");
     }
 
     fn done(index: u32, used: u32, offset: u32) -> DequeuedBuffer {
