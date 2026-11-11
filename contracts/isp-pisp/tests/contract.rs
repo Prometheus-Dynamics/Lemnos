@@ -130,6 +130,7 @@ fn the_info_round_trips() {
         front_end_config_bytes: 1,
         back_end_config_bytes: 16_700,
         statistics_bytes: u32::MAX,
+        stalled: u64::MAX,
     });
 }
 

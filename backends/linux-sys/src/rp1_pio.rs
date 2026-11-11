@@ -1,6 +1,8 @@
-//! The RP1 PIO character device (`/dev/pioN`, the `rp1_pio` kernel driver):
-//! claiming state machines, loading instructions, pin and GPIO-function setup,
-//! and DMA-backed FIFO transfers.
+//! The RP1 PIO block (the `rp1_pio` kernel driver): claiming state machines, loading
+//! instructions, pin and GPIO-function setup, and DMA-backed FIFO transfers. Two routes reach
+//! it with the same operations: the driver's own node (`/dev/pioN`), and the Lemnos module's
+//! client of that driver on a claim of `pio-0` (`LEMNOS_IOC_PIO_*` in `kernel/lemnos.h`), which
+//! a holder that dies lets go of.
 //!
 //! Layouts and request numbers follow the kernel's `rp1_pio_if.h` as earlier
 //! ports recorded them. The `sm_config` words are the RP2040 PIO register
@@ -13,11 +15,12 @@
 //! refused argument returns `EINVAL` without touching the device. The bounds are
 //! this crate's; they are not read back from the kernel.
 
-use crate::ioctl::{ioctl_ptr, iow};
+use crate::ioctl::{Ioctl, Pod, ioctl_ptr, iow, iowr, pod};
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 const PIO_IOC_MAGIC: u8 = 102;
 
@@ -189,25 +192,143 @@ struct XferData32Args {
     data: *mut u8,
 }
 
-const ADD_PROGRAM: u32 = iow::<AddProgramArgs>(PIO_IOC_MAGIC, 11);
-const REMOVE_PROGRAM: u32 = iow::<RemoveProgramArgs>(PIO_IOC_MAGIC, 12);
-const SM_CLAIM: u32 = iow::<ClaimArgs>(PIO_IOC_MAGIC, 20);
-const SM_UNCLAIM: u32 = iow::<ClaimArgs>(PIO_IOC_MAGIC, 21);
-const SM_INIT: u32 = iow::<SmInitArgs>(PIO_IOC_MAGIC, 30);
-const SM_SET_CONFIG: u32 = iow::<SmSetConfigArgs>(PIO_IOC_MAGIC, 31);
-const SM_CLEAR_FIFOS: u32 = iow::<SmClearFifosArgs>(PIO_IOC_MAGIC, 33);
-const SM_SET_CLKDIV: u32 = iow::<SmSetClkdivArgs>(PIO_IOC_MAGIC, 34);
-const SM_SET_PINS: u32 = iow::<SmSetPinsArgs>(PIO_IOC_MAGIC, 35);
-const SM_SET_PINDIRS: u32 = iow::<SmSetPinsArgs>(PIO_IOC_MAGIC, 36);
-const SM_SET_ENABLED: u32 = iow::<SmSetEnabledArgs>(PIO_IOC_MAGIC, 37);
-const SM_RESTART: u32 = iow::<SmRestartArgs>(PIO_IOC_MAGIC, 38);
-const SM_DRAIN_TX: u32 = iow::<SmClearFifosArgs>(PIO_IOC_MAGIC, 45);
-const SM_CONFIG_XFER32: u32 = iow::<ConfigXfer32Args>(PIO_IOC_MAGIC, 3);
+pod!(
+    SmConfig,
+    AddProgramArgs,
+    RemoveProgramArgs,
+    ClaimArgs,
+    SmInitArgs,
+    SmSetConfigArgs,
+    SmSetEnabledArgs,
+    SmSetClkdivArgs,
+    SmSetPinsArgs,
+    SmClearFifosArgs,
+    SmRestartArgs,
+    GpioInitArgs,
+    GpioSetFunctionArgs,
+    GpioSetArgs,
+    ConfigXfer32Args,
+    PioOpenRaw,
+    PioConfigXferRaw,
+);
+
+/// One PIO operation, two ways: the stock node's request and the module's operation number
+/// (`enum lemnos_pio_op` in `kernel/lemnos.h`), with the same argument structure.
+struct PioOp<T> {
+    stock: Ioctl<T>,
+    module: u32,
+}
+
+impl<T> Clone for PioOp<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for PioOp<T> {}
+
+impl<T: Pod> PioOp<T> {
+    const fn new(nr: u8, name: &'static str, module: u32) -> Self {
+        Self {
+            stock: Ioctl::new(iow::<T>(PIO_IOC_MAGIC, nr), name),
+            module,
+        }
+    }
+}
+
+const ADD_PROGRAM: PioOp<AddProgramArgs> = PioOp::new(11, "PIO_IOC_ADD_PROGRAM", 0);
+const REMOVE_PROGRAM: PioOp<RemoveProgramArgs> = PioOp::new(12, "PIO_IOC_REMOVE_PROGRAM", 1);
+const SM_CLAIM: PioOp<ClaimArgs> = PioOp::new(20, "PIO_IOC_SM_CLAIM", 2);
+const SM_UNCLAIM: PioOp<ClaimArgs> = PioOp::new(21, "PIO_IOC_SM_UNCLAIM", 3);
+const SM_INIT: PioOp<SmInitArgs> = PioOp::new(30, "PIO_IOC_SM_INIT", 4);
+const SM_SET_CONFIG: PioOp<SmSetConfigArgs> = PioOp::new(31, "PIO_IOC_SM_SET_CONFIG", 5);
+const SM_CLEAR_FIFOS: PioOp<SmClearFifosArgs> = PioOp::new(33, "PIO_IOC_SM_CLEAR_FIFOS", 7);
+const SM_SET_CLKDIV: PioOp<SmSetClkdivArgs> = PioOp::new(34, "PIO_IOC_SM_SET_CLKDIV", 8);
+const SM_SET_PINS: PioOp<SmSetPinsArgs> = PioOp::new(35, "PIO_IOC_SM_SET_PINS", 9);
+const SM_SET_PINDIRS: PioOp<SmSetPinsArgs> = PioOp::new(36, "PIO_IOC_SM_SET_PINDIRS", 10);
+const SM_SET_ENABLED: PioOp<SmSetEnabledArgs> = PioOp::new(37, "PIO_IOC_SM_SET_ENABLED", 11);
+const SM_RESTART: PioOp<SmRestartArgs> = PioOp::new(38, "PIO_IOC_SM_RESTART", 12);
+const SM_DRAIN_TX: PioOp<SmClearFifosArgs> = PioOp::new(45, "PIO_IOC_SM_DRAIN_TX", 16);
+const GPIO_INIT: PioOp<GpioInitArgs> = PioOp::new(50, "PIO_IOC_GPIO_INIT", 18);
+const GPIO_SET_FUNCTION: PioOp<GpioSetFunctionArgs> =
+    PioOp::new(51, "PIO_IOC_GPIO_SET_FUNCTION", 19);
+const GPIO_SET_OUTOVER: PioOp<GpioSetArgs> = PioOp::new(53, "PIO_IOC_GPIO_SET_OUTOVER", 21);
+const GPIO_SET_INPUT_ENABLED: PioOp<GpioSetArgs> =
+    PioOp::new(56, "PIO_IOC_GPIO_SET_INPUT_ENABLED", 22);
+const SM_CONFIG_XFER32: Ioctl<ConfigXfer32Args> = Ioctl::new(
+    iow::<ConfigXfer32Args>(PIO_IOC_MAGIC, 3),
+    "PIO_IOC_SM_CONFIG_XFER32",
+);
+// Carries a pointer the kernel follows, so it isn't an `Ioctl`.
 const SM_XFER_DATA32: u32 = iow::<XferData32Args>(PIO_IOC_MAGIC, 2);
-const GPIO_INIT: u32 = iow::<GpioInitArgs>(PIO_IOC_MAGIC, 50);
-const GPIO_SET_FUNCTION: u32 = iow::<GpioSetFunctionArgs>(PIO_IOC_MAGIC, 51);
-const GPIO_SET_OUTOVER: u32 = iow::<GpioSetArgs>(PIO_IOC_MAGIC, 53);
-const GPIO_SET_INPUT_ENABLED: u32 = iow::<GpioSetArgs>(PIO_IOC_MAGIC, 56);
+
+/// The module's `'L'` requests for PIO (`kernel/lemnos.h`).
+const LEMNOS: u8 = b'L';
+const LEMNOS_PIO_OPEN: Ioctl<PioOpenRaw> =
+    Ioctl::new(iow::<PioOpenRaw>(LEMNOS, 0x90), "LEMNOS_IOC_PIO_OPEN");
+const LEMNOS_PIO_CONFIG_XFER: Ioctl<PioConfigXferRaw> = Ioctl::new(
+    iow::<PioConfigXferRaw>(LEMNOS, 0x92),
+    "LEMNOS_IOC_PIO_CONFIG_XFER",
+);
+// Carries a pointer the kernel follows, so it isn't an `Ioctl`.
+const LEMNOS_PIO_XFER: u32 = iow::<PioXferRaw>(LEMNOS, 0x93);
+/// `LEMNOS_PIO_ARGS`: the bytes of arguments one `LEMNOS_IOC_PIO_CALL` carries.
+const LEMNOS_PIO_ARGS: usize = 72;
+/// The claim the module's PIO belongs to.
+pub const MODULE_RESOURCE: &str = "pio-0";
+
+/// `struct lemnos_pio_open`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PioOpenRaw {
+    claim: i32,
+}
+
+/// `struct lemnos_pio_call`, with its argument bytes seen as the operation's own structure.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PioCallRaw<T: Copy> {
+    claim: i32,
+    op: u32,
+    result: i64,
+    args: PioArgs<T>,
+}
+
+/// The `args` bytes of `struct lemnos_pio_call`: the operation's structure, zero after it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+union PioArgs<T: Copy> {
+    args: T,
+    bytes: [u8; LEMNOS_PIO_ARGS],
+}
+
+// SAFETY: integers and a union of a `Pod` structure with bytes: every bit pattern is a value.
+unsafe impl<T: Pod> Pod for PioCallRaw<T> {}
+
+/// `struct lemnos_pio_config_xfer`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PioConfigXferRaw {
+    claim: i32,
+    sm: u32,
+    dir: u32,
+    buf_size: u32,
+    buf_count: u32,
+    reserved: u32,
+}
+
+/// `struct lemnos_pio_xfer`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PioXferRaw {
+    claim: i32,
+    sm: u32,
+    dir: u32,
+    len: u32,
+    data: u64,
+    timeout_ms: u32,
+    reserved: u32,
+}
 
 /// The error for an argument outside what this crate lets through to the device.
 fn refused() -> io::Error {
@@ -260,22 +381,121 @@ fn check_origin(origin: u16, len: usize) -> io::Result<()> {
     }
 }
 
-/// An open RP1 PIO client (one file descriptor). Dropping it closes the
-/// descriptor, and the driver then stops and releases everything it claimed.
+/// The Lemnos module's PIO client: a claim on `pio-0` with a client of the kernel's PIO driver
+/// bound to it. Closing the claim ends the client, which frees its machines and programs.
+#[derive(Debug)]
+struct ModuleClient {
+    node: Arc<OwnedFd>,
+    claim: OwnedFd,
+}
+
+impl ModuleClient {
+    fn claim_fd(&self) -> i32 {
+        self.claim.as_raw_fd()
+    }
+
+    /// Runs one operation through `LEMNOS_IOC_PIO_CALL`. The operation's own return value comes
+    /// back in `result`: a negative one is its error.
+    fn call<T: Pod>(&self, op: u32, args: &mut T) -> io::Result<libc::c_int> {
+        const { assert!(size_of::<T>() <= LEMNOS_PIO_ARGS) };
+        let request: Ioctl<PioCallRaw<T>> =
+            Ioctl::new(iowr::<PioCallRaw<T>>(LEMNOS, 0x91), "LEMNOS_IOC_PIO_CALL");
+        let mut call = PioCallRaw {
+            claim: self.claim_fd(),
+            op,
+            result: 0,
+            args: PioArgs {
+                bytes: [0; LEMNOS_PIO_ARGS],
+            },
+        };
+        call.args.args = *args;
+        request.call(self.node.as_fd(), &mut call)?;
+        // SAFETY: `args` is the field written above, and the kernel writes only an operation's
+        // own structure back into it; `T` is `Pod`, so any bytes it holds are a value.
+        *args = unsafe { call.args.args };
+        result_of(call.result)
+    }
+}
+
+/// An operation's return value as the module reports it: a negative errno, or the value.
+fn result_of(result: i64) -> io::Result<libc::c_int> {
+    if result < 0 {
+        let errno = i32::try_from(-result).unwrap_or(libc::EIO);
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+    libc::c_int::try_from(result).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))
+}
+
+/// How a [`PioDevice`] reaches the PIO block.
+#[derive(Debug)]
+enum Route {
+    /// The stock driver's node, `/dev/pioN`.
+    Node(File),
+    /// The Lemnos module, shared by every bus of this process.
+    Module(Arc<ModuleClient>),
+}
+
+/// An open RP1 PIO client: either the stock driver's node or the Lemnos module's client on a
+/// claim of `pio-0`. The operations, and the checks before them, are the same both ways.
+/// Dropping the last handle on a client ends it, and the driver then stops and releases
+/// everything it claimed.
 #[derive(Debug)]
 pub struct PioDevice {
-    file: File,
+    route: Route,
 }
 
 impl PioDevice {
     /// Opens `path` (`/dev/pio0`). Needs read and write access to the node.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
-        Ok(Self { file })
+        Ok(Self {
+            route: Route::Node(file),
+        })
     }
 
-    fn fd(&self) -> BorrowedFd<'_> {
-        self.file.as_fd()
+    /// The PIO block through the Lemnos module's control node `node`: claims `pio-0` and binds a
+    /// client to it (`LEMNOS_IOC_PIO_OPEN`). The claim is exclusive system-wide, so a process
+    /// has one: every call with the same open node while a handle from an earlier call lives
+    /// shares that client. A kernel module without PIO answers `ENOTTY`; someone else holding
+    /// the claim, `EBUSY`.
+    pub fn through_module(node: &Arc<OwnedFd>) -> io::Result<Self> {
+        type Shared = Mutex<Option<(Weak<OwnedFd>, Weak<ModuleClient>)>>;
+        static SHARED: Shared = Mutex::new(None);
+        let mut shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, client)) = shared.as_ref()
+            && at.upgrade().is_some_and(|at| Arc::ptr_eq(&at, node))
+            && let Some(client) = client.upgrade()
+        {
+            return Ok(Self {
+                route: Route::Module(client),
+            });
+        }
+        let claim = crate::module::claim(node.as_fd(), MODULE_RESOURCE)?;
+        let mut open = PioOpenRaw {
+            claim: claim.as_raw_fd(),
+        };
+        LEMNOS_PIO_OPEN.call(node.as_fd(), &mut open)?;
+        let client = Arc::new(ModuleClient {
+            node: Arc::clone(node),
+            claim,
+        });
+        *shared = Some((Arc::downgrade(node), Arc::downgrade(&client)));
+        Ok(Self {
+            route: Route::Module(client),
+        })
+    }
+
+    /// Whether this client is the Lemnos module's.
+    pub fn is_module(&self) -> bool {
+        matches!(self.route, Route::Module(_))
+    }
+
+    /// Runs one operation on whichever route this client is.
+    fn run<T: Pod>(&self, op: PioOp<T>, args: &mut T) -> io::Result<libc::c_int> {
+        match &self.route {
+            Route::Node(file) => op.stock.call(file.as_fd(), args),
+            Route::Module(client) => client.call(op.module, args),
+        }
     }
 
     /// Loads `instrs` into instruction memory at `origin` (or any free place
@@ -292,9 +512,8 @@ impl PioDevice {
             instrs: [0; INSTRUCTION_COUNT],
         };
         args.instrs[..instrs.len()].copy_from_slice(instrs);
-        // SAFETY: ADD_PROGRAM reads one `rp1_pio_add_program_args` (`args`) and
-        // returns the placed offset as the ioctl result.
-        let ret = unsafe { ioctl_ptr(self.fd(), ADD_PROGRAM, &mut args) }?;
+        // The driver returns the placed offset as the result.
+        let ret = self.run(ADD_PROGRAM, &mut args)?;
         Ok(ret as u16)
     }
 
@@ -308,17 +527,15 @@ impl PioDevice {
             num_instrs: len,
             origin,
         };
-        // SAFETY: REMOVE_PROGRAM reads one `rp1_pio_remove_program_args`.
-        unsafe { ioctl_ptr(self.fd(), REMOVE_PROGRAM, &mut args) }?;
+        self.run(REMOVE_PROGRAM, &mut args)?;
         Ok(())
     }
 
     /// Claims any free state machine and returns its number.
     pub fn claim_any_sm(&self) -> io::Result<u16> {
+        // With a zero mask the driver claims one free machine and returns its index.
         let mut args = ClaimArgs { mask: 0 };
-        // SAFETY: SM_CLAIM reads one `rp1_pio_sm_claim_args`; with a zero mask
-        // the driver claims one free machine and returns its index.
-        let ret = unsafe { ioctl_ptr(self.fd(), SM_CLAIM, &mut args) }?;
+        let ret = self.run(SM_CLAIM, &mut args)?;
         Ok(ret as u16)
     }
 
@@ -326,8 +543,7 @@ impl PioDevice {
     pub fn unclaim_sms(&self, mask: u16) -> io::Result<()> {
         check_sm_mask(mask)?;
         let mut args = ClaimArgs { mask };
-        // SAFETY: SM_UNCLAIM reads one `rp1_pio_sm_claim_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_UNCLAIM, &mut args) }?;
+        self.run(SM_UNCLAIM, &mut args)?;
         Ok(())
     }
 
@@ -342,8 +558,7 @@ impl PioDevice {
             initial_pc,
             config,
         };
-        // SAFETY: SM_INIT reads one `rp1_pio_sm_init_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_INIT, &mut args) }?;
+        self.run(SM_INIT, &mut args)?;
         Ok(())
     }
 
@@ -355,8 +570,7 @@ impl PioDevice {
             rsvd: 0,
             config,
         };
-        // SAFETY: SM_SET_CONFIG reads one `rp1_pio_sm_set_config_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_SET_CONFIG, &mut args) }?;
+        self.run(SM_SET_CONFIG, &mut args)?;
         Ok(())
     }
 
@@ -369,8 +583,7 @@ impl PioDevice {
             div_frac,
             rsvd: 0,
         };
-        // SAFETY: SM_SET_CLKDIV reads one `rp1_pio_sm_set_clkdiv_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_SET_CLKDIV, &mut args) }?;
+        self.run(SM_SET_CLKDIV, &mut args)?;
         Ok(())
     }
 
@@ -385,8 +598,7 @@ impl PioDevice {
             values,
             mask,
         };
-        // SAFETY: SM_SET_PINS reads one `rp1_pio_sm_set_pins_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_SET_PINS, &mut args) }?;
+        self.run(SM_SET_PINS, &mut args)?;
         Ok(())
     }
 
@@ -394,15 +606,14 @@ impl PioDevice {
     pub fn sm_set_pindirs(&self, sm: u16, dirs: u32, mask: u32) -> io::Result<()> {
         check_sm(sm)?;
         check_pin_bits(dirs, mask)?;
+        // `rp1_pio_sm_set_pindirs_args` has the layout of `SmSetPinsArgs`.
         let mut args = SmSetPinsArgs {
             sm,
             rsvd: 0,
             values: dirs,
             mask,
         };
-        // SAFETY: SM_SET_PINDIRS reads one `rp1_pio_sm_set_pindirs_args`, whose
-        // layout matches `SmSetPinsArgs`.
-        unsafe { ioctl_ptr(self.fd(), SM_SET_PINDIRS, &mut args) }?;
+        self.run(SM_SET_PINDIRS, &mut args)?;
         Ok(())
     }
 
@@ -414,8 +625,7 @@ impl PioDevice {
             enable: u8::from(enable),
             rsvd: 0,
         };
-        // SAFETY: SM_SET_ENABLED reads one `rp1_pio_sm_set_enabled_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_SET_ENABLED, &mut args) }?;
+        self.run(SM_SET_ENABLED, &mut args)?;
         Ok(())
     }
 
@@ -423,8 +633,7 @@ impl PioDevice {
     pub fn sm_restart(&self, mask: u16) -> io::Result<()> {
         check_sm_mask(mask)?;
         let mut args = SmRestartArgs { mask };
-        // SAFETY: SM_RESTART reads one `rp1_pio_sm_restart_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_RESTART, &mut args) }?;
+        self.run(SM_RESTART, &mut args)?;
         Ok(())
     }
 
@@ -432,8 +641,7 @@ impl PioDevice {
     pub fn sm_clear_fifos(&self, sm: u16) -> io::Result<()> {
         check_sm(sm)?;
         let mut args = SmClearFifosArgs { sm };
-        // SAFETY: SM_CLEAR_FIFOS reads one `rp1_pio_sm_clear_fifos_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_CLEAR_FIFOS, &mut args) }?;
+        self.run(SM_CLEAR_FIFOS, &mut args)?;
         Ok(())
     }
 
@@ -441,13 +649,14 @@ impl PioDevice {
     pub fn sm_drain_tx(&self, sm: u16) -> io::Result<()> {
         check_sm(sm)?;
         let mut args = SmClearFifosArgs { sm };
-        // SAFETY: SM_DRAIN_TX reads one `rp1_pio_sm_clear_fifos_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_DRAIN_TX, &mut args) }?;
+        self.run(SM_DRAIN_TX, &mut args)?;
         Ok(())
     }
 
     /// Requests the DMA channels for `sm` in `dir` with `buf_count` bounce
     /// buffers of `buf_size` bytes (a multiple of 4, at most [`MAX_BUF_SIZE`]).
+    /// Configuring a channel again stops anything still running on it, and on the module's
+    /// route also clears a channel a timed-out transfer left refusing.
     pub fn config_xfer32(
         &self,
         sm: u16,
@@ -463,14 +672,67 @@ impl PioDevice {
         if buf_count == 0 || buf_count > MAX_BUF_COUNT {
             return Err(refused());
         }
-        let mut args = ConfigXfer32Args {
-            sm,
-            dir,
-            buf_size,
-            buf_count,
-        };
-        // SAFETY: SM_CONFIG_XFER32 reads one `rp1_pio_sm_config_xfer32_args`.
-        unsafe { ioctl_ptr(self.fd(), SM_CONFIG_XFER32, &mut args) }?;
+        match &self.route {
+            Route::Node(file) => {
+                let mut args = ConfigXfer32Args {
+                    sm,
+                    dir,
+                    buf_size,
+                    buf_count,
+                };
+                SM_CONFIG_XFER32.call(file.as_fd(), &mut args)?;
+            }
+            Route::Module(client) => {
+                let mut args = PioConfigXferRaw {
+                    claim: client.claim_fd(),
+                    sm: u32::from(sm),
+                    dir: u32::from(dir),
+                    buf_size,
+                    buf_count,
+                    reserved: 0,
+                };
+                LEMNOS_PIO_CONFIG_XFER.call(client.node.as_fd(), &mut args)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves `bytes` bytes at `data` between this process and machine `sm` by DMA.
+    ///
+    /// # Safety
+    ///
+    /// `data` must be valid for `bytes` bytes of reads (`DIR_TO_SM`) or of writes
+    /// (`DIR_FROM_SM`), and not otherwise accessed, for the duration of the call.
+    unsafe fn xfer(&self, sm: u16, dir: u16, data: *mut u8, bytes: u32) -> io::Result<()> {
+        match &self.route {
+            Route::Node(file) => {
+                let mut args = XferData32Args {
+                    sm,
+                    dir,
+                    data_bytes: bytes,
+                    data,
+                };
+                // SAFETY: SM_XFER_DATA32 moves `data_bytes` bytes at `data`, which the caller
+                // guarantees for the duration of the call.
+                unsafe { ioctl_ptr(file.as_fd(), SM_XFER_DATA32, &mut args) }?;
+            }
+            Route::Module(client) => {
+                let mut args = PioXferRaw {
+                    claim: client.claim_fd(),
+                    sm: u32::from(sm),
+                    dir: u32::from(dir),
+                    len: bytes,
+                    data: data as u64,
+                    // The module's default: one second.
+                    timeout_ms: 0,
+                    reserved: 0,
+                };
+                // SAFETY: LEMNOS_IOC_PIO_XFER moves `len` bytes at `data`, which the caller
+                // guarantees for the duration of the call; the module copies through its own
+                // buffers and has finished with `data` when it returns.
+                unsafe { ioctl_ptr(client.node.as_fd(), LEMNOS_PIO_XFER, &mut args) }?;
+            }
+        }
         Ok(())
     }
 
@@ -480,18 +742,11 @@ impl PioDevice {
     pub fn xfer_to_sm(&self, sm: u16, words: &[u32]) -> io::Result<()> {
         check_sm(sm)?;
         check_words(words.len())?;
-        let mut args = XferData32Args {
-            sm,
-            dir: DIR_TO_SM,
-            // Checked above: at most `MAX_XFER_WORDS` words, so this fits.
-            data_bytes: (words.len() * 4) as u32,
-            // The kernel only reads from this buffer for `DIR_TO_SM`.
-            data: words.as_ptr() as *mut u8,
-        };
-        // SAFETY: SM_XFER_DATA32 reads `data_bytes` bytes from `data`, which is
-        // the live slice `words` for the duration of the call.
-        unsafe { ioctl_ptr(self.fd(), SM_XFER_DATA32, &mut args) }?;
-        Ok(())
+        // Checked above: at most `MAX_XFER_WORDS` words, so this fits.
+        let bytes = (words.len() * 4) as u32;
+        // SAFETY: `words` is live for the call, and the kernel only reads from it for
+        // `DIR_TO_SM`.
+        unsafe { self.xfer(sm, DIR_TO_SM, words.as_ptr() as *mut u8, bytes) }
     }
 
     /// Reads `words.len()` words from machine `sm`'s RX FIFO by DMA. Blocks
@@ -499,25 +754,17 @@ impl PioDevice {
     pub fn xfer_from_sm(&self, sm: u16, words: &mut [u32]) -> io::Result<()> {
         check_sm(sm)?;
         check_words(words.len())?;
-        let mut args = XferData32Args {
-            sm,
-            dir: DIR_FROM_SM,
-            // Checked above: at most `MAX_XFER_WORDS` words, so this fits.
-            data_bytes: (words.len() * 4) as u32,
-            data: words.as_mut_ptr().cast(),
-        };
-        // SAFETY: SM_XFER_DATA32 writes `data_bytes` bytes into `data`, which is
-        // the live, exclusively borrowed slice `words` for the call.
-        unsafe { ioctl_ptr(self.fd(), SM_XFER_DATA32, &mut args) }?;
-        Ok(())
+        // Checked above: at most `MAX_XFER_WORDS` words, so this fits.
+        let bytes = (words.len() * 4) as u32;
+        // SAFETY: `words` is a live, exclusively borrowed slice of `bytes` bytes for the call.
+        unsafe { self.xfer(sm, DIR_FROM_SM, words.as_mut_ptr().cast(), bytes) }
     }
 
     /// Hands GPIO `gpio` to the PIO block (`pio_gpio_init`: init, then function).
     pub fn gpio_init(&self, gpio: u16) -> io::Result<()> {
         check_gpio(gpio)?;
         let mut args = GpioInitArgs { gpio };
-        // SAFETY: GPIO_INIT reads one `rp1_gpio_init_args`.
-        unsafe { ioctl_ptr(self.fd(), GPIO_INIT, &mut args) }?;
+        self.run(GPIO_INIT, &mut args)?;
         Ok(())
     }
 
@@ -528,8 +775,7 @@ impl PioDevice {
             return Err(refused());
         }
         let mut args = GpioSetFunctionArgs { gpio, func };
-        // SAFETY: GPIO_SET_FUNCTION reads one `rp1_gpio_set_function_args`.
-        unsafe { ioctl_ptr(self.fd(), GPIO_SET_FUNCTION, &mut args) }?;
+        self.run(GPIO_SET_FUNCTION, &mut args)?;
         Ok(())
     }
 
@@ -540,8 +786,7 @@ impl PioDevice {
             return Err(refused());
         }
         let mut args = GpioSetArgs { gpio, value };
-        // SAFETY: GPIO_SET_OUTOVER reads one `rp1_gpio_set_args`.
-        unsafe { ioctl_ptr(self.fd(), GPIO_SET_OUTOVER, &mut args) }?;
+        self.run(GPIO_SET_OUTOVER, &mut args)?;
         Ok(())
     }
 
@@ -552,8 +797,7 @@ impl PioDevice {
             gpio,
             value: u16::from(enabled),
         };
-        // SAFETY: GPIO_SET_INPUT_ENABLED reads one `rp1_gpio_set_args`.
-        unsafe { ioctl_ptr(self.fd(), GPIO_SET_INPUT_ENABLED, &mut args) }?;
+        self.run(GPIO_SET_INPUT_ENABLED, &mut args)?;
         Ok(())
     }
 }
@@ -679,10 +923,106 @@ mod tests {
     #[test]
     fn request_numbers_match_the_kernel_header() {
         // _IOW(102, nr, struct) on aarch64 / x86_64 for the structures above.
-        assert_eq!(SM_CONFIG_XFER32, 0x400c_6603); // _IOW(102, 3, 12 bytes)
+        assert_eq!(SM_CONFIG_XFER32.nr(), 0x400c_6603); // _IOW(102, 3, 12 bytes)
         assert_eq!(SM_XFER_DATA32, 0x4010_6602); // _IOW(102, 2, 16 bytes)
-        assert_eq!(SM_CLAIM, 0x4002_6614); // _IOW(102, 20, 2 bytes)
-        assert_eq!(ADD_PROGRAM, 0x4044_660b); // _IOW(102, 11, 68 bytes)
+        assert_eq!(SM_CLAIM.stock.nr(), 0x4002_6614); // _IOW(102, 20, 2 bytes)
+        assert_eq!(ADD_PROGRAM.stock.nr(), 0x4044_660b); // _IOW(102, 11, 68 bytes)
+    }
+
+    #[test]
+    fn the_modules_structures_are_the_headers() {
+        use std::mem::offset_of;
+        assert_eq!(size_of::<PioOpenRaw>(), 4);
+        assert_eq!(size_of::<PioCallRaw<AddProgramArgs>>(), 88);
+        assert_eq!(size_of::<PioCallRaw<ClaimArgs>>(), 88);
+        assert_eq!(size_of::<PioCallRaw<SmInitArgs>>(), 88);
+        assert_eq!(offset_of!(PioCallRaw<ClaimArgs>, result), 8);
+        assert_eq!(offset_of!(PioCallRaw<ClaimArgs>, args), 16);
+        assert_eq!(size_of::<PioConfigXferRaw>(), 24);
+        assert_eq!(size_of::<PioXferRaw>(), 32);
+        assert_eq!(offset_of!(PioXferRaw, data), 16);
+        assert_eq!(offset_of!(PioXferRaw, timeout_ms), 24);
+        // _IOW('L', 0x90, 4), _IOWR('L', 0x91, 88), _IOW('L', 0x92, 24), _IOW('L', 0x93, 32).
+        assert_eq!(LEMNOS_PIO_OPEN.nr(), 0x4004_4c90);
+        assert_eq!(iowr::<PioCallRaw<ClaimArgs>>(LEMNOS, 0x91), 0xc058_4c91);
+        assert_eq!(LEMNOS_PIO_CONFIG_XFER.nr(), 0x4018_4c92);
+        assert_eq!(LEMNOS_PIO_XFER, 0x4020_4c93);
+        let header = include_str!("../../../kernel/lemnos.h");
+        assert!(header.contains("#define LEMNOS_PIO_ARGS 72"));
+        for (name, nr) in [
+            ("LEMNOS_IOC_PIO_OPEN   _IOW('L', 0x90", 0x90),
+            ("LEMNOS_IOC_PIO_CALL   _IOWR('L', 0x91", 0x91),
+            ("LEMNOS_IOC_PIO_CONFIG_XFER _IOW('L', 0x92", 0x92),
+            ("LEMNOS_IOC_PIO_XFER   _IOW('L', 0x93", 0x93),
+        ] {
+            assert!(header.contains(name), "{name} ({nr:#x})");
+        }
+    }
+
+    /// Each operation's number is its place in `enum lemnos_pio_op`, read from the header itself.
+    #[test]
+    fn module_operation_numbers_are_the_headers() {
+        let header = include_str!("../../../kernel/lemnos.h");
+        let body = header
+            .split("enum lemnos_pio_op {")
+            .nth(1)
+            .and_then(|rest| rest.split("};").next())
+            .unwrap();
+        let names: Vec<&str> = body
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        let place = |name: &str| names.iter().position(|n| *n == name).unwrap() as u32;
+        let ops = [
+            ("LEMNOS_PIO_ADD_PROGRAM", ADD_PROGRAM.module),
+            ("LEMNOS_PIO_REMOVE_PROGRAM", REMOVE_PROGRAM.module),
+            ("LEMNOS_PIO_SM_CLAIM", SM_CLAIM.module),
+            ("LEMNOS_PIO_SM_UNCLAIM", SM_UNCLAIM.module),
+            ("LEMNOS_PIO_SM_INIT", SM_INIT.module),
+            ("LEMNOS_PIO_SM_SET_CONFIG", SM_SET_CONFIG.module),
+            ("LEMNOS_PIO_SM_CLEAR_FIFOS", SM_CLEAR_FIFOS.module),
+            ("LEMNOS_PIO_SM_SET_CLKDIV", SM_SET_CLKDIV.module),
+            ("LEMNOS_PIO_SM_SET_PINS", SM_SET_PINS.module),
+            ("LEMNOS_PIO_SM_SET_PINDIRS", SM_SET_PINDIRS.module),
+            ("LEMNOS_PIO_SM_SET_ENABLED", SM_SET_ENABLED.module),
+            ("LEMNOS_PIO_SM_RESTART", SM_RESTART.module),
+            ("LEMNOS_PIO_SM_DRAIN_TX", SM_DRAIN_TX.module),
+            ("LEMNOS_PIO_GPIO_INIT", GPIO_INIT.module),
+            ("LEMNOS_PIO_GPIO_SET_FUNCTION", GPIO_SET_FUNCTION.module),
+            ("LEMNOS_PIO_GPIO_SET_OUTOVER", GPIO_SET_OUTOVER.module),
+            (
+                "LEMNOS_PIO_GPIO_SET_INPUT_ENABLED",
+                GPIO_SET_INPUT_ENABLED.module,
+            ),
+        ];
+        for (name, number) in ops {
+            assert_eq!(place(name), number, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_modules_result_is_the_value_or_its_error() {
+        assert_eq!(result_of(5).unwrap(), 5);
+        assert_eq!(result_of(0).unwrap(), 0);
+        assert_eq!(
+            result_of(-i64::from(libc::EBUSY))
+                .err()
+                .and_then(|e| e.raw_os_error()),
+            Some(libc::EBUSY)
+        );
+        assert_eq!(
+            result_of(i64::MAX).err().and_then(|e| e.raw_os_error()),
+            Some(libc::EOVERFLOW)
+        );
+    }
+
+    #[test]
+    fn a_node_that_is_not_the_module_refuses_the_claim() {
+        let node = Arc::new(OwnedFd::from(File::open("/dev/null").unwrap()));
+        let error = PioDevice::through_module(&node).err().unwrap();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOTTY));
+        assert!(!device().is_module());
     }
 
     #[test]

@@ -1,12 +1,16 @@
 //! The board mode: measures the Linux backend's route on a real board, on hardware the caller
 //! names and nothing else.
 //!
-//! `lemnos-module-check board [i2c=BUS:ADDR:REG:BYTES] [held=BUS:ADDR] [line=CHIP:LINE]
+//! `lemnos-module-check board [stock] [i2c=BUS:ADDR:REG:BYTES] [held=BUS:ADDR] [line=CHIP:LINE]
 //! [pwm=CHIP:CHANNEL]`
 //!
+//! - `stock`: the stock route even when the module is loaded, so one bus can be measured both
+//!   ways in one session.
 //! - `i2c`: a register read on a real chip, many times: a write of the one-byte register address,
 //!   then a read of `BYTES` (1 to 4). Nothing else is written. Every read must give the first
-//!   read's value, so name a register that does not change (a chip id).
+//!   read's value, so name a register that does not change (a chip id). `BUS` may be a PIO I2C
+//!   bus (`pio-i2c:sda=8,scl=7`); on the module's route it holds one claim, `pio-0`, and no
+//!   `/dev/pio0`.
 //! - `held`: an address a kernel driver has bound. A one-byte read, which writes nothing, must
 //!   be refused with `BUSY`.
 //! - `line`: a GPIO line that is free, taken as an input with its bias left as it is, and read.
@@ -25,7 +29,7 @@ use lemnos_hal::raw::{Bias, EdgeDetect, LineConfig, Polarity, PwmConfig};
 use lemnos_linux::LinuxBoard;
 use lemnos_measure::test_alloc::allocations;
 
-use crate::{REPEATS, Report, claims, measure};
+use crate::{REPEATS, Report, claims, measure, open_files};
 
 /// One target of the board mode, parsed from `kind=value`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,18 +62,26 @@ fn byte(text: &str) -> Option<u8> {
 /// Parses one argument. `None` for anything it does not understand.
 pub fn parse(arg: &str) -> Option<Target> {
     let (kind, value) = arg.split_once('=')?;
+    if kind == "i2c" {
+        // From the right: a PIO bus's name has a colon of its own.
+        let mut fields = value.rsplitn(4, ':');
+        let (bytes, register, address, bus) = (
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+            fields.next()?,
+        );
+        let bytes = usize::try_from(number(bytes)?).ok()?;
+        (1..=4).contains(&bytes).then_some(())?;
+        return Some(Target::I2c {
+            bus: bus.to_string(),
+            address: byte(address).filter(|a| *a < 0x80)?,
+            register: byte(register)?,
+            bytes,
+        });
+    }
     let parts: Vec<&str> = value.split(':').collect();
     match (kind, parts.as_slice()) {
-        ("i2c", [bus, address, register, bytes]) => {
-            let bytes = usize::try_from(number(bytes)?).ok()?;
-            (1..=4).contains(&bytes).then_some(())?;
-            Some(Target::I2c {
-                bus: (*bus).to_string(),
-                address: byte(address).filter(|a| *a < 0x80)?,
-                register: byte(register)?,
-                bytes,
-            })
-        }
         ("held", [bus, address]) => Some(Target::Held {
             bus: (*bus).to_string(),
             address: byte(address).filter(|a| *a < 0x80)?,
@@ -120,8 +132,11 @@ fn check_i2c(
         std::io::stdout(),
         "     {bus_name} 0x{address:02x} register 0x{register:02x}: {first:02x?}"
     );
+    // A PIO bus on the module's route holds its one `pio-0` claim and no `/dev/pio0`.
+    let pio = bus_name.starts_with("pio-i2c:");
     report.check(
-        claims() == before + usize::from(module),
+        claims() == before + usize::from(module)
+            && (!pio || module != (open_files("/dev/pio") > 0)),
         "I2C took the expected route",
     );
     let first = &*first;
@@ -222,10 +237,10 @@ fn check_pwm(report: &mut Report, board: &mut LinuxBoard, module: bool, name: &s
 }
 
 /// Runs the board mode on the targets named. Returns the number of failures.
-pub fn run(targets: &[Target]) -> u32 {
+pub fn run(targets: &[Target], stock: bool) -> u32 {
     let mut report = Report { failures: 0 };
     let mut board = LinuxBoard::new();
-    let module = board.open_module().is_ok();
+    let module = !stock && board.open_module().is_ok();
     let _ = writeln!(
         std::io::stdout(),
         "route: {}",
@@ -268,6 +283,15 @@ mod tests {
                 address: 0x40,
                 register: 0x3f,
                 bytes: 2
+            })
+        );
+        assert_eq!(
+            parse("i2c=pio-i2c:sda=8,scl=7:0x18:0x00:1"),
+            Some(Target::I2c {
+                bus: "pio-i2c:sda=8,scl=7".into(),
+                address: 0x18,
+                register: 0,
+                bytes: 1
             })
         );
         assert_eq!(

@@ -77,6 +77,11 @@ impl Node {
         self.0.fd.as_fd()
     }
 
+    /// The open node itself, for a client that keeps it (the PIO block's).
+    pub(crate) fn shared(&self) -> &Arc<OwnedFd> {
+        &self.0.fd
+    }
+
     fn events(&self) -> &events::Events {
         &self.0.events
     }

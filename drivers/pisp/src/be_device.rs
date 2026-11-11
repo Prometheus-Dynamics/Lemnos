@@ -947,6 +947,7 @@ impl IspPisp for PispBe {
             front_end_config_bytes: 0,
             back_end_config_bytes: BeTilesConfig::SIZE as u32,
             statistics_bytes: 0,
+            stalled: 0,
         })
     }
 

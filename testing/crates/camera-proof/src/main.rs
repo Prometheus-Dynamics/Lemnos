@@ -165,7 +165,7 @@ fn run(args: &Args) -> Result<bool, Error> {
         .or_else(|| std::env::var("LEMNOSD_SOCKET").ok())
         .unwrap_or_else(|| "/run/lemnos/lemnosd.sock".to_string());
     let client = Client::connect(&socket, "lemnos-camera-proof")
-        .map_err(|e| Error::Save(format!("{socket}: {e}")))?;
+        .map_err(|e| Error::Connect(format!("{socket}: {e}")))?;
     client.set_timeout(Duration::from_secs(5));
     let bus = SocketBus::new(client);
     let mut camera = assemble(
@@ -205,9 +205,9 @@ fn run(args: &Args) -> Result<bool, Error> {
         let stopped = camera.stop();
         out(format_args!("stopped first: {stopped:?}"));
     }
-    if let Some(code) = args.pattern {
-        camera.set_test_pattern(code)?;
-    }
+    // Always set: the sensor keeps the pattern an earlier caller chose, so no `--pattern` means
+    // the scene, not whatever the last run left.
+    camera.set_test_pattern(args.pattern.unwrap_or(0))?;
     if args.exposure.is_some() || args.frame_length.is_some() {
         camera.set_controls(Controls {
             exposure: args.exposure,
@@ -271,6 +271,13 @@ fn run(args: &Args) -> Result<bool, Error> {
             continue;
         };
         let now = monotonic_ns();
+        if taken == 0 {
+            // A script can stop the camera, or kill this client, once this line is out.
+            out(format_args!(
+                "streaming: first frame after {} ms",
+                started.elapsed().as_millis()
+            ));
+        }
         latencies.push(now.saturating_sub(frame.timestamp_ns()));
         if let Some(before) = previous_ts {
             intervals.push(frame.timestamp_ns().saturating_sub(before));

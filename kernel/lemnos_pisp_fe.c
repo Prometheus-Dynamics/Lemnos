@@ -147,6 +147,12 @@ struct lem_pisp_fe {
 	bool test_scribble;		/* test only: the next copy gets overwritten */
 	struct lpf_frame cur, next;	/* being written; queued for the next frame */
 	bool fs_int, fe_int;
+	/*
+	 * The receiver started a frame the front end has not: a front end with
+	 * no job queued starts nothing and raises nothing, so the receiver's
+	 * frame start is the only sign of a frame it let go by.
+	 */
+	bool csi_pending;
 	u64 fs_ns;
 	/*
 	 * The copy of the job being prepared, kernel memory no one else
@@ -561,6 +567,7 @@ static void lpf_sof(struct lem_pisp_fe *fe, u64 now)
 		fe->errors++;
 		fe->cur.valid = false;
 	}
+	fe->csi_pending = false;
 	fe->cur = fe->next;
 	fe->next.valid = false;
 	if (fe->cur.valid)
@@ -617,6 +624,23 @@ void lem_pisp_fe_isr(struct lem_pisp_fe *fe, u64 now)
 	spin_unlock(&fe->lock);
 }
 
+/*
+ * The receiver's frame start on the channel feeding the front end, handled
+ * before the front end's own interrupt when both are pending, since the
+ * receiver starts a frame before the front end does. A frame the receiver
+ * started and the front end didn't by the next one had no job queued.
+ */
+void lem_pisp_fe_csi_fs(struct lem_pisp_fe *fe)
+{
+	spin_lock(&fe->lock);
+	if (fe->streaming) {
+		if (fe->csi_pending)
+			fe->dropped++;
+		fe->csi_pending = true;
+	}
+	spin_unlock(&fe->lock);
+}
+
 /* --- start and stop --- */
 
 bool lem_pisp_fe_streaming(struct lem_pisp_fe *fe)
@@ -642,14 +666,21 @@ static bool lpf_idle(struct lem_pisp_fe *fe)
 }
 
 /*
- * cfe_stop_channel and pisp_fe_stop. Only when the block reports idle does
- * anything go back; otherwise every pin stays, for good. l->ctl held.
+ * pisp_fe_stop, then cfe_stop_channel's channel stop: the other way round from
+ * cfe_stop_channel. The abort lands while the channel still feeds the block. A
+ * block the channel's stop cuts off mid-frame waits for the rest of that frame
+ * for good, ABORT or not: STATUS stayed 0x5 (queued and active) on the board
+ * after the stock order. A block still busy once the channel is stopped is
+ * reset, which pisp_fe_start does to every block before it runs. Only when the
+ * block reports idle does anything go back; otherwise every pin stays, for
+ * good. l->ctl held.
  */
 void lem_pisp_fe_stop(struct lem_pisp_fe *fe)
 {
 	struct lrc_dev *l = fe->l;
 	struct lem_stream *s = fe->stream;
 	unsigned long flags;
+	bool idle;
 
 	if (!s)
 		return;
@@ -659,17 +690,27 @@ void lem_pisp_fe_stop(struct lem_pisp_fe *fe)
 	/* Not streaming, so a retry finds nothing to do and doesn't come again. */
 	cancel_delayed_work_sync(&fe->retry);
 
-	lpf_trace(fe, LEMNOS_PISP_FE_MARK_CHANNEL_STOP, 0);
-	lrc_fe_channel_stop(l);
 	lpf_wr(fe, FE_INT_EN, 0);
 	lpf_wr(fe, FE_CONTROL, FE_CONTROL_ABORT);
 	/* Those writes are posted across a bus: a read lands them first. */
 	(void)lpf_rd(fe, FE_STATUS);
-	synchronize_irq(l->irq);
-
 	/* pisp_fe_stop waits this long before it expects idle; so does this. */
 	usleep_range(1000, 2000);
-	if (lpf_idle(fe)) {
+	idle = lpf_idle(fe);
+
+	lpf_trace(fe, LEMNOS_PISP_FE_MARK_CHANNEL_STOP, 0);
+	lrc_fe_channel_stop(l);
+	synchronize_irq(l->irq);
+	if (!idle) {
+		u32 status = lpf_rd(fe, FE_STATUS);
+
+		lpf_wr(fe, FE_CONTROL, FE_CONTROL_RESET);
+		(void)lpf_rd(fe, FE_STATUS);
+		idle = lpf_idle(fe);
+		dev_warn_ratelimited(l->dev, "PiSP front end busy after abort (STATUS %#x): reset, %s\n",
+				     status, idle ? "idle" : "still busy");
+	}
+	if (idle) {
 		lpf_wr(fe, FE_INT_STATUS, ~0u);
 		if (fe->cur.valid)
 			lem_stream_cancel(s, &fe->cur.slot);
@@ -753,6 +794,7 @@ static long lpf_start_locked(struct lem_pisp_fe *fe, const struct lemnos_pisp_fe
 	fe->cur.valid = fe->next.valid = false;
 	fe->frames = fe->written = fe->dropped = fe->errors = fe->stalled = 0;
 	fe->fs_int = fe->fe_int = false;
+	fe->csi_pending = false;
 	ret = lem_stream_next(stream, &fe->next.slot);
 	if (!ret) {
 		ret = lpf_prepare(fe, &fe->next.slot);
