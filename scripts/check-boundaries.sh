@@ -9,8 +9,8 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 self="${BASH_SOURCE[0]}"
 
-# Planning files are allowed to name products until the last docs pass.
-planning='^(AGENTS\.md|TODO\.md|docs/design\.md|docs/prs/|testing/board-runs/)'
+# Board-run records name the board a check was written for or run on. Nothing else names one.
+records='^testing/board-runs/'
 exempt='^(scripts/check-boundaries\.sh|testing/boundary/)'
 product='photon(vision)?|helios|wpilib|\bfrc\b|\braze\b|\bcm5\b|\batlas\b|\bstyx\b|\beidos\b|networktables|/run/media|/home/[a-z]|sozo|pepservices'
 hardware='camera|imu|sensor|gyro|gyroscope|accel|accelerometer|fan|light|led|isp'
@@ -91,7 +91,7 @@ check_tree() (
   # No product names, in paths or contents.
   local file
   while read -r file; do
-    [[ "$file" =~ $exempt || "$file" =~ $planning ]] && continue
+    [[ "$file" =~ $exempt || "$file" =~ $records ]] && continue
     if grep -Eqi "$product" <<<"$file"; then fail "product name in path: $file"; fi
     if grep -IEqi "$product" "$file"; then
       fail "product name in $file: $(grep -IEin "$product" "$file" | head -1 | cut -c1-120)"

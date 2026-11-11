@@ -12,7 +12,7 @@ releases every import.
 The module has no match table. It binds a device only when `driver_override` names it and one of
 the device's compatibles is in the `owned` parameter. It never replaces or patches a stock driver.
 
-```sh
+```sh needs:root-and-a-board
 insmod lemnos.ko owned=vendor,block
 echo lemnos > /sys/bus/platform/devices/$DEVICE/driver_override
 echo $DEVICE > /sys/bus/platform/drivers/lemnos/bind
@@ -214,11 +214,11 @@ holder ends the wait. Block numbers aren't reused while the module is loaded.
 
 ## Building and testing
 
-```sh
+```sh needs:a-built-kernel-tree
 make KDIR=<a built kernel tree>
 ```
 
 `testing/qemu/run.sh` builds the module and boots a kernel in QEMU with it loaded, then runs
-`test/lemnos_check.c`, `test/lemnos_irq_check.c`, `test/lemnos_unbind_check.c`, `test/lemnos_claim_check.c`, `test/lemnos_bus_check.c`, `test/lemnos_gpio_check.c`, `test/lemnos_power_check.c`, `test/lemnos_stream_check.c`, `test/lemnos_rp1_csi2_check.c` and `test/lemnos_pisp_fe_check.c` on blocks with
-nothing behind them. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
+every check in `test/` on blocks with nothing behind them, and `lemnos-module-check`, which drives
+the Linux backend through the module and through the stock interfaces. CI runs this against the kernel `testing/qemu/build-kernel.sh` builds, with lock
 and memory checking on.

@@ -1,8 +1,8 @@
 # Writing a driver
 
 A driver is the code that talks to one part and says what it provides. Lemnos does not know what a
-part is: it matches tags, carries calls and values, and runs drivers under its failure rules. There
-are three ways to write a driver. Pick the first that fits.
+part is: it matches tags, carries calls and values, and runs drivers under its failure rules
+([Concepts](concepts.md)). There are three ways to write a driver. Pick the first that fits.
 
 | Form | What you write | Use it when |
 |---|---|---|
@@ -69,12 +69,20 @@ To prove a new file, put it under `tests/chips/` and bind it on the simulated bu
 `src/tests.rs` does. Then break one register in the file and check that the test fails before you
 restore it.
 
+```sh slow
+cargo test -q -p lemnos-driver-generic-sensor
+```
+
+The generic driver serves `magnetometer/1` only. A chip for another contract needs a built-in
+driver, or a generic driver for that contract.
+
 ## The built-in form
 
 A built-in driver is a crate in `drivers/<name>/`. Its `Cargo.toml` names its type under
 `[package.metadata.lemnos]` (`driver = "Type"`, or a list for a crate with more than one, as
-`drivers/pisp` has), and `scripts/generate-builtins.py` lists it for lemnosd when a maintainer runs
-it after the driver merges. Chip drivers are `no_std` over `embedded-hal`. The
+`drivers/pisp` has). `scripts/generate-builtins.py` then writes it into lemnosd's list of drivers
+(`service/lemnosd/src/builtin.rs` and the service's `Cargo.toml`); with `--check` it only says
+whether that list is current. Chip drivers are `no_std` over `embedded-hal`. The
 closest examples are `drivers/bmm150` (a magnetometer on I2C, with its power-up sequence in Rust) and
 `drivers/ina2xx` (a power monitor with its chip layer in a separate module).
 
@@ -135,6 +143,18 @@ do. A consumer that posts bytes that are no job loses its stream with `fault_con
 Tests run against the simulated bus (`lemnos-sim`), where the chip's registers are plain bytes that
 a test sets and reads back. Steady-state reads must allocate nothing; prove it with the counting
 allocator in `lemnos-measure`, as `drivers/generic-sensor` does.
+
+A driver for a hardware block follows the block rule in [the design](design.md#the-block-rule): no
+vendor library, and no doing the block's work in software. Its kernel interface (structures,
+request numbers, the `unsafe` that issues them) goes in a crate of its own, `drivers/<name>-sys`,
+and the driver crate has no `unsafe`. Every path by which a caller's bytes become an address, an
+offset, a size or a descriptor the block will use is checked against a buffer the caller really
+holds, with arithmetic that cannot overflow. If the kernel's interface gives no way to keep a job
+to the caller's memory, the driver refuses the job and says why, as `drivers/vip9000` does.
+
+```sh
+python3 scripts/generate-builtins.py --check
+```
 
 ## The package form
 
@@ -295,14 +315,6 @@ name is refused. Between two packages the first by file name wins.
   signature or a wrong one: refused.
 - **open**: any package in the directory runs.
 
-Signing with OpenSSL 3:
-
-```sh
-openssl genpkey -algorithm ed25519 -out key.pem
-openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | xxd -p -c 32 >> package-keys
-openssl pkeyutl -sign -inkey key.pem -rawin -in libdriver.so -out libdriver.so.sig
-```
-
 The file is read once, into memory that can't be changed afterwards. The signature is checked over
 those bytes and the same bytes are what gets loaded, so a file swapped after the check changes
 nothing.
@@ -311,6 +323,44 @@ Lemnos loads no vendor library. The loader is for Lemnos driver packages only: a
 whole shared object for this machine exporting `lemnos_package` with the right magic and version is
 refused without any of it being run or mapped. A package must not load a vendor library either: the
 block rule in `docs/design.md` holds for a package's driver as for any other.
+
+### Building, signing and loading one
+
+The whole path, with the fixture package and OpenSSL 3. Build the package, on its own, and put it
+in a directory:
+
+```sh slow
+cargo build --manifest-path engine/package/tests/fixture/Cargo.toml --target-dir "$TMPDIR/fixture"
+mkdir "$TMPDIR/packages"
+cp "$TMPDIR/fixture/debug/liblemnos_package_fixture.so" "$TMPDIR/packages/"
+```
+
+Make a key, add its public half to the key file, and sign the package:
+
+```sh slow
+openssl genpkey -algorithm ed25519 -out "$TMPDIR/key.pem"
+openssl pkey -in "$TMPDIR/key.pem" -pubout -outform DER | tail -c 32 | xxd -p -c 32 >> "$TMPDIR/package-keys"
+openssl pkeyutl -sign -inkey "$TMPDIR/key.pem" -rawin -in "$TMPDIR/packages/liblemnos_package_fixture.so" -out "$TMPDIR/packages/liblemnos_package_fixture.so.sig"
+```
+
+Start the daemon with the directory and the keys, on a board file that names the package's
+driver (`docs/examples/package-board.toml`):
+
+```sh slow
+export LEMNOSD_SOCKET="${TMPDIR:-/tmp}/lemnosd.sock"
+lemnosd --sim --board docs/examples/package-board.toml --packages "$TMPDIR/packages" --package-keys "$TMPDIR/package-keys" &
+```
+
+The package is loaded, its device runs, and its contract is called like any other:
+
+```sh slow
+lemnos-ctl packages
+lemnos-ctl list
+lemnos-ctl describe thing
+lemnos-ctl call thing add 2 3
+kill %1
+wait
+```
 
 ### A package in C
 
@@ -351,5 +401,6 @@ runs one driver both ways.
 - Settings are checked at bind and a bad one is `INVALID_ARGUMENT`.
 - Each failure is reported through health, and a read after it tries again.
 - Tests run on the simulated bus, and a test shows that a wrong register fails.
-- Hardware you could not reach is marked `untested on board`, with the check written to
-  `testing/board-runs/<id>.md`.
+- Hardware you could not reach is marked `untested on board` in the crate's documentation, with
+  the check written to a file under `testing/board-runs/` ([Testing](testing.md#board-runs)).
+- The driver has a row in [Drivers and contracts](drivers.md) that says what state it is in.

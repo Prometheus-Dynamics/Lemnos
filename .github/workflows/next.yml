@@ -4,9 +4,8 @@ on:
   push:
     branches:
       - next
+    # The gate runs the documents' commands and checks their links, so a document counts.
     paths-ignore:
-      - "**.md"
-      - "docs/**"
       - "LICENSE-*"
   pull_request:
     branches:

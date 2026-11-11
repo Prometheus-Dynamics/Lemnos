@@ -1,0 +1,193 @@
+# The daemon and lemnos-ctl
+
+`lemnosd` owns the hardware. It reads a board file, binds a driver to each device, keeps them
+running, and serves every program over one Unix socket. `lemnos-ctl` is the command-line client.
+It has no code for any device: everything it shows comes from the device's own description.
+
+## lemnosd
+
+```text
+lemnosd [--sim] [--board PATH] [--socket PATH] [--check]
+        [--packages DIR] [--package-keys FILE] [--package-mode signed|open]
+```
+
+| Flag | Environment | Default | Meaning |
+|---|---|---|---|
+| `--board PATH` | `LEMNOSD_BOARD` | `/etc/lemnos/board.toml` | The [board file](boards.md) |
+| `--socket PATH` | `LEMNOSD_SOCKET` | `/run/lemnos/lemnosd.sock` | Where it listens. The directory is made if it is missing. The socket is mode 0660 |
+| `--sim` | | off | Use the simulated board in place of this machine's hardware |
+| `--check` | | off | Parse the board file and exit: 0 when it is well formed |
+| `--packages DIR` | `LEMNOSD_PACKAGES` | none | Load driver packages from this directory |
+| `--package-keys FILE` | `LEMNOSD_PACKAGE_KEYS` | none | The public keys packages must be signed with |
+| `--package-mode` | `LEMNOSD_PACKAGE_MODE` | `signed` | `signed`, or `open` to run any package |
+
+A flag wins over its environment variable. Packages are described in
+[Writing a driver](writing-a-driver.md#the-package-form).
+
+Start it on the simulated board:
+
+```sh
+export LEMNOSD_SOCKET="${TMPDIR:-/tmp}/lemnosd.sock"
+lemnosd --sim --board docs/examples/sim-board.toml &
+```
+
+What it does while it runs:
+
+- **Binds every device**, the ones others use first. A device that cannot bind stays listed, with
+  its reason, and is retried under [the failure rule](concepts.md#the-failure-rule). The daemon
+  starts whatever the board file says: a board with nothing reachable still starts.
+- **Uses the kernel module when it is loaded.** Without `--sim` it opens `/dev/lemnos` if the node
+  is there, and says on its error output if it could not. See [The kernel module](kernel-module.md).
+- **Listens for hotplug.** Without `--sim` it watches the kernel's events for the names in the
+  board file and retries the devices waiting on them. If it cannot watch, devices still bind when
+  their retries come round.
+- **Ends everything a connection held when the connection closes**: subscriptions, streams and
+  whatever a driver was holding for that caller.
+- **Stops on `SIGTERM` or `SIGINT`.** Stopping drops every driver, which is what releases the
+  hardware and lets a driver restore what it took over.
+
+It writes nothing to its standard output. Its error output gets what could not be used, what
+became of each driver package, and a driver's panic message.
+
+The drivers compiled in are listed in `service/lemnosd/src/builtin.rs`, which
+`scripts/generate-builtins.py` writes from the driver crates. The `fake-devices` feature adds the
+four fake drivers the simulated board uses.
+
+The shipped form is a small static binary:
+
+```sh slow
+cargo build -p lemnosd -p lemnos-ctl --profile service
+```
+
+For a board, add `--target aarch64-unknown-linux-musl` (after `rustup target add` for it). A
+statically linked `lemnosd` cannot load driver packages and says so; build for a glibc target to
+use them.
+
+## lemnos-ctl
+
+```text
+lemnos-ctl [--socket PATH] COMMAND
+```
+
+The socket is `--socket`, else `LEMNOSD_SOCKET`, else `/run/lemnos/lemnosd.sock`. A command exits 0
+on success. On failure it prints the reason on its error output and exits 1.
+
+### list
+
+Every device and how it stands: name, driver, state, health, tags, then `-> NAME` when the board
+file links it to another device, then the reason in brackets when there is one.
+
+```sh
+lemnos-ctl list
+```
+
+### chain DEVICE
+
+The devices a device leads to through `link`, in order: a camera's sensor, its receiver, its ISP.
+A last line says when the chain ends at a name the board does not have, or comes back on itself.
+
+```sh
+lemnos-ctl chain counter
+```
+
+### describe DEVICE
+
+What the device provides: each contract with its methods and their types, then each item (a
+`value`, `control` or `action`) with its unit and range.
+
+```sh
+lemnos-ctl describe counter
+lemnos-ctl describe orientation
+```
+
+### read DEVICE [ITEM]
+
+Reads one value, or every value the device has. A value is printed in its unit.
+
+```sh
+lemnos-ctl read accel
+lemnos-ctl read counter count
+```
+
+### watch DEVICE ITEM [--period-ms N] [--count N]
+
+Subscribes to a value and prints each one as it arrives. The period is 100 ms unless given. It runs
+until stopped unless `--count` says how many to print.
+
+```sh
+lemnos-ctl watch accel z --period-ms 50 --count 3
+```
+
+### set DEVICE ITEM [VALUE...]
+
+Sets a control or runs an action. A value item is refused as read-only.
+
+```sh
+lemnos-ctl set counter target 7
+lemnos-ctl read counter count
+```
+
+### call DEVICE METHOD [ARG...]
+
+Calls any method by name, whether or not an item names it. When two contracts on the device have a
+method of the same name, write `TAG:NAME`. The reply is printed unless the method returns nothing.
+
+```sh
+lemnos-ctl call counter peek
+lemnos-ctl call counter example.counter/1:set 5
+```
+
+Arguments for `set` and `call` are words, in the order `describe` shows the parameters. A number is
+written as a number, a bool as `true`, `false`, `on`, `off`, `1` or `0`, bytes as hex, and an
+optional value that is absent as `none`. A record or an array takes one word per field or element,
+in order.
+
+### off DEVICE, on DEVICE
+
+Turns a device off, and on again. Off drops the driver and stops the retries. The device stays
+listed as `off` with the reason `manual`. On binds it again. A device the board file marks
+`disabled = true` starts off, and `on` starts it.
+
+```sh
+lemnos-ctl off counter
+lemnos-ctl list
+lemnos-ctl on counter
+```
+
+### packages
+
+How the daemon runs driver packages (`off`, `signed` or `open`), then each file it looked at: the
+driver a loaded one became, or why a refused one was refused.
+
+```sh
+lemnos-ctl packages
+```
+
+### When a command is refused
+
+A refusal carries a status and a few words: `refused (-16): ...`. The numbers are negative Linux
+error numbers, and Lemnos's own codes below -4095:
+
+| Status | Name | Usual meaning |
+|---|---|---|
+| -1 | `NOT_PERMITTED` | The device is host-owned and the method would change it |
+| -2 | `NOT_FOUND` | No such device, method, stream or resource name |
+| -5 | `IO` | The hardware did not answer |
+| -11 | `AGAIN` | Not ready yet: a chip still powering up |
+| -16 | `BUSY` | Someone else holds it, or the driver is in a call right now. Ask again |
+| -19 | `NO_DEVICE` | The device is not running |
+| -22 | `INVALID_ARGUMENT` | A bad setting or argument |
+| -95 | `NOT_SUPPORTED` | The driver or the hardware does not do this |
+| -110 | `TIMED_OUT` | The call ran past its deadline |
+| -4099 | `PANIC` | The driver panicked in the call. It has been dropped and will be bound again |
+
+## lemnos-orion
+
+`service/orion` builds `lemnos-orion`, a bridge that publishes every device the daemon serves, with
+its values, to an Orion node. It is a client like any other and knows no device. It reads
+`LEMNOSD_SOCKET` and `ORION_NODE_ID`. It has not been run against a board.
+
+```sh
+kill %1
+wait
+```

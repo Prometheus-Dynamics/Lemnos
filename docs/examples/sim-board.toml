@@ -1,0 +1,43 @@
+# A board for `lemnosd --sim`: devices with no hardware behind them. The fake drivers come from
+# testing/crates/fake-devices and are in a lemnosd built with `--features fake-devices`.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "sim"
+
+# Three fakes that each serve one vector, read from `config`.
+[[devices]]
+id = "accel"
+driver = "fake-accelerometer"
+config = { x = 0.0, y = 0.0, z = 9.81 }
+
+[[devices]]
+id = "gyro"
+driver = "fake-gyroscope"
+config = { x = 0.0, y = 0.0, z = 0.0 }
+
+[[devices]]
+id = "mag"
+driver = "fake-magnetometer"
+config = { x = 0.00002, y = 0.0, z = 0.00004 }
+
+# A real driver built from other devices: it needs no hardware of its own.
+[[devices]]
+id = "orientation"
+driver = "orientation"
+uses = { accel = "accel", gyro = "gyro", mag = "mag" }
+config = { sample_rate_hz = 100 }
+
+# A contract the tools have no code for: a value, a control and an action.
+[[devices]]
+id = "counter"
+driver = "fake-counter"
+link = "accel"
+config = { start = 41 }
+
+# A device whose bus the simulated board does not have. It is listed, retrying, with the reason.
+[[devices]]
+id = "absent"
+driver = "bmm150"
+bus = "i2c-9"

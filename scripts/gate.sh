@@ -31,5 +31,7 @@ step "client on tokio" cargo test -q -p lemnos-client --features tokio
 step "C surface, shared form" cargo test -q -p lemnos-capi --features shared
 
 step boundaries scripts/check-boundaries.sh
+# Every command in the documents runs against the simulated board, and every link leads somewhere.
+step documents scripts/check-docs.py
 
 echo "gate passed"
