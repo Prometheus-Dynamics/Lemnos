@@ -27,7 +27,8 @@ What it runs, in order:
 5. A few feature combinations: the measurement counters, the client on tokio, the C API as a shared
    library.
 6. `scripts/check-boundaries.sh`: the layering rules.
-7. `scripts/check-docs.py`: the commands and links in these documents, and the driver list.
+7. `scripts/check-docs.py`: the commands and links in these documents, the driver list and the
+   board-run list.
 
 The last two also run on their own:
 
@@ -74,7 +75,9 @@ LEMNOS_TEST_DMA_HEAP=/dev/dma_heap/system cargo test -p lemnosd --test stream_dm
 checks that an example shown in a document is the file it names, and checks every relative link.
 It also holds [Drivers and contracts](drivers.md) to the code: its driver tables name exactly the
 drivers `lemnosd` builds in, each with the contracts it provides; no crate in its library table
-has a built-in driver; and no built-in driver's crate documentation says it is not built in.
+has a built-in driver; and no built-in driver's crate documentation says it is not built in. And
+it holds [Hardware status](hardware-status.md) to `testing/board-runs/`: every written check is
+listed there, and the count it gives is the count of files.
 A block marked `slow` runs only with `--slow`. A block marked `needs:` is never run, and the check
 lists it with what it needs.
 

@@ -276,6 +276,21 @@ def check_drivers(problems):
             problems.append(f"drivers/{name}/src/lib.rs: says \"{found.group(0)}\", and lemnosd builds it in")
 
 
+def check_board_runs(problems):
+    """docs/hardware-status.md lists every written board run, and counts them right."""
+    path = "docs/hardware-status.md"
+    text = (ROOT / path).read_text()
+    runs = sorted(p.name for p in (ROOT / "testing/board-runs").glob("*.md"))
+    for name in runs:
+        if f"board-runs/{name})" not in text:
+            problems.append(f"{path}: testing/board-runs/{name} is not listed")
+    stated = re.search(r"None of those (\d+) files", text)
+    if not stated:
+        problems.append(f"{path}: no \"None of those N files\" count of the board runs")
+    elif int(stated.group(1)) != len(runs):
+        problems.append(f"{path}: says {stated.group(1)} board runs, and there are {len(runs)}")
+
+
 def main():
     slow = "--slow" in sys.argv
     list_only = "--list" in sys.argv
@@ -290,6 +305,7 @@ def main():
 
     problems, not_run, ran, skipped_slow = [], [], 0, []
     check_drivers(problems)
+    check_board_runs(problems)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     if not list_only:
         # The programs the documents run, built as the README builds them.
