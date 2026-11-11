@@ -14,6 +14,7 @@ lemnos-hal = { path = "../../engine/hal" }
 lemnos-contract-power-switch = { path = "../../contracts/power-switch" }
 
 [dev-dependencies]
+lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 
 [package.metadata.lemnos]
