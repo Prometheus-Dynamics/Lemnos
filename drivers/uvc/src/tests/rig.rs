@@ -135,6 +135,10 @@ impl StreamEndpoint for Consumer {
     fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
         self.stream.fault_consumer()
     }
+
+    fn buffer_current(&self, buffer: u32) -> core::result::Result<bool, ErrorKind> {
+        Ok(self.attached.load(Ordering::Relaxed) && self.stream.buffer_current(buffer)?)
+    }
 }
 
 /// The driver, its device and its stream, at a simulated time. The test plays the consumer: it

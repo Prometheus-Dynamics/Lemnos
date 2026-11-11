@@ -10,13 +10,12 @@
 //! completes. Buffers numbered [`MAX_BUFFERS`] and up are never used.
 //!
 //! A stream's memory is made anew for each consumer, so buffers held from before a consumer
-//! came have nothing of it behind them. They are given up (published while nobody can receive
-//! them) and taken again:
-//!
-//! - on a stream with handles, when a job names one whose handle is gone (as the dma-buf
-//!   drivers do);
-//! - on any stream, when a tick finds no consumer attached: from then on the driver holds
-//!   nothing until one is, and takes its buffers then.
+//! came have nothing of it behind them, and the stream says so
+//! ([`StreamEndpoint::buffer_current`]). Every tick asks it of one held buffer before it
+//! takes more: when the consumer it was taken
+//! under has gone, whether or not another came, everything held is given up (published while
+//! nobody can receive it) and taken again. A job naming a buffer whose handle is gone has it
+//! renewed the same way (as the dma-buf drivers do).
 //!
 //! # What is checked, and where
 //!
@@ -313,30 +312,31 @@ impl Server {
         stream: &mut S,
         lane: &mut Lane,
     ) -> Result<bool, ErrorKind> {
-        // A read of nothing from a held buffer says whether anyone is attached.
-        if !lane.attached {
-            // A buffer taken now is the present consumer's, if there is one.
-            let Some(buffer) = stream.next_buffer()? else {
-                return Ok(false);
-            };
-            lane.set_held(buffer, true);
-            if !stream.read(buffer, 0, &mut [])? {
-                Self::give_up(stream, lane, buffer)?;
-                return Ok(false);
-            }
-            lane.attached = true;
-        }
-        Self::take_free(stream, lane)?;
+        // One held buffer says whether the consumer it was taken under is still the one there.
+        // It is asked before any buffer is taken, so everything held is of one consumer's
+        // time, and one that went is seen whether or not another came.
         if let Some(buffer) = lane.any_held()
-            && !stream.read(buffer, 0, &mut [])?
+            && !stream.buffer_current(buffer)?
         {
             // Gone: everything held is from its time.
             while let Some(buffer) = lane.any_held() {
                 Self::give_up(stream, lane, buffer)?;
             }
             lane.attached = false;
-            return Ok(false);
         }
+        if !lane.attached {
+            // A buffer taken now is the present consumer's, if there is one.
+            let Some(buffer) = stream.next_buffer()? else {
+                return Ok(false);
+            };
+            lane.set_held(buffer, true);
+            if !stream.buffer_current(buffer)? {
+                Self::give_up(stream, lane, buffer)?;
+                return Ok(false);
+            }
+            lane.attached = true;
+        }
+        Self::take_free(stream, lane)?;
         Ok(true)
     }
 

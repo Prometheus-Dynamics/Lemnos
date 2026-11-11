@@ -281,6 +281,11 @@ impl<T: StreamEndpoint<Error = ErrorKind>> StreamEndpoint for Faulty<T> {
         self.faults.check("buffer_handle")?;
         self.inner.buffer_handle(buffer)
     }
+
+    fn buffer_current(&self, buffer: u32) -> Result<bool, ErrorKind> {
+        self.faults.check("buffer_current")?;
+        self.inner.buffer_current(buffer)
+    }
 }
 
 impl<T: UsbDevice<Error = ErrorKind>> UsbDevice for Faulty<T> {

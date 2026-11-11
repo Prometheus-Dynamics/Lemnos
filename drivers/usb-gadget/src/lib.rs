@@ -1,18 +1,27 @@
 //! Brings this board up as a USB device and keeps it up.
 //!
-//! Untested on board.
+//! Untested on board: the checks are `testing/board-runs/E36.md`.
 //!
 //! The driver takes a [`UsbFunction`](lemnos_hal::UsbFunction) (the board file's `function`
 //! need: on Linux a controller, `udc:NAME`) and a description of the gadget, builds the
 //! descriptor set once at bind, enables the function with it, and enables it again whenever
 //! that fails or the controller lets go.
 //!
-//! It owns bring-up and health and nothing else. No merged contract carries endpoint bytes or
-//! control requests for a caller (`raw-bus` is I2C, SPI, a line and a PWM channel), and this
-//! driver invents none: until such a contract exists, a host sees the device with the identity
-//! and interfaces described, every control request sent to the function is refused with a
-//! stall, and the endpoints carry nothing. What the interfaces are for is not this driver's
-//! business, and it never looks.
+//! It owns bring-up and health, and it carries the device's traffic for whoever serves it,
+//! through `usb.function/1` (`lemnos-contract-usb-function`): the bytes of every endpoint as
+//! jobs on a data stream, control requests delivered as events and answered or stalled by
+//! calls, endpoint halts, and the bus events. What the interfaces are for, and what any byte
+//! means, is the caller's business, and the driver never looks.
+//!
+//! The data stream is the optional need `data` in the board file (`[devices.streams.data]`,
+//! `job_bytes` at least the contract's `JOB_BYTES`, buffers of the contract's `DATA_OFFSET`
+//! plus the longest transfer wanted). Name the controller under `uses`
+//! (`uses = { function = "udc:NAME" }`), not as the device's `bus`: a `bus` stands in for
+//! every need a board file doesn't name, the data stream included. Without the stream, and whenever no consumer has
+//! the stream open, the device is on the bus with the identity and interfaces described,
+//! every control request sent to the function is refused with a stall, and the endpoints
+//! carry nothing: a device nobody serves refuses what it is asked. How jobs are checked and
+//! buffers held is in [`serve`].
 //!
 //! Settings come from the device's `config` in the board file:
 //!
@@ -25,14 +34,19 @@
 //! - `manufacturer`, `product_name`, `serial` (strings, optional): what the host shows.
 //! - `max_power_ma` (integer, default 100): the most the device draws from the bus, up to 500.
 //! - `self_powered` (boolean, default false).
+//! - `control_timeout_ms` (integer, default 1000, 1 to 60000): how long a control request
+//!   waits for the caller's answer before it is stalled.
 //!
 //! A setting that is missing, out of range or malformed fails the bind with
 //! `INVALID_ARGUMENT`. Binding does not touch the function.
 //!
 //! # Failure
 //!
-//! The work is done in [`Lifecycle::tick`], which never waits. While the gadget is up the
-//! driver looks for events every [`POLL_NS`]. When enabling fails, or the function reports
+//! The work is done in [`Lifecycle::tick`], which never waits: endpoint transfers are asked
+//! for with no timeout, so one that can't move yet is tried again by the next tick, and the
+//! function loses nothing meanwhile. While the gadget is up the driver looks for events every
+//! [`POLL_NS`], and every [`SERVE_NS`] while a consumer has the data stream open (at once
+//! when bytes moved and more wait). When enabling fails, or the function reports
 //! that its controller let go, the driver disables the function and enables it again after a
 //! backoff that starts at 1 s, doubles, and stops at 8 s. The backoff clears once the gadget
 //! has stayed up for 8 s. It never gives up and never switches itself off.
@@ -46,17 +60,31 @@
 
 #![no_std]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
 pub mod description;
+pub mod serve;
+#[cfg(test)]
+mod serve_tests;
 #[cfg(test)]
 mod tests;
 
+use core::time::Duration;
+
 use description::{Fault, Identity, Set};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, UsbFunctionHandle, driver};
+use lemnos_contract_usb_function::{
+    Counters, EndpointInfo, Event, EventKind, FunctionInfo, JobStatus, Request, State, UsbFunction,
+};
+use lemnos_core::{
+    Config, Health, Lifecycle, Result, Status, StreamHandle, UsbFunctionHandle, driver, status_of,
+};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::UsbFunctionEvent;
+use lemnos_hal::usb_descriptors::{self, UsbDescriptors};
+use serve::Serve;
 
 const NS_PER_MS: u64 = 1_000_000;
 /// How often an enabled function is asked for events.
@@ -66,9 +94,16 @@ pub const BACKOFF_FIRST_NS: u64 = 1_000 * NS_PER_MS;
 /// The longest wait after a failure, and how long the gadget must stay up to clear the
 /// backoff.
 pub const BACKOFF_CAP_NS: u64 = 8_000 * NS_PER_MS;
+/// How often the data stream is served while a consumer has it open.
+pub const SERVE_NS: u64 = NS_PER_MS;
 /// The most events dealt with in one tick, so a host that floods requests can't hold the
 /// lane.
 const EVENTS_PER_TICK: usize = 16;
+/// How long the host is given to take or send the data stage of a request the caller answers.
+/// The host is in the middle of the request, so the stage moves at once or not at all.
+const CONTROL_STAGE: Duration = Duration::from_millis(100);
+/// The name the data stream is opened by: its need's.
+const DATA_STREAM: &str = "data";
 
 pub const STARTING: &str = "not enabled yet";
 pub const NOT_THERE: &str = "the USB device controller, or what the board sets up for it, is \
@@ -89,15 +124,26 @@ fn enable_fault(kind: ErrorKind) -> &'static str {
     }
 }
 
-#[driver("usb-gadget", provides = [])]
+#[driver("usb-gadget", provides = [UsbFunction])]
 pub struct UsbGadget {
     #[needs]
     function: UsbFunctionHandle,
+    /// `usb.function/1` jobs and their completions.
+    #[needs(optional)]
+    data: Option<StreamHandle>,
     set: Set,
     /// Whether the function is enabled.
     up: bool,
-    /// Whether the host has the device configured. Only for a reader of the state.
+    /// Whether the host has the device configured.
     configured: bool,
+    /// Whether the bus is idle.
+    suspended: bool,
+    /// How long a control request waits for the caller's answer.
+    control_timeout_ns: u64,
+    /// How many consumers had gone when the request that waits was reported: one more since
+    /// means whoever was told of it is no longer there.
+    request_gone: u32,
+    serve: Serve,
     /// When the next step is due. A tick can come early.
     next_ns: u64,
     /// When the gadget came up.
@@ -141,30 +187,215 @@ impl UsbGadget {
         }
     }
 
+    /// The controller let go, or the function failed: the gadget comes down, and what waited
+    /// on it ends.
+    fn let_go(&mut self, now_ns: u64) -> u64 {
+        self.up = false;
+        self.suspended = false;
+        self.serve.request_deadline_ns = None;
+        if core::mem::take(&mut self.configured) {
+            self.serve.note(serve::plain(EventKind::Deconfigured));
+        }
+        if let Some(stream) = self.data.as_deref_mut() {
+            // A stream that fails here leaves the jobs for the function to fail one by one.
+            let _ = self
+                .serve
+                .end(stream, JobStatus::NotConfigured, now_ns, |job| {
+                    job.kind != lemnos_contract_usb_function::JobKind::Event
+                });
+        }
+        let _ = self.function.disable();
+        self.backoff(LET_GO, now_ns)
+    }
+
+    /// Refuses the control request that waits, if one does, and counts it.
+    fn refuse_request(&mut self) {
+        if self.serve.request_deadline_ns.take().is_some() {
+            // A host that already let it go is no fault.
+            let _ = self.function.control_stall();
+            self.serve.counters.requests_unanswered += 1;
+        }
+    }
+
     fn keep_up(&mut self, now_ns: u64) -> u64 {
         if now_ns.saturating_sub(self.up_since_ns) >= BACKOFF_CAP_NS {
             self.attempts = 0;
         }
-        for _ in 0..EVENTS_PER_TICK {
+        // Whether a consumer has the data stream open. A stream that fails counts as nobody
+        // there for this tick.
+        let serving = match self.data.as_deref_mut() {
+            Some(stream) => self.serve.refresh(stream).unwrap_or(false),
+            None => false,
+        };
+        // A request waits for its answer only while the consumer that was told of it is there
+        // to give it, and only so long.
+        if !serving
+            || self.serve.gone != self.request_gone
+            || self
+                .serve
+                .request_deadline_ns
+                .is_some_and(|deadline| now_ns >= deadline)
+        {
+            self.refuse_request();
+        }
+        // Reading on would stall a request that waits, so nothing is read until it is answered.
+        let mut events = EVENTS_PER_TICK;
+        while events > 0 && self.serve.request_deadline_ns.is_none() {
+            events -= 1;
             match self.function.next_event() {
                 Ok(None) => break,
-                Ok(Some(UsbFunctionEvent::Configured)) => self.configured = true,
-                Ok(Some(UsbFunctionEvent::Deconfigured)) => self.configured = false,
-                Ok(Some(UsbFunctionEvent::Suspended | UsbFunctionEvent::Resumed)) => {}
-                Ok(Some(UsbFunctionEvent::Setup { .. })) => {
-                    // Nobody here answers requests. A host that already let it go is no fault.
-                    let _ = self.function.control_stall();
+                Ok(Some(UsbFunctionEvent::Configured)) => {
+                    self.configured = true;
+                    self.suspended = false;
+                    self.serve.note(serve::plain(EventKind::Configured));
                 }
-                Err(_) => {
-                    self.up = false;
+                Ok(Some(UsbFunctionEvent::Deconfigured)) => {
                     self.configured = false;
-                    let _ = self.function.disable();
-                    return self.backoff(LET_GO, now_ns);
+                    self.suspended = false;
+                    self.serve.note(serve::plain(EventKind::Deconfigured));
+                    if let Some(stream) = self.data.as_deref_mut() {
+                        let _ = self
+                            .serve
+                            .end(stream, JobStatus::NotConfigured, now_ns, |job| {
+                                job.kind != lemnos_contract_usb_function::JobKind::Event
+                            });
+                    }
                 }
+                Ok(Some(UsbFunctionEvent::Suspended)) => {
+                    self.suspended = true;
+                    self.serve.note(serve::plain(EventKind::Suspended));
+                }
+                Ok(Some(UsbFunctionEvent::Resumed)) => {
+                    self.suspended = false;
+                    self.serve.note(serve::plain(EventKind::Resumed));
+                }
+                Ok(Some(UsbFunctionEvent::Setup { setup, length })) => {
+                    if serving {
+                        self.serve.note(Event {
+                            kind: EventKind::Setup,
+                            request: Request {
+                                request_type: setup.request_type,
+                                request: setup.request,
+                                value: setup.value,
+                                index: setup.index,
+                                length,
+                            },
+                        });
+                        self.serve.request_deadline_ns =
+                            Some(now_ns.saturating_add(self.control_timeout_ns));
+                        self.request_gone = self.serve.gone;
+                    } else {
+                        // Nobody here answers requests. A host that already let it go is no
+                        // fault.
+                        let _ = self.function.control_stall();
+                        self.serve.counters.requests_unanswered += 1;
+                    }
+                }
+                Err(_) => return self.let_go(now_ns),
             }
         }
-        self.next_ns = now_ns.saturating_add(POLL_NS);
+        let mut again = false;
+        if serving && let Some(stream) = self.data.as_deref_mut() {
+            // A stream that fails leaves its jobs where they are, for the next tick.
+            again = self
+                .serve
+                .run(stream, &mut *self.function, now_ns)
+                .unwrap_or(false);
+        }
+        self.next_ns = match (serving, again) {
+            (true, true) => now_ns,
+            (true, false) => now_ns.saturating_add(SERVE_NS),
+            (false, _) => now_ns.saturating_add(POLL_NS),
+        };
         self.next_ns
+    }
+
+    /// What an answer to the pending request came to. Nothing is pending afterwards, unless
+    /// the function said the answer did not fit the request.
+    fn answered<T>(&mut self, answer: core::result::Result<T, ErrorKind>) -> Result<T> {
+        if !matches!(answer, Err(ErrorKind::InvalidInput)) {
+            self.serve.request_deadline_ns = None;
+        }
+        answer.map_err(status_of)
+    }
+}
+
+impl UsbFunction for UsbGadget {
+    fn info(&mut self) -> Result<FunctionInfo> {
+        Ok(FunctionInfo {
+            endpoints: self.serve.endpoints().len() as u8,
+            max_transfer: self.serve.max_transfer() as u32,
+            max_pending: serve::MAX_PENDING as u16,
+            max_events: serve::MAX_EVENTS as u16,
+            control_timeout_ms: (self.control_timeout_ns / NS_PER_MS) as u32,
+        })
+    }
+
+    fn endpoint(&mut self, index: u8) -> Result<EndpointInfo> {
+        self.serve
+            .endpoints()
+            .get(usize::from(index))
+            .copied()
+            .ok_or(Status::NOT_FOUND)
+    }
+
+    fn data_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        if self.data.is_none() {
+            return Err(Status::NOT_SUPPORTED);
+        }
+        into.get_mut(..DATA_STREAM.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(DATA_STREAM.as_bytes());
+        Ok(DATA_STREAM.len())
+    }
+
+    fn state(&mut self) -> Result<State> {
+        Ok(State {
+            up: self.up,
+            configured: self.configured,
+            suspended: self.suspended,
+            request_pending: self.serve.request_deadline_ns.is_some(),
+        })
+    }
+
+    fn control_in(&mut self, data: &[u8]) -> Result<u32> {
+        let sent = self.function.control_in(data, CONTROL_STAGE);
+        self.answered(sent).map(|sent| sent as u32)
+    }
+
+    fn control_out(&mut self, into: &mut [u8]) -> Result<usize> {
+        let came = self.function.control_out(into, CONTROL_STAGE);
+        self.answered(came)
+    }
+
+    fn control_stall(&mut self) -> Result<()> {
+        let stalled = self.function.control_stall();
+        self.answered(stalled)
+    }
+
+    fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<()> {
+        self.function.set_halt(endpoint, halted).map_err(status_of)
+    }
+
+    fn cancel(&mut self, endpoint: u8) -> Result<u32> {
+        let Some(stream) = self.data.as_deref_mut() else {
+            return Ok(0);
+        };
+        // The stream's clock is the tick's: a cancelled job is stamped with the last one.
+        let now_ns = self.next_ns;
+        self.serve
+            .end(stream, JobStatus::Cancelled, now_ns, |job| {
+                use lemnos_contract_usb_function::JobKind;
+                match job.kind {
+                    JobKind::Event => endpoint == 0,
+                    JobKind::Send | JobKind::Receive => endpoint != 0 && job.endpoint == endpoint,
+                }
+            })
+            .map_err(status_of)
+    }
+
+    fn counters(&mut self) -> Result<Counters> {
+        Ok(self.serve.counters)
     }
 }
 
@@ -174,11 +405,34 @@ impl Lifecycle for UsbGadget {
     const TICKS: bool = true;
 
     fn start(needs: UsbGadgetNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let set = set(cfg)?;
+        let control_timeout_ms = integer(cfg, "control_timeout_ms", 60_000, Some(1_000))?;
+        if control_timeout_ms == 0 {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        // The set was built here, so it parses; one that didn't would name no endpoints.
+        let serve = {
+            let parsed = UsbDescriptors::parse(set.bytes()).ok();
+            let named = parsed
+                .iter()
+                .flat_map(|set| usb_descriptors::endpoints(set.full_speed()))
+                .map(|e| EndpointInfo {
+                    address: e.address,
+                    attributes: e.attributes,
+                    max_packet: e.max_packet,
+                });
+            Serve::new(named, needs.data.is_some())
+        };
         Ok(Self {
             function: needs.function,
-            set: set(cfg)?,
+            data: needs.data,
+            set,
             up: false,
             configured: false,
+            suspended: false,
+            control_timeout_ns: control_timeout_ms as u64 * NS_PER_MS,
+            request_gone: 0,
+            serve,
             next_ns: 0,
             up_since_ns: 0,
             attempts: 0,

@@ -1,0 +1,23 @@
+[package]
+name = "lemnos-usb-echo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Board-check tool: serves a usb.function/1 device through the service, answering one vendor request and echoing an endpoint pair"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../../engine/core", features = ["std"] }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-linux-stream = { path = "../../../backends/linux-stream" }
+lemnos-contract-usb-function = { path = "../../../contracts/usb-function" }
+
+[dev-dependencies]
+lemnosd = { path = "../../../service/lemnosd" }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-sim = { path = "../../../backends/sim" }
+lemnos-hal = { path = "../../../engine/hal", features = ["std", "mock"] }
+lemnos-driver-usb-gadget = { path = "../../../drivers/usb-gadget" }

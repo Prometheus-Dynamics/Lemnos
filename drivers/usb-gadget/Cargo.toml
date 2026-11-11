@@ -9,18 +9,26 @@ publish = false
 workspace = true
 
 [features]
+default = ["alloc"]
+# The memory for one endpoint transfer is taken from the allocator, 64 KiB of it, and only
+# when the board gives the device a data stream. Without this it is 1 KiB inside the driver.
+alloc = ["lemnos-core/alloc"]
 # The `interfaces` setting is a path to a file holding the text, read at bind, instead of the
 # text itself.
-std = []
+std = ["alloc"]
 
 [dependencies]
 lemnos-core = { path = "../../engine/core" }
 lemnos-hal = { path = "../../engine/hal" }
+lemnos-contract-usb-function = { path = "../../contracts/usb-function" }
 
 [dev-dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["mock"] }
 lemnos-linux = { path = "../../backends/linux" }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
 [package.metadata.lemnos]

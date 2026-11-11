@@ -160,6 +160,10 @@ impl StreamEndpoint for RingEnd {
     fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
         Ok(())
     }
+
+    fn buffer_current(&self, _buffer: u32) -> core::result::Result<bool, ErrorKind> {
+        Ok(true)
+    }
 }
 
 /// A group the sensor would latch: the launch that closed it, and its exposure.

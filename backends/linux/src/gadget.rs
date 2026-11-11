@@ -61,7 +61,16 @@
 //!   product, serial or configuration string over 125 bytes of UTF-8 are `Unsupported`.
 //! - The data stage of a control request can't be abandoned once begun: `control_in` and
 //!   `control_out` wait for the host, whatever their timeout.
-//! - An endpoint transfer that times out is cancelled, and what it had moved is lost.
+//! - Each endpoint has one transfer with the kernel at a time, on [`TRANSFER_BYTES`] of memory
+//!   of its own, so that a transfer outlasts the call that began it:
+//!   - `read` begins a read of that size when none is under way, and a `read` that times out
+//!     leaves it there for the next to finish. Nothing the host sends is lost between calls.
+//!     The host's transfer ends the read at its short packet, and a longer one comes in
+//!     pieces of that size.
+//!   - `write` takes at most that much, hands it to the kernel and returns; it waits only for
+//!     the write before it. How that write ended is reported by the next `write`.
+//!   - When the host configures the function again, what was under way or read and not yet
+//!     taken under the configuration before is dropped.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -377,12 +386,15 @@ impl Paths {
             let file = self.mount.join(format!("ep{address:02x}"));
             endpoints.push(Endpoint::open(&file)?);
         }
-        let aio = aio::Context::new()?;
+        let mut queues = Vec::with_capacity(endpoints.len());
+        for _ in &endpoints {
+            queues.push(aio::Queue::new(TRANSFER_BYTES)?);
+        }
         attribute(&self.gadget, "UDC", &self.name)?;
         Ok(FfsWire {
             ep0,
             endpoints,
-            aio,
+            queues,
         })
     }
 }
@@ -396,14 +408,23 @@ trait Wire {
     fn stall(&mut self, request_is_in: bool) -> io::Result<()>;
     fn halt(&mut self, endpoint: usize, endpoint_is_in: bool) -> io::Result<()>;
     fn clear_halt(&mut self, endpoint: usize) -> io::Result<()>;
+    /// What the host sent to the endpoint. A timeout loses nothing.
     fn read(&mut self, endpoint: usize, data: &mut [u8], timeout: Duration) -> io::Result<usize>;
+    /// Hands `data`, or the first of it, to the endpoint once it is free of the write before.
     fn write(&mut self, endpoint: usize, data: &[u8], timeout: Duration) -> io::Result<usize>;
+    /// Drops every transfer under way and everything read and not yet taken.
+    fn forget(&mut self);
 }
+
+/// The most one transfer with the kernel carries, per endpoint: a multiple of every packet
+/// size, so a longer transfer is cut only between packets.
+pub const TRANSFER_BYTES: usize = 64 * 1024;
 
 struct FfsWire {
     ep0: Ep0,
     endpoints: Vec<Endpoint>,
-    aio: aio::Context,
+    /// Each endpoint's transfers, in the endpoints' order.
+    queues: Vec<aio::Queue>,
 }
 
 impl Wire for FfsWire {
@@ -432,13 +453,17 @@ impl Wire for FfsWire {
     }
 
     fn read(&mut self, endpoint: usize, data: &mut [u8], timeout: Duration) -> io::Result<usize> {
-        self.aio
-            .read(self.endpoints[endpoint].as_fd(), data, timeout)
+        self.queues[endpoint].read(self.endpoints[endpoint].as_fd(), data, timeout)
     }
 
     fn write(&mut self, endpoint: usize, data: &[u8], timeout: Duration) -> io::Result<usize> {
-        self.aio
-            .write(self.endpoints[endpoint].as_fd(), data, timeout)
+        self.queues[endpoint].write(self.endpoints[endpoint].as_fd(), data, timeout)
+    }
+
+    fn forget(&mut self) {
+        for queue in &mut self.queues {
+            queue.cancel();
+        }
     }
 }
 
@@ -511,6 +536,8 @@ impl<W: Wire> Session<W> {
                     return Err(ErrorKind::Unavailable);
                 }
                 Event::Enable => {
+                    // Nothing of the configuration before this one reaches the new one.
+                    self.wire.forget();
                     self.configured = true;
                     UsbFunctionEvent::Configured
                 }

@@ -77,11 +77,6 @@
 //! and the played-back node and a request-recording stand-in for the units. The board checks are
 //! `testing/board-runs/E2.md`.
 //!
-//! Not delivered: on a
-//! stream without handles a consumer that leaves and another that comes between two ticks is not
-//! seen, so jobs of the second naming buffers held from the first complete into nothing (the
-//! producer's end can't say which consumer a held buffer was taken under unless it has handles).
-//!
 //! Provenance: ported from the dev branch (`crates/lemnos-drivers-rga`).
 
 #![forbid(unsafe_code)]

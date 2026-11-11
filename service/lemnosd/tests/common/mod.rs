@@ -90,6 +90,21 @@ pub fn start_with_buffers(devices: &str, buffers: Arc<dyn BufferSource>) -> Runn
 }
 
 fn start_on(devices: &str, buffers: Option<Arc<dyn BufferSource>>) -> Running {
+    start_board(
+        devices,
+        vec![entry::<FakeCounter>()],
+        SimBoard::new(),
+        buffers,
+    )
+}
+
+/// A service running `drivers` on `sim`, whose parts the caller keeps a hand on.
+pub fn start_board(
+    devices: &str,
+    drivers: Vec<lemnos_host::DriverEntry>,
+    sim: SimBoard,
+    buffers: Option<Arc<dyn BufferSource>>,
+) -> Running {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "lemnosd-test-{}-{}",
@@ -104,8 +119,8 @@ fn start_on(devices: &str, buffers: Option<Arc<dyn BufferSource>>) -> Running {
         socket: socket.clone(),
         name: "test-host".to_string(),
         board: parse(&text).unwrap(),
-        drivers: vec![entry::<FakeCounter>()],
-        backend: Box::new(SimBoard::new()),
+        drivers,
+        backend: Box::new(sim),
         options: Options {
             call_deadline: Duration::from_millis(200),
             ..Options::default()

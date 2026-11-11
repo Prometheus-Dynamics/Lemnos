@@ -74,8 +74,8 @@ impl Drop for Tree {
 }
 
 impl Provider for Tree {
-    fn provided(&self, _need: &str) -> bool {
-        true
+    fn provided(&self, need: &str) -> bool {
+        need == "function"
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
