@@ -90,11 +90,21 @@ On Linux (`lemnosd` with no `--sim`):
 | `usb:VVVV:PPPP` | The USB device with this vendor and product, in hex. Refused when more than one fits |
 | `udc:NAME` | This board as a USB device, through the controller of that name under `/sys/class/udc` |
 | `dma:BLOCK` | DMA memory for a block bound to the kernel module, by the block's device name |
+| `regs:BLOCK` or `regs:BLOCK/N` | Register region `N` (0 when left out) of a block bound to the module, mapped |
+| `irq:BLOCK` or `irq:BLOCK/N` | Interrupt `N` (0 when left out) of a block bound to the module |
+| `clocks:BLOCK/NAME,NAME` | Clocks of a block bound to the module, by the names its firmware description gives them; index 0 is the first. `clocks:BLOCK` alone is the block's only clock |
+| `resets:BLOCK/NAME,NAME` | Reset lines of a block bound to the module, named the same way |
 
 When the [kernel module](kernel-module.md) is loaded, the daemon opens it and reaches I2C adapters,
 GPIO lines, PWM channels and the SPI devices bound to the module through it, under claims the
-kernel enforces. Without the module the same names go through the stock interfaces. `dma:` names
-exist only with the module: there is no other source of DMA memory, and nothing stands in for it.
+kernel enforces. Without the module the same names go through the stock interfaces.
+
+A block's own resources (`dma:`, `regs:`, `irq:`, `clocks:`, `resets:`) exist only with the module:
+there is no other source of them, and nothing stands in. Each is refused with `NOT_SUPPORTED`
+without the module and `NO_DEVICE` when the module has no block of that name bound. Register
+regions are mapped only when the module says the block's registers may be (its DMA is confined by
+an IOMMU); otherwise they are refused with `ACCESS`. A clock or reset name the block doesn't have is
+refused when the device binds. Each is held by one device at a time.
 
 On the simulated board (`lemnosd --sim`) there are no buses. A device that needs one is listed as
 `retrying`. Tests that need a simulated bus build a `SimBoard` in code and add named resources to

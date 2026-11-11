@@ -1,20 +1,26 @@
 //! The hardware traits through the Lemnos kernel module, for the buses it serves, and DMA
-//! memory for the blocks bound to it.
+//! memory, register windows, interrupts, clocks and resets for the blocks bound to it.
 //!
 //! Claims here belong to the kernel: a holder that dies lets go, and a name someone holds is
 //! refused. `LinuxBoard` chooses per bus, so anything the module doesn't serve stays on the stock
-//! path. DMA memory has no stock path: only the module gives it (see [`dma`]).
+//! path. A block's resources have no stock path: only the module gives them (see [`block`]).
 
+pub(crate) mod block;
 pub(crate) mod dma;
+mod events;
 mod gpio;
 mod i2c;
+mod interrupt;
+mod power;
 mod pwm;
+mod registers;
 mod spi;
 
 use std::fmt::{self, Write};
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,12 +29,21 @@ use lemnos_linux_sys::module as sys;
 pub use dma::ModuleDma;
 pub(crate) use gpio::ModuleLine;
 pub(crate) use i2c::ModuleI2c;
+pub use interrupt::ModuleInterrupt;
+pub use power::{ModuleClocks, ModuleReset};
 pub(crate) use pwm::ModulePwm;
+pub use registers::ModuleRegisters;
 pub(crate) use spi::ModuleSpi;
 
-/// The open control node. It has one opener at a time, so a process holds one and shares it.
+/// The open control node. It has one opener at a time, so a process holds one and shares it,
+/// with the interrupts read from it (see [`events`]).
 #[derive(Clone)]
-pub(crate) struct Node(Arc<OwnedFd>);
+pub(crate) struct Node(Arc<Inner>);
+
+struct Inner {
+    fd: OwnedFd,
+    events: events::Events,
+}
 
 /// A resource name, built without allocating.
 struct Name {
@@ -49,13 +64,26 @@ impl Write for Name {
 }
 
 impl Node {
+    /// Opens the node non-blocking: reading it is only the event stream, which [`events`] reads
+    /// after `poll` says there is something, and nothing else on it looks at the flag.
     pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        Ok(Self(Arc::new(file.into())))
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        Ok(Self(Arc::new(Inner {
+            fd: file.into(),
+            events: events::Events::default(),
+        })))
     }
 
     fn fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
+        self.0.fd.as_fd()
+    }
+
+    fn events(&self) -> &events::Events {
+        &self.0.events
     }
 
     fn claim(&self, resource: fmt::Arguments<'_>) -> io::Result<OwnedFd> {

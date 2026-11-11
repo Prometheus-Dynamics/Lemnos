@@ -97,6 +97,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`C7.md`](../testing/board-runs/C7.md) | The daemon on the module route: its claims, the fall-back to stock |
 | [`C8.md`](../testing/board-runs/C8.md) | The whole system on the module route against the stock route, timed |
 | [`B23.md`](../testing/board-runs/B23.md) | DMA memory for a block bound to the module |
+| [`G4.md`](../testing/board-runs/G4.md) | A block's registers, interrupts, clocks and resets through the backend, on a real block |
 
 ## USB
 

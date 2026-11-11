@@ -1,6 +1,6 @@
 //! The Lemnos kernel module's control node, `/dev/lemnos`: claims, and the buses, lines and
-//! channels that belong to them, and a bound block's DMA memory. The interface is
-//! `kernel/lemnos.h`.
+//! channels that belong to them, and a bound block's DMA memory, register regions, interrupts,
+//! clocks and resets. The interface is `kernel/lemnos.h`.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -245,6 +245,103 @@ struct ReleaseRaw {
     handle: u32,
 }
 
+/// `struct lemnos_region`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RegionRaw {
+    block: u32,
+    index: u32,
+    start: u64,
+    size: u64,
+    offset: u64,
+}
+
+/// `struct lemnos_irq`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IrqRaw {
+    block: u32,
+    index: u32,
+}
+
+/// `struct lemnos_power`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PowerRaw {
+    block: u32,
+    kind: u32,
+    op: u32,
+    handle: u32,
+    name: [u8; POWER_NAME],
+    value: u64,
+    value2: u64,
+}
+
+/// `struct lemnos_event`: what reading the control node gives.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Event {
+    /// The block it is about.
+    pub block: u32,
+    /// For an interrupt, which of the block's.
+    pub index: u32,
+    /// For an interrupt, how many times it has fired since the block was bound; for the other
+    /// kinds, their own sequence number.
+    pub count: u32,
+    /// `EVENT_*`.
+    pub kind: u32,
+    /// `ktime_get_ns()` when it happened.
+    pub ns: u64,
+    /// What the kind carries.
+    pub value: i64,
+}
+
+/// `LEMNOS_EVENT_IRQ`.
+pub const EVENT_IRQ: u32 = 0;
+/// `LEMNOS_EVENT_BLOCK_BOUND`.
+pub const EVENT_BLOCK_BOUND: u32 = 1;
+/// `LEMNOS_EVENT_BLOCK_UNBOUND`.
+pub const EVENT_BLOCK_UNBOUND: u32 = 2;
+
+/// `LEMNOS_INFO_MMIO_MAPPABLE`: the block's registers may be mapped.
+pub const INFO_MMIO_MAPPABLE: u32 = 1 << 0;
+
+/// `LEMNOS_POWER_NAME`: room for a clock's or reset's name and its NUL.
+pub const POWER_NAME: usize = 32;
+
+/// `LEMNOS_POWER_*`: what a [`power`] request is about and what it does.
+pub mod power {
+    /// A clock.
+    pub const CLOCK: u32 = 0;
+    /// A supply.
+    pub const SUPPLY: u32 = 1;
+    /// A reset line.
+    pub const RESET: u32 = 2;
+    /// A clock or supply on; a reset deasserted.
+    pub const ENABLE: u32 = 0;
+    /// A clock or supply off; a reset asserted.
+    pub const DISABLE: u32 = 1;
+    /// The value is 1 for on, or for a reset asserted.
+    pub const STATUS: u32 = 2;
+    /// The value is hertz, or microvolts.
+    pub const GET: u32 = 3;
+    /// Sets hertz, or minimum and maximum microvolts; the value is what it settled on.
+    pub const SET: u32 = 4;
+    /// A reset asserted and deasserted.
+    pub const PULSE: u32 = 5;
+}
+
+/// One register region of a block (`LEMNOS_IOC_REGION`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region {
+    /// Its physical address.
+    pub start: u64,
+    /// Bytes.
+    pub size: u64,
+    /// What to give `mmap` on the control node to map it.
+    pub offset: u64,
+}
+
 /// `LEMNOS_ABI`: the interface these structures are.
 pub const ABI: u32 = 1;
 
@@ -301,6 +398,10 @@ pod!(
     AllocRaw,
     ImportRaw,
     ReleaseRaw,
+    RegionRaw,
+    IrqRaw,
+    PowerRaw,
+    Event,
 );
 
 const CLAIM: Ioctl<Claim> = Ioctl::new(iowr::<Claim>(TYPE, 0xce), "LEMNOS_IOC_CLAIM");
@@ -324,6 +425,10 @@ const INFO: Ioctl<InfoRaw> = Ioctl::new(iowr::<InfoRaw>(TYPE, 0xd0), "LEMNOS_IOC
 const ALLOC: Ioctl<AllocRaw> = Ioctl::new(iowr::<AllocRaw>(TYPE, 0xd2), "LEMNOS_IOC_ALLOC");
 const IMPORT: Ioctl<ImportRaw> = Ioctl::new(iowr::<ImportRaw>(TYPE, 0xd3), "LEMNOS_IOC_IMPORT");
 const RELEASE: Ioctl<ReleaseRaw> = Ioctl::new(iow::<ReleaseRaw>(TYPE, 0xd4), "LEMNOS_IOC_RELEASE");
+const REGION: Ioctl<RegionRaw> = Ioctl::new(iowr::<RegionRaw>(TYPE, 0xd1), "LEMNOS_IOC_REGION");
+const IRQ_ENABLE: Ioctl<IrqRaw> = Ioctl::new(iow::<IrqRaw>(TYPE, 0xd5), "LEMNOS_IOC_IRQ_ENABLE");
+const POWER: Ioctl<PowerRaw> = Ioctl::new(iowr::<PowerRaw>(TYPE, 0xd6), "LEMNOS_IOC_POWER");
+const TEST_IRQ: Ioctl<IrqRaw> = Ioctl::new(iow::<IrqRaw>(TYPE, 0xdf), "LEMNOS_IOC_TEST_IRQ");
 
 // These carry pointers the kernel follows, so they aren't `Ioctl`s.
 const I2C_TRANSFER: u32 = iow::<I2cTransfer>(TYPE, 0xa8);
@@ -696,6 +801,83 @@ pub fn release(node: BorrowedFd<'_>, block: u32, handle: u32) -> io::Result<()> 
     Ok(())
 }
 
+/// Register region `index` of block `block`: where it is and the `mmap` offset that maps it.
+/// `EINVAL` past the block's regions, `ENODEV` once it is unbound.
+pub fn region(node: BorrowedFd<'_>, block: u32, index: u32) -> io::Result<Region> {
+    let mut arg: RegionRaw = zeroed();
+    arg.block = block;
+    arg.index = index;
+    REGION.call(node, &mut arg)?;
+    Ok(Region {
+        start: arg.start,
+        size: arg.size,
+        offset: arg.offset,
+    })
+}
+
+/// Unmasks interrupt `index` of block `block`, after its cause was cleared. It masks itself again
+/// when it fires.
+pub fn irq_enable(node: BorrowedFd<'_>, block: u32, index: u32) -> io::Result<()> {
+    let mut arg = IrqRaw { block, index };
+    IRQ_ENABLE.call(node, &mut arg)?;
+    Ok(())
+}
+
+/// Sets interrupt `index` of block `block` pending at its controller. Test only: the module
+/// refuses it (`EPERM`) unless it was loaded with `test_irq_inject`.
+pub fn test_irq(node: BorrowedFd<'_>, block: u32, index: u32) -> io::Result<()> {
+    let mut arg = IrqRaw { block, index };
+    TEST_IRQ.call(node, &mut arg)?;
+    Ok(())
+}
+
+/// One `LEMNOS_IOC_POWER` request: `op` ([`power`]) on the clock, supply or reset of kind `kind`
+/// named `name` (empty for a block's only clock or reset), with `value` and `value2` in. Returns
+/// the value the module answers.
+pub fn power(
+    node: BorrowedFd<'_>,
+    block: u32,
+    (kind, op): (u32, u32),
+    name: &str,
+    (value, value2): (u64, u64),
+) -> io::Result<u64> {
+    let bytes = name.as_bytes();
+    if bytes.len() >= POWER_NAME || bytes.contains(&0) {
+        return Err(invalid());
+    }
+    let mut arg: PowerRaw = zeroed();
+    arg.block = block;
+    arg.kind = kind;
+    arg.op = op;
+    arg.name[..bytes.len()].copy_from_slice(bytes);
+    arg.value = value;
+    arg.value2 = value2;
+    POWER.call(node, &mut arg)?;
+    Ok(arg.value)
+}
+
+/// Reads what events are waiting on the control node into `out`, at most `out.len()`, and returns
+/// how many. On a node opened non-blocking, `WouldBlock` when there are none. Allocates nothing.
+pub fn read_events(node: BorrowedFd<'_>, out: &mut [Event]) -> io::Result<usize> {
+    if out.is_empty() {
+        return Err(invalid());
+    }
+    let bytes = size_of_val(out);
+    loop {
+        // SAFETY: `out` is `bytes` writable bytes for the call, and `Event` is plain data every
+        // bit pattern of which is a value, so whatever the kernel writes there is one.
+        let n = unsafe { libc::read(node.as_raw_fd(), out.as_mut_ptr().cast(), bytes) };
+        if n >= 0 {
+            // The module writes whole events only.
+            return Ok(n as usize / size_of::<Event>());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,6 +902,10 @@ mod tests {
         assert_eq!(size_of::<AllocRaw>(), 32);
         assert_eq!(size_of::<ImportRaw>(), 32);
         assert_eq!(size_of::<ReleaseRaw>(), 8);
+        assert_eq!(size_of::<RegionRaw>(), 32);
+        assert_eq!(size_of::<IrqRaw>(), 8);
+        assert_eq!(size_of::<PowerRaw>(), 64);
+        assert_eq!(size_of::<Event>(), 32);
     }
 
     #[test]
@@ -738,6 +924,22 @@ mod tests {
         assert_eq!(offset_of!(ImportRaw, size), 16);
         assert_eq!(offset_of!(ImportRaw, handle), 24);
         assert_eq!(offset_of!(ReleaseRaw, handle), 4);
+        assert_eq!(offset_of!(RegionRaw, index), 4);
+        assert_eq!(offset_of!(RegionRaw, start), 8);
+        assert_eq!(offset_of!(RegionRaw, size), 16);
+        assert_eq!(offset_of!(RegionRaw, offset), 24);
+        assert_eq!(offset_of!(IrqRaw, index), 4);
+        assert_eq!(offset_of!(PowerRaw, kind), 4);
+        assert_eq!(offset_of!(PowerRaw, op), 8);
+        assert_eq!(offset_of!(PowerRaw, handle), 12);
+        assert_eq!(offset_of!(PowerRaw, name), 16);
+        assert_eq!(offset_of!(PowerRaw, value), 48);
+        assert_eq!(offset_of!(PowerRaw, value2), 56);
+        assert_eq!(offset_of!(Event, index), 4);
+        assert_eq!(offset_of!(Event, count), 8);
+        assert_eq!(offset_of!(Event, kind), 12);
+        assert_eq!(offset_of!(Event, ns), 16);
+        assert_eq!(offset_of!(Event, value), 24);
     }
 
     /// The block requests as `kernel/lemnos.h` defines them, read from the header itself, so a
@@ -828,6 +1030,81 @@ mod tests {
             ]
         );
         assert_eq!(fields("lemnos_release"), ["__u32 block", "__u32 handle"]);
+        assert!(defined("LEMNOS_INFO_MMIO_MAPPABLE", "(1u << 0)"));
+        assert!(defined("LEMNOS_POWER_NAME", "32"));
+        assert!(defined(
+            "LEMNOS_IOC_REGION",
+            "_IOWR('L', 0xd1, struct lemnos_region)"
+        ));
+        assert!(defined(
+            "LEMNOS_IOC_IRQ_ENABLE",
+            "_IOW('L', 0xd5, struct lemnos_irq)"
+        ));
+        assert!(defined(
+            "LEMNOS_IOC_POWER",
+            "_IOWR('L', 0xd6, struct lemnos_power)"
+        ));
+        assert!(defined(
+            "LEMNOS_IOC_TEST_IRQ",
+            "_IOW('L', 0xdf, struct lemnos_irq)"
+        ));
+        for (name, value) in [
+            ("LEMNOS_EVENT_IRQ", EVENT_IRQ),
+            ("LEMNOS_EVENT_BLOCK_BOUND", EVENT_BLOCK_BOUND),
+            ("LEMNOS_EVENT_BLOCK_UNBOUND", EVENT_BLOCK_UNBOUND),
+            ("LEMNOS_POWER_CLOCK", power::CLOCK),
+            ("LEMNOS_POWER_SUPPLY", power::SUPPLY),
+            ("LEMNOS_POWER_RESET", power::RESET),
+            ("LEMNOS_POWER_ENABLE", power::ENABLE),
+            ("LEMNOS_POWER_DISABLE", power::DISABLE),
+            ("LEMNOS_POWER_STATUS", power::STATUS),
+            ("LEMNOS_POWER_GET", power::GET),
+            ("LEMNOS_POWER_SET", power::SET),
+            ("LEMNOS_POWER_PULSE", power::PULSE),
+        ] {
+            // The header follows a value with a tab and a comment on some of these.
+            let found = header.lines().any(|line| {
+                let mut words = line.split_whitespace();
+                words.next() == Some("#define")
+                    && words.next() == Some(name)
+                    && words.next() == Some(value.to_string().as_str())
+            });
+            assert!(found, "{name} = {value}");
+        }
+        assert_eq!(
+            fields("lemnos_region"),
+            [
+                "__u32 block",
+                "__u32 index",
+                "__u64 start",
+                "__u64 size",
+                "__u64 offset"
+            ]
+        );
+        assert_eq!(fields("lemnos_irq"), ["__u32 block", "__u32 index"]);
+        assert_eq!(
+            fields("lemnos_event"),
+            [
+                "__u32 block",
+                "__u32 index",
+                "__u32 count",
+                "__u32 kind",
+                "__u64 ns",
+                "__s64 value"
+            ]
+        );
+        assert_eq!(
+            fields("lemnos_power"),
+            [
+                "__u32 block",
+                "__u32 kind",
+                "__u32 op",
+                "__u32 handle",
+                "char name[LEMNOS_POWER_NAME]",
+                "__u64 value",
+                "__u64 value2"
+            ]
+        );
     }
 
     #[test]
@@ -851,6 +1128,24 @@ mod tests {
         assert_eq!(ALLOC.nr(), 0xc020_4cd2);
         assert_eq!(IMPORT.nr(), 0xc020_4cd3);
         assert_eq!(RELEASE.nr(), 0x4008_4cd4);
+        assert_eq!(REGION.nr(), 0xc020_4cd1);
+        assert_eq!(IRQ_ENABLE.nr(), 0x4008_4cd5);
+        assert_eq!(POWER.nr(), 0xc040_4cd6);
+        assert_eq!(TEST_IRQ.nr(), 0x4008_4cdf);
+    }
+
+    #[test]
+    fn power_names_that_cant_be_one_are_refused_before_the_kernel() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let fd = std::os::fd::AsFd::as_fd(&file);
+        for name in ["a\0b", &"x".repeat(POWER_NAME)] {
+            let error = power(fd, 1, (power::CLOCK, power::STATUS), name, (0, 0)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+        }
+        assert_eq!(
+            read_events(fd, &mut []).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]
