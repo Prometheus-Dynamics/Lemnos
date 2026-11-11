@@ -124,7 +124,7 @@ crosses the socket.
 |---|---|
 | ring | a shared mapping of `ring_bytes`, read and written by both sides |
 | doorbell | an eventfd. The host adds 1 after each frame. Waiting on it is optional |
-| buffers | `buffers` buffers, one every `stride` bytes from offset 0. Map it read-only |
+| buffers | `buffers` buffers, one every `stride` bytes from offset 0. Map it read-only, or writable for a stream the consumer fills (below) |
 
 ### Streams whose buffers are dma-bufs
 
@@ -158,6 +158,36 @@ dma-buf (`fstatfs` gives `DMA_BUF_MAGIC`), or it is sealed against shrinking. Th
 and every check below are the same as for a stream of shared memory; only where buffer `n`'s bytes
 are differs. The same memory is what the driver's hardware is given, so a frame is in the buffer
 with no copy.
+
+### Streams the consumer fills
+
+On some streams the consumer puts bytes in buffers for the producer: a job's input image, a
+configuration, a program. Which streams those are is the device's contract's to say, and the
+consumer learns a stream's role from the contract method that named it:
+
+| Contract | The consumer fills | The producer alone fills |
+|---|---|---|
+| `image.convert/1`, `image.scaler/1`, `image.blend/1` | the job stream (a job's input images) | |
+| `npu/1` | the job stream (programs, tensors) | |
+| `camera.isp/1` | the config stream; the input stream | the statistics and output streams |
+| `camera.receiver/1`, `camera.frames/1` | | the frame stream |
+
+A consumer maps the buffers of a stream it fills writable, and of any other read-only. Nothing in
+the request or the answer differs: the buffers' memory is made for one attachment, only that
+consumer and the producer ever see it, and the producer takes nothing in it on trust (it reads a
+buffer once, into memory of its own, and checks the copy). `lemnos-client` does this with
+`open_stream_writable` and `FrameStream::write`.
+
+When a buffer is the consumer's to write is the contract's rule too. In every contract above: the
+consumer writes a buffer before it posts the job that names it, and leaves it alone until that
+job's completion has arrived; a buffer that arrived as a frame is the consumer's until it returns
+it. A write at any other time races the producer or its hardware, and costs the consumer its own
+result and nothing else.
+
+On a stream of dma-bufs a device shares the memory, so the consumer tells the kernel around each
+access by the processor (`DMA_BUF_IOCTL_SYNC`): start and end of a write around the copy, and
+start and end of a read from when a frame is taken to when it is returned. The host does the same
+around its own accesses.
 
 `stride` is `buffer_bytes` rounded up to a multiple of 4096. The ring is 64-bit words, little-endian
 on every platform this is built for:
