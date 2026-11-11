@@ -122,6 +122,8 @@ pub enum Fault {
     Bus(ErrorKind),
     /// The chip ID register did not read [`CHIP_ID`].
     WrongChip,
+    /// The chip is powered down, and isn't Lemnos's to power up.
+    PoweredDown,
 }
 
 impl From<RegisterError<ErrorKind>> for Fault {
@@ -135,6 +137,7 @@ impl Fault {
         match self {
             Self::Bus(kind) => status_of(kind),
             Self::WrongChip => Status::NOT_SUPPORTED,
+            Self::PoweredDown => Status::AGAIN,
         }
     }
 
@@ -142,6 +145,7 @@ impl Fault {
         match self {
             Self::Bus(_) => "bus error",
             Self::WrongChip => "chip ID mismatch",
+            Self::PoweredDown => "powered down by its owner",
         }
     }
 }
@@ -301,6 +305,27 @@ pub fn power_on(bus: &mut I2c, address: u8) -> Result<(), Fault> {
 /// `settings`.
 pub fn start_up(bus: &mut I2c, address: u8, settings: Settings) -> Result<Trim, Fault> {
     let mut regs = I2cRegisters::new(bus, address, AddressWidth::Bits8);
+    let trim = identify(&mut regs)?;
+    let (rep_xy, rep_z) = settings.preset.registers();
+    regs.write8(REG_REP_XY, rep_xy)?;
+    regs.write8(REG_REP_Z, rep_z)?;
+    regs.write8(REG_OP_MODE, settings.op_mode())?;
+    Ok(trim)
+}
+
+/// For a chip the operating system's driver runs: checks that it is powered and is the chip,
+/// and reads its factory trim, with nothing written but register addresses. It measures as its
+/// owner set it up.
+pub fn attach(bus: &mut I2c, address: u8) -> Result<Trim, Fault> {
+    let mut regs = I2cRegisters::new(bus, address, AddressWidth::Bits8);
+    if regs.read8(REG_POWER)? & 0x01 == 0 {
+        return Err(Fault::PoweredDown);
+    }
+    identify(&mut regs)
+}
+
+/// Checks the chip ID and reads the factory trim.
+fn identify(regs: &mut I2cRegisters<&mut I2c>) -> Result<Trim, Fault> {
     if regs.read8(REG_CHIP_ID)? != CHIP_ID {
         return Err(Fault::WrongChip);
     }
@@ -308,10 +333,6 @@ pub fn start_up(bus: &mut I2c, address: u8, settings: Settings) -> Result<Trim, 
     regs.read_burst(REG_TRIM_X1, &mut x1y1)?;
     regs.read_burst(REG_TRIM_Z4, &mut z4x2y2)?;
     regs.read_burst(REG_TRIM_Z2, &mut rest)?;
-    let (rep_xy, rep_z) = settings.preset.registers();
-    regs.write8(REG_REP_XY, rep_xy)?;
-    regs.write8(REG_REP_Z, rep_z)?;
-    regs.write8(REG_OP_MODE, settings.op_mode())?;
     Ok(Trim::from_registers(x1y1, z4x2y2, rest))
 }
 

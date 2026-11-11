@@ -171,6 +171,8 @@ pub(crate) struct Setup {
     len: usize,
     current_lsb_na: u32,
     shunt_lsb_nv: u32,
+    /// The external shunt, for a chip calibrated by someone else (0 for the INA260).
+    shunt_micro_ohms: u32,
 }
 
 /// INA226 config: 16-sample averaging, 1.1 ms conversions, continuous shunt and bus.
@@ -254,6 +256,11 @@ impl Setup {
             len,
             current_lsb_na,
             shunt_lsb_nv,
+            shunt_micro_ohms: if model == Model::Ina260 {
+                0
+            } else {
+                calibration.shunt_micro_ohms
+            },
         })
     }
 
@@ -302,6 +309,38 @@ impl Setup {
                 die_temperature_mc: None,
             },
         }
+    }
+
+    /// A reading of a chip someone else set up, whose shunt range is `config`'s (the INA238's
+    /// CONFIG register; ignored for the others). Its current and power registers are scaled by a
+    /// calibration this driver didn't write, so for an external shunt both come from the shunt
+    /// voltage and the board's shunt instead; the INA260's are fixed and read as they are.
+    pub(crate) fn reading_of_owned(&self, raw: &[u32], config: u16) -> ReadingFixed {
+        let mut reading = self.reading_fixed(raw);
+        if self.model == Model::Ina260 || self.shunt_micro_ohms == 0 {
+            return reading;
+        }
+        let shunt_lsb_nv: i64 = match self.model {
+            Model::Ina238 if config & INA238_ADCRANGE != 0 => 1_250,
+            Model::Ina238 => 5_000,
+            _ => 2_500,
+        };
+        let shunt_nv = i64::from(raw[0] as u16 as i16) * shunt_lsb_nv;
+        // nV / µΩ is mA, so ×10^6 for nA.
+        let magnitude = div_u64(
+            shunt_nv.unsigned_abs() * 1_000_000,
+            u64::from(self.shunt_micro_ohms),
+        ) as i64;
+        let current_na = if shunt_nv < 0 { -magnitude } else { magnitude };
+        reading.shunt_voltage_nv = shunt_nv as i32;
+        reading.current_na = current_na;
+        // µV × µA is pW.
+        reading.power_nw = div_u64(
+            u64::from(reading.bus_voltage_uv)
+                .saturating_mul(div_u64(current_na.unsigned_abs(), 1_000)),
+            1_000,
+        );
+        reading
     }
 
     pub(crate) fn check_ids<E>(&self, manufacturer: u16, device: u16) -> Result<(), Error<E>> {
@@ -403,6 +442,9 @@ pub struct Ina {
     model: Model,
     address: u8,
     pub(crate) setup: Setup,
+    /// Set by [`attach`](Self::attach): the chip is someone else's, read with the shunt range
+    /// it was found in (the INA238's CONFIG register).
+    owned: Option<u16>,
 }
 
 impl Ina {
@@ -413,6 +455,7 @@ impl Ina {
             model,
             address,
             setup: Setup::new(model, calibration)?,
+            owned: None,
         })
     }
 
@@ -444,6 +487,23 @@ impl Ina {
         Ok(())
     }
 
+    /// Verifies a chip the operating system's driver runs, and reads the one setting the
+    /// readings' scale depends on (the INA238's shunt range), with nothing written but register
+    /// addresses: its configuration and calibration stay the owner's. Later reads use what it
+    /// found.
+    pub fn attach<B: I2c>(&mut self, bus: &mut B) -> Result<(), Error<B::Error>> {
+        let (manufacturer, device) = self.ids(bus)?;
+        self.setup.check_ids(manufacturer, device)?;
+        let config = match self.model {
+            Model::Ina238 => {
+                I2cRegisters::new(bus, self.address, AddressWidth::Bits8).read(0x00, 2)? as u16
+            }
+            Model::Ina226 | Model::Ina260 => 0,
+        };
+        self.owned = Some(config);
+        Ok(())
+    }
+
     /// Reads the latest conversion in integer units, in one I2C transaction.
     pub fn read_fixed<B: I2c>(&self, bus: &mut B) -> Result<ReadingFixed, Error<B::Error>> {
         let registers = self.setup.registers();
@@ -461,7 +521,10 @@ impl Ina {
                 ))
             })?;
         let raw = poll_decode(registers, &data);
-        Ok(self.setup.reading_fixed(&raw))
+        Ok(match self.owned {
+            Some(config) => self.setup.reading_of_owned(&raw, config),
+            None => self.setup.reading_fixed(&raw),
+        })
     }
 }
 

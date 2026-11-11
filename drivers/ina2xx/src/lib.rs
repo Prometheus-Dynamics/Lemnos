@@ -18,6 +18,15 @@
 //! `Degraded`. The driver never gives up and never switches itself off. It makes
 //! no retries of its own, so pacing between attempts (capped at 8 s) is the
 //! host's job, done by how often it reads.
+//!
+//! On a device the board gives to the host (`owner = "host"`) the operating
+//! system's driver runs the chip, and this one only reads it: the first read
+//! verifies the chip and reads its shunt range (INA238), writing nothing but
+//! register addresses, so its configuration and calibration stay the owner's.
+//! Current and power then come from the shunt voltage and the board's
+//! `shunt_*` setting rather than from the chip's calibrated registers, which
+//! are scaled by a calibration this driver didn't choose. The INA260's are
+//! fixed, and read as they are.
 
 #![no_std]
 
@@ -29,8 +38,8 @@ mod tests;
 use chip::{Calibration, DEFAULT_ADDRESS, Model};
 use lemnos_contract_power_monitor::{PowerMonitor, PowerReading};
 use lemnos_core::{
-    Config, Description, Health, I2c, Item, Lifecycle, MethodId, Result, Status, Unit, driver,
-    status_of,
+    AddressWidth, Config, Description, Health, I2c, Item, Lifecycle, MethodId, Result, Status,
+    Unit, driver, status_of,
 };
 use lemnos_hal::HalError;
 
@@ -45,18 +54,23 @@ pub struct Ina2xx {
     bus: I2c,
     chip: chip::Ina,
     verified: bool,
+    /// The operating system's driver runs the chip: read it, never set it up.
+    host_owned: bool,
 }
 
 impl Lifecycle for Ina2xx {
     type Needs = Ina2xxNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
+    // A one-byte register pointer moves the chip's pointer and nothing else.
+    const I2C_REGISTER_ADDRESS: Option<AddressWidth> = Some(AddressWidth::Bits8);
 
     fn start(needs: Ina2xxNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
             bus: needs.bus,
             chip: chip_from_config(cfg)?,
             verified: false,
+            host_owned: cfg.host_owned(),
         })
     }
 
@@ -83,9 +97,12 @@ impl Lifecycle for Ina2xx {
 impl PowerMonitor for Ina2xx {
     fn read(&mut self) -> Result<PowerReading> {
         if !self.verified {
-            self.chip
-                .init(&mut self.bus)
-                .map_err(|error| status_of(error.kind()))?;
+            let verified = if self.host_owned {
+                self.chip.attach(&mut self.bus)
+            } else {
+                self.chip.init(&mut self.bus)
+            };
+            verified.map_err(|error| status_of(error.kind()))?;
             self.verified = true;
         }
         match self.chip.read_fixed(&mut self.bus) {

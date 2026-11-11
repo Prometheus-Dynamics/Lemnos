@@ -17,6 +17,11 @@
 //! the host's clock passes it (the host ticks the driver at the time it asks for). Then it reads
 //! each axis.
 //!
+//! On a device the board gives to the host (`owner = "host"`) the operating system's driver has
+//! started the chip, and this one only reads it: a read checks the identity register and reads
+//! the axes, and the start-up writes and waits are skipped. Nothing is written but register
+//! addresses.
+//!
 //! A wrong identity value is reported as `NOT_SUPPORTED`, with health `Failed`, and the next read
 //! checks again. A bus fault puts the chip back to start-up on the next read. The driver never
 //! gives up and never switches itself off. It makes no retries of its own, so pacing between
@@ -100,12 +105,17 @@ pub struct GenericSensor {
     due: Option<u64>,
     /// Why the chip is not measuring, while it is not.
     fault: &'static str,
+    /// The operating system's driver runs the chip: read it, never start it.
+    host_owned: bool,
 }
 
 impl Lifecycle for GenericSensor {
     type Needs = GenericSensorNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
+    // Every register a description names is one byte wide, and its address moves the chip's
+    // pointer and nothing else.
+    const I2C_REGISTER_ADDRESS: Option<AddressWidth> = Some(AddressWidth::Bits8);
 
     const TICKS: bool = true;
 
@@ -119,6 +129,7 @@ impl Lifecycle for GenericSensor {
             now_ns: 0,
             due: None,
             fault: "not started",
+            host_owned: cfg.host_owned(),
         })
     }
 
@@ -186,6 +197,7 @@ impl GenericSensor {
             next,
             due,
             now_ns,
+            host_owned,
             ..
         } = self;
         let mut regs = I2cRegisters::new(bus, *address, AddressWidth::Bits8);
@@ -196,6 +208,10 @@ impl GenericSensor {
                 if found != u32::from(expected) {
                     return Err(Fault::Identity);
                 }
+            }
+            // Its owner started it: there is nothing to write or wait for.
+            if *host_owned {
+                return Ok(true);
             }
         }
         while *next < chip.steps().len() {

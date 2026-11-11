@@ -2,8 +2,8 @@
 //! drivers that write when they bind and when they tick, bound to devices the board gives to
 //! the host, beside the same drivers on devices that are Lemnos's.
 //!
-//! Nothing here is real hardware: a fake sysfs tree, the simulated board's line and I2C bus,
-//! and a plain file standing where a watchdog's node would be.
+//! Nothing here is real hardware: a fake sysfs tree, the simulated board's line, and a plain
+//! file standing where a watchdog's node would be.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lemnos_core::{Config, Lifecycle, MethodId, Result, Status, StreamHandle, contract, driver};
-use lemnos_driver_bmm150::Bmm150;
 use lemnos_driver_fan_control::FanController;
 use lemnos_driver_gpio_power_switch::GpioPowerSwitch;
 use lemnos_driver_hw_watchdog::HwWatchdog;
@@ -198,43 +197,7 @@ fn the_same_switch_owned_by_lemnos_drives_its_line() {
     assert_eq!(line.level(), Some(true));
 }
 
-// A driver that writes registers on I2C when it binds.
-
-fn magnetometer(owner: &str) -> (Host, lemnos_sim::SimI2c) {
-    let sim = SimBoard::new();
-    let bus = sim.add_i2c("i2c");
-    bus.attach(0x10, lemnos_sim::Layout::Bytes);
-    let devices =
-        format!("[[devices]]\nid = \"mag\"\ndriver = \"bmm150\"\nbus = \"i2c\"\n{owner}\n");
-    let (host, _) = host_on(sim, &devices, &[entry::<Bmm150>()]);
-    (host, bus)
-}
-
-/// Asks the chip for a sample, which its driver can only give by writing to it first.
-fn sample(host: &Host) -> Result<usize> {
-    let read = MethodId {
-        contract: 0,
-        method: 1,
-    };
-    host.call(0, read, &[], &mut [0; 64])
-}
-
-#[test]
-fn a_host_owned_chip_sees_nothing_on_its_bus() {
-    let (host, bus) = magnetometer("owner = \"host\"");
-    assert_eq!(bus.transactions(), 0);
-    // Whatever the driver tries, when it binds or when it is asked for a sample, needs a
-    // register written, and the bus refuses before anything goes out.
-    let _ = sample(&host);
-    let _ = sample(&host);
-    assert_eq!(bus.transactions(), 0, "refused before the bus");
-    host.shutdown();
-    assert_eq!(bus.transactions(), 0);
-    // The same chip as Lemnos's is written to.
-    let (host, bus) = magnetometer("");
-    let _ = sample(&host);
-    assert!(bus.transactions() > 0);
-}
+// Drivers that read and write registers on I2C: see `host_owned_i2c.rs`.
 
 // A driver that reaches hardware by itself and writes from `tick`.
 

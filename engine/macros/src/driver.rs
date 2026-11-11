@@ -145,6 +145,9 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
             const HOST_OWNED: ::lemnos_core::HostOwned =
                 <Self as ::lemnos_core::Lifecycle>::HOST_OWNED;
 
+            const I2C_REGISTER_ADDRESS: ::core::option::Option<::lemnos_core::AddressWidth> =
+                <Self as ::lemnos_core::Lifecycle>::I2C_REGISTER_ADDRESS;
+
             const TRACKS_CALLERS: bool = <Self as ::lemnos_core::Lifecycle>::TRACKS_CALLERS;
 
             fn caller(&mut self, __caller: ::lemnos_core::CallerId) {

@@ -1,3 +1,5 @@
+extern crate std;
+
 use super::*;
 use crate::chip::{ConfigError, Error, INA226_CONFIG, INA238_ADC_CONFIG, INA238_ADCRANGE};
 use lemnos_core::{ConfigValue, Driver, Reply, Resources};
@@ -438,4 +440,67 @@ fn dispatch_serves_the_reading_and_refuses_other_methods() {
         Driver::dispatch(&mut driver, other, &[], &mut reply),
         Status::NOT_SUPPORTED
     );
+}
+
+// A chip the operating system's driver runs.
+
+fn bind_host_owned(
+    board: &mut SimBoard,
+    entries: &[(&str, ConfigValue<'_>)],
+) -> lemnos_core::Result<Ina2xx> {
+    let mut resources = Resources::new(board, None);
+    Ina2xx::bind(&mut resources, &Config::new(entries).for_host_owned())
+}
+
+/// Every register the simulated chip holds.
+fn words(sim: &SimI2c) -> std::vec::Vec<Option<std::vec::Vec<u8>>> {
+    (0..=255)
+        .map(|register| sim.word(chip::DEFAULT_ADDRESS, register))
+        .collect()
+}
+
+#[test]
+fn a_host_owned_ina238_is_read_in_the_range_its_owner_chose_and_never_written() {
+    // The owner chose the low range and a calibration of its own: -8000 × 1.25 µV = -10 mV,
+    // which over 10 mΩ is -1 A, at 3840 × 3.125 mV = 12 V.
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0x3e, 0x3f, 0x2381);
+    set16(&sim, 0x00, INA238_ADCRANGE);
+    set16(&sim, 0x01, 0x1234);
+    set16(&sim, 0x02, 777);
+    set16(&sim, 0x04, -8000i16 as u16);
+    set16(&sim, 0x05, 3840);
+    set16(&sim, 0x07, 0x7fff);
+    let before = words(&sim);
+    let mut driver = bind_host_owned(&mut board, &INA238).unwrap();
+    for _ in 0..3 {
+        let reading = PowerMonitor::read(&mut driver).unwrap();
+        close(reading.shunt_v, -0.010);
+        close(reading.bus_v, 12.0);
+        close(reading.current_a, -1.0);
+        close(reading.power_w, 12.0);
+    }
+    assert!(driver.verified);
+    assert_eq!(words(&sim), before, "nothing written");
+
+    // Its owner moves it to the wide range: a new verification reads it again.
+    set16(&sim, 0x00, 0);
+    driver.verified = false;
+    close(PowerMonitor::read(&mut driver).unwrap().shunt_v, -0.040);
+}
+
+#[test]
+fn a_host_owned_ina260_reads_as_it_stands() {
+    let (mut board, sim) = board_with_bus();
+    chip_bus(&sim, 0xfe, 0xff, 0x2270);
+    set16(&sim, 0x00, 0x6127);
+    set16(&sim, 0x01, 800);
+    set16(&sim, 0x02, 9600);
+    set16(&sim, 0x03, 1200);
+    let before = words(&sim);
+    let mut driver = bind_host_owned(&mut board, &INA260).unwrap();
+    let reading = PowerMonitor::read(&mut driver).unwrap();
+    close(reading.current_a, 1.0);
+    close(reading.power_w, 12.0);
+    assert_eq!(words(&sim), before);
 }
