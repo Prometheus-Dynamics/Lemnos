@@ -6,17 +6,17 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
     CallerId, ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, Hint,
-    HostClock, I2c, InterruptHandle, ItemKind, Line, LocalCaller, Manifest, MethodId, NeedKind,
-    Provider, Pwm, RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Spi,
-    Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    HostClock, HostOwned, I2c, InterruptHandle, ItemKind, Line, LocalCaller, Manifest, MethodId,
+    NeedKind, Provider, Pwm, RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result,
+    Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 
-use crate::Options;
 use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue, Owner};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
     HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
 };
+use crate::{Options, guest};
 
 /// A bound driver, as the host runs it: [`Driver`] without its type. Every `#[driver]` type is
 /// one. A driver that reaches the host some other way, such as one loaded from a package,
@@ -85,6 +85,7 @@ pub struct DriverEntry {
     factory: Factory,
     ticks: bool,
     tracks_callers: bool,
+    host_owned: HostOwned,
 }
 
 impl DriverEntry {
@@ -106,6 +107,9 @@ impl DriverEntry {
             factory: Factory::Bound(binder),
             ticks,
             tracks_callers,
+            // Nothing says what a driver built elsewhere does to hardware, so it is never
+            // bound to a host-owned device.
+            host_owned: HostOwned::Refused,
         }
     }
 }
@@ -123,6 +127,7 @@ pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
         factory: Factory::BuiltIn(make::<D>),
         ticks: D::TICKS,
         tracks_callers: D::TRACKS_CALLERS,
+        host_owned: D::HOST_OWNED,
     }
 }
 
@@ -247,6 +252,25 @@ struct Inner {
     /// Called when a device's next tick moves earlier.
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
     streams: Streams,
+    /// How a host-owned device's driver calls the devices it uses: reads only.
+    reading: OnceLock<&'static Reading>,
+}
+
+/// The way from a host-owned device's driver to another device. Only a method the other
+/// device's description names as a value gets through, whoever owns that device: a driver that
+/// may change nothing changes nothing through another driver either.
+struct Reading(&'static Inner);
+
+impl Router for Reading {
+    fn call(&self, device: u32, method: MethodId, args: &[u8], reply: &mut [u8]) -> Result<usize> {
+        let slot = self.0.slot(device).ok_or(Status::NOT_FOUND)?;
+        self.0
+            .call_from(&slot, CallerId::LOCAL, true, method, args, reply)
+    }
+
+    fn health(&self, device: u32) -> Health {
+        Router::health(self.0, device)
+    }
 }
 
 /// Runs a board's drivers. Each driver call goes through a lane, with a panic
@@ -516,6 +540,20 @@ impl Inner {
         args: &[u8],
         reply: &mut [u8],
     ) -> Result<usize> {
+        self.call_from(slot, caller, false, method, args, reply)
+    }
+
+    /// Runs a method here. `reads_only` is set for a caller that may change nothing: a
+    /// host-owned device's driver calling a device it uses.
+    fn call_from(
+        &self,
+        slot: &Slot,
+        caller: CallerId,
+        reads_only: bool,
+        method: MethodId,
+        args: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize> {
         if slot.hung.load(Ordering::Acquire) {
             return Err(Status::NO_DEVICE);
         }
@@ -526,7 +564,7 @@ impl Inner {
         let mut writer = Reply::new(reply);
         let ticks = slot.ticks();
         let tracks_callers = slot.tracks_callers();
-        let guest = slot.spec.owner == Owner::Host;
+        let guest = reads_only || slot.spec.owner == Owner::Host;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             if guest && !only_reads(instance.as_ref(), method) {
                 return (NOT_OURS, None);
@@ -667,6 +705,19 @@ impl Inner {
             return;
         };
 
+        // The operating system's driver has this device. A driver that doesn't say how it would
+        // leave the hardware alone is not started on it at all.
+        let guest = slot.spec.owner == Owner::Host;
+        if guest && entry.host_owned == HostOwned::Refused {
+            let reason = format!(
+                "driver {:?} can't be bound to a host-owned device: it doesn't say it would \
+                 only read it",
+                slot.spec.driver
+            );
+            self.record_failed_bind(&slot, &reason);
+            return;
+        }
+
         // A call stuck in the old instance holds its lock until it returns.
         let Ok(mut old) = slot.instance.try_lock() else {
             self.record_failed_bind(&slot, "a call into the old driver is still stuck");
@@ -688,7 +739,11 @@ impl Inner {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_value()))
                 .collect();
-            let config = Config::new(&entries);
+            let config = if guest {
+                Config::new(&entries).for_host_owned()
+            } else {
+                Config::new(&entries)
+            };
             let mut binding = Binding {
                 inner: self,
                 slot: &target,
@@ -827,6 +882,11 @@ struct Binding<'a> {
 }
 
 impl Binding<'_> {
+    /// Whether the device being bound is the operating system's, to be read and not changed.
+    fn guest(&self) -> bool {
+        self.slot.spec.owner == Owner::Host
+    }
+
     fn bus_name(&self, need: &str) -> Result<String> {
         self.slot
             .spec
@@ -855,7 +915,13 @@ macro_rules! buses {
     ($($method:ident -> $handle:ty;)*) => {$(
         fn $method(&mut self, need: &str) -> Result<$handle> {
             let bus = self.bus_name(need)?;
-            lock(&self.inner.backend).$method(&bus)
+            let handle = lock(&self.inner.backend).$method(&bus)?;
+            // A host-owned device gets it with every change refused.
+            Ok(if self.guest() {
+                guest::$method(handle)
+            } else {
+                handle
+            })
         }
     )*};
 }
@@ -884,7 +950,14 @@ impl Provider for Binding<'_> {
             return Err(Status::NO_DEVICE);
         }
         let contract = target.contract_index(tag).ok_or(Status::INVALID_ARGUMENT)?;
-        Ok(LocalCaller::new(self.inner, target.index, contract))
+        let router: &'static dyn Router = match self.inner.reading.get() {
+            Some(reading) if self.guest() => *reading,
+            // Never without one once the host has started; refuse rather than hand a
+            // host-owned device a way to change another.
+            None if self.guest() => return Err(Status::NOT_PERMITTED),
+            _ => self.inner,
+        };
+        Ok(LocalCaller::new(router, target.index, contract))
     }
 
     buses! {
@@ -904,12 +977,17 @@ impl Provider for Binding<'_> {
     }
 
     fn stream(&mut self, need: &str) -> Result<StreamHandle> {
-        if self.slot.spec.streams.contains_key(need) {
-            let endpoint = self.inner.streams.producer(self.slot.index, need)?;
-            return Ok(Box::new(endpoint));
-        }
-        let bus = self.bus_name(need)?;
-        lock(&self.inner.backend).stream(&bus)
+        let endpoint: StreamHandle = if self.slot.spec.streams.contains_key(need) {
+            Box::new(self.inner.streams.producer(self.slot.index, need)?)
+        } else {
+            let bus = self.bus_name(need)?;
+            lock(&self.inner.backend).stream(&bus)?
+        };
+        Ok(if self.guest() {
+            guest::stream(endpoint)
+        } else {
+            endpoint
+        })
     }
 }
 
@@ -1026,7 +1104,10 @@ impl Host {
             drivers: table,
             waker: OnceLock::new(),
             streams,
+            reading: OnceLock::new(),
         }));
+        // Lives as long as `inner` does, which is for good.
+        let _ = inner.reading.set(Box::leak(Box::new(Reading(inner))));
         let host = Self { inner };
         let slots = inner.all();
         for at in order {
@@ -1107,7 +1188,9 @@ impl Host {
 
     /// Runs a method on a device's lane, and returns the reply's length. A device the board
     /// marks `owner = "host"` runs only methods its description names as values; any other call
-    /// is `NOT_PERMITTED`, and so is one from another driver.
+    /// is `NOT_PERMITTED`, and so is one from another driver. Its driver is bound only if it
+    /// says how it leaves such a device alone ([`HostOwned`]), with every need handed to it
+    /// read-only, so what it does from `start` and `tick` can change nothing either.
     pub fn call(
         &self,
         device: u32,

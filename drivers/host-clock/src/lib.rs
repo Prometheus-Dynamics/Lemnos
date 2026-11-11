@@ -53,6 +53,8 @@ pub struct HostClock {
 
 impl Lifecycle for HostClock {
     type Needs = HostClockNeeds;
+    // Reaches the kernel's files itself, and on a host-owned device only reads them.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ReadsOnly;
 
     fn start(_needs: HostClockNeeds, cfg: &Config<'_>) -> Result<Self> {
         let root = PathBuf::from(cfg.str("sys_root").unwrap_or(DEFAULT_SYS_ROOT));

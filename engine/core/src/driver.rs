@@ -37,6 +37,27 @@ pub enum Health {
     Gone(&'static str),
 }
 
+/// What a driver does on a device the board file gives to the host (`owner = "host"`): one the
+/// operating system's own driver owns, which Lemnos may read and must not change.
+///
+/// The host can stop a write only where it stands between the driver and the hardware, which is
+/// at the driver's needs. So it has to know whether that is everywhere the driver reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostOwned {
+    /// The driver says nothing, so it is never bound to a host-owned device: the device stays
+    /// unbound, and says why.
+    #[default]
+    Refused,
+    /// Everything the driver does to hardware goes through its needs. The host hands those to
+    /// a host-owned device as read-only, so no path in the driver can write, from `start`,
+    /// `tick` or a method.
+    ThroughNeeds,
+    /// The driver reaches hardware by itself (a file, a device node), and on a host-owned
+    /// device ([`Config::host_owned`]) opens it for reading only and writes nothing, so the
+    /// operating system refuses a write it would attempt. Its needs are read-only as well.
+    ReadsOnly,
+}
+
 /// Who is calling a driver. Numbers mean nothing except that one caller keeps its own for as long
 /// as it is connected, and they aren't reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,6 +86,8 @@ pub trait Driver: Sized {
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
         None
     }
+    /// What the driver does on a host-owned device. See [`Lifecycle::HOST_OWNED`].
+    const HOST_OWNED: HostOwned = HostOwned::Refused;
     /// Whether the host should say who is calling. See [`Lifecycle::TRACKS_CALLERS`].
     const TRACKS_CALLERS: bool = false;
     /// See [`Lifecycle::caller`].
@@ -96,6 +119,9 @@ pub trait Lifecycle: Sized {
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
         None
     }
+    /// Whether this driver can be bound to a device the operating system owns, and how it
+    /// keeps from changing it. Left as it is, the driver is never bound to one.
+    const HOST_OWNED: HostOwned = HostOwned::Refused;
     /// Set this to `true` for a driver that holds something on a caller's behalf and has to give
     /// it up when that caller goes. Other drivers cost the host nothing.
     const TRACKS_CALLERS: bool = false;

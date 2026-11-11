@@ -131,6 +131,9 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::tick(self, __now_ns)
             }
 
+            const HOST_OWNED: ::lemnos_core::HostOwned =
+                <Self as ::lemnos_core::Lifecycle>::HOST_OWNED;
+
             const TRACKS_CALLERS: bool = <Self as ::lemnos_core::Lifecycle>::TRACKS_CALLERS;
 
             fn caller(&mut self, __caller: ::lemnos_core::CallerId) {

@@ -113,6 +113,8 @@ pub struct FanController {
 
 impl Lifecycle for FanController {
     type Needs = FanControllerNeeds;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     const TICKS: bool = true;
 

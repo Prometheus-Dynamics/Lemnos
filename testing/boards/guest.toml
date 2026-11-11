@@ -1,7 +1,9 @@
 # A guest board: a machine whose operating system already drives its hardware through the stock
 # kernel drivers. Every device is host-owned, so Lemnos binds each driver read-only: a call reaches
 # a driver only when the device's description names the method as a value, and anything that would
-# change the hardware is refused with NOT_PERMITTED. Lemnos drives nothing here.
+# change the hardware is refused with NOT_PERMITTED. What a driver does by itself, when it binds
+# and on its ticks, can change nothing either: its needs are handed to it read-only, and only a
+# driver that says it would only read is bound at all. Lemnos drives nothing here.
 
 format = "lemnos.board"
 schema_version = 1

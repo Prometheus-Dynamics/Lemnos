@@ -67,6 +67,8 @@ pub struct Vcm {
 
 impl Lifecycle for Vcm {
     type Needs = VcmNeeds;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     fn start(needs: VcmNeeds, cfg: &Config<'_>) -> Result<Self> {
         let chip = chip_from_config(cfg)?;

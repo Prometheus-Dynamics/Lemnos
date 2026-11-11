@@ -5,6 +5,7 @@
 
 pub mod board;
 mod contain;
+mod guest;
 mod host;
 pub mod schedule;
 pub mod stream;

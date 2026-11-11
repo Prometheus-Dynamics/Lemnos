@@ -92,6 +92,18 @@ driver can recover from itself. A driver that holds something that can be unplug
 `TICKS` and look at it in `tick`: the host ticks it when the backend hints that its hardware may
 have changed, so it finds out without waiting for a caller.
 
+A board file gives a device to the host with `owner = "host"` when the operating system's own
+driver owns the hardware: Lemnos may read it and must not change it. The host refuses every method
+such a device's description doesn't name as a value, and it stands between the driver and its
+needs too: each need is handed over read-only (a write on a bus, a line set, a register write, a
+job from a stream, a change asked of another device are all refused before they reach anything),
+so what the driver does from `start` and `tick` changes nothing either. That only holds for
+hardware reached through needs, so a driver says which kind it is with `Lifecycle::HOST_OWNED`:
+`ThroughNeeds` when everything it does to hardware goes through its needs, `ReadsOnly` when it
+opens files or nodes itself and, seeing `cfg.host_owned()`, opens them for reading only
+(`drivers/hwmon-fan`). A driver that says nothing is never bound to a host-owned device; the
+device shows as waiting, with that as its reason.
+
 A driver with a stream need (`StreamHandle`) can ask what the stream's buffers are when it binds:
 `buffer_kind()` answers `Plain` (shared memory, reached with `write` and `read`) or `Handles` (one
 dma-buf per buffer, which hardware can be given), from the board file's `memory` key, before any

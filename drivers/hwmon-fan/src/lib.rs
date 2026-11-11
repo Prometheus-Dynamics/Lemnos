@@ -85,10 +85,14 @@ pub struct HwmonFan {
     manual: bool,
     /// Whether the last call failed.
     failing: bool,
+    /// The operating system owns this fan: nothing is ever opened for writing.
+    reads_only: bool,
 }
 
 impl Lifecycle for HwmonFan {
     type Needs = HwmonFanNeeds;
+    // Reaches the kernel's files itself, and on a host-owned device only reads them.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ReadsOnly;
 
     fn start(_needs: HwmonFanNeeds, cfg: &Config<'_>) -> Result<Self> {
         let sys = Path::new(cfg.str("sys_root").unwrap_or("/sys"));
@@ -106,7 +110,9 @@ impl Lifecycle for HwmonFan {
             }
             None => find(&hwmon, cfg.str("name"))?.ok_or(Status::NOT_FOUND)?,
         };
-        Ok(Self::new(fan, sys.join("class/thermal")))
+        let mut driver = Self::new(fan, sys.join("class/thermal"));
+        driver.reads_only = cfg.host_owned();
+        Ok(driver)
     }
 
     fn describe(&self, out: &mut Description) {
@@ -140,6 +146,7 @@ impl HwmonFan {
             saved: None,
             manual: false,
             failing: false,
+            reads_only: false,
         }
     }
 
@@ -150,6 +157,11 @@ impl HwmonFan {
 
     /// Takes the fan over if it is not yet, and sets its duty.
     fn drive(&mut self, per_mille: u16) -> Result<()> {
+        // Every write this driver makes starts here. On a host-owned fan none is made, and
+        // nothing is saved, so there is never anything to hand back either.
+        if self.reads_only {
+            return Err(Status::NOT_PERMITTED);
+        }
         if self.saved.is_none() {
             self.saved = Some(Saved::capture(
                 &self.fan,

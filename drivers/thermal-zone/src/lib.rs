@@ -43,6 +43,8 @@ pub struct ThermalZone {
 
 impl Lifecycle for ThermalZone {
     type Needs = ThermalZoneNeeds;
+    // Reaches the kernel's files itself, and on a host-owned device only reads them.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ReadsOnly;
 
     fn start(_needs: ThermalZoneNeeds, cfg: &Config<'_>) -> Result<Self> {
         let dir = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;

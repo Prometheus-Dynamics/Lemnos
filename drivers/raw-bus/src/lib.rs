@@ -54,6 +54,8 @@ pub struct RawBus {
 
 impl Lifecycle for RawBus {
     type Needs = RawBusNeeds;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     fn start(needs: RawBusNeeds, cfg: &Config<'_>) -> Result<Self> {
         if needs.i2c.is_none() && needs.spi.is_none() && needs.line.is_none() && needs.pwm.is_none()
