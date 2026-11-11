@@ -13,10 +13,18 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-v4l2 = { path = "../../backends/v4l2" }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-driver-v4l2-capture = { path = "../v4l2-capture" }
 libc.workspace = true
 
 [dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+# Only for its test allocator, which makes each stream buffer a sealed memfd with a handle.
+lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
 
 [package.metadata.lemnos]
 driver = "Rkcif"

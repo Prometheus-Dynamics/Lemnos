@@ -22,10 +22,27 @@
 //! driver's, read by the vendor driver from it; `configure` checks the link fits the receiver and
 //! works out the layout the receiver writes in its default compact mode.
 //!
-//! Not served: `frame_stream` and `counters` answer `NOT_SUPPORTED`. Raw frames from the capture
-//! node would need a way for a driver to fill a frame stream's buffer, which the stream endpoint
-//! doesn't have yet; the vendor driver's counts aren't readable through V4L2. `Unpacked16` needs the
-//! vendor driver's private memory-mode call, which `lemnos-v4l2` doesn't carry, so it is refused.
+//! # Raw frames
+//!
+//! The receiver's capture node can also hand its raw frames to a caller, through a frame
+//! stream this driver produces. That path is on when the board file gives the device a
+//! `frames` stream (`[devices.streams.frames]`) and names the capture node (`capture`, below):
+//! `frame_stream` then answers `frames`, `start` starts the node after routing the channel,
+//! and `counters` counts what it delivered. `lemnos-driver-v4l2-capture`'s pump moves the
+//! frames: the node fills the stream's own buffers when they are dma-bufs
+//! (`memory = "dma-buf"`) and the node takes them, with nothing copied, and otherwise fills
+//! buffers of its own with one copy per frame into the stream. Without both, `frame_stream`
+//! and `counters` answer `NOT_SUPPORTED` as before, and frames reach only the ISP.
+//!
+//! More settings, for the raw path:
+//!
+//! - `capture`: the capture node's media entity name (the routed channel's video node).
+//! - `order`: the colour order, `mono`, `rggb`, `grbg`, `gbrg` or `bggr`, default `mono`. The
+//!   pixel format asked of the node carries it; there is no monochrome format past 8 bits.
+//! - `buffers`: buffers the node fills when frames are copied, 2 to 32, default 4.
+//!
+//! `Unpacked16` needs the vendor driver's private memory-mode call, which `lemnos-v4l2`
+//! doesn't carry, so it is refused: frames are the receiver's compact layout.
 //!
 //! Failures. While routed, every second the driver reads the receiver's graph without allocating
 //! and checks the channel's link is still on. A link someone turned off, or a graph that can't be
@@ -47,7 +64,10 @@ mod tests;
 use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, Packing,
 };
-use lemnos_core::{Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, driver};
+use lemnos_core::{
+    Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
+};
+use lemnos_driver_v4l2_capture::{self as capture, Pump, Wanted, fourcc, parse_order};
 
 pub use hw::{Hardware, LinuxHardware, Settings, link_on};
 pub use route::{IspGraph, IspLink, Plan};
@@ -104,9 +124,40 @@ enum State {
 /// The rkcif camera receiver.
 #[driver("rkcif", provides = [CameraReceiver])]
 pub struct Rkcif {
+    /// Raw frames go out here, when the board gives the stream.
+    #[needs(optional)]
+    frames: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
+    /// The capture node, when the board names it.
+    node: Option<Box<dyn capture::Hardware>>,
+    /// What moves the node's frames into the stream.
+    pump: Pump,
+    raw: Raw,
     link: Option<LinkConfig>,
     state: State,
+}
+
+/// The stream raw frames go out on: the need's name, which is the name a consumer opens it by.
+pub const STREAM: &str = "frames";
+/// How often the capture node is read for filled buffers while it streams.
+const POLL_NS: u64 = 1_000_000;
+
+/// How the raw path asks the capture node for frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Raw {
+    /// The colour order the pixel format carries.
+    pub order: lemnos_contract_camera_receiver::BayerOrder,
+    /// Buffers the node fills when frames are copied.
+    pub buffers: u32,
+}
+
+impl Default for Raw {
+    fn default() -> Self {
+        Self {
+            order: lemnos_contract_camera_receiver::BayerOrder::Mono,
+            buffers: 4,
+        }
+    }
 }
 
 /// How a compact raw frame is laid out: lines of `width * depth / 8` bytes, rounded down as the
@@ -132,9 +183,30 @@ impl Lifecycle for Rkcif {
     type Needs = RkcifNeeds;
     const TICKS: bool = true;
 
-    fn start(_needs: RkcifNeeds, cfg: &Config<'_>) -> Result<Self> {
+    fn start(needs: RkcifNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::new(cfg.str("device"))?;
-        Ok(Self::with_hardware(Box::new(LinuxHardware::new(settings))))
+        let mut raw = Raw::default();
+        if let Some(order) = cfg.str("order") {
+            raw.order = parse_order(order).ok_or(Status::INVALID_ARGUMENT)?;
+        }
+        if cfg.get("buffers").is_some() {
+            raw.buffers = cfg
+                .int("buffers")
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| (2..=32).contains(n))
+                .ok_or(Status::INVALID_ARGUMENT)?;
+        }
+        let node: Option<Box<dyn capture::Hardware>> = match cfg.str("capture") {
+            None => None,
+            Some(name) => Some(Box::new(capture::LinuxHardware::new(
+                capture::Settings::new(name)?,
+            ))),
+        };
+        let mut driver = Self::with_hardware(Box::new(LinuxHardware::new(settings)));
+        driver.frames = needs.frames;
+        driver.node = node;
+        driver.raw = raw;
+        Ok(driver)
     }
 
     fn describe(&self, out: &mut Description) {
@@ -153,6 +225,28 @@ impl Lifecycle for Rkcif {
 
     /// Checks the route when routed, and runs a due recovery attempt. Returns when next.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        // The capture node is read every tick it streams; a failure is the route's failure
+        // too, and both are set up again.
+        if matches!(self.state, State::Routed { .. }) && self.pump_frames().is_err() {
+            self.state = State::Recovering {
+                attempt: 0,
+                due: None,
+            };
+        }
+        let next = self.tick_route(now_ns)?;
+        Some(
+            if self.raw_path() && matches!(self.state, State::Routed { .. }) {
+                next.min(now_ns.saturating_add(POLL_NS))
+            } else {
+                next
+            },
+        )
+    }
+}
+
+impl Rkcif {
+    /// Checks the route when routed, and runs a due recovery attempt. Returns when next.
+    fn tick_route(&mut self, now_ns: u64) -> Option<u64> {
         match self.state {
             State::Stopped => None,
             State::Routed { next_check: None } => {
@@ -171,7 +265,7 @@ impl Lifecycle for Rkcif {
                         attempt: 0,
                         due: None,
                     };
-                    return self.tick(now_ns);
+                    return self.tick_route(now_ns);
                 }
                 let at = now_ns.saturating_add(CHECK_NS);
                 self.state = State::Routed {
@@ -191,7 +285,7 @@ impl Lifecycle for Rkcif {
             State::Recovering { attempt, .. } => {
                 // Whatever was open may be stale: a receiver probed again is a new device.
                 self.hw.close();
-                match self.route() {
+                match self.route().and_then(|()| self.begin_frames()) {
                     Ok(()) => {
                         let at = now_ns.saturating_add(CHECK_NS);
                         self.state = State::Routed {
@@ -219,9 +313,66 @@ impl Rkcif {
     #[must_use]
     pub fn with_hardware(hw: Box<dyn Hardware>) -> Self {
         Self {
+            frames: None,
             hw,
+            node: None,
+            pump: Pump::new(),
+            raw: Raw::default(),
             link: None,
             state: State::Stopped,
+        }
+    }
+
+    /// The driver with its raw path: frames from `node` into `frames`, asked for as `raw`
+    /// says. For a simulated board or a test.
+    #[must_use]
+    pub fn with_frames(
+        mut self,
+        node: Box<dyn capture::Hardware>,
+        frames: StreamHandle,
+        raw: Raw,
+    ) -> Self {
+        self.node = Some(node);
+        self.frames = Some(frames);
+        self.raw = raw;
+        self
+    }
+
+    /// Whether raw frames are delivered: the board gave both the stream and the node.
+    fn raw_path(&self) -> bool {
+        self.frames.is_some() && self.node.is_some()
+    }
+
+    /// How raw frames reach the stream since the last start.
+    #[must_use]
+    pub fn mode(&self) -> capture::Mode {
+        self.pump.mode()
+    }
+
+    /// Starts the capture node for the configured link, when there is a raw path.
+    fn begin_frames(&mut self) -> Result<()> {
+        let (Some(node), Some(frames)) = (self.node.as_deref_mut(), self.frames.as_deref()) else {
+            return Ok(());
+        };
+        let link = self.link.ok_or(Status::INVALID_ARGUMENT)?;
+        let layout = layout(&link)?;
+        let wanted = Wanted {
+            // The vendor driver takes its input from the route, not from an input index.
+            input: None,
+            fourcc: fourcc(self.raw.order, link.bit_depth).ok_or(Status::INVALID_ARGUMENT)?,
+            width: layout.width,
+            height: layout.height,
+            stride: layout.stride,
+            size: layout.size,
+        };
+        self.pump.begin(node, frames, &wanted, self.raw.buffers)
+    }
+
+    /// Takes what the capture node has filled, when there is a raw path.
+    fn pump_frames(&mut self) -> Result<()> {
+        match (self.node.as_deref_mut(), self.frames.as_deref_mut()) {
+            (Some(node), Some(frames)) => self.pump.pump(node, frames),
+            _ => Ok(()),
         }
     }
 
@@ -286,8 +437,14 @@ impl CameraReceiver for Rkcif {
         Ok(self.link)
     }
 
-    fn frame_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
-        Err(Status::NOT_SUPPORTED)
+    fn frame_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        if !self.raw_path() {
+            return Err(Status::NOT_SUPPORTED);
+        }
+        into.get_mut(..STREAM.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(STREAM.as_bytes());
+        Ok(STREAM.len())
     }
 
     fn start(&mut self) -> Result<()> {
@@ -298,6 +455,12 @@ impl CameraReceiver for Rkcif {
             return Err(Status::BUSY);
         }
         self.route()?;
+        if let Err(status) = self.begin_frames() {
+            if let Some(node) = self.node.as_deref_mut() {
+                let _ = node.stop();
+            }
+            return Err(status);
+        }
         self.state = State::Routed { next_check: None };
         Ok(())
     }
@@ -306,11 +469,18 @@ impl CameraReceiver for Rkcif {
         // The route stays as it is: the ISP may be streaming through it, and only its own driver
         // stops that. Recovery is over either way.
         self.state = State::Stopped;
-        Ok(())
+        // The capture node is this driver's own, and ends with it.
+        match self.node.as_deref_mut() {
+            Some(node) => node.stop(),
+            None => Ok(()),
+        }
     }
 
     fn counters(&mut self) -> Result<Counters> {
-        Err(Status::NOT_SUPPORTED)
+        if !self.raw_path() {
+            return Err(Status::NOT_SUPPORTED);
+        }
+        Ok(self.pump.counters())
     }
 
     /// The ISP whose link from this receiver is on, by its media device driver name
