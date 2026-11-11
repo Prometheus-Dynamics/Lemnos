@@ -21,6 +21,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_ina2xx::Ina2xx>(),
         entry::<lemnos_driver_isp600::Isp600>(),
         entry::<lemnos_driver_k230_capture::K230Capture>(),
+        entry::<lemnos_driver_k230_vpu::K230Vpu>(),
         entry::<lemnos_driver_k230isp::K230Isp>(),
         entry::<lemnos_driver_m2m_decode::M2mCodec>(),
         entry::<lemnos_driver_orientation::Orientation>(),

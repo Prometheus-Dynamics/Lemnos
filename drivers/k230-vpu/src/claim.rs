@@ -10,13 +10,13 @@
 //!
 //! # Order
 //!
-//! Take a claim with a [`Setup`]; add the dma-bufs it will use ([`Claim::add_buffer`]); give it
-//! destinations ([`Claim::give`]); submit sources ([`Claim::submit`], which starts the session on
-//! its first call); take completions from both sides ([`Claim::complete_source`],
-//! [`Claim::complete_destination`]), waiting with [`Claim::wait`]. A decoder that asked for no
-//! destinations learns the stream's format from [`Claim::source_change`] and then
-//! [`Claim::adopt_destinations`]. [`Claim::drain`] finishes the stream: the last destination comes
-//! back flagged `V4L2_BUF_FLAG_LAST`.
+//! Take a claim with a [`Setup`]; add the dma-bufs it will use ([`ClaimOf::add_buffer`]); give
+//! it destinations ([`ClaimOf::give`]); submit sources ([`ClaimOf::submit`], which starts the
+//! session on its first call); take completions from both sides ([`ClaimOf::complete_source`],
+//! [`ClaimOf::complete_destination`]), waiting with [`ClaimOf::wait`]. A decoder that asked for
+//! no destinations learns the stream's format from [`ClaimOf::source_change`] and then
+//! [`ClaimOf::adopt_destinations`]. [`ClaimOf::drain`] finishes the stream: the last
+//! destination comes back flagged `V4L2_BUF_FLAG_LAST`.
 //!
 //! # Failures
 //!
@@ -34,6 +34,7 @@
 //! completing and waiting allocate nothing.
 
 use std::io;
+use std::ops::DerefMut;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
@@ -140,7 +141,7 @@ pub enum SubmitError {
     Job(JobError),
     /// The block holds every buffer of that queue; take a completion first.
     Full,
-    /// The destinations wait for the stream's format ([`Claim::adopt_destinations`]).
+    /// The destinations wait for the stream's format ([`ClaimOf::adopt_destinations`]).
     Pending,
     /// The kernel refused it. Nothing is queued for it.
     Device(io::Error),
@@ -200,6 +201,31 @@ impl<D: Device> Vpu<D> {
     /// Takes a claim: a new session set up as `setup` says. `now_ns` is the caller's clock, for
     /// the backoff.
     pub fn claim(&mut self, setup: &Setup<'_>, now_ns: u64) -> Result<Claim<'_, D>, ClaimError> {
+        let session = self.session_for(setup, now_ns)?;
+        Ok(ClaimOf::new(self, session, setup.direction))
+    }
+
+    /// [`Self::claim`], for a holder that keeps the claim past this borrow (a driver, which
+    /// holds its claim across jobs for as long as it serves one consumer): the claim owns the
+    /// block, and gives it back with [`ClaimOf::release`]. When no claim is taken the block
+    /// comes back with the reason.
+    pub fn claim_owned(
+        mut self: Box<Self>,
+        setup: &Setup<'_>,
+        now_ns: u64,
+    ) -> Result<OwnedClaim<D>, (Box<Self>, ClaimError)> {
+        match self.session_for(setup, now_ns) {
+            Ok(session) => Ok(ClaimOf::new(self, session, setup.direction)),
+            Err(error) => Err((self, error)),
+        }
+    }
+
+    /// A session set up as `setup` says, or why not, with the backoff kept.
+    fn session_for(
+        &mut self,
+        setup: &Setup<'_>,
+        now_ns: u64,
+    ) -> Result<M2mSession<D::Node>, ClaimError> {
         setup.check().map_err(ClaimError::Setup)?;
         if self.failures > 0 && now_ns < self.retry_at_ns {
             return Err(ClaimError::BackingOff {
@@ -209,7 +235,7 @@ impl<D: Device> Vpu<D> {
         match self.open(setup) {
             Ok(session) => {
                 self.failures = 0;
-                Ok(Claim::new(self, session, setup.direction))
+                Ok(session)
             }
             Err(ClaimError::Device { error, .. }) => {
                 self.failures = self.failures.saturating_add(1);
@@ -285,9 +311,17 @@ struct Slot {
     plan: Plan,
 }
 
+/// A claim that borrows its block, from [`Vpu::claim`].
+pub type Claim<'v, D> = ClaimOf<&'v mut Vpu<D>, D>;
+
+/// A claim that owns its block, from [`Vpu::claim_owned`].
+pub type OwnedClaim<D> = ClaimOf<Box<Vpu<D>>, D>;
+
 /// A claim on the block: one session, the buffers it holds, and what the block holds of them.
-pub struct Claim<'v, D: Device> {
-    vpu: &'v mut Vpu<D>,
+/// `H` is how it holds its [`Vpu`], borrowed ([`Claim`]) or owned ([`OwnedClaim`]); either way
+/// the `Vpu` has this one claim and no other.
+pub struct ClaimOf<H: DerefMut<Target = Vpu<D>>, D: Device> {
+    vpu: H,
     session: M2mSession<D::Node>,
     direction: Direction,
     buffers: [Option<Buffer>; MAX_BUFFERS],
@@ -300,8 +334,8 @@ pub struct Claim<'v, D: Device> {
     capturing: bool,
 }
 
-impl<'v, D: Device> Claim<'v, D> {
-    fn new(vpu: &'v mut Vpu<D>, session: M2mSession<D::Node>, direction: Direction) -> Self {
+impl<H: DerefMut<Target = Vpu<D>>, D: Device> ClaimOf<H, D> {
+    fn new(vpu: H, session: M2mSession<D::Node>, direction: Direction) -> Self {
         Self {
             vpu,
             session,
@@ -471,7 +505,7 @@ impl<'v, D: Device> Claim<'v, D> {
         }
     }
 
-    fn release(&mut self, source: bool, index: usize) -> Slot {
+    fn give_back(&mut self, source: bool, index: usize) -> Slot {
         let slots = if source {
             &mut self.sources
         } else {
@@ -490,7 +524,7 @@ impl<'v, D: Device> Claim<'v, D> {
 
     fn release_all(&mut self, source: bool) {
         for index in 0..SLOTS {
-            self.release(source, index);
+            self.give_back(source, index);
         }
     }
 
@@ -499,7 +533,7 @@ impl<'v, D: Device> Claim<'v, D> {
         let Some(done) = self.session.dequeue_output()? else {
             return Ok(None);
         };
-        let slot = self.release(true, done.index as usize);
+        let slot = self.give_back(true, done.index as usize);
         if slot.plan.planes == 0 {
             return Err(not_held());
         }
@@ -518,7 +552,7 @@ impl<'v, D: Device> Claim<'v, D> {
         let Some(done) = self.session.dequeue_capture()? else {
             return Ok(None);
         };
-        let slot = self.release(false, done.index as usize);
+        let slot = self.give_back(false, done.index as usize);
         if slot.plan.planes == 0 {
             return Err(not_held());
         }
@@ -569,6 +603,15 @@ impl<'v, D: Device> Claim<'v, D> {
         }
         self.capturing = false;
         Ok(())
+    }
+
+    /// Ends the claim: the session is closed, which makes the kernel tear it down with every
+    /// buffer it was given, and the claim's buffers are let go. Gives back how the block was
+    /// held: for an [`OwnedClaim`], the [`Vpu`] itself, with its backoff, to claim again.
+    pub fn release(self) -> H {
+        let Self { vpu, session, .. } = self;
+        drop(session);
+        vpu
     }
 
     /// Stops the session: every source and destination comes back without a completion, and
@@ -664,7 +707,7 @@ fn written(done: &Dequeued, plan: &Plan) -> Option<[u32; MAX_PLANES]> {
     Some(bytes)
 }
 
-impl<D: Device> Claim<'_, D>
+impl<H: DerefMut<Target = Vpu<D>>, D: Device> ClaimOf<H, D>
 where
     D::Node: AsFd,
 {

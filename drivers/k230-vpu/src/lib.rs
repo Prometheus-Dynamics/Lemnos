@@ -5,10 +5,11 @@
 //! caller's bytes and settings without reading them. Parsing a stream, choosing an encoder's
 //! settings and every other part of a codec are the caller's.
 //!
-//! - [`Vpu`] and [`Claim`]: a session opened with a [`Setup`] (direction, both formats, buffer
-//!   counts, controls), the buffers it holds, [`Claim::submit`] and [`Claim::give`], and
-//!   completions from both sides (see [`claim`] for the order, the backoff and what dropping a
-//!   claim does).
+//! - [`Vpu`] and [`Claim`] (or [`OwnedClaim`], which owns its `Vpu`): a session opened with a
+//!   [`Setup`] (direction, both formats, buffer counts, controls), the buffers it holds,
+//!   [`ClaimOf::submit`] and [`ClaimOf::give`], and completions
+//!   from both sides (see [`claim`] for the order, the backoff and what dropping a claim
+//!   does).
 //! - [`Source`] and [`Destination`]: one dma-buf per memory plane, each checked against the size
 //!   the claim measured before anything is queued; [`job`] lists every path by which a caller's
 //!   number becomes memory the block reaches.
@@ -18,8 +19,8 @@
 //!
 //! # Not covered
 //!
-//! - **Some private requests** (`VIDIOC_S_MVX_*`). [`Claim::private`] issues the ones
-//!   `lemnos-driver-k230-vpu-sys` found sound after reading what the kernel does with each
+//! - **Some private requests** (`VIDIOC_S_MVX_*`). [`ClaimOf::private`] issues
+//!   the ones `lemnos-driver-k230-vpu-sys` found sound after reading what the kernel does with each
 //!   (colour description, regions of interest with their count bounded, QP, rate control,
 //!   long-term references, statistics mode, Huffman tables, the colour-conversion
 //!   coefficients). The OSD requests, the downscale, mini-frame, seamless-target and crop
@@ -33,11 +34,23 @@
 //! - **Single-planar formats.** Multi-planar only; the driver's single-planar path moves
 //!   `bytesused` and offsets around on dequeue.
 //! - **Two controls**: [`REFUSED_CONTROLS`].
-//! - **A contract.** The block is not served as `codec.block/1` yet. It is a stateful codec:
-//!   bitstream goes in and pictures come out on their own schedule, so a session's sources
-//!   and destinations complete separately, and the claim here borrows its [`Vpu`]. Serving it
-//!   needs a claim a driver can own and the mapping of sources and destinations to jobs.
-//!   Nothing is registered in `lemnosd`.
+//!
+//! # Served as `codec.block/1`
+//!
+//! [`K230Vpu`] gives the block to a caller as `codec.block/1` (block name `mvx`), with
+//! [`VpuBlock`] holding one session across jobs: a setup job opens it, sources and destinations
+//! are jobs that stay pending until the block gives their buffers back, in whatever order it
+//! does, and drains, events, controls and the sound private requests are jobs of their own.
+//! [`codec`] gives the work format and what is checked.
+//!
+//! The board file:
+//!
+//! - `device` (string, required): the block's video node.
+//! - The stream `jobs` (`[devices.streams.jobs]`), required, with `memory = "dma-buf"`: both
+//!   queues take the stream's buffers as dma-bufs, so a stream of plain memory fails the bind
+//!   with `NOT_SUPPORTED`. `job_bytes` at least the contract's `JOB_BYTES`.
+//!
+//! Nothing is opened at bind.
 //!
 //! # Source
 //!
@@ -52,24 +65,31 @@
 //! `mvx_mmu.c` (the block's page tables), `mvx_session.c` and `mvx_v4l2_ctrls.c` (the controls).
 //! None of the SDK's kernel patches (`buildroot-overlay/linux/`) touch the codec.
 //!
-//! Hardware status: untested on board. The board check is in `testing/board-runs/E21.md`.
+//! Hardware status: untested on board. The board checks are in `testing/board-runs/E21.md` and,
+//! for the contract, `testing/board-runs/E41.md`.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
 pub mod claim;
+pub mod codec;
+mod driver;
 pub mod job;
 mod linux;
 mod setup;
 pub mod uapi;
 
 #[cfg(test)]
+mod codec_tests;
+#[cfg(test)]
 mod tests;
 
 pub use claim::{
-    BufferError, Claim, ClaimError, Completion, ControlError, Device, MAX_BUFFERS, SubmitError,
-    Vpu, backoff_ns,
+    BufferError, Claim, ClaimError, ClaimOf, Completion, ControlError, Device, MAX_BUFFERS,
+    OwnedClaim, SubmitError, Vpu, backoff_ns,
 };
+pub use codec::VpuBlock;
+pub use driver::{BoxedBlock, JOB_STREAM, K230Vpu, K230VpuNeeds, STREAM_FAILED};
 pub use job::{BufferId, Destination, JobError, Payload, Source};
 pub use lemnos_driver_m2m_decode::{PixFormatMplane, PlaneFormat, Ready, SourceChange};
 pub use linux::LinuxDevice;

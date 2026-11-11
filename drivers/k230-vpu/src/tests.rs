@@ -1,11 +1,10 @@
 //! The claim against a node that plays the `mvx` driver back: the formats it keeps, the buffers
 //! it is handed for each queue, the completions it gives, and its failures.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lemnos_driver_m2m_decode::{
@@ -26,40 +25,42 @@ use crate::uapi::{DRIVER, MAX_PLANES, control};
 use crate::*;
 
 /// One plane as the kernel was handed it: descriptor, length, bytes used, data offset.
-type Plane = (i32, u32, u32, u32);
+pub(crate) type Plane = (i32, u32, u32, u32);
 
 /// One queued buffer.
 #[derive(Clone, Copy, Debug)]
-struct Queue {
-    index: u32,
-    planes: [Plane; MAX_PLANES],
-    count: usize,
+pub(crate) struct Queue {
+    pub(crate) index: u32,
+    pub(crate) planes: [Plane; MAX_PLANES],
+    pub(crate) count: usize,
 }
 
 /// What the played-back driver does and saw. Index 0 is the output (source) queue, 1 the
 /// capture (destination) queue.
-struct Driver {
-    driver: &'static str,
+pub(crate) struct Driver {
+    pub(crate) driver: &'static str,
     /// The pixel format the driver keeps on the output queue instead of the one asked for.
-    keeps: Option<u32>,
-    formats: [Option<Format>; 2],
+    pub(crate) keeps: Option<u32>,
+    pub(crate) formats: [Option<Format>; 2],
     /// Buffers granted per queue at most.
-    grant: u32,
-    granted: [u32; 2],
+    pub(crate) grant: u32,
+    pub(crate) granted: [u32; 2],
     /// Everything queued, in order.
-    queued: [Vec<Queue>; 2],
+    pub(crate) queued: [Vec<Queue>; 2],
     /// Held by the device, oldest first.
-    held: [VecDeque<Queue>; 2],
+    pub(crate) held: [VecDeque<Queue>; 2],
     /// Ready to dequeue.
-    done: [VecDeque<Dequeued>; 2],
-    events: VecDeque<Event>,
-    controls: Vec<(u32, i32)>,
+    pub(crate) done: [VecDeque<Dequeued>; 2],
+    pub(crate) events: VecDeque<Event>,
+    pub(crate) controls: Vec<(u32, i32)>,
     /// A control id the kernel refuses as invalid.
-    bad_control: Option<u32>,
-    stream_ons: Vec<BufType>,
-    stream_offs: usize,
-    stops: [usize; 2],
-    refuse_queue: bool,
+    pub(crate) bad_control: Option<u32>,
+    pub(crate) stream_ons: Vec<BufType>,
+    pub(crate) stream_offs: usize,
+    pub(crate) stops: [usize; 2],
+    pub(crate) refuse_queue: bool,
+    /// Dequeuing fails (`EIO`).
+    pub(crate) refuse_dequeue: bool,
 }
 
 impl Default for Driver {
@@ -80,20 +81,21 @@ impl Default for Driver {
             stream_offs: 0,
             stops: [0, 0],
             refuse_queue: false,
+            refuse_dequeue: false,
         }
     }
 }
 
 #[derive(Clone, Default)]
-struct Mock(Rc<RefCell<Driver>>);
+pub(crate) struct Mock(pub(crate) Arc<Mutex<Driver>>);
 
 impl Mock {
-    fn with<T>(&self, f: impl FnOnce(&mut Driver) -> T) -> T {
-        f(&mut self.0.borrow_mut())
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&mut Driver) -> T) -> T {
+        f(&mut self.0.lock().unwrap())
     }
 
     /// The device finishes the oldest buffer it holds on `side`, reporting `bytes` per plane.
-    fn finish(&self, side: usize, flags: u32, bytes: [u32; MAX_PLANES]) {
+    pub(crate) fn finish(&self, side: usize, flags: u32, bytes: [u32; MAX_PLANES]) {
         self.with(|d| {
             let q = d.held[side].pop_front().expect("a held buffer");
             let mut bytes_used = [0; V4L2_PLANES];
@@ -112,9 +114,17 @@ impl Mock {
     }
 }
 
-struct MockNode(Mock);
+/// A played-back node, with a pipe for a descriptor: the private requests issued on it are
+/// answered `ENOTTY`, which shows they reached a call.
+pub(crate) struct MockNode(Mock, OwnedFd);
 
-struct NoMap;
+impl std::os::fd::AsFd for MockNode {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.1.as_fd()
+    }
+}
+
+pub(crate) struct NoMap;
 
 impl PlaneMap for NoMap {
     fn bytes(&self) -> &[u8] {
@@ -223,7 +233,12 @@ impl Node for MockNode {
     }
 
     fn dequeue(&self, buf_type: BufType, _: Memory, _: u32) -> io::Result<Option<Dequeued>> {
-        Ok(self.0.with(|d| d.done[side(buf_type)].pop_front()))
+        self.0.with(|d| {
+            if d.refuse_dequeue {
+                return Err(io::Error::from_raw_os_error(5));
+            }
+            Ok(d.done[side(buf_type)].pop_front())
+        })
     }
 
     fn stream_on(&self, buf_type: BufType) -> io::Result<()> {
@@ -307,13 +322,13 @@ impl Node for MockNode {
 }
 
 /// The system: opens a played-back node, or fails to; measures buffers by their real size.
-struct MockDevice {
-    mock: Mock,
-    opens: u32,
+pub(crate) struct MockDevice {
+    pub(crate) mock: Mock,
+    pub(crate) opens: u32,
     /// Fail this many opens first.
-    fail_opens: u32,
+    pub(crate) fail_opens: u32,
     /// Answer this size for every buffer instead of its own.
-    size: Option<u64>,
+    pub(crate) size: Option<u64>,
 }
 
 impl Device for MockDevice {
@@ -325,7 +340,8 @@ impl Device for MockDevice {
             self.fail_opens -= 1;
             return Err(io::Error::from_raw_os_error(16));
         }
-        Ok(MockNode(self.mock.clone()))
+        let (reader, _) = std::io::pipe()?;
+        Ok(MockNode(self.mock.clone(), reader.into()))
     }
 
     fn buffer_size(&mut self, fd: BorrowedFd<'_>) -> io::Result<u64> {
@@ -336,7 +352,7 @@ impl Device for MockDevice {
     }
 }
 
-fn vpu(mock: &Mock) -> Vpu<MockDevice> {
+pub(crate) fn vpu(mock: &Mock) -> Vpu<MockDevice> {
     Vpu::new(MockDevice {
         mock: mock.clone(),
         opens: 0,
@@ -346,10 +362,10 @@ fn vpu(mock: &Mock) -> Vpu<MockDevice> {
 }
 
 /// H.264 is `H264`; NV12 in two memory planes is `NM12`.
-const H264: u32 = u32::from_le_bytes(*b"H264");
-const NV12M: u32 = u32::from_le_bytes(*b"NM12");
+pub(crate) const H264: u32 = u32::from_le_bytes(*b"H264");
+pub(crate) const NV12M: u32 = u32::from_le_bytes(*b"NM12");
 
-fn format(pixelformat: u32, sizes: &[u32]) -> PixFormatMplane {
+pub(crate) fn format(pixelformat: u32, sizes: &[u32]) -> PixFormatMplane {
     let mut planes = [PlaneFormat::default(); V4L2_PLANES];
     for (to, &size) in planes.iter_mut().zip(sizes) {
         *to = PlaneFormat {
@@ -369,7 +385,7 @@ fn format(pixelformat: u32, sizes: &[u32]) -> PixFormatMplane {
 }
 
 /// A decoder: 4096-byte bitstream buffers in, NV12 frames of 2048 + 1024 bytes out.
-fn decode() -> Setup<'static> {
+pub(crate) fn decode() -> Setup<'static> {
     Setup {
         direction: Direction::Decode,
         source: format(H264, &[4096]),
@@ -380,7 +396,7 @@ fn decode() -> Setup<'static> {
     }
 }
 
-fn buffer(len: u64) -> OwnedFd {
+pub(crate) fn buffer(len: u64) -> OwnedFd {
     dma_buf::sealed_memfd(c"k230-vpu-test", len).expect("memfd")
 }
 
