@@ -33,7 +33,7 @@ use lemnos_linux_sys::dma_heap;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::SimBoard;
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout, STATE_FAULT};
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -272,6 +272,35 @@ fn jobs_on_the_ring_run_on_the_streams_dma_bufs_and_complete_on_the_ring() {
     assert_eq!(completion(&mut consumer).identity, 4);
     let stats = host.stream_stats(0, "jobs").unwrap();
     assert_eq!((stats.faults, stats.dropped), (0, 0));
+}
+
+#[test]
+fn bytes_that_are_no_job_end_the_consumers_stream_as_faulted_and_the_next_consumer_is_served() {
+    let host = start();
+    let mut producer = host.stream_producer(0, "jobs").unwrap();
+    let lease = host.stream_attach(0, "jobs", CallerId(1)).unwrap();
+    let mut consumer = consumer(&lease);
+    let runs = Rc::new(Cell::new(0));
+    let mut converter = converter(&runs);
+    assert_eq!(converter.serve(&mut producer, 0), Ok(0));
+    assert!(consumer.push_job(&[1, 2, 3]).unwrap());
+    post(&mut consumer, &job(1, 0, 1, 32, 32));
+    assert_eq!(converter.serve(&mut producer, 1), Ok(1));
+    // The consumer sees the fault, and the job it posted behind the bad bytes ran nowhere.
+    assert_eq!(consumer.state(), STATE_FAULT);
+    assert_eq!(runs.get(), 0);
+    assert_eq!(converter.last_failure(), Some(Failure::Undecodable));
+    let stats = host.stream_stats(0, "jobs").unwrap();
+    assert_eq!((stats.faults, stats.attached), (1, false));
+    assert_eq!((stats.producer_held, stats.consumer_held), (0, 0));
+    // The driver carries on: the next consumer's job runs.
+    let next = host.stream_attach(0, "jobs", CallerId(2)).unwrap();
+    let mut fresh = self::consumer(&next);
+    post(&mut fresh, &job(2, 0, 1, 32, 32));
+    assert_eq!(converter.serve(&mut producer, 2), Ok(1));
+    assert_eq!(runs.get(), 1);
+    assert_eq!(completion(&mut fresh).identity, 2);
+    assert_eq!(host.stream_stats(0, "jobs").unwrap().faults, 1);
 }
 
 #[test]

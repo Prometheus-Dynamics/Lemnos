@@ -39,7 +39,10 @@
 //!    whose frame has passed, or that the kernel flagged, is not delivered and the job counts
 //!    as an error.
 //!
-//! A job that fails step 1 or 2 is counted as dropped. Nothing on the way allocates.
+//! A job that fails step 1 or 2 is counted as dropped. Bytes on the config stream's job queue
+//! that are no job are counted as dropped too and, as the contract says of a broken consumer,
+//! fault that consumer's config stream; the config buffers held under it are given up. Nothing
+//! on the way allocates.
 //!
 //! # Settings
 //!
@@ -753,13 +756,38 @@ impl Rkisp {
             let job = encoded
                 .get(..len)
                 .and_then(|bytes| IspJob::decode(&mut Reader::new(bytes)).ok());
-            let sent = match job {
-                Some(job) => self.submit(&job)?,
-                None => false,
+            let Some(job) = job else {
+                // Bytes that are no job: a broken consumer, which loses the config stream.
+                self.counters.dropped = self.counters.dropped.saturating_add(1);
+                return self.fault_config();
             };
+            let sent = self.submit(&job)?;
             if !sent {
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
             }
+        }
+        Ok(())
+    }
+
+    /// Faults the config stream's consumer. The config buffers held were taken under it and
+    /// have nothing behind them now: each is given up, to be taken again under the next one.
+    fn fault_config(&mut self) -> Result<()> {
+        self.config.fault_consumer().map_err(|_| Status::IO)?;
+        for buffer in 0..MAX_STREAM_BUFFERS {
+            if !has(self.held.config, buffer) {
+                continue;
+            }
+            // Nothing is behind it, so this reaches no one.
+            self.config
+                .publish(StreamFrame {
+                    buffer,
+                    bytes: 0,
+                    sequence: 0,
+                    identity: 0,
+                    timestamp_ns: 0,
+                })
+                .map_err(|_| Status::IO)?;
+            self.held.config = with(self.held.config, buffer, false);
         }
         Ok(())
     }

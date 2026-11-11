@@ -9,6 +9,11 @@
 //! Frames published on the statistics and output streams carry the job's `identity`, so a caller
 //! ties results to the frame it asked for. Lemnos carries the identity and never reads it.
 //!
+//! A job the ISP cannot run (a buffer it doesn't hold, a layout it doesn't take, no room) is
+//! counted in [`Counters::dropped`] and nothing is published for it. Bytes that cannot be decoded
+//! as an [`IspJob`] are a broken consumer: the ISP faults the config stream, as it does for any
+//! malformed ring, and runs nothing more that was posted on it.
+//!
 //! Units: sizes in pixels and lines, `stride` and `size` and `bytes` in bytes, `fourcc` the
 //! little-endian four-character code of the pixel format.
 

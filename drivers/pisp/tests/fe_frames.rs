@@ -41,7 +41,7 @@ use lemnos_host::{Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
-use lemnos_wire::ring::{Consumer, Layout};
+use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -807,6 +807,39 @@ fn a_job_naming_a_statistics_buffer_another_job_has_is_dropped() {
     fe.tick(now).unwrap();
     assert_eq!(hw.with(|b| b.lost), 0);
     assert_eq!(hw.registered(), 0);
+}
+
+#[test]
+fn bytes_that_are_no_job_fault_the_config_streams_consumer_and_the_next_one_is_served() {
+    let host = host();
+    let hw = Hw::default();
+    let mut app = App::attach(&host);
+    let mut fe = driver(&host, &hw);
+    CameraIsp::start(&mut fe).unwrap();
+    app.config.fill(0, &config_for(1, true, false));
+    assert!(app.config.ring.push_job(&[1, 2, 3]).unwrap());
+    app.post(1, 0, 0, NO_BUFFER);
+    let now = two_ticks(&mut fe, 1);
+    // The client that posted them sees its config stream faulted, and the job it posted behind
+    // them never reached the block.
+    assert_eq!(app.config.ring.state(), STATE_FAULT);
+    assert!(hw.with(|b| b.keys.is_empty()));
+    assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
+    let stats = host.stream_stats(0, "config").unwrap();
+    assert_eq!((stats.faults, stats.attached), (1, false));
+    assert_eq!(stats.consumer_held, 0);
+    let stats = host.stream_stats(0, "statistics").unwrap();
+    assert_eq!((stats.faults, stats.attached), (0, true));
+    // It attaches again, and its job runs on the configuration it writes now.
+    app.config = Client::attach(&host, "config");
+    app.config.fill(0, &config_for(4, true, false));
+    app.post(2, 0, 0, NO_BUFFER);
+    let now = two_ticks(&mut fe, now);
+    assert_eq!(hw.with(|b| b.keys.clone()), [4]);
+    let stats = app.stats.ring.pop_frame().unwrap().expect("statistics");
+    assert_eq!((stats.buffer, stats.identity), (0, 2));
+    fe.tick(now).unwrap();
+    assert_eq!(hw.with(|b| b.lost), 0);
 }
 
 #[test]

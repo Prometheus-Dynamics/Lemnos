@@ -386,6 +386,10 @@ impl StreamEndpoint for Racing {
     ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
         self.inner.buffer_handle(buffer)
     }
+
+    fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
+        self.inner.fault_consumer()
+    }
 }
 
 fn driver_on(streams: &Streams, config: StreamHandle) -> (Rkisp, Handle) {
@@ -817,6 +821,32 @@ fn a_job_the_driver_cannot_run_is_dropped_before_anything_reaches_the_kernel() {
     d.tick(1);
     assert_eq!(d.counters().unwrap().dropped, refused.len() as u64 + 1);
     assert!(k.queued_params().is_empty());
+    // Refused jobs are the consumer's mistakes; bytes that are no job cost it the stream.
+    assert_eq!(streams.config.faults(), 1);
+}
+
+#[test]
+fn bytes_that_are_no_job_fault_the_consumer_and_the_next_one_is_served() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    streams.config.fill(2, &pattern(1, PARAMS));
+    streams.config.post_job(&[0xff; 3]);
+    post(&streams.config, &job(1, 2, 1));
+    d.tick(1);
+    // Faulted at the bad bytes: the job behind them never reached the kernel.
+    assert_eq!(streams.config.faults(), 1);
+    assert!(k.queued_params().is_empty());
+    assert_eq!(d.counters().unwrap().dropped, 1);
+    assert_eq!(streams.statistics.faults() + streams.output0.faults(), 0);
+    // The config buffers held under it were given up; taken again, the next consumer's job runs.
+    let params = pattern(4, PARAMS);
+    streams.config.fill(2, &params);
+    post(&streams.config, &job(2, 2, 1));
+    d.tick(2);
+    assert_eq!(k.queued_params().len(), 1);
+    assert_eq!(k.params_seen(0), params);
+    assert_eq!(d.health(), Health::Ok);
 }
 
 #[test]

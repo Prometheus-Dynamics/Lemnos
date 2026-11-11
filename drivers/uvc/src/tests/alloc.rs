@@ -133,6 +133,10 @@ impl StreamEndpoint for Endless {
     fn buffer_handle(&self, _: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {
         Err(ErrorKind::Unsupported)
     }
+
+    fn fault_consumer(&mut self) -> Result<(), ErrorKind> {
+        Ok(())
+    }
 }
 
 static PUBLISHED: AtomicUsize = AtomicUsize::new(0);

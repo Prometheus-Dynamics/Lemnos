@@ -100,7 +100,7 @@ pub const MAX_BUFFERS: u32 = 64;
 /// Jobs taken in one [`Claim::serve`]; the rest wait for the next.
 pub const MAX_JOBS_PER_ROUND: u32 = 64;
 
-/// The longest job read off the queue: a longer one is taken off and counted.
+/// The longest job read off the queue: a longer one is taken off and faults its consumer.
 const LONGEST_JOB: usize = 256;
 
 /// First delay before a claim is tried again.
@@ -244,9 +244,10 @@ impl<D: Device> Service<D> {
 /// Why the last failed job failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// The bytes on the job queue were not a job.
+    /// The bytes on the job queue were not a job. The consumer's stream was faulted.
     Undecodable,
-    /// The result buffer is not one the driver holds, so the job cannot complete.
+    /// The result buffer is not one the driver holds, so the job cannot complete. One that is
+    /// not on the stream at all faulted the consumer's stream.
     Result,
     /// Refused before it ran: an unknown program, a slot not attached, the result buffer
     /// attached, or an object in the program's domain that is not the program's.
@@ -685,12 +686,18 @@ impl<'a, D: Device> Claim<'a, D> {
                 .get(..len)
                 .filter(|bytes| bytes.len() <= JOB_BYTES)
                 .and_then(|bytes| RunJob::decode(&mut Reader::new(bytes)).ok());
+            // A broken consumer, by the contract: bytes that are no job, or a result buffer that
+            // isn't on the stream. It loses the stream, and no job of its is run after.
             let Some(job) = job else {
-                self.failed(Failure::Undecodable);
-                continue;
+                self.fault(stream, Failure::Undecodable)?;
+                break;
             };
+            if job.result >= stream.buffer_count() {
+                self.fault(stream, Failure::Result)?;
+                break;
+            }
             if !self.holds(job.result) {
-                // Not on the stream or not the driver's: there is nothing to complete on.
+                // On the stream but not the driver's now: there is nothing to complete on.
                 self.failed(Failure::Result);
                 continue;
             }
@@ -698,6 +705,32 @@ impl<'a, D: Device> Claim<'a, D> {
             self.complete(stream, &job, outcome, now_ns)?;
         }
         Ok(read)
+    }
+
+    /// Faults the consumer whose job was no job. Every buffer held was taken under it and has
+    /// nothing behind it now, so each is given up, to be taken again under the next consumer.
+    fn fault<S: StreamEndpoint + ?Sized>(
+        &mut self,
+        stream: &mut S,
+        failure: Failure,
+    ) -> Result<(), S::Error> {
+        self.failed(failure);
+        stream.fault_consumer()?;
+        for buffer in 0..MAX_BUFFERS {
+            if !self.holds(buffer) {
+                continue;
+            }
+            // Nothing is behind it, so this reaches no one.
+            stream.publish(StreamFrame {
+                buffer,
+                bytes: 0,
+                sequence: 0,
+                identity: 0,
+                timestamp_ns: 0,
+            })?;
+            self.set_held(buffer, false);
+        }
+        Ok(())
     }
 
     fn failed(&mut self, failure: Failure) {

@@ -208,6 +208,12 @@ A consumer that breaks these loses the stream: the host marks it faulted (state 
 doorbell. Nothing else is affected: not the connection, not other streams. A fresh StreamOpen starts
 over on new memory.
 
+The ring carries a job's bytes without reading them, so whether they are a job is for the driver to
+say. A driver whose contract calls bytes that are no job a broken consumer ends the stream the same
+way (`StreamEndpoint::fault_consumer`): state 2, the doorbell, and the jobs still queued are gone.
+A job that decodes but can't be run is not that: it completes as failed, or is counted as dropped,
+as its contract says, and the stream stays open.
+
 ## Description
 
 The `bytes` of a Description, in order: a `u16` contract count, then for each its tag (str), a `u16`

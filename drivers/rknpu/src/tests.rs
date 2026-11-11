@@ -992,15 +992,25 @@ fn the_contract_is_served_through_its_trait() {
 }
 
 #[test]
-fn undecodable_jobs_and_results_off_the_stream_are_counted_without_a_completion() {
+fn undecodable_jobs_and_results_off_the_stream_fault_the_consumer() {
     let mut service = Service::new(Node {
         kernel: Kernel::new(true),
     });
     let mut claim = service.claim(0).unwrap();
     let mut stream = stream();
     stream.post_job(&[1, 2, 3]);
+    post(&stream, job(1, 1, 2));
+    // Faulted at the bytes that are no job: the job behind them is never read.
+    assert_eq!(claim.serve(&mut stream, 0), Ok(1));
+    assert_eq!(stream.faults(), 1);
+    assert!(stream.take_frame().is_none());
+    assert_eq!(claim.counters().errors, 1);
+    assert_eq!(claim.last_failure(), Some(Failure::Undecodable));
+    assert!((0..BUFFERS).all(|buffer| !claim.holds(buffer)), "given up");
+    // A result buffer past the stream's last is the same broken consumer.
     post(&stream, job(1, 1, BUFFERS + 5));
-    assert_eq!(claim.serve(&mut stream, 0), Ok(2));
+    assert_eq!(claim.serve(&mut stream, 0), Ok(1));
+    assert_eq!(stream.faults(), 2);
     assert!(stream.take_frame().is_none());
     assert_eq!(claim.counters().errors, 2);
     assert_eq!(claim.last_failure(), Some(Failure::Result));

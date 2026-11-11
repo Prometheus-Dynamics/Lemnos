@@ -578,6 +578,49 @@ fn after_a_fault_the_producer_carries_on_and_a_new_consumer_can_attach() {
 }
 
 #[test]
+fn a_producer_faults_the_consumer_that_posted_what_is_no_job() {
+    let (host, lease, mut producer) = fault_case(|_, _, _| {});
+    let mut consumer = consumer(&lease);
+    consumer.push_job(b"not a job").unwrap();
+    let mut out = [0u8; 16];
+    assert_eq!(producer.next_job(&mut out), Ok(Some(9)));
+    let stream: &mut dyn StreamEndpoint<Error = ErrorKind> = &mut producer;
+    stream.fault_consumer().unwrap();
+    assert_cut_off(&host, &lease);
+    assert_eq!(consumer.state(), STATE_FAULT);
+    // Jobs it had waiting went with it, and what the producer held has nothing behind it.
+    assert_eq!(producer.next_job(&mut out), Ok(None));
+    let stats = host.stream_stats(0, "frames").unwrap();
+    assert_eq!(stats.producer_held, 1);
+    assert!((0..4).any(|buffer| producer.write(buffer, 0, &[1]) == Ok(false)));
+
+    // The next consumer starts clean and the producer serves it.
+    let next = host.stream_attach(0, "frames", CallerId(8)).unwrap();
+    let mut fresh = self::consumer(&next);
+    let mut source = SimFrameSource::new(FRAME_BYTES);
+    assert!(produce(&mut source, &mut producer));
+    assert!(fresh.pop_frame().unwrap().is_some());
+    assert_eq!(host.stream_stats(0, "frames").unwrap().faults, 1);
+}
+
+#[test]
+fn faulting_with_no_consumer_attached_does_nothing() {
+    let host = start();
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    producer.fault_consumer().unwrap();
+    let lease = host.stream_attach(0, "frames", CONSUMER).unwrap();
+    host.stream_detach(0, "frames", CONSUMER).unwrap();
+    producer.fault_consumer().unwrap();
+    let stats = host.stream_stats(0, "frames").unwrap();
+    assert_eq!(stats.faults, 0, "{stats:?}");
+    assert_eq!(
+        get(&lease, offsets::STATE),
+        STATE_CLOSED,
+        "left, not faulted"
+    );
+}
+
+#[test]
 fn a_driver_that_needs_a_stream_gets_this_one_and_its_frames_arrive() {
     let host = start();
     let lease = host.stream_attach(1, "frames", CONSUMER).unwrap();

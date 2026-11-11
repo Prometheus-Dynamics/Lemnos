@@ -33,7 +33,7 @@ use lemnos_host::{Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
-use lemnos_wire::ring::{Consumer, Layout};
+use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -611,6 +611,43 @@ fn a_job_naming_an_input_buffer_the_driver_does_not_hold_is_dropped() {
     assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 2);
     assert_eq!(hw.with(|b| b.lost), 0);
     assert_eq!(hw.registered(), 0);
+}
+
+#[test]
+fn bytes_that_are_no_job_fault_the_config_streams_consumer_and_the_next_one_is_served() {
+    let host = host();
+    let hw = Hw::default();
+    let mut app = App::attach(&host);
+    let mut be = driver(&host, &hw);
+    CameraIsp::start(&mut be).unwrap();
+    app.config.fill(0, &config_for(1));
+    let frame_in = app.give_input(1, 5);
+    assert!(app.config.ring.push_job(&[1, 2, 3]).unwrap());
+    app.config.post(1, 0, 1, 0);
+    let mut now = be.tick(1).unwrap();
+    now = be.tick(now).unwrap();
+    // The client that posted them sees its config stream faulted, and the job it posted behind
+    // them never reached the block.
+    assert_eq!(app.config.ring.state(), STATE_FAULT);
+    assert!(app.output.ring.pop_frame().unwrap().is_none());
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
+    let stats = host.stream_stats(0, "config").unwrap();
+    assert_eq!((stats.faults, stats.attached), (1, false));
+    assert_eq!(stats.consumer_held, 0);
+    for other in ["input", "output0"] {
+        let stats = host.stream_stats(0, other).unwrap();
+        assert_eq!((stats.faults, stats.attached), (0, true), "{other}");
+    }
+    // It attaches again, and its job runs on the configuration it writes now.
+    app.config = Client::attach(&host, "config");
+    app.config.fill(0, &config_for(3));
+    app.config.post(2, 0, 1, 0);
+    now = be.tick(now).unwrap();
+    be.tick(now).unwrap();
+    let frame = app.output.ring.pop_frame().unwrap().expect("a frame");
+    assert_eq!(frame.identity, 2);
+    assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_in, 3));
+    assert_eq!(hw.with(|b| b.lost), 0);
 }
 
 #[test]

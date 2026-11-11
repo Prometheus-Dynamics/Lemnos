@@ -223,6 +223,17 @@ pub trait StreamEndpoint {
     /// - The consumer shares the memory and can change it at any time, as with `read`: hardware
     ///   given a consumer's image must take nothing in it on trust.
     fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, Self::Error>;
+    /// Ends the attached consumer's stream as faulted, for a consumer that broke the rules of
+    /// what it posts: bytes on the job queue that are no job of the driver's contract. It is the
+    /// same end a consumer that corrupts the ring gets. The consumer sees its stream faulted
+    /// and has to attach again to carry on; the jobs it had posted are gone with it and
+    /// everything it held comes back free. Nothing else is touched: the producer keeps its end
+    /// and the next consumer starts clean.
+    ///
+    /// Buffers the producer holds were taken under the consumer that is now gone, so nothing is
+    /// behind them: publish each to give it up, as for a consumer that left by itself. Does
+    /// nothing when no consumer is attached. Allocates nothing.
+    fn fault_consumer(&mut self) -> Result<(), Self::Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
