@@ -28,3 +28,8 @@ lemnos-contract-orientation = { path = "../../contracts/orientation" }
 lemnos-driver-hwmon-fan = { path = "../../drivers/hwmon-fan" }
 lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
 lemnos-driver-host-clock = { path = "../../drivers/host-clock" }
+lemnos-driver-fan-control = { path = "../../drivers/fan-control" }
+lemnos-driver-gpio-power-switch = { path = "../../drivers/gpio-power-switch" }
+lemnos-driver-bmm150 = { path = "../../drivers/bmm150" }
+lemnos-driver-hw-watchdog = { path = "../../drivers/hw-watchdog" }
+lemnos-hal = { path = "../hal", features = ["std", "mock"] }

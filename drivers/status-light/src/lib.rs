@@ -131,6 +131,8 @@ fn write_frame(pixels: &mut Dev<dyn Pixels>, frame: &[look::Rgbw]) -> Result<()>
 
 impl Lifecycle for StatusLight {
     type Needs = StatusLightNeeds;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     /// Ticked: the animator's frame interval and the write retries are the only timed work, and
     /// both are returned from [`Lifecycle::tick`].

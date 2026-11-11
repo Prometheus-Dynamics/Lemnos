@@ -96,6 +96,8 @@ impl Ws2812 {
 
 impl Lifecycle for Ws2812 {
     type Needs = Ws2812Needs;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     fn start(needs: Ws2812Needs, cfg: &Config<'_>) -> Result<Self> {
         let config = Self::strip_config(cfg)?;

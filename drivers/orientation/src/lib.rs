@@ -92,6 +92,8 @@ pub struct Orientation {
 
 impl Lifecycle for Orientation {
     type Needs = OrientationNeeds;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     fn start(needs: OrientationNeeds, cfg: &Config<'_>) -> Result<Self> {
         let hz = sample_rate(cfg)?;

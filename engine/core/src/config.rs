@@ -11,11 +11,30 @@ pub enum ConfigValue<'a> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Config<'a> {
     entries: &'a [(&'a str, ConfigValue<'a>)],
+    host_owned: bool,
 }
 
 impl<'a> Config<'a> {
     pub const fn new(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            host_owned: false,
+        }
+    }
+
+    /// The same settings, for a device the board file gives to the host (`owner = "host"`).
+    #[must_use]
+    pub const fn for_host_owned(mut self) -> Self {
+        self.host_owned = true;
+        self
+    }
+
+    /// Whether the operating system's own driver owns this device, so that Lemnos may read it
+    /// and must not change it. What a driver takes through its needs is already read-only
+    /// then. A driver that reaches hardware by itself (a file, a device node) looks here, and
+    /// opens what it opens for reading only: see [`HostOwned`](crate::HostOwned).
+    pub const fn host_owned(&self) -> bool {
+        self.host_owned
     }
 
     /// Every setting, in the board file's order.

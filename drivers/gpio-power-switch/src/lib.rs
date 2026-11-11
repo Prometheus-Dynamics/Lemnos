@@ -46,6 +46,8 @@ pub struct GpioPowerSwitch {
 
 impl Lifecycle for GpioPowerSwitch {
     type Needs = GpioPowerSwitchNeeds;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     fn start(mut needs: GpioPowerSwitchNeeds, cfg: &Config<'_>) -> Result<Self> {
         let default_on = flag(cfg, "default_on", true)?;

@@ -178,6 +178,8 @@ pub struct Ov9782 {
 
 impl Lifecycle for Ov9782 {
     type Needs = Ov9782Needs;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
     const TICKS: bool = true;
 
     fn start(needs: Ov9782Needs, cfg: &Config<'_>) -> Result<Self> {

@@ -61,6 +61,8 @@ pub struct Bmm150 {
 
 impl Lifecycle for Bmm150 {
     type Needs = Bmm150Needs;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     fn start(needs: Bmm150Needs, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {

@@ -556,6 +556,8 @@ pub struct Bmi088 {
 
 impl Lifecycle for Bmi088 {
     type Needs = Bmi088Needs;
+    // Everything this driver does to hardware goes through its needs.
+    const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
     const TICKS: bool = true;
 
     fn start(needs: Bmi088Needs, cfg: &Config<'_>) -> Result<Self> {
