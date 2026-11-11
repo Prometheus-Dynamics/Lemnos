@@ -29,7 +29,7 @@ use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
-use lemnos_host::{Host, Options as HostOptions, entry};
+use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
@@ -710,24 +710,62 @@ fn a_job_on_an_output_the_client_holds_is_dropped() {
 }
 
 #[test]
-fn streams_without_handles_get_no_job_and_no_garbage() {
+fn streams_without_handles_are_refused_with_or_without_a_client() {
     let dma = "memory = \"dma-buf\"";
     for text in [board("", dma), board(dma, "")] {
         let host = host_with(&text);
         let hw = Hw::default();
-        let mut app = App::attach(&host);
         let mut be = driver(&host, &hw);
-        CameraIsp::start(&mut be).unwrap();
-        app.config.fill(0, &config_for(1));
-        app.give_input(0, 1);
-        app.config.post(1, 0, 0, 1);
-        let now = be.tick(1).unwrap();
-        be.tick(now).unwrap();
+        // Nobody is attached yet, and the streams already say what they are.
+        assert_eq!(CameraIsp::start(&mut be), Err(Status::NOT_SUPPORTED));
+        let mut app = App::attach(&host);
+        assert_eq!(CameraIsp::start(&mut be), Err(Status::NOT_SUPPORTED));
+        assert_eq!(be.tick(1), None, "not running");
         assert!(app.output.ring.pop_frame().unwrap().is_none());
-        assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
         assert_eq!(hw.with(|b| b.finished.len() + b.lost as usize), 0);
         assert_eq!(hw.registered(), 0);
     }
+}
+
+/// A board whose device is the back end itself, with its streams as `input` and `output` say.
+fn bound(input_memory: &str, output_memory: &str) -> Host {
+    let text = board(input_memory, output_memory).replace(
+        "driver = \"fake-counter\"",
+        "driver = \"pisp-be\"\nconfig = { device = \"none\" }",
+    );
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    Host::start_with_streams(
+        &parse(&text).unwrap(),
+        &[entry::<PispBe>()],
+        Box::new(sim),
+        Arc::new(clock),
+        HostOptions::default(),
+        Arc::new(Handles),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_board_with_an_image_stream_of_plain_memory_is_refused_at_bind() {
+    let dma = "memory = \"dma-buf\"";
+    for (input, output) in [("", dma), (dma, "")] {
+        let host = bound(input, output);
+        host.tick();
+        let DeviceState::Backoff { reason, .. } = host.device("isp").unwrap().state else {
+            panic!("the driver bound to a stream it cannot use");
+        };
+        assert!(
+            reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
+            "{reason}"
+        );
+        // Nobody had to attach for the driver to know.
+        assert_eq!(host.stream_stats(0, "input").unwrap().attachments, 0);
+    }
+    // With both as dma-bufs it binds; nothing is opened until `start`.
+    let host = bound(dma, dma);
+    host.tick();
+    assert_eq!(host.device("isp").unwrap().state, DeviceState::Running);
 }
 
 #[test]

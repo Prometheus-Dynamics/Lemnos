@@ -92,6 +92,13 @@ driver can recover from itself. A driver that holds something that can be unplug
 `TICKS` and look at it in `tick`: the host ticks it when the backend hints that its hardware may
 have changed, so it finds out without waiting for a caller.
 
+A driver with a stream need (`StreamHandle`) can ask what the stream's buffers are when it binds:
+`buffer_kind()` answers `Plain` (shared memory, reached with `write` and `read`) or `Handles` (one
+dma-buf per buffer, which hardware can be given), from the board file's `memory` key, before any
+consumer attaches. A driver whose hardware takes buffers only by handle refuses a `Plain` stream
+in `start` with `NOT_SUPPORTED`, as `drivers/g2d` does. The device then shows as failing to bind,
+which points at the board file, where waiting for a consumer and going unhealthy would not.
+
 Tests run against the simulated bus (`lemnos-sim`), where the chip's registers are plain bytes that
 a test sets and reads back. Steady-state reads must allocate nothing; prove it with the counting
 allocator in `lemnos-measure`, as `drivers/generic-sensor` does.

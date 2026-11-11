@@ -9,7 +9,7 @@ use lemnos_contract_camera_receiver::{
 };
 use lemnos_core::{Health, Lifecycle, Result, Status, StreamHandle};
 use lemnos_hal::ErrorKind;
-use lemnos_hal::blocks::{BufferHandle, StreamEndpoint, StreamFrame};
+use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamEndpoint, StreamFrame};
 use lemnos_hal::mock::MockStream;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_v4l2::FourCc;
@@ -447,6 +447,10 @@ impl StreamEndpoint for Unattached {
     type Error = ErrorKind;
     fn buffer_count(&self) -> u32 {
         2
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        BufferKind::Plain
     }
     fn publish(&mut self, frame: StreamFrame) -> core::result::Result<(), ErrorKind> {
         self.0.lock().unwrap().1.push(frame);

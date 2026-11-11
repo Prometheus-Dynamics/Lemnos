@@ -344,9 +344,14 @@ fn a_stream_whose_buffers_have_no_handles_is_refused() {
     let frames = MockStream::with_bytes(4, 4096);
     let (mut d, hw) = driver_on(&frames);
     d.configure(raw10(), Packing::Packed).unwrap();
+    let stopped = hw.with(|m| m.stopped);
     assert_eq!(d.start().unwrap_err(), Status::NOT_SUPPORTED);
     assert_eq!(hw.with(|m| (m.started, m.set.len())), (0, 0));
-    assert!(hw.with(|m| m.stopped) >= 2, "what was made is ended again");
+    assert_eq!(
+        hw.with(|m| m.stopped),
+        stopped,
+        "nothing was made or touched"
+    );
     assert_eq!(d.tick(0), None, "not streaming");
     assert!(frames.take_frame().is_none());
 }

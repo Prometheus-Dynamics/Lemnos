@@ -13,13 +13,13 @@ use std::time::Duration;
 
 use lemnos_contract_image_scaler::{Counters, Filter, ImageRef, ImageScaler, JOB_BYTES, ScaleJob};
 use lemnos_core::{CallerId, Decode, Encode, Health, Lifecycle, MethodId, Reader, Status, Writer};
-use lemnos_driver_rkvpss::driver::{BoxedDevice, NO_HANDLES, Opener, POLL_NS};
+use lemnos_driver_rkvpss::driver::{BoxedDevice, Opener, POLL_NS};
 use lemnos_driver_rkvpss::jobs::Failure;
 use lemnos_driver_rkvpss::{Channel, Device, Job, Rkvpss, RkvpssNeeds, State};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::{Counting, allocations};
@@ -255,29 +255,28 @@ fn a_board_file_without_a_channel_is_refused() {
 }
 
 #[test]
-fn a_stream_of_plain_shared_memory_is_refused_with_a_status_naming_the_fix() {
+fn a_stream_of_plain_shared_memory_is_refused_at_bind_before_any_consumer_comes() {
+    // `HeapAllocator` makes plain shared memory, with no handles.
     let rig = Rig::start(
-        &board(
-            "rkvpss",
-            "channel = 0, node = \"/nonexistent/video9\"",
-            false,
-        ),
+        &board("rkvpss", "channel = 0", false),
         Arc::new(HeapAllocator),
     );
     rig.host.tick();
-    assert_eq!(
-        rig.health(),
-        Health::Ok,
-        "nothing to tell before a consumer"
+    let DeviceState::Backoff { reason, .. } = rig.host.device("v").unwrap().state else {
+        panic!("the driver bound to a stream it cannot use");
+    };
+    assert!(
+        reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
+        "{reason}"
     );
-    let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
-    rig.after(Duration::from_millis(1));
-    assert_eq!(rig.health(), Health::Failed(NO_HANDLES));
-    assert!(NO_HANDLES.contains("memory = \"dma-buf\""));
-    post(&mut consumer, &job(3, 0, 1));
-    rig.after(Duration::from_millis(1));
-    assert_eq!(rig.counters(), Counters { jobs: 0, errors: 1 });
+    assert!(matches!(rig.health(), Health::Failed(_)));
+    // Nobody had to attach for the driver to know, and nothing holds the stream's other end.
+    let stats = rig.host.stream_stats(0, "jobs").unwrap();
+    assert_eq!((stats.attachments, stats.claimed), (0, false));
+    // The same board with the stream as dma-bufs binds.
+    let rig = Rig::start(&board("rkvpss", "channel = 0", true), Arc::new(PerBuffer));
+    rig.host.tick();
+    assert_eq!(rig.host.device("v").unwrap().state, DeviceState::Running);
 }
 
 /// What the played node saw, and how it is to fail.

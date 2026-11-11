@@ -165,12 +165,29 @@ impl std::os::fd::AsFd for BufferHandle<'_> {
     }
 }
 
+/// What a stream's buffers are made of. It is fixed when the stream is declared, so a driver
+/// can ask before any consumer has attached and refuse a stream it can't work on when it binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferKind {
+    /// Plain memory shared with the consumer: `write` and `read` are the only way into it, and
+    /// [`StreamEndpoint::buffer_handle`] answers `Unsupported`.
+    Plain,
+    /// Every buffer is behind a handle hardware can take (a dma-buf, on a host with file
+    /// descriptors): [`StreamEndpoint::buffer_handle`] lends it while a consumer is attached.
+    /// `write` and `read` reach the same memory.
+    Handles,
+}
+
 /// The producer's end of a stream of buffers. Whoever opened the stream reads
 /// the other end.
 pub trait StreamEndpoint {
     type Error: HalError;
 
     fn buffer_count(&self) -> u32;
+    /// What the stream's buffers are. The answer never changes for a stream, with or without a
+    /// consumer, so a driver whose hardware takes buffers only by handle asks once when it
+    /// binds and refuses [`BufferKind::Plain`] there.
+    fn buffer_kind(&self) -> BufferKind;
     /// Passes a filled buffer to the consumer.
     fn publish(&mut self, frame: StreamFrame) -> Result<(), Self::Error>;
     /// The next buffer the consumer has returned, if any.

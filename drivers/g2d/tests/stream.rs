@@ -111,6 +111,10 @@ struct PerBuffer {
 
 impl StreamAllocator for PerBuffer {
     fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
+        HeapAllocator.allocate(name, layout)
+    }
+
+    fn allocate_handles(&self, name: &str, layout: &Layout, _: &str) -> Result<Backing, Status> {
         let plain = HeapAllocator.allocate(name, layout)?;
         let mut handles = Vec::new();
         let mut buffers = Vec::new();
@@ -145,9 +149,9 @@ fn start_on(heap: Option<File>) -> Host {
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"a\"\ndriver = \"fake-counter\"\n\
-         [devices.streams.jobs]\nbuffers = {BUFFERS}\nbuffer_bytes = {BYTES}\n\
-         job_slots = 4\njob_bytes = {JOB_BYTES}\n\
-         [devices.streams.odd]\nbuffers = 2\nbuffer_bytes = {ODD_BYTES}\n\
+         [devices.streams.jobs]\nmemory = \"dma-buf\"\nbuffers = {BUFFERS}\n\
+         buffer_bytes = {BYTES}\njob_slots = 4\njob_bytes = {JOB_BYTES}\n\
+         [devices.streams.odd]\nmemory = \"dma-buf\"\nbuffers = 2\nbuffer_bytes = {ODD_BYTES}\n\
          job_slots = 4\njob_bytes = {JOB_BYTES}\n"
     );
     let sim = SimBoard::new();

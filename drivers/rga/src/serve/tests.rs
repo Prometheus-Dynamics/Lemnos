@@ -92,10 +92,16 @@ struct Allocator(Memory);
 
 impl StreamAllocator for Allocator {
     fn allocate(&self, name: &str, layout: &RingLayout) -> Result<Backing, Status> {
+        HeapAllocator.allocate(name, layout)
+    }
+
+    fn allocate_handles(
+        &self,
+        name: &str,
+        layout: &RingLayout,
+        _: &str,
+    ) -> Result<Backing, Status> {
         let plain = HeapAllocator.allocate(name, layout)?;
-        if self.0 == Memory::Plain {
-            return Ok(plain);
-        }
         let (mut handles, mut buffers) = (Vec::new(), Vec::new());
         for _ in 0..layout.buffers {
             let fd: OwnedFd =
@@ -120,9 +126,15 @@ impl StreamAllocator for Allocator {
 }
 
 fn host(memory: Memory) -> Host {
+    // The board file says what the buffers are, and the allocator is asked for that.
+    let declared = if memory == Memory::Plain {
+        ""
+    } else {
+        "memory = \"dma-buf\"\n"
+    };
     let stream = |name| {
         format!(
-            "[devices.streams.{name}]\nbuffers = {BUFFERS}\nbuffer_bytes = {BYTES}\n\
+            "[devices.streams.{name}]\n{declared}buffers = {BUFFERS}\nbuffer_bytes = {BYTES}\n\
              job_slots = 16\njob_bytes = 128\n"
         )
     };

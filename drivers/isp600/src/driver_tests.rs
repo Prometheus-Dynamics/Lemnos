@@ -13,7 +13,7 @@ use lemnos_contract_isp_isp600::{
 };
 use lemnos_core::{Encode, Health, Lifecycle, Result, Status, StreamHandle, Writer};
 use lemnos_hal::ErrorKind;
-use lemnos_hal::blocks::{BufferHandle, StreamEndpoint, StreamFrame};
+use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamEndpoint, StreamFrame};
 use lemnos_hal::mock::MockStream;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_v4l2::FourCc;
@@ -206,6 +206,10 @@ impl StreamEndpoint for Racing {
 
     fn buffer_count(&self) -> u32 {
         self.inner.buffer_count()
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        self.inner.buffer_kind()
     }
 
     fn publish(&mut self, frame: StreamFrame) -> core::result::Result<(), ErrorKind> {

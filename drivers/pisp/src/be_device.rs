@@ -43,6 +43,11 @@
 //! contract says: they are counted as dropped, that consumer's config stream is faulted, and the
 //! config buffers held under it are given up.
 //!
+//! The `input` and output streams must be `memory = "dma-buf"`. The driver asks each what its
+//! buffers are when it binds (`StreamEndpoint::buffer_kind`) and refuses a stream of plain shared
+//! memory there with `NOT_SUPPORTED`, before any client attaches; `start` refuses the same way.
+//! `config` may be either: it is only read.
+//!
 //! What a client's configuration may not name: the bytes where older layouts kept addresses
 //! (the head of `pisp_be_config`), the HOG address, the reserved tail and the bus settings are
 //! the module's, and a configuration with any of them non-zero is dropped here, as the module
@@ -73,7 +78,7 @@ use lemnos_core::{
     StreamHandle, driver,
 };
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
-use lemnos_hal::blocks::StreamFrame;
+use lemnos_hal::blocks::{BufferKind, StreamFrame};
 
 use crate::be_hw::{Finished, Hardware, LinuxHardware, Placed, Plan, Registered, Settings};
 use crate::be_job::{self, JobMemory, KernelJob};
@@ -254,6 +259,16 @@ pub struct PispBe {
     bytes: Box<[u8; CONFIG_BYTES]>,
 }
 
+/// `NOT_SUPPORTED` for a stream whose buffers have no handles: the block takes an image only as a
+/// dma-buf. The stream knows from the board file, with or without a consumer.
+fn handles_only(stream: &StreamHandle) -> Result<()> {
+    if stream.buffer_kind() == BufferKind::Handles {
+        Ok(())
+    } else {
+        Err(Status::NOT_SUPPORTED)
+    }
+}
+
 impl Lifecycle for PispBe {
     type Needs = PispBeNeeds;
     const TICKS: bool = true;
@@ -266,6 +281,12 @@ impl Lifecycle for PispBe {
             None => Ok(default),
         };
         let options = Options::new(int("buffers", 4)?, int("job_slots", 4)?)?;
+        // The block reads and writes images only as dma-bufs: known now, before any client.
+        handles_only(&needs.input)?;
+        handles_only(&needs.output0)?;
+        if let Some(output1) = needs.output1.as_ref() {
+            handles_only(output1)?;
+        }
         Ok(Self::with_hardware(
             Box::new(LinuxHardware::new(settings)),
             needs,
@@ -422,6 +443,11 @@ impl PispBe {
 
     /// Makes everything from nothing.
     fn begin(&mut self) -> Result<()> {
+        handles_only(&self.input)?;
+        handles_only(&self.output0)?;
+        if let Some(output1) = self.output1.as_ref() {
+            handles_only(output1)?;
+        }
         let tdn_bytes = match (self.tdn_compressed, self.raw) {
             (Some(compressed), Some(input)) => {
                 let per_pixel = if compressed { 1 } else { 2 };

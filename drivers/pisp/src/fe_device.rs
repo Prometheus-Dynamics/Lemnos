@@ -74,10 +74,13 @@
 //! contract says: they are counted as dropped, that consumer's config stream is faulted, and the
 //! config buffers held under it are given up.
 //!
-//! `start` without an `output0` stream on the device is `NOT_FOUND`; with one whose buffers have
-//! no handles and a consumer attached, `NOT_SUPPORTED`; with buffers smaller than output 0, or
-//! more than 64 of them, `INVALID_ARGUMENT`. Found later (a consumer attaching after `start`), the
-//! last two show as degraded health.
+//! An `output0`, `statistics` or `output1` stream whose buffers have no handles (plain shared
+//! memory) is refused when the driver binds, with `NOT_SUPPORTED`: the stream says what its
+//! buffers are before any client attaches (`StreamEndpoint::buffer_kind`), so the device shows as
+//! failing to bind until the board file is fixed. `start` refuses the same way. `start` without
+//! an `output0` stream on the device is `NOT_FOUND`; with buffers smaller than output 0, or more
+//! than 64 of them, `INVALID_ARGUMENT` when a client is already attached, and degraded health
+//! once one is.
 //!
 //! Failures. A stream that faulted, a job the module refused or a wedged block starts recovery:
 //! the next ticks stop what's left and make everything again, with the delay between attempts
@@ -99,7 +102,7 @@ use lemnos_core::{
     StreamHandle, driver,
 };
 use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
-use lemnos_hal::blocks::StreamFrame;
+use lemnos_hal::blocks::{BufferKind, StreamFrame};
 
 mod relay;
 
@@ -296,6 +299,16 @@ pub struct PispFe {
     bytes: Box<[u8; CONFIG_BYTES]>,
 }
 
+/// `NOT_SUPPORTED` for a stream whose buffers have no handles: the block takes an image only as a
+/// dma-buf. The stream knows from the board file, with or without a consumer.
+fn handles_only(stream: &StreamHandle) -> Result<()> {
+    if stream.buffer_kind() == BufferKind::Handles {
+        Ok(())
+    } else {
+        Err(Status::NOT_SUPPORTED)
+    }
+}
+
 impl Lifecycle for PispFe {
     type Needs = PispFeNeeds;
     const TICKS: bool = true;
@@ -317,6 +330,14 @@ impl Lifecycle for PispFe {
             },
             int("job_slots", Some(4))?,
         )?;
+        // The block writes images and statistics only into dma-bufs: known now, before any
+        // client attaches.
+        for stream in [&needs.output0, &needs.statistics, &needs.output1]
+            .into_iter()
+            .flatten()
+        {
+            handles_only(stream)?;
+        }
         Ok(Self::with_hardware(
             Box::new(LinuxHardware::new(settings)),
             needs,
@@ -334,10 +355,6 @@ impl Lifecycle for PispFe {
             State::Recovering { .. } => {
                 Health::Degraded("the front end's stream ended while running: restarting it")
             }
-            State::Running { .. } if self.relay.no_handles() => Health::Degraded(
-                "the output0 stream's buffers have no handles (not memory = \"dma-buf\"): \
-                 every job is dropped",
-            ),
             State::Running { .. } if self.relay.refused() => Health::Degraded(
                 "the output0 stream's buffers are not memory the block can take \
                  (smaller than output 0?): jobs on them are dropped",
@@ -451,6 +468,16 @@ impl PispFe {
             // Nowhere for output 0 to go.
             return Err(Status::NOT_FOUND);
         };
+        for stream in [
+            Some(frames),
+            self.statistics.as_ref(),
+            self.output1.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            handles_only(stream)?;
+        }
         let buffers = frames.buffer_count();
         if buffers == 0 || buffers as usize > MAX_BUFFERS {
             return Err(Status::INVALID_ARGUMENT);

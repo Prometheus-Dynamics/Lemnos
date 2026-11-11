@@ -496,7 +496,7 @@ fn an_image_larger_than_its_buffer_is_dropped_and_let_go() {
 }
 
 #[test]
-fn with_buffers_that_have_no_handles_a_job_is_dropped_before_the_block() {
+fn streams_whose_buffers_have_no_handles_are_refused_at_start() {
     for streams in [
         Streams {
             input: MockStream::new(4),
@@ -509,11 +509,9 @@ fn with_buffers_that_have_no_handles_a_job_is_dropped_before_the_block() {
     ] {
         let (mut be, hw) = setup(&streams);
         streams.configure(&config());
-        CameraIsp::start(&mut be).unwrap();
-        streams.post(&job(1, 0, 2));
-        run_once(&mut be, 1);
+        assert_eq!(CameraIsp::start(&mut be), Err(Status::NOT_SUPPORTED));
+        assert_eq!(be.tick(1), None, "not running");
         assert!(hw.posted().is_empty());
-        assert_eq!(dropped(&mut be), 1);
         assert_eq!(hw.with(Mock::live), 0);
     }
 }
