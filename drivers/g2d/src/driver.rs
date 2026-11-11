@@ -19,13 +19,10 @@
 //! - `device`: the engine's node, [`DEVICE`] when left out. Nothing is opened at bind: the
 //!   first job opens it (see [`G2d`]).
 //! - The stream named [`JOB_STREAM`] carries the jobs and holds the images. Its buffers must be
-//!   dma-bufs, since a job is handed to the engine by descriptor. A stream of plain shared
-//!   memory can't say so until a consumer attaches (the producer's end answers "nothing behind
-//!   this buffer" until then); from the first buffer it lends with a consumer attached, the
-//!   driver reports [`Health::Failed`] with [`NO_HANDLES`], which tells the board author what
-//!   to change, and every job fails. Its completion reaches the consumer when it names a
-//!   buffer taken since the consumer attached; such a stream can't tell the driver which
-//!   buffers those are.
+//!   dma-bufs, since a job is handed to the engine by descriptor. The driver asks the stream
+//!   what its buffers are when it binds (`StreamEndpoint::buffer_kind`), and a stream of plain
+//!   shared memory is refused there with `NOT_SUPPORTED`: the device shows as failing to bind,
+//!   retried as any failed bind is, until the board file gives the stream `memory = "dma-buf"`.
 //!
 //! # Ticks
 //!
@@ -57,9 +54,9 @@ use lemnos_contract_image_convert::{
     ConversionPair, ConvertInfo, Counters, ImageConvert, MAX_STREAM_NAME,
 };
 use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
-use lemnos_hal::ErrorKind;
+use lemnos_hal::blocks::BufferKind;
 
-use crate::convert::{Converter, FORMATS, MAX_BUFFERS};
+use crate::convert::{Converter, FORMATS};
 use crate::engine::{Engine, G2d, State, backoff_ns};
 use crate::{DEVICE, Device, MAX_SIZE};
 
@@ -69,24 +66,11 @@ pub const JOB_STREAM: &str = "jobs";
 /// How often the stream is looked at.
 pub const POLL_NS: u64 = 1_000_000;
 
-/// What health says about a job stream without dma-bufs.
-pub const NO_HANDLES: &str =
-    "the job stream's buffers are not dma-bufs: give it memory = \"dma-buf\" in the board file";
-
 /// An engine, as the driver holds it.
 pub type BoxedEngine = Box<dyn Engine + Send>;
 
 /// What opens the engine, as the driver holds it.
 pub type Opener = Box<dyn FnMut() -> io::Result<BoxedEngine> + Send>;
-
-/// Whether the stream's buffers have handles, as far as the driver has seen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Handles {
-    /// No buffer has been lent with a consumer attached yet.
-    Unknown,
-    Yes,
-    No,
-}
 
 /// The G2D engine as `image.convert/1`.
 #[driver("g2d", provides = [ImageConvert])]
@@ -94,7 +78,6 @@ pub struct G2dDriver {
     #[needs]
     jobs: StreamHandle,
     converter: Converter<BoxedEngine, Opener>,
-    handles: Handles,
     /// Stream errors in a row.
     stream_failures: u32,
     /// When the stream is tried again after an error.
@@ -110,15 +93,16 @@ impl Lifecycle for G2dDriver {
         if path.as_os_str().is_empty() {
             return Err(Status::INVALID_ARGUMENT);
         }
+        // The engine takes an image only as a dma-buf: known now, before any consumer comes.
+        if needs.jobs.buffer_kind() != BufferKind::Handles {
+            return Err(Status::NOT_SUPPORTED);
+        }
         let open: Opener =
             Box::new(move || Device::open(&path).map(|device| Box::new(device) as BoxedEngine));
         Ok(Self::with_engine(needs, open))
     }
 
     fn health(&self) -> Health {
-        if self.handles == Handles::No {
-            return Health::Failed(NO_HANDLES);
-        }
         if self.stream_failures > 0 {
             return Health::Degraded("the job stream failed: trying it again");
         }
@@ -135,7 +119,6 @@ impl Lifecycle for G2dDriver {
         match self.converter.serve(&mut *self.jobs, now_ns) {
             Ok(_) => {
                 self.stream_failures = 0;
-                self.look_for_handles();
                 Some(now_ns.saturating_add(POLL_NS))
             }
             Err(_) => {
@@ -155,7 +138,6 @@ impl G2dDriver {
         Self {
             jobs: needs.jobs,
             converter: Converter::new(G2d::new(open)),
-            handles: Handles::Unknown,
             stream_failures: 0,
             retry_at_ns: 0,
         }
@@ -164,19 +146,6 @@ impl G2dDriver {
     /// The job server.
     pub fn converter(&self) -> &Converter<BoxedEngine, Opener> {
         &self.converter
-    }
-
-    /// Asks the stream for the handle of a buffer the driver holds: an `Unsupported` answer
-    /// means its buffers aren't dma-bufs. Nothing is learnt while no consumer is attached.
-    fn look_for_handles(&mut self) {
-        let Some(buffer) = (0..MAX_BUFFERS).find(|b| self.converter.holds(*b)) else {
-            return;
-        };
-        match self.jobs.buffer_handle(buffer) {
-            Ok(Some(_)) => self.handles = Handles::Yes,
-            Err(ErrorKind::Unsupported) => self.handles = Handles::No,
-            Ok(None) | Err(_) => {}
-        }
     }
 }
 

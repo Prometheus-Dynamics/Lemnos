@@ -23,7 +23,7 @@ use lemnos_driver_rp1_csi2::{Finished, Hardware, Rp1Csi2, StartParams};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
-use lemnos_host::{Host, Options as HostOptions, entry};
+use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_sim::SimBoard;
 use lemnos_wire::ring::{Consumer, Layout};
@@ -574,29 +574,56 @@ fn with_no_consumer_the_block_has_no_memory_and_gets_it_when_one_comes() {
 }
 
 #[test]
-fn a_stream_without_handles_is_refused_and_gets_no_frame() {
-    // Plain shared memory with a consumer attached: nothing to give the block.
+fn a_stream_without_handles_is_refused_with_or_without_a_consumer() {
+    // Plain shared memory: nothing to give the block. The stream says so before anyone attaches.
     let host = host_with(FRAME_BYTES, "");
     let hw = Hw::default();
-    let mut frames = Client::attach(&host);
     let mut receiver = driver(&host, &hw);
     assert_eq!(receiver.start().unwrap_err(), Status::NOT_SUPPORTED);
-    assert_eq!(hw.with(|b| (b.going, b.given)), (false, 0));
-    assert!(frames.ring.pop_frame().unwrap().is_none());
-    drop(frames);
-    host.stream_detach(0, "frames", CALLER).unwrap();
-
-    // Started with nobody attached, it can't know yet. Once a consumer is there it says so,
-    // and still gives the block nothing.
-    receiver.start().unwrap();
-    assert_eq!(receiver.health(), Health::Ok);
     let mut frames = Client::attach(&host);
-    let now = receiver.tick(1).unwrap();
-    assert!(matches!(receiver.health(), Health::Degraded(_)));
-    assert_eq!(hw.with(|b| b.given), 0);
-    assert_eq!(hw.with(Block::frame), None);
-    receiver.tick(now).unwrap();
+    assert_eq!(receiver.start().unwrap_err(), Status::NOT_SUPPORTED);
+    assert_eq!(hw.with(|b| (b.going, b.given)), (false, 0));
+    assert_eq!(receiver.tick(1), None, "not streaming");
     assert!(frames.ring.pop_frame().unwrap().is_none());
+}
+
+/// A board whose device `csi0` is this driver, with `frames` as `memory` says.
+fn bound(memory: &str) -> Host {
+    let text = format!(
+        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+         [[devices]]\nid = \"csi0\"\ndriver = \"rp1-csi2\"\nconfig = {{ device = \"none\" }}\n\
+         [devices.streams.frames]\nbuffers = {BUFFERS}\nbuffer_bytes = {FRAME_BYTES}\n{memory}"
+    );
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    Host::start_with_streams(
+        &parse(&text).unwrap(),
+        &[entry::<Rp1Csi2>()],
+        Box::new(sim),
+        Arc::new(clock),
+        HostOptions::default(),
+        Arc::new(Handles),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_board_whose_frames_stream_is_plain_memory_is_refused_at_bind() {
+    let host = bound("");
+    host.tick();
+    let DeviceState::Backoff { reason, .. } = host.device("csi0").unwrap().state else {
+        panic!("the driver bound to a stream it cannot use");
+    };
+    assert!(
+        reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
+        "{reason}"
+    );
+    // Nobody had to attach for the driver to know.
+    assert_eq!(host.stream_stats(0, "frames").unwrap().attachments, 0);
+    // The same board with the stream as dma-bufs binds; nothing is opened until `start`.
+    let host = bound("memory = \"dma-buf\"\n");
+    host.tick();
+    assert_eq!(host.device("csi0").unwrap().state, DeviceState::Running);
 }
 
 #[test]

@@ -889,17 +889,13 @@ fn a_stream_whose_buffers_have_no_handles_is_refused() {
 }
 
 #[test]
-fn statistics_without_handles_get_no_job() {
+fn a_statistics_stream_without_handles_is_refused_at_start() {
     let mut r = rig();
     let plain = MockStream::with_bytes(4, STATS_BYTES);
     r.fe.statistics = Some(Box::new(plain.clone()));
-    r.fill(0, &config(en::AWB_STATS));
-    CameraIsp::start(&mut r.fe).unwrap();
-    r.post(&job(1, 0, 0, NO_BUFFER));
-    r.fe.tick(1);
-    assert!(r.hw.with(|m| m.posted.is_empty()));
-    assert_eq!(r.fe.counters.dropped, 1);
-    assert_eq!(r.hw.registered(), 0);
+    assert_eq!(CameraIsp::start(&mut r.fe), Err(Status::NOT_SUPPORTED));
+    assert!(r.hw.with(|m| m.set.is_empty()));
+    assert_eq!(r.fe.tick(1), None, "not running");
 }
 
 #[test]

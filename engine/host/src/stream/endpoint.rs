@@ -4,7 +4,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lemnos_core::{CallerId, Status};
-use lemnos_hal::blocks::{BufferHandle, StreamFrame};
+use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_wire::ring::{
     FrameSlot, Layout, Producer, RingError, STATE_CLOSED, STATE_FAULT, WordMemory,
@@ -297,6 +297,8 @@ impl StreamCore {
 pub struct ProducerEndpoint {
     core: Arc<Mutex<StreamCore>>,
     buffers: u32,
+    /// What the board file says the buffers are. An attachment is never made of anything else.
+    kind: BufferKind,
     /// The dma-bufs of the attachment the last buffer was taken in, kept here so one can be
     /// lent for as long as this end is borrowed. Changed only when a buffer is taken, which
     /// needs this end exclusively, so never while a handle is out.
@@ -307,17 +309,22 @@ pub struct ProducerEndpoint {
 
 impl ProducerEndpoint {
     pub(super) fn claim(core: Arc<Mutex<StreamCore>>) -> Result<Self, Status> {
-        let buffers = {
+        let (buffers, kind) = {
             let mut guard = lock(&core);
             if guard.claimed {
                 return Err(Status::BUSY);
             }
             guard.claimed = true;
-            guard.layout.buffers
+            let kind = match guard.memory {
+                StreamMemory::Shared => BufferKind::Plain,
+                StreamMemory::DmaBuf => BufferKind::Handles,
+            };
+            (guard.layout.buffers, kind)
         };
         Ok(Self {
             core,
             buffers,
+            kind,
             lent: None,
             lent_epoch: 0,
         })
@@ -357,6 +364,10 @@ impl StreamEndpoint for ProducerEndpoint {
 
     fn buffer_count(&self) -> u32 {
         self.buffers
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        self.kind
     }
 
     fn publish(&mut self, frame: StreamFrame) -> Result<(), ErrorKind> {

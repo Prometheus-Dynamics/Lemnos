@@ -9,9 +9,9 @@ use super::alloc::vec::Vec;
 use super::{Shared, with};
 use crate::ErrorKind;
 use crate::blocks::{
-    BufferHandle, Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt, InterruptEvent,
-    IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice, UsbDeviceId,
-    UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
+    BufferHandle, BufferKind, Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt,
+    InterruptEvent, IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice,
+    UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
 };
 use crate::usb_descriptors::{self, UsbDescriptors, UsbEndpoint};
 
@@ -547,6 +547,14 @@ impl StreamEndpoint for MockStream {
 
     fn buffer_count(&self) -> u32 {
         with(&self.state, |s| s.buffers)
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        #[cfg(all(feature = "std", unix))]
+        if self.files.is_some() {
+            return BufferKind::Handles;
+        }
+        BufferKind::Plain
     }
 
     fn publish(&mut self, frame: StreamFrame) -> Result<(), ErrorKind> {

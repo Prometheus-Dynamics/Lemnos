@@ -24,11 +24,14 @@
 //! (at once for a buffer the block isn't using). With no consumer no buffer has memory the driver
 //! may use, and the block drops frames until one comes.
 //!
-//! What is refused. `start` without a `frames` stream on the device is `NOT_FOUND`. A stream
-//! whose buffers have no handles (plain shared memory, not `memory = "dma-buf"`) is
-//! `NOT_SUPPORTED` at `start` when a consumer is already attached, and otherwise shows as degraded
-//! health once one is: no frame is ever published over memory the block didn't write. Buffers
-//! smaller than a frame, or more than 64 of them, are refused the same two ways.
+//! What is refused. A `frames` stream whose buffers have no handles (plain shared memory, not
+//! `memory = "dma-buf"`) is refused when the driver binds, with `NOT_SUPPORTED`: the stream says
+//! what its buffers are before any consumer attaches (`StreamEndpoint::buffer_kind`), so the
+//! device shows as failing to bind until the board file is fixed, and no frame is ever published
+//! over memory the block didn't write. `start` without a `frames` stream on the device is
+//! `NOT_FOUND`. Buffers smaller than a frame, or more than 64 of them, are `INVALID_ARGUMENT` at
+//! `start` when a consumer is already attached, and otherwise show as degraded health once one
+//! is.
 //!
 //! Provenance: ported from the dev branch (`crates/lemnos-drivers-pisp/src/device/csi2_module.rs`
 //! and the receiver module); the kernel part keeps the stock driver's copyright and is GPL-2.0, as
@@ -66,6 +69,8 @@ use lemnos_contract_camera_receiver::{
 use lemnos_core::{
     Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
 };
+
+use lemnos_hal::blocks::BufferKind;
 
 pub use hw::{Finished, Hardware, LinuxHardware, Settings, StartParams};
 pub use lemnos_driver_rp1_csi2_sys as sys;
@@ -172,12 +177,26 @@ fn layout(link: &LinkConfig, packing: Packing) -> Result<FrameLayout> {
     })
 }
 
+/// `NOT_SUPPORTED` for a stream whose buffers have no handles: there is nothing to give the
+/// block. The stream knows from the board file, with or without a consumer.
+fn handles_only(frames: &relay::Frames) -> Result<()> {
+    if frames.buffer_kind() == BufferKind::Handles {
+        Ok(())
+    } else {
+        Err(Status::NOT_SUPPORTED)
+    }
+}
+
 impl Lifecycle for Rp1Csi2 {
     type Needs = Rp1Csi2Needs;
     const TICKS: bool = true;
 
     fn start(needs: Rp1Csi2Needs, cfg: &Config<'_>) -> Result<Self> {
         let settings = hw::Settings::new(cfg.str("device"))?;
+        // The block writes a frame only into a dma-buf: known now, before any consumer comes.
+        if let Some(frames) = needs.frames.as_ref() {
+            handles_only(&**frames)?;
+        }
         let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(settings));
         Ok(Self::with_hardware(hw, needs.frames))
     }
@@ -192,10 +211,6 @@ impl Lifecycle for Rp1Csi2 {
             State::Recovering { .. } => {
                 Health::Degraded("the receiver stopped while streaming: restarting it")
             }
-            State::Streaming { .. } if self.relay.no_handles() => Health::Degraded(
-                "the frames stream's buffers have no handles (not memory = \"dma-buf\"): \
-                 no frame can reach its consumer",
-            ),
             State::Streaming { .. } if self.relay.refused() => Health::Degraded(
                 "the frames stream's buffers are not memory the block can take \
                  (smaller than a frame?): no frame can reach its consumer",
@@ -298,6 +313,7 @@ impl Rp1Csi2 {
             // Nowhere for a frame to go.
             return Err(Status::NOT_FOUND);
         };
+        handles_only(&**frames)?;
         let buffers = frames.buffer_count();
         if buffers == 0 || buffers as usize > MAX_BUFFERS {
             return Err(Status::INVALID_ARGUMENT);

@@ -37,7 +37,7 @@ use lemnos_driver_pisp::{FeLink, FeOptions, PispFe, PispFeNeeds};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
-use lemnos_host::{Host, Options as HostOptions, entry};
+use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
@@ -905,4 +905,53 @@ fn jobs_in_steady_state_allocate_nothing() {
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().jobs, 64);
     assert_eq!(hw.with(|b| b.lost), 0);
     assert_eq!(hw.registered(), 0);
+}
+
+/// A board whose device is the front end itself, with each image stream as its entry says.
+fn bound(statistics: &str, output0: &str, output1: &str) -> Host {
+    let text = format!(
+        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+         [[devices]]\nid = \"isp\"\ndriver = \"pisp-fe\"\n\
+         config = {{ device = \"none\", lanes = 2, mbps = 900, data_type = 43 }}\n\
+         [devices.streams.config]\nbuffers = {CONFIGS}\nbuffer_bytes = {CONFIG_BYTES}\n\
+         job_slots = 8\njob_bytes = 128\n\
+         [devices.streams.statistics]\nbuffers = {CONFIGS}\nbuffer_bytes = {STATS_BYTES}\n\
+         {statistics}\n\
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{output0}\n\
+         [devices.streams.output1]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{output1}\n"
+    );
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    Host::start_with_streams(
+        &parse(&text).unwrap(),
+        &[entry::<PispFe>()],
+        Box::new(sim),
+        Arc::new(clock),
+        HostOptions::default(),
+        Arc::new(Handles),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_board_with_an_image_or_statistics_stream_of_plain_memory_is_refused_at_bind() {
+    let dma = "memory = \"dma-buf\"";
+    for plain in 0..3 {
+        let memory = |stream: usize| if stream == plain { "" } else { dma };
+        let host = bound(memory(0), memory(1), memory(2));
+        host.tick();
+        let DeviceState::Backoff { reason, .. } = host.device("isp").unwrap().state else {
+            panic!("the driver bound to a stream it cannot use");
+        };
+        assert!(
+            reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
+            "{reason}"
+        );
+        // Nobody had to attach for the driver to know.
+        assert_eq!(host.stream_stats(0, "output0").unwrap().attachments, 0);
+    }
+    // With all three as dma-bufs it binds; nothing is opened until `start`.
+    let host = bound(dma, dma, dma);
+    host.tick();
+    assert_eq!(host.device("isp").unwrap().state, DeviceState::Running);
 }

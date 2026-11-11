@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use lemnos_core::{CallerId, Status};
 use lemnos_fake_devices::FakeCounter;
-use lemnos_hal::blocks::{BufferHandle, StreamFrame};
+use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_host::board::parse;
 use lemnos_host::stream::{
@@ -29,6 +29,8 @@ const FIRST: CallerId = CallerId(7);
 const SECOND: CallerId = CallerId(8);
 const BUFFERS: u32 = 4;
 const BYTES: usize = 64;
+/// The board file's key for a stream of dma-bufs.
+const DMA_BUF: &str = "memory = \"dma-buf\"\n";
 
 /// A file of `len` bytes with no name left.
 fn unnamed(len: u64) -> File {
@@ -86,6 +88,10 @@ struct FileStreams {
 
 impl StreamAllocator for FileStreams {
     fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
+        HeapAllocator.allocate(name, layout)
+    }
+
+    fn allocate_handles(&self, name: &str, layout: &Layout, _: &str) -> Result<Backing, Status> {
         let heap = HeapAllocator.allocate(name, layout)?;
         let files: Vec<File> = (0..layout.buffers)
             .map(|_| unnamed(u64::from(layout.buffer_bytes)))
@@ -135,7 +141,7 @@ fn start_declared(allocator: Arc<dyn StreamAllocator>, keys: &str) -> Host {
 }
 
 fn with_handles() -> Host {
-    start(Arc::new(FileStreams { short: 0 }))
+    start_declared(Arc::new(FileStreams { short: 0 }), DMA_BUF)
 }
 
 fn consumer(lease: &Lease) -> Consumer {
@@ -300,6 +306,53 @@ fn a_consumer_that_goes_keeps_its_memory_to_itself_and_the_next_gets_its_own() {
 }
 
 #[test]
+fn a_producer_knows_what_its_buffers_are_before_any_consumer_attaches() {
+    let host = with_handles();
+    // What a driver is given when it binds.
+    let frames: Box<dyn StreamEndpoint<Error = ErrorKind>> =
+        Box::new(host.stream_producer(0, "frames").unwrap());
+    let plain: Box<dyn StreamEndpoint<Error = ErrorKind>> =
+        Box::new(host.stream_producer(0, "plain").unwrap());
+    assert_eq!(frames.buffer_kind(), BufferKind::Handles);
+    assert_eq!(plain.buffer_kind(), BufferKind::Plain);
+    for name in ["frames", "plain"] {
+        assert_eq!(host.stream_stats(0, name).unwrap().attachments, 0, "{name}");
+    }
+    // It stays so with a consumer, and after it.
+    host.stream_attach(0, "frames", FIRST).unwrap();
+    host.stream_attach(0, "plain", FIRST).unwrap();
+    assert_eq!(frames.buffer_kind(), BufferKind::Handles);
+    assert_eq!(plain.buffer_kind(), BufferKind::Plain);
+    host.caller_gone(FIRST);
+    assert_eq!(frames.buffer_kind(), BufferKind::Handles);
+    assert_eq!(plain.buffer_kind(), BufferKind::Plain);
+}
+
+/// Hands out handles for every stream, declared as dma-bufs or not.
+struct Eager;
+
+impl StreamAllocator for Eager {
+    fn allocate(&self, name: &str, layout: &Layout) -> Result<Backing, Status> {
+        FileStreams { short: 0 }.allocate_handles(name, layout, "")
+    }
+}
+
+#[test]
+fn a_stream_declared_as_plain_memory_lends_no_handle_whatever_the_allocator_made() {
+    let host = start(Arc::new(Eager));
+    let mut producer = host.stream_producer(0, "plain").unwrap();
+    assert_eq!(producer.buffer_kind(), BufferKind::Plain);
+    let lease = host.stream_attach(0, "plain", FIRST).unwrap();
+    assert!(lease.handles.is_none());
+    let buffer = producer.next_buffer().unwrap().unwrap();
+    assert_eq!(
+        producer.buffer_handle(buffer).map(|_| ()),
+        Err(ErrorKind::Unsupported),
+        "what the driver was told at bind stays true"
+    );
+}
+
+#[test]
 fn a_stream_of_plain_memory_has_no_handles_and_says_so() {
     let host = start(Arc::new(HeapAllocator));
     let mut producer = host.stream_producer(0, "frames").unwrap();
@@ -325,7 +378,7 @@ fn a_stream_of_plain_memory_has_no_handles_and_says_so() {
 
 #[test]
 fn an_attachment_with_the_wrong_number_of_handles_is_refused() {
-    let host = start(Arc::new(FileStreams { short: 1 }));
+    let host = start_declared(Arc::new(FileStreams { short: 1 }), DMA_BUF);
     assert_eq!(
         host.stream_attach(0, "frames", FIRST).err(),
         Some(Status::IO)
@@ -398,7 +451,7 @@ impl StreamAllocator for Declared {
         if self.empty_handed {
             return HeapAllocator.allocate(name, layout);
         }
-        FileStreams { short: 0 }.allocate(name, layout)
+        FileStreams { short: 0 }.allocate_handles(name, layout, heap)
     }
 }
 

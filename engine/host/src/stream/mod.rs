@@ -234,10 +234,12 @@ impl Streams {
         {
             return Err(Status::IO);
         }
-        // What the board file declared is what a driver was written against.
+        // What the board file declared is what a driver was written against, and what its end
+        // of the stream told it when it bound.
         if memory == StreamMemory::DmaBuf && handles.is_none() {
             return Err(Status::IO);
         }
+        let handles = handles.filter(|_| memory == StreamMemory::DmaBuf);
         core.attach(
             caller,
             Arc::clone(&ring),

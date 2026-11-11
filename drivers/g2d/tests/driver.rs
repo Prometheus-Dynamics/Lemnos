@@ -15,13 +15,13 @@ use std::time::Duration;
 use lemnos_contract_image_convert::{ConvertJob, Counters, ImageConvert, ImageRef, JOB_BYTES};
 use lemnos_core::{CallerId, Decode, Encode, Health, Lifecycle, MethodId, Reader, Status, Writer};
 use lemnos_driver_g2d::convert::Failure;
-use lemnos_driver_g2d::driver::{BoxedEngine, NO_HANDLES, Opener, POLL_NS};
+use lemnos_driver_g2d::driver::{BoxedEngine, Opener, POLL_NS};
 use lemnos_driver_g2d::{Engine, G2dDriver, G2dDriverNeeds, HardwareVersion, Job, State};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_hal::mock::MockStream;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::{Counting, allocations};
@@ -228,30 +228,25 @@ fn a_board_file_binds_it_and_the_host_reaches_its_contract_and_its_jobs() {
 }
 
 #[test]
-fn a_stream_of_plain_shared_memory_is_refused_with_a_status_naming_the_fix() {
+fn a_stream_of_plain_shared_memory_is_refused_at_bind_before_any_consumer_comes() {
     // `HeapAllocator` makes plain shared memory, with no handles.
     let rig = Rig::start(&board("g2d", false), Arc::new(HeapAllocator));
     rig.host.tick();
-    assert_eq!(
-        rig.health(),
-        Health::Ok,
-        "nothing to tell before a consumer"
+    let DeviceState::Backoff { reason, .. } = rig.host.device("g").unwrap().state else {
+        panic!("the driver bound to a stream it cannot use");
+    };
+    assert!(
+        reason.contains(&format!("{:?}", Status::NOT_SUPPORTED)),
+        "{reason}"
     );
-    let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
-    let mut consumer = consumer(&lease);
-    rig.after(Duration::from_millis(1));
-    assert_eq!(rig.health(), Health::Failed(NO_HANDLES));
-    assert!(NO_HANDLES.contains("memory = \"dma-buf\""));
-    // Every job is still taken, and fails. (Its completion reaches the consumer only on a
-    // buffer taken since it attached: a stream without handles can't say which those are.)
-    post(&mut consumer, &job(3, 0, 1, 32, 32));
-    rig.after(Duration::from_millis(1));
-    let counters = rig.call(0, 5, &[]).unwrap();
-    assert_eq!(
-        Counters::decode(&mut Reader::new(&counters)).unwrap(),
-        Counters { jobs: 0, errors: 1 }
-    );
-    assert_eq!(rig.health(), Health::Failed(NO_HANDLES));
+    assert!(matches!(rig.health(), Health::Failed(_)));
+    // Nobody had to attach for the driver to know, and nothing holds the stream's other end.
+    let stats = rig.host.stream_stats(0, "jobs").unwrap();
+    assert_eq!((stats.attachments, stats.claimed), (0, false));
+    // The same board with the stream as dma-bufs binds.
+    let rig = Rig::start(&board("g2d", true), Arc::new(PerBuffer));
+    rig.host.tick();
+    assert_eq!(rig.host.device("g").unwrap().state, DeviceState::Running);
 }
 
 /// An engine that counts its jobs and fails as told; `Send`, as a driver's must be.

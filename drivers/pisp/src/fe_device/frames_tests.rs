@@ -631,29 +631,16 @@ fn with_no_consumer_no_job_is_sent() {
 }
 
 #[test]
-fn a_stream_without_handles_is_refused_and_gets_no_job_and_no_garbage() {
-    // `frames` declared as plain shared memory, with a consumer attached: nothing to give the
-    // block.
+fn a_stream_without_handles_is_refused_with_or_without_a_consumer() {
+    // `output0` declared as plain shared memory: nothing to give the block. The stream says so
+    // before anyone attaches.
     let host = host_with("");
     let hw = Hw::default();
-    let frames = Client::attach(&host, "output0");
-    let mut jobs = Client::attach(&host, "config");
     let mut fe = driver(&host, &hw);
     assert_eq!(CameraIsp::start(&mut fe), Err(Status::NOT_SUPPORTED));
-    assert_eq!(hw.with(|b| b.given), 0);
-    drop(frames);
-    host.stream_detach(0, "output0", CALLER).unwrap();
-
-    // Started with nobody attached, it can't know yet. Once a consumer is there it says so,
-    // and a job is dropped rather than run into memory the consumer never sees.
-    CameraIsp::start(&mut fe).unwrap();
     let mut frames = Client::attach(&host, "output0");
-    let mut now = fe.tick(1).unwrap();
-    assert!(matches!(fe.health(), Health::Degraded(_)));
-    jobs.post(1, 1);
-    now = fe.tick(now).unwrap();
-    fe.tick(now).unwrap();
+    assert_eq!(CameraIsp::start(&mut fe), Err(Status::NOT_SUPPORTED));
+    assert_eq!(fe.tick(1), None, "not running");
     assert!(frames.ring.pop_frame().unwrap().is_none());
-    assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
     assert_eq!(hw.with(|b| (b.given, b.queue.len(), b.refused)), (0, 0, 0));
 }
