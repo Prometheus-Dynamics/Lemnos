@@ -2,7 +2,7 @@
 //! each one took the expected route and behaved the same on it.
 //!
 //! `lemnos-module-check <route> <spi route> <gpio chip number> <simulated chip directory>`, where
-//! a route is `module` or `stock`. The first covers I2C, GPIO and PWM, and the test block's DMA
+//! a route is `module` or `stock`. The first covers I2C (PIO I2C too), GPIO and PWM, and the test block's DMA
 //! memory, registers, interrupts, clock and reset, which must be bound to the module on the
 //! module route, loaded with `test_map_unconfined` and `test_irq_inject` (on the stock route there
 //! are none).
@@ -52,6 +52,12 @@ const TEST_BLOCK_MAGIC: u32 = 0x4c45_4d4e;
 /// The rate of the test clock, a fixed one.
 const TEST_CLOCK_HZ: u64 = 25_000_000;
 const TEST_BUS: &str = "i2c-40";
+/// A PIO I2C bus. The harness has the stand-in PIO driver and no `/dev/pio0`, so only the
+/// module's route reaches it.
+const PIO_BUS: &str = "pio-i2c:sda=8,scl=7";
+const PIO_OTHER_BUS: &str = "pio-i2c:sda=10,scl=11";
+/// The stand-in PIO driver's count of open clients.
+const PIO_CLIENTS: &str = "/sys/module/rp1_pio_mock/parameters/clients";
 const STUB_ADDR: u8 = 0x30;
 const MEM_ADDR: u8 = 0x50;
 const HELD_ADDR: u8 = 0x51;
@@ -80,9 +86,23 @@ fn route(through_module: bool) -> &'static str {
     if through_module { "module" } else { "stock" }
 }
 
-/// Runs `op` many times and prints its median and 99th percentile time and its allocations.
+/// The CPU time all of this process's threads have run, in nanoseconds, from the scheduler's
+/// own accounting (`/proc/self/task/*/schedstat`), or `None` where the kernel doesn't keep it.
+fn cpu_ns() -> Option<u64> {
+    let mut total = 0;
+    for task in std::fs::read_dir("/proc/self/task").ok()?.flatten() {
+        let text = std::fs::read_to_string(task.path().join("schedstat")).ok()?;
+        total += text.split_whitespace().next()?.parse::<u64>().ok()?;
+    }
+    Some(total)
+}
+
+/// Runs `op` many times and prints its median and 99th percentile time, the CPU time it took
+/// per run (every thread of the process, so a helper thread's share is in it), and its
+/// allocations.
 fn measure(through_module: bool, what: &str, mut op: impl FnMut(usize) -> bool) {
     let mut times = [0u64; SAMPLES];
+    let cpu_before = cpu_ns();
     let (ok, allocated) = allocations(|| {
         let mut ok = (0..WARMUP).all(&mut op);
         for (n, time) in times.iter_mut().enumerate() {
@@ -92,10 +112,19 @@ fn measure(through_module: bool, what: &str, mut op: impl FnMut(usize) -> bool) 
         }
         ok
     });
+    let cpu = cpu_ns()
+        .zip(cpu_before)
+        .map(|(after, before)| {
+            format!(
+                "  cpu {:>7} ns",
+                after.saturating_sub(before) / (WARMUP + SAMPLES) as u64
+            )
+        })
+        .unwrap_or_default();
     times.sort_unstable();
     let _ = writeln!(
         std::io::stdout(),
-        "measure {:<6} {what:<22} median {:>7} ns  p99 {:>7} ns  {allocated} allocations{}",
+        "measure {:<6} {what:<22} median {:>7} ns  p99 {:>7} ns{cpu}  {allocated} allocations{}",
         route(through_module),
         times[SAMPLES / 2],
         times[SAMPLES * 99 / 100],
@@ -269,6 +298,60 @@ fn check_plain_adapter(report: &mut Report, board: &mut LinuxBoard, through_modu
         )
         .is_ok()
     });
+}
+
+fn pio_clients() -> Option<i32> {
+    std::fs::read_to_string(PIO_CLIENTS)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// PIO I2C goes through the module's client of the PIO driver when the module is open: one
+/// claim on `pio-0` for every bus of the process, no `/dev/pio0`, and the driver's client gone
+/// with the last bus.
+fn check_pio_i2c(report: &mut Report, board: &mut LinuxBoard, through_module: bool) {
+    let (claims_before, clients_before) = (claims(), pio_clients().unwrap_or(0));
+    let bus = board.i2c(PIO_BUS);
+    if !through_module {
+        // No PIO node in the harness: the stock route has nothing to open.
+        report.check(bus.is_err(), "PIO I2C has no stock node here");
+        return;
+    }
+    let Ok(mut bus) = bus else {
+        report.check(false, "PIO I2C opened through the module");
+        return;
+    };
+    report.check(
+        claims() == claims_before + 1 && open_files("pio") == 0,
+        "PIO I2C took the module's route",
+    );
+    report.check(
+        pio_clients() == Some(clients_before + 1),
+        "one client of the PIO driver",
+    );
+    let other = board.i2c(PIO_OTHER_BUS);
+    report.check(
+        other.is_ok() && claims() == claims_before + 1 && pio_clients() == Some(clients_before + 1),
+        "a second PIO bus shares the claim and the client",
+    );
+    // The stand-in driver is no I2C target: the answer means nothing, but the transfer must
+    // reach it and come back rather than hang or be refused on the way.
+    let start = Instant::now();
+    let mut out = [0u8; 1];
+    let answer = bus.transaction(0x18, &mut [I2cOp::Write(&[0]), I2cOp::Read(&mut out)]);
+    report.check(
+        start.elapsed() < Duration::from_millis(900)
+            && !matches!(answer, Err(ErrorKind::Timeout | ErrorKind::InvalidInput)),
+        "a PIO I2C transfer goes through the module and returns",
+    );
+    drop(other);
+    drop(bus);
+    report.check(
+        claims() == claims_before && pio_clients() == Some(clients_before),
+        "the last bus dropped lets the claim and the client go",
+    );
 }
 
 fn check_spi(report: &mut Report, board: &mut LinuxBoard, through_module: bool) {
@@ -918,6 +1001,11 @@ fn main() -> ExitCode {
     if let [mode, targets @ ..] = args.as_slice()
         && mode == "board"
     {
+        // `board stock ...` keeps to the stock route even with the module loaded, for an A/B.
+        let (stock, targets) = match targets {
+            [first, rest @ ..] if first == "stock" => (true, rest),
+            _ => (false, targets),
+        };
         let Some(targets) = targets
             .iter()
             .map(|t| board::parse(t))
@@ -925,7 +1013,7 @@ fn main() -> ExitCode {
         else {
             return ExitCode::from(2);
         };
-        let failures = board::run(&targets);
+        let failures = board::run(&targets, stock);
         let _ = writeln!(
             std::io::stdout(),
             "lemnos-module-check board: {failures} failed"
@@ -970,6 +1058,7 @@ fn main() -> ExitCode {
 
     check_smbus_adapter(&mut report, &mut board, module);
     check_plain_adapter(&mut report, &mut board, module);
+    check_pio_i2c(&mut report, &mut board, module);
     check_spi(&mut report, &mut board, spi_module);
     check_line(&mut report, &mut board, module, chip, dir);
     check_pwm(&mut report, &mut board, module);

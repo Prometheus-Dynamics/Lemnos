@@ -60,12 +60,16 @@ MODULE_PARM_DESC(csi2_phys, "Physical address of 16K set aside for the fake rece
 #define R_INT_FE	BIT(4)
 
 /* Offsets of the fake front end's registers. */
+#define FE_R_CONTROL	0x004
 #define FE_R_STATUS	0x008
 #define FE_R_INT_STATUS	0x01c
 #define FE_R_CONFIG	0x040
 #define FE_R_INT_EOF	BIT(0)
 #define FE_R_INT_SOF	BIT(1)
 #define FE_R_BUSY	0x4u	/* FE_STATUS_ACTIVE */
+#define FE_R_MIDFRAME	0x5u	/* FE_STATUS_QUEUED | FE_STATUS_ACTIVE, as the board showed */
+#define FE_R_ABORT	BIT(1)
+#define FE_R_RESET	BIT(2)
 
 static void __iomem *tcsi_regs[4];	/* third: mipi cfg; fourth: the front end */
 static int tcsi_irq;
@@ -89,6 +93,26 @@ static DECLARE_DELAYED_WORK(tfe_busy_work, tfe_busy_tick);
 static void tfe_busy_tick(struct work_struct *work)
 {
 	writel(0, tcsi_regs[3] + FE_R_STATUS);
+}
+
+static u32 tfe_midframe;	/* TCSI_IOC_FE_MIDFRAME's mode; 0: off */
+static void tfe_midframe_tick(struct work_struct *work);
+static DECLARE_DELAYED_WORK(tfe_midframe_work, tfe_midframe_tick);
+
+/* CONTROL keeps the last value written: that is what is looked at, every ms. */
+static void tfe_midframe_tick(struct work_struct *work)
+{
+	u32 ctrl = readl(tcsi_regs[3] + FE_R_CONTROL);
+	bool fed = !(readl(tcsi_regs[0] + R_CTRL) & R_FORCE);
+
+	if ((ctrl & FE_R_RESET) ||
+	    ((tfe_midframe & TFE_ABORT_WHILE_FED) && (ctrl & FE_R_ABORT) && fed)) {
+		writel(0, tcsi_regs[3] + FE_R_STATUS);
+		tfe_midframe = 0;
+		return;
+	}
+	if (tfe_midframe)
+		schedule_delayed_work(&tfe_midframe_work, msecs_to_jiffies(1));
 }
 
 static u64 tfe_read_addr(unsigned int offset)
@@ -179,6 +203,20 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		cancel_delayed_work(&tfe_busy_work);
 		if (ms != U32_MAX)
 			schedule_delayed_work(&tfe_busy_work, msecs_to_jiffies(ms));
+		return 0;
+	}
+	if (cmd == TCSI_IOC_FE_MIDFRAME) {
+		u32 mode;
+
+		if (copy_from_user(&mode, uarg, sizeof(mode)))
+			return -EFAULT;
+		cancel_delayed_work_sync(&tfe_midframe_work);
+		tfe_midframe = mode;
+		/* Whatever CONTROL held before this frame is history. */
+		writel(0, tcsi_regs[3] + FE_R_CONTROL);
+		writel(mode ? FE_R_MIDFRAME : 0, tcsi_regs[3] + FE_R_STATUS);
+		if (mode)
+			schedule_delayed_work(&tfe_midframe_work, msecs_to_jiffies(1));
 		return 0;
 	}
 	if (cmd == TCSI_IOC_FE_FIRE) {
@@ -448,6 +486,7 @@ static void tb_teardown(void)
 		misc_deregister(&tcsi_misc);
 	cancel_delayed_work_sync(&tcsi_work);
 	cancel_delayed_work_sync(&tfe_busy_work);
+	cancel_delayed_work_sync(&tfe_midframe_work);
 	if (!IS_ERR_OR_NULL(tcsi_pdev))
 		platform_device_unregister(tcsi_pdev);
 	for (int i = 0; i < ARRAY_SIZE(tcsi_regs); i++)

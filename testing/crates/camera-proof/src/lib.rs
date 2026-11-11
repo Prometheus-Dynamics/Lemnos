@@ -21,7 +21,7 @@ use lemnos_contract_camera_isp::{CameraIsp, IspInput};
 use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, MAX_STREAM_NAME, Packing,
 };
-use lemnos_contract_camera_sensor::{CameraSensor, Controls, Mode};
+use lemnos_contract_camera_sensor::{CameraSensor, Controls, FrameValues, Mode};
 use lemnos_core::{Bound, Caller, Contract, Status};
 use lemnos_wire::ring::{FrameSlot, RingError};
 
@@ -142,6 +142,8 @@ pub enum Error {
         buffer: usize,
     },
     Save(String),
+    /// The daemon's socket could not be reached.
+    Connect(String),
 }
 
 impl std::fmt::Display for Error {
@@ -170,6 +172,7 @@ impl std::fmt::Display for Error {
                 )
             }
             Self::Save(e) => write!(f, "saving a frame: {e}"),
+            Self::Connect(e) => write!(f, "connecting: {e}"),
         }
     }
 }
@@ -349,6 +352,11 @@ impl<B: Bus> Camera<'_, B> {
             "sensor.set_controls",
             self.sensor_api.set_controls(controls),
         )
+    }
+
+    /// Values for a coming frame, written in one group (`camera.sensor` `post_values`).
+    pub fn post_values(&mut self, values: FrameValues) -> Result<(), Error> {
+        step("sensor.post_values", self.sensor_api.post_values(values))
     }
 
     /// The receiver's counters since it started.

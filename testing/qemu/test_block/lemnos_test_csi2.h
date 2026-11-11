@@ -49,5 +49,14 @@ struct tcsi_regs {
  * block does. LINES makes the next armed frame end add this many instead.
  */
 #define TCSI_IOC_LINES	_IOW('T', 8, __u32)
+/*
+ * The front end caught mid-frame: STATUS reads queued and active until a
+ * RESET is written to CONTROL, or, with TFE_ABORT_WHILE_FED, until an ABORT
+ * is written while the channel isn't forced (still feeding the block). 0 ends
+ * it.
+ */
+#define TFE_RESET_ONLY		0x1u
+#define TFE_ABORT_WHILE_FED	0x2u
+#define TCSI_IOC_FE_MIDFRAME	_IOW('T', 9, __u32)
 
 #endif

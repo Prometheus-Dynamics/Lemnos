@@ -234,7 +234,9 @@ impl Provider for LinuxBoard {
     fn i2c(&mut self, need: &str) -> Result<I2c> {
         if pio_i2c::names(need) {
             return Ok(I2c(lemnos_core::Held::boxed(Box::new(pio_i2c::open(
-                &self.dev, need,
+                &self.dev,
+                need,
+                self.module.as_ref(),
             )?))));
         }
         if let Some((node, bus)) = self.module_i2c(need) {

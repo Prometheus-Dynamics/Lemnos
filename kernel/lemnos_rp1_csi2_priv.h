@@ -76,6 +76,7 @@ long lem_pisp_fe_ioctl(struct lem_pisp_fe *fe, unsigned int cmd, void __user *ar
 /* l->ctl held; nothing streaming afterwards, or the block is wedged. */
 void lem_pisp_fe_stop(struct lem_pisp_fe *fe);
 void lem_pisp_fe_isr(struct lem_pisp_fe *fe, u64 now);
+void lem_pisp_fe_csi_fs(struct lem_pisp_fe *fe);
 bool lem_pisp_fe_streaming(struct lem_pisp_fe *fe);
 
 #endif

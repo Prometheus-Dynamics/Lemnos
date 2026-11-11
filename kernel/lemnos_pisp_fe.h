@@ -53,7 +53,8 @@ struct lemnos_pisp_fe_info {
 	__u32 streaming;	/* nonzero between START and STOP */
 	__u64 frames;		/* frame starts since START */
 	__u64 written;		/* frames completed */
-	__u64 dropped;		/* frame starts with no job queued */
+	__u64 dropped;		/* frames with no job queued: the receiver started them and the
+				 * front end never did, counted at the receiver's next start */
 	__u64 errors;		/* frames that were bad (no frame end before the next start) */
 	__u64 stalled;		/* jobs the front end was not ready to queue */
 };

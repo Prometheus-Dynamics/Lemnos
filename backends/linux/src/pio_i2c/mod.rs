@@ -1,8 +1,13 @@
 //! I2C on PIO: a bit-banged I2C master on the RP1 PIO block, for pins that no
 //! hardware I2C controller drives. A board file names it `pio-i2c:sda=N,scl=N`.
 //!
-//! Every handle on the same pins and device node shares one state machine, and
-//! transactions on it are serialized. The bus ends when its last handle drops.
+//! Every handle on the same pins shares one state machine, and transactions on it are
+//! serialized. The bus ends when its last handle drops.
+//!
+//! With the kernel module open, the bus goes through the module's client of the PIO driver (a
+//! claim on `pio-0`, which a holder that dies lets go of); without it, or on a module built
+//! without PIO, through the driver's own node. The stock node must exist either way: it is how
+//! a board shows it has the block.
 
 mod bus;
 mod device;
@@ -19,6 +24,7 @@ use lemnos_hal::ErrorKind;
 use lemnos_hal::i2c::{ErrorType, I2c, Operation};
 use lemnos_linux_sys::rp1_pio::PioDevice;
 
+use crate::module::{self, Node};
 use crate::open_status;
 use bus::PioBus;
 use selector::Pins;
@@ -33,7 +39,14 @@ pub(crate) fn provided(dev: &Path, need: &str) -> bool {
     matches!(selector::parse(need), Some(Ok(_))) && dev.join(device::DEVNODE).exists()
 }
 
-type Registry = Mutex<HashMap<(PathBuf, Pins), Weak<PioBus<PioDevice>>>>;
+/// Open buses by route (the stock node's path, or the module's) and pins.
+type Registry = Mutex<HashMap<(Route, Pins), Weak<PioBus<PioDevice>>>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Route {
+    Stock(PathBuf),
+    Module,
+}
 
 fn registry() -> &'static Registry {
     static BUSES: OnceLock<Registry> = OnceLock::new();
@@ -59,22 +72,38 @@ impl I2c for PioI2c {
     }
 }
 
-/// The PIO bus a board-file name `pio-i2c:sda=N,scl=N[,hz=N]` means, on the PIO device
-/// under `dev`. A malformed name is refused as an invalid argument; a name that isn't a
-/// PIO bus at all is not found.
-pub(crate) fn open(dev: &Path, need: &str) -> Result<PioI2c, Status> {
+/// The PIO bus a board-file name `pio-i2c:sda=N,scl=N[,hz=N]` means: through `module` when
+/// it is open and serves PIO, otherwise on the PIO device under `dev`. A malformed name is
+/// refused as an invalid argument; a name that isn't a PIO bus at all is not found.
+pub(crate) fn open(dev: &Path, need: &str, module: Option<&Node>) -> Result<PioI2c, Status> {
     let pins = match selector::parse(need) {
         None => return Err(Status::NOT_FOUND),
         Some(Err(_)) => return Err(Status::INVALID_ARGUMENT),
         Some(Ok(pins)) => pins,
     };
     let devnode = dev.join(device::DEVNODE);
-    let key = (devnode.clone(), pins);
     let mut buses = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    let through_module = match module {
+        Some(node) => match PioDevice::through_module(node.shared()) {
+            Ok(device) => Some(device),
+            Err(error) if module::not_served(&error) => None,
+            Err(error) => return Err(open_status(&error)),
+        },
+        None => None,
+    };
+    let route = match through_module {
+        Some(_) => Route::Module,
+        None => Route::Stock(devnode.clone()),
+    };
+    let key = (route, pins);
     if let Some(bus) = buses.get(&key).and_then(Weak::upgrade) {
         return Ok(PioI2c { bus });
     }
-    let bus = Arc::new(device::open_bus(&devnode, pins).map_err(|e| open_status(&e))?);
+    let opened = match through_module {
+        Some(device) => device::start_bus(device, pins),
+        None => device::open_bus(&devnode, pins),
+    };
+    let bus = Arc::new(opened.map_err(|e| open_status(&e))?);
     buses.insert(key, Arc::downgrade(&bus));
     Ok(PioI2c { bus })
 }
@@ -106,14 +135,26 @@ mod tests {
     fn a_missing_device_node_is_no_device_and_a_bad_name_is_refused() {
         let dir = temp_dev("open");
         assert_eq!(
-            open(&dir, "pio-i2c:sda=8,scl=7").err(),
+            open(&dir, "pio-i2c:sda=8,scl=7", None).err(),
             Some(Status::NO_DEVICE)
         );
         assert_eq!(
-            open(&dir, "pio-i2c:sda=8,scl=8").err(),
+            open(&dir, "pio-i2c:sda=8,scl=8", None).err(),
             Some(Status::INVALID_ARGUMENT)
         );
-        assert_eq!(open(&dir, "i2c-1").err(), Some(Status::NOT_FOUND));
+        assert_eq!(open(&dir, "i2c-1", None).err(), Some(Status::NOT_FOUND));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_module_without_pio_leaves_the_bus_on_the_stock_node() {
+        let dir = temp_dev("fallback");
+        // Not the module: the claim is refused as not served, and the stock node is tried.
+        let node = Node::open("/dev/null").unwrap();
+        assert_eq!(
+            open(&dir, "pio-i2c:sda=8,scl=7", Some(&node)).err(),
+            Some(Status::NO_DEVICE)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

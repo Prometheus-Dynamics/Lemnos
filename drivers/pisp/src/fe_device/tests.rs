@@ -201,6 +201,10 @@ impl Hardware for Hw {
             errors: 1,
         })
     }
+
+    fn stalled(&mut self) -> u64 {
+        7
+    }
 }
 
 fn config(extra: u32) -> FeConfig {
@@ -713,6 +717,16 @@ fn stop_ends_recovery_and_only_the_front_ends_outputs_exist() {
     CameraIsp::stop(fe).unwrap();
     assert_eq!(fe.tick(1 << 40), None);
     assert!(matches!(fe.health(), Health::Ok));
+}
+
+#[test]
+fn the_blocks_stalled_count_is_in_the_info_while_running_only() {
+    let mut r = rig();
+    assert_eq!(IspPisp::info(&mut r.fe).unwrap().stalled, 0);
+    CameraIsp::start(&mut r.fe).unwrap();
+    assert_eq!(IspPisp::info(&mut r.fe).unwrap().stalled, 7);
+    CameraIsp::stop(&mut r.fe).unwrap();
+    assert_eq!(IspPisp::info(&mut r.fe).unwrap().stalled, 0);
 }
 
 #[test]

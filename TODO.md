@@ -6,19 +6,20 @@ done and shown.
 
 ## Hardware runs
 
-One run on the reference board (2026-11-11) covered the kernel module, the backend's buses through
-it, and the camera path; [`docs/hardware-status.md`](docs/hardware-status.md#the-first-board-run)
-lists what it showed. Every other check under `testing/board-runs/` has no result yet, and
+Two runs on the reference board (2026-11-11) covered the kernel module, the backend's buses through
+it, the camera path and the thermal zone; [`docs/hardware-status.md`](docs/hardware-status.md#the-first-board-run)
+lists what they showed. Every other check under `testing/board-runs/` has no result yet, and
 [`docs/testing.md`](docs/testing.md#board-runs) says how a run is done.
 
 - [ ] Every check in `testing/board-runs/` that has no result.
-- [ ] What the first run on the reference board left out: SPI and driven outputs through the
-      module (`C3.md`, `C4.md`); the reset pulse (`C6.md`); the receiver's register, every-way stop
-      and second-camera checks (`D5.md` 3, 5, 7, 8); the front end's output 1, queue pressure, 200
-      stop cycles of each kind and bad configurations (`D7.md`, `D16.md`, `D18.md`); the back end's
-      raw round trip against the stock driver and its checks 3 to 8 (`D6.md`, `D15.md`,
-      `D17.md`); the sensor's mode 1 and its exposure checks (`D8.md`, `D10.md`); the chip, fan and
-      thermal drivers' own checks (`B8.md` to `B15.md`); a host-owned chip (`A35.md`).
+- [ ] What the runs on the reference board left out: SPI and driven outputs through the module
+      (`C3.md`, `C4.md`); the reset pulse (`C6.md`); the receiver's pool written back after a stop,
+      and a second camera (`D5.md` 5, 8); a statistics range of the wrong size (`D7.md` 5); the
+      back end's counters, which user space can't read, and its wedge test (`D6.md` 7, 8), a full
+      ring and output 1 (`D17.md` 7, 8); the sensor's modes 2 to 5 (`D8.md`); its exposure
+      linearity and single sixteenths, and when a posted exposure lands, which need the scene
+      lit (`D8.md` 7, 8, `D10.md`); the chip and fan drivers' own checks (`B8.md` to `B12.md`, `B14.md`, `B15.md`);
+      a host-owned chip (`A35.md`).
 - [ ] The bench's reference set on the reference board, beside the earlier version's figures
       (`testing/bench/bench.sh --real`). The harness has no step for the camera, light and fan
       rows: their figures come only from the board runs `testing/bench/reference.tsv` names.

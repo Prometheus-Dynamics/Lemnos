@@ -359,22 +359,31 @@ static irqreturn_t lrc_isr(int irq, void *data)
 	struct lrc_dev *l = data;
 	u64 now = ktime_get_ns();
 	bool sof, eof, handled = false;
-	u32 sts, status;
+	u32 sts, status = 0;
 	u16 line;
 
 	sts = rd(l->cfg, MIPICFG_INTS);
+	if (sts & MIPICFG_INT_CSI_DMA) {
+		status = rd(l->dma, CSI2_STATUS);
+		if (status) {
+			wr(l->dma, CSI2_STATUS, status);	/* write back to clear */
+			handled = true;
+		}
+	}
+	sof = status & IRQ_FS(LRC_CH);
+	eof = status & IRQ_FE_ACK(LRC_CH);
+	/*
+	 * The channel feeding the front end: only its frame starts matter, and
+	 * before the front end's interrupt, which comes after them.
+	 */
+	if (sof && l->fe)
+		lem_pisp_fe_csi_fs(l->fe);
 	if (l->fe && (sts & MIPICFG_INT_PISP_FE)) {
 		lem_pisp_fe_isr(l->fe, now);
 		handled = true;
 	}
-	if (!(sts & MIPICFG_INT_CSI_DMA))
-		return handled ? IRQ_HANDLED : IRQ_NONE;
-	status = rd(l->dma, CSI2_STATUS);
 	if (!status)
 		return handled ? IRQ_HANDLED : IRQ_NONE;
-	wr(l->dma, CSI2_STATUS, status);	/* write back to clear */
-	sof = status & IRQ_FS(LRC_CH);
-	eof = status & IRQ_FE_ACK(LRC_CH);
 	line = eof ? rd(l->dma, CSI2_CH_DEBUG(LRC_CH)) & 0xffff : 0;
 
 	spin_lock(&l->lock);

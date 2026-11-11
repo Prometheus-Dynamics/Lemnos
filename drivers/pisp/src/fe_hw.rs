@@ -106,6 +106,11 @@ pub trait Hardware: Send {
     fn check(&mut self) -> Result<()>;
     /// The module's counters since the last start.
     fn counters(&mut self) -> Result<Counters>;
+    /// Frame starts since the last start at which the block still had the job before queued
+    /// (the module's `stalled`). 0 when nothing is running.
+    fn stalled(&mut self) -> u64 {
+        0
+    }
 }
 
 /// Where the block is and what to allocate from.
@@ -341,5 +346,12 @@ impl Hardware for LinuxHardware {
             dropped: info.dropped,
             errors: info.errors,
         })
+    }
+
+    fn stalled(&mut self) -> u64 {
+        self.running()
+            .ok()
+            .and_then(|r| r.node.info().ok())
+            .map_or(0, |info| info.stalled)
     }
 }

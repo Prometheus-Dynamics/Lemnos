@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/dma-heap.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,6 +48,7 @@
 
 /* Registers of the fake front end, as lemnos_pisp_fe.c writes them. */
 #define FE_CONTROL 0x004
+#define FE_STATUS 0x008
 #define FE_INT_EN 0x018
 #define FE_INT_STATUS 0x01c
 #define FE_CONFIG 0x040
@@ -156,6 +158,13 @@ static uint32_t peek(uint32_t off)
 static void fe_fire(uint32_t status)
 {
 	CHECK(!ioctl(hw, TCSI_IOC_FE_FIRE, &status), "fire %x", status);
+	sleep_ms(4);
+}
+
+/* The receiver's interrupt with this status, as the channel feeding the front end raises it. */
+static void csi_fire(uint32_t status)
+{
+	CHECK(!ioctl(hw, TCSI_IOC_FIRE, &status), "receiver fire %x", status);
 	sleep_ms(4);
 }
 
@@ -1476,7 +1485,7 @@ static void test_sequence(void)
 		CHECK(contains_write(m, FE_CONTROL, C_QUEUE) >= 0, "armed once the block is ready");
 	}
 
-	/* Stop order: channel, then INT_EN 0, then ABORT. */
+	/* Stop order: INT_EN 0, then ABORT while the channel still feeds the block, then the channel. */
 	{
 		uint32_t m;
 		int c, ie, ab;
@@ -1487,7 +1496,8 @@ static void test_sequence(void)
 		c = contains_write(m, LEMNOS_PISP_FE_MARK_CHANNEL_STOP, 0);
 		ie = contains_write(m, FE_INT_EN, 0);
 		ab = contains_write(m, FE_CONTROL, C_ABORT);
-		CHECK(c >= 0 && c < ie && ie < ab, "stop: channel %d, ints off %d, abort %d", c, ie, ab);
+		CHECK(ie >= 0 && ie < ab && ab < c, "stop: ints off %d, abort %d, channel %d", ie, ab, c);
+		CHECK(contains_write(m, FE_CONTROL, C_RESET) < 0, "an idle block is not reset");
 		{
 			struct tcsi_regs regs;
 
@@ -1598,6 +1608,119 @@ static void test_hostile_hw(void)
 	CHECK(fe_info().errors == 0 && fe_info().dropped >= 1, "start with no frame end is dropped");
 	CHECK(!stop(), "stopped");
 	stream_close(&s);
+}
+
+/*
+ * A front end with no job queued starts no frame and raises nothing (as the
+ * board shows): the receiver's frame start is what counts the frame it let go
+ * by, at the next one, and a frame the front end did start is no drop.
+ */
+static void test_frames_with_no_job(void)
+{
+	struct stream s;
+	struct lemnos_pisp_fe_start a;
+	struct lemnos_stream_job j;
+	uint64_t d0;
+
+	CHECK(!stream_setup(&s), "no job: stream");
+	valid(cfg_slot(0));
+	cfg_slot(0)->global.enables &= ~(uint32_t)PISP_FE_ENABLE_OUTPUT1;
+	j = job_for(0, 0);
+	post(&s, &j);
+	CHECK(!kick(&s), "job");
+	a = good_start(&s);
+	CHECK(!start(&a), "started");
+	d0 = fe_info().dropped;
+	csi_fire(TCSI_FS);
+	fe_fire(TFE_SOF);
+	fe_fire(TFE_EOF);
+	csi_fire(TCSI_FS);
+	CHECK(fe_info().dropped == d0, "a frame the front end started is no drop (%llu)",
+	      (unsigned long long)(fe_info().dropped - d0));
+	csi_fire(TCSI_FS);
+	CHECK(fe_info().dropped == d0 + 1, "the receiver's next start counts the frame with no job");
+	csi_fire(TCSI_FS | TCSI_FE_ACK);
+	CHECK(fe_info().dropped == d0 + 2, "and every one after it");
+	CHECK(fe_info().errors == 0 && fe_info().written == 1, "nothing else counted");
+	CHECK(!stop(), "stopped");
+	csi_fire(TCSI_FS);
+	csi_fire(TCSI_FS);
+	stream_close(&s);
+	/* Stopped, the receiver's frame starts count nothing; a start begins again from none. */
+	CHECK(!stream_setup(&s), "no job: stream again");
+	valid(cfg_slot(0));
+	cfg_slot(0)->global.enables &= ~(uint32_t)PISP_FE_ENABLE_OUTPUT1;
+	j = job_for(0, 0);
+	post(&s, &j);
+	CHECK(!kick(&s), "job again");
+	a = good_start(&s);
+	CHECK(!start(&a), "started again");
+	csi_fire(TCSI_FS);
+	fe_fire(TFE_SOF);
+	CHECK(fe_info().dropped == 0, "a start counts from none");
+	CHECK(!stop(), "stopped again");
+	stream_close(&s);
+}
+
+/*
+ * A stop that finds the block mid-frame. Cut off from its input mid-frame, the
+ * block stays queued and active for good (as the board showed): the abort goes
+ * in while the channel still feeds it, and a block still busy once the channel
+ * is stopped is reset. Either way nothing is wedged and the next start runs.
+ */
+static void test_stop_mid_frame(void)
+{
+	static const struct {
+		uint32_t mode;
+		const char *what;
+		bool reset;
+	} cases[] = {
+		{ TFE_ABORT_WHILE_FED, "abort works while fed", false },
+		{ TFE_RESET_ONLY, "only a reset ends the frame", true },
+	};
+
+	for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		struct stream s;
+		struct lemnos_pisp_fe_start a;
+		struct lemnos_stream_job j;
+		uint32_t mode = cases[i].mode, off = 0, m;
+
+		CHECK(!stream_setup(&s), "mid-frame: stream");
+		valid(cfg_slot(0));
+		cfg_slot(0)->global.enables &= ~(uint32_t)PISP_FE_ENABLE_OUTPUT1;
+		j = job_for(0, 0);
+		post(&s, &j);
+		CHECK(!kick(&s), "mid-frame: job");
+		a = good_start(&s);
+		CHECK(!start(&a), "mid-frame: started");
+		csi_fire(TCSI_FS);
+		fe_fire(TFE_SOF);
+		CHECK(!ioctl(hw, TCSI_IOC_FE_MIDFRAME, &mode), "mid-frame: %s", cases[i].what);
+		(void)read_trace();
+		CHECK(!stop(), "mid-frame: stopped (%s)", cases[i].what);
+		m = read_trace();
+		CHECK(!(fe_info().flags & LEMNOS_PISP_FE_INFO_WEDGED), "not wedged (%s)",
+		      cases[i].what);
+		CHECK((contains_write(m, FE_CONTROL, C_RESET) >= 0) == cases[i].reset,
+		      "reset only when the abort did not end it (%s)", cases[i].what);
+		CHECK(peek(FE_STATUS) == 0, "idle after the stop (%s)", cases[i].what);
+		ioctl(hw, TCSI_IOC_FE_MIDFRAME, &off);
+		stream_close(&s);
+
+		CHECK(!stream_setup(&s), "mid-frame: stream after");
+		valid(cfg_slot(0));
+		cfg_slot(0)->global.enables &= ~(uint32_t)PISP_FE_ENABLE_OUTPUT1;
+		j = job_for(0, 0);
+		post(&s, &j);
+		CHECK(!kick(&s), "mid-frame: job after");
+		a = good_start(&s);
+		CHECK(!start(&a), "the next start runs (%s)", cases[i].what);
+		fe_fire(TFE_SOF);
+		fe_fire(TFE_EOF);
+		CHECK(fe_info().written == 1, "and completes a frame (%s)", cases[i].what);
+		CHECK(!stop(), "stopped after");
+		stream_close(&s);
+	}
 }
 
 /* --- stopping --- */
@@ -1973,6 +2096,8 @@ int main(int argc, char **argv)
 	test_sequence();
 	test_toctou();
 	test_hostile_hw();
+	test_frames_with_no_job();
+	test_stop_mid_frame();
 	test_own_buffers(heap, dev);
 	test_stop_in_flight(node, unbind, dev);
 	printf("lemnos_pisp_fe_check: %d failures\n", failures);

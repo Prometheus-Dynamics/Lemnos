@@ -4,7 +4,7 @@
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
 Of those 85 files, the ones listed under [The first board run](#the-first-board-run) record what
-one run on the reference board showed; everything else is still *untested on board*.
+two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
 run and where its result goes.
@@ -26,17 +26,19 @@ with the board's own software stopped only for each test and put back afterwards
 |---|---|
 | [`C1.md`](../testing/board-runs/C1.md) | The module core on the PiSP back end, behind its IOMMU: the check tools pass, interrupt to handler 0.5 µs, to user space 1.5 µs (p99) |
 | [`C3.md`](../testing/board-runs/C3.md), [`C4.md`](../testing/board-runs/C4.md), [`C8.md`](../testing/board-runs/C8.md) | Register reads, a free input and a PWM channel (output off) on both routes: same data, 0 allocations; I2C the same time on both, PWM 6 times faster through the module. No SPI device, nothing driven |
-| [`C5.md`](../testing/board-runs/C5.md) | PIO in board mode, including DMA; a killed holder took a minute to die, now at once |
+| [`C5.md`](../testing/board-runs/C5.md) | PIO in board mode, including DMA; a killed holder took a minute to die, now at once. The IMU on PIO I2C both ways: same data, same bus time, 0 allocations; two bus faults on the module route fixed |
 | [`C6.md`](../testing/board-runs/C6.md) | A block's clock, thermal reads and watches, bind and unbind events |
 | [`C7.md`](../testing/board-runs/C7.md) | The daemon on the module route with real chips: claims, values, a kill and a restart, back to stock |
-| [`D5.md`](../testing/board-runs/D5.md), [`D16.md`](../testing/board-runs/D16.md), [`D9.md`](../testing/board-runs/D9.md) | Frames from the sensor into a client at 57 and 115 fps with no drops; stop, kill and unbind while streaming. Three receiver faults found and fixed |
-| [`D7.md`](../testing/board-runs/D7.md), [`D18.md`](../testing/board-runs/D18.md) | The front end at capture rate: output equal to the receiver's frames, statistics with every frame, stop in flight |
-| [`D6.md`](../testing/board-runs/D6.md), [`D15.md`](../testing/board-runs/D15.md), [`D17.md`](../testing/board-runs/D17.md) | The back end on a captured frame: the right colours, 1188 jobs/s with two queued. The first job on each buffer was dropped; fixed |
-| [`D8.md`](../testing/board-runs/D8.md) | The sensor's mode 0 timing: line time within 0.01 %, each frame its programmed length plus about 0.9 of a line |
+| [`D5.md`](../testing/board-runs/D5.md), [`D16.md`](../testing/board-runs/D16.md), [`D9.md`](../testing/board-runs/D9.md) | Frames from the sensor into a client at 57 to 145 fps with no drops; the DMA writes only the stream's buffers; stop, kill and unbind while streaming. Three receiver faults found and fixed |
+| [`D7.md`](../testing/board-runs/D7.md), [`D18.md`](../testing/board-runs/D18.md) | The front end at capture rate: both outputs and statistics with every frame, frames with no job counted, refused configurations, 200 stops each way. Two module faults found and fixed: frames with no job uncounted, and a stop mid-frame that wedged the block until a reboot |
+| [`D6.md`](../testing/board-runs/D6.md), [`D15.md`](../testing/board-runs/D15.md), [`D17.md`](../testing/board-runs/D17.md) | The back end on a captured frame: output identical to the stock driver's, round trip 739 µs against its 738, 120 jobs/s for 60 s, refused jobs, close and unbind with jobs on the block, no IOMMU fault. The first job on each buffer was dropped; fixed |
+| [`D8.md`](../testing/board-runs/D8.md), [`D10.md`](../testing/board-runs/D10.md) | The sensor's modes 0 and 1 with both clock-lane settings: line time within 0.02 %, no receiver errors at the shortest frame; the exposure limit; no OTP access on the bus. Exposure linearity and when a post lands need the scene lit: not judged |
+| [`B13.md`](../testing/board-runs/B13.md) | `thermal-zone` on the board's zone, a missing zone and a file of its own: values, `NOT_FOUND`, `IO`, recovery with no restart, the zone followed under load |
 
 Each file says which of its checks ran and which did not, and why. The fixes the run made are in
 the kernel module (`lemnos_pio.c`, `lemnos_rp1_csi2.c`, `lemnos_pisp_fe.c`), the `rp1-csi2` and
-`pisp` drivers and the Linux backend, each with a test that fails without it.
+`pisp` drivers and the Linux backend, each with a test that fails without it. The second run (PR
+F2b) also gave the PIO I2C bus a module route.
 
 ## What has been shown, and how
 

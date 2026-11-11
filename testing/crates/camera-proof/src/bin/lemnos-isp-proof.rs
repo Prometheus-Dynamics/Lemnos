@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! lemnos-isp-proof --input FILE [--socket PATH] [--isp ID] [--sensor ID] [--jobs N] [--save DIR]
+//!                  [--rate N --seconds S] [--checks 1]
 //! ```
 //!
 //! `--input` is one packed RAW10 frame from the receiver (1280x800, 1600 bytes a line, as
@@ -17,6 +18,16 @@
 //! - the back end's counters.
 //!
 //! With `--save`, the first output's luma as a PGM.
+//!
+//! With `--rate` and `--seconds`, jobs at that rate for that long with two queued: every job must
+//! finish, in order, with no drop and no error.
+//!
+//! With `--checks 1` (the board file needs two `config` buffers and two `input` buffers), what the
+//! driver must not run, each followed by a job that must: a configuration with a byte set in its
+//! address fields (dropped, no frame); a configuration rewritten with zero gains right after its
+//! job was posted (the frame is the first configuration's); a job naming the output buffer the
+//! client holds (dropped, the held frame's bytes unchanged); two jobs naming the same input in one
+//! go (one frame, one dropped).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -56,6 +67,9 @@ struct Args {
     input: PathBuf,
     jobs: u32,
     save: Option<PathBuf>,
+    rate: u32,
+    seconds: u32,
+    checks: bool,
 }
 
 fn parse() -> Option<Args> {
@@ -66,6 +80,9 @@ fn parse() -> Option<Args> {
         input: PathBuf::new(),
         jobs: 1000,
         save: None,
+        rate: 0,
+        seconds: 0,
+        checks: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -77,6 +94,9 @@ fn parse() -> Option<Args> {
             "--input" => args.input = PathBuf::from(value),
             "--jobs" => args.jobs = value.parse().ok()?,
             "--save" => args.save = Some(PathBuf::from(value)),
+            "--rate" => args.rate = value.parse().ok()?,
+            "--seconds" => args.seconds = value.parse().ok()?,
+            "--checks" => args.checks = value != "0",
             _ => return None,
         }
     }
@@ -135,11 +155,11 @@ fn order(bayer: BayerOrder) -> Order {
     }
 }
 
-fn job(identity: u64, input: u32, output: u32) -> ([u8; 128], usize) {
+fn job(identity: u64, config: u32, input: u32, output: u32) -> ([u8; 128], usize) {
     let job = IspJob {
         identity,
         layout: LAYOUT_BACK_END,
-        config_buffer: 0,
+        config_buffer: config,
         input_buffer: input,
         outputs: [output, NO_BUFFER, NO_BUFFER, NO_BUFFER],
     };
@@ -153,7 +173,18 @@ fn job(identity: u64, input: u32, output: u32) -> ([u8; 128], usize) {
 /// buffer another job still has on the block is dropped, so jobs in flight together use different
 /// buffers of each stream.
 fn post(config: &mut FrameStream, identity: u64, input: u32, output: u32) -> Result<(), String> {
-    let (buf, n) = job(identity, input, output);
+    post_on(config, identity, 0, input, output)
+}
+
+/// As [`post`], with the configuration in config buffer `cfg_buffer`.
+fn post_on(
+    config: &mut FrameStream,
+    identity: u64,
+    cfg_buffer: u32,
+    input: u32,
+    output: u32,
+) -> Result<(), String> {
+    let (buf, n) = job(identity, cfg_buffer, input, output);
     match config.post_job(buf.get(..n).unwrap_or(&[])) {
         Ok(true) => Ok(()),
         Ok(false) => Err("the job queue is full".into()),
@@ -414,14 +445,221 @@ fn run(args: &Args) -> Result<bool, String> {
     ));
     let counters = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
     out(format_args!("back end counters: {counters:?}"));
+    let mut ok = distinct >= 6 && same > HEIGHT as usize * 9 / 10 && in_order && done == args.jobs;
+
+    if args.rate > 0 && args.seconds > 0 {
+        let jobs = args.rate * args.seconds;
+        let period = Duration::from_secs(1) / args.rate;
+        let before = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+        let started = Instant::now();
+        let (mut posted, mut done, mut in_order) = (0u32, 0u32, true);
+        let mut expect = identity;
+        while posted < 2 {
+            post(&mut cfg, identity, posted % inputs, posted % outputs)?;
+            identity += 1;
+            posted += 1;
+        }
+        while done < jobs {
+            let Some(frame) = output
+                .next_frame(Duration::from_secs(2))
+                .map_err(|e| format!("output0: {e:?}"))?
+            else {
+                break;
+            };
+            in_order &= frame.identity() == expect;
+            expect = frame.identity() + 1;
+            output
+                .release(frame)
+                .map_err(|e| format!("release: {e:?}"))?;
+            done += 1;
+            if posted < jobs {
+                // Paced: job n goes in no earlier than n periods after the start.
+                let due = period * posted;
+                if let Some(wait) = due.checked_sub(started.elapsed()) {
+                    std::thread::sleep(wait);
+                }
+                post(&mut cfg, identity, posted % inputs, posted % outputs)?;
+                identity += 1;
+                posted += 1;
+            }
+        }
+        let after = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+        out(format_args!(
+            "sustained: {done} of {jobs} jobs at {} jobs/s with two queued in {:.1} s; in order: {in_order}; dropped +{}, errors +{}",
+            args.rate,
+            started.elapsed().as_secs_f64(),
+            after.dropped - before.dropped,
+            after.errors - before.errors
+        ));
+        ok &= done == jobs
+            && in_order
+            && after.dropped == before.dropped
+            && after.errors == before.errors;
+    }
+
+    if args.checks {
+        ok &= checks(
+            &mut isp,
+            &mut cfg,
+            &mut output,
+            &config_bytes,
+            &mut identity,
+        )?;
+    }
     isp.stop().map_err(|s| format!("stop: {s:?}"))?;
-    Ok(distinct >= 6 && same > HEIGHT as usize * 9 / 10 && in_order && done == args.jobs)
+    Ok(ok)
+}
+
+fn hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// One job on config buffer `cfg_buffer`, input 0 and output `out`: the frame's hash, or `None`
+/// when nothing came in `wait`.
+fn one(
+    cfg: &mut FrameStream,
+    output: &mut FrameStream,
+    identity: &mut u64,
+    cfg_buffer: u32,
+    out_buffer: u32,
+    wait: Duration,
+) -> Result<Option<u64>, String> {
+    post_on(cfg, *identity, cfg_buffer, 0, out_buffer)?;
+    *identity += 1;
+    let Some(frame) = output
+        .next_frame(wait)
+        .map_err(|e| format!("output0: {e:?}"))?
+    else {
+        return Ok(None);
+    };
+    let h = hash(output.bytes(&frame));
+    output
+        .release(frame)
+        .map_err(|e| format!("release: {e:?}"))?;
+    Ok(Some(h))
+}
+
+/// D15 check 3 and D17 checks 3, 4 and 6: what the driver must not run.
+#[allow(clippy::too_many_lines)]
+fn checks(
+    isp: &mut impl CameraIsp,
+    cfg: &mut FrameStream,
+    output: &mut FrameStream,
+    good: &[u8],
+    identity: &mut u64,
+) -> Result<bool, String> {
+    let wait = Duration::from_millis(500);
+    let mut ok = true;
+    let reference = one(cfg, output, identity, 0, 0, Duration::from_secs(2))?
+        .ok_or("no frame for the reference job")?;
+
+    // An address field: one byte set in the first 112 bytes, in config buffer 1.
+    let mut addressed = good.to_vec();
+    if let Some(b) = addressed.get_mut(8) {
+        *b = 0x10;
+    }
+    cfg.write(1, 0, &addressed)
+        .map_err(|e| format!("config write: {e:?}"))?;
+    let before = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    let got = one(cfg, output, identity, 1, 0, wait)?;
+    let after = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    let next = one(cfg, output, identity, 0, 0, Duration::from_secs(2))?;
+    out(format_args!(
+        "configuration naming an address: frame {got:?}, dropped +{}, errors +{}; the next job's frame equal to the reference: {}",
+        after.dropped - before.dropped,
+        after.errors - before.errors,
+        next == Some(reference)
+    ));
+    ok &= got.is_none() && after.dropped == before.dropped + 1 && next == Some(reference);
+
+    // Rewritten right after its job was posted. The driver reads it once, when it takes the job,
+    // which the client can't see: before the rewrite gives the first configuration's frame, after
+    // it the zeroed one's (or a drop, if the driver refuses it). Either way nothing breaks.
+    cfg.write(1, 0, good)
+        .map_err(|e| format!("config write: {e:?}"))?;
+    let mut zeroed = good.to_vec();
+    zeroed.iter_mut().skip(112).for_each(|b| *b = 0);
+    let before = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    post_on(cfg, *identity, 1, 0, 0)?;
+    *identity += 1;
+    cfg.write(1, 0, &zeroed)
+        .map_err(|e| format!("config write: {e:?}"))?;
+    let frame = output
+        .next_frame(wait)
+        .map_err(|e| format!("output0: {e:?}"))?;
+    let changed_after = match frame {
+        Some(f) => {
+            let h = hash(output.bytes(&f));
+            output.release(f).map_err(|e| format!("release: {e:?}"))?;
+            Some(h)
+        }
+        None => None,
+    };
+    let after = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    let next = one(cfg, output, identity, 0, 0, Duration::from_secs(2))?;
+    out(format_args!(
+        "configuration zeroed right after its job was posted: a frame {}, equal to the reference: {}; dropped +{}, errors +{}; the next job's frame equal to the reference: {}",
+        changed_after.is_some(),
+        changed_after == Some(reference),
+        after.dropped - before.dropped,
+        after.errors - before.errors,
+        next == Some(reference)
+    ));
+    ok &= after.errors == before.errors && next == Some(reference);
+    cfg.write(1, 0, good)
+        .map_err(|e| format!("config write: {e:?}"))?;
+
+    // A job naming the output buffer the client holds.
+    post_on(cfg, *identity, 0, 0, 1)?;
+    *identity += 1;
+    let held = output
+        .next_frame(Duration::from_secs(2))
+        .map_err(|e| format!("output0: {e:?}"))?
+        .ok_or("no frame to hold")?;
+    let held_hash = hash(output.bytes(&held));
+    let before = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    let got = one(cfg, output, identity, 0, held.buffer(), wait)?;
+    let after = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    let unchanged = hash(output.bytes(&held)) == held_hash;
+    out(format_args!(
+        "a job on the output buffer the client holds ({}): frame {got:?}, dropped +{}, the held frame unchanged: {unchanged}",
+        held.buffer(),
+        after.dropped - before.dropped
+    ));
+    ok &= got.is_none() && after.dropped == before.dropped + 1 && unchanged;
+    output
+        .release(held)
+        .map_err(|e| format!("release: {e:?}"))?;
+
+    // Two jobs naming the same input in one go.
+    let before = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    post_on(cfg, *identity, 0, 0, 0)?;
+    post_on(cfg, *identity + 1, 1, 0, 1)?;
+    *identity += 2;
+    let mut frames = 0;
+    while let Some(f) = output
+        .next_frame(wait)
+        .map_err(|e| format!("output0: {e:?}"))?
+    {
+        frames += 1;
+        output.release(f).map_err(|e| format!("release: {e:?}"))?;
+    }
+    let after = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
+    out(format_args!(
+        "two jobs on one input in one go: {frames} frames, dropped +{}, errors +{}",
+        after.dropped - before.dropped,
+        after.errors - before.errors
+    ));
+    ok &= frames == 1 && after.dropped == before.dropped + 1 && after.errors == before.errors;
+    Ok(ok)
 }
 
 fn main() -> ExitCode {
     let Some(args) = parse() else {
         out(format_args!(
-            "usage: lemnos-isp-proof --input FILE [--socket PATH] [--isp ID] [--sensor ID] [--jobs N] [--save DIR]"
+            "usage: lemnos-isp-proof --input FILE [--socket PATH] [--isp ID] [--sensor ID] [--jobs N] [--save DIR] [--rate N --seconds S] [--checks 1]"
         ));
         return ExitCode::from(2);
     };

@@ -37,6 +37,10 @@ pub struct PispInfo {
     pub front_end_config_bytes: u32,
     pub back_end_config_bytes: u32,
     pub statistics_bytes: u32,
+    /// Front end only, while streaming: frame starts at which the block had not yet taken the
+    /// job queued for the frame before, since the last start. 0 for the back end and when
+    /// stopped.
+    pub stalled: u64,
 }
 
 #[contract("isp.pisp", version = 1)]

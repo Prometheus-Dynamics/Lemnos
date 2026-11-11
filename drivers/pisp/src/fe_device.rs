@@ -1096,6 +1096,11 @@ impl IspPisp for PispFe {
             front_end_config_bytes: CONFIG_BYTES as u32,
             back_end_config_bytes: 0,
             statistics_bytes: STATS_BYTES as u32,
+            stalled: if self.state == State::Stopped {
+                0
+            } else {
+                self.hw.stalled()
+            },
         })
     }
 

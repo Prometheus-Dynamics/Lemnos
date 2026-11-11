@@ -33,7 +33,7 @@ python3 scripts/generate-builtins.py --check
 | `ws2812` | `pixels/1` | `spi`: SPI | Serves its contract |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
 | `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm` | Serves its contract. Closed by default: writes and each bus are allowed only by `config` |
-| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Mode 0 timing measured on the reference board (`D8.md`). When a posted exposure takes effect is an assumption until a board run |
+| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Modes 0 and 1 measured on the reference board with both clock-lane settings, the exposure limit and refusal, and a bus trace with no OTP access (`D8.md`). When a posted exposure takes effect is an assumption until a run with the scene lit (`D10.md`) |
 
 ## Devices with no bus of their own
 
@@ -43,7 +43,7 @@ python3 scripts/generate-builtins.py --check
 | `fan-control` | `fan-control/1` | `fan`, `t0` and optional `t1` to `t3`: devices | Serves its contract |
 | `status-light` | `light/1` | `pixels`: a device | Serves its contract |
 | `hwmon-fan` | `fan/1` | a hwmon node, by `name` or `hwmon` | Serves its contract. Takes the fan over at the first `set_duty` and gives it back on release. A killed daemon leaves the last duty |
-| `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract |
+| `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract. Run on the reference board (`B13.md`) |
 | `gpu-lease` | `gpu-lease/1` | nothing | Serves its contract. The lease is advisory: nothing is enforced on the GPU |
 | `host-clock` | no contract | nothing | Runs. Shows the kernel's clock source and whether an RTC set the clock, as values |
 | `hw-watchdog` | no contract | `device`: a watchdog node | Runs. Opening the node arms the watchdog; the driver feeds it. It never sets the timeout |
@@ -60,9 +60,9 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `rp1-csi2` | `camera.receiver/1` | the kernel module; `frames` stream of dma-bufs | Serves its contract. Run on the reference board at 57 and 115 fps (`D5.md`) |
-| `pisp-fe` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config` stream, optional `statistics`, `output0`, `output1` | Serves its contract. Temporal denoise and line events are not supported. Output 0 and statistics run on the reference board (`D7.md`); output 1 has not |
-| `pisp-be` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config`, `input`, `output0` streams, optional `output1` | Serves its contract. No statistics stream, no line events. Run on the reference board on a captured frame (`D6.md`) |
+| `rp1-csi2` | `camera.receiver/1` | the kernel module; `frames` stream of dma-bufs | Serves its contract. Run on the reference board at 57 to 145 fps, with 200 stops each by `STOP`, client kill, daemon kill and unbind (`D5.md`) |
+| `pisp-fe` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config` stream, optional `statistics`, `output0`, `output1` | Serves its contract. Temporal denoise and line events are not supported. Outputs 0 and 1 and statistics run on the reference board, with 200 stops each way (`D7.md`) |
+| `pisp-be` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config`, `input`, `output0` streams, optional `output1` | Serves its contract. No statistics stream, no line events. Run on the reference board: the same output and round trip as the stock driver (`D6.md`) |
 | `rkcif` | `camera.receiver/1` | the vendor kernel's media graph; optional `frames` stream | Serves its contract. Routes a MIPI channel and says which ISP it feeds. Frames only on the raw path, when `frames` and `capture` are set |
 | `rkisp` | `camera.isp/1` | the vendor kernel's ISP nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream: frames come from the receiver |
 | `sunxi-vin` | `camera.receiver/1` | the vendor kernel's capture node; `frames` stream | Serves its contract |

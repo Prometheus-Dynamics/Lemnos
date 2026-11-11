@@ -87,7 +87,12 @@ pub(crate) const DEVNODE: &str = "pio0";
 /// requested (a leftover `i2c-gpio` device, say), since the bus would fight it
 /// for them.
 pub(crate) fn open_bus(devnode: &Path, pins: Pins) -> io::Result<PioBus<PioDevice>> {
-    let device = PioDevice::open(devnode)?;
+    start_bus(PioDevice::open(devnode)?, pins)
+}
+
+/// Starts the bus for `pins` on an open client, either route, with the same check as
+/// [`open_bus`].
+pub(crate) fn start_bus(device: PioDevice, pins: Pins) -> io::Result<PioBus<PioDevice>> {
     check_pins_free(pins)?;
     PioBus::start(device, pins.sda, pins.scl, pins.hz)
 }
