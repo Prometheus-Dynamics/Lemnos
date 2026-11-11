@@ -229,56 +229,62 @@ impl Provider for LinuxBoard {
 
     fn i2c(&mut self, need: &str) -> Result<I2c> {
         if pio_i2c::names(need) {
-            return Ok(I2c(Box::new(pio_i2c::open(&self.dev, need)?)));
+            return Ok(I2c(lemnos_core::Held::boxed(Box::new(pio_i2c::open(
+                &self.dev, need,
+            )?))));
         }
         if let Some((node, bus)) = self.module_i2c(need) {
-            return Ok(I2c(Box::new(module::ModuleI2c::new(node, bus))));
+            return Ok(I2c(lemnos_core::Held::boxed(Box::new(
+                module::ModuleI2c::new(node, bus),
+            ))));
         }
         // Every device on a bus opens it: the kernel serialises their transfers.
         let path = self.node(need, I2C).ok_or(Status::NOT_FOUND)?;
         let bus = I2cBus::open_path(&path).map_err(|e| open_status(&e))?;
-        Ok(I2c(Box::new(bus)))
+        Ok(I2c(lemnos_core::Held::boxed(Box::new(bus))))
     }
 
     fn spi(&mut self, need: &str) -> Result<Spi> {
         if let Some(device) = self.open_module_spi(need)? {
-            return Ok(Spi(Box::new(device)));
+            return Ok(Spi(lemnos_core::Held::boxed(Box::new(device))));
         }
-        Ok(Spi(Box::new(self.open_spi(need)?)))
+        Ok(Spi(lemnos_core::Held::boxed(Box::new(
+            self.open_spi(need)?,
+        ))))
     }
 
     fn raw_spi(&mut self, need: &str) -> Result<RawSpiBus> {
         if let Some(device) = self.open_module_spi(need)? {
-            return Ok(Box::new(device));
+            return Ok(lemnos_core::Held::boxed(Box::new(device)));
         }
-        Ok(Box::new(self.open_spi(need)?))
+        Ok(lemnos_core::Held::boxed(Box::new(self.open_spi(need)?)))
     }
 
     fn line(&mut self, need: &str) -> Result<Line> {
         if let Some(line) = self.open_module_line(need)? {
-            return Ok(Box::new(line));
+            return Ok(lemnos_core::Held::boxed(Box::new(line)));
         }
         // The kernel refuses a line that's held, so this needs no claim of its own.
         let (path, offset) = self.line_node(need).ok_or(Status::NOT_FOUND)?;
         let line = GpioLine::open(&path, offset).map_err(|e| open_status(&e))?;
-        Ok(Box::new(line))
+        Ok(lemnos_core::Held::boxed(Box::new(line)))
     }
 
     fn pwm(&mut self, need: &str) -> Result<Pwm> {
         if let Some(pwm) = self.open_module_pwm(need)? {
-            return Ok(Box::new(pwm));
+            return Ok(lemnos_core::Held::boxed(Box::new(pwm)));
         }
         let (chip, channel) = self.pwm_node(need).ok_or(Status::NOT_FOUND)?;
         let claim = self.claim(need)?;
         let pwm = SysfsPwm::open(&chip, channel).map_err(|e| open_status(&e))?;
-        Ok(Box::new(pwm.holding(claim)))
+        Ok(lemnos_core::Held::boxed(Box::new(pwm.holding(claim))))
     }
 
     fn uart(&mut self, need: &str) -> Result<Uart> {
         let path = self.node(need, TTY).ok_or(Status::NOT_FOUND)?;
         let claim = self.claim(need)?;
         let uart = TtyUart::open_path(&path).map_err(|e| open_status(&e))?;
-        Ok(Box::new(uart.holding(claim)))
+        Ok(lemnos_core::Held::boxed(Box::new(uart.holding(claim))))
     }
 
     /// The device is found by its name each time, so after it re-enumerates the same name, or
@@ -288,15 +294,19 @@ impl Provider for LinuxBoard {
         let name = usb::UsbName::parse(need).ok_or(Status::NOT_FOUND)?;
         let id = usb::locate(&self.dev, &self.sys, name)?;
         let claim = self.claim(&usb::claim_key(id))?;
-        Ok(Box::new(usb::open(&self.dev, &self.sys, id, claim)?))
+        Ok(lemnos_core::Held::boxed(Box::new(usb::open(
+            &self.dev, &self.sys, id, claim,
+        )?)))
     }
 
     fn usb_function(&mut self, need: &str) -> Result<UsbFunctionHandle> {
-        Ok(Box::new(self.open_usb_function(need)?))
+        Ok(lemnos_core::Held::boxed(Box::new(
+            self.open_usb_function(need)?,
+        )))
     }
 
     fn dma(&mut self, need: &str) -> Result<DmaHandle> {
-        Ok(Box::new(self.module_dma(need)?))
+        Ok(lemnos_core::Held::boxed(Box::new(self.module_dma(need)?)))
     }
 }
 

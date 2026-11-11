@@ -207,3 +207,50 @@ mod linux {
 
 #[cfg(target_os = "linux")]
 pub use linux::LinuxHardware;
+
+/// The driver's DMA need, as the boxed provider the capture device takes: every call goes to
+/// what the host handed over.
+#[cfg(target_os = "linux")]
+pub(crate) struct HeldDma(pub(crate) lemnos_core::DmaHandle);
+
+#[cfg(target_os = "linux")]
+impl lemnos_hal::DmaBuffers for HeldDma {
+    type Error = lemnos_hal::ErrorKind;
+
+    fn allocate(
+        &mut self,
+        len: u64,
+    ) -> core::result::Result<lemnos_hal::blocks::DmaBuffer, Self::Error> {
+        self.0.allocate(len)
+    }
+
+    fn release(&mut self, id: u32) -> core::result::Result<(), Self::Error> {
+        self.0.release(id)
+    }
+
+    fn write(
+        &mut self,
+        id: u32,
+        offset: u64,
+        data: &[u8],
+    ) -> core::result::Result<(), Self::Error> {
+        self.0.write(id, offset, data)
+    }
+
+    fn read(
+        &mut self,
+        id: u32,
+        offset: u64,
+        out: &mut [u8],
+    ) -> core::result::Result<(), Self::Error> {
+        self.0.read(id, offset, out)
+    }
+
+    fn sync_for_device(&mut self, id: u32) -> core::result::Result<(), Self::Error> {
+        self.0.sync_for_device(id)
+    }
+
+    fn sync_for_cpu(&mut self, id: u32) -> core::result::Result<(), Self::Error> {
+        self.0.sync_for_cpu(id)
+    }
+}

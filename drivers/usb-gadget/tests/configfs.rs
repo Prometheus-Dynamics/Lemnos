@@ -89,7 +89,9 @@ impl Provider for Tree {
             &self.root.join("udc"),
             UDC,
         );
-        Ok(Box::new(gadget.ok_or(Status::NOT_FOUND)?))
+        Ok(lemnos_core::Held::boxed(Box::new(
+            gadget.ok_or(Status::NOT_FOUND)?,
+        )))
     }
 }
 

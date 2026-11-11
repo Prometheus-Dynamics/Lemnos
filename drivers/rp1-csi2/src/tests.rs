@@ -127,7 +127,7 @@ fn driver_on(frames: &MockStream) -> (Rp1Csi2, Hw) {
         m.given_back.reserve(4096);
         m.set.reserve(4096);
     });
-    let frames: StreamHandle = Box::new(frames.clone());
+    let frames: StreamHandle = lemnos_core::Held::boxed(Box::new(frames.clone()));
     let driver = Rp1Csi2::with_hardware(Box::new(hw.clone()), Some(frames));
     (driver, hw)
 }

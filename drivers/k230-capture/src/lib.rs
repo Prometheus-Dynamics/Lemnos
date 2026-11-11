@@ -294,7 +294,10 @@ impl Lifecycle for K230Capture {
     fn start(needs: K230CaptureNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::new(cfg.str("isp"), cfg.str("mipi"))?;
         let options = options(cfg)?;
-        let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(settings, needs.dma));
+        let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(
+            settings,
+            Box::new(hw::HeldDma(needs.dma)),
+        ));
         Ok(Self::with_hardware(hw, needs.frames, options))
     }
 
@@ -367,7 +370,7 @@ impl K230Capture {
     pub fn with_hardware(hw: Box<dyn Hardware>, frames: StreamHandle, options: Options) -> Self {
         Self {
             frames,
-            dma: Box::new(Moved),
+            dma: lemnos_core::Held::boxed(Box::new(Moved)),
             hw,
             options,
             link: None,

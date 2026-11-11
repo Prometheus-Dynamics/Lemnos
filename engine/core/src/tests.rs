@@ -85,7 +85,9 @@ impl Provider for Board {
         if need != "bus" {
             return Err(Status::NOT_FOUND);
         }
-        Ok(I2c(Box::new(self.0.take().ok_or(Status::BUSY)?)))
+        Ok(I2c(crate::Held::boxed(Box::new(
+            self.0.take().ok_or(Status::BUSY)?,
+        ))))
     }
 }
 
@@ -509,5 +511,54 @@ mod package {
             (settings[3].kind, settings[3].text.as_str()),
             (SETTING_TEXT, "left")
         );
+    }
+}
+
+mod held {
+    use std::boxed::Box;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::{Held, Home};
+
+    /// Where a value lives between holders.
+    struct Place(Mutex<Option<&'static mut [u8; 4]>>, AtomicU32);
+
+    impl Home<[u8; 4]> for Place {
+        fn take_back(&self, resource: &'static mut [u8; 4]) {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            *self.0.lock().unwrap() = Some(resource);
+        }
+    }
+
+    #[test]
+    fn what_was_lent_goes_home_when_its_holder_is_dropped_and_can_be_lent_again() {
+        static PLACE: Place = Place(Mutex::new(None), AtomicU32::new(0));
+        let value: &'static mut [u8; 4] = Box::leak(Box::new([1, 2, 3, 4]));
+        let mut held = Held::lent(value, &PLACE);
+        assert_eq!(*held, [1, 2, 3, 4]);
+        held[0] = 9;
+        assert!(PLACE.0.lock().unwrap().is_none(), "out while it is held");
+        drop(held);
+        assert_eq!(PLACE.1.load(Ordering::Relaxed), 1);
+        // The same memory, as its last holder left it, to lend to the next.
+        let back = PLACE.0.lock().unwrap().take().expect("home again");
+        assert_eq!(*back, [9, 2, 3, 4]);
+        let again = Held::lent(back, &PLACE);
+        drop(again);
+        assert_eq!(
+            PLACE.1.load(Ordering::Relaxed),
+            2,
+            "once for each time it was lent"
+        );
+    }
+
+    #[test]
+    fn a_boxed_resource_is_owned_outright_and_as_usable() {
+        let mut held: Held<[u8]> = Held::boxed(Box::new([5u8, 6]));
+        held[1] = 7;
+        assert_eq!(&*held, [5, 7]);
+        let from: Held<[u8]> = Box::<[u8]>::from([1u8]).into();
+        assert_eq!(from.len(), 1);
     }
 }

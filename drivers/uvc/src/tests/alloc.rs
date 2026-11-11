@@ -171,7 +171,12 @@ fn a_thousand_transfers_allocate_nothing() {
         published: &PUBLISHED,
         buffer: vec![0; 4096],
     };
-    let mut uvc = rig::bind(Box::new(usb), Box::new(stream), 4096).unwrap();
+    let mut uvc = rig::bind(
+        lemnos_core::Held::boxed(Box::new(usb)),
+        lemnos_core::Held::boxed(Box::new(stream)),
+        4096,
+    )
+    .unwrap();
 
     let mut now = 1_000;
     for _ in 0..16 {

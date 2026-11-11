@@ -11,7 +11,7 @@ use std::vec::Vec;
 use embedded_hal::digital::{self, InputPin, OutputPin, StatefulOutputPin};
 use embedded_hal::i2c::{self, I2c as _, NoAcknowledgeSource, Operation};
 use embedded_hal::pwm::{self, SetDutyCycle};
-use lemnos_core::{HostClock, I2c, Line, Provider, Status};
+use lemnos_core::{HostClock, Provider, Status};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::{
     ControlSetup, IsoPacket, UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent,
@@ -20,30 +20,24 @@ use lemnos_hal::blocks::{
 use lemnos_hal::raw::{EdgeDetect, LineConfig, Polarity, PwmConfig, RawLine, RawPwm};
 
 use crate::usb::{Endpoint, Function, FunctionPort, Host, HostPort, PortEvent, TransferKind};
-use crate::{Buses, I2cBus, InputLine, Named, OutputLine, PwmChannel};
+use crate::{Buses, DynI2c, DynLine, I2cBus, InputLine, OutputLine, PwmChannel, Stall, Stalled};
 
-/// Makes a bus handle whichever way `lemnos-core` holds them: boxed when the build has an
-/// allocator, `&'static mut` when it doesn't.
-trait Hold<B> {
-    fn hold(bus: B) -> Self;
+/// The firmware's lock, played by a mutex.
+struct Locked<T>(std::sync::Mutex<T>);
+
+impl<T> Locked<T> {
+    const fn new(value: T) -> Self {
+        Self(std::sync::Mutex::new(value))
+    }
 }
 
-macro_rules! hold {
-    ($($bound:path),*) => {$(
-        impl<B: $bound + Send + 'static> Hold<B> for &'static mut (dyn $bound + Send) {
-            fn hold(bus: B) -> Self {
-                Box::leak(Box::new(bus))
-            }
-        }
-        impl<B: $bound + Send + 'static> Hold<B> for Box<dyn $bound + Send> {
-            fn hold(bus: B) -> Self {
-                Box::new(bus)
-            }
-        }
-    )*};
-}
+impl<T: Send> lemnos_core::Lock for Locked<T> {
+    type Inner = T;
 
-hold!(lemnos_hal::i2c::I2c<Error = ErrorKind>, RawLine);
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        self.0.try_lock().ok().map(|mut value| f(&mut value))
+    }
+}
 
 /// One I2C target with 256 registers, which stops acknowledging when told to.
 #[derive(Debug)]
@@ -245,20 +239,40 @@ fn a_pwm_channel_refuses_another_period_or_too_much_duty() {
 }
 
 #[test]
-fn buses_give_each_handle_once_by_name() {
-    let mut i2c = [Named::new("i2c0", I2c(Hold::hold(I2cBus(registers()))))];
-    let line: Line = Hold::hold(OutputLine::new(Pin::default()));
-    let mut lines = [Named::new("led", line)];
-    let mut buses = Buses::new().with_i2c(&mut i2c).with_lines(&mut lines);
+fn a_bus_is_lent_once_by_name_and_comes_back_when_its_holder_is_dropped() {
+    static I2C0: Stall<DynI2c, Locked<Option<&'static mut DynI2c>>> =
+        Stall::new("i2c0", Locked::new(None));
+    static LED: Stall<DynLine, Locked<Option<&'static mut DynLine>>> =
+        Stall::new("led", Locked::new(None));
+    let i2c = [&I2C0 as &'static dyn Stalled<DynI2c>];
+    let lines = [&LED as &'static dyn Stalled<DynLine>];
+    let mut buses = Buses::new().with_i2c(&i2c).with_lines(&lines);
+    // Declared, and not yet put in its stall at boot.
+    assert!(!buses.provided("i2c0"));
+    assert_eq!(buses.i2c("i2c0").err(), Some(Status::BUSY));
+    assert!(I2C0.put(Box::leak(Box::new(I2cBus(registers())))));
+    assert!(LED.put(Box::leak(Box::new(OutputLine::new(Pin::default())))));
     assert!(buses.provided("i2c0") && buses.provided("led"));
     assert!(!buses.provided("i2c1"));
+    // A stall holds one bus: a second is refused, and the first stays.
+    assert!(!I2C0.put(Box::leak(Box::new(I2cBus(registers())))));
+
     let mut bus = buses.i2c("i2c0").unwrap();
-    assert!(!buses.provided("i2c0"));
+    assert!(!buses.provided("i2c0") && !I2C0.is_in());
     assert_eq!(buses.i2c("i2c0").err(), Some(Status::BUSY));
     assert_eq!(buses.i2c("i2c1").err(), Some(Status::NOT_FOUND));
     assert_eq!(buses.spi("i2c0").err(), Some(Status::NOT_FOUND));
-    bus.write(0x40, &[0, 1]).unwrap();
+    bus.write(0x40, &[0x10, 7]).unwrap();
     buses.line("led").unwrap().set(true).unwrap();
+    assert!(LED.is_in(), "the line's holder was dropped at once");
+
+    // Whoever held the bus lets go: it is back, the same bus, for the next to take.
+    drop(bus);
+    assert!(I2C0.is_in() && buses.provided("i2c0"));
+    let mut again = buses.i2c("i2c0").unwrap();
+    let mut value = [0u8; 1];
+    again.write_read(0x40, &[0x10], &mut value).unwrap();
+    assert_eq!(value, [7], "what the first holder wrote is still in it");
 }
 
 /// A clock that moves 1 ms each time it is read.

@@ -308,12 +308,12 @@ impl Streams {
     fn needs(&self, config: StreamHandle) -> RkispNeeds {
         RkispNeeds {
             config,
-            statistics: Box::new(self.statistics.clone()),
-            output0: Box::new(self.output0.clone()),
+            statistics: lemnos_core::Held::boxed(Box::new(self.statistics.clone())),
+            output0: lemnos_core::Held::boxed(Box::new(self.output0.clone())),
             output1: self
                 .output1
                 .clone()
-                .map(|s| -> StreamHandle { Box::new(s) }),
+                .map(|s| -> StreamHandle { lemnos_core::Held::boxed(Box::new(s)) }),
         }
     }
 }
@@ -423,7 +423,10 @@ fn driver_on(streams: &Streams, config: StreamHandle) -> (Rkisp, Handle) {
 }
 
 fn driver(streams: &Streams) -> (Rkisp, Handle) {
-    driver_on(streams, Box::new(streams.config.clone()))
+    driver_on(
+        streams,
+        lemnos_core::Held::boxed(Box::new(streams.config.clone())),
+    )
 }
 
 fn input() -> IspInput {
@@ -769,7 +772,7 @@ fn the_driver_uses_its_copy_when_the_caller_changes_the_buffer_after_the_read() 
         allow: None,
         hook: Hook::default(),
     };
-    let (mut d, k) = driver_on(&streams, Box::new(config));
+    let (mut d, k) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)));
     configured(&mut d);
     d.start().unwrap();
     d.tick(0);
@@ -798,7 +801,7 @@ fn a_job_the_driver_cannot_run_is_dropped_before_anything_reaches_the_kernel() {
         allow: None,
         hook: Hook::default(),
     };
-    let (mut d, k) = driver_on(&streams, Box::new(config));
+    let (mut d, k) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)));
     configured(&mut d);
     // Output 1 is off.
     d.start().unwrap();
@@ -905,7 +908,7 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
         hook: Hook::default(),
     };
     let hook = Arc::clone(&config.hook);
-    let (mut d, k) = driver_on(&streams, Box::new(config));
+    let (mut d, k) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)));
     configured(&mut d);
     d.start().unwrap();
     d.tick(0);
@@ -1211,7 +1214,7 @@ fn the_steady_state_allocates_nothing() {
         allow: Some(Arc::clone(&allow)),
         hook: Hook::default(),
     };
-    let (mut d, k) = driver_on(&streams, Box::new(config));
+    let (mut d, k) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)));
     configured(&mut d);
     d.start().unwrap();
     let mut now = d.tick(0).unwrap();

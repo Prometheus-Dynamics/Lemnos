@@ -281,7 +281,7 @@ impl Rig {
 /// with handles unless given), and output 1 when `output1`.
 fn rig_with(frames: Option<MockStream>, output1: bool) -> Rig {
     let hw = Hw::default();
-    let hold = |s: &MockStream| Box::new(s.clone()) as StreamHandle;
+    let hold = |s: &MockStream| -> StreamHandle { lemnos_core::Held::boxed(Box::new(s.clone())) };
     let config = MockStream::with_bytes(4, CONFIG_BYTES);
     let stats = handles(4, STATS_BYTES as u64);
     let frames = frames.unwrap_or_else(|| handles(4, 4096));
@@ -563,7 +563,7 @@ fn a_buffer_the_module_wont_register_or_that_is_too_small_drops_the_job() {
 
     // An output 1 buffer smaller than the image the configuration describes.
     let small = handles(4, u64::from(FRAME) - 16);
-    r.fe.output1 = Some(Box::new(small.clone()));
+    r.fe.output1 = Some(lemnos_core::Held::boxed(Box::new(small.clone())));
     r.fe.out1 = super::Buffers::NONE;
     r.post(&job(2, 1, 0, 1));
     r.fe.tick(2);
@@ -892,7 +892,7 @@ fn a_stream_whose_buffers_have_no_handles_is_refused() {
 fn a_statistics_stream_without_handles_is_refused_at_start() {
     let mut r = rig();
     let plain = MockStream::with_bytes(4, STATS_BYTES);
-    r.fe.statistics = Some(Box::new(plain.clone()));
+    r.fe.statistics = Some(lemnos_core::Held::boxed(Box::new(plain.clone())));
     assert_eq!(CameraIsp::start(&mut r.fe), Err(Status::NOT_SUPPORTED));
     assert!(r.hw.with(|m| m.set.is_empty()));
     assert_eq!(r.fe.tick(1), None, "not running");

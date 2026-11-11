@@ -519,7 +519,9 @@ fn config_for(key: u8, stats: bool, output1: bool) -> Vec<u8> {
 }
 
 fn driver(host: &Host, hw: &Hw) -> PispFe {
-    let stream = |name| -> StreamHandle { Box::new(host.stream_producer(0, name).unwrap()) };
+    let stream = |name| -> StreamHandle {
+        lemnos_core::Held::boxed(Box::new(host.stream_producer(0, name).unwrap()))
+    };
     let link = FeLink {
         lanes: 2,
         mbps: 800,

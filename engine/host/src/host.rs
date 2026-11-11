@@ -978,7 +978,9 @@ impl Provider for Binding<'_> {
 
     fn stream(&mut self, need: &str) -> Result<StreamHandle> {
         let endpoint: StreamHandle = if self.slot.spec.streams.contains_key(need) {
-            Box::new(self.inner.streams.producer(self.slot.index, need)?)
+            lemnos_core::Held::boxed(Box::new(
+                self.inner.streams.producer(self.slot.index, need)?,
+            ))
         } else {
             let bus = self.bus_name(need)?;
             lock(&self.inner.backend).stream(&bus)?

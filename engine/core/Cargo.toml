@@ -13,7 +13,8 @@ workspace = true
 
 [features]
 default = []
-# Resources are boxed. Without this they are `&'static mut`, for hosts with no allocator.
+# A host can box resources (`Held::boxed`). Without this a `Held` is always lent from a `static`
+# place it goes back to when dropped, for hosts with no allocator. The type is the same either way.
 alloc = ["lemnos-abi/alloc"]
 std = ["alloc", "lemnos-abi/std", "lemnos-hal/std"]
 # Fixed-point values as floats.

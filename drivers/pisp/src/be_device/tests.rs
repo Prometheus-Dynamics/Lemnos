@@ -233,7 +233,8 @@ impl Streams {
     }
 
     fn needs(&self) -> PispBeNeeds {
-        let hold = |s: &MockStream| -> StreamHandle { Box::new(s.clone()) };
+        let hold =
+            |s: &MockStream| -> StreamHandle { lemnos_core::Held::boxed(Box::new(s.clone())) };
         PispBeNeeds {
             config: hold(&self.config),
             input: hold(&self.input),

@@ -4,8 +4,9 @@
 //! The engine matches tags as strings and carries method numbers and bytes. It
 //! has no idea what any of them mean.
 //!
-//! Works with no allocator. Feature `alloc` boxes resources; without it a host
-//! hands them out as `&'static mut`.
+//! Works with no allocator. A resource a driver holds is a [`Held`], the same type either way:
+//! boxed by a host that has an allocator (feature `alloc`), or lent from a `static` place it goes
+//! back to when the driver is dropped.
 
 #![no_std]
 
@@ -20,6 +21,7 @@ mod contract;
 mod description;
 mod driver;
 mod fixed;
+mod held;
 #[cfg(feature = "std")]
 pub mod package;
 mod resources;
@@ -42,9 +44,9 @@ pub use lemnos_abi::Status;
 pub use lemnos_hal::ErrorKind;
 pub use lemnos_macros::{Decode, Encode, contract, driver};
 pub use resources::{
-    BusKind, ClocksHandle, DmaHandle, Held, Hint, HintSource, I2c, InterruptHandle, Line, Need,
-    NeedKind, Provider, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Resource, Resources, Spi,
-    StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    BusKind, ClocksHandle, DmaHandle, Held, Hint, HintSource, Home, I2c, InterruptHandle, Line,
+    Lock, Need, NeedKind, Provider, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Resource,
+    Resources, Spi, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 pub use tag::Tag;
 

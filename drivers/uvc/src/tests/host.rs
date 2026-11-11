@@ -72,7 +72,9 @@ impl Provider for Board {
     fn usb_device(&mut self, need: &str) -> Result<UsbDeviceHandle> {
         self.opens.lock().unwrap().push(need.to_string());
         let device = self.plugged.lock().unwrap().get(need).cloned();
-        Ok(Box::new(device.ok_or(Status::NO_DEVICE)?))
+        Ok(lemnos_core::Held::boxed(Box::new(
+            device.ok_or(Status::NO_DEVICE)?,
+        )))
     }
 }
 

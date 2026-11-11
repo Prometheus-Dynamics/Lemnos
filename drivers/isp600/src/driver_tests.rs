@@ -188,8 +188,8 @@ impl Streams {
     fn needs(&self, config: StreamHandle) -> Isp600Needs {
         Isp600Needs {
             config,
-            statistics: Box::new(self.statistics.clone()),
-            output0: Box::new(self.output0.clone()),
+            statistics: lemnos_core::Held::boxed(Box::new(self.statistics.clone())),
+            output0: lemnos_core::Held::boxed(Box::new(self.output0.clone())),
         }
     }
 }
@@ -282,7 +282,11 @@ fn driver_on(streams: &Streams, config: StreamHandle, settle: u8) -> (Isp600, Ha
 }
 
 fn driver(streams: &Streams) -> (Isp600, Handle) {
-    driver_on(streams, Box::new(streams.config.clone()), SETTLE)
+    driver_on(
+        streams,
+        lemnos_core::Held::boxed(Box::new(streams.config.clone())),
+        SETTLE,
+    )
 }
 
 fn input() -> IspInput {
@@ -586,7 +590,11 @@ fn a_job_carries_its_image_in_and_its_statistics_and_image_out() {
 #[test]
 fn the_default_settle_lets_three_frames_go_by() {
     let streams = Streams::new();
-    let (mut d, k) = driver_on(&streams, Box::new(streams.config.clone()), DEFAULT_SETTLE);
+    let (mut d, k) = driver_on(
+        &streams,
+        lemnos_core::Held::boxed(Box::new(streams.config.clone())),
+        DEFAULT_SETTLE,
+    );
     configured(&mut d);
     d.start().unwrap();
     d.tick(0);
@@ -613,7 +621,7 @@ fn the_driver_hands_in_its_copy_when_the_caller_changes_the_buffer_after_the_rea
         scribble: vec![0xff; LOAD_BYTES],
         hook: Hook::default(),
     };
-    let (mut d, k) = driver_on(&streams, Box::new(config), SETTLE);
+    let (mut d, k) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)), SETTLE);
     configured(&mut d);
     d.start().unwrap();
     d.tick(0);
@@ -700,7 +708,7 @@ fn a_buffer_given_back_and_named_by_a_later_job_in_the_same_tick_is_held() {
         hook: Hook::default(),
     };
     let hook = Arc::clone(&config.hook);
-    let (mut d, k) = driver_on(&streams, Box::new(config), SETTLE);
+    let (mut d, k) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)), SETTLE);
     configured(&mut d);
     d.start().unwrap();
     d.tick(0);

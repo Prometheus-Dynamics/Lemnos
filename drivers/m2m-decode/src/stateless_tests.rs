@@ -537,7 +537,12 @@ fn a_caller_decodes_through_a_real_host_on_the_streams_own_buffers() {
     let host = host(&board("nothing", "memory = \"dma-buf\"\n"));
     let mock = Mock::new(true);
     let jobs = Box::new(host.stream_producer(0, "jobs").unwrap());
-    let mut driver = M2mCodec::on(M2mCodecNeeds { jobs }, Box::new(block_on(&mock)));
+    let mut driver = M2mCodec::on(
+        M2mCodecNeeds {
+            jobs: lemnos_core::Held::boxed(jobs),
+        },
+        Box::new(block_on(&mock)),
+    );
     let mut name = [0u8; 48];
     let len = CodecBlock::block(&mut driver, &mut name).unwrap();
     assert_eq!(&name[..len], b"v4l2-stateless");

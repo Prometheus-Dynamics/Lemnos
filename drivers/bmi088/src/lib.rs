@@ -236,6 +236,7 @@ struct Die<const RING: usize> {
 }
 
 impl<const RING: usize> Die<RING> {
+    #[inline(always)]
     fn new(kind: Kind, address: u8, fifo: bool, setting: Setting) -> Self {
         Self {
             kind,
@@ -561,6 +562,14 @@ impl Lifecycle for Bmi088 {
     const TICKS: bool = true;
 
     fn start(needs: Bmi088Needs, cfg: &Config<'_>) -> Result<Self> {
+        let mut place = None;
+        Self::start_in(&mut place, needs, cfg)?;
+        place.ok_or(Status::IO)
+    }
+
+    /// Builds the driver where it will live. Its two FIFO rings are most of 6 KB: on a
+    /// microcontroller they are filled in the driver's slot and never cross the stack.
+    fn start_in(place: &mut Option<Self>, needs: Bmi088Needs, cfg: &Config<'_>) -> Result<()> {
         let fifo = match cfg.get("fifo") {
             None => false,
             Some(ConfigValue::Bool(on)) => on,
@@ -573,21 +582,15 @@ impl Lifecycle for Bmi088 {
         .ok_or(Status::INVALID_ARGUMENT)?;
         let gyro = chip::gyro_setting(int(cfg, "gyro_range", 2000)?, int(cfg, "gyro_rate", 2000)?)
             .ok_or(Status::INVALID_ARGUMENT)?;
-        Ok(Self {
+        let accel_address = address(cfg, "accel_address", DEFAULT_ACCEL_ADDRESS)?;
+        let gyro_address = address(cfg, "gyro_address", DEFAULT_GYRO_ADDRESS)?;
+        // Nothing fallible is left, and nothing large has been made yet.
+        *place = Some(Self {
             bus: needs.bus,
-            accel: Die::new(
-                Kind::Accel,
-                address(cfg, "accel_address", DEFAULT_ACCEL_ADDRESS)?,
-                fifo,
-                accel,
-            ),
-            gyro: Die::new(
-                Kind::Gyro,
-                address(cfg, "gyro_address", DEFAULT_GYRO_ADDRESS)?,
-                fifo,
-                gyro,
-            ),
-        })
+            accel: Die::new(Kind::Accel, accel_address, fifo, accel),
+            gyro: Die::new(Kind::Gyro, gyro_address, fifo, gyro),
+        });
+        Ok(())
     }
 
     fn describe(&self, out: &mut Description) {

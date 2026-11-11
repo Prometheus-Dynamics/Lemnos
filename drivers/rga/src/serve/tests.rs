@@ -254,9 +254,9 @@ fn driver(
         .cloned()
         .map(|rec| -> Opener<Box<dyn Submit>> { Box::new(move || Ok(Box::new(rec.clone()))) });
     let needs = RgaNeeds {
-        scale: Some(producer(host, "scale")),
-        convert: Some(producer(host, "convert")),
-        blend: Some(producer(host, "blend")),
+        scale: Some(lemnos_core::Held::boxed(producer(host, "scale"))),
+        convert: Some(lemnos_core::Held::boxed(producer(host, "convert"))),
+        blend: Some(lemnos_core::Held::boxed(producer(host, "blend"))),
     };
     Rga::serving(needs, settings, soc, Routes::new(soc, m2m, multi))
 }
@@ -821,7 +821,7 @@ fn a_unit_whose_node_is_not_there_fails_its_jobs_and_is_looked_for_again() {
         Box::new(move || Ok(Box::new(rec.clone())))
     };
     let needs = RgaNeeds {
-        scale: Some(producer(&host, "scale")),
+        scale: Some(lemnos_core::Held::boxed(producer(&host, "scale"))),
         convert: None,
         blend: None,
     };

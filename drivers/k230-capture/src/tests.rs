@@ -214,7 +214,10 @@ fn driver_with(stream: StreamHandle, format: Format) -> (K230Capture, Handle) {
 }
 
 fn driver(stream: &MockStream) -> (K230Capture, Handle) {
-    driver_with(Box::new(stream.clone()), Format::Bayer)
+    driver_with(
+        lemnos_core::Held::boxed(Box::new(stream.clone())),
+        Format::Bayer,
+    )
 }
 
 fn streaming(stream: &MockStream) -> (K230Capture, Handle) {
@@ -268,7 +271,10 @@ fn configure_returns_each_formats_layout() {
         (Format::P010, 10, Packing::Unpacked16, 10, 128, 8192 + 4096),
     ];
     for (format, depth, packing, bit_depth, stride, size) in cases {
-        let (mut d, _block) = driver_with(Box::new(MockStream::new(1)), format);
+        let (mut d, _block) = driver_with(
+            lemnos_core::Held::boxed(Box::new(MockStream::new(1))),
+            format,
+        );
         let link = LinkConfig {
             bit_depth: depth,
             data_type: 0x2a + (depth - 8) / 2,
@@ -474,7 +480,10 @@ fn a_yuv_or_rgb_format_goes_through_the_pipeline() {
             .unwrap(),
         ),
     ] {
-        let (mut d, block) = driver_with(Box::new(MockStream::with_bytes(2, 12288)), format);
+        let (mut d, block) = driver_with(
+            lemnos_core::Held::boxed(Box::new(MockStream::with_bytes(2, 12288))),
+            format,
+        );
         d.configure(raw10(), Packing::Packed).unwrap();
         d.start().unwrap();
         let calls = block.calls();
@@ -571,7 +580,10 @@ fn a_frame_larger_than_the_copy_chunk_arrives_whole() {
     let bytes = 256 * 3 * 192;
     assert!(bytes > 2 * COPY_CHUNK);
     let stream = MockStream::with_bytes(2, bytes);
-    let (mut d, block) = driver_with(Box::new(stream.clone()), Format::Bgr24);
+    let (mut d, block) = driver_with(
+        lemnos_core::Held::boxed(Box::new(stream.clone())),
+        Format::Bgr24,
+    );
     d.configure(link, Packing::Packed).unwrap();
     d.start().unwrap();
     let sent = pattern(5, bytes);

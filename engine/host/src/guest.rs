@@ -54,59 +54,59 @@ type Refusable<T> = Result<T, ErrorKind>;
 pub(crate) struct ReadOnly<T>(T);
 
 pub(crate) fn i2c(bus: I2c) -> I2c {
-    I2c(Box::new(ReadOnly(bus)))
+    I2c(lemnos_core::Held::boxed(Box::new(ReadOnly(bus))))
 }
 
 pub(crate) fn spi(bus: Spi) -> Spi {
-    Spi(Box::new(ReadOnly(bus)))
+    Spi(lemnos_core::Held::boxed(Box::new(ReadOnly(bus))))
 }
 
 pub(crate) fn raw_spi(bus: RawSpiBus) -> RawSpiBus {
-    Box::new(ReadOnly(bus))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(bus)))
 }
 
 pub(crate) fn line(line: Line) -> Line {
-    Box::new(ReadOnly(line))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(line)))
 }
 
 pub(crate) fn pwm(pwm: Pwm) -> Pwm {
-    Box::new(ReadOnly(pwm))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(pwm)))
 }
 
 pub(crate) fn uart(uart: Uart) -> Uart {
-    Box::new(ReadOnly(uart))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(uart)))
 }
 
 pub(crate) fn usb_device(device: UsbDeviceHandle) -> UsbDeviceHandle {
-    Box::new(ReadOnly(device))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(device)))
 }
 
 pub(crate) fn usb_function(function: UsbFunctionHandle) -> UsbFunctionHandle {
-    Box::new(ReadOnly(function))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(function)))
 }
 
 pub(crate) fn registers(registers: RegistersHandle) -> RegistersHandle {
-    Box::new(ReadOnly(registers))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(registers)))
 }
 
 pub(crate) fn interrupt(interrupt: InterruptHandle) -> InterruptHandle {
-    Box::new(ReadOnly(interrupt))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(interrupt)))
 }
 
 pub(crate) fn dma(dma: DmaHandle) -> DmaHandle {
-    Box::new(ReadOnly(dma))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(dma)))
 }
 
 pub(crate) fn clocks(clocks: ClocksHandle) -> ClocksHandle {
-    Box::new(ReadOnly(clocks))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(clocks)))
 }
 
 pub(crate) fn reset(reset: ResetHandle) -> ResetHandle {
-    Box::new(ReadOnly(reset))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(reset)))
 }
 
 pub(crate) fn stream(stream: StreamHandle) -> StreamHandle {
-    Box::new(ReadOnly(stream))
+    lemnos_core::Held::boxed(Box::new(ReadOnly(stream)))
 }
 
 impl i2c::ErrorType for ReadOnly<I2c> {
@@ -465,7 +465,7 @@ mod tests {
     fn an_i2c_bus_passes_a_plain_read_and_refuses_anything_with_a_write_in_it() {
         let mock = MockI2c::new().with_raw_target(0x20);
         mock.set_logging(true);
-        let mut bus = i2c(I2c(Box::new(mock.clone())));
+        let mut bus = i2c(I2c(lemnos_core::Held::boxed(Box::new(mock.clone()))));
         let mut byte = [0u8; 1];
         assert_eq!(bus.write(0x20, &[1, 2]), Err(REFUSED));
         // Naming a register before reading it is a write.
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn a_raw_spi_bus_refuses_every_segment_that_sends() {
         let mock = MockRawSpi::new();
-        let mut bus = raw_spi(Box::new(mock.clone()));
+        let mut bus = raw_spi(lemnos_core::Held::boxed(Box::new(mock.clone())));
         let mut rx = [0u8; 2];
         let mut sending = [SpiSegment {
             config: SpiConfig::default(),
@@ -504,7 +504,7 @@ mod tests {
     fn a_line_is_read_and_never_configured_or_set() {
         let mock = MockLine::new();
         mock.drive(true);
-        let mut wrapped = line(Box::new(mock.clone()));
+        let mut wrapped = line(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.configure(&LineConfig::output(true)), Err(REFUSED));
         assert_eq!(wrapped.configure(&LineConfig::input()), Err(REFUSED));
         assert_eq!(wrapped.set(false), Err(REFUSED));
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn a_pwm_channel_is_read_and_never_configured() {
         let mock = MockPwm::new();
-        let mut wrapped = pwm(Box::new(mock.clone()));
+        let mut wrapped = pwm(lemnos_core::Held::boxed(Box::new(mock.clone())));
         let config = PwmConfig {
             period_ns: 1000,
             duty_ns: 500,
@@ -533,7 +533,7 @@ mod tests {
         let mock = MockUart::new();
         let before = mock.baud();
         mock.receive(b"in");
-        let mut wrapped = uart(Box::new(mock.clone()));
+        let mut wrapped = uart(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.write(b"out"), Err(REFUSED));
         assert_eq!(wrapped.set_baud(9600), Err(REFUSED));
         assert!(mock.sent().is_empty());
@@ -547,7 +547,7 @@ mod tests {
     fn registers_are_read_and_no_write_of_any_shape_lands() {
         let mock = MockRegisters::new(64);
         mock.set(8, 0xABCD);
-        let mut wrapped = registers(Box::new(mock.clone()));
+        let mut wrapped = registers(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.write32(8, 1), Err(REFUSED));
         assert_eq!(wrapped.modify32(8, 0xF, 0x1), Err(REFUSED));
         assert_eq!(wrapped.write_block(0, &[1, 2, 3]), Err(REFUSED));
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn an_interrupt_is_waited_for_and_never_masked_or_unmasked() {
         let mock = MockInterrupt::new();
-        let mut wrapped = interrupt(Box::new(mock.clone()));
+        let mut wrapped = interrupt(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.enable(), Err(REFUSED));
         assert!(!mock.enabled());
         assert_eq!(wrapped.disable(), Err(REFUSED));
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn clocks_resets_and_dma_memory_are_left_as_they_are() {
         let mock = MockClocks::new();
-        let mut wrapped = clocks(Box::new(mock.clone()));
+        let mut wrapped = clocks(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.enable(1), Err(REFUSED));
         assert_eq!(wrapped.disable(1), Err(REFUSED));
         assert_eq!(wrapped.set_rate_hz(1, 48_000_000), Err(REFUSED));
@@ -577,13 +577,13 @@ mod tests {
         assert!(wrapped.rate_hz(1).is_ok());
 
         let mock = MockReset::new();
-        let mut wrapped = reset(Box::new(mock.clone()));
+        let mut wrapped = reset(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.assert(0), Err(REFUSED));
         assert_eq!(wrapped.deassert(0), Err(REFUSED));
         assert!(mock.history().is_empty());
 
         let mock = MockDma::new();
-        let mut wrapped = dma(Box::new(mock.clone()));
+        let mut wrapped = dma(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.allocate(4096).map(|_| ()), Err(REFUSED));
         assert_eq!(wrapped.write(0, 0, &[1]), Err(REFUSED));
         assert_eq!(wrapped.sync_for_device(0), Err(REFUSED));
@@ -596,7 +596,7 @@ mod tests {
         let mock = MockUsbDevice::new(&[9, 2, 9, 0, 1, 1, 0, 0x80, 50]);
         mock.bind_kernel_driver(0);
         mock.queue_in(&[7, 7]);
-        let mut wrapped = usb_device(Box::new(mock.clone()));
+        let mut wrapped = usb_device(lemnos_core::Held::boxed(Box::new(mock.clone())));
         let out = ControlSetup {
             request_type: 0x21,
             request: 1,
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn a_usb_function_is_never_enabled_or_answered() {
         let mock = MockUsbFunction::new();
-        let mut wrapped = usb_function(Box::new(mock.clone()));
+        let mut wrapped = usb_function(lemnos_core::Held::boxed(Box::new(mock.clone())));
         let mut data = [0u8; 8];
         assert_eq!(wrapped.enable(&[1, 2, 3]), Err(REFUSED));
         assert_eq!(wrapped.disable(), Err(REFUSED));
@@ -652,7 +652,7 @@ mod tests {
     fn a_stream_gives_no_job_and_no_handle_and_still_carries_frames() {
         let mock = MockStream::with_bytes(2, 16);
         mock.post_job(b"a change");
-        let mut wrapped = stream(Box::new(mock.clone()));
+        let mut wrapped = stream(lemnos_core::Held::boxed(Box::new(mock.clone())));
         let mut job = [0u8; 16];
         assert_eq!(wrapped.next_job(&mut job), Ok(None));
         assert_eq!(wrapped.buffer_kind(), BufferKind::Plain);

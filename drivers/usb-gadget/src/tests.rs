@@ -238,7 +238,7 @@ impl Provider for Board {
 
     fn usb_function(&mut self, _need: &str) -> Result<UsbFunctionHandle> {
         let function = self.0.take().ok_or(Status::NOT_FOUND)?;
-        Ok(Box::new(function))
+        Ok(lemnos_core::Held::boxed(Box::new(function)))
     }
 }
 

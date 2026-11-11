@@ -74,6 +74,14 @@ pub trait Driver: Sized {
     const MANIFEST: Manifest;
 
     fn bind(res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<Self>;
+    /// Binds into `place`, which is where the driver will live: a host with no allocator keeps
+    /// each driver in a `static`, and a large one built on the stack and moved there costs the
+    /// stack its whole size. `place` is `None` on the way in and `Some` only on success. The
+    /// default builds with [`Driver::bind`] and moves the result.
+    fn bind_in(place: &mut Option<Self>, res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<()> {
+        *place = Some(Self::bind(res, cfg)?);
+        Ok(())
+    }
     fn describe(&self, out: &mut Description);
     fn health(&self) -> Health {
         Health::Ok
@@ -102,6 +110,14 @@ pub trait Lifecycle: Sized {
     type Needs;
 
     fn start(needs: Self::Needs, cfg: &Config<'_>) -> Result<Self>;
+    /// [`Lifecycle::start`], into the place the driver will live. A driver whose state is large
+    /// can write this to fill `place` field by field, so that it is never whole on the stack of
+    /// a microcontroller; `place` must be `Some` exactly when this succeeds. The default starts
+    /// by value and moves the result.
+    fn start_in(place: &mut Option<Self>, needs: Self::Needs, cfg: &Config<'_>) -> Result<()> {
+        *place = Some(Self::start(needs, cfg)?);
+        Ok(())
+    }
     fn describe(&self, _out: &mut Description) {}
     fn health(&self) -> Health {
         Health::Ok

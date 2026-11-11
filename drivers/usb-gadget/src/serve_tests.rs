@@ -51,11 +51,17 @@ impl Provider for Board {
     }
 
     fn usb_function(&mut self, _need: &str) -> Result<UsbFunctionHandle> {
-        self.function.take().ok_or(Status::NOT_FOUND)
+        self.function
+            .take()
+            .map(lemnos_core::Held::boxed)
+            .ok_or(Status::NOT_FOUND)
     }
 
     fn stream(&mut self, _need: &str) -> Result<StreamHandle> {
-        self.stream.take().ok_or(Status::NOT_FOUND)
+        self.stream
+            .take()
+            .map(lemnos_core::Held::boxed)
+            .ok_or(Status::NOT_FOUND)
     }
 }
 

@@ -427,7 +427,7 @@ impl QuietBoard {
 macro_rules! quiet {
     ($($method:ident -> $handle:ty;)*) => {$(
         fn $method(&mut self, _need: &str) -> Result<$handle> {
-            Ok(self.quiet()?)
+            Ok(lemnos_core::Held::boxed(self.quiet()?))
         }
     )*};
 }
@@ -446,7 +446,7 @@ impl Provider for QuietBoard {
     }
 
     fn spi(&mut self, _need: &str) -> Result<Spi> {
-        Ok(Spi(self.quiet()?))
+        Ok(Spi(lemnos_core::Held::boxed(self.quiet()?)))
     }
 
     quiet! {
