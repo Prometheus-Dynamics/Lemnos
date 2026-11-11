@@ -44,7 +44,8 @@
 //! As the other image drivers do it: the driver holds every buffer the stream has free; the
 //! output is published and is the driver's again once returned; buffers held from before a new
 //! consumer are given up and taken again, and the dma-bufs the kernel kept attached for the old
-//! consumer are released (`release_buffers`) once nothing is held back.
+//! consumer are released (`release_buffers`) once nothing is held back. A consumer that posts
+//! bytes that are no job is faulted, as the contract says, and is such an old consumer from then.
 //!
 //! # Allocation
 //!
@@ -72,7 +73,7 @@ pub const MAX_JOBS_PER_ROUND: u32 = 64;
 pub const MAX_HOLDS: usize = 64;
 
 /// The longest job a stream's queue can carry. Jobs are read into this much, so that one too
-/// long to be a [`ScaleJob`] is taken off the queue and counted, not left at its head.
+/// long to be a [`ScaleJob`] is taken off the queue and faults its consumer, not left at its head.
 const LONGEST_JOB: usize = 4096;
 
 /// The frame the driver runs to see the block finish one: the smallest square, in NV12, which
@@ -82,7 +83,7 @@ const PROBE: (PixelFormat, u32) = (PixelFormat::Nv12, MIN_SIZE);
 /// Why the last failed job failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
-    /// The bytes on the job queue were not a job.
+    /// The bytes on the job queue were not a job. The consumer's stream was faulted.
     Undecodable,
     /// A buffer the driver doesn't hold or holds back, or the same buffer twice.
     Buffers,
@@ -261,8 +262,9 @@ impl<D: Device, F: FnMut() -> io::Result<D>> Jobs<D, F> {
                 .filter(|bytes| bytes.len() <= JOB_BYTES)
                 .and_then(|bytes| ScaleJob::decode(&mut Reader::new(bytes)).ok());
             let Some(job) = job else {
-                self.failed(Failure::Undecodable);
-                continue;
+                // A broken consumer: it loses the stream, and no job of its is run after.
+                self.fault(stream)?;
+                break;
             };
             // Buffers held since before this consumer came have nothing behind them: they are
             // given up and taken again first, so that even a failed job completes to it.
@@ -291,6 +293,25 @@ impl<D: Device, F: FnMut() -> io::Result<D>> Jobs<D, F> {
             self.stale = false;
         }
         Ok(read)
+    }
+
+    /// Faults the consumer that posted bytes that are no job. Every buffer held was taken under
+    /// it and has nothing behind it now, so each is given up as [`renew`](Self::renew) does: a
+    /// held-back one too, and the hold on its memory stays until the block ends a frame.
+    fn fault<S: StreamEndpoint + ?Sized>(&mut self, stream: &mut S) -> Result<(), S::Error> {
+        self.failed(Failure::Undecodable);
+        stream.fault_consumer()?;
+        for buffer in 0..MAX_BUFFERS {
+            if !self.holds(buffer) {
+                continue;
+            }
+            // Nothing is behind it, so this reaches no one.
+            stream.publish(empty(buffer, 0, 0, 0))?;
+            self.held = with(self.held, buffer, false);
+            self.held_back = with(self.held_back, buffer, false);
+            self.stale = true;
+        }
+        Ok(())
     }
 
     fn failed(&mut self, failure: Failure) {

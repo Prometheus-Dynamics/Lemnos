@@ -23,7 +23,7 @@ use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout as RingLayout};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout as RingLayout, STATE_FAULT};
 
 use lemnos_contract_image_blend::ImageBlend;
 use lemnos_contract_image_convert::ImageConvert;
@@ -462,13 +462,50 @@ fn jobs_the_driver_cannot_run_complete_as_failed_and_are_counted() {
     assert_eq!(rga.last_failure(), Some(Failure::Size));
     let done = scale.done();
     assert_eq!((done.identity, done.bytes), (5, 0));
-    // Bytes that are no job: counted, and nothing to complete.
-    assert!(scale.ring.push_job(&[1, 2, 3]).unwrap());
-    rga.tick(6);
-    assert_eq!(rga.last_failure(), Some(Failure::Undecodable));
-    assert_eq!(scale.ring.pop_frame().unwrap(), None);
     let c = ImageScaler::counters(&mut rga).unwrap();
-    assert_eq!((c.jobs, c.errors), (1, 5));
+    assert_eq!((c.jobs, c.errors), (1, 4));
+}
+
+#[test]
+fn bytes_that_are_no_job_fault_that_consumers_stream_and_no_other() {
+    let (host, mut rga, _mock, _rec) = on_rk3588(Memory::Plain);
+    let mut scale = Client::attach(&host, "scale", 1);
+    let mut conv = Client::attach(&host, "convert", 2);
+    rga.tick(0);
+    assert!(scale.ring.push_job(&[1, 2, 3]).unwrap());
+    scale.post(&scale_job(1, 0, 1, 256, 128));
+    // A job the converter completes, as failed: no route does it.
+    conv.post(&ConvertJob {
+        identity: 0xB,
+        input: convert_ref(0, 2, 1, RGB3, 3),
+        output: convert_ref(1, 2, 1, AR24, 4),
+    });
+    rga.tick(1);
+    // The scaler's consumer is cut off, and the job it posted behind the bad bytes ran nowhere.
+    assert_eq!(scale.ring.state(), STATE_FAULT);
+    assert_eq!(scale.ring.pop_frame().unwrap(), None);
+    assert_eq!(
+        rga.health(),
+        Health::Ok,
+        "the consumer's mistake, not the driver's"
+    );
+    let c = ImageScaler::counters(&mut rga).unwrap();
+    assert_eq!((c.jobs, c.errors), (0, 1));
+    let stats = host.stream_stats(0, "scale").unwrap();
+    assert_eq!((stats.faults, stats.attached), (1, false));
+    assert_eq!((stats.producer_held, stats.consumer_held), (0, 0));
+    // The converter's consumer is served as before.
+    assert_eq!(conv.done().identity, 0xB);
+    let stats = host.stream_stats(0, "convert").unwrap();
+    assert_eq!((stats.faults, stats.attached), (0, true));
+    // The next consumer of the scaler's stream is served.
+    let mut next = Client::attach(&host, "scale", 3);
+    next.post(&scale_job(4, 0, 1, 256, 128));
+    rga.tick(2);
+    rga.tick(3);
+    let done = next.done();
+    assert_eq!((done.identity, done.bytes), (4, 128 * 128 * 4));
+    assert_eq!(host.stream_stats(0, "scale").unwrap().faults, 1);
 }
 
 #[test]

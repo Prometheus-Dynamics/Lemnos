@@ -27,6 +27,10 @@
 //! that names one makes the driver give it up and take the stream's free buffers again, which
 //! are the new consumer's.
 //!
+//! A consumer that posts bytes that are no job is broken, as the contract says: the driver
+//! faults its stream ([`StreamEndpoint::fault_consumer`]), runs nothing more of its, and gives
+//! up every buffer held under it.
+//!
 //! # Formats
 //!
 //! The formats of one plane, by their DRM four-character codes, the codes other image drivers
@@ -54,7 +58,7 @@ pub const MAX_BUFFERS: u32 = 64;
 pub const MAX_JOBS_PER_ROUND: u32 = 64;
 
 /// The longest job a stream's queue can carry. Jobs are read into this much, so that one too
-/// long to be a [`ConvertJob`] is taken off the queue and counted, not left at its head.
+/// long to be a [`ConvertJob`] is taken off the queue and faults its consumer, not left at its head.
 const LONGEST_JOB: usize = 4096;
 
 const fn code(name: &[u8; 4]) -> u32 {
@@ -102,7 +106,7 @@ pub const CONVERSIONS: u16 = (FORMATS.len() * FORMATS.len()) as u16;
 /// Why the last failed job failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
-    /// The bytes on the job queue were not a job.
+    /// The bytes on the job queue were not a job. The consumer's stream was faulted.
     Undecodable,
     /// A buffer the driver doesn't hold, or the same buffer twice.
     Buffers,
@@ -228,8 +232,9 @@ impl<E: Engine, F: FnMut(Layout, Layout) -> io::Result<E>> Converter<E, F> {
                 .filter(|bytes| bytes.len() <= JOB_BYTES)
                 .and_then(|bytes| ConvertJob::decode(&mut Reader::new(bytes)).ok());
             let Some(job) = job else {
-                self.failed(Failure::Undecodable);
-                continue;
+                // A broken consumer: it loses the stream, and no job of its is run after.
+                self.fault(stream)?;
+                break;
             };
             // Buffers held since before this consumer came have nothing behind them: they are
             // given up and taken again first, so that even a failed job completes to it.
@@ -242,6 +247,29 @@ impl<E: Engine, F: FnMut(Layout, Layout) -> io::Result<E>> Converter<E, F> {
             self.complete(stream, &job, outcome, now_ns)?;
         }
         Ok(read)
+    }
+
+    /// Faults the consumer that posted bytes that are no job. Every buffer held was taken under
+    /// it and has nothing behind it now, so each is given up, to be taken again under the next
+    /// consumer.
+    fn fault<S: StreamEndpoint + ?Sized>(&mut self, stream: &mut S) -> Result<(), S::Error> {
+        self.failed(Failure::Undecodable);
+        stream.fault_consumer()?;
+        for buffer in 0..MAX_BUFFERS {
+            if !self.holds(buffer) {
+                continue;
+            }
+            // Nothing is behind it, so this reaches no one.
+            stream.publish(StreamFrame {
+                buffer,
+                bytes: 0,
+                sequence: 0,
+                identity: 0,
+                timestamp_ns: 0,
+            })?;
+            self.set_held(buffer, false);
+        }
+        Ok(())
     }
 
     fn failed(&mut self, failure: Failure) {

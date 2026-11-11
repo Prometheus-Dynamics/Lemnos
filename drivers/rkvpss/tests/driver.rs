@@ -24,7 +24,7 @@ use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::mmap::Mapping;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use lemnos_sim::{SimBoard, SimClock};
-use lemnos_wire::ring::{Consumer, FrameSlot, Layout};
+use lemnos_wire::ring::{Consumer, FrameSlot, Layout, STATE_FAULT};
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -397,6 +397,40 @@ fn jobs_run_on_the_handles_of_their_buffers_and_complete_on_the_ring() {
     assert_eq!((done.buffer, done.identity, done.bytes), (3, 2, OUT_BYTES));
     assert_eq!(log.releases.load(Ordering::Relaxed), 1);
     assert_eq!(driver.counters().unwrap(), Counters { jobs: 2, errors: 0 });
+}
+
+#[test]
+fn bytes_that_are_no_job_end_the_consumers_stream_as_faulted_and_the_next_consumer_is_served() {
+    let rig = counter_rig();
+    let log = log(16);
+    let mut driver = driver_on(&rig.host, &log);
+    let lease = rig.host.stream_attach(0, "jobs", CallerId(1)).unwrap();
+    let mut broken = consumer(&lease);
+    driver.tick(0);
+    assert!(broken.push_job(&[1, 2, 3]).unwrap());
+    post(&mut broken, &job(1, 0, 1));
+    driver.tick(MS);
+    // The consumer sees the fault, and the job it posted behind the bad bytes ran nowhere.
+    assert_eq!(broken.state(), STATE_FAULT);
+    assert_eq!(log.runs(), 0);
+    assert_eq!(driver.server().last_failure(), Some(Failure::Undecodable));
+    let stats = rig.host.stream_stats(0, "jobs").unwrap();
+    assert_eq!((stats.faults, stats.attached), (1, false));
+    assert_eq!((stats.producer_held, stats.consumer_held), (0, 0));
+    assert_eq!(
+        driver.health(),
+        Health::Ok,
+        "the consumer's mistake, not the driver's"
+    );
+    // The next consumer's job runs, and the kernel lets go of the old one's dma-bufs.
+    let next = rig.host.stream_attach(0, "jobs", CallerId(2)).unwrap();
+    let mut fresh = consumer(&next);
+    post(&mut fresh, &job(2, 2, 3));
+    driver.tick(2 * MS);
+    let done = completion(&mut fresh);
+    assert_eq!((done.buffer, done.identity, done.bytes), (3, 2, OUT_BYTES));
+    assert_eq!(log.runs(), 1);
+    assert_eq!(rig.host.stream_stats(0, "jobs").unwrap().faults, 1);
 }
 
 /// Serves one job on a fresh driver and returns its completion, the failure and the runs.

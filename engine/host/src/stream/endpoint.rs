@@ -127,6 +127,9 @@ impl StreamCore {
 
     /// A consumer broke the rules: it loses the stream. Nothing else does.
     fn fault(&mut self) {
+        if self.attached.is_none() {
+            return;
+        }
         self.counters.faults += 1;
         self.detach(STATE_FAULT);
     }
@@ -394,6 +397,11 @@ impl StreamEndpoint for ProducerEndpoint {
         Ok(handles
             .and_then(|handles| handles.get(buffer as usize))
             .map(|fd| BufferHandle::from(fd.as_fd())))
+    }
+
+    fn fault_consumer(&mut self) -> Result<(), ErrorKind> {
+        lock(&self.core).fault();
+        Ok(())
     }
 }
 

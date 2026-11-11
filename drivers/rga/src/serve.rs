@@ -53,6 +53,11 @@
 //!   because its device node wasn't there when last looked for). The job doesn't wait for it and
 //!   runs nowhere else.
 //!
+//! Bytes on a job queue that are no job of its contract are a broken consumer, as the contracts
+//! say: the driver faults that consumer's stream ([`StreamEndpoint::fault_consumer`]), counts
+//! one error with [`Failure::Undecodable`], runs nothing more of its and gives up every buffer
+//! held under it. The other two streams and the units are untouched.
+//!
 //! The mainline device that won't import the stream's dma-bufs is handed the images as bytes
 //! through `read`/`write` instead: the same unit doing the same work, so that is not a failure.
 
@@ -75,7 +80,7 @@ pub const MAX_JOBS_PER_ROUND: u32 = 8;
 pub const POLL_NS: u64 = 1_000_000;
 
 /// The longest job a stream's queue can carry. Jobs are read into this much, so that one too
-/// long to be a job is taken off the queue and counted, not left at its head.
+/// long to be a job is taken off the queue and faults its consumer, not left at its head.
 const LONGEST_JOB: usize = 4096;
 
 /// First wait before a failed unit is tried again.
@@ -90,7 +95,7 @@ pub const fn backoff_ns(attempt: u32) -> u64 {
 /// Why the last failed job failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
-    /// The bytes on the job queue were not a job.
+    /// The bytes on the job queue were not a job. The consumer's stream was faulted.
     Undecodable,
     /// The job itself was refused: a format, size, stride or pairing its contract doesn't take,
     /// or the same buffer twice.
@@ -373,9 +378,16 @@ impl Server {
                 .get(..len)
                 .and_then(|bytes| Job::decode(contract, bytes));
             let Some(job) = job else {
+                // A broken consumer: it loses the stream, and no job of its is run after. What
+                // is held is from its time.
                 self.jobs.count(contract, None);
                 self.last_failure = Some(Failure::Undecodable);
-                continue;
+                stream.fault_consumer()?;
+                while let Some(buffer) = lane.any_held() {
+                    Self::give_up(stream, lane, buffer)?;
+                }
+                lane.attached = false;
+                break;
             };
             // Buffers held since before this consumer came have nothing behind them: they are
             // given up and taken again first, so that even a failed job completes to it.

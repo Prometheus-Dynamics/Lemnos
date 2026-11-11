@@ -382,6 +382,8 @@ struct StreamState {
     held: Vec<bool>,
     /// Held since before the consumer changed: nothing is behind it until it is taken again.
     stale: Vec<bool>,
+    /// Times the producer faulted its consumer.
+    faults: u32,
 }
 
 /// A stream with a test playing the consumer.
@@ -497,6 +499,11 @@ impl MockStream {
                 }
             }
         });
+    }
+
+    /// How many times the producer has faulted its consumer.
+    pub fn faults(&self) -> u32 {
+        with(&self.state, |s| s.faults)
     }
 
     /// Puts `data` at the start of `buffer`, as a consumer handing the producer input would.
@@ -625,6 +632,14 @@ impl StreamEndpoint for MockStream {
         }
         let _ = stale;
         Err(ErrorKind::Unsupported)
+    }
+
+    /// The faulted consumer is gone and the test plays the next one, as
+    /// [`change_consumer`](Self::change_consumer) does.
+    fn fault_consumer(&mut self) -> Result<(), ErrorKind> {
+        with(&self.state, |s| s.faults += 1);
+        self.change_consumer();
+        Ok(())
     }
 }
 

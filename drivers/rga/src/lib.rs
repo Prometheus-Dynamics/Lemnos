@@ -77,8 +77,7 @@
 //! and the played-back node and a request-recording stand-in for the units. The board checks are
 //! `testing/board-runs/E2.md`.
 //!
-//! Not delivered: the contracts fault the stream of a consumer that posts bytes that are no job,
-//! and the producer's end has no way to; such a job is counted as failed and dropped instead. On a
+//! Not delivered: on a
 //! stream without handles a consumer that leaves and another that comes between two ticks is not
 //! seen, so jobs of the second naming buffers held from the first complete into nothing (the
 //! producer's end can't say which consumer a held buffer was taken under unless it has handles).

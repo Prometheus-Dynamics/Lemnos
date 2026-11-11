@@ -347,25 +347,30 @@ fn an_engine_that_fails_completes_the_job_as_failed_and_is_tried_again() {
 }
 
 #[test]
-fn bytes_that_are_not_a_job_are_counted_and_the_next_job_runs() {
+fn bytes_that_are_not_a_job_fault_the_consumer_and_the_next_one_is_served() {
     let (mut stream, _) = backed(&[BYTES; 2]);
     let consumer = stream.clone();
     let plan = Rc::new(Plan::default());
     let mut converter = Converter::new(engine(&plan));
     consumer.post_job(&[1, 2, 3]);
     post(&consumer, &job(4, 0, 1));
-    assert_eq!(converter.serve(&mut stream, 0), Ok(2));
-    assert_eq!(converter.counters(), Counters { jobs: 1, errors: 1 });
+    // The consumer is faulted at the bytes that are no job, and its job behind them runs nowhere.
+    assert_eq!(converter.serve(&mut stream, 0), Ok(1));
+    assert_eq!(consumer.faults(), 1);
+    assert_eq!(converter.counters(), Counters { jobs: 0, errors: 1 });
     assert_eq!(converter.last_failure(), Some(Failure::Undecodable));
-    assert_eq!(consumer.take_frame().expect("a completion").identity, 4);
     assert_eq!(consumer.take_frame(), None);
-    // A job longer than any the contract has is taken off the queue too, not left at its head.
+    // What was held under it is given up, and the next consumer's job runs on buffers taken anew.
+    assert!(!converter.holds(0) && !converter.holds(1));
+    post(&consumer, &job(5, 0, 1));
+    assert_eq!(converter.serve(&mut stream, 0), Ok(1));
+    assert_eq!(consumer.take_frame().expect("a completion").identity, 5);
+    // A job longer than any the contract has is no job either.
     consumer.return_buffer(1);
     consumer.post_job(&[0; JOB_BYTES + 1]);
-    post(&consumer, &job(5, 0, 1));
-    assert_eq!(converter.serve(&mut stream, 0), Ok(2));
-    assert_eq!(converter.counters(), Counters { jobs: 2, errors: 2 });
-    assert_eq!(consumer.take_frame().expect("a completion").identity, 5);
+    assert_eq!(converter.serve(&mut stream, 0), Ok(1));
+    assert_eq!(consumer.faults(), 2);
+    assert_eq!(converter.counters(), Counters { jobs: 1, errors: 2 });
     // One the stream itself can't hand over is the stream's error.
     consumer.post_job(&[0; LONGEST_JOB + 1]);
     assert_eq!(

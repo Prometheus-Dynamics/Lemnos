@@ -127,6 +127,10 @@ impl StreamEndpoint for Consumer {
         }
         self.stream.buffer_handle(buffer)
     }
+
+    fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
+        self.stream.fault_consumer()
+    }
 }
 
 /// The driver, its device and its stream, at a simulated time. The test plays the consumer: it

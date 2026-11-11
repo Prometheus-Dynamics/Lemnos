@@ -482,6 +482,10 @@ impl StreamEndpoint for Unattached {
     ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
         Ok(None)
     }
+
+    fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
+        Ok(())
+    }
 }
 
 #[test]

@@ -39,6 +39,10 @@
 //! as the new client's), when the module won't register it, or when the buffer is smaller than
 //! the image the configuration describes.
 //!
+//! Bytes on the config stream's job queue that are no job are a broken consumer, as the
+//! contract says: they are counted as dropped, that consumer's config stream is faulted, and the
+//! config buffers held under it are given up.
+//!
 //! What a client's configuration may not name: the bytes where older layouts kept addresses
 //! (the head of `pisp_be_config`), the HOG address, the reserved tail and the bus settings are
 //! the module's, and a configuration with any of them non-zero is dropped here, as the module
@@ -454,13 +458,37 @@ impl PispBe {
             let job = encoded
                 .get(..len)
                 .and_then(|bytes| IspJob::decode(&mut Reader::new(bytes)).ok());
-            let sent = match job {
-                Some(job) => self.submit(&job)?,
-                None => false,
+            let Some(job) = job else {
+                // Bytes that are no job: a broken consumer, which loses the config stream.
+                self.counters.dropped = self.counters.dropped.saturating_add(1);
+                return self.fault_config();
             };
-            if !sent {
+            if !self.submit(&job)? {
                 self.counters.dropped = self.counters.dropped.saturating_add(1);
             }
+        }
+        Ok(())
+    }
+
+    /// Faults the config stream's consumer. The config buffers held were taken under it and
+    /// have nothing behind them now: each is given up, to be taken again under the next one.
+    fn fault_config(&mut self) -> Result<()> {
+        self.config.fault_consumer().map_err(|_| Status::IO)?;
+        for buffer in 0..MAX_BUFFERS as u32 {
+            if !self.configs.free(buffer) {
+                continue;
+            }
+            // Nothing is behind it, so this reaches no one.
+            self.config
+                .publish(StreamFrame {
+                    buffer,
+                    bytes: 0,
+                    sequence: 0,
+                    identity: 0,
+                    timestamp_ns: 0,
+                })
+                .map_err(|_| Status::IO)?;
+            Buffers::set(&mut self.configs.held, buffer, false);
         }
         Ok(())
     }

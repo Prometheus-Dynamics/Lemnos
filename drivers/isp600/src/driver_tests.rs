@@ -246,6 +246,10 @@ impl StreamEndpoint for Racing {
     ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
         self.inner.buffer_handle(buffer)
     }
+
+    fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
+        self.inner.fault_consumer()
+    }
 }
 
 fn driver_on(streams: &Streams, config: StreamHandle, settle: u8) -> (Isp600, Handle) {
@@ -668,6 +672,29 @@ fn a_job_naming_what_the_driver_does_not_hold_is_dropped() {
     d.tick(1);
     assert!(k.loads().is_empty());
     assert_eq!(d.counters().unwrap().dropped, 1);
+}
+
+#[test]
+fn bytes_that_are_no_job_fault_the_consumer_and_the_next_one_is_served() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    streams.config.fill(2, &image(1));
+    streams.config.post_job(&[0xff; 3]);
+    post(&streams.config, &job(1, 2, 1));
+    d.tick(1);
+    // Faulted at the bad bytes: the job behind them never reached the kernel.
+    assert_eq!(streams.config.faults(), 1);
+    assert!(k.loads().is_empty());
+    assert_eq!(d.counters().unwrap().dropped, 1);
+    assert_eq!(streams.statistics.faults() + streams.output0.faults(), 0);
+    // The config buffers held under it were given up; taken again, the next consumer's job runs.
+    let load = image(4);
+    streams.config.fill(2, &load);
+    post(&streams.config, &job(2, 2, 1));
+    d.tick(2);
+    assert_eq!(k.loads(), vec![load]);
+    assert_eq!(d.health(), Health::Ok);
 }
 
 #[test]

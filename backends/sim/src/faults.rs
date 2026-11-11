@@ -270,6 +270,7 @@ impl<T: StreamEndpoint<Error = ErrorKind>> StreamEndpoint for Faulty<T> {
         next_job(out: &mut [u8]) -> Option<usize>;
         write(buffer: u32, offset: usize, data: &[u8]) -> bool;
         read(buffer: u32, offset: usize, out: &mut [u8]) -> bool;
+        fault_consumer() -> ();
     }
 
     fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {
