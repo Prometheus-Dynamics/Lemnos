@@ -378,6 +378,105 @@ mod tests {
         (LinuxBoard::at(&dir, &dir), dir)
     }
 
+    /// A machine whose `/dev` and `/sys` are a directory of the test's, with the I2C bus list in
+    /// place and no adapter yet; the host on it, with a chip driver waiting on adapter 7.
+    fn waiting_on_an_adapter(
+        name: &str,
+    ) -> (
+        lemnos_host::Host,
+        lemnos_sim::SimClock,
+        PathBuf,
+        hotplug::BoardHints,
+    ) {
+        use lemnos_host::board::parse;
+        use lemnos_host::{Host, Options, entry};
+
+        let (board, dir) = temp_board(name);
+        let dir = std::fs::canonicalize(dir).unwrap();
+        std::fs::create_dir_all(dir.join("bus/i2c/devices")).unwrap();
+        std::fs::create_dir_all(dir.join("devices/platform/soc/i2c-7")).unwrap();
+        let paths = hotplug::LinuxPaths::new()
+            .with_sys_class_root(dir.join("class"))
+            .with_sys_bus_root(dir.join("bus"))
+            .with_dev_root(&dir);
+        let filter = hotplug::BoardHints::filter_for(["i2c-7"]).unwrap();
+        let watcher = hotplug::DeviceWatcher::inotify(paths, filter).expect("inotify");
+        let hints = hotplug::BoardHints::new(watcher, ["i2c-7"]).unwrap();
+        let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+                    [[devices]]\nid = \"mag\"\ndriver = \"bmm150\"\nbus = \"i2c-7\"\n";
+        let clock = lemnos_sim::SimBoard::new().clock();
+        let host = Host::start(
+            &parse(text).unwrap(),
+            &[entry::<lemnos_driver_bmm150::Bmm150>()],
+            Box::new(board),
+            Arc::new(clock.clone()),
+            Options::default(),
+        )
+        .unwrap();
+        (host, clock, dir, hints)
+    }
+
+    /// How many times the device's bind has been tried and has failed.
+    fn attempts(host: &lemnos_host::Host) -> u32 {
+        match host.device("mag").unwrap().state {
+            lemnos_host::DeviceState::Backoff { attempts, .. } => attempts,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The adapter arrives: the kernel lists it and makes its node. The node here is a plain
+    /// file, which no I2C request works on, so a bind that reaches it fails: what the tests
+    /// below count is when the bind is tried, which is all a hint changes.
+    fn adapter_arrives(dir: &Path) {
+        std::os::unix::fs::symlink(
+            dir.join("devices/platform/soc/i2c-7"),
+            dir.join("bus/i2c/devices/i2c-7"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("i2c-7"), b"").unwrap();
+    }
+
+    #[test]
+    fn an_i2c_adapter_arriving_brings_the_bind_waiting_on_it_forward() {
+        let (host, clock, dir, mut hints) = waiting_on_an_adapter("hint-i2c");
+        assert_eq!(attempts(&host), 1, "no adapter yet");
+        adapter_arrives(&dir);
+        // Well before the retry, which is a second away, and past the gap between two binds.
+        clock.advance(std::time::Duration::from_millis(300));
+        let mut hinted = 0;
+        hints.read(&mut |hint| {
+            hinted += 1;
+            host.hint(hint);
+        });
+        assert!(hinted >= 1, "the adapter's arrival was a hint");
+        host.tick();
+        assert_eq!(
+            attempts(&host),
+            2,
+            "bound again at once, not a second later"
+        );
+        // A storm of the same hint binds nothing more.
+        for _ in 0..100 {
+            host.hint(lemnos_core::Hint::Changed("i2c-7"));
+            host.tick();
+        }
+        assert_eq!(attempts(&host), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn without_the_hint_the_same_bind_waits_for_its_retry() {
+        let (host, clock, dir, _hints) = waiting_on_an_adapter("hint-none");
+        adapter_arrives(&dir);
+        clock.advance(std::time::Duration::from_millis(300));
+        host.tick();
+        assert_eq!(attempts(&host), 1, "nothing said the adapter came");
+        clock.advance(std::time::Duration::from_millis(700));
+        host.tick();
+        assert_eq!(attempts(&host), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn dma_memory_comes_only_from_the_module() {
         let (mut board, dir) = temp_board("dma");
