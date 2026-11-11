@@ -2,12 +2,43 @@
 //! channels that belong to them, and a bound block's DMA memory, register regions, interrupts,
 //! clocks and resets. The interface is `kernel/lemnos.h`.
 
+use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use crate::i2c::Message;
 use crate::ioctl::{Ioctl, from_bytes, ioctl_ptr, iow, iowr, pod, zeroed};
 use crate::spi::Transfer;
+
+/// Opens the control node at `path` for everything in this process to share.
+///
+/// The module lets one file be open on the node at a time, system-wide, and what a process does
+/// through it (its claims, its blocks' streams, its events) belongs to that file. So a process
+/// opens the node once: the first call opens it, non-blocking and close-on-exec, and every
+/// later call for the same path gets that same open file, until the last holder drops it and
+/// the file closes. A daemon whose drivers reach the module on their own (a block driver making
+/// its stream) and through the board (claims) thus holds one file, not two the module refuses.
+pub fn open_shared(path: &Path) -> io::Result<Arc<OwnedFd>> {
+    static OPEN: Mutex<Option<(PathBuf, Weak<OwnedFd>)>> = Mutex::new(None);
+    let mut open = OPEN.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((at, fd)) = open.as_ref()
+        && at == path
+        && let Some(fd) = fd.upgrade()
+    {
+        return Ok(fd);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    let fd = Arc::new(OwnedFd::from(file));
+    *open = Some((path.to_path_buf(), Arc::downgrade(&fd)));
+    Ok(fd)
+}
 
 /// `LEMNOS_BUS_MAX_SEGMENTS`.
 pub const MAX_SEGMENTS: usize = 16;
@@ -881,6 +912,23 @@ pub fn read_events(node: BorrowedFd<'_>, out: &mut [Event]) -> io::Result<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_opens_the_node_once_and_shares_it() {
+        let dir = std::env::temp_dir().join(format!("lemnos-shared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node");
+        std::fs::write(&path, b"").unwrap();
+        let first = open_shared(&path).unwrap();
+        let second = open_shared(&path).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "one open file, not two");
+        drop(first);
+        drop(second);
+        // Every holder gone: the file closed, and the next call opens it again.
+        let again = open_shared(&path).unwrap();
+        assert_eq!(Arc::strong_count(&again), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn layouts_are_the_kernels() {

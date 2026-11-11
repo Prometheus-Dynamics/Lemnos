@@ -17,6 +17,11 @@ lemnos-sim = { path = "../../../backends/sim" }
 lemnos-contract-camera-isp = { path = "../../../contracts/camera-isp" }
 lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }
 lemnos-contract-camera-sensor = { path = "../../../contracts/camera-sensor" }
+lemnos-client = { path = "../../../engine/client" }
+lemnos-linux-stream = { path = "../../../backends/linux-stream" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+lemnos-contract-isp-pisp = { path = "../../../contracts/isp-pisp" }
+lemnos-driver-pisp = { path = "../../../drivers/pisp", default-features = false }
 
 [dev-dependencies]
 lemnos-hal = { path = "../../../engine/hal", features = ["std"] }

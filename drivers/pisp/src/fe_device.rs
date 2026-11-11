@@ -63,12 +63,12 @@
 //! it. The module resolves those ranges to its pinned dma-bufs and fills every address of the
 //! configuration in itself.
 //!
-//! A job is dropped, and nothing posted, when it names a buffer the driver doesn't hold or one
-//! another job still has on the block, when a stream it needs is missing or its buffers have no
-//! handles, when the client its buffer was taken for has gone (the buffer is given up and taken
-//! again as the new client's), when the module won't register a buffer (it has room for few at
-//! once), when a buffer is smaller than what the configuration makes the block write there, or
-//! when the module's ring is full.
+//! A statistics or output 1 buffer still held for a client that has gone is given up and taken
+//! again as the new client's within the job, which then runs. A job is dropped, and nothing
+//! posted, when it names a buffer the driver doesn't hold or one another job still has on the
+//! block, when a stream it needs is missing or its buffers have no handles, when the module won't
+//! register a buffer (it has room for few at once), when a buffer is smaller than what the
+//! configuration makes the block write there, or when the module's ring is full.
 //!
 //! Bytes on the config stream's job queue that are no job are a broken consumer, as the
 //! contract says: they are counted as dropped, that consumer's config stream is faulted, and the
@@ -792,15 +792,23 @@ impl PispFe {
         if !buffers.free(buffer) {
             return Ok(None);
         }
-        let registered = match stream.buffer_handle(buffer) {
-            Ok(Some(handle)) => self.hw.register(handle.fd()),
-            Ok(None) => {
-                // The client it was taken for has gone. Publishing it reaches no one and gives
-                // it up; the stream's free buffers, the new client's, come with the next look.
-                give_up(stream, buffer);
-                Buffers::set(&mut buffers.held, buffer, false);
+        let mut handle = stream.buffer_handle(buffer);
+        if matches!(handle, Ok(None)) {
+            // Taken for a client that has gone, or before any came. Publishing it reaches no
+            // one and gives it up; it is free again at once as the client's now, so it is taken
+            // again and lent under that client, and the job runs. Still not the client's:
+            // dropped.
+            give_up(stream, buffer);
+            Buffers::set(&mut buffers.held, buffer, false);
+            buffers.take(stream)?;
+            if !buffers.free(buffer) {
                 return Ok(None);
             }
+            handle = stream.buffer_handle(buffer);
+        }
+        let registered = match handle {
+            Ok(Some(handle)) => self.hw.register(handle.fd()),
+            Ok(None) => return Ok(None),
             // Buffers without handles: nothing the block writes would reach the client.
             Err(_) => return Ok(None),
         };

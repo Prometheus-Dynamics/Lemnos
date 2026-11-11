@@ -284,9 +284,9 @@ def check_board_runs(problems):
     for name in runs:
         if f"board-runs/{name})" not in text:
             problems.append(f"{path}: testing/board-runs/{name} is not listed")
-    stated = re.search(r"None of those (\d+) files", text)
+    stated = re.search(r"(?:None|Of) those (\d+) files", text)
     if not stated:
-        problems.append(f"{path}: no \"None of those N files\" count of the board runs")
+        problems.append(f"{path}: no \"Of those N files\" count of the board runs")
     elif int(stated.group(1)) != len(runs):
         problems.append(f"{path}: says {stated.group(1)} board runs, and there are {len(runs)}")
 

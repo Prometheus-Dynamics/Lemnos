@@ -153,7 +153,11 @@ impl CameraSensor for SimSensor {
     }
 
     fn set_controls(&mut self, _controls: Controls) -> Result<()> {
-        Err(Status::NOT_SUPPORTED)
+        if self.selected.is_none() {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        log("sensor.set_controls");
+        Ok(())
     }
 
     fn post_values(&mut self, values: FrameValues) -> Result<()> {

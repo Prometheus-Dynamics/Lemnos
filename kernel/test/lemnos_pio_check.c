@@ -5,14 +5,27 @@
  * the module's buffers, and a transfer that never finishes.
  *
  * Usage: lemnos_pio_check /dev/lemnos
+ *        lemnos_pio_check /dev/lemnos board
+ *
+ * The first form is for the test harness only: it drives machines 0 and 1
+ * whoever owns them. "board" is the form for real hardware that others may be
+ * using: it takes a free machine from the driver, touches no pin, loads a
+ * three-instruction loopback (pull, mov isr osr, push), and checks words and
+ * DMA come back through it; then a child is killed with a transfer stuck on
+ * its machine, and its machine and program space must be free again.
  * Copyright (c) 2026 the Lemnos authors.
  */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../lemnos.h"
@@ -95,6 +108,186 @@ static int xfer(int c, uint32_t sm, uint32_t dir, void *data, uint32_t len, uint
 	return ioctl(fd, LEMNOS_IOC_PIO_XFER, &x) ? -errno : 0;
 }
 
+
+/* pull block; mov isr, osr; push block. No pin is read or driven. */
+static const uint16_t loopback[3] = { 0x80a0, 0xa0c7, 0x8020 };
+
+struct sm_init { uint16_t sm, initial_pc; uint32_t clkdiv, execctrl, shiftctrl, pinctrl; };
+struct sm_word { uint16_t sm; uint8_t blocking, rsvd; uint32_t data; };
+struct sm_enable { uint16_t mask; uint8_t enable, rsvd; };
+
+static uint64_t now_ns(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+/* Opens the node, claims pio-0, opens a client, takes a free machine and loads the loopback on
+ * it, running. Returns the claim; *sm and *origin say where. */
+static int board_setup(const char *node, int *sm, int *origin)
+{
+	struct lemnos_pio_open o;
+	uint16_t any[8] = { 0 };
+	struct { uint16_t n, origin, instrs[32]; } program = { .n = 3, .origin = 0xffff };
+	int64_t result = -1;
+	int c;
+
+	fd = open(node, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	c = claim("pio-0");
+	o.claim = c;
+	if (c < 0 || ioctl(fd, LEMNOS_IOC_PIO_OPEN, &o))
+		return -1;
+	if (call(c, LEMNOS_PIO_SM_CLAIM, any, sizeof(any), &result, NULL) || result < 0 || result > 3)
+		return -1;
+	*sm = (int)result;
+	memcpy(program.instrs, loopback, sizeof(loopback));
+	if (call(c, LEMNOS_PIO_ADD_PROGRAM, &program, sizeof(program), &result, NULL) || result < 0)
+		return -1;
+	*origin = (int)result;
+	/* clkdiv 1.0; wrap from origin+2 back to origin; shift right, no autopush or autopull;
+	 * pinctrl 0: no pin in any group. */
+	struct sm_init init = {
+		.sm = (uint16_t)*sm, .initial_pc = (uint16_t)*origin, .clkdiv = 1u << 16,
+		.execctrl = ((uint32_t)(*origin + 2) << 12) | ((uint32_t)*origin << 7),
+		.shiftctrl = (1u << 18) | (1u << 19), .pinctrl = 0,
+	};
+	if (call(c, LEMNOS_PIO_SM_INIT, &init, sizeof(init), &result, NULL) || result < 0)
+		return -1;
+	struct sm_enable en = { .mask = (uint16_t)(1u << *sm), .enable = 1 };
+	if (call(c, LEMNOS_PIO_SM_SET_ENABLED, &en, sizeof(en), &result, NULL) || result < 0)
+		return -1;
+	return c;
+}
+
+struct mover { int claim, sm; uint32_t dir, len, timeout; void *data; int ret; };
+
+static void *move_thread(void *arg)
+{
+	struct mover *m = arg;
+
+	m->ret = xfer(m->claim, (uint32_t)m->sm, m->dir, m->data, m->len, m->timeout);
+	return NULL;
+}
+
+static int board(const char *node)
+{
+	static uint8_t out[65536], in[65536];
+	static uint64_t times[2000];
+	int sm = -1, origin = -1, c, pipefd[2];
+	int64_t result;
+
+	c = board_setup(node, &sm, &origin);
+	CHECK(c >= 0, "a free machine (%d) running the loopback at offset %d", sm, origin);
+	if (c < 0) {
+		printf("%s: setup failed (%s)\n", node, strerror(errno));
+		return 1;
+	}
+
+	int words_ok = 1;
+
+	for (uint32_t i = 0; i < 2000; i++) {
+		struct sm_word w = { .sm = (uint16_t)sm, .blocking = 1, .data = 0x5a000000u | i }, back;
+		uint64_t t0 = now_ns();
+
+		words_ok &= !call(c, LEMNOS_PIO_SM_PUT, &w, sizeof(w), &result, NULL);
+		memset(&back, 0, sizeof(back));
+		back.sm = (uint16_t)sm;
+		back.blocking = 1;
+		words_ok &= !call(c, LEMNOS_PIO_SM_GET, &back, sizeof(back), &result, &back) &&
+			    back.data == w.data;
+		times[i] = now_ns() - t0;
+	}
+	qsort(times, 2000, sizeof(times[0]), cmp_u64);
+	CHECK(words_ok, "2000 words came back through the machine");
+	printf("measure put+get one word: median %llu ns  p99 %llu ns\n",
+	       (unsigned long long)times[1000], (unsigned long long)times[1980]);
+
+	CHECK(!config_xfer(c, (uint32_t)sm, LEMNOS_PIO_TO_SM, 4096, 4) &&
+	      !config_xfer(c, (uint32_t)sm, LEMNOS_PIO_FROM_SM, 4096, 4), "DMA configured both ways");
+	for (size_t i = 0; i < sizeof(out); i++)
+		out[i] = (uint8_t)(i * 7 + 3);
+	for (int round = 0; round < 3; round++) {
+		struct mover rx = { c, sm, LEMNOS_PIO_FROM_SM, sizeof(in), 2000, in, -1 };
+		struct mover tx = { c, sm, LEMNOS_PIO_TO_SM, sizeof(out), 2000, out, -1 };
+		pthread_t a, b;
+
+		memset(in, 0, sizeof(in));
+		uint64_t t0 = now_ns();
+
+		pthread_create(&a, NULL, move_thread, &rx);
+		pthread_create(&b, NULL, move_thread, &tx);
+		pthread_join(b, NULL);
+		pthread_join(a, NULL);
+		uint64_t t = now_ns() - t0;
+
+		CHECK(!rx.ret && !tx.ret && !memcmp(in, out, sizeof(in)),
+		      "64 KiB out and back by DMA, in 4 KiB pieces: %s, %s, %llu us",
+		      strerror(-tx.ret), strerror(-rx.ret), (unsigned long long)(t / 1000));
+	}
+	CHECK(xfer(c, (uint32_t)sm, LEMNOS_PIO_TO_SM, (void *)16, 4, 0) == -EFAULT,
+	      "a bad pointer: EFAULT");
+	/* Nothing reads the machine now: once its two FIFOs are full the send stalls. */
+	CHECK(xfer(c, (uint32_t)sm, LEMNOS_PIO_TO_SM, out, 4096, 50) == -ETIMEDOUT,
+	      "a send nothing drains ends: ETIMEDOUT");
+	CHECK(xfer(c, (uint32_t)sm, LEMNOS_PIO_TO_SM, out, 16, 50) == -EIO,
+	      "and the channel refuses after: EIO");
+	CHECK(!config_xfer(c, (uint32_t)sm, LEMNOS_PIO_TO_SM, 4096, 4), "reconfiguring clears it");
+	close(c);
+	close(fd);
+
+	/* A holder killed with a transfer stuck on its machine. */
+	if (pipe(pipefd))
+		return 2;
+	pid_t child = fork();
+
+	if (!child) {
+		int csm = -1, corigin = -1, cc = board_setup(node, &csm, &corigin);
+		int msg[2] = { csm, corigin };
+
+		if (cc < 0 || config_xfer(cc, (uint32_t)csm, LEMNOS_PIO_TO_SM, 4096, 4))
+			_exit(3);
+		if (write(pipefd[1], msg, sizeof(msg)) != sizeof(msg))
+			_exit(4);
+		xfer(cc, (uint32_t)csm, LEMNOS_PIO_TO_SM, out, sizeof(out), 60000);
+		_exit(5);
+	}
+	int msg[2] = { -1, -1 }, status = 0;
+
+	close(pipefd[1]);
+	CHECK(read(pipefd[0], msg, sizeof(msg)) == sizeof(msg), "a child holds machine %d, program at %d, sending",
+	      msg[0], msg[1]);
+	usleep(300000);
+	kill(child, SIGKILL);
+	waitpid(child, &status, 0);
+	CHECK(WIFSIGNALED(status), "the child was killed mid-transfer");
+	int nsm = -1, norigin = -1;
+
+	c = board_setup(node, &nsm, &norigin);
+	CHECK(c >= 0, "a new holder got a machine (%d) and program space (%d)", nsm, norigin);
+	if (c >= 0) {
+		uint16_t mask[8] = { (uint16_t)(1u << msg[0]) };
+
+		/* Its own machine is claimed already; the child's must be free unless it is the same. */
+		CHECK(msg[0] == nsm || !call(c, LEMNOS_PIO_SM_CLAIM, mask, sizeof(mask), &result, NULL),
+		      "the killed child's machine %d can be claimed: %lld", msg[0], (long long)result);
+		close(c);
+	}
+	close(fd);
+	printf("%s board: %d failed\n", node, failures);
+	return failures ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *node = argc > 1 ? argv[1] : "/dev/lemnos";
@@ -102,6 +295,8 @@ int main(int argc, char **argv)
 	int64_t result = -1;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	if (argc > 2 && !strcmp(argv[2], "board"))
+		return board(node);
 	fd = open(node, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
 		perror(node);
@@ -186,6 +381,34 @@ int main(int argc, char **argv)
 	close(c);
 	CHECK(param("clients") == 0, "closing the claim closed the client");
 	close(fd);
+
+	/* A holder killed while its transfer hangs, with a long timeout: it ends at once. */
+	CHECK(!set_sticky("1"), "machine 1 will hang again");
+	pid_t child = fork();
+
+	if (!child) {
+		struct lemnos_pio_open co;
+
+		fd = open(node, O_RDWR | O_CLOEXEC);
+		co.claim = claim("pio-0");
+		if (fd < 0 || co.claim < 0 || ioctl(fd, LEMNOS_IOC_PIO_OPEN, &co) ||
+		    config_xfer(co.claim, 1, 0, 4096, 4))
+			_exit(3);
+		xfer(co.claim, 1, 0, out, 16, 60000);
+		_exit(4);
+	}
+	int status = 0;
+
+	usleep(200000);
+	uint64_t t0 = now_ns();
+
+	kill(child, SIGKILL);
+	waitpid(child, &status, 0);
+	uint64_t ms = (now_ns() - t0) / 1000000;
+
+	CHECK(WIFSIGNALED(status) && ms < 2000, "a holder killed mid-transfer ends at once: %llu ms",
+	      (unsigned long long)ms);
+	CHECK(!set_sticky("-1") && param("clients") == 0, "and its client is closed");
 	printf("%s: %d failed\n", node, failures);
 	return failures ? 1 : 0;
 }

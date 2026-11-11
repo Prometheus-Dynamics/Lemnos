@@ -435,6 +435,29 @@ fn a_buffer_the_block_is_writing_keeps_its_memory_until_its_frame_is_done() {
 }
 
 #[test]
+fn frames_lost_before_a_start_are_not_counted_after_it() {
+    let frames = stream(4);
+    let (mut d, hw) = driver_on(&frames);
+    hw.with(|m| m.answer = Some((1, Set::Busy)));
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    hw.with(|m| {
+        m.answer = None;
+        m.finished.push(frame(1, 0, 5));
+    });
+    d.tick(0).unwrap();
+    assert_eq!(d.counters().unwrap().dropped, 1);
+
+    d.stop().unwrap();
+    d.start().unwrap();
+    assert_eq!(
+        d.counters().unwrap().dropped,
+        0,
+        "counted since the last start, as the block's own are"
+    );
+}
+
+#[test]
 fn a_consumer_that_leaves_gets_nothing_more_and_the_next_one_gets_its_own_memory() {
     let frames = stream(4);
     let (mut d, hw) = driver_on(&frames);

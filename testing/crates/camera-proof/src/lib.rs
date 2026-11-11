@@ -3,15 +3,15 @@
 //! streams frames and saves them.
 //!
 //! It knows no chip. Every step is a call on a `camera.*` contract, reached through a [`Bus`]. The
-//! [`host`] module is the only bus: it reaches devices in one process with simulated time. There
-//! is no bus over `lemnosd`'s socket yet, though the client has each part one needs: calls, each
-//! device's `link` (`lemnos_client::follow`), and a frame stream's consumer end
-//! (`Client::open_stream`, with `lemnos-linux-stream`'s platform on Linux).
+//! [`host`] module reaches devices in one process with simulated time; [`socket`] reaches them
+//! through `lemnosd`'s socket on a real board, which is what the `lemnos-camera-proof` program
+//! uses.
 //!
 //! Frames carry the sequence, identity and timestamp their producer gave them. A capture counts
 //! sequence gaps, the receiver's own drop count, and the frame rate measured from timestamps.
 
 pub mod host;
+pub mod socket;
 
 use std::fs;
 use std::io;
@@ -21,11 +21,12 @@ use lemnos_contract_camera_isp::{CameraIsp, IspInput};
 use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, MAX_STREAM_NAME, Packing,
 };
-use lemnos_contract_camera_sensor::{CameraSensor, Mode};
+use lemnos_contract_camera_sensor::{CameraSensor, Controls, Mode};
 use lemnos_core::{Bound, Caller, Contract, Status};
 use lemnos_wire::ring::{FrameSlot, RingError};
 
 pub use host::HostBus;
+pub use socket::SocketBus;
 
 /// A device a bus found: its index on the bus and its board id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +199,9 @@ pub struct Camera<'a, B: Bus> {
     receiver_api: Bound<dyn CameraReceiver, B::Caller<'a>>,
     isp_api: Option<Bound<dyn CameraIsp, B::Caller<'a>>>,
     mode_index: u16,
+    /// Whether this camera has selected its mode on the sensor. A selection resets the sensor's
+    /// controls to the mode's defaults, so it is made once: controls set before `start` stay.
+    selected: bool,
     mode: Mode,
     stream: String,
     layout: Option<FrameLayout>,
@@ -245,6 +249,7 @@ pub fn assemble<'a, B: Bus>(bus: &'a B, options: &Options) -> Result<Camera<'a, 
         receiver_api,
         isp_api,
         mode_index: options.mode,
+        selected: false,
         mode,
         stream,
         layout: None,
@@ -282,10 +287,7 @@ impl<B: Bus> Camera<'_, B> {
     /// receiver is configured with that mode's link, the ISP is set up on the receiver's layout,
     /// the receiver starts, the ISP starts, and the sensor starts last.
     pub fn start(&mut self) -> Result<FrameLayout, Error> {
-        step(
-            "sensor.select_mode",
-            self.sensor_api.select_mode(self.mode_index),
-        )?;
+        self.select()?;
         let layout = step(
             "receiver.configure",
             self.receiver_api.configure(self.mode.link, Packing::Packed),
@@ -317,6 +319,36 @@ impl<B: Bus> Camera<'_, B> {
         step("receiver.stop", self.receiver_api.stop())?;
         self.layout = None;
         Ok(())
+    }
+
+    /// Asks the sensor for one of its test patterns; 0 is the scene.
+    pub fn set_test_pattern(&mut self, code: u16) -> Result<(), Error> {
+        step(
+            "sensor.set_test_pattern",
+            self.sensor_api.set_test_pattern(code),
+        )
+    }
+
+    /// Selects the mode on the sensor, once.
+    fn select(&mut self) -> Result<(), Error> {
+        if !self.selected {
+            step(
+                "sensor.select_mode",
+                self.sensor_api.select_mode(self.mode_index),
+            )?;
+            self.selected = true;
+        }
+        Ok(())
+    }
+
+    /// Sets the sensor's exposure, gains and frame length at once. Before `start` the mode is
+    /// selected first, so what is set here is what the sensor starts with.
+    pub fn set_controls(&mut self, controls: Controls) -> Result<(), Error> {
+        self.select()?;
+        step(
+            "sensor.set_controls",
+            self.sensor_api.set_controls(controls),
+        )
     }
 
     /// The receiver's counters since it started.

@@ -607,22 +607,19 @@ fn a_statistics_client_that_left_gets_nothing_and_the_next_one_gets_its_buffer()
     CameraIsp::start(&mut r.fe).unwrap();
     r.fe.tick(1);
     r.stats.change_consumer();
-    // Statistics buffer 0 was taken for the client that left: given up, and the job dropped.
+    // Statistics buffer 0 was taken for the client that left: given up, taken again as the
+    // new client's within the job, and the job runs.
     r.post(&job(1, 0, 0, NO_BUFFER));
     r.fe.tick(2);
-    assert!(r.hw.with(|m| m.posted.is_empty()));
-    assert_eq!(r.fe.counters.dropped, 1);
-    // Taken again as the new client's.
-    r.post(&job(2, 0, 0, NO_BUFFER));
-    r.fe.tick(3);
     assert_eq!(r.hw.with(|m| m.posted.len()), 1);
+    assert_eq!(r.fe.counters.dropped, 0);
     // That client leaves while the block writes its buffer: the statistics reach no one.
     r.stats.change_consumer();
-    r.hw.with(|m| m.finished.push(done(0, 2)));
-    r.fe.tick(4);
+    r.hw.with(|m| m.finished.push(done(0, 1)));
+    r.fe.tick(3);
     assert!(r.stats.take_frame().is_none());
-    assert_eq!(r.frames.take_frame().map(|f| f.identity), Some(2));
-    assert_eq!(r.fe.counters.dropped, 2);
+    assert_eq!(r.frames.take_frame().map(|f| f.identity), Some(1));
+    assert_eq!(r.fe.counters.dropped, 1);
     assert_eq!(r.hw.registered(), 0);
 }
 

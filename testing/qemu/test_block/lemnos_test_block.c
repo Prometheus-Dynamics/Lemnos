@@ -75,6 +75,7 @@ static u64 tcsi_cur_addr;
 static u32 tcsi_cur_len;
 static u32 tcsi_busy;		/* ms the line counter keeps moving after FORCE */
 static u8 tcsi_pattern;
+static u32 tcsi_lines;		/* the next armed frame end's lines; 0: the height */
 
 static void tcsi_tick(struct work_struct *work);
 static DECLARE_DELAYED_WORK(tcsi_work, tcsi_tick);
@@ -207,6 +208,8 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		writel(R_INT_FE, cfg + R_INTS);
 		return irq_set_irqchip_state(tcsi_irq, IRQCHIP_STATE_PENDING, true);
 	}
+	if (cmd == TCSI_IOC_LINES)
+		return get_user(tcsi_lines, (u32 __user *)uarg);
 	if (cmd == TCSI_IOC_BUSY) {
 		u32 ms;
 
@@ -230,8 +233,14 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			tcsi_cur_len = readl(dma + R_LENGTH) << 4;
 		}
 		if ((status & TCSI_FE_ACK) && tcsi_cur_addr) {
+			u32 dbg = readl(dma + R_DEBUG);
+			u32 lines = tcsi_lines ? tcsi_lines : readl(dma + R_FRAME_SIZE) >> 16;
+
 			memset(phys_to_virt(tcsi_cur_addr), ++tcsi_pattern, tcsi_cur_len);
 			tcsi_cur_addr = 0;
+			tcsi_lines = 0;
+			/* Frames in the high half, lines in the low, each wrapping. */
+			writel(((dbg >> 16) + 1) << 16 | ((dbg + lines) & 0xffff), dma + R_DEBUG);
 		}
 		writel(status, dma + R_STATUS);
 		writel(R_INT_DMA, cfg + R_INTS);

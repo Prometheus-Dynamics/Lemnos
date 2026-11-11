@@ -12,6 +12,7 @@
 #include <linux/mutex.h>
 #include <linux/rwsem.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <linux/types.h>
 
 #include "lemnos_internal.h"
@@ -46,8 +47,11 @@ struct lrc_dev {
 	bool streaming, fs_int, fe_int;
 	struct lrc_frame cur, next;	/* being written; in the channel's shadow registers */
 	u64 fs_ns;			/* the current frame's start */
+	u16 fe_line;			/* the channel's line count at the last frame end */
 	struct lemnos_rp1_csi2_start start;
 	u64 frames, written, dropped, errors;
+	/* Arms again while nothing is armed and no buffer was free; see lrc_arm(). */
+	struct delayed_work retry;
 };
 
 

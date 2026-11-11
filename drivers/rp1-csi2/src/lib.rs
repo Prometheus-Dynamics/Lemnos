@@ -56,6 +56,8 @@
 //! 250 ms and capped at 8 s, and clearing when one succeeds. The driver never gives up and never
 //! turns itself off; `stop` is what ends it. While recovering, health is degraded and `start` is
 //! refused with `BUSY`. A failed `start` or `stop` is reported to its caller, who retries it.
+//! A node that answers `ENODEV` (its block was unbound) is dropped, and the next attempt opens
+//! the path again, so the driver comes back once the block is bound again.
 
 mod hw;
 pub mod relay;

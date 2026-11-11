@@ -80,10 +80,12 @@ impl Relay {
     }
 
     /// The module's stream is new: it has no buffer's memory and has published nothing. What
-    /// the driver holds on the `frames` stream, it still holds.
+    /// the driver holds on the `frames` stream, it still holds. Lost frames are counted from
+    /// here, as the block's own counters are.
     pub fn restart(&mut self, count: u32) {
         self.count = count.min(MAX_BUFFERS as u32);
         self.no_handles = false;
+        self.lost = 0;
         for slot in &mut self.slots {
             slot.matched = false;
             slot.fence = None;

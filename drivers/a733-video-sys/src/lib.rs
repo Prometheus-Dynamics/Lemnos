@@ -160,7 +160,7 @@ impl Node {
         // SAFETY: the request takes its argument by value (`_compat_cedardev_ioctl` reads
         // `arg` as a number for every `Plain` request), so the kernel follows no pointer;
         // the descriptor is this node's open file.
-        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), request as libc::c_ulong, argument) };
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), request as _, argument) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -193,7 +193,7 @@ impl Node {
         // SAFETY: both requests copy one `struct dma_buf_param` in from the pointer and the
         // map request copies it back out; `pointer` is to a live, exclusively borrowed
         // `DmaBufParam` of that layout, which outlives the call.
-        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), request as libc::c_ulong, pointer) };
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), request as _, pointer) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }

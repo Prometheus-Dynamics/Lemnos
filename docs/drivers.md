@@ -33,7 +33,7 @@ python3 scripts/generate-builtins.py --check
 | `ws2812` | `pixels/1` | `spi`: SPI | Serves its contract |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
 | `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm` | Serves its contract. Closed by default: writes and each bus are allowed only by `config` |
-| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. When a posted exposure takes effect is an assumption until a board run |
+| `ov9782` | `camera.sensor/1` | `bus`: I2C; optional `values` stream | Serves its contract. Mode 0 timing measured on the reference board (`D8.md`). When a posted exposure takes effect is an assumption until a board run |
 
 ## Devices with no bus of their own
 
@@ -60,9 +60,9 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `rp1-csi2` | `camera.receiver/1` | the kernel module; `frames` stream of dma-bufs | Serves its contract |
-| `pisp-fe` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config` stream, optional `statistics`, `output0`, `output1` | Serves its contract. Temporal denoise and line events are not supported |
-| `pisp-be` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config`, `input`, `output0` streams, optional `output1` | Serves its contract. No statistics stream, no line events |
+| `rp1-csi2` | `camera.receiver/1` | the kernel module; `frames` stream of dma-bufs | Serves its contract. Run on the reference board at 57 and 115 fps (`D5.md`) |
+| `pisp-fe` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config` stream, optional `statistics`, `output0`, `output1` | Serves its contract. Temporal denoise and line events are not supported. Output 0 and statistics run on the reference board (`D7.md`); output 1 has not |
+| `pisp-be` | `camera.isp/1`, `isp.pisp/1` | the kernel module; `config`, `input`, `output0` streams, optional `output1` | Serves its contract. No statistics stream, no line events. Run on the reference board on a captured frame (`D6.md`) |
 | `rkcif` | `camera.receiver/1` | the vendor kernel's media graph; optional `frames` stream | Serves its contract. Routes a MIPI channel and says which ISP it feeds. Frames only on the raw path, when `frames` and `capture` are set |
 | `rkisp` | `camera.isp/1` | the vendor kernel's ISP nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream: frames come from the receiver |
 | `sunxi-vin` | `camera.receiver/1` | the vendor kernel's capture node; `frames` stream | Serves its contract |

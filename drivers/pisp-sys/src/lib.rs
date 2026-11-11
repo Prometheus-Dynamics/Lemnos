@@ -11,11 +11,11 @@
 
 #![cfg(target_os = "linux")]
 
-use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::OpenOptionsExt;
+
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lemnos_linux_sys::mmap::Mapping;
@@ -192,18 +192,17 @@ pub struct Frame {
 /// The control node.
 #[derive(Debug)]
 pub struct Control {
-    file: File,
+    fd: Arc<OwnedFd>,
 }
 
 impl Control {
-    /// Opens the node at `path`. One opener at a time.
+    /// Opens the node at `path`: the process's one open file on it, shared with whatever else
+    /// in the process has it open (`lemnos_linux_sys::module::open_shared`), since the module
+    /// takes one opener at a time.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_CLOEXEC)
-            .open(path)?;
-        Ok(Self { file })
+        Ok(Self {
+            fd: lemnos_linux_sys::module::open_shared(path.as_ref())?,
+        })
     }
 
     /// The number of the block whose device name is `name`.
@@ -213,7 +212,7 @@ impl Control {
             block: 0,
             name: [0; 64],
         };
-        while ioctl(self.file.as_fd(), IOC_NEXT, (&raw mut next).cast()).is_ok() {
+        while ioctl(self.fd.as_fd(), IOC_NEXT, (&raw mut next).cast()).is_ok() {
             let end = next.name.iter().position(|&b| b == 0).unwrap_or(64);
             if next.name.get(..end) == Some(name.as_bytes()) {
                 return Ok(next.block);
@@ -247,7 +246,7 @@ impl Control {
             },
             ..Default::default()
         };
-        ioctl(self.file.as_fd(), IOC_BE_CREATE, (&raw mut create).cast())?;
+        ioctl(self.fd.as_fd(), IOC_BE_CREATE, (&raw mut create).cast())?;
         // SAFETY: a successful create returns a new close-on-exec descriptor that nothing else
         // owns.
         let fd = unsafe { OwnedFd::from_raw_fd(create.stream.fd) };

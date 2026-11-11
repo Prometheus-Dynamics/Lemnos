@@ -688,19 +688,15 @@ fn a_new_input_client_gives_frames_from_its_own_memory() {
     app.config.fill(0, &config_for(3));
     let frame_in = app.give_input(2, 77);
 
-    // Dropped, and buffer 2 given up and taken again as the new client's.
+    // Buffer 2 is given up and taken again as the new client's within the job, which runs on
+    // the new client's memory: nothing is dropped.
     app.config.post(1, 0, 2, 0);
-    now = be.tick(now).unwrap();
-    now = be.tick(now).unwrap();
-    assert!(app.output.ring.pop_frame().unwrap().is_none());
-    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 1);
-
-    app.config.post(2, 0, 2, 0);
     now = be.tick(now).unwrap();
     be.tick(now).unwrap();
     let frame = app.output.ring.pop_frame().unwrap().expect("a frame");
-    assert_eq!(frame.identity, 2);
+    assert_eq!(frame.identity, 1);
     assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_in, 3));
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().dropped, 0);
     assert_eq!(hw.with(|b| b.lost), 0);
 }
 

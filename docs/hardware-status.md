@@ -1,9 +1,10 @@
 # Hardware status
 
-**Nothing in this repository has been run on hardware in its present form.** Every driver, every
-backend and the kernel module were written and tested against simulations, mocks and models of
-the kernel's behaviour. Each is marked *untested on board*, and each has a written check waiting
-under `testing/board-runs/`. None of those 85 files records a result yet.
+**Most of this repository has not been run on hardware in its present form.** The drivers, the
+backends and the kernel module were written and tested against simulations, mocks and models of
+the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
+Of those 85 files, the ones listed under [The first board run](#the-first-board-run) record what
+one run on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
 run and where its result goes.
@@ -16,6 +17,27 @@ grep -Li 'untested on board' testing/board-runs/*.md | wc -l
 The first number is how many checks are written. The second is how many no longer say
 `untested on board`.
 
+## The first board run
+
+On 2026-11-11, on the reference board (a Raspberry Pi Compute Module 5, kernel `7.2.9-v8-16k`),
+with the board's own software stopped only for each test and put back afterwards:
+
+| Check | Result |
+|---|---|
+| [`C1.md`](../testing/board-runs/C1.md) | The module core on the PiSP back end, behind its IOMMU: the check tools pass, interrupt to handler 0.5 µs, to user space 1.5 µs (p99) |
+| [`C3.md`](../testing/board-runs/C3.md), [`C4.md`](../testing/board-runs/C4.md), [`C8.md`](../testing/board-runs/C8.md) | Register reads, a free input and a PWM channel (output off) on both routes: same data, 0 allocations; I2C the same time on both, PWM 6 times faster through the module. No SPI device, nothing driven |
+| [`C5.md`](../testing/board-runs/C5.md) | PIO in board mode, including DMA; a killed holder took a minute to die, now at once |
+| [`C6.md`](../testing/board-runs/C6.md) | A block's clock, thermal reads and watches, bind and unbind events |
+| [`C7.md`](../testing/board-runs/C7.md) | The daemon on the module route with real chips: claims, values, a kill and a restart, back to stock |
+| [`D5.md`](../testing/board-runs/D5.md), [`D16.md`](../testing/board-runs/D16.md), [`D9.md`](../testing/board-runs/D9.md) | Frames from the sensor into a client at 57 and 115 fps with no drops; stop, kill and unbind while streaming. Three receiver faults found and fixed |
+| [`D7.md`](../testing/board-runs/D7.md), [`D18.md`](../testing/board-runs/D18.md) | The front end at capture rate: output equal to the receiver's frames, statistics with every frame, stop in flight |
+| [`D6.md`](../testing/board-runs/D6.md), [`D15.md`](../testing/board-runs/D15.md), [`D17.md`](../testing/board-runs/D17.md) | The back end on a captured frame: the right colours, 1188 jobs/s with two queued. The first job on each buffer was dropped; fixed |
+| [`D8.md`](../testing/board-runs/D8.md) | The sensor's mode 0 timing: line time within 0.01 %, each frame its programmed length plus about 0.9 of a line |
+
+Each file says which of its checks ran and which did not, and why. The fixes the run made are in
+the kernel module (`lemnos_pio.c`, `lemnos_rp1_csi2.c`, `lemnos_pisp_fe.c`), the `rp1-csi2` and
+`pisp` drivers and the Linux backend, each with a test that fails without it.
+
 ## What has been shown, and how
 
 | What | Shown by | Not shown |
@@ -23,8 +45,8 @@ The first number is how many checks are written. The second is how many no longe
 | The engine: binding, calls, values, containment, retries, the protocol, the client, the C API, packages | Tests on a PC, in the gate | Nothing in the engine depends on a board. Timing on a board is unmeasured |
 | Chip drivers | Tests on a simulated bus whose registers the test writes | That the real chip answers as its datasheet says |
 | Block drivers | Tests against a model of the kernel node, written from the kernel's source | That the kernel on a board behaves as its source reads; that the block does |
-| The kernel module | QEMU, in a real kernel with lock and memory checking, on blocks with nothing behind them | Any real block, bus, interrupt or DMA |
-| Frame streams | Tests with test memory, and a real dma-heap when one is named | A frame from a sensor; a buffer filled by a block |
+| The kernel module | QEMU, in a real kernel with lock and memory checking, on blocks with nothing behind them; on the reference board, the PiSP blocks, the CSI-2 receiver, I2C, a GPIO input, PWM and PIO (above) | Every other board and block; SPI; driven outputs |
+| Frame streams | Tests with test memory, and a real dma-heap when one is named; on the reference board, frames from a sensor and buffers filled by both PiSP blocks | Every other board |
 | The microcontroller host | Builds for two bare-metal targets; tests on a PC with mock peripherals | Any microcontroller |
 
 Many of these drivers were ported from an earlier version of Lemnos that did run on boards. That

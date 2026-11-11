@@ -5,6 +5,7 @@ mod sim;
 use std::path::PathBuf;
 
 use lemnos_camera_proof::{Bus, DirSink, Error, Options, assemble, capture};
+use lemnos_contract_camera_sensor::Controls;
 
 fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("camera-proof-{}-{name}", std::process::id()))
@@ -85,6 +86,35 @@ fn starts_in_contract_order_and_the_sensor_last() {
         sim::calls()[6..],
         ["sensor.stop", "isp.stop", "receiver.stop"]
     );
+}
+
+#[test]
+fn controls_set_before_start_are_not_undone_by_selecting_the_mode() {
+    let _serial = sim::serial();
+    let bus = sim::bus(&sim::board(Some("csi0")));
+    let mut camera = assemble(&bus, &Options::default()).unwrap();
+    camera
+        .set_controls(Controls {
+            frame_length: Some(910),
+            ..Controls::default()
+        })
+        .unwrap();
+    camera.start().unwrap();
+    let calls = sim::calls();
+    assert_eq!(
+        calls[..3],
+        [
+            "sensor.select_mode",
+            "sensor.set_controls",
+            "receiver.configure"
+        ]
+    );
+    assert_eq!(
+        calls.iter().filter(|c| *c == "sensor.select_mode").count(),
+        1,
+        "selecting the mode again would reset the controls"
+    );
+    camera.stop().unwrap();
 }
 
 #[test]

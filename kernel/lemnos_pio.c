@@ -222,6 +222,7 @@ static long lem_pio_move(struct lem_pio *p, const struct lemnos_pio_xfer *x, str
 	void __user *user = u64_to_user_ptr(x->data);
 	bool to_sm = x->dir == LEMNOS_PIO_TO_SM;
 	u32 done = 0;
+	long left;
 	int ret;
 
 	if (d->stuck)
@@ -237,10 +238,15 @@ static long lem_pio_move(struct lem_pio *p, const struct lemnos_pio_xfer *x, str
 					   &d->done);
 		if (ret)
 			return ret;
-		if (!wait_for_completion_timeout(&d->done, timeout)) {
-			/* It may still finish, into this scratch: keep it until reconfigured. */
+		/*
+		 * Killable, so a holder stuck on a channel nothing drains can still be ended: the
+		 * caller's timeout can be long. Either way the transfer may still finish, into this
+		 * scratch: keep it until reconfigured, or until the claim's release ends the client.
+		 */
+		left = wait_for_completion_killable_timeout(&d->done, timeout);
+		if (left <= 0) {
 			d->stuck = true;
-			return -ETIMEDOUT;
+			return left ? -EINTR : -ETIMEDOUT;
 		}
 		if (!to_sm && copy_to_user(user + done, d->scratch, n))
 			return -EFAULT;
