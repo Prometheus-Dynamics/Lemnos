@@ -1,0 +1,13 @@
+# A program that tries to load a driver package, for the test of what a statically linked host
+# does. The test builds it for a musl target, where the C library is linked statically and
+# there is no dynamic loader, and runs it. It is not a member of the workspace.
+[package]
+name = "lemnos-package-static-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+lemnos-package = { path = "../.." }
+
+[workspace]

@@ -45,6 +45,24 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
             },
         ),
         ("list-done", Frame::ListDone { id: 1 }),
+        ("packages", Frame::Packages { id: 14 }),
+        (
+            "package",
+            Frame::Package {
+                id: 14,
+                path: "/p",
+                driver: "d",
+                reason: "",
+            },
+        ),
+        (
+            "packages-done",
+            Frame::PackagesDone {
+                id: 14,
+                mode: package_mode::SIGNED,
+                note: "",
+            },
+        ),
         (
             "open",
             Frame::Open {

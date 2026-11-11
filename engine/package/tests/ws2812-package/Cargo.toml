@@ -1,0 +1,23 @@
+# A merged driver crate built as a package: the driver is `drivers/ws2812`, untouched, and this
+# crate adds the one line that exports it. The tests build it with cargo and load the file it
+# makes. It is not a member of the workspace: a package is built on its own.
+[package]
+name = "lemnos-package-ws2812"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+lemnos-core = { path = "../../../core", features = ["std"] }
+lemnos-driver-ws2812 = { path = "../../../../drivers/ws2812" }
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+
+[workspace]

@@ -6,7 +6,10 @@
 //! package's, then calls [`PackageDescriptor::register`] once for the driver's manifest and its
 //! [`DriverTable`]. The host hands the driver a [`HostTable`] when it binds: what the driver is
 //! given comes back as [`Handle`]s that only the host can resolve, so a package links none of the
-//! host's types.
+//! host's types. Every kind of resource a driver can be given crosses: the [`HostTable`] holds
+//! one small table of functions for each (see [`tables`]).
+//!
+//! `include/lemnos/package.h` is the same boundary as a C header, checked against these types.
 //!
 //! Pointers cross inside [`Str`], [`Slice`], [`SliceMut`] and [`Out`]. Each is made only from a
 //! Rust reference, so reading one back is sound for as long as its lifetime says. `'static` here
@@ -18,7 +21,7 @@
 
 use core::ffi::{CStr, c_void};
 use core::marker::PhantomData;
-use core::mem::{align_of, offset_of, size_of};
+use core::mem::size_of;
 
 use crate::{AbiVersion, Handle, Status, layout_hash};
 
@@ -26,11 +29,13 @@ use crate::{AbiVersion, Handle, Status, layout_hash};
 mod driver;
 #[cfg(feature = "std")]
 mod host;
+pub mod tables;
 
 #[cfg(feature = "std")]
 pub use driver::{PackageInstance, driver_table};
 #[cfg(feature = "std")]
 pub use host::{Loaded, PackageBinding, PackageHost, host_table};
+pub use tables::*;
 
 /// The one symbol a package exports: a [`PackageDescriptor`].
 pub const PACKAGE_ENTRY: &CStr = c"lemnos_package";
@@ -227,8 +232,9 @@ impl<T> core::fmt::Debug for Out<'_, T> {
 }
 
 /// [`PackageNeed::kind`] for another device, named by the contract in [`PackageNeed::tag`]. Every
-/// other value is a kind of bus, numbered by the driver model.
-pub const NEED_DEVICE: u32 = 0;
+/// other value is a kind of bus, numbered as the `TAKE_*` values are ([`TAKE_I2C`] to
+/// [`TAKE_STREAM`]).
+pub const NEED_DEVICE: u32 = TAKE_DEVICE;
 
 /// One thing the driver needs, by the name a board file gives it.
 #[repr(C)]
@@ -379,42 +385,6 @@ pub const SETTING_FLOAT: u32 = 1;
 pub const SETTING_BOOL: u32 = 2;
 pub const SETTING_TEXT: u32 = 3;
 
-/// One step of a bus transaction: bytes to send, or room for bytes to receive.
-#[repr(C)]
-#[derive(Debug)]
-pub struct PackageTransfer<'a> {
-    /// [`TRANSFER_WRITE`] or [`TRANSFER_READ`].
-    pub kind: u32,
-    pub reserved: u32,
-    pub write: Slice<'a, u8>,
-    pub read: SliceMut<'a, u8>,
-}
-
-pub const TRANSFER_WRITE: u32 = 0;
-pub const TRANSFER_READ: u32 = 1;
-/// The most steps one transaction carries.
-pub const MAX_TRANSFER_STEPS: usize = 8;
-
-impl<'a> PackageTransfer<'a> {
-    pub const fn write(bytes: &'a [u8]) -> Self {
-        Self {
-            kind: TRANSFER_WRITE,
-            reserved: 0,
-            write: Slice::new(bytes),
-            read: SliceMut::empty(),
-        }
-    }
-
-    pub const fn read(room: &'a mut [u8]) -> Self {
-        Self {
-            kind: TRANSFER_READ,
-            reserved: 0,
-            write: Slice::EMPTY,
-            read: SliceMut::new(room),
-        }
-    }
-}
-
 /// [`DriverTable::flags`]: the host should call `tick`.
 pub const DRIVER_TICKS: u32 = 1;
 /// [`DriverTable::flags`]: the host should call `caller` and `caller_gone`.
@@ -472,7 +442,9 @@ pub struct DriverTable {
 /// What a package's driver calls on the host. The table lives as long as the process.
 ///
 /// A [`Handle`] from `take` is the driver's until it calls `release`, or until the host lets go
-/// of the driver, which releases whatever it still holds.
+/// of the driver, which releases whatever it still holds. What is done with a handle is in the
+/// table of its kind; a handle of another kind, or one released, is refused there with
+/// [`Status::STALE_HANDLE`] or [`Status::INVALID_ARGUMENT`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct HostTable {
@@ -480,9 +452,9 @@ pub struct HostTable {
     pub reserved: u32,
     /// Whether the board file supplies `need`. Not 0 for yes. Only during `bind`.
     pub provided: extern "C" fn(binding: *mut c_void, need: Str<'_>) -> u32,
-    /// Takes what the board file names for `need`: `kind` is [`NEED_DEVICE`] (with the
-    /// contract's `tag`) or a kind of bus. Only during `bind`.
-    /// [`Status::NOT_SUPPORTED`] for a kind this host does not carry across the boundary.
+    /// Takes what the board file names for `need`: `kind` is one of the `TAKE_*` values, and
+    /// `tag` the contract of a device. Only during `bind`. [`Status::NOT_SUPPORTED`] for a kind
+    /// this host does not have.
     pub take: extern "C" fn(
         binding: *mut c_void,
         kind: u32,
@@ -491,21 +463,20 @@ pub struct HostTable {
         resource: Out<'_, Handle>,
     ) -> Status,
     pub release: extern "C" fn(resource: Handle) -> Status,
-    /// Calls a method of a device taken with [`NEED_DEVICE`], on the contract it was taken for.
-    pub device_call: extern "C" fn(
-        device: Handle,
-        method: u16,
-        args: Slice<'_, u8>,
-        reply: SliceMut<'_, u8>,
-        len: Out<'_, usize>,
-    ) -> Status,
-    pub device_health: extern "C" fn(device: Handle, health: Out<'_, PackageHealth>) -> Status,
-    /// Runs one I2C transaction, at most [`MAX_TRANSFER_STEPS`] steps, on a bus taken as I2C.
-    pub i2c_transaction: extern "C" fn(
-        bus: Handle,
-        address: u16,
-        steps: SliceMut<'_, PackageTransfer<'_>>,
-    ) -> Status,
+    pub device: DeviceTable,
+    pub i2c: I2cTable,
+    pub spi: SpiTable,
+    pub line: LineTable,
+    pub pwm: PwmTable,
+    pub uart: UartTable,
+    pub registers: RegistersTable,
+    pub interrupt: InterruptTable,
+    pub dma: DmaTable,
+    pub clocks: ClocksTable,
+    pub reset: ResetTable,
+    pub stream: StreamTable,
+    pub usb_device: UsbDeviceTable,
+    pub usb_function: UsbFunctionTable,
 }
 
 /// What `register` hands the host: one driver.
@@ -545,26 +516,22 @@ impl PackageDescriptor {
     }
 }
 
-macro_rules! shape {
-    ($t:ty $(, $field:ident)*) => {
-        [size_of::<$t>() as u64, align_of::<$t>() as u64 $(, offset_of!($t, $field) as u64)*]
-    };
-}
+use tables::shape;
 
-/// The layout hash of the package boundary: every type above, with this crate's own
-/// [`LAYOUT_HASH`](crate::LAYOUT_HASH). The types hold pointers, so the hash follows the target's
-/// pointer width, which a package and its host share.
+/// The layout hash of the package boundary: every type here and in [`tables`], with this
+/// crate's own [`LAYOUT_HASH`](crate::LAYOUT_HASH). The types hold pointers, so the hash follows
+/// the target's pointer width, which a package and its host share.
 pub const PACKAGE_LAYOUT_HASH: u64 = {
-    let parts: [&[u64]; 20] = [
+    let parts: [&[u64]; 19] = [
         &[crate::LAYOUT_HASH],
-        &shape!(Str<'static>, ptr, len),
-        &shape!(Slice<'static, u8>, ptr, len),
-        &shape!(SliceMut<'static, u8>, ptr, len),
-        &shape!(Out<'static, u8>, ptr),
-        &shape!(PackageNeed, name, kind, optional, tag),
-        &shape!(PackageShape, kind, count, of, fields),
-        &shape!(PackageField, name, shape),
-        &shape!(
+        shape!(Str<'static>, ptr, len),
+        shape!(Slice<'static, u8>, ptr, len),
+        shape!(SliceMut<'static, u8>, ptr, len),
+        shape!(Out<'static, u8>, ptr),
+        shape!(PackageNeed, name, kind, optional, tag),
+        shape!(PackageShape, kind, count, of, fields),
+        shape!(PackageField, name, shape),
+        shape!(
             PackageMethod,
             id,
             has_out_buffer,
@@ -573,10 +540,10 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             params,
             returns
         ),
-        &shape!(PackageContract, tag, methods),
-        &shape!(PackageManifest, name, needs, provides),
-        &shape!(PackageHealth, kind, reserved, reason),
-        &shape!(
+        shape!(PackageContract, tag, methods),
+        shape!(PackageManifest, name, needs, provides),
+        shape!(PackageHealth, kind, reserved, reason),
+        shape!(
             PackageItem,
             kind,
             unit,
@@ -590,7 +557,7 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             name,
             field
         ),
-        &shape!(
+        shape!(
             PackageSetting<'static>,
             key,
             kind,
@@ -599,8 +566,7 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             float,
             text
         ),
-        &shape!(PackageTransfer<'static>, kind, reserved, write, read),
-        &shape!(
+        shape!(
             DriverTable,
             struct_size,
             flags,
@@ -613,38 +579,57 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             caller_gone,
             drop
         ),
-        &shape!(
+        shape!(
             HostTable,
             struct_size,
             reserved,
             provided,
             take,
             release,
-            device_call,
-            device_health,
-            i2c_transaction
+            device,
+            i2c,
+            spi,
+            line,
+            pwm,
+            uart,
+            registers,
+            interrupt,
+            dma,
+            clocks,
+            reset,
+            stream,
+            usb_device,
+            usb_function
         ),
-        &shape!(PackageDriver, manifest, table),
-        &shape!(PackageDescriptor, magic, version, register),
-        &[MAX_TRANSFER_STEPS as u64],
+        shape!(PackageDriver, manifest, table),
+        shape!(PackageDescriptor, magic, version, register),
+        &[MAX_TRANSFER_STEPS as u64, MAX_ISO_PACKETS as u64],
     ];
-    let mut words = [0u64; 128];
-    let (mut n, mut p) = (0, 0);
-    while p < parts.len() {
-        let mut i = 0;
-        while i < parts[p].len() {
-            words[n] = parts[p][i];
-            n += 1;
-            i += 1;
+    let groups: [&[&[u64]]; 3] = [&parts, &tables::VALUE_SHAPES, &tables::TABLE_SHAPES];
+    let mut words = [0u64; 512];
+    let (mut n, mut g) = (0, 0);
+    while g < groups.len() {
+        let mut p = 0;
+        while p < groups[g].len() {
+            let mut i = 0;
+            while i < groups[g][p].len() {
+                words[n] = groups[g][p][i];
+                n += 1;
+                i += 1;
+            }
+            p += 1;
         }
-        p += 1;
+        g += 1;
     }
     layout_hash(&words)
 };
 
 /// The version of the package boundary. A host loads a package whose major is this one, whose
 /// minor is no newer, and whose layout hash is the same.
-pub const PACKAGE_VERSION: AbiVersion = AbiVersion::new(1, 0, PACKAGE_LAYOUT_HASH);
+pub const PACKAGE_VERSION: AbiVersion = AbiVersion::new(2, 0, PACKAGE_LAYOUT_HASH);
+
+#[cfg(all(test, feature = "std"))]
+mod header;
 
 #[cfg(test)]
 mod tests {

@@ -31,7 +31,7 @@ calls across a shared-library boundary are not inlined.
 ## Driver packages
 
 `package` is the boundary between a compiled driver file (a package) and the host that loads it.
-It has its own version, `PACKAGE_VERSION` (1.0), and its own layout hash, `PACKAGE_LAYOUT_HASH`,
+It has its own version, `PACKAGE_VERSION` (2.0), and its own layout hash, `PACKAGE_LAYOUT_HASH`,
 which covers every type below and this crate's frozen hash. Its types hold pointers, so the hash
 follows the target's pointer width; a package and its host are one process and share it. The
 frozen 1.0 layouts above are untouched.
@@ -43,7 +43,17 @@ frozen 1.0 layouts above are untouched.
   needs, and the contracts it provides with their methods and shapes) and a `DriverTable` (bind,
   describe, health, dispatch, tick, caller, caller_gone, drop).
 - When a driver binds, the host gives it a `HostTable`: `provided` and `take` while it binds,
-  then `release`, `device_call`, `device_health` and `i2c_transaction` on the `Handle`s it took.
+  then `release` and one small table of functions for each kind of resource, used on the
+  `Handle`s it took: `device`, `i2c`, `spi`, `line`, `pwm`, `uart`, `registers`, `interrupt`,
+  `dma`, `clocks`, `reset`, `stream`, `usb_device` and `usb_function`.
+- Each table is declared once (`table!` in `package/tables.rs`), which makes its `#[repr(C)]`
+  struct, the trait a host implements for it (a function left out answers `NOT_SUPPORTED`), the
+  guarded `extern "C"` function behind each pointer and its part of the layout hash. A new
+  function is one line there.
+- What the tables carry is plain C data: `PackageTransfer`, `PackageSpiSegment`,
+  `PackageLineConfig`, `PackageEdge`, `PackagePwmConfig`, `PackageInterruptEvent`,
+  `PackageDmaBuffer`, `PackageFrame`, `PackageControlSetup`, `PackageIsoPacket`, `PackageUsbEvent`,
+  and `Fd`, a file descriptor's number lent for a stream buffer's handle.
 - Pointers cross inside `Str`, `Slice`, `SliceMut` and `Out`, which are made only from Rust
   references. A null or misaligned pointer, or text that is not UTF-8, reads as empty.
 - `driver_table::<T>()` (feature `std`) builds a `DriverTable` over a `PackageInstance`, and
@@ -51,10 +61,16 @@ frozen 1.0 layouts above are untouched.
   in both runs inside `guard`. `Loaded` is a package's bound driver as the host holds it.
 
 `load` (feature `load`, Linux) gets a package into the process: `seal` copies a file's bytes into
-a sealed memfd, and `load` has the dynamic loader map that memory and returns the descriptor. It
+a sealed memfd, and `load` has the dynamic loader map that memory and returns the descriptor. A
+program linked statically against its C library has no dynamic loader: `supported()` is false
+there and `load` refuses without calling one. It
 can look up the package entry and nothing else, and it is the only use of the dynamic loader in
 Lemnos: for Lemnos driver packages, never for a vendor library. A package is never unloaded.
 `lemnos-package` does the checking in between and is what a host uses.
+
+`include/lemnos/package.h` is the same boundary for C, checked against these types by this
+crate's tests (every size, alignment, offset and constant, with a C compiler), and used by a
+package written in C that `lemnos-package`'s tests build and load.
 
 ## C header
 

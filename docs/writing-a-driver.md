@@ -193,8 +193,32 @@ functions: bind, describe, health, dispatch, tick, caller, caller_gone and drop.
 panic and returns it as a status. What the driver asks for when it binds comes back from the host as
 handles, so the package links none of the host's types. The types are in `lemnos_abi::package`.
 
-A package's driver can be given other devices (`Dev<dyn Contract>`) and I2C buses (`I2c`). Any other
-kind of bus is `NOT_SUPPORTED` when it binds, for now. A driver that needs one is a built-in driver.
+A package's driver can be given everything a built-in driver can: other devices
+(`Dev<dyn Contract>`), I2C buses, SPI devices (`Spi`, and `RawSpiBus` with per-transfer settings),
+GPIO lines with their edges, PWM channels, UARTs, register windows, interrupts, DMA memory, clocks,
+resets, USB devices, USB functions and frame streams. The `#[needs]` fields are the same types and
+the driver uses them through the same traits, so a driver crate that is built into the service
+becomes a package with nothing changed but the export line. `engine/package/tests/ws2812-package`
+is that: its whole source is
+
+```rust
+lemnos_core::export_package!(lemnos_driver_ws2812::Ws2812);
+```
+
+and a test runs it beside the same driver built in and compares what each put on the bus.
+
+Behind each resource is a handle the host holds, and each call on it crosses the boundary through
+a small table of functions for its kind. Four things are worth knowing:
+
+- Nothing in a steady-state call allocates, on either side.
+- A resource's error arrives as the kind it was (`Timeout`, `Busy`, `Unavailable`, `Unsupported`
+  and the rest), so a driver that tells them apart still can.
+- One I2C or SPI transaction carries at most 16 steps, and one isochronous USB transfer at most
+  64 packets. More is `InvalidInput` before anything reaches the bus.
+- A stream buffer's handle (`StreamEndpoint::buffer_handle`) crosses as the number of a file
+  descriptor in the service's process, which is the package's process too. It is borrowed until
+  the stream's next call, as it is for a built-in driver: duplicate it, or hand it to the kernel,
+  to hold the memory longer.
 
 A package is built against one version of the Lemnos crates and runs only in a service built with
 the same package boundary: the same major version and the same layout hash. Anything else is
@@ -213,6 +237,26 @@ lemnosd --packages /usr/lib/lemnos/packages --package-mode open
 environment. With no directory, nothing is scanned and nothing is loaded. With one, lemnosd loads
 every file in it whose name ends in `.so`, in order of name, and says on its error output what it
 loaded and what it refused and why. A file that is refused never stops another, or the service.
+
+`lemnos-ctl packages` asks a running service the same thing:
+
+```text
+$ lemnos-ctl packages
+packages signed: only packages signed by a trusted key run
+/usr/lib/lemnos/packages/a-driver.so  loaded   some-driver
+/usr/lib/lemnos/packages/b-other.so   refused  bad signature: not signed by a trusted key, or changed since
+/usr/lib/lemnos/packages/c-notes.so   refused  unsigned: signed mode, and it has no signature file
+```
+
+The first line is how packages are run (`off`, `signed` or `open`). If the directory could not be
+used at all, the next line says why.
+
+A statically linked lemnosd can't load packages. A program linked statically against its C
+library, which is what a musl target builds unless told otherwise, has no dynamic loader in it.
+Such a service looks at no file, says once that it is statically linked and that packages need a
+dynamically linked build, and runs its built-in drivers as ever. `lemnos-ctl packages` shows the
+same line. Build lemnosd for a glibc target, or for musl with `-C target-feature=-crt-static`, to
+use packages.
 
 A driver's name is taken once. A built-in driver always keeps its name: a package with the same
 name is refused. Between two packages the first by file name wins.
@@ -242,6 +286,17 @@ whole shared object for this machine exporting `lemnos_package` with the right m
 refused without any of it being run or mapped. A package must not load a vendor library either: the
 block rule in `docs/design.md` holds for a package's driver as for any other.
 
+### A package in C
+
+A package need not be Rust. `include/lemnos/package.h` is the whole boundary as a C header: the
+descriptor, the manifest, the table of functions the service calls on the driver and the tables
+the driver calls on the service, one for each kind of resource. It is checked against the Rust
+types by a test that compiles it and compares every size, offset and value, and
+`engine/package/tests/c-package/package.c` is a small driver written against it that the loader's
+tests build with the C compiler, load and run. Its rules are at the top of the header: nothing
+unwinds across the boundary, a pointer and its length are what they say, and what `register_driver`
+hands over stays valid while the package is loaded.
+
 ### What a package can break
 
 A package runs inside lemnosd's process.
@@ -259,7 +314,9 @@ A package runs inside lemnosd's process.
 
 Test the driver as a built-in driver is tested, on the simulated bus: it is the same type. To test
 it as a package, do what `engine/package/tests` does: build the `cdylib`, load it with
-`lemnos_package::Loader` and run it under `lemnos_host::Host`.
+`lemnos_package::Loader` and run it under `lemnos_host::Host`. `tests/resources.rs` there uses
+every kind of resource from a package against the simulated board, and `tests/merged_driver.rs`
+runs one driver both ways.
 
 ## Checklist
 

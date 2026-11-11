@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use common::{FakeHost, temp_dir};
 use lemnos_client::{
-    Client, DeviceEntry, DeviceHealth, DeviceState, Error, Incoming, Session, follow,
+    Client, DeviceEntry, DeviceHealth, DeviceState, Error, Incoming, PackageEntry, PackageMode,
+    Session, follow,
 };
 use lemnos_core::{Result, Status, contract};
 
@@ -92,6 +93,64 @@ fn links_are_followed_from_a_sensor_to_its_receiver_and_its_isp_and_always_end()
     ];
     assert_eq!(names(&circle, "b"), ["b", "c", "a"]);
     assert_eq!(names(&circle, "self"), ["self"]);
+}
+
+#[test]
+fn packages_are_listed_as_the_service_reports_them_and_only_asked_of_one_that_can_say() {
+    let host = FakeHost::start();
+    // A service from before it could say is never sent the question: it would hang up.
+    let client = Client::connect(&host.path, "t").unwrap();
+    assert!(matches!(
+        client.packages(),
+        Err(Error::Refused {
+            status: Status::NOT_SUPPORTED,
+            ..
+        })
+    ));
+    assert_eq!(host.control.package_asks.load(Ordering::SeqCst), 0);
+    assert!(client.is_connected());
+    assert_eq!(client.list().unwrap().len(), 2);
+
+    host.control
+        .features
+        .store(lemnos_wire::feature::PACKAGES, Ordering::SeqCst);
+    host.control
+        .package_mode
+        .store(lemnos_wire::package_mode::SIGNED.into(), Ordering::SeqCst);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let list = client.packages().unwrap();
+    assert_eq!(list.mode, PackageMode::Signed);
+    assert_eq!(list.note, "half read");
+    assert_eq!(
+        list.packages,
+        [
+            PackageEntry {
+                path: "/p/a.so".to_string(),
+                driver: Some("a".to_string()),
+                reason: String::new(),
+            },
+            PackageEntry {
+                path: "/p/b.so".to_string(),
+                driver: None,
+                reason: "unsigned".to_string(),
+            },
+        ]
+    );
+    for (mode, expected) in [
+        (lemnos_wire::package_mode::OFF, PackageMode::Off),
+        (lemnos_wire::package_mode::OPEN, PackageMode::Open),
+    ] {
+        host.control
+            .package_mode
+            .store(mode.into(), Ordering::SeqCst);
+        assert_eq!(client.packages().unwrap().mode, expected);
+    }
+    // A mode nobody defined is not guessed at.
+    host.control.package_mode.store(9, Ordering::SeqCst);
+    assert_eq!(
+        client.packages(),
+        Err(Error::Wire(lemnos_wire::WireError::Malformed))
+    );
 }
 
 #[test]

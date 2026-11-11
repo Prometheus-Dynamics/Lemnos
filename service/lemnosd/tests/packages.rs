@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use lemnosd::builtin;
-use lemnosd::packages::{PackageConfig, add_packages};
+use lemnosd::packages::{PackageConfig, PackageMode, PackageReport, add_packages, add_packages_if};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("lemnosd-packages-{}-{name}", std::process::id()));
@@ -20,7 +20,10 @@ fn packages_are_off_unless_a_directory_is_configured() {
     let built_in = drivers.len();
     let config = PackageConfig::default();
     assert_eq!((config.dir.as_ref(), config.open), (None, false));
-    assert!(add_packages(&mut drivers, &config).is_empty());
+    assert_eq!(
+        add_packages(&mut drivers, &config),
+        PackageReport::default()
+    );
     assert_eq!(drivers.len(), built_in);
 
     // Keys and a mode with no directory are still off.
@@ -29,7 +32,10 @@ fn packages_are_off_unless_a_directory_is_configured() {
         keys: Some("/nonexistent/keys".into()),
         open: true,
     };
-    assert!(add_packages(&mut drivers, &config).is_empty());
+    assert_eq!(
+        add_packages(&mut drivers, &config),
+        PackageReport::default()
+    );
     assert_eq!(drivers.len(), built_in);
 }
 
@@ -45,7 +51,7 @@ fn signed_mode_without_usable_keys_loads_nothing_and_says_so() {
         keys: None,
         open: false,
     };
-    let said = add_packages(&mut drivers, &no_keys);
+    let said = add_packages(&mut drivers, &no_keys).lines();
     assert_eq!(said.len(), 1);
     assert!(said[0].contains("signed mode needs a key file"), "{said:?}");
 
@@ -53,7 +59,7 @@ fn signed_mode_without_usable_keys_loads_nothing_and_says_so() {
         keys: Some(dir.join("missing-keys")),
         ..no_keys.clone()
     };
-    let said = add_packages(&mut drivers, &bad_keys);
+    let said = add_packages(&mut drivers, &bad_keys).lines();
     assert_eq!(said.len(), 1);
     assert!(said[0].contains("not used"), "{said:?}");
 
@@ -62,7 +68,7 @@ fn signed_mode_without_usable_keys_loads_nothing_and_says_so() {
         keys: Some(dir.join("keys")),
         ..no_keys
     };
-    let said = add_packages(&mut drivers, &malformed);
+    let said = add_packages(&mut drivers, &malformed).lines();
     assert!(said[0].contains("not 64 hex digits"), "{said:?}");
     assert_eq!(drivers.len(), built_in);
     let _ = std::fs::remove_dir_all(dir);
@@ -82,7 +88,7 @@ fn a_file_that_is_no_package_is_refused_and_the_built_in_drivers_stay() {
         keys: None,
         open: true,
     };
-    let said = add_packages(&mut drivers, &open);
+    let said = add_packages(&mut drivers, &open).lines();
     assert_eq!(said.len(), 1, "{said:?}");
     assert!(said[0].ends_with("driver.so refused: not a driver package: not a shared object"));
 
@@ -92,7 +98,7 @@ fn a_file_that_is_no_package_is_refused_and_the_built_in_drivers_stay() {
         open: false,
         ..open.clone()
     };
-    let said = add_packages(&mut drivers, &signed);
+    let said = add_packages(&mut drivers, &signed).lines();
     assert_eq!(said.len(), 1, "{said:?}");
     assert!(said[0].contains("refused: unsigned"), "{said:?}");
 
@@ -101,8 +107,45 @@ fn a_file_that_is_no_package_is_refused_and_the_built_in_drivers_stay() {
         dir: Some(dir.join("missing")),
         ..open
     };
-    let said = add_packages(&mut drivers, &missing);
+    let said = add_packages(&mut drivers, &missing).lines();
     assert_eq!(said.len(), 1, "{said:?}");
     assert_eq!(drivers.len(), built_in);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_statically_linked_service_loads_no_package_and_says_why() {
+    let dir = scratch("static");
+    std::fs::write(dir.join("driver.so"), "anything").unwrap();
+    let mut drivers = builtin::drivers();
+    let built_in = drivers.len();
+    let open = PackageConfig {
+        dir: Some(dir.clone()),
+        keys: None,
+        open: true,
+    };
+    // As a program with no dynamic loader sees it: nothing is looked at, the reason is said
+    // once, and the mode it was asked for is still what it reports.
+    let report = add_packages_if(&mut drivers, &open, false);
+    assert_eq!(report.mode, PackageMode::Open);
+    assert!(report.files.is_empty());
+    assert!(
+        report.note.contains("statically linked") && report.note.contains("dynamically linked"),
+        "{}",
+        report.note
+    );
+    assert_eq!(report.lines().len(), 1);
+    assert!(report.lines()[0].starts_with("packages: "));
+    assert_eq!(drivers.len(), built_in);
+    // With no directory configured it has nothing to say, static or not.
+    let off = add_packages_if(&mut drivers, &PackageConfig::default(), false);
+    assert_eq!(off, PackageReport::default());
+
+    // This test binary is the ordinary kind, and looks at the file.
+    assert!(lemnos_package::can_load());
+    let report = add_packages(&mut drivers, &open);
+    assert_eq!((report.mode, report.files.len()), (PackageMode::Open, 1));
+    assert_eq!(report.files[0].driver, None);
+    assert!(report.note.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }

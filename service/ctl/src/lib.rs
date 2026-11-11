@@ -6,7 +6,7 @@ mod shape;
 use std::io::Write;
 use std::time::Duration;
 
-use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, follow};
+use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, PackageMode, follow};
 use lemnos_core::ItemKind;
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
@@ -21,7 +21,8 @@ lemnos-ctl [--socket PATH] COMMAND
   watch DEVICE ITEM [--period-ms N] [--count N]
   set DEVICE ITEM [VALUE...]     a control or an action
   call DEVICE METHOD [ARG...]    any method, as NAME or TAG:NAME
-  off DEVICE | on DEVICE";
+  off DEVICE | on DEVICE
+  packages                       driver packages: which loaded, which were refused and why";
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -84,6 +85,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
         ("call", [device, method, values @ ..]) => tool.call(device, method, values),
         ("off", [device]) => tool.power(device, false),
         ("on", [device]) => tool.power(device, true),
+        ("packages", []) => tool.packages(),
         _ => Err(USAGE.to_string()),
     }
 }
@@ -158,6 +160,35 @@ impl Tool<'_> {
             }
             Some(link) => line(self.out, format_args!("-> {link}: no such device")),
         }
+    }
+
+    /// How the service runs driver packages, then every file it looked at: the driver a loaded
+    /// one became, or why a refused one was refused.
+    fn packages(&mut self) -> Outcome {
+        let list = self.client.packages().map_err(text)?;
+        let mode = match list.mode {
+            PackageMode::Off => "off: no package directory is configured",
+            PackageMode::Signed => "signed: only packages signed by a trusted key run",
+            PackageMode::Open => "open: any package in the directory runs",
+        };
+        line(self.out, format_args!("packages {mode}"))?;
+        if !list.note.is_empty() {
+            line(self.out, format_args!("{}", list.note))?;
+        }
+        let width = list
+            .packages
+            .iter()
+            .map(|p| p.path.len())
+            .max()
+            .unwrap_or(0);
+        for package in list.packages {
+            let row = match package.driver {
+                Some(driver) => format!("{:width$}  loaded   {driver}", package.path),
+                None => format!("{:width$}  refused  {}", package.path, package.reason),
+            };
+            line(self.out, format_args!("{row}"))?;
+        }
+        Ok(())
     }
 
     fn describe(&mut self, name: &str) -> Outcome {

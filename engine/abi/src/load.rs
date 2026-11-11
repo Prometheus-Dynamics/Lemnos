@@ -44,6 +44,17 @@ pub fn seal(bytes: &[u8]) -> io::Result<OwnedFd> {
     Ok(OwnedFd::from(file))
 }
 
+/// Whether this program can load a shared object at all. One built with a statically linked C
+/// library (the default on musl targets) has no dynamic loader in it: its `dlopen` is a stub
+/// that always fails, or one that half works. [`load`] refuses there without calling it.
+pub const fn supported() -> bool {
+    !cfg!(target_feature = "crt-static")
+}
+
+/// What [`load`] says in a program that is not [`supported`].
+pub const STATIC_PROGRAM: &str =
+    "this program is statically linked and has no dynamic loader to load a package with";
+
 /// Why [`load`] returned no descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
@@ -63,6 +74,9 @@ static LOADING: Mutex<()> = Mutex::new(());
 /// by the name it was opened under, and that name is the descriptor's number: a number that came
 /// round again would be taken for the library already loaded.
 pub fn load(fd: OwnedFd) -> Result<&'static PackageDescriptor, LoadError> {
+    if !supported() {
+        return Err(LoadError::Refused(String::from(STATIC_PROGRAM)));
+    }
     let _one = LOADING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -130,5 +144,8 @@ mod tests {
             panic!("loaded text");
         };
         assert!(!why.is_empty());
+        // In a statically linked test binary the reason is that, and no loader was called.
+        assert_eq!(supported(), !cfg!(target_feature = "crt-static"));
+        assert_eq!(why == STATIC_PROGRAM, !supported());
     }
 }

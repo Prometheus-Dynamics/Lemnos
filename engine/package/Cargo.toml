@@ -22,3 +22,5 @@ ed25519-dalek = { version = "2.2", default-features = false }
 [dev-dependencies]
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }
+# The merged driver that `tests/merged_driver.rs` also builds as a package, to compare the two.
+lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }

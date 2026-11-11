@@ -134,6 +134,13 @@ impl SimBoard {
         add_stream(buffers: u32) -> MockStream as Stream = MockStream::new(buffers);
     }
 
+    /// Adds a stream the test made itself: one whose buffers hold bytes
+    /// ([`MockStream::with_bytes`]) or are behind handles ([`MockStream::with_handles`]).
+    pub fn add_stream_of(&self, name: &str, stream: MockStream) -> MockStream {
+        self.insert(name, Part::Stream(stream.clone()));
+        stream
+    }
+
     pub fn add_i2c(&self, name: &str) -> SimI2c {
         let bus = SimI2c::new(self.clock.clone());
         self.insert(name, Part::I2c(bus.clone()));

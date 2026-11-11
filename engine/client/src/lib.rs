@@ -26,7 +26,7 @@ pub use client::{Client, RemoteCaller};
 pub use error::Error;
 pub use lemnos_wire::DeviceDescription;
 pub use session::{
-    DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, Session, Subscription,
-    ValueInfo, follow,
+    DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, PackageEntry, PackageList,
+    PackageMode, Session, Subscription, ValueInfo, follow,
 };
 pub use stream::{FrameStream, HeldFrame, StreamPlatform};

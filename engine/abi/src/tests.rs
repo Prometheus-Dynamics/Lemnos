@@ -382,7 +382,7 @@ mod package {
             core::mem::offset_of!(PackageDescriptor, register),
             DESCRIPTOR_HEAD
         );
-        assert_eq!((PACKAGE_VERSION.major, PACKAGE_VERSION.minor), (1, 0));
+        assert_eq!((PACKAGE_VERSION.major, PACKAGE_VERSION.minor), (2, 0));
         assert_eq!(PACKAGE_VERSION.layout, PACKAGE_LAYOUT_HASH);
         assert_eq!(
             PACKAGE_VERSION.struct_size as usize,
@@ -408,9 +408,43 @@ mod package {
         assert_eq!(size_of::<PackageHealth>(), 24);
         assert_eq!(size_of::<PackageItem>(), 56);
         assert_eq!(size_of::<PackageSetting<'static>>(), 56);
-        assert_eq!(size_of::<PackageTransfer<'static>>(), 40);
         assert_eq!(size_of::<DriverTable>(), 72);
-        assert_eq!(size_of::<HostTable>(), 56);
+        assert_eq!(size_of::<HostTable>(), 552);
+        assert_eq!(core::mem::offset_of!(HostTable, device), 32);
+        assert_eq!(core::mem::offset_of!(HostTable, usb_function), 480);
+        // What the tables carry.
+        assert_eq!(size_of::<Fd>(), 4);
+        assert_eq!(size_of::<PackageTransfer<'static>>(), 40);
+        assert_eq!(size_of::<PackageSpiSegment<'static>>(), 48);
+        assert_eq!(size_of::<PackageLineConfig>(), 12);
+        assert_eq!(size_of::<PackageEdge>(), 24);
+        assert_eq!(size_of::<PackagePwmConfig>(), 24);
+        assert_eq!(size_of::<PackageInterruptEvent>(), 16);
+        assert_eq!(size_of::<PackageDmaBuffer>(), 24);
+        assert_eq!(size_of::<PackageFrame>(), 32);
+        assert_eq!(size_of::<PackageControlSetup>(), 8);
+        assert_eq!(size_of::<PackageIsoPacket>(), 12);
+        assert_eq!(size_of::<PackageUsbEvent>(), 16);
+        // Each table is its functions and nothing else.
+        let pointer = size_of::<usize>();
+        for (table, functions) in [
+            (size_of::<DeviceTable>(), 2),
+            (size_of::<I2cTable>(), 1),
+            (size_of::<SpiTable>(), 2),
+            (size_of::<LineTable>(), 4),
+            (size_of::<PwmTable>(), 2),
+            (size_of::<UartTable>(), 3),
+            (size_of::<RegistersTable>(), 5),
+            (size_of::<InterruptTable>(), 3),
+            (size_of::<DmaTable>(), 6),
+            (size_of::<ClocksTable>(), 4),
+            (size_of::<ResetTable>(), 2),
+            (size_of::<StreamTable>(), 10),
+            (size_of::<UsbDeviceTable>(), 12),
+            (size_of::<UsbFunctionTable>(), 9),
+        ] {
+            assert_eq!(table, functions * pointer);
+        }
         assert_eq!(size_of::<PackageDriver>(), 120);
         assert_eq!(size_of::<PackageDescriptor>(), 32);
     }
@@ -538,26 +572,45 @@ mod package {
             fn release(_resource: Handle) -> Status {
                 panic!("deliberate panic in the host");
             }
-            fn device_call(
-                _device: Handle,
-                _method: u16,
-                _args: &[u8],
-                _reply: &mut [u8],
-            ) -> Result<usize, Status> {
-                Err(Status::NOT_SUPPORTED)
-            }
-            fn device_health(_device: Handle) -> PackageHealth {
-                PackageHealth::OK
-            }
-            fn i2c_transaction(
+        }
+
+        // This host has I2C buses and lines, and nothing else: every other kind is left as it
+        // is.
+        impl I2cHost for Nothing {
+            fn transaction(
                 _bus: Handle,
                 _address: u16,
-                steps: &mut [PackageTransfer<'_>],
+                mut steps: SliceMut<'_, PackageTransfer<'_>>,
             ) -> Status {
+                let steps = steps.as_mut_slice();
                 steps[1].read.as_mut_slice()[0] = steps[0].write.as_slice()[0] + 1;
                 Status::OK
             }
         }
+
+        impl LineHost for Nothing {
+            fn get(_line: Handle, value: Out<'_, u32>) -> Status {
+                value.set(1);
+                Status::OK
+            }
+
+            fn set(_line: Handle, _value: u32) -> Status {
+                panic!("deliberate panic in a table");
+            }
+        }
+
+        impl DeviceHost for Nothing {}
+        impl SpiHost for Nothing {}
+        impl PwmHost for Nothing {}
+        impl UartHost for Nothing {}
+        impl RegistersHost for Nothing {}
+        impl InterruptHost for Nothing {}
+        impl DmaHost for Nothing {}
+        impl ClocksHost for Nothing {}
+        impl ResetHost for Nothing {}
+        impl StreamHost for Nothing {}
+        impl UsbDeviceHost for Nothing {}
+        impl UsbFunctionHost for Nothing {}
 
         static DRIVER: DriverTable = driver_table::<Adder>(DRIVER_TICKS);
         static HOST: HostTable = host_table::<Board, Nothing>();
@@ -612,8 +665,9 @@ mod package {
         fn the_host_is_served_through_its_table_and_a_panic_is_a_status() {
             assert_eq!(HOST.struct_size as usize, size_of::<HostTable>());
             assert_eq!((HOST.release)(Handle::new(1, 1)), Status::PANIC);
+            // A kind this host does not have answers for itself.
             let mut len = 0;
-            let called = (HOST.device_call)(
+            let called = (HOST.device.call)(
                 Handle::new(1, 1),
                 1,
                 Slice::EMPTY,
@@ -621,16 +675,39 @@ mod package {
                 Out::new(&mut len),
             );
             assert_eq!(called, Status::NOT_SUPPORTED);
+            assert_eq!(
+                (HOST.reset.assert_reset)(Handle::new(1, 1), 0),
+                Status::NOT_SUPPORTED
+            );
+            let mut fd = Fd::NONE;
+            assert_eq!(
+                (HOST.stream.buffer_handle)(Handle::new(1, 1), 0, Out::new(&mut fd)),
+                Status::NOT_SUPPORTED
+            );
+            assert!(fd.is_none());
             let mut byte = [0u8];
             let mut steps = [
                 PackageTransfer::write(&[4]),
                 PackageTransfer::read(&mut byte),
             ];
             assert_eq!(
-                (HOST.i2c_transaction)(Handle::new(1, 1), 0x20, SliceMut::new(&mut steps)),
+                (HOST.i2c.transaction)(Handle::new(1, 1), 0x20, SliceMut::new(&mut steps)),
                 Status::OK
             );
             assert_eq!(byte, [5]);
+            // Within one table, what the host serves works, what it leaves out says so, and a
+            // panic stops at the table.
+            let mut value = 0;
+            assert_eq!(
+                (HOST.line.get)(Handle::new(1, 1), Out::new(&mut value)),
+                Status::OK
+            );
+            assert_eq!(value, 1);
+            assert_eq!(
+                (HOST.line.configure)(Handle::new(1, 1), PackageLineConfig::default()),
+                Status::NOT_SUPPORTED
+            );
+            assert_eq!((HOST.line.set)(Handle::new(1, 1), 1), Status::PANIC);
             // No binding at all is refused, not followed.
             let mut handle = Handle::NULL;
             let taken = (HOST.take)(
