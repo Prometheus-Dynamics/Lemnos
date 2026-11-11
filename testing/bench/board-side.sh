@@ -125,7 +125,7 @@ usb_cycle() {
   back=$(settle ge "$before") || back=
   if [ -n "$drop" ] && [ -n "$back" ] && [ "$usb_off" = 0 ]; then
     row usb.cycle measured "devices $before, down after $drop ms, back after $back ms" \
-      "board, usb-a-power (the camera's port); counted in sysfs, since next has no USB backend"
+      "board, usb-a-power (the camera's port); devices counted in sysfs"
   else
     row usb.cycle not_measured "" \
       "cycle incomplete: devices $before, down ${drop:-no}, back ${back:-no}, switch off ${usb_off}"

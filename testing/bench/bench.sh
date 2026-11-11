@@ -145,15 +145,15 @@ placeholders() {
     cpu.200hz_pct not_measured "" "$why" \
     threads.lemnosd not_measured "" "$why" \
     mem.pss_kb not_measured "" "$why" \
-    alloc.steady_state not_measured "" "no allocation counter wraps lemnosd on next (engine/client/tests/alloc.rs counts the client only)" \
-    light.frame_rate not_measured "" "no step in this harness yet: testing/board-runs/B17.md has the check" \
-    fan.steps not_measured "" "no step in this harness yet: testing/board-runs/B14.md has the check" \
+    alloc.steady_state not_measured "" "nothing counts a lemnosd running on the board; service/lemnosd/tests/alloc.rs counts one in a test process on the build host" \
+    light.frame_rate not_measured "" "no step in this harness: only the board run testing/board-runs/B17.md gives it" \
+    fan.steps not_measured "" "no step in this harness: only the board run testing/board-runs/B14.md gives it" \
     power.readings not_measured "" "$why" \
     usb.cycle not_measured "" "$why" \
-    camera.fps not_measured "" "no camera driver, receiver, ISP or frame stream on next" \
-    camera.drops not_measured "" "no camera driver, receiver, ISP or frame stream on next" \
-    camera.latency_ms not_measured "" "no camera driver, receiver, ISP or frame stream on next" \
-    camera.latch_frames not_measured "" "no camera driver, receiver, ISP or frame stream on next"
+    camera.fps not_measured "" "no camera step in this harness: only the board run testing/board-runs/D9.md gives it" \
+    camera.drops not_measured "" "no camera step in this harness: only the board run testing/board-runs/D9.md gives it" \
+    camera.latency_ms not_measured "" "no camera step in this harness: only the board run testing/board-runs/D9.md gives it" \
+    camera.latch_frames not_measured "" "no camera step in this harness: only the board run testing/board-runs/D9.md gives it"
 }
 
 # Runs on the board over ssh. Stops the services that match lemnos*, and starts them again on exit

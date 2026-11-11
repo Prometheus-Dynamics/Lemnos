@@ -67,7 +67,8 @@
 //!   the same view of memory (no IOMMU, the same `dma-ranges`). The ISP is bound to the vendor's
 //!   `vvcam-isp` driver, so the module cannot own it; which block to name, and whether the two
 //!   agree, is checked on a board (`testing/board-runs/B23.md`, step 2). If that cannot be shown,
-//!   the memory must not be handed to the ISP. The driver is not registered in `lemnosd`.
+//!   the memory must not be handed to the ISP. The driver is built into `lemnosd`, so a board
+//!   file can name it; until that check passes, it is for that board run.
 //! - Scaling, cropping and the self paths: the main path writes the sensor's full frame.
 //!
 //! Untested on board: written from the vendor driver's interface and the ISP8000's open register

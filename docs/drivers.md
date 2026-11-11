@@ -101,9 +101,9 @@ A board file cannot name these.
 
 | Crate | What it is | Why it is not a driver |
 |---|---|---|
-| `vip9000` | `npu/1`, with the checks | Refuses to run: `load` answers `NOT_SUPPORTED`. The block has one page table for every opener, so a job cannot be kept to its own buffers from user space. It needs a kernel-module path |
-| `k230-kpu` | `npu/1`, with the checks | Refuses to run: `load` answers `NOT_SUPPORTED`. The block has no IOMMU and no bus protection, so a job cannot be confined at all without reading the program |
-| `k230-ai2d` | The AI2D block's kernel interface, checked jobs and a scaler loop | No job reaches the block: its register map is not in the public sources. It implements no contract |
+| `vip9000` | `npu/1`'s methods over a device trait, with the checks | No Linux device is built, and `load` answers `NOT_SUPPORTED`. The block has one page table for every opener, so a job cannot be kept to its own buffers from user space. It needs a kernel-module path |
+| `k230-kpu` | `npu/1`'s methods over a device trait, with the checks | No Linux device is built, and `load` answers `NOT_SUPPORTED`. The block has no IOMMU and no bus protection, so a job cannot be confined at all without reading the program |
+| `k230-ai2d` | The AI2D block's kernel interface, and checked job logic over a device trait | No hardware path: nothing implements the device trait on Linux, because the block's register map is not in the public sources. It serves no contract |
 | `k230-gsdma` | Job checks and descriptors for the DMA engine | The kernel gives user space no way to the block. It needs a kernel-module path |
 | `rkaiisp` | The AI-ISP's layouts, parameter checks and ring | Never run on the block. No contract |
 | `rk-jpeg` | The JPEG block's register and address model | Builds no job: the field layout is not public. JPEG jobs go through `rk-mpp` with the caller's registers |

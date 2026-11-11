@@ -1,4 +1,6 @@
-//! `image.scaler/1` jobs, taken from a stream whose buffers are dma-bufs.
+//! Jobs in `image.scaler/1`'s job format, taken from a stream whose buffers are dma-bufs. This is
+//! job logic over [`Device`], not a driver: nothing implements [`Device`] on Linux, and nothing
+//! here serves the contract's methods (see the crate's documentation).
 //!
 //! The consumer names two buffers of the stream in a job. [`Scaler::serve`] borrows their handles
 //! from the stream and gives them to [`Ai2d::resize`], which checks the images against the

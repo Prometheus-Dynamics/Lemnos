@@ -13,8 +13,8 @@ written check under `testing/board-runs/`, and none records a result.
 
 - [ ] Every check in `testing/board-runs/`.
 - [ ] The bench's reference set on the reference board, beside the earlier version's figures
-      (`testing/bench/bench.sh --real`). Before that: `testing/bench/reference.tsv` still says the
-      camera drivers do not exist and that the light and fan rows have no step in the harness.
+      (`testing/bench/bench.sh --real`). The harness has no step for the camera, light and fan
+      rows: their figures come only from the board runs `testing/bench/reference.tsv` names.
 - [ ] The whole system on the kernel-module route against the stock route, on a real bus.
 - [ ] `lemnos-orion` against a running node.
 

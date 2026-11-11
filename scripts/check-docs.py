@@ -29,6 +29,11 @@ byte, so an example shown in a document is the example that is checked.
 Links. Every relative link must name a file or directory that exists, and a
 `#fragment` on a Markdown file must be one of its headings.
 
+Drivers. docs/drivers.md must say what the code is: its driver tables name
+exactly the `#[driver]` types lemnosd builds in, each with the contracts it
+provides; a crate in its library table has no driver lemnosd builds in; and no
+crate whose driver is built in says in its crate documentation that it is not.
+
     scripts/check-docs.py            the fast commands, files and links
     scripts/check-docs.py --slow     the slow commands too
     scripts/check-docs.py --list     list every command block and what it is, run nothing
@@ -204,6 +209,73 @@ def first_line(body):
     return ""
 
 
+DRIVER = re.compile(r'#\[driver\("([^"]+)", provides = \[([^\]]*)\]\)\]\s*(?:#\[[^\]]*\]\s*)*pub struct (\w+)')
+CONTRACT = re.compile(r'#\[contract\("([^"]+)", version = (\d+)\)\]\s*(?:#\[[^\]]*\]\s*)*pub trait (\w+)')
+NOT_BUILT_IN = re.compile(r"not registered in `lemnosd`|not built into (the daemon|`lemnosd`)|nothing is registered in `lemnosd`")
+
+
+def sources(crate_dir):
+    return [p for p in sorted((crate_dir / "src").rglob("*.rs")) if "tests" not in p.parts and p.name != "tests.rs"]
+
+
+def check_drivers(problems):
+    """docs/drivers.md against the driver crates and lemnosd's built-in list."""
+    import tomllib
+
+    tags = {}
+    for path in sorted(ROOT.glob("contracts/*/src/**/*.rs")) + sorted(ROOT.glob("drivers/*/src/**/*.rs")):
+        for m in CONTRACT.finditer(path.read_text()):
+            tags[m.group(3)] = f"{m.group(1)}/{m.group(2)}"
+    builtin = (ROOT / "service/lemnosd/src/builtin.rs").read_text()
+    built_in = {}  # driver name -> set of contract tags
+    built_in_dirs = set()
+    crates = {}
+    for manifest in sorted(ROOT.glob("drivers/*/Cargo.toml")):
+        package = tomllib.loads(manifest.read_text())["package"]
+        crates[manifest.parent.name] = package
+        crate = package["name"].replace("-", "_")
+        types, renamed = {}, {}
+        for path in sources(manifest.parent):
+            code = path.read_text()
+            renamed.update((m.group(2), m.group(1)) for m in re.finditer(r"\b(\w+) as (\w+)\b", code))
+            for m in DRIVER.finditer(code):
+                types[m.group(3)] = (m.group(1), m.group(2))
+        for kind, (name, provides) in types.items():
+            if f"entry::<{crate}::{kind}>()" in builtin:
+                traits = [t.strip() for t in provides.split(",") if t.strip()]
+                built_in[name] = {tags.get(renamed.get(t, t), t) for t in traits}
+                built_in_dirs.add(manifest.parent.name)
+    text = (ROOT / "docs/drivers.md").read_text()
+    library = text.split("## Library crates", 1)
+    if len(library) != 2:
+        problems.append("docs/drivers.md: no `## Library crates` section")
+        return
+    rows = {}
+    for line in library[0].splitlines():
+        m = re.match(r"\| `([^`]+)`(?: \(crate `[^`]+`\))? \| ([^|]*) \|", line)
+        if m:
+            rows[m.group(1)] = set(re.findall(r"`([a-z0-9.-]+/\d+)`", m.group(2)))
+    for name in sorted(set(rows) - set(built_in)):
+        problems.append(f"docs/drivers.md: `{name}` is in a driver table but lemnosd builds in no such driver")
+    for name in sorted(set(built_in) - set(rows)):
+        problems.append(f"docs/drivers.md: lemnosd builds in `{name}`, and no driver table lists it")
+    for name in sorted(set(rows) & set(built_in)):
+        if rows[name] != built_in[name]:
+            problems.append(f"docs/drivers.md: `{name}` is listed as providing {sorted(rows[name])}, and provides {sorted(built_in[name])}")
+    table = library[1].split("\n## ", 1)[0]
+    for m in re.finditer(r"^\| `([^`]+)` \|", table, re.M):
+        name = m.group(1)
+        if name not in crates:
+            problems.append(f"docs/drivers.md: library crate `{name}` is not under drivers/")
+        elif name in built_in_dirs:
+            problems.append(f"docs/drivers.md: library crate `{name}` has a driver lemnosd builds in")
+    for name in sorted(built_in_dirs):
+        lib = ROOT / "drivers" / name / "src/lib.rs"
+        found = NOT_BUILT_IN.search(lib.read_text()) if lib.is_file() else None
+        if found:
+            problems.append(f"drivers/{name}/src/lib.rs: says \"{found.group(0)}\", and lemnosd builds it in")
+
+
 def main():
     slow = "--slow" in sys.argv
     list_only = "--list" in sys.argv
@@ -217,6 +289,7 @@ def main():
     target_bin = target / "debug"
 
     problems, not_run, ran, skipped_slow = [], [], 0, []
+    check_drivers(problems)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     if not list_only:
         # The programs the documents run, built as the README builds them.
