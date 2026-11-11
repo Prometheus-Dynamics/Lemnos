@@ -32,3 +32,4 @@ libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-driver-rk-mpp = { path = "../rk-mpp", features = ["played"] }

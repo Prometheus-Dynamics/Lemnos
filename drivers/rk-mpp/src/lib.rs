@@ -7,6 +7,9 @@
 //! - [`Service`] and [`Claim`]: one claim at a time on the service, bound to one [`Block`] behind
 //!   an IOMMU; the buffers it holds; [`Claim::submit`] and [`Claim::complete`] (see
 //!   [`claim`] for the backoff and what dropping a claim does).
+//! - [`ParamJob`]: a parameter block's job (the IEP2's), with every descriptor word placed by
+//!   the driver from the claim's buffers and every word the kernel uses as an index, a size or a
+//!   count checked; [`job`] lists the checks.
 //! - [`Job`]: register values, the [`Address`] registers that hold buffers, and the registers to
 //!   read back. Every path by which a job's numbers become a descriptor, an address, an index or a
 //!   length is checked against the block and the claim's buffers; [`job`] lists them.
@@ -48,11 +51,11 @@ pub mod uapi;
 #[cfg(test)]
 mod tests;
 
-pub use block::{Block, Direct, Facts, MAX_REGISTERS};
+pub use block::{Block, Check, Descriptor, Direct, Facts, MAX_REGISTERS, ParamFacts, Word};
 pub use claim::{
     BufferError, Claim, ClaimError, ClaimOf, CompleteError, Completion, Device, MAX_BUFFERS,
     OwnedClaim, Service, Session, SubmitError, backoff_ns,
 };
-pub use codec::{BoxedDevice, MppBlock};
-pub use job::{Address, BufferId, Job, JobError, MAX_ADDRESSES, ReadBack};
+pub use codec::{BlockClaim, BoxedDevice, MppBlock};
+pub use job::{Address, BufferId, Job, JobError, MAX_ADDRESSES, ParamAddress, ParamJob, ReadBack};
 pub use message::{Message, Payload, READ_BACK_BYTES, READ_BACK_SLOTS};

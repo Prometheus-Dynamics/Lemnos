@@ -1,11 +1,16 @@
 //! The layouts against the vendor sources: sizes and offsets as `gcc` gives them on LP64 for the
-//! structures transcribed from `mpp_iep2.c`, `mpp_common.c` and `rk-mpp.h`, and the numbers.
+//! structures transcribed from `mpp_iep2.c`, and the numbers; and `lemnos-driver-rk-mpp`'s
+//! facts about the parameter block against them.
 
 use std::mem::{offset_of, size_of};
 
-use crate::mpp::{self, Msg, OffsetElem};
+use lemnos_driver_rk_mpp::{Block, Check};
+
 use crate::regs::{self, ADDRESS_REGISTERS};
-use crate::{Addr, DilMode, FieldOrder, Params, PdComp, Results, Sampling, Swap};
+use crate::{
+    Addr, DilMode, FieldOrder, PARAMS_BYTES, Params, PdComp, RESULTS_BYTES, Results, SLOTS,
+    Sampling, Slot, Swap, TUNING_BYTES, TUNING_START,
+};
 
 #[test]
 fn params_match_the_c_layout() {
@@ -54,40 +59,68 @@ fn results_match_the_c_layout() {
 }
 
 #[test]
-fn service_layouts_and_numbers() {
-    assert_eq!(size_of::<Msg>(), 24);
-    assert_eq!(mpp::MSG_BYTES, 24);
-    assert_eq!(offset_of!(Msg, flags), 4);
-    assert_eq!(offset_of!(Msg, size), 8);
-    assert_eq!(offset_of!(Msg, offset), 12);
-    assert_eq!(offset_of!(Msg, data_ptr), 16);
-    assert_eq!(size_of::<OffsetElem>(), 8);
-    assert_eq!(offset_of!(OffsetElem, offset), 4);
-    // _IOW('v', 1, unsigned int).
-    assert_eq!(mpp::IOC_CFG_V1, 0x4004_7601);
-    assert_eq!(mpp::CMD_QUERY_HW_SUPPORT, 0);
-    assert_eq!(mpp::CMD_INIT_CLIENT_TYPE, 0x100);
-    assert_eq!(mpp::CMD_INIT_TRANS_TABLE, 0x102);
-    assert_eq!(mpp::CMD_SET_REG_WRITE, 0x200);
-    assert_eq!(mpp::CMD_SET_REG_READ, 0x201);
-    assert_eq!(mpp::CMD_SET_REG_ADDR_OFFSET, 0x202);
-    assert_eq!(mpp::CMD_POLL_HW_FINISH, 0x300);
-    assert_eq!(mpp::CMD_RESET_SESSION, 0x400);
-    assert_eq!(mpp::CMD_RELEASE_FD, 0x402);
+fn the_service_layers_facts_are_this_structure() {
+    let facts = Block::Iep2.params().expect("a parameter block");
+    assert_eq!((facts.bytes, facts.results), (PARAMS_BYTES, RESULTS_BYTES));
+    assert_eq!((PARAMS_BYTES, RESULTS_BYTES), (656, 412));
+    assert_eq!((TUNING_START, TUNING_BYTES), (116, 368));
+
+    // Every descriptor word is a slot's, in slot order, landing in the kernel's register for
+    // that word; the outputs' third words are no slot's.
+    assert_eq!(facts.descriptors.len(), SLOTS);
+    for (descriptor, slot) in facts.descriptors.iter().zip(Slot::ALL) {
+        let word = slot.word();
+        assert_eq!(usize::from(descriptor.at), word, "{slot:?}");
+        let index = (word - offset_of!(Params, src)) / 4;
+        assert_eq!(
+            ADDRESS_REGISTERS[index],
+            Some(u32::from(descriptor.register)),
+            "{slot:?}"
+        );
+    }
+
+    // The words checked are the ones this crate writes from its own checked numbers, and the
+    // two it holds at zero.
+    let at = |at: usize| {
+        facts
+            .words
+            .iter()
+            .find(|w| usize::from(w.at) == at)
+            .map(|w| w.check)
+    };
+    let range = |min, max| Some(Check::Range { min, max });
+    assert_eq!(at(offset_of!(Params, tile_cols)), range(1, 120));
+    assert_eq!(at(offset_of!(Params, tile_rows)), range(1, 272));
+    for stride in [
+        offset_of!(Params, src_y_stride),
+        offset_of!(Params, src_uv_stride),
+        offset_of!(Params, dst_y_stride),
+    ] {
+        assert_eq!(at(stride), range(0, 0xffff));
+    }
+    assert_eq!(at(offset_of!(Params, dst) + 8), range(0, 0));
+    assert_eq!(at(offset_of!(Params, dst) + 20), range(0, 0));
+    assert_eq!(at(offset_of!(Params, dil_out_mode)), range(0, 0));
+    assert_eq!(at(offset_of!(Params, osd_area_num)), range(0, 8));
+    assert_eq!(at(offset_of!(Params, roi_en)), range(0, 0));
+    let Some(Check::OneOf(modes)) = at(offset_of!(Params, dil_mode)) else {
+        panic!("dil_mode is checked against the modes");
+    };
     assert_eq!(
+        modes,
         [
-            mpp::FLAG_MULTI_MSG,
-            mpp::FLAG_LAST_MSG,
-            mpp::FLAG_REG_FD_NO_TRANS,
-            mpp::FLAG_SCL_FD_NO_TRANS,
-            mpp::FLAG_REG_NO_OFFSET,
-            mpp::FLAG_SECURE_MODE,
-        ],
-        [1, 2, 4, 8, 0x10, 0x1_0000]
+            DilMode::Disable,
+            DilMode::I5O2,
+            DilMode::I5O1T,
+            DilMode::I5O1B,
+            DilMode::I2O2,
+            DilMode::I1O1B,
+            DilMode::Pd,
+            DilMode::Bypass,
+            DilMode::Dect,
+        ]
+        .map(|m| m as u32)
     );
-    assert_eq!(mpp::DEVICE_IEP2, 28);
-    assert_eq!(mpp::MAX_MSGS, 16);
-    assert_eq!(mpp::MAX_OFFSETS, 80);
 }
 
 #[test]

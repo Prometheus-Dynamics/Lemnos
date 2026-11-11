@@ -16,12 +16,20 @@
 //!   read are runs of whole registers inside the bound block's registers and reaching its first;
 //!   every table and offset index is a register inside the write. Every message but the last
 //!   carries `MULTI_MSG`, the last `MULTI_MSG | LAST_MSG`, so the kernel stops at the last.
+//! - A parameter job, on a session bound to a parameter block (the IEP2): `SET_REG_WRITE` of
+//!   exactly the parameter structure's size at offset 0, then optionally `SET_REG_ADDR_OFFSET`,
+//!   then `SET_REG_READ` of exactly the results' size into a read-back area. Every descriptor
+//!   word of the structure holds 1 to 1023, every word the kernel uses as an index, a size, a
+//!   count or a mode is in its range ([`lemnos_driver_rk_mpp::ParamFacts`]), every offset is
+//!   keyed by a descriptor word's register, and every message carries `REG_NO_OFFSET` besides
+//!   the chain's two flags. A register-file job is refused on such a session, and a parameter
+//!   job on any other.
 //!
 //! Each message's size is the exact length of the memory it was built with (`size` and payload
 //! are fixed when the driver builds the message, and a session cannot swap the payload). Commands
 //! the driver never sends (`INIT_DRIVER_DATA`, `SET_RCB_INFO`, `SET_SESSION_FD`, `POLL_HW_IRQ`,
-//! `TRANS_FD_TO_IOVA`, `SEND_CODEC_INFO`) are refused, and no flag past the chain's two is ever
-//! set.
+//! `TRANS_FD_TO_IOVA`, `SEND_CODEC_INFO`) are refused, and no flag past the chain's two (and a
+//! parameter job's `REG_NO_OFFSET`) is ever set.
 //!
 //! # Memory
 //!

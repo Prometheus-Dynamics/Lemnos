@@ -26,7 +26,7 @@ use std::ops::DerefMut;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::block::{Block, Facts};
-use crate::job::{BufferId, Held, Job, JobError, Plan, Staging, plan};
+use crate::job::{BufferId, Held, Job, JobError, ParamJob, Plan, Staging, plan, plan_params};
 use crate::message::{Message, READ_BACK_SLOTS};
 use crate::uapi::{Command, FD_MASK};
 
@@ -380,23 +380,38 @@ impl<H: DerefMut<Target = Service<D>>, D: Device> ClaimOf<H, D> {
             return Err(SubmitError::Full);
         }
         let buffers = &self.buffers;
-        let held = |id: BufferId| {
-            let b = buffers
-                .get(usize::from(id.slot))?
-                .as_ref()
-                .filter(|b| b.generation == id.generation)?;
-            Some(Held {
-                slot: id.slot,
-                fd: b.fd.as_raw_fd() as u32,
-                size: b.size,
-            })
-        };
-        let plan = plan(&self.facts, job, held, &mut self.staging).map_err(SubmitError::Job)?;
+        let plan = plan(&self.facts, job, |id| held(buffers, id), &mut self.staging)
+            .map_err(SubmitError::Job)?;
         let slot = (self.head + self.in_flight) % READ_BACK_SLOTS;
         send_job(&mut self.session, &self.staging, &plan, slot).map_err(SubmitError::Device)?;
+        self.queued(job.identity, &plan, slot);
+        Ok(())
+    }
 
+    /// Checks a parameter block's `job` and queues it on the block. Its completion reads back
+    /// the block's results structure, as words ([`Self::complete`]).
+    pub fn submit_params(&mut self, job: &ParamJob<'_>) -> Result<(), SubmitError> {
+        let facts = self
+            .block
+            .params()
+            .ok_or(SubmitError::Job(JobError::NotParamBlock))?;
+        if self.in_flight == READ_BACK_SLOTS {
+            return Err(SubmitError::Full);
+        }
+        let buffers = &self.buffers;
+        let plan = plan_params(facts, job, |id| held(buffers, id), &mut self.staging)
+            .map_err(SubmitError::Job)?;
+        let slot = (self.head + self.in_flight) % READ_BACK_SLOTS;
+        send_param_job(&mut self.session, &self.staging, &plan, slot)
+            .map_err(SubmitError::Device)?;
+        self.queued(job.identity, &plan, slot);
+        Ok(())
+    }
+
+    /// Records a job the kernel took, in read-back `slot`.
+    fn queued(&mut self, identity: u64, plan: &Plan, slot: usize) {
         self.pending[slot] = Pending {
-            identity: job.identity,
+            identity,
             read_bytes: plan.read.map_or(0, |(_, bytes)| bytes),
             buffers: plan.buffers,
         };
@@ -407,7 +422,6 @@ impl<H: DerefMut<Target = Service<D>>, D: Device> ClaimOf<H, D> {
                 buffer.mapped = true;
             }
         }
-        Ok(())
     }
 
     /// Waits for the oldest job in flight and copies the registers it reads back into `into`.
@@ -443,6 +457,54 @@ impl<H: DerefMut<Target = Service<D>>, D: Device> ClaimOf<H, D> {
             registers,
         })
     }
+}
+
+/// A buffer the claim holds, as a plan sees it.
+fn held(buffers: &[Option<Buffer>; MAX_BUFFERS], id: BufferId) -> Option<Held> {
+    let b = buffers
+        .get(usize::from(id.slot))?
+        .as_ref()
+        .filter(|b| b.generation == id.generation)?;
+    Some(Held {
+        slot: id.slot,
+        fd: b.fd.as_raw_fd() as u32,
+        size: b.size,
+    })
+}
+
+/// A parameter job as one call: the structure, the offsets, the results' read-back, each
+/// message saying a descriptor word holds no offset.
+fn send_param_job<S: Session>(
+    session: &mut S,
+    staging: &Staging,
+    plan: &Plan,
+    slot: usize,
+) -> io::Result<()> {
+    let (_, from, len) = plan.write;
+    let (_, results) = plan.read.unwrap_or((0, 0));
+    let mut messages = [
+        Message::input(
+            Command::SetRegWrite,
+            0,
+            &staging.registers[from..from + len],
+        ),
+        Message::read_back(0, results, slot),
+        Message::bare(Command::PollHwFinish),
+    ];
+    let n = if plan.offsets > 0 {
+        messages[2] = Message::read_back(0, results, slot);
+        messages[1] = Message::input(
+            Command::SetRegAddrOffset,
+            0,
+            &staging.offsets[..plan.offsets],
+        );
+        3
+    } else {
+        2
+    };
+    let messages = &mut messages[..n];
+    Message::chain_params(messages);
+    session.send(messages)
 }
 
 /// One job as one call: the session's translation table, the write, the offsets, the read-back.

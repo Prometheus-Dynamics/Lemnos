@@ -49,6 +49,7 @@ lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
 lemnos-driver-pisp = { path = "../../drivers/pisp" }
 lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
 lemnos-driver-rga = { path = "../../drivers/rga" }
+lemnos-driver-rk-iep = { path = "../../drivers/rk-iep" }
 lemnos-driver-rk-mpp-codec = { path = "../../drivers/rk-mpp-codec" }
 lemnos-driver-rkcif = { path = "../../drivers/rkcif" }
 lemnos-driver-rkisp = { path = "../../drivers/rkisp" }

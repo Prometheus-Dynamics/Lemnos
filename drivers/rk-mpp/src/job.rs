@@ -31,12 +31,34 @@
 //! - **Counts.** At most [`MAX_ADDRESSES`] addresses, below the kernel's 80-entry arrays (whose
 //!   region array check is off by one), and four messages per job, below its 16.
 //!
+//! # Parameter jobs
+//!
+//! A parameter block ([`crate::ParamFacts`]) takes a [`ParamJob`]: the whole parameter
+//! structure, and the buffer for each word the kernel translates. The kernel copies a write of
+//! any size into its fixed structure and a read of any size out of its results, translates its
+//! fixed list of words with no table, takes the session's `MPP_FLAGS_REG_NO_OFFSET` to mean a
+//! word is a whole descriptor whose offset is looked up by register in the job's offset list,
+//! and then programs the block from the structure, using some words as indices, sizes and
+//! counts. So:
+//!
+//! - **Descriptor words** are written by the driver, never taken from the caller: every one
+//!   of them is first zeroed, and then holds the descriptor of a buffer the claim holds, named
+//!   by the job, and a job must name one for every descriptor word (a word left 0 is skipped by
+//!   the kernel and gives the block address 0). Each is named once.
+//! - **Offsets** go in the offset list, keyed by the descriptor word's register, made only for
+//!   the job's addresses, each below the size the claim measured. The messages carry
+//!   `MPP_FLAGS_REG_NO_OFFSET`, so no offset rides in a descriptor word.
+//! - **Sizes**: the write is exactly the structure's size, the read exactly the results'.
+//! - **The caller's words** the kernel or the block takes as an index, a size, a count or a
+//!   mode that changes what is reached are checked against the ranges the facts give; every
+//!   other word is carried as it is.
+//!
 //! What the block then reads or writes from each address, how far, is set by the caller's other
 //! registers, which the driver does not interpret. That is confined by the block's IOMMU: a claim
 //! is taken only on a block behind one, and the claim is the only session on the service, so the
 //! only buffers mapped for the block are the claim's own (see [`crate::Claim`]).
 
-use crate::block::{Facts, MAX_REGISTERS};
+use crate::block::{Facts, MAX_REGISTERS, ParamFacts};
 use crate::message::READ_BACK_BYTES;
 use crate::uapi::{FD_MASK, RegOffsetElem};
 
@@ -86,6 +108,31 @@ pub struct Job<'a> {
     pub read: Option<ReadBack>,
 }
 
+/// A word of a parameter job that holds a buffer's device address: `offset` bytes into
+/// `buffer`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParamAddress {
+    /// The word, by its byte offset in the parameter structure; one the kernel translates.
+    pub word: u16,
+    /// A buffer the claim holds.
+    pub buffer: BufferId,
+    /// Bytes into the buffer; below its size.
+    pub offset: u32,
+}
+
+/// One task for a parameter block: its whole parameter structure, and the buffer each of its
+/// descriptor words holds. The results structure is always read back.
+#[derive(Clone, Copy, Debug)]
+pub struct ParamJob<'a> {
+    /// The caller's name for the job. Carried to its completion, never read.
+    pub identity: u64,
+    /// The structure, in the kernel's layout and the machine's byte order. Its descriptor words
+    /// are replaced by the driver.
+    pub params: &'a [u8],
+    /// A buffer for every descriptor word.
+    pub addresses: &'a [ParamAddress],
+}
+
 /// Why a job was refused. The device was not touched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobError {
@@ -130,6 +177,31 @@ pub enum JobError {
     DirectNotAddress {
         /// The register.
         register: u16,
+    },
+    /// A parameter job on a register-file block.
+    NotParamBlock,
+    /// The parameter structure is not the size the kernel's is.
+    ParamsSize {
+        /// Bytes given.
+        len: usize,
+    },
+    /// An address names a word the kernel doesn't translate.
+    NotDescriptor {
+        /// The word's byte offset.
+        word: u16,
+    },
+    /// A word the kernel translates has no buffer named for it.
+    MissingDescriptor {
+        /// The word's byte offset.
+        word: u16,
+    },
+    /// A word the kernel or the block uses as an index, a size, a count or a mode is out of its
+    /// range.
+    Word {
+        /// The word's byte offset.
+        at: u16,
+        /// Its value.
+        value: u32,
     },
 }
 
@@ -300,6 +372,99 @@ pub(crate) fn plan(
         table,
         offsets,
         read: read.map(|(at, len)| (u32::try_from(at).unwrap_or(u32::MAX), len)),
+        buffers,
+    })
+}
+
+/// The native-endian word at byte `at` of `bytes`.
+fn word_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+/// Checks a parameter job against the block and the claim's buffers, and stages its messages'
+/// payloads: the structure with every descriptor word the driver's, and the offset list.
+pub(crate) fn plan_params(
+    facts: &ParamFacts,
+    job: &ParamJob<'_>,
+    held: impl Fn(BufferId) -> Option<Held>,
+    staging: &mut Staging,
+) -> Result<Plan, JobError> {
+    if job.params.len() != facts.bytes || facts.bytes > staging.registers.len() {
+        return Err(JobError::ParamsSize {
+            len: job.params.len(),
+        });
+    }
+    if job.addresses.len() > facts.descriptors.len() {
+        return Err(JobError::TooManyAddresses);
+    }
+    let file = &mut staging.registers[..facts.bytes];
+    file.copy_from_slice(job.params);
+
+    // The caller's words the kernel or the block takes as an index, a size, a count or a mode.
+    for word in facts.words {
+        let value = word_at(file, usize::from(word.at));
+        if !word.check.allows(value) {
+            return Err(JobError::Word { at: word.at, value });
+        }
+    }
+
+    // No caller's number stays in a word the kernel translates.
+    for descriptor in facts.descriptors {
+        let at = usize::from(descriptor.at);
+        file[at..at + 4].fill(0);
+    }
+
+    // Each address: a descriptor word, named once, holding a buffer the claim holds at an
+    // offset inside it.
+    let mut buffers = 0u64;
+    let mut offsets = 0;
+    for (i, address) in job.addresses.iter().enumerate() {
+        let descriptor = facts
+            .descriptors
+            .iter()
+            .find(|d| d.at == address.word)
+            .ok_or(JobError::NotDescriptor { word: address.word })?;
+        let register = descriptor.register;
+        if job.addresses[..i].iter().any(|a| a.word == address.word) {
+            return Err(JobError::DuplicateAddress { register });
+        }
+        let buffer = held(address.buffer).ok_or(JobError::UnknownBuffer { register })?;
+        if u64::from(address.offset) >= buffer.size {
+            return Err(JobError::OffsetOutside {
+                register,
+                offset: address.offset,
+                size: buffer.size,
+            });
+        }
+        debug_assert!((1..=FD_MASK).contains(&buffer.fd));
+        let at = usize::from(address.word);
+        file[at..at + 4].copy_from_slice(&buffer.fd.to_ne_bytes());
+        buffers |= 1 << buffer.slot;
+        if address.offset != 0 {
+            let elem = RegOffsetElem {
+                index: u32::from(register),
+                offset: address.offset,
+            };
+            staging.offsets[offsets..offsets + 8].copy_from_slice(&elem.to_ne_bytes());
+            offsets += 8;
+        }
+    }
+
+    // Every word the kernel translates holds a buffer: one left 0 would give the block
+    // address 0.
+    for descriptor in facts.descriptors {
+        if !job.addresses.iter().any(|a| a.word == descriptor.at) {
+            return Err(JobError::MissingDescriptor {
+                word: descriptor.at,
+            });
+        }
+    }
+
+    Ok(Plan {
+        write: (0, 0, facts.bytes),
+        table: 0,
+        offsets,
+        read: Some((0, facts.results)),
         buffers,
     })
 }

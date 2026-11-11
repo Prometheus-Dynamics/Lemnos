@@ -1,24 +1,27 @@
 //! Jobs: three input frames, two output frames and the block's two scratch buffers, each placed in
-//! a dma-buf the caller holds and checked against that dma-buf's size.
+//! a buffer the claim holds and checked against that buffer's size, made into the parameter
+//! structure and the addresses of a [`ParamJob`].
 //!
 //! # Where a caller's numbers become addresses
 //!
-//! The vendor driver turns every address word of the parameters into a bus address: the dma-buf
-//! the word names, plus an offset. It checks neither the offset nor anything the block then reads
-//! or writes from there, and other dma-bufs sit in the same address space. So everything that
-//! decides where the block reaches is checked here:
+//! The vendor driver turns every descriptor word of the parameters into a bus address: the
+//! dma-buf the word names, plus an offset. It checks neither the offset nor anything the block
+//! then reads or writes from there, and the IOMMU fault handler of the block maps a spare page
+//! wherever it faults, so a read past a buffer does not stop the block. Two layers check what
+//! decides where the block reaches:
 //!
-//! - **Descriptors.** A word holds a [`Buffer`]'s descriptor and nothing else, and only a [`Job`]
-//!   writes one. A descriptor of 0 is refused: the kernel skips a word of 0 and hands the block
-//!   address 0. The job borrows every descriptor until it is dropped, so none can be closed and
-//!   reused under it.
-//! - **Offsets.** They go in a `CMD_SET_REG_ADDR_OFFSET` list keyed by the register, with
-//!   `FLAG_REG_NO_OFFSET` set, so a descriptor never shares its word with an offset. Each is at
-//!   most `u32::MAX` and is checked with the plane it starts.
-//! - **Extents.** A plane of `lines` lines `stride` apart is checked as `offset + lines * stride`
-//!   bytes, in `u64` with overflow refused, against the dma-buf's size as the kernel reports it.
-//!   Luma has `height` lines, chroma `height` (4:2:2) or `height / 2` (4:2:0). A semi-planar chroma
-//!   line holds `width` bytes, a planar one `width / 2`.
+//! - **Descriptors and offsets**, in `lemnos-driver-rk-mpp` ([`ParamJob`]): the driver writes
+//!   every descriptor word itself, with a buffer the claim holds, named once, its offset below
+//!   the size the claim measured and carried in the offset list keyed by the word's register
+//!   (`MPP_FLAGS_REG_NO_OFFSET` set, so no offset rides in a word). Every one of the kernel's
+//!   descriptor words is named: a semi-planar frame's Cr word holds its chroma plane, which the
+//!   block does not read in that layout. The structure is sent at its exact size and the
+//!   results read at theirs.
+//! - **Extents**, here, for what the block reaches from each address. A plane of `lines` lines
+//!   `stride` apart is checked as `offset + lines * stride` bytes, in `u64` with overflow
+//!   refused, against the buffer's size as the kernel reports it. Luma has `height` lines,
+//!   chroma `height` (4:2:2) or `height / 2` (4:2:0). A semi-planar chroma line holds `width`
+//!   bytes, a planar one `width / 2`.
 //! - **Strides.** Given in bytes, a multiple of 4, at least a line, at most what the 16-bit field
 //!   holds in 4-byte words; the block gets the stride in words. The source does not say the
 //!   field's unit. In words, the block uses exactly the checked pitch; were it bytes, the pitch
@@ -29,25 +32,21 @@
 //! - **Scratch.** The motion data and motion vector buffers are read and written by the block. The
 //!   source does not give their size; each must hold [`scratch_len`] bytes, two per pixel, a bound
 //!   chosen to be safe that the board run measures.
-//! - **Modes.** Every frame a mode might read is required, so no register is left at address 0.
-//!   The one mode the vendor driver says reads past its buffer (`I1O1T`) does not exist here. The
+//! - **Modes.** Every frame a mode might read is required, so no descriptor word is left 0. The
+//!   one mode the vendor driver says reads past its buffer (`I1O1T`) does not exist here. The
 //!   output-mode bit, whose effect on the written extent the source does not give, and the ROI,
 //!   are held at zero. `osd_area_num` is at most 8: the kernel indexes its arrays by it.
-//!
-//! The parameters are sent with their exact size, and the results read with theirs: the vendor
-//! driver copies a parameter message of any size into its fixed structure, and copies results out
-//! at the size asked.
+//!   `lemnos-driver-rk-mpp` checks the same words again before anything is sent.
 
 use std::fmt;
-use std::marker::PhantomData;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::mem::offset_of;
 
-use crate::mpp::{
-    CMD_POLL_HW_FINISH, CMD_SET_REG_ADDR_OFFSET, CMD_SET_REG_READ, CMD_SET_REG_WRITE,
-    FLAG_LAST_MSG, FLAG_MULTI_MSG, FLAG_REG_NO_OFFSET, Msg, OffsetElem,
+use lemnos_driver_rk_mpp::{BufferId, ParamAddress, ParamJob};
+
+use crate::params::{
+    DilMode, FieldOrder, PARAMS_BYTES, Params, PdComp, Sampling, Swap, TUNING_BYTES, TUNING_START,
 };
-use crate::params::{Addr, DilMode, FieldOrder, Params, PdComp, Results, Sampling, Swap, Tuning};
-use crate::regs::{ADDRESS_REGISTERS, ADDRESS_WORDS, STRIDE_FIELD_BITS};
+use crate::regs::STRIDE_FIELD_BITS;
 
 /// Width of a tile in pixels (`TILE_WIDTH`).
 pub const TILE_WIDTH: u32 = 16;
@@ -71,93 +70,58 @@ pub const fn scratch_len(width: u32, height: u32) -> u64 {
     2 * width as u64 * height as u64
 }
 
-/// A dma-buf the caller holds, with the size the kernel gives it.
-#[derive(Clone, Copy, Debug)]
-pub struct Buffer<'a> {
-    fd: BorrowedFd<'a>,
-    len: u64,
+/// A buffer the claim holds, with the size the claim measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Buffer {
+    /// The claim's buffer.
+    pub id: BufferId,
+    /// Its size in bytes, as the kernel gave it to the claim.
+    pub len: u64,
 }
 
-impl<'a> Buffer<'a> {
-    /// The dma-buf `fd`, measured. Descriptor 0 is refused (the kernel reads a word of 0 as no
-    /// buffer). A descriptor that is not a dma-buf is refused by the kernel when a job names it.
-    pub fn new(fd: BorrowedFd<'a>) -> std::io::Result<Self> {
-        let len = lemnos_linux_sys::dma_buf::size(fd)?;
-        Self::with_len(fd, len)
-    }
-
-    /// `fd` taken to be `len` bytes. Only tests and [`Self::new`] make one.
-    pub(crate) fn with_len(fd: BorrowedFd<'a>, len: u64) -> std::io::Result<Self> {
-        if fd.as_raw_fd() <= 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "descriptor 0 reads as no buffer to the kernel",
-            ));
-        }
-        Ok(Self { fd, len })
-    }
-
-    /// The size in bytes.
-    #[must_use]
-    pub fn len(&self) -> u64 {
-        self.len
-    }
-
-    /// Whether the dma-buf is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn word(&self) -> u32 {
-        // Positive, checked when made.
-        self.fd.as_raw_fd().unsigned_abs()
-    }
-}
-
-/// Where a plane starts: a dma-buf and a byte offset into it.
-#[derive(Clone, Copy, Debug)]
-pub struct At<'a> {
-    /// The dma-buf.
-    pub buffer: Buffer<'a>,
+/// Where a plane starts: a buffer and a byte offset into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct At {
+    /// The buffer.
+    pub buffer: Buffer,
     /// Bytes from its start.
     pub offset: u64,
 }
 
-impl<'a> At<'a> {
+impl At {
     /// The plane at `offset` in `buffer`.
     #[must_use]
-    pub fn new(buffer: Buffer<'a>, offset: u64) -> Self {
+    pub fn new(buffer: Buffer, offset: u64) -> Self {
         Self { buffer, offset }
     }
 }
 
 /// A frame's chroma.
 #[derive(Clone, Copy, Debug)]
-pub enum Chroma<'a> {
+pub enum Chroma {
     /// One interleaved plane.
-    Semi(At<'a>),
+    Semi(At),
     /// Separate Cb and Cr planes.
     Planar {
         /// Cb.
-        cb: At<'a>,
+        cb: At,
         /// Cr.
-        cr: At<'a>,
+        cr: At,
     },
 }
 
 /// One frame's planes.
 #[derive(Clone, Copy, Debug)]
-pub struct Frame<'a> {
+pub struct Frame {
     /// Luma.
-    pub luma: At<'a>,
+    pub luma: At,
     /// Chroma.
-    pub chroma: Chroma<'a>,
+    pub chroma: Chroma,
 }
 
 /// The input: three frames of one layout.
 #[derive(Clone, Copy, Debug)]
-pub struct Input<'a> {
+pub struct Input {
     /// Chroma sampling.
     pub sampling: Sampling,
     /// Chroma layout; [`Swap::Planar`] needs [`Chroma::Planar`] frames, the others
@@ -168,16 +132,16 @@ pub struct Input<'a> {
     /// Bytes per chroma line.
     pub chroma_stride: u32,
     /// The current frame.
-    pub cur: Frame<'a>,
+    pub cur: Frame,
     /// The next frame.
-    pub next: Frame<'a>,
+    pub next: Frame,
     /// The previous frame.
-    pub prev: Frame<'a>,
+    pub prev: Frame,
 }
 
 /// The output: two semi-planar frames, the top and bottom results.
 #[derive(Clone, Copy, Debug)]
-pub struct Output<'a> {
+pub struct Output {
     /// Chroma sampling.
     pub sampling: Sampling,
     /// [`Swap::SemiUv`] or [`Swap::SemiVu`].
@@ -185,9 +149,9 @@ pub struct Output<'a> {
     /// Bytes per line, luma and chroma.
     pub stride: u32,
     /// The top (or only) output.
-    pub top: Frame<'a>,
+    pub top: Frame,
     /// The bottom output.
-    pub bottom: Frame<'a>,
+    pub bottom: Frame,
 }
 
 /// How the block deinterlaces.
@@ -201,7 +165,8 @@ pub struct Mode {
     pub pd: PdComp,
 }
 
-/// A place the block reads or writes, by the address word it fills.
+/// A place the block reads or writes, by the descriptor word it fills. Its position in
+/// [`Slot::ALL`] is its slot number in `codec.block/1` work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     /// The current frame's luma.
@@ -236,25 +201,51 @@ pub enum Slot {
     Md,
 }
 
+/// Descriptor words the kernel translates: one per [`Slot`].
+pub const SLOTS: usize = 15;
+
 impl Slot {
-    /// The address word this slot fills.
-    const fn word(self) -> usize {
+    /// Every slot, in slot-number order.
+    pub const ALL: [Self; SLOTS] = [
+        Self::CurY,
+        Self::CurC,
+        Self::CurCr,
+        Self::NextY,
+        Self::NextC,
+        Self::NextCr,
+        Self::PrevY,
+        Self::PrevC,
+        Self::PrevCr,
+        Self::TopY,
+        Self::TopC,
+        Self::BottomY,
+        Self::BottomC,
+        Self::Mv,
+        Self::Md,
+    ];
+
+    /// The byte offset in [`Params`] of the descriptor word this slot fills.
+    #[must_use]
+    pub const fn word(self) -> usize {
+        let src = offset_of!(Params, src);
+        let dst = offset_of!(Params, dst);
+        // `struct iep2_addr` is `{y, cbcr, cr}`, 12 bytes.
         match self {
-            Self::CurY => 0,
-            Self::CurC => 1,
-            Self::CurCr => 2,
-            Self::NextY => 3,
-            Self::NextC => 4,
-            Self::NextCr => 5,
-            Self::PrevY => 6,
-            Self::PrevC => 7,
-            Self::PrevCr => 8,
-            Self::TopY => 9,
-            Self::TopC => 10,
-            Self::BottomY => 12,
-            Self::BottomC => 13,
-            Self::Mv => 15,
-            Self::Md => 16,
+            Self::CurY => src,
+            Self::CurC => src + 4,
+            Self::CurCr => src + 8,
+            Self::NextY => src + 12,
+            Self::NextC => src + 16,
+            Self::NextCr => src + 20,
+            Self::PrevY => src + 24,
+            Self::PrevC => src + 28,
+            Self::PrevCr => src + 32,
+            Self::TopY => dst,
+            Self::TopC => dst + 4,
+            Self::BottomY => dst + 12,
+            Self::BottomC => dst + 16,
+            Self::Mv => offset_of!(Params, mv_addr),
+            Self::Md => offset_of!(Params, md_addr),
         }
     }
 }
@@ -276,13 +267,13 @@ pub enum JobError {
         /// The stride asked.
         stride: u32,
     },
-    /// A plane runs past its dma-buf, or its offset is past `u32::MAX`.
+    /// A plane runs past its buffer, or its offset is past `u32::MAX`.
     OutOfBuffer {
         /// The plane.
         slot: Slot,
         /// The byte it would end at, or `u64::MAX` if that overflows.
         end: u64,
-        /// The dma-buf's size.
+        /// The buffer's size.
         len: u64,
     },
     /// The frame's chroma does not match the layout, or the output is planar.
@@ -302,7 +293,7 @@ impl fmt::Display for JobError {
             }
             Self::Stride { slot, stride } => write!(f, "stride {stride} does not fit {slot:?}"),
             Self::OutOfBuffer { slot, end, len } => {
-                write!(f, "{slot:?} ends at {end}, past its {len}-byte dma-buf")
+                write!(f, "{slot:?} ends at {end}, past its {len}-byte buffer")
             }
             Self::Layout { slot } => write!(f, "{slot:?} has the wrong chroma layout"),
             Self::OsdAreas(n) => write!(f, "{n} OSD areas, the block has {MAX_OSD_AREAS}"),
@@ -312,42 +303,27 @@ impl fmt::Display for JobError {
 
 impl std::error::Error for JobError {}
 
-/// The data a message of [`Job::messages`] points at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Data {
-    /// [`Job::params`], `size_of::<Params>()` bytes.
-    Params,
-    /// [`Job::offsets`].
-    Offsets,
-    /// The caller's [`Results`], `size_of::<Results>()` bytes, written by the kernel.
-    Results,
-    /// Nothing; the pointer stays zero.
-    None,
-}
-
-/// A checked job, holding the descriptors it names until it is dropped.
+/// A checked job: the parameter structure and the address of every descriptor word.
 #[derive(Clone, Debug)]
-pub struct Job<'a> {
-    params: Params,
-    offsets: [OffsetElem; ADDRESS_WORDS],
-    count: usize,
-    fds: PhantomData<BorrowedFd<'a>>,
+pub struct Job {
+    params: [u8; PARAMS_BYTES],
+    addresses: [ParamAddress; SLOTS],
 }
 
-impl<'a> Job<'a> {
+impl Job {
     /// A job deinterlacing `input` into `output` at `width` by `height`, with `md` and `mv` as the
-    /// block's scratch, or why not (see the module documentation for every check). Allocates
-    /// nothing.
+    /// block's scratch and `tuning` the caller's settings ([`Tuning::encode`](crate::Tuning)),
+    /// or why not (see the module documentation for every check). Allocates nothing.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: u32,
         height: u32,
-        input: &Input<'a>,
-        output: &Output<'a>,
-        md: At<'a>,
-        mv: At<'a>,
+        input: &Input,
+        output: &Output,
+        md: At,
+        mv: At,
         mode: Mode,
-        tuning: &Tuning,
+        tuning: &[u8; TUNING_BYTES],
     ) -> Result<Self, JobError> {
         if width == 0
             || height == 0
@@ -358,17 +334,28 @@ impl<'a> Job<'a> {
         {
             return Err(JobError::Size { width, height });
         }
-        if tuning.osd_area_num > MAX_OSD_AREAS {
-            return Err(JobError::OsdAreas(tuning.osd_area_num));
+        let osd = offset_of!(Params, osd_area_num) - TUNING_START;
+        let osd_areas = u32::from_ne_bytes([
+            tuning[osd],
+            tuning[osd + 1],
+            tuning[osd + 2],
+            tuning[osd + 3],
+        ]);
+        if osd_areas > MAX_OSD_AREAS {
+            return Err(JobError::OsdAreas(osd_areas));
         }
         if matches!(output.swap, Swap::Planar) {
             return Err(JobError::Layout { slot: Slot::TopY });
         }
+        // Every slot is placed below before the job is returned; until then each holds this.
+        let nowhere = ParamAddress {
+            word: 0,
+            buffer: md.buffer.id,
+            offset: 0,
+        };
         let mut job = Self {
-            params: Params::default(),
-            offsets: [OffsetElem::default(); ADDRESS_WORDS],
-            count: 0,
-            fds: PhantomData,
+            params: [0; PARAMS_BYTES],
+            addresses: [nowhere; SLOTS],
         };
 
         let in_chroma_line = match input.swap {
@@ -394,6 +381,9 @@ impl<'a> Job<'a> {
                 }
                 (Swap::SemiUv | Swap::SemiVu, Chroma::Semi(at)) => {
                     job.place(c, at, input.chroma_stride, in_chroma)?;
+                    // Not read in this layout; the kernel translates the word all the same,
+                    // so it holds a plane already checked.
+                    job.place(cr, at, input.chroma_stride, in_chroma)?;
                 }
                 _ => return Err(JobError::Layout { slot: y }),
             }
@@ -412,32 +402,44 @@ impl<'a> Job<'a> {
         job.place_len(Slot::Md, md, scratch)?;
         job.place_len(Slot::Mv, mv, scratch)?;
 
-        let p = &mut job.params;
-        p.src_fmt = input.sampling as u32;
-        p.src_yuv_swap = input.swap as u32;
-        p.dst_fmt = output.sampling as u32;
-        p.dst_yuv_swap = output.swap as u32;
-        p.tile_cols = width / TILE_WIDTH;
-        p.tile_rows = height / TILE_HEIGHT;
-        p.src_y_stride = input.luma_stride / STRIDE_ALIGN;
-        p.src_uv_stride = input.chroma_stride / STRIDE_ALIGN;
-        p.dst_y_stride = output.stride / STRIDE_ALIGN;
-        p.dil_mode = mode.dil as u32;
-        p.dil_out_mode = 0;
-        p.dil_field_order = mode.field_order as u32;
-        p.pd_mode = mode.pd as u32;
-        tuning.apply(p);
+        job.params[TUNING_START..TUNING_START + TUNING_BYTES].copy_from_slice(tuning);
+        for (at, value) in [
+            (offset_of!(Params, src_fmt), input.sampling as u32),
+            (offset_of!(Params, src_yuv_swap), input.swap as u32),
+            (offset_of!(Params, dst_fmt), output.sampling as u32),
+            (offset_of!(Params, dst_yuv_swap), output.swap as u32),
+            (offset_of!(Params, tile_cols), width / TILE_WIDTH),
+            (offset_of!(Params, tile_rows), height / TILE_HEIGHT),
+            (
+                offset_of!(Params, src_y_stride),
+                input.luma_stride / STRIDE_ALIGN,
+            ),
+            (
+                offset_of!(Params, src_uv_stride),
+                input.chroma_stride / STRIDE_ALIGN,
+            ),
+            (
+                offset_of!(Params, dst_y_stride),
+                output.stride / STRIDE_ALIGN,
+            ),
+            (offset_of!(Params, dil_mode), mode.dil as u32),
+            (offset_of!(Params, dil_out_mode), 0),
+            (offset_of!(Params, dil_field_order), mode.field_order as u32),
+            (offset_of!(Params, pd_mode), mode.pd as u32),
+        ] {
+            job.params[at..at + 4].copy_from_slice(&value.to_ne_bytes());
+        }
         Ok(job)
     }
 
     /// Places `at` in `slot`, as `lines` lines `stride` apart.
-    fn place(&mut self, slot: Slot, at: At<'a>, stride: u32, lines: u32) -> Result<(), JobError> {
+    fn place(&mut self, slot: Slot, at: At, stride: u32, lines: u32) -> Result<(), JobError> {
         self.place_len(slot, at, u64::from(stride) * u64::from(lines))
     }
 
     /// Places `at` in `slot`, as `bytes` bytes.
-    fn place_len(&mut self, slot: Slot, at: At<'a>, bytes: u64) -> Result<(), JobError> {
-        let len = at.buffer.len();
+    fn place_len(&mut self, slot: Slot, at: At, bytes: u64) -> Result<(), JobError> {
+        let len = at.buffer.len;
         let end = at.offset.checked_add(bytes);
         let offset = u32::try_from(at.offset);
         let (Some(end), Ok(offset)) = (end, offset) else {
@@ -450,62 +452,37 @@ impl<'a> Job<'a> {
         if end > len {
             return Err(JobError::OutOfBuffer { slot, end, len });
         }
-        let word = slot.word();
-        let Some(index) = ADDRESS_REGISTERS[word] else {
-            return Err(JobError::Layout { slot });
+        let index = Slot::ALL.iter().position(|&s| s == slot).unwrap_or(0);
+        self.addresses[index] = ParamAddress {
+            // Every word is below the structure's 656 bytes.
+            word: u16::try_from(slot.word()).unwrap_or(u16::MAX),
+            buffer: at.buffer.id,
+            offset,
         };
-        set_word(&mut self.params, word, at.buffer.word());
-        self.offsets[self.count] = OffsetElem { index, offset };
-        self.count += 1;
         Ok(())
     }
 
-    /// The parameters, descriptors in the address words.
+    /// The parameter structure, in the kernel's layout and the machine's byte order. Its
+    /// descriptor words are 0: the claim writes them.
     #[must_use]
-    pub fn params(&self) -> &Params {
+    pub fn params(&self) -> &[u8; PARAMS_BYTES] {
         &self.params
     }
 
-    /// The offsets, one per placed plane, keyed by its register.
+    /// The address of every descriptor word, in [`Slot::ALL`] order.
     #[must_use]
-    pub fn offsets(&self) -> &[OffsetElem] {
-        &self.offsets[..self.count]
+    pub fn addresses(&self) -> &[ParamAddress; SLOTS] {
+        &self.addresses
     }
 
-    /// The call that runs this job: the parameters, the offsets, where the results go, and the
-    /// wait. Every `data_ptr` is zero; the code that issues the call points each at its [`Data`].
+    /// The job for the claim, named `identity`.
     #[must_use]
-    pub fn messages(&self) -> [(Msg, Data); 4] {
-        let msg = |cmd, flags, size: usize| Msg {
-            cmd,
-            flags: FLAG_MULTI_MSG | flags,
-            // The structures are a few hundred bytes and the list at most 17 entries.
-            size: u32::try_from(size).unwrap_or(u32::MAX),
-            offset: 0,
-            data_ptr: 0,
-        };
-        [
-            (
-                msg(CMD_SET_REG_WRITE, FLAG_REG_NO_OFFSET, size_of::<Params>()),
-                Data::Params,
-            ),
-            (
-                msg(
-                    CMD_SET_REG_ADDR_OFFSET,
-                    FLAG_REG_NO_OFFSET,
-                    self.count * size_of::<OffsetElem>(),
-                ),
-                Data::Offsets,
-            ),
-            (
-                msg(CMD_SET_REG_READ, FLAG_REG_NO_OFFSET, size_of::<Results>()),
-                Data::Results,
-            ),
-            (
-                msg(CMD_POLL_HW_FINISH, FLAG_REG_NO_OFFSET | FLAG_LAST_MSG, 0),
-                Data::None,
-            ),
-        ]
+    pub fn param_job(&self, identity: u64) -> ParamJob<'_> {
+        ParamJob {
+            identity,
+            params: &self.params,
+            addresses: &self.addresses,
+        }
     }
 }
 
@@ -514,27 +491,4 @@ fn check_stride(slot: Slot, stride: u32, line: u32) -> Result<(), JobError> {
         return Err(JobError::Stride { slot, stride });
     }
     Ok(())
-}
-
-fn set_word(params: &mut Params, word: usize, value: u32) {
-    let addr: &mut Addr = match word / 3 {
-        0 => &mut params.src[0],
-        1 => &mut params.src[1],
-        2 => &mut params.src[2],
-        3 => &mut params.dst[0],
-        4 => &mut params.dst[1],
-        _ => {
-            if word == 15 {
-                params.mv_addr = value;
-            } else {
-                params.md_addr = value;
-            }
-            return;
-        }
-    };
-    match word % 3 {
-        0 => addr.y = value,
-        1 => addr.cbcr = value,
-        _ => addr.cr = value,
-    }
 }

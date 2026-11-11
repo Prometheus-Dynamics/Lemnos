@@ -16,11 +16,226 @@
 //!   chips, which reads a descriptor out of the caller's PPS buffer (`fill_scaling_list_pps`), and
 //!   by `mpp_rkvdec2.c` on others; the type alone does not say which.
 //! - `MPP_DEVICE_RKVENC` (`mpp_rkvenc.c` or `mpp_rkvenc2.c`, register classes), `MPP_DEVICE_AV1DEC`
-//!   (register classes), `MPP_DEVICE_IEP2` (parameter block), `MPP_DEVICE_VDPP` (two windows),
+//!   (register classes), `MPP_DEVICE_VDPP` (two windows),
 //!   `MPP_DEVICE_VEPU2_JPEG` (multi-core task path), `MPP_DEVICE_VDPU1_PP`, `MPP_DEVICE_VDPU2_PP`,
 //!   `MPP_DEVICE_AVSPLUS_DEC` and `MPP_DEVICE_VEPU22`.
 
+//!
+//! # Parameter blocks
+//!
+//! One block takes no register file: the IEP2 deinterlacer (`MPP_DEVICE_IEP2`, `mpp_iep2.c`).
+//! Its job is one parameter structure (`struct iep2_params`), copied whole into the task; the
+//! kernel translates a fixed list of its words as descriptors (`iep2_addr_rnum`, no translation
+//! table), and programs the block's registers from the rest itself. [`ParamFacts`] says what
+//! the kernel does with each word, and [`crate::ParamJob`] is the job for it. Its
+//! [`Facts::registers`] is 0, so no register-file job is taken on it.
+
 use crate::uapi::client;
+
+/// What the kernel does with one word of a parameter block's structure, other than translating
+/// it: a range the word must be in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Check {
+    /// From `min` to `max`, both included.
+    Range {
+        /// The smallest value taken.
+        min: u32,
+        /// The largest value taken.
+        max: u32,
+    },
+    /// One of these.
+    OneOf(&'static [u32]),
+}
+
+impl Check {
+    /// Whether `value` passes.
+    #[must_use]
+    pub fn allows(self, value: u32) -> bool {
+        match self {
+            Self::Range { min, max } => (min..=max).contains(&value),
+            Self::OneOf(values) => values.contains(&value),
+        }
+    }
+}
+
+/// A word of the parameter structure the kernel translates as a descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Descriptor {
+    /// Its byte offset in the structure.
+    pub at: u16,
+    /// The register the kernel keys its offset by (`mem_region->reg_idx`, looked up in the
+    /// task's `MPP_CMD_SET_REG_ADDR_OFFSET` list).
+    pub register: u16,
+}
+
+/// A word of the parameter structure the kernel uses as an index, a size or a count, or that
+/// selects how the block reaches memory, with the values it may hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Word {
+    /// Its byte offset in the structure.
+    pub at: u16,
+    /// What it must be.
+    pub check: Check,
+}
+
+/// What the kernel does with a parameter block's job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParamFacts {
+    /// Bytes of the parameter structure. The kernel copies a write of any size into it
+    /// unchecked, so a job's is exactly this.
+    pub bytes: usize,
+    /// Bytes of the results structure. The kernel copies the size a read asks for out of it
+    /// unchecked, so a job's read is exactly this.
+    pub results: usize,
+    /// Every word the kernel translates as a descriptor. A job places a buffer the claim holds
+    /// in each one; the caller's value there is never sent.
+    pub descriptors: &'static [Descriptor],
+    /// The caller's words the kernel or the block takes as an index, a size, a count or a mode
+    /// that changes what is reached. Every other word is carried as it is.
+    pub words: &'static [Word],
+}
+
+/// `struct iep2_params`, from `mpp_iep2.c`: 656 bytes (`gcc` on LP64; no padding, all `u32`
+/// but eight `s8`s).
+const IEP2: ParamFacts = ParamFacts {
+    bytes: 656,
+    // `struct iep2_output`.
+    results: 412,
+    // `src[3]` at 36 and `dst[2]` at 72, each `{y, cbcr, cr}`, then `mv_addr` at 96 and
+    // `md_addr` at 100, in `iep2_addr_rnum` order: cur 24 27 28, nxt 25 29 30, prv 26 31 32,
+    // top 44 46 -1, bot 45 47 -1, mv 34, md 33. The kernel skips a word whose register is -1
+    // (the outputs' `cr`) and a word of 0; it translates the rest.
+    descriptors: &[
+        Descriptor {
+            at: 36,
+            register: 24,
+        },
+        Descriptor {
+            at: 40,
+            register: 27,
+        },
+        Descriptor {
+            at: 44,
+            register: 28,
+        },
+        Descriptor {
+            at: 48,
+            register: 25,
+        },
+        Descriptor {
+            at: 52,
+            register: 29,
+        },
+        Descriptor {
+            at: 56,
+            register: 30,
+        },
+        Descriptor {
+            at: 60,
+            register: 26,
+        },
+        Descriptor {
+            at: 64,
+            register: 31,
+        },
+        Descriptor {
+            at: 68,
+            register: 32,
+        },
+        Descriptor {
+            at: 72,
+            register: 44,
+        },
+        Descriptor {
+            at: 76,
+            register: 46,
+        },
+        Descriptor {
+            at: 84,
+            register: 45,
+        },
+        Descriptor {
+            at: 88,
+            register: 47,
+        },
+        Descriptor {
+            at: 96,
+            register: 34,
+        },
+        Descriptor {
+            at: 100,
+            register: 33,
+        },
+    ],
+    words: &[
+        // `tile_cols` and `tile_rows`: the size, written as `tiles * 16 - 1` and `tiles * 4 - 1`
+        // into 11-bit fields; at most `IEP2_TILE_W_MAX` 120 and `IEP2_TILE_H_MAX` 272, the size
+        // of the kernel's own ROI buffer; 0 would wrap to the largest size.
+        Word {
+            at: 16,
+            check: Check::Range { min: 1, max: 120 },
+        },
+        Word {
+            at: 20,
+            check: Check::Range { min: 1, max: 272 },
+        },
+        // The three strides, in 4-byte words: 16-bit fields of the block's pitch registers.
+        Word {
+            at: 24,
+            check: Check::Range {
+                min: 0,
+                max: 0xffff,
+            },
+        },
+        Word {
+            at: 28,
+            check: Check::Range {
+                min: 0,
+                max: 0xffff,
+            },
+        },
+        Word {
+            at: 32,
+            check: Check::Range {
+                min: 0,
+                max: 0xffff,
+            },
+        },
+        // The outputs' `cr`: neither translated nor written by the kernel. Held at 0, so that
+        // no caller's number sits in a descriptor-shaped word.
+        Word {
+            at: 80,
+            check: Check::Range { min: 0, max: 0 },
+        },
+        Word {
+            at: 92,
+            check: Check::Range { min: 0, max: 0 },
+        },
+        // `dil_mode`: the modes of `enum rockchip_iep2_dil_mode` but `I1O1T` (5), in which the
+        // block reads past the current frame's buffer and the kernel maps a spare page where it
+        // faults. An unknown mode does what the source doesn't say.
+        Word {
+            at: 104,
+            check: Check::OneOf(&[0, 1, 2, 3, 4, 6, 7, 8, 9]),
+        },
+        // `dil_out_mode`: its effect on what the block writes is not in the source. Held at 0.
+        Word {
+            at: 108,
+            check: Check::Range { min: 0, max: 0 },
+        },
+        // `osd_area_num`: the kernel indexes the eight-entry OSD arrays, and writes one OSD
+        // register per area, by it (`iep2_osd_cfg`).
+        Word {
+            at: 132,
+            check: Check::Range { min: 0, max: 8 },
+        },
+        // `roi_en`: points the block at the kernel's own ROI buffer, which nothing fills.
+        Word {
+            at: 488,
+            check: Check::Range { min: 0, max: 0 },
+        },
+    ],
+};
 
 /// A block a claim binds to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -37,6 +252,9 @@ pub enum Block {
     JpegDecoder,
     /// The JPEG encoder (`MPP_DEVICE_RKJPEGE`, `mpp_jpgenc.c`).
     JpegEncoder,
+    /// The IEP2 deinterlacer (`MPP_DEVICE_IEP2`, `mpp_iep2.c`): a parameter block, whose jobs
+    /// are [`crate::ParamJob`]s.
+    Iep2,
 }
 
 /// A register the kernel translates outside the translation table when another register holds a
@@ -85,14 +303,25 @@ pub const MAX_REGISTERS: usize = 184;
 
 impl Block {
     /// Every block a claim may bind to.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Vdpu1,
         Self::Vdpu2,
         Self::Vepu1,
         Self::Vepu2,
         Self::JpegDecoder,
         Self::JpegEncoder,
+        Self::Iep2,
     ];
+
+    /// What the kernel does with the block's parameter structure, for a parameter block;
+    /// `None` for a register-file block.
+    #[must_use]
+    pub const fn params(self) -> Option<&'static ParamFacts> {
+        match self {
+            Self::Iep2 => Some(&IEP2),
+            _ => None,
+        }
+    }
 
     /// The block's facts.
     #[must_use]
@@ -156,6 +385,14 @@ impl Block {
             Self::JpegEncoder => Facts {
                 client: client::RKJPEGE,
                 registers: 79,
+                first: 0,
+                direct: None,
+            },
+            // No register file: a register-file job is refused on it, as running past 0
+            // registers. Its jobs are parameter blocks ([`Block::params`]).
+            Self::Iep2 => Facts {
+                client: client::IEP2,
+                registers: 0,
                 first: 0,
                 direct: None,
             },

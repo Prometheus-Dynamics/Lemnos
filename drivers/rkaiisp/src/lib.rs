@@ -35,7 +35,8 @@
 //! Provenance: new. Every fact is from rockchip-linux/kernel, branch `develop-6.1`, commit
 //! `77168c8d5ab82399f65a80e9f807b50ba37cf483`: `include/uapi/linux/rk-aiisp-config.h`,
 //! `include/uapi/linux/rk-isp2-config.h` and `drivers/media/platform/rockchip/aiisp/`
-//! (`aiisp.c`, `aiisp.h`). The ring follows the shape of `drivers/rk-iep`.
+//! (`aiisp.c`, `aiisp.h`). The ring follows the shape `drivers/rk-iep` had before it moved onto
+//! `drivers/rk-mpp`.
 
 #![forbid(unsafe_code)]
 

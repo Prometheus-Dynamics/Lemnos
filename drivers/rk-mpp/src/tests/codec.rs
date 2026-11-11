@@ -135,8 +135,11 @@ fn the_blocks_have_the_names_a_board_file_and_a_caller_use() {
             .to_string();
         assert!(name.len() <= lemnos_contract_codec_block::MAX_BLOCK_NAME);
         let short = name.strip_prefix("rk-mpp:").unwrap();
-        assert_eq!(block_named(short), Some(block));
+        // A parameter block is served by its own driver, never by this one.
+        let expected = block.params().is_none().then_some(block);
+        assert_eq!(block_named(short), expected);
     }
+    assert_eq!(block_named("iep2"), None);
     assert_eq!(block_named("vdpu3"), None);
     assert_eq!(block_named("rk-mpp:vdpu2"), None);
 }
