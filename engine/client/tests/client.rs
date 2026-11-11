@@ -4,7 +4,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use common::{FakeHost, temp_dir};
-use lemnos_client::{Client, DeviceHealth, DeviceState, Error, Incoming, Session};
+use lemnos_client::{
+    Client, DeviceEntry, DeviceHealth, DeviceState, Error, Incoming, Session, follow,
+};
 use lemnos_core::{Result, Status, contract};
 
 #[contract("example.counter", version = 1)]
@@ -34,6 +36,62 @@ fn listing_reports_every_device_as_the_service_does() {
     assert_eq!(devices[1].state, DeviceState::BackingOff);
     assert_eq!(devices[1].health, DeviceHealth::Failed);
     assert_eq!(devices[1].reason, "bad");
+    // What each is wired to, as the board file's `link` has it.
+    assert_eq!(devices[0].link.as_deref(), Some("two"));
+    assert_eq!(devices[1].link, None);
+    let chain: Vec<&str> = follow(&devices, "one")
+        .into_iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(chain, ["one", "two"]);
+}
+
+fn entry(index: u32, name: &str, link: Option<&str>) -> DeviceEntry {
+    DeviceEntry {
+        index,
+        name: name.to_string(),
+        driver: "d".to_string(),
+        tags: Vec::new(),
+        state: DeviceState::Running,
+        health: DeviceHealth::Ok,
+        reason: String::new(),
+        link: link.map(str::to_string),
+    }
+}
+
+#[test]
+fn links_are_followed_from_a_sensor_to_its_receiver_and_its_isp_and_always_end() {
+    let names = |devices: &[DeviceEntry], from: &str| -> Vec<String> {
+        follow(devices, from)
+            .into_iter()
+            .map(|d| d.name.clone())
+            .collect()
+    };
+    let board = [
+        entry(0, "isp0", None),
+        entry(1, "cam0", Some("csi0")),
+        entry(2, "csi0", Some("isp0")),
+        entry(3, "lone", None),
+        entry(4, "dangling", Some("nowhere")),
+    ];
+    assert_eq!(names(&board, "cam0"), ["cam0", "csi0", "isp0"]);
+    assert_eq!(names(&board, "csi0"), ["csi0", "isp0"]);
+    assert_eq!(names(&board, "lone"), ["lone"]);
+    assert_eq!(
+        names(&board, "dangling"),
+        ["dangling"],
+        "ends where the board does"
+    );
+    assert!(names(&board, "nowhere").is_empty());
+    // A board whose links go round ends too, and names each device once.
+    let circle = [
+        entry(0, "a", Some("b")),
+        entry(1, "b", Some("c")),
+        entry(2, "c", Some("a")),
+        entry(3, "self", Some("self")),
+    ];
+    assert_eq!(names(&circle, "b"), ["b", "c", "a"]);
+    assert_eq!(names(&circle, "self"), ["self"]);
 }
 
 #[test]

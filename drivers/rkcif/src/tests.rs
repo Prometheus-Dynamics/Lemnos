@@ -425,6 +425,30 @@ fn the_driver_reads_feeds_from_its_own_model() {
     );
 }
 
+#[test]
+fn the_contract_answers_the_isp_whose_link_is_on_and_nothing_when_none_is() {
+    let (mut d, hw) = driver();
+    let mut name = [0u8; 64];
+    // Wired to no ISP: the frames go only to the capture nodes.
+    assert_eq!(CameraReceiver::feeds(&mut d, &mut name), Ok(0));
+    hw.with(|m| {
+        m.isps = vec![
+            isp("rkisp-vir0", &[(MODEL, COMPOSER, 0, OFF)]),
+            isp("rkisp-vir1", &[(MODEL, COMPOSER, 0, ON)]),
+        ];
+    });
+    let len = CameraReceiver::feeds(&mut d, &mut name).unwrap();
+    assert_eq!(&name[..len], b"rkisp-vir1");
+    let mut small = [0u8; 4];
+    assert_eq!(
+        CameraReceiver::feeds(&mut d, &mut small),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+    // Wired, with every link off: no ISP takes the frames now.
+    hw.with(|m| m.isps = vec![isp("rkisp-vir0", &[(MODEL, COMPOSER, 0, OFF)])]);
+    assert_eq!(CameraReceiver::feeds(&mut d, &mut name), Ok(0));
+}
+
 // The contract.
 
 #[test]

@@ -430,4 +430,11 @@ impl CameraReceiver for Rp1Csi2 {
         counters.dropped = counters.dropped.saturating_add(self.relay.lost());
         Ok(counters)
     }
+
+    /// No ISP takes this driver's frames in hardware: the block's DMA channel writes them to
+    /// memory, and the frame stream is where they go. (The front end, which is a receiver and
+    /// an ISP in one, is `drivers/pisp`.) Which device takes them next is the board's `link`.
+    fn feeds(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Ok(0)
+    }
 }

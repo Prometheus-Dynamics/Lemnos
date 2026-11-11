@@ -168,6 +168,9 @@ pub struct DeviceInfo {
     pub tags: Vec<Tag>,
     pub state: DeviceState,
     pub health: Health,
+    /// The device this one is wired to, by the id the board file's `link` names. The host
+    /// hands it on as written and never reads it: what the wiring means is the devices'.
+    pub link: Option<String>,
 }
 
 struct Slot {
@@ -1060,6 +1063,7 @@ impl Host {
                 .unwrap_or_default(),
             state,
             health: self.inner.device_health(slot, MAX_DEPTH),
+            link: slot.spec.link.clone(),
         }
     }
 

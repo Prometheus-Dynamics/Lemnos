@@ -532,4 +532,17 @@ impl CameraReceiver for SunxiVin {
     fn counters(&mut self) -> Result<Counters> {
         Ok(self.counters)
     }
+
+    /// The ISP the frames pass through on the way to the capture node, by its media entity
+    /// name ([`route::feeds`]), read from the graph at each call. The kernel driver links the
+    /// path in when the node opens, so this is complete from `start` to `stop`; before, it
+    /// answers what the graph has then, which may be none.
+    fn feeds(&mut self, into: &mut [u8]) -> Result<usize> {
+        let feeds = SunxiVin::feeds(self)?;
+        let name = feeds.isp.as_deref().map_or(&[][..], str::as_bytes);
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
+    }
 }

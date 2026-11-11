@@ -625,3 +625,12 @@ fn the_steady_state_allocates_nothing() {
         "frames, returns, counters and the health check"
     );
 }
+
+#[test]
+fn no_isp_takes_the_frames_in_hardware() {
+    let frames = MockStream::with_bytes(4, 4096);
+    let (mut d, _hw) = driver_on(&frames);
+    let mut name = [0xAAu8; 64];
+    assert_eq!(CameraReceiver::feeds(&mut d, &mut name), Ok(0));
+    assert_eq!(CameraReceiver::feeds(&mut d, &mut []), Ok(0));
+}

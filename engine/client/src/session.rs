@@ -73,6 +73,31 @@ pub struct DeviceEntry {
     pub state: DeviceState,
     pub health: DeviceHealth,
     pub reason: String,
+    /// The name of the device this one is wired to, from its board entry's `link`: a camera
+    /// sensor's names its receiver, and the receiver's names its ISP. `None` when the board
+    /// names none, and from a service older than this field. See [`follow`].
+    pub link: Option<String>,
+}
+
+/// The devices `from` leads to through `link`, in order, starting with `from` itself: a sensor,
+/// its receiver, the receiver's ISP. Ends at a device with no `link`, at a `link` naming a
+/// device that isn't in `devices`, and before any device already passed, so a board whose
+/// links go round in a circle ends too. Empty when `from` isn't in `devices`.
+#[must_use]
+pub fn follow<'a>(devices: &'a [DeviceEntry], from: &str) -> Vec<&'a DeviceEntry> {
+    let mut chain: Vec<&DeviceEntry> = Vec::new();
+    let mut next = Some(from);
+    while let Some(name) = next {
+        let Some(device) = devices.iter().find(|d| d.name == name) else {
+            break;
+        };
+        if chain.iter().any(|seen| seen.index == device.index) {
+            break;
+        }
+        chain.push(device);
+        next = device.link.as_deref();
+    }
+    chain
 }
 
 /// One contract of one device.
@@ -730,6 +755,7 @@ impl Session {
                 state,
                 health,
                 reason,
+                link,
                 ..
             } => {
                 let (Some(state), Some(health)) = (device_state(state), device_health(health))
@@ -748,6 +774,7 @@ impl Session {
                     state,
                     health,
                     reason: reason.to_string(),
+                    link: (!link.0.is_empty()).then(|| link.0.to_string()),
                 });
                 None
             }

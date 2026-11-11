@@ -33,7 +33,7 @@ closes the connection on a larger length, without reading it.
 | 1 | Hello | version u16, name str, events bool | to host |
 | 2 | Welcome | version u16, features u64, host str | to client |
 | 3 | List | id u32 | to host |
-| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str | to client |
+| 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str | to client |
 | 5 | ListDone | id u32 | to client |
 | 6 | Open | id u32, device str, tag str | to host |
 | 7 | Opened | id u32, device u32, contract u8 | to client |
@@ -57,6 +57,12 @@ closes the connection on a larger length, without reading it.
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
 `tags` is comma-separated. An empty `device` in Open means any device with that tag.
+
+`link` in Device is the name of another device this one is wired to, as the board file's `link`
+says, or empty when it names none. The host carries it and never reads it: what the wiring means
+is between the two devices' contracts. A camera sensor's `link` names its receiver and the
+receiver's names its ISP, so a client follows a sensor to both through List alone. `link` was
+appended to Device (rule 8): a host from before it sends Device without it, which reads as empty.
 
 `features` in Welcome is a set of bits, each saying the host can do one thing added to version 1
 after its first form. A host leaves the bits it doesn't know clear, and a client ignores the bits
@@ -290,12 +296,15 @@ Each vector is one complete frame.
 
 ### device
 
-`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r" }`
+`Device { id: 1, device: 2, name: "a", driver: "b", tags: "c/1", state: 1, health: 2, reason: "r", link: "d" }`
 
 <!-- vector: device -->
 ```hex
-22 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72
+27 00 00 00 04 00 01 00 00 00 02 00 00 00 01 00 00 00 61 01 00 00 00 62 03 00 00 00 63 2f 31 01 02 01 00 00 00 72 01 00 00 00 64
 ```
+
+A host from before `link` sends the same frame without its last five bytes (length `22`), and a
+client reads that as `link: ""`.
 
 ### list-done
 
