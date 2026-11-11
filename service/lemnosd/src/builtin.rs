@@ -5,6 +5,7 @@ use lemnos_host::{DriverEntry, entry};
 /// Every driver compiled into this service.
 pub fn drivers() -> Vec<DriverEntry> {
     vec![
+        entry::<lemnos_driver_a733_di::A733Di>(),
         entry::<lemnos_driver_a733_video::A733Video>(),
         entry::<lemnos_driver_bmi088::Bmi088>(),
         entry::<lemnos_driver_bmm150::Bmm150>(),

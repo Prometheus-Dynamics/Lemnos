@@ -19,8 +19,7 @@
 
 use std::io;
 
-use crate::job::{Config, Job, Settings};
-use crate::uapi;
+use lemnos_driver_a733_di_sys::{Config, Job, Settings, uapi};
 
 /// First delay before a reopen.
 const BACKOFF_FIRST_NS: u64 = 250_000_000;

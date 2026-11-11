@@ -14,19 +14,13 @@
 //!   capped at 8 s. It never gives up and never turns itself off. A job allocates nothing.
 //! - [`Device`]: the kernel operations the deinterlacer runs on, one per request.
 //!
-//! # Not here
+//! # On a device, and for a caller
 //!
-//! **No Linux [`Device`].** Issuing a request needs `unsafe`, and `lemnos-linux-sys` has no
-//! public request this crate can use (only the request-number encoders and the dma-buf size are
-//! public). It belongs in a crate allowed `unsafe` (a `-sys` crate for this block, or a module of
-//! `lemnos-linux-sys`): the requests in [`uapi`], with `DI_IOC_PROCESS_FB` taking only a
-//! [`Job`]'s [`request`](Job::request). That crate must also never map the node (its `mmap` maps
-//! any physical page the offset names), never issue `DI_IOC_MEM_REQUEST` (it answers physical
-//! addresses), and should refuse to open on a kernel built with `CONFIG_SUNXI_DI_SINGEL_FILE`,
-//! whose structures are larger than these (see [`uapi`]).
-//!
-//! **No contract.** No merged contract describes a deinterlacer (the image contracts scale,
-//! convert and blend). The crate is a library; nothing is registered in `lemnosd`.
+//! The requests, the structures and the checked [`Job`] live in `lemnos-driver-a733-di-sys`,
+//! which holds the `unsafe`, never maps the node and never issues the requests that deal in
+//! physical addresses; this crate re-exports them. [`LinuxDevice`] is the [`Device`] on the
+//! real node. [`A733Di`] gives the block to a caller as `codec.block/1` ([`codec`]): a job is
+//! the settings and the frames, each frame a part of a buffer of the job stream.
 //!
 //! Also not covered: the tuning tables (`DI_IOC_GET_TNRPARA`, `DI_IOC_SET_TNRPARA`), the demo
 //! crop, crops smaller than the frame, and the timeouts (the kernel's 3 s defaults stand).
@@ -35,14 +29,20 @@
 //! Unverified until it runs: which `base_field` value is the top field (the header's comment and
 //! the kernel's log disagree), and whether the block reads past a row's last byte.
 
+#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
+pub mod codec;
 mod engine;
-mod job;
-pub mod uapi;
+mod linux;
 
+pub use lemnos_driver_a733_di_sys::uapi;
+
+pub use codec::{A733Di, DiBlock};
 pub use engine::{Deinterlacer, Device, Processed, RunError, State, backoff_ns};
-pub use job::{
+pub use linux::LinuxDevice;
+
+pub use lemnos_driver_a733_di_sys::{
     Config, Field, Format, Frame, FrameError, Invalid, Job, Layout, Level, MAX_SIZE, MAX_STRIDE,
     Mode, Settings, Tnr,
 };
