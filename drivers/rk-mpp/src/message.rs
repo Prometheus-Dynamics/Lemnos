@@ -2,8 +2,9 @@
 //!
 //! A [`Message`] is made only here, so a [`crate::Session`] can rely on what it says: the size is
 //! the length of the slice it carries, or for [`Payload::ReadBack`] at most
-//! [`READ_BACK_BYTES`]; the flags are only [`flags::MULTI_MSG`] and [`flags::LAST_MSG`]; and the
-//! command is never one of those this crate refuses to send.
+//! [`READ_BACK_BYTES`]; the flags are only [`flags::MULTI_MSG`] and [`flags::LAST_MSG`], and on
+//! every message of a parameter job ([`crate::ParamJob`]) [`flags::REG_NO_OFFSET`] as well; and
+//! the command is never one of those this crate refuses to send.
 
 use crate::block::MAX_REGISTERS;
 use crate::uapi::{Command, MsgV1, flags};
@@ -84,15 +85,40 @@ impl<'a> Message<'a> {
 
     /// Chains `messages` into one call: every one but the last says another follows.
     pub(crate) fn chain(messages: &mut [Self]) {
+        Self::chain_with(messages, 0);
+    }
+
+    /// [`Self::chain`] for a parameter job: every message also says that a descriptor word is
+    /// a whole descriptor, its offset in the offset list ([`flags::REG_NO_OFFSET`]).
+    pub(crate) fn chain_params(messages: &mut [Self]) {
+        Self::chain_with(messages, flags::REG_NO_OFFSET);
+    }
+
+    fn chain_with(messages: &mut [Self], extra: u32) {
         let n = messages.len();
         for (i, message) in messages.iter_mut().enumerate() {
-            message.flags = if n == 1 {
-                0
-            } else if i + 1 == n {
-                flags::MULTI_MSG | flags::LAST_MSG
-            } else {
-                flags::MULTI_MSG
-            };
+            message.flags = extra
+                | if n == 1 {
+                    0
+                } else if i + 1 == n {
+                    flags::MULTI_MSG | flags::LAST_MSG
+                } else {
+                    flags::MULTI_MSG
+                };
+        }
+    }
+
+    /// A message of any command, payload and offset, chained with `flags` as given: for the
+    /// tests of a session layer, which must refuse what the driver never builds.
+    #[cfg(feature = "played")]
+    #[must_use]
+    pub fn forged(cmd: Command, flags: u32, offset: u32, payload: Payload<'a>, size: u32) -> Self {
+        Self {
+            cmd,
+            flags,
+            offset,
+            size,
+            payload,
         }
     }
 

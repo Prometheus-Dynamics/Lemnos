@@ -3,9 +3,10 @@
 
 use std::io;
 
-use lemnos_driver_rk_mpp::uapi::{Command, MAX_REG_TRANS_NUM, flags};
+use lemnos_driver_rk_mpp::uapi::{Command, FD_MASK, MAX_REG_TRANS_NUM, flags};
 use lemnos_driver_rk_mpp::{
-    Block, Facts, MAX_ADDRESSES, MAX_BUFFERS, Message, Payload, READ_BACK_BYTES, READ_BACK_SLOTS,
+    Block, Facts, MAX_ADDRESSES, MAX_BUFFERS, Message, ParamFacts, Payload, READ_BACK_BYTES,
+    READ_BACK_SLOTS,
 };
 
 use crate::session::DATA_BYTES;
@@ -68,6 +69,14 @@ pub(crate) fn check(
     if n == 0 || n > 4 {
         return Err(refused());
     }
+    // A job on a parameter block says, on every message, that a descriptor word holds no
+    // offset; nothing else does.
+    let params = bound.and_then(Block::params).filter(|_| n > 1);
+    let extra = if params.is_some() {
+        flags::REG_NO_OFFSET
+    } else {
+        0
+    };
 
     // The chain ends exactly at its last message, so the kernel never reads a message past it.
     for (i, m) in messages.iter().enumerate() {
@@ -76,7 +85,7 @@ pub(crate) fn check(
             (_, true) => flags::MULTI_MSG | flags::LAST_MSG,
             (_, false) => flags::MULTI_MSG,
         };
-        if m.flags() != expect {
+        if m.flags() != expect | extra {
             return Err(refused());
         }
     }
@@ -94,7 +103,92 @@ pub(crate) fn check(
     if n == 1 {
         return single(&messages[0], bound, allowed);
     }
-    job(messages, bound).map(|()| Checked { binds: None })
+    match params {
+        Some(facts) => param_job(messages, facts),
+        None => job(messages, bound),
+    }
+    .map(|()| Checked { binds: None })
+}
+
+/// A parameter block's job: the structure, then optionally the offsets, then the results'
+/// read-back. The structure is exactly the kernel's size, every descriptor word holds a
+/// descriptor a register can name (1 to 1023) and every word the kernel uses as an index, a
+/// size, a count or a mode is in its range; every offset is keyed by a descriptor word's
+/// register; the read-back is exactly the results' size.
+fn param_job(messages: &[Message<'_>], facts: &ParamFacts) -> io::Result<()> {
+    let [write, rest @ .., read] = messages else {
+        return Err(refused());
+    };
+    if !matches!(write.cmd(), Command::SetRegWrite)
+        || !matches!(write.payload(), Payload::In(_))
+        || write.offset() != 0
+        || write.size() as usize != facts.bytes
+    {
+        return Err(refused());
+    }
+    let structure = exact(write).ok_or_else(refused)?;
+    let word = |at: u16| {
+        let at = usize::from(at);
+        u32::from_ne_bytes([
+            structure[at],
+            structure[at + 1],
+            structure[at + 2],
+            structure[at + 3],
+        ])
+    };
+    for descriptor in facts.descriptors {
+        if !(1..=FD_MASK).contains(&word(descriptor.at)) {
+            return Err(refused());
+        }
+    }
+    for checked in facts.words {
+        if !checked.check.allows(word(checked.at)) {
+            return Err(refused());
+        }
+    }
+
+    match rest {
+        [] => {}
+        [offsets] => {
+            if !matches!(offsets.cmd(), Command::SetRegAddrOffset)
+                || !matches!(offsets.payload(), Payload::In(_))
+                || offsets.offset() != 0
+            {
+                return Err(refused());
+            }
+            let elems = exact(offsets).ok_or_else(refused)?;
+            if elems.is_empty()
+                || !elems.len().is_multiple_of(8)
+                || elems.len() > 8 * facts.descriptors.len().min(MAX_REG_TRANS_NUM)
+            {
+                return Err(refused());
+            }
+            for elem in elems.as_chunks::<8>().0 {
+                let index = u32::from_ne_bytes([elem[0], elem[1], elem[2], elem[3]]);
+                if !facts
+                    .descriptors
+                    .iter()
+                    .any(|d| u32::from(d.register) == index)
+                {
+                    return Err(refused());
+                }
+            }
+        }
+        _ => return Err(refused()),
+    }
+
+    match read.payload() {
+        Payload::ReadBack { slot }
+            if matches!(read.cmd(), Command::SetRegRead)
+                && *slot < READ_BACK_SLOTS
+                && read.offset() == 0
+                && read.size() as usize == facts.results
+                && facts.results <= READ_BACK_BYTES =>
+        {
+            Ok(())
+        }
+        _ => Err(refused()),
+    }
 }
 
 /// A call of one message.

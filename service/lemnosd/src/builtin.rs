@@ -29,6 +29,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_pisp::PispFe>(),
         entry::<lemnos_driver_raw_bus::RawBus>(),
         entry::<lemnos_driver_rga::Rga>(),
+        entry::<lemnos_driver_rk_iep::RkIep>(),
         entry::<lemnos_driver_rk_mpp_codec::RkMpp>(),
         entry::<lemnos_driver_rkcif::Rkcif>(),
         entry::<lemnos_driver_rkisp::Rkisp>(),

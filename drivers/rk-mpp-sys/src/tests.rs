@@ -13,8 +13,8 @@ use lemnos_driver_rk_mpp::uapi::{
     Command, IOC_CFG_V1, MAX_MSG_NUM, MsgV1, RegOffsetElem, client, flags,
 };
 use lemnos_driver_rk_mpp::{
-    Address, Block, ClaimError, Device, Job, Message, READ_BACK_BYTES, READ_BACK_SLOTS, ReadBack,
-    Service, Session, SubmitError,
+    Address, Block, ClaimError, Device, Job, Message, ParamAddress, ParamJob, Payload,
+    READ_BACK_BYTES, READ_BACK_SLOTS, ReadBack, Service, Session, SubmitError,
 };
 use lemnos_linux_sys::dma_buf;
 use lemnos_measure::test_alloc::allocations;
@@ -638,4 +638,245 @@ fn a_session_binds_once_and_only_to_blocks_it_was_opened_for() {
     let calls = node.rec.borrow().calls;
     assert!(einval(&other.bind(Block::Vdpu2).unwrap_err()));
     assert_eq!(node.rec.borrow().calls, calls);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Parameter jobs (the IEP2)
+
+/// Bytes of the IEP2's parameter structure and results.
+const IEP2_PARAMS: usize = 656;
+const IEP2_OUTPUT: usize = 412;
+
+/// A structure the IEP2 takes, every descriptor word holding descriptor `fd`.
+fn iep2_structure(fd: u32) -> [u8; IEP2_PARAMS] {
+    let mut p = [0u8; IEP2_PARAMS];
+    let facts = Block::Iep2.params().unwrap();
+    let mut set = |at: usize, v: u32| p[at..at + 4].copy_from_slice(&v.to_ne_bytes());
+    set(16, 10);
+    set(20, 10);
+    set(104, 1);
+    for d in facts.descriptors {
+        set(usize::from(d.at), fd);
+    }
+    p
+}
+
+#[test]
+fn a_parameter_job_is_issued_from_the_sessions_own_memory() {
+    let node = PlayedNode::new("iep2-job");
+    let rec = node.rec.clone();
+    let mut service = Service::new(node);
+    let mut claim = service.claim(Block::Iep2, 0).unwrap();
+    let frames = claim.add_buffer(memfd(1 << 20)).unwrap();
+    let addresses: Vec<ParamAddress> = Block::Iep2
+        .params()
+        .unwrap()
+        .descriptors
+        .iter()
+        .map(|d| ParamAddress {
+            word: d.at,
+            buffer: frames,
+            offset: u32::from(d.at) * 16,
+        })
+        .collect();
+    let params = iep2_structure(999);
+    let job = ParamJob {
+        identity: 3,
+        params: &params,
+        addresses: &addresses,
+    };
+    claim.submit_params(&job).unwrap();
+    {
+        let rec = rec.borrow();
+        assert_eq!(rec.n, 3);
+        let no_offset = flags::REG_NO_OFFSET;
+        assert_eq!(
+            rec.wire[..3]
+                .iter()
+                .map(|m| (m.cmd, m.flags))
+                .collect::<Vec<_>>(),
+            [
+                (Command::SetRegWrite.code(), flags::MULTI_MSG | no_offset),
+                (
+                    Command::SetRegAddrOffset.code(),
+                    flags::MULTI_MSG | no_offset
+                ),
+                (
+                    Command::SetRegRead.code(),
+                    flags::MULTI_MSG | flags::LAST_MSG | no_offset
+                ),
+            ]
+        );
+        assert_eq!(rec.wire[0].size as usize, IEP2_PARAMS);
+        assert_eq!(rec.wire[0].offset, 0);
+        assert_eq!(rec.wire[1].size, 15 * 8);
+        assert_eq!(rec.wire[2].size as usize, IEP2_OUTPUT);
+        assert!(rec.scratch.contains(&(rec.wire[0].data_ptr as usize)));
+        assert!(rec.scratch.contains(&(rec.wire[1].data_ptr as usize)));
+        assert_eq!(rec.wire[2].data_ptr as usize, rec.area0);
+        // What the kernel read: the caller's 999 replaced by the claim's descriptor.
+        let fd = u32::from_ne_bytes(rec.bytes[0][36..40].try_into().unwrap());
+        assert!(fd > 0 && fd != 999);
+    }
+    let mut results = [0u32; IEP2_OUTPUT / 4];
+    claim.complete(&mut results).unwrap();
+    assert_eq!(results[102], pattern(102));
+}
+
+/// Sends `messages` on a session bound to `block`; whether the session issued them.
+fn sends(block: Block, messages: &mut [Message<'_>]) -> io::Result<()> {
+    let node = PlayedNode::new(&format!("forged-{block:?}"));
+    let mut session = node.session(&Block::ALL);
+    session.bind(block).unwrap();
+    let calls = node.rec.borrow().calls;
+    let result = session.send(messages);
+    let issued = node.rec.borrow().calls - calls;
+    assert_eq!(issued, usize::from(result.is_ok()), "{result:?}");
+    result
+}
+
+const JOB: u32 = flags::MULTI_MSG | flags::REG_NO_OFFSET;
+const LAST: u32 = flags::MULTI_MSG | flags::LAST_MSG | flags::REG_NO_OFFSET;
+
+fn write(params: &[u8], flags: u32) -> Message<'_> {
+    Message::forged(
+        Command::SetRegWrite,
+        flags,
+        0,
+        Payload::In(params),
+        params.len() as u32,
+    )
+}
+
+fn results(size: usize, flags: u32) -> Message<'static> {
+    Message::forged(
+        Command::SetRegRead,
+        flags,
+        0,
+        Payload::ReadBack { slot: 0 },
+        size as u32,
+    )
+}
+
+fn offsets(elems: &[u8], flags: u32) -> Message<'_> {
+    Message::forged(
+        Command::SetRegAddrOffset,
+        flags,
+        0,
+        Payload::In(elems),
+        elems.len() as u32,
+    )
+}
+
+#[test]
+fn the_session_issues_a_parameter_job_only_as_the_driver_builds_it() {
+    let good = iep2_structure(9);
+    let elem = RegOffsetElem {
+        index: 24,
+        offset: 64,
+    }
+    .to_ne_bytes();
+    // As the driver builds it: issued.
+    sends(
+        Block::Iep2,
+        &mut [write(&good, JOB), results(IEP2_OUTPUT, LAST)],
+    )
+    .unwrap();
+    sends(
+        Block::Iep2,
+        &mut [
+            write(&good, JOB),
+            offsets(&elem, JOB),
+            results(IEP2_OUTPUT, LAST),
+        ],
+    )
+    .unwrap();
+
+    let refused = |what: &str, messages: &mut [Message<'_>]| {
+        let e = sends(Block::Iep2, messages).unwrap_err();
+        assert!(einval(&e), "{what}: {e:?}");
+    };
+    // A descriptor word the kernel would skip (0) or that no register's 10 bits carry.
+    for fd in [0, 1024, u32::MAX] {
+        let mut p = good;
+        p[60..64].copy_from_slice(&fd.to_ne_bytes());
+        refused(
+            &format!("descriptor {fd}"),
+            &mut [write(&p, JOB), results(IEP2_OUTPUT, LAST)],
+        );
+    }
+    // A word the kernel takes as an index, a size or a mode, out of range.
+    for (at, value) in [(16, 0), (20, 273), (104, 5), (132, 9), (488, 1), (80, 9)] {
+        let mut p = good;
+        p[at..at + 4].copy_from_slice(&(value as u32).to_ne_bytes());
+        refused(
+            &format!("word {at} = {value}"),
+            &mut [write(&p, JOB), results(IEP2_OUTPUT, LAST)],
+        );
+    }
+    // The structure shorter or longer than the kernel's: it copies whatever size it is given.
+    let long = [0u8; IEP2_PARAMS + 4];
+    refused(
+        "a long write",
+        &mut [write(&long, JOB), results(IEP2_OUTPUT, LAST)],
+    );
+    refused(
+        "a short write",
+        &mut [
+            write(&good[..IEP2_PARAMS - 4], JOB),
+            results(IEP2_OUTPUT, LAST),
+        ],
+    );
+    // A results read of another size: the kernel copies out the size asked.
+    refused(
+        "a long read",
+        &mut [write(&good, JOB), results(IEP2_OUTPUT + 4, LAST)],
+    );
+    refused(
+        "a short read",
+        &mut [write(&good, JOB), results(IEP2_OUTPUT - 4, LAST)],
+    );
+    // An offset keyed by a register that is no descriptor word's, or a part entry.
+    let stray = RegOffsetElem {
+        index: 80,
+        offset: 64,
+    }
+    .to_ne_bytes();
+    refused(
+        "a stray offset",
+        &mut [
+            write(&good, JOB),
+            offsets(&stray, JOB),
+            results(IEP2_OUTPUT, LAST),
+        ],
+    );
+    refused(
+        "a part entry",
+        &mut [
+            write(&good, JOB),
+            offsets(&elem[..4], JOB),
+            results(IEP2_OUTPUT, LAST),
+        ],
+    );
+    // Without the flag that keeps an offset out of a descriptor word.
+    refused(
+        "no REG_NO_OFFSET",
+        &mut [
+            write(&good, flags::MULTI_MSG),
+            results(IEP2_OUTPUT, flags::MULTI_MSG | flags::LAST_MSG),
+        ],
+    );
+    // No read-back last, or the write not first.
+    refused("no read", &mut [write(&good, JOB), offsets(&elem, LAST)]);
+    refused(
+        "read first",
+        &mut [results(IEP2_OUTPUT, JOB), write(&good, LAST)],
+    );
+    // A parameter job on a register-file block's session.
+    let e = sends(
+        Block::Vepu2,
+        &mut [write(&good, JOB), results(IEP2_OUTPUT, LAST)],
+    )
+    .unwrap_err();
+    assert!(einval(&e));
 }

@@ -19,6 +19,8 @@ pub const fn driver_name(block: Block) -> &'static str {
         Block::Vepu2 => "mpp_vepu2",
         Block::JpegDecoder => "mpp_jpgdec",
         Block::JpegEncoder => "mpp_jpgenc",
+        // `IEP2_DRIVER_NAME` in `mpp_iep2.c`.
+        Block::Iep2 => "mpp-iep2",
     }
 }
 

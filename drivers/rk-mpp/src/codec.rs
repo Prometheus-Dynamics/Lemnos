@@ -72,14 +72,17 @@ pub const fn block_name(block: crate::Block) -> &'static str {
         crate::Block::Vepu2 => "rk-mpp:vepu2",
         crate::Block::JpegDecoder => "rk-mpp:jpeg-decoder",
         crate::Block::JpegEncoder => "rk-mpp:jpeg-encoder",
+        crate::Block::Iep2 => "rk-mpp:iep2",
     }
 }
 
-/// The block a board file names: the part of [`block_name`] after `rk-mpp:`.
+/// The register-file block a board file names: the part of [`block_name`] after `rk-mpp:`. A
+/// parameter block (`iep2`) is not one: its jobs are served by its own driver.
 #[must_use]
 pub fn block_named(name: &str) -> Option<crate::Block> {
     crate::Block::ALL
         .into_iter()
+        .filter(|block| block.params().is_none())
         .find(|&block| block_name(block).strip_prefix("rk-mpp:") == Some(name))
 }
 
@@ -159,48 +162,42 @@ enum Link<D: Device> {
     Moving,
 }
 
-/// One block of the service as `codec.block/1` has it.
-pub struct MppBlock<D: Device> {
+/// One block's claim as a `codec.block/1` driver holds it: taken when a consumer's first job
+/// comes, given up when the consumer goes, and the claim's buffer for each stream buffer a job
+/// has named. [`MppBlock`] serves register-file blocks with it; a parameter block's driver
+/// (`lemnos-driver-rk-iep`) serves its own work format with it.
+pub struct BlockClaim<D: Device> {
     block: crate::Block,
     link: Link<D>,
     /// The claim's buffer for each stream buffer a job has named.
     ids: [Option<BufferId>; MAX_BUFFERS],
-    /// A job's addresses and read-back, built here.
-    addresses: [Address; MAX_ADDRESSES],
-    registers: Box<[u32; MAX_REGISTERS]>,
-    identity: u64,
     fault: Option<&'static str>,
 }
 
-impl<D: Device> MppBlock<D> {
-    /// `block` of the service on `device`. Nothing is opened until a job comes.
+impl<D: Device> BlockClaim<D> {
+    /// `block` of the service on `device`. Nothing is opened until [`Self::claim`].
     pub fn new(device: D, block: crate::Block) -> Self {
-        let nowhere = Address {
-            register: 0,
-            buffer: BufferId {
-                slot: 0,
-                generation: 0,
-            },
-            offset: 0,
-        };
         Self {
             block,
             link: Link::Idle(Box::new(Service::new(device))),
             ids: [None; MAX_BUFFERS],
-            addresses: [nowhere; MAX_ADDRESSES],
-            registers: Box::new([0; MAX_REGISTERS]),
-            identity: 0,
             fault: None,
         }
     }
 
-    /// Whether the block holds its claim.
+    /// The block.
+    pub fn block(&self) -> crate::Block {
+        self.block
+    }
+
+    /// Whether the claim is held.
     pub fn claimed(&self) -> bool {
         matches!(self.link, Link::Claimed(_))
     }
 
-    /// The claim, taken now if it isn't held.
-    fn claim(&mut self, now_ns: u64) -> Option<&mut OwnedClaim<D>> {
+    /// The claim, taken now if it isn't held. `None` when it can't be taken: the reason is in
+    /// [`Self::health`], and the next call tries again behind the service's backoff.
+    pub fn claim(&mut self, now_ns: u64) -> Option<&mut OwnedClaim<D>> {
         if let Link::Idle(_) = self.link {
             let Link::Idle(service) = std::mem::replace(&mut self.link, Link::Moving) else {
                 return None;
@@ -220,14 +217,48 @@ impl<D: Device> MppBlock<D> {
                 }
             }
         }
+        self.held()
+    }
+
+    /// The claim, if it is held.
+    pub fn held(&mut self) -> Option<&mut OwnedClaim<D>> {
         match &mut self.link {
             Link::Claimed(claim) => Some(&mut **claim),
             _ => None,
         }
     }
 
-    /// Gives the claim up, keeping the service and its backoff.
-    fn unclaim(&mut self) {
+    /// The claim's buffer for stream buffer `index`: the one an earlier job made, or the
+    /// stream buffer's dma-buf, its descriptor duplicated and added to the claim now (which
+    /// measures its real size). [`Start::Refused`] for a buffer the claim can't take (no
+    /// handle, out of range, the claim full), [`Start::Failed`] when no claim is held or the
+    /// descriptor can't be duplicated.
+    pub fn buffer(&mut self, index: u32, buffers: &Buffers<'_>) -> Result<BufferId, Start> {
+        let Link::Claimed(claim) = &mut self.link else {
+            return Err(Start::Failed);
+        };
+        let Some(slot) = self.ids.get_mut(index as usize) else {
+            return Err(Start::Refused);
+        };
+        if let Some(id) = *slot {
+            return Ok(id);
+        }
+        let Some(handle) = buffers.handle(index) else {
+            return Err(Start::Refused);
+        };
+        let Ok(fd) = handle.fd().try_clone_to_owned() else {
+            return Err(Start::Failed);
+        };
+        let Ok(id) = claim.add_buffer(fd) else {
+            return Err(Start::Refused);
+        };
+        *slot = Some(id);
+        Ok(id)
+    }
+
+    /// Gives the claim up, keeping the service and its backoff: the kernel unmaps every buffer
+    /// the session mapped, and the next claim starts with none.
+    pub fn unclaim(&mut self) {
         self.ids = [None; MAX_BUFFERS];
         if let Link::Claimed(_) = self.link {
             let Link::Claimed(claim) = std::mem::replace(&mut self.link, Link::Moving) else {
@@ -237,6 +268,48 @@ impl<D: Device> MppBlock<D> {
                 self.link = Link::Idle(service);
             }
         }
+    }
+
+    /// `Ok`, or `Degraded` with why the last claim wasn't taken.
+    pub fn health(&self) -> Health {
+        match self.fault {
+            None => Health::Ok,
+            Some(reason) => Health::Degraded(reason),
+        }
+    }
+}
+
+/// One block of the service as `codec.block/1` has it.
+pub struct MppBlock<D: Device> {
+    claim: BlockClaim<D>,
+    /// A job's addresses and read-back, built here.
+    addresses: [Address; MAX_ADDRESSES],
+    registers: Box<[u32; MAX_REGISTERS]>,
+    identity: u64,
+}
+
+impl<D: Device> MppBlock<D> {
+    /// `block` of the service on `device`. Nothing is opened until a job comes.
+    pub fn new(device: D, block: crate::Block) -> Self {
+        let nowhere = Address {
+            register: 0,
+            buffer: BufferId {
+                slot: 0,
+                generation: 0,
+            },
+            offset: 0,
+        };
+        Self {
+            claim: BlockClaim::new(device, block),
+            addresses: [nowhere; MAX_ADDRESSES],
+            registers: Box::new([0; MAX_REGISTERS]),
+            identity: 0,
+        }
+    }
+
+    /// Whether the block holds its claim.
+    pub fn claimed(&self) -> bool {
+        self.claim.claimed()
     }
 }
 
@@ -248,7 +321,7 @@ fn word(bytes: &[u8], at: usize) -> Option<u32> {
 
 impl<D: Device> Block for MppBlock<D> {
     fn name(&self) -> &str {
-        block_name(self.block)
+        block_name(self.claim.block())
     }
 
     fn limits(&self) -> BlockInfo {
@@ -305,12 +378,9 @@ impl<D: Device> Block for MppBlock<D> {
         if work.ref_count() > MAX_ADDRESSES {
             return Start::Refused;
         }
-        if self.claim(now_ns).is_none() {
+        if self.claim.claim(now_ns).is_none() {
             return Start::Failed;
         }
-        let Link::Claimed(claim) = &mut self.link else {
-            return Start::Failed;
-        };
 
         // Each reference: a register, and a stream buffer the claim holds or takes now.
         let mut named = 0;
@@ -318,24 +388,12 @@ impl<D: Device> Block for MppBlock<D> {
             let Ok(register) = u16::try_from(reference.slot) else {
                 return Start::Refused;
             };
-            let Some(slot) = self.ids.get_mut(reference.buffer as usize) else {
-                return Start::Refused;
+            let id = match self.claim.buffer(reference.buffer, buffers) {
+                Ok(id) => id,
+                Err(start) => return start,
             };
-            let id = match *slot {
-                Some(id) => id,
-                None => {
-                    let Some(handle) = buffers.handle(reference.buffer) else {
-                        return Start::Refused;
-                    };
-                    let Ok(fd) = handle.fd().try_clone_to_owned() else {
-                        return Start::Failed;
-                    };
-                    let Ok(id) = claim.add_buffer(fd) else {
-                        return Start::Refused;
-                    };
-                    *slot = Some(id);
-                    id
-                }
+            let Some(claim) = self.claim.held() else {
+                return Start::Failed;
             };
             // The offset is checked by the claim; the length, when one is given, here.
             let end = u64::from(reference.offset) + u64::from(reference.length);
@@ -358,19 +416,22 @@ impl<D: Device> Block for MppBlock<D> {
             addresses: &self.addresses[..named],
             read,
         };
+        let Some(claim) = self.claim.held() else {
+            return Start::Failed;
+        };
         match claim.submit(&job) {
             Ok(()) => {}
             Err(SubmitError::Job(_)) => return Start::Refused,
             Err(_) => {
                 // The kernel refused the call, or the session is in a state nobody knows:
                 // the next job starts on a new one.
-                self.unclaim();
+                self.claim.unclaim();
                 return Start::Failed;
             }
         }
         let done = claim.complete(&mut self.registers[..]);
         let Ok(done) = done else {
-            self.unclaim();
+            self.claim.unclaim();
             return Start::Failed;
         };
         let bytes = 4 * done.registers;
@@ -389,13 +450,10 @@ impl<D: Device> Block for MppBlock<D> {
     }
 
     fn release(&mut self) {
-        self.unclaim();
+        self.claim.unclaim();
     }
 
     fn health(&self) -> Health {
-        match self.fault {
-            None => Health::Ok,
-            Some(reason) => Health::Degraded(reason),
-        }
+        self.claim.health()
     }
 }

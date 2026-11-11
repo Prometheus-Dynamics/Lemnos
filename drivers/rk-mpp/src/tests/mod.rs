@@ -22,6 +22,7 @@ use crate::{
 };
 
 mod codec;
+mod params;
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -135,6 +136,12 @@ fn block_facts_stay_inside_the_kernel_limits() {
     let mut most = 0;
     for block in Block::ALL {
         let facts = block.facts();
+        assert!(facts.client < client::END, "{block:?}");
+        if block.params().is_some() {
+            // A parameter block has no register file: every register-file job runs past it.
+            assert_eq!(facts.registers, 0, "{block:?}");
+            continue;
+        }
         assert!(usize::from(facts.registers) <= MAX_REGISTERS, "{block:?}");
         assert!(facts.first < facts.registers, "{block:?}");
         assert!(facts.client < client::END, "{block:?}");

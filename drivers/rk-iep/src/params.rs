@@ -5,6 +5,8 @@
 //! private to that driver and reach the kernel as message data, so they are this crate's to
 //! carry, not a uAPI header's.
 
+use core::mem::{offset_of, size_of};
+
 /// Address words in `src` and `dst`.
 const PLANES: usize = 3;
 /// OSD areas, motion truth list entries and combing OSD flags.
@@ -27,7 +29,8 @@ pub struct Addr {
     pub cr: u32,
 }
 
-/// `struct iep2_params`. Only a [`Job`](crate::Job) fills one in for the kernel.
+/// `struct iep2_params`: the layout a job's parameter bytes take. A [`Job`](crate::Job) writes
+/// them field by field at these offsets.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Params {
@@ -116,34 +119,15 @@ pub struct Params {
     pub yend: [u32; OSD_AREAS],
 }
 
-impl Params {
-    /// The address words in the kernel's order (see
-    /// [`ADDRESS_REGISTERS`](crate::regs::ADDRESS_REGISTERS)).
-    #[must_use]
-    pub fn address_words(&self) -> [u32; crate::regs::ADDRESS_WORDS] {
-        let [cur, next, prev] = self.src;
-        let [top, bottom] = self.dst;
-        [
-            cur.y,
-            cur.cbcr,
-            cur.cr,
-            next.y,
-            next.cbcr,
-            next.cr,
-            prev.y,
-            prev.cbcr,
-            prev.cr,
-            top.y,
-            top.cbcr,
-            top.cr,
-            bottom.y,
-            bottom.cbcr,
-            bottom.cr,
-            self.mv_addr,
-            self.md_addr,
-        ]
-    }
-}
+/// Bytes of [`Params`].
+pub const PARAMS_BYTES: usize = size_of::<Params>();
+/// Bytes of [`Results`].
+pub const RESULTS_BYTES: usize = size_of::<Results>();
+/// Where the caller's settings start in [`Params`]: `md_theta`.
+pub const TUNING_START: usize = offset_of!(Params, md_theta);
+/// Bytes of the caller's settings: [`Params`] from `md_theta` to the end of `mtn_tab`, the
+/// item a job's [`Tuning`] travels in.
+pub const TUNING_BYTES: usize = offset_of!(Params, pd_mode) - TUNING_START;
 
 /// `struct iep2_output`: what the block counted, copied out when the job is done.
 #[repr(C)]
@@ -313,48 +297,133 @@ pub struct Tuning {
 }
 
 impl Tuning {
-    /// Copies the settings into `params`.
-    pub(crate) fn apply(&self, params: &mut Params) {
-        params.md_theta = self.md_theta;
-        params.md_r = self.md_r;
-        params.md_lambda = self.md_lambda;
-        params.dect_resi_thr = self.dect_resi_thr;
-        params.osd_area_num = self.osd_area_num;
-        params.osd_gradh_thr = self.osd_gradh_thr;
-        params.osd_gradv_thr = self.osd_gradv_thr;
-        params.osd_pos_limit_en = self.osd_pos_limit_en;
-        params.osd_pos_limit_num = self.osd_pos_limit_num;
-        params.osd_limit_area = self.osd_limit_area;
-        params.osd_line_num = self.osd_line_num;
-        params.osd_pec_thr = self.osd_pec_thr;
-        params.osd_x_sta = self.osd_x_sta;
-        params.osd_x_end = self.osd_x_end;
-        params.osd_y_sta = self.osd_y_sta;
-        params.osd_y_end = self.osd_y_end;
-        params.me_pena = self.me_pena;
-        params.mv_bonus = self.mv_bonus;
-        params.mv_similar_thr = self.mv_similar_thr;
-        params.mv_similar_num_thr0 = self.mv_similar_num_thr0;
-        params.me_thr_offset = self.me_thr_offset;
-        params.mv_left_limit = self.mv_left_limit;
-        params.mv_right_limit = self.mv_right_limit;
-        params.mv_tru_list = self.mv_tru_list;
-        params.mv_tru_vld = self.mv_tru_vld;
-        params.eedi_thr0 = self.eedi_thr0;
-        params.ble_backtoma_num = self.ble_backtoma_num;
-        params.comb_cnt_thr = self.comb_cnt_thr;
-        params.comb_feature_thr = self.comb_feature_thr;
-        params.comb_t_thr = self.comb_t_thr;
-        params.comb_osd_vld = self.comb_osd_vld;
+    /// The settings as the [`TUNING_BYTES`] of a job's tuning item: [`Params`] from
+    /// `md_theta` on, in the kernel's layout and the machine's byte order.
+    #[must_use]
+    pub fn encode(&self) -> [u8; TUNING_BYTES] {
+        let mut out = [0u8; TUNING_BYTES];
+        put_words(&mut out, offset_of!(Params, md_theta), &[self.md_theta]);
+        put_words(&mut out, offset_of!(Params, md_r), &[self.md_r]);
+        put_words(&mut out, offset_of!(Params, md_lambda), &[self.md_lambda]);
+        put_words(
+            &mut out,
+            offset_of!(Params, dect_resi_thr),
+            &[self.dect_resi_thr],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_area_num),
+            &[self.osd_area_num],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_gradh_thr),
+            &[self.osd_gradh_thr],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_gradv_thr),
+            &[self.osd_gradv_thr],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_pos_limit_en),
+            &[self.osd_pos_limit_en],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_pos_limit_num),
+            &[self.osd_pos_limit_num],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_limit_area),
+            &self.osd_limit_area,
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_line_num),
+            &[self.osd_line_num],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, osd_pec_thr),
+            &[self.osd_pec_thr],
+        );
+        put_words(&mut out, offset_of!(Params, osd_x_sta), &self.osd_x_sta);
+        put_words(&mut out, offset_of!(Params, osd_x_end), &self.osd_x_end);
+        put_words(&mut out, offset_of!(Params, osd_y_sta), &self.osd_y_sta);
+        put_words(&mut out, offset_of!(Params, osd_y_end), &self.osd_y_end);
+        put_words(&mut out, offset_of!(Params, me_pena), &[self.me_pena]);
+        put_words(&mut out, offset_of!(Params, mv_bonus), &[self.mv_bonus]);
+        put_words(
+            &mut out,
+            offset_of!(Params, mv_similar_thr),
+            &[self.mv_similar_thr],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, mv_similar_num_thr0),
+            &[self.mv_similar_num_thr0],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, me_thr_offset),
+            &[self.me_thr_offset.cast_unsigned()],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, mv_left_limit),
+            &[self.mv_left_limit],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, mv_right_limit),
+            &[self.mv_right_limit],
+        );
+        put_words(&mut out, offset_of!(Params, mv_tru_vld), &self.mv_tru_vld);
+        put_words(&mut out, offset_of!(Params, eedi_thr0), &[self.eedi_thr0]);
+        put_words(
+            &mut out,
+            offset_of!(Params, ble_backtoma_num),
+            &[self.ble_backtoma_num],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, comb_cnt_thr),
+            &[self.comb_cnt_thr],
+        );
+        put_words(
+            &mut out,
+            offset_of!(Params, comb_feature_thr),
+            &[self.comb_feature_thr],
+        );
+        put_words(&mut out, offset_of!(Params, comb_t_thr), &[self.comb_t_thr]);
+        put_words(
+            &mut out,
+            offset_of!(Params, comb_osd_vld),
+            &self.comb_osd_vld,
+        );
         match self.mtn_tab {
             Some(table) => {
-                params.mtn_en = 1;
-                params.mtn_tab = table;
+                put_words(&mut out, offset_of!(Params, mtn_en), &[1]);
+                put_words(&mut out, offset_of!(Params, mtn_tab), &table);
             }
-            None => {
-                params.mtn_en = 0;
-                params.mtn_tab = [0; MTN_TAB_LEN];
-            }
+            None => put_words(&mut out, offset_of!(Params, mtn_en), &[0]),
         }
+        let at = offset_of!(Params, mv_tru_list) - TUNING_START;
+        for (byte, value) in out[at..at + OSD_AREAS].iter_mut().zip(self.mv_tru_list) {
+            *byte = value.cast_unsigned();
+        }
+        out
+    }
+}
+
+/// Writes `values` in the machine's byte order into `out`, the tuning item, from byte `at` of
+/// [`Params`] on.
+fn put_words(out: &mut [u8; TUNING_BYTES], at: usize, values: &[u32]) {
+    let at = at - TUNING_START;
+    for (four, value) in out[at..].as_chunks_mut::<4>().0.iter_mut().zip(values) {
+        *four = value.to_ne_bytes();
     }
 }

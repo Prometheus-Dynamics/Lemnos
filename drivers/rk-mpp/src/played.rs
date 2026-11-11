@@ -19,7 +19,21 @@ pub fn iova(fd: u32) -> u32 {
 pub struct Task {
     pub regs: [u32; MAX_REGISTERS],
     pub read: Option<(usize, usize, usize)>,
+    /// An IEP2 task: `regs` holds its parameter structure, and its read copies `output`.
+    pub iep2: bool,
 }
+
+/// `sizeof(struct iep2_params)` and `sizeof(struct iep2_output)`, from `mpp_iep2.c` (`gcc`,
+/// LP64).
+pub const IEP2_PARAMS: usize = 656;
+pub const IEP2_OUTPUT: usize = 412;
+
+/// `iep2_addr_rnum` of `mpp_iep2.c`: the register of each address word, from `src[0].y` at byte
+/// 36 on, -1 for a word the kernel skips. Transcribed again here, apart from the driver's facts,
+/// so that the played kernel is not the driver's own description of itself.
+pub const IEP2_ADDR_RNUM: [i32; 17] = [
+    24, 27, 28, 25, 29, 30, 26, 31, 32, 44, 46, -1, 45, 47, -1, 34, 33,
+];
 
 /// A kernel that does what `mpp_common.c` does with each message.
 pub struct Kernel {
@@ -46,6 +60,10 @@ pub struct Kernel {
     pub resets: u32,
     pub released: [u32; 8],
     pub released_len: usize,
+    /// What the IEP2 block counted, as the kernel copies it out at a poll.
+    pub output: [u8; IEP2_OUTPUT],
+    /// The flags of the last call's messages, ORed, as `mpp_collect_msgs` gathers them.
+    pub last_flags: u32,
 }
 
 #[allow(missing_docs)]
@@ -68,6 +86,7 @@ impl Kernel {
             tasks: std::array::from_fn(|_| Task {
                 regs: [0; MAX_REGISTERS],
                 read: None,
+                iep2: false,
             }),
             head: 0,
             queued: 0,
@@ -76,6 +95,8 @@ impl Kernel {
             resets: 0,
             released: [0; 8],
             released_len: 0,
+            output: [0; IEP2_OUTPUT],
+            last_flags: 0,
         }
     }
 
@@ -89,8 +110,11 @@ impl Kernel {
 
     pub fn take_fd(&mut self, fd: u32) -> u32 {
         assert!(fd != 0);
-        self.translated[self.translated_len] = fd;
-        self.translated_len += 1;
+        // The log keeps the first translations; a long run stops adding to it.
+        if let Some(slot) = self.translated.get_mut(self.translated_len) {
+            *slot = fd;
+            self.translated_len += 1;
+        }
         iova(fd)
     }
 
@@ -104,15 +128,25 @@ impl Kernel {
         self.last_len = messages.len();
         for (i, m) in messages.iter().enumerate() {
             self.last[i] = (m.cmd().code(), m.flags());
-            // Only the chain flags are ever set.
-            assert_eq!(m.flags() & !(flags::MULTI_MSG | flags::LAST_MSG), 0);
+            // Only the chain flags are ever set, and on a parameter job's messages the one
+            // that says a descriptor word holds no offset.
+            let extra = m.flags() & flags::REG_NO_OFFSET;
+            assert_eq!(
+                m.flags() & !(flags::MULTI_MSG | flags::LAST_MSG | flags::REG_NO_OFFSET),
+                0
+            );
             let last = i + 1 == messages.len();
             let expect = match (messages.len(), last) {
                 (1, _) => 0,
                 (_, true) => flags::MULTI_MSG | flags::LAST_MSG,
                 (_, false) => flags::MULTI_MSG,
             };
-            assert_eq!(m.flags(), expect);
+            assert_eq!(m.flags(), expect | extra);
+        }
+        // `mpp_collect_msgs`: the task's flags are every message's, ORed.
+        self.last_flags = messages.iter().fold(0, |all, m| all | m.flags());
+        if self.client == Some(uapi::client::IEP2) && messages.len() > 1 {
+            return self.iep2(messages);
         }
 
         let mut regs = [0u32; MAX_REGISTERS];
@@ -170,7 +204,11 @@ impl Kernel {
                     self.polls += 1;
                     assert!(self.queued > 0, "poll with nothing queued");
                     let task = &self.tasks[self.head];
-                    if let Some((at, size, slot)) = task.read {
+                    if let (Some((_, size, slot)), true) = (task.read, task.iep2) {
+                        // `iep2_result`: `size` bytes of the output, whatever the size.
+                        assert!(size <= IEP2_OUTPUT, "the kernel would read past its output");
+                        self.areas[slot][..size].copy_from_slice(&self.output[..size]);
+                    } else if let Some((at, size, slot)) = task.read {
                         let (words, _) = self.areas[slot][..size].as_chunks_mut::<4>();
                         for (b, r) in words.iter_mut().zip(&task.regs[at / 4..]) {
                             *b = r.to_ne_bytes();
@@ -222,7 +260,88 @@ impl Kernel {
         }
         assert!(self.queued < SLOTS);
         let tail = (self.head + self.queued) % SLOTS;
-        self.tasks[tail] = Task { regs, read };
+        self.tasks[tail] = Task {
+            regs,
+            read,
+            iep2: false,
+        };
+        self.queued += 1;
+        Ok(())
+    }
+
+    /// `iep2_alloc_task` for one call on a session bound to the IEP2: `iep2_extract_task_msg`,
+    /// then `iep2_process_reg_fd`.
+    fn iep2(&mut self, messages: &mut [Message<'_>]) -> io::Result<()> {
+        let mut params = [0u8; 4 * MAX_REGISTERS];
+        let mut wrote = false;
+        let mut offsets = [(0u32, 0u32); MAX_REG_TRANS_NUM];
+        let mut offsets_len = 0;
+        let mut read = None;
+        for m in messages.iter() {
+            let size = m.size() as usize;
+            if size == 0 {
+                continue;
+            }
+            match (m.cmd(), m.payload()) {
+                // `copy_from_user(&task->params, req->data, req->size)`: unchecked.
+                (Command::SetRegWrite, Payload::In(data)) => {
+                    assert!(
+                        size <= IEP2_PARAMS,
+                        "the kernel would write past its params"
+                    );
+                    params[..size].copy_from_slice(data);
+                    wrote = true;
+                }
+                (Command::SetRegRead, Payload::ReadBack { slot }) => {
+                    assert!(*slot < SLOTS);
+                    read = Some((0, size, *slot));
+                }
+                // `mpp_extract_reg_offset_info`.
+                (Command::SetRegAddrOffset, Payload::In(data)) => {
+                    assert!(size.is_multiple_of(8), "the kernel would copy a part entry");
+                    assert!(offsets_len + size / 8 <= MAX_REG_TRANS_NUM);
+                    for e in data.as_chunks::<8>().0 {
+                        offsets[offsets_len] = (
+                            u32::from_ne_bytes(e[..4].try_into().unwrap()),
+                            u32::from_ne_bytes(e[4..].try_into().unwrap()),
+                        );
+                        offsets_len += 1;
+                    }
+                }
+                (cmd, _) => panic!("{cmd:?} is not part of an IEP2 job"),
+            }
+        }
+        assert!(wrote, "a task without its parameters");
+        let no_offset = self.last_flags & flags::REG_NO_OFFSET != 0;
+        for (i, &register) in IEP2_ADDR_RNUM.iter().enumerate() {
+            let at = 36 + 4 * i;
+            let word = u32::from_ne_bytes(params[at..at + 4].try_into().unwrap());
+            let (fd, offset) = if no_offset {
+                let offset = offsets[..offsets_len]
+                    .iter()
+                    .find(|&&(index, _)| index as i32 == register)
+                    .map_or(0, |&(_, offset)| offset);
+                (word, offset)
+            } else {
+                (word & uapi::FD_MASK, word >> 10)
+            };
+            if fd == 0 || register == -1 {
+                continue;
+            }
+            let address = self.take_fd(fd).wrapping_add(offset);
+            params[at..at + 4].copy_from_slice(&address.to_ne_bytes());
+        }
+        let mut regs = [0u32; MAX_REGISTERS];
+        for (r, w) in regs.iter_mut().zip(params.as_chunks::<4>().0) {
+            *r = u32::from_ne_bytes(*w);
+        }
+        assert!(self.queued < SLOTS);
+        let tail = (self.head + self.queued) % SLOTS;
+        self.tasks[tail] = Task {
+            regs,
+            read,
+            iep2: true,
+        };
         self.queued += 1;
         Ok(())
     }

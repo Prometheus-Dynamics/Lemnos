@@ -4,15 +4,29 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The Rockchip IEP2 deinterlacer behind the vendor kernel's mpp_service: its parameter and register layouts, jobs checked against the caller's dma-bufs, and a driver that reopens itself after a failure. No vendor library"
+description = "The Rockchip IEP2 deinterlacer behind the vendor kernel's mpp_service, given to a caller as codec.block/1: jobs built from planes checked against the dma-bufs the caller holds, issued as parameter-block jobs of lemnos-driver-rk-mpp. No vendor library"
 
 [lints]
 workspace = true
 
-# Linux only. No `unsafe` here: the call into the service comes through the `Device` trait.
+# Linux only: the node is reached through lemnos-driver-rk-mpp-sys, which holds the `unsafe`.
 [target.'cfg(target_os = "linux")'.dependencies]
-lemnos-linux-sys = { path = "../../backends/linux-sys" }
-libc.workspace = true
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
+lemnos-driver-codec-jobs = { path = "../codec-jobs" }
+lemnos-driver-rk-mpp = { path = "../rk-mpp" }
+lemnos-driver-rk-mpp-sys = { path = "../rk-mpp-sys" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
+lemnos-driver-rk-mpp = { path = "../rk-mpp", features = ["played"] }
+
+[package.metadata.lemnos]
+driver = "RkIep"
