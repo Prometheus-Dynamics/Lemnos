@@ -138,9 +138,11 @@ fn stats_windows_ok(cfg: &FeConfig) -> bool {
         && (enables & en::CDAF_STATS == 0 || (c.size_x >= 2 && c.size_y >= 2))
 }
 
-/// Bytes an output writes: stride times height, `None` for a bad stride or format.
-fn output_bytes(cfg: &FeConfig, i: usize) -> Option<u64> {
-    let o = &cfg.ch[i].output.format;
+/// Bytes output `i` writes: stride times height, `None` for a bad stride or format or no such
+/// output.
+#[must_use]
+pub fn output_bytes(cfg: &FeConfig, i: usize) -> Option<u64> {
+    let o = &cfg.ch.get(i)?.output.format;
     if !output_format_ok(o.format) {
         return None;
     }

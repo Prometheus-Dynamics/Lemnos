@@ -44,4 +44,4 @@ lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-driver-pisp-sys = { path = "../pisp-sys" }
 
 [package.metadata.lemnos]
-driver = "PispBe"
+driver = ["PispBe", "PispFe"]

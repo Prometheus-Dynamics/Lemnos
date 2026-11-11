@@ -1,5 +1,5 @@
 //! The front end's output 0 through the host's own frame stream, end to end: a consumer attaches
-//! to the `frames` stream as a client of the daemon does, posts a job on the `jobs` stream, and
+//! to the `output0` stream as a client of the daemon does, posts a job on the `config` stream, and
 //! reads the frame through the descriptor it was handed for the buffer. A stand-in for the block
 //! and the module writes a known pattern by device address into the memory it was given for the
 //! job's buffer, as the block's DMA does, and keeps the module's rules: a job on a buffer with no
@@ -29,9 +29,9 @@ use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_sim::SimBoard;
 use lemnos_wire::ring::{Consumer, Layout};
 
-use super::{Link, Options, PispFe};
+use super::{Link, Options, PispFe, PispFeNeeds};
 use crate::fe::FrontEnd;
-use crate::fe_hw::{Finished, Hardware, Job, Placed, Plan, Set, Start};
+use crate::fe_hw::{Finished, Hardware, Job, Placed, Plan, Registered, Set, Start};
 use crate::fe_job::CONFIG_BYTES;
 use crate::format::formats;
 use crate::uapi::{Branch, ImageFormatConfig, Wire, fe_enable as en};
@@ -42,7 +42,6 @@ const HEIGHT: u32 = 32;
 const OUTPUT_BYTES: u32 = WIDTH * 2 * HEIGHT;
 const BUFFERS: u32 = 4;
 const CONFIG: u64 = 0x1000_0000;
-const STATS: u64 = 0x2000_0000;
 /// Where the stand-in puts the first memory it is given, and how far apart the rest.
 const MEMORY: u64 = 0x4000_0000;
 const MEMORY_SPAN: u64 = 0x0010_0000;
@@ -121,13 +120,14 @@ impl StreamAllocator for Handles {
     }
 }
 
-/// A host whose device 0 has a `jobs` stream and a `frames` stream, `memory` as given.
+/// A host whose device 0 has a `config` stream and an `output0` stream, `memory` as given.
 fn host_with(memory: &str) -> Host {
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
          [[devices]]\nid = \"isp\"\ndriver = \"fake-counter\"\n\
-         [devices.streams.jobs]\nbuffers = 1\nbuffer_bytes = 64\njob_slots = 4\njob_bytes = 128\n\
-         [devices.streams.frames]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{memory}"
+         [devices.streams.config]\nbuffers = 1\nbuffer_bytes = {CONFIG_BYTES}\njob_slots = 4\n\
+         job_bytes = 128\n\
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n{memory}"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();
@@ -170,8 +170,8 @@ struct Buffer {
     at: Where,
 }
 
+#[derive(Default)]
 struct Block {
-    config: Vec<u8>,
     buffers: Vec<Buffer>,
     made: u32,
     started: u32,
@@ -186,24 +186,6 @@ struct Block {
     /// Jobs whose output 0 address was in no memory the module holds.
     stray: u32,
     bad_returns: u32,
-}
-
-impl Default for Block {
-    fn default() -> Self {
-        Self {
-            config: vec![0; CONFIG_BYTES],
-            buffers: Vec::new(),
-            made: 0,
-            started: 0,
-            output0_bytes: 0,
-            queue: VecDeque::new(),
-            finished: VecDeque::new(),
-            given: 0,
-            refused: 0,
-            stray: 0,
-            bad_returns: 0,
-        }
-    }
 }
 
 impl Block {
@@ -273,11 +255,7 @@ impl Hardware for Hw {
                 })
                 .collect();
         });
-        Ok(Placed {
-            config: CONFIG,
-            stats: STATS,
-            output1: None,
-        })
+        Ok(Placed { config: CONFIG })
     }
 
     fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set> {
@@ -320,9 +298,17 @@ impl Hardware for Hw {
         });
     }
 
-    fn read_config(&mut self, _slot: u32, out: &mut [u8; CONFIG_BYTES]) -> Result<()> {
-        self.with(|b| out.copy_from_slice(&b.config));
+    fn write_config(&mut self, _slot: u32, _config: &[u8; CONFIG_BYTES]) -> Result<()> {
         Ok(())
+    }
+
+    fn register(&mut self, _memory: BorrowedFd<'_>) -> Result<Registered> {
+        // Output 0 only here: nothing else is lent.
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn unregister(&mut self, _region: u32) -> Result<()> {
+        Err(Status::NOT_FOUND)
     }
 
     fn post(&mut self, job: &Job) -> Result<()> {
@@ -392,11 +378,14 @@ fn driver(host: &Host, hw: &Hw) -> PispFe {
     };
     let mut fe = PispFe::with_hardware(
         Box::new(hw.clone()),
-        Some(stream("jobs")),
-        Some(stream("frames")),
-        Options::new(link, 4, 4, "cfg", "st", ["frames", "b"]).unwrap(),
+        PispFeNeeds {
+            config: stream("config"),
+            statistics: None,
+            output0: Some(stream("output0")),
+            output1: None,
+        },
+        Options::new(link, 4).unwrap(),
     );
-    hw.with(|b| b.config = config());
     let input = IspInput {
         width: WIDTH,
         height: HEIGHT,
@@ -428,7 +417,10 @@ impl Client {
         Self { lease, ring }
     }
 
+    /// Writes the configuration into config buffer 0 and posts a job naming it.
     fn post(&mut self, identity: u64, output0: u32) {
+        let at = self.lease.layout.buffer_offset(0).unwrap();
+        assert!(self.lease.buffers.write(at, &config()));
         let job = IspJob {
             identity,
             layout: LAYOUT_FRONT_END,
@@ -470,8 +462,8 @@ fn read(file: &File) -> Vec<u8> {
 fn the_consumer_reads_what_the_block_wrote_for_its_job() {
     let host = host();
     let hw = Hw::default();
-    let mut frames = Client::attach(&host, "frames");
-    let mut jobs = Client::attach(&host, "jobs");
+    let mut frames = Client::attach(&host, "output0");
+    let mut jobs = Client::attach(&host, "config");
     let mut fe = driver(&host, &hw);
     CameraIsp::start(&mut fe).unwrap();
     assert_eq!(
@@ -517,8 +509,8 @@ fn the_consumer_reads_what_the_block_wrote_for_its_job() {
 fn a_job_on_a_buffer_the_consumer_holds_or_a_job_has_is_dropped() {
     let host = host();
     let hw = Hw::default();
-    let mut frames = Client::attach(&host, "frames");
-    let mut jobs = Client::attach(&host, "jobs");
+    let mut frames = Client::attach(&host, "output0");
+    let mut jobs = Client::attach(&host, "config");
     let mut fe = driver(&host, &hw);
     CameraIsp::start(&mut fe).unwrap();
     // Two jobs on one buffer, taken in one look: the second has nowhere to go.
@@ -551,8 +543,8 @@ fn a_job_on_a_buffer_the_consumer_holds_or_a_job_has_is_dropped() {
 fn a_new_consumer_gets_frames_in_its_own_memory() {
     let host = host();
     let hw = Hw::default();
-    let mut jobs = Client::attach(&host, "jobs");
-    let first = Client::attach(&host, "frames");
+    let mut jobs = Client::attach(&host, "config");
+    let first = Client::attach(&host, "output0");
     let mut fe = driver(&host, &hw);
     CameraIsp::start(&mut fe).unwrap();
     // The first consumer leaves with the block in the middle of its job on buffer 3.
@@ -561,8 +553,8 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
     assert_eq!(hw.with(|b| b.queue.len()), 1);
     let old: Vec<File> = (0..BUFFERS).map(|buffer| first.file(buffer)).collect();
     drop(first);
-    host.stream_detach(0, "frames", CALLER).unwrap();
-    let mut second = Client::attach(&host, "frames");
+    host.stream_detach(0, "output0", CALLER).unwrap();
+    let mut second = Client::attach(&host, "output0");
     now = fe.tick(now).unwrap();
     assert_eq!(
         hw.with(|b| b.given),
@@ -615,7 +607,7 @@ fn a_new_consumer_gets_frames_in_its_own_memory() {
 fn with_no_consumer_no_job_is_sent() {
     let host = host();
     let hw = Hw::default();
-    let mut jobs = Client::attach(&host, "jobs");
+    let mut jobs = Client::attach(&host, "config");
     let mut fe = driver(&host, &hw);
     CameraIsp::start(&mut fe).unwrap();
     jobs.post(1, 0);
@@ -626,7 +618,7 @@ fn with_no_consumer_no_job_is_sent() {
     );
     assert_eq!(CameraIsp::counters(&mut fe).unwrap().dropped, 1);
 
-    let mut frames = Client::attach(&host, "frames");
+    let mut frames = Client::attach(&host, "output0");
     now = fe.tick(now).unwrap();
     assert_eq!(hw.with(|b| b.with_memory()), BUFFERS as usize);
     jobs.post(2, 0);
@@ -644,18 +636,18 @@ fn a_stream_without_handles_is_refused_and_gets_no_job_and_no_garbage() {
     // block.
     let host = host_with("");
     let hw = Hw::default();
-    let frames = Client::attach(&host, "frames");
-    let mut jobs = Client::attach(&host, "jobs");
+    let frames = Client::attach(&host, "output0");
+    let mut jobs = Client::attach(&host, "config");
     let mut fe = driver(&host, &hw);
     assert_eq!(CameraIsp::start(&mut fe), Err(Status::NOT_SUPPORTED));
     assert_eq!(hw.with(|b| b.given), 0);
     drop(frames);
-    host.stream_detach(0, "frames", CALLER).unwrap();
+    host.stream_detach(0, "output0", CALLER).unwrap();
 
     // Started with nobody attached, it can't know yet. Once a consumer is there it says so,
     // and a job is dropped rather than run into memory the consumer never sees.
     CameraIsp::start(&mut fe).unwrap();
-    let mut frames = Client::attach(&host, "frames");
+    let mut frames = Client::attach(&host, "output0");
     let mut now = fe.tick(1).unwrap();
     assert!(matches!(fe.health(), Health::Degraded(_)));
     jobs.post(1, 1);

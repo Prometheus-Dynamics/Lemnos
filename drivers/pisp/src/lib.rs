@@ -60,4 +60,7 @@ pub use be_device::{
     OUTPUT_STREAMS as BE_OUTPUT_STREAMS, Options as BeOptions, PispBe, PispBeNeeds,
 };
 #[cfg(all(feature = "device", target_os = "linux"))]
-pub use fe_device::PispFe;
+pub use fe_device::{
+    CONFIG_STREAM as FE_CONFIG_STREAM, Link as FeLink, OUTPUT_STREAMS as FE_OUTPUT_STREAMS,
+    Options as FeOptions, PispFe, PispFeNeeds, STATISTICS_STREAM as FE_STATISTICS_STREAM,
+};
