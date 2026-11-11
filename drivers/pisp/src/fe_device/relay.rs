@@ -1,4 +1,4 @@
-//! Which buffer of the `frames` stream is where, and the rules that make the image the block
+//! Which buffer of the `output0` stream is where, and the rules that make the image the block
 //! wrote for a job be the image the stream's consumer reads.
 //!
 //! The stream's memory is the host's: one dma-buf per buffer, made anew for every consumer. The
@@ -31,7 +31,7 @@ use crate::fe_hw::{Finished, Hardware, Set};
 /// The most buffers a stream may have (`LEMNOS_STREAM_MAX_OWN_BUFFERS`).
 pub(super) const MAX_BUFFERS: usize = 64;
 
-/// The producer's end of the `frames` stream.
+/// The producer's end of the `output0` stream.
 pub(super) type Frames = dyn StreamEndpoint<Error = ErrorKind> + Send;
 
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +48,7 @@ struct Slot {
     refused: bool,
 }
 
-/// The state of every buffer of the `frames` stream, on both sides.
+/// The state of every buffer of the `output0` stream, on both sides.
 #[derive(Debug)]
 pub(super) struct Relay {
     slots: [Slot; MAX_BUFFERS],
@@ -73,7 +73,7 @@ impl Relay {
     }
 
     /// The module's stream is new: it has no buffer's memory, no job and has published nothing.
-    /// What the driver holds on the `frames` stream, it still holds.
+    /// What the driver holds on the `output0` stream, it still holds.
     pub(super) fn restart(&mut self, count: u32) {
         self.count = count.min(MAX_BUFFERS as u32);
         self.no_handles = false;
@@ -221,6 +221,13 @@ impl Relay {
                 false
             }
             Err(_) => false,
+        }
+    }
+
+    /// A job claimed on `buffer` was not sent after all: the buffer is free for the next one.
+    pub(super) fn unclaim(&mut self, buffer: u32) {
+        if let Some(slot) = self.slot(buffer) {
+            slot.posted = false;
         }
     }
 

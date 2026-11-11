@@ -156,6 +156,25 @@ struct Register {
     size: u64,
 }
 
+/// `struct lemnos_stream_unregister`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct Unregister {
+    region: u32,
+    reserved: u32,
+}
+
+/// A dma-buf the block may be sent to, as the module pinned it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region {
+    /// What [`Stream::unregister`] takes.
+    pub region: u32,
+    /// Its device address.
+    pub addr: u64,
+    /// Its bytes, as the module found them.
+    pub size: u64,
+}
+
 /// `struct lemnos_stream_buffer`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -199,6 +218,7 @@ const IOC_FE_START: u32 = iow::<Start>(b'L', 0xc9);
 const IOC_FE_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xca, 0);
 const IOC_KICK: u32 = lemnos_linux_sys::ioc(0, b'L', 0x81, 0);
 const IOC_REGISTER: u32 = iowr::<Register>(b'L', 0x82);
+const IOC_UNREGISTER: u32 = iow::<Unregister>(b'L', 0x83);
 const IOC_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
 const IOC_BUFFER: u32 = iowr::<StreamBuffer>(b'L', 0x86);
 
@@ -352,12 +372,32 @@ impl Stream {
 
     /// Pins a dma-buf the block may be sent to. Its device address.
     pub fn register(&self, memory: BorrowedFd<'_>) -> io::Result<u64> {
+        self.register_region(memory).map(|r| r.addr)
+    }
+
+    /// Pins a dma-buf the block may be sent to, until [`unregister`](Self::unregister) or the
+    /// stream's end. The module refuses one already registered or overlapping one that is, and
+    /// one past the stream's regions.
+    pub fn register_region(&self, memory: BorrowedFd<'_>) -> io::Result<Region> {
         let mut reg = Register {
             fd: memory.as_raw_fd(),
             ..Default::default()
         };
         ioctl(self.fd.as_fd(), IOC_REGISTER, (&raw mut reg).cast())?;
-        Ok(reg.addr)
+        Ok(Region {
+            region: reg.region,
+            addr: reg.addr,
+            size: reg.size,
+        })
+    }
+
+    /// Lets go of a registered dma-buf. The module refuses (`EBUSY`) while a job uses it.
+    pub fn unregister(&self, region: u32) -> io::Result<()> {
+        let mut arg = Unregister {
+            region,
+            reserved: 0,
+        };
+        ioctl(self.fd.as_fd(), IOC_UNREGISTER, (&raw mut arg).cast()).map(|_| ())
     }
 
     /// Gives `buffer` the dma-buf `memory`, which the module pins for as long as the buffer has
@@ -496,6 +536,8 @@ mod tests {
         assert_eq!(offset_of!(Job, range), 16);
         assert_eq!(size_of::<StreamCreate>(), 56);
         assert_eq!(size_of::<Register>(), 24);
+        assert_eq!(size_of::<Unregister>(), 8);
+        assert_eq!(IOC_UNREGISTER, 0x4008_4c83);
         assert_eq!(size_of::<StreamStatus>(), 40);
         assert_eq!(size_of::<StreamBuffer>(), 24);
         assert_eq!(offset_of!(StreamBuffer, fd), 4);

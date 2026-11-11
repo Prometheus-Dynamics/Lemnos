@@ -72,8 +72,9 @@ restore it.
 ## The built-in form
 
 A built-in driver is a crate in `drivers/<name>/`. Its `Cargo.toml` names its type under
-`[package.metadata.lemnos]`, and `scripts/generate-builtins.py` lists it for lemnosd when a
-maintainer runs it after the driver merges. Chip drivers are `no_std` over `embedded-hal`. The
+`[package.metadata.lemnos]` (`driver = "Type"`, or a list for a crate with more than one, as
+`drivers/pisp` has), and `scripts/generate-builtins.py` lists it for lemnosd when a maintainer runs
+it after the driver merges. Chip drivers are `no_std` over `embedded-hal`. The
 closest examples are `drivers/bmm150` (a magnetometer on I2C, with its power-up sequence in Rust) and
 `drivers/ina2xx` (a power monitor with its chip layer in a separate module).
 
