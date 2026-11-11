@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The K230 AI2D block: its kernel interface's layouts, jobs checked against the dma-bufs a caller holds, and image.scaler/1 jobs served from a stream over a block that reopens itself after a failure. No vendor library"
+description = "The K230 AI2D block: its kernel interface's layouts, and checked job logic over a device trait that nothing implements on Linux. No hardware path and no driver: the block's register map is not public. No vendor library"
 
 [lints]
 workspace = true

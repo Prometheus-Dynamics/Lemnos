@@ -1,7 +1,11 @@
 //! The K230's AI2D block (crop, resize, pad and affine transforms for a neural network's input):
-//! what its kernel interface is, jobs checked against the dma-bufs a caller holds, and
-//! `image.scaler/1` jobs served from a stream over a block that reopens itself after a failure.
-//! No vendor library: nothing here links, loads or follows one.
+//! what its kernel interface is, and checked job logic over a [`Device`] trait. No vendor
+//! library: nothing here links, loads or follows one.
+//!
+//! **There is no hardware path, and this is not a driver.** Nothing implements [`Device`] on
+//! Linux (see "Not here" below), so no job reaches the block. The crate has no `#[driver]` type,
+//! serves no contract, is not in `lemnosd`, and no board file can name it. Everything below runs
+//! only against the played-back block in its tests.
 //!
 //! - [`uapi`]: the node, the two requests and their structure, the register window and the
 //!   interrupt, transcribed with their source and pinned by layout tests.
@@ -12,8 +16,9 @@
 //!   both imports whatever happened. After a failure it closes the block (the kernel then drops
 //!   every import) and reopens with a backoff doubling from 250 ms, capped at 8 s. It never gives
 //!   up and never turns itself off. A resize on an open block allocates nothing.
-//! - [`Scaler`]: `image.scaler/1` jobs from a stream whose buffers are dma-bufs, the way the
-//!   other image drivers serve their contracts. See [`scaler`].
+//! - [`Scaler`]: jobs in `image.scaler/1`'s job format taken from a stream whose buffers are
+//!   dma-bufs, checked, and handed to [`Ai2d`]. It is the loop a driver would run, over the same
+//!   trait; it does not implement the contract's methods. See [`scaler`].
 //!
 //! # Not here: a [`Device`] for Linux
 //!

@@ -29,8 +29,9 @@
 //! - The 4:2:0 formats through jobs: a job names one buffer and the engine takes each plane from
 //!   the start of its own dma-buf. They go through [`Device`] and [`Nonai2d`] with a dma-buf per
 //!   plane.
-//! - The `image.convert/1` contract's methods: this is a library, as the other image drivers'
-//!   job servers are; nothing is registered in `lemnosd`.
+//! - The `image.convert/1` contract's methods: this is a library. It has no `#[driver]` type,
+//!   is not in `lemnosd`, and no board file can name it; [`Converter`] is the job loop a driver
+//!   would run.
 //!
 //! A conversion that times out closes the node, and the job completes as failed (empty). The
 //! kernel lets go of the dma-bufs when the node closes; an engine that is really still running

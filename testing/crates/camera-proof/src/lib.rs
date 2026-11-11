@@ -3,10 +3,10 @@
 //! streams frames and saves them.
 //!
 //! It knows no chip. Every step is a call on a `camera.*` contract, reached through a [`Bus`]. The
-//! [`host`] module reaches devices in one process with simulated time. A board reached through
-//! `lemnosd` has no bus yet: the device list now carries each device's `link`
-//! (`lemnos_client::follow`), and no consumer platform takes the frame stream the Linux module
-//! makes.
+//! [`host`] module is the only bus: it reaches devices in one process with simulated time. There
+//! is no bus over `lemnosd`'s socket yet, though the client has each part one needs: calls, each
+//! device's `link` (`lemnos_client::follow`), and a frame stream's consumer end
+//! (`Client::open_stream`, with `lemnos-linux-stream`'s platform on Linux).
 //!
 //! Frames carry the sequence, identity and timestamp their producer gave them. A capture counts
 //! sequence gaps, the receiver's own drop count, and the frame rate measured from timestamps.
