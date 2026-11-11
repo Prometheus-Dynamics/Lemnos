@@ -24,8 +24,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use lemnos_driver_rknpu::uapi::{self, Action, MemCreate, MemDestroy, MemMap, Submit, TASK_BYTES};
-use lemnos_driver_rknpu::{Create, Domain, Kind, Object, Query, Run, Session};
+use crate::request::{Create, Domain, Kind, Object, Query, Run};
+use crate::uapi::{self, Action, MemCreate, MemDestroy, MemMap, Submit, TASK_BYTES};
 use lemnos_linux_sys::mmap::Mapping;
 
 /// Objects a session holds at once: far more than the driver's programs and slots make.
@@ -140,14 +140,16 @@ impl NpuSession {
     }
 }
 
-impl Session for NpuSession {
-    fn query(&mut self, query: Query) -> io::Result<u32> {
+impl NpuSession {
+    /// Sends `RKNPU_ACTION` and returns the value the kernel answers.
+    pub fn query(&mut self, query: Query) -> io::Result<u32> {
         let mut arg = query.to_raw();
         call(self.fd.as_fd(), &mut arg)?;
         Ok(arg.value)
     }
 
-    fn create(&mut self, request: Create) -> io::Result<Object> {
+    /// Makes an object (`MEM_CREATE`) and maps it for the CPU (`MEM_MAP`, `mmap`), zeroed.
+    pub fn create(&mut self, request: Create) -> io::Result<Object> {
         if self.held.len() >= MAX_OBJECTS {
             return Err(io::Error::from(io::ErrorKind::OutOfMemory));
         }
@@ -197,12 +199,15 @@ impl Session for NpuSession {
         })
     }
 
-    fn memory(&mut self, handle: u32) -> Option<&mut [u8]> {
+    /// The CPU's mapping of an object this session made.
+    pub fn memory(&mut self, handle: u32) -> Option<&mut [u8]> {
         let at = self.find(handle)?;
         self.held[at].map.as_mut().map(Mapping::as_mut_slice)
     }
 
-    fn destroy(&mut self, handle: u32) -> io::Result<()> {
+    /// Unmaps the CPU's mapping, then closes the handle (`MEM_DESTROY`). After an error the
+    /// handle is still the session's and may be destroyed again.
+    pub fn destroy(&mut self, handle: u32) -> io::Result<()> {
         let at = self
             .find(handle)
             .ok_or_else(|| refused("not an object of this session"))?;
@@ -218,7 +223,9 @@ impl Session for NpuSession {
         Ok(())
     }
 
-    fn submit(&mut self, run: &Run) -> io::Result<()> {
+    /// Runs a job (`SUBMIT`, blocking), after checking its body is a live object of this
+    /// session made for it.
+    pub fn submit(&mut self, run: &Run) -> io::Result<()> {
         let at = self
             .find(run.body())
             .ok_or_else(|| refused("not an object of this session"))?;

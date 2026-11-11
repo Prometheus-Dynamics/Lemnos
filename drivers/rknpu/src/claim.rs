@@ -35,8 +35,8 @@
 //! domain, so while it runs the IOMMU maps those objects and no others. The checks that keep it
 //! so:
 //!
-//! - **One claim per service, one service per node.** [`Claim`] borrows its [`Service`] mutably.
-//!   No other process may open the node: the kernel's domains are shared by every opener, so an
+//! - **One claim per service, one service per node.** A [`Service`] gives out one [`Claim`] at a
+//!   time ([`ClaimError::Claimed`] while one is alive). No other process may open the node: the kernel's domains are shared by every opener, so an
 //!   object another opener makes in a program's domain would be mapped during its runs, and
 //!   nothing this side can see it. That is a property of the board's device permissions, not of
 //!   this crate (and another opener of the node can already make the kernel follow any address
@@ -70,13 +70,17 @@
 //! A claim that fails to open starts a backoff: until it is due, [`Service::claim`] answers
 //! [`ClaimError::BackingOff`] without touching the device. The delay doubles from 250 ms, is
 //! capped at 8 s, and clears when a claim is taken. The service never gives up. A run the block
-//! does not finish completes as [`RunStatus::Failed`] and the claim stays.
+//! does not finish completes as [`RunStatus::Failed`] and the claim stays: the kernel has reset
+//! the block before the call returns. A session call the kernel answers with `ENODEV` (the node's
+//! device was removed) marks the claim [`Claim::lost`]; its holder drops it and claims again.
 //!
 //! # Allocation
 //!
 //! Taking a claim, loading and attaching allocate. A run allocates nothing.
 
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lemnos_contract_npu::{
     Counters, JOB_BYTES, MAX_STREAM_NAME, Npu, NpuInfo, RESULT_BYTES, RunJob, RunResult, RunStatus,
@@ -102,6 +106,10 @@ pub const MAX_JOBS_PER_ROUND: u32 = 64;
 
 /// The longest job read off the queue: a longer one is taken off and faults its consumer.
 const LONGEST_JOB: usize = 256;
+
+/// `ENODEV` (`include/uapi/asm-generic/errno-base.h`): what the kernel answers on a file whose
+/// device was removed.
+const ENODEV: i32 = 19;
 
 /// First delay before a claim is tried again.
 const BACKOFF_FIRST_NS: u64 = 250_000_000;
@@ -173,6 +181,8 @@ pub enum ClaimError {
         /// When the next claim may be tried.
         retry_at_ns: u64,
     },
+    /// A claim taken on this service is still alive.
+    Claimed,
 }
 
 /// The node, through `D`.
@@ -181,6 +191,8 @@ pub struct Service<D: Device> {
     device: D,
     failures: u32,
     retry_at_ns: u64,
+    /// Set while a claim taken here is alive; the claim clears it when dropped.
+    claimed: Arc<AtomicBool>,
 }
 
 impl<D: Device> Service<D> {
@@ -190,6 +202,7 @@ impl<D: Device> Service<D> {
             device,
             failures: 0,
             retry_at_ns: 0,
+            claimed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -200,7 +213,10 @@ impl<D: Device> Service<D> {
 
     /// Takes the claim: a session, checked to have the block behind an IOMMU, and the kernel's
     /// domain switching found out. `now_ns` is the caller's clock, for the backoff.
-    pub fn claim(&mut self, now_ns: u64) -> Result<Claim<'_, D>, ClaimError> {
+    pub fn claim(&mut self, now_ns: u64) -> Result<Claim<D>, ClaimError> {
+        if self.claimed.load(Ordering::Acquire) {
+            return Err(ClaimError::Claimed);
+        }
         if self.failures > 0 && now_ns < self.retry_at_ns {
             return Err(ClaimError::BackingOff {
                 retry_at_ns: self.retry_at_ns,
@@ -209,7 +225,8 @@ impl<D: Device> Service<D> {
         match self.open() {
             Ok(Some((session, domains))) => {
                 self.failures = 0;
-                Ok(Claim::new(self, session, domains))
+                self.claimed.store(true, Ordering::Release);
+                Ok(Claim::new(Arc::clone(&self.claimed), session, domains))
             }
             Ok(None) => Err(ClaimError::NotConfined),
             Err(error) => {
@@ -289,7 +306,7 @@ struct Program {
 }
 
 /// The claim on the node: a session, its programs and objects, and the stream's buffers held.
-pub struct Claim<'a, D: Device> {
+pub struct Claim<D: Device> {
     session: D::Session,
     domains: Domains,
     programs: [Option<Program>; MAX_PROGRAMS],
@@ -299,10 +316,13 @@ pub struct Claim<'a, D: Device> {
     counters: Counters,
     last_failure: Option<Failure>,
     sequence: u64,
-    service: &'a mut Service<D>,
+    /// Whether the kernel said the node's device is gone.
+    lost: bool,
+    /// The service's flag, cleared when the claim is dropped.
+    claimed: Arc<AtomicBool>,
 }
 
-impl<D: Device> std::fmt::Debug for Claim<'_, D> {
+impl<D: Device> std::fmt::Debug for Claim<D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Claim")
             .field("domains", &self.domains)
@@ -319,8 +339,8 @@ fn program_index(program: u32) -> Option<usize> {
     (index < MAX_PROGRAMS).then_some(index)
 }
 
-impl<'a, D: Device> Claim<'a, D> {
-    fn new(service: &'a mut Service<D>, session: D::Session, domains: Domains) -> Self {
+impl<D: Device> Claim<D> {
+    fn new(claimed: Arc<AtomicBool>, session: D::Session, domains: Domains) -> Self {
         Self {
             session,
             domains,
@@ -330,13 +350,20 @@ impl<'a, D: Device> Claim<'a, D> {
             counters: Counters::default(),
             last_failure: None,
             sequence: 0,
-            service,
+            lost: false,
+            claimed,
         }
     }
 
-    /// The service the claim was taken on.
-    pub fn service(&self) -> &Service<D> {
-        self.service
+    /// Whether the kernel answered a call with `ENODEV`: the node's device is gone, and nothing
+    /// on this session will work again. Drop the claim and take a new one.
+    pub fn lost(&self) -> bool {
+        self.lost
+    }
+
+    /// Notes an error from the session.
+    fn seen(&mut self, error: &io::Error) {
+        self.lost |= error.raw_os_error() == Some(ENODEV);
     }
 
     /// The session.
@@ -405,7 +432,13 @@ impl<'a, D: Device> Claim<'a, D> {
 
     /// Makes an object for program `index` and enters it in the ledger.
     fn create(&mut self, index: usize, request: Create) -> Result<Object, Status> {
-        let object = self.session.create(request).map_err(|_| Status::IO)?;
+        let object = match self.session.create(request) {
+            Ok(object) => object,
+            Err(error) => {
+                self.seen(&error);
+                return Err(Status::IO);
+            }
+        };
         self.ledger.push(Entry {
             handle: object.handle,
             domain: object.domain,
@@ -417,7 +450,13 @@ impl<'a, D: Device> Claim<'a, D> {
     /// Destroys an object. If the kernel refuses, it stays in the ledger with no owner, which
     /// keeps its domain from being given out or run in until [`Self::sweep`] frees it.
     fn release(&mut self, handle: u32) {
-        let freed = self.session.destroy(handle).is_ok();
+        let freed = match self.session.destroy(handle) {
+            Ok(()) => true,
+            Err(error) => {
+                self.seen(&error);
+                false
+            }
+        };
         if let Some(at) = self.ledger.iter().position(|e| e.handle == handle) {
             if freed {
                 self.ledger.swap_remove(at);
@@ -432,6 +471,18 @@ impl<'a, D: Device> Claim<'a, D> {
         let session = &mut self.session;
         self.ledger
             .retain(|e| e.owner.is_some() || session.destroy(e.handle).is_err());
+    }
+
+    /// The stream's buffers held, one bit each, to hand to the next claim on the same stream
+    /// with [`Self::adopt`] when this one is dropped.
+    pub fn held(&self) -> u64 {
+        self.held
+    }
+
+    /// Takes on the buffers an earlier claim on the same stream held: the stream counts them as
+    /// the producer's, and no other claim will be given them again.
+    pub fn adopt(&mut self, held: u64) {
+        self.held |= held;
     }
 
     /// Whether the driver holds `buffer`.
@@ -460,6 +511,29 @@ impl<'a, D: Device> Claim<'a, D> {
         Ok(())
     }
 
+    /// Gives up `buffer` if it was taken under a consumer that has gone, so the next
+    /// [`Self::take_free`] takes it again under the consumer attached now. A buffer taken before
+    /// the consumer came has nothing behind it, and its completion would reach no one.
+    fn renew<S: StreamEndpoint + ?Sized>(
+        &mut self,
+        stream: &mut S,
+        buffer: u32,
+    ) -> Result<(), S::Error> {
+        if !self.holds(buffer) || !matches!(stream.buffer_current(buffer), Ok(false)) {
+            return Ok(());
+        }
+        // Nothing is behind it, so this reaches no one.
+        stream.publish(StreamFrame {
+            buffer,
+            bytes: 0,
+            sequence: 0,
+            identity: 0,
+            timestamp_ns: 0,
+        })?;
+        self.set_held(buffer, false);
+        Ok(())
+    }
+
     /// Whether `bytes` from the start of `buffer` are inside it: its last byte reads.
     fn fits<S: StreamEndpoint + ?Sized>(&self, stream: &mut S, buffer: u32, bytes: u32) -> bool {
         let Some(last) = bytes.checked_sub(1) else {
@@ -479,6 +553,7 @@ impl<'a, D: Device> Claim<'a, D> {
         if bytes == 0 || bytes > MAX_PROGRAM_BYTES {
             return Err(Status::INVALID_ARGUMENT);
         }
+        self.renew(stream, buffer).map_err(|_| Status::IO)?;
         self.take_free(stream).map_err(|_| Status::IO)?;
         if !self.fits(stream, buffer, bytes) {
             return Err(Status::INVALID_ARGUMENT);
@@ -617,6 +692,7 @@ impl<'a, D: Device> Claim<'a, D> {
         if slot >= slots || bytes == 0 {
             return Err(Status::INVALID_ARGUMENT);
         }
+        self.renew(stream, buffer).map_err(|_| Status::IO)?;
         self.take_free(stream).map_err(|_| Status::IO)?;
         if !self.fits(stream, buffer, bytes) {
             return Err(Status::INVALID_ARGUMENT);
@@ -697,7 +773,8 @@ impl<'a, D: Device> Claim<'a, D> {
                 break;
             }
             // Again for each job: its consumer may have given a buffer back and named it in
-            // this job since the last look.
+            // this job since the last look, or come since the buffer was taken.
+            self.renew(stream, job.result)?;
             self.take_free(stream)?;
             if !self.holds(job.result) {
                 // On the stream but not the driver's now: there is nothing to complete on.
@@ -815,9 +892,10 @@ impl<'a, D: Device> Claim<'a, D> {
             // Whatever the last run left past the buffer's bytes goes.
             rest.fill(0);
         }
-        self.session
-            .submit(&program.run)
-            .map_err(|_| (RunStatus::Failed, Failure::Device))?;
+        if let Err(error) = self.session.submit(&program.run) {
+            self.lost |= error.raw_os_error() == Some(ENODEV);
+            return Err((RunStatus::Failed, Failure::Device));
+        }
         for a in program.attached[..slots].iter().flatten() {
             let memory = self
                 .session
@@ -834,7 +912,7 @@ impl<'a, D: Device> Claim<'a, D> {
     }
 }
 
-impl<D: Device> Drop for Claim<'_, D> {
+impl<D: Device> Drop for Claim<D> {
     /// Destroys every object the claim made before the session closes. Closing the file would
     /// free what is left anyway (the kernel releases a file's handles with it).
     fn drop(&mut self) {
@@ -842,20 +920,21 @@ impl<D: Device> Drop for Claim<'_, D> {
             let _ = self.unload(index as u32 + 1);
         }
         self.sweep();
+        self.claimed.store(false, Ordering::Release);
     }
 }
 
 /// `npu/1` served on a claim and a stream: the contract's calls, with the stream they need.
-pub struct Served<'c, 'a, D: Device, S: StreamEndpoint + ?Sized> {
+pub struct Served<'c, D: Device, S: StreamEndpoint + ?Sized> {
     /// The claim.
-    pub claim: &'c mut Claim<'a, D>,
+    pub claim: &'c mut Claim<D>,
     /// The job stream.
     pub stream: &'c mut S,
     /// The stream's name, as [`Npu::job_stream`] answers it.
     pub name: &'c str,
 }
 
-impl<D: Device, S: StreamEndpoint + ?Sized> Npu for Served<'_, '_, D, S> {
+impl<D: Device, S: StreamEndpoint + ?Sized> Npu for Served<'_, D, S> {
     fn info(&mut self) -> lemnos_core::Result<NpuInfo> {
         Ok(self.claim.info())
     }

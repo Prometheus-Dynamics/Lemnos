@@ -34,6 +34,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_rk_mpp_codec::RkMpp>(),
         entry::<lemnos_driver_rkcif::Rkcif>(),
         entry::<lemnos_driver_rkisp::Rkisp>(),
+        entry::<lemnos_driver_rknpu::Rknpu>(),
         entry::<lemnos_driver_rkvpss::Rkvpss>(),
         entry::<lemnos_driver_rp1_csi2::Rp1Csi2>(),
         entry::<lemnos_driver_status_light::StatusLight>(),

@@ -42,9 +42,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Unfinished in the code
 
-- [ ] **`npu/1` has no driver in the daemon.** `drivers/rknpu` implements the contract as a library
-      and is not registered. How a program learns its buffer addresses is the driver's own framing,
-      not part of the contract.
 - [ ] **The Linux backend does not hand out register windows, interrupts, clocks or resets**,
       though the driver interface and the kernel module have them. A PIO-made I2C bus does not go
       through the module either.

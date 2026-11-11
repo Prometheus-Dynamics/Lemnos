@@ -9,14 +9,20 @@ description = "The Rockchip NPU behind the vendor kernel's DRM node, serving npu
 [lints]
 workspace = true
 
-# No `unsafe` here and no device access of its own: the node is reached through the `Device` and
-# `Session` traits, implemented by `lemnos-driver-rknpu-sys`.
+# No `unsafe` here: every system call goes through lemnos-driver-rknpu-sys, which holds the
+# `unsafe`. This crate's `Device` and `Session` traits are implemented on its node and session.
 [target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-rknpu-sys = { path = "../rknpu-sys" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-contract-npu = { path = "../../contracts/npu" }
-lemnos-linux-sys = { path = "../../backends/linux-sys" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+
+[package.metadata.lemnos]
+driver = "Rknpu"
