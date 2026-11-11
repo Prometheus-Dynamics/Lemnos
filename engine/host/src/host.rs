@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
-    CallerId, ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver, Health, Hint,
-    HostClock, HostOwned, I2c, InterruptHandle, ItemKind, Line, LocalCaller, Manifest, MethodId,
-    NeedKind, Provider, Pwm, RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result,
-    Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    AddressWidth, CallerId, ClocksHandle, Config, ConfigValue, Description, DmaHandle, Driver,
+    Health, Hint, HostClock, HostOwned, I2c, InterruptHandle, ItemKind, Line, LocalCaller,
+    Manifest, MethodId, NeedKind, Provider, Pwm, RawSpiBus, RegistersHandle, Reply, ResetHandle,
+    Resources, Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle,
+    UsbFunctionHandle,
 };
 
 use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue, Owner};
@@ -86,6 +87,7 @@ pub struct DriverEntry {
     ticks: bool,
     tracks_callers: bool,
     host_owned: HostOwned,
+    i2c_register_address: Option<AddressWidth>,
 }
 
 impl DriverEntry {
@@ -110,6 +112,7 @@ impl DriverEntry {
             // Nothing says what a driver built elsewhere does to hardware, so it is never
             // bound to a host-owned device.
             host_owned: HostOwned::Refused,
+            i2c_register_address: None,
         }
     }
 }
@@ -128,6 +131,7 @@ pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
         ticks: D::TICKS,
         tracks_callers: D::TRACKS_CALLERS,
         host_owned: D::HOST_OWNED,
+        i2c_register_address: D::I2C_REGISTER_ADDRESS,
     }
 }
 
@@ -960,8 +964,20 @@ impl Provider for Binding<'_> {
         Ok(LocalCaller::new(router, target.index, contract))
     }
 
+    fn i2c(&mut self, need: &str) -> Result<I2c> {
+        let bus = self.bus_name(need)?;
+        let handle = lock(&self.inner.backend).i2c(&bus)?;
+        // A host-owned device's driver reads registers of the width it declares, and writes
+        // nothing else.
+        Ok(if self.guest() {
+            let register = self.slot.entry.and_then(|entry| entry.i2c_register_address);
+            guest::i2c(handle, register)
+        } else {
+            handle
+        })
+    }
+
     buses! {
-        i2c -> I2c;
         spi -> Spi;
         raw_spi -> RawSpiBus;
         line -> Line;

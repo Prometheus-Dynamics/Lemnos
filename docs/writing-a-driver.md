@@ -104,6 +104,20 @@ opens files or nodes itself and, seeing `cfg.host_owned()`, opens them for readi
 (`drivers/hwmon-fan`). A driver that says nothing is never bound to a host-owned device; the
 device shows as waiting, with that as its reason.
 
+Reading most I2C chips means writing the register's address first (`write_read`). On a host-owned
+device the I2C bus passes that, and nothing else that writes, when the driver declares how its
+chips name a register with `Lifecycle::I2C_REGISTER_ADDRESS` (`Some(AddressWidth::Bits8)` or
+`Bits16`): a transaction passes when every write in it is exactly one address of that width,
+followed at once by a non-empty read. A register's value never fits (it travels in the same write
+as the address), and a write with no read after it is refused. Declare it only for chips on which
+an address write does nothing but move the register pointer; a chip that takes one-byte commands is
+left at `None`, where only plain reads pass. The pointer is still the chip's state: an operating
+system driver that sets it in one transfer and reads it in a later one can read the register
+Lemnos named in between, while Lemnos's own address-and-read is one transfer the kernel never
+splits. A driver that reads such a chip also looks at `cfg.host_owned()` and skips what it would
+configure, reading what the owner set up instead (`drivers/bmm150`, `drivers/ina2xx`,
+`drivers/generic-sensor`).
+
 A driver with a stream need (`StreamHandle`) can ask what the stream's buffers are when it binds:
 `buffer_kind()` answers `Plain` (shared memory, reached with `write` and `read`) or `Handles` (one
 dma-buf per buffer, which hardware can be given), from the board file's `memory` key, before any

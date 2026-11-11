@@ -9,9 +9,18 @@
 //!
 //! What counts as a change, bus by bus:
 //!
-//! - I2C: any write. A read of a register that first writes the register's number is a write,
-//!   so only chips that answer a plain read can be read; the rest are the operating system's to
-//!   read (its own files say what they hold).
+//! - I2C: any write but a register's address before a read. A transaction passes when every
+//!   write in it is exactly one register address, of the width the driver declares for its chips
+//!   ([`Lifecycle::I2C_REGISTER_ADDRESS`](lemnos_core::Lifecycle::I2C_REGISTER_ADDRESS)), with a
+//!   non-empty read right after it, so it ends with a read; a plain read always passes. A write
+//!   with no read after it, two writes in a row (which go out as one longer write), a write
+//!   longer or shorter than an address, and any write at all when the driver declares no width
+//!   are refused. That is how drivers read registers (`write_read`, and several address-read
+//!   pairs in one transaction), and it leaves no room for a value: a register is written by
+//!   sending its address and then the value in the same write. What the address write does
+//!   change is the chip's register pointer, which the operating system's driver uses too; see
+//!   that constant's documentation for when that matters and why a combined address-and-read
+//!   can't be split by the operating system's own transfers.
 //! - SPI: anything that sends bytes. Only a pure read and a delay pass.
 //! - A line: configuring it and setting it. Its level and its edges are read.
 //! - PWM: configuring it. Its configuration is read.
@@ -39,6 +48,7 @@ use lemnos_hal::blocks::{
 };
 use lemnos_hal::i2c::{self, I2c as HalI2c};
 use lemnos_hal::raw::{Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, SpiSegment};
+use lemnos_hal::register::AddressWidth;
 use lemnos_hal::spi::{self, SpiDevice};
 use lemnos_hal::{
     Clocks, DmaBuffers, ErrorKind, Interrupt, Registers, Reset, StreamEndpoint, Uart as UartTrait,
@@ -53,8 +63,35 @@ type Refusable<T> = Result<T, ErrorKind>;
 /// A resource of a host-owned device: `T` with its changes refused.
 pub(crate) struct ReadOnly<T>(T);
 
-pub(crate) fn i2c(bus: I2c) -> I2c {
-    I2c(lemnos_core::Held::boxed(Box::new(ReadOnly(bus))))
+/// An I2C bus of a host-owned device, for a driver whose chips name a register with
+/// `register` (`None`: only plain reads).
+pub(crate) fn i2c(bus: I2c, register: Option<AddressWidth>) -> I2c {
+    I2c(lemnos_core::Held::boxed(Box::new(ReadOnlyI2c {
+        bus,
+        register,
+    })))
+}
+
+/// An I2C bus that passes reads, and register reads of one address width.
+pub(crate) struct ReadOnlyI2c {
+    bus: I2c,
+    register: Option<AddressWidth>,
+}
+
+/// Whether `operations` only read: each write is one register address of `register`'s width,
+/// with a non-empty read right after it. Plain reads, and an empty transaction, pass.
+fn reads_only(operations: &[i2c::Operation<'_>], register: Option<AddressWidth>) -> bool {
+    operations.iter().enumerate().all(|(at, operation)| {
+        let i2c::Operation::Write(written) = operation else {
+            return true;
+        };
+        let address = register.is_some_and(|width| written.len() == width.bytes());
+        let read_next = matches!(
+            operations.get(at + 1),
+            Some(i2c::Operation::Read(read)) if !read.is_empty()
+        );
+        address && read_next
+    })
 }
 
 pub(crate) fn spi(bus: Spi) -> Spi {
@@ -109,19 +146,16 @@ pub(crate) fn stream(stream: StreamHandle) -> StreamHandle {
     lemnos_core::Held::boxed(Box::new(ReadOnly(stream)))
 }
 
-impl i2c::ErrorType for ReadOnly<I2c> {
+impl i2c::ErrorType for ReadOnlyI2c {
     type Error = ErrorKind;
 }
 
-impl HalI2c for ReadOnly<I2c> {
+impl HalI2c for ReadOnlyI2c {
     fn transaction(&mut self, address: u8, operations: &mut [i2c::Operation<'_>]) -> Refusable<()> {
-        if operations
-            .iter()
-            .any(|operation| matches!(operation, i2c::Operation::Write(_)))
-        {
+        if !reads_only(operations, self.register) {
             return Err(REFUSED);
         }
-        self.0.transaction(address, operations)
+        self.bus.transaction(address, operations)
     }
 }
 
@@ -461,18 +495,170 @@ mod tests {
 
     const SOON: Duration = Duration::from_millis(1);
 
+    fn host_i2c(mock: &MockI2c, register: Option<AddressWidth>) -> I2c {
+        i2c(
+            I2c(lemnos_core::Held::boxed(Box::new(mock.clone()))),
+            register,
+        )
+    }
+
     #[test]
-    fn an_i2c_bus_passes_a_plain_read_and_refuses_anything_with_a_write_in_it() {
+    fn an_i2c_bus_with_no_register_width_passes_only_a_plain_read() {
         let mock = MockI2c::new().with_raw_target(0x20);
         mock.set_logging(true);
-        let mut bus = i2c(I2c(lemnos_core::Held::boxed(Box::new(mock.clone()))));
+        let mut bus = host_i2c(&mock, None);
         let mut byte = [0u8; 1];
         assert_eq!(bus.write(0x20, &[1, 2]), Err(REFUSED));
-        // Naming a register before reading it is a write.
+        // Naming a register before reading it is a write, and this driver names none.
         assert_eq!(bus.write_read(0x20, &[1], &mut byte), Err(REFUSED));
         assert!(mock.transfers().is_empty(), "nothing went out");
         let _ = bus.read(0x20, &mut byte);
         assert_eq!(mock.transfers().len(), 1, "a plain read does");
+    }
+
+    #[test]
+    fn an_i2c_bus_passes_a_register_address_then_a_read_and_refuses_every_other_write() {
+        let mock = MockI2c::new()
+            .with_target(0x20, AddressWidth::Bits8)
+            .with_registers(0x20, 0x10, &[0xAB, 0xCD]);
+        mock.set_logging(true);
+        let mut bus = host_i2c(&mock, Some(AddressWidth::Bits8));
+        let mut two = [0u8; 2];
+        // A register written: its address and its value in one write, with or without a read
+        // after it.
+        assert_eq!(bus.write(0x20, &[0x10, 0x55]), Err(REFUSED));
+        assert_eq!(bus.write_read(0x20, &[0x10, 0x55], &mut two), Err(REFUSED));
+        // The address alone, with nothing read: it moves the pointer and reads nothing.
+        assert_eq!(bus.write(0x20, &[0x10]), Err(REFUSED));
+        // The address and the value as two writes, which go out as one.
+        let (address, value) = ([0x10u8], [0x55u8]);
+        assert_eq!(
+            bus.transaction(
+                0x20,
+                &mut [
+                    i2c::Operation::Write(&address),
+                    i2c::Operation::Write(&value),
+                    i2c::Operation::Read(&mut two),
+                ],
+            ),
+            Err(REFUSED)
+        );
+        // A read, then a write at the end.
+        let mut one = [0u8; 1];
+        assert_eq!(
+            bus.transaction(
+                0x20,
+                &mut [
+                    i2c::Operation::Write(&address),
+                    i2c::Operation::Read(&mut one),
+                    i2c::Operation::Write(&value),
+                ],
+            ),
+            Err(REFUSED)
+        );
+        // An address followed by an empty read reads nothing.
+        assert_eq!(bus.write_read(0x20, &[0x10], &mut []), Err(REFUSED));
+        // An address wider than the chip's.
+        assert_eq!(bus.write_read(0x20, &[0x00, 0x10], &mut two), Err(REFUSED));
+        // An empty write, which some chips take as a command.
+        assert_eq!(bus.write_read(0x20, &[], &mut two), Err(REFUSED));
+        assert!(mock.transfers().is_empty(), "nothing went out");
+        assert_eq!(mock.register(0x20, 0x10), 0xAB, "nothing changed");
+
+        // What drivers do to read: an address and a read, alone or as several pairs.
+        assert_eq!(bus.write_read(0x20, &[0x10], &mut two), Ok(()));
+        assert_eq!(two, [0xAB, 0xCD]);
+        let (first, second) = ([0x10u8], [0x11u8]);
+        let (mut a, mut b) = ([0u8; 1], [0u8; 1]);
+        assert_eq!(
+            bus.transaction(
+                0x20,
+                &mut [
+                    i2c::Operation::Write(&first),
+                    i2c::Operation::Read(&mut a),
+                    i2c::Operation::Write(&second),
+                    i2c::Operation::Read(&mut b),
+                ],
+            ),
+            Ok(())
+        );
+        assert_eq!((a, b), ([0xAB], [0xCD]));
+        assert_eq!(mock.transfers().len(), 2);
+        assert_eq!(mock.register(0x20, 0x10), 0xAB);
+        assert_eq!(mock.register(0x20, 0x11), 0xCD);
+    }
+
+    #[test]
+    fn a_two_byte_register_address_is_exactly_two_bytes() {
+        let mock = MockI2c::new()
+            .with_target(0x36, AddressWidth::Bits16)
+            .with_registers(0x36, 0x300a, &[0x97, 0x82]);
+        mock.set_logging(true);
+        let mut bus = host_i2c(&mock, Some(AddressWidth::Bits16));
+        let mut two = [0u8; 2];
+        // Two address bytes and a value, which is how a 16-bit-address chip is written.
+        assert_eq!(
+            bus.write_read(0x36, &[0x30, 0x0a, 0x01], &mut two),
+            Err(REFUSED)
+        );
+        assert_eq!(bus.write_read(0x36, &[0x30], &mut two), Err(REFUSED));
+        assert!(mock.transfers().is_empty());
+        assert_eq!(bus.write_read(0x36, &[0x30, 0x0a], &mut two), Ok(()));
+        assert_eq!(two, [0x97, 0x82]);
+    }
+
+    /// An `embedded-hal` SPI device that records what reaches it.
+    #[derive(Clone, Default)]
+    struct Recording(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+    impl spi::ErrorType for Recording {
+        type Error = ErrorKind;
+    }
+
+    impl SpiDevice for Recording {
+        fn transaction(&mut self, operations: &mut [spi::Operation<'_, u8>]) -> Refusable<()> {
+            let mut log = self.0.lock().unwrap();
+            for operation in operations {
+                log.push(match operation {
+                    spi::Operation::Read(buf) => {
+                        buf.fill(0x5A);
+                        "read"
+                    }
+                    spi::Operation::Write(_) => "write",
+                    spi::Operation::Transfer(..) => "transfer",
+                    spi::Operation::TransferInPlace(_) => "transfer in place",
+                    spi::Operation::DelayNs(_) => "delay",
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_spi_device_passes_reads_and_delays_and_refuses_everything_that_sends() {
+        let mock = Recording::default();
+        let mut bus = spi(Spi(lemnos_core::Held::boxed(Box::new(mock.clone()))));
+        let mut rx = [0u8; 2];
+        let mut in_place = [1u8, 2];
+        assert_eq!(bus.write(&[0x80]), Err(REFUSED));
+        assert_eq!(bus.transfer(&mut rx, &[0x80, 0]), Err(REFUSED));
+        assert_eq!(bus.transfer_in_place(&mut in_place), Err(REFUSED));
+        // A read of a register sends its address first: refused as a whole.
+        assert_eq!(
+            bus.transaction(&mut [
+                spi::Operation::Write(&[0x80]),
+                spi::Operation::Read(&mut rx),
+            ]),
+            Err(REFUSED)
+        );
+        assert!(mock.0.lock().unwrap().is_empty(), "nothing went out");
+        assert_eq!(in_place, [1, 2]);
+        assert_eq!(
+            bus.transaction(&mut [spi::Operation::Read(&mut rx), spi::Operation::DelayNs(10),]),
+            Ok(())
+        );
+        assert_eq!(rx, [0x5A, 0x5A]);
+        assert_eq!(*mock.0.lock().unwrap(), ["read", "delay"]);
     }
 
     #[test]

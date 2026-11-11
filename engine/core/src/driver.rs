@@ -1,4 +1,5 @@
 use crate::{Config, ContractInfo, Description, Need, Resources, Result, Status, Writer};
+use lemnos_hal::register::AddressWidth;
 
 /// A driver's reply buffer.
 pub type Reply<'a> = Writer<'a>;
@@ -96,6 +97,8 @@ pub trait Driver: Sized {
     }
     /// What the driver does on a host-owned device. See [`Lifecycle::HOST_OWNED`].
     const HOST_OWNED: HostOwned = HostOwned::Refused;
+    /// How its I2C chips name a register. See [`Lifecycle::I2C_REGISTER_ADDRESS`].
+    const I2C_REGISTER_ADDRESS: Option<AddressWidth> = None;
     /// Whether the host should say who is calling. See [`Lifecycle::TRACKS_CALLERS`].
     const TRACKS_CALLERS: bool = false;
     /// See [`Lifecycle::caller`].
@@ -138,6 +141,27 @@ pub trait Lifecycle: Sized {
     /// Whether this driver can be bound to a device the operating system owns, and how it
     /// keeps from changing it. Left as it is, the driver is never bound to one.
     const HOST_OWNED: HostOwned = HostOwned::Refused;
+    /// How the I2C chips this driver reads name a register: the width of the register address
+    /// written before a register is read, or `None` for chips read without one.
+    ///
+    /// It matters only on a host-owned device, where a write on the bus could change what the
+    /// operating system's driver set up. There the host passes an I2C transaction only when it
+    /// reads: every write in it is exactly one register address of this width and is followed
+    /// at once by a read (a repeated start, then the read), and the transaction ends with a
+    /// read. A write of a register's value, a write with no read after it, and anything longer
+    /// than an address are refused before the bus. With `None` only plain reads pass.
+    ///
+    /// The host can't tell a register address from a command byte, so this is the driver's
+    /// word for its chips: set it only when a write of an address of this width does nothing on
+    /// them but move the register pointer. A chip that takes one-byte commands (a reset, a
+    /// conversion started by a write) is read with `None`, or not on a host-owned device.
+    ///
+    /// Moving the pointer is still a change the operating system's driver can see: one that
+    /// sets the pointer in one transfer and reads it with a plain read in a later transfer can
+    /// read the register Lemnos named in between. Lemnos's own write and read can't be split:
+    /// they go out as one transfer, and the kernel holds the adapter for a whole transfer, so the
+    /// operating system's driver can't land a transfer between them.
+    const I2C_REGISTER_ADDRESS: Option<AddressWidth> = None;
     /// Set this to `true` for a driver that holds something on a caller's behalf and has to give
     /// it up when that caller goes. Other drivers cost the host nothing.
     const TRACKS_CALLERS: bool = false;

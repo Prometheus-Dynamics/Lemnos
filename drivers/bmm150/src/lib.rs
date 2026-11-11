@@ -11,6 +11,14 @@
 //!
 //! An axis the chip cannot measure (overflow, or a trim that cannot compensate
 //! it) reads as NaN.
+//!
+//! On a device the board gives to the host (`owner = "host"`) the operating
+//! system's driver runs the chip, and this one only reads it: the first read
+//! checks that the chip is powered and is a BMM150 and reads its trim, writing
+//! nothing but register addresses, and every read returns the data registers as
+//! they stand. `preset` and `data_rate` are the owner's then, and ignored; the
+//! data-ready bit is too, since the owner's own reads clear it. A chip its owner
+//! has powered down reads as `AGAIN`, with health saying so.
 
 #![no_std]
 
@@ -23,8 +31,8 @@ pub use chip::{DataRate, Preset};
 use chip::{Fault, Settings, Trim};
 use lemnos_contract_magnetometer::Magnetometer;
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, I2c, Item, Lifecycle, MethodId, Result, Status, Unit,
-    Vector3, driver,
+    AddressWidth, Config, ConfigValue, Description, Health, I2c, Item, Lifecycle, MethodId, Result,
+    Status, Unit, Vector3, driver,
 };
 
 /// The 7-bit address with SDO and CSB2 low; 0x11-0x13 are the alternatives.
@@ -57,12 +65,16 @@ pub struct Bmm150 {
     last: Option<Vector3>,
     /// Why the chip is not measuring, while it is not.
     fault: &'static str,
+    /// The operating system's driver runs the chip: read it, never set it up.
+    host_owned: bool,
 }
 
 impl Lifecycle for Bmm150 {
     type Needs = Bmm150Needs;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
+    // A one-byte register address moves the chip's pointer and nothing else.
+    const I2C_REGISTER_ADDRESS: Option<AddressWidth> = Some(AddressWidth::Bits8);
 
     fn start(needs: Bmm150Needs, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
@@ -72,6 +84,7 @@ impl Lifecycle for Bmm150 {
             phase: Phase::Off,
             last: None,
             fault: "not started",
+            host_owned: cfg.host_owned(),
         })
     }
 
@@ -106,6 +119,13 @@ impl Bmm150 {
 impl Magnetometer for Bmm150 {
     fn read(&mut self) -> Result<Vector3> {
         let trim = match self.phase {
+            Phase::Off if self.host_owned => match chip::attach(&mut self.bus, self.address) {
+                Ok(trim) => {
+                    self.phase = Phase::Ready(trim);
+                    trim
+                }
+                Err(fault) => return Err(self.fail(fault)),
+            },
             Phase::Off => {
                 if let Err(fault) = chip::power_on(&mut self.bus, self.address) {
                     return Err(self.fail(fault));
@@ -126,7 +146,8 @@ impl Magnetometer for Bmm150 {
             Ok(raw) => raw,
             Err(fault) => return Err(self.fail(fault)),
         };
-        if !raw.data_ready {
+        // The owner's reads clear the data-ready bit, so on its chip the data is read as it is.
+        if !raw.data_ready && !self.host_owned {
             return self.last.ok_or(Status::AGAIN);
         }
         let field = trim.compensate_fixed(raw).to_vector();
