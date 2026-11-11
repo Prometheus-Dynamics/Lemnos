@@ -11,6 +11,10 @@
 //! - [`HevcDecoder`]: an access unit in, a frame out, on a node it opens itself and reopens
 //!   after a failure (backoff capped at 8 s; it never gives up and never turns itself off).
 //!
+//! - [`StatelessBlock`] and [`M2mCodec`]: a stateless decoder given to a caller as
+//!   `codec.block/1`. The caller's controls, bitstream buffer and picture buffers go into a
+//!   media request as they are; nothing is parsed here ([`stateless`]).
+//!
 //! Every device call goes through a [`Node`]. On Linux that is a [`LinuxNode`] over
 //! `lemnos-linux-sys`, which holds all the `unsafe`; this crate has none. Steady-state decoding
 //! allocates nothing: buffers are mapped and records made when the session opens.
@@ -30,13 +34,17 @@ mod node;
 mod request;
 mod session;
 
+#[cfg(any(test, feature = "mock"))]
+pub mod mock;
+pub mod stateless;
 #[cfg(test)]
-mod mock;
+mod stateless_tests;
 
 pub use decoder::{DecodeError, Frame, HevcDecoder, Settings, State, backoff_ns};
 pub use node::{LinuxNode, Node, PlaneMap, Queued};
 pub use request::{Request, media_device_for};
 pub use session::{Drain, M2mSession, MAX_BUFFERS, QueueSetup, Ready, SourceChange, queue_type};
+pub use stateless::{M2mCodec, StatelessBlock};
 
 /// The extended control a request's controls are given as.
 pub use lemnos_linux_sys::v4l2::device::ExtControl;

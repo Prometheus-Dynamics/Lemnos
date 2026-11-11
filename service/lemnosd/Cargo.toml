@@ -26,6 +26,7 @@ lemnos-linux = { path = "../../backends/linux" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices", optional = true }
 # generated: begin drivers
+lemnos-driver-a733-video = { path = "../../drivers/a733-video" }
 lemnos-driver-bmi088 = { path = "../../drivers/bmi088" }
 lemnos-driver-bmm150 = { path = "../../drivers/bmm150" }
 lemnos-driver-coral-loader = { path = "../../drivers/coral-loader" }
@@ -41,11 +42,13 @@ lemnos-driver-ina2xx = { path = "../../drivers/ina2xx" }
 lemnos-driver-isp600 = { path = "../../drivers/isp600" }
 lemnos-driver-k230-capture = { path = "../../drivers/k230-capture" }
 lemnos-driver-k230isp = { path = "../../drivers/k230isp" }
+lemnos-driver-m2m-decode = { path = "../../drivers/m2m-decode" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
 lemnos-driver-pisp = { path = "../../drivers/pisp" }
 lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
 lemnos-driver-rga = { path = "../../drivers/rga" }
+lemnos-driver-rk-mpp-codec = { path = "../../drivers/rk-mpp-codec" }
 lemnos-driver-rkcif = { path = "../../drivers/rkcif" }
 lemnos-driver-rkisp = { path = "../../drivers/rkisp" }
 lemnos-driver-rkvpss = { path = "../../drivers/rkvpss" }

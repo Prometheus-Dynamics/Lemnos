@@ -9,9 +9,17 @@ description = "The video codec blocks behind the vendor kernel's /dev/mpp_servic
 [lints]
 workspace = true
 
+[features]
+# The played kernel of this crate's tests, for the tests of the crates that drive it.
+played = []
+
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
+lemnos-driver-codec-jobs = { path = "../codec-jobs" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }

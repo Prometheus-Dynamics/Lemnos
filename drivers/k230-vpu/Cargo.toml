@@ -13,6 +13,7 @@ workspace = true
 # lemnos-linux-sys, which holds the `unsafe`.
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-driver-m2m-decode = { path = "../m2m-decode" }
+lemnos-driver-k230-vpu-sys = { path = "../k230-vpu-sys" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

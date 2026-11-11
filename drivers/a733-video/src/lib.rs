@@ -25,14 +25,14 @@
 //! business under the block rule and not public. So no path that writes a register lands here: one
 //! would let a caller reach memory it does not hold.
 //!
-//! **No Linux [`Device`].** Every request takes its argument by value or as a plain structure, but
-//! issuing one needs `unsafe`, and `lemnos-linux-sys` has no public request for this device. The
-//! window mapping exists ([`Mapping`](lemnos_linux_sys::mmap::Mapping) with `read_volatile`), but
-//! reading registers with the engine's clocks off can stall the bus, so it is useless without the
-//! claim. Both belong in a crate allowed `unsafe` (a `-sys` crate for this device, or a module of
-//! `lemnos-linux-sys`): the requests in [`uapi`] with their argument types, and a mapping of
-//! exactly [`uapi::WINDOW_BYTES`] at offset 0 (the kernel maps as many bytes as asked from the
-//! window's start).
+//! # On a device, and for a caller
+//!
+//! [`LinuxDevice`] is the [`Device`] on the real node, over `lemnos-driver-a733-video-sys`,
+//! which holds the `unsafe` and issues only the requests that take a value or one plain
+//! structure, with a read-only mapping of exactly the window. [`A733Video`] gives the engine to
+//! a caller as `codec.block/1` ([`codec`]). With no register write there is no coding job to
+//! give it, and the contract says so honestly: the one job it runs claims the engine, reads
+//! the registers the caller names and lets the engine go; everything else is refused.
 //!
 //! Kernel facts a caller must know: the lock blocks, uninterruptibly, while another opener holds
 //! it; closing the file releases the lock but not the use counted by `IOCTL_ENGINE_REQ`, so a
@@ -46,7 +46,16 @@
 #![forbid(unsafe_code)]
 
 mod block;
+#[cfg(target_os = "linux")]
+pub mod codec;
+#[cfg(target_os = "linux")]
+mod linux;
 pub mod uapi;
+
+#[cfg(target_os = "linux")]
+pub use codec::{A733Video, EngineBlock};
+#[cfg(target_os = "linux")]
+pub use linux::LinuxDevice;
 
 pub use block::{
     Block, BufferId, Completion, Device, Error, Lock, MAX_BUFFERS, MAX_WAIT_S, Mode, State,

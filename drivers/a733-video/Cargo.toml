@@ -12,6 +12,19 @@ workspace = true
 # Linux only: a dma-buf's size, from the crate allowed `unsafe`.
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-driver-a733-video-sys = { path = "../a733-video-sys" }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
+lemnos-driver-codec-jobs = { path = "../codec-jobs" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
+
+[package.metadata.lemnos]
+driver = "A733Video"

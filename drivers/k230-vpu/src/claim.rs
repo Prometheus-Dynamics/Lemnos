@@ -663,3 +663,17 @@ fn written(done: &Dequeued, plan: &Plan) -> Option<[u32; MAX_PLANES]> {
     }
     Some(bytes)
 }
+
+impl<D: Device> Claim<'_, D>
+where
+    D::Node: AsFd,
+{
+    /// Issues one of the block's private requests (`VIDIOC_G_MVX_*`, `VIDIOC_S_MVX_*`) on the
+    /// claim's session, with `payload` as its structure, which the kernel reads and writes
+    /// back. Only the requests `lemnos-driver-k230-vpu-sys` lists as sound are issued, each
+    /// with a payload of exactly its structure's size; any other is `InvalidInput` and
+    /// reaches nothing. The bytes are the caller's settings and are not read here.
+    pub fn private(&mut self, request: u32, payload: &mut [u8]) -> io::Result<()> {
+        lemnos_driver_k230_vpu_sys::private(self.session.node().as_fd(), request, payload)
+    }
+}

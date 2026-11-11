@@ -2,9 +2,8 @@
 //! requests and events, with failures to order. Its steady-state calls allocate nothing, so a
 //! test can count the session's and the decoder's allocations through it.
 
-use std::cell::RefCell;
 use std::io;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use lemnos_linux_sys::poll;
@@ -51,6 +50,10 @@ pub struct Faults {
     pub poll_error: bool,
 }
 
+/// A queued buffer: its index, whether its first plane was a dma-buf, and that plane's length,
+/// bytes used and data offset.
+pub type LastQueued = (u32, bool, u32, u32, u32);
+
 /// The device's state, shared by every node opened on it.
 pub struct Device {
     pub m2m: bool,
@@ -78,6 +81,9 @@ pub struct Device {
     pub events: Vec<Event>,
     pub last_on_next: bool,
     pub sequence: u32,
+    /// The last buffer queued on each side: its index, whether its first plane was a dma-buf,
+    /// and that plane's length, bytes used and data offset.
+    pub last_queued: [Option<LastQueued>; 2],
 }
 
 impl Device {
@@ -130,11 +136,11 @@ impl Device {
 
 /// A handle on a mock device; each node opened on it is another handle.
 #[derive(Clone)]
-pub struct Mock(pub Rc<RefCell<Device>>);
+pub struct Mock(pub Arc<Mutex<Device>>);
 
 impl Mock {
     pub fn new(multiplanar: bool) -> Self {
-        Self(Rc::new(RefCell::new(Device {
+        Self(Arc::new(Mutex::new(Device {
             m2m: true,
             multiplanar,
             capture_fourcc: None,
@@ -156,12 +162,13 @@ impl Mock {
             events: Vec::new(),
             last_on_next: false,
             sequence: 0,
+            last_queued: [None; 2],
         })))
     }
 
     /// Opens a node on the device (or fails, if ordered to).
     pub fn open(&self) -> io::Result<MockNode> {
-        let mut d = self.0.borrow_mut();
+        let mut d = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if d.faults.open {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
@@ -176,7 +183,7 @@ impl Mock {
     }
 
     pub fn with<T>(&self, f: impl FnOnce(&mut Device) -> T) -> T {
-        f(&mut self.0.borrow_mut())
+        f(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
@@ -203,8 +210,8 @@ pub fn fill_byte(capture: bool, index: u32, plane: u32) -> u8 {
 }
 
 impl MockNode {
-    fn dev(&self) -> std::cell::RefMut<'_, Device> {
-        self.0.0.borrow_mut()
+    fn dev(&self) -> std::sync::MutexGuard<'_, Device> {
+        self.0.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -316,6 +323,16 @@ impl Node for MockNode {
             return Err(io::Error::from_raw_os_error(22));
         }
         d.queued[side] |= 1 << buffer.index;
+        if let Some(plane) = buffer.planes.first() {
+            let dma_buf = matches!(plane.memory, sys::PlaneMemory::Dmabuf(_));
+            d.last_queued[side] = Some((
+                buffer.index,
+                dma_buf,
+                plane.length,
+                plane.bytes_used,
+                plane.data_offset,
+            ));
+        }
         if buffer.request.is_some() {
             d.in_request = Some(buffer.index);
         }

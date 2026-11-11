@@ -10,6 +10,8 @@
 //! - [`Job`]: register values, the [`Address`] registers that hold buffers, and the registers to
 //!   read back. Every path by which a job's numbers become a descriptor, an address, an index or a
 //!   length is checked against the block and the claim's buffers; [`job`] lists them.
+//! - [`MppBlock`]: a block as `codec.block/1` has it (see [`codec`] for its slots and item
+//!   tags): a job's work becomes a [`Job`], its buffer references the claim's buffers.
 //! - [`uapi`]: the kernel's request number, message layout, commands, flags and client types.
 //! - [`Session`] and [`Device`]: the system side, which issues the request.
 //!
@@ -36,8 +38,11 @@
 
 pub mod block;
 pub mod claim;
+pub mod codec;
 pub mod job;
 pub mod message;
+#[cfg(any(test, feature = "played"))]
+pub mod played;
 pub mod uapi;
 
 #[cfg(test)]
@@ -45,8 +50,9 @@ mod tests;
 
 pub use block::{Block, Direct, Facts, MAX_REGISTERS};
 pub use claim::{
-    BufferError, Claim, ClaimError, CompleteError, Completion, Device, MAX_BUFFERS, Service,
-    Session, SubmitError, backoff_ns,
+    BufferError, Claim, ClaimError, ClaimOf, CompleteError, Completion, Device, MAX_BUFFERS,
+    OwnedClaim, Service, Session, SubmitError, backoff_ns,
 };
+pub use codec::{BoxedDevice, MppBlock};
 pub use job::{Address, BufferId, Job, JobError, MAX_ADDRESSES, ReadBack};
 pub use message::{Message, Payload, READ_BACK_BYTES, READ_BACK_SLOTS};
