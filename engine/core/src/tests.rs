@@ -328,6 +328,7 @@ mod package {
         }
         assert_eq!(bus_of(0), None);
         assert_eq!(bus_of(14), None);
+        let mut seen = std::vec::Vec::new();
         for kind in [
             ErrorKind::NotFound,
             ErrorKind::Unavailable,
@@ -336,15 +337,145 @@ mod package {
             ErrorKind::Timeout,
             ErrorKind::InvalidInput,
             ErrorKind::Unsupported,
+            ErrorKind::Configuration,
             ErrorKind::Nack,
             ErrorKind::Overrun,
+            ErrorKind::Failed,
         ] {
             assert_eq!(bus_error_of(status_of_bus(kind)), kind);
+            assert!(!status_of_bus(kind).is_ok());
+            seen.push(status_of_bus(kind));
         }
+        seen.sort_by_key(|status| status.0);
+        seen.dedup();
+        assert_eq!(seen.len(), 11, "each kind of error has its own status");
+        // A handle the host no longer knows is the resource being gone.
+        assert_eq!(bus_error_of(Status::STALE_HANDLE), ErrorKind::Unavailable);
+        assert_eq!(bus_error_of(Status::PANIC), ErrorKind::Failed);
+    }
+
+    #[test]
+    fn what_a_resource_carries_crosses_as_it_is() {
+        use core::time::Duration;
+        use lemnos_hal::blocks::{
+            ControlSetup, DmaBuffer, InterruptEvent, StreamFrame, UsbFunctionEvent,
+        };
+        use lemnos_hal::raw::{
+            Bias, Direction, Drive, Edge, EdgeDetect, LineConfig, Polarity, PwmConfig,
+        };
+
+        for direction in [Direction::Input, Direction::Output] {
+            for bias in [Bias::AsIs, Bias::PullUp, Bias::PullDown, Bias::Disabled] {
+                for drive in [Drive::PushPull, Drive::OpenDrain, Drive::OpenSource] {
+                    for edge in [
+                        EdgeDetect::None,
+                        EdgeDetect::Rising,
+                        EdgeDetect::Falling,
+                        EdgeDetect::Both,
+                    ] {
+                        let config = LineConfig {
+                            direction,
+                            initial: true,
+                            active_low: true,
+                            bias,
+                            drive,
+                            edge,
+                            debounce_us: 77,
+                        };
+                        assert_eq!(line_config_in(line_config_out(&config)), Some(config));
+                    }
+                }
+            }
+        }
+        // A value this build does not know is refused, never guessed.
+        let mut unknown = line_config_out(&LineConfig::input());
+        unknown.bias = 4;
+        assert_eq!(line_config_in(unknown), None);
+        let mut unknown = line_config_out(&LineConfig::input());
+        unknown.direction = 2;
+        assert_eq!(line_config_in(unknown), None);
+
+        let edge = Edge {
+            rising: true,
+            timestamp_ns: u64::MAX - 1,
+            seq: 9,
+        };
+        assert_eq!(edge_in(edge_out(Some(edge))), Some(edge));
+        assert_eq!(edge_in(edge_out(None)), None);
+
+        for polarity in [Polarity::Normal, Polarity::Inversed] {
+            let config = PwmConfig {
+                period_ns: 20_000_000,
+                duty_ns: 1_500_000,
+                polarity,
+                enabled: true,
+            };
+            assert_eq!(pwm_config_in(pwm_config_out(&config)), Some(config));
+        }
+        let mut unknown = pwm_config_out(&PwmConfig::default());
+        unknown.polarity = 2;
+        assert_eq!(pwm_config_in(unknown), None);
+
+        let event = InterruptEvent {
+            count: 3,
+            timestamp_ns: 8,
+        };
         assert_eq!(
-            bus_error_of(status_of_bus(ErrorKind::Failed)),
-            ErrorKind::Failed
+            interrupt_event_in(interrupt_event_out(Some(event))),
+            Some(event)
         );
+        assert_eq!(interrupt_event_in(interrupt_event_out(None)), None);
+
+        let buffer = DmaBuffer {
+            id: 4,
+            len: 1 << 33,
+            device_address: 0xfee0_0000_0000,
+        };
+        assert_eq!(dma_buffer_in(dma_buffer_out(buffer)), buffer);
+
+        let frame = StreamFrame {
+            buffer: 2,
+            bytes: 640 * 480,
+            sequence: 1 << 40,
+            identity: u64::MAX,
+            timestamp_ns: 5,
+        };
+        assert_eq!(frame_in(frame_out(frame)), frame);
+
+        let setup = ControlSetup {
+            request_type: 0xc1,
+            request: 0x81,
+            value: 0x0200,
+            index: 3,
+        };
+        assert_eq!(setup_in(setup_out(setup)), setup);
+        for event in [
+            None,
+            Some(UsbFunctionEvent::Configured),
+            Some(UsbFunctionEvent::Deconfigured),
+            Some(UsbFunctionEvent::Suspended),
+            Some(UsbFunctionEvent::Resumed),
+            Some(UsbFunctionEvent::Setup {
+                setup,
+                length: u16::MAX,
+            }),
+        ] {
+            assert_eq!(usb_event_in(usb_event_out(event)), Ok(event));
+        }
+        let mut unknown = usb_event_out(None);
+        unknown.kind = 6;
+        assert_eq!(usb_event_in(unknown), Err(ErrorKind::Failed));
+        let mut long = usb_event_out(Some(UsbFunctionEvent::Setup { setup, length: 1 }));
+        long.length = 1 << 16;
+        assert_eq!(usb_event_in(long), Err(ErrorKind::Failed));
+
+        // A timeout crosses in nanoseconds and is never taken for "without limit".
+        assert_eq!(
+            timeout_in(timeout_out(Duration::from_millis(5))),
+            Duration::from_millis(5)
+        );
+        assert_eq!(timeout_out(Duration::MAX), abi::NO_TIMEOUT - 1);
+        assert_eq!(timeout_out(Duration::ZERO), 0);
     }
 
     #[test]

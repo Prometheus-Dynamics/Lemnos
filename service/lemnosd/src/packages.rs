@@ -4,6 +4,12 @@
 //! every package in it is loaded beside the built-in drivers, in signed mode unless open mode is
 //! asked for by name. A built-in driver's name always wins: a package with the same name is
 //! refused. Nothing a package does or fails to do stops the service or another package.
+//!
+//! What became of each file is kept as a [`PackageReport`]: the service prints it when it
+//! starts and answers a client that asks with it (`lemnos-ctl packages`).
+//!
+//! A service linked statically against its C library can load no package: it has no dynamic
+//! loader. It says so once, looks at no file, and runs its built-in drivers as ever.
 
 use std::path::PathBuf;
 
@@ -21,53 +27,121 @@ pub struct PackageConfig {
     pub open: bool,
 }
 
-/// Loads the configured packages and adds their drivers to `drivers`. Returns what there is to
-/// say about it, one line each: every package loaded, every file refused and why, and anything
-/// that kept the directory from being used at all.
-pub fn add_packages(drivers: &mut Vec<DriverEntry>, config: &PackageConfig) -> Vec<String> {
+/// Which packages a service runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PackageMode {
+    /// None: no directory is configured.
+    #[default]
+    Off,
+    /// Only packages signed by a trusted key.
+    Signed,
+    /// Any package in the directory.
+    Open,
+}
+
+/// One package file and what became of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageFile {
+    pub path: PathBuf,
+    /// The name of the driver it was loaded as. `None` for a file that was refused.
+    pub driver: Option<String>,
+    /// Why it was refused. Empty for one that was loaded.
+    pub reason: String,
+}
+
+/// What became of the packages a service was configured with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackageReport {
+    pub mode: PackageMode,
+    /// Why the directory could not be used at all, or was only partly read. Empty otherwise.
+    pub note: String,
+    /// Every file looked at, in order of name: the loaded ones, then the refused ones.
+    pub files: Vec<PackageFile>,
+}
+
+impl PackageReport {
+    /// What there is to say, one line each: anything that kept the directory from being used,
+    /// every package loaded, and every file refused and why.
+    pub fn lines(&self) -> Vec<String> {
+        let mut said = Vec::new();
+        if !self.note.is_empty() {
+            said.push(format!("packages: {}", self.note));
+        }
+        for file in &self.files {
+            said.push(match &file.driver {
+                Some(driver) => format!("package {}: driver {driver:?}", file.path.display()),
+                None => format!("package {} refused: {}", file.path.display(), file.reason),
+            });
+        }
+        said
+    }
+}
+
+/// Loads the configured packages and adds their drivers to `drivers`. Returns what became of
+/// them.
+pub fn add_packages(drivers: &mut Vec<DriverEntry>, config: &PackageConfig) -> PackageReport {
+    add_packages_if(drivers, config, lemnos_package::can_load())
+}
+
+/// [`add_packages`], for a program that can load shared objects (`can_load`) or one that can't.
+pub fn add_packages_if(
+    drivers: &mut Vec<DriverEntry>,
+    config: &PackageConfig,
+    can_load: bool,
+) -> PackageReport {
     let Some(dir) = &config.dir else {
-        return Vec::new();
+        return PackageReport::default();
     };
+    let mut report = PackageReport {
+        mode: if config.open {
+            PackageMode::Open
+        } else {
+            PackageMode::Signed
+        },
+        ..PackageReport::default()
+    };
+    if !can_load {
+        report.note = format!(
+            "{} not used: this lemnosd is statically linked and can't load driver packages; \
+             packages need a dynamically linked build",
+            dir.display()
+        );
+        return report;
+    }
     let mode = if config.open {
         Mode::Open
     } else {
         let Some(keys) = &config.keys else {
-            return vec![format!(
-                "packages: {} not used: signed mode needs a key file",
-                dir.display()
-            )];
+            report.note = format!("{} not used: signed mode needs a key file", dir.display());
+            return report;
         };
         match TrustedKeys::from_file(keys) {
             Ok(keys) => Mode::Signed(keys),
             Err(error) => {
-                return vec![format!(
-                    "packages: {} not used: {}: {error}",
-                    dir.display(),
-                    keys.display()
-                )];
+                report.note = format!("{} not used: {}: {error}", dir.display(), keys.display());
+                return report;
             }
         }
     };
     let mut loader = Loader::new(mode);
     loader.reserve(drivers.iter().map(|driver| driver.manifest().name));
-    let mut said = Vec::new();
     if let Err(error) = loader.scan(dir) {
-        said.push(format!("packages: {}: {error}", dir.display()));
+        report.note = format!("{}: {error}", dir.display());
     }
     for package in loader.packages() {
-        said.push(format!(
-            "package {}: driver {:?}",
-            package.path().display(),
-            package.name()
-        ));
+        report.files.push(PackageFile {
+            path: package.path().to_owned(),
+            driver: Some(package.name().to_owned()),
+            reason: String::new(),
+        });
     }
     for refused in loader.refused() {
-        said.push(format!(
-            "package {} refused: {}",
-            refused.path.display(),
-            refused.why
-        ));
+        report.files.push(PackageFile {
+            path: refused.path.clone(),
+            driver: None,
+            reason: refused.why.to_string(),
+        });
     }
     drivers.extend(loader.entries());
-    said
+    report
 }

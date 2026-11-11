@@ -4,28 +4,41 @@
 use core::ffi::c_void;
 
 use super::{
-    DriverTable, HostTable, NO_TICK, Out, PackageHealth, PackageItem, PackageSetting,
-    PackageTransfer, Slice, SliceMut, Str,
+    ClocksHost, ClocksTable, DeviceHost, DeviceTable, DmaHost, DmaTable, DriverTable, HostTable,
+    I2cHost, I2cTable, InterruptHost, InterruptTable, LineHost, LineTable, NO_TICK, Out,
+    PackageHealth, PackageItem, PackageSetting, PwmHost, PwmTable, RegistersHost, RegistersTable,
+    ResetHost, ResetTable, Slice, SliceMut, SpiHost, SpiTable, Str, StreamHost, StreamTable,
+    UartHost, UartTable, UsbDeviceHost, UsbDeviceTable, UsbFunctionHost, UsbFunctionTable,
 };
 use crate::{Handle, Status, guard, guard_or};
 
 /// What a binding driver may ask for: the [`HostTable`]'s `provided` and `take`, in Rust.
 pub trait PackageBinding {
     fn provided(&mut self, need: &str) -> bool;
+    /// `kind` is one of the `TAKE_*` values.
     fn take(&mut self, kind: u32, need: &str, tag: &str) -> Result<Handle, Status>;
 }
 
-/// What a bound driver may ask of what it took: the rest of the [`HostTable`], in Rust.
-pub trait PackageHost {
+/// What a bound driver may ask of what it took: `release`, and the table of every kind of
+/// resource, in Rust. A kind the host does not have is left as it is, and answers
+/// [`Status::NOT_SUPPORTED`].
+pub trait PackageHost:
+    DeviceHost
+    + I2cHost
+    + SpiHost
+    + LineHost
+    + PwmHost
+    + UartHost
+    + RegistersHost
+    + InterruptHost
+    + DmaHost
+    + ClocksHost
+    + ResetHost
+    + StreamHost
+    + UsbDeviceHost
+    + UsbFunctionHost
+{
     fn release(resource: Handle) -> Status;
-    fn device_call(
-        device: Handle,
-        method: u16,
-        args: &[u8],
-        reply: &mut [u8],
-    ) -> Result<usize, Status>;
-    fn device_health(device: Handle) -> PackageHealth;
-    fn i2c_transaction(bus: Handle, address: u16, steps: &mut [PackageTransfer<'_>]) -> Status;
 }
 
 /// The host's binding behind the pointer it gave `bind`, or `None` for null.
@@ -64,44 +77,7 @@ extern "C" fn take<B: PackageBinding>(
 }
 
 extern "C" fn release<H: PackageHost>(resource: Handle) -> Status {
-    guard(|| H::release(resource))
-}
-
-extern "C" fn device_call<H: PackageHost>(
-    device: Handle,
-    method: u16,
-    args: Slice<'_, u8>,
-    reply: SliceMut<'_, u8>,
-    len: Out<'_, usize>,
-) -> Status {
-    guard(
-        || match H::device_call(device, method, args.as_slice(), reply.into_slice()) {
-            Ok(used) => {
-                len.set(used);
-                Status::OK
-            }
-            Err(status) if status.is_ok() => Status::IO,
-            Err(status) => status,
-        },
-    )
-}
-
-extern "C" fn device_health<H: PackageHost>(
-    device: Handle,
-    health: Out<'_, PackageHealth>,
-) -> Status {
-    guard(|| {
-        health.set(H::device_health(device));
-        Status::OK
-    })
-}
-
-extern "C" fn i2c_transaction<H: PackageHost>(
-    bus: Handle,
-    address: u16,
-    mut steps: SliceMut<'_, PackageTransfer<'_>>,
-) -> Status {
-    guard(|| H::i2c_transaction(bus, address, steps.as_mut_slice()))
+    guard(|| <H as PackageHost>::release(resource))
 }
 
 /// The table that serves a package's drivers: `B` while one binds, `H` afterwards.
@@ -112,9 +88,20 @@ pub const fn host_table<B: PackageBinding, H: PackageHost>() -> HostTable {
         provided: provided::<B>,
         take: take::<B>,
         release: release::<H>,
-        device_call: device_call::<H>,
-        device_health: device_health::<H>,
-        i2c_transaction: i2c_transaction::<H>,
+        device: DeviceTable::over::<H>(),
+        i2c: I2cTable::over::<H>(),
+        spi: SpiTable::over::<H>(),
+        line: LineTable::over::<H>(),
+        pwm: PwmTable::over::<H>(),
+        uart: UartTable::over::<H>(),
+        registers: RegistersTable::over::<H>(),
+        interrupt: InterruptTable::over::<H>(),
+        dma: DmaTable::over::<H>(),
+        clocks: ClocksTable::over::<H>(),
+        reset: ResetTable::over::<H>(),
+        stream: StreamTable::over::<H>(),
+        usb_device: UsbDeviceTable::over::<H>(),
+        usb_function: UsbFunctionTable::over::<H>(),
     }
 }
 

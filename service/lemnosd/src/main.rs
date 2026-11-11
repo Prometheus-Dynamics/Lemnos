@@ -3,7 +3,9 @@
 //!
 //! Driver packages are off unless `--packages` (or `LEMNOSD_PACKAGES`) names a directory. They
 //! then load in signed mode, against the keys in `--package-keys` (`LEMNOSD_PACKAGE_KEYS`),
-//! unless `--package-mode open` (`LEMNOSD_PACKAGE_MODE`) says any package may run.
+//! unless `--package-mode open` (`LEMNOSD_PACKAGE_MODE`) says any package may run. What was
+//! loaded and what was refused goes to the error output, and to `lemnos-ctl packages`. A
+//! statically linked build loads none, and says so.
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -123,10 +125,11 @@ fn main() -> ExitCode {
         Err(error) => return complain(&format!("signals: {error}")),
     };
     let mut drivers = drivers();
-    for line in add_packages(&mut drivers, &packages) {
+    let packages = add_packages(&mut drivers, &packages);
+    for line in packages.lines() {
         let _ = complain(&line);
     }
-    let service = Service::start(Config {
+    let config = Config {
         socket: PathBuf::from(socket),
         name: board_file.board.id.clone(),
         board: board_file,
@@ -137,8 +140,8 @@ fn main() -> ExitCode {
             Box::new(linux_board())
         },
         options: Options::default(),
-    });
-    let mut service = match service {
+    };
+    let mut service = match Service::start_with_packages(config, packages) {
         Ok(service) => service,
         Err(error) => return complain(&error.to_string()),
     };

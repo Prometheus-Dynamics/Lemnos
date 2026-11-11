@@ -8,7 +8,7 @@ use lemnos_core::Status;
 use lemnos_wire::ring::Layout;
 use lemnos_wire::{
     DeviceDescription, Frame, MAX_QUEUED_BYTES, VERSION, append, decode, decode_description,
-    feature, handle_descriptors, health, state,
+    feature, handle_descriptors, health, package_mode, state,
 };
 
 use crate::connection::{Connection, Taker};
@@ -98,6 +98,37 @@ pub fn follow<'a>(devices: &'a [DeviceEntry], from: &str) -> Vec<&'a DeviceEntry
         next = device.link.as_deref();
     }
     chain
+}
+
+/// Which driver packages the service runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageMode {
+    /// None: no package directory is configured.
+    Off,
+    /// Only packages signed by a key the service trusts.
+    Signed,
+    /// Any package in its directory.
+    Open,
+}
+
+/// One package file the service looked at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageEntry {
+    pub path: String,
+    /// The name of the driver it was loaded as. `None` for a file that was refused.
+    pub driver: Option<String>,
+    /// Why it was refused. Empty for one that was loaded.
+    pub reason: String,
+}
+
+/// What became of the service's driver packages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageList {
+    pub mode: PackageMode,
+    /// Why the package directory could not be used at all, or empty.
+    pub note: String,
+    /// Every file the service looked at, loaded or refused, in the order it looked.
+    pub packages: Vec<PackageEntry>,
 }
 
 /// One contract of one device.
@@ -375,6 +406,8 @@ const fn answers(frame: &Frame<'_>) -> Option<u32> {
         | Frame::Subscribed { id, .. }
         | Frame::StreamReady { id, .. }
         | Frame::StreamHandles { id, .. }
+        | Frame::Package { id, .. }
+        | Frame::PackagesDone { id, .. }
         | Frame::Refusal { id, .. } => Some(id),
         _ => None,
     }
@@ -783,6 +816,49 @@ impl Session {
         }))
     }
 
+    pub(crate) fn op_packages(&mut self) -> Result<(u32, impl Pick<PackageList> + use<>), Error> {
+        // Only a service that said so knows the question. To any other it is an unknown kind,
+        // which ends the connection.
+        if self.shared.features & feature::PACKAGES == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service does not report its driver packages".to_string(),
+            });
+        }
+        let id = self.shared.id();
+        self.queue(&Frame::Packages { id })?;
+        let mut packages = Vec::new();
+        Ok((id, move |frame: Frame<'_>| match frame {
+            Frame::Package {
+                path,
+                driver,
+                reason,
+                ..
+            } => {
+                packages.push(PackageEntry {
+                    path: path.to_string(),
+                    driver: (!driver.is_empty()).then(|| driver.to_string()),
+                    reason: reason.to_string(),
+                });
+                None
+            }
+            Frame::PackagesDone { mode, note, .. } => {
+                let mode = match mode {
+                    package_mode::OFF => PackageMode::Off,
+                    package_mode::SIGNED => PackageMode::Signed,
+                    package_mode::OPEN => PackageMode::Open,
+                    _ => return Some(Err(Error::Wire(lemnos_wire::WireError::Malformed))),
+                };
+                Some(Ok(PackageList {
+                    mode,
+                    note: note.to_string(),
+                    packages: core::mem::take(&mut packages),
+                }))
+            }
+            _ => None,
+        }))
+    }
+
     pub(crate) fn op_open(
         &mut self,
         name: &str,
@@ -926,6 +1002,14 @@ impl Session {
     pub fn list(&mut self) -> Result<Vec<DeviceEntry>, Error> {
         self.settle()?;
         let (id, pick) = self.op_list()?;
+        self.wait(id, pick)
+    }
+
+    /// What became of the service's driver packages: which were loaded, which refused and why.
+    /// A service from before it could say is `Refused` with `NOT_SUPPORTED`.
+    pub fn packages(&mut self) -> Result<PackageList, Error> {
+        self.settle()?;
+        let (id, pick) = self.op_packages()?;
         self.wait(id, pick)
     }
 

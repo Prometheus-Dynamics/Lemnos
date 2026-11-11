@@ -10,11 +10,13 @@ use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::{
     Appended, Frame, MAX_FRAME, VERSION, decode, encode_description, feature, handle_descriptors,
+    package_mode,
 };
 
 use crate::Core;
 use crate::conn::Conn;
 use crate::events::wire_state;
+use crate::packages::PackageMode;
 use crate::readers::Point;
 
 const BUFFER_START: usize = 16 * 1024;
@@ -118,6 +120,7 @@ impl Client {
         }
         match frame {
             Frame::List { id } => self.list(id),
+            Frame::Packages { id } => self.packages(id),
             Frame::Open { id, device, tag } => self.open(id, device, tag),
             Frame::Describe { id, device } => self.describe(id, device),
             Frame::Call {
@@ -159,7 +162,7 @@ impl Client {
         }
         self.conn.answer(&Frame::Welcome {
             version: VERSION,
-            features: feature::STREAM_HANDLES,
+            features: feature::STREAM_HANDLES | feature::PACKAGES,
             host: &self.core.name,
         });
         true
@@ -187,6 +190,29 @@ impl Client {
             });
         }
         self.conn.answer(&Frame::ListDone { id });
+        true
+    }
+
+    /// What became of the driver packages: every file, then how packages are run.
+    fn packages(&self, id: u32) -> Keep {
+        let report = &self.core.packages;
+        for file in &report.files {
+            self.conn.answer(&Frame::Package {
+                id,
+                path: &file.path.to_string_lossy(),
+                driver: file.driver.as_deref().unwrap_or(""),
+                reason: &file.reason,
+            });
+        }
+        self.conn.answer(&Frame::PackagesDone {
+            id,
+            mode: match report.mode {
+                PackageMode::Off => package_mode::OFF,
+                PackageMode::Signed => package_mode::SIGNED,
+                PackageMode::Open => package_mode::OPEN,
+            },
+            note: &report.note,
+        });
         true
     }
 

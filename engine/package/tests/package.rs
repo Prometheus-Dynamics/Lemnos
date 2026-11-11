@@ -47,7 +47,7 @@ fn a_package_loaded_by_path_answers_through_the_host() {
     );
     let add = &package.manifest().provides[0].methods[1];
     assert_eq!((add.id, add.name, add.params.len()), (2, "add", 2));
-    assert_eq!(package.manifest().needs.len(), 2);
+    assert_eq!(package.manifest().needs.len(), 15);
     assert!(package.manifest().needs.iter().all(|need| need.optional));
 
     let (host, _) = host(TWO, &loader.entries());
@@ -148,15 +148,15 @@ fn a_scan_loads_what_it_can_and_says_why_it_refused_the_rest() {
     assert_eq!(
         refusal(&loader, "g-major.so"),
         Refusal::AbiMismatch {
-            package: (2, 0),
-            host: (1, 0)
+            package: (3, 0),
+            host: (2, 0)
         }
     );
     assert_eq!(
         refusal(&loader, "h-minor.so"),
         Refusal::AbiMismatch {
-            package: (1, 1),
-            host: (1, 0)
+            package: (2, 1),
+            host: (2, 0)
         }
     );
     assert_eq!(refusal(&loader, "i-layout.so"), Refusal::LayoutMismatch);
@@ -479,9 +479,14 @@ config = { start = 6 }
         Err(Status::NOT_FOUND)
     );
 
-    // The user's health follows the device it uses, which it can do without.
+    // The user's health follows the device it uses, which it can do without. The driver sees
+    // the same through its handle.
     assert_eq!(host.device("user").unwrap().health, Health::Ok);
+    assert_eq!(host.call(user, method(11), &[], &mut reply), Ok(4));
+    assert_eq!(u32::from_le_bytes(reply), 0);
     host.off("chip").unwrap();
+    assert_eq!(host.call(user, method(11), &[], &mut reply), Ok(4));
+    assert_eq!(u32::from_le_bytes(reply), 2, "the device it uses is off");
     assert!(matches!(
         host.device("user").unwrap().health,
         Health::Degraded(_)

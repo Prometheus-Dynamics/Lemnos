@@ -10,7 +10,7 @@ use tokio::time::{Instant, timeout_at};
 
 use crate::DeviceDescription;
 use crate::error::Error;
-use crate::session::{DeviceEntry, Handle, Mode, Session, Subscription, ValueInfo};
+use crate::session::{DeviceEntry, Handle, Mode, PackageList, Session, Subscription, ValueInfo};
 use crate::stream::{FrameStream, StreamPlatform};
 
 /// [`Session`] for a tokio program. It waits on the socket's readiness and
@@ -108,6 +108,13 @@ impl AsyncClient {
     pub async fn list(&mut self) -> Result<Vec<DeviceEntry>, Error> {
         self.settle().await?;
         let (id, pick) = self.session.op_list()?;
+        self.wait(id, pick).await
+    }
+
+    /// What became of the service's driver packages: which were loaded, which refused and why.
+    pub async fn packages(&mut self) -> Result<PackageList, Error> {
+        self.settle().await?;
+        let (id, pick) = self.session.op_packages()?;
         self.wait(id, pick).await
     }
 

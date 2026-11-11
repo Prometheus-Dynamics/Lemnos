@@ -8,6 +8,7 @@ use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::{Options, entry};
 use lemnos_sim::SimBoard;
+use lemnosd::packages::{PackageConfig, PackageFile, PackageMode, PackageReport, add_packages};
 use lemnosd::{Config, Service};
 
 struct Running {
@@ -16,6 +17,11 @@ struct Running {
 }
 
 fn start() -> Running {
+    start_with(PackageReport::default())
+}
+
+/// A service that reports `packages` as what became of its driver packages.
+fn start_with(packages: PackageReport) -> Running {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "lemnos-ctl-test-{}-{}",
@@ -32,15 +38,15 @@ fn start() -> Running {
         [[devices]]\nid = \"stray\"\ndriver = \"fake-counter\"\nlink = \"nowhere\"\n\
         [[devices]]\nid = \"round\"\ndriver = \"fake-counter\"\nlink = \"about\"\n\
         [[devices]]\nid = \"about\"\ndriver = \"fake-counter\"\nlink = \"round\"\n";
-    let service = Service::start(Config {
+    let config = Config {
         socket: socket.clone(),
         name: "t".to_string(),
         board: parse(text).unwrap(),
         drivers: vec![entry::<FakeCounter>()],
         backend: Box::new(SimBoard::new()),
         options: Options::default(),
-    })
-    .unwrap();
+    };
+    let service = Service::start_with_packages(config, packages).unwrap();
     Running {
         _service: service,
         socket,
@@ -210,4 +216,70 @@ fn unknown_things_are_explained() {
             .unwrap_err()
             .contains("lemnos-ctl")
     );
+}
+
+#[test]
+fn packages_shows_what_was_loaded_and_why_the_rest_was_refused() {
+    // A service with packages off says so.
+    assert_eq!(
+        ctl(&start(), &["packages"]).unwrap(),
+        "packages off: no package directory is configured\n"
+    );
+
+    // A real scan of a directory holding a file that is no package, in open mode, and beside it
+    // a package that loaded.
+    let dir = std::env::temp_dir().join(format!("lemnos-ctl-packages-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("junk.so"), "not a shared object").unwrap();
+    let mut drivers = vec![entry::<FakeCounter>()];
+    let mut report = add_packages(
+        &mut drivers,
+        &PackageConfig {
+            dir: Some(dir.clone()),
+            keys: None,
+            open: true,
+        },
+    );
+    assert_eq!(report.mode, PackageMode::Open);
+    report.files.insert(
+        0,
+        PackageFile {
+            path: "/packages/good.so".into(),
+            driver: Some("some-driver".to_string()),
+            reason: String::new(),
+        },
+    );
+    let junk = dir.join("junk.so").display().to_string();
+    let width = junk.len();
+    assert_eq!(
+        ctl(&start_with(report), &["packages"]).unwrap(),
+        format!(
+            "packages open: any package in the directory runs\n\
+             {:width$}  loaded   some-driver\n\
+             {junk}  refused  not a driver package: not a shared object\n",
+            "/packages/good.so"
+        )
+    );
+
+    // Signed mode with no keys: nothing was looked at, and the reason is there to read.
+    let report = add_packages(
+        &mut drivers,
+        &PackageConfig {
+            dir: Some(dir.clone()),
+            keys: None,
+            open: false,
+        },
+    );
+    let text = ctl(&start_with(report), &["packages"]).unwrap();
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        rows[0],
+        "packages signed: only packages signed by a trusted key run"
+    );
+    assert!(
+        rows[1].ends_with("not used: signed mode needs a key file"),
+        "{text}"
+    );
+    assert_eq!(rows.len(), 2);
+    let _ = std::fs::remove_dir_all(dir);
 }

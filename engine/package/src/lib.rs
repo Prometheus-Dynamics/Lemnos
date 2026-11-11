@@ -47,8 +47,16 @@
 //! it was loaded (its registration failed, or its driver's name was taken) stays mapped and is
 //! never called again.
 //!
-//! What a package's driver can be given today: other devices, and I2C buses. Any other kind of
-//! bus is `NOT_SUPPORTED` when it binds.
+//! A package's driver can be given everything a built-in driver can: other devices, and every
+//! kind of bus and block a board has. Each is a handle in this crate's table, used through the
+//! host's table of functions for its kind (`lemnos_abi::package`), with the kind of every handle
+//! and every count checked here before the resource is touched.
+//!
+//! # A statically linked host
+//!
+//! A program linked statically against its C library (the default on musl targets) has no
+//! dynamic loader. [`can_load`] says so, and every load there is [`Refusal::StaticHost`] with
+//! nothing read. Packages need a dynamically linked service.
 
 mod adapter;
 mod elf;
@@ -88,6 +96,9 @@ pub enum Mode {
 /// Why a file was not loaded as a package. One file's refusal never stops another's load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
+    /// This program is statically linked: it has no dynamic loader, so it can load no package
+    /// at all. The file was not looked at.
+    StaticHost,
     /// The file, or in signed mode its signature, could not be read.
     Unreadable(String),
     /// Larger than [`MAX_PACKAGE_BYTES`].
@@ -123,6 +134,11 @@ pub enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::StaticHost => write!(
+                f,
+                "this program is statically linked and can't load driver packages: \
+                 use a dynamically linked build"
+            ),
             Self::Unreadable(why) => write!(f, "can't be read: {why}"),
             Self::TooLarge => write!(f, "larger than {MAX_PACKAGE_BYTES} bytes"),
             Self::Unsigned => write!(f, "unsigned: signed mode, and it has no signature file"),
@@ -317,7 +333,16 @@ fn signature_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Whether this program can load packages at all. A statically linked one can't: every
+/// [`Loader::load`] is [`Refusal::StaticHost`], and a scan refuses every file with it.
+pub const fn can_load() -> bool {
+    lemnos_abi::load::supported()
+}
+
 fn open(path: &Path, mode: &Mode) -> Result<Package, Refusal> {
+    if !can_load() {
+        return Err(Refusal::StaticHost);
+    }
     // The one read of the file. From here on only the sealed copy is looked at.
     let mut bytes = Vec::new();
     File::open(path)

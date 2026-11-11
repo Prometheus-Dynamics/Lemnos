@@ -2,16 +2,24 @@
 //! exports it. The driver is written exactly as a built-in one is.
 //!
 //! It has no hardware behind it. Its methods are what the loader's tests need: a value that
-//! comes back right, a panic, a hang, a call to another device and a read from a bus.
+//! comes back right, a panic, a hang, a call to another device, a read from a bus, and one
+//! (`exercise`) that uses every other kind of resource a driver can be given.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use lemnos_core::package::status_of_bus;
 use lemnos_core::{
-    Config, Description, Dev, Health, I2c, Item, Lifecycle, MethodId, Result, Status, contract,
-    driver, status_of,
+    ClocksHandle, Config, Description, Dev, DmaHandle, ErrorKind, Health, I2c, InterruptHandle,
+    Item, Lifecycle, Line, MethodId, Pwm, RawSpiBus, RegistersHandle, ResetHandle, Result, Spi,
+    Status, StreamHandle, Uart, UsbDeviceHandle, UsbFunctionHandle, contract, driver, status_of,
 };
+use lemnos_hal::blocks::{BufferKind, ControlSetup, IsoPacket, StreamFrame, UsbFunctionEvent};
 use lemnos_hal::i2c::I2c as _;
+use lemnos_hal::raw::{
+    Bias, EdgeDetect, LineConfig, Polarity, PwmConfig, SpiConfig, SpiMode, SpiSegment,
+};
+use lemnos_hal::spi::{Operation, SpiDevice as _};
 use lemnos_measure::test_alloc::{Counting, TOTAL};
 
 /// Test support, not part of a package: lets a test ask how much this package allocated.
@@ -46,7 +54,40 @@ pub trait Example {
     /// How many times the host has ticked this driver.
     #[method(9)]
     fn ticks(&mut self) -> Result<u32>;
+    /// Does one thing (`step`) with the resource of one kind (`kind`) this device was given:
+    /// `data` goes in, what came back is written to `into`, and its length returned. The kinds
+    /// and steps are listed at [`kind`] and in `exercise.rs`.
+    /// How the device this one uses as `peer` is doing: 0 ok, 1 degraded, 2 failed, 3 gone.
+    #[method(11)]
+    fn peer_health(&mut self) -> Result<u32>;
+    #[method(10)]
+    fn exercise(
+        &mut self,
+        kind: u8,
+        step: u8,
+        data: &[u8],
+        #[out] into: &mut [u8],
+    ) -> Result<usize>;
 }
+
+/// The kinds of resource `exercise` takes.
+pub mod kind {
+    pub const SPI: u8 = 2;
+    pub const LINE: u8 = 3;
+    pub const PWM: u8 = 4;
+    pub const UART: u8 = 5;
+    pub const USB_DEVICE: u8 = 6;
+    pub const USB_FUNCTION: u8 = 7;
+    pub const REGISTERS: u8 = 8;
+    pub const INTERRUPT: u8 = 9;
+    pub const DMA: u8 = 10;
+    pub const CLOCKS: u8 = 11;
+    pub const RESET: u8 = 12;
+    pub const STREAM: u8 = 13;
+    pub const RAW_SPI: u8 = 14;
+}
+
+mod exercise;
 
 /// Binds that have panicked, in this package.
 static PANICS: AtomicU32 = AtomicU32::new(0);
@@ -57,6 +98,35 @@ pub struct Fixture {
     peer: Option<Dev<dyn Example>>,
     #[needs(optional)]
     bus: Option<I2c>,
+    #[needs(optional)]
+    spi: Option<Spi>,
+    #[needs(optional)]
+    raw_spi: Option<RawSpiBus>,
+    #[needs(optional)]
+    line: Option<Line>,
+    #[needs(optional)]
+    pwm: Option<Pwm>,
+    #[needs(optional)]
+    uart: Option<Uart>,
+    #[needs(optional)]
+    usb: Option<UsbDeviceHandle>,
+    #[needs(optional)]
+    function: Option<UsbFunctionHandle>,
+    #[needs(optional)]
+    registers: Option<RegistersHandle>,
+    #[needs(optional)]
+    interrupt: Option<InterruptHandle>,
+    #[needs(optional)]
+    dma: Option<DmaHandle>,
+    #[needs(optional)]
+    clocks: Option<ClocksHandle>,
+    #[needs(optional)]
+    reset: Option<ResetHandle>,
+    #[needs(optional)]
+    stream: Option<StreamHandle>,
+    /// The DMA buffer and the stream buffer `exercise` took last.
+    dma_buffer: u32,
+    stream_buffer: u32,
     count: u32,
     ticks: u32,
     gone: bool,
@@ -74,6 +144,21 @@ impl Lifecycle for Fixture {
         Ok(Self {
             peer: needs.peer,
             bus: needs.bus,
+            spi: needs.spi,
+            raw_spi: needs.raw_spi,
+            line: needs.line,
+            pwm: needs.pwm,
+            uart: needs.uart,
+            usb: needs.usb,
+            function: needs.function,
+            registers: needs.registers,
+            interrupt: needs.interrupt,
+            dma: needs.dma,
+            clocks: needs.clocks,
+            reset: needs.reset,
+            stream: needs.stream,
+            dma_buffer: 0,
+            stream_buffer: 0,
             count: cfg.int("start").unwrap_or(0) as u32,
             ticks: 0,
             gone: false,
@@ -147,6 +232,21 @@ impl Example for Fixture {
 
     fn ticks(&mut self) -> Result<u32> {
         Ok(self.ticks)
+    }
+
+    fn peer_health(&mut self) -> Result<u32> {
+        Ok(
+            match self.peer.as_ref().ok_or(Status::NOT_FOUND)?.health() {
+                Health::Ok => 0,
+                Health::Degraded(_) => 1,
+                Health::Failed(_) => 2,
+                Health::Gone(_) => 3,
+            },
+        )
+    }
+
+    fn exercise(&mut self, kind: u8, step: u8, data: &[u8], into: &mut [u8]) -> Result<usize> {
+        self.run(kind, step, data, into)
     }
 }
 

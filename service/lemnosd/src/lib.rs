@@ -34,6 +34,7 @@ use lemnos_host::{DriverEntry, Host, HostError, Options};
 use clock::MonotonicClock;
 use conn::{Conn, Waker};
 use notify::Notifier;
+use packages::PackageReport;
 use readers::Readers;
 use streams::ServiceStreams;
 pub use streams::{BufferSource, DmaHeaps};
@@ -79,6 +80,8 @@ pub struct Config {
 }
 
 pub(crate) struct Core {
+    /// What became of the driver packages, for a client that asks.
+    pub(crate) packages: PackageReport,
     pub(crate) host: Host,
     pub(crate) clock: Arc<MonotonicClock>,
     pub(crate) name: String,
@@ -148,11 +151,29 @@ impl Service {
         Self::start_with_buffers(config, Arc::new(DmaHeaps::default()))
     }
 
+    /// [`Service::start`], for a service that looked for driver packages: `packages` is what
+    /// became of them, which it tells a client that asks. The packages' drivers are already in
+    /// `config.drivers` (see [`packages::add_packages`]).
+    pub fn start_with_packages(
+        config: Config,
+        packages: PackageReport,
+    ) -> Result<Self, StartError> {
+        Self::start_whole(config, Arc::new(DmaHeaps::default()), packages)
+    }
+
     /// [`Service::start`], with `buffers` giving the buffers of every stream the board file
     /// declares as dma-bufs.
     pub fn start_with_buffers(
         config: Config,
         buffers: Arc<dyn BufferSource>,
+    ) -> Result<Self, StartError> {
+        Self::start_whole(config, buffers, PackageReport::default())
+    }
+
+    fn start_whole(
+        config: Config,
+        buffers: Arc<dyn BufferSource>,
+        packages: PackageReport,
     ) -> Result<Self, StartError> {
         let listener = bind(&config.socket).map_err(StartError::Socket)?;
         let (wake_tx, wake_rx) = UnixStream::pair().map_err(StartError::Socket)?;
@@ -171,6 +192,7 @@ impl Service {
         )
         .map_err(StartError::Host)?;
         let core = Arc::new(Core {
+            packages,
             host,
             clock,
             name: config.name,

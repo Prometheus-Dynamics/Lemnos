@@ -53,6 +53,9 @@ closes the connection on a larger length, without reading it.
 | 21 | StreamClose | id u32, device u32, name str | to host |
 | 22 | StreamOpenHandles | id u32, device u32, name str | to host |
 | 23 | StreamHandles | id u32, buffers u32, descriptors u8, buffer_bytes u32, frame_slots u32, job_slots u32, job_bytes u32 | to client |
+| 24 | Packages | id u32 | to host |
+| 25 | Package | id u32, path str, driver str, reason str | to client |
+| 26 | PackagesDone | id u32, mode u8, note str | to client |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
@@ -72,6 +75,7 @@ closes the connection on a kind it doesn't know (rule 3).
 | Bit | Value | The host |
 |---|---|---|
 | 0 | 1 | takes StreamOpenHandles, and may answer it with StreamHandles |
+| 1 | 2 | takes Packages |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never
@@ -102,6 +106,19 @@ Each of these closes a way the earlier protocol could go wrong.
 10. **An addition is announced before it is used.** A kind added to version 1 is sent to a host
     only when its bit is set in Welcome's `features`, and to a client only in answer to a kind
     that says the client knows it. So neither side is ever sent a kind it would close on.
+
+## Driver packages
+
+Packages asks what became of the driver packages the host was configured with. The host answers
+with one Package for every file it looked at, in the order it looked, then PackagesDone. A Package
+with a `driver` was loaded and that is its driver's name; one with an empty `driver` was refused
+and `reason` says why, in words. `mode` in PackagesDone is 0 when no package directory is
+configured, 1 when only signed packages run and 2 when any package runs. `note` is empty unless
+the directory could not be used at all (signed mode with no keys, a directory that can't be read,
+a host that can't load shared objects), and then says why. A host with packages off answers
+PackagesDone alone.
+
+A client sends Packages only to a host that set bit 1 of `features` (rule 10).
 
 ## Descriptors
 
@@ -457,6 +474,33 @@ client reads that as `link: ""`.
 <!-- vector: stream-handles -->
 ```hex
 1b 00 00 00 17 00 0d 00 00 00 04 00 00 00 06 00 01 00 00 04 00 00 00 02 00 00 00 08 00 00 00
+```
+
+### packages
+
+`Packages { id: 14 }`
+
+<!-- vector: packages -->
+```hex
+06 00 00 00 18 00 0e 00 00 00
+```
+
+### package
+
+`Package { id: 14, path: "/p", driver: "d", reason: "" }`
+
+<!-- vector: package -->
+```hex
+15 00 00 00 19 00 0e 00 00 00 02 00 00 00 2f 70 01 00 00 00 64 00 00 00 00
+```
+
+### packages-done
+
+`PackagesDone { id: 14, mode: 1, note: "" }`
+
+<!-- vector: packages-done -->
+```hex
+0b 00 00 00 1a 00 0e 00 00 00 01 00 00 00 00
 ```
 
 ### event

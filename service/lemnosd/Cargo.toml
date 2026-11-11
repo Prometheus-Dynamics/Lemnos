@@ -66,3 +66,5 @@ lemnos-linux-stream = { path = "../../backends/linux-stream" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+# Signs a package for the test that starts the daemon in signed mode.
+ed25519-dalek = { version = "2.2", default-features = false }

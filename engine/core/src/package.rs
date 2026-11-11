@@ -6,28 +6,53 @@
 //! driver's calls behind a function table, and what the driver needs fetched from the host as
 //! handles. The host's side is the other half of each conversion here, used by the loader.
 //!
-//! What a package's driver can be given: other devices, and I2C buses. Any other kind of bus is
-//! `NOT_SUPPORTED` when it binds, as it is on a host that lacks one.
+//! A package's driver can be given everything a built-in driver can: other devices and every
+//! kind of bus and block in [`Provider`]. Each is a handle the host holds, used through the
+//! host's table for its kind, so the driver's own code is the same either way.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use core::time::Duration;
+
 use lemnos_abi::package::{
-    DRIVER_TICKS, DRIVER_TRACKS_CALLERS, HEALTH_DEGRADED, HEALTH_FAILED, HEALTH_GONE, HEALTH_OK,
-    HostTable, ITEM_HAS_FIELD, ITEM_HAS_MAX, ITEM_HAS_MIN, MAX_TRANSFER_STEPS, NEED_DEVICE, Out,
-    PackageContract, PackageDriver, PackageField, PackageHealth, PackageInstance, PackageItem,
-    PackageManifest, PackageMethod, PackageNeed, PackageSetting, PackageShape, PackageTransfer,
-    SETTING_BOOL, SETTING_FLOAT, SETTING_INT, SETTING_TEXT, Slice, SliceMut, Str, driver_table,
+    BUFFERS_HANDLES, BUFFERS_PLAIN, DRIVER_TICKS, DRIVER_TRACKS_CALLERS, Fd, HEALTH_DEGRADED,
+    HEALTH_FAILED, HEALTH_GONE, HEALTH_OK, HostTable, ITEM_HAS_FIELD, ITEM_HAS_MAX, ITEM_HAS_MIN,
+    MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, NEED_DEVICE, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out,
+    PackageContract, PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge,
+    PackageField, PackageFrame, PackageHealth, PackageInstance, PackageInterruptEvent,
+    PackageIsoPacket, PackageItem, PackageLineConfig, PackageManifest, PackageMethod, PackageNeed,
+    PackagePwmConfig, PackageSetting, PackageShape, PackageSpiSegment, PackageTransfer,
+    PackageUsbEvent, SETTING_BOOL, SETTING_FLOAT, SETTING_INT, SETTING_TEXT, Slice, SliceMut, Str,
+    TAKE_CLOCKS, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT, TAKE_LINE, TAKE_PWM, TAKE_RAW_SPI,
+    TAKE_REGISTERS, TAKE_RESET, TAKE_SPI, TAKE_STREAM, TAKE_UART, TAKE_USB_DEVICE,
+    TAKE_USB_FUNCTION, USB_EVENT_CONFIGURED, USB_EVENT_DECONFIGURED, USB_EVENT_NONE,
+    USB_EVENT_RESUMED, USB_EVENT_SETUP, USB_EVENT_SUSPENDED, driver_table,
 };
 use lemnos_abi::{Handle, guard};
+use lemnos_hal::blocks::{
+    BufferHandle, BufferKind, ControlSetup, DmaBuffer, InterruptEvent, IsoPacket, StreamFrame,
+    UsbFunctionEvent,
+};
 use lemnos_hal::i2c::{self, I2c as HalI2c, Operation};
+use lemnos_hal::raw::{
+    Bias, Direction, Drive, Edge, EdgeDetect, LineConfig, Polarity, PwmConfig, RawLine, RawPwm,
+    RawSpi, SpiConfig, SpiMode, SpiSegment,
+};
+use lemnos_hal::spi::{self, SpiDevice};
+use lemnos_hal::{
+    Clocks, DmaBuffers, Interrupt, Registers, Reset, StreamEndpoint, Uart as HalUart, UsbDevice,
+    UsbFunction,
+};
 
 use crate::{
-    BusKind, CallerId, Config, ConfigValue, ContractInfo, Description, Driver, ErrorKind, Field,
-    Health, I2c, Item, ItemKind, LocalCaller, Manifest, MethodId, MethodInfo, Need, NeedKind,
-    Param, Provider, Reply, Resources, Result, Router, Shape, Status, Tag, Unit,
+    BusKind, CallerId, ClocksHandle, Config, ConfigValue, ContractInfo, Description, DmaHandle,
+    Driver, ErrorKind, Field, Health, I2c, InterruptHandle, Item, ItemKind, Line, LocalCaller,
+    Manifest, MethodId, MethodInfo, Need, NeedKind, Param, Provider, Pwm, RawSpiBus,
+    RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Shape, Spi, Status,
+    StreamHandle, Tag, Uart, Unit, UsbDeviceHandle, UsbFunctionHandle,
 };
 
 /// The boundary's own types, for [`export_package!`](crate::export_package) and the loader.
@@ -88,29 +113,270 @@ fn kept<T>(values: Vec<T>) -> Slice<'static, T> {
     Slice::new(Vec::leak(values))
 }
 
-/// The status a bus error crosses the boundary as. Unlike [`status_of`](crate::status_of), a
-/// missing acknowledge and an overrun keep their own codes, so the driver sees them as they were.
+const NACK: Status = Status::from_errno(121);
+const OVERRUN: Status = Status::from_errno(75);
+const CONFIGURATION: Status = Status::from_errno(71);
+
+/// The status a resource's error crosses the boundary as. Every kind has its own, so the
+/// driver sees the kind the host's resource reported.
 pub fn status_of_bus(kind: ErrorKind) -> Status {
     match kind {
-        ErrorKind::Nack => Status::from_errno(121),
-        ErrorKind::Overrun => Status::from_errno(75),
-        kind => crate::status_of(kind),
+        ErrorKind::NotFound => Status::NOT_FOUND,
+        ErrorKind::Unavailable => Status::NO_DEVICE,
+        ErrorKind::Busy => Status::BUSY,
+        ErrorKind::PermissionDenied => Status::ACCESS,
+        ErrorKind::Timeout => Status::TIMED_OUT,
+        ErrorKind::InvalidInput => Status::INVALID_ARGUMENT,
+        ErrorKind::Unsupported => Status::NOT_SUPPORTED,
+        ErrorKind::Configuration => CONFIGURATION,
+        ErrorKind::Nack => NACK,
+        ErrorKind::Overrun => OVERRUN,
+        _ => Status::IO,
     }
 }
 
-/// The bus error a status from the host stands for.
+/// The resource error a status from the host stands for. A handle the host no longer knows
+/// reads as the resource being gone.
 pub fn bus_error_of(status: Status) -> ErrorKind {
     match status {
         Status::NOT_FOUND => ErrorKind::NotFound,
-        Status::NO_DEVICE => ErrorKind::Unavailable,
+        Status::NO_DEVICE | Status::STALE_HANDLE => ErrorKind::Unavailable,
         Status::BUSY => ErrorKind::Busy,
         Status::ACCESS => ErrorKind::PermissionDenied,
         Status::TIMED_OUT => ErrorKind::Timeout,
         Status::INVALID_ARGUMENT => ErrorKind::InvalidInput,
         Status::NOT_SUPPORTED => ErrorKind::Unsupported,
+        CONFIGURATION => ErrorKind::Configuration,
+        NACK => ErrorKind::Nack,
+        OVERRUN => ErrorKind::Overrun,
+        Status::IO => ErrorKind::Failed,
         status => status
             .errno()
             .map_or(ErrorKind::Failed, ErrorKind::from_errno),
+    }
+}
+
+// ---- Resource values in C form, both ways ----
+
+/// A timeout as it crosses: nanoseconds, never [`NO_TIMEOUT`].
+pub fn timeout_out(timeout: Duration) -> u64 {
+    u64::try_from(timeout.as_nanos())
+        .unwrap_or(NO_TIMEOUT)
+        .min(NO_TIMEOUT - 1)
+}
+
+pub fn timeout_in(timeout_ns: u64) -> Duration {
+    Duration::from_nanos(timeout_ns)
+}
+
+pub fn line_config_out(config: &LineConfig) -> PackageLineConfig {
+    PackageLineConfig {
+        direction: config.direction as u8,
+        initial: u8::from(config.initial),
+        active_low: u8::from(config.active_low),
+        bias: config.bias as u8,
+        drive: config.drive as u8,
+        edge: config.edge as u8,
+        reserved: 0,
+        debounce_us: config.debounce_us,
+    }
+}
+
+/// `None` for a value this build does not know.
+pub fn line_config_in(config: PackageLineConfig) -> Option<LineConfig> {
+    Some(LineConfig {
+        direction: *[Direction::Input, Direction::Output].get(usize::from(config.direction))?,
+        initial: config.initial != 0,
+        active_low: config.active_low != 0,
+        bias: *[Bias::AsIs, Bias::PullUp, Bias::PullDown, Bias::Disabled]
+            .get(usize::from(config.bias))?,
+        drive: *[Drive::PushPull, Drive::OpenDrain, Drive::OpenSource]
+            .get(usize::from(config.drive))?,
+        edge: *[
+            EdgeDetect::None,
+            EdgeDetect::Rising,
+            EdgeDetect::Falling,
+            EdgeDetect::Both,
+        ]
+        .get(usize::from(config.edge))?,
+        debounce_us: config.debounce_us,
+    })
+}
+
+pub fn edge_out(edge: Option<Edge>) -> PackageEdge {
+    edge.map_or(PackageEdge::default(), |edge| PackageEdge {
+        present: 1,
+        rising: u32::from(edge.rising),
+        seq: edge.seq,
+        reserved: 0,
+        timestamp_ns: edge.timestamp_ns,
+    })
+}
+
+pub fn edge_in(edge: PackageEdge) -> Option<Edge> {
+    (edge.present != 0).then_some(Edge {
+        rising: edge.rising != 0,
+        timestamp_ns: edge.timestamp_ns,
+        seq: edge.seq,
+    })
+}
+
+pub fn pwm_config_out(config: &PwmConfig) -> PackagePwmConfig {
+    PackagePwmConfig {
+        period_ns: config.period_ns,
+        duty_ns: config.duty_ns,
+        polarity: config.polarity as u32,
+        enabled: u32::from(config.enabled),
+    }
+}
+
+/// `None` for a polarity this build does not know.
+pub fn pwm_config_in(config: PackagePwmConfig) -> Option<PwmConfig> {
+    Some(PwmConfig {
+        period_ns: config.period_ns,
+        duty_ns: config.duty_ns,
+        polarity: *[Polarity::Normal, Polarity::Inversed].get(config.polarity as usize)?,
+        enabled: config.enabled != 0,
+    })
+}
+
+pub fn interrupt_event_out(event: Option<InterruptEvent>) -> PackageInterruptEvent {
+    event.map_or(PackageInterruptEvent::default(), |event| {
+        PackageInterruptEvent {
+            present: 1,
+            count: event.count,
+            timestamp_ns: event.timestamp_ns,
+        }
+    })
+}
+
+pub fn interrupt_event_in(event: PackageInterruptEvent) -> Option<InterruptEvent> {
+    (event.present != 0).then_some(InterruptEvent {
+        count: event.count,
+        timestamp_ns: event.timestamp_ns,
+    })
+}
+
+pub fn dma_buffer_out(buffer: DmaBuffer) -> PackageDmaBuffer {
+    PackageDmaBuffer {
+        id: buffer.id,
+        reserved: 0,
+        len: buffer.len,
+        device_address: buffer.device_address,
+    }
+}
+
+pub fn dma_buffer_in(buffer: PackageDmaBuffer) -> DmaBuffer {
+    DmaBuffer {
+        id: buffer.id,
+        len: buffer.len,
+        device_address: buffer.device_address,
+    }
+}
+
+pub fn frame_out(frame: StreamFrame) -> PackageFrame {
+    PackageFrame {
+        buffer: frame.buffer,
+        bytes: frame.bytes,
+        sequence: frame.sequence,
+        identity: frame.identity,
+        timestamp_ns: frame.timestamp_ns,
+    }
+}
+
+pub fn frame_in(frame: PackageFrame) -> StreamFrame {
+    StreamFrame {
+        buffer: frame.buffer,
+        bytes: frame.bytes,
+        sequence: frame.sequence,
+        identity: frame.identity,
+        timestamp_ns: frame.timestamp_ns,
+    }
+}
+
+pub fn setup_out(setup: ControlSetup) -> PackageControlSetup {
+    PackageControlSetup {
+        request_type: setup.request_type,
+        request: setup.request,
+        value: setup.value,
+        index: setup.index,
+        reserved: 0,
+    }
+}
+
+pub fn setup_in(setup: PackageControlSetup) -> ControlSetup {
+    ControlSetup {
+        request_type: setup.request_type,
+        request: setup.request,
+        value: setup.value,
+        index: setup.index,
+    }
+}
+
+pub fn usb_event_out(event: Option<UsbFunctionEvent>) -> PackageUsbEvent {
+    let plain = |kind| PackageUsbEvent {
+        kind,
+        ..PackageUsbEvent::default()
+    };
+    match event {
+        None => plain(USB_EVENT_NONE),
+        Some(UsbFunctionEvent::Configured) => plain(USB_EVENT_CONFIGURED),
+        Some(UsbFunctionEvent::Deconfigured) => plain(USB_EVENT_DECONFIGURED),
+        Some(UsbFunctionEvent::Suspended) => plain(USB_EVENT_SUSPENDED),
+        Some(UsbFunctionEvent::Resumed) => plain(USB_EVENT_RESUMED),
+        Some(UsbFunctionEvent::Setup { setup, length }) => PackageUsbEvent {
+            kind: USB_EVENT_SETUP,
+            length: u32::from(length),
+            setup: setup_out(setup),
+        },
+    }
+}
+
+/// `Err` for an event this build does not know.
+pub fn usb_event_in(
+    event: PackageUsbEvent,
+) -> core::result::Result<Option<UsbFunctionEvent>, ErrorKind> {
+    Ok(Some(match event.kind {
+        USB_EVENT_NONE => return Ok(None),
+        USB_EVENT_CONFIGURED => UsbFunctionEvent::Configured,
+        USB_EVENT_DECONFIGURED => UsbFunctionEvent::Deconfigured,
+        USB_EVENT_SUSPENDED => UsbFunctionEvent::Suspended,
+        USB_EVENT_RESUMED => UsbFunctionEvent::Resumed,
+        USB_EVENT_SETUP => UsbFunctionEvent::Setup {
+            setup: setup_in(event.setup),
+            length: u16::try_from(event.length).map_err(|_| ErrorKind::Failed)?,
+        },
+        _ => return Err(ErrorKind::Failed),
+    }))
+}
+
+/// One raw SPI segment in C form.
+pub fn segment_out<'a>(segment: &'a mut SpiSegment<'_>) -> PackageSpiSegment<'a> {
+    PackageSpiSegment {
+        mode: segment.config.mode.bits(),
+        bits_per_word: segment.config.bits_per_word,
+        cs_change: u8::from(segment.cs_change),
+        reserved: 0,
+        speed_hz: segment.config.speed_hz,
+        delay_us: segment.delay_us,
+        reserved2: [0; 3],
+        tx: Slice::new(segment.tx),
+        rx: SliceMut::new(segment.rx),
+    }
+}
+
+/// One raw SPI segment as the host's own type, borrowed from the package's.
+pub fn segment_in<'a>(segment: &'a mut PackageSpiSegment<'_>) -> SpiSegment<'a> {
+    SpiSegment {
+        config: SpiConfig {
+            mode: SpiMode::from_bits(segment.mode),
+            speed_hz: segment.speed_hz,
+            bits_per_word: segment.bits_per_word,
+        },
+        tx: segment.tx.as_slice(),
+        rx: segment.rx.as_mut_slice(),
+        cs_change: segment.cs_change != 0,
+        delay_us: segment.delay_us,
     }
 }
 
@@ -483,7 +749,7 @@ impl Router for Remote {
         let (host, handle) = self.handle(device)?;
         let room = reply.len();
         let mut len = 0;
-        let status = (host.device_call)(
+        let status = (host.device.call)(
             handle,
             method.method,
             Slice::new(args),
@@ -498,7 +764,7 @@ impl Router for Remote {
             return Health::Failed("missing");
         };
         let mut health = PackageHealth::OK;
-        if !(host.device_health)(handle, Out::new(&mut health)).is_ok() {
+        if !(host.device.health)(handle, Out::new(&mut health)).is_ok() {
             return Health::Failed("the host did not answer");
         }
         health_in(health)
@@ -507,7 +773,7 @@ impl Router for Remote {
 
 /// The devices one driver took, given back to the host when the driver goes.
 struct Devices {
-    host: HostTable,
+    host: &'static HostTable,
     slots: Vec<u32>,
 }
 
@@ -519,22 +785,41 @@ impl Drop for Devices {
     }
 }
 
-/// An I2C bus the host holds, used through its handle.
-struct RemoteI2c {
-    host: HostTable,
-    bus: Handle,
+/// Something the host holds for this driver, used through its handle and given back when the
+/// driver lets go of it. It is every kind of resource: which one is the host's to know, and a
+/// call for another kind is refused there.
+struct Taken {
+    host: &'static HostTable,
+    handle: Handle,
 }
 
-impl i2c::ErrorType for RemoteI2c {
+impl Drop for Taken {
+    fn drop(&mut self) {
+        let _ = (self.host.release)(self.handle);
+    }
+}
+
+type Hal<T> = core::result::Result<T, ErrorKind>;
+
+fn done(status: Status) -> Hal<()> {
+    if status.is_ok() {
+        Ok(())
+    } else {
+        Err(bus_error_of(status))
+    }
+}
+
+/// A length the host wrote, never more than the room it was given.
+fn length(status: Status, len: usize, room: usize) -> Hal<usize> {
+    done(status).map(|()| len.min(room))
+}
+
+impl i2c::ErrorType for Taken {
     type Error = ErrorKind;
 }
 
-impl HalI2c for RemoteI2c {
-    fn transaction(
-        &mut self,
-        address: u8,
-        operations: &mut [Operation<'_>],
-    ) -> core::result::Result<(), ErrorKind> {
+impl HalI2c for Taken {
+    fn transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Hal<()> {
         if operations.len() > MAX_TRANSFER_STEPS {
             return Err(ErrorKind::InvalidInput);
         }
@@ -547,28 +832,622 @@ impl HalI2c for RemoteI2c {
                 Operation::Write(bytes) => PackageTransfer::write(bytes),
             };
         }
-        let status = (self.host.i2c_transaction)(
-            self.bus,
+        done((self.host.i2c.transaction)(
+            self.handle,
             u16::from(address),
             SliceMut::new(&mut steps[..count]),
-        );
-        if status.is_ok() {
-            Ok(())
-        } else {
-            Err(bus_error_of(status))
-        }
+        ))
     }
 }
 
-impl Drop for RemoteI2c {
-    fn drop(&mut self) {
-        let _ = (self.host.release)(self.bus);
+impl spi::ErrorType for Taken {
+    type Error = ErrorKind;
+}
+
+impl SpiDevice for Taken {
+    fn transaction(&mut self, operations: &mut [spi::Operation<'_, u8>]) -> Hal<()> {
+        if operations.len() > MAX_TRANSFER_STEPS {
+            return Err(ErrorKind::InvalidInput);
+        }
+        let mut steps: [PackageTransfer<'_>; MAX_TRANSFER_STEPS] =
+            core::array::from_fn(|_| PackageTransfer::write(&[]));
+        let count = operations.len();
+        for (step, operation) in steps.iter_mut().zip(operations.iter_mut()) {
+            *step = match operation {
+                spi::Operation::Read(room) => PackageTransfer::read(room),
+                spi::Operation::Write(bytes) => PackageTransfer::write(bytes),
+                spi::Operation::Transfer(room, bytes) => PackageTransfer::both(room, bytes),
+                spi::Operation::TransferInPlace(bytes) => PackageTransfer::in_place(bytes),
+                spi::Operation::DelayNs(ns) => PackageTransfer::delay(*ns),
+            };
+        }
+        done((self.host.spi.transaction)(
+            self.handle,
+            SliceMut::new(&mut steps[..count]),
+        ))
+    }
+}
+
+impl RawSpi for Taken {
+    fn transfer(&mut self, segments: &mut [SpiSegment<'_>]) -> Hal<()> {
+        if segments.len() > MAX_TRANSFER_STEPS {
+            return Err(ErrorKind::InvalidInput);
+        }
+        let count = segments.len();
+        let mut segments = segments.iter_mut();
+        let mut carried: [Option<PackageSpiSegment<'_>>; MAX_TRANSFER_STEPS] =
+            core::array::from_fn(|_| segments.next().map(segment_out));
+        // The segments in one row, as the host takes them.
+        let mut row: [PackageSpiSegment<'_>; MAX_TRANSFER_STEPS] =
+            core::array::from_fn(|at| match carried[at].take() {
+                Some(segment) => segment,
+                None => PackageSpiSegment {
+                    mode: 0,
+                    bits_per_word: 0,
+                    cs_change: 0,
+                    reserved: 0,
+                    speed_hz: 0,
+                    delay_us: 0,
+                    reserved2: [0; 3],
+                    tx: Slice::EMPTY,
+                    rx: SliceMut::empty(),
+                },
+            });
+        done((self.host.spi.transfer)(
+            self.handle,
+            SliceMut::new(&mut row[..count]),
+        ))
+    }
+}
+
+impl RawLine for Taken {
+    fn configure(&mut self, config: &LineConfig) -> Hal<()> {
+        done((self.host.line.configure)(
+            self.handle,
+            line_config_out(config),
+        ))
+    }
+
+    fn get(&mut self) -> Hal<bool> {
+        let mut value = 0;
+        done((self.host.line.get)(self.handle, Out::new(&mut value)))?;
+        Ok(value != 0)
+    }
+
+    fn set(&mut self, value: bool) -> Hal<()> {
+        done((self.host.line.set)(self.handle, u32::from(value)))
+    }
+
+    fn read_edge(&mut self) -> Hal<Option<Edge>> {
+        let mut edge = PackageEdge::default();
+        done((self.host.line.read_edge)(self.handle, Out::new(&mut edge)))?;
+        Ok(edge_in(edge))
+    }
+}
+
+impl RawPwm for Taken {
+    fn configure(&mut self, config: &PwmConfig) -> Hal<()> {
+        done((self.host.pwm.configure)(
+            self.handle,
+            pwm_config_out(config),
+        ))
+    }
+
+    fn config(&mut self) -> Hal<PwmConfig> {
+        let mut config = PackagePwmConfig::default();
+        done((self.host.pwm.config)(self.handle, Out::new(&mut config)))?;
+        pwm_config_in(config).ok_or(ErrorKind::Failed)
+    }
+}
+
+impl HalUart for Taken {
+    type Error = ErrorKind;
+
+    fn set_baud(&mut self, baud: u32) -> Hal<()> {
+        done((self.host.uart.set_baud)(self.handle, baud))
+    }
+
+    fn write(&mut self, data: &[u8]) -> Hal<usize> {
+        let mut len = 0;
+        let status = (self.host.uart.write)(self.handle, Slice::new(data), Out::new(&mut len));
+        length(status, len, data.len())
+    }
+
+    fn read(&mut self, out: &mut [u8], timeout: Duration) -> Hal<usize> {
+        let (room, mut len) = (out.len(), 0);
+        let status = (self.host.uart.read)(
+            self.handle,
+            SliceMut::new(out),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, room)
+    }
+}
+
+impl Registers for Taken {
+    type Error = ErrorKind;
+
+    fn size(&self) -> usize {
+        let mut size = 0;
+        let status = (self.host.registers.size)(self.handle, Out::new(&mut size));
+        if status.is_ok() { size } else { 0 }
+    }
+
+    fn read32(&mut self, offset: usize) -> Hal<u32> {
+        let mut value = 0;
+        done((self.host.registers.read32)(
+            self.handle,
+            offset,
+            Out::new(&mut value),
+        ))?;
+        Ok(value)
+    }
+
+    fn write32(&mut self, offset: usize, value: u32) -> Hal<()> {
+        done((self.host.registers.write32)(self.handle, offset, value))
+    }
+
+    fn modify32(&mut self, offset: usize, clear: u32, set: u32) -> Hal<()> {
+        done((self.host.registers.modify32)(
+            self.handle,
+            offset,
+            clear,
+            set,
+        ))
+    }
+
+    fn write_block(&mut self, offset: usize, values: &[u32]) -> Hal<()> {
+        done((self.host.registers.write_block)(
+            self.handle,
+            offset,
+            Slice::new(values),
+        ))
+    }
+}
+
+impl Interrupt for Taken {
+    type Error = ErrorKind;
+
+    fn enable(&mut self) -> Hal<()> {
+        done((self.host.interrupt.enable)(self.handle))
+    }
+
+    fn disable(&mut self) -> Hal<()> {
+        done((self.host.interrupt.disable)(self.handle))
+    }
+
+    fn wait(&mut self, timeout: Option<Duration>) -> Hal<Option<InterruptEvent>> {
+        let mut event = PackageInterruptEvent::default();
+        done((self.host.interrupt.wait)(
+            self.handle,
+            timeout.map_or(NO_TIMEOUT, timeout_out),
+            Out::new(&mut event),
+        ))?;
+        Ok(interrupt_event_in(event))
+    }
+}
+
+impl DmaBuffers for Taken {
+    type Error = ErrorKind;
+
+    fn allocate(&mut self, len: u64) -> Hal<DmaBuffer> {
+        let mut buffer = PackageDmaBuffer::default();
+        done((self.host.dma.allocate)(
+            self.handle,
+            len,
+            Out::new(&mut buffer),
+        ))?;
+        Ok(dma_buffer_in(buffer))
+    }
+
+    fn release(&mut self, id: u32) -> Hal<()> {
+        done((self.host.dma.release)(self.handle, id))
+    }
+
+    fn write(&mut self, id: u32, offset: u64, data: &[u8]) -> Hal<()> {
+        done((self.host.dma.write)(
+            self.handle,
+            id,
+            offset,
+            Slice::new(data),
+        ))
+    }
+
+    fn read(&mut self, id: u32, offset: u64, out: &mut [u8]) -> Hal<()> {
+        done((self.host.dma.read)(
+            self.handle,
+            id,
+            offset,
+            SliceMut::new(out),
+        ))
+    }
+
+    fn sync_for_device(&mut self, id: u32) -> Hal<()> {
+        done((self.host.dma.sync_for_device)(self.handle, id))
+    }
+
+    fn sync_for_cpu(&mut self, id: u32) -> Hal<()> {
+        done((self.host.dma.sync_for_cpu)(self.handle, id))
+    }
+}
+
+impl Clocks for Taken {
+    type Error = ErrorKind;
+
+    fn enable(&mut self, clock: u32) -> Hal<()> {
+        done((self.host.clocks.enable)(self.handle, clock))
+    }
+
+    fn disable(&mut self, clock: u32) -> Hal<()> {
+        done((self.host.clocks.disable)(self.handle, clock))
+    }
+
+    fn rate_hz(&mut self, clock: u32) -> Hal<u64> {
+        let mut hz = 0;
+        done((self.host.clocks.rate_hz)(
+            self.handle,
+            clock,
+            Out::new(&mut hz),
+        ))?;
+        Ok(hz)
+    }
+
+    fn set_rate_hz(&mut self, clock: u32, hz: u64) -> Hal<u64> {
+        let mut settled = 0;
+        done((self.host.clocks.set_rate_hz)(
+            self.handle,
+            clock,
+            hz,
+            Out::new(&mut settled),
+        ))?;
+        Ok(settled)
+    }
+}
+
+impl Reset for Taken {
+    type Error = ErrorKind;
+
+    fn assert(&mut self, line: u32) -> Hal<()> {
+        done((self.host.reset.assert_reset)(self.handle, line))
+    }
+
+    fn deassert(&mut self, line: u32) -> Hal<()> {
+        done((self.host.reset.deassert_reset)(self.handle, line))
+    }
+}
+
+impl StreamEndpoint for Taken {
+    type Error = ErrorKind;
+
+    fn buffer_count(&self) -> u32 {
+        let mut count = 0;
+        let status = (self.host.stream.buffer_count)(self.handle, Out::new(&mut count));
+        if status.is_ok() { count } else { 0 }
+    }
+
+    fn publish(&mut self, frame: StreamFrame) -> Hal<()> {
+        done((self.host.stream.publish)(self.handle, frame_out(frame)))
+    }
+
+    fn next_buffer(&mut self) -> Hal<Option<u32>> {
+        let mut buffer = NO_BUFFER;
+        done((self.host.stream.next_buffer)(
+            self.handle,
+            Out::new(&mut buffer),
+        ))?;
+        Ok((buffer != NO_BUFFER).then_some(buffer))
+    }
+
+    fn next_job(&mut self, out: &mut [u8]) -> Hal<Option<usize>> {
+        let (room, mut len) = (out.len(), NO_JOB);
+        done((self.host.stream.next_job)(
+            self.handle,
+            SliceMut::new(out),
+            Out::new(&mut len),
+        ))?;
+        Ok((len != NO_JOB).then_some(len.min(room)))
+    }
+
+    fn write(&mut self, buffer: u32, offset: usize, data: &[u8]) -> Hal<bool> {
+        let mut attached = 0;
+        done((self.host.stream.write)(
+            self.handle,
+            buffer,
+            offset,
+            Slice::new(data),
+            Out::new(&mut attached),
+        ))?;
+        Ok(attached != 0)
+    }
+
+    fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Hal<bool> {
+        let mut attached = 0;
+        done((self.host.stream.read)(
+            self.handle,
+            buffer,
+            offset,
+            SliceMut::new(out),
+            Out::new(&mut attached),
+        ))?;
+        Ok(attached != 0)
+    }
+
+    fn buffer_handle(&self, buffer: u32) -> Hal<Option<BufferHandle<'_>>> {
+        let mut fd = Fd::NONE;
+        done((self.host.stream.buffer_handle)(
+            self.handle,
+            buffer,
+            Out::new(&mut fd),
+        ))?;
+        lent(self, fd)
+    }
+
+    fn buffer_current(&self, buffer: u32) -> Hal<bool> {
+        let mut current = 0;
+        done((self.host.stream.buffer_current)(
+            self.handle,
+            buffer,
+            Out::new(&mut current),
+        ))?;
+        Ok(current != 0)
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        let mut kind = BUFFERS_PLAIN;
+        let status = (self.host.stream.buffer_kind)(self.handle, Out::new(&mut kind));
+        // A host that can't say has no handles to lend.
+        if status.is_ok() && kind == BUFFERS_HANDLES {
+            BufferKind::Handles
+        } else {
+            BufferKind::Plain
+        }
+    }
+
+    fn fault_consumer(&mut self) -> Hal<()> {
+        done((self.host.stream.fault_consumer)(self.handle))
+    }
+}
+
+/// The descriptor the host lent for a buffer, borrowed for as long as the stream is.
+#[cfg(unix)]
+fn lent(stream: &Taken, fd: Fd) -> Hal<Option<BufferHandle<'_>>> {
+    Ok(fd.borrowed(stream).map(BufferHandle::from))
+}
+
+/// No handle can be made here.
+#[cfg(not(unix))]
+fn lent(_stream: &Taken, _fd: Fd) -> Hal<Option<BufferHandle<'_>>> {
+    Err(ErrorKind::Unsupported)
+}
+
+impl UsbDevice for Taken {
+    type Error = ErrorKind;
+
+    fn config_descriptor(&mut self, index: u8, out: &mut [u8]) -> Hal<usize> {
+        let (room, mut len) = (out.len(), 0);
+        let status = (self.host.usb_device.config_descriptor)(
+            self.handle,
+            index,
+            SliceMut::new(out),
+            Out::new(&mut len),
+        );
+        length(status, len, room)
+    }
+
+    fn reset(&mut self) -> Hal<()> {
+        done((self.host.usb_device.reset)(self.handle))
+    }
+
+    fn detach_kernel_driver(&mut self, interface: u8) -> Hal<()> {
+        done((self.host.usb_device.detach_kernel_driver)(
+            self.handle,
+            interface,
+        ))
+    }
+
+    fn claim_interface(&mut self, interface: u8) -> Hal<()> {
+        done((self.host.usb_device.claim_interface)(
+            self.handle,
+            interface,
+        ))
+    }
+
+    fn release_interface(&mut self, interface: u8) -> Hal<()> {
+        done((self.host.usb_device.release_interface)(
+            self.handle,
+            interface,
+        ))
+    }
+
+    fn set_alternate(&mut self, interface: u8, alternate: u8) -> Hal<()> {
+        done((self.host.usb_device.set_alternate)(
+            self.handle,
+            interface,
+            alternate,
+        ))
+    }
+
+    fn control_in(
+        &mut self,
+        setup: ControlSetup,
+        data: &mut [u8],
+        timeout: Duration,
+    ) -> Hal<usize> {
+        let (room, mut len) = (data.len(), 0);
+        let status = (self.host.usb_device.control_in)(
+            self.handle,
+            setup_out(setup),
+            SliceMut::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, room)
+    }
+
+    fn control_out(&mut self, setup: ControlSetup, data: &[u8], timeout: Duration) -> Hal<usize> {
+        let mut len = 0;
+        let status = (self.host.usb_device.control_out)(
+            self.handle,
+            setup_out(setup),
+            Slice::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, data.len())
+    }
+
+    fn bulk_in(&mut self, endpoint: u8, data: &mut [u8], timeout: Duration) -> Hal<usize> {
+        let (room, mut len) = (data.len(), 0);
+        let status = (self.host.usb_device.bulk_in)(
+            self.handle,
+            endpoint,
+            SliceMut::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, room)
+    }
+
+    fn bulk_out(&mut self, endpoint: u8, data: &[u8], timeout: Duration) -> Hal<usize> {
+        let mut len = 0;
+        let status = (self.host.usb_device.bulk_out)(
+            self.handle,
+            endpoint,
+            Slice::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, data.len())
+    }
+
+    fn interrupt_in(&mut self, endpoint: u8, data: &mut [u8], timeout: Duration) -> Hal<usize> {
+        let (room, mut len) = (data.len(), 0);
+        let status = (self.host.usb_device.interrupt_in)(
+            self.handle,
+            endpoint,
+            SliceMut::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, room)
+    }
+
+    fn iso_in(
+        &mut self,
+        endpoint: u8,
+        data: &mut [u8],
+        packets: &mut [IsoPacket],
+        timeout: Duration,
+    ) -> Hal<()> {
+        if packets.len() > MAX_ISO_PACKETS {
+            return Err(ErrorKind::InvalidInput);
+        }
+        let mut carried = [PackageIsoPacket::default(); MAX_ISO_PACKETS];
+        for (carried, packet) in carried.iter_mut().zip(packets.iter()) {
+            carried.capacity = packet.capacity;
+        }
+        done((self.host.usb_device.iso_in)(
+            self.handle,
+            endpoint,
+            SliceMut::new(data),
+            SliceMut::new(&mut carried[..packets.len()]),
+            timeout_out(timeout),
+        ))?;
+        for (packet, carried) in packets.iter_mut().zip(carried.iter()) {
+            // A packet never carried more than it had room for.
+            packet.received = carried.received.min(packet.capacity);
+            packet.ok = carried.ok != 0;
+        }
+        Ok(())
+    }
+}
+
+impl UsbFunction for Taken {
+    type Error = ErrorKind;
+
+    fn enable(&mut self, descriptors: &[u8]) -> Hal<()> {
+        done((self.host.usb_function.enable)(
+            self.handle,
+            Slice::new(descriptors),
+        ))
+    }
+
+    fn disable(&mut self) -> Hal<()> {
+        done((self.host.usb_function.disable)(self.handle))
+    }
+
+    fn next_event(&mut self) -> Hal<Option<UsbFunctionEvent>> {
+        let mut event = PackageUsbEvent::default();
+        done((self.host.usb_function.next_event)(
+            self.handle,
+            Out::new(&mut event),
+        ))?;
+        usb_event_in(event)
+    }
+
+    fn control_in(&mut self, data: &[u8], timeout: Duration) -> Hal<usize> {
+        let mut len = 0;
+        let status = (self.host.usb_function.control_in)(
+            self.handle,
+            Slice::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, data.len())
+    }
+
+    fn control_out(&mut self, data: &mut [u8], timeout: Duration) -> Hal<usize> {
+        let (room, mut len) = (data.len(), 0);
+        let status = (self.host.usb_function.control_out)(
+            self.handle,
+            SliceMut::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, room)
+    }
+
+    fn control_stall(&mut self) -> Hal<()> {
+        done((self.host.usb_function.control_stall)(self.handle))
+    }
+
+    fn set_halt(&mut self, endpoint: u8, halted: bool) -> Hal<()> {
+        done((self.host.usb_function.set_halt)(
+            self.handle,
+            endpoint,
+            u32::from(halted),
+        ))
+    }
+
+    fn read(&mut self, endpoint: u8, data: &mut [u8], timeout: Duration) -> Hal<usize> {
+        let (room, mut len) = (data.len(), 0);
+        let status = (self.host.usb_function.read)(
+            self.handle,
+            endpoint,
+            SliceMut::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, room)
+    }
+
+    fn write(&mut self, endpoint: u8, data: &[u8], timeout: Duration) -> Hal<usize> {
+        let mut len = 0;
+        let status = (self.host.usb_function.write)(
+            self.handle,
+            endpoint,
+            Slice::new(data),
+            timeout_out(timeout),
+            Out::new(&mut len),
+        );
+        length(status, len, data.len())
     }
 }
 
 /// What a binding driver asks the host for, through the host's table.
 struct Asking<'a> {
-    host: &'a HostTable,
+    host: &'static HostTable,
     binding: *mut c_void,
     devices: &'a mut Devices,
 }
@@ -589,6 +1468,22 @@ impl Asking<'_> {
         }
         Ok(handle)
     }
+
+    fn taken(&mut self, kind: u32, need: &str) -> Result<Box<Taken>> {
+        let handle = self.take(kind, need, "")?;
+        Ok(Box::new(Taken {
+            host: self.host,
+            handle,
+        }))
+    }
+}
+
+macro_rules! asked {
+    ($($method:ident -> $handle:ty = $kind:ident;)*) => {$(
+        fn $method(&mut self, need: &str) -> Result<$handle> {
+            Ok(self.taken($kind, need)?)
+        }
+    )*};
 }
 
 impl Provider for Asking<'_> {
@@ -605,11 +1500,26 @@ impl Provider for Asking<'_> {
     }
 
     fn i2c(&mut self, need: &str) -> Result<I2c> {
-        let bus = self.take(bus_code(BusKind::I2c), need, "")?;
-        Ok(I2c(Box::new(RemoteI2c {
-            host: *self.host,
-            bus,
-        })))
+        Ok(I2c(self.taken(TAKE_I2C, need)?))
+    }
+
+    fn spi(&mut self, need: &str) -> Result<Spi> {
+        Ok(Spi(self.taken(TAKE_SPI, need)?))
+    }
+
+    asked! {
+        raw_spi -> RawSpiBus = TAKE_RAW_SPI;
+        line -> Line = TAKE_LINE;
+        pwm -> Pwm = TAKE_PWM;
+        uart -> Uart = TAKE_UART;
+        usb_device -> UsbDeviceHandle = TAKE_USB_DEVICE;
+        usb_function -> UsbFunctionHandle = TAKE_USB_FUNCTION;
+        registers -> RegistersHandle = TAKE_REGISTERS;
+        interrupt -> InterruptHandle = TAKE_INTERRUPT;
+        dma -> DmaHandle = TAKE_DMA;
+        clocks -> ClocksHandle = TAKE_CLOCKS;
+        reset -> ResetHandle = TAKE_RESET;
+        stream -> StreamHandle = TAKE_STREAM;
     }
 }
 
@@ -628,9 +1538,14 @@ impl<D: Driver + Send + 'static> PackageInstance for Exported<D> {
         settings: &[PackageSetting<'_>],
         link: Option<&str>,
     ) -> Result<Self> {
+        // A table shorter than the one this package was built against lacks functions it calls.
+        if (host.struct_size as usize) < size_of::<HostTable>() {
+            return Err(Status::VERSION_MISMATCH);
+        }
+        // The host's table is the same for every bind: this package keeps its own copy.
         let host = REMOTE.host.get_or_init(|| *host);
         let mut devices = Devices {
-            host: *host,
+            host,
             slots: Vec::new(),
         };
         let entries: Vec<(&str, ConfigValue<'_>)> = settings.iter().map(setting_in).collect();
@@ -726,4 +1641,184 @@ macro_rules! export_package {
         pub static lemnos_package: $crate::package::abi::PackageDescriptor =
             $crate::package::abi::PackageDescriptor::new($crate::package::register::<$driver>);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use lemnos_abi::package::{
+        ClocksHost, DeviceHost, DmaHost, I2cHost, InterruptHost, LineHost, PackageBinding,
+        PackageHost, PwmHost, RegistersHost, ResetHost, SpiHost, StreamHost, UartHost,
+        UsbDeviceHost, UsbFunctionHost, host_table,
+    };
+
+    use super::*;
+
+    /// A host that answers with lengths and counts larger than the room it was given, and
+    /// counts what reaches it.
+    struct Liar;
+
+    static REACHED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    fn reached() -> u32 {
+        REACHED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    impl PackageHost for Liar {
+        fn release(_resource: Handle) -> Status {
+            Status::OK
+        }
+    }
+
+    impl UartHost for Liar {
+        fn write(_uart: Handle, data: Slice<'_, u8>, len: Out<'_, usize>) -> Status {
+            len.set(data.as_slice().len() + 5);
+            Status::OK
+        }
+
+        fn read(_uart: Handle, _out: SliceMut<'_, u8>, _ns: u64, len: Out<'_, usize>) -> Status {
+            len.set(usize::MAX - 1);
+            Status::OK
+        }
+    }
+
+    impl StreamHost for Liar {
+        fn next_job(_stream: Handle, _out: SliceMut<'_, u8>, len: Out<'_, usize>) -> Status {
+            len.set(1 << 40);
+            Status::OK
+        }
+    }
+
+    impl UsbDeviceHost for Liar {
+        fn bulk_in(
+            _device: Handle,
+            _endpoint: u8,
+            _data: SliceMut<'_, u8>,
+            _timeout_ns: u64,
+            len: Out<'_, usize>,
+        ) -> Status {
+            len.set(4096);
+            Status::OK
+        }
+
+        fn iso_in(
+            _device: Handle,
+            _endpoint: u8,
+            _data: SliceMut<'_, u8>,
+            mut packets: SliceMut<'_, PackageIsoPacket>,
+            _timeout_ns: u64,
+        ) -> Status {
+            for packet in packets.as_mut_slice() {
+                packet.received = u32::MAX;
+                packet.ok = 7;
+            }
+            Status::OK
+        }
+    }
+
+    impl I2cHost for Liar {
+        fn transaction(_: Handle, _: u16, _: SliceMut<'_, PackageTransfer<'_>>) -> Status {
+            REACHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Status::OK
+        }
+    }
+
+    impl DeviceHost for Liar {}
+    impl SpiHost for Liar {}
+    impl LineHost for Liar {}
+    impl PwmHost for Liar {}
+    impl RegistersHost for Liar {}
+    impl InterruptHost for Liar {}
+    impl DmaHost for Liar {}
+    impl ClocksHost for Liar {}
+    impl ResetHost for Liar {}
+    impl UsbFunctionHost for Liar {}
+
+    struct Nobody;
+
+    impl PackageBinding for Nobody {
+        fn provided(&mut self, _need: &str) -> bool {
+            false
+        }
+
+        fn take(&mut self, _kind: u32, _need: &str, _tag: &str) -> Result<Handle> {
+            Err(Status::NOT_FOUND)
+        }
+    }
+
+    static LIAR: HostTable = host_table::<Nobody, Liar>();
+
+    fn taken() -> Taken {
+        Taken {
+            host: &LIAR,
+            handle: Handle::new(1, 1),
+        }
+    }
+
+    #[test]
+    fn a_length_the_host_reports_never_exceeds_the_room_it_was_given() {
+        let mut resource = taken();
+        let mut room = [0u8; 4];
+        assert_eq!(
+            HalUart::read(&mut resource, &mut room, Duration::ZERO),
+            Ok(4)
+        );
+        assert_eq!(HalUart::write(&mut resource, &[1, 2, 3]), Ok(3));
+        assert_eq!(resource.next_job(&mut room), Ok(Some(4)));
+        assert_eq!(resource.bulk_in(0x81, &mut room, Duration::ZERO), Ok(4));
+        let mut packets = [IsoPacket {
+            capacity: 8,
+            received: 0,
+            ok: false,
+        }; 2];
+        let mut data = [0u8; 16];
+        resource
+            .iso_in(0x81, &mut data, &mut packets, Duration::ZERO)
+            .unwrap();
+        assert_eq!((packets[1].received, packets[1].ok), (8, true));
+    }
+
+    #[test]
+    fn more_than_the_boundary_carries_is_refused_before_it_crosses() {
+        let mut resource = taken();
+        let before = reached();
+        let mut operations: [Operation<'_>; MAX_TRANSFER_STEPS + 1] =
+            core::array::from_fn(|_| Operation::Write(&[]));
+        assert_eq!(
+            HalI2c::transaction(&mut resource, 0x20, &mut operations),
+            Err(ErrorKind::InvalidInput)
+        );
+        assert_eq!(reached(), before);
+        assert_eq!(
+            HalI2c::transaction(&mut resource, 0x20, &mut operations[..MAX_TRANSFER_STEPS]),
+            Ok(())
+        );
+        assert_eq!(reached(), before + 1);
+        let mut spi: [spi::Operation<'_, u8>; MAX_TRANSFER_STEPS + 1] =
+            core::array::from_fn(|_| spi::Operation::DelayNs(1));
+        assert_eq!(
+            SpiDevice::transaction(&mut resource, &mut spi),
+            Err(ErrorKind::InvalidInput)
+        );
+        let mut packets = [IsoPacket::default(); MAX_ISO_PACKETS + 1];
+        assert_eq!(
+            resource.iso_in(0x81, &mut [], &mut packets, Duration::ZERO),
+            Err(ErrorKind::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn a_kind_the_host_lacks_is_unsupported_as_on_any_host() {
+        let mut resource = taken();
+        assert_eq!(Reset::assert(&mut resource, 0), Err(ErrorKind::Unsupported));
+        assert_eq!(RawLine::get(&mut resource), Err(ErrorKind::Unsupported));
+        assert_eq!(
+            resource.buffer_handle(0).map(|handle| handle.is_some()),
+            Err(ErrorKind::Unsupported)
+        );
+        assert_eq!(Registers::size(&resource), 0);
+        assert_eq!(resource.buffer_count(), 0);
+        assert_eq!(resource.buffer_kind(), BufferKind::Plain);
+        assert_eq!(resource.buffer_current(0), Err(ErrorKind::Unsupported));
+        assert_eq!(resource.fault_consumer(), Err(ErrorKind::Unsupported));
+    }
 }

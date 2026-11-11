@@ -6,7 +6,7 @@ use lemnos_core::{Bound, Caller, Contract, Status};
 
 use crate::DeviceDescription;
 use crate::error::Error;
-use crate::session::{DeviceEntry, Event, Handle, Session, Subscription, ValueInfo};
+use crate::session::{DeviceEntry, Event, Handle, PackageList, Session, Subscription, ValueInfo};
 use crate::stream::{FrameStream, StreamPlatform};
 
 const ARGS: usize = 256;
@@ -36,6 +36,11 @@ impl Client {
 
     pub fn list(&self) -> Result<Vec<DeviceEntry>, Error> {
         self.lock().list()
+    }
+
+    /// What became of the service's driver packages: which were loaded, which refused and why.
+    pub fn packages(&self) -> Result<PackageList, Error> {
+        self.lock().packages()
     }
 
     /// The first device providing `tag`.

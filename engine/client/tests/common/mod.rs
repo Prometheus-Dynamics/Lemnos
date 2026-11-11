@@ -43,6 +43,10 @@ pub struct Control {
     /// The kind of every frame that asked for a stream, in order.
     pub opens: Mutex<Vec<u16>>,
     pub stream_closes: AtomicU32,
+    /// How many times it was asked what became of its packages, and the `mode` it answers
+    /// with.
+    pub package_asks: AtomicU32,
+    pub package_mode: AtomicU32,
 }
 
 pub struct FakeHost {
@@ -160,6 +164,35 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             version: answer,
                             features: control.features.load(Ordering::SeqCst),
                             host: "fake",
+                        },
+                        &mut out,
+                    );
+                }
+                Frame::Packages { id } => {
+                    control.package_asks.fetch_add(1, Ordering::SeqCst);
+                    send(
+                        Frame::Package {
+                            id,
+                            path: "/p/a.so",
+                            driver: "a",
+                            reason: "",
+                        },
+                        &mut out,
+                    );
+                    send(
+                        Frame::Package {
+                            id,
+                            path: "/p/b.so",
+                            driver: "",
+                            reason: "unsigned",
+                        },
+                        &mut out,
+                    );
+                    send(
+                        Frame::PackagesDone {
+                            id,
+                            mode: control.package_mode.load(Ordering::SeqCst) as u8,
+                            note: "half read",
                         },
                         &mut out,
                     );

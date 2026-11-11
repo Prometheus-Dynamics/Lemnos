@@ -30,8 +30,10 @@ pub mod feature {
     /// The host takes StreamOpenHandles and may answer it with StreamHandles: a stream whose
     /// buffers are one descriptor each.
     pub const STREAM_HANDLES: u64 = 1;
+    /// The host takes Packages, and answers it with what became of its driver packages.
+    pub const PACKAGES: u64 = 2;
     /// Every bit this build knows.
-    pub const ALL: u64 = STREAM_HANDLES;
+    pub const ALL: u64 = STREAM_HANDLES | PACKAGES;
 }
 
 /// The most buffers a stream may have when each is its own descriptor. Its descriptors, and
@@ -102,6 +104,16 @@ impl<'a> Decode<'a> for Appended<'a> {
         }
         <&str>::decode(from).map(Self)
     }
+}
+
+/// Which driver packages a host runs, as carried on the wire.
+pub mod package_mode {
+    /// None: no package directory is configured.
+    pub const OFF: u8 = 0;
+    /// Only packages signed by a key the host trusts.
+    pub const SIGNED: u8 = 1;
+    /// Any package in its directory.
+    pub const OPEN: u8 = 2;
 }
 
 macro_rules! frames {
@@ -217,6 +229,15 @@ frames! {
         job_slots: u32,
         job_bytes: u32,
     }
+    /// Asks what became of the host's driver packages. Sent only to a host whose Welcome set
+    /// [`feature::PACKAGES`]. Answered with one Package for each file, then PackagesDone.
+    24 Packages { id: u32 }
+    /// One package file. Loaded: `driver` is its driver's name and `reason` is empty. Refused:
+    /// `driver` is empty and `reason` says why.
+    25 Package { id: u32, path: &'a str, driver: &'a str, reason: &'a str }
+    /// `mode` is one of [`package_mode`]. `note` is empty, or says why the package directory
+    /// could not be used at all.
+    26 PackagesDone { id: u32, mode: u8, note: &'a str }
 }
 
 /// How many descriptors StreamHandles carries for a stream of `buffers` buffers, or `None` when
