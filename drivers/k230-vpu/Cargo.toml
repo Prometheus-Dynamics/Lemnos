@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The K230 video codec block through the SDK kernel's mvx V4L2 memory-to-memory driver: a claim on a codec session, the caller's dma-bufs, bitstream and frames submitted and completed, every plane checked against the buffer the caller holds. No vendor library"
+description = "The K230 video codec block through the SDK kernel's mvx V4L2 memory-to-memory driver, given to a caller as codec.block/1: a session held across jobs, the stream's dma-bufs as sources and destinations completing on the block's schedule, every plane checked against the buffer behind it. No vendor library"
 
 [lints]
 workspace = true
@@ -15,6 +15,17 @@ workspace = true
 lemnos-driver-m2m-decode = { path = "../m2m-decode" }
 lemnos-driver-k230-vpu-sys = { path = "../k230-vpu-sys" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-codec-block = { path = "../../contracts/codec-block" }
+lemnos-driver-codec-jobs = { path = "../codec-jobs" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-driver-codec-jobs = { path = "../codec-jobs", features = ["testing"] }
+
+[package.metadata.lemnos]
+driver = "K230Vpu"

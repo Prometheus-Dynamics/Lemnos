@@ -42,6 +42,7 @@ lemnos-driver-hwmon-fan = { path = "../../drivers/hwmon-fan" }
 lemnos-driver-ina2xx = { path = "../../drivers/ina2xx" }
 lemnos-driver-isp600 = { path = "../../drivers/isp600" }
 lemnos-driver-k230-capture = { path = "../../drivers/k230-capture" }
+lemnos-driver-k230-vpu = { path = "../../drivers/k230-vpu" }
 lemnos-driver-k230isp = { path = "../../drivers/k230isp" }
 lemnos-driver-m2m-decode = { path = "../../drivers/m2m-decode" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }

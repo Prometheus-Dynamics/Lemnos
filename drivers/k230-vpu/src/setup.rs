@@ -50,7 +50,7 @@ pub struct Setup<'a> {
     /// Source buffers to ask for, 1 to 64.
     pub sources: u32,
     /// Destination buffers to ask for, up to 64. A decoder may ask for 0, which waits for the
-    /// stream's format (see [`crate::Claim::adopt_destinations`]); an encoder may not.
+    /// stream's format (see [`crate::ClaimOf::adopt_destinations`]); an encoder may not.
     pub destinations: u32,
     /// Controls set once the session is open, before it streams.
     pub controls: &'a [Control],
