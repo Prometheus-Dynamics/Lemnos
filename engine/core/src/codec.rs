@@ -53,6 +53,11 @@ impl<'a> Writer<'a> {
         self.len == 0
     }
 
+    /// The room left.
+    pub fn remaining(&self) -> usize {
+        self.buf.len() - self.len
+    }
+
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.out(bytes.len())?.copy_from_slice(bytes);
         self.len += bytes.len();

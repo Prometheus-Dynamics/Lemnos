@@ -20,6 +20,7 @@ fake-devices = ["dep:lemnos-fake-devices"]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-wire = { path = "../../engine/wire" }
+lemnos-package = { path = "../../engine/package" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-linux = { path = "../../backends/linux" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }

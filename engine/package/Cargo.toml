@@ -1,0 +1,24 @@
+[package]
+name = "lemnos-package"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Loads Lemnos driver packages: compiled driver files, checked, signed or open, run by the host like any built-in driver"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-abi = { path = "../abi", features = ["load"] }
+lemnos-core = { path = "../core", features = ["std"] }
+lemnos-hal = { path = "../hal", features = ["std"] }
+lemnos-host = { path = "../host" }
+# Signed mode only. Verification needs neither std nor zeroize.
+ed25519-dalek = { version = "2.2", default-features = false }
+
+[dev-dependencies]
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-measure = { path = "../measure", features = ["alloc-count"] }

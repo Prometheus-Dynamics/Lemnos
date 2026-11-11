@@ -11,6 +11,8 @@
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 mod codec;
 mod config;
@@ -18,6 +20,8 @@ mod contract;
 mod description;
 mod driver;
 mod fixed;
+#[cfg(feature = "std")]
+pub mod package;
 mod resources;
 mod tag;
 

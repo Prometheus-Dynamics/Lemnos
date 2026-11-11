@@ -1,4 +1,9 @@
-//! `lemnosd [--sim] [--board PATH] [--socket PATH] [--check]`
+//! `lemnosd [--sim] [--board PATH] [--socket PATH] [--check]
+//!          [--packages DIR] [--package-keys FILE] [--package-mode signed|open]`
+//!
+//! Driver packages are off unless `--packages` (or `LEMNOSD_PACKAGES`) names a directory. They
+//! then load in signed mode, against the keys in `--package-keys` (`LEMNOSD_PACKAGE_KEYS`),
+//! unless `--package-mode open` (`LEMNOSD_PACKAGE_MODE`) says any package may run.
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -12,9 +17,11 @@ use lemnos_linux::hotplug::UsbHints;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
+use lemnosd::packages::{PackageConfig, add_packages};
 use lemnosd::{Config, DEFAULT_BOARD, DEFAULT_SOCKET, Service};
 
-const USAGE: &str = "lemnosd [--sim] [--board PATH] [--socket PATH] [--check]";
+const USAGE: &str = "lemnosd [--sim] [--board PATH] [--socket PATH] [--check] \
+     [--packages DIR] [--package-keys FILE] [--package-mode signed|open]";
 
 fn complain(text: &str) -> ExitCode {
     let _ = writeln!(std::io::stderr(), "lemnosd: {text}");
@@ -64,6 +71,10 @@ fn main() -> ExitCode {
     let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
     let mut board = var("LEMNOSD_BOARD", DEFAULT_BOARD);
     let mut socket = var("LEMNOSD_SOCKET", DEFAULT_SOCKET);
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let mut packages = set("LEMNOSD_PACKAGES").map(PathBuf::from);
+    let mut package_keys = set("LEMNOSD_PACKAGE_KEYS").map(PathBuf::from);
+    let mut package_mode = var("LEMNOSD_PACKAGE_MODE", "signed");
     let mut sim = false;
     let mut check = false;
     let mut args = std::env::args().skip(1);
@@ -71,11 +82,23 @@ fn main() -> ExitCode {
         match arg.as_str() {
             "--board" => board = args.next().unwrap_or_default(),
             "--socket" => socket = args.next().unwrap_or_default(),
+            "--packages" => packages = args.next().map(PathBuf::from),
+            "--package-keys" => package_keys = args.next().map(PathBuf::from),
+            "--package-mode" => package_mode = args.next().unwrap_or_default(),
             "--sim" => sim = true,
             "--check" => check = true,
             _ => return complain(USAGE),
         }
     }
+    let packages = PackageConfig {
+        dir: packages,
+        keys: package_keys,
+        open: match package_mode.as_str() {
+            "signed" => false,
+            "open" => true,
+            _ => return complain(USAGE),
+        },
+    };
     let text = match std::fs::read_to_string(&board) {
         Ok(text) => text,
         Err(error) => return complain(&format!("{board}: {error}")),
@@ -99,11 +122,15 @@ fn main() -> ExitCode {
         Ok(signals) => signals,
         Err(error) => return complain(&format!("signals: {error}")),
     };
+    let mut drivers = drivers();
+    for line in add_packages(&mut drivers, &packages) {
+        let _ = complain(&line);
+    }
     let service = Service::start(Config {
         socket: PathBuf::from(socket),
         name: board_file.board.id.clone(),
         board: board_file,
-        drivers: drivers(),
+        drivers,
         backend: if sim {
             Box::new(SimBoard::new())
         } else {

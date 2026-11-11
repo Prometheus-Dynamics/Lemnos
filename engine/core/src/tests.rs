@@ -205,3 +205,178 @@ fn config_reads_by_type() {
     assert_eq!(cfg.int("s"), None);
     assert_eq!(cfg.int("missing"), None);
 }
+
+mod package {
+    use crate::package::abi::{HEALTH_GONE, PackageHealth, SETTING_BOOL, SETTING_TEXT, Slice, Str};
+    use crate::package::*;
+    use crate::*;
+
+    const RECORD: Shape = Shape::Record(&[
+        Field {
+            name: "when",
+            shape: Shape::U64,
+        },
+        Field {
+            name: "values",
+            shape: Shape::Array(&Shape::Option(&Shape::F32), 3),
+        },
+    ]);
+
+    const MANIFEST: Manifest = Manifest {
+        name: "example",
+        needs: &[
+            Need {
+                name: "bus",
+                kind: NeedKind::Bus(BusKind::Stream),
+                optional: false,
+            },
+            Need {
+                name: "other",
+                kind: NeedKind::Device(Tag::new("example.thing/1")),
+                optional: true,
+            },
+        ],
+        provides: &[
+            super::INFO,
+            ContractInfo {
+                tag: Tag::new("example.more/12"),
+                methods: &[MethodInfo {
+                    id: 7,
+                    name: "fill",
+                    params: &[
+                        Param {
+                            name: "label",
+                            shape: Shape::Str,
+                        },
+                        Param {
+                            name: "entry",
+                            shape: RECORD,
+                        },
+                    ],
+                    returns: Shape::Bytes,
+                    has_out_buffer: true,
+                }],
+            },
+        ],
+    };
+
+    #[test]
+    fn a_manifest_crosses_the_boundary_whole() {
+        let crossed = manifest_out(&MANIFEST);
+        assert_eq!(crossed.name.as_str(), "example");
+        assert_eq!(crossed.needs.as_slice()[0].kind, bus_code(BusKind::Stream));
+        assert_eq!(crossed.needs.as_slice()[1].tag.as_str(), "example.thing/1");
+        assert_eq!(manifest_in(&crossed), Ok(MANIFEST));
+    }
+
+    #[test]
+    fn a_manifest_the_host_cannot_use_is_refused_with_a_reason() {
+        let good = manifest_out(&MANIFEST);
+        let mut nameless = good;
+        nameless.name = Str::new("");
+        assert_eq!(manifest_in(&nameless), Err("the driver has no name"));
+
+        let mut needs = good.needs.as_slice().to_vec();
+        needs[1].tag = Str::new("no-major");
+        let mut bad_tag = good;
+        bad_tag.needs = Slice::new(std::vec::Vec::leak(needs.clone()));
+        assert_eq!(
+            manifest_in(&bad_tag),
+            Err("a contract tag is not name/major")
+        );
+
+        needs[0].kind = 99;
+        needs[1].tag = Str::new("example.thing/1");
+        let mut bad_bus = good;
+        bad_bus.needs = Slice::new(std::vec::Vec::leak(needs));
+        assert_eq!(
+            manifest_in(&bad_bus),
+            Err("a need of a kind this host does not know")
+        );
+
+        let mut contracts = good.provides.as_slice().to_vec();
+        let mut methods = contracts[0].methods.as_slice().to_vec();
+        methods[0].returns.kind = 200;
+        contracts[0].methods = Slice::new(std::vec::Vec::leak(methods));
+        let mut bad_shape = good;
+        bad_shape.provides = Slice::new(std::vec::Vec::leak(contracts));
+        assert_eq!(
+            manifest_in(&bad_shape),
+            Err("a shape of a kind this host does not know")
+        );
+    }
+
+    #[test]
+    fn every_bus_and_bus_error_has_its_own_code() {
+        for bus in [
+            BusKind::I2c,
+            BusKind::Spi,
+            BusKind::Gpio,
+            BusKind::Pwm,
+            BusKind::Uart,
+            BusKind::Usb,
+            BusKind::UsbFunction,
+            BusKind::Registers,
+            BusKind::Interrupt,
+            BusKind::Dma,
+            BusKind::Clocks,
+            BusKind::Reset,
+            BusKind::Stream,
+        ] {
+            assert_ne!(bus_code(bus), abi::NEED_DEVICE);
+            assert_eq!(bus_of(bus_code(bus)), Some(bus));
+        }
+        assert_eq!(bus_of(0), None);
+        assert_eq!(bus_of(14), None);
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::Unavailable,
+            ErrorKind::Busy,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Timeout,
+            ErrorKind::InvalidInput,
+            ErrorKind::Unsupported,
+            ErrorKind::Nack,
+            ErrorKind::Overrun,
+        ] {
+            assert_eq!(bus_error_of(status_of_bus(kind)), kind);
+        }
+        assert_eq!(
+            bus_error_of(status_of_bus(ErrorKind::Failed)),
+            ErrorKind::Failed
+        );
+    }
+
+    #[test]
+    fn health_items_and_settings_cross_as_they_are() {
+        for health in [
+            Health::Ok,
+            Health::Degraded("warm"),
+            Health::Failed("cold"),
+            Health::Gone("unplugged"),
+        ] {
+            assert_eq!(health_in(health_out(health)), health);
+        }
+        assert_eq!(health_out(Health::Gone("x")).kind, HEALTH_GONE);
+        assert!(matches!(
+            health_in(PackageHealth::new(77, "")),
+            Health::Failed(_)
+        ));
+
+        let config = Config::new(&[
+            ("rate", ConfigValue::Int(-4)),
+            ("gain", ConfigValue::Float(1.5)),
+            ("on", ConfigValue::Bool(true)),
+            ("name", ConfigValue::Str("left")),
+        ]);
+        let settings = settings_out(&config);
+        assert_eq!(settings.len(), 4);
+        assert_eq!((settings[0].key.as_str(), settings[0].int), ("rate", -4));
+        assert_eq!(settings[1].float, 1.5);
+        assert_eq!((settings[2].kind, settings[2].int), (SETTING_BOOL, 1));
+        assert_eq!(
+            (settings[3].kind, settings[3].text.as_str()),
+            (SETTING_TEXT, "left")
+        );
+    }
+}

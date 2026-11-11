@@ -18,7 +18,10 @@ use crate::stream::{
     HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
 };
 
-trait Instance: Send {
+/// A bound driver, as the host runs it: [`Driver`] without its type. Every `#[driver]` type is
+/// one. A driver that reaches the host some other way, such as one loaded from a package,
+/// implements this and is run exactly as a built-in driver is.
+pub trait Instance: Send {
     fn describe(&self, out: &mut Description);
     fn health(&self) -> Health;
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
@@ -53,7 +56,27 @@ impl<D: Driver + Send> Instance for D {
     }
 }
 
-type Factory = fn(&mut Resources<'_>, &Config<'_>) -> Result<Box<dyn Instance>>;
+/// Builds a driver whose type the host was not compiled with. See [`DriverEntry::bound_by`].
+pub trait Binder: Send + Sync {
+    /// What [`Driver::bind`] is to a built-in driver: called on the device's lane, inside the
+    /// panic boundary, on every bind and every retry.
+    fn bind(&self, res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<Box<dyn Instance>>;
+}
+
+#[derive(Clone, Copy)]
+enum Factory {
+    BuiltIn(fn(&mut Resources<'_>, &Config<'_>) -> Result<Box<dyn Instance>>),
+    Bound(&'static dyn Binder),
+}
+
+impl Factory {
+    fn bind(&self, res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<Box<dyn Instance>> {
+        match self {
+            Self::BuiltIn(make) => make(res, cfg),
+            Self::Bound(binder) => binder.bind(res, cfg),
+        }
+    }
+}
 
 /// A driver the host can start.
 #[derive(Clone, Copy)]
@@ -68,6 +91,23 @@ impl DriverEntry {
     pub const fn manifest(&self) -> &Manifest {
         &self.manifest
     }
+
+    /// The entry for a driver that `binder` builds. `ticks` and `tracks_callers` are its
+    /// [`Driver::TICKS`] and [`Driver::TRACKS_CALLERS`]. The host treats it as it treats an
+    /// [`entry`]: the same lane, panic boundary, deadline, backoff and rebind.
+    pub const fn bound_by(
+        manifest: Manifest,
+        ticks: bool,
+        tracks_callers: bool,
+        binder: &'static dyn Binder,
+    ) -> Self {
+        Self {
+            manifest,
+            factory: Factory::Bound(binder),
+            ticks,
+            tracks_callers,
+        }
+    }
 }
 
 /// The entry for a driver type.
@@ -80,7 +120,7 @@ pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
     }
     DriverEntry {
         manifest: D::MANIFEST,
-        factory: make::<D>,
+        factory: Factory::BuiltIn(make::<D>),
         ticks: D::TICKS,
         tracks_callers: D::TRACKS_CALLERS,
     }
@@ -654,7 +694,7 @@ impl Inner {
             let link = target.spec.link.as_deref();
             let built = catch_unwind(AssertUnwindSafe(|| {
                 let mut res = Resources::new(&mut binding, link);
-                (entry.factory)(&mut res, &config)
+                entry.factory.bind(&mut res, &config)
             }));
             let missing = binding.missing.take();
             match built {
