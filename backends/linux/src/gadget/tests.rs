@@ -574,6 +574,7 @@ enum Did {
     ClearHalt(usize),
     Read(usize),
     Write(usize, Vec<u8>),
+    Forget,
 }
 
 /// A wire that answers as FunctionFS does, from a script.
@@ -634,6 +635,10 @@ impl Wire for FakeWire {
         self.did.push(Did::Write(endpoint, data.to_vec()));
         self.answer(data.len())
     }
+
+    fn forget(&mut self) {
+        self.did.push(Did::Forget);
+    }
 }
 
 fn request(request_type: u8, length: u16) -> Setup {
@@ -658,6 +663,9 @@ fn configured() -> Session<FakeWire> {
     let mut session = session();
     session.wire.events.push_back(Event::Enable);
     assert_eq!(session.next_event(), Ok(Some(UsbFunctionEvent::Configured)));
+    // A new configuration starts with nothing of the one before.
+    assert_eq!(session.wire.did, [Did::Forget]);
+    session.wire.did.clear();
     session
 }
 
@@ -824,7 +832,11 @@ fn a_reset_or_a_pull_is_one_deconfigured_and_endpoints_stop_until_configured_aga
         ]
     );
     assert_eq!(session.write(0x81, &[1], WAIT), Ok(1));
-    assert_eq!(session.wire.did, [Did::Write(0, vec![1])]);
+    // Each configuration began with what the one before left dropped.
+    assert_eq!(
+        session.wire.did,
+        [Did::Forget, Did::Forget, Did::Write(0, vec![1])]
+    );
 }
 
 #[test]

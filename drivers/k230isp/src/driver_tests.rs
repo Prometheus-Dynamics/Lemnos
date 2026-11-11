@@ -211,6 +211,10 @@ impl StreamEndpoint for Racing {
     fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
         self.inner.fault_consumer()
     }
+
+    fn buffer_current(&self, buffer: u32) -> core::result::Result<bool, ErrorKind> {
+        self.inner.buffer_current(buffer)
+    }
 }
 
 fn driver_on(streams: &Streams, config: StreamHandle) -> (K230Isp, Handle) {

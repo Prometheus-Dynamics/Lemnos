@@ -263,6 +263,37 @@ fn nothing_is_behind_a_buffer_with_no_consumer_or_from_before_this_one() {
 }
 
 #[test]
+fn a_producer_can_tell_a_buffer_taken_under_a_consumer_that_has_gone() {
+    // On plain memory too, where no handle can say so.
+    let host = with_handles();
+    let mut producer = host.stream_producer(0, "plain").unwrap();
+    assert!(producer.buffer_current(0).is_err(), "not the producer's");
+    let early = producer.next_buffer().unwrap().unwrap();
+    assert_eq!(producer.buffer_current(early), Ok(false), "nobody");
+    let _first = host.stream_attach(0, "plain", FIRST).unwrap();
+    assert_eq!(
+        producer.buffer_current(early),
+        Ok(false),
+        "taken before the consumer came"
+    );
+    let current = producer.next_buffer().unwrap().unwrap();
+    assert_eq!(producer.buffer_current(current), Ok(true));
+    // The consumer goes and another comes between two looks.
+    host.stream_detach(0, "plain", FIRST).unwrap();
+    assert_eq!(producer.buffer_current(current), Ok(false));
+    let second = host.stream_attach(0, "plain", SECOND).unwrap();
+    assert_eq!(producer.buffer_current(current), Ok(false));
+    // Publishing it reaches no one and frees it, to be taken again under the one there now.
+    producer.publish(frame(current)).unwrap();
+    assert_eq!(consumer(&second).pop_frame().unwrap(), None);
+    producer.publish(frame(early)).unwrap();
+    for _ in 0..2 {
+        let buffer = producer.next_buffer().unwrap().unwrap();
+        assert_eq!(producer.buffer_current(buffer), Ok(true));
+    }
+}
+
+#[test]
 fn a_consumer_that_goes_keeps_its_memory_to_itself_and_the_next_gets_its_own() {
     let host = with_handles();
     let mut producer = host.stream_producer(0, "frames").unwrap();

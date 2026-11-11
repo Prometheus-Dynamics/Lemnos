@@ -228,8 +228,8 @@ fn a_description_past_the_buffer_is_refused_as_too_long() {
 struct Board(Option<MockUsbFunction>);
 
 impl Provider for Board {
-    fn provided(&self, _need: &str) -> bool {
-        true
+    fn provided(&self, need: &str) -> bool {
+        need == "function"
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {

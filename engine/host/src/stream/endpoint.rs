@@ -257,6 +257,14 @@ impl StreamCore {
         Ok(attached.buffers.read(start, out))
     }
 
+    /// Whether `buffer`, which the producer holds, was taken under the consumer attached now.
+    fn current(&self, buffer: u32) -> Result<bool, ErrorKind> {
+        let Some(BufferState::Producer { epoch }) = self.pool.state(buffer) else {
+            return Err(ErrorKind::InvalidInput);
+        };
+        Ok(self.attached.is_some() && epoch == self.epoch)
+    }
+
     /// Whether `buffer`'s handle can be lent: the epoch it was taken in when that attachment
     /// still stands, `None` when nothing is behind it now. Refused for a buffer the producer
     /// doesn't hold, and `Unsupported` when the attached buffers aren't dma-bufs.
@@ -395,6 +403,10 @@ impl StreamEndpoint for ProducerEndpoint {
 
     fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, ErrorKind> {
         lock(&self.core).read(buffer, offset, out)
+    }
+
+    fn buffer_current(&self, buffer: u32) -> Result<bool, ErrorKind> {
+        lock(&self.core).current(buffer)
     }
 
     fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {

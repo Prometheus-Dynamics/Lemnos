@@ -99,6 +99,13 @@ consumer attaches. A driver whose hardware takes buffers only by handle refuses 
 in `start` with `NOT_SUPPORTED`, as `drivers/g2d` does. The device then shows as failing to bind,
 which points at the board file, where waiting for a consumer and going unhealthy would not.
 
+A driver that takes jobs on a stream holds the buffers its consumer names, and a stream's memory
+is made anew for each consumer. `buffer_current(buffer)` says whether a held buffer was taken
+under the consumer attached now. Ask it of one held buffer at the start of each tick, before
+taking more: when it answers `false`, everything held and waiting was a consumer's that has gone,
+so publish each buffer to give it up and start clean, as `drivers/usb-gadget` and `drivers/rga`
+do. A consumer that posts bytes that are no job loses its stream with `fault_consumer()`.
+
 Tests run against the simulated bus (`lemnos-sim`), where the chip's registers are plain bytes that
 a test sets and reads back. Steady-state reads must allocate nothing; prove it with the counting
 allocator in `lemnos-measure`, as `drivers/generic-sensor` does.

@@ -141,6 +141,10 @@ impl StreamEndpoint for Endless {
     fn fault_consumer(&mut self) -> Result<(), ErrorKind> {
         Ok(())
     }
+
+    fn buffer_current(&self, _: u32) -> Result<bool, ErrorKind> {
+        Ok(false)
+    }
 }
 
 static PUBLISHED: AtomicUsize = AtomicUsize::new(0);

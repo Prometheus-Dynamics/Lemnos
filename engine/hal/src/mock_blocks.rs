@@ -644,6 +644,15 @@ impl StreamEndpoint for MockStream {
 
     /// The faulted consumer is gone and the test plays the next one, as
     /// [`change_consumer`](Self::change_consumer) does.
+    fn buffer_current(&self, buffer: u32) -> Result<bool, ErrorKind> {
+        with(&self.state, |s| {
+            if s.held.get(buffer as usize) != Some(&true) {
+                return Err(ErrorKind::InvalidInput);
+            }
+            Ok(s.stale.get(buffer as usize) != Some(&true))
+        })
+    }
+
     fn fault_consumer(&mut self) -> Result<(), ErrorKind> {
         with(&self.state, |s| s.faults += 1);
         self.change_consumer();
@@ -993,6 +1002,8 @@ struct UsbFunctionState {
     pending: Option<(ControlSetup, u16, Vec<u8>)>,
     answers: Vec<(ControlSetup, ControlAnswer)>,
     halted: Vec<u8>,
+    /// IN endpoints still busy with what they were handed before: a `write` times out.
+    busy: Vec<u8>,
     from_host: VecDeque<(u8, Vec<u8>)>,
     to_host: Vec<(u8, Vec<u8>)>,
 }
@@ -1102,6 +1113,17 @@ impl MockUsbFunction {
 
     pub fn host_received(&self) -> Vec<(u8, Vec<u8>)> {
         with(&self.state, |s| s.to_host.clone())
+    }
+
+    /// The host stops (`busy` true) or goes back to taking what the IN endpoint `endpoint` is
+    /// handed. While it is stopped a `write` to the endpoint times out and takes nothing.
+    pub fn set_busy(&self, endpoint: u8, busy: bool) {
+        with(&self.state, |s| {
+            s.busy.retain(|e| *e != endpoint);
+            if busy {
+                s.busy.push(endpoint);
+            }
+        });
     }
 }
 
@@ -1232,6 +1254,9 @@ impl UsbFunction for MockUsbFunction {
         with(&self.state, |s| {
             if s.usable(endpoint)?.address & 0x80 == 0 {
                 return Err(ErrorKind::InvalidInput);
+            }
+            if s.busy.contains(&endpoint) {
+                return Err(ErrorKind::Timeout);
             }
             s.to_host.push((endpoint, data.to_vec()));
             Ok(data.len())

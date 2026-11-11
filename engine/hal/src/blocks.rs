@@ -184,6 +184,17 @@ pub trait StreamEndpoint {
     type Error: HalError;
 
     fn buffer_count(&self) -> u32;
+    /// Whether `buffer` was taken under the consumer attached now. `false` when no consumer is
+    /// attached, and when the one that was attached when the buffer was taken with
+    /// `next_buffer` has gone, whether or not another has come: publishing the buffer then
+    /// reaches no one, and that is how to give it up. One taken afterwards is current again.
+    ///
+    /// This is how a producer that holds buffers for a consumer (a job's buffers, named by
+    /// number) sees that the consumer it held them for is no longer the one there, on any kind
+    /// of stream: `write` and `read` reach whatever consumer is attached, and only a stream
+    /// with handles says so through [`buffer_handle`](Self::buffer_handle). Refused, as
+    /// `write` is, for a buffer the producer doesn't hold. Allocates nothing.
+    fn buffer_current(&self, buffer: u32) -> Result<bool, Self::Error>;
     /// What the stream's buffers are. The answer never changes for a stream, with or without a
     /// consumer, so a driver whose hardware takes buffers only by handle asks once when it
     /// binds and refuses [`BufferKind::Plain`] there.
@@ -528,19 +539,39 @@ pub trait UsbFunction {
     /// can't be halted (an isochronous endpoint), `Unavailable` while not configured.
     fn set_halt(&mut self, endpoint: u8, halted: bool) -> Result<(), Self::Error>;
     /// Takes what the host sent to the OUT endpoint `endpoint` (its address in the
-    /// descriptors) into `data`, waiting at most `timeout`. Returns how many bytes came.
+    /// descriptors) into `data`, waiting at most `timeout`. Returns how many bytes came, which
+    /// is 0 for a zero-length packet.
     ///
     /// `InvalidInput` for an endpoint the descriptors don't name or one of the other
     /// direction, `Timeout` when nothing came, `Unavailable` while not configured.
+    ///
+    /// A `Timeout` loses nothing: what the host sends later is there for the next `read`,
+    /// whole. A `timeout` of zero only looks, so a caller that never waits reads this way. A
+    /// transfer ends at a short packet, and `read` gives one transfer at a time: bytes of a
+    /// transfer that did not fit `data` come with the next `read`, when `data` is a multiple
+    /// of the endpoint's packet size. With any other size the bytes of a packet that did not
+    /// fit may be dropped.
     fn read(
         &mut self,
         endpoint: u8,
         data: &mut [u8],
         timeout: Duration,
     ) -> Result<usize, Self::Error>;
-    /// Sends `data` to the host on the IN endpoint `endpoint` (its address in the
-    /// descriptors, bit 7 set), waiting at most `timeout` for the host to take it. Returns
-    /// how many bytes went. Errors are as for [`read`](Self::read).
+    /// Hands `data` to the controller to send to the host on the IN endpoint `endpoint` (its
+    /// address in the descriptors, bit 7 set) as one transfer, waiting at most `timeout` for
+    /// the endpoint to be free of what was handed to it before. Returns how many bytes the
+    /// controller took, which can be fewer than `data` holds: hand it the rest next, and it
+    /// goes out as part of the same transfer when what was taken is a multiple of the
+    /// endpoint's packet size (a controller takes no other short count). An empty `data`
+    /// sends a zero-length packet.
+    ///
+    /// `Ok` says the bytes are the controller's, not that the host has them: the host takes
+    /// them when it next asks, and a reset or a pull before that loses them, as it loses any
+    /// transfer under way. `Timeout` when the endpoint stayed busy: nothing of `data` was
+    /// taken, nothing already handed over is disturbed, and the call can be made again. A
+    /// `timeout` of zero only looks. A transfer that failed after it was handed over is
+    /// reported by the next `write` to the endpoint, which takes nothing. The other errors
+    /// are as for [`read`](Self::read).
     fn write(&mut self, endpoint: u8, data: &[u8], timeout: Duration)
     -> Result<usize, Self::Error>;
 }
