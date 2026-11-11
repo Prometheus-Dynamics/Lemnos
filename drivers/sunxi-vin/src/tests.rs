@@ -890,3 +890,30 @@ fn the_driver_answers_feeds_from_the_nodes_graph() {
     assert_eq!(d.feeds().unwrap().isp.as_deref(), Some("sunxi_isp.0"));
     assert_eq!(d.feeds().unwrap().receiver.as_deref(), Some("sunxi_mipi.0"));
 }
+
+#[test]
+fn the_contract_answers_the_isp_on_the_way_to_the_node() {
+    let (mut d, node) = driver(&MockStream::new(1));
+    let mut name = [0u8; 64];
+    // The graph can't be read: the error, not a guess.
+    assert_eq!(
+        CameraReceiver::feeds(&mut d, &mut name),
+        Err(Status::NO_DEVICE)
+    );
+    node.with(|n| {
+        n.graph = Some(Graph {
+            topology: vin_graph(),
+            capture: 7,
+        });
+    });
+    let len = CameraReceiver::feeds(&mut d, &mut name).unwrap();
+    assert_eq!(&name[..len], b"sunxi_isp.0");
+    let mut small = [0u8; 4];
+    assert_eq!(
+        CameraReceiver::feeds(&mut d, &mut small),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+    // A node nothing feeds through an ISP.
+    node.with(|n| n.graph.as_mut().unwrap().capture = 42);
+    assert_eq!(CameraReceiver::feeds(&mut d, &mut name), Ok(0));
+}

@@ -82,6 +82,28 @@ pub mod health {
     pub const FAILED: u8 = 2;
 }
 
+/// Text appended to a frame after the frame's first form. A peer from before the addition
+/// doesn't send it, and then it reads as empty: rule 8 of `docs/wire.md` from the reader's
+/// side. It can only be a frame's last field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Appended<'a>(pub &'a str);
+
+impl Encode for Appended<'_> {
+    const SHAPE: lemnos_core::Shape = lemnos_core::Shape::Str;
+    fn encode(&self, out: &mut Writer<'_>) -> lemnos_core::Result<()> {
+        self.0.encode(out)
+    }
+}
+
+impl<'a> Decode<'a> for Appended<'a> {
+    fn decode(from: &mut Reader<'a>) -> lemnos_core::Result<Self> {
+        if from.remaining() == 0 {
+            return Ok(Self(""));
+        }
+        <&str>::decode(from).map(Self)
+    }
+}
+
 macro_rules! frames {
     ($($(#[$doc:meta])* $kind:literal $name:ident { $($(#[$field_doc:meta])* $field:ident: $ty:ty),* $(,)? })*) => {
         /// One message, in either direction.
@@ -133,6 +155,9 @@ frames! {
         state: u8,
         health: u8,
         reason: &'a str,
+        /// The name of the device this one is wired to, from the board file's `link`. Empty
+        /// when it names none, and from a host older than this field.
+        link: Appended<'a>,
     }
     5 ListDone { id: u32 }
     /// An empty `device` means any device providing `tag`.

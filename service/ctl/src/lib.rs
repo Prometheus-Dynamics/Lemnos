@@ -6,7 +6,7 @@ mod shape;
 use std::io::Write;
 use std::time::Duration;
 
-use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error};
+use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, follow};
 use lemnos_core::ItemKind;
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
@@ -15,6 +15,7 @@ use shape::{encode_args, render, shape_name};
 pub const USAGE: &str = "\
 lemnos-ctl [--socket PATH] COMMAND
   list                           every device and how it stands
+  chain DEVICE                   the devices it leads to through `link`, in order
   describe DEVICE                what it provides
   read DEVICE [ITEM]             one value, or all of them
   watch DEVICE ITEM [--period-ms N] [--count N]
@@ -74,6 +75,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     let mut tool = Tool { client, out };
     match (command.as_str(), tail) {
         ("list", []) => tool.list(),
+        ("chain", [device]) => tool.chain(device),
         ("describe", [device]) => tool.describe(device),
         ("read", [device]) => tool.read_all(device),
         ("read", [device, item]) => tool.read_one(device, item),
@@ -114,12 +116,48 @@ impl Tool<'_> {
                 state_name(d.state),
                 health_name(d.health),
             );
+            if let Some(link) = &d.link {
+                row.push_str(&format!("  -> {link}"));
+            }
             if !d.reason.is_empty() {
                 row.push_str(&format!("  ({})", d.reason));
             }
             line(self.out, format_args!("{row}"))?;
         }
         Ok(())
+    }
+
+    /// What `name` is wired to, and what that is wired to, one device a row: a camera sensor,
+    /// its receiver, the receiver's ISP. The tool knows none of them: it follows the board's
+    /// `link` from one device to the next.
+    fn chain(&mut self, name: &str) -> Outcome {
+        let devices = self.client.list().map_err(text)?;
+        let chain = follow(&devices, name);
+        let Some(last) = chain.last() else {
+            return Err(format!("no device {name:?}"));
+        };
+        let width = chain.iter().map(|d| d.name.len()).max().unwrap_or(0);
+        for d in &chain {
+            let tags = d.tags.join(",");
+            line(
+                self.out,
+                format_args!(
+                    "{:width$}  {}  {}  {}  {tags}",
+                    d.name,
+                    d.driver,
+                    state_name(d.state),
+                    health_name(d.health),
+                ),
+            )?;
+        }
+        // Where it ends says why: nothing further, a name the board doesn't have, or a circle.
+        match &last.link {
+            None => Ok(()),
+            Some(link) if devices.iter().any(|d| &d.name == link) => {
+                line(self.out, format_args!("-> {link}: already above"))
+            }
+            Some(link) => line(self.out, format_args!("-> {link}: no such device")),
+        }
     }
 
     fn describe(&mut self, name: &str) -> Outcome {

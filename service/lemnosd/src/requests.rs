@@ -9,7 +9,7 @@ use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::{
-    Frame, MAX_FRAME, VERSION, decode, encode_description, feature, handle_descriptors,
+    Appended, Frame, MAX_FRAME, VERSION, decode, encode_description, feature, handle_descriptors,
 };
 
 use crate::Core;
@@ -183,6 +183,7 @@ impl Client {
                 state,
                 health,
                 reason: &reason,
+                link: Appended(info.link.as_deref().unwrap_or("")),
             });
         }
         self.conn.answer(&Frame::ListDone { id });

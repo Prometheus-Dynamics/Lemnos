@@ -41,6 +41,7 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 state: state::BACKOFF,
                 health: health::FAILED,
                 reason: "r",
+                link: Appended("d"),
             },
         ),
         ("list-done", Frame::ListDone { id: 1 }),
@@ -322,6 +323,35 @@ fn appended_fields_are_skipped() {
     let (frame, used) = decode(&buf[..n + 1]).unwrap().unwrap();
     assert_eq!(frame, Frame::List { id: 5 });
     assert_eq!(used, n + 1);
+}
+
+#[test]
+fn a_device_from_before_its_link_reads_as_having_none() {
+    let with = Frame::Device {
+        id: 1,
+        device: 2,
+        name: "a",
+        driver: "b",
+        tags: "c/1",
+        state: state::BACKOFF,
+        health: health::FAILED,
+        reason: "r",
+        link: Appended("d"),
+    };
+    let mut buf = [0; 64];
+    let n = encode(&with, &mut buf).unwrap();
+    // What an older host sends: the same frame, ending after `reason`.
+    let older = n - 5;
+    buf[..4].copy_from_slice(&((older - 4) as u32).to_le_bytes());
+    let (frame, used) = decode(&buf[..older]).unwrap().unwrap();
+    assert_eq!(used, older);
+    let Frame::Device { link, reason, .. } = frame else {
+        panic!("{frame:?}");
+    };
+    assert_eq!((reason, link), ("r", Appended("")));
+    // A link that is there but cut short is malformed, not empty.
+    buf[..4].copy_from_slice(&((older - 4 + 2) as u32).to_le_bytes());
+    assert_eq!(decode(&buf[..older + 2]), Err(WireError::Malformed));
 }
 
 #[test]

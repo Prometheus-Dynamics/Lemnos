@@ -27,6 +27,6 @@ pub use error::Error;
 pub use lemnos_wire::DeviceDescription;
 pub use session::{
     DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, Session, Subscription,
-    ValueInfo,
+    ValueInfo, follow,
 };
 pub use stream::{FrameStream, HeldFrame, StreamPlatform};

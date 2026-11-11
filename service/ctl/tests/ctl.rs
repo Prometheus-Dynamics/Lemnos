@@ -25,7 +25,13 @@ fn start() -> Running {
     let socket = dir.join("sock");
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
         [[devices]]\nid = \"thing\"\ndriver = \"fake-counter\"\n[devices.config]\nstart = 41\n\
-        [[devices]]\nid = \"broken\"\ndriver = \"nothing-by-this-name\"\n";
+        [[devices]]\nid = \"broken\"\ndriver = \"nothing-by-this-name\"\n\
+        [[devices]]\nid = \"sensor\"\ndriver = \"fake-counter\"\nlink = \"receiver\"\n\
+        [[devices]]\nid = \"receiver\"\ndriver = \"fake-counter\"\nlink = \"isp\"\n\
+        [[devices]]\nid = \"isp\"\ndriver = \"fake-counter\"\n\
+        [[devices]]\nid = \"stray\"\ndriver = \"fake-counter\"\nlink = \"nowhere\"\n\
+        [[devices]]\nid = \"round\"\ndriver = \"fake-counter\"\nlink = \"about\"\n\
+        [[devices]]\nid = \"about\"\ndriver = \"fake-counter\"\nlink = \"round\"\n";
     let service = Service::start(Config {
         socket: socket.clone(),
         name: "t".to_string(),
@@ -65,12 +71,48 @@ fn list_shows_every_device_and_why_one_is_down() {
     let running = start();
     let text = ctl(&running, &["list"]).unwrap();
     let rows: Vec<&str> = text.lines().collect();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 8);
     assert!(rows[0].starts_with("thing "));
     assert!(rows[0].contains("running"));
     assert!(rows[0].contains("example.counter/1"));
+    assert!(!rows[0].contains("->"), "wired to nothing");
     assert!(rows[1].contains("retrying"));
     assert!(rows[1].contains("no driver named"));
+    // What a device is wired to, as the board file's `link` has it.
+    assert!(rows[2].starts_with("sensor "));
+    assert!(rows[2].ends_with("  -> receiver"), "{}", rows[2]);
+    assert!(rows[3].ends_with("  -> isp"), "{}", rows[3]);
+    assert!(rows[4].starts_with("isp ") && !rows[4].contains("->"));
+}
+
+#[test]
+fn chain_follows_a_device_to_what_it_is_wired_to() {
+    let running = start();
+    let names = |from: &str| -> Vec<String> {
+        ctl(&running, &["chain", from])
+            .unwrap()
+            .lines()
+            .map(|row| row.split_whitespace().next().unwrap().to_string())
+            .collect()
+    };
+    // The tool has no code for a sensor, a receiver or an ISP: the board's links are all it has.
+    assert_eq!(names("sensor"), ["sensor", "receiver", "isp"]);
+    assert_eq!(names("receiver"), ["receiver", "isp"]);
+    assert_eq!(names("thing"), ["thing"]);
+    let text = ctl(&running, &["chain", "sensor"]).unwrap();
+    assert!(text.lines().all(|row| row.contains("running")), "{text}");
+    // Where the board's links lead nowhere, or round, it says so and ends.
+    let stray = ctl(&running, &["chain", "stray"]).unwrap();
+    assert_eq!(stray.lines().count(), 2);
+    assert!(stray.ends_with("-> nowhere: no such device\n"), "{stray}");
+    let round = ctl(&running, &["chain", "round"]).unwrap();
+    assert_eq!(names("round")[..2], ["round", "about"]);
+    assert!(round.ends_with("-> round: already above\n"), "{round}");
+    assert!(
+        ctl(&running, &["chain", "nothing"])
+            .unwrap_err()
+            .contains("no device")
+    );
 }
 
 #[test]

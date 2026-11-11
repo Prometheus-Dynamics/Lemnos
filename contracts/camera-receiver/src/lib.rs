@@ -5,6 +5,12 @@
 //! stream name from `frame_stream` and opens that stream through the client. Frames never cross
 //! this contract: a method carries settings, and a stream carries frames.
 //!
+//! Where the frames go after the receiver. Which device of the board takes them next is the
+//! board file's `link` on the receiver (a sensor's `link` names its receiver, the receiver's its
+//! ISP), which a client reads from the device list and follows. What the hardware is doing is
+//! [`CameraReceiver::feeds`]: on a chip where the receiver hands frames to an ISP inside the
+//! hardware, it names that ISP; on one where the receiver only writes to memory, it names none.
+//!
 //! Each frame a stream publishes has an opaque `u64` identity. The consumer picks it and the
 //! receiver hands it back unchanged. Lemnos never reads it, so the consumer can use it to tie a
 //! frame to the exposure and gain it asked for.
@@ -19,6 +25,10 @@ use lemnos_core::{Decode, Encode, Reader, Result, Shape, Status, Writer, contrac
 
 /// Longest stream name a method answers, in bytes. A name is UTF-8 and at most this long.
 pub const MAX_STREAM_NAME: usize = 32;
+
+/// Longest name [`CameraReceiver::feeds`] answers, in bytes: a media entity's name is at most
+/// this long.
+pub const MAX_FEED_NAME: usize = 64;
 
 macro_rules! wire_enum {
     ($name:ident { $($variant:ident = $value:literal),* $(,)? }) => {
@@ -144,4 +154,15 @@ pub trait CameraReceiver {
     fn stop(&mut self) -> Result<()>;
     #[method(7)]
     fn counters(&mut self) -> Result<Counters>;
+    /// The ISP that takes this receiver's frames inside the hardware now, with no memory in
+    /// between: its name as the hardware's own driver has it, which is the name an ISP driver's
+    /// `device` setting takes, as UTF-8 into `into`, returning its length. `into` holds at least
+    /// [`MAX_FEED_NAME`] bytes. A receiver wired to more than one ISP answers the one whose link
+    /// is on.
+    ///
+    /// Length 0 when no ISP does: the frames reach only the frame stream, and whoever reads it
+    /// passes them on. A receiver that can't read its wiring at the moment answers the error
+    /// that stopped it.
+    #[method(8)]
+    fn feeds(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }

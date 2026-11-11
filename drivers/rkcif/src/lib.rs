@@ -8,8 +8,9 @@
 //! receiver exposes in the ISP's graph. Frames never cross this crate.
 //!
 //! Which ISP the receiver feeds is read from the graphs, not from a table: see [`route`] and
-//! [`Rkcif::feeds`]. The board file's `link` on the sensor names this receiver; the consumer
-//! follows on to the ISP with [`Rkcif::feeds`].
+//! [`Rkcif::feeds`]. The board file's `link` on the sensor names this receiver and the
+//! receiver's names its ISP, which a client reads from the device list; the contract's `feeds`
+//! answers the ISP whose link is on in the hardware now.
 //!
 //! Settings come from the device's `config` in the board file:
 //!
@@ -310,5 +311,17 @@ impl CameraReceiver for Rkcif {
 
     fn counters(&mut self) -> Result<Counters> {
         Err(Status::NOT_SUPPORTED)
+    }
+
+    /// The ISP whose link from this receiver is on, by its media device driver name
+    /// ([`route::feeding`]), read from the graphs at each call. None when the receiver is wired
+    /// to no ISP, or to some and every link is off.
+    fn feeds(&mut self, into: &mut [u8]) -> Result<usize> {
+        let links = Rkcif::feeds(self)?;
+        let name = route::feeding(&links).map_or(&[][..], str::as_bytes);
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
     }
 }

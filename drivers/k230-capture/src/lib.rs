@@ -608,6 +608,12 @@ impl CameraReceiver for K230Capture {
     fn counters(&mut self) -> Result<Counters> {
         Ok(self.counters)
     }
+
+    /// No ISP takes this block's frames in hardware: it writes them to memory, and the frame
+    /// stream is where they go.
+    fn feeds(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 const _: () = assert!(RING == 3);

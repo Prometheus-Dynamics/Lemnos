@@ -328,6 +328,10 @@ impl CameraReceiver for SimReceiver {
     fn counters(&mut self) -> Result<Counters> {
         Ok(self.counters)
     }
+
+    fn feeds(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 #[driver("sim-isp", provides = [CameraIsp])]
