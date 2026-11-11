@@ -117,6 +117,17 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::start(__needs, __cfg)
             }
 
+            fn bind_in(
+                __place: &mut ::core::option::Option<Self>,
+                __res: &mut ::lemnos_core::Resources<'_>,
+                __cfg: &::lemnos_core::Config<'_>,
+            ) -> ::lemnos_core::Result<()> {
+                let __needs = #needs_struct {
+                    #(#need_idents: <#need_types as ::lemnos_core::Resource>::take(__res, #need_labels)?,)*
+                };
+                <Self as ::lemnos_core::Lifecycle>::start_in(__place, __needs, __cfg)
+            }
+
             fn describe(&self, __out: &mut ::lemnos_core::Description) {
                 <Self as ::lemnos_core::Lifecycle>::describe(self, __out)
             }

@@ -67,7 +67,7 @@ fn bus_with_id(id: u16) -> Bus {
 fn sensor_on(bus: &Bus, entries: &[(&str, ConfigValue<'_>)]) -> Ov9782 {
     <Ov9782 as Lifecycle>::start(
         Ov9782Needs {
-            bus: I2c(Box::new(bus.clone())),
+            bus: I2c(lemnos_core::Held::boxed(Box::new(bus.clone()))),
             values: None,
         },
         &Config::new(entries),

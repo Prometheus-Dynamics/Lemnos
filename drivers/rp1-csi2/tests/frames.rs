@@ -367,7 +367,8 @@ fn link() -> LinkConfig {
 }
 
 fn driver(host: &Host, hw: &Hw) -> Rp1Csi2 {
-    let frames: StreamHandle = Box::new(host.stream_producer(0, "frames").unwrap());
+    let frames: StreamHandle =
+        lemnos_core::Held::boxed(Box::new(host.stream_producer(0, "frames").unwrap()));
     let mut receiver = Rp1Csi2::with_hardware(Box::new(hw.clone()), Some(frames));
     let layout = receiver.configure(link(), Packing::Packed).unwrap();
     assert_eq!(layout.size, FRAME_BYTES);
@@ -632,7 +633,8 @@ fn buffers_smaller_than_a_frame_are_refused() {
     let host = host();
     let hw = Hw::default();
     let mut frames = Client::attach(&host);
-    let frames_end: StreamHandle = Box::new(host.stream_producer(0, "frames").unwrap());
+    let frames_end: StreamHandle =
+        lemnos_core::Held::boxed(Box::new(host.stream_producer(0, "frames").unwrap()));
     let mut receiver = Rp1Csi2::with_hardware(Box::new(hw.clone()), Some(frames_end));
     let big = LinkConfig {
         width: 640,

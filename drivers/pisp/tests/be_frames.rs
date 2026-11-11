@@ -414,7 +414,9 @@ fn config_for(key: u8) -> Vec<u8> {
 }
 
 fn driver(host: &Host, hw: &Hw) -> PispBe {
-    let stream = |name| -> StreamHandle { Box::new(host.stream_producer(0, name).unwrap()) };
+    let stream = |name| -> StreamHandle {
+        lemnos_core::Held::boxed(Box::new(host.stream_producer(0, name).unwrap()))
+    };
     let mut be = PispBe::with_hardware(
         Box::new(hw.clone()),
         PispBeNeeds {

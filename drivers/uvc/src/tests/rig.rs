@@ -71,7 +71,10 @@ pub fn bind(usb: UsbDeviceHandle, stream: StreamHandle, frame_bytes: i64) -> Res
 
 pub fn bind_config(config: &Config<'_>) -> Result<Uvc> {
     let usb = MockUsb::new(fixture::webcam().bytes);
-    let mut board = Board(Some(Box::new(usb)), Some(Box::new(MockStream::new(1))));
+    let mut board = Board(
+        Some(lemnos_core::Held::boxed(Box::new(usb))),
+        Some(lemnos_core::Held::boxed(Box::new(MockStream::new(1)))),
+    );
     let mut resources = Resources::new(&mut board, None);
     Uvc::bind(&mut resources, config)
 }
@@ -177,7 +180,12 @@ impl Rig {
             stream: stream.clone(),
             attached: Arc::clone(&attached),
         };
-        let uvc = bind(Box::new(usb.clone()), Box::new(consumer), frame_bytes).unwrap();
+        let uvc = bind(
+            lemnos_core::Held::boxed(Box::new(usb.clone())),
+            lemnos_core::Held::boxed(Box::new(consumer)),
+            frame_bytes,
+        )
+        .unwrap();
         Self {
             uvc,
             usb,

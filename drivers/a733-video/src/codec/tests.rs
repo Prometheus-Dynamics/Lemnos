@@ -157,7 +157,12 @@ impl Rig {
         };
         let jobs = Box::new(host.stream_producer(0, "jobs").unwrap());
         let block = EngineBlock::new(open, Lock::Encoder);
-        let mut driver = A733Video::on(A733VideoNeeds { jobs }, Box::new(block));
+        let mut driver = A733Video::on(
+            A733VideoNeeds {
+                jobs: lemnos_core::Held::boxed(jobs),
+            },
+            Box::new(block),
+        );
         let caller = Caller::attach(&host, 0, "jobs", 1);
         let now = driver.tick(1).unwrap();
         Self {

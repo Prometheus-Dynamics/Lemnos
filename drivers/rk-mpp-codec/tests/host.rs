@@ -243,7 +243,9 @@ fn a_board_file_binds_it_and_what_it_names_is_checked() {
 fn driver_on(rig: &Rig, kernel: &Arc<Mutex<Kernel>>) -> RkMpp {
     let jobs = Box::new(rig.host.stream_producer(0, "jobs").unwrap());
     RkMpp::on(
-        RkMppNeeds { jobs },
+        RkMppNeeds {
+            jobs: lemnos_core::Held::boxed(jobs),
+        },
         BoxedDevice::new(Node(Arc::clone(kernel))),
         Block::Vepu2,
     )

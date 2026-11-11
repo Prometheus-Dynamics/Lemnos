@@ -19,6 +19,9 @@ pub struct Options {
     pub retry_first_ns: u64,
     /// Capped at 8 s.
     pub retry_cap_ns: u64,
+    /// Calls in a row that fail as a device that has gone does (`IO`, `NO_DEVICE`,
+    /// `TIMED_OUT`) before its driver is dropped and bound again.
+    pub error_limit: u32,
 }
 
 impl Options {
@@ -26,15 +29,21 @@ impl Options {
     pub const DEFAULT: Self = Self {
         retry_first_ns: 1_000_000_000,
         retry_cap_ns: RETRY_CAP_NS,
+        error_limit: 5,
     };
 
-    /// The wait before retry number `attempt` (0 is the first).
-    pub const fn backoff_ns(&self, attempt: u32) -> u64 {
-        let cap = if self.retry_cap_ns < RETRY_CAP_NS {
+    /// The longest wait between retries: the cap asked for, and never more than 8 s.
+    pub const fn cap_ns(&self) -> u64 {
+        if self.retry_cap_ns < RETRY_CAP_NS {
             self.retry_cap_ns
         } else {
             RETRY_CAP_NS
-        };
+        }
+    }
+
+    /// The wait before retry number `attempt` (0 is the first).
+    pub const fn backoff_ns(&self, attempt: u32) -> u64 {
+        let cap = self.cap_ns();
         let doubled = match 1u64.checked_shl(attempt) {
             Some(factor) => self.retry_first_ns.saturating_mul(factor),
             None => cap,
@@ -55,7 +64,8 @@ pub enum State {
     /// Not tried yet.
     Unbound,
     Running,
-    /// Its bind failed; it is tried again at `next_retry_ns`, forever.
+    /// Its bind failed, or its driver was dropped because what it was bound with is gone; it
+    /// is bound again at `next_retry_ns`, forever.
     Backoff {
         attempts: u32,
         next_retry_ns: u64,
@@ -197,7 +207,7 @@ impl Table {
             {
                 self.bind(device, buses, now);
             }
-            entry.tick(now);
+            entry.tick(now, &self.options);
             if let Some(due) = entry.next_due() {
                 next = Some(next.map_or(due, |next| next.min(due)));
             }
@@ -213,7 +223,8 @@ impl Table {
         args: &[u8],
         reply: &mut [u8],
     ) -> Result<usize> {
-        self.entry(device)?.call(method, args, reply, self.clock)
+        self.entry(device)?
+            .call(method, args, reply, self.clock, &self.options)
     }
 
     pub fn describe(&self, device: u32, out: &mut Description) -> Result<()> {

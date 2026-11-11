@@ -6,13 +6,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use embedded_hal::i2c::{self, Operation};
 use lemnos_core::{
-    Config, ConfigValue, Decode, Description, ErrorKind, Health, I2c, MethodId, Reader, Status,
-    Vector3,
+    Config, ConfigValue, Decode, Description, Health, MethodId, Reader, Status, Vector3,
 };
 use lemnos_driver_bmi088::Bmi088;
 use lemnos_driver_orientation::Orientation;
 use lemnos_host_static::{Device, Lock, Options, Slot, Spec, State, Table};
-use lemnos_mcu::{Buses, I2cBus, Named};
+use lemnos_mcu::{Buses, DynI2c, I2cBus, Stall, Stalled};
 use lemnos_measure::test_alloc::{Counting, allocations};
 
 #[global_allocator]
@@ -124,32 +123,17 @@ fn two_targets(transactions: &'static AtomicU32) -> TwoTargets {
     }
 }
 
-/// Makes a bus handle whichever way `lemnos-core` holds them: boxed when the build has an
-/// allocator, `&'static mut` when it doesn't. Called before anything is counted.
-trait Hold<B> {
-    fn hold(bus: B) -> Self;
-}
+type I2cStall = Stall<DynI2c, Locked<Option<&'static mut DynI2c>>>;
 
-type Erased = dyn i2c::I2c<Error = ErrorKind> + Send;
-
-impl<B: i2c::I2c<Error = ErrorKind> + Send + 'static> Hold<B> for &'static mut Erased {
-    fn hold(bus: B) -> Self {
-        Box::leak(Box::new(bus))
-    }
-}
-
-impl<B: i2c::I2c<Error = ErrorKind> + Send + 'static> Hold<B> for Box<Erased> {
-    fn hold(bus: B) -> Self {
-        Box::new(bus)
-    }
-}
-
-/// The bus the firmware names `i2c0`, with the two targets on it.
-fn bus(transactions: &'static AtomicU32) -> [Named<I2c>; 1] {
-    [Named::new(
-        "i2c0",
-        I2c(Hold::hold(I2cBus(two_targets(transactions)))),
-    )]
+/// The bus the firmware names `i2c0`, with the two targets on it, in a stall of its own: the
+/// firmware's `static`, filled once at boot. The bus is made before anything is counted.
+macro_rules! i2c0 {
+    ($transactions:expr) => {{
+        static STALL: I2cStall = Stall::new("i2c0", Locked::new(None));
+        let bus: &'static mut DynI2c = Box::leak(Box::new(I2cBus(two_targets($transactions))));
+        assert!(STALL.put(bus));
+        [&STALL as &'static dyn Stalled<DynI2c>]
+    }};
 }
 
 const READ: u16 = 1;
@@ -203,8 +187,8 @@ macro_rules! table {
 fn both_drivers_bind_children_first_and_answer_through_the_table() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
-    let mut i2c = bus(&TRANSACTIONS);
-    TABLE.start(&mut Buses::new().with_i2c(&mut i2c));
+    let i2c = i2c0!(&TRANSACTIONS);
+    TABLE.start(&mut Buses::new().with_i2c(&i2c));
     assert_eq!(TABLE.state(SENSOR), Some(State::Running));
     assert_eq!(TABLE.state(FUSED), Some(State::Running));
 
@@ -220,8 +204,8 @@ fn both_drivers_bind_children_first_and_answer_through_the_table() {
 fn a_call_reaches_the_device_and_contract_it_names() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
-    let mut i2c = bus(&TRANSACTIONS);
-    TABLE.start(&mut Buses::new().with_i2c(&mut i2c));
+    let i2c = i2c0!(&TRANSACTIONS);
+    TABLE.start(&mut Buses::new().with_i2c(&i2c));
 
     let acceleration = first_value(&TABLE, SENSOR, 0);
     assert!((acceleration.z - 9.806).abs() < 0.01, "{acceleration:?}");
@@ -242,8 +226,8 @@ fn nothing_allocates_from_start_to_steady_state() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
     // The firmware's buses exist before the host starts.
-    let mut i2c = bus(&TRANSACTIONS);
-    let mut buses = Buses::new().with_i2c(&mut i2c);
+    let i2c = i2c0!(&TRANSACTIONS);
+    let mut buses = Buses::new().with_i2c(&i2c);
     let mut reads = 0;
     let ((), count) = allocations(|| {
         TABLE.start(&mut buses);
@@ -294,8 +278,8 @@ fn a_parent_waits_for_its_child_without_using_up_a_bus_then_binds() {
     assert!(matches!(TABLE.state(FUSED), Some(State::Backoff { .. })));
     assert_eq!(TABLE.health(FUSED), Health::Failed("retrying"));
 
-    let mut i2c = bus(&TRANSACTIONS);
-    let mut buses = Buses::new().with_i2c(&mut i2c);
+    let i2c = i2c0!(&TRANSACTIONS);
+    let mut buses = Buses::new().with_i2c(&i2c);
     let mut next = Some(0);
     for _ in 0..10 {
         CLOCK.0.store(next.unwrap(), Ordering::Relaxed);
@@ -313,8 +297,8 @@ fn a_parent_waits_for_its_child_without_using_up_a_bus_then_binds() {
 fn health_passes_up_and_off_and_on_are_immediate() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
-    let mut i2c = bus(&TRANSACTIONS);
-    TABLE.start(&mut Buses::new().with_i2c(&mut i2c));
+    let i2c = i2c0!(&TRANSACTIONS);
+    TABLE.start(&mut Buses::new().with_i2c(&i2c));
     first_value(&TABLE, FUSED, 0);
     assert_eq!(
         TABLE.health(FUSED),
@@ -338,8 +322,8 @@ fn health_passes_up_and_off_and_on_are_immediate() {
 fn devices_are_found_by_id_and_tag_and_describe_themselves() {
     table!(TABLE, CLOCK);
     static TRANSACTIONS: AtomicU32 = AtomicU32::new(0);
-    let mut i2c = bus(&TRANSACTIONS);
-    TABLE.start(&mut Buses::new().with_i2c(&mut i2c));
+    let i2c = i2c0!(&TRANSACTIONS);
+    TABLE.start(&mut Buses::new().with_i2c(&i2c));
     assert_eq!(TABLE.index("sensor"), Some(SENSOR));
     assert_eq!(TABLE.id(FUSED), Some("fused"));
     assert_eq!(TABLE.find("orientation/1", 0), Some(FUSED));

@@ -171,7 +171,7 @@ fn driver_on(stream: StreamHandle) -> (SunxiVin, Handle) {
 }
 
 fn driver(stream: &MockStream) -> (SunxiVin, Handle) {
-    driver_on(Box::new(stream.clone()))
+    driver_on(lemnos_core::Held::boxed(Box::new(stream.clone())))
 }
 
 fn streaming(stream: &MockStream) -> (SunxiVin, Handle) {
@@ -266,7 +266,11 @@ fn a_monochrome_sensor_deeper_than_eight_bits_names_an_order() {
         planes: Vec::new(),
     };
     let mono = Options::default();
-    let mut d = SunxiVin::with_hardware(Box::new(hw), Box::new(MockStream::new(1)), mono);
+    let mut d = SunxiVin::with_hardware(
+        Box::new(hw),
+        lemnos_core::Held::boxed(Box::new(MockStream::new(1))),
+        mono,
+    );
     assert_eq!(
         d.configure(raw10(), Packing::Unpacked16).unwrap_err(),
         Status::INVALID_ARGUMENT
@@ -499,7 +503,7 @@ impl StreamEndpoint for Unattached {
 #[test]
 fn with_no_consumer_frames_are_dropped_and_buffers_go_back() {
     let stream = Unattached::default();
-    let (mut d, node) = driver_on(Box::new(stream.clone()));
+    let (mut d, node) = driver_on(lemnos_core::Held::boxed(Box::new(stream.clone())));
     d.configure(raw10(), Packing::Unpacked16).unwrap();
     d.start().unwrap();
     let mut now = 0;

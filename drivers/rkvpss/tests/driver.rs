@@ -367,7 +367,8 @@ fn log(runs: usize) -> Arc<Log> {
 /// The driver on channel 2 over a played node, on stream "jobs" of a device whose own driver
 /// doesn't use it: the test plays the host's part in ticking it.
 fn driver_on(host: &Host, log: &Arc<Log>) -> Rkvpss {
-    let jobs = Box::new(host.stream_producer(0, "jobs").unwrap());
+    let jobs: lemnos_core::StreamHandle =
+        lemnos_core::Held::boxed(Box::new(host.stream_producer(0, "jobs").unwrap()));
     Rkvpss::with_device(RkvpssNeeds { jobs }, opener(log), Channel::Ch2)
 }
 

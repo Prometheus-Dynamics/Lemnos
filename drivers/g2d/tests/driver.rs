@@ -289,7 +289,8 @@ fn opener(plan: &Arc<Plan>) -> Opener {
 /// The driver over a counting engine, on stream "jobs" of a device whose own driver doesn't
 /// use it: the test plays the host's part in ticking it.
 fn driver_on(host: &Host, plan: &Arc<Plan>) -> G2dDriver {
-    let jobs = Box::new(host.stream_producer(0, "jobs").unwrap());
+    let jobs: lemnos_core::StreamHandle =
+        lemnos_core::Held::boxed(Box::new(host.stream_producer(0, "jobs").unwrap()));
     G2dDriver::with_engine(G2dDriverNeeds { jobs }, opener(plan))
 }
 
@@ -383,7 +384,7 @@ fn a_stream_error_is_tried_again_on_the_backoff() {
     ]);
     stream.post_job(&[0; 4097]);
     let plan = Arc::new(Plan::default());
-    let jobs = Box::new(stream.clone());
+    let jobs: lemnos_core::StreamHandle = lemnos_core::Held::boxed(Box::new(stream.clone()));
     let mut driver = G2dDriver::with_engine(G2dDriverNeeds { jobs }, opener(&plan));
     assert_eq!(driver.tick(0), Some(250 * MS));
     assert_eq!(

@@ -6,7 +6,9 @@
 //! - [`PwmChannel`]: an embedded-hal duty-cycle channel as a [`RawPwm`].
 //! - [`usb`]: [`UsbFunction`] and [`UsbHost`] over a small port trait the firmware implements on
 //!   its USB peripheral.
-//! - [`Buses`]: the firmware's buses by name, as the [`Provider`] a host binds drivers from.
+//! - [`Stall`]: where a bus lives when no driver holds it, and where it comes back to when its
+//!   driver is dropped. [`Buses`]: the firmware's stalls by name, as the [`Provider`] a host binds
+//!   drivers from.
 //!
 //! Every type is generic over the peripheral, so the same code is tested here against mocks and
 //! built for the target with the firmware's HAL.
@@ -30,7 +32,10 @@ mod pwm;
 pub mod usb;
 
 pub use bus::{I2cBus, SpiBus};
-pub use buses::{Buses, Named};
+pub use buses::{
+    Buses, DynI2c, DynLine, DynPwm, DynRawSpi, DynSpi, DynUart, DynUsbDevice, DynUsbFunction,
+    Stall, Stalled,
+};
 pub use line::{InputLine, OutputLine};
 pub use pwm::PwmChannel;
 

@@ -267,8 +267,8 @@ impl Rig {
         let no_config: &[(&str, ConfigValue<'_>)] = &[];
         let mut sensor = <Ov9782 as Lifecycle>::start(
             Ov9782Needs {
-                bus: I2c(Box::new(bus.clone())),
-                values: Some(Box::new(RingEnd(producer))),
+                bus: I2c(lemnos_core::Held::boxed(Box::new(bus.clone()))),
+                values: Some(lemnos_core::Held::boxed(Box::new(RingEnd(producer)))),
             },
             &Config::new(no_config),
         )

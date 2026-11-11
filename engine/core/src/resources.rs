@@ -8,12 +8,7 @@ use lemnos_hal::{
 
 use crate::{Contract, Dev, LocalCaller, Result, Status, Tag};
 
-/// Something a driver owns once it has bound.
-#[cfg(feature = "alloc")]
-pub type Held<T> = alloc::boxed::Box<T>;
-/// Something a driver owns once it has bound.
-#[cfg(not(feature = "alloc"))]
-pub type Held<T> = &'static mut T;
+pub use crate::held::{Held, Home, Lock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BusKind {

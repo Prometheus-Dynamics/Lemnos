@@ -369,7 +369,9 @@ fn config() -> Vec<u8> {
 }
 
 fn driver(host: &Host, hw: &Hw) -> PispFe {
-    let stream = |name| -> StreamHandle { Box::new(host.stream_producer(0, name).unwrap()) };
+    let stream = |name| -> StreamHandle {
+        lemnos_core::Held::boxed(Box::new(host.stream_producer(0, name).unwrap()))
+    };
     let link = Link {
         lanes: 2,
         mbps: 800,

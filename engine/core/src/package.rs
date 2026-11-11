@@ -1481,7 +1481,7 @@ impl Asking<'_> {
 macro_rules! asked {
     ($($method:ident -> $handle:ty = $kind:ident;)*) => {$(
         fn $method(&mut self, need: &str) -> Result<$handle> {
-            Ok(self.taken($kind, need)?)
+            Ok(crate::Held::boxed(self.taken($kind, need)?))
         }
     )*};
 }
@@ -1500,11 +1500,11 @@ impl Provider for Asking<'_> {
     }
 
     fn i2c(&mut self, need: &str) -> Result<I2c> {
-        Ok(I2c(self.taken(TAKE_I2C, need)?))
+        Ok(I2c(crate::Held::boxed(self.taken(TAKE_I2C, need)?)))
     }
 
     fn spi(&mut self, need: &str) -> Result<Spi> {
-        Ok(Spi(self.taken(TAKE_SPI, need)?))
+        Ok(Spi(crate::Held::boxed(self.taken(TAKE_SPI, need)?)))
     }
 
     asked! {

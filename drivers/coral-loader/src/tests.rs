@@ -115,7 +115,7 @@ impl Provider for Board {
 
     fn usb_device(&mut self, _need: &str) -> Result<UsbDeviceHandle> {
         let usb = self.0.take().ok_or(Status::NOT_FOUND)?;
-        Ok(Box::new(usb))
+        Ok(lemnos_core::Held::boxed(Box::new(usb)))
     }
 }
 

@@ -65,7 +65,7 @@ impl Provider for Board {
 }
 
 fn bind(entries: &[(&str, ConfigValue<'_>)], bus: Flaky) -> lemnos_core::Result<Ws2812> {
-    let mut board = Board(Some(Spi(Box::new(bus))));
+    let mut board = Board(Some(Spi(lemnos_core::Held::boxed(Box::new(bus)))));
     let mut res = Resources::new(&mut board, None);
     Ws2812::bind(&mut res, &Config::new(entries))
 }

@@ -70,7 +70,9 @@ macro_rules! provide {
         fn $method(&mut self, need: &str) -> Result<$handle> {
             let (part, faults, release) = self.take(need)?;
             match part {
-                Part::$part(mock) => Ok(Box::new(Faulty::new(mock, faults, release))),
+                Part::$part(mock) => Ok(lemnos_core::Held::boxed(Box::new(Faulty::new(
+                    mock, faults, release,
+                )))),
                 _ => Err(Status::INVALID_ARGUMENT),
             }
         }
@@ -181,7 +183,9 @@ impl Provider for SimBoard {
     fn i2c(&mut self, need: &str) -> Result<I2c> {
         let (part, faults, release) = self.take(need)?;
         match part {
-            Part::I2c(bus) => Ok(I2c(Box::new(Faulty::new(bus, faults, release)))),
+            Part::I2c(bus) => Ok(I2c(lemnos_core::Held::boxed(Box::new(Faulty::new(
+                bus, faults, release,
+            ))))),
             _ => Err(Status::INVALID_ARGUMENT),
         }
     }
@@ -189,7 +193,9 @@ impl Provider for SimBoard {
     fn spi(&mut self, need: &str) -> Result<Spi> {
         let (part, faults, release) = self.take(need)?;
         match part {
-            Part::Spi(device) => Ok(Spi(Box::new(Faulty::new(device, faults, release)))),
+            Part::Spi(device) => Ok(Spi(lemnos_core::Held::boxed(Box::new(Faulty::new(
+                device, faults, release,
+            ))))),
             _ => Err(Status::INVALID_ARGUMENT),
         }
     }

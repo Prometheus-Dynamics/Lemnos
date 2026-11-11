@@ -146,7 +146,7 @@ impl Streams {
     fn needs(&self, config: StreamHandle) -> K230IspNeeds {
         K230IspNeeds {
             config,
-            statistics: Box::new(self.statistics.clone()),
+            statistics: lemnos_core::Held::boxed(Box::new(self.statistics.clone())),
         }
     }
 }
@@ -234,7 +234,10 @@ fn driver_on(streams: &Streams, config: StreamHandle) -> (K230Isp, Handle) {
 }
 
 fn driver(streams: &Streams) -> (K230Isp, Handle) {
-    driver_on(streams, Box::new(streams.config.clone()))
+    driver_on(
+        streams,
+        lemnos_core::Held::boxed(Box::new(streams.config.clone())),
+    )
 }
 
 fn running(streams: &Streams) -> (K230Isp, Handle) {
@@ -434,7 +437,7 @@ fn the_driver_uses_its_copy_when_the_caller_changes_the_buffer_after_the_read() 
         scribble: list(&[(MI_BASE, 1), (WINDOW_BYTES, 0)]),
         hands_over: None,
     };
-    let (mut d, b) = driver_on(&streams, Box::new(config));
+    let (mut d, b) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)));
     d.start().unwrap();
     d.tick(0);
     streams.config.fill(1, &list(&[(AE_V_SIZE, 6)]));
@@ -526,7 +529,7 @@ fn a_config_buffer_handed_over_and_named_while_a_tick_runs_is_held_for_that_job(
         scribble: good.clone(),
         hands_over: Some(3),
     };
-    let (mut d, b) = driver_on(&streams, Box::new(config));
+    let (mut d, b) = driver_on(&streams, lemnos_core::Held::boxed(Box::new(config)));
     // The consumer kept buffer 3: take it before the driver can.
     let mut consumer = streams.config.clone();
     let mut taken = Vec::new();
