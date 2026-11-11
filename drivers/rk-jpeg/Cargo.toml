@@ -9,10 +9,12 @@ description = "The Rockchip JPEG decoder and encoder behind the vendor kernel's 
 [lints]
 workspace = true
 
-# Linux only. No `unsafe` here: the call into the service comes through the `Device` trait.
+# Linux only. No `unsafe` here: the call into the service is `lemnos-driver-rk-mpp-sys`'s.
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 libc.workspace = true
+lemnos-driver-rk-mpp = { path = "../rk-mpp" }
+lemnos-driver-rk-mpp-sys = { path = "../rk-mpp-sys" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
