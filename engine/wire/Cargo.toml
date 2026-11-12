@@ -11,8 +11,19 @@ description = "The Lemnos socket protocol: calls, values and streams, delivered 
 [lints]
 workspace = true
 
+# With no features: only the frame stream's ring, which needs nothing of the engine.
+[features]
+default = ["protocol"]
+# The socket protocol: frames, calls, values, descriptions.
+protocol = ["dep:lemnos-core"]
+
 [dependencies]
-lemnos-core = { path = "../core", features = ["std"] }
+lemnos-core = { path = "../core", features = ["std"], optional = true }
 
 [dev-dependencies]
 lemnos-measure = { path = "../measure", features = ["alloc-count"] }
+
+# The protocol's own allocation test.
+[[test]]
+name = "alloc"
+required-features = ["protocol"]

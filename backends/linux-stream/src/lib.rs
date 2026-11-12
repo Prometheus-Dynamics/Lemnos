@@ -1,17 +1,25 @@
-//! What a frame stream needs from Linux, for a program using `lemnos-client`.
+//! What a frame stream needs from Linux: receiving its descriptors, and mapping its ring and
+//! buffers (shared memory or dma-bufs) with their lengths checked before anything is mapped.
 //!
-//! `lemnos-client` has no `unsafe` and doesn't know about this crate. It asks for a
-//! [`StreamPlatform`], and the program passes [`LinuxStreams`]. All the unsafe is in
+//! With no features this is a library over `lemnos-linux-sys` and the ring of `lemnos-wire`
+//! alone, no part of the engine: [`LinuxStreams`]'s own methods return a [`RingMapping`] and
+//! [`BufferMapping`]s, which are the ring's [`WordMemory`] and [`ByteMemory`].
+//!
+//! With the `client` feature (on by default) it is also what a program using `lemnos-client`
+//! passes for streams. `lemnos-client` has no `unsafe` and doesn't know about this crate. It asks
+//! for a `StreamPlatform`, and the program passes [`LinuxStreams`]. All the unsafe is in
 //! `lemnos-linux-sys`.
 
 #![cfg(target_os = "linux")]
 
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+#[cfg(feature = "client")]
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+#[cfg(feature = "client")]
 use lemnos_client::StreamPlatform;
 use lemnos_linux_sys::dma_buf::{SYNC_END, SYNC_READ, SYNC_START, SYNC_WRITE};
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
@@ -23,9 +31,10 @@ use lemnos_wire::ring::{ByteMemory, WordMemory};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LinuxStreams;
 
-struct SharedRing(Mapping);
+/// A stream's ring, mapped shared and writable, as words.
+pub struct RingMapping(Mapping);
 
-impl WordMemory for SharedRing {
+impl WordMemory for RingMapping {
     fn words(&self) -> &[AtomicU64] {
         // Checked when this was made. An empty slice would just read as too small anyway.
         self.0.as_atomic_words().unwrap_or(&[])
@@ -36,8 +45,10 @@ impl WordMemory for SharedRing {
 /// `DMA_BUF_IOCTL_SYNC`.
 type Sync = Box<dyn Fn(u64) + Send + std::marker::Sync>;
 
-/// The one mapping of a stream of shared memory, or one buffer of a stream of dma-bufs.
-struct SharedBuffers {
+/// The one mapping of a stream of shared memory, or one buffer of a stream of dma-bufs. Read it
+/// through [`ByteMemory`]: a dma-buf's reads go between [`ByteMemory::begin_read`] and
+/// [`ByteMemory::end_read`], and its writes through [`ByteMemory::write`], which tell the kernel.
+pub struct BufferMapping {
     map: Mapping,
     /// Whether the mapping can be written.
     writable: bool,
@@ -46,7 +57,7 @@ struct SharedBuffers {
     synced: Option<Sync>,
 }
 
-impl SharedBuffers {
+impl BufferMapping {
     fn sync(&self, flags: u64) {
         if let Some(sync) = &self.synced {
             sync(flags);
@@ -54,7 +65,7 @@ impl SharedBuffers {
     }
 }
 
-impl ByteMemory for SharedBuffers {
+impl ByteMemory for BufferMapping {
     fn bytes(&self) -> &[u8] {
         self.map.as_slice()
     }
@@ -100,8 +111,10 @@ fn at_least(fd: BorrowedFd<'_>, bytes: usize) -> io::Result<()> {
     }
 }
 
-impl StreamPlatform for LinuxStreams {
-    fn recv_with_descriptors(
+impl LinuxStreams {
+    /// Reads from `socket` into `buf`, appending any descriptors that arrived to `fds`. Returns
+    /// the bytes read, 0 at end of file.
+    pub fn recv_with_descriptors(
         &self,
         socket: BorrowedFd<'_>,
         buf: &mut [u8],
@@ -110,35 +123,43 @@ impl StreamPlatform for LinuxStreams {
         scm::recv_with_fds(socket, buf, fds)
     }
 
-    fn map_ring(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Arc<dyn WordMemory>> {
+    /// Maps `bytes` of `fd` shared and writable, as a ring's words. Refused unless `fd` is
+    /// exactly `bytes` long and sealed against shrinking, and `bytes` is whole words.
+    pub fn map_ring(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<RingMapping> {
         exactly(fd, bytes)?;
         let mapping = Mapping::new(fd, bytes, 0, true)?;
         if mapping.as_atomic_words().is_none() {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        Ok(Arc::new(SharedRing(mapping)))
+        Ok(RingMapping(mapping))
     }
 
-    fn map_buffers(
+    /// Maps `bytes` of `fd` shared, read-only or writable too: the buffers of a stream of
+    /// shared memory, all in one. Refused unless `fd` is exactly `bytes` long and sealed against
+    /// shrinking.
+    pub fn map_buffers(
         &self,
         fd: BorrowedFd<'_>,
         bytes: usize,
         writable: bool,
-    ) -> io::Result<Box<dyn ByteMemory>> {
+    ) -> io::Result<BufferMapping> {
         exactly(fd, bytes)?;
-        Ok(Box::new(SharedBuffers {
+        Ok(BufferMapping {
             map: Mapping::new(fd, bytes, 0, writable)?,
             writable,
             synced: None,
-        }))
+        })
     }
 
-    fn map_buffer(
+    /// Maps the first `bytes` of `fd` shared: one buffer of a stream of dma-bufs. Refused unless
+    /// `fd` is at least `bytes` long and can never get shorter (a dma-buf, or memory sealed
+    /// against shrinking). A dma-buf's accesses are bracketed with `DMA_BUF_IOCTL_SYNC`.
+    pub fn map_buffer(
         &self,
         fd: BorrowedFd<'_>,
         bytes: usize,
         writable: bool,
-    ) -> io::Result<Box<dyn ByteMemory>> {
+    ) -> io::Result<BufferMapping> {
         at_least(fd, bytes)?;
         // A stand-in for a dma-buf (a sealed memfd) takes no such call.
         let synced = if dma_buf::is_dma_buf(fd)? {
@@ -149,19 +170,63 @@ impl StreamPlatform for LinuxStreams {
         } else {
             None
         };
-        Ok(Box::new(SharedBuffers {
+        Ok(BufferMapping {
             map: Mapping::new(fd, bytes, 0, writable)?,
             writable,
             synced,
-        }))
+        })
     }
 
-    fn wait_doorbell(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+    /// Waits up to `timeout` for the doorbell (an eventfd) and drains it; returns whether it
+    /// rang.
+    pub fn wait_doorbell(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
         let woken = poll_one(fd, POLLIN, Some(timeout))? != 0;
         if woken {
             eventfd::drain(fd);
         }
         Ok(woken)
+    }
+}
+
+#[cfg(feature = "client")]
+impl StreamPlatform for LinuxStreams {
+    fn recv_with_descriptors(
+        &self,
+        socket: BorrowedFd<'_>,
+        buf: &mut [u8],
+        fds: &mut Vec<OwnedFd>,
+    ) -> io::Result<usize> {
+        LinuxStreams::recv_with_descriptors(self, socket, buf, fds)
+    }
+
+    fn map_ring(&self, fd: BorrowedFd<'_>, bytes: usize) -> io::Result<Arc<dyn WordMemory>> {
+        Ok(Arc::new(LinuxStreams::map_ring(self, fd, bytes)?))
+    }
+
+    fn map_buffers(
+        &self,
+        fd: BorrowedFd<'_>,
+        bytes: usize,
+        writable: bool,
+    ) -> io::Result<Box<dyn ByteMemory>> {
+        Ok(Box::new(LinuxStreams::map_buffers(
+            self, fd, bytes, writable,
+        )?))
+    }
+
+    fn map_buffer(
+        &self,
+        fd: BorrowedFd<'_>,
+        bytes: usize,
+        writable: bool,
+    ) -> io::Result<Box<dyn ByteMemory>> {
+        Ok(Box::new(LinuxStreams::map_buffer(
+            self, fd, bytes, writable,
+        )?))
+    }
+
+    fn wait_doorbell(&self, fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
+        LinuxStreams::wait_doorbell(self, fd, timeout)
     }
 }
 
@@ -235,11 +300,11 @@ mod tests {
 
     #[test]
     fn a_dma_bufs_accesses_are_bracketed_for_the_kernel() {
-        use std::sync::Mutex;
+        use std::sync::{Arc, Mutex};
         let fd = sealed_memfd(c"synced", 4096).unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&calls);
-        let buffer = SharedBuffers {
+        let buffer = BufferMapping {
             map: Mapping::new(fd.as_fd(), 4096, 0, true).unwrap(),
             writable: true,
             synced: Some(Box::new(move |flags| log.lock().unwrap().push(flags))),

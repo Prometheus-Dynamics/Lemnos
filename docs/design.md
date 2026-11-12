@@ -63,7 +63,7 @@ no frame crosses a socket.
 
 ```text
 engine/      abi, hal, core, macros, host, wire, client, capi, measure, package, host-static
-backends/    linux-sys, linux, linux-stream, v4l2, usb, mcu, sim
+backends/    linux-sys, linux, linux-hotplug, linux-stream, v4l2, usb, mcu, sim
 service/     lemnosd, ctl, orion
 kernel/      lemnos.ko source
 contracts/   one small crate per tag family

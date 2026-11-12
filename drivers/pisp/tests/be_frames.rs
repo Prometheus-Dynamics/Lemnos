@@ -9,7 +9,7 @@
 //!
 //! Sealed memfds stand in for the streams' dma-bufs and for the module's pool.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(feature = "device", target_os = "linux"))]
 
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd};

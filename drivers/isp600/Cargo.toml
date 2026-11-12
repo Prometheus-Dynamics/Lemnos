@@ -9,13 +9,26 @@ description = "The ISP600 as camera.isp/1 and isp.isp600/1, through the vendor k
 [lints]
 workspace = true
 
+# With no features: the library half, used without the daemon. The load image's and the
+# statistics buffer's layouts and the load image's check; no driver, no engine.
+[features]
+default = ["device"]
+# The `camera.isp/1` and `isp.isp600/1` driver.
+device = [
+  "dep:lemnos-core",
+  "dep:lemnos-hal",
+  "dep:lemnos-contract-camera-isp",
+  "dep:lemnos-contract-isp-isp600",
+  "dep:lemnos-v4l2",
+]
+
 [dependencies]
-lemnos-core = { path = "../../engine/core", features = ["std"] }
-lemnos-hal = { path = "../../engine/hal", features = ["std"] }
-lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }
-lemnos-contract-isp-isp600 = { path = "../../contracts/isp-isp600" }
+lemnos-core = { path = "../../engine/core", features = ["std"], optional = true }
+lemnos-hal = { path = "../../engine/hal", features = ["std"], optional = true }
+lemnos-contract-camera-isp = { path = "../../contracts/camera-isp", optional = true }
+lemnos-contract-isp-isp600 = { path = "../../contracts/isp-isp600", optional = true }
 lemnos-driver-isp600-sys = { path = "../isp600-sys" }
-lemnos-v4l2 = { path = "../../backends/v4l2" }
+lemnos-v4l2 = { path = "../../backends/v4l2", optional = true }
 
 [dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }

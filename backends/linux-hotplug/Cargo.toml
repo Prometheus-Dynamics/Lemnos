@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-linux-hotplug"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Linux devices appearing and going away: kernel uevents over netlink, inotify on sysfs and /dev, or rescans, in the kernel's uevent shape. A library: no part of the Lemnos engine"
+
+[lints]
+workspace = true
+
+# Linux only: every system call goes through lemnos-linux-sys, the one crate allowed `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { path = "../linux-sys" }

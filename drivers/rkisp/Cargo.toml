@@ -9,10 +9,18 @@ description = "The vendor rkisp ISP (ISP21, ISP30, ISP35) as camera.isp/1, throu
 [lints]
 workspace = true
 
+# With no features: the library half, used without the daemon. The parameter and statistics
+# layouts, the generation table and the ISP path in the media graph; no driver, no engine.
+[features]
+default = ["device"]
+# The `camera.isp/1` driver.
+device = ["dep:lemnos-core", "dep:lemnos-hal", "dep:lemnos-contract-camera-isp"]
+
 [dependencies]
-lemnos-core = { path = "../../engine/core", features = ["std"] }
-lemnos-hal = { path = "../../engine/hal", features = ["std"] }
-lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }
+lemnos-abi = { path = "../../engine/abi", default-features = false }
+lemnos-core = { path = "../../engine/core", features = ["std"], optional = true }
+lemnos-hal = { path = "../../engine/hal", features = ["std"], optional = true }
+lemnos-contract-camera-isp = { path = "../../contracts/camera-isp", optional = true }
 lemnos-driver-rkisp-sys = { path = "../rkisp-sys" }
 lemnos-v4l2 = { path = "../../backends/v4l2" }
 

@@ -11,7 +11,7 @@
 //!
 //! Sealed memfds stand in for the streams' dma-bufs and for the module's own memory.
 
-#![cfg(target_os = "linux")]
+#![cfg(all(feature = "device", target_os = "linux"))]
 
 use std::collections::VecDeque;
 use std::fs::File;

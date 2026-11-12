@@ -108,7 +108,9 @@ Neither side trusts the ring. Each value is read once and checked.
 `lemnos-client` opens a stream with `open_stream`, or `open_stream_writable` for one the consumer
 fills. Both take a `StreamPlatform`, which does what only the operating system can: receive the
 descriptors and map them. On Linux that is `LinuxStreams` from `lemnos-linux-stream`
-(`backends/linux-stream`). It also tells the kernel around each access to a dma-buf.
+(`backends/linux-stream`). It also tells the kernel around each access to a dma-buf. With its
+default features off it is the mappings alone, over `lemnos-wire`'s ring, for a program that has
+no client: see [Used as libraries](drivers.md#used-as-libraries).
 
 ```rust
 let devices = client.list()?;

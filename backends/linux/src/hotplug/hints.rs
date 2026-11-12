@@ -308,7 +308,7 @@ fn hints_for(event: &UeventMsg<'_>, watched: &[Watched], report: &mut dyn FnMut(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hotplug::uevent::encode;
+    use lemnos_linux_hotplug::encode;
 
     const NAMES: [&str; 5] = [
         "usb:3-1",

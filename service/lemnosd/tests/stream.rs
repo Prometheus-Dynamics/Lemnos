@@ -20,7 +20,7 @@ use lemnos_host::stream::ProducerEndpoint;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::scm::recv_with_fds;
 use lemnos_sim::SimFrameSource;
-use lemnos_wire::ring::{Layout, STATE_FAULT, offsets};
+use lemnos_wire::ring::{Layout, STATE_FAULT, WordMemory, offsets};
 use lemnos_wire::{Frame, VERSION, append, decode};
 
 const FRAME_BYTES: usize = 4096;
