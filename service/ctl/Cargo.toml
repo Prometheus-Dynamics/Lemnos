@@ -18,10 +18,11 @@ path = "src/main.rs"
 [dependencies]
 lemnos-client = { path = "../../engine/client" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
+# For `validate`: the board file parser, the same one lemnosd reads it with.
+lemnos-host = { path = "../../engine/host" }
 lemnos-wire = { path = "../../engine/wire" }
 
 [dev-dependencies]
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
-lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }

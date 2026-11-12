@@ -22,7 +22,9 @@ lemnos-ctl [--socket PATH] COMMAND
   set DEVICE ITEM [VALUE...]     a control or an action
   call DEVICE METHOD [ARG...]    any method, as NAME or TAG:NAME
   off DEVICE | on DEVICE
-  packages                       driver packages: which loaded, which were refused and why";
+  packages                       driver packages: which loaded, which were refused and why
+  validate BOARD                 check a board file and show the host settings it gives, with no
+                                 daemon";
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -72,6 +74,12 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     let [command, tail @ ..] = rest else {
         return Err(USAGE.to_string());
     };
+    if command == "validate" {
+        return match tail {
+            [board] => validate(board, out),
+            _ => Err(USAGE.to_string()),
+        };
+    }
     let client = Client::connect(&socket, "lemnos-ctl").map_err(|e| format!("{socket}: {e}"))?;
     let mut tool = Tool { client, out };
     match (command.as_str(), tail) {
@@ -87,6 +95,44 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
         ("on", [device]) => tool.power(device, true),
         ("packages", []) => tool.packages(),
         _ => Err(USAGE.to_string()),
+    }
+}
+
+/// Reads and checks the board file at `path` as `lemnosd` would, and prints what the host will
+/// run with: its settings, defaults filled in, and the devices that opted in to auto-off.
+fn validate(path: &str, out: &mut dyn Write) -> Outcome {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let board = lemnos_host::board::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    let options = board.host.apply(lemnos_host::Options::default());
+    line(
+        out,
+        format_args!(
+            "{path}: board {:?}, {} devices",
+            board.board.id,
+            board.devices.len()
+        ),
+    )?;
+    line(
+        out,
+        format_args!(
+            "host: call deadline {} ms, first retry {} ms, retry cap {} ms",
+            options.call_deadline.as_millis(),
+            options.retry_first.as_millis(),
+            options.retry_cap.as_millis(),
+        ),
+    )?;
+    let opted: Vec<String> = board
+        .devices
+        .iter()
+        .filter_map(|d| d.auto_off_after.map(|n| format!("{} after {n}", d.id)))
+        .collect();
+    if opted.is_empty() {
+        line(
+            out,
+            format_args!("auto-off: none, every device is retried forever"),
+        )
+    } else {
+        line(out, format_args!("auto-off: {}", opted.join(", ")))
     }
 }
 

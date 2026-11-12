@@ -31,6 +31,11 @@ export LEMNOSD_SOCKET="${TMPDIR:-/tmp}/lemnosd.sock"
 lemnosd --sim --board docs/examples/sim-board.toml &
 ```
 
+How it treats its drivers is the board file's `[host]` section: the call deadline and the waits
+between retries, which default to 2 s and 1 s doubling to 8 s. The 8 s cap can be shortened and
+never lengthened. Nothing is turned off automatically unless a device's own entry opts in with
+`auto_off_after`. See [Board files](boards.md#the-keys).
+
 What it does while it runs:
 
 - **Binds every device**, the ones others use first. A device that cannot bind stays listed, with
@@ -163,6 +168,19 @@ driver a loaded one became, or why a refused one was refused.
 lemnos-ctl packages
 ```
 
+### validate
+
+Checks a board file the way `lemnosd --check` does, with no daemon and no socket, then prints what
+the host would run with: the `[host]` settings with the defaults filled in, and the devices that
+opted in to auto-off. A file that is refused exits 1 with the key and the reason, so a `[host]`
+value past its range, a `retry_cap_ms` over the failure rule's 8 s among them, never reaches a
+running daemon. The keys are in [Board files](boards.md#the-keys).
+
+```sh
+lemnos-ctl validate docs/examples/sim-board.toml
+lemnos-ctl validate docs/examples/full-board.toml
+```
+
 ### When a command is refused
 
 A refusal carries a status and a few words: `refused (-16): ...`. The numbers are negative Linux
@@ -178,7 +196,7 @@ error numbers, and Lemnos's own codes below -4095:
 | -19 | `NO_DEVICE` | The device is not running |
 | -22 | `INVALID_ARGUMENT` | A bad setting or argument |
 | -95 | `NOT_SUPPORTED` | The driver or the hardware does not do this |
-| -110 | `TIMED_OUT` | The call ran past its deadline |
+| -110 | `TIMED_OUT` | The call ran past its deadline: 2 s, or the board file's `call_deadline_ms` |
 | -4099 | `PANIC` | The driver panicked in the call. It has been dropped and will be bound again |
 
 ## lemnos-orion

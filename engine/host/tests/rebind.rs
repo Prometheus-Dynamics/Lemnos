@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use lemnos_core::{Config, Health, Lifecycle, MethodId, Result, Status, contract, driver};
 use lemnos_host::board::parse;
-use lemnos_host::{AutoOff, DeviceState, Host, Options, entry};
+use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_sim::{SimBoard, SimClock};
 
 const DEAD: &str = "what it was bound with is dead";
@@ -84,10 +84,11 @@ impl Leaving for Leaver {
     }
 }
 
-fn host_with(key: usize, config: &str, options: Options) -> (Host, SimClock, &'static Shared) {
+/// The device `d`, with `device` added to its board entry.
+fn host_with(key: usize, config: &str, device: &str) -> (Host, SimClock, &'static Shared) {
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
-         [[devices]]\nid = \"d\"\ndriver = \"leaver\"\nconfig = {{ key = {key}{config} }}\n"
+         [[devices]]\nid = \"d\"\ndriver = \"leaver\"\nconfig = {{ key = {key}{config} }}\n{device}"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();
@@ -96,14 +97,14 @@ fn host_with(key: usize, config: &str, options: Options) -> (Host, SimClock, &'s
         &[entry::<Leaver>()],
         Box::new(sim),
         Arc::new(clock.clone()),
-        options,
+        Options::default(),
     )
     .unwrap();
     (host, clock, &SHARED[key])
 }
 
 fn host(key: usize, config: &str) -> (Host, SimClock, &'static Shared) {
-    host_with(key, config, Options::default())
+    host_with(key, config, "")
 }
 
 fn binds(shared: &Shared) -> u32 {
@@ -254,11 +255,7 @@ fn asking_for_ever_never_switches_a_device_off_unless_the_board_says_so() {
     }
     assert_eq!(binds(shared), 40, "still being bound");
 
-    let options = Options {
-        auto_off: Some(AutoOff { after_attempts: 3 }),
-        ..Options::default()
-    };
-    let (host, clock, shared) = host_with(6, ", always = true", options);
+    let (host, clock, shared) = host_with(6, ", always = true", "auto_off_after = 3\n");
     for _ in 0..10 {
         host.tick();
         clock.advance(Duration::from_secs(8));
