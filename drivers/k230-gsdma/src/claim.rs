@@ -11,10 +11,14 @@
 //! A claim whose session fails to open starts a backoff: until it is due, [`Gsdma::claim`]
 //! answers [`ClaimError::BackingOff`] without touching the device. The delay doubles from 250 ms,
 //! is capped at 8 s, and clears when a claim is taken. The driver never gives up and never turns
-//! the engine off. A job the session refuses comes back as [`SubmitError::Device`] and nothing is
-//! in flight. A job that has not finished by the timeout stays in flight
-//! ([`CompleteError::Timeout`]); dropping the claim drops its session first, which must stop the
-//! engine (the kernel driver disables and re-enables the channel), and only then the buffers.
+//! the engine off. A job the session refuses comes back as [`SubmitError::Device`] and nothing
+//! is in flight. A job that has not finished by the caller's timeout stays in flight
+//! ([`CompleteError::Timeout`]). The session stops a job that runs too long by itself (the
+//! kernel module turns the channel off and on, as the vendor driver does): it completes with
+//! [`Completion::stopped`] set, and what it wrote is unknown. Nothing is run again or done
+//! another way. Dropping the claim drops its session first, which must stop the engine, and only
+//! then the buffers. On Linux a refused job ends the module's stream, so every later call on the
+//! claim fails: the caller drops the claim and takes a new one, through the backoff.
 //!
 //! # Allocation
 //!
@@ -67,17 +71,33 @@ impl<'a> Request<'a> {
     }
 }
 
-/// One open of the engine. What a session must do is what the kernel interface it stands for
-/// must do; see the crate's docs for why none exists yet.
+/// How the job in flight ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Finished {
+    /// The engine finished it.
+    Done,
+    /// It ran too long and the engine was stopped; what it wrote is unknown.
+    Stopped,
+}
+
+/// One open of the engine. The Linux one is [`crate::LinuxSession`].
 pub trait Session {
-    /// Starts `request`. Only buffers the request names, at the plan's extents, may be reached,
-    /// so the session must place each buffer as one piece the engine can address (a contiguous
-    /// buffer, or one the session copies through), and must build the descriptors with
-    /// [`Plan::descriptors`], which checks every extent against the memory the engine may reach.
+    /// Makes buffer `slot`, a dma-buf the claim measured at `size` bytes, one jobs may name,
+    /// until [`detach`](Self::detach). The claim holds the descriptor meanwhile.
+    fn attach(&mut self, slot: usize, fd: BorrowedFd<'_>, size: u64) -> io::Result<()>;
+
+    /// Lets go of what [`attach`](Self::attach) did. Never called while the job in flight uses
+    /// the buffer.
+    fn detach(&mut self, slot: usize) -> io::Result<()>;
+
+    /// Starts `request`. Only buffers the request names, at the plan's extents, may be reached:
+    /// whatever builds the engine's descriptors must prove every extent inside memory it holds
+    /// and below the memory the engine reaches ([`Plan::descriptors`] does, and so does the
+    /// kernel module the Linux session hands the job to).
     fn submit(&mut self, request: &Request<'_>) -> io::Result<()>;
 
-    /// Waits up to `timeout` for the job in flight: `true` when it finished.
-    fn wait(&mut self, timeout: Duration) -> io::Result<bool>;
+    /// Waits up to `timeout` for the job in flight: `None` while it runs.
+    fn wait(&mut self, timeout: Duration) -> io::Result<Option<Finished>>;
 }
 
 /// The engine and the facts the claim needs from the system.
@@ -120,6 +140,8 @@ pub enum BufferError {
     Unknown,
     /// The job in flight uses the buffer.
     Busy,
+    /// The session refused to attach or detach it. A buffer not detached stays held.
+    Device(io::Error),
 }
 
 /// Why a job was not submitted.
@@ -144,11 +166,13 @@ pub enum CompleteError {
     Device(io::Error),
 }
 
-/// A job that finished.
+/// A job that ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Completion {
     /// The job's identity.
     pub identity: u64,
+    /// The job ran too long and the engine was stopped: what it wrote is unknown.
+    pub stopped: bool,
 }
 
 /// The engine, through `D`.
@@ -245,6 +269,9 @@ impl<D: Device> Claim<'_, D> {
         if size == 0 {
             return Err(BufferError::Size(None));
         }
+        self.session
+            .attach(slot, fd.as_fd(), size)
+            .map_err(BufferError::Device)?;
         self.generation = self.generation.wrapping_add(1);
         self.buffers[slot] = Some(Buffer {
             fd,
@@ -272,6 +299,9 @@ impl<D: Device> Claim<'_, D> {
         {
             return Err(BufferError::Busy);
         }
+        self.session
+            .detach(usize::from(id.slot))
+            .map_err(BufferError::Device)?;
         self.buffers[usize::from(id.slot)]
             .take()
             .map(|b| b.fd)
@@ -304,11 +334,14 @@ impl<D: Device> Claim<'_, D> {
     pub fn complete(&mut self, timeout: Duration) -> Result<Completion, CompleteError> {
         let (identity, _) = self.in_flight.ok_or(CompleteError::Nothing)?;
         match self.session.wait(timeout) {
-            Ok(true) => {
+            Ok(Some(finished)) => {
                 self.in_flight = None;
-                Ok(Completion { identity })
+                Ok(Completion {
+                    identity,
+                    stopped: finished == Finished::Stopped,
+                })
             }
-            Ok(false) => Err(CompleteError::Timeout),
+            Ok(None) => Err(CompleteError::Timeout),
             Err(error) => Err(CompleteError::Device(error)),
         }
     }

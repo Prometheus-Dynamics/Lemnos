@@ -11,11 +11,15 @@
 //! (median and 99th percentile, from the monotonic clock) and what it allocated. They are numbers
 //! to read, not checks: nothing fails on time.
 //!
+//! `lemnos-module-check gsdma <device> <heap>` drives the graphics DMA driver's Linux device
+//! through the module's node and the harness's fake engine ([`gsdma`]).
+//!
 //! `lemnos-module-check board ...` is the mode for a real board: it touches only the devices
 //! named on its command line, in the ways [`board`] lists, and never the harness's fixed test
 //! addresses.
 
 mod board;
+mod gsdma;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -1019,6 +1023,15 @@ fn main() -> ExitCode {
             "lemnos-module-check board: {failures} failed"
         );
         return if failures == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    if let [mode, device, heap] = args.as_slice()
+        && mode == "gsdma"
+    {
+        return if gsdma::run(device, heap) == 0 {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE

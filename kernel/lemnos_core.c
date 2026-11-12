@@ -38,6 +38,7 @@
 #include "lemnos.h"
 #include "lemnos_internal.h"
 #include "lemnos_pisp_be.h"
+#include "lemnos_gsdma.h"
 
 #define LEM_NAME "lemnos"
 #define LEM_MAX_COMPATIBLE 8
@@ -62,6 +63,12 @@ static char *pisp_be = "";
 module_param(pisp_be, charp, 0444);
 MODULE_PARM_DESC(pisp_be,
 		 "Compatibles of the blocks driven by the PiSP back end code; their "
+		 "registers and interrupts never reach user space");
+
+static char *gsdma = "";
+module_param(gsdma, charp, 0444);
+MODULE_PARM_DESC(gsdma,
+		 "Compatibles of the blocks driven as the K230 graphics DMA engine; their "
 		 "registers and interrupts never reach user space");
 
 static bool test_map_unconfined;
@@ -93,6 +100,7 @@ struct lem_block {
 	u32 regions;
 	u32 nirqs;
 	struct lem_pb *pb;		/* the PiSP back end, or NULL */
+	struct lem_gd *gd;		/* the K230 graphics DMA engine, or NULL */
 	struct xarray imports;		/* handle -> struct lem_import */
 	atomic_t bufs;			/* DMA buffers not yet freed */
 	struct lem_power *power;
@@ -552,6 +560,7 @@ union lem_args {
 	struct lemnos_claim claim;
 	struct lemnos_stream_create stream;
 	struct lemnos_pisp_be_create pisp_be;
+	struct lemnos_gsdma_create gsdma;
 	struct lemnos_i2c_transfer i2c;
 	struct lemnos_i2c_smbus smbus;
 	struct lemnos_spi_transfer spi;
@@ -611,9 +620,13 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		if (!l->pb)
 			return -ENOTTY;
 		return lem_pb_create(l->pb, l->dev, &u->pisp_be);
+	case LEMNOS_IOC_GSDMA_CREATE:
+		if (!l->gd)
+			return -ENOTTY;
+		return lem_gd_create(l->gd, l->dev, &u->gsdma);
 	case LEMNOS_IOC_POWER:
 		/* A block the module drives keeps its own clocks. */
-		if (l->pb)
+		if (l->pb || l->gd)
 			return -ENOTTY;
 		return lem_power_request(l->power, &u->power);
 	case LEMNOS_IOC_TEST_IRQ:
@@ -788,6 +801,13 @@ static int lem_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(l->pb), "PiSP back end\n");
 		goto ready;
 	}
+	if (lem_device_listed(dev, gsdma)) {
+		l->mappable = false;
+		l->gd = lem_gd_probe(pdev);
+		if (IS_ERR(l->gd))
+			return dev_err_probe(dev, PTR_ERR(l->gd), "K230 graphics DMA engine\n");
+		goto ready;
+	}
 	if (test_irq_inject)
 		dev_warn(dev, "test_irq_inject: interrupts can be raised from user space\n");
 
@@ -857,6 +877,8 @@ static void lem_remove(struct platform_device *pdev)
 	/* After the streams: every job has stopped or the block is wedged. */
 	if (l->pb)
 		lem_pb_remove(l->pb);
+	if (l->gd)
+		lem_gd_remove(l->gd);
 	lem_power_destroy(l->power);
 	up_write(&lem_blocks_sem);
 	lem_event_post(LEMNOS_EVENT_BLOCK_UNBOUND, l->id, 0, 0);

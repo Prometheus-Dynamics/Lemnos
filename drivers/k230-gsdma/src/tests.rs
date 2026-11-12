@@ -483,7 +483,11 @@ struct Played {
     submits: Vec<(u64, [i32; 4])>,
     refuse: bool,
     /// What the next waits answer.
-    finished: bool,
+    finished: Option<Finished>,
+    /// Slots attached, as a mask, and every attach and detach in order.
+    attached: u64,
+    attaches: Vec<(bool, usize, u64)>,
+    refuse_attach: bool,
     dropped: bool,
 }
 
@@ -499,6 +503,27 @@ impl Mock {
 struct MockSession(Mock);
 
 impl Session for MockSession {
+    fn attach(&mut self, slot: usize, _: BorrowedFd<'_>, size: u64) -> io::Result<()> {
+        self.0.with(|p| {
+            if p.refuse_attach {
+                return Err(io::Error::from_raw_os_error(14));
+            }
+            assert_eq!(p.attached & 1 << slot, 0, "attached twice");
+            p.attached |= 1 << slot;
+            p.attaches.push((true, slot, size));
+            Ok(())
+        })
+    }
+
+    fn detach(&mut self, slot: usize) -> io::Result<()> {
+        self.0.with(|p| {
+            assert_ne!(p.attached & 1 << slot, 0, "detached unattached");
+            p.attached &= !(1 << slot);
+            p.attaches.push((false, slot, 0));
+            Ok(())
+        })
+    }
+
     fn submit(&mut self, request: &Request<'_>) -> io::Result<()> {
         let plan = request.plan();
         let mut fds = [-1; 4];
@@ -516,7 +541,7 @@ impl Session for MockSession {
         })
     }
 
-    fn wait(&mut self, _: Duration) -> io::Result<bool> {
+    fn wait(&mut self, _: Duration) -> io::Result<Option<Finished>> {
         Ok(self.0.with(|p| p.finished))
     }
 }
@@ -616,10 +641,13 @@ fn a_claim_measures_its_buffers_and_hands_the_session_only_those() {
         Err(CompleteError::Timeout)
     ));
     assert!(claim.busy(), "a job that times out stays in flight");
-    mock.with(|p| p.finished = true);
+    mock.with(|p| p.finished = Some(Finished::Done));
     assert_eq!(
         claim.complete(TIMEOUT).unwrap(),
-        Completion { identity: 42 }
+        Completion {
+            identity: 42,
+            stopped: false
+        }
     );
     assert!(matches!(
         claim.complete(TIMEOUT),
@@ -637,6 +665,11 @@ fn a_claim_measures_its_buffers_and_hands_the_session_only_those() {
     drop(claim);
     mock.with(|p| {
         assert_eq!(p.submits, [(42, [a_raw, b_raw, -1, -1])]);
+        // Each buffer was attached once with its measured size; only the removed one detached.
+        assert_eq!(
+            p.attaches,
+            [(true, 0, 8192), (true, 1, 8192), (false, 0, 0)]
+        );
         assert!(p.dropped);
     });
 }
@@ -681,7 +714,7 @@ fn a_refused_job_leaves_nothing_in_flight() {
 fn submitting_and_completing_allocate_nothing() {
     let mock = Mock::default();
     mock.with(|p| {
-        p.finished = true;
+        p.finished = Some(Finished::Done);
         p.submits.reserve(64);
     });
     let mut gsdma = Gsdma::new(MockDevice(mock.clone()));
@@ -705,4 +738,90 @@ fn submitting_and_completing_allocate_nothing() {
         }
     });
     assert_eq!(n, 0);
+}
+
+#[test]
+fn a_job_the_engine_was_stopped_on_completes_as_stopped_and_frees_the_claim() {
+    let mock = Mock::default();
+    let mut gsdma = Gsdma::new(MockDevice(mock.clone()));
+    let mut claim = gsdma.claim(0).expect("claim");
+    let a = claim.add_buffer(buffer(8192)).unwrap();
+    let b = claim.add_buffer(buffer(8192)).unwrap();
+    let s = [Plane {
+        buffer: a,
+        offset: 0,
+        pitch: 256,
+    }];
+    let d = [Plane {
+        buffer: b,
+        offset: 0,
+        pitch: 128,
+    }];
+    claim.submit(&argb_turned(&s, &d)).unwrap();
+    mock.with(|p| p.finished = Some(Finished::Stopped));
+    assert_eq!(
+        claim.complete(TIMEOUT).unwrap(),
+        Completion {
+            identity: 42,
+            stopped: true
+        }
+    );
+    assert!(!claim.busy());
+    // Nothing is run again: the session saw one job.
+    claim.remove_buffer(b).expect("free again");
+    drop(claim);
+    assert_eq!(mock.with(|p| p.submits.len()), 1);
+}
+
+#[test]
+fn a_buffer_the_session_will_not_attach_is_not_held() {
+    let mock = Mock::default();
+    mock.with(|p| p.refuse_attach = true);
+    let mut gsdma = Gsdma::new(MockDevice(mock.clone()));
+    let mut claim = gsdma.claim(0).expect("claim");
+    assert!(matches!(
+        claim.add_buffer(buffer(8192)),
+        Err(BufferError::Device(_))
+    ));
+    mock.with(|p| p.refuse_attach = false);
+    // The slot is still free: the next buffer takes slot 0.
+    let a = claim.add_buffer(buffer(8192)).unwrap();
+    assert_eq!(a.slot, 0);
+}
+
+#[test]
+fn the_modules_rotation_bits_are_drms() {
+    use lemnos_driver_k230_gsdma_sys as sys;
+    assert_eq!(
+        [
+            sys::ROTATE_0,
+            sys::ROTATE_90,
+            sys::ROTATE_180,
+            sys::ROTATE_270,
+            sys::REFLECT_X,
+            sys::REFLECT_Y
+        ],
+        [
+            drm::ROTATE_0,
+            drm::ROTATE_90,
+            drm::ROTATE_180,
+            drm::ROTATE_270,
+            drm::REFLECT_X,
+            drm::REFLECT_Y
+        ]
+    );
+}
+
+#[test]
+fn settings_refuse_names_that_could_be_paths() {
+    assert!(Settings::new("lemnos-test-gsdma", "linux,cma").is_ok());
+    for (device, heap) in [
+        ("", "h"),
+        ("d", ""),
+        ("../d", "h"),
+        ("d", "a/b"),
+        ("d\0", "h"),
+    ] {
+        assert!(Settings::new(device, heap).is_err(), "{device:?} {heap:?}");
+    }
 }

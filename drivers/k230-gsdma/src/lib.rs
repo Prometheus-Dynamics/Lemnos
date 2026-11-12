@@ -14,29 +14,26 @@
 //! - [`Gsdma`] and [`Claim`]: a claim on the engine, the buffers it holds, one job submitted and
 //!   completed at a time, and a backoff doubling from 250 ms to 8 s after a failed open. It never
 //!   gives up and never turns itself off. Submitting and completing allocate nothing.
+//! - [`LinuxDevice`] and [`LinuxSession`]: the [`Device`] on Linux, over the engine's node in
+//!   `lemnos.ko`.
 //!
-//! # Not here: a [`Device`] for Linux
+//! # How a job reaches the engine on Linux
 //!
-//! The reference gives a caller no way to reach the engine, so no job reaches it yet. Exactly:
-//!
-//! - **No interface.** The kernel driver (`drivers/soc/canaan/k230-gdma.c`, added by the SDK's
-//!   patch 0023) registers no device node, request or mapping. It exports one kernel function,
-//!   `canaan_gdma_rotate_sync`, which only the display driver calls, to turn a framebuffer into a
-//!   buffer the display driver allocated itself for scan-out. Nothing in user space can name a
-//!   destination.
-//! - **Nothing in front of the engine.** The engine takes 32-bit bus addresses and has no MMU.
-//!   The kernel driver's own check (`k230_dma_addr_in_ddr`, patch 0029) only keeps an address in
-//!   the first 2 GiB, which is all of memory; it does not know which buffer an address belongs
-//!   to, how wide a row is, or how far a turned plane reaches. Driving the registers from user
-//!   space (a register window, `/dev/mem`) would let a job name any memory, and cannot be made
-//!   safe there. It is left out, on purpose.
-//!
-//! What is missing is a kernel interface that takes jobs as dma-bufs: a node with one request
-//! carrying, per plane, a dma-buf descriptor, an offset and a pitch on each side, plus the
-//! format, size and rotation, which pins the buffers, refuses one the engine cannot see in one
-//! piece, and builds the descriptors from their bus addresses. The [`Session`] trait is that
-//! request's shape; [`Plan`] is what such an interface needs, already checked; and
-//! [`Plan::descriptors`] is the chain it would write.
+//! The vendor kernel gives user space no way to reach the engine: its driver
+//! (`drivers/soc/canaan/k230-gdma.c`, added by the SDK's patch 0023) registers no device node and
+//! only serves the display driver, and its own address check (`k230_dma_addr_in_ddr`, patch
+//! 0029) only keeps an address in the first 2 GiB. The engine takes 32-bit bus addresses and has
+//! no MMU, so driving its registers from user space would let a job name any memory. So the
+//! engine is driven by `lemnos.ko` instead (its `gsdma` parameter names the block), and its
+//! registers never reach user space. A [`LinuxSession`] is a frame stream on that node: each
+//! buffer the claim holds is registered on the stream, which pins it; a job is the checked
+//! [`Plan`] as device addresses. The module reads the job once into its own memory, works out
+//! every byte the engine will read and write on each plane, proves each span inside one
+//! registered buffer, below the engine's reach and clear of every other plane it writes, and
+//! only then builds the descriptors in memory of its own. A job that runs too long is stopped
+//! there (the channel turned off and on, as the vendor driver does) and ends as
+//! [`Completion::stopped`]; an engine that can't be shown stopped keeps the job's memory until a
+//! reboot. [`linux`] lists the checks this side makes first.
 //!
 //! # Source
 //!
@@ -49,26 +46,29 @@
 //! (`github.com/ruyisdk/linux-xuantie-kernel` at `7d4e1f444f461dbe3833bd99a4640e7b6c2cd529`). See
 //! [`uapi`].
 //!
-//! Hardware status: untested on board. The board check is in `testing/board-runs/E22.md`.
+//! Hardware status: untested on board. The board checks are in `testing/board-runs/E22.md` and
+//! `testing/board-runs/H7b.md`.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
 pub mod claim;
 pub mod job;
+pub mod linux;
 pub mod uapi;
 
 #[cfg(test)]
 mod tests;
 
 pub use claim::{
-    BufferError, Claim, ClaimError, CompleteError, Completion, Device, Gsdma, MAX_BUFFERS, Request,
-    Session, SubmitError, TIMEOUT, backoff_ns,
+    BufferError, Claim, ClaimError, CompleteError, Completion, Device, Finished, Gsdma,
+    MAX_BUFFERS, Request, Session, SubmitError, TIMEOUT, backoff_ns,
 };
 pub use job::{
     AddressError, BufferId, Format, Frame, Job, JobError, MAX_FIELD, Plan, Plane, Rotation, Span,
     Turn,
 };
+pub use linux::{LinuxDevice, LinuxSession, Settings};
 
 #[cfg(test)]
 #[global_allocator]

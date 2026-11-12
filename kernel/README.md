@@ -33,6 +33,9 @@ as soon as the module loads.
 | `test_pb_fake_regs` | Test only. The back end's register window is ordinary memory, for the fake block in QEMU. |
 | `test_stream_source` | Test only. Enables `LEMNOS_STREAM_IOC_TEST_SOURCE`, a source that fills frames through a kernel mapping. |
 | `test_pisp_fe` | Test only. Enables the PiSP front end's write log and post-copy overwrite ioctls. |
+| `gsdma` | Compatibles driven as the graphics DMA engine (`lemnos_gsdma.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
+| `test_gsdma_fake_regs` | Test only. The graphics DMA engine's register window is ordinary memory, for the fake engine in QEMU. |
+| `test_gsdma_reach` | Test only. Lowers the device address the graphics DMA engine is said to reach, for the reach check in QEMU. |
 
 ## Claims
 
@@ -145,6 +148,37 @@ kernel log says so. Closing a stream or unbinding waits for what's on the block 
 
 `lemnos_pisp_be.c` keeps the stock driver's copyright for its register sequence and job
 accounting; see its header.
+
+## The graphics DMA engine
+
+A block listed in `gsdma` (a memory-to-memory engine that copies up to three image planes, turned
+by quarter turns and mirrored, walking a chain of 24-byte descriptors with 32-bit bus addresses and
+no MMU in front of it) is driven by the module: its registers can't be mapped and its interrupt
+isn't forwarded. `LEMNOS_IOC_GSDMA_CREATE` makes a frame stream whose jobs are
+`struct lemnos_gsdma_job` (`lemnos_gsdma.h`), one stream at a time. A pool buffer holds no image;
+it only counts a job and publishes its end. Images are dma-bufs registered on the stream, and a job
+names them by device address.
+
+Each job is read once into kernel memory. From its format, size and rotation `lgd_validate` works
+out, plane by plane and side by side, the exact span the engine reads or writes (`pitch * (rows -
+1) + row`, rows and row turned on the destination for a quarter turn), and refuses a pitch outside
+1 to 65535 or shorter than a row (`EINVAL`), a span whose end wraps (`EOVERFLOW`), one past the
+memory the engine addresses (`ENXIO`), and a destination over a source or another destination
+(`ENOTUNIQ`). `lem_stream_job_take()` then proves every span inside one registered dma-buf
+(`EFAULT`) and not in the pool (`EACCES`). Only then does `lgd_build` write the descriptors into
+coherent memory of the module's own, from the pinned buffers' device addresses, checking each end
+against the reach once more. Any refusal ends the stream; nothing is clamped.
+
+A job that outlives its timeout (100 ms plus 1 ms per 256 KiB it writes) is stopped: the channel
+is turned off and on, as the vendor driver does, once the engine's progress registers have held
+still for 10 ms. Its frame is published with 0 bytes, `timeouts` counts it, and the stream goes
+on. An engine whose progress doesn't stop within 100 ms is wedged: the job's buffers and the
+descriptors are held until a reboot, `lemnos.ko` can't be unloaded, new streams are refused with
+`EIO`, and the kernel log says so. `LEMNOS_GSDMA_IOC_STATUS` on the stream reports `wedged`,
+`finished`, `refused` and `timeouts`.
+
+`lemnos_gsdma.c` holds no vendor code; the register map, descriptor layout, probe values and
+formats it uses are facts, with their source in its header.
 
 ## The PiSP front end
 

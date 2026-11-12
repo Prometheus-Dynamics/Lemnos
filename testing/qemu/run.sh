@@ -35,7 +35,7 @@ mkdir -p "$root"/{dev,proc,sys}
 flags=(-static -O2 -Wall -Wextra -Wno-unused-parameter -pthread -I"$work/test_block")
 read -r -a compiler <<<"$CC"
 "${compiler[@]}" "${flags[@]}" -o "$root/init" "$here/init.c"
-for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_bus_check lemnos_gpio_check lemnos_power_check lemnos_pio_check lemnos_stream_check lemnos_rp1_csi2_check lemnos_board_check; do
+for check in lemnos_check lemnos_irq_check lemnos_unbind_check lemnos_claim_check lemnos_bus_check lemnos_gpio_check lemnos_power_check lemnos_pio_check lemnos_stream_check lemnos_rp1_csi2_check lemnos_gsdma_check lemnos_board_check; do
   "${compiler[@]}" "${flags[@]}" -o "$root/$check" "$work/kernel/test/$check.c"
 done
 # lemnos_board_check is built so it keeps compiling; it runs only on a board (C6).

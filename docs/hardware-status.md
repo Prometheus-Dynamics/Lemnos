@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 85 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 86 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -177,6 +177,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E3.md`](../testing/board-runs/E3.md) | `vglite`: crop, flip, rotate, fill and blend against a reference |
 | [`E35.md`](../testing/board-runs/E35.md) | `k230-ai2d`: the import requests and the address they answer |
 | [`E22.md`](../testing/board-runs/E22.md) | `k230-gsdma`: confirms there is no way in from user space |
+| [`H7b.md`](../testing/board-runs/H7b.md) | `k230-gsdma` through `lemnos.ko`: turned copies byte-equal, refusals, a stopped job, unbind |
 
 ## Codec blocks
 

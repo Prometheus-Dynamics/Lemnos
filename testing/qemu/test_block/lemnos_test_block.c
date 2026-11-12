@@ -32,7 +32,7 @@
 
 #include "lemnos_test_csi2.h"
 
-#define TB_IRQS 4
+#define TB_IRQS 5
 #define TB_BLOCK_IRQS 2
 #define TB_MAGIC 0x4c454d4e
 /* The fake PiSP back end: a window of ordinary memory its driver is told is registers. */
@@ -40,6 +40,8 @@
 #define TB_PISP_ORDER 1
 #define TB_PISP_BYTES (PAGE_SIZE << TB_PISP_ORDER)
 #define TB_PISP_VERSION 0x02252700
+/* The fake K230 graphics DMA engine: a page of ordinary memory its driver is told is registers. */
+#define TB_GSDMA_IRQ 3
 
 static unsigned long csi2_phys;
 module_param(csi2_phys, ulong, 0444);
@@ -474,8 +476,179 @@ static const struct attribute_group tb_pisp_group = {
 	.bin_attrs = tb_pisp_bin_attrs,
 };
 
+
+/*
+ * The fake K230 graphics DMA engine. Its registers are a page of ordinary
+ * memory, looked at every millisecond: a 1 in CTRL starts the chain at
+ * LLI_BASE, which is walked as the engine would, copying each plane through
+ * the kernel's mapping of the bus addresses it names (no IOMMU in this guest:
+ * a bus address is physical), then DONE is set and the interrupt raised.
+ * With `hang` set, a started chain never finishes and its progress register
+ * keeps moving, for `hang` ms after the channel is turned off (~0: forever).
+ */
+#define TGD_CH_EN	0x00
+#define TGD_CH_EN_BIT	BIT(4)
+#define TGD_INT_STAT	0x08
+#define TGD_CTRL	0x10
+#define TGD_LLI_BASE	0x14
+#define TGD_CUR_DADDR	0x44
+#define TGD_DONE	BIT(18)
+
+static struct platform_device *tb_gsdma;
+static struct page *tb_gsdma_page;
+static DEFINE_MUTEX(tgd_lock);
+static u32 tgd_hang, tgd_left, tgd_jobs, tgd_word0[3], tgd_errors;
+static bool tgd_hanging;
+
+static void tgd_tick(struct work_struct *work);
+static DECLARE_DELAYED_WORK(tgd_work, tgd_tick);
+
+static u32 __iomem *tgd_regs(void)
+{
+	return page_address(tb_gsdma_page);
+}
+
+static u32 tgd_rd(unsigned int off)
+{
+	return readl((u8 __iomem *)tgd_regs() + off);
+}
+
+static void tgd_wr(unsigned int off, u32 v)
+{
+	writel(v, (u8 __iomem *)tgd_regs() + off);
+}
+
+static void *tgd_at(u64 bus)
+{
+	return pfn_valid(PHYS_PFN(bus)) ? phys_to_virt(bus) : NULL;
+}
+
+/* One descriptor: its plane, mirrored, then turned clockwise. */
+static void tgd_plane(const u32 *d)
+{
+	static const u32 bpe_of[4] = { 1, 2, 3, 4 };
+	u32 turn = d[0] & 3, bpe = bpe_of[(d[0] >> 8) & 3];
+	bool mx = d[0] & BIT(2), my = d[0] & BIT(3);
+	u32 w = d[2] & 0xffff, h = d[2] >> 16, sp = d[3] & 0xffff, dp = d[3] >> 16;
+	u8 *src = tgd_at(d[1]), *dst = tgd_at(d[4]);
+
+	if (!src || !dst) {
+		tgd_errors++;
+		return;
+	}
+	for (u32 y = 0; y < h; y++) {
+		for (u32 x = 0; x < w; x++) {
+			u32 ax = mx ? w - 1 - x : x, ay = my ? h - 1 - y : y, dx, dy;
+
+			switch (turn) {
+			case 0: dx = ax; dy = ay; break;
+			case 1: dx = h - 1 - ay; dy = ax; break;
+			case 2: dx = w - 1 - ax; dy = h - 1 - ay; break;
+			default: dx = ay; dy = w - 1 - ax; break;
+			}
+			memcpy(dst + (u64)dy * dp + (u64)dx * bpe, src + (u64)y * sp + (u64)x * bpe,
+			       bpe);
+		}
+	}
+}
+
+static void tgd_run(void)
+{
+	u64 at = tgd_rd(TGD_LLI_BASE);
+
+	for (u32 i = 0; i < 3 && at; i++) {
+		u32 *d = tgd_at(at);
+
+		if (!d) {
+			tgd_errors++;
+			break;
+		}
+		tgd_word0[i] = d[0];
+		tgd_plane(d);
+		if (d[0] & BIT(30))
+			break;
+		at = d[5];
+	}
+	tgd_jobs++;
+}
+
+static void tgd_tick(struct work_struct *work)
+{
+	bool raise = false, on;
+
+	mutex_lock(&tgd_lock);
+	if (tgd_rd(TGD_CTRL) == 1 && !tgd_hanging) {
+		tgd_wr(TGD_CTRL, 0);
+		tgd_wr(TGD_INT_STAT, 0);
+		if (tgd_hang) {
+			tgd_hanging = true;
+			tgd_left = tgd_hang;
+		} else {
+			tgd_run();
+			tgd_wr(TGD_INT_STAT, TGD_DONE);
+			raise = true;
+		}
+	}
+	if (tgd_hanging) {
+		/* It moves while on; once off, for `left` ms more. */
+		if (!(tgd_rd(TGD_CH_EN) & TGD_CH_EN_BIT) && tgd_left != U32_MAX && !tgd_left--)
+			tgd_hanging = false;
+		else
+			tgd_wr(TGD_CUR_DADDR, tgd_rd(TGD_CUR_DADDR) + 1);
+	}
+	/* Looked at every ms only while a driver has the channel on, so it costs nothing otherwise. */
+	on = tgd_hanging || (tgd_rd(TGD_CH_EN) & TGD_CH_EN_BIT);
+	mutex_unlock(&tgd_lock);
+	if (raise)
+		irq_set_irqchip_state(tb_irq[TB_GSDMA_IRQ], IRQCHIP_STATE_PENDING, true);
+	schedule_delayed_work(&tgd_work, msecs_to_jiffies(on ? 1 : 50));
+}
+
+/* "N": jobs from now on hang, moving for N ms after the channel is off (4294967295: forever). */
+static ssize_t hang_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			  size_t count)
+{
+	u32 v;
+
+	if (kstrtou32(buf, 0, &v))
+		return -EINVAL;
+	mutex_lock(&tgd_lock);
+	tgd_hang = v;
+	mutex_unlock(&tgd_lock);
+	return count;
+}
+static DEVICE_ATTR_WO(hang);
+
+/* "jobs errors word0 word0 word0": chains run, addresses it couldn't reach, the last descriptors' first words. */
+static ssize_t ran_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	ssize_t n;
+
+	mutex_lock(&tgd_lock);
+	n = sysfs_emit(buf, "%u %u %x %x %x\n", tgd_jobs, tgd_errors, tgd_word0[0], tgd_word0[1],
+		       tgd_word0[2]);
+	mutex_unlock(&tgd_lock);
+	return n;
+}
+static DEVICE_ATTR_RO(ran);
+
+static struct attribute *tb_gsdma_attrs[] = { &dev_attr_hang.attr, &dev_attr_ran.attr, NULL };
+static const struct attribute_group tb_gsdma_group = { .attrs = tb_gsdma_attrs };
+
+static const struct property_entry tb_gsdma_props[] = {
+	PROPERTY_ENTRY_STRING("compatible", "lemnos,test-gsdma"),
+	{ }
+};
+
 static void tb_teardown(void)
 {
+	if (!IS_ERR_OR_NULL(tb_gsdma)) {
+		sysfs_remove_group(&tb_gsdma->dev.kobj, &tb_gsdma_group);
+		platform_device_unregister(tb_gsdma);
+	}
+	cancel_delayed_work_sync(&tgd_work);
+	if (tb_gsdma_page)
+		__free_page(tb_gsdma_page);
 	if (!IS_ERR_OR_NULL(tb_pisp)) {
 		sysfs_remove_group(&tb_pisp->dev.kobj, &tb_pisp_group);
 		platform_device_unregister(tb_pisp);
@@ -524,6 +697,15 @@ static int __init tb_init(void)
 		.num_res = ARRAY_SIZE(pisp_res),
 		.dma_mask = DMA_BIT_MASK(64),
 		.properties = tb_pisp_props,
+	};
+	struct resource gsdma_res[2];
+	struct platform_device_info gsdma = {
+		.name = "lemnos-test-gsdma",
+		.id = PLATFORM_DEVID_NONE,
+		.res = gsdma_res,
+		.num_res = ARRAY_SIZE(gsdma_res),
+		.dma_mask = DMA_BIT_MASK(64),
+		.properties = tb_gsdma_props,
 	};
 	struct platform_device_info info = {
 		.name = "lemnos-test-block",
@@ -644,6 +826,23 @@ static int __init tb_init(void)
 	ret = sysfs_create_group(&tb_pisp->dev.kobj, &tb_pisp_group);
 	if (ret)
 		goto fail;
+
+	tb_gsdma_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!tb_gsdma_page) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+	gsdma_res[0] = (struct resource)DEFINE_RES_MEM(page_to_phys(tb_gsdma_page), PAGE_SIZE);
+	gsdma_res[1] = (struct resource)DEFINE_RES_IRQ(tb_irq[TB_GSDMA_IRQ]);
+	tb_gsdma = platform_device_register_full(&gsdma);
+	if (IS_ERR(tb_gsdma)) {
+		ret = PTR_ERR(tb_gsdma);
+		goto fail;
+	}
+	ret = sysfs_create_group(&tb_gsdma->dev.kobj, &tb_gsdma_group);
+	if (ret)
+		goto fail;
+	schedule_delayed_work(&tgd_work, msecs_to_jiffies(1));
 	return 0;
 fail:
 	tb_teardown();

@@ -13,5 +13,7 @@ workspace = true
 lemnos-core = { path = "../../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
 lemnos-linux = { path = "../../../backends/linux" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }
+lemnos-driver-k230-gsdma = { path = "../../../drivers/k230-gsdma" }
 lemnos-measure = { path = "../../../engine/measure", features = ["alloc-count"] }
 libc.workspace = true

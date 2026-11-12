@@ -22,6 +22,8 @@
 #define OTHER "lemnos-test-other"
 #define SPI "spi-lemnos-test"
 #define PISP "lemnos-test-pisp"
+#define GSDMA "lemnos-test-gsdma"
+#define OWNED_GSDMA OWNED ",lemnos,test-gsdma gsdma=lemnos,test-gsdma test_gsdma_fake_regs=1"
 #define BIND "/sys/bus/platform/drivers/lemnos/bind"
 #define UNBIND "/sys/bus/platform/drivers/lemnos/unbind"
 #define OWNED "owned=lemnos,test-block,lemnos,test-spi"
@@ -355,6 +357,29 @@ int main(void)
 	check(!unload("lemnos_test_block"), "test block module unloaded");
 
 	check(!load("/lemnos_test_block.ko", ""), "test block module loaded for the PiSP back end");
+
+	/* The graphics DMA engine on its fake engine. */
+	check(!load("/lemnos.ko", OWNED_GSDMA), "module loaded with the graphics DMA engine");
+	check(!bind_block(GSDMA), "graphics DMA engine bound");
+	check(!run((char *const[]){ "/lemnos_gsdma_check", "/dev/lemnos", GSDMA, (char *)cma_heap(),
+				    "run", NULL }),
+	      "lemnos_gsdma_check run");
+	/* The driver's own Linux device, through the same node and fake engine. */
+	check(!run((char *const[]){ "/lemnos-module-check", "gsdma", GSDMA,
+				    (char *)cma_heap() + strlen("/dev/dma_heap/"), NULL }),
+	      "lemnos-module-check gsdma");
+	check(!put(UNBIND, GSDMA), "graphics DMA engine unbound");
+	check(!forget_override(GSDMA), "graphics DMA override cleared");
+	check(!unload("lemnos"), "module unloaded after the graphics DMA checks");
+	check(!load("/lemnos.ko", OWNED_GSDMA " test_gsdma_reach=0x100000"),
+	      "module loaded with the graphics DMA engine's reach lowered");
+	check(!bind_block(GSDMA), "graphics DMA engine bound");
+	check(!run((char *const[]){ "/lemnos_gsdma_check", "/dev/lemnos", GSDMA, (char *)cma_heap(),
+				    "reach", NULL }),
+	      "lemnos_gsdma_check reach");
+	check(!put(UNBIND, GSDMA), "graphics DMA engine unbound");
+	check(!forget_override(GSDMA), "graphics DMA override cleared");
+	check(!unload("lemnos"), "module unloaded after the reach check");
 	/* The PiSP back end on its fake block. */
 	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1"),
 	      "module loaded with the PiSP back end");
@@ -369,8 +394,13 @@ int main(void)
 	check(!forget_override(PISP), "PiSP override cleared");
 	check(!unload("lemnos"), "module unloaded with the back end idle");
 
-	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1"),
+	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be,lemnos,test-gsdma pisp_be=lemnos,test-pisp-be "
+				  "test_pb_fake_regs=1 gsdma=lemnos,test-gsdma test_gsdma_fake_regs=1"),
 	      "module loaded for the wedge checks");
+	check(!bind_block(GSDMA), "graphics DMA engine bound");
+	check(!run((char *const[]){ "/lemnos_gsdma_check", "/dev/lemnos", GSDMA, (char *)cma_heap(),
+				    "wedge", NULL }),
+	      "lemnos_gsdma_check wedge");
 	check(!bind_block(PISP), "PiSP block bound");
 	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
 				    (char *)cma_heap(), "wedge", NULL }),
@@ -378,6 +408,7 @@ int main(void)
 	check(unload("lemnos") && errno == EAGAIN, "a wedged block keeps the module loaded");
 	/* The test block's devices go with it; a wedged block's memory stays pinned regardless. */
 	check(!put(UNBIND, PISP), "wedged PiSP block unbound");
+	check(!put(UNBIND, GSDMA), "wedged graphics DMA engine unbound");
 	/* The stand-in PIO driver stays: the wedged module above depends on it. */
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);
