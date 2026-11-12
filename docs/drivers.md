@@ -118,6 +118,33 @@ A board file cannot name these.
 Crates named `drivers/<name>-sys` hold a driver's kernel interface: structures, request numbers
 and the `unsafe` that issues them. They are not drivers.
 
+## Used as libraries
+
+Other programs take these crates as plain libraries, with no `lemnosd`, no host and no driver
+runtime. Each builds and tests alone with its default features off, and then its dependency tree
+holds no part of the engine: not `lemnos-core`, its macros, `lemnos-hal`, a contract, the client
+or the host. `scripts/check-libraries.sh`, a step of the gate, builds, lints and tests each one
+that way and checks its tree with `cargo tree -e normal`.
+
+| Crate | What it is | With no default features |
+|---|---|---|
+| `lemnos-v4l2` (`backends/v4l2`) | V4L2 video nodes, subdevices, the media controller and events | Everything; it has no driver half |
+| `lemnos-driver-pisp` | The PiSP's uAPI layouts, front and back end builders, tiling and statistics decoding | No driver: the front and back end drivers are behind `device` |
+| `lemnos-driver-pisp-sys`, `lemnos-driver-pisp-fe-sys` | The PiSP back and front end kernel interfaces | Everything |
+| `lemnos-driver-rkisp` | The rkisp parameter and statistics layouts (as `uapi`), the generation table and the ISP path in the media graph (`graph`) | No driver and no job checks: `device` adds them |
+| `lemnos-driver-rkisp-sys` | The ISP21, ISP30 and ISP35 layouts | Everything |
+| `lemnos-driver-k230isp` | The configuration layout (register writes) and its check, the statistics layout and its decoder, the register map | No driver and no `hw` layer: `device` adds them |
+| `lemnos-driver-k230isp-sys` | The vvcam-isp device's register requests, bounded to the registers that carry no address | Everything |
+| `lemnos-driver-isp600` | The load image's and statistics buffer's layouts, and the load image's check | No driver and no job checks: `device` adds them |
+| `lemnos-driver-isp600-sys` | The ISP and statistics subdevice requests | Everything |
+| `lemnos-linux-hotplug` (`backends/linux-hotplug`) | Devices appearing and going away: netlink uevents, inotify or rescans, in the kernel's uevent shape | Everything. `lemnos-linux` re-exports it as `hotplug` and adds the host's board hints |
+| `lemnos-linux-stream` (`backends/linux-stream`) | A frame stream's ring and buffers mapped (shared memory or dma-bufs, with `DMA_BUF_IOCTL_SYNC` around each access), lengths and seals checked first | The mappings alone. `client` (on by default) adds the `StreamPlatform` `lemnos-client` takes |
+| `lemnos-wire` (`engine/wire`) | The frame stream's shared ring | Only `ring`. `protocol` (on by default) adds the socket protocol |
+
+Every driver half is on by default, so the workspace, `lemnosd` and a plain dependency get the
+drivers as before. A program that wants the library alone names the crate with
+`default-features = false`.
+
 ## Contracts
 
 One crate each under `contracts/`. The numbers are the method numbers on the wire.

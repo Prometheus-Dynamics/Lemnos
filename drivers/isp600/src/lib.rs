@@ -8,7 +8,8 @@
 //! caller, in the camera stack; no vendor library, tuning file or default table is used, read or
 //! mirrored.
 //!
-//! What it stands on, each with no device access of its own:
+//! What it stands on, each with no device access of its own. [`layout`] is the library half:
+//! built with no features (no `device`), it needs no driver, engine or daemon.
 //!
 //! - [`layout`]: the load image's and the statistics buffer's regions, the register offsets and
 //!   bits the vendor kernel names, and [`layout::check_load`], which every load image passes
@@ -46,22 +47,25 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 mod driver;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 pub mod hw;
+#[cfg(feature = "device")]
 pub mod job;
 pub mod layout;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, feature = "device", target_os = "linux"))]
 mod driver_tests;
+#[cfg(all(test, feature = "device"))]
+mod job_tests;
 #[cfg(test)]
 mod tests;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 pub use driver::{
     CONFIG_STREAM, DEFAULT_SETTLE, Isp600, Isp600Needs, MAX_DIMENSION, MAX_SETTLE,
     MAX_STREAM_BUFFERS, MIN_DIMENSION, OUTPUT_STREAM, Options, STATISTICS_STREAM,
 };
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 pub use hw::{Hardware, LinuxHardware, Settings};

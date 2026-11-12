@@ -17,8 +17,12 @@
 //! media device model (see the receiver driver's `route` module); the vendor driver enables the
 //! first such link when it probes.
 
-use lemnos_core::{Result, Status};
+use lemnos_abi::Status;
 use lemnos_v4l2::media::{DataLink, LinkFlags, PadRef, Topology};
+
+/// What a graph rule returns: `NOT_FOUND` for a node or link the graph lacks, `BUSY` for an input
+/// another source holds.
+pub type Result<T> = core::result::Result<T, Status>;
 
 /// The ISP's own subdevice.
 pub const ISP_ENTITY: &str = "rkisp-isp-subdev";

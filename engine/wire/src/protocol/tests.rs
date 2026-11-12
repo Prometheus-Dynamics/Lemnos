@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::*;
+use super::*;
 
 fn roundtrip(frame: Frame<'_>) {
     let mut buf = [0; 256];
@@ -205,7 +205,7 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
 
 /// Pulls `name -> hex` out of `docs/wire.md`.
 fn spec() -> BTreeMap<String, Vec<u8>> {
-    let text = include_str!("../../../docs/wire.md");
+    let text = include_str!("../../../../docs/wire.md");
     let mut out = BTreeMap::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
@@ -429,7 +429,7 @@ mod description {
         Unit,
     };
 
-    use crate::{OwnedShape, decode_description, encode_description};
+    use super::{OwnedShape, decode_description, encode_description};
 
     const CONTRACT: ContractInfo = ContractInfo {
         tag: Tag::new("example.thing/1"),

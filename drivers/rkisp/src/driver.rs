@@ -904,7 +904,7 @@ impl CameraIsp for Rkisp {
         if index != 0 {
             return Err(Status::NOT_FOUND);
         }
-        Ok(self.options.generation.config_layout())
+        Ok(self.options.generation.config_layout().into())
     }
 
     fn set_input(&mut self, input: IspInput) -> Result<()> {

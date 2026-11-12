@@ -9,10 +9,17 @@ description = "The ISP8000 behind the vendor vvcam-isp device as camera.isp/1: r
 [lints]
 workspace = true
 
+# With no features: the library half, used without the daemon. The configuration layout and its
+# check, the statistics layout and its decoder, and the register map; no driver, no engine.
+[features]
+default = ["device"]
+# The `camera.isp/1` driver.
+device = ["dep:lemnos-core", "dep:lemnos-hal", "dep:lemnos-contract-camera-isp"]
+
 [dependencies]
-lemnos-core = { path = "../../engine/core", features = ["std"] }
-lemnos-hal = { path = "../../engine/hal", features = ["std"] }
-lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }
+lemnos-core = { path = "../../engine/core", features = ["std"], optional = true }
+lemnos-hal = { path = "../../engine/hal", features = ["std"], optional = true }
+lemnos-contract-camera-isp = { path = "../../contracts/camera-isp", optional = true }
 lemnos-driver-k230isp-sys = { path = "../k230isp-sys" }
 
 [dev-dependencies]

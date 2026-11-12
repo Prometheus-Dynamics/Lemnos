@@ -147,7 +147,7 @@ impl<'a> UeventMsg<'a> {
 /// Writes a message in the kernel's format into `out` (replacing its
 /// contents). Used to synthesize events the kernel did not send (coldplug,
 /// rescans) so every consumer parses them the same way.
-pub(crate) fn encode<'v>(
+pub fn encode<'v>(
     out: &mut Vec<u8>,
     action: &str,
     devpath: &str,

@@ -3,7 +3,8 @@
 //! each job's parameters in and its statistics and images out. See the `driver` module's
 //! documentation (on [`Rkisp`]) for the streams, the job steps, the settings and the failure rule.
 //!
-//! What it stands on, each with no device access of its own:
+//! What it stands on, each with no device access of its own. All but [`job`] and [`hw`] are the
+//! library half: built with no features (no `device`), they need no driver, engine or daemon.
 //!
 //! - [`uapi`]: the parameter and statistics layouts, from the `-sys` crate (bindgen's, checked
 //!   against the C compiler). Lemnos never reads them: the caller fills a parameter buffer and
@@ -29,30 +30,33 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 mod driver;
 mod generation;
 #[cfg(target_os = "linux")]
 pub mod graph;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 pub mod hw;
+#[cfg(feature = "device")]
 pub mod job;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, feature = "device", target_os = "linux"))]
 mod driver_tests;
+#[cfg(all(test, feature = "device"))]
+mod job_tests;
 #[cfg(test)]
 mod tests;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 pub use driver::{
     CONFIG_STREAM, MAX_DIMENSION, MAX_PENDING, MAX_STREAM_BUFFERS, OUTPUT_STREAMS, Options, Rkisp,
     RkispNeeds, STATISTICS_STREAM,
 };
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "device", target_os = "linux"))]
 pub use hw::{Hardware, LinuxHardware, Settings};
 
 pub use generation::{
-    Generation, LAYOUT_ISP21_PARAMS, LAYOUT_ISP21_STATISTICS, LAYOUT_ISP30_PARAMS,
+    BufferLayout, Generation, LAYOUT_ISP21_PARAMS, LAYOUT_ISP21_STATISTICS, LAYOUT_ISP30_PARAMS,
     LAYOUT_ISP30_STATISTICS, LAYOUT_ISP35_PARAMS, LAYOUT_ISP35_STATISTICS, OUTPUTS,
 };
 /// The parameter and statistics layouts: the `-sys` crate, where the generated code lives.

@@ -498,7 +498,7 @@ impl StreamPlatform for Older {
         fd: std::os::fd::BorrowedFd<'_>,
         bytes: usize,
     ) -> std::io::Result<Arc<dyn WordMemory>> {
-        LinuxStreams.map_ring(fd, bytes)
+        StreamPlatform::map_ring(&LinuxStreams, fd, bytes)
     }
 
     fn map_buffers(
@@ -507,7 +507,7 @@ impl StreamPlatform for Older {
         bytes: usize,
         writable: bool,
     ) -> std::io::Result<Box<dyn ByteMemory>> {
-        LinuxStreams.map_buffers(fd, bytes, writable)
+        StreamPlatform::map_buffers(&LinuxStreams, fd, bytes, writable)
     }
 
     fn wait_doorbell(
@@ -689,7 +689,7 @@ impl StreamPlatform for Telling {
         fd: std::os::fd::BorrowedFd<'_>,
         bytes: usize,
     ) -> std::io::Result<Arc<dyn WordMemory>> {
-        LinuxStreams.map_ring(fd, bytes)
+        StreamPlatform::map_ring(&LinuxStreams, fd, bytes)
     }
 
     fn map_buffers(
@@ -699,7 +699,7 @@ impl StreamPlatform for Telling {
         writable: bool,
     ) -> std::io::Result<Box<dyn ByteMemory>> {
         self.writable.lock().unwrap().push(writable);
-        LinuxStreams.map_buffers(fd, bytes, writable)
+        StreamPlatform::map_buffers(&LinuxStreams, fd, bytes, writable)
     }
 
     fn map_buffer(
@@ -710,7 +710,7 @@ impl StreamPlatform for Telling {
     ) -> std::io::Result<Box<dyn ByteMemory>> {
         self.writable.lock().unwrap().push(writable);
         Ok(Box::new(Told {
-            inner: LinuxStreams.map_buffer(fd, bytes, writable)?,
+            inner: StreamPlatform::map_buffer(&LinuxStreams, fd, bytes, writable)?,
             buffer: self.mapped.fetch_add(1, Ordering::SeqCst),
             calls: Arc::clone(&self.calls),
         }))

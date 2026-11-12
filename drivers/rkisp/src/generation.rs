@@ -5,9 +5,26 @@
 //! `0x<generation>02`, so a caller that reads a number knows the structure without asking which
 //! chip it is on.
 
-use lemnos_contract_camera_isp::ConfigLayout;
-
 use crate::uapi;
+
+/// One buffer layout: the number `camera.isp/1` gives it and the bytes one buffer of it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferLayout {
+    /// The layout number (`LAYOUT_*`).
+    pub layout: u32,
+    /// Bytes of one buffer.
+    pub bytes: u32,
+}
+
+#[cfg(feature = "device")]
+impl From<BufferLayout> for lemnos_contract_camera_isp::ConfigLayout {
+    fn from(l: BufferLayout) -> Self {
+        Self {
+            layout: l.layout,
+            bytes: l.bytes,
+        }
+    }
+}
 
 /// `camera.isp/1` config layout: an ISP21 parameter buffer (`struct isp21_isp_params_cfg`).
 pub const LAYOUT_ISP21_PARAMS: u32 = 0x2101;
@@ -85,28 +102,28 @@ impl Generation {
 
     /// The parameter layout a job's config buffer holds.
     #[must_use]
-    pub const fn config_layout(self) -> ConfigLayout {
+    pub const fn config_layout(self) -> BufferLayout {
         let (layout, n) = match self {
             Self::Isp21 => (LAYOUT_ISP21_PARAMS, uapi::ISP21_PARAMS_BYTES),
             Self::Isp30 => (LAYOUT_ISP30_PARAMS, uapi::ISP30_PARAMS_BYTES),
             Self::Isp35 => (LAYOUT_ISP35_PARAMS, uapi::ISP35_PARAMS_BYTES),
         };
-        ConfigLayout {
+        BufferLayout {
             layout,
             bytes: bytes(n),
         }
     }
 
-    /// The statistics layout and its size: what [`IspInfo`](lemnos_contract_camera_isp::IspInfo)
-    /// reports as `statistics_layout` and `statistics_bytes`.
+    /// The statistics layout and its size: what the driver's `IspInfo` reports as
+    /// `statistics_layout` and `statistics_bytes`.
     #[must_use]
-    pub const fn statistics_layout(self) -> ConfigLayout {
+    pub const fn statistics_layout(self) -> BufferLayout {
         let (layout, n) = match self {
             Self::Isp21 => (LAYOUT_ISP21_STATISTICS, uapi::ISP21_STATS_BYTES),
             Self::Isp30 => (LAYOUT_ISP30_STATISTICS, uapi::ISP30_STATS_BYTES),
             Self::Isp35 => (LAYOUT_ISP35_STATISTICS, uapi::ISP35_STATS_BYTES),
         };
-        ConfigLayout {
+        BufferLayout {
             layout,
             bytes: bytes(n),
         }

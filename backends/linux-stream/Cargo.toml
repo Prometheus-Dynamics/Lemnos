@@ -11,7 +11,14 @@ description = "Linux support for taking a Lemnos frame stream: receiving descrip
 [lints]
 workspace = true
 
+# With no features: the mappings alone, over lemnos-linux-sys and lemnos-wire's ring, with no
+# part of the engine.
+[features]
+default = ["client"]
+# The `StreamPlatform` lemnos-client takes.
+client = ["dep:lemnos-client"]
+
 [dependencies]
-lemnos-client = { path = "../../engine/client" }
-lemnos-wire = { path = "../../engine/wire" }
+lemnos-client = { path = "../../engine/client", optional = true }
+lemnos-wire = { path = "../../engine/wire", default-features = false }
 lemnos-linux-sys = { path = "../linux-sys" }
