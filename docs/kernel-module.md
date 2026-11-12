@@ -38,6 +38,7 @@ and everything else stays on the stock path:
 | `spidevB.C` | Yes, when that SPI device is bound to the module |
 | `gpiochipN:LINE` | Yes, when the module can take the line |
 | `pwmchipN:CHANNEL` | Yes, when the module can take the channel |
+| `pio-i2c:sda=N,scl=N` | Yes, when the module was built with PIO: a claim on `pio-0`. The stock PIO node must exist either way |
 | `dma:BLOCK` | Only through the module. There is no stock path |
 | `regs:BLOCK/N` | Only through the module, and only when it says the block's registers may be mapped |
 | `irq:BLOCK/N` | Only through the module |
@@ -49,7 +50,7 @@ themselves.
 Interrupts reach the backend on the module's one event stream, which it reads for every interrupt
 a process holds and files each event under its own. Supplies, thermal watches and PIO are complete
 in the module and tested in QEMU; the driver interface has no supply or thermal resource, so the
-backend hands them to no driver, and an I2C bus on PIO (`pio-i2c:`) uses the stock PIO node.
+backend hands those two to no driver.
 
 ## What it never does
 

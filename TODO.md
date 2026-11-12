@@ -7,7 +7,8 @@ done and shown.
 ## Hardware runs
 
 Two runs on the reference board (2026-11-11) covered the kernel module, the backend's buses through
-it, the camera path and the thermal zone; [`docs/hardware-status.md`](docs/hardware-status.md#the-first-board-run)
+it (the PIO-made I2C bus among them, on its module route since the second run), the camera path and
+the thermal zone; [`docs/hardware-status.md`](docs/hardware-status.md#the-first-board-run)
 lists what they showed. Every other check under `testing/board-runs/` has no result yet, and
 [`docs/testing.md`](docs/testing.md#board-runs) says how a run is done.
 
@@ -49,7 +50,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Unfinished in the code
 
-- [ ] **A PIO-made I2C bus does not go through the kernel module.**
 - [ ] **Libraries with no contract driver**: `drivers/nonai2d`, `drivers/vglite`,
       `drivers/k230-ai2d` (its register map is not public), `drivers/rk-jpeg` (builds no job: the
       field layout is not public; JPEG runs through `rk-mpp` with the caller's registers).
@@ -66,6 +66,3 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       captured straight into a stream while no consumer is attached.
 - [ ] **`lemnosd` has no settings for the host**: the call deadline, the retry times and the
       opt-in auto-off policy are fixed at their defaults.
-- [ ] **Two tests have been reported to fail now and then** under load:
-      `service/orion/tests/orion_bridge.rs` and
-      `call_reaches_any_method_by_name_or_with_its_tag` in `service/ctl`. Not yet traced.
