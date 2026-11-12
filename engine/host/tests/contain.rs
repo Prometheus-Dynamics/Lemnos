@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use common::{COUNTERS, get_counter, host, host_with, method, quick};
 use lemnos_core::{Health, Status};
-use lemnos_host::{AutoOff, DeviceState, OffReason, Options};
+use lemnos_host::{DeviceState, OffReason, Options};
 
 fn index(host: &lemnos_host::Host, id: &str) -> u32 {
     host.device(id).unwrap().index
@@ -188,11 +188,14 @@ fn disabled_in_the_board_file_stays_off_until_switched_on() {
 }
 
 #[test]
-fn auto_off_happens_only_when_configured() {
-    let text =
-        "[[devices]]\nid = \"a\"\ndriver = \"fake-accelerometer\"\nconfig = { refuse = true }\n";
+fn auto_off_happens_only_to_a_device_that_opts_in() {
+    let text = "[[devices]]\nid = \"a\"\ndriver = \"fake-accelerometer\"\nconfig = { refuse = true }\n\
+        auto_off_after = 3\n\
+        [[devices]]\nid = \"b\"\ndriver = \"fake-accelerometer\"\nconfig = { refuse = true }\n";
+    // Host-wide settings, at their shortest, turn nobody off.
     let options = Options {
-        auto_off: Some(AutoOff { after_attempts: 3 }),
+        retry_first: Duration::from_millis(1),
+        retry_cap: Duration::from_millis(1),
         ..Options::default()
     };
     let (host, clock) = host_with(text, options);
@@ -204,6 +207,42 @@ fn auto_off_happens_only_when_configured() {
         host.device("a").unwrap().state,
         DeviceState::Off(OffReason::Policy)
     );
+    for _ in 0..20 {
+        clock.advance(Duration::from_secs(8));
+        host.tick();
+    }
+    let DeviceState::Backoff { attempts, .. } = host.device("b").unwrap().state else {
+        panic!("b opted in to nothing and is retried forever");
+    };
+    assert!(attempts > 3, "{attempts}");
+    // Turning it on again is the way back.
+    host.on("a").unwrap();
+    assert!(!matches!(
+        host.device("a").unwrap().state,
+        DeviceState::Off(_)
+    ));
+}
+
+#[test]
+fn the_board_files_host_settings_reach_the_host() {
+    let text = "[host]\ncall_deadline_ms = 750\nretry_first_ms = 200\nretry_cap_ms = 3000\n\
+        [[devices]]\nid = \"a\"\ndriver = \"fake-accelerometer\"\nconfig = { refuse = true }\n";
+    let (host, clock) = host_with(text, Options::default());
+    let options = host.options();
+    assert_eq!(options.call_deadline, Duration::from_millis(750));
+    assert_eq!(options.retry_first, Duration::from_millis(200));
+    assert_eq!(options.retry_cap, Duration::from_secs(3));
+    // The waits follow them: 200 ms doubling to the 3 s cap.
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        let now = clock.now_ns();
+        let due = host.next_retry_ns().unwrap();
+        let wait = due.saturating_sub(now);
+        waits.push(wait / 1_000_000);
+        clock.advance(Duration::from_nanos(wait));
+        host.tick();
+    }
+    assert_eq!(waits, [200, 400, 800, 1600, 3000, 3000]);
 }
 
 #[test]

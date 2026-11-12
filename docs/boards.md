@@ -11,10 +11,12 @@ lemnosd --check --board docs/examples/sim-board.toml
 lemnosd --check --board docs/examples/full-board.toml
 lemnosd --check --board testing/boards/guest.toml
 lemnosd --check --board testing/bench/board.toml
+lemnos-ctl validate docs/examples/full-board.toml
 ```
 
-`--check` parses the file and exits, 0 when it is well formed. It checks the keys on this page. It
-does not check a driver's own `config` keys, or that the hardware is there: those are checked when
+`--check` parses the file and exits, 0 when it is well formed. `lemnos-ctl validate` checks it the
+same way with no daemon, and also prints the host settings the file gives, defaults filled in, and
+the devices that opted in to auto-off. Both check the keys on this page. Neither checks a driver's own `config` keys, or that the hardware is there: those are checked when
 the driver binds, and a device that fails to bind is listed with the reason.
 
 ## The keys
@@ -26,6 +28,7 @@ At the top:
 | `format` | Always `"lemnos.board"` |
 | `schema_version` | `1`. A file with a higher number than the daemon knows is refused |
 | `[board]` `id` | The board's name. The daemon gives it to clients as its own name |
+| `[host]` | How the host treats every driver (below). Optional |
 | `[[devices]]` | One table per device, in any order |
 
 In a device:
@@ -39,6 +42,7 @@ In a device:
 | `link` | The `id` of another device this one is wired to. The host only hands it over. `lemnos-ctl chain` follows it |
 | `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own |
 | `disabled` | `true` starts the device off. `lemnos-ctl on` turns it on |
+| `auto_off_after` | Opts this device in to being turned off after this many failed binds in a row, at least 1. Left out, it is retried forever. `lemnos-ctl on` brings it back |
 | `owner` | `"lemnos"` (the default) or `"host"`. With `"host"` the operating system owns the hardware and Lemnos only reads it. See [Concepts](concepts.md#who-owns-the-hardware) |
 | `[devices.streams.NAME]` | A frame stream this device offers, by the name its driver needs and a consumer asks for |
 
@@ -54,6 +58,18 @@ In a stream:
 | `heap` | Only with `memory = "dma-buf"`: the dma-heap the buffers come from, by its name under `/dev/dma_heap`. `"system"` when left out |
 
 [Frame streams](streams.md) says which to choose.
+
+In `[host]`, every key optional. Each one left out keeps the default:
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `call_deadline_ms` | 2000 | 1 to 60000 | How long one driver call may run before it is `TIMED_OUT` and the device is retried once the call lets go |
+| `retry_first_ms` | 1000 | 1 to the cap | The wait before a device that failed is bound again. It doubles with each failure in a row |
+| `retry_cap_ms` | 8000 | 1 to 8000 | The longest wait, and how long a driver must stay up before its wait starts again from the first |
+
+The cap can be shorter than 8 s but never longer: that is [the failure rule](concepts.md#the-failure-rule),
+and a longer value is refused. There is no host-wide auto-off: only a device's own
+`auto_off_after` turns a device off.
 
 ## `bus` and `uses`
 
@@ -175,6 +191,12 @@ schema_version = 1             # a file newer than the service is refused
 [board]
 id = "example"                 # the name the service gives itself to clients
 
+# `[host]`: how the host treats every driver. Each key may be left out; these are the defaults.
+[host]
+call_deadline_ms = 2000        # how long one driver call may run: 1 to 60000
+retry_first_ms = 1000          # the first wait before a failed device is bound again
+retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
+
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 [[devices]]
 id = "power0"
@@ -218,10 +240,13 @@ driver = "ws2812"
 bus = "spidev0.0"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
+# `auto_off_after`: this device alone opts in to being turned off after 5 failed binds in a
+# row. Every other device is retried forever.
 [[devices]]
 id = "bench"
 driver = "raw-bus"
 uses = { i2c = "i2c-1", pwm = "pwmchip0:1" }
+auto_off_after = 5
 
 # `owner = "host"`: the operating system's own driver has this hardware. Lemnos reads it and
 # changes nothing.

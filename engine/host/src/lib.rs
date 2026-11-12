@@ -10,7 +10,7 @@ mod host;
 pub mod schedule;
 pub mod stream;
 
-pub use contain::{AutoOff, Options};
+pub use contain::{MAX_RETRY_CAP, Options};
 pub use host::{
     Binder, DeviceInfo, DeviceState, DriverEntry, Host, HostError, Instance, OffReason, entry,
 };

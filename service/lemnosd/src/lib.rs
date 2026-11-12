@@ -76,6 +76,8 @@ pub struct Config {
     pub board: BoardFile,
     pub drivers: Vec<DriverEntry>,
     pub backend: Box<dyn Provider + Send>,
+    /// How the host treats its drivers. What the board file's `[host]` section sets wins over
+    /// these; `lemnosd` passes the defaults.
     pub options: Options,
 }
 

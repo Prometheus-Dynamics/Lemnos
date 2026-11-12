@@ -104,11 +104,13 @@ Hardware goes away and comes back. Lemnos never gives up on it, and never hides 
 - **A driver whose hardware is gone for good is bound again.** A driver says so itself (the handle
   of an unplugged USB device), or its calls fail five times in a row the way a missing device
   fails. The host drops it, takes back its resources and binds it again under the rule above.
-- **Nothing is switched off automatically.** `lemnos-ctl off` and `on` are the only switch. The
-  host has an opt-in policy that stops retrying after a number of failures. `lemnosd` does not turn
-  it on and has no setting for it.
+- **Nothing is switched off automatically** unless its board entry asks. `lemnos-ctl off` and `on`
+  are the switch. A device with `auto_off_after = N` in the board file opts in to being turned off
+  after N failed binds in a row; no setting turns that on for any other device. The waits and the
+  call deadline are set in the board file's [`[host]`](boards.md#the-keys) section; the cap can be
+  made shorter than 8 s, never longer.
 - **A panic or a hang in one driver stays in that driver.** Each call runs behind a panic boundary
-  and a deadline of 2 s. A driver that panics is dropped and bound again. Other devices carry on.
+  and a deadline, 2 s unless the board file sets another. A driver that panics is dropped and bound again. Other devices carry on.
   Memory corruption inside the daemon's process cannot be contained.
 - **Hotplug events are hints.** When the kernel announces a bus or a device that the board file
   names, the host tries the devices waiting on it at once, at most once every 250 ms for each

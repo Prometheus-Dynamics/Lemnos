@@ -64,5 +64,3 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       at a time.
 - [ ] **Capture**: `rkcif` has no 16-bit unpacked layout; multi-plane frames are copied; nothing is
       captured straight into a stream while no consumer is attached.
-- [ ] **`lemnosd` has no settings for the host**: the call deadline, the retry times and the
-      opt-in auto-off policy are fixed at their defaults.

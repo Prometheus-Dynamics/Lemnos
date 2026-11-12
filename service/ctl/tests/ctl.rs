@@ -283,3 +283,96 @@ fn packages_shows_what_was_loaded_and_why_the_rest_was_refused() {
     assert_eq!(rows.len(), 2);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Writes `text` to a board file of its own and runs `validate` on it, with no daemon.
+fn validate(text: &str) -> Result<String, String> {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "lemnos-ctl-validate-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("board.toml");
+    std::fs::write(&path, text).unwrap();
+    let mut out = Vec::new();
+    // No daemon is listening there: validate never connects.
+    let args = [
+        "--socket".to_string(),
+        dir.join("nobody").display().to_string(),
+        "validate".to_string(),
+        path.display().to_string(),
+    ];
+    let result = lemnos_ctl::run(&args, &mut out).map(|()| String::from_utf8(out).unwrap());
+    std::fs::remove_dir_all(&dir).unwrap();
+    result
+}
+
+const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
+
+#[test]
+fn validate_shows_the_defaults_with_no_host_section() {
+    let text = validate(&format!("{HEAD}[[devices]]\nid = \"a\"\ndriver = \"x\"\n")).unwrap();
+    assert!(text.contains("board \"t\", 1 devices"), "{text}");
+    assert!(
+        text.contains("host: call deadline 2000 ms, first retry 1000 ms, retry cap 8000 ms"),
+        "{text}"
+    );
+    assert!(text.contains("auto-off: none"), "{text}");
+}
+
+#[test]
+fn validate_shows_what_the_host_section_and_the_devices_set() {
+    let text = validate(&format!(
+        "{HEAD}[host]\ncall_deadline_ms = 500\nretry_first_ms = 250\nretry_cap_ms = 4000\n\
+         [[devices]]\nid = \"a\"\ndriver = \"x\"\nauto_off_after = 3\n\
+         [[devices]]\nid = \"b\"\ndriver = \"x\"\n"
+    ))
+    .unwrap();
+    assert!(
+        text.contains("host: call deadline 500 ms, first retry 250 ms, retry cap 4000 ms"),
+        "{text}"
+    );
+    assert!(text.contains("auto-off: a after 3\n"), "{text}");
+}
+
+#[test]
+fn validate_refuses_a_retry_cap_past_eight_seconds_and_says_why() {
+    let error = validate(&format!("{HEAD}[host]\nretry_cap_ms = 9000\n")).unwrap_err();
+    assert!(error.contains("retry_cap_ms"), "{error}");
+    assert!(error.contains("8 s"), "{error}");
+}
+
+#[test]
+fn validate_refuses_bad_host_settings_by_name() {
+    for (keys, named) in [
+        ("[host]\ncall_deadline_ms = 0\n", "call_deadline_ms"),
+        (
+            "[host]\nretry_first_ms = 5000\nretry_cap_ms = 1000\n",
+            "retry_first_ms",
+        ),
+        ("[host]\nauto_off = true\n", "auto_off"),
+        (
+            "[[devices]]\nid = \"a\"\ndriver = \"x\"\nauto_off_after = 0\n",
+            "auto_off_after",
+        ),
+    ] {
+        let error = validate(&format!("{HEAD}{keys}")).unwrap_err();
+        assert!(error.contains(named), "{keys}: {error}");
+    }
+}
+
+#[test]
+fn validate_names_a_file_it_cant_read() {
+    let mut out = Vec::new();
+    let error = lemnos_ctl::run(
+        &[
+            "validate".to_string(),
+            "/nonexistent/board.toml".to_string(),
+        ],
+        &mut out,
+    )
+    .unwrap_err();
+    assert!(error.starts_with("/nonexistent/board.toml: "), "{error}");
+    assert!(lemnos_ctl::run(&["validate".to_string()], &mut out).is_err());
+}

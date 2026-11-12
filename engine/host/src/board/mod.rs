@@ -2,11 +2,14 @@
 //! only. It knows no drivers and no kinds of device.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use lemnos_core::ConfigValue;
 use lemnos_wire::MAX_HANDLE_BUFFERS;
 use lemnos_wire::ring::Layout;
 use serde::Deserialize;
+
+use crate::contain::{MAX_RETRY_CAP, Options};
 
 pub const FORMAT: &str = "lemnos.board";
 pub const SCHEMA_VERSION: u32 = 1;
@@ -36,6 +39,85 @@ pub enum BoardError {
     StreamHeap(String, String, String),
     #[error("device {0:?} stream {1:?}: `heap` is only for `memory = \"dma-buf\"`")]
     StreamHeapUnused(String, String),
+    #[error("[host] {0}: {1}")]
+    Host(&'static str, String),
+    #[error(
+        "device {0:?} auto_off_after: at least 1, the attempts in a row before it is turned off"
+    )]
+    AutoOff(String),
+}
+
+/// The longest `call_deadline_ms` a board file may set.
+pub const MAX_CALL_DEADLINE_MS: u64 = 60_000;
+/// The longest `retry_cap_ms` a board file may set: the failure rule's 8 s cap.
+pub const MAX_RETRY_CAP_MS: u64 = MAX_RETRY_CAP.as_millis() as u64;
+
+/// How the host treats every driver, from the board file's `[host]` section. Each key left out
+/// keeps what the host was started with, which for `lemnosd` is the default in the table of
+/// `docs/boards.md`. Nothing here can turn a device off: that is each device's own
+/// `auto_off_after`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostSpec {
+    /// How long one driver call may run, in milliseconds: 1 to [`MAX_CALL_DEADLINE_MS`].
+    #[serde(default)]
+    pub call_deadline_ms: Option<u64>,
+    /// The wait before the first retry of a device that failed, in milliseconds. At least 1,
+    /// and at most the cap.
+    #[serde(default)]
+    pub retry_first_ms: Option<u64>,
+    /// The longest wait between retries, in milliseconds: at most [`MAX_RETRY_CAP_MS`]. It is
+    /// also how long a driver must stay up before its wait starts again from the shortest.
+    #[serde(default)]
+    pub retry_cap_ms: Option<u64>,
+}
+
+impl HostSpec {
+    /// `options` with what this section sets put over it.
+    #[must_use]
+    pub fn apply(&self, options: Options) -> Options {
+        let ms = Duration::from_millis;
+        Options {
+            call_deadline: self.call_deadline_ms.map_or(options.call_deadline, ms),
+            retry_first: self.retry_first_ms.map_or(options.retry_first, ms),
+            retry_cap: self.retry_cap_ms.map_or(options.retry_cap, ms),
+            ..options
+        }
+    }
+
+    /// Checks each value against its range, and the first retry against the cap it doubles
+    /// to. A first retry with no cap set is held to the default cap, which is the most there is.
+    fn check(&self) -> Result<(), BoardError> {
+        let out = |key, why: &str| Err(BoardError::Host(key, why.to_string()));
+        if let Some(deadline) = self.call_deadline_ms
+            && !(1..=MAX_CALL_DEADLINE_MS).contains(&deadline)
+        {
+            return out(
+                "call_deadline_ms",
+                &format!("{deadline} is not from 1 to {MAX_CALL_DEADLINE_MS}"),
+            );
+        }
+        if let Some(cap) = self.retry_cap_ms
+            && !(1..=MAX_RETRY_CAP_MS).contains(&cap)
+        {
+            return out(
+                "retry_cap_ms",
+                &format!(
+                    "{cap} is not from 1 to {MAX_RETRY_CAP_MS}: the failure rule caps the wait at 8 s"
+                ),
+            );
+        }
+        let cap = self.retry_cap_ms.unwrap_or(MAX_RETRY_CAP_MS);
+        if let Some(first) = self.retry_first_ms
+            && !(1..=cap).contains(&first)
+        {
+            return out(
+                "retry_first_ms",
+                &format!("{first} is not from 1 to the cap, {cap}"),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// What a stream's buffers are made of.
@@ -186,6 +268,10 @@ pub struct DeviceSpec {
     /// The frame streams this device offers, by the name a consumer asks for and a driver needs.
     #[serde(default)]
     pub streams: BTreeMap<String, StreamSpec>,
+    /// Opts this device in to being turned off after this many failed binds in a row. Left
+    /// out, it is retried forever, which is the failure rule.
+    #[serde(default)]
+    pub auto_off_after: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -194,6 +280,9 @@ pub struct BoardFile {
     pub format: String,
     pub schema_version: u32,
     pub board: BoardInfo,
+    /// How the host treats every driver. Left out, it keeps what it was started with.
+    #[serde(default)]
+    pub host: HostSpec,
     #[serde(default)]
     pub devices: Vec<DeviceSpec>,
 }
@@ -245,6 +334,7 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
     if board.schema_version > SCHEMA_VERSION {
         return Err(BoardError::Version(board.schema_version));
     }
+    board.host.check()?;
     let mut seen = BTreeSet::new();
     for device in &board.devices {
         if !seen.insert(device.id.as_str()) {
@@ -252,6 +342,9 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
         }
         if device.uses.values().any(|used| *used == device.id) {
             return Err(BoardError::SelfUse(device.id.clone()));
+        }
+        if device.auto_off_after == Some(0) {
+            return Err(BoardError::AutoOff(device.id.clone()));
         }
         device.owned_config()?;
         for (name, stream) in &device.streams {
@@ -477,6 +570,108 @@ mod tests {
         let error = device("owner = \"guest\"\n").unwrap_err();
         assert!(error.to_string().contains("guest"), "{error}");
         assert!(error.to_string().contains("owner"), "{error}");
+    }
+
+    #[test]
+    fn host_settings_default_to_what_the_host_was_started_with() {
+        let board = with("").unwrap();
+        assert_eq!(board.host, HostSpec::default());
+        assert_eq!(board.host.apply(Options::default()), Options::default());
+        let started = Options {
+            call_deadline: Duration::from_millis(30),
+            ..Options::default()
+        };
+        assert_eq!(board.host.apply(started), started);
+    }
+
+    #[test]
+    fn host_settings_parse_and_win_over_what_the_host_was_started_with() {
+        let board = parse(&format!(
+            "{HEAD}[host]\ncall_deadline_ms = 500\nretry_first_ms = 250\nretry_cap_ms = 4000\n"
+        ))
+        .unwrap();
+        let options = board.host.apply(Options::default());
+        assert_eq!(options.call_deadline, Duration::from_millis(500));
+        assert_eq!(options.retry_first, Duration::from_millis(250));
+        assert_eq!(options.retry_cap, Duration::from_secs(4));
+        assert_eq!(options.error_limit, Options::default().error_limit);
+        // One key alone changes that one only.
+        let board = parse(&format!("{HEAD}[host]\nretry_first_ms = 100\n")).unwrap();
+        let options = board.host.apply(Options::default());
+        assert_eq!(options.retry_first, Duration::from_millis(100));
+        assert_eq!(options.retry_cap, MAX_RETRY_CAP);
+        assert_eq!(options.call_deadline, Options::default().call_deadline);
+    }
+
+    fn host(keys: &str) -> Result<BoardFile, BoardError> {
+        parse(&format!("{HEAD}[host]\n{keys}"))
+    }
+
+    #[test]
+    fn the_retry_cap_never_goes_past_eight_seconds() {
+        assert!(host("retry_cap_ms = 8000\n").is_ok());
+        for bad in ["8001", "60000", "0"] {
+            let error = host(&format!("retry_cap_ms = {bad}\n")).unwrap_err();
+            assert!(
+                matches!(error, BoardError::Host("retry_cap_ms", _)),
+                "{bad}: {error}"
+            );
+        }
+        // Negative and too large for the type are not numbers of milliseconds at all.
+        assert!(host("retry_cap_ms = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_first_retry_is_at_most_the_cap_and_never_zero() {
+        assert!(host("retry_first_ms = 8000\n").is_ok());
+        assert!(host("retry_first_ms = 2000\nretry_cap_ms = 2000\n").is_ok());
+        for keys in [
+            "retry_first_ms = 0\n",
+            "retry_first_ms = 8001\n",
+            "retry_first_ms = 3000\nretry_cap_ms = 2000\n",
+        ] {
+            let error = host(keys).unwrap_err();
+            assert!(
+                matches!(error, BoardError::Host("retry_first_ms", _)),
+                "{keys}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_call_deadline_is_in_range() {
+        assert!(host("call_deadline_ms = 1\n").is_ok());
+        assert!(host(&format!("call_deadline_ms = {MAX_CALL_DEADLINE_MS}\n")).is_ok());
+        for bad in [0, MAX_CALL_DEADLINE_MS + 1] {
+            let error = host(&format!("call_deadline_ms = {bad}\n")).unwrap_err();
+            assert!(
+                matches!(error, BoardError::Host("call_deadline_ms", _)),
+                "{bad}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_host_key_is_refused_by_name() {
+        let error = host("auto_off_after = 3\n").unwrap_err();
+        assert!(error.to_string().contains("auto_off_after"), "{error}");
+        let error = host("retry_cap = 8000\n").unwrap_err();
+        assert!(error.to_string().contains("retry_cap"), "{error}");
+    }
+
+    #[test]
+    fn auto_off_is_each_devices_own_and_at_least_one_attempt() {
+        let board = with(
+            "[[devices]]\nid = \"a\"\ndriver = \"x\"\nauto_off_after = 3\n\
+             [[devices]]\nid = \"b\"\ndriver = \"x\"\n",
+        )
+        .unwrap();
+        assert_eq!(board.devices[0].auto_off_after, Some(3));
+        assert_eq!(board.devices[1].auto_off_after, None);
+        assert_eq!(
+            with("[[devices]]\nid = \"a\"\ndriver = \"x\"\nauto_off_after = 0\n"),
+            Err(BoardError::AutoOff("a".to_string()))
+        );
     }
 
     #[test]

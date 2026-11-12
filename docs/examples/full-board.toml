@@ -8,6 +8,12 @@ schema_version = 1             # a file newer than the service is refused
 [board]
 id = "example"                 # the name the service gives itself to clients
 
+# `[host]`: how the host treats every driver. Each key may be left out; these are the defaults.
+[host]
+call_deadline_ms = 2000        # how long one driver call may run: 1 to 60000
+retry_first_ms = 1000          # the first wait before a failed device is bound again
+retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
+
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 [[devices]]
 id = "power0"
@@ -51,10 +57,13 @@ driver = "ws2812"
 bus = "spidev0.0"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
+# `auto_off_after`: this device alone opts in to being turned off after 5 failed binds in a
+# row. Every other device is retried forever.
 [[devices]]
 id = "bench"
 driver = "raw-bus"
 uses = { i2c = "i2c-1", pwm = "pwmchip0:1" }
+auto_off_after = 5
 
 # `owner = "host"`: the operating system's own driver has this hardware. Lemnos reads it and
 # changes nothing.

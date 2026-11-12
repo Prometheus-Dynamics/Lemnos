@@ -385,7 +385,7 @@ impl Inner {
                     .clock
                     .now_ns()
                     .saturating_sub(slot.bound_ns.load(Ordering::Acquire));
-                if u128::from(ran) < self.options.retry_cap.as_nanos() {
+                if u128::from(ran) < self.options.cap().as_nanos() {
                     slot.short_runs.fetch_add(1, Ordering::AcqRel)
                 } else {
                     slot.short_runs.store(0, Ordering::Release);
@@ -393,7 +393,7 @@ impl Inner {
                 }
             }
         };
-        *state = self.next_state(attempts, reason);
+        *state = self.next_state(slot, attempts, reason);
         self.changes.fetch_add(1, Ordering::Release);
     }
 
@@ -469,15 +469,18 @@ impl Inner {
         }
     }
 
-    fn next_state(&self, attempts: u32, reason: &str) -> DeviceState {
-        if let Some(policy) = self.options.auto_off
-            && attempts + 1 >= policy.after_attempts
+    /// Where a device goes after failed attempt number `attempts + 1` in a row: back to waiting,
+    /// or off when its board entry opted in to that (`auto_off_after`) and this was the last
+    /// attempt it allows. No host-wide setting turns a device off.
+    fn next_state(&self, slot: &Slot, attempts: u32, reason: &str) -> DeviceState {
+        if let Some(after) = slot.spec.auto_off_after
+            && attempts.saturating_add(1) >= after
         {
             return DeviceState::Off(OffReason::Policy);
         }
         let wait = self.options.backoff(attempts).as_nanos() as u64;
         DeviceState::Backoff {
-            attempts: attempts + 1,
+            attempts: attempts.saturating_add(1),
             next_retry_ns: self.clock.now_ns() + wait,
             reason: reason.to_string(),
         }
@@ -799,7 +802,7 @@ impl Inner {
             DeviceState::Backoff { attempts, .. } => *attempts,
             DeviceState::Running => 0,
         };
-        *state = self.next_state(attempts, reason);
+        *state = self.next_state(slot, attempts, reason);
         self.changes.fetch_add(1, Ordering::Release);
     }
 
@@ -1061,6 +1064,9 @@ fn bind_order(devices: &[DeviceSpec]) -> core::result::Result<Vec<usize>, HostEr
 impl Host {
     /// Starts every device. A device that can't start is left retrying, and
     /// never stops the others; only a board that can't be ordered is refused.
+    ///
+    /// What the board file's `[host]` section sets wins over `options`; what it leaves out is
+    /// taken from `options` ([`HostSpec::apply`](crate::board::HostSpec::apply)).
     pub fn start(
         board: &BoardFile,
         drivers: &[DriverEntry],
@@ -1087,6 +1093,7 @@ impl Host {
         options: Options,
         allocator: Arc<dyn StreamAllocator>,
     ) -> core::result::Result<Self, HostError> {
+        let options = board.host.apply(options);
         let order = bind_order(&board.devices)?;
         let table: BTreeMap<_, _> = drivers
             .iter()
@@ -1404,6 +1411,13 @@ impl Host {
                     .slot_by_id(id)
                     .is_some_and(|child| child.is_running())
         })
+    }
+
+    /// How this host treats its drivers: what it was started with, and the board file's
+    /// `[host]` section over that.
+    #[must_use]
+    pub fn options(&self) -> Options {
+        self.inner.options
     }
 
     /// When the next retry is due, if one is waiting.
