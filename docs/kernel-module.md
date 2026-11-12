@@ -23,8 +23,9 @@ Through one node, `/dev/lemnos`, with one opener at a time:
 - **One event stream**: interrupts, blocks bound and unbound, supply faults, temperature limits.
 - **Frame streams** with the module as the producer, for blocks whose DMA must be checked in the
   kernel. Every address a job names is checked against memory the module has pinned.
-- **Three blocks driven inside the module**, because their DMA cannot be left to user space: the
-  CSI-2 receiver and both halves of the ISP on the BCM2712 with RP1.
+- **Four blocks driven inside the module**, because their DMA cannot be left to user space: the
+  CSI-2 receiver and both halves of the ISP on the BCM2712 with RP1, and the K230's graphics DMA
+  engine, which takes bus addresses with no MMU in front of it.
 - **PIO state machines** on the RP1, through a table of allowed operations.
 
 ## What the daemon uses today
@@ -44,8 +45,8 @@ and everything else stays on the stock path:
 | `irq:BLOCK/N` | Only through the module |
 | `clocks:BLOCK/NAME,...`, `resets:BLOCK/NAME,...` | Only through the module |
 
-The receiver and ISP drivers (`rp1-csi2`, `pisp-be`, `pisp-fe`) open the module's nodes
-themselves.
+The receiver and ISP drivers (`rp1-csi2`, `pisp-be`, `pisp-fe`) and the graphics DMA library
+(`k230-gsdma`) open the module's nodes themselves.
 
 Interrupts reach the backend on the module's one event stream, which it reads for every interrupt
 a process holds and files each event under its own. Supplies, thermal watches and PIO are complete
@@ -102,6 +103,7 @@ Other parameters:
 |---|---|
 | `confined` | Compatibles whose IOMMU really confines their DMA. Only their registers can be mapped |
 | `pisp_be` | Compatibles driven as the ISP back end. Must also be in `owned` |
+| `gsdma` | Compatibles driven as the graphics DMA engine. Must also be in `owned` |
 | `bus_buffer` | The largest I2C or SPI transfer, in bytes each way. 4096 by default |
 
 The parameters whose names start with `test_` are for the QEMU harness. Leave them unset.

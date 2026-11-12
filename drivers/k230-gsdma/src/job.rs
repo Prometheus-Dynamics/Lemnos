@@ -352,6 +352,8 @@ pub struct Plan {
     format: Format,
     rotation: Rotation,
     planes: usize,
+    /// The source frame's width and height in pixels.
+    frame: (u32, u32),
     /// Per plane: the source plane's width and height in elements.
     size: [(u16, u16); MAX_PLANES],
     source: [Span; MAX_PLANES],
@@ -391,6 +393,12 @@ impl Plan {
     #[must_use]
     pub fn rotation(&self) -> Rotation {
         self.rotation
+    }
+
+    /// The source frame's width and height in pixels.
+    #[must_use]
+    pub fn frame_size(&self) -> (u32, u32) {
+        self.frame
     }
 
     /// The planes.
@@ -554,6 +562,7 @@ pub(crate) fn plan(
         format,
         rotation: job.rotation,
         planes: format.planes(),
+        frame: (src.width, src.height),
         size: [(0, 0); MAX_PLANES],
         source: [NO_SPAN; MAX_PLANES],
         destination: [NO_SPAN; MAX_PLANES],
