@@ -35,7 +35,25 @@ from the bundle's manifest, and the slot's kernel command line carries it:
 A bundle is a tar holding:
 
 - `slot.json`, the manifest (below).
-- `slot.sig`, optional. It is an Ed25519 signature over the manifest's exact bytes.
+- `slot.sig`, optional. When present it is the shared signature record (`lemnos_slot_store::signing`,
+  the same container first flash uses), exactly 108 bytes:
+
+  | offset | bytes | content |
+  |---|---|---|
+  | 0 | 8 | `LMNSSIG1` |
+  | 8 | 1 | algorithm: `1` (Ed25519) |
+  | 9 | 3 | zero |
+  | 12 | 32 | key id: SHA-256 of the signing key's 32-byte public key |
+  | 44 | 64 | Ed25519 signature over the signed message |
+
+  The signed message is the manifest's exact bytes (`slot.json` as it is in the bundle): no domain
+  tag, no added fields. Vector: the test key is the 32-byte seed of `0x07` repeated (public key
+  `ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c`, key id
+  `fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889`). The test
+  `the_signature_member_is_the_shared_record_and_names_the_key_by_its_id` builds this record for a
+  bundle and checks its header, key id and signature.
+
+  A bare 64-byte signature (the first version's form) is malformed: refused, `INVALID_ARGUMENT`.
 - `rootfs.erofs`, the image with its dm-verity hash tree appended.
 - `boot/`, the slot's boot files.
 
@@ -150,6 +168,32 @@ the board boots.
 - **The image's superblock** sits inside the image. It is covered by `image.sha256` at install,
   but nothing checks it at boot, so nothing at boot relies on it.
 
+### Where the switch comes from, and the rules that keep a board up
+
+`require_signed` is a setting of the `system-slots` device in the base image's board file (its
+`config` table; `docs/boards.md`). The driver reads it when the daemon starts, and writes it for the
+boot side as a marker, `require-signed`, in the state directory on the data partition. Switching it
+on means editing the board file and restarting the daemon. Nothing in a slot image carries it.
+The first-flash driver has its own `require_signed` in its board-file entry, so the two can differ
+today; unifying the source is a follow-up (see the status note below).
+
+The rules, so that a board always comes up:
+
+- With the switch on, a slot whose signature did not verify is never set as the default nor tried
+  (`set_default` and `trial` refuse it, naming it in `list`'s `error`).
+- At start, if the switch is on and the default slot did not verify, the driver says so in `list`'s
+  `error` (naming the default and what to install) and in `info` (`default_signature`). It keeps
+  running; it does not refuse to start.
+- At boot, an unverified trial is refused and the default starts instead, as for any failed trial.
+- At boot, an unverified default always starts: the boot side never refuses the default. The start
+  is recorded in `board/slots/boot-unverified` (the slot's id), which `info` shows as
+  `boot_unverified`. A verified boot removes the record.
+
+What is open: the switch is read through one function (`signing::security_on`) and written through
+one (`signing::set_security`), so moving its source later is a change in one place. Orion has its
+own security switch (`security`, read by its node's keys service; the Lemnos bridge does not read
+it), and the two are not yet one setting. That is a follow-up.
+
 ### What this protects, and what it doesn't
 
 The root hash on the kernel command line is only as trustworthy as the boot partition that holds
@@ -159,15 +203,46 @@ unless the SoC's secure boot verifies the boot partition. When `require_signed` 
 signature on `slot.json` protects what gets installed, not what boots.
 
 Signing is a board setting. The `keys` file lists the keys the board trusts, one per line: 64 hex
-digits, a space, then the key's owner. A signature that is present is always checked. `list`
-shows each slot as one of these:
+digits, a space, then the key's owner. The record's key id is matched against those keys (the same
+key id, SHA-256 of the public key, as first flash uses); a signature is checked against that key
+when the board holds it. The policy is the table below. It is the same table first
+flash applies (`lemnos_slot_store::signing`), and the outcome words are the same.
 
-- `"signed":"trusted"`, with the key's owner as `"signer"`;
-- `"untrusted"`;
-- `"unsigned"`.
+| `require_signed` | bundle | key | result | `signature` in `list` |
+|---|---|---|---|---|
+| off | unsigned | – | installs | `not_checked_unsigned` |
+| off | signed | the board's key, verifies | installs | `verified` |
+| off | signed | the board's key, does not verify | refused, before anything is written | (none) |
+| off | signed | unknown key, or no key list | installs | `not_checked_unknown_key` |
+| on | unsigned | – | refused | (none) |
+| on | signed | unknown key or no key list | refused | (none) |
+| on | signed | known key, bad signature | refused | (none) |
+| on | signed | known key, verifies | installs | `verified` |
 
-With `require_signed = true`, only bundles signed by a trusted key install. The setting is off by
-default.
+In every row, a malformed signature (a `slot.sig` that is not a 108-byte record: wrong length, magic,
+algorithm or padding) is refused as an invalid argument. A
+refusal is `NOT_PERMITTED` with the reason in `list`'s `error`, and nothing is installed.
+
+`list` shows each slot as before, and adds one field at the end of the slot:
+
+- `"signed"`: `trusted` (with the key's owner as `"signer"`), `untrusted` or `unsigned`. These are
+  unchanged; `trusted` is `verified`, `untrusted` is `not_checked_unknown_key`, `unsigned` is
+  `not_checked_unsigned`.
+- `"signature"`: `verified`, `not_checked_unknown_key` or `not_checked_unsigned`. A slot installed
+  before this field existed reads it from its `signed` label: `untrusted` there is
+  `not_checked_unknown_key`, though that install may have been a bad signature under a known key
+  (the record kept no key id), so the label cannot say more.
+
+`info` shows the policy and the last install's signature result: `require_signed`, and
+`last_install` with `slot` (empty when refused), `signature` (the outcome, or `refused`), `signer`
+and `reason`. The install's job result is still the slot's id.
+
+With `require_signed = true`, a slot whose signature did not verify is never set as the default
+nor tried. The boot side enforces the same: the driver keeps a marker, `require-signed`, in the
+state directory while the setting is on, and the boot program does not start a slot whose
+signature did not verify. It falls back to another slot, as for any failed start, and the slot's
+failure names the signature. So a slot installed with signing off stays installed, but it is not
+bootable once signing is required.
 
 ## Two ways to send a bundle
 
@@ -208,6 +283,7 @@ Tested against a real Orion node and comm core on a PC, in-process
 | --- | --- |
 | `list` | Every slot (with its `product`, `version` and `board`), the pointers, free space, the reserve, the number kept, the last error |
 | `list_page(after, size)` | The same object with one page of the slots: as many whole slots as fit the buffer, newest first, then `more` and `next`. `after` is `-` for the first page and the previous page's `next` after it (see below) |
+| `info` | The signature policy (`require_signed`) and the last install's signature result |
 | `install`, `write` | A streamed install (a long job) |
 | `accept`, `install_file` | An install from a file in `.incoming` (a long job) |
 | `set_default(id, force)` | The default from the next boot. The slot must have booted well, unless `force` |

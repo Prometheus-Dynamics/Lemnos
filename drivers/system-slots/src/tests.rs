@@ -142,6 +142,10 @@ struct Bundle {
     manifest_image_sha: Option<String>,
     signer: SigningKey,
     sign: bool,
+    /// The key the record names, when not the signer.
+    named: Option<SigningKey>,
+    /// What `slot.sig` holds instead of the record, when set.
+    sig_file: Option<Vec<u8>>,
 }
 
 /// The board the test boards are.
@@ -171,6 +175,8 @@ impl Bundle {
             manifest_image_sha: None,
             signer: key(),
             sign: true,
+            named: None,
+            sig_file: None,
         }
     }
 
@@ -201,13 +207,26 @@ impl Bundle {
         self.pack_with(&self.manifest())
     }
 
+    /// The signature record this bundle's manifest gets: the named key's id and the signature.
+    fn pack_record(&self) -> Vec<u8> {
+        let manifest = self.manifest();
+        let signature = self.signer.sign(manifest.as_bytes()).to_bytes();
+        let named = self.named.as_ref().unwrap_or(&self.signer);
+        let key_id: [u8; 32] = Sha256::digest(named.verifying_key().as_bytes()).into();
+        lemnos_slot_store::signing::record_bytes(&key_id, &signature)
+    }
+
     /// The bundle with `manifest` as its slot.json, signed as it is.
     fn pack_with(&self, manifest: &str) -> Vec<u8> {
         let manifest = manifest.to_string();
         let signature = self.signer.sign(manifest.as_bytes()).to_bytes();
         let mut files: Vec<(String, Vec<u8>)> = vec![("slot.json".into(), manifest.into_bytes())];
         if self.sign {
-            files.push(("slot.sig".into(), signature.to_vec()));
+            let named = self.named.as_ref().unwrap_or(&self.signer);
+            let key_id = Sha256::digest(named.verifying_key().as_bytes()).into();
+            let record = lemnos_slot_store::signing::record_bytes(&key_id, &signature);
+            let sig = self.sig_file.clone().unwrap_or(record);
+            files.push(("slot.sig".into(), sig));
         }
         files.push(("rootfs.erofs".into(), self.image.clone()));
         files.push(("boot/".into(), Vec::new()));
@@ -460,7 +479,7 @@ fn with_require_signed_a_bundle_not_signed_by_a_trusted_key_is_refused_and_leave
     assert!(!board.work_left());
     let state = board.state();
     assert_eq!(state.state, "error");
-    assert!(state.error.contains("slot.sig"), "{}", state.error);
+    assert!(state.error.contains("not signed"), "{}", state.error);
 }
 
 #[test]
@@ -822,6 +841,267 @@ fn without_require_signed_any_bundle_installs_and_the_list_says_how_it_was_signe
     torn[at + 124..at + 135].copy_from_slice(b"00000000077");
     let (status, _, _) = board.stream(1, &torn, 4096);
     assert_eq!(status, Status::INVALID_ARGUMENT);
+}
+
+/// The `signed` and `signature` words `list` gives a slot.
+fn listed(board: &mut Board, id: &str) -> (String, String) {
+    let mut out = vec![0u8; 64 * 1024];
+    let len = board.slots.list(&mut out).unwrap();
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    let Some(Json::List(slots)) = json.get("slots") else {
+        panic!("no slots")
+    };
+    let slot = slots
+        .iter()
+        .find(|slot| slot.get("id").and_then(Json::text) == Some(id))
+        .unwrap_or_else(|| panic!("{id} is not listed"));
+    let word = |key: &str| slot.get(key).and_then(Json::text).unwrap().to_string();
+    (word("signed"), word("signature"))
+}
+
+/// What `info` says about the last install, as the JSON's `last_install` fields.
+fn last_install(board: &mut Board) -> (String, String, String) {
+    let mut out = vec![0u8; 4096];
+    let len = board.slots.info(&mut out).unwrap();
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    let last = json.get("last_install").expect("last_install");
+    let word = |key: &str| last.get(key).and_then(Json::text).unwrap().to_string();
+    (word("slot"), word("signature"), word("reason"))
+}
+
+/// The signature policy on the install path, row by row. Each accepted bundle is checked for
+/// what `list` and `info` say; each refused one for its status, the reason, and that nothing is
+/// installed or left behind.
+#[test]
+fn the_policy_with_require_signed_off_accepts_every_row_and_says_how_it_was_checked() {
+    let mut board = Board::new("os-1");
+    let mut unsigned = Bundle::new("os-2");
+    unsigned.sign = false;
+    let (status, _, _) = board.stream(1, &unsigned.pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(
+        listed(&mut board, "os-2"),
+        ("unsigned".into(), "not_checked_unsigned".into())
+    );
+
+    let (status, _, _) = board.stream(1, &Bundle::new("os-3").pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(
+        listed(&mut board, "os-3"),
+        ("trusted".into(), "verified".into())
+    );
+    assert_eq!(
+        last_install(&mut board),
+        (
+            "os-3".into(),
+            "verified".into(),
+            "signature verified with a key on this board's list (the build key)".into()
+        )
+    );
+
+    let mut unknown = Bundle::new("os-4");
+    unknown.signer = SigningKey::from_bytes(&[9; 32]);
+    let (status, _, _) = board.stream(1, &unknown.pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(
+        listed(&mut board, "os-4"),
+        ("untrusted".into(), "not_checked_unknown_key".into())
+    );
+    assert_eq!(last_install(&mut board).1, "not_checked_unknown_key");
+
+    // A board with no key list at all: every key is unknown, so the same bundle is not checked.
+    board.slots.keys.clear();
+    let (status, _, _) = board.stream(1, &Bundle::new("os-5").pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(
+        listed(&mut board, "os-5"),
+        ("untrusted".into(), "not_checked_unknown_key".into())
+    );
+}
+
+#[test]
+fn with_require_signed_off_a_bad_signature_under_a_known_key_is_refused_before_anything_is_installed()
+ {
+    let mut board = Board::new("os-1");
+    let mut forged = Bundle::new("os-6");
+    // Named as the build key, signed by another key: the record is corrupted or forged.
+    forged.signer = SigningKey::from_bytes(&[9; 32]);
+    forged.named = Some(key());
+    let (status, _, _) = board.stream(1, &forged.pack(), 4096);
+    assert_eq!(status, Status::NOT_PERMITTED, "{}", board.state().error);
+    assert!(
+        board.state().error.contains("does not verify"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.layout().installed("os-6"));
+    assert!(!board.work_left());
+    let (slot, signature, _) = last_install(&mut board);
+    assert_eq!((slot.as_str(), signature.as_str()), ("", "refused"));
+}
+
+#[test]
+fn with_require_signed_on_the_table_refuses_three_rows_and_takes_a_verified_bundle() {
+    let mut board = Board::new("os-1");
+    board.slots.require_signed = true;
+    let mut unsigned = Bundle::new("os-2");
+    unsigned.sign = false;
+    let (status, _, _) = board.stream(1, &unsigned.pack(), 4096);
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert!(
+        board.state().error.contains("not signed"),
+        "{}",
+        board.state().error
+    );
+
+    let mut unknown = Bundle::new("os-3");
+    unknown.signer = SigningKey::from_bytes(&[9; 32]);
+    let (status, _, _) = board.stream(1, &unknown.pack(), 4096);
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert!(
+        board.state().error.contains("does not trust"),
+        "{}",
+        board.state().error
+    );
+
+    let mut forged = Bundle::new("os-4");
+    forged.signer = SigningKey::from_bytes(&[9; 32]);
+    forged.named = Some(key());
+    let (status, _, _) = board.stream(1, &forged.pack(), 4096);
+    assert_eq!(status, Status::NOT_PERMITTED);
+    assert!(
+        board.state().error.contains("does not verify"),
+        "{}",
+        board.state().error
+    );
+
+    for id in ["os-2", "os-3", "os-4"] {
+        assert!(!board.layout().installed(id), "{id} was installed");
+    }
+    assert!(!board.work_left());
+
+    let (status, _, _) = board.stream(1, &Bundle::new("os-5").pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    assert_eq!(
+        listed(&mut board, "os-5"),
+        ("trusted".into(), "verified".into())
+    );
+}
+
+#[test]
+fn a_board_with_require_signed_on_and_no_key_list_refuses_every_bundle() {
+    let mut board = Board::new("os-1");
+    board.slots.require_signed = true;
+    board.slots.keys.clear();
+    // Refused when the install starts: no job, nothing staged.
+    assert_eq!(
+        board.slots.install(10, false, false),
+        Err(Status::NOT_PERMITTED)
+    );
+    assert!(!board.layout().installed("os-2"));
+}
+
+/// A malformed signature is refused in every row, whatever `require_signed` says: as an invalid
+/// argument, with nothing installed. A bare 64-byte signature, the first version's form, is one.
+#[test]
+fn a_malformed_signature_is_refused_in_every_row() {
+    let record = |f: fn(&mut Vec<u8>)| {
+        let mut bytes = Bundle::new("os-2").pack_record();
+        f(&mut bytes);
+        bytes
+    };
+    let malformed: Vec<(&str, Bundle)> = vec![
+        ("a bare 64-byte signature", {
+            let mut b = Bundle::new("os-2");
+            b.sig_file = Some(key().sign(b"x").to_bytes().to_vec());
+            b
+        }),
+        ("a record of 107 bytes", {
+            let mut b = Bundle::new("os-2");
+            b.sig_file = Some(record(|r| r.truncate(107)));
+            b
+        }),
+        ("a record with another magic", {
+            let mut b = Bundle::new("os-2");
+            b.sig_file = Some(record(|r| r[0] = b'X'));
+            b
+        }),
+        ("a record with another algorithm", {
+            let mut b = Bundle::new("os-2");
+            b.sig_file = Some(record(|r| r[8] = 2));
+            b
+        }),
+        ("a record with nonzero padding", {
+            let mut b = Bundle::new("os-2");
+            b.sig_file = Some(record(|r| r[10] = 1));
+            b
+        }),
+        ("an empty slot.sig", {
+            let mut b = Bundle::new("os-2");
+            b.sig_file = Some(Vec::new());
+            b
+        }),
+    ];
+    for require in [false, true] {
+        for (what, bundle) in &malformed {
+            let mut board = Board::new("os-1");
+            board.slots.require_signed = require;
+            let (status, _, _) = board.stream(1, &bundle.pack(), 4096);
+            assert_eq!(
+                status,
+                Status::INVALID_ARGUMENT,
+                "{what}, require_signed {require}"
+            );
+            assert!(
+                !board.layout().installed("os-2"),
+                "{what}, require_signed {require}"
+            );
+            assert!(!board.work_left(), "{what}, require_signed {require}");
+        }
+    }
+}
+
+/// A slot installed before the outcome words existed has only its `SIGNED` label; `list` reads
+/// it as before, and `signature` says what that label means.
+#[test]
+fn a_slot_recorded_under_the_old_labels_is_listed_as_before() {
+    let mut board = Board::new("os-1");
+    let mut untrusted = Bundle::new("os-2");
+    untrusted.signer = SigningKey::from_bytes(&[9; 32]);
+    let (status, _, _) = board.stream(1, &untrusted.pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    let mut meta = board.meta("os-2");
+    meta.set("SIGNATURE", "");
+    meta.save(board.layout(), "os-2").unwrap();
+    assert_eq!(
+        listed(&mut board, "os-2"),
+        ("untrusted".into(), "not_checked_unknown_key".into())
+    );
+}
+
+/// With `require_signed` on, a slot whose signature did not verify is never set as the default
+/// nor tried, even though it was installed while signing was off.
+#[test]
+fn a_slot_whose_signature_did_not_verify_is_not_tried_once_signing_is_required() {
+    let mut board = Board::new("os-1");
+    let mut unknown = Bundle::new("os-2");
+    unknown.signer = SigningKey::from_bytes(&[9; 32]);
+    let (status, _, _) = board.stream(1, &unknown.pack(), 4096);
+    assert_eq!(status, Status::OK, "{}", board.state().error);
+    board.slots.require_signed = true;
+    assert_eq!(
+        board.slots.trial("os-2", false, false, false),
+        Err(Status::NOT_PERMITTED)
+    );
+    assert!(
+        board.state().error.contains("not signed by a key"),
+        "{}",
+        board.state().error
+    );
+    assert_eq!(
+        board.slots.set_default("os-2", false),
+        Err(Status::NOT_PERMITTED)
+    );
 }
 
 /// No forced backup: the previous slot may be removed, and a board then runs one slot; a
@@ -2389,7 +2669,7 @@ fn walk(board: &mut Board, cap: usize) -> (Vec<String>, usize) {
 }
 
 /// The unpaged `list`'s slot ids, newest first.
-fn listed(board: &Board) -> Vec<String> {
+fn listed_ids(board: &Board) -> Vec<String> {
     let json = Json::parse(&board.list()).unwrap();
     let Some(Json::List(slots)) = json.get("slots") else {
         panic!("no slots")
@@ -2407,7 +2687,7 @@ fn the_paged_list_walks_every_slot_once_in_the_order_of_the_list() {
     for n in 2..=9 {
         board.install_ok(&format!("os-{n}"));
     }
-    let all = listed(&board);
+    let all = listed_ids(&board);
     assert_eq!(all.len(), 9);
     // A page of about two slots, so the walk takes several.
     let (ids, pages) = walk(&mut board, 1100);
@@ -2427,7 +2707,7 @@ fn a_slot_installed_between_pages_is_neither_lost_nor_repeated() {
     for n in 2..=9 {
         board.install_ok(&format!("os-{n}"));
     }
-    let before = listed(&board);
+    let before = listed_ids(&board);
     let (first, more, next) = page(&mut board, "-", 1100).unwrap();
     assert!(more);
     // Installed between the first and the second page: it is the newest, so it is not on a later
@@ -2447,7 +2727,7 @@ fn a_slot_installed_between_pages_is_neither_lost_nor_repeated() {
     seen.extend(rest);
     assert_eq!(seen, before, "every slot that existed once, in order");
     assert!(!seen.contains(&"os-10".to_string()));
-    assert_eq!(listed(&board).len(), 10);
+    assert_eq!(listed_ids(&board).len(), 10);
     // A walk that starts again sees the new slot first.
     let (again, _) = walk(&mut board, 1100);
     assert_eq!(again[0], "os-10");
@@ -2470,4 +2750,60 @@ fn a_bad_cursor_is_refused_and_a_buffer_too_small_for_a_slot_is_too_small() {
     assert!(ids.is_empty());
     assert!(!more);
     assert_eq!(next, "");
+}
+
+/// The signature member of a signed bundle is the shared 108-byte record: magic, algorithm 1,
+/// zeros, the SHA-256 of the signing public key, then the signature over the manifest's bytes.
+#[test]
+fn the_signature_member_is_the_shared_record_and_names_the_key_by_its_id() {
+    let bundle = Bundle::new("os-2");
+    let record = bundle.pack_record();
+    assert_eq!(record.len(), 108);
+    assert_eq!(&record[..8], b"LMNSSIG1");
+    assert_eq!(record[8], 1);
+    assert_eq!(&record[9..12], &[0, 0, 0]);
+    // The W1 test key (the seed is the byte 0x07 repeated 32 times): its key id.
+    assert_eq!(
+        hex(&record[12..44]),
+        "fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889"
+    );
+    let parsed = lemnos_slot_store::signing::parse_record(&record).unwrap();
+    let signature = ed25519_dalek::Signature::from_bytes(&parsed.signature);
+    assert!(
+        key()
+            .verifying_key()
+            .verify_strict(bundle.manifest().as_bytes(), &signature)
+            .is_ok(),
+        "the signed message is the slot.json bytes"
+    );
+}
+
+/// With signing required and the default slot not verified, the start says so: the state's error
+/// names the default and what to install, `info` shows its signature, and the driver keeps running.
+#[test]
+fn with_require_signed_an_unverified_default_is_reported_and_the_driver_keeps_running() {
+    let mut board = Board::new("os-1");
+    let mut state = board.state();
+    state.default = "os-1".into();
+    state.save(board.layout()).unwrap();
+    // The default was installed under an unknown key, which the record says.
+    let mut meta = board.meta("os-1");
+    meta.set("SIGNATURE", "not_checked_unknown_key");
+    meta.set("SIGNED", "untrusted");
+    meta.save(board.layout(), "os-1").unwrap();
+    board.slots.require_signed = true;
+    board.slots.report_policy();
+    let error = board.state().error;
+    assert!(error.contains("default slot os-1"), "{error}");
+    assert!(error.contains("install a verified slot"), "{error}");
+    let mut out = vec![0u8; 4096];
+    let len = board.slots.info(&mut out).unwrap();
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    assert_eq!(
+        json.get("default_signature").and_then(Json::text),
+        Some("not_checked_unknown_key")
+    );
+    // The board still answers its calls.
+    let mut list = vec![0u8; 64 * 1024];
+    assert!(board.slots.list(&mut list).is_ok());
 }

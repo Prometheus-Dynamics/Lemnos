@@ -29,6 +29,9 @@ pub struct Candidate {
     pub failed: bool,
     /// Its boot files are on the boot partition, so the boot loader can start it.
     pub resident: bool,
+    /// The board may start it under its signature policy: always, unless the board requires
+    /// signing and the slot's signature did not verify.
+    pub signed: bool,
     /// Its install order: higher is newer.
     pub seq: u64,
 }
@@ -78,7 +81,7 @@ pub fn after_failure(failure: &Failure<'_>) -> Next {
 
 /// The best slot to fall back to (rule 3), if any.
 pub fn pick(failure: &Failure<'_>) -> Option<String> {
-    let usable = |c: &&Candidate| c.resident && c.id != failure.slot;
+    let usable = |c: &&Candidate| c.resident && c.signed && c.id != failure.slot;
     let previous = failure
         .slots
         .iter()
@@ -156,6 +159,7 @@ mod tests {
             good: true,
             failed: false,
             resident: true,
+            signed: true,
             seq,
         }
     }
@@ -168,6 +172,22 @@ mod tests {
             fallbacks: 0,
             slots,
         }
+    }
+
+    /// The board requires signing and this slot did not verify: the boot side never falls back to it.
+    #[test]
+    fn a_slot_the_signature_policy_refuses_is_never_the_fallback() {
+        let mut unsigned = slot("os-1", 1);
+        unsigned.signed = false;
+        let slots = vec![slot("os-2", 2), unsigned];
+        let fail = failure("os-3", "", &slots);
+        assert_eq!(pick(&fail).as_deref(), Some("os-2"));
+        let only_unsigned = [{
+            let mut c = slot("os-1", 1);
+            c.signed = false;
+            c
+        }];
+        assert_eq!(pick(&failure("os-3", "", &only_unsigned)), None);
     }
 
     #[test]

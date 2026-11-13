@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use lemnos_core::{CallerId, JobId, Status};
+use lemnos_slot_store::signing::RECORD_LEN;
+use lemnos_slot_store::signing::{self, Check, Outcome, Refusal};
 use sha2::{Digest, Sha256};
 
 use crate::boot::{self, hex};
@@ -19,8 +21,9 @@ use lemnos_slot_store::ubi::{self, UbiWrite};
 
 /// The largest manifest taken.
 const MAX_MANIFEST: u64 = 64 * 1024;
-/// An Ed25519 signature's length.
-pub const SIGNATURE_LEN: usize = 64;
+/// The length of a bundle's `slot.sig`: the shared signature record (`lemnos_slot_store::signing`),
+/// 108 bytes. The bare 64-byte signature of the first version is no longer accepted.
+pub const SIGNATURE_LEN: usize = RECORD_LEN;
 /// No space left on the device.
 pub const NO_SPACE: Status = Status::from_errno(28);
 /// What an install is called in its work directory's name.
@@ -45,26 +48,6 @@ pub struct TrustedKey {
     pub key: VerifyingKey,
     /// Who holds the private half, as the key file names them.
     pub owner: String,
-}
-
-/// How a slot's manifest was signed: by a key the board trusts (and whose), by another key, or
-/// not at all.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Signed {
-    Trusted(String),
-    Untrusted,
-    Unsigned,
-}
-
-impl Signed {
-    /// The word `list` and the slot's state show.
-    pub fn word(&self) -> &'static str {
-        match self {
-            Self::Trusted(_) => "trusted",
-            Self::Untrusted => "untrusted",
-            Self::Unsigned => "unsigned",
-        }
-    }
 }
 
 /// The keys the board trusts: one per line, 64 hex digits, a space, then the key's owner (any
@@ -204,9 +187,9 @@ impl Sink for Unpack {
             (Member::Manifest, _) if size > MAX_MANIFEST => {
                 self.fail(bad("slot.json is too large"))
             }
-            (Member::Signature, _) if size != SIGNATURE_LEN as u64 => {
-                self.fail(bad("slot.sig is not one Ed25519 signature"))
-            }
+            (Member::Signature, _) if size != SIGNATURE_LEN as u64 => self.fail(bad(
+                "slot.sig is not a signature record: 108 bytes, the magic LMNSSIG1, algorithm 1 (a bare 64-byte signature is refused)",
+            )),
             (Member::Manifest | Member::Signature, _) => {
                 self.current = Some((what, None));
                 Ok(())
@@ -311,6 +294,35 @@ impl Sink for Unpack {
     }
 }
 
+/// What `slot.sig` shows, as the shared policy takes it: the signature record names its key by
+/// id (SHA-256 of the public key). A key the board holds is checked; any other is unknown. The
+/// signed message is the manifest's exact bytes.
+fn signature_check<'a>(keys: &'a [TrustedKey], manifest: &[u8], signature: &[u8]) -> Check<'a> {
+    if signature.is_empty() {
+        return Check::Unsigned;
+    }
+    let record = match signing::parse_record(signature) {
+        Ok(record) => record,
+        Err(why) => return Check::Malformed(format!("slot.sig: {why}")),
+    };
+    let Some(trusted) = keys
+        .iter()
+        .find(|t| signing::key_id(t.key.as_bytes()) == record.key_id)
+    else {
+        return Check::UnknownKey;
+    };
+    let signature = Signature::from_bytes(&record.signature);
+    if trusted.key.verify_strict(manifest, &signature).is_ok() {
+        Check::Verified {
+            owner: &trusted.owner,
+        }
+    } else {
+        Check::BadSignature {
+            owner: &trusted.owner,
+        }
+    }
+}
+
 /// What finishing needs from the board.
 pub struct Finish<'a> {
     pub layout: &'a Layout,
@@ -341,6 +353,9 @@ pub struct Install {
     unpack: Unpack,
     /// How it ended: the slot's id, or why not.
     pub end: Option<Result<String, Failure>>,
+    /// The signature policy's result for this bundle, once `finish` reached it: the outcome, or
+    /// the refusal's text.
+    pub signed: Option<Result<Outcome, String>>,
     /// The bundle's file in `.incoming`, for an install from a file: read on the driver's ticks,
     /// and deleted when the install ends.
     pub source: Option<Source>,
@@ -475,6 +490,7 @@ impl Install {
                 failure: None,
             },
             end: None,
+            signed: None,
             source: None,
         })
     }
@@ -508,48 +524,22 @@ impl Install {
         if !self.tar.finished() {
             return Err(bad("the bundle ends in the middle"));
         }
-        let unpack = &self.unpack;
-        if unpack.manifest.is_empty() {
+        if self.unpack.manifest.is_empty() {
             return Err(bad("not a slot bundle: no slot.json"));
         }
-        // A signature that is there is always checked, and what it showed is recorded.
-        let signed = if unpack.signature.len() == SIGNATURE_LEN {
-            let signature = Signature::from_bytes(
-                &<[u8; SIGNATURE_LEN]>::try_from(unpack.signature.as_slice())
-                    .map_err(|_| bad("slot.sig"))?,
-            );
-            board
-                .keys
-                .iter()
-                .find(|trusted| {
-                    trusted
-                        .key
-                        .verify_strict(&unpack.manifest, &signature)
-                        .is_ok()
-                })
-                .map_or(Signed::Untrusted, |trusted| {
-                    Signed::Trusted(trusted.owner.clone())
-                })
-        } else {
-            Signed::Unsigned
-        };
-        if board.require_signed {
-            match signed {
-                Signed::Trusted(_) => {}
-                Signed::Untrusted => {
-                    return Err((
-                        Status::NOT_PERMITTED,
-                        "slot.json is not signed by a key this board trusts".into(),
-                    ));
-                }
-                Signed::Unsigned => {
-                    return Err((
-                        Status::NOT_PERMITTED,
-                        "the bundle is not signed (no slot.sig), and this board takes only signed ones".into(),
-                    ));
-                }
-            }
-        }
+        // The signature is decided before anything else is looked at, and before anything is
+        // written to the slot's place. The policy is the shared table in `lemnos_slot_store`.
+        let check = signature_check(board.keys, &self.unpack.manifest, &self.unpack.signature);
+        let decided = signing::decide(board.require_signed, "the bundle", check);
+        self.signed = Some(match &decided {
+            Ok(outcome) => Ok(outcome.clone()),
+            Err(refusal) => Err(refusal.to_string()),
+        });
+        let outcome = decided.map_err(|refusal| match refusal {
+            Refusal::Malformed(text) => bad(text),
+            Refusal::Policy(text) => (Status::NOT_PERMITTED, text),
+        })?;
+        let unpack = &self.unpack;
         // From here the manifest says what everything else must be.
         let text =
             core::str::from_utf8(&unpack.manifest).map_err(|_| bad("slot.json isn't text"))?;
@@ -673,14 +663,10 @@ impl Install {
         let mut meta = Meta::default();
         meta.set("PINNED", if self.pin { "yes" } else { "no" });
         meta.set("GOOD", "untried");
-        meta.set("SIGNED", signed.word());
-        meta.set(
-            "SIGNER",
-            match &signed {
-                Signed::Trusted(owner) => owner,
-                _ => "",
-            },
-        );
+        // `SIGNATURE` is the outcome word; `SIGNED` keeps the label older boards and readers use.
+        meta.set("SIGNATURE", outcome.word());
+        meta.set("SIGNED", outcome.legacy_word());
+        meta.set("SIGNER", outcome.signer());
         meta.set("INSTALLED", &crate::store::now_utc());
         let seq = crate::store::next_seq(layout).map_err(&io)?;
         meta.set("SEQ", &seq.to_string());

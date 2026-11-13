@@ -1955,6 +1955,7 @@ name = "lemnos-slot-store"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-linux-sys",
+ "sha2 0.10.9",
 ]
 
 [[package]]

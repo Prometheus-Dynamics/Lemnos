@@ -8,6 +8,7 @@
 //! - [`boots`]: the boot history, one line per boot.
 //! - [`json`]: the small JSON reader both use.
 //! - [`twocopy`]: two-copy records, written one sector at a time; [`bootfat`] places their files.
+//! - [`signing`]: the signature policy both signed installs apply (slot bundles and first flash).
 //!
 //! Plain `std`, so the initramfs program stays small; the `linux` feature adds the UBI ioctls.
 
@@ -20,6 +21,7 @@ pub mod firmware;
 pub mod json;
 pub mod manifest;
 pub mod records;
+pub mod signing;
 pub mod store;
 pub mod twocopy;
 pub mod ubi;

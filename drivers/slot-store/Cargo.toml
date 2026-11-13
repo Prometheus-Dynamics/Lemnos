@@ -15,5 +15,10 @@ workspace = true
 linux = ["dep:lemnos-linux-sys"]
 fake = []
 
+# The key id (SHA-256 of a public key) and nothing else of the signing code: verification is the
+# drivers' own (they hold ed25519), so slot-init, which never verifies, does not link it.
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }

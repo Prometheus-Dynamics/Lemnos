@@ -26,10 +26,16 @@
 //! - `systemctl`: the program that restarts the board, `"systemctl"` by default; it is run as
 //!   `systemctl reboot`, with `--reboot-argument=0 tryboot` for a trial.
 //! - `keys`: a file of the keys the board trusts, one per line: 64 hex digits, a space, and the
-//!   key's owner. A bundle's `slot.sig`, when it has one, is always checked against them, and
-//!   `list` shows each slot as `trusted` (with the owner as `signer`), `untrusted` or `unsigned`.
-//! - `require_signed`: `true` refuses every bundle not signed by a trusted key. Off by default:
-//!   such a bundle installs, and shows as `untrusted` or `unsigned`.
+//!   key's owner. A signed bundle's `slot.sig` is the 108-byte signature record, which names its
+//!   key by id; the signature is checked against that key when the board holds it. The policy for each case is
+//!   the table in [`lemnos_slot_store::signing`], shared with first flash. `list` shows each slot
+//!   as `trusted` (with the owner as `signer`), `untrusted` or `unsigned`, and its `signature`
+//!   word: `verified`, `not_checked_unknown_key` or `not_checked_unsigned`.
+//! - `require_signed`: `true` refuses every bundle the table refuses (unsigned, signed by a key
+//!   the board does not trust, or a bad signature). Off by default: an unsigned bundle or one
+//!   under an unknown key installs and is reported as not checked. With it on, a slot whose
+//!   signature did not verify is never set as the default nor tried, and the boot side does not
+//!   start it either (see `docs/slots.md`).
 //! - `boot_args`: the name the slot's initramfs reads its kernel arguments under: a slot's
 //!   command line gets `<boot_args>.slot=<id> <boot_args>.roothash=<hex>
 //!   <boot_args>.data=PARTUUID=<uuid> panic=5`. Required for an install.
@@ -89,9 +95,10 @@ use lemnos_core::{
 
 use boot::{BootRecord, FileRecord, Restarter, Tryboot};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
-pub use install::{SIGNATURE_LEN, Signed, TrustedKey, parse_keys};
+pub use install::{SIGNATURE_LEN, TrustedKey, parse_keys};
 use json::quoted;
 use lemnos_slot_store::boots;
+use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};
@@ -145,6 +152,9 @@ pub struct SystemSlots {
     boots_keep: usize,
     /// Where the board's reset reason is read from, when the board file names a file for it.
     reset_reason: Option<PathBuf>,
+    /// The last install's signature result, and the slot it made (`""` when it was refused):
+    /// `info` shows it.
+    last_signed: Option<(String, std::result::Result<Outcome, String>)>,
 }
 
 fn restarter(cfg: &Config<'_>) -> Restarter {
@@ -199,6 +209,7 @@ impl SystemSlots {
             snapshot_written: false,
             boots_keep: boots::DEFAULT_KEEP,
             reset_reason: None,
+            last_signed: None,
         };
         slots.clear_interrupted();
         // What a sender left in `.incoming` belongs to no install now.
@@ -316,6 +327,9 @@ impl SystemSlots {
         };
         match install.finish(&finish) {
             Ok(id) => {
+                if let Some(signed) = install.signed.clone() {
+                    self.last_signed = Some((id.clone(), signed));
+                }
                 self.mark_keep_old(&id, install.keep_old)?;
                 state.staged = id.clone();
                 state.state = "staged".into();
@@ -327,7 +341,12 @@ impl SystemSlots {
                 self.show("done", NO_PROGRESS);
                 Ok(())
             }
-            Err(failure) => Err(self.fail_install(install, failure)),
+            Err(failure) => {
+                if let Some(signed) = install.signed.clone() {
+                    self.last_signed = Some((String::new(), signed));
+                }
+                Err(self.fail_install(install, failure))
+            }
         }
     }
 
@@ -359,6 +378,24 @@ impl SystemSlots {
         };
         let _ = self.save(&state);
         Err(Status::NOT_SUPPORTED)
+    }
+
+    /// With `require_signed`, a slot may be set as the default or tried only when its signature
+    /// verified. The reason in the state when not.
+    fn fits_signature(&self, id: &str) -> Result<()> {
+        if !self.require_signed {
+            return Ok(());
+        }
+        let meta = Meta::load(&self.layout, id);
+        if signing::recorded(meta.get("SIGNATURE"), meta.get("SIGNED")) == signing::VERIFIED {
+            return Ok(());
+        }
+        let mut state = self.state();
+        state.error = format!(
+            "slot {id} is not signed by a key this board trusts, and this board takes only those"
+        );
+        let _ = self.save(&state);
+        Err(Status::NOT_PERMITTED)
     }
 
     /// What the slot's initramfs finds the data partition by.
@@ -602,6 +639,70 @@ impl SystemSlots {
         Ok(gone)
     }
 
+    /// What `info` says: the policy, and the last install's signature result.
+    fn info_json(&self) -> String {
+        let (slot, word, signer, reason) = match &self.last_signed {
+            None => (String::new(), String::new(), String::new(), String::new()),
+            Some((slot, Ok(outcome))) => (
+                slot.clone(),
+                outcome.word().to_string(),
+                outcome.signer().to_string(),
+                outcome.reason(),
+            ),
+            Some((slot, Err(text))) => {
+                (slot.clone(), "refused".into(), String::new(), text.clone())
+            }
+        };
+        let mut out = format!(
+            "{{\"require_signed\":{},\"last_install\":{{",
+            self.require_signed
+        );
+        for (key, value) in [
+            ("slot", &slot),
+            ("signature", &word),
+            ("signer", &signer),
+            ("reason", &reason),
+        ] {
+            if out.ends_with('{') {
+                out.push('"');
+            } else {
+                out.push_str(",\"");
+            }
+            out.push_str(key);
+            out.push_str("\":");
+            quoted(value, &mut out);
+        }
+        out.push('}');
+        out.push_str(&format!(
+            ",\"default_signature\":\"{}\",\"boot_unverified\":",
+            signature_word(&Meta::load(&self.layout, &self.state().default))
+        ));
+        quoted(&signing::boot_unverified(&self.layout), &mut out);
+        out.push('}');
+        out
+    }
+
+    /// Reports, at start and in `info`, a default slot whose signature did not verify while
+    /// signing is required: the state's `error` names it and what to install.
+    fn report_policy(&mut self) {
+        if !self.require_signed {
+            return;
+        }
+        let state = self.state();
+        if state.default.is_empty() {
+            return;
+        }
+        if signature_word(&Meta::load(&self.layout, &state.default)) == signing::VERIFIED {
+            return;
+        }
+        let mut state = state;
+        state.error = format!(
+            "signing is required, and the default slot {} is not signed by a key this board trusts: install a verified slot and set it as the default",
+            state.default
+        );
+        let _ = self.save(&state);
+    }
+
     fn list_json(&self) -> String {
         let state = self.state();
         let running = self.running();
@@ -756,7 +857,10 @@ impl SystemSlots {
             ("kernel", text("kernel")),
             ("display_name", text("display_name")),
             ("good", meta.get("GOOD").to_string()),
-            ("signed", signed_word(&meta)),
+            (
+                "signed",
+                signing::legacy_label(signature_word(&meta)).to_string(),
+            ),
             ("signer", meta.get("SIGNER").to_string()),
             ("installed", meta.get("INSTALLED").to_string()),
             ("last_boot", meta.get("LAST_BOOT").to_string()),
@@ -767,13 +871,14 @@ impl SystemSlots {
             out.push(',');
         }
         out.push_str(&format!(
-            "\"size\":{size},\"verity\":{},\"intact\":{},\"flags\":[{}],\"pinned\":{},\"failures\":{},\"failed\":{}}}",
+            "\"size\":{size},\"verity\":{},\"intact\":{},\"flags\":[{}],\"pinned\":{},\"failures\":{},\"failed\":{},\"signature\":\"{}\"}}",
             !text("verity.root_hash").is_empty(),
             want == Some(size),
             flags.join(","),
             meta.pinned(),
             meta.get("FAILURES").parse::<u32>().unwrap_or(0),
             meta.failed(),
+            signature_word(&meta),
         ));
         out
     }
@@ -877,11 +982,9 @@ fn permille(done: u64, total: u64) -> u16 {
     (done.saturating_mul(1000) / total).min(1000) as u16
 }
 
-fn signed_word(meta: &Meta) -> String {
-    match meta.get("SIGNED") {
-        "" => "unsigned".to_string(),
-        word => word.to_string(),
-    }
+/// A slot's signature word: `verified`, `not_checked_unknown_key` or `not_checked_unsigned`.
+fn signature_word(meta: &Meta) -> &'static str {
+    signing::recorded(meta.get("SIGNATURE"), meta.get("SIGNED"))
 }
 
 /// The data partition's PARTUUID: the device mounted at `data`, found among
@@ -1010,6 +1113,8 @@ impl Lifecycle for SystemSlots {
         slots.boot_args = cfg.str("boot_args").unwrap_or("").to_string();
         slots.board_id = cfg.board().to_string();
         slots.require_signed = cfg.bool("require_signed").unwrap_or(false);
+        signing::set_security(&slots.layout, slots.require_signed).map_err(|_| Status::IO)?;
+        slots.report_policy();
         if let Some(mb) = cfg.int("reserve_mb") {
             slots.reserve = u64::try_from(mb).map_err(|_| Status::INVALID_ARGUMENT)? << 20;
         }
@@ -1089,6 +1194,13 @@ impl Slots for SystemSlots {
         Ok(json.len())
     }
 
+    fn info(&mut self, into: &mut [u8]) -> Result<usize> {
+        let json = self.info_json();
+        let out = into.get_mut(..json.len()).ok_or(Status::BUFFER_TOO_SMALL)?;
+        out.copy_from_slice(json.as_bytes());
+        Ok(json.len())
+    }
+
     fn install(&mut self, size: u64, pin: bool, keep_old: bool) -> Result<JobId> {
         self.begin(size, pin, keep_old, None)
     }
@@ -1139,6 +1251,7 @@ impl Slots for SystemSlots {
     fn set_default(&mut self, id: &str, force: bool) -> Result<()> {
         self.installed(id)?;
         self.fits_board(id)?;
+        self.fits_signature(id)?;
         let meta = Meta::load(&self.layout, id);
         if meta.failed() && !force {
             return Err(Status::NOT_PERMITTED);
@@ -1163,6 +1276,7 @@ impl Slots for SystemSlots {
     fn trial(&mut self, id: &str, keep_default: bool, keep_old: bool, force: bool) -> Result<()> {
         self.installed(id)?;
         self.fits_board(id)?;
+        self.fits_signature(id)?;
         if id == self.running() {
             return Err(Status::BUSY);
         }

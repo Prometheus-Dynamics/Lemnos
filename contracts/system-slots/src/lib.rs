@@ -7,10 +7,14 @@
 //! that restarts before then boots the default again. A board may have a single slot; a trial
 //! then falls back to it.
 //!
-//! A slot arrives as a bundle: a tar of `slot.json` (its manifest), `slot.sig` (an Ed25519
-//! signature over the manifest's bytes), `rootfs.erofs` and `boot/`. A signature is always
-//! checked against the keys the board trusts and recorded; a board may refuse a bundle that no
-//! trusted key signed, and by default takes it and shows it as unverified. The manifest
+//! A slot arrives as a bundle: a tar of `slot.json` (its manifest), `slot.sig` (a 108-byte
+//! signature record, the shared container first flash uses: the key id and an Ed25519 signature
+//! over the manifest's bytes), `rootfs.erofs` and `boot/`. The record names its key, and the
+//! signature is checked against that key when the board holds it. The board's
+//! policy (`require_signed`) is the table in `lemnos_slot_store::signing`, the same one first
+//! flash applies: an unsigned bundle or one under a key the board does not hold installs and is
+//! reported as not checked, unless the board requires signing; a bad signature under a key the
+//! board holds is always refused. The manifest
 //! names the image's size and SHA-256, every boot file's SHA-256 and the image's dm-verity root
 //! hash. The driver carries the bytes and checks them against the manifest; it never reads what
 //! the image holds.
@@ -25,7 +29,20 @@
 //!            "flags":["running","default","previous","trial","staged"],"pinned":false,
 //!            "good":"yes|no|untried","signed":"trusted|untrusted|unsigned","signer":"<owner>",
 //!            "installed":"<UTC time>","last_boot":"<UTC time>",
-//!            "failures":N,"failed":false}]}
+//!            "failures":N,"failed":false,
+//!            "signature":"verified|not_checked_unknown_key|not_checked_unsigned"}]}
+//! ```
+//!
+//! `signed` is the older label of the same fact (`trusted` is `verified`, `untrusted` is
+//! `not_checked_unknown_key`, `unsigned` is `not_checked_unsigned`); a slot installed before the
+//! `signature` word existed reports it from its `signed` label. `info` writes the policy and the
+//! last install's signature result:
+//!
+//! ```text
+//! {"require_signed":false,"last_install":{"slot":"<id, or \"\" when refused>",
+//!  "signature":"verified|not_checked_unknown_key|not_checked_unsigned|refused","signer":"<owner>",
+//!  "reason":"<the reason in words>"},"default_signature":"<the default's signature word>",
+//!  "boot_unverified":"<the slot the boot side started unverified, or \"\">"}
 //! ```
 //!
 //! An empty id is `""`.
@@ -49,8 +66,8 @@ pub trait Slots {
     /// order. The job's progress is the bytes taken of `size`, and its result the new slot's id
     /// (UTF-8). `pin` keeps the slot from housekeeping; `keep_old` has confirming it remove no
     /// old slots. One install at a time: `BUSY` while another runs. Never over the running or
-    /// the default slot. `NOT_PERMITTED` when the board takes only signed bundles and trusts no
-    /// key.
+    /// the default slot. `NOT_PERMITTED` when the signature policy refuses the bundle (`info`
+    /// then says why); `INVALID_ARGUMENT` for a malformed signature.
     #[method(2, job)]
     fn install(&mut self, size: u64, pin: bool, keep_old: bool) -> Result<JobId>;
     /// The running install's bytes from `offset`, which must be where the last write ended.
@@ -104,4 +121,9 @@ pub trait Slots {
     /// `INVALID_ARGUMENT` for a cursor that is not one; `BUFFER_TOO_SMALL` when a slot does not fit.
     #[method(13)]
     fn list_page(&mut self, after: &str, #[out] into: &mut [u8]) -> Result<usize>;
+
+    /// The signature policy and the last install's signature result, as JSON (see the crate's
+    /// documentation). Returns its length; `BUFFER_TOO_SMALL` when it doesn't fit.
+    #[method(14)]
+    fn info(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }

@@ -565,6 +565,126 @@ fn a_slot_built_for_another_kernel_is_refused() {
     assert_fell_back(&board, &fake, "kernel 6.1.0-other");
 }
 
+/// Records how `id` was signed at install, the way the driver does.
+fn record_signature(board: &Board, id: &str, signature: &str, signed: &str) {
+    let mut meta = board.meta(id);
+    meta.set("SIGNATURE", signature);
+    meta.set("SIGNED", signed);
+    meta.save(&board.layout, id).unwrap();
+}
+
+/// With signing off (no marker), a slot installed under an unknown key boots as before.
+#[test]
+fn a_slot_not_checked_at_install_still_boots_while_signing_is_not_required() {
+    let board = Board::new();
+    record_signature(&board, "os-2", "not_checked_unknown_key", "untrusted");
+    let (_, why) = board.boot(&[]);
+    assert_eq!(why, "");
+}
+
+/// With `require_signed` on (its marker there), a started slot whose signature did not verify
+/// is not started: the boot falls back, and the reason names the slot.
+#[test]
+fn with_require_signed_a_slot_whose_signature_did_not_verify_is_not_started() {
+    let board = Board::new();
+    make_default(&board, "os-1");
+    record_signature(&board, "os-1", "verified", "trusted");
+    record_signature(&board, "os-2", "not_checked_unknown_key", "untrusted");
+    fs::write(
+        board
+            .layout
+            .marker(lemnos_slot_store::signing::REQUIRE_MARKER),
+        b"yes\n",
+    )
+    .unwrap();
+    let (fake, _) = board.boot(&[]);
+    // os-2 is started as a trial, so a failure restarts plainly into the default (rule 1).
+    let meta = board.meta("os-2");
+    assert_eq!(meta.get("FAILED"), "yes");
+    assert!(
+        meta.get("FAIL_REASON")
+            .contains("os-2 is not signed by a key this board trusts"),
+        "{:?}",
+        meta.get("FAIL_REASON")
+    );
+    assert_eq!(fake.last(), "restart");
+    assert!(!fake.called("switch_root"));
+}
+
+/// Makes `id` the board's default in its state, as an earlier boot left it.
+fn make_default(board: &Board, id: &str) {
+    let mut state = State::load(&board.layout);
+    state.default = id.into();
+    state.save(&board.layout).unwrap();
+}
+
+/// Signing required, and the default slot (the one started) did not verify: the board still
+/// comes up on the default, and the start is recorded so the driver reports it.
+#[test]
+fn with_require_signed_an_unverified_default_still_boots_and_is_reported() {
+    let board = Board::new();
+    make_default(&board, "os-2");
+    record_signature(&board, "os-2", "not_checked_unknown_key", "untrusted");
+    record_signature(&board, "os-1", "not_checked_unsigned", "unsigned");
+    fs::write(
+        board
+            .layout
+            .marker(lemnos_slot_store::signing::REQUIRE_MARKER),
+        b"yes\n",
+    )
+    .unwrap();
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert_eq!(fake.last(), "switch_root newroot");
+    assert_eq!(board.read("data/board/slots/boot-unverified"), "os-2\n");
+}
+
+/// Once a verified default boots, the record of an unverified start is cleared.
+#[test]
+fn a_verified_boot_clears_the_unverified_start_record() {
+    let board = Board::new();
+    make_default(&board, "os-2");
+    record_signature(&board, "os-2", "verified", "trusted");
+    fs::write(
+        board
+            .layout
+            .marker(lemnos_slot_store::signing::REQUIRE_MARKER),
+        b"yes\n",
+    )
+    .unwrap();
+    fs::write(
+        board
+            .layout
+            .marker(lemnos_slot_store::signing::BOOT_UNVERIFIED),
+        b"os-9\n",
+    )
+    .unwrap();
+    let (_, why) = board.boot(&[]);
+    assert_eq!(why, "");
+    assert!(
+        !board
+            .layout
+            .marker(lemnos_slot_store::signing::BOOT_UNVERIFIED)
+            .exists()
+    );
+}
+
+/// With `require_signed` on, a slot whose signature verified boots.
+#[test]
+fn with_require_signed_a_verified_slot_boots() {
+    let board = Board::new();
+    record_signature(&board, "os-2", "verified", "trusted");
+    fs::write(
+        board
+            .layout
+            .marker(lemnos_slot_store::signing::REQUIRE_MARKER),
+        b"yes\n",
+    )
+    .unwrap();
+    let (_, why) = board.boot(&[]);
+    assert_eq!(why, "");
+}
+
 #[test]
 fn a_slot_built_for_this_kernel_boots() {
     let board = Board::new();

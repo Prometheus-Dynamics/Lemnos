@@ -35,6 +35,7 @@ use lemnos_slot_store::manifest::Manifest;
 use lemnos_slot_store::records::{
     KERNEL_GAP, MAX_ATTEMPTS, REASON_FILE, attempts, file, tryboot, uboot,
 };
+use lemnos_slot_store::signing::{self, BOOT_UNVERIFIED};
 use lemnos_slot_store::store::{self, Layout, Meta, State, read_line, valid_id};
 use lemnos_slot_store::ubi::{self, Ubi};
 
@@ -297,6 +298,7 @@ impl Boot<'_> {
                     good: meta.get("GOOD") == "yes",
                     failed: meta.failed(),
                     resident: self.layout.boot_dir(&id).is_dir(),
+                    signed: self.may_start(&meta),
                     seq: meta.seq(),
                     id,
                 }
@@ -337,6 +339,13 @@ impl Boot<'_> {
     }
 
     /// The attempts a trial gets: the board's `trial_attempts`, as the driver wrote it.
+    /// Whether the policy lets `meta`'s slot be a fallback: always, unless signing is required and
+    /// its signature did not verify. (The default may still start: see `run`.)
+    fn may_start(&self, meta: &Meta) -> bool {
+        !signing::security_on(&self.layout)
+            || signing::recorded(meta.get("SIGNATURE"), meta.get("SIGNED")) == signing::VERIFIED
+    }
+
     fn trial_attempts(&self) -> u8 {
         store::setting(&self.layout, "TRIAL_ATTEMPTS")
             .and_then(|text| attempts(&text))
@@ -798,6 +807,26 @@ impl Boot<'_> {
             self.mark("trial-init", &format!("{slot}\n"));
         }
 
+        // The switch's policy, as the boot side applies it. An unverified trial is refused (the
+        // default starts instead). The default always starts: a board must come up. When it is
+        // unverified the start is recorded, so the driver reports it.
+        let meta = Meta::load(&self.layout, &slot);
+        let verified =
+            signing::recorded(meta.get("SIGNATURE"), meta.get("SIGNED")) == signing::VERIFIED;
+        if signing::security_on(&self.layout) && !verified {
+            if self.trial {
+                return self.fail(&format!(
+                    "{slot} is not signed by a key this board trusts, and this board takes only those"
+                ));
+            }
+            self.log(&format!("starting the default slot {slot} although it is not signed by a key this board trusts"));
+            let _ = store::replace(
+                &self.layout.marker(BOOT_UNVERIFIED),
+                format!("{slot}\n").as_bytes(),
+            );
+        } else {
+            let _ = fs::remove_file(self.layout.marker(BOOT_UNVERIFIED));
+        }
         let manifest_path = self.layout.manifest(&slot);
         let manifest = match fs::read_to_string(&manifest_path) {
             Ok(text) => match Manifest::parse(&text) {

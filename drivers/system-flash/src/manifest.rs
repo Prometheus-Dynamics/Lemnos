@@ -19,18 +19,18 @@
 use ed25519_dalek::{Signature, VerifyingKey};
 use lemnos_core::Status;
 use lemnos_slot_store::json::Json;
-use sha2::{Digest, Sha256};
+use lemnos_slot_store::signing::{self, Check, Refusal};
+pub use lemnos_slot_store::signing::{RECORD_LEN, parse_record, record_bytes};
+
+/// The SHA-256 of a public key: its key id, as the shared record names it.
+pub fn key_id(key: &VerifyingKey) -> [u8; 32] {
+    lemnos_slot_store::signing::key_id(key.as_bytes())
+}
 
 /// The domain tag of the signed message, with its NUL.
 pub const DOMAIN: &[u8] = b"lemnos-first-flash\0";
 /// The signed message's version.
 pub const MESSAGE_VERSION: u32 = 1;
-/// The record's magic.
-pub const RECORD_MAGIC: &[u8; 8] = b"LMNSSIG1";
-/// The record's algorithm: Ed25519.
-pub const ALGORITHM_ED25519: u8 = 1;
-/// The record's length.
-pub const RECORD_LEN: usize = 108;
 /// The raw image kind a block target takes.
 pub const DISK: &str = "disk";
 
@@ -65,50 +65,6 @@ pub fn signed_message(board: &str, format: &str, size: u64, sha256: &[u8; 32]) -
     out.extend_from_slice(&size.to_le_bytes());
     out.extend_from_slice(sha256);
     out
-}
-
-/// A well-formed signature record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Record {
-    pub key_id: [u8; 32],
-    pub signature: [u8; 64],
-}
-
-/// The record's bytes, as they are written: `LMNSSIG1`, algorithm, zeros, key id, signature.
-pub fn record_bytes(key_id: &[u8; 32], signature: &[u8; 64]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(RECORD_LEN);
-    out.extend_from_slice(RECORD_MAGIC);
-    out.push(ALGORITHM_ED25519);
-    out.extend_from_slice(&[0, 0, 0]);
-    out.extend_from_slice(key_id);
-    out.extend_from_slice(signature);
-    out
-}
-
-/// Reads a record: exactly 108 bytes, the magic, algorithm 1 and zero padding. Anything else is a
-/// malformed record, whatever the policy.
-///
-/// # Errors
-///
-/// When the bytes are not a well-formed record.
-pub fn parse_record(bytes: &[u8]) -> Result<Record, &'static str> {
-    if bytes.len() != RECORD_LEN
-        || bytes[..8] != *RECORD_MAGIC
-        || bytes[8] != ALGORITHM_ED25519
-        || bytes[9..12] != [0, 0, 0]
-    {
-        return Err("malformed signature record");
-    }
-    let mut key_id = [0u8; 32];
-    key_id.copy_from_slice(&bytes[12..44]);
-    let mut signature = [0u8; 64];
-    signature.copy_from_slice(&bytes[44..108]);
-    Ok(Record { key_id, signature })
-}
-
-/// The SHA-256 of a public key: its key id.
-pub fn key_id(key: &VerifyingKey) -> [u8; 32] {
-    Sha256::digest(key.as_bytes()).into()
 }
 
 /// A key the board trusts, its key id, and whose it is.
@@ -151,64 +107,16 @@ pub fn parse_keys(text: &str) -> Result<Vec<TrustedKey>, String> {
     Ok(keys)
 }
 
-/// How a manifest's signature stands, once the policy has been applied to it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
-    /// The record's key is on the board's list and the signature verifies, by that key's owner.
-    Verified(String),
-    /// No record: the image is unsigned, and the board accepts that.
-    NotCheckedUnsigned,
-    /// A well-formed record under a key the board doesn't know (or no key list at all).
-    NotCheckedUnknownKey,
-}
+/// The outcome, as the shared table names it.
+pub use lemnos_slot_store::signing::Outcome;
 
-impl Outcome {
-    /// The stable word for `info`, the log and the sender's UI.
-    pub fn word(&self) -> &'static str {
-        match self {
-            Self::Verified(_) => "verified",
-            Self::NotCheckedUnsigned => "not_checked_unsigned",
-            Self::NotCheckedUnknownKey => "not_checked_unknown_key",
-        }
-    }
-
-    /// The code the write job's result carries after its byte count.
-    pub fn code(&self) -> u8 {
-        match self {
-            Self::Verified(_) => 0,
-            Self::NotCheckedUnsigned => 1,
-            Self::NotCheckedUnknownKey => 2,
-        }
-    }
-
-    /// The reason in words, as the sender shows it.
-    pub fn reason(&self) -> String {
-        match self {
-            Self::Verified(owner) => {
-                format!("signature verified with a key on this board's list ({owner})")
-            }
-            Self::NotCheckedUnsigned => "unsigned image; signature not checked".into(),
-            Self::NotCheckedUnknownKey => "signed by an unknown key, not checked".into(),
-        }
-    }
-
-    /// The signer's owner, or empty.
-    pub fn signer(&self) -> &str {
-        match self {
-            Self::Verified(owner) => owner,
-            _ => "",
-        }
-    }
-}
-
-/// The signature policy, as the table in the brief sets it. `record` is empty or the record's
-/// bytes; the size and hash are the manifest's, and the message is rebuilt from `board` and
-/// `format` (the board's own).
+/// The signature policy for a first-flash image. The table is `lemnos_slot_store::signing::decide`;
+/// this maps the record and the board's keys onto its check. `record` is empty or the record's
+/// bytes; the message is rebuilt from `board` and `format` (the board's own), size and hash.
 ///
 /// # Errors
 ///
-/// `(status, sentence)` for every refused row: a malformed record in any row; a known key whose
-/// signature does not verify in any row; an unsigned or unknown-key image under `require_signed`.
+/// `(status, sentence)` for every refused row (see the shared table).
 pub fn decide(
     require_signed: bool,
     board: &str,
@@ -218,37 +126,33 @@ pub fn decide(
     record: &[u8],
     keys: &[TrustedKey],
 ) -> Result<Outcome, (Status, String)> {
-    if record.is_empty() {
-        if require_signed {
-            return Err((
-                Status::NOT_PERMITTED,
-                "this board takes only signed images, and this one is unsigned".into(),
-            ));
+    let check = if record.is_empty() {
+        Check::Unsigned
+    } else {
+        match parse_record(record) {
+            Err(why) => Check::Malformed(why.to_string()),
+            Ok(parsed) => match keys.iter().find(|k| k.id == parsed.key_id) {
+                None => Check::UnknownKey,
+                Some(trusted) => {
+                    let message = signed_message(board, format, size, sha256);
+                    let signature = Signature::from_bytes(&parsed.signature);
+                    if trusted.key.verify_strict(&message, &signature).is_ok() {
+                        Check::Verified {
+                            owner: &trusted.owner,
+                        }
+                    } else {
+                        Check::BadSignature {
+                            owner: &trusted.owner,
+                        }
+                    }
+                }
+            },
         }
-        return Ok(Outcome::NotCheckedUnsigned);
-    }
-    let parsed = parse_record(record).map_err(|why| (Status::INVALID_ARGUMENT, why.to_string()))?;
-    let Some(trusted) = keys.iter().find(|k| k.id == parsed.key_id) else {
-        if require_signed {
-            return Err((
-                Status::NOT_PERMITTED,
-                "this board takes only images signed by a key on its list, and this one is signed by an unknown key".into(),
-            ));
-        }
-        return Ok(Outcome::NotCheckedUnknownKey);
     };
-    let message = signed_message(board, format, size, sha256);
-    let signature = Signature::from_bytes(&parsed.signature);
-    if trusted.key.verify_strict(&message, &signature).is_err() {
-        return Err((
-            Status::NOT_PERMITTED,
-            format!(
-                "the signature does not verify for the key of {}: the record is corrupted or was not made by that key",
-                trusted.owner
-            ),
-        ));
-    }
-    Ok(Outcome::Verified(trusted.owner.clone()))
+    signing::decide(require_signed, "the image", check).map_err(|refusal| match refusal {
+        Refusal::Malformed(text) => (Status::INVALID_ARGUMENT, text),
+        Refusal::Policy(text) => (Status::NOT_PERMITTED, text),
+    })
 }
 
 /// Reads a schema 1 transport manifest for `board_id`. A manifest for another board is refused

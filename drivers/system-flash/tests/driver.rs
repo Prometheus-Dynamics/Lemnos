@@ -646,7 +646,7 @@ fn an_unsigned_image_is_refused_before_any_write_when_signing_is_required() {
         driver.manifest(&manifest_json(rig.board, SMALL, SMALL_SHA, None), &[]),
         Err(Status::NOT_PERMITTED)
     );
-    assert!(info(&mut driver).contains("only signed images"));
+    assert!(info(&mut driver).contains("takes only signed ones"));
     assert_eq!(driver.write(SMALL, FORMAT_RAW), Err(Status::NOT_FOUND));
     assert!(rig.file_bytes().iter().all(|&b| b == 0));
 }
@@ -664,7 +664,7 @@ fn an_unknown_key_is_refused_before_any_write_when_signing_is_required() {
         &vector_record(),
     );
     assert_eq!(refused, Err(Status::NOT_PERMITTED));
-    assert!(info(&mut driver).contains("unknown key"));
+    assert!(info(&mut driver).contains("does not trust"));
     // With no key list at all, every signed image is an unknown key.
     let mut bare = Rig::new("row6b", SMALL);
     bare.require_signed = true;
