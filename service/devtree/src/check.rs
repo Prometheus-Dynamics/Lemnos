@@ -124,15 +124,19 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Vec<String> {
             Some(_) => {}
         }
     }
-    // A PWM name is a node of the live tree: it must be there and enabled, as the overlay makes it.
+    // A PWM or watchdog name is a node of the live tree: it must be there and enabled, as the
+    // overlay makes it.
     for device in &board.devices {
         for name in device.bus.iter().chain(device.uses.values()) {
-            let Some(node) = name
-                .strip_prefix("pwm:")
-                .and_then(|rest| rest.rsplit_once(':'))
-                .map(|(node, _)| node)
-            else {
-                continue;
+            let node = match name.strip_prefix("watchdog:") {
+                Some(node) => node,
+                None => match name
+                    .strip_prefix("pwm:")
+                    .and_then(|rest| rest.rsplit_once(':'))
+                {
+                    Some((node, _)) => node,
+                    None => continue,
+                },
             };
             let dir = live.tree.join(node.trim_start_matches('/'));
             if !dir.is_dir() {

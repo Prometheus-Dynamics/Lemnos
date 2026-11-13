@@ -24,8 +24,9 @@ lemnos-host = { path = "../../engine/host" }
 lemnos-devtree = { path = "../devtree" }
 lemnos-linux = { path = "../../backends/linux" }
 lemnos-wire = { path = "../../engine/wire" }
+# For `tree`: the built-in drivers' manifests, which say what each device needs.
+lemnosd = { path = "../lemnosd" }
 
 [dev-dependencies]
-lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-sim = { path = "../../backends/sim" }

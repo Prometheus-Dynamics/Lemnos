@@ -1,7 +1,9 @@
-# The reference board: a compute module on its IO board, with one addressable LED ring on RP1
-# GPIO13, a camera sensor on the SoC's own I2C bus, a camera power switch on RP1 GPIO34, a fan on
-# the fan header's PWM channel, and the camera receiver owned by the kernel module. Its overlay,
-# boot fragment and module configuration are made from this file by `lemnos-ctl tree`.
+# The reference board: a compute module on its IO board, shaped as a managed board is. It has an
+# addressable LED strip on the PIO block, an IMU and a magnetometer on a PIO I2C bus, a power
+# monitor on i2c-1, a camera (sensor, receiver, PiSP front and back end) on the camera I2C bus, a
+# power switch for the camera, a fan on the fan header's PWM channel, the board as a USB gadget, the
+# hardware watchdog as the daemon's keep-alive, and the system identity, slots and reboot devices.
+# Its overlay, boot fragment and module configuration are made from this file by `lemnos-ctl tree`.
 format = "lemnos.board"
 schema_version = 1
 
@@ -16,9 +18,11 @@ name = "i2c-1"
 controller = "i2c1"
 pins = "gpio2_3"
 
+# The camera and display connector's bus: RP1 I2C at 0x88000, on GPIO38 and GPIO39.
 [[hardware]]
 name = "i2c-10"
 controller = "i2c10"
+pins = "gpio38_39"
 
 [[hardware]]
 controller = "pwm1"
@@ -38,6 +42,12 @@ module = "pisp_be"
 [[hardware]]
 controller = "pio"
 
+# The board as a USB device: the SoC's controller in peripheral mode, as the UDC.
+[[hardware]]
+name = "udc:1000480000.usb"
+controller = "usb"
+
+# The hardware watchdog, named by the devices that use it as `watchdog:<node>`.
 [[hardware]]
 controller = "watchdog"
 
@@ -52,23 +62,65 @@ line = "gpio:pinctrl-rp1:45"
 boot = "high"
 reason = "the fan header's line: at full speed from power-on, until Lemnos's fan driver takes it"
 
+# The system: who the board is, what it can install and boot, and reboot.
+[[devices]]
+id = "identity"
+driver = "system-identity"
+config = { serial = "device-tree" }
+
+[[devices]]
+id = "slots"
+driver = "system-slots"
+config = { data = "/data", boot = "/boot/firmware", record = "tryboot", keys = "/etc/lemnos/slot-keys", boot_args = "os", require_signed = false, reserve_mb = 2048, keep = 3 }
+
+[[devices]]
+id = "reboot"
+driver = "system-reboot"
+
+# The daemon's keep-alive: the hardware watchdog, set to 15 s. The daemon feeds it only while it is
+# healthy. The device names the node by its device-tree path, which the generator enables.
+[[devices]]
+id = "watchdog"
+driver = "hw-watchdog"
+keepalive = true
+uses = { watchdog = "watchdog:/soc@107c000000/watchdog@7d200000" }
+config = { timeout_s = 15 }
+
+# The board as a USB device: the gadget's functions, its identity from the system identity device.
+[[devices]]
+id = "gadget"
+driver = "usb-gadget"
+uses = { function = "udc:1000480000.usb", identity = "identity" }
+config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Lemnos board", interfaces = "function ffs\nfunction ncm derive\nfunction acm\n" }
+
+# The LED strip on the PIO block.
 [[devices]]
 id = "ring"
 driver = "ws2812"
 bus = "pio-out:gpio=13"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
+# The IMU and the magnetometer, on the PIO block's I2C bus.
 [[devices]]
 id = "imu"
 driver = "bmi088"
-bus = "i2c-1"
+bus = "pio-i2c:sda=8,scl=7"
 config = { accel_rate = 200, gyro_rate = 200, fifo = false }
 
 [[devices]]
-id = "sensor"
-driver = "ov9782"
-bus = "i2c-10"
+id = "mag"
+driver = "bmm150"
+bus = "pio-i2c:sda=8,scl=7"
 
+# The power monitor on i2c-1.
+[[devices]]
+id = "power"
+driver = "ina2xx"
+bus = "i2c-1"
+config = { chip = "ina238", address = 0x40, shunt_ohms = 0.010, max_current_a = 2.0 }
+
+# The camera: the sensor on the camera bus, linked to the receiver, which is linked to the PiSP
+# front end, which is linked to the back end. The power switch powers the sensor's regulator.
 [[devices]]
 id = "cam0-power"
 driver = "gpio-power-switch"
@@ -76,7 +128,65 @@ uses = { line = "gpio:pinctrl-rp1:34" }
 config = { default_on = true }
 
 [[devices]]
+id = "cam0-sensor"
+driver = "ov9782"
+bus = "i2c-10"
+link = "cam0-receiver"
+
+# The receiver is the kernel module's: the module owns its node, and this device is its driver's.
+[[devices]]
+id = "cam0-receiver"
+driver = "rp1-csi2"
+link = "cam0-fe"
+config = { device = "1f00110000.csi" }
+
+[[devices]]
+id = "cam0-fe"
+driver = "pisp-fe"
+link = "cam0-isp"
+config = { device = "1f00110000.csi" }
+
+[devices.streams.config]
+buffers = 4
+buffer_bytes = 8192
+
+[[devices]]
+id = "cam0-isp"
+driver = "pisp-be"
+config = { device = "1000880000.pisp_be" }
+
+[devices.streams.config]
+buffers = 4
+buffer_bytes = 8192
+
+[devices.streams.input]
+buffers = 4
+buffer_bytes = 2097152
+memory = "dma-buf"
+heap = "linux,cma"
+
+[devices.streams.output0]
+buffers = 4
+buffer_bytes = 4194304
+memory = "dma-buf"
+heap = "linux,cma"
+
+# The fan on the fan header's PWM channel, driven directly, with no kernel fan driver between.
+[[devices]]
 id = "fan"
 driver = "pwm-channel-fan"
 uses = { pwm = "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1" }
 config = { frequency_hz = 25000, min_duty = 200, kick_ms = 500 }
+
+# The board's temperature, and the fan control that runs the fan from it. Neither names hardware:
+# the thermal zone is read through sysfs, and the fan control is built from the devices above.
+[[devices]]
+id = "cpu-thermal"
+driver = "thermal-zone"
+config = { path = "/sys/class/thermal/thermal_zone0" }
+
+[[devices]]
+id = "fan-control"
+driver = "fan-control"
+uses = { fan = "fan", t0 = "cpu-thermal" }
+config = { curve_t0 = "30000:300,60000:600,75000:1000", floor = 300, slew_per_s = 50 }

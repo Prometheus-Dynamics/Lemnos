@@ -12,7 +12,6 @@
 soc = "rk3588"
 form = "overlay"
 
-needs_nothing = ["orientation", "fan-control"]
 
 [chips.gpio0]
 label = "gpio0"

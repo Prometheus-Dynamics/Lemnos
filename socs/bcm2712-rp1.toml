@@ -5,7 +5,6 @@
 # labels, so each node is named by its path. A pin set also has its label, which an overlay refers to:
 # the base tree keeps the labels in its symbols. The paths of the RP1 nodes are the `rp1` ones.
 soc = "bcm2712-rp1"
-needs_nothing = ["orientation", "fan-control"]
 
 # The GPIO chips a `gpio:LABEL:LINE` name may name. The label is the chip's own, as the kernel
 # reports it: the RP1 GPIO chip's label is a constant of its driver (`pinctrl-rp1`, drivers/pinctrl/
@@ -14,7 +13,6 @@ needs_nothing = ["orientation", "fan-control"]
 label = "pinctrl-rp1"
 reason = "the RP1 GPIO chip, on the IO board's RP1"
 
-# Drivers whose devices need no hardware from this SoC: they are composed of other devices.
 
 # The I2C buses. The kernel numbers an I2C adapter by its alias `i2cN`, so the board's `i2c-N`
 # comes out of that alias.
@@ -60,13 +58,20 @@ label = "rp1_i2c2_12_13"
 path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c2_12_13"
 gpios = [12, 13]
 
-# The SoC's own I2C controller. The camera sensor sits on it in the board runs; its alias is in the
-# base tree already, so it needs no pin set.
+# The camera and display I2C bus: the RP1's I2C at offset 0x88000 (`rp1_i2c6`, the `i2c@88000` node
+# of rp1.dtsi, rpi-7.2.y). The base tree's `i2c10` alias is `i2c_csi_dsi0`, which is this node
+# (bcm2712-rpi.dtsi, `i2c10 = &i2c_csi_dsi0`; bcm2712-rpi-cm5io.dtsi, `i2c_csi_dsi0: &i2c6`). Its
+# pin group is `rp1_i2c6_38_39` (GPIO38 and GPIO39, rp1.dtsi), the one the CAM/DISP 0 connector's
+# bus is wired through. Not the SoC's own `i2c@7d005600`, which is a different bus.
 [controllers.i2c10]
 kind = "i2c"
-path = "/soc@107c000000/i2c@7d005600"
+path = "/axi/pcie@1000120000/rp1/i2c@88000"
 alias = "i2c10"
-reason = "the SoC's own I2C controller, the camera sensor's bus (the board's i2c-10)"
+reason = "an I2C bus on RP1 (designware): the camera and display connector's bus, the board's i2c-10"
+[controllers.i2c10.pins.gpio38_39]
+label = "rp1_i2c6_38_39"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c6_38_39"
+gpios = [38, 39]
 
 # The PWM channel on GPIO45, the fan header's line. A channel is named by the backend, so the
 # generator enables the block and its pin function and makes no name.

@@ -11,6 +11,7 @@ use lemnos_core::{
     InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest, MethodId, NeedKind,
     Origin, Provider, Pwm, RawSpiBus, Reader, RegistersHandle, Reply, ResetHandle, Resources,
     Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
+    Watchdog,
 };
 
 use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner};
@@ -1738,6 +1739,7 @@ impl Provider for Binding<'_> {
         dma -> DmaHandle;
         clocks -> ClocksHandle;
         reset -> ResetHandle;
+        watchdog -> Watchdog;
     }
 
     fn stream(&mut self, need: &str) -> Result<StreamHandle> {

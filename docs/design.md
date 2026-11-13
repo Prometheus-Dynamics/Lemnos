@@ -341,7 +341,7 @@ pub struct MethodId { pub contract: u8, pub method: u16 }
 
 // A #[needs] field is anything implementing Resource: I2c, Spi, Line, Pwm, Uart, UsbDeviceHandle,
 // UsbFunctionHandle, RegistersHandle, InterruptHandle, DmaHandle, ClocksHandle, ResetHandle,
-// StreamHandle, Dev<dyn SomeContract>, or an Option of any of those.
+// StreamHandle, Watchdog, Dev<dyn SomeContract>, or an Option of any of those.
 impl Resources<'_> {
     fn i2c(&mut self, need: &str) -> Result<I2c>; // and one for each kind above
     fn device<C: Contract + ?Sized>(&mut self, need: &str) -> Result<Dev<C>>;

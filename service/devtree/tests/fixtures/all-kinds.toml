@@ -1,6 +1,5 @@
 # A test SoC with one controller of every kind, so every resource kind is generated and checked.
 soc = "test-soc"
-needs_nothing = ["composed"]
 
 [chips.g]
 label = "gpio-test"
