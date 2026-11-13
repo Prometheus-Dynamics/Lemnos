@@ -11,6 +11,7 @@ pub enum ConfigValue<'a> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Config<'a> {
     entries: &'a [(&'a str, ConfigValue<'a>)],
+    lists: &'a [(&'a str, &'a [&'a str])],
     host_owned: bool,
     board: &'a str,
     host_version: &'a str,
@@ -20,10 +21,28 @@ impl<'a> Config<'a> {
     pub const fn new(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Self {
         Self {
             entries,
+            lists: &[],
             host_owned: false,
             board: "",
             host_version: "",
         }
+    }
+
+    /// The same settings, with the lists the board file gives this device: a key whose value
+    /// is an array of strings (`health = ["device:x"]`). Only a driver built into the host sees
+    /// them; a driver package gets its settings alone.
+    #[must_use]
+    pub const fn with_lists(mut self, lists: &'a [(&'a str, &'a [&'a str])]) -> Self {
+        self.lists = lists;
+        self
+    }
+
+    /// The array of strings the board file gives under `key`, if it does.
+    pub fn list(&self, key: &str) -> Option<&'a [&'a str]> {
+        self.lists
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, items)| *items)
     }
 
     /// The same settings, on the board the board file's `[board] id` names.

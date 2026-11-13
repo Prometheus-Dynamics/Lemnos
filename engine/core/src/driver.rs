@@ -72,6 +72,36 @@ impl CallerId {
     pub const LOCAL: Self = Self(0);
 }
 
+/// Who a board device came from: the board file's own list, or a device made for a resource a
+/// `[[each]]` entry found (or one on a bus such a device is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Named by the board file's `[[devices]]`.
+    BuiltIn,
+    /// Made by an `[[each]]` entry, as the resource came and went.
+    Hotplug,
+}
+
+/// One device of the board, as a driver that watches the board sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoardDevice<'a> {
+    pub id: &'a str,
+    pub origin: Origin,
+    /// Bound now: its driver is running. A device waiting to retry, or switched off, is not.
+    pub bound: bool,
+    /// Its health as the host reports it now, with a dead device's [`Health::Gone`] apart from
+    /// [`Health::Failed`].
+    pub health: Health,
+}
+
+/// The board as the host has it now: every device the board names, in the host's order. The
+/// host makes it fresh before each tick of a driver that watches the board, and reading it
+/// allocates nothing.
+pub trait BoardView {
+    /// Calls `f` once for each device.
+    fn each(&self, f: &mut dyn FnMut(BoardDevice<'_>));
+}
+
 /// A driver as the host sees it. `#[driver]` writes this; handwritten
 /// implementations are for tests.
 pub trait Driver: Sized {
@@ -100,6 +130,10 @@ pub trait Driver: Sized {
     }
     /// What the driver does on a host-owned device. See [`Lifecycle::HOST_OWNED`].
     const HOST_OWNED: HostOwned = HostOwned::Refused;
+    /// See [`Lifecycle::WATCHES_BOARD`].
+    const WATCHES_BOARD: bool = false;
+    /// See [`Lifecycle::board`].
+    fn board(&mut self, _view: &dyn BoardView) {}
     /// How its I2C chips name a register. See [`Lifecycle::I2C_REGISTER_ADDRESS`].
     const I2C_REGISTER_ADDRESS: Option<AddressWidth> = None;
     /// Whether the host should say who is calling. See [`Lifecycle::TRACKS_CALLERS`].
@@ -149,6 +183,14 @@ pub trait Lifecycle: Sized {
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
         None
     }
+    /// Set this to `true` for a driver that needs to know the rest of the board: which devices
+    /// there are, which are bound and how healthy each is. The host calls [`Lifecycle::board`]
+    /// with a fresh view before each tick, so the driver reads it there and keeps what it
+    /// needs. Other drivers cost the host nothing, and a driver package gets an empty view.
+    const WATCHES_BOARD: bool = false;
+    /// Given the board as it is now, before each tick when [`Lifecycle::WATCHES_BOARD`] is set.
+    /// Must not block, and must not keep the view past the call.
+    fn board(&mut self, _view: &dyn BoardView) {}
     /// Whether this driver can be bound to a device the operating system owns, and how it
     /// keeps from changing it. Left as it is, the driver is never bound to one.
     const HOST_OWNED: HostOwned = HostOwned::Refused;
