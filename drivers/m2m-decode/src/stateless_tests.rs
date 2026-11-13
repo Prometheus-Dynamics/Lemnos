@@ -23,7 +23,7 @@ use crate::mock::{Call, Mock, MockNode};
 use crate::stateless::{
     FIRST_CONTROL, M2mCodec, M2mCodecNeeds, MAX_CONTROLS, MAX_PAYLOAD_BYTES, PICTURE_BUFFERS,
     REOPENING, SETUP_BYTES, SLOT_PICTURE, SLOT_SOURCE, Settings, StatelessBlock, TAG_SETUP,
-    TAG_STAMP,
+    TAG_STAMP, backoff_ns,
 };
 
 const BUFFERS: u32 = 8;
@@ -591,4 +591,13 @@ fn a_caller_decodes_through_a_real_host_on_the_streams_own_buffers() {
         (2, 2, 0)
     );
     assert_eq!(Lifecycle::health(&driver), Health::Ok);
+}
+
+#[test]
+fn the_reopen_wait_doubles_from_250_ms_and_holds_at_8_s() {
+    let waits: Vec<u64> = (0..8).map(backoff_ns).collect();
+    assert_eq!(
+        waits,
+        [250, 500, 1000, 2000, 4000, 8000, 8000, 8000].map(|ms| ms * 1_000_000)
+    );
 }

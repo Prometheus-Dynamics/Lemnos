@@ -112,7 +112,6 @@ A board file cannot name these.
 | `rk-mpp` | The MPP service's checked jobs | Used by `rk-mpp-codec` and `rk-iep` |
 | `codec-jobs` | The job server every `codec.block/1` driver shares | A building block |
 | `v4l2-capture` | A capture node that fills a stream's own buffers | Used by `rkcif` and `sunxi-vin` |
-| `hevc` | A parameter-set and slice-header parser | Used by the library decoder in `m2m-decode`. IDR slices only |
 | `soc` | Chip description tables | Data |
 
 ## Which drivers take a block's own resources
