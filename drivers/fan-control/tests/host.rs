@@ -1,5 +1,5 @@
 //! The controller on a host, with simulated devices: a temperature the test sets (and can make
-//! fail), and a fan that records every write and every hand-back (and can make writes fail).
+//! fail), and a fan that records every write and every release (and can make writes fail).
 //! Time is the simulated clock; each second the test advances it and ticks the host.
 
 use std::sync::Arc;
@@ -328,7 +328,7 @@ fn a_sensor_broken_from_the_start_runs_at_full_duty_until_it_reads() {
 }
 
 #[test]
-fn a_failed_write_hands_the_fan_back_and_retries_on_a_backoff_capped_at_8_seconds() {
+fn a_failed_write_releases_the_fan_and_retries_on_a_backoff_capped_at_8_seconds() {
     let mut rig = start_rig(&board(40_000, false));
     rig.fail_fan(5);
     rig.host.tick();
@@ -343,7 +343,7 @@ fn a_failed_write_hands_the_fan_back_and_retries_on_a_backoff_capped_at_8_second
             attempts.push(t);
         }
     }
-    // Five writes fail, each followed by a hand-back. The waits are 1, 2, 4, 8, 8 seconds.
+    // Five writes fail, each followed by a release. The waits are 1, 2, 4, 8, 8 seconds.
     assert_eq!(attempts, [0, 1, 3, 7, 15, 23]);
     assert_eq!(rig.releases(), 5);
     assert_eq!(rig.duty(), 400);
@@ -351,13 +351,13 @@ fn a_failed_write_hands_the_fan_back_and_retries_on_a_backoff_capped_at_8_second
 }
 
 #[test]
-fn disabling_hands_the_fan_back_and_enabling_takes_it_again() {
+fn disabling_releases_the_fan_and_enabling_takes_it_again() {
     let mut rig = start_rig(&board(40_000, false));
     rig.host.tick();
     assert_eq!(rig.calls(), 1);
 
     rig.ctl(8, &enc(&false));
-    assert_eq!(rig.releases(), 1, "the fan is handed back");
+    assert_eq!(rig.releases(), 1, "the fan is released");
     assert_eq!(rig.state().duty, 0);
     rig.second();
     rig.second();
@@ -434,7 +434,7 @@ fn the_hotter_of_two_temperatures_drives_the_fan() {
 }
 
 #[test]
-fn stopping_the_controller_hands_the_fan_back() {
+fn stopping_the_controller_releases_the_fan() {
     let rig = start_rig(&board(40_000, false));
     rig.host.tick();
     rig.host.off("ctl").unwrap();

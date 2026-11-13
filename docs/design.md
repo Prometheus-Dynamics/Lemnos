@@ -276,6 +276,20 @@ a lost event costs time and a storm of them costs nothing. The host never learns
 Services are built with `panic = "unwind"`. With `panic = "abort"` a driver's panic could not be
 contained.
 
+## The daemon is the kernel
+
+`lemnosd` is not allowed to go down. In this stack it plays the part of the kernel, so nothing is
+designed around it being stopped or dead:
+
+- No code keeps a path working for an absent daemon. No backend falls back to another route because
+  the daemon is away, and no driver hands its hardware to another controller because it stopped.
+- A driver that is dropped leaves its hardware in its safe state, such as a fan at full duty, and
+  never in a kernel governor's hands. Clean shutdown does the same.
+- A dead daemon is restarted at once. If it is not healthy again within the watchdog's bound, the
+  board's hardware watchdog resets the board (see [`daemon.md`](daemon.md#if-the-daemon-dies)).
+- A client, a driver or a device coming and going is normal operation and is handled as such. That
+  is not this rule.
+
 ## Shared interfaces
 
 Everyone builds against these. `engine/core`, `engine/macros` and `engine/client` are the source of

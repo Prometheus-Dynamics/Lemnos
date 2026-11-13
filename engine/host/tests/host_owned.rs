@@ -170,7 +170,7 @@ fn a_host_owned_device_answers_reads_and_refuses_every_change() {
     assert_eq!(host.device("theirs").unwrap().state, DeviceState::Running);
     assert_eq!(decode::<u16>(&call(&host, theirs, DUTY, &[]).unwrap()), 302);
 
-    // Shutting down hands nothing back, because nothing was taken.
+    // Shutting down writes nothing, because nothing was taken.
     host.shutdown();
     assert_eq!(tree.read("class/hwmon/hwmon2/pwm1"), "77");
     assert_eq!(tree.read("class/hwmon/hwmon2/pwm1_enable"), "2");
@@ -185,9 +185,11 @@ fn a_lemnos_owned_device_on_the_same_board_still_takes_changes() {
     call(&host, ours, SET_DUTY, &duty_args(500)).unwrap();
     assert_eq!(tree.read("class/hwmon/hwmon3/pwm1"), "128");
     assert_eq!(tree.read("class/hwmon/hwmon3/pwm1_enable"), "1");
+    // Release puts the fan at full duty and leaves it in manual mode: nothing goes back to the
+    // kernel's governor.
     call(&host, ours, RELEASE, &[]).unwrap();
-    assert_eq!(tree.read("class/hwmon/hwmon3/pwm1"), "10");
-    assert_eq!(tree.read("class/hwmon/hwmon3/pwm1_enable"), "2");
+    assert_eq!(tree.read("class/hwmon/hwmon3/pwm1"), "255");
+    assert_eq!(tree.read("class/hwmon/hwmon3/pwm1_enable"), "1");
 
     // And the host-owned one beside it was never touched.
     assert_eq!(tree.read("class/hwmon/hwmon2/pwm1"), "77");

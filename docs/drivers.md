@@ -52,7 +52,7 @@ python3 scripts/generate-builtins.py --check
 | `fan-control` | `fan-control/1` | `fan`, `t0` and optional `t1` to `t3`: devices | Serves its contract |
 | `status-light` | `light/1` | `pixels`: a device | Serves its contract |
 | `pwm-channel-fan` | `fan/1` | `pwm`: a PWM channel, and optional `tach`: a GPIO line | Serves its contract. Drives the PWM directly, with no kernel fan driver between. Full duty at start, on release, and when stopped |
-| `hwmon-fan` | `fan/1` | a hwmon node, by `name` or `hwmon` | Serves its contract, for a fan the kernel exposes through hwmon. Takes the fan over at the first `set_duty` and gives it back on release. A killed daemon leaves the last duty. Not a safety net: the controller keeps the fan safe |
+| `hwmon-fan` | `fan/1` | a hwmon node, by `name` or `hwmon` | Serves its contract, for a fan the kernel exposes through hwmon. Takes the fan over at the first `set_duty`. `release`, and dropping the driver, put the fan at full duty; nothing is handed to the kernel's thermal governor. A killed daemon runs no code, so the fan keeps the last duty |
 | `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract. Run on the reference board (`B13.md`) |
 | `gpu-lease` | `gpu-lease/1` | nothing | Serves its contract. The lease is advisory: nothing is enforced on the GPU |
 | `host-clock` | no contract | nothing | Runs. Shows the kernel's clock source and whether an RTC set the clock, as values |

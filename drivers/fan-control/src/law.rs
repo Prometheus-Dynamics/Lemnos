@@ -27,7 +27,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// The health reason while an input is missing or stale.
 pub const DEGRADED: &str = "a temperature input is missing or stale: the fan is at full duty";
 /// The health reason after a failed fan write.
-pub const WRITE_FAILED: &str = "the fan write failed: handed back to the kernel, retrying";
+pub const WRITE_FAILED: &str = "the fan write failed: released to full duty, retrying";
 
 /// One input's curve: 1 to [`MAX_POINTS`] points, values strictly ascending, duties 0 to 1000.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +147,7 @@ pub struct Control {
     max_age_ms: u32,
     inputs: [Input; SLOTS],
     enabled: bool,
-    /// The duty last commanded (0 while disabled or handed back).
+    /// The duty last commanded (0 while disabled or released).
     duty: i32,
     demand: i32,
     source: Option<u8>,
@@ -169,8 +169,8 @@ pub struct Control {
     attempts: u32,
     /// The last write failed.
     fault: bool,
-    /// When the fan is due to be handed back (ns). Set when the controller is disabled, and
-    /// kept until the hand-back works.
+    /// When the fan is due to be released (ns). Set when the controller is disabled, and
+    /// kept until the release works.
     release_at_ns: Option<u64>,
 }
 
@@ -332,17 +332,17 @@ impl Control {
         }
     }
 
-    /// Whether the fan is due to be handed back at `now_ns`.
+    /// Whether the fan is due to be released at `now_ns`.
     pub fn release_due(&self, now_ns: u64) -> bool {
         self.release_at_ns.is_some_and(|at| now_ns >= at)
     }
 
-    /// The hand-back worked.
+    /// The release worked.
     pub fn released(&mut self) {
         self.release_at_ns = None;
     }
 
-    /// The hand-back failed. It is tried again in one period.
+    /// The release failed. It is tried again in one period.
     pub fn release_failed(&mut self, now_ns: u64) {
         self.release_at_ns = Some(now_ns.saturating_add(PERIOD_NS));
     }
@@ -373,7 +373,7 @@ impl Control {
         }
     }
 
-    /// One control step. Returns the duty to write, or `None` while the fan is handed back and
+    /// One control step. Returns the duty to write, or `None` while the fan is released and
     /// the retry wait has not run out. Completing a step counts toward the stall check either way.
     pub fn step(&mut self, now_ns: u64) -> Option<i32> {
         self.stepped_ns = Some(now_ns);
@@ -461,7 +461,7 @@ impl Control {
         self.attempts = 0;
     }
 
-    /// The fan write failed. The fan is handed back (the driver does that) and the next attempt
+    /// The fan write failed. The fan is released (the driver does that) and the next attempt
     /// waits 1 s, then 2, 4 and 8 s, and stays at 8 s.
     pub fn write_failed(&mut self, now_ns: u64) {
         self.attempts = self.attempts.saturating_add(1);

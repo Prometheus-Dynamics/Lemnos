@@ -280,7 +280,7 @@ fn a_failed_write_retries_with_a_backoff_capped_at_8_seconds() {
 }
 
 #[test]
-fn a_failed_write_reports_zero_duty_while_the_fan_is_handed_back() {
+fn a_failed_write_reports_zero_duty_while_the_fan_is_released() {
     let mut c = one(tuned());
     c.step(0);
     c.write_failed(0);
@@ -322,13 +322,13 @@ fn a_degraded_or_retrying_controller_still_counts_as_stepping() {
 }
 
 #[test]
-fn disabling_hands_the_fan_back_once_and_enabling_starts_from_a_stop() {
+fn disabling_releases_the_fan_once_and_enabling_starts_from_a_stop() {
     let mut c = one(tuned());
     c.step(0);
     c.set_enabled(false);
     assert_eq!(c.state().duty, 0);
     assert!(c.release_due(0));
-    assert_eq!(c.next_due(), Some(0), "the hand-back is due now");
+    assert_eq!(c.next_due(), Some(0), "the release is due now");
     c.released();
     assert_eq!(c.next_due(), None, "nothing to do while disabled");
     assert!(!c.step_due(10 * S));
@@ -339,7 +339,7 @@ fn disabling_hands_the_fan_back_once_and_enabling_starts_from_a_stop() {
 }
 
 #[test]
-fn a_failed_hand_back_is_tried_again_in_a_second() {
+fn a_failed_release_is_tried_again_in_a_second() {
     let mut c = one(tuned());
     c.set_enabled(false);
     c.release_failed(5 * S);
