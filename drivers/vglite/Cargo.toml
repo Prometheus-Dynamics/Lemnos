@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The VGLite 2.5D GPU on /dev/vg_lite: resize, crop, flips and quarter turns, fill, blend, palette and width-1 lines (a stroke), its command streams ported from the vendor's library and checked as they are built, reopened after a failure. No vendor library"
+description = "The VGLite 2.5D GPU on /dev/vg_lite: resize, crop, flips and quarter turns, fill, blend, palette and width-1 lines (a stroke), its command streams ported from the vendor's library and checked as they are built, reopened after a failure; served as image.scaler/1 and image.convert/1 from job streams of dma-bufs. No vendor library"
 
 [lints]
 workspace = true
@@ -13,6 +13,18 @@ workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 lemnos-driver-vglite-sys = { path = "../vglite-sys" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+lemnos-contract-image-scaler = { path = "../../contracts/image-scaler" }
+lemnos-contract-image-convert = { path = "../../contracts/image-convert" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "VgliteDriver"

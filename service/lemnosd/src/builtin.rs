@@ -24,6 +24,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_k230_vpu::K230Vpu>(),
         entry::<lemnos_driver_k230isp::K230Isp>(),
         entry::<lemnos_driver_m2m_decode::M2mCodec>(),
+        entry::<lemnos_driver_nonai2d::Nonai2dDriver>(),
         entry::<lemnos_driver_orientation::Orientation>(),
         entry::<lemnos_driver_ov9782::Ov9782>(),
         entry::<lemnos_driver_pisp::PispBe>(),
@@ -43,6 +44,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_usb_gadget::UsbGadget>(),
         entry::<lemnos_driver_uvc::Uvc>(),
         entry::<lemnos_driver_vcm::Vcm>(),
+        entry::<lemnos_driver_vglite::VgliteDriver>(),
         entry::<lemnos_driver_ws2812::Ws2812>(),
     ]
 }

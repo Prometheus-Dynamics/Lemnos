@@ -20,6 +20,8 @@
 //! - [`Converter`]: `image.convert/1` jobs served from a stream whose buffers are dma-bufs. A job
 //!   names two of the stream's buffers; the driver borrows their handles from the stream and
 //!   builds checked frames over them. See [`convert`].
+//! - [`Nonai2dDriver`]: the driver, providing `image.convert/1` over [`Converter`] on the
+//!   device's job stream, whose buffers must be dma-bufs (`memory = "dma-buf"`). See [`driver`].
 //!
 //! # Not covered
 //!
@@ -29,9 +31,6 @@
 //! - The 4:2:0 formats through jobs: a job names one buffer and the engine takes each plane from
 //!   the start of its own dma-buf. They go through [`Device`] and [`Nonai2d`] with a dma-buf per
 //!   plane.
-//! - The `image.convert/1` contract's methods: this is a library. It has no `#[driver]` type,
-//!   is not in `lemnosd`, and no board file can name it; [`Converter`] is the job loop a driver
-//!   would run.
 //!
 //! A conversion that times out closes the node, and the job completes as failed (empty). The
 //! kernel lets go of the dma-bufs when the node closes; an engine that is really still running
@@ -49,8 +48,9 @@
 //! mode being the default (`K_2D_CALC_MODE_CSC`). Ported from the dev branch
 //! (`crates/lemnos-drivers-nonai2d`).
 //!
-//! Hardware status: untested on board. The board checks are in `testing/board-runs/E5.md` and,
-//! for drawing, `testing/board-runs/E6.md`.
+//! Hardware status: untested on board. The board checks are in `testing/board-runs/E5.md`, for
+//! drawing `testing/board-runs/E6.md`, and for the driver bound from a board file
+//! `testing/board-runs/H3c.md`.
 //! Unverified until it runs: that the engine's byte order for each format is the V4L2 name's, and
 //! that a 4:2:0 frame's chroma order is as named.
 
@@ -64,6 +64,8 @@ pub mod convert;
 #[cfg(target_os = "linux")]
 mod device;
 #[cfg(target_os = "linux")]
+pub mod driver;
+#[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
 mod frame;
@@ -72,6 +74,8 @@ mod frame;
 pub use convert::Converter;
 #[cfg(target_os = "linux")]
 pub use device::{CONVERT_TIMEOUT, DRIVER, Device, Payloads, find};
+#[cfg(target_os = "linux")]
+pub use driver::{Nonai2dDriver, Nonai2dDriverNeeds};
 #[cfg(target_os = "linux")]
 pub use engine::{Engine, Nonai2d, RunError, State, backoff_ns, node};
 #[cfg(target_os = "linux")]

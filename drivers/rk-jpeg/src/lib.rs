@@ -24,8 +24,12 @@
 //! (sizes, strides, formats, stream and bitstream lengths) that the vendor kernel's driver
 //! source does not name. It names the address registers, the start and status bits and the
 //! picture-size fields, which is what [`regs`], [`Addresses`] and [`status`] hold for a
-//! caller that builds register files. No other public kernel source was found to name the
-//! rest, so no field layout is guessed here.
+//! caller that builds register files. Rockchip's user-space MPP (`rockchip-linux/mpp` at
+//! `9b56348`, Apache-2.0) does name every field (`hal_jpegd_rkv_reg.h`,
+//! `hal_jpegd_vpu730_reg.h`, `hal_jpege_vpu720_reg.h`), but not how far the block reads and
+//! writes from each address: where the decoder's chroma plane lies and how large it is per
+//! output format, the units of the table lengths, the encoder's ECS length buffer. Those are
+//! what a job's check needs, and they are not guessed here (`TODO.md` lists them).
 //!
 //! # On a device
 //!

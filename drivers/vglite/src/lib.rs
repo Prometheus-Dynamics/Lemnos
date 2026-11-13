@@ -37,6 +37,11 @@
 //!   a line is its square-capped width-1 stroke from pixel centre to pixel centre, not proven
 //!   equal to Bresenham on board (`tests/lines.rs`).
 //!
+//! - **Driver:** [`VgliteDriver`] serves `image.scaler/1` and `image.convert/1`, each from its
+//!   own stream of dma-bufs; [`serve`] runs the jobs and lists every check a job's bytes pass
+//!   through. A conversion is an identity blit with the source and target formats apart, among
+//!   [`CONVERTIBLE`]. See [`driver`] for the board file and what is not provided.
+//!
 //! # What is checked
 //!
 //! Every word of a stream that a caller influences becomes an address, a stride, a size, a format
@@ -52,7 +57,9 @@
 //! output for small fixtures, recorded on a host by the dev branch's oracle (the library built
 //! unmodified with its kernel request replaced by a recorder). Register values and command
 //! encodings inferred rather than read from a source that states them are marked unverified
-//! where they are defined. The board check is `testing/board-runs/E3.md`.
+//! where they are defined. The board checks are `testing/board-runs/E3.md` and, for the driver,
+//! `testing/board-runs/H3c.md`. A conversion's stream is the recorded copy with only its format
+//! words changed (`tests.rs`), not itself recorded from the vendor library.
 //!
 //! Provenance: ported from the dev branch (`crates/lemnos-drivers-vglite`, and
 //! `crates/lemnos-linux-sys/src/vg_lite.rs` for the `-sys` crate). Changes from dev: no dma-buf
@@ -65,14 +72,18 @@
 #![forbid(unsafe_code)]
 
 mod command;
+pub mod driver;
 mod gpu;
 mod plan;
+pub mod serve;
 mod stroke;
 mod surface;
 
+pub use driver::{VgliteDriver, VgliteDriverNeeds};
 pub use gpu::{MAX_STROKE_POINTS, RunError, State, Stroke, Vglite, backoff_ns};
 pub use lemnos_driver_vglite_sys::DEVICE;
-pub use plan::{BlendMode, Filter, Format, Image, MAX_SIDE, Transform};
+pub use plan::{BlendMode, CONVERTIBLE, Filter, Format, Image, MAX_SIDE, Transform};
+pub use serve::Gpu;
 pub use stroke::{Cap, Join};
 pub use surface::{Frame, Transfer};
 

@@ -45,6 +45,7 @@ lemnos-driver-k230-capture = { path = "../../drivers/k230-capture" }
 lemnos-driver-k230-vpu = { path = "../../drivers/k230-vpu" }
 lemnos-driver-k230isp = { path = "../../drivers/k230isp" }
 lemnos-driver-m2m-decode = { path = "../../drivers/m2m-decode" }
+lemnos-driver-nonai2d = { path = "../../drivers/nonai2d" }
 lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-driver-ov9782 = { path = "../../drivers/ov9782" }
 lemnos-driver-pisp = { path = "../../drivers/pisp" }
@@ -63,6 +64,7 @@ lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
 lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget" }
 lemnos-driver-uvc = { path = "../../drivers/uvc" }
 lemnos-driver-vcm = { path = "../../drivers/vcm" }
+lemnos-driver-vglite = { path = "../../drivers/vglite" }
 lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
 # generated: end drivers
 

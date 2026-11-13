@@ -415,6 +415,31 @@ pub(crate) fn resize(src: Image, dst: Image, filter: Filter) -> io::Result<(Matr
     }
 }
 
+/// The formats [`convert`] changes between: the three four-byte formats, each to each. A
+/// blit names its source and its target format apart (`set_render_target` and the source's
+/// image words), and the unit reads one and writes the other; that is all a conversion is.
+pub const CONVERTIBLE: [Format; 3] = [Format::Rgba8888, Format::Bgra8888, Format::Rgbx8888];
+
+/// A copy of `src` into `dst` of the same size, from one format to another: an identity blit,
+/// point sampled. Among [`CONVERTIBLE`] any pair; otherwise only a format to itself (a copy).
+/// A palette source is [`crate::Vglite::palette_bytes`]'s, and has no table here.
+pub(crate) fn convert(src: Image, dst: Image) -> io::Result<()> {
+    if (src.width, src.height) != (dst.width, dst.height) {
+        return invalid(format!(
+            "a {}x{} output for a {}x{} input; that is a resize",
+            dst.width, dst.height, src.width, src.height
+        ));
+    }
+    let pair = CONVERTIBLE.contains(&src.format) && CONVERTIBLE.contains(&dst.format);
+    if !pair && (src.format != dst.format || src.format == Format::Index8) {
+        return unsupported(format!(
+            "{:?} to {:?}: not a conversion the unit is used for here",
+            src.format, dst.format
+        ));
+    }
+    Ok(())
+}
+
 /// The matrix of an unscaled crop of `rect` (left, top, width, height): a translation, point
 /// sampled; what falls outside the target is clipped.
 pub(crate) fn crop(rect: (u32, u32, u32, u32)) -> Matrix {

@@ -813,3 +813,93 @@ fn encoding_a_warm_operation_allocates_nothing() {
     let ((), allocated) = allocations(|| round(&mut outliner));
     assert_eq!(allocated, 0);
 }
+
+/// The words of an identity copy blit from a 16x4 source in `from` to a target in `to`.
+fn copy_words(from: Format, to: Format) -> Vec<u32> {
+    let (t, s) = (target_buffer(), source_buffer());
+    words(
+        Op::Blit {
+            matrix: IDENTITY,
+            blend: BLEND_NONE,
+            sampling: Sampling::Point,
+        },
+        bound(&t, to, 16, 4, 64),
+        Some(bound(&s, from, 16, 4, 64)),
+    )
+}
+
+#[test]
+fn a_conversion_is_the_vendor_copy_with_only_its_format_words_changed() {
+    // `vg_lite_blit` writes the target's and the source's format codes into a word each and
+    // branches on neither for these formats, so a conversion's stream is the recorded copy
+    // with those words, and only those, carrying the other codes.
+    let copy = copy_words(Format::Rgba8888, Format::Rgba8888);
+    assert_eq!(copy, BLIT_IDENTITY);
+    let diff = |got: &[u32]| -> Vec<(usize, u32)> {
+        got.iter()
+            .zip(&copy)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| (i, a ^ b))
+            .collect()
+    };
+    let target = |f: Format| f.target().map(TargetFormat::code).unwrap();
+    let source = |f: Format| f.source().code();
+    for to in [Format::Bgra8888, Format::Rgbx8888] {
+        let got = copy_words(Format::Rgba8888, to);
+        assert_eq!(got.len(), copy.len());
+        let changed = diff(&got);
+        assert_eq!(changed.len(), 1, "{to:?}: {changed:x?}");
+        assert_eq!(
+            changed[0].1,
+            target(to) ^ target(Format::Rgba8888),
+            "{to:?}"
+        );
+    }
+    for from in [Format::Bgra8888, Format::Rgbx8888] {
+        let got = copy_words(from, Format::Rgba8888);
+        let changed = diff(&got);
+        assert_eq!(changed.len(), 1, "{from:?}: {changed:x?}");
+        assert_eq!(
+            changed[0].1,
+            source(from) ^ source(Format::Rgba8888),
+            "{from:?}"
+        );
+    }
+}
+
+#[test]
+fn a_conversion_keeps_the_size_and_the_four_byte_formats() {
+    let image = |format, width| Image::packed(format, width, 4);
+    for from in plan::CONVERTIBLE {
+        for to in plan::CONVERTIBLE {
+            plan::convert(image(from, 16), image(to, 16)).unwrap();
+        }
+    }
+    plan::convert(image(Format::L8, 16), image(Format::L8, 16)).unwrap();
+    let refused = |from, to, width| {
+        plan::convert(image(from, 16), image(to, width))
+            .unwrap_err()
+            .kind()
+    };
+    assert_eq!(
+        refused(Format::Rgba8888, Format::Bgra8888, 8),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        refused(Format::Rgba8888, Format::L8, 16),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        refused(Format::L8, Format::Rgba8888, 16),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        refused(Format::A8, Format::L8, 16),
+        io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        refused(Format::Index8, Format::Index8, 16),
+        io::ErrorKind::Unsupported
+    );
+}

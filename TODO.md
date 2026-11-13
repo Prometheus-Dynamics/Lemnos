@@ -48,9 +48,27 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Unfinished in the code
 
-- [ ] **Libraries with no contract driver**: `drivers/nonai2d`, `drivers/vglite`,
-      `drivers/k230-ai2d` (its register map is not public), `drivers/rk-jpeg` (builds no job: the
-      field layout is not public; JPEG runs through `rk-mpp` with the caller's registers).
+- [ ] **Two libraries with no contract driver**, rechecked against the public sources on
+      2026-11-11:
+  - `drivers/k230-ai2d`: the block's job registers are in no public source. The SDK kernel's
+    `drivers/misc/canaan/ai2d/k230_ai2d.c` only imports dma-bufs; the RT-Smart driver
+    (`kendryte/k230_sdk` `src/big/rt-smart/kernel/bsp/maix3/board/interdrv/gnne/ai2d_dev.c`)
+    names one interrupt register (`0xca0`) and takes no job; `kendryte/nncase` at `master` has
+    no AI2D source (the K230 runtime ships prebuilt); `canmv_k230` `port/kpu/ai2d.c`, the SDK's
+    `ai2d_kpu` and `python-k230` packages and the K230 AI2D runtime manuals only call the
+    runtime's builder. Unknown: every register offset and field of a job (addresses, sizes,
+    strides, formats, the start bit).
+  - `drivers/rk-jpeg`: the field layouts are public in Rockchip MPP (`rockchip-linux/mpp` at
+    `9b56348`, Apache-2.0: `mpp/hal/vpu/jpegd/hal_jpegd_rkv_reg.h`, `hal_jpegd_vpu730_reg.h`,
+    `mpp/hal/rkenc/jpege/hal_jpege_vpu720_reg.h`, and how `hal_jpegd_rkv.c` fills them). What
+    no source states is how far the block reaches from each address, which a job's check
+    needs: where the decoder puts its chroma plane after `reg13_dec_out_base` and how large it
+    is in each `yuv_out_format`, tiled and scaled-down mode; the unit of `qtbl_len`,
+    `htbl_mincode_len` and `htbl_value_len` (the table sizes are `RKD_*` constants, not
+    hardware facts); and on the encoder, the extent of the ECS length buffer
+    (`reg021_adr_ecs_len`) and of the chroma source planes per format. Read from MPP's own
+    buffer sizes these would be guesses at the hardware, so JPEG still runs through `rk-mpp`
+    with the caller's registers.
 - [ ] **The description form covers one contract**, `magnetometer/1`.
 - [ ] **No built-in driver takes a UART.**
 - [ ] **No built-in driver takes a block's registers, interrupt, clocks or resets** from the module
