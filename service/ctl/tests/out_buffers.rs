@@ -1,7 +1,8 @@
 //! Out-buffer methods through the text path: `lemnos-ctl call` on the simulated board, and every
 //! out-buffer method of every contract in `contracts/`, encoded the way the tool sends it.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -99,23 +100,144 @@ fn sample(shape: &OwnedShape, words: &mut Vec<String>) {
     words.push(word.to_string());
 }
 
+/// The contract sources: `contracts/<dir>/src/lib.rs`, where each contract is one trait.
+fn contract_sources() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("{}: {e}", root.display()))
+        .map(|entry| entry.unwrap().path().join("src/lib.rs"))
+        .filter(|path| path.is_file())
+        .collect();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "no contract sources under {}",
+        root.display()
+    );
+    files
+}
+
+/// The arguments of `#[contract("name", version = N, kind = "...")]`, as the contract macro reads
+/// them: the tag `name/N`. The kind is checked for its shape only.
+fn contract_args(input: syn::parse::ParseStream) -> syn::Result<String> {
+    let name: syn::LitStr = input.parse()?;
+    input.parse::<syn::Token![,]>()?;
+    let key: syn::Ident = input.parse()?;
+    if key != "version" {
+        return Err(syn::Error::new(key.span(), "expected `version = N`"));
+    }
+    input.parse::<syn::Token![=]>()?;
+    let version: syn::LitInt = input.parse()?;
+    if input.peek(syn::Token![,]) {
+        input.parse::<syn::Token![,]>()?;
+    }
+    if !input.is_empty() {
+        let key: syn::Ident = input.parse()?;
+        if key != "kind" {
+            return Err(syn::Error::new(key.span(), "expected `kind = \"...\"`"));
+        }
+        input.parse::<syn::Token![=]>()?;
+        input.parse::<syn::LitStr>()?;
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+        }
+    }
+    Ok(format!(
+        "{}/{}",
+        name.value(),
+        version.base10_parse::<u32>()?
+    ))
+}
+
+/// The out-buffer methods of the contracts the device set serves, read from their sources: every
+/// trait with a `#[contract]` attribute whose tag is in `served`, and each of its methods that has
+/// an `#[out]` parameter. The syntax tree has no comments in it, so a doc that names `#[out]`
+/// counts for nothing. Returns the tags found, and the `(tag, method)` pairs.
+fn source_out_methods(served: &[&str]) -> (BTreeSet<String>, BTreeSet<(String, String)>) {
+    let (mut tags, mut methods) = (BTreeSet::new(), BTreeSet::new());
+    for file in contract_sources() {
+        let text = std::fs::read_to_string(&file).unwrap();
+        let parsed = syn::parse_file(&text).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+        for item in parsed.items {
+            let syn::Item::Trait(contract) = item else {
+                continue;
+            };
+            let Some(attr) = contract
+                .attrs
+                .iter()
+                .find(|a| a.path().is_ident("contract"))
+            else {
+                continue;
+            };
+            let tag = attr
+                .parse_args_with(contract_args)
+                .unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            if !served.contains(&tag.as_str()) {
+                continue;
+            }
+            tags.insert(tag.clone());
+            for member in &contract.items {
+                let syn::TraitItem::Fn(method) = member else {
+                    continue;
+                };
+                let out = method.sig.inputs.iter().any(|arg| {
+                    matches!(arg, syn::FnArg::Typed(param)
+                        if param.attrs.iter().any(|a| a.path().is_ident("out")))
+                });
+                if out {
+                    methods.insert((tag.clone(), method.sig.ident.to_string()));
+                }
+            }
+        }
+    }
+    (tags, methods)
+}
+
+fn named(pairs: &[&(String, String)]) -> String {
+    if pairs.is_empty() {
+        return "none".to_string();
+    }
+    let names: Vec<String> = pairs.iter().map(|(tag, m)| format!("{tag} {m}")).collect();
+    names.join(", ")
+}
+
 #[test]
 fn every_out_buffer_method_of_every_contract_is_callable_through_the_text_path() {
     let description = described();
     assert_eq!(description.contracts.len(), CONTRACTS.len());
-    let mut walked = 0;
+    let served: Vec<&str> = CONTRACTS.iter().map(|c| c.tag.as_str()).collect();
+    // The expected set comes from the sources, not from a count kept by hand: a method added to a
+    // contract with an `#[out]` parameter is expected here with no edit to this test.
+    let (tags, expected) = source_out_methods(&served);
+    let unread: Vec<&str> = served
+        .iter()
+        .copied()
+        .filter(|tag| !tags.contains(*tag))
+        .collect();
+    assert!(
+        unread.is_empty(),
+        "no contract source under contracts/ declares these: {unread:?}"
+    );
+    let mut walked = BTreeSet::new();
     for contract in &description.contracts {
         for method in contract.methods.iter().filter(|m| m.has_out_buffer) {
-            walked += 1;
+            walked.insert((contract.tag.clone(), method.name.clone()));
             check(method);
         }
     }
-    // Every `#[out]` parameter in the contracts: the list must not drift from them.
-    assert_eq!(walked, OUT_METHODS, "out-buffer methods found");
+    // Both ways: a source method whose description lost `has_out_buffer` (so it is never walked),
+    // and a described method that no source declares with `#[out]`.
+    let lost: Vec<&(String, String)> = expected.difference(&walked).collect();
+    let extra: Vec<&(String, String)> = walked.difference(&expected).collect();
+    assert!(
+        lost.is_empty() && extra.is_empty(),
+        "out-buffer methods differ between contracts/ and the device description.\n\
+         `#[out]` in the source, not walked (no has_out_buffer in the description): {}\n\
+         walked from the description, no `#[out]` in the source: {}",
+        named(&lost),
+        named(&extra),
+    );
 }
-
-/// The out-buffer methods in `contracts/` (`has_out_buffer`), counted when the test was written.
-const OUT_METHODS: usize = 33;
 
 fn check(method: &OwnedMethod) {
     let mut words = Vec::new();

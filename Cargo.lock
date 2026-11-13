@@ -722,6 +722,7 @@ dependencies = [
  "lemnos-sim-walk",
  "lemnos-wire",
  "lemnosd",
+ "syn 3.0.10",
 ]
 
 [[package]]
