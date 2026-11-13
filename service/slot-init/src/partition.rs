@@ -15,19 +15,40 @@ use std::path::{Path, PathBuf};
 pub enum Spec {
     PartUuid(String),
     Label(String),
+    /// On raw NAND: a UBIFS volume, by its UBI device and name (`UBI=ubi0:data`).
+    Ubi {
+        device: String,
+        volume: String,
+    },
 }
 
 impl Spec {
-    /// `PARTUUID=<id>` or `LABEL=<name>`.
+    /// `PARTUUID=<id>`, `LABEL=<name>` or `UBI=<device>:<volume>`.
     ///
     /// # Errors
     ///
-    /// When it is neither.
+    /// When it is none of them.
     pub fn parse(text: &str) -> Result<Self, String> {
         match text.split_once('=') {
             Some(("PARTUUID", id)) if !id.is_empty() => Ok(Self::PartUuid(id.to_ascii_lowercase())),
             Some(("LABEL", name)) if !name.is_empty() => Ok(Self::Label(name.to_owned())),
-            _ => Err(format!("{text:?} isn't PARTUUID=<id> or LABEL=<name>")),
+            Some(("UBI", at)) => match at.split_once(':') {
+                Some((device, volume))
+                    if device.starts_with("ubi")
+                        && device.len() > 3
+                        && device[3..].bytes().all(|b| b.is_ascii_digit())
+                        && !volume.is_empty() =>
+                {
+                    Ok(Self::Ubi {
+                        device: device.to_owned(),
+                        volume: volume.to_owned(),
+                    })
+                }
+                _ => Err(format!("{text:?} isn't UBI=<device>:<volume>")),
+            },
+            _ => Err(format!(
+                "{text:?} isn't PARTUUID=<id>, LABEL=<name> or UBI=<device>:<volume>"
+            )),
         }
     }
 }
@@ -180,6 +201,7 @@ pub fn find(spec: &Spec, sys: &Path, dev: &Path) -> Result<Part, String> {
         let hit = match spec {
             Spec::PartUuid(want) => id.as_deref() == Some(want.as_str()),
             Spec::Label(want) => label.as_deref() == Some(want.as_str()),
+            Spec::Ubi { .. } => false,
         };
         if hit {
             return Ok(part);
@@ -230,6 +252,15 @@ mod tests {
         assert_eq!(Spec::parse("LABEL=data"), Ok(Spec::Label("data".into())));
         assert!(Spec::parse("UUID=x").is_err());
         assert!(Spec::parse("PARTUUID=").is_err());
+        assert_eq!(
+            Spec::parse("UBI=ubi0:data"),
+            Ok(Spec::Ubi {
+                device: "ubi0".into(),
+                volume: "data".into()
+            })
+        );
+        assert!(Spec::parse("UBI=mtd3:data").is_err());
+        assert!(Spec::parse("UBI=ubi0:").is_err());
     }
 
     #[test]

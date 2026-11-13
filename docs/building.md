@@ -68,11 +68,11 @@ Stripped sizes, from the vendored builds of this table (bytes):
 | `lemnosd`       | 2018968      | 2021444          | 2017376      |
 | `lemnos-ctl`    | 732632       | 714820           | 728928       |
 | `lemnos-orion`  | 775368       | 768908           | 772048       |
-| `lemnos-slot-init` | 470128   | 442568           | 462144       |
+| `lemnos-slot-init` | 491768   | 466144           | 483896       |
 
 `lemnos-slot-init` was measured from a worktree build (`cargo build -p lemnos-slot-init --profile
-service --target <triple>`, the repo's rust-lld config) on the I5d branch, not from the vendored
-tree. It is plain `std` with no serde and no async.
+service --target <triple>`, the repo's rust-lld config) on the I5c branch, which added the UBI
+path, not from the vendored tree. It is plain `std` with no serde and no async.
 
 The worktree build of the same commit gave `lemnos-ctl` 733224 and `lemnos-orion` 775912 on
 aarch64: the same to within 0.1 percent. The sizes move with the base; these are measured on this

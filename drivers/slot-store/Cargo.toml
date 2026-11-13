@@ -9,5 +9,11 @@ description = "The board's slot files: the layout, state, per-slot records and t
 [lints]
 workspace = true
 
-# Plain std, no other dependency: lemnos-slot-init links it into a static initramfs program.
-[dependencies]
+# Plain std: lemnos-slot-init links it into a static initramfs program. `linux` adds the UBI
+# ioctls (`ubi::System`) through lemnos-linux-sys; `fake` adds `ubi::Fake` for other crates' tests.
+[features]
+linux = ["dep:lemnos-linux-sys"]
+fake = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-linux-sys = { path = "../../backends/linux-sys", optional = true }

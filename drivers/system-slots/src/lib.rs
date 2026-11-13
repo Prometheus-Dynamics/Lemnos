@@ -15,8 +15,14 @@
 //! - `record`: how the boot loader is told which slot to start: `"tryboot"` (the default: the
 //!   firmware's `default.txt`, `trial.txt` and tryboot restart), `"uboot"` (U-Boot's standard
 //!   boot flow: `boot-record.env`, a per-slot `extlinux.conf` and the static script in
-//!   `packaging/uboot`; see [`uboot`]) or `"file"` (one `boot-record` file, for a loader with
-//!   one fixed kernel; see [`boot`]). `docs/slots.md` describes each.
+//!   `packaging/uboot`; see [`uboot`]), `"ubi"` (the same on raw NAND, the record being the UBI
+//!   volume `boot-record` and the script `packaging/uboot/boot-ubi.cmd`; needs `ubi`) or
+//!   `"file"` (one `boot-record` file, for a loader with one fixed kernel; see [`boot`]).
+//!   `docs/slots.md` describes each.
+//! - `ubi`: on raw NAND, the UBI device (`"ubi0"`) whose static volumes hold the images, as
+//!   `slot-<id>` ([`lemnos_slot_store::ubi`]). `data` and `boot` are then where its UBIFS
+//!   volumes `data` and `boot` are mounted, and a slot's command line names the data volume as
+//!   `<boot_args>.data=UBI=ubi0:data`. Unset, the images are files on the data partition.
 //! - `systemctl`: the program that restarts the board, `"systemctl"` by default; it is run as
 //!   `systemctl reboot`, with `--reboot-argument=0 tryboot` for a trial.
 //! - `keys`: a file of the keys the board trusts, one per line: 64 hex digits, a space, and the
@@ -32,7 +38,8 @@
 //!   ([`manifest`] lists the manifest's keys).
 //! - `partuuid`: the data partition's PARTUUID, which a slot's kernel command line names. Found
 //!   from the mount table and `/dev/disk/by-partuuid` when not given.
-//! - `reserve_mb`: free space an install leaves on the data partition, 2048 by default.
+//! - `reserve_mb`: free space an install leaves on the data partition (on raw NAND, on the UBI
+//!   device), 2048 by default.
 //! - `keep`: how many slots housekeeping keeps when the board has no setting of its own, 3 by
 //!   default.
 //! - `running`: the running slot, for a test; read from `board/slots/booted` otherwise.
@@ -58,6 +65,7 @@ mod tests;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lemnos_contract_system_reboot::Reboot;
 use lemnos_contract_system_slots::Slots;
@@ -67,6 +75,7 @@ use boot::{BootRecord, FileRecord, Restarter, Tryboot};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 pub use install::{SIGNATURE_LEN, Signed, TrustedKey, parse_keys};
 use json::quoted;
+use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use uboot::Uboot;
 
@@ -88,6 +97,8 @@ pub struct SystemSlots {
     next_job: u64,
     /// The buffer an install from a file reads through, kept between ticks.
     read_buf: Vec<u8>,
+    /// On raw NAND, what changes the UBI device's volumes (`layout.ubi` names the device).
+    ubi_write: Option<Arc<dyn UbiWrite>>,
 }
 
 fn restarter(cfg: &Config<'_>) -> Restarter {
@@ -99,6 +110,18 @@ fn restarter(cfg: &Config<'_>) -> Restarter {
 impl SystemSlots {
     /// The driver over a layout and a boot record of the caller's choosing.
     pub fn new(layout: Layout, record: Box<dyn BootRecord>, keys: Vec<TrustedKey>) -> Self {
+        Self::with_volumes(layout, record, keys, None)
+    }
+
+    /// The driver with its images in UBI volumes, changed through `ubi_write`, when the layout
+    /// names a UBI device.
+    pub fn with_volumes(
+        layout: Layout,
+        record: Box<dyn BootRecord>,
+        keys: Vec<TrustedKey>,
+        ubi_write: Option<Arc<dyn UbiWrite>>,
+    ) -> Self {
+        let layout_has_ubi = layout.ubi.is_some();
         let mut slots = Self {
             layout,
             record,
@@ -114,6 +137,7 @@ impl SystemSlots {
             install: None,
             next_job: 0,
             read_buf: Vec::new(),
+            ubi_write: ubi_write.filter(|_| layout_has_ubi),
         };
         slots.clear_interrupted();
         // What a sender left in `.incoming` belongs to no install now.
@@ -123,7 +147,7 @@ impl SystemSlots {
 
     /// An install the service's restart cut short: its work goes, and the board's state says so.
     fn clear_interrupted(&mut self) {
-        if install::clear_leftovers(&self.layout) {
+        if install::clear_leftovers(&self.layout, self.ubi_write.as_deref()) {
             let mut state = State::load(&self.layout);
             if state.state == "staging" {
                 state.state = "error".into();
@@ -215,7 +239,7 @@ impl SystemSlots {
             layout: &self.layout,
             keys: &self.keys,
             require_signed: self.require_signed,
-            partuuid: &self.partuuid,
+            data: &self.data_spec(),
             boot_args: &self.boot_args,
             board_id: &self.board_id,
             guard: Guard {
@@ -270,10 +294,26 @@ impl SystemSlots {
         Err(Status::NOT_SUPPORTED)
     }
 
+    /// What the slot's initramfs finds the data partition by.
+    fn data_spec(&self) -> String {
+        match &self.layout.ubi {
+            Some(device) => format!("UBI={}:{}", device.device, ubi::DATA_VOLUME),
+            None if self.partuuid.is_empty() => String::new(),
+            None => format!("PARTUUID={}", self.partuuid),
+        }
+    }
+
+    /// The bytes free where images go: the data partition, or the UBI device.
+    fn free(&self) -> std::io::Result<u64> {
+        match &self.layout.ubi {
+            Some(device) => device.free(),
+            None => lemnos_linux_sys::statfs::free_bytes(&self.layout.images()),
+        }
+    }
+
     fn room(&self, size: u64) -> Result<()> {
         fs::create_dir_all(self.layout.images()).map_err(|_| Status::IO)?;
-        let free =
-            lemnos_linux_sys::statfs::free_bytes(&self.layout.images()).map_err(|_| Status::IO)?;
+        let free = self.free().map_err(|_| Status::IO)?;
         if free < size.saturating_add(self.reserve) {
             let mut state = self.state();
             state.error = format!(
@@ -309,9 +349,17 @@ impl SystemSlots {
         };
         self.next_job += 1;
         let job = JobId(self.next_job);
-        let mut install =
-            Install::start(&self.layout, self.calling, job, size, pin, keep_old, guard)
-                .map_err(|failure| failure.0)?;
+        let mut install = Install::start(
+            &self.layout,
+            self.calling,
+            job,
+            size,
+            pin,
+            keep_old,
+            guard,
+            self.ubi_write.clone(),
+        )
+        .map_err(|failure| failure.0)?;
         install.source = source;
         state.state = "staging".into();
         state.error.clear();
@@ -359,6 +407,12 @@ impl SystemSlots {
         if dir.exists() {
             fs::remove_dir_all(&dir).map_err(io)?;
             store::sync_dir(&self.layout.boot.join("slots")).map_err(io)?;
+        }
+        if let (Some(device), Some(writer)) = (&self.layout.ubi, &self.ubi_write) {
+            let volume = ubi::image_volume(id);
+            if device.volume(&volume).is_some() {
+                writer.remove(&volume).map_err(io)?;
+            }
         }
         for path in [
             self.layout.image(id),
@@ -470,7 +524,7 @@ impl SystemSlots {
             quoted(value, &mut out);
             out.push(',');
         }
-        let free = lemnos_linux_sys::statfs::free_bytes(&self.layout.data).unwrap_or(0);
+        let free = self.free().unwrap_or(0);
         out.push_str(&format!(
             "\"free_bytes\":{free},\"reserve_bytes\":{},\"keep\":{},\"slots\":[",
             self.reserve,
@@ -492,7 +546,7 @@ impl SystemSlots {
                     .to_string()
             };
             let meta = Meta::load(&self.layout, id);
-            let size = fs::metadata(self.layout.image(id)).map_or(0, |m| m.len());
+            let size = self.layout.image_size(id).unwrap_or(0);
             let want = manifest
                 .as_ref()
                 .and_then(|m| m.path("image.size"))
@@ -601,10 +655,19 @@ impl Lifecycle for SystemSlots {
     }
 
     fn start(_: SystemSlotsNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let layout = Layout {
-            data: PathBuf::from(cfg.str("data").unwrap_or("/data")),
-            boot: PathBuf::from(cfg.str("boot").unwrap_or("/boot/firmware")),
-        };
+        let mut layout = Layout::new(
+            PathBuf::from(cfg.str("data").unwrap_or("/data")),
+            PathBuf::from(cfg.str("boot").unwrap_or("/boot/firmware")),
+        );
+        layout.ubi = cfg.str("ubi").map(|device| Ubi {
+            sys: PathBuf::from("/sys"),
+            dev: PathBuf::from("/dev"),
+            device: device.to_string(),
+        });
+        let ubi_write: Option<Arc<dyn UbiWrite>> = layout
+            .ubi
+            .clone()
+            .map(|ubi| Arc::new(ubi::System { ubi }) as Arc<dyn UbiWrite>);
         let record: Box<dyn BootRecord> = match cfg.str("record").unwrap_or("tryboot") {
             "tryboot" => Box::new(Tryboot {
                 boot: layout.boot.clone(),
@@ -617,7 +680,16 @@ impl Lifecycle for SystemSlots {
             "uboot" => Box::new(Uboot {
                 boot: layout.boot.clone(),
                 restarter: restarter(cfg),
+                volume: None,
             }),
+            "ubi" => match (&layout.ubi, &ubi_write) {
+                (Some(device), Some(writer)) => Box::new(Uboot {
+                    boot: layout.boot.clone(),
+                    restarter: restarter(cfg),
+                    volume: Some((device.clone(), writer.clone())),
+                }),
+                _ => return Err(Status::INVALID_ARGUMENT),
+            },
             _ => return Err(Status::INVALID_ARGUMENT),
         };
         // A key file that can't be read leaves the board trusting no bundle, which every
@@ -627,7 +699,7 @@ impl Lifecycle for SystemSlots {
             .and_then(|path| fs::read_to_string(path).ok())
             .and_then(|text| parse_keys(&text).ok())
             .unwrap_or_default();
-        let mut slots = Self::new(layout, record, keys);
+        let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
         slots.partuuid = cfg
             .str("partuuid")
             .map(str::to_string)

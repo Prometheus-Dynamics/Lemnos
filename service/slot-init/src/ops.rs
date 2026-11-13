@@ -3,10 +3,11 @@
 //! mounted partitions are read and written directly: in the tests those are temporary
 //! directories.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lemnos_slot_store::manifest::Verity;
+use lemnos_slot_store::ubi::Ubi;
 
 /// What `/init` does to the system. Each failure is a sentence for the log.
 pub trait Ops {
@@ -20,9 +21,14 @@ pub trait Ops {
     fn umount(&self, target: &Path);
     /// Loads a kernel module for the running kernel `release`, and what it needs first.
     fn load_module(&self, name: &str, release: &str) -> Result<(), String>;
-    /// A read-only loop device over `image` and a dm-verity device named `name` over that, as
-    /// `verity` describes. Returns the verity device's node.
+    /// A dm-verity device named `name` over `image`, as `verity` describes: through a read-only
+    /// loop device when `image` is a file, directly when it is a block device. Returns the verity
+    /// device's node.
     fn open_verity(&self, image: &Path, name: &str, verity: &Verity) -> Result<String, String>;
+    /// The read-only block device over UBI volume `name` (`ubiblockN_M`): its node.
+    fn ubi_block(&self, ubi: &Ubi, name: &str) -> Result<PathBuf, String>;
+    /// Replaces UBI volume `name` with `bytes`, atomically (written beside, renamed over).
+    fn ubi_replace(&self, ubi: &Ubi, name: &str, bytes: &[u8]) -> Result<(), String>;
     /// The kernel's log, for keeping after a failure.
     fn kernel_log(&self) -> String;
     fn sync(&self);

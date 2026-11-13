@@ -36,6 +36,7 @@ pub mod signal;
 pub mod spi;
 pub mod statfs;
 pub mod time;
+pub mod ubi;
 pub mod udmabuf;
 pub mod usbfs;
 pub mod user;

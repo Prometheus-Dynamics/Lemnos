@@ -4,6 +4,7 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use lemnos_core::{CallerId, JobId, Status};
@@ -14,6 +15,7 @@ use crate::json::Json;
 use crate::manifest::Manifest;
 use crate::store::{Layout, Meta, valid_id};
 use crate::tar::{Kind, Sink, Tar};
+use lemnos_slot_store::ubi::{self, UbiWrite};
 
 /// The largest manifest taken.
 const MAX_MANIFEST: u64 = 64 * 1024;
@@ -151,9 +153,17 @@ struct Writing {
     unsynced: u64,
 }
 
-/// The tar's members, into the work directory.
+/// Where the image goes while it comes, on raw NAND: the device's writer and the work volume.
+#[derive(Clone)]
+struct WorkVolume {
+    writer: Arc<dyn UbiWrite>,
+    name: String,
+}
+
+/// The tar's members, into the work directory (and the image into its work volume on raw NAND).
 struct Unpack {
     work: PathBuf,
+    volume: Option<WorkVolume>,
     guard: Guard,
     manifest: Vec<u8>,
     signature: Vec<u8>,
@@ -200,6 +210,30 @@ impl Sink for Unpack {
             (Member::Manifest | Member::Signature, _) => {
                 self.current = Some((what, None));
                 Ok(())
+            }
+            (Member::Root, _) if self.volume.is_some() => {
+                let Some(volume) = self.volume.clone() else {
+                    return Ok(());
+                };
+                let opened = volume
+                    .writer
+                    .make(&volume.name, size)
+                    .and_then(|()| volume.writer.update(&volume.name, size));
+                match opened {
+                    Ok(file) => {
+                        self.current = Some((
+                            what,
+                            Some(Writing {
+                                file,
+                                hasher: Sha256::new(),
+                                name: name.to_string(),
+                                unsynced: 0,
+                            }),
+                        ));
+                        Ok(())
+                    }
+                    Err(error) => self.fail(disk("the image's volume")(error)),
+                }
             }
             (Member::Root | Member::Boot, _) => {
                 let path = self.work.join(name);
@@ -284,7 +318,9 @@ pub struct Finish<'a> {
     /// Refuse a bundle not signed by a trusted key. Off, such a bundle installs and its slot
     /// shows as untrusted or unsigned.
     pub require_signed: bool,
-    pub partuuid: &'a str,
+    /// What the slot's initramfs finds the data partition by: `PARTUUID=<id>`, or
+    /// `UBI=<device>:data` on raw NAND. Empty when it isn't known.
+    pub data: &'a str,
     pub boot_args: &'a str,
     /// The board file's `[board] id`: a slot built for another board is refused.
     pub board_id: &'a str,
@@ -403,8 +439,21 @@ impl Install {
         pin: bool,
         keep_old: bool,
         guard: Guard,
+        writer: Option<Arc<dyn UbiWrite>>,
     ) -> Result<Self, Failure> {
         let work = layout.images().join(format!("{WORK_PREFIX}{}", job.0));
+        let volume = writer.map(|writer| WorkVolume {
+            writer,
+            name: ubi::work_volume(job.0),
+        });
+        if let (Some(volume), Some(device)) = (&volume, &layout.ubi)
+            && device.volume(&volume.name).is_some()
+        {
+            volume
+                .writer
+                .remove(&volume.name)
+                .map_err(disk("the work volume"))?;
+        }
         let _ = fs::remove_dir_all(&work);
         fs::create_dir_all(&work).map_err(disk("the work directory"))?;
         Ok(Self {
@@ -417,6 +466,7 @@ impl Install {
             tar: Tar::default(),
             unpack: Unpack {
                 work,
+                volume,
                 guard,
                 manifest: Vec::new(),
                 signature: Vec::new(),
@@ -532,9 +582,12 @@ impl Install {
                 .map(|(_, sha)| sha.as_str())
         };
         let root = unpack.work.join("rootfs.erofs");
-        let size = fs::metadata(&root)
-            .map_err(|_| bad("not a slot bundle: no rootfs.erofs"))?
-            .len();
+        let size = match (&unpack.volume, &board.layout.ubi) {
+            (Some(volume), Some(device)) => device.volume(&volume.name).map(|v| v.bytes),
+            _ => fs::metadata(&root).ok().map(|m| m.len()),
+        }
+        .filter(|_| hash_of("rootfs.erofs").is_some())
+        .ok_or_else(|| bad("not a slot bundle: no rootfs.erofs"))?;
         if size != image_size {
             return Err(bad("rootfs.erofs isn't the size slot.json says"));
         }
@@ -560,7 +613,7 @@ impl Install {
         let base = fs::read_to_string(boot_dir.join("cmdline.txt"))
             .map_err(|_| bad("the bundle has no boot/cmdline.txt"))?;
         let base = base.split_whitespace().collect::<Vec<_>>().join(" ");
-        if board.partuuid.is_empty() {
+        if board.data.is_empty() {
             return Err((
                 Status::NO_DEVICE,
                 "the data partition's PARTUUID isn't known".into(),
@@ -586,8 +639,8 @@ impl Install {
             .map_err(&io)?;
         }
         let cmdline = format!(
-            "{base} {args}.slot={id} {args}.roothash={root_hash} {args}.data=PARTUUID={} panic=5",
-            board.partuuid
+            "{base} {args}.slot={id} {args}.roothash={root_hash} {args}.data={} panic=5",
+            board.data
         );
         fs::write(boot_dir.join("cmdline.txt"), format!("{cmdline}\n")).map_err(&io)?;
         board
@@ -606,7 +659,13 @@ impl Install {
         File::open(&manifest_tmp)
             .and_then(|f| f.sync_all())
             .map_err(&io)?;
-        fs::rename(&root, layout.image(&id)).map_err(&io)?;
+        match &unpack.volume {
+            Some(volume) => volume
+                .writer
+                .rename(&volume.name, &ubi::image_volume(&id))
+                .map_err(disk("the image's volume"))?,
+            None => fs::rename(&root, layout.image(&id)).map_err(&io)?,
+        }
         crate::store::sync_dir(&images).map_err(&io)?;
         fs::rename(&manifest_tmp, layout.manifest(&id)).map_err(&io)?;
         crate::store::sync_dir(&images).map_err(&io)?;
@@ -632,6 +691,9 @@ impl Install {
     /// Removes what came so far.
     pub fn discard(&mut self) {
         let _ = fs::remove_dir_all(&self.unpack.work);
+        if let Some(volume) = &self.unpack.volume {
+            let _ = volume.writer.remove(&volume.name);
+        }
         self.drop_source();
     }
 
@@ -671,8 +733,16 @@ impl Install {
 }
 
 /// Work an install left when the service stopped in the middle: removed. Whether there was any.
-pub fn clear_leftovers(layout: &Layout) -> bool {
+pub fn clear_leftovers(layout: &Layout, writer: Option<&dyn UbiWrite>) -> bool {
     let mut found = false;
+    if let (Some(device), Some(writer)) = (&layout.ubi, writer) {
+        for volume in device.volumes() {
+            if volume.name.starts_with(ubi::WORK_PREFIX) {
+                found = true;
+                let _ = writer.remove(&volume.name);
+            }
+        }
+    }
     for entry in fs::read_dir(layout.images())
         .into_iter()
         .flatten()

@@ -7,6 +7,7 @@ use super::*;
 use crate::tests::TempDir;
 
 const SCRIPT: &str = include_str!("../../../../packaging/uboot/boot.cmd");
+const SCRIPT_UBI: &str = include_str!("../../../../packaging/uboot/boot-ubi.cmd");
 
 fn files(names: &[&str]) -> Vec<String> {
     names.iter().map(|n| n.to_string()).collect()
@@ -199,16 +200,14 @@ fn what_cant_go_into_the_configuration_is_refused() {
 #[test]
 fn the_driver_writes_the_record_whole_and_keeps_the_root_copy() {
     let dir = TempDir::new("uboot");
-    let layout = Layout {
-        data: dir.0.join("data"),
-        boot: dir.0.join("boot"),
-    };
+    let layout = Layout::new(dir.0.join("data"), dir.0.join("boot"));
     fs::create_dir_all(layout.boot_dir("os-1")).unwrap();
     let mut record = Uboot {
         boot: layout.boot.clone(),
         restarter: Restarter {
             systemctl: "/nonexistent/systemctl".into(),
         },
+        volume: None,
     };
     record.set_default("os-1").unwrap();
     record.set_trial("os-2").unwrap();
@@ -245,4 +244,60 @@ fn the_driver_writes_the_record_whole_and_keeps_the_root_copy() {
     );
     // No kernel at the root: U-Boot reads it from the slot's directory.
     assert!(!layout.boot.join("Image").exists());
+}
+
+#[test]
+fn the_nand_script_mirrors_the_same_decision_over_the_record_volume() {
+    use lemnos_slot_store::ubi::{BOOT_VOLUME, RECORD_VOLUME};
+    let at = |needle: &str| {
+        SCRIPT_UBI
+            .find(needle)
+            .unwrap_or_else(|| panic!("the script has no `{needle}`"))
+    };
+    let mount = at(&format!("ubifsmount ubi0:{BOOT_VOLUME}"));
+    let read = at(&format!("ubi read ${{scriptaddr}} {RECORD_VOLUME}"));
+    let import = at(&format!(
+        "env import -t ${{scriptaddr}} ${{filesize}} {}",
+        KEYS.join(" ")
+    ));
+    let armed_test = at(r#"test "${trial_armed}" = "1" && test -n "${trial}""#);
+    let disarm = at("setenv trial_armed 0");
+    let export = at(&format!("env export -t ${{scriptaddr}} {}", KEYS.join(" ")));
+    let write = at(&format!(
+        "ubi write ${{scriptaddr}} {RECORD_VOLUME} ${{filesize}}"
+    ));
+    let trial = at(&format!("/slots/${{trial}}/{EXTLINUX}"));
+    let default = at(&format!("/slots/${{default}}/{EXTLINUX}"));
+    let root = SCRIPT_UBI.rfind("/extlinux/extlinux.conf").unwrap();
+    assert!(mount < read && read < import && import < armed_test);
+    assert!(armed_test < disarm && disarm < export && export < write && write < trial);
+    assert!(trial < default && default < root);
+    // Every boot goes through the UBIFS boot volume, and the last resort is the root copy.
+    for line in SCRIPT_UBI
+        .lines()
+        .filter(|l| l.trim_start().starts_with("sysboot"))
+    {
+        assert!(
+            line.contains(&format!(
+                "sysboot ubi 0:{BOOT_VOLUME} any ${{pxefile_addr_r}} "
+            )),
+            "{line}"
+        );
+    }
+    assert!(
+        SCRIPT_UBI
+            .lines()
+            .last()
+            .unwrap()
+            .ends_with(" /extlinux/extlinux.conf")
+    );
+    assert!(SCRIPT_UBI.contains("ubi part ${ubi_mtd}"));
+    for banned in ["saveenv", "bootcount", "bootlimit", "mmc ", "load "] {
+        assert!(!SCRIPT_UBI.contains(banned), "{banned}");
+    }
+    // The decision table is the same one the file record's script follows.
+    assert_eq!(
+        SCRIPT_UBI.matches("sysboot").count(),
+        SCRIPT.matches("sysboot").count()
+    );
 }

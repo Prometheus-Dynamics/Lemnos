@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! slots/<id>.erofs            the root filesystem image, its dm-verity hash tree appended
+//!                             (on raw NAND, the UBI volume slot-<id> instead: see crate::ubi)
 //! slots/<id>.json             its manifest
 //! slots/<id>.boot             "<sha256>  <path>" for each file of its boot directory
 //! slots/bootfiles/<sha256>    those files, kept by content
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{Json, quoted};
+use crate::ubi::Ubi;
 
 /// How many slots housekeeping keeps when nothing says otherwise.
 pub const DEFAULT_KEEP: u32 = 3;
@@ -36,9 +38,32 @@ pub struct Layout {
     pub data: PathBuf,
     /// The boot partition's mount point.
     pub boot: PathBuf,
+    /// On raw NAND, the UBI device whose volumes hold the images ([`crate::ubi`]); `None` keeps
+    /// them as files on the data partition.
+    pub ubi: Option<Ubi>,
 }
 
 impl Layout {
+    /// The images as files.
+    pub fn new(data: impl Into<PathBuf>, boot: impl Into<PathBuf>) -> Self {
+        Self {
+            data: data.into(),
+            boot: boot.into(),
+            ubi: None,
+        }
+    }
+
+    /// Slot `id`'s image's size: its file's, or its volume's.
+    pub fn image_size(&self, id: &str) -> Option<u64> {
+        match &self.ubi {
+            None => fs::metadata(self.image(id))
+                .ok()
+                .filter(fs::Metadata::is_file)
+                .map(|m| m.len()),
+            Some(ubi) => ubi.volume(&crate::ubi::image_volume(id)).map(|v| v.bytes),
+        }
+    }
+
     pub fn images(&self) -> PathBuf {
         self.data.join("slots")
     }
@@ -78,7 +103,7 @@ impl Layout {
 
     /// Whether a slot is installed: its manifest and its image.
     pub fn installed(&self, id: &str) -> bool {
-        valid_id(id) && self.manifest(id).is_file() && self.image(id).is_file()
+        valid_id(id) && self.manifest(id).is_file() && self.image_size(id).is_some()
     }
 
     /// Every installed slot, by id.
@@ -384,10 +409,7 @@ mod tests {
     #[test]
     fn state_round_trips_and_writes_state_json_for_the_initramfs() {
         let dir = TempDir::new("state");
-        let layout = Layout {
-            data: dir.0.clone(),
-            boot: dir.0.join("boot"),
-        };
+        let layout = Layout::new(dir.0.clone(), dir.0.join("boot"));
         let state = State {
             default: "a-1".into(),
             previous: String::new(),
@@ -414,10 +436,7 @@ mod tests {
     #[test]
     fn a_fresh_board_has_its_default_from_state_json() {
         let dir = TempDir::new("fresh");
-        let layout = Layout {
-            data: dir.0.clone(),
-            boot: dir.0.join("boot"),
-        };
+        let layout = Layout::new(dir.0.clone(), dir.0.join("boot"));
         fs::create_dir_all(layout.state_dir()).unwrap();
         fs::write(
             layout.marker("state.json"),
@@ -432,10 +451,7 @@ mod tests {
     #[test]
     fn meta_reads_what_the_shell_wrote() {
         let dir = TempDir::new("meta");
-        let layout = Layout {
-            data: dir.0.clone(),
-            boot: dir.0.join("boot"),
-        };
+        let layout = Layout::new(dir.0.clone(), dir.0.join("boot"));
         fs::create_dir_all(layout.state_dir()).unwrap();
         fs::write(
             layout.meta("a"),

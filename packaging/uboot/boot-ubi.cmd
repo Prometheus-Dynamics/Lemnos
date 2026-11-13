@@ -1,0 +1,28 @@
+# Starts the board's slot on raw NAND from the record the slot driver keeps (record = "ubi").
+# Build: mkimage -A <arch> -O linux -T script -C none -d boot-ubi.cmd boot.scr
+# It takes the MTD partition that holds UBI from ubi_mtd (the board's default environment sets
+# it), and needs the ubi and ubifsmount commands, sysboot over UBIFS, env import and export, and
+# test. The record is the static volume boot-record; the slots' kernels and extlinux.conf files
+# are in the UBIFS volume boot. It never uses the saved U-Boot environment or a boot count.
+
+setenv default
+setenv trial
+setenv trial_armed
+
+ubi part ${ubi_mtd}
+ubifsmount ubi0:boot
+if ubi read ${scriptaddr} boot-record; then
+	env import -t ${scriptaddr} ${filesize} default trial trial_armed
+	if test "${trial_armed}" = "1" && test -n "${trial}"; then
+		# One shot: the record says disarmed before the trial's kernel runs.
+		setenv trial_armed 0
+		env export -t ${scriptaddr} default trial trial_armed
+		if ubi write ${scriptaddr} boot-record ${filesize}; then
+			sysboot ubi 0:boot any ${pxefile_addr_r} /slots/${trial}/extlinux/extlinux.conf
+		fi
+	fi
+	if test -n "${default}"; then
+		sysboot ubi 0:boot any ${pxefile_addr_r} /slots/${default}/extlinux/extlinux.conf
+	fi
+fi
+sysboot ubi 0:boot any ${pxefile_addr_r} /extlinux/extlinux.conf

@@ -364,10 +364,7 @@ mod tests {
     use crate::tests::TempDir;
 
     fn layout(dir: &TempDir) -> Layout {
-        let layout = Layout {
-            data: dir.0.join("data"),
-            boot: dir.0.join("boot"),
-        };
+        let layout = Layout::new(dir.0.join("data"), dir.0.join("boot"));
         fs::create_dir_all(layout.images()).unwrap();
         fs::create_dir_all(layout.boot.join("slots")).unwrap();
         layout

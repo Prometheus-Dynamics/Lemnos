@@ -1729,6 +1729,9 @@ dependencies = [
 [[package]]
 name = "lemnos-slot-store"
 version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+]
 
 [[package]]
 name = "lemnos-soc"

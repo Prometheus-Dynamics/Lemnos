@@ -280,10 +280,44 @@ What this gives up: every slot runs the default's kernel. A slot whose image nee
 kernel can't boot until it is the default. Even then the root copy changes only on `confirm` or
 `set_default`, so a trial of a new kernel isn't possible.
 
-### Raw NAND
+### Raw NAND, over UBI
 
-On raw NAND, the same contract works over UBI volumes, and the record is a tiny static UBI
-volume. That backend is a later PR. It isn't in the tree yet.
+On a board whose storage is raw NAND, the same slots live in UBI volumes. Set `ubi = "ubi0"`
+and `record = "ubi"`. The volumes on that UBI device are:
+
+| Volume | Type | What it holds |
+|---|---|---|
+| `data` | dynamic, UBIFS | the data directory, mounted at `data` |
+| `boot` | dynamic, UBIFS | the boot directory, mounted at `boot`: `slots/<id>/` with each slot's kernel and `extlinux.conf` |
+| `slot-<id>` | static | the slot's image with its hash tree, exactly `image.size` bytes |
+| `slot-new-<n>` | static | an image while install job `n` writes it |
+| `boot-record` | static | the U-Boot record, the same three lines as `boot-record.env` |
+
+- **An install** makes `slot-new-<n>` the size of `rootfs.erofs`, writes it whole as the bundle
+  streams in (`UBI_IOCVOLUP`), checks it like a file, and renames it to `slot-<id>`. UBI renames
+  atomically and removes a volume already called `slot-<id>` in the same step. A refused,
+  cancelled or interrupted install removes its work volume. `remove` removes the slot's volume.
+  `accept` and the reserve count the UBI device's free erase blocks.
+- **The record** is replaced whole: written to `boot-record-new`, then renamed over
+  `boot-record`. A power cut leaves the old record or the new one.
+- **The loader** runs `packaging/uboot/boot-ubi.cmd`. It is the `uboot` script's decision over
+  the volume:
+  - `ubi part ${ubi_mtd}` and `ubifsmount ubi0:boot`;
+  - `ubi read` the record;
+  - for an armed trial, `ubi write` it back disarmed, then sysboot the trial;
+  - then the default;
+  - then `/extlinux/extlinux.conf`.
+
+  U-Boot's `ubi write` of the record isn't atomic. A power cut in it leaves the volume
+  unreadable, and the script then boots the root copy, which is the default's.
+- **The kernel** attaches UBI itself: a slot's `boot/cmdline.txt` must carry `ubi.mtd=<n>`.
+  `lemnos-slot-init` reads `<boot_args>.data=UBI=ubi0:data`. It mounts the data and boot
+  volumes as UBIFS, makes a read-only `ubiblock` device over `slot-<id>`, and opens dm-verity on
+  it. A fallback writes its trial into `boot-record` the same atomic way.
+
+The script and the UBI calls have run only against fakes. The tests check the volume names, the
+structures and request numbers against `mtd/ubi-user.h`, and the script's text against the
+decision table. `testing/board-runs/I5c.md` is the board run.
 
 ## Booting a slot: `lemnos-slot-init`
 
@@ -304,7 +338,8 @@ kernel needs devtmpfs, ext4, vfat, EROFS, loop and dm-verity.
 
 1. It mounts `/proc`, `/sys` and `/dev`, and reads the slot arguments from the kernel command
    line. The prefix is whatever stands before `.slot=` (the driver's `boot_args`).
-2. It finds the data partition from `<prefix>.data=`, `PARTUUID=` (MBR or GPT) or `LABEL=` (ext4),
+2. It finds the data partition from `<prefix>.data=`, `PARTUUID=` (MBR or GPT), `LABEL=` (ext4) or
+   `UBI=<device>:<volume>` (raw NAND, below),
    from `/sys/class/block` and the disks themselves. It waits up to 10 s, and if nothing answers it
    takes the partition labelled `data`. A filesystem whose superblock records errors is mounted
    read-only. There is no fsck here.
@@ -348,7 +383,8 @@ fails without it:
 
    Only a slot whose boot directory is on the boot partition can be started.
    - The trial goes into the record the boot partition holds: `trial.txt` and a `0 tryboot`
-     restart, `boot-record.env` with `trial_armed=1`, or `boot-record`'s `trial=`.
+     restart, `boot-record.env` with `trial_armed=1`, `boot-record`'s `trial=`, or on raw NAND the
+     `boot-record` volume with `trial_armed=1`.
    - The board's state gets `TRIAL` set to that slot, so a `confirm` from it makes it the default:
      the board has rolled back.
 4. **With no candidate**, such as a board with one slot, the board waits, then restarts into the
@@ -368,6 +404,7 @@ for `/`, with a fake for every system call. `testing/board-runs/I5d.md` is the b
 id = "slots"
 driver = "system-slots"
 config = { data = "/data", boot = "/boot/firmware", record = "tryboot", keys = "/etc/lemnos/slot-keys", boot_args = "os", require_signed = false, reserve_mb = 2048, keep = 3 }
+# On raw NAND: config = { data = "/data", boot = "/boot", ubi = "ubi0", record = "ubi", boot_args = "os" }
 
 [[devices]]
 id = "reboot"

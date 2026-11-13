@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use lemnos_slot_store::manifest::{BLOCK, Verity, tree_bytes};
 use lemnos_slot_store::store::{Layout, Meta, State};
+use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 
 use super::{BOOT_LOG, DATA_LOG, Env, boot};
 use crate::decide::MAX_FALLBACKS;
@@ -34,6 +35,8 @@ struct Fake {
     calls: RefCell<Vec<String>>,
     logs: RefCell<Vec<String>>,
     refuse: Vec<&'static str>,
+    /// On a NAND board, the UBI device.
+    nand: Option<ubi::Fake>,
 }
 
 impl Fake {
@@ -103,6 +106,18 @@ impl Ops for Fake {
         .map(|()| "/dev/dm-0".to_string())
     }
 
+    fn ubi_block(&self, ubi: &Ubi, name: &str) -> Result<PathBuf, String> {
+        self.call(format!("ubiblock {} {name}", ubi.device))?;
+        let device = self.nand.as_ref().ok_or("no UBI device")?;
+        device.block(name).map_err(|e| e.to_string())
+    }
+
+    fn ubi_replace(&self, ubi: &Ubi, name: &str, bytes: &[u8]) -> Result<(), String> {
+        self.call(format!("ubi replace {name}"))?;
+        let device = self.nand.as_ref().ok_or("no UBI device")?;
+        ubi::replace(ubi, device, name, bytes).map_err(|e| e.to_string())
+    }
+
     fn kernel_log(&self) -> String {
         "the kernel's log\n".into()
     }
@@ -133,6 +148,8 @@ struct Board {
     _dir: Root,
     env: Env,
     layout: Layout,
+    /// On raw NAND: the UBI device's description.
+    nand: Option<Ubi>,
 }
 
 impl Board {
@@ -153,11 +170,9 @@ impl Board {
         };
         let board = Self {
             _dir: Root(root.clone()),
-            layout: Layout {
-                data: root.join("data"),
-                boot: root.join("boot"),
-            },
+            layout: Layout::new(root.join("data"), root.join("boot")),
             env,
+            nand: None,
         };
         fs::create_dir_all(board.env.dev.clone()).unwrap();
         let mut mbr = vec![0u8; 512];
@@ -256,9 +271,57 @@ impl Board {
             calls: RefCell::new(Vec::new()),
             logs: RefCell::new(Vec::new()),
             refuse: refuse.to_vec(),
+            nand: self.nand.clone().map(|ubi| ubi::Fake {
+                ubi,
+                refuse: std::sync::Mutex::new(Vec::new()),
+            }),
         };
         let why = boot(&fake, &self.env);
         (fake, why)
+    }
+
+    /// The same board on raw NAND: the data and boot directories are UBIFS volumes (here plain
+    /// directories), the images static volumes, and the record the volume `boot-record`.
+    fn nand() -> Self {
+        let mut board = Self::new();
+        let ubi = Ubi {
+            sys: board.env.sys.clone(),
+            dev: board.env.dev.clone(),
+            device: "ubi0".into(),
+        };
+        let device = ubi::Fake::new(ubi.clone(), 64 << 20);
+        device.put("data", b"");
+        device.put("boot", b"");
+        for id in ["os-1", "os-2"] {
+            let file = board.env.at(&format!("data/slots/{id}.erofs"));
+            device.put(&ubi::image_volume(id), &fs::read(&file).unwrap());
+            fs::remove_file(file).unwrap();
+        }
+        device.put(ubi::RECORD_VOLUME, b"default=os-2\ntrial=\ntrial_armed=0\n");
+        fs::remove_file(board.env.at("boot/default.txt")).unwrap();
+        board.write(
+            "proc/cmdline",
+            format!(
+                "os.slot=os-2 os.roothash={} os.data=UBI=ubi0:data",
+                hash("os-2")
+            )
+            .as_bytes(),
+        );
+        board.layout.ubi = Some(ubi.clone());
+        board.nand = Some(ubi);
+        board
+    }
+
+    fn record_volume(&self) -> String {
+        String::from_utf8(
+            self.layout
+                .ubi
+                .as_ref()
+                .unwrap()
+                .read(ubi::RECORD_VOLUME)
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     fn meta(&self, id: &str) -> Meta {
@@ -606,4 +669,111 @@ fn a_boot_partition_that_wont_mount_still_boots_the_command_lines_slot() {
     let (fake, why) = board.boot(&["mount vfat"]);
     assert_eq!(why, "");
     assert_eq!(fake.last(), "switch_root newroot");
+}
+
+#[test]
+fn on_nand_the_slot_boots_from_its_volume_through_ubiblock() {
+    let board = Board::nand();
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    let calls = fake.calls();
+    assert!(
+        calls.contains(&"mount ubifs noatime ubi0:data data".to_string()),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&"mount ubifs ro ubi0:boot boot".to_string()),
+        "{calls:?}"
+    );
+    let block = calls
+        .iter()
+        .position(|c| c == "ubiblock ubi0 slot-os-2")
+        .unwrap();
+    let verity = calls
+        .iter()
+        .position(|c| c.starts_with("verity dev/ubiblock0_"))
+        .unwrap();
+    assert!(block < verity, "{calls:?}");
+    assert!(!fake.called("verity data/"), "no loop over a file");
+    assert_eq!(fake.last(), "switch_root newroot");
+}
+
+#[test]
+fn on_nand_a_cut_short_volume_falls_back_through_the_record_volume() {
+    let board = Board::nand();
+    let device = ubi::Fake {
+        ubi: board.nand.clone().unwrap(),
+        refuse: std::sync::Mutex::new(Vec::new()),
+    };
+    device.remove("slot-os-2").unwrap();
+    device.put("slot-os-2", &[0u8; 2048]);
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains("cut short"), "{why}");
+    assert!(!fake.called("ubiblock"));
+    assert!(fake.called("ubi replace boot-record"));
+    assert_eq!(
+        board.record_volume(),
+        "default=os-2\ntrial=os-1\ntrial_armed=1\n"
+    );
+    assert_eq!(fake.last(), "restart");
+    assert_eq!(board.meta("os-2").get("FAILED"), "yes");
+}
+
+#[test]
+fn on_nand_a_verity_failure_falls_back_and_the_default_stays() {
+    let board = Board::nand();
+    let (fake, _) = board.boot(&["verity "]);
+    assert_eq!(
+        board.record_volume(),
+        "default=os-2\ntrial=os-1\ntrial_armed=1\n"
+    );
+    assert!(board.meta("os-2").get("FAIL_REASON").contains("dm-verity"));
+    assert!(fake.called("mount ubifs rw ubi0:boot boot"));
+    assert_eq!(
+        board.read(&format!("boot/{BOOT_LOG}")),
+        "the kernel's log\n"
+    );
+    assert_eq!(fake.last(), "restart");
+}
+
+#[test]
+fn on_nand_a_missing_data_volume_waits_and_restarts() {
+    let board = Board::nand();
+    board.write(
+        "proc/cmdline",
+        format!(
+            "os.slot=os-2 os.roothash={} os.data=UBI=ubi0:other",
+            hash("os-2")
+        )
+        .as_bytes(),
+    );
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains("no data volume"), "{why}");
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|l| l.contains("has no volume other"))
+    );
+    assert_eq!(fake.last(), "restart");
+}
+
+#[test]
+fn on_nand_a_failed_trial_restarts_plainly_and_leaves_the_record() {
+    let board = Board::nand();
+    board.write(
+        "proc/cmdline",
+        format!(
+            "os.slot=os-1 os.roothash={} os.data=UBI=ubi0:data",
+            hash("os-1")
+        )
+        .as_bytes(),
+    );
+    let (fake, _) = board.boot(&["verity "]);
+    assert_eq!(fake.last(), "restart");
+    assert!(!fake.called("ubi replace"));
+    assert_eq!(
+        board.record_volume(),
+        "default=os-2\ntrial=\ntrial_armed=0\n"
+    );
 }
