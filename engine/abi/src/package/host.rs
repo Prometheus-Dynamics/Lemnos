@@ -6,9 +6,10 @@ use core::ffi::c_void;
 use super::{
     ClocksHost, ClocksTable, DeviceHost, DeviceTable, DmaHost, DmaTable, DriverTable, HostTable,
     I2cHost, I2cTable, InterruptHost, InterruptTable, LineHost, LineTable, NO_TICK, Out,
-    PackageHealth, PackageItem, PackageSetting, PwmHost, PwmTable, RegistersHost, RegistersTable,
-    ResetHost, ResetTable, Slice, SliceMut, SpiHost, SpiTable, Str, StreamHost, StreamTable,
-    UartHost, UartTable, UsbDeviceHost, UsbDeviceTable, UsbFunctionHost, UsbFunctionTable,
+    PackageHealth, PackageItem, PackageJobState, PackageSetting, PwmHost, PwmTable, RegistersHost,
+    RegistersTable, ResetHost, ResetTable, Slice, SliceMut, SpiHost, SpiTable, Str, StreamHost,
+    StreamTable, UartHost, UartTable, UsbDeviceHost, UsbDeviceTable, UsbFunctionHost,
+    UsbFunctionTable,
 };
 use crate::{Handle, Status, guard, guard_or};
 
@@ -195,6 +196,25 @@ impl Loaded {
 
     pub fn caller_gone(&mut self, caller: u64) -> Status {
         (self.table.caller_gone)(self.driver, caller)
+    }
+
+    /// How a long job stands, and its result's length once it has finished.
+    pub fn job(&mut self, job: u64, result: &mut [u8]) -> Result<(PackageJobState, usize), Status> {
+        let room = result.len();
+        let mut len = 0;
+        let mut state = PackageJobState::default();
+        let status = (self.table.job)(
+            self.driver,
+            job,
+            SliceMut::new(result),
+            Out::new(&mut len),
+            Out::new(&mut state),
+        );
+        status.into_result().map(|_| (state, len.min(room)))
+    }
+
+    pub fn job_cancel(&mut self, job: u64) -> Status {
+        (self.table.job_cancel)(self.driver, job)
     }
 }
 

@@ -103,7 +103,7 @@ impl Core {
     }
 
     /// Ends the event loop's current wait, or the next one if it isn't waiting.
-    fn wake(&self) {
+    pub(crate) fn wake(&self) {
         let _guard = lock(&self.stop_lock);
         self.woken.store(true, Ordering::Relaxed);
         self.stop_wake.notify_all();

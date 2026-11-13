@@ -49,6 +49,8 @@ pub struct Control {
     /// with.
     pub package_asks: AtomicU32,
     pub package_mode: AtomicU32,
+    /// Every job cancel asked for.
+    pub cancels: Mutex<Vec<u64>>,
 }
 
 pub struct FakeHost {
@@ -261,6 +263,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             params: &[],
                             returns: Shape::U8,
                             has_out_buffer: false,
+                            job: false,
                         }],
                     };
                     let manifest = Manifest {
@@ -395,6 +398,49 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             }
                         }
                     }
+                }
+                // A job's first argument byte says how it runs: 0 ends at once with its
+                // arguments as the result, after one step of progress; 1 does the same but sends
+                // it all before JobStarted, as the service may; 2 runs until cancelled.
+                Frame::CallJob { id, args, .. } => {
+                    let job = u64::from(session) << 32 | u64::from(id);
+                    let how = args.first().copied().unwrap_or(0);
+                    if how != 1 {
+                        send(Frame::JobStarted { id, job }, &mut out);
+                    }
+                    send(
+                        Frame::JobProgress {
+                            job,
+                            done: 1,
+                            total: 2,
+                        },
+                        &mut out,
+                    );
+                    if how != 2 {
+                        send(
+                            Frame::JobDone {
+                                job,
+                                status: 0,
+                                bytes: args,
+                            },
+                            &mut out,
+                        );
+                    }
+                    if how == 1 {
+                        send(Frame::JobStarted { id, job }, &mut out);
+                    }
+                }
+                Frame::JobCancel { id, job } => {
+                    control.cancels.lock().unwrap().push(job);
+                    send(Frame::Reply { id, bytes: &[] }, &mut out);
+                    send(
+                        Frame::JobDone {
+                            job,
+                            status: -125,
+                            bytes: &[],
+                        },
+                        &mut out,
+                    );
                 }
                 Frame::SetPower { id, .. } => {
                     control.power_calls.fetch_add(1, Ordering::SeqCst);

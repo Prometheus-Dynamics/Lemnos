@@ -6,15 +6,15 @@ use std::panic::resume_unwind;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lemnos_abi::package::{
-    BUFFERS_HANDLES, BUFFERS_PLAIN, ClocksHost, DRIVER_TICKS, DRIVER_TRACKS_CALLERS, DeviceHost,
-    DmaHost, DriverTable, Fd, HostTable, I2cHost, InterruptHost, LineHost, Loaded, MAX_ISO_PACKETS,
-    MAX_TRANSFER_STEPS, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageBinding, PackageControlSetup,
-    PackageDmaBuffer, PackageDriver, PackageEdge, PackageFrame, PackageHealth, PackageHost,
-    PackageInterruptEvent, PackageIsoPacket, PackageItem, PackageLineConfig, PackagePwmConfig,
-    PackageSpiSegment, PackageTransfer, PackageUsbEvent, PwmHost, RegistersHost, ResetHost, Slice,
-    SliceMut, SpiHost, StreamHost, TAKE_CLOCKS, TAKE_DEVICE, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT,
-    TAKE_LINE, TAKE_PWM, TAKE_RAW_SPI, TAKE_REGISTERS, TAKE_RESET, TAKE_SPI, TAKE_STREAM,
-    TAKE_UART, TAKE_USB_DEVICE, TAKE_USB_FUNCTION, TRANSFER_BOTH, TRANSFER_DELAY,
+    BUFFERS_HANDLES, BUFFERS_PLAIN, ClocksHost, DRIVER_JOBS, DRIVER_TICKS, DRIVER_TRACKS_CALLERS,
+    DeviceHost, DmaHost, DriverTable, Fd, HostTable, I2cHost, InterruptHost, LineHost, Loaded,
+    MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageBinding,
+    PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge, PackageFrame, PackageHealth,
+    PackageHost, PackageInterruptEvent, PackageIsoPacket, PackageItem, PackageLineConfig,
+    PackagePwmConfig, PackageSpiSegment, PackageTransfer, PackageUsbEvent, PwmHost, RegistersHost,
+    ResetHost, Slice, SliceMut, SpiHost, StreamHost, TAKE_CLOCKS, TAKE_DEVICE, TAKE_DMA, TAKE_I2C,
+    TAKE_INTERRUPT, TAKE_LINE, TAKE_PWM, TAKE_RAW_SPI, TAKE_REGISTERS, TAKE_RESET, TAKE_SPI,
+    TAKE_STREAM, TAKE_UART, TAKE_USB_DEVICE, TAKE_USB_FUNCTION, TRANSFER_BOTH, TRANSFER_DELAY,
     TRANSFER_IN_PLACE, TRANSFER_READ, TRANSFER_WRITE, UartHost, UsbDeviceHost, UsbFunctionHost,
     host_table,
 };
@@ -26,9 +26,9 @@ use lemnos_core::package::{
 };
 use lemnos_core::{
     Caller, CallerId, ClocksHandle, Config, Description, Dev, DmaHandle, ErrorKind, Health, I2c,
-    InterruptHandle, Line, MAX_ITEMS, Manifest, MethodId, NeedKind, Pwm, RawSpiBus,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, Spi, Status, StreamHandle, Uart,
-    UsbDeviceHandle, UsbFunctionHandle,
+    InterruptHandle, JobId, JobState, Line, MAX_ITEMS, Manifest, MethodId, NeedKind, Pwm,
+    RawSpiBus, RegistersHandle, Reply, ResetHandle, Resources, Result, Spi, Status, StreamHandle,
+    Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 use lemnos_hal::blocks::{BufferKind, IsoPacket};
 use lemnos_hal::i2c::{I2c as _, Operation};
@@ -938,6 +938,31 @@ impl Instance for Running {
             panicked();
         }
     }
+
+    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
+        let room = result.remaining();
+        let Ok(buffer) = result.out(room) else {
+            return JobState::Finished(Status::BUFFER_TOO_SMALL);
+        };
+        match self.loaded.job(job.0, buffer) {
+            Ok((state, used)) if state.finished != 0 => match result.advance(used) {
+                Ok(()) => JobState::Finished(state.status),
+                Err(status) => JobState::Finished(status),
+            },
+            Ok((state, _)) => JobState::Running {
+                done: state.done,
+                total: state.total,
+            },
+            Err(Status::PANIC) => panicked(),
+            Err(status) => JobState::Finished(status),
+        }
+    }
+
+    fn job_cancel(&mut self, job: JobId) {
+        if self.loaded.job_cancel(job.0) == Status::PANIC {
+            panicked();
+        }
+    }
 }
 
 /// Has a package build its driver, on every bind and every retry.
@@ -977,6 +1002,7 @@ pub(crate) fn entry(driver: &'static PackageDriver, manifest: &'static Manifest)
         driver.table.flags & DRIVER_TRACKS_CALLERS != 0,
         binder,
     )
+    .with_jobs(driver.table.flags & DRIVER_JOBS != 0)
 }
 
 #[cfg(test)]

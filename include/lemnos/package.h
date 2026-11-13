@@ -50,7 +50,7 @@ extern "C" {
  * built for that target (lemnos_abi::package::PACKAGE_LAYOUT_HASH).
  */
 #if UINTPTR_MAX == 0xffffffffffffffffULL
-#define LEMNOS_PACKAGE_LAYOUT_HASH 0x987634c72e5b0188ULL
+#define LEMNOS_PACKAGE_LAYOUT_HASH 0x57cde501ca6c0a8cULL
 #endif
 
 /* The first field of a descriptor: the bytes "LEMNOSPK". */
@@ -140,7 +140,8 @@ typedef struct LemnosPackageMethod {
     uint16_t id;
     /* Not 0: the method also fills a caller-supplied byte buffer. */
     uint16_t has_out_buffer;
-    uint32_t reserved;
+    /* LEMNOS_METHOD_JOB. Other bits are 0. */
+    uint32_t flags;
     LemnosStr name;
     /* LemnosPackageField. */
     LemnosSlice params;
@@ -546,8 +547,22 @@ typedef struct LemnosHostTable {
 #define LEMNOS_DRIVER_TICKS 1
 /* LemnosDriverTable.flags: the host should call caller and caller_gone. */
 #define LEMNOS_DRIVER_TRACKS_CALLERS 2
+/* LemnosDriverTable.flags: the driver runs long jobs; the host calls job and job_cancel. */
+#define LEMNOS_DRIVER_JOBS 4
+/* LemnosPackageMethod.flags: the method starts a long job and returns its number, a uint64_t. */
+#define LEMNOS_METHOD_JOB 1
 /* tick's answer when the driver wants no tick. */
 #define LEMNOS_NO_TICK UINT64_MAX
+
+/* How a long job stands, as job writes it. */
+typedef struct LemnosPackageJobState {
+    /* Not 0: the job is over, with `status`, and its result is in the reply. */
+    uint32_t finished;
+    LemnosStatus status;
+    /* While running: done of total (0 when not known). */
+    uint64_t done;
+    uint64_t total;
+} LemnosPackageJobState;
 
 /* `driver` is what bind wrote, and belongs to the package. */
 typedef struct LemnosDriverTable {
@@ -575,6 +590,14 @@ typedef struct LemnosDriverTable {
     LemnosStatus (*caller_gone)(void *driver, uint64_t caller);
     /* Lets go of the driver and everything it holds. */
     LemnosStatus (*drop)(void *driver);
+    /*
+     * How long job `job` stands, into `state`. Once it has finished, its result
+     * is in `result` and its length in `len`. Only with LEMNOS_DRIVER_JOBS.
+     */
+    LemnosStatus (*job)(void *driver, uint64_t job, LemnosSliceMut result, size_t *len,
+                        LemnosPackageJobState *state);
+    /* Stops job `job`. Only with LEMNOS_DRIVER_JOBS. */
+    LemnosStatus (*job_cancel)(void *driver, uint64_t job);
 } LemnosDriverTable;
 
 /* What register_driver hands the host: one driver. */

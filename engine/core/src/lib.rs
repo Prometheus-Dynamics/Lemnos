@@ -35,7 +35,8 @@ pub use contract::{
 };
 pub use description::{Description, Item, ItemKind, MAX_ITEMS, Unit};
 pub use driver::{
-    CallerId, Driver, Health, HostClock, HostOwned, Lifecycle, Manifest, MethodId, Reply,
+    CallerId, Driver, Health, HostClock, HostOwned, JobId, JobState, Lifecycle, Manifest, MethodId,
+    Reply,
 };
 #[cfg(feature = "float")]
 pub use fixed::to_f32;

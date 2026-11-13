@@ -151,6 +151,13 @@ period asked for and sends each value, or only the values that changed. A driver
 ask to be told who is calling and when a caller has gone, which is how a lease ends with the
 connection that held it.
 
+Some work takes longer than a call should: writing a large file, a step that runs for seconds. A
+contract marks such a method as a **long job**. Calling it starts the job and returns its number at
+once. The daemon then sends the caller the job's progress and, when it ends, its result. The caller
+can cancel it. A job belongs to the connection that started it: when that connection closes, the
+job is cancelled. Drivers keep nothing across a restart of the daemon, so a job a restart cut short
+ends as interrupted, and is not picked up again.
+
 ```sh
 lemnos-ctl watch accel z --period-ms 50 --count 3
 ```

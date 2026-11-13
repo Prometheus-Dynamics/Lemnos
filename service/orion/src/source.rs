@@ -200,15 +200,15 @@ fn discover(client: &Client) -> Result<(Vec<DeviceSpec>, HashMap<u64, Route>, Ve
 }
 
 /// The contract tag and method that read a value item, and what it publishes as, when the
-/// item can be published: a reader takes no arguments, has no out-buffer, and replies with a
-/// number or a flag.
+/// item can be published: a reader takes no arguments, has no out-buffer, starts no job, and
+/// replies with a number or a flag.
 fn plan<'a>(
     description: &'a DeviceDescription,
     item: &OwnedItem,
 ) -> Option<(&'a str, &'a OwnedMethod, Plain)> {
     let contract = description.contracts.get(usize::from(item.contract))?;
     let method = contract.methods.iter().find(|m| m.id == item.method)?;
-    if !method.params.is_empty() || method.has_out_buffer {
+    if !method.params.is_empty() || method.has_out_buffer || method.job {
         return None;
     }
     let plain = plain_of(&method.returns, item.field.as_deref())?;
@@ -274,6 +274,7 @@ mod tests {
                 .collect(),
             returns,
             has_out_buffer: out,
+            job: false,
         }
     }
 

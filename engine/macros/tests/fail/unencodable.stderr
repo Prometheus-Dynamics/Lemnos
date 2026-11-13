@@ -13,11 +13,11 @@ help: the trait `Encode` is not implemented for `NotOnTheWire`
             &[u8]
             &str
             ()
+            JobId
             Vector3
             [T; N]
             [u8]
             bool
-            f32
           and $N others
   = note: this error originates in the attribute macro `contract` (in Nightly builds, run with -Z macro-backtrace for more info)
 
@@ -36,11 +36,11 @@ help: the trait `Encode` is not implemented for `NotOnTheWire`
             &[u8]
             &str
             ()
+            JobId
             Vector3
             [T; N]
             [u8]
             bool
-            f32
           and $N others
 
 error[E0277]: the trait bound `NotOnTheWire: Decode<'_>` is not satisfied
@@ -58,10 +58,10 @@ help: the trait `Decode<'_>` is not implemented for `NotOnTheWire`
             `&'a [u8]` implements `Decode<'a>`
             `&'a str` implements `Decode<'a>`
             `()` implements `Decode<'_>`
+            `JobId` implements `Decode<'_>`
             `Vector3` implements `Decode<'_>`
             `[T; N]` implements `Decode<'a>`
             `bool` implements `Decode<'_>`
             `f32` implements `Decode<'_>`
-            `f64` implements `Decode<'_>`
           and $N others
   = note: this error originates in the attribute macro `contract` (in Nightly builds, run with -Z macro-backtrace for more info)

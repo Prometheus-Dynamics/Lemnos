@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lemnos_core::{Health, HostClock};
-use lemnos_host::{DeviceInfo, DeviceState};
+use lemnos_host::{DeviceInfo, DeviceState, JobEvent, JobUpdate};
 use lemnos_wire::{Frame, health, state};
 
 use crate::Core;
@@ -65,9 +65,37 @@ fn send_changes(core: &Core, sent: &mut Vec<u64>) {
     }
 }
 
+/// Sends what changed about long jobs to whoever started each. A job whose starter has gone
+/// has nobody to tell.
+fn send_jobs(core: &Core, updates: &mut Vec<JobUpdate>) {
+    core.host.take_job_updates(updates);
+    if updates.is_empty() {
+        return;
+    }
+    let clients = crate::lock(&core.clients);
+    for update in updates.drain(..) {
+        let Some(client) = clients.iter().find(|client| client.id == update.owner) else {
+            continue;
+        };
+        match &update.event {
+            JobEvent::Progress { done, total } => client.value(&Frame::JobProgress {
+                job: update.job,
+                done: *done,
+                total: *total,
+            }),
+            JobEvent::Finished { status, result } => client.event(&Frame::JobDone {
+                job: update.job,
+                status: status.0,
+                bytes: result,
+            }),
+        }
+    }
+}
+
 pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
     let mut seen = core.host.changes();
     let mut sent = Vec::new();
+    let mut updates = Vec::new();
     send_changes(core, &mut sent);
     let watchdog = notifier.watchdog_interval();
     let mut next_ping = Instant::now();
@@ -86,6 +114,7 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
             seen = changes;
             send_changes(core, &mut sent);
         }
+        send_jobs(core, &mut updates);
         if let Some(interval) = watchdog
             && Instant::now() >= next_ping
         {

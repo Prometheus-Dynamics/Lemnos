@@ -376,3 +376,123 @@ fn validate_names_a_file_it_cant_read() {
     assert!(error.starts_with("/nonexistent/board.toml: "), "{error}");
     assert!(lemnos_ctl::run(&["validate".to_string()], &mut out).is_err());
 }
+
+/// Counts to what it is asked, one step per millisecond, and ends with the count. Asked for 0,
+/// it fails.
+#[lemnos_core::contract("counting", version = 1)]
+pub trait Counting {
+    #[method(1, job)]
+    fn count(&mut self, to: u32) -> lemnos_core::Result<lemnos_core::JobId>;
+}
+
+#[lemnos_core::driver("counting", provides = [Counting])]
+pub struct Counter {
+    counting: Option<(u32, u32)>,
+}
+
+impl lemnos_core::Lifecycle for Counter {
+    type Needs = CounterNeeds;
+    const TICKS: bool = true;
+    const JOBS: bool = true;
+
+    fn start(_: CounterNeeds, _: &lemnos_core::Config<'_>) -> lemnos_core::Result<Self> {
+        Ok(Self { counting: None })
+    }
+
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let (done, to) = self.counting.as_mut()?;
+        if *done >= *to {
+            return None;
+        }
+        *done += 1;
+        Some(now_ns + 1_000_000)
+    }
+
+    fn job(
+        &mut self,
+        _: lemnos_core::JobId,
+        result: &mut lemnos_core::Reply<'_>,
+    ) -> lemnos_core::JobState {
+        use lemnos_core::{Encode, JobState, Status};
+        match self.counting {
+            Some((_, 0)) => {
+                self.counting = None;
+                JobState::Finished(Status::INVALID_ARGUMENT)
+            }
+            Some((done, to)) if done < to => JobState::Running {
+                done: u64::from(done),
+                total: u64::from(to),
+            },
+            Some((done, _)) => {
+                self.counting = None;
+                JobState::Finished(match done.encode(result) {
+                    Ok(()) => Status::OK,
+                    Err(status) => status,
+                })
+            }
+            None => JobState::Finished(Status::NOT_FOUND),
+        }
+    }
+}
+
+impl Counting for Counter {
+    fn count(&mut self, to: u32) -> lemnos_core::Result<lemnos_core::JobId> {
+        self.counting = Some((0, to));
+        Ok(lemnos_core::JobId(1))
+    }
+}
+
+fn start_counting() -> (Running, PathBuf) {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "lemnos-ctl-jobs-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let socket = dir.join("sock");
+    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+        [[devices]]\nid = \"counter\"\ndriver = \"counting\"\n";
+    let service = Service::start(Config {
+        socket: socket.clone(),
+        name: "t".to_string(),
+        board: parse(text).unwrap(),
+        drivers: vec![entry::<Counter>()],
+        backend: Box::new(SimBoard::new()),
+        options: Options::default(),
+    })
+    .unwrap();
+    (
+        Running {
+            _service: service,
+            socket,
+        },
+        dir,
+    )
+}
+
+#[test]
+fn a_job_method_runs_as_a_job_with_its_progress() {
+    let (running, dir) = start_counting();
+    let described = ctl(&running, &["describe", "counter"]).unwrap();
+    assert!(described.contains("-> job"), "{described}");
+    let text = ctl(&running, &["call", "counter", "count", "20"]).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[0].starts_with("job 0x") && lines[0].ends_with(" started"),
+        "{text}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("progress ") && l.ends_with("/20")),
+        "{text}"
+    );
+    assert!(
+        lines.last().unwrap().ends_with(" done: 14 00 00 00"),
+        "{text}"
+    );
+    let failed = ctl(&running, &["call", "counter", "count", "0"]).unwrap_err();
+    assert!(failed.ends_with("failed: status -22"), "{failed}");
+    drop(running);
+    let _ = std::fs::remove_dir_all(dir);
+}

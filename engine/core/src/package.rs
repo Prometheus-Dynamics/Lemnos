@@ -18,18 +18,18 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use core::time::Duration;
 
 use lemnos_abi::package::{
-    BUFFERS_HANDLES, BUFFERS_PLAIN, DRIVER_TICKS, DRIVER_TRACKS_CALLERS, Fd, HEALTH_DEGRADED,
-    HEALTH_FAILED, HEALTH_GONE, HEALTH_OK, HostTable, ITEM_HAS_FIELD, ITEM_HAS_MAX, ITEM_HAS_MIN,
-    MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, NEED_DEVICE, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out,
-    PackageContract, PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge,
-    PackageField, PackageFrame, PackageHealth, PackageInstance, PackageInterruptEvent,
-    PackageIsoPacket, PackageItem, PackageLineConfig, PackageManifest, PackageMethod, PackageNeed,
-    PackagePwmConfig, PackageSetting, PackageShape, PackageSpiSegment, PackageTransfer,
-    PackageUsbEvent, SETTING_BOOL, SETTING_FLOAT, SETTING_INT, SETTING_TEXT, Slice, SliceMut, Str,
-    TAKE_CLOCKS, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT, TAKE_LINE, TAKE_PWM, TAKE_RAW_SPI,
-    TAKE_REGISTERS, TAKE_RESET, TAKE_SPI, TAKE_STREAM, TAKE_UART, TAKE_USB_DEVICE,
-    TAKE_USB_FUNCTION, USB_EVENT_CONFIGURED, USB_EVENT_DECONFIGURED, USB_EVENT_NONE,
-    USB_EVENT_RESUMED, USB_EVENT_SETUP, USB_EVENT_SUSPENDED, driver_table,
+    BUFFERS_HANDLES, BUFFERS_PLAIN, DRIVER_JOBS, DRIVER_TICKS, DRIVER_TRACKS_CALLERS, Fd,
+    HEALTH_DEGRADED, HEALTH_FAILED, HEALTH_GONE, HEALTH_OK, HostTable, ITEM_HAS_FIELD,
+    ITEM_HAS_MAX, ITEM_HAS_MIN, MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, METHOD_JOB, NEED_DEVICE,
+    NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageContract, PackageControlSetup, PackageDmaBuffer,
+    PackageDriver, PackageEdge, PackageField, PackageFrame, PackageHealth, PackageInstance,
+    PackageInterruptEvent, PackageIsoPacket, PackageItem, PackageJobState, PackageLineConfig,
+    PackageManifest, PackageMethod, PackageNeed, PackagePwmConfig, PackageSetting, PackageShape,
+    PackageSpiSegment, PackageTransfer, PackageUsbEvent, SETTING_BOOL, SETTING_FLOAT, SETTING_INT,
+    SETTING_TEXT, Slice, SliceMut, Str, TAKE_CLOCKS, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT, TAKE_LINE,
+    TAKE_PWM, TAKE_RAW_SPI, TAKE_REGISTERS, TAKE_RESET, TAKE_SPI, TAKE_STREAM, TAKE_UART,
+    TAKE_USB_DEVICE, TAKE_USB_FUNCTION, USB_EVENT_CONFIGURED, USB_EVENT_DECONFIGURED,
+    USB_EVENT_NONE, USB_EVENT_RESUMED, USB_EVENT_SETUP, USB_EVENT_SUSPENDED, driver_table,
 };
 use lemnos_abi::{Handle, guard};
 use lemnos_hal::blocks::{
@@ -49,8 +49,8 @@ use lemnos_hal::{
 
 use crate::{
     BusKind, CallerId, ClocksHandle, Config, ConfigValue, ContractInfo, Description, DmaHandle,
-    Driver, ErrorKind, Field, Health, I2c, InterruptHandle, Item, ItemKind, Line, LocalCaller,
-    Manifest, MethodId, MethodInfo, Need, NeedKind, Param, Provider, Pwm, RawSpiBus,
+    Driver, ErrorKind, Field, Health, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line,
+    LocalCaller, Manifest, MethodId, MethodInfo, Need, NeedKind, Param, Provider, Pwm, RawSpiBus,
     RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Shape, Spi, Status,
     StreamHandle, Tag, Uart, Unit, UsbDeviceHandle, UsbFunctionHandle,
 };
@@ -435,7 +435,7 @@ fn method_out(method: &MethodInfo) -> PackageMethod {
     PackageMethod {
         id: method.id,
         has_out_buffer: u16::from(method.has_out_buffer),
-        reserved: 0,
+        flags: if method.job { METHOD_JOB } else { 0 },
         name: Str::new(method.name),
         params: kept(params.collect()),
         returns: shape_out(&method.returns),
@@ -602,6 +602,7 @@ pub fn manifest_in(manifest: &PackageManifest) -> core::result::Result<Manifest,
                 params: Vec::leak(params),
                 returns: shape_in(&method.returns, MAX_SHAPE_DEPTH)?,
                 has_out_buffer: method.has_out_buffer != 0,
+                job: method.flags & METHOD_JOB != 0,
             });
         }
         provides.push(ContractInfo {
@@ -1649,6 +1650,29 @@ impl<D: Driver + Send + 'static> PackageInstance for Exported<D> {
     fn caller_gone(&mut self, caller: u64) {
         self.driver.caller_gone(CallerId(caller));
     }
+
+    fn job(&mut self, job: u64, result: &mut [u8]) -> (PackageJobState, usize) {
+        let mut writer = Reply::new(result);
+        let state = match self.driver.job(JobId(job), &mut writer) {
+            JobState::Running { done, total } => PackageJobState {
+                finished: 0,
+                status: Status::OK,
+                done,
+                total,
+            },
+            JobState::Finished(status) => PackageJobState {
+                finished: 1,
+                status,
+                done: 0,
+                total: 0,
+            },
+        };
+        (state, writer.len())
+    }
+
+    fn job_cancel(&mut self, job: u64) {
+        self.driver.job_cancel(JobId(job));
+    }
 }
 
 /// A package's `register` for the driver `D`: its manifest in C form and the table that serves
@@ -1663,6 +1687,9 @@ pub extern "C" fn register<D: Driver + Send + 'static>(
         }
         if D::TRACKS_CALLERS {
             flags |= DRIVER_TRACKS_CALLERS;
+        }
+        if D::JOBS {
+            flags |= DRIVER_JOBS;
         }
         let registered = Box::leak(Box::new(PackageDriver {
             manifest: manifest_out(&D::MANIFEST),

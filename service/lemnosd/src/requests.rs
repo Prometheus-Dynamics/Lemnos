@@ -146,6 +146,14 @@ impl Client {
                 self.stream_open(id, device, name, true)
             }
             Frame::StreamClose { id, device, name } => self.stream_close(id, device, name),
+            Frame::CallJob {
+                id,
+                device,
+                contract,
+                method,
+                args,
+            } => self.call_job(id, device, contract, method, args),
+            Frame::JobCancel { id, job } => self.cancel_job(id, job),
             // Only the service sends the rest.
             _ => false,
         }
@@ -162,7 +170,7 @@ impl Client {
         }
         self.conn.answer(&Frame::Welcome {
             version: VERSION,
-            features: feature::STREAM_HANDLES | feature::PACKAGES,
+            features: feature::STREAM_HANDLES | feature::PACKAGES | feature::JOBS,
             host: &self.core.name,
         });
         true
@@ -295,6 +303,28 @@ impl Client {
             Err(status) => return self.refuse(id, status, "the call failed"),
         }
         true
+    }
+
+    fn call_job(&self, id: u32, device: u32, contract: u8, method: u16, args: &[u8]) -> Keep {
+        let method = MethodId { contract, method };
+        match self.core.host.start_job(self.conn.id, device, method, args) {
+            Ok(job) => self.conn.answer(&Frame::JobStarted { id, job }),
+            Err(status) => return self.refuse(id, status, "the job could not be started"),
+        }
+        // What the job has already done goes out after this answer.
+        self.core.wake();
+        true
+    }
+
+    fn cancel_job(&self, id: u32, job: u64) -> Keep {
+        match self.core.host.cancel_job(self.conn.id, job) {
+            Ok(()) => {
+                self.conn.answer(&Frame::Reply { id, bytes: &[] });
+                self.core.wake();
+                true
+            }
+            Err(status) => self.refuse(id, status, "can't cancel the job"),
+        }
     }
 
     fn subscribe(

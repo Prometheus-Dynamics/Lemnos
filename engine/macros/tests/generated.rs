@@ -1,9 +1,9 @@
 //! Runs the generated code: a driver served through a client, as a host would.
 
 use lemnos_core::{
-    Bound, Caller, Config, Contract, Description, Dev, Driver, I2c, Item, Lifecycle, LocalCaller,
-    Manifest, MethodId, NeedKind, Provider, Reply, Resources, Result, Shape, Status, Tag, Unit,
-    contract, driver,
+    Bound, Caller, Config, Contract, Description, Dev, Driver, I2c, Item, JobId, JobState,
+    Lifecycle, LocalCaller, Manifest, MethodId, NeedKind, Provider, Reply, Resources, Result,
+    Shape, Status, Tag, Unit, contract, driver,
 };
 
 #[derive(lemnos_core::Encode, lemnos_core::Decode, Debug, Clone, Copy, PartialEq)]
@@ -28,11 +28,15 @@ pub trait Thing {
 pub trait Other {
     #[method(1)]
     fn ping(&mut self) -> Result<()>;
+    #[method(2, job)]
+    fn count_to(&mut self, to: u32) -> Result<JobId>;
 }
 
 #[driver("example", provides = [Thing, Other])]
 pub struct Example {
     count: u32,
+    /// The one job: how far it has counted, and to what.
+    counting: Option<(u32, u32)>,
     #[needs(optional)]
     bus: Option<I2c>,
     #[needs(optional)]
@@ -41,10 +45,32 @@ pub struct Example {
 
 impl Lifecycle for Example {
     type Needs = ExampleNeeds;
+    const JOBS: bool = true;
+
+    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
+        match self.counting {
+            Some((done, to)) if job == JobId(1) && done < to => {
+                self.counting = Some((done + 1, to));
+                JobState::Running {
+                    done: u64::from(done),
+                    total: u64::from(to),
+                }
+            }
+            Some((done, _)) if job == JobId(1) => {
+                self.counting = None;
+                match lemnos_core::Encode::encode(&done, result) {
+                    Ok(()) => JobState::Finished(Status::OK),
+                    Err(status) => JobState::Finished(status),
+                }
+            }
+            _ => JobState::Finished(Status::NOT_FOUND),
+        }
+    }
 
     fn start(needs: ExampleNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
             count: cfg.int("count").unwrap_or(5) as u32,
+            counting: None,
             bus: needs.bus,
             peer: needs.peer,
         })
@@ -91,6 +117,11 @@ impl Thing for Example {
 impl Other for Example {
     fn ping(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    fn count_to(&mut self, to: u32) -> Result<JobId> {
+        self.counting = Some((0, to));
+        Ok(JobId(1))
     }
 }
 
@@ -236,4 +267,54 @@ fn the_description_comes_from_lifecycle() {
     let mut out = Description::new();
     Driver::describe(&driver, &mut out);
     assert_eq!(out.find("level").unwrap().field, Some("level"));
+}
+
+#[test]
+fn a_job_method_is_marked_and_its_driver_answers_for_the_job() {
+    const M: Manifest = Example::MANIFEST;
+    const { assert!(<Example as Driver>::JOBS) };
+    let other = M.provides[1].methods;
+    assert_eq!(
+        other.iter().map(|m| (m.name, m.job)).collect::<Vec<_>>(),
+        [("ping", false), ("count_to", true)]
+    );
+    assert!(<dyn Thing as Contract>::INFO.methods.iter().all(|m| !m.job));
+
+    let mut driver = bound();
+    let mut buf = [0; 8];
+    let mut reply = Reply::new(&mut buf);
+    let start = MethodId {
+        contract: 1,
+        method: 2,
+    };
+    assert_eq!(
+        driver.dispatch(start, &2u32.to_le_bytes(), &mut reply),
+        Status::OK
+    );
+    assert_eq!(reply.len(), 8);
+    assert_eq!(buf, 1u64.to_le_bytes());
+    let mut states = Vec::new();
+    loop {
+        let mut out = [0; 8];
+        let mut result = Reply::new(&mut out);
+        let state = Driver::job(&mut driver, JobId(1), &mut result);
+        let len = result.len();
+        states.push((state, out[..len].to_vec()));
+        if matches!(state, JobState::Finished(_)) {
+            break;
+        }
+    }
+    assert_eq!(
+        states,
+        [
+            (JobState::Running { done: 0, total: 2 }, vec![]),
+            (JobState::Running { done: 1, total: 2 }, vec![]),
+            (JobState::Finished(Status::OK), 2u32.to_le_bytes().to_vec()),
+        ]
+    );
+    let mut out = [0; 8];
+    assert_eq!(
+        Driver::job(&mut driver, JobId(1), &mut Reply::new(&mut out)),
+        JobState::Finished(Status::NOT_FOUND)
+    );
 }

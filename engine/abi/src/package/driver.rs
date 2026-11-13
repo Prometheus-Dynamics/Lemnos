@@ -4,8 +4,8 @@ use alloc::boxed::Box;
 use core::ffi::c_void;
 
 use super::{
-    DriverTable, HostTable, NO_TICK, Out, PackageHealth, PackageItem, PackageSetting, Slice,
-    SliceMut, Str,
+    DriverTable, HostTable, NO_TICK, Out, PackageHealth, PackageItem, PackageJobState,
+    PackageSetting, Slice, SliceMut, Str,
 };
 use crate::{Status, guard};
 
@@ -32,6 +32,9 @@ pub trait PackageInstance: Sized + Send + 'static {
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
     fn caller(&mut self, caller: u64);
     fn caller_gone(&mut self, caller: u64);
+    /// How job `job` stands; when it has finished, its result's length in `result`.
+    fn job(&mut self, job: u64, result: &mut [u8]) -> (PackageJobState, usize);
+    fn job_cancel(&mut self, job: u64);
 }
 
 /// The driver behind the pointer `bind` gave the host, or `None` for null.
@@ -143,6 +146,34 @@ extern "C" fn caller_gone<T: PackageInstance>(driver: *mut c_void, caller: u64) 
     })
 }
 
+extern "C" fn job<T: PackageInstance>(
+    driver: *mut c_void,
+    job: u64,
+    result: SliceMut<'_, u8>,
+    len: Out<'_, usize>,
+    state: Out<'_, PackageJobState>,
+) -> Status {
+    guard(|| {
+        let Some(instance) = instance::<T>(driver) else {
+            return Status::STALE_HANDLE;
+        };
+        let (now, used) = instance.job(job, result.into_slice());
+        len.set(used);
+        state.set(now);
+        Status::OK
+    })
+}
+
+extern "C" fn job_cancel<T: PackageInstance>(driver: *mut c_void, job: u64) -> Status {
+    guard(|| {
+        let Some(instance) = instance::<T>(driver) else {
+            return Status::STALE_HANDLE;
+        };
+        instance.job_cancel(job);
+        Status::OK
+    })
+}
+
 extern "C" fn drop_driver<T: PackageInstance>(driver: *mut c_void) -> Status {
     guard(|| {
         if driver.is_null() {
@@ -156,8 +187,8 @@ extern "C" fn drop_driver<T: PackageInstance>(driver: *mut c_void) -> Status {
     })
 }
 
-/// The table that serves `T` to the host. `flags` is [`DRIVER_TICKS`](super::DRIVER_TICKS) and
-/// [`DRIVER_TRACKS_CALLERS`](super::DRIVER_TRACKS_CALLERS).
+/// The table that serves `T` to the host. `flags` is [`DRIVER_TICKS`](super::DRIVER_TICKS),
+/// [`DRIVER_TRACKS_CALLERS`](super::DRIVER_TRACKS_CALLERS) and [`DRIVER_JOBS`](super::DRIVER_JOBS).
 pub const fn driver_table<T: PackageInstance>(flags: u32) -> DriverTable {
     DriverTable {
         struct_size: size_of::<DriverTable>() as u32,
@@ -170,5 +201,7 @@ pub const fn driver_table<T: PackageInstance>(flags: u32) -> DriverTable {
         caller: caller::<T>,
         caller_gone: caller_gone::<T>,
         drop: drop_driver::<T>,
+        job: job::<T>,
+        job_cancel: job_cancel::<T>,
     }
 }

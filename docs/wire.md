@@ -56,6 +56,11 @@ closes the connection on a larger length, without reading it.
 | 24 | Packages | id u32 | to host |
 | 25 | Package | id u32, path str, driver str, reason str | to client |
 | 26 | PackagesDone | id u32, mode u8, note str | to client |
+| 27 | CallJob | id u32, device u32, contract u8, method u16, args bytes | to host |
+| 28 | JobStarted | id u32, job u64 | to client |
+| 29 | JobProgress | job u64, done u64, total u64 | to client |
+| 30 | JobDone | job u64, status i32, bytes | to client |
+| 31 | JobCancel | id u32, job u64 | to host |
 
 `state`: 0 running, 1 backing off, 2 off. `health`: 0 ok, 1 degraded, 2 failed. `status` is a
 `lemnos-abi` status: 0 is success, a negative Linux errno is that errno, and lower codes are Lemnos's.
@@ -76,6 +81,7 @@ closes the connection on a kind it doesn't know (rule 3).
 |---|---|---|
 | 0 | 1 | takes StreamOpenHandles, and may answer it with StreamHandles |
 | 1 | 2 | takes Packages |
+| 2 | 4 | takes CallJob and JobCancel |
 
 `contract` is the tag's position in the device's list, which Opened reports. `method` is the number
 the contract declares. `args`, `bytes` and values mean something only to the contract. The host never
@@ -92,7 +98,7 @@ Each of these closes a way the earlier protocol could go wrong.
 1. **The version is checked.** The first frame is Hello. A host answers a different version with
    Refusal and closes. A client refuses a different version in Welcome.
 2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Unsubscribe,
-   SetPower and StreamClose have no reply of their own and are answered with an empty Reply. Nothing is ignored in
+   SetPower, StreamClose and JobCancel have no reply of their own and are answered with an empty Reply. Nothing is ignored in
    silence. `id` 0 is allowed and is not special.
 3. **A malformed frame closes the connection** on either side, because the stream can no longer be
    trusted. That covers an impossible length, an unknown kind, a short field, a bad `bool` and bad
@@ -110,6 +116,39 @@ Each of these closes a way the earlier protocol could go wrong.
 10. **An addition is announced before it is used.** A kind added to version 1 is sent to a host
     only when its bit is set in Welcome's `features`, and to a client only in answer to a kind
     that says the client knows it. So neither side is ever sent a kind it would close on.
+
+## Long jobs
+
+Some methods start work that runs for a long time: an image written to storage, say. The contract
+marks such a method as a job (the Description says which, below), and it is started with CallJob
+in place of Call. CallJob is sent only to a host that set bit 2 of `features` (rule 10). A Call to
+a job method gets Refusal with `NOT_SUPPORTED`, and a CallJob to any other method gets Refusal with
+`INVALID_ARGUMENT`. A host refuses with `BUSY` while 64 jobs are open.
+
+The answer is JobStarted, with the host's number for the job, or Refusal. From then on the host
+sends this connection, and no other:
+
+- JobProgress whenever the job has come further: `done` of `total`, in whatever unit the contract
+  says (bytes, steps), `total` 0 while not known. Only the newest matters, and a host may drop one
+  a client hasn't read yet, as it drops values (rule 5).
+- JobDone, once, when the job is over. `status` 0 is success and `bytes` is then the result the
+  contract defines; otherwise `bytes` is empty. A cancelled job ends with `ECANCELED` (-125), and
+  a job whose driver was lost (a panic, a rebind, the device switched off) with `EINTR` (-4).
+  JobDone is never dropped.
+
+JobProgress and JobDone for a job may come before its JobStarted, since the job runs on while the
+answer is on its way: a client keeps them by job number until it knows the number.
+
+JobCancel asks the driver to stop a job this connection started. It is answered with an empty
+Reply, and the job's JobDone follows, with -125 or with how it really ended if it got there first.
+A job another connection started is refused with `NOT_PERMITTED`, one that has finished or never
+was with `NOT_FOUND`, and one an earlier run of the host started with `EINTR`: the high 32 bits of a
+job number are different for each run of the host, so a number from before a restart is told from
+one never given.
+
+A job belongs to the connection that started it. When that connection closes, by any route, the
+host cancels each of its jobs (rule 6). Nothing about a job survives the host: drivers keep no
+state across a restart, so a client whose connection ended mid-job counts the job as interrupted.
 
 ## Driver packages
 
@@ -285,7 +324,10 @@ method count, and for each method its id u16, name str, a `u16` parameter count 
 name str and shape, its returned shape and a has-out-buffer bool. Then a `u16` item count, and for
 each item its kind u8 (0 value, 1 control, 2 action), name str, unit str, exponent i8, min and max
 (each a presence bool, then an i64 when present), contract u8, method u16, and field (a presence
-bool, then a str when present).
+bool, then a str when present). Then, appended after the first form, a `u16` count of job methods
+and for each its contract u8 and method u16: those are started with CallJob. A host from before
+job methods ends at the items, and a reader takes that as no job methods. A job method that names
+no method above makes the description malformed.
 
 A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 i32, 9 i64, 10 f32,
 11 f64, 12 str, 13 bytes, 14 option (followed by its shape), 15 array (a u32 length, then its shape),
@@ -545,6 +587,51 @@ client reads that as `link: ""`.
 <!-- vector: event -->
 ```hex
 0c 00 00 00 13 00 03 00 00 00 00 00 00 00 00 00
+```
+
+### call-job
+
+`CallJob { id: 15, device: 3, contract: 0, method: 4, args: [aa] }`
+
+<!-- vector: call-job -->
+```hex
+12 00 00 00 1b 00 0f 00 00 00 03 00 00 00 00 04 00 01 00 00 00 aa
+```
+
+### job-started
+
+`JobStarted { id: 15, job: 0x100000002 }`
+
+<!-- vector: job-started -->
+```hex
+0e 00 00 00 1c 00 0f 00 00 00 02 00 00 00 01 00 00 00
+```
+
+### job-progress
+
+`JobProgress { job: 0x100000002, done: 5, total: 10 }`
+
+<!-- vector: job-progress -->
+```hex
+1a 00 00 00 1d 00 02 00 00 00 01 00 00 00 05 00 00 00 00 00 00 00 0a 00 00 00 00 00 00 00
+```
+
+### job-done
+
+`JobDone { job: 0x100000002, status: 0, bytes: [7] }`
+
+<!-- vector: job-done -->
+```hex
+13 00 00 00 1e 00 02 00 00 00 01 00 00 00 00 00 00 00 01 00 00 00 07
+```
+
+### job-cancel
+
+`JobCancel { id: 16, job: 0x100000002 }`
+
+<!-- vector: job-cancel -->
+```hex
+0e 00 00 00 1f 00 10 00 00 00 02 00 00 00 01 00 00 00
 ```
 
 ### refusal

@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use lemnos_abi::{AbiVersion, Handle, MessageSink, Slab, Status, guard, layout_hash, write_text};
+use lemnos_client::JobEvent as ClientJobEvent;
 use lemnos_client::{
     self as client, DeviceDescription, DeviceEntry, DeviceHealth, DeviceState, Error, PackageList,
     PackageMode, Session,
@@ -64,6 +65,25 @@ pub struct PackageInfo {
     pub loaded: u32,
 }
 
+/// What happened to a long job: `kind` is [`JOB_PROGRESS`] or [`JOB_DONE`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct JobEvent {
+    pub struct_size: u32,
+    pub kind: u32,
+    pub job: u64,
+    /// Progress: `done` of `total` (0 when not known).
+    pub done: u64,
+    pub total: u64,
+    /// Done: how it ended.
+    pub status: Status,
+    /// Done: the result's length.
+    pub len: u32,
+}
+
+pub const JOB_PROGRESS: u32 = 0;
+pub const JOB_DONE: u32 = 1;
+
 pub const LAYOUT: u64 = layout_hash(&[
     lemnos_abi::LAYOUT_HASH,
     size_of::<DeviceInfo>() as u64,
@@ -87,18 +107,21 @@ pub const LAYOUT: u64 = layout_hash(&[
     size_of::<Frame>() as u64,
     align_of::<Frame>() as u64,
     offset_of!(Frame, timestamp_ns) as u64,
+    size_of::<JobEvent>() as u64,
+    align_of::<JobEvent>() as u64,
+    offset_of!(JobEvent, len) as u64,
 ]);
 
 /// `LEMNOS_LAYOUT_HASH` in `include/lemnos.h`. The layouts it hashes hold no
 /// pointers, so it is the same on every target.
-const HEADER_LAYOUT_HASH: u64 = 0x8729_8e01_dabc_373f;
+const HEADER_LAYOUT_HASH: u64 = 0xaeea_810d_49ef_c35b;
 const _: () = assert!(
     LAYOUT == HEADER_LAYOUT_HASH,
     "update LEMNOS_LAYOUT_HASH in lemnos.h"
 );
 
-/// This surface's version: 1.2.
-pub const VERSION: AbiVersion = AbiVersion::new(1, 2, LAYOUT);
+/// This surface's version: 1.3.
+pub const VERSION: AbiVersion = AbiVersion::new(1, 3, LAYOUT);
 
 struct Entry {
     session: Session,
@@ -440,6 +463,123 @@ pub unsafe extern "C" fn lemnos_call(
             match session.call(handle, method, args, reply) {
                 Ok(n) => count(n),
                 Err(error) => fail(error, sink),
+            }
+        })
+    })
+}
+
+/// # Safety
+/// `args` is valid for `args_len` bytes (or `args_len` is 0); `job` is valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_job_start(
+    client: Handle,
+    opened: u32,
+    method: u16,
+    args: *const u8,
+    args_len: usize,
+    job: *mut u64,
+    sink: MessageSink,
+) -> Status {
+    guard(|| {
+        if job.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        let args: &[u8] = if args_len == 0 {
+            &[]
+        } else if args.is_null() {
+            return Status::INVALID_ARGUMENT;
+        } else {
+            // SAFETY: not null, and valid for `args_len` bytes by the contract.
+            unsafe { core::slice::from_raw_parts(args, args_len) }
+        };
+        with_entry(client, |entry| {
+            let Entry {
+                session,
+                opened: handles,
+                ..
+            } = entry;
+            let Some(handle) = handles.get_mut(opened as usize) else {
+                return Status::NOT_FOUND;
+            };
+            match session.start_job(handle, method, args) {
+                Ok(number) => {
+                    // SAFETY: not null, and valid for a write by the contract.
+                    unsafe { job.write(number) };
+                    Status::OK
+                }
+                Err(error) => fail(error, sink),
+            }
+        })
+    })
+}
+
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub extern "C" fn lemnos_job_cancel(client: Handle, job: u64, sink: MessageSink) -> Status {
+    guard(|| {
+        with_entry(client, |entry| match entry.session.cancel_job(job) {
+            Ok(()) => Status::OK,
+            Err(error) => fail(error, sink),
+        })
+    })
+}
+
+/// # Safety
+/// `event` is null or valid for its declared `struct_size`; `result` is null or valid for
+/// `capacity` bytes.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_job_next(
+    client: Handle,
+    timeout_ms: u32,
+    event: *mut JobEvent,
+    result: *mut u8,
+    capacity: usize,
+) -> Status {
+    guard(|| {
+        // SAFETY: passed on from this function's contract.
+        let event = match unsafe { checked(event) } {
+            Ok(event) => event,
+            Err(status) => return status,
+        };
+        // SAFETY: passed on from this function's contract.
+        let result: &mut [u8] = match unsafe { out_bytes(result, capacity) } {
+            Some(result) => result,
+            None if capacity == 0 => &mut [],
+            None => return Status::INVALID_ARGUMENT,
+        };
+        let timeout = Duration::from_millis(u64::from(timeout_ms));
+        with_entry(client, |entry| {
+            let Some(next) = entry.session.wait_job_event(timeout) else {
+                return Status::OK;
+            };
+            match next {
+                ClientJobEvent::Progress { job, done, total } => {
+                    event.kind = JOB_PROGRESS;
+                    event.job = job;
+                    event.done = done;
+                    event.total = total;
+                    event.status = Status::OK;
+                    event.len = 0;
+                    Status(1)
+                }
+                ClientJobEvent::Done {
+                    job,
+                    status,
+                    result: bytes,
+                } => {
+                    event.kind = JOB_DONE;
+                    event.job = job;
+                    event.done = 0;
+                    event.total = 0;
+                    event.status = status;
+                    event.len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+                    match result.get_mut(..bytes.len()) {
+                        Some(into) => {
+                            into.copy_from_slice(&bytes);
+                            Status(1)
+                        }
+                        None => Status::BUFFER_TOO_SMALL,
+                    }
+                }
             }
         })
     })

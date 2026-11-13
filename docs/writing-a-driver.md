@@ -128,6 +128,20 @@ driver can recover from itself. A driver that holds something that can be unplug
 `TICKS` and look at it in `tick`: the host ticks it when the backend hints that its hardware may
 have changed, so it finds out without waiting for a caller.
 
+### Long jobs
+
+A method that runs longer than a call is marked `#[method(N, job)]` in its contract and returns
+`Result<JobId>`. The driver starts the work, returns a number of its choosing, and goes on with the
+work in `tick` (set `TICKS`). It sets `JOBS` and answers two more methods. `job(id, result)` says
+how a job stands: `JobState::Running { done, total }` (in the contract's unit; `total` 0 when not
+known yet), or `JobState::Finished(status)` with the result encoded into `result` on success. The
+host asks after every call and tick of the driver, sends the starter what changed, and never asks
+about a finished job again. `job_cancel(id)` stops a job; it then finishes as `Status::CANCELLED`.
+The host cancels a caller's jobs when the caller goes. A job's result is at most 4 KiB, and a host
+keeps at most 64 jobs open. A driver keeps no job across a restart: the host reports each job that
+was open as interrupted, and a client starts it again if it wants it. `service/lemnosd/tests/jobs.rs`
+has a whole driver that runs jobs.
+
 A board file gives a device to the host with `owner = "host"` when the operating system's own
 driver owns the hardware: Lemnos may read it and must not change it. The host refuses every method
 such a device's description doesn't name as a value, and it stands between the driver and its
@@ -269,7 +283,7 @@ built-in driver's.
 the version of the package boundary the crate was built against (with a hash of every layout that
 crosses it) and a `register` function. The service reads the magic and version first. Only when
 they match its own does it call `register`, which hands over the driver's manifest and a table of
-functions: bind, describe, health, dispatch, tick, caller, caller_gone and drop. Each of them stops a
+functions: bind, describe, health, dispatch, tick, caller, caller_gone, drop, job and job_cancel. Each of them stops a
 panic and returns it as a status. What the driver asks for when it binds comes back from the host as
 handles, so the package links none of the host's types. The types are in `lemnos_abi::package`.
 

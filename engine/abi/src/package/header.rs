@@ -148,6 +148,8 @@ fn the_package_header_matches_the_crate() {
             "LEMNOS_DRIVER_TRACKS_CALLERS",
             DRIVER_TRACKS_CALLERS.to_string(),
         ),
+        ("LEMNOS_DRIVER_JOBS", DRIVER_JOBS.to_string()),
+        ("LEMNOS_METHOD_JOB", METHOD_JOB.to_string()),
     ] {
         checks.push((name.to_string(), value));
     }
@@ -182,7 +184,7 @@ fn the_package_header_matches_the_crate() {
         PackageMethod,
         id,
         has_out_buffer,
-        reserved,
+        flags,
         name,
         params,
         returns
@@ -382,7 +384,18 @@ fn the_package_header_matches_the_crate() {
         tick,
         caller,
         caller_gone,
-        drop
+        drop,
+        job,
+        job_cancel
+    );
+    c_struct!(
+        checks,
+        "LemnosPackageJobState",
+        PackageJobState,
+        finished,
+        status,
+        done,
+        total
     );
     c_struct!(
         checks,

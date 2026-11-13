@@ -391,7 +391,8 @@ mod package {
         assert_eq!(size_of::<PackageHealth>(), 24);
         assert_eq!(size_of::<PackageItem>(), 56);
         assert_eq!(size_of::<PackageSetting<'static>>(), 56);
-        assert_eq!(size_of::<DriverTable>(), 72);
+        assert_eq!(size_of::<DriverTable>(), 88);
+        assert_eq!(size_of::<PackageJobState>(), 24);
         assert_eq!(size_of::<HostTable>(), 592);
         assert_eq!(core::mem::offset_of!(HostTable, device), 32);
         assert_eq!(core::mem::offset_of!(HostTable, usb_function), 520);
@@ -428,7 +429,7 @@ mod package {
         ] {
             assert_eq!(table, functions * pointer);
         }
-        assert_eq!(size_of::<PackageDriver>(), 120);
+        assert_eq!(size_of::<PackageDriver>(), 136);
         assert_eq!(size_of::<PackageDescriptor>(), 32);
     }
 
@@ -531,6 +532,35 @@ mod package {
 
             fn caller_gone(&mut self, caller: u64) {
                 assert_eq!(caller, self.last_caller);
+            }
+
+            fn job(&mut self, job: u64, result: &mut [u8]) -> (PackageJobState, usize) {
+                assert_ne!(job, 9, "deliberate panic");
+                if job == 1 {
+                    return (
+                        PackageJobState {
+                            finished: 0,
+                            status: Status::OK,
+                            done: 3,
+                            total: 4,
+                        },
+                        0,
+                    );
+                }
+                result[0] = self.base;
+                (
+                    PackageJobState {
+                        finished: 1,
+                        status: Status::OK,
+                        done: 0,
+                        total: 0,
+                    },
+                    1,
+                )
+            }
+
+            fn job_cancel(&mut self, job: u64) {
+                assert_ne!(job, 9, "deliberate panic");
             }
         }
 
@@ -638,6 +668,20 @@ mod package {
             // Panics inside the driver stop at its table.
             assert_eq!(driver.caller_gone(9), Status::PANIC);
             assert_eq!(driver.dispatch(0, 9, &[2], &mut reply).0, Status::PANIC);
+            let (running, len) = driver.job(1, &mut reply).unwrap();
+            assert_eq!(
+                (running.finished, running.done, running.total, len),
+                (0, 3, 4, 0)
+            );
+            let (finished, len) = driver.job(2, &mut reply).unwrap();
+            assert_eq!(
+                (finished.finished, finished.status, len),
+                (1, Status::OK, 1)
+            );
+            assert_eq!(reply[0], 40);
+            assert_eq!(driver.job_cancel(2), Status::OK);
+            assert_eq!(driver.job_cancel(9), Status::PANIC);
+            assert_eq!(driver.job(9, &mut reply).err(), Some(Status::PANIC));
 
             let before = DROPS.load(Ordering::Relaxed);
             drop(driver);

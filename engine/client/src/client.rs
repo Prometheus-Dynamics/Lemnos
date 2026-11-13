@@ -2,11 +2,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use lemnos_core::{Bound, Caller, Contract, Status};
+use lemnos_core::{Bound, Caller, Contract, JobId, Status};
 
 use crate::DeviceDescription;
 use crate::error::Error;
-use crate::session::{DeviceEntry, Event, Handle, PackageList, Session, Subscription, ValueInfo};
+use crate::session::{
+    DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Subscription, ValueInfo,
+};
 use crate::stream::{FrameStream, StreamPlatform};
 
 const ARGS: usize = 256;
@@ -76,6 +78,31 @@ impl Client {
         reply: &mut [u8],
     ) -> Result<usize, Error> {
         self.lock().call(handle, method, args, reply)
+    }
+
+    /// See [`Session::start_job`].
+    pub fn start_job(&self, handle: &mut Handle, method: u16, args: &[u8]) -> Result<u64, Error> {
+        self.lock().start_job(handle, method, args)
+    }
+
+    /// See [`Session::cancel_job`].
+    pub fn cancel_job(&self, job: u64) -> Result<(), Error> {
+        self.lock().cancel_job(job)
+    }
+
+    /// See [`Session::wait_job`]. Holds the connection while it waits: other threads' calls
+    /// wait too.
+    pub fn wait_job(
+        &self,
+        job: u64,
+        timeout: Duration,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Option<(Status, Vec<u8>)> {
+        self.lock().wait_job(job, timeout, progress)
+    }
+
+    pub fn next_job_event(&self) -> Option<JobEvent> {
+        self.lock().next_job_event()
     }
 
     pub fn subscribe(
@@ -170,6 +197,16 @@ impl Caller for RemoteCaller {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .call(&mut self.handle, method, args, reply)
+            .map_err(Status::from)
+    }
+
+    fn start_job(&mut self, method: u16, args_len: usize) -> Result<JobId, Status> {
+        let args = self.args.get(..args_len).ok_or(Status::INVALID_ARGUMENT)?;
+        self.session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .start_job(&mut self.handle, method, args)
+            .map(JobId)
             .map_err(Status::from)
     }
 }

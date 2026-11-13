@@ -146,7 +146,8 @@ impl Conn {
         self.waker.wake();
     }
 
-    /// Queues a value from another thread, unless this client has fallen behind.
+    /// Queues a value, or a job's progress, from another thread, unless this client has fallen
+    /// behind: only the newest of either matters.
     pub(crate) fn value(&self, frame: &Frame<'_>) {
         let mut outbox = self.lock();
         if outbox.closed || outbox.bytes.len() > VALUE_LIMIT {
