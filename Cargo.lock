@@ -522,6 +522,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-contract-indicator"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+]
+
+[[package]]
 name = "lemnos-contract-isp-isp600"
 version = "2.0.1-dev"
 dependencies = [
@@ -880,6 +887,16 @@ dependencies = [
  "lemnos-core",
  "lemnos-hal",
  "lemnos-sim",
+]
+
+[[package]]
+name = "lemnos-driver-indicator"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-contract-indicator",
+ "lemnos-contract-pixels",
+ "lemnos-core",
+ "lemnos-measure",
 ]
 
 [[package]]
@@ -1412,6 +1429,7 @@ name = "lemnos-driver-system-slots"
 version = "2.0.1-dev"
 dependencies = [
  "ed25519-dalek 2.2.0",
+ "lemnos-contract-indicator",
  "lemnos-contract-system-reboot",
  "lemnos-contract-system-slots",
  "lemnos-core",
@@ -1838,6 +1856,7 @@ dependencies = [
  "lemnos-driver-hw-watchdog",
  "lemnos-driver-hwmon-fan",
  "lemnos-driver-ina2xx",
+ "lemnos-driver-indicator",
  "lemnos-driver-isp600",
  "lemnos-driver-k230-capture",
  "lemnos-driver-k230-vpu",

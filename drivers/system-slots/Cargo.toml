@@ -12,6 +12,7 @@ workspace = true
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-contract-system-slots = { path = "../../contracts/system-slots" }
 lemnos-contract-system-reboot = { path = "../../contracts/system-reboot" }
+lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
 # The slot files, shared with lemnos-slot-init.
 lemnos-slot-store = { path = "../slot-store", features = ["linux"] }

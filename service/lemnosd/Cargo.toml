@@ -43,6 +43,7 @@ lemnos-driver-host-clock = { path = "../../drivers/host-clock" }
 lemnos-driver-hw-watchdog = { path = "../../drivers/hw-watchdog" }
 lemnos-driver-hwmon-fan = { path = "../../drivers/hwmon-fan" }
 lemnos-driver-ina2xx = { path = "../../drivers/ina2xx" }
+lemnos-driver-indicator = { path = "../../drivers/indicator" }
 lemnos-driver-isp600 = { path = "../../drivers/isp600" }
 lemnos-driver-k230-capture = { path = "../../drivers/k230-capture" }
 lemnos-driver-k230-vpu = { path = "../../drivers/k230-vpu" }

@@ -51,6 +51,7 @@ python3 scripts/generate-builtins.py --check
 | `orientation` | `orientation/1` | `accel`, `gyro`, optional `mag`: devices | Serves its contract. No calibration: that is the caller's |
 | `fan-control` | `fan-control/1` | `fan`, `t0` and optional `t1` to `t3`: devices | Serves its contract |
 | `status-light` | `light/1` | `pixels`: a device | Serves its contract |
+| `indicator` | `indicator/1` | `pixels`: a device (the LED strip, or a GPIO LED driver that provides `pixels/1`); `brightness` and `state.<name>` patterns in `config` | Serves its contract: named states (`idle`, `receiving`, `writing`, `verifying`, `done`, `failed`), each drawn with the pattern the board gives it (`solid`, `blink`, `chase`, `bar`, `off`), as a frame on the device's tick. An unknown state is refused. Allocates nothing once started |
 | `pwm-channel-fan` | `fan/1` | `pwm`: a PWM channel, and optional `tach`: a GPIO line | Serves its contract. Drives the PWM directly, with no kernel fan driver between. Full duty at start, on release, and when stopped |
 | `hwmon-fan` | `fan/1` | a hwmon node, by `name` or `hwmon` | Serves its contract, for a fan the kernel exposes through hwmon. Takes the fan over at the first `set_duty`. `release`, and dropping the driver, put the fan at full duty; nothing is handed to the kernel's thermal governor. A killed daemon runs no code, so the fan keeps the last duty |
 | `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract. Run on the reference board (`B13.md`) |
@@ -62,7 +63,7 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `system-slots` | `system.slots/1` | nothing; `data` and `boot` partitions, `record`, `keys`, `boot_args` in `config` (`docs/slots.md`) | Serves its contract. Installs a slot bundle as a long job, streamed or from a file in `.incoming`, checked against its schema 3 manifest and refused when built for another board (the board file's `[board] id`); a signature is always checked and shown, and `require_signed` refuses bundles no trusted key signed (off by default). Sets the default, boots a slot on trial, confirms, removes and keeps the last few. Never over the running or the default slot. On raw NAND (`ubi`, `record = "ubi"`) the images and the record are UBI volumes, replaced by atomic rename. Untested on board (`I5.md`, `I5c.md`) |
+| `system-slots` | `system.slots/1` | nothing; `data` and `boot` partitions, `record`, `keys`, `boot_args` in `config` (`docs/slots.md`) | Serves its contract. Installs a slot bundle as a long job, streamed or from a file in `.incoming`, checked against its schema 3 manifest and refused when built for another board (the board file's `[board] id`); a signature is always checked and shown, and `require_signed` refuses bundles no trusted key signed (off by default). Sets the default, boots a slot on trial, confirms, removes and keeps the last few. With an `indicator` need (`uses = { indicator = "<id>" }`) it shows `receiving` (with its progress), `verifying`, `done` or `failed` as an install runs. Never over the running or the default slot. On raw NAND (`ubi`, `record = "ubi"`) the images and the record are UBI volumes, replaced by atomic rename. Untested on board (`I5.md`, `I5c.md`) |
 | `system-identity` | `system.identity/1` | nothing; `serial` source, `name`, `revision`, `data` in `config`; the family is the board's `[board] id` | Serves the board's identity facts: `serial`, `family`, `model` and the running slot's `version.slot`, `version.product`, `version.os`. Binds fail when a serial source cannot be read, so the host retries. Untested on board (`P1.md`) |
 | `system-reboot` | `system.reboot/1` | nothing | Serves its contract. Runs `systemctl reboot` |
 
@@ -241,6 +242,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `fan-control/1` | 1 state, 2 settings, 3 set_settings, 4 curve, 5 set_curve, 6 hold, 7 release_hold, 8 set_enabled | `fan-control` |
 | `pixels/1` | 1 pixel_count, 2 set, 3 show | `ws2812` |
 | `light/1` | 1 layout, 2 show, 3 clear, 4 clear_all, 5 set_brightness | `status-light` |
+| `indicator/1` | 1 set, 2 states | `indicator` |
 | `lens/1` | 1 range, 2 set_position, 3 position, 4 direction, 5 settle_us | `vcm` |
 | `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set, 6 uart_write, 7 uart_read | `raw-bus` |
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |

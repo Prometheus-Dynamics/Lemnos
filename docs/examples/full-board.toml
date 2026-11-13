@@ -65,6 +65,14 @@ driver = "ws2812"
 bus = "pio-out:gpio=13"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
+# `uses` names an `indicator`'s pixels: the indicator shows named states (`receiving`, `failed`, ...)
+# on the strip, each drawn with the pattern the board gives it. `brightness` scales every pattern.
+[[devices]]
+id = "status-indicator"
+driver = "indicator"
+uses = { pixels = "ring-pixels" }
+config = { brightness = 128, "state.failed" = "blink #ff0000 period=400" }
+
 # `auto_off_after`: this device alone opts in to being turned off after 5 failed binds in a
 # row. Every other device is retried forever.
 [[devices]]

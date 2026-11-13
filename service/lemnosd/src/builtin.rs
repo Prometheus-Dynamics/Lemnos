@@ -28,6 +28,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_hw_watchdog::HwWatchdog>(),
         entry::<lemnos_driver_hwmon_fan::HwmonFan>(),
         entry::<lemnos_driver_ina2xx::Ina2xx>(),
+        entry::<lemnos_driver_indicator::Indicator>(),
         entry::<lemnos_driver_isp600::Isp600>(),
         entry::<lemnos_driver_k230_capture::K230Capture>(),
         entry::<lemnos_driver_k230_vpu::K230Vpu>(),

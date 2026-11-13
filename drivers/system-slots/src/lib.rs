@@ -75,10 +75,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use lemnos_contract_indicator::{Indicator as IndicatorContract, NO_PROGRESS};
 use lemnos_contract_system_reboot::Reboot;
 use lemnos_contract_system_slots::Slots;
 use lemnos_core::{
-    BoardView, CallerId, Config, JobId, JobState, Lifecycle, Reply, Result, Status, driver,
+    BoardView, CallerId, Config, Dev, JobId, JobState, Lifecycle, Reply, Result, Status, driver,
 };
 
 use boot::{BootRecord, FileRecord, Restarter, Tryboot};
@@ -106,6 +107,11 @@ pub struct SystemSlots {
     calling: CallerId,
     install: Option<Install>,
     next_job: u64,
+    /// The board's indicator, when it has one: it shows the install's phase.
+    #[needs(optional)]
+    indicator: Option<Dev<dyn IndicatorContract>>,
+    /// The state last sent to the indicator, so only a change is sent.
+    shown: Option<(&'static str, u16)>,
     /// The buffer an install from a file reads through, kept between ticks.
     read_buf: Vec<u8>,
     /// On raw NAND, what changes the UBI device's volumes (`layout.ubi` names the device).
@@ -160,6 +166,8 @@ impl SystemSlots {
             calling: CallerId::LOCAL,
             install: None,
             next_job: 0,
+            indicator: None,
+            shown: None,
             read_buf: Vec::new(),
             ubi_write: ubi_write.filter(|_| layout_has_ubi),
             policy: Policy::default(),
@@ -242,8 +250,9 @@ impl SystemSlots {
         Ok(())
     }
 
-    fn fail_install(&self, install: &mut Install, failure: Failure) -> Status {
+    fn fail_install(&mut self, install: &mut Install, failure: Failure) -> Status {
         let status = failure.0;
+        self.show("failed", NO_PROGRESS);
         install.discard();
         let mut state = State::load(&self.layout);
         state.state = "error".into();
@@ -255,7 +264,7 @@ impl SystemSlots {
     }
 
     /// The install's next bytes; the last of them puts the slot in place.
-    fn feed(&self, install: &mut Install, offset: u64, bytes: &[u8]) -> Result<()> {
+    fn feed(&mut self, install: &mut Install, offset: u64, bytes: &[u8]) -> Result<()> {
         if let Err(failure) = install.take(offset, bytes) {
             // A write out of order changes nothing: the install goes on from where it is.
             if offset != install.got {
@@ -264,8 +273,12 @@ impl SystemSlots {
             return Err(self.fail_install(install, failure));
         }
         if !install.complete() {
+            // Bytes arriving: show the progress as they do, not only on ticks.
+            self.show("receiving", permille(install.got, install.size));
             return Ok(());
         }
+        // The hash, verity and signature are checked by `finish`, whichever way the bytes came.
+        self.show("verifying", NO_PROGRESS);
         let mut state = self.state();
         let finish = Finish {
             layout: &self.layout,
@@ -290,6 +303,7 @@ impl SystemSlots {
                 self.save(&state)?;
                 install.drop_source();
                 install.end = Some(Ok(id));
+                self.show("done", NO_PROGRESS);
                 Ok(())
             }
             Err(failure) => Err(self.fail_install(install, failure)),
@@ -359,6 +373,34 @@ impl SystemSlots {
         Ok(())
     }
 
+    /// Shows the install's phase on the board's indicator, when the board has one: `receiving`
+    /// while bytes arrive (with their progress), then `verifying`, `done` or `failed` as the install
+    /// reaches each. Only a change is sent, so a steady phase costs nothing.
+    fn indicate(&mut self) {
+        let Some(install) = self.install.as_ref() else {
+            return;
+        };
+        let state = match &install.end {
+            Some(Ok(_)) => ("done", NO_PROGRESS),
+            Some(Err(_)) => ("failed", NO_PROGRESS),
+            None if install.complete() => ("verifying", NO_PROGRESS),
+            None => ("receiving", permille(install.got, install.size)),
+        };
+        self.show(state.0, state.1);
+    }
+
+    /// Sends `state` and its progress to the indicator, unless it is what was sent last. A refused
+    /// indication changes no install: the next change is sent again.
+    fn show(&mut self, state: &'static str, progress: u16) {
+        if self.shown == Some((state, progress)) {
+            return;
+        }
+        self.shown = Some((state, progress));
+        if let Some(indicator) = self.indicator.as_mut() {
+            let _ = indicator.set(state, progress);
+        }
+    }
+
     /// Starts an install of `size` bytes, written by its starter or read from `source`.
     fn begin(
         &mut self,
@@ -399,6 +441,7 @@ impl SystemSlots {
         state.started_by = "lemnos".into();
         self.save(&state)?;
         self.install = Some(install);
+        self.show("receiving", 0);
         Ok(job)
     }
 
@@ -714,6 +757,14 @@ fn read_boot_id() -> String {
 
 /// How a slot was signed, as `list` shows it. A slot from before the board recorded it is
 /// `unsigned`.
+/// `done` of `total` in per mille, at most 1000; the whole of it when `total` is 0.
+fn permille(done: u64, total: u64) -> u16 {
+    if total == 0 {
+        return 1000;
+    }
+    (done.saturating_mul(1000) / total).min(1000) as u16
+}
+
 fn signed_word(meta: &Meta) -> String {
     match meta.get("SIGNED") {
         "" => "unsigned".to_string(),
@@ -765,9 +816,11 @@ impl Lifecycle for SystemSlots {
     }
 
     /// An install from a file reads a piece each tick, at once again while there is more. A trial
-    /// that waits is looked at again each second, until it is confirmed or falls back.
+    /// that waits is looked at again each second, until it is confirmed or falls back. The
+    /// indicator is brought up to date on each tick too.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         self.pull();
+        self.indicate();
         let install = self
             .install
             .as_ref()
@@ -780,7 +833,7 @@ impl Lifecycle for SystemSlots {
         }
     }
 
-    fn start(_: SystemSlotsNeeds, cfg: &Config<'_>) -> Result<Self> {
+    fn start(needs: SystemSlotsNeeds, cfg: &Config<'_>) -> Result<Self> {
         let mut layout = Layout::new(
             PathBuf::from(cfg.str("data").unwrap_or("/data")),
             PathBuf::from(cfg.str("boot").unwrap_or("/boot/firmware")),
@@ -834,6 +887,7 @@ impl Lifecycle for SystemSlots {
             .map(|text| Source::parse(text).map_err(|_| Status::INVALID_ARGUMENT))
             .collect::<Result<Vec<_>>>()?;
         slots.boot = read_boot_id();
+        slots.indicator = needs.indicator;
         slots.partuuid = cfg
             .str("partuuid")
             .map(str::to_string)
