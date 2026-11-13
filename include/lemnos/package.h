@@ -50,7 +50,7 @@ extern "C" {
  * built for that target (lemnos_abi::package::PACKAGE_LAYOUT_HASH).
  */
 #if UINTPTR_MAX == 0xffffffffffffffffULL
-#define LEMNOS_PACKAGE_LAYOUT_HASH 0x57cde501ca6c0a8cULL
+#define LEMNOS_PACKAGE_LAYOUT_HASH 0x432460040a3bbd5eULL
 #endif
 
 /* The first field of a descriptor: the bytes "LEMNOSPK". */
@@ -196,6 +196,39 @@ typedef struct LemnosPackageItem {
     LemnosStr name;
     LemnosStr field;
 } LemnosPackageItem;
+
+/*
+ * What an item or a contract says beyond LemnosPackageItem, or how a method
+ * reads (lemnos_abi::package::PackageExtra). Filled by describe_extra.
+ */
+#define LEMNOS_EXTRA_CONTRACT 0
+#define LEMNOS_EXTRA_METHOD 1
+#define LEMNOS_EXTRA_ITEM 2
+#define LEMNOS_EXTRA_HAS_READING 1
+#define LEMNOS_EXTRA_HAS_STEP 2
+#define LEMNOS_EXTRA_HAS_WARN_LOW 4
+#define LEMNOS_EXTRA_HAS_WARN_HIGH 8
+#define LEMNOS_EXTRA_HAS_GROUP 16
+typedef struct LemnosPackageExtra {
+    /* LEMNOS_EXTRA_CONTRACT, LEMNOS_EXTRA_METHOD or LEMNOS_EXTRA_ITEM. */
+    uint8_t what;
+    /* A reading's code: 0 number, 1 range, 2 switch, 3 text, 4 colour array, 5 three axes. */
+    uint8_t reading;
+    /* LEMNOS_EXTRA_HAS_*: which of the fields below are set. */
+    uint8_t flags;
+    /* LEMNOS_EXTRA_CONTRACT and LEMNOS_EXTRA_METHOD: the contract's position. */
+    uint8_t contract;
+    /* LEMNOS_EXTRA_METHOD: the method. */
+    uint16_t method;
+    uint16_t reserved;
+    /* LEMNOS_EXTRA_ITEM: the item's position in the order describe fills. */
+    uint32_t index;
+    int64_t step;
+    int64_t warn_low;
+    int64_t warn_high;
+    /* LEMNOS_EXTRA_CONTRACT: the kind. LEMNOS_EXTRA_ITEM: the group. */
+    LemnosStr text;
+} LemnosPackageExtra;
 
 #define LEMNOS_SETTING_INT 0
 #define LEMNOS_SETTING_FLOAT 1
@@ -599,6 +632,13 @@ typedef struct LemnosDriverTable {
                         LemnosPackageJobState *state);
     /* Stops job `job`. Only with LEMNOS_DRIVER_JOBS. */
     LemnosStatus (*job_cancel)(void *driver, uint64_t job);
+    /*
+     * Fills `extras` (LemnosPackageExtra) and writes how many there are in all.
+     * With a NULL driver it gives the manifest's contract kinds and method
+     * readings; with the driver, its items'. NULL in a package built before
+     * LemnosPackageExtra: the host takes none.
+     */
+    LemnosStatus (*describe_extra)(void *driver, LemnosSliceMut extras, uint32_t *count);
 } LemnosDriverTable;
 
 /* What register_driver hands the host: one driver. */

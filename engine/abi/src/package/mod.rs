@@ -111,6 +111,19 @@ impl<'a, T> Slice<'a, T> {
         }
     }
 
+    /// The same header read as a slice of `U`.
+    ///
+    /// # Safety
+    ///
+    /// Each element the header points at must be a `U` in the layout the peer wrote.
+    unsafe fn cast<U>(self) -> Slice<'a, U> {
+        Slice {
+            ptr: self.ptr.cast(),
+            len: self.len,
+            life: PhantomData,
+        }
+    }
+
     /// The values. Empty when the peer sent a null or misaligned pointer.
     pub fn as_slice(&self) -> &'a [T] {
         if self.ptr.is_null() || !self.ptr.is_aligned() {
@@ -367,6 +380,65 @@ impl PackageItem {
     };
 }
 
+/// What a device's item or a contract says beyond [`PackageItem`], or what a method says about
+/// how its value reads. It is a separate table, so a [`PackageItem`] keeps its size: a package
+/// built before it has none of these, and its items read with no reading, step, limit or group,
+/// and its contracts with the kind `other`.
+///
+/// [`DriverTable::describe_extra`] fills these; with a null driver it gives the contracts and
+/// methods of the package's manifest, and with the driver's instance the items.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PackageExtra {
+    /// One of [`EXTRA_CONTRACT`], [`EXTRA_METHOD`] and [`EXTRA_ITEM`]. Another value is ignored.
+    pub what: u8,
+    /// The reading's code ([`EXTRA_HAS_READING`]); for a method, its reading; for an item, its own.
+    pub reading: u8,
+    /// [`EXTRA_HAS_READING`], [`EXTRA_HAS_STEP`], [`EXTRA_HAS_WARN_LOW`], [`EXTRA_HAS_WARN_HIGH`],
+    /// [`EXTRA_HAS_GROUP`]: which of the fields below are set.
+    pub flags: u8,
+    /// [`EXTRA_CONTRACT`] and [`EXTRA_METHOD`]: the contract's position in the manifest.
+    pub contract: u8,
+    /// [`EXTRA_METHOD`]: the method.
+    pub method: u16,
+    pub reserved: u16,
+    /// [`EXTRA_ITEM`]: the item's position in the order [`DriverTable::describe`] fills.
+    pub index: u32,
+    pub step: i64,
+    pub warn_low: i64,
+    pub warn_high: i64,
+    /// [`EXTRA_CONTRACT`]: the contract's kind. [`EXTRA_ITEM`]: the item's group.
+    pub text: Str<'static>,
+}
+
+/// [`PackageExtra::what`]: a contract's kind, in `text`.
+pub const EXTRA_CONTRACT: u8 = 0;
+/// [`PackageExtra::what`]: a method's reading.
+pub const EXTRA_METHOD: u8 = 1;
+/// [`PackageExtra::what`]: an item's reading, step, limits and group.
+pub const EXTRA_ITEM: u8 = 2;
+pub const EXTRA_HAS_READING: u8 = 1;
+pub const EXTRA_HAS_STEP: u8 = 2;
+pub const EXTRA_HAS_WARN_LOW: u8 = 4;
+pub const EXTRA_HAS_WARN_HIGH: u8 = 8;
+pub const EXTRA_HAS_GROUP: u8 = 16;
+
+impl PackageExtra {
+    pub const EMPTY: Self = Self {
+        what: 0,
+        reading: 0,
+        flags: 0,
+        contract: 0,
+        method: 0,
+        reserved: 0,
+        index: 0,
+        step: 0,
+        warn_low: 0,
+        warn_high: 0,
+        text: Str::EMPTY,
+    };
+}
+
 /// One setting from the device's board entry, lent for the bind.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -478,6 +550,80 @@ pub struct DriverTable {
     ) -> Status,
     /// Stops job `job`. Called only with [`DRIVER_JOBS`].
     pub job_cancel: extern "C" fn(driver: *mut c_void, job: u64) -> Status,
+    /// Fills `extras` (see [`PackageExtra`]) and writes how many there are in all. With a null
+    /// `driver` it gives the manifest's contract kinds and method readings; with the driver, its
+    /// items'. `None` in a package built before the extras: the host takes none.
+    pub describe_extra: Option<
+        extern "C" fn(
+            driver: *mut c_void,
+            extras: SliceMut<'_, PackageExtra>,
+            count: Out<'_, u32>,
+        ) -> Status,
+    >,
+}
+
+/// [`DriverTable`] as a package built before [`PackageExtra`] has it: the same functions and
+/// no `describe_extra`. The host reads such a package's table as this.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DriverTableBase {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub bind: extern "C" fn(
+        host: &HostTable,
+        binding: *mut c_void,
+        settings: Slice<'_, PackageSetting<'_>>,
+        link: Str<'_>,
+        has_link: u32,
+        driver: Out<'_, *mut c_void>,
+    ) -> Status,
+    pub describe: extern "C" fn(
+        driver: *mut c_void,
+        items: SliceMut<'_, PackageItem>,
+        count: Out<'_, u32>,
+    ) -> Status,
+    pub health: extern "C" fn(driver: *mut c_void, health: Out<'_, PackageHealth>) -> Status,
+    pub dispatch: extern "C" fn(
+        driver: *mut c_void,
+        contract: u8,
+        method: u16,
+        args: Slice<'_, u8>,
+        reply: SliceMut<'_, u8>,
+        len: Out<'_, usize>,
+    ) -> Status,
+    pub tick: extern "C" fn(driver: *mut c_void, now_ns: u64, next_ns: Out<'_, u64>) -> Status,
+    pub caller: extern "C" fn(driver: *mut c_void, caller: u64) -> Status,
+    pub caller_gone: extern "C" fn(driver: *mut c_void, caller: u64) -> Status,
+    pub drop: extern "C" fn(driver: *mut c_void) -> Status,
+    pub job: extern "C" fn(
+        driver: *mut c_void,
+        job: u64,
+        result: SliceMut<'_, u8>,
+        len: Out<'_, usize>,
+        state: Out<'_, PackageJobState>,
+    ) -> Status,
+    pub job_cancel: extern "C" fn(driver: *mut c_void, job: u64) -> Status,
+}
+
+impl DriverTableBase {
+    /// The table as the current one, with no extras.
+    pub fn widen(self) -> DriverTable {
+        DriverTable {
+            struct_size: size_of::<DriverTable>() as u32,
+            flags: self.flags,
+            bind: self.bind,
+            describe: self.describe,
+            health: self.health,
+            dispatch: self.dispatch,
+            tick: self.tick,
+            caller: self.caller,
+            caller_gone: self.caller_gone,
+            drop: self.drop,
+            job: self.job,
+            job_cancel: self.job_cancel,
+            describe_extra: None,
+        }
+    }
 }
 
 /// What a package's driver calls on the host. The table lives as long as the process.
@@ -528,6 +674,24 @@ pub struct PackageDriver {
     pub table: DriverTable,
 }
 
+/// [`PackageDriver`] as a package built before [`PackageExtra`] registers it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PackageDriverBase {
+    pub manifest: PackageManifest,
+    pub table: DriverTableBase,
+}
+
+impl PackageDriverBase {
+    /// The driver as the current one, with no extras.
+    pub fn widen(self) -> PackageDriver {
+        PackageDriver {
+            manifest: self.manifest,
+            table: self.table.widen(),
+        }
+    }
+}
+
 /// What a package's [`PACKAGE_ENTRY`] symbol is. The host reads `magic` and `version` and runs
 /// nothing of the package's unless both are right.
 #[repr(C)]
@@ -559,11 +723,106 @@ impl PackageDescriptor {
 
 use tables::shape;
 
+/// The one driver a package's `register` wrote, read with the layout the package was built with:
+/// `base` for one built before [`PackageExtra`] (its driver widened, with no extras). The reason
+/// it is refused, when it is not exactly one driver or its table is shorter than its layout.
+pub fn registered_driver(
+    drivers: Slice<'static, PackageDriver>,
+    base: bool,
+) -> Result<PackageDriver, &'static str> {
+    if !base {
+        let [driver] = drivers.as_slice() else {
+            return Err("it did not register exactly one driver");
+        };
+        if (driver.table.struct_size as usize) < size_of::<DriverTable>() {
+            return Err("its driver table is shorter than this host's");
+        }
+        return Ok(*driver);
+    }
+    // The header of `drivers` is the same for either element type: a pointer and a count. The
+    // package wrote `PackageDriverBase`s, so the same header reads them.
+    // SAFETY: `base` is set only for a package whose registered layout is the base layout, and
+    // such a package wrote `PackageDriverBase`s in this header.
+    let bases = unsafe { drivers.cast::<PackageDriverBase>() };
+    let [base] = bases.as_slice() else {
+        return Err("it did not register exactly one driver");
+    };
+    if (base.table.struct_size as usize) < size_of::<DriverTableBase>() {
+        return Err("its driver table is shorter than this host's");
+    }
+    Ok((*base).widen())
+}
+
+/// The layout hash of the package boundary before [`PackageExtra`]: what a package built before
+/// it carries. A host loads such a package with no extras (see [`PackageDriverBase`]).
+pub const PACKAGE_BASE_LAYOUT_HASH: u64 = package_layout(false);
+
 /// The layout hash of the package boundary: every type here and in [`tables`], with this
 /// crate's own [`LAYOUT_HASH`](crate::LAYOUT_HASH). The types hold pointers, so the hash follows
 /// the target's pointer width, which a package and its host share.
-pub const PACKAGE_LAYOUT_HASH: u64 = {
-    let parts: [&[u64]; 20] = [
+pub const PACKAGE_LAYOUT_HASH: u64 = package_layout(true);
+
+/// The hash of the boundary with (`extras`) or without the parts [`PackageExtra`] added. Without
+/// them, the parts it adds are empty, so the hash is the one a package built before them has.
+const fn package_layout(extras: bool) -> u64 {
+    let driver: &[u64] = if extras {
+        shape!(
+            DriverTable,
+            struct_size,
+            flags,
+            bind,
+            describe,
+            health,
+            dispatch,
+            tick,
+            caller,
+            caller_gone,
+            drop,
+            job,
+            job_cancel,
+            describe_extra
+        )
+    } else {
+        shape!(
+            DriverTableBase,
+            struct_size,
+            flags,
+            bind,
+            describe,
+            health,
+            dispatch,
+            tick,
+            caller,
+            caller_gone,
+            drop,
+            job,
+            job_cancel
+        )
+    };
+    let package_driver: &[u64] = if extras {
+        shape!(PackageDriver, manifest, table)
+    } else {
+        shape!(PackageDriverBase, manifest, table)
+    };
+    let extra: &[u64] = if extras {
+        shape!(
+            PackageExtra,
+            what,
+            reading,
+            flags,
+            contract,
+            method,
+            reserved,
+            index,
+            step,
+            warn_low,
+            warn_high,
+            text
+        )
+    } else {
+        &[]
+    };
+    let parts: [&[u64]; 21] = [
         &[crate::LAYOUT_HASH],
         shape!(Str<'static>, ptr, len),
         shape!(Slice<'static, u8>, ptr, len),
@@ -608,21 +867,8 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             float,
             text
         ),
-        shape!(
-            DriverTable,
-            struct_size,
-            flags,
-            bind,
-            describe,
-            health,
-            dispatch,
-            tick,
-            caller,
-            caller_gone,
-            drop,
-            job,
-            job_cancel
-        ),
+        extra,
+        driver,
         shape!(
             HostTable,
             struct_size,
@@ -645,7 +891,7 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
             usb_device,
             usb_function
         ),
-        shape!(PackageDriver, manifest, table),
+        package_driver,
         shape!(PackageDescriptor, magic, version, register),
         &[MAX_TRANSFER_STEPS as u64, MAX_ISO_PACKETS as u64],
     ];
@@ -666,10 +912,11 @@ pub const PACKAGE_LAYOUT_HASH: u64 = {
         g += 1;
     }
     layout_hash(&words)
-};
+}
 
 /// The version of the package boundary. A host loads a package whose major is this one, whose
-/// minor is no newer, and whose layout hash is the same.
+/// minor is no newer, and whose layout hash is [`PACKAGE_LAYOUT_HASH`] or, for a package built
+/// before [`PackageExtra`], [`PACKAGE_BASE_LAYOUT_HASH`].
 pub const PACKAGE_VERSION: AbiVersion = AbiVersion::new(2, 0, PACKAGE_LAYOUT_HASH);
 
 #[cfg(all(test, feature = "std"))]

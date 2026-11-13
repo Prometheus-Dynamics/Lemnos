@@ -285,6 +285,18 @@ pub fn usb_descriptors() -> Vec<u8> {
 /// Builds the package written in C (`tests/c-package/package.c`) with the C compiler, with
 /// `flags` added, and returns the file it made in `dir`.
 pub fn c_package(dir: &Path, name: &str, flags: &[&str]) -> PathBuf {
+    let include = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../include");
+    c_package_with(dir, name, &include, flags)
+}
+
+/// [`c_package`] against the boundary as it was before the extras: `tests/c-package/base`, a
+/// copy of `include/lemnos` from before them.
+pub fn c_package_base(dir: &Path, name: &str, flags: &[&str]) -> PathBuf {
+    let include = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/c-package/base");
+    c_package_with(dir, name, &include, flags)
+}
+
+fn c_package_with(dir: &Path, name: &str, include: &Path, flags: &[&str]) -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let out = dir.join(name);
     let output = Command::new("cc")
@@ -292,7 +304,7 @@ pub fn c_package(dir: &Path, name: &str, flags: &[&str]) -> PathBuf {
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC",
         ])
         .arg("-I")
-        .arg(manifest.join("../../include"))
+        .arg(include)
         .arg(manifest.join("tests/c-package/package.c"))
         .args(flags)
         .arg("-o")

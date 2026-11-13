@@ -149,6 +149,17 @@ fn the_package_header_matches_the_crate() {
             DRIVER_TRACKS_CALLERS.to_string(),
         ),
         ("LEMNOS_DRIVER_JOBS", DRIVER_JOBS.to_string()),
+        ("LEMNOS_EXTRA_CONTRACT", EXTRA_CONTRACT.to_string()),
+        ("LEMNOS_EXTRA_METHOD", EXTRA_METHOD.to_string()),
+        ("LEMNOS_EXTRA_ITEM", EXTRA_ITEM.to_string()),
+        ("LEMNOS_EXTRA_HAS_READING", EXTRA_HAS_READING.to_string()),
+        ("LEMNOS_EXTRA_HAS_STEP", EXTRA_HAS_STEP.to_string()),
+        ("LEMNOS_EXTRA_HAS_WARN_LOW", EXTRA_HAS_WARN_LOW.to_string()),
+        (
+            "LEMNOS_EXTRA_HAS_WARN_HIGH",
+            EXTRA_HAS_WARN_HIGH.to_string(),
+        ),
+        ("LEMNOS_EXTRA_HAS_GROUP", EXTRA_HAS_GROUP.to_string()),
         ("LEMNOS_METHOD_JOB", METHOD_JOB.to_string()),
     ] {
         checks.push((name.to_string(), value));
@@ -227,6 +238,22 @@ fn the_package_header_matches_the_crate() {
         max,
         name,
         field
+    );
+    c_struct!(
+        checks,
+        "LemnosPackageExtra",
+        PackageExtra,
+        what,
+        reading,
+        flags,
+        contract,
+        method,
+        reserved,
+        index,
+        step,
+        warn_low,
+        warn_high,
+        text
     );
     c_struct!(
         checks,
@@ -386,7 +413,8 @@ fn the_package_header_matches_the_crate() {
         caller_gone,
         drop,
         job,
-        job_cancel
+        job_cancel,
+        describe_extra
     );
     c_struct!(
         checks,

@@ -4,8 +4,8 @@ use alloc::boxed::Box;
 use core::ffi::c_void;
 
 use super::{
-    DriverTable, HostTable, NO_TICK, Out, PackageHealth, PackageItem, PackageJobState,
-    PackageSetting, Slice, SliceMut, Str,
+    DriverTable, HostTable, NO_TICK, Out, PackageExtra, PackageHealth, PackageItem,
+    PackageJobState, PackageSetting, Slice, SliceMut, Str,
 };
 use crate::{Status, guard};
 
@@ -20,6 +20,22 @@ pub trait PackageInstance: Sized + Send + 'static {
     ) -> Result<Self, Status>;
     /// Fills `items` and returns how many there are in all.
     fn describe(&self, items: &mut [PackageItem]) -> u32;
+    /// Fills `extras` with what the items carry beyond [`PackageItem`]: a reading, a step, warning
+    /// limits and a group, each by the item's position in [`describe`](Self::describe). Returns
+    /// how many there are in all. Nothing by default.
+    fn describe_extra(&self, extras: &mut [PackageExtra]) -> u32 {
+        let _ = extras;
+        0
+    }
+    /// The contract kinds and method readings of the package's manifest, which need no driver:
+    /// asked with a null driver. Nothing by default.
+    fn manifest_extra(extras: &mut [PackageExtra]) -> u32
+    where
+        Self: Sized,
+    {
+        let _ = extras;
+        0
+    }
     fn health(&self) -> PackageHealth;
     /// Runs a method and returns its status and the reply's length.
     fn dispatch(
@@ -35,6 +51,25 @@ pub trait PackageInstance: Sized + Send + 'static {
     /// How job `job` stands; when it has finished, its result's length in `result`.
     fn job(&mut self, job: u64, result: &mut [u8]) -> (PackageJobState, usize);
     fn job_cancel(&mut self, job: u64);
+}
+
+extern "C" fn describe_extra<T: PackageInstance>(
+    driver: *mut c_void,
+    mut extras: SliceMut<'_, PackageExtra>,
+    count: Out<'_, u32>,
+) -> Status {
+    guard(|| {
+        let written = if driver.is_null() {
+            T::manifest_extra(extras.as_mut_slice())
+        } else {
+            let Some(instance) = instance::<T>(driver) else {
+                return Status::STALE_HANDLE;
+            };
+            instance.describe_extra(extras.as_mut_slice())
+        };
+        count.set(written);
+        Status::OK
+    })
 }
 
 /// The driver behind the pointer `bind` gave the host, or `None` for null.
@@ -203,5 +238,6 @@ pub const fn driver_table<T: PackageInstance>(flags: u32) -> DriverTable {
         drop: drop_driver::<T>,
         job: job::<T>,
         job_cancel: job_cancel::<T>,
+        describe_extra: Some(describe_extra::<T>),
     }
 }

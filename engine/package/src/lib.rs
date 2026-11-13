@@ -70,7 +70,10 @@ use std::path::{Path, PathBuf};
 
 use lemnos_abi::AbiVersion;
 use lemnos_abi::load::{LoadError, load, seal};
-use lemnos_abi::package::{DriverTable, Out, PACKAGE_MAGIC, PACKAGE_VERSION, PackageDriver, Slice};
+use lemnos_abi::package::{
+    Loaded, Out, PACKAGE_BASE_LAYOUT_HASH, PACKAGE_MAGIC, PACKAGE_VERSION, PackageDriver,
+    PackageExtra, Slice, registered_driver,
+};
 use lemnos_core::{Manifest, Status};
 use lemnos_host::DriverEntry;
 
@@ -301,6 +304,9 @@ pub fn resources_held() -> usize {
     adapter::resources_held()
 }
 
+/// The most extras a manifest may carry (contract kinds and method readings) that the host reads.
+const MAX_EXTRAS: usize = 256;
+
 fn unreadable(error: io::Error) -> Refusal {
     Refusal::Unreadable(error.to_string())
 }
@@ -320,7 +326,8 @@ fn check(magic: u64, version: &AbiVersion) -> Result<(), Refusal> {
             host: (host.major, host.minor),
         });
     }
-    if version.layout != host.layout {
+    // A package built before the extras has the boundary's base layout: it loads with none.
+    if version.layout != host.layout && version.layout != PACKAGE_BASE_LAYOUT_HASH {
         return Err(Refusal::LayoutMismatch);
     }
     Ok(())
@@ -390,16 +397,27 @@ fn open(path: &Path, mode: &Mode) -> Result<Package, Refusal> {
     if !status.is_ok() {
         return Err(Refusal::RegistrationFailed(status));
     }
-    let [driver] = drivers.as_slice() else {
-        return Err(Refusal::BadManifest(
-            "it did not register exactly one driver",
-        ));
+    let base = descriptor.version.layout == PACKAGE_BASE_LAYOUT_HASH;
+    let driver = registered_driver(drivers, base).map_err(Refusal::BadManifest)?;
+    let driver: &'static PackageDriver = Box::leak(Box::new(driver));
+    // The contract kinds and method readings: asked with no driver, once, here.
+    let mut extras = vec![PackageExtra::EMPTY; MAX_EXTRAS];
+    let count = match Loaded::manifest_extra(&driver.table, &mut extras) {
+        Some(Ok(count)) => count as usize,
+        Some(Err(_)) => {
+            return Err(Refusal::BadManifest(
+                "the package did not give its manifest's extras",
+            ));
+        }
+        None => 0,
     };
-    if (driver.table.struct_size as usize) < size_of::<DriverTable>() {
-        return Err(Refusal::LayoutMismatch);
+    if count > extras.len() {
+        return Err(Refusal::BadManifest(
+            "its manifest has more extras than the host reads",
+        ));
     }
-    let manifest =
-        lemnos_core::package::manifest_in(&driver.manifest).map_err(Refusal::BadManifest)?;
+    let manifest = lemnos_core::package::manifest_in(&driver.manifest, &extras[..count])
+        .map_err(Refusal::BadManifest)?;
     let manifest: &'static Manifest = Box::leak(Box::new(manifest));
     Ok(Package {
         path: path.to_owned(),

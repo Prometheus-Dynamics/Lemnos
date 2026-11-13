@@ -7,20 +7,20 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lemnos_abi::package::{
     BUFFERS_HANDLES, BUFFERS_PLAIN, ClocksHost, DRIVER_JOBS, DRIVER_TICKS, DRIVER_TRACKS_CALLERS,
-    DeviceHost, DmaHost, DriverTable, Fd, HostTable, I2cHost, InterruptHost, LineHost, Loaded,
-    MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageBinding,
-    PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge, PackageFrame, PackageHealth,
-    PackageHost, PackageInterruptEvent, PackageIsoPacket, PackageItem, PackageLineConfig,
-    PackagePwmConfig, PackageSpiSegment, PackageTransfer, PackageUsbEvent, PwmHost, RegistersHost,
-    ResetHost, Slice, SliceMut, SpiHost, StreamHost, TAKE_CLOCKS, TAKE_DEVICE, TAKE_DMA, TAKE_I2C,
-    TAKE_INTERRUPT, TAKE_LINE, TAKE_PWM, TAKE_RAW_SPI, TAKE_REGISTERS, TAKE_RESET, TAKE_SPI,
-    TAKE_STREAM, TAKE_UART, TAKE_USB_DEVICE, TAKE_USB_FUNCTION, TRANSFER_BOTH, TRANSFER_DELAY,
-    TRANSFER_IN_PLACE, TRANSFER_READ, TRANSFER_WRITE, UartHost, UsbDeviceHost, UsbFunctionHost,
-    host_table,
+    DeviceHost, DmaHost, DriverTable, EXTRA_ITEM, Fd, HostTable, I2cHost, InterruptHost, LineHost,
+    Loaded, MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out,
+    PackageBinding, PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge,
+    PackageExtra, PackageFrame, PackageHealth, PackageHost, PackageInterruptEvent,
+    PackageIsoPacket, PackageItem, PackageLineConfig, PackagePwmConfig, PackageSpiSegment,
+    PackageTransfer, PackageUsbEvent, PwmHost, RegistersHost, ResetHost, Slice, SliceMut, SpiHost,
+    StreamHost, TAKE_CLOCKS, TAKE_DEVICE, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT, TAKE_LINE, TAKE_PWM,
+    TAKE_RAW_SPI, TAKE_REGISTERS, TAKE_RESET, TAKE_SPI, TAKE_STREAM, TAKE_UART, TAKE_USB_DEVICE,
+    TAKE_USB_FUNCTION, TRANSFER_BOTH, TRANSFER_DELAY, TRANSFER_IN_PLACE, TRANSFER_READ,
+    TRANSFER_WRITE, UartHost, UsbDeviceHost, UsbFunctionHost, host_table,
 };
 use lemnos_abi::{Handle, Slab};
 use lemnos_core::package::{
-    dma_buffer_out, edge_out, frame_in, health_in, health_out, interrupt_event_out, item_in,
+    dma_buffer_out, edge_out, frame_in, health_in, health_out, interrupt_event_out, item_with,
     line_config_in, pwm_config_in, pwm_config_out, segment_in, settings_out, setup_in,
     status_of_bus, timeout_in, uart_format_in, usb_event_out,
 };
@@ -884,10 +884,24 @@ impl Instance for Running {
             Err(Status::PANIC) => panicked(),
             Err(_) => return,
         };
+        // What the items carry beyond their own record, by item position. A package without it
+        // gives none, and its items read as before.
+        let mut extras = [PackageExtra::EMPTY; MAX_ITEMS];
+        let extra_count = match self.loaded.describe_extra(&mut extras) {
+            Some(Ok(count)) => (count as usize).min(MAX_ITEMS),
+            Some(Err(Status::PANIC)) => panicked(),
+            _ => 0,
+        };
+        let extras = &extras[..extra_count];
         let mut last = None;
-        for item in items.iter().take(count).filter_map(item_in) {
-            out.add(item);
-            last = Some(item);
+        for (index, item) in items.iter().take(count).enumerate() {
+            let extra = extras
+                .iter()
+                .find(|extra| extra.what == EXTRA_ITEM && extra.index as usize == index);
+            if let Some(item) = item_with(item, extra) {
+                out.add(item);
+                last = Some(item);
+            }
         }
         // Items the package had no room for count as left out here too.
         if let Some(item) = last {
