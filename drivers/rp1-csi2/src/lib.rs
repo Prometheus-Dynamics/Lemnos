@@ -622,4 +622,12 @@ impl CameraReceiver for Rp1Csi2 {
     fn layout(&mut self) -> Result<Option<FrameLayout>> {
         Ok(self.layout)
     }
+
+    fn inputs(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }

@@ -145,6 +145,14 @@ mod tests {
         fn graph(&mut self) -> Result<Graph> {
             Err(Status::NOT_SUPPORTED)
         }
+
+        fn inputs(&mut self) -> Result<Vec<lemnos_v4l2::v4l2::InputInfo>> {
+            Err(Status::NOT_SUPPORTED)
+        }
+
+        fn input(&mut self) -> Result<u32> {
+            Err(Status::NOT_SUPPORTED)
+        }
     }
 
     fn line(index: u32, sequence: u32, data: Vec<u8>, bad: bool) -> (Frame, Vec<u8>) {

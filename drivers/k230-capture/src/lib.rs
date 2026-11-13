@@ -648,6 +648,14 @@ impl CameraReceiver for K230Capture {
             size: layout.bytes,
         }))
     }
+
+    fn inputs(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 const _: () = assert!(RING == 3);

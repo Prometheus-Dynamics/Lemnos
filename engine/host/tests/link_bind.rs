@@ -157,6 +157,14 @@ impl CameraReceiver for LinkedProvider {
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    fn inputs(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// A sensor whose bind asks the receiver its link, as the camera sensors do. It serves no frames:

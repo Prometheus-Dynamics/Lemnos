@@ -40,8 +40,9 @@ pub use control::{
     MenuValue,
 };
 pub use format::{
-    Format, FormatDesc, FormatFlags, FrameIntervals, FrameSize, FrameSizes, MetaFormat, PixFormat,
-    PixFormatMplane, PlaneFormat, SelectionTarget, StepwiseSize, StreamParams,
+    Format, FormatDesc, FormatFlags, FrameIntervals, FrameSize, FrameSizes, InputInfo, MAX_INPUTS,
+    MetaFormat, PixFormat, PixFormatMplane, PlaneFormat, SelectionTarget, StepwiseSize,
+    StreamParams,
 };
 pub use lemnos_linux_sys::v4l2::device::ExtControl;
 pub use mmap_queue::{MmapQueue, QueueTimer};

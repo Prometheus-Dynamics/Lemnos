@@ -151,6 +151,13 @@ impl Capture for NodeEnd {
     fn graph(&mut self) -> Result<Graph> {
         Err(Status::NO_DEVICE)
     }
+    fn inputs(&mut self) -> Result<Vec<lemnos_v4l2::v4l2::InputInfo>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// The host's producer end, counting the copies a driver makes into it.

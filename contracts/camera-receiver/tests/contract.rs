@@ -1,6 +1,7 @@
 use lemnos_contract_camera_receiver::{
-    BayerOrder, CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig,
-    MAX_EMBEDDED_STREAM_NAME, MAX_FEED_NAME, MAX_STREAM_NAME, Packing,
+    BayerOrder, CameraReceiver, Counters, FrameLayout, FrameStarts, INPUT_RECORD, Input, Limits,
+    LinkConfig, MAX_EMBEDDED_STREAM_NAME, MAX_FEED_NAME, MAX_INPUT_NAME, MAX_INPUTS,
+    MAX_STREAM_NAME, Packing, read_input, write_input,
 };
 use lemnos_core::{
     Bound, Caller, Contract, Decode, Encode, LOCAL_ARGS, REPLY_INLINE, Reader, Reply, Result,
@@ -117,8 +118,13 @@ fn the_tag_and_numbers_are_stable() {
             ("source", 10),
             ("layout", 11),
             ("frame_starts", 12),
+            ("inputs", 13),
+            ("input", 14),
         ]
     );
+    assert!(INFO.methods[12].has_out_buffer);
+    assert_eq!(INFO.methods[12].returns, Shape::Bytes);
+    assert!(!INFO.methods[13].has_out_buffer);
     assert!(!INFO.methods[11].has_out_buffer);
     assert!(matches!(INFO.methods[11].returns, Shape::Option(_)));
     assert!(INFO.methods[3].has_out_buffer);
@@ -220,6 +226,9 @@ struct Mock {
     layout: Option<FrameLayout>,
     /// What `source` answers: `None` is unknown.
     source: Option<&'static str>,
+    /// What `inputs` lists: `None` is a node with no input support.
+    inputs: Option<Vec<Input<'static>>>,
+    selected: u32,
 }
 
 impl CameraReceiver for Mock {
@@ -302,6 +311,30 @@ impl CameraReceiver for Mock {
 
     fn embedded_stream(&mut self, into: &mut [u8]) -> Result<usize> {
         copy_name("embedded", into)
+    }
+
+    fn inputs(&mut self, into: &mut [u8]) -> Result<usize> {
+        let Some(list) = &self.inputs else {
+            return Err(Status::NOT_SUPPORTED);
+        };
+        if list.len() > MAX_INPUTS {
+            return Err(Status::BUFFER_TOO_SMALL);
+        }
+        for (i, input) in list.iter().enumerate() {
+            let at = i * INPUT_RECORD;
+            let record = into
+                .get_mut(at..at + INPUT_RECORD)
+                .ok_or(Status::BUFFER_TOO_SMALL)?;
+            write_input(input, record)?;
+        }
+        Ok(list.len() * INPUT_RECORD)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        match self.inputs {
+            Some(_) => Ok(self.selected),
+            None => Err(Status::NOT_SUPPORTED),
+        }
     }
 }
 
@@ -420,4 +453,129 @@ fn a_caller_sees_the_drivers_refusals() {
         receiver.frame_stream(&mut small),
         Err(Status::BUFFER_TOO_SMALL)
     );
+}
+
+#[test]
+fn an_input_record_round_trips_and_is_laid_out_as_documented() {
+    let input = Input {
+        index: 2,
+        kind: 2,
+        status: 0x10,
+        name: "rear",
+    };
+    let mut record = [0xaa; INPUT_RECORD];
+    write_input(&input, &mut record).unwrap();
+    assert_eq!(&record[0..4], &2u32.to_le_bytes());
+    assert_eq!(record[12], 4);
+    assert_eq!(&record[16..20], b"rear");
+    assert!(
+        record[20..].iter().all(|&b| b == 0),
+        "zero-filled to the end"
+    );
+    assert_eq!(read_input(&record), Ok(input));
+}
+
+#[test]
+fn a_name_past_the_bound_or_not_utf8_is_refused() {
+    let long = "x".repeat(MAX_INPUT_NAME + 1);
+    let mut record = [0; INPUT_RECORD];
+    let too_long = Input {
+        index: 0,
+        kind: 2,
+        status: 0,
+        name: &long,
+    };
+    assert_eq!(
+        write_input(&too_long, &mut record),
+        Err(Status::INVALID_ARGUMENT)
+    );
+    let mut bad = [0u8; INPUT_RECORD];
+    bad[12] = 1;
+    bad[16] = 0xff;
+    assert_eq!(read_input(&bad), Err(Status::INVALID_ARGUMENT));
+    bad[12] = (MAX_INPUT_NAME + 1) as u8;
+    assert_eq!(read_input(&bad), Err(Status::INVALID_ARGUMENT));
+    assert_eq!(read_input(&bad[..47]), Err(Status::INVALID_ARGUMENT));
+    assert_eq!(
+        write_input(
+            &Input {
+                index: 0,
+                kind: 0,
+                status: 0,
+                name: "a"
+            },
+            &mut record[..47]
+        ),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+}
+
+#[test]
+fn a_caller_lists_three_inputs_and_reads_each_record() {
+    let mut receiver = Bound::new(Direct {
+        driver: Mock {
+            inputs: Some(vec![
+                Input {
+                    index: 0,
+                    kind: 2,
+                    status: 0,
+                    name: "Camera",
+                },
+                Input {
+                    index: 1,
+                    kind: 1,
+                    status: 0,
+                    name: "Tuner",
+                },
+                Input {
+                    index: 2,
+                    kind: 3,
+                    status: 1,
+                    name: "Touch",
+                },
+            ]),
+            selected: 1,
+            ..Mock::default()
+        },
+        args: [0; LOCAL_ARGS],
+    });
+    let mut buf = [0; MAX_INPUTS * INPUT_RECORD];
+    let len = receiver.inputs(&mut buf).unwrap();
+    assert_eq!(len, 3 * INPUT_RECORD);
+    let names: Vec<_> = buf[..len]
+        .chunks(INPUT_RECORD)
+        .map(|r| read_input(r).unwrap())
+        .map(|i| (i.index, i.kind, i.name))
+        .collect();
+    assert_eq!(names, [(0, 2, "Camera"), (1, 1, "Tuner"), (2, 3, "Touch")]);
+    assert_eq!(receiver.input(), Ok(1));
+}
+
+#[test]
+fn a_node_with_no_input_support_says_not_supported() {
+    let mut receiver = client();
+    let mut buf = [0; MAX_INPUTS * INPUT_RECORD];
+    assert_eq!(receiver.inputs(&mut buf), Err(Status::NOT_SUPPORTED));
+    assert_eq!(receiver.input(), Err(Status::NOT_SUPPORTED));
+}
+
+#[test]
+fn a_node_with_more_inputs_than_the_answer_holds_is_refused() {
+    let many: Vec<_> = (0..=MAX_INPUTS as u32)
+        .map(|index| Input {
+            index,
+            kind: 2,
+            status: 0,
+            name: "in",
+        })
+        .collect();
+    let mut receiver = Bound::new(Direct {
+        driver: Mock {
+            inputs: Some(many),
+            ..Mock::default()
+        },
+        args: [0; LOCAL_ARGS],
+    });
+    let mut buf = [0; MAX_INPUTS * INPUT_RECORD];
+    assert_eq!(receiver.inputs(&mut buf), Err(Status::BUFFER_TOO_SMALL));
 }

@@ -656,6 +656,7 @@ When you add a method or field, classify it in the PR:
 | `camera.receiver` methods 9 to 11 (`embedded_stream`, `source`, `layout`) | additive | appended methods; an old driver answers `NOT_SUPPORTED` |
 | `camera.sensor` method 12 (`identity`) | additive | appended method |
 | `camera.sensor` methods 13 and 14 (`post_values_at`, `applied_landing`), `camera.receiver` method 12 (`frame_starts`) | additive | appended methods and their types; an old driver answers `NOT_SUPPORTED` and an old caller never calls them |
+| `camera.receiver` methods 13 and 14 (`inputs`, `input`) and the `Input` record | additive | appended methods and a record layout a caller reads with `read_input`; an old driver answers `NOT_SUPPORTED`, and a receiver without a V4L2 node always does |
 | `camera.sensor` methods 15 to 18 (`in_force`, `set_exposure`, `set_analogue_gain`, `set_frame_length`) and `InForce` | additive | appended methods and their type; the three setters are posts, so a driver without a landing answers `NOT_SUPPORTED` as `post_values_at` does |
 | `Unit::Line` (`"line"`) | additive | a new unit symbol on the description's unit string; an item with it reads as unit-less to a client that does not know it |
 | `camera.isp` methods 13 and 14 (`input_layout`, `output_layout`) | additive | appended methods, marked `#[added]` in T1d (U1b added them without the mark) |

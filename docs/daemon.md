@@ -259,6 +259,7 @@ each out-buffer method's largest reply, from its contract's own bounds:
 | `camera-isp/1` | `config_stream`, `statistics_stream`, `input_stream`, `output_stream` | 32 bytes each | whole |
 | `camera-receiver/1` | `frame_stream`, `embedded_stream` | 32 bytes each | whole |
 | `camera-receiver/1` | `feeds`, `source` | 64 bytes (`MAX_FEED_NAME`) | whole |
+| `camera-receiver/1` | `inputs` | 768 bytes (`MAX_INPUTS` records of `INPUT_RECORD`, 48 bytes each) | whole |
 | `camera-sensor/1` | `identity` | 64 bytes (`MAX_IDENTITY_NAME`) | whole |
 | `codec-block/1` | `block` | 48 bytes (`MAX_BLOCK_NAME`) | whole |
 | `codec-block/1`, `image-blend/1`, `image-convert/1`, `image-scaler/1`, `npu/1` | `job_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |

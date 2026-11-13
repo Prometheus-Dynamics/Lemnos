@@ -827,6 +827,14 @@ impl CameraReceiver for SimReceiver {
             latest_ns: frame0 + frame * p.interval_ns,
         }))
     }
+
+    fn inputs(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// Writes one frame's embedded data into a free buffer and publishes it with the frame's sequence.

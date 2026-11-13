@@ -439,4 +439,13 @@ impl CameraReceiver for SunxiVin {
     fn layout(&mut self) -> Result<Option<FrameLayout>> {
         Ok(self.layout)
     }
+
+    fn inputs(&mut self, into: &mut [u8]) -> Result<usize> {
+        let list = self.hw.inputs()?;
+        lemnos_driver_v4l2_capture::input_records(&list, into)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        self.hw.input()
+    }
 }

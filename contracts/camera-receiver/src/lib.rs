@@ -38,6 +38,66 @@ pub const MAX_EMBEDDED_STREAM_NAME: usize = 32;
 /// this long.
 pub const MAX_FEED_NAME: usize = 64;
 
+/// Most inputs [`CameraReceiver::inputs`] answers. A node with more is refused with
+/// `BUFFER_TOO_SMALL`: its inputs do not fit the answer.
+pub const MAX_INPUTS: usize = 16;
+
+/// Bytes of one input in the answer to [`CameraReceiver::inputs`].
+pub const INPUT_RECORD: usize = 48;
+
+/// Longest input name, in bytes.
+pub const MAX_INPUT_NAME: usize = 32;
+
+/// One video input, as one record of [`CameraReceiver::inputs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Input<'a> {
+    /// The index to select with the receiver's input.
+    pub index: u32,
+    /// Its kind: `V4L2_INPUT_TYPE_TUNER` (1), `_CAMERA` (2) or `_TOUCH` (3).
+    pub kind: u32,
+    /// Its status flags (`V4L2_IN_ST_*`).
+    pub status: u32,
+    /// The input's name: UTF-8, at most [`MAX_INPUT_NAME`] bytes.
+    pub name: &'a str,
+}
+
+/// Writes `input` as one record: `index`, `kind` and `status` as little-endian `u32`s at bytes 0,
+/// 4 and 8; the name's length as one byte at 12; the name from byte 16, zero-filled to the record's
+/// end. `INVALID_ARGUMENT` for a name longer than [`MAX_INPUT_NAME`], `BUFFER_TOO_SMALL` for a
+/// buffer shorter than [`INPUT_RECORD`].
+pub fn write_input(input: &Input<'_>, into: &mut [u8]) -> Result<()> {
+    if input.name.len() > MAX_INPUT_NAME {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    let record = into
+        .get_mut(..INPUT_RECORD)
+        .ok_or(Status::BUFFER_TOO_SMALL)?;
+    record.fill(0);
+    record[0..4].copy_from_slice(&input.index.to_le_bytes());
+    record[4..8].copy_from_slice(&input.kind.to_le_bytes());
+    record[8..12].copy_from_slice(&input.status.to_le_bytes());
+    record[12] = input.name.len() as u8;
+    record[16..16 + input.name.len()].copy_from_slice(input.name.as_bytes());
+    Ok(())
+}
+
+/// Reads one record written by [`write_input`]. `INVALID_ARGUMENT` for a record shorter than
+/// [`INPUT_RECORD`], a name length past [`MAX_INPUT_NAME`], or a name that is not UTF-8.
+pub fn read_input(record: &[u8]) -> Result<Input<'_>> {
+    let record = record.get(..INPUT_RECORD).ok_or(Status::INVALID_ARGUMENT)?;
+    let len = usize::from(record[12]);
+    if len > MAX_INPUT_NAME {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    let name = core::str::from_utf8(&record[16..16 + len]).map_err(|_| Status::INVALID_ARGUMENT)?;
+    Ok(Input {
+        index: u32::from_le_bytes([record[0], record[1], record[2], record[3]]),
+        kind: u32::from_le_bytes([record[4], record[5], record[6], record[7]]),
+        status: u32::from_le_bytes([record[8], record[9], record[10], record[11]]),
+        name,
+    })
+}
+
 macro_rules! wire_enum {
     ($name:ident { $($variant:ident = $value:literal),* $(,)? }) => {
         impl Encode for $name {
@@ -227,4 +287,20 @@ pub trait CameraReceiver {
     #[added]
     #[method(12)]
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>>;
+    /// The video inputs the receiver's capture node offers, in index order, as records of
+    /// [`INPUT_RECORD`] bytes (see [`write_input`]) into `into`, which holds at least
+    /// `MAX_INPUTS * INPUT_RECORD` bytes. Returns the bytes written: a multiple of
+    /// [`INPUT_RECORD`], so a node with no input writes 0.
+    ///
+    /// `NOT_SUPPORTED` when the node has no input support at all, which is a fact about the
+    /// receiver and not a read that failed. `BUFFER_TOO_SMALL` when the node has more than
+    /// [`MAX_INPUTS`] inputs. Any other error is a read that failed now.
+    #[added]
+    #[method(13)]
+    fn inputs(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    /// The index of the input the node has selected now (`VIDIOC_G_INPUT`), the one
+    /// [`inputs`](Self::inputs) names. `NOT_SUPPORTED` when the node has no input support.
+    #[added]
+    #[method(14)]
+    fn input(&mut self) -> Result<u32>;
 }

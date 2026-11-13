@@ -33,7 +33,9 @@ flags! {
     }
 }
 
-/// A format a queue supports (`VIDIOC_ENUM_FMT`).
+/// The most inputs [`VideoDevice::inputs`] lists before it refuses the node.
+pub const MAX_INPUTS: u32 = 256;
+
 /// One of a device's video inputs (`struct v4l2_input`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputInfo {
@@ -47,6 +49,7 @@ pub struct InputInfo {
     pub status: u32,
 }
 
+/// A format a queue supports (`VIDIOC_ENUM_FMT`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatDesc {
     /// Enumeration index.
@@ -559,6 +562,16 @@ impl VideoDevice {
         })
     }
 
+    /// Lists the device's video inputs, in index order, by calling [`enum_input`](Self::enum_input)
+    /// until the driver answers `EINVAL` past the last one. A node with no input at all lists none.
+    ///
+    /// Errors: a node without input support answers `ENOTTY` on the first call, which comes back
+    /// as the error (check [`Error::is_not_supported`]); any other errno is returned as it is.
+    /// More than [`MAX_INPUTS`] inputs is `Error::Invalid`, so the loop always ends.
+    pub fn inputs(&self) -> Result<Vec<InputInfo>> {
+        list_inputs(|index| self.enum_input(index))
+    }
+
     /// The streaming parameters of a queue (`VIDIOC_G_PARM`).
     pub fn stream_params(&self, buf_type: BufType) -> Result<StreamParams> {
         let mut raw: v4l2_streamparm = zeroed();
@@ -619,9 +632,124 @@ impl VideoDevice {
     }
 }
 
+/// Lists inputs through `enum_input`, index by index, until it answers `EINVAL`. Any other error
+/// ends the list with that error, so a refusal is never read as the end of the list.
+pub(crate) fn list_inputs(
+    mut enum_input: impl FnMut(u32) -> Result<InputInfo>,
+) -> Result<Vec<InputInfo>> {
+    let mut inputs = Vec::new();
+    let mut index = 0u32;
+    loop {
+        if index == MAX_INPUTS {
+            // One more call tells a node with exactly MAX_INPUTS inputs from a longer one.
+            return match enum_input(index) {
+                Err(e) if e.is_invalid_argument() => Ok(inputs),
+                Ok(_) => Err(Error::Invalid(format!(
+                    "more than {MAX_INPUTS} video inputs"
+                ))),
+                Err(e) => Err(e),
+            };
+        }
+        match enum_input(index) {
+            Ok(input) => inputs.push(input),
+            Err(e) if e.is_invalid_argument() => return Ok(inputs),
+            Err(e) => return Err(e),
+        }
+        index += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input(index: u32, name: &str, kind: u32) -> InputInfo {
+        InputInfo {
+            index,
+            name: name.to_owned(),
+            kind,
+            status: 0,
+        }
+    }
+
+    fn einval() -> Error {
+        Error::Ioctl {
+            name: "VIDIOC_ENUMINPUT",
+            errno: libc::EINVAL,
+        }
+    }
+
+    fn enotty() -> Error {
+        Error::Ioctl {
+            name: "VIDIOC_ENUMINPUT",
+            errno: libc::ENOTTY,
+        }
+    }
+
+    #[test]
+    fn three_inputs_list_in_index_order_with_names_and_kinds() {
+        let inputs = list_inputs(|i| match i {
+            0 => Ok(input(0, "Camera", 2)),
+            1 => Ok(input(1, "Tuner", 1)),
+            2 => Ok(input(2, "Touch", 3)),
+            _ => Err(einval()),
+        })
+        .unwrap();
+        assert_eq!(
+            inputs,
+            [
+                input(0, "Camera", 2),
+                input(1, "Tuner", 1),
+                input(2, "Touch", 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_node_with_no_inputs_lists_none() {
+        assert_eq!(list_inputs(|_| Err(einval())).unwrap(), []);
+    }
+
+    #[test]
+    fn no_input_support_is_the_enotty_error_and_is_not_an_empty_list() {
+        let err = list_inputs(|_| Err(enotty())).unwrap_err();
+        assert!(err.is_not_supported());
+    }
+
+    #[test]
+    fn an_error_midway_ends_the_list_with_that_error() {
+        let mut calls = 0;
+        let err = list_inputs(|i| {
+            calls += 1;
+            if i == 0 {
+                Ok(input(0, "Camera", 2))
+            } else {
+                Err(enotty())
+            }
+        })
+        .unwrap_err();
+        assert!(err.is_not_supported());
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_driver_that_never_ends_the_list_is_refused_at_the_bound() {
+        let mut calls = 0u32;
+        let err = list_inputs(|i| {
+            calls += 1;
+            Ok(input(i, "Loop", 2))
+        })
+        .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)));
+        assert_eq!(calls, MAX_INPUTS + 1);
+    }
+
+    #[test]
+    fn a_device_without_input_support_answers_not_supported_on_a_real_node() {
+        let (dev, _file) = crate::v4l2::test_device();
+        let err = dev.inputs().unwrap_err();
+        assert!(err.is_not_supported(), "{err}");
+    }
 
     #[test]
     fn multiplanar_format_round_trips_through_raw() {

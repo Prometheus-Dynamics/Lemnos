@@ -695,4 +695,15 @@ impl CameraReceiver for Rkcif {
             .map(|link| layout(&link, self.packing))
             .transpose()
     }
+
+    fn inputs(&mut self, into: &mut [u8]) -> Result<usize> {
+        let node = self.node.as_mut().ok_or(Status::NOT_SUPPORTED)?;
+        let list = node.inputs()?;
+        capture::input_records(&list, into)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        let node = self.node.as_mut().ok_or(Status::NOT_SUPPORTED)?;
+        node.input()
+    }
 }

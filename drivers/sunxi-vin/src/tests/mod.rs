@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_receiver::{
-    BayerOrder, CameraReceiver, Counters, FrameLayout, LinkConfig, MAX_STREAM_NAME, Packing,
+    BayerOrder, CameraReceiver, Counters, FrameLayout, INPUT_RECORD, LinkConfig, MAX_INPUTS,
+    MAX_STREAM_NAME, Packing, read_input,
 };
 use lemnos_core::{Health, Lifecycle, Result, Status, StreamHandle};
 use lemnos_hal::ErrorKind;
@@ -16,6 +17,7 @@ use lemnos_v4l2::FourCc;
 use lemnos_v4l2::media::{
     Entity, EntityFlags, EntityFunction, Link, LinkFlags, Pad, PadFlags, Topology,
 };
+use lemnos_v4l2::v4l2::InputInfo;
 
 use crate::route::{Feeds, feeds};
 use crate::{Frame, Granted, Graph, Hardware, Wanted};
@@ -52,6 +54,9 @@ struct Node {
     /// What `open` answers instead of what was asked.
     answer: Option<Granted>,
     graph: Option<Graph>,
+    /// What the node lists as its inputs: `None` is a node with no input support.
+    inputs: Option<Vec<InputInfo>>,
+    selected: u32,
 }
 
 /// The node's own hold on each plane's memory of one slot, in plane order.
@@ -199,6 +204,23 @@ impl Hardware for Hw {
             .graph
             .clone()
             .ok_or(Status::NO_DEVICE)
+    }
+
+    fn inputs(&mut self) -> Result<Vec<InputInfo>> {
+        self.node
+            .lock()
+            .unwrap()
+            .inputs
+            .clone()
+            .ok_or(Status::NOT_SUPPORTED)
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        let n = self.node.lock().unwrap();
+        match n.inputs {
+            Some(_) => Ok(n.selected),
+            None => Err(Status::NOT_SUPPORTED),
+        }
     }
 }
 
@@ -1040,4 +1062,40 @@ fn layout_is_what_configure_set_and_nothing_before() {
     assert_eq!(CameraReceiver::layout(&mut d), Ok(None));
     let set = d.configure(raw10(), Packing::Unpacked16).unwrap();
     assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
+}
+
+fn input(index: u32, name: &str, kind: u32) -> InputInfo {
+    InputInfo {
+        index,
+        name: name.to_owned(),
+        kind,
+        status: 0,
+    }
+}
+
+#[test]
+fn a_caller_lists_the_nodes_inputs_and_the_one_selected() {
+    let (mut d, node) = driver(&MockStream::new(4));
+    node.with(|n| {
+        n.inputs = Some(vec![input(0, "Camera", 2), input(1, "Tuner", 1)]);
+        n.selected = 1;
+    });
+    let mut buf = [0; MAX_INPUTS * INPUT_RECORD];
+    let len = d.inputs(&mut buf).unwrap();
+    assert_eq!(len, 2 * INPUT_RECORD);
+    let listed: Vec<_> = buf[..len]
+        .chunks(INPUT_RECORD)
+        .map(|r| read_input(r).unwrap())
+        .map(|i| (i.index, i.kind, i.name))
+        .collect();
+    assert_eq!(listed, [(0, 2, "Camera"), (1, 1, "Tuner")]);
+    assert_eq!(d.input(), Ok(1));
+}
+
+#[test]
+fn a_node_with_no_input_support_says_not_supported_and_lists_nothing() {
+    let (mut d, _node) = driver(&MockStream::new(4));
+    let mut buf = [0; MAX_INPUTS * INPUT_RECORD];
+    assert_eq!(d.inputs(&mut buf), Err(Status::NOT_SUPPORTED));
+    assert_eq!(d.input(), Err(Status::NOT_SUPPORTED));
 }

@@ -5,13 +5,14 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
 
+use lemnos_contract_camera_receiver::{INPUT_RECORD, Input, MAX_INPUTS, write_input};
 use lemnos_core::{Result, Status};
 use lemnos_hal::blocks::BufferHandle;
 use lemnos_linux_sys::dma_buf;
 use lemnos_v4l2::media::{self, InterfaceType, MediaDevice, Topology};
 use lemnos_v4l2::v4l2::{
-    BufType, BufferFlags, CapabilityFlags, DequeuedBuffer, Format, MetaFormat, MmapQueue,
-    PixFormat, PixFormatMplane, PlaneFormat, VideoDevice,
+    BufType, BufferFlags, CapabilityFlags, DequeuedBuffer, Format, InputInfo, MetaFormat,
+    MmapQueue, PixFormat, PixFormatMplane, PlaneFormat, VideoDevice,
 };
 use lemnos_v4l2::{Error, FourCc};
 
@@ -114,6 +115,12 @@ pub trait Hardware: Send {
     fn requeue(&mut self, index: u32) -> Result<()>;
     /// The media graph as it stands.
     fn graph(&mut self) -> Result<Graph>;
+    /// The node's video inputs in index order (`VIDIOC_ENUMINPUT`, see
+    /// [`VideoDevice::inputs`]). `NOT_SUPPORTED` when the node has no input support.
+    fn inputs(&mut self) -> Result<Vec<InputInfo>>;
+    /// The input the node has selected (`VIDIOC_G_INPUT`). `NOT_SUPPORTED` when the node has no
+    /// input support.
+    fn input(&mut self) -> Result<u32>;
 }
 
 /// Where the node is.
@@ -162,6 +169,24 @@ pub struct LinuxHardware {
 }
 
 impl LinuxHardware {
+    /// One read-only call on the node: on the open node when there is one, else on the node
+    /// opened for the call alone. A node with no input support answers `NOT_SUPPORTED`.
+    fn query<T>(&mut self, call: impl FnOnce(&VideoDevice) -> lemnos_v4l2::Result<T>) -> Result<T> {
+        let refused = |e: &Error| {
+            if e.is_not_supported() {
+                Status::NOT_SUPPORTED
+            } else {
+                status(e)
+            }
+        };
+        if let Some((dev, _)) = &self.opened {
+            return call(dev).map_err(|e| refused(&e));
+        }
+        let video = self.find()?.video.clone();
+        let dev = VideoDevice::open_read_only(&video).map_err(|e| refused(&e))?;
+        call(&dev).map_err(|e| refused(&e))
+    }
+
     #[must_use]
     pub fn new(settings: Settings) -> Self {
         Self {
@@ -214,6 +239,31 @@ impl LinuxHardware {
         }
         self.found.as_ref().ok_or(Status::NO_DEVICE)
     }
+}
+
+/// Writes the inputs as the `camera.receiver` answer to `inputs`: one record per input (see
+/// `lemnos_contract_camera_receiver::write_input`), into `into`. Returns the bytes written.
+/// `BUFFER_TOO_SMALL` for more inputs than the answer holds, or a buffer too short for them.
+pub fn input_records(list: &[InputInfo], into: &mut [u8]) -> Result<usize> {
+    if list.len() > MAX_INPUTS {
+        return Err(Status::BUFFER_TOO_SMALL);
+    }
+    for (i, input) in list.iter().enumerate() {
+        let at = i * INPUT_RECORD;
+        let record = into
+            .get_mut(at..at + INPUT_RECORD)
+            .ok_or(Status::BUFFER_TOO_SMALL)?;
+        write_input(
+            &Input {
+                index: input.index,
+                kind: input.kind,
+                status: input.status,
+                name: &input.name,
+            },
+            record,
+        )?;
+    }
+    Ok(list.len() * INPUT_RECORD)
 }
 
 fn status(error: &Error) -> Status {
@@ -481,6 +531,14 @@ impl Hardware for LinuxHardware {
             .ok_or(Status::NO_DEVICE)?
             .id;
         Ok(Graph { topology, capture })
+    }
+
+    fn inputs(&mut self) -> Result<Vec<InputInfo>> {
+        self.query(|dev| dev.inputs())
+    }
+
+    fn input(&mut self) -> Result<u32> {
+        self.query(|dev| dev.input())
     }
 }
 

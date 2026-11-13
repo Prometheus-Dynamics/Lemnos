@@ -61,6 +61,7 @@ pub use embedded::{LINE_BUFFERS, pump as pump_embedded, start as start_embedded}
 pub use format::{fourcc, parse_order};
 pub use hw::{
     Frame, Granted, Graph, Hardware, LinuxHardware, MAX_PLANES, Prepare, Settings, Wanted,
+    input_records,
 };
 pub use pump::{MAX_SLOTS, Mode, Pump};
 
