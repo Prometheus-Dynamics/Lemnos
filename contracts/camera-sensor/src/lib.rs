@@ -395,21 +395,14 @@ pub enum LinkCheck {
 ///
 /// `answer` is that reply: the name it gave (empty for nothing wired), or the status it refused
 /// with. `identity` is this sensor's own name as the kernel knows it, `None` when no kernel names
-/// it. `NOT_SUPPORTED` leaves the link unknown. `INVALID_ARGUMENT` means the linked device does not
-/// serve the receiver contract at all (a front end is linked this way on a board), so it cannot say
-/// either, and the link is unknown too. Any other refusal is returned as is: the receiver could not
-/// be asked now, so the bind is retried and nothing is concluded.
+/// it. A refusal other than `NOT_SUPPORTED` is returned as is: the receiver could not be asked,
+/// so the bind is retried and nothing is concluded.
 pub fn check_link(answer: Result<&[u8]>, identity: Option<&[u8]>) -> Result<LinkCheck> {
     let name = match answer {
         Ok(name) => name,
         Err(Status::NOT_SUPPORTED) => {
             return Ok(LinkCheck::Unknown(
                 "the linked receiver cannot say what is wired to its input",
-            ));
-        }
-        Err(Status::INVALID_ARGUMENT) => {
-            return Ok(LinkCheck::Unknown(
-                "the linked device does not answer as a receiver",
             ));
         }
         Err(status) => return Err(status),
