@@ -36,3 +36,71 @@ fn the_statistics_wrappers_put_their_header_where_the_kernel_does() {
         size_of::<isp35::isp35_stat>() + 4
     );
 }
+
+#[test]
+fn the_isp35_module_bits_are_distinct_and_all_named() {
+    use crate::module35::*;
+    let all = [
+        DPCC, BLS, SDG, LSC, AWB_GAIN, BDM, CCM, GOC, CPROC, IE, RAWAF, RAWAE0, RAWAE1, RAWAE2,
+        RAWAE3, RAWAWB, RAWHIST0, RAWHIST1, RAWHIST2, RAWHIST3, HDRMGE, RAWNR, GIC, DHAZ, LUT3D,
+        LDCH, GAIN, DEBAYER, BAYNR, BAY3D, YNR, CNR, SHARP, DRC, CAC, CSM, CGC, RGBIR, HSV, ENH,
+        HIST, AI, AIAWB, AWBSYNC, BAY3D_L2, FORCE,
+    ];
+    // Every bit of the ISP35 table is one bit, and no two names share one.
+    let mut seen = 0u64;
+    for bit in all {
+        assert_eq!(bit.count_ones(), 1);
+        assert_eq!(seen & bit, 0);
+        seen |= bit;
+    }
+    assert_eq!(all.len(), 46);
+    assert_eq!(seen, ALL);
+    assert_eq!(super::module::ALL & RGBIR, 0);
+}
+
+#[test]
+fn the_byte_views_are_packed_so_every_byte_is_a_field_byte() {
+    use crate::bytes::Bytes;
+    use core::mem::align_of;
+    assert_eq!(align_of::<isp21::isp21_isp_params_cfg>(), 1);
+    assert_eq!(align_of::<isp21::rkisp_isp21_stat_buffer>(), 1);
+    assert_eq!(align_of::<isp3x::isp3x_isp_params_cfg>(), 1);
+    assert_eq!(align_of::<isp3x::rkisp3x_isp_stat_buffer>(), 1);
+    assert_eq!(align_of::<isp35::isp35_isp_params_cfg>(), 1);
+    assert_eq!(align_of::<isp35::rkisp35_stat_buffer>(), 1);
+    assert_eq!(
+        <isp35::isp35_isp_params_cfg as Bytes>::SIZE,
+        ISP35_PARAMS_BYTES
+    );
+    assert_eq!(
+        <isp35::rkisp35_stat_buffer as Bytes>::SIZE,
+        ISP35_STATS_BYTES
+    );
+    assert_eq!(
+        <isp3x::isp3x_isp_params_cfg as Bytes>::SIZE,
+        ISP30_PARAMS_BYTES
+    );
+    assert_eq!(
+        <isp21::isp21_isp_params_cfg as Bytes>::SIZE,
+        ISP21_PARAMS_BYTES
+    );
+}
+
+#[test]
+fn a_caller_writes_module_bits_at_the_kernels_offsets_through_bytes() {
+    use crate::bytes::Bytes;
+    use crate::module35;
+    use core::mem::offset_of;
+    let zero = [0u8; ISP35_PARAMS_BYTES];
+    let mut params = <isp35::isp35_isp_params_cfg as Bytes>::from_bytes(&zero).unwrap();
+    let mask = module35::LSC | module35::HSV;
+    // The bytes at the field's offset are the mask, little-endian, and nothing else moves.
+    params.as_bytes_mut()[offset_of!(isp35::isp35_isp_params_cfg, module_ens)..][..8]
+        .copy_from_slice(&mask.to_le_bytes());
+    let back = <isp35::isp35_isp_params_cfg as Bytes>::from_bytes(params.as_bytes()).unwrap();
+    assert_eq!({ back.module_ens }, mask);
+    assert_eq!({ back.module_en_update }, 0);
+    assert_eq!({ back.module_cfg_update }, 0);
+    assert_eq!(params.as_bytes().len(), ISP35_PARAMS_BYTES);
+    assert!(<isp35::isp35_isp_params_cfg as Bytes>::from_bytes(&[0; 10]).is_none());
+}

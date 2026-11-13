@@ -114,6 +114,24 @@ impl Generation {
         }
     }
 
+    /// The module bits this generation's parameter buffers define: the ISP21 and ISP30 table, or
+    /// the ISP35 one (`uapi::module` and `uapi::module35`).
+    #[must_use]
+    pub const fn module_bits(self) -> u64 {
+        match self {
+            Self::Isp21 | Self::Isp30 => uapi::module::ALL,
+            Self::Isp35 => uapi::module35::ALL,
+        }
+    }
+
+    /// Whether a parameter buffer's module mask names only modules this generation has. A mask
+    /// with any other bit set is a caller's mistake: an ISP35 bit on an ISP30 is refused, not
+    /// passed to the kernel.
+    #[must_use]
+    pub const fn accepts_modules(self, mask: u64) -> bool {
+        mask & !self.module_bits() == 0
+    }
+
     /// The statistics layout and its size: what the driver's `IspInfo` reports as
     /// `statistics_layout` and `statistics_bytes`.
     #[must_use]

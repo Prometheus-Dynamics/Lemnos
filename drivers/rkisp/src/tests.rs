@@ -266,3 +266,20 @@ mod path {
         assert!(plan(&t, None, false).is_ok());
     }
 }
+
+#[test]
+fn each_generation_names_its_module_bits() {
+    use crate::uapi::{module, module35};
+    // The ISP35 table is the ISP21/30 one plus its own modules: LSC is on both, the RGB-IR bit only
+    // on ISP35, and the force bit is the top bit on both.
+    assert_eq!(Generation::Isp21.module_bits(), module::ALL);
+    assert_eq!(Generation::Isp30.module_bits(), module::ALL);
+    assert_eq!(Generation::Isp35.module_bits(), module35::ALL);
+    assert!(Generation::Isp35.accepts_modules(module35::RGBIR | module35::LSC));
+    assert!(!Generation::Isp30.accepts_modules(module35::RGBIR));
+    assert!(!Generation::Isp21.accepts_modules(module35::HSV));
+    assert!(Generation::Isp21.accepts_modules(0));
+    assert!(Generation::Isp30.accepts_modules(module::LSC | module::CGC));
+    assert!(!Generation::Isp30.accepts_modules(module::FORCE | (1 << 62)));
+    assert!(Generation::Isp35.accepts_modules(module35::FORCE));
+}
