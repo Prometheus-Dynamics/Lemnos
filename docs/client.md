@@ -210,6 +210,8 @@ function, struct and code is there with its rule.
 | `lemnos_stream_read`, `lemnos_stream_write`, `lemnos_stream_post_job` | Copy out of a buffer or into one, and post a job |
 | `lemnos_stream_buffer_handle` | A new descriptor of a buffer's own dma-buf, to hand to a GPU or an encoder |
 | `lemnos_stream_plane`, `lemnos_stream_plane_handle` | On a stream whose buffers are in planes: a held frame's part in one plane, read in place, and a new descriptor of one plane's dma-buf |
+| `lemnos_stream_region` | Where one plane of a buffer is: a new descriptor of its memory (a pool's memfd or a dma-buf), its offset, payload and allocated sizes, and whether the descriptor allows writes. Valid for the stream's life; see [Where a buffer's memory is](streams.md#where-a-buffers-memory-is) |
+| `lemnos_stream_pool_page`, `lemnos_stream_generation` | A read-only descriptor of the pool page, for a second reader, and the pool's generation (a new one whenever the host makes a new pool) |
 
 Every call returns a status: 0 for success, a negative number for an error, and a positive count
 where the call says so. Output structs start with their own size. Text comes back through a

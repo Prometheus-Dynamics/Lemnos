@@ -408,6 +408,9 @@ impl JobCollector {
 /// frames, posts jobs with [`jobs`](Self::jobs), and waits with [`doorbell`](Self::doorbell).
 pub struct Consumer {
     layout: Layout,
+    /// The pool page as the host passed it (read-only), kept so it can be handed on to another
+    /// reader. The pool's own view has a mapping of it, not the descriptor.
+    pool_page: OwnedFd,
     frames: shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>>,
     /// The frames [`pop_frame`](Self::pop_frame) took and nobody has released, by buffer.
     held: Vec<Option<shm_ring_buffers::Held<shm_ring_holds::Marks<WriteMap>>>>,
@@ -468,6 +471,7 @@ impl Consumer {
         if reader.geometry().history() != layout.frame_slots {
             return Err(RingError::BadLayout);
         }
+        let kept = clone_owned(&pool_page)?;
         let (fills, view) = if writable {
             let fills = shm_ring_buffers::PoolView::attach_writable(
                 clone_owned(&pool_page)?,
@@ -492,6 +496,7 @@ impl Consumer {
         let jobs = JobPoster::new(job_ring, job_acks, &layout)?;
         let bell = shm_ring_doorbell::Doorbell::attach(bell_fd, bell_page)?;
         Ok(Self {
+            pool_page: kept,
             held: (0..layout.buffers).map(|_| None).collect(),
             planes: planes.len().max(1) as u32,
             layout,
@@ -597,6 +602,13 @@ impl Consumer {
         &mut self,
     ) -> &mut shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>> {
         &mut self.frames
+    }
+
+    /// The pool page descriptor, read-only, as the host passed it: a second reader attaches with it
+    /// and the pool's descriptors (see `PoolView::attach`).
+    #[must_use]
+    pub const fn pool_page(&self) -> &OwnedFd {
+        &self.pool_page
     }
 
     /// The writable view of the pool, for a stream the consumer fills; `None` otherwise.

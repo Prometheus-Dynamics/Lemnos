@@ -7,8 +7,9 @@ pub(crate) use crate::surface::{
     lemnos_call, lemnos_check_version, lemnos_client_close, lemnos_client_open,
     lemnos_device_count, lemnos_device_text, lemnos_next_value, lemnos_open, lemnos_package_info,
     lemnos_package_list, lemnos_package_text, lemnos_stream_buffer_handle, lemnos_stream_close,
-    lemnos_stream_info, lemnos_stream_next_frame, lemnos_stream_open, lemnos_stream_plane,
-    lemnos_stream_plane_handle, lemnos_stream_post_job, lemnos_stream_read, lemnos_stream_release,
+    lemnos_stream_generation, lemnos_stream_info, lemnos_stream_next_frame, lemnos_stream_open,
+    lemnos_stream_plane, lemnos_stream_plane_handle, lemnos_stream_pool_page,
+    lemnos_stream_post_job, lemnos_stream_read, lemnos_stream_region, lemnos_stream_release,
     lemnos_stream_write, lemnos_subscribe,
 };
 
@@ -171,6 +172,25 @@ mod shared {
             plane: u32,
             fd: *mut i32,
             sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_region(
+            client: Handle,
+            stream: Handle,
+            buffer: u32,
+            plane: u32,
+            region: *mut crate::surface::StreamRegion,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_pool_page(
+            client: Handle,
+            stream: Handle,
+            fd: *mut i32,
+            sink: MessageSink,
+        ) -> Status;
+        pub(crate) unsafe fn lemnos_stream_generation(
+            client: Handle,
+            stream: Handle,
+            generation: *mut u32,
         ) -> Status;
         pub(crate) safe fn lemnos_stream_close(
             client: Handle,

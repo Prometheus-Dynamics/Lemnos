@@ -33,4 +33,4 @@ pub use session::{
     DeviceEntry, DeviceHealth, DeviceState, Event, Handle, Incoming, JobEvent, PackageEntry,
     PackageList, PackageMode, Session, Subscription, UsbEndpoints, ValueInfo, follow,
 };
-pub use stream::{Access, FrameStream, HeldFrame, StreamPlatform};
+pub use stream::{Access, FrameStream, HeldFrame, MemoryKind, Region, StreamPlatform};

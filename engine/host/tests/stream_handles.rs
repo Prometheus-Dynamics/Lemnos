@@ -778,3 +778,28 @@ fn on_standby_a_thousand_frames_with_nobody_attached_allocate_nothing() {
         .unwrap();
     assert_eq!(consumer.pop_frame().unwrap().unwrap().sequence, 1000);
 }
+
+#[test]
+fn a_new_pool_carries_a_new_generation_so_a_lease_on_the_old_one_is_recognisably_dead() {
+    // Each consumer is given a pool the host makes for it: a reopen is a new pool, and the page says so.
+    let host = with_handles();
+    let first = host
+        .stream_attach(0, "frames", FIRST)
+        .unwrap()
+        .consumer()
+        .unwrap();
+    let first_generation = first.frames().pool().generation();
+    assert_ne!(first_generation, 0, "a page of 0 reads as no pool");
+    host.stream_detach(0, "frames", FIRST).unwrap();
+    let second = host
+        .stream_attach(0, "frames", SECOND)
+        .unwrap()
+        .consumer()
+        .unwrap();
+    let second_generation = second.frames().pool().generation();
+    assert_eq!(second_generation, first_generation.wrapping_add(1));
+    assert_ne!(
+        first_generation, second_generation,
+        "the old lease is on a pool that is gone"
+    );
+}

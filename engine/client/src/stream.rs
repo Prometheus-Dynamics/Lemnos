@@ -14,7 +14,7 @@
 
 use std::fmt::Debug;
 use std::io;
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,50 @@ use shm_ring_holds::Marks;
 
 use crate::error::Error;
 use crate::holds::Hold;
+
+/// What a stream's buffers are in: one shared pool of memfd memory, or a dma-buf of its own for
+/// each buffer's plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    SharedMemory,
+    DmaBuf,
+}
+
+/// One plane of one buffer, as the stream holds it: the descriptor its bytes are in, where they
+/// start in it, and how much memory there is. A region is lent for as long as the stream is, and
+/// the same for every frame that is in that buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct Region<'a> {
+    /// The descriptor: a memfd of the shared pool, or a dma-buf. Borrowed; the stream closes it.
+    /// `try_clone` keeps it past the stream, and then only the memory stays alive, not the
+    /// protection on it (see the stream docs in `docs/streams.md`).
+    pub fd: BorrowedFd<'a>,
+    /// What `fd` is.
+    pub kind: MemoryKind,
+    /// The pool index of this plane: buffer × planes + plane. The same number the ring's frames
+    /// name.
+    pub index: u32,
+    /// Where the plane starts in `fd`.
+    pub offset: u64,
+    /// The bytes the stream's contract may use in the plane: the buffer's length, or the plane's.
+    pub payload_bytes: u64,
+    /// The memory from `offset` that really exists: a shared pool's stride (up to the next buffer)
+    /// or a dma-buf's whole size, which a heap may round up. At least `payload_bytes`.
+    pub allocated_bytes: u64,
+    /// Slack past the payload that a device importing the buffer must be given. Always 0 today:
+    /// it will come from the board's per-stream `tail_bytes` key, dma-bufs only (I2d).
+    pub tail_bytes: u64,
+    /// Whether `fd` allows a writable mapping, as probed at open. The stream maps it writable only
+    /// when it was taken with [`Session::open_stream_writable`](crate::Session::open_stream_writable).
+    pub writable: bool,
+}
+
+/// What the stream knows about one pool index, probed at open.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    writable: bool,
+    allocated: u64,
+}
 
 /// The one kind of access a platform brackets for the kernel on a dma-buf.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +163,8 @@ pub struct FrameStream {
     writable: bool,
     /// Each buffer's planes: one, unless the stream's buffers are a descriptor per plane.
     planes: Planes,
+    /// Each pool index's descriptor facts, probed at open.
+    slots: Box<[Slot]>,
     platform: Arc<dyn StreamPlatform>,
     /// The session's record that this stream is open. Dropping the stream without closing it
     /// queues the close.
@@ -128,6 +174,60 @@ pub struct FrameStream {
 /// The most descriptors one answer brings: a stream with a descriptor per buffer, at its limit.
 pub(crate) const MAX_DESCRIPTORS: usize =
     (lemnos_wire::HANDLE_DESCRIPTORS_BEFORE + lemnos_wire::MAX_HANDLE_BUFFERS) as usize;
+
+/// What each pool index's descriptor allows, and how big its memory is, before the stream is
+/// attached. A shared pool is one descriptor, probed once; a read-only descriptor is one a
+/// writable mapping of it fails on, which is the answer a writer needs.
+fn probe(
+    fds: &[OwnedFd],
+    layout: Layout,
+    lengths: &[u32],
+    shared: bool,
+) -> Result<Box<[Slot]>, Error> {
+    let descs = layout.pool_descs(shared, lengths);
+    let mut seen: [Option<Slot>; 256] = [None; 256];
+    let mut out = Vec::with_capacity(descs.len());
+    for desc in &descs {
+        let known = match seen.get(usize::from(desc.descriptor)).copied().flatten() {
+            Some(slot) => slot,
+            None => {
+                let fd = fds
+                    .get(lemnos_wire::ring::fds::BUFFERS + usize::from(desc.descriptor))
+                    .ok_or(Error::Stream(RingError::BadLayout))?;
+                let slot = Slot {
+                    writable: writable_fd(fd.as_fd()),
+                    // A shared pool's buffers sit a stride apart; a dma-buf's memory is its size.
+                    allocated: if shared {
+                        layout.stride()
+                    } else {
+                        desc.size.max(size_of(fd.as_fd()))
+                    },
+                };
+                seen[usize::from(desc.descriptor)] = Some(slot);
+                slot
+            }
+        };
+        out.push(known);
+    }
+    Ok(out.into_boxed_slice())
+}
+
+/// Whether `fd` allows a writable shared mapping: the one thing a writer does with it. The probe
+/// maps and unmaps it, so nothing is kept.
+fn writable_fd(fd: BorrowedFd<'_>) -> bool {
+    fd.try_clone_to_owned()
+        .ok()
+        .and_then(|owned| WriteMap::new(owned).ok())
+        .is_some()
+}
+
+/// The size of `fd` as the kernel reports it, or 0 when it can't say.
+fn size_of(fd: BorrowedFd<'_>) -> u64 {
+    fd.try_clone_to_owned()
+        .ok()
+        .and_then(|owned| std::fs::File::from(owned).metadata().ok())
+        .map_or(0, |meta| meta.len())
+}
 
 impl FrameStream {
     /// Builds the stream from what the answer carried: the descriptors in the order of
@@ -148,6 +248,11 @@ impl FrameStream {
         } else {
             planes.lengths()
         };
+        let layout = layout.checked().map_err(Error::Stream)?;
+        let slots = probe(&fds, layout, lengths, shared)?;
+        if writable && slots.iter().any(|slot| !slot.writable) {
+            return Err(Error::StreamBuffersReadOnly);
+        }
         let consumer =
             Consumer::attach(fds, layout, lengths, shared, writable).map_err(Error::Stream)?;
         Ok(Self {
@@ -157,6 +262,7 @@ impl FrameStream {
             dma: !shared,
             writable,
             planes,
+            slots,
             platform,
             hold: None,
         })
@@ -336,6 +442,52 @@ impl FrameStream {
             .unwrap_or(&[])
     }
 
+    /// The memory of each buffer and plane: the descriptor, where it starts, and what it allows.
+    /// `None` for a buffer or plane the stream doesn't have. Lives as long as the stream; see
+    /// [`Region`] for the rules that apply to a copy of the descriptor.
+    #[must_use]
+    pub fn region(&self, buffer: u32, plane: u32) -> Option<Region<'_>> {
+        let index = self.index(buffer, plane)?;
+        let (fd, desc) = self
+            .consumer
+            .frames()
+            .pool()
+            .descriptor(BufferIndex(index))?;
+        let slot = self.slots.get(index as usize)?;
+        let payload = *self.planes.lengths().get(plane as usize)?;
+        Some(Region {
+            fd,
+            kind: if self.dma {
+                MemoryKind::DmaBuf
+            } else {
+                MemoryKind::SharedMemory
+            },
+            index,
+            offset: desc.offset,
+            payload_bytes: u64::from(payload),
+            allocated_bytes: slot.allocated,
+            tail_bytes: 0,
+            writable: slot.writable,
+        })
+    }
+
+    /// The pool page's descriptor, read-only, dup'd: with the descriptors of [`region`](Self::region)
+    /// it is everything another reader of this pool needs (see `shm_ring_buffers::PoolView::attach`).
+    /// That reader holds no reader slot, so it can read frames it is given but must not mark them;
+    /// its protection against reuse is only the hold this stream's frames have. Once this stream
+    /// is closed, a copy keeps the memory alive but nothing protects it from reuse.
+    pub fn pool_page(&self) -> io::Result<OwnedFd> {
+        self.consumer.pool_page().try_clone()
+    }
+
+    /// The pool's generation, as the host stamped its page: it changes whenever the host makes a
+    /// new pool for this stream (a reopen, a mode change that reallocates). A lease with an older
+    /// generation is on a pool that is gone.
+    #[must_use]
+    pub fn generation(&self) -> u32 {
+        self.consumer.frames().pool().generation()
+    }
+
     /// The descriptor of `buffer`, on a stream whose buffers are a descriptor each (dma-bufs),
     /// for handing the buffer to something else that takes memory that way: a GPU importing a
     /// frame, an encoder. On a stream whose buffers are in planes this is plane 0's; see
@@ -360,12 +512,7 @@ impl FrameStream {
         if !self.dma {
             return None;
         }
-        let index = self.index(buffer, plane)?;
-        self.consumer
-            .frames()
-            .pool()
-            .descriptor(BufferIndex(index))
-            .map(|(fd, _)| fd)
+        self.region(buffer, plane).map(|region| region.fd)
     }
 
     /// Whether the stream was taken to be filled ([`Session::open_stream_writable`]), so that

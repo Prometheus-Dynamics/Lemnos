@@ -2,18 +2,19 @@
 
 mod common;
 
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::{FakeHost, StreamHost, StreamScript};
-use lemnos_client::{Access, Error, Session, StreamPlatform};
+use lemnos_client::{Access, Error, MemoryKind, Session, StreamPlatform};
 use lemnos_core::Status;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_wire::ring::{Layout, RingError, STATE_CLOSED, fds};
 use lemnos_wire::{MAX_HANDLE_BUFFERS, feature};
+use shm_ring::read_only;
 
 fn platform() -> Arc<dyn StreamPlatform> {
     Arc::new(LinuxStreams)
@@ -799,4 +800,177 @@ fn a_service_without_shared_rings_is_refused_before_it_is_asked() {
         matches!(&error, Error::Refused { status, .. } if *status == Status::NOT_SUPPORTED),
         "{error:?}"
     );
+}
+
+/// A second reader's view of a stream, built only from what the stream hands out: the pool page
+/// and each plane's region (a copy of its descriptor, and where it starts and how long it is). This
+/// is what another process would build from the same descriptors it is passed.
+fn second_view(stream: &lemnos_client::FrameStream) -> shm_ring_buffers::PoolView {
+    let planes = stream.planes().count();
+    let count = stream.buffer_count() * planes;
+    let shared = stream.region(0, 0).unwrap().kind == MemoryKind::SharedMemory;
+    let mut fds: Vec<OwnedFd> = Vec::new();
+    let mut descs = Vec::new();
+    for index in 0..count {
+        let region = stream.region(index / planes, index % planes).unwrap();
+        assert_eq!(region.index, index);
+        if shared && index > 0 {
+            // One memfd for the whole pool: each buffer names descriptor 0 at its own offset.
+            descs.push(shm_ring_buffers::BufferDesc {
+                descriptor: 0,
+                offset: region.offset,
+                size: region.payload_bytes,
+            });
+            continue;
+        }
+        fds.push(region.fd.try_clone_to_owned().unwrap());
+        descs.push(shm_ring_buffers::BufferDesc {
+            descriptor: (fds.len() - 1) as u8,
+            offset: region.offset,
+            size: region.payload_bytes,
+        });
+    }
+    shm_ring_buffers::PoolView::attach(stream.pool_page().unwrap(), fds, &descs).unwrap()
+}
+
+#[test]
+fn a_shared_stream_region_is_a_slice_of_one_pool_and_a_second_view_sees_the_producers_bytes() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    for buffer in 0..2 {
+        let region = stream.region(buffer, 0).unwrap();
+        assert_eq!(region.kind, MemoryKind::SharedMemory);
+        assert_eq!(region.offset, u64::from(buffer) * 4096, "a stride apart");
+        assert_eq!(region.payload_bytes, 128);
+        assert_eq!(region.allocated_bytes, 4096, "up to the next buffer");
+        assert_eq!(region.tail_bytes, 0);
+        assert!(region.writable, "the descriptor allows a writable mapping");
+    }
+    assert!(stream.region(2, 0).is_none(), "no such buffer");
+    assert!(stream.region(0, 1).is_none(), "no such plane");
+    for buffer in 0..2 {
+        assert!(host.write(buffer, 0, &[buffer as u8 + 40; 128]));
+    }
+    let view = second_view(&stream);
+    for buffer in 0..2 {
+        let bytes = view.bytes(shm_ring_buffers::BufferIndex(buffer)).unwrap();
+        assert_eq!(bytes, &host.bytes(buffer)[..128]);
+        assert_eq!(bytes, [buffer as u8 + 40; 128]);
+    }
+    // A frame the producer publishes: the held frame's buffer is not reused while it is held, and
+    // the second view reads the frame's bytes off the same memory the stream does.
+    assert!(host.push(1, 128, 7, 0, 0));
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(frame.buffer(), 1);
+    assert!(!host.reclaim(1), "held: the producer may not reuse it");
+    assert_eq!(stream.bytes(&frame), [41; 128]);
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(1)).unwrap(),
+        [41; 128]
+    );
+    stream.release(frame).unwrap();
+    assert!(host.reclaim(1), "given back: reusable");
+}
+
+#[test]
+fn a_dma_buf_stream_region_is_its_plane_and_a_second_view_sees_each_plane() {
+    let (layout, mut host, fds) = good_planes(2);
+    let (fake, mut session) = handles_host(layout, claimed_for(2, 2), fds);
+    *fake.control.plane_bytes.lock().unwrap() = two_planes();
+    let mut stream = session.open_stream_writable(7, "s", platform()).unwrap();
+    for buffer in 0..2 {
+        let first = stream.region(buffer, 0).unwrap();
+        let second = stream.region(buffer, 1).unwrap();
+        assert_eq!(first.kind, MemoryKind::DmaBuf);
+        assert_eq!((first.offset, first.payload_bytes), (0, 128));
+        assert_eq!((second.offset, second.payload_bytes), (0, 64));
+        assert_eq!(first.index, buffer * 2);
+        assert_eq!(second.index, buffer * 2 + 1);
+        assert!(first.allocated_bytes >= first.payload_bytes);
+        // A descriptor is a page long, as a heap rounds it: the region says what exists, not the plane.
+        assert_eq!(first.allocated_bytes, 4096, "a page, as the heap rounds it");
+        assert_eq!(second.allocated_bytes, 4096);
+        assert_eq!(first.tail_bytes, 0);
+        assert!(first.writable && second.writable);
+    }
+    assert!(host.write(2, 0, &[1; 128]));
+    assert!(host.write(3, 0, &[2; 64]));
+    assert!(host.write(0, 0, &[3; 128]));
+    assert!(host.write(1, 0, &[4; 64]));
+    let view = second_view(&stream);
+    for index in 0..4 {
+        let bytes = view.bytes(shm_ring_buffers::BufferIndex(index)).unwrap();
+        let len = bytes.len();
+        assert_eq!(bytes, &host.bytes(index)[..len]);
+    }
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(2)).unwrap(),
+        [1; 128]
+    );
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(3)).unwrap(),
+        [2; 64]
+    );
+    // A frame in buffer 1 is held: its planes are pool indices 2 and 3, and the second view
+    // reads the same bytes the stream hands out for each plane.
+    assert!(host.push(1, 192, 1, 0, 0));
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(stream.plane(&frame, 0), [1; 128]);
+    assert_eq!(stream.plane(&frame, 1), [2; 64]);
+    assert_eq!(
+        view.bytes(shm_ring_buffers::BufferIndex(2)).unwrap(),
+        [1; 128]
+    );
+    assert!(!host.reclaim(1), "held");
+    stream.release(frame).unwrap();
+}
+
+#[test]
+fn a_writable_open_of_read_only_buffers_is_refused_by_name_and_a_read_only_open_maps_them_read_only()
+ {
+    let (_host, mut fds) = good();
+    // The pool's descriptor, as a reader is given it: read-only (a writable mapping fails).
+    for fd in fds.iter_mut().skip(fds::BUFFERS) {
+        let read = read_only(fd.as_fd()).unwrap();
+        *fd = read;
+    }
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let refused = session
+        .open_stream_writable(7, "s", platform())
+        .unwrap_err();
+    assert_eq!(refused, Error::StreamBuffersReadOnly);
+    assert_eq!(
+        refused.to_string(),
+        "this stream's buffers are read-only: it can't be taken writable"
+    );
+}
+
+#[test]
+fn a_read_only_open_of_writable_buffers_still_maps_them_read_only() {
+    let (_host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    assert!(!stream.is_writable());
+    // The descriptor allows writes, so the region says so; the stream does not map them writable.
+    assert!(stream.region(0, 0).unwrap().writable);
+    assert!(matches!(
+        stream.write(0, 0, &[1]),
+        Err(Error::StreamReadOnly)
+    ));
+    assert!(stream.pool_page().is_ok());
+}
+
+#[test]
+fn a_generation_is_the_pool_pages_word_and_a_second_view_reports_it_too() {
+    let (_host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let stream = session.open_stream(7, "s", platform()).unwrap();
+    assert_eq!(
+        stream.generation(),
+        1,
+        "the test producer's pool is generation 1"
+    );
+    let view = second_view(&stream);
+    assert_eq!(view.generation(), stream.generation());
 }

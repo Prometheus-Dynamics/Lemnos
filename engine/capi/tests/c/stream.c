@@ -81,6 +81,39 @@ static int frames(LemnosHandle client) {
     }
     printf("frames 6 in place, by copy and by handle\n");
 
+    /* A buffer's region: its own memory at its offset holds the frame's bytes, and the pool page and
+       generation are there for a second reader. The frame is held while the region is read. */
+    {
+        LemnosFrame frame = {sizeof frame, 0, 0, 0, 0, 0, 0};
+        const uint8_t *data = NULL;
+        status = lemnos_stream_next_frame(client, stream, 5000, &frame, &data, sink);
+        if (status != 1) return fail("next frame for a region", status);
+        LemnosStreamRegion region = {sizeof region, 0, 0, -1, 0, 0, 0, 0};
+        status = lemnos_stream_region(client, stream, frame.buffer, 0, &region, sink);
+        if (status != LEMNOS_OK || region.fd < 0) return fail("region", status);
+        if (!(region.flags & LEMNOS_REGION_DMA_BUF) || region.index != frame.buffer ||
+            region.payload_bytes != info.buffer_bytes || region.tail_bytes != 0 ||
+            region.allocated_bytes < region.payload_bytes)
+            return fail("region fields", -1);
+        uint8_t copy[16];
+        ssize_t got = pread(region.fd, copy, sizeof copy, (off_t)(region.offset + 100));
+        int same = got == (ssize_t)sizeof copy && memcmp(copy, data + 100, sizeof copy) == 0;
+        close(region.fd);
+        if (!same) return fail("region bytes are the frame's", -1);
+        int32_t page = -1;
+        status = lemnos_stream_pool_page(client, stream, &page, sink);
+        if (status != LEMNOS_OK || page < 0) return fail("pool page", status);
+        close(page);
+        uint32_t generation = 0;
+        status = lemnos_stream_generation(client, stream, &generation);
+        if (status != LEMNOS_OK || generation == 0) return fail("generation", status);
+        status = lemnos_stream_release(client, stream, frame.buffer, sink);
+        if (status != LEMNOS_OK) return fail("release a region's frame", status);
+        printf("region of buffer %u: %llu bytes from %llu, generation %u\n", frame.buffer,
+               (unsigned long long)region.payload_bytes, (unsigned long long)region.offset,
+               generation);
+    }
+
     uint8_t byte = 1;
     status = lemnos_stream_write(client, stream, 0, 0, &byte, 1, LEMNOS_NO_SINK);
     if (status != -EACCES) return fail("write on a stream taken read-only", status);

@@ -28,7 +28,7 @@ extern "C" {
 
 #define LEMNOS_ABI_MAJOR 1
 #define LEMNOS_ABI_MINOR 3
-#define LEMNOS_LAYOUT_HASH 0x26e08492e69df4ffULL
+#define LEMNOS_LAYOUT_HASH 0x736a24f433432c7ULL
 
 #define LEMNOS_VERSION_INIT \
     { sizeof(LemnosAbiVersion), LEMNOS_ABI_MAJOR, LEMNOS_ABI_MINOR, LEMNOS_LAYOUT_HASH }
@@ -68,6 +68,9 @@ extern "C" {
 #define LEMNOS_STREAM_WRITABLE (1u << 0)
 #define LEMNOS_STREAM_BUFFER_HANDLES (1u << 1)
 #define LEMNOS_STREAM_OPEN (1u << 2)
+/* LemnosStreamRegion flags. */
+#define LEMNOS_REGION_WRITABLE (1u << 0)
+#define LEMNOS_REGION_DMA_BUF (1u << 1)
 /* LemnosJobEvent.kind */
 #define LEMNOS_JOB_PROGRESS 0
 #define LEMNOS_JOB_DONE 1
@@ -119,6 +122,19 @@ typedef struct LemnosStreamInfo {
     uint32_t job_bytes;
     uint32_t planes; /* memory planes per buffer: 1 unless the board file gives more */
 } LemnosStreamInfo;
+
+/* One plane of one buffer, from lemnos_stream_region. fd is a new descriptor the
+ * caller closes. */
+typedef struct LemnosStreamRegion {
+    uint32_t struct_size;
+    uint32_t flags;          /* LEMNOS_REGION_WRITABLE, LEMNOS_REGION_DMA_BUF */
+    uint32_t index;          /* pool index: buffer * planes + plane */
+    int32_t fd;              /* the memory: a memfd of the pool, or a dma-buf */
+    uint64_t offset;         /* where the plane starts in fd */
+    uint64_t payload_bytes;  /* what the contract may use in the plane */
+    uint64_t allocated_bytes;/* what exists from offset; at least payload_bytes */
+    uint64_t tail_bytes;     /* slack past the payload for an importer: 0 today */
+} LemnosStreamRegion;
 
 typedef struct LemnosFrame {
     uint32_t struct_size;
@@ -264,6 +280,19 @@ LemnosStatus lemnos_stream_plane(LemnosHandle client, LemnosHandle stream, uint3
  * gives plane 0. */
 LemnosStatus lemnos_stream_plane_handle(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
                                         uint32_t plane, int32_t *fd, LemnosMessageSink sink);
+/* Where plane plane of buffer is: fills *region (struct_size set). A buffer or
+ * plane the stream doesn't have is -EINVAL. Valid for the stream's life; see
+ * docs/streams.md for who may touch the memory and when. */
+LemnosStatus lemnos_stream_region(LemnosHandle client, LemnosHandle stream, uint32_t buffer,
+                                  uint32_t plane, LemnosStreamRegion *region,
+                                  LemnosMessageSink sink);
+/* A new read-only descriptor of the pool page, for a second reader of the pool. It
+ * holds no reader slot and must not mark frames; see docs/streams.md. */
+LemnosStatus lemnos_stream_pool_page(LemnosHandle client, LemnosHandle stream, int32_t *fd,
+                                     LemnosMessageSink sink);
+/* The pool's generation: it changes whenever the host makes a new pool for the
+ * stream, so an older lease is on a pool that is gone. */
+LemnosStatus lemnos_stream_generation(LemnosHandle client, LemnosHandle stream, uint32_t *generation);
 /* Releases every frame still held and gives the stream back. */
 LemnosStatus lemnos_stream_close(LemnosHandle client, LemnosHandle stream, LemnosMessageSink sink);
 

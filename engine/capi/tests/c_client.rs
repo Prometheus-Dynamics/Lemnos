@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use common::{Producing, package_service, service, stream_service};
 use lemnos_capi::Client;
+use lemnos_capi::surface;
 use lemnos_linux_sys::dma_buf;
 
 fn deps_dir() -> PathBuf {
@@ -87,6 +88,7 @@ const CLIENT: &[&str] = &[
 const STREAM: &[&str] = &[
     "frames buffers=4 bytes=5000 handles=1 writable=0 open=1",
     "frames 6 in place, by copy and by handle",
+    "region of buffer ",
     "refused write=-13 past=-22 none=-22",
     "jobs 6 written, posted and made",
     "plain handle status=-95",
@@ -371,4 +373,49 @@ fn a_stream_in_planes_gives_each_plane_and_its_descriptor_through_the_surface() 
     assert_eq!(seam[..], pattern[198..202]);
     stream.release(buffer).unwrap();
     stream.close().unwrap();
+}
+
+#[test]
+fn the_rust_wrapper_gives_each_buffers_region_and_its_bytes_are_the_frames_bytes() {
+    use std::fs::File;
+    use std::os::unix::fs::FileExt;
+
+    let streams = stream_service();
+    let producing = Producing::start(&streams);
+    let client = Client::connect(
+        streams.socket.to_str().unwrap(),
+        "w",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let stream = client.open_stream(0, "frames", false).unwrap();
+    let frame = stream
+        .next_frame(Duration::from_secs(5))
+        .unwrap()
+        .expect("a frame");
+    let (region, fd) = stream.region(frame.buffer, 0).unwrap();
+    assert_eq!(region.index, frame.buffer);
+    assert_eq!(
+        region.flags & surface::REGION_DMA_BUF,
+        surface::REGION_DMA_BUF
+    );
+    // The descriptor allows a writable mapping; this read-only open maps it read-only.
+    assert_eq!(
+        region.flags & surface::REGION_WRITABLE,
+        surface::REGION_WRITABLE
+    );
+    assert_eq!(region.payload_bytes, 5000);
+    assert!(region.allocated_bytes >= region.payload_bytes);
+    assert_eq!(region.tail_bytes, 0);
+    // A second reader's view of the same bytes, read through the descriptor the surface gave.
+    let mut copy = [0u8; 8];
+    File::from(fd)
+        .read_exact_at(&mut copy, region.offset)
+        .unwrap();
+    assert_eq!(copy, frame.bytes[..8]);
+    assert!(stream.pool_page().is_ok());
+    assert!(stream.generation().unwrap() >= 1);
+    assert!(stream.region(99, 0).is_err(), "no such buffer");
+    stream.close().unwrap();
+    producing.stop();
 }
