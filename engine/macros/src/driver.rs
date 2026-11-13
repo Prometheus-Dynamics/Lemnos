@@ -194,6 +194,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::release_endpoints(self, __caller)
             }
 
+            fn endpoints_ended(&mut self) -> bool {
+                <Self as ::lemnos_core::Lifecycle>::endpoints_ended(self)
+            }
+
             const JOBS: bool = <Self as ::lemnos_core::Lifecycle>::JOBS;
 
             fn job(

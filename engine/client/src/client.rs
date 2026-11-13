@@ -8,7 +8,7 @@ use crate::DeviceDescription;
 use crate::error::Error;
 use crate::session::{
     DeviceEntry, Event, Handle, JobEvent, PackageList, Session, Subscription, UsbEndpoints,
-    ValueInfo,
+    UsbEndpointsEnd, ValueInfo,
 };
 use crate::stream::{FrameStream, StreamPlatform};
 
@@ -148,6 +148,15 @@ impl Client {
         platform: Arc<dyn StreamPlatform>,
     ) -> Result<UsbEndpoints, Error> {
         self.lock().usb_endpoints(device, platform)
+    }
+
+    /// See [`Session::usb_endpoints_end`].
+    pub fn usb_endpoints_end(
+        &self,
+        device: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<UsbEndpointsEnd, Error> {
+        self.lock().usb_endpoints_end(device, platform)
     }
 
     /// See [`Session::usb_endpoints_release`].

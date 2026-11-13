@@ -31,6 +31,10 @@ use lemnos_linux_sys::usbfs::UsbfsFile;
 use lemnosd::gadget::{resolve, settings_for};
 use lemnosd::privilege::{self, KEEP, Request};
 
+mod holder;
+mod hub;
+use hub::Hub;
+
 /// The board the check runs: the gadget derives its addresses from the identity device, whose
 /// serial the kernel command line carries as `lemnos.serial=` (see `testing/qemu/run.sh`).
 const BOARD: &str = r#"
@@ -96,8 +100,13 @@ macro_rules! say {
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("host") {
+    // The first argument decides which role this process plays; the children are this program.
+    let role = std::env::args().nth(1);
+    if role.as_deref() == Some("hub") {
+        hub::run();
+        return ExitCode::SUCCESS;
+    }
+    if role.as_deref() == Some("host") {
         return if host_side() {
             ExitCode::SUCCESS
         } else {
@@ -126,10 +135,20 @@ fn main() -> ExitCode {
     // The host is a separate process, as a host is. It starts before the daemon's privileged start
     // and runs as root, which the check's host side needs for usbfs.
     let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/lemnos-gadget-check"));
-    let mut host = match Command::new(me).arg("host").spawn() {
+    let mut host = match Command::new(&me).arg("host").spawn() {
         Ok(child) => child,
         Err(error) => {
             say!("FAIL the host side cannot start: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // The root child for the holder checks: port controls, resets, configurations and mounts. It
+    // is started here, before the daemon drops to its user, and keeps its root.
+    let mut hub = match Hub::start(&me) {
+        Ok(hub) => hub,
+        Err(error) => {
+            say!("FAIL the root child for the holder checks cannot start: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -278,6 +297,9 @@ fn main() -> ExitCode {
         host_ok,
         "the host side saw the interfaces and got its bytes back",
     );
+    // 6. The holder checks: a process holding the bulk pair sees each event, and the gadget is
+    // torn down by the last case.
+    holder::run(&mut gadget, &mut hub, &mut check);
     let _ = gadget.disable();
     if failures == 0 {
         ExitCode::SUCCESS

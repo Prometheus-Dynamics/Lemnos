@@ -164,6 +164,10 @@ pub trait Driver: Sized {
     fn release_endpoints(&mut self, _caller: CallerId) -> Result<()> {
         Err(Status::NOT_SUPPORTED)
     }
+    /// See [`Lifecycle::endpoints_ended`].
+    fn endpoints_ended(&mut self) -> bool {
+        false
+    }
     /// Whether the driver runs long jobs. See [`Lifecycle::JOBS`].
     const JOBS: bool = false;
     /// See [`Lifecycle::job`].
@@ -260,6 +264,14 @@ pub trait Lifecycle: Sized {
     /// when it holds none.
     fn release_endpoints(&mut self, _caller: CallerId) -> Result<()> {
         Err(Status::NOT_SUPPORTED)
+    }
+    /// Whether the driver has ended the endpoints' hold for good: the function was taken down
+    /// by the driver itself and will not be back, so every copy of the pair a holder keeps is to
+    /// be let go. The host asks after each tick and closes the holder's END descriptor when this
+    /// is `true`. A host going away, a bus reset or a suspend is not this: those leave the hold as
+    /// it is, and the same descriptors work again. `false` by default.
+    fn endpoints_ended(&mut self) -> bool {
+        false
     }
     /// Set this to `true` for a driver with long jobs: methods its contracts mark
     /// `#[method(N, job)]`, which start work and return a [`JobId`] at once. The work itself is

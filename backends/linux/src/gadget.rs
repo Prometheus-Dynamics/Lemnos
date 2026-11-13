@@ -486,9 +486,15 @@ impl Paths {
     }
 
     /// Removes the function directories the setup makes. Setup only, after the configurations
-    /// are gone and the FunctionFS mount is unmounted.
-    fn remove_functions(&self) {
-        for name in [self.function_name().as_str(), NCM_DIR, ACM_DIR] {
+    /// are gone. With `reuse` the FunctionFS directory stays, with its mount.
+    fn remove_functions(&self, reuse: bool) {
+        let ffs = self.function_name();
+        let names = if reuse {
+            vec![NCM_DIR, ACM_DIR]
+        } else {
+            vec![ffs.as_str(), NCM_DIR, ACM_DIR]
+        };
+        for name in names {
             remove_dir(&self.gadget.join("functions").join(name));
         }
     }
@@ -534,11 +540,18 @@ pub fn prepare(
     if !paths.udc.exists() {
         return Err(io::Error::from_raw_os_error(libc::ENOENT));
     }
+    // A FunctionFS mount that is already there, with its ep0 in it, belongs to a holder that may
+    // still have copies of the endpoints, or to an earlier daemon. It is reused: never unmounted or
+    // remounted under a holder (the kernel refuses that with EBUSY, and it would drop the holder's
+    // descriptors). Holds end on their own when their process goes; see `endpoints_ended`.
+    let reuse = paths.mount.join("ep0").exists();
     paths.unbind();
     paths.dismantle();
-    // `unmount` of a point that isn't mounted fails, which is the state a fresh image is in.
-    let _ = system.unmount(&paths.mount);
-    paths.remove_functions();
+    if !reuse {
+        // `unmount` of a point that isn't mounted fails, which is the state a fresh image is in.
+        let _ = system.unmount(&paths.mount);
+    }
+    paths.remove_functions(reuse);
 
     fs::create_dir_all(&paths.gadget)?;
     for (file, value) in &plan.identity {
@@ -577,11 +590,13 @@ pub fn prepare(
     for function in functions {
         match function {
             GadgetFunction::Ffs => {
-                let dir = paths.function();
-                fs::create_dir(&dir)?;
-                fs::create_dir_all(&paths.mount)?;
-                let options = format!("uid={},gid={},rmode=0500,fmode=0600", owner.uid, owner.gid);
-                system.functionfs(&paths.name, &paths.mount, &options)?;
+                if !reuse {
+                    fs::create_dir(paths.function())?;
+                    fs::create_dir_all(&paths.mount)?;
+                    let options =
+                        format!("uid={},gid={},rmode=0500,fmode=0600", owner.uid, owner.gid);
+                    system.functionfs(&paths.name, &paths.mount, &options)?;
+                }
                 links.push(paths.function_name());
             }
             GadgetFunction::Ncm {

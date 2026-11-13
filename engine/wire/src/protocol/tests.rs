@@ -269,6 +269,11 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
         ("endpoints-open", Frame::EndpointsOpen { id: 17, device: 3 }),
         ("endpoints", Frame::Endpoints { id: 17 }),
         (
+            "endpoints-open-end",
+            Frame::EndpointsOpenEnd { id: 17, device: 3 },
+        ),
+        ("endpoints-end", Frame::EndpointsEnd { id: 17 }),
+        (
             "endpoints-close",
             Frame::EndpointsClose { id: 18, device: 3 },
         ),

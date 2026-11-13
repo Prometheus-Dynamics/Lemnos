@@ -537,6 +537,7 @@ const fn answers(frame: &Frame<'_>) -> Option<u32> {
         | Frame::StreamRings { id, .. }
         | Frame::StreamRingHandles { id, .. }
         | Frame::Endpoints { id }
+        | Frame::EndpointsEnd { id }
         | Frame::Package { id, .. }
         | Frame::PackagesDone { id, .. }
         | Frame::JobStarted { id, .. }
@@ -553,6 +554,18 @@ pub struct UsbEndpoints {
     pub out: OwnedFd,
     /// The IN endpoint: what the device sends is written to it.
     pub input: OwnedFd,
+}
+
+/// A function's bulk endpoints with the END descriptor, from [`Session::usb_endpoints_end`]. END
+/// reads EOF, or hangs up, once the hold is over for good: close all three and ask again.
+#[derive(Debug)]
+pub struct UsbEndpointsEnd {
+    /// The OUT endpoint, as in [`UsbEndpoints::out`].
+    pub out: OwnedFd,
+    /// The IN endpoint, as in [`UsbEndpoints::input`].
+    pub input: OwnedFd,
+    /// The END descriptor: readable (EOF or a hang-up) when the hold is over for good.
+    pub end: OwnedFd,
 }
 
 /// A connection to the service that one thread owns.
@@ -1411,30 +1424,77 @@ impl Session {
         }
         let id = self.shared.id();
         self.queue(&Frame::EndpointsOpen { id, device })?;
+        let mut fds = self.take_endpoint_fds(id, platform, 2)?;
+        let input = fds.pop().ok_or(Error::Disconnected)?;
+        let out = fds.pop().ok_or(Error::Disconnected)?;
+        Ok(UsbEndpoints { out, input })
+    }
+
+    /// [`Session::usb_endpoints`] with the END descriptor as well.
+    ///
+    /// # Errors
+    ///
+    /// `Refused` with `NOT_SUPPORTED` when the service does not lend endpoints, or does not lend
+    /// the END descriptor (a service built before it refuses this by name, and is never sent the
+    /// request); `Refused` with `BUSY` while another connection holds them, `NO_DEVICE` while the
+    /// function is not enabled.
+    pub fn usb_endpoints_end(
+        &mut self,
+        device: u32,
+        platform: Arc<dyn StreamPlatform>,
+    ) -> Result<UsbEndpointsEnd, Error> {
+        self.settle()?;
+        if self.shared.features & feature::ENDPOINTS == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service does not lend endpoints".to_string(),
+            });
+        }
+        if self.shared.features & lemnos_wire::ENDPOINTS_END == 0 {
+            return Err(Error::Refused {
+                status: Status::NOT_SUPPORTED,
+                text: "the service does not lend the END descriptor".to_string(),
+            });
+        }
+        let id = self.shared.id();
+        self.queue(&Frame::EndpointsOpenEnd { id, device })?;
+        let mut fds = self.take_endpoint_fds(id, platform, 3)?;
+        let end = fds.pop().ok_or(Error::Disconnected)?;
+        let input = fds.pop().ok_or(Error::Disconnected)?;
+        let out = fds.pop().ok_or(Error::Disconnected)?;
+        Ok(UsbEndpointsEnd { out, input, end })
+    }
+
+    /// Waits for the endpoints answer to request `id` and takes its `count` descriptors. A
+    /// different count is a connection out of step, and closes the connection.
+    fn take_endpoint_fds(
+        &mut self,
+        id: u32,
+        platform: Arc<dyn StreamPlatform>,
+        count: usize,
+    ) -> Result<Vec<OwnedFd>, Error> {
         let connection = self.connection.as_mut().ok_or(Error::Disconnected)?;
         connection.taker = Some(Taker {
             platform: Arc::clone(&platform),
             fds: Vec::new(),
         });
         let ready = self.wait(id, |frame| match frame {
-            Frame::Endpoints { .. } => Some(Ok(())),
+            Frame::Endpoints { .. } | Frame::EndpointsEnd { .. } => Some(Ok(())),
             _ => None,
         });
         let taker = self.connection.as_mut().and_then(|c| c.taker.take());
         match ready {
             Ok(()) => {
-                let mut fds = taker.ok_or(Error::Disconnected)?.fds;
+                let fds = taker.ok_or(Error::Disconnected)?.fds;
                 // Every descriptor came with the answer, or the connection is out of step.
-                if fds.len() != 2 {
+                if fds.len() != count {
                     self.lost();
                     return Err(Error::Wire(lemnos_wire::WireError::Malformed));
                 }
-                let input = fds.pop().ok_or(Error::Disconnected)?;
-                let out = fds.pop().ok_or(Error::Disconnected)?;
-                Ok(UsbEndpoints { out, input })
+                Ok(fds)
             }
             Err(Error::TimedOut) => {
-                // A late Endpoints would carry descriptors that a plain read loses.
+                // A late answer would carry descriptors that a plain read loses.
                 self.lost();
                 Err(Error::TimedOut)
             }

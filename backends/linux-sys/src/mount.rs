@@ -50,3 +50,17 @@ pub fn unmount(target: &Path) -> io::Result<()> {
         Err(io::Error::last_os_error())
     }
 }
+
+/// Unmounts `target` lazily (`MNT_DETACH`): the mount goes at once, and the filesystem lives on
+/// until its last open file closes. A FunctionFS instance with a file still open keeps its name
+/// taken, so a mount of the same name is `EBUSY` until then. Nothing mounted there is `EINVAL`.
+pub fn detach(target: &Path) -> io::Result<()> {
+    let target = c_path(target)?;
+    // SAFETY: the pointer is a NUL-terminated string this call owns for its duration.
+    let rc = unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}

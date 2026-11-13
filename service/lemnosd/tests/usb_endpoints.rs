@@ -249,3 +249,71 @@ fn the_hold_ends_when_the_gadget_goes_down_and_a_new_hand_off_comes_once_it_is_u
     host.to_device.write_all(b"back").unwrap();
     assert_eq!(read_exact(&mut out, 4), b"back");
 }
+
+/// Asks until the pair and END are lent, as [`take_pair`] does.
+fn take_end(session: &mut Session, device: u32) -> Result<lemnos_client::UsbEndpointsEnd, Error> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match session.usb_endpoints_end(device, std::sync::Arc::new(LinuxStreams)) {
+            Ok(lent) => return Ok(lent),
+            Err(Error::Refused { status, .. })
+                if matches!(status, Status::NO_DEVICE | Status::BUSY)
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Reads END on a thread, so the test can wait for it without blocking itself: `Some(0)` is EOF,
+/// the hold is over for good. `None` when nothing came within `within`.
+fn end_reads(end: OwnedFd, within: Duration) -> Option<usize> {
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut file = std::fs::File::from(end);
+        let mut byte = [0u8; 1];
+        let _ = sent.send(file.read(&mut byte).ok());
+    });
+    got.recv_timeout(within).ok().flatten()
+}
+
+#[test]
+fn the_end_descriptor_stays_open_while_the_hold_stands() {
+    let (running, _host) = start();
+    let mut one = connect(&running.socket, "one");
+    let device = device_index(&mut one);
+    let lent = take_end(&mut one, device).unwrap();
+    assert_eq!(end_reads(lent.end, Duration::from_millis(300)), None);
+}
+
+#[test]
+fn the_end_hangs_up_when_the_holder_releases() {
+    let (running, _host) = start();
+    let mut one = connect(&running.socket, "one");
+    let device = device_index(&mut one);
+    let lent = take_end(&mut one, device).unwrap();
+    one.usb_endpoints_release(device).unwrap();
+    assert_eq!(end_reads(lent.end, WAIT), Some(0));
+}
+
+#[test]
+fn the_end_hangs_up_when_the_holder_goes() {
+    let (running, _host) = start();
+    let mut one = connect(&running.socket, "one");
+    let device = device_index(&mut one);
+    let lent = take_end(&mut one, device).unwrap();
+    drop(one);
+    assert_eq!(end_reads(lent.end, WAIT), Some(0));
+}
+
+#[test]
+fn the_end_hangs_up_when_the_device_is_switched_off() {
+    let (running, _host) = start();
+    let mut one = connect(&running.socket, "one");
+    let device = device_index(&mut one);
+    let lent = take_end(&mut one, device).unwrap();
+    one.set_power(device, false).unwrap();
+    assert_eq!(end_reads(lent.end, WAIT), Some(0));
+}
