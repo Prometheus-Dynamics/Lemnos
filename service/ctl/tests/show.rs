@@ -102,8 +102,9 @@ fn a_device_prints_its_name_kind_bus_address_state_and_each_value() {
     assert!(panel.contains("  kind     power\n"), "{panel}");
     assert!(panel.contains("  bus      i2c-1\n"), "{panel}");
     assert!(panel.contains("  address  0x40\n"), "{panel}");
-    // Running, with the driver's own note on its health as the reason (the chip is not verified).
-    assert!(panel.contains("  state    running ("), "{panel}");
+    // Running. The driver's note on its health ("chip not verified") is the reason only until the
+    // chip's first read: a read the host makes first leaves it out, so the reason is not asserted.
+    assert!(panel.contains("  state    running"), "{panel}");
     // The INA226's bus span is 32767 counts of 1.25 mV.
     assert!(
         panel.contains(
