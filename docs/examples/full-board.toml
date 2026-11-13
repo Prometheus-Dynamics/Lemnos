@@ -144,7 +144,7 @@ link = "cam0-receiver"
 id = "cam0-receiver"
 driver = "rp1-csi2"
 link = "cam0-isp"
-config = { device = "1f00110000.csi" }
+config = { device = "1f00110000.csi", embedded_bytes = 256 }
 
 [devices.streams.frames]
 buffers = 8
@@ -152,6 +152,15 @@ buffer_bytes = 2097152
 memory = "dma-buf"
 heap = "linux,cma"
 standby = true                 # capture with nobody attached; a consumer gets the newest frame
+
+# `embedded`: the sensor's embedded data lines, on the same device (a stream of the name the driver
+# asks for). One buffer per line, the frame's sequence on it; `embedded_bytes` is a line's length,
+# a multiple of 16 from 16 to 65520. Asked for only where the sensor sends embedded lines.
+[devices.streams.embedded]
+buffers = 4
+buffer_bytes = 256
+memory = "dma-buf"
+heap = "linux,cma"
 
 [[devices]]
 id = "cam0-isp"

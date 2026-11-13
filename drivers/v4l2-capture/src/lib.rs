@@ -52,10 +52,12 @@
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
+mod embedded;
 mod format;
 mod hw;
 mod pump;
 
+pub use embedded::{LINE_BUFFERS, pump as pump_embedded, start as start_embedded};
 pub use format::{fourcc, parse_order};
 pub use hw::{
     Frame, Granted, Graph, Hardware, LinuxHardware, MAX_PLANES, Prepare, Settings, Wanted,

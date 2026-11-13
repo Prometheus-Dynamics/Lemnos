@@ -41,9 +41,17 @@
 //!
 //! - `device`: the platform device name, whose `/dev/lemnos-rp1-csi2-<device>` node is opened. With
 //!   only one receiver bound, this may be left out.
+//! - `embedded_bytes`: the length of each embedded data line, a multiple of 16 from 16 to 65520.
+//!   Read only when the board declares an `embedded` stream on the device (see below).
 //!
 //! The frame memory is the stream's, so its buffer count and size are the board file's
 //! (`[devices.streams.frames]`: `buffers`, at most 64, and `buffer_bytes`, at least a frame).
+//!
+//! The embedded data is a second stream on the same device, named `embedded` in the board file:
+//! one buffer per line, the frame's sequence on it, the line taken on the block's second DMA
+//! channel (CSI-2 data type 0x12, the image's virtual channel). A frame with no line publishes
+//! nothing, and the sequence skips it. Its buffers are the board's, dma-bufs like `frames`'s.
+//! Asked for only where the sensor sends embedded lines. Untested on a board.
 //!
 //! The module's stream is created by `start` and ends at `stop`. Nothing of it is kept across a
 //! restart: `start` opens the node, makes the module's stream, gives it the buffers the driver
@@ -85,7 +93,7 @@ use lemnos_core::{
 
 use lemnos_hal::blocks::BufferKind;
 
-pub use hw::{Finished, Hardware, LinuxHardware, Settings, StartParams};
+pub use hw::{Channel, Finished, Hardware, LinuxHardware, Settings, StartParams};
 pub use lemnos_driver_rp1_csi2_sys as sys;
 use relay::{MAX_BUFFERS, Relay};
 
@@ -115,6 +123,8 @@ const CHECK_NS: u64 = 1_000_000_000;
 const POLL_NS: u64 = 1_000_000;
 /// The stream the board declares on the device, and the name its consumer opens it by.
 const STREAM: &str = "frames";
+/// The stream of the embedded data, when the board declares one on the device.
+const EMBEDDED: &str = "embedded";
 
 /// The delay before recovery attempt `attempt` (from 0), doubling to the cap.
 const fn backoff_ns(attempt: u32) -> u64 {
@@ -146,8 +156,14 @@ pub struct Rp1Csi2 {
     /// PiSP block. Resolved at bind, where the host checks it serves `camera.isp/1`.
     #[link]
     _isp: Option<Dev<dyn CameraIsp>>,
+    /// Where the embedded data goes, when the board declares an `embedded` stream on the device.
+    #[needs(optional)]
+    embedded: Option<StreamHandle>,
+    /// The bytes of each embedded line (`config.embedded_bytes`), with `embedded`.
+    embedded_bytes: u32,
     hw: Box<dyn Hardware>,
     relay: Relay,
+    embedded_relay: Relay,
     link: Option<LinkConfig>,
     packing: Packing,
     layout: Option<FrameLayout>,
@@ -214,10 +230,24 @@ impl Lifecycle for Rp1Csi2 {
         if let Some(frames) = needs.frames.as_ref() {
             handles_only(&**frames)?;
         }
+        let embedded_bytes = match needs.embedded.is_some() {
+            true => {
+                if let Some(frames) = needs.embedded.as_ref() {
+                    handles_only(&**frames)?;
+                }
+                cfg.int("embedded_bytes")
+                    .and_then(|bytes| u32::try_from(bytes).ok())
+                    .ok_or(Status::INVALID_ARGUMENT)?
+            }
+            false => 0,
+        };
         let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(settings));
-        let mut this = Self::with_hardware(hw, needs.frames);
-        this._isp = needs._isp;
-        Ok(this)
+        let mut driver = Self::with_hardware(hw, needs.frames);
+        driver._isp = needs._isp;
+        Ok(match needs.embedded {
+            Some(embedded) => driver.with_embedded(embedded, embedded_bytes),
+            None => driver,
+        })
     }
 
     fn describe(&self, out: &mut Description) {
@@ -298,8 +328,11 @@ impl Rp1Csi2 {
         Self {
             frames,
             _isp: None,
+            embedded: None,
+            embedded_bytes: 0,
             hw,
-            relay: Relay::new(),
+            relay: Relay::new(Channel::Image),
+            embedded_relay: Relay::new(Channel::Embedded),
             link: None,
             packing: Packing::Packed,
             layout: None,
@@ -307,14 +340,31 @@ impl Rp1Csi2 {
         }
     }
 
+    /// Gives the receiver its `embedded` stream and the bytes of each embedded line. Without
+    /// one, the receiver captures no embedded data.
+    #[must_use]
+    pub fn with_embedded(mut self, embedded: StreamHandle, bytes: u32) -> Self {
+        self.embedded = Some(embedded);
+        self.embedded_bytes = bytes;
+        self
+    }
+
     /// Finished frames out to the stream, returned buffers back to the block, and each buffer
     /// the driver holds matched to the memory behind it. An error means the module's stream is
-    /// over.
+    /// over. The embedded data is moved the same way, on its own stream.
     fn pump(&mut self) -> Result<()> {
+        if let Some(embedded) = self.embedded.as_mut() {
+            while let Some(done) = self.hw.next_frame(Channel::Embedded)? {
+                self.embedded_relay
+                    .finished(&done, &mut **embedded, &mut *self.hw)?;
+            }
+            self.embedded_relay.sweep(&mut **embedded);
+            self.embedded_relay.take(&mut **embedded, &mut *self.hw)?;
+        }
         let Some(frames) = self.frames.as_mut() else {
             return Ok(());
         };
-        while let Some(done) = self.hw.next_frame()? {
+        while let Some(done) = self.hw.next_frame(Channel::Image)? {
             self.relay.finished(&done, &mut **frames, &mut *self.hw)?;
         }
         self.relay.sweep(&mut **frames);
@@ -338,9 +388,33 @@ impl Rp1Csi2 {
         if buffers == 0 || buffers as usize > MAX_BUFFERS {
             return Err(Status::INVALID_ARGUMENT);
         }
+        let (embedded_buffers, embedded_bytes) = match self.embedded.as_ref() {
+            None => (0, 0),
+            Some(embedded) => {
+                handles_only(&**embedded)?;
+                let count = embedded.buffer_count();
+                let bytes = self.embedded_bytes;
+                if count == 0
+                    || count as usize > MAX_BUFFERS
+                    || bytes == 0
+                    || bytes > sys::EMBEDDED_MAX
+                    || !bytes.is_multiple_of(16)
+                {
+                    return Err(Status::INVALID_ARGUMENT);
+                }
+                (count, bytes)
+            }
+        };
         // Whatever was running ends first; a failure here is not a reason to not try the start.
         let _ = self.hw.stop();
         self.hw.make(&hw::StartParams {
+            embedded_buffers,
+            embedded_frame_slots: if embedded_buffers == 0 {
+                0
+            } else {
+                frame_slots_for(embedded_buffers)
+            },
+            embedded_bytes,
             lanes: u32::from(link.lanes),
             mbps: link.link_rate_mbps,
             vc: u32::from(link.virtual_channel),
@@ -354,6 +428,7 @@ impl Rp1Csi2 {
             frame_slots: frame_slots_for(buffers),
         })?;
         self.relay.restart(buffers);
+        self.embedded_relay.restart(embedded_buffers);
         let ready = match self.relay.settle_all(&mut **frames, &mut *self.hw) {
             Ok(()) => self.relay.take(&mut **frames, &mut *self.hw),
             Err(status) => Err(status),
@@ -366,6 +441,26 @@ impl Rp1Csi2 {
         } else {
             ready
         };
+        let embedded_ready = match self.embedded.as_mut() {
+            None => Ok(()),
+            Some(embedded) => match self
+                .embedded_relay
+                .settle_all(&mut **embedded, &mut *self.hw)
+            {
+                Ok(()) => self.embedded_relay.take(&mut **embedded, &mut *self.hw),
+                Err(status) => Err(status),
+            },
+        };
+        let embedded_refusal = if self.embedded.is_none() {
+            Ok(())
+        } else if self.embedded_relay.no_handles() {
+            Err(Status::NOT_SUPPORTED)
+        } else if self.embedded_relay.refused() {
+            Err(Status::INVALID_ARGUMENT)
+        } else {
+            embedded_ready
+        };
+        let refusal = refusal.and(embedded_refusal);
         if let Err(status) = refusal.and_then(|()| self.hw.go()) {
             let _ = self.hw.stop();
             return Err(status);
@@ -468,10 +563,18 @@ impl CameraReceiver for Rp1Csi2 {
         self.hw.frame_starts()
     }
 
-    /// This receiver captures no embedded data: nothing in its driver names where the block writes a
-    /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
-    fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
-        Ok(0)
+    /// The name of the stream the embedded data goes to: `embedded`, when the board declares
+    /// one on the device. One buffer per frame, carrying that frame's sequence, on the image's
+    /// virtual channel with data type 0x12 (`kernel/lemnos_rp1_csi2.c`). 0 when none.
+    fn embedded_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        if self.embedded.is_none() {
+            return Ok(0);
+        }
+        let name = EMBEDDED.as_bytes();
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
     }
 
     /// Unknown: the module knows the block, not which sensor the board wires to it. A link the

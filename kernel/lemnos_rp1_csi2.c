@@ -68,6 +68,8 @@
 
 #define LRC_NAME	"lemnos-rp1-csi2"
 #define LRC_CH		0
+/* The embedded data channel: the same block's second DMA channel (stock: CSI2_CH1_EMBEDDED). */
+#define LRC_EMB_CH	1
 
 /* DW CSI-2 host (resource 1), from dphy.c. */
 #define HOST_VERSION		0x000
@@ -109,6 +111,7 @@
 #define IRQ_EN_FS		BIT(13)
 #define IRQ_EN_FE_ACK		BIT(15)
 #define PACK_LINE		BIT(29)
+#define PACK_BYTES		BIT(30)
 #define CH_MODE_SHIFT		1
 #define VC_SHIFT		5
 #define DT_SHIFT		7
@@ -122,7 +125,7 @@
 #define MIPICFG_INT_PISP_FE	BIT(4)
 
 /* The windows must cover what's used here, so a short region can't be mistaken for one. */
-#define LRC_DMA_WINDOW		(CSI2_CH_FRAME_SIZE(LRC_CH) + 4)
+#define LRC_DMA_WINDOW		(CSI2_CH_FRAME_SIZE(LRC_EMB_CH) + 4)
 #define LRC_HOST_WINDOW		(HOST_PHY_TST_CTRL1 + 4)
 #define LRC_CFG_WINDOW		(MIPICFG_INTS + 4)
 
@@ -249,17 +252,18 @@ static void dphy_start(struct lrc_dev *l, u32 lanes, u32 mbps)
 }
 
 /*
- * csi2_set_buffer: ADDR0 last, it latches the others for the next frame. Only
- * ever a device address and size from lem_stream_next(). Lock held.
+ * Programs a channel's buffer: ADDR0 last, it latches the others for the next
+ * frame. Only ever a device address and size from lem_stream_next(). Lock held.
  */
-static void lrc_set_buffer(struct lrc_dev *l, const struct lem_stream_slot *slot)
+static void lrc_program(struct lrc_dev *l, unsigned int ch, const struct lem_stream_slot *slot,
+			u32 stride)
 {
 	u64 addr = slot->addr >> 4;
 
-	wr(l->dma, CSI2_CH_LENGTH(LRC_CH), slot->bytes >> 4);
-	wr(l->dma, CSI2_CH_STRIDE(LRC_CH), l->start.stride >> 4);
-	wr(l->dma, CSI2_CH_ADDR1(LRC_CH), addr >> 32);
-	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), addr & 0xffffffff);
+	wr(l->dma, CSI2_CH_LENGTH(ch), slot->bytes >> 4);
+	wr(l->dma, CSI2_CH_STRIDE(ch), stride >> 4);
+	wr(l->dma, CSI2_CH_ADDR1(ch), addr >> 32);
+	wr(l->dma, CSI2_CH_ADDR0(ch), addr & 0xffffffff);
 }
 
 /*
@@ -293,7 +297,32 @@ static void lrc_arm(struct lrc_dev *l)
 		return;
 	}
 	l->next.valid = true;
-	lrc_set_buffer(l, &l->next.slot);
+	lrc_program(l, LRC_CH, &l->next.slot, l->start.stride);
+}
+
+/*
+ * lrc_arm for the embedded channel. Its lines are PACK_BYTES, so the stride is
+ * zero, as the stock driver's meta node. The rule: the channel's ADDR0 is the
+ * next buffer's address, or zero when none is armed, so the channel latches
+ * nothing it could write into a buffer that has been given away (and a channel
+ * with no buffer address makes no frame start, as the board showed).
+ */
+static void lrc_emb_arm(struct lrc_dev *l)
+{
+	int ret;
+
+	if (!l->streaming || !l->emb.stream || l->emb.next.valid)
+		return;
+	ret = lem_stream_next(l->emb.stream, &l->emb.next.slot);
+	if (ret) {
+		if (ret == -ENOBUFS)
+			queue_delayed_work(system_highpri_wq, &l->retry,
+					   msecs_to_jiffies(LRC_RETRY_MS));
+		wr(l->dma, CSI2_CH_ADDR0(LRC_EMB_CH), 0);
+		return;
+	}
+	l->emb.next.valid = true;
+	lrc_program(l, LRC_EMB_CH, &l->emb.next.slot, 0);
 }
 
 static void lrc_retry(struct work_struct *work)
@@ -303,12 +332,32 @@ static void lrc_retry(struct work_struct *work)
 
 	spin_lock_irqsave(&l->lock, flags);
 	lrc_arm(l);
+	lrc_emb_arm(l);
 	spin_unlock_irqrestore(&l->lock, flags);
+}
+
+/*
+ * The embedded channel's frame before the one starting now is over, and the
+ * frame count is still the last one's. A line that started and never ended is
+ * given back empty (the stream drops it). A frame with no embedded line
+ * publishes nothing: the buffer armed for the next line is still the next
+ * frame's, the one the channel latched at its last start, so it is not touched.
+ * The sequence numbers show the gap. Lock held.
+ */
+static void lrc_emb_frame_end(struct lrc_dev *l)
+{
+	if (!l->emb.stream || !l->frames)
+		return;
+	if (l->emb.cur.valid) {		/* a line started and never ended: cut short */
+		lem_stream_complete(l->emb.stream, &l->emb.cur.slot, 0, l->emb.seq, l->emb.fs_ns);
+		l->emb.cur.valid = false;
+	}
 }
 
 /* cfe_sof_isr_handler. Lock held. */
 static void lrc_sof(struct lrc_dev *l, u64 now)
 {
+	lrc_emb_frame_end(l);
 	if (l->cur.valid) {		/* a start before the last frame's end */
 		/* The cut frame's start was counted at l->frames: its sequence is one below. */
 		lem_stream_complete(l->stream, &l->cur.slot, 0, l->frames - 1, l->fs_ns);
@@ -325,6 +374,23 @@ static void lrc_sof(struct lrc_dev *l, u64 now)
 	l->fs_int = true;
 	l->fe_int = false;
 	lrc_arm(l);
+}
+
+/*
+ * The embedded channel's frame start. Its line goes to the buffer armed for it,
+ * and that buffer's frame is the one starting now. Lock held.
+ */
+static void lrc_emb_sof(struct lrc_dev *l, u64 now)
+{
+	if (!l->emb.stream)
+		return;
+	if (!l->emb.next.valid)		/* none armed: the line has nowhere to go */
+		return;
+	l->emb.cur = l->emb.next;
+	l->emb.next.valid = false;
+	l->emb.seq = l->frames - 1;
+	l->emb.fs_ns = now;
+	lrc_emb_arm(l);
 }
 
 /*
@@ -358,13 +424,31 @@ static void lrc_eof(struct lrc_dev *l, u16 line)
 	lrc_arm(l);
 }
 
+/*
+ * The embedded channel's frame end: its one line is in, when the channel counted
+ * exactly one line since the last end (stock: the meta node's frame height is 1).
+ * Otherwise the buffer goes out empty. Lock held.
+ */
+static void lrc_emb_eof(struct lrc_dev *l, u16 line)
+{
+	u16 lines = line - l->emb.fe_line;
+
+	l->emb.fe_line = line;
+	if (!l->emb.cur.valid)
+		return;
+	lem_stream_complete(l->emb.stream, &l->emb.cur.slot, lines == 1 ? l->emb.bytes : 0,
+			    l->emb.seq, l->emb.fs_ns);
+	l->emb.cur.valid = false;
+	lrc_emb_arm(l);
+}
+
 static irqreturn_t lrc_isr(int irq, void *data)
 {
 	struct lrc_dev *l = data;
 	u64 now = ktime_get_ns();
-	bool sof, eof, handled = false;
+	bool sof, eof, emb_sof, emb_eof, handled = false;
 	u32 sts, status = 0;
-	u16 line;
+	u16 line, emb_line = 0;
 
 	sts = rd(l->cfg, MIPICFG_INTS);
 	if (sts & MIPICFG_INT_CSI_DMA) {
@@ -376,6 +460,8 @@ static irqreturn_t lrc_isr(int irq, void *data)
 	}
 	sof = status & IRQ_FS(LRC_CH);
 	eof = status & IRQ_FE_ACK(LRC_CH);
+	emb_sof = status & IRQ_FS(LRC_EMB_CH);
+	emb_eof = status & IRQ_FE_ACK(LRC_EMB_CH);
 	/*
 	 * The channel feeding the front end: only its frame starts matter, and
 	 * before the front end's interrupt, which comes after them.
@@ -389,9 +475,13 @@ static irqreturn_t lrc_isr(int irq, void *data)
 	if (!status)
 		return handled ? IRQ_HANDLED : IRQ_NONE;
 	line = eof ? rd(l->dma, CSI2_CH_DEBUG(LRC_CH)) & 0xffff : 0;
+	emb_line = emb_eof ? rd(l->dma, CSI2_CH_DEBUG(LRC_EMB_CH)) & 0xffff : 0;
 
 	spin_lock(&l->lock);
 	if (l->streaming) {
+		/* The embedded line of the frame ending is in before the next frame's start. */
+		if (emb_eof)
+			lrc_emb_eof(l, emb_line);
 		/*
 		 * The orders cfe_isr handles: FE then FS of the next frame,
 		 * FS and FE of one frame, and an FS with no FE before it. The
@@ -407,47 +497,62 @@ static irqreturn_t lrc_isr(int irq, void *data)
 		}
 		if (sof)
 			lrc_sof(l, now);
+		/* After the image's start, which closes the frame before it. */
+		if (emb_sof)
+			lrc_emb_sof(l, now);
 	}
 	spin_unlock(&l->lock);
 	return IRQ_HANDLED;
 }
 
 /*
- * Whether the channel is seen to have stopped. The FORCE and the two ADDR0
+ * Whether the channels are seen to have stopped. The FORCE and the ADDR0
  * writes have gone out and the read flushed them; what remains is what was
- * already in flight on the bus, and its line counter moves until that's done.
- * Bounded. Sleeps: never on the frame path.
+ * already in flight on the bus, and each line counter moves until that's done.
+ * Bounded. Sleeps: never on the frame path. `emb` also watches the embedded
+ * channel.
  */
-static bool lrc_dma_stopped(struct lrc_dev *l)
+static bool lrc_dma_stopped(struct lrc_dev *l, bool emb)
 {
-	u32 last = rd(l->dma, CSI2_CH_DEBUG(LRC_CH));
-	unsigned int still = 0;
+	unsigned int chans = emb ? 2 : 1;
+	u32 last[2] = { 0, 0 };
+	unsigned int still[2] = { 0, 0 };
 
+	for (unsigned int c = 0; c < chans; c++)
+		last[c] = rd(l->dma, CSI2_CH_DEBUG(c ? LRC_EMB_CH : LRC_CH));
 	for (unsigned int i = 0; i < LRC_STOP_POLLS; i++) {
-		u32 now;
+		bool done = true;
 
 		usleep_range(200, 400);
-		now = rd(l->dma, CSI2_CH_DEBUG(LRC_CH));
-		if (now == last) {
-			if (++still >= LRC_STOP_STILL_READS)
-				return true;
-		} else {
-			still = 0;
-			last = now;
+		for (unsigned int c = 0; c < chans; c++) {
+			u32 now = rd(l->dma, CSI2_CH_DEBUG(c ? LRC_EMB_CH : LRC_CH));
+
+			if (now == last[c]) {
+				if (still[c] < LRC_STOP_STILL_READS)
+					still[c]++;
+			} else {
+				still[c] = 0;
+				last[c] = now;
+			}
+			done = done && still[c] >= LRC_STOP_STILL_READS;
 		}
+		if (done)
+			return true;
 	}
 	return false;
 }
 
 /*
- * Stops the channel, waits for it, and gives back what it held. Only when the
- * channel is seen to have stopped does anything go back: otherwise it was
- * still writing, so every buffer it could reach stays pinned for good. Takes
- * no stream lock of its own (s->ctl may be held by a caller above us).
- * ctl held.
+ * Stops the channels, waits for them, and gives back what they held. Only when
+ * the channels are seen to have stopped does anything go back: otherwise they
+ * were still writing, so every buffer they could reach stays pinned for good.
+ * Takes no stream lock of its own (s->ctl may be held by a caller above us).
+ * Stops the receiver whole: the frame stream and the embedded stream, if one is
+ * attached. ctl held.
  */
-static void lrc_stop_locked(struct lrc_dev *l, struct lem_stream *s)
+static void lrc_stop_locked(struct lrc_dev *l)
 {
+	struct lem_stream *s = l->stream, *e = l->emb.stream;
 	unsigned long flags;
 
 	spin_lock_irqsave(&l->lock, flags);
@@ -456,6 +561,11 @@ static void lrc_stop_locked(struct lrc_dev *l, struct lem_stream *s)
 	wr(l->dma, CSI2_CH_CTRL(LRC_CH), FORCE);
 	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
 	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
+	if (e) {
+		wr(l->dma, CSI2_CH_CTRL(LRC_EMB_CH), FORCE);
+		wr(l->dma, CSI2_CH_ADDR0(LRC_EMB_CH), 0);
+		wr(l->dma, CSI2_CH_ADDR0(LRC_EMB_CH), 0);
+	}
 	wr(l->dma, CSI2_IRQ_MASK, 0);
 	wr(l->cfg, MIPICFG_INTE, 0);
 	spin_unlock_irqrestore(&l->lock, flags);
@@ -467,36 +577,60 @@ static void lrc_stop_locked(struct lrc_dev *l, struct lem_stream *s)
 	/* No handler still holds cur/next, and none will start. */
 	synchronize_irq(l->irq);
 
-	if (lrc_dma_stopped(l)) {
+	if (lrc_dma_stopped(l, e != NULL)) {
 		if (l->cur.valid)
 			lem_stream_cancel(s, &l->cur.slot);
 		if (l->next.valid)
 			lem_stream_cancel(s, &l->next.slot);
 		l->cur.valid = l->next.valid = false;
+		if (e) {
+			if (l->emb.cur.valid)
+				lem_stream_cancel(e, &l->emb.cur.slot);
+			if (l->emb.next.valid)
+				lem_stream_cancel(e, &l->emb.next.slot);
+			l->emb.cur.valid = l->emb.next.valid = false;
+		}
 	} else {
 		/* Not known to be finished: pinned for good, and refused until rebound. */
 		dev_err(l->dev, "DMA did not stop; buffers stay pinned until reboot\n");
 		l->wedged = true;
 		lem_stream_wedge(s);
+		if (e)
+			lem_stream_wedge(e);
 	}
 
 	spin_lock_irqsave(&l->lock, flags);
 	l->stream = NULL;
+	l->emb.stream = NULL;
 	spin_unlock_irqrestore(&l->lock, flags);
 	if (lem_stream_detach(s))
 		kref_put(&l->ref, lrc_free);
+	if (e && lem_stream_detach(e))
+		kref_put(&l->ref, lrc_free);
 }
 
-/* The stream is going: its stop() contract. Takes l->ctl under the stream's s->ctl. */
+/* The frame stream is going: its stop() contract. Takes l->ctl under the stream's s->ctl. */
 static void lrc_stream_stop(void *priv, struct lem_stream *s)
 {
 	struct lrc_dev *l = priv;
 
 	mutex_lock(&l->ctl);
 	if (l->stream == s)	/* unbinding stops it first; a late call finds nothing to do */
-		lrc_stop_locked(l, s);
+		lrc_stop_locked(l);
 	mutex_unlock(&l->ctl);
 	/* Our reference, taken at attach: the stream gave it up by calling this. */
+	kref_put(&l->ref, lrc_free);
+}
+
+/* The embedded stream is going: as lrc_stream_stop, and the receiver stops with it. */
+static void lrc_emb_stream_stop(void *priv, struct lem_stream *s)
+{
+	struct lrc_dev *l = priv;
+
+	mutex_lock(&l->ctl);
+	if (l->emb.stream == s)
+		lrc_stop_locked(l);
+	mutex_unlock(&l->ctl);
 	kref_put(&l->ref, lrc_free);
 }
 
@@ -524,12 +658,45 @@ static int lrc_check_start(const struct lrc_dev *l, const struct lemnos_rp1_csi2
 	return 0;
 }
 
-static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
+/*
+ * Takes a stream made on this node, by its fd, as a producer for frames of
+ * `bytes`. The node's reference is taken here, and released by whoever takes
+ * the producer off the stream: stop, unbind, or the stream's own close, as for
+ * the frame stream. The fd's file is held only while this runs.
+ */
+static long lrc_attach(struct lrc_dev *l, int fd, u32 bytes,
+		       void (*stop)(void *priv, struct lem_stream *s), struct lem_stream **out)
 {
-	const struct lem_stream_producer producer = { .stop = lrc_stream_stop, .priv = l };
+	const struct lem_stream_producer producer = { .stop = stop, .priv = l };
 	struct lem_stream *stream;
 	struct file *file;
+	long ret;
+
+	file = fget(fd);
+	if (!file)
+		return -EBADF;
+	stream = lem_stream_from_file(file, l->dev);
+	if (IS_ERR(stream)) {
+		ret = PTR_ERR(stream);
+		goto put_file;
+	}
+	kref_get(&l->ref);
+	ret = lem_stream_attach(stream, &producer, bytes);
+	if (ret) {
+		kref_put(&l->ref, lrc_free);
+		goto put_file;
+	}
+	*out = stream;
+put_file:
+	fput(file);
+	return ret;
+}
+
+static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
+{
+	struct lem_stream *stream, *emb = NULL;
 	unsigned long flags;
+	int req_fd;
 	long ret;
 	u32 ctrl;
 
@@ -541,20 +708,20 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	if (l->stream || (l->fe && lem_pisp_fe_streaming(l->fe)))
 		return -EBUSY;
 
-	file = fget(s->stream_fd);
-	if (!file)
-		return -EBADF;
-	stream = lem_stream_from_file(file, l->dev);
-	if (IS_ERR(stream)) {
-		ret = PTR_ERR(stream);
-		goto put_file;
-	}
-	/* Released by whoever takes the producer off the stream, stop or unbind. */
-	kref_get(&l->ref);
-	ret = lem_stream_attach(stream, &producer, s->size);
-	if (ret) {
-		kref_put(&l->ref, lrc_free);
-		goto put_file;
+	ret = lrc_attach(l, s->stream_fd, s->size, lrc_stream_stop, &stream);
+	if (ret)
+		return ret;
+	/* The request is for this START only: it is asked again before the next one. */
+	req_fd = l->emb.req_fd;
+	l->emb.req_fd = -1;
+	if (req_fd >= 0) {
+		ret = lrc_attach(l, req_fd, l->emb.req_bytes, lrc_emb_stream_stop, &emb);
+		if (ret) {
+			/* Undo the frame stream's attach: it was only just made. */
+			if (lem_stream_detach(stream))
+				kref_put(&l->ref, lrc_free);
+			return ret;
+		}
 	}
 
 	spin_lock_irqsave(&l->lock, flags);
@@ -565,12 +732,16 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	l->fs_ns = 0;
 	l->fs_int = l->fe_int = false;
 	l->fe_line = 0;		/* the line count is cleared below */
+	l->emb.stream = emb;
+	l->emb.bytes = emb ? l->emb.req_bytes : 0;
+	l->emb.cur.valid = l->emb.next.valid = false;
+	l->emb.fe_line = 0;
 	spin_unlock_irqrestore(&l->lock, flags);
 
 	/* csi2_start_channel, the caller's vc and dt. */
 	wr(l->dma, CSI2_CH_CTRL(LRC_CH), 0);
 	wr(l->dma, CSI2_CH_DEBUG(LRC_CH), 0);
-	wr(l->dma, CSI2_STATUS, IRQ_CH_MASK(LRC_CH));
+	wr(l->dma, CSI2_STATUS, IRQ_CH_MASK(LRC_CH) | IRQ_CH_MASK(LRC_EMB_CH));
 	ctrl = DMA_EN | IRQ_EN_FS | IRQ_EN_FE_ACK | PACK_LINE;
 	/* CH_MODE (bits 2:1): CSI2_MODE_REMAP, as cfe_start_channel picks for a 16-bit format. */
 	if (s->flags & LEMNOS_RP1_CSI2_UNPACK16)
@@ -579,9 +750,26 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	ctrl |= (s->vc << VC_SHIFT) | (s->dt << DT_SHIFT);
 	wr(l->dma, CSI2_CH_CTRL(LRC_CH), ctrl);
 
+	/*
+	 * The embedded channel, as cfe_start_channel starts a meta node: one line
+	 * of the buffer's size, packed as bytes, auto arm off, the image's virtual
+	 * channel and data type 0x12. Its ADDR0 stays zero until a buffer is armed,
+	 * and a channel not asked for stays off.
+	 */
+	wr(l->dma, CSI2_CH_CTRL(LRC_EMB_CH), 0);
+	wr(l->dma, CSI2_CH_DEBUG(LRC_EMB_CH), 0);
+	wr(l->dma, CSI2_CH_ADDR0(LRC_EMB_CH), 0);
+	if (emb) {
+		ctrl = DMA_EN | IRQ_EN_FS | IRQ_EN_FE_ACK | PACK_LINE | PACK_BYTES;
+		ctrl |= (s->vc << VC_SHIFT) | (LEMNOS_RP1_CSI2_EMBEDDED_DT << DT_SHIFT);
+		wr(l->dma, CSI2_CH_FRAME_SIZE(LRC_EMB_CH), (1u << 16) | l->emb.bytes);
+		wr(l->dma, CSI2_CH_CTRL(LRC_EMB_CH), ctrl);
+	}
+
 	spin_lock_irqsave(&l->lock, flags);
 	l->streaming = true;
 	lrc_arm(l);
+	lrc_emb_arm(l);
 	spin_unlock_irqrestore(&l->lock, flags);
 
 	/* cfe_start_streaming's order: MIPI config, then csi2_open_rx. */
@@ -590,10 +778,7 @@ static long lrc_start(struct lrc_dev *l, const struct lemnos_rp1_csi2_start *s)
 	wr(l->dma, CSI2_IRQ_MASK, 0);
 	dphy_start(l, s->lanes, s->mbps);
 	wr(l->dma, CSI2_CTRL, EOP_IS_EOL);
-	ret = 0;
-put_file:
-	fput(file);
-	return ret;
+	return 0;
 }
 
 /*
@@ -637,6 +822,49 @@ void lrc_fe_channel_stop(struct lrc_dev *l)
 	wr(l->dma, CSI2_CH_ADDR0(LRC_CH), 0);
 	wr(l->dma, CSI2_IRQ_MASK, 0);
 	wr(l->cfg, MIPICFG_INTE, 0);
+}
+
+/*
+ * The embedded stream for the next START: checked now (a stream made on this
+ * node, a length the channel can take), used at START. -1 asks for none.
+ */
+static long lrc_embedded(struct lrc_dev *l, void __user *arg)
+{
+	struct lemnos_rp1_csi2_embedded e;
+	struct lem_stream *stream;
+	struct file *file;
+	long ret = 0;
+
+	if (copy_from_user(&e, arg, sizeof(e)))
+		return -EFAULT;
+	if (e.reserved[0] || e.reserved[1])
+		return -EINVAL;
+	if (e.stream_fd < 0) {
+		if (e.bytes)
+			return -EINVAL;
+	} else {
+		if (!e.bytes || e.bytes > LEMNOS_RP1_CSI2_EMBEDDED_MAX || (e.bytes & 15))
+			return -EINVAL;
+		file = fget(e.stream_fd);
+		if (!file)
+			return -EBADF;
+		stream = lem_stream_from_file(file, l->dev);
+		ret = IS_ERR(stream) ? PTR_ERR(stream) : 0;
+		fput(file);
+		if (ret)
+			return ret;
+	}
+	mutex_lock(&l->ctl);
+	if (l->gone)
+		ret = -ENODEV;
+	else if (l->stream)
+		ret = -EBUSY;
+	else {
+		l->emb.req_fd = e.stream_fd;
+		l->emb.req_bytes = e.stream_fd < 0 ? 0 : e.bytes;
+	}
+	mutex_unlock(&l->ctl);
+	return ret;
 }
 
 static long lrc_info(struct lrc_dev *l, void __user *arg)
@@ -713,6 +941,8 @@ static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return lrc_frame_starts(l, uarg);
 	case LEMNOS_RP1_CSI2_IOC_STREAM_CREATE:
 		return lrc_stream_create(l, uarg);
+	case LEMNOS_RP1_CSI2_IOC_EMBEDDED:
+		return lrc_embedded(l, uarg);
 	case LEMNOS_RP1_CSI2_IOC_START: {
 		struct lemnos_rp1_csi2_start s;
 
@@ -729,7 +959,7 @@ static long lrc_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		if (l->gone)
 			ret = -ENODEV;
 		else if (l->stream)
-			lrc_stop_locked(l, l->stream);
+			lrc_stop_locked(l);
 		mutex_unlock(&l->ctl);
 		return ret;
 	default:
@@ -754,7 +984,10 @@ static int lrc_release(struct inode *inode, struct file *file)
 
 	mutex_lock(&l->ctl);
 	if (l->stream)
-		lrc_stop_locked(l, l->stream);
+		lrc_stop_locked(l);
+	/* The embedded stream is asked for per open, as the frame stream is per START. */
+	l->emb.req_fd = -1;
+	l->emb.req_bytes = 0;
 	if (l->fe)
 		lem_pisp_fe_stop(l->fe);
 	mutex_unlock(&l->ctl);
@@ -819,6 +1052,7 @@ static int lrc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	kref_init(&l->ref);
 	l->dev = get_device(dev);
+	l->emb.req_fd = -1;
 	mutex_init(&l->ctl);
 	init_rwsem(&l->going);
 	spin_lock_init(&l->lock);
@@ -906,7 +1140,7 @@ static void lrc_remove(struct platform_device *pdev)
 
 	mutex_lock(&l->ctl);
 	if (l->stream)
-		lrc_stop_locked(l, l->stream);
+		lrc_stop_locked(l);
 	if (l->fe)
 		lem_pisp_fe_stop(l->fe);
 	wr(l->cfg, MIPICFG_INTE, 0);

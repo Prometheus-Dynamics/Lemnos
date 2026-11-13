@@ -585,3 +585,91 @@ fn on_standby_the_node_captures_with_nobody_attached_and_a_consumer_gets_the_new
     assert_eq!(allocated, 0);
     assert_eq!(rig.host.stream_stats(0, "frames").unwrap().kept, 1);
 }
+
+/// A driver whose embedded path is on: a metadata node that fills lines of `FRAME` bytes, and a
+/// host with an `embedded` stream of plain memory the lines are copied into.
+fn embedded_driver() -> (Host, Rkcif, Node) {
+    let text = format!(
+        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+         [[devices]]\nid = \"cif\"\ndriver = \"nothing\"\n\
+         [devices.streams.embedded]\nbuffers = {BUFFERS}\nbuffer_bytes = {FRAME}\n"
+    );
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    let host = Host::start_with_streams(
+        &parse(&text).unwrap(),
+        &[entry::<nothing::Nothing>()],
+        Box::new(sim),
+        Arc::new(clock),
+        Options::default(),
+        Arc::new(HeapAllocator),
+    )
+    .unwrap();
+    let stream = host.stream_producer(0, "embedded").unwrap();
+    let route = Hw::default();
+    route.with(|m| m.topology = receiver(ON, OFF, OFF));
+    let node = Node::default();
+    let end = NodeEnd {
+        node: node.clone(),
+        payload: vec![0x5a; FRAME],
+    };
+    let mut driver = Rkcif::with_hardware(Box::new(route)).with_embedded(
+        Box::new(end),
+        lemnos_core::Held::boxed(Box::new(stream)),
+        FourCc::new(b"BG10"),
+        FRAME as u32,
+    );
+    driver.configure(link(), Packing::Packed).unwrap();
+    CameraReceiver::start(&mut driver).unwrap();
+    (host, driver, node)
+}
+
+#[test]
+fn embedded_lines_come_off_the_metadata_node_onto_the_embedded_stream() {
+    let (host, mut driver, node) = embedded_driver();
+    let mut name = [0u8; 16];
+    let len = driver.embedded_stream(&mut name).unwrap();
+    assert_eq!(&name[..len], b"embedded");
+    node.with(|n| {
+        assert_eq!(
+            n.opened,
+            [Wanted {
+                input: None,
+                fourcc: FourCc::new(b"BG10"),
+                width: 0,
+                height: 0,
+                stride: 0,
+                size: FRAME as u32,
+                mode: 0,
+            }],
+            "the node is asked for lines of the board's size, in the board's format"
+        );
+        assert_eq!(n.streamed, [4], "started with every buffer queued");
+    });
+    let lease = host.stream_attach(0, "embedded", CallerId(7)).unwrap();
+    let mut ring = Consumer::attach(Arc::clone(&lease.ring), lease.layout).unwrap();
+    node.with(|n| n.filled.push_back((0, 5)));
+    Lifecycle::tick(&mut driver, 1_000_000).expect("a started driver ticks");
+    let line = ring.pop_frame().unwrap().expect("the line is published");
+    assert_eq!((line.bytes, line.sequence), (FRAME as u32, 5));
+    assert!(ring.release(line.buffer, line.fence).unwrap());
+    let mut out = vec![0u8; FRAME];
+    assert!(
+        lease
+            .buffers
+            .read(lease.layout.buffer_offset(line.buffer).unwrap(), &mut out)
+    );
+    assert!(out.iter().all(|&b| b == 0x5a), "the line's bytes, copied");
+    assert_eq!(
+        node.with(|n| n.requeued),
+        1,
+        "the node's buffer goes back to the node"
+    );
+    let before = node.with(|n| n.stopped);
+    assert_eq!(CameraReceiver::stop(&mut driver), Ok(()));
+    assert_eq!(
+        node.with(|n| n.stopped),
+        before + 1,
+        "the metadata node stops with the receiver"
+    );
+}

@@ -321,3 +321,20 @@ fn from_bytes_fills_and_zeroes() {
     let raw: v4l2_control = from_bytes(&7u32.to_ne_bytes());
     assert_eq!((raw.id, raw.value), (7, 0));
 }
+
+#[test]
+fn metadata_capture_matches_the_kernel_header() {
+    // `V4L2_BUF_TYPE_META_CAPTURE` and the `v4l2_meta_format` fields, from `linux/videodev2.h`.
+    assert_eq!(BufType::MetaCapture as u32, 13);
+    assert_eq!(BufType::from_raw(13), Some(BufType::MetaCapture));
+    assert!(BufType::MetaCapture.is_meta());
+    assert!(!BufType::MetaCapture.is_multiplanar());
+    assert_eq!(size_of::<v4l2_meta_format>(), 20);
+    assert_eq!(offset_of!(v4l2_meta_format, dataformat), 0);
+    assert_eq!(offset_of!(v4l2_meta_format, buffersize), 4);
+    assert_eq!(offset_of!(v4l2_meta_format, width), 8);
+    assert_eq!(offset_of!(v4l2_meta_format, height), 12);
+    assert_eq!(offset_of!(v4l2_meta_format, bytesperline), 16);
+    // The format's union carries the meta member at the same place as the others.
+    assert_eq!(offset_of!(v4l2_format, fmt), 8);
+}

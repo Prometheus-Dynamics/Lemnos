@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use lemnos_contract_camera_receiver::{CameraReceiver, Counters, FrameStarts, LinkConfig, Packing};
 use lemnos_core::{CallerId, Health, Lifecycle, Result, Status, StreamHandle};
 use lemnos_driver_rp1_csi2::relay::Set;
-use lemnos_driver_rp1_csi2::{Finished, Hardware, Rp1Csi2, StartParams};
+use lemnos_driver_rp1_csi2::{Channel, Finished, Hardware, Rp1Csi2, StartParams};
 use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Backing, BufferMemory, HeapAllocator, Lease, StreamAllocator};
@@ -344,7 +344,11 @@ impl Hardware for Hw {
         Ok(Counters::default())
     }
 
-    fn set_buffer(&mut self, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set> {
+    fn set_buffer(&mut self, channel: Channel, buffer: u32, memory: BorrowedFd<'_>) -> Result<Set> {
+        // These tests run no embedded stream: the block has none to give memory to.
+        if channel == Channel::Embedded {
+            return Ok(Set::Refused);
+        }
         let file = File::from(memory.try_clone_to_owned().map_err(|_| Status::IO)?);
         let size = file.metadata().map_err(|_| Status::IO)?.len();
         self.with(|b| {
@@ -373,11 +377,17 @@ impl Hardware for Hw {
         })
     }
 
-    fn next_frame(&mut self) -> Result<Option<Finished>> {
+    fn next_frame(&mut self, channel: Channel) -> Result<Option<Finished>> {
+        if channel == Channel::Embedded {
+            return Ok(None);
+        }
         Ok(self.with(|b| b.finished.pop_front()))
     }
 
-    fn give_back(&mut self, buffer: u32, fence: u32) -> Result<()> {
+    fn give_back(&mut self, channel: Channel, buffer: u32, fence: u32) -> Result<()> {
+        if channel == Channel::Embedded {
+            return Ok(());
+        }
         self.with(|b| match b.buffers.get_mut(buffer as usize) {
             Some(slot) if slot.at == Where::Out(fence) => slot.at = Where::Free,
             _ => b.bad_returns += 1,

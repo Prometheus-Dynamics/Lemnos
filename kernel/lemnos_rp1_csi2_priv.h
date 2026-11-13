@@ -25,6 +25,21 @@ struct lrc_frame {
 	bool valid;
 };
 
+/*
+ * The embedded data channel (CSI-2 data type 0x12 on the image's virtual
+ * channel): its own stream, its own buffers, its own frame accounting. See
+ * lemnos_rp1_csi2.c, "Embedded data".
+ */
+struct lrc_emb {
+	int req_fd;			/* asked for before START; -1: none */
+	u32 req_bytes;
+	struct lem_stream *stream;	/* non-NULL while streaming */
+	u32 bytes;			/* the line's length, from START */
+	struct lrc_frame cur, next;	/* cur: a line being written; next: armed */
+	u64 seq, fs_ns;			/* cur's frame, and its start */
+	u16 fe_line;			/* the channel's line count at the last frame end */
+};
+
 struct lrc_dev {
 	struct kref ref;		/* the block, each open file, each attached stream */
 	struct device *dev;		/* held until freed */
@@ -49,6 +64,7 @@ struct lrc_dev {
 	u64 fs_ns;			/* the latest frame start, armed or not (0 before one) */
 	u16 fe_line;			/* the channel's line count at the last frame end */
 	struct lemnos_rp1_csi2_start start;
+	struct lrc_emb emb;
 	u64 frames, written, dropped, errors;
 	/* Arms again while nothing is armed and no buffer was free; see lrc_arm(). */
 	struct delayed_work retry;

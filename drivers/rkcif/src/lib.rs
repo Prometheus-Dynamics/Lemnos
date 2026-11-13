@@ -40,6 +40,11 @@
 //! - `order`: the colour order, `mono`, `rggb`, `grbg`, `gbrg` or `bggr`, default `mono`. The
 //!   pixel format asked of the node carries it; there is no monochrome format past 8 bits.
 //! - `buffers`: buffers the node fills when frames are copied, 2 to 32, default 4.
+//! - `embedded`: a metadata node's media entity name, for the sensor's embedded lines. Used with the
+//!   `embedded` stream (`[devices.streams.embedded]`): each line is copied onto that stream with the
+//!   frame's sequence (`lemnos-driver-v4l2-capture`'s `pump_embedded`). Needs `embedded_format`
+//!   (the node's data format, four characters) and `embedded_bytes` (a line's length, above 0).
+//!   Left out, the receiver captures no embedded data.
 //!
 //! # Layouts
 //!
@@ -85,6 +90,7 @@ use lemnos_core::{
     Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_v4l2_capture::{self as capture, Pump, Wanted, fourcc, parse_order};
+use lemnos_v4l2::FourCc;
 
 pub use hw::{Hardware, LinuxHardware, Settings, link_on};
 pub use route::{IspGraph, IspLink, Plan};
@@ -152,9 +158,16 @@ pub struct Rkcif {
     /// Raw frames go out here, when the board gives the stream.
     #[needs(optional)]
     frames: Option<StreamHandle>,
+    /// The embedded data goes out here, when the board gives the stream and names a metadata node.
+    #[needs(optional)]
+    embedded: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
     /// The capture node, when the board names it.
     node: Option<Box<dyn capture::Hardware>>,
+    /// The metadata node the embedded lines come off (`config.embedded`), with the data format
+    /// and the line's bytes (`config.embedded_format`, `config.embedded_bytes`).
+    embedded_node: Option<Box<dyn capture::Hardware>>,
+    embedded_line: Option<(FourCc, u32)>,
     /// What moves the node's frames into the stream.
     pump: Pump,
     raw: Raw,
@@ -165,6 +178,8 @@ pub struct Rkcif {
 
 /// The stream raw frames go out on: the need's name, which is the name a consumer opens it by.
 pub const STREAM: &str = "frames";
+/// The stream the embedded lines go out on: the need's name.
+pub const EMBEDDED: &str = "embedded";
 /// How often the capture node is read for filled buffers while it streams.
 const POLL_NS: u64 = 1_000_000;
 
@@ -257,9 +272,30 @@ impl Lifecycle for Rkcif {
                     .with_prepare(Box::new(prepare_node)),
             )),
         };
+        let (embedded_node, embedded_line) = match cfg.str("embedded") {
+            None => (None, None),
+            Some(name) => {
+                let format = cfg
+                    .str("embedded_format")
+                    .and_then(|f| f.parse::<FourCc>().ok())
+                    .ok_or(Status::INVALID_ARGUMENT)?;
+                let bytes = cfg
+                    .int("embedded_bytes")
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .ok_or(Status::INVALID_ARGUMENT)?;
+                let node: Box<dyn capture::Hardware> = Box::new(capture::LinuxHardware::metadata(
+                    capture::Settings::new(name)?,
+                ));
+                (Some(node), Some((format, bytes)))
+            }
+        };
         let mut driver = Self::with_hardware(Box::new(LinuxHardware::new(settings)));
         driver.frames = needs.frames;
+        driver.embedded = needs.embedded;
         driver.node = node;
+        driver.embedded_node = embedded_node;
+        driver.embedded_line = embedded_line;
         driver.raw = raw;
         Ok(driver)
     }
@@ -282,7 +318,9 @@ impl Lifecycle for Rkcif {
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         // The capture node is read every tick it streams; a failure is the route's failure
         // too, and both are set up again.
-        if matches!(self.state, State::Routed { .. }) && self.pump_frames().is_err() {
+        if matches!(self.state, State::Routed { .. })
+            && (self.pump_frames().is_err() || self.pump_embedded().is_err())
+        {
             self.state = State::Recovering {
                 attempt: 0,
                 due: None,
@@ -340,7 +378,11 @@ impl Rkcif {
             State::Recovering { attempt, .. } => {
                 // Whatever was open may be stale: a receiver probed again is a new device.
                 self.hw.close();
-                match self.route().and_then(|()| self.begin_frames()) {
+                match self
+                    .route()
+                    .and_then(|()| self.begin_frames())
+                    .and_then(|()| self.begin_embedded())
+                {
                     Ok(()) => {
                         let at = now_ns.saturating_add(CHECK_NS);
                         self.state = State::Routed {
@@ -369,14 +411,33 @@ impl Rkcif {
     pub fn with_hardware(hw: Box<dyn Hardware>) -> Self {
         Self {
             frames: None,
+            embedded: None,
             hw,
             node: None,
+            embedded_node: None,
+            embedded_line: None,
             pump: Pump::new(),
             raw: Raw::default(),
             link: None,
             packing: Packing::Packed,
             state: State::Stopped,
         }
+    }
+
+    /// The driver with its embedded path: lines from the metadata node `node`, `bytes` long in
+    /// data format `format`, into `stream`. For a simulated board or a test.
+    #[must_use]
+    pub fn with_embedded(
+        mut self,
+        node: Box<dyn capture::Hardware>,
+        stream: StreamHandle,
+        format: FourCc,
+        bytes: u32,
+    ) -> Self {
+        self.embedded_node = Some(node);
+        self.embedded = Some(stream);
+        self.embedded_line = Some((format, bytes));
+        self
     }
 
     /// The driver with its raw path: frames from `node` into `frames`, asked for as `raw`
@@ -432,6 +493,31 @@ impl Rkcif {
     fn pump_frames(&mut self) -> Result<()> {
         match (self.node.as_deref_mut(), self.frames.as_deref_mut()) {
             (Some(node), Some(frames)) => self.pump.pump(node, frames),
+            _ => Ok(()),
+        }
+    }
+
+    /// Starts the metadata node the embedded lines come off, when the board gives both it and
+    /// the stream. Whatever it was doing ends first.
+    fn begin_embedded(&mut self) -> Result<()> {
+        let (Some(node), Some((format, bytes)), Some(_)) = (
+            self.embedded_node.as_deref_mut(),
+            self.embedded_line,
+            self.embedded.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let _ = node.stop();
+        capture::start_embedded(node, format, bytes)
+    }
+
+    /// Moves the metadata node's filled lines onto the embedded stream, when both are there.
+    fn pump_embedded(&mut self) -> Result<()> {
+        match (
+            self.embedded_node.as_deref_mut(),
+            self.embedded.as_deref_mut(),
+        ) {
+            (Some(node), Some(stream)) => capture::pump_embedded(node, stream).map(|_| ()),
             _ => Ok(()),
         }
     }
@@ -519,8 +605,11 @@ impl CameraReceiver for Rkcif {
             return Err(Status::BUSY);
         }
         self.route()?;
-        if let Err(status) = self.begin_frames() {
+        if let Err(status) = self.begin_frames().and_then(|()| self.begin_embedded()) {
             if let Some(node) = self.node.as_deref_mut() {
+                let _ = node.stop();
+            }
+            if let Some(node) = self.embedded_node.as_deref_mut() {
                 let _ = node.stop();
             }
             return Err(status);
@@ -533,7 +622,10 @@ impl CameraReceiver for Rkcif {
         // The route stays as it is: the ISP may be streaming through it, and only its own driver
         // stops that. Recovery is over either way.
         self.state = State::Stopped;
-        // The capture node is this driver's own, and ends with it.
+        // The capture nodes are this driver's own, and end with it.
+        if let Some(node) = self.embedded_node.as_deref_mut() {
+            let _ = node.stop();
+        }
         match self.node.as_deref_mut() {
             Some(node) => node.stop(),
             None => Ok(()),
@@ -559,15 +651,29 @@ impl CameraReceiver for Rkcif {
         Ok(name.len())
     }
 
-    /// This receiver captures no embedded data: nothing in its driver names where the block writes a
-    /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
-    /// Not counted yet: the frame-start count is not wired in this driver.
+    /// Not answered: the vendor kernel's `rkcif` (rockchip-linux/kernel, develop-5.10,
+    /// `drivers/media/platform/rockchip/cif/capture.c`, read to character 300000 of 504477) raises no
+    /// `V4L2_EVENT_FRAME_SYNC` and has no `v4l2_event_queue` on frame starts. Its CSI start
+    /// interrupt and its DVP SOF subdev are internal to the driver, and nothing reaches user
+    /// space as an event or a control, so the frame-start count has no observable source here.
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
         Err(Status::NOT_SUPPORTED)
     }
 
-    fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
-        Ok(0)
+    /// The name of the stream the embedded lines go to, `embedded`, when the board declares it on
+    /// the device and names a metadata node for the lines (`config.embedded`). The vendor
+    /// kernel's own `rkcif` carries embedded data as a pixel format on the image node
+    /// (`V4L2_PIX_FMT_EBD8`) and exposes no metadata node, so on that kernel no node can be named
+    /// and this answers 0; a kernel that exposes one serves it. 0 otherwise.
+    fn embedded_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        if self.embedded.is_none() || self.embedded_node.is_none() {
+            return Ok(0);
+        }
+        let name = EMBEDDED.as_bytes();
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
     }
 
     /// The sensor the graph has upstream of the configured channel's capture node. Unknown without

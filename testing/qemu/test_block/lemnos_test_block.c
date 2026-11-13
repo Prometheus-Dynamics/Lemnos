@@ -137,6 +137,12 @@ static u32 tfe_read_out_bytes(unsigned int i)
 	return (u32)f.stride * f.height;
 }
 
+/* The embedded channel: its registers sit one channel stride (0x40) above the image's. */
+#define R_EMB(r)	((r) + 0x40)
+static u64 tcsi_emb_addr;
+static u32 tcsi_emb_len;
+static u32 tcsi_emb_lines = 1;	/* the next embedded frame end's lines; 0: no line */
+
 static void tcsi_tick(struct work_struct *work)
 {
 	void __iomem *dma = tcsi_regs[0];
@@ -166,6 +172,19 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	void __iomem *dma = tcsi_regs[0], *cfg = tcsi_regs[2];
 	void __user *uarg = (void __user *)arg;
 
+	if (cmd == TCSI_IOC_PEEK_EMB) {
+		struct tcsi_regs r = {
+			.addr0 = readl(dma + R_EMB(R_ADDR0)),
+			.addr1 = readl(dma + R_EMB(R_ADDR1)),
+			.length = readl(dma + R_EMB(R_LENGTH)),
+			.stride = readl(dma + R_EMB(R_STRIDE)),
+			.ctrl = readl(dma + R_EMB(R_CTRL)),
+			.frame_size = readl(dma + R_EMB(R_FRAME_SIZE)),
+			.debug = readl(dma + R_EMB(R_DEBUG)),
+		};
+
+		return copy_to_user(uarg, &r, sizeof(r)) ? -EFAULT : 0;
+	}
 	if (cmd == TCSI_IOC_PEEK) {
 		struct tcsi_regs r = {
 			.addr0 = readl(dma + R_ADDR0),
@@ -253,6 +272,8 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	}
 	if (cmd == TCSI_IOC_LINES)
 		return get_user(tcsi_lines, (u32 __user *)uarg);
+	if (cmd == TCSI_IOC_EMB_LINES)
+		return get_user(tcsi_emb_lines, (u32 __user *)uarg);
 	if (cmd == TCSI_IOC_BUSY) {
 		u32 ms;
 
@@ -274,6 +295,21 @@ static long tcsi_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			tcsi_cur_addr = (u64)readl(dma + R_ADDR1) << 36 |
 					(u64)readl(dma + R_ADDR0) << 4;
 			tcsi_cur_len = readl(dma + R_LENGTH) << 4;
+		}
+		if (status & TCSI_EMB_FS) {
+			tcsi_emb_addr = (u64)readl(dma + R_EMB(R_ADDR1)) << 36 |
+					(u64)readl(dma + R_EMB(R_ADDR0)) << 4;
+			tcsi_emb_len = readl(dma + R_EMB(R_LENGTH)) << 4;
+		}
+		if ((status & TCSI_EMB_FE_ACK) && tcsi_emb_addr) {
+			u32 dbg = readl(dma + R_EMB(R_DEBUG));
+			u32 lines = tcsi_emb_lines;
+
+			if (lines)
+				memset(phys_to_virt(tcsi_emb_addr), ++tcsi_pattern, tcsi_emb_len);
+			tcsi_emb_addr = 0;
+			tcsi_emb_lines = 1;
+			writel(((dbg >> 16) + 1) << 16 | ((dbg + lines) & 0xffff), dma + R_EMB(R_DEBUG));
 		}
 		if ((status & TCSI_FE_ACK) && tcsi_cur_addr) {
 			u32 dbg = readl(dma + R_DEBUG);
