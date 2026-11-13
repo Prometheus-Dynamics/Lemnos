@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 88 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 89 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -130,6 +130,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`D11.md`](../testing/board-runs/D11.md) | The usbfs host: enumeration, descriptors, every transfer type, unplug, timeouts |
 | [`A22.md`](../testing/board-runs/A22.md) | Reset and kernel-driver detach on usbfs |
 | [`D12.md`](../testing/board-runs/D12.md) | `uvc`: descriptors, frames, drops, unplug and replug |
+| [`H4a.md`](../testing/board-runs/H4a.md) | `[[each]]` by USB class: two cameras alike, ids by port, replug, a pinned and a refused one |
 | [`D13.md`](../testing/board-runs/D13.md) | `coral-loader`: block size, end state, retries |
 | [`E25.md`](../testing/board-runs/E25.md) | The gadget backend: identity, control stalls, endpoint bytes, unplug |
 | [`E36.md`](../testing/board-runs/E36.md) | `usb-gadget` served by a caller: control replies, 64 MiB each way, cancel, unbind |

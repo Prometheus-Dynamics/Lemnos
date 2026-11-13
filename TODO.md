@@ -74,7 +74,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 - [ ] **No built-in driver takes a block's registers, interrupt, clocks or resets** from the module
       (`regs:`, `irq:`, `clocks:`, `resets:`). The block drivers built in open their own kernel
       nodes.
-- [ ] **A USB camera needs a board entry.** There is no binding by device class.
 - [ ] **USB**: the gadget has no isochronous endpoints, and `uvc` reads one isochronous transfer
       at a time.
 - [ ] **Frame streams are not on the shared ring** (I2). `lemnosd`'s streams, the client and the

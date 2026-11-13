@@ -28,8 +28,10 @@
 //! device may have changed, so an idle camera that is unplugged is noticed at the hint, or at the
 //! next method without one.
 //!
-//! The driver has to be given a device by the board file, by port or by vendor and product. A
-//! camera that is absent when the service starts is bound when it arrives.
+//! The board file gives it a device by port, by vendor and product, or by class: an `[[each]]`
+//! entry matching `usb:class:0e` binds this driver to every camera plugged in, each under an id of
+//! its own, with no entry per camera (see `docs/boards.md`). A camera that is absent when the
+//! service starts is bound when it arrives.
 //!
 //! Everything from the device is untrusted: see the module docs of [`descriptors`] and
 //! [`payload`]. A frame's identity holds its PTS and source clock reference, see

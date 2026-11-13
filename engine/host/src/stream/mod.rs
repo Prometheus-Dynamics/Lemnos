@@ -25,7 +25,7 @@ mod pool;
 
 use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use lemnos_core::{CallerId, Status};
 use lemnos_wire::ring::{Layout, STATE_CLOSED, WordMemory, heap_words};
@@ -173,32 +173,57 @@ pub struct Lease {
     pub handles: Option<Arc<[OwnedFd]>>,
 }
 
-/// Every declared stream. Built once and never resized.
+/// Every declared stream: those of the board file's devices, and of each device an `[[each]]`
+/// entry makes, added as it is made. None is ever taken away.
 pub(crate) struct Streams {
     allocator: Arc<dyn StreamAllocator>,
-    table: BTreeMap<(u32, String), Arc<Mutex<StreamCore>>>,
+    table: RwLock<Table>,
 }
+
+/// Each stream, by its device's index and its name.
+type Table = BTreeMap<(u32, String), Arc<Mutex<StreamCore>>>;
 
 impl Streams {
     pub(crate) fn new(allocator: Arc<dyn StreamAllocator>, devices: &[DeviceSpec]) -> Self {
-        let mut table = BTreeMap::new();
+        let streams = Self {
+            allocator,
+            table: RwLock::new(BTreeMap::new()),
+        };
         for (index, device) in devices.iter().enumerate() {
-            for (name, spec) in &device.streams {
-                let core = StreamCore::new(spec);
-                table.insert((index as u32, name.clone()), Arc::new(Mutex::new(core)));
-            }
+            streams.add(index as u32, device);
         }
-        Self { allocator, table }
+        streams
     }
 
-    fn core(&self, device: u32, name: &str) -> Option<&Arc<Mutex<StreamCore>>> {
-        self.table.get(&(device, name.to_string()))
+    /// Adds the streams of the device at `index`.
+    pub(crate) fn add(&self, index: u32, device: &DeviceSpec) {
+        let mut table = self.table.write().unwrap_or_else(PoisonError::into_inner);
+        for (name, spec) in &device.streams {
+            let core = StreamCore::new(spec);
+            table.insert((index, name.clone()), Arc::new(Mutex::new(core)));
+        }
+    }
+
+    fn core(&self, device: u32, name: &str) -> Option<Arc<Mutex<StreamCore>>> {
+        self.table
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(device, name.to_string()))
+            .cloned()
+    }
+
+    /// Runs `f` on every stream, under the table's lock. Allocates nothing.
+    fn each(&self, mut f: impl FnMut(&mut StreamCore)) {
+        let table = self.table.read().unwrap_or_else(PoisonError::into_inner);
+        for core in table.values() {
+            f(&mut lock(core));
+        }
     }
 
     /// Takes the producer's end. A stream has one producer at a time.
     pub(crate) fn producer(&self, device: u32, name: &str) -> Result<ProducerEndpoint, Status> {
         let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
-        ProducerEndpoint::claim(Arc::clone(core))
+        ProducerEndpoint::claim(core)
     }
 
     /// Takes the consumer's end, for `caller`, on memory no earlier consumer has seen.
@@ -209,7 +234,7 @@ impl Streams {
         caller: CallerId,
     ) -> Result<Lease, Status> {
         let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
-        let mut core = lock(core);
+        let mut core = lock(&core);
         let layout = core.layout();
         if core.is_attached() {
             return Err(Status::BUSY);
@@ -260,29 +285,27 @@ impl Streams {
     /// Gives up a stream `caller` holds.
     pub(crate) fn detach(&self, device: u32, name: &str, caller: CallerId) -> Result<(), Status> {
         let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
-        lock(core).detach_if(caller)
+        lock(&core).detach_if(caller)
     }
 
     /// Gives up everything `caller` held. Runs however the caller went.
     pub(crate) fn caller_gone(&self, caller: CallerId) {
-        for core in self.table.values() {
-            let _ = lock(core).detach_if(caller);
-        }
+        self.each(|core| {
+            let _ = core.detach_if(caller);
+        });
     }
 
     /// What the board file says the stream's buffers are.
     pub(crate) fn memory(&self, device: u32, name: &str) -> Option<StreamMemory> {
-        self.core(device, name).map(|core| lock(core).memory())
+        self.core(device, name).map(|core| lock(&core).memory())
     }
 
     pub(crate) fn stats(&self, device: u32, name: &str) -> Option<StreamStats> {
-        self.core(device, name).map(|core| lock(core).stats())
+        self.core(device, name).map(|core| lock(&core).stats())
     }
 
     /// Tells every consumer the host is going.
     pub(crate) fn close_all(&self) {
-        for core in self.table.values() {
-            lock(core).detach(STATE_CLOSED);
-        }
+        self.each(|core| core.detach(STATE_CLOSED));
     }
 }

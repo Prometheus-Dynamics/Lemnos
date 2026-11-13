@@ -52,7 +52,7 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `uvc` | `camera.frames/1` | `usb`: a USB device; `frames` stream | Serves its contract. A frame larger than `frame_bytes` is dropped and counted |
+| `uvc` | `camera.frames/1` | `usb`: a USB device; `frames` stream | Serves its contract. A frame larger than `frame_bytes` is dropped and counted. An `[[each]]` entry matching `usb:class:0e` binds it to every camera plugged in |
 | `coral-loader` | no contract | `usb`: a USB device; `firmware`: a file | Runs. Loads the firmware file the board file names over DFU, then resets the device. It never reads the firmware |
 | `usb-gadget` | `usb.function/1` | `function`: `udc:NAME`; optional `data` stream | Serves its contract. A caller serves the endpoints. No isochronous endpoints |
 

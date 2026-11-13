@@ -19,6 +19,7 @@ lemnos-hal = { path = "../../engine/hal", features = ["mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 lemnos-host = { path = "../../engine/host" }
 lemnos-wire = { path = "../../engine/wire" }
+lemnos-sim = { path = "../../backends/sim" }
 
 [package.metadata.lemnos]
 driver = "Uvc"

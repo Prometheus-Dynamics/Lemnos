@@ -10,6 +10,8 @@
 //! - [`blocks`] adds what a driver asks of a hardware block (registers,
 //!   interrupts, DMA, clocks, resets), a frame stream, and USB in both roles.
 //! - [`usb_descriptors`] defines and checks the descriptor set a USB function presents.
+//! - [`usb_match`] reads the board names that say what a USB device is: its vendor and product,
+//!   or its class codes.
 //! - [`raw`] defines claimed GPIO lines and PWM channels ([`raw::RawLine`],
 //!   [`raw::RawPwm`]) and per-transfer SPI settings, for every layer.
 //! - [`ErrorKind`] and [`HalError`] classify failures portably; [`erased`]
@@ -34,6 +36,7 @@ pub mod power;
 pub mod raw;
 pub mod register;
 pub mod usb_descriptors;
+pub mod usb_match;
 
 pub use blocks::{
     Clocks, DmaBuffers, Interrupt, Registers, Reset, StreamEndpoint, Uart, UsbDevice, UsbFunction,

@@ -8,6 +8,7 @@
 //! |---|---|---|
 //! | `usb:1-1.4` | `usb` | that port, a whole device (not an interface or a root hub) |
 //! | `usb:1a2b:3c4d` | `usb` | a whole device with that vendor and product, or with none given |
+//! | `usb:class:CC...` | `usb` | any whole device: an event doesn't carry its interfaces' classes |
 //! | `i2c-N` | `i2c`, `i2c-dev` | the adapter `i2c-N` or its `/dev` node |
 //! | `spidevB.C` | `spidev`, `spi` | the node `spidevB.C`, or the SPI device `spiB.C` behind it |
 //! | `gpiochipN:LINE` | `gpio` | the chip `gpiochipN` |
@@ -24,6 +25,8 @@ use std::time::{Duration, Instant};
 use lemnos_core::{Hint, HintSource};
 
 use super::{DeviceWatchSource, DeviceWatcher, Filter, LinuxPaths, UeventMsg, UeventRef};
+use lemnos_hal::usb_match::UsbPattern;
+
 use crate::usb::UsbName;
 
 /// The devices [`BoardHints`] watches when every name it was given is a USB name.
@@ -265,10 +268,11 @@ fn usb_fits(name: &str, port: Option<&str>, product: Option<(u16, u16)>) -> bool
     };
     match UsbName::parse(name) {
         Some(UsbName::Port(named)) => named == port,
-        Some(UsbName::Id {
+        Some(UsbName::Is(UsbPattern::Id {
             vendor,
             product: id,
-        }) => product.is_none_or(|found| found == (vendor, id)),
+        })) => product.is_none_or(|found| found == (vendor, id)),
+        Some(UsbName::Is(UsbPattern::Class { .. })) => true,
         None => false,
     }
 }
@@ -379,6 +383,27 @@ mod tests {
         assert_eq!(
             hints("remove", "/bus/usb/devices/1-2", &[("SUBSYSTEM", "usb")]),
             ["Changed(\"usb:046D:0825\")", "Changed(\"usb:1a2b:3c4d\")"]
+        );
+    }
+
+    #[test]
+    fn a_class_is_hinted_by_every_whole_device_and_by_nothing_else() {
+        let names = ["usb:class:0e", "usb:class:0e:01:00", "usb:3-1"];
+        let vars = [USB_DEVICE[0], USB_DEVICE[1], ("PRODUCT", "46d/825/12")];
+        assert_eq!(
+            hints_among(&names, "add", "/devices/platform/usb1/1-2", &vars),
+            [
+                "Changed(\"usb:class:0e\")",
+                "Changed(\"usb:class:0e:01:00\")"
+            ]
+        );
+        let usb = [("SUBSYSTEM", "usb")];
+        assert!(hints_among(&names, "add", "/devices/platform/usb1/1-2/1-2:1.0", &usb).is_empty());
+        assert!(hints_among(&names, "add", "/devices/platform/usb1", &usb).is_empty());
+        assert_eq!(
+            BoardHints::filter_for(["usb:class:0e"]),
+            Some(USB),
+            "a class is watched as any USB name is"
         );
     }
 
