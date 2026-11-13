@@ -22,6 +22,14 @@ A dependency is one a configuration must state explicitly: a symbol set by a `de
 `select` is not counted, because a merged fragment does not get it. Symbols with no prompt
 (set only by other symbols) are not reported, since no configuration sets them by hand.
 
+4. The slot-board table ("Slot board: built in"): every row whose must-be-built-in cell starts
+   with `yes` is `=y` in both harness configurations, and the symbols marked "checked by
+   slot-init" are exactly the option names `service/slot-init/src/kernel.rs` gives (its
+   `option:` strings and the `CONFIG_` names in its storage message): one list, checked both ways.
+
+Kernel tree (CI): the slot-board rows marked `yes` are roots too, and each must be `=y` in the
+configuration (`m` is not enough for a slot board).
+
 Exits 1 and says what is wrong; 0 when all hold.
 """
 import os
@@ -40,6 +48,9 @@ DEPS_SECTION = "## Dependencies"
 SYMBOL = re.compile(r"(?<![A-Za-z0-9_])(CONFIG_[A-Z0-9_]+)")
 ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|]+?)\s*\|")
 DEP_ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|]*?)\s*\|\s*$")
+SLOT_SECTION = "## Slot board: built in"
+SLOT_ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
+SLOT_CODE = ROOT / "service" / "slot-init" / "src" / "kernel.rs"
 
 
 # ---- Kconfig: symbols, their dependencies, and the closure ----------------------------------
@@ -303,6 +314,26 @@ def doc_symbols():
     return found
 
 
+def slot_table():
+    """symbol -> its must-be-built-in cell, from the slot-board table."""
+    rows = {}
+    for line in section_text(SLOT_SECTION).splitlines():
+        match = SLOT_ROW.match(line)
+        if match:
+            rows[match.group(1)] = match.group(3).strip()
+    return rows
+
+
+def slot_code_names():
+    """The option names slot-init gives when a piece is absent: its `option:` strings, and the
+    `CONFIG_` names in its storage message."""
+    text = SLOT_CODE.read_text()
+    names = set(re.findall(r'option: "([A-Z0-9_]+)"', text))
+    start = text.index("fn storage_message")
+    names |= set(re.findall(r"CONFIG_([A-Z0-9_]+)", text[start:text.index("}", start)]))
+    return names
+
+
 def fragment(path=HARNESS):
     values = {}
     for line in path.read_text().splitlines():
@@ -316,7 +347,28 @@ def fragment(path=HARNESS):
     return values
 
 
+def slot_checks(problems):
+    slot = slot_table()
+    for name, must in sorted(slot.items()):
+        if must.startswith("yes"):
+            for path in (HARNESS, MODULES_OFF):
+                if fragment(path).get(name) != "y":
+                    problems.append(
+                        f"{name} must be built in for a slot board (the slot-board table) "
+                        f"but {path.relative_to(ROOT)} does not set it to y")
+    if not SLOT_CODE.exists():
+        # slot-init's self-check (kernel.rs) is not on this branch yet: its names are checked once it is.
+        return
+    checked = {name[len("CONFIG_"):] for name, must in slot.items() if "checked by slot-init" in must}
+    code = slot_code_names()
+    for option in sorted(checked - code):
+        problems.append(f"{option} is marked checked by slot-init in {DOC.relative_to(ROOT)} but {SLOT_CODE.relative_to(ROOT)} does not name it")
+    for option in sorted(code - checked):
+        problems.append(f"{SLOT_CODE.relative_to(ROOT)} names {option} but the slot-board table does not mark it checked by slot-init")
+
+
 def plain_checks(problems):
+    slot_checks(problems)
     rows = table()
     for name, where in referenced().items():
         if name not in rows:
@@ -351,6 +403,21 @@ def tree_checks(tree, config_path, arch, problems):
     syms = parse_tree(tree, extra=extra, arch=arch)
     config = read_config(config_path)
     deps = dependency_table()
+    for key, must in slot_table().items():
+        if not must.startswith("yes"):
+            continue
+        bare = key[len("CONFIG_"):]
+        if bare not in syms:
+            problems.append(f"{key} has no Kconfig symbol in {tree}")
+            continue
+        if config.get(bare, "n") != "y":
+            problems.append(f"{key} must be =y for a slot board but {config_path} does not set it")
+            continue
+        for dep in sorted(closure(syms, config, bare)):
+            if dep not in deps.get(key, set()):
+                problems.append(
+                    f"CONFIG_{dep} is unset in {config_path} and is a dependency of {key}, "
+                    f"but is not listed for it in the Dependencies table of {DOC.relative_to(ROOT)}")
     for key, requirement in table().items():
         if requirement != "required":
             continue
