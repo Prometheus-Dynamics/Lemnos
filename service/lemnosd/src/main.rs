@@ -113,10 +113,12 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     // What the board file calls its hardware, for the backend to say which of it comes and goes.
+    // An `[[each]]` entry is told of by its pattern.
     let names: Vec<String> = board_file
         .devices
         .iter()
         .flat_map(|device| device.bus.iter().chain(device.uses.values()))
+        .chain(board_file.each.iter().map(|each| &each.pattern))
         .cloned()
         .collect();
     // Before any thread starts, so that every thread has these signals blocked.

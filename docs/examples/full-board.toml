@@ -151,3 +151,17 @@ config = { isp = "/dev/vvcam-isp.0", mipi = "/dev/vvcam-mipi.0" }
 [devices.streams.frames]
 buffers = 4
 buffer_bytes = 4194304
+
+# `[[each]]`: a device for each resource that fits `match`, here each USB camera plugged in that
+# no device above names, whatever port it is in. Each is named `camera@` and its port.
+[[each]]
+id = "camera"
+driver = "uvc"
+match = "usb:class:0e"
+need = "usb"
+except = ["usb:1-1.3"]           # never this one
+config = { frame_bytes = 1048576 }
+
+[each.streams.frames]
+buffers = 4
+buffer_bytes = 1048576

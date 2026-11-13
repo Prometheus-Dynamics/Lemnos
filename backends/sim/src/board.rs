@@ -10,6 +10,7 @@ use lemnos_hal::mock::{
     MockClocks, MockDma, MockInterrupt, MockLine, MockPwm, MockRawSpi, MockRegisters, MockReset,
     MockStream, MockUart, MockUsbDevice, MockUsbFunction,
 };
+use lemnos_hal::usb_match::{self, ClassCodes, UsbCodes, UsbPattern};
 
 use crate::faults::Release;
 use crate::{FaultScript, Faulty, SimClock, SimHints, SimI2c, SimSpi};
@@ -44,6 +45,9 @@ impl Part {
 struct Parts {
     parts: BTreeMap<String, (Part, FaultScript)>,
     claimed: BTreeSet<String>,
+    /// What each USB device added with [`SimBoard::add_usb_device_as`] says it is: its device
+    /// descriptor's codes and its interfaces' classes.
+    usb: BTreeMap<String, (UsbCodes, Vec<ClassCodes>)>,
 }
 
 /// A simulated board's resources, by the name a board file gives them. Clones
@@ -104,9 +108,30 @@ impl SimBoard {
         self.hints.push(name);
     }
 
+    /// Adds a USB device that says it is `codes`, with the configuration `descriptor`, whose
+    /// interfaces' classes it says too. A board name that says what a device is
+    /// (`usb:VVVV:PPPP`, `usb:class:CC`, see [`lemnos_hal::usb_match`]) finds it by these, and
+    /// [`find`](Provider::find) reports it by `name`.
+    pub fn add_usb_device_as(
+        &self,
+        name: &str,
+        codes: UsbCodes,
+        descriptor: &[u8],
+    ) -> MockUsbDevice {
+        let interfaces = usb_match::interface_classes(descriptor).collect();
+        self.with(|s| s.usb.insert(name.to_string(), (codes, interfaces)));
+        self.add_usb_device(name, descriptor)
+    }
+
     /// Removes a resource, as unplugging a device does. Whoever holds it keeps what they hold.
     pub fn remove(&self, name: &str) {
-        if self.with(|s| s.parts.remove(name)).is_some() {
+        if self
+            .with(|s| {
+                s.usb.remove(name);
+                s.parts.remove(name)
+            })
+            .is_some()
+        {
             self.hints.push(name);
         }
     }
@@ -150,16 +175,16 @@ impl SimBoard {
     }
 
     fn take(&self, name: &str) -> Result<(Part, FaultScript, Release)> {
-        let (part, faults) = self.with(|s| {
-            let (part, faults) = s.parts.get(name).ok_or(Status::NOT_FOUND)?.clone();
-            if part.exclusive() && !s.claimed.insert(name.to_string()) {
+        let (name, part, faults) = self.with(|s| {
+            let name = resolve(s, name)?;
+            let (part, faults) = s.parts.get(&name).ok_or(Status::NOT_FOUND)?.clone();
+            if part.exclusive() && !s.claimed.insert(name.clone()) {
                 return Err(Status::BUSY);
             }
-            Ok((part, faults))
+            Ok((name, part, faults))
         })?;
         let release = if part.exclusive() {
             let board = self.clone();
-            let name = name.to_string();
             Release(Some(Box::new(move || {
                 board.with(|s| s.claimed.remove(&name));
             })))
@@ -172,7 +197,27 @@ impl SimBoard {
 
 impl Provider for SimBoard {
     fn provided(&self, need: &str) -> bool {
-        self.with(|s| s.parts.contains_key(need))
+        self.with(|s| resolve(s, need).is_ok())
+    }
+
+    /// Every resource by its own name, for a name that is one, and for a USB pattern every USB
+    /// device added with [`SimBoard::add_usb_device_as`] that fits it.
+    fn find(&self, pattern: &str, found: &mut dyn FnMut(&str)) -> Result<()> {
+        let names: Vec<String> = self.with(|s| {
+            s.parts
+                .keys()
+                .filter(|name| fits(s, pattern, name))
+                .cloned()
+                .collect()
+        });
+        for name in &names {
+            found(name);
+        }
+        Ok(())
+    }
+
+    fn fits(&self, name: &str, found: &str) -> bool {
+        self.with(|s| s.parts.contains_key(found) && fits(s, name, found))
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
@@ -214,4 +259,35 @@ impl Provider for SimBoard {
         reset -> ResetHandle as Reset;
         stream -> StreamHandle as Stream;
     }
+}
+
+/// Whether the board name `name` reaches the resource `found`: it is its name, or a USB pattern
+/// its codes fit.
+fn fits(parts: &Parts, name: &str, found: &str) -> bool {
+    if name == found {
+        return true;
+    }
+    match (UsbPattern::parse(name), parts.usb.get(found)) {
+        (Some(pattern), Some((codes, interfaces))) => {
+            pattern.fits(codes, interfaces.iter().copied())
+        }
+        _ => false,
+    }
+}
+
+/// The resource a name opens: the one of that name, or the one USB device a USB pattern fits.
+/// `INVALID_ARGUMENT` when a pattern fits more than one, as on Linux.
+fn resolve(parts: &Parts, name: &str) -> Result<String> {
+    if parts.parts.contains_key(name) {
+        return Ok(name.to_string());
+    }
+    if UsbPattern::parse(name).is_none() {
+        return Err(Status::NOT_FOUND);
+    }
+    let mut fitting = parts.usb.keys().filter(|found| fits(parts, name, found));
+    let found = fitting.next().ok_or(Status::NOT_FOUND)?;
+    if fitting.next().is_some() {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    Ok(found.clone())
 }

@@ -12,7 +12,7 @@ use lemnos_core::{
     UsbFunctionHandle,
 };
 
-use crate::board::{BoardError, BoardFile, DeviceSpec, OwnedValue, Owner};
+use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
     HeapAllocator, Lease, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
@@ -208,6 +208,9 @@ struct Slot {
     short_runs: AtomicU32,
     /// A hint has named this running device and its driver has not been ticked since.
     hinted: AtomicBool,
+    /// The `[[each]]` entry that made this device, by its place in the board file, and the name
+    /// of the resource it was made for. `None` for a device of the board file's own.
+    made: Option<(usize, String)>,
 }
 
 const NO_TICK: u64 = u64::MAX;
@@ -217,6 +220,45 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Slot {
+    /// A device as it starts: waiting for its first bind, or off when the board says so.
+    fn new(
+        index: u32,
+        spec: DeviceSpec,
+        entry: Option<DriverEntry>,
+        made: Option<(usize, String)>,
+    ) -> core::result::Result<Self, BoardError> {
+        let state = if spec.disabled {
+            DeviceState::Off(OffReason::Disabled)
+        } else {
+            DeviceState::Backoff {
+                attempts: 0,
+                next_retry_ns: 0,
+                reason: "starting".to_string(),
+            }
+        };
+        Ok(Self {
+            index,
+            lane_key: match &spec.bus {
+                Some(bus) => format!("bus:{bus}"),
+                None => format!("device:{}", spec.id),
+            },
+            config: spec.owned_config()?,
+            entry,
+            spec,
+            instance: Mutex::new(None),
+            state: Mutex::new(state),
+            hung: AtomicBool::new(false),
+            errors: AtomicU32::new(0),
+            missing: Mutex::new(Vec::new()),
+            next_tick_ns: AtomicU64::new(NO_TICK),
+            tried_ns: AtomicU64::new(0),
+            bound_ns: AtomicU64::new(0),
+            short_runs: AtomicU32::new(0),
+            hinted: AtomicBool::new(false),
+            made,
+        })
+    }
+
     fn is_running(&self) -> bool {
         matches!(*lock(&self.state), DeviceState::Running)
     }
@@ -244,8 +286,22 @@ impl Slot {
     }
 }
 
+/// An `[[each]]` entry of the board file, and when to look for what fits it.
+struct Rule {
+    spec: EachSpec,
+    /// A hint named the pattern, or couldn't say what changed, since the last look.
+    hinted: AtomicBool,
+    /// When to look again without a hint.
+    next_look_ns: AtomicU64,
+    /// When the last look was. A hint never brings on another sooner than
+    /// [`Options::hint_gap`] after it.
+    looked_ns: AtomicU64,
+}
+
 struct Inner {
+    /// Devices are only ever added, so a device's index stays its own.
     slots: RwLock<Vec<Arc<Slot>>>,
+    rules: Vec<Rule>,
     lanes: Mutex<HashMap<String, Arc<Lane>>>,
     /// Goes up whenever any device changes state.
     changes: AtomicU64,
@@ -368,6 +424,93 @@ impl Inner {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// When a rule is next due a look: now when a hint named it and the gap since its last look
+    /// has passed.
+    fn rule_due_ns(&self, rule: &Rule) -> u64 {
+        let due = rule.next_look_ns.load(Ordering::Acquire);
+        if rule.hinted.load(Ordering::Acquire) {
+            let gap = self.options.hint_gap.as_nanos() as u64;
+            due.min(rule.looked_ns.load(Ordering::Acquire).saturating_add(gap))
+        } else {
+            due
+        }
+    }
+
+    /// Looks for what fits each `[[each]]` entry that is due, and makes and binds a device for
+    /// each resource found that no device has yet.
+    fn look(&'static self) {
+        let now = self.clock.now_ns();
+        for (at, rule) in self.rules.iter().enumerate() {
+            if self.rule_due_ns(rule) > now {
+                continue;
+            }
+            rule.hinted.store(false, Ordering::Release);
+            rule.looked_ns.store(now, Ordering::Release);
+            let wait = self.options.retry_cap.as_nanos() as u64;
+            rule.next_look_ns
+                .store(now.saturating_add(wait), Ordering::Release);
+            let mut found = Vec::new();
+            {
+                let backend = lock(&self.backend);
+                let listed = backend.find(&rule.spec.pattern, &mut |name| {
+                    found.push(name.to_string());
+                });
+                if listed.is_err() {
+                    continue;
+                }
+                found.sort();
+                found.dedup();
+                found.retain(|name| self.free_for(&**backend, rule, name));
+            }
+            for name in found {
+                self.make(at, rule, name);
+            }
+        }
+    }
+
+    /// Whether `rule` may take the resource `found`: none of its exceptions reaches it, no
+    /// device has it yet, and no device of the board file's own names it.
+    fn free_for(&self, backend: &(dyn Provider + Send), rule: &Rule, found: &str) -> bool {
+        if rule
+            .spec
+            .except
+            .iter()
+            .any(|name| backend.fits(name, found))
+        {
+            return false;
+        }
+        self.all().iter().all(|slot| match &slot.made {
+            Some((_, taken)) => taken != found,
+            None => !slot
+                .spec
+                .bus
+                .iter()
+                .chain(slot.spec.uses.values())
+                .any(|name| backend.fits(name, found)),
+        })
+    }
+
+    /// Makes the device `rule` has for `found`, and binds it.
+    fn make(&'static self, at: usize, rule: &Rule, found: String) {
+        let spec = rule.spec.device(&found);
+        let entry = self.drivers.get(spec.driver.as_str()).copied();
+        let slot = {
+            let mut slots = self.slots.write().unwrap_or_else(PoisonError::into_inner);
+            let index = slots.len() as u32;
+            // The board file was checked, so the entry's config is good.
+            let Ok(slot) = Slot::new(index, spec, entry, Some((at, found))) else {
+                return;
+            };
+            let slot = Arc::new(slot);
+            // Its streams are there before anyone can find the device.
+            self.streams.add(index, &slot.spec);
+            slots.push(Arc::clone(&slot));
+            slot
+        };
+        self.changes.fetch_add(1, Ordering::Release);
+        self.bind(slot);
     }
 
     /// The device stopped working: let go of it and schedule a retry.
@@ -1101,36 +1244,24 @@ impl Host {
             .collect();
         let mut slots = Vec::with_capacity(board.devices.len());
         for (index, spec) in board.devices.iter().enumerate() {
-            let state = if spec.disabled {
-                DeviceState::Off(OffReason::Disabled)
-            } else {
-                DeviceState::Backoff {
-                    attempts: 0,
-                    next_retry_ns: 0,
-                    reason: "starting".to_string(),
-                }
-            };
-            slots.push(Arc::new(Slot {
-                index: index as u32,
-                lane_key: match &spec.bus {
-                    Some(bus) => format!("bus:{bus}"),
-                    None => format!("device:{}", spec.id),
-                },
-                config: spec.owned_config()?,
-                entry: table.get(spec.driver.as_str()).copied(),
-                spec: spec.clone(),
-                instance: Mutex::new(None),
-                state: Mutex::new(state),
-                hung: AtomicBool::new(false),
-                errors: AtomicU32::new(0),
-                missing: Mutex::new(Vec::new()),
-                next_tick_ns: AtomicU64::new(NO_TICK),
-                tried_ns: AtomicU64::new(0),
-                bound_ns: AtomicU64::new(0),
-                short_runs: AtomicU32::new(0),
-                hinted: AtomicBool::new(false),
-            }));
+            let entry = table.get(spec.driver.as_str()).copied();
+            slots.push(Arc::new(Slot::new(
+                index as u32,
+                spec.clone(),
+                entry,
+                None,
+            )?));
         }
+        let rules = board
+            .each
+            .iter()
+            .map(|spec| Rule {
+                spec: spec.clone(),
+                hinted: AtomicBool::new(false),
+                next_look_ns: AtomicU64::new(0),
+                looked_ns: AtomicU64::new(0),
+            })
+            .collect();
 
         let streams = Streams::new(allocator, &board.devices);
 
@@ -1138,6 +1269,7 @@ impl Host {
         // `shutdown` lets every device go.
         let inner: &'static Inner = Box::leak(Box::new(Inner {
             slots: RwLock::new(slots),
+            rules,
             lanes: Mutex::new(HashMap::new()),
             changes: AtomicU64::new(0),
             backend: Mutex::new(backend),
@@ -1157,6 +1289,8 @@ impl Host {
                 inner.bind(Arc::clone(&slots[at]));
             }
         }
+        // After the board's own devices, which keep what they name from every rule.
+        inner.look();
         Ok(host)
     }
 
@@ -1319,6 +1453,7 @@ impl Host {
     /// Retries what is due and rebinds devices whose optional parts have
     /// arrived. Call this regularly.
     pub fn tick(&self) {
+        self.inner.look();
         let now = self.inner.clock.now_ns();
         for slot in self.inner.all() {
             let due = matches!(
@@ -1343,13 +1478,28 @@ impl Host {
     /// sooner than [`Options::hint_gap`] after its last. Callable from any thread. Allocates
     /// nothing.
     pub fn hint(&self, hint: Hint<'_>) {
-        let mut index = 0;
+        // Whatever came may fit an `[[each]]` entry: a backend names what it saw, which can be
+        // a resource the entry's pattern reaches as well as the pattern.
         let mut any = false;
+        for rule in &self.inner.rules {
+            rule.hinted.store(true, Ordering::Release);
+            any = true;
+        }
+        let mut index = 0;
         while let Some(slot) = self.inner.slot(index) {
             index += 1;
+            // A device a rule made is named by the rule's pattern too: the backend may know
+            // only that something under it changed.
+            let by_rule = |name: &str| {
+                slot.made
+                    .as_ref()
+                    .is_some_and(|(at, _)| self.inner.rules[*at].spec.pattern == name)
+            };
             any |= match hint {
                 Hint::Any => self.inner.hinted(&slot),
-                Hint::Changed(name) => slot.names(name) && self.inner.hinted(&slot),
+                Hint::Changed(name) => {
+                    (slot.names(name) || by_rule(name)) && self.inner.hinted(&slot)
+                }
             };
         }
         if any {
@@ -1420,8 +1570,14 @@ impl Host {
         self.inner.options
     }
 
-    /// When the next retry is due, if one is waiting.
+    /// When the next retry is due, if one is waiting, or the next look for what fits an
+    /// `[[each]]` entry: [`Host::tick`] does both.
     pub fn next_retry_ns(&self) -> Option<u64> {
+        let looks = self
+            .inner
+            .rules
+            .iter()
+            .map(|rule| self.inner.rule_due_ns(rule));
         self.inner
             .slots
             .read()
@@ -1431,6 +1587,7 @@ impl Host {
                 DeviceState::Backoff { next_retry_ns, .. } => Some(*next_retry_ns),
                 _ => None,
             })
+            .chain(looks)
             .min()
     }
 

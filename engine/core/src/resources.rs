@@ -117,6 +117,21 @@ pub trait HintSource: Send {
 pub trait Provider {
     /// Whether the board file supplies this need.
     fn provided(&self, need: &str) -> bool;
+    /// Reports each resource that fits `pattern` now, by a name that reaches that one resource
+    /// alone and stays the same for as long as it is wired the way it is (a USB device by its
+    /// port, say). The host binds one device for each, for the board file's `[[each]]` entries.
+    /// What a pattern can say is the backend's, as every name is. `NOT_SUPPORTED`, the default,
+    /// when the backend finds nothing by pattern; `pattern` itself is never reported unless it
+    /// is such a name.
+    fn find(&self, _pattern: &str, _found: &mut dyn FnMut(&str)) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// Whether `name`, any name or pattern a board file uses, reaches `found`, a name
+    /// [`find`](Self::find) reported, now. The host keeps a resource a board entry names by
+    /// any name from every `[[each]]` entry. The default says only that a name reaches itself.
+    fn fits(&self, name: &str, found: &str) -> bool {
+        name == found
+    }
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller>;
 
     fn i2c(&mut self, _need: &str) -> Result<I2c> {

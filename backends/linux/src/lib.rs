@@ -220,10 +220,18 @@ impl Provider for LinuxBoard {
             || exists(self.pwm_node(need).map(|(path, _)| path))
             || self.module_i2c(need).is_some()
             || self.module_spi(need).is_some()
-            || usb::UsbName::parse(need)
-                .is_some_and(|name| usb::locate(&self.dev, &self.sys, name).is_ok())
+            || usb::UsbName::parse(need).is_some_and(|name| usb::locate(&self.sys, name).is_ok())
             || exists(gadget::controller(need).map(|name| self.udc_class().join(name)))
             || self.module_has_block(need)
+    }
+
+    /// USB devices, by their ports: see [`usb`]. Nothing else is found by a pattern.
+    fn find(&self, pattern: &str, found: &mut dyn FnMut(&str)) -> Result<()> {
+        usb::find(&self.sys, pattern, found)
+    }
+
+    fn fits(&self, name: &str, found: &str) -> bool {
+        name == found || usb::fits(&self.sys, name, found)
     }
 
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
@@ -298,7 +306,7 @@ impl Provider for LinuxBoard {
     /// however the device was named.
     fn usb_device(&mut self, need: &str) -> Result<UsbDeviceHandle> {
         let name = usb::UsbName::parse(need).ok_or(Status::NOT_FOUND)?;
-        let id = usb::locate(&self.dev, &self.sys, name)?;
+        let id = usb::locate(&self.sys, name)?;
         let claim = self.claim(&usb::claim_key(id))?;
         Ok(lemnos_core::Held::boxed(Box::new(usb::open(
             &self.dev, &self.sys, id, claim,
@@ -715,6 +723,8 @@ mod tests {
             ("idVendor", vendor.to_string()),
             ("idProduct", product.to_string()),
             ("bDeviceClass", "ef".to_string()),
+            ("bDeviceSubClass", "02".to_string()),
+            ("bDeviceProtocol", "01".to_string()),
             ("speed", "480".to_string()),
         ];
         for (name, value) in attributes {
@@ -730,6 +740,7 @@ mod tests {
 
     #[test]
     fn usb_names_are_a_port_or_a_vendor_and_product() {
+        use lemnos_hal::usb_match::UsbPattern;
         use usb::UsbName;
         assert_eq!(UsbName::parse("usb:1-1"), Some(UsbName::Port("1-1")));
         assert_eq!(
@@ -738,10 +749,18 @@ mod tests {
         );
         assert_eq!(
             UsbName::parse("usb:1A2b:00ff"),
-            Some(UsbName::Id {
+            Some(UsbName::Is(UsbPattern::Id {
                 vendor: 0x1a2b,
                 product: 0x00ff
-            })
+            }))
+        );
+        assert_eq!(
+            UsbName::parse("usb:class:0e:01"),
+            Some(UsbName::Is(UsbPattern::Class {
+                class: 0x0e,
+                subclass: Some(1),
+                protocol: None
+            }))
         );
         let refused = [
             "usb:",
@@ -759,6 +778,8 @@ mod tests {
             "usb:1a2b:3c4d5",
             "usb:+a2b:3c4d",
             "usb:1a2b:3c4d:1",
+            "usb:class:e",
+            "usb:class:0e:01:00:00",
             "1-1",
             "ttyUSB0",
         ];
@@ -812,6 +833,90 @@ mod tests {
             board.usb_device("usb:2-1.3").map(|_| ()).unwrap_err(),
             Status::NO_DEVICE
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A sysfs entry for an interface of the device on `port`, as the kernel lists it beside
+    /// the device.
+    fn interface(dir: &Path, port: &str, number: u8, class: &str, subclass: &str) {
+        let entry = dir
+            .join("bus/usb/devices")
+            .join(format!("{port}:1.{number}"));
+        std::fs::create_dir_all(&entry).unwrap();
+        for (name, value) in [
+            ("bInterfaceClass", class),
+            ("bInterfaceSubClass", subclass),
+            ("bInterfaceProtocol", "00"),
+        ] {
+            std::fs::write(entry.join(name), format!("{value}\n")).unwrap();
+        }
+    }
+
+    fn found(board: &LinuxBoard, pattern: &str) -> core::result::Result<Vec<String>, Status> {
+        let mut names = Vec::new();
+        board.find(pattern, &mut |name| names.push(name.to_string()))?;
+        Ok(names)
+    }
+
+    #[test]
+    fn a_usb_class_finds_every_device_with_it_by_port() {
+        let (board, dir) = temp_board("usb-class");
+        assert_eq!(found(&board, "usb:class:0e").unwrap(), Vec::<String>::new());
+        // Two cameras alike and a disk, the cameras' class only on their interfaces.
+        plug(&dir, "1-4", 1, 7, "1a2b", "3c4d");
+        interface(&dir, "1-4", 0, "0e", "01");
+        interface(&dir, "1-4", 1, "0e", "02");
+        plug(&dir, "2-1.3", 2, 12, "1a2b", "3c4d");
+        interface(&dir, "2-1.3", 0, "0e", "01");
+        interface(&dir, "2-1.3", 1, "0e", "02");
+        plug(&dir, "1-2", 1, 3, "0001", "0002");
+        interface(&dir, "1-2", 0, "08", "06");
+        // A root hub is not plugged in.
+        std::fs::create_dir_all(dir.join("bus/usb/devices/usb1")).unwrap();
+
+        assert_eq!(
+            found(&board, "usb:class:0e").unwrap(),
+            ["usb:1-4", "usb:2-1.3"]
+        );
+        assert_eq!(
+            found(&board, "usb:class:0e:02:00").unwrap(),
+            ["usb:1-4", "usb:2-1.3"]
+        );
+        assert_eq!(found(&board, "usb:class:08").unwrap(), ["usb:1-2"]);
+        assert_eq!(found(&board, "usb:class:ef:02:01").unwrap().len(), 3);
+        assert_eq!(
+            found(&board, "usb:1a2b:3c4d").unwrap(),
+            ["usb:1-4", "usb:2-1.3"]
+        );
+        assert_eq!(found(&board, "usb:2-1.3").unwrap(), ["usb:2-1.3"]);
+        assert_eq!(found(&board, "usb:9-9").unwrap(), Vec::<String>::new());
+        assert_eq!(found(&board, "i2c-1"), Err(Status::NOT_SUPPORTED));
+
+        // Which names reach which device, now.
+        assert!(board.fits("usb:1-4", "usb:1-4"));
+        assert!(board.fits("usb:1a2b:3c4d", "usb:1-4"));
+        assert!(board.fits("usb:class:0e:01", "usb:2-1.3"));
+        assert!(!board.fits("usb:class:0e", "usb:1-2"));
+        assert!(!board.fits("usb:1-4", "usb:2-1.3"));
+        assert!(!board.fits("i2c-1", "usb:1-4"));
+        assert!(!board.fits("usb:class:0e", "usb:9-9"));
+
+        // A name that says what a device is opens it only when one device alone fits.
+        assert!(board.provided("usb:class:08"));
+        assert!(!board.provided("usb:class:0e"));
+        assert!(!board.provided("usb:class:03"));
+        let mut board = board;
+        assert_eq!(
+            board.usb_device("usb:class:0e").map(|_| ()).unwrap_err(),
+            Status::INVALID_ARGUMENT
+        );
+        assert_eq!(
+            board.usb_device("usb:class:03").map(|_| ()).unwrap_err(),
+            Status::NO_DEVICE
+        );
+        let mut disk = board.usb_device("usb:class:08:06").map_err(|_| ()).unwrap();
+        let mut config = [0u8; 16];
+        assert_eq!(disk.config_descriptor(0, &mut config), Ok(9));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

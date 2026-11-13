@@ -355,3 +355,63 @@ fn with_hints_an_idle_camera_is_dropped_when_it_leaves_and_back_as_soon_as_it_re
     rig.assert_taken(&second);
     assert_eq!(rig.counters(), Ok(Counters::default()));
 }
+
+/// What a camera says it is in its device descriptor: its class is given per interface.
+fn camera_codes(product: u16) -> lemnos_hal::usb_match::UsbCodes {
+    lemnos_hal::usb_match::UsbCodes {
+        vendor: 0x1a2b,
+        product,
+        class: 0xef,
+        subclass: 2,
+        protocol: 1,
+    }
+}
+
+#[test]
+fn every_camera_plugged_in_binds_by_its_class_with_no_entry_of_its_own() {
+    use lemnos_sim::SimBoard;
+
+    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"uvc\"\n\
+                [[each]]\nid = \"camera\"\ndriver = \"uvc\"\nmatch = \"usb:class:0e\"\n\
+                need = \"usb\"\nconfig = { frame_bytes = 4096 }\n\
+                [each.streams.frames]\nbuffers = 4\nbuffer_bytes = 4096\n";
+    let board = SimBoard::new();
+    let clock = board.clock();
+    clock.advance(Duration::from_secs(1));
+    let webcam = fixture::webcam().bytes;
+    let first = board.add_usb_device_as("usb:1-4", camera_codes(1), &webcam);
+    let host = Host::start(
+        &parse(text).unwrap(),
+        &[entry::<Uvc>()],
+        Box::new(board.clone()),
+        Arc::new(clock.clone()),
+        Options::default(),
+    )
+    .unwrap();
+    // A second camera of the same make, plugged in later, and a hint that something came.
+    let second = board.add_usb_device_as("usb:3-1.2", camera_codes(1), &webcam);
+    board.hints().drain(|hint| host.hint(hint));
+    clock.advance(Options::default().hint_gap);
+    for _ in 0..16 {
+        host.tick();
+    }
+
+    let ids: Vec<String> = host.devices().into_iter().map(|d| d.id).collect();
+    assert_eq!(ids, ["camera@usb:1-4", "camera@usb:3-1.2"]);
+    let format_count = MethodId {
+        contract: 0,
+        method: 1,
+    };
+    for (device, mock) in host.devices().iter().zip([&first, &second]) {
+        assert_eq!(device.state, DeviceState::Running, "{}", device.id);
+        assert_eq!(device.health, Health::Ok, "{}", device.id);
+        // Each driver read its own camera and took its video interfaces from the host's driver.
+        let mut reply = [0u8; 8];
+        let n = host
+            .call(device.index, format_count, &[], &mut reply)
+            .unwrap();
+        assert_eq!(u16::decode(&mut Reader::new(&reply[..n])), Ok(6));
+        assert_eq!(mock.claimed(), [CONTROL_INTERFACE, STREAM_INTERFACE]);
+        assert!(host.stream_stats(device.index, "frames").is_some());
+    }
+}

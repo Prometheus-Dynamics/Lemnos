@@ -30,6 +30,7 @@ At the top:
 | `[board]` `id` | The board's name. The daemon gives it to clients as its own name |
 | `[host]` | How the host treats every driver (below). Optional |
 | `[[devices]]` | One table per device, in any order |
+| `[[each]]` | One table per kind of hardware that gets a device of its own wherever it is found. See [One device for each that fits](#one-device-for-each-that-fits) |
 
 In a device:
 
@@ -104,6 +105,7 @@ On Linux (`lemnosd` with no `--sim`):
 | `ttyNAME` | A serial port, such as `ttyAMA0`. No built-in driver takes one yet; a package can |
 | `usb:BUS-PORT` | The USB device plugged into a port, such as `usb:1-1.4` |
 | `usb:VVVV:PPPP` | The USB device with this vendor and product, in hex. Refused when more than one fits |
+| `usb:class:CC`, `usb:class:CC:SS`, `usb:class:CC:SS:PP` | The USB device whose device descriptor or one of whose interfaces has this class, subclass and protocol, two hex digits each. A part left out fits any. Refused when more than one fits |
 | `udc:NAME` | This board as a USB device, through the controller of that name under `/sys/class/udc` |
 | `dma:BLOCK` | DMA memory for a block bound to the kernel module, by the block's device name |
 | `regs:BLOCK` or `regs:BLOCK/N` | Register region `N` (0 when left out) of a block bound to the module, mapped |
@@ -125,6 +127,49 @@ refused when the device binds. Each is held by one device at a time.
 On the simulated board (`lemnosd --sim`) there are no buses. A device that needs one is listed as
 `retrying`. Tests that need a simulated bus build a `SimBoard` in code and add named resources to
 it. On a microcontroller the names are whatever the firmware calls its buses.
+
+## One device for each that fits
+
+A device entry names one piece of hardware. An `[[each]]` entry names a kind: the host makes a
+device for each resource the backend finds that fits its `match`, when it starts and whenever
+more comes. A USB camera plugged into any port then gets its driver with no entry of its own:
+
+```toml
+[[each]]
+id = "camera"
+driver = "uvc"
+match = "usb:class:0e"
+need = "usb"
+config = { frame_bytes = 1048576 }
+
+[each.streams.frames]
+buffers = 4
+buffer_bytes = 1048576
+```
+
+| Key | Meaning |
+|---|---|
+| `id` | The entry's name. Each device it makes is `ID@RESOURCE`, such as `camera@usb:1-1.4` |
+| `driver` | The driver of each device it makes |
+| `match` | What a resource must fit, as a [resource name](#resource-names) says it. On Linux a USB name: `usb:class:...` or `usb:VVVV:PPPP`, which here may fit any number of devices |
+| `need` | The need the resource found fills. Left out, it is the device's `bus` |
+| `except` | A list of names. A resource any of them reaches is never taken by this entry |
+| `uses`, `config`, `owner`, `auto_off_after`, `[each.streams.NAME]` | As in a device, for each device made |
+
+A resource is found by a name that stays the same for as long as it is wired the same way. On
+Linux that is the USB port (`usb:1-1.4`). So the device made for it keeps its id, and its index,
+when it leaves and comes back to the same port, and two cameras alike are two devices with ids
+of their own. A device whose hardware left stays listed, retrying, as any device does; it is not
+taken away while the service runs.
+
+What a board entry names is its own. A resource that a `[[devices]]` entry names by any name
+(its port, its vendor and product, a class that fits it alone) is never taken by an `[[each]]`
+entry, so a device entry pins one device to settings of its own, and a device entry with
+`disabled = true` keeps one from being bound at all. A resource is taken by one `[[each]]` entry
+only: the first in the file that fits it.
+
+The host looks again whenever the backend hints that hardware came or went, and every retry cap
+(8 s unless `[host]` sets it) without a hint. On the simulated board nothing is found.
 
 ## A board that runs with no hardware
 
@@ -334,6 +379,20 @@ config = { isp = "/dev/vvcam-isp.0", mipi = "/dev/vvcam-mipi.0" }
 [devices.streams.frames]
 buffers = 4
 buffer_bytes = 4194304
+
+# `[[each]]`: a device for each resource that fits `match`, here each USB camera plugged in that
+# no device above names, whatever port it is in. Each is named `camera@` and its port.
+[[each]]
+id = "camera"
+driver = "uvc"
+match = "usb:class:0e"
+need = "usb"
+except = ["usb:1-1.3"]           # never this one
+config = { frame_bytes = 1048576 }
+
+[each.streams.frames]
+buffers = 4
+buffer_bytes = 1048576
 ```
 
 The simulated board accepts it. Devices whose buses it does not have are listed as retrying:

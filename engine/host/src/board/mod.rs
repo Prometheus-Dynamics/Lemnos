@@ -45,6 +45,12 @@ pub enum BoardError {
         "device {0:?} auto_off_after: at least 1, the attempts in a row before it is turned off"
     )]
     AutoOff(String),
+    #[error("id {0:?} has an `@`, which only the ids of devices an `[[each]]` entry makes have")]
+    At(String),
+    #[error("each {0:?}: `match` is empty")]
+    EmptyMatch(String),
+    #[error("each {0:?}: need {1:?} is named twice, by `need` and in `uses` or `streams`")]
+    NeedTwice(String, String),
 }
 
 /// The longest `call_deadline_ms` a board file may set.
@@ -274,6 +280,76 @@ pub struct DeviceSpec {
     pub auto_off_after: Option<u32>,
 }
 
+/// One device for each resource the backend finds that fits a pattern: a USB camera of any make
+/// plugged into any port, say. The host looks when it starts, when a backend hints that
+/// something under the pattern came or went, and every retry cap without a hint.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EachSpec {
+    /// The devices made are named `ID@RESOURCE`, after the name the backend found the resource
+    /// by, so a device keeps its id for as long as its hardware is wired the same way.
+    pub id: String,
+    pub driver: String,
+    /// The pattern, in the backend's terms, as any resource name is.
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// The need the resource found fills. Left out, it is the device's `bus`.
+    #[serde(default)]
+    pub need: Option<String>,
+    /// Names and patterns this entry never takes a resource by.
+    #[serde(default)]
+    pub except: Vec<String>,
+    /// Other needs, as a device's `uses`.
+    #[serde(default)]
+    pub uses: BTreeMap<String, String>,
+    #[serde(default)]
+    pub config: toml::Table,
+    #[serde(default)]
+    pub owner: Owner,
+    /// The streams each device made offers.
+    #[serde(default)]
+    pub streams: BTreeMap<String, StreamSpec>,
+    /// As in a device, for each device made.
+    #[serde(default)]
+    pub auto_off_after: Option<u32>,
+}
+
+/// What joins an `[[each]]` entry's id to the resource a device of it was made for.
+pub const EACH_SEPARATOR: char = '@';
+
+impl EachSpec {
+    /// The id of the device made for the resource `found`.
+    #[must_use]
+    pub fn device_id(&self, found: &str) -> String {
+        format!("{}{EACH_SEPARATOR}{found}", self.id)
+    }
+
+    /// The board entry of the device made for the resource `found`.
+    #[must_use]
+    pub fn device(&self, found: &str) -> DeviceSpec {
+        let mut uses = self.uses.clone();
+        let bus = match &self.need {
+            Some(need) => {
+                uses.insert(need.clone(), found.to_string());
+                None
+            }
+            None => Some(found.to_string()),
+        };
+        DeviceSpec {
+            id: self.device_id(found),
+            driver: self.driver.clone(),
+            bus,
+            uses,
+            link: None,
+            config: self.config.clone(),
+            disabled: false,
+            owner: self.owner,
+            streams: self.streams.clone(),
+            auto_off_after: self.auto_off_after,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BoardFile {
@@ -285,6 +361,9 @@ pub struct BoardFile {
     pub host: HostSpec,
     #[serde(default)]
     pub devices: Vec<DeviceSpec>,
+    /// Devices made for whatever the backend finds that fits.
+    #[serde(default)]
+    pub each: Vec<EachSpec>,
 }
 
 /// A config value the host owns.
@@ -340,6 +419,9 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
         if !seen.insert(device.id.as_str()) {
             return Err(BoardError::Duplicate(device.id.clone()));
         }
+        if device.id.contains(EACH_SEPARATOR) {
+            return Err(BoardError::At(device.id.clone()));
+        }
         if device.uses.values().any(|used| *used == device.id) {
             return Err(BoardError::SelfUse(device.id.clone()));
         }
@@ -347,14 +429,44 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
             return Err(BoardError::AutoOff(device.id.clone()));
         }
         device.owned_config()?;
-        for (name, stream) in &device.streams {
-            if stream.checked_layout().is_none() {
-                return Err(BoardError::Stream(device.id.clone(), name.clone()));
-            }
-            stream.check_memory(&device.id, name)?;
+        check_streams(&device.id, &device.streams)?;
+    }
+    let mut rules = BTreeSet::new();
+    for each in &board.each {
+        if !rules.insert(each.id.as_str()) {
+            return Err(BoardError::Duplicate(each.id.clone()));
         }
+        if each.id.contains(EACH_SEPARATOR) {
+            return Err(BoardError::At(each.id.clone()));
+        }
+        if each.pattern.is_empty() {
+            return Err(BoardError::EmptyMatch(each.id.clone()));
+        }
+        if each.auto_off_after == Some(0) {
+            return Err(BoardError::AutoOff(each.id.clone()));
+        }
+        if let Some(need) = &each.need
+            && (each.uses.contains_key(need) || each.streams.contains_key(need))
+        {
+            return Err(BoardError::NeedTwice(each.id.clone(), need.clone()));
+        }
+        // Checked as the entry of a device made for it would be.
+        let mut device = each.device(&each.pattern);
+        device.id.clone_from(&each.id);
+        device.owned_config()?;
+        check_streams(&each.id, &each.streams)?;
     }
     Ok(board)
+}
+
+fn check_streams(id: &str, streams: &BTreeMap<String, StreamSpec>) -> Result<(), BoardError> {
+    for (name, stream) in streams {
+        if stream.checked_layout().is_none() {
+            return Err(BoardError::Stream(id.to_string(), name.clone()));
+        }
+        stream.check_memory(id, name)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -570,6 +682,93 @@ mod tests {
         let error = device("owner = \"guest\"\n").unwrap_err();
         assert!(error.to_string().contains("guest"), "{error}");
         assert!(error.to_string().contains("owner"), "{error}");
+    }
+
+    const CAMERA: &str = r#"
+        [[each]]
+        id = "camera"
+        driver = "uvc"
+        match = "usb:class:0e"
+        need = "usb"
+        except = ["usb:1-1.3"]
+        uses = { light = "lamp" }
+        config = { frame_bytes = 4096 }
+        [each.streams.frames]
+        buffers = 4
+        buffer_bytes = 4096
+        "#;
+
+    #[test]
+    fn an_each_entry_parses_and_makes_a_device_per_resource() {
+        let board = with(CAMERA).unwrap();
+        let each = &board.each[0];
+        assert_eq!(each.pattern, "usb:class:0e");
+        assert_eq!(each.except, ["usb:1-1.3"]);
+        let device = each.device("usb:1-1.4");
+        assert_eq!(device.id, "camera@usb:1-1.4");
+        assert_eq!(device.driver, "uvc");
+        assert_eq!(device.bus, None);
+        assert_eq!(device.uses["usb"], "usb:1-1.4");
+        assert_eq!(device.uses["light"], "lamp");
+        assert_eq!(device.streams["frames"].buffers, 4);
+        assert_eq!(
+            device.owned_config().unwrap(),
+            [("frame_bytes".to_string(), OwnedValue::Int(4096))]
+        );
+    }
+
+    #[test]
+    fn an_each_entry_without_a_need_gives_the_resource_as_the_bus() {
+        let board = with("[[each]]\nid = \"c\"\ndriver = \"x\"\nmatch = \"p\"\n").unwrap();
+        let device = board.each[0].device("r");
+        assert_eq!(device.bus.as_deref(), Some("r"));
+        assert!(device.uses.is_empty());
+    }
+
+    #[test]
+    fn an_each_entry_is_checked_as_a_device_is() {
+        let entry = |extra: &str| {
+            with(&format!(
+                "[[each]]\nid = \"c\"\ndriver = \"x\"\nmatch = \"p\"\n{extra}"
+            ))
+        };
+        let error = entry("matches = 1\n").unwrap_err();
+        assert!(error.to_string().contains("matches"), "{error}");
+        assert_eq!(
+            entry("config = { list = [1] }\n"),
+            Err(BoardError::Config("c".to_string(), "list".to_string()))
+        );
+        assert_eq!(
+            entry("[each.streams.out]\nbuffers = 0\nbuffer_bytes = 1\n"),
+            Err(BoardError::Stream("c".to_string(), "out".to_string()))
+        );
+        assert_eq!(
+            entry("need = \"usb\"\nuses = { usb = \"a\" }\n"),
+            Err(BoardError::NeedTwice("c".to_string(), "usb".to_string()))
+        );
+        assert_eq!(
+            with("[[each]]\nid = \"c\"\ndriver = \"x\"\nmatch = \"\"\n"),
+            Err(BoardError::EmptyMatch("c".to_string()))
+        );
+        let error = with("[[each]]\nid = \"c\"\ndriver = \"x\"\n").unwrap_err();
+        assert!(error.to_string().contains("match"), "{error}");
+        let twice = "[[each]]\nid = \"c\"\ndriver = \"x\"\nmatch = \"p\"\n";
+        assert_eq!(
+            with(&format!("{twice}{twice}")),
+            Err(BoardError::Duplicate("c".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_at_is_only_for_devices_an_each_entry_makes() {
+        assert_eq!(
+            with("[[devices]]\nid = \"a@b\"\ndriver = \"x\"\n"),
+            Err(BoardError::At("a@b".to_string()))
+        );
+        assert_eq!(
+            with("[[each]]\nid = \"a@b\"\ndriver = \"x\"\nmatch = \"p\"\n"),
+            Err(BoardError::At("a@b".to_string()))
+        );
     }
 
     #[test]
