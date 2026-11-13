@@ -43,6 +43,12 @@ the kernel module (`lemnos_pio.c`, `lemnos_rp1_csi2.c`, `lemnos_pisp_fe.c`), the
 `pisp` drivers and the Linux backend, each with a test that fails without it. The second run (PR
 F2b) also gave the PIO I2C bus a module route.
 
+## The second board run, the raw camera path (2026-11-13)
+
+| Check | Result |
+|---|---|
+| [`F2e.md`](../testing/board-runs/F2e.md) | The 9000-frame raw run at 114.802 fps with no gaps or drops, as root and as the `lemnos` user with the three device nodes it needs; the sensor's six modes select; the LED ring's pixel order not decided; a client that stops with an error leaves the sensor started (found, not fixed) |
+
 ## What has been shown, and how
 
 | What | Shown by | Not shown |
