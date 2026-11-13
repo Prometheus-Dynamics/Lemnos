@@ -169,9 +169,12 @@ struct lem_stream_producer {
 
 /* The stream open as `file`, if it was created on `dev`; an ERR_PTR otherwise. */
 struct lem_stream *lem_stream_from_file(struct file *file, struct device *dev);
-/* One producer per stream. `bytes` is what it may write per buffer. */
-int lem_stream_attach(struct lem_stream *s, const struct lem_stream_producer *producer, u32 stride,
-		      u32 height, u32 bytes);
+/*
+ * One producer per stream. `bytes` is what it may write per buffer. The stream
+ * knows bytes only: a producer whose frames are lines or planes checks that
+ * they fit in `bytes` itself, before attaching.
+ */
+int lem_stream_attach(struct lem_stream *s, const struct lem_stream_producer *producer, u32 bytes);
 /* Removes the producer; true when it was there and this call took it off. */
 bool lem_stream_detach(struct lem_stream *s);
 /* The next frame's buffer, any context: 0, or -ENOBUFS when none is free. */

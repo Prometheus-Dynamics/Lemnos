@@ -6,8 +6,9 @@
 //!   errno, and the codes below [`Status::LEMNOS_BASE`] are this crate's.
 //! - [`Handle`]: a generation-counted `u64`; 0 is null. [`Slab`] (feature
 //!   `alloc`) hands them out and refuses stale ones.
-//! - [`BufferDesc`] and [`FenceDesc`]: a dma-buf frame and a fence, by file
-//!   descriptor.
+//! - [`BufferDesc`] and [`FenceDesc`]: a buffer's memory and a fence, by file
+//!   descriptor. A buffer is bytes at a place; what they mean is not this
+//!   crate's business.
 //! - [`MessageSink`]: a C callback that takes a message, such as an error's
 //!   text.
 //! - [`AbiVersion`]: the handshake, with a hash of the layouts above.
@@ -53,7 +54,7 @@ mod slab;
 mod status;
 mod version;
 
-pub use desc::{BufferDesc, FenceDesc, MAX_PLANES, PlaneDesc};
+pub use desc::{BufferDesc, FenceDesc};
 pub use features::Features;
 #[cfg(feature = "std")]
 pub use guard::{guard, guard_or};

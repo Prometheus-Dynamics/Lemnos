@@ -23,7 +23,7 @@ extern "C" {
 /* The version of these types (lemnos_abi::VERSION), not of any surface. */
 #define LEMNOS_ABI_TYPES_MAJOR 1
 #define LEMNOS_ABI_TYPES_MINOR 0
-#define LEMNOS_ABI_TYPES_LAYOUT_HASH 0xa02cfb4a8dd4545bULL
+#define LEMNOS_ABI_TYPES_LAYOUT_HASH 0xc1a33afa27dd77e3ULL
 
 /*
  * Status codes (lemnos_abi::Status), an int32_t: 0 success, -1 to -4095 a
@@ -61,31 +61,20 @@ typedef struct LemnosMessageSink {
 
 #define LEMNOS_NO_SINK ((LemnosMessageSink){ NULL, NULL })
 
-/* One memory plane of a buffer; fd -1 for a plane not used. */
-#define LEMNOS_MAX_PLANES 4
-typedef struct LemnosPlaneDesc {
-    int32_t fd;
-    uint32_t reserved;
-    uint64_t offset;
-    uint64_t stride;
-    uint64_t size;
-} LemnosPlaneDesc;
-
 /*
- * A buffer by dma-buf: an image (DRM fourcc and modifier) or bytes (fourcc 0,
- * one plane). The descriptors are borrowed for the call unless
- * LEMNOS_BUFFER_OWNED is set, when the receiver closes them.
+ * Where a buffer's bytes are: size bytes at offset in the dma-buf fd. A memory
+ * location and nothing else: what the bytes are is the business of the
+ * contract that uses them. The descriptor is borrowed for the call unless
+ * LEMNOS_BUFFER_OWNED is set, when the receiver closes it.
  */
 #define LEMNOS_BUFFER_OWNED (1u << 0)
 typedef struct LemnosBufferDesc {
     uint32_t struct_size;
     uint32_t flags;
-    uint32_t width;
-    uint32_t height;
-    uint32_t fourcc;
-    uint32_t plane_count;
-    uint64_t modifier;
-    LemnosPlaneDesc planes[LEMNOS_MAX_PLANES];
+    int32_t fd;
+    uint32_t reserved;
+    uint64_t offset;
+    uint64_t size;
 } LemnosBufferDesc;
 
 /* A fence by file descriptor; ownership as for a buffer. */

@@ -242,6 +242,7 @@ pub struct FrameSlot {
     pub sequence: u64,
     /// Means something only to the producer and the consumer.
     pub identity: u64,
+    /// `CLOCK_MONOTONIC` nanoseconds on Linux. Carried, never read.
     pub timestamp_ns: u64,
     /// What the consumer hands back with the buffer.
     pub fence: u32,

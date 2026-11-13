@@ -28,6 +28,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../lemnos.h"
@@ -63,8 +64,17 @@ struct stream {
 
 struct frame {
 	uint32_t buffer, bytes, fence;
-	uint64_t sequence, identity;
+	uint64_t sequence, identity, timestamp_ns;
 };
+
+/* CLOCK_MONOTONIC now, in nanoseconds: the clock frame timestamps are on. */
+static uint64_t monotonic_ns(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
 
 static uint64_t load(const struct stream *s, size_t at)
 {
@@ -202,6 +212,7 @@ static int pop_frame(struct stream *s, struct frame *f)
 	f->bytes = (uint32_t)(pair >> 32);
 	f->sequence = load(s, at + 1);
 	f->identity = load(s, at + 2);
+	f->timestamp_ns = load(s, at + 3);
 	f->fence = (uint32_t)load(s, at + 4);
 	s->frames_tail++;
 	store(s, LEMNOS_RING_FRAMES_TAIL, s->frames_tail);
@@ -529,9 +540,18 @@ static void test_with_frames(int ctl, uint32_t block, int pool, uint8_t *pool_cp
 	struct pollfd p = { .fd = s.fd, .events = POLLIN };
 
 	CHECK(poll(&p, 1, 0) == 0, "poll: nothing waiting yet");
+	uint64_t before = monotonic_ns(), last = before;
+
 	CHECK(!run_source(&s, 0, 8), "test source: 8 frames");
 	for (uint32_t n = 0; n < 8; n++) {
 		CHECK(wait_frame(&s, &f, 5000), "frame %u arrived", n);
+		uint64_t after = monotonic_ns();
+
+		CHECK(f.timestamp_ns >= last && f.timestamp_ns <= after,
+		      "frame %u stamped on CLOCK_MONOTONIC: %llu in [%llu, %llu]", n,
+		      (unsigned long long)f.timestamp_ns, (unsigned long long)last,
+		      (unsigned long long)after);
+		last = f.timestamp_ns > last ? f.timestamp_ns : last;
 		const uint64_t *w = (const uint64_t *)(pool_cpu + (uint64_t)f.buffer * STRIDE);
 
 		CHECK(f.sequence == n && f.bytes == BUFFER_BYTES && f.buffer < BUFFERS &&

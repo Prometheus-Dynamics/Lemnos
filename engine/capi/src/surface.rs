@@ -91,7 +91,7 @@ pub const LAYOUT: u64 = layout_hash(&[
 
 /// `LEMNOS_LAYOUT_HASH` in `include/lemnos.h`. The layouts it hashes hold no
 /// pointers, so it is the same on every target.
-const HEADER_LAYOUT_HASH: u64 = 0xb28f148893bc3412;
+const HEADER_LAYOUT_HASH: u64 = 0x8729_8e01_dabc_373f;
 const _: () = assert!(
     LAYOUT == HEADER_LAYOUT_HASH,
     "update LEMNOS_LAYOUT_HASH in lemnos.h"

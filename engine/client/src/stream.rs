@@ -114,6 +114,8 @@ impl HeldFrame {
         self.identity
     }
 
+    /// When the frame was made: nanoseconds on `CLOCK_MONOTONIC` on Linux, the clock of
+    /// `clock_gettime(CLOCK_MONOTONIC)`. 0 when the producer had no time for it.
     #[must_use]
     pub const fn timestamp_ns(&self) -> u64 {
         self.timestamp_ns

@@ -50,7 +50,7 @@ extern "C" {
  * built for that target (lemnos_abi::package::PACKAGE_LAYOUT_HASH).
  */
 #if UINTPTR_MAX == 0xffffffffffffffffULL
-#define LEMNOS_PACKAGE_LAYOUT_HASH 0x171f8780472f4930ULL
+#define LEMNOS_PACKAGE_LAYOUT_HASH 0x4391f834b6603755ULL
 #endif
 
 /* The first field of a descriptor: the bytes "LEMNOSPK". */

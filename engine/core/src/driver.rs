@@ -176,6 +176,8 @@ pub trait Lifecycle: Sized {
 /// Time as the host sees it, supplied by the backend so a simulated board can
 /// run on simulated time.
 pub trait HostClock: Send + Sync {
-    /// Nanoseconds since an arbitrary fixed point. Never goes backwards.
+    /// Nanoseconds on the platform's monotonic clock: `CLOCK_MONOTONIC` on Linux, which is
+    /// the clock every stream frame, value, interrupt and edge time is on there. Never goes
+    /// backwards.
     fn now_ns(&self) -> u64;
 }
