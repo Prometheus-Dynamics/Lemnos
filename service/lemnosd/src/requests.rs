@@ -10,8 +10,8 @@ use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::{
     CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
-    PLANE_LENGTH_BYTES, Tail, VERSION, WireError, decode, encode_description, feature,
-    handle_descriptors, package_mode,
+    PLANE_LENGTH_BYTES, REPLY_OVERHEAD, Tail, VERSION, WireError, decode, encode_description,
+    feature, handle_descriptors, package_mode,
 };
 
 use crate::Core;
@@ -23,9 +23,6 @@ use crate::readers::Point;
 const BUFFER_START: usize = 16 * 1024;
 const DESCRIPTION_MAX: usize = 64 * 1024;
 const REPLY_START: usize = 4 * 1024;
-/// Header and fields a Reply adds around its bytes.
-const REPLY_OVERHEAD: usize = 32;
-
 /// Whether the connection should carry on.
 type Keep = bool;
 

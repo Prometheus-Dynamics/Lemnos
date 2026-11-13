@@ -25,13 +25,20 @@ use std::time::Duration;
 use lemnos_client::{Client, Error, JobEvent};
 use lemnos_core::{ItemKind, Status};
 use lemnos_wire::OwnedShape;
-use lemnos_wire::text::{encode_args, find_item, find_method, method_of, render_reply};
+use lemnos_wire::text::{
+    Call, encode_call_within, find_item, find_method, method_of, render_reply, too_small,
+};
 use orion::actions::Outcome;
 
 use crate::{LEMNOSD_CALLS_NAME, Shared};
 
 /// The largest reply read, as `lemnos-ctl` reads it.
 const REPLY_MAX: usize = 64 * 1024;
+/// The most reply an action's output carries. Orion's client and comm core take frames of 64 KiB
+/// (`client/connect` `Options::max_frame`, `comm/server` `Limits::max_frame`), and the action result
+/// frame also carries the call, the outcome and the detail, so 4 KiB is kept for those. A reply
+/// larger than this is refused, not cut short, and an out buffer never asks for more.
+pub const ORION_REPLY_MAX: u32 = 60 * 1024;
 
 /// What an action does to its device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +332,17 @@ fn failed(error: Error) -> Failure {
     Failure::Failed(error.to_string())
 }
 
+/// A call's failure. A reply that did not fit the out buffer is named as such, with how to ask
+/// for more; the bridge never sends a partial reply.
+fn refused_reply(error: Error, call: &Call) -> Failure {
+    match &error {
+        Error::Refused { status, .. } if *status == Status::BUFFER_TOO_SMALL => {
+            Failure::Failed(format!("{error}: {}", too_small(call)))
+        }
+        _ => failed(error),
+    }
+}
+
 /// Does one job: its reply as text, or the long job it started.
 ///
 /// # Errors
@@ -368,19 +386,19 @@ pub fn serve(client: &Client, job: &Job) -> Result<Served, Failure> {
     } else {
         find_method(&description, wanted).map_err(Failure::Refused)?
     };
-    let args = encode_args(&method.params, values).map_err(Failure::Refused)?;
+    let call = encode_call_within(method, values, ORION_REPLY_MAX).map_err(Failure::Refused)?;
     let tag = &description.contracts[contract].tag;
     let mut handle = client.open_tag(&device.name, tag).map_err(failed)?;
     if method.job {
         let started = client
-            .start_job(&mut handle, method.id, &args)
+            .start_job(&mut handle, method.id, &call.args)
             .map_err(failed)?;
         return Ok(Served::Started(started));
     }
-    let mut reply = vec![0; REPLY_MAX];
+    let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
     let len = client
-        .call(&mut handle, method.id, &args, &mut reply)
-        .map_err(failed)?;
+        .call(&mut handle, method.id, &call.args, &mut reply)
+        .map_err(|error| refused_reply(error, &call))?;
     if job.verb == Verb::Set || method.returns == OwnedShape::Unit {
         return Ok(Served::Output(String::new()));
     }
