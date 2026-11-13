@@ -4,7 +4,7 @@ use std::os::fd::BorrowedFd;
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_receiver::{
-    CameraReceiver, Counters, FrameLayout, LinkConfig, MAX_STREAM_NAME, Packing,
+    CameraReceiver, Counters, FrameLayout, FrameStarts, LinkConfig, MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{Health, Lifecycle, Result, Status, StreamHandle};
 use lemnos_hal::mock::MockStream;
@@ -36,6 +36,20 @@ struct Mock {
     answer: Option<(u32, Set)>,
     finished: Vec<Finished>,
     given_back: Vec<(u32, u32)>,
+    /// Whether the block is receiving, and the frame starts it has counted since it went.
+    receiving: bool,
+    starts: FrameStarts,
+}
+
+impl Mock {
+    /// The block raises a frame start at `at_ns`: counted while receiving. (The address-less case
+    /// is the integration stand-in's, in `tests/frames.rs`.)
+    fn frame_start(&mut self, at_ns: u64) {
+        if self.receiving {
+            self.starts.count += 1;
+            self.starts.latest_ns = at_ns;
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -67,6 +81,8 @@ impl Hardware for Hw {
         self.with(|m| {
             m.started += 1;
             m.set_before_go = m.set.len();
+            m.receiving = true;
+            m.starts = FrameStarts::default();
         });
         Ok(())
     }
@@ -97,8 +113,15 @@ impl Hardware for Hw {
     }
 
     fn stop(&mut self) -> Result<()> {
-        self.with(|m| m.stopped += 1);
+        self.with(|m| {
+            m.stopped += 1;
+            m.receiving = false;
+        });
         Ok(())
+    }
+
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        Ok(self.with(|m| m.receiving.then_some(m.starts)))
     }
 
     fn check(&mut self) -> Result<()> {
@@ -431,6 +454,44 @@ fn a_buffer_the_block_is_writing_keeps_its_memory_until_its_frame_is_done() {
     assert_eq!(
         frames.take_frame().map(|f| (f.buffer, f.sequence)),
         Some((1, 1))
+    );
+}
+
+#[test]
+fn frame_starts_is_unknown_until_started_then_counts_the_blocks_starts() {
+    let (mut d, hw) = driver();
+    d.configure(raw10(), Packing::Packed).unwrap();
+    assert_eq!(
+        d.frame_starts().unwrap(),
+        None,
+        "before START nothing is counted: unknown, not zero"
+    );
+    d.start().unwrap();
+    assert_eq!(
+        d.frame_starts().unwrap(),
+        Some(FrameStarts {
+            count: 0,
+            latest_ns: 0,
+        }),
+        "started: an empty count, no start yet"
+    );
+    hw.with(|m| {
+        m.frame_start(5_000);
+        m.frame_start(9_000);
+    });
+    assert_eq!(
+        d.frame_starts().unwrap(),
+        Some(FrameStarts {
+            count: 2,
+            latest_ns: 9_000,
+        }),
+        "two starts counted, the latest at its own time"
+    );
+    d.stop().unwrap();
+    assert_eq!(
+        d.frame_starts().unwrap(),
+        None,
+        "stopped: unknown again, whatever the block last counted"
     );
 }
 

@@ -35,6 +35,7 @@ with the board's own software stopped only for each test and put back afterwards
 | [`U1a.md`](../testing/board-runs/U1a.md) | Not run yet: the back end's YCbCr, output colour conversion, debin, demosaic, sharpening, false colour, saturation, tone mapping, CAC and input decompression with the libpisp defaults, on the colour bars. HOG and stitch are refused before a job |
 | [`U1b.md`](../testing/board-runs/U1b.md) | Not run yet: the camera ISP's layout methods, the back end's refusal of a configuration that does not match its input frame, and the configuration buffer rule |
 | [`D8.md`](../testing/board-runs/D8.md), [`D10.md`](../testing/board-runs/D10.md) | The sensor's modes 0 and 1 with both clock-lane settings: line time within 0.02 %, no receiver errors at the shortest frame; the exposure limit; no OTP access on the bus. Exposure linearity and when a post lands need the scene lit: not judged |
+| [`J4b2.md`](../testing/board-runs/J4b2.md) | Not run yet: the receiver's frame-start count against the sensor's frame rate, its sequence numbers, and whether every frame start shows (a channel with no buffer address raises none, as measured earlier) |
 | [`B13.md`](../testing/board-runs/B13.md) | `thermal-zone` on the board's zone, a missing zone and a file of its own: values, `NOT_FOUND`, `IO`, recovery with no restart, the zone followed under load |
 
 Each file says which of its checks ran and which did not, and why. The fixes the run made are in

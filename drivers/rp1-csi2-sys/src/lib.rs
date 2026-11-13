@@ -144,10 +144,27 @@ pub struct StreamStatus {
     pub jobs: u64,
 }
 
+/// `struct lemnos_rp1_csi2_frame_starts`: the frame-start count, read with
+/// [`Node::frame_starts`]. `valid` is nonzero while the receiver is streaming, when the count is
+/// the one since START; zero means it is unknown, and is not a count of zero.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameStarts {
+    /// Frame starts since START.
+    pub frames: u64,
+    /// CLOCK_MONOTONIC at the latest start, or zero while `frames` is zero.
+    pub latest_ns: u64,
+    /// Nonzero while streaming.
+    pub valid: u32,
+    /// Zero.
+    pub reserved: u32,
+}
+
 const IOC_INFO: u32 = ior::<Info>(b'L', 0xc0);
 const IOC_STREAM_CREATE: u32 = iowr::<StreamCreate>(b'L', 0xc1);
 const IOC_START: u32 = iow::<Start>(b'L', 0xc2);
 const IOC_STOP: u32 = lemnos_linux_sys::ioc(0, b'L', 0xc3, 0);
+const IOC_FRAME_STARTS: u32 = ior::<FrameStarts>(b'L', 0xc4);
 const IOC_STREAM_STATUS: u32 = ior::<StreamStatus>(b'L', 0x84);
 const IOC_STREAM_BUFFER: u32 = iowr::<StreamBuffer>(b'L', 0x86);
 /// `sizeof(struct lemnos_stream_job)`: a job's fixed size.
@@ -211,6 +228,14 @@ impl Node {
         let mut info = Info::default();
         self.ioctl(IOC_INFO, &raw mut info)?;
         Ok(info)
+    }
+
+    /// The frame-start count since START (`LEMNOS_RP1_CSI2_IOC_FRAME_STARTS`). An ioctl the module
+    /// doesn't have answers `ENOTTY`, which the driver reads as a receiver that can't count.
+    pub fn frame_starts(&self) -> io::Result<FrameStarts> {
+        let mut fs = FrameStarts::default();
+        self.ioctl(IOC_FRAME_STARTS, &raw mut fs)?;
+        Ok(fs)
     }
 
     /// Makes a frame stream on this block with no pool: each buffer is a dma-buf of its own,
@@ -415,5 +440,10 @@ mod tests {
         assert_eq!(IOC_STOP, 0x0000_4cc3);
         assert_eq!(IOC_STREAM_STATUS, 0x8028_4c84);
         assert_eq!(JOB_BYTES, 80);
+        assert_eq!(size_of::<FrameStarts>(), 24);
+        assert_eq!(offset_of!(FrameStarts, latest_ns), 8);
+        assert_eq!(offset_of!(FrameStarts, valid), 16);
+        assert_eq!(offset_of!(FrameStarts, reserved), 20);
+        assert_eq!(IOC_FRAME_STARTS, 0x8018_4cc4);
     }
 }

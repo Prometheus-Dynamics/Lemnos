@@ -46,7 +46,7 @@ struct lrc_dev {
 	struct lem_stream *stream;	/* non-NULL while streaming */
 	bool streaming, fs_int, fe_int;
 	struct lrc_frame cur, next;	/* being written; in the channel's shadow registers */
-	u64 fs_ns;			/* the current frame's start */
+	u64 fs_ns;			/* the latest frame start, armed or not (0 before one) */
 	u16 fe_line;			/* the channel's line count at the last frame end */
 	struct lemnos_rp1_csi2_start start;
 	u64 frames, written, dropped, errors;

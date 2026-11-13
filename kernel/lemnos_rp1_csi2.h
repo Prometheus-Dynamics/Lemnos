@@ -70,9 +70,32 @@ struct lemnos_rp1_csi2_start {
 	__u32 reserved[2];	/* zero */
 };
 
+/*
+ * The frame-start count, read with LEMNOS_RP1_CSI2_IOC_FRAME_STARTS. `frames`
+ * counts the frame-start interrupts the channel raised since START, each one
+ * whether or not a buffer was armed for it (with none, the frame is a drop). So
+ * the frame that starts as the k-th counted start has sequence k - 1: the
+ * sequence a published frame carries (lemnos.h, "Frame streams"). A channel with
+ * no buffer address raises no interrupt, so a start then is in no count: `frames`
+ * is the sensor's frame starts only while every start shows (see the driver's
+ * docs and testing/board-runs/J4b2.md).
+ * `latest_ns` is CLOCK_MONOTONIC (ktime_get_ns) at the latest start, the one
+ * the count names, and 0 while `frames` is 0. `valid` is nonzero while the
+ * receiver is streaming, which is when `frames` and `latest_ns` are the count
+ * since START; it is zero before START and after STOP, and a restart starts
+ * the count again at zero.
+ */
+struct lemnos_rp1_csi2_frame_starts {
+	__u64 frames;		/* frame starts since START */
+	__u64 latest_ns;	/* CLOCK_MONOTONIC of the latest start, 0 with none */
+	__u32 valid;		/* nonzero while streaming */
+	__u32 reserved;		/* zero */
+};
+
 #define LEMNOS_RP1_CSI2_IOC_INFO	 _IOR('L', 0xc0, struct lemnos_rp1_csi2_info)
 #define LEMNOS_RP1_CSI2_IOC_STREAM_CREATE _IOWR('L', 0xc1, struct lemnos_stream_create)
 #define LEMNOS_RP1_CSI2_IOC_START	 _IOW('L', 0xc2, struct lemnos_rp1_csi2_start)
 #define LEMNOS_RP1_CSI2_IOC_STOP	 _IO('L', 0xc3)
+#define LEMNOS_RP1_CSI2_IOC_FRAME_STARTS _IOR('L', 0xc4, struct lemnos_rp1_csi2_frame_starts)
 
 #endif
