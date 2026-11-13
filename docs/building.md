@@ -4,7 +4,8 @@ The programs an OS image ships are listed once, in `packaging/shipped.txt`: `lem
 and `lemnos-orion`. `scripts/check-shipped.sh` reads that list, and this page lists each one in its
 table. The image builder builds them `--locked --offline` from vendored sources, with the
 `service` profile, for each target below. The kernel module is built separately:
-[kernel-module.md](kernel-module.md), "For an image builder".
+[kernel-module.md](kernel-module.md), "For an image builder", and the symbols a board kernel needs, in
+[kernel-config.md](kernel-config.md).
 
 ## The lock file
 
