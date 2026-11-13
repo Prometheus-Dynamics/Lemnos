@@ -18,7 +18,8 @@ Through one node, `/dev/lemnos`, with one opener at a time:
   edges, and PWM channels, each under a claim.
 - **DMA memory for a block**, as dma-bufs, and dma-bufs mapped to a block's device addresses.
 - **Register regions and interrupts of a block**, for a driver in user space. Registers can be
-  mapped only for a block whose IOMMU really confines its DMA.
+  mapped only for a block whose IOMMU really confines its DMA, or one the module is told to map
+  though nothing confines it (`unconfined`, below).
 - **Clocks, supplies and resets** of a block, by the names its firmware description gives them.
 - **One event stream**: interrupts, blocks bound and unbound, supply faults, temperature limits.
 - **Frame streams** with the module as the producer, for blocks whose DMA must be checked in the
@@ -46,7 +47,9 @@ and everything else stays on the stock path:
 | `clocks:BLOCK/NAME,...`, `resets:BLOCK/NAME,...` | Only through the module |
 
 The receiver and ISP drivers (`rp1-csi2`, `pisp-be`, `pisp-fe`) and the graphics DMA library
-(`k230-gsdma`) open the module's nodes themselves.
+(`k230-gsdma`) open the module's nodes themselves. `k230isp` and `k230-capture` take `regs:`,
+`irq:`, `clocks:` and `resets:` when the board file names them (see
+[Drivers and contracts](drivers.md#which-drivers-take-a-blocks-own-resources)).
 
 Interrupts reach the backend on the module's one event stream, which it reads for every interrupt
 a process holds and files each event under its own. Supplies, thermal watches and PIO are complete
@@ -101,7 +104,8 @@ Other parameters:
 
 | Parameter | Meaning |
 |---|---|
-| `confined` | Compatibles whose IOMMU really confines their DMA. Only their registers can be mapped |
+| `confined` | Compatibles whose IOMMU really confines their DMA. Their registers can be mapped |
+| `unconfined` | Compatibles whose registers can be mapped though no IOMMU confines their DMA. The driver in user space alone then keeps that DMA inside the block's memory, so list only a block whose driver checks every register it writes and points every address register only at memory the module allocated for that block, and whose stock driver already gives user space the same access. The kernel log says so when such a block binds |
 | `pisp_be` | Compatibles driven as the ISP back end. Must also be in `owned` |
 | `gsdma` | Compatibles driven as the graphics DMA engine. Must also be in `owned` |
 | `bus_buffer` | The largest I2C or SPI transfer, in bytes each way. 4096 by default |

@@ -1,11 +1,13 @@
-//! The ISP8000 frame path behind the vendor kernel's `vvcam-isp` device, with the CSI receiver
-//! behind its `vvcam-mipi` device, as `camera.receiver/1`: [`K230Capture`] sets up the link, the
-//! ISP's input and output and its memory interface, and delivers each frame the block writes
-//! through a frame stream. It only receives: the sensor is set up by its own driver.
+//! The ISP8000 frame path, with the CSI receiver behind the vendor kernel's `vvcam-mipi` device,
+//! as `camera.receiver/1`: [`K230Capture`] sets up the link, the ISP's input and output and its
+//! memory interface, and delivers each frame the block writes through a frame stream. It only
+//! receives: the sensor is set up by its own driver.
 //!
 //! The vendor's capture daemon is never used. The kernel takes the link as plain numbers and sets
-//! up the CSI receiver and video input itself; the ISP is programmed directly through the
-//! `vvcam-isp` register requests, every one through the sys crate's table; and the memory
+//! up the CSI receiver and video input itself; the ISP is programmed directly, every register
+//! through the sys crate's table, either through the vendor's `vvcam-isp` register requests or
+//! through the ISP's own register window and interrupt from the host (on Linux the Lemnos kernel
+//! module's, with the ISP bound to it), as the board file chooses (see Settings); and the memory
 //! interface writes only into DMA memory the sys crate holds (see its documentation for every
 //! path by which a caller's number reaches the block, and the check on each).
 //!
@@ -30,9 +32,24 @@
 //!
 //! # Settings
 //!
+//! The way to the ISP is the board file's, and there is no falling back from one to the other:
+//!
+//! - **The module's resources**: the device's `uses` names `regs` (the ISP's register window,
+//!   such as `regs:90000000.isp`) and `irq` (the memory interface's interrupt, such as
+//!   `irq:90000000.isp/0`), and optionally `clocks` and `resets` (every clock turned on, and
+//!   every reset line asserted then released, at each open). `dma` should then name the same
+//!   block (`dma:90000000.isp`), so the memory's device addresses are the ISP's own. `isp` must
+//!   not be set. See [`ModuleHardware`].
+//! - **The vendor device**: none of those named; `isp` may give its node.
+//!
+//! `regs` without `irq`, `irq`, `clocks` or `resets` without `regs`, `regs` with `isp`, or a
+//! window smaller than the ISP's is refused when the device binds (`INVALID_ARGUMENT`). A
+//! resource the host can't give fails the bind with the host's reason; nothing else is tried.
+//!
 //! From the device's `config` in the board file:
 //!
-//! - `isp`, `mipi`: the device nodes, default `/dev/vvcam-isp.0` and `/dev/vvcam-mipi.0`.
+//! - `isp`, `mipi`: the device nodes, default `/dev/vvcam-isp.0` (on the vendor way only) and
+//!   `/dev/vvcam-mipi.0`.
 //! - `format`: `bayer` (default), `nv12`, `nv16`, `yuyv`, `bgr24` or `p010`; see [`Format`].
 //! - `order`: the sensor's colour order, `rggb` (default), `grbg`, `gbrg` or `bggr`.
 //!
@@ -62,13 +79,15 @@
 //!
 //! - The host must provide the `dma` need. `LinuxBoard` answers `dma:<block>` through the Lemnos
 //!   kernel module (`backends/linux/src/module/`): each buffer is the module's allocation for the
-//!   named block, with the device address the module reports. That address is valid for the DMA
-//!   setup of the block the module owns, and is the address the ISP sees only if both blocks have
-//!   the same view of memory (no IOMMU, the same `dma-ranges`). The ISP is bound to the vendor's
-//!   `vvcam-isp` driver, so the module cannot own it; which block to name, and whether the two
-//!   agree, is checked on a board (`testing/board-runs/B23.md`, step 2). If that cannot be shown,
-//!   the memory must not be handed to the ISP. The driver is built into `lemnosd`, so a board
-//!   file can name it; until that check passes, it is for that board run.
+//!   named block, with the device address the module reports. On the module's way the ISP is that
+//!   block, so the address is the ISP's own. On the vendor's way the ISP is bound to `vvcam-isp`
+//!   and the module cannot own it, so the address is another block's, and is the ISP's only if
+//!   both have the same view of memory (no IOMMU, the same `dma-ranges`); that is checked on a
+//!   board (`testing/board-runs/B23.md`, step 2), and until it is, the vendor's way is for that
+//!   board run. The module maps the ISP's registers only when loaded with it in `unconfined=`:
+//!   it has no IOMMU, so this driver's checks alone keep the block's DMA inside the ring.
+//! - On the module's way the ISP's window and interrupts have one holder, this driver: the
+//!   `k230isp` driver can't take the same ISP's registers at the same time.
 //! - Scaling, cropping and the self paths: the main path writes the sensor's full frame.
 //!
 //! Untested on board: written from the vendor driver's interface and the ISP8000's open register
@@ -80,14 +99,16 @@ mod hw;
 pub mod plan;
 
 #[cfg(all(test, target_os = "linux"))]
+mod module_tests;
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
 
 use lemnos_contract_camera_receiver::{
     BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{
-    Config, Description, DmaHandle, Health, Item, Lifecycle, MethodId, Result, Status,
-    StreamHandle, driver,
+    ClocksHandle, Config, Description, DmaHandle, Health, InterruptHandle, Item, Lifecycle,
+    MethodId, RegistersHandle, ResetHandle, Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_k230_capture_sys::mipi::DevAttr;
 use lemnos_driver_k230_capture_sys::regs::MIS_MP_FRAME_END;
@@ -95,9 +116,9 @@ use lemnos_driver_k230_capture_sys::{MiEvent, RING};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::{DmaBuffer, DmaBuffers, StreamFrame};
 
-#[cfg(target_os = "linux")]
-pub use hw::LinuxHardware;
 pub use hw::{Hardware, ISP_PATH, MIPI_PATH, Settings};
+#[cfg(target_os = "linux")]
+pub use hw::{LinuxHardware, ModuleHardware};
 pub use lemnos_driver_k230_capture_sys as sys;
 pub use plan::{Format, Layout, MAX_DIMENSION, MIN_DIMENSION, WIDTH_STEP};
 
@@ -274,6 +295,20 @@ pub struct K230Capture {
         reason = "the need's memory lives in the hardware; this is what is left"
     )]
     dma: DmaHandle,
+    /// The ISP's own resources, for the module's way. Moved into the hardware at bind; what is
+    /// left here is `None`. Declared here so the host provides them.
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    regs: Option<RegistersHandle>,
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    irq: Option<InterruptHandle>,
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    clocks: Option<ClocksHandle>,
+    #[needs(optional)]
+    #[expect(dead_code, reason = "moved into the hardware at bind")]
+    resets: Option<ResetHandle>,
     hw: Box<dyn Hardware>,
     options: Options,
     link: Option<LinkConfig>,
@@ -295,10 +330,22 @@ impl Lifecycle for K230Capture {
     fn start(needs: K230CaptureNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::new(cfg.str("isp"), cfg.str("mipi"))?;
         let options = options(cfg)?;
-        let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(
-            settings,
-            Box::new(hw::HeldDma(needs.dma)),
-        ));
+        let dma = Box::new(hw::HeldDma(needs.dma));
+        let hw: Box<dyn Hardware> = match (needs.regs, needs.irq) {
+            (Some(regs), Some(irq)) if cfg.str("isp").is_none() => Box::new(ModuleHardware::new(
+                &settings,
+                Box::new(hw::HeldRegisters(regs)),
+                Box::new(hw::HeldInterrupt(irq)),
+                dma,
+                needs.clocks,
+                needs.resets,
+            )?),
+            (None, None) if needs.clocks.is_none() && needs.resets.is_none() => {
+                Box::new(LinuxHardware::new(settings, dma))
+            }
+            // Half of one way, or both at once: the board file is wrong, and nothing is guessed.
+            _ => return Err(Status::INVALID_ARGUMENT),
+        };
         Ok(Self::with_hardware(hw, needs.frames, options))
     }
 
@@ -372,6 +419,10 @@ impl K230Capture {
         Self {
             frames,
             dma: lemnos_core::Held::boxed(Box::new(Moved)),
+            regs: None,
+            irq: None,
+            clocks: None,
+            resets: None,
             hw,
             options,
             link: None,

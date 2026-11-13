@@ -141,6 +141,8 @@ struct DmaState {
     next: u32,
     buffers: BTreeMap<u32, Vec<u8>>,
     owned_by_device: BTreeMap<u32, bool>,
+    /// Where the next buffer is, for memory made with [`MockDma::at`].
+    address: Option<u64>,
 }
 
 /// DMA memory backed by the heap. A CPU access to a buffer the device holds
@@ -151,8 +153,17 @@ pub struct MockDma {
 }
 
 impl MockDma {
+    /// Memory whose buffer `n` is at device address `n << 32`.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Memory whose buffers follow each other from device address `base`, each starting on a
+    /// 4 KiB boundary, as a block below 4 GiB sees it.
+    pub fn at(base: u64) -> Self {
+        let mock = Self::default();
+        with(&mock.state, |s| s.address = Some(base));
+        mock
     }
 
     /// Writes as the block would, whoever holds the buffer.
@@ -198,10 +209,17 @@ impl DmaBuffers for MockDma {
             s.next += 1;
             let id = s.next;
             s.buffers.insert(id, vec![0; size]);
+            let device_address = match s.address {
+                Some(at) => {
+                    s.address = Some(at + len.next_multiple_of(0x1000));
+                    at
+                }
+                None => u64::from(id) << 32,
+            };
             Ok(DmaBuffer {
                 id,
                 len,
-                device_address: u64::from(id) << 32,
+                device_address,
             })
         })
     }
@@ -240,6 +258,17 @@ impl DmaBuffers for MockDma {
 struct ClocksState {
     enabled: BTreeMap<u32, bool>,
     rates: BTreeMap<u32, u64>,
+    /// How many there are; `None` takes any index.
+    count: Option<u32>,
+}
+
+impl ClocksState {
+    fn has(&self, clock: u32) -> Result<(), ErrorKind> {
+        match self.count {
+            Some(count) if clock >= count => Err(ErrorKind::NotFound),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Clocks that take any rate they are given.
@@ -249,8 +278,16 @@ pub struct MockClocks {
 }
 
 impl MockClocks {
+    /// Clocks at any index.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// `count` clocks: an index past them is `NotFound`, as on a real block.
+    pub fn counted(count: u32) -> Self {
+        let mock = Self::default();
+        with(&mock.state, |s| s.count = Some(count));
+        mock
     }
 
     pub fn enabled(&self, clock: u32) -> bool {
@@ -264,40 +301,75 @@ impl Clocks for MockClocks {
     type Error = ErrorKind;
 
     fn enable(&mut self, clock: u32) -> Result<(), ErrorKind> {
-        with(&self.state, |s| s.enabled.insert(clock, true));
-        Ok(())
+        with(&self.state, |s| {
+            s.has(clock)?;
+            s.enabled.insert(clock, true);
+            Ok(())
+        })
     }
 
     fn disable(&mut self, clock: u32) -> Result<(), ErrorKind> {
-        with(&self.state, |s| s.enabled.insert(clock, false));
-        Ok(())
+        with(&self.state, |s| {
+            s.has(clock)?;
+            s.enabled.insert(clock, false);
+            Ok(())
+        })
     }
 
     fn rate_hz(&mut self, clock: u32) -> Result<u64, ErrorKind> {
-        Ok(with(&self.state, |s| {
-            s.rates.get(&clock).copied().unwrap_or(0)
-        }))
+        with(&self.state, |s| {
+            s.has(clock)?;
+            Ok(s.rates.get(&clock).copied().unwrap_or(0))
+        })
     }
 
     fn set_rate_hz(&mut self, clock: u32, hz: u64) -> Result<u64, ErrorKind> {
-        with(&self.state, |s| s.rates.insert(clock, hz));
-        Ok(hz)
+        with(&self.state, |s| {
+            s.has(clock)?;
+            s.rates.insert(clock, hz);
+            Ok(hz)
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct ResetState {
+    history: Vec<(u32, bool)>,
+    /// How many lines there are; `None` takes any index.
+    count: Option<u32>,
+}
+
+impl ResetState {
+    fn change(&mut self, line: u32, asserted: bool) -> Result<(), ErrorKind> {
+        if self.count.is_some_and(|count| line >= count) {
+            return Err(ErrorKind::NotFound);
+        }
+        self.history.push((line, asserted));
+        Ok(())
     }
 }
 
 /// Reset lines that record each change as `(line, asserted)`.
 #[derive(Debug, Clone, Default)]
 pub struct MockReset {
-    state: Shared<Vec<(u32, bool)>>,
+    state: Shared<ResetState>,
 }
 
 impl MockReset {
+    /// Lines at any index.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// `count` lines: an index past them is `NotFound`, as on a real block.
+    pub fn counted(count: u32) -> Self {
+        let mock = Self::default();
+        with(&mock.state, |s| s.count = Some(count));
+        mock
+    }
+
     pub fn history(&self) -> Vec<(u32, bool)> {
-        with(&self.state, |s| s.clone())
+        with(&self.state, |s| s.history.clone())
     }
 }
 
@@ -305,13 +377,11 @@ impl Reset for MockReset {
     type Error = ErrorKind;
 
     fn assert(&mut self, line: u32) -> Result<(), ErrorKind> {
-        with(&self.state, |s| s.push((line, true)));
-        Ok(())
+        with(&self.state, |s| s.change(line, true))
     }
 
     fn deassert(&mut self, line: u32) -> Result<(), ErrorKind> {
-        with(&self.state, |s| s.push((line, false)));
-        Ok(())
+        with(&self.state, |s| s.change(line, false))
     }
 }
 
@@ -1330,6 +1400,46 @@ mod tests {
         assert_eq!(clocks.rate_hz(2), Ok(24_000_000));
         clocks.disable(2).unwrap();
         assert!(!clocks.enabled(2));
+    }
+
+    #[test]
+    fn memory_at_a_base_follows_on_from_it() {
+        let mut dma = MockDma::at(0x4000_0000);
+        assert_eq!(dma.allocate(16).unwrap().device_address, 0x4000_0000);
+        assert_eq!(dma.allocate(0x1001).unwrap().device_address, 0x4000_1000);
+        assert_eq!(dma.allocate(1).unwrap().device_address, 0x4000_3000);
+        assert_eq!(MockDma::new().allocate(1).unwrap().device_address, 1 << 32);
+    }
+
+    #[test]
+    fn counted_clocks_and_resets_refuse_an_index_past_the_last() {
+        let mut clocks = MockClocks::counted(2);
+        clocks.enable(1).unwrap();
+        assert_eq!(clocks.enable(2), Err(ErrorKind::NotFound));
+        assert_eq!(clocks.rate_hz(2), Err(ErrorKind::NotFound));
+        assert!(!clocks.enabled(2));
+        let mut reset = MockReset::counted(1);
+        reset.assert(0).unwrap();
+        assert_eq!(reset.deassert(1), Err(ErrorKind::NotFound));
+        assert_eq!(reset.history(), [(0, true)]);
+    }
+
+    #[test]
+    fn every_clock_turns_on_and_every_line_is_pulsed_up_to_the_last() {
+        use crate::blocks::{MAX_LINES, enable_clocks, pulse_resets};
+        let mut clocks = MockClocks::counted(3);
+        assert_eq!(enable_clocks(&mut clocks), Ok(3));
+        assert!((0..3).all(|c| clocks.enabled(c)));
+        let mut none = MockClocks::counted(0);
+        assert_eq!(enable_clocks(&mut none), Ok(0));
+        // A block with no count stops at the most there can be.
+        assert_eq!(enable_clocks(&mut MockClocks::new()), Ok(MAX_LINES));
+        let mut reset = MockReset::counted(2);
+        assert_eq!(pulse_resets(&mut reset), Ok(2));
+        assert_eq!(
+            reset.history(),
+            [(0, true), (1, true), (0, false), (1, false)]
+        );
     }
 
     #[test]

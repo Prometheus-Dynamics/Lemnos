@@ -4,7 +4,7 @@
 //! `lemnos-module-check <route> <spi route> <gpio chip number> <simulated chip directory>`, where
 //! a route is `module` or `stock`. The first covers I2C (PIO I2C too), GPIO and PWM, and the test block's DMA
 //! memory, registers, interrupts, clock and reset, which must be bound to the module on the
-//! module route, loaded with `test_map_unconfined` and `test_irq_inject` (on the stock route there
+//! module route, loaded with the test block in `unconfined` and `test_irq_inject` (on the stock route there
 //! are none).
 //!
 //! Each bus also prints a `measure` line per operation: the time it takes on the route it took
@@ -835,6 +835,10 @@ fn check_registers(report: &mut Report, board: &mut LinuxBoard) {
     report.check(
         regs.size() == 4096 && magic == Ok(TEST_BLOCK_MAGIC),
         "the region is the test block's page: its module's marker is at word 0",
+    );
+    report.check(
+        regs.unconfined(),
+        "the module says the test block is mapped through unconfined= alone",
     );
     let written = regs.write32(0x40, 0xa5a5_0001).is_ok()
         && regs.modify32(0x40, 0xff, 0x7e).is_ok()

@@ -2,7 +2,7 @@
 /*
  * A block unbound while the control node is open: the unbind waits for the
  * DMA buffers still held, register mappings fault afterwards, and requests
- * for the block fail. The module must be loaded test_map_unconfined=1.
+ * for the block fail. The module must be loaded with the block in unconfined=.
  *
  * Usage: lemnos_unbind_check /dev/lemnos <device name> <unbind path>
  * Copyright (c) 2026 the Lemnos authors.

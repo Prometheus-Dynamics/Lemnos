@@ -57,7 +57,7 @@ static char *confined = "";
 module_param(confined, charp, 0444);
 MODULE_PARM_DESC(confined,
 		 "Compatibles of the blocks whose DMA their IOMMU really confines; "
-		 "no other block's registers can be mapped");
+		 "no other block's registers can be mapped, except those in unconfined=");
 
 static char *pisp_be = "";
 module_param(pisp_be, charp, 0444);
@@ -71,10 +71,11 @@ MODULE_PARM_DESC(gsdma,
 		 "Compatibles of the blocks driven as the K230 graphics DMA engine; their "
 		 "registers and interrupts never reach user space");
 
-static bool test_map_unconfined;
-module_param(test_map_unconfined, bool, 0444);
-MODULE_PARM_DESC(test_map_unconfined,
-		 "Test only: allow mapping the registers of a block whose DMA is not confined");
+static char *unconfined = "";
+module_param(unconfined, charp, 0444);
+MODULE_PARM_DESC(unconfined,
+		 "Compatibles of the blocks whose registers may be mapped though no IOMMU "
+		 "confines their DMA: the driver in user space alone keeps that DMA in bounds");
 
 static bool test_irq_inject;
 module_param(test_irq_inject, bool, 0444);
@@ -97,6 +98,7 @@ struct lem_block {
 	struct platform_device *pdev;
 	u32 id;
 	bool mappable;
+	bool unconfined;		/* mappable through unconfined= alone */
 	u32 regions;
 	u32 nirqs;
 	struct lem_pb *pb;		/* the PiSP back end, or NULL */
@@ -598,7 +600,8 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		u->info = (struct lemnos_info){
 			.block = l->id,
 			.abi = LEMNOS_ABI,
-			.flags = l->mappable ? LEMNOS_INFO_MMIO_MAPPABLE : 0,
+			.flags = (l->mappable ? LEMNOS_INFO_MMIO_MAPPABLE : 0) |
+				 (l->unconfined ? LEMNOS_INFO_MMIO_UNCONFINED : 0),
 			.regions = l->regions,
 			.irqs = l->nirqs,
 			.dma_bits = fls64(dma_get_mask(l->dev)),
@@ -788,14 +791,16 @@ static int lem_probe(struct platform_device *pdev)
 	       platform_get_resource(pdev, IORESOURCE_MEM, l->regions))
 		l->regions++;
 	l->mappable = device_iommu_mapped(dev) && lem_device_listed(dev, confined);
-	if (!l->mappable && test_map_unconfined) {
-		dev_warn(dev, "test_map_unconfined: registers mappable on a block whose DMA is not confined\n");
+	if (!l->mappable && lem_device_listed(dev, unconfined)) {
+		dev_warn(dev, "unconfined: registers mappable though no IOMMU confines this block's DMA\n");
 		l->mappable = true;
+		l->unconfined = true;
 	}
 
 	/* The module drives this block itself: nothing of it reaches user space. */
 	if (lem_device_listed(dev, pisp_be)) {
 		l->mappable = false;
+		l->unconfined = false;
 		l->pb = lem_pb_probe(pdev);
 		if (IS_ERR(l->pb))
 			return dev_err_probe(dev, PTR_ERR(l->pb), "PiSP back end\n");
@@ -803,6 +808,7 @@ static int lem_probe(struct platform_device *pdev)
 	}
 	if (lem_device_listed(dev, gsdma)) {
 		l->mappable = false;
+		l->unconfined = false;
 		l->gd = lem_gd_probe(pdev);
 		if (IS_ERR(l->gd))
 			return dev_err_probe(dev, PTR_ERR(l->gd), "K230 graphics DMA engine\n");
@@ -845,9 +851,9 @@ ready:
 	}
 	lem_power_set_block(l->power, l->id);
 	lem_event_post(LEMNOS_EVENT_BLOCK_BOUND, l->id, 0, 0);
-	dev_info(dev, "block %u: %u regions, %u interrupts, %u-bit DMA, registers %smappable\n",
+	dev_info(dev, "block %u: %u regions, %u interrupts, %u-bit DMA, registers %smappable%s\n",
 		 l->id, l->regions, l->nirqs, fls64(dma_get_mask(dev)),
-		 l->mappable ? "" : "not ");
+		 l->mappable ? "" : "not ", l->unconfined ? " (unconfined)" : "");
 	return 0;
 }
 

@@ -9,7 +9,8 @@
  * its number.
  *
  * - LEMNOS_IOC_INFO: the ABI, the register regions and interrupts, the DMA
- *   address width, and whether the registers may be mapped.
+ *   address width, and whether the registers may be mapped, and if so whether
+ *   only because the module was told to (unconfined=).
  * - LEMNOS_IOC_REGION: one register region's physical range and the offset to
  *   give mmap(), which maps it when LEMNOS_INFO_MMIO_MAPPABLE is set and the
  *   caller has CAP_SYS_RAWIO. Mappings must be shared. They fault once the
@@ -151,6 +152,11 @@
 
 /* The registers may be mapped (see above). */
 #define LEMNOS_INFO_MMIO_MAPPABLE	(1u << 0)
+/*
+ * They may be mapped only because the block is listed in unconfined=: no
+ * IOMMU confines its DMA, so the driver in user space alone keeps it in bounds.
+ */
+#define LEMNOS_INFO_MMIO_UNCONFINED	(1u << 1)
 
 struct lemnos_next {
 	__u32 after;		/* in: a block number, or 0 for the first */

@@ -95,6 +95,8 @@ int main(int argc, char **argv)
 		CHECK(regs != MAP_FAILED, "registers mapped");
 	else
 		CHECK(regs == MAP_FAILED && errno == EPERM, "registers not mapped (EPERM)");
+	CHECK(!(info.flags & LEMNOS_INFO_MMIO_UNCONFINED) || (info.flags & LEMNOS_INFO_MMIO_MAPPABLE),
+	      "unconfined only with mappable: flags 0x%x", info.flags);
 
 	/* A buffer: written by the CPU through the dma-buf, imported back to the same address. */
 	struct lemnos_alloc a = { .block = block, .size = 1 << 20 };

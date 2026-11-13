@@ -243,8 +243,8 @@ int main(void)
 	check(!forget_override(BLOCK) && !forget_override(OTHER), "overrides cleared");
 	check(!unload("lemnos"), "module unloaded");
 
-	check(!load("/lemnos.ko", OWNED " test_map_unconfined=1 test_irq_inject=1"),
-	      "module loaded with the test paths");
+	check(!load("/lemnos.ko", OWNED " unconfined=lemnos,test-block test_irq_inject=1"),
+	      "module loaded with the test block unconfined and the interrupt test path");
 	check(!bind_block(BLOCK), "block bound");
 	check(!run((char *const[]){ "/lemnos_irq_check", "/dev/lemnos", BLOCK, "2000", NULL }),
 	      "lemnos_irq_check");

@@ -168,6 +168,24 @@ impl SimBoard {
         stream
     }
 
+    /// Adds DMA memory the test made itself, such as [`MockDma::at`].
+    pub fn add_dma_of(&self, name: &str, dma: MockDma) -> MockDma {
+        self.insert(name, Part::Dma(dma.clone()));
+        dma
+    }
+
+    /// Adds clocks the test made itself, such as [`MockClocks::counted`].
+    pub fn add_clocks_of(&self, name: &str, clocks: MockClocks) -> MockClocks {
+        self.insert(name, Part::Clocks(clocks.clone()));
+        clocks
+    }
+
+    /// Adds reset lines the test made itself, such as [`MockReset::counted`].
+    pub fn add_reset_of(&self, name: &str, reset: MockReset) -> MockReset {
+        self.insert(name, Part::Reset(reset.clone()));
+        reset
+    }
+
     pub fn add_i2c(&self, name: &str) -> SimI2c {
         let bus = SimI2c::new(self.clock.clone());
         self.insert(name, Part::I2c(bus.clone()));

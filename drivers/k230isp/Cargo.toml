@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The ISP8000 behind the vendor vvcam-isp device as camera.isp/1: register writes in, checked against the registers that carry no address, and the statistics registers out per frame. Carried, never read"
+description = "The ISP8000 as camera.isp/1, behind the vendor vvcam-isp device or through its own register window and interrupt from the kernel module, as the board file chooses: register writes in, checked against the registers that carry no address, and the statistics registers out per frame. Carried, never read"
 
 [lints]
 workspace = true
@@ -24,6 +24,7 @@ lemnos-driver-k230isp-sys = { path = "../k230isp-sys" }
 
 [dev-dependencies]
 lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
+lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
 [package.metadata.lemnos]
