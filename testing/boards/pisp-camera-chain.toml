@@ -1,0 +1,88 @@
+# The camera chain WITH links on the reference SoC: sensor -> receiver -> front end -> back end.
+# Each link names the device the next stage feeds, and the host checks its contract at bind:
+# a sensor's link names a camera.receiver/1 device; a receiver's and each ISP's link a camera.isp/1 device.
+# The sensor, the receiver and the front end share one CSI-2 block (one kernel node, the front end
+# inside it); the back end is its own block. Streams are listed in drivers/pisp/README.md, "The camera
+# chain and its streams". Board: the reference SoC with a camera sensor on i2c-10.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "pisp-camera-chain"
+
+[[devices]]
+id = "cam0-power"
+driver = "gpio-power-switch"
+bus = "gpiochip15:34"
+config = { default_on = true }
+
+[[devices]]
+id = "cam0-sensor"
+driver = "ov9782"
+bus = "i2c-10"
+link = "cam0-receiver"
+
+[[devices]]
+id = "cam0-receiver"
+driver = "rp1-csi2"
+link = "cam0-fe"
+config = { device = "1f00110000.csi" }
+
+[devices.streams.frames]
+buffers = 8
+buffer_bytes = 1280000
+memory = "dma-buf"
+heap = "linux,cma"
+
+[[devices]]
+id = "cam0-fe"
+driver = "pisp-fe"
+link = "cam0-be"
+config = { device = "1f00110000.csi", lanes = 2, mbps = 800, data_type = 0x2b, job_slots = 8 }
+
+[devices.streams.config]
+buffers = 8
+buffer_bytes = 632
+job_slots = 8
+job_bytes = 128
+
+[devices.streams.statistics]
+buffers = 8
+buffer_bytes = 23200
+memory = "dma-buf"
+heap = "linux,cma"
+
+[devices.streams.output0]
+buffers = 4
+buffer_bytes = 2052096
+memory = "dma-buf"
+heap = "linux,cma"
+
+[devices.streams.output1]
+buffers = 4
+buffer_bytes = 516096
+memory = "dma-buf"
+heap = "linux,cma"
+
+[[devices]]
+id = "cam0-be"
+driver = "pisp-be"
+config = { device = "1000880000.pisp_be" }
+
+[devices.streams.config]
+buffers = 2
+buffer_bytes = 16720
+job_slots = 8
+job_bytes = 128
+
+[devices.streams.input]
+buffers = 2
+buffer_bytes = 2048000
+memory = "dma-buf"
+heap = "linux,cma"
+
+[devices.streams.output0]
+buffers = 4
+buffer_bytes = 1600000
+memory = "dma-buf"
+heap = "linux,cma"

@@ -107,7 +107,7 @@ use lemnos_contract_isp_pisp::{
     IspPisp, LAYOUT_FRONT_END, LAYOUT_STATISTICS, OUTPUT_FRONT_END_0, OUTPUT_FRONT_END_1, PispInfo,
 };
 use lemnos_core::{
-    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
+    Config, Decode, Description, Dev, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
     StreamHandle, driver,
 };
 use lemnos_driver_pisp_fe_sys::{Job, Range, Start};
@@ -287,6 +287,9 @@ pub struct PispFe {
     output0: Option<StreamHandle>,
     #[needs(optional)]
     output1: Option<StreamHandle>,
+    /// The ISP the board feeds this front end to (`link` on the front end): the back end.
+    #[link]
+    _next: Option<Dev<dyn CameraIsp>>,
     hw: Box<dyn Hardware>,
     options: Options,
     input: Option<IspInput>,
@@ -437,6 +440,7 @@ impl PispFe {
             statistics: needs.statistics,
             output0: needs.output0,
             output1: needs.output1,
+            _next: needs._next,
             hw,
             options,
             input: None,

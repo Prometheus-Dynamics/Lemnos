@@ -261,6 +261,9 @@ struct Slot {
     errors: AtomicU32,
     /// Optional dependencies that were absent at the last bind.
     missing: Mutex<Vec<String>>,
+    /// Why the last bind was refused for its link: the linked device does not serve the contract
+    /// the driver links to. Set by the link's resolution, and reported as the failed bind's reason.
+    link_refusal: Mutex<Option<String>>,
     /// When the driver next wants a tick. [`NO_TICK`] when it doesn't.
     next_tick_ns: AtomicU64,
     /// When a bind was last tried. A hint never brings on another sooner than
@@ -297,6 +300,32 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Slot {
+    /// The reason a link to this device is refused when it does not serve `tag`: what the link
+    /// needs, what this device serves, and where the link goes.
+    fn serves_message(&self, id: &str, tag: Tag) -> String {
+        let served: Vec<&str> = self
+            .entry
+            .map(|entry| {
+                entry
+                    .manifest
+                    .provides
+                    .iter()
+                    .map(|contract| contract.tag.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let serves = if served.is_empty() {
+            "no contract".to_string()
+        } else {
+            served.join(", ")
+        };
+        format!(
+            "the link to `{id}` needs a {} device, but `{id}` serves {serves}: a sensor links to \
+             a camera.receiver/1 device, and a receiver and each ISP to a camera.isp/1 device",
+            tag.as_str()
+        )
+    }
+
     /// A device as it starts: waiting for its first bind, or off when the board says so.
     fn new(
         index: u32,
@@ -329,6 +358,7 @@ impl Slot {
             hung: AtomicBool::new(false),
             errors: AtomicU32::new(0),
             missing: Mutex::new(Vec::new()),
+            link_refusal: Mutex::new(None),
             next_tick_ns: AtomicU64::new(NO_TICK),
             tried_ns: AtomicU64::new(0),
             bound_ns: AtomicU64::new(0),
@@ -1398,7 +1428,9 @@ impl Inner {
                 self.bring_users_forward(&slot.spec.id);
             }
             Ok(Err(status)) => {
-                self.record_failed_bind(&slot, &format!("bind failed: {status:?}"));
+                let refusal = lock(&slot.link_refusal).take();
+                let reason = refusal.unwrap_or_else(|| format!("bind failed: {status:?}"));
+                self.record_failed_bind(&slot, &reason);
             }
             Err(LaneError::Deadline) => {
                 self.abandon_lane(&slot);
@@ -1666,7 +1698,14 @@ impl Provider for Binding<'_> {
     fn link_device(&mut self, tag: Tag) -> Result<LocalCaller> {
         let id = self.slot.spec.link.as_deref().ok_or(Status::NOT_FOUND)?;
         let target = self.inner.slot_by_id(id).ok_or(Status::NOT_FOUND)?;
-        self.caller_of(&target, tag)
+        let caller = self.caller_of(&target, tag);
+        // A linked device that does not serve the contract can never be bound to this link: say which
+        // contract is wanted and which the device serves, rather than leave a bare status.
+        *lock(&self.slot.link_refusal) = match &caller {
+            Err(Status::INVALID_ARGUMENT) => Some(target.serves_message(id, tag)),
+            _ => None,
+        };
+        caller
     }
 
     fn i2c(&mut self, need: &str) -> Result<I2c> {

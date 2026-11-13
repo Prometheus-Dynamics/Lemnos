@@ -121,3 +121,42 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## The camera chain and its streams
+
+A PiSP camera is a chain of `link`s on the board: sensor → receiver → front end → back end. Each
+hop's contract is checked when the device binds: a sensor's link names a `camera.receiver/1`
+device; a receiver's link and each ISP's link name a `camera.isp/1` device. A link to the wrong
+contract is refused, and the device's health says what the link needs and what its target serves.
+The front end and the back end are both `camera.isp/1`, so a front end links to a back end, and a
+back end has no link. A receiver with no link is a camera without an ISP, which is valid.
+
+The streams a consumer opens, by device, with who writes each one:
+
+| Device | Stream | Direction | Who writes | Buffers on the F2 reference board |
+|---|---|---|---|---|
+| receiver (`rp1-csi2`) | `frames` | out | the receiver: packed RAW10 or RAW8 frames | 8 of 1280000 bytes, dma-buf (CMA) |
+| front end (`pisp-fe`) | `config` | in | the consumer: one configuration per job | 8 of 632 bytes, the job names one |
+| front end | `statistics` | out | the front end: AWB, AGC and focus statistics per frame | 8 of 23200 bytes, dma-buf |
+| front end | `output0` | out | the front end: the frame, 16-bit Bayer, from the job | 4 of 2052096 bytes, dma-buf |
+| front end | `output1` | out | the front end: a half-size Bayer frame, when the job turns it on | 4 of 516096 bytes, dma-buf |
+| back end (`pisp-be`) | `config` | in | the consumer: one configuration per job | 2 of 16720 bytes (`job_slots` 8) |
+| back end | `input` | in | the consumer: the raw frame the job reads | 2 of 2048000 bytes, dma-buf |
+| back end | `output0` | out | the back end: the job's YCbCr (NV12 by default) frame | 4 of 1600000 bytes, dma-buf |
+| back end | `output1` | out | the back end, when the job turns it on | as the board file gives |
+
+The names are the board file's stream names (`[devices.streams.NAME]`) and the `CameraIsp` methods
+`config_stream`, `statistics_stream`, `input_stream` and `output_stream(n)` answer them.
+
+**From the front end to the back end.** The two are separate streams with separate buffers. Nothing
+in Lemnos hands a front-end `output0` buffer to the back end as its `input`: the consumer carries the
+frame, by mapping the front end's output and writing it into a back-end input buffer. That copy is the
+consumer's; it is not measured on the board. The F2 runs fed the back end from a frame the client wrote
+itself (`lemnos-isp-proof`, `lemnos-be-raw`).
+
+**The receiver's raw frames beside the front end.** The module refuses a receiver stream while the
+front end streams (`lemnos_rp1_csi2.c`, `EBUSY`), and the kernel README says why: in front-end mode the
+CSI-2 channel feeds the front end instead of memory. The stock driver takes the same channel out of
+raw mode in that mode (`fe_csi2_channel`). A consumer that wants packed raw frames and the ISP at once
+does not get them from this block at this commit. The front end's `output0` is the raw frame
+unpacked to 16 bits, which is what a consumer gets alongside the ISP.

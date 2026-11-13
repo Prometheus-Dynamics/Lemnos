@@ -27,6 +27,7 @@ lemnos-driver-orientation = { path = "../../drivers/orientation" }
 lemnos-contract-orientation = { path = "../../contracts/orientation" }
 lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
 lemnos-contract-camera-sensor = { path = "../../contracts/camera-sensor" }
+lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }
 lemnos-driver-hwmon-fan = { path = "../../drivers/hwmon-fan" }
 lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
 lemnos-driver-host-clock = { path = "../../drivers/host-clock" }
