@@ -70,11 +70,58 @@ static LemnosStatus bind(const LemnosHostTable *host, void *binding, LemnosSlice
 }
 
 static LemnosStatus describe(void *driver, LemnosSliceMut items, uint32_t *count) {
+#ifdef WITH_EXTRAS
+    /* One item, with the limits and reading its extra gives. */
+    if (driver != NULL && items.len >= 1) {
+        LemnosPackageItem *out = (LemnosPackageItem *)items.ptr;
+        LemnosPackageItem level = { 0, 0, 0, LEMNOS_ITEM_HAS_MIN | LEMNOS_ITEM_HAS_MAX, 0, 0, 1, 0,
+                                    100, STR("level"), NOTHING };
+        out[0] = level;
+    }
+    *count = driver != NULL ? 1 : 0;
+#else
     (void)driver;
     (void)items;
     *count = 0;
+#endif
     return LEMNOS_OK;
 }
+
+#ifdef LEMNOS_EXTRA_ITEM
+#ifdef WITH_EXTRAS
+/* The manifest's kind and method reading, with no driver. Items: none. */
+static LemnosStatus describe_extra(void *driver, LemnosSliceMut extras, uint32_t *count) {
+    LemnosPackageExtra *out = (LemnosPackageExtra *)extras.ptr;
+    if (driver != NULL) {
+        if (extras.len >= 1) {
+            LemnosPackageExtra item = { .what = LEMNOS_EXTRA_ITEM, .reading = 1,
+                                        .flags = LEMNOS_EXTRA_HAS_READING | LEMNOS_EXTRA_HAS_STEP |
+                                                 LEMNOS_EXTRA_HAS_WARN_LOW |
+                                                 LEMNOS_EXTRA_HAS_WARN_HIGH |
+                                                 LEMNOS_EXTRA_HAS_GROUP,
+                                        .index = 0, .step = 5, .warn_low = 10, .warn_high = 90,
+                                        .text = STR("grp") };
+            out[0] = item;
+        }
+        *count = 1;
+        return LEMNOS_OK;
+    }
+    if (extras.len >= 2) {
+        LemnosPackageExtra kind = { .what = LEMNOS_EXTRA_CONTRACT, .flags = LEMNOS_EXTRA_HAS_GROUP,
+                                    .text = STR("sensor") };
+        LemnosPackageExtra reading = { .what = LEMNOS_EXTRA_METHOD, .reading = 2,
+                                       .flags = LEMNOS_EXTRA_HAS_READING, .method = 1 };
+        out[0] = kind;
+        out[1] = reading;
+    }
+    *count = 2;
+    return LEMNOS_OK;
+}
+#define DESCRIBE_EXTRA describe_extra
+#else
+#define DESCRIBE_EXTRA NULL
+#endif
+#endif
 
 static LemnosStatus health(void *driver, LemnosPackageHealth *health) {
     (void)driver;
@@ -182,7 +229,11 @@ static const LemnosPackageContract CONTRACTS[] = {
 static const LemnosPackageDriver DRIVER = {
     { NAME, { NEEDS, 1 }, { CONTRACTS, 1 } },
     { sizeof(LemnosDriverTable), 0, bind, describe, health, dispatch, tick, caller, caller,
-      drop_driver, NULL, NULL },
+      drop_driver, NULL, NULL
+#ifdef LEMNOS_EXTRA_ITEM
+      , DESCRIBE_EXTRA
+#endif
+    },
 };
 
 static LemnosStatus register_driver(LemnosSlice *driver) {
@@ -200,8 +251,15 @@ static LemnosStatus register_driver(LemnosSlice *driver) {
 #endif
 }
 
+#ifdef FUTURE_LAYOUT
+/* A boundary this host does not know: its layout hash is none of the host's. */
+#define VERSION_HERE { sizeof(LemnosAbiVersion), LEMNOS_PACKAGE_MAJOR, LEMNOS_PACKAGE_MINOR, 0x1234 }
+#else
+#define VERSION_HERE LEMNOS_PACKAGE_VERSION_INIT
+#endif
+
 const LemnosPackageDescriptor lemnos_package = {
     LEMNOS_PACKAGE_MAGIC,
-    LEMNOS_PACKAGE_VERSION_INIT,
+    VERSION_HERE,
     register_driver,
 };

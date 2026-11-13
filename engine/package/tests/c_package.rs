@@ -211,3 +211,108 @@ fn files_too_large_or_unreadable_are_refused_without_being_looked_at() {
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(scanned);
 }
+
+#[test]
+fn a_c_package_gives_its_items_limits_readings_and_kinds() {
+    use lemnos_core::{Item, ItemKind, MethodId, Reading, Unit};
+    let dir = scratch("c-package-extras");
+    let file = c_package(&dir, "extras.so", &["-DWITH_EXTRAS"]);
+    let mut loader = Loader::new(Mode::Open);
+    let package = loader.load(&file).unwrap();
+    // The manifest: the contract's kind, and the method's reading, with no driver bound.
+    let contract = &package.manifest().provides[0];
+    assert_eq!(contract.kind, "sensor");
+    assert_eq!(contract.methods[0].reading, Some(Reading::Switch));
+    assert_eq!(contract.methods[1].reading, None);
+
+    let sim = SimBoard::new();
+    let line = sim.add_line("gpio7");
+    let devices = r#"
+[[devices]]
+id = "thing"
+driver = "c-package"
+uses = { line = "gpio7" }
+config = { base = 40 }
+"#;
+    let (host, _) = host_on(sim, devices, &loader.entries(), Options::default());
+    let description = host.describe(index(&host, "thing")).unwrap();
+    let level = description
+        .find("level")
+        .expect("the item the package describes");
+    // What the built-in driver would describe, field for field.
+    let built_in = Item {
+        kind: ItemKind::Value,
+        name: "level",
+        unit: Unit::One,
+        exponent: 0,
+        min: Some(0),
+        max: Some(100),
+        step: Some(5),
+        warn_low: Some(10),
+        warn_high: Some(90),
+        reading: Some(Reading::Range),
+        group: Some("grp"),
+        method: MethodId {
+            contract: 0,
+            method: 1,
+        },
+        field: None,
+    };
+    assert_eq!(*level, built_in);
+    let _ = line;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_package_built_before_the_extras_loads_and_its_items_read_unknown() {
+    use lemnos_core::{MethodId, Reading};
+    let dir = scratch("c-package-base");
+    let file = common::c_package_base(&dir, "base.so", &["-DWITH_EXTRAS"]);
+    let mut loader = Loader::new(Mode::Open);
+    let package = loader.load(&file).unwrap();
+    let contract = &package.manifest().provides[0];
+    assert_eq!(contract.kind, "other");
+    assert_eq!(contract.methods[0].reading, None::<Reading>);
+
+    let sim = SimBoard::new();
+    let _line = sim.add_line("gpio7");
+    let devices = r#"
+[[devices]]
+id = "thing"
+driver = "c-package"
+uses = { line = "gpio7" }
+config = { base = 40 }
+"#;
+    let (host, _) = host_on(sim, devices, &loader.entries(), Options::default());
+    let description = host.describe(index(&host, "thing")).unwrap();
+    let level = description.find("level").unwrap();
+    // Its own record gives the limits; the reading, step, warning limits and group are unknown.
+    assert_eq!((level.min, level.max), (Some(0), Some(100)));
+    assert_eq!(
+        (
+            level.reading,
+            level.step,
+            level.warn_low,
+            level.warn_high,
+            level.group
+        ),
+        (None, None, None, None, None)
+    );
+    assert_eq!(
+        level.method,
+        MethodId {
+            contract: 0,
+            method: 1
+        }
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_package_with_a_boundary_this_host_does_not_know_is_refused() {
+    let dir = scratch("c-package-future");
+    let file = c_package(&dir, "future.so", &["-DFUTURE_LAYOUT"]);
+    let mut loader = Loader::new(Mode::Open);
+    assert!(matches!(loader.load(&file), Err(Refusal::LayoutMismatch)));
+    let _ = std::fs::remove_dir_all(dir);
+}

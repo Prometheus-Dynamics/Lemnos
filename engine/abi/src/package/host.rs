@@ -6,9 +6,9 @@ use core::ffi::c_void;
 use super::{
     ClocksHost, ClocksTable, DeviceHost, DeviceTable, DmaHost, DmaTable, DriverTable, HostTable,
     I2cHost, I2cTable, InterruptHost, InterruptTable, LineHost, LineTable, NO_TICK, Out,
-    PackageHealth, PackageItem, PackageJobState, PackageSetting, PwmHost, PwmTable, RegistersHost,
-    RegistersTable, ResetHost, ResetTable, Slice, SliceMut, SpiHost, SpiTable, Str, StreamHost,
-    StreamTable, UartHost, UartTable, UsbDeviceHost, UsbDeviceTable, UsbFunctionHost,
+    PackageExtra, PackageHealth, PackageItem, PackageJobState, PackageSetting, PwmHost, PwmTable,
+    RegistersHost, RegistersTable, ResetHost, ResetTable, Slice, SliceMut, SpiHost, SpiTable, Str,
+    StreamHost, StreamTable, UartHost, UartTable, UsbDeviceHost, UsbDeviceTable, UsbFunctionHost,
     UsbFunctionTable,
 };
 use crate::{Handle, Status, guard, guard_or};
@@ -153,6 +153,30 @@ impl Loaded {
         let mut count = 0;
         let status = (self.table.describe)(self.driver, SliceMut::new(items), Out::new(&mut count));
         status.into_result().map(|_| count)
+    }
+
+    /// Fills `extras` and returns how many there are in all. `None` when the package has no
+    /// extras (a package built before them): nothing is written then.
+    pub fn describe_extra(&self, extras: &mut [PackageExtra]) -> Option<Result<u32, Status>> {
+        let describe = self.table.describe_extra?;
+        let mut count = 0;
+        let status = describe(self.driver, SliceMut::new(extras), Out::new(&mut count));
+        Some(status.into_result().map(|_| count))
+    }
+
+    /// The manifest's extras, given with no driver: `None` when the package has none.
+    pub fn manifest_extra(
+        table: &DriverTable,
+        extras: &mut [PackageExtra],
+    ) -> Option<Result<u32, Status>> {
+        let describe = table.describe_extra?;
+        let mut count = 0;
+        let status = describe(
+            core::ptr::null_mut(),
+            SliceMut::new(extras),
+            Out::new(&mut count),
+        );
+        Some(status.into_result().map(|_| count))
     }
 
     pub fn health(&self) -> Result<PackageHealth, Status> {

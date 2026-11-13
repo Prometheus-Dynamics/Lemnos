@@ -274,7 +274,10 @@ mod package {
         assert_eq!(crossed.name.as_str(), "example");
         assert_eq!(crossed.needs.as_slice()[0].kind, bus_code(BusKind::Stream));
         assert_eq!(crossed.needs.as_slice()[1].tag.as_str(), "example.thing/1");
-        assert_eq!(manifest_in(&crossed), Ok(MANIFEST));
+        assert_eq!(
+            manifest_in(&crossed, &manifest_extras(&MANIFEST)),
+            Ok(MANIFEST)
+        );
     }
 
     #[test]
@@ -282,14 +285,14 @@ mod package {
         let good = manifest_out(&MANIFEST);
         let mut nameless = good;
         nameless.name = Str::new("");
-        assert_eq!(manifest_in(&nameless), Err("the driver has no name"));
+        assert_eq!(manifest_in(&nameless, &[]), Err("the driver has no name"));
 
         let mut needs = good.needs.as_slice().to_vec();
         needs[1].tag = Str::new("no-major");
         let mut bad_tag = good;
         bad_tag.needs = Slice::new(std::vec::Vec::leak(needs.clone()));
         assert_eq!(
-            manifest_in(&bad_tag),
+            manifest_in(&bad_tag, &[]),
             Err("a contract tag is not name/major")
         );
 
@@ -298,7 +301,7 @@ mod package {
         let mut bad_bus = good;
         bad_bus.needs = Slice::new(std::vec::Vec::leak(needs));
         assert_eq!(
-            manifest_in(&bad_bus),
+            manifest_in(&bad_bus, &[]),
             Err("a need of a kind this host does not know")
         );
 
@@ -309,7 +312,7 @@ mod package {
         let mut bad_shape = good;
         bad_shape.provides = Slice::new(std::vec::Vec::leak(contracts));
         assert_eq!(
-            manifest_in(&bad_shape),
+            manifest_in(&bad_shape, &[]),
             Err("a shape of a kind this host does not know")
         );
     }

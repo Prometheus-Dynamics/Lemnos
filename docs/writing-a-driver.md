@@ -544,8 +544,15 @@ a fan's duty from its per-mille limits. Where it does not know, it leaves the it
 unknown figure is never a guess.
 
 The wire carries these as an appended trailer on the description ([Wire](wire.md#description)).
-A driver package does not yet carry the reading, step, limit, group or contract kind: its items read
-as unknown for them until its item table is extended ([the package form](#the-package-form)).
+A driver package carries them too. Its items' reading, step, warning limits and group, its contracts'
+kinds and its methods' readings cross in the package's `PackageExtra` table, which is a separate table
+so that the item table keeps its size. Each of them is given by the same declarations as a built-in
+driver's, so a packaged driver describes what the same driver built in describes.
+
+A package built before that table ([the package form](#the-package-form)) loads with the
+extras absent: its contracts are `other`, and its items have no reading, step, limit or group, but
+keep their own range and address. A package built against a boundary this host does not know is
+refused with the layout mismatch, before any of its code runs.
 
 ## Compatibility: what must match, and what need not
 

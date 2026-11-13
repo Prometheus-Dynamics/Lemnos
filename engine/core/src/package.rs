@@ -18,11 +18,13 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use core::time::Duration;
 
 use lemnos_abi::package::{
-    BUFFERS_HANDLES, BUFFERS_PLAIN, DRIVER_JOBS, DRIVER_TICKS, DRIVER_TRACKS_CALLERS, Fd,
-    HEALTH_DEGRADED, HEALTH_FAILED, HEALTH_GONE, HEALTH_OK, HostTable, ITEM_HAS_FIELD,
-    ITEM_HAS_MAX, ITEM_HAS_MIN, MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, METHOD_JOB, NEED_DEVICE,
-    NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageContract, PackageControlSetup, PackageDmaBuffer,
-    PackageDriver, PackageEdge, PackageField, PackageFrame, PackageHealth, PackageInstance,
+    BUFFERS_HANDLES, BUFFERS_PLAIN, DRIVER_JOBS, DRIVER_TICKS, DRIVER_TRACKS_CALLERS,
+    EXTRA_CONTRACT, EXTRA_HAS_GROUP, EXTRA_HAS_READING, EXTRA_HAS_STEP, EXTRA_HAS_WARN_HIGH,
+    EXTRA_HAS_WARN_LOW, EXTRA_ITEM, EXTRA_METHOD, Fd, HEALTH_DEGRADED, HEALTH_FAILED, HEALTH_GONE,
+    HEALTH_OK, HostTable, ITEM_HAS_FIELD, ITEM_HAS_MAX, ITEM_HAS_MIN, MAX_ISO_PACKETS,
+    MAX_TRANSFER_STEPS, METHOD_JOB, NEED_DEVICE, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out,
+    PackageContract, PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge,
+    PackageExtra, PackageField, PackageFrame, PackageHealth, PackageInstance,
     PackageInterruptEvent, PackageIsoPacket, PackageItem, PackageJobState, PackageLineConfig,
     PackageManifest, PackageMethod, PackageNeed, PackagePwmConfig, PackageSetting, PackageShape,
     PackageSpiSegment, PackageTransfer, PackageUsbEvent, SETTING_BOOL, SETTING_FLOAT, SETTING_INT,
@@ -51,7 +53,7 @@ use crate::{
     BusKind, CallerId, ClocksHandle, Config, ConfigValue, ContractInfo, Description, DmaHandle,
     Driver, ErrorKind, Field, Health, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line,
     LocalCaller, Manifest, MethodId, MethodInfo, Need, NeedKind, Param, Provider, Pwm, RawSpiBus,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Shape, Spi, Status,
+    Reading, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Shape, Spi, Status,
     StreamHandle, Tag, Uart, Unit, UsbDeviceHandle, UsbFunctionHandle,
 };
 
@@ -533,6 +535,70 @@ fn item_out(item: &Item) -> PackageItem {
     }
 }
 
+/// What an item carries beyond [`PackageItem`], as a [`PackageExtra`] at `index`, or `None` when
+/// it carries none of it.
+fn item_extra_out(index: usize, item: &Item) -> Option<PackageExtra> {
+    let mut extra = PackageExtra {
+        index: index as u32,
+        ..PackageExtra::EMPTY
+    };
+    extra.what = EXTRA_ITEM;
+    if let Some(reading) = item.reading {
+        extra.reading = reading.code();
+        extra.flags |= EXTRA_HAS_READING;
+    }
+    if let Some(step) = item.step {
+        extra.step = step;
+        extra.flags |= EXTRA_HAS_STEP;
+    }
+    if let Some(warn_low) = item.warn_low {
+        extra.warn_low = warn_low;
+        extra.flags |= EXTRA_HAS_WARN_LOW;
+    }
+    if let Some(warn_high) = item.warn_high {
+        extra.warn_high = warn_high;
+        extra.flags |= EXTRA_HAS_WARN_HIGH;
+    }
+    if let Some(group) = item.group {
+        extra.text = Str::new(group);
+        extra.flags |= EXTRA_HAS_GROUP;
+    }
+    (extra.flags != 0).then_some(extra)
+}
+
+/// A manifest's contract kinds and method readings, as [`PackageExtra`]s: the entries
+/// [`DriverTable::describe_extra`](lemnos_abi::package::DriverTable) gives with a null driver.
+pub fn manifest_extras(manifest: &Manifest) -> Vec<PackageExtra> {
+    let mut extras = Vec::new();
+    for (contract, info) in manifest.provides.iter().enumerate() {
+        let Ok(contract) = u8::try_from(contract) else {
+            break;
+        };
+        if info.kind != "other" {
+            extras.push(PackageExtra {
+                what: EXTRA_CONTRACT,
+                contract,
+                flags: EXTRA_HAS_GROUP,
+                text: Str::new(info.kind),
+                ..PackageExtra::EMPTY
+            });
+        }
+        for method in info.methods {
+            if let Some(reading) = method.reading {
+                extras.push(PackageExtra {
+                    what: EXTRA_METHOD,
+                    reading: reading.code(),
+                    flags: EXTRA_HAS_READING,
+                    contract,
+                    method: method.id,
+                    ..PackageExtra::EMPTY
+                });
+            }
+        }
+    }
+    extras
+}
+
 // ---- The same, as the host reads it ----
 
 fn shape_in(shape: &PackageShape, depth: u32) -> core::result::Result<Shape, &'static str> {
@@ -591,7 +657,14 @@ fn tag_in(tag: &'static str) -> core::result::Result<Tag, &'static str> {
 
 /// The manifest a package registered, checked, as the host's own type. What it points to is
 /// kept for good: call it once per package.
-pub fn manifest_in(manifest: &PackageManifest) -> core::result::Result<Manifest, &'static str> {
+///
+/// `extras` are the package's [`PackageExtra`]s for its manifest (see [`manifest_extras`] on the
+/// package's side): the contract kinds and method readings. Without them every contract is
+/// `other` and every method has no reading.
+pub fn manifest_in(
+    manifest: &PackageManifest,
+    extras: &[PackageExtra],
+) -> core::result::Result<Manifest, &'static str> {
     let name = manifest.name.as_str();
     if name.is_empty() {
         return Err("the driver has no name");
@@ -616,7 +689,17 @@ pub fn manifest_in(manifest: &PackageManifest) -> core::result::Result<Manifest,
         return Err("too many contracts");
     }
     let mut provides = Vec::new();
-    for contract in manifest.provides.as_slice() {
+    for (position, contract) in manifest.provides.as_slice().iter().enumerate() {
+        let position = position as u8;
+        let kind = extras
+            .iter()
+            .find(|e| {
+                e.what == EXTRA_CONTRACT && e.contract == position && e.flags & EXTRA_HAS_GROUP != 0
+            })
+            .map_or("other", |e| {
+                let text: Str<'static> = e.text;
+                text.as_str()
+            });
         let mut methods = Vec::new();
         for method in contract.methods.as_slice() {
             let mut params = Vec::new();
@@ -633,12 +716,20 @@ pub fn manifest_in(manifest: &PackageManifest) -> core::result::Result<Manifest,
                 returns: shape_in(&method.returns, MAX_SHAPE_DEPTH)?,
                 has_out_buffer: method.has_out_buffer != 0,
                 job: method.flags & METHOD_JOB != 0,
-                reading: None,
+                reading: extras
+                    .iter()
+                    .find(|e| {
+                        e.what == EXTRA_METHOD
+                            && e.contract == position
+                            && e.method == method.id
+                            && e.flags & EXTRA_HAS_READING != 0
+                    })
+                    .and_then(|e| Reading::from_code(e.reading)),
             });
         }
         provides.push(ContractInfo {
             tag: tag_in(contract.tag.as_str())?,
-            kind: "other",
+            kind,
             methods: Vec::leak(methods),
         });
     }
@@ -665,6 +756,14 @@ pub fn health_in(health: PackageHealth) -> Health {
 /// One item a package described, as the host's own type. `None` for a kind of item this host
 /// does not know.
 pub fn item_in(item: &PackageItem) -> Option<Item> {
+    item_with(item, None)
+}
+
+/// One item a package described, with what its [`PackageExtra`] says (`None` when it said
+/// nothing). A reading code this host does not know is no reading.
+pub fn item_with(item: &PackageItem, extra: Option<&PackageExtra>) -> Option<Item> {
+    let extra = extra.filter(|extra| extra.what == EXTRA_ITEM);
+    let has = |flag: u8| extra.is_some_and(|extra| extra.flags & flag != 0);
     Some(Item {
         kind: *ITEM_KINDS.get(usize::from(item.kind))?,
         name: item.name.as_str(),
@@ -675,11 +774,13 @@ pub fn item_in(item: &PackageItem) -> Option<Item> {
         exponent: item.exponent,
         min: (item.flags & ITEM_HAS_MIN != 0).then_some(item.min),
         max: (item.flags & ITEM_HAS_MAX != 0).then_some(item.max),
-        step: None,
-        warn_low: None,
-        warn_high: None,
-        reading: None,
-        group: None,
+        step: has(EXTRA_HAS_STEP).then(|| extra.map_or(0, |e| e.step)),
+        warn_low: has(EXTRA_HAS_WARN_LOW).then(|| extra.map_or(0, |e| e.warn_low)),
+        warn_high: has(EXTRA_HAS_WARN_HIGH).then(|| extra.map_or(0, |e| e.warn_high)),
+        reading: has(EXTRA_HAS_READING)
+            .then(|| extra.and_then(|e| Reading::from_code(e.reading)))
+            .flatten(),
+        group: has(EXTRA_HAS_GROUP).then(|| extra.map_or("", |e| e.text.as_str())),
         method: MethodId {
             contract: item.contract,
             method: item.method,
@@ -1667,6 +1768,32 @@ impl<D: Driver + Send + 'static> PackageInstance for Exported<D> {
         }
         let left_out = description.items().count() - count + description.dropped();
         (count + left_out) as u32
+    }
+
+    fn describe_extra(&self, extras: &mut [PackageExtra]) -> u32 {
+        let mut description = Description::new();
+        self.driver.describe(&mut description);
+        let mut count = 0;
+        for (index, item) in description.items().enumerate() {
+            if let Some(extra) = item_extra_out(index, item) {
+                if let Some(slot) = extras.get_mut(count) {
+                    *slot = extra;
+                }
+                count += 1;
+            }
+        }
+        count as u32
+    }
+
+    fn manifest_extra(extras: &mut [PackageExtra]) -> u32
+    where
+        Self: Sized,
+    {
+        let all = manifest_extras(&D::MANIFEST);
+        for (slot, extra) in extras.iter_mut().zip(&all) {
+            *slot = *extra;
+        }
+        all.len() as u32
     }
 
     fn health(&self) -> PackageHealth {
