@@ -52,7 +52,7 @@ fn max_len(shape: &Shape) -> Option<usize> {
         Shape::Option(inner) => 1 + max_len(inner)?,
         Shape::Array(inner, count) => max_len(inner)? * *count as usize,
         Shape::Record(fields) => {
-            let mut total = 0;
+            let mut total = 4;
             for field in *fields {
                 total += max_len(&field.shape)?;
             }
@@ -202,8 +202,10 @@ fn an_unknown_order_or_packing_is_refused() {
 
 #[test]
 fn a_bad_packing_inside_a_layout_is_refused() {
-    let mut bytes = [0u8; 18];
-    bytes[9] = 2; // packing, after width (4), height (4) and bit depth (1)
+    // A block: its u32 length (18 body bytes), then the layout's fields.
+    let mut bytes = [0u8; 22];
+    bytes[..4].copy_from_slice(&18u32.to_le_bytes());
+    bytes[13] = 2; // packing, after the block length (4), width (4), height (4) and bit depth (1)
     assert_eq!(
         FrameLayout::decode(&mut Reader::new(&bytes)).err(),
         Some(Status::INVALID_ARGUMENT)

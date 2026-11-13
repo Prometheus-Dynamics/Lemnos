@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use lemnos_linux_sys::scm::send_with_fds;
 use lemnos_wire::ring::Layout;
-use lemnos_wire::{Appended, Frame, append, decode, encode_description, health, state};
+use lemnos_wire::{Frame, Tail, append, decode, encode_description, health, state};
 
 /// What the fake answers StreamOpen with: a layout, how many descriptors it claims, and the
 /// descriptors it actually sends.
@@ -169,10 +169,11 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     let answer = if wanted == 0 { version } else { wanted };
                     send(
                         Frame::Welcome {
-                            layout: match control.welcome_layout.load(Ordering::SeqCst) {
-                                0 => lemnos_wire::LAYOUT_HASH,
+                            core: match control.welcome_layout.load(Ordering::SeqCst) {
+                                0 => lemnos_wire::CORE_HASH,
                                 other => other,
                             },
+                            parts: lemnos_wire::Tail(&lemnos_wire::PART_BYTES[..]),
                             lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
                             version: answer,
                             features: control.features.load(Ordering::SeqCst),
@@ -221,7 +222,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             state: state::RUNNING,
                             health: health::OK,
                             reason: "",
-                            link: Appended("two"),
+                            link: Tail("two"),
                         },
                         &mut out,
                     );
@@ -235,7 +236,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             state: state::BACKOFF,
                             health: health::FAILED,
                             reason: "bad",
-                            link: Appended(""),
+                            link: Tail(""),
                         },
                         &mut out,
                     );

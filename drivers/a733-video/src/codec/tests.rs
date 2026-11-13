@@ -96,7 +96,7 @@ fn board(driver: &str) -> String {
          [[devices]]\nid = \"engine\"\ndriver = \"{driver}\"\n\
          config = {{ device = \"/nonexistent/cedar_dev_ve2\" }}\n\
          [devices.streams.jobs]\nbuffers = 4\nbuffer_bytes = 1024\n\
-         job_slots = 8\njob_bytes = 20\n"
+         job_slots = 8\njob_bytes = 24\n"
     )
 }
 

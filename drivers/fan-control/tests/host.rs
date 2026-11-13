@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lemnos_contract_fan::Fan;
-use lemnos_contract_fan_control::{Point, State};
+use lemnos_contract_fan_control::{POINT_BYTES, Point, State};
 use lemnos_contract_temperature::Temperature;
 use lemnos_core::{
     Config, Decode, Encode, Health, Lifecycle, MethodId, Reader, Result, Status, Writer, contract,
@@ -397,7 +397,7 @@ fn a_curve_set_through_the_contract_takes_effect_and_a_restart_forgets_it() {
     rig.second();
     assert_eq!(rig.duty(), 350, "the board's curve at 35 degrees");
 
-    let mut points = [0u8; 16];
+    let mut points = [0u8; 2 * POINT_BYTES];
     let n = Point::write_all(
         &[
             Point {

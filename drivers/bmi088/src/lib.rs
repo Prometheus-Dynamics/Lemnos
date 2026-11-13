@@ -95,7 +95,7 @@ pub const DEFAULT_ACCEL_ADDRESS: u8 = 0x18;
 pub const DEFAULT_GYRO_ADDRESS: u8 = 0x68;
 
 /// Bytes of one batch record (see the contract crates).
-const RECORD_LEN: usize = 20;
+const RECORD_LEN: usize = 4 + 8 + (4 + 3 * 4);
 /// Ring slots: each die's FIFO depth in frames.
 const ACC_RING: usize = chip::ACC_FIFO_FRAMES;
 const GYRO_RING: usize = chip::GYRO_FIFO_FRAMES;

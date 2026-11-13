@@ -10,13 +10,20 @@ pub enum Error {
     Refused { status: Status, text: String },
     /// The service speaks another version of the protocol.
     Version { ours: u16, theirs: u16 },
-    /// The service was built from another Lemnos revision: its wire layout hash is not this
-    /// client's. Nothing after the handshake's prefix was read. The client and the service must
-    /// come from the same revision.
+    /// The service's core protocol differs from this client's: its core hash is not this
+    /// client's. Nothing after the handshake's prefix was read. Only the core is compared here;
+    /// see `docs/writing-a-driver.md`.
     LayoutMismatch {
         ours: u64,
         theirs: u64,
         theirs_lemnos: String,
+    },
+    /// A part of the wire (`part`, one of the feature parts) differs from this client's. Refused
+    /// at the handshake, whatever the core. Nothing was called.
+    PartMismatch {
+        part: &'static str,
+        ours: u64,
+        theirs: u64,
     },
     /// The device's description gives contract `contract` another encoding hash than this
     /// client was built with: an argument or result type differs. Nothing was called.
@@ -63,7 +70,11 @@ impl core::fmt::Display for Error {
                 theirs_lemnos,
             } => write!(
                 f,
-                "the service was built from another Lemnos revision (Lemnos {theirs_lemnos}, wire layout {theirs:#018x}); this client is Lemnos {LEMNOS} with wire layout {ours:#018x}. The client and the service must come from the same Lemnos revision"
+                "core protocol differs (hash {ours:#018x} here, {theirs:#018x} there; the service is Lemnos {theirs_lemnos}, this client is Lemnos {LEMNOS})"
+            ),
+            Self::PartMismatch { part, ours, theirs } => write!(
+                f,
+                "wire part `{part}` differs (hash {ours:#018x} here, {theirs:#018x} there)"
             ),
             Self::ContractMismatch {
                 contract,
@@ -103,9 +114,9 @@ impl From<Error> for Status {
             Error::Disconnected => Status::NO_DEVICE,
             Error::Refused { status, .. } => status,
             Error::Version { .. } => Status::NOT_SUPPORTED,
-            Error::LayoutMismatch { .. } | Error::ContractMismatch { .. } => {
-                Status::VERSION_MISMATCH
-            }
+            Error::LayoutMismatch { .. }
+            | Error::PartMismatch { .. }
+            | Error::ContractMismatch { .. } => Status::VERSION_MISMATCH,
             Error::Wire(_) => Status::IO,
             Error::Stale => Status::AGAIN,
             Error::TimedOut => Status::TIMED_OUT,

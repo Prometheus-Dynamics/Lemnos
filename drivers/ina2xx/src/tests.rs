@@ -431,7 +431,8 @@ fn dispatch_serves_the_reading_and_refuses_other_methods() {
         Driver::dispatch(&mut driver, read, &[], &mut reply),
         Status::OK
     );
-    assert_eq!(reply.len(), 16);
+    // A block (4), then four f32s.
+    assert_eq!(reply.len(), 4 + 4 * 4);
     let other = MethodId {
         contract: 0,
         method: 9,

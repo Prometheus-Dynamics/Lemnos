@@ -59,7 +59,7 @@ fn max_len(shape: &Shape) -> Option<usize> {
         Shape::Option(inner) => 1 + max_len(inner)?,
         Shape::Array(inner, count) => max_len(inner)? * *count as usize,
         Shape::Record(fields) => {
-            let mut total = 0;
+            let mut total = 4;
             for field in *fields {
                 total += max_len(&field.shape)?;
             }
@@ -156,7 +156,7 @@ fn every_type_round_trips() {
 #[test]
 fn a_job_is_a_fixed_small_record() {
     assert_eq!(max_len(&ConvertJob::SHAPE), Some(JOB_BYTES));
-    assert_eq!(JOB_BYTES, 48);
+    assert_eq!(JOB_BYTES, 60);
 }
 
 #[derive(Default)]

@@ -94,6 +94,22 @@ impl<'a> Writer<'a> {
         self.len = end;
         Ok(())
     }
+
+    /// Starts a length-prefixed block: writes a placeholder `u32` and returns where it is. Pair
+    /// it with [`end_block`](Self::end_block), which writes the bytes that follow it.
+    pub fn begin_block(&mut self) -> Result<usize> {
+        let at = self.len;
+        self.write(&[0; 4])?;
+        Ok(at)
+    }
+
+    /// Ends the block [`begin_block`](Self::begin_block) started at `at`, writing its length.
+    pub fn end_block(&mut self, at: usize) -> Result<()> {
+        let body = self.len - at - 4;
+        let body = u32::try_from(body).map_err(|_| Status::INVALID_ARGUMENT)?;
+        self.buf[at..at + 4].copy_from_slice(&body.to_le_bytes());
+        Ok(())
+    }
 }
 
 /// Reads what a [`Writer`] wrote.
@@ -120,6 +136,13 @@ impl<'a> Reader<'a> {
         Ok(head)
     }
 
+    /// Reads a block written by [`Writer::begin_block`] and [`Writer::end_block`]: its length,
+    /// then exactly that many bytes, as a reader of their own.
+    pub fn block(&mut self) -> Result<Reader<'a>> {
+        let len = u32::from_le_bytes(self.array()?) as usize;
+        self.take(len).map(Reader::new)
+    }
+
     fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
         let mut out = [0; N];
         out.copy_from_slice(self.take(N)?);
@@ -130,6 +153,10 @@ impl<'a> Reader<'a> {
 /// A value that can be sent.
 pub trait Encode {
     const SHAPE: Shape;
+    /// True for a field added after the first form of its frame or struct: one a reader from
+    /// before it does not know. Such a field is left out of the base-shape hash. See
+    /// `docs/writing-a-driver.md`.
+    const ADDED: bool = false;
     fn encode(&self, out: &mut Writer<'_>) -> Result<()>;
 }
 
@@ -291,18 +318,44 @@ impl Encode for Vector3 {
         },
     ]);
     fn encode(&self, out: &mut Writer<'_>) -> Result<()> {
+        let at = out.begin_block()?;
         self.x.encode(out)?;
         self.y.encode(out)?;
-        self.z.encode(out)
+        self.z.encode(out)?;
+        out.end_block(at)
     }
 }
 
 impl Decode<'_> for Vector3 {
     fn decode(from: &mut Reader<'_>) -> Result<Self> {
+        let mut body = from.block()?;
         Ok(Self {
-            x: f32::decode(from)?,
-            y: f32::decode(from)?,
-            z: f32::decode(from)?,
+            x: f32::decode(&mut body)?,
+            y: f32::decode(&mut body)?,
+            z: f32::decode(&mut body)?,
         })
+    }
+}
+
+/// A trailing value: one a frame or struct from before it does not carry. Absent on the wire
+/// (nothing left to read), it decodes as `T::default()`. Its [`Encode::ADDED`] is true, so it is
+/// outside the base shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Tail<T>(pub T);
+
+impl<T: Encode> Encode for Tail<T> {
+    const SHAPE: Shape = T::SHAPE;
+    const ADDED: bool = true;
+    fn encode(&self, out: &mut Writer<'_>) -> Result<()> {
+        self.0.encode(out)
+    }
+}
+
+impl<'a, T: Decode<'a> + Default> Decode<'a> for Tail<T> {
+    fn decode(from: &mut Reader<'a>) -> Result<Self> {
+        if from.remaining() == 0 {
+            return Ok(Self(T::default()));
+        }
+        T::decode(from).map(Self)
     }
 }

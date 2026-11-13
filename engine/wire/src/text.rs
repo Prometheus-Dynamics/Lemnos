@@ -119,9 +119,15 @@ fn encode<'w, S: AsRef<str> + 'w>(
             }
         }
         OwnedShape::Record(fields) => {
+            // A record is a block: its u32 length, then its fields.
+            let at = out.len();
+            out.extend_from_slice(&[0; 4]);
             for (_, field) in fields {
                 encode(field, words, out)?;
             }
+            let body = u32::try_from(out.len() - at - 4)
+                .map_err(|_| "the record is too long".to_string())?;
+            out[at..at + 4].copy_from_slice(&body.to_le_bytes());
         }
     }
     Ok(())
@@ -227,6 +233,9 @@ fn decode(
             into.push(']');
         }
         OwnedShape::Record(fields) => {
+            // A record is a block: its length, then its fields, read from the block alone.
+            let n = u32::from_le_bytes(from.array()?) as usize;
+            let mut body = Cursor(from.take(n)?);
             into.push('{');
             for (i, (name, field)) in fields.iter().enumerate() {
                 if i > 0 {
@@ -234,7 +243,7 @@ fn decode(
                 }
                 into.push_str(name);
                 into.push_str(": ");
-                decode(field, from, into, scale)?;
+                decode(field, &mut body, into, scale)?;
             }
             into.push('}');
         }
@@ -260,6 +269,8 @@ fn skip_to<'s>(
     let (Some(field), OwnedShape::Record(fields)) = (field, shape) else {
         return Ok(shape);
     };
+    // The record's block length comes first.
+    from.array::<4>()?;
     let mut discard = String::new();
     for (name, inner) in fields {
         if name == field {
@@ -466,7 +477,9 @@ mod tests {
 
     #[test]
     fn a_record_prints_with_its_field_names() {
-        let mut reply = vec![3];
+        // The record's block: its length (5), then x and y.
+        let mut reply = 5u32.to_le_bytes().to_vec();
+        reply.push(3);
         reply.extend(1.5f32.to_le_bytes());
         assert_eq!(
             render(&record(), false, &reply, &item("", 0, None)).unwrap(),
@@ -476,7 +489,9 @@ mod tests {
 
     #[test]
     fn an_item_can_show_one_field_scaled_with_its_unit() {
-        let mut reply = vec![3];
+        // The record's block: its length (5), then x and y.
+        let mut reply = 5u32.to_le_bytes().to_vec();
+        reply.push(3);
         reply.extend(1.5f32.to_le_bytes());
         assert_eq!(
             render(&record(), false, &reply, &item("V", 1, Some("y"))).unwrap(),

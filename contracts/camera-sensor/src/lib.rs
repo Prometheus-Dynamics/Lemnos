@@ -133,15 +133,18 @@ impl Encode for GainLaw {
     const SHAPE: Shape = Shape::Record(GAIN_LAW_FIELDS);
     fn encode(&self, out: &mut Writer<'_>) -> Result<()> {
         let (tag, param) = self.parts();
+        let at = out.begin_block()?;
         tag.encode(out)?;
-        param.encode(out)
+        param.encode(out)?;
+        out.end_block(at)
     }
 }
 
 impl Decode<'_> for GainLaw {
     fn decode(from: &mut Reader<'_>) -> Result<Self> {
-        let tag = u8::decode(from)?;
-        let param = u32::decode(from)?;
+        let mut body = from.block()?;
+        let tag = u8::decode(&mut body)?;
+        let param = u32::decode(&mut body)?;
         match (tag, param) {
             (0, 0) => Ok(Self::Linear),
             (1, full) if full > 0 => Ok(Self::Reciprocal { full }),

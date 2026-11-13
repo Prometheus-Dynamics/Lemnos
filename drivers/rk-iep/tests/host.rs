@@ -91,7 +91,7 @@ fn board(driver: &str, dma_buf: bool) -> String {
          [[devices]]\nid = \"iep\"\ndriver = \"{driver}\"\n\
          config = {{ node = \"/nonexistent/mpp_service\" }}\n\
          [devices.streams.jobs]\n{memory}buffers = 12\nbuffer_bytes = {BYTES}\n\
-         job_slots = 8\njob_bytes = 20\n"
+         job_slots = 8\njob_bytes = 24\n"
     )
 }
 

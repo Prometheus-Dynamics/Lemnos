@@ -8,7 +8,7 @@
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use lemnos_contract_npu::{Npu, RESULT_BYTES, RunJob, RunResult, RunStatus};
+use lemnos_contract_npu::{JOB_BYTES, Npu, RESULT_BYTES, RunJob, RunResult, RunStatus};
 use lemnos_core::{Decode, Encode, Reader, Status, Writer};
 use lemnos_hal::mock::MockStream;
 use lemnos_measure::test_alloc::allocations;
@@ -209,7 +209,7 @@ fn stream() -> MockStream {
 }
 
 fn post(stream: &MockStream, job: RunJob) {
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0u8; JOB_BYTES];
     let mut writer = Writer::new(&mut bytes);
     job.encode(&mut writer).unwrap();
     let used = writer.len();
@@ -219,9 +219,11 @@ fn post(stream: &MockStream, job: RunJob) {
 fn completion(stream: &MockStream) -> (u64, RunStatus) {
     let frame = stream.take_frame().expect("a completion");
     assert_eq!(frame.bytes as usize, RESULT_BYTES);
-    let status = RunResult::decode(&mut Reader::new(&stream.contents(frame.buffer)[..1]))
-        .unwrap()
-        .status;
+    let status = RunResult::decode(&mut Reader::new(
+        &stream.contents(frame.buffer)[..RESULT_BYTES],
+    ))
+    .unwrap()
+    .status;
     stream.return_buffer(frame.buffer);
     (frame.identity, status)
 }

@@ -50,7 +50,8 @@ impl Raw {
 
     fn greet(&mut self) {
         self.send(Frame::Hello {
-            layout: lemnos_wire::LAYOUT_HASH,
+            core: lemnos_wire::CORE_HASH,
+            parts: lemnos_wire::Tail(&lemnos_wire::PART_BYTES[..]),
             lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
             version: VERSION,
             name: "raw",
@@ -331,7 +332,8 @@ fn another_protocol_version_is_refused_and_closed() {
     let running = start();
     let mut raw = Raw::connect(&running);
     raw.send(Frame::Hello {
-        layout: lemnos_wire::LAYOUT_HASH,
+        core: lemnos_wire::CORE_HASH,
+        parts: lemnos_wire::Tail(&lemnos_wire::PART_BYTES[..]),
         lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
         version: VERSION + 1,
         name: "future",
@@ -580,7 +582,8 @@ fn a_client_from_another_lemnos_revision_is_answered_with_the_hosts_layout_and_c
     let running = start();
     let mut raw = Raw::connect(&running);
     raw.send(Frame::Hello {
-        layout: 0x1122_3344_5566_7788,
+        core: 0x1122_3344_5566_7788,
+        parts: lemnos_wire::Tail(&lemnos_wire::PART_BYTES[..]),
         lemnos: lemnos_wire::LemnosName("0.0.1"),
         // A complete Hello from another revision: the daemon refuses on its layout alone.
         version: VERSION,
@@ -590,8 +593,34 @@ fn a_client_from_another_lemnos_revision_is_answered_with_the_hosts_layout_and_c
     raw.with_next(|frame| {
         assert!(matches!(
             frame,
-            Some(Frame::Welcome { layout, lemnos, .. })
-                if layout == lemnos_wire::LAYOUT_HASH && lemnos.0 == lemnos_wire::LEMNOS
+            Some(Frame::Welcome { core, lemnos, .. })
+                if core == lemnos_wire::CORE_HASH && lemnos.0 == lemnos_wire::LEMNOS
+        ));
+    });
+    raw.closes();
+}
+
+#[test]
+fn a_client_whose_part_differs_is_answered_with_the_hosts_parts_and_closed() {
+    let running = start();
+    let mut raw = Raw::connect(&running);
+    // The same core, but the packages part is another build's.
+    let mut parts = lemnos_wire::PART_BYTES;
+    parts[8] ^= 1;
+    raw.send(Frame::Hello {
+        core: lemnos_wire::CORE_HASH,
+        parts: lemnos_wire::Tail(&parts[..]),
+        lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
+        version: VERSION,
+        name: "old-packages",
+        events: false,
+    });
+    raw.with_next(|frame| {
+        assert!(matches!(
+            frame,
+            Some(Frame::Welcome { core, parts, .. })
+                if core == lemnos_wire::CORE_HASH
+                    && parts.0 == &lemnos_wire::PART_BYTES[..]
         ));
     });
     raw.closes();

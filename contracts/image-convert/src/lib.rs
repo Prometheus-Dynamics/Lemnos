@@ -40,7 +40,7 @@ pub struct ImageRef {
 }
 
 /// Encoded size of an [`ImageRef`].
-const IMAGE_BYTES: usize = 4 * 5;
+const IMAGE_BYTES: usize = 4 + 4 * 5;
 
 /// One conversion the block makes.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,7 +61,7 @@ pub struct ConvertJob {
 }
 
 /// Largest encoded [`ConvertJob`], in bytes. The job queue must hold jobs this large.
-pub const JOB_BYTES: usize = 8 + 2 * IMAGE_BYTES;
+pub const JOB_BYTES: usize = 4 + 8 + 2 * IMAGE_BYTES;
 
 /// What the block takes.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]

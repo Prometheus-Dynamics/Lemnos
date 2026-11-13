@@ -36,7 +36,7 @@ config = { vendor = 0x1209, product = 1, interfaces = "interface 0xff 0 0 pipe\n
 buffers = 8
 buffer_bytes = 4096
 job_slots = 16
-job_bytes = 18
+job_bytes = 22
 "#;
 
 fn post(stream: &mut FrameStream, job: Job) {

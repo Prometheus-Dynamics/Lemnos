@@ -97,13 +97,15 @@ What a client can do:
 
 ### Versions at connect
 
-The first frame each side sends carries the build's layout hash and its Lemnos version (see
-[`wire.md`](wire.md#the-handshake)). A client that finds the service's hash different from its own
-refuses at once with `Error::LayoutMismatch`, in every form: `Client::connect`, `Session::connect`,
-`AsyncClient::connect`, and the C API, which returns `VERSION_MISMATCH` with the same text. The text
-names both layout hashes and both Lemnos versions. The client and the service must come from the
-same Lemnos revision: a client built from one revision can't talk to a daemon built from another,
-and that is what the refusal is for. Nothing else is checked for a refused connection.
+The first frame each side sends carries the build's core hash and its Lemnos version, then the
+hashes of its wire parts (see [`wire.md`](wire.md#core-and-parts)). A client that finds the
+service's core hash different from its own refuses at once with `Error::LayoutMismatch`, whose text
+is `core protocol differs`, with both hashes and the service's Lemnos version. A part that differs
+is refused with `Error::PartMismatch`, which names the part. Both come in every form:
+`Client::connect`, `Session::connect`, `AsyncClient::connect`, and the C API, which returns
+`VERSION_MISMATCH` with the same text. Only the core and the parts are compared at connect. The
+Lemnos version string is not: a client and a service from different revisions interoperate when
+the interface they use is the same. Nothing else is checked for a refused connection.
 
 A typed client (`Client::open::<C>`) also checks the contract's encoding hash, once, when it opens:
 a device whose argument or result types differ from the client's is refused with

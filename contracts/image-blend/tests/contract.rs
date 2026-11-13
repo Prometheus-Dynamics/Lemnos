@@ -51,7 +51,7 @@ fn max_len(shape: &Shape) -> Option<usize> {
         Shape::Option(inner) => 1 + max_len(inner)?,
         Shape::Array(inner, count) => max_len(inner)? * *count as usize,
         Shape::Record(fields) => {
-            let mut total = 0;
+            let mut total = 4;
             for field in *fields {
                 total += max_len(&field.shape)?;
             }
@@ -151,13 +151,16 @@ fn every_type_round_trips() {
 #[test]
 fn a_job_is_a_fixed_small_record() {
     assert_eq!(max_len(&BlendJob::SHAPE), Some(JOB_BYTES));
-    assert_eq!(JOB_BYTES, 69);
+    assert_eq!(JOB_BYTES, 85);
 }
 
 #[test]
 fn an_unknown_operation_is_refused() {
+    // A block of the job's body (its length after the 4-byte prefix), then the identity (8)
+    // and the operation.
     let mut bytes = [0u8; JOB_BYTES];
-    bytes[8] = 200;
+    bytes[..4].copy_from_slice(&((JOB_BYTES - 4) as u32).to_le_bytes());
+    bytes[12] = 200;
     assert_eq!(
         BlendJob::decode(&mut Reader::new(&bytes)).err(),
         Some(Status::INVALID_ARGUMENT)

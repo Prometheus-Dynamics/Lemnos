@@ -73,7 +73,8 @@ fn no_path_leaks_a_descriptor() {
         let mut out = Vec::new();
         for frame in [
             Frame::Hello {
-                layout: lemnos_wire::LAYOUT_HASH,
+                core: lemnos_wire::CORE_HASH,
+                parts: lemnos_wire::Tail(&lemnos_wire::PART_BYTES[..]),
                 lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
                 version: VERSION,
                 name: "x",
@@ -128,7 +129,8 @@ fn no_path_leaks_a_descriptor() {
         let mut out = Vec::new();
         for frame in [
             Frame::Hello {
-                layout: lemnos_wire::LAYOUT_HASH,
+                core: lemnos_wire::CORE_HASH,
+                parts: lemnos_wire::Tail(&lemnos_wire::PART_BYTES[..]),
                 lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
                 version: VERSION,
                 name: "x",

@@ -182,7 +182,7 @@ fn a_service_from_another_lemnos_revision_is_refused_at_connect() {
     assert_eq!(
         error,
         Error::LayoutMismatch {
-            ours: lemnos_wire::LAYOUT_HASH,
+            ours: lemnos_wire::CORE_HASH,
             theirs: 0xdead_beef_0bad_f00d,
             theirs_lemnos: lemnos_wire::LEMNOS.to_string(),
         }
@@ -190,10 +190,10 @@ fn a_service_from_another_lemnos_revision_is_refused_at_connect() {
     let text = error.to_string();
     assert!(text.contains("0xdeadbeef0badf00d"), "{text}");
     assert!(
-        text.contains(&format!("{:#018x}", lemnos_wire::LAYOUT_HASH)),
+        text.contains(&format!("{:#018x}", lemnos_wire::CORE_HASH)),
         "{text}"
     );
-    assert!(text.contains("same Lemnos revision"), "{text}");
+    assert!(text.contains("core protocol differs"), "{text}");
     assert_eq!(lemnos_core::Status::from(error), Status::VERSION_MISMATCH);
 }
 

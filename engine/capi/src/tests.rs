@@ -208,7 +208,8 @@ fn a_service_from_another_lemnos_revision_is_refused_through_the_c_surface() {
         let mut out = Vec::new();
         append(
             &Frame::Welcome {
-                layout: 0xdead_beef_0bad_f00d,
+                core: 0xdead_beef_0bad_f00d,
+                parts: lemnos_wire::Tail(&lemnos_wire::PART_BYTES[..]),
                 lemnos: LemnosName("9.9.9"),
                 version: VERSION,
                 features: 0,
@@ -238,11 +239,11 @@ fn a_service_from_another_lemnos_revision_is_refused_through_the_c_surface() {
     let text = TEXT.lock().unwrap().clone();
     assert!(text.contains("0xdeadbeef0badf00d"), "{text}");
     assert!(
-        text.contains(&format!("{:#018x}", lemnos_wire::LAYOUT_HASH)),
+        text.contains(&format!("{:#018x}", lemnos_wire::CORE_HASH)),
         "{text}"
     );
     assert!(text.contains("9.9.9"), "{text}");
-    assert!(text.contains("same Lemnos revision"), "{text}");
+    assert!(text.contains("core protocol differs"), "{text}");
 }
 
 /// The named fields of `struct name` in `source`, in order: the ones its declaration gives in

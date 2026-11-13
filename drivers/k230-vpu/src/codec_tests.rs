@@ -43,7 +43,7 @@ fn board(driver: &str, dma_buf: bool) -> String {
          [[devices]]\nid = \"vpu\"\ndriver = \"{driver}\"\n\
          config = {{ device = \"/nonexistent/video-codec\" }}\n\
          [devices.streams.jobs]\n{memory}buffers = 16\nbuffer_bytes = {BYTES}\n\
-         job_slots = 16\njob_bytes = 20\n"
+         job_slots = 16\njob_bytes = 24\n"
     )
 }
 
