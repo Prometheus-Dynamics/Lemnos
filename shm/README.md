@@ -55,7 +55,7 @@ the same way by every party, so there is no stored offset to point somewhere els
 
 | Word | Holds | Written by |
 | --- | --- | --- |
-| 0 | Magic: `ORIONRG1`, kept from where the ring was first written so existing rings attach | Owner, once, last |
+| 0 | Magic: `SHMRING1` | Owner, once, last |
 | 1 | Layout number: 1 | Owner, once |
 | 2 | Fields (low 32 bits), history (high 32 bits) | Owner, once |
 | 3 | Largest payload in bytes (low 32), expiry in ms (high 32) | Owner, once |
@@ -218,7 +218,7 @@ shared-memory file that is not sealed against shrinking.
 
 | Word | Holds |
 | --- | --- |
-| 0 | Magic: `ORIONPL1` |
+| 0 | Magic: `SHMPOOL1` |
 | 1 | Generation (low 32 bits), buffers (high 32) |
 | 2 to 7 | Reserved, zero |
 | 8 | Tickets: one word per buffer, `uses << 1 | taken back` |

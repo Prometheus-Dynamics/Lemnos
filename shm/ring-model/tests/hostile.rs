@@ -48,7 +48,7 @@ fn a_valid_header_over_random_contents_is_read_safely() {
                 _ => 0,
             };
         }
-        words[0] = u64::from_le_bytes(*b"ORIONRG1");
+        words[0] = u64::from_le_bytes(*b"SHMRING1");
         words[1] = 1;
         words[2] = fields | history << 32;
         words[3] = max_payload;
