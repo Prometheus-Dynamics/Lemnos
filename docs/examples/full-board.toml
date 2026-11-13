@@ -57,6 +57,14 @@ driver = "ws2812"
 bus = "spidev0.0"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
+# The same strip on the RP1 PIO block: a `pio-out` name instead of an SPI device. Needs the PIO
+# block's node (and the kernel module, or the stock node).
+[[devices]]
+id = "ring-pixels-pio"
+driver = "ws2812"
+bus = "pio-out:gpio=13"
+config = { count = 16, wire = "rgb", brightness = 255 }
+
 # `auto_off_after`: this device alone opts in to being turned off after 5 failed binds in a
 # row. Every other device is retried forever.
 [[devices]]

@@ -100,6 +100,11 @@ pub(crate) fn start_bus(device: PioDevice, pins: Pins) -> io::Result<PioBus<PioD
 /// Fails with `EBUSY` if SDA or SCL is requested from the kernel on the RP1 GPIO
 /// chip. Chips that can't be read are skipped.
 fn check_pins_free(pins: Pins) -> io::Result<()> {
+    pins_free(&[pins.sda, pins.scl])
+}
+
+/// Fails with `EBUSY` if any of `pins` is requested from the kernel on the RP1 GPIO chip.
+pub(crate) fn pins_free(pins: &[u8]) -> io::Result<()> {
     for number in 0..16 {
         let path = format!("/dev/gpiochip{number}");
         let Ok(file) = std::fs::File::open(&path) else {
@@ -111,7 +116,7 @@ fn check_pins_free(pins: Pins) -> io::Result<()> {
         if !label_of(&info.label).contains("rp1") {
             continue;
         }
-        for pin in [pins.sda, pins.scl] {
+        for &pin in pins {
             let Ok(line) = gpio::line_info(file.as_fd(), u32::from(pin)) else {
                 continue;
             };

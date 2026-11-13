@@ -1519,6 +1519,7 @@ dependencies = [
  "lemnos-contract-pixels",
  "lemnos-core",
  "lemnos-hal",
+ "lemnos-measure",
  "lemnos-sim",
 ]
 

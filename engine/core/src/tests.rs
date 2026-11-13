@@ -326,12 +326,13 @@ mod package {
             BusKind::Clocks,
             BusKind::Reset,
             BusKind::Stream,
+            BusKind::Pio,
         ] {
             assert_ne!(bus_code(bus), abi::NEED_DEVICE);
             assert_eq!(bus_of(bus_code(bus)), Some(bus));
         }
         assert_eq!(bus_of(0), None);
-        assert_eq!(bus_of(14), None);
+        assert_eq!(bus_of(15), None);
         let mut seen = std::vec::Vec::new();
         for kind in [
             ErrorKind::NotFound,
