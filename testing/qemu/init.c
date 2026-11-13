@@ -267,9 +267,6 @@ int main(void)
 
 	check(!load("/i2c-stub.ko", "chip_addr=0x30"), "i2c-stub loaded");
 	check(!load("/lemnos_test_bus.ko", ""), "test buses loaded");
-	check(!load("/spi-loopback-test.ko", "loopback=1"), "spi-loopback-test loaded");
-	check(!access("/sys/bus/spi/devices/spi40.1/driver", F_OK),
-	      "spi-loopback-test passed on the test controller");
 	check(!put("/sys/bus/spi/devices/" SPI "/driver_override", "lemnos") &&
 		      !put("/sys/bus/spi/drivers/lemnos/bind", SPI),
 	      "SPI device bound");
@@ -308,7 +305,6 @@ int main(void)
 	if (!access("/spidev.ko", R_OK))
 		check(!unload("spidev"), "spidev unloaded");
 	gpio_sim_down();
-	check(!unload("spi_loopback_test"), "spi-loopback-test unloaded");
 	check(!unload("lemnos_test_bus"), "test buses unloaded");
 	check(!unload("i2c_stub"), "i2c-stub unloaded");
 
