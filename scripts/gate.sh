@@ -46,6 +46,9 @@ step libraries scripts/check-libraries.sh
 step boundaries scripts/check-boundaries.sh
 # The unit, udev and sysusers files; nothing is installed here.
 step packaging scripts/check-packaging.sh
+# The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
+# Also checks that docs/building.md lists each of them.
+step shipped scripts/check-shipped.sh
 # Every command in the documents runs against the simulated board, and every link leads somewhere.
 step documents scripts/check-docs.py
 

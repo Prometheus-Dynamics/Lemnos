@@ -1,8 +1,10 @@
 # Building the shipped programs
 
-The programs an OS image ships are `lemnosd`, `lemnos-ctl` and `lemnos-orion`. They are built from
-the workspace with `--locked --offline` from vendored sources, so the build can be planned and run
-without the network. This page records what each one needs and which targets it builds for.
+The programs an OS image ships are listed once, in `packaging/shipped.txt`: `lemnosd`, `lemnos-ctl`
+and `lemnos-orion`. `scripts/check-shipped.sh` reads that list, and this page lists each one in its
+table. The image builder builds them `--locked --offline` from vendored sources, with the
+`service` profile, for each target below. The kernel module is built separately:
+[kernel-module.md](kernel-module.md), "For an image builder".
 
 ## The lock file
 
@@ -14,47 +16,77 @@ what to run:
 cargo metadata --format-version 1 >/dev/null
 ```
 
-Then commit the `Cargo.lock` that run changed. The run keeps every version already locked and adds
-only what the manifests newly need. It does not upgrade anything else.
-
-Every other cargo command in the gate is run after that check, and none of them rewrite a lock
-that matches the manifests.
+Then commit the `Cargo.lock` that run changed. It keeps every version already locked and adds only
+what the manifests newly need. Other cargo calls in the gate leave a consistent lock unchanged.
 
 ## Vendored, offline build
 
-The OS build vendors the dependencies once, then builds against them:
-
 ```text
-cargo vendor --locked vendor/ > .cargo/config.toml   # append to any existing config instead
-cargo build --locked --offline -p lemnosd -p lemnos-ctl
+cargo vendor --locked vendor/ > vendor-config.toml
+# append vendor-config.toml to .cargo/config.toml (keep the repository's target settings)
+cargo build --locked --offline --profile service --target <triple> -p <package>
 ```
 
 `cargo vendor` also vendors the Orion git dependency of `service/orion`, pinned by `rev` in its
-manifest. Nothing else is fetched.
+manifest.
+
+## Targets
+
+`.cargo/config.toml` holds one entry per musl target. Each links with `rust-lld` and Rust's
+self-contained musl, with `+crt-static`, so no C cross toolchain or container is needed. The page
+size (`-zmax-page-size`) is the alignment of the loadable segments, and it must not be larger than
+the smallest page size the target's kernels use:
+
+- `aarch64-unknown-linux-musl`: `0x10000` (64 KiB). arm64 kernels run with 4, 16 or 64 KiB pages,
+  so the binary is aligned for 64 KiB to run on all of them.
+- `armv7-unknown-linux-musleabihf`: `0x1000` (4 KiB). 32-bit ARM Linux has only 4 KiB pages.
+- `riscv64gc-unknown-linux-musl`: `0x1000` (4 KiB). Mainline RISC-V Linux has only 4 KiB pages.
+
+The builder adds to these settings; it does not replace them.
+
+## Profile
+
+The `service` profile (`Cargo.toml`) is the shipped profile: `opt-level = "z"`, fat LTO, one codegen
+unit, `panic = "unwind"` (required: it is what lets the host contain a panicking driver), and
+`strip = true`. The smallest reasonable footprint, not a fixed budget. On the same base, one codegen
+unit was 1 to 2 percent smaller than the default 16 on aarch64 (lemnosd 2004048 to 1979760 bytes,
+lemnos-ctl 699048 to 692992, lemnos-orion 789552 to 775912).
 
 ## Shipped programs
 
-| Binary (`-p` package)          | Binary name     | Features needed                       | Built for musl targets                                                  |
-|--------------------------------|-----------------|---------------------------------------|-------------------------------------------------------------------------|
-| `lemnosd` (`lemnosd`)          | `lemnosd`       | none (`fake-devices` is for the simulated board only) | `aarch64-unknown-linux-musl` yes; `armv7-unknown-linux-musleabihf` yes with rust-lld, see below; `riscv64gc-unknown-linux-musl` no |
-| `lemnos-ctl` (`lemnos-ctl`)    | `lemnos-ctl`    | none                                  | same as `lemnosd`                                                       |
-| `lemnos-orion` (`lemnos-orion`)| `lemnos-orion`  | none (Orion is pinned by its git `rev`) | same as `lemnosd`                                                       |
-| `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | planned: not merged, not built                                    |
+| Binary (`-p` package)           | Binary name       | Features needed                                               | Musl targets built (`--locked --offline`, `service`, rust-lld) |
+|---------------------------------|-------------------|---------------------------------------------------------------|-----------------------------------------------------------------|
+| `lemnosd` (`lemnosd`)           | `lemnosd`         | none (`fake-devices` is for the simulated board only)         | `aarch64-unknown-linux-musl`, `armv7-unknown-linux-musleabihf`, `riscv64gc-unknown-linux-musl` |
+| `lemnos-ctl` (`lemnos-ctl`)     | `lemnos-ctl`      | none                                                          | the same three                                                  |
+| `lemnos-orion` (`lemnos-orion`) | `lemnos-orion`    | none (Orion is pinned by its git `rev`)                       | the same three                                                  |
+| `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | planned, not merged, not built                                |
 
-What was run, on the M5 branch (`cargo build --locked -p <package> --target <target>`, dev profile):
+Stripped sizes, from the vendored builds of this table (bytes):
 
-- `aarch64-unknown-linux-musl`: all three packages build. The repo's `.cargo/config.toml` selects
-  `rust-lld` with self-contained musl for this target, so no C toolchain is needed.
-- `armv7-unknown-linux-musleabihf`: plain builds fail at link time, because the default linker is
-  the host `cc`, which cannot link 32-bit ARM. All three packages build when the linker is
-  overridden with `CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=rust-lld` and
-  `CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-C link-self-contained=yes"`. The repo has
-  no config entry for this target yet.
-- `riscv64gc-unknown-linux-musl`: plain builds fail at link time for the same reason as armv7. With
-  `rust-lld` the link fails with `unable to find library -lgcc_s`, because the host has no cross
-  libgcc for this target. Needs a cross toolchain or a libgcc_s for riscv64 musl before this target
-  can be shipped.
+| Binary          | aarch64 musl | armv7 musleabihf | riscv64 musl |
+|-----------------|-------------:|-----------------:|-------------:|
+| `lemnosd`       | 2018968      | 2021444          | 2017376      |
+| `lemnos-ctl`    | 732632       | 714820           | 728928       |
+| `lemnos-orion`  | 775368       | 768908           | 772048       |
 
-The host target builds `lemnosd` and `lemnos-ctl` with `--locked --offline` from a vendored copy.
+The worktree build of the same commit gave `lemnos-ctl` 733224 and `lemnos-orion` 775912 on
+aarch64: the same to within 0.1 percent. The sizes move with the base; these are measured on this
+base only.
 
-Not run: the glibc targets; the `service` profile (fat LTO) for any target; `lemnos-slot-init`.
+Verified: each of the nine (program, target) pairs built with `cargo build --locked --offline
+--profile service --target <triple> -p <package>` from a `cargo vendor` tree, with a `PATH` where
+`cc`, `gcc`, `g++`, `clang` and `ld` fail when run. The host build scripts were compiled first with
+the host toolchain, because rustc needs the host linker for them; the target links did not use any C
+tool. Each result is `stripped` and of the right word size (`file`).
+
+Not run: the glibc targets; `lemnos-slot-init`; a board.
+
+## No C in the shipped programs
+
+`scripts/check-shipped.sh` (run by the gate) takes each program's normal and build dependency tree.
+It fails if the tree holds a crate that compiles C or runs a C generator (`cc`, `cmake`, `bindgen`,
+`pkg-config`, `vcpkg`, `cxx-build` and similar), or a `-sys` crate from outside the workspace that
+is not on its allow list. The one allowed foreign `-sys` crate is `linux-raw-sys`: generated Rust
+bindings to the Linux uapi, with no build script. It also fails if `docs/building.md` does not list a
+shipped program. `engine/capi/build.rs` runs a C compiler, but it is the C library, not a shipped
+program.
