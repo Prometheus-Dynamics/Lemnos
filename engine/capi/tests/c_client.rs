@@ -270,6 +270,8 @@ fn the_rust_wrapper_takes_streams_and_the_package_list_through_the_surface() {
         assert_eq!(copy[..], frame.bytes[..8]);
         stream.release(buffer).unwrap();
     }
+    // The skip count goes through the C export; the reader may have been overrun, so only the call is checked.
+    stream.skipped().unwrap();
     stream.close().unwrap();
 
     let mut input = client.open_stream(0, "input", true).unwrap();

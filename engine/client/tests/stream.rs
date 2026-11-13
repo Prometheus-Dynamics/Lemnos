@@ -5,16 +5,19 @@ mod common;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{FakeHost, StreamHost, StreamScript};
-use lemnos_client::{Access, Error, MemoryKind, Session, StreamPlatform};
+use lemnos_client::{Access, Error, FrameStream, MemoryKind, Session, StreamPlatform};
 use lemnos_core::Status;
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_linux_sys::dma_buf::sealed_memfd;
+use lemnos_linux_sys::poll::{POLLIN, poll_one};
+use lemnos_linux_sys::signal::{SIGUSR1, catch_without_restart, interrupt_this_thread_after};
 use lemnos_wire::ring::{Layout, RingError, STATE_CLOSED, fds};
 use lemnos_wire::{MAX_HANDLE_BUFFERS, feature};
 use shm_ring::read_only;
+use shm_ring_doorbell::Doorbell;
 
 fn platform() -> Arc<dyn StreamPlatform> {
     Arc::new(LinuxStreams)
@@ -474,6 +477,10 @@ impl StreamPlatform for Refusing {
         LinuxStreams.recv_with_descriptors(socket, buf, fds)
     }
 
+    fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> std::io::Result<bool> {
+        LinuxStreams.wait_readable(fd, timeout)
+    }
+
     fn dma_sync(&self, _: BorrowedFd<'_>, _: Access, _: bool) -> std::io::Result<()> {
         Err(std::io::Error::other("no kernel support"))
     }
@@ -611,6 +618,10 @@ impl StreamPlatform for Telling {
         fds: &mut Vec<OwnedFd>,
     ) -> std::io::Result<usize> {
         LinuxStreams.recv_with_descriptors(socket, buf, fds)
+    }
+
+    fn wait_readable(&self, fd: BorrowedFd<'_>, timeout: Duration) -> std::io::Result<bool> {
+        LinuxStreams.wait_readable(fd, timeout)
     }
 
     fn dma_sync(&self, fd: BorrowedFd<'_>, access: Access, begin: bool) -> std::io::Result<()> {
@@ -973,4 +984,177 @@ fn a_generation_is_the_pool_pages_word_and_a_second_view_reports_it_too() {
     );
     let view = second_view(&stream);
     assert_eq!(view.generation(), stream.generation());
+}
+
+/// A signal delivered to the thread waiting in `next_frame` interrupts the sleep, and the wait
+/// goes on: the frame published during it comes back, and the wait ends with it.
+#[test]
+fn a_signal_during_next_frame_still_returns_the_frame_published_during_the_wait() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    catch_without_restart(SIGUSR1).unwrap();
+    let signal = interrupt_this_thread_after(SIGUSR1, Duration::from_millis(200));
+    let frame = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(host.write(1, 0, &[9]));
+            assert!(host.push(1, 1, 4, 5, 6));
+            host.ring();
+        });
+        stream.next_frame(Duration::from_secs(3)).unwrap()
+    });
+    signal.join().unwrap();
+    let frame = frame.expect("the frame published after the signal");
+    assert_eq!((frame.buffer(), frame.sequence()), (1, 4));
+    assert_eq!(stream.bytes(&frame), [9]);
+}
+
+/// A signal that interrupts the sleep does not stretch the wait: the time is taken once, so the
+/// call returns at its timeout, not at the signal plus the whole timeout again.
+#[test]
+fn a_signal_during_next_frame_does_not_stretch_the_wait_past_its_timeout() {
+    let (_host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    catch_without_restart(SIGUSR1).unwrap();
+    let signal = interrupt_this_thread_after(SIGUSR1, Duration::from_millis(500));
+    let start = Instant::now();
+    let got = stream.next_frame(Duration::from_millis(1500)).unwrap();
+    let took = start.elapsed();
+    signal.join().unwrap();
+    assert!(got.is_none(), "nothing was published");
+    assert!(
+        took >= Duration::from_millis(1500) && took < Duration::from_millis(1750),
+        "the wait took {took:?} for a timeout of 1.5 s with a signal at 0.5 s"
+    );
+}
+
+/// Frames lost before the reader reads them are counted, and the frame still in the ring comes
+/// back from the same `try_next`: a loss never reads as nothing pending.
+#[test]
+fn losses_are_counted_and_the_frame_behind_them_comes_back_in_the_same_call() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+    // Ten frames into the eight-slot ring with nothing read: the ring overwrites its oldest
+    // entries, and each buffer is taken back and reused for a later frame.
+    publish_run(&mut host, 0, 10);
+    assert_eq!(stream.skipped(), 0, "nothing has been read yet");
+    let frame = stream
+        .try_next()
+        .unwrap()
+        .expect("the frame behind the losses");
+    assert_eq!(stream.skipped(), 8, "frames 0 to 7 are lost, and counted");
+    assert_eq!(frame.sequence(), 8, "the newest frame that is still intact");
+    stream.release(frame).unwrap();
+    let frame = stream.try_next().unwrap().expect("the frame after it");
+    assert_eq!(frame.sequence(), 9);
+    stream.release(frame).unwrap();
+    assert!(stream.try_next().unwrap().is_none());
+}
+
+/// Publishes frames `from..from + count` (sequence = frame number), each into buffer `frame % 2`.
+fn publish_run(host: &mut StreamHost, from: u64, count: u64) {
+    for sequence in from..from + count {
+        let buffer = (sequence % 2) as u32;
+        assert!(host.reclaim(buffer));
+        assert!(host.write(buffer, 0, &[sequence as u8]));
+        assert!(host.push(buffer, 1, sequence, 0, sequence));
+    }
+}
+
+/// Takes what `stream` has pending, and checks the rule the raw-descriptor loop depends on: a
+/// `try_next` that returns nothing has nothing left to return. Every frame published so far is
+/// either taken (`taken_before` in earlier calls, and this call's count) or counted as skipped.
+/// Returns this call's count.
+fn drain_and_check(stream: &mut FrameStream, taken_before: u64, published: u64) -> u64 {
+    let mut taken = 0;
+    while let Some(frame) = stream.try_next().unwrap() {
+        taken += 1;
+        stream.release(frame).unwrap();
+    }
+    assert_eq!(
+        taken_before + taken + stream.skipped(),
+        published,
+        "try_next returned nothing while a frame was still pending"
+    );
+    taken
+}
+
+/// The raw doorbell loop (`docs/streams.md`, "Waiting on the doorbell") never sleeps with a
+/// frame pending: after `try_next` returns nothing, a frame published before the consumer
+/// sleeps is found, and one published during the sleep wakes it.
+#[test]
+fn the_raw_doorbell_never_sleeps_with_a_frame_pending() {
+    let (mut host, fds) = good();
+    // The stream's own doorbell, duplicated: the raw loop arms and sleeps on it, the stream
+    // reads frames from the same ring and page.
+    let eventfd = fds[lemnos_wire::ring::fds::BELL].try_clone().unwrap();
+    let page = fds[lemnos_wire::ring::fds::BELL_PAGE].try_clone().unwrap();
+    let mut bell = Doorbell::attach(eventfd, page).unwrap();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let mut stream = session.open_stream(7, "s", platform()).unwrap();
+
+    // Frames published with losses before the first look: nothing may be left pending.
+    publish_run(&mut host, 0, 10);
+    let taken = drain_and_check(&mut stream, 0, 10);
+    assert_eq!(taken, 2, "frames 8 and 9 are the intact ones");
+
+    // A frame published while the consumer sleeps wakes it, at once.
+    bell.arm();
+    assert!(host.reclaim(1));
+    assert!(host.write(1, 0, &[77]));
+    assert!(host.push(1, 1, 10, 0, 10));
+    host.ring();
+    let woke = poll_one(bell.as_fd(), POLLIN, Some(Duration::from_secs(2))).unwrap();
+    bell.disarm();
+    assert_ne!(
+        woke & POLLIN,
+        0,
+        "a frame published during the sleep did not wake it"
+    );
+    assert_eq!(drain_and_check(&mut stream, taken, 11), 1);
+}
+
+/// A doorbell that can't be waited on: the error of the wait comes back by name, and is never
+/// taken for no frame.
+#[derive(Debug)]
+struct BrokenDoorbell;
+
+impl StreamPlatform for BrokenDoorbell {
+    fn recv_with_descriptors(
+        &self,
+        socket: BorrowedFd<'_>,
+        buf: &mut [u8],
+        fds: &mut Vec<OwnedFd>,
+    ) -> std::io::Result<usize> {
+        LinuxStreams.recv_with_descriptors(socket, buf, fds)
+    }
+
+    fn wait_readable(&self, _: BorrowedFd<'_>, _: Duration) -> std::io::Result<bool> {
+        Err(std::io::Error::other("the doorbell failed"))
+    }
+}
+
+#[test]
+fn a_failed_doorbell_wait_is_an_error_and_a_frame_already_there_is_still_returned() {
+    let (mut host, fds) = good();
+    let (_fake, mut session) = host_with(layout(), 8, fds);
+    let broken: Arc<dyn StreamPlatform> = Arc::new(BrokenDoorbell);
+    let mut stream = session.open_stream(7, "s", broken).unwrap();
+    assert!(
+        matches!(
+            stream.next_frame(Duration::from_secs(1)),
+            Err(Error::StreamWait(_))
+        ),
+        "a wait that failed was taken for no frame"
+    );
+    assert!(host.push(0, 1, 0, 0, 0));
+    host.ring();
+    let frame = stream
+        .next_frame(Duration::from_secs(1))
+        .unwrap()
+        .expect("a frame already in the ring comes back without waiting");
+    assert_eq!(frame.sequence(), 0);
 }
