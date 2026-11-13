@@ -472,6 +472,15 @@ impl Serve {
         F: UsbFunction<Error = ErrorKind> + ?Sized,
     {
         let job = waiting.job;
+        // A send of no bytes is done without a transfer. A zero-length write on a FunctionFS
+        // endpoint is a zero-length packet on the wire, and the byte stream on the lent endpoints
+        // gives packet boundaries and short packets no meaning, so this driver never emits one.
+        if job.length == 0 {
+            return Step::Over(Completion {
+                status: JobStatus::Done,
+                count: 0,
+            });
+        }
         let done = waiting.done as usize;
         // Checked at intake to be within the scratch.
         let Some(rest) = (job.length as usize)

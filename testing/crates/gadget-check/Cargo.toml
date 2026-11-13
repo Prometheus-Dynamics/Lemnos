@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 lemnosd = { path = "../../../service/lemnosd" }
 lemnos-client = { path = "../../../engine/client" }
+lemnos-hal = { path = "../../../engine/hal" }
 lemnos-core = { path = "../../../engine/core" }
 lemnos-linux-stream = { path = "../../../backends/linux-stream" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }

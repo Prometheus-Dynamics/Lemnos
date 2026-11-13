@@ -23,6 +23,9 @@
 //!   Its synchronisation type is asynchronous. Each send is one interval's bytes, and a
 //!   receive needs room for them.
 //!
+//! The functions are FunctionFS (`function ffs`, the link, always first in the composite, so its
+//! interface is interface 0 and carries no interface association), then the others in file order.
+//!
 //! Endpoints are numbered from 1 in file order, whatever their direction and setting, so there
 //! are at most 15, and no address is in two settings. What the classes, subclasses and protocols mean, and what the endpoints carry, is the
 //! business of whoever talks over them: nothing here looks.
@@ -468,16 +471,24 @@ fn high_speed_interval(ms: u8) -> u8 {
 /// [`crate::derive::macs`]; without them such a line is a [`Fault::NoIdentity`].
 pub fn functions(interfaces: &str, macs: Option<Macs>) -> Result<Functions, Fault> {
     let layout = Layout::parse(interfaces)?;
-    let mut items = [GadgetFunction::Ffs; MAX_FUNCTIONS];
-    let mut len = 0;
-    if !layout
-        .listed()
-        .any(|f| f == Listed::Fixed(GadgetFunction::Ffs))
-    {
-        items[0] = GadgetFunction::Ffs;
-        len = 1;
+    // The link is always first: its configuration position, and so its interface number in the
+    // composite, is 0 whatever order the board file lists the others in. A `function ffs` line
+    // elsewhere in the file is the same function, not a second one.
+    let others = layout
+        .functions
+        .iter()
+        .flatten()
+        .filter(|f| **f != Listed::Fixed(GadgetFunction::Ffs))
+        .count();
+    if others + 1 > MAX_FUNCTIONS {
+        return Err(Fault::Function(1));
     }
+    let mut items = [GadgetFunction::Ffs; MAX_FUNCTIONS];
+    let mut len = 1;
     for function in layout.functions.iter().flatten() {
+        if *function == Listed::Fixed(GadgetFunction::Ffs) {
+            continue;
+        }
         items[len] = match *function {
             Listed::Fixed(function) => function,
             Listed::Derive { line, ifname } => {

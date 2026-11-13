@@ -184,6 +184,140 @@ pub fn descriptors_blob(
     Ok(blob)
 }
 
+/// `wIndex` of an extended compatible ID feature descriptor (Microsoft OS 1.0).
+pub const OS_EXT_COMPAT: u16 = 4;
+/// `wIndex` of an extended properties feature descriptor (Microsoft OS 1.0).
+pub const OS_EXT_PROP: u16 = 5;
+/// `bcdVersion` of both feature descriptors: 1.00, the only version the kernel takes.
+const OS_VERSION: u16 = 0x0100;
+/// `dwPropertyDataType` of a `REG_SZ` property. The kernel's wire writer has no case for
+/// `REG_MULTI_SZ` (7), so a multi-string property cannot be sent to the host and is not built.
+const REG_SZ: u32 = 1;
+
+/// One interface entry of an extended compatible ID section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompatEntry {
+    /// `bFirstInterfaceNumber`, numbered within the function (the kernel refuses one past its
+    /// interfaces).
+    pub interface: u8,
+    /// `CompatibleID`, padded with NULs to 8 bytes.
+    pub compatible: [u8; 8],
+    /// `SubCompatibleID`, padded with NULs to 8 bytes.
+    pub sub_compatible: [u8; 8],
+}
+
+/// One `REG_SZ` extended property of an interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtProp<'a> {
+    /// `PropertyName`. The kernel reads it as a NUL-terminated UTF-8 string and sends it as UTF-16.
+    pub name: &'a str,
+    /// The `REG_SZ` value, the same way: UTF-8 here, UTF-16 with a NUL on the wire.
+    pub data: &'a str,
+}
+
+/// The header every feature descriptor section of the blob starts with. The kernel reads it as
+/// `struct usb_os_desc_header` (`interface`, `dwLength`, `bcdVersion`, `wIndex`, `wCount`), and
+/// `dwLength` is the section's own length, header included.
+fn os_section(interface: u8, index: u16, count: u16, body: &[u8]) -> io::Result<Vec<u8>> {
+    let length = u32::try_from(11 + body.len()).map_err(|_| invalid())?;
+    let mut section = Vec::with_capacity(11 + body.len());
+    section.push(interface);
+    section.extend_from_slice(&length.to_le_bytes());
+    section.extend_from_slice(&OS_VERSION.to_le_bytes());
+    section.extend_from_slice(&index.to_le_bytes());
+    section.extend_from_slice(&count.to_le_bytes());
+    section.extend_from_slice(body);
+    Ok(section)
+}
+
+/// An extended compatible ID section (`wIndex` 4) for `entries`. Each entry is
+/// `bFirstInterfaceNumber`, `Reserved1` (1, which the kernel forces anyway), the two IDs and six
+/// zero bytes, 24 bytes in all (`struct usb_ext_compat_desc`).
+pub fn os_compat_section(entries: &[CompatEntry]) -> io::Result<Vec<u8>> {
+    let count = u16::try_from(entries.len())
+        .ok()
+        .filter(|&count| count <= 255)
+        .ok_or_else(invalid)?;
+    let mut body = Vec::with_capacity(24 * entries.len());
+    for entry in entries {
+        body.push(entry.interface);
+        body.push(1);
+        body.extend_from_slice(&entry.compatible);
+        body.extend_from_slice(&entry.sub_compatible);
+        body.extend_from_slice(&[0; 6]);
+    }
+    // The section's own header carries `bCount` and a zero `Reserved`, which is `wCount` here.
+    os_section(0, OS_EXT_COMPAT, count, &body)
+}
+
+/// An extended properties section (`wIndex` 5) of `props` for one interface. Each property is
+/// `dwSize` (14 plus the name and data lengths), `dwPropertyDataType` (`REG_SZ`),
+/// `wPropertyNameLength` and the name, `dwPropertyDataLength` and the data. Name and data are
+/// UTF-8 with a NUL, and their lengths count the NUL.
+pub fn os_prop_section(interface: u8, props: &[ExtProp<'_>]) -> io::Result<Vec<u8>> {
+    let count = u16::try_from(props.len()).map_err(|_| invalid())?;
+    let mut body = Vec::new();
+    for prop in props {
+        if prop.name.contains('\0') || prop.data.contains('\0') {
+            return Err(invalid());
+        }
+        let name = prop.name.len() + 1;
+        let data = prop.data.len() + 1;
+        let name_len = u16::try_from(name).map_err(|_| invalid())?;
+        let data_len = u32::try_from(data).map_err(|_| invalid())?;
+        let size = u32::try_from(14 + name + data).map_err(|_| invalid())?;
+        body.extend_from_slice(&size.to_le_bytes());
+        body.extend_from_slice(&REG_SZ.to_le_bytes());
+        body.extend_from_slice(&name_len.to_le_bytes());
+        body.extend_from_slice(prop.name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&data_len.to_le_bytes());
+        body.extend_from_slice(prop.data.as_bytes());
+        body.push(0);
+    }
+    os_section(interface, OS_EXT_PROP, count, &body)
+}
+
+/// The descriptors blob with Microsoft OS 1.0 feature sections after the descriptors. The
+/// layout is [`descriptors_blob`]'s, with `FUNCTIONFS_HAS_MS_OS_DESC` set and a count of
+/// sections after the speed counts, before the descriptors, as the kernel's parser reads it
+/// (`__ffs_data_got_descs`). `sections` are the outputs of [`os_compat_section`] and
+/// [`os_prop_section`], in the order given.
+pub fn descriptors_blob_with_os(
+    flags: u32,
+    full: Option<&[u8]>,
+    high: Option<&[u8]>,
+    sections: &[Vec<u8>],
+) -> io::Result<Vec<u8>> {
+    if flags & (HAS_FS_DESC | HAS_HS_DESC | HAS_SS_DESC | HAS_MS_OS_DESC | EVENTFD) != 0
+        || (full.is_none() && high.is_none())
+        || sections.is_empty()
+    {
+        return Err(invalid());
+    }
+    let mut flags = flags | HAS_MS_OS_DESC;
+    let mut blob = vec![0u8; 12];
+    for (speed, bit) in [(full, HAS_FS_DESC), (high, HAS_HS_DESC)] {
+        if let Some(descriptors) = speed {
+            flags |= bit;
+            blob.extend_from_slice(&count(descriptors)?.to_le_bytes());
+        }
+    }
+    let sections_count = u32::try_from(sections.len()).map_err(|_| invalid())?;
+    blob.extend_from_slice(&sections_count.to_le_bytes());
+    for descriptors in [full, high].into_iter().flatten() {
+        blob.extend_from_slice(descriptors);
+    }
+    for section in sections {
+        blob.extend_from_slice(section);
+    }
+    let length = u32::try_from(blob.len()).map_err(|_| invalid())?;
+    blob[..4].copy_from_slice(&DESCRIPTORS_MAGIC_V2.to_le_bytes());
+    blob[4..8].copy_from_slice(&length.to_le_bytes());
+    blob[8..12].copy_from_slice(&flags.to_le_bytes());
+    Ok(blob)
+}
+
 /// The strings blob `ep0` takes second: the magic, the blob's length, the number of strings,
 /// the number of languages, then for the one language its code and each string in UTF-8 with a
 /// NUL after it. The function's descriptors name these strings by their place here, from 1.

@@ -579,6 +579,83 @@ Nothing else is set up for that gadget.
 Once the gadget is bound the driver reads the name the kernel gave back, and describes it as the
 item `ifname` (text), and the `usb.function` contract's method 11, `ifname`, returns the same text. It is absent while the gadget is down, and absent when the gadget has no NCM function.
 
+### The link's identity and its Windows descriptors
+
+Every gadget presents one link: the FunctionFS function, whose first interface (interface 0) is the
+vendor link, with the CDC NCM and ACM functions of the setup after it. The link is always in the
+function list: `description::functions` adds it when the board file does not name it. So the
+descriptors that bind it on Windows are not a board option; the backend writes them for every gadget
+it builds, and the same code builds the daemon's gadget, the QEMU harness's and any other.
+
+- **Link GUID.** `{CF13388F-BE34-4A1E-94C2-9AAFEF9A04E9}` is the Lemnos link GUID, the device
+  interface GUID the link registers. It is the constant `usb_descriptors::ms_os::LINK_GUID`, the same
+  on every product, and it does not change.
+- **Microsoft OS 1.0 descriptors.** The kernel sends string 0xEE (`MSFT100`, vendor code `0x51`) and,
+  for the device, the extended compatible ID with `WINUSB` for interface 0 and `WINNCM` for the NCM
+  control interface. For interface 0 it sends the extended property `DeviceInterfaceGUID` (REG_SZ)
+  with the link GUID. The kernel can send only these: MS OS 2.0 and its BOS descriptor are not emitted
+  by Linux 7.3, and a REG_MULTI_SZ property (the plural `DeviceInterfaceGUIDs`) has no wire encoding
+  in the composite core. Windows applies WinUSB to the link interface only, not to the device, so the
+  network and serial functions keep their own drivers.
+- **Release (`bcdDevice`).** Windows keeps OS-descriptor state per vendor, product and release, so a
+  device that changes its descriptors under the same release keeps the old answer. The release is
+  therefore tied to the link: `drivers/usb-gadget/src/revision.rs` lists each release with the
+  fingerprint of the link it presented, and the default release is the last entry. A test fails when
+  the link changes without a new entry with a higher release. A board that sets `release` keeps its
+  own number; a product that does so takes the same care.
+- **Composite class.** The default class triple is 0xEF, 0x02, 0x01 (interface association
+  descriptors). With class 0 the device has no class, and Windows binds each function of a composite
+  only through that triple.
+- **Vendor and product.** A board file without `vendor` or `product` gets `LINK_VENDOR` and
+  `LINK_PRODUCT` in `drivers/usb-gadget/src/lib.rs`. Both are placeholders: 0x1d6b is the Linux
+  Foundation's id, and 0x0104 is its "Multifunction Composite Gadget" entry, which every composite
+  gadget built on the Linux framework uses too. Windows keys its OS-descriptor cache, and any INF or
+  udev rule, on these numbers, so a product must choose its own pair once, before any image leaves the
+  bench. Its choices are a vendor id it owns or a product id from an open allocation (pid.codes assigns
+  PIDs only under an open-source licence, and its VID 0x1209 has PID 0x0001 listed as a test id).
+
+Untested on Windows and macOS. The host test to run on real machines, and what it checks per
+function, is [the R1h board-run record](../testing/board-runs/R1h.md). The Linux side is checked by
+the QEMU harness, which requests the descriptors the way Windows does and compares the bytes.
+
+### The managed identity: reservation, layout, builders and the byte stream
+
+- **Reservation.** The managed identity is vendor 0x1d6b, product 0x0104, with `bcdDevice` reserved
+  to 0x0100 through 0x0aff. The release it presents now is 0x0200, and it only ever rises. Another
+  team's bring-up images use 0x1d6b:0103 with `bcdDevice` from 0x0b00. The numbers, the reservation
+  and the link's identity are in `contracts/usb-link.toml` (`version = 1`). The tests of
+  `drivers/usb-gadget` read that file and fail if the code's constants differ from it, and a reader
+  refuses an unknown version or key. Other teams' tests and device data read the file rather than
+  copying the numbers. The vendor and product numbers stay PLACEHOLDERS until the user settles a
+  product id; that choice moves the managed range with it.
+- **Interface layout.** The link is the first function of the composite, so its interface is
+  interface 0, whatever order the board file lists the functions in
+  (`description::functions` always puts `function ffs` first). The NCM and ACM functions follow it.
+  The link is its own function: no interface association covers it, and a test checks that no
+  descriptor of the link is an association (type 11). The Microsoft OS 1.0 compatible ID section
+  names interface 0 (`bFirstInterfaceNumber` 0), and the extended property `DeviceInterfaceGUID` is
+  requested for interface 0 (`wValue` 0, `wIndex` 5), which is how the host finds the link child.
+- **Who builds a gadget.** A gadget of ours is built through the daemon only: `lemnosd`'s root
+  phase (`service/lemnosd/src/gadget.rs`) calls `lemnos_linux::gadget::prepare`, so every gadget
+  the daemon makes emits the same descriptors. Flasher and recovery images build theirs the same
+  way, through the daemon. In this repository the daemon is the only builder; the flasher and
+  recovery images are not in it and were not checked here. A gadget built by hand, outside the
+  daemon, must not present the managed identity, because a Windows cache keyed on its numbers would
+  then hold descriptors the hand-built gadget does not match.
+- **The byte stream.** The peer's team states (not verified by us) that what travels on the link is
+  their byte stream: COBS-encoded frames ending in 0x00, with a signed handshake, and that USB packet
+  boundaries, short packets and zero-length packets carry no meaning. This driver never generates a
+  zero-length packet: the FunctionFS endpoints are opened without `FUNCTIONFS_ENDPOINT_ENABLE_ZLP`
+  (the kernel default is off, `f_fs.c` `zlp_enabled`), and a send of no bytes completes without a
+  transfer (`drivers/usb-gadget/src/serve.rs`, `send`). A zero-length packet from the host is
+  received as an empty read. Nothing here depends on one.
+- **The lent endpoints after END.** Once END hangs up, the holder's copies of the endpoints go away
+  within the completion of one in-flight read: the codes the gadget documents for a dead function
+  (`EIDRM` and `ESRCH`, mapped to `Unavailable`) make that read return; that the read does return
+  is to be tested on a board, not verified here. A remount or re-describe
+  that still sees the endpoints busy for longer than that is a finding to report, not an expected
+  state.
+
 ### Identity-derived addresses and the USB serial
 
 The gadget names the identity device whose serial is the board's serial, and the daemon reads that

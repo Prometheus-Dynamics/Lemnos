@@ -25,15 +25,19 @@
 //!
 //! Settings come from the device's `config` in the board file:
 //!
-//! - `vendor`, `product` (integers, required): the USB vendor and product numbers, 0 to 0xffff.
+//! - `vendor`, `product` (integers, default [`LINK_VENDOR`] and [`LINK_PRODUCT`]): the USB vendor
+//!   and product numbers, 0 to 0xffff. See "The link's identity" below.
 //! - `interfaces` (string, required): the interfaces and their endpoints, as [`description`]
 //!   sets out: the text itself, in every build.
 //! - `interfaces_file` (string, optional, `std` builds only): a path to a file holding that text,
 //!   read once at bind. A build without a filesystem refuses it by name ([`refusal`]). Giving both
 //!   `interfaces` and `interfaces_file` is refused by name too.
-//! - `release` (integer, default 0x0100): the device's release number (`bcdDevice`).
-//! - `class`, `subclass`, `protocol` (integers, default 0): the device's class triple. 0 leaves
-//!   the class to each interface.
+//! - `release` (integer, default [`revision::RELEASE`]): the device's release number
+//!   (`bcdDevice`). See [`revision`].
+//! - `class`, `subclass`, `protocol` (integers, default 0xef, 0x02, 0x01): the device's class
+//!   triple, the composite device with interface association descriptors. 0 leaves the class to
+//!   each interface, which a device with the CDC functions must not do: Windows binds each
+//!   function of a composite device only through that triple.
 //! - `manufacturer`, `product_name`, `serial` (strings, optional): what the host shows. `serial`
 //!   defaults to the board's serial fact (`board_serial`, below); with neither, the device has no
 //!   serial string and health says so.
@@ -48,6 +52,17 @@
 //!
 //! A setting that is missing, out of range or malformed fails the bind with
 //! `INVALID_ARGUMENT`. Binding does not touch the function.
+//!
+//! # The link's identity
+//!
+//! Every gadget of ours presents the same link: the FunctionFS function (the first interface of
+//! it is the link, WinUSB on Windows), with the Microsoft OS 1.0 descriptors that bind it, and the
+//! NCM and ACM functions of the setup. Those descriptors are not a board option: the backend
+//! writes them for every gadget, because `description::functions` always lists the FunctionFS
+//! function. Their constants are in [`usb_descriptors::ms_os`](lemnos_hal::usb_descriptors::ms_os).
+//! The vendor and product numbers of a board that gives none are [`LINK_VENDOR`] and
+//! [`LINK_PRODUCT`]. A board file that gives its own numbers keeps them; Windows caches the OS
+//! descriptor state per number pair, so one product should use one pair throughout.
 //!
 //! # Failure
 //!
@@ -76,6 +91,7 @@ extern crate std;
 
 pub mod derive;
 pub mod description;
+pub mod revision;
 pub mod serve;
 #[cfg(test)]
 mod serve_tests;
@@ -85,6 +101,21 @@ mod tests;
 use core::time::Duration;
 
 use description::{Fault, Identity, Set};
+
+/// The vendor number of a gadget whose board gives none. PLACEHOLDER: 0x1d6b is the Linux
+/// Foundation's id, shared with every composite gadget built on the Linux framework, and the
+/// choice of a product id is open (see `docs/boards.md`, "The link's identity"). Change it here.
+pub const LINK_VENDOR: u16 = 0x1d6b;
+/// The product number of a gadget whose board gives none. PLACEHOLDER, as [`LINK_VENDOR`]:
+/// 0x0104 is the "Multifunction Composite Gadget" id under 0x1d6b.
+pub const LINK_PRODUCT: u16 = 0x0104;
+/// The class triple of the composite device: class 0xEF, subclass 0x02, protocol 0x01 (the
+/// interface association descriptor), what the CDC functions need.
+pub const COMPOSITE_CLASS: (i64, i64, i64) = (0xef, 0x02, 0x01);
+/// The interface string of the managed link: what the host program matches the vendor interface
+/// by, with the vendor and product numbers (never by GUID or tty number). It is named in
+/// `contracts/usb-link.toml`, which a test checks against this.
+pub const LINK_INTERFACE_NAME: &str = "orion-link";
 use lemnos_contract_usb_function::{
     Counters, EndpointInfo, Event, EventKind, FunctionInfo, JobStatus, MAX_IFNAME_TEXT, Request,
     State, UsbFunction,
@@ -635,12 +666,12 @@ pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
         (Some(_), None) => return Err(Status::INVALID_ARGUMENT),
     };
     let identity = Identity {
-        vendor: integer(cfg, "vendor", 0xffff, None)? as u16,
-        product: integer(cfg, "product", 0xffff, None)? as u16,
-        release: integer(cfg, "release", 0xffff, Some(0x0100))? as u16,
-        class: integer(cfg, "class", 0xff, Some(0))? as u8,
-        subclass: integer(cfg, "subclass", 0xff, Some(0))? as u8,
-        protocol: integer(cfg, "protocol", 0xff, Some(0))? as u8,
+        vendor: integer(cfg, "vendor", 0xffff, Some(i64::from(LINK_VENDOR)))? as u16,
+        product: integer(cfg, "product", 0xffff, Some(i64::from(LINK_PRODUCT)))? as u16,
+        release: integer(cfg, "release", 0xffff, Some(i64::from(revision::RELEASE)))? as u16,
+        class: integer(cfg, "class", 0xff, Some(COMPOSITE_CLASS.0))? as u8,
+        subclass: integer(cfg, "subclass", 0xff, Some(COMPOSITE_CLASS.1))? as u8,
+        protocol: integer(cfg, "protocol", 0xff, Some(COMPOSITE_CLASS.2))? as u8,
         manufacturer: string(cfg, "manufacturer")?,
         product_name: string(cfg, "product_name")?,
         serial: string(cfg, "serial")?.or(cfg.str("board_serial")),

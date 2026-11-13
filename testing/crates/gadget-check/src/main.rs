@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
-use lemnos_linux_sys::usbfs::UsbfsFile;
+use lemnos_hal::usb_descriptors::ms_os;
+use lemnos_linux_sys::usbfs::{ControlSetup, UsbfsFile};
 use lemnosd::privilege::KEEP;
 
 mod daemon;
@@ -327,6 +328,7 @@ fn host_side() -> bool {
     let n = usb.read_descriptors(0, &mut descriptors).unwrap_or(0);
     let seen = interfaces(&descriptors[..n]);
     let mut ok = seen == INTERFACES;
+    ok &= os_descriptors(&usb, &descriptors[..n]);
     say!(
         "{} the host sees {:02x?} (want {:02x?})",
         if ok { "ok  " } else { "FAIL" },
@@ -358,6 +360,134 @@ fn host_side() -> bool {
         say!("ok   {ROUNDS} rounds of {CHUNK} bytes went out and came back");
     }
     ok
+}
+
+/// The Microsoft OS 1.0 descriptors, requested the way Windows requests them and read back byte
+/// for byte: string 0xEE; the extended compatible IDs (`wIndex` 4, to the device, as the kernel
+/// answers them); and the link's extended properties (`wIndex` 5, to its interface 0). The
+/// expected bytes are what the host reads, names and data as UTF-16 with a NUL.
+fn os_descriptors(usb: &UsbfsFile, descriptors: &[u8]) -> bool {
+    let wide = |text: &str, nul: bool| -> Vec<u8> {
+        let mut units: Vec<u16> = text.encode_utf16().collect();
+        if nul {
+            units.push(0);
+        }
+        units.iter().flat_map(|unit| unit.to_le_bytes()).collect()
+    };
+    let mut ok = true;
+
+    let mut want = vec![0x12, 0x03];
+    want.extend(wide(ms_os::QW_SIGN, false));
+    want.extend([ms_os::VENDOR_CODE, 0]);
+    ok &= request(
+        usb,
+        "string 0xEE",
+        ControlSetup {
+            request_type: 0x80,
+            request: 6,
+            value: 0x03ee,
+            index: 0,
+        },
+        &want,
+    );
+
+    // The link (interface 0) and the NCM control interface, the two the kernel lists.
+    let mut entries = vec![(0u8, ms_os::LINK_COMPATIBLE_ID)];
+    if let Some(number) = ncm_interface(descriptors) {
+        entries.push((number, ms_os::NCM_COMPATIBLE_ID));
+    } else {
+        say!("FAIL the NCM control interface is not in the descriptors");
+        ok = false;
+    }
+    let mut want = Vec::new();
+    want.extend(((16 + 24 * entries.len()) as u32).to_le_bytes());
+    want.extend([0x00, 0x01]);
+    want.extend(4u16.to_le_bytes());
+    want.push(entries.len() as u8);
+    want.extend([0; 7]);
+    for (first, id) in &entries {
+        want.extend([*first, 1]);
+        want.extend(id);
+        want.extend([0; 8 + 6]);
+    }
+    ok &= request(
+        usb,
+        "extended compatible IDs",
+        ControlSetup {
+            request_type: 0xc0,
+            request: ms_os::VENDOR_CODE,
+            value: 0,
+            index: 4,
+        },
+        &want,
+    );
+
+    let name = wide(ms_os::LINK_GUID_PROPERTY, true);
+    let data = wide(ms_os::LINK_GUID, true);
+    let size = 14 + name.len() + data.len();
+    let mut want = Vec::new();
+    want.extend(((10 + size) as u32).to_le_bytes());
+    want.extend([0x00, 0x01]);
+    want.extend(5u16.to_le_bytes());
+    want.extend(1u16.to_le_bytes());
+    want.extend((size as u32).to_le_bytes());
+    want.extend(1u32.to_le_bytes());
+    want.extend((name.len() as u16).to_le_bytes());
+    want.extend(&name);
+    want.extend((data.len() as u32).to_le_bytes());
+    want.extend(&data);
+    ok &= request(
+        usb,
+        "extended properties of interface 0",
+        ControlSetup {
+            request_type: 0xc1,
+            request: ms_os::VENDOR_CODE,
+            value: 0,
+            index: 5,
+        },
+        &want,
+    );
+    ok
+}
+
+/// One control read, which must return `want` exactly.
+fn request(usb: &UsbfsFile, what: &str, setup: ControlSetup, want: &[u8]) -> bool {
+    let mut got = vec![0u8; want.len() + 8];
+    match usb.control_in(setup, &mut got, 5000) {
+        Ok(n) if got[..n] == *want => {
+            say!("ok   {what}: {n} bytes as the host reads them");
+            true
+        }
+        Ok(n) => {
+            say!("FAIL {what}: got {:02x?}, want {:02x?}", &got[..n], want);
+            false
+        }
+        Err(error) => {
+            say!("FAIL {what}: {error}");
+            false
+        }
+    }
+}
+
+/// The number of the CDC NCM control interface (class 0x02, subclass 0x0d) in the descriptors.
+fn ncm_interface(bytes: &[u8]) -> Option<u8> {
+    let mut at = 0;
+    while at + 2 <= bytes.len() {
+        let len = usize::from(bytes[at]);
+        if len < 2 || at + len > bytes.len() {
+            break;
+        }
+        let is_ncm = bytes[at + 1] == 4
+            && len >= 9
+            && bytes[at + 3] == 0
+            && bytes[at + 5] == 0x02
+            && bytes[at + 6] == 0x0d;
+        if is_ncm {
+            return Some(bytes[at + 2]);
+        }
+        at += len;
+    }
+    None
 }
 
 /// The bus path of the device with the gadget's vendor and product, when it is listed.

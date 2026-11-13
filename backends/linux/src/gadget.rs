@@ -109,11 +109,11 @@ use std::time::Duration;
 
 use lemnos_hal::blocks::{BufferHandle, ControlSetup, UsbFunctionEvent, iso_interval_bytes};
 use lemnos_hal::usb_descriptors::{
-    self, CONFIGURATION_LEN, GadgetFunction, INTERFACE, UsbDescriptors,
+    self, CONFIGURATION_LEN, GadgetFunction, INTERFACE, UsbDescriptors, ms_os,
 };
 use lemnos_hal::{ErrorKind, UsbFunction};
 use lemnos_linux_sys::aio;
-use lemnos_linux_sys::functionfs::{self, Endpoint, Ep0, Event, Setup};
+use lemnos_linux_sys::functionfs::{self, CompatEntry, Endpoint, Ep0, Event, ExtProp, Setup};
 
 use crate::Claim;
 
@@ -202,7 +202,12 @@ struct Plan {
     max_power: String,
     attributes: String,
     configuration_name: Option<String>,
+    /// The descriptors blob, with the link's Microsoft OS 1.0 sections after the descriptors.
     descriptors: Vec<u8>,
+    /// `os_desc` attributes of the gadget's configfs OS descriptors (`use`, `b_vendor_code`,
+    /// `qw_sign`): what makes the kernel answer string 0xEE and the vendor requests for the
+    /// configurations it links there.
+    os_attributes: Vec<(&'static str, String)>,
     function_strings: Vec<u8>,
     /// Each endpoint's address, and for an isochronous one its bytes per interval.
     endpoints: Vec<(u8, Option<u32>)>,
@@ -313,13 +318,51 @@ impl Plan {
             max_power: (u16::from(configuration.max_power) * 2).to_string(),
             attributes: format!("0x{:02x}", configuration.attributes),
             configuration_name: attribute(configuration.name)?,
-            descriptors: functionfs::descriptors_blob(flags, Some(full), high).map_err(invalid)?,
+            descriptors: functionfs::descriptors_blob_with_os(
+                flags,
+                Some(full),
+                high,
+                &link_sections().map_err(invalid)?,
+            )
+            .map_err(invalid)?,
+            os_attributes: vec![
+                ("use", "1".to_string()),
+                ("b_vendor_code", format!("0x{:02x}", ms_os::VENDOR_CODE)),
+                ("qw_sign", ms_os::QW_SIGN.to_string()),
+            ],
             function_strings: functionfs::strings_blob(language.unwrap_or(0), &table)
                 .map_err(invalid)?,
             endpoints,
             lend,
         })
     }
+}
+
+/// The Microsoft OS 1.0 sections of the link, which every gadget of ours presents: the
+/// FunctionFS function is always in the list (`description::functions` adds it when the board
+/// does not name it), and its first interface is the link. The compatible ID is WinUSB and the
+/// property is the link GUID, so Windows binds WinUSB to that interface only.
+fn link_sections() -> io::Result<Vec<Vec<u8>>> {
+    Ok(vec![
+        functionfs::os_compat_section(&[CompatEntry {
+            interface: 0,
+            compatible: ms_os::LINK_COMPATIBLE_ID,
+            sub_compatible: [0; 8],
+        }])?,
+        functionfs::os_prop_section(
+            0,
+            &[ExtProp {
+                name: ms_os::LINK_GUID_PROPERTY,
+                data: ms_os::LINK_GUID,
+            }],
+        )?,
+    ])
+}
+
+/// The text configfs takes for an 8-byte ID: its bytes up to the NULs.
+fn id_text(id: &[u8; 8]) -> &[u8] {
+    let end = id.iter().position(|&b| b == 0).unwrap_or(id.len());
+    &id[..end]
 }
 
 /// `[OUT, IN]` positions when the transfer types are exactly one bulk OUT and one bulk IN.
@@ -463,6 +506,14 @@ impl Paths {
     /// Removes every configuration and strings directory of the gadget, and the links in them.
     /// Never fails: what isn't there is already gone. Setup only.
     fn dismantle(&self) {
+        // The configurations the OS descriptors name, which configfs won't remove while linked.
+        if let Ok(entries) = fs::read_dir(self.gadget.join("os_desc")) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         for configuration in directories(&self.gadget.join("configs")) {
             // The functions linked in, then the strings, then the configuration.
             if let Ok(entries) = fs::read_dir(&configuration) {
@@ -578,6 +629,13 @@ pub fn prepare(
     fs::create_dir_all(&configuration)?;
     attribute(&configuration, "MaxPower", &plan.max_power)?;
     attribute(&configuration, "bmAttributes", &plan.attributes)?;
+    // The OS descriptors belong to the configuration linked under `os_desc` below. Setting
+    // `use` first is what makes the kernel answer string 0xEE for the device.
+    let os_desc = paths.gadget.join("os_desc");
+    fs::create_dir_all(&os_desc)?;
+    for (file, value) in &plan.os_attributes {
+        attribute(&os_desc, file, value)?;
+    }
     if let (Some(language), Some(name)) = (&plan.language, &plan.configuration_name) {
         let strings = configuration.join("strings").join(language);
         fs::create_dir_all(&strings)?;
@@ -608,6 +666,16 @@ pub fn prepare(
                 fs::create_dir(&dir)?;
                 attribute(&dir, "host_addr", &mac_text(host))?;
                 attribute(&dir, "dev_addr", &mac_text(device))?;
+                // The NCM interface's OS descriptor, a group configfs makes for the function.
+                // Written raw: the store takes up to 8 bytes and would keep a newline. Best
+                // effort: the link does not depend on it, and the harness checks it is there.
+                let interface = dir.join("os_desc").join("interface.ncm");
+                let _ = fs::create_dir_all(&interface).and_then(|()| {
+                    fs::write(
+                        interface.join("compatible_id"),
+                        id_text(&ms_os::NCM_COMPATIBLE_ID),
+                    )
+                });
                 if let Some(name) = ifname {
                     // Only taken while the function is unbound, which it is here.
                     attribute(&dir, "ifname", name.as_str()).map_err(ifname_refused)?;
@@ -623,6 +691,7 @@ pub fn prepare(
     for name in &links {
         std::os::unix::fs::symlink(functions_dir.join(name), configuration.join(name))?;
     }
+    std::os::unix::fs::symlink(&configuration, os_desc.join(&plan.configuration))?;
 
     // The daemon writes the controller's name here, and nothing else in the gadget.
     let udc = paths.gadget.join("UDC");

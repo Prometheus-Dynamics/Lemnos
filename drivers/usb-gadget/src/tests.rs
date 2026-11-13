@@ -371,9 +371,7 @@ fn binding_checks_the_settings_and_touches_no_function() {
         }
         entries
     };
-    let refused: [(&str, Option<ConfigValue<'static>>); 14] = [
-        ("vendor", None),
-        ("product", None),
+    let refused: [(&str, Option<ConfigValue<'static>>); 12] = [
         ("interfaces", None),
         ("vendor", Some(ConfigValue::Int(0x10000))),
         ("vendor", Some(ConfigValue::Int(-1))),
@@ -664,43 +662,32 @@ fn keeping_the_gadget_up_allocates_nothing() {
 }
 
 #[test]
-fn the_functions_are_listed_in_order_with_ffs_first_unless_a_line_places_it() {
+fn the_functions_are_listed_with_ffs_first_and_the_others_in_file_order() {
     use crate::description::functions;
     use lemnos_hal::usb_descriptors::GadgetFunction::{Acm, Ffs, Ncm};
 
     let ncm = "function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02\n";
     let interfaces = "interface 0xff 0 0 orion-link\nendpoint in bulk\nendpoint out bulk\n";
     let listed = |text: &str| functions(text, None).map(|f| f.as_slice().to_vec());
+    let as_ncm = Ncm {
+        host: [2, 0, 0, 0, 0, 1],
+        device: [2, 0, 0, 0, 0, 2],
+        ifname: None,
+    };
 
-    // No `function` line: FunctionFS alone, as before.
+    // No `function` line: FunctionFS alone.
     assert_eq!(listed(interfaces), Ok(std::vec![Ffs]));
-    // Lines in the order given; `ffs` anywhere it is listed.
+    // `ffs` listed after the others is still first; the others keep the order they were given.
     assert_eq!(
         listed(&std::format!(
             "function acm\n{ncm}function ffs\n{interfaces}"
         )),
-        Ok(std::vec![
-            Acm,
-            Ncm {
-                host: [2, 0, 0, 0, 0, 1],
-                device: [2, 0, 0, 0, 0, 2],
-                ifname: None,
-            },
-            Ffs,
-        ])
+        Ok(std::vec![Ffs, Acm, as_ncm])
     );
     // `ffs` not listed but the others are: FunctionFS still comes first.
     assert_eq!(
-        listed(&std::format!("{ncm}function acm\n{interfaces}")),
-        Ok(std::vec![
-            Ffs,
-            Ncm {
-                host: [2, 0, 0, 0, 0, 1],
-                device: [2, 0, 0, 0, 0, 2],
-                ifname: None,
-            },
-            Acm,
-        ])
+        listed(&std::format!("{ncm}{interfaces}")),
+        Ok(std::vec![Ffs, as_ncm])
     );
     // The MAC words may come in either order.
     assert!(
@@ -1184,4 +1171,68 @@ fn an_interfaces_file_gives_the_set_its_text_gives() {
     let (text_set, _) = settings_of(&settings(), "").expect("the text is accepted");
     let _ = std::fs::remove_file(&path);
     assert_eq!(file_set.bytes(), text_set.bytes());
+}
+
+#[test]
+fn the_link_is_the_first_function_whatever_order_the_board_lists_them_in() {
+    use lemnos_hal::usb_descriptors::GadgetFunction::{Acm, Ffs, Ncm};
+    use std::format;
+    let ncm = "function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02 ifname=lemnos%d\n";
+    let link = "function ffs\ninterface 0xff 0 0 link\nendpoint in bulk\nendpoint out bulk\n";
+    let as_ncm = Ncm {
+        host: [2, 0, 0, 0, 0, 1],
+        device: [2, 0, 0, 0, 0, 2],
+        ifname: Some(lemnos_hal::usb_descriptors::IfName::new("lemnos%d").unwrap()),
+    };
+    // The link first; the others after it in the order the file gives them.
+    for (listed, others) in [
+        (format!("{ncm}{link}function acm\n"), [as_ncm, Acm]),
+        (format!("function acm\n{link}{ncm}"), [Acm, as_ncm]),
+        (format!("{link}{ncm}function acm\n"), [as_ncm, Acm]),
+    ] {
+        let functions = description::functions(&listed, None).unwrap();
+        assert_eq!(
+            functions.as_slice(),
+            &[Ffs, others[0], others[1]],
+            "{listed}"
+        );
+    }
+}
+
+#[test]
+fn the_link_has_no_interface_association_so_it_is_its_own_interface() {
+    // An interface association descriptor is type 11 (0x0b). Nothing of the link's may carry one:
+    // the composite groups an interface behind an association only when a descriptor says so.
+    let interfaces = "function ffs\ninterface 0xff 0 0 link\nendpoint in bulk\nendpoint out bulk\n";
+    let set = build(&identity_for_layout(), interfaces).unwrap();
+    let bytes = set.bytes();
+    let mut at = 0;
+    while at + 2 <= bytes.len() {
+        let len = usize::from(bytes[at]);
+        assert!(len >= 2 && at + len <= bytes.len());
+        assert_ne!(
+            bytes[at + 1],
+            11,
+            "no interface association in the link's descriptors"
+        );
+        at += len;
+    }
+    // The link's interface is number 0.
+    assert!(bytes.windows(4).any(|w| w == [9, 4, 0, 0]));
+}
+
+fn identity_for_layout() -> Identity<'static> {
+    Identity {
+        vendor: crate::LINK_VENDOR,
+        product: crate::LINK_PRODUCT,
+        release: crate::revision::RELEASE,
+        class: 0xef,
+        subclass: 0x02,
+        protocol: 0x01,
+        manufacturer: None,
+        product_name: None,
+        serial: None,
+        max_power_ma: 100,
+        self_powered: false,
+    }
 }

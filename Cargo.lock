@@ -1574,6 +1574,7 @@ dependencies = [
  "lemnos-sim",
  "lemnos-wire",
  "sha2 0.10.9",
+ "toml",
 ]
 
 [[package]]
@@ -1684,6 +1685,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-core",
+ "lemnos-hal",
  "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnosd",

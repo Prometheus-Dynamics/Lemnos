@@ -28,6 +28,7 @@ sha2 = { version = "0.10", default-features = false }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-hal = { path = "../../engine/hal", features = ["mock"] }
 lemnos-linux = { path = "../../backends/linux" }
+toml = { workspace = true }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
 lemnos-wire = { path = "../../engine/wire" }
