@@ -1804,6 +1804,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-nand-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-driver-system-flash",
+ "lemnos-driver-system-flash-sys",
+]
+
+[[package]]
 name = "lemnos-orion"
 version = "2.0.1-dev"
 dependencies = [

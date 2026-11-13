@@ -164,7 +164,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`I5c.md`](../testing/board-runs/I5c.md) | Slots on raw NAND over UBI: an install into a static volume renamed into place, a refused and a cancelled install leaving no work volume, the record volume replaced by rename, `boot-ubi.cmd` run by U-Boot (trial, disarm, default, root copy), and `lemnos-slot-init` booting through `ubiblock` and falling back through the record volume |
 | [`W2.md`](../testing/board-runs/W2.md) | `indicator`: its states on a real strip, each pattern kind over time (blink, bar, solid), the state set and refusals, and a job driving the states (`W1.md` or `I5.md`) |
 | [`W1.md`](../testing/board-runs/W1.md) | `system-flash`: a first-flash image streamed through the bridge and written to a spare card, the refusals (`allow_first_flash`, the running system), a corrupt and a cancelled write, verify, the partition re-read, and the bridge's memory over a long stream |
-| [`W1b.md`](../testing/board-runs/W1b.md) | `system-flash` on raw NAND: a UBI or raw image written to a spare MTD partition, its bad blocks skipped, the erase counts carried forward, the read-back and verify, the refusals (the layout, the size after bad blocks, the running root), and a UBI attach of the result (not run here) |
+| [`W1b.md`](../testing/board-runs/W1b.md) | `system-flash` on raw NAND: a UBI or raw image written to a spare MTD partition, its bad blocks skipped, the erase counts carried forward, the read-back and verify, the refusals (the layout, the size after bad blocks, the running root), and the same image attached by the kernel's UBI and read back, in QEMU against the kernel's NAND simulator (real chip: untested on board) |
 
 ## USB
 

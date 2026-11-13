@@ -39,6 +39,15 @@
 #define CSI2_BIND "/sys/bus/platform/drivers/" CSI2_DRIVER "/bind"
 #define CSI2_UNBIND "/sys/bus/platform/drivers/" CSI2_DRIVER "/unbind"
 #define OWNED_CSI2 "owned=lemnos,test-block,lemnos,test-csi2"
+/*
+ * The NAND simulator's chip: 128 MiB of 128 KiB erase blocks and 2 KiB pages (ID 98 da 90 15), split
+ * into six partitions, mtd0 to mtd5 (the last is the rest). Its bad blocks are chip-wide erase block
+ * numbers: partition A's 5 and 9; B's 6 and 40 (70 and 104); D's 3, 20 and 50 (131, 148 and 178). Erase
+ * block 203 (F's block 3) fails every erase (weakblocks=203:0). Bit flips: one per page at most, and
+ * about one page in a thousand gets one (ECC corrects it). lemnos-nand-check reads these back.
+ */
+#define NANDSIM "first_id_byte=0x98 second_id_byte=0xda third_id_byte=0x90 fourth_id_byte=0x15 " \
+	"parts=64,64,64,8,4 badblocks=5,9,70,104,131,148,178 weakblocks=203:0 bitflips=1"
 /* The fake receiver's registers: guest memory the kernel left alone (memmap=). */
 #define CSI2_PHYS "csi2_phys=0x20000000"
 
@@ -537,6 +546,14 @@ int main(void)
 	give_module_nodes_to_daemon_group();
 	give_to_daemon_group(cma_heap());
 	check(!run((char *const[]){ "/lemnos-gadget-check", NULL }), "lemnos_gadget_check");
+
+	/*
+	 * The first flash on raw NAND: the driver's writer on the kernel's own NAND simulator, with its
+	 * bad blocks, a weak erase block and bit flips injected by the kernel, under the kernel's MTD and UBI.
+	 */
+	check(!load("/nandsim.ko", NANDSIM), "NAND simulator loaded");
+	check(!run((char *const[]){ "/lemnos-nand-check", NULL }), "lemnos-nand-check");
+	check(!unload("nandsim"), "NAND simulator unloaded");
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);
 	sync();
