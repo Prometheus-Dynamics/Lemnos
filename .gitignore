@@ -1,4 +1,5 @@
-target/
+# No trailing slash: a symlinked target directory must be ignored too.
+target
 target-docker/
 .cargo-docker/
 Cargo.lock
