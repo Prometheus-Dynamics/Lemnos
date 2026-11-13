@@ -657,9 +657,14 @@ mod description {
     /// the state would have sent it: that item's block shrinks by its two bytes. The last item has
     /// no step, limits or group, so its block is 7 bytes with the state and 5 without.
     fn without_last_unit_state(buf: &mut [u8], n: usize) -> usize {
-        let at = n - 4 - 7;
+        // The description ends with the added-field count (two bytes, zero here): the last item's
+        // block sits just before it.
+        let at = n - 2 - 4 - 7;
         assert_eq!(u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()), 7);
         buf[at..at + 4].copy_from_slice(&5u32.to_le_bytes());
+        // Drop the block's last two bytes, the state, and keep the trailer after them.
+        let end = at + 4 + 7;
+        buf.copy_within(end..n, end - 2);
         n - 2
     }
 
@@ -799,11 +804,11 @@ mod layout {
                 use super::super::super::hash;
 
                 frames! {
-                    core = 0 {
+                    "core" = 0 {
                         1 Hello { core: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool, parts: Tail<&'a [u8]> $($hello)* }
                         2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
                     }
-                    jobs = 3 {
+                    "jobs" = 1 bit JOBS {
                         40 Probe { id: u32 }
                         $($jobs)*
                     }
@@ -831,11 +836,11 @@ mod layout {
         use super::super::super::{Build, LemnosName, WireError};
 
         frames! {
-            core = 0 {
+            "core" = 0 {
                 1 Hello { core: u64, lemnos: LemnosName<'a>, version: u16, title: &'a str, events: bool, parts: Tail<&'a [u8]> }
                 2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
             }
-            jobs = 3 { 40 Probe { id: u32 } }
+            "jobs" = 1 bit JOBS { 40 Probe { id: u32 } }
         }
     }
 
@@ -846,11 +851,11 @@ mod layout {
         use super::super::super::{Build, LemnosName, WireError};
 
         frames! {
-            core = 0 {
+            "core" = 0 {
                 1 Hello { core: u64, lemnos: LemnosName<'a>, version: u32, name: &'a str, events: bool, parts: Tail<&'a [u8]> }
                 2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
             }
-            jobs = 3 { 40 Probe { id: u32 } }
+            "jobs" = 1 bit JOBS { 40 Probe { id: u32 } }
         }
     }
 
@@ -903,8 +908,8 @@ mod layout {
             "a base frame in the jobs part is not in the core"
         );
         assert_ne!(
-            same::Frame::fold_part(hash::OFFSET, 3),
-            kind_base::Frame::fold_part(hash::OFFSET, 3)
+            same::Frame::fold_part(hash::OFFSET, 1),
+            kind_base::Frame::fold_part(hash::OFFSET, 1)
         );
     }
 
@@ -920,7 +925,6 @@ mod layout {
     fn the_core_hash_is_built_from_the_core_frames_and_constants() {
         let mut hash = hash::OFFSET;
         hash = fold_constants(hash);
-        hash = feature::fold_constants(hash);
         hash = state::fold_constants(hash);
         hash = health::fold_constants(hash);
         hash = Frame::fold_part(hash, 0);
@@ -930,33 +934,86 @@ mod layout {
     }
 
     #[test]
-    fn each_part_hash_is_built_from_its_frames_and_constants() {
+    fn each_part_hash_is_its_own_declaration() {
+        for (i, hash) in PART_HASHES.iter().enumerate() {
+            assert_eq!(*hash, section_hash(i as u8 + 1));
+        }
         let mut hash = Frame::fold_part(hash::OFFSET, 1);
         hash = handles::fold_constants(hash);
-        assert_eq!(PART_HASHES[0], hash);
-        let mut hash = Frame::fold_part(hash::OFFSET, 2);
-        hash = package_mode::fold_constants(hash);
-        assert_eq!(PART_HASHES[1], hash);
-        assert_eq!(PART_HASHES[2], Frame::fold_part(hash::OFFSET, 3));
-        let mut hash = Frame::fold_part(hash::OFFSET, 4);
-        hash = crate::ring::fds::fold_constants(hash);
-        assert_eq!(PART_HASHES[3], hash);
+        assert_ne!(
+            PART_HASHES[0], hash,
+            "the name, number and bit are folded too"
+        );
+        assert_eq!(
+            PART_NAMES,
+            [
+                "stream-handles",
+                "packages",
+                "jobs",
+                "shared-rings",
+                "endpoints"
+            ]
+        );
+        assert_eq!(PART_BITS, [1, 2, 4, 8, 16]);
+        assert_eq!(feature::EVERY, 31);
+        assert_eq!(PARTS, 5);
     }
 
     #[test]
     fn the_parts_and_the_core_are_different_hashes() {
-        let all = [
-            CORE_HASH,
-            PART_HASHES[0],
-            PART_HASHES[1],
-            PART_HASHES[2],
-            PART_HASHES[3],
-        ];
+        let mut all = vec![CORE_HASH];
+        all.extend(PART_HASHES);
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn a_dummy_part_moves_neither_the_core_nor_any_other_part() {
+        // The same core and jobs frames, with one extra part declared after them. The extra part
+        // must not change the core's base, nor the jobs part's hash.
+        mod with_dummy {
+            use lemnos_core::{Decode, Encode, Reader, Tail, Writer};
+
+            use super::super::super::hash;
+            use super::super::super::{Build, LemnosName, WireError};
+
+            frames! {
+                "core" = 0 {
+                    1 Hello { core: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool, parts: Tail<&'a [u8]> }
+                    2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
+                }
+                "jobs" = 1 bit JOBS { 40 Probe { id: u32 } }
+                "dummy" = 2 bit DUMMY { added 42 Extra { id: u32 } }
+            }
+        }
+        mod without {
+            use lemnos_core::{Decode, Encode, Reader, Tail, Writer};
+
+            use super::super::super::hash;
+            use super::super::super::{Build, LemnosName, WireError};
+
+            frames! {
+                "core" = 0 {
+                    1 Hello { core: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool, parts: Tail<&'a [u8]> }
+                    2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
+                }
+                "jobs" = 1 bit JOBS { 40 Probe { id: u32 } }
+            }
+        }
+        assert_eq!(
+            with_dummy::Frame::fold_part(hash::OFFSET, 0),
+            without::Frame::fold_part(hash::OFFSET, 0),
+            "adding a part must not move the core's base"
+        );
+        assert_eq!(
+            with_dummy::section_hash(1),
+            without::section_hash(1),
+            "adding a part must not move the jobs part"
+        );
+        assert_ne!(with_dummy::section_hash(2), without::section_hash(1));
     }
 
     #[test]
@@ -1079,22 +1136,89 @@ mod handshake {
         );
     }
 
+    fn records(list: &[(&str, u64)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (part, hash) in list {
+            out.push(part.len() as u8);
+            out.extend_from_slice(part.as_bytes());
+            out.extend_from_slice(&hash.to_le_bytes());
+        }
+        out
+    }
+
+    fn ours() -> Vec<(&'static str, u64)> {
+        PART_NAMES.iter().copied().zip(PART_HASHES).collect()
+    }
+
     #[test]
-    fn a_part_that_differs_is_refused_by_name() {
-        let mut parts = PART_BYTES;
-        parts[8] ^= 1;
+    fn a_part_that_differs_is_refused_by_name_and_the_rest_agrees() {
+        let list: Vec<(&str, u64)> = ours()
+            .into_iter()
+            .map(|(part, hash)| {
+                if part == "packages" {
+                    (part, hash ^ 1)
+                } else {
+                    (part, hash)
+                }
+            })
+            .collect();
+        let parts = check_parts(&records(&list)).unwrap();
+        assert_eq!(parts.refused, feature::PACKAGES);
+        assert_eq!(parts.agreed, feature::EVERY & !feature::PACKAGES);
+        assert_eq!(parts.theirs[1], PART_HASHES[1] ^ 1);
+    }
+
+    #[test]
+    fn a_hello_with_a_refused_part_still_reads_on() {
+        let list: Vec<(&str, u64)> = ours()
+            .into_iter()
+            .map(|(part, hash)| {
+                if part == "jobs" {
+                    (part, hash ^ 1)
+                } else {
+                    (part, hash)
+                }
+            })
+            .collect();
         let mut prefix = CORE_HASH.to_le_bytes().to_vec();
         prefix.extend_from_slice(&name(LEMNOS));
         prefix.extend_from_slice(&VERSION.to_le_bytes());
-        let bytes = frame(1, &prefix, &hello_tail(&parts));
-        let Err(WireError::PartMismatch { part, ours, theirs }) = decode(&bytes) else {
-            panic!("a differing part must be refused");
+        let bytes = frame(1, &prefix, &hello_tail(&records(&list)));
+        let (back, _) = decode(&bytes).unwrap().unwrap();
+        let Frame::Hello { parts, .. } = back else {
+            panic!("a Hello");
         };
-        assert_eq!(part, "packages");
-        assert_eq!(ours, PART_HASHES[1]);
-        assert_eq!(theirs, PART_HASHES[1] ^ 1);
-        let text = WireError::PartMismatch { part, ours, theirs }.to_string();
-        assert!(text.contains("`packages`"), "{text}");
+        assert_eq!(check_parts(parts.0).unwrap().refused, feature::JOBS);
+    }
+
+    #[test]
+    fn unknown_part_names_are_ignored() {
+        let mut list = ours();
+        list.push(("a-future-part", 9));
+        let parts = check_parts(&records(&list)).unwrap();
+        assert_eq!(parts.agreed, feature::EVERY);
+        assert_eq!(parts.refused, 0);
+    }
+
+    #[test]
+    fn a_part_the_peer_lacks_is_not_agreed_and_not_refused() {
+        let parts = check_parts(&records(&ours()[..1])).unwrap();
+        assert_eq!(parts.agreed, feature::STREAM_HANDLES);
+        assert_eq!(parts.refused, 0);
+    }
+
+    #[test]
+    fn truncated_part_records_are_malformed() {
+        let mut bytes = records(&ours());
+        bytes.pop();
+        assert_eq!(check_parts(&bytes), Err(WireError::Malformed));
+    }
+
+    #[test]
+    fn this_build_agrees_with_itself_on_every_part() {
+        let parts = check_parts(&PART_BYTES).unwrap();
+        assert_eq!(parts.agreed, feature::EVERY);
+        assert_eq!(parts.refused, 0);
     }
 
     #[test]

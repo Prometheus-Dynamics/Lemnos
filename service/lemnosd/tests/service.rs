@@ -601,12 +601,20 @@ fn a_client_from_another_lemnos_revision_is_answered_with_the_hosts_layout_and_c
 }
 
 #[test]
-fn a_client_whose_part_differs_is_answered_with_the_hosts_parts_and_closed() {
+fn a_client_whose_part_differs_is_refused_by_name_and_the_rest_works() {
     let running = start();
     let mut raw = Raw::connect(&running);
-    // The same core, but the packages part is another build's.
-    let mut parts = lemnos_wire::PART_BYTES;
-    parts[8] ^= 1;
+    // The same core, but the packages part is another build's: flip the last byte of its hash,
+    // found by name in the records.
+    let mut parts = lemnos_wire::PART_BYTES.to_vec();
+    let mut at = 0;
+    for name in lemnos_wire::PART_NAMES {
+        let end = at + 1 + name.len() + 8;
+        if name == "packages" {
+            parts[end - 1] ^= 1;
+        }
+        at = end;
+    }
     raw.send(Frame::Hello {
         core: lemnos_wire::CORE_HASH,
         parts: lemnos_wire::Tail(&parts[..]),
@@ -615,13 +623,15 @@ fn a_client_whose_part_differs_is_answered_with_the_hosts_parts_and_closed() {
         name: "old-packages",
         events: false,
     });
+    // The Welcome clears only the refused part's bit; the connection is not closed.
     raw.with_next(|frame| {
-        assert!(matches!(
-            frame,
-            Some(Frame::Welcome { core, parts, .. })
-                if core == lemnos_wire::CORE_HASH
-                    && parts.0 == &lemnos_wire::PART_BYTES[..]
-        ));
+        let Some(Frame::Welcome { core, features, .. }) = frame else {
+            panic!("a Welcome");
+        };
+        assert_eq!(core, lemnos_wire::CORE_HASH);
+        assert_eq!(
+            features,
+            lemnos_wire::feature::EVERY & !lemnos_wire::feature::PACKAGES
+        );
     });
-    raw.closes();
 }
