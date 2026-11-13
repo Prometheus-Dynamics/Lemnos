@@ -566,6 +566,7 @@ When you add a method or field, classify it in the PR:
 | `camera.sensor` `SensorInfo.embedded_data` | additive | absent means `None`, which is what a sensor from before it did |
 | `camera.receiver` methods 9 to 11 (`embedded_stream`, `source`, `layout`) | additive | appended methods; an old driver answers `NOT_SUPPORTED` |
 | `camera.sensor` method 12 (`identity`) | additive | appended method |
+| `camera.sensor` methods 13 and 14 (`post_values_at`, `applied_landing`), `camera.receiver` method 12 (`frame_starts`) | additive | appended methods and their types; an old driver answers `NOT_SUPPORTED` and an old caller never calls them |
 | `lens/1` methods 4 and 5 (`direction`, `settle_us`) | additive | appended methods |
 | `raw-bus` methods 6 and 7 (`uart_write`, `uart_read`) | additive | appended methods |
 | `MethodInfo.job` on a new method | additive | a method that was not a job before is not called differently by a client that doesn't know it is one |

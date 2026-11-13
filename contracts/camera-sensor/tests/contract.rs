@@ -1,6 +1,7 @@
 use lemnos_contract_camera_sensor::{
-    BayerOrder, CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, LinkConfig,
-    MAX_IDENTITY_NAME, Mode, Rect, SensorInfo,
+    AppliedLanding, BayerOrder, CameraSensor, Controls, EmbeddedData, FrameStarts, FrameValues,
+    GainLaw, GainRange, Landing, LinkConfig, MAX_IDENTITY_NAME, Mode, Rect, SensorInfo, landing_of,
+    launch_frame,
 };
 use lemnos_core::{
     Bound, Caller, Contract, Decode, Encode, LOCAL_ARGS, REPLY_INLINE, Reader, Reply, Result,
@@ -110,8 +111,13 @@ fn the_tag_and_numbers_are_stable() {
             ("set_flips", 10),
             ("set_test_pattern", 11),
             ("identity", 12),
+            ("post_values_at", 13),
+            ("applied_landing", 14),
         ]
     );
+    assert!(!INFO.methods[12].has_out_buffer);
+    assert!(matches!(INFO.methods[12].returns, Shape::Record(_)));
+    assert!(matches!(INFO.methods[13].returns, Shape::Option(_)));
     assert_eq!(INFO.methods[9].returns, Shape::U8);
     assert!(INFO.methods[..11].iter().all(|m| !m.has_out_buffer));
     assert!(INFO.methods[11].has_out_buffer);
@@ -421,6 +427,92 @@ impl CameraSensor for Mock {
             .copy_from_slice(name);
         Ok(name.len())
     }
+
+    fn post_values_at(&mut self, _values: FrameValues) -> Result<Landing> {
+        // No receiver in the mock: nothing to count frame starts with.
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn applied_landing(&mut self) -> Result<Option<AppliedLanding>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+}
+
+#[test]
+fn a_launch_that_straddles_a_frame_start_is_the_later_frame() {
+    let at = |count| FrameStarts {
+        count,
+        latest_ns: 0,
+    };
+    // No frame start during the writes: the frame in progress, count - 1.
+    assert_eq!(launch_frame(at(5), at(5)), 4);
+    // A start during the writes: the later frame.
+    assert_eq!(launch_frame(at(5), at(6)), 5);
+    assert_eq!(launch_frame(at(5), at(7)), 6);
+    // Nothing started yet: the frame is not counted, and the helper saturates rather than wraps.
+    assert_eq!(launch_frame(at(0), at(0)), 0);
+}
+
+#[test]
+fn a_landing_is_the_launch_frame_plus_each_controls_delay() {
+    let posted = Controls {
+        exposure: Some(300),
+        analogue_gain: None,
+        digital_gain: None,
+        frame_length: Some(900),
+    };
+    let landing = landing_of(10, [3, 1, 2], &posted);
+    assert_eq!(
+        landing,
+        Landing {
+            exposure: Some(13),
+            analogue_gain: None,
+            digital_gain: None,
+            frame_length: Some(12),
+            latest: 13,
+        }
+    );
+    let gain_only = landing_of(
+        10,
+        [3, 1, 2],
+        &Controls {
+            analogue_gain: Some(20),
+            ..Controls::default()
+        },
+    );
+    assert_eq!(gain_only.latest, 11);
+    assert_eq!(
+        landing_of(10, [3, 1, 2], &Controls::default()).latest,
+        10,
+        "a post naming no control has its launch frame"
+    );
+}
+
+#[test]
+fn landings_and_applied_landings_round_trip() {
+    // Absent controls are encoded short, so this checks the decode of what was written, not the
+    // fixed length `round_trip` asserts.
+    fn exact<T: Encode + for<'a> Decode<'a> + PartialEq + core::fmt::Debug>(value: T) {
+        let mut buffer = [0; REPLY_INLINE];
+        let mut writer = Writer::new(&mut buffer);
+        value.encode(&mut writer).unwrap();
+        let used = writer.len();
+        let mut reader = Reader::new(&buffer[..used]);
+        assert_eq!(T::decode(&mut reader), Ok(value));
+        assert_eq!(reader.remaining(), 0);
+    }
+    exact(Landing {
+        exposure: Some(u64::MAX),
+        analogue_gain: None,
+        digital_gain: None,
+        frame_length: Some(0),
+        latest: 9,
+    });
+    exact(AppliedLanding {
+        values: values(),
+        landing: landing_of(3, [2, 2, 2], &values().controls),
+    });
+    exact(Some(AppliedLanding::default()));
 }
 
 #[test]

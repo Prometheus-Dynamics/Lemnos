@@ -194,3 +194,12 @@ impl Bus for HostBus {
         Ok(())
     }
 }
+
+impl HostBus {
+    /// Moves simulated time on by `by` and runs every tick that falls due, so a test can post at a
+    /// time of its own choosing rather than at the next tick.
+    pub fn advance(&self, by: Duration) {
+        self.clock.advance(by);
+        self.host.run_ticks();
+    }
+}

@@ -8,27 +8,41 @@
 //! timestamp, and no pixel content.
 //!
 //! The sensor's controls go through a simulated pipeline shared by the sensor and its receiver, so
-//! a frame shows the values in force for it, with the timing rule of `camera.sensor`: a post made
-//! while frame `F` is the last one emitted lands on frame `F + delay` for each control. Frame `k`
-//! is the `k`th emission since the receiver started; the first `drop_frames` are masked at the
-//! sensor and never published. With `embedded = true` the sensor reports register embedded data,
-//! and the receiver publishes the values in force for each frame on its `embedded` stream, in the
-//! layout `encode_embedded` and `decode_embedded` here define. The board file sets the delays,
-//! masking and embedded data through the sensor's `config`.
+//! a frame shows the values in force for it, with the timing rule of `camera.sensor`: a group whose
+//! launch falls in frame `F` shows each control on frame `F + delay`. Frame `k` is the `k`th start
+//! since the receiver started, one interval after the first tick; the first `drop_frames` are
+//! masked at the sensor and never published, but they are starts and count. With `embedded = true`
+//! the sensor reports register embedded data, and the receiver publishes the values in force for
+//! each frame on its `embedded` stream, in the layout `encode_embedded` and `decode_embedded` here
+//! define. The board file sets the delays, masking and embedded data through the sensor's `config`.
+//!
+//! Lock-step (the default) is the board the proofs above run on: a post's group launches at once,
+//! in the frame in progress. Free-running (`free_running = true`) runs frames on their own clock,
+//! `period_us` apart when given (the link's frame time otherwise), and a post's group takes
+//! `write_us` to reach the sensor, launching when the write ends. So a write that crosses a frame
+//! start lands one frame later than the caller's schedule says, as with group hold on hardware.
+//!
+//! Landing frames. `post_values_at` reads the receiver's `frame_starts` through the sensor's link
+//! before its write and after it, and answers with `launch_frame` of the two reads, the rule in the
+//! `camera.sensor` docs. The sim's physics is the frame in progress when the write ends; a test
+//! checks the answer against what the embedded data shows. `naive_landing = true` answers from the
+//! read before the write alone, a negative control the proofs must fail on.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lemnos_contract_camera_isp::{
     CameraIsp, ConfigLayout, Counters as IspCounters, IspInfo, IspInput, IspOutput, OutputLayout,
 };
+use lemnos_contract_camera_receiver::FrameStarts;
 use lemnos_contract_camera_receiver::{
     BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig,
     MAX_EMBEDDED_STREAM_NAME, MAX_STREAM_NAME, Packing,
 };
 use lemnos_contract_camera_sensor::{
-    CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, Mode, Rect, SensorInfo,
+    AppliedLanding, CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, Landing,
+    Mode, Rect, SensorInfo, landing_of, launch_frame,
 };
-use lemnos_core::{Config, ConfigValue, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{Config, ConfigValue, Dev, Lifecycle, Result, Status, StreamHandle, driver};
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
 use lemnos_host::{Host, Options, entry};
@@ -68,6 +82,18 @@ pub struct SimConfig {
     pub drop_frames: u8,
     /// Whether the sensor carries embedded data.
     pub embedded: bool,
+    /// Free-running: frames on their own clock (`period_us`), and posts take `write_us` to reach
+    /// the sensor, so a post whose group launch falls after a frame start lands one frame later.
+    /// Without it (lock-step, the default) the frame period is the link's and a write takes no
+    /// time.
+    pub free_running: bool,
+    /// The frame period in nanoseconds, when free-running sets one.
+    pub period_ns: Option<u64>,
+    /// The group write time in nanoseconds, when free-running.
+    pub write_ns: u64,
+    /// A negative control: the sensor answers its landing from the frame count read before the
+    /// write, as a driver without the straddle rule would. Board `naive_landing = true`.
+    pub naive_landing: bool,
 }
 
 impl SimConfig {
@@ -76,6 +102,10 @@ impl SimConfig {
         delays: [2, 2, 2],
         drop_frames: 0,
         embedded: false,
+        free_running: false,
+        period_ns: None,
+        write_ns: 0,
+        naive_landing: false,
     };
 
     fn from_config(cfg: &Config<'_>) -> Result<Self> {
@@ -86,10 +116,28 @@ impl SimConfig {
                 Some(_) => Err(Status::INVALID_ARGUMENT),
             }
         };
-        let embedded = match cfg.get("embedded") {
-            None => false,
-            Some(ConfigValue::Bool(on)) => on,
-            Some(_) => return Err(Status::INVALID_ARGUMENT),
+        let flag = |key: &str| -> Result<bool> {
+            match cfg.get(key) {
+                None => Ok(false),
+                Some(ConfigValue::Bool(on)) => Ok(on),
+                Some(_) => Err(Status::INVALID_ARGUMENT),
+            }
+        };
+        // Microseconds, up to ten seconds.
+        let micros = |key: &str| -> Result<Option<u64>> {
+            match cfg.get(key) {
+                None => Ok(None),
+                Some(ConfigValue::Int(v)) if (1..=10_000_000).contains(&v) => {
+                    Ok(Some(v as u64 * 1_000))
+                }
+                Some(_) => Err(Status::INVALID_ARGUMENT),
+            }
+        };
+        let free_running = flag("free_running")?;
+        let (period_ns, write_ns) = if free_running {
+            (micros("period_us")?, micros("write_us")?.unwrap_or(0))
+        } else {
+            (None, 0)
         };
         Ok(Self {
             delays: [
@@ -98,7 +146,11 @@ impl SimConfig {
                 int("frame_length_delay", 2)?,
             ],
             drop_frames: int("drop_frames", 0)?,
-            embedded,
+            embedded: flag("embedded")?,
+            free_running,
+            period_ns,
+            write_ns,
+            naive_landing: flag("naive_landing")?,
         })
     }
 }
@@ -154,9 +206,19 @@ pub struct Pipeline {
     config: SimConfig,
     emitted: u64,
     /// Per control (exposure, gain, frame length): values waiting for their frame, as (frame,
-    /// value), in the order they were posted.
-    queues: [Vec<(u64, u32)>; 3],
+    /// value), in the order they were posted. A frame is -1 before the first.
+    queues: [Vec<(i64, u32)>; 3],
     in_force: [u32; 3],
+    /// Time of the first frame start, and the frame period. `None` until the receiver's first tick.
+    frame0_ns: Option<u64>,
+    interval_ns: u64,
+    /// The receiver's last tick: the sim's present.
+    now_ns: u64,
+    /// When set, the receiver's frame count is read as of this time instead of the present. The
+    /// sensor sets it for the read after its write, which lies in the sim's future.
+    read_at: Option<u64>,
+    /// Posts whose group launch fell in a later frame than the one their write began in.
+    straddles: u64,
 }
 
 impl Pipeline {
@@ -166,14 +228,26 @@ impl Pipeline {
             emitted: 0,
             queues: [Vec::new(), Vec::new(), Vec::new()],
             in_force: INITIAL,
+            frame0_ns: None,
+            interval_ns: 1,
+            now_ns: 0,
+            read_at: None,
+            straddles: 0,
         }
     }
 
-    /// Schedules `value` for control `control` to show on frame `emitted - 1 + delay`: the frame
-    /// last emitted, plus the control's delay. Delay 0 shows on the next frame.
-    fn land(&mut self, control: usize, value: u32, delay: u8) {
-        let frame = (self.emitted + u64::from(delay)).saturating_sub(1);
-        self.queues[control].push((frame, value));
+    /// The frame in progress at `at_ns`: frame `k` starts at `frame0 + k * interval`. -1 before the
+    /// first frame starts.
+    fn frame_at(&self, at_ns: u64) -> i64 {
+        match self.frame0_ns {
+            Some(frame0) if at_ns >= frame0 => ((at_ns - frame0) / self.interval_ns) as i64,
+            _ => -1,
+        }
+    }
+
+    /// Schedules `value` for control `control` to show on frame `target`.
+    fn land(&mut self, control: usize, value: u32, target: i64) {
+        self.queues[control].push((target, value));
     }
 
     /// Emits the next frame: applies the values due on it and returns its number with the values
@@ -184,7 +258,7 @@ impl Pipeline {
         for (control, queue) in self.queues.iter_mut().enumerate() {
             let mut i = 0;
             while i < queue.len() {
-                if queue[i].0 <= frame {
+                if queue[i].0 <= frame as i64 {
                     self.in_force[control] = queue.remove(i).1;
                 } else {
                     i += 1;
@@ -198,6 +272,11 @@ impl Pipeline {
 /// Frames the receiver has emitted since it started.
 pub fn emitted() -> u64 {
     pipeline().emitted
+}
+
+/// Posts whose group launch fell after a frame start that came during their writes.
+pub fn straddles() -> u64 {
+    pipeline().straddles
 }
 
 /// The calls logged since [`serial`], in order.
@@ -255,25 +334,48 @@ fn frame_interval_ns(link: &LinkConfig) -> u64 {
         .max(1)
 }
 
+/// What a sensor's read of the receiver's frame count gave.
+#[derive(Clone, Copy)]
+enum Probe {
+    Count(FrameStarts),
+    Unknown,
+    Unsupported,
+}
+
+/// Where a post's landing stands once it is made.
+#[derive(Clone, Copy)]
+enum Outcome {
+    Known(Landing),
+    Unknown,
+    Unsupported,
+}
+
 #[driver("sim-sensor", provides = [CameraSensor])]
 pub struct SimSensor {
     selected: Option<u16>,
     streaming: bool,
     applied: Option<FrameValues>,
+    /// The last post accepted, with what its landing was.
+    last: Option<(FrameValues, Outcome)>,
     config: SimConfig,
+    /// The receiver the board links this sensor to: where landings read the frame count from.
+    #[link]
+    _receiver: Option<Dev<dyn CameraReceiver>>,
 }
 
 impl Lifecycle for SimSensor {
     type Needs = SimSensorNeeds;
 
-    fn start(_needs: SimSensorNeeds, cfg: &Config<'_>) -> Result<Self> {
+    fn start(needs: SimSensorNeeds, cfg: &Config<'_>) -> Result<Self> {
         let config = SimConfig::from_config(cfg)?;
         pipeline().config = config;
         Ok(Self {
             selected: None,
             streaming: false,
             applied: None,
+            last: None,
             config,
+            _receiver: needs._receiver,
         })
     }
 }
@@ -334,22 +436,36 @@ impl CameraSensor for SimSensor {
         }
         check_limits(&controls)?;
         log("sensor.set_controls");
-        schedule(&controls, true);
+        // Written at once: the group launches in the frame in progress, and shows on the next.
+        let now = pipeline().now_ns;
+        let launch = pipeline().frame_at(now);
+        schedule(&controls, launch, [0; 3]);
         Ok(())
     }
 
     fn post_values(&mut self, values: FrameValues) -> Result<()> {
-        if self.selected.is_none() {
-            return Err(Status::INVALID_ARGUMENT);
+        self.post(values, false).map(|_| ())
+    }
+
+    fn post_values_at(&mut self, values: FrameValues) -> Result<Landing> {
+        match self.post(values, true)? {
+            Outcome::Known(landing) => Ok(landing),
+            Outcome::Unknown => Err(Status::BUSY),
+            Outcome::Unsupported => Err(Status::NOT_SUPPORTED),
         }
-        check_limits(&values.controls)?;
-        schedule(&values.controls, false);
-        self.applied = Some(values);
-        Ok(())
     }
 
     fn applied(&mut self) -> Result<Option<FrameValues>> {
         Ok(self.applied)
+    }
+
+    fn applied_landing(&mut self) -> Result<Option<AppliedLanding>> {
+        match self.last {
+            None => Ok(None),
+            Some((values, Outcome::Known(landing))) => Ok(Some(AppliedLanding { values, landing })),
+            Some((_, Outcome::Unknown)) => Err(Status::BUSY),
+            Some((_, Outcome::Unsupported)) => Err(Status::NOT_SUPPORTED),
+        }
     }
 
     fn set_flips(&mut self, _horizontal: bool, _vertical: bool) -> Result<BayerOrder> {
@@ -369,11 +485,87 @@ impl CameraSensor for SimSensor {
     }
 }
 
-/// Applies a post's controls to the pipeline: each lands by its own delay, or at once (on the next
-/// frame) for `set_controls`.
-fn schedule(controls: &Controls, at_once: bool) {
+impl SimSensor {
+    /// Reads the receiver's frame count as of `at_ns`, through the link.
+    fn probe(&mut self, at_ns: u64) -> Result<Probe> {
+        let Some(receiver) = self._receiver.as_mut() else {
+            return Ok(Probe::Unsupported);
+        };
+        pipeline().read_at = Some(at_ns);
+        let answer = receiver.frame_starts();
+        pipeline().read_at = None;
+        match answer {
+            Ok(Some(count)) => Ok(Probe::Count(count)),
+            Ok(None) => Ok(Probe::Unknown),
+            Err(Status::NOT_SUPPORTED) => Ok(Probe::Unsupported),
+            Err(status) => Err(status),
+        }
+    }
+
+    /// One post. Its group is written from the present, and launches when the write has taken
+    /// `write_ns`. The launch frame is the one in progress then (the sim's physics). The sensor
+    /// answers that frame with the landing rule: the counts read before the write and after it,
+    /// through `launch_frame`. With `must_know`, a post whose landing cannot be read is refused
+    /// before anything is written.
+    fn post(&mut self, values: FrameValues, must_know: bool) -> Result<Outcome> {
+        if self.selected.is_none() {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        check_limits(&values.controls)?;
+        let (t0, write_ns, delays, naive) = {
+            let p = pipeline();
+            (
+                p.now_ns,
+                p.config.write_ns,
+                p.config.delays,
+                p.config.naive_landing,
+            )
+        };
+        let before = match self.probe(t0)? {
+            Probe::Count(count) => Ok(count),
+            Probe::Unknown => Err(Outcome::Unknown),
+            Probe::Unsupported => Err(Outcome::Unsupported),
+        };
+        if let (true, Err(outcome)) = (must_know, before) {
+            return Err(match outcome {
+                Outcome::Unknown => Status::BUSY,
+                _ => Status::NOT_SUPPORTED,
+            });
+        }
+        let t1 = t0 + write_ns;
+        let (first, launch) = {
+            let p = pipeline();
+            (p.frame_at(t0), p.frame_at(t1))
+        };
+        if launch != first {
+            pipeline().straddles += 1;
+        }
+        schedule(&values.controls, launch, delays);
+        self.applied = Some(values);
+        let outcome = match before {
+            Err(outcome) => outcome,
+            Ok(before) => match self.probe(t1).unwrap_or(Probe::Unknown) {
+                Probe::Count(after) => {
+                    let frame = if naive {
+                        launch_frame(before, before)
+                    } else {
+                        launch_frame(before, after)
+                    };
+                    Outcome::Known(landing_of(frame, delays, &values.controls))
+                }
+                Probe::Unknown => Outcome::Unknown,
+                Probe::Unsupported => Outcome::Unsupported,
+            },
+        };
+        self.last = Some((values, outcome));
+        Ok(outcome)
+    }
+}
+
+/// Applies a post's controls to the pipeline: each control shows on frame `launch + delay`, where
+/// `launch` is the frame its group launched in.
+fn schedule(controls: &Controls, launch: i64, delays: [u8; 3]) {
     let mut p = pipeline();
-    let delays = if at_once { [0; 3] } else { p.config.delays };
     let wanted = [
         controls.exposure,
         controls.analogue_gain,
@@ -381,7 +573,7 @@ fn schedule(controls: &Controls, at_once: bool) {
     ];
     for (control, value) in wanted.into_iter().enumerate() {
         if let Some(value) = value {
-            p.land(control, value, delays[control]);
+            p.land(control, value, launch + i64::from(delays[control]));
         }
     }
 }
@@ -444,12 +636,15 @@ impl Lifecycle for SimReceiver {
 
     /// Makes every frame due by `now_ns`, and returns when the next one is due.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        pipeline().now_ns = now_ns;
         let run = self.run.as_mut()?;
         let mut next = match run.next_ns {
             Some(next) => next,
             None => {
+                // The first frame starts one interval after the first tick.
                 let next = now_ns.saturating_add(run.interval_ns);
                 run.next_ns = Some(next);
+                pipeline().frame0_ns = Some(next);
                 return Some(next);
             }
         };
@@ -553,12 +748,14 @@ impl CameraReceiver for SimReceiver {
         log("receiver.start");
         self.counters = Counters::default();
         let config = pipeline().config;
+        let interval_ns = config.period_ns.unwrap_or_else(|| frame_interval_ns(&link));
         *pipeline() = Pipeline {
             config,
+            interval_ns,
             ..Pipeline::new()
         };
         self.run = Some(Run {
-            interval_ns: frame_interval_ns(&link),
+            interval_ns,
             next_ns: None,
         });
         Ok(())
@@ -597,6 +794,26 @@ impl CameraReceiver for SimReceiver {
 
     fn layout(&mut self) -> Result<Option<FrameLayout>> {
         Ok(self.layout)
+    }
+
+    /// Frames start on the clock from the first tick, every interval. Masked frames are starts
+    /// too: they are counted and their sequence is taken, but nothing is published for them.
+    /// `None` while the receiver is not running or before the first frame has started.
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        if self.run.is_none() {
+            return Ok(None);
+        }
+        let p = pipeline();
+        let at = p.read_at.unwrap_or(p.now_ns);
+        let frame = p.frame_at(at);
+        let Some(frame0) = p.frame0_ns.filter(|_| frame >= 0) else {
+            return Ok(None);
+        };
+        let frame = frame as u64;
+        Ok(Some(FrameStarts {
+            count: frame + 1,
+            latest_ns: frame0 + frame * p.interval_ns,
+        }))
     }
 }
 

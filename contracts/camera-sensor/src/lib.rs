@@ -39,6 +39,27 @@
 //! by the sensor's own library crate. A sensor with [`EmbeddedData::None`] carries nothing, and a
 //! caller can only verify its posts from the frames' pixels, which Lemnos does not look at.
 //!
+//! Landing frame. A caller that needs the frame a post shows on asks for it with `post_values_at`,
+//! and reads it back with `applied_landing`. The frame is named by the sequence the receiver's
+//! frame stream gives it, which is the receiver's frame-start count from zero (see
+//! `camera.receiver` `frame_starts`). The rule, with `F` the frame in which the group launch
+//! completes:
+//!
+//! 1. Read the receiver's frame-start count before the group's writes (`before`).
+//! 2. Write the group, its launch last.
+//! 3. Read the count again (`after`).
+//! 4. `F = after.count - 1`. If the two counts are equal, no frame started during the writes, so
+//!    the launch is in `before.count - 1`, which is the same frame. If they differ, a frame started
+//!    while the group was in flight, so the launch straddled a frame boundary and `F` is the later
+//!    frame. Lemnos never answers the earlier one for a straddle.
+//!
+//! Each control posted in the group shows on `F + d`, where `d` is its delay in the mode. The
+//! answer names every posted control's frame ([`Landing`]) and the latest of them. A caller
+//! with no frames counted yet is refused before anything is written (`BUSY`). The answer is exact
+//! unless a frame starts between the launch write returning and the second read; then the answer is
+//! at most one frame late, never early. Lemnos answers `NOT_SUPPORTED` when there is no link to a
+//! receiver or the receiver cannot count frame starts, and writes nothing in that case.
+//!
 //! The order of calls is `select_mode`, `configure` the receiver with that mode's `link`, the
 //! receiver's `start`, then `start` here. The first `drop_frames` frames after `start` are not
 //! usable.
@@ -47,7 +68,7 @@
 
 use lemnos_core::{Decode, Encode, Field, Reader, Result, Shape, Status, Writer, contract};
 
-pub use lemnos_contract_camera_receiver::{BayerOrder, LinkConfig};
+pub use lemnos_contract_camera_receiver::{BayerOrder, FrameStarts, LinkConfig};
 
 /// Longest name [`CameraSensor::identity`] answers, in bytes. The same bound a receiver's `source`
 /// answer has.
@@ -224,6 +245,63 @@ pub struct Mode {
     pub frame_length_delay: u8,
 }
 
+/// The frames a post's controls first show on, as [`landing_of`] gives them. A control the post
+/// does not name is `None`. `digital_gain` is `None` on every sensor in the tree, which has no
+/// digital gain the contract can reach.
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Landing {
+    pub exposure: Option<u64>,
+    pub analogue_gain: Option<u64>,
+    pub digital_gain: Option<u64>,
+    pub frame_length: Option<u64>,
+    /// The latest of the frames above: the frame by which every value the post names is in force.
+    /// When the post names no control, the frame its group launched in.
+    pub latest: u64,
+}
+
+/// The last post accepted with a landing, and where it landed.
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AppliedLanding {
+    pub values: FrameValues,
+    pub landing: Landing,
+}
+
+/// The frame a group launched in, from the receiver's frame-start counts read before and after
+/// the group's writes. See the module's landing rule: the later frame when the counts differ.
+///
+/// `before` and `after` never decrease, so the later count is `after`. Both are taken so the rule
+/// reads as written and a caller cannot skip the second read.
+pub fn launch_frame(before: FrameStarts, after: FrameStarts) -> u64 {
+    let counted = if before.count == after.count {
+        before
+    } else {
+        after
+    };
+    counted.count.saturating_sub(1)
+}
+
+/// Where a post's controls land, for a launch in frame `frame` and the mode's delays
+/// (`exposure_delay`, `gain_delay`, `frame_length_delay`). A control the post does not name has no
+/// frame.
+pub fn landing_of(frame: u64, delays: [u8; 3], posted: &Controls) -> Landing {
+    let at = |value: Option<u32>, delay: u8| value.map(|_| frame + u64::from(delay));
+    let exposure = at(posted.exposure, delays[0]);
+    let analogue_gain = at(posted.analogue_gain, delays[1]);
+    let frame_length = at(posted.frame_length, delays[2]);
+    let latest = [exposure, analogue_gain, frame_length]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(frame);
+    Landing {
+        exposure,
+        analogue_gain,
+        digital_gain: None,
+        frame_length,
+        latest,
+    }
+}
+
 /// Values to change. `None` leaves one as it is.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Controls {
@@ -263,7 +341,8 @@ pub trait CameraSensor {
     fn set_controls(&mut self, controls: Controls) -> Result<()>;
     /// Posts values as one group, with group hold where the sensor has it. Each control shows on
     /// the frame its delay in [`Mode`] gives (see the module's timing rule); with equal delays they
-    /// show together. `BUSY` while earlier values wait to be written.
+    /// show together. `BUSY` while earlier values wait to be written. The post is recorded for
+    /// `applied_landing`, with the landing read for it when the receiver can count frame starts.
     #[method(8)]
     fn post_values(&mut self, values: FrameValues) -> Result<()>;
     /// The values last accepted and written by `post_values`, or `None` before any. Not what a
@@ -282,6 +361,19 @@ pub trait CameraSensor {
     /// names this sensor, which is unknown and never matches.
     #[method(12)]
     fn identity(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    /// Posts values as [`CameraSensor::post_values`] does, and answers where they land: the frame
+    /// each posted control first shows on, by the landing rule in the module docs. Refused before
+    /// anything is written: `NOT_SUPPORTED` with no link to a receiver that counts frame starts,
+    /// and `BUSY` while no frame start has been counted since the receiver's `start`. Other
+    /// refusals are those of `post_values`.
+    #[method(13)]
+    fn post_values_at(&mut self, values: FrameValues) -> Result<Landing>;
+    /// The last post accepted by either `post_values` or `post_values_at`, with its values as
+    /// posted and where it landed, or `None` before any post. `BUSY` when that post was made before
+    /// any frame start had been counted, so its landing is not known. `NOT_SUPPORTED` when there
+    /// was no link to a receiver that counts frame starts, so no landing was ever read for it.
+    #[method(14)]
+    fn applied_landing(&mut self) -> Result<Option<AppliedLanding>>;
 }
 
 /// What a sensor's bind found about the board's `link` to its receiver. Three answers, and only

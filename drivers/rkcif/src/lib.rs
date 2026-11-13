@@ -79,7 +79,7 @@ pub mod route;
 mod tests;
 
 use lemnos_contract_camera_receiver::{
-    CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, Packing,
+    CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig, Packing,
 };
 use lemnos_core::{
     Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
@@ -561,6 +561,11 @@ impl CameraReceiver for Rkcif {
 
     /// This receiver captures no embedded data: nothing in its driver names where the block writes a
     /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
+    /// Not counted yet: the frame-start count is not wired in this driver.
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }

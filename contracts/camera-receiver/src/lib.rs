@@ -123,6 +123,19 @@ pub struct FrameLayout {
     pub size: u32,
 }
 
+/// The receiver's frame-start count, since its last `start`.
+///
+/// A frame start is the instant the sensor's frame begins on the link. `count` is how many the
+/// receiver has seen, and frame `k` (sequence, from 0) is the `k`th one, so the frame in progress
+/// at a read is `count - 1`. `latest_ns` is the CLOCK_MONOTONIC time of the latest start, the one
+/// the count names. A start is counted whether or not its frame is published (a frame dropped for
+/// want of a buffer still counts), so the sequence of published frames is the same count.
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameStarts {
+    pub count: u64,
+    pub latest_ns: u64,
+}
+
 /// What the receiver can take.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Limits {
@@ -203,4 +216,11 @@ pub trait CameraReceiver {
     /// after opening the stream.
     #[method(11)]
     fn layout(&mut self) -> Result<Option<FrameLayout>>;
+    /// The frame-start count since `start`, as [`FrameStarts`]. `None` is unknown, and a consumer
+    /// must not read it as zero: nothing has started since `start`, or the receiver cannot see its
+    /// frame starts right now. `NOT_SUPPORTED` where the receiver cannot count frame starts at all,
+    /// which is a fact about the receiver and not a read that failed. Any other error is a read
+    /// that failed now.
+    #[method(12)]
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>>;
 }

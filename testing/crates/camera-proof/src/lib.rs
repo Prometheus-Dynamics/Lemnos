@@ -19,9 +19,11 @@ use std::path::{Path, PathBuf};
 
 use lemnos_contract_camera_isp::{CameraIsp, IspInput};
 use lemnos_contract_camera_receiver::{
-    CameraReceiver, Counters, FrameLayout, MAX_STREAM_NAME, Packing,
+    CameraReceiver, Counters, FrameLayout, FrameStarts, MAX_STREAM_NAME, Packing,
 };
-use lemnos_contract_camera_sensor::{CameraSensor, Controls, FrameValues, Mode};
+use lemnos_contract_camera_sensor::{
+    AppliedLanding, CameraSensor, Controls, FrameValues, Landing, Mode,
+};
 use lemnos_core::{Bound, Caller, Contract, Status};
 use lemnos_wire::ring::{FrameSlot, RingError};
 
@@ -357,6 +359,25 @@ impl<B: Bus> Camera<'_, B> {
     /// Values for a coming frame, written in one group (`camera.sensor` `post_values`).
     pub fn post_values(&mut self, values: FrameValues) -> Result<(), Error> {
         step("sensor.post_values", self.sensor_api.post_values(values))
+    }
+
+    /// Values for a coming frame, and the frame each posted control first shows on
+    /// (`camera.sensor` `post_values_at`).
+    pub fn post_values_at(&mut self, values: FrameValues) -> Result<Landing, Error> {
+        step(
+            "sensor.post_values_at",
+            self.sensor_api.post_values_at(values),
+        )
+    }
+
+    /// The last post and where it landed (`camera.sensor` `applied_landing`).
+    pub fn applied_landing(&mut self) -> Result<Option<AppliedLanding>, Error> {
+        step("sensor.applied_landing", self.sensor_api.applied_landing())
+    }
+
+    /// The receiver's frame-start count since it started (`camera.receiver` `frame_starts`).
+    pub fn frame_starts(&mut self) -> Result<Option<FrameStarts>, Error> {
+        step("receiver.frame_starts", self.receiver_api.frame_starts())
     }
 
     /// The receiver's counters since it started.
