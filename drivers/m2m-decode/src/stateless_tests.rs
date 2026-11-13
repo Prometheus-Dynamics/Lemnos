@@ -15,6 +15,7 @@ use lemnos_host::board::parse;
 use lemnos_host::{Host, Options, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::v4l2::fourcc;
+use lemnos_linux_sys::v4l2::h264;
 use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_wire::ring::STATE_FAULT;
@@ -156,7 +157,7 @@ fn a_job_becomes_one_request_on_the_callers_buffers_and_brings_its_picture_back(
     assert!(!rig.block.is_open(), "nothing is opened before a job");
     let items = [
         (TAG_SETUP, usual_setup()),
-        (TAG_STAMP, 123_456_789u64.to_le_bytes().to_vec()),
+        (TAG_STAMP, 123_456_000u64.to_le_bytes().to_vec()),
         (COMPOUND, vec![7; 40]),
         (INTEGER, 2i32.to_le_bytes().to_vec()),
     ];
@@ -600,4 +601,131 @@ fn the_reopen_wait_doubles_from_250_ms_and_holds_at_8_s() {
         waits,
         [250, 500, 1000, 2000, 4000, 8000, 8000, 8000].map(|ms| ms * 1_000_000)
     );
+}
+
+/// The controls of one H.264 frame, as the caller builds them: each structure's bytes by its
+/// control id, and the two menu values as integers.
+fn h264_frame() -> Vec<(u32, Vec<u8>)> {
+    let sps = h264::Sps {
+        profile_idc: 100,
+        level_idc: 40,
+        pic_width_in_mbs_minus1: 3,
+        pic_height_in_map_units_minus1: 3,
+        flags: h264::sps_flags::FRAME_MBS_ONLY,
+        ..h264::Sps::default()
+    };
+    let pps = h264::Pps::default();
+    let scaling = h264::ScalingMatrix::default();
+    let pred = h264::PredWeights::default();
+    let slice = h264::SliceParams {
+        slice_type: h264::SLICE_TYPE_I,
+        ..h264::SliceParams::default()
+    };
+    let decode = h264::DecodeParams {
+        flags: h264::decode_flags::IDR_PIC,
+        ..h264::DecodeParams::default()
+    };
+    vec![
+        (h264::CID_SPS, sps.as_bytes().to_vec()),
+        (h264::CID_PPS, pps.as_bytes().to_vec()),
+        (h264::CID_SCALING_MATRIX, scaling.as_bytes().to_vec()),
+        (h264::CID_PRED_WEIGHTS, pred.as_bytes().to_vec()),
+        (h264::CID_SLICE_PARAMS, slice.as_bytes().to_vec()),
+        (h264::CID_DECODE_PARAMS, decode.as_bytes().to_vec()),
+        (
+            h264::CID_DECODE_MODE,
+            h264::DECODE_MODE_SLICE_BASED.to_le_bytes().to_vec(),
+        ),
+        (
+            h264::CID_START_CODE,
+            h264::START_CODE_ANNEX_B.to_le_bytes().to_vec(),
+        ),
+    ]
+}
+
+#[test]
+fn an_h264_frame_is_one_request_with_its_controls_as_the_callers_bytes() {
+    let mut rig = Rig::new();
+    let mut items = vec![
+        (TAG_SETUP, setup(b"S264", 64, 64, b"NV12", 1)),
+        (TAG_STAMP, 7_000_000u64.to_le_bytes().to_vec()),
+    ];
+    items.extend(h264_frame());
+    let (status, back) = rig.run(&[source(2, 0, 4096), picture(0, 3)], &items);
+    assert_eq!(status, JobStatus::Done);
+    assert_eq!(back, [4096]);
+    rig.mock.with(|d| {
+        // Each structure goes with its own size, the menus as integers.
+        assert_eq!(
+            d.controls[..d.control_count],
+            [
+                (h264::CID_SPS, 1048),
+                (h264::CID_PPS, 12),
+                (h264::CID_SCALING_MATRIX, 480),
+                (h264::CID_PRED_WEIGHTS, 772),
+                (h264::CID_SLICE_PARAMS, 152),
+                (h264::CID_DECODE_PARAMS, 560),
+                (h264::CID_DECODE_MODE, 0),
+                (h264::CID_START_CODE, 0),
+            ]
+        );
+        assert_eq!(d.calls().filter(|c| *c == Call::QueueRequest).count(), 1);
+        assert_eq!(d.opens, 1);
+        assert_eq!(d.last_queued[0], Some((0, true, BYTES as u32, 4096, 0)));
+        assert_eq!(d.last_queued[1], Some((3, true, BYTES as u32, 0, 0)));
+    });
+    // The next frame, a reference to this one by its stamp, runs on the same session.
+    let mut next = vec![
+        (TAG_SETUP, setup(b"S264", 64, 64, b"NV12", 1)),
+        (TAG_STAMP, 7_033_000u64.to_le_bytes().to_vec()),
+    ];
+    next.extend(h264_frame());
+    assert_eq!(
+        rig.run(&[source(2, 0, 4096), picture(0, 4)], &next).0,
+        JobStatus::Done
+    );
+    assert_eq!(rig.mock.with(|d| d.opens), 1);
+}
+
+#[test]
+fn the_slots_are_the_same_for_h264_and_hevc_the_source_then_each_plane() {
+    assert_eq!((SLOT_SOURCE, SLOT_PICTURE), (0, 1));
+    let mut rig = Rig::new();
+    let hevc = [(TAG_SETUP, usual_setup())];
+    let h264 = [(TAG_SETUP, setup(b"S264", 64, 64, b"NV12", 1))];
+    assert_eq!(
+        rig.run(&[source(2, 0, 100), picture(0, 3)], &hevc).0,
+        JobStatus::Done
+    );
+    assert_eq!(
+        rig.run(&[source(2, 0, 100), picture(0, 3)], &h264).0,
+        JobStatus::Done
+    );
+    // A reference is not a slot. Numbered `2 + DPB index`, as a DPB entry 0 would be, it names
+    // plane 1, which a one-plane picture does not have.
+    rig.refused(
+        "a reference numbered as a slot, past a one-plane picture",
+        &[source(2, 0, 100), picture(0, 3), reference(2, 4, 0, 0)],
+        &h264,
+    );
+}
+
+#[test]
+fn a_stamp_the_kernel_cannot_keep_is_refused_rather_than_rounded() {
+    let mut rig = Rig::new();
+    let refs = [source(2, 0, 100), picture(0, 3)];
+    let with = |ns: u64| {
+        [
+            (TAG_SETUP, usual_setup()),
+            (TAG_STAMP, ns.to_le_bytes().to_vec()),
+        ]
+    };
+    rig.refused(
+        "a stamp finer than a microsecond",
+        &refs,
+        &with(123_456_789),
+    );
+    rig.refused("a stamp of 1 ns", &refs, &with(1));
+    assert_eq!(rig.run(&refs, &with(123_456_000)).0, JobStatus::Done);
+    assert_eq!(rig.run(&refs, &with(0)).0, JobStatus::Done, "no stamp");
 }

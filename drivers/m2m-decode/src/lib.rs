@@ -11,8 +11,8 @@
 //!   media request as they are; nothing is parsed here ([`stateless`]).
 //!
 //! Nothing in this crate reads a bitstream or builds a control from one. A caller that holds
-//! the codec parses its stream and builds the work, and the HEVC parser lives in that caller's
-//! crate, not here.
+//! the codec (H.264 or HEVC) parses its stream and builds the work, and the parser lives in
+//! that caller's crate, not here.
 //!
 //! Every device call goes through a [`Node`]. On Linux that is a [`LinuxNode`] over
 //! `lemnos-linux-sys`, which holds all the `unsafe`; this crate has none. Steady-state decoding

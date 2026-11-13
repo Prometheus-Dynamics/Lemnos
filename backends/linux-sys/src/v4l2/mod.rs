@@ -17,6 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 pub mod device;
+pub mod h264;
 pub mod hevc;
 
 use device::{

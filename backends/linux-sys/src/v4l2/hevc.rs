@@ -141,7 +141,7 @@ pub const DPB_ENTRIES_MAX: usize = 16;
 
 /// Views a structure of this module as its bytes. Only for the structures
 /// here: each has no padding, so every byte is a field's.
-fn bytes_of<T: Copy>(value: &T) -> &[u8] {
+pub(super) fn bytes_of<T: Copy>(value: &T) -> &[u8] {
     // SAFETY: `T` is one of this module's structures, all `repr(C)` integer
     // arrays with no padding (checked by the layout tests), so every byte of
     // the value is initialised; the slice covers exactly `value` and borrows it.
@@ -150,7 +150,7 @@ fn bytes_of<T: Copy>(value: &T) -> &[u8] {
 
 /// [`bytes_of`] for writing: as there, every byte of `T` is a field's, and every field is
 /// an integer, so any bytes written leave a valid value.
-fn bytes_of_mut<T: Copy>(value: &mut T) -> &mut [u8] {
+pub(super) fn bytes_of_mut<T: Copy>(value: &mut T) -> &mut [u8] {
     let len = size_of::<T>();
     let ptr = std::ptr::from_mut(value).cast::<u8>();
     // SAFETY: `ptr` is the exclusive borrow of `value` for `len` bytes; `T` is one of this
