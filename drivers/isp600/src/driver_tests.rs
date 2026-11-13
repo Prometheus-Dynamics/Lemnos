@@ -1038,6 +1038,57 @@ fn stop_ends_the_waiting_job() {
     k.with(|k| assert!(k.stopped >= 2));
 }
 
+#[test]
+fn stop_releases_every_config_buffer_and_a_restart_runs_jobs_with_rewritten_contents() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    // Job 1 is in flight on buffer 1 when stop comes, and never completes.
+    streams.config.fill(1, &image(1));
+    post(&streams.config, &job(1, 1, NO_BUFFER));
+    d.tick(1);
+    assert_eq!(k.loads(), vec![image(1)]);
+    d.stop().unwrap();
+    assert_eq!(
+        d.counters().unwrap().errors,
+        1,
+        "the job outstanding at stop is completed as an error"
+    );
+
+    // The consumer may rewrite every config buffer now, and does.
+    for buffer in 0..4 {
+        streams.config.fill(buffer, &image(10 + buffer as u8));
+    }
+    d.start().unwrap();
+    d.tick(2);
+    for buffer in 0..4u32 {
+        let identity = 10 + u64::from(buffer);
+        post(&streams.config, &job(identity, buffer, NO_BUFFER));
+        d.tick(3);
+        // The first frame after the load settles, the next is the job's statistics.
+        let first = 10 * (buffer + 1);
+        k.frame(first, &[1; 8], &[1; 8]);
+        k.frame(first + 1, &[2; 8], &[2; 8]);
+        d.tick(4);
+        let s = streams.statistics.take_frame().unwrap();
+        assert_eq!(s.identity, identity);
+        streams.statistics.return_buffer(s.buffer);
+    }
+    assert_eq!(
+        k.loads(),
+        vec![image(1), image(10), image(11), image(12), image(13)],
+        "each restarted job loads the rewritten contents of its buffer"
+    );
+    assert_eq!(
+        d.counters().unwrap(),
+        Counters {
+            jobs: 4,
+            dropped: 0,
+            errors: 0
+        }
+    );
+}
+
 // ---- Allocation.
 
 #[test]

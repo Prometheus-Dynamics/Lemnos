@@ -1286,6 +1286,60 @@ fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next_job() {
     assert_eq!(k.params_seen(0), second);
 }
 
+#[test]
+fn stop_releases_every_config_buffer_and_a_restart_runs_jobs_with_rewritten_contents() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    // Job 1 is in flight on buffer 1 when stop comes, and never completes.
+    streams.config.fill(1, &pattern(3, PARAMS));
+    post(&streams.config, &job(1, 1, NO_BUFFER));
+    d.tick(1);
+    assert_eq!(k.queued_params(), vec![(0, 10921)]);
+    d.stop().unwrap();
+    assert_eq!(
+        d.counters().unwrap().errors,
+        1,
+        "the job outstanding at stop is completed as an error"
+    );
+    assert!(streams.statistics.take_frame().is_none());
+
+    // The consumer may rewrite every config buffer now, and does.
+    for buffer in 0..4 {
+        streams
+            .config
+            .fill(buffer, &pattern(20 + buffer as u8, PARAMS));
+    }
+    d.start().unwrap();
+    d.tick(2);
+    for buffer in 0..4u32 {
+        let identity = 10 + u64::from(buffer);
+        post(&streams.config, &job(identity, buffer, NO_BUFFER));
+        d.tick(3);
+        let sequence = 5 + buffer;
+        k.apply(0, sequence);
+        k.finish(Queue::Statistics, 0, sequence, &pattern(9, 1000));
+        d.tick(4);
+        let s = streams.statistics.take_frame().unwrap();
+        assert_eq!(s.identity, identity);
+        streams.statistics.return_buffer(s.buffer);
+        assert_eq!(
+            k.params_seen(0),
+            pattern(20 + buffer as u8, PARAMS),
+            "job {identity} programmed the rewritten contents of buffer {buffer}"
+        );
+    }
+    assert_eq!(k.queued_params().len(), 5);
+    assert_eq!(
+        d.counters().unwrap(),
+        Counters {
+            jobs: 4,
+            dropped: 0,
+            errors: 0
+        }
+    );
+}
+
 /// One job through the driver: taken on one tick, its frame finished for the next, its results
 /// handed back by the consumer.
 fn one_job(

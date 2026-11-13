@@ -1121,3 +1121,68 @@ fn the_steady_state_allocates_nothing() {
     );
     assert_eq!(r.fe.counters.dropped, 0);
 }
+
+#[test]
+fn a_write_to_a_config_buffer_an_accepted_job_holds_does_not_change_that_job() {
+    let mut r = rig();
+    let first = config(0);
+    r.fill(0, &first);
+    CameraIsp::start(&mut r.fe).unwrap();
+    r.post(&job(1, 0, 2, NO_BUFFER));
+    r.fe.tick(1);
+    assert_eq!(r.hw.with(|m| m.posted.len()), 1);
+    let second = config(en::AWB_STATS);
+    r.fill(0, &second);
+    assert_eq!(
+        &r.config.contents(0)[..CONFIG_BYTES],
+        &bytes_of(&second)[..],
+        "the consumer's write landed while job 1 holds config 0"
+    );
+    assert_eq!(
+        &r.hw.with(|m| m.configs[2].to_vec())[..],
+        &bytes_of(&first)[..],
+        "the module's copy is the configuration present at accept"
+    );
+}
+
+#[test]
+fn stop_gives_every_config_buffer_back_and_each_one_runs_its_rewrite_after_restart() {
+    let mut r = rig();
+    let first = config(0);
+    for buffer in 0..4 {
+        r.fill(buffer, &first);
+    }
+    CameraIsp::start(&mut r.fe).unwrap();
+    r.post(&job(1, 0, 2, NO_BUFFER));
+    r.fe.tick(1);
+    assert_eq!(r.hw.with(|m| m.posted.len()), 1, "job 1 is outstanding");
+    CameraIsp::stop(&mut r.fe).unwrap();
+    assert!(
+        r.frames.take_frame().is_none(),
+        "stop publishes nothing for the outstanding job"
+    );
+    assert_eq!(CameraIsp::counters(&mut r.fe).unwrap().jobs, 0);
+
+    let second = config(en::AWB_STATS);
+    for buffer in 0..4 {
+        r.fill(buffer, &second);
+    }
+    CameraIsp::start(&mut r.fe).unwrap();
+    for c in 0..4u32 {
+        r.post(&job(10 + u64::from(c), c, c, NO_BUFFER));
+    }
+    r.fe.tick(2);
+    let posted = r.hw.with(|m| m.posted.clone());
+    assert_eq!(
+        posted.len(),
+        5,
+        "one job per config buffer after the restart"
+    );
+    for c in 0..4usize {
+        assert_eq!(
+            &r.hw.with(|m| m.configs[c].to_vec())[..],
+            &bytes_of(&second)[..],
+            "job {c} runs with the rewrite"
+        );
+    }
+}

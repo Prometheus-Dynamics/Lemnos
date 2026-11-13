@@ -799,6 +799,65 @@ fn a_config_buffer_rewritten_after_its_job_completes_is_read_by_the_next_job() {
 }
 
 #[test]
+fn a_write_to_a_config_buffer_an_accepted_job_holds_does_not_change_that_job() {
+    let mut rig = Rig::running();
+    rig.post(1, 0, &[(AE_H_SIZE, 1)], 0);
+    rig.tick();
+    // The consumer writes buffer 0 while job 1 holds it: job 1 was copied at accept and runs with that.
+    rig.config.fill(0, &list(&[(AE_H_SIZE, 9)]));
+    rig.post(2, 1, &[(AE_H_SIZE, 2)], 1);
+    rig.played.end(Ok(FRAME_END));
+    rig.tick();
+    rig.played.end(Ok(FRAME_END));
+    rig.tick();
+    assert_eq!(rig.output.take_frame().unwrap().identity, 1);
+    assert_eq!(
+        rig.played.log().configs,
+        vec![vec![w(AE_H_SIZE, 1)], vec![w(AE_H_SIZE, 2)]],
+        "job 1 programmed from the bytes it was accepted with"
+    );
+}
+
+#[test]
+fn a_stop_gives_every_config_buffer_back_and_a_restart_runs_each_with_its_new_contents() {
+    let mut rig = Rig::running();
+    rig.post(1, 0, &[(AE_H_SIZE, 1)], 0);
+    rig.tick();
+    // Job 1 is with the module when stop comes: it ends as an error and publishes nothing.
+    rig.d.stop().unwrap();
+    assert_eq!(rig.counters(), (0, 0, 1));
+    assert!(rig.output.take_frame().is_none());
+    // Every config buffer is the consumer's again: each is rewritten with contents no job ran.
+    for buffer in 0..4 {
+        rig.config.fill(buffer, &list(&[(AE_H_SIZE, 10 + buffer)]));
+    }
+    rig.d.start().unwrap();
+    rig.tick();
+    // Each buffer is named in turn; a job goes once the one before it has been collected.
+    for (identity, buffer) in [(2, 0), (3, 1), (4, 2), (5, 3)] {
+        post(&rig.config, &job(identity, buffer, buffer));
+        rig.tick();
+        rig.played.end(Ok(FRAME_END));
+        rig.tick();
+    }
+    assert_eq!(
+        rig.played.log().configs[1..],
+        [
+            vec![w(AE_H_SIZE, 10)],
+            vec![w(AE_H_SIZE, 11)],
+            vec![w(AE_H_SIZE, 12)],
+            vec![w(AE_H_SIZE, 13)],
+        ]
+    );
+    // Jobs 2 to 4 completed in turn; job 5 is still with the path.
+    let done: Vec<u64> = std::iter::from_fn(|| rig.output.take_frame())
+        .map(|frame| frame.identity)
+        .collect();
+    assert_eq!(done, [2, 3, 4]);
+    assert_eq!(rig.counters(), (3, 0, 0));
+}
+
+#[test]
 fn a_frame_that_wrapped_comes_out_empty() {
     let mut rig = Rig::running();
     rig.post(1, 0, &[], 0);
