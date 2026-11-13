@@ -1,0 +1,49 @@
+# A board file for the RK3588 map (socs/rk3588.toml): two I2C buses, an SPI bus, the PWM fan and the
+# video codec. The overlay is applied by the loader. Untested on board.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "rk3588"
+soc = "rk3588"
+
+[[hardware]]
+name = "i2c-0"
+controller = "i2c0"
+pins = "m0"
+
+[[hardware]]
+name = "i2c-3"
+controller = "i2c3"
+pins = "m0"
+
+[[hardware]]
+name = "spidev0.0"
+controller = "spi0"
+
+[[hardware]]
+controller = "pwm1"
+pins = "m0"
+
+[[hardware]]
+controller = "vpu121"
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-0"
+
+[[devices]]
+id = "sensor"
+driver = "ov9782"
+bus = "i2c-3"
+
+[[devices]]
+id = "panel"
+driver = "panel"
+bus = "spidev0.0"
+
+[[devices]]
+id = "fan"
+driver = "pwm-channel-fan"
+uses = { pwm = "pwm:/pwm@fd8b0010:1" }

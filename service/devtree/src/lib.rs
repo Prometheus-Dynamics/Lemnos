@@ -15,4 +15,4 @@ pub mod map;
 
 pub use check::check;
 pub use generate::{Output, generate};
-pub use map::{Controller, Kind, SocMap};
+pub use map::{Controller, Form, Kind, SocMap};

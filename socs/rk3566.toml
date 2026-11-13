@@ -1,0 +1,164 @@
+# The SoC map for the RK3566. Data only: `lemnos-ctl tree` and `lemnos-ctl validate` read it.
+#
+# Source: the Linux kernel's mainline device tree at v6.12, `arch/arm64/boot/dts/rockchip/`:
+# rk3566.dtsi (which includes rk356x.dtsi), and the shared pin groups in rk3568-pinctrl.dtsi. Node
+# paths are the root-level nodes of rk356x.dtsi, as the live tree shows them. Pin numbers are
+# bank*32 + the pin's index (RK_PA0 = 0, RK_PB0 = 8, RK_PC0 = 16, RK_PD0 = 24) from the bank and pin
+# the group lists. The chip labels are the bank names of the RK3568-family pin table
+# (drivers/pinctrl/pinctrl-rockchip.c, rk3568_pin_banks), which gpio-rockchip.c copies into gc->label.
+#
+# The vendor kernel (rockchip-linux/kernel, develop-6.1, rk356x.dtsi) has the same addresses, but
+# names two blocks differently: the RGA is `rockchip,rga2` there and `rockchip,rk3568-rga` here, and
+# the VEPU encoder is `rockchip,vpu-encoder-v2` there and `rockchip,rk3568-vepu` here. A board on the
+# vendor kernel needs the vendor names in its own tree; this map gives none that a module takes.
+#
+# Not in the map, because the mainline base tree has no node for them: the camera receiver and ISP
+# (VICAP), the NPU, and the video decoder. Their drivers need nodes from a board tree.
+soc = "rk3566"
+# The form the output takes: an overlay, which the loader applies with `fdtoverlays` (the vendor U-Boot's
+# PXE command applies them: cmd/pxe.c in the vendor U-Boot tree).
+form = "overlay"
+
+# The GPIO chips a `gpio:LABEL:LINE` name may name.
+needs_nothing = ["orientation", "fan-control"]
+
+[chips.gpio0]
+label = "gpio0"
+reason = "GPIO bank 0, in the PMU domain"
+[chips.gpio1]
+label = "gpio1"
+reason = "GPIO bank 1"
+[chips.gpio2]
+label = "gpio2"
+reason = "GPIO bank 2"
+[chips.gpio3]
+label = "gpio3"
+reason = "GPIO bank 3"
+[chips.gpio4]
+label = "gpio4"
+reason = "GPIO bank 4"
+
+[controllers.i2c0]
+kind = "i2c"
+path = "/i2c@fdd40000"
+alias = "i2c0"
+reason = "an I2C bus on the RK3566 (rockchip,rk3568-i2c)"
+
+[controllers.i2c1]
+kind = "i2c"
+path = "/i2c@fe5a0000"
+alias = "i2c1"
+reason = "an I2C bus on the RK3566"
+[controllers.i2c1.pins.xfer]
+path = "/pinctrl/i2c1/i2c1-xfer"
+label = "i2c1_xfer"
+gpios = [11, 12]
+
+[controllers.i2c2]
+kind = "i2c"
+path = "/i2c@fe5b0000"
+alias = "i2c2"
+reason = "an I2C bus on the RK3566"
+[controllers.i2c2.pins.m0]
+path = "/pinctrl/i2c2/i2c2m0-xfer"
+label = "i2c2m0_xfer"
+gpios = [13, 14]
+
+[controllers.i2c3]
+kind = "i2c"
+path = "/i2c@fe5c0000"
+alias = "i2c3"
+reason = "an I2C bus on the RK3566"
+[controllers.i2c3.pins.m0]
+path = "/pinctrl/i2c3/i2c3m0-xfer"
+label = "i2c3m0_xfer"
+gpios = [32, 33]
+
+[controllers.i2c4]
+kind = "i2c"
+path = "/i2c@fe5d0000"
+alias = "i2c4"
+reason = "an I2C bus on the RK3566"
+[controllers.i2c4.pins.m0]
+path = "/pinctrl/i2c4/i2c4m0-xfer"
+label = "i2c4m0_xfer"
+gpios = [138, 139]
+
+[controllers.i2c5]
+kind = "i2c"
+path = "/i2c@fe5e0000"
+alias = "i2c5"
+reason = "an I2C bus on the RK3566"
+[controllers.i2c5.pins.m0]
+path = "/pinctrl/i2c5/i2c5m0-xfer"
+label = "i2c5m0_xfer"
+gpios = [107, 108]
+
+[controllers.spi0]
+kind = "spi"
+path = "/spi@fe610000"
+alias = "spi0"
+reason = "an SPI controller on the RK3566"
+
+[controllers.spi1]
+kind = "spi"
+path = "/spi@fe620000"
+alias = "spi1"
+reason = "an SPI controller on the RK3566"
+
+[controllers.spi2]
+kind = "spi"
+path = "/spi@fe630000"
+alias = "spi2"
+reason = "an SPI controller on the RK3566"
+
+[controllers.spi3]
+kind = "spi"
+path = "/spi@fe640000"
+alias = "spi3"
+reason = "an SPI controller on the RK3566"
+
+[controllers.uart2]
+kind = "uart"
+path = "/serial@fe660000"
+alias = "serial2"
+reason = "a serial port on the RK3566 (snps,dw-apb-uart)"
+[controllers.uart2.pins.m0]
+path = "/pinctrl/uart2/uart2m0-xfer"
+label = "uart2m0_xfer"
+gpios = [24, 25]
+
+[controllers.pwm1]
+kind = "pwm"
+path = "/pwm@fdd70010"
+reason = "a PWM block on the RK3566 (the PMU-side PWM 1)"
+[controllers.pwm1.pins.m0]
+path = "/pinctrl/pwm1/pwm1m0-pins"
+label = "pwm1m0_pins"
+gpios = [16]
+
+[controllers.pwm3]
+kind = "pwm"
+path = "/pwm@fdd70030"
+reason = "a PWM block on the RK3566 (the PMU-side PWM 3)"
+[controllers.pwm3.pins.ir]
+path = "/pinctrl/pwm3/pwm3-pins"
+label = "pwm3_pins"
+gpios = [18]
+
+# Blocks the board may name, with nothing to wire: their nodes are enabled, and a driver of their own
+# takes them. None is the kernel module's.
+[controllers.vpu]
+kind = "block"
+path = "/video-codec@fdea0400"
+reason = "the VPU video decoder on the RK3566 (rockchip,rk3568-vpu)"
+
+[controllers.vepu]
+kind = "block"
+path = "/video-codec@fdee0000"
+reason = "the VEPU video encoder on the RK3566 (rockchip,rk3568-vepu)"
+
+[controllers.rga]
+kind = "block"
+path = "/rga@fdeb0000"
+reason = "the RGA 2D block on the RK3566 (rockchip,rk3568-rga)"

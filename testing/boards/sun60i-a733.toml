@@ -1,0 +1,43 @@
+# A board file for the A733 map (socs/sun60i-a733.toml): an I2C bus, a second I2C bus, a serial port
+# with its pins, an SPI bus and the image signal processor, as a fragment for the board's device tree.
+# Untested on board.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "sun60i-a733"
+soc = "sun60i-a733"
+
+[[hardware]]
+name = "i2c-0"
+controller = "i2c0"
+
+[[hardware]]
+name = "i2c-2"
+controller = "i2c2"
+
+[[hardware]]
+controller = "uart0"
+pins = "pb9_pb10"
+
+[[hardware]]
+name = "spidev1.0"
+controller = "spi1"
+
+[[hardware]]
+controller = "isp"
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-0"
+
+[[devices]]
+id = "sensor"
+driver = "ov9782"
+bus = "i2c-2"
+
+[[devices]]
+id = "panel"
+driver = "panel"
+bus = "spidev1.0"
