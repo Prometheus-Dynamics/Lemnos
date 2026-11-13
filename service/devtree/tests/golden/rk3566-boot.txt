@@ -2,4 +2,4 @@
 # before the kernel runs, so each line holds its level from power-on until the
 # kernel drives it. Syntax not checked on board.
 # gpio:gpio1:4: boot low: the switched load's enable: off from power-on until Lemnos's power switch takes it
-gpio=4=op,dl
+gpio=36=op,dl

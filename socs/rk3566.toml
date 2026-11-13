@@ -24,18 +24,23 @@ form = "overlay"
 [chips.gpio0]
 label = "gpio0"
 reason = "GPIO bank 0, in the PMU domain"
+number_base = 0
 [chips.gpio1]
 label = "gpio1"
 reason = "GPIO bank 1"
+number_base = 32
 [chips.gpio2]
 label = "gpio2"
 reason = "GPIO bank 2"
+number_base = 64
 [chips.gpio3]
 label = "gpio3"
 reason = "GPIO bank 3"
+number_base = 96
 [chips.gpio4]
 label = "gpio4"
 reason = "GPIO bank 4"
+number_base = 128
 
 [controllers.i2c0]
 kind = "i2c"
@@ -167,8 +172,8 @@ reason = "the RGA 2D block on the RK3566 (rockchip,rk3568-rga)"
 # usb2phy0, v6.12). A board's gadget names it `udc:fcc00000.usb`; the generator makes it peripheral
 # (dr_mode) and enables the PHY and its OTG port, which the base tree leaves disabled.
 #
-# Not set here, and not set by the generator: `phy-supply` on the OTG port. A board's dts sets it to
-# power VBUS for host mode (`&usb2phy0_otg { phy-supply = ... }`); a device port must not have it.
+# The OTG port's `phy-supply` (host-mode VBUS in a board's dts) is replaced by the generator with the
+# stand-in, so the port drives no VBUS; the base's fact is at the end of this file.
 # `extcon` on the controller (the SoC dtsi sets it on `usb2phy0`) is for the OTG role detection that a
 # fixed peripheral role does not use; the overlay leaves it as the base tree has it.
 #
@@ -187,3 +192,8 @@ path = "/usb2phy@fe8a0000/otg-port"
 phy = "usb2-phy"
 label = "usb2phy0_otg"
 reason = "the OTG port of that USB 2 PHY, the one the controller is wired to (its phys)"
+
+# A base tree whose device port has no VBUS supply on its USB 2 PHY's OTG port: nothing to hold, and
+# nothing for the stand-in to replace.
+[bases.usb-no-vbus.vbus.usb-otg0]
+reason = "the base tree's OTG port has no phy-supply"

@@ -54,9 +54,15 @@ fn report_live_tree(board: &lemnos_host::board::BoardFile) {
         sys: std::path::Path::new("/sys/bus/platform/devices"),
         gpio_chips: &chips,
         udc: std::path::Path::new("/sys/class/udc"),
+        gpio_debug: std::path::Path::new("/sys/kernel/debug/gpio"),
+        regulators: std::path::Path::new("/sys/class/regulator"),
     };
-    for problem in lemnos_devtree::check(board, &map, &live) {
+    let findings = lemnos_devtree::check(board, &map, &live);
+    for problem in &findings.problems {
         let _ = writeln!(std::io::stderr(), "lemnosd: live tree: {problem}");
+    }
+    for note in &findings.notes {
+        let _ = writeln!(std::io::stderr(), "lemnosd: live tree note: {note}");
     }
 }
 

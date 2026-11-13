@@ -16,18 +16,23 @@ form = "overlay"
 [chips.gpio0]
 label = "gpio0"
 reason = "GPIO bank 0, in the PMU domain"
+number_base = 0
 [chips.gpio1]
 label = "gpio1"
 reason = "GPIO bank 1"
+number_base = 32
 [chips.gpio2]
 label = "gpio2"
 reason = "GPIO bank 2"
+number_base = 64
 [chips.gpio3]
 label = "gpio3"
 reason = "GPIO bank 3"
+number_base = 96
 [chips.gpio4]
 label = "gpio4"
 reason = "GPIO bank 4"
+number_base = 128
 
 [controllers.i2c0]
 kind = "i2c"
@@ -135,9 +140,9 @@ reason = "the RGA 2D block on the RK3588 (rockchip,rk3588-rga)"
 # the port. Without `usb3` the overlay links the controller to USB 2 PHY 0 alone and leaves the USBDP
 # PHY off, which is a port that is USB 2 only; with it, both PHYs are enabled and linked.
 #
-# Not set here, and not set by the generator: `phy-supply` on the OTG port (a host VBUS supply; a
-# device port must not have it), and `mode-switch` and the Type-C properties on USBDP (a board with a
-# Type-C connector adds them). rk3588s.dtsi includes rk3588-base.dtsi and sets
+# The OTG port's `phy-supply` (a host VBUS supply in the base) is replaced by the generator with the
+# stand-in; the base's supply is a `[bases.*.vbus]` fact. Not set here, and not set by the generator:
+# `mode-switch` and the Type-C properties on USBDP (a board with a Type-C connector adds them). rk3588s.dtsi includes rk3588-base.dtsi and sets
 # no USB node, so the RK3588S has the same controller and PHYs as this map. Untested on board.
 [controllers.usb-otg0]
 kind = "usb-peripheral"
@@ -159,3 +164,13 @@ phy = "usb3-phy"
 label = "usbdp_phy0"
 args = [4]
 reason = "USBDP combo PHY 0 (rockchip,rk3588-usbdp-phy), the SuperSpeed side of port 0; the board names usb3 (its phys, PHY_TYPE_USB3)"
+
+# A base tree whose device port's VBUS regulator is switched by a GPIO line (the enable pin of a
+# fixed regulator). The line is this base tree's: a board built on another tree names its own, and
+# a board that drives VBUS another way states it. The regulator is what the USB 2 PHY's OTG port
+# names in `phy-supply` in that tree, which the generator replaces with the stand-in.
+[bases.usb-gpio-vbus.vbus.usb-otg0]
+regulator = "/vcc5v0-otg-vbus"
+regulator_name = "vcc5v0_otg"
+switch = "gpio:gpio4:11"
+reason = "a fixed regulator on the OTG port's phy-supply, switched by its enable line (the base tree's)"

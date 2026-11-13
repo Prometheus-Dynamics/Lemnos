@@ -70,3 +70,7 @@ reason = "the hardware watchdog"
 [bases.b.lines."gpio:gpio-test:9"]
 holders = ["/bus/regulator"]
 reason = "a regulator on the line"
+
+# The fixture's usb port: its base tree has no VBUS supply on it.
+[bases.b.vbus.usb]
+reason = "the fixture base has no VBUS supply on its USB port"

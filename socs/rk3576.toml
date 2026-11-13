@@ -16,7 +16,8 @@
 # one a board's device port is, and whether it has its SuperSpeed lanes, is the board's to say: the
 # controller's `[[hardware]]` entry names it and gives `options = ["usb3"]` for the SuperSpeed PHY.
 # The `drd0` port's SuperSpeed PHY is the USBDP combo PHY; `drd1` uses combo PHY 1's PSU lane. Neither
-# controller's `phy-supply` is set here: a host VBUS supply is the board's, and a device port has none.
+# controller's USB 2 PHY `phy-supply` is kept: the generator replaces it with the stand-in, so the port
+# drives no VBUS (docs/device-tree.md, VBUS of a device port). The base's supplies are at the end.
 soc = "rk3576"
 form = "overlay"
 
@@ -24,18 +25,23 @@ form = "overlay"
 [chips.gpio0]
 label = "gpio0"
 reason = "GPIO bank 0"
+number_base = 0
 [chips.gpio1]
 label = "gpio1"
 reason = "GPIO bank 1"
+number_base = 32
 [chips.gpio2]
 label = "gpio2"
 reason = "GPIO bank 2"
+number_base = 64
 [chips.gpio3]
 label = "gpio3"
 reason = "GPIO bank 3"
+number_base = 96
 [chips.gpio4]
 label = "gpio4"
 reason = "GPIO bank 4"
+number_base = 128
 
 [controllers.i2c1]
 kind = "i2c"
@@ -139,3 +145,18 @@ phy = "usb3-phy"
 label = "combphy1_psu"
 args = [4]
 reason = "combo PHY 1 (rockchip,rk3576-naneng-combphy), the SuperSpeed side of controller 1; the board names usb3 (its phys, PHY_TYPE_USB3)"
+
+# A base tree whose two device ports' VBUS regulators are always on: each is the `phy-supply` of its
+# USB 2 PHY's OTG port, and is `regulator-always-on`, so detaching the PHY's supply does not stop VBUS.
+# A board on this tree states how each port's VBUS is handled in its own hardware entry.
+[bases.usb-always-on-vbus.vbus.usb-drd0]
+regulator = "/vcc5v0-otg0-vbus"
+regulator_name = "vcc5v0_otg0"
+always_on = true
+reason = "a 5 V OTG regulator on USB 2 PHY 0's OTG port, regulator-always-on in the base tree"
+
+[bases.usb-always-on-vbus.vbus.usb-drd1]
+regulator = "/vcc5v0-host-vbus"
+regulator_name = "vcc5v0_host"
+always_on = true
+reason = "a 5 V host regulator on USB 2 PHY 1's OTG port, regulator-always-on in the base tree"

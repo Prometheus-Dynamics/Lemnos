@@ -6,6 +6,7 @@ schema_version = 1
 [board]
 id = "rk3566"
 soc = "rk3566"
+base = "usb-no-vbus"
 
 [[hardware]]
 name = "i2c-1"

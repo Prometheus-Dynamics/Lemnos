@@ -346,6 +346,22 @@ pub struct HardwareSpec {
     /// `"usb3"` for a USB 3 PHY the port's SuperSpeed lanes use). Only the generator reads it.
     #[serde(default)]
     pub options: Vec<String>,
+    /// For a device port: the GPIO line that switches the port's VBUS, as `gpio:LABEL:LINE`. The
+    /// generator holds it at `vbus_off` from power-on. Needs `vbus_reason`; exclusive with
+    /// `vbus_undriven`. Only the device tree generator reads it.
+    #[serde(default)]
+    pub vbus: Option<String>,
+    /// The level the `vbus` line holds when VBUS is off: `"low"` or `"high"`. Only the generator reads it.
+    #[serde(default)]
+    pub vbus_off: Option<String>,
+    /// For a device port whose VBUS is not driven on this board at all: the board author's assertion,
+    /// made from the schematic and checked with a meter. Exclusive with `vbus`. Needs `vbus_reason`.
+    #[serde(default)]
+    pub vbus_undriven: bool,
+    /// Why the port's VBUS is handled as `vbus` or `vbus_undriven` says. Written beside the boot
+    /// hold, or in the generator's refusal. Only the device tree generator reads it.
+    #[serde(default)]
+    pub vbus_reason: Option<String>,
 }
 
 /// A GPIO line the board gives to Lemnos, and the state the line is in before the kernel runs.

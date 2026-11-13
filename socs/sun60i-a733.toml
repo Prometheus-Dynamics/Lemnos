@@ -1,6 +1,10 @@
 # The SoC map for the Allwinner A733 (sun60i). Data only: `lemnos-ctl tree` and `lemnos-ctl validate`
 # read it.
 #
+# No VBUS handling: this map has no device port (`usb-peripheral`), so the generator writes no PHY
+# supply. The A733 family runs mainline 7.3.4 plus this vendor series, and its USB-C PHY has no VBUS
+# supply in that tree. A port added here later needs its base's VBUS fact (docs/device-tree.md).
+#
 # Source: the A733 kernel patch set of a vendor BSP (the `allwinner-bsp` repository, and the kernel
 # patch series of its mainline packaging, `patches/`), applied to the kernel the packaging names
 # (7.3-rc5 at its adaptation; the series is applied in the order its `patches/series` file gives). The SoC base is `arm64-dts-allwinner-add-allwinner-a733-soc.patch` (sun60i-a733.dtsi); the

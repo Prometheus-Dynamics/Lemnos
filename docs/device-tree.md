@@ -138,7 +138,7 @@ Every enabled node gets `status = "okay"`. What a kind adds:
 | `pwm` | path, pin sets (one per channel's pin) | pin set | Enables the block and the channel's pin function. No `pwm-fan` node: see below |
 | `pio` | path | nothing else | Enables the PIO block. Its pins are claimed at run time by the driver |
 | `csi` | path, `sysfs`, `stock_driver` | nothing else | Enables the receiver with no sensor node. The module drives it |
-| `usb-peripheral` | path, `sysfs`, `needs` | `dr_mode = "peripheral"`, and `phys` and `phy-names` for the PHYs the entry takes | The controller in peripheral mode, for a gadget that names it; the PHYs it is linked to, which the base tree links to both the USB 2 and the SuperSpeed PHY |
+| `usb-peripheral` | path, `sysfs`, `needs` | `dr_mode = "peripheral"`, `phys` and `phy-names` for the PHYs the entry takes, and the stand-in for the USB 2 PHY's `phy-supply` | The controller in peripheral mode, for a gadget that names it; the PHYs it is linked to; no VBUS from the port (see [VBUS of a device port](#vbus-of-a-device-port)) |
 | `watchdog` | path | nothing else | Enables the hardware watchdog on a board that lists it |
 | `block` | path | nothing else | Enables a block the kernel module drives (the PiSP back end). Its board entry gives the module option |
 
@@ -161,13 +161,95 @@ peripheral node.
 - The SoC's base tree links the controller to its SuperSpeed PHY on the RK3588 and RK3576, and that
   PHY must be enabled for the controller to probe. A USB 2 only board therefore leaves that PHY out of
   the `phys`, and the generator writes the USB 2 PHY alone.
-- The generator writes no `phy-supply`, no `extcon` and no `maximum-speed`. A `phy-supply` on the OTG
-  port is host-mode VBUS: a board whose dts sets it keeps it, and the overlay does not remove it.
+- The generator writes no `extcon` and no `maximum-speed`. It always replaces the USB 2 PHY's
+  `phy-supply` with the stand-in, so the port drives no VBUS (see below).
 
 The start check, for each port the board names: the node is enabled, its `dr_mode` is `peripheral`
 (`host mode` and `no dr_mode` are named), each enabled `needs` node is present and enabled (`PHY or
 node disabled`, `is absent`), each PHY the entry takes is in the live `phys` (`PHY link missing`), and,
-for a named port, `/sys/class/udc/<sysfs>` exists (`no UDC`).
+for a named port, `/sys/class/udc/<sysfs>` exists (`no UDC`). Then its VBUS, as below.
+
+### VBUS of a device port
+
+A USB 2 PHY's OTG port can carry a `phy-supply`: the regulator that drives 5 V onto VBUS for host mode.
+A device port that drives VBUS into the host it is plugged into is a hardware hazard, so a port in
+device mode never keeps one.
+
+**The supply is enabled in device mode too.** The PHY core enables a PHY's `phy-supply` whatever the
+port's mode: `phy_power_on` in `drivers/phy/phy-core.c` (v6.12) calls `regulator_enable(phy->pwr)`, and
+`phy->pwr` is `regulator_get_optional(&phy->dev, "phy")`, the `phy-supply` of the node the PHY was
+created for. The Rockchip USB 2 PHY creates that PHY for the `otg-port` node
+(`drivers/phy/rockchip/phy-rockchip-inno-usb2.c`, `devm_phy_create(dev, child_np, ...)`). The controller
+powers its USB 2 PHYs in `dwc3_core_init`, through `dwc3_phy_power_on` (`drivers/usb/dwc3/core.c`), before
+`dr_mode` makes it a gadget. Removing the supply is therefore required, not a precaution.
+
+**The overlay replaces it; it does not delete it.** `dtc` 1.8.1 compiles `/delete-property/` inside a
+`/plugin/;` overlay to nothing: the blob has no trace of it, and `fdtoverlay` keeps the base's
+`phy-supply`. The v6.12 kernel's overlay code has no property-delete form either. What works is a
+replacement: the overlay writes `phy-supply = <&lemnos_no_vbus>;` on the PHY's OTG port, and adds the
+stand-in at the root, `regulator-lemnos-no-vbus`: a `regulator-fixed` with no GPIO, no enable pin and
+no voltage, which no hardware uses, so it supplies nothing. With `form = "fragment"` the same two
+nodes are written into the board's own `.dts`, which `dtc` merges with the base.
+
+| Loader | What it does with the overlay | Checked |
+|---|---|---|
+| `fdtoverlay` (libfdt) | replaces the property; the base regulator stays in the tree | yes: `service/devtree/tests/apply.rs`, and mainline base trees (see the board-run note) |
+| `dtc` of a board's `.dts` (`form = "fragment"`) | merged with the base, which then has the stand-in | yes: `apply.rs` |
+| U-Boot `fdt apply` | the same libfdt overlay application | no: expected the same, since it is the same library call |
+| Raspberry Pi firmware overlay loader | libfdt overlay application | no: expected the same, for the same reason |
+| kernel configfs overlay (`drivers/of/overlay.c`, v6.12) | adds and replaces properties; no delete form | no: expected the same, since it has no delete for the supply to need |
+
+**What the generator knows, and what the board says.** The generator reads the base tree's VBUS facts
+from the map, under `[bases.NAME.vbus.CONTROLLER]`: `regulator` (the path of the regulator the base's
+`phy-supply` names), `regulator_name` (its `regulator-name`, to find it in `/sys/class/regulator`),
+`always_on` (`regulator-always-on`, or no enable control: detaching the PHY's supply does not stop
+VBUS), `switch` (the `gpio:LABEL:LINE` that enables it), and `reason`. The base is the one the board
+names with `[board] base`. A port the base does not describe is not known to have no supply, so the
+board must say how its VBUS is handled.
+
+The board says it in the port's `[[hardware]]` entry, with one of two statements:
+
+- `vbus = "gpio:LABEL:LINE"` with `vbus_off = "low"` or `"high"` (the level that is off): VBUS is
+  switched by that line. The generator holds the line at its off level in the boot fragment.
+- `vbus_undriven = true`: this board does not drive VBUS on this port. An assertion from the schematic,
+  checked by a meter (the generator cannot know it).
+
+Both need `vbus_reason`. `vbus_off` or `vbus_reason` without a statement is refused.
+
+| The base says | The board says | Result |
+|---|---|---|
+| no regulator on the port | nothing | generated |
+| no regulator | a statement | generated, with the statement's hold |
+| regulator switched by line L | `vbus = L` with `vbus_off` | generated; the boot fragment holds L at its off level |
+| regulator switched by L | `vbus_undriven = true` | generated |
+| regulator switched by L | nothing, or another line | refused, naming L |
+| regulator always on | nothing | refused, naming the regulator and why |
+| regulator always on | a statement | generated |
+| no fact for the port (no base, or the base is silent) | nothing | refused: the supply cannot be seen |
+| no fact for the port | a statement | generated |
+
+Every refusal names the entry, the base, the regulator and the two statements the board may make.
+
+**The boot hold.** `gpio=N=op,dl` (or `dh`) in the boot fragment, where `N` is the SoC's GPIO number:
+the chip's `number_base` in the map plus the line. A Rockchip bank is 32 times its number (`gpio4`
+line 11 is GPIO 139). The boot fragment is the file the Raspberry Pi firmware reads. No loader in this
+repository reads it on a Rockchip board, so there the image team applies the same hold in U-Boot,
+before the kernel runs; the numbers are in the board-run note.
+
+**The start check** (`lemnos-ctl validate`, live) repeats the rule against the running system. For each
+device port, with its PHY's live `phy-supply`:
+
+- absent, or the stand-in: no VBUS problem;
+- any other supply: a problem, unless the board holds VBUS by a line that reads its off level;
+- a `vbus` line is read from the kernel's GPIO listing (`/sys/kernel/debug/gpio`, which needs root and
+  debugfs). A level other than the off level is named (`reads hi, but the board says its off level is
+  low`). A line no driver has requested is not listed there: a note asks for a meter. A listing that
+  cannot be read is named;
+- an always-on regulator the base names is found by its name under `/sys/class/regulator`; an enabled
+  one is a note, with what the board says about it;
+- a statement the generator would refuse is a problem.
+
+Each of these is a finding about one port: the check names it and does not stop the daemon.
 
 ### Fan, safe from boot
 
@@ -240,7 +322,7 @@ I2C or SPI controller, or whose pin sets share a GPIO.
 | Map | Source | Form | Not in the map |
 |---|---|---|---|
 | `socs/bcm2712-rp1.toml` | the base tree the reference board boots, rpi-7.2.y | overlay | its labels are not checked against a base tree on this host |
-| `socs/rk3566.toml` | mainline v6.12, `rk3566.dtsi` / `rk356x.dtsi`, `rk3568-pinctrl.dtsi` | overlay (`fdtoverlays`) | camera receiver and ISP, NPU, video decoder (no mainline node). USB: port 0 in device mode, USB 2 only |
+| `socs/rk3566.toml` | mainline v6.12, `rk3566.dtsi` / `rk356x.dtsi`, `rk3568-pinctrl.dtsi` | overlay (`fdtoverlays`) | camera receiver and ISP, NPU, video decoder (no mainline node). USB: port 0 in device mode, USB 2 only; its base fact: no VBUS supply on that port |
 | `socs/rk3588.toml` | mainline v6.12, `rk3588-base.dtsi`, `rk3588-base-pinctrl.dtsi` | overlay | camera receiver and ISP, NPU, rkvdec (no mainline node). USB: port 0 in device mode, USB 2 or USB 3 by the board's `usb3` option; RK3588S is the same (`rk3588s.dtsi` adds no USB node) |
 | `socs/rk3576.toml` | mainline v6.14 (USB, the first tag with the RK3576's USB nodes), `rk3576.dtsi`, `rk3576-pinctrl.dtsi`; GPIO bank names from v6.14 `pinctrl-rockchip.c` | overlay | PWM (no PWM controller node through v6.18), camera receiver and ISP, NPU, video decoder |
 | `socs/k230.toml` | `kendryte/k230_sdk` at 7e302f73, `k230.dtsi` (kernel 5.10.4) | fragment (the SDK loads a plain blob) | camera, ISP, GSDMA, KPU (no node in the SDK's SoC description); GPIO chip labels (one node per pin) |
@@ -250,6 +332,40 @@ The `form` key chooses the output. `overlay` (the default) is a `/plugin/;` over
 `target-path` fragments, for a loader that applies overlays. `fragment` is `&{/path} { ... };`
 blocks, for a board `.dts` that includes the base tree. A fragment names nodes by path, so it needs
 no labels except the pin sets it references.
+
+The A733 map (`socs/sun60i-a733.toml`) has no device port, so no VBUS handling applies to it. Its
+USB-C PHY has no VBUS supply in the mainline 7.3.4 tree the family runs, plus its vendor series.
+
+### What a base tree must provide
+
+The generator does not read the base tree. It writes paths and labels from the map, and the base must
+supply them. Each board fixture is checked against a base built from its map
+(`service/devtree/tests/apply.rs`, `every_fixture_overlay_applies_to_a_base_built_from_its_map`), and
+the same checks are what a real base needs:
+
+- **Built with symbols**: `dtc -@`, so each label is in `__symbols__`. An overlay's `&label` or
+  `phys = <&label>` resolves against that.
+- **A node at each map path**: every controller's `path`, each `needs` path and pin set path, and each
+  line holder a base names. The overlay enables the node (`status = "okay"`) or disables a holder.
+- **The labels the map gives**: each pin set's `label` (the `pinctrl-0` target), and each `needs` entry
+  with a `label` (the PHY that the controller's `phys` refers to). `socs/*.toml` names them.
+- **Nothing for the VBUS stand-in**: the overlay adds `regulator-lemnos-no-vbus` and its label, so the
+  base needs no label for it. A device port's OTG port must exist at its `needs` path, since the
+  overlay sets its `phy-supply`.
+- **The VBUS supply** a base has on a port is declared in the map's `[bases.NAME.vbus.CONTROLLER]`, not
+  read from the base. A base whose map has no such fact is refused for any device port that does not
+  state its VBUS (see [VBUS of a device port](#vbus-of-a-device-port)).
+
+A missing label is found when the overlay is applied, not when it is generated. The overlay compiles
+with `dtc -@`, and `fdtoverlay` then fails with `Failed to apply '<overlay>': FDT_ERR_NOTFOUND`, which
+does not name the label. To find which label the overlay wants, list the overlay's fixups:
+`dtc -@ -I dtb -O dts overlay.dtbo` prints a `__fixups__` block with each label and its fragment.
+
+The gate: `apply.rs` runs in CI (the gate job installs `device-tree-compiler`, and the test fails rather
+than skips when `CI` is set and a tool is missing). For each board fixture it generates the output,
+applies it, and reads the result back with `fdtget`: each controller the board names is `okay`, and each
+device port's PHY names the stand-in. A fragment-form output is merged into its base by `dtc` instead.
+What the gate does not check is a real vendor base: that is each family's board-run note.
 
 ## Reference
 

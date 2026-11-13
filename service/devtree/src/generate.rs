@@ -7,7 +7,30 @@ use std::fmt::Write as _;
 use lemnos_core::{BusKind, Manifest, NeedKind};
 use lemnos_host::board::{BoardFile, LineSpec};
 
-use crate::map::{Controller, Form, Kind, PinSet, SocMap};
+use crate::map::{Base, Controller, Form, Kind, PinSet, SocMap, Vbus};
+
+/// The label of the stand-in regulator the overlay gives every device port's PHY as its `phy-supply`.
+pub const NO_VBUS_LABEL: &str = "lemnos_no_vbus";
+/// The stand-in's node, at the root of the tree. A fixed regulator with no enable pin, no GPIO and
+/// no voltage: it is named by no hardware, so it supplies nothing.
+pub const NO_VBUS_NODE: &str = "/regulator-lemnos-no-vbus";
+
+/// What the board says about a device port's VBUS, once the generator has checked it against the
+/// base tree's fact (see [`vbus_plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VbusPlan {
+    /// The base has no supply on the port: nothing to hold.
+    NoSupply,
+    /// VBUS is switched by a line: the generator holds it at `off` (`"low"` or `"high"`) from power-on.
+    Hold {
+        line: String,
+        off: String,
+        reason: String,
+    },
+    /// The board author asserts VBUS is not driven on this port: nothing to hold, and nothing checked
+    /// on the line.
+    Undriven { reason: String },
+}
 
 /// What the generator makes: the overlay the OS layer compiles and loads, and the boot fragment
 /// the firmware reads before the kernel.
@@ -35,6 +58,8 @@ struct Chosen<'a> {
     confined: bool,
     /// The options the board entry names, each one the map gives the controller.
     options: Vec<&'a str>,
+    /// For a device port: what its VBUS is, as the board says and the base tree allows.
+    vbus: Option<VbusPlan>,
 }
 
 /// Makes the overlay and the boot fragment for `board`, using `map`. `drivers` are the manifests of
@@ -62,11 +87,11 @@ pub fn generate(board: &BoardFile, map: &SocMap, drivers: &[Manifest]) -> Result
                 .ok_or_else(|| format!("[board] base {name:?} is not in the {soc} map"))?,
         )),
     };
-    let chosen = choose(board, map)?;
+    let chosen = choose(board, map, base)?;
     check_lines(board, map)?;
     check_devices(board, map, &chosen, base.map(|(_, b)| b), drivers)?;
     let overlay = overlay(board, &chosen, base, &board.lines, map.form)?;
-    let boot = boot(board, map)?;
+    let boot = boot(board, map, &chosen)?;
     let modprobe = modprobe(board, &chosen);
     Ok(Output {
         overlay,
@@ -76,10 +101,15 @@ pub fn generate(board: &BoardFile, map: &SocMap, drivers: &[Manifest]) -> Result
 }
 
 /// Each `[[hardware]]` entry, resolved against the map, and the GPIOs no two entries share.
-fn choose<'a>(board: &'a BoardFile, map: &'a SocMap) -> Result<Vec<Chosen<'a>>, String> {
+fn choose<'a>(
+    board: &'a BoardFile,
+    map: &'a SocMap,
+    base: Option<(&str, &Base)>,
+) -> Result<Vec<Chosen<'a>>, String> {
     let mut chosen = Vec::new();
     let mut controllers = BTreeSet::new();
     let mut gpios: BTreeMap<u16, &str> = BTreeMap::new();
+    let mut held_lines: BTreeSet<String> = BTreeSet::new();
     for hardware in &board.hardware {
         let name = hardware.controller.as_str();
         let controller = map.controllers.get(name).ok_or_else(|| {
@@ -147,6 +177,29 @@ fn choose<'a>(board: &'a BoardFile, map: &'a SocMap) -> Result<Vec<Chosen<'a>>, 
                 ));
             }
         }
+        let vbus = if controller.kind == Kind::UsbPeripheral {
+            let fact = base.and_then(|(_, b)| b.vbus.get(name));
+            let plan = vbus_plan(runtime, name, hardware, base.map(|(n, _)| n), fact)?;
+            if let VbusPlan::Hold { line, .. } = &plan {
+                if board
+                    .lines
+                    .iter()
+                    .any(|l| &l.line == line && l.boot.is_some())
+                {
+                    return Err(format!(
+                        "[[hardware]] controller {name:?}: VBUS line {line:?} is also a [[lines]] entry with a boot state; hold it in one place"
+                    ));
+                }
+                if !held_lines.insert(line.clone()) {
+                    return Err(format!(
+                        "[[hardware]] controller {name:?}: VBUS line {line:?} is the VBUS line of another port"
+                    ));
+                }
+            }
+            Some(plan)
+        } else {
+            None
+        };
         let mut options: Vec<&str> = Vec::new();
         for option in &hardware.options {
             if !controller
@@ -186,9 +239,150 @@ fn choose<'a>(board: &'a BoardFile, map: &'a SocMap) -> Result<Vec<Chosen<'a>>, 
             unconfined: hardware.unconfined,
             confined: hardware.confined,
             options,
+            vbus,
         });
     }
     Ok(chosen)
+}
+
+/// What a device port's VBUS is, from the board's statement and the base tree's fact. The base tree
+/// says what supply the port has (`fact`, from the base named by `[board] base`); the board says how
+/// VBUS is handled, when it must. Refused, naming the base, the regulator and the keys to add, when
+/// the base has a supply that can be on and the board says nothing about it, and when the base
+/// describes nothing about the port at all.
+pub fn vbus_plan(
+    runtime: &str,
+    key: &str,
+    hardware: &lemnos_host::board::HardwareSpec,
+    base: Option<&str>,
+    fact: Option<&Vbus>,
+) -> Result<VbusPlan, String> {
+    let who = if runtime.is_empty() {
+        format!("USB device port {key:?}")
+    } else {
+        format!("USB device port {key:?} (name {runtime:?})")
+    };
+    let keys = "`vbus = \"gpio:LABEL:LINE\"` with `vbus_off` and `vbus_reason`, or `vbus_undriven = true` with `vbus_reason`";
+    let statement = match (&hardware.vbus, hardware.vbus_undriven) {
+        (Some(_), true) => {
+            return Err(format!(
+                "[[hardware]] {who}: `vbus` and `vbus_undriven` are both set; a port's VBUS is one or the other"
+            ));
+        }
+        (Some(line), false) => {
+            let off = match hardware.vbus_off.as_deref() {
+                Some(level @ ("low" | "high")) => level.to_string(),
+                Some(other) => {
+                    return Err(format!(
+                        "[[hardware]] {who}: vbus_off {other:?} is not \"low\" or \"high\""
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "[[hardware]] {who}: `vbus` names a line, so `vbus_off` must say its level when VBUS is off"
+                    ));
+                }
+            };
+            Some(Statement::Line {
+                line: line.clone(),
+                off,
+                reason: reason_of(hardware, &who)?,
+            })
+        }
+        (None, true) => Some(Statement::Undriven {
+            reason: reason_of(hardware, &who)?,
+        }),
+        (None, false) => {
+            if hardware.vbus_off.is_some() || hardware.vbus_reason.is_some() {
+                return Err(format!(
+                    "[[hardware]] {who}: `vbus_off` and `vbus_reason` go with `vbus` or `vbus_undriven`"
+                ));
+            }
+            None
+        }
+    };
+    let Some(fact) = fact else {
+        return match statement {
+            Some(statement) => Ok(statement.plan()),
+            None => Err(format!(
+                "[[hardware]] {who}: the base {} does not describe its VBUS, so the generator cannot \
+                 see whether it has an always-on or switched supply; state how VBUS is handled: {keys}",
+                base.map_or_else(
+                    || "(none is named by [board] base)".to_string(),
+                    |b| format!("{b:?}")
+                )
+            )),
+        };
+    };
+    let Some(regulator) = &fact.regulator else {
+        return Ok(statement.map_or(VbusPlan::NoSupply, Statement::plan));
+    };
+    match (&fact.switch, statement) {
+        (
+            Some(line),
+            Some(Statement::Line {
+                line: stated,
+                off,
+                reason,
+            }),
+        ) if &stated == line => Ok(VbusPlan::Hold {
+            line: stated,
+            off,
+            reason,
+        }),
+        (Some(_), Some(statement @ Statement::Undriven { .. })) => Ok(statement.plan()),
+        (Some(line), Some(Statement::Line { line: stated, .. })) => Err(format!(
+            "[[hardware]] {who}: the base {base:?} switches its VBUS regulator {regulator} with {line}, \
+             and the board names {stated}; the two must be the same line"
+        )),
+        (Some(line), None) => Err(format!(
+            "[[hardware]] {who}: VBUS regulator {regulator} (base {base:?}: {}) is switched by {line}; \
+             state it: `vbus = {line:?}` with `vbus_off` and `vbus_reason`, or {keys_undriven}",
+            fact.reason,
+            keys_undriven = "`vbus_undriven = true` if this port is not driven by it"
+        )),
+        (None, Some(statement)) => Ok(statement.plan()),
+        (None, None) if fact.always_on => Err(format!(
+            "[[hardware]] {who}: VBUS regulator {regulator} (base {base:?}: {}) is always on, so detaching \
+             the PHY's phy-supply does not stop VBUS; state how VBUS is handled: {keys}",
+            fact.reason
+        )),
+        (None, None) => Err(format!(
+            "[[hardware]] {who}: VBUS regulator {regulator} (base {base:?}: {}) has no enable line the \
+             generator can hold; state how VBUS is handled: {keys}",
+            fact.reason
+        )),
+    }
+}
+
+/// A board's statement about a device port's VBUS, before the base tree's fact is applied.
+enum Statement {
+    Line {
+        line: String,
+        off: String,
+        reason: String,
+    },
+    Undriven {
+        reason: String,
+    },
+}
+
+impl Statement {
+    fn plan(self) -> VbusPlan {
+        match self {
+            Self::Line { line, off, reason } => VbusPlan::Hold { line, off, reason },
+            Self::Undriven { reason } => VbusPlan::Undriven { reason },
+        }
+    }
+}
+
+fn reason_of(hardware: &lemnos_host::board::HardwareSpec, who: &str) -> Result<String, String> {
+    match hardware.vbus_reason.as_deref() {
+        Some(reason) if !reason.trim().is_empty() => Ok(reason.to_string()),
+        _ => Err(format!(
+            "[[hardware]] {who}: a VBUS statement needs `vbus_reason`, what the schematic shows"
+        )),
+    }
 }
 
 /// A module role a board gives a node: `owned`, which needs the node's compatible, or a role the
@@ -582,6 +776,7 @@ fn overlay(
     }
     let mut fragment = 0usize;
     let mut fragments = String::new();
+    let mut no_vbus_written = false;
     for entry in chosen {
         let controller = entry.controller;
         let mut body = vec![String::from("status = \"okay\";")];
@@ -659,18 +854,44 @@ fn overlay(
         }
         for need in &controller.needs {
             if asks(need, &entry.options) {
+                // A device port's PHY never names a VBUS supply: its `phy-supply` (a host's 5 V
+                // for VBUS) is replaced by the stand-in, which supplies nothing. dtc 1.8 drops
+                // `/delete-property/` in an overlay, so replacing is the only way that every
+                // loader applies (see docs/device-tree.md).
+                let mut body = vec![String::from("status = \"okay\";")];
+                let mut reason = format!(
+                    "needed by {} ({}): {}",
+                    entry.key,
+                    controller.kind.name(),
+                    need.reason
+                );
+                if controller.kind == Kind::UsbPeripheral && need.phy.as_deref() == Some("usb2-phy")
+                {
+                    if !no_vbus_written {
+                        push_fragment(
+                            form,
+                            &mut fragments,
+                            &mut fragment,
+                            "/",
+                            "the stand-in for a device port's VBUS supply: a fixed regulator with no enable pin, no GPIO and no voltage; it supplies nothing",
+                            &[format!(
+                                "{NO_VBUS_LABEL}: regulator-lemnos-no-vbus {{ compatible = \"regulator-fixed\"; regulator-name = \"lemnos-no-vbus\"; regulator-min-microvolt = <0>; regulator-max-microvolt = <0>; }};"
+                            )],
+                        );
+                        no_vbus_written = true;
+                    }
+                    body.push(format!("phy-supply = <&{NO_VBUS_LABEL}>;"));
+                    reason.push_str(
+                        "; its phy-supply is replaced by the stand-in, so this PHY drives no VBUS",
+                    );
+                }
                 push_fragment(
                     form,
                     &mut fragments,
                     &mut fragment,
                     &need.path,
-                    &format!(
-                        "needed by {} ({}): {}",
-                        entry.key,
-                        controller.kind.name(),
-                        need.reason
-                    ),
-                    &["status = \"okay\";".into()],
+                    &reason,
+                    &body,
                 );
             }
         }
@@ -748,9 +969,19 @@ fn push_fragment(
     *n += 1;
 }
 
+/// The SoC's GPIO number of a stable GPIO name, which the boot fragment writes: the chip's first
+/// number plus the line.
+fn boot_number(name: &str, map: &SocMap) -> Result<u32, String> {
+    let (label, line) = gpio_line(name, map)?;
+    let chip = map
+        .chip_labelled(label)
+        .ok_or_else(|| format!("line {name:?}: no GPIO chip labelled {label:?}"))?;
+    Ok(chip.number_base + u32::from(line))
+}
+
 /// The firmware configuration: the state each board line has from power-on until the kernel
 /// takes it. Every `[[lines]]` entry with a `boot` state is written, with its reason.
-fn boot(board: &BoardFile, map: &SocMap) -> Result<String, String> {
+fn boot(board: &BoardFile, map: &SocMap, chosen: &[Chosen<'_>]) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -767,9 +998,23 @@ fn boot(board: &BoardFile, map: &SocMap) -> Result<String, String> {
             continue;
         };
         let state = if level == "high" { "dh" } else { "dl" };
-        let (_, gpio) = gpio_line(&line.line, map)?;
+        let gpio = boot_number(&line.line, map)?;
         let reason = line.reason.as_deref().unwrap_or_default();
         let _ = writeln!(out, "# {}: boot {level}: {reason}", line.line);
+        let _ = writeln!(out, "gpio={gpio}=op,{state}");
+    }
+    // A device port's VBUS line, held at its off level from power-on: the board's statement.
+    for entry in chosen {
+        let Some(VbusPlan::Hold { line, off, reason }) = &entry.vbus else {
+            continue;
+        };
+        let gpio = boot_number(line, map)?;
+        let state = if off == "high" { "dh" } else { "dl" };
+        let _ = writeln!(
+            out,
+            "# {line}: VBUS of {} held {off} (off) from power-on: {reason}",
+            entry.key
+        );
         let _ = writeln!(out, "gpio={gpio}=op,{state}");
     }
     Ok(out)
