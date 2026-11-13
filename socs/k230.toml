@@ -1,0 +1,85 @@
+# The SoC map for the Kendryte K230 (and the K230D, which shares this SoC description). Data only:
+# `lemnos-ctl tree` and `lemnos-ctl validate` read it.
+#
+# Source: the K230 SoC device tree of the Kendryte SDK, kendryte/k230_sdk at 7e302f733311d284be255f0d81d3463b6ae6ee6d,
+# `src/little/linux/arch/riscv/boot/dts/kendryte/k230.dtsi` (the Linux tree the SDK builds: version
+# 5.10.4). Node paths are under the `soc` bus of that file. The K230D board description
+# (`k230d.dts` in the same directory, same SDK commit) includes it and adds `serial0` as the console.
+# The SDK's kernel tree is a vendor tree; a mainline tree at v6.12 has no K230 device tree.
+#
+# Not in the map, because the SDK's SoC description has no node for them: the camera receiver (the DVP
+# and CSI paths), the ISP, the graphics DMA engine, and the KPU. Their drivers need nodes that a board
+# or a newer SoC description names. The GPIO ports are one node per pin in `gpio_provider.dtsi`
+# (`canaan,k230-apb-gpio`, `ngpios = <1>`), and the kernel names their chips by their drivers; no
+# `gpio:LABEL:LINE` chip is given here until a chip label is read from that driver.
+#
+# The SDK's post-build loads the device tree as a plain blob (`bootm $kernel_addr - $dtb_addr`, no
+# `fdt apply`), so the output is a fragment for a board `.dts`.
+soc = "k230"
+form = "fragment"
+
+needs_nothing = ["orientation", "fan-control"]
+
+[controllers.i2c0]
+kind = "i2c"
+path = "/soc/i2c@91405000"
+alias = "i2c0"
+reason = "an I2C (DesignWare) bus on the K230 (snps,designware-i2c)"
+
+[controllers.i2c1]
+kind = "i2c"
+path = "/soc/i2c@91406000"
+alias = "i2c1"
+reason = "an I2C (DesignWare) bus on the K230 (snps,designware-i2c)"
+
+[controllers.i2c2]
+kind = "i2c"
+path = "/soc/i2c@91407000"
+alias = "i2c2"
+reason = "an I2C (DesignWare) bus on the K230 (snps,designware-i2c)"
+
+[controllers.i2c3]
+kind = "i2c"
+path = "/soc/i2c@91408000"
+alias = "i2c3"
+reason = "an I2C (DesignWare) bus on the K230 (snps,designware-i2c)"
+
+[controllers.i2c4]
+kind = "i2c"
+path = "/soc/i2c@91409000"
+alias = "i2c4"
+reason = "an I2C (DesignWare) bus on the K230 (snps,designware-i2c)"
+
+[controllers.spi0]
+kind = "spi"
+path = "/soc/spi@91584000"
+alias = "spi0"
+reason = "an SPI controller on the K230 (snps,dwc-ssi-1.01a)"
+
+[controllers.spi1]
+kind = "spi"
+path = "/soc/spi@91582000"
+alias = "spi1"
+reason = "an SPI controller on the K230 (snps,dwc-ssi-1.01a)"
+
+[controllers.spi2]
+kind = "spi"
+path = "/soc/spi@91583000"
+alias = "spi2"
+reason = "an SPI controller on the K230 (snps,dwc-ssi-1.01a)"
+
+[controllers.uart0]
+kind = "block"
+path = "/soc/serial@91400000"
+alias = "serial0"
+reason = "a serial port on the K230 (snps,dw-apb-uart); its pins are the board's pinctrl's, which this map does not give"
+
+[controllers.pwm]
+kind = "block"
+path = "/soc/pwm@9140a000"
+reason = "the PWM block on the K230 (canaan,k230-pwm); its pins are the board's pinctrl's, which this map does not give"
+
+[controllers.watchdog0]
+kind = "watchdog"
+path = "/soc/wdt0@91106000"
+reason = "the hardware watchdog on the K230 (snps,dw-wdt)"

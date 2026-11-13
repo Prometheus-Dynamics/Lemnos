@@ -481,3 +481,81 @@ fn a_stable_gpio_name_needs_its_chip_on_the_machine_with_the_line_in_range() {
         "{problems:?}"
     );
 }
+
+// The SoC families: each map under `socs/` with a board file under `testing/boards/`, and goldens for
+// the three outputs. The maps cite the device trees they were read from (see each map's header); the
+// goldens check the generator, not the trees.
+
+fn family(soc: &str) -> (&'static str, &'static str) {
+    match soc {
+        "rk3566" => (
+            include_str!("../../../socs/rk3566.toml"),
+            include_str!("../../../testing/boards/rk3566.toml"),
+        ),
+        "rk3588" => (
+            include_str!("../../../socs/rk3588.toml"),
+            include_str!("../../../testing/boards/rk3588.toml"),
+        ),
+        "k230" => (
+            include_str!("../../../socs/k230.toml"),
+            include_str!("../../../testing/boards/k230.toml"),
+        ),
+        "sun60i-a733" => (
+            include_str!("../../../socs/sun60i-a733.toml"),
+            include_str!("../../../testing/boards/sun60i-a733.toml"),
+        ),
+        other => panic!("no family {other}"),
+    }
+}
+
+#[test]
+fn every_family_makes_its_three_outputs_as_its_goldens() {
+    for soc in ["rk3566", "rk3588", "k230", "sun60i-a733"] {
+        let (map, board_text) = family(soc);
+        let out = generated(board_text, map).unwrap_or_else(|e| panic!("{soc}: {e}"));
+        assert_eq!(out.overlay, golden(&format!("{soc}.dts")), "{soc} overlay");
+        assert_eq!(out.boot, golden(&format!("{soc}-boot.txt")), "{soc} boot");
+        assert_eq!(
+            out.modprobe,
+            golden(&format!("{soc}-modprobe.conf")),
+            "{soc} modprobe"
+        );
+    }
+}
+
+#[test]
+fn the_overlay_families_are_plugin_overlays_and_the_fragment_families_are_not() {
+    for soc in ["rk3566", "rk3588"] {
+        let (map, board_text) = family(soc);
+        let out = generated(board_text, map).unwrap();
+        assert!(out.overlay.contains("/plugin/;"), "{soc}");
+        assert!(out.overlay.contains("target-path = \"/"), "{soc}");
+    }
+    for soc in ["k230", "sun60i-a733"] {
+        let (map, board_text) = family(soc);
+        let out = generated(board_text, map).unwrap();
+        assert!(!out.overlay.contains("/plugin/;"), "{soc}");
+        assert!(!out.overlay.contains("/dts-v1/;"), "{soc}");
+        assert!(!out.overlay.contains("target-path"), "{soc}");
+        assert!(
+            out.overlay.contains("&{/soc/i2c@"),
+            "{soc}: {}",
+            out.overlay
+        );
+    }
+}
+
+#[test]
+fn a_fragment_map_with_a_disabled_holder_writes_a_path_block() {
+    let map = format!("{}\n", include_str!("../../../socs/k230.toml"));
+    let base = "[chips.x]\nlabel = \"x\"\n[bases.b.lines.\"gpio:x:1\"]\nholders = [\"/soc/holder\"]\nreason = \"a test holder\"\n";
+    let map = format!("{map}{base}");
+    let board = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"f\"\nsoc = \"k230\"\nbase = \"b\"\n[[lines]]\nline = \"gpio:x:1\"\n";
+    let out = generated(board, &map).unwrap();
+    assert!(
+        out.overlay
+            .contains("&{/soc/holder} {\n\tstatus = \"disabled\";\n};"),
+        "{}",
+        out.overlay
+    );
+}

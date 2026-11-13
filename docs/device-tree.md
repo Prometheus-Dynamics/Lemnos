@@ -198,6 +198,21 @@ the drivers whose devices are composed of other devices and need no hardware.
 The parser refuses a map whose paths are not absolute, whose alias is not `i2cN` or `spiN` for an
 I2C or SPI controller, or whose pin sets share a GPIO.
 
+## SoC families
+
+| Map | Source | Form | Not in the map |
+|---|---|---|---|
+| `socs/bcm2712-rp1.toml` | the base tree the reference board boots, rpi-7.2.y | overlay | its labels are not checked against a base tree on this host |
+| `socs/rk3566.toml` | mainline v6.12, `rk3566.dtsi` / `rk356x.dtsi`, `rk3568-pinctrl.dtsi` | overlay (`fdtoverlays`) | camera receiver and ISP, NPU, video decoder (no mainline node) |
+| `socs/rk3588.toml` | mainline v6.12, `rk3588-base.dtsi`, `rk3588-base-pinctrl.dtsi` | overlay | camera receiver and ISP, NPU, rkvdec (no mainline node) |
+| `socs/k230.toml` | `kendryte/k230_sdk` at 7e302f73, `k230.dtsi` (kernel 5.10.4) | fragment (the SDK loads a plain blob) | camera, ISP, GSDMA, KPU (no node in the SDK's SoC description); GPIO chip labels (one node per pin) |
+| `socs/sun60i-a733.toml` | a vendor BSP's A733 kernel patch series | fragment (extlinux `fdt` loads a full blob) | I2C, PWM and SPI pin groups (none in the series) |
+
+The `form` key chooses the output. `overlay` (the default) is a `/plugin/;` overlay with
+`target-path` fragments, for a loader that applies overlays. `fragment` is `&{/path} { ... };`
+blocks, for a board `.dts` that includes the base tree. A fragment names nodes by path, so it needs
+no labels except the pin sets it references.
+
 ## Reference
 
 The reference board's three outputs and the names they use are in

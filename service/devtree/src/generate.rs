@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use lemnos_host::board::{BoardFile, LineSpec};
 
-use crate::map::{Controller, Kind, PinSet, SocMap};
+use crate::map::{Controller, Form, Kind, PinSet, SocMap};
 
 /// What the generator makes: the overlay the OS layer compiles and loads, and the boot fragment
 /// the firmware reads before the kernel.
@@ -60,7 +60,7 @@ pub fn generate(board: &BoardFile, map: &SocMap) -> Result<Output, String> {
     let chosen = choose(board, map)?;
     check_lines(board, map)?;
     check_devices(board, map, &chosen, base.map(|(_, b)| b))?;
-    let overlay = overlay(board, &chosen, base, &board.lines)?;
+    let overlay = overlay(board, &chosen, base, &board.lines, map.form)?;
     let boot = boot(board, map)?;
     let modprobe = modprobe(board, &chosen);
     Ok(Output {
@@ -404,6 +404,7 @@ fn overlay(
     chosen: &[Chosen<'_>],
     base: Option<(&str, &crate::map::Base)>,
     lines: &[LineSpec],
+    form: Form,
 ) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
@@ -416,9 +417,16 @@ fn overlay(
         out,
         "// Every fragment says why it is here. Node paths are the base tree's."
     );
-    let _ = writeln!(out, "/dts-v1/;");
-    let _ = writeln!(out, "/plugin/;");
-    let _ = writeln!(out, "/ {{");
+    match form {
+        Form::Overlay => {
+            let _ = writeln!(out, "/dts-v1/;");
+            let _ = writeln!(out, "/plugin/;");
+            let _ = writeln!(out, "/ {{");
+        }
+        // A fragment is merged into a board's own `.dts`, which names the base tree, so it has no
+        // header of its own and no root node: each fragment is a `&{path}` (or `/`) block.
+        Form::Fragment => {}
+    }
     let mut fragment = 0usize;
     let mut fragments = String::new();
     for entry in chosen {
@@ -451,6 +459,7 @@ fn overlay(
             );
         }
         push_fragment(
+            form,
             &mut fragments,
             &mut fragment,
             &controller.path,
@@ -460,6 +469,7 @@ fn overlay(
         if let Some(alias) = &controller.alias {
             let alias_body = format!("aliases {{ {alias} = \"{}\"; }};", controller.path);
             push_fragment(
+                form,
                 &mut fragments,
                 &mut fragment,
                 "/",
@@ -475,6 +485,7 @@ fn overlay(
                 for holder in &holders.holders {
                     if disabled.insert(holder.clone()) {
                         push_fragment(
+                            form,
                             &mut fragments,
                             &mut fragment,
                             holder,
@@ -495,20 +506,48 @@ fn overlay(
         );
     }
     out.push_str(&fragments);
-    let _ = writeln!(out, "}};");
+    if form == Form::Overlay {
+        let _ = writeln!(out, "}};");
+    }
     Ok(out)
 }
 
-fn push_fragment(out: &mut String, n: &mut usize, target: &str, reason: &str, body: &[String]) {
-    let _ = writeln!(out, "\t// {reason}");
-    let _ = writeln!(out, "\tfragment@{n} {{");
-    let _ = writeln!(out, "\t\ttarget-path = \"{target}\";");
-    let _ = writeln!(out, "\t\t__overlay__ {{");
-    for line in body {
-        let _ = writeln!(out, "\t\t\t{line}");
+fn push_fragment(
+    form: Form,
+    out: &mut String,
+    n: &mut usize,
+    target: &str,
+    reason: &str,
+    body: &[String],
+) {
+    match form {
+        Form::Overlay => {
+            let _ = writeln!(out, "\t// {reason}");
+            let _ = writeln!(out, "\tfragment@{n} {{");
+            let _ = writeln!(out, "\t\ttarget-path = \"{target}\";");
+            let _ = writeln!(out, "\t\t__overlay__ {{");
+            for line in body {
+                let _ = writeln!(out, "\t\t\t{line}");
+            }
+            let _ = writeln!(out, "\t\t}};");
+            let _ = writeln!(out, "\t}};");
+        }
+        // The base tree's path, by a `dtc` path reference: no label is needed, and the root's
+        // `aliases` merge in as they are written.
+        Form::Fragment => {
+            let _ = writeln!(out, "// {reason}");
+            let head = if target == "/" {
+                "/".to_string()
+            } else {
+                format!("&{{{target}}}")
+            };
+            let _ = writeln!(out, "{head} {{");
+            for line in body {
+                let _ = writeln!(out, "\t{line}");
+            }
+            let _ = writeln!(out, "}};");
+        }
     }
-    let _ = writeln!(out, "\t\t}};");
-    let _ = writeln!(out, "\t}};");
     *n += 1;
 }
 

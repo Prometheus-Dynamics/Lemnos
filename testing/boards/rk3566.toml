@@ -1,0 +1,55 @@
+# A board file for the RK3566 map (socs/rk3566.toml): the buses, the PWM fan, a GPIO power switch
+# and the video decoder, as an overlay the loader applies. Untested on board.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "rk3566"
+soc = "rk3566"
+
+[[hardware]]
+name = "i2c-1"
+controller = "i2c1"
+pins = "xfer"
+
+[[hardware]]
+name = "i2c-2"
+controller = "i2c2"
+pins = "m0"
+
+[[hardware]]
+name = "spidev1.0"
+controller = "spi1"
+
+[[hardware]]
+controller = "pwm1"
+pins = "m0"
+
+[[hardware]]
+controller = "vpu"
+
+# The power switch's line. Boot low: the line holds its level from power-on until the driver takes it.
+[[lines]]
+line = "gpio:gpio1:4"
+boot = "low"
+reason = "the switched load's enable: off from power-on until Lemnos's power switch takes it"
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-1"
+
+[[devices]]
+id = "panel"
+driver = "panel"
+bus = "spidev1.0"
+
+[[devices]]
+id = "fan"
+driver = "pwm-channel-fan"
+uses = { pwm = "pwm:/pwm@fdd70010:1" }
+
+[[devices]]
+id = "load"
+driver = "gpio-power-switch"
+uses = { line = "gpio:gpio1:4" }

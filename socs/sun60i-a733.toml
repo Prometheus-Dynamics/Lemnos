@@ -1,0 +1,82 @@
+# The SoC map for the Allwinner A733 (sun60i). Data only: `lemnos-ctl tree` and `lemnos-ctl validate`
+# read it.
+#
+# Source: the A733 kernel patch set of a vendor BSP (the `allwinner-bsp` repository, and the kernel
+# patch series of its mainline packaging, `patches/`), applied to the kernel the packaging names
+# (7.3-rc5 at its adaptation; the series is applied in the order its `patches/series` file gives). The SoC base is `arm64-dts-allwinner-add-allwinner-a733-soc.patch` (sun60i-a733.dtsi); the
+# controllers are in the series' `a733-*` patches: `a733-eeprom-*` (i2c0), `a733-header` (i2c2, i2c7,
+# spi1, uart2, uart4), `a733-pwm` (pwm0, pwm1), `a733-csi-isp-base` (csic, isp), and the pin groups
+# in the base patch and `a733-dts-fixes` (uart0_pb_pins, uart2_pb_pins). Node paths are under the
+# base's `soc` bus (`/soc`). The mainline sun60i-a733.dtsi (7.3-rc5 onwards) is not checked against it.
+#
+# Not in the map, because the series gives no pin group for them: the I2C and PWM pins, the SPI pins.
+# A board that uses them wires them through the pinctrl it names, which this map does not give.
+soc = "sun60i-a733"
+# The base the board's loader hands the kernel is a full device tree (extlinux `fdt`), not an overlay.
+form = "fragment"
+
+needs_nothing = ["orientation", "fan-control"]
+
+[controllers.i2c0]
+kind = "i2c"
+path = "/soc/i2c@2510000"
+alias = "i2c0"
+reason = "an I2C (TWI) controller on the A733 (allwinner,sun60i-a733-i2c)"
+
+[controllers.i2c2]
+kind = "i2c"
+path = "/soc/i2c@2512000"
+alias = "i2c2"
+reason = "an I2C (TWI) controller on the A733 (allwinner,sun60i-a733-i2c)"
+
+[controllers.i2c7]
+kind = "i2c"
+path = "/soc/i2c@2517000"
+alias = "i2c7"
+reason = "an I2C (TWI) controller on the A733 (allwinner,sun60i-a733-i2c)"
+
+[controllers.spi1]
+kind = "spi"
+path = "/soc/spi@2541000"
+alias = "spi1"
+reason = "an SPI controller on the A733 (allwinner,sun60i-a733-spi-dbi)"
+
+[controllers.uart0]
+kind = "uart"
+path = "/soc/serial@2500000"
+alias = "serial0"
+reason = "a serial port on the A733 (snps,dw-apb-uart)"
+[controllers.uart0.pins.pb9_pb10]
+path = "/soc/pinctrl@2000000/uart0-pb-pins"
+label = "uart0_pb_pins"
+gpios = [41, 42]
+
+[controllers.uart2]
+kind = "uart"
+path = "/soc/serial@2502000"
+alias = "serial2"
+reason = "a serial port on the A733 (snps,dw-apb-uart)"
+[controllers.uart2.pins.pb0_pb1]
+path = "/soc/pinctrl@2000000/uart2-pb-pins"
+label = "uart2_pb_pins"
+gpios = [32, 33]
+
+[controllers.pwm0]
+kind = "block"
+path = "/soc/pwm@2527000"
+reason = "a PWM controller on the A733 (allwinner,sun60i-a733-pwm); its pins are the board's pinctrl's"
+
+[controllers.pwm1]
+kind = "block"
+path = "/soc/pwm@2528000"
+reason = "a PWM controller on the A733 (allwinner,sun60i-a733-pwm); its pins are the board's pinctrl's"
+
+[controllers.csic]
+kind = "block"
+path = "/soc/csic@5800000"
+reason = "the camera sensor interface on the A733 (allwinner,sun60i-a733-csic); a driver of its own takes it"
+
+[controllers.isp]
+kind = "block"
+path = "/soc/isp@5900000"
+reason = "the image signal processor on the A733 (allwinner,sun60i-a733-isp)"

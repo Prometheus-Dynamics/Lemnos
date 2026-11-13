@@ -1,0 +1,130 @@
+# The SoC map for the RK3588. Data only: `lemnos-ctl tree` and `lemnos-ctl validate` read it.
+#
+# Source: the Linux kernel's mainline device tree at v6.12, `arch/arm64/boot/dts/rockchip/`:
+# rk3588-base.dtsi (rk3588s.dtsi includes it), and the pin groups in rk3588-base-pinctrl.dtsi.
+# Node paths are the root-level nodes of rk3588-base.dtsi. Pin numbers are bank*32 + the pin's index
+# (RK_PA0 = 0, RK_PB0 = 8, RK_PC0 = 16, RK_PD0 = 24), from the bank and pin each group lists. The chip
+# labels are the bank names in rk3588_pin_banks (drivers/pinctrl/pinctrl-rockchip.c, v6.12).
+#
+# Not in the map, because the mainline base tree has no node for them: the camera receiver and ISP,
+# the NPU, and the video decoder (rkvdec). A board tree adds them. The vendor kernel names the RGA
+# `rockchip,rk3588-rga` here and `rockchip,rga2` in the vendor tree; see the RK3566 map's note.
+soc = "rk3588"
+form = "overlay"
+
+needs_nothing = ["orientation", "fan-control"]
+
+[chips.gpio0]
+label = "gpio0"
+reason = "GPIO bank 0, in the PMU domain"
+[chips.gpio1]
+label = "gpio1"
+reason = "GPIO bank 1"
+[chips.gpio2]
+label = "gpio2"
+reason = "GPIO bank 2"
+[chips.gpio3]
+label = "gpio3"
+reason = "GPIO bank 3"
+[chips.gpio4]
+label = "gpio4"
+reason = "GPIO bank 4"
+
+[controllers.i2c0]
+kind = "i2c"
+path = "/i2c@fd880000"
+alias = "i2c0"
+reason = "an I2C bus on the RK3588"
+[controllers.i2c0.pins.m0]
+path = "/pinctrl/i2c0/i2c0m0-xfer"
+label = "i2c0m0_xfer"
+gpios = [11, 6]
+
+[controllers.i2c1]
+kind = "i2c"
+path = "/i2c@fea90000"
+alias = "i2c1"
+reason = "an I2C bus on the RK3588"
+[controllers.i2c1.pins.m0]
+path = "/pinctrl/i2c1/i2c1m0-xfer"
+label = "i2c1m0_xfer"
+gpios = [13, 14]
+
+[controllers.i2c2]
+kind = "i2c"
+path = "/i2c@feaa0000"
+alias = "i2c2"
+reason = "an I2C bus on the RK3588"
+[controllers.i2c2.pins.m0]
+path = "/pinctrl/i2c2/i2c2m0-xfer"
+label = "i2c2m0_xfer"
+gpios = [15, 16]
+
+[controllers.i2c3]
+kind = "i2c"
+path = "/i2c@feab0000"
+alias = "i2c3"
+reason = "an I2C bus on the RK3588"
+[controllers.i2c3.pins.m0]
+path = "/pinctrl/i2c3/i2c3m0-xfer"
+label = "i2c3m0_xfer"
+gpios = [48, 49]
+
+[controllers.spi0]
+kind = "spi"
+path = "/spi@feb00000"
+alias = "spi0"
+reason = "an SPI controller on the RK3588"
+
+[controllers.spi1]
+kind = "spi"
+path = "/spi@feb10000"
+alias = "spi1"
+reason = "an SPI controller on the RK3588"
+
+[controllers.spi2]
+kind = "spi"
+path = "/spi@feb20000"
+alias = "spi2"
+reason = "an SPI controller on the RK3588"
+
+[controllers.spi3]
+kind = "spi"
+path = "/spi@feb30000"
+alias = "spi3"
+reason = "an SPI controller on the RK3588"
+
+[controllers.spi4]
+kind = "spi"
+path = "/spi@fecb0000"
+alias = "spi4"
+reason = "an SPI controller on the RK3588"
+
+[controllers.uart2]
+kind = "uart"
+path = "/serial@feb50000"
+alias = "serial2"
+reason = "a serial port on the RK3588"
+[controllers.uart2.pins.m0]
+path = "/pinctrl/uart2/uart2m0-xfer"
+label = "uart2m0_xfer"
+gpios = [13, 14]
+
+[controllers.pwm1]
+kind = "pwm"
+path = "/pwm@fd8b0010"
+reason = "a PWM block on the RK3588 (PWM 1)"
+[controllers.pwm1.pins.m0]
+path = "/pinctrl/pwm1/pwm1m0-pins"
+label = "pwm1m0_pins"
+gpios = [16]
+
+[controllers.vpu121]
+kind = "block"
+path = "/video-codec@fdb50000"
+reason = "the VPU121 video codec on the RK3588 (rockchip,rk3588-vpu121)"
+
+[controllers.rga]
+kind = "block"
+path = "/rga@fdb80000"
+reason = "the RGA 2D block on the RK3588 (rockchip,rk3588-rga)"

@@ -117,6 +117,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`Q2.md`](../testing/board-runs/Q2.md) | the device-tree overlay from the board file: compiled and applied to the base tree; the boot fragment |
 | [`Q1.md`](../testing/board-runs/Q1.md) | `ws2812` on the RP1 PIO block: the bit stream, reset gap and retry, on a 16-LED ring |
 | [`Q2c.md`](../testing/board-runs/Q2c.md) | the reference board's overlay, boot fragment and module configuration; stable GPIO and PWM names |
+| [`Q2b.md`](../testing/board-runs/Q2b.md) | the device-tree maps for the RK3566, RK3588, K230 and A733 families; untested on board |
 | [`B17.md`](../testing/board-runs/B17.md) | `status-light`: looks, layers, frame interval, idle cost |
 | [`B21.md`](../testing/board-runs/B21.md) | `vcm`: move, clamp, settle time |
 | [`E24.md`](../testing/board-runs/E24.md) | `hw-watchdog`: arming, feed cadence, the reset when feeding stops |

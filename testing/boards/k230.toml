@@ -1,0 +1,29 @@
+# A board file for the K230 map (socs/k230.toml): an I2C bus, an SPI bus and the watchdog, as a
+# fragment for the board's own device tree. Untested on board.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "k230"
+soc = "k230"
+
+[[hardware]]
+name = "i2c-0"
+controller = "i2c0"
+
+[[hardware]]
+name = "spidev0.0"
+controller = "spi0"
+
+[[hardware]]
+controller = "watchdog0"
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-0"
+
+[[devices]]
+id = "panel"
+driver = "panel"
+bus = "spidev0.0"

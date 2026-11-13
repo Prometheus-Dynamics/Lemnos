@@ -16,6 +16,11 @@ pub struct SocMap {
     /// The base trees a board may be built on, by name.
     #[serde(default)]
     pub bases: BTreeMap<String, Base>,
+    /// The form the output takes. `overlay` (the default) is a `/plugin/;` overlay for a loader
+    /// that applies overlays; `fragment` is blocks a board's own `.dts` takes, for a loader that
+    /// boots a plain device tree.
+    #[serde(default)]
+    pub form: Form,
     /// The GPIO chips a `gpio:LABEL:LINE` name may name, by a short key. The label is the chip's
     /// own, as the kernel reports it.
     #[serde(default)]
@@ -25,6 +30,17 @@ pub struct SocMap {
     /// refused, since its needs would produce nothing in any output.
     #[serde(default)]
     pub needs_nothing: Vec<String>,
+}
+
+/// What the overlay output is: the form a loader applies, which the map says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Form {
+    /// A `/plugin/;` overlay, with `target-path` fragments.
+    #[default]
+    Overlay,
+    /// Fragments for a board's `.dts`: `&{/path} { ... };` blocks.
+    Fragment,
 }
 
 /// A GPIO chip: the label `gpio:LABEL:LINE` names it by.
