@@ -28,3 +28,6 @@ lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-wire = { path = "../../engine/wire" }

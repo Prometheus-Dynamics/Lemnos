@@ -132,3 +132,56 @@ fn a_job_with_no_route_on_the_chip_completes_as_failed_through_the_hosts_ticks()
     let counters = Counters::decode(&mut Reader::new(&reply[..n])).unwrap();
     assert_eq!((counters.jobs, counters.errors), (0, 1));
 }
+
+/// A result is released and named again in a new job, on the host's own ticks: the job is served
+/// as the first was, and the stream is not faulted. A control for the codec job server, which
+/// must give the same answer on the same order.
+#[test]
+fn a_result_released_and_named_again_is_completed_again_through_the_hosts_ticks() {
+    let (host, clock, index) = start("config = { soc = \"rk3576\" }\n");
+    let lease = host.stream_attach(index, "convert", CallerId(5)).unwrap();
+    let mut consumer = lease.consumer_writable().unwrap();
+    for _ in 0..4 {
+        clock.0.fetch_add(1_000_000, Ordering::Relaxed);
+        host.tick();
+    }
+    assert!(consumer.write(0, 0, &[1, 2, 3, 4, 5, 6]));
+    let job = |identity: u64| ConvertJob {
+        identity,
+        input: ImageRef {
+            buffer: 0,
+            width: 2,
+            height: 1,
+            fourcc: RGB3,
+            stride: 6,
+        },
+        output: ImageRef {
+            buffer: 1,
+            width: 2,
+            height: 1,
+            fourcc: AR24,
+            stride: 8,
+        },
+    };
+    for identity in [77u64, 78] {
+        let mut bytes = [0u8; 64];
+        let mut writer = Writer::new(&mut bytes);
+        job(identity).encode(&mut writer).unwrap();
+        let used = writer.len();
+        assert!(consumer.jobs().post(&bytes[..used]).unwrap());
+        let mut done = None;
+        for _ in 0..4 {
+            clock.0.fetch_add(1_000_000, Ordering::Relaxed);
+            host.tick();
+            done = consumer.pop_frame().unwrap();
+            if done.is_some() {
+                break;
+            }
+        }
+        let done = done.expect("a completion from the host's ticks");
+        assert_eq!((done.buffer, done.identity), (1, identity));
+        // Released, so the next job may name the buffer again.
+        assert!(consumer.release(done.buffer));
+    }
+    assert_eq!(host.stream_stats(index, "convert").unwrap().faults, 0);
+}

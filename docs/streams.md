@@ -355,6 +355,13 @@ configuration for one frame.
 A job names buffers by number, never by address. The driver checks every number, offset and length
 against the buffers the consumer really holds before any of it reaches hardware.
 
+A returned buffer is reusable in a job from the moment the consumer releases it (drops the completion
+frame that carries it), so a job posted after that may name it. When a job names a buffer the driver
+does not hold, the driver takes the returned buffers back before it checks the job, so such a job is
+served, whether the consumer released and posted from one thread or from several; a job naming a buffer
+the consumer still holds is refused and faults its stream. On a free-running stream the consumer names no buffer in a call, so the rule
+there is only that a released buffer goes back to the driver when the driver next asks for one.
+
 On a block that takes jobs, each job's completion comes back as a frame on the same stream, with
 the job's identity. Every job the block reads gets exactly one completion.
 

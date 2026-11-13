@@ -832,6 +832,7 @@ dependencies = [
  "lemnos-host",
  "lemnos-linux-sys",
  "lemnos-measure",
+ "lemnos-sim",
  "lemnos-wire",
 ]
 

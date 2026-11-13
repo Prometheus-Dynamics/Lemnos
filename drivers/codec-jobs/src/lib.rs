@@ -10,8 +10,10 @@
 //!
 //! The server holds every buffer of the stream the consumer has not been handed, so a job can
 //! name any of them. A job's result buffer is published as its completion and is the server's
-//! again once the consumer returns it. Buffers numbered [`MAX_BUFFERS`] and up are never
-//! used.
+//! again once the consumer returns it. A job may name a buffer the consumer returned since the
+//! server last looked: when a job names a buffer the server does not hold, the server takes the
+//! returns back and looks again before it refuses the job. Buffers numbered [`MAX_BUFFERS`] and
+//! up are never used.
 //!
 //! A stream's memory is made anew for each consumer. Every tick asks the stream whether one
 //! held buffer is still the present consumer's ([`StreamEndpoint::buffer_current`]) before it
@@ -236,6 +238,21 @@ impl Server {
         }
     }
 
+    /// Takes every buffer the stream has free or returned, at most one round of the stream.
+    /// Allocates nothing.
+    fn take_returned<S>(&mut self, stream: &mut S) -> Result<(), ErrorKind>
+    where
+        S: StreamEndpoint<Error = ErrorKind> + ?Sized,
+    {
+        for _ in 0..stream.buffer_count() {
+            let Some(buffer) = stream.next_buffer()? else {
+                break;
+            };
+            self.set_held(buffer, true);
+        }
+        Ok(())
+    }
+
     /// The buffers jobs in flight use.
     fn busy(&self) -> u64 {
         self.in_flight
@@ -290,12 +307,7 @@ impl Server {
             }
             self.attached = true;
         }
-        for _ in 0..stream.buffer_count() {
-            let Some(buffer) = stream.next_buffer()? else {
-                break;
-            };
-            self.set_held(buffer, true);
-        }
+        self.take_returned(stream)?;
         Ok(true)
     }
 
@@ -358,38 +370,56 @@ impl Server {
     }
 
     /// Reads `job`'s work and checks it and its references. The references' buffers, one bit
-    /// each, and the work's length; `None` when the job is refused.
-    fn check<S, B>(&mut self, stream: &mut S, block: &B, job: &Job) -> Option<(u64, usize)>
+    /// each, and the work's length; `Ok(None)` when the job is refused.
+    fn check<S, B>(
+        &mut self,
+        stream: &mut S,
+        block: &B,
+        job: &Job,
+    ) -> Result<Option<(u64, usize)>, ErrorKind>
     where
         S: StreamEndpoint<Error = ErrorKind> + ?Sized,
         B: Block + ?Sized,
     {
         let limits = block.limits();
-        let len = usize::try_from(job.work_bytes).ok()?;
+        let Some(len) = usize::try_from(job.work_bytes).ok() else {
+            return Ok(None);
+        };
         if len > limits.max_work_bytes as usize {
-            return None;
+            return Ok(None);
         }
-        let held = self.held;
-        let copy = self.work.get_mut(..len)?;
+        let Some(copy) = self.work.get_mut(..len) else {
+            return Ok(None);
+        };
         if !matches!(stream.read(job.work, 0, copy), Ok(true)) {
-            return None;
+            return Ok(None);
         }
-        let work = Work::parse(copy)?;
+        let Some(work) = Work::parse(copy) else {
+            return Ok(None);
+        };
         if work.ref_count() > usize::from(limits.max_refs)
             || work.item_count() > usize::from(limits.max_items)
         {
-            return None;
+            return Ok(None);
         }
         let usable = limits.max_buffers.min(MAX_BUFFERS);
         let mut named = 0u64;
         for reference in work.refs() {
             let buffer = reference.buffer;
-            if buffer >= usable || held & (1 << buffer) == 0 || buffer == job.result {
-                return None;
+            if buffer >= usable || buffer == job.result {
+                return Ok(None);
             }
             named |= 1 << buffer;
         }
-        Some((named, len))
+        // A buffer a reference names that is not held may have been returned since the last
+        // look, as for the job's own buffers: take the returns back, then look again.
+        if named & !self.held != 0 {
+            self.take_returned(stream)?;
+        }
+        if named & !self.held != 0 {
+            return Ok(None);
+        }
+        Ok(Some((named, len)))
     }
 
     /// Serves the stream once: completes what the block has finished, then takes new jobs
@@ -436,13 +466,22 @@ impl Server {
             };
             taken += 1;
             let busy = self.busy();
-            let job = encoded
+            let decoded = encoded
                 .get(..len)
                 .filter(|bytes| bytes.len() <= JOB_BYTES)
-                .and_then(|bytes| Job::decode(&mut Reader::new(bytes)).ok())
-                .filter(|job| {
-                    self.holds(job.work) && self.holds(job.result) && busy & (1 << job.result) == 0
-                });
+                .and_then(|bytes| Job::decode(&mut Reader::new(bytes)).ok());
+            // Again for each job: its consumer may have returned a buffer and named it in this job
+            // since the last look. A consumer releases a buffer before it posts a job that names
+            // it, so once the job is read the release is in place, and the returns are taken back
+            // before the job is checked. Only a job that names a buffer not held asks.
+            let unheld =
+                decoded.is_some_and(|job| !(self.holds(job.work) && self.holds(job.result)));
+            if unheld {
+                self.take_returned(stream)?;
+            }
+            let job = decoded.filter(|job| {
+                self.holds(job.work) && self.holds(job.result) && busy & (1 << job.result) == 0
+            });
             let Some(job) = job else {
                 // Bytes that are no job, or a job with nothing to complete on: a broken
                 // consumer. It loses the stream, and what was held under it goes with it.
@@ -451,7 +490,7 @@ impl Server {
                 self.forget(stream, block)?;
                 return Ok(false);
             };
-            let Some((named, len)) = self.check(stream, block, &job) else {
+            let Some((named, len)) = self.check(stream, block, &job)? else {
                 self.complete(
                     stream,
                     job.identity,
