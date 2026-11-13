@@ -77,9 +77,13 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
+#include <linux/file.h>
+#include <linux/mm.h>
+#include <linux/shmem_fs.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <uapi/linux/fcntl.h>
 
 #include "lemnos_internal.h"
 
@@ -121,6 +125,18 @@ struct lem_stream_region {
 	u64 addr, end;			/* device addresses, addr < end */
 	u64 size;
 	u32 users;			/* job ranges not finished */
+};
+
+/*
+ * A reader's marks page, pinned for the stream's life: the reader's own memfd,
+ * mapped read-only here. Its words are shm/ring-holds' layout (marks.rs): the
+ * version, then one mark per buffer, nonzero while the reader holds it.
+ */
+struct lem_reader {
+	struct page **pages;
+	unsigned int npages;
+	u64 *marks;			/* vmap of pages, read-only; NULL: no reader in this slot */
+	u32 max_held;			/* what the reader may hold at once; enforced by the cut-off */
 };
 
 struct lem_stream {
@@ -167,6 +183,8 @@ struct lem_stream {
 	size_t shm_slots_at;		/* its slots */
 	size_t page_at;			/* the pool page's first word (shm form) */
 	size_t w_state, w_returns_head, w_returns_tail, w_jobs_head, w_jobs_tail;
+	struct lem_reader reader[LEMNOS_STREAM_MAX_READERS];	/* shm form: the consumers' marks */
+	u32 newest;			/* shm form: the buffer of the newest frame, kept for the frame path */
 };
 
 static const struct file_operations lem_stream_fops;
@@ -250,6 +268,7 @@ static void lem_stream_wake(struct lem_stream *s)
 #define LEM_POOL_MAGIC		0x314c4f4f504d4853ull	/* "SHMPOOL1" */
 #define LEM_POOL_TICKETS	8	/* one word per buffer, from here */
 #define LEM_POOL_READERS	64	/* shm-ring-buffers' MAX_READERS: cut-off words after the tickets */
+#define LEM_MARKS_AT		1	/* a marks page's first mark: word 0 is its version (marks.rs) */
 
 static u64 lem_shm_stamp(u64 seq)
 {
@@ -299,12 +318,44 @@ static void lem_shm_publish(struct lem_stream *s, u32 buffer, u32 bytes, u64 seq
 	lem_ring_write_release(s, LEM_SHM_W_HEAD, s->frames_head);
 }
 
-/* A buffer the consumer returned: its ticket goes on to the next even value. Lock held. */
-static void lem_shm_ticket_advance(struct lem_stream *s, u32 buffer)
+/* Whether any reader's marks hold `buffer`. Lock held; `buffer` is below s->buffers. */
+static bool lem_stream_held(const struct lem_stream *s, u32 buffer)
 {
-	size_t at = s->page_at + LEM_POOL_TICKETS + buffer;
+	for (u32 r = 0; r < LEMNOS_STREAM_MAX_READERS; r++) {
+		const u64 *marks = s->reader[r].marks;
 
-	lem_ring_write_release(s, at, lem_ring_read(s, at) + 2);
+		if (marks && READ_ONCE(marks[LEM_MARKS_AT + buffer]))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Takes a published buffer back if no reader holds it (shm/ring-buffers'
+ * writer: retire, check the holders, release). Retiring makes the ticket odd,
+ * so no reader can newly take the frame; the full barrier orders that before
+ * the marks are read, and pairs with the reader's fence. A held buffer stays
+ * published. Lock held. True if the buffer is free now.
+ */
+static bool lem_stream_reclaim(struct lem_stream *s, u32 buffer)
+{
+	struct lem_stream_buf *b = &s->buf[buffer];
+	size_t at = s->page_at + LEM_POOL_TICKETS + buffer;
+	u64 ticket;
+
+	if (b->state != LEM_BUF_CONSUMER)
+		return b->state == LEM_BUF_FREE;
+	ticket = lem_ring_read(s, at);
+	if (!(ticket & 1))
+		lem_ring_write(s, at, ticket | 1);
+	smp_mb();
+	if (lem_stream_held(s, buffer))
+		return false;
+	/* Odd to the next even value: release. */
+	lem_ring_write_release(s, at, (lem_ring_read(s, at) | 1) + 1);
+	b->state = LEM_BUF_FREE;
+	s->returned++;
+	return true;
 }
 
 /* Takes back buffers the consumer returned. Lock held; bounded by the kernel's capacity. */
@@ -312,6 +363,9 @@ static int lem_stream_collect_returns(struct lem_stream *s)
 {
 	u32 slots = s->frame_slots;
 
+	/* The shm form has no returns queue: a buffer goes back when no reader holds it. */
+	if (s->shm)
+		return 0;
 	for (u32 n = 0; n < slots; n++) {
 		u64 head = lem_ring_read_acquire(s, s->w_returns_head);
 		u64 count = head - s->returns_tail;
@@ -334,8 +388,6 @@ static int lem_stream_collect_returns(struct lem_stream *s)
 		b->state = LEM_BUF_FREE;
 		s->returned++;
 		s->returns_tail++;
-		if (s->shm)
-			lem_shm_ticket_advance(s, buffer);
 		lem_ring_write_release(s, s->w_returns_tail, s->returns_tail);
 	}
 	return 0;
@@ -435,6 +487,9 @@ static int lem_stream_accept(struct lem_stream *s, const struct lemnos_stream_jo
 
 	if (in->buffer >= s->buffers)
 		return -EINVAL;
+	/* A consumer that let go of the buffer's marks gets it back to post a job on it. */
+	if (s->shm)
+		lem_stream_reclaim(s, in->buffer);
 	b = &s->buf[in->buffer];
 	if (b->state == LEM_BUF_ABSENT)
 		return -EFAULT;
@@ -581,6 +636,21 @@ static bool lem_stream_take(struct lem_stream *s, struct lem_job *job)
 			return true;
 		}
 	}
+	/* Shm: take back one no reader holds, but never the newest frame's, so a reader always has one. */
+	if (s->shm) {
+		for (u32 i = 0; i < s->buffers; i++) {
+			u32 b = (s->cursor + i) % s->buffers;
+
+			if (b == s->newest || s->buf[b].state != LEM_BUF_CONSUMER ||
+			    !lem_stream_reclaim(s, b))
+				continue;
+			s->cursor = (b + 1) % s->buffers;
+			s->buf[b].state = LEM_BUF_ACTIVE;
+			memset(job, 0, sizeof(*job));
+			job->buffer = b;
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -641,6 +711,7 @@ static void lem_stream_finish_locked(struct lem_stream *s, const struct lem_job 
 		lem_stream_fault_locked(s, ret);
 	} else if (pushed) {
 		b->state = LEM_BUF_CONSUMER;
+		s->newest = job->buffer;
 		s->published++;
 	} else {
 		b->state = LEM_BUF_FREE;
@@ -986,6 +1057,8 @@ int lem_stream_job_take(struct lem_stream *s, u32 buffer, u64 identity,
 		ret = -EINVAL;
 		goto out;
 	}
+	if (s->shm)
+		lem_stream_reclaim(s, buffer);
 	for (u32 i = 0; i < count; i++) {
 		ret = lem_stream_resolve(s, buffer, range[i].addr, range[i].len, &slot->job.range[i]);
 		if (ret)
@@ -1288,6 +1361,87 @@ static long lem_stream_test_source(struct lem_stream *s, const struct lemnos_str
 	return 0;
 }
 
+/* Unpins a reader's marks page, whatever part of it was pinned. */
+static void lem_reader_release(struct lem_reader *r)
+{
+	if (r->marks)
+		vunmap(r->marks);
+	for (unsigned int i = 0; i < r->npages; i++)
+		put_page(r->pages[i]);
+	kfree(r->pages);
+	memset(r, 0, sizeof(*r));
+}
+
+/*
+ * LEMNOS_STREAM_IOC_READER: pins a reader's marks page and gives the reader a
+ * slot. The page must be a shmem file, sealed against shrinking and growing,
+ * and big enough for the buffers. Its pages are mapped read-only and never
+ * written. Called with s->ctl held, which orders the table's changes; the new
+ * entry is published under s->lock, where the frame path reads it.
+ */
+static long lem_stream_reader_add(struct lem_stream *s, struct lemnos_stream_reader *a)
+{
+	size_t bytes = (LEM_MARKS_AT + 2 * (size_t)s->buffers) * sizeof(u64);
+	const unsigned int want = F_SEAL_SHRINK | F_SEAL_GROW;
+	struct lem_reader r = {};
+	struct file *file;
+	unsigned long flags;
+	u32 slot;
+	long ret = -EINVAL;
+
+	if (!s->shm || a->reserved || a->max_hold_ns)
+		return -EINVAL;
+	for (slot = 0; slot < LEMNOS_STREAM_MAX_READERS; slot++)
+		if (!s->reader[slot].marks)
+			break;
+	if (slot == LEMNOS_STREAM_MAX_READERS)
+		return -ENOSPC;
+
+	file = fget(a->fd);
+	if (!file)
+		return -EBADF;
+	if (!shmem_file(file) ||
+	    (READ_ONCE(SHMEM_I(file_inode(file))->seals) & want) != want ||
+	    i_size_read(file_inode(file)) < (loff_t)bytes)
+		goto put;
+
+	r.npages = DIV_ROUND_UP(bytes, PAGE_SIZE);
+	r.pages = kcalloc(r.npages, sizeof(*r.pages), GFP_KERNEL);
+	if (!r.pages) {
+		ret = -ENOMEM;
+		goto put;
+	}
+	for (unsigned int i = 0; i < r.npages; i++) {
+		struct page *page = shmem_read_mapping_page(file->f_mapping, i);
+
+		if (IS_ERR(page)) {
+			ret = PTR_ERR(page);
+			r.npages = i;
+			goto unpin;
+		}
+		r.pages[i] = page;
+	}
+	r.marks = vmap(r.pages, r.npages, VM_MAP, PAGE_KERNEL_RO);
+	if (!r.marks) {
+		ret = -ENOMEM;
+		goto unpin;
+	}
+	r.max_held = a->max_held;
+
+	spin_lock_irqsave(&s->lock, flags);
+	s->reader[slot] = r;
+	spin_unlock_irqrestore(&s->lock, flags);
+	a->slot = slot;
+	fput(file);
+	return 0;
+
+unpin:
+	lem_reader_release(&r);
+put:
+	fput(file);
+	return ret;
+}
+
 static long lem_stream_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct lem_stream *s = file->private_data;
@@ -1368,6 +1522,19 @@ static long lem_stream_ioctl(struct file *file, unsigned int cmd, unsigned long 
 			return -EFAULT;
 		mutex_lock(&s->ctl);
 		ret = s->dead ? -ENODEV : s->fault ? s->fault : lem_stream_set_buffer(s, &a);
+		mutex_unlock(&s->ctl);
+		if (!ret && copy_to_user(uarg, &a, sizeof(a)))
+			ret = -EFAULT;
+		return ret;
+	}
+
+	if (cmd == LEMNOS_STREAM_IOC_READER) {
+		struct lemnos_stream_reader a;
+
+		if (copy_from_user(&a, uarg, sizeof(a)))
+			return -EFAULT;
+		mutex_lock(&s->ctl);
+		ret = s->dead ? -ENODEV : s->fault ? s->fault : lem_stream_reader_add(s, &a);
 		mutex_unlock(&s->ctl);
 		if (!ret && copy_to_user(uarg, &a, sizeof(a)))
 			ret = -EFAULT;
@@ -1496,6 +1663,8 @@ static void lem_stream_free(struct lem_stream *s)
 		for (u32 i = 0; s->own && i < s->buffers; i++)
 			lem_region_unmap(&s->own[i]);
 	}
+	for (u32 r = 0; r < LEMNOS_STREAM_MAX_READERS; r++)
+		lem_reader_release(&s->reader[r]);
 	kvfree(s->own);
 	kvfree(s->queue);
 	kvfree(s->buf);
@@ -1602,6 +1771,8 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	BUILD_BUG_ON(IS_ENABLED(CONFIG_CPU_BIG_ENDIAN));
 	BUILD_BUG_ON(sizeof(struct lemnos_stream_job) % 8);
 	BUILD_BUG_ON(LEM_SHM_ENTRY_BYTES % 8 || LEM_SHM_SLOT_WORDS != 9);
+	BUILD_BUG_ON(sizeof(struct lemnos_stream_reader) != 24);
+	BUILD_BUG_ON(LEMNOS_STREAM_MAX_READERS != LEM_POOL_READERS);
 
 	ret = lem_stream_check_layout(c);
 	if (ret)
@@ -1633,6 +1804,7 @@ static long lem_stream_create_with(struct device *dev, struct lemnos_stream_crea
 	s->job_bytes = c->job_bytes;
 	s->stride = ALIGN((u64)c->buffer_bytes, LEMNOS_STREAM_BUFFER_ALIGN);
 	s->shm = c->flags & LEMNOS_STREAM_CREATE_SHM;
+	s->newest = U32_MAX;
 	s->job_words = 1 + DIV_ROUND_UP(s->job_bytes, 8);
 	if (s->shm) {
 		size_t control;

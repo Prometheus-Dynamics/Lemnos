@@ -43,6 +43,20 @@ struct TestSource {
 }
 pod!(TestSource);
 
+/// `struct lemnos_stream_reader`: the marks page in, the slot out.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Reader {
+    fd: i32,
+    slot: u32,
+    max_held: u32,
+    reserved: u32,
+    max_hold_ns: u64,
+}
+pod!(Reader);
+
+const READER: Ioctl<Reader> = Ioctl::new(iowr::<Reader>(TYPE, 0x87), "LEMNOS_STREAM_IOC_READER");
+
 const CREATE_REQ: Ioctl<Create> =
     Ioctl::new(iowr::<Create>(TYPE, 0x80), "LEMNOS_IOC_STREAM_CREATE");
 const TEST_SOURCE: Ioctl<TestSource> = Ioctl::new(
@@ -114,4 +128,33 @@ pub fn create(node: BorrowedFd<'_>, spec: &Spec<'_>) -> io::Result<Stream> {
 pub fn test_source(stream: BorrowedFd<'_>, period_us: u32, frames: u32) -> io::Result<()> {
     let mut arg = TestSource { period_us, frames };
     TEST_SOURCE.call(stream, &mut arg).map(|_| ())
+}
+
+/// Gives a stream's module a reader's marks page: a sealed memfd in the layout of
+/// `shm_ring_holds::Marks` (its read-only descriptor, `Marks::page_fd`). The module holds every
+/// buffer the page marks, and returns the reader's slot, which the reader reports with
+/// `Marks::set_slot`. `max_held` is what the reader may hold at once, zero for no limit.
+pub fn add_reader(stream: BorrowedFd<'_>, marks: BorrowedFd<'_>, max_held: u32) -> io::Result<u32> {
+    let mut arg = Reader {
+        fd: marks.as_raw_fd(),
+        slot: 0,
+        max_held,
+        reserved: 0,
+        max_hold_ns: 0,
+    };
+    READER.call(stream, &mut arg)?;
+    Ok(arg.slot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Reader;
+
+    /// The C struct is 24 bytes with the same offsets; `kernel/lemnos_stream.c` asserts its size.
+    #[test]
+    fn the_reader_struct_is_the_modules() {
+        assert_eq!(std::mem::size_of::<Reader>(), 24);
+        assert_eq!(std::mem::offset_of!(Reader, slot), 4);
+        assert_eq!(std::mem::offset_of!(Reader, max_hold_ns), 16);
+    }
 }

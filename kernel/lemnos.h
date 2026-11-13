@@ -280,8 +280,9 @@ struct lemnos_claim {
  * LEMNOS_RING_* layout: one field, one sample per frame, each sample's entry
  * naming its buffer and ticket (shm/ring-buffers/src/entry.rs). The pool page
  * (shm/ring-buffers/src/page.rs) follows the ring in the mapping, then the
- * returns and jobs words. Returns and jobs are still the old words for now.
- * Needs frame_slots of at least 2.
+ * returns and jobs words. Returns are not read in this form: a buffer goes back
+ * when no reader holds it, from the reader's marks page (LEMNOS_STREAM_IOC_READER).
+ * Jobs are still the old words for now. Needs frame_slots of at least 2.
  */
 #define LEMNOS_STREAM_CREATE_SHM	(1u << 1)
 
@@ -334,6 +335,25 @@ struct lemnos_stream_buffer {
 	__u64 size;		/* out: bytes of it the block may reach: buffer_bytes */
 };
 
+/*
+ * LEMNOS_STREAM_IOC_READER, on a stream made with LEMNOS_STREAM_CREATE_SHM: gives
+ * the module a reader's marks page (shm/ring-holds/src/marks.rs). The module
+ * pins the page and reads it read-only; it never writes it. A buffer is held
+ * while any reader marks it, and the module reuses it only when none does. The
+ * page must be a sealed memfd (F_SEAL_SHRINK and F_SEAL_GROW) of at least
+ * 8 * (1 + 2 * buffers) bytes. The reader table is fixed at LEMNOS_STREAM_MAX_READERS
+ * for the stream's life; a reader's page is released when the stream is.
+ */
+#define LEMNOS_STREAM_MAX_READERS	64u
+
+struct lemnos_stream_reader {
+	__s32 fd;		/* in: the marks page, a memfd */
+	__u32 slot;		/* out: the reader slot the module gave it, 0 to 63 */
+	__u32 max_held;		/* in: buffers it may hold at once; 0 for no limit */
+	__u32 reserved;		/* in: zero */
+	__u64 max_hold_ns;	/* in: how long one hold may last; zero until the cut-off lands */
+};
+
 struct lemnos_stream_status {
 	__u32 state;		/* LEMNOS_RING_STATE_*, held in the kernel */
 	__s32 fault;		/* the errno that ended it, or 0 */
@@ -358,6 +378,7 @@ struct lemnos_stream_test_source {
 #define LEMNOS_STREAM_IOC_STATUS       _IOR('L', 0x84, struct lemnos_stream_status)
 #define LEMNOS_STREAM_IOC_TEST_SOURCE  _IOW('L', 0x85, struct lemnos_stream_test_source)
 #define LEMNOS_STREAM_IOC_BUFFER       _IOWR('L', 0x86, struct lemnos_stream_buffer)
+#define LEMNOS_STREAM_IOC_READER       _IOWR('L', 0x87, struct lemnos_stream_reader)
 
 #define LEMNOS_BUS_MAX_SEGMENTS 16
 

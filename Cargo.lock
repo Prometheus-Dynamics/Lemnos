@@ -1859,6 +1859,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-shm-holds-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-linux-sys",
+ "shm-ring",
+ "shm-ring-buffers",
+ "shm-ring-holds",
+]
+
+[[package]]
 name = "lemnos-shm-ring-check"
 version = "2.0.1-dev"
 dependencies = [
