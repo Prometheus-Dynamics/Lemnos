@@ -578,6 +578,14 @@ until the run itself ends. The later protocol revision closes that (`ORION-R2 (C
 Not renewed: the bridge's own housekeeping (its publishing of the hello document, its ticks), and Orion's
 own traffic to the caller (its topic subscriptions and its pings), which the bridge does not see.
 
+**The note of a lease's end.** The first reply the bridge makes to a caller after its lease ended is served
+normally, on a fresh connection, and its `detail` begins with `lease-ended: holds released` (the note, given
+once per expiry). The rest of `detail` is free text, as it was: a client matches the prefix `lease-ended:`
+and reads the remainder as it reads any detail. A reply carries the note when the caller's run is answered
+(its end or cancel included), so a run that began after the drop carries it on its reply. The bridge
+remembers at most 64 callers whose note is still due; the oldest is forgotten first. A caller that comes
+back after that sees no note, and `leases.ended` still counts the drop.
+
 **The lease is readable.** While the lease is on, the hello document carries `lease.seconds` (the lease
 in whole seconds, so no client hard-codes it) and `leases.ended` (how many callers' leases have ended
 since the bridge started), and the describe reply's device record carries `lease_seconds`. With

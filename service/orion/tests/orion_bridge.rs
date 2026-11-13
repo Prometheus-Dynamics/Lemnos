@@ -1367,12 +1367,11 @@ fn a_dead_callers_idle_holds_are_released_within_its_lease() {
     );
 }
 
-/// What a dropped caller sees on its next request: the request is served on a fresh connection, its
-/// holds are gone, and the reply says nothing of the drop (the outcome is `Succeeded`, the output is
-/// the new state and the detail is empty). The only sign is the hello document's `leases.ended`.
-/// The next reply after a drop is the one the note of a lease's end is to go on (see docs/daemon.md).
+/// A dropped caller is told once: its first reply after the lease ended is served normally, on a fresh
+/// connection, with its holds gone, and its `detail` begins with the note `lease-ended:`. The reply
+/// after it carries no note. The hello document's `leases.ended` counts the drop for everyone.
 #[test]
-fn a_dropped_callers_next_reply_says_nothing_of_its_dropped_holds() {
+fn a_dropped_caller_is_told_once_by_the_note_on_its_next_reply() {
     let dir = dir("lease-dropped-reply");
     let (board, _logic, _service, _bridge, dashboard) = start_tracked_leased(&dir, TEST_LEASE);
     let caller = second_session(&board);
@@ -1380,10 +1379,17 @@ fn a_dropped_callers_next_reply_says_nothing_of_its_dropped_holds() {
     assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
     drop(caller);
     std::thread::sleep(TEST_LEASE * 3);
-    let next = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
-    assert_eq!(next.outcome, Outcome::Succeeded, "{next:?}");
-    assert_eq!(String::from_utf8(next.output).expect("text"), "0");
-    assert_eq!(next.detail, "", "the reply says the holds were released");
+    let first = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
+    assert_eq!(first.outcome, Outcome::Succeeded, "{first:?}");
+    assert_eq!(String::from_utf8(first.output).expect("text"), "0");
+    assert_eq!(
+        first.detail,
+        lemnos_orion::calls::LEASE_ENDED_NOTE,
+        "the first reply after the drop carries the note"
+    );
+    let second = run(&dashboard, "lemnos.tracked.call", "lemnos.tracked", "held");
+    assert_eq!(second.outcome, Outcome::Succeeded, "{second:?}");
+    assert_eq!(second.detail, "", "the note is given once");
     let facts = hello(&dashboard).expect("the hello document");
     assert_eq!(facts.get("leases.ended").map(String::as_str), Some("1"));
 }
