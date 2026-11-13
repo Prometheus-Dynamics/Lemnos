@@ -16,6 +16,8 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
         (
             "hello",
             Frame::Hello {
+                layout: LAYOUT_HASH,
+                lemnos: LemnosName("1.0.0"),
                 version: 1,
                 name: "tool",
                 events: true,
@@ -24,6 +26,8 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
         (
             "welcome",
             Frame::Welcome {
+                layout: LAYOUT_HASH,
+                lemnos: LemnosName("1.0.0"),
                 version: 1,
                 features: 0,
                 host: "h",
@@ -629,5 +633,220 @@ mod description {
         bytes.extend([1, 0, 0, 0, 0, 0]);
         bytes.extend([14; 64]);
         assert!(decode_description(&bytes).is_err());
+    }
+}
+
+/// The layout hash has to move when any layout moves, and the spec has to state the hash this
+/// build computes. Copies of the frame table and of the constants, each with one change, show the
+/// hash reads every part of a definition.
+#[allow(dead_code, unused_imports)]
+mod layout {
+    use super::*;
+
+    macro_rules! copy_of_table {
+        ($name:ident { $($extra:tt)* }) => {
+            mod $name {
+                use lemnos_core::{Decode, Encode, Reader, Writer};
+
+                use super::super::super::{Build, LemnosName, WireError};
+                use super::super::super::hash;
+
+                frames! {
+                    1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool $($extra)* }
+                    2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
+                }
+            }
+        };
+    }
+
+    copy_of_table!(same {});
+    copy_of_table!(added { , extra: u8 });
+
+    mod renamed {
+        use lemnos_core::{Decode, Encode, Reader, Writer};
+
+        use super::super::super::{Build, LemnosName, WireError};
+
+        frames! {
+            1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u16, title: &'a str, events: bool }
+            2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
+        }
+    }
+
+    mod retyped {
+        use lemnos_core::{Decode, Encode, Reader, Writer};
+
+        use super::super::super::{Build, LemnosName, WireError};
+
+        frames! {
+            1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u32, name: &'a str, events: bool }
+            2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
+        }
+    }
+
+    mod one_constant {
+        constants! {
+            pub const LIMIT: u32 = 1;
+        }
+    }
+
+    mod another_constant {
+        constants! {
+            pub const LIMIT: u32 = 2;
+        }
+    }
+
+    #[test]
+    fn the_table_hash_is_the_same_for_the_same_definition() {
+        assert_eq!(
+            same::Frame::fold_frames(hash::OFFSET),
+            same::Frame::fold_frames(hash::OFFSET)
+        );
+        assert_ne!(
+            same::Frame::fold_frames(hash::OFFSET),
+            Frame::fold_frames(hash::OFFSET),
+            "the copy is smaller than the real table, so it must hash differently"
+        );
+    }
+
+    #[test]
+    fn a_field_added_renamed_or_retyped_moves_the_hash() {
+        let before = same::Frame::fold_frames(hash::OFFSET);
+        assert_ne!(before, added::Frame::fold_frames(hash::OFFSET));
+        assert_ne!(before, renamed::Frame::fold_frames(hash::OFFSET));
+        assert_ne!(before, retyped::Frame::fold_frames(hash::OFFSET));
+    }
+
+    #[test]
+    fn a_constant_that_changes_moves_the_hash() {
+        assert_ne!(
+            one_constant::fold_constants(hash::OFFSET),
+            another_constant::fold_constants(hash::OFFSET)
+        );
+    }
+
+    #[test]
+    fn the_real_hash_is_built_from_every_table_and_constant() {
+        // Each part alone, folded in the order LAYOUT_HASH uses, must agree with it.
+        let mut hash = hash::OFFSET;
+        hash = fold_constants(hash);
+        hash = feature::fold_constants(hash);
+        hash = state::fold_constants(hash);
+        hash = health::fold_constants(hash);
+        hash = package_mode::fold_constants(hash);
+        hash = Frame::fold_frames(hash);
+        hash = crate::ring::fold_constants(hash);
+        hash = crate::ring::offsets::fold_constants(hash);
+        assert_eq!(hash, LAYOUT_HASH);
+    }
+
+    #[test]
+    fn the_wire_fold_and_the_core_fold_are_the_same_function() {
+        for value in [0, 1, u64::MAX, 0x0123_4567_89ab_cdef] {
+            assert_eq!(
+                lemnos_core::layout::word(hash::OFFSET, value),
+                hash::word(hash::OFFSET, value)
+            );
+        }
+        assert_eq!(
+            lemnos_core::layout::text(hash::OFFSET, "hello"),
+            hash::text(hash::OFFSET, "hello")
+        );
+    }
+
+    #[test]
+    fn the_spec_states_this_builds_layout_hash() {
+        let text = include_str!("../../../../docs/wire.md");
+        let hash = format!("{LAYOUT_HASH:#018x}");
+        assert!(
+            text.contains(&hash),
+            "docs/wire.md must state the layout hash {hash}, the one this build computes"
+        );
+    }
+}
+
+/// A handshake is read in one order, whatever the peer is: its layout hash and Lemnos version
+/// first, then the rest. A peer from another revision is refused on the prefix alone.
+mod handshake {
+    use super::*;
+
+    fn frame(kind: u16, prefix: &[u8], tail: &[u8]) -> Vec<u8> {
+        let mut body = kind.to_le_bytes().to_vec();
+        body.extend_from_slice(prefix);
+        body.extend_from_slice(tail);
+        let mut out = (body.len() as u32).to_le_bytes().to_vec();
+        out.extend(body);
+        out
+    }
+
+    fn name(text: &str) -> [u8; NAME_BYTES] {
+        let mut out = [0; NAME_BYTES];
+        out[..text.len()].copy_from_slice(text.as_bytes());
+        out
+    }
+
+    #[test]
+    fn another_layout_is_refused_whatever_follows_its_prefix() {
+        let other = 0x1122_3344_5566_7788u64;
+        let mut prefix = other.to_le_bytes().to_vec();
+        prefix.extend_from_slice(&name("9.9.9"));
+        // Nothing in the tail is a Hello's: it would be malformed if it were read.
+        let bytes = frame(1, &prefix, &[0xff]);
+        assert_eq!(
+            decode(&bytes),
+            Err(WireError::LayoutMismatch(Build {
+                layout: other,
+                name: name("9.9.9"),
+            }))
+        );
+        let Err(WireError::LayoutMismatch(peer)) = decode(&bytes) else {
+            unreachable!()
+        };
+        assert_eq!(peer.lemnos(), "9.9.9");
+        let text = WireError::LayoutMismatch(peer).to_string();
+        assert!(
+            text.contains("9.9.9") && text.contains("0x1122334455667788"),
+            "{text}"
+        );
+        assert!(text.contains("another Lemnos revision"), "{text}");
+    }
+
+    #[test]
+    fn a_welcome_from_another_layout_is_refused_the_same_way() {
+        let mut prefix = 7u64.to_le_bytes().to_vec();
+        prefix.extend_from_slice(&name("old"));
+        let bytes = frame(2, &prefix, &[]);
+        assert!(matches!(
+            decode(&bytes),
+            Err(WireError::LayoutMismatch(peer)) if peer.layout == 7 && peer.lemnos() == "old"
+        ));
+    }
+
+    #[test]
+    fn the_same_layout_reads_on() {
+        let mut prefix = LAYOUT_HASH.to_le_bytes().to_vec();
+        prefix.extend_from_slice(&name(LEMNOS));
+        prefix.extend_from_slice(&VERSION.to_le_bytes());
+        // A Hello's name and events flag follow the prefix.
+        let tail = [4, 0, 0, 0, b'a', b'b', b'c', b'd', 1];
+        let bytes = frame(1, &prefix, &tail);
+        let (back, used) = decode(&bytes).unwrap().unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(
+            back,
+            Frame::Hello {
+                layout: LAYOUT_HASH,
+                lemnos: LemnosName(LEMNOS),
+                version: VERSION,
+                name: "abcd",
+                events: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_short_handshake_is_malformed_not_mismatched() {
+        let bytes = frame(1, &[1, 2, 3], &[]);
+        assert_eq!(decode(&bytes), Err(WireError::Malformed));
     }
 }

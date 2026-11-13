@@ -22,6 +22,7 @@ mod description;
 mod driver;
 mod fixed;
 mod held;
+pub mod layout;
 #[cfg(feature = "std")]
 pub mod package;
 mod resources;

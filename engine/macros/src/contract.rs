@@ -364,6 +364,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 tag: ::lemnos_core::Tag::new(#tag),
                 methods: &[#(#infos),*],
             };
+            const HASH: u64 = ::lemnos_core::layout::contract_hash(&Self::INFO);
         }
 
         impl<__T: ::lemnos_core::Caller> #name for ::lemnos_core::Bound<dyn #name, __T> {

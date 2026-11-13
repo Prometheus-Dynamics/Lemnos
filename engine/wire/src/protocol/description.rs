@@ -47,6 +47,9 @@ pub struct OwnedMethod {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedContract {
     pub tag: String,
+    /// The contract's encoding hash ([`lemnos_core::layout::contract_hash`]): equal on both sides
+    /// when every argument and result type is laid out the same.
+    pub hash: u64,
     pub methods: Vec<OwnedMethod>,
 }
 
@@ -147,6 +150,7 @@ fn decode_shape(from: &mut Reader<'_>, depth: u32) -> Result<OwnedShape> {
 
 fn encode_contract(contract: &ContractInfo, out: &mut Writer<'_>) -> Result<()> {
     contract.tag.as_str().encode(out)?;
+    lemnos_core::layout::contract_hash(contract).encode(out)?;
     (contract.methods.len() as u16).encode(out)?;
     for method in contract.methods {
         method.id.encode(out)?;
@@ -220,6 +224,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
     let mut contracts = Vec::new();
     for _ in 0..u16::decode(from)? {
         let tag = <&str>::decode(from)?.to_string();
+        let hash = u64::decode(from)?;
         let mut methods = Vec::new();
         for _ in 0..u16::decode(from)? {
             let id = u16::decode(from)?;
@@ -241,7 +246,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
                 job: false,
             });
         }
-        contracts.push(OwnedContract { tag, methods });
+        contracts.push(OwnedContract { tag, hash, methods });
     }
     let mut items = Vec::new();
     for _ in 0..u16::decode(from)? {

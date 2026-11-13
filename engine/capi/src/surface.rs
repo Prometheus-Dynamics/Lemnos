@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use lemnos_abi::{AbiVersion, Handle, MessageSink, Slab, Status, guard, layout_hash, write_text};
+use lemnos_abi::{AbiVersion, Handle, MessageSink, Slab, Status, guard, write_text};
 use lemnos_client::JobEvent as ClientJobEvent;
 use lemnos_client::{
     self as client, DeviceDescription, DeviceEntry, DeviceHealth, DeviceState, Error, PackageList,
@@ -84,41 +84,81 @@ pub struct JobEvent {
 pub const JOB_PROGRESS: u32 = 0;
 pub const JOB_DONE: u32 = 1;
 
-pub const LAYOUT: u64 = layout_hash(&[
-    lemnos_abi::LAYOUT_HASH,
-    size_of::<DeviceInfo>() as u64,
-    align_of::<DeviceInfo>() as u64,
-    offset_of!(DeviceInfo, health) as u64,
-    size_of::<Subscription>() as u64,
-    align_of::<Subscription>() as u64,
-    offset_of!(Subscription, period_us) as u64,
-    size_of::<Value>() as u64,
-    align_of::<Value>() as u64,
-    offset_of!(Value, stamp_ns) as u64,
-    size_of::<ItemInfo>() as u64,
-    align_of::<ItemInfo>() as u64,
-    offset_of!(ItemInfo, max) as u64,
-    size_of::<PackageInfo>() as u64,
-    align_of::<PackageInfo>() as u64,
-    offset_of!(PackageInfo, loaded) as u64,
-    size_of::<StreamInfo>() as u64,
-    align_of::<StreamInfo>() as u64,
-    offset_of!(StreamInfo, planes) as u64,
-    size_of::<Frame>() as u64,
-    align_of::<Frame>() as u64,
-    offset_of!(Frame, timestamp_ns) as u64,
-    size_of::<JobEvent>() as u64,
-    align_of::<JobEvent>() as u64,
-    offset_of!(JobEvent, len) as u64,
+/// Size, alignment and the offset of every field named, in the order named: the layout a type of
+/// this surface has. [`LAYOUT`] lists every field of every type it covers; a test checks that
+/// against the declarations, so a field can't be added without moving the hash.
+macro_rules! shape {
+    ($t:ty $(, $field:ident)*) => {
+        [size_of::<$t>() as u64, align_of::<$t>() as u64 $(, offset_of!($t, $field) as u64)*]
+    };
+}
+
+/// FNV-1a over every word of every part, in order: [`lemnos_abi::layout_hash`] over the parts
+/// read as one list.
+const fn fold(parts: &[&[u64]]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut p = 0;
+    while p < parts.len() {
+        let mut i = 0;
+        while i < parts[p].len() {
+            let mut word = parts[p][i];
+            let mut byte = 0;
+            while byte < 8 {
+                hash ^= word & 0xff;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                word >>= 8;
+                byte += 1;
+            }
+            i += 1;
+        }
+        p += 1;
+    }
+    hash
+}
+
+/// The layout hash of this surface's types, with the abi's own.
+pub const LAYOUT: u64 = fold(&[
+    &[lemnos_abi::LAYOUT_HASH],
+    &shape!(DeviceInfo, struct_size, state, health, reserved),
+    &shape!(Subscription, struct_size, reserved, id, period_us),
+    &shape!(Value, struct_size, len, subscription, stamp_ns),
+    &shape!(
+        ItemInfo,
+        struct_size,
+        kind,
+        contract,
+        method,
+        exponent,
+        has_range,
+        min,
+        max
+    ),
+    &shape!(PackageInfo, struct_size, loaded),
+    &shape!(
+        StreamInfo,
+        struct_size,
+        flags,
+        buffers,
+        buffer_bytes,
+        frame_slots,
+        job_slots,
+        job_bytes,
+        planes
+    ),
+    &shape!(
+        Frame,
+        struct_size,
+        buffer,
+        len,
+        reserved,
+        sequence,
+        identity,
+        timestamp_ns
+    ),
+    &shape!(JobEvent, struct_size, kind, job, done, total, status, len),
 ]);
 
-/// `LEMNOS_LAYOUT_HASH` in `include/lemnos.h`. The layouts it hashes hold no
-/// pointers, so it is the same on every target.
-const HEADER_LAYOUT_HASH: u64 = 0xaeea_810d_49ef_c35b;
-const _: () = assert!(
-    LAYOUT == HEADER_LAYOUT_HASH,
-    "update LEMNOS_LAYOUT_HASH in lemnos.h"
-);
+// `LEMNOS_LAYOUT_HASH` in `include/lemnos.h` must equal [`LAYOUT`]: a test reads the header.
 
 /// This surface's version: 1.3.
 pub const VERSION: AbiVersion = AbiVersion::new(1, 3, LAYOUT);

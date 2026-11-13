@@ -3,8 +3,15 @@
 mod common;
 
 use common::FakeHost;
-use lemnos_client::{Incoming, Session};
+use lemnos_client::{Client, Incoming, Session};
+use lemnos_core::{Result, contract};
 use lemnos_measure::test_alloc::{Counting, allocations};
+
+#[contract("example.counter", version = 1)]
+pub trait Counter {
+    #[method(1)]
+    fn add(&mut self, value: u32) -> Result<u32>;
+}
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -51,6 +58,24 @@ fn a_thousand_blocking_calls_allocate_nothing() {
     let ((), count) = allocations(|| {
         for _ in 0..1000 {
             session.call(&mut handle, 1, &args, &mut reply).unwrap();
+        }
+    });
+    assert_eq!(count, 0);
+}
+
+/// A typed client's layout check runs once, when it opens: the calls after it are the same as
+/// the untyped ones, with nothing added per call.
+#[test]
+fn after_a_typed_open_a_thousand_calls_allocate_nothing() {
+    let host = FakeHost::start();
+    let client = Client::connect(&host.path, "t").unwrap();
+    let mut counter = client.open::<dyn Counter>("").unwrap();
+    for _ in 0..10 {
+        counter.add(2).unwrap();
+    }
+    let ((), count) = allocations(|| {
+        for _ in 0..1000 {
+            counter.add(2).unwrap();
         }
     });
     assert_eq!(count, 0);

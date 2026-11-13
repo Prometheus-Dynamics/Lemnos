@@ -1,6 +1,6 @@
 use lemnos_core::Status;
-use lemnos_wire::WireError;
 use lemnos_wire::ring::RingError;
+use lemnos_wire::{LEMNOS, WireError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -10,6 +10,21 @@ pub enum Error {
     Refused { status: Status, text: String },
     /// The service speaks another version of the protocol.
     Version { ours: u16, theirs: u16 },
+    /// The service was built from another Lemnos revision: its wire layout hash is not this
+    /// client's. Nothing after the handshake's prefix was read. The client and the service must
+    /// come from the same revision.
+    LayoutMismatch {
+        ours: u64,
+        theirs: u64,
+        theirs_lemnos: String,
+    },
+    /// The device's description gives contract `contract` another encoding hash than this
+    /// client was built with: an argument or result type differs. Nothing was called.
+    ContractMismatch {
+        contract: String,
+        ours: u64,
+        theirs: u64,
+    },
     /// The service sent something that isn't the protocol.
     Wire(WireError),
     /// The handle predates a reconnect. Open it again.
@@ -42,6 +57,22 @@ impl core::fmt::Display for Error {
                     "protocol {theirs} from the service, this client speaks {ours}"
                 )
             }
+            Self::LayoutMismatch {
+                ours,
+                theirs,
+                theirs_lemnos,
+            } => write!(
+                f,
+                "the service was built from another Lemnos revision (Lemnos {theirs_lemnos}, wire layout {theirs:#018x}); this client is Lemnos {LEMNOS} with wire layout {ours:#018x}. The client and the service must come from the same Lemnos revision"
+            ),
+            Self::ContractMismatch {
+                contract,
+                ours,
+                theirs,
+            } => write!(
+                f,
+                "contract {contract} was built with another encoding (the device's hash {theirs:#018x}, this client's {ours:#018x}): the device and this client must come from the same Lemnos revision"
+            ),
             Self::Wire(error) => write!(f, "{error}"),
             Self::Stale => f.write_str("the handle predates a reconnect"),
             Self::TimedOut => f.write_str("no answer in time"),
@@ -72,6 +103,9 @@ impl From<Error> for Status {
             Error::Disconnected => Status::NO_DEVICE,
             Error::Refused { status, .. } => status,
             Error::Version { .. } => Status::NOT_SUPPORTED,
+            Error::LayoutMismatch { .. } | Error::ContractMismatch { .. } => {
+                Status::VERSION_MISMATCH
+            }
             Error::Wire(_) => Status::IO,
             Error::Stale => Status::AGAIN,
             Error::TimedOut => Status::TIMED_OUT,

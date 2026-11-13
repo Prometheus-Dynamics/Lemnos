@@ -250,6 +250,8 @@ impl RawClient {
             fds: Vec::new(),
         };
         client.send(&Frame::Hello {
+            layout: lemnos_wire::LAYOUT_HASH,
+            lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
             version: VERSION,
             name: "raw",
             events: false,

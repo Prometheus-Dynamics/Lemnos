@@ -142,3 +142,25 @@ fn the_async_form_takes_a_stream_and_frames_arrive() {
     });
     assert_eq!(producer.pop_return().unwrap(), Some((0, 2)));
 }
+
+#[test]
+fn the_async_form_refuses_a_service_from_another_lemnos_revision_at_connect() {
+    let host = FakeHost::start();
+    host.control
+        .welcome_layout
+        .store(0xdead_beef_0bad_f00d, Ordering::SeqCst);
+    block_on(async {
+        let error = AsyncClient::connect(&host.path, "t").await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::LayoutMismatch {
+                    theirs: 0xdead_beef_0bad_f00d,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(Status::from(error), Status::VERSION_MISMATCH);
+    });
+}

@@ -9,8 +9,8 @@ use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::{
-    Appended, Frame, MAX_FRAME, MAX_PLANES, PLANE_LENGTH_BYTES, VERSION, decode,
-    encode_description, feature, handle_descriptors, package_mode,
+    Appended, Frame, LAYOUT_HASH, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PLANE_LENGTH_BYTES,
+    VERSION, WireError, decode, encode_description, feature, handle_descriptors, package_mode,
 };
 
 use crate::Core;
@@ -86,6 +86,18 @@ impl Client {
         loop {
             match decode(&buf[self.start..self.end]) {
                 Ok(None) => return true,
+                Err(WireError::LayoutMismatch(_)) => {
+                    // Built from another Lemnos revision: say which, then close. The peer checks
+                    // our layout in the Welcome it gets, before anything else in it.
+                    self.conn.answer(&Frame::Welcome {
+                        layout: LAYOUT_HASH,
+                        lemnos: LemnosName(LEMNOS),
+                        version: VERSION,
+                        features: 0,
+                        host: "",
+                    });
+                    return false;
+                }
                 Err(_) => return false,
                 Ok(Some((frame, used))) => {
                     self.start += used;
@@ -111,6 +123,7 @@ impl Client {
             version,
             name: _,
             events,
+            ..
         } = frame
         {
             return self.hello(version, events);
@@ -169,6 +182,8 @@ impl Client {
             self.conn.events.store(events, Ordering::Relaxed);
         }
         self.conn.answer(&Frame::Welcome {
+            layout: LAYOUT_HASH,
+            lemnos: LemnosName(LEMNOS),
             version: VERSION,
             features: feature::STREAM_HANDLES | feature::PACKAGES | feature::JOBS,
             host: &self.core.name,

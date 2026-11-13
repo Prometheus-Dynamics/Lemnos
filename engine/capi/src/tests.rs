@@ -169,3 +169,128 @@ fn the_job_event_kinds_match() {
     assert_eq!(define("LEMNOS_JOB_PROGRESS"), JOB_PROGRESS.to_string());
     assert_eq!(define("LEMNOS_JOB_DONE"), JOB_DONE.to_string());
 }
+
+/// A service from another Lemnos revision: the C surface refuses at connect with
+/// VERSION_MISMATCH, and its message names both layouts.
+#[test]
+fn a_service_from_another_lemnos_revision_is_refused_through_the_c_surface() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::Mutex;
+
+    use lemnos_wire::{Frame, LemnosName, VERSION, append, decode};
+
+    static TEXT: Mutex<String> = Mutex::new(String::new());
+    extern "C" fn collect(_: *mut core::ffi::c_void, text: *const u8, len: usize) {
+        // SAFETY: the surface passes `len` bytes of UTF-8, valid for this call.
+        let bytes = unsafe { core::slice::from_raw_parts(text, len) };
+        TEXT.lock()
+            .unwrap()
+            .push_str(core::str::from_utf8(bytes).unwrap());
+    }
+
+    let dir = std::env::temp_dir().join(format!("lemnos-capi-layout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("svc.sock");
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let served = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = vec![0u8; 4096];
+        let mut got = 0;
+        loop {
+            let n = stream.read(&mut buf[got..]).unwrap();
+            got += n;
+            if matches!(decode(&buf[..got]), Ok(Some(_))) || n == 0 {
+                break;
+            }
+        }
+        let mut out = Vec::new();
+        append(
+            &Frame::Welcome {
+                layout: 0xdead_beef_0bad_f00d,
+                lemnos: LemnosName("9.9.9"),
+                version: VERSION,
+                features: 0,
+                host: "other",
+            },
+            &mut out,
+        )
+        .unwrap();
+        stream.write_all(&out).unwrap();
+    });
+
+    let socket = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    let name = std::ffi::CString::new("c").unwrap();
+    let mut handle = lemnos_abi::Handle::NULL;
+    let sink = lemnos_abi::MessageSink {
+        context: core::ptr::null_mut(),
+        write: Some(collect),
+    };
+    // SAFETY: both strings are NUL-terminated and live through the call; `handle` is valid for a
+    // write.
+    let status = unsafe {
+        crate::ffi::lemnos_client_open(socket.as_ptr(), name.as_ptr(), 2_000, &mut handle, sink)
+    };
+    served.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status, lemnos_abi::Status::VERSION_MISMATCH);
+    let text = TEXT.lock().unwrap().clone();
+    assert!(text.contains("0xdeadbeef0badf00d"), "{text}");
+    assert!(
+        text.contains(&format!("{:#018x}", lemnos_wire::LAYOUT_HASH)),
+        "{text}"
+    );
+    assert!(text.contains("9.9.9"), "{text}");
+    assert!(text.contains("same Lemnos revision"), "{text}");
+}
+
+/// The named fields of `struct name` in `source`, in order: the ones its declaration gives in
+/// named form. `None` when it has no such declaration.
+fn named_fields(source: &str, name: &str) -> Option<Vec<String>> {
+    let start = source.find(&format!("pub struct {name} {{"))?;
+    let body = &source[start..];
+    let end = body.find("\n}")?;
+    Some(
+        body[..end]
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub ")?;
+                let (field, _) = rest.split_once(':')?;
+                Some(field.trim().to_string())
+            })
+            .collect(),
+    )
+}
+
+/// Every `shape!(Type, field, ...)` in `layout`, as its type and its fields.
+fn listed_shapes(layout: &str) -> Vec<(String, Vec<String>)> {
+    layout
+        .split("shape!(")
+        .skip(1)
+        .map(|call| {
+            let inside = &call[..call.find(')').unwrap()];
+            let mut parts = inside.split(',').map(str::trim).filter(|p| !p.is_empty());
+            let name = parts.next().unwrap().to_string();
+            (name, parts.map(str::to_string).collect())
+        })
+        .collect()
+}
+
+#[test]
+fn every_field_of_a_hashed_type_is_in_the_layout() {
+    let surface = include_str!("surface.rs");
+    let streams = include_str!("surface/streams.rs");
+    let sources = format!("{surface}\n{streams}");
+    let shapes = listed_shapes(surface);
+    assert!(shapes.len() >= 8, "the layout lists its types: {shapes:?}");
+    for (name, listed) in shapes {
+        let declared = named_fields(&sources, &name)
+            .unwrap_or_else(|| panic!("{name} is hashed but not declared here"));
+        assert_eq!(
+            listed, declared,
+            "{name}: the layout hash must list every field, in order"
+        );
+    }
+}

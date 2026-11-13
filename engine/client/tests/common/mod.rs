@@ -51,6 +51,10 @@ pub struct Control {
     pub package_mode: AtomicU32,
     /// Every job cancel asked for.
     pub cancels: Mutex<Vec<u64>>,
+    /// The layout hash Welcome carries. 0 means this build's.
+    pub welcome_layout: AtomicU64,
+    /// The contracts Describe answers with. `None` means one contract, `a/1`.
+    pub provides: Mutex<Option<&'static [lemnos_core::ContractInfo]>>,
 }
 
 pub struct FakeHost {
@@ -165,6 +169,11 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     let answer = if wanted == 0 { version } else { wanted };
                     send(
                         Frame::Welcome {
+                            layout: match control.welcome_layout.load(Ordering::SeqCst) {
+                                0 => lemnos_wire::LAYOUT_HASH,
+                                other => other,
+                            },
+                            lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
                             version: answer,
                             features: control.features.load(Ordering::SeqCst),
                             host: "fake",
@@ -266,10 +275,12 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             job: false,
                         }],
                     };
+                    let provided: &'static [lemnos_core::ContractInfo] =
+                        control.provides.lock().unwrap().unwrap_or(&[INFO]);
                     let manifest = Manifest {
                         name: "d",
                         needs: &[],
-                        provides: &[INFO],
+                        provides: provided,
                     };
                     let mut bytes = [0; 256];
                     let n = encode_description(&manifest, &Description::new(), &mut bytes).unwrap();
