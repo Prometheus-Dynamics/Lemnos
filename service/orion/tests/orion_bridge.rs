@@ -263,7 +263,14 @@ fn devices_are_resources_their_values_and_status_are_topics() {
             .labels
             .contains(&("lemnos.control.target".to_owned(), "u32".to_owned()))
     );
-    assert_eq!(thing.topics, ["lemnos.thing.values", "lemnos.thing.status"]);
+    assert_eq!(
+        thing.topics,
+        [
+            "lemnos.thing.values",
+            "lemnos.thing.status",
+            "lemnos.thing.description"
+        ]
+    );
     assert_eq!(
         thing.actions,
         [
@@ -538,14 +545,14 @@ fn a_device_that_starts_running_later_is_described_then() {
     assert_eq!(off.state, ResourceState::Pending);
     assert_eq!(
         off.topics,
-        ["lemnos.thing.status"],
+        ["lemnos.thing.status", "lemnos.thing.description"],
         "nothing described, no values"
     );
 
     // Switched on, it is described, and its values and controls appear.
     client.set_power(counter.index, true).expect("on");
     let on = wait_for("the counter described", || {
-        resource(&dashboard, "lemnos.thing").filter(|found| found.topics.len() == 2)
+        resource(&dashboard, "lemnos.thing").filter(|found| found.topics.len() == 3)
     });
     assert_eq!(on.state, ResourceState::Ready);
     assert!(on.actions.contains(&"lemnos.thing.set".to_owned()));

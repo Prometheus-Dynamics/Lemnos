@@ -5,6 +5,7 @@
 //! WS2812 strip on a second simulated SPI. The methods none of these can host are named in the
 //! bridge's docs as covered by the text path only.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
@@ -26,6 +27,7 @@ use lemnos_sim::{Layout, SimBoard};
 use lemnosd::{Config as LemnosdConfig, Service};
 use orion::actions::{ActionCall, Finished, Outcome, Target};
 use orion::provider::Found;
+use orion::topics::{FieldId, Subscriber};
 use orion::types::Error as Refusal;
 use orion::{Address, ClientError, Orion};
 use orion_node_app::{Node, NodeSettings};
@@ -237,6 +239,52 @@ fn board_text(dir: &Path) -> String {
     )
 }
 
+/// The walk board, started: lemnosd on it, the bridge, and Orion's dashboard once every device
+/// is a resource. `sim` is the simulated board lemnosd runs on, kept by the caller to change it.
+struct Walk {
+    _board: Board,
+    _logic: Logic,
+    _service: Service,
+    _bridge: Bridge,
+    dashboard: Orion,
+}
+
+fn start_walk(dir: &Path, sim: SimBoard) -> Walk {
+    let lemnosd = dir.join("lemnosd.sock");
+    let board = Board::start_for_node(dir);
+    let logic = Logic::start(dir);
+    let service = Service::start(LemnosdConfig {
+        socket: lemnosd.clone(),
+        name: "t".to_string(),
+        board: parse(&board_text(dir)).expect("board"),
+        drivers: vec![
+            entry::<FakeAccelerometer>(),
+            entry::<FakeGyroscope>(),
+            entry::<Identity>(),
+            entry::<SystemSlots>(),
+            entry::<RawBus>(),
+            entry::<UsbGadget>(),
+            entry::<Ws2812>(),
+            entry::<Indicator>(),
+        ],
+        backend: Box::new(sim),
+        options: HostOptions::default(),
+    })
+    .expect("lemnosd");
+    let bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    for device in WAIT_NAMES {
+        wait_for(device, || resource(&dashboard, &format!("lemnos.{device}")));
+    }
+    Walk {
+        _board: board,
+        _logic: logic,
+        _service: service,
+        _bridge: bridge,
+        dashboard,
+    }
+}
+
 /// The text of a run that succeeded.
 fn said(finished: Finished) -> String {
     assert_eq!(finished.outcome, Outcome::Succeeded, "{finished:?}");
@@ -256,7 +304,6 @@ fn refused(finished: Finished) -> String {
 #[test]
 fn the_out_buffer_methods_the_simulator_hosts_answer_through_the_bridge() {
     let dir = dir("walk");
-    let lemnosd = dir.join("lemnosd.sock");
     std::fs::write(dir.join("cpuinfo"), CPUINFO).expect("cpuinfo");
     std::fs::create_dir_all(dir.join("data/slots")).expect("slots");
     std::fs::create_dir_all(dir.join("data/board/slots")).expect("marker");
@@ -281,34 +328,11 @@ fn the_out_buffer_methods_the_simulator_hosts_answer_through_the_bridge() {
     sim.add_usb_function("usb");
     sim.add_stream("data", 8);
 
-    let board = Board::start_for_node(&dir);
-    let _logic = Logic::start(&dir);
-    let _service = Service::start(LemnosdConfig {
-        socket: lemnosd.clone(),
-        name: "t".to_string(),
-        board: parse(&board_text(&dir)).expect("board"),
-        drivers: vec![
-            entry::<FakeAccelerometer>(),
-            entry::<FakeGyroscope>(),
-            entry::<Identity>(),
-            entry::<SystemSlots>(),
-            entry::<RawBus>(),
-            entry::<UsbGadget>(),
-            entry::<Ws2812>(),
-            entry::<Indicator>(),
-        ],
-        backend: Box::new(sim),
-        options: HostOptions::default(),
-    })
-    .expect("lemnosd");
-    let _bridge = start_bridge(&lemnosd, board.socket(), None);
-    let dashboard = dashboard(board.socket());
-    for device in WAIT_NAMES {
-        wait_for(device, || resource(&dashboard, &format!("lemnos.{device}")));
-    }
+    let walk = start_walk(&dir, sim);
+    let dashboard = &walk.dashboard;
     let call = |device: &str, words: &str| {
         run_once_said(
-            &dashboard,
+            dashboard,
             &format!("lemnos.{device}.call"),
             &format!("lemnos.{device}"),
             words,
@@ -350,4 +374,153 @@ fn the_out_buffer_methods_the_simulator_hosts_answer_through_the_bridge() {
 
     // indicator: its states, as the contract lists them.
     assert_eq!(said(call("lights", "states")), STATES.join(","));
+}
+
+/// The payload of a topic's newest sample of `field`, if it has one.
+fn latest(subscriber: &mut Subscriber, field: u16) -> Option<Vec<u8>> {
+    let _ = subscriber.wait(Duration::from_millis(50));
+    subscriber
+        .latest(FieldId(field))
+        .map(|sample| sample.payload.to_vec())
+}
+
+/// A generation counter's latest value, once the topic has one.
+fn generation(subscriber: &mut Subscriber) -> Option<i64> {
+    let bytes = latest(subscriber, 0)?;
+    Some(i64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+/// The description generation of the fake accelerometer moves by exactly one each time its state
+/// changes (off, then on through the bridge's `power` action), and the device-set generation and
+/// the description generation hold still while nothing changes.
+#[test]
+fn a_description_generation_moves_once_per_change_and_holds_while_nothing_changes() {
+    let dir = dir("generation");
+    std::fs::write(dir.join("cpuinfo"), CPUINFO).expect("cpuinfo");
+    std::fs::create_dir_all(dir.join("data/slots")).expect("slots");
+    std::fs::create_dir_all(dir.join("data/board/slots")).expect("marker");
+    std::fs::create_dir_all(dir.join("boot/slots")).expect("boot slots");
+    let walk = start_walk(&dir, SimBoard::new());
+    let dashboard = &walk.dashboard;
+    let mut described = dashboard
+        .subscribe("lemnos.imu.description")
+        .expect("subscribe");
+    let mut set = dashboard.subscribe("lemnos.devices").expect("subscribe");
+    let first = wait_for("the description generation", || generation(&mut described));
+    let devices = wait_for("the device-set generation", || generation(&mut set));
+    assert_eq!(first, 1, "a device's first generation");
+
+    // Steady: nothing changes, so nothing moves.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        generation(&mut described),
+        Some(first),
+        "moved while steady"
+    );
+    assert_eq!(
+        generation(&mut set),
+        Some(devices),
+        "the device set moved while steady"
+    );
+
+    for (word, expected) in [("off", first + 1), ("on", first + 2)] {
+        let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", word);
+        assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
+        wait_for(&format!("the generation after {word}"), || {
+            (generation(&mut described) == Some(expected)).then_some(())
+        });
+        std::thread::sleep(Duration::from_millis(1000));
+        assert_eq!(
+            generation(&mut described),
+            Some(expected),
+            "moved more than once for {word}"
+        );
+    }
+    assert_eq!(
+        generation(&mut set),
+        Some(devices),
+        "the device set did not change"
+    );
+}
+
+/// A clock for a host the test runs itself: nanoseconds since it was made.
+struct Elapsed(Instant);
+
+impl lemnos_core::HostClock for Elapsed {
+    fn now_ns(&self) -> u64 {
+        self.0.elapsed().as_nanos() as u64
+    }
+}
+
+/// The size of each device's description on the walk board, as lemnosd frames it: the same
+/// `encode_description` of its manifest, description and identity, measured here with the same
+/// drivers. A device that is not running has no description to measure (`describe` refuses it),
+/// and is printed as such. Every measured description fits the bridge's reply bound.
+#[test]
+fn the_description_of_each_device_on_the_walk_board_is_measured_against_the_bound() {
+    let dir = dir("size");
+    std::fs::write(dir.join("cpuinfo"), CPUINFO).expect("cpuinfo");
+    std::fs::create_dir_all(dir.join("data/slots")).expect("slots");
+    std::fs::create_dir_all(dir.join("data/board/slots")).expect("marker");
+    std::fs::create_dir_all(dir.join("boot/slots")).expect("boot slots");
+    let sim = SimBoard::new();
+    let i2c = sim.add_i2c("i2c");
+    i2c.attach(0x50, Layout::Bytes);
+    sim.add_spi("spi");
+    sim.add_spi("strip-spi");
+    sim.add_uart("uart");
+    sim.add_usb_function("usb");
+    sim.add_stream("data", 8);
+    let board = parse(&board_text(&dir)).expect("board");
+    let drivers = [
+        entry::<FakeAccelerometer>(),
+        entry::<FakeGyroscope>(),
+        entry::<Identity>(),
+        entry::<SystemSlots>(),
+        entry::<RawBus>(),
+        entry::<UsbGadget>(),
+        entry::<Ws2812>(),
+        entry::<Indicator>(),
+    ];
+    let host = lemnos_host::Host::start(
+        &board,
+        &drivers,
+        Box::new(sim),
+        Arc::new(Elapsed(Instant::now())),
+        HostOptions::default(),
+    )
+    .expect("host");
+    let mut largest = (0usize, String::new());
+    for info in host.devices() {
+        let Ok(description) = host.describe(info.index) else {
+            let _ = writeln!(
+                std::io::stderr(),
+                "description {}: not running, not measured",
+                info.id
+            );
+            continue;
+        };
+        let manifest = host.manifest(info.index).expect("manifest");
+        let identity = lemnos_wire::Identity {
+            label: &info.label,
+            bus: info.bus.as_deref().unwrap_or(""),
+            state: 0,
+            reason: "",
+        };
+        let mut bytes = vec![0; 1 << 20];
+        let len = lemnos_wire::encode_description(&manifest, &description, &identity, &mut bytes)
+            .expect("encode");
+        let _ = writeln!(std::io::stderr(), "description {}: {len} bytes", info.id);
+        assert!(len <= calls::ORION_REPLY_MAX as usize, "{}: {len}", info.id);
+        if len > largest.0 {
+            largest = (len, info.id.clone());
+        }
+    }
+    let _ = writeln!(
+        std::io::stderr(),
+        "largest description: {} at {} bytes",
+        largest.1,
+        largest.0
+    );
+    assert!(largest.0 > 0, "no device on the walk board is running");
 }

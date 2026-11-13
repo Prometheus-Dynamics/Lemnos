@@ -404,6 +404,63 @@ device describes.
 | its events | the topic `lemnos.<device>.status`: `state`, `health` and `reason` as text, as `lemnos-ctl list` names them |
 | `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. Programs on the board and operators granted them may run them |
 
+**Topics and how each is read.** Every topic the bridge publishes is a state: its newest sample is what
+matters, and it is current until the bridge publishes a change or withdraws the topic. None is an
+event today (no topic carries each job progress or frame; progress goes with the run). Each
+state is a latest-value topic (history 2). The table is in code as `publish::CLASSES`.
+
+| topic | kind | expiry | history | what it says, and why it is current until changed |
+|---|---|---|---|---|
+| `lemnos.<device>.values` | state | zero | 2 | a device's readings: published as each changes; withdrawn with the device |
+| `lemnos.<device>.status` | state | zero | 2 | `state`, `health`, `reason`: published as each changes; `gone` when lemnosd stops listing the device |
+| `lemnos.<device>.description` | state, a generation | zero | 2 | the device's description generation (an `int`): it moves when what `describe` says of the device changes (its state or reason, which the description carries). A client that sees it move asks `describe` again |
+| `lemnos.devices` | state, a generation | zero | 2 | the device set's generation (an `int`): it moves when a device comes or goes |
+| `hello.<fact>` | state | zero | 2 | a board fact: published when it changes; withdrawn when it goes or the session ends |
+
+**Expiry.** Every state is declared with an expiry of zero, which is "valid until changed". The
+device topics are declared through Orion's resource `topic()`, which sets zero whatever is asked, so
+zero is the only expiry a device topic can have at this rev. That is deliberate: the bridge publishes
+each change and withdraws the topic when the device goes, so a sample is never served as current
+after it went stale. The facts are declared directly and get zero for the same reason.
+
+**Late subscribers.** A subscriber that arrives after a state's last sample may miss it until Orion
+sends the last value on subscribe (a later Orion rev, `on_subscribe`). Until then the bridge does not
+republish on a timer. Once Orion has it, the move is setting `on_subscribe = 1` on the state rows
+above and nothing else.
+
+**Description generations.** The generation counts from 1 when a device comes. It moves once for each
+change of the device's state or reason, and not for a change of health alone (the description does not
+carry health). The device set's generation moves once for each change of the set, however many devices
+came or went together. Each is published as a sample on change and when a session starts, and held
+while nothing changes.
+
+**The `hello` facts and offers.** `hello.offers` lists the distinct contract ids that the running
+devices serve, sorted and separated by a space. A consumer grants a board only what `offers` names, so
+it is recomputed as devices start and stop, and the fact is declared again or withdrawn when it
+changes. Each contract id is about 14 bytes, and all 32 shipped contract ids come to 425 bytes; a
+fact's value is held to 1024 bytes (`hello::MAX_VALUE_BYTES`), which keeps every shipped id. (At 256 bytes
+the whole list was dropped on a board with about 19 device contracts.)
+
+**Security.** The bridge has no switch of its own, and no hardware-control capability of its own.
+Setting a settable item and calling a device's method are the device contract's own rights, and the
+bridge admits the device's actions to local callers and to operators only (`publish::POLICY`); the
+bridge never admits anyone else. What the operator's "security on" means for a device is the driver's
+own configuration: for the slots and system-flash drivers, `require_signed` refuses a bundle no trusted
+key signed (off by default). That switch governs installs, not device actions.
+
+**Descriptions.** A device's description (what `describe` returns) is not an out-buffer method, and is
+not duplicated as bridge labels. On the walk board (the largest simulated board: fake accelerometer
+and gyroscope, identity, slots, raw bus, usb gadget, a WS2812 strip and its indicator; eight devices,
+each running) each description measures, with `encode_description` of its manifest, from 178 bytes
+(the indicator) to 764 bytes (the usb gadget), and the largest is 764 bytes. The bridge's bound is
+61440 bytes, so a description on that board is far under it; no paged form is needed for those
+devices. The full-board example's devices need hardware, so their descriptions cannot be measured on
+this machine, and are not measured here. The measurement is `the_description_of_each_device_on_the_walk_board_is_measured_against_the_bound`.
+
+The bridge does not yet serve `describe` through `.call`. Its client decodes a description and keeps no
+bytes of it, and the manifest that re-encodes one is held by lemnosd, so the bridge cannot send the
+frame as it is. A text form of the description, made by lemnosd, is the step that is not built.
+
 **Out-buffer replies through `.call`.** An out-buffer method takes the same optional size word as
 `lemnos-ctl call` (see above). The bridge's default size is 61440 bytes, not the frame limit, and a
 size word above 61440 is refused. Orion's client and comm core take frames of 64 KiB, and the action's

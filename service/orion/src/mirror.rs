@@ -81,6 +81,10 @@ pub struct Changes {
     pub readings: Vec<(u64, usize, Reading, u64)>,
     /// The board's facts now, when they changed: each `hello.<name>` and its value, in order.
     pub hello: Option<Vec<(String, String)>>,
+    /// The device set's generation, when it changed (a device came or went).
+    pub set: Option<u64>,
+    /// `(slot, generation)` of each device whose description changed, its generation now.
+    pub described: Vec<(u64, u64)>,
 }
 
 impl Changes {
@@ -90,6 +94,8 @@ impl Changes {
             && self.status.is_empty()
             && self.readings.is_empty()
             && self.hello.is_none()
+            && self.set.is_none()
+            && self.described.is_empty()
     }
 
     fn clear(&mut self) {
@@ -98,6 +104,8 @@ impl Changes {
         self.status.clear();
         self.readings.clear();
         self.hello = None;
+        self.set = None;
+        self.described.clear();
     }
 }
 
@@ -114,6 +122,10 @@ struct Device {
     spec: DeviceSpec,
     items: Vec<Item>,
     status_dirty: bool,
+    /// Counts each change of what the device's description says (its state and reason, which
+    /// `describe` carries). Starts at 1 when the device comes.
+    generation: u64,
+    generation_dirty: bool,
 }
 
 #[derive(Debug, Default)]
@@ -129,6 +141,15 @@ pub struct Mirror {
     /// The `hello.*` facts now, as [`hello::document`] leaves them.
     hello: Vec<(String, String)>,
     hello_dirty: bool,
+    /// Counts each change of the device set: a device that came or went.
+    set_generation: u64,
+    set_dirty: bool,
+}
+
+/// Whether a change of status changes what `describe` says: its state or its reason. Health is
+/// not in the description, so a change of health alone is not one.
+fn described_moved(held: &Status, new: &Status) -> bool {
+    held.state != new.state || held.reason != new.reason
 }
 
 /// Whether two specs describe the same device, apart from its index and its status: what its
@@ -161,6 +182,10 @@ impl Mirror {
                     if device.spec.status != spec.status {
                         device.status_dirty = true;
                     }
+                    if described_moved(&device.spec.status, &spec.status) {
+                        device.generation += 1;
+                        device.generation_dirty = true;
+                    }
                     device.spec.index = spec.index;
                     device.spec.status = spec.status;
                     kept.push(device);
@@ -171,6 +196,8 @@ impl Mirror {
                     self.added.push(slot);
                     kept.push(Device {
                         slot,
+                        generation: 1,
+                        generation_dirty: true,
                         items: spec
                             .items
                             .iter()
@@ -187,6 +214,10 @@ impl Mirror {
             }
         }
         self.removed.extend(held.iter().map(|d| d.slot));
+        if !self.added.is_empty() || !self.removed.is_empty() {
+            self.set_generation += 1;
+            self.set_dirty = true;
+        }
         self.devices = kept;
         self.identity = identity;
         self.rebuild_hello();
@@ -207,6 +238,11 @@ impl Mirror {
     pub fn snapshot(&mut self) -> Snapshot {
         self.removed.clear();
         self.added.clear();
+        // A session starts with the device set's generation (it is given to `Session::open`), and
+        // with each device's generation published once: the next take carries them all.
+        for device in &mut self.devices {
+            device.generation_dirty = true;
+        }
         (
             self.devices
                 .iter()
@@ -249,6 +285,17 @@ impl Mirror {
             return;
         }
         let moved = status.state != state;
+        if described_moved(
+            status,
+            &Status {
+                state,
+                health,
+                reason: reason.to_owned(),
+            },
+        ) {
+            device.generation += 1;
+            device.generation_dirty = true;
+        }
         status.state = state;
         status.health = health;
         reason.clone_into(&mut status.reason);
@@ -301,7 +348,13 @@ impl Mirror {
         if std::mem::take(&mut self.hello_dirty) {
             into.hello = Some(self.hello.clone());
         }
+        if std::mem::take(&mut self.set_dirty) {
+            into.set = Some(self.set_generation);
+        }
         for device in &mut self.devices {
+            if std::mem::take(&mut device.generation_dirty) {
+                into.described.push((device.slot, device.generation));
+            }
             if std::mem::take(&mut device.status_dirty) {
                 into.status.push((device.slot, device.spec.status.clone()));
             }
@@ -317,6 +370,11 @@ impl Mirror {
 
     pub fn is_empty(&self) -> bool {
         self.devices.is_empty()
+    }
+
+    /// The device set's generation now: what a session starts from.
+    pub fn set_generation(&self) -> u64 {
+        self.set_generation
     }
 }
 
@@ -533,6 +591,52 @@ mod tests {
         let (devices, _) = mirror.snapshot();
         assert_eq!(devices.len(), 1);
         assert!(take(&mut mirror).added.is_empty());
+    }
+
+    #[test]
+    fn the_device_set_generation_moves_once_per_change_of_the_set_and_not_when_steady() {
+        let mut mirror = Mirror::new();
+        assert_eq!(mirror.set_generation(), 0);
+        mirror.set_devices(vec![spec(0, "a", &[]), spec(1, "b", &[])], None);
+        assert_eq!(mirror.set_generation(), 1, "two devices came in one change");
+        assert_eq!(take(&mut mirror).set, Some(1));
+        // The same list again: nothing moved.
+        mirror.set_devices(vec![spec(0, "a", &[]), spec(1, "b", &[])], None);
+        assert_eq!(mirror.set_generation(), 1);
+        assert!(take(&mut mirror).set.is_none());
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        assert_eq!(mirror.set_generation(), 2, "one left");
+        assert_eq!(take(&mut mirror).set, Some(2));
+    }
+
+    #[test]
+    fn a_devices_description_generation_moves_on_its_state_or_reason_and_not_its_health() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        let changes = take(&mut mirror);
+        assert_eq!(
+            changes.described,
+            [(0, 1)],
+            "a new device's first generation"
+        );
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus");
+        assert_eq!(take(&mut mirror).described, [(0, 2)]);
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Ok, "bus gone");
+        assert_eq!(
+            take(&mut mirror).described,
+            [(0, 3)],
+            "the reason is in the description"
+        );
+        mirror.set_status(0, DeviceState::BackingOff, DeviceHealth::Failed, "bus gone");
+        assert!(
+            take(&mut mirror).described.is_empty(),
+            "health is not in the description"
+        );
+        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "bus gone");
+        assert_eq!(take(&mut mirror).described, [(0, 4)]);
+        // Steady: the same status again is not a change.
+        mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "bus gone");
+        assert!(take(&mut mirror).described.is_empty());
     }
 
     #[test]
