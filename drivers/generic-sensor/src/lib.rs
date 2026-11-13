@@ -442,7 +442,7 @@ macro_rules! description_driver {
             }
 
             fn describe(&self, out: &mut Description) {
-                describe($kind, out);
+                describe($kind, &self.sensor, out);
             }
 
             fn health(&self) -> Health {
@@ -464,7 +464,17 @@ macro_rules! description_driver {
 }
 
 /// The items each contract's drivers describe.
-fn describe(kind: Kind, out: &mut Description) {
+fn describe(kind: Kind, sensor: &Sensor, out: &mut Description) {
+    if let Link::I2c { address } = sensor.link {
+        out.set_address(address);
+    }
+    // The three axes of a vector are one value: their items share a group.
+    let group = match kind {
+        Kind::Magnetometer => Some("magnetic_field"),
+        Kind::Accelerometer => Some("acceleration"),
+        Kind::Gyroscope => Some("angular_rate"),
+        _ => None,
+    };
     let items: &[(&str, Option<&'static str>, Unit)] = match kind {
         Kind::Magnetometer => &[
             ("magnetic_field.x", Some("x"), Unit::Tesla),
@@ -490,7 +500,10 @@ fn describe(kind: Kind, out: &mut Description) {
         ],
     };
     for (name, field, unit) in items {
-        let item = Item::value(name, READ).unit(*unit, 0);
+        let mut item = Item::value(name, READ).unit(*unit, 0);
+        if let Some(group) = group {
+            item = item.group(group);
+        }
         out.add(match field {
             Some(field) => item.field(field),
             None => item,

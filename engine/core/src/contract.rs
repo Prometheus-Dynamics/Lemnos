@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::{Health, MethodId, Result, Shape, Status, Tag};
+use crate::{Health, MethodId, Reading, Result, Shape, Status, Tag};
 
 /// One parameter of a contract method.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -22,12 +22,18 @@ pub struct MethodInfo {
     /// The method starts a long job and returns its [`JobId`](crate::JobId): it is started with
     /// the host's job form, not called.
     pub job: bool,
+    /// How the value this method reads or sets shows, when the contract says. Not part of the
+    /// method's layout: see [`Description`](crate::Description) for how a device's items use it.
+    pub reading: Option<Reading>,
 }
 
 /// A contract as data.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContractInfo {
     pub tag: Tag,
+    /// What the contract is for, for grouping devices: `"sensor"`, `"actuator"`, `"camera"` and
+    /// so on, or `"other"`. Declared once in the contract crate; not part of the layout.
+    pub kind: &'static str,
     pub methods: &'static [MethodInfo],
 }
 

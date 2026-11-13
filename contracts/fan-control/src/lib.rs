@@ -71,7 +71,7 @@ pub struct State {
     pub held: bool,
 }
 
-#[contract("fan-control", version = 1)]
+#[contract("fan-control", version = 1, kind = "actuator")]
 pub trait FanControl {
     #[method(1)]
     fn state(&mut self) -> Result<State>;

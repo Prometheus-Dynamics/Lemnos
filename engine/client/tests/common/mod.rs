@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use lemnos_linux_sys::scm::send_with_fds;
 use lemnos_wire::ring::Layout;
-use lemnos_wire::{Frame, Tail, append, decode, encode_description, health, state};
+use lemnos_wire::{Frame, Identity, Tail, append, decode, encode_description, health, state};
 
 /// What the fake answers StreamOpen with: a layout, how many descriptors it claims, and the
 /// descriptors it actually sends.
@@ -267,6 +267,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                     use lemnos_core::{ContractInfo, Description, Manifest, Shape, Tag};
                     const INFO: ContractInfo = ContractInfo {
                         tag: Tag::new("a/1"),
+                        kind: "other",
                         methods: &[lemnos_core::MethodInfo {
                             id: 1,
                             name: "m",
@@ -274,6 +275,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             returns: Shape::U8,
                             has_out_buffer: false,
                             job: false,
+                            reading: None,
                         }],
                     };
                     let provided: &'static [lemnos_core::ContractInfo] =
@@ -284,7 +286,13 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                         provides: provided,
                     };
                     let mut bytes = [0; 256];
-                    let n = encode_description(&manifest, &Description::new(), &mut bytes).unwrap();
+                    let n = encode_description(
+                        &manifest,
+                        &Description::new(),
+                        &Identity::default(),
+                        &mut bytes,
+                    )
+                    .unwrap();
                     send(
                         Frame::Description {
                             id,

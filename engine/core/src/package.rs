@@ -632,10 +632,12 @@ pub fn manifest_in(manifest: &PackageManifest) -> core::result::Result<Manifest,
                 returns: shape_in(&method.returns, MAX_SHAPE_DEPTH)?,
                 has_out_buffer: method.has_out_buffer != 0,
                 job: method.flags & METHOD_JOB != 0,
+                reading: None,
             });
         }
         provides.push(ContractInfo {
             tag: tag_in(contract.tag.as_str())?,
+            kind: "other",
             methods: Vec::leak(methods),
         });
     }
@@ -672,6 +674,11 @@ pub fn item_in(item: &PackageItem) -> Option<Item> {
         exponent: item.exponent,
         min: (item.flags & ITEM_HAS_MIN != 0).then_some(item.min),
         max: (item.flags & ITEM_HAS_MAX != 0).then_some(item.max),
+        step: None,
+        warn_low: None,
+        warn_high: None,
+        reading: None,
+        group: None,
         method: MethodId {
             contract: item.contract,
             method: item.method,

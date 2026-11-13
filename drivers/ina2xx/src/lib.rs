@@ -75,14 +75,36 @@ impl Lifecycle for Ina2xx {
     }
 
     fn describe(&self, out: &mut Description) {
-        for (name, field, unit) in [
-            ("bus_voltage", "bus_v", Unit::Volt),
-            ("shunt_voltage", "shunt_v", Unit::Volt),
-            ("current", "current_a", Unit::Ampere),
-            ("power", "power_w", Unit::Watt),
-        ] {
-            out.add(Item::value(name, READ).unit(unit, 0).field(field));
-        }
+        // Every span is in nano-units (the register scale of the chip, see `Setup::spans`).
+        let spans = self.chip.setup.spans(self.chip.attached());
+        out.set_address(self.chip.address());
+        let bus = Item::value("bus_voltage", READ)
+            .unit(Unit::Volt, -9)
+            .field("bus_v")
+            .range(0, spans.bus_max_nv)
+            .step(spans.bus_lsb_nv);
+        out.add(bus);
+        let shunt = Item::value("shunt_voltage", READ)
+            .unit(Unit::Volt, -9)
+            .field("shunt_v");
+        out.add(match (spans.shunt_max_nv, spans.shunt_lsb_nv) {
+            (Some(max), Some(step)) => shunt.range(-max, max).step(step),
+            _ => shunt,
+        });
+        out.add(
+            Item::value("current", READ)
+                .unit(Unit::Ampere, -9)
+                .field("current_a")
+                .range(-spans.current_max_na, spans.current_max_na)
+                .step(spans.current_lsb_na),
+        );
+        out.add(
+            Item::value("power", READ)
+                .unit(Unit::Watt, -9)
+                .field("power_w")
+                .range(0, spans.power_max_nw)
+                .step(spans.power_lsb_nw.max(1)),
+        );
     }
 
     fn health(&self) -> Health {

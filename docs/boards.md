@@ -37,6 +37,7 @@ In a device:
 | Key | Meaning |
 |---|---|
 | `id` | The device's name. Unique in the file |
+| `label` | The name a person reads for the device, shown in place of its id. Optional |
 | `driver` | The driver's name, as in [Drivers and contracts](drivers.md). An unknown name leaves the device `retrying` with that as its reason |
 | `bus` | The resource this device sits on, by the backend's name for it (below) |
 | `uses` | A table from one of the driver's need names to a device `id` or a resource name |

@@ -56,7 +56,7 @@ pub struct GpuState {
     pub last_hang_ms: Option<u64>,
 }
 
-#[contract("gpu-lease", version = 1)]
+#[contract("gpu-lease", version = 1, kind = "compute")]
 pub trait GpuLease {
     /// Asks for the GPU. `shared` leases may be held together, and exclusive ones are held alone.
     /// A lease that cannot be held now is queued when `wait` is set, and otherwise refused with

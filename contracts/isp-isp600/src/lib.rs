@@ -91,7 +91,7 @@ pub struct Region {
     pub bytes: u32,
 }
 
-#[contract("isp.isp600", version = 1)]
+#[contract("isp.isp600", version = 1, kind = "camera")]
 pub trait IspIsp600 {
     #[method(1)]
     fn info(&mut self) -> Result<Isp600Info>;

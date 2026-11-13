@@ -50,7 +50,55 @@ pub enum ItemKind {
     Action,
 }
 
+/// How a value is shown: what kind of reading it is. Numbered in the wire's description, so the
+/// codes never change; see [`Reading::code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Reading {
+    /// A plain number, in the item's unit.
+    Number,
+    /// A settable number within its range (a control such as a duty cycle).
+    Range,
+    /// On or off.
+    Switch,
+    /// Text.
+    Text,
+    /// A colour array: one entry per pixel or channel.
+    ColourArray,
+    /// One axis of a three-axis vector. The three items share a `group`; each one's `field` is
+    /// its axis (`x`, `y` or `z`).
+    ThreeAxes,
+}
+
+impl Reading {
+    /// The number this reading has on the wire. Fixed: a new reading takes the next number.
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Number => 0,
+            Self::Range => 1,
+            Self::Switch => 2,
+            Self::Text => 3,
+            Self::ColourArray => 4,
+            Self::ThreeAxes => 5,
+        }
+    }
+
+    /// The reading for a wire number, or `None` for one this build does not know.
+    pub const fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::Number,
+            1 => Self::Range,
+            2 => Self::Switch,
+            3 => Self::Text,
+            4 => Self::ColourArray,
+            5 => Self::ThreeAxes,
+            _ => return None,
+        })
+    }
+}
+
 /// One thing a device offers, tied to the method that does it.
+///
+/// A control's `method` is the one that sets it; a value's is the one that reads it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Item {
     pub kind: ItemKind,
@@ -58,8 +106,20 @@ pub struct Item {
     pub unit: Unit,
     /// The value is `raw * 10^exponent`, in `unit`.
     pub exponent: i8,
+    /// The lowest and highest raw values the item can take. `None` when the driver does not know.
     pub min: Option<i64>,
     pub max: Option<i64>,
+    /// The smallest change the item can take, in raw units. `None` when not known.
+    pub step: Option<i64>,
+    /// A raw value below `warn_low`, or above `warn_high`, is a warning (an under-voltage, an
+    /// over-temperature). `None` when there is no such threshold.
+    pub warn_low: Option<i64>,
+    pub warn_high: Option<i64>,
+    /// How the value reads. `None` takes the reading the method declares, and failing that the
+    /// one its shape suggests.
+    pub reading: Option<Reading>,
+    /// Items with the same group are one value: a vector, whose parts are the items' fields.
+    pub group: Option<&'static str>,
     pub method: MethodId,
     /// Which field of the method's record, when it returns several.
     pub field: Option<&'static str>,
@@ -74,6 +134,11 @@ impl Item {
             exponent: 0,
             min: None,
             max: None,
+            step: None,
+            warn_low: None,
+            warn_high: None,
+            reading: None,
+            group: None,
             method,
             field: None,
         }
@@ -103,6 +168,44 @@ impl Item {
         self
     }
 
+    /// A signed span: from `-full` to `full`, the span of a sensor axis. Used by drivers that
+    /// measure both ways.
+    pub const fn range_of_scale(mut self, full: i64, step: i64) -> Self {
+        self.min = Some(-full);
+        self.max = Some(full);
+        self.step = Some(step);
+        self
+    }
+
+    /// The smallest change the item can take, in raw units.
+    pub const fn step(mut self, step: i64) -> Self {
+        self.step = Some(step);
+        self
+    }
+
+    /// Warns below `raw`.
+    pub const fn warn_below(mut self, raw: i64) -> Self {
+        self.warn_low = Some(raw);
+        self
+    }
+
+    /// Warns above `raw`.
+    pub const fn warn_above(mut self, raw: i64) -> Self {
+        self.warn_high = Some(raw);
+        self
+    }
+
+    pub const fn reading(mut self, reading: Reading) -> Self {
+        self.reading = Some(reading);
+        self
+    }
+
+    /// Puts the item in a vector: the items of one group are its parts.
+    pub const fn group(mut self, group: &'static str) -> Self {
+        self.group = Some(group);
+        self
+    }
+
     pub const fn field(mut self, field: &'static str) -> Self {
         self.field = Some(field);
         self
@@ -118,6 +221,7 @@ pub struct Description {
     items: [Option<Item>; MAX_ITEMS],
     len: usize,
     dropped: usize,
+    address: Option<u8>,
 }
 
 impl Default for Description {
@@ -132,7 +236,21 @@ impl Description {
             items: [None; MAX_ITEMS],
             len: 0,
             dropped: 0,
+            address: None,
         }
+    }
+
+    /// Says where the device answers on its bus: a 7-bit I2C address. The host renders it.
+    /// Left unset when the device has none to name (one driver that drives several chips
+    /// on one bus names none).
+    pub fn set_address(&mut self, address: u8) -> &mut Self {
+        self.address = Some(address);
+        self
+    }
+
+    /// The address the driver named, if any.
+    pub const fn address(&self) -> Option<u8> {
+        self.address
     }
 
     /// Adds an item. Past [`MAX_ITEMS`] it is counted in

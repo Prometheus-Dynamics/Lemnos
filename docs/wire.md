@@ -465,6 +465,27 @@ the block and reads the fields it knows. Bytes left after them are skipped. A fi
 before takes its default, so a field a writer from before it did not send reads as the default.
 Every field type of such a struct implements `Default`.
 
+Then, appended after the job list, three parts. A reader from before them stops at the job list,
+and takes the identity as unknown (an empty label, no state, no kind, no reading for any item).
+
+- The identity, one struct block: `label` str (the board's `label`, or the device id when the board
+  names none), `bus` str (the bus or block the board names, empty when none), `state` (a presence
+  bool, then a u8: 0 running, 1 retrying, 2 off), `reason` str (why the device is not running, or its
+  last failure; empty when none), `address` (a presence bool, then a u8: the 7-bit I2C address the
+  driver named), and `kind` str (the first contract kind that is not `other`, else `other`).
+- A `u16` contract count, then one block per contract: its `kind` str (`sensor`, `actuator`, ...,
+  `other`).
+- A `u16` item count, then one block per item, in the order of the items above: `reading` u8 (0
+  number, 1 range, 2 switch, 3 text, 4 colour array, 5 three axes; the item's own reading, else its
+  method's, else one its shape suggests), `step` (a presence bool, then an i64), `warn_low` and
+  `warn_high` (each a presence bool, then an i64), and `group` (a presence bool, then a str: the
+  items of one group are one vector, each part named by its `field`).
+
+A reading code this build does not know reads as no reading. Every i64 is in the item's exponent
+(`raw * 10^exponent`, in its unit), like `min` and `max`. The identity is an addition (a `Tail` in
+the code), so it is left out of the core hash: a host that adds it does not refuse a client built
+without it.
+
 ### Contract hashes
 
 Each contract in a Description carries its encoding hash: a 64-bit FNV-1a over the tag, every

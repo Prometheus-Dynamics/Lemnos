@@ -146,7 +146,7 @@ pub struct Counters {
     pub errors: u64,
 }
 
-#[contract("camera.isp", version = 1)]
+#[contract("camera.isp", version = 1, kind = "camera")]
 pub trait CameraIsp {
     #[method(1)]
     fn info(&mut self) -> Result<IspInfo>;

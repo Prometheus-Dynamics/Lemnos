@@ -17,8 +17,8 @@ pub struct PowerReading {
     pub power_w: f32,
 }
 
-#[contract("power-monitor", version = 1)]
+#[contract("power-monitor", version = 1, kind = "power")]
 pub trait PowerMonitor {
-    #[method(1)]
+    #[method(1, reading = number)]
     fn read(&mut self) -> Result<PowerReading>;
 }

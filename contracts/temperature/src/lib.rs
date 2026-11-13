@@ -4,9 +4,9 @@
 
 use lemnos_core::{Result, contract};
 
-#[contract("temperature", version = 1)]
+#[contract("temperature", version = 1, kind = "sensor")]
 pub trait Temperature {
     /// Degrees Celsius.
-    #[method(1)]
+    #[method(1, reading = number)]
     fn read(&mut self) -> Result<f32>;
 }

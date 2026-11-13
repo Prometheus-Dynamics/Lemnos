@@ -14,15 +14,15 @@ use lemnos_core::{LOCAL_ARGS, Result, contract};
 /// and 4 bytes per LED, within [`LOCAL_ARGS`]: `(64 - 2 - 4) / 4` = 14.
 pub const MAX_LOCAL_LEDS: usize = (LOCAL_ARGS - 2 - 4) / 4;
 
-#[contract("pixels", version = 1)]
+#[contract("pixels", version = 1, kind = "light")]
 pub trait Pixels {
     /// How many LEDs the strip has.
-    #[method(1)]
+    #[method(1, reading = number)]
     fn pixel_count(&mut self) -> Result<u16>;
     /// Stores LEDs starting at LED `offset` (an LED index, not a byte offset), 4 bytes each (r, g,
     /// b, w), first LED first. LEDs past the end of the strip are ignored, and a partial LED at the
     /// end is dropped. Other stored LEDs keep their values. Nothing reaches the strip until `show`.
-    #[method(2)]
+    #[method(2, reading = colour_array)]
     fn set(&mut self, offset: u16, pixels: &[u8]) -> Result<()>;
     /// Sends the stored frame to the strip as one transaction.
     #[method(3)]

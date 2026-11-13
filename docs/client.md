@@ -96,6 +96,21 @@ What a client can do:
   list. An event may repeat a state the client has; the newest one is current. Up to 64 events
   queue. Past that the oldest go, so a client that stops reading should list the devices again.
 
+### Device descriptions
+
+`Client::describe(device)` returns a `DeviceDescription`. Besides its contracts and items it has
+what a generic panel shows, with no code for the device:
+
+- `label`, the board's name for the device (its id when the board names none);
+- `kind`, the grouping its contracts give it (`sensor`, `power`, ...), `other` when none;
+- `bus` (empty when none) and `address` (`Option<u8>`, the 7-bit I2C address);
+- `state` (`Option<u8>`: 0 running, 1 retrying, 2 off) and `reason`;
+- for each item, `reading` (`Option<Reading>`), `step`, `warn_low`, `warn_high` and `group`, next to
+  its `unit`, `exponent`, `min` and `max`.
+
+A value an older host does not describe reads as unknown (`None`, or empty text). `lemnos-ctl show`
+prints exactly these, one panel per device.
+
 ### Versions at connect
 
 The first frame each side sends carries the build's core hash and its Lemnos version, then the

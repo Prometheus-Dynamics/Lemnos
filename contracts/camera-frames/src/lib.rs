@@ -37,7 +37,7 @@ pub struct Counters {
     pub errors: u64,
 }
 
-#[contract("camera.frames", version = 1)]
+#[contract("camera.frames", version = 1, kind = "camera")]
 pub trait CameraFrames {
     /// How many formats [`format`](Self::format) can return.
     #[method(1)]

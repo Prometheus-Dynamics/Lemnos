@@ -26,10 +26,10 @@ pub struct Sample {
 /// own block (4 + 3 × 4).
 pub const RECORD_LEN: usize = 4 + 8 + (4 + 3 * 4);
 
-#[contract("gyroscope", version = 1)]
+#[contract("gyroscope", version = 1, kind = "sensor")]
 pub trait Gyroscope {
     /// Angular rate in rad/s.
-    #[method(1)]
+    #[method(1, reading = three_axes)]
     fn read(&mut self) -> Result<Vector3>;
     /// The samples since the last batch, oldest first, as records into `into` (see the module
     /// docs). Returns the bytes written: 0 when there is no new sample. Samples that do not fit

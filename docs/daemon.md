@@ -176,6 +176,17 @@ lemnos-ctl describe counter
 lemnos-ctl describe orientation
 ```
 
+### show DEVICE
+
+The device as a panel, from its description alone: its label, kind, bus, I2C address (`unknown`
+when the driver names none), state and reason, which contracts it provides, then each value,
+control and action with its unit, range, step, warning limit, reading type and vector group. A figure
+the device does not give reads `unknown`. The tool holds no code for any kind of device.
+
+```sh
+lemnos-ctl show accel
+```
+
 ### read DEVICE [ITEM]
 
 Reads one value, or every value the device has. A value is printed in its unit.

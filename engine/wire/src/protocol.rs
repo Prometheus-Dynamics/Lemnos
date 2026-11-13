@@ -4,8 +4,8 @@
 mod description;
 
 pub use description::{
-    DeviceDescription, OwnedContract, OwnedItem, OwnedMethod, OwnedParam, OwnedShape,
-    decode_description, encode_description,
+    DeviceDescription, Identity, OwnedContract, OwnedItem, OwnedMethod, OwnedParam, OwnedShape,
+    decode_description, device_kind, effective_reading, encode_description,
 };
 
 use lemnos_core::{Decode, Encode, Reader, Shape, Status, Writer};

@@ -11,11 +11,15 @@ use lemnos_wire::text::{
 };
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
+mod show;
+
 pub const USAGE: &str = "\
 lemnos-ctl [--socket PATH] COMMAND
   list                           every device and how it stands
   chain DEVICE                   the devices it leads to through `link`, in order
   describe DEVICE                what it provides
+  show DEVICE                    the device as a panel: name, kind, bus, state, each value's
+                                 unit, range, limit and reading type
   read DEVICE [ITEM]             one value, or all of them
   watch DEVICE ITEM [--period-ms N] [--count N]
   set DEVICE ITEM [VALUE...]     a control or an action
@@ -115,6 +119,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
         ("list", []) => tool.list(),
         ("chain", [device]) => tool.chain(device),
         ("describe", [device]) => tool.describe(device),
+        ("show", [device]) => tool.show(device),
         ("read", [device]) => tool.read_all(device),
         ("read", [device, item]) => tool.read_one(device, item),
         ("watch", [device, item, options @ ..]) => tool.watch(device, item, options),
@@ -437,6 +442,15 @@ impl Tool<'_> {
                 Some(driver) => format!("{:width$}  loaded   {driver}", package.path),
                 None => format!("{:width$}  refused  {}", package.path, package.reason),
             };
+            line(self.out, format_args!("{row}"))?;
+        }
+        Ok(())
+    }
+
+    /// The device as a panel, from its description (see [`show`](crate::show)).
+    fn show(&mut self, name: &str) -> Outcome {
+        let (_, description) = self.description(name)?;
+        for row in show::panel(&description) {
             line(self.out, format_args!("{row}"))?;
         }
         Ok(())

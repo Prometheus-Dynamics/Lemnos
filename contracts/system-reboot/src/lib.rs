@@ -4,7 +4,7 @@
 
 use lemnos_core::{Result, contract};
 
-#[contract("system.reboot", version = 1)]
+#[contract("system.reboot", version = 1, kind = "system")]
 pub trait Reboot {
     /// Asks the system to restart. Returns once the restart is under way.
     #[method(1)]

@@ -122,7 +122,12 @@ impl Lifecycle for Orientation {
 
     fn describe(&self, out: &mut Description) {
         for (name, field) in [("roll", "x"), ("pitch", "y"), ("yaw", "z")] {
-            out.add(Item::value(name, READ).unit(Unit::Radian, 0).field(field));
+            out.add(
+                Item::value(name, READ)
+                    .unit(Unit::Radian, 0)
+                    .field(field)
+                    .group("attitude"),
+            );
         }
     }
 

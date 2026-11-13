@@ -369,6 +369,10 @@ pub struct LineSpec {
 #[serde(deny_unknown_fields)]
 pub struct DeviceSpec {
     pub id: String,
+    /// The name a person reads for the device, shown in place of its id. Optional: the id is
+    /// the name when it is left out.
+    #[serde(default)]
+    pub label: Option<String>,
     pub driver: String,
     /// The bus or block it sits on. What the text means is the backend's.
     #[serde(default)]
@@ -457,6 +461,7 @@ impl EachSpec {
         };
         DeviceSpec {
             id: self.device_id(found),
+            label: None,
             driver: self.driver.clone(),
             bus,
             uses,

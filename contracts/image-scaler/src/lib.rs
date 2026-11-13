@@ -104,7 +104,7 @@ pub struct Counters {
     pub errors: u64,
 }
 
-#[contract("image.scaler", version = 1)]
+#[contract("image.scaler", version = 1, kind = "compute")]
 pub trait ImageScaler {
     #[method(1)]
     fn info(&mut self) -> Result<ScalerInfo>;

@@ -113,11 +113,18 @@ impl Lifecycle for HwmonFan {
 
     fn describe(&self, out: &mut Description) {
         out.add(Item::value("rpm", RPM).unit(Unit::RevolutionPerMinute, 0));
-        out.add(Item::value("duty", DUTY).unit(Unit::One, -3));
+        // Duty is per mille: a range of 0 to MAX_DUTY, one step is one per mille.
+        out.add(
+            Item::value("duty", DUTY)
+                .unit(Unit::One, -3)
+                .range(0, i64::from(MAX_DUTY))
+                .step(1),
+        );
         out.add(
             Item::control("duty", SET_DUTY)
                 .unit(Unit::One, -3)
-                .range(0, i64::from(MAX_DUTY)),
+                .range(0, i64::from(MAX_DUTY))
+                .step(1),
         );
         out.add(Item::action("release", RELEASE));
     }

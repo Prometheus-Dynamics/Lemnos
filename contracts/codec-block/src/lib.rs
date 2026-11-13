@@ -209,7 +209,7 @@ pub struct Counters {
     pub failed: u64,
 }
 
-#[contract("codec.block", version = 1)]
+#[contract("codec.block", version = 1, kind = "compute")]
 pub trait CodecBlock {
     #[method(1)]
     fn info(&mut self) -> Result<BlockInfo>;

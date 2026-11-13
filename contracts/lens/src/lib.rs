@@ -48,15 +48,15 @@ impl Decode<'_> for FocusDirection {
     }
 }
 
-#[contract("lens", version = 1)]
+#[contract("lens", version = 1, kind = "actuator")]
 pub trait Lens {
     #[method(1)]
     fn range(&mut self) -> Result<Range>;
     /// Starts a move and returns at once.
-    #[method(2)]
+    #[method(2, reading = range)]
     fn set_position(&mut self, position: u16) -> Result<()>;
     /// The last position asked for.
-    #[method(3)]
+    #[method(3, reading = number)]
     fn position(&mut self) -> Result<u16>;
     /// Which way focus moves as the position goes up. `Unknown` until the board or the driver says.
     #[method(4)]

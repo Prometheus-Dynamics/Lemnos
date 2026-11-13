@@ -80,7 +80,7 @@ pub struct Counters {
     pub errors: u64,
 }
 
-#[contract("image.convert", version = 1)]
+#[contract("image.convert", version = 1, kind = "compute")]
 pub trait ImageConvert {
     #[method(1)]
     fn info(&mut self) -> Result<ConvertInfo>;
