@@ -279,4 +279,4 @@ pub fn locate<D: ReadAt>(dev: &mut D, name: &[u8; 11], want: u64) -> Result<Foun
 
 #[cfg(test)]
 #[path = "bootfat_tests.rs"]
-mod tests;
+pub(crate) mod tests;

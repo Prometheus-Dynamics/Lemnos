@@ -55,14 +55,14 @@ impl Kind {
     /// The board's security switch and its generation (S2).
     pub const SECURITY: Kind = Kind(4);
 
-    /// The pre-created file's 8.3 name on the boot partition for this kind (the data partition's
-    /// names are the caller's). `None` for a kind this build does not know.
-    pub fn file_name(self) -> Option<&'static str> {
+    /// The pre-created file's FAT directory name for this kind (eleven bytes: 8.3, space padded,
+    /// upper case). `None` for a kind this build does not know.
+    pub fn file_name(self) -> Option<&'static [u8; 11]> {
         match self {
-            Kind::TRIAL => Some("TRIAL.REC"),
-            Kind::REASON => Some("REASON.REC"),
-            Kind::BOOT_HISTORY => Some("BOOTHIST.REC"),
-            Kind::SECURITY => Some("SECURE.REC"),
+            Kind::TRIAL => Some(b"TRIAL   REC"),
+            Kind::REASON => Some(b"REASON  REC"),
+            Kind::BOOT_HISTORY => Some(b"BOOTHISTREC"),
+            Kind::SECURITY => Some(b"SECURE  REC"),
             _ => None,
         }
     }
@@ -339,7 +339,10 @@ impl Sectors for FileSectors {
 /// 1 holding `initial` and copy B at sequence 0 holding the same bytes, so both are valid and A
 /// wins. Returned as `(file name, sector bytes)` in the order given. Run by the image builder, which
 /// places each file with [`crate::bootfat`] and writes the bytes into the image.
-pub fn precreate(kinds: &[(Kind, &[u8])]) -> Result<Vec<(&'static str, Vec<u8>)>, Error> {
+/// One pre-created file: its FAT directory name and its bytes.
+pub type Precreated = (&'static [u8; 11], Vec<u8>);
+
+pub fn precreate(kinds: &[(Kind, &[u8])]) -> Result<Vec<Precreated>, Error> {
     let mut out = Vec::with_capacity(kinds.len());
     for &(kind, initial) in kinds {
         let name = kind.file_name().ok_or_else(|| {

@@ -1,7 +1,7 @@
 use super::*;
 
 /// A FAT volume built in memory: enough structure for the placement, nothing more.
-struct Vol(Vec<u8>);
+pub(crate) struct Vol(pub(crate) Vec<u8>);
 
 impl ReadAt for Vol {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -16,15 +16,15 @@ impl ReadAt for Vol {
 }
 
 /// A file for the image: its 8.3 name, size and cluster chain (the chain's clusters in order).
-struct Entry {
-    name: &'static [u8; 11],
-    size: u32,
-    chain: Vec<u32>,
+pub(crate) struct Entry {
+    pub(crate) name: &'static [u8; 11],
+    pub(crate) size: u32,
+    pub(crate) chain: Vec<u32>,
 }
 
 /// Builds a FAT16 or FAT32 volume of `total` sectors with `spc` sectors per cluster and `files`
 /// in the root directory. Each file's chain is written into both FAT copies.
-fn build(fat32: bool, spc: u64, total: u64, files: &[Entry]) -> Vol {
+pub(crate) fn build(fat32: bool, spc: u64, total: u64, files: &[Entry]) -> Vol {
     let reserved = 1u64;
     let nfats = 2u64;
     let bpe = if fat32 { 4u64 } else { 2 };
@@ -104,10 +104,10 @@ fn build(fat32: bool, spc: u64, total: u64, files: &[Entry]) -> Vol {
     Vol(img)
 }
 
-const REC: &[u8; 11] = b"TRIAL   REC";
+pub(crate) const REC: &[u8; 11] = b"TRIAL   REC";
 const OTHER: &[u8; 11] = b"OTHER   BIN";
 
-fn data_start(fat32: bool, total: u64, spc: u64) -> u64 {
+pub(crate) fn data_start(fat32: bool, total: u64, spc: u64) -> u64 {
     // Mirrors `build`: the same loop, reproduced so the expected LBA is computed independently.
     let reserved = 1u64;
     let bpe = if fat32 { 4u64 } else { 2 };
