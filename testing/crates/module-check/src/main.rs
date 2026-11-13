@@ -14,12 +14,16 @@
 //! `lemnos-module-check gsdma <device> <heap>` drives the graphics DMA driver's Linux device
 //! through the module's node and the harness's fake engine ([`gsdma`]).
 //!
+//! `lemnos-module-check vip <device> <heap>` drives the VIP9000 driver's claim through the
+//! module's node and the harness's fake block ([`vip`]).
+//!
 //! `lemnos-module-check board ...` is the mode for a real board: it touches only the devices
 //! named on its command line, in the ways [`board`] lists, and never the harness's fixed test
 //! addresses.
 
 mod board;
 mod gsdma;
+mod vip;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -1036,6 +1040,15 @@ fn main() -> ExitCode {
         && mode == "gsdma"
     {
         return if gsdma::run(device, heap) == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    if let [mode, device, heap] = args.as_slice()
+        && mode == "vip"
+    {
+        return if vip::run(device, heap) == 0 {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE

@@ -25,6 +25,10 @@
 #define GSDMA "lemnos-test-gsdma"
 #define OWNED_GSDMA OWNED ",lemnos,test-gsdma gsdma=lemnos,test-gsdma test_gsdma_fake_regs=1"
 #define VE "lemnos-test-ve"
+#define VIP "lemnos-test-vip"
+#define VIP_SYS "/sys/bus/platform/devices/" VIP
+#define OWNED_VIP OWNED ",lemnos,test-vip vip9000=lemnos,test-vip test_vip_fake_regs=1 " \
+	"test_vip_timeout_ms=300"
 #define BIND "/sys/bus/platform/drivers/lemnos/bind"
 #define UNBIND "/sys/bus/platform/drivers/lemnos/unbind"
 #define OWNED "owned=lemnos,test-block,lemnos,test-spi"
@@ -381,6 +385,35 @@ int main(void)
 	check(!put(UNBIND, GSDMA), "graphics DMA engine unbound");
 	check(!forget_override(GSDMA), "graphics DMA override cleared");
 	check(!unload("lemnos"), "module unloaded after the reach check");
+	/* The VIP9000 on its fake block: a chip pointed at its tables by register. */
+	check(!load("/lemnos.ko", OWNED_VIP), "module loaded with the VIP9000");
+	check(!bind_block(VIP), "VIP9000 bound");
+	check(!run((char *const[]){ "/lemnos_vip_check", "/dev/lemnos", VIP, (char *)cma_heap(),
+				    "run", NULL }),
+	      "lemnos_vip_check run");
+	/* The driver's claim over its Linux session, through the same node and fake block. */
+	check(!run((char *const[]){ "/lemnos-module-check", "vip", VIP,
+				    (char *)cma_heap() + strlen("/dev/dma_heap/"), NULL }),
+	      "lemnos-module-check vip");
+	check(!put(UNBIND, VIP), "VIP9000 unbound");
+	/* One pointed at them by a command. */
+	check(!put(VIP_SYS "/cid", "0x10000016"), "fake VIP9000 reports a command-set-up chip");
+	check(!bind_block(VIP), "VIP9000 bound as that chip");
+	check(!run((char *const[]){ "/lemnos_vip_check", "/dev/lemnos", VIP, (char *)cma_heap(),
+				    "command", NULL }),
+	      "lemnos_vip_check command");
+	check(!put(UNBIND, VIP), "VIP9000 unbound");
+	/* Chips whose MMU isn't known, or that have none: refused at bind. */
+	check(!put(VIP_SYS "/cid", "0x12345678"), "fake VIP9000 reports an unknown chip");
+	bind_block(VIP);
+	check(access(VIP_SYS "/driver", F_OK), "an unknown chip is refused");
+	check(!put(VIP_SYS "/cid", "0xee"), "fake VIP9000 reports a chip without an MMU");
+	bind_block(VIP);
+	check(access(VIP_SYS "/driver", F_OK), "a chip without an MMU is refused");
+	check(!put(VIP_SYS "/cid", "0x1000003b"), "fake VIP9000 reports the first chip again");
+	check(!forget_override(VIP), "VIP9000 override cleared");
+	check(!unload("lemnos"), "module unloaded after the VIP9000 checks");
+
 	/* The PiSP back end on its fake block. */
 	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1"),
 	      "module loaded with the PiSP back end");
@@ -407,13 +440,19 @@ int main(void)
 	check(!unload("lemnos"), "module unloaded after the register jobs");
 	check(!unload("lemnos_test_regjob"), "fake register-job blocks unloaded");
 
-	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be,lemnos,test-gsdma pisp_be=lemnos,test-pisp-be "
-				  "test_pb_fake_regs=1 gsdma=lemnos,test-gsdma test_gsdma_fake_regs=1"),
+	check(!load("/lemnos.ko", OWNED ",lemnos,test-pisp-be,lemnos,test-gsdma,lemnos,test-vip "
+				  "pisp_be=lemnos,test-pisp-be test_pb_fake_regs=1 gsdma=lemnos,test-gsdma "
+				  "test_gsdma_fake_regs=1 vip9000=lemnos,test-vip test_vip_fake_regs=1 "
+				  "test_vip_timeout_ms=300"),
 	      "module loaded for the wedge checks");
 	check(!bind_block(GSDMA), "graphics DMA engine bound");
 	check(!run((char *const[]){ "/lemnos_gsdma_check", "/dev/lemnos", GSDMA, (char *)cma_heap(),
 				    "wedge", NULL }),
 	      "lemnos_gsdma_check wedge");
+	check(!bind_block(VIP), "VIP9000 bound");
+	check(!run((char *const[]){ "/lemnos_vip_check", "/dev/lemnos", VIP, (char *)cma_heap(),
+				    "wedge", NULL }),
+	      "lemnos_vip_check wedge");
 	check(!bind_block(PISP), "PiSP block bound");
 	check(!run((char *const[]){ "/lemnos_pisp_be_check", "/dev/lemnos", PISP, BIND, UNBIND,
 				    (char *)cma_heap(), "wedge", NULL }),
@@ -422,6 +461,7 @@ int main(void)
 	/* The test block's devices go with it; a wedged block's memory stays pinned regardless. */
 	check(!put(UNBIND, PISP), "wedged PiSP block unbound");
 	check(!put(UNBIND, GSDMA), "wedged graphics DMA engine unbound");
+	check(!put(UNBIND, VIP), "wedged VIP9000 unbound");
 	/* The stand-in PIO driver stays: the wedged module above depends on it. */
 
 	printf("lemnos-qemu: %s (%d failed)\n", failures ? "FAILED" : "passed", failures);

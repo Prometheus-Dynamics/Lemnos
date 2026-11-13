@@ -38,6 +38,9 @@ as soon as the module loads.
 | `test_gsdma_reach` | Test only. Lowers the device address the graphics DMA engine is said to reach, for the reach check in QEMU. |
 | `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs (`lemnos_regjob_a733.c`). Must also be in `owned`. Empty by default. |
 | `test_rj_fake_regs` | Test only. A register-job block's window is ordinary memory, for the fake blocks in QEMU. |
+| `vip9000` | Compatibles driven as the VIP9000 neural accelerator (`lemnos_vip.c`), as comma-separated `vendor,name` pairs. Must also be in `owned`. Empty by default. |
+| `test_vip_fake_regs` | Test only. The VIP9000's register window is ordinary memory, for the fake block in QEMU. |
+| `test_vip_timeout_ms` | Test only. A job's time on the VIP9000 before it is stopped, in ms (5000 when unset), for the hang check in QEMU. |
 
 ## Claims
 
@@ -181,6 +184,50 @@ descriptors are held until a reboot, `lemnos.ko` can't be unloaded, new streams 
 
 `lemnos_gsdma.c` holds no vendor code; the register map, descriptor layout, probe values and
 formats it uses are facts, with their source in its header.
+
+## The VIP9000 neural accelerator
+
+A block listed in `vip9000` (a neural accelerator that runs a program of command words through an
+MMU of its own) is driven by the module: its registers can't be mapped, its interrupt isn't
+forwarded, and its MMU is the module's. At bind the module reads the chip's customer id and takes
+only chips the vendor's feature table lists with an MMU, each set up the way that table says (the
+page directory register, or a page table array selected by a command); any other chip is refused
+with `ENODEV`. `LEMNOS_IOC_VIP_CREATE` makes a frame stream whose jobs are
+`struct lemnos_vip_job` (`lemnos_vip.h`), one stream at a time. A pool buffer holds no data; it
+only counts a job and publishes its end.
+
+Programs. `LEMNOS_VIP_IOC_LOAD` copies a program into kernel memory and `lvip_scan` checks that
+copy once: whole commands to its end (`EINVAL` and the offset otherwise), and only state loads
+outside the block's control registers (below 0x400: clocks, interrupts, the MMU, the command
+fetcher), the completion event and the MMU's set-up state, plus NOP and STALL (`EPERM` and the
+offset otherwise). LINK, CALL, RETURN, WAIT and END are refused: the block would leave the
+module's copy, or end before the module's own event. At most eight programs per stream.
+
+Jobs. A job names a loaded program and up to 13 slots, each whole pages of a dma-buf registered on
+the stream. It is read once into kernel memory and checked: the program loaded, every slot
+page-aligned, whole pages, at most 256 MiB, unused slots and reserved fields zero (`EINVAL`).
+`lem_stream_job_take()` proves every slot inside one registered dma-buf (`EFAULT`, `EOVERFLOW`) and
+not in the pool (`EACCES`). Only then are the tables written, from the pinned buffers' device
+addresses: one root table per block, whose first entry maps the module's command buffer read-only
+at `0x00100000`, and slot `n` page by page at `(n + 1) << 28`, its pages and no more, writable.
+Nothing else is mapped: no heap of the module's, no on-chip memory, nothing of another job. The
+program is copied into the command buffer between a preamble that flushes the MMU's TLB and a tail
+that raises the module's event and ends, and the block is started there. Any refusal ends the
+stream; nothing is clamped.
+
+The end of a job. The event with the block idle is a finished job: every slot entry is cleared
+before anything else runs, and the frame is published with the pool buffer's bytes. An MMU
+exception or bus error from the interrupt, or a job still running after 5 s, is answered by the
+vendor's software reset, seen to take twice in a row, and the block set up again: the frame is
+published with 0 bytes, `faults` or `timeouts` counts it, and the stream goes on. A block that
+can't be shown reset is wedged: the job's buffers, the tables and the command buffer are held until
+a reboot, `lemnos.ko` can't be unloaded, new streams are refused with `EIO`, and the kernel log
+says so. `LEMNOS_VIP_IOC_STATUS` on the stream reports `wedged`, the chip, `finished`, `refused`,
+`faults`, `timeouts`, the last fault's interrupt status and the resets.
+
+`lemnos_vip.c` holds no vendor code; the register offsets and values, the reset, set-up and trigger
+sequences, the command encodings, the table entry formats and the chips it uses are facts, with
+their source in its header.
 
 ## The PiSP front end
 

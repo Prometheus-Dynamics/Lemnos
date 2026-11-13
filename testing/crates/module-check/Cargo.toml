@@ -11,9 +11,11 @@ workspace = true
 
 [dependencies]
 lemnos-core = { path = "../../../engine/core", features = ["std"] }
-lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
+lemnos-hal = { path = "../../../engine/hal", features = ["std", "mock"] }
 lemnos-linux = { path = "../../../backends/linux" }
 lemnos-linux-sys = { path = "../../../backends/linux-sys" }
 lemnos-driver-k230-gsdma = { path = "../../../drivers/k230-gsdma" }
+lemnos-driver-vip9000 = { path = "../../../drivers/vip9000" }
+lemnos-contract-npu = { path = "../../../contracts/npu" }
 lemnos-measure = { path = "../../../engine/measure", features = ["alloc-count"] }
 libc.workspace = true

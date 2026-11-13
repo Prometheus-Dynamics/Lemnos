@@ -40,6 +40,7 @@
 #include "lemnos_pisp_be.h"
 #include "lemnos_gsdma.h"
 #include "lemnos_regjob_priv.h"
+#include "lemnos_vip.h"
 
 #define LEM_NAME "lemnos"
 #define LEM_MAX_COMPATIBLE 8
@@ -78,6 +79,12 @@ MODULE_PARM_DESC(unconfined,
 		 "Compatibles of the blocks whose registers may be mapped though no IOMMU "
 		 "confines their DMA: the driver in user space alone keeps that DMA in bounds");
 
+static char *vip9000 = "";
+module_param(vip9000, charp, 0444);
+MODULE_PARM_DESC(vip9000,
+		 "Compatibles of the blocks driven as the VIP9000 neural accelerator; their "
+		 "registers, interrupts and MMU never reach user space");
+
 static bool test_irq_inject;
 module_param(test_irq_inject, bool, 0444);
 MODULE_PARM_DESC(test_irq_inject,
@@ -105,6 +112,7 @@ struct lem_block {
 	struct lem_pb *pb;		/* the PiSP back end, or NULL */
 	struct lem_gd *gd;		/* the K230 graphics DMA engine, or NULL */
 	struct lem_rj *rj;		/* run through register jobs, or NULL */
+	struct lem_vip *vip;		/* the VIP9000, or NULL */
 	struct xarray imports;		/* handle -> struct lem_import */
 	atomic_t bufs;			/* DMA buffers not yet freed */
 	struct lem_power *power;
@@ -566,6 +574,7 @@ union lem_args {
 	struct lemnos_pisp_be_create pisp_be;
 	struct lemnos_gsdma_create gsdma;
 	struct lemnos_regjob_open regjob;
+	struct lemnos_vip_create vip;
 	struct lemnos_i2c_transfer i2c;
 	struct lemnos_i2c_smbus smbus;
 	struct lemnos_spi_transfer spi;
@@ -634,9 +643,13 @@ static long lem_block_request(struct lem_block *l, unsigned int cmd, union lem_a
 		if (!l->rj)
 			return -ENOTTY;
 		return lem_rj_open(l->rj, &u->regjob);
+	case LEMNOS_IOC_VIP_CREATE:
+		if (!l->vip)
+			return -ENOTTY;
+		return lem_vip_create(l->vip, l->dev, &u->vip);
 	case LEMNOS_IOC_POWER:
 		/* A block the module drives keeps its own clocks. */
-		if (l->pb || l->gd || l->rj)
+		if (l->pb || l->gd || l->rj || l->vip)
 			return -ENOTTY;
 		return lem_power_request(l->power, &u->power);
 	case LEMNOS_IOC_TEST_IRQ:
@@ -821,6 +834,14 @@ static int lem_probe(struct platform_device *pdev)
 			return dev_err_probe(dev, PTR_ERR(l->gd), "K230 graphics DMA engine\n");
 		goto ready;
 	}
+	if (lem_device_listed(dev, vip9000)) {
+		l->mappable = false;
+		l->unconfined = false;
+		l->vip = lem_vip_probe(pdev);
+		if (IS_ERR(l->vip))
+			return dev_err_probe(dev, PTR_ERR(l->vip), "VIP9000\n");
+		goto ready;
+	}
 	l->rj = lem_rj_probe(pdev);
 	if (IS_ERR(l->rj))
 		return dev_err_probe(dev, PTR_ERR(l->rj), "register jobs\n");
@@ -908,6 +929,8 @@ static void lem_remove(struct platform_device *pdev)
 		lem_gd_remove(l->gd);
 	if (l->rj)
 		lem_rj_remove(l->rj);
+	if (l->vip)
+		lem_vip_remove(l->vip);
 	lem_power_destroy(l->power);
 	up_write(&lem_blocks_sem);
 	lem_event_post(LEMNOS_EVENT_BLOCK_UNBOUND, l->id, 0, 0);

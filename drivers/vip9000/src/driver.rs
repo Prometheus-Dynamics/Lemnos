@@ -1,5 +1,6 @@
-//! The driver: what serves the node, whether a job there could be confined, and the `npu/1`
-//! contract answered from that.
+//! The vendor kernels' node: what serves it, whether a job there could be confined, and the
+//! `npu/1` contract answered from that. The block in `lemnos.ko` is served by [`crate::claim`]
+//! instead; this is what a board that names the vendor's node gets.
 //!
 //! # Failures
 //!
@@ -11,9 +12,9 @@
 //! # What the contract gets
 //!
 //! [`Npu::info`] reports the largest program the block's command buffer takes and room for no
-//! program. [`Npu::load`] checks its arguments and then answers `NOT_SUPPORTED`: on every kernel
-//! driver this crate knows, a job could reach past its own buffers (see [`crate::confine`]), and
-//! the run path for a kernel that confines is not built. So no program loads, nothing is attached
+//! program. [`Npu::load`] checks its arguments and then answers `NOT_SUPPORTED`: on the vendor's
+//! kernel drivers a job could reach past its own buffers (see [`crate::confine`]), and the run
+//! path is only through `lemnos.ko` ([`crate::claim`]). So no program loads, nothing is attached
 //! and no job stream is named; [`Npu::job_stream`] answers `NOT_SUPPORTED` and the other calls
 //! `NOT_FOUND`. [`Vip9000::state`] says why.
 //!
@@ -53,6 +54,8 @@ pub enum Kernel {
     Vipcore,
     /// The vendor's `galcore`.
     Galcore,
+    /// `lemnos.ko`, with the block named in its `vip9000` parameter.
+    Lemnos,
     /// Another driver, or none this crate knows.
     Other,
 }
@@ -63,6 +66,7 @@ impl Kernel {
         match self {
             Self::Vipcore => Some(confine::VIPCORE),
             Self::Galcore => Some(confine::GALCORE),
+            Self::Lemnos => Some(confine::LEMNOS),
             Self::Other => None,
         }
     }

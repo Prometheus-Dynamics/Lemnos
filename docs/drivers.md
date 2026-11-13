@@ -100,6 +100,7 @@ python3 scripts/generate-builtins.py --check
 | Driver | Provides | Needs | State |
 |---|---|---|---|
 | `rknpu` | `npu/1` | the vendor kernel's NPU render node (`node`, or found by its driver); `jobs` stream | Serves its contract. Each program runs in an IOMMU domain of its own that holds only its objects, checked before every run. A program belongs to the caller that loaded it and is unloaded when that caller goes. Confinement holds only while the daemon is the node's sole opener, and whether a program can reach the IOMMU's own registers is not known |
+| `vip9000` | `npu/1` | the block driven by `lemnos.ko` (`route = "lemnos"`, its `device` name and a dma-`heap`); `jobs` stream | Serves its contract through the module. While a job runs, the block's MMU maps the module's copy of its program (read-only) and its slots, and nothing else; every program is checked once in the kernel; a fault or a run out of time resets the block and fails the run. Buffers are copied to and from the slots. `route = "vipcore"`, the vendor's node, binds only to refuse every load. Untested on board |
 
 ## Library crates
 
@@ -107,7 +108,6 @@ A board file cannot name these.
 
 | Crate | What it is | Why it is not a driver |
 |---|---|---|
-| `vip9000` | `npu/1`'s methods over a device trait, with the checks | No Linux device is built, and `load` answers `NOT_SUPPORTED`. The block has one page table for every opener, so a job cannot be kept to its own buffers from user space. It needs a kernel-module path |
 | `k230-kpu` | `npu/1`'s methods over a device trait, with the checks | No Linux device is built, and `load` answers `NOT_SUPPORTED`. The block has no IOMMU and no bus protection, so a job cannot be confined at all without reading the program |
 | `k230-ai2d` | The AI2D block's kernel interface, and checked job logic over a device trait | No hardware path: nothing implements the device trait on Linux, because the block's register map is not in the public sources. It serves no contract |
 | `k230-gsdma` | Job checks, descriptors, and a Linux device on the engine's node in `lemnos.ko` | No contract driver wraps it. Untested on board |

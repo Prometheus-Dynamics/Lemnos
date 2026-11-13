@@ -32,7 +32,7 @@
 
 #include "lemnos_test_csi2.h"
 
-#define TB_IRQS 5
+#define TB_IRQS 6
 #define TB_BLOCK_IRQS 2
 #define TB_MAGIC 0x4c454d4e
 /* The fake PiSP back end: a window of ordinary memory its driver is told is registers. */
@@ -42,6 +42,9 @@
 #define TB_PISP_VERSION 0x02252700
 /* The fake K230 graphics DMA engine: a page of ordinary memory its driver is told is registers. */
 #define TB_GSDMA_IRQ 3
+#define TB_TCSI_IRQ 4
+/* The fake VIP9000: a page of ordinary memory its driver is told is registers. */
+#define TB_VIP_IRQ 5
 
 static unsigned long csi2_phys;
 module_param(csi2_phys, ulong, 0444);
@@ -640,8 +643,305 @@ static const struct property_entry tb_gsdma_props[] = {
 	{ }
 };
 
+/*
+ * The fake VIP9000. Its registers are a page of ordinary memory, looked at
+ * every millisecond while a driver has it. A 1 in the command fetcher's enable
+ * bit starts the commands at its address, which are run as the block would,
+ * through its MMU when that is on: the root table from the page directory
+ * register, or from the page table array a set-up command selected; each
+ * second-level entry present, and writable for a write. A miss is the MMU's
+ * exception: interrupt status bit 30, the fetcher stays busy until a reset.
+ * Commands: state loads, NOP, STALL and END; END makes it idle and raises the
+ * interrupt with the events the commands asked for. Three states of its own
+ * copy memory (0x5000 source, 0x5001 destination, 0x5002 bytes: copies) and
+ * hang (0x5003). A reset is seen as the clock register's idle bits coming back
+ * after the fake cleared them when the MMU went on; it turns the MMU off and
+ * makes the block idle. With `stuck`, resets are ignored.
+ */
+#define TVIP_CLOCK	0x000
+#define TVIP_IDLE	0x004
+#define TVIP_INT	0x010
+#define TVIP_CID	0x030
+#define TVIP_MMU	0x388
+#define TVIP_PTA_LOW	0x38c
+#define TVIP_PTA_HIGH	0x390
+#define TVIP_FE_CTL	0x3a4
+#define TVIP_PD	0x3b4
+#define TVIP_FE_ADDR	0x654
+#define TVIP_IDLE_ALL	0x7fffffffu
+#define TVIP_CLOCK_BITS	0x00030000u
+
+static struct platform_device *tb_vip;
+static struct page *tb_vip_page;
+static DEFINE_MUTEX(tvip_lock);
+static u32 tvip_cid = 0x1000003b;
+static bool tvip_stuck, tvip_marked, tvip_pta, tvip_busy;
+static u32 tvip_jobs, tvip_faults, tvip_resets, tvip_flushes, tvip_copied, tvip_errors;
+static u32 tvip_src, tvip_dst;
+
+static void tvip_tick(struct work_struct *work);
+static DECLARE_DELAYED_WORK(tvip_work, tvip_tick);
+
+static u32 tvip_rd(unsigned int off)
+{
+	return readl((u8 __iomem *)page_address(tb_vip_page) + off);
+}
+
+static void tvip_wr(unsigned int off, u32 v)
+{
+	writel(v, (u8 __iomem *)page_address(tb_vip_page) + off);
+}
+
+static void *tvip_phys(u64 pa)
+{
+	return pfn_valid(PHYS_PFN(pa)) ? phys_to_virt(pa) : NULL;
+}
+
+/* The kernel's pointer for the block's address `va`, and the bytes to its page's end; NULL: a fault. */
+static u8 *tvip_at(u32 va, bool write, u32 *left)
+{
+	u32 mmu = tvip_rd(TVIP_MMU);
+	u64 pa = va;
+
+	if (mmu & BIT(0)) {
+		u64 root;
+		u32 *mtlb, *stlb, m, pte;
+
+		if (mmu & BIT(5)) {
+			root = (u64)(tvip_rd(TVIP_PD) >> 4) << 12;
+		} else {
+			u32 *pta;
+
+			if (!tvip_pta)
+				return NULL;
+			pta = tvip_phys(tvip_rd(TVIP_PTA_LOW) | (u64)tvip_rd(TVIP_PTA_HIGH) << 32);
+			if (!pta)
+				return NULL;
+			root = (pta[0] & ~0xfffu) | (u64)pta[1] << 32;
+		}
+		mtlb = tvip_phys(root);
+		if (!mtlb)
+			return NULL;
+		m = le32_to_cpu(READ_ONCE(mtlb[va >> 24]));
+		if (!(m & BIT(0)))
+			return NULL;
+		stlb = tvip_phys(m & ~0x3fu);
+		if (!stlb)
+			return NULL;
+		pte = le32_to_cpu(READ_ONCE(stlb[(va >> 12) & 0xfff]));
+		if (!(pte & BIT(0)) || (write && !(pte & BIT(2))))
+			return NULL;
+		pa = (pte & ~0xfffu) | (u64)((pte >> 4) & 0xff) << 32 | (va & 0xfff);
+	}
+	*left = 4096 - (va & 0xfff);
+	return tvip_phys(pa);
+}
+
+static bool tvip_copy(u32 len)
+{
+	u32 src = tvip_src, dst = tvip_dst;
+
+	while (len) {
+		u32 ls, ld, n;
+		u8 *s = tvip_at(src, false, &ls), *d = tvip_at(dst, true, &ld);
+
+		if (!s || !d)
+			return false;
+		n = min3(len, ls, ld);
+		memcpy(d, s, n);
+		src += n;
+		dst += n;
+		len -= n;
+		tvip_copied += n;
+	}
+	return true;
+}
+
+enum { TVIP_END, TVIP_FAULT, TVIP_HANG };
+
+/* Runs what the fetcher was started on. */
+static int tvip_run(u32 *events)
+{
+	u32 va = tvip_rd(TVIP_FE_ADDR), left = (tvip_rd(TVIP_FE_CTL) & 0xffff) * 2;
+
+	while (left) {
+		u32 l, w, op, n;
+		u32 *p = (u32 *)tvip_at(va, false, &l);
+
+		if (!p)
+			return TVIP_FAULT;
+		w = le32_to_cpu(p[0]);
+		op = w >> 27;
+		if (op == 2)
+			return TVIP_END;
+		if (op == 3 || op == 9) {
+			n = 2;
+		} else if (op == 1) {
+			u32 addr = w & 0xffff, count = (w >> 16) & 0x3ff;
+
+			if (!count)
+				count = 1024;
+			for (u32 i = 0; i < count; i++) {
+				u32 vl, v, *q = (u32 *)tvip_at(va + 4 + i * 4, false, &vl);
+
+				if (!q)
+					return TVIP_FAULT;
+				v = le32_to_cpu(*q);
+				switch (addr + i) {
+				case 0x0061:
+					tvip_flushes++;
+					break;
+				case 0x0e01:
+					*events |= BIT(v & 0x1f);
+					break;
+				case 0x0e12:
+					if (!(tvip_rd(TVIP_MMU) & BIT(0)))
+						tvip_pta = true;
+					break;
+				case 0x5000:
+					tvip_src = v;
+					break;
+				case 0x5001:
+					tvip_dst = v;
+					break;
+				case 0x5002:
+					if (!tvip_copy(v))
+						return TVIP_FAULT;
+					break;
+				case 0x5003:
+					return TVIP_HANG;
+				}
+			}
+			n = ALIGN(1 + count, 2);
+		} else {
+			tvip_errors++;
+			return TVIP_HANG;
+		}
+		if (n > left)
+			return TVIP_HANG;
+		left -= n;
+		va += n * 4;
+	}
+	return TVIP_HANG;
+}
+
+static void tvip_tick(struct work_struct *work)
+{
+	bool raise = false, on;
+
+	mutex_lock(&tvip_lock);
+	if (!tvip_stuck) {
+		u32 clock = tvip_rd(TVIP_CLOCK);
+
+		if (tvip_marked && (clock & TVIP_CLOCK_BITS) == TVIP_CLOCK_BITS) {
+			tvip_wr(TVIP_MMU, 0);
+			tvip_wr(TVIP_FE_CTL, 0);
+			tvip_wr(TVIP_IDLE, TVIP_IDLE_ALL);
+			tvip_pta = tvip_busy = tvip_marked = false;
+			tvip_resets++;
+		} else if (!tvip_marked && (tvip_rd(TVIP_MMU) & BIT(0))) {
+			tvip_wr(TVIP_CLOCK, clock & ~TVIP_CLOCK_BITS);
+			tvip_marked = true;
+		}
+	}
+	if (!tvip_busy && (tvip_rd(TVIP_FE_CTL) & BIT(16))) {
+		u32 events = 0;
+		int r;
+
+		tvip_wr(TVIP_IDLE, TVIP_IDLE_ALL & ~BIT(0));
+		r = tvip_run(&events);
+		tvip_wr(TVIP_FE_CTL, 0);
+		if (tvip_rd(TVIP_MMU) & BIT(0))
+			tvip_jobs++;
+		if (r == TVIP_END) {
+			tvip_wr(TVIP_IDLE, TVIP_IDLE_ALL);
+			if (events) {
+				tvip_wr(TVIP_INT, tvip_rd(TVIP_INT) | events);
+				raise = true;
+			}
+		} else {
+			tvip_busy = true;
+			if (r == TVIP_FAULT) {
+				tvip_faults++;
+				tvip_wr(TVIP_INT, tvip_rd(TVIP_INT) | BIT(30));
+				raise = true;
+			}
+		}
+	}
+	on = tvip_rd(TVIP_CLOCK) || tvip_marked;
+	mutex_unlock(&tvip_lock);
+	if (raise)
+		irq_set_irqchip_state(tb_irq[TB_VIP_IRQ], IRQCHIP_STATE_PENDING, true);
+	schedule_delayed_work(&tvip_work, msecs_to_jiffies(on ? 1 : 50));
+}
+
+/* The customer id the block reports; set before the driver binds. */
+static ssize_t cid_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			 size_t count)
+{
+	u32 v;
+
+	if (kstrtou32(buf, 0, &v))
+		return -EINVAL;
+	mutex_lock(&tvip_lock);
+	tvip_cid = v;
+	tvip_wr(TVIP_CID, v);
+	mutex_unlock(&tvip_lock);
+	return count;
+}
+
+static ssize_t cid_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "0x%08x\n", tvip_cid);
+}
+static DEVICE_ATTR_RW(cid);
+
+/* "1": resets are ignored from now on (until "0"). */
+static ssize_t stuck_store(struct device *dev, struct device_attribute *attr, const char *buf,
+			   size_t count)
+{
+	bool v;
+
+	if (kstrtobool(buf, &v))
+		return -EINVAL;
+	mutex_lock(&tvip_lock);
+	tvip_stuck = v;
+	mutex_unlock(&tvip_lock);
+	return count;
+}
+static DEVICE_ATTR_WO(stuck);
+
+/* "jobs faults resets flushes copied errors": since the module loaded. */
+static ssize_t vip_ran_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	ssize_t n;
+
+	mutex_lock(&tvip_lock);
+	n = sysfs_emit(buf, "%u %u %u %u %u %u\n", tvip_jobs, tvip_faults, tvip_resets,
+		       tvip_flushes, tvip_copied, tvip_errors);
+	mutex_unlock(&tvip_lock);
+	return n;
+}
+static struct device_attribute dev_attr_vip_ran = __ATTR(ran, 0444, vip_ran_show, NULL);
+
+static struct attribute *tb_vip_attrs[] = { &dev_attr_cid.attr, &dev_attr_stuck.attr,
+					    &dev_attr_vip_ran.attr, NULL };
+static const struct attribute_group tb_vip_group = { .attrs = tb_vip_attrs };
+
+static const struct property_entry tb_vip_props[] = {
+	PROPERTY_ENTRY_STRING("compatible", "lemnos,test-vip"),
+	{ }
+};
+
 static void tb_teardown(void)
 {
+	if (!IS_ERR_OR_NULL(tb_vip)) {
+		sysfs_remove_group(&tb_vip->dev.kobj, &tb_vip_group);
+		platform_device_unregister(tb_vip);
+	}
+	cancel_delayed_work_sync(&tvip_work);
+	if (tb_vip_page)
+		__free_page(tb_vip_page);
 	if (!IS_ERR_OR_NULL(tb_gsdma)) {
 		sysfs_remove_group(&tb_gsdma->dev.kobj, &tb_gsdma_group);
 		platform_device_unregister(tb_gsdma);
@@ -686,10 +986,14 @@ static void tb_teardown(void)
 		__free_page(tb_page);
 }
 
+/* Filled by tb_init; platform_device_register_full copies them, and the stack frame stays small. */
+static struct resource pisp_res[2] __initdata;
+static struct resource gsdma_res[2] __initdata;
+static struct resource vip_res[2] __initdata;
+
 static int __init tb_init(void)
 {
 	struct resource res[1 + TB_BLOCK_IRQS];
-	struct resource pisp_res[2];
 	struct platform_device_info pisp = {
 		.name = "lemnos-test-pisp",
 		.id = PLATFORM_DEVID_NONE,
@@ -698,7 +1002,6 @@ static int __init tb_init(void)
 		.dma_mask = DMA_BIT_MASK(64),
 		.properties = tb_pisp_props,
 	};
-	struct resource gsdma_res[2];
 	struct platform_device_info gsdma = {
 		.name = "lemnos-test-gsdma",
 		.id = PLATFORM_DEVID_NONE,
@@ -706,6 +1009,14 @@ static int __init tb_init(void)
 		.num_res = ARRAY_SIZE(gsdma_res),
 		.dma_mask = DMA_BIT_MASK(64),
 		.properties = tb_gsdma_props,
+	};
+	struct platform_device_info vip = {
+		.name = "lemnos-test-vip",
+		.id = PLATFORM_DEVID_NONE,
+		.res = vip_res,
+		.num_res = ARRAY_SIZE(vip_res),
+		.dma_mask = DMA_BIT_MASK(64),
+		.properties = tb_vip_props,
 	};
 	struct platform_device_info info = {
 		.name = "lemnos-test-block",
@@ -796,7 +1107,7 @@ static int __init tb_init(void)
 			}
 			memset_io(tcsi_regs[i], 0, SZ_4K);
 		}
-		tcsi_irq = tb_irq[TB_IRQS - 1];
+		tcsi_irq = tb_irq[TB_TCSI_IRQ];
 		cr[4] = (struct resource)DEFINE_RES_IRQ(tcsi_irq);
 		tcsi_pdev = platform_device_register_full(&csi);
 		if (IS_ERR(tcsi_pdev)) {
@@ -843,6 +1154,25 @@ static int __init tb_init(void)
 	if (ret)
 		goto fail;
 	schedule_delayed_work(&tgd_work, msecs_to_jiffies(1));
+
+	tb_vip_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!tb_vip_page) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+	tvip_wr(TVIP_IDLE, TVIP_IDLE_ALL);
+	tvip_wr(TVIP_CID, tvip_cid);
+	vip_res[0] = (struct resource)DEFINE_RES_MEM(page_to_phys(tb_vip_page), PAGE_SIZE);
+	vip_res[1] = (struct resource)DEFINE_RES_IRQ(tb_irq[TB_VIP_IRQ]);
+	tb_vip = platform_device_register_full(&vip);
+	if (IS_ERR(tb_vip)) {
+		ret = PTR_ERR(tb_vip);
+		goto fail;
+	}
+	ret = sysfs_create_group(&tb_vip->dev.kobj, &tb_vip_group);
+	if (ret)
+		goto fail;
+	schedule_delayed_work(&tvip_work, msecs_to_jiffies(1));
 	return 0;
 fail:
 	tb_teardown();

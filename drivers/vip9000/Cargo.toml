@@ -4,15 +4,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The VeriSilicon VIP9000 NPU behind the vendor kernel's vipcore node: its uAPI layouts pinned against the C compiler, checked builders for the requests a run needs, and the confinement check that refuses runs while the block's address translation reaches past a job's own buffers. The caller's program is carried, never read"
+description = "The VeriSilicon VIP9000 NPU serving npu/1 through its node in lemnos.ko, which gives each job MMU tables holding only its own slots and checks every program once; and the vendor kernel's vipcore node, its uAPI pinned and its gaps listed, on which no job is run. The caller's program is carried, never read"
 
 [lints]
 workspace = true
 
-# No `unsafe` here and no device access of its own: the node is reached through the `Device` trait.
+# No `unsafe` here: every system call goes through lemnos-driver-vip9000-sys, which holds the
+# `unsafe`. The claim reaches the node through its `Module` and `Session` traits.
 [dependencies]
 lemnos-contract-npu = { path = "../../contracts/npu" }
-lemnos-core = { path = "../../engine/core" }
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-hal = { path = "../../engine/hal", features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-vip9000-sys = { path = "../vip9000-sys" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+libc.workspace = true
 
 [dev-dependencies]
+lemnos-hal = { path = "../../engine/hal", features = ["std", "mock"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "Vip9000Driver"
