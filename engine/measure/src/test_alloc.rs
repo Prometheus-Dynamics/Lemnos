@@ -14,6 +14,13 @@ use std::cell::Cell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+thread_local! {
+    /// This thread's live bytes, as its allocations and frees have moved them, and the most they
+    /// have been since [`peak_bytes`] last began.
+    static LIVE: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
+
 /// Counts this thread's allocations, so parallel tests do not disturb a count. Forwards every
 /// call to [`System`].
 pub struct Counting;
@@ -34,6 +41,19 @@ pub static TOTAL: AtomicUsize = AtomicUsize::new(0);
 
 static RECORD: AtomicBool = AtomicBool::new(false);
 static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Moves this thread's live bytes by `delta` and keeps the peak.
+fn live(delta: isize) {
+    let _ = LIVE.try_with(|live| {
+        let now = live.get() + delta;
+        live.set(now);
+        let _ = PEAK.try_with(|peak| {
+            if now > peak.get() {
+                peak.set(now);
+            }
+        });
+    });
+}
 
 fn count() {
     let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
@@ -87,15 +107,18 @@ pub fn take_records() -> Vec<String> {
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count();
+        live(layout.size() as isize);
         // SAFETY: the caller's layout, passed on.
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        live(-(layout.size() as isize));
         // SAFETY: the caller's pointer and layout, passed on.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         count();
+        live(new_size as isize - layout.size() as isize);
         // SAFETY: the caller's arguments, passed on.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -107,4 +130,15 @@ pub fn allocations<T>(f: impl FnOnce() -> T) -> (T, usize) {
     let before = ALLOCATIONS.with(Cell::get);
     let value = f();
     (value, ALLOCATIONS.with(Cell::get) - before)
+}
+
+/// The value of `f`, and the most bytes this thread held beyond what it held when `f` began, at
+/// any point while `f` ran (zero unless [`Counting`] is the global allocator). A buffer `f`
+/// allocates and frees is part of the peak only while it is alive.
+pub fn peak_bytes<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let base = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(base));
+    let value = f();
+    let peak = PEAK.with(Cell::get);
+    (value, (peak - base).max(0) as usize)
 }

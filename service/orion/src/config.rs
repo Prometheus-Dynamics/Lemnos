@@ -23,6 +23,9 @@ pub struct Config {
     /// USB function devices whose bulk endpoints are offered to the comm core, each as the link
     /// it is for: `LEMNOS_ORION_LINKS`.
     pub links: Vec<Link>,
+    /// The files each device takes as a stream, fed to its long job as they arrive
+    /// (`LEMNOS_ORION_STREAMS`).
+    pub streams: Vec<(String, Vec<String>)>,
 }
 
 /// A device's bulk endpoints offered to the comm core as a link.
@@ -67,6 +70,7 @@ impl Config {
             ),
             files: files(std::env::var("LEMNOS_ORION_FILES").ok().as_deref())?,
             links: links(std::env::var("LEMNOS_ORION_LINKS").ok().as_deref())?,
+            streams: streams(std::env::var("LEMNOS_ORION_STREAMS").ok().as_deref())?,
         })
     }
 }
@@ -132,6 +136,34 @@ pub fn files(value: Option<&str>) -> Result<Vec<(String, PathBuf)>, String> {
         .collect()
 }
 
+/// The streams each device takes: `device=name+name,device=name`, each name a file name the device's
+/// directory takes (one path part of `[A-Za-z0-9._-]`, not starting with a dot).
+///
+/// # Errors
+///
+/// When an entry is not `device=names`, or a name is not a file name.
+pub fn streams(value: Option<&str>) -> Result<Vec<(String, Vec<String>)>, String> {
+    let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    text.split(',')
+        .map(str::trim)
+        .map(|entry| {
+            let (device, names) = entry
+                .split_once('=')
+                .filter(|(device, names)| !device.is_empty() && !names.is_empty())
+                .ok_or_else(|| format!("LEMNOS_ORION_STREAMS {entry:?}: want device=name+name"))?;
+            let names: Vec<String> = names.split('+').map(str::to_owned).collect();
+            if let Some(bad) = names.iter().find(|n| !crate::files::valid_name(n)) {
+                return Err(format!(
+                    "LEMNOS_ORION_STREAMS names {bad:?}, which isn't a file name"
+                ));
+            }
+            Ok((device.to_owned(), names))
+        })
+        .collect()
+}
+
 /// `device=link` pairs, comma-separated, from `LEMNOS_ORION_LINKS`.
 pub fn links(value: Option<&str>) -> Result<Vec<Link>, String> {
     let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
@@ -155,6 +187,21 @@ pub fn links(value: Option<&str>) -> Result<Vec<Link>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streams_name_the_files_each_device_takes_as_a_stream() {
+        assert_eq!(streams(None), Ok(Vec::new()));
+        assert_eq!(
+            streams(Some("flash=image.img.xz+image.img")),
+            Ok(vec![(
+                "flash".to_owned(),
+                vec!["image.img.xz".to_owned(), "image.img".to_owned()]
+            )])
+        );
+        assert!(streams(Some("flash")).is_err());
+        assert!(streams(Some("flash=../x")).is_err());
+        assert!(streams(Some("=image.img")).is_err());
+    }
 
     #[test]
     fn links_name_each_usb_device_and_its_link() {

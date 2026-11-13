@@ -495,6 +495,180 @@ The trial settings (`auto_confirm`, `confirm_uptime_s`, `confirm_deadline_s`,
 `reboot_at_deadline`, `trial_attempts` and `health`) are in [Trials of a slot](boards.md#trials-of-a-slot-system-slots).
 The driver's crate documentation, `drivers/system-slots/src/lib.rs`, lists every setting.
 
+## First flash
+
+A board that may be blank (no partition table, no data partition, no slot) is flashed from a
+flasher image: a RAM-only initramfs running `lemnosd`, the bridge and a recovery build of the
+layer above. It can't install a slot, because a slot lives on a data partition that isn't there.
+So it writes a whole disk image to the board's storage with `system.flash/1`, served by
+`system-flash`. The image defines the partitions, the one slot and the boot record; the driver
+writes them and invents none of them.
+
+Settings (`system-flash`'s `config`): `path` (the one target, a block device: the only place a path
+comes from), `allow_first_flash` (`false` by default: a write is refused unless it is `true`, which
+only a flasher's board file sets), `kind` (`block`, or `file` for a regular file in tests),
+`max_dict_mb` (8 by default; 1 to 8, the ceiling: a board file may lower it, never raise it),
+`keys` (the trusted keys: one per line, 64 hex digits, a space, then the owner), `require_signed`
+(`false` by default: the policy table below), and `mountinfo` (the mount table the running-system
+check reads, `/proc/self/mountinfo` by default). A board's `[board] id` is given to the driver, and a
+manifest for another board is refused first.
+
+### The image
+
+- The image is the whole first-flash disk, as the OS builder lays it out. It is written from byte 0
+  of the target. Bytes past its end are left as they were, so the image must cover the target's
+  partition table.
+- The build produces `image.img.xz`: an xz file whose first stream is the raw image, and which may
+  carry one more stream: the signature record (below). `image.img` is raw. The image is one stream
+  of one or more xz blocks with check `none`, `CRC32`, `CRC64` or `SHA-256`, and the LZMA2 filter
+  only (no BCJ, no delta).
+- The xz dictionary is the decoder's memory. A block that declares a dictionary over the board's
+  limit is refused at its header, before anything is allocated for it. The decoder's memory is the
+  dictionary plus 256 KiB (8.25 MiB at the 8 MiB ceiling).
+
+```text
+xz -6 --check=crc64 -T1 -k image.img        # image.img.xz, dictionary 8 MiB
+```
+
+A file holds one image stream and optionally one record stream, and nothing else. A third stream,
+or data after the second that is not zero padding in fours, is refused as "not a first-flash image".
+
+### The signed message and the record
+
+The signature is Ed25519 over a fixed binary message, which the board rebuilds from its own board id,
+its format (`disk` for a block target), and the image's size and SHA-256. The sender never signs a
+JSON file:
+
+```text
+"lemnos-first-flash\0"    19 bytes: the domain tag, with its NUL
+u32 LE version = 1
+u32 LE length, then the board id bytes
+u32 LE length, then the format bytes ("disk")
+u64 LE raw image size
+32 bytes raw image SHA-256
+```
+
+The record is 108 bytes: `LMNSSIG1`, `u8` algorithm 1 (Ed25519), three zero bytes, the 32-byte key id
+(SHA-256 of the public key), and the 64-byte signature. The record is the second xz stream of the
+image file, and the same bytes go in the transport manifest's `signature` field (216 lowercase hex
+digits). The record stream is built with the same limits as the image:
+
+```text
+xz -0 --check=crc64 -c record.bin > record.xz
+cat image.img.xz record.xz > signed.img.xz     # stream 1 is the image, stream 2 the record
+xz -t signed.img.xz                             # stock xz accepts both
+xz -dc --single-stream signed.img.xz | sha256sum  # the image alone
+```
+
+### The manifest
+
+The transport JSON, `<name>.json` for a streamed image (see Over Orion), schema 1:
+
+```text
+{"schema":1,"board":"<board id>","format":"disk","image":{"size":N,"sha256":"<64 hex>"},
+ "signature":"<216 hex: the record, optional; omit when unsigned>"}
+```
+
+`format` is the raw image's kind (`disk`), not the compression. `image.size` and `image.sha256` are
+stream 1's decoded bytes. The JSON is transport only: the board checks it against the signed message
+it rebuilds, and nothing depends on byte-identical JSON. The transport's SHA-256 (Orion's, over the
+pushed file) covers the stream as it was sent, and both are checked.
+
+### Signature policy
+
+The board checks, in order, and before the first byte is written:
+
+1. The JSON's `board` is the board's id. Otherwise the manifest is refused by name, "this image is for
+   board X, and this is board Y" (`-95`), before any signature is looked at.
+2. The record is empty, or 108 bytes with the magic, algorithm 1 and zero padding. Anything else is
+   refused in every row: "malformed signature record" (`-22`).
+3. The record's key id is looked up in `keys`. A board with no key list has no known keys.
+4. The table decides. The size and the raw SHA-256 are enforced during the stream in every row.
+
+| `require_signed` | image | key | result | outcome |
+|---|---|---|---|---|
+| off | unsigned | – | accepted | `not_checked_unsigned` |
+| off | signed | key id in the board's list, signature verifies | accepted | `verified` |
+| off | signed | key id in the board's list, signature does NOT verify | refused, before any write | `refused` |
+| off | signed | key id unknown, or the board has no key list | accepted | `not_checked_unknown_key` |
+| on | unsigned | – | refused, before any write | `refused` |
+| on | signed | unknown key or no key list | refused, before any write | `refused` |
+| on | signed | known key, bad signature | refused, before any write | `refused` |
+| on | signed | known key, verifies | accepted | `verified` |
+
+The outcome is reported as a stable word in `info` (`manifest.signed`, with `manifest.reason`), in
+the log, and in the write job's result after its byte count: `0` verified, `1` not checked (unsigned),
+`2` not checked (unknown key). The sender's UI shows the word and its reason.
+
+In every accepted row the file's own second stream must be the record given at `manifest`, byte for
+byte. An empty record and a file with no second stream count as the same. A raw image has no second
+stream, so the record check does not apply to it.
+
+### Calls
+
+1. `manifest(json, record)`: accepts the transport JSON and the record (empty when unsigned, which is
+   what the table above is about). Nothing is written.
+2. `write(size, format)`: a long job. `size` is the stream's bytes as sent (both streams), `format` is
+   1 for xz and 0 for raw. Its progress is the stream bytes taken; its result is the raw image's byte
+   count, `u64` little-endian, then the outcome code.
+3. `data(offset, bytes)`: the stream in order from offset 0. The last piece ends the stream, and the
+   job then checks the image, its record, and ends.
+4. `verify()`: optional, a second long job. It reads the target back from its start for the
+   manifest's size and checks the hash.
+5. The flasher restarts the board. The driver does not restart it.
+
+The job's results: `0` with the raw byte count and the outcome code, after the image's hash matches
+and its record is the one given; `-22` for a malformed stream, a stream cut short, a dictionary over
+the limit, a size or hash that isn't the manifest's, a stream that holds more than its image, a file
+that is not an image (a second stream that is not one record, or a third stream), or a file record
+that isn't the one given; `-28` when the image is larger than the target (refused at `write`, nothing
+written); `-5` for I/O on the target; `-125` cancelled; `-4` when the service restarted. A write that
+fails or is cancelled leaves the target partial, and the state says so: `info` shows `cancelled` or
+`failed` and must not be booted. A new write starts again from byte 0. Nothing is kept across a
+restart.
+
+`info` (JSON) says whether a write may start (`writable`, and why not in `reason`), the target's size,
+whether it holds anything, the state and the last error, the last manifest's facts and outcome, and
+the effective `max_dict_mb`.
+
+### Safety
+
+- The target is named only in the board file. No method takes a device path.
+- A write is refused when the target is the device the running system is on: a mounted filesystem
+  whose device is the target, or a partition of it (its sysfs parent). A flasher runs from RAM, so
+  the check passes there; a normal image's root is on the target, and the check refuses.
+- `allow_first_flash` must be `true`.
+- The image must fit: `image.size` at most the target's size.
+
+### Over Orion
+
+A stream's image is pushed to `lemnos/<device>/<name>` where `<name>` is one of the names
+`LEMNOS_ORION_STREAMS` gives the device (for example `flash=image.img.xz+image.img`). Its transport
+manifest (`<name>.json`) is pushed first, to the same device, like any small file. There is no
+signature sidecar: the record is in the manifest's `signature` field and in the image itself. Then:
+
+1. The bridge reads the manifest, decodes its `signature` field, calls `manifest`, starts the `write`
+   job on its own lemnosd connection (it is the job's starter, and only the starter may send `data`),
+   and acknowledges the push as received.
+2. Each chunk goes to `data` before the bridge acknowledges it, so a slow device slows the sender.
+   The bridge holds one chunk at a time.
+3. At the commit the bridge checks the stream's SHA-256 against the sender's, then waits for the
+   job: the answer is `committed` with the raw byte count and the signature outcome, or `rejected`
+   with the job's status or the refusal.
+
+A push that breaks is begun again from zero; a streamed image is not resumed.
+
+### Not delivered
+
+- **Raw NAND (MTD and UBI) first flash.** `kind = "mtd"` and `"ubi"` are refused `-95`. Its design is
+  in the brief (W1b).
+
+### After the write
+
+The driver `fsync`s the target and asks the kernel to read its partition table again
+(`BLKRRPART`, through `drivers/system-flash-sys`). A kernel that holds a partition open refuses,
+and `info` says so: the flasher restarts the board, and that makes the new table the one in use.
+
 ## Proof
 
 ```sh slow

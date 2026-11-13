@@ -1,0 +1,26 @@
+[package]
+name = "lemnos-driver-system-flash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-system-flash = { path = "../../contracts/system-flash" }
+lemnos-contract-indicator = { path = "../../contracts/indicator" }
+lemnos-driver-system-flash-sys = { path = "../system-flash-sys" }
+# The manifest's JSON reader, shared with the slot files.
+lemnos-slot-store = { path = "../slot-store" }
+# Both already in the tree: the signature check and the hashes.
+ed25519-dalek = { version = "2.2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "SystemFlash"

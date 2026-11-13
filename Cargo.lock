@@ -608,6 +608,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-contract-system-flash"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+]
+
+[[package]]
 name = "lemnos-contract-system-identity"
 version = "2.0.1-dev"
 dependencies = [
@@ -1448,6 +1455,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-driver-system-flash"
+version = "2.0.1-dev"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "lemnos-contract-indicator",
+ "lemnos-contract-system-flash",
+ "lemnos-core",
+ "lemnos-driver-system-flash-sys",
+ "lemnos-measure",
+ "lemnos-slot-store",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "lemnos-driver-system-flash-sys"
+version = "2.0.1-dev"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "lemnos-driver-system-identity"
 version = "2.0.1-dev"
 dependencies = [
@@ -1755,6 +1783,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-core",
+ "lemnos-driver-system-flash",
  "lemnos-driver-system-identity",
  "lemnos-driver-system-slots",
  "lemnos-driver-usb-gadget",
@@ -1764,6 +1793,7 @@ dependencies = [
  "lemnos-linux-stream",
  "lemnos-linux-sys",
  "lemnos-sim",
+ "lemnos-slot-store",
  "lemnos-wire",
  "lemnosd",
  "orion",
@@ -1912,6 +1942,7 @@ dependencies = [
  "lemnos-driver-rp1-csi2",
  "lemnos-driver-status-light",
  "lemnos-driver-sunxi-vin",
+ "lemnos-driver-system-flash",
  "lemnos-driver-system-identity",
  "lemnos-driver-system-slots",
  "lemnos-driver-thermal-zone",

@@ -148,8 +148,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Firmware, slots and the first flash
 
-- [ ] **First-flash write** (W1): the raw first-flash write, with the bridge's streaming sink. W2
-      (indicator states) has merged.
 - [ ] **Raw NAND first flash** (W1b).
 - [ ] **Modules-off kernel boot in CI** (W3b): the kernel built with modules off is not yet booted
       in CI. W3 has merged (the configuration, and the built-in module booted in QEMU).

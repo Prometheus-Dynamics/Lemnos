@@ -27,6 +27,7 @@ orion-connect = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev 
 orion-msg-session = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133" }
 orion-wire = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133" }
 lemnos-linux-stream = { path = "../../backends/linux-stream" }
+lemnos-slot-store = { path = "../../drivers/slot-store" }
 # Already in the tree through Orion's client: waits on the Orion session and the wake-up together.
 # The SHA-256 a file sent to a device is checked against; already in the tree.
 sha2 = { version = "0.10", default-features = false }
@@ -40,6 +41,7 @@ orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = 
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
+lemnos-driver-system-flash = { path = "../../drivers/system-flash" }
 lemnos-driver-system-identity = { path = "../../drivers/system-identity" }
 lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }

@@ -65,6 +65,7 @@ lemnos-driver-rkvpss = { path = "../../drivers/rkvpss" }
 lemnos-driver-rp1-csi2 = { path = "../../drivers/rp1-csi2" }
 lemnos-driver-status-light = { path = "../../drivers/status-light" }
 lemnos-driver-sunxi-vin = { path = "../../drivers/sunxi-vin" }
+lemnos-driver-system-flash = { path = "../../drivers/system-flash" }
 lemnos-driver-system-identity = { path = "../../drivers/system-identity" }
 lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
