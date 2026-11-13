@@ -2,6 +2,7 @@
 //! tests are in `tests/builder.rs`, where a buffer comes from a claim.
 
 mod pins;
+mod vepu541_h265_pins;
 mod vepu580_pins;
 
 use crate::layout::{Field, Region};
