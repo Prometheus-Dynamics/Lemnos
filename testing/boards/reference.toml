@@ -1,5 +1,5 @@
 # The reference board: a compute module on its IO board, shaped as a managed board is. It has an
-# addressable LED strip on the PIO block, an IMU and a magnetometer on a PIO I2C bus, a power
+# addressable LED strip on the PIO block, an IMU on a PIO I2C bus, a magnetometer and a power
 # monitor on i2c-1, a camera (sensor, receiver, PiSP front and back end) on the camera I2C bus, a
 # power switch for the camera, a fan on the fan header's PWM channel, the board as a USB gadget, the
 # hardware watchdog as the daemon's keep-alive, and the system identity, slots and reboot devices.
@@ -93,26 +93,35 @@ driver = "usb-gadget"
 uses = { function = "udc:1000480000.usb", identity = "identity" }
 config = { vendor = 0x1209, product = 0x0001, manufacturer = "Lemnos", product_name = "Lemnos board", interfaces = "function ffs\nfunction ncm derive\nfunction acm\n" }
 
-# The LED strip on the PIO block.
+# The LED strip on the PIO block: 16 SK6812-EC20 on GPIO13, 24 bits per LED on the wire, as the
+# product's overlay states (`ws2812-pio,gpio=13,num_leds=16`, 2026-11-13). The pixel order GRB is
+# the product's own: this driver takes only the wire width ("rgb" or "rgbw"), so the colour order is
+# unverified here and not readable without lighting the ring.
 [[devices]]
 id = "ring"
 driver = "ws2812"
 bus = "pio-out:gpio=13"
 config = { count = 16, wire = "rgb", brightness = 255 }
 
-# The IMU and the magnetometer, on the PIO block's I2C bus.
+# The IMU, on the PIO block's I2C bus.
 [[devices]]
 id = "imu"
 driver = "bmi088"
 bus = "pio-i2c:sda=8,scl=7"
 config = { accel_rate = 200, gyro_rate = 200, fifo = false }
 
+# The magnetometer: a BMM150 at 0x10 on i2c-1, the same bus as the power monitor. Read on the board
+# (2026-11-13): register 0x40 reads 0x32, the BMM150 chip ID. It is NOT on the PIO bus.
 [[devices]]
 id = "mag"
 driver = "bmm150"
-bus = "pio-i2c:sda=8,scl=7"
+bus = "i2c-1"
+config = { address = 0x10 }
 
-# The power monitor on i2c-1.
+# The power monitor on i2c-1: an INA238-family chip at 0x40. Read on the board (2026-11-13):
+# manufacturer ID 0x5449, device ID register 0x2381. The shunt is NOT readable from the board: the
+# device tree names no shunt-resistor and the shunt calibration register is at its reset value. The
+# 0.010 ohm below is from the earlier run and the product's manifest (unverified against the schematic).
 [[devices]]
 id = "power"
 driver = "ina2xx"
@@ -127,11 +136,16 @@ driver = "gpio-power-switch"
 uses = { line = "gpio:pinctrl-rp1:34" }
 config = { default_on = true }
 
+# The sensor's clock: the product's overlay is `ov9782,cam0,clk-continuous` (config.txt on the board,
+# 2026-11-13), so the continuous clock. The sensor modes the driver offers are 1280x800, 1280x720 and
+# 640x400 (binned), each RAW10 and RAW8. The stream sizes below are this file's own choices and are
+# not stated by the product: unverified.
 [[devices]]
 id = "cam0-sensor"
 driver = "ov9782"
 bus = "i2c-10"
 link = "cam0-receiver"
+config = { continuous_clock = true }
 
 # The receiver is the kernel module's: the module owns its node, and this device is its driver's.
 [[devices]]
@@ -172,11 +186,13 @@ memory = "dma-buf"
 heap = "linux,cma"
 
 # The fan on the fan header's PWM channel, driven directly, with no kernel fan driver between.
+# Read on the board (2026-11-13): the product's pwm-fan node (/cooling_fan) takes channel 3 of the
+# RP1 PWM at pwm@9c000 (pin 45, function pwm1), with period 41566 ns, which is 24057 Hz rounded.
 [[devices]]
 id = "fan"
 driver = "pwm-channel-fan"
-uses = { pwm = "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:1" }
-config = { frequency_hz = 25000, min_duty = 200, kick_ms = 500 }
+uses = { pwm = "pwm:/axi/pcie@1000120000/rp1/pwm@9c000:3" }
+config = { frequency_hz = 24057, min_duty = 200, kick_ms = 500 }
 
 # The board's temperature, and the fan control that runs the fan from it. Neither names hardware:
 # the thermal zone is read through sysfs, and the fan control is built from the devices above.
