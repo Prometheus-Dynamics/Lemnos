@@ -160,8 +160,13 @@ before reading. Where each contract gives it:
 | `camera.frames/1` | `frame_stream` | `format`: `FrameFormat::max_frame_bytes` |
 | `camera.isp/1` | `config_stream` | `config_layout`: `ConfigLayout::bytes` |
 | `camera.isp/1` | `statistics_stream` | `info`: `IspInfo::statistics_bytes` |
-| `camera.isp/1` | `output_stream` | `set_output` returns `OutputLayout::size`, the most bytes an image takes |
-| `camera.isp/1` | `input_stream` | Not stated by the contract yet: `set_input` takes only the frame's size and bit depth, not its packing |
+| `camera.isp/1` | `output_stream` | `set_output` returns `OutputLayout`, and `output_layout` (method 14) answers it again: `stride` and `size`, the most bytes an image takes, padding included. `None` while the output is off |
+| `camera.isp/1` | `input_stream` | `input_layout` (method 13): `stride` and `size` of a raw frame, from `set_input`. `NOT_SUPPORTED` when the frame comes straight from the receiver |
+
+The ISP's configuration rules (which buffer a job may name, when it is read, when it is given
+back) are in the `camera.isp/1` contract's module docs, under "Configuration buffers". The camera
+ISP's job sequence, step by step, as the reference board runs it, is in
+[`drivers/pisp/README.md`](../drivers/pisp/README.md#running-a-job-live).
 
 The job streams (`image.scaler/1`, `image.convert/1`, `image.blend/1`, `codec.block/1`, `npu/1`,
 `usb.function/1`) have no frame size to state: each job names its own layout, offsets and lengths

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_isp::{
     BayerOrder, CameraIsp, Counters, IspInput, IspJob, IspOutput, MAX_STREAM_NAME, NO_BUFFER,
+    OutputLayout,
 };
 use lemnos_contract_isp_isp600::{
     IspIsp600, LAYOUT_LOAD, LAYOUT_STATISTICS, LOAD_RGB_TABLE, Region as WireRegion,
@@ -478,6 +479,58 @@ fn an_output_is_laid_out_by_its_format() {
     d.clear_output(0).unwrap();
 }
 
+#[test]
+fn layouts_are_what_set_output_programs() {
+    let (mut d, _k) = driver(&Streams::new());
+    // The input never sits in a buffer the consumer writes: the receiver owns its layout.
+    assert_eq!(d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+    d.set_input(input()).unwrap();
+    assert_eq!(d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+
+    assert_eq!(d.output_layout(0).unwrap(), None, "before set_output");
+    assert_eq!(d.output_layout(1).unwrap_err(), Status::NOT_FOUND);
+    let set = d.set_output(0, nv12()).unwrap();
+    assert_eq!(d.output_layout(0).unwrap(), Some(set));
+    assert_eq!(
+        d.output_layout(0).unwrap(),
+        Some(OutputLayout {
+            stride: 64,
+            size: 3072
+        })
+    );
+    // Padding the output asked for is in the size, and in nothing else.
+    let padded = IspOutput {
+        fourcc: u32::from_le_bytes(*b"NV16"),
+        pad_bytes: 100,
+        ..nv12()
+    };
+    let set = d.set_output(0, padded).unwrap();
+    assert_eq!(
+        d.output_layout(0).unwrap(),
+        Some(OutputLayout {
+            stride: 64,
+            size: 4196
+        })
+    );
+    assert_eq!(d.output_layout(0).unwrap(), Some(set));
+    // A refused output leaves the one set before it.
+    assert!(
+        d.set_output(
+            0,
+            IspOutput {
+                width: 63,
+                ..nv12()
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(d.output_layout(0).unwrap(), Some(set));
+
+    d.clear_output(0).unwrap();
+    assert_eq!(d.output_layout(0).unwrap(), None, "after clear_output");
+    assert_eq!(d.output_layout(1).unwrap_err(), Status::NOT_FOUND);
+}
+
 // ---- Starting.
 
 #[test]
@@ -816,6 +869,56 @@ fn one_job_runs_at_a_time_and_the_next_waits_on_the_ring() {
         "taken once the first was done"
     );
     assert_eq!(d.counters().unwrap().jobs, 1);
+}
+
+#[test]
+fn a_job_naming_a_config_buffer_in_flight_waits_and_disturbs_nothing() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    streams.config.fill(0, &image(1));
+    post(&streams.config, &job(1, 0, NO_BUFFER));
+    d.tick(1);
+    assert_eq!(k.loads(), vec![image(1)]);
+    // The consumer writes buffer 0 again while job 1 has it, and names it in job 2.
+    streams.config.fill(0, &image(2));
+    post(&streams.config, &job(2, 0, NO_BUFFER));
+    d.tick(2);
+    assert_eq!(
+        k.loads(),
+        vec![image(1)],
+        "job 2 is not taken while job 1 is in flight"
+    );
+    assert_eq!(d.counters().unwrap().dropped, 0);
+
+    // Job 1 completes, untouched: its statistics go out with its identity.
+    k.frame(1, &[1; 8], &[1; 8]);
+    k.frame(2, &[2; 8], &[2; 8]);
+    d.tick(3);
+    assert_eq!(streams.statistics.take_frame().unwrap().identity, 1);
+    assert_eq!(d.counters().unwrap().jobs, 1);
+    // Job 2 is taken once job 1 is done, reading the buffer as it is by then.
+    assert_eq!(k.loads(), vec![image(1), image(2)]);
+}
+
+#[test]
+fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next() {
+    let streams = Streams::new();
+    let (mut d, k) = running(&streams);
+    d.tick(0);
+    streams.config.fill(0, &image(1));
+    post(&streams.config, &job(1, 0, NO_BUFFER));
+    d.tick(1);
+    k.frame(1, &[1; 8], &[1; 8]);
+    k.frame(2, &[2; 8], &[2; 8]);
+    d.tick(2);
+    assert_eq!(d.counters().unwrap().jobs, 1);
+
+    streams.config.fill(0, &image(2));
+    post(&streams.config, &job(2, 0, NO_BUFFER));
+    d.tick(3);
+    assert_eq!(k.loads(), vec![image(1), image(2)]);
+    assert_eq!(d.counters().unwrap().dropped, 0);
 }
 
 #[test]

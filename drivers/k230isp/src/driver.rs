@@ -31,6 +31,20 @@
 //!   job's identity, the frame's number (frames seen leaving the ISP since the driver started)
 //!   and the time the kernel took the frame's interrupt.
 //!
+//! # Configuration buffers
+//!
+//! This driver follows the contract's configuration buffer rules, 2 to 5 (the `# Configuration
+//! buffers` section of the `camera.isp/1` contract). It reads a job's buffer once, when the job is
+//! taken off the ring, into its own copy, and checks and programs from that copy. It accepts one
+//! job at a time and takes the next only when the one with the block has completed, so no two
+//! accepted jobs hold a configuration buffer together: a job that names a buffer the block is
+//! still using waits on the ring and is never refused for it.
+//!
+//! # Layouts
+//!
+//! `input_layout` is `NOT_SUPPORTED`, as `input_stream` is. `output_layout` is `NOT_FOUND` for
+//! every output, since there are none.
+//!
 //! # A job, step by step
 //!
 //! One job is with the block at a time; the next waits on the ring.
@@ -538,6 +552,17 @@ impl CameraIsp for K230Isp {
     }
 
     fn clear_output(&mut self, _output: u8) -> Result<()> {
+        Err(Status::NOT_FOUND)
+    }
+
+    /// `NOT_SUPPORTED`: no raw frame is ever in a buffer this driver's consumer writes (see
+    /// `input_stream`).
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    /// Every output is `NOT_FOUND`: this driver has none (`max_outputs` is 0).
+    fn output_layout(&mut self, _output: u8) -> Result<Option<OutputLayout>> {
         Err(Status::NOT_FOUND)
     }
 

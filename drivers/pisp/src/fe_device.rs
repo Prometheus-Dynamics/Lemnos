@@ -43,6 +43,15 @@
 //! When the frame is finished, its output 0 image, its statistics and its output 1 image are
 //! published on their streams, each with the job's `identity`.
 //!
+//! # Configuration buffers
+//!
+//! The front end follows the contract's rules for configuration buffers (`contracts/camera-isp`,
+//! "Configuration buffers"). A job is accepted when the driver takes it off the ring. It reads
+//! its config buffer once, then holds that buffer busy until the job completes (a frame, or a
+//! drop or error), and a job naming a config buffer that an accepted job still holds is dropped
+//! and counted, with nothing posted, the earlier job undisturbed. A config buffer whose consumer
+//! faulted while it was busy is given up when its job completes.
+//!
 //! # Memory
 //!
 //! Output 0 is written straight into the `output0` buffer a job names. The module's stream is made
@@ -209,12 +218,15 @@ struct Buffers {
     held: [bool; MAX_BUFFERS],
     /// On the block for a job now.
     busy: [bool; MAX_BUFFERS],
+    /// Held and busy when the consumer that had them faulted: given up when the job completes.
+    leaving: [bool; MAX_BUFFERS],
 }
 
 impl Buffers {
     const NONE: Self = Self {
         held: [false; MAX_BUFFERS],
         busy: [false; MAX_BUFFERS],
+        leaving: [false; MAX_BUFFERS],
     };
 
     fn free(&self, buffer: u32) -> bool {
@@ -260,6 +272,8 @@ struct Lent {
 struct InFlight {
     statistics: Option<Lent>,
     output1: Option<Lent>,
+    /// The config buffer the job was accepted with, busy until the job completes.
+    config: u32,
 }
 
 /// The PiSP front end.
@@ -285,7 +299,8 @@ pub struct PispFe {
     counters: Counters,
     /// Where each `output0` buffer is, and whether the module's memory for it is the stream's.
     relay: Relay,
-    /// The `config` buffers the driver holds; never lent, only read.
+    /// The `config` buffers the driver holds, and which an accepted job still holds: a job naming
+    /// one of those is dropped (contract rule 4).
     configs: Buffers,
     /// The `statistics` buffers the driver holds, and which a job has.
     stats: Buffers,
@@ -448,6 +463,22 @@ impl PispFe {
         self.jobs = [None; MAX_BUFFERS];
         self.stats.busy = [false; MAX_BUFFERS];
         self.out1.busy = [false; MAX_BUFFERS];
+        // The jobs that held config buffers are gone with the module's stream.
+        self.configs.busy = [false; MAX_BUFFERS];
+        for buffer in 0..MAX_BUFFERS as u32 {
+            self.let_go_config(buffer);
+        }
+    }
+
+    /// Ends a config buffer's hold by an accepted job, and gives it up if its consumer faulted
+    /// while the job held it. Nothing is behind a faulted consumer's buffer, so this reaches no one.
+    fn let_go_config(&mut self, buffer: u32) {
+        Buffers::set(&mut self.configs.busy, buffer, false);
+        if self.configs.leaving.get(buffer as usize) == Some(&true) {
+            Buffers::set(&mut self.configs.leaving, buffer, false);
+            Buffers::set(&mut self.configs.held, buffer, false);
+            give_up(&mut self.config, buffer);
+        }
     }
 
     fn fail(&mut self, now_ns: u64) -> Option<u64> {
@@ -547,7 +578,12 @@ impl PispFe {
     fn fault_config(&mut self) -> Result<()> {
         self.config.fault_consumer().map_err(|_| Status::IO)?;
         for buffer in 0..MAX_BUFFERS as u32 {
-            if !self.configs.free(buffer) {
+            if self.configs.held.get(buffer as usize) != Some(&true) {
+                continue;
+            }
+            if self.configs.busy.get(buffer as usize) == Some(&true) {
+                // An accepted job still holds it: it is given up when that job completes.
+                Buffers::set(&mut self.configs.leaving, buffer, true);
                 continue;
             }
             // Nothing is behind it, so this reaches no one.
@@ -585,7 +621,10 @@ impl PispFe {
             .unwrap_or(InFlight {
                 statistics: None,
                 output1: None,
+                config: NO_BUFFER,
             });
+        // The job is complete: its config buffer is the consumer's again.
+        self.let_go_config(job.config);
         // The block is done with them: the module has released the job's hold.
         for lent in [job.statistics, job.output1].iter().flatten() {
             self.hw.unregister(lent.region)?;
@@ -666,6 +705,7 @@ impl PispFe {
         let mut flight = InFlight {
             statistics: None,
             output1: None,
+            config: job.config_buffer,
         };
         let mut ranges = [Range::default(); 2];
         let mut count = 0;
@@ -742,6 +782,8 @@ impl PispFe {
                 Buffers::set(&mut self.lendable(which).1.busy, lent.buffer, true);
             }
         }
+        // Held until the job completes: a job naming this config buffer is dropped until then.
+        Buffers::set(&mut self.configs.busy, job.config_buffer, true);
         if let Some(slot) = self.jobs.get_mut(output0 as usize) {
             *slot = Some(flight);
         }
@@ -1085,6 +1127,20 @@ impl CameraIsp for PispFe {
             out.errors = out.errors.saturating_add(block.errors);
         }
         Ok(out)
+    }
+
+    /// `None` before `set_input`, then `NOT_SUPPORTED`: the front end's frames come from the
+    /// receiver, and the driver programs no stride for them (`input_stream` is refused too).
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        if self.input.is_none() {
+            return Ok(None);
+        }
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>> {
+        let branch = self.branch(output)?;
+        Ok(self.outputs[branch].map(|out| out.layout))
     }
 }
 

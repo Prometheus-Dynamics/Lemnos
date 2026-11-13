@@ -16,6 +16,40 @@
 //!
 //! Units: sizes in pixels and lines, `stride` and `size` and `bytes` in bytes, `fourcc` the
 //! little-endian four-character code of the pixel format.
+//!
+//! # Layouts
+//!
+//! A consumer sizes and checks its buffers from the contract alone. [`CameraIsp::input_layout`]
+//! is the layout the ISP reads a raw frame in, from `set_input`; [`CameraIsp::output_layout`] (or
+//! the answer of `set_output`) is the layout it writes one output's image in. A frame in an input
+//! buffer is `size` bytes at most, laid out at `stride` bytes a line; an output buffer is written
+//! the same way. A layout is `None` until the input or output it describes is set, and after an
+//! output is cleared. A driver's layouts are fixed while stopped: `set_input` and `set_output`
+//! change them, and the job names the layout it was built for.
+//!
+//! # Configuration buffers
+//!
+//! The config stream's buffers hold configurations, and each job names one. The rules, which every
+//! driver of this contract follows:
+//!
+//! 1. The consumer writes a configuration into config buffer `n` before it posts the job that names
+//!    `n`, and does not write `n` again until that job has completed (a frame, a drop or an error
+//!    is published for it). That is the stream rule for every buffer; nothing here relaxes it.
+//! 2. The driver reads config buffer `n` once, when it takes the job, copies it into its own memory,
+//!    checks the copy, and programs the block from the copy. It never reads the buffer again and
+//!    never keeps a pointer into it. A write to `n` after the take changes nothing the job runs.
+//! 3. There is no separate return message. The driver holds the config buffers from `start` to
+//!    `stop`. A config buffer is busy from the moment its job is accepted until the job completes,
+//!    and the consumer may write it and post another job naming it once that job has completed.
+//! 4. A job is accepted when the driver takes it off the config stream's ring. When it is accepted,
+//!    a job that names a config buffer an earlier accepted job still holds is dropped and counted in
+//!    [`Counters::dropped`], as for every other buffer, and nothing is published for it. A driver
+//!    that accepts one job at a time, waiting for each to complete before it takes the next, never
+//!    drops a job this way: its jobs wait on the ring instead. Either way the earlier job is not
+//!    disturbed.
+//! 5. A write that overlaps the take (rule 1 broken) is not refused: the copy is checked like any
+//!    other, so the job runs with what the driver copied or is dropped if the copy fails a check.
+//!    It never runs unchecked, and the consumer learns what ran from its completion only.
 
 #![no_std]
 
@@ -70,12 +104,13 @@ pub struct IspOutput {
     pub pad_bytes: u32,
 }
 
-/// How an output writes each image.
+/// The layout of one image in a buffer: an input frame ([`CameraIsp::input_layout`]) or an
+/// output's image ([`CameraIsp::set_output`], [`CameraIsp::output_layout`]).
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OutputLayout {
-    /// Bytes per line.
+    /// Bytes per line in a buffer, as the block reads or writes them: padding included.
     pub stride: u32,
-    /// Bytes per image at most.
+    /// Bytes per image at most: every plane of the image, and the `pad_bytes` an output asked for.
     pub size: u32,
 }
 
@@ -144,4 +179,13 @@ pub trait CameraIsp {
     fn stop(&mut self) -> Result<()>;
     #[method(12)]
     fn counters(&mut self) -> Result<Counters>;
+    /// The layout a raw frame takes in an input buffer, from `set_input`: `stride` and `size`. `None`
+    /// before `set_input`. `NOT_SUPPORTED` when the frame comes straight from the receiver, which
+    /// owns its layout (see `input_stream`).
+    #[method(13)]
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>>;
+    /// The layout of one output's image, from `set_output`: `stride` and `size`. `None` before the
+    /// output is set and after `clear_output`. `NOT_FOUND` past the last output.
+    #[method(14)]
+    fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>>;
 }

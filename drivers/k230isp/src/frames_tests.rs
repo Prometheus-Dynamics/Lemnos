@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_isp::{
-    BayerOrder, CameraIsp, IspInput, IspJob, IspOutput, MAX_STREAM_NAME, NO_BUFFER,
+    BayerOrder, CameraIsp, IspInput, IspJob, IspOutput, MAX_STREAM_NAME, NO_BUFFER, OutputLayout,
 };
 use lemnos_core::{Encode, Health, Lifecycle, Status, Writer};
 use lemnos_driver_k230isp_sys::regs::{AE_H_SIZE, AE_V_SIZE, ISP_AWB_GAIN_RB, ISP_CTRL};
@@ -682,6 +682,120 @@ fn a_frame_comes_out_when_the_next_job_takes_the_path() {
     assert_eq!((image.buffer, image.identity, image.sequence), (1, 71, 1));
     // The same memory is imported once.
     assert_eq!(rig.played.log().imports.len(), 2);
+}
+
+#[test]
+fn input_and_output_layouts_are_what_is_set_and_none_before_or_after() {
+    let mut rig = Rig::new();
+    assert_eq!(rig.d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+    assert_eq!(rig.d.output_layout(0).unwrap(), None, "before set_output");
+    assert_eq!(rig.d.output_layout(1).unwrap_err(), Status::NOT_FOUND);
+    rig.d.set_input(input()).unwrap();
+    assert_eq!(rig.d.input_layout().unwrap_err(), Status::NOT_SUPPORTED);
+    assert_eq!(
+        rig.d.output_layout(0).unwrap(),
+        None,
+        "input is not an output"
+    );
+    let nv12 = OutputLayout {
+        stride: WIDTH,
+        size: LUMA + CHROMA,
+    };
+    let answered = rig.d.set_output(0, image(NV12)).unwrap();
+    assert_eq!(answered, nv12);
+    assert_eq!(rig.d.output_layout(0).unwrap(), Some(nv12));
+    // The padding the output asked for is in the size, not the stride.
+    let padded = OutputLayout {
+        stride: WIDTH,
+        size: 2 * LUMA + 100,
+    };
+    let answered = rig
+        .d
+        .set_output(
+            0,
+            IspOutput {
+                pad_bytes: 100,
+                ..image(NV16)
+            },
+        )
+        .unwrap();
+    assert_eq!(answered, padded);
+    assert_eq!(rig.d.output_layout(0).unwrap(), Some(padded));
+    // While running it is the same.
+    rig.d.clear_output(0).unwrap();
+    assert_eq!(rig.d.output_layout(0).unwrap(), None, "after clear_output");
+    rig.configure();
+    rig.d.start().unwrap();
+    assert_eq!(rig.d.output_layout(0).unwrap(), Some(nv12));
+    // The planes of a job's image fit in the size the layout gives.
+    rig.post(1, 0, &[], 0);
+    rig.tick();
+    let ran = rig.jobs().pop().unwrap();
+    let end = ran.addrs.iter().map(|a| a.offset + a.bytes).max().unwrap();
+    assert!(end <= u64::from(nv12.size), "{end}");
+    assert_eq!(rig.d.output_layout(1).unwrap_err(), Status::NOT_FOUND);
+    rig.d.stop().unwrap();
+    // A refused output changes nothing: the layout set before stays.
+    let refused = IspOutput {
+        width: 0,
+        ..image(NV12)
+    };
+    assert_eq!(
+        rig.d.set_output(0, refused).unwrap_err(),
+        Status::INVALID_ARGUMENT
+    );
+    assert_eq!(rig.d.output_layout(0).unwrap(), Some(nv12));
+}
+
+#[test]
+fn a_config_buffer_a_job_in_flight_holds_drops_a_job_that_names_it() {
+    let mut rig = Rig::running();
+    rig.post(1, 0, &[(AE_H_SIZE, 1)], 0);
+    rig.tick();
+    rig.played.end(Ok(FRAME_END));
+    // Job 2 names buffer 0, which job 1 still holds (its image is not out). The consumer writes
+    // nothing to buffer 0 here.
+    post(&rig.config, &job(2, 0, 1));
+    rig.tick();
+    assert_eq!(rig.counters(), (0, 1, 0), "job 2 refused");
+    assert_eq!(
+        rig.played.log().starts,
+        1,
+        "nothing of job 2 went to the module"
+    );
+    assert!(rig.output.take_frame().is_none());
+    // Job 3 takes the path at job 1's frame end: job 1's image comes out with its identity.
+    rig.post(3, 1, &[], 1);
+    rig.played.end(Ok(FRAME_END));
+    rig.tick();
+    rig.tick();
+    let image = rig.output.take_frame().unwrap();
+    assert_eq!((image.buffer, image.identity), (0, 1));
+    assert_eq!(rig.counters(), (1, 1, 0));
+    assert_eq!(rig.played.log().starts, 2);
+    assert_eq!(rig.played.log().configs.len(), 2, "jobs 1 and 3 only");
+}
+
+#[test]
+fn a_config_buffer_rewritten_after_its_job_completes_is_read_by_the_next_job() {
+    let mut rig = Rig::running();
+    rig.post(1, 0, &[(AE_H_SIZE, 1)], 0);
+    rig.tick();
+    rig.played.end(Ok(FRAME_END));
+    rig.post(2, 1, &[(AE_H_SIZE, 2)], 1);
+    rig.tick();
+    // Job 2's frame end completes job 1, whose image comes out.
+    rig.played.end(Ok(FRAME_END));
+    rig.tick();
+    assert_eq!(rig.output.take_frame().unwrap().identity, 1);
+    // Job 1 is complete: buffer 0 may be written again and named.
+    rig.post(3, 0, &[(AE_H_SIZE, 3)], 2);
+    rig.tick();
+    assert_eq!(rig.played.log().starts, 3);
+    assert_eq!(
+        rig.played.log().configs.last().unwrap(),
+        &vec![w(AE_H_SIZE, 3)]
+    );
 }
 
 #[test]

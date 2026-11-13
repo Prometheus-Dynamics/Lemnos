@@ -828,6 +828,7 @@ fn a_buffer_given_back_and_named_again_within_one_pump_completes_its_job() {
     let mut be = driver(&host, &hw);
     CameraIsp::start(&mut be).unwrap();
     app.lock().unwrap().config.fill(0, &config_for(0x11));
+    app.lock().unwrap().config.fill(1, &config_for(0x11));
     let frame_a = app.lock().unwrap().give_input(0, 1);
     let frame_b = app.lock().unwrap().give_input(1, 2);
     let frame_x = app.lock().unwrap().give_input(2, 3);
@@ -838,7 +839,8 @@ fn a_buffer_given_back_and_named_again_within_one_pump_completes_its_job() {
     let now = be.tick(now).unwrap();
 
     // Job X is queued before the pump. When the pump posts X to the block, the consumer pops
-    // A's frame, gives buffer 0 back and names it in job B, all before the pump reads B.
+    // A's frame, gives buffer 0 back and names it in job B, all before the pump reads B. Job X
+    // holds configuration buffer 0, so job B names configuration buffer 1 (the same contents).
     app.lock().unwrap().config.post(2, 0, 2, 1);
     let shared = Arc::clone(&app);
     hw.hook_after_post(2, move || {
@@ -847,7 +849,7 @@ fn a_buffer_given_back_and_named_again_within_one_pump_completes_its_job() {
         assert_eq!((frame.buffer, frame.identity), (0, 1));
         assert!(app.output.read(frame.buffer, frame.bytes) == expected(&frame_a, 0x11));
         assert!(app.output.ring.release(frame.buffer, frame.fence).unwrap());
-        app.config.post(3, 0, 1, 0);
+        app.config.post(3, 1, 1, 0);
     });
     let now = be.tick(now).unwrap();
     be.tick(now).unwrap();

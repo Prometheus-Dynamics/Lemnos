@@ -18,6 +18,17 @@
 //!   layout `isp.isp600/1` describes.
 //! - `output0`: the image; a job names a buffer from those the stream has handed this driver.
 //!
+//! Layouts: `output_layout` is the stride and size `set_output` programmed, with the padding the
+//! output asked for; `None` until it is set and after `clear_output`. `input_layout` is
+//! `NOT_SUPPORTED`: the raw frame comes straight from the receiver and `input_stream` is refused.
+//!
+//! Config buffers follow the contract's rules (its `# Configuration buffers`). The driver holds
+//! them from `start` to `stop` and reads a job's buffer once, when it accepts the job. Only one
+//! job is accepted at a time, and the next is read off the ring only when the one in flight has
+//! completed, so a buffer is busy for exactly that job and no second job takes it meanwhile. A
+//! job naming a busy buffer therefore waits on the ring, rather than being dropped as the contract
+//! words it; the earlier job is not disturbed.
+//!
 //! Everything published carries the job's identity, the kernel's frame count (widened to 64
 //! bits) and, for images, the frame's timestamp.
 //!
@@ -882,6 +893,21 @@ impl CameraIsp for Isp600 {
 
     fn counters(&mut self) -> Result<Counters> {
         Ok(self.counters)
+    }
+
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        // The raw frame comes straight from the receiver, which owns its layout: no buffer holds it.
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>> {
+        if output != 0 {
+            return Err(Status::NOT_FOUND);
+        }
+        Ok(self.output.map(|o| OutputLayout {
+            stride: o.stride,
+            size: o.stream_bytes,
+        }))
     }
 }
 

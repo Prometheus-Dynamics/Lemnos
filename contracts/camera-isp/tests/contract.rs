@@ -117,6 +117,8 @@ fn the_tag_and_numbers_are_stable() {
             ("start", 10),
             ("stop", 11),
             ("counters", 12),
+            ("input_layout", 13),
+            ("output_layout", 14),
         ]
     );
     for i in [5, 6, 7, 8] {
@@ -278,6 +280,23 @@ impl CameraIsp for Mock {
     fn counters(&mut self) -> Result<Counters> {
         Ok(Counters::default())
     }
+
+    fn input_layout(&mut self) -> Result<Option<OutputLayout>> {
+        Ok(self.input.map(|i| OutputLayout {
+            stride: i.width * 2,
+            size: i.width * 2 * i.height,
+        }))
+    }
+
+    fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>> {
+        if output >= 2 {
+            return Err(Status::NOT_FOUND);
+        }
+        Ok(self.outputs[usize::from(output)].map(|o| OutputLayout {
+            stride: o.width,
+            size: o.width * o.height + o.pad_bytes,
+        }))
+    }
 }
 
 fn client() -> Bound<dyn CameraIsp, Direct<Mock>> {
@@ -336,4 +355,46 @@ fn input_cannot_change_while_streaming() {
     assert_eq!(isp.set_input(IspInput::default()), Err(Status::BUSY));
     assert_eq!(isp.stop(), Ok(()));
     assert_eq!(isp.set_input(IspInput::default()), Ok(()));
+}
+
+#[test]
+fn layouts_answer_what_was_set_and_none_until_then() {
+    let mut c = client();
+    assert_eq!(c.input_layout(), Ok(None));
+    assert_eq!(c.output_layout(0), Ok(None));
+    assert_eq!(c.output_layout(2), Err(Status::NOT_FOUND));
+    c.set_input(IspInput {
+        width: 640,
+        height: 480,
+        bit_depth: 10,
+        bayer: BayerOrder::default(),
+    })
+    .unwrap();
+    c.set_output(
+        1,
+        IspOutput {
+            width: 640,
+            height: 480,
+            fourcc: 0,
+            pad_bytes: 16,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        c.input_layout(),
+        Ok(Some(OutputLayout {
+            stride: 1280,
+            size: 614_400
+        }))
+    );
+    assert_eq!(
+        c.output_layout(1),
+        Ok(Some(OutputLayout {
+            stride: 640,
+            size: 307_216
+        }))
+    );
+    assert_eq!(c.output_layout(0), Ok(None));
+    c.clear_output(1).unwrap();
+    assert_eq!(c.output_layout(1), Ok(None));
 }
