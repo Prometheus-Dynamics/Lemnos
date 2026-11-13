@@ -568,6 +568,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-contract-named-files"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+]
+
+[[package]]
 name = "lemnos-contract-npu"
 version = "2.0.1-dev"
 dependencies = [
@@ -1084,6 +1091,16 @@ dependencies = [
  "lemnos-measure",
  "lemnos-sim",
  "lemnos-wire",
+]
+
+[[package]]
+name = "lemnos-driver-named-files"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-contract-named-files",
+ "lemnos-core",
+ "lemnos-linux-sys",
+ "lemnos-slot-store",
 ]
 
 [[package]]
@@ -1952,6 +1969,7 @@ dependencies = [
  "lemnos-driver-k230-vpu",
  "lemnos-driver-k230isp",
  "lemnos-driver-m2m-decode",
+ "lemnos-driver-named-files",
  "lemnos-driver-nonai2d",
  "lemnos-driver-orientation",
  "lemnos-driver-ov9782",

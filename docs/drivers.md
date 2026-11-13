@@ -67,6 +67,7 @@ python3 scripts/generate-builtins.py --check
 | `system-flash` | `system.flash/1` | `path` (the one target), `allow_first_flash`, `kind` (`block`, `file`, `mtd`), `image` and `mark_bad` (mtd), `max_dict_mb` (1 to 8), `keys`, `require_signed`, `mountinfo` in `config`; an optional `indicator` need (`docs/slots.md`, "First flash") | Serves its contract. Writes a whole first-flash image, streamed through `data` (or from a bridge's stream), decoded on the board (xz with a pure-Rust streaming decoder: one image stream and an optional signature-record stream; or raw), checked against its manifest's SHA-256 and size, its record checked against the one given, and re-read as a partition table. A signed image is verified against the board's keys with the signed message the board rebuilds; the policy (`require_signed`) is in `docs/slots.md`, "First flash". Refused unless `allow_first_flash` is set, on the running system's device, and for an image larger than the target. Raw NAND (`kind = "mtd"`): one driver per partition, bad blocks and erase through `drivers/system-flash-sys`, every block read back, UBI erase counts carried forward (`docs/slots.md`, "Raw NAND"). Untested on board (`W1.md`, `W1b.md`) |
 | `system-identity` | `system.identity/1` | nothing; `serial` source, `name`, `revision`, `data` in `config`; the family is the board's `[board] id` | Serves the board's identity facts: `serial`, `family`, `model` and the running slot's `version.slot`, `version.product`, `version.os`. Binds fail when a serial source cannot be read, so the host retries. Untested on board (`P1.md`) |
 | `system-reboot` | `system.reboot/1` | `data` (the data partition, `/data` by default) | Serves its contract. Leaves the caller's request for the boot history, then runs `systemctl reboot` |
+| `named-files` | `lemnos.files/1` | `data`, `boot`, `sys_block`, `module`, and the image's `tree_overlay`, `tree_boot`, `tree_modprobe` paths (all optional, with the defaults `docs/daemon.md` gives) | Serves the `lemnos/` names (`docs/daemon.md`, "Named files"): each is a snapshot taken when a reader opens it, read in pieces, and closed. Lists what it serves in `lemnos/index` |
 
 ## USB
 
@@ -278,6 +279,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `system.flash/1` | 1 info, 2 manifest, 3 write (a long job), 4 data, 5 verify (a long job) | `system-flash` |
 | `system.slots/1` | 1 list, 2 install (a long job), 3 write, 4 set_default, 5 trial, 6 confirm, 7 remove, 8 pin, 9 set_keep, 10 accept, 11 install_file (a long job), 12 boots (the boot history) | `system-slots` |
 | `system.reboot/1` | 1 reboot | `system-reboot` |
+| `lemnos.files/1` | 1 index, 2 open, 3 size, 4 read, 5 close | `named-files` |
 
 A camera is not one contract. A consumer finds a `camera.sensor/1` device and follows the board
 file's `link` to its receiver and from there to its ISP. A USB camera is one device with

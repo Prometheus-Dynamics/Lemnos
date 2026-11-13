@@ -335,6 +335,43 @@ error numbers, and Lemnos's own codes below -4095:
 | -110 | `TIMED_OUT` | The call ran past its deadline: 2 s, or the board file's `call_deadline_ms` |
 | -4099 | `PANIC` | The driver panicked in the call. It has been dropped and will be bound again |
 
+## Named files (`lemnos/`)
+
+The `named-files` driver serves the `lemnos/` names, which are Lemnos's own knowledge of the board. A
+client (the Orion bridge, `lemnos-ctl`) gets a file by opening its name, reading it in pieces and
+closing it: the contract is `lemnos.files/1`.
+
+A file is a snapshot taken when it is opened, so its bytes are fixed for the transfer's life: a resumed
+read and a digest over it agree. At most four snapshots are open at once. Each name has a bound in bytes;
+a file over it is refused, never cut short. A name the node does not serve is refused by name.
+
+`lemnos/index` is the index, in Orion's text format (`orion-index 1`):
+
+```text
+orion-index 1
+total <bytes>
+<name> <max_bytes> user-data|no-user-data
+```
+
+`total` is the sum of the listed names' bounds. The index lists the names served now, not every name
+the driver knows: a name whose source is absent (a tree file whose key is unset, a boot history with no
+boot in it yet) is not listed and is refused when asked for.
+
+| Name | Source | Bound | User data |
+| --- | --- | --- | --- |
+| `lemnos/boots` | the boot history (`docs/slots.md`, "Boot history") | 16 KiB | no |
+| `lemnos/storage` | statvfs of the data and boot partitions; `life_time` and `pre_eol_info` of each `mmcblk*` device | 4 KiB | no |
+| `lemnos/trial-reason` | the boot partition's `trial-reason`, when present | 4 KiB | no |
+| `lemnos/tree/overlay.dts` | the file `tree_overlay` names | 256 KiB | no |
+| `lemnos/tree/boot.txt` | the file `tree_boot` names | 64 KiB | no |
+| `lemnos/tree/modprobe.conf` | the file `tree_modprobe` names | 16 KiB | no |
+| `lemnos/kernel` | the lemnos module's parameters, `name=value` sorted by name; absent while the module is not loaded | 16 KiB | no |
+| `lemnos/index` | this index; always readable, and not listed in itself | 2 KiB | no |
+
+Not yet served (later PRs of I6f): `lemnos/log`, `lemnos/board.toml`, `lemnos/description`,
+`lemnos/slots`, `lemnos/identity`, `lemnos/versions`, `lemnos/self-test` (waits for PR X1). Nothing is
+read in the background; each name is read when it is opened.
+
 ## lemnos-orion
 
 `service/orion` builds `lemnos-orion`, a bridge that offers every device the daemon serves to an
