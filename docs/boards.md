@@ -80,6 +80,19 @@ and a longer value is refused. There is no host-wide auto-off: only a device's o
 identity from its device's `config`: the serial source, the display name and the revision. See
 [Identity facts](identity.md#serial-source-settings).
 
+## The device tree
+
+Three keys describe the hardware for the device tree generator (`lemnos-ctl tree`, see
+[the device tree](device-tree.md)). The daemon reads them and does not use them. They are optional:
+a board that has none runs as before.
+
+| Key | Meaning |
+|---|---|
+| `[board] soc` | The name of the SoC map the board is built for (`socs/<soc>.toml`) |
+| `[board] base` | The base tree the board boots, by its name in that map. Only when a base node holds a line the board uses |
+| `[[hardware]]` | One piece of hardware a device uses: `controller` (the map's name), `name` (the runtime name a device uses for it, if any), `pins` (the map's pin set, where the controller has several) |
+| `[[lines]]` | A GPIO line the board gives to Lemnos, as `chip:N`. `boot` (`"low"` or `"high"`) holds it from power-on, with the `reason` it is held |
+
 ## `bus` and `uses`
 
 A driver names what it needs: `bus`, `line`, `accel`, `frames`. The host fills each need in this

@@ -1,0 +1,103 @@
+# The SoC map for bcm2712 with RP1. Data only: `lemnos-ctl tree` and
+# `lemnos-ctl validate` read it, and nothing in the daemon does.
+#
+# Every path is a node of the compiled base tree (a bcm2712 module on an IO board, built as its own tree). A live tree has no
+# labels, so each node is named by its path. A pin set also has its label, which an overlay refers to:
+# the base tree keeps the labels in its symbols. The paths of the RP1 nodes are the `rp1` ones.
+soc = "bcm2712-rp1"
+
+# The I2C buses. The kernel numbers an I2C adapter by its alias `i2cN`, so the board's `i2c-N`
+# comes out of that alias.
+[controllers.i2c0]
+kind = "i2c"
+path = "/axi/pcie@1000120000/rp1/i2c@70000"
+alias = "i2c0"
+reason = "an I2C bus on RP1 (designware); the board's i2c-0"
+[controllers.i2c0.pins.gpio0_1]
+label = "rp1_i2c0_0_1"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c0_0_1"
+gpios = [0, 1]
+[controllers.i2c0.pins.gpio8_9]
+label = "rp1_i2c0_8_9"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c0_8_9"
+gpios = [8, 9]
+
+[controllers.i2c1]
+kind = "i2c"
+path = "/axi/pcie@1000120000/rp1/i2c@74000"
+alias = "i2c1"
+reason = "an I2C bus on RP1 (designware); the board's i2c-1"
+[controllers.i2c1.pins.gpio2_3]
+label = "rp1_i2c1_2_3"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c1_2_3"
+gpios = [2, 3]
+[controllers.i2c1.pins.gpio10_11]
+label = "rp1_i2c1_10_11"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c1_10_11"
+gpios = [10, 11]
+
+[controllers.i2c2]
+kind = "i2c"
+path = "/axi/pcie@1000120000/rp1/i2c@78000"
+alias = "i2c2"
+reason = "an I2C bus on RP1 (designware); the board's i2c-2"
+[controllers.i2c2.pins.gpio4_5]
+label = "rp1_i2c2_4_5"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c2_4_5"
+gpios = [4, 5]
+[controllers.i2c2.pins.gpio12_13]
+label = "rp1_i2c2_12_13"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_i2c2_12_13"
+gpios = [12, 13]
+
+# The SoC's own I2C controller. The camera sensor sits on it in the board runs; its alias is in the
+# base tree already, so it needs no pin set.
+[controllers.i2c10]
+kind = "i2c"
+path = "/soc@107c000000/i2c@7d005600"
+alias = "i2c10"
+reason = "the SoC's own I2C controller, the camera sensor's bus (the board's i2c-10)"
+
+# The PWM channel on GPIO45, the fan header's line. A channel is named by the backend, so the
+# generator enables the block and its pin function and makes no name.
+[controllers.pwm1]
+kind = "pwm"
+path = "/axi/pcie@1000120000/rp1/pwm@9c000"
+reason = "a PWM channel on RP1; the fan's pulse output"
+[controllers.pwm1.pins.gpio45]
+label = "rp1_pwm1_gpio45"
+path = "/axi/pcie@1000120000/rp1/gpio@d0000/rp1_pwm1_gpio45"
+gpios = [45]
+
+# The PIO block. A `pio-out` or `pio-i2c` name needs it enabled; the pins are claimed at run
+# time by the driver, so no pin set is written here.
+[controllers.pio]
+kind = "pio"
+path = "/axi/pcie@1000120000/rp1/pio@178000"
+reason = "the RP1 PIO block, which the module's state machines and the PIO I2C bus run on"
+
+# The CSI-2 receiver with no sensor node: the sensor is Lemnos's, and the receiver is the module's.
+[controllers.csi0]
+kind = "csi"
+path = "/axi/pcie@1000120000/rp1/csi@110000"
+sysfs = "1f00110000.csi"
+stock_driver = "rp1-cfe"
+reason = "the camera receiver; the module drives it, and the stock receiver driver must not bind"
+
+# The SoC's USB controller in peripheral mode, for a gadget (`udc:` names).
+[controllers.usb]
+kind = "usb-peripheral"
+path = "/axi/usb@480000"
+reason = "the SoC's USB controller in peripheral mode, for a USB gadget"
+
+# The hardware watchdog. Enabled on a managed board: a board file with this entry has it.
+[controllers.watchdog]
+kind = "watchdog"
+path = "/soc@107c000000/watchdog@7d200000"
+reason = "the hardware watchdog, on for a managed board"
+
+# What the base tree does with the lines the board may give to Lemnos. A line the board lists
+# that a base node holds is disabled in the overlay: the node is the one that drives the line.
+[bases.module-io.lines."rp1:34"]
+holders = ["/cam0_reg"]
+reason = "the camera power regulator's enable pin (RP1 GPIO34); a Lemnos power switch drives it"

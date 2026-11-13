@@ -111,6 +111,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`B14.md`](../testing/board-runs/B14.md) | `fan-control`: curve, slew, hold, a failed sensor, restart |
 | [`B15.md`](../testing/board-runs/B15.md) | `gpio-power-switch`: two USB port power lines |
 | [`B16.md`](../testing/board-runs/B16.md) | `ws2812`: bit timing, colour order, reset between frames |
+| [`Q2.md`](../testing/board-runs/Q2.md) | the device-tree overlay from the board file: compiled and applied to the base tree; the boot fragment |
 | [`B17.md`](../testing/board-runs/B17.md) | `status-light`: looks, layers, frame interval, idle cost |
 | [`B21.md`](../testing/board-runs/B21.md) | `vcm`: move, clamp, settle time |
 | [`E24.md`](../testing/board-runs/E24.md) | `hw-watchdog`: arming, feed cadence, the reset when feeding stops |

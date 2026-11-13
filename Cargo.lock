@@ -651,11 +651,21 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-core",
+ "lemnos-devtree",
  "lemnos-fake-devices",
  "lemnos-host",
  "lemnos-sim",
  "lemnos-wire",
  "lemnosd",
+]
+
+[[package]]
+name = "lemnos-devtree"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-host",
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -1747,6 +1757,7 @@ dependencies = [
  "lemnos-client",
  "lemnos-contract-usb-function",
  "lemnos-core",
+ "lemnos-devtree",
  "lemnos-driver-a733-di",
  "lemnos-driver-a733-video",
  "lemnos-driver-bmi088",

@@ -24,8 +24,12 @@ lemnos-ctl [--socket PATH] COMMAND
                                  the tool cancels it)
   off DEVICE | on DEVICE
   packages                       driver packages: which loaded, which were refused and why
-  validate BOARD                 check a board file and show the host settings it gives, with no
-                                 daemon";
+  validate [--socs DIR] [--no-live] BOARD
+                                 check a board file and show the host settings it gives, with no
+                                 daemon; with a `soc`, also check the live device tree against it
+  tree [--socs DIR | --map FILE] BOARD [-o FILE] [--boot FILE]
+                                 write the device-tree overlay for a board (stdout by default),
+                                 and its firmware boot fragment, with no daemon";
 
 const DEFAULT_SOCKET: &str = "/run/lemnos/lemnosd.sock";
 const REPLY_MAX: usize = 64 * 1024;
@@ -80,9 +84,17 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
     };
     if command == "validate" {
         return match tail {
-            [board] => validate(board, out),
+            [board] => validate(board, None, true, out),
+            [flag, dir, board] if flag == "--socs" => validate(board, Some(dir), true, out),
+            [flag, board] if flag == "--no-live" => validate(board, None, false, out),
+            [flag, dir, nolive, board] if flag == "--socs" && nolive == "--no-live" => {
+                validate(board, Some(dir), false, out)
+            }
             _ => Err(USAGE.to_string()),
         };
+    }
+    if command == "tree" {
+        return tree(tail, out);
     }
     let client = Client::connect(&socket, "lemnos-ctl").map_err(|e| format!("{socket}: {e}"))?;
     let mut tool = Tool { client, out };
@@ -104,7 +116,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Outcome {
 
 /// Reads and checks the board file at `path` as `lemnosd` would, and prints what the host will
 /// run with: its settings, defaults filled in, and the devices that opted in to auto-off.
-fn validate(path: &str, out: &mut dyn Write) -> Outcome {
+fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> Outcome {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let board = lemnos_host::board::parse(&text).map_err(|e| format!("{path}: {e}"))?;
     // A link names a device of this board, and not the device itself. Whether the two ends agree
@@ -124,6 +136,104 @@ fn validate(path: &str, out: &mut dyn Write) -> Outcome {
             ));
         }
     }
+    let problems = match (&board.board.soc, live) {
+        (Some(_), true) => live_problems(&board, socs)?,
+        _ => Vec::new(),
+    };
+    validate_settings(path, &board, out)?;
+    if !problems.is_empty() {
+        for problem in &problems {
+            line(out, format_args!("live: {problem}"))?;
+        }
+        return Err(format!(
+            "{path}: {} problems with the live system",
+            problems.len()
+        ));
+    }
+    Ok(())
+}
+
+/// The problems the live device tree and platform devices have against the board's hardware.
+fn live_problems(
+    board: &lemnos_host::board::BoardFile,
+    socs: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let map = load_map(board, socs)?;
+    Ok(lemnos_devtree::check(
+        board,
+        &map,
+        &lemnos_devtree::check::Live {
+            tree: std::path::Path::new("/proc/device-tree"),
+            sys: std::path::Path::new("/sys/bus/platform/devices"),
+        },
+    ))
+}
+
+/// The SoC map a board names, read from `socs` (`socs/<soc>.toml`, the repository's folder by
+/// default).
+fn load_map(
+    board: &lemnos_host::board::BoardFile,
+    socs: Option<&str>,
+) -> Result<lemnos_devtree::SocMap, String> {
+    let soc = board.board.soc.as_deref().ok_or("[board] soc is not set")?;
+    let dir = socs.unwrap_or("socs");
+    let path = format!("{dir}/{soc}.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    lemnos_devtree::SocMap::parse(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+/// `tree BOARD [-o FILE] [--boot FILE]`: the overlay and the boot fragment for a board.
+fn tree(args: &[String], out: &mut dyn Write) -> Outcome {
+    let mut socs = None;
+    let mut map_file = None;
+    let mut overlay_out = None;
+    let mut boot_out = None;
+    let mut board_path = None;
+    let mut i = 0;
+    while i < args.len() {
+        let value = args.get(i + 1).cloned();
+        match (args[i].as_str(), value) {
+            ("--socs", Some(dir)) => socs = Some(dir),
+            ("--map", Some(file)) => map_file = Some(file),
+            ("-o", Some(file)) => overlay_out = Some(file),
+            ("--boot", Some(file)) => boot_out = Some(file),
+            (flag, _) if board_path.is_none() && !flag.starts_with('-') => {
+                board_path = Some(flag.to_string());
+                i += 1;
+                continue;
+            }
+            _ => return Err(USAGE.to_string()),
+        }
+        i += 2;
+    }
+    let path = board_path.ok_or_else(|| USAGE.to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let board = lemnos_host::board::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+    let map = match map_file {
+        Some(file) => {
+            let text = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
+            lemnos_devtree::SocMap::parse(&text).map_err(|e| format!("{file}: {e}"))?
+        }
+        None => load_map(&board, socs.as_deref())?,
+    };
+    let generated = lemnos_devtree::generate(&board, &map).map_err(|e| format!("{path}: {e}"))?;
+    match overlay_out {
+        Some(file) => {
+            std::fs::write(&file, &generated.overlay).map_err(|e| format!("{file}: {e}"))?
+        }
+        None => line(out, format_args!("{}", generated.overlay.trim_end()))?,
+    }
+    if let Some(file) = boot_out {
+        std::fs::write(&file, &generated.boot).map_err(|e| format!("{file}: {e}"))?;
+    }
+    Ok(())
+}
+
+fn validate_settings(
+    path: &str,
+    board: &lemnos_host::board::BoardFile,
+    out: &mut dyn Write,
+) -> Outcome {
     let options = board.host.apply(lemnos_host::Options::default());
     line(
         out,

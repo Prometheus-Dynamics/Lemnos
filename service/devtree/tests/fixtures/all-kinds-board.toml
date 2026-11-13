@@ -1,0 +1,62 @@
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "all-kinds"
+soc = "test-soc"
+base = "b"
+
+[[hardware]]
+name = "i2c-0"
+controller = "i2c0"
+pins = "a"
+
+[[hardware]]
+name = "spidev0.0"
+controller = "spi0"
+
+[[hardware]]
+controller = "uart0"
+pins = "a"
+
+[[hardware]]
+controller = "pwm0"
+pins = "a"
+
+[[hardware]]
+controller = "pio"
+
+[[hardware]]
+controller = "csi0"
+
+[[hardware]]
+name = "udc:7000.usb"
+controller = "usb"
+
+[[hardware]]
+controller = "wdt"
+
+[[lines]]
+line = "gpio:9"
+boot = "high"
+reason = "held high from power-on until the fan driver takes it"
+
+[[devices]]
+id = "imu"
+driver = "imu"
+bus = "i2c-0"
+
+[[devices]]
+id = "panel"
+driver = "panel"
+bus = "spidev0.0"
+
+[[devices]]
+id = "ring"
+driver = "ws2812"
+bus = "pio-out:gpio=5"
+
+[[devices]]
+id = "gadget"
+driver = "gadget"
+bus = "udc:7000.usb"

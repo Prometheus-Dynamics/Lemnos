@@ -26,6 +26,33 @@ use lemnosd::{Config, DEFAULT_BOARD, DEFAULT_SOCKET, Service};
 const USAGE: &str = "lemnosd [--sim] [--board PATH] [--socket PATH] [--check] \
      [--packages DIR] [--package-keys FILE] [--package-mode signed|open]";
 
+/// Prints each way the live device tree differs from the board file, from the SoC map the board
+/// names (read from `$LEMNOS_SOCS`, `/usr/share/lemnos/socs` by default). Reports only.
+fn report_live_tree(board: &lemnos_host::board::BoardFile) {
+    let dir = std::env::var("LEMNOS_SOCS").unwrap_or_else(|_| "/usr/share/lemnos/socs".into());
+    let Some(soc) = board.board.soc.as_deref() else {
+        return;
+    };
+    let path = format!("{dir}/{soc}.toml");
+    let map = match std::fs::read_to_string(&path)
+        .map_err(|e| format!("{path}: {e}"))
+        .and_then(|text| lemnos_devtree::SocMap::parse(&text))
+    {
+        Ok(map) => map,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "lemnosd: live tree not checked: {error}");
+            return;
+        }
+    };
+    let live = lemnos_devtree::check::Live {
+        tree: std::path::Path::new("/proc/device-tree"),
+        sys: std::path::Path::new("/sys/bus/platform/devices"),
+    };
+    for problem in lemnos_devtree::check(board, &map, &live) {
+        let _ = writeln!(std::io::stderr(), "lemnosd: live tree: {problem}");
+    }
+}
+
 fn complain(text: &str) -> ExitCode {
     let _ = writeln!(std::io::stderr(), "lemnosd: {text}");
     ExitCode::FAILURE
@@ -116,6 +143,11 @@ fn main() -> ExitCode {
     };
     if check {
         return ExitCode::SUCCESS;
+    }
+    // The live device tree against what the board file needs, when the board names a SoC map. A
+    // mismatch is reported and the daemon starts anyway: nothing here stops or changes hardware.
+    if !sim && board_file.board.soc.is_some() {
+        report_live_tree(&board_file);
     }
     // The root phase: as root, the privileged start, then the drop to the requested user. Without
     // root there is nothing to drop, and the daemon says which capabilities it lacks.
