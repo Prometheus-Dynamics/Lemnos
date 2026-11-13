@@ -40,7 +40,7 @@ In a device:
 | `driver` | The driver's name, as in [Drivers and contracts](drivers.md). An unknown name leaves the device `retrying` with that as its reason |
 | `bus` | The resource this device sits on, by the backend's name for it (below) |
 | `uses` | A table from one of the driver's need names to a device `id` or a resource name |
-| `link` | The `id` of another device this one is wired to. The host only hands it over. `lemnos-ctl chain` follows it |
+| `link` | The `id` of another device this one is wired to. The host only hands it over, and `lemnos-ctl validate` refuses a `link` to a device the board doesn't have. `lemnos-ctl chain` follows it. A driver that needs the link takes it at bind (a `#[link]` field) and confirms it from the hardware side: see [Drivers and contracts](drivers.md#contracts) |
 | `config` | The driver's settings: numbers, booleans and strings. Each driver documents its own |
 | `disabled` | `true` starts the device off. `lemnos-ctl on` turns it on |
 | `auto_off_after` | Opts this device in to being turned off after this many failed binds in a row, at least 1. Left out, it is retried forever. `lemnos-ctl on` brings it back |

@@ -18,7 +18,8 @@ buffers = 8
 buffer_bytes = 2097152
 ```
 
-- **The buffers**: `buffers` of them, each `buffer_bytes` long.
+- **The buffers**: `buffers` of them, each `buffer_bytes` long. [Buffer length](#buffer-length)
+  says how a consumer reads them back.
 - **The ring**: shared memory with three queues. *Frames* go from the driver to the program.
   *Returns* give buffers back. *Jobs* go from the program to the driver.
 - **The doorbell**: an eventfd the daemon rings after each frame, for a program that wants to
@@ -142,6 +143,36 @@ number, in the sensor's own layout, which the sensor's library crate decodes. A 
 captures none answers an empty name. In the tree, no receiver captures embedded lines yet
 (`rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture`), and no sensor on a board carries them, so the
 path is exercised only by the simulated camera. See [Hardware status](hardware-status.md).
+
+## Buffer length
+
+A consumer learns the buffer length from the stream it opened, with nothing from the contract:
+`FrameStream::buffer_len()` is the bytes in each buffer and `buffer_count()` the buffers. Both come
+from the stream's open reply, which carries the board's `buffer_bytes` and `buffers`, so they are the
+same before and after the first frame. A frame's `len()` is at most `buffer_len()`.
+
+The contract says how many bytes a frame takes, so a consumer can check it against that length
+before reading. Where each contract gives it:
+
+| Contract | Stream | Where the frame's size is |
+|---|---|---|
+| `camera.receiver/1` | `frame_stream` | `layout` (method 11), or what `configure` returned: `FrameLayout::size`, the most bytes a frame takes. `layout` answers `None` before `configure` |
+| `camera.frames/1` | `frame_stream` | `format`: `FrameFormat::max_frame_bytes` |
+| `camera.isp/1` | `config_stream` | `config_layout`: `ConfigLayout::bytes` |
+| `camera.isp/1` | `statistics_stream` | `info`: `IspInfo::statistics_bytes` |
+| `camera.isp/1` | `output_stream` | `set_output` returns `OutputLayout::size`, the most bytes an image takes |
+| `camera.isp/1` | `input_stream` | Not stated by the contract yet: `set_input` takes only the frame's size and bit depth, not its packing |
+
+The job streams (`image.scaler/1`, `image.convert/1`, `image.blend/1`, `codec.block/1`, `npu/1`,
+`usb.function/1`) have no frame size to state: each job names its own layout, offsets and lengths
+within the buffers, and the driver checks every one against `buffer_len()` before hardware sees it.
+
+A receiver's frame layout is single-plane. Its `stride` is the bytes per line the block writes,
+padding included, and `size` the frame: `stride` times the lines. `stride` is what the kernel reports
+for the frame or what the block is programmed to write; `sunxi-vin` refuses to start when the kernel
+grants another, and `rkcif` writes its vendor compact lines by rule, which no register reports.
+
+The C API has no frame streams yet, so a C consumer has no buffer length to read.
 
 ## Jobs
 

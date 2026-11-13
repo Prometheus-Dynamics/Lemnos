@@ -3,10 +3,11 @@
 
 use super::*;
 use chip::{CHIP_ID, DEFAULT_ADDRESS, OTP_PROGRAM};
+use lemnos_contract_camera_receiver::CameraReceiver;
 use lemnos_contract_camera_sensor::{
     BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Rect,
 };
-use lemnos_core::{Contract, Driver};
+use lemnos_core::{Config, Contract, Dev, Driver, Health, I2c, Lifecycle, Result, Status};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::i2c::{ErrorType, I2c as HalI2c, Operation};
 use lemnos_hal::mock::{MockI2c, MockOp};
@@ -21,6 +22,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 const ADDR: u8 = DEFAULT_ADDRESS;
+
+/// Health of a sensor bound with no link: nothing to confirm, so degraded, and healthy otherwise.
+pub(crate) const NO_RECEIVER: &str = "the board names no receiver for this sensor";
 
 /// A bus that can fail its Nth transaction from now, and only that one.
 #[derive(Clone)]
@@ -71,6 +75,7 @@ fn sensor_on(bus: &Bus, entries: &[(&str, ConfigValue<'_>)]) -> Ov9782 {
         Ov9782Needs {
             bus: I2c(lemnos_core::Held::boxed(Box::new(bus.clone()))),
             values: None,
+            _receiver: None,
         },
         &Config::new(entries),
     )
@@ -683,7 +688,7 @@ fn recovery_retries_with_backoff_capped_at_8s_never_gives_up_and_clears_on_succe
     clear(&bus);
     assert_eq!(Lifecycle::tick(&mut s, now), None);
     assert_eq!(s.state, State::Streaming);
-    assert_eq!(Driver::health(&s), Health::Ok);
+    assert_eq!(Driver::health(&s), Health::Degraded(NO_RECEIVER));
     let w = writes(&bus);
     assert_eq!(w.first(), Some(&(0x0100, 0x00)));
     assert_eq!(w.last(), Some(&(0x0100, 0x01)));
@@ -1038,4 +1043,92 @@ fn the_sensor_reports_a_linear_gain_law_and_no_embedded_data() {
     assert_eq!(range.law, GainLaw::Linear);
     assert_eq!(range.unity, 0x10);
     assert_eq!(chip::sensor_info().embedded_data, EmbeddedData::None);
+}
+
+/// A receiver whose `source` answers `answer`, as a device the link can reach.
+struct Answers(Result<&'static [u8]>);
+
+impl lemnos_core::Router for Answers {
+    fn call(
+        &self,
+        _device: u32,
+        _method: lemnos_core::MethodId,
+        _args: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize> {
+        let name = self.0?;
+        reply
+            .get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
+    }
+
+    fn health(&self, _device: u32) -> Health {
+        Health::Ok
+    }
+}
+
+/// The receiver the board's link names, answering `answer` to `source`.
+fn linked_receiver(answer: Result<&'static [u8]>) -> Dev<dyn CameraReceiver> {
+    let router: &'static Answers = Box::leak(Box::new(Answers(answer)));
+    lemnos_core::Bound::new(lemnos_core::LocalCaller::new(router, 0, 0))
+}
+
+fn start_linked(answer: Option<Result<&'static [u8]>>) -> Result<Ov9782> {
+    let bus = bus_with_id(0x9782);
+    <Ov9782 as Lifecycle>::start(
+        Ov9782Needs {
+            bus: I2c(lemnos_core::Held::boxed(Box::new(bus.clone()))),
+            values: None,
+            _receiver: answer.map(linked_receiver),
+        },
+        &Config::new(&[]),
+    )
+}
+
+#[test]
+fn a_link_to_a_receiver_with_nothing_wired_fails_the_sensor() {
+    // The board says this sensor feeds that receiver, and the receiver says nothing feeds it.
+    let sensor = start_linked(Some(Ok(b""))).unwrap();
+    assert_eq!(
+        Driver::health(&sensor),
+        Health::Failed("the linked receiver has nothing wired to its input")
+    );
+}
+
+#[test]
+fn a_receiver_fed_by_another_sensor_fails_the_sensor() {
+    let sensor = start_linked(Some(Ok(b"imx219 4-0010"))).unwrap();
+    // This driver knows no kernel name for itself, so it cannot tell a match: unknown, never Ok.
+    assert_eq!(
+        Driver::health(&sensor),
+        Health::Degraded("the kernel does not name this sensor")
+    );
+}
+
+#[test]
+fn a_receiver_that_cannot_say_leaves_the_link_unconfirmed() {
+    let sensor = start_linked(Some(Err(Status::NOT_SUPPORTED))).unwrap();
+    assert_eq!(
+        Driver::health(&sensor),
+        Health::Degraded("the linked receiver cannot say what is wired to its input")
+    );
+}
+
+#[test]
+fn a_board_without_a_link_has_nothing_to_confirm() {
+    let sensor = start_linked(None).unwrap();
+    assert_eq!(
+        Driver::health(&sensor),
+        Health::Degraded("the board names no receiver for this sensor")
+    );
+}
+
+#[test]
+fn a_receiver_that_cannot_be_asked_fails_the_bind_and_is_retried() {
+    assert!(matches!(
+        start_linked(Some(Err(Status::BUSY))),
+        Err(Status::BUSY)
+    ));
 }

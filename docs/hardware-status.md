@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 99 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -174,6 +174,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`H8b.md`](../testing/board-runs/H8b.md) | The K230 ISP through `lemnos.ko`: the main path's register map, frames into dma-bufs, the buffer switch at a frame's end, refusals, a stall reset; `k230-capture` and `k230isp` on one ISP at once |
 | [`E30.md`](../testing/board-runs/E30.md) | `k230-capture`: nodes, the link, guard pages, formats, stop and restart |
 | [`H1.md`](../testing/board-runs/H1.md) | The kernel module's `unconfined=`: the K230 ISP's registers mapped though no IOMMU confines it |
+| [`J1.md`](../testing/board-runs/J1.md) | The sensor's link confirmed from the receiver's `source`, the receiver's `layout` with its stride, and the buffer length a stream reports: each receiver's answer on the reference board |
 
 ## Frame streams on dma-bufs
 

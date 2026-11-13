@@ -49,6 +49,10 @@ use lemnos_core::{Decode, Encode, Field, Reader, Result, Shape, Status, Writer, 
 
 pub use lemnos_contract_camera_receiver::{BayerOrder, LinkConfig};
 
+/// Longest name [`CameraSensor::identity`] answers, in bytes. The same bound a receiver's `source`
+/// answer has.
+pub const MAX_IDENTITY_NAME: usize = lemnos_contract_camera_receiver::MAX_FEED_NAME;
+
 /// A rectangle of the pixel array.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
@@ -272,4 +276,50 @@ pub trait CameraSensor {
     /// 0 turns the pattern off. `INVALID_ARGUMENT` past [`SensorInfo::test_patterns`].
     #[method(11)]
     fn set_test_pattern(&mut self, code: u16) -> Result<()>;
+    /// The sensor's name as the kernel knows it, where the kernel knows it at all: the name a
+    /// receiver's `source` answers for this sensor. Written as UTF-8 into `into`, returning its
+    /// length; `into` holds at least [`MAX_IDENTITY_NAME`] bytes. `NOT_SUPPORTED` when no kernel
+    /// names this sensor, which is unknown and never matches.
+    #[method(12)]
+    fn identity(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+}
+
+/// What a sensor's bind found about the board's `link` to its receiver. Three answers, and only
+/// `Confirmed` is a pass: a consumer must not read `Unknown` as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkCheck {
+    /// The receiver's input is the one this sensor feeds.
+    Confirmed,
+    /// Not confirmed and not refuted; the reason says why.
+    Unknown(&'static str),
+    /// The linked receiver is not the one wired to this sensor; the reason says how.
+    Mismatch(&'static str),
+}
+
+/// Checks a sensor's board link against what its linked receiver answers to `source`.
+///
+/// `answer` is that reply: the name it gave (empty for nothing wired), or the status it refused
+/// with. `identity` is this sensor's own name as the kernel knows it, `None` when no kernel names
+/// it. A refusal other than `NOT_SUPPORTED` is returned as is: the receiver could not be asked,
+/// so the bind is retried and nothing is concluded.
+pub fn check_link(answer: Result<&[u8]>, identity: Option<&[u8]>) -> Result<LinkCheck> {
+    let name = match answer {
+        Ok(name) => name,
+        Err(Status::NOT_SUPPORTED) => {
+            return Ok(LinkCheck::Unknown(
+                "the linked receiver cannot say what is wired to its input",
+            ));
+        }
+        Err(status) => return Err(status),
+    };
+    if name.is_empty() {
+        return Ok(LinkCheck::Mismatch(
+            "the linked receiver has nothing wired to its input",
+        ));
+    }
+    Ok(match identity {
+        None => LinkCheck::Unknown("the kernel does not name this sensor"),
+        Some(own) if own == name => LinkCheck::Confirmed,
+        Some(_) => LinkCheck::Mismatch("the linked receiver is fed by another sensor"),
+    })
 }

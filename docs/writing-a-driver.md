@@ -335,6 +335,12 @@ the driver uses them through the same traits, so a driver crate that is built in
 becomes a package with nothing changed but the export line. `engine/package/tests/ws2812-package`
 is that: its whole source is
 
+A field marked `#[link]` takes the device the board's `link` names, as `Option<Dev<dyn Contract>>`:
+`None` when the board names no link. It is not a need: the manifest doesn't list it and no `uses`
+entry names it. A linked device that isn't running fails the bind, which is retried, as a needed
+device does; one with no such contract fails it too. The check a driver makes with it is the
+driver's: the camera sensors ask their receiver's `source` (see [Drivers and contracts](drivers.md#contracts)).
+
 ```rust
 lemnos_core::export_package!(lemnos_driver_ws2812::Ws2812);
 ```

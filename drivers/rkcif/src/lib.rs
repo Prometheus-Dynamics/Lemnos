@@ -564,4 +564,24 @@ impl CameraReceiver for Rkcif {
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    /// The sensor the graph has upstream of the configured channel's capture node. Unknown without
+    /// a link configured, or when the graph has no sensor on that path.
+    fn source(&mut self, into: &mut [u8]) -> Result<usize> {
+        let link = self.link.ok_or(Status::NOT_SUPPORTED)?;
+        let topology = self.hw.topology()?;
+        let name = route::sensor(&topology, u32::from(link.virtual_channel))
+            .ok_or(Status::NOT_SUPPORTED)?;
+        let name = name.as_bytes();
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
+    }
+
+    fn layout(&mut self) -> Result<Option<FrameLayout>> {
+        self.link
+            .map(|link| layout(&link, self.packing))
+            .transpose()
+    }
 }

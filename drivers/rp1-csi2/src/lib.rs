@@ -445,4 +445,14 @@ impl CameraReceiver for Rp1Csi2 {
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    /// Unknown: the module knows the block, not which sensor the board wires to it. A link the
+    /// board names is confirmed by the sensor's side only where the kernel names that sensor.
+    fn source(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn layout(&mut self) -> Result<Option<FrameLayout>> {
+        Ok(self.layout)
+    }
 }

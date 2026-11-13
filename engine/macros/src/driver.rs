@@ -48,7 +48,20 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
 
     let mut need_idents = Vec::new();
     let mut need_types = Vec::new();
+    // A `#[link]` field takes the device the board's `link` names. It is not a need: the board
+    // gives it no name to `uses`, so it is not in the manifest.
+    let mut link_idents = Vec::new();
+    let mut link_types = Vec::new();
     for field in &mut fields.named {
+        if let Some(position) = field.attrs.iter().position(|a| a.path().is_ident("link")) {
+            if !matches!(field.attrs[position].meta, syn::Meta::Path(_)) {
+                return Err(Error::new(field.attrs[position].span(), "expected #[link]"));
+            }
+            field.attrs.remove(position);
+            link_idents.push(field.ident.clone());
+            link_types.push(field.ty.clone());
+            continue;
+        }
         let Some(position) = field.attrs.iter().position(|a| a.path().is_ident("needs")) else {
             continue;
         };
@@ -94,6 +107,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
         /// What this driver is given when it binds.
         #vis struct #needs_struct {
             #(pub #need_idents: #need_types,)*
+            #(pub #link_idents: #link_types,)*
         }
 
         impl ::lemnos_core::Driver for #name {
@@ -113,6 +127,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
             ) -> ::lemnos_core::Result<Self> {
                 let __needs = #needs_struct {
                     #(#need_idents: <#need_types as ::lemnos_core::Resource>::take(__res, #need_labels)?,)*
+                    #(#link_idents: <#link_types as ::lemnos_core::Resource>::take_link(__res)?,)*
                 };
                 <Self as ::lemnos_core::Lifecycle>::start(__needs, __cfg)
             }
@@ -124,6 +139,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
             ) -> ::lemnos_core::Result<()> {
                 let __needs = #needs_struct {
                     #(#need_idents: <#need_types as ::lemnos_core::Resource>::take(__res, #need_labels)?,)*
+                    #(#link_idents: <#link_types as ::lemnos_core::Resource>::take_link(__res)?,)*
                 };
                 <Self as ::lemnos_core::Lifecycle>::start_in(__place, __needs, __cfg)
             }

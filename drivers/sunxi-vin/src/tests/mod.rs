@@ -1006,3 +1006,38 @@ fn the_contract_answers_the_isp_on_the_way_to_the_node() {
     node.with(|n| n.graph.as_mut().unwrap().capture = 42);
     assert_eq!(CameraReceiver::feeds(&mut d, &mut name), Ok(0));
 }
+
+#[test]
+fn the_contract_answers_the_sensor_on_the_way_to_the_node_or_unknown() {
+    let (mut d, node) = driver(&MockStream::new(1));
+    let mut name = [0u8; 64];
+    node.with(|n| {
+        n.graph = Some(Graph {
+            topology: vin_graph(),
+            capture: 7,
+        });
+    });
+    // The graph names the sensor at the head of the chain.
+    let len = CameraReceiver::source(&mut d, &mut name).unwrap();
+    assert_eq!(&name[..len], b"sensor 3-0010");
+    let mut small = [0u8; 4];
+    assert_eq!(
+        CameraReceiver::source(&mut d, &mut small),
+        Err(Status::BUFFER_TOO_SMALL)
+    );
+    // A node whose chain has no sensor in the graph: the kernel doesn't name one, so unknown,
+    // never an empty answer that would read as nothing wired.
+    node.with(|n| n.graph.as_mut().unwrap().capture = 42);
+    assert_eq!(
+        CameraReceiver::source(&mut d, &mut name),
+        Err(Status::NOT_SUPPORTED)
+    );
+}
+
+#[test]
+fn layout_is_what_configure_set_and_nothing_before() {
+    let (mut d, _node) = driver(&MockStream::new(1));
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(None));
+    let set = d.configure(raw10(), Packing::Unpacked16).unwrap();
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
+}

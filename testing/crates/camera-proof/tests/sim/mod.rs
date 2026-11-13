@@ -363,6 +363,10 @@ impl CameraSensor for SimSensor {
             Err(Status::INVALID_ARGUMENT)
         }
     }
+
+    fn identity(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// Applies a post's controls to the pipeline: each lands by its own delay, or at once (on the next
@@ -584,6 +588,15 @@ impl CameraReceiver for SimReceiver {
             .ok_or(Status::BUFFER_TOO_SMALL)?
             .copy_from_slice(name);
         Ok(name.len())
+    }
+
+    /// The simulated wiring is not described to the kernel, so the link is unknown.
+    fn source(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn layout(&mut self) -> Result<Option<FrameLayout>> {
+        Ok(self.layout)
     }
 }
 

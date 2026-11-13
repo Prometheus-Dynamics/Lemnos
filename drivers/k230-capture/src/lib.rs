@@ -626,6 +626,22 @@ impl CameraReceiver for K230Capture {
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    /// Unknown: the block's driver describes no sensor, so the link is not confirmed from here.
+    fn source(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
+    fn layout(&mut self) -> Result<Option<FrameLayout>> {
+        Ok(self.layout.map(|layout| FrameLayout {
+            width: layout.width,
+            height: layout.height,
+            bit_depth: layout.bit_depth,
+            packing: layout.packing,
+            stride: layout.stride,
+            size: layout.bytes,
+        }))
+    }
 }
 
 const _: () = assert!(RING == 3);

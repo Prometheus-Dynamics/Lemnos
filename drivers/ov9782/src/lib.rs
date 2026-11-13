@@ -78,13 +78,18 @@ use chip::{
     MODE_SELECT, MODES, ModeEntry, PLL2_MULTIPLIER, STANDBY, STREAMING, TEST_PATTERN,
     TEST_PATTERNS,
 };
+use lemnos_contract_camera_receiver::{CameraReceiver, MAX_FEED_NAME};
 use lemnos_contract_camera_sensor::{
-    BayerOrder, CameraSensor, Controls, FrameValues, Mode, SensorInfo,
+    BayerOrder, CameraSensor, Controls, FrameValues, LinkCheck, Mode, SensorInfo, check_link,
 };
 use lemnos_core::{
-    Config, ConfigValue, Decode, Description, Health, I2c, Item, Lifecycle, MethodId, Reader,
+    Config, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Lifecycle, MethodId, Reader,
     Result, Status, StreamHandle, driver,
 };
+
+/// The name the kernel gives this sensor, when some kernel driver binds it. None here: this driver
+/// runs the sensor itself, so no kernel names it, and a link is never confirmed from this side.
+const IDENTITY: Option<&[u8]> = None;
 
 const START: MethodId = MethodId {
     contract: 0,
@@ -171,6 +176,20 @@ impl Current {
     }
 }
 
+/// The bind-time check of the board's link: asks the linked receiver what is wired to its input,
+/// and compares it with this sensor. No link is nothing to confirm; a receiver that can't be asked
+/// fails the bind, which is retried.
+fn link_check(receiver: Option<&mut Dev<dyn CameraReceiver>>) -> Result<LinkCheck> {
+    let Some(receiver) = receiver else {
+        return Ok(LinkCheck::Unknown(
+            "the board names no receiver for this sensor",
+        ));
+    };
+    let mut name = [0; MAX_FEED_NAME];
+    let answer = receiver.source(&mut name).map(|len| &name[..len]);
+    check_link(answer, IDENTITY)
+}
+
 /// An OV9782 sensor.
 #[driver("ov9782", provides = [CameraSensor])]
 pub struct Ov9782 {
@@ -179,6 +198,12 @@ pub struct Ov9782 {
     /// Jobs carrying `FrameValues`, from the consumer. Absent when the board gives no stream.
     #[needs(optional)]
     values: Option<StreamHandle>,
+    /// The receiver the board links this sensor to. Asked once, at bind, whether it is wired to
+    /// this sensor ([`LinkCheck`]); kept so the link stays in the board's hands.
+    #[link]
+    _receiver: Option<Dev<dyn CameraReceiver>>,
+    /// What the bind found about the link; reported by `health`.
+    link_check: LinkCheck,
     address: u8,
     continuous_clock: bool,
     /// The selected mode and its control values in force.
@@ -197,9 +222,13 @@ impl Lifecycle for Ov9782 {
     const TICKS: bool = true;
 
     fn start(needs: Ov9782Needs, cfg: &Config<'_>) -> Result<Self> {
+        let mut needs = needs;
+        let link_check = link_check(needs._receiver.as_mut())?;
         Ok(Self {
             bus: needs.bus,
             values: needs.values,
+            _receiver: needs._receiver,
+            link_check,
             address: address_from_config(cfg)?,
             continuous_clock: continuous_clock_from_config(cfg)?,
             selected: None,
@@ -217,10 +246,16 @@ impl Lifecycle for Ov9782 {
     }
 
     fn health(&self) -> Health {
-        match self.state {
-            State::Recovering { .. } => {
+        // A mismatch is the first thing to report. Recovery, when it's under way, is next; an
+        // unconfirmed link is what remains.
+        if let LinkCheck::Mismatch(reason) = self.link_check {
+            return Health::Failed(reason);
+        }
+        match (self.state, self.link_check) {
+            (State::Recovering { .. }, _) => {
                 Health::Degraded("bus error while streaming: restarting the sensor")
             }
+            (_, LinkCheck::Unknown(reason)) => Health::Degraded(reason),
             _ => Health::Ok,
         }
     }
@@ -611,6 +646,15 @@ impl CameraSensor for Ov9782 {
             }
             Err(status) => Err(self.fail(status)),
         }
+    }
+
+    /// The kernel names this sensor only when a kernel driver binds it, and this one has none.
+    fn identity(&mut self, into: &mut [u8]) -> Result<usize> {
+        let name = IDENTITY.ok_or(Status::NOT_SUPPORTED)?;
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
     }
 }
 

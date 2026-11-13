@@ -871,3 +871,21 @@ fn the_steady_state_allocates_nothing() {
     assert_eq!(allocated, 0, "event, rearm, copy, publish and the poll");
     assert_eq!(d.counters().unwrap().frames, 1004);
 }
+
+#[test]
+fn the_block_describes_no_sensor_so_the_link_is_unknown() {
+    let (mut d, _hw) = driver(&MockStream::new(1));
+    let mut name = [0u8; 64];
+    assert_eq!(
+        CameraReceiver::source(&mut d, &mut name),
+        Err(Status::NOT_SUPPORTED)
+    );
+}
+
+#[test]
+fn layout_is_what_configure_set_and_nothing_before() {
+    let (mut d, _hw) = driver(&MockStream::new(1));
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(None));
+    let set = d.configure(raw10(), Packing::Unpacked16).unwrap();
+    assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
+}
