@@ -44,6 +44,10 @@ lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnos-driver-system-flash = { path = "../../drivers/system-flash" }
 lemnos-driver-system-identity = { path = "../../drivers/system-identity" }
 lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget" }
+lemnos-driver-raw-bus = { path = "../../drivers/raw-bus" }
+lemnos-driver-ws2812 = { path = "../../drivers/ws2812" }
+lemnos-driver-indicator = { path = "../../drivers/indicator" }
+lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 orion-server = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
 orion-link-usb = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }

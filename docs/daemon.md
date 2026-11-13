@@ -363,6 +363,28 @@ that the reply is larger than 61440 bytes and that the method has no paged form.
 pieces. `lemnos-ctl`, on the board's own socket, carries a frame of 1 MiB and reads such a reply
 whole. A method whose reply can exceed 60 KiB needs a paged form to be called through the bridge.
 
+**Coverage through the bridge.** `service/orion/tests/live_walk.rs` calls, through `.call` on a real
+Orion core and lemnosd, every out-buffer method the simulated board can host, and checks each reply:
+`identity` (`serial`, `family`, `model`, `facts`), `slots` (`list`), a `raw-bus` on the simulated I2C,
+SPI and UART (`i2c_transfer`, `spi_transfer`, `uart_read`), `gadget` (`data_stream`, and `control_out`
+refused with no request pending, `INVALID_ARGUMENT`), the fake accelerometer and gyroscope (`read_batch`
+refused as `NOT_SUPPORTED`: a fake has no FIFO), and `lights` (`states`, an indicator on a WS2812
+strip). That is 13 of the 33 out-buffer methods. The success path of `read_batch` and of `control_out`
+is not reached through the bridge, since neither has a simulated FIFO or a stream consumer to give
+the request.
+
+The other 20 are covered by the text path only (`every_out_buffer_method_of_every_contract_is_callable_through_the_text_path`
+in `service/ctl/tests/out_buffers.rs`), because no simulated device can host them:
+
+- `camera-frames` `frame_stream`; `camera-isp` `config_stream`, `statistics_stream`, `input_stream`,
+  `output_stream`; `camera-receiver` `frame_stream`, `feeds`, `embedded_stream`, `source`; `camera-sensor`
+  `identity`: the simulator has no camera, ISP or image sensor;
+- `codec-block` `block` and `job_stream`; `image-blend`, `image-convert`, `image-scaler` `job_stream`; `npu`
+  `job_stream`: the simulator has no codec, 2D engine or NPU;
+- `fan-control` `curve`: it needs a temperature input, and the simulator has none;
+- `gpu-lease` `last_hang`; `system-flash` `info`: the simulator has no GPU and no flash device;
+- `system-slots` `list_page`: the paged form, whose bridge walk is in `service/orion/tests/orion_bridge.rs`.
+
 **Time.** A sample's time is `CLOCK_MONOTONIC` nanoseconds, the clock Orion's samples are on. A
 value carries the time the driver read it, as lemnosd stamped it, and the bridge passes that on
 unchanged; a status change, or a fact, is stamped when the bridge sees it. The bridge converts
