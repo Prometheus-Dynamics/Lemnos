@@ -1,0 +1,60 @@
+# The reference board: a compute module on its IO board, with one addressable LED ring on RP1
+# GPIO13, a camera sensor on the SoC's own I2C bus, and the fan header's PWM. Its overlay is made
+# from this file by `lemnos-ctl tree`.
+format = "lemnos.board"
+schema_version = 1
+
+[board]
+id = "reference"
+soc = "bcm2712-rp1"
+base = "module-io"
+
+# The hardware the devices below use. Each entry is the one place its pins are written.
+[[hardware]]
+name = "i2c-1"
+controller = "i2c1"
+pins = "gpio2_3"
+
+[[hardware]]
+name = "i2c-10"
+controller = "i2c10"
+
+[[hardware]]
+controller = "pwm1"
+pins = "gpio45"
+
+[[hardware]]
+controller = "csi0"
+
+[[hardware]]
+controller = "pio"
+
+[[hardware]]
+controller = "watchdog"
+
+# A line the board gives to Lemnos: the camera regulator's line is held by a base node that the
+# overlay disables. The fan header's line is held at its full-speed level from power-on.
+[[lines]]
+line = "rp1:34"
+
+[[lines]]
+line = "rp1:45"
+boot = "high"
+reason = "the fan header's line: at full speed from power-on, until Lemnos's fan driver takes it"
+
+[[devices]]
+id = "ring"
+driver = "ws2812"
+bus = "pio-out:gpio=13"
+config = { count = 16, wire = "rgb", brightness = 255 }
+
+[[devices]]
+id = "imu"
+driver = "bmi088"
+bus = "i2c-1"
+config = { accel_rate = 200, gyro_rate = 200, fifo = false }
+
+[[devices]]
+id = "sensor"
+driver = "ov9782"
+bus = "i2c-10"

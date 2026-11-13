@@ -301,6 +301,46 @@ pub enum Owner {
 #[serde(deny_unknown_fields)]
 pub struct BoardInfo {
     pub id: String,
+    /// The SoC map that says what this board's hardware is (`socs/<soc>.toml`). Only the device
+    /// tree generator reads it: the daemon does not.
+    #[serde(default)]
+    pub soc: Option<String>,
+    /// The base tree the board is built on, by its name in the SoC map. Only the generator reads it.
+    #[serde(default)]
+    pub base: Option<String>,
+}
+
+/// A piece of hardware the board uses: a controller of the SoC map, with the pin set it is wired
+/// through. The runtime name a device uses for it is `name`, when the device names it. Only the
+/// device tree generator reads these; the daemon does not.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardwareSpec {
+    /// The name devices use for it, as `i2c-1`, `spidev0.0` or `udc:...`. Left out for hardware
+    /// that no device names by it, such as the watchdog.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The controller's name in the SoC map.
+    pub controller: String,
+    /// The pin set in the map that wires the controller, when it has more than one.
+    #[serde(default)]
+    pub pins: Option<String>,
+}
+
+/// A GPIO line the board gives to Lemnos, and the state the line is in before the kernel runs.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineSpec {
+    /// The line in the SoC's naming, as `rp1:34`.
+    pub line: String,
+    /// `"low"` or `"high"`: the level the firmware drives the line to at boot, held until the
+    /// kernel takes it. Left out, the firmware leaves the line alone.
+    #[serde(default)]
+    pub boot: Option<String>,
+    /// Why the board holds the line in that state, written beside the firmware line. Required with
+    /// `boot`.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// One device.
@@ -418,6 +458,12 @@ pub struct BoardFile {
     /// Devices made for whatever the backend finds that fits.
     #[serde(default)]
     pub each: Vec<EachSpec>,
+    /// The hardware the devices use, for the device tree generator.
+    #[serde(default)]
+    pub hardware: Vec<HardwareSpec>,
+    /// The GPIO lines the board gives to Lemnos, for the device tree generator.
+    #[serde(default)]
+    pub lines: Vec<LineSpec>,
 }
 
 /// A config value the host owns.

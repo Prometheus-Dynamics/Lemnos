@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-devtree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Makes a device-tree overlay from a Lemnos board file and a SoC map, and checks a live device tree against both"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-host = { path = "../../engine/host" }
+serde = { workspace = true, features = ["derive", "std"] }
+toml.workspace = true

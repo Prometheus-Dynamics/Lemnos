@@ -1,0 +1,63 @@
+# A test SoC with one controller of every kind, so every resource kind is generated and checked.
+soc = "test-soc"
+
+[controllers.i2c0]
+kind = "i2c"
+path = "/bus/i2c@1000"
+alias = "i2c0"
+reason = "an I2C bus"
+[controllers.i2c0.pins.a]
+path = "/pins/i2c0a"
+label = "i2c0a"
+gpios = [0, 1]
+
+[controllers.spi0]
+kind = "spi"
+path = "/bus/spi@2000"
+alias = "spi0"
+reason = "an SPI controller"
+
+[controllers.uart0]
+kind = "uart"
+path = "/bus/uart@3000"
+alias = "serial0"
+reason = "a serial port"
+[controllers.uart0.pins.a]
+path = "/pins/uart0a"
+label = "uart0a"
+gpios = [14, 15]
+
+[controllers.pwm0]
+kind = "pwm"
+path = "/bus/pwm@4000"
+reason = "a PWM block"
+[controllers.pwm0.pins.a]
+path = "/pins/pwm0a"
+label = "pwm0a"
+gpios = [18]
+
+[controllers.pio]
+kind = "pio"
+path = "/bus/pio@5000"
+reason = "the PIO block"
+
+[controllers.csi0]
+kind = "csi"
+path = "/bus/csi@6000"
+sysfs = "6000.csi"
+stock_driver = "stock-csi"
+reason = "a camera receiver"
+
+[controllers.usb]
+kind = "usb-peripheral"
+path = "/bus/usb@7000"
+reason = "a USB controller in peripheral mode"
+
+[controllers.wdt]
+kind = "watchdog"
+path = "/bus/wdt@8000"
+reason = "the hardware watchdog"
+
+[bases.b.lines."gpio:9"]
+holders = ["/bus/regulator"]
+reason = "a regulator on the line"

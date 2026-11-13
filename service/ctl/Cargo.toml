@@ -20,6 +20,8 @@ lemnos-client = { path = "../../engine/client" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 # For `validate`: the board file parser, the same one lemnosd reads it with.
 lemnos-host = { path = "../../engine/host" }
+# For `tree` and the live check of `validate`: the overlay generator and the SoC map.
+lemnos-devtree = { path = "../devtree" }
 lemnos-wire = { path = "../../engine/wire" }
 
 [dev-dependencies]
