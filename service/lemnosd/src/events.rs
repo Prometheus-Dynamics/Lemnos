@@ -37,14 +37,19 @@ pub(crate) fn wire_state(info: &DeviceInfo) -> (u8, u8, String) {
     (state, health, reason)
 }
 
-fn send_changes(core: &Core, last: &mut Vec<(u8, u8, String)>) {
+/// Sends an event for each device whose revision has moved since its last event. The event
+/// carries the state now, which is the state after every change since then. It is not
+/// compared with the state last sent: a device that went down and came back between two
+/// looks is back where it was, but a client that listed it in between holds the state from
+/// that list, so it must be told.
+fn send_changes(core: &Core, sent: &mut Vec<u64>) {
     let devices = core.host.devices();
-    last.resize(devices.len(), (u8::MAX, u8::MAX, String::new()));
-    for (info, last) in devices.iter().zip(last.iter_mut()) {
-        let now = wire_state(info);
-        if now == *last {
+    sent.resize(devices.len(), u64::MAX);
+    for (info, sent) in devices.iter().zip(sent.iter_mut()) {
+        if info.revision == *sent {
             continue;
         }
+        let now = wire_state(info);
         let event = Frame::Event {
             device: info.index,
             state: now.0,
@@ -56,14 +61,14 @@ fn send_changes(core: &Core, last: &mut Vec<(u8, u8, String)>) {
                 client.event(&event);
             }
         }
-        *last = now;
+        *sent = info.revision;
     }
 }
 
 pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
     let mut seen = core.host.changes();
-    let mut last = Vec::new();
-    send_changes(core, &mut last);
+    let mut sent = Vec::new();
+    send_changes(core, &mut sent);
     let watchdog = notifier.watchdog_interval();
     let mut next_ping = Instant::now();
     while !core.stopping() {
@@ -79,7 +84,7 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
         let changes = core.host.changes();
         if changes != seen {
             seen = changes;
-            send_changes(core, &mut last);
+            send_changes(core, &mut sent);
         }
         if let Some(interval) = watchdog
             && Instant::now() >= next_ping

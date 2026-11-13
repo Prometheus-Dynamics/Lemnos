@@ -287,6 +287,21 @@ A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 
 11 f64, 12 str, 13 bytes, 14 option (followed by its shape), 15 array (a u32 length, then its shape),
 16 record (a u16 count, then each field's name str and shape). Shapes nest at most 8 deep.
 
+## Events
+
+A host sends an Event to a client that said `events: true` in its Hello, from that Hello onward.
+The rules a client can rely on:
+
+- Each change to a device's state or reason is sent as an Event, with its health as it is at
+  send time. The host sends the device's state as it is at send time, so an Event carries every
+  change made before it. A change of health alone is not sent on its own: it goes out with the
+  device's next state change.
+- Changes between two sends may come as one Event, and an Event may repeat a state the client
+  already has (a device that retries sends one per retry). The newest Event for a device is its
+  current state.
+- A client that listed the devices and keeps reading gets every later change of state or reason on
+  each of them. It does not need to list again to learn of a device that comes up later.
+
 ## Test vectors
 
 Each vector is one complete frame.

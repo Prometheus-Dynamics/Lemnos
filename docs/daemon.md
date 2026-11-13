@@ -232,7 +232,7 @@ session, which is how Orion tells each subscriber
 of a topic that its publisher is gone: Orion has no way to take back one topic on its own. When
 lemnosd is back, the same topics are declared again and their subscribers carry on. A device
 that is not running when the bridge reads the list has no description yet; the bridge reads the
-devices again when it starts running. When the
+device again when lemnosd's event says it is running (see [Events](wire.md#events)). When the
 Orion comm core restarts, the bridge connects again and says every topic, action and resource
 again. Both sides retry forever.
 
