@@ -215,6 +215,7 @@ Tested against a real Orion node and comm core on a PC, in-process
 | `remove(id)` | Removes a slot. The running, default, trial and pinned slots are refused |
 | `pin(id, pinned)` | Keeps a slot from housekeeping and from `remove` |
 | `set_keep(n)` | How many slots housekeeping keeps; 0 keeps every slot |
+| `boots` | The boot history: one line per boot kept, oldest first (see [Boot history](#boot-history)) |
 | `reboot` (`system.reboot/1`) | Restarts the board |
 
 Housekeeping runs on `confirm` and keeps `keep` slots. It never removes the running, default,
@@ -477,6 +478,33 @@ It is the price of the guarantee that a trial kernel which can never boot always
 attempt is taken before the trial's kernel runs, so a power cut cannot leave the trial without
 its count. `testing/board-runs/I5f.md` measures it. **Untested on board.**
 
+## Boot history
+
+The history is `lemnos/boots`: one line per boot, kept with the slot records in
+`board/slots/boots` on the data partition. When the state directory can't be written, the same
+history is kept on the boot partition as `boot-history`, beside `trial-reason`; the reader takes
+the copy with the later boot. The loader never reads it.
+
+Each line is seven space-separated fields, a value's whitespace replaced by `_`:
+
+```text
+<n> <utc> <slot> <outcome> <reset> <requested> <boot>
+```
+
+- `n`: a monotonic boot number, starting at 1.
+- `slot`: the slot the boot ran (`-` when none was known).
+- `outcome`: `on-trial` while a trial runs unresolved, `confirmed` or `fell-back` once it
+  resolves (the entry is rewritten once, when the trial resolves), `unknown` for any other boot.
+- `reset`: the board's reset reason, raw: the `reset_reason` file, or the first watchdog's
+  `bootstatus`; `none` when neither reads.
+- `requested`: `by:<caller>` when the previous run restarted through `system.reboot`, else `-`.
+- `boot`: the kernel's boot id. A boot writes one entry, so a driver started again within a
+  boot writes none.
+
+The history keeps the newest `boots_keep` boots (16 by default). It is written at the driver's
+start, once per boot, after the trial's accounting. It is a record like the slot records: the
+rule that drivers keep no state across restarts is about run-time state, not this.
+
 ## Settings
 
 ```toml
@@ -493,6 +521,7 @@ driver = "system-reboot"
 
 The trial settings (`auto_confirm`, `confirm_uptime_s`, `confirm_deadline_s`,
 `reboot_at_deadline`, `trial_attempts` and `health`) are in [Trials of a slot](boards.md#trials-of-a-slot-system-slots).
+The boot history's keys (`boots_keep`, `reset_reason`, and `data` on `system-reboot`) are in [Boot history](boards.md#boot-history-system-slots-system-reboot).
 The driver's crate documentation, `drivers/system-slots/src/lib.rs`, lists every setting.
 
 ## First flash

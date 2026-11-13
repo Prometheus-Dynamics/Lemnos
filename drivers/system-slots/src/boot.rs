@@ -463,6 +463,58 @@ pub fn tryboot_default(boot: &Path) -> Option<String> {
     valid_id(id).then(|| id.to_string())
 }
 
+/// The reboot request `system.reboot` leaves in the state directory before it restarts, for the
+/// next boot's history (`requested` in `lemnos/boots`), and which that boot takes and removes.
+pub const REQUEST_FILE: &str = "reboot-request";
+
+/// Records that `caller` asked for the restart through `system.reboot`. The restart goes on
+/// whether or not this can be written: the history then says `-`.
+pub fn note_request(state_dir: &Path, caller: u64) {
+    let _ = fs::create_dir_all(state_dir);
+    let _ = replace(
+        &state_dir.join(REQUEST_FILE),
+        format!("by:{caller}\n").as_bytes(),
+    );
+}
+
+/// The request the previous run left, `by:<caller>`, or `-` when there is none.
+pub fn read_request(state_dir: &Path) -> String {
+    fs::read_to_string(state_dir.join(REQUEST_FILE))
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// The reset reason, as the board reports it: the file the board file's `reset_reason` names,
+/// else the first watchdog's `bootstatus`. The raw text; `none` when nothing reads.
+pub fn reset_reason(path: Option<&Path>) -> String {
+    if let Some(path) = path {
+        return fs::read_to_string(path)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "none".to_string());
+    }
+    let Ok(dirs) = fs::read_dir("/sys/class/watchdog") else {
+        return "none".to_string();
+    };
+    let mut files: Vec<PathBuf> = dirs
+        .flatten()
+        .map(|entry| entry.path().join("bootstatus"))
+        .collect();
+    files.sort();
+    for file in files {
+        if let Ok(text) = fs::read_to_string(&file) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    "none".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

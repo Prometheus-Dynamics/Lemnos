@@ -87,4 +87,9 @@ pub trait Slots {
     /// when the driver starts. `BUSY` while another install runs.
     #[method(11, job)]
     fn install_file(&mut self, name: &str, pin: bool, keep_old: bool) -> Result<JobId>;
+    /// The boot history, one line per boot kept (`n utc slot outcome reset requested boot`,
+    /// oldest first; see `lemnos-slot-store`'s `boots`). Returns its length; `BUFFER_TOO_SMALL`
+    /// when it doesn't fit.
+    #[method(12)]
+    fn boots(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }

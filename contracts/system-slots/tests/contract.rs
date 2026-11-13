@@ -20,9 +20,14 @@ fn the_tag_and_numbers_are_stable() {
             ("set_keep", 9, false),
             ("accept", 10, false),
             ("install_file", 11, true),
+            ("boots", 12, false),
         ]
     );
     assert!(info.methods[0].has_out_buffer);
+    assert!(
+        info.methods[11].has_out_buffer,
+        "boots writes into a buffer"
+    );
     assert_eq!(info.methods[1].returns, Shape::U64);
     assert_eq!(info.methods[2].params[1].shape, Shape::Bytes);
     assert_eq!(info.methods[3].params[0].shape, Shape::Str);

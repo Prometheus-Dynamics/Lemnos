@@ -470,7 +470,10 @@ impl Resolved {
             self.reason.replace(['\n', '\r'], " "),
             self.time
         );
-        replace(&Self::path(layout), text.as_bytes())
+        replace(&Self::path(layout), text.as_bytes())?;
+        // The boot history's entry for this trial takes the same outcome (`lemnos/boots`).
+        let _ = lemnos_slot_store::boots::set_outcome(layout, &self.slot, &self.outcome);
+        Ok(())
     }
 
     /// The `resolved` field of `list`.

@@ -93,6 +93,16 @@ optional and keeps its default when left out:
 `health` is an array of strings in the device's `config` (`health = ["device:x", "file:/run/y"]`).
 Only the built-in drivers see it; other arrays in a device's `config` are refused.
 
+## Boot history (`system-slots`, `system-reboot`)
+
+These keys are optional. [Slots](slots.md#boot-history) says what the history holds.
+
+| Driver | Key | Default | Range | Meaning |
+|---|---|---|---|---|
+| `system-slots` | `boots_keep` | `16` | at least 1 | How many boots the boot history keeps (`lemnos/boots`), newest kept |
+| `system-slots` | `reset_reason` | unset | an absolute path | A file the board writes its reset reason to. Read at each boot for the history; unset, the first watchdog's `bootstatus` is read |
+| `system-reboot` | `data` | `/data` | an absolute path | The data partition: where a restart through `system.reboot` leaves the request the next boot's history names as `requested` |
+
 ## `[board]` identity
 
 `[board] id` is the board's family, and the driver `system-identity` reads the rest of the

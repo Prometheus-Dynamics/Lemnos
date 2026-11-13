@@ -5,10 +5,12 @@
 //! - [`manifest`]: a slot's `slot.json`, schema 3, and the dm-verity table it gives.
 //! - [`records`]: the boot records' formats: `tryboot`, `file` and `uboot`.
 //! - [`ubi`]: slots on raw NAND: images and the record as UBI volumes.
+//! - [`boots`]: the boot history, one line per boot.
 //! - [`json`]: the small JSON reader both use.
 //!
 //! Plain `std`, so the initramfs program stays small; the `linux` feature adds the UBI ioctls.
 
+pub mod boots;
 pub mod json;
 pub mod manifest;
 pub mod records;
