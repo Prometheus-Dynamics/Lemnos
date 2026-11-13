@@ -102,6 +102,9 @@ reason = "the camera receiver; the module drives it, and the stock receiver driv
 [controllers.usb]
 kind = "usb-peripheral"
 path = "/axi/usb@480000"
+# The UDC name a gadget's `udc:` names: the platform device's name, from the bus address 0x10_00480000
+# (`1000480000.usb`). Not checked on a board.
+sysfs = "1000480000.usb"
 reason = "the SoC's USB controller in peripheral mode, for a USB gadget"
 
 # The PiSP back end, the ISP's processing block. Its node is enabled, and the kernel module drives

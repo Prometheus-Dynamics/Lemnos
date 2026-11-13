@@ -53,6 +53,7 @@ fn report_live_tree(board: &lemnos_host::board::BoardFile) {
         tree: std::path::Path::new("/proc/device-tree"),
         sys: std::path::Path::new("/sys/bus/platform/devices"),
         gpio_chips: &chips,
+        udc: std::path::Path::new("/sys/class/udc"),
     };
     for problem in lemnos_devtree::check(board, &map, &live) {
         let _ = writeln!(std::io::stderr(), "lemnosd: live tree: {problem}");

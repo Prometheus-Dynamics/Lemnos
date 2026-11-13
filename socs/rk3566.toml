@@ -162,3 +162,29 @@ reason = "the VEPU video encoder on the RK3566 (rockchip,rk3568-vepu)"
 kind = "block"
 path = "/rga@fdeb0000"
 reason = "the RGA 2D block on the RK3566 (rockchip,rk3568-rga)"
+
+# The USB 2 device port (the OTG port of the DRD controller, port 0). The controller is USB 2 only on
+# this SoC: its PHY is the USB 2 PHY alone, with no SuperSpeed PHY (rk356x.dtsi, usb_host0_xhci and
+# usb2phy0, v6.12). A board's gadget names it `udc:fcc00000.usb`; the generator makes it peripheral
+# (dr_mode) and enables the PHY and its OTG port, which the base tree leaves disabled.
+#
+# Not set here, and not set by the generator: `phy-supply` on the OTG port. A board's dts sets it to
+# power VBUS for host mode (`&usb2phy0_otg { phy-supply = ... }`); a device port must not have it.
+# `extcon` on the controller (the SoC dtsi sets it on `usb2phy0`) is for the OTG role detection that a
+# fixed peripheral role does not use; the overlay leaves it as the base tree has it.
+#
+# The SoC has the same node set on the RK3568 (rk356x.dtsi is shared), so this map covers it too; a
+# board on an RK3568 names soc = "rk3566" as the map is named. Untested on board.
+[controllers.usb-otg0]
+kind = "usb-peripheral"
+path = "/usb@fcc00000"
+sysfs = "fcc00000.usb"
+reason = "the USB 2 DRD (OTG) controller on the RK3566, port 0 (rockchip,rk3568-dwc3); device mode"
+[[controllers.usb-otg0.needs]]
+path = "/usb2phy@fe8a0000"
+reason = "the USB 2 PHY that port 0 uses (rockchip,rk3568-usb2phy); disabled in the base tree"
+[[controllers.usb-otg0.needs]]
+path = "/usb2phy@fe8a0000/otg-port"
+phy = "usb2-phy"
+label = "usb2phy0_otg"
+reason = "the OTG port of that USB 2 PHY, the one the controller is wired to (its phys)"

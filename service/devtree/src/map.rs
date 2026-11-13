@@ -116,7 +116,9 @@ pub struct Controller {
     /// The alias the kernel numbers the controller by (`i2c1`, `spi0`), when it has one.
     #[serde(default)]
     pub alias: Option<String>,
-    /// The name the kernel gives the platform device, for the module-ownership check.
+    /// The name the kernel gives the platform device. For the module-ownership check; and for a
+    /// `usb-peripheral` controller, the UDC name a gadget's `udc:` names: the controller is listed
+    /// under `/sys/class/udc` by it. Required for that kind.
     #[serde(default)]
     pub sysfs: Option<String>,
     /// The stock driver the kernel would bind to the node. Bound, it means the module does not own
@@ -133,11 +135,43 @@ pub struct Controller {
     /// The module roles this node may be given besides `owned`, from [`MODULE_ROLES`].
     #[serde(default)]
     pub module_roles: Vec<String>,
+    /// Other nodes the controller needs enabled to work: its PHY and PHY ports, say. Each is
+    /// enabled with the controller when the board entry takes it: an entry with no `option` is
+    /// always enabled, and one with an `option` only when the board names that option.
+    #[serde(default)]
+    pub needs: Vec<Need>,
     /// Stock kernel modules that bind this node when they load. The generator writes a
     /// `blacklist` for each one a board gives to the module, so it is not loaded for the node.
     #[serde(default)]
     pub stock_modules: Vec<String>,
     /// Why the generated overlay enables this node. Written beside it.
+    pub reason: String,
+}
+
+/// A node a controller needs enabled, and the board option that asks for it, when it needs one. A
+/// PHY the controller is linked to is a need with `phy` (its `phy-names` entry) and `label` (its label
+/// in the base tree, which the overlay refers to); the controller's `phys` lists the PHYs its entry
+/// takes, in the order the map gives them.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Need {
+    /// The node's path in the base tree.
+    pub path: String,
+    /// The board's option that enables this node, from the entry's `options`. Left out, the node
+    /// is always enabled with the controller.
+    #[serde(default)]
+    pub option: Option<String>,
+    /// The PHY's name in the controller's `phy-names` (`usb2-phy`, `usb3-phy`), when the controller
+    /// is linked to it. Needs `label`.
+    #[serde(default)]
+    pub phy: Option<String>,
+    /// The PHY node's label in the base tree, which the controller's `phys` refers to.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The PHY specifier's cells after the phandle (`PHY_TYPE_USB3` is 4), when the PHY has any.
+    #[serde(default)]
+    pub args: Vec<u32>,
+    /// Why the node is needed. Written beside the overlay's fragment.
     pub reason: String,
 }
 
@@ -184,6 +218,40 @@ impl SocMap {
         for (name, controller) in &map.controllers {
             if !controller.path.starts_with('/') {
                 return Err(format!("controller {name:?}: its path must be absolute"));
+            }
+            if controller.kind == Kind::UsbPeripheral && controller.sysfs.is_none() {
+                return Err(format!(
+                    "controller {name:?}: a usb-peripheral controller needs `sysfs`, the UDC name \
+                     its gadget's `udc:` names"
+                ));
+            }
+            for need in &controller.needs {
+                if !need.path.starts_with('/') {
+                    return Err(format!(
+                        "controller {name:?}: needed node {:?} must have an absolute path",
+                        need.path
+                    ));
+                }
+                if need.option.as_deref() == Some("") {
+                    return Err(format!(
+                        "controller {name:?}: a needed node has an empty option"
+                    ));
+                }
+                match (&need.phy, &need.label) {
+                    (None, None) if need.args.is_empty() => {}
+                    (Some(_), Some(label))
+                        if !label.is_empty()
+                            && label
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_') => {}
+                    _ => {
+                        return Err(format!(
+                            "controller {name:?}: needed node {:?} has `phy` and `label` together, \
+                             a label of letters, digits and _, or else neither (and no args)",
+                            need.path
+                        ));
+                    }
+                }
             }
             if let Some(compatible) = &controller.compatible {
                 let pair = compatible.split(',').collect::<Vec<_>>();

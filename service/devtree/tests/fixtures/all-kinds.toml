@@ -60,6 +60,7 @@ reason = "a camera receiver"
 [controllers.usb]
 kind = "usb-peripheral"
 path = "/bus/usb@7000"
+sysfs = "7000.usb"
 reason = "a USB controller in peripheral mode"
 
 [controllers.wdt]

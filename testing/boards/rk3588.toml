@@ -28,6 +28,13 @@ pins = "m0"
 [[hardware]]
 controller = "vpu121"
 
+# The USB 3 device port (port 0). Its SuperSpeed lanes are wired, so the board names `usb3`.
+[[hardware]]
+name = "udc:fc000000.usb"
+controller = "usb-otg0"
+role = "peripheral"
+options = ["usb3"]
+
 [[devices]]
 id = "imu"
 driver = "bmi088"
@@ -47,3 +54,8 @@ bus = "spidev0.0"
 id = "fan"
 driver = "pwm-channel-fan"
 uses = { pwm = "pwm:/pwm@fd8b0010:1" }
+
+[[devices]]
+id = "gadget"
+driver = "usb-gadget"
+uses = { function = "udc:fc000000.usb" }

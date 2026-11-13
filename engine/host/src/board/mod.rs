@@ -338,6 +338,14 @@ pub struct HardwareSpec {
     /// Needs `module`. Only the generator reads it.
     #[serde(default)]
     pub confined: bool,
+    /// The port's role, for a controller the map makes a USB device port: `"peripheral"`, the only
+    /// role the generator makes. Left out, it is `"peripheral"`. Only the generator reads it.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// The options the map gives the controller, each adding nodes the port needs (such as
+    /// `"usb3"` for a USB 3 PHY the port's SuperSpeed lanes use). Only the generator reads it.
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// A GPIO line the board gives to Lemnos, and the state the line is in before the kernel runs.

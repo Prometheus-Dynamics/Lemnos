@@ -1,0 +1,142 @@
+# The SoC map for the RK3576. Data only: `lemnos-ctl tree` and `lemnos-ctl validate` read it.
+#
+# Source: the Linux kernel's mainline device tree at v6.14, `arch/arm64/boot/dts/rockchip/`:
+# rk3576.dtsi (the nodes below are under its `soc` node, as the live tree shows them as /soc/...) and
+# rk3576-pinctrl.dtsi (the pin groups). v6.14 is the first tag with the RK3576's USB controllers; the
+# SoC's own base tree first appears at v6.13, which has no USB node. The GPIO chip labels are the bank
+# names of rk3576_pin_banks (drivers/pinctrl/pinctrl-rockchip.c at v6.14). Pin numbers are
+# bank*32 + the pin's index (RK_PA0 = 0, RK_PB0 = 8, RK_PC0 = 16, RK_PD0 = 24), from the bank and pin
+# each group lists.
+#
+# Not in the map, because the mainline base tree has no node for them through v6.18: PWM (the pin
+# groups exist, but no PWM controller node), the camera receiver and ISP, the NPU and the video
+# decoder. A board tree adds them.
+#
+# USB: two DRD (OTG) controllers, each with a USB 2 PHY (its OTG port) and a SuperSpeed PHY. Which
+# one a board's device port is, and whether it has its SuperSpeed lanes, is the board's to say: the
+# controller's `[[hardware]]` entry names it and gives `options = ["usb3"]` for the SuperSpeed PHY.
+# The `drd0` port's SuperSpeed PHY is the USBDP combo PHY; `drd1` uses combo PHY 1's PSU lane. Neither
+# controller's `phy-supply` is set here: a host VBUS supply is the board's, and a device port has none.
+soc = "rk3576"
+form = "overlay"
+
+needs_nothing = ["orientation", "fan-control"]
+
+[chips.gpio0]
+label = "gpio0"
+reason = "GPIO bank 0"
+[chips.gpio1]
+label = "gpio1"
+reason = "GPIO bank 1"
+[chips.gpio2]
+label = "gpio2"
+reason = "GPIO bank 2"
+[chips.gpio3]
+label = "gpio3"
+reason = "GPIO bank 3"
+[chips.gpio4]
+label = "gpio4"
+reason = "GPIO bank 4"
+
+[controllers.i2c1]
+kind = "i2c"
+path = "/soc/i2c@2ac40000"
+alias = "i2c1"
+reason = "an I2C bus on the RK3576 (rockchip,rk3576-i2c)"
+[controllers.i2c1.pins.m0]
+path = "/soc/pinctrl/i2c1/i2c1m0-xfer"
+label = "i2c1m0_xfer"
+gpios = [10, 11]
+
+[controllers.i2c2]
+kind = "i2c"
+path = "/soc/i2c@2ac50000"
+alias = "i2c2"
+reason = "an I2C bus on the RK3576"
+[controllers.i2c2.pins.m0]
+path = "/soc/pinctrl/i2c2/i2c2m0-xfer"
+label = "i2c2m0_xfer"
+gpios = [15, 16]
+
+[controllers.i2c3]
+kind = "i2c"
+path = "/soc/i2c@2ac60000"
+alias = "i2c3"
+reason = "an I2C bus on the RK3576"
+[controllers.i2c3.pins.m0]
+path = "/soc/pinctrl/i2c3/i2c3m0-xfer"
+label = "i2c3m0_xfer"
+gpios = [140, 141]
+
+[controllers.spi0]
+kind = "spi"
+path = "/soc/spi@2acf0000"
+alias = "spi0"
+reason = "an SPI controller on the RK3576"
+
+[controllers.spi1]
+kind = "spi"
+path = "/soc/spi@2ad00000"
+alias = "spi1"
+reason = "an SPI controller on the RK3576"
+
+[controllers.uart2]
+kind = "uart"
+path = "/soc/serial@2ad50000"
+alias = "serial2"
+reason = "a serial port on the RK3576 (snps,dw-apb-uart)"
+[controllers.uart2.pins.m0]
+path = "/soc/pinctrl/uart2/uart2m0-xfer"
+label = "uart2m0_xfer"
+gpios = [54, 55]
+
+[controllers.watchdog]
+kind = "watchdog"
+path = "/soc/watchdog@2ace0000"
+reason = "the hardware watchdog on the RK3576 (rockchip,rk3576-wdt, snps,dw-wdt)"
+
+# The DRD controller on the RK3576's first USB port. Its USB 2 side is the OTG port of USB 2 PHY 0; its
+# SuperSpeed side (option `usb3`) is the USBDP combo PHY.
+[controllers.usb-drd0]
+kind = "usb-peripheral"
+path = "/soc/usb@23000000"
+sysfs = "23000000.usb"
+reason = "the USB DRD (OTG) controller 0 on the RK3576 (rockchip,rk3576-dwc3); device mode"
+[[controllers.usb-drd0.needs]]
+path = "/soc/syscon@2602e000/usb2-phy@0"
+reason = "USB 2 PHY 0 (rockchip,rk3576-usb2phy), the USB 2 side of controller 0; disabled in the base tree"
+[[controllers.usb-drd0.needs]]
+path = "/soc/syscon@2602e000/usb2-phy@0/otg-port"
+phy = "usb2-phy"
+label = "u2phy0_otg"
+reason = "the OTG port of USB 2 PHY 0, the one controller 0 is wired to (its phys)"
+[[controllers.usb-drd0.needs]]
+option = "usb3"
+path = "/soc/phy@2b010000"
+phy = "usb3-phy"
+label = "usbdp_phy"
+args = [4]
+reason = "the USBDP combo PHY (rockchip,rk3576-usbdp-phy), the SuperSpeed side of controller 0; the board names usb3 (its phys, PHY_TYPE_USB3)"
+
+# The DRD controller on the second USB port. Its USB 2 side is the OTG port of USB 2 PHY 1; its
+# SuperSpeed side (option `usb3`) is combo PHY 1, the PSU lane (rockchip,rk3576-naneng-combphy).
+[controllers.usb-drd1]
+kind = "usb-peripheral"
+path = "/soc/usb@23400000"
+sysfs = "23400000.usb"
+reason = "the USB DRD (OTG) controller 1 on the RK3576 (rockchip,rk3576-dwc3); device mode"
+[[controllers.usb-drd1.needs]]
+path = "/soc/syscon@2602e000/usb2-phy@2000"
+reason = "USB 2 PHY 1 (rockchip,rk3576-usb2phy), the USB 2 side of controller 1; disabled in the base tree"
+[[controllers.usb-drd1.needs]]
+path = "/soc/syscon@2602e000/usb2-phy@2000/otg-port"
+phy = "usb2-phy"
+label = "u2phy1_otg"
+reason = "the OTG port of USB 2 PHY 1, the one controller 1 is wired to (its phys)"
+[[controllers.usb-drd1.needs]]
+option = "usb3"
+path = "/soc/phy@2b060000"
+phy = "usb3-phy"
+label = "combphy1_psu"
+args = [4]
+reason = "combo PHY 1 (rockchip,rk3576-naneng-combphy), the SuperSpeed side of controller 1; the board names usb3 (its phys, PHY_TYPE_USB3)"

@@ -66,4 +66,35 @@
 			status = "okay";
 		};
 	};
+	// usb-peripheral: the USB 3 DRD (OTG) controller on the RK3588, port 0 (rockchip,rk3588-dwc3); device mode
+	fragment@8 {
+		target-path = "/usb@fc000000";
+		__overlay__ {
+			status = "okay";
+			dr_mode = "peripheral";
+			phys = <&u2phy0_otg>, <&usbdp_phy0 4>;
+			phy-names = "usb2-phy", "usb3-phy";
+		};
+	};
+	// needed by usb-otg0 (usb-peripheral): USB 2 PHY 0 (rockchip,rk3588-usb2phy), the USB 2 side of port 0; disabled in the base tree
+	fragment@9 {
+		target-path = "/syscon@fd5d0000/usb2phy@0";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	// needed by usb-otg0 (usb-peripheral): the OTG port of USB 2 PHY 0, the one port 0's controller is wired to (its phys)
+	fragment@10 {
+		target-path = "/syscon@fd5d0000/usb2phy@0/otg-port";
+		__overlay__ {
+			status = "okay";
+		};
+	};
+	// needed by usb-otg0 (usb-peripheral): USBDP combo PHY 0 (rockchip,rk3588-usbdp-phy), the SuperSpeed side of port 0; the board names usb3 (its phys, PHY_TYPE_USB3)
+	fragment@11 {
+		target-path = "/phy@fed80000";
+		__overlay__ {
+			status = "okay";
+		};
+	};
 };

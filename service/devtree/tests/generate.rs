@@ -168,6 +168,7 @@ fn fixture_dir(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("tree")).unwrap();
     fs::create_dir_all(dir.join("sys")).unwrap();
+    fs::create_dir_all(dir.join("udc")).unwrap();
     dir
 }
 
@@ -195,6 +196,7 @@ fn run_check(dir: &Path, board_text: &str, map_text: &str) -> Vec<String> {
             tree: &dir.join("tree"),
             sys: &dir.join("sys"),
             gpio_chips: &[("gpio-test".to_string(), 16)],
+            udc: &dir.join("udc"),
         },
     )
 }
@@ -455,6 +457,7 @@ fn a_stable_gpio_name_needs_its_chip_on_the_machine_with_the_line_in_range() {
             tree: &tree,
             sys: &dir.join("sys"),
             gpio_chips: &small,
+            udc: &dir.join("udc"),
         },
     );
     assert!(
@@ -472,6 +475,7 @@ fn a_stable_gpio_name_needs_its_chip_on_the_machine_with_the_line_in_range() {
             tree: &tree,
             sys: &dir.join("sys"),
             gpio_chips: &other,
+            udc: &dir.join("udc"),
         },
     );
     assert!(
@@ -496,6 +500,10 @@ fn family(soc: &str) -> (&'static str, &'static str) {
             include_str!("../../../socs/rk3588.toml"),
             include_str!("../../../testing/boards/rk3588.toml"),
         ),
+        "rk3576" => (
+            include_str!("../../../socs/rk3576.toml"),
+            include_str!("../../../testing/boards/rk3576.toml"),
+        ),
         "k230" => (
             include_str!("../../../socs/k230.toml"),
             include_str!("../../../testing/boards/k230.toml"),
@@ -510,7 +518,7 @@ fn family(soc: &str) -> (&'static str, &'static str) {
 
 #[test]
 fn every_family_makes_its_three_outputs_as_its_goldens() {
-    for soc in ["rk3566", "rk3588", "k230", "sun60i-a733"] {
+    for soc in ["rk3566", "rk3588", "rk3576", "k230", "sun60i-a733"] {
         let (map, board_text) = family(soc);
         let out = generated(board_text, map).unwrap_or_else(|e| panic!("{soc}: {e}"));
         assert_eq!(out.overlay, golden(&format!("{soc}.dts")), "{soc} overlay");
@@ -525,7 +533,7 @@ fn every_family_makes_its_three_outputs_as_its_goldens() {
 
 #[test]
 fn the_overlay_families_are_plugin_overlays_and_the_fragment_families_are_not() {
-    for soc in ["rk3566", "rk3588"] {
+    for soc in ["rk3566", "rk3588", "rk3576"] {
         let (map, board_text) = family(soc);
         let out = generated(board_text, map).unwrap();
         assert!(out.overlay.contains("/plugin/;"), "{soc}");
@@ -557,5 +565,314 @@ fn a_fragment_map_with_a_disabled_holder_writes_a_path_block() {
             .contains("&{/soc/holder} {\n\tstatus = \"disabled\";\n};"),
         "{}",
         out.overlay
+    );
+}
+
+// The USB device port: a gadget makes its controller a device, with the PHYs it needs; no gadget makes
+// none. The board names the port and its options; the map says what each needs.
+
+const RK3566_MAP: &str = include_str!("../../../socs/rk3566.toml");
+const RK3566_BOARD: &str = include_str!("../../../testing/boards/rk3566.toml");
+const RK3588_MAP: &str = include_str!("../../../socs/rk3588.toml");
+const RK3588_BOARD: &str = include_str!("../../../testing/boards/rk3588.toml");
+const RK3576_MAP: &str = include_str!("../../../socs/rk3576.toml");
+const RK3576_BOARD: &str = include_str!("../../../testing/boards/rk3576.toml");
+
+/// The overlay's fragment for `target`: its text from its `target-path` line to its closing brace.
+fn fragment_for<'a>(overlay: &'a str, target: &str) -> &'a str {
+    let at = overlay
+        .find(&format!("target-path = \"{target}\""))
+        .unwrap_or_else(|| panic!("no fragment for {target}:\n{overlay}"));
+    let end = overlay[at..].find("\t};").map_or(overlay.len(), |e| at + e);
+    &overlay[at..end]
+}
+
+#[test]
+fn a_gadget_makes_its_usb_port_a_peripheral_with_the_phy_it_needs() {
+    let out = generated(RK3566_BOARD, RK3566_MAP).unwrap();
+    let port = fragment_for(&out.overlay, "/usb@fcc00000");
+    assert!(port.contains("status = \"okay\";"), "{port}");
+    assert!(port.contains("dr_mode = \"peripheral\";"), "{port}");
+    assert!(fragment_for(&out.overlay, "/usb2phy@fe8a0000").contains("status = \"okay\";"));
+    assert!(
+        fragment_for(&out.overlay, "/usb2phy@fe8a0000/otg-port").contains("status = \"okay\";")
+    );
+    // The device port is only ever the one the board names: no host VBUS supply is written for it.
+    assert!(!out.overlay.contains("phy-supply"), "{}", out.overlay);
+}
+
+#[test]
+fn the_rk3588_port_enables_its_usb3_phy_only_when_the_board_names_usb3() {
+    let out = generated(RK3588_BOARD, RK3588_MAP).unwrap();
+    assert!(fragment_for(&out.overlay, "/usb@fc000000").contains("dr_mode = \"peripheral\";"));
+    assert!(fragment_for(&out.overlay, "/syscon@fd5d0000/usb2phy@0/otg-port").contains("okay"));
+    assert!(fragment_for(&out.overlay, "/phy@fed80000").contains("status = \"okay\";"));
+    // The same board without the option: the USB 2 side only.
+    let board = RK3588_BOARD.replace("options = [\"usb3\"]\n", "");
+    let out = generated(&board, RK3588_MAP).unwrap();
+    assert!(!out.overlay.contains("/phy@fed80000"), "{}", out.overlay);
+    assert!(out.overlay.contains("dr_mode = \"peripheral\";"));
+}
+
+#[test]
+fn the_rk3576_ports_name_their_own_udc_and_phys() {
+    let out = generated(RK3576_BOARD, RK3576_MAP).unwrap();
+    assert!(fragment_for(&out.overlay, "/soc/usb@23000000").contains("dr_mode = \"peripheral\";"));
+    assert!(fragment_for(&out.overlay, "/soc/phy@2b010000").contains("okay"));
+    assert!(
+        !out.overlay.contains("/soc/usb@23400000"),
+        "drd1 is not the board's port"
+    );
+    // The second port, named by the board in its place, with its own PHYs.
+    let board = RK3576_BOARD
+        .replace("udc:23000000.usb", "udc:23400000.usb")
+        .replace("usb-drd0", "usb-drd1");
+    let out = generated(&board, RK3576_MAP).unwrap();
+    assert!(fragment_for(&out.overlay, "/soc/usb@23400000").contains("dr_mode = \"peripheral\";"));
+    assert!(fragment_for(&out.overlay, "/soc/syscon@2602e000/usb2-phy@2000").contains("okay"));
+    assert!(fragment_for(&out.overlay, "/soc/phy@2b060000").contains("okay"));
+    assert!(!out.overlay.contains("usb2-phy@0"), "{}", out.overlay);
+}
+
+#[test]
+fn no_gadget_makes_no_peripheral_port() {
+    let board = RK3566_BOARD
+        .replace("[[hardware]]\nname = \"udc:fcc00000.usb\"\ncontroller = \"usb-otg0\"\nrole = \"peripheral\"\n", "")
+        .replace("[[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\nuses = { function = \"udc:fcc00000.usb\" }\n", "");
+    assert!(!board.contains("usb-otg0") && !board.contains("usb-gadget"));
+    let out = generated(&board, RK3566_MAP).unwrap();
+    assert!(!out.overlay.contains("usb@fcc00000"), "{}", out.overlay);
+    assert!(!out.overlay.contains("dr_mode"), "{}", out.overlay);
+    assert!(!out.overlay.contains("usb2phy"), "{}", out.overlay);
+}
+
+#[test]
+fn a_port_no_gadget_names_is_refused() {
+    let board = RK3566_BOARD.replace(
+        "[[devices]]\nid = \"gadget\"\ndriver = \"usb-gadget\"\nuses = { function = \"udc:fcc00000.usb\" }\n",
+        "",
+    );
+    let err = generated(&board, RK3566_MAP).unwrap_err();
+    assert!(
+        err.contains("usb-otg0") && err.contains("no device names it"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_usb_port_the_map_lacks_is_refused_with_what_it_has() {
+    let board = RK3566_BOARD.replace("controller = \"usb-otg0\"", "controller = \"usb-otg1\"");
+    let err = generated(&board, RK3566_MAP).unwrap_err();
+    assert!(
+        err.contains("\"usb-otg1\" is not in the rk3566 map"),
+        "{err}"
+    );
+    assert!(err.contains("usb-otg0"), "{err}");
+}
+
+#[test]
+fn a_udc_name_must_be_the_controllers_udc() {
+    let board = RK3566_BOARD.replace("udc:fcc00000.usb", "udc:fcc00001.usb");
+    let err = generated(&board, RK3566_MAP).unwrap_err();
+    assert!(
+        err.contains("\"fcc00000.usb\"") && err.contains("udc:fcc00000.usb"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_port_option_the_map_does_not_give_is_refused() {
+    let board = RK3566_BOARD.replace(
+        "role = \"peripheral\"\n",
+        "role = \"peripheral\"\noptions = [\"usb3\"]\n",
+    );
+    let err = generated(&board, RK3566_MAP).unwrap_err();
+    assert!(err.contains("no option \"usb3\""), "{err}");
+}
+
+#[test]
+fn a_port_role_other_than_peripheral_is_refused() {
+    let board = RK3566_BOARD.replace("role = \"peripheral\"", "role = \"host\"");
+    let err = generated(&board, RK3566_MAP).unwrap_err();
+    assert!(err.contains("role \"host\""), "{err}");
+}
+
+#[test]
+fn a_usb_peripheral_map_entry_needs_its_udc_name() {
+    let map = RK3566_MAP.replace("sysfs = \"fcc00000.usb\"\n", "");
+    let err = SocMap::parse(&map).unwrap_err();
+    assert!(err.contains("needs `sysfs`"), "{err}");
+}
+
+#[test]
+fn a_needed_node_must_have_an_absolute_path() {
+    let map = RK3566_MAP.replace(
+        "path = \"/usb2phy@fe8a0000\"",
+        "path = \"usb2phy@fe8a0000\"",
+    );
+    let err = SocMap::parse(&map).unwrap_err();
+    assert!(err.contains("absolute path"), "{err}");
+}
+
+/// The OTG port's phandle in the fixture tree, and the port's `phys` entry on the controller.
+const OTG_PORT: u32 = 0x13;
+
+fn usb_tree(
+    dir: &Path,
+    dr_mode: Option<&str>,
+    port: Option<&str>,
+    phy: Option<&str>,
+    linked: bool,
+    udc: bool,
+) {
+    let tree = dir.join("tree");
+    node(&tree, "/usb@fcc00000", None, Some("okay"), None);
+    if let Some(mode) = dr_mode {
+        fs::write(
+            tree.join("usb@fcc00000").join("dr_mode"),
+            format!("{mode}\0"),
+        )
+        .unwrap();
+    }
+    if linked {
+        fs::write(
+            tree.join("usb@fcc00000").join("phys"),
+            OTG_PORT.to_be_bytes(),
+        )
+        .unwrap();
+    }
+    node(&tree, "/usb2phy@fe8a0000", None, phy, None);
+    node(
+        &tree,
+        "/usb2phy@fe8a0000/otg-port",
+        Some(OTG_PORT),
+        port,
+        None,
+    );
+    if udc {
+        fs::create_dir_all(dir.join("udc").join("fcc00000.usb")).unwrap();
+    }
+}
+
+fn usb_problems(
+    name: &str,
+    dr_mode: Option<&str>,
+    port: Option<&str>,
+    phy: Option<&str>,
+    udc: bool,
+) -> Vec<String> {
+    let dir = fixture_dir(name);
+    usb_tree(&dir, dr_mode, port, phy, true, udc);
+    run_check(&dir, RK3566_BOARD, RK3566_MAP)
+        .into_iter()
+        .filter(|p| p.contains("USB port"))
+        .collect()
+}
+
+#[test]
+fn a_peripheral_port_with_its_phy_on_and_its_udc_has_no_usb_problem() {
+    let problems = usb_problems(
+        "usb-ok",
+        Some("peripheral"),
+        Some("okay"),
+        Some("okay"),
+        true,
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn a_port_in_host_mode_is_named() {
+    let problems = usb_problems("usb-host", Some("host"), Some("okay"), Some("okay"), true);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("USB port usb-otg0: host mode") && p.contains("\"host\"")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_port_with_no_dr_mode_is_named_as_not_in_peripheral_mode() {
+    let problems = usb_problems("usb-nomode", None, Some("okay"), Some("okay"), true);
+    assert!(
+        problems.iter().any(|p| p.contains("no dr_mode")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_disabled_port_phy_is_named() {
+    let problems = usb_problems(
+        "usb-phydis",
+        Some("peripheral"),
+        Some("disabled"),
+        Some("okay"),
+        true,
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("disabled") && p.contains("/usb2phy@fe8a0000/otg-port")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_missing_phy_is_named() {
+    // The PHY's node is absent: the overlay did not apply, or the base tree is not the board's.
+    let dir = fixture_dir("usb-phymissing");
+    let tree = dir.join("tree");
+    node(&tree, "/usb@fcc00000", None, Some("okay"), None);
+    fs::write(tree.join("usb@fcc00000").join("dr_mode"), "peripheral\0").unwrap();
+    fs::write(
+        tree.join("usb@fcc00000").join("phys"),
+        OTG_PORT.to_be_bytes(),
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("udc").join("fcc00000.usb")).unwrap();
+    let problems = run_check(&dir, RK3566_BOARD, RK3566_MAP);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("USB port usb-otg0") && p.contains("/usb2phy@fe8a0000 is absent")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_port_its_phy_is_not_linked_to_is_named() {
+    let dir = fixture_dir("usb-unlinked");
+    usb_tree(
+        &dir,
+        Some("peripheral"),
+        Some("okay"),
+        Some("okay"),
+        false,
+        true,
+    );
+    let problems = run_check(&dir, RK3566_BOARD, RK3566_MAP);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("PHY link missing") && p.contains("/usb2phy@fe8a0000/otg-port")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_port_with_no_udc_is_named() {
+    let problems = usb_problems(
+        "usb-noudc",
+        Some("peripheral"),
+        Some("okay"),
+        Some("okay"),
+        false,
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("no UDC \"fcc00000.usb\"")),
+        "{problems:?}"
     );
 }
