@@ -1,0 +1,17 @@
+[package]
+name = "lemnos-gadget-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Board-check in the QEMU harness: the USB gadget's root phase, its FunctionFS link bound on the dummy controller, and a host loop over its bulk pair"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnosd = { path = "../../../service/lemnosd" }
+lemnos-host = { path = "../../../engine/host" }
+lemnos-hal = { path = "../../../engine/hal", features = ["std"] }
+lemnos-linux = { path = "../../../backends/linux" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys" }

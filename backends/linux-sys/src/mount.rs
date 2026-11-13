@@ -14,12 +14,12 @@ fn c_path(path: &Path) -> io::Result<CString> {
         .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
 }
 
-/// Mounts a FunctionFS instance at `target` with `options` (`uid=`, `gid=`, `rmode=`,
-/// `fmode=`, as `f_fs.c` parses them). The mount's source is the name `functionfs`, which the
-/// filesystem ignores.
-pub fn functionfs(target: &Path, options: &str) -> io::Result<()> {
+/// Mounts the FunctionFS instance named `source` at `target` with `options` (`uid=`, `gid=`,
+/// `rmode=`, `fmode=`, as `f_fs.c` parses them). The kernel finds the instance by that name: the
+/// function's own name, which is `NAME` for `ffs.NAME` in configfs. Any other name is `ENOENT`.
+pub fn functionfs(source: &str, target: &Path, options: &str) -> io::Result<()> {
     let target = c_path(target)?;
-    let source = c"functionfs";
+    let source = CString::new(source).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     let kind = c"functionfs";
     let data = CString::new(options).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     // SAFETY: each pointer is a NUL-terminated string this call owns for its duration.

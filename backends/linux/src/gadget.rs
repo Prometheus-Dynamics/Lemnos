@@ -349,7 +349,7 @@ pub struct Owner {
 /// The mounts the setup makes. The system's are [`SystemMounts`]; a test records them.
 pub trait Mounts {
     /// Mounts FunctionFS at `target` with `options`, as `f_fs.c` parses them.
-    fn functionfs(&mut self, target: &Path, options: &str) -> io::Result<()>;
+    fn functionfs(&mut self, source: &str, target: &Path, options: &str) -> io::Result<()>;
     /// Unmounts `target`. Nothing mounted there is an error.
     fn unmount(&mut self, target: &Path) -> io::Result<()>;
 }
@@ -358,8 +358,8 @@ pub trait Mounts {
 pub struct SystemMounts;
 
 impl Mounts for SystemMounts {
-    fn functionfs(&mut self, target: &Path, options: &str) -> io::Result<()> {
-        lemnos_linux_sys::mount::functionfs(target, options)
+    fn functionfs(&mut self, source: &str, target: &Path, options: &str) -> io::Result<()> {
+        lemnos_linux_sys::mount::functionfs(source, target, options)
     }
 
     fn unmount(&mut self, target: &Path) -> io::Result<()> {
@@ -533,7 +533,7 @@ pub fn prepare(
                 fs::create_dir(&dir)?;
                 fs::create_dir_all(&paths.mount)?;
                 let options = format!("uid={},gid={},rmode=0500,fmode=0600", owner.uid, owner.gid);
-                system.functionfs(&paths.mount, &options)?;
+                system.functionfs(&paths.name, &paths.mount, &options)?;
                 links.push(paths.function_name());
             }
             GadgetFunction::Ncm { host, device } => {

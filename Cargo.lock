@@ -1547,6 +1547,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-gadget-check"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-hal",
+ "lemnos-host",
+ "lemnos-linux",
+ "lemnos-linux-sys",
+ "lemnosd",
+]
+
+[[package]]
 name = "lemnos-hal"
 version = "2.0.1-dev"
 dependencies = [

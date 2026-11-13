@@ -177,14 +177,17 @@ const ENABLE: u8 = 2;
 /// Records what the setup asked of the mounts.
 #[derive(Debug, Default)]
 struct Recorder {
-    mounts: Vec<(PathBuf, String)>,
+    mounts: Vec<(String, PathBuf, String)>,
     unmounts: Vec<PathBuf>,
 }
 
 impl Mounts for Recorder {
-    fn functionfs(&mut self, target: &Path, options: &str) -> io::Result<()> {
-        self.mounts
-            .push((target.to_path_buf(), options.to_string()));
+    fn functionfs(&mut self, source: &str, target: &Path, options: &str) -> io::Result<()> {
+        self.mounts.push((
+            source.to_string(),
+            target.to_path_buf(),
+            options.to_string(),
+        ));
         Ok(())
     }
 
@@ -258,10 +261,11 @@ fn setup_writes_the_identity_the_configuration_and_the_function_and_leaves_udc_u
     assert_eq!(
         recorder.mounts,
         [(
+            "udc0".to_string(),
             tree.mount(),
             format!("uid={},gid={},rmode=0500,fmode=0600", own().uid, own().gid)
         )],
-        "FunctionFS is mounted once, for the daemon's owner"
+        "FunctionFS is mounted once, from its instance name, for the daemon's owner"
     );
 }
 
