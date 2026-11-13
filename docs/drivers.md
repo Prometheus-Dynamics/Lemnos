@@ -26,7 +26,7 @@ python3 scripts/generate-builtins.py --check
 | Driver | Provides | Needs | State |
 |---|---|---|---|
 | `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C | Serves its contract. Batches only with `fifo = true` |
-| `bmm150` | `magnetometer/1` | `bus`: I2C | Serves its contract. Reads only on a host-owned device |
+| `bmm150` | `magnetometer/1`, `self-test/1` | `bus`: I2C | Serves its contract. Reads only on a host-owned device |
 | `generic-magnetometer` | `magnetometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. The [description form](writing-a-driver.md#the-description-form), as are the four below |
 | `generic-accelerometer` | `accelerometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. `read` only: no batches, a description has no FIFO |
 | `generic-gyroscope` | `gyroscope/1` | `bus`: I2C; `description`: a chip file | Serves its contract. `read` only: no batches, a description has no FIFO |
@@ -37,7 +37,7 @@ python3 scripts/generate-builtins.py --check
 | `modbus-gyroscope` | `gyroscope/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract. `read` only |
 | `modbus-temperature` | `temperature/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract |
 | `modbus-power-monitor` | `power-monitor/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract |
-| `ina2xx` | `power-monitor/1` | `bus`: I2C; `chip`: `ina226`, `ina238` or `ina260` | Serves its contract |
+| `ina2xx` | `power-monitor/1`, `self-test/1` | `bus`: I2C; `chip`: `ina226`, `ina238` or `ina260` | Serves its contract |
 | `vcm` | `lens/1` | `bus`: I2C; `chip`; optional `direction`, `settle_us` | Serves its contract. The position is unknown until the first move. Direction and settle time are unknown unless the board gives them |
 | `ws2812` | `pixels/1` | `bus`: SPI device, or a `pio-out` name (PIO state machine running the strip's 800 kHz program) | Serves its contract. The PIO program's timing is untested on board (`Q1.md`) |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
@@ -51,13 +51,13 @@ python3 scripts/generate-builtins.py --check
 | `orientation` | `orientation/1` | `accel`, `gyro`, optional `mag`: devices | Serves its contract. No calibration: that is the caller's |
 | `fan-control` | `fan-control/1` | `fan`, `t0` and optional `t1` to `t3`: devices | Serves its contract |
 | `status-light` | `light/1` | `pixels`: a device | Serves its contract |
-| `indicator` | `indicator/1` | `pixels`: a device (the LED strip, or a GPIO LED driver that provides `pixels/1`); `brightness` and `state.<name>` patterns in `config` | Serves its contract: named states (`idle`, `receiving`, `writing`, `verifying`, `done`, `failed`), each drawn with the pattern the board gives it (`solid`, `blink`, `chase`, `bar`, `off`), as a frame on the device's tick. An unknown state is refused. Allocates nothing once started |
+| `indicator` | `indicator/1`, `self-test/1` | `pixels`: a device (the LED strip, or a GPIO LED driver that provides `pixels/1`); `brightness` and `state.<name>` patterns in `config` | Serves its contract: named states (`idle`, `receiving`, `writing`, `verifying`, `done`, `failed`), each drawn with the pattern the board gives it (`solid`, `blink`, `chase`, `bar`, `off`), as a frame on the device's tick. An unknown state is refused. Allocates nothing once started |
 | `pwm-channel-fan` | `fan/1` | `pwm`: a PWM channel, and optional `tach`: a GPIO line | Serves its contract. Drives the PWM directly, with no kernel fan driver between. Full duty at start, on release, and when stopped |
-| `hwmon-fan` | `fan/1` | a hwmon node, by `name` or `hwmon` | Serves its contract, for a fan the kernel exposes through hwmon. Takes the fan over at the first `set_duty`. `release`, and dropping the driver, put the fan at full duty; nothing is handed to the kernel's thermal governor. A killed daemon runs no code, so the fan keeps the last duty |
+| `hwmon-fan` | `fan/1`, `self-test/1` | a hwmon node, by `name` or `hwmon` | Serves its contract, for a fan the kernel exposes through hwmon. Takes the fan over at the first `set_duty`. `release`, and dropping the driver, put the fan at full duty; nothing is handed to the kernel's thermal governor. A killed daemon runs no code, so the fan keeps the last duty |
 | `thermal-zone` | `temperature/1` | `path`: a thermal zone | Serves its contract. Run on the reference board (`B13.md`) |
 | `gpu-lease` | `gpu-lease/1` | nothing | Serves its contract. The lease is advisory: nothing is enforced on the GPU |
 | `host-clock` | no contract | nothing | Runs. Shows the kernel's clock source and whether an RTC set the clock, as values |
-| `hw-watchdog` | no contract | `uses = { watchdog = "watchdog:NODE" }` (the watchdog by its device-tree node), or `device`: a numbered watchdog node such as `watchdog0`; and `keepalive = true` on the device | Sets the timeout (`timeout_s`, default 15 s, clamped to the device's range) and reads it back. Feeds the node at half the timeout, only while the daemon is healthy (see [If the daemon dies](daemon.md#if-the-daemon-dies)). Never writes the magic close |
+| `hw-watchdog` | `self-test/1` | `uses = { watchdog = "watchdog:NODE" }` (the watchdog by its device-tree node), or `device`: a numbered watchdog node such as `watchdog0`; and `keepalive = true` on the device | Sets the timeout (`timeout_s`, default 15 s, clamped to the device's range) and reads it back. Feeds the node at half the timeout, only while the daemon is healthy (see [If the daemon dies](daemon.md#if-the-daemon-dies)). Never writes the magic close |
 
 ## The board's own system
 
@@ -261,6 +261,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `pixels/1` | 1 pixel_count, 2 set, 3 show | `ws2812` |
 | `light/1` | 1 layout, 2 show, 3 clear, 4 clear_all, 5 set_brightness | `status-light` |
 | `indicator/1` | 1 set, 2 states | `indicator` |
+| `self-test/1` | 1 tests, 2 run (job), 3 last | `hwmon-fan`, `bmm150`, `ina2xx`, `indicator`, `hw-watchdog`, `board-self-test` (add-on: see [Self-tests](#self-tests)) |
 | `lens/1` | 1 range, 2 set_position, 3 position, 4 direction, 5 settle_us | `vcm` |
 | `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set, 6 uart_write, 7 uart_read | `raw-bus` |
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
@@ -365,3 +366,93 @@ says so. The board keys are `max_rpm` and `warn_below_rpm` (`hwmon-fan`, `pwm-ch
 `min_c`, `max_c`, `warn_below_c` and `warn_above_c` (`thermal-zone`), and `bus_warn_below_v`,
 `bus_warn_above_v` and `current_warn_above_a` (`ina2xx`). Each is optional; an absent key is no
 figure.
+## Self-tests
+
+`self-test/1` (`contracts/self-test`) names checks a device runs on itself. A driver serves it beside
+its own contract, and the built-in `board-self-test` serves it for a whole board. A UI lists the
+tests, starts one, and reads what each last found, without knowing the driver. Nothing persists
+across a restart. The contract carries no `kind`: it is an add-on, and the device keeps its own kind.
+
+| # | Method | Arguments | Result |
+|---|---|---|---|
+| 1 | `tests` | an out buffer | a count, then one test record each |
+| 2 | `run` (long job) | `name: &str`, `confirmed: bool` | a job; its progress is milliseconds of the test's `expect_ms`; its result is one result record |
+| 3 | `last` | an out buffer | a count, then each test that has a result: its name and that result |
+
+`run` answers `INVALID_ARGUMENT` for a name the device does not list, and `BUSY` while another test
+runs, or for an intrusive test while another caller uses the device (refused before anything runs).
+`confirmed` is the operator's word for a test that needs one. A cancelled test ends `CANCELLED`, and
+`last` keeps the result it had. A job the driver loses ends `INTERRUPTED`.
+
+**Names.** A test name is `[a-z0-9_]`, 1 to 32 bytes, and never `all` (the board's). The set and the
+names are stable for a driver version, so a manufacturing flow may store them.
+
+**Layouts.** Little-endian, fixed width, no padding. Text is a length byte then its field, zero padded.
+
+| Record | Bytes | Fields |
+|---|---|---|
+| test (in `tests`) | 249 | name (80), description (96), intrusive (u8: 1 changes what the device does while it runs), operator (u8: 1 needs an operator to confirm), fixture (64), `expect_ms` (u32, a bound for a UI, not a promise) |
+| result (`run`'s result, and the body of each `last` entry) | 373 | outcome (u8: 0 pass, 1 fail, 2 skipped, 3 not-supported), reason (u16), detail (96), measure count (u8, 0 to 4), four measure slots of 68 bytes |
+| measure | 68 | name (32), value (i64), exponent (i8: the value is `value * 10^exponent` in the unit), unit (8), low and high limits (i64 each), flags (u8: bit 0 low is set, bit 1 high is set) |
+| `last` entry | 454 | name (80), then a result |
+
+A list is a count (u8), then its entries. A device lists at most 8 tests (`MAX_TESTS`). A board's
+list names up to 16 members' tests and `all`, so at most 129 entries (`MAX_LISTED`). The sizes are
+pinned by the contract's tests. The largest reply of each method is in the bridge's table in [`daemon.md`](daemon.md).
+
+**Reasons.** The codes are numbered and never reused.
+
+| Code | Name | Outcome | Meaning |
+|---|---|---|---|
+| 0 | `OK` | pass | within limits, or answered as expected |
+| 1 | `OPERATOR_CONFIRMED` | pass | an operator confirmed what the test shows |
+| 2 | `NEEDS_OPERATOR` | skipped | run it again with `confirmed = true` |
+| 3 | `NOT_CONFIGURED` | skipped | the board file gives no setting the test needs |
+| 4 | `ABSENT` | skipped | the hardware the test needs is not there, or the member is not running |
+| 5 | `IN_USE` | skipped | (a board only) a member refused its start because another caller uses it |
+| 6 | `NO_RESPONSE` | fail | a read or write of the device failed |
+| 7 | `IDENTITY` | fail | the chip answered with another identity |
+| 8 | `OUT_OF_RANGE` | fail | a measured value is outside its limits |
+| 9 | `RESTORE_FAILED` | fail | the device could not be put back as found; retried |
+| 10 | `UNKNOWN_TEST` | not-supported | the device does not offer that test |
+| 11 | `READ_ONLY` | skipped | the device is the operating system's, and the test would write |
+
+**The rules.** `lemnos-contract-self-test` keeps them in one place (`Runner`), and each driver's tests
+show them on the simulator.
+
+- A test leaves the device as it found it. It reads what it will change first, and puts it back on
+  every end: pass, fail, skip and cancel. A put-back that fails is retried on the ticks with backoff
+  capped at 8 s, the device reports `Degraded` meanwhile, and the answer is a fail with
+  `RESTORE_FAILED` (a test's own failure keeps its reason).
+- Cancelling stops the test and starts the put-back at once; the job answers `CANCELLED` from then.
+- An intrusive test is refused with `BUSY` while another caller uses the device. A caller counts as
+  using it once it has called the device and until it goes; a driver it drives (a fan under a
+  controller) counts too. A read-only test is never refused for use.
+- While an intrusive test runs, the driver refuses its own normal changes with `BUSY` (a fan's duty,
+  an indicator's state), so no write is overwritten by a put-back.
+- A missing fixture, setting, sensor or operator is `skipped`, with its reason. A `fail` means the
+  device was reached and was wrong, or a read failed.
+- A tick before a step is due takes no step. With no test running a tick costs nothing and allocates
+  nothing.
+
+**Driver-to-driver jobs.** A driver may start a long job on a device it uses: `LocalCaller` routes
+`start_job`, `poll` and `cancel` through the host's router. The job belongs to the starter (its
+device-owned caller number, `CallerId::device`), and only it polls or cancels it. Its progress and
+result go to the starter, never to a client. When the starter's slot ends, its jobs are cancelled on
+the device they run on. A package driver is given `NOT_SUPPORTED` for these calls.
+
+**Served by.** Each test's cost is its `expect_ms` bound on the simulator; the fan's settle is fixed
+at 3 s.
+
+| Driver | Tests | Board-file keys |
+|---|---|---|
+| `bmm150` | `identity`: the chip ID register reads `0x32` (non-intrusive) | none |
+| `ina2xx` | `bus_voltage`: the bus voltage is in the range (non-intrusive) | `self_test_bus_min_mv`, `self_test_bus_max_mv` (both, or the test is skipped `NOT_CONFIGURED`) |
+| `hwmon-fan` | `spin` (intrusive): sets the test duty, waits 3 s, reads the tachometer, puts back the duty and the `pwm1_enable` mode it found. A fan with no tachometer is skipped `ABSENT` | `self_test_duty` (per mille, 1 to 1000, default 500), `self_test_rpm_min`, `self_test_rpm_max` (both, or skipped `NOT_CONFIGURED`) |
+| `indicator` | `lamp` (intrusive, operator): shows `receiving` for 2 s, then puts back the state it had | none; `confirmed = true` runs it, else skipped `NEEDS_OPERATOR` |
+| `hw-watchdog` | `answers` (non-intrusive): reads the device's timeout; feeds and changes nothing | none |
+| `board-self-test` | the members' tests as `member:test`, and `all` | `members`, `include_intrusive` (see [Boards](boards.md#the-self-test-of-a-board)) |
+
+The camera sensor (`ov9782`) serves no self-test yet: its identity and test-pattern checks need its
+streaming state, which this change does not touch.
+

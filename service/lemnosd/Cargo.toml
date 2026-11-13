@@ -33,6 +33,7 @@ lemnos-driver-a733-di = { path = "../../drivers/a733-di" }
 lemnos-driver-a733-video = { path = "../../drivers/a733-video" }
 lemnos-driver-bmi088 = { path = "../../drivers/bmi088" }
 lemnos-driver-bmm150 = { path = "../../drivers/bmm150" }
+lemnos-driver-board-self-test = { path = "../../drivers/board-self-test" }
 lemnos-driver-coral-loader = { path = "../../drivers/coral-loader" }
 lemnos-driver-fan-control = { path = "../../drivers/fan-control" }
 lemnos-driver-g2d = { path = "../../drivers/g2d" }

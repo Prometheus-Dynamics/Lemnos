@@ -62,8 +62,33 @@ use lemnos_contract_indicator::{
     FULL_PROGRESS, Indicator as IndicatorContract, NO_PROGRESS, STATES,
 };
 use lemnos_contract_pixels::{MAX_LOCAL_LEDS, Pixels};
-use lemnos_core::{Config, Description, Dev, Health, Lifecycle, Result, Status, driver};
+use lemnos_contract_self_test::{
+    Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
+};
+use lemnos_core::{
+    CallerId, Config, Description, Dev, Health, Item, JobId, JobState, Lifecycle, MethodId, Reply,
+    Result, Status, driver,
+};
 use pattern::{Pattern, draw, next_change};
+
+/// `self-test/1`'s `run`, the second contract the driver serves.
+const RUN: MethodId = MethodId {
+    contract: 1,
+    method: 2,
+};
+/// The checks this driver offers. Its names are stable.
+const SPECS: &[Spec] = &[Spec {
+    name: "lamp",
+    description: "the indicator shows the receiving state for two seconds",
+    intrusive: true,
+    operator: true,
+    fixture: "an operator watching the indicator",
+    expect_ms: 2000,
+}];
+/// The state the `lamp` test shows.
+const LAMP_STATE: &str = "receiving";
+/// How long the `lamp` test holds its state.
+const LAMP_NS: u64 = 2_000 * NS_PER_MS;
 
 const NS_PER_MS: u64 = 1_000_000;
 /// The first retry after a failed write, and the longest one.
@@ -71,7 +96,7 @@ const BACKOFF_FIRST_NS: u64 = 100 * NS_PER_MS;
 const BACKOFF_MAX_NS: u64 = 8_000 * NS_PER_MS;
 
 /// An indicator on a `pixels/1` device.
-#[driver("indicator", provides = [IndicatorContract])]
+#[driver("indicator", provides = [IndicatorContract, SelfTest])]
 pub struct Indicator {
     #[needs]
     pixels: Dev<dyn Pixels>,
@@ -96,6 +121,10 @@ pub struct Indicator {
     backoff: u64,
     /// The last write failed.
     failed: bool,
+    /// The self-test checks: their runs and the last result of each.
+    runner: Runner,
+    /// Who the method being run is for (see [`Lifecycle::caller`]).
+    calling: CallerId,
 }
 
 impl Indicator {
@@ -123,8 +152,11 @@ impl Lifecycle for Indicator {
     type Needs = IndicatorNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
-    /// Ticked: a blink or chase, and the write retries, are the only timed work.
+    /// Ticked: a blink or chase, the write retries, and the self-test's steps are the timed work.
     const TICKS: bool = true;
+    // The self-test runs its steps from the tick, and tracks who sets the state.
+    const JOBS: bool = true;
+    const TRACKS_CALLERS: bool = true;
 
     fn start(mut needs: IndicatorNeeds, cfg: &Config<'_>) -> Result<Self> {
         let count = usize::from(needs.pixels.pixel_count()?);
@@ -154,19 +186,123 @@ impl Lifecycle for Indicator {
             retry_at: 0,
             backoff: 0,
             failed: false,
+            runner: Runner::new(SPECS),
+            calling: CallerId::LOCAL,
         })
     }
 
-    fn describe(&self, _out: &mut Description) {}
+    fn describe(&self, out: &mut Description) {
+        out.add(Item::action("self_test", RUN));
+    }
 
     fn health(&self) -> Health {
         if self.failed {
             return Health::Failed("the last write to the pixels failed; retrying");
         }
+        if let Some(why) = self.runner.health() {
+            return Health::Degraded(why);
+        }
         Health::Ok
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        // The test's steps first, so the frame they set is drawn in this same tick.
+        let test = {
+            let mut bench = Lamp {
+                state: &mut self.state,
+                progress: &mut self.progress,
+                changed: &mut self.changed,
+            };
+            self.runner.tick(now_ns, &mut bench)
+        };
+        let frame = self.tick_frame(now_ns);
+        match (test, frame) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+        self.runner.caller(caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        self.runner.caller_gone(caller);
+    }
+
+    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
+        self.runner.job(job, result)
+    }
+
+    fn job_cancel(&mut self, job: JobId) {
+        let mut bench = Lamp {
+            state: &mut self.state,
+            progress: &mut self.progress,
+            changed: &mut self.changed,
+        };
+        self.runner.cancel(job, &mut bench);
+    }
+}
+
+impl SelfTest for Indicator {
+    fn tests(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.runner.write_tests(into)
+    }
+
+    fn run(&mut self, name: &str, confirmed: bool) -> Result<JobId> {
+        self.runner.start(name, confirmed, self.calling)
+    }
+
+    fn last(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.runner.write_last(into)
+    }
+}
+
+/// The `lamp` test's steps: it shows [`LAMP_STATE`] for [`LAMP_NS`], and puts back the state it
+/// found, so the frame returns to what the driver had set.
+struct Lamp<'a> {
+    state: &'a mut usize,
+    progress: &'a mut u16,
+    changed: &'a mut bool,
+}
+
+impl Bench for Lamp<'_> {
+    fn step(&mut self, _test: usize, now_ns: u64, scratch: &mut Scratch) -> Flow {
+        if scratch.step == 0 {
+            scratch.saved = [*self.state as i64, i64::from(*self.progress), 0, 1];
+            scratch.step = 1;
+            let lamp = STATES
+                .iter()
+                .position(|name| *name == LAMP_STATE)
+                .unwrap_or(0);
+            *self.state = lamp;
+            *self.progress = NO_PROGRESS;
+            *self.changed = true;
+            return Flow::Wait(now_ns + LAMP_NS);
+        }
+        Flow::Done(
+            Record::pass(reason::OPERATOR_CONFIRMED)
+                .said("an operator confirmed the indicator showed the state")
+                .measure(Measure::new("held", (LAMP_NS / NS_PER_MS) as i64, 0, "ms")),
+        )
+    }
+
+    fn restore(&mut self, scratch: &mut Scratch) -> core::result::Result<(), Status> {
+        if scratch.saved[3] == 0 {
+            return Ok(());
+        }
+        *self.state = scratch.saved[0] as usize;
+        *self.progress = scratch.saved[1] as u16;
+        *self.changed = true;
+        scratch.saved[3] = 0;
+        Ok(())
+    }
+}
+
+impl Indicator {
+    /// Draws the current state's frame when it is due, and sends it.
+    fn tick_frame(&mut self, now_ns: u64) -> Option<u64> {
         if self.changed {
             self.changed = false;
             self.since_ns = now_ns;
@@ -218,6 +354,10 @@ impl IndicatorContract for Indicator {
             .ok_or(Status::INVALID_ARGUMENT)?;
         if progress != NO_PROGRESS && progress > FULL_PROGRESS {
             return Err(Status::INVALID_ARGUMENT);
+        }
+        // A self-test is showing its own state, and puts this one back when it ends.
+        if self.runner.busy() {
+            return Err(Status::BUSY);
         }
         self.state = index;
         self.progress = progress;

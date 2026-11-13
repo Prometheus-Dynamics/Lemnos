@@ -146,6 +146,19 @@ pub trait Provider {
         false
     }
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller>;
+    /// A route to the device named `id` on the board, serving contract `tag`, whether it runs or
+    /// not: a call to one that is not running is `NO_DEVICE`. The route calls as the device that
+    /// asks, so the device it names sees the caller. The default refuses.
+    fn member(&mut self, id: &str, tag: Tag) -> Result<LocalCaller> {
+        let _ = (id, tag);
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// Reports the id of each device on the board whose driver serves contract `tag`, in board
+    /// order, as the board's own. The default reports none.
+    fn members(&mut self, tag: Tag, found: &mut dyn FnMut(&str)) -> Result<()> {
+        let _ = (tag, found);
+        Err(Status::NOT_SUPPORTED)
+    }
     /// The device the board's `link` names, if it has the contract `tag`. Only a host that
     /// binds drivers from its own table can name one; the default refuses.
     fn link_device(&mut self, tag: Tag) -> Result<LocalCaller> {
@@ -235,6 +248,17 @@ impl<'a> Resources<'a> {
 
     pub fn device<C: Contract + ?Sized>(&mut self, need: &str) -> Result<Dev<C>> {
         self.provider.device(need, C::TAG).map(Dev::new)
+    }
+
+    /// A route to the board device `id`, as contract `C`, whether it runs or not. See
+    /// [`Provider::member`].
+    pub fn member<C: Contract + ?Sized>(&mut self, id: &str) -> Result<Dev<C>> {
+        self.provider.member(id, C::TAG).map(Dev::new)
+    }
+
+    /// The ids of the board's devices serving contract `C`. See [`Provider::members`].
+    pub fn members<C: Contract + ?Sized>(&mut self, found: &mut dyn FnMut(&str)) -> Result<()> {
+        self.provider.members(C::TAG, found)
     }
 
     pub fn provider(&mut self) -> &mut dyn Provider {

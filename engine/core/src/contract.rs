@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use crate::{Health, MethodId, Reading, Result, Shape, Status, Tag};
+use crate::{CallerId, Health, JobId, MethodId, Reading, Result, Shape, Status, Tag};
 
 /// One parameter of a contract method.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -87,10 +87,64 @@ pub const LOCAL_ARGS: usize = 64;
 /// Stack space a generated client gives a reply with no output buffer.
 pub const REPLY_INLINE: usize = 256;
 
+/// How a long job a driver started on another device stands, from [`Router::job_poll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Polled {
+    /// Still going: `done` of `total`, as its contract's job says (0 when not known).
+    Running { done: u64, total: u64 },
+    /// Over. `len` bytes of its result were copied to the buffer; they are the result only when
+    /// `status` is OK.
+    Finished { status: Status, len: usize },
+}
+
 /// How the host gets a call to a device in the same process.
+///
+/// The methods after [`Router::health`] serve a driver that calls another device it uses: a
+/// caller other than the host itself, which is named by its [`CallerId`], and the long jobs it
+/// starts there. A router that does not serve them answers `NOT_SUPPORTED`, which is the default.
 pub trait Router: Sync {
     fn call(&self, device: u32, method: MethodId, args: &[u8], reply: &mut [u8]) -> Result<usize>;
     fn health(&self, device: u32) -> Health;
+    /// [`Router::call`], for `caller`. [`CallerId::LOCAL`] is the same call.
+    fn call_as(
+        &self,
+        caller: CallerId,
+        device: u32,
+        method: MethodId,
+        args: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize> {
+        if caller == CallerId::LOCAL {
+            self.call(device, method, args, reply)
+        } else {
+            Err(Status::NOT_SUPPORTED)
+        }
+    }
+    /// Starts job method `method` on `device` for `caller`, and returns the host's number for the
+    /// job. `caller` owns it: only `caller` polls it or cancels it, and it ends when `caller`'s
+    /// device goes.
+    fn start_job(
+        &self,
+        caller: CallerId,
+        device: u32,
+        method: MethodId,
+        args: &[u8],
+    ) -> Result<u64> {
+        let _ = (caller, device, method, args);
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// How job `job` (from [`Router::start_job`]) stands, for its owner `caller`. A job that
+    /// finished is answered once, with its result copied to `result`. `NOT_FOUND` for a job that
+    /// is over and was answered, or never was; `NOT_PERMITTED` for one `caller` doesn't own.
+    fn job_poll(&self, caller: CallerId, job: u64, result: &mut [u8]) -> Result<Polled> {
+        let _ = (caller, job, result);
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// Cancels job `job` for its owner `caller`, as [`Driver::job_cancel`] does.
+    fn cancel_job(&self, caller: CallerId, job: u64) -> Result<()> {
+        let _ = (caller, job);
+        Err(Status::NOT_SUPPORTED)
+    }
 }
 
 /// A direct call to another device in the same host.
@@ -98,6 +152,8 @@ pub struct LocalCaller {
     router: &'static dyn Router,
     device: u32,
     contract: u8,
+    /// Who the calls are for. [`CallerId::LOCAL`] unless the host says otherwise (see [`by`](Self::by)).
+    caller: CallerId,
     args: [u8; LOCAL_ARGS],
 }
 
@@ -107,8 +163,26 @@ impl LocalCaller {
             router,
             device,
             contract,
+            caller: CallerId::LOCAL,
             args: [0; LOCAL_ARGS],
         }
+    }
+
+    /// The same route, for `caller`: the device sees calls from it as from that caller, and jobs
+    /// started through it belong to it.
+    pub const fn by(mut self, caller: CallerId) -> Self {
+        self.caller = caller;
+        self
+    }
+
+    /// How job `job` (one this route started) stands. See [`Router::job_poll`].
+    pub fn poll(&self, job: JobId, result: &mut [u8]) -> Result<Polled> {
+        self.router.job_poll(self.caller, job.0, result)
+    }
+
+    /// Cancels job `job` (one this route started). See [`Router::cancel_job`].
+    pub fn cancel(&self, job: JobId) -> Result<()> {
+        self.router.cancel_job(self.caller, job.0)
     }
 }
 
@@ -117,6 +191,7 @@ impl core::fmt::Debug for LocalCaller {
         f.debug_struct("LocalCaller")
             .field("device", &self.device)
             .field("contract", &self.contract)
+            .field("caller", &self.caller)
             .finish()
     }
 }
@@ -132,7 +207,19 @@ impl Caller for LocalCaller {
             contract: self.contract,
             method,
         };
-        self.router.call(self.device, id, args, reply)
+        self.router
+            .call_as(self.caller, self.device, id, args, reply)
+    }
+
+    fn start_job(&mut self, method: u16, args_len: usize) -> Result<JobId> {
+        let args = self.args.get(..args_len).ok_or(Status::BUFFER_TOO_SMALL)?;
+        let id = MethodId {
+            contract: self.contract,
+            method,
+        };
+        self.router
+            .start_job(self.caller, self.device, id, args)
+            .map(JobId)
     }
 }
 

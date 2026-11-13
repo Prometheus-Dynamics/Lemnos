@@ -1,0 +1,22 @@
+[package]
+name = "lemnos-driver-board-self-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-self-test = { path = "../../contracts/self-test" }
+
+[dev-dependencies]
+lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "BoardSelfTest"

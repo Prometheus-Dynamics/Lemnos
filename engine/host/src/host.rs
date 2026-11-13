@@ -9,9 +9,9 @@ use lemnos_core::{
     AddressWidth, BoardDevice, BoardView, CallerId, ClocksHandle, Config, ConfigValue, Decode,
     Description, DmaHandle, Driver, Encode, Health, Hint, HostClock, HostOwned, I2c,
     InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest, MethodId, NeedKind,
-    Origin, Provider, Pwm, RawSpiBus, Reader, RegistersHandle, Reply, ResetHandle, Resources,
-    Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
-    Watchdog,
+    Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RegistersHandle, Reply, ResetHandle,
+    Resources, Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle,
+    UsbFunctionHandle, Watchdog,
 };
 
 use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner};
@@ -455,6 +455,8 @@ struct Inner {
     streams: Streams,
     /// How a host-owned device's driver calls the devices it uses: reads only.
     reading: OnceLock<&'static Reading>,
+    /// How a device that is not host-owned calls another device it uses, and starts its jobs.
+    routes: OnceLock<&'static Routes>,
     /// Long jobs still open, and what their starters haven't been told yet.
     jobs: Mutex<Jobs>,
 }
@@ -502,6 +504,9 @@ struct Jobs {
     next: u32,
     open: Vec<OpenJob>,
     updates: VecDeque<JobUpdate>,
+    /// What changed about jobs a device started on another device (owned by [`CallerId::device`]).
+    /// Read by [`Router::job_poll`], never by [`Host::take_job_updates`].
+    local: VecDeque<JobUpdate>,
 }
 
 impl Jobs {
@@ -524,15 +529,20 @@ impl Jobs {
             next: 0,
             open: Vec::new(),
             updates: VecDeque::new(),
+            local: VecDeque::new(),
         }
     }
 
     /// Queues an update. A job's progress that hasn't gone out yet is replaced by newer
     /// progress, so the queue holds at most two updates per job.
     fn push(&mut self, update: JobUpdate) {
+        let queue = if update.owner.is_device() {
+            &mut self.local
+        } else {
+            &mut self.updates
+        };
         if let JobEvent::Progress { .. } = update.event
-            && let Some(queued) = self
-                .updates
+            && let Some(queued) = queue
                 .iter_mut()
                 .rev()
                 .find(|queued| queued.job == update.job)
@@ -541,7 +551,7 @@ impl Jobs {
             queued.event = update.event;
             return;
         }
-        self.updates.push_back(update);
+        queue.push_back(update);
     }
 }
 
@@ -559,6 +569,58 @@ impl Router for Reading {
 
     fn health(&self, device: u32) -> Health {
         Router::health(self.0, device)
+    }
+}
+
+/// The way from a device that is not host-owned to the devices it uses: calls as the caller it
+/// names, and the long jobs it starts there. The host keeps one for its lifetime.
+struct Routes(&'static Inner);
+
+impl Router for Routes {
+    fn call(&self, device: u32, method: MethodId, args: &[u8], reply: &mut [u8]) -> Result<usize> {
+        Router::call(self.0, device, method, args, reply)
+    }
+
+    fn health(&self, device: u32) -> Health {
+        Router::health(self.0, device)
+    }
+
+    fn call_as(
+        &self,
+        caller: CallerId,
+        device: u32,
+        method: MethodId,
+        args: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize> {
+        if caller == CallerId::LOCAL {
+            return Router::call(self.0, device, method, args, reply);
+        }
+        let slot = self.0.slot(device).ok_or(Status::NOT_FOUND)?;
+        self.0.call_here(&slot, caller, false, method, args, reply)
+    }
+
+    fn start_job(
+        &self,
+        caller: CallerId,
+        device: u32,
+        method: MethodId,
+        args: &[u8],
+    ) -> Result<u64> {
+        let slot = self.0.slot(device).ok_or(Status::NOT_FOUND)?;
+        let mut reply = [0u8; 8];
+        let n = self
+            .0
+            .call_here(&slot, caller, true, method, args, &mut reply)?;
+        u64::decode(&mut Reader::new(&reply[..n]))
+    }
+
+    fn job_poll(&self, caller: CallerId, job: u64, result: &mut [u8]) -> Result<Polled> {
+        self.0.job_poll_for(caller, job, result)
+    }
+
+    fn cancel_job(&self, caller: CallerId, job: u64) -> Result<()> {
+        self.0.cancel_for(caller, job)
     }
 }
 
@@ -651,6 +713,7 @@ impl Inner {
 
     /// Ends every open job of `device` with `status`: its driver has gone.
     fn end_jobs(&self, slot: &Slot, status: Status) {
+        self.end_started(slot);
         if slot.open_jobs.load(Ordering::Acquire) == 0 {
             return;
         }
@@ -678,6 +741,38 @@ impl Inner {
         self.wake();
     }
 
+    /// Ends the jobs a device started on other devices, now its driver is gone: each is taken off
+    /// the books and cancelled on the device it runs on, and what was queued for the starter is
+    /// dropped. Nothing is queued for a starter after this.
+    fn end_started(&self, starter: &Slot) {
+        let owner = CallerId::device(starter.index);
+        let mut cancels = Vec::new();
+        {
+            let mut jobs = self.jobs();
+            jobs.open.retain(|job| {
+                if job.owner == owner {
+                    cancels.push((job.device, job.driver_job));
+                    false
+                } else {
+                    true
+                }
+            });
+            jobs.local.retain(|update| update.owner != owner);
+        }
+        for (device, driver_job) in cancels {
+            let Some(target) = self.slot(device) else {
+                continue;
+            };
+            target.open_jobs.fetch_sub(1, Ordering::AcqRel);
+            // Teardown holds no lock of the starter's, and the device it runs on never waits for
+            // its starter, so this takes its instance directly, as a call does.
+            let mut guard = lock(&target.instance);
+            if let Some(instance) = guard.as_mut() {
+                let _ = catch_unwind(AssertUnwindSafe(|| instance.job_cancel(driver_job)));
+            }
+        }
+    }
+
     /// Takes a job `instance` has just started on `caller`'s behalf, and returns its number.
     fn open_job(&self, slot: &Slot, driver_job: JobId, caller: CallerId) -> u64 {
         let mut jobs = self.jobs();
@@ -692,6 +787,86 @@ impl Inner {
         });
         slot.open_jobs.fetch_add(1, Ordering::AcqRel);
         id
+    }
+
+    /// Cancels job `job` for its owner `caller`. See [`Host::cancel_job`].
+    fn cancel_for(&'static self, caller: CallerId, job: u64) -> Result<()> {
+        let (device, driver_job) = {
+            let jobs = self.jobs();
+            let Some(open) = jobs.open.iter().find(|open| open.id == job) else {
+                return Err(if (job >> 32) as u32 == jobs.epoch {
+                    Status::NOT_FOUND
+                } else {
+                    Status::INTERRUPTED
+                });
+            };
+            if open.owner != caller && caller != CallerId::LOCAL {
+                return Err(Status::NOT_PERMITTED);
+            }
+            (open.device, open.driver_job)
+        };
+        let slot = self.slot(device).ok_or(Status::NOT_FOUND)?;
+        self.on_lane(slot, move |instance| instance.job_cancel(driver_job));
+        Ok(())
+    }
+
+    /// How job `job`, a device-owned one, stands for its owner `caller`. See [`Router::job_poll`].
+    /// What changed since the last poll is taken from the queue; a finished job's result is copied
+    /// only when it fits, so a poll that is too small for it can be repeated.
+    fn job_poll_for(&self, caller: CallerId, job: u64, result: &mut [u8]) -> Result<Polled> {
+        let mut jobs = self.jobs();
+        let open = jobs
+            .open
+            .iter()
+            .find(|open| open.id == job)
+            .map(|open| (open.owner, open.told));
+        let queued = jobs
+            .local
+            .iter()
+            .find(|update| update.job == job)
+            .map(|u| u.owner);
+        match (open, queued) {
+            (Some((owner, _)), _) | (None, Some(owner)) if owner != caller => {
+                return Err(Status::NOT_PERMITTED);
+            }
+            (None, None) => return Err(Status::NOT_FOUND),
+            _ => {}
+        }
+        if let Some(at) = jobs.local.iter().position(|update| {
+            update.job == job && matches!(update.event, JobEvent::Finished { .. })
+        }) && let JobEvent::Finished {
+            status,
+            result: bytes,
+        } = &jobs.local[at].event
+        {
+            if bytes.len() > result.len() {
+                return Err(Status::BUFFER_TOO_SMALL);
+            }
+            let (status, len) = (*status, bytes.len());
+            result[..len].copy_from_slice(bytes);
+            jobs.local.remove(at);
+            // Anything queued after the end is for a job the host has already let go.
+            jobs.local.retain(|update| update.job != job);
+            return Ok(Polled::Finished { status, len });
+        }
+        let mut told = open.and_then(|(_, told)| told);
+        while let Some(at) = jobs.local.iter().position(|update| update.job == job) {
+            if let Some(update) = jobs.local.remove(at)
+                && let JobEvent::Progress { done, total } = update.event
+            {
+                told = Some((done, total));
+            }
+        }
+        match open {
+            Some(_) => {
+                let (done, total) = told.unwrap_or((0, 0));
+                if let Some(at) = jobs.open.iter().position(|open| open.id == job) {
+                    jobs.open[at].told = Some((done, total));
+                }
+                Ok(Polled::Running { done, total })
+            }
+            None => Err(Status::NOT_FOUND),
+        }
     }
 
     /// Asks a driver how each of its open jobs stands, and queues what changed for their
@@ -1680,7 +1855,7 @@ impl Binding<'_> {
             // Never without one once the host has started; refuse rather than hand a
             // host-owned device a way to change another.
             None if self.guest() => return Err(Status::NOT_PERMITTED),
-            _ => self.inner,
+            _ => *self.inner.routes.get().ok_or(Status::NO_MEMORY)?,
         };
         Ok(LocalCaller::new(router, target.index, contract))
     }
@@ -1722,6 +1897,28 @@ impl Provider for Binding<'_> {
     fn device(&mut self, need: &str, tag: Tag) -> Result<LocalCaller> {
         let target = self.target(need).ok_or(Status::NOT_FOUND)?;
         self.caller_of(&target, tag)
+    }
+
+    fn member(&mut self, id: &str, tag: Tag) -> Result<LocalCaller> {
+        let target = self.inner.slot_by_id(id).ok_or(Status::NOT_FOUND)?;
+        // A device calling itself would wait on its own lane.
+        if target.index == self.slot.index {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        let contract = target.contract_index(tag).ok_or(Status::INVALID_ARGUMENT)?;
+        let router: &'static dyn Router = *self.inner.routes.get().ok_or(Status::NO_MEMORY)?;
+        Ok(LocalCaller::new(router, target.index, contract).by(CallerId::device(self.slot.index)))
+    }
+
+    fn members(&mut self, tag: Tag, found: &mut dyn FnMut(&str)) -> Result<()> {
+        let mut index = 0;
+        while let Some(slot) = self.inner.slot(index) {
+            index += 1;
+            if slot.index != self.slot.index && slot.contract_index(tag).is_some() {
+                found(&slot.spec.id);
+            }
+        }
+        Ok(())
     }
 
     fn link_device(&mut self, tag: Tag) -> Result<LocalCaller> {
@@ -1907,10 +2104,12 @@ impl Host {
             liveness: OnceLock::new(),
             streams,
             reading: OnceLock::new(),
+            routes: OnceLock::new(),
             jobs: Mutex::new(Jobs::new()),
         }));
         // Lives as long as `inner` does, which is for good.
         let _ = inner.reading.set(Box::leak(Box::new(Reading(inner))));
+        let _ = inner.routes.set(Box::leak(Box::new(Routes(inner))));
         let host = Self { inner };
         let slots = inner.all();
         for at in order {
@@ -2080,24 +2279,7 @@ impl Host {
     /// restart ended it), and `NOT_PERMITTED` for one another caller started.
     /// [`CallerId::LOCAL`] may cancel any.
     pub fn cancel_job(&self, caller: CallerId, job: u64) -> Result<()> {
-        let (device, driver_job) = {
-            let jobs = self.inner.jobs();
-            let Some(open) = jobs.open.iter().find(|open| open.id == job) else {
-                return Err(if (job >> 32) as u32 == jobs.epoch {
-                    Status::NOT_FOUND
-                } else {
-                    Status::INTERRUPTED
-                });
-            };
-            if open.owner != caller && caller != CallerId::LOCAL {
-                return Err(Status::NOT_PERMITTED);
-            }
-            (open.device, open.driver_job)
-        };
-        let slot = self.inner.slot(device).ok_or(Status::NOT_FOUND)?;
-        self.inner
-            .on_lane(slot, move |instance| instance.job_cancel(driver_job));
-        Ok(())
+        self.inner.cancel_for(caller, job)
     }
 
     /// Moves what changed about long jobs, oldest first, into `into`. The host's waker

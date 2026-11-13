@@ -3,6 +3,7 @@
 //! the instants it wants to `tick`.
 
 use super::*;
+use lemnos_contract_self_test::SelfTest;
 use lemnos_measure::test_alloc::{Counting, allocations};
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +35,8 @@ struct Device {
     /// Whether feeds and requests are recorded. Off for the allocation test, which must not grow
     /// a vector.
     record: bool,
+    /// Every timeout read fails.
+    read_fails: bool,
 }
 
 #[derive(Clone)]
@@ -51,6 +54,7 @@ impl Fake {
             feed_fails_from: None,
             now: 0,
             record: true,
+            read_fails: false,
         })))
     }
 
@@ -88,7 +92,10 @@ impl RawWatchdog for Fake {
     }
 
     fn timeout(&mut self) -> std::result::Result<u32, ErrorKind> {
-        Ok(self.with(|d| d.timeout))
+        self.with(|d| match d.read_fails {
+            true => Err(ErrorKind::Failed),
+            false => Ok(d.timeout),
+        })
     }
 
     fn timeout_range(&mut self) -> (Option<u32>, Option<u32>) {
@@ -312,4 +319,76 @@ fn the_device_gives_the_timeout_range_read_at_bind() {
     let left = out.find("timeleft").unwrap();
     assert_eq!((left.min, left.max), (Some(0), Some(60)));
     assert_eq!(out.find("state").unwrap().min, None);
+}
+
+/// Runs the `answers` test to its answer on the driver's tick, and reads the answer back.
+fn run_answers(
+    dog: &mut HwWatchdog,
+) -> (
+    lemnos_core::JobState,
+    Option<lemnos_contract_self_test::Record>,
+) {
+    let job = SelfTest::run(dog, "answers", false).unwrap();
+    lemnos_core::Driver::tick(dog, 0);
+    let mut buffer = [0u8; lemnos_contract_self_test::RECORD_BYTES + 8];
+    let mut writer = lemnos_core::Writer::new(&mut buffer);
+    let state = lemnos_core::Lifecycle::job(dog, job, &mut writer);
+    let used = writer.len();
+    let record = match state {
+        lemnos_core::JobState::Finished(lemnos_core::Status::OK) => Some(
+            lemnos_contract_self_test::Record::read(&mut lemnos_core::Reader::new(&buffer[..used]))
+                .unwrap(),
+        ),
+        _ => None,
+    };
+    (state, record)
+}
+
+/// A watchdog that has done its first look at the device (the timeout is set, and the first feed
+/// is made), so a test can measure what its own steps change.
+fn settled(fake: &Fake) -> HwWatchdog {
+    let mut dog = driver(fake, 15);
+    tick_at(fake, &mut dog, 0);
+    dog
+}
+
+#[test]
+fn the_answers_test_reports_the_timeout_and_changes_nothing() {
+    let fake = Fake::new(15);
+    let mut dog = settled(&fake);
+    let (feeds, sets) = fake.with(|d| (d.feeds.len(), d.sets.len()));
+    let (_, record) = run_answers(&mut dog);
+    let record = record.unwrap();
+    assert_eq!(record.outcome, lemnos_contract_self_test::Outcome::Pass);
+    assert_eq!(record.measures().next().unwrap().value, 15);
+    assert_eq!(
+        fake.with(|d| (d.feeds.len(), d.sets.len())),
+        (feeds, sets),
+        "no feed, no request"
+    );
+}
+
+#[test]
+fn a_device_reporting_no_timeout_fails_the_answers_test() {
+    let fake = Fake::new(0);
+    let mut dog = driver(&fake, 15);
+    let (_, record) = run_answers(&mut dog);
+    assert_eq!(
+        record.unwrap().reason,
+        lemnos_contract_self_test::reason::OUT_OF_RANGE
+    );
+}
+
+#[test]
+fn a_device_that_does_not_answer_fails_the_answers_test_and_is_not_faulted() {
+    let fake = Fake::new(15);
+    let mut dog = settled(&fake);
+    fake.with(|d| d.read_fails = true);
+    let before = lemnos_core::Driver::health(&dog);
+    let (_, record) = run_answers(&mut dog);
+    assert_eq!(
+        record.unwrap().reason,
+        lemnos_contract_self_test::reason::NO_RESPONSE
+    );
+    assert_eq!(lemnos_core::Driver::health(&dog), before);
 }

@@ -9,6 +9,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_a733_video::A733Video>(),
         entry::<lemnos_driver_bmi088::Bmi088>(),
         entry::<lemnos_driver_bmm150::Bmm150>(),
+        entry::<lemnos_driver_board_self_test::BoardSelfTest>(),
         entry::<lemnos_driver_coral_loader::CoralLoader>(),
         entry::<lemnos_driver_fan_control::FanController>(),
         entry::<lemnos_driver_g2d::G2dDriver>(),

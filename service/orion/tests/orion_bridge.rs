@@ -11,20 +11,25 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use lemnos_contract_self_test::{
+    Outcome as SelfOutcome, RECORD_BYTES, Record, read_last, read_tests,
+};
+use lemnos_core::Reader;
 use lemnos_core::{
     CallerId, Config as DriverConfig, JobId, JobState, Lifecycle, Reply, Result,
     Status as DriverStatus, contract, driver,
 };
+use lemnos_driver_board_self_test::BoardSelfTest;
 use lemnos_driver_system_identity::Identity;
 use lemnos_driver_system_slots::SystemSlots;
-use lemnos_fake_devices::{FakeAccelerometer, FakeCounter};
+use lemnos_fake_devices::{FakeAccelerometer, FakeCounter, FakeProbe};
 use lemnos_host::board::parse;
 use lemnos_host::{Options as HostOptions, entry};
 use lemnos_orion::config::Config;
 use lemnos_orion::{Shared, calls, publish, source};
 use lemnos_sim::SimBoard;
 use lemnosd::{Config as LemnosdConfig, Service};
-use orion::actions::{ActionCall, Finished, Outcome, Target};
+use orion::actions::{ActionCall, Finished, Outcome, Target, Update};
 use orion::provider::{Found, ResourceState};
 use orion::topics::{FieldId, SampleTime, Status, Subscriber};
 use orion::types::Error as Refusal;
@@ -1412,4 +1417,133 @@ fn a_comm_core_with_a_short_idle_time_is_connected_to_again() {
     });
     let peek = run_once_said(&dashboard, "lemnos.thing.call", "lemnos.thing", "peek");
     assert_eq!(peek.outcome, Outcome::Succeeded, "{peek:?}");
+}
+
+/// A reply the bridge sends as the run's output: its bytes when they are not all hex digits (a
+/// record has zero bytes, so it is always the bytes), else the hex text the bridge wrote.
+fn reply(output: &[u8]) -> Vec<u8> {
+    if output.iter().all(u8::is_ascii_hexdigit) && !output.is_empty() {
+        let text = std::str::from_utf8(output).expect("ascii");
+        return (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex"))
+            .collect();
+    }
+    output.to_vec()
+}
+
+/// A run started through the bridge, with the progress it reports on the way: each update's
+/// `done` and `total`, as the run's progress data carries them (little-endian), then the end.
+fn run_watched(dashboard: &Orion, device: &str, args: &str) -> (Vec<(u64, u64)>, Finished) {
+    let action = format!("lemnos.{device}.call");
+    let mut run = dashboard
+        .run(&ActionCall {
+            name: &action,
+            target: Target::Resource(format!("lemnos.{device}").parse().expect("name")),
+            args: args.as_bytes(),
+            deadline_ms: 0,
+            detached: false,
+        })
+        .expect("run");
+    let mut seen = Vec::new();
+    loop {
+        match run.wait(WAIT).expect("news of the run") {
+            Some(Update::Doing(doing)) => {
+                let done = u64::from_le_bytes(doing.data[..8].try_into().expect("done"));
+                let total = u64::from_le_bytes(doing.data[8..16].try_into().expect("total"));
+                assert_eq!(doing.message, format!("{done} of {total}"));
+                seen.push((done, total));
+            }
+            Some(Update::Finished(finished)) => return (seen, finished),
+            None => panic!("the run went quiet"),
+        }
+    }
+}
+
+/// lemnosd over a self-test member (the probe) and the board's own self-test over it.
+fn start_lemnosd_self_test(socket: &Path) -> Service {
+    let board = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+        [[devices]]\nid = \"a\"\ndriver = \"fake-probe\"\n\
+        [[devices]]\nid = \"selftest\"\ndriver = \"board-self-test\"\n\
+        config = { members = [\"a\"] }\n";
+    start_lemnosd_with(
+        socket,
+        board,
+        vec![entry::<FakeProbe>(), entry::<BoardSelfTest>()],
+    )
+}
+
+#[test]
+fn the_board_self_test_is_listed_run_and_read_through_the_bridge() {
+    let dir = dir("self-test");
+    let lemnosd = dir.join("lemnosd.sock");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_self_test(&lemnosd);
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the self-test resource", || {
+        resource(&dashboard, "lemnos.selftest")
+    });
+
+    // `tests` is an out-buffer method: the bridge sends the size, and the reply is the list.
+    let listed = run_once_said(
+        &dashboard,
+        "lemnos.selftest.call",
+        "lemnos.selftest",
+        "tests",
+    );
+    assert_eq!(listed.outcome, Outcome::Succeeded, "{listed:?}");
+    let names: Vec<String> = read_tests(&reply(&listed.output))
+        .expect("the list")
+        .map(|test| test.name.as_str().to_string())
+        .collect();
+    assert_eq!(names.first().map(String::as_str), Some("a:ok"), "{names:?}");
+    assert_eq!(names.last().map(String::as_str), Some("all"), "{names:?}");
+
+    // `run` is a long job: its end is the run's end, and its result is the record.
+    let run = run_once_said(
+        &dashboard,
+        "lemnos.selftest.call",
+        "lemnos.selftest",
+        "run a:bad false",
+    );
+    assert_eq!(run.outcome, Outcome::Succeeded, "{run:?}");
+    let answer = Record::read(&mut Reader::new(&reply(&run.output))).expect("a record");
+    assert_eq!(answer.outcome, SelfOutcome::Fail);
+    assert_eq!(
+        answer.reason,
+        lemnos_contract_self_test::reason::OUT_OF_RANGE
+    );
+    assert_eq!(reply(&run.output).len(), RECORD_BYTES);
+
+    // `last` gives the result the run left.
+    let last = run_once_said(
+        &dashboard,
+        "lemnos.selftest.call",
+        "lemnos.selftest",
+        "last",
+    );
+    assert_eq!(last.outcome, Outcome::Succeeded, "{last:?}");
+    let kept: Vec<String> = read_last(&reply(&last.output))
+        .expect("the last results")
+        .map(|entry| entry.name.as_str().to_string())
+        .collect();
+    assert!(kept.contains(&"a:bad".to_string()), "{kept:?}");
+
+    // A slow test is a long job whose progress reaches the bridge's client. The board's own run
+    // reports steps, so this goes to the member: `slow` waits a second, and each update is the
+    // milliseconds done of its bound (1000).
+    wait_for("the member", || resource(&dashboard, "lemnos.a"));
+    let (seen, slow) = run_watched(&dashboard, "a", "run slow false");
+    assert_eq!(slow.outcome, Outcome::Succeeded, "{slow:?}");
+    let record = Record::read(&mut Reader::new(&reply(&slow.output))).expect("a record");
+    assert_eq!(record.outcome, SelfOutcome::Pass);
+    assert!(
+        !seen.is_empty(),
+        "the run's progress came back through the bridge"
+    );
+    assert!(seen.iter().all(|&(_, total)| total == 1000), "{seen:?}");
+    assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0), "{seen:?}");
+    assert!(seen.iter().all(|&(done, _)| done <= 1000), "{seen:?}");
 }

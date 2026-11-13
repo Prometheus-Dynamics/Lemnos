@@ -71,6 +71,17 @@ pub struct CallerId(pub u64);
 impl CallerId {
     /// A caller in the same process: another driver, or the host itself. It never goes away.
     pub const LOCAL: Self = Self(0);
+
+    /// The caller a device is when it calls another device it uses (see [`crate::LocalCaller::by`]):
+    /// its slot's index, in a range the daemon never numbers its connections from.
+    pub const fn device(index: u32) -> Self {
+        Self((1 << 62) | index as u64)
+    }
+
+    /// Whether this is a device's own caller, from [`CallerId::device`].
+    pub const fn is_device(self) -> bool {
+        self.0 & (1 << 62) != 0
+    }
 }
 
 /// Where a board device comes from: the board file's own list, or hardware that comes and goes.

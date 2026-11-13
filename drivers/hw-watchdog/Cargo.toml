@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 lemnos-core = { path = "../../engine/core" }
+lemnos-contract-self-test = { path = "../../contracts/self-test" }
 lemnos-hal = { path = "../../engine/hal" }
 lemnos-driver-hw-watchdog-sys = { path = "../hw-watchdog-sys" }
 

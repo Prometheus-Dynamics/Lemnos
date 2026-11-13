@@ -2,7 +2,10 @@ extern crate std;
 
 use super::*;
 use crate::chip::{ConfigError, Error, INA226_CONFIG, INA238_ADC_CONFIG, INA238_ADCRANGE};
-use lemnos_core::{ConfigValue, Driver, Reply, Resources};
+use lemnos_contract_self_test::{Outcome, Record, SelfTest, reason};
+use lemnos_core::{
+    ConfigValue, Driver, JobState, Lifecycle, Reader, Reply, Resources, Status, Writer,
+};
 use lemnos_hal::HalError;
 use lemnos_hal::register::{AddressWidth, I2cRegisters, RegisterBus};
 use lemnos_sim::{Layout, SimBoard, SimI2c};
@@ -539,4 +542,123 @@ fn the_board_gives_the_rails_warning_limits_in_nano_units() {
     let mut out = Description::new();
     Driver::describe(&bare, &mut out);
     assert_eq!(out.find("bus_voltage").unwrap().warn_high, None);
+}
+
+/// The INA226 with a bus-voltage range of 11 V to 13 V, from the board file.
+const RANGED: [(&str, ConfigValue<'static>); 5] = [
+    ("chip", ConfigValue::Str("ina226")),
+    ("shunt_ohms", ConfigValue::Float(0.01)),
+    ("max_current_a", ConfigValue::Float(8.192)),
+    ("self_test_bus_min_mv", ConfigValue::Int(11000)),
+    ("self_test_bus_max_mv", ConfigValue::Int(13000)),
+];
+
+/// A chip at the default address that answers the registers a reading polls.
+fn answering_chip(sim: &SimI2c) {
+    sim.attach(chip::DEFAULT_ADDRESS, Layout::Words);
+    for register in [0x01u8, 0x02, 0x03, 0x04] {
+        sim.set_word(chip::DEFAULT_ADDRESS, register, &[0, 0]);
+    }
+}
+
+/// Runs test `name` to its answer on the driver's tick, and reads the answer back.
+fn run_test(driver: &mut Ina2xx, name: &str) -> (JobState, Option<Record>) {
+    let job = SelfTest::run(driver, name, false).unwrap();
+    Driver::tick(driver, 0);
+    let mut buffer = [0u8; lemnos_contract_self_test::RECORD_BYTES + 8];
+    let mut writer = Writer::new(&mut buffer);
+    let state = Lifecycle::job(driver, job, &mut writer);
+    let used = writer.len();
+    let record = match state {
+        JobState::Finished(Status::OK) => {
+            Some(Record::read(&mut Reader::new(&buffer[..used])).unwrap())
+        }
+        _ => None,
+    };
+    (state, record)
+}
+
+#[test]
+fn the_bus_voltage_test_passes_inside_the_board_files_range() {
+    let (mut board, sim) = board_with_bus();
+    let mut driver = bind(&mut board, &RANGED).unwrap();
+    answering_chip(&sim);
+    set16(&sim, 0x02, 9600); // 12.000 V at 1.25 mV a count
+    let (state, record) = run_test(&mut driver, "bus_voltage");
+    assert_eq!(state, JobState::Finished(Status::OK));
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Pass);
+    let measure = record.measures().next().unwrap();
+    assert_eq!(measure.value, 12_000_000, "micro-volts");
+    assert_eq!(measure.exponent, -6);
+    assert_eq!(measure.unit.as_str(), "V");
+    assert_eq!(
+        (measure.low, measure.high),
+        (Some(11_000_000), Some(13_000_000))
+    );
+}
+
+#[test]
+fn the_bus_voltage_test_fails_outside_the_range_with_the_value_it_read() {
+    let (mut board, sim) = board_with_bus();
+    let mut driver = bind(&mut board, &RANGED).unwrap();
+    answering_chip(&sim);
+    set16(&sim, 0x02, 4800); // 6.000 V
+    let (_, record) = run_test(&mut driver, "bus_voltage");
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Fail);
+    assert_eq!(record.reason, reason::OUT_OF_RANGE);
+    assert_eq!(record.measures().next().unwrap().value, 6_000_000);
+}
+
+#[test]
+fn without_a_range_the_test_is_skipped_and_the_bus_is_not_touched() {
+    let (mut board, sim) = board_with_bus();
+    let mut driver = bind(&mut board, &INA226).unwrap();
+    let before = sim.transactions();
+    let (_, record) = run_test(&mut driver, "bus_voltage");
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Skipped);
+    assert_eq!(record.reason, reason::NOT_CONFIGURED);
+    assert_eq!(sim.transactions(), before, "a skipped test reads nothing");
+}
+
+#[test]
+fn a_chip_that_does_not_answer_is_no_response() {
+    let (mut board, sim) = board_with_bus();
+    let mut driver = bind(&mut board, &RANGED).unwrap();
+    answering_chip(&sim);
+    sim.set_dead(chip::DEFAULT_ADDRESS, true);
+    let before = Driver::health(&driver);
+    let (_, record) = run_test(&mut driver, "bus_voltage");
+    assert_eq!(record.unwrap().reason, reason::NO_RESPONSE);
+    assert_eq!(Driver::health(&driver), before);
+}
+
+#[test]
+fn a_range_with_its_bounds_reversed_is_refused_at_bind() {
+    let (mut board, _sim) = board_with_bus();
+    let reversed = [
+        ("chip", ConfigValue::Str("ina226")),
+        ("shunt_ohms", ConfigValue::Float(0.01)),
+        ("max_current_a", ConfigValue::Float(8.192)),
+        ("self_test_bus_min_mv", ConfigValue::Int(13000)),
+        ("self_test_bus_max_mv", ConfigValue::Int(11000)),
+    ];
+    assert_eq!(
+        bind(&mut board, &reversed).err(),
+        Some(Status::INVALID_ARGUMENT)
+    );
+}
+
+#[test]
+fn describe_offers_the_self_test_action() {
+    let (mut board, _sim) = board_with_bus();
+    let driver = bind(&mut board, &INA226).unwrap();
+    let mut out = Description::new();
+    Driver::describe(&driver, &mut out);
+    assert_eq!(
+        out.find("self_test").unwrap().kind,
+        lemnos_core::ItemKind::Action
+    );
 }

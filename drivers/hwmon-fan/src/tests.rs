@@ -3,9 +3,17 @@
 //! kernel: the values written are the values read back.
 
 use super::*;
-use lemnos_core::{ConfigValue, Driver, LocalCaller, Provider, Resources, Tag};
+use lemnos_contract_self_test::{Outcome, Record, SelfTest, reason};
+use lemnos_core::{
+    CallerId, Config, ConfigValue, Driver, JobState, Lifecycle, LocalCaller, Provider, Reader,
+    Resources, Tag, Writer,
+};
+use lemnos_measure::test_alloc::{Counting, allocations};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
 
 /// Provides no other devices: the fan's `needs` is empty.
 struct NoDevices;
@@ -263,4 +271,264 @@ fn the_fan_names_its_hwmon_directory_as_its_location() {
         "{}",
         out.location()
     );
+}
+/// The `spin` test's settle, which the driver waits before it reads the tachometer.
+const SETTLE: u64 = 3_000_000_000;
+/// The `calling` callers the in-use rule is tested with.
+const ASKER: CallerId = CallerId(7);
+const OTHER: CallerId = CallerId(5);
+
+/// A tachometer range of 1000 to 2000 revolutions per minute, from the board file.
+const RANGE: [(&str, ConfigValue<'static>); 2] = [
+    ("self_test_rpm_min", ConfigValue::Int(1000)),
+    ("self_test_rpm_max", ConfigValue::Int(2000)),
+];
+
+/// Starts `spin` on `fan` and takes its first step: the fan is turned, and the answer waits.
+fn start_spin(fan: &mut HwmonFan) -> lemnos_core::JobId {
+    let job = SelfTest::run(fan, "spin", false).unwrap();
+    Driver::tick(fan, 0);
+    job
+}
+
+/// The answer of `job` as the driver's `job` gives it, and the record it carries.
+fn answer(fan: &mut HwmonFan, job: lemnos_core::JobId) -> (JobState, Option<Record>) {
+    let mut buffer = [0u8; lemnos_contract_self_test::RECORD_BYTES + 8];
+    let mut writer = Writer::new(&mut buffer);
+    let state = Lifecycle::job(fan, job, &mut writer);
+    let used = writer.len();
+    let record = match state {
+        JobState::Finished(lemnos_core::Status::OK) => {
+            Some(Record::read(&mut Reader::new(&buffer[..used])).unwrap())
+        }
+        _ => None,
+    };
+    (state, record)
+}
+
+/// The fan's duty and mode files as the tree holds them now.
+fn duty_and_mode(root: &Path) -> (String, String) {
+    (
+        read(root, &format!("{PWM_FAN}/pwm1")),
+        read(root, &format!("{PWM_FAN}/pwm1_enable")),
+    )
+}
+
+/// A tachometer reading of `rpm`, as the fan's kernel file gives it.
+fn set_rpm(root: &Path, rpm: &str) {
+    write(root, &format!("{PWM_FAN}/fan1_input"), rpm);
+}
+
+#[test]
+fn spin_turns_the_fan_and_puts_its_duty_and_mode_back() {
+    let tree = Tree::new("spin-pass");
+    set_rpm(tree.root(), "1500");
+    let mut fan = bind(
+        tree.root(),
+        &[("name", ConfigValue::Str("pwmfan")), RANGE[0], RANGE[1]],
+    )
+    .unwrap();
+    let job = start_spin(&mut fan);
+    assert_eq!(
+        duty_and_mode(tree.root()),
+        ("128".into(), "1".into()),
+        "the test duty, in manual mode"
+    );
+    assert_eq!(
+        answer(&mut fan, job).0,
+        JobState::Running {
+            done: 0,
+            total: 3000
+        }
+    );
+    Driver::tick(&mut fan, SETTLE);
+    let (state, record) = answer(&mut fan, job);
+    assert_eq!(state, JobState::Finished(lemnos_core::Status::OK));
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Pass);
+    assert_eq!(record.measures().next().unwrap().value, 1500);
+    assert_eq!(
+        duty_and_mode(tree.root()),
+        ("77".into(), "2".into()),
+        "the duty and the automatic mode it found"
+    );
+}
+
+#[test]
+fn spin_outside_the_range_fails_with_the_speed_it_read() {
+    let tree = Tree::new("spin-range");
+    set_rpm(tree.root(), "2500");
+    let mut fan = bind(
+        tree.root(),
+        &[("name", ConfigValue::Str("pwmfan")), RANGE[0], RANGE[1]],
+    )
+    .unwrap();
+    let job = start_spin(&mut fan);
+    Driver::tick(&mut fan, SETTLE);
+    let (_, record) = answer(&mut fan, job);
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Fail);
+    assert_eq!(record.reason, reason::OUT_OF_RANGE);
+    assert_eq!(record.measures().next().unwrap().value, 2500);
+    assert_eq!(duty_and_mode(tree.root()), ("77".into(), "2".into()));
+}
+
+#[test]
+fn spin_without_a_tachometer_is_skipped_and_leaves_the_fan_as_it_was() {
+    let tree = Tree::new("spin-absent");
+    let mut fan = bind(
+        tree.root(),
+        &[("name", ConfigValue::Str("pwmfan")), RANGE[0], RANGE[1]],
+    )
+    .unwrap();
+    let job = SelfTest::run(&mut fan, "spin", false).unwrap();
+    Driver::tick(&mut fan, 0);
+    let (state, record) = answer(&mut fan, job);
+    assert_eq!(state, JobState::Finished(lemnos_core::Status::OK));
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Skipped);
+    assert_eq!(record.reason, reason::ABSENT);
+    assert_eq!(
+        duty_and_mode(tree.root()),
+        ("77".into(), "2".into()),
+        "nothing was written"
+    );
+}
+
+#[test]
+fn spin_without_a_range_is_skipped_before_anything_is_written() {
+    let tree = Tree::new("spin-unconfigured");
+    set_rpm(tree.root(), "1500");
+    let mut fan = bind(tree.root(), &[("name", ConfigValue::Str("pwmfan"))]).unwrap();
+    let job = SelfTest::run(&mut fan, "spin", false).unwrap();
+    Driver::tick(&mut fan, 0);
+    let (_, record) = answer(&mut fan, job);
+    let record = record.unwrap();
+    assert_eq!(record.reason, reason::NOT_CONFIGURED);
+    assert_eq!(duty_and_mode(tree.root()), ("77".into(), "2".into()));
+}
+
+#[test]
+fn cancelling_spin_puts_the_fan_back_at_once() {
+    let tree = Tree::new("spin-cancel");
+    set_rpm(tree.root(), "1500");
+    let mut fan = bind(
+        tree.root(),
+        &[("name", ConfigValue::Str("pwmfan")), RANGE[0], RANGE[1]],
+    )
+    .unwrap();
+    let job = start_spin(&mut fan);
+    assert_eq!(duty_and_mode(tree.root()).0, "128");
+    Lifecycle::job_cancel(&mut fan, job);
+    assert_eq!(
+        duty_and_mode(tree.root()),
+        ("77".into(), "2".into()),
+        "put back by the cancel"
+    );
+    assert_eq!(
+        answer(&mut fan, job).0,
+        JobState::Finished(lemnos_core::Status::CANCELLED)
+    );
+    assert!(
+        fan.runner.last("spin").is_none(),
+        "a cancelled test leaves last as it was"
+    );
+}
+
+#[test]
+fn a_tachometer_that_cannot_be_read_is_no_response_and_the_fan_is_put_back() {
+    let tree = Tree::new("spin-unreadable");
+    // A directory where the tachometer's file is: reading it fails.
+    fs::create_dir_all(tree.root().join(format!("{PWM_FAN}/fan1_input"))).unwrap();
+    let mut fan = bind(
+        tree.root(),
+        &[("name", ConfigValue::Str("pwmfan")), RANGE[0], RANGE[1]],
+    )
+    .unwrap();
+    let job = start_spin(&mut fan);
+    Driver::tick(&mut fan, SETTLE);
+    let (_, record) = answer(&mut fan, job);
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Fail);
+    assert_eq!(record.reason, reason::NO_RESPONSE);
+    assert_eq!(duty_and_mode(tree.root()), ("77".into(), "2".into()));
+}
+
+#[test]
+fn a_duty_change_or_a_release_is_refused_while_spin_runs() {
+    let tree = Tree::new("spin-busy");
+    set_rpm(tree.root(), "1500");
+    let mut fan = bind(
+        tree.root(),
+        &[("name", ConfigValue::Str("pwmfan")), RANGE[0], RANGE[1]],
+    )
+    .unwrap();
+    let job = start_spin(&mut fan);
+    assert_eq!(fan.set_duty(300), Err(lemnos_core::Status::BUSY));
+    assert_eq!(fan.release(), Err(lemnos_core::Status::BUSY));
+    Driver::tick(&mut fan, SETTLE);
+    answer(&mut fan, job);
+    assert!(
+        fan.set_duty(300).is_ok(),
+        "allowed again once the test has ended"
+    );
+}
+
+#[test]
+fn spin_is_refused_while_another_caller_uses_the_fan() {
+    let tree = Tree::new("spin-in-use");
+    set_rpm(tree.root(), "1500");
+    let mut fan = bind(
+        tree.root(),
+        &[("name", ConfigValue::Str("pwmfan")), RANGE[0], RANGE[1]],
+    )
+    .unwrap();
+    Driver::caller(&mut fan, OTHER);
+    Driver::caller(&mut fan, ASKER);
+    assert_eq!(
+        SelfTest::run(&mut fan, "spin", false),
+        Err(lemnos_core::Status::BUSY)
+    );
+    assert_eq!(
+        duty_and_mode(tree.root()),
+        ("77".into(), "2".into()),
+        "refused before anything changed"
+    );
+    Driver::caller_gone(&mut fan, OTHER);
+    assert!(
+        SelfTest::run(&mut fan, "spin", false).is_ok(),
+        "the other caller has gone"
+    );
+}
+
+#[test]
+fn spin_on_a_host_owned_fan_is_skipped_and_nothing_is_written() {
+    let tree = Tree::new("spin-host-owned");
+    set_rpm(tree.root(), "1500");
+    let entries = [
+        ("sys_root", ConfigValue::Str(tree.root().to_str().unwrap())),
+        ("name", ConfigValue::Str("pwmfan")),
+        RANGE[0],
+        RANGE[1],
+    ];
+    let mut provider = NoDevices;
+    let mut resources = Resources::new(&mut provider, None);
+    let mut fan = HwmonFan::bind(&mut resources, &Config::new(&entries).for_host_owned()).unwrap();
+    let job = SelfTest::run(&mut fan, "spin", false).unwrap();
+    Driver::tick(&mut fan, 0);
+    let (_, record) = answer(&mut fan, job);
+    assert_eq!(record.unwrap().reason, reason::READ_ONLY);
+    assert_eq!(duty_and_mode(tree.root()), ("77".into(), "2".into()));
+}
+
+#[test]
+fn idle_ticks_allocate_nothing() {
+    let tree = Tree::new("spin-idle");
+    let mut fan = bind(tree.root(), &[("name", ConfigValue::Str("pwmfan"))]).unwrap();
+    let ((), count) = allocations(|| {
+        for at in 0..1000u64 {
+            Driver::tick(&mut fan, at);
+        }
+    });
+    assert_eq!(count, 0, "allocations in 1000 idle ticks");
 }
