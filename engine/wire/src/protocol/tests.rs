@@ -653,23 +653,13 @@ mod description {
         assert_eq!(jobs, [(3, false), (5, true)]);
     }
 
-    /// Takes the unit state off the last item of an encoded description, as a host from before
-    /// the state would have sent it: that item's block shrinks by its two bytes. The last item has
-    /// no step, limits or group, so its block is 7 bytes with the state and 5 without.
-    fn without_last_unit_state(buf: &mut [u8], n: usize) -> usize {
-        // The description ends with the added-field count (two bytes, zero here): the last item's
-        // block sits just before it.
-        let at = n - 2 - 4 - 7;
-        assert_eq!(u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()), 7);
-        buf[at..at + 4].copy_from_slice(&5u32.to_le_bytes());
-        // Drop the block's last two bytes, the state, and keep the trailer after them.
-        let end = at + 4 + 7;
-        buf.copy_within(end..n, end - 2);
-        n - 2
-    }
-
+    /// The old-description compatibility: a description encoded in the layout a host from before
+    /// the unit state and the real ranges sends (the encoder's own layout, with those fields left
+    /// out) must decode, and each item's state is then decided by its unit string. Built by the
+    /// encoder, never by patching bytes.
     #[test]
     fn each_unit_state_round_trips_and_an_old_description_decides_by_the_unit() {
+        use super::super::description::Layout;
         use lemnos_core::UnitState;
         let manifest = Manifest {
             name: "n",
@@ -698,35 +688,100 @@ mod description {
             ]
         );
 
-        // An old description, without the state: the last item's unit string decides. An empty
-        // unit is unknown; a unit is known.
-        let mut old = Description::new();
-        old.add(Item::value("count", method).dimensionless());
-        old.add(Item::value("volts", method).unit(Unit::Volt, 0));
-        let mut buf = [0; 512];
-        let n = encode_description(&manifest, &old, &identity(), &mut buf).unwrap();
-        let n = without_last_unit_state(&mut buf, n);
-        let back = decode_description(&buf[..n]).unwrap();
-        assert_eq!(back.items[0].unit_state, UnitState::Dimensionless);
-        assert_eq!(back.items[1].unit_state, UnitState::Known);
-
-        let mut old = Description::new();
-        old.add(Item::value("count", method).unit(Unit::Volt, 0));
-        old.add(Item::value("mystery", method));
-        let mut buf = [0; 512];
-        let n = encode_description(&manifest, &old, &identity(), &mut buf).unwrap();
-        let n = without_last_unit_state(&mut buf, n);
-        let back = decode_description(&buf[..n]).unwrap();
+        // The same items, shaped, as a host from before the state encodes them.
+        let mut shaped = Description::new();
+        shaped.add(
+            Item::value("volts", method)
+                .unit(Unit::Volt, 0)
+                .step(7)
+                .group("pair"),
+        );
+        shaped.add(
+            Item::value("count", method)
+                .dimensionless()
+                .step(3)
+                .warn_below(-1),
+        );
+        shaped.add(Item::value("mystery", method).warn_above(9));
+        let mut old = [0; 512];
+        let n = super::super::description::encode_as(
+            &manifest,
+            &shaped,
+            &identity(),
+            &mut old,
+            Layout::BeforeUnitState,
+        )
+        .unwrap();
+        let mut current = [0; 512];
+        let m = encode_description(&manifest, &shaped, &identity(), &mut current).unwrap();
+        // The layouts differ by the state's two bytes and the two real-range options' presence
+        // bytes per item (absent here): the old one is strictly shorter.
+        assert!(m > n);
+        let back = decode_description(&old[..n])
+            .expect("a description from before the unit state still decodes");
+        assert_eq!(back.items.len(), 3);
+        assert_eq!(back.items[0].unit, "V");
+        assert_eq!(back.items[0].unit_state, UnitState::Known);
         assert_eq!(back.items[1].unit, "");
         assert_eq!(back.items[1].unit_state, UnitState::Unknown);
+        assert_eq!(back.items[2].unit_state, UnitState::Unknown);
+        // The fields read from the right bytes.
+        assert_eq!(back.items[0].step, Some(7));
+        assert_eq!(back.items[0].group.as_deref(), Some("pair"));
+        assert_eq!(back.items[1].step, Some(3));
+        assert_eq!(back.items[1].warn_low, Some(-1));
+        assert_eq!(back.items[2].warn_high, Some(9));
+    }
+
+    /// A real-valued range and step cross the wire as the description gives them, and an item with
+    /// none reads none.
+    #[test]
+    fn a_real_range_and_step_cross_the_wire() {
+        let manifest = Manifest {
+            name: "n",
+            needs: &[],
+            provides: &[CONTRACT],
+        };
+        let method = MethodId {
+            contract: 0,
+            method: 3,
+        };
+        let mut description = Description::new();
+        description.add(
+            Item::value("field", method)
+                .unit(Unit::Tesla, 0)
+                .real_range(-0.0013, 0.0013)
+                .real_step(0.000_3),
+        );
+        description.add(Item::value("plain", method).dimensionless());
+        let mut buf = [0; 512];
+        let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
+        let back = decode_description(&buf[..n]).unwrap();
+        assert_eq!(back.items[0].real_min, Some(-0.0013));
+        assert_eq!(back.items[0].real_max, Some(0.0013));
+        assert_eq!(back.items[0].real_step, Some(0.000_3));
+        assert_eq!(
+            (
+                back.items[1].real_min,
+                back.items[1].real_max,
+                back.items[1].real_step
+            ),
+            (None, None, None)
+        );
     }
 
     /// The identity trailer's length for `description`, measured by encoding it alone.
     fn trailer_len(manifest: &Manifest, description: &Description) -> usize {
         let mut tail = [0; 512];
         let mut out = lemnos_core::Writer::new(&mut tail);
-        super::super::description::encode_trailer(manifest, description, &identity(), &mut out)
-            .unwrap();
+        super::super::description::encode_trailer(
+            manifest,
+            description,
+            &identity(),
+            &mut out,
+            super::super::description::Layout::Current,
+        )
+        .unwrap();
         out.len()
     }
 

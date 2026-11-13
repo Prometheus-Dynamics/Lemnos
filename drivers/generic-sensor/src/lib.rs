@@ -499,8 +499,19 @@ fn describe(kind: Kind, sensor: &Sensor, out: &mut Description) {
             ("power", Some("power_w"), Unit::Watt),
         ],
     };
-    for (name, field, unit) in items {
+    // Each channel's span is what its bits can count, in the contract's unit: the number's smallest
+    // and largest count, scaled and offset as the description says. The step is one count.
+    let channels = sensor.chip.channels();
+    for (index, (name, field, unit)) in items.iter().enumerate() {
         let mut item = Item::value(name, READ).unit(*unit, 0);
+        if let Some(channel) = channels.get(index) {
+            let (low, high) = count_span(channel.bits, channel.signed);
+            let at = |count: f64| count * f64::from(channel.scale) + f64::from(channel.offset);
+            let (a, b) = (at(low), at(high));
+            item = item
+                .real_range(a.min(b), a.max(b))
+                .real_step(f64::from(channel.scale).abs());
+        }
         if let Some(group) = group {
             item = item.group(group);
         }
@@ -508,6 +519,17 @@ fn describe(kind: Kind, sensor: &Sensor, out: &mut Description) {
             Some(field) => item.field(field),
             None => item,
         });
+    }
+}
+
+/// The smallest and largest count a number of `bits` takes (`signed` as two's complement).
+fn count_span(bits: u8, signed: bool) -> (f64, f64) {
+    let bits = u32::from(bits).min(32);
+    if signed {
+        let half = (1u64 << (bits - 1)) as f64;
+        (-half, half - 1.0)
+    } else {
+        (0.0, ((1u64 << bits) - 1) as f64)
     }
 }
 

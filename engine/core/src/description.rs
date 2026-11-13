@@ -165,6 +165,13 @@ pub struct Item {
     /// over-temperature). `None` when there is no such threshold.
     pub warn_low: Option<i64>,
     pub warn_high: Option<i64>,
+    /// The lowest and highest values, as real numbers in `unit`, for a range no integer scale can
+    /// give exactly (a float read with a finer unit than its own). Set with [`Item::real_range`];
+    /// `min` and `max` are then unused. A description from before them has none.
+    pub real_min: Option<f64>,
+    pub real_max: Option<f64>,
+    /// The smallest change, as a real number in `unit` (see [`Item::real_step`]).
+    pub real_step: Option<f64>,
     /// How the value reads. `None` takes the reading the method declares, and failing that the
     /// one its shape suggests.
     pub reading: Option<Reading>,
@@ -188,6 +195,9 @@ impl Item {
             step: None,
             warn_low: None,
             warn_high: None,
+            real_min: None,
+            real_max: None,
+            real_step: None,
             reading: None,
             group: None,
             method,
@@ -246,6 +256,19 @@ impl Item {
     }
 
     /// The smallest change the item can take, in raw units.
+    /// A range as real numbers in the item's unit, for a float value (see [`Item::real_min`]).
+    pub const fn real_range(mut self, min: f64, max: f64) -> Self {
+        self.real_min = Some(min);
+        self.real_max = Some(max);
+        self
+    }
+
+    /// The smallest change, as a real number in the item's unit.
+    pub const fn real_step(mut self, step: f64) -> Self {
+        self.real_step = Some(step);
+        self
+    }
+
     pub const fn step(mut self, step: i64) -> Self {
         self.step = Some(step);
         self

@@ -99,17 +99,21 @@ fn item_row(item: &OwnedItem) -> String {
         UnitState::Unknown => "unknown".to_string(),
     };
     let _ = write!(row, "  unit {unit}");
-    let range = match (item.min, item.max) {
-        (Some(min), Some(max)) => format!(
+    // The integer range when the device gives one; otherwise a real-valued range, in the unit.
+    let range = match (item.min, item.max, item.real_min, item.real_max) {
+        (Some(min), Some(max), _, _) => format!(
             "{}..{}",
             scaled(min, item.exponent),
             scaled(max, item.exponent)
         ),
+        (_, _, Some(min), Some(max)) => format!("{min}..{max}"),
         _ => "unknown".to_string(),
     };
     let _ = write!(row, "  range {range}");
     if let Some(step) = item.step {
         let _ = write!(row, "  step {}", scaled(step, item.exponent));
+    } else if let Some(step) = item.real_step {
+        let _ = write!(row, "  step {step}");
     }
     let limit = match (item.warn_low, item.warn_high) {
         (None, None) => "none".to_string(),
@@ -227,6 +231,9 @@ mod unit_tests {
             field: None,
             reading: None,
             step: None,
+            real_min: None,
+            real_max: None,
+            real_step: None,
             warn_low: None,
             warn_high: None,
             group: None,

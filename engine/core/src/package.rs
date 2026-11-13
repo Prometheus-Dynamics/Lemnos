@@ -19,19 +19,20 @@ use core::time::Duration;
 
 use lemnos_abi::package::{
     BUFFERS_HANDLES, BUFFERS_PLAIN, DRIVER_JOBS, DRIVER_TICKS, DRIVER_TRACKS_CALLERS,
-    EXTRA_CONTRACT, EXTRA_HAS_GROUP, EXTRA_HAS_READING, EXTRA_HAS_STEP, EXTRA_HAS_WARN_HIGH,
-    EXTRA_HAS_WARN_LOW, EXTRA_ITEM, EXTRA_METHOD, Fd, HEALTH_DEGRADED, HEALTH_FAILED, HEALTH_GONE,
-    HEALTH_OK, HostTable, ITEM_HAS_FIELD, ITEM_HAS_MAX, ITEM_HAS_MIN, MAX_ISO_PACKETS,
-    MAX_TRANSFER_STEPS, METHOD_JOB, NEED_DEVICE, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out,
-    PackageContract, PackageControlSetup, PackageDmaBuffer, PackageDriver, PackageEdge,
-    PackageExtra, PackageField, PackageFrame, PackageHealth, PackageInstance,
-    PackageInterruptEvent, PackageIsoPacket, PackageItem, PackageJobState, PackageLineConfig,
-    PackageManifest, PackageMethod, PackageNeed, PackagePwmConfig, PackageSetting, PackageShape,
-    PackageSpiSegment, PackageTransfer, PackageUsbEvent, SETTING_BOOL, SETTING_FLOAT, SETTING_INT,
-    SETTING_TEXT, Slice, SliceMut, Str, TAKE_CLOCKS, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT, TAKE_LINE,
-    TAKE_PWM, TAKE_RAW_SPI, TAKE_REGISTERS, TAKE_RESET, TAKE_SPI, TAKE_STREAM, TAKE_UART,
-    TAKE_USB_DEVICE, TAKE_USB_FUNCTION, USB_EVENT_CONFIGURED, USB_EVENT_DECONFIGURED,
-    USB_EVENT_NONE, USB_EVENT_RESUMED, USB_EVENT_SETUP, USB_EVENT_SUSPENDED, driver_table,
+    EXTRA_CONTRACT, EXTRA_HAS_GROUP, EXTRA_HAS_READING, EXTRA_HAS_STEP, EXTRA_HAS_UNIT_STATE,
+    EXTRA_HAS_WARN_HIGH, EXTRA_HAS_WARN_LOW, EXTRA_ITEM, EXTRA_METHOD, EXTRA_UNIT_DIMENSIONLESS,
+    EXTRA_UNIT_UNKNOWN, Fd, HEALTH_DEGRADED, HEALTH_FAILED, HEALTH_GONE, HEALTH_OK, HostTable,
+    ITEM_HAS_FIELD, ITEM_HAS_MAX, ITEM_HAS_MIN, MAX_ISO_PACKETS, MAX_TRANSFER_STEPS, METHOD_JOB,
+    NEED_DEVICE, NO_BUFFER, NO_JOB, NO_TIMEOUT, Out, PackageContract, PackageControlSetup,
+    PackageDmaBuffer, PackageDriver, PackageEdge, PackageExtra, PackageField, PackageFrame,
+    PackageHealth, PackageInstance, PackageInterruptEvent, PackageIsoPacket, PackageItem,
+    PackageJobState, PackageLineConfig, PackageManifest, PackageMethod, PackageNeed,
+    PackagePwmConfig, PackageSetting, PackageShape, PackageSpiSegment, PackageTransfer,
+    PackageUsbEvent, SETTING_BOOL, SETTING_FLOAT, SETTING_INT, SETTING_TEXT, Slice, SliceMut, Str,
+    TAKE_CLOCKS, TAKE_DMA, TAKE_I2C, TAKE_INTERRUPT, TAKE_LINE, TAKE_PWM, TAKE_RAW_SPI,
+    TAKE_REGISTERS, TAKE_RESET, TAKE_SPI, TAKE_STREAM, TAKE_UART, TAKE_USB_DEVICE,
+    TAKE_USB_FUNCTION, USB_EVENT_CONFIGURED, USB_EVENT_DECONFIGURED, USB_EVENT_NONE,
+    USB_EVENT_RESUMED, USB_EVENT_SETUP, USB_EVENT_SUSPENDED, driver_table,
 };
 use lemnos_abi::{Handle, guard};
 use lemnos_hal::blocks::{
@@ -544,6 +545,13 @@ fn item_extra_out(index: usize, item: &Item) -> Option<PackageExtra> {
         ..PackageExtra::EMPTY
     };
     extra.what = EXTRA_ITEM;
+    // The unit state always crosses, so a package's item says what the built-in one says.
+    extra.flags |= EXTRA_HAS_UNIT_STATE;
+    match item.unit_state {
+        UnitState::Known => {}
+        UnitState::Dimensionless => extra.flags |= EXTRA_UNIT_DIMENSIONLESS,
+        UnitState::Unknown => extra.flags |= EXTRA_UNIT_UNKNOWN,
+    }
     if let Some(reading) = item.reading {
         extra.reading = reading.code();
         extra.flags |= EXTRA_HAS_READING;
@@ -775,17 +783,33 @@ pub fn item_with(item: &PackageItem, extra: Option<&PackageExtra>) -> Option<Ite
         .get(usize::from(item.unit))
         .copied()
         .unwrap_or(Unit::One);
+    // What the package says of its unit state; without it, the unit string decides.
+    let unit_state = if has(EXTRA_HAS_UNIT_STATE) {
+        if has(EXTRA_UNIT_UNKNOWN) {
+            UnitState::Unknown
+        } else if has(EXTRA_UNIT_DIMENSIONLESS) {
+            UnitState::Dimensionless
+        } else {
+            UnitState::Known
+        }
+    } else {
+        UnitState::from_unit(unit.symbol())
+    };
     Some(Item {
         kind: *ITEM_KINDS.get(usize::from(item.kind))?,
         name: item.name.as_str(),
         unit,
-        unit_state: UnitState::from_unit(unit.symbol()),
+        unit_state,
         exponent: item.exponent,
         min: (item.flags & ITEM_HAS_MIN != 0).then_some(item.min),
         max: (item.flags & ITEM_HAS_MAX != 0).then_some(item.max),
         step: has(EXTRA_HAS_STEP).then(|| extra.map_or(0, |e| e.step)),
         warn_low: has(EXTRA_HAS_WARN_LOW).then(|| extra.map_or(0, |e| e.warn_low)),
         warn_high: has(EXTRA_HAS_WARN_HIGH).then(|| extra.map_or(0, |e| e.warn_high)),
+        // A package carries no real-valued range: its items keep the integer ones.
+        real_min: None,
+        real_max: None,
+        real_step: None,
         reading: has(EXTRA_HAS_READING)
             .then(|| extra.and_then(|e| Reading::from_code(e.reading)))
             .flatten(),
@@ -2098,5 +2122,42 @@ mod tests {
         assert_eq!(resource.buffer_kind(), BufferKind::Plain);
         assert_eq!(resource.buffer_current(0), Err(ErrorKind::Unsupported));
         assert_eq!(resource.fault_consumer(), Err(ErrorKind::Unsupported));
+    }
+
+    /// Each unit state a driver can declare crosses the package boundary as the host has it, and
+    /// an item from a package with no state (its extra absent) keeps the old rule.
+    #[test]
+    fn a_packaged_items_unit_state_is_what_the_built_in_one_has() {
+        use crate::{Unit, UnitState};
+        let method = MethodId {
+            contract: 0,
+            method: 1,
+        };
+        let cases = [
+            (
+                Item::value("known", method).unit(Unit::Volt, 0),
+                UnitState::Known,
+            ),
+            (
+                Item::value("dimensionless", method).unit(Unit::One, 0),
+                UnitState::Dimensionless,
+            ),
+            (Item::value("unknown", method), UnitState::Unknown),
+        ];
+        for (built_in, state) in cases {
+            assert_eq!(built_in.unit_state, state, "{}", built_in.name);
+            let record = item_out(&built_in);
+            let extra = item_extra_out(0, &built_in).expect("an item always says its state");
+            let crossed = item_with(&record, Some(&extra)).unwrap();
+            assert_eq!(crossed, built_in, "{}", built_in.name);
+            // Without the extra (a package from before the table) the unit string decides.
+            let old = item_with(&record, None).unwrap();
+            let by_unit = if built_in.unit.symbol().is_empty() {
+                UnitState::Unknown
+            } else {
+                UnitState::Known
+            };
+            assert_eq!(old.unit_state, by_unit, "{}", built_in.name);
+        }
     }
 }

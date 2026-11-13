@@ -541,13 +541,22 @@ reading is part of a contract's layout hash: both are for description only.
 
 A driver fills in a range only when it knows one: a sensor's full scale from its configured range,
 a fan's duty from its per-mille limits. Where it does not know, it leaves the item without one. An
-unknown figure is never a guess.
+unknown figure is never a guess. A float value's range, which no integer scale states exactly, is
+given with `real_range(min, max)` and `real_step(step)` in the item's unit.
+
+Every item declares its unit state. `Item::unit(unit, exponent)` with a unit is known, and `One` (or
+`.dimensionless()`) is dimensionless; a count, a switch, a text and an action are dimensionless. An
+item that declares none is unknown, so a driver that does not set it is visible in the panel.
 
 The wire carries these as an appended trailer on the description ([Wire](wire.md#description)).
 A driver package carries them too. Its items' reading, step, warning limits and group, its contracts'
 kinds and its methods' readings cross in the package's `PackageExtra` table, which is a separate table
 so that the item table keeps its size. Each of them is given by the same declarations as a built-in
-driver's, so a packaged driver describes what the same driver built in describes.
+driver's, so a packaged driver describes what the same driver built in describes. An item's unit
+state is in the table's flags (`EXTRA_HAS_UNIT_STATE`, with `EXTRA_UNIT_DIMENSIONLESS` and
+`EXTRA_UNIT_UNKNOWN` for the two other states; neither set is known). A package built before the
+flag decides by its unit string, as a host before the state did. A package carries no real-valued
+range: its float items keep the integer one only.
 
 A package built before that table ([the package form](#the-package-form)) loads with the
 extras absent: its contracts are `other`, and its items have no reading, step, limit or group, but

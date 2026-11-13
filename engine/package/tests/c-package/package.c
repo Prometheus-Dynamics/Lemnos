@@ -98,7 +98,9 @@ static LemnosStatus describe_extra(void *driver, LemnosSliceMut extras, uint32_t
                                         .flags = LEMNOS_EXTRA_HAS_READING | LEMNOS_EXTRA_HAS_STEP |
                                                  LEMNOS_EXTRA_HAS_WARN_LOW |
                                                  LEMNOS_EXTRA_HAS_WARN_HIGH |
-                                                 LEMNOS_EXTRA_HAS_GROUP,
+                                                 LEMNOS_EXTRA_HAS_GROUP |
+                                                 LEMNOS_EXTRA_HAS_UNIT_STATE |
+                                                 LEMNOS_EXTRA_UNIT_DIMENSIONLESS,
                                         .index = 0, .step = 5, .warn_low = 10, .warn_high = 90,
                                         .text = STR("grp") };
             out[0] = item;

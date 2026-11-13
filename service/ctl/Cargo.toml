@@ -62,3 +62,4 @@ lemnos-contract-usb-function = { path = "../../contracts/usb-function" }
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-sim = { path = "../../backends/sim" }
+lemnos-sim-walk = { path = "../../testing/crates/sim-walk" }

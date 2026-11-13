@@ -121,12 +121,19 @@ impl Lifecycle for Orientation {
     }
 
     fn describe(&self, out: &mut Description) {
-        for (name, field) in [("roll", "x"), ("pitch", "y"), ("yaw", "z")] {
+        // The angles' principal ranges: roll and yaw are atan2 results in ±π; pitch is asin-like,
+        // in ±π/2 (its root is never negative).
+        for (name, field, half) in [
+            ("roll", "x", core::f64::consts::PI),
+            ("pitch", "y", core::f64::consts::FRAC_PI_2),
+            ("yaw", "z", core::f64::consts::PI),
+        ] {
             out.add(
                 Item::value(name, READ)
                     .unit(Unit::Radian, 0)
                     .field(field)
-                    .group("attitude"),
+                    .group("attitude")
+                    .real_range(-half, half),
             );
         }
     }

@@ -494,9 +494,11 @@ job list, and takes the identity as unknown (an empty label, no state, no kind, 
   method's, else one its shape suggests), `step` (a presence bool, then an i64), `warn_low` and
   `warn_high` (each a presence bool, then an i64), and `group` (a presence bool, then a str: the
   items of one group are one vector, each part named by its `field`), and `unit_state` (a presence
-  bool, then a u8: 0 known, 1 dimensionless, 2 unknown). `unit_state` is the last field of the block.
-  A host from before it sends none, and its item's state is decided by its unit string: unknown when
-  the string is empty, known otherwise.
+  bool, then a u8: 0 known, 1 dimensionless, 2 unknown), and then `real_min`, `real_max` and
+  `real_step` (each a presence bool, then an f64: the range and the step as real numbers in the
+  item's unit, for a float value). Those three are the last fields of the block. A host from before
+  the unit state sends none of them, and its item's state is decided by its unit string: unknown when
+  the string is empty, known otherwise. An item with no real range reads the integer one.
 
 A reading code this build does not know reads as no reading. Every i64 is in the item's exponent
 (`raw * 10^exponent`, in its unit), like `min` and `max`. The identity is an addition (a `Tail` in
