@@ -146,6 +146,10 @@ const BACKOFF_MAX_NS: u64 = 8_000_000_000;
 
 /// How often a streaming sensor reads its values ring. A posted value waits at most this long.
 pub const VALUES_POLL_NS: u64 = 1_000_000;
+/// How often a streaming sensor with a linked receiver asks that receiver whether it is still there.
+/// A receiver that has gone (unbound, or its handle stale) takes the stream with it: see
+/// [`Ov9782::lost_receiver`].
+pub const RECEIVER_WATCH_NS: u64 = 100_000_000;
 /// Most jobs one poll reads. The ring holds at most 64 (`lemnos-wire` `MAX_JOB_SLOTS`).
 const MAX_JOBS_PER_POLL: usize = 64;
 /// Bytes read of one job: an encoded `FrameValues` fits, and this runs on small stacks. A longer
@@ -418,10 +422,21 @@ impl Lifecycle for Ov9782 {
                 }
             }
             State::Streaming => {
+                if self.receiver_lost() {
+                    self.lost_receiver();
+                    return None;
+                }
                 self.take_values();
-                self.values
+                let poll = self
+                    .values
                     .as_ref()
-                    .map(|_| now_ns.saturating_add(VALUES_POLL_NS))
+                    .map(|_| now_ns.saturating_add(VALUES_POLL_NS));
+                if self._receiver.is_some() {
+                    let watch = now_ns.saturating_add(RECEIVER_WATCH_NS);
+                    Some(poll.map_or(watch, |at| at.min(watch)))
+                } else {
+                    poll
+                }
             }
             State::Recovering { attempt, due } => {
                 self.discard_values();
@@ -600,6 +615,27 @@ impl Ov9782 {
         }
     }
 
+    /// Whether the linked receiver has gone: unbound, or its handle no longer names it. A receiver
+    /// that answers with any other status is still there.
+    fn receiver_lost(&mut self) -> bool {
+        match self._receiver.as_mut() {
+            Some(receiver) => matches!(
+                receiver.frame_starts(),
+                Err(Status::NO_DEVICE | Status::STALE_HANDLE)
+            ),
+            None => false,
+        }
+    }
+
+    /// The receiver went while the sensor streamed, so the stream went with it. The sensor is put
+    /// to standby (best effort: the bus may be the thing that failed) and is Stopped, which is what
+    /// a later `select_mode` and `start` need. The driver keeps nothing else across the loss; the
+    /// next start programs the whole mode again.
+    fn lost_receiver(&mut self) {
+        let _ = self.reg(MODE_SELECT, STANDBY);
+        self.state = State::Stopped;
+    }
+
     /// Whether a method may write to the sensor now.
     fn check_not_recovering(&self) -> Result<()> {
         if matches!(self.state, State::Recovering { .. } | State::PowerUp { .. }) {
@@ -756,6 +792,11 @@ impl CameraSensor for Ov9782 {
     }
 
     fn select_mode(&mut self, index: u16) -> Result<()> {
+        // A stream still marked running may have lost its receiver before the watch ran: then it
+        // is over, and the sensor is free to take a mode.
+        if self.state == State::Streaming && self.receiver_lost() {
+            self.lost_receiver();
+        }
         if self.state != State::Stopped {
             return Err(Status::BUSY);
         }
