@@ -61,7 +61,9 @@ impl SimFrameSource {
         identity: u64,
         write: &mut FrameWriter<'_>,
     ) -> Result<bool, ErrorKind> {
-        let Some(buffer) = stream.next_buffer()? else {
+        // A frame needs a buffer the producer picks, so finding none is an ask: counted as refused on a
+        // job-driven stream.
+        let Some(buffer) = stream.ask_buffer()? else {
             return Ok(false);
         };
         let sequence = self.sequence;

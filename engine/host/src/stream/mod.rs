@@ -129,8 +129,11 @@ pub struct StreamStats {
     pub returned: u64,
     /// Consumers cut off for breaking the rules.
     pub faults: u64,
-    /// Asks for a buffer that found none on a job-driven stream: the job did not start. Always 0
-    /// on a free-running stream, whose frames are replaced instead (`dropped`).
+    /// Asks for a buffer for a result (`ask_buffer`) that found none on a job-driven stream: the
+    /// job did not start, because the consumer holds every buffer or has not read the result.
+    /// Counted once per refused ask. Collecting returned buffers (`next_buffer`) counts nothing,
+    /// so a consumer that keeps up reads 0. Always 0 on a free-running stream, whose frames are
+    /// replaced instead (`dropped`).
     pub refused: u64,
     /// Buffers in each state, always summing to the pool.
     pub free: u32,

@@ -104,7 +104,7 @@ fn run(every: u64) -> (Vec<u64>, u64, u64, u64, u64) {
         if every > 0 && p % every == 0 {
             read(&mut consumer, &mut seen, &mut bad);
         }
-        match producer.next_buffer().unwrap() {
+        match producer.ask_buffer().unwrap() {
             Some(buffer) => {
                 assert!(producer.write(buffer, 0, &pattern(p)).unwrap());
                 producer
@@ -150,4 +150,44 @@ fn a_reader_that_keeps_up_gets_every_result_and_no_job_is_refused() {
     let (seen, refused, bad, dropped, _) = run(1);
     assert_eq!(seen, (0..PERIODS).collect::<Vec<_>>());
     assert_eq!((refused, bad, dropped), (0, 0, 0));
+}
+
+/// A producer that collects what the consumer returned before each job, as the job servers do, and
+/// takes a job's buffer from what it holds. A consumer that keeps up is refused nothing: the
+/// collection that finds nothing is not counted.
+#[test]
+fn collecting_returns_before_each_job_counts_no_refusal_for_a_consumer_that_keeps_up() {
+    let host = start(4);
+    let mut producer = host.stream_producer(0, "frames").unwrap();
+    let mut consumer = host
+        .stream_attach(0, "frames", CONSUMER)
+        .unwrap()
+        .consumer()
+        .unwrap();
+    let mut held = Vec::new();
+    for p in 0..PERIODS {
+        // Collect every buffer returned so far, until the collection finds none.
+        while let Some(buffer) = producer.next_buffer().unwrap() {
+            held.push(buffer);
+        }
+        let buffer = held
+            .pop()
+            .expect("a buffer is held when the consumer keeps up");
+        assert!(producer.write(buffer, 0, &pattern(p)).unwrap());
+        producer
+            .publish(StreamFrame {
+                buffer,
+                bytes: FRAME as u32,
+                sequence: p,
+                identity: 0,
+                timestamp_ns: p + 1,
+            })
+            .unwrap();
+        // The consumer takes the result and releases it at once.
+        let slot = consumer.pop_frame().unwrap().expect("the result");
+        assert_eq!(slot.sequence, p);
+        assert!(consumer.release(slot.buffer));
+    }
+    let stats = host.stream_stats(0, "frames").unwrap();
+    assert_eq!((stats.refused, stats.faults), (0, 0), "{stats:?}");
 }

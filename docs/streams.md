@@ -200,7 +200,7 @@ reclaimable.
 **Job-driven streams.** On a job stream an unread frame is never replaced, whatever the
 driver's working set. Each frame is a result the consumer posted a job for, so replacing it loses
 the consumer's work. The pressure goes the other way: a job whose output has no free buffer is not
-started. The driver's ask finds none and the refusal is counted in `refused` (the stream's stats).
+started. The driver's ask (`ask_buffer`) finds none and the refusal is counted in `refused` (the stream's stats).
 The block's own contract counters are not changed by this rule. A read result is taken back as usual, so a
 consumer that keeps up is refused nothing, and no result is ever silently lost.
 
@@ -242,7 +242,7 @@ driver's `W` for its kind; `working = 0` when left out, which is right for the f
 only). `working` must be less than `buffers`. A consumer reads them, and the stream's `kind`, from
 the open answer: `FrameStream::buffer_count()`, `FrameStream::working()`, `FrameStream::margin()`
 (which is N, for a free-running stream) and `FrameStream::job_driven()`. The host's stats carry
-`refused`, the count of asks a job-driven stream could not answer.
+`refused`, the count of asks for a result's buffer (`ask_buffer`) that a job-driven stream could not answer. Collecting returned buffers (`next_buffer`) is not an ask and counts nothing, so a consumer that keeps up reads `refused: 0`.
 A consumer that reads the shared memory with the shm crates alone is not told `W`, and must take it
 from the board file.
 
@@ -354,6 +354,13 @@ configuration for one frame.
 
 A job names buffers by number, never by address. The driver checks every number, offset and length
 against the buffers the consumer really holds before any of it reaches hardware.
+
+**What counts as refused.** `refused` counts a job that could not start because the driver needed a
+buffer it picks itself and found none: the driver's ask (`ask_buffer`) finds nothing, and that is counted
+once for that job. Where the driver picks the buffer for a job's result, the ask is made (the ISPs'
+statistics today, and the simulated producer's frames). Where the consumer names every buffer a job uses
+(the codec, image, camera output and USB servers), nothing is counted as refused there: a result buffer the
+consumer still holds is a fault, and a consumer that stops reading shows as a fault, not as `refused`.
 
 A returned buffer is reusable in a job from the moment the consumer releases it (drops the completion
 frame that carries it), so a job posted after that may name it. When a job names a buffer the driver

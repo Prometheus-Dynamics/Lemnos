@@ -290,7 +290,8 @@ fn a_result_released_before_the_serve_is_named_again_and_served() {
     assert!(!rig.faulted(), "the consumer was faulted for it");
     assert_eq!(take(&rig.ring), Some((2, JobStatus::Done)));
     assert_eq!(rig.block.started, 2);
-    assert_eq!(rig.host.stream_stats(0, "jobs").unwrap().faults, 0);
+    let stats = rig.host.stream_stats(0, "jobs").unwrap();
+    assert_eq!((stats.faults, stats.refused), (0, 0), "{stats:?}");
 }
 
 /// The server collects the returns of a serve, and the consumer then releases the result and

@@ -208,6 +208,20 @@ pub(crate) fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result
     Ok(())
 }
 
+/// The buffer a statistics result goes into, which the driver picks: one it holds, or else one the
+/// stream hands out now. `None` when neither is there: the job's result cannot be published, and
+/// the stream counts the ask as refused.
+pub(crate) fn statistics_buffer(stream: &mut StreamHandle, mask: &mut u64) -> Result<Option<u32>> {
+    if let Some(buffer) = lowest(*mask) {
+        return Ok(Some(buffer));
+    }
+    let Some(buffer) = stream.ask_buffer().map_err(|_| Status::IO)? else {
+        return Ok(None);
+    };
+    *mask = with(*mask, buffer, true);
+    Ok(Some(buffer))
+}
+
 /// The ISP, behind `vvcam-isp` or through `lemnos.ko`'s configuration role, as `camera.isp/1`.
 #[driver("k230isp", provides = [CameraIsp])]
 pub struct K230Isp {
@@ -404,7 +418,8 @@ impl K230Isp {
             self.error();
             return Ok(());
         }
-        let Some(buffer) = lowest(self.held_statistics) else {
+        let Some(buffer) = statistics_buffer(&mut self.statistics, &mut self.held_statistics)?
+        else {
             self.error();
             return Ok(());
         };

@@ -102,7 +102,7 @@ use lemnos_driver_regjob_sys::{self as regjob, Addr, Job, STATUS_UNLATCHED, Writ
 use lemnos_hal::blocks::StreamFrame;
 
 use crate::config::{self, CONFIG_BYTES, LAYOUT_WRITES, MAX_WRITES};
-use crate::driver::{backoff_ns, has, lowest, name, take_returned, with};
+use crate::driver::{backoff_ns, has, name, statistics_buffer, take_returned, with};
 use crate::stats::{self, LAYOUT_STATISTICS, STATISTICS_BYTES, STATISTICS_REGISTERS};
 
 const START: MethodId = MethodId {
@@ -567,7 +567,8 @@ impl K230IspFrames {
             self.error();
             return Ok(());
         }
-        let Some(buffer) = lowest(self.held_statistics) else {
+        let Some(buffer) = statistics_buffer(&mut self.statistics, &mut self.held_statistics)?
+        else {
             self.error();
             return Ok(());
         };

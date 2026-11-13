@@ -513,6 +513,10 @@ impl StreamEndpoint for ReadOnly<StreamHandle> {
         self.0.next_buffer()
     }
 
+    fn ask_buffer(&mut self) -> Refusable<Option<u32>> {
+        self.0.ask_buffer()
+    }
+
     /// Never a job: what a consumer posts stays on the ring, unread.
     fn next_job(&mut self, _: &mut [u8]) -> Refusable<Option<usize>> {
         Ok(None)

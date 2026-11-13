@@ -407,9 +407,15 @@ impl StreamCore {
         if let Some(buffer) = self.pool.take(self.epoch) {
             return Some(buffer);
         }
-        let buffer = self.take_back();
+        self.take_back()
+    }
+
+    /// A buffer for a result about to be published. On a job-driven stream, finding none is a job
+    /// that does not start (the consumer holds every buffer, or has not read the result), and is
+    /// counted once in `refused`. Collecting what was returned is `next_buffer`, and counts nothing.
+    fn ask_buffer(&mut self) -> Option<u32> {
+        let buffer = self.next_buffer();
         if buffer.is_none() && self.kind == StreamKind::JobDriven {
-            // No free buffer for the next job: it does not start, and the refusal is counted.
             self.counters.refused += 1;
         }
         buffer
@@ -857,6 +863,17 @@ impl StreamEndpoint for ProducerEndpoint {
     fn next_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {
         let mut core = lock(&self.core);
         let buffer = core.next_buffer();
+        if buffer.is_some() && self.lent_epoch != core.epoch {
+            // Cloning shares the descriptors, and allocates nothing.
+            self.lent = core.in_place().and_then(|memory| memory.handles.clone());
+            self.lent_epoch = core.epoch;
+        }
+        Ok(buffer)
+    }
+
+    fn ask_buffer(&mut self) -> Result<Option<u32>, ErrorKind> {
+        let mut core = lock(&self.core);
+        let buffer = core.ask_buffer();
         if buffer.is_some() && self.lent_epoch != core.epoch {
             // Cloning shares the descriptors, and allocates nothing.
             self.lent = core.in_place().and_then(|memory| memory.handles.clone());

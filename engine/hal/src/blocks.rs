@@ -293,8 +293,16 @@ pub trait StreamEndpoint {
     fn buffer_kind(&self) -> BufferKind;
     /// Passes a filled buffer to the consumer.
     fn publish(&mut self, frame: StreamFrame) -> Result<(), Self::Error>;
-    /// The next buffer the consumer has returned, if any.
+    /// The next buffer the consumer has returned, if any. This is collection: finding none is
+    /// nothing, and is not counted as a refusal.
     fn next_buffer(&mut self) -> Result<Option<u32>, Self::Error>;
+    /// A buffer for a result the producer is about to publish. On a job-driven stream a `None`
+    /// is a job that could not start, and the host counts it as refused. A producer that only
+    /// collects returned buffers calls [`next_buffer`](Self::next_buffer) instead. The default
+    /// is `next_buffer`.
+    fn ask_buffer(&mut self) -> Result<Option<u32>, Self::Error> {
+        self.next_buffer()
+    }
     /// Copies the consumer's next job into `out` and returns its length. What
     /// the bytes mean is between the driver and the consumer.
     fn next_job(&mut self, out: &mut [u8]) -> Result<Option<usize>, Self::Error>;

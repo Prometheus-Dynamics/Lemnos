@@ -302,6 +302,20 @@ fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result<()> {
     Ok(())
 }
 
+/// The buffer a statistics result goes into, which the driver picks: one it holds, or else one the
+/// stream hands out now. `None` when neither is there: the job's result cannot be published, and
+/// the stream counts the ask as refused.
+fn statistics_buffer(stream: &mut StreamHandle, mask: &mut u64) -> Result<Option<u32>> {
+    if let Some(buffer) = lowest(*mask) {
+        return Ok(Some(buffer));
+    }
+    let Some(buffer) = stream.ask_buffer().map_err(|_| Status::IO)? else {
+        return Ok(None);
+    };
+    *mask = with(*mask, buffer, true);
+    Ok(Some(buffer))
+}
+
 /// Publishes `buffer` of `stream` holding `bytes`. `true` when it was published: the buffer is no
 /// longer held.
 fn publish(stream: &mut StreamHandle, mask: &mut u64, frame: StreamFrame) -> bool {
@@ -514,26 +528,28 @@ impl Isp600 {
                 p.statistics_settle -= 1;
                 continue;
             }
-            let delivered = match (
-                lowest(self.held.statistics),
-                job::filled(&self.stats[..], got.bytes, STATISTICS_BYTES),
-            ) {
-                (Some(buffer), Some(data)) => {
-                    let frame = StreamFrame {
-                        buffer,
-                        bytes: 0,
-                        sequence,
-                        identity: p.identity,
-                        timestamp_ns: 0,
-                    };
-                    write_and_publish(
-                        &mut self.statistics,
-                        &mut self.held.statistics,
-                        frame,
-                        &[data],
-                    )
+            let delivered = match job::filled(&self.stats[..], got.bytes, STATISTICS_BYTES) {
+                Some(data) => {
+                    match statistics_buffer(&mut self.statistics, &mut self.held.statistics)? {
+                        Some(buffer) => {
+                            let frame = StreamFrame {
+                                buffer,
+                                bytes: 0,
+                                sequence,
+                                identity: p.identity,
+                                timestamp_ns: 0,
+                            };
+                            write_and_publish(
+                                &mut self.statistics,
+                                &mut self.held.statistics,
+                                frame,
+                                &[data],
+                            )
+                        }
+                        None => false,
+                    }
                 }
-                _ => false,
+                None => false,
             };
             p.statistics = false;
             p.missed |= !delivered;

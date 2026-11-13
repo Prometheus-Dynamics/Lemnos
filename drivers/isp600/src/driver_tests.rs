@@ -2,6 +2,7 @@
 //! value here is written out by hand.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_isp::{
@@ -1161,4 +1162,154 @@ fn the_steady_state_allocates_nothing() {
         assert_eq!(k.load_count, JOBS);
         assert_eq!(k.last, image(1));
     });
+}
+
+/// A statistics stream that counts an ask that finds no buffer, as the host counts a refused ask on
+/// a job-driven stream. Only the driver's asks are counted: collecting what was returned is not.
+#[derive(Clone)]
+struct Counted {
+    inner: MockStream,
+    refused: Arc<AtomicU32>,
+}
+
+impl StreamEndpoint for Counted {
+    type Error = ErrorKind;
+
+    fn buffer_count(&self) -> u32 {
+        self.inner.buffer_count()
+    }
+
+    fn buffer_kind(&self) -> BufferKind {
+        self.inner.buffer_kind()
+    }
+
+    fn buffer_current(&self, buffer: u32) -> core::result::Result<bool, ErrorKind> {
+        self.inner.buffer_current(buffer)
+    }
+
+    fn publish(&mut self, frame: StreamFrame) -> core::result::Result<(), ErrorKind> {
+        self.inner.publish(frame)
+    }
+
+    fn next_buffer(&mut self) -> core::result::Result<Option<u32>, ErrorKind> {
+        self.inner.next_buffer()
+    }
+
+    fn ask_buffer(&mut self) -> core::result::Result<Option<u32>, ErrorKind> {
+        let buffer = self.inner.ask_buffer()?;
+        if buffer.is_none() {
+            self.refused.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        Ok(buffer)
+    }
+
+    fn next_job(&mut self, out: &mut [u8]) -> core::result::Result<Option<usize>, ErrorKind> {
+        self.inner.next_job(out)
+    }
+
+    fn write(
+        &mut self,
+        buffer: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> core::result::Result<bool, ErrorKind> {
+        self.inner.write(buffer, offset, data)
+    }
+
+    fn read(
+        &mut self,
+        buffer: u32,
+        offset: usize,
+        out: &mut [u8],
+    ) -> core::result::Result<bool, ErrorKind> {
+        self.inner.read(buffer, offset, out)
+    }
+
+    fn buffer_handle(
+        &self,
+        buffer: u32,
+    ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
+        self.inner.buffer_handle(buffer)
+    }
+
+    fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
+        self.inner.fault_consumer()
+    }
+}
+
+/// Runs `jobs` jobs one after another on a started driver whose statistics stream counts its
+/// refused asks. The consumer returns each image and reads each statistics result. With
+/// `keep_up` it also returns each statistics buffer after reading it; without, it keeps them.
+/// Returns (refused asks, jobs completed, jobs whose result could not be delivered).
+fn run_statistics(keep_up: bool, jobs: u64) -> (u32, u64, u64) {
+    let streams = Streams::new();
+    let refused = Arc::new(AtomicU32::new(0));
+    let handle = Handle::default();
+    let hw = Hw {
+        kernel: Arc::clone(&handle.0),
+        current: Vec::with_capacity(IMAGE * 2),
+    };
+    let needs = Isp600Needs {
+        config: lemnos_core::Held::boxed(Box::new(streams.config.clone())),
+        statistics: lemnos_core::Held::boxed(Box::new(Counted {
+            inner: streams.statistics.clone(),
+            refused: Arc::clone(&refused),
+        })),
+        output0: lemnos_core::Held::boxed(Box::new(streams.output0.clone())),
+    };
+    let mut d = Isp600::with_hardware(Box::new(hw), needs, Options::new(0, 4, SETTLE).unwrap());
+    configured(&mut d);
+    d.start().unwrap();
+    let k = handle;
+
+    streams.config.fill(2, &image(1));
+    let mut now = 0u64;
+    let mut sequence = 4u32;
+    for n in 0..jobs {
+        post(&streams.config, &job(100 + n, 2, 1));
+        let before = d.counters().unwrap();
+        let finished = |d: &mut Isp600| {
+            let c = d.counters().unwrap();
+            c.jobs + c.errors
+        };
+        let done_before = before.jobs + before.errors;
+        // Frames go by until the job is over, as the settle of the statistics allows.
+        for _ in 0..12 {
+            k.frame(
+                sequence,
+                &pattern(sequence as u8, STATISTICS_BYTES),
+                &pattern(sequence as u8, IMAGE),
+            );
+            sequence += 1;
+            now += 1;
+            d.tick(now);
+            while let Some(s) = streams.statistics.take_frame() {
+                if keep_up {
+                    streams.statistics.return_buffer(s.buffer);
+                }
+            }
+            while let Some(o) = streams.output0.take_frame() {
+                streams.output0.return_buffer(o.buffer);
+            }
+            if finished(&mut d) > done_before {
+                break;
+            }
+        }
+    }
+    let c = d.counters().unwrap();
+    (refused.load(AtomicOrdering::SeqCst), c.jobs, c.errors)
+}
+
+#[test]
+fn a_consumer_that_keeps_up_is_refused_nothing_and_every_job_completes() {
+    let (refused, jobs, errors) = run_statistics(true, 8);
+    assert_eq!((refused, jobs, errors), (0, 8, 0));
+}
+
+#[test]
+fn a_consumer_that_keeps_its_statistics_is_refused_once_per_job_that_has_none() {
+    // The stream has four statistics buffers and the consumer keeps every one: the first four
+    // jobs have theirs, and each of the other four finds none, and is refused once.
+    let (refused, jobs, errors) = run_statistics(false, 8);
+    assert_eq!((refused, jobs, errors), (4, 4, 4));
 }

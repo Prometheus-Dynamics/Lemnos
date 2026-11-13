@@ -361,6 +361,20 @@ fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result<()> {
     Ok(())
 }
 
+/// The buffer a statistics result goes into, which the driver picks: one it holds, or else one the
+/// stream hands out now. `None` when neither is there: the job's result cannot be published, and
+/// the stream counts the ask as refused.
+fn statistics_buffer(stream: &mut StreamHandle, mask: &mut u64) -> Result<Option<u32>> {
+    if let Some(buffer) = lowest(*mask) {
+        return Ok(Some(buffer));
+    }
+    let Some(buffer) = stream.ask_buffer().map_err(|_| Status::IO)? else {
+        return Ok(None);
+    };
+    *mask = with(*mask, buffer, true);
+    Ok(Some(buffer))
+}
+
 /// Writes `data` into `buffer` of `stream` and publishes it. `true` when it reached a consumer;
 /// the buffer is no longer held when it was published, delivered or not.
 fn deliver(
@@ -707,18 +721,21 @@ impl Rkisp {
         let delivered = match part {
             Part::Statistics => {
                 let limit = self.options.generation.statistics_layout().bytes;
-                match (
-                    lowest(self.held.statistics),
-                    job::filled(payload, payload.len(), limit),
-                ) {
-                    (Some(buffer), Some(data)) => deliver(
-                        &mut self.statistics,
-                        &mut self.held.statistics,
-                        buffer,
-                        data,
-                        StreamFrame { buffer, ..frame },
-                    ),
-                    _ => false,
+                match job::filled(payload, payload.len(), limit) {
+                    Some(data) => {
+                        // A stream that fails is a result that is not delivered.
+                        match statistics_buffer(&mut self.statistics, &mut self.held.statistics) {
+                            Ok(Some(buffer)) => deliver(
+                                &mut self.statistics,
+                                &mut self.held.statistics,
+                                buffer,
+                                data,
+                                StreamFrame { buffer, ..frame },
+                            ),
+                            _ => false,
+                        }
+                    }
+                    None => false,
                 }
             }
             Part::Output(o) => {
