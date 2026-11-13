@@ -22,7 +22,7 @@ use lemnos_abi::{Handle, Slab};
 use lemnos_core::package::{
     dma_buffer_out, edge_out, frame_in, health_in, health_out, interrupt_event_out, item_in,
     line_config_in, pwm_config_in, pwm_config_out, segment_in, settings_out, setup_in,
-    status_of_bus, timeout_in, usb_event_out,
+    status_of_bus, timeout_in, uart_format_in, usb_event_out,
 };
 use lemnos_core::{
     Caller, CallerId, ClocksHandle, Config, Description, Dev, DmaHandle, ErrorKind, Health, I2c,
@@ -344,9 +344,12 @@ impl PwmHost for Held {
 }
 
 impl UartHost for Held {
-    fn set_baud(uart: Handle, baud: u32) -> Status {
+    fn configure(uart: Handle, baud: u32, parity: u8, stop_bits: u8) -> Status {
         let uart = held!(uart, Uart);
-        done(lock(&uart).set_baud(baud))
+        let Some(format) = uart_format_in(baud, parity, stop_bits) else {
+            return Status::INVALID_ARGUMENT;
+        };
+        done(lock(&uart).configure(format))
     }
 
     fn write(uart: Handle, data: Slice<'_, u8>, len: Out<'_, usize>) -> Status {
@@ -1022,7 +1025,10 @@ mod tests {
             (HOST.line.get)(bus, Out::new(&mut value)),
             Status::INVALID_ARGUMENT
         );
-        assert_eq!((HOST.uart.set_baud)(bus, 9600), Status::INVALID_ARGUMENT);
+        assert_eq!(
+            (HOST.uart.configure)(bus, 9600, 0, 1),
+            Status::INVALID_ARGUMENT
+        );
         let mut fd = Fd::NONE;
         assert_eq!(
             (HOST.stream.buffer_handle)(line, 0, Out::new(&mut fd)),

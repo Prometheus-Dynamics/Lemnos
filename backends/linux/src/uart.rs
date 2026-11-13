@@ -7,7 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use lemnos_hal::{ErrorKind, Uart};
+use lemnos_hal::{ErrorKind, Parity, StopBits, Uart, UartFormat};
 use lemnos_linux_sys::poll;
 use lemnos_linux_sys::serial;
 
@@ -18,7 +18,7 @@ const OPEN_BAUD: u32 = 115_200;
 /// How long a write waits for room before it reports that none went out.
 const WRITE_WAIT: Duration = Duration::from_millis(100);
 
-/// A raw 8N1 port, read and written without blocking the thread for longer than asked.
+/// A raw port, 8N1 until configured, read and written without blocking the thread for longer than asked.
 pub struct TtyUart {
     file: File,
     _claim: Option<Claim>,
@@ -31,7 +31,7 @@ impl TtyUart {
             .write(true)
             .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
             .open(path)?;
-        serial::configure(file.as_fd(), OPEN_BAUD)?;
+        serial::configure(file.as_fd(), OPEN_BAUD, serial::Parity::None, false)?;
         Ok(Self { file, _claim: None })
     }
 
@@ -71,8 +71,15 @@ impl TtyUart {
 impl Uart for TtyUart {
     type Error = ErrorKind;
 
-    fn set_baud(&mut self, baud: u32) -> Result<(), ErrorKind> {
-        serial::configure(self.file.as_fd(), baud).map_err(|e| kind_of(&e))
+    fn configure(&mut self, format: UartFormat) -> Result<(), ErrorKind> {
+        let parity = match format.parity {
+            Parity::None => serial::Parity::None,
+            Parity::Even => serial::Parity::Even,
+            Parity::Odd => serial::Parity::Odd,
+        };
+        let two_stop_bits = format.stop_bits == StopBits::Two;
+        serial::configure(self.file.as_fd(), format.baud, parity, two_stop_bits)
+            .map_err(|e| kind_of(&e))
     }
 
     fn write(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
@@ -114,11 +121,26 @@ mod tests {
     }
 
     #[test]
-    fn the_rate_can_change() {
+    fn the_rate_and_frame_can_change() {
         let (_controller, path) = pair();
         let mut port = TtyUart::open_path(path).unwrap();
-        assert_eq!(port.set_baud(9600), Ok(()));
-        assert_eq!(port.set_baud(123_456), Err(ErrorKind::InvalidInput));
+        assert_eq!(port.configure(UartFormat::new(9600)), Ok(()));
+        let even = UartFormat {
+            baud: 19_200,
+            parity: Parity::Even,
+            stop_bits: StopBits::One,
+        };
+        assert_eq!(port.configure(even), Ok(()));
+        let odd_two = UartFormat {
+            parity: Parity::Odd,
+            stop_bits: StopBits::Two,
+            ..even
+        };
+        assert_eq!(port.configure(odd_two), Ok(()));
+        assert_eq!(
+            port.configure(UartFormat::new(123_456)),
+            Err(ErrorKind::InvalidInput)
+        );
     }
 
     #[test]

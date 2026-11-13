@@ -44,7 +44,7 @@ use lemnos_core::{
 };
 use lemnos_hal::blocks::{
     BufferHandle, BufferKind, ControlSetup, DmaBuffer, InterruptEvent, IsoPacket, StreamFrame,
-    UsbFunctionEvent,
+    UartFormat, UsbFunctionEvent,
 };
 use lemnos_hal::i2c::{self, I2c as HalI2c};
 use lemnos_hal::raw::{Edge, LineConfig, PwmConfig, RawLine, RawPwm, RawSpi, SpiSegment};
@@ -218,7 +218,7 @@ impl RawPwm for ReadOnly<Pwm> {
 impl UartTrait for ReadOnly<Uart> {
     type Error = ErrorKind;
 
-    fn set_baud(&mut self, _: u32) -> Refusable<()> {
+    fn configure(&mut self, _: UartFormat) -> Refusable<()> {
         Err(REFUSED)
     }
 
@@ -748,7 +748,7 @@ mod tests {
         mock.receive(b"in");
         let mut wrapped = uart(lemnos_core::Held::boxed(Box::new(mock.clone())));
         assert_eq!(wrapped.write(b"out"), Err(REFUSED));
-        assert_eq!(wrapped.set_baud(9600), Err(REFUSED));
+        assert_eq!(wrapped.configure(UartFormat::new(9600)), Err(REFUSED));
         assert!(mock.sent().is_empty());
         assert_eq!(mock.baud(), before);
         let mut got = [0u8; 2];

@@ -34,4 +34,9 @@ driver = [
     "GenericGyroscope",
     "GenericTemperature",
     "GenericPowerMonitor",
+    "ModbusMagnetometer",
+    "ModbusAccelerometer",
+    "ModbusGyroscope",
+    "ModbusTemperature",
+    "ModbusPowerMonitor",
 ]

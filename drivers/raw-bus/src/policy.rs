@@ -7,13 +7,14 @@
 //!
 //! - `writes` (boolean, default `false`). With `false`, these are refused: an I2C transfer with a
 //!   write part, every SPI transfer (SPI clocks bytes out on every transfer), `line_set`, configuring
-//!   the line as an output at bind (that drives its level), and `pwm_set`. With `true`, they are
+//!   the line as an output at bind (that drives its level), `pwm_set` and `uart_write`. Reading
+//!   the UART is allowed. With `true`, they are
 //!   allowed.
 //! - `allow_i2c` (default none): the 7-bit addresses the device may use, read or write. It is an
 //!   integer for one address, or a string of comma-separated addresses, each decimal or `0x` hex.
 //!   Ranges are not supported. With none, every I2C transfer is refused, reads included.
 //!
-//! A bus, line or PWM channel is the device's only because the board binds it to the device, so there
+//! A bus, line, PWM channel or UART is the device's only because the board binds it to the device, so there
 //! is no setting for those: the board opts in by binding one, and `writes` covers what is done on it.
 
 use lemnos_core::{Config, ConfigValue, Result, Status};
@@ -70,6 +71,13 @@ impl Policy {
     }
 
     pub fn admit_line_set(&self) -> Result<()> {
+        if !self.writes {
+            return Err(REFUSED);
+        }
+        Ok(())
+    }
+
+    pub fn admit_uart_write(&self) -> Result<()> {
         if !self.writes {
             return Err(REFUSED);
         }

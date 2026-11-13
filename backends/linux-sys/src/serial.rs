@@ -1,4 +1,4 @@
-//! Serial ports through termios: raw mode, 8N1, no flow control.
+//! Serial ports through termios: raw mode, 8 data bits, no flow control.
 
 use std::io;
 use std::mem::MaybeUninit;
@@ -40,8 +40,25 @@ fn speed(baud: u32) -> io::Result<libc::speed_t> {
     })
 }
 
-/// Puts the port in raw mode at `baud`: reads return what's there without waiting.
-pub fn configure(fd: BorrowedFd<'_>, baud: u32) -> io::Result<()> {
+/// A frame's parity bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parity {
+    /// No parity bit.
+    None,
+    /// The parity bit makes the count of ones even.
+    Even,
+    /// The parity bit makes the count of ones odd.
+    Odd,
+}
+
+/// Puts the port in raw mode at `baud`, 8 data bits with `parity` and one stop bit, or two with
+/// `two_stop_bits`: reads return what's there without waiting.
+pub fn configure(
+    fd: BorrowedFd<'_>,
+    baud: u32,
+    parity: Parity,
+    two_stop_bits: bool,
+) -> io::Result<()> {
     let speed = speed(baud)?;
     let raw = fd.as_raw_fd();
     let mut settings = MaybeUninit::<libc::termios>::zeroed();
@@ -52,7 +69,15 @@ pub fn configure(fd: BorrowedFd<'_>, baud: u32) -> io::Result<()> {
     // SAFETY: `settings` is a live `termios` that this only rewrites.
     unsafe { libc::cfmakeraw(&mut settings) };
     settings.c_cflag |= libc::CLOCAL | libc::CREAD;
-    settings.c_cflag &= !(libc::CSTOPB | libc::PARENB | libc::CRTSCTS);
+    settings.c_cflag &= !(libc::CSTOPB | libc::PARENB | libc::PARODD | libc::CRTSCTS);
+    settings.c_cflag |= match parity {
+        Parity::None => 0,
+        Parity::Even => libc::PARENB,
+        Parity::Odd => libc::PARENB | libc::PARODD,
+    };
+    if two_stop_bits {
+        settings.c_cflag |= libc::CSTOPB;
+    }
     settings.c_cc[libc::VMIN] = 0;
     settings.c_cc[libc::VTIME] = 0;
     // SAFETY: `settings` is a live `termios` and `speed` came from the constants above.
@@ -71,15 +96,15 @@ mod tests {
     fn a_standard_rate_is_accepted_and_others_are_not() {
         let (_controller, path) = pair();
         let port = std::fs::File::open(path).unwrap();
-        configure(port.as_fd(), 115_200).unwrap();
-        configure(port.as_fd(), 1_000_000).unwrap();
-        let error = configure(port.as_fd(), 123_456).unwrap_err();
+        configure(port.as_fd(), 115_200, Parity::None, false).unwrap();
+        configure(port.as_fd(), 1_000_000, Parity::None, false).unwrap();
+        let error = configure(port.as_fd(), 123_456, Parity::None, false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn something_that_is_not_a_tty_is_refused() {
         let file = std::fs::File::open("/dev/null").unwrap();
-        assert!(configure(file.as_fd(), 9600).is_err());
+        assert!(configure(file.as_fd(), 9600, Parity::None, false).is_err());
     }
 }

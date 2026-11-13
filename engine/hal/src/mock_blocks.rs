@@ -10,8 +10,8 @@ use super::{Shared, with};
 use crate::ErrorKind;
 use crate::blocks::{
     BufferHandle, BufferKind, Clocks, ControlSetup, DmaBuffer, DmaBuffers, Interrupt,
-    InterruptEvent, IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UsbDevice,
-    UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
+    InterruptEvent, IsoPacket, Registers, Reset, StreamEndpoint, StreamFrame, Uart, UartFormat,
+    UsbDevice, UsbDeviceId, UsbDeviceInfo, UsbFunction, UsbFunctionEvent, UsbHost,
 };
 use crate::usb_descriptors::{self, UsbDescriptors, UsbEndpoint};
 
@@ -385,11 +385,26 @@ impl Reset for MockReset {
     }
 }
 
-#[derive(Debug, Default)]
+/// What answers a [`MockUart`]'s writes: given the bytes written, the bytes that arrive back.
+type Responder = super::alloc::boxed::Box<dyn FnMut(&[u8]) -> Vec<u8> + Send>;
+
+#[derive(Default)]
 struct UartState {
-    baud: u32,
+    format: Option<UartFormat>,
     incoming: VecDeque<u8>,
     sent: Vec<u8>,
+    responder: Option<Responder>,
+}
+
+impl core::fmt::Debug for UartState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UartState")
+            .field("format", &self.format)
+            .field("incoming", &self.incoming)
+            .field("sent", &self.sent)
+            .field("responder", &self.responder.is_some())
+            .finish()
+    }
 }
 
 /// A serial port with a test at the far end.
@@ -403,8 +418,14 @@ impl MockUart {
         Self::default()
     }
 
+    /// The rate last configured, 0 before any.
     pub fn baud(&self) -> u32 {
-        with(&self.state, |s| s.baud)
+        with(&self.state, |s| s.format.map_or(0, |f| f.baud))
+    }
+
+    /// The format last configured.
+    pub fn format(&self) -> Option<UartFormat> {
+        with(&self.state, |s| s.format)
     }
 
     pub fn receive(&self, data: &[u8]) {
@@ -414,18 +435,32 @@ impl MockUart {
     pub fn sent(&self) -> Vec<u8> {
         with(&self.state, |s| s.sent.clone())
     }
+
+    /// Puts a device at the far end: from now on each write is handed to `respond`, and what it
+    /// returns arrives to be read, as a device that answers requests would send it.
+    pub fn respond_with(&self, respond: impl FnMut(&[u8]) -> Vec<u8> + Send + 'static) {
+        with(&self.state, |s| {
+            s.responder = Some(super::alloc::boxed::Box::new(respond))
+        });
+    }
 }
 
 impl Uart for MockUart {
     type Error = ErrorKind;
 
-    fn set_baud(&mut self, baud: u32) -> Result<(), ErrorKind> {
-        with(&self.state, |s| s.baud = baud);
+    fn configure(&mut self, format: UartFormat) -> Result<(), ErrorKind> {
+        with(&self.state, |s| s.format = Some(format));
         Ok(())
     }
 
     fn write(&mut self, data: &[u8]) -> Result<usize, ErrorKind> {
-        with(&self.state, |s| s.sent.extend_from_slice(data));
+        with(&self.state, |s| {
+            s.sent.extend_from_slice(data);
+            if let Some(respond) = s.responder.as_mut() {
+                let reply = respond(data);
+                s.incoming.extend(reply);
+            }
+        });
         Ok(data.len())
     }
 
@@ -1520,7 +1555,7 @@ mod tests {
     fn a_uart_moves_bytes_both_ways() {
         let mut uart = MockUart::new();
         let far = uart.clone();
-        uart.set_baud(115_200).unwrap();
+        uart.configure(UartFormat::new(115_200)).unwrap();
         assert_eq!(far.baud(), 115_200);
         assert_eq!(uart.write(&[1, 2]), Ok(2));
         assert_eq!(far.sent(), [1, 2]);

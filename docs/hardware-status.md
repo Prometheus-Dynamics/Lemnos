@@ -105,6 +105,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`B12.md`](../testing/board-runs/B12.md) | `hwmon-fan`: take-over, release, hand-back on stop, the gap after a kill |
 | [`B13.md`](../testing/board-runs/B13.md) | `thermal-zone`: reads against the kernel's value, a missing zone |
 | [`H3a.md`](../testing/board-runs/H3a.md) | The description form: a power monitor described by a file beside `ina2xx` on the same chip, identity refusal, an outage; a temperature or inertial chip from a file |
+| [`H3b.md`](../testing/board-runs/H3b.md) | Drivers on a UART: `raw-bus` loopback and its frame settings, a Modbus sensor from a description, an outage, a wrong unit id |
 | [`B14.md`](../testing/board-runs/B14.md) | `fan-control`: curve, slew, hold, a failed sensor, restart |
 | [`B15.md`](../testing/board-runs/B15.md) | `gpio-power-switch`: two USB port power lines |
 | [`B16.md`](../testing/board-runs/B16.md) | `ws2812`: bit timing, colour order, reset between frames |
