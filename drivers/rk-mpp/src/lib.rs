@@ -33,14 +33,18 @@
 //! Provenance: written for this tree from the kernel side of `/dev/mpp_service`
 //! (rockchip-linux/kernel `develop-6.1` at `77168c8d5ab82399f65a80e9f807b50ba37cf483`:
 //! `include/uapi/linux/rk-mpp.h` and `drivers/video/rockchip/mpp/`). Interface facts only are
-//! transcribed, with their files named where they are used; no code is copied, and the user-space
-//! MPP library is neither used nor followed.
+//! transcribed, with their files named where they are used; no code is copied. Vendor user-space
+//! code is governed by the 2026-11-13 ruling: register facts may be transcribed from open-source
+//! vendor user-space code with provenance (source file and version); the libraries themselves are
+//! neither used nor linked.
 
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
 pub mod block;
+#[cfg(feature = "device")]
 pub mod claim;
+#[cfg(feature = "device")]
 pub mod codec;
 pub mod job;
 pub mod message;
@@ -48,14 +52,18 @@ pub mod message;
 pub mod played;
 pub mod uapi;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "device"))]
 mod tests;
 
 pub use block::{Block, Check, Descriptor, Direct, Facts, MAX_REGISTERS, ParamFacts, Word};
+#[cfg(feature = "device")]
 pub use claim::{
     BufferError, Claim, ClaimError, ClaimOf, CompleteError, Completion, Device, MAX_BUFFERS,
     OwnedClaim, Service, Session, SubmitError, backoff_ns,
 };
+#[cfg(feature = "device")]
 pub use codec::{BlockClaim, BoxedDevice, MppBlock};
 pub use job::{Address, BufferId, Job, JobError, MAX_ADDRESSES, ParamAddress, ParamJob, ReadBack};
-pub use message::{Message, Payload, READ_BACK_BYTES, READ_BACK_SLOTS};
+#[cfg(any(test, feature = "device", feature = "played"))]
+pub use message::{Message, Payload};
+pub use message::{READ_BACK_BYTES, READ_BACK_SLOTS};

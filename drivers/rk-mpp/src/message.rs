@@ -7,6 +7,7 @@
 //! the command is never one of those this crate refuses to send.
 
 use crate::block::MAX_REGISTERS;
+#[cfg(any(test, feature = "device", feature = "played"))]
 use crate::uapi::{Command, MsgV1, flags};
 
 /// Bytes of one read-back area: the most registers a block has.
@@ -34,6 +35,7 @@ pub enum Payload<'a> {
 }
 
 /// One message of an `MPP_IOC_CFG_V1` chain.
+#[cfg(any(test, feature = "device", feature = "played"))]
 #[derive(Debug)]
 pub struct Message<'a> {
     cmd: Command,
@@ -43,6 +45,8 @@ pub struct Message<'a> {
     payload: Payload<'a>,
 }
 
+#[cfg(any(test, feature = "device", feature = "played"))]
+#[cfg_attr(not(feature = "device"), allow(dead_code))]
 impl<'a> Message<'a> {
     fn new(cmd: Command, offset: u32, payload: Payload<'a>, size: usize) -> Self {
         Self {

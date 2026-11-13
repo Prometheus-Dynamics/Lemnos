@@ -1,0 +1,20 @@
+[package]
+name = "lemnos-driver-rkvenc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Rockchip H.264 and H.265 encoder register layouts (VEPU541, VEPU540, VEPU580 class) and a job builder: typed fields with bit positions and widths, address registers checked for alignment, read-back registers. No vendor library; no codec policy; the caller supplies every value"
+
+[lints]
+workspace = true
+
+# Linux only, like the rk-mpp crates the jobs are given to: the job type is `lemnos-driver-rk-mpp`'s.
+# Without the engine (`device`, off here) the crate is the layouts and the builder alone.
+[target.'cfg(target_os = "linux")'.dependencies]
+lemnos-driver-rk-mpp = { path = "../rk-mpp", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+lemnos-driver-rk-mpp = { path = "../rk-mpp", features = ["played"] }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }

@@ -9,6 +9,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 libraries=(
   lemnos-v4l2
   lemnos-driver-pisp lemnos-driver-pisp-sys lemnos-driver-pisp-fe-sys
+  lemnos-driver-rk-mpp lemnos-driver-rkvenc
   lemnos-driver-rkisp lemnos-driver-rkisp-sys
   lemnos-driver-k230isp lemnos-driver-k230isp-sys
   lemnos-driver-isp600 lemnos-driver-isp600-sys

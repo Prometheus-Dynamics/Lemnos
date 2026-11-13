@@ -59,8 +59,9 @@ use lemnos_driver_rk_mpp::{Block, Message, Payload, READ_BACK_BYTES, READ_BACK_S
 use crate::check::{self, footprint, refused};
 
 /// Bytes of the session's scratch area: room for the largest job the driver builds (the largest
-/// register write, a full translation table and a full offset list) and more.
-pub const DATA_BYTES: usize = 2048;
+/// block's register write, which is 780 registers, a full translation table and a full offset list)
+/// and more.
+pub const DATA_BYTES: usize = 4096;
 
 /// Memory the kernel uses during a call only.
 struct Scratch {

@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 94 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -203,6 +203,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E38.md`](../testing/board-runs/E38.md) | `a733-di` output and field order; JPEG through `rk-mpp` |
 | [`E19.md`](../testing/board-runs/E19.md) | `a733-video`: the register window, the claim, a second claimant |
 | [`H8a.md`](../testing/board-runs/H8a.md) | `a733-video` through `lemnos.ko`: the encoder's register map, an encode, tight extents, refusals, a timeout reset |
+| [`K1a.md`](../testing/board-runs/K1a.md) | The VEPU541 H.264 encoder through `rk-mpp`: the identity register, the read-back window, the stream length, the address alignments |
 | [`E20.md`](../testing/board-runs/E20.md) | `a733-di`: every mode, reads past the rows, recovery |
 | [`E21.md`](../testing/board-runs/E21.md) | `k230-vpu`: layouts, JPEG encode and decode, guards, sessions |
 | [`E41.md`](../testing/board-runs/E41.md) | `k230-vpu` through its job stream: out-of-order completions, a source change |

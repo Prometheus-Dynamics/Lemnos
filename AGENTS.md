@@ -58,8 +58,10 @@ and board runs.
 
 - **Lemnos is only the engine.** Nothing in `engine/` or `service/` may know what a kind of
   hardware is. `engine/` never imports `contracts/`, `drivers/`, `backends/` or `service/`.
-- **No vendor libraries.** Nothing closed is linked or loaded, and nothing is copied from one. The
-  dynamic loader is used only for Lemnos's own driver packages.
+- **No vendor libraries.** Nothing closed is linked, loaded or copied. The dynamic loader is used
+  only for Lemnos's own driver packages. Per the 2026-11-13 ruling, register facts may be transcribed
+  from open-source vendor user-space code with provenance (source file and version); the libraries
+  themselves are neither used nor linked.
 - **No software stand-in for hardware.** A driver carries the caller's work to its block without
   knowing what it means. A job the block cannot do fails. It is never done on the CPU instead.
 - **The failure rule, in every driver.** Never give up on hardware: reconnect, with a wait capped

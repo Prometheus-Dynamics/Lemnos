@@ -241,13 +241,17 @@ fn a_board_file_binds_it_and_what_it_names_is_checked() {
 /// The driver on the played kernel, on the stream of a device whose own driver doesn't use
 /// it: the test plays the host's part in ticking it.
 fn driver_on(rig: &Rig, kernel: &Arc<Mutex<Kernel>>) -> RkMpp {
+    driver_on_block(rig, kernel, Block::Vepu2)
+}
+
+fn driver_on_block(rig: &Rig, kernel: &Arc<Mutex<Kernel>>, block: Block) -> RkMpp {
     let jobs = Box::new(rig.host.stream_producer(0, "jobs").unwrap());
     RkMpp::on(
         RkMppNeeds {
             jobs: lemnos_core::Held::boxed(jobs),
         },
         BoxedDevice::new(Node(Arc::clone(kernel))),
-        Block::Vepu2,
+        block,
     )
 }
 
@@ -330,4 +334,59 @@ fn a_callers_job_runs_on_the_block_with_the_streams_buffers_and_comes_back() {
     );
     assert_eq!(Lifecycle::health(&driver), Health::Ok);
     let _ = Status::OK;
+}
+
+/// An encoder job built by `lemnos-driver-rkvenc`'s `RegisterSet`, sent as the caller's
+/// codec.block work. The caller sets its fields and its stream buffers on the builder, then sends
+/// exactly what `codec_job` gives: the write side's words, one reference per address register,
+/// and the read-back window. The driver runs it on the rkvenc block and the read-back comes back.
+#[test]
+fn an_encoder_job_from_the_rkvenc_builder_runs_on_the_codec_block() {
+    use lemnos_core::Lifecycle;
+    use lemnos_driver_rkvenc::vepu541_h264::{RegisterSet, set};
+
+    let rig = Rig::start(&board("nothing", true), true);
+    let kernel = Arc::new(Mutex::new(Kernel::new(all_blocks())));
+    let mut driver = driver_on_block(&rig, &kernel, Block::Rkvenc);
+    let mut caller = Caller::attach(&rig.host, 0, "jobs", 1);
+    let mut now = driver.tick(1).unwrap();
+
+    // The caller's job: a field, and its two stream buffers (indices 2 and 3 of its stream).
+    let mut job = RegisterSet::new();
+    job.set(set::reg017::SRC_CFMT, 4).unwrap();
+    job.set(set::reg001::LKT_NUM, 0xab).unwrap();
+    job.set_stream_address(set::reg070::ADR_SRC0, 2, 0).unwrap();
+    job.set_stream_address(set::reg078::CMVW_ADDR, 3, 1024)
+        .unwrap();
+    let sent = job.codec_job().unwrap();
+    let refs: Vec<_> = sent
+        .refs
+        .iter()
+        .map(|r| reference(u32::from(r.register), r.buffer, r.offset, 0))
+        .collect();
+    let read = [
+        u32::from(sent.read.first).to_le_bytes(),
+        u32::from(sent.read.count).to_le_bytes(),
+    ]
+    .concat();
+    caller.post(
+        1,
+        0,
+        1,
+        &refs,
+        &[(TAG_WRITE, &write(0, sent.write)), (TAG_READ, &read)],
+    );
+    now = driver.tick(now).unwrap();
+    let (identity, record, back) = caller.completion().unwrap();
+    assert_eq!((identity, record.status), (1, JobStatus::Done));
+    let back = words(&back);
+    // The read-back starts at word 7: SRC_CFMT (word 17, bit 2) holds 4.
+    assert_eq!(back[17 - 7], 4 << 2);
+    // The address registers hold the device addresses the kernel gave the two buffers.
+    let fds: Vec<u32> = kernel.lock().unwrap().translated[..2].to_vec();
+    let source = sent.refs[0].register as usize;
+    let recon = sent.refs[1].register as usize;
+    assert_eq!(back[source - 7], iova(fds[0]));
+    assert_eq!(back[recon - 7], iova(fds[1]).wrapping_add(1024));
+    let _ = now;
 }
