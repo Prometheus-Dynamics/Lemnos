@@ -1,0 +1,19 @@
+[package]
+name = "shm-ring-model"
+description = "The shm-ring concurrency proof: every interleaving of a writer against readers, and a hostile ring."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+shm-ring = { path = "../ring" }
+
+[dev-dependencies]
+loom = "0.7.3"
+
+[lints]
+workspace = true

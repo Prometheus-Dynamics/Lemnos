@@ -60,5 +60,9 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 - [ ] **A USB camera needs a board entry.** There is no binding by device class.
 - [ ] **USB**: the gadget has no isochronous endpoints, and `uvc` reads one isochronous transfer
       at a time.
+- [ ] **Frame streams are not on the shared ring** (I2). `lemnosd`'s streams, the client and the
+      C API still use their own ring and doorbell (`docs/streams.md`). Move them onto
+      `shm-ring`, `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`),
+      and pass descriptors with `shm-fdpass`.
 - [ ] **Capture**: `rkcif` has no 16-bit unpacked layout; multi-plane frames are copied; nothing is
       captured straight into a stream while no consumer is attached.

@@ -8,6 +8,8 @@ members = [
   "contracts/*",
   "drivers/*",
   "testing/crates/*",
+  # The shared-memory ring family: standalone, no dependency on anything else here.
+  "shm/*",
 ]
 resolver = "3"
 
