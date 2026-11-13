@@ -4,11 +4,12 @@
 //! kernel runs. At install the driver writes `slots/<id>/extlinux/extlinux.conf` from the slot's
 //! files and its command line. The record is `boot-record.env` on the boot partition, in the text
 //! form U-Boot's `env import -t` reads: `default=<id>`, `trial=<id>` (empty when none) and
-//! `trial_armed=0|1`. A static script, `packaging/uboot/boot.cmd`, loads the record and, for an
-//! armed trial, first writes the record back disarmed and then starts the trial; when that
-//! returns, or there is no armed trial, it starts the default; when the record can't be read, the
-//! fixed `extlinux/extlinux.conf` at the boot partition's root, a copy of the default's this
-//! driver keeps current. [`steps`] is that decision, which the script mirrors.
+//! `trial_attempts=0..3`, the boots that may still start the trial. A static script,
+//! `packaging/uboot/boot.cmd`, loads the record and, for a trial with attempts, takes one, writes
+//! the record and then starts the trial; when that returns, or there are none, it starts the
+//! default; when the record can't be read, the fixed `extlinux/extlinux.conf` at the boot
+//! partition's root, a copy of the default's this driver keeps current. [`steps`] is that
+//! decision, which the script mirrors.
 
 use std::fs;
 use std::io;
@@ -20,6 +21,7 @@ use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use crate::boot::{BootRecord, Restarter};
 use crate::store::{Layout, replace, sync_dir, valid_id};
 
+pub use lemnos_slot_store::records::MAX_ATTEMPTS;
 pub use lemnos_slot_store::records::uboot::{KEYS, RECORD_FILE, Record};
 
 /// Where a slot's loader configuration is, under its boot directory.
@@ -28,8 +30,9 @@ pub const EXTLINUX: &str = "extlinux/extlinux.conf";
 /// One step of the loader script, in the order it takes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Write the record back with `trial_armed=0`. When that write fails, the trial is skipped.
-    Disarm,
+    /// Takes one attempt from the trial: writes the record with `attempts` left, and only then
+    /// `sysboot`s the trial `id`. When the write fails, the trial is skipped.
+    Trial { id: String, attempts: u8 },
     /// `sysboot` this slot's configuration. Returns only when that slot couldn't be started.
     Boot(String),
     /// `sysboot` the fixed configuration at the boot partition's root.
@@ -37,13 +40,16 @@ pub enum Step {
 }
 
 /// What the loader script does with `record` (`None`: it couldn't be read): each step is tried
-/// when the one before it returned.
+/// when the one before it returned. A trial with attempts left (1 to 3) takes one: its boot has
+/// `attempts - 1` left in the record. With none (0), the trial is skipped.
 pub fn steps(record: Option<&Record>) -> Vec<Step> {
     let mut steps = Vec::new();
     if let Some(record) = record {
-        if record.armed && !record.trial.is_empty() {
-            steps.push(Step::Disarm);
-            steps.push(Step::Boot(record.trial.clone()));
+        if !record.trial.is_empty() && (1..=MAX_ATTEMPTS).contains(&record.attempts) {
+            steps.push(Step::Trial {
+                id: record.trial.clone(),
+                attempts: record.attempts - 1,
+            });
         }
         if !record.default.is_empty() {
             steps.push(Step::Boot(record.default.clone()));
@@ -192,15 +198,36 @@ impl BootRecord for Uboot {
         self.write(&record)
     }
 
-    fn set_trial(&mut self, id: &str) -> io::Result<()> {
+    fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()> {
         let mut record = self.read();
         record.trial = id.to_string();
-        record.armed = true;
+        record.attempts = attempts;
         self.write(&record)
     }
 
-    fn restart(&mut self, _trial: bool) -> io::Result<()> {
-        // The script starts an armed trial on any restart.
+    fn pending(&self) -> io::Result<Option<(String, u8)>> {
+        let record = self.read();
+        Ok((!record.trial.is_empty()).then_some((record.trial, record.attempts)))
+    }
+
+    fn set_attempts(&mut self, attempts: u8) -> io::Result<()> {
+        let mut record = self.read();
+        if record.trial.is_empty() {
+            return Ok(());
+        }
+        record.attempts = attempts;
+        self.write(&record)
+    }
+
+    fn clear_trial(&mut self) -> io::Result<()> {
+        let mut record = self.read();
+        record.trial.clear();
+        record.attempts = 0;
+        self.write(&record)
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
+        // The script starts a trial that has attempts left on any restart.
         self.restarter.run(None)
     }
 

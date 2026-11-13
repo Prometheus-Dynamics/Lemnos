@@ -74,6 +74,23 @@ The cap can be shorter than 8 s but never longer: that is [the failure rule](con
 and a longer value is refused. There is no host-wide auto-off: only a device's own
 `auto_off_after` turns a device off.
 
+## Trials of a slot (`system-slots`)
+
+The `system-slots` driver's `config` (see [Slots](slots.md)) takes these trial settings. Each is
+optional and keeps its default when left out:
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `auto_confirm` | `true` | `true`, `false` | The board confirms a healthy trial itself. `false`: only a `confirm` call confirms, and nothing restarts the board by itself |
+| `confirm_uptime_s` | `30` | 0 up | How long the daemon must have run in the trial before it may confirm |
+| `confirm_deadline_s` | `600` | at least `confirm_uptime_s` | The time, from the daemon's start, by which every condition must hold |
+| `reboot_at_deadline` | `true` | `true`, `false` | At the deadline with a condition unmet: record why, and restart into the default. Ignored with `auto_confirm = false` |
+| `trial_attempts` | `3` | 1 to 3 | Boots in a row that may fail to reach a running daemon before a trial falls back. A boot that reaches the daemon gives its attempt back |
+| `health` | `[]` | a list of strings | Extra conditions for a trial to confirm. Each is `device:<id>` (that device's health is Ok), `file:<path>` (the file exists and was modified since this boot began) or `socket:<path>` (the Unix socket accepts a connection). A checked path must be absolute |
+
+`health` is an array of strings in the device's `config` (`health = ["device:x", "file:/run/y"]`).
+Only the built-in drivers see it; other arrays in a device's `config` are refused.
+
 ## `[board]` identity
 
 `[board] id` is the board's family, and the driver `system-identity` reads the rest of the

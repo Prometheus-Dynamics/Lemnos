@@ -99,6 +99,53 @@ pub fn pick(failure: &Failure<'_>) -> Option<String> {
         .map(|c| c.id.clone())
 }
 
+/// What the default slot's start does about a pending tryboot trial, before it mounts anything
+/// but the boot partition. The firmware has no counter, so the default slot's kernel takes the
+/// attempt: one per trial boot, so a trial that never reaches the daemon uses one up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TryPass {
+    /// Carry on as usual: no trial file, a trial boot already, or no counter beside it.
+    Boot,
+    /// Write `left` attempts, then restart with the tryboot argument, which boots the trial.
+    Spend { left: u8 },
+    /// The trial has no attempts left: its file goes, and this boot starts the default.
+    Out,
+}
+
+/// The tryboot rule. `trial_file` is whether `trial.txt` names a slot, `flag` whether the firmware
+/// booted this as a trial, `attempts` the counter beside it (`None` when there is none).
+pub fn tryboot_pass(trial_file: bool, flag: bool, attempts: Option<u8>) -> TryPass {
+    match attempts {
+        Some(0) if trial_file && !flag => TryPass::Out,
+        Some(n) if trial_file && !flag => TryPass::Spend { left: n - 1 },
+        _ => TryPass::Boot,
+    }
+}
+
+/// What the `file` record says the boot starts, and what it writes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilePick {
+    /// The trial, with `left` attempts still to be taken by a later boot. It stays the trial until
+    /// they are used up.
+    Trial { slot: String, left: u8 },
+    /// The default. `clear` when a trial with no attempts left was in the record, which is removed.
+    Default { clear: bool },
+}
+
+/// The `file` record's choice for one boot: a trial with attempts left takes one now.
+pub fn file_pick(trial: &str, attempts: u8) -> FilePick {
+    if trial.is_empty() {
+        FilePick::Default { clear: false }
+    } else if attempts > 0 {
+        FilePick::Trial {
+            slot: trial.to_string(),
+            left: attempts - 1,
+        }
+    } else {
+        FilePick::Default { clear: true }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +275,58 @@ mod tests {
             after_failure(&failure("a", "", &slots)),
             Next::Wait("no other slot can start".into())
         );
+    }
+
+    #[test]
+    fn the_tryboot_pass_takes_one_attempt_per_trial_boot_and_stops_at_zero() {
+        assert_eq!(
+            tryboot_pass(true, false, Some(3)),
+            TryPass::Spend { left: 2 }
+        );
+        assert_eq!(
+            tryboot_pass(true, false, Some(1)),
+            TryPass::Spend { left: 0 }
+        );
+        assert_eq!(tryboot_pass(true, false, Some(0)), TryPass::Out);
+        // A trial boot takes nothing more; no trial file means nothing to do; no counter is as
+        // the board always booted.
+        assert_eq!(tryboot_pass(true, true, Some(2)), TryPass::Boot);
+        assert_eq!(tryboot_pass(false, false, Some(2)), TryPass::Boot);
+        assert_eq!(tryboot_pass(true, false, None), TryPass::Boot);
+    }
+
+    /// Three attempts on the tryboot form: each default boot takes one and restarts into the trial,
+    /// each failed trial restarts plainly, and the default boot after the last attempt boots the
+    /// default. Exactly three trial boots, as the loader's ladder gives.
+    #[test]
+    fn three_attempts_on_the_tryboot_form_are_three_trial_boots_then_the_default() {
+        let (mut left, mut trials) = (Some(3u8), 0);
+        loop {
+            // A default boot (the firmware's flag is clear) runs the pass.
+            match tryboot_pass(true, false, left) {
+                TryPass::Spend { left: next } => {
+                    left = Some(next);
+                    // The restart with the tryboot argument boots the trial, which fails.
+                    trials += 1;
+                }
+                TryPass::Out => break,
+                TryPass::Boot => panic!("the pass boots nothing with attempts left"),
+            }
+        }
+        assert_eq!(trials, 3);
+        assert_eq!(left, Some(0));
+    }
+
+    #[test]
+    fn the_file_record_picks_a_trial_with_attempts_and_clears_one_without() {
+        assert_eq!(file_pick("", 2), FilePick::Default { clear: false });
+        assert_eq!(
+            file_pick("b", 2),
+            FilePick::Trial {
+                slot: "b".into(),
+                left: 1
+            }
+        );
+        assert_eq!(file_pick("b", 0), FilePick::Default { clear: true });
     }
 }

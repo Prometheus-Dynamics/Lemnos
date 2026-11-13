@@ -145,6 +145,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | Check | What a board has to show |
 |---|---|
 | [`I5.md`](../testing/board-runs/I5.md) | `system-slots` and `system-reboot`: a streamed install checked against its signed manifest, refused bundles, cancel, kill and restart mid-install, a confirmed trial, an unconfirmed trial falling back on a single-slot board, housekeeping, an install from a file in `.incoming`, the U-Boot record and script, and the board's own slot tool reading the same state |
+| [`I5f.md`](../testing/board-runs/I5f.md) | How a trial resolves on a board: a healthy trial confirms by itself, a trial survives power cuts until its attempts run out, and the cost of the extra tryboot pass (power-on to the trial's daemon, with and without it). Untested on board |
 | [`I5d.md`](../testing/board-runs/I5d.md) | `lemnos-slot-init` as a slot's `/init`: a plain boot through dm-verity, a trial, a damaged image, a wrong root hash and a cut-short image each falling back to the previous slot on trial, three fallbacks in a row stopping, and the default never written |
 | [`I5c.md`](../testing/board-runs/I5c.md) | Slots on raw NAND over UBI: an install into a static volume renamed into place, a refused and a cancelled install leaving no work volume, the record volume replaced by rename, `boot-ubi.cmd` run by U-Boot (trial, disarm, default, root copy), and `lemnos-slot-init` booting through `ubiblock` and falling back through the record volume |
 

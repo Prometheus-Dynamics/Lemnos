@@ -14,7 +14,7 @@
 //! board/slots/state.json      {"schema":1,"default":..,"previous":..,"trial":..}, for the initramfs
 //! board/slots/<id>.meta       PINNED, GOOD, INSTALLED, SEQ, FAILED, FAILURES, FAIL_REASON, ...
 //! board/slots/booted          the running slot, written by the initramfs
-//! board/slots/settings.env    SLOTS_KEEP
+//! board/slots/settings.env    SLOTS_KEEP, TRIAL_ATTEMPTS
 //! ```
 //!
 //! Every file is replaced whole: written beside, synced, renamed, and its directory synced, so a
@@ -346,11 +346,33 @@ pub fn keep_count(layout: &Layout, fallback: u32) -> u32 {
 }
 
 pub fn set_keep(layout: &Layout, keep: u32) -> io::Result<()> {
+    write_setting(layout, "SLOTS_KEEP", &keep.to_string())
+}
+
+/// The value of a key in `settings.env`, if it has one.
+pub fn setting(layout: &Layout, key: &str) -> Option<String> {
+    fs::read_to_string(layout.marker("settings.env"))
+        .ok()
+        .and_then(|text| {
+            env_lines(&text)
+                .into_iter()
+                .rev()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v)
+        })
+}
+
+/// Sets a key in `settings.env`, keeping the others.
+pub fn write_setting(layout: &Layout, key: &str, value: &str) -> io::Result<()> {
     fs::create_dir_all(layout.state_dir())?;
-    replace(
-        &layout.marker("settings.env"),
-        format!("SLOTS_KEEP={keep}\n").as_bytes(),
-    )
+    let path = layout.marker("settings.env");
+    let mut lines: Vec<(String, String)> = fs::read_to_string(&path)
+        .map(|text| env_lines(&text))
+        .unwrap_or_default();
+    lines.retain(|(k, _)| k != key);
+    lines.push((key.to_string(), value.to_string()));
+    let text: String = lines.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    replace(&path, text.as_bytes())
 }
 
 /// The next install number (`seq`).

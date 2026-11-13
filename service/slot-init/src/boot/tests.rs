@@ -297,7 +297,10 @@ impl Board {
             device.put(&ubi::image_volume(id), &fs::read(&file).unwrap());
             fs::remove_file(file).unwrap();
         }
-        device.put(ubi::RECORD_VOLUME, b"default=os-2\ntrial=\ntrial_armed=0\n");
+        device.put(
+            ubi::RECORD_VOLUME,
+            b"default=os-2\ntrial=\ntrial_attempts=0\n",
+        );
         fs::remove_file(board.env.at("boot/default.txt")).unwrap();
         board.write(
             "proc/cmdline",
@@ -462,9 +465,12 @@ fn assert_fell_back(board: &Board, fake: &Fake, reason: &str) {
         meta.get("FAIL_REASON")
     );
     assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    // The trial's attempts are the board's: the default's kernel takes one before the trial boots.
+    assert_eq!(board.read("boot/trial-attempts"), "3\n");
     assert_eq!(board.read("data/board/slots/fallbacks"), "1\n");
     assert_eq!(board.state().trial, "os-1");
-    assert_eq!(fake.last(), "restart 0 tryboot");
+    // A plain restart: the loader's pass takes the attempt, then the trial boots.
+    assert_eq!(fake.last(), "restart");
     assert!(!fake.called("switch_root"));
     board.default_kept();
 }
@@ -584,7 +590,7 @@ fn rule_3_a_previous_slot_that_failed_gives_way_to_a_good_one() {
     );
     let (fake, _) = board.boot(&["verity "]);
     assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-3/\n");
-    assert_eq!(fake.last(), "restart 0 tryboot");
+    assert_eq!(fake.last(), "restart");
 }
 
 #[test]
@@ -611,37 +617,61 @@ fn rule_4_a_board_with_one_slot_waits_and_restarts_into_it() {
 }
 
 #[test]
-fn a_uboot_board_falls_back_through_an_armed_trial() {
+fn a_uboot_board_falls_back_through_a_trial_with_attempts() {
     let board = Board::new();
     board.write(
         "boot/boot-record.env",
-        b"default=os-2\ntrial=\ntrial_armed=0\n",
+        b"default=os-2\ntrial=\ntrial_attempts=0\n",
     );
     let (fake, _) = board.boot(&["verity "]);
     assert_eq!(
         board.read("boot/boot-record.env"),
-        "default=os-2\ntrial=os-1\ntrial_armed=1\n"
+        "default=os-2\ntrial=os-1\ntrial_attempts=3\n"
     );
     assert_eq!(board.read("boot/trial.txt"), "");
     assert_eq!(fake.last(), "restart");
 }
 
 #[test]
-fn a_file_record_picks_its_trial_and_clears_it() {
+fn a_file_record_trial_takes_one_attempt_and_keeps_the_trial() {
     let board = Board::new();
-    board.write("boot/boot-record", b"default=os-2\ntrial=os-1\n");
+    board.write(
+        "boot/boot-record",
+        b"default=os-2\ntrial=os-1\ntrial_attempts=2\n",
+    );
     let (fake, why) = board.boot(&[]);
     assert_eq!(why, "", "{:?}", fake.logs.borrow());
-    assert_eq!(board.read("boot/boot-record"), "default=os-2\n");
+    assert_eq!(
+        board.read("boot/boot-record"),
+        "default=os-2\ntrial=os-1\ntrial_attempts=1\n"
+    );
     assert!(fake.called("verity data/slots/os-1.erofs"));
     assert_eq!(board.read("data/board/slots/trial-init"), "os-1\n");
     assert_eq!(board.read("newroot/data/board/slots/booted"), "os-1\n");
 }
 
 #[test]
+fn a_file_record_trial_with_no_attempts_left_is_cleared_and_the_default_boots() {
+    let board = Board::new();
+    board.write(
+        "boot/boot-record",
+        b"default=os-2\ntrial=os-1\ntrial_attempts=0\n",
+    );
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert_eq!(board.read("boot/boot-record"), "default=os-2\n");
+    assert!(!fake.called("verity data/slots/os-1.erofs"));
+    assert!(fake.called("verity data/slots/os-2.erofs"));
+    assert!(!board.env.at("data/board/slots/trial-init").exists());
+}
+
+#[test]
 fn a_file_record_trial_takes_its_root_hash_from_its_own_command_line() {
     let board = Board::new();
-    board.write("boot/boot-record", b"default=os-2\ntrial=os-1\n");
+    board.write(
+        "boot/boot-record",
+        b"default=os-2\ntrial=os-1\ntrial_attempts=2\n",
+    );
     board.write(
         "boot/slots/os-1/cmdline.txt",
         b"os.slot=os-1 os.roothash=bad\n",
@@ -649,8 +679,11 @@ fn a_file_record_trial_takes_its_root_hash_from_its_own_command_line() {
     let (fake, _) = board.boot(&[]);
     assert!(!fake.called("verity "));
     assert!(board.meta("os-1").get("FAIL_REASON").contains("root hash"));
-    // A failed trial: the record's default boots next.
-    assert_eq!(board.read("boot/boot-record"), "default=os-2\n");
+    // A failed trial keeps its attempts: the next boot takes one more.
+    assert_eq!(
+        board.read("boot/boot-record"),
+        "default=os-2\ntrial=os-1\ntrial_attempts=1\n"
+    );
     assert_eq!(fake.last(), "restart");
 }
 
@@ -659,7 +692,10 @@ fn a_file_record_falls_back_through_its_trial_line() {
     let board = Board::new();
     board.write("boot/boot-record", b"default=os-2\n");
     let (fake, _) = board.boot(&["verity "]);
-    assert_eq!(board.read("boot/boot-record"), "default=os-2\ntrial=os-1\n");
+    assert_eq!(
+        board.read("boot/boot-record"),
+        "default=os-2\ntrial=os-1\ntrial_attempts=3\n"
+    );
     assert_eq!(fake.last(), "restart");
 }
 
@@ -713,7 +749,7 @@ fn on_nand_a_cut_short_volume_falls_back_through_the_record_volume() {
     assert!(fake.called("ubi replace boot-record"));
     assert_eq!(
         board.record_volume(),
-        "default=os-2\ntrial=os-1\ntrial_armed=1\n"
+        "default=os-2\ntrial=os-1\ntrial_attempts=3\n"
     );
     assert_eq!(fake.last(), "restart");
     assert_eq!(board.meta("os-2").get("FAILED"), "yes");
@@ -725,7 +761,7 @@ fn on_nand_a_verity_failure_falls_back_and_the_default_stays() {
     let (fake, _) = board.boot(&["verity "]);
     assert_eq!(
         board.record_volume(),
-        "default=os-2\ntrial=os-1\ntrial_armed=1\n"
+        "default=os-2\ntrial=os-1\ntrial_attempts=3\n"
     );
     assert!(board.meta("os-2").get("FAIL_REASON").contains("dm-verity"));
     assert!(fake.called("mount ubifs rw ubi0:boot boot"));
@@ -774,6 +810,72 @@ fn on_nand_a_failed_trial_restarts_plainly_and_leaves_the_record() {
     assert!(!fake.called("ubi replace"));
     assert_eq!(
         board.record_volume(),
-        "default=os-2\ntrial=\ntrial_armed=0\n"
+        "default=os-2\ntrial=\ntrial_attempts=0\n"
     );
+}
+
+/// The tryboot pass: a trial with attempts left takes one before anything else is mounted, and
+/// the board restarts into the trial with the tryboot argument. Decided in `decide`; here it is
+/// over the boot partition.
+#[test]
+fn a_pending_tryboot_trial_takes_an_attempt_and_restarts_into_it_before_anything_else() {
+    let board = Board::new();
+    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
+    board.write("boot/trial-attempts", b"2\n");
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains("restarting into trial os-1"), "{why}");
+    assert_eq!(board.read("boot/trial-attempts"), "1\n");
+    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert_eq!(fake.last(), "restart 0 tryboot");
+    // Only the boot partition was mounted for it: the data partition came later, if at all.
+    assert!(fake.called("mount vfat rw dev/mmcblk0p1 boot"));
+    assert!(!fake.called("mount ext4"));
+    assert!(!fake.called("verity "));
+}
+
+#[test]
+fn a_tryboot_trial_boot_takes_nothing_more() {
+    let board = Board::new();
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
+    board.write("boot/trial-attempts", b"2\n");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert_eq!(board.read("boot/trial-attempts"), "2\n");
+    assert!(!fake.called("restart"));
+}
+
+#[test]
+fn a_tryboot_trial_with_no_attempts_left_is_removed_and_the_default_boots() {
+    let board = Board::new();
+    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
+    board.write("boot/trial-attempts", b"0\n");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(!board.env.at("boot/trial.txt").exists());
+    assert!(!board.env.at("boot/trial-attempts").exists());
+    assert!(!fake.called("restart"));
+    assert!(fake.called("verity data/slots/os-2.erofs"));
+}
+
+#[test]
+fn a_tryboot_trial_without_a_counter_is_left_as_it_always_was() {
+    let board = Board::new();
+    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert!(!fake.called("restart"));
+    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+}
+
+#[test]
+fn a_fallback_trial_gets_the_attempts_the_board_was_given() {
+    let board = Board::new();
+    board.write("data/board/slots/settings.env", b"TRIAL_ATTEMPTS=2\n");
+    let (fake, _) = board.boot(&["verity "]);
+    assert_eq!(board.read("boot/trial-attempts"), "2\n");
+    assert_eq!(fake.last(), "restart");
 }
