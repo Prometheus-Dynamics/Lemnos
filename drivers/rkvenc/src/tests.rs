@@ -3,6 +3,7 @@
 
 mod pins;
 mod vepu541_h265_pins;
+mod vepu580_h265_pins;
 mod vepu580_pins;
 
 use crate::layout::{Field, Region};

@@ -229,6 +229,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`K1a2.md`](../testing/board-runs/K1a2.md) | The VEPU541 H.264 encoder's second window (L2) and multi-run jobs through `rk-mpp`: the L2 words read back, the write runs, the refusals |
 | [`K1a2b.md`](../testing/board-runs/K1a2b.md) | The VEPU580 H.264 encoder through `rk-mpp:rkvenc2`: the classes, the picture-class translation with its offset in the descriptor word, the status read-back |
 | [`K1a3.md`](../testing/board-runs/K1a3.md) | The VEPU541 H.265 encoder through `rk-mpp:rkvenc`: the identity word, the read-back, one encode and the L2 words |
+| [`K1a4.md`](../testing/board-runs/K1a4.md) | The VEPU580 H.265 encoder through `rk-mpp:rkvenc2`: the identity word, the status read-back, one encode |
 | [`E20.md`](../testing/board-runs/E20.md) | `a733-di`: every mode, reads past the rows, recovery |
 | [`E21.md`](../testing/board-runs/E21.md) | `k230-vpu`: layouts, JPEG encode and decode, guards, sessions |
 | [`E41.md`](../testing/board-runs/E41.md) | `k230-vpu` through its job stream: out-of-order completions, a source change |
