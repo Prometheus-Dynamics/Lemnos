@@ -25,8 +25,8 @@ use alloc::vec::Vec;
 
 use lemnos_contract_pixels::Pixels as PixelsContract;
 use lemnos_core::{
-    BusKind, Config, Description, Health, Item, Lifecycle, MethodId, NeedKind, Pio, Resource,
-    Resources, Result, Spi, Status, Unit, driver, status_of,
+    BusKind, Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId,
+    NeedKind, Pio, Resource, Resources, Result, Spi, Status, Unit, driver, status_of,
 };
 use lemnos_hal::pio::{PioJob, PioOperation};
 use lemnos_hal::spi::{Operation, SpiDevice};
@@ -92,6 +92,15 @@ impl Resource for Link {
     }
 }
 
+/// The settings this driver reads from the board file's `config`.
+const KEYS: &[Key] = &[
+    Key::required("count", Kind::Int),
+    Key::optional("wire", Kind::Str),
+    Key::optional("offset", Kind::Int),
+    Key::optional("direction", Kind::Str),
+    Key::optional("brightness", Kind::Int),
+];
+
 /// `pixel_count`: method 1 of the first contract this driver provides.
 const PIXEL_COUNT: MethodId = MethodId {
     contract: 0,
@@ -116,28 +125,29 @@ pub struct Ws2812 {
 }
 
 impl Ws2812 {
+    /// The strip's settings. Each value is read here after `check_config` has accepted it, so
+    /// the only refusal left is a `count` that is not given.
     fn strip_config(cfg: &Config<'_>) -> Result<StripConfig> {
         let count = cfg
             .int("count")
             .and_then(|count| u16::try_from(count).ok())
-            .filter(|&count| count > 0)
             .ok_or(Status::INVALID_ARGUMENT)?;
-        let wire = match cfg.str("wire") {
-            Some(name) => Wire::from_name(name).ok_or(Status::INVALID_ARGUMENT)?,
-            None => Wire::Rgb,
-        };
-        let offset = match cfg.int("offset") {
-            Some(offset) => u16::try_from(offset).map_err(|_| Status::INVALID_ARGUMENT)?,
-            None => 0,
-        };
-        let direction = match cfg.str("direction") {
-            Some(name) => Direction::from_name(name).ok_or(Status::INVALID_ARGUMENT)?,
-            None => Direction::Cw,
-        };
-        let brightness = match cfg.int("brightness") {
-            Some(level) => u8::try_from(level).map_err(|_| Status::INVALID_ARGUMENT)?,
-            None => 255,
-        };
+        let wire = cfg
+            .str("wire")
+            .and_then(Wire::from_name)
+            .unwrap_or(Wire::Rgb);
+        let offset = cfg
+            .int("offset")
+            .and_then(|offset| u16::try_from(offset).ok())
+            .unwrap_or(0);
+        let direction = cfg
+            .str("direction")
+            .and_then(Direction::from_name)
+            .unwrap_or(Direction::Cw);
+        let brightness = cfg
+            .int("brightness")
+            .and_then(|level| u8::try_from(level).ok())
+            .unwrap_or(255);
         Ok(StripConfig::new(count, wire)
             .with_offset(offset)
             .with_direction(direction)
@@ -173,6 +183,50 @@ impl Lifecycle for Ws2812 {
     type Needs = Ws2812Needs;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg
+            .int("count")
+            .is_some_and(|count| !(1..=i64::from(u16::MAX)).contains(&count))
+        {
+            return Err(ConfigError::new(
+                "count",
+                "must be a whole number from 1 to 65535",
+            ));
+        }
+        if cfg
+            .str("wire")
+            .is_some_and(|name| Wire::from_name(name).is_none())
+        {
+            return Err(ConfigError::new("wire", "must be rgb, rgbw, grb or grbw"));
+        }
+        if cfg
+            .int("offset")
+            .is_some_and(|offset| u16::try_from(offset).is_err())
+        {
+            return Err(ConfigError::new(
+                "offset",
+                "must be a whole number from 0 to 65535",
+            ));
+        }
+        if cfg
+            .str("direction")
+            .is_some_and(|name| Direction::from_name(name).is_none())
+        {
+            return Err(ConfigError::new("direction", "must be cw or ccw"));
+        }
+        if cfg
+            .int("brightness")
+            .is_some_and(|level| u8::try_from(level).is_err())
+        {
+            return Err(ConfigError::new(
+                "brightness",
+                "must be a whole number from 0 to 255",
+            ));
+        }
+        Ok(())
+    }
 
     fn start(needs: Ws2812Needs, cfg: &Config<'_>) -> Result<Self> {
         let config = Self::strip_config(cfg)?;

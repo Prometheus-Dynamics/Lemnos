@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::chip::{Chip, DEFAULT_ADDRESS};
-use lemnos_core::{Contract, Description, Driver, Resources};
+use lemnos_core::{ConfigError, ConfigValue, Contract, Description, Driver, Resources};
 use lemnos_sim::{Layout, SimBoard, SimI2c};
 
 extern crate alloc;
@@ -336,4 +336,128 @@ fn a_bad_direction_or_settle_time_is_refused() {
             "{entry:?}"
         );
     }
+}
+
+/// The verdict of `check_config` on `entries`, with no hardware.
+fn checked<'a>(
+    entries: &'a [(&'a str, ConfigValue<'a>)],
+) -> core::result::Result<(), ConfigError<'a>> {
+    <Vcm as Lifecycle>::check_config(&Config::new(entries))
+}
+
+/// The key `entries` are refused under, if they are refused.
+fn refused_key<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<&'a str> {
+    checked(entries).err().map(|err| err.key)
+}
+
+#[test]
+fn a_valid_full_config_passes_check_config() {
+    let entries = [
+        ("chip", ConfigValue::Str("dw9807")),
+        ("address", ConfigValue::Int(0x0c)),
+        ("min", ConfigValue::Int(100)),
+        ("max", ConfigValue::Int(600)),
+        ("direction", ConfigValue::Str("Near")),
+        ("settle_us", ConfigValue::Int(12_000)),
+    ];
+    assert_eq!(checked(&entries), Ok(()));
+}
+
+#[test]
+fn check_config_refuses_an_unknown_key_by_name_with_a_suggestion() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    assert_eq!(checked(&bogus).unwrap_err().key, "bogus");
+    let near = [
+        ("chip", ConfigValue::Str("dw9807")),
+        ("adress", ConfigValue::Int(0x0c)),
+    ];
+    let err = checked(&near).unwrap_err();
+    assert_eq!((err.key, err.suggestion), ("adress", Some("address")));
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind_and_a_missing_chip() {
+    let text_address = [
+        ("chip", ConfigValue::Str("dw9807")),
+        ("address", ConfigValue::Str("0x0c")),
+    ];
+    assert_eq!(refused_key(&text_address), Some("address"));
+    assert_eq!(refused_key(&[("chip", ConfigValue::Int(3))]), Some("chip"));
+    assert_eq!(refused_key(&[]), Some("chip"));
+}
+
+#[test]
+fn check_config_refuses_each_bad_value_and_accepts_its_edge() {
+    let dw = ("chip", ConfigValue::Str("dw9807"));
+    let ak = ("chip", ConfigValue::Str("ak7375"));
+    assert_eq!(
+        refused_key(&[("chip", ConfigValue::Str("imx708"))]),
+        Some("chip")
+    );
+    assert_eq!(
+        refused_key(&[dw, ("address", ConfigValue::Int(0x07))]),
+        Some("address")
+    );
+    assert_eq!(checked(&[dw, ("address", ConfigValue::Int(0x08))]), Ok(()));
+    assert_eq!(checked(&[dw, ("address", ConfigValue::Int(0x77))]), Ok(()));
+    assert_eq!(
+        refused_key(&[dw, ("address", ConfigValue::Int(0x78))]),
+        Some("address")
+    );
+    assert_eq!(
+        refused_key(&[dw, ("direction", ConfigValue::Str("sideways"))]),
+        Some("direction")
+    );
+    assert_eq!(
+        checked(&[dw, ("direction", ConfigValue::Str("FAR"))]),
+        Ok(())
+    );
+    assert_eq!(
+        refused_key(&[dw, ("settle_us", ConfigValue::Int(-1))]),
+        Some("settle_us")
+    );
+    assert_eq!(checked(&[dw, ("settle_us", ConfigValue::Int(0))]), Ok(()));
+    assert_eq!(
+        checked(&[dw, ("settle_us", ConfigValue::Int(u32::MAX.into()))]),
+        Ok(())
+    );
+    assert_eq!(
+        refused_key(&[dw, ("settle_us", ConfigValue::Int(1 << 32))]),
+        Some("settle_us")
+    );
+    assert_eq!(
+        refused_key(&[dw, ("min", ConfigValue::Int(-1))]),
+        Some("min")
+    );
+    assert_eq!(
+        refused_key(&[dw, ("min", ConfigValue::Int(1024))]),
+        Some("min")
+    );
+    assert_eq!(
+        refused_key(&[dw, ("max", ConfigValue::Int(1024))]),
+        Some("max")
+    );
+    assert_eq!(checked(&[dw, ("max", ConfigValue::Int(1023))]), Ok(()));
+    assert_eq!(
+        refused_key(&[
+            dw,
+            ("min", ConfigValue::Int(700)),
+            ("max", ConfigValue::Int(600))
+        ]),
+        Some("min")
+    );
+    assert_eq!(
+        checked(&[
+            dw,
+            ("min", ConfigValue::Int(600)),
+            ("max", ConfigValue::Int(600))
+        ]),
+        Ok(())
+    );
+    // The AK7375 has 12 bits: 4095 is its top, not 1023.
+    assert_eq!(checked(&[ak, ("max", ConfigValue::Int(4095))]), Ok(()));
+    assert_eq!(
+        refused_key(&[ak, ("max", ConfigValue::Int(4096))]),
+        Some("max")
+    );
 }

@@ -106,7 +106,9 @@ pub use v4l2::{M2mRga, MAX_SESSIONS, find_m2m_device};
 use lemnos_contract_image_blend::{self as blend, BlendInfo, ImageBlend};
 use lemnos_contract_image_convert::{self as convert, ConversionPair, ConvertInfo, ImageConvert};
 use lemnos_contract_image_scaler::{self as scaler, ImageScaler, ScalerInfo};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 
 use jobs::{Contract, Jobs, Settings};
 use serve::{Failure, Lane, Routes, Server};
@@ -223,45 +225,72 @@ const SOCS: [(&str, caps::Soc); 7] = [
     ("k230d", caps::Soc::K230d),
 ];
 
-/// The chip `name` names: `INVALID_ARGUMENT` when there is no name or it is none of [`SOCS`],
-/// `NOT_SUPPORTED` when the chip has no implemented route.
+/// The settings a board file gives the block.
+const KEYS: &[Key] = &[
+    Key::required("soc", Kind::Str),
+    Key::optional("max_width", Kind::Int),
+    Key::optional("max_height", Kind::Int),
+    // The CPU route's settings, refused below: the hardware has its own.
+    Key::optional("matrix", Kind::Str),
+    Key::optional("sampling", Kind::Str),
+];
+
+/// The chip `name` names, or `None` when it is none of [`SOCS`].
+fn soc_named(name: &str) -> Option<caps::Soc> {
+    SOCS.iter().find(|(n, _)| *n == name).map(|&(_, soc)| soc)
+}
+
+/// The chip `name` names: `INVALID_ARGUMENT` when there is no name or it is none of [`SOCS`]. Its
+/// route is checked by `check_config`.
 fn soc(name: Option<&str>) -> Result<caps::Soc> {
-    let name = name.ok_or(Status::INVALID_ARGUMENT)?;
-    let soc = SOCS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|&(_, soc)| soc)
-        .ok_or(Status::INVALID_ARGUMENT)?;
-    if caps::caps(soc).any(|c| c.implemented) {
-        Ok(soc)
-    } else {
-        Err(Status::NOT_SUPPORTED)
-    }
+    name.and_then(soc_named).ok_or(Status::INVALID_ARGUMENT)
 }
 
 impl Lifecycle for Rga {
     type Needs = RgaNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        for key in ["max_width", "max_height"] {
+            if let Some(side) = cfg.int(key)
+                && !u32::try_from(side).is_ok_and(|side| (1..=65535).contains(&side))
+            {
+                return Err(ConfigError::new(key, "must be 1 to 65535"));
+            }
+        }
+        // The CPU route's settings: the hardware has its own, so naming one is refused.
+        for key in ["matrix", "sampling"] {
+            if cfg.get(key).is_some() {
+                return Err(ConfigError::new(
+                    key,
+                    "is the CPU route's setting: the hardware has its own",
+                ));
+            }
+        }
+        if let Some(name) = cfg.str("soc") {
+            let Some(soc) = soc_named(name) else {
+                return Err(ConfigError::new(
+                    "soc",
+                    "must be rk3566, rk3568, rk3576, rk3588, rk3562, rv1126b or k230d",
+                ));
+            };
+            if !caps::caps(soc).any(|c| c.implemented) {
+                return Err(ConfigError::new("soc", "has no implemented route here"));
+            }
+        }
+        Ok(())
+    }
+
     fn start(needs: RgaNeeds, cfg: &Config<'_>) -> Result<Self> {
         let side = |key| match cfg.int(key) {
             None => Ok(8192),
-            Some(v) => u32::try_from(v)
-                .ok()
-                .filter(|v| (1..=65535).contains(v))
-                .ok_or(Status::INVALID_ARGUMENT),
+            Some(v) => u32::try_from(v).map_err(|_| Status::INVALID_ARGUMENT),
         };
         let settings = Settings {
             max_width: side("max_width")?,
             max_height: side("max_height")?,
         };
-        // The CPU route's settings: the hardware has its own, so naming one is refused.
-        if ["matrix", "sampling"]
-            .iter()
-            .any(|key| cfg.str(key).is_some())
-        {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         let soc = soc(cfg.str("soc"))?;
         Ok(Self::serving(needs, settings, soc, Routes::on_system(soc)))
     }

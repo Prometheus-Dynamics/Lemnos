@@ -60,7 +60,8 @@ use layers::{LAYERS, Layers};
 use lemnos_contract_light::{Layout, Light as LightContract};
 use lemnos_contract_pixels::{MAX_LOCAL_LEDS, Pixels};
 use lemnos_core::{
-    Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result, Status, Unit, driver,
+    Config, ConfigError, Description, Dev, Health, Item, Key, Kind, Lifecycle, MethodId, Result,
+    Status, Unit, driver,
 };
 
 const NS_PER_MS: u64 = 1_000_000;
@@ -129,17 +130,44 @@ fn write_frame(pixels: &mut Dev<dyn Pixels>, frame: &[look::Rgbw]) -> Result<()>
     pixels.show()
 }
 
+/// Every setting the driver reads (see `settings`). `count` is required; the rest have defaults.
+const KEYS: &[Key] = &[
+    Key::required("count", Kind::Int),
+    Key::optional("fade_ms", Kind::Int),
+    Key::optional("easing", Kind::Str),
+    Key::optional("status_effect", Kind::Str),
+    Key::optional("error_effect", Kind::Str),
+    Key::optional("breathe_period_ms", Kind::Int),
+    Key::optional("breathe_depth", Kind::Float),
+    Key::optional("blink_period_ms", Kind::Int),
+    Key::optional("blink_duty", Kind::Float),
+    Key::optional("look_brightness", Kind::Float),
+    Key::optional("ok", Kind::Int),
+    Key::optional("warn", Kind::Int),
+    Key::optional("error", Kind::Int),
+    Key::optional("busy", Kind::Int),
+    Key::optional("default_look", Kind::Str),
+    Key::optional("spinner_period_ms", Kind::Int),
+    Key::optional("spinner_tail", Kind::Int),
+    Key::optional("spinner_base", Kind::Float),
+];
+
 impl Lifecycle for StatusLight {
     type Needs = StatusLightNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        Settings::from_config(cfg).map(|_| ())
+    }
 
     /// Ticked: the animator's frame interval and the write retries are the only timed work, and
     /// both are returned from [`Lifecycle::tick`].
     const TICKS: bool = true;
 
     fn start(needs: StatusLightNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let settings = Settings::from_config(cfg)?;
+        let settings = Settings::from_config(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         Ok(Self {
             pixels: needs.pixels,
             layers: Layers::default(),

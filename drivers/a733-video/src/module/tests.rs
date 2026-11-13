@@ -504,17 +504,28 @@ fn a_job_allocates_nothing_once_its_buffers_are_imported() {
 
 #[test]
 fn a_board_file_picks_the_route_and_a_module_not_there_fails_the_job() {
-    let state = |config: &str| {
-        let (host, _) = clocked(&board("a733-video", config));
-        host.tick();
-        host.device("engine").unwrap().state
+    // A bad route, or a module route without a block, is refused by the device's settings: the
+    // board starts, and the device is listed failed with the reason, and no device is made.
+    let refused = |config: &str| {
+        let sim = SimBoard::new();
+        let clock = sim.clock();
+        let host = Host::start_with_streams(
+            &parse(&board("a733-video", config)).unwrap(),
+            &[entry::<A733Video>(), entry::<nothing::Nothing>()],
+            Box::new(sim),
+            Arc::new(clock),
+            Options::default(),
+            Arc::new(PerBuffer),
+        )
+        .unwrap();
+        matches!(
+            &host.device("engine").unwrap().state,
+            DeviceState::Backoff { reason, .. } if reason.starts_with("device \"engine\": setting \"")
+        )
     };
-    assert_ne!(state("route = \"module\""), DeviceState::Running);
-    assert_ne!(
-        state("route = \"module\", block = \"\""),
-        DeviceState::Running
-    );
-    assert_ne!(state("route = \"both\""), DeviceState::Running);
+    assert!(refused("route = \"module\""));
+    assert!(refused("route = \"module\", block = \"\""));
+    assert!(refused("route = \"both\""));
     let (host, clock) = clocked(&board(
         "a733-video",
         "route = \"module\", block = \"ve\", node = \"/nonexistent/lemnos\"",

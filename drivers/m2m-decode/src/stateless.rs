@@ -81,7 +81,9 @@ use std::time::Duration;
 
 use lemnos_contract_codec_block::work::Work;
 use lemnos_contract_codec_block::{BlockInfo, CodecBlock, Counters};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_driver_codec_jobs::{Block, Buffers, Server, Start, name_into};
 use lemnos_hal::blocks::BufferKind;
 use lemnos_linux_sys::dma_buf;
@@ -614,22 +616,36 @@ impl M2mCodec {
     }
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::required("device", Kind::Str),
+    Key::optional("timeout_ms", Kind::Int),
+];
+
 impl Lifecycle for M2mCodec {
     type Needs = M2mCodecNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("device").is_some_and(str::is_empty) {
+            return Err(ConfigError::new(
+                "device",
+                "must be a device path, not empty",
+            ));
+        }
+        if let Some(ms) = cfg.int("timeout_ms")
+            && !(1..=60_000).contains(&ms)
+        {
+            return Err(ConfigError::new("timeout_ms", "must be 1 to 60000 ms"));
+        }
+        Ok(())
+    }
+
     fn start(needs: M2mCodecNeeds, cfg: &Config<'_>) -> Result<Self> {
         let path = PathBuf::from(cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?);
-        if path.as_os_str().is_empty() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
-        let timeout = match cfg.get("timeout_ms") {
-            None => 1_000,
-            Some(_) => cfg
-                .int("timeout_ms")
-                .filter(|ms| (1..=60_000).contains(ms))
-                .ok_or(Status::INVALID_ARGUMENT)?,
-        };
+        // The range of timeout_ms is checked by check_config; this reads it.
+        let timeout = cfg.int("timeout_ms").unwrap_or(1_000);
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);
         }

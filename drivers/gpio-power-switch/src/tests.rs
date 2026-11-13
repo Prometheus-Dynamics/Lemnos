@@ -152,3 +152,34 @@ fn no_fault_input_has_one_channel() {
     assert!(description.find("power.fault").is_none());
     assert_eq!(switch.fault().unwrap(), None);
 }
+
+#[test]
+fn a_full_valid_config_passes_the_check() {
+    let entries = [
+        ("default_on", ConfigValue::Bool(false)),
+        ("active_low", ConfigValue::Bool(true)),
+        ("fault_active_low", ConfigValue::Bool(false)),
+    ];
+    assert_eq!(
+        <GpioPowerSwitch as Driver>::check_config(&Config::new(&entries)),
+        Ok(())
+    );
+}
+
+#[test]
+fn an_unknown_key_is_refused_by_name_with_a_near_miss_suggested() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    let error = <GpioPowerSwitch as Driver>::check_config(&Config::new(&bogus)).unwrap_err();
+    assert_eq!(error.key, "bogus");
+    let near = [("default_om", ConfigValue::Bool(true))];
+    let error = <GpioPowerSwitch as Driver>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(error.key, "default_om");
+    assert_eq!(error.suggestion, Some("default_on"));
+}
+
+#[test]
+fn a_wrong_kind_is_refused_by_the_check() {
+    let entries = [("active_low", ConfigValue::Str("yes"))];
+    let error = <GpioPowerSwitch as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(error.key, "active_low");
+}

@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, FrameStarts, LinkConfig, MAX_STREAM_NAME, Packing,
 };
-use lemnos_core::{Health, Lifecycle, Result, Status, StreamHandle};
+use lemnos_core::{
+    Config, ConfigError, ConfigValue, Health, Lifecycle, Result, Status, StreamHandle,
+};
 use lemnos_hal::mock::MockStream;
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_measure::test_alloc::allocations;
@@ -947,5 +949,49 @@ fn a_caller_going_away_stops_the_receiver_it_started() {
         hw.with(|m| m.stopped),
         before + 1,
         "and nothing more once it is stopped"
+    );
+}
+
+#[test]
+fn check_config_names_the_bad_setting() {
+    fn check(
+        entries: &'static [(&'static str, ConfigValue<'static>)],
+    ) -> core::result::Result<(), ConfigError<'static>> {
+        <crate::Rp1Csi2 as Lifecycle>::check_config(&Config::new(entries))
+    }
+    assert!(check(&[]).is_ok());
+    assert!(
+        check(&[
+            ("device", ConfigValue::Str("csi0")),
+            ("embedded_bytes", ConfigValue::Int(4096))
+        ])
+        .is_ok()
+    );
+    assert!(check(&[("embedded_bytes", ConfigValue::Int(4_294_967_295))]).is_ok());
+
+    let bogus = check(&[("bogus", ConfigValue::Int(1))]).unwrap_err();
+    assert_eq!(bogus.key, "bogus");
+    let near = check(&[("devce", ConfigValue::Str("csi0"))]).unwrap_err();
+    assert_eq!((near.key, near.suggestion), ("devce", Some("device")));
+    assert_eq!(
+        check(&[("device", ConfigValue::Int(0))]).unwrap_err().key,
+        "device"
+    );
+    for bad in ["", "a/b", "a\0b"] {
+        let entries: &[(&str, ConfigValue)] = &[("device", ConfigValue::Str(bad))];
+        let error = <crate::Rp1Csi2 as Lifecycle>::check_config(&Config::new(entries)).unwrap_err();
+        assert_eq!(error.key, "device", "{bad:?}");
+    }
+    assert_eq!(
+        check(&[("embedded_bytes", ConfigValue::Int(-1))])
+            .unwrap_err()
+            .key,
+        "embedded_bytes"
+    );
+    assert_eq!(
+        check(&[("embedded_bytes", ConfigValue::Int(4_294_967_296))])
+            .unwrap_err()
+            .key,
+        "embedded_bytes"
     );
 }

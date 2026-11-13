@@ -386,17 +386,25 @@ fn a_thousand_jobs_through_the_driver_allocate_nothing() {
 }
 
 #[test]
-fn an_empty_or_non_text_device_setting_is_refused_at_bind() {
+fn an_empty_or_non_text_device_setting_is_refused_before_any_device_is_made() {
     for config in ["device = \"\"", "device = 3"] {
         let text = board("nonai2d", true).replace("device = \"/nonexistent/video9\"", config);
-        let rig = Rig::start(&text, Arc::new(PerBuffer));
-        rig.host.tick();
-        let DeviceState::Backoff { reason, .. } = rig.host.device("g").unwrap().state else {
-            panic!("bound with {config}");
-        };
+        let sim = SimBoard::new();
+        let clock = sim.clock();
+        let host = Host::start_with_streams(
+            &parse(&text).unwrap(),
+            &[entry::<Nonai2dDriver>(), entry::<FakeCounter>()],
+            Box::new(sim),
+            Arc::new(clock),
+            Options::default(),
+            Arc::new(PerBuffer),
+        )
+        .unwrap();
+        // The device is never made: it is listed failed, with the key and the reason.
+        let state = host.device("g").unwrap().state;
         assert!(
-            reason.contains(&format!("{:?}", Status::INVALID_ARGUMENT)),
-            "{config}: {reason}"
+            matches!(&state, DeviceState::Backoff { reason, .. } if reason.contains("setting \"device\"")),
+            "{config}: {state:?}"
         );
     }
 }

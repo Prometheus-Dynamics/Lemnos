@@ -13,5 +13,5 @@ pub mod stream;
 pub use contain::{MAX_RETRY_CAP, Options};
 pub use host::{
     Binder, DeviceInfo, DeviceState, DriverEntry, Host, HostError, Instance, JOB_RESULT_MAX,
-    JobEvent, JobUpdate, Liveness, MAX_JOBS, OffReason, entry,
+    JobEvent, JobUpdate, Liveness, MAX_JOBS, OffReason, check_settings, entry, settings_refusals,
 };

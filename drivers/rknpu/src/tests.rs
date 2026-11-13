@@ -11,7 +11,9 @@ use std::mem::{align_of, offset_of, size_of};
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_npu::{JOB_BYTES, Npu, RESULT_BYTES, RunJob, RunResult, RunStatus};
-use lemnos_core::{Decode, Encode, Reader, Status, Writer};
+use lemnos_core::{
+    Config, ConfigError, ConfigValue, Decode, Encode, Lifecycle, Reader, Status, Writer,
+};
 use lemnos_hal::mock::MockStream;
 use lemnos_measure::test_alloc::allocations;
 
@@ -1475,3 +1477,28 @@ fn the_node_is_the_one_render_node_bound_to_the_npu_driver() {
 }
 
 mod host;
+
+#[test]
+fn check_config_names_the_bad_setting() {
+    fn check(
+        entries: &'static [(&'static str, ConfigValue<'static>)],
+    ) -> core::result::Result<(), ConfigError<'static>> {
+        <crate::Rknpu as Lifecycle>::check_config(&Config::new(entries))
+    }
+    assert!(check(&[]).is_ok());
+    assert!(check(&[("node", ConfigValue::Str("/dev/rknpu"))]).is_ok());
+    assert_eq!(
+        check(&[("node", ConfigValue::Str(""))]).unwrap_err().key,
+        "node"
+    );
+    let near = check(&[("nod", ConfigValue::Str("/dev/rknpu"))]).unwrap_err();
+    assert_eq!((near.key, near.suggestion), ("nod", Some("node")));
+    assert_eq!(
+        check(&[("node", ConfigValue::Int(1))]).unwrap_err().key,
+        "node"
+    );
+    assert_eq!(
+        check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
+        "bogus"
+    );
+}

@@ -146,26 +146,36 @@ fn config_sets_the_limits() {
     assert_eq!(Lifecycle::health(&rga), Health::Ok);
 }
 
+fn check<'a>(
+    entries: &'a [(&'a str, ConfigValue<'a>)],
+) -> core::result::Result<(), lemnos_core::ConfigError<'a>> {
+    <Rga as Lifecycle>::check_config(&Config::new(entries))
+}
+
 #[test]
-fn without_a_soc_or_with_a_chip_that_has_no_route_the_driver_does_not_bind() {
+fn without_a_soc_or_with_a_chip_that_has_no_route_the_board_is_refused() {
     // No `soc`: no route for anything, so no driver that would fail every job.
-    assert_eq!(start(&[]).err(), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(check(&[]).unwrap_err().key, "soc");
     assert_eq!(
-        start(&[("max_width", ConfigValue::Int(64))]).err(),
-        Some(Status::INVALID_ARGUMENT)
+        check(&[("max_width", ConfigValue::Int(64))])
+            .unwrap_err()
+            .key,
+        "soc"
     );
     // A chip this crate knows whose units have no route here yet.
     assert_eq!(
-        start(&[("soc", ConfigValue::Str("k230d"))]).err(),
-        Some(Status::NOT_SUPPORTED)
+        check(&[("soc", ConfigValue::Str("k230d"))])
+            .unwrap_err()
+            .key,
+        "soc"
     );
     for soc in ["rk3566", "rk3568", "rk3576", "rk3588", "rk3562", "rv1126b"] {
-        assert!(start(&[("soc", ConfigValue::Str(soc))]).is_ok(), "{soc}");
+        assert!(check(&[("soc", ConfigValue::Str(soc))]).is_ok(), "{soc}");
     }
 }
 
 #[test]
-fn bad_config_is_refused() {
+fn bad_config_is_refused_by_the_key_it_is_in() {
     let soc = ("soc", ConfigValue::Str("rk3588"));
     for entry in [
         ("max_width", ConfigValue::Int(0)),
@@ -182,10 +192,14 @@ fn bad_config_is_refused() {
             vec![soc, entry]
         };
         assert_eq!(
-            start(&entries).err(),
-            Some(Status::INVALID_ARGUMENT),
+            check(&entries).err().map(|e| e.key),
+            Some(entry.0),
             "{entries:?}"
         );
+    }
+    // The edges of the side range pass.
+    for side in [1, 65535] {
+        assert!(check(&[soc, ("max_width", ConfigValue::Int(side))]).is_ok());
     }
 }
 

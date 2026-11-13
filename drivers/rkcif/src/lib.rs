@@ -87,7 +87,8 @@ use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig, Packing,
 };
 use lemnos_core::{
-    Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
+    StreamHandle, driver,
 };
 use lemnos_driver_v4l2_capture::{self as capture, Pump, Wanted, fourcc, parse_order};
 use lemnos_v4l2::FourCc;
@@ -248,9 +249,88 @@ fn prepare_node(fd: std::os::fd::BorrowedFd<'_>, wanted: &Wanted) -> Result<()> 
     }
 }
 
+/// The settings a board file gives the camera receiver.
+const KEYS: &[Key] = &[
+    Key::optional("device", Kind::Str),
+    Key::optional("order", Kind::Str),
+    Key::optional("buffers", Kind::Int),
+    Key::optional("capture", Kind::Str),
+    Key::optional("embedded", Kind::Str),
+    Key::optional("embedded_format", Kind::Str),
+    Key::optional("embedded_bytes", Kind::Int),
+];
+
 impl Lifecycle for Rkcif {
     type Needs = RkcifNeeds;
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        // The name rules are the constructors' own, the same ones `start` builds the nodes with.
+        if Settings::new(cfg.str("device")).is_err() {
+            return Err(ConfigError::new(
+                "device",
+                "must be a media device model of 1 to 31 bytes, with no NUL",
+            ));
+        }
+        if let Some(order) = cfg.str("order")
+            && parse_order(order).is_none()
+        {
+            return Err(ConfigError::new(
+                "order",
+                "must be mono, rggb, grbg, gbrg or bggr",
+            ));
+        }
+        if let Some(buffers) = cfg.int("buffers")
+            && !u32::try_from(buffers).is_ok_and(|n| (2..=32).contains(&n))
+        {
+            return Err(ConfigError::new("buffers", "must be 2 to 32"));
+        }
+        if let Some(name) = cfg.str("capture")
+            && capture::Settings::new(name).is_err()
+        {
+            return Err(ConfigError::new(
+                "capture",
+                "must be a device name, not empty and with no NUL",
+            ));
+        }
+        if let Some(name) = cfg.str("embedded") {
+            if capture::Settings::new(name).is_err() {
+                return Err(ConfigError::new(
+                    "embedded",
+                    "must be a device name, not empty and with no NUL",
+                ));
+            }
+            match cfg.str("embedded_format") {
+                None => {
+                    return Err(ConfigError::new(
+                        "embedded_format",
+                        "is required with embedded",
+                    ));
+                }
+                Some(format) if format.parse::<FourCc>().is_err() => {
+                    return Err(ConfigError::new(
+                        "embedded_format",
+                        "must be a four-character format code",
+                    ));
+                }
+                Some(_) => {}
+            }
+            match cfg.int("embedded_bytes") {
+                None => {
+                    return Err(ConfigError::new(
+                        "embedded_bytes",
+                        "is required with embedded",
+                    ));
+                }
+                Some(bytes) if !u32::try_from(bytes).is_ok_and(|n| n > 0) => {
+                    return Err(ConfigError::new("embedded_bytes", "must be 1 or more"));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
 
     fn start(needs: RkcifNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::new(cfg.str("device"))?;
@@ -262,7 +342,6 @@ impl Lifecycle for Rkcif {
             raw.buffers = cfg
                 .int("buffers")
                 .and_then(|n| u32::try_from(n).ok())
-                .filter(|n| (2..=32).contains(n))
                 .ok_or(Status::INVALID_ARGUMENT)?;
         }
         let node: Option<Box<dyn capture::Hardware>> = match cfg.str("capture") {
@@ -282,7 +361,6 @@ impl Lifecycle for Rkcif {
                 let bytes = cfg
                     .int("embedded_bytes")
                     .and_then(|n| u32::try_from(n).ok())
-                    .filter(|n| *n > 0)
                     .ok_or(Status::INVALID_ARGUMENT)?;
                 let node: Box<dyn capture::Hardware> = Box::new(capture::LinuxHardware::metadata(
                     capture::Settings::new(name)?,

@@ -19,7 +19,7 @@ use crate::manifest::BLOCK;
 use crate::store::{self, Layout, Meta, State};
 use crate::tar::tests::archive;
 use crate::trial::{Log, Resolved, Source};
-use crate::{SystemSlots, TrustedKey};
+use crate::{SystemReboot, SystemSlots, TrustedKey};
 use lemnos_slot_store::ubi::{Fake, Ubi, UbiWrite, image_volume};
 
 pub struct TempDir(pub PathBuf);
@@ -2806,4 +2806,108 @@ fn with_require_signed_an_unverified_default_is_reported_and_the_driver_keeps_ru
     // The board still answers its calls.
     let mut list = vec![0u8; 64 * 1024];
     assert!(board.slots.list(&mut list).is_ok());
+}
+
+#[test]
+fn check_config_names_the_bad_setting() {
+    use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+    fn check(
+        entries: &'static [(&'static str, ConfigValue<'static>)],
+    ) -> core::result::Result<(), ConfigError<'static>> {
+        <SystemSlots as Lifecycle>::check_config(&Config::new(entries))
+    }
+    let full = [
+        ("record", ConfigValue::Str("uboot")),
+        ("reserve_mb", ConfigValue::Int(64)),
+        ("keep", ConfigValue::Int(3)),
+        ("boots_keep", ConfigValue::Int(10)),
+        ("auto_confirm", ConfigValue::Bool(true)),
+        ("confirm_uptime_s", ConfigValue::Int(30)),
+        ("confirm_deadline_s", ConfigValue::Int(30)),
+        ("trial_attempts", ConfigValue::Int(3)),
+    ];
+    assert!(<SystemSlots as Lifecycle>::check_config(&Config::new(&full)).is_ok());
+    let listed = Config::new(&full).with_lists(&[("health", &["device:x", "file:/run/ok"])]);
+    assert!(<SystemSlots as Lifecycle>::check_config(&listed).is_ok());
+    assert!(check(&[]).is_ok());
+
+    let bogus = check(&[("bogus", ConfigValue::Int(1))]).unwrap_err();
+    assert_eq!(bogus.key, "bogus");
+    let near = check(&[("keeps", ConfigValue::Int(3))]).unwrap_err();
+    assert_eq!((near.key, near.suggestion), ("keeps", Some("keep")));
+    assert_eq!(
+        check(&[("keep", ConfigValue::Str("3"))]).unwrap_err().key,
+        "keep"
+    );
+    assert_eq!(
+        check(&[("record", ConfigValue::Str("grub"))])
+            .unwrap_err()
+            .key,
+        "record"
+    );
+    assert_eq!(
+        check(&[("record", ConfigValue::Str("ubi"))])
+            .unwrap_err()
+            .key,
+        "ubi"
+    );
+    assert_eq!(
+        check(&[("reserve_mb", ConfigValue::Int(-1))])
+            .unwrap_err()
+            .key,
+        "reserve_mb"
+    );
+    assert_eq!(
+        check(&[("keep", ConfigValue::Int(-1))]).unwrap_err().key,
+        "keep"
+    );
+    assert_eq!(
+        check(&[("boots_keep", ConfigValue::Int(-1))])
+            .unwrap_err()
+            .key,
+        "boots_keep"
+    );
+    assert_eq!(
+        check(&[("confirm_uptime_s", ConfigValue::Int(-1))])
+            .unwrap_err()
+            .key,
+        "confirm_uptime_s"
+    );
+    let order = check(&[
+        ("confirm_uptime_s", ConfigValue::Int(60)),
+        ("confirm_deadline_s", ConfigValue::Int(30)),
+    ])
+    .unwrap_err();
+    assert_eq!(order.key, "confirm_deadline_s");
+    assert_eq!(
+        check(&[("trial_attempts", ConfigValue::Int(0))])
+            .unwrap_err()
+            .key,
+        "trial_attempts"
+    );
+    assert_eq!(
+        check(&[("trial_attempts", ConfigValue::Int(4))])
+            .unwrap_err()
+            .key,
+        "trial_attempts"
+    );
+    let bad = <SystemSlots as Lifecycle>::check_config(
+        &Config::new(&[("record", ConfigValue::Str("tryboot"))])
+            .with_lists(&[("health", &["file:relative/path"])]),
+    );
+    assert_eq!(bad.unwrap_err().key, "health");
+    let reboot = <SystemReboot as Lifecycle>::check_config(&Config::new(&[(
+        "systemctl",
+        ConfigValue::Str("/bin/systemctl"),
+    )]));
+    assert!(reboot.is_ok());
+    assert_eq!(
+        <SystemReboot as Lifecycle>::check_config(&Config::new(&[(
+            "record",
+            ConfigValue::Str("x")
+        )]))
+        .unwrap_err()
+        .key,
+        "record"
+    );
 }

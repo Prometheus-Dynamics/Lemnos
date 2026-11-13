@@ -17,7 +17,7 @@
 //! A bus, line, PWM channel or UART is the device's only because the board binds it to the device, so there
 //! is no setting for those: the board opts in by binding one, and `writes` covers what is done on it.
 
-use lemnos_core::{Config, ConfigValue, Result, Status};
+use lemnos_core::{Config, ConfigError, ConfigValue, Result, Status};
 
 /// The refusal for a call the policy does not allow.
 const REFUSED: Status = Status::NOT_PERMITTED;
@@ -61,15 +61,6 @@ impl Policy {
         Ok(())
     }
 
-    /// Configuring the GPIO line at bind. An output drives the line to its initial level, so it is
-    /// a write; an input is not.
-    pub fn admit_line_configure(&self, output: bool) -> Result<()> {
-        if output && !self.writes {
-            return Err(REFUSED);
-        }
-        Ok(())
-    }
-
     pub fn admit_line_set(&self) -> Result<()> {
         if !self.writes {
             return Err(REFUSED);
@@ -90,6 +81,14 @@ impl Policy {
         }
         Ok(())
     }
+}
+
+/// Refuses an `allow_i2c` that is not an address or a list of them, or that names one outside 7
+/// bits. The same reading `from_config` makes, so a board file is refused before any device is made.
+pub fn check_allow_i2c<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+    allowed_addresses(cfg.get("allow_i2c"))
+        .map(|_| ())
+        .map_err(|_| ConfigError::new("allow_i2c", "must be a 7-bit address, or a list of them"))
 }
 
 /// A boolean setting: absent means `false`, and a non-boolean is refused.

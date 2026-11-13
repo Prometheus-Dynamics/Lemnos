@@ -8,7 +8,9 @@ use lemnos_contract_camera_receiver::{
     BayerOrder, CameraReceiver, Counters, FrameLayout, INPUT_RECORD, LinkConfig, MAX_INPUTS,
     MAX_STREAM_NAME, Packing, read_input,
 };
-use lemnos_core::{Health, Lifecycle, Result, Status, StreamHandle};
+use lemnos_core::{
+    Config, ConfigError, ConfigValue, Health, Lifecycle, Result, Status, StreamHandle,
+};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamEndpoint, StreamFrame};
 use lemnos_hal::mock::MockStream;
@@ -1098,4 +1100,110 @@ fn a_node_with_no_input_support_says_not_supported_and_lists_nothing() {
     let mut buf = [0; MAX_INPUTS * INPUT_RECORD];
     assert_eq!(d.inputs(&mut buf), Err(Status::NOT_SUPPORTED));
     assert_eq!(d.input(), Err(Status::NOT_SUPPORTED));
+}
+#[test]
+fn check_config_names_the_bad_setting() {
+    fn check(
+        entries: &'static [(&'static str, ConfigValue<'static>)],
+    ) -> core::result::Result<(), ConfigError<'static>> {
+        <SunxiVin as Lifecycle>::check_config(&Config::new(entries))
+    }
+    let full = [
+        ("capture", ConfigValue::Str("vin-cap")),
+        ("input", ConfigValue::Int(1)),
+        ("order", ConfigValue::Str("rggb")),
+        ("lanes", ConfigValue::Int(4)),
+        ("buffers", ConfigValue::Int(4)),
+    ];
+    assert!(<SunxiVin as Lifecycle>::check_config(&Config::new(&full)).is_ok());
+
+    let bogus = check(&[
+        ("capture", ConfigValue::Str("c")),
+        ("bogus", ConfigValue::Int(1)),
+    ])
+    .unwrap_err();
+    assert_eq!(bogus.key, "bogus");
+    let near = check(&[
+        ("capture", ConfigValue::Str("c")),
+        ("lane", ConfigValue::Int(2)),
+    ])
+    .unwrap_err();
+    assert_eq!((near.key, near.suggestion), ("lane", Some("lanes")));
+    assert_eq!(
+        check(&[("capture", ConfigValue::Int(1))]).unwrap_err().key,
+        "capture"
+    );
+    assert_eq!(
+        check(&[("capture", ConfigValue::Str(""))]).unwrap_err().key,
+        "capture"
+    );
+    assert_eq!(check(&[]).unwrap_err().key, "capture");
+
+    // Each value just outside its range or set is refused under its key; the edges pass.
+    let refused: &[(&[(&str, ConfigValue)], &str)] = &[
+        (
+            &[
+                ("capture", ConfigValue::Str("c")),
+                ("lanes", ConfigValue::Int(0)),
+            ],
+            "lanes",
+        ),
+        (
+            &[
+                ("capture", ConfigValue::Str("c")),
+                ("lanes", ConfigValue::Int(5)),
+            ],
+            "lanes",
+        ),
+        (
+            &[
+                ("capture", ConfigValue::Str("c")),
+                ("buffers", ConfigValue::Int(1)),
+            ],
+            "buffers",
+        ),
+        (
+            &[
+                ("capture", ConfigValue::Str("c")),
+                ("buffers", ConfigValue::Int(33)),
+            ],
+            "buffers",
+        ),
+        (
+            &[
+                ("capture", ConfigValue::Str("c")),
+                ("input", ConfigValue::Int(-1)),
+            ],
+            "input",
+        ),
+        (
+            &[
+                ("capture", ConfigValue::Str("c")),
+                ("order", ConfigValue::Str("xggb")),
+            ],
+            "order",
+        ),
+    ];
+    for (entries, key) in refused {
+        let error = <SunxiVin as Lifecycle>::check_config(&Config::new(entries)).unwrap_err();
+        assert_eq!(error.key, *key, "{entries:?}");
+    }
+    let edges: &[&[(&str, ConfigValue)]] = &[
+        &[
+            ("capture", ConfigValue::Str("c")),
+            ("lanes", ConfigValue::Int(1)),
+            ("buffers", ConfigValue::Int(2)),
+        ],
+        &[
+            ("capture", ConfigValue::Str("c")),
+            ("lanes", ConfigValue::Int(4)),
+            ("buffers", ConfigValue::Int(32)),
+        ],
+    ];
+    for entries in edges {
+        assert!(
+            <SunxiVin as Lifecycle>::check_config(&Config::new(entries)).is_ok(),
+            "{entries:?}"
+        );
+    }
 }

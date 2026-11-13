@@ -47,11 +47,16 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::Path;
 
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, UsbDeviceHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, UsbDeviceHandle, driver,
+};
 use loader::{Ended, GONE, IN_PROGRESS, Loader, UNCHANGED, UNCONFIRMED};
 
 /// The largest image accepted. A DFU image is a boot-time payload, not a filesystem.
 pub const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Every setting the driver reads from the board file.
+const KEYS: &[Key] = &[Key::required("firmware", Kind::Str)];
 
 /// The method a description item points at when it only states something. This driver provides no
 /// contract, so no method answers to it.
@@ -67,6 +72,16 @@ impl Lifecycle for CoralLoader {
     type Needs = CoralLoaderNeeds;
 
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        match cfg.str("firmware") {
+            Some(path) if !Path::new(path).is_absolute() => {
+                Err(ConfigError::new("firmware", "must be an absolute path"))
+            }
+            _ => Ok(()),
+        }
+    }
 
     fn start(needs: CoralLoaderNeeds, cfg: &Config<'_>) -> Result<Self> {
         let path = cfg.str("firmware").ok_or(Status::INVALID_ARGUMENT)?;
@@ -95,13 +110,11 @@ impl Lifecycle for CoralLoader {
     }
 }
 
-/// Reads the image, without ever holding more than [`MAX_IMAGE_BYTES`] of it.
+/// Reads the image, without ever holding more than [`MAX_IMAGE_BYTES`] of it. The path is
+/// absolute by `check_config`.
 ///
 /// The path must be a regular file: opening a FIFO would block this bind forever.
 fn read_image(path: &Path) -> Result<Vec<u8>> {
-    if !path.is_absolute() {
-        return Err(Status::INVALID_ARGUMENT);
-    }
     let metadata = fs::metadata(path).map_err(|error| io_status(&error))?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_IMAGE_BYTES {
         return Err(Status::INVALID_ARGUMENT);

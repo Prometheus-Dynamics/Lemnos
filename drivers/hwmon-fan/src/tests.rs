@@ -532,3 +532,82 @@ fn idle_ticks_allocate_nothing() {
     });
     assert_eq!(count, 0, "allocations in 1000 idle ticks");
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn refusal<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<ConfigError<'a>> {
+    <HwmonFan as lemnos_core::Lifecycle>::check_config(&Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_accepts_a_full_config() {
+    let entries = [
+        ("sys_root", ConfigValue::Str("/sys")),
+        ("name", ConfigValue::Str("pwmfan")),
+        ("max_rpm", ConfigValue::Int(3000)),
+        ("warn_below_rpm", ConfigValue::Int(200)),
+        ("self_test_duty", ConfigValue::Int(500)),
+        ("self_test_rpm_min", ConfigValue::Int(1000)),
+        ("self_test_rpm_max", ConfigValue::Int(2000)),
+    ];
+    assert_eq!(refusal(&entries), None);
+}
+
+#[test]
+fn check_config_refuses_an_unknown_key_by_name_and_suggests_the_near_one() {
+    let err = refusal(&[("max_rp", ConfigValue::Int(3000))]).unwrap();
+    assert_eq!(err.key, "max_rp");
+    assert_eq!(err.suggestion, Some("max_rpm"));
+    assert_eq!(
+        refusal(&[("bogus", ConfigValue::Int(1))]).unwrap().key,
+        "bogus"
+    );
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind() {
+    let err = refusal(&[("max_rpm", ConfigValue::Str("3000"))]).unwrap();
+    assert_eq!(err.key, "max_rpm");
+}
+
+#[test]
+fn check_config_refuses_a_hwmon_that_is_a_path_and_accepts_a_name() {
+    assert_eq!(
+        refusal(&[("hwmon", ConfigValue::Str("../hwmon2"))])
+            .unwrap()
+            .key,
+        "hwmon"
+    );
+    assert!(refusal(&[("hwmon", ConfigValue::Str(""))]).is_some());
+    assert_eq!(refusal(&[("hwmon", ConfigValue::Str("hwmon2"))]), None);
+}
+
+#[test]
+fn check_config_refuses_a_negative_rpm_and_accepts_zero() {
+    assert_eq!(
+        refusal(&[("max_rpm", ConfigValue::Int(-1))]).unwrap().key,
+        "max_rpm"
+    );
+    assert_eq!(refusal(&[("warn_below_rpm", ConfigValue::Int(0))]), None);
+}
+
+#[test]
+fn check_config_keeps_the_test_duty_to_one_to_a_thousand() {
+    assert!(refusal(&[("self_test_duty", ConfigValue::Int(0))]).is_some());
+    assert!(refusal(&[("self_test_duty", ConfigValue::Int(1001))]).is_some());
+    assert_eq!(refusal(&[("self_test_duty", ConfigValue::Int(1))]), None);
+    assert_eq!(refusal(&[("self_test_duty", ConfigValue::Int(1000))]), None);
+}
+
+#[test]
+fn check_config_refuses_a_test_range_that_is_backwards() {
+    let backwards = [
+        ("self_test_rpm_min", ConfigValue::Int(2000)),
+        ("self_test_rpm_max", ConfigValue::Int(1000)),
+    ];
+    assert_eq!(refusal(&backwards).unwrap().key, "self_test_rpm_min");
+    let equal = [
+        ("self_test_rpm_min", ConfigValue::Int(1000)),
+        ("self_test_rpm_max", ConfigValue::Int(1000)),
+    ];
+    assert_eq!(refusal(&equal), None);
+}

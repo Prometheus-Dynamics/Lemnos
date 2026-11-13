@@ -228,3 +228,37 @@ fn the_index_text_roundtrips_through_the_parser() {
     assert_eq!(lines[1].name, "lemnos/kernel");
     assert!(parse_index("not an index").is_none());
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn refusal<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<lemnos_core::ConfigError<'a>> {
+    <NamedFilesDriver as lemnos_core::Lifecycle>::check_config(&Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_accepts_every_setting_and_refuses_an_unknown_one_by_name() {
+    let full = [
+        ("data", ConfigValue::Str("/data")),
+        ("boot", ConfigValue::Str("/boot/firmware")),
+        ("sys_block", ConfigValue::Str("/sys/block")),
+        ("module", ConfigValue::Str("/sys/module/lemnos")),
+        ("tree_overlay", ConfigValue::Str("/x/overlay")),
+        ("tree_boot", ConfigValue::Str("/x/boot")),
+        ("tree_modprobe", ConfigValue::Str("/x/modprobe")),
+    ];
+    assert_eq!(refusal(&full), None);
+    let err = refusal(&[("tree_bot", ConfigValue::Str("/x"))]).unwrap();
+    assert_eq!(err.key, "tree_bot");
+    assert_eq!(err.suggestion, Some("tree_boot"));
+    assert_eq!(
+        refusal(&[("bogus", ConfigValue::Int(1))]).unwrap().key,
+        "bogus"
+    );
+}
+
+#[test]
+fn check_config_refuses_a_path_given_as_a_number() {
+    assert_eq!(
+        refusal(&[("boot", ConfigValue::Int(1))]).unwrap().key,
+        "boot"
+    );
+}

@@ -525,3 +525,85 @@ fn checks_and_refusals_allocate_nothing() {
     });
     assert_eq!(count, 0, "allocations in 1000 checks");
 }
+
+/// The board's `config` for the NPU driver: the settings check, with no device.
+#[cfg(target_os = "linux")]
+mod config {
+    use crate::npu::Vip9000Driver;
+    use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+
+    fn checked<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), ConfigError<'a>> {
+        <Vip9000Driver as Lifecycle>::check_config(&Config::new(entries))
+    }
+
+    fn refused_key<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<&'a str> {
+        checked(entries).err().map(|err| err.key)
+    }
+
+    #[test]
+    fn a_lemnos_or_vipcore_config_passes() {
+        let lemnos = [
+            ("route", ConfigValue::Str("lemnos")),
+            ("device", ConfigValue::Str("3600000.npu")),
+            ("heap", ConfigValue::Str("reserved")),
+        ];
+        assert_eq!(checked(&lemnos), Ok(()));
+        assert_eq!(checked(&[("route", ConfigValue::Str("vipcore"))]), Ok(()));
+    }
+
+    #[test]
+    fn unknown_keys_wrong_kinds_and_a_missing_route_are_refused_by_name() {
+        let heep = [
+            ("route", ConfigValue::Str("lemnos")),
+            ("heep", ConfigValue::Str("reserved")),
+        ];
+        let err = checked(&heep).unwrap_err();
+        assert_eq!((err.key, err.suggestion), ("heep", Some("heap")));
+        let text_device_number = [
+            ("route", ConfigValue::Str("lemnos")),
+            ("device", ConfigValue::Int(3)),
+        ];
+        assert_eq!(refused_key(&text_device_number), Some("device"));
+        assert_eq!(
+            refused_key(&[("device", ConfigValue::Str("3600000.npu"))]),
+            Some("route")
+        );
+    }
+
+    #[test]
+    fn check_config_refuses_each_bad_value_and_accepts_its_edge() {
+        let route = ("route", ConfigValue::Str("lemnos"));
+        let device = ("device", ConfigValue::Str("3600000.npu"));
+        let heap = ("heap", ConfigValue::Str("reserved"));
+        assert_eq!(
+            refused_key(&[("route", ConfigValue::Str("sideways"))]),
+            Some("route")
+        );
+        // The lemnos route needs both names.
+        assert_eq!(refused_key(&[route, heap]), Some("device"));
+        assert_eq!(refused_key(&[route, device]), Some("heap"));
+        assert_eq!(
+            refused_key(&[route, ("device", ConfigValue::Str("")), heap]),
+            Some("device")
+        );
+        assert_eq!(
+            refused_key(&[route, ("device", ConfigValue::Str("3600000/npu")), heap]),
+            Some("device")
+        );
+        assert_eq!(
+            refused_key(&[route, device, ("heap", ConfigValue::Str("/dev/dma_heap"))]),
+            Some("heap")
+        );
+        assert_eq!(checked(&[route, device, heap]), Ok(()));
+        // The vipcore route reads neither name, so it does not check them.
+        assert_eq!(
+            checked(&[
+                ("route", ConfigValue::Str("vipcore")),
+                ("device", ConfigValue::Str(""))
+            ]),
+            Ok(())
+        );
+    }
+}

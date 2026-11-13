@@ -1,6 +1,6 @@
 use crate::{
-    Config, ContractInfo, Decode, Description, Encode, Need, Reader, Resources, Result, Shape,
-    Status, Writer,
+    Config, ConfigError, ContractInfo, Decode, Description, Encode, Need, Reader, Resources,
+    Result, Shape, Status, Writer,
 };
 use lemnos_hal::blocks::BufferHandle;
 use lemnos_hal::register::AddressWidth;
@@ -122,6 +122,13 @@ pub trait Driver: Sized {
     const MANIFEST: Manifest;
 
     fn bind(res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<Self>;
+    /// Checks the settings a board file gives this driver. Needs no hardware and no bind, so the
+    /// host runs it when it checks a board file, before any device is made; a built-in driver's
+    /// bind runs it too. Accepts every setting by default, which is what a driver built outside
+    /// this tree gets.
+    fn check_config<'a>(_cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        Ok(())
+    }
     /// Binds into `place`, which is where the driver will live: a host with no allocator keeps
     /// each driver in a `static`, and a large one built on the stack and moved there costs the
     /// stack its whole size. `place` is `None` on the way in and `Some` only on success. The
@@ -188,6 +195,12 @@ pub trait Lifecycle: Sized {
     type Needs;
 
     fn start(needs: Self::Needs, cfg: &Config<'_>) -> Result<Self>;
+    /// The settings check, as [`Driver::check_config`]. A driver written with `#[driver]` binds
+    /// only after it passes: the generated bind refuses with `INVALID_ARGUMENT` otherwise. Accepts
+    /// every setting by default.
+    fn check_config<'a>(_cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        Ok(())
+    }
     /// [`Lifecycle::start`], into the place the driver will live. A driver whose state is large
     /// can write this to fill `place` field by field, so that it is never whole on the stack of
     /// a microcontroller; `place` must be `Some` exactly when this succeeds. The default starts

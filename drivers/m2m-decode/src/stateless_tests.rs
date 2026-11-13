@@ -12,7 +12,7 @@ use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_driver_codec_jobs::{Block, Buffers, POLL_NS, Server, Start};
 use lemnos_hal::mock::MockStream;
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_linux_sys::dma_buf::sealed_memfd;
 use lemnos_linux_sys::v4l2::fourcc;
 use lemnos_linux_sys::v4l2::h264;
@@ -491,6 +491,11 @@ mod nothing {
 }
 
 fn host(text: &str) -> Host {
+    try_host(text).unwrap()
+}
+
+/// The host started on `text`, or the reason it refused the board file.
+fn try_host(text: &str) -> Result<Host, String> {
     let sim = SimBoard::new();
     let clock = sim.clock();
     Host::start_with_streams(
@@ -501,7 +506,7 @@ fn host(text: &str) -> Host {
         Options::default(),
         Arc::new(PerBuffer),
     )
-    .unwrap()
+    .map_err(|error| error.to_string())
 }
 
 #[test]
@@ -515,20 +520,33 @@ fn a_board_file_binds_the_driver_and_a_plain_stream_or_no_device_is_refused() {
         (lemnos_host::DeviceState::Running, Health::Ok)
     );
     assert_eq!(up.manifest(0).unwrap().provides.len(), 1);
-    for text in [
-        board("v4l2-stateless", ""),
-        board("v4l2-stateless", dma).replace("device = \"/nonexistent/video-decoder\"", ""),
-        board("v4l2-stateless", dma).replace(
-            "device = \"/nonexistent/video-decoder\"",
-            "device = \"/x\", timeout_ms = 0",
+    // A stream of plain memory: the bind is refused, and the host still starts.
+    let plain = host(&board("v4l2-stateless", ""));
+    plain.tick();
+    assert_ne!(
+        plain.device("decoder").unwrap().state,
+        lemnos_host::DeviceState::Running
+    );
+    // A setting the driver's check refuses: the board starts, and the device is listed failed by
+    // name, with the key. The device is never made.
+    for (text, key) in [
+        (
+            board("v4l2-stateless", dma).replace("device = \"/nonexistent/video-decoder\"", ""),
+            "device",
+        ),
+        (
+            board("v4l2-stateless", dma).replace(
+                "device = \"/nonexistent/video-decoder\"",
+                "device = \"/x\", timeout_ms = 0",
+            ),
+            "timeout_ms",
         ),
     ] {
-        let host = host(&text);
-        host.tick();
-        assert_ne!(
-            host.device("decoder").unwrap().state,
-            lemnos_host::DeviceState::Running,
-            "{text}"
+        let host = try_host(&text).unwrap();
+        let state = host.device("decoder").unwrap().state;
+        assert!(
+            matches!(&state, DeviceState::Backoff { reason, .. } if reason.contains(key)),
+            "{key}: {state:?}"
         );
     }
 }
@@ -728,4 +746,28 @@ fn a_stamp_the_kernel_cannot_keep_is_refused_rather_than_rounded() {
     rig.refused("a stamp of 1 ns", &refs, &with(1));
     assert_eq!(rig.run(&refs, &with(123_456_000)).0, JobStatus::Done);
     assert_eq!(rig.run(&refs, &with(0)).0, JobStatus::Done, "no stamp");
+}
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn refusal<'a>(
+    entries: &'a [(&'a str, lemnos_core::ConfigValue<'a>)],
+) -> Option<lemnos_core::ConfigError<'a>> {
+    <super::M2mCodec as lemnos_core::Lifecycle>::check_config(&lemnos_core::Config::new(entries))
+        .err()
+}
+
+#[test]
+fn check_config_refuses_an_empty_device_and_a_timeout_out_of_range() {
+    use lemnos_core::ConfigValue::{Int, Str};
+    let ok = [("device", Str("/dev/video10")), ("timeout_ms", Int(60_000))];
+    assert_eq!(refusal(&ok), None);
+    assert_eq!(refusal(&[]).unwrap().key, "device");
+    assert_eq!(refusal(&[("device", Str(""))]).unwrap().key, "device");
+    let err = refusal(&[("devcie", Str("/dev/video10"))]).unwrap();
+    assert_eq!(err.key, "devcie");
+    assert_eq!(err.suggestion, Some("device"));
+    let slow = [("device", Str("/dev/video10")), ("timeout_ms", Int(0))];
+    assert_eq!(refusal(&slow).unwrap().key, "timeout_ms");
+    let fast = [("device", Str("/dev/video10")), ("timeout_ms", Int(1))];
+    assert_eq!(refusal(&fast), None);
 }

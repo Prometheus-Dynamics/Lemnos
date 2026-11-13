@@ -870,3 +870,34 @@ fn the_steady_state_allocates_nothing() {
     let c = d.counters().unwrap();
     assert_eq!((c.jobs, c.dropped, c.errors), (JOBS, 0, 0));
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn isp_refusal<'a>(
+    entries: &'a [(&'a str, lemnos_core::ConfigValue<'a>)],
+) -> Option<lemnos_core::ConfigError<'a>> {
+    <K230Isp as lemnos_core::Lifecycle>::check_config(&lemnos_core::Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_of_the_isp_driver_takes_one_way_and_refuses_the_rest() {
+    use lemnos_core::ConfigValue::Str;
+    assert_eq!(isp_refusal(&[]), None);
+    assert_eq!(isp_refusal(&[("block", Str("k230_isp"))]), None);
+    assert_eq!(isp_refusal(&[("device", Str("/dev/vvcam-isp.0"))]), None);
+    assert_eq!(isp_refusal(&[("block", Str(""))]).unwrap().key, "block");
+    assert_eq!(isp_refusal(&[("device", Str(""))]).unwrap().key, "device");
+    let both = [
+        ("block", Str("k230_isp")),
+        ("device", Str("/dev/vvcam-isp.0")),
+    ];
+    assert_eq!(isp_refusal(&both).unwrap().key, "device");
+    let err = isp_refusal(&[("nod", Str("/dev/lemnos"))]).unwrap();
+    assert_eq!(err.key, "nod");
+    assert_eq!(err.suggestion, Some("node"));
+}
+
+#[test]
+fn check_config_of_the_isp_driver_refuses_a_wrong_kind() {
+    use lemnos_core::ConfigValue::Int;
+    assert_eq!(isp_refusal(&[("node", Int(1))]).unwrap().key, "node");
+}

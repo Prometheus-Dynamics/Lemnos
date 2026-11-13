@@ -87,8 +87,8 @@ use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig, Packing,
 };
 use lemnos_core::{
-    BufferHandle, CallerId, Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result,
-    Status, StreamHandle, driver,
+    BufferHandle, CallerId, Config, ConfigError, Description, Dev, Health, Item, Key, Kind,
+    Lifecycle, MethodId, Result, Status, StreamHandle, driver,
 };
 
 use lemnos_hal::blocks::BufferKind;
@@ -250,6 +250,13 @@ fn handles_only(frames: &relay::Frames) -> Result<()> {
     }
 }
 
+/// Every setting the driver reads. Both are optional: `embedded_bytes` is needed only when the
+/// embedded-data stream is wired, which only the board's needs say, so that case stays at bind.
+const KEYS: &[Key] = &[
+    Key::optional("device", Kind::Str),
+    Key::optional("embedded_bytes", Kind::Int),
+];
+
 impl Lifecycle for Rp1Csi2 {
     type Needs = Rp1Csi2Needs;
     const TICKS: bool = true;
@@ -265,6 +272,17 @@ impl Lifecycle for Rp1Csi2 {
             self.owner = None;
             let _ = CameraReceiver::stop(self);
         }
+    }
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        hw::Settings::new(cfg.str("device"))
+            .map_err(|_| ConfigError::new("device", "must be a name with no '/' or NUL"))?;
+        if let Some(bytes) = cfg.int("embedded_bytes") {
+            u32::try_from(bytes)
+                .map_err(|_| ConfigError::new("embedded_bytes", "must be 0 to 4294967295"))?;
+        }
+        Ok(())
     }
 
     fn start(needs: Rp1Csi2Needs, cfg: &Config<'_>) -> Result<Self> {

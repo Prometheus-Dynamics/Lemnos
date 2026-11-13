@@ -708,3 +708,27 @@ fn building_and_running_jobs_allocates_nothing() {
     assert_eq!(allocated, 0, "building and running a job");
     assert_eq!(kernel.borrow().polls, 1_001);
 }
+
+#[test]
+fn check_config_names_keys_and_refuses_an_empty_node() {
+    use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), ConfigError<'a>> {
+        <crate::RkIep as Lifecycle>::check_config(&Config::new(entries))
+    }
+    assert!(check(&[("node", ConfigValue::Str("/dev/mpp_service"))]).is_ok());
+    assert!(check(&[]).is_ok());
+    assert_eq!(
+        check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
+        "bogus"
+    );
+    let near = check(&[("nod", ConfigValue::Str("/dev/mpp_service"))]).unwrap_err();
+    assert_eq!(near.suggestion, Some("node"));
+    assert_eq!(
+        check(&[("node", ConfigValue::Int(3))]).unwrap_err().key,
+        "node"
+    );
+    let empty = check(&[("node", ConfigValue::Str(""))]).unwrap_err();
+    assert_eq!((empty.key, empty.reason), ("node", "must not be empty"));
+}

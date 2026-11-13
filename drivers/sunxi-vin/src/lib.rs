@@ -66,7 +66,8 @@ use lemnos_contract_camera_receiver::{
     MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{
-    Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
+    StreamHandle, driver,
 };
 
 pub use lemnos_driver_v4l2_capture::{
@@ -166,25 +167,52 @@ impl Default for Options {
     }
 }
 
-fn options(cfg: &Config<'_>) -> Result<Options> {
+/// Every setting the driver reads. `capture` is required; the rest have defaults.
+const KEYS: &[Key] = &[
+    Key::required("capture", Kind::Str),
+    Key::optional("input", Kind::Int),
+    Key::optional("order", Kind::Str),
+    Key::optional("lanes", Kind::Int),
+    Key::optional("buffers", Kind::Int),
+];
+
+/// The driver's options from the config. A value out of range is refused with its key named.
+fn options(cfg: &Config<'_>) -> core::result::Result<Options, ConfigError<'static>> {
     let defaults = Options::default();
-    let int = |key, min: i64, max: i64, default: u32| match cfg.int(key) {
+    let int = |key: &'static str, min: i64, max: i64, reason: &'static str, default: u32| match cfg
+        .int(key)
+    {
         Some(v) if (min..=max).contains(&v) => {
-            u32::try_from(v).map_err(|_| Status::INVALID_ARGUMENT)
+            u32::try_from(v).map_err(|_| ConfigError::new(key, reason))
         }
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+        Some(_) => Err(ConfigError::new(key, reason)),
         None => Ok(default),
     };
     let order = match cfg.str("order") {
-        Some(order) => parse_order(order).ok_or(Status::INVALID_ARGUMENT)?,
+        Some(order) => parse_order(order).ok_or(ConfigError::new(
+            "order",
+            "must be rggb, grbg, gbrg or bggr",
+        ))?,
         None => defaults.order,
     };
-    let lanes = int("lanes", 1, i64::from(MAX_LANES), u32::from(defaults.lanes))?;
+    let lanes = int(
+        "lanes",
+        1,
+        i64::from(MAX_LANES),
+        "must be 1 to 4",
+        u32::from(defaults.lanes),
+    )?;
     Ok(Options {
-        input: int("input", 0, i64::from(i32::MAX), defaults.input)?,
+        input: int(
+            "input",
+            0,
+            i64::from(i32::MAX),
+            "must be 0 to 2147483647",
+            defaults.input,
+        )?,
         order,
-        lanes: u8::try_from(lanes).map_err(|_| Status::INVALID_ARGUMENT)?,
-        buffers: int("buffers", 2, 32, defaults.buffers)?,
+        lanes: u8::try_from(lanes).map_err(|_| ConfigError::new("lanes", "must be 1 to 4"))?,
+        buffers: int("buffers", 2, 32, "must be 2 to 32", defaults.buffers)?,
     })
 }
 
@@ -206,9 +234,17 @@ impl Lifecycle for SunxiVin {
     type Needs = SunxiVinNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        // The node's name is checked by the same constructor start uses, so the two agree.
+        Settings::new(cfg.str("capture").unwrap_or_default())
+            .map_err(|_| ConfigError::new("capture", "must name the capture node"))?;
+        options(cfg).map(|_| ())
+    }
+
     fn start(needs: SunxiVinNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::new(cfg.str("capture").ok_or(Status::INVALID_ARGUMENT)?)?;
-        let options = options(cfg)?;
+        let options = options(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(settings));
         Ok(Self::with_hardware(hw, needs.frames, options))
     }

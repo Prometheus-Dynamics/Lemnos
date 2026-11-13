@@ -28,6 +28,10 @@ pub enum BoardError {
     SelfUse(String),
     #[error("device {0:?} config key {1:?}: values are numbers, booleans or strings")]
     Config(String, String),
+    /// A setting a driver refuses, by device id, with the driver's own words for it (naming the
+    /// key). Found by [`check_settings`](crate::check_settings) with no hardware.
+    #[error("device {0:?}: {1}")]
+    Setting(String, String),
     #[error("device {0:?} stream {1:?}: its numbers are out of range")]
     Stream(String, String),
     #[error(

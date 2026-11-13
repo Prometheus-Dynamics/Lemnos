@@ -126,10 +126,23 @@ pub fn privileged_start(board: &BoardFile, owner: Owner) -> Result<usize, String
         .iter()
         .filter(|device| device.driver == DRIVER)
     {
+        // A gadget whose settings the check refuses is not made. The host lists it as failed with
+        // the reason, and the other gadgets are set up.
+        if refused(device) {
+            continue;
+        }
         setup_one(&board.board.id, device, owner)?;
         done += 1;
     }
     Ok(done)
+}
+
+/// Whether the gadget's own check refuses the device's settings. Checked with no hardware.
+fn refused(device: &DeviceSpec) -> bool {
+    match config_entries(device) {
+        Ok(entries) => lemnos_driver_usb_gadget::check(&Config::new(&entries)).is_err(),
+        Err(_) => true,
+    }
 }
 
 fn setup_one(board: &str, device: &DeviceSpec, owner: Owner) -> Result<(), String> {
@@ -169,9 +182,7 @@ pub fn settings_for(board: &str, device: &DeviceSpec) -> Result<(Set, Functions)
     let id = &device.id;
     let entries = config_entries(device).map_err(|reason| format!("{id}: {reason}"))?;
     let config = Config::new(&entries).on_board(board);
-    if let Some(reason) = lemnos_driver_usb_gadget::refusal(&config) {
-        return Err(format!("{id}: {reason}"));
-    }
+    lemnos_driver_usb_gadget::check(&config).map_err(|error| format!("{id}: {error}"))?;
     lemnos_driver_usb_gadget::settings(&config).map_err(|status| {
         match device
             .config

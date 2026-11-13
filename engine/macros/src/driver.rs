@@ -156,10 +156,18 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 provides: &[#(<dyn #provides as ::lemnos_core::Contract>::INFO),*],
             };
 
+            fn check_config<'a>(
+                __cfg: &::lemnos_core::Config<'a>,
+            ) -> ::core::result::Result<(), ::lemnos_core::ConfigError<'a>> {
+                <Self as ::lemnos_core::Lifecycle>::check_config(__cfg)
+            }
+
             fn bind(
                 __res: &mut ::lemnos_core::Resources<'_>,
                 __cfg: &::lemnos_core::Config<'_>,
             ) -> ::lemnos_core::Result<Self> {
+                <Self as ::lemnos_core::Lifecycle>::check_config(__cfg)
+                    .map_err(|_| ::lemnos_core::Status::INVALID_ARGUMENT)?;
                 let __needs = #needs_struct {
                     #(#need_idents: <#need_types as ::lemnos_core::Resource>::take(__res, #need_labels)?,)*
                     #(#link_idents: <#link_types as ::lemnos_core::Resource>::take_link(__res)?,)*
@@ -172,6 +180,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 __res: &mut ::lemnos_core::Resources<'_>,
                 __cfg: &::lemnos_core::Config<'_>,
             ) -> ::lemnos_core::Result<()> {
+                <Self as ::lemnos_core::Lifecycle>::check_config(__cfg)
+                    .map_err(|_| ::lemnos_core::Status::INVALID_ARGUMENT)?;
                 let __needs = #needs_struct {
                     #(#need_idents: <#need_types as ::lemnos_core::Resource>::take(__res, #need_labels)?,)*
                     #(#link_idents: <#link_types as ::lemnos_core::Resource>::take_link(__res)?,)*

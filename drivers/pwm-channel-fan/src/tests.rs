@@ -7,6 +7,8 @@ use super::math::{
 };
 use lemnos_hal::raw::Edge;
 
+use super::PwmChannelFan;
+
 fn rising(seq: u32, at_ns: u64) -> Edge {
     Edge {
         rising: true,
@@ -153,5 +155,60 @@ fn the_board_gives_the_speed_range_and_the_stall_limit_to_the_shape() {
     let bare = super::shape(&Config::new(&[])).unwrap();
     assert_eq!((bare.max_rpm, bare.warn_below_rpm), (None, None));
     let negative = [("max_rpm", ConfigValue::Int(-5))];
-    assert!(super::shape(&Config::new(&negative)).is_err());
+    assert!(
+        <PwmChannelFan as lemnos_core::Lifecycle>::check_config(&Config::new(&negative)).is_err()
+    );
+}
+
+#[test]
+fn check_config_accepts_a_full_valid_config_and_names_a_bad_key() {
+    use lemnos_core::{Config, ConfigValue, Lifecycle};
+    let full = [
+        ("frequency_hz", ConfigValue::Int(25_000)),
+        ("inverted", ConfigValue::Bool(true)),
+        ("min_duty", ConfigValue::Int(100)),
+        ("kick_ms", ConfigValue::Int(500)),
+        ("pulses_per_rev", ConfigValue::Int(2)),
+        ("max_rpm", ConfigValue::Int(3000)),
+        ("warn_below_rpm", ConfigValue::Int(200)),
+    ];
+    assert!(<PwmChannelFan as Lifecycle>::check_config(&Config::new(&full)).is_ok());
+    let near = [("kick_m", ConfigValue::Int(500))];
+    let err = <PwmChannelFan as Lifecycle>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!((err.key, err.suggestion), ("kick_m", Some("kick_ms")));
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind_and_each_value_outside_its_range() {
+    use lemnos_core::{Config, ConfigValue, Lifecycle};
+    fn check<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<&'a str> {
+        <PwmChannelFan as Lifecycle>::check_config(&Config::new(entries))
+            .err()
+            .map(|e| e.key)
+    }
+    assert_eq!(
+        check(&[("kick_ms", ConfigValue::Str("500"))]),
+        Some("kick_ms")
+    );
+    // The edges pass; one step outside is refused.
+    assert_eq!(check(&[("frequency_hz", ConfigValue::Int(1))]), None);
+    assert_eq!(
+        check(&[("frequency_hz", ConfigValue::Int(0))]),
+        Some("frequency_hz")
+    );
+    assert_eq!(check(&[("min_duty", ConfigValue::Int(1000))]), None);
+    assert_eq!(
+        check(&[("min_duty", ConfigValue::Int(1001))]),
+        Some("min_duty")
+    );
+    assert_eq!(check(&[("kick_ms", ConfigValue::Int(10_000))]), None);
+    assert_eq!(
+        check(&[("kick_ms", ConfigValue::Int(10_001))]),
+        Some("kick_ms")
+    );
+    assert_eq!(check(&[("pulses_per_rev", ConfigValue::Int(64))]), None);
+    assert_eq!(
+        check(&[("pulses_per_rev", ConfigValue::Int(65))]),
+        Some("pulses_per_rev")
+    );
 }

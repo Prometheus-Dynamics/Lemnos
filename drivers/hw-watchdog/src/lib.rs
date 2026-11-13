@@ -78,8 +78,8 @@ use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
 use lemnos_core::{
-    CallerId, Config, ConfigValue, Description, Health, Held, Item, JobId, JobState, Lifecycle,
-    MethodId, Reply, Result, Status, Unit, Watchdog, driver,
+    CallerId, Config, ConfigError, ConfigValue, Description, Health, Held, Item, JobId, JobState,
+    Key, Kind, Lifecycle, MethodId, Reply, Result, Status, Unit, Watchdog, driver,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::raw::RawWatchdog;
@@ -146,10 +146,8 @@ const TIMEOUT_UNKNOWN: &str = "timeout unknown: fed every 1 s";
 /// attributes under `sys_root`. The numbered form of the board's watchdog, kept for a board
 /// file that names it by `device`.
 fn open_device(cfg: &Config<'_>) -> Result<Watchdog> {
+    // The name's form is checked by check_config.
     let name = cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?;
-    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
-        return Err(Status::INVALID_ARGUMENT);
-    }
     let dev_root = cfg.str("dev_root").unwrap_or(DEFAULT_DEV_ROOT);
     let sys_root = cfg.str("sys_root").unwrap_or(DEFAULT_SYS_ROOT);
     // Write-only, no create, no truncate: this opens the device and nothing else.
@@ -280,12 +278,41 @@ impl SelfTest for HwWatchdog {
     }
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::optional("device", Kind::Str),
+    Key::optional("timeout_s", Kind::Int),
+    Key::optional("dev_root", Kind::Str),
+    Key::optional("sys_root", Kind::Str),
+];
+
 impl Lifecycle for HwWatchdog {
     type Needs = HwWatchdogNeeds;
 
     const TICKS: bool = true;
     const JOBS: bool = true;
     const TRACKS_CALLERS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if let Some(name) = cfg.str("device")
+            && (name.is_empty() || name.contains('/') || name == "." || name == "..")
+        {
+            return Err(ConfigError::new(
+                "device",
+                "must be a node name under dev_root, not a path",
+            ));
+        }
+        if let Some(seconds) = cfg.int("timeout_s")
+            && !(1..=i64::from(u32::MAX)).contains(&seconds)
+        {
+            return Err(ConfigError::new(
+                "timeout_s",
+                "must be 1 to 4294967295 seconds",
+            ));
+        }
+        Ok(())
+    }
 
     fn caller(&mut self, caller: CallerId) {
         self.calling = caller;
@@ -308,9 +335,10 @@ impl Lifecycle for HwWatchdog {
     }
 
     fn start(needs: HwWatchdogNeeds, cfg: &Config<'_>) -> Result<Self> {
+        // The range of timeout_s is checked by check_config; this is the conversion only.
         let requested = match cfg.get("timeout_s") {
             None => DEFAULT_TIMEOUT_S,
-            Some(ConfigValue::Int(s)) if (1..=i64::from(u32::MAX)).contains(&s) => s as u32,
+            Some(ConfigValue::Int(s)) => u32::try_from(s).map_err(|_| Status::INVALID_ARGUMENT)?,
             Some(_) => return Err(Status::INVALID_ARGUMENT),
         };
         let mut node = match needs.watchdog {

@@ -32,9 +32,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use lemnos_contract_system_identity::SystemIdentity;
-use lemnos_core::{Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, driver};
+use lemnos_core::{
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
+    driver,
+};
 use lemnos_identity::{ByteOrder, Facts, SerialError, SerialSource};
 use lemnos_slot_store::manifest::Manifest;
+
+/// A setting read, or the key it is refused on.
+type Checked<T> = core::result::Result<T, ConfigError<'static>>;
 
 const SERIAL: MethodId = MethodId {
     contract: 0,
@@ -62,10 +68,29 @@ pub struct Identity {
     missing_serial: bool,
 }
 
+/// Every setting the driver reads. All are optional: with no `serial` source the device is
+/// degraded, not refused.
+const KEYS: &[Key] = &[
+    Key::optional("name", Kind::Str),
+    Key::optional("revision", Kind::Str),
+    Key::optional("data", Kind::Str),
+    Key::optional("serial", Kind::Str),
+    Key::optional("serial_path", Kind::Str),
+    Key::optional("serial_key", Kind::Str),
+    Key::optional("serial_offset", Kind::Int),
+    Key::optional("serial_length", Kind::Int),
+    Key::optional("serial_byte_order", Kind::Str),
+];
+
 impl Lifecycle for Identity {
     type Needs = IdentityNeeds;
     // Reads the board's own files: serial and slot. A host-owned board reads them only.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ReadsOnly;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        serial_source(cfg).map(|_| ())
+    }
 
     fn start(_needs: IdentityNeeds, cfg: &Config<'_>) -> Result<Self> {
         let mut facts = Facts::default();
@@ -78,7 +103,7 @@ impl Lifecycle for Identity {
         if !cfg.board().is_empty() {
             set(&mut facts, "family", cfg.board());
         }
-        match serial_source(cfg)? {
+        match serial_source(cfg).map_err(|_| Status::INVALID_ARGUMENT)? {
             None => missing_serial = true,
             Some(source) => match source.read() {
                 Ok(serial) => set(&mut facts, "serial", &serial),
@@ -186,14 +211,15 @@ fn copy(text: Option<&str>, into: &mut [u8]) -> Result<usize> {
 /// fit the serial format.
 pub fn board_serial(cfg: &Config<'_>) -> core::result::Result<String, String> {
     match serial_source(cfg) {
-        Err(status) => Err(format!("the serial settings are wrong: {status:?}")),
+        Err(error) => Err(format!("the serial settings are wrong: {error}")),
         Ok(None) => Err("the identity device names no `serial` source".into()),
         Ok(Some(source)) => source.read().map_err(|error| error.to_string()),
     }
 }
 
-/// The serial source the config names, or `None` when it names none.
-fn serial_source(cfg: &Config<'_>) -> Result<Option<SerialSource>> {
+/// The serial source the config names, or `None` when it names none. Only the settings are read
+/// here, so this is also the serial part of the settings check; a refusal names its key.
+fn serial_source(cfg: &Config<'_>) -> Checked<Option<SerialSource>> {
     let Some(kind) = cfg.str("serial") else {
         return Ok(None);
     };
@@ -208,23 +234,44 @@ fn serial_source(cfg: &Config<'_>) -> Result<Option<SerialSource>> {
         "cmdline" => SerialSource::Cmdline {
             key: cfg
                 .str("serial_key")
-                .ok_or(Status::INVALID_ARGUMENT)?
+                .ok_or(ConfigError::new(
+                    "serial_key",
+                    "is required for serial = cmdline",
+                ))?
                 .to_string(),
             path: path.unwrap_or(lemnos_identity::serial::CMDLINE).into(),
         },
         "nvmem" => SerialSource::Nvmem {
-            path: path.ok_or(Status::INVALID_ARGUMENT)?.into(),
+            path: path
+                .ok_or(ConfigError::new(
+                    "serial_path",
+                    "is required for serial = nvmem",
+                ))?
+                .into(),
             offset: u64::try_from(cfg.int("serial_offset").unwrap_or(0))
-                .map_err(|_| Status::INVALID_ARGUMENT)?,
-            length: usize::try_from(cfg.int("serial_length").ok_or(Status::INVALID_ARGUMENT)?)
-                .map_err(|_| Status::INVALID_ARGUMENT)?,
+                .map_err(|_| ConfigError::new("serial_offset", "must not be negative"))?,
+            length: usize::try_from(cfg.int("serial_length").ok_or(ConfigError::new(
+                "serial_length",
+                "is required for serial = nvmem",
+            ))?)
+            .map_err(|_| ConfigError::new("serial_length", "must not be negative"))?,
             byte_order: match cfg.str("serial_byte_order").unwrap_or("big") {
                 "big" => ByteOrder::Big,
                 "little" => ByteOrder::Little,
-                _ => return Err(Status::INVALID_ARGUMENT),
+                _ => {
+                    return Err(ConfigError::new(
+                        "serial_byte_order",
+                        "must be big or little",
+                    ));
+                }
             },
         },
-        _ => return Err(Status::INVALID_ARGUMENT),
+        _ => {
+            return Err(ConfigError::new(
+                "serial",
+                "must be device-tree, cpuinfo, cmdline or nvmem",
+            ));
+        }
     };
     Ok(Some(source))
 }

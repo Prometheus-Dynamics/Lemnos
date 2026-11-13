@@ -62,7 +62,7 @@ fn with_no_settings_an_output_line_is_refused_at_bind_and_an_input_is_not() {
             &[("line_direction", ConfigValue::Str("output"))]
         )
         .err(),
-        Some(REFUSED)
+        Some(Status::INVALID_ARGUMENT)
     );
     assert!(wiring.line.configs().is_empty(), "the line was not touched");
 

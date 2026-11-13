@@ -128,3 +128,166 @@ impl<'a> Config<'a> {
         }
     }
 }
+
+/// The kind of value a setting takes, as a board file writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A whole number.
+    Int,
+    /// A number, with or without a fraction. A whole number is read as one.
+    Float,
+    Bool,
+    Str,
+    /// An array of strings (`health = ["device:x"]`), read with [`Config::list`].
+    List,
+}
+
+/// One setting a driver reads: its key, the kind it takes, and whether the board must give it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Key {
+    pub name: &'static str,
+    pub kind: Kind,
+    pub required: bool,
+}
+
+impl Key {
+    /// A setting the board must give.
+    pub const fn required(name: &'static str, kind: Kind) -> Self {
+        Self {
+            name,
+            kind,
+            required: true,
+        }
+    }
+
+    /// A setting the board may leave out.
+    pub const fn optional(name: &'static str, kind: Kind) -> Self {
+        Self {
+            name,
+            kind,
+            required: false,
+        }
+    }
+}
+
+/// A setting a driver refuses, and why. Named by key so the person who wrote the board file can
+/// find it. A driver returns it from [`Driver::check_config`](crate::Driver::check_config) with
+/// no hardware, so the refusal comes before any device is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigError<'a> {
+    /// The setting's key. A key the driver does not read is the one the board file gave.
+    pub key: &'a str,
+    /// Why, in words that follow the key: "must be a whole number", "is required".
+    pub reason: &'static str,
+    /// The key the driver does read, when the one given looks like a misspelling of it.
+    pub suggestion: Option<&'static str>,
+}
+
+impl<'a> ConfigError<'a> {
+    /// A refusal of `key` for `reason`, with no suggestion.
+    pub const fn new(key: &'a str, reason: &'static str) -> Self {
+        Self {
+            key,
+            reason,
+            suggestion: None,
+        }
+    }
+}
+
+impl core::fmt::Display for ConfigError<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "setting {:?} {}", self.key, self.reason)?;
+        match self.suggestion {
+            Some(name) => write!(f, " (did you mean {name:?}?)"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The largest edit distance that still reads as a misspelling of a key this long.
+fn near(given: &str, key: &str) -> bool {
+    const MAX: usize = 48;
+    let (a, b) = (given.as_bytes(), key.as_bytes());
+    if a.len() > MAX || b.len() > MAX {
+        return false;
+    }
+    // One row of the edit distance table, on the stack.
+    let mut row = [0usize; MAX + 1];
+    for (j, cell) in row.iter_mut().enumerate().take(b.len() + 1) {
+        *cell = j;
+    }
+    for (i, &x) in a.iter().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, &y) in b.iter().enumerate() {
+            let above = row[j + 1];
+            let cost = usize::from(x != y);
+            row[j + 1] = (diagonal + cost).min(above + 1).min(row[j] + 1);
+            diagonal = above;
+        }
+    }
+    let distance = row[b.len()];
+    distance <= 2 && distance * 3 <= a.len().max(b.len())
+}
+
+impl<'a> Config<'a> {
+    /// Checks the settings against the keys a driver reads: every given key must be one of them
+    /// and take the kind it says, and every required key must be given. The first problem found
+    /// is returned, in the board file's order; a key the driver does not read gets the nearest
+    /// key it reads as a suggestion, when one is close.
+    ///
+    /// This checks names and kinds only. A range or a combination is the driver's own check.
+    ///
+    /// # Errors
+    ///
+    /// The first setting that is not one of `keys`, has the wrong kind, or a required key that is
+    /// missing.
+    pub fn check_keys(&self, keys: &[Key]) -> Result<(), ConfigError<'a>> {
+        let find = |name: &str| keys.iter().find(|key| key.name == name);
+        let unknown = |key: &'a str| ConfigError {
+            key,
+            reason: "is not a setting this driver reads",
+            suggestion: keys.iter().find(|k| near(key, k.name)).map(|k| k.name),
+        };
+        for &(name, value) in self.entries {
+            let Some(key) = find(name) else {
+                return Err(unknown(name));
+            };
+            let ok = matches!(
+                (key.kind, value),
+                (Kind::Int, ConfigValue::Int(_))
+                    | (Kind::Float, ConfigValue::Int(_) | ConfigValue::Float(_))
+                    | (Kind::Bool, ConfigValue::Bool(_))
+                    | (Kind::Str, ConfigValue::Str(_))
+            );
+            if !ok {
+                return Err(ConfigError::new(name, kind_reason(key.kind)));
+            }
+        }
+        for &(name, _) in self.lists {
+            let Some(key) = find(name) else {
+                return Err(unknown(name));
+            };
+            if key.kind != Kind::List {
+                return Err(ConfigError::new(name, kind_reason(key.kind)));
+            }
+        }
+        for key in keys {
+            if key.required && self.get(key.name).is_none() && self.list(key.name).is_none() {
+                return Err(ConfigError::new(key.name, "is required"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why a setting of `kind` is refused when it is given another kind.
+const fn kind_reason(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Int => "must be a whole number",
+        Kind::Float => "must be a number",
+        Kind::Bool => "must be true or false",
+        Kind::Str => "must be text",
+        Kind::List => "must be a list of text",
+    }
+}

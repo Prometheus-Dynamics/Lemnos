@@ -376,3 +376,68 @@ fn the_identity_test_reports_a_dead_chip_as_no_response_and_leaves_the_driver_al
         "a failed test read is not a fault of the driver"
     );
 }
+
+#[test]
+fn a_full_valid_config_passes_the_check() {
+    let entries = [
+        ("address", ConfigValue::Int(0x13)),
+        ("preset", ConfigValue::Str("high_accuracy")),
+        ("data_rate", ConfigValue::Int(30)),
+    ];
+    assert_eq!(
+        <Bmm150 as Driver>::check_config(&Config::new(&entries)),
+        Ok(())
+    );
+}
+
+#[test]
+fn an_unknown_key_is_refused_and_a_near_miss_is_suggested() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    assert_eq!(
+        <Bmm150 as Driver>::check_config(&Config::new(&bogus))
+            .unwrap_err()
+            .key,
+        "bogus"
+    );
+    let near = [("preset_", ConfigValue::Str("regular"))];
+    let error = <Bmm150 as Driver>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(error.suggestion, Some("preset"));
+}
+
+#[test]
+fn a_wrong_kind_is_refused_by_name() {
+    let entries = [("preset", ConfigValue::Int(1))];
+    assert_eq!(
+        <Bmm150 as Driver>::check_config(&Config::new(&entries))
+            .unwrap_err()
+            .key,
+        "preset"
+    );
+}
+
+#[test]
+fn a_value_the_chip_cannot_use_is_refused_and_its_edges_pass() {
+    let refused = [
+        ("address", ConfigValue::Int(0x07)),
+        ("preset", ConfigValue::Str("bogus")),
+        ("data_rate", ConfigValue::Int(7)),
+    ];
+    for (key, value) in refused {
+        let entries = [(key, value)];
+        assert_eq!(
+            <Bmm150 as Driver>::check_config(&Config::new(&entries))
+                .unwrap_err()
+                .key,
+            key
+        );
+    }
+    let edges = [
+        ("address", ConfigValue::Int(0x77)),
+        ("preset", ConfigValue::Str("low_power")),
+        ("data_rate", ConfigValue::Int(2)),
+    ];
+    assert_eq!(
+        <Bmm150 as Driver>::check_config(&Config::new(&edges)),
+        Ok(())
+    );
+}

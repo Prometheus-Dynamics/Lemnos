@@ -71,8 +71,8 @@ use lemnos_contract_fan::Fan;
 use lemnos_contract_fan_control::{FanControl, MAX_POINTS, Point, Settings, State};
 use lemnos_contract_temperature::Temperature;
 use lemnos_core::{
-    Config, ConfigValue, Description, Dev, Health, Item, Lifecycle, MethodId, Result, Status, Unit,
-    driver,
+    Config, ConfigError, ConfigValue, Description, Dev, Health, Item, Key, Kind, Lifecycle,
+    MethodId, Result, Status, Unit, driver,
 };
 
 /// The method that reads `State`, for a description.
@@ -83,6 +83,28 @@ const STATE: MethodId = MethodId {
 
 /// The configuration key of each input's curve.
 const CURVE_KEYS: [&str; SLOTS] = ["curve_t0", "curve_t1", "curve_t2", "curve_t3"];
+
+/// Every setting the driver reads from the board file. All are optional: each has a default.
+const KEYS: &[Key] = &[
+    Key::optional("floor", Kind::Int),
+    Key::optional("hysteresis", Kind::Int),
+    Key::optional("slew_per_s", Kind::Int),
+    Key::optional("kick_ms", Kind::Int),
+    Key::optional("max_age_ms", Kind::Int),
+    Key::optional("curve_t0", Kind::Str),
+    Key::optional("curve_t1", Kind::Str),
+    Key::optional("curve_t2", Kind::Str),
+    Key::optional("curve_t3", Kind::Str),
+];
+
+/// The whole-number settings, each with the range it takes and the reason it is refused.
+const RANGES: &[(&str, i64, i64, &str)] = &[
+    ("floor", 0, FULL as i64, "must be 0 to 1000"),
+    ("hysteresis", 0, i32::MAX as i64, "must be 0 or more"),
+    ("slew_per_s", 0, FULL as i64, "must be 0 to 1000"),
+    ("kick_ms", 0, u32::MAX as i64, "must be 0 to 4294967295"),
+    ("max_age_ms", 1, u32::MAX as i64, "must be 1 to 4294967295"),
+];
 
 /// The curve an input gets without its `curve_tN`: 30 °C at 300, 60 °C at 600, 75 °C at full.
 const DEFAULT_CURVE: [Point; 3] = [
@@ -121,6 +143,29 @@ impl Lifecycle for FanController {
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        for &(key, low, high, reason) in RANGES {
+            if let Some(value) = cfg.int(key)
+                && !(low..=high).contains(&value)
+            {
+                return Err(ConfigError::new(key, reason));
+            }
+        }
+        // A curve is checked whether or not its input is wired, so a bad one is refused either way.
+        for key in CURVE_KEYS {
+            if let Some(ConfigValue::Str(text)) = cfg.get(key)
+                && parse_curve(text).is_err()
+            {
+                return Err(ConfigError::new(
+                    key,
+                    "must be value:duty pairs, values ascending, duty 0 to 1000",
+                ));
+            }
+        }
+        Ok(())
+    }
 
     fn start(needs: FanControllerNeeds, cfg: &Config<'_>) -> Result<Self> {
         let (settings, max_age_ms) = tuning(cfg)?;
@@ -285,11 +330,12 @@ fn millidegrees(celsius: f32) -> Option<i32> {
     })
 }
 
-/// A whole-number setting in `low..=high`, or `default` when it is not set.
-fn int(cfg: &Config<'_>, key: &str, low: i64, high: i64, default: i64) -> Result<i64> {
+/// A whole-number setting, or `default` when it is not set. Its range is checked by
+/// `check_config`.
+fn int(cfg: &Config<'_>, key: &str, default: i64) -> Result<i64> {
     match cfg.get(key) {
         None => Ok(default),
-        Some(ConfigValue::Int(value)) if (low..=high).contains(&value) => Ok(value),
+        Some(ConfigValue::Int(value)) => Ok(value),
         Some(_) => Err(Status::INVALID_ARGUMENT),
     }
 }
@@ -297,12 +343,12 @@ fn int(cfg: &Config<'_>, key: &str, low: i64, high: i64, default: i64) -> Result
 /// The tuning and the staleness limit, from the configuration.
 fn tuning(cfg: &Config<'_>) -> Result<(Settings, u32)> {
     let settings = Settings {
-        floor: int(cfg, "floor", 0, i64::from(FULL), 0)? as i32,
-        hysteresis: int(cfg, "hysteresis", 0, i64::from(i32::MAX), 0)? as i32,
-        slew_per_s: int(cfg, "slew_per_s", 0, i64::from(FULL), 50)? as i32,
-        kick_ms: int(cfg, "kick_ms", 0, i64::from(u32::MAX), 0)? as u32,
+        floor: int(cfg, "floor", 0)? as i32,
+        hysteresis: int(cfg, "hysteresis", 0)? as i32,
+        slew_per_s: int(cfg, "slew_per_s", 50)? as i32,
+        kick_ms: int(cfg, "kick_ms", 0)? as u32,
     };
-    let max_age_ms = int(cfg, "max_age_ms", 1, i64::from(u32::MAX), 3000)? as u32;
+    let max_age_ms = int(cfg, "max_age_ms", 3000)? as u32;
     Ok((settings, max_age_ms))
 }
 

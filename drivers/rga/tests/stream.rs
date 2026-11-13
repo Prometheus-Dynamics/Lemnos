@@ -62,9 +62,23 @@ fn job_stream(host: &Host, index: u32, contract: u8) -> Result<String, lemnos_co
 }
 
 #[test]
-fn without_a_soc_the_driver_does_not_bind() {
-    let (host, _clock, _index) = start("");
-    assert_ne!(host.device("rga").unwrap().state, DeviceState::Running);
+fn without_a_soc_the_device_is_listed_failed_and_never_made() {
+    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
+                [[devices]]\nid = \"rga\"\ndriver = \"rga\"\n";
+    // The board starts; the device is never made, and is listed failed with the key.
+    let host = Host::start(
+        &parse(text).unwrap(),
+        &[entry::<Rga>()],
+        Box::new(SimBoard::new()),
+        Arc::new(Clock::default()),
+        Options::default(),
+    )
+    .expect("the board starts");
+    let state = host.device("rga").unwrap().state;
+    assert!(
+        matches!(&state, DeviceState::Backoff { reason, .. } if reason.contains("setting \"soc\"")),
+        "{state:?}"
+    );
 }
 
 #[test]

@@ -41,8 +41,8 @@ use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
 use lemnos_core::{
-    CallerId, Config, Description, Health, Item, JobId, JobState, Lifecycle, MethodId, Reply,
-    Result, Status, Unit, driver,
+    CallerId, Config, ConfigError, Description, Health, Item, JobId, JobState, Key, Kind,
+    Lifecycle, MethodId, Reply, Result, Status, Unit, driver,
 };
 use std::path::{Path, PathBuf};
 
@@ -58,9 +58,10 @@ struct RpmLimits {
 }
 
 fn rpm_limits(cfg: &Config<'_>) -> Result<RpmLimits> {
+    // A whole number, not negative: check_config refuses the rest before bind gets here.
     let optional = |key: &str| match cfg.get(key) {
         None => Ok(None),
-        Some(lemnos_core::ConfigValue::Int(value)) if value >= 0 => Ok(Some(value)),
+        Some(lemnos_core::ConfigValue::Int(value)) => Ok(Some(value)),
         Some(_) => Err(Status::INVALID_ARGUMENT),
     };
     Ok(RpmLimits {
@@ -147,6 +148,18 @@ struct TestSettings {
     rpm: Option<(i64, i64)>,
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::optional("sys_root", Kind::Str),
+    Key::optional("hwmon", Kind::Str),
+    Key::optional("name", Kind::Str),
+    Key::optional("max_rpm", Kind::Int),
+    Key::optional("warn_below_rpm", Kind::Int),
+    Key::optional("self_test_duty", Kind::Int),
+    Key::optional("self_test_rpm_min", Kind::Int),
+    Key::optional("self_test_rpm_max", Kind::Int),
+];
+
 impl Lifecycle for HwmonFan {
     type Needs = HwmonFanNeeds;
     // Reaches the kernel's files itself, and on a host-owned device only reads them.
@@ -155,6 +168,37 @@ impl Lifecycle for HwmonFan {
     const TICKS: bool = true;
     const JOBS: bool = true;
     const TRACKS_CALLERS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if let Some(dir) = cfg.str("hwmon")
+            && (dir.is_empty() || dir.contains('/'))
+        {
+            return Err(ConfigError::new(
+                "hwmon",
+                "must be a directory name, not a path",
+            ));
+        }
+        for key in ["max_rpm", "warn_below_rpm"] {
+            if cfg.int(key).is_some_and(|value| value < 0) {
+                return Err(ConfigError::new(key, "must not be negative"));
+            }
+        }
+        if let Some(duty) = cfg.int("self_test_duty")
+            && !(1..=i64::from(MAX_DUTY)).contains(&duty)
+        {
+            return Err(ConfigError::new("self_test_duty", "must be 1 to 1000"));
+        }
+        if let (Some(min), Some(max)) = (cfg.int("self_test_rpm_min"), cfg.int("self_test_rpm_max"))
+            && min > max
+        {
+            return Err(ConfigError::new(
+                "self_test_rpm_min",
+                "must not be above self_test_rpm_max",
+            ));
+        }
+        Ok(())
+    }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         let mut bench = Spin {
@@ -198,9 +242,6 @@ impl Lifecycle for HwmonFan {
         let hwmon = sys.join("class/hwmon");
         let fan = match cfg.str("hwmon") {
             Some(dir) => {
-                if dir.is_empty() || dir.contains('/') {
-                    return Err(Status::INVALID_ARGUMENT);
-                }
                 let fan = hwmon.join(dir);
                 if !fan.join("pwm1").exists() {
                     return Err(Status::NOT_FOUND);
@@ -474,16 +515,13 @@ impl Drop for HwmonFan {
 /// The `self_test_duty` (per mille, 1 to 1000) and `self_test_rpm_min` and `self_test_rpm_max`
 /// config for the `spin` test.
 fn test_settings(cfg: &Config<'_>) -> Result<TestSettings> {
+    // The range of each value is checked by check_config, so only the conversion is left here.
     let duty = match cfg.int("self_test_duty") {
         None => TEST_DUTY,
-        Some(duty) => u16::try_from(duty)
-            .ok()
-            .filter(|duty| (1..=MAX_DUTY).contains(duty))
-            .ok_or(Status::INVALID_ARGUMENT)?,
+        Some(duty) => u16::try_from(duty).map_err(|_| Status::INVALID_ARGUMENT)?,
     };
     let rpm = match (cfg.int("self_test_rpm_min"), cfg.int("self_test_rpm_max")) {
-        (Some(min), Some(max)) if min <= max => Some((min, max)),
-        (Some(_), Some(_)) => return Err(Status::INVALID_ARGUMENT),
+        (Some(min), Some(max)) => Some((min, max)),
         _ => None,
     };
     Ok(TestSettings { duty, rpm })

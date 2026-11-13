@@ -1,7 +1,9 @@
 //! The driver: the block served as `codec.block/1` on the device's job stream.
 
 use lemnos_contract_codec_block::{BlockInfo, CodecBlock, Counters};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_driver_codec_jobs::{Block, Server, name_into};
 use lemnos_hal::blocks::BufferKind;
 
@@ -43,15 +45,26 @@ impl K230Vpu {
     }
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[Key::required("device", Kind::Str)];
+
 impl Lifecycle for K230Vpu {
     type Needs = K230VpuNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("device").is_some_and(str::is_empty) {
+            return Err(ConfigError::new(
+                "device",
+                "must be a device path, not empty",
+            ));
+        }
+        Ok(())
+    }
+
     fn start(needs: K230VpuNeeds, cfg: &Config<'_>) -> Result<Self> {
         let path = cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?;
-        if path.is_empty() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         // Both queues take a buffer only as a dma-buf: known now, before any consumer comes.
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);

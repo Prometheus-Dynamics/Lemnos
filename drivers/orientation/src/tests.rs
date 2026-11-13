@@ -271,9 +271,10 @@ fn a_failing_accelerometer_is_reported_on_each_call_until_it_returns() {
 }
 
 #[test]
-fn bad_settings_are_refused_at_bind() {
-    let refuse =
-        |entries: &[(&str, ConfigValue<'_>)]| start(level_bench(), false, entries).is_err();
+fn bad_settings_are_refused_before_any_device_is_made() {
+    let refuse = |entries: &[(&str, ConfigValue<'_>)]| {
+        Orientation::check_config(&Config::new(entries)).is_err()
+    };
     assert!(refuse(&[("sample_rate_hz", ConfigValue::Float(1.0))]));
     assert!(refuse(&[("sample_rate_hz", ConfigValue::Int(5000))]));
     assert!(refuse(&[("sample_rate_hz", ConfigValue::Str("fast"))]));
@@ -283,6 +284,34 @@ fn bad_settings_are_refused_at_bind() {
     assert!(refuse(&[("sample_rate_hz", ConfigValue::Float(9.0))]));
     assert!(!refuse(&[("sample_rate_hz", ConfigValue::Float(10.0))]));
     assert!(!refuse(&[("sample_rate_hz", ConfigValue::Int(1000))]));
+}
+
+#[test]
+fn check_config_accepts_a_full_valid_config() {
+    let full = [
+        ("sample_rate_hz", ConfigValue::Float(100.0)),
+        ("mode", ConfigValue::Str("9axis")),
+        ("algorithm", ConfigValue::Str("madgwick")),
+        ("kp", ConfigValue::Float(1.0)),
+        ("ki", ConfigValue::Float(0.05)),
+        ("beta", ConfigValue::Float(0.1)),
+        ("dip_deg", ConfigValue::Float(60.0)),
+        ("mount_roll_deg", ConfigValue::Int(0)),
+        ("mount_pitch_deg", ConfigValue::Float(0.0)),
+        ("mount_yaw_deg", ConfigValue::Float(0.0)),
+        ("declination_deg", ConfigValue::Float(-2.0)),
+    ];
+    assert!(Orientation::check_config(&Config::new(&full)).is_ok());
+}
+
+#[test]
+fn check_config_names_an_unknown_key_and_suggests_the_near_one() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    let err = Orientation::check_config(&Config::new(&bogus)).unwrap_err();
+    assert_eq!(err.key, "bogus");
+    let near = [("sample_rat_hz", ConfigValue::Float(50.0))];
+    let err = Orientation::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(err.suggestion, Some("sample_rate_hz"));
 }
 
 #[test]

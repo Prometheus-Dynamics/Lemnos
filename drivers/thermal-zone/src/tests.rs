@@ -1,5 +1,5 @@
 use super::*;
-use lemnos_core::{ConfigValue, Reply};
+use lemnos_core::{ConfigError, ConfigValue, Reply};
 use std::fs;
 
 /// A fake zone directory under the system temporary directory (`TMPDIR`),
@@ -160,13 +160,13 @@ fn the_board_gives_the_zones_range_and_warning_limits() {
         (item.min, item.max, item.warn_low, item.warn_high),
         (Some(-20), Some(100), Some(-10), Some(85))
     );
-    // A range the other way round is refused at bind.
+    // A range the other way round is refused by the settings check, before bind.
     let backwards = [
         ("path", ConfigValue::Str(&path)),
         ("min_c", ConfigValue::Int(50)),
         ("max_c", ConfigValue::Int(10)),
     ];
-    assert!(ThermalZone::start(ThermalZoneNeeds {}, &Config::new(&backwards)).is_err());
+    assert!(ThermalZone::check_config(&Config::new(&backwards)).is_err());
 }
 
 #[test]
@@ -176,4 +176,55 @@ fn the_zone_names_its_directory_as_its_location() {
     let mut out = Description::default();
     dev.describe(&mut out);
     assert_eq!(out.location(), tree.path());
+}
+
+#[test]
+fn check_config_names_the_bad_setting() {
+    fn check(
+        entries: &'static [(&'static str, ConfigValue<'static>)],
+    ) -> core::result::Result<(), ConfigError<'static>> {
+        ThermalZone::check_config(&Config::new(entries))
+    }
+    let full = &[
+        ("path", ConfigValue::Str("/sys/class/thermal/thermal_zone0")),
+        ("min_c", ConfigValue::Int(-20)),
+        ("max_c", ConfigValue::Int(100)),
+        ("warn_below_c", ConfigValue::Int(-10)),
+        ("warn_above_c", ConfigValue::Int(85)),
+    ];
+    assert!(check(full).is_ok());
+    assert!(
+        check(&[
+            ("path", ConfigValue::Str("/x")),
+            ("min_c", ConfigValue::Int(7)),
+            ("max_c", ConfigValue::Int(7))
+        ])
+        .is_ok()
+    );
+
+    let bogus = check(&[
+        ("path", ConfigValue::Str("/x")),
+        ("bogus", ConfigValue::Int(1)),
+    ])
+    .unwrap_err();
+    assert_eq!(bogus.key, "bogus");
+    let near = check(&[
+        ("path", ConfigValue::Str("/x")),
+        ("warn_abov_c", ConfigValue::Int(85)),
+    ])
+    .unwrap_err();
+    assert_eq!(near.key, "warn_abov_c");
+    assert_eq!(near.suggestion, Some("warn_above_c"));
+
+    let kind = check(&[("path", ConfigValue::Int(3))]).unwrap_err();
+    assert_eq!(kind.key, "path");
+    assert_eq!(check(&[]).unwrap_err().key, "path");
+    let backwards = check(&[
+        ("path", ConfigValue::Str("/x")),
+        ("min_c", ConfigValue::Int(50)),
+        ("max_c", ConfigValue::Int(10)),
+    ])
+    .unwrap_err();
+    assert_eq!(backwards.key, "min_c");
+    assert_eq!(backwards.reason, "must not be above max_c");
 }

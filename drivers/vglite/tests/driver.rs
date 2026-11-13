@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use lemnos_contract_image_convert::{self as convert, ConvertJob, ImageConvert, ImageRef};
 use lemnos_contract_image_scaler::{self as scaler, Filter as WireFilter, ScaleJob};
-use lemnos_core::{CallerId, Decode, Encode, Health, Lifecycle, MethodId, Reader, Status, Writer};
+use lemnos_core::{
+    CallerId, Config, ConfigError, ConfigValue, Decode, Encode, Health, Lifecycle, MethodId,
+    Reader, Status, Writer,
+};
 use lemnos_driver_vglite::driver::{BoxedGpu, POLL_NS};
 use lemnos_driver_vglite::serve::{Contract, Failure};
 use lemnos_driver_vglite::{
@@ -288,13 +291,28 @@ fn bind_refuses_plain_streams_no_streams_and_a_bad_device_setting() {
         "{reason}"
     );
 
-    for config in ["device = \"\"", "device = 3"] {
+    // The host checks the setting when it starts: the board starts, and the device is listed
+    // failed with the key and the reason. The device is never made.
+    for (config, reason) in [
+        ("device = \"\"", "must not be empty"),
+        ("device = 3", "must be text"),
+    ] {
         let text = board("vglite", true).replace("device = \"/nonexistent/vg_lite\"", config);
-        let rig = Rig::start(&text, Arc::new(PerBuffer));
-        let reason = rig.refusal();
+        let sim = SimBoard::new();
+        let clock = sim.clock();
+        let host = Host::start_with_streams(
+            &parse(&text).unwrap(),
+            &[entry::<VgliteDriver>(), entry::<FakeCounter>()],
+            Box::new(sim),
+            Arc::new(clock.clone()),
+            Options::default(),
+            Arc::new(PerBuffer),
+        )
+        .unwrap_or_else(|error| panic!("{config}: {error}"));
+        let state = host.device("g").unwrap().state;
         assert!(
-            reason.contains(&format!("{:?}", Status::INVALID_ARGUMENT)),
-            "{config}: {reason}"
+            matches!(&state, lemnos_host::DeviceState::Backoff { reason: text, .. } if text.contains("setting \"device\"") && text.contains(reason)),
+            "{config}: {state:?}"
         );
     }
 }
@@ -610,4 +628,31 @@ fn a_thousand_jobs_through_the_driver_allocate_nothing() {
     });
     assert_eq!(count, 0, "allocations in 1000 jobs");
     assert_eq!(plan.converts.load(Ordering::Relaxed), 1010);
+}
+
+/// The verdict of `check_config` on `entries`, with no hardware.
+fn checked<'a>(
+    entries: &'a [(&'a str, ConfigValue<'a>)],
+) -> core::result::Result<(), ConfigError<'a>> {
+    <VgliteDriver as Lifecycle>::check_config(&Config::new(entries))
+}
+
+#[test]
+fn check_config_accepts_a_device_path_and_no_device() {
+    assert_eq!(checked(&[]), Ok(()));
+    assert_eq!(
+        checked(&[("device", ConfigValue::Str("/dev/vg_lite"))]),
+        Ok(())
+    );
+}
+
+#[test]
+fn check_config_refuses_an_unknown_key_a_wrong_kind_and_an_empty_path() {
+    let err = checked(&[("devise", ConfigValue::Str("/dev/vg_lite"))]).unwrap_err();
+    assert_eq!((err.key, err.suggestion), ("devise", Some("device")));
+    let err = checked(&[("device", ConfigValue::Int(3))]).unwrap_err();
+    assert_eq!(err.key, "device");
+    let err = checked(&[("device", ConfigValue::Str(""))]).unwrap_err();
+    assert_eq!((err.key, err.reason), ("device", "must not be empty"));
+    assert_eq!(checked(&[("device", ConfigValue::Str("x"))]), Ok(()));
 }

@@ -662,3 +662,121 @@ fn describe_offers_the_self_test_action() {
         lemnos_core::ItemKind::Action
     );
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn refusal<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<lemnos_core::ConfigError<'a>> {
+    <Ina2xx as lemnos_core::Lifecycle>::check_config(&Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_accepts_a_full_config() {
+    let entries = [
+        ("chip", ConfigValue::Str("INA226")),
+        ("address", ConfigValue::Int(0x41)),
+        ("shunt_ohms", ConfigValue::Float(0.01)),
+        ("max_current_a", ConfigValue::Float(2.0)),
+        ("bus_warn_below_v", ConfigValue::Float(10.8)),
+        ("bus_warn_above_v", ConfigValue::Float(13.5)),
+        ("current_warn_above_a", ConfigValue::Float(1.5)),
+        ("self_test_bus_min_mv", ConfigValue::Int(11_000)),
+        ("self_test_bus_max_mv", ConfigValue::Int(13_000)),
+    ];
+    assert_eq!(refusal(&entries), None);
+}
+
+#[test]
+fn check_config_refuses_an_unknown_key_by_name_and_suggests_the_near_one() {
+    let entries = [
+        ("chip", ConfigValue::Str("ina226")),
+        ("shunt_ohm", ConfigValue::Float(0.01)),
+    ];
+    let err = refusal(&entries).unwrap();
+    assert_eq!(err.key, "shunt_ohm");
+    assert_eq!(err.suggestion, Some("shunt_ohms"));
+    let bogus = [
+        ("chip", ConfigValue::Str("ina226")),
+        ("bogus", ConfigValue::Int(1)),
+    ];
+    assert_eq!(refusal(&bogus).unwrap().key, "bogus");
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind_and_a_missing_chip() {
+    let wrong = [
+        ("chip", ConfigValue::Str("ina226")),
+        ("address", ConfigValue::Str("0x40")),
+    ];
+    assert_eq!(refusal(&wrong).unwrap().key, "address");
+    let missing = [("shunt_ohms", ConfigValue::Float(0.01))];
+    assert_eq!(refusal(&missing).unwrap().key, "chip");
+}
+
+#[test]
+fn check_config_refuses_an_address_outside_seven_bits_and_accepts_the_edges() {
+    let chip = ("chip", ConfigValue::Str("ina226"));
+    let shunt = ("shunt_ohms", ConfigValue::Float(0.01));
+    let max = ("max_current_a", ConfigValue::Float(1.0));
+    assert_eq!(
+        refusal(&[chip, shunt, max, ("address", ConfigValue::Int(128))])
+            .unwrap()
+            .key,
+        "address"
+    );
+    assert_eq!(
+        refusal(&[chip, shunt, max, ("address", ConfigValue::Int(-1))])
+            .unwrap()
+            .key,
+        "address"
+    );
+    assert_eq!(
+        refusal(&[chip, shunt, max, ("address", ConfigValue::Int(0))]),
+        None
+    );
+    assert_eq!(
+        refusal(&[chip, shunt, max, ("address", ConfigValue::Int(127))]),
+        None
+    );
+}
+
+#[test]
+fn check_config_refuses_a_calibration_the_chip_cannot_take() {
+    let chip = ("chip", ConfigValue::Str("ina226"));
+    let zero_shunt = [
+        chip,
+        ("shunt_micro_ohms", ConfigValue::Int(-1)),
+        ("max_current_micro_amps", ConfigValue::Int(1_000_000)),
+    ];
+    assert_eq!(refusal(&zero_shunt).unwrap().key, "shunt_micro_ohms");
+    let fine = [
+        chip,
+        ("shunt_ohms", ConfigValue::Float(0.01)),
+        ("max_current_a", ConfigValue::Float(1.0)),
+    ];
+    assert_eq!(refusal(&fine), None);
+}
+
+#[test]
+fn check_config_refuses_a_warning_limit_that_is_not_a_number() {
+    let entries = [
+        ("chip", ConfigValue::Str("ina260")),
+        ("bus_warn_above_v", ConfigValue::Float(f64::NAN)),
+    ];
+    assert_eq!(refusal(&entries).unwrap().key, "bus_warn_above_v");
+}
+
+#[test]
+fn check_config_refuses_a_bus_range_that_is_backwards_and_accepts_equal() {
+    let chip = ("chip", ConfigValue::Str("ina260"));
+    let backwards = [
+        chip,
+        ("self_test_bus_min_mv", ConfigValue::Int(13_000)),
+        ("self_test_bus_max_mv", ConfigValue::Int(11_000)),
+    ];
+    assert_eq!(refusal(&backwards).unwrap().key, "self_test_bus_min_mv");
+    let equal = [
+        chip,
+        ("self_test_bus_min_mv", ConfigValue::Int(12_000)),
+        ("self_test_bus_max_mv", ConfigValue::Int(12_000)),
+    ];
+    assert_eq!(refusal(&equal), None);
+}

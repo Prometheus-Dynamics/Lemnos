@@ -19,7 +19,8 @@ mod tests;
 
 use lemnos_contract_gpu_lease::{GpuLease, GpuState, LeaseState, Ticket};
 use lemnos_core::{
-    CallerId, Config, Description, Item, Lifecycle, MethodId, Result, Status, driver,
+    CallerId, Config, ConfigError, Description, Item, Key, Lifecycle, MethodId, Result, Status,
+    driver,
 };
 use queue::Queue;
 use std::time::Instant;
@@ -32,6 +33,9 @@ const STATE: MethodId = MethodId {
     contract: 0,
     method: 5,
 };
+
+/// The settings the driver reads from the board file: none.
+const KEYS: &[Key] = &[];
 
 #[driver("gpu-lease", provides = [GpuLease])]
 pub struct GpuLeaseDevice {
@@ -48,6 +52,10 @@ pub struct GpuLeaseDevice {
 impl Lifecycle for GpuLeaseDevice {
     type Needs = GpuLeaseDeviceNeeds;
     const TRACKS_CALLERS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)
+    }
 
     fn start(_needs: GpuLeaseDeviceNeeds, _cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {

@@ -40,7 +40,9 @@
 #![forbid(unsafe_code)]
 
 use lemnos_contract_codec_block::{BlockInfo, CodecBlock, Counters};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_driver_codec_jobs::{Block as _, Server, name_into};
 use lemnos_driver_rk_mpp::codec::block_named;
 use lemnos_driver_rk_mpp::{Block, BoxedDevice, MppBlock, backoff_ns};
@@ -82,9 +84,31 @@ impl RkMpp {
     }
 }
 
+/// The settings a board file gives the block.
+const KEYS: &[Key] = &[
+    Key::required("block", Kind::Str),
+    Key::optional("node", Kind::Str),
+];
+
 impl Lifecycle for RkMpp {
     type Needs = RkMppNeeds;
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if let Some(name) = cfg.str("block")
+            && block_named(name).is_none()
+        {
+            return Err(ConfigError::new(
+                "block",
+                "must be vdpu1, vdpu2, vepu1, vepu2, jpeg-decoder or jpeg-encoder",
+            ));
+        }
+        if cfg.str("node") == Some("") {
+            return Err(ConfigError::new("node", "must not be empty"));
+        }
+        Ok(())
+    }
 
     fn start(needs: RkMppNeeds, cfg: &Config<'_>) -> Result<Self> {
         let block = cfg
@@ -92,9 +116,6 @@ impl Lifecycle for RkMpp {
             .and_then(block_named)
             .ok_or(Status::INVALID_ARGUMENT)?;
         let node = cfg.str("node").unwrap_or(NODE);
-        if node.is_empty() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         // The block takes a buffer only as a dma-buf: known now, before any consumer comes.
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);
@@ -146,5 +167,69 @@ impl CodecBlock for RkMpp {
 
     fn counters(&mut self) -> Result<Counters> {
         Ok(self.server.counters())
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+
+    use super::RkMpp;
+
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), ConfigError<'a>> {
+        <RkMpp as Lifecycle>::check_config(&Config::new(entries))
+    }
+
+    #[test]
+    fn a_full_config_passes_and_unknown_or_misspelled_keys_are_named() {
+        let full = [
+            ("block", ConfigValue::Str("vepu2")),
+            ("node", ConfigValue::Str("/dev/mpp_service")),
+        ];
+        assert!(check(&full).is_ok());
+        assert_eq!(
+            check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
+            "bogus"
+        );
+        let near = check(&[("blok", ConfigValue::Str("vepu2"))]).unwrap_err();
+        assert_eq!(near.suggestion, Some("block"));
+    }
+
+    #[test]
+    fn a_wrong_kind_a_missing_block_and_the_value_checks_are_refused() {
+        assert_eq!(
+            check(&[("block", ConfigValue::Int(2))]).unwrap_err().key,
+            "block"
+        );
+        assert_eq!(
+            check(&[("node", ConfigValue::Int(2))]).unwrap_err().key,
+            "node"
+        );
+        let missing = check(&[]).unwrap_err();
+        assert_eq!((missing.key, missing.reason), ("block", "is required"));
+        assert_eq!(
+            check(&[("block", ConfigValue::Str("vepu9"))])
+                .unwrap_err()
+                .key,
+            "block"
+        );
+        assert_eq!(
+            check(&[("block", ConfigValue::Str("jpeg-encoder"))]).err(),
+            None
+        );
+        let empty = check(&[
+            ("block", ConfigValue::Str("vdpu1")),
+            ("node", ConfigValue::Str("")),
+        ]);
+        assert_eq!(empty.unwrap_err().key, "node");
+        assert!(
+            check(&[
+                ("block", ConfigValue::Str("vdpu1")),
+                ("node", ConfigValue::Str("x"))
+            ])
+            .is_ok()
+        );
     }
 }

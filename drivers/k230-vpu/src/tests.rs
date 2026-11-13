@@ -1152,3 +1152,21 @@ fn the_private_requests_issued_are_the_ones_read_to_be_sound_at_their_sizes() {
     assert_eq!(MAX_FRAME_REGIONS, sys::MAX_ROI);
     assert_eq!(u32::from(BASE_VIDIOC_PRIVATE), sys::BASE_PRIVATE);
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn refusal<'a>(
+    entries: &'a [(&'a str, lemnos_core::ConfigValue<'a>)],
+) -> Option<lemnos_core::ConfigError<'a>> {
+    <K230Vpu as lemnos_core::Lifecycle>::check_config(&lemnos_core::Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_needs_a_device_path_and_refuses_an_empty_one() {
+    use lemnos_core::ConfigValue::Str;
+    assert_eq!(refusal(&[("device", Str("/dev/video1"))]), None);
+    assert_eq!(refusal(&[]).unwrap().key, "device");
+    assert_eq!(refusal(&[("device", Str(""))]).unwrap().key, "device");
+    let err = refusal(&[("devcie", Str("/dev/video1"))]).unwrap();
+    assert_eq!(err.key, "devcie");
+    assert_eq!(err.suggestion, Some("device"));
+}

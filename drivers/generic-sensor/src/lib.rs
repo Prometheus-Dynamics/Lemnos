@@ -79,8 +79,8 @@ use lemnos_contract_magnetometer::Magnetometer;
 use lemnos_contract_power_monitor::{PowerMonitor, PowerReading};
 use lemnos_contract_temperature::Temperature;
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, I2c, Item, Lifecycle, MethodId, Result, Status, Uart,
-    Unit, Vector3, driver, status_of,
+    Config, ConfigError, ConfigValue, Description, Health, I2c, Item, Key, Kind as KeyKind,
+    Lifecycle, MethodId, Result, Status, Uart, Unit, Vector3, driver, status_of,
 };
 use lemnos_hal::register::{
     AddressWidth, Endian, I2cRegisters, RegisterBus, RegisterError, decode_value,
@@ -170,58 +170,16 @@ enum Port<'a> {
 }
 
 /// Which of the two a driver type takes.
-/// What a generic driver holds: the sensor its settings name, or the setting that refuses it. A
-/// refused driver still binds. Its health is `Failed` with the setting's name, and every read is
-/// `INVALID_ARGUMENT`, so the operator sees which key is wrong and nothing is guessed.
-#[derive(Debug)]
-// A refused driver holds no chip. Boxing the live one would need an allocator this crate does not have.
-#[allow(clippy::large_enum_variant)]
-enum Sensor {
-    Live(Live),
-    Refused(&'static str),
-}
-
-impl Sensor {
-    /// Reads the settings and the description for `kind`. Nothing touches the bus.
-    fn new(cfg: &Config<'_>, kind: Kind, wire: Wire) -> Result<Self> {
-        match chip(cfg, kind)? {
-            Ok(chip) => Ok(Self::Live(Live::new(cfg, chip, wire)?)),
-            Err(reason) => Ok(Self::Refused(reason)),
-        }
-    }
-
-    fn health(&self) -> Health {
-        match self {
-            Self::Live(live) => live.health(),
-            Self::Refused(reason) => Health::Failed(reason),
-        }
-    }
-
-    fn tick(&mut self, now_ns: u64) -> Option<u64> {
-        match self {
-            Self::Live(live) => live.tick(now_ns),
-            Self::Refused(_) => None,
-        }
-    }
-
-    fn read(&mut self, port: Port<'_>) -> Result<[f32; MAX_CHANNELS]> {
-        match self {
-            Self::Live(live) => live.read(port),
-            Self::Refused(_) => Err(Status::INVALID_ARGUMENT),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wire {
     I2c,
     Uart,
 }
 
-/// A sensor the settings name: the parsed chip and where its start-up is. The bus stays in the
-/// driver type, which is what the host binds.
+/// What every generic driver shares: the parsed chip and where its start-up is. The bus stays in
+/// the driver type, which is what the host binds.
 #[derive(Debug)]
-struct Live {
+pub struct Sensor {
     link: Link,
     chip: Chip,
     phase: Phase,
@@ -237,37 +195,32 @@ struct Live {
     host_owned: bool,
 }
 
-impl Live {
-    /// Checks that the driver was given what the description's transport needs. Nothing touches
-    /// the bus.
-    fn new(cfg: &Config<'_>, chip: Chip, wire: Wire) -> Result<Self> {
+impl Sensor {
+    /// Opens the sensor the settings name: the same [`check`] the host ran before it made the
+    /// device, then the chip. Nothing touches the bus.
+    fn open(cfg: &Config<'_>, kind: Kind, wire: Wire) -> Result<Self> {
+        check(cfg, kind, wire).map_err(|_| Status::INVALID_ARGUMENT)?;
+        let chip = load(cfg, kind).map_err(|_| Status::INVALID_ARGUMENT)?;
+        Self::new(cfg, chip)
+    }
+
+    /// The sensor for a chip the settings give, on the transport the description names. The
+    /// transport against the bus, and every setting, were checked by [`check`].
+    fn new(cfg: &Config<'_>, chip: Chip) -> Result<Self> {
+        let invalid = |_| Status::INVALID_ARGUMENT;
         let link = match chip.transport() {
-            Transport::I2c => {
-                // A `modbus-*` driver with a description of an I2C chip.
-                if wire != Wire::I2c {
-                    return Err(Status::INVALID_ARGUMENT);
-                }
-                for key in ["baud", "parity", "stop_bits", "response_ms"] {
-                    if cfg.get(key).is_some() {
-                        return Err(Status::INVALID_ARGUMENT);
-                    }
-                }
-                Link::I2c {
-                    address: address(cfg)?,
-                }
-            }
+            Transport::I2c => Link::I2c {
+                address: address(cfg).map_err(invalid)?,
+            },
             Transport::Modbus { input } => {
-                if wire != Wire::Uart {
-                    return Err(Status::INVALID_ARGUMENT);
-                }
                 if cfg.host_owned() {
                     return Err(Status::NOT_SUPPORTED);
                 }
                 Link::Modbus {
-                    unit: unit(cfg)?,
+                    unit: unit(cfg).map_err(invalid)?,
                     input,
-                    format: uart_format(cfg)?,
-                    wait: response(cfg)?,
+                    format: uart_format(cfg).map_err(invalid)?,
+                    wait: response(cfg).map_err(invalid)?,
                 }
             }
         };
@@ -477,8 +430,12 @@ macro_rules! description_driver {
 
             const TICKS: bool = true;
 
+            fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+                check(cfg, $kind, Wire::$port)
+            }
+
             fn start(needs: $needs, cfg: &Config<'_>) -> Result<Self> {
-                let sensor = Sensor::new(cfg, $kind, Wire::$port)?;
+                let sensor = Sensor::open(cfg, $kind, Wire::$port)?;
                 Ok(Self {
                     $field: needs.$field,
                     sensor,
@@ -509,16 +466,8 @@ macro_rules! description_driver {
 
 /// The items each contract's drivers describe.
 fn describe(kind: Kind, sensor: &Sensor, out: &mut Description) {
-    let live = match sensor {
-        Sensor::Live(live) => Some(live),
-        Sensor::Refused(_) => None,
-    };
-    if let Some(Live {
-        link: Link::I2c { address },
-        ..
-    }) = live
-    {
-        out.set_address(*address);
+    if let Link::I2c { address } = sensor.link {
+        out.set_address(address);
     }
     // The three axes of a vector are one value: their items share a group.
     let group = match kind {
@@ -553,10 +502,7 @@ fn describe(kind: Kind, sensor: &Sensor, out: &mut Description) {
     };
     // Each channel's span is what its bits can count, in the contract's unit: the number's smallest
     // and largest count, scaled and offset as the description says. The step is one count.
-    let channels = match live {
-        Some(live) => live.chip.channels(),
-        None => &[],
-    };
+    let channels = sensor.chip.channels();
     for (index, (name, field, unit)) in items.iter().enumerate() {
         let mut item = Item::value(name, READ).unit(*unit, 0);
         if let Some(channel) = channels.get(index) {
@@ -854,42 +800,150 @@ impl PowerMonitor for ModbusPowerMonitor {
     }
 }
 
-/// The `address` setting: a 7-bit address that is not reserved.
-fn address(cfg: &Config<'_>) -> Result<u8> {
+/// The settings this driver takes, by key and kind. `address` is the chip's I2C address or the
+/// Modbus unit id; the Modbus frame keys are read only on a Modbus driver.
+const KEYS: &[Key] = &[
+    Key::required("address", KeyKind::Int),
+    Key::optional("description", KeyKind::Str),
+    Key::optional("description_file", KeyKind::Str),
+    Key::optional("baud", KeyKind::Int),
+    Key::optional("parity", KeyKind::Str),
+    Key::optional("stop_bits", KeyKind::Int),
+    Key::optional("response_ms", KeyKind::Int),
+];
+
+/// The Modbus frame keys: an I2C chip takes none of them.
+const MODBUS_KEYS: &[&str] = &["baud", "parity", "stop_bits", "response_ms"];
+
+/// The reason both `description` and `description_file` are given.
+const BOTH_KEYS: &str = "is given with description: give one of them, not both";
+/// The reason `description_file` is given to a build without a filesystem.
+#[cfg(not(feature = "std"))]
+const NO_FILESYSTEM: &str = "needs a build with a filesystem: give the chip's text as description";
+
+/// The settings a generic driver of `wire` and `kind` takes, checked with no bus and no hardware:
+/// the key names and kinds, the chip the description names, and the settings the chip's transport
+/// needs. The host runs this before it makes the device, and `start` runs it again through
+/// [`Sensor::open`], so the two cannot drift.
+fn check<'a>(
+    cfg: &Config<'a>,
+    kind: Kind,
+    wire: Wire,
+) -> core::result::Result<(), ConfigError<'a>> {
+    cfg.check_keys(KEYS)?;
+    let chip = load(cfg, kind)?;
+    match (chip.transport(), wire) {
+        (Transport::I2c, Wire::I2c) => {
+            for key in MODBUS_KEYS {
+                if cfg.get(key).is_some() {
+                    return Err(ConfigError::new(
+                        key,
+                        "is a Modbus setting, and this chip is on I2C",
+                    ));
+                }
+            }
+            address(cfg).map(drop)
+        }
+        (Transport::Modbus { .. }, Wire::Uart) => {
+            unit(cfg).map(drop)?;
+            uart_format(cfg).map(drop)?;
+            response(cfg).map(drop)
+        }
+        (Transport::I2c, Wire::Uart) => Err(ConfigError::new(
+            "description",
+            "is an I2C chip's description, and this driver reads Modbus chips",
+        )),
+        (Transport::Modbus { .. }, Wire::I2c) => Err(ConfigError::new(
+            "description",
+            "is a Modbus chip's description, and this driver reads I2C chips",
+        )),
+    }
+}
+
+/// The chip the settings name, for `kind`. `description` is the chip's text in every build.
+/// `description_file` is a path, which only a build with a filesystem can read.
+fn load<'a>(cfg: &Config<'a>, kind: Kind) -> core::result::Result<Chip, ConfigError<'a>> {
+    match (cfg.get("description"), cfg.get("description_file")) {
+        (Some(_), Some(_)) => Err(ConfigError::new("description_file", BOTH_KEYS)),
+        (Some(ConfigValue::Str(text)), None) => Chip::parse(text, kind).map_err(|_| {
+            ConfigError::new(
+                "description",
+                "is not a chip description: a file's path goes in description_file",
+            )
+        }),
+        (None, Some(ConfigValue::Str(path))) => file(path, kind),
+        (None, None) => Err(ConfigError::new(
+            "description",
+            "is required: give the chip's text, or its file under description_file",
+        )),
+        _ => Err(ConfigError::new("description", "must be text")),
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn file<'a>(_path: &str, _kind: Kind) -> core::result::Result<Chip, ConfigError<'a>> {
+    Err(ConfigError::new("description_file", NO_FILESYSTEM))
+}
+
+#[cfg(feature = "std")]
+fn file<'a>(path: &str, kind: Kind) -> core::result::Result<Chip, ConfigError<'a>> {
+    let text = std::fs::read_to_string(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            ConfigError::new("description_file", "names no file: check the path")
+        }
+        _ => ConfigError::new("description_file", "cannot be read"),
+    })?;
+    Chip::parse(&text, kind)
+        .map_err(|_| ConfigError::new("description_file", "is not a chip description file"))
+}
+
+/// The `address` setting: a 7-bit I2C address that is not reserved.
+fn address<'a>(cfg: &Config<'a>) -> core::result::Result<u8, ConfigError<'a>> {
     match cfg.int("address") {
         Some(address) if (0x08..=0x77).contains(&address) => Ok(address as u8),
-        _ => Err(Status::INVALID_ARGUMENT),
+        _ => Err(ConfigError::new(
+            "address",
+            "must be a 7-bit I2C address, 0x08 to 0x77",
+        )),
     }
 }
 
 /// The `address` setting on Modbus: a unit id, 1 to 247 (0 is broadcast, which nothing answers).
-fn unit(cfg: &Config<'_>) -> Result<u8> {
+fn unit<'a>(cfg: &Config<'a>) -> core::result::Result<u8, ConfigError<'a>> {
     match cfg.int("address") {
         Some(unit) if (1..=247).contains(&unit) => Ok(unit as u8),
-        _ => Err(Status::INVALID_ARGUMENT),
+        _ => Err(ConfigError::new(
+            "address",
+            "must be a Modbus unit id, 1 to 247",
+        )),
     }
 }
 
 /// The port's frame on Modbus: `baud`, `parity` and `stop_bits`.
-fn uart_format(cfg: &Config<'_>) -> Result<UartFormat> {
+fn uart_format<'a>(cfg: &Config<'a>) -> core::result::Result<UartFormat, ConfigError<'a>> {
     let baud = match cfg.get("baud") {
         None => 9600,
         Some(ConfigValue::Int(baud)) => u32::try_from(baud)
             .ok()
             .filter(|baud| *baud > 0)
-            .ok_or(Status::INVALID_ARGUMENT)?,
-        Some(_) => return Err(Status::INVALID_ARGUMENT),
+            .ok_or(ConfigError::new("baud", "must be a whole number above 0"))?,
+        Some(_) => return Err(ConfigError::new("baud", "must be a whole number")),
     };
     let parity = match cfg.get("parity") {
         None | Some(ConfigValue::Str("even")) => Parity::Even,
         Some(ConfigValue::Str("none")) => Parity::None,
         Some(ConfigValue::Str("odd")) => Parity::Odd,
-        Some(_) => return Err(Status::INVALID_ARGUMENT),
+        Some(_) => {
+            return Err(ConfigError::new(
+                "parity",
+                "must be \"none\", \"even\" or \"odd\"",
+            ));
+        }
     };
     let stop_bits = match cfg.get("stop_bits") {
         None | Some(ConfigValue::Int(1)) => StopBits::One,
         Some(ConfigValue::Int(2)) => StopBits::Two,
-        Some(_) => return Err(Status::INVALID_ARGUMENT),
+        Some(_) => return Err(ConfigError::new("stop_bits", "must be 1 or 2")),
     };
     Ok(UartFormat {
         baud,
@@ -899,48 +953,12 @@ fn uart_format(cfg: &Config<'_>) -> Result<UartFormat> {
 }
 
 /// The `response_ms` setting on Modbus.
-fn response(cfg: &Config<'_>) -> Result<Duration> {
+fn response<'a>(cfg: &Config<'a>) -> core::result::Result<Duration, ConfigError<'a>> {
     match cfg.get("response_ms") {
         None => Ok(Duration::from_millis(100)),
         Some(ConfigValue::Int(ms)) if (1..=500).contains(&ms) => {
             Ok(Duration::from_millis(ms as u64))
         }
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+        Some(_) => Err(ConfigError::new("response_ms", "must be 1 to 500")),
     }
-}
-
-/// The reason both `description` and `description_file` are given.
-const BOTH_KEYS: &str = "give description or description_file, not both";
-/// The reason `description_file` is given to a build without a filesystem.
-#[cfg(not(feature = "std"))]
-const NO_FILESYSTEM: &str = "description_file needs a build with a filesystem";
-
-/// The chip the settings name, for `kind`. `description` is always the chip's text, in every
-/// build. `description_file` is a path, which only a build with a filesystem can read; a build
-/// without one refuses it by name, never reads it as text. A bad text or file is `INVALID_ARGUMENT`.
-fn chip(cfg: &Config<'_>, kind: Kind) -> Result<core::result::Result<Chip, &'static str>> {
-    match (cfg.get("description"), cfg.get("description_file")) {
-        (Some(_), Some(_)) => Ok(Err(BOTH_KEYS)),
-        (Some(ConfigValue::Str(text)), None) => Chip::parse(text, kind)
-            .map(Ok)
-            .map_err(|_| Status::INVALID_ARGUMENT),
-        (None, Some(ConfigValue::Str(path))) => file(path, kind),
-        _ => Err(Status::INVALID_ARGUMENT),
-    }
-}
-
-#[cfg(not(feature = "std"))]
-fn file(_path: &str, _kind: Kind) -> Result<core::result::Result<Chip, &'static str>> {
-    Ok(Err(NO_FILESYSTEM))
-}
-
-#[cfg(feature = "std")]
-fn file(path: &str, kind: Kind) -> Result<core::result::Result<Chip, &'static str>> {
-    let text = std::fs::read_to_string(path).map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => Status::NOT_FOUND,
-        _ => Status::IO,
-    })?;
-    Chip::parse(&text, kind)
-        .map(Ok)
-        .map_err(|_| Status::INVALID_ARGUMENT)
 }

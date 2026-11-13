@@ -96,8 +96,8 @@ use lemnos_contract_camera_isp::{
     NO_BUFFER, OutputLayout,
 };
 use lemnos_core::{
-    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
-    StreamHandle, driver,
+    Config, ConfigError, Decode, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Reader,
+    Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_k230isp_sys::regs::{CTRL_GEN_CFG_UPD, ISP_CTRL, MIS_FRAME_OUT};
 use lemnos_hal::blocks::StreamFrame;
@@ -245,9 +245,37 @@ pub struct K230Isp {
     stats: [u8; STATISTICS_BYTES],
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::optional("block", Kind::Str),
+    Key::optional("device", Kind::Str),
+    Key::optional("node", Kind::Str),
+];
+
 impl Lifecycle for K230Isp {
     type Needs = K230IspNeeds;
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("block") == Some("") {
+            return Err(ConfigError::new(
+                "block",
+                "must be a platform device name, not empty",
+            ));
+        }
+        // One way to the ISP, not both. Which way the device has is checked at bind, against its needs.
+        if cfg.str("block").is_some() && cfg.str("device").is_some() {
+            return Err(ConfigError::new("device", "cannot be given with block"));
+        }
+        if cfg.str("device") == Some("") {
+            return Err(ConfigError::new(
+                "device",
+                "must be a device path, not empty",
+            ));
+        }
+        Ok(())
+    }
 
     fn start(needs: K230IspNeeds, cfg: &Config<'_>) -> Result<Self> {
         let hw: Box<dyn Hardware> = match (cfg.str("block"), cfg.str("device")) {

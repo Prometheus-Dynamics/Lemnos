@@ -53,8 +53,8 @@ use lemnos_contract_gyroscope::Gyroscope;
 use lemnos_contract_magnetometer::Magnetometer;
 use lemnos_contract_orientation::Orientation as OrientationContract;
 use lemnos_core::{
-    Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result, Status, Unit, Vector3,
-    driver,
+    Config, ConfigError, Description, Dev, Health, Item, Key, Kind, Lifecycle, MethodId, Result,
+    Status, Unit, Vector3, driver,
 };
 
 const READ: MethodId = MethodId {
@@ -90,10 +90,43 @@ pub struct Orientation {
     nine_axis: bool,
 }
 
+/// The settings a board file gives the filter.
+const KEYS: &[Key] = &[
+    Key::optional("sample_rate_hz", Kind::Float),
+    Key::optional("mode", Kind::Str),
+    Key::optional("algorithm", Kind::Str),
+    Key::optional("kp", Kind::Float),
+    Key::optional("ki", Kind::Float),
+    Key::optional("beta", Kind::Float),
+    Key::optional("dip_deg", Kind::Float),
+    Key::optional("mount_roll_deg", Kind::Float),
+    Key::optional("mount_pitch_deg", Kind::Float),
+    Key::optional("mount_yaw_deg", Kind::Float),
+    Key::optional("declination_deg", Kind::Float),
+];
+
 impl Lifecycle for Orientation {
     type Needs = OrientationNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if let Some(hz) = cfg.float("sample_rate_hz")
+            && !(SLOWEST_SAMPLE_HZ..=FASTEST_SAMPLE_HZ).contains(&hz)
+        {
+            return Err(ConfigError::new("sample_rate_hz", "must be 10 to 1000"));
+        }
+        match cfg.str("mode") {
+            None | Some("6axis" | "9axis") => {}
+            Some(_) => return Err(ConfigError::new("mode", "must be 6axis or 9axis")),
+        }
+        match cfg.str("algorithm") {
+            None | Some("mahony" | "madgwick") => {}
+            Some(_) => return Err(ConfigError::new("algorithm", "must be mahony or madgwick")),
+        }
+        Ok(())
+    }
 
     fn start(needs: OrientationNeeds, cfg: &Config<'_>) -> Result<Self> {
         let hz = sample_rate(cfg)?;
@@ -190,18 +223,12 @@ impl OrientationContract for Orientation {
     }
 }
 
-/// The sample rate from `sample_rate_hz`, checked against the filter's limits.
+/// The sample rate from `sample_rate_hz`, or the default when it is not set. Its range is
+/// checked by `check_config`.
 fn sample_rate(cfg: &Config<'_>) -> Result<f64> {
-    let hz = match cfg.get("sample_rate_hz") {
-        None => DEFAULT_SAMPLE_HZ,
-        Some(_) => cfg
-            .float("sample_rate_hz")
-            .ok_or(Status::INVALID_ARGUMENT)?,
-    };
-    if (SLOWEST_SAMPLE_HZ..=FASTEST_SAMPLE_HZ).contains(&hz) {
-        Ok(hz)
-    } else {
-        Err(Status::INVALID_ARGUMENT)
+    match cfg.get("sample_rate_hz") {
+        None => Ok(DEFAULT_SAMPLE_HZ),
+        Some(_) => cfg.float("sample_rate_hz").ok_or(Status::INVALID_ARGUMENT),
     }
 }
 
@@ -226,6 +253,7 @@ fn number(cfg: &Config<'_>, key: &str, default: f32) -> Result<f32> {
 
 /// The filter's settings from the configuration.
 fn filter_config(cfg: &Config<'_>, nine_axis: bool) -> Result<OrientationConfig> {
+    // The names are checked by `check_config`; this is the match over them.
     let algorithm = match setting_text(cfg, "algorithm")?.unwrap_or("mahony") {
         "mahony" => Algorithm::Mahony,
         "madgwick" => Algorithm::Madgwick,

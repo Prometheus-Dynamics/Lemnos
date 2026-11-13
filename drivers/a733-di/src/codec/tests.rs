@@ -428,3 +428,25 @@ fn a_board_file_binds_it_on_a_stream_of_dma_bufs_only() {
     plain.tick();
     assert_ne!(plain.device("di").unwrap().state, DeviceState::Running);
 }
+
+#[test]
+fn the_config_check_takes_a_device_path_and_refuses_bad_settings() {
+    use lemnos_core::{Config, ConfigValue, Driver};
+    let entries = [("device", ConfigValue::Str("/dev/a733-di"))];
+    assert_eq!(
+        <crate::A733Di as Driver>::check_config(&Config::new(&entries)),
+        Ok(())
+    );
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    let error = <crate::A733Di as Driver>::check_config(&Config::new(&bogus)).unwrap_err();
+    assert_eq!(error.key, "bogus");
+    let near = [("devise", ConfigValue::Str("/dev/a733-di"))];
+    let error = <crate::A733Di as Driver>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(error.suggestion, Some("device"));
+    let wrong = [("device", ConfigValue::Bool(true))];
+    let error = <crate::A733Di as Driver>::check_config(&Config::new(&wrong)).unwrap_err();
+    assert_eq!(error.key, "device");
+    let empty = [("device", ConfigValue::Str(""))];
+    let error = <crate::A733Di as Driver>::check_config(&Config::new(&empty)).unwrap_err();
+    assert_eq!(error.reason, "must not be empty");
+}

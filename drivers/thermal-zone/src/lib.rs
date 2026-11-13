@@ -19,7 +19,8 @@ mod tests;
 
 use lemnos_contract_temperature::Temperature;
 use lemnos_core::{
-    Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, Unit, driver,
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
+    Unit, driver,
 };
 use std::fs::File;
 use std::io::{self, Read};
@@ -52,10 +53,27 @@ struct Limits {
     warn_above: Option<i64>,
 }
 
+/// Every setting the driver reads. `path` is required; the limits are optional.
+const KEYS: &[Key] = &[
+    Key::required("path", Kind::Str),
+    Key::optional("min_c", Kind::Int),
+    Key::optional("max_c", Kind::Int),
+    Key::optional("warn_below_c", Kind::Int),
+    Key::optional("warn_above_c", Kind::Int),
+];
+
 impl Lifecycle for ThermalZone {
     type Needs = ThermalZoneNeeds;
     // Reaches the kernel's files itself, and on a host-owned device only reads them.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ReadsOnly;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if matches!((cfg.int("min_c"), cfg.int("max_c")), (Some(min), Some(max)) if min > max) {
+            return Err(ConfigError::new("min_c", "must not be above max_c"));
+        }
+        Ok(())
+    }
 
     fn start(_needs: ThermalZoneNeeds, cfg: &Config<'_>) -> Result<Self> {
         let dir = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;
@@ -65,9 +83,6 @@ impl Lifecycle for ThermalZone {
             warn_below: cfg.int("warn_below_c"),
             warn_above: cfg.int("warn_above_c"),
         };
-        if matches!((limits.min, limits.max), (Some(min), Some(max)) if min > max) {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         Ok(Self {
             temp: Path::new(dir).join("temp"),
             faulted: false,

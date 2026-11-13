@@ -101,8 +101,8 @@ use lemnos_contract_camera_sensor::{
     landing_of, launch_frame,
 };
 use lemnos_core::{
-    CallerId, Config, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Lifecycle,
-    MethodId, Reader, Result, Status, StreamHandle, Unit, driver,
+    CallerId, Config, ConfigError, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Key,
+    Kind, Lifecycle, MethodId, Reader, Result, Status, StreamHandle, Unit, driver,
 };
 
 /// The name the kernel gives this sensor, when some kernel driver binds it. None here: this driver
@@ -338,6 +338,12 @@ pub struct Ov9782 {
     owner: Option<CallerId>,
 }
 
+/// The settings a board file gives the sensor.
+const KEYS: &[Key] = &[
+    Key::optional("address", Kind::Int),
+    Key::optional("continuous_clock", Kind::Bool),
+];
+
 impl Lifecycle for Ov9782 {
     type Needs = Ov9782Needs;
     // Everything this driver does to hardware goes through its needs.
@@ -345,6 +351,19 @@ impl Lifecycle for Ov9782 {
     const TICKS: bool = true;
     // The host says who is calling, so a caller that goes away can stop the sensor it started.
     const TRACKS_CALLERS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if let Some(address) = cfg.int("address")
+            && !(0x08..=0x77).contains(&address)
+        {
+            return Err(ConfigError::new(
+                "address",
+                "must be a 7-bit address, 0x08 to 0x77",
+            ));
+        }
+        Ok(())
+    }
 
     fn caller(&mut self, caller: CallerId) {
         self.caller = Some(caller);
@@ -1082,11 +1101,11 @@ fn decode_job(job: &[u8]) -> Option<FrameValues> {
     (from.remaining() == 0).then_some(values)
 }
 
-/// The `address` config: a 7-bit address that is not reserved.
+/// The `address` config, default the chip's. Its range is checked by `check_config`.
 fn address_from_config(cfg: &Config<'_>) -> Result<u8> {
     match cfg.get("address") {
         None => Ok(DEFAULT_ADDRESS),
-        Some(ConfigValue::Int(address)) if (0x08..=0x77).contains(&address) => Ok(address as u8),
+        Some(ConfigValue::Int(address)) => Ok(address as u8),
         Some(_) => Err(Status::INVALID_ARGUMENT),
     }
 }

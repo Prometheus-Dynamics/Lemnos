@@ -64,7 +64,8 @@ use std::os::unix::fs::FileExt;
 use lemnos_contract_indicator::{Indicator as IndicatorContract, NO_PROGRESS};
 use lemnos_contract_system_flash::{FORMAT_RAW, FORMAT_XZ, Flash};
 use lemnos_core::{
-    CallerId, Config, Dev, Health, JobId, JobState, Lifecycle, Reply, Result, Status, driver,
+    CallerId, Config, ConfigError, Dev, Health, JobId, JobState, Key, Kind as SettingKind,
+    Lifecycle, Reply, Result, Status, driver,
 };
 use lemnos_slot_store::json::quoted;
 use sha2::{Digest, Sha256};
@@ -671,36 +672,83 @@ fn io_failure(error: &io::Error, what: &str) -> (Status, String) {
     (Status::IO, format!("{what}: {error}"))
 }
 
+/// Every setting the driver reads. `path` is required; the rest have defaults.
+const KEYS: &[Key] = &[
+    Key::required("path", SettingKind::Str),
+    Key::optional("kind", SettingKind::Str),
+    Key::optional("image", SettingKind::Str),
+    Key::optional("erase_size", SettingKind::Int),
+    Key::optional("write_size", SettingKind::Int),
+    Key::optional("subpage_size", SettingKind::Int),
+    Key::optional("bad_blocks", SettingKind::Str),
+    Key::optional("mtd_index", SettingKind::Int),
+    Key::optional("mark_bad", SettingKind::Bool),
+    Key::optional("sysfs", SettingKind::Str),
+    Key::optional("max_dict_mb", SettingKind::Int),
+    Key::optional("keys", SettingKind::Str),
+    Key::optional("allow_first_flash", SettingKind::Bool),
+    Key::optional("require_signed", SettingKind::Bool),
+    Key::optional("mountinfo", SettingKind::Str),
+];
+
+/// The target kind and, for `mtd`, its NAND settings. Refused with the key named.
+fn kind_and_mtd<'a>(
+    cfg: &Config<'a>,
+) -> core::result::Result<(Kind, Option<Mtd>), ConfigError<'a>> {
+    let kind = Kind::parse(cfg.str("kind").unwrap_or("block"))
+        .ok_or(ConfigError::new("kind", "must be block, file or mtd"))?;
+    let mtd = match kind {
+        Kind::Mtd => Some(Mtd::from_config(cfg)?),
+        _ if cfg.str("image").is_some() => {
+            return Err(ConfigError::new("image", "is only for kind = mtd"));
+        }
+        _ => None,
+    };
+    Ok((kind, mtd))
+}
+
+/// The `max_dict_mb` setting: the largest dictionary a decoder may take, in MiB (1 to 8).
+fn max_dict_mb<'a>(cfg: &Config<'a>) -> core::result::Result<i64, ConfigError<'a>> {
+    match cfg.int("max_dict_mb").unwrap_or(8) {
+        mb @ 1..=8 => Ok(mb),
+        _ => Err(ConfigError::new("max_dict_mb", "must be 1 to 8")),
+    }
+}
+
 impl Mtd {
     /// The NAND settings of a `kind = "mtd"` board file. The test overrides (`erase_size` and the
     /// rest) make the target a regular file standing in for the partition.
-    fn from_config(cfg: &Config<'_>) -> Result<Self> {
+    fn from_config<'a>(cfg: &Config<'a>) -> core::result::Result<Self, ConfigError<'a>> {
         let image = match cfg.str("image") {
             None => Image::Raw,
-            Some(text) => Image::parse(text).ok_or(Status::INVALID_ARGUMENT)?,
+            Some(text) => {
+                Image::parse(text).ok_or(ConfigError::new("image", "must be ubi or raw"))?
+            }
         };
-        let positive = |n: i64| {
+        let positive = |key: &'static str, n: i64| {
             u64::try_from(n)
                 .ok()
                 .filter(|&n| n > 0)
-                .ok_or(Status::INVALID_ARGUMENT)
+                .ok_or(ConfigError::new(key, "must be a positive number"))
         };
         let fake = match cfg.int("erase_size") {
             None => None,
             Some(erase) => {
-                let write = positive(cfg.int("write_size").unwrap_or(2048))?;
+                let write = positive("write_size", cfg.int("write_size").unwrap_or(2048))?;
                 let subpage = match cfg.int("subpage_size") {
                     None => write,
-                    Some(sub) => positive(sub)?,
+                    Some(sub) => positive("subpage_size", sub)?,
                 };
                 Some(FakeNand {
-                    erase: positive(erase)?,
+                    erase: positive("erase_size", erase)?,
                     write,
                     subpage,
                     bad: cfg.str("bad_blocks").map(Into::into),
                     index: match cfg.int("mtd_index") {
                         None => None,
-                        Some(n) => Some(u32::try_from(n).map_err(|_| Status::INVALID_ARGUMENT)?),
+                        Some(n) => Some(u32::try_from(n).map_err(|_| {
+                            ConfigError::new("mtd_index", "must be 0 to 4294967295")
+                        })?),
                     },
                 })
             }
@@ -720,20 +768,18 @@ impl Lifecycle for SystemFlash {
     const JOBS: bool = true;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        kind_and_mtd(cfg)?;
+        max_dict_mb(cfg)?;
+        Ok(())
+    }
+
     fn start(needs: SystemFlashNeeds, cfg: &Config<'_>) -> Result<Self> {
         let path = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;
-        let kind =
-            Kind::parse(cfg.str("kind").unwrap_or("block")).ok_or(Status::INVALID_ARGUMENT)?;
-        let mtd = match kind {
-            Kind::Mtd => Some(Mtd::from_config(cfg)?),
-            _ if cfg.str("image").is_some() => return Err(Status::INVALID_ARGUMENT),
-            _ => None,
-        };
+        let (kind, mtd) = kind_and_mtd(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         let format = mtd.as_ref().map_or(manifest::DISK, |m| m.image.format());
-        let max_mb = cfg.int("max_dict_mb").unwrap_or(8);
-        if !(1..=8).contains(&max_mb) {
-            return Err(Status::INVALID_ARGUMENT);
-        }
+        let max_mb = max_dict_mb(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         // A key file that can't be read leaves the board trusting no manifest, as slots do.
         let keys = cfg
             .str("keys")
@@ -1224,5 +1270,126 @@ mod tests {
         assert_eq!(io_failure(&full, "x").0, NO_SPACE);
         let other = io::Error::from_raw_os_error(5);
         assert_eq!(io_failure(&other, "x").0, Status::IO);
+    }
+
+    #[test]
+    fn check_config_names_the_bad_setting() {
+        use lemnos_core::{Config, ConfigValue};
+        fn check<'a>(
+            entries: &'a [(&'a str, ConfigValue<'a>)],
+        ) -> core::result::Result<(), ConfigError<'a>> {
+            <SystemFlash as Lifecycle>::check_config(&Config::new(entries))
+        }
+        let mtd = [
+            ("path", ConfigValue::Str("/dev/mtd0")),
+            ("kind", ConfigValue::Str("mtd")),
+            ("image", ConfigValue::Str("ubi")),
+            ("erase_size", ConfigValue::Int(131_072)),
+            ("subpage_size", ConfigValue::Int(2048)),
+            ("mtd_index", ConfigValue::Int(0)),
+            ("max_dict_mb", ConfigValue::Int(1)),
+        ];
+        assert!(<SystemFlash as Lifecycle>::check_config(&Config::new(&mtd)).is_ok());
+        assert!(
+            check(&[
+                ("path", ConfigValue::Str("/dev/x")),
+                ("max_dict_mb", ConfigValue::Int(8))
+            ])
+            .is_ok()
+        );
+
+        assert_eq!(
+            check(&[
+                ("bogus", ConfigValue::Int(1)),
+                ("path", ConfigValue::Str("/x"))
+            ])
+            .unwrap_err()
+            .key,
+            "bogus"
+        );
+        let near = check(&[
+            ("path", ConfigValue::Str("/x")),
+            ("max_dict_m", ConfigValue::Int(8)),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            (near.key, near.suggestion),
+            ("max_dict_m", Some("max_dict_mb"))
+        );
+        assert_eq!(
+            check(&[("path", ConfigValue::Int(1))]).unwrap_err().key,
+            "path"
+        );
+        assert_eq!(check(&[]).unwrap_err().key, "path");
+        assert_eq!(
+            check(&[
+                ("path", ConfigValue::Str("/x")),
+                ("kind", ConfigValue::Str("tape"))
+            ])
+            .unwrap_err()
+            .key,
+            "kind"
+        );
+        assert_eq!(
+            check(&[
+                ("path", ConfigValue::Str("/x")),
+                ("image", ConfigValue::Str("ubi"))
+            ])
+            .unwrap_err()
+            .key,
+            "image"
+        );
+        assert_eq!(
+            check(&[
+                ("path", ConfigValue::Str("/x")),
+                ("kind", ConfigValue::Str("mtd")),
+                ("image", ConfigValue::Str("xfs"))
+            ])
+            .unwrap_err()
+            .key,
+            "image"
+        );
+        assert_eq!(
+            check(&[
+                ("path", ConfigValue::Str("/x")),
+                ("max_dict_mb", ConfigValue::Int(0))
+            ])
+            .unwrap_err()
+            .key,
+            "max_dict_mb"
+        );
+        assert_eq!(
+            check(&[
+                ("path", ConfigValue::Str("/x")),
+                ("max_dict_mb", ConfigValue::Int(9))
+            ])
+            .unwrap_err()
+            .key,
+            "max_dict_mb"
+        );
+        let mtd_base = [
+            ("path", ConfigValue::Str("/x")),
+            ("kind", ConfigValue::Str("mtd")),
+            ("erase_size", ConfigValue::Int(1)),
+        ];
+        let mut write_zero = mtd_base.to_vec();
+        write_zero.push(("write_size", ConfigValue::Int(0)));
+        assert_eq!(check(&write_zero).unwrap_err().key, "write_size");
+        let mut subpage_zero = mtd_base.to_vec();
+        subpage_zero.push(("subpage_size", ConfigValue::Int(0)));
+        assert_eq!(check(&subpage_zero).unwrap_err().key, "subpage_size");
+        let mut index_negative = mtd_base.to_vec();
+        index_negative.push(("mtd_index", ConfigValue::Int(-1)));
+        assert_eq!(check(&index_negative).unwrap_err().key, "mtd_index");
+        assert_eq!(
+            check(&[
+                ("path", ConfigValue::Str("/x")),
+                ("kind", ConfigValue::Str("mtd")),
+                ("erase_size", ConfigValue::Int(0))
+            ])
+            .unwrap_err()
+            .key,
+            "erase_size"
+        );
     }
 }

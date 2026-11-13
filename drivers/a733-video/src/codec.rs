@@ -23,7 +23,9 @@ use std::path::PathBuf;
 
 use lemnos_contract_codec_block::work::Work;
 use lemnos_contract_codec_block::{BlockInfo, CodecBlock, Counters};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_driver_codec_jobs::{Block, Buffers, Server, Start, name_into};
 
 use crate::block::{Device, Lock, State, backoff_ns};
@@ -183,9 +185,44 @@ impl A733Video {
     }
 }
 
+/// Every setting the driver reads from the board file. None is required by name: `block` is
+/// required on the module route, which `check_config` checks.
+const KEYS: &[Key] = &[
+    Key::optional("route", Kind::Str),
+    Key::optional("device", Kind::Str),
+    Key::optional("lock", Kind::Str),
+    Key::optional("node", Kind::Str),
+    Key::optional("block", Kind::Str),
+];
+
 impl Lifecycle for A733Video {
     type Needs = A733VideoNeeds;
     const TICKS: bool = true;
+
+    /// The vendor route's `device` and `lock` are checked only on that route, and the module
+    /// route's `block` only on it, as `start` reads them.
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        match cfg.str("route") {
+            None | Some("vendor") => {
+                if cfg.str("device") == Some("") {
+                    return Err(ConfigError::new("device", "must not be empty"));
+                }
+                match cfg.str("lock") {
+                    None | Some("encoder" | "decoder" | "jpeg") => Ok(()),
+                    Some(_) => Err(ConfigError::new("lock", "must be encoder, decoder or jpeg")),
+                }
+            }
+            Some("module") => match cfg.str("block") {
+                Some(name) if !name.is_empty() => Ok(()),
+                _ => Err(ConfigError::new(
+                    "block",
+                    "is required on the module route, and must not be empty",
+                )),
+            },
+            Some(_) => Err(ConfigError::new("route", "must be vendor or module")),
+        }
+    }
 
     fn start(needs: A733VideoNeeds, cfg: &Config<'_>) -> Result<Self> {
         match cfg.str("route") {
@@ -204,9 +241,6 @@ impl Lifecycle for A733Video {
             Some(_) => return Err(Status::INVALID_ARGUMENT),
         }
         let path = PathBuf::from(cfg.str("device").unwrap_or(DEVICE));
-        if path.as_os_str().is_empty() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         let lock = match cfg.str("lock") {
             None | Some("encoder") => Lock::Encoder,
             Some("decoder") => Lock::Decoder,

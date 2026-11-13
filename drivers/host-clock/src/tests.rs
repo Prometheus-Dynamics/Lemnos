@@ -179,3 +179,40 @@ fn provides_no_contract() {
             .is_empty()
     );
 }
+
+#[test]
+fn check_config_accepts_a_full_config() {
+    let entries = [
+        ("sys_root", ConfigValue::Str("/sys")),
+        ("rtc", ConfigValue::Str("rtc0")),
+    ];
+    assert_eq!(
+        <HostClock as lemnos_core::Lifecycle>::check_config(&Config::new(&entries)),
+        Ok(())
+    );
+}
+
+#[test]
+fn check_config_refuses_an_unknown_key_by_name() {
+    let entries = [("bogus", ConfigValue::Int(1))];
+    let err =
+        <HostClock as lemnos_core::Lifecycle>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(err.key, "bogus");
+}
+
+#[test]
+fn check_config_suggests_the_nearest_key() {
+    let entries = [("sys_roto", ConfigValue::Str("/sys"))];
+    let err =
+        <HostClock as lemnos_core::Lifecycle>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(err.key, "sys_roto");
+    assert_eq!(err.suggestion, Some("sys_root"));
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind() {
+    let entries = [("rtc", ConfigValue::Int(0))];
+    let err =
+        <HostClock as lemnos_core::Lifecycle>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(err.key, "rtc");
+}
