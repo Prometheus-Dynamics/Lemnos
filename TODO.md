@@ -41,10 +41,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
 
 ## Unfinished in the code
 
-- [ ] **Gadget MAC derivation** (R1): `function ncm derive`, a NCM address stable from the board
-      serial, is not in the board format yet. It waits for the identity library (P1) to be on `next`,
-      and is then a call into it. Until then the NCM addresses are the board file's own `host=` and
-      `device=` values.
 - [ ] **ISP600 tuning encodings** (`drivers/isp600`): the channel black level and bit depths, module
       enables and temporal denoise's record enable are encoded and wait for a board run
       (`testing/board-runs/U3.md`). No public, licensed source defines the register encodings of white

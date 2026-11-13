@@ -37,7 +37,7 @@ id = "t"
 id = "gadget"
 driver = "usb-gadget"
 uses = { function = "udc0" }
-config = { vendor = 0x1209, product = 1, interfaces = "interface 0xff 0 0 pipe\nendpoint in bulk\nendpoint out bulk\n" }
+config = { vendor = 0x1209, product = 1, serial = "S0", interfaces = "interface 0xff 0 0 pipe\nendpoint in bulk\nendpoint out bulk\n" }
 
 [devices.streams.data]
 buffers = 8

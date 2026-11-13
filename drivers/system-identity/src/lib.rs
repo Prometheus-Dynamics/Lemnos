@@ -159,6 +159,22 @@ fn copy(text: Option<&str>, into: &mut [u8]) -> Result<usize> {
     Ok(bytes.len())
 }
 
+/// The board's serial as this device's config names its source, read and normalised. The daemon
+/// reads it once, at setup, and gives it to a gadget that names this device as its `identity`
+/// (`docs/identity.md`, `docs/boards.md`). The reason is text: it is what the board log says.
+///
+/// # Errors
+///
+/// When the config names no source, names one wrongly, or the source cannot be read or does not
+/// fit the serial format.
+pub fn board_serial(cfg: &Config<'_>) -> core::result::Result<String, String> {
+    match serial_source(cfg) {
+        Err(status) => Err(format!("the serial settings are wrong: {status:?}")),
+        Ok(None) => Err("the identity device names no `serial` source".into()),
+        Ok(Some(source)) => source.read().map_err(|error| error.to_string()),
+    }
+}
+
 /// The serial source the config names, or `None` when it names none.
 fn serial_source(cfg: &Config<'_>) -> Result<Option<SerialSource>> {
     let Some(kind) = cfg.str("serial") else {

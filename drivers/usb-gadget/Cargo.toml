@@ -21,6 +21,8 @@ std = ["alloc"]
 lemnos-core = { path = "../../engine/core" }
 lemnos-hal = { path = "../../engine/hal" }
 lemnos-contract-usb-function = { path = "../../contracts/usb-function" }
+# The NCM addresses a board identity gives (`derive`): SHA-256, no_std, as the tree already uses it.
+sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }

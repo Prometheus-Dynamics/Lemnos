@@ -482,10 +482,59 @@ buffer_bytes = 1048576
 
 The gadget's `interfaces` text lists its functions in configfs link order, one per line: `function ffs`
 (the FunctionFS link the daemon serves; the default, first, when no line names it), `function ncm
-host=MAC device=MAC` (a CDC network function; both MACs unicast and different), and `function acm`
-(a serial console, `ttyGS0` for the first). The `interface`, `alternate` and `endpoint` lines
-describe the FunctionFS function. Each kind is listed at most once. The MACs are the board's own.
-Deriving them from the board serial is not in yet (see `TODO.md`).
+host=MAC device=MAC` or `function ncm derive` (a CDC network function; both MACs unicast and
+different), and `function acm` (a serial console, `ttyGS0` for the first). The `interface`,
+`alternate` and `endpoint` lines describe the FunctionFS function. Each kind is listed at most once.
+`host=MAC device=MAC` gives the board's own addresses. `derive` takes both from the board's identity,
+so every board of a type gets its own pair (see below).
+
+### Identity-derived addresses and the USB serial
+
+The gadget names the identity device whose serial is the board's serial, and the daemon reads that
+serial once, before anything is set up (`docs/identity.md`):
+
+```toml
+[[devices]]
+id = "identity"
+driver = "system-identity"
+[devices.config]
+serial = "device-tree"
+
+[[devices]]
+id = "gadget"
+driver = "usb-gadget"
+uses = { function = "udc:fe800000.usb" }
+config = { vendor = 0x1209, product = 0x0001, identity = "identity", interfaces = "function ffs\ninterface 0xff 0 0 pipe\nendpoint in bulk\nendpoint out bulk\nfunction ncm derive\nfunction acm\n" }
+```
+
+- `identity` (optional) names the `system-identity` device. Without it, or with a serial that cannot
+  be read, the gadget has no board serial. A board file that names a device that is not there, or
+  one that is not a `system-identity` device, is refused. The board file may not set `board_serial`
+  or `board_serial_error` itself: the daemon writes them.
+- `serial` (optional string) is the USB serial string the host shows. It defaults to the board
+  serial. With neither, the device has no serial string and its health is `Degraded` with the
+  reason. Nothing is invented.
+- `function ncm derive` needs the board serial. Without one, the gadget does not set up, and the
+  daemon names the reason (the board serial could not be read, or the board names no identity).
+  There is no fixed fallback address.
+
+The rule. The input is the ASCII bytes of `<family>:<serial>`: `<family>` is the board file's
+`[board] id`, `<serial>` is the normalised serial (lowercase hex, 8 to 32 digits, leading zeros
+kept). The digest is SHA-256 of the 15 bytes `lemnos-usb-ncm\0` followed by that input. Take the
+first 6 bytes and set the first to `(b0 & 0xfc) | 0x02`: unicast, locally administered. The host's
+address is those 6 bytes with the lowest bit of the last octet cleared; the device's is the same
+with that bit set.
+
+Vectors, to check another implementation against. They are computed with `hashlib`, and the digest
+prefixes match `printf 'lemnos-usb-ncm\0%s' 'alpha:00000001' | sha256sum`:
+
+| `[board] id` | serial | host MAC | device MAC |
+|---|---|---|---|
+| `lemnos-test` | `0123456789abcdef` | `aa:22:75:11:2a:72` | `aa:22:75:11:2a:73` |
+| `alpha` | `00000001` | `b2:b5:ba:4c:1e:30` | `b2:b5:ba:4c:1e:31` |
+
+The two addresses differ only in the last bit, and the derived pair is the same in the daemon's
+driver and in its root phase, because both read the same settings.
 
 The gadget's configfs tree and FunctionFS mount are made by the daemon in its root phase, before it
 drops to user `lemnos` (see `packaging/README.md`). The daemon then binds the gadget and serves ep0.

@@ -31,7 +31,13 @@
 //! - `release` (integer, default 0x0100): the device's release number (`bcdDevice`).
 //! - `class`, `subclass`, `protocol` (integers, default 0): the device's class triple. 0 leaves
 //!   the class to each interface.
-//! - `manufacturer`, `product_name`, `serial` (strings, optional): what the host shows.
+//! - `manufacturer`, `product_name`, `serial` (strings, optional): what the host shows. `serial`
+//!   defaults to the board's serial fact (`board_serial`, below); with neither, the device has no
+//!   serial string and health says so.
+//! - `board_serial` (string, optional, set by the daemon, never by the board file): the board's
+//!   normalised serial, read from the identity device the gadget names as `identity` (see
+//!   `docs/identity.md`). The daemon refuses a board file that sets it. With `function ncm derive`
+//!   it is what the NCM addresses come from ([`derive`]); the family is the board's `[board] id`.
 //! - `max_power_ma` (integer, default 100): the most the device draws from the bus, up to 500.
 //! - `self_powered` (boolean, default false).
 //! - `control_timeout_ms` (integer, default 1000, 1 to 60000): how long a control request
@@ -65,6 +71,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod derive;
 pub mod description;
 pub mod serve;
 #[cfg(test)]
@@ -113,6 +120,11 @@ pub const DENIED: &str = "not allowed to set the gadget up: retrying";
 pub const IN_USE: &str = "something else holds the controller: retrying";
 pub const ENABLE_FAILED: &str = "the gadget could not be enabled: retrying";
 pub const LET_GO: &str = "the controller let go of the gadget: enabling it again";
+/// Health while up, when the gadget has no serial string: the board names no serial source.
+pub const NO_SERIAL: &str = "no USB serial string: the board names no readable serial";
+/// Health while up, when the gadget has no serial string although the board names one that
+/// could not be read.
+pub const NO_SERIAL_READ: &str = "no USB serial string: the board serial could not be read";
 
 fn enable_fault(kind: ErrorKind) -> &'static str {
     match kind {
@@ -134,6 +146,8 @@ pub struct UsbGadget {
     set: Set,
     /// Whether the function is enabled.
     up: bool,
+    /// Why the gadget is up but missing something: its health while up.
+    note: Option<&'static str>,
     /// Whether the host has the device configured.
     configured: bool,
     /// Whether the bus is idle.
@@ -406,6 +420,13 @@ impl Lifecycle for UsbGadget {
 
     fn start(needs: UsbGadgetNeeds, cfg: &Config<'_>) -> Result<Self> {
         let (set, _) = settings(cfg)?;
+        let note = if cfg.str("serial").is_some() || cfg.str("board_serial").is_some() {
+            None
+        } else if cfg.str("board_serial_error").is_some() {
+            Some(NO_SERIAL_READ)
+        } else {
+            Some(NO_SERIAL)
+        };
         let control_timeout_ms = integer(cfg, "control_timeout_ms", 60_000, Some(1_000))?;
         if control_timeout_ms == 0 {
             return Err(Status::INVALID_ARGUMENT);
@@ -428,6 +449,7 @@ impl Lifecycle for UsbGadget {
             data: needs.data,
             set,
             up: false,
+            note,
             configured: false,
             suspended: false,
             control_timeout_ns: control_timeout_ms as u64 * NS_PER_MS,
@@ -442,7 +464,7 @@ impl Lifecycle for UsbGadget {
 
     fn health(&self) -> Health {
         match (self.up, self.fault) {
-            (true, _) => Health::Ok,
+            (true, _) => self.note.map_or(Health::Ok, Health::Degraded),
             (false, STARTING) => Health::Degraded(STARTING),
             (false, fault) => Health::Failed(fault),
         }
@@ -505,7 +527,7 @@ pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
         protocol: integer(cfg, "protocol", 0xff, Some(0))? as u8,
         manufacturer: string(cfg, "manufacturer")?,
         product_name: string(cfg, "product_name")?,
-        serial: string(cfg, "serial")?,
+        serial: string(cfg, "serial")?.or(cfg.str("board_serial")),
         max_power_ma: integer(cfg, "max_power_ma", 500, Some(100))? as u16,
         self_powered,
     };
@@ -516,7 +538,11 @@ pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
     let interfaces = text.as_str();
     let set =
         description::build(&identity, interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
+    // The addresses come from the board's serial fact, and only when there is one in the format.
+    let macs = cfg
+        .str("board_serial")
+        .and_then(|serial| derive::macs(cfg.board(), serial));
     let functions =
-        description::functions(interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
+        description::functions(interfaces, macs).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
     Ok((set, functions))
 }
