@@ -51,15 +51,30 @@ struct lrj_profile {
 	u32 id;			/* LEMNOS_REGJOB_PROFILE_* */
 	const char *name;
 	u32 window;		/* bytes of the register window jobs and the module use */
+	/* What the frames role may write. */
 	const struct lrj_plain *plain;
 	u32 nplain;
+	/*
+	 * A write changes only the bits of the writer's mask; the others keep
+	 * their value (read, merged, written back under the module's lock). Off:
+	 * the bits outside the mask are written as 0.
+	 */
+	bool keep_bits;
+	/* What the configuration role may write; none: the profile has no such role. */
+	const struct lrj_plain *config;
+	u32 nconfig;
 	const struct lrj_slot *slots;
 	u32 nslots;
 	u32 start_reg;
 	/* Highest address + bytes a slot's register can hold (1 << 32 for a 32-bit register). */
 	u64 addr_limit;
-	/* The block keeps using its addresses after a job completes (a capture path). */
+	/*
+	 * The block keeps using its addresses after a job completes (a capture
+	 * path): it takes a job's addresses only when latch() switches it to them.
+	 */
 	bool continuous;
+	/* Which of the device's interrupts completes a job. */
+	u32 irq_index;
 
 	/* Whether `value` may start a job. */
 	bool (*start_ok)(u32 value);
@@ -74,13 +89,28 @@ struct lrj_profile {
 	void (*arm)(struct lem_rj *rj);
 	/* In the handler: 1 with *status when the job completed, 0 when not this block's. */
 	int (*irq)(struct lem_rj *rj, u32 *status);
+	/*
+	 * Continuous profiles: switches the block to the addresses in `c`, either
+	 * at once on an idle block (before the start) or in the handler at the end
+	 * of a frame, and answers LEMNOS_REGJOB_STATUS_UNLATCHED when the block
+	 * didn't take them. Called with irq_lock held.
+	 */
+	u32 (*latch)(struct lem_rj *rj, const struct lrj_ctx *c);
 	/* Interrupts off. */
 	void (*quiet)(struct lem_rj *rj);
 	/* After the reset line was pulsed (and at probe): the block's own reset sequence. */
 	void (*reset_regs)(struct lem_rj *rj);
+
+	/* Configuration role: which of the device's interrupts carries its events. */
+	u32 event_irq_index;
+	/* In the handler: the status read and cleared, 0 when nothing of the events' is pending. */
+	u32 (*event)(struct lem_rj *rj);
+	/* The events' interrupt on (a configuration session is open) or off. irq_lock held. */
+	void (*event_arm)(struct lem_rj *rj, bool on);
 };
 
 extern const struct lrj_profile lrj_a733_ve;
+extern const struct lrj_profile lrj_k230_isp;
 
 /* lemnos_core.c: whether any of the device's compatibles is in the comma-separated pairs. */
 bool lem_device_listed(struct device *dev, const char *list);

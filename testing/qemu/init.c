@@ -29,6 +29,7 @@
 #define VIP_SYS "/sys/bus/platform/devices/" VIP
 #define OWNED_VIP OWNED ",lemnos,test-vip vip9000=lemnos,test-vip test_vip_fake_regs=1 " \
 	"test_vip_timeout_ms=300"
+#define ISP "lemnos-test-isp"
 #define BIND "/sys/bus/platform/drivers/lemnos/bind"
 #define UNBIND "/sys/bus/platform/drivers/lemnos/unbind"
 #define OWNED "owned=lemnos,test-block,lemnos,test-spi"
@@ -428,15 +429,22 @@ int main(void)
 	check(!forget_override(PISP), "PiSP override cleared");
 	check(!unload("lemnos"), "module unloaded with the back end idle");
 
-	/* Register jobs on a fake video engine. The check unbinds it at its end. */
+	/* Register jobs on a fake video engine and a fake ISP. The first check unbinds its block. */
 	check(!load("/lemnos_test_regjob.ko", ""), "fake register-job blocks loaded");
-	check(!load("/lemnos.ko", OWNED ",lemnos,test-ve a733_ve=lemnos,test-ve test_rj_fake_regs=1"),
+	check(!load("/lemnos.ko", OWNED ",lemnos,test-ve,lemnos,test-isp a733_ve=lemnos,test-ve "
+			       "k230_isp=lemnos,test-isp test_rj_fake_regs=1"),
 	      "module loaded with register jobs");
 	check(!bind_block(VE), "fake video engine bound");
+	check(!bind_block(ISP), "fake ISP bound");
 	check(!run((char *const[]){ "/lemnos_regjob_check", "/dev/lemnos", VE, UNBIND,
 				    (char *)cma_heap(), NULL }),
 	      "lemnos_regjob_check");
+	check(!run((char *const[]){ "/lemnos_regjob_isp_check", "/dev/lemnos", ISP,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos_regjob_isp_check");
+	check(!put(UNBIND, ISP), "fake ISP unbound");
 	check(!forget_override(VE), "fake video engine override cleared");
+	check(!forget_override(ISP), "fake ISP override cleared");
 	check(!unload("lemnos"), "module unloaded after the register jobs");
 	check(!unload("lemnos_test_regjob"), "fake register-job blocks unloaded");
 

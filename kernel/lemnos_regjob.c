@@ -22,9 +22,25 @@
  * anything is released. A block that can't be reset can't be shown to have
  * stopped: it is wedged, and what it may still use stays pinned for good.
  *
- * Locking: rj->lock (a mutex) covers the session, its buffers, the live sets
- * and a job's whole run; rj->irq_lock (a spinlock) the completion, and is the
- * only lock the handler takes.
+ * A job started without waiting (LEMNOS_REGJOB_RUN_NOWAIT) is collected by
+ * LEMNOS_REGJOB_IOC_WAIT, which never sleeps: the deadline is checked there,
+ * and a job past it is handled as a timeout. Until it is collected no other
+ * job starts. The registers a job reads back are read in the handler, at the
+ * job's end.
+ *
+ * Two roles. The frames session runs jobs; the configuration session (on a
+ * profile that has one) writes and reads registers that take no address, at
+ * once, and takes the block's other interrupt as events. Every register write
+ * of either role is made under rj->lock, and on a profile that keeps bits a
+ * register is read, merged with the writer's bits and written back there, so
+ * a register both roles write (the K230 ISP's isp_ctrl) keeps each role's
+ * bits. The handlers write only registers no table lists (interrupt status and
+ * clear, the module's switch of a capture path), so they never race a merge.
+ *
+ * Locking: rj->lock (a mutex) covers the sessions, their buffers, the live
+ * sets, a job's start and collection and every register write; rj->irq_lock
+ * (a spinlock) the completion and the event queue, and is the only lock the
+ * handlers take.
  *
  * Copyright (c) 2026 the Lemnos authors.
  */
@@ -45,6 +61,7 @@
 #include <linux/platform_device.h>
 #include <linux/reset.h>
 #include <linux/scatterlist.h>
+#include <linux/timekeeping.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
@@ -58,6 +75,12 @@ module_param(a733_ve, charp, 0444);
 MODULE_PARM_DESC(a733_ve,
 		 "Compatibles of the blocks run as the A733 video engine's encoder through register "
 		 "jobs (vendor,name pairs); they must also be in owned=");
+
+static char *k230_isp = "";
+module_param(k230_isp, charp, 0444);
+MODULE_PARM_DESC(k230_isp,
+		 "Compatibles of the blocks run as the K230's ISP main path through register jobs "
+		 "(vendor,name pairs); they must also be in owned=");
 
 static bool test_rj_fake_regs;
 module_param(test_rj_fake_regs, bool, 0444);
@@ -83,22 +106,43 @@ struct lem_rj {
 	struct kref ref;
 
 	struct mutex lock;		/* everything to irq_lock */
-	struct lrj_session *session;
+	struct lrj_session *session;	/* the frames role */
+	struct lrj_session *config;	/* the configuration role (written under irq_lock too) */
+	int event_irq;			/* the configuration role's interrupt; 0: none of its own */
 	bool gone;			/* unbound: nothing touches the block again */
 	bool wedged;
 	bool module_held;
 	u64 cur, prev;			/* buffer bits the block may be using */
 	u64 jobs, refused, timeouts, resets;
 
+	/* A job started and not yet collected. */
+	bool pending;
+	u32 pending_reads;
+	unsigned long deadline;		/* jiffies */
+	u32 timeout_ms;
+
 	spinlock_t irq_lock;		/* the completion */
 	bool armed, done;
+	bool latch_pending;		/* continuous: switch to the job's addresses at its end */
+	struct lrj_session *job;	/* the session whose job is armed */
 	u32 status;
+	u64 done_ns;			/* when the handler completed it */
 	wait_queue_head_t wq;
 };
 
-/* One opener's session: its buffers, and room for one job's kernel copy. */
+/*
+ * One opener's session: its buffers, and room for one job's kernel copy; or,
+ * for the configuration role, its event queue.
+ */
 struct lrj_session {
 	struct lem_rj *rj;
+	bool config;			/* the configuration role */
+	/* LEMNOS_REGJOB_IOC_WRITE's reads: not a pending job's, which the handler fills. */
+	u32 now_reads[LEMNOS_REGJOB_MAX_READS];
+	u32 now_values[LEMNOS_REGJOB_MAX_READS];
+	/* The configuration role's events, under irq_lock. */
+	struct lemnos_regjob_event ev[LEMNOS_REGJOB_EVENTS];
+	u32 ev_head, ev_count, ev_lost;
 	struct lrj_buf buf[LEMNOS_REGJOB_MAX_BUFFERS];
 	struct lemnos_regjob_write w[LEMNOS_REGJOB_MAX_WRITES];
 	struct lemnos_regjob_addr a[LEMNOS_REGJOB_MAX_ADDRS];
@@ -225,6 +269,55 @@ static long lrj_release_buf(struct lrj_session *s, u32 index)
 	return 0;
 }
 
+/* --- the configuration role's events --- */
+
+/* Queues an event for the configuration session, if one is open. irq_lock held. */
+static void lrj_event_push(struct lem_rj *rj, u32 status, u64 now_ns)
+{
+	struct lrj_session *c = rj->config;
+	struct lemnos_regjob_event *e;
+
+	if (!c)
+		return;
+	if (c->ev_count == LEMNOS_REGJOB_EVENTS) {
+		c->ev_lost++;
+		return;
+	}
+	e = &c->ev[(c->ev_head + c->ev_count) % LEMNOS_REGJOB_EVENTS];
+	e->status = status;
+	e->lost = c->ev_lost;
+	e->timestamp_ns = now_ns;
+	c->ev_lost = 0;
+	c->ev_count++;
+}
+
+/* The next queued event: 0, or -EAGAIN when none is. */
+static long lrj_event_take(struct lrj_session *s, struct lemnos_regjob_event *e)
+{
+	struct lem_rj *rj = s->rj;
+	unsigned long flags;
+	long ret = -EAGAIN;
+
+	spin_lock_irqsave(&rj->irq_lock, flags);
+	if (rj->gone || rj->config != s) {
+		ret = -ENODEV;
+	} else if (s->ev_count) {
+		*e = s->ev[s->ev_head];
+		s->ev_head = (s->ev_head + 1) % LEMNOS_REGJOB_EVENTS;
+		s->ev_count--;
+		ret = 0;
+	}
+	spin_unlock_irqrestore(&rj->irq_lock, flags);
+	return ret;
+}
+
+/* The events' interrupt, after anything turned the block's interrupts off. irq_lock held. */
+static void lrj_events_on(struct lem_rj *rj)
+{
+	if (rj->config && !rj->gone)
+		rj->p->event_arm(rj, true);
+}
+
 /* --- stopping the block --- */
 
 /* The block can't be shown to have stopped: what it may use stays pinned for good. */
@@ -247,15 +340,19 @@ static void lrj_wedge(struct lem_rj *rj)
 static void lrj_stop(struct lem_rj *rj)
 {
 	unsigned long flags;
+	bool reset = false;
 	int ret;
 
 	spin_lock_irqsave(&rj->irq_lock, flags);
 	rj->armed = false;
+	rj->latch_pending = false;
+	rj->job = NULL;
 	rj->p->quiet(rj);
 	spin_unlock_irqrestore(&rj->irq_lock, flags);
+	rj->pending = false;
 	if (!rj->rst) {
 		lrj_wedge(rj);
-		return;
+		goto events;
 	}
 	ret = reset_control_reset(rj->rst);
 	if (ret == -ENOTSUPP || ret == -EOPNOTSUPP) {
@@ -268,13 +365,23 @@ static void lrj_stop(struct lem_rj *rj)
 	if (ret) {
 		dev_err(rj->dev, "reset failed (%d)\n", ret);
 		lrj_wedge(rj);
-		return;
+		goto events;
 	}
 	rj->resets++;
 	rj->p->reset_regs(rj);
 	rj->p->quiet(rj);
 	rj->cur = 0;
 	rj->prev = 0;
+	reset = true;
+events:
+	/* The configuration role keeps its interrupt, and learns that its registers are gone. */
+	spin_lock_irqsave(&rj->irq_lock, flags);
+	if (rj->config) {
+		lrj_events_on(rj);
+		if (reset)
+			lrj_event_push(rj, LEMNOS_REGJOB_EVENT_RESET, ktime_get_ns());
+	}
+	spin_unlock_irqrestore(&rj->irq_lock, flags);
 }
 
 /*
@@ -297,10 +404,10 @@ static void lrj_end_session(struct lem_rj *rj, struct lrj_session *s)
 
 /* --- a job --- */
 
-static u32 lrj_plain_mask(const struct lrj_profile *p, u32 offset, bool *listed)
+static u32 lrj_mask(const struct lrj_plain *table, u32 n, u32 offset, bool *listed)
 {
-	for (u32 i = 0; i < p->nplain; i++) {
-		const struct lrj_plain *r = &p->plain[i];
+	for (u32 i = 0; i < n; i++) {
+		const struct lrj_plain *r = &table[i];
 
 		if (offset >= r->offset && (offset - r->offset) / 4 < r->count) {
 			*listed = true;
@@ -309,6 +416,39 @@ static u32 lrj_plain_mask(const struct lrj_profile *p, u32 offset, bool *listed)
 	}
 	*listed = false;
 	return 0;
+}
+
+/* Every write in a role's table, with only its bits, on a register boundary in the window. */
+static int lrj_check_writes(const struct lrj_profile *p, const struct lrj_plain *table, u32 n,
+			    const struct lemnos_regjob_write *w, u32 nw)
+{
+	for (u32 i = 0; i < nw; i++) {
+		bool listed;
+		u32 mask;
+
+		if (w[i].offset % 4 || w[i].offset > p->window - 4)
+			return -EINVAL;
+		mask = lrj_mask(table, n, w[i].offset, &listed);
+		if (!listed || (w[i].value & ~mask))
+			return -EPERM;
+	}
+	return 0;
+}
+
+/*
+ * One checked write. On a profile that keeps bits, the bits outside the
+ * writer's mask keep their value. rj->lock held: every merge is under it.
+ */
+static void lrj_write_checked(struct lem_rj *rj, const struct lrj_plain *table, u32 n,
+			      const struct lemnos_regjob_write *w)
+{
+	bool listed;
+	u32 mask = lrj_mask(table, n, w->offset, &listed);
+	u32 value = w->value;
+
+	if (rj->p->keep_bits && mask != U32_MAX)
+		value |= lrj_rd(rj, w->offset) & ~mask;
+	lrj_wr(rj, w->offset, value);
 }
 
 /* Every check, on the kernel's copy, before any register is written. rj->lock held. */
@@ -323,17 +463,9 @@ static int lrj_check(struct lem_rj *rj, struct lrj_session *s, const struct lemn
 	BUILD_BUG_ON(LEMNOS_REGJOB_MAX_BUFFERS > 64);
 	BUILD_BUG_ON(LEMNOS_REGJOB_MAX_ADDRS > 32);
 
-	for (u32 i = 0; i < r->nwrites; i++) {
-		const struct lemnos_regjob_write *w = &s->w[i];
-		bool listed;
-		u32 mask;
-
-		if (w->offset % 4 || w->offset > p->window - 4)
-			return -EINVAL;
-		mask = lrj_plain_mask(p, w->offset, &listed);
-		if (!listed || (w->value & ~mask))
-			return -EPERM;
-	}
+	ret = lrj_check_writes(p, p->plain, p->nplain, s->w, r->nwrites);
+	if (ret)
+		return ret;
 
 	if (r->naddrs != p->nslots)
 		return -EINVAL;
@@ -398,62 +530,93 @@ static bool lrj_done(struct lem_rj *rj)
 	return done;
 }
 
-/* Writes the checked job, starts it and waits. rj->lock held. */
-static long lrj_execute(struct lem_rj *rj, struct lrj_session *s, struct lemnos_regjob_run *r,
-			u64 used)
+/* Writes the checked job and starts it. rj->lock held. */
+static void lrj_start(struct lem_rj *rj, struct lrj_session *s, const struct lemnos_regjob_run *r,
+		      u64 used)
 {
 	const struct lrj_profile *p = rj->p;
 	const struct lrj_ctx *c = &s->ctx;
 	unsigned long flags;
-	bool done;
+	bool idle = !(rj->cur | rj->prev);
 
 	/* The addresses first, from the copy: nothing the caller wrote reaches them. */
 	for (u32 k = 0; k < p->nslots; k++)
 		lrj_wr(rj, p->slots[k].reg, lower_32_bits(c->addr[k]));
 	p->derive(rj, c);
 	for (u32 i = 0; i < r->nwrites; i++)
-		lrj_wr(rj, s->w[i].offset, s->w[i].value);
+		lrj_write_checked(rj, p->plain, p->nplain, &s->w[i]);
 
-	/* What the last job left on a block that keeps going stays live until this one completes. */
-	rj->prev = rj->cur;
+	/*
+	 * What the jobs before left on a block that keeps going stays live until
+	 * this one completes; on any other block nothing is left by now.
+	 */
+	rj->prev |= rj->cur;
 	rj->cur = used;
+	rj->pending = true;
+	rj->pending_reads = r->nreads;
+	rj->timeout_ms = r->timeout_ms;
+	rj->deadline = jiffies + msecs_to_jiffies(r->timeout_ms);
 
 	spin_lock_irqsave(&rj->irq_lock, flags);
 	rj->done = false;
+	rj->status = 0;
+	rj->job = s;
+	rj->latch_pending = false;
+	if (p->continuous) {
+		/* An idle block takes the addresses now; a running one at its frame's end. */
+		if (idle)
+			rj->status = p->latch(rj, c);
+		else
+			rj->latch_pending = true;
+	}
 	rj->armed = true;
 	p->arm(rj);
 	spin_unlock_irqrestore(&rj->irq_lock, flags);
 	lrj_wr(rj, p->start_reg, r->start);
+}
 
-	/* Not interruptible: until it ends or is reset, the block is using the buffers. */
-	wait_event_timeout(rj->wq, lrj_done(rj), msecs_to_jiffies(r->timeout_ms));
+/*
+ * The started job's end, if it has come: 1 with *status, 0 while it runs, or
+ * -ETIMEDOUT once it is past its deadline (the block is reset). rj->lock held.
+ */
+static int lrj_collect(struct lem_rj *rj, u32 *status, u64 *done_ns)
+{
+	unsigned long flags;
+	bool done;
+
 	spin_lock_irqsave(&rj->irq_lock, flags);
 	done = rj->done;
-	rj->armed = false;
-	r->status = rj->status;
+	if (done) {
+		rj->armed = false;
+		rj->job = NULL;
+		*status = rj->status;
+		*done_ns = rj->done_ns;
+	}
 	spin_unlock_irqrestore(&rj->irq_lock, flags);
 
 	if (!done) {
+		if (time_before(jiffies, rj->deadline))
+			return 0;
 		rj->timeouts++;
 		dev_warn(rj->dev, "job did not finish in %u ms: resetting the block\n",
-			 r->timeout_ms);
+			 rj->timeout_ms);
 		lrj_stop(rj);
 		return -ETIMEDOUT;
 	}
+	rj->pending = false;
 	rj->jobs++;
-	if (p->continuous)
-		rj->prev = 0;	/* this job's addresses are the ones in use now */
-	else
+	if (!rj->p->continuous)
 		rj->cur = 0;	/* the block is done with every buffer */
-	for (u32 i = 0; i < r->nreads; i++)
-		s->values[i] = lrj_rd(rj, s->reads[i]);
-	return 0;
+	else if (!(*status & LEMNOS_REGJOB_STATUS_UNLATCHED))
+		rj->prev = 0;	/* this job's addresses are the ones in use now */
+	/* Not taken: the block may use either set, so both stay live. */
+	return 1;
 }
 
 static long lrj_run(struct lrj_session *s, struct lemnos_regjob_run *r)
 {
 	struct lem_rj *rj = s->rj;
-	u64 used = 0;
+	u64 used = 0, done_ns;
 	long ret;
 
 	mutex_lock(&rj->lock);
@@ -465,9 +628,14 @@ static long lrj_run(struct lrj_session *s, struct lemnos_regjob_run *r)
 		ret = -EIO;
 		goto out;
 	}
+	if (rj->pending) {
+		ret = -EBUSY;
+		goto out;
+	}
 	if (r->nwrites > LEMNOS_REGJOB_MAX_WRITES || r->naddrs > LEMNOS_REGJOB_MAX_ADDRS ||
 	    r->nreads > LEMNOS_REGJOB_MAX_READS || !r->timeout_ms ||
-	    r->timeout_ms > LEMNOS_REGJOB_MAX_TIMEOUT_MS)
+	    r->timeout_ms > LEMNOS_REGJOB_MAX_TIMEOUT_MS ||
+	    (r->flags & ~LEMNOS_REGJOB_RUN_NOWAIT) || r->reserved)
 		ret = -EINVAL;
 	/* The copy: what is checked and what runs. */
 	else if (copy_from_user(s->w, u64_to_user_ptr(r->writes), r->nwrites * sizeof(s->w[0])) ||
@@ -481,9 +649,100 @@ static long lrj_run(struct lrj_session *s, struct lemnos_regjob_run *r)
 		rj->refused++;
 		goto out;
 	}
-	ret = lrj_execute(rj, s, r, used);
-	if (!ret && copy_to_user(u64_to_user_ptr(r->values), s->values,
-				 r->nreads * sizeof(s->values[0])))
+	lrj_start(rj, s, r, used);
+	if (r->flags & LEMNOS_REGJOB_RUN_NOWAIT) {
+		ret = 0;
+		goto out;
+	}
+	/* Not interruptible: until it ends or is reset, the block is using the buffers. */
+	wait_event_timeout(rj->wq, lrj_done(rj), msecs_to_jiffies(r->timeout_ms));
+	if (!lrj_done(rj))
+		rj->deadline = jiffies;	/* its time is up */
+	ret = lrj_collect(rj, &r->status, &done_ns);
+	if (ret == 1)
+		ret = copy_to_user(u64_to_user_ptr(r->values), s->values,
+				   r->nreads * sizeof(s->values[0])) ? -EFAULT : 0;
+	else if (!ret)
+		ret = -ETIMEDOUT;	/* unreachable: a deadline in the past times out */
+out:
+	mutex_unlock(&rj->lock);
+	return ret;
+}
+
+static long lrj_wait(struct lrj_session *s, struct lemnos_regjob_wait *w)
+{
+	struct lem_rj *rj = s->rj;
+	long ret;
+
+	mutex_lock(&rj->lock);
+	if (rj->gone || rj->session != s)
+		ret = -ENODEV;
+	else if (!rj->pending)
+		ret = -EINVAL;
+	else if (w->nreads != rj->pending_reads)
+		ret = -EINVAL;
+	else
+		ret = lrj_collect(rj, &w->status, &w->timestamp_ns);
+	if (ret == 1)
+		ret = copy_to_user(u64_to_user_ptr(w->values), s->values,
+				   w->nreads * sizeof(s->values[0])) ? -EFAULT : 0;
+	else if (!ret)
+		ret = -EAGAIN;
+	mutex_unlock(&rj->lock);
+	return ret;
+}
+
+/* Whether `s` is still its block's session in its role. rj->lock held. */
+static bool lrj_current(struct lrj_session *s)
+{
+	struct lem_rj *rj = s->rj;
+
+	return !rj->gone && (s->config ? rj->config : rj->session) == s;
+}
+
+/* LEMNOS_REGJOB_IOC_WRITE: checked writes, then reads, at once. */
+static long lrj_regs(struct lrj_session *s, struct lemnos_regjob_regs *r)
+{
+	struct lem_rj *rj = s->rj;
+	const struct lrj_profile *p = rj->p;
+	const struct lrj_plain *table = s->config ? p->config : p->plain;
+	u32 n = s->config ? p->nconfig : p->nplain;
+	long ret;
+
+	if (!p->nconfig)
+		return -EINVAL;	/* no second role: the block's registers move with its jobs */
+	if (r->nwrites > LEMNOS_REGJOB_MAX_WRITES || r->nreads > LEMNOS_REGJOB_MAX_READS)
+		return -EINVAL;
+	mutex_lock(&rj->lock);
+	if (!lrj_current(s)) {
+		ret = -ENODEV;
+		goto out;
+	}
+	if (rj->wedged) {
+		ret = -EIO;
+		goto out;
+	}
+	/* The copy: what is checked and what is written. */
+	if (copy_from_user(s->w, u64_to_user_ptr(r->writes), r->nwrites * sizeof(s->w[0])) ||
+	    copy_from_user(s->now_reads, u64_to_user_ptr(r->reads),
+			   r->nreads * sizeof(s->now_reads[0]))) {
+		ret = -EFAULT;
+		goto out;
+	}
+	ret = lrj_check_writes(p, table, n, s->w, r->nwrites);
+	for (u32 i = 0; !ret && i < r->nreads; i++)
+		if (s->now_reads[i] % 4 || s->now_reads[i] > p->window - 4)
+			ret = -EINVAL;
+	if (ret) {
+		rj->refused++;
+		goto out;
+	}
+	for (u32 i = 0; i < r->nwrites; i++)
+		lrj_write_checked(rj, table, n, &s->w[i]);
+	for (u32 i = 0; i < r->nreads; i++)
+		s->now_values[i] = lrj_rd(rj, s->now_reads[i]);
+	if (copy_to_user(u64_to_user_ptr(r->values), s->now_values,
+			 r->nreads * sizeof(s->now_values[0])))
 		ret = -EFAULT;
 out:
 	mutex_unlock(&rj->lock);
@@ -513,17 +772,51 @@ static long lrj_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	union {
 		struct lemnos_regjob_import imp;
 		struct lemnos_regjob_run run;
+		struct lemnos_regjob_wait wait;
 		struct lemnos_regjob_info info;
+		struct lemnos_regjob_regs regs;
+		struct lemnos_regjob_event event;
 		u32 index;
 	} u;
 	long ret;
 
+	/* A configuration session names no buffer; a frames session has no events. */
 	switch (cmd) {
+	case LEMNOS_REGJOB_IOC_RUN:
+	case LEMNOS_REGJOB_IOC_WAIT:
+	case LEMNOS_REGJOB_IOC_IMPORT:
+	case LEMNOS_REGJOB_IOC_RELEASE:
+		if (s->config)
+			return -EINVAL;
+		break;
+	case LEMNOS_REGJOB_IOC_EVENT:
+		if (!s->config)
+			return -EINVAL;
+		break;
+	}
+
+	switch (cmd) {
+	case LEMNOS_REGJOB_IOC_WRITE:
+		if (copy_from_user(&u.regs, uarg, sizeof(u.regs)))
+			return -EFAULT;
+		return lrj_regs(s, &u.regs);
+	case LEMNOS_REGJOB_IOC_EVENT:
+		ret = lrj_event_take(s, &u.event);
+		if (!ret && copy_to_user(uarg, &u.event, sizeof(u.event)))
+			return -EFAULT;
+		return ret;
 	case LEMNOS_REGJOB_IOC_RUN:
 		if (copy_from_user(&u.run, uarg, sizeof(u.run)))
 			return -EFAULT;
 		ret = lrj_run(s, &u.run);
 		if (!ret && copy_to_user(uarg, &u.run, sizeof(u.run)))
+			return -EFAULT;
+		return ret;
+	case LEMNOS_REGJOB_IOC_WAIT:
+		if (copy_from_user(&u.wait, uarg, sizeof(u.wait)))
+			return -EFAULT;
+		ret = lrj_wait(s, &u.wait);
+		if (!ret && copy_to_user(uarg, &u.wait, sizeof(u.wait)))
 			return -EFAULT;
 		return ret;
 	case LEMNOS_REGJOB_IOC_IMPORT:
@@ -558,10 +851,20 @@ static int lrj_file_release(struct inode *inode, struct file *file)
 	struct lrj_session *s = file->private_data;
 	struct lem_rj *rj = s->rj;
 
+	unsigned long flags;
+
 	mutex_lock(&rj->lock);
 	if (rj->session == s) {
 		lrj_end_session(rj, s);
 		rj->session = NULL;
+	}
+	if (rj->config == s) {
+		/* Its interrupt off; what it wrote stays, as the frames role's writes do. */
+		spin_lock_irqsave(&rj->irq_lock, flags);
+		if (!rj->gone && !rj->wedged)
+			rj->p->event_arm(rj, false);
+		rj->config = NULL;
+		spin_unlock_irqrestore(&rj->irq_lock, flags);
 	}
 	mutex_unlock(&rj->lock);
 	kvfree(s);
@@ -579,33 +882,45 @@ static const struct file_operations lrj_fops = {
 
 long lem_rj_open(struct lem_rj *rj, struct lemnos_regjob_open *o)
 {
+	bool config = o->flags & LEMNOS_REGJOB_OPEN_CONFIG;
+	struct lrj_session **role = config ? &rj->config : &rj->session;
 	struct lrj_session *s;
+	unsigned long flags;
 	int fd;
 
-	if (o->flags)
+	if (o->flags & ~LEMNOS_REGJOB_OPEN_CONFIG)
+		return -EINVAL;
+	if (config && !rj->p->nconfig)
 		return -EINVAL;
 	s = kvzalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
 		return -ENOMEM;
 	s->rj = rj;
+	s->config = config;
 	mutex_lock(&rj->lock);
 	if (rj->gone) {
 		fd = -ENODEV;
 		goto fail;
 	}
-	if (rj->session) {
+	if (*role) {
 		fd = -EBUSY;
 		goto fail;
 	}
-	/* Set before the fd exists: a close from another thread waits for the lock. */
-	rj->session = s;
 	kref_get(&rj->ref);
 	fd = anon_inode_getfd("lemnos-regjob", &lrj_fops, s, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
-		rj->session = NULL;
 		kref_put(&rj->ref, lrj_free);	/* the probe's reference is still held */
 		goto fail;
 	}
+	/*
+	 * Set before the lock is let go: a close of the new fd from another
+	 * thread waits for the lock, then finds the session in its role.
+	 */
+	spin_lock_irqsave(&rj->irq_lock, flags);
+	*role = s;
+	if (config && !rj->wedged)
+		rj->p->event_arm(rj, true);
+	spin_unlock_irqrestore(&rj->irq_lock, flags);
 	mutex_unlock(&rj->lock);
 	o->fd = fd;
 	o->profile = rj->p->id;
@@ -620,6 +935,28 @@ fail:
 
 /* --- the block --- */
 
+/* The configuration role's interrupt, if pending: read, cleared and queued. irq_lock held. */
+static bool lrj_event_irq(struct lem_rj *rj)
+{
+	u32 status = rj->p->event(rj);
+
+	if (!status)
+		return false;
+	lrj_event_push(rj, status, ktime_get_ns());
+	return true;
+}
+
+static irqreturn_t lrj_event_isr(int irq, void *data)
+{
+	struct lem_rj *rj = data;
+	bool handled;
+
+	spin_lock(&rj->irq_lock);
+	handled = lrj_event_irq(rj);
+	spin_unlock(&rj->irq_lock);
+	return handled ? IRQ_HANDLED : IRQ_NONE;
+}
+
 static irqreturn_t lrj_isr(int irq, void *data)
 {
 	struct lem_rj *rj = data;
@@ -627,12 +964,24 @@ static irqreturn_t lrj_isr(int irq, void *data)
 	u32 status;
 
 	spin_lock(&rj->irq_lock);
+	/* One line for both roles: the events are this handler's too. */
+	if (rj->p->nconfig && !rj->event_irq && lrj_event_irq(rj))
+		ret = IRQ_HANDLED;
 	if (rj->p->irq(rj, &status)) {
 		ret = IRQ_HANDLED;
-		/* A completion with no job waiting is stale, and only cleared. */
-		if (rj->armed && !rj->done) {
+		/* A completion with no job armed is stale, and only cleared. */
+		if (rj->armed && !rj->done && rj->job) {
+			struct lrj_session *s = rj->job;
+
+			for (u32 i = 0; i < rj->pending_reads; i++)
+				s->values[i] = lrj_rd(rj, s->reads[i]);
+			if (rj->latch_pending) {
+				status |= rj->p->latch(rj, &s->ctx);
+				rj->latch_pending = false;
+			}
 			rj->done = true;
-			rj->status = status;
+			rj->done_ns = ktime_get_ns();
+			rj->status |= status;
 			wake_up(&rj->wq);
 		}
 	}
@@ -644,6 +993,8 @@ static const struct lrj_profile *lrj_profile_for(struct device *dev)
 {
 	if (lem_device_listed(dev, a733_ve))
 		return &lrj_a733_ve;
+	if (lem_device_listed(dev, k230_isp))
+		return &lrj_k230_isp;
 	return NULL;
 }
 
@@ -739,7 +1090,7 @@ struct lem_rj *lem_rj_probe(struct platform_device *pdev)
 	}
 	p->reset_regs(rj);
 	p->quiet(rj);
-	rj->irq = platform_get_irq(pdev, 0);
+	rj->irq = platform_get_irq(pdev, p->irq_index);
 	if (rj->irq <= 0) {
 		ret = rj->irq ?: -EINVAL;
 		goto fail;
@@ -747,8 +1098,26 @@ struct lem_rj *lem_rj_probe(struct platform_device *pdev)
 	ret = devm_request_irq(dev, rj->irq, lrj_isr, 0, dev_name(dev), rj);
 	if (ret)
 		goto fail;
-	dev_info(dev, "register jobs as %s\n", p->name);
+	if (p->nconfig) {
+		int irq = platform_get_irq(pdev, p->event_irq_index);
+
+		if (irq <= 0) {
+			ret = irq ?: -EINVAL;
+			goto fail_irq;
+		}
+		/* The same line as the jobs': lrj_isr takes both. */
+		if (irq != rj->irq) {
+			ret = devm_request_irq(dev, irq, lrj_event_isr, 0, dev_name(dev), rj);
+			if (ret)
+				goto fail_irq;
+			rj->event_irq = irq;
+		}
+	}
+	dev_info(dev, "register jobs as %s%s\n", p->name,
+		 p->nconfig && !rj->event_irq ? ", both roles on one interrupt" : "");
 	return rj;
+fail_irq:
+	devm_free_irq(dev, rj->irq, rj);
 fail:
 	kfree(rj);
 	return ERR_PTR(ret);
@@ -757,13 +1126,20 @@ fail:
 /*
  * The block is being unbound: a running job ends first (its timeout bounds
  * that), then the block is stopped if it may be using a buffer, every buffer
- * of the session is released, and nothing touches the registers again.
+ * of the frames session is released, the configuration session gets nothing
+ * more (its calls answer ENODEV), and nothing touches the registers again.
  */
 void lem_rj_remove(struct lem_rj *rj)
 {
 	unsigned long flags;
 
 	mutex_lock(&rj->lock);
+	/* The configuration session goes first: a reset below is no news to it. */
+	spin_lock_irqsave(&rj->irq_lock, flags);
+	if (rj->config && !rj->wedged)
+		rj->p->event_arm(rj, false);
+	rj->config = NULL;
+	spin_unlock_irqrestore(&rj->irq_lock, flags);
 	if (rj->session) {
 		lrj_end_session(rj, rj->session);
 		rj->session = NULL;
@@ -771,11 +1147,14 @@ void lem_rj_remove(struct lem_rj *rj)
 	rj->gone = true;
 	spin_lock_irqsave(&rj->irq_lock, flags);
 	rj->armed = false;
+	rj->job = NULL;
 	if (!rj->wedged)
 		rj->p->quiet(rj);
 	spin_unlock_irqrestore(&rj->irq_lock, flags);
 	mutex_unlock(&rj->lock);
 	devm_free_irq(rj->dev, rj->irq, rj);
+	if (rj->event_irq)
+		devm_free_irq(rj->dev, rj->event_irq, rj);
 	if (rj->rst && !rj->wedged)
 		reset_control_assert(rj->rst);
 	kref_put(&rj->ref, lrj_free);

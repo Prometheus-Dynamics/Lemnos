@@ -32,7 +32,11 @@ Through one node, `/dev/lemnos`, with one opener at a time:
 - **Register jobs** for blocks programmed by writing registers that take bus addresses: the
   caller gives the values and its dma-bufs, and the module writes every address itself, refuses a
   range shorter than what the job's own geometry makes the block reach, runs the job and resets
-  the block if it hangs. The A733 video engine's encoder runs this way.
+  the block if it hangs. A block that runs continuously, like an ISP writing every frame, switches
+  to a job's buffers at a frame's end, in the module's interrupt handler. A second session in a
+  configuration role can write the same block's other registers and take its events while frames
+  run, with the registers both write merged bit by bit under the module's lock. The A733 video
+  engine's encoder and the K230 ISP run this way.
 - **PIO state machines** on the RP1, through a table of allowed operations.
 
 ## What the daemon uses today
@@ -53,8 +57,9 @@ and everything else stays on the stock path:
 | `clocks:BLOCK/NAME,...`, `resets:BLOCK/NAME,...` | Only through the module |
 
 The receiver and ISP drivers (`rp1-csi2`, `pisp-be`, `pisp-fe`), the graphics DMA library
-(`k230-gsdma`), `a733-video` with `route = "module"` and the `vip9000` driver open the module's nodes themselves. `k230isp` and
-`k230-capture` take `regs:`, `irq:`, `clocks:` and `resets:` when the board file names them (see
+(`k230-gsdma`), `a733-video` with `route = "module"` and the `vip9000` driver open the module's
+nodes themselves. The K230 ISP's drivers (`k230isp`, `k230-capture`, `k230isp-frames`) reach
+the ISP through its register jobs, when the board file gives them the block (see
 [Drivers and contracts](drivers.md#which-drivers-take-a-blocks-own-resources)).
 
 Interrupts reach the backend on the module's one event stream, which it reads for every interrupt
@@ -116,6 +121,7 @@ Other parameters:
 | `gsdma` | Compatibles driven as the graphics DMA engine. Must also be in `owned` |
 | `a733_ve` | Compatibles driven as the A733 video engine's encoder through register jobs. Must also be in `owned` |
 | `vip9000` | Compatibles driven as the VIP9000 neural accelerator. Must also be in `owned` |
+| `k230_isp` | Compatibles driven as the K230 ISP through register jobs: frames in one session, configuration and statistics in another beside it. Must also be in `owned` |
 | `bus_buffer` | The largest I2C or SPI transfer, in bytes each way. 4096 by default |
 
 The parameters whose names start with `test_` are for the QEMU harness. Leave them unset.

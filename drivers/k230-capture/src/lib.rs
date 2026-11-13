@@ -4,17 +4,24 @@
 //! receives: the sensor is set up by its own driver.
 //!
 //! The vendor's capture daemon is never used. The kernel takes the link as plain numbers and sets
-//! up the CSI receiver and video input itself; the ISP is programmed directly, every register
-//! through the sys crate's table, either through the vendor's `vvcam-isp` register requests or
-//! through the ISP's own register window and interrupt from the host (on Linux the Lemnos kernel
-//! module's, with the ISP bound to it), as the board file chooses (see Settings); and the memory
-//! interface writes only into DMA memory the sys crate holds (see its documentation for every
-//! path by which a caller's number reaches the block, and the check on each).
+//! up the CSI receiver and video input itself. The ISP is reached one of two ways, as the board
+//! file chooses (see Settings):
+//!
+//! - **The vendor's `vvcam-isp`** ([`LinuxHardware`]): the ISP is programmed directly through its
+//!   register requests, every one through the sys crate's table, and the memory interface writes
+//!   only into DMA memory the sys crate holds (see its documentation for every path by which a
+//!   caller's number reaches the block, and the check on each).
+//! - **`lemnos.ko`** ([`ModuleHardware`]): the ISP bound to the module, which drives its frames
+//!   role: it writes every address register itself, from memory it allocated for the ISP and a
+//!   range it checked, and switches the path between memories only at a frame's end. The
+//!   module's configuration role runs beside it on the same block, so `k230isp` gives tuning and
+//!   statistics for the frames this driver delivers. See [`module`].
 //!
 //! # Frames
 //!
-//! The block writes a ring of three memories from the host's DMA memory (the `dma` need), one
-//! being written, one armed for the next frame, one being read. At each of the main path's frame
+//! The block writes a ring of three memories, one being written, one armed for the next frame,
+//! one being read. On the vendor's way the memories come from the host's DMA memory (the `dma`
+//! need); on the module's way the module allocates them for the ISP. At each of the main path's frame
 //! ends the driver reads which memory the block has moved to, arms the free one for the frame
 //! after, and copies the finished frame into a buffer of the `frames` stream with
 //! `StreamEndpoint::write`, then publishes it. That is one copy per frame; nothing is allocated
@@ -34,21 +41,18 @@
 //!
 //! The way to the ISP is the board file's, and there is no falling back from one to the other:
 //!
-//! - **The module's resources**: the device's `uses` names `regs` (the ISP's register window,
-//!   such as `regs:90000000.isp`) and `irq` (the memory interface's interrupt, such as
-//!   `irq:90000000.isp/0`), and optionally `clocks` and `resets` (every clock turned on, and
-//!   every reset line asserted then released, at each open). `dma` should then name the same
-//!   block (`dma:90000000.isp`), so the memory's device addresses are the ISP's own. `isp` must
-//!   not be set. See [`ModuleHardware`].
-//! - **The vendor device**: none of those named; `isp` may give its node.
+//! - **The module**: `config` gives `block`, the ISP's platform device name as `lemnos.ko` lists
+//!   it, and optionally `node`, the module's control node (default `/dev/lemnos`). `isp` must not
+//!   be set, and `dma` must not be named.
+//! - **The vendor device**: no `block`; the device's `uses` names `dma`, and `config` may give
+//!   `isp`.
 //!
-//! `regs` without `irq`, `irq`, `clocks` or `resets` without `regs`, `regs` with `isp`, or a
-//! window smaller than the ISP's is refused when the device binds (`INVALID_ARGUMENT`). A
-//! resource the host can't give fails the bind with the host's reason; nothing else is tried.
+//! Anything else (`block` with `isp` or `dma`, an empty `block`, the vendor way without `dma`)
+//! is refused when the device binds (`INVALID_ARGUMENT`).
 //!
 //! From the device's `config` in the board file:
 //!
-//! - `isp`, `mipi`: the device nodes, default `/dev/vvcam-isp.0` (on the vendor way only) and
+//! - `isp`, `mipi`: the device nodes, default `/dev/vvcam-isp.0` (on the vendor's way only) and
 //!   `/dev/vvcam-mipi.0`.
 //! - `format`: `bayer` (default), `nv12`, `nv16`, `yuyv`, `bgr24` or `p010`; see [`Format`].
 //! - `order`: the sensor's colour order, `rggb` (default), `grbg`, `gbrg` or `bggr`.
@@ -60,10 +64,12 @@
 //! at 10 and 12; the other formats take [`Packing::Packed`], except P010, which is
 //! [`Packing::Unpacked16`].
 //!
-//! The ring's memory is kept from one start to the next. A start at a larger frame size than the
-//! last one within [`RELEASE_AFTER`](lemnos_driver_k230_capture_sys::RELEASE_AFTER) of a stop is
-//! refused with `BUSY`: the block may still be writing the old memory, so it is not given back
-//! until then.
+//! The ring's memory is kept from one start to the next. On the vendor's way a start at a larger
+//! frame size than the last one within
+//! [`RELEASE_AFTER`](lemnos_driver_k230_capture_sys::RELEASE_AFTER) of a stop is refused with
+//! `BUSY`: the block may still be writing the old memory, so it is not given back until then. On
+//! the module's way a stop of a running path has the module reset the block, so the memory is
+//! free at once.
 //!
 //! # Failures
 //!
@@ -75,19 +81,21 @@
 //! frame end after which the block names none of the ring, is counted in `errors` and is not a
 //! reason to restart.
 //!
+//! On the module's way a frame that doesn't come within
+//! [`FRAME_TIMEOUT_MS`](module::FRAME_TIMEOUT_MS) has the module reset the block, which is a
+//! device error here: recovery starts it again.
+//!
 //! # Not delivered
 //!
-//! - The host must provide the `dma` need. `LinuxBoard` answers `dma:<block>` through the Lemnos
-//!   kernel module (`backends/linux/src/module/`): each buffer is the module's allocation for the
-//!   named block, with the device address the module reports. On the module's way the ISP is that
-//!   block, so the address is the ISP's own. On the vendor's way the ISP is bound to `vvcam-isp`
-//!   and the module cannot own it, so the address is another block's, and is the ISP's only if
-//!   both have the same view of memory (no IOMMU, the same `dma-ranges`); that is checked on a
-//!   board (`testing/board-runs/B23.md`, step 2), and until it is, the vendor's way is for that
-//!   board run. The module maps the ISP's registers only when loaded with it in `unconfined=`:
-//!   it has no IOMMU, so this driver's checks alone keep the block's DMA inside the ring.
-//! - On the module's way the ISP's window and interrupts have one holder, this driver: the
-//!   `k230isp` driver can't take the same ISP's registers at the same time.
+//! - On the vendor's way the host must provide the `dma` need. `LinuxBoard` answers `dma:<block>`
+//!   through the Lemnos kernel module (`backends/linux/src/module/`): each buffer is the module's allocation for the
+//!   named block, with the device address the module reports. That address is valid for the DMA
+//!   setup of the block the module owns, and is the address the ISP sees only if both blocks have
+//!   the same view of memory (no IOMMU, the same `dma-ranges`). The ISP is bound to the vendor's
+//!   `vvcam-isp` driver, so the module cannot own it; which block to name, and whether the two
+//!   agree, is checked on a board (`testing/board-runs/B23.md`, step 2). If that cannot be shown,
+//!   the memory must not be handed to the ISP. The driver is built into `lemnosd`, so a board
+//!   file can name it; until that check passes, it is for that board run.
 //! - Scaling, cropping and the self paths: the main path writes the sensor's full frame.
 //!
 //! Untested on board: written from the vendor driver's interface and the ISP8000's open register
@@ -96,6 +104,8 @@
 #![forbid(unsafe_code)]
 
 mod hw;
+#[cfg(target_os = "linux")]
+pub mod module;
 pub mod plan;
 
 #[cfg(all(test, target_os = "linux"))]
@@ -107,19 +117,20 @@ use lemnos_contract_camera_receiver::{
     BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{
-    ClocksHandle, Config, Description, DmaHandle, Health, InterruptHandle, Item, Lifecycle,
-    MethodId, RegistersHandle, ResetHandle, Result, Status, StreamHandle, driver,
+    Config, Description, DmaHandle, Health, Item, Lifecycle, MethodId, Result, Status,
+    StreamHandle, driver,
 };
 use lemnos_driver_k230_capture_sys::mipi::DevAttr;
 use lemnos_driver_k230_capture_sys::regs::MIS_MP_FRAME_END;
 use lemnos_driver_k230_capture_sys::{MiEvent, RING};
-use lemnos_hal::ErrorKind;
-use lemnos_hal::blocks::{DmaBuffer, DmaBuffers, StreamFrame};
+use lemnos_hal::blocks::StreamFrame;
 
-pub use hw::{Hardware, ISP_PATH, MIPI_PATH, Settings};
 #[cfg(target_os = "linux")]
-pub use hw::{LinuxHardware, ModuleHardware};
+pub use hw::LinuxHardware;
+pub use hw::{Hardware, ISP_PATH, MIPI_PATH, Settings};
 pub use lemnos_driver_k230_capture_sys as sys;
+#[cfg(target_os = "linux")]
+pub use module::{FrameSession, LinuxFrameSession, ModuleHardware};
 pub use plan::{Format, Layout, MAX_DIMENSION, MIN_DIMENSION, WIDTH_STEP};
 
 const START: MethodId = MethodId {
@@ -245,70 +256,16 @@ enum Delivery {
     Bad,
 }
 
-/// What a moved-out DMA need leaves behind: refuses everything. The real memory is the
-/// hardware's from `start` on.
-struct Moved;
-
-impl DmaBuffers for Moved {
-    type Error = ErrorKind;
-
-    fn allocate(&mut self, _len: u64) -> core::result::Result<DmaBuffer, ErrorKind> {
-        Err(ErrorKind::Unavailable)
-    }
-    fn release(&mut self, _id: u32) -> core::result::Result<(), ErrorKind> {
-        Err(ErrorKind::Unavailable)
-    }
-    fn write(
-        &mut self,
-        _id: u32,
-        _offset: u64,
-        _data: &[u8],
-    ) -> core::result::Result<(), ErrorKind> {
-        Err(ErrorKind::Unavailable)
-    }
-    fn read(
-        &mut self,
-        _id: u32,
-        _offset: u64,
-        _out: &mut [u8],
-    ) -> core::result::Result<(), ErrorKind> {
-        Err(ErrorKind::Unavailable)
-    }
-    fn sync_for_device(&mut self, _id: u32) -> core::result::Result<(), ErrorKind> {
-        Err(ErrorKind::Unavailable)
-    }
-    fn sync_for_cpu(&mut self, _id: u32) -> core::result::Result<(), ErrorKind> {
-        Err(ErrorKind::Unavailable)
-    }
-}
-
 /// The ISP8000 frame path as a camera receiver.
 #[driver("k230-capture", provides = [CameraReceiver])]
 pub struct K230Capture {
     #[needs]
     frames: StreamHandle,
-    /// The host's DMA memory. Handed to the hardware when the driver starts; what is left here
-    /// refuses every call, so the memory has one owner. Declared here so the host provides it.
-    #[needs]
-    #[expect(
-        dead_code,
-        reason = "the need's memory lives in the hardware; this is what is left"
-    )]
-    dma: DmaHandle,
-    /// The ISP's own resources, for the module's way. Moved into the hardware at bind; what is
-    /// left here is `None`. Declared here so the host provides them.
+    /// The host's DMA memory, on the vendor's way. Moved into the hardware at bind, so the
+    /// memory has one owner; what is left here is `None`. Declared here so the host provides it.
     #[needs(optional)]
     #[expect(dead_code, reason = "moved into the hardware at bind")]
-    regs: Option<RegistersHandle>,
-    #[needs(optional)]
-    #[expect(dead_code, reason = "moved into the hardware at bind")]
-    irq: Option<InterruptHandle>,
-    #[needs(optional)]
-    #[expect(dead_code, reason = "moved into the hardware at bind")]
-    clocks: Option<ClocksHandle>,
-    #[needs(optional)]
-    #[expect(dead_code, reason = "moved into the hardware at bind")]
-    resets: Option<ResetHandle>,
+    dma: Option<DmaHandle>,
     hw: Box<dyn Hardware>,
     options: Options,
     link: Option<LinkConfig>,
@@ -330,20 +287,18 @@ impl Lifecycle for K230Capture {
     fn start(needs: K230CaptureNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::new(cfg.str("isp"), cfg.str("mipi"))?;
         let options = options(cfg)?;
-        let dma = Box::new(hw::HeldDma(needs.dma));
-        let hw: Box<dyn Hardware> = match (needs.regs, needs.irq) {
-            (Some(regs), Some(irq)) if cfg.str("isp").is_none() => Box::new(ModuleHardware::new(
-                &settings,
-                Box::new(hw::HeldRegisters(regs)),
-                Box::new(hw::HeldInterrupt(irq)),
-                dma,
-                needs.clocks,
-                needs.resets,
-            )?),
-            (None, None) if needs.clocks.is_none() && needs.resets.is_none() => {
-                Box::new(LinuxHardware::new(settings, dma))
+        let hw: Box<dyn Hardware> = match (cfg.str("block"), cfg.str("isp"), needs.dma) {
+            (Some(block), None, None) if !block.is_empty() => {
+                let node = std::path::PathBuf::from(cfg.str("node").unwrap_or(module::NODE));
+                Box::new(ModuleHardware::new(
+                    &settings,
+                    Box::new(LinuxFrameSession::new(node, block.to_owned())),
+                ))
             }
-            // Half of one way, or both at once: the board file is wrong, and nothing is guessed.
+            (None, _, Some(dma)) => {
+                Box::new(LinuxHardware::new(settings, Box::new(hw::HeldDma(dma))))
+            }
+            // Both ways at once, or half of one: the board file is wrong, and nothing is guessed.
             _ => return Err(Status::INVALID_ARGUMENT),
         };
         Ok(Self::with_hardware(hw, needs.frames, options))
@@ -418,11 +373,7 @@ impl K230Capture {
     pub fn with_hardware(hw: Box<dyn Hardware>, frames: StreamHandle, options: Options) -> Self {
         Self {
             frames,
-            dma: lemnos_core::Held::boxed(Box::new(Moved)),
-            regs: None,
-            irq: None,
-            clocks: None,
-            resets: None,
+            dma: None,
             hw,
             options,
             link: None,

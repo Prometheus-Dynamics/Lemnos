@@ -1,10 +1,6 @@
-//! The block as the driver sees it ([`Hardware`]), and the two Linux implementations over the sys
+//! The block as the driver sees it ([`Hardware`]), and the Linux implementation over the sys
 //! crate's [`Capture`](lemnos_driver_k230_capture_sys::Capture) and
-//! [`MipiNode`](lemnos_driver_k230_capture_sys::MipiNode), between which the board file chooses:
-//! the ISP behind the vendor's `vvcam-isp` ([`LinuxHardware`]), or the ISP's own register window
-//! and memory-interface interrupt from the host, on Linux the Lemnos kernel module's, with its
-//! clocks and reset lines if the board names them ([`ModuleHardware`]). The CSI receiver is the
-//! vendor's `vvcam-mipi` on both.
+//! [`MipiNode`](lemnos_driver_k230_capture_sys::MipiNode) ([`LinuxHardware`]).
 //!
 //! [`Hardware`] adds nothing that could widen what the sys crate allows: register writes go
 //! through its table, and the memory interface is armed only from the memory it holds.
@@ -84,13 +80,11 @@ impl Settings {
 mod linux {
     use std::io;
 
-    use lemnos_core::{ClocksHandle, ResetHandle, Result, Status, status_of};
+    use lemnos_core::{Result, Status};
     use lemnos_driver_k230_capture_sys::mipi::DevAttr;
     use lemnos_driver_k230_capture_sys::{
-        BlockInterrupt, BlockRegisters, Capture, CaptureError, Dma, MiEvent, MipiNode, Output,
-        Planes,
+        Capture, CaptureError, Dma, MiEvent, MipiNode, Output, Planes,
     };
-    use lemnos_hal::blocks::{enable_clocks, pulse_resets};
 
     use super::{Hardware, Settings};
 
@@ -105,7 +99,6 @@ mod linux {
     fn status(e: &CaptureError) -> Status {
         match e {
             CaptureError::Io(e) => io_status(e),
-            CaptureError::Block(kind) => status_of(*kind),
             CaptureError::Dma(_) => Status::IO,
             CaptureError::Memory(_) => Status::INVALID_ARGUMENT,
             // Memory too small for a new layout cannot be given back within the grace after the
@@ -210,157 +203,10 @@ mod linux {
             self.capture()?.next_event().map_err(|e| status(&e))
         }
     }
-
-    /// The ISP's own register window and memory-interface interrupt from the host, with the
-    /// host's DMA memory for the same block, and the vendor's `vvcam-mipi` for the receiver.
-    ///
-    /// Each open turns on every clock the board names, turns the memory interface off, asserts
-    /// and releases every reset line the board names (the block starts from its reset state),
-    /// then takes the interrupt from nothing pending and opens the CSI device. Clocks stay on
-    /// across a close: turning them off is the host's, when it lets the block go.
-    pub struct ModuleHardware {
-        mipi_path: String,
-        capture: Capture,
-        clocks: Option<ClocksHandle>,
-        resets: Option<ResetHandle>,
-        mipi: Option<MipiNode>,
-    }
-
-    impl ModuleHardware {
-        /// The ISP through `regs` and `irq`, with `dma` for the frame memory, the CSI device at
-        /// `settings`' `mipi`, and the `clocks` and `resets` the board names. Touches nothing
-        /// yet. `INVALID_ARGUMENT` for a window smaller than the ISP's.
-        pub fn new(
-            settings: &Settings,
-            regs: BlockRegisters,
-            irq: BlockInterrupt,
-            dma: Dma,
-            clocks: Option<ClocksHandle>,
-            resets: Option<ResetHandle>,
-        ) -> Result<Self> {
-            let capture = Capture::on_block(regs, irq, dma).map_err(|(e, _)| status(&e))?;
-            Ok(Self {
-                mipi_path: settings.mipi.clone(),
-                capture,
-                clocks,
-                resets,
-                mipi: None,
-            })
-        }
-    }
-
-    impl Hardware for ModuleHardware {
-        fn open(&mut self) -> Result<()> {
-            self.mipi = None;
-            // The clocks first: the registers answer only with them on.
-            if let Some(clocks) = self.clocks.as_mut() {
-                enable_clocks(&mut **clocks).map_err(status_of)?;
-            }
-            // Off before the reset, so the memory is held for the frame that was in flight.
-            self.capture.stop().map_err(|e| status(&e))?;
-            if let Some(resets) = self.resets.as_mut() {
-                pulse_resets(&mut **resets).map_err(status_of)?;
-            }
-            self.capture.watch_frames().map_err(|e| status(&e))?;
-            self.mipi = Some(MipiNode::open(&self.mipi_path).map_err(|e| io_status(&e))?);
-            Ok(())
-        }
-
-        fn set_link(&mut self, attr: &DevAttr) -> Result<()> {
-            self.mipi
-                .as_ref()
-                .ok_or(Status::IO)?
-                .set_link(attr)
-                .map_err(|e| io_status(&e))
-        }
-
-        fn write(&mut self, addr: u32, value: u32) -> Result<()> {
-            self.capture.write(addr, value).map_err(|e| status(&e))
-        }
-
-        fn provide(&mut self, bytes: u64) -> Result<()> {
-            self.capture.provide(bytes).map_err(|e| status(&e))
-        }
-
-        fn start(&mut self, output: Output, planes: Planes) -> Result<()> {
-            self.capture.start(output, planes).map_err(|e| status(&e))
-        }
-
-        fn rearm(&mut self, slot: usize) -> Result<()> {
-            self.capture.rearm(slot).map_err(|e| status(&e))
-        }
-
-        fn active(&mut self) -> Result<Option<usize>> {
-            self.capture.active().map_err(|e| status(&e))
-        }
-
-        fn take(&mut self, slot: usize) -> Result<()> {
-            self.capture.take(slot).map_err(|e| status(&e))
-        }
-
-        fn copy_out(&mut self, slot: usize, offset: u64, out: &mut [u8]) -> Result<()> {
-            self.capture
-                .copy_out(slot, offset, out)
-                .map_err(|e| status(&e))
-        }
-
-        fn stop(&mut self) -> Result<()> {
-            self.capture.stop().map_err(|e| status(&e))
-        }
-
-        fn next_event(&mut self) -> Result<Option<MiEvent>> {
-            self.capture.next_event().map_err(|e| status(&e))
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{LinuxHardware, ModuleHardware};
-
-/// The driver's register need, as the boxed window the capture takes.
-#[cfg(target_os = "linux")]
-pub(crate) struct HeldRegisters(pub(crate) lemnos_core::RegistersHandle);
-
-#[cfg(target_os = "linux")]
-impl lemnos_hal::blocks::Registers for HeldRegisters {
-    type Error = lemnos_hal::ErrorKind;
-
-    fn size(&self) -> usize {
-        self.0.size()
-    }
-
-    fn read32(&mut self, offset: usize) -> core::result::Result<u32, Self::Error> {
-        self.0.read32(offset)
-    }
-
-    fn write32(&mut self, offset: usize, value: u32) -> core::result::Result<(), Self::Error> {
-        self.0.write32(offset, value)
-    }
-}
-
-/// The driver's interrupt need, as the boxed interrupt the capture takes.
-#[cfg(target_os = "linux")]
-pub(crate) struct HeldInterrupt(pub(crate) lemnos_core::InterruptHandle);
-
-#[cfg(target_os = "linux")]
-impl lemnos_hal::blocks::Interrupt for HeldInterrupt {
-    type Error = lemnos_hal::ErrorKind;
-
-    fn enable(&mut self) -> core::result::Result<(), Self::Error> {
-        self.0.enable()
-    }
-
-    fn disable(&mut self) -> core::result::Result<(), Self::Error> {
-        self.0.disable()
-    }
-
-    fn wait(
-        &mut self,
-        timeout: Option<core::time::Duration>,
-    ) -> core::result::Result<Option<lemnos_hal::blocks::InterruptEvent>, Self::Error> {
-        self.0.wait(timeout)
-    }
-}
+pub use linux::LinuxHardware;
 
 /// The driver's DMA need, as the boxed provider the capture device takes: every call goes to
 /// what the host handed over.

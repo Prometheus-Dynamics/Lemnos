@@ -147,10 +147,6 @@ impl Streams {
         K230IspNeeds {
             config,
             statistics: lemnos_core::Held::boxed(Box::new(self.statistics.clone())),
-            regs: None,
-            irq: None,
-            clocks: None,
-            resets: None,
         }
     }
 }

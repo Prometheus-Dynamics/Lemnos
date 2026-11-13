@@ -2,9 +2,10 @@
 //!
 //! It reaches the block one of two ways, and the board file chooses which (see Settings): through
 //! the register requests and the interrupt events of the vendor kernel's `vvcam-isp`, or through
-//! the block's own register window and interrupt from the host, which on Linux are the Lemnos
-//! kernel module's, with the ISP bound to the module. Either way every register access goes
-//! through the sys crate's table. It does no 3A and holds no tuning: a
+//! the configuration role of the block as the Lemnos kernel module drives it, with the ISP bound
+//! to the module, beside `k230-capture` running frames through the module's frames role. Either
+//! way every register access goes through the sys crate's table. It does no 3A and holds no
+//! tuning: a
 //! configuration is a list of register writes ([`config`](crate::config)) whose values it never
 //! reads, and statistics are the statistics registers copied out unread
 //! ([`stats`](crate::stats)).
@@ -14,9 +15,11 @@
 //! It does **not** deliver frames, and it does not set up the frame path: it programs neither
 //! the sensor, the receiver, the ISP's input nor its memory interface, and no image ever reaches
 //! a Lemnos stream through it. The ISP has statistics to give only while something else runs
-//! frames through it. So [`IspInfo::max_outputs`] is 0, `set_input` is `NOT_SUPPORTED` (the input
+//! frames through it (`k230-capture`, on either way). So [`IspInfo::max_outputs`] is 0, `set_input` is `NOT_SUPPORTED` (the input
 //! is whatever the path that feeds the ISP delivers), every output is `NOT_FOUND`, and
-//! `input_stream` is `NOT_SUPPORTED`. A job names no input buffer and no output buffer.
+//! `input_stream` is `NOT_SUPPORTED`. A job names no input buffer and no output buffer. The vendor
+//! node can't be given a buffer whose range is checked, so frames go through
+//! [`K230IspFrames`](crate::K230IspFrames) and `lemnos.ko` instead.
 //!
 //! # Streams
 //!
@@ -55,21 +58,21 @@
 //!
 //! The way to the block is the board file's, and there is no falling back from one to the other:
 //!
-//! - **The module's resources**: the device's `uses` names `regs` (the ISP's register window, such
-//!   as `regs:90000000.isp`) and `irq` (the ISP core's interrupt, such as `irq:90000000.isp/0`),
-//!   and optionally `clocks` and `resets` (`clocks:90000000.isp/NAME,...`, every one turned on,
-//!   and `resets:...`, every line pulsed, at each open). See
-//!   [`ModuleHardware`](crate::hw::ModuleHardware). `device` must not be set.
-//! - **The vendor device**: none of those named; `config` may give `device`, the vendor driver's
-//!   node, default `/dev/vvcam-isp.0`.
+//! - **The module**: `config` gives `block`, the ISP's platform device name as `lemnos.ko` lists
+//!   it (the ISP bound to the module and listed in its `k230_isp` parameter), and optionally
+//!   `node`, the module's control node, default `/dev/lemnos`. The driver holds the block's
+//!   configuration session; see [`ModuleHardware`](crate::hw::ModuleHardware). `device` must not
+//!   be set.
+//! - **The vendor device**: no `block`; `config` may give `device`, the vendor driver's node,
+//!   default `/dev/vvcam-isp.0`.
 //!
-//! `regs` without `irq`, `irq`, `clocks` or `resets` without `regs`, or `regs` with `device`, is
-//! refused when the device binds (`INVALID_ARGUMENT`). A resource the host can't give fails the
-//! bind with the host's reason; nothing else is tried.
+//! `block` with `device`, or an empty `block`, is refused when the device binds
+//! (`INVALID_ARGUMENT`). Neither way falls back to the other.
 //!
 //! # Failures
 //!
-//! A failed request starts recovery: the device is closed and opened again on the next ticks,
+//! A failed request starts recovery, and so does a reset of the block by the module's frames role
+//! (which undoes what was written): the device is closed and opened again on the next ticks,
 //! with the delay between attempts doubling from 250 ms and capped at 8 s, clearing when one
 //! succeeds. A job with the block when it failed counts as an error. The driver never gives up and
 //! never turns itself off; `stop` is what ends it. While recovering, health is degraded.
@@ -79,14 +82,15 @@ use lemnos_contract_camera_isp::{
     NO_BUFFER, OutputLayout,
 };
 use lemnos_core::{
-    ClocksHandle, Config, Decode, Description, Health, InterruptHandle, Item, Lifecycle, MethodId,
-    Reader, RegistersHandle, ResetHandle, Result, Status, StreamHandle, driver,
+    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
+    StreamHandle, driver,
 };
 use lemnos_driver_k230isp_sys::regs::{CTRL_GEN_CFG_UPD, ISP_CTRL, MIS_FRAME_OUT};
 use lemnos_hal::blocks::StreamFrame;
 
 use crate::config::{self, CONFIG_BYTES, LAYOUT_WRITES};
-use crate::hw::{Hardware, LinuxHardware, ModuleHardware, Settings};
+use crate::frames::NODE;
+use crate::hw::{Hardware, LinuxConfigSession, LinuxHardware, ModuleHardware, Settings};
 use crate::stats::{self, LAYOUT_STATISTICS, STATISTICS_BYTES};
 
 const START: MethodId = MethodId {
@@ -136,12 +140,12 @@ enum State {
 }
 
 /// Whether bit `index` of `mask` is set; `false` past the mask.
-const fn has(mask: u64, index: u32) -> bool {
+pub(crate) const fn has(mask: u64, index: u32) -> bool {
     index < 64 && mask & (1 << index) != 0
 }
 
 /// `mask` with bit `index` set or cleared; unchanged past the mask.
-const fn with(mask: u64, index: u32, set: bool) -> u64 {
+pub(crate) const fn with(mask: u64, index: u32, set: bool) -> u64 {
     if index >= 64 {
         mask
     } else if set {
@@ -152,7 +156,7 @@ const fn with(mask: u64, index: u32, set: bool) -> u64 {
 }
 
 /// The lowest set bit of `mask`.
-const fn lowest(mask: u64) -> Option<u32> {
+pub(crate) const fn lowest(mask: u64) -> Option<u32> {
     if mask == 0 {
         None
     } else {
@@ -180,7 +184,7 @@ struct Frames {
 }
 
 /// Takes the buffers `stream` has handed back into `mask`, at most one round of the stream.
-fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result<()> {
+pub(crate) fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result<()> {
     for _ in 0..MAX_STREAM_BUFFERS {
         let Some(buffer) = stream.next_buffer().map_err(|_| Status::IO)? else {
             break;
@@ -190,27 +194,13 @@ fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result<()> {
     Ok(())
 }
 
-/// The ISP, behind `vvcam-isp` or through the host's resources for it, as `camera.isp/1`.
+/// The ISP, behind `vvcam-isp` or through `lemnos.ko`'s configuration role, as `camera.isp/1`.
 #[driver("k230isp", provides = [CameraIsp])]
 pub struct K230Isp {
     #[needs]
     config: StreamHandle,
     #[needs]
     statistics: StreamHandle,
-    /// The block's own resources, for the module's way. Moved into the hardware at bind; what is
-    /// left here is `None`. Declared here so the host provides them.
-    #[needs(optional)]
-    #[expect(dead_code, reason = "moved into the hardware at bind")]
-    regs: Option<RegistersHandle>,
-    #[needs(optional)]
-    #[expect(dead_code, reason = "moved into the hardware at bind")]
-    irq: Option<InterruptHandle>,
-    #[needs(optional)]
-    #[expect(dead_code, reason = "moved into the hardware at bind")]
-    clocks: Option<ClocksHandle>,
-    #[needs(optional)]
-    #[expect(dead_code, reason = "moved into the hardware at bind")]
-    resets: Option<ResetHandle>,
     hw: Box<dyn Hardware>,
     state: State,
     counters: Counters,
@@ -231,15 +221,17 @@ impl Lifecycle for K230Isp {
     type Needs = K230IspNeeds;
     const TICKS: bool = true;
 
-    fn start(mut needs: K230IspNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let hw: Box<dyn Hardware> = match (needs.regs.take(), needs.irq.take()) {
-            (Some(regs), Some(irq)) if cfg.str("device").is_none() => Box::new(
-                ModuleHardware::new(regs, irq, needs.clocks.take(), needs.resets.take()),
-            ),
-            (None, None) if needs.clocks.is_none() && needs.resets.is_none() => {
-                Box::new(LinuxHardware::new(Settings::new(cfg.str("device"))?))
+    fn start(needs: K230IspNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let hw: Box<dyn Hardware> = match (cfg.str("block"), cfg.str("device")) {
+            (Some(block), None) if !block.is_empty() => {
+                let node = std::path::PathBuf::from(cfg.str("node").unwrap_or(NODE));
+                Box::new(ModuleHardware::new(Box::new(LinuxConfigSession::new(
+                    node,
+                    block.to_owned(),
+                ))))
             }
-            // Half of one way, or both at once: the board file is wrong, and nothing is guessed.
+            (None, device) => Box::new(LinuxHardware::new(Settings::new(device)?)),
+            // Both ways at once, or no block: the board file is wrong, and nothing is guessed.
             _ => return Err(Status::INVALID_ARGUMENT),
         };
         Ok(Self::with_hardware(hw, needs))
@@ -305,10 +297,6 @@ impl K230Isp {
         Self {
             config: needs.config,
             statistics: needs.statistics,
-            regs: None,
-            irq: None,
-            clocks: None,
-            resets: None,
             hw,
             state: State::Stopped,
             counters: Counters::default(),
@@ -503,7 +491,7 @@ impl K230Isp {
 }
 
 /// Writes a stream name into `into`.
-fn name(name: &str, into: &mut [u8]) -> Result<usize> {
+pub(crate) fn name(name: &str, into: &mut [u8]) -> Result<usize> {
     let bytes = name.as_bytes();
     into.get_mut(..bytes.len())
         .ok_or(Status::BUFFER_TOO_SMALL)?

@@ -55,6 +55,8 @@ impl Iterator for Writes<'_> {
     }
 }
 
+impl ExactSizeIterator for Writes<'_> {}
+
 /// The writes `config` holds, if every one may be written; `None` refuses the whole list.
 #[must_use]
 pub fn check(config: &[u8]) -> Option<Writes<'_>> {
