@@ -298,6 +298,7 @@ fn unset_rig(frames: Option<MockStream>, output1: bool) -> Rig {
             statistics: Some(hold(&stats)),
             output0: Some(hold(&frames)),
             output1: output1.then(|| hold(&out1)),
+            _next: None,
         },
         options(),
     );

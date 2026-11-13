@@ -1350,6 +1350,7 @@ dependencies = [
 name = "lemnos-driver-rp1-csi2"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-contract-camera-isp",
  "lemnos-contract-camera-receiver",
  "lemnos-core",
  "lemnos-driver-rp1-csi2-sys",
@@ -1570,6 +1571,7 @@ dependencies = [
 name = "lemnos-host"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-contract-camera-isp",
  "lemnos-contract-camera-receiver",
  "lemnos-contract-camera-sensor",
  "lemnos-contract-orientation",

@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-contract-camera-receiver = { path = "../../contracts/camera-receiver" }
+lemnos-contract-camera-isp = { path = "../../contracts/camera-isp" }
 lemnos-hal = { path = "../../engine/hal", features = ["std"] }
 lemnos-driver-rp1-csi2-sys = { path = "../rp1-csi2-sys" }
 

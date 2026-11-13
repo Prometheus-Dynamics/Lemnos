@@ -535,6 +535,7 @@ fn driver(host: &Host, hw: &Hw) -> PispFe {
             statistics: Some(stream("statistics")),
             output0: Some(stream("output0")),
             output1: Some(stream("output1")),
+            _next: None,
         },
         FeOptions::new(link, 8).unwrap(),
     );

@@ -385,6 +385,7 @@ fn driver(host: &Host, hw: &Hw) -> PispFe {
             statistics: None,
             output0: Some(stream("output0")),
             output1: None,
+            _next: None,
         },
         Options::new(link, 4).unwrap(),
     );

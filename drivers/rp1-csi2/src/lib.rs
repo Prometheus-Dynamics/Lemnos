@@ -74,11 +74,13 @@ pub mod relay;
 #[cfg(test)]
 mod tests;
 
+use lemnos_contract_camera_isp::CameraIsp;
 use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig, Packing,
 };
 use lemnos_core::{
-    Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle, driver,
+    Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result, Status, StreamHandle,
+    driver,
 };
 
 use lemnos_hal::blocks::BufferKind;
@@ -140,6 +142,10 @@ pub struct Rp1Csi2 {
     /// Where frames go: the board's `frames` stream on this device.
     #[needs(optional)]
     frames: Option<StreamHandle>,
+    /// The ISP the board feeds this receiver to (`link` on the receiver): the front end on a
+    /// PiSP block. Resolved at bind, where the host checks it serves `camera.isp/1`.
+    #[link]
+    _isp: Option<Dev<dyn CameraIsp>>,
     hw: Box<dyn Hardware>,
     relay: Relay,
     link: Option<LinkConfig>,
@@ -209,7 +215,9 @@ impl Lifecycle for Rp1Csi2 {
             handles_only(&**frames)?;
         }
         let hw: Box<dyn Hardware> = Box::new(LinuxHardware::new(settings));
-        Ok(Self::with_hardware(hw, needs.frames))
+        let mut this = Self::with_hardware(hw, needs.frames);
+        this._isp = needs._isp;
+        Ok(this)
     }
 
     fn describe(&self, out: &mut Description) {
@@ -289,6 +297,7 @@ impl Rp1Csi2 {
     pub fn with_hardware(hw: Box<dyn Hardware>, frames: Option<StreamHandle>) -> Self {
         Self {
             frames,
+            _isp: None,
             hw,
             relay: Relay::new(),
             link: None,
