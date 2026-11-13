@@ -16,8 +16,8 @@ use lemnos_contract_camera_receiver::{
     MAX_FEED_NAME, Packing,
 };
 use lemnos_contract_camera_sensor::{
-    AppliedLanding, CameraSensor, Controls, FrameValues, Landing, LinkCheck, Mode, SensorInfo,
-    check_link,
+    AppliedLanding, CameraSensor, Controls, FrameValues, InForce, Landing, LinkCheck, Mode,
+    SensorInfo, check_link,
 };
 use lemnos_core::{Config, Dev, Health, Lifecycle, Result, Status, driver};
 use lemnos_host::board::parse;
@@ -200,6 +200,18 @@ impl CameraSensor for LinkedConsumer {
         Err(Status::NOT_SUPPORTED)
     }
     fn applied_landing(&mut self) -> Result<Option<AppliedLanding>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn in_force(&mut self) -> Result<InForce> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_exposure(&mut self, _lines: u32) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_analogue_gain(&mut self, _code: u32) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_frame_length(&mut self, _lines: u32) -> Result<Landing> {
         Err(Status::NOT_SUPPORTED)
     }
     fn info(&mut self) -> Result<SensorInfo> {

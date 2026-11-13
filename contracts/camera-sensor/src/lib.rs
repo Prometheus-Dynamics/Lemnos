@@ -314,6 +314,17 @@ pub struct Controls {
     pub frame_length: Option<u32>,
 }
 
+/// The control values in force for the selected mode, as the driver holds them, for a caller to
+/// show. Exposure is in whole lines (the sub-line part is not shown), analogue gain is its code,
+/// and frame length is in lines. Each is `None` where the driver holds no value: before a mode is
+/// selected, all three are.
+#[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InForce {
+    pub exposure_lines: Option<u32>,
+    pub analogue_gain: Option<u32>,
+    pub frame_length: Option<u32>,
+}
+
 /// Controls for one frame and the caller's name for that frame.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FrameValues {
@@ -377,6 +388,22 @@ pub trait CameraSensor {
     /// was no link to a receiver that counts frame starts, so no landing was ever read for it.
     #[method(14)]
     fn applied_landing(&mut self) -> Result<Option<AppliedLanding>>;
+    /// The control values in force, as [`InForce`] says. A zero-argument read, so a caller can
+    /// show them without a post.
+    #[method(15)]
+    fn in_force(&mut self) -> Result<InForce>;
+    /// Sets the exposure to `lines` whole lines, posted as [`CameraSensor::post_values_at`] posts
+    /// it: the answer is the frame it lands on, by the landing rule in the module docs. Refused
+    /// as `post_values_at` is, and `INVALID_ARGUMENT` when the sensor is not streaming, since a
+    /// value set while stopped lands on no frame.
+    #[method(16)]
+    fn set_exposure(&mut self, lines: u32) -> Result<Landing>;
+    /// Sets the analogue gain to `code`, landing as [`CameraSensor::set_exposure`] does.
+    #[method(17)]
+    fn set_analogue_gain(&mut self, code: u32) -> Result<Landing>;
+    /// Sets the frame length to `lines`, landing as [`CameraSensor::set_exposure`] does.
+    #[method(18)]
+    fn set_frame_length(&mut self, lines: u32) -> Result<Landing>;
 }
 
 /// What a sensor's bind found about the board's `link` to its receiver. Three answers, and only

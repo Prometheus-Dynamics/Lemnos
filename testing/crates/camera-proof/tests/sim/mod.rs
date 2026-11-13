@@ -39,8 +39,8 @@ use lemnos_contract_camera_receiver::{
     MAX_EMBEDDED_STREAM_NAME, MAX_STREAM_NAME, Packing,
 };
 use lemnos_contract_camera_sensor::{
-    AppliedLanding, CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, Landing,
-    Mode, Rect, SensorInfo, landing_of, launch_frame,
+    AppliedLanding, CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, InForce,
+    Landing, Mode, Rect, SensorInfo, landing_of, launch_frame,
 };
 use lemnos_core::{Config, ConfigValue, Dev, Lifecycle, Result, Status, StreamHandle, driver};
 use lemnos_hal::blocks::StreamFrame;
@@ -466,6 +466,18 @@ impl CameraSensor for SimSensor {
             Some((_, Outcome::Unknown)) => Err(Status::BUSY),
             Some((_, Outcome::Unsupported)) => Err(Status::NOT_SUPPORTED),
         }
+    }
+    fn in_force(&mut self) -> Result<InForce> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_exposure(&mut self, _lines: u32) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_analogue_gain(&mut self, _code: u32) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_frame_length(&mut self, _lines: u32) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
     }
 
     fn set_flips(&mut self, _horizontal: bool, _vertical: bool) -> Result<BayerOrder> {

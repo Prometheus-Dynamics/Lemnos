@@ -1,7 +1,7 @@
 use lemnos_contract_camera_sensor::{
     AppliedLanding, BayerOrder, CameraSensor, Controls, EmbeddedData, FrameStarts, FrameValues,
-    GainLaw, GainRange, Landing, LinkConfig, MAX_IDENTITY_NAME, Mode, Rect, SensorInfo, landing_of,
-    launch_frame,
+    GainLaw, GainRange, InForce, Landing, LinkConfig, MAX_IDENTITY_NAME, Mode, Rect, SensorInfo,
+    landing_of, launch_frame,
 };
 use lemnos_core::{
     Bound, Caller, Contract, Decode, Encode, LOCAL_ARGS, REPLY_INLINE, Reader, Reply, Result,
@@ -113,6 +113,10 @@ fn the_tag_and_numbers_are_stable() {
             ("identity", 12),
             ("post_values_at", 13),
             ("applied_landing", 14),
+            ("in_force", 15),
+            ("set_exposure", 16),
+            ("set_analogue_gain", 17),
+            ("set_frame_length", 18),
         ]
     );
     assert!(!INFO.methods[12].has_out_buffer);
@@ -441,6 +445,18 @@ impl CameraSensor for Mock {
     }
 
     fn applied_landing(&mut self) -> Result<Option<AppliedLanding>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn in_force(&mut self) -> Result<InForce> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_exposure(&mut self, _lines: u32) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_analogue_gain(&mut self, _code: u32) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn set_frame_length(&mut self, _lines: u32) -> Result<Landing> {
         Err(Status::NOT_SUPPORTED)
     }
 }

@@ -15,6 +15,8 @@ pub enum Unit {
     Pascal,
     Hertz,
     Second,
+    /// A count of sensor lines, such as an exposure or a frame length.
+    Line,
     /// Dimensionless: ratios, steps, levels, modes.
     #[default]
     One,
@@ -35,6 +37,7 @@ impl Unit {
             Self::Pascal => "Pa",
             Self::Hertz => "Hz",
             Self::Second => "s",
+            Self::Line => "line",
             Self::One => "",
         }
     }

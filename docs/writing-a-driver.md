@@ -618,6 +618,8 @@ When you add a method or field, classify it in the PR:
 | `camera.receiver` methods 9 to 11 (`embedded_stream`, `source`, `layout`) | additive | appended methods; an old driver answers `NOT_SUPPORTED` |
 | `camera.sensor` method 12 (`identity`) | additive | appended method |
 | `camera.sensor` methods 13 and 14 (`post_values_at`, `applied_landing`), `camera.receiver` method 12 (`frame_starts`) | additive | appended methods and their types; an old driver answers `NOT_SUPPORTED` and an old caller never calls them |
+| `camera.sensor` methods 15 to 18 (`in_force`, `set_exposure`, `set_analogue_gain`, `set_frame_length`) and `InForce` | additive | appended methods and their type; the three setters are posts, so a driver without a landing answers `NOT_SUPPORTED` as `post_values_at` does |
+| `Unit::Line` (`"line"`) | additive | a new unit symbol on the description's unit string; an item with it reads as unit-less to a client that does not know it |
 | `lens/1` methods 4 and 5 (`direction`, `settle_us`) | additive | appended methods |
 | `raw-bus` methods 6 and 7 (`uart_write`, `uart_read`) | additive | appended methods |
 | `MethodInfo.job` on a new method | additive | a method that was not a job before is not called differently by a client that doesn't know it is one |
