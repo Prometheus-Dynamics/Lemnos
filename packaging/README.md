@@ -1,6 +1,6 @@
 # Packaging
 
-How lemnosd runs on a board: a systemd unit, the user it runs as, the device-node rules it needs, and
+How lemnosd runs on a board: a systemd unit, or a BusyBox init script, the user it runs as, the device-node rules it needs, and
 the settings file. This directory ships the files; an OS's image build installs them where the table
 says. Nothing here names a board or an OS. `scripts/check-packaging.sh` checks every file, and the gate
 runs it. It installs nothing, enables nothing, and starts nothing.
@@ -13,6 +13,8 @@ runs it. It installs nothing, enables nothing, and starts nothing.
 | `systemd/lemnosd.env.example` | `/etc/lemnos/lemnosd.env` | Optional settings both units read. | Always, edited as needed |
 | `systemd/lemnos-module.conf` | `/usr/lib/modules-load.d/lemnos.conf` | Loads `lemnos.ko` at boot. **Optional.** | Only an image that ships `lemnos.ko` |
 | `udev/70-lemnos.rules` | `/usr/lib/udev/rules.d/70-lemnos.rules` | Gives group `lemnos` the device nodes lemnosd opens. | Always |
+| `init/S50lemnosd` | `/etc/init.d/S50lemnosd` (mode 0755) | BusyBox init script for the daemon, in place of the unit. | Only an image without systemd |
+| `init/mdev.conf.fragment` | appended to `/etc/mdev.conf` | Device-node rules for mdev, the BusyBox counterpart of the udev rules. | Only an image without systemd |
 
 The OS supplies what is not here: the `lemnosd` and `lemnos-orion` binaries at `/usr/bin`, and the
 board file at `/etc/lemnos/board.toml` (see [docs/boards.md](../docs/boards.md)). The units refuse to
@@ -21,8 +23,8 @@ start without the board file (`ConditionPathExists=`).
 ## The daemon
 
 `lemnosd.service` runs `lemnosd --board /etc/lemnos/board.toml` as user and group `lemnos`, with
-`Type=notify`, a 30 s watchdog, and `Restart=always` (1 s, growing to 30 s; no start limit). It is not
-root:
+`Type=notify`, `Restart=always` with a constant `RestartSec=1s` and no start limit, and no `WatchdogSec=`:
+the hardware watchdog is its escalation (see "The hardware watchdog"). It is not root:
 
 - **Devices** come through group `lemnos`, from the udev rules. The daemon opens the nodes its drivers
   name, one by one; the rules list each kind by subsystem. Vendor nodes that a board's drivers open by
@@ -53,6 +55,90 @@ to the Orion node's socket, and writes no files. The node's socket belongs to Or
 image that ships Orion adds `SupplementaryGroups=orion` in a drop-in. The unit is hardened to
 `AF_UNIX` only, with no capabilities and no devices. Widen the address families only if a node is reached
 over TCP.
+
+## The hardware watchdog
+
+lemnosd must not stay down. A board with a managed hardware watchdog (the `hw-watchdog` driver, on by
+default) reboots when the daemon stops feeding it. The daemon feeds it itself, and sets its timeout
+(15 s by default). So the watchdog is the escalation on every board, systemd or BusyBox, and the
+supervisor's restart is the first step: a restart must come back well inside that bound, which is why
+the restart delay is a constant 1 s.
+
+Three rules follow, and the OS must keep them:
+
+- **Do not give the watchdog to systemd.** The device has one opener, which is lemnosd's `hw-watchdog`
+  driver. Leave `RuntimeWatchdogSec=` and `ShutdownWatchdogSec=` unset in `/etc/systemd/system.conf`
+  (and its drop-ins): either would have systemd open the same device.
+- **Do not run a second feeder** on BusyBox: no `watchdog` daemon, and no init step that opens the node.
+- **The units set no `WatchdogSec=`.** A software timeout that restarts a hung daemon would race the
+  hardware reboot with a second, shorter clock. Dropping it keeps one escalation, identical on both
+  init systems. `Type=notify` stays, for readiness only.
+
+The `lemnos` group can open the watchdog node (`SUBSYSTEM=="watchdog"` in the udev rules, `^watchdog`
+in the mdev fragment) so the daemon can open it as its own user. Nothing else should.
+
+## Without systemd (BusyBox init)
+
+A small board (64 to 128 MB) runs BusyBox init instead. The same daemon, the same user, socket, device
+nodes and watchdog escalation, with `packaging/init/` in place of the units. The OS installs the files
+above and does these four things, which the units would otherwise do.
+
+**The user and group** are made by the image builder, not by sysusers. Add these lines (uid and gid 999,
+or any free system id, the same in both files):
+
+```text
+/etc/group:   lemnos:x:999:
+/etc/passwd:  lemnos:x:999:999:Lemnos daemon:/nonexistent:/bin/false
+/etc/shadow:  lemnos:!:0:0:99999:7:::
+```
+
+Nothing keys on the id, as with the unit. The OS adds program users to group `lemnos` as usual.
+
+**The device nodes** are given to group `lemnos` by mdev, not udev. Append `init/mdev.conf.fragment` to
+`/etc/mdev.conf`. Each line is the same node as a udev rule: `^lemnos$` is `/dev/lemnos`, `^dma_heap/.*$`
+the dma heaps, `^i2c-[0-9]+$` the I2C buses, `^spidev...$` SPI, `^gpiochip[0-9]+$` GPIO, the `ttyS`,
+`ttyAMA`, `ttyUSB` and `ttyACM` serial ports, `^video[0-9]+$` and `^media[0-9]+$` for cameras,
+`^watchdog[0-9]*$` for the watchdog, and `^bus/usb/.../...$` for usbfs. mdev runs at boot (`mdev -s`) and
+on hotplug only if the image sets `/proc/sys/kernel/hotplug` to `/sbin/mdev`.
+
+**The one capability** is granted to the binary, not to a process: `setcap cap_sys_rawio=ep
+/usr/bin/lemnosd`. The init script starts the daemon as `lemnos` through `start-stop-daemon`, so no
+process runs as root after boot, and no code in the script drops privileges. File capabilities work
+for a non-root process on exec, so the daemon gets `CAP_SYS_RAWIO` where it is needed: the register
+mapping. The rootfs must keep extended attributes (ext4, f2fs and squashfs with xattrs do). Where it
+does not, the daemon runs without the capability and the drivers that map registers report
+`PermissionDenied`; nothing else changes. The other choice, running the daemon as root and dropping
+privileges in the script, was rejected: it adds a root process and privilege-drop code that the file
+capability does without.
+
+**The runtime directory and log.** The script makes `/run/lemnos` (mode 0750, owner `lemnos`) and
+`/var/log/lemnosd.log` at start. Nothing needs a tmpfiles file.
+
+The script (`/etc/init.d/S50lemnosd`) runs with `start`, `status`, `restart` and `stop`. It needs
+`start-stop-daemon` (BusyBox with `CONFIG_START_STOP_DAEMON`). A daemon that exits is started again
+after 1 s, a constant delay, and never given up on. `stop` is for shutdown: it sends TERM, waits up to
+10 s, then KILLs. On a live board it must not be used, since the hardware watchdog would then reboot
+the board. The script does not feed the watchdog. It does not depend on systemd-notify: lemnosd sends
+nothing when `NOTIFY_SOCKET` and `WATCHDOG_USEC` are absent (`service/lemnosd/src/notify.rs`).
+
+**What is lost without systemd** is the hardening, and the unit's bookkeeping:
+
+- Each hardening option of the unit: `ProtectSystem=strict` (read-only filesystem view), `ProtectHome`,
+  `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`,
+  `ProtectControlGroups`, `ProtectHostname`, `ProtectClock`, `ProtectProc=invisible`, `LockPersonality`,
+  `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictSUIDSGID`, `RestrictNamespaces`,
+  `SystemCallArchitectures`, `RestrictAddressFamilies` (the daemon is unconfined in its address
+  families), `SystemCallFilter`, `SystemCallErrorNumber`, and `NoNewPrivileges`. Only `CAP_SYS_RAWIO` is
+  granted, but the capability bounding set is not narrowed to it as the unit does.
+- `sysusers` (the user is made by the image's passwd lines), `tmpfiles` (none needed), and
+  `RuntimeDirectory=` (the script makes the directory and removes the socket at stop).
+- Logging to the journal: the daemon's error output goes to `/var/log/lemnosd.log`.
+- `ConditionPathExists=` for the board file: `start` checks it instead.
+
+Nothing else changes: the watchdog escalation, the restart and the device groups are the same on both.
+The sanity checks in `scripts/check-packaging.sh` run `sh -n` on the script, `busybox sh -n` when
+BusyBox is installed, and `shellcheck` when it is installed. None of them runs the script. The init
+script and the mdev fragment are untested on board.
 
 ## Settings
 

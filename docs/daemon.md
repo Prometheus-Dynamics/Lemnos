@@ -74,9 +74,19 @@ use them.
 nodes given to group `lemnos` by `packaging/udev/70-lemnos.rules`. Its one capability is
 `CAP_SYS_RAWIO`, for register mapping through `/dev/lemnos`. The unit starts only when the OS has
 supplied the board file at `/etc/lemnos/board.toml`. The OS installs the unit files and supplies the
-`lemnosd` binary and the board file. [`packaging/README.md`](../packaging/README.md) has the install
+`lemnosd` binary and the board file. The unit restarts the daemon after a constant 1 s and sets no
+`WatchdogSec=`: the hardware watchdog escalates, as it does without systemd. [`packaging/README.md`](../packaging/README.md) has the install
 table, what each unit needs and what it does not. The PWM and USB gadget drivers write sysfs and
 configfs, which only root may do, so a board that uses them needs a drop-in that runs the daemon as root.
+
+## Running under BusyBox init
+
+On a board without systemd, `packaging/init/S50lemnosd` runs the daemon as the `lemnos` user, with
+the same socket and device-node groups as the unit, through `start`, `status`, `restart` and `stop`. A
+crash restarts it after a constant 1 s. `stop` is for shutdown, and sends TERM, then KILL after 10 s.
+The capability is a file capability on `/usr/bin/lemnosd`. The hardware watchdog is the escalation on
+both init systems: the daemon feeds it, and the OS must not give it to systemd. [`packaging/README.md`](../packaging/README.md)
+has the user's passwd and group lines, the mdev rules, and what the unit gives that the script does not.
 
 ## lemnos-ctl
 

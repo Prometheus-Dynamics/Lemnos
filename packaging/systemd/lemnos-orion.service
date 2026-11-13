@@ -21,8 +21,6 @@ Group=lemnos
 TimeoutStopSec=15s
 Restart=always
 RestartSec=1s
-RestartSteps=5
-RestartMaxDelaySec=30s
 
 CapabilityBoundingSet=
 AmbientCapabilities=

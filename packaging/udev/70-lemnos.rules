@@ -28,6 +28,10 @@ SUBSYSTEM=="media", GROUP="lemnos", MODE="0660"
 # USB: the usbfs nodes /dev/bus/usb/BBB/DDD, one per device (not per interface).
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", GROUP="lemnos", MODE="0660"
 
+# The hardware watchdog, /dev/watchdog0 (or /dev/watchdog): lemnosd's hw-watchdog driver opens it
+# for writing, which arms it, and feeds it. Group access only; nothing else may open it.
+SUBSYSTEM=="watchdog", GROUP="lemnos", MODE="0660"
+
 # Vendor nodes a board's compiled-in drivers open, by name, are the image's to add: one line each,
 # SUBSYSTEM=="misc", KERNEL=="<name>", GROUP="lemnos", MODE="0660". Look them up in the driver's
 # source (grep for DEVICE or NODE in drivers/<name>/). Nothing here covers them.
