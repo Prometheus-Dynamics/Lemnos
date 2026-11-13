@@ -37,6 +37,8 @@ struct Fake {
     refuse: Vec<&'static str>,
     /// On a NAND board, the UBI device.
     nand: Option<ubi::Fake>,
+    /// The device-mapper targets the kernel has; `None` when there is no control node.
+    dm: Option<Vec<String>>,
 }
 
 impl Fake {
@@ -93,8 +95,9 @@ impl Ops for Fake {
         let _ = self.call(format!("umount {}", self.short(target)));
     }
 
-    fn load_module(&self, name: &str, release: &str) -> Result<(), String> {
-        self.call(format!("module {name} {release}"))
+    fn dm_targets(&self) -> Result<Vec<String>, String> {
+        self.call("dm_targets".into())?;
+        self.dm.clone().ok_or_else(|| "no control node".into())
     }
 
     fn open_verity(&self, image: &Path, name: &str, verity: &Verity) -> Result<String, String> {
@@ -150,6 +153,8 @@ struct Board {
     layout: Layout,
     /// On raw NAND: the UBI device's description.
     nand: Option<Ubi>,
+    /// The device-mapper targets the kernel has (`None`: no control node).
+    dm_targets: Option<Vec<String>>,
 }
 
 impl Board {
@@ -173,7 +178,10 @@ impl Board {
             layout: Layout::new(root.join("data"), root.join("boot")),
             env,
             nand: None,
+            dm_targets: Some(vec!["verity".into()]),
         };
+        // A kernel with every piece of the chain built in.
+        board.kernel(&["ext4", "vfat", "erofs"]);
         fs::create_dir_all(board.env.dev.clone()).unwrap();
         let mut mbr = vec![0u8; 512];
         mbr[440..444].copy_from_slice(&0x1234_abcdu32.to_le_bytes());
@@ -205,6 +213,24 @@ impl Board {
             b"DEFAULT=os-2\nPREVIOUS=os-1\nSTATE=confirmed\n",
         );
         board
+    }
+
+    /// The kernel's proc files: the filesystems named, and every other piece present.
+    fn kernel(&self, filesystems: &[&str]) {
+        let mut text = String::from("nodev\tsysfs\n");
+        for fs in filesystems {
+            text.push_str(&format!("\t{fs}\n"));
+        }
+        self.write("proc/filesystems", text.as_bytes());
+        self.write("proc/misc", b"235 hwrng\n236 device-mapper\n");
+        self.write(
+            "proc/devices",
+            b"Character devices:\n  1 mem\nBlock devices:\n  7 loop\n",
+        );
+        self.write(
+            "proc/crypto",
+            b"name         : sha256\ndriver       : sha256-generic\n",
+        );
     }
 
     fn write(&self, path: &str, bytes: &[u8]) {
@@ -275,6 +301,7 @@ impl Board {
                 ubi,
                 refuse: std::sync::Mutex::new(Vec::new()),
             }),
+            dm: self.dm_targets.clone(),
         };
         let why = boot(&fake, &self.env);
         (fake, why)
@@ -297,6 +324,7 @@ impl Board {
             device.put(&ubi::image_volume(id), &fs::read(&file).unwrap());
             fs::remove_file(file).unwrap();
         }
+        board.kernel(&["ubifs", "erofs"]);
         device.put(
             ubi::RECORD_VOLUME,
             b"default=os-2\ntrial=\ntrial_attempts=0\n",
@@ -366,7 +394,9 @@ fn the_default_slot_boots_through_dm_verity() {
         hash("x0")
     );
     assert!(calls.contains(&verity), "{calls:?}");
-    assert!(at("module dm-verity 6.12.0-board") < at("verity "));
+    // A built-in kernel needs no module, and the initramfs carries none.
+    assert!(!calls.iter().any(|c| c.starts_with("module")));
+    assert!(calls.contains(&"dm_targets".to_string()));
     assert!(at("verity ") < at("mount erofs ro /dev/dm-0 newroot"));
     assert!(at("mount erofs") < at("move data newroot/data"));
     assert_eq!(fake.last(), "switch_root newroot");
@@ -878,4 +908,164 @@ fn a_fallback_trial_gets_the_attempts_the_board_was_given() {
     let (fake, _) = board.boot(&["verity "]);
     assert_eq!(board.read("boot/trial-attempts"), "2\n");
     assert_eq!(fake.last(), "restart");
+}
+
+/// A board whose kernel lacks `option`, the piece the boot chain needs.
+fn kernel_without(option: &str) -> Board {
+    let mut board = Board::new();
+    match option {
+        "BLK_DEV_DM" => board.write("proc/misc", b"235 hwrng\n"),
+        "CRYPTO_SHA256" => board.write("proc/crypto", b"name : crc32c\n"),
+        "DM_VERITY" => board.dm_targets = Some(Vec::new()),
+        "EROFS_FS" => board.kernel(&["ext4", "vfat"]),
+        "EXT4_FS" => board.kernel(&["vfat", "erofs"]),
+        "BLK_DEV_LOOP" => board.write("proc/devices", b"Block devices:\n  259 blkext\n"),
+        other => panic!("no such piece {other}"),
+    }
+    board
+}
+
+#[test]
+fn each_missing_kernel_piece_is_named_and_no_slot_is_failed_or_spent() {
+    for option in [
+        "BLK_DEV_DM",
+        "CRYPTO_SHA256",
+        "DM_VERITY",
+        "EROFS_FS",
+        "EXT4_FS",
+        "BLK_DEV_LOOP",
+    ] {
+        let board = kernel_without(option);
+        let (fake, why) = board.boot(&[]);
+        let named = format!("the kernel lacks CONFIG_{option}: ");
+        assert!(why.starts_with("no slot can start: "), "{option}: {why}");
+        assert!(why.contains(&named), "{option}: {why}");
+        assert!(
+            fake.logs.borrow().iter().any(|line| line.contains(&named)),
+            "{option}: {:?}",
+            fake.logs.borrow()
+        );
+        // Nothing mounted past the boot checks, no slot opened, no attempt or failure recorded.
+        assert!(!fake.called("verity "), "{option}: {:?}", fake.calls());
+        assert!(!fake.called("mount erofs"), "{option}");
+        assert!(!fake.called("restart 0 tryboot"), "{option}");
+        assert!(!board.meta("os-2").failed(), "{option}");
+        assert_eq!(board.meta("os-2").get("FAILURES"), "", "{option}");
+        assert!(!board.env.at("boot/trial-attempts").exists(), "{option}");
+        // The default slot can't open either: the boot waits, keeps the log, and restarts.
+        assert!(fake.called("sleep 30"), "{option}: {:?}", fake.calls());
+        assert_eq!(fake.last(), "restart", "{option}");
+        assert!(board.env.at("boot/slot-init.log").exists(), "{option}");
+    }
+}
+
+#[test]
+fn a_kernel_without_a_storage_driver_names_it_when_no_data_partition_answers() {
+    let board = Board::new();
+    fs::remove_dir_all(board.env.sys.join("class/block")).unwrap();
+    fs::create_dir_all(board.env.sys.join("class/block")).unwrap();
+    let (fake, why) = board.boot(&[]);
+    assert!(
+        why.starts_with("no slot can start: no data partition"),
+        "{why}"
+    );
+    assert!(
+        fake.logs
+            .borrow()
+            .iter()
+            .any(|line| line.contains("the kernel lacks CONFIG_MMC_BLOCK")),
+        "{:?}",
+        fake.logs.borrow()
+    );
+    assert!(!fake.called("mount ext4"));
+}
+
+#[test]
+fn a_tryboot_trial_held_for_a_kernel_gap_gives_back_its_attempt_and_takes_no_more() {
+    let board = kernel_without("DM_VERITY");
+    board.write(
+        lemnos_slot_store::records::tryboot::TRIAL_FLAG,
+        &[0, 0, 0, 1],
+    );
+    board.write("boot/trial.txt", b"os_prefix=slots/os-1/\n");
+    board.write("boot/trial-attempts", b"1\n");
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains("the kernel lacks CONFIG_DM_VERITY"), "{why}");
+    // The trial's boot gives back the attempt the default's boot took for it, and restarts plainly.
+    assert_eq!(fake.last(), "restart");
+    assert_eq!(board.read("boot/trial-attempts"), "2\n");
+    assert_eq!(board.read("boot/trial.txt"), "os_prefix=slots/os-1/\n");
+    assert!(
+        board
+            .read("boot/trial-reason")
+            .contains("the kernel lacks CONFIG_DM_VERITY")
+    );
+    assert!(!board.meta("os-1").failed());
+
+    // The kernel is fixed in the meantime. The default boot does not spend the held trial's
+    // attempt, and the default slot boots.
+    let board = {
+        let mut fixed = board;
+        fixed.dm_targets = Some(vec!["verity".into()]);
+        fixed
+    };
+    fs::remove_file(
+        board
+            .env
+            .at(lemnos_slot_store::records::tryboot::TRIAL_FLAG),
+    )
+    .unwrap();
+    let (fake, why) = board.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    assert_eq!(board.read("boot/trial-attempts"), "2\n");
+    assert!(!fake.called("restart 0 tryboot"));
+    assert!(fake.called("verity data/slots/os-2.erofs"));
+}
+
+#[test]
+fn a_file_record_trial_held_for_a_kernel_gap_is_not_started_until_the_gap_is_gone() {
+    let board = kernel_without("EROFS_FS");
+    board.write(
+        "boot/boot-record",
+        lemnos_slot_store::records::file::text("os-2", "os-1", 2).as_bytes(),
+    );
+    let (_fake, why) = board.boot(&[]);
+    assert!(why.contains("the kernel lacks CONFIG_EROFS_FS"), "{why}");
+    let (default, trial, left) =
+        lemnos_slot_store::records::file::parse(&board.read("boot/boot-record"));
+    assert_eq!(
+        (default.as_str(), trial.as_str(), left),
+        ("os-2", "os-1", 2)
+    );
+
+    // The next boot, the kernel now complete: the held trial is not picked, and the default starts.
+    let fixed = board;
+    fixed.kernel(&["ext4", "vfat", "erofs"]);
+    let (fake, why) = fixed.boot(&[]);
+    assert_eq!(why, "", "{:?}", fake.logs.borrow());
+    let (_, trial, left) = lemnos_slot_store::records::file::parse(&fixed.read("boot/boot-record"));
+    assert_eq!((trial.as_str(), left), ("os-1", 2));
+    assert!(fake.called("verity data/slots/os-2.erofs"));
+}
+
+#[test]
+fn a_uboot_trial_held_for_a_kernel_gap_is_withdrawn_with_its_attempt_given_back() {
+    let board = kernel_without("DM_VERITY");
+    board.write(
+        "boot/boot-record.env",
+        b"default=os-2\ntrial=os-1\ntrial_attempts=2\n",
+    );
+    let (fake, why) = board.boot(&[]);
+    assert!(why.contains("the kernel lacks CONFIG_DM_VERITY"), "{why}");
+    assert_eq!(fake.last(), "restart");
+    let record =
+        lemnos_slot_store::records::uboot::Record::parse(&board.read("boot/boot-record.env"));
+    // U-Boot takes an attempt on every trial start, so the trial is withdrawn; the attempt given
+    // back is counted up to the board's attempts.
+    assert_eq!((record.trial.as_str(), record.attempts), ("", 3));
+    assert!(
+        board
+            .read("boot/trial-reason")
+            .contains("the kernel lacks CONFIG_DM_VERITY")
+    );
 }

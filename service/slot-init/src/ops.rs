@@ -19,8 +19,9 @@ pub trait Ops {
     /// Moves the mount at `source` to `target`.
     fn move_mount(&self, source: &Path, target: &Path) -> Result<(), String>;
     fn umount(&self, target: &Path);
-    /// Loads a kernel module for the running kernel `release`, and what it needs first.
-    fn load_module(&self, name: &str, release: &str) -> Result<(), String>;
+    /// The device-mapper targets the running kernel has, by name (`verity`). Built in or loaded:
+    /// an error when there is no device-mapper control node.
+    fn dm_targets(&self) -> Result<Vec<String>, String>;
     /// A dm-verity device named `name` over `image`, as `verity` describes: through a read-only
     /// loop device when `image` is a file, directly when it is a block device. Returns the verity
     /// device's node.

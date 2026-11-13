@@ -339,24 +339,55 @@ pub fn create_verity(dev: &Path, name: &str, sectors: u64, params: &str) -> io::
     Ok(dev.join(format!("dm-{minor}")))
 }
 
-/// Loads the kernel module in `file` with `params`.
-pub fn load_module(file: &Path, params: &str) -> io::Result<()> {
-    let module = File::open(file)?;
-    let params = c_text(params)?;
-    // SAFETY: finit_module takes a descriptor, a NUL-terminated string alive for the call, and
-    // flags.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_finit_module,
-            module.as_raw_fd(),
-            params.as_ptr(),
-            0 as libc::c_int,
-        )
-    };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
+/// `DM_LIST_VERSIONS`: the device-mapper targets the running kernel has, by name. Built in or
+/// loaded, a target is listed; a kernel without device-mapper has no control node to ask.
+pub const DM_LIST_VERSIONS: u32 = iowr::<DmIoctl>(0xfd, 13);
+
+/// The reply size asked for: room for a few dozen targets.
+const LIST_BYTES: usize = 4096;
+
+/// The target names in a `DM_LIST_VERSIONS` reply: `dm_target_versions` records from
+/// `data_start`, each `next` bytes after the one before (0 on the last). Every step moves
+/// forward, so the walk ends within the buffer.
+pub fn target_names(buf: &[u8]) -> io::Result<Vec<String>> {
+    let invalid = || io::Error::from(io::ErrorKind::InvalidData);
+    if buf.len() < size_of::<DmIoctl>() {
+        return Err(invalid());
     }
-    Ok(())
+    let head: DmIoctl = crate::ioctl::from_bytes(buf);
+    let mut at = head.data_start as usize;
+    let mut names = Vec::new();
+    loop {
+        let next = buf
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .ok_or_else(invalid)?;
+        // `next` (4), `version` (12), then the NUL-terminated name.
+        let name = buf.get(at + 16..).ok_or_else(invalid)?;
+        let end = name.iter().position(|&b| b == 0).ok_or_else(invalid)?;
+        names.push(String::from_utf8_lossy(&name[..end]).into_owned());
+        if next == 0 {
+            return Ok(names);
+        }
+        at = at.checked_add(next as usize).ok_or_else(invalid)?;
+    }
+}
+
+/// The device-mapper targets the kernel has (see [`DM_LIST_VERSIONS`]), through the control node
+/// under `dev`.
+pub fn dm_targets(dev: &Path) -> io::Result<Vec<String>> {
+    let control = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dev.join("mapper/control"))?;
+    let mut buf = vec![0u8; LIST_BYTES];
+    let mut head: DmIoctl = crate::ioctl::zeroed();
+    head.version = [4, 0, 0];
+    head.data_size = LIST_BYTES as u32;
+    head.data_start = size_of::<DmIoctl>() as u32;
+    buf[..size_of::<DmIoctl>()].copy_from_slice(as_bytes(&head));
+    dm_call(&control, DM_LIST_VERSIONS, &mut buf)?;
+    target_names(&buf)
 }
 
 /// The kernel's log buffer, as text.
@@ -448,6 +479,41 @@ mod tests {
         assert_eq!(DM_DEV_CREATE, 0xc138_fd03);
         assert_eq!(DM_DEV_SUSPEND, 0xc138_fd06);
         assert_eq!(DM_TABLE_LOAD, 0xc138_fd09);
+    }
+
+    #[test]
+    fn the_target_list_request_is_the_kernels() {
+        assert_eq!(DM_LIST_VERSIONS, 0xc138_fd0d);
+    }
+
+    #[test]
+    fn a_target_list_reply_walks_its_records_by_next() {
+        // Two records from offset 312: "verity" (next 24: 16 + 7, padded) and "crypt".
+        let mut buf = vec![0u8; 312 + 24 + 16 + 6];
+        buf[..312].copy_from_slice(as_bytes(&{
+            let mut head: DmIoctl = crate::ioctl::zeroed();
+            head.data_start = 312;
+            head
+        }));
+        buf[312..316].copy_from_slice(&24u32.to_le_bytes());
+        buf[328..334].copy_from_slice(b"verity");
+        buf[336..340].copy_from_slice(&0u32.to_le_bytes());
+        buf[352..357].copy_from_slice(b"crypt");
+        assert_eq!(target_names(&buf).unwrap(), ["verity", "crypt"]);
+    }
+
+    #[test]
+    fn a_target_list_reply_that_runs_off_the_buffer_is_refused() {
+        let mut buf = vec![0u8; 312 + 16];
+        buf[..312].copy_from_slice(as_bytes(&{
+            let mut head: DmIoctl = crate::ioctl::zeroed();
+            head.data_start = 312;
+            head
+        }));
+        // A `next` pointing past the end, and no NUL after the name: both refused.
+        buf[312..316].copy_from_slice(&4096u32.to_le_bytes());
+        assert!(target_names(&buf).is_err());
+        assert!(target_names(&buf[..100]).is_err());
     }
 
     #[test]

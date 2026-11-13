@@ -19,6 +19,17 @@ pub fn attempts(text: &str) -> Option<u8> {
         .filter(|n| *n <= MAX_ATTEMPTS)
 }
 
+/// The boot partition's copy of a trial's reason: `trial-reason`, beside the boot record. The
+/// daemon writes it when it gives a trial up (and reads it when the state has no reason of its
+/// own); `lemnos-slot-init` writes it when a trial's boot finds a piece of the kernel missing, and
+/// holds the trial back while it says so. The loader itself never reads it.
+pub const REASON_FILE: &str = "trial-reason";
+
+/// The prefix of the reason `lemnos-slot-init` writes when the kernel lacks a piece of the boot
+/// chain. A reason with this prefix holds the trial back (no attempt is taken for it) until the
+/// daemon resolves the trial.
+pub const KERNEL_GAP: &str = "the kernel lacks CONFIG_";
+
 /// The board firmware's one-shot boot: `default.txt` and `trial.txt` on the boot partition, each
 /// one `os_prefix` line, and a restart with [`tryboot::RESTART_ARG`] reading `trial.txt` once. The
 /// firmware has no counter: a trial's attempts are the file [`tryboot::ATTEMPTS_FILE`] beside it,

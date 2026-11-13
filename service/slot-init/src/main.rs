@@ -8,6 +8,7 @@
 mod boot;
 mod cmdline;
 mod decide;
+mod kernel;
 mod ops;
 mod partition;
 mod sys;
