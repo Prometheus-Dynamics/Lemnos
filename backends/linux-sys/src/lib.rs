@@ -31,6 +31,7 @@ pub mod scm;
 pub mod serial;
 pub mod signal;
 pub mod spi;
+pub mod statfs;
 pub mod time;
 pub mod udmabuf;
 pub mod usbfs;

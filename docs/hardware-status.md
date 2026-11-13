@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 94 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 99 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -128,6 +128,12 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`B23.md`](../testing/board-runs/B23.md) | DMA memory for a block bound to the module |
 | [`G4.md`](../testing/board-runs/G4.md) | A block's registers, interrupts, clocks and resets through the backend, on a real block |
 | [`I3.md`](../testing/board-runs/I3.md) | Frame timestamps from the module, a V4L2 node and a tick-stamped completion, all on `CLOCK_MONOTONIC` |
+
+## The board's system
+
+| Check | What a board has to show |
+|---|---|
+| [`I5.md`](../testing/board-runs/I5.md) | `system-slots` and `system-reboot`: a streamed install checked against its signed manifest, refused bundles, cancel, kill and restart mid-install, a confirmed trial, an unconfirmed trial falling back on a single-slot board, housekeeping, an install from a file in `.incoming`, the U-Boot record and script, and the board's own slot tool reading the same state |
 
 ## USB
 
