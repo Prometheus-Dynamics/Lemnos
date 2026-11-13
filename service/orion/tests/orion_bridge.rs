@@ -12,6 +12,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use lemnos_driver_system_identity::Identity;
+use lemnos_driver_system_slots::SystemSlots;
 use lemnos_fake_devices::{FakeAccelerometer, FakeCounter};
 use lemnos_host::board::parse;
 use lemnos_host::{Options as HostOptions, entry};
@@ -606,6 +607,7 @@ fn start_lemnosd_board(socket: &Path, board: &str) -> Service {
             entry::<FakeAccelerometer>(),
             entry::<FakeCounter>(),
             entry::<Identity>(),
+            entry::<SystemSlots>(),
         ],
         backend: Box::new(SimBoard::new()),
         options: HostOptions::default(),
@@ -763,4 +765,81 @@ fn offers_follow_a_device_going_and_coming() {
         (offers(&dashboard).as_deref() == Some(OFFERS)).then_some(())
     });
     drop(service);
+}
+
+/// The board of [`IdentityFiles::board`], with the slot driver over the same data and boot
+/// directories as the identity device reads.
+fn outbuf_board(files: &IdentityFiles) -> String {
+    format!(
+        "{}[[devices]]\nid = \"slots\"\ndriver = \"system-slots\"\n\
+         config = {{ data = \"{}\", boot = \"{}\", record = \"file\", partuuid = \"abcd-02\", \
+         boot_args = \"os\", reserve_mb = 0, running = \"\" }}\n",
+        files.board(),
+        files.dir.join("data").display(),
+        files.dir.join("boot").display()
+    )
+}
+
+#[test]
+fn the_call_action_carries_an_out_buffer_reply_whole_or_names_why_not() {
+    let dir = dir("outbuf");
+    let lemnosd = dir.join("lemnosd.sock");
+    let files = IdentityFiles::new(&dir, "Serial\t\t: 0000000000ABCDEF\n");
+    files.boot("os-2", "an-os", "2.0");
+    // A slot is listed once its image is there, as the manifest's 4096 bytes.
+    image(&files.dir, "os-2");
+    std::fs::create_dir_all(dir.join("boot/slots")).expect("boot slots");
+    let board = Board::start_for_node(&dir);
+    let _logic = Logic::start(&dir);
+    let _service = start_lemnosd_board(&lemnosd, &outbuf_board(&files));
+    let _bridge = start_bridge(&lemnosd, board.socket(), None);
+    let dashboard = dashboard(board.socket());
+    wait_for("the slots resource", || {
+        resource(&dashboard, "lemnos.slots")
+    });
+    wait_for("the identity resource", || {
+        resource(&dashboard, "lemnos.identity")
+    });
+
+    // `facts` takes an out buffer and no arguments: the bridge sends the size itself.
+    let facts = run_once_said(
+        &dashboard,
+        "lemnos.identity.call",
+        "lemnos.identity",
+        "facts",
+    );
+    assert_eq!(facts.outcome, Outcome::Succeeded, "{facts:?}");
+    let text = String::from_utf8(facts.output).expect("text");
+    assert!(text.contains("serial=0000000000abcdef"), "{text}");
+
+    // `list` on the slot device: JSON, as text.
+    let list = run_once_said(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
+    assert_eq!(list.outcome, Outcome::Succeeded, "{list:?}");
+    let json = String::from_utf8(list.output).expect("text");
+    assert!(json.starts_with("{\"slot_active\":"), "{json}");
+    assert!(json.contains("\"id\":\"os-2\""), "{json}");
+
+    // More slots than one Orion frame carries (64 KiB): the reply is refused by name, never cut
+    // short, and the call returns rather than waiting.
+    for i in 0..600 {
+        let id = format!("bulk-{i:03}");
+        std::fs::write(
+            files.dir.join("data/slots").join(format!("{id}.json")),
+            manifest(&id, "bulk", "1.0"),
+        )
+        .expect("manifest");
+        image(&files.dir, &id);
+    }
+    let big = run_once_said(&dashboard, "lemnos.slots.call", "lemnos.slots", "list");
+    assert_ne!(big.outcome, Outcome::Succeeded, "{big:?}");
+    assert!(big.output.is_empty(), "no partial reply: {big:?}");
+    assert!(big.detail.contains("no paged form"), "{big:?}");
+    assert!(big.detail.contains("61440"), "{big:?}");
+}
+
+/// The image file of slot `id` under `dir`, 4096 bytes as its manifest says.
+fn image(dir: &Path, id: &str) {
+    let file =
+        std::fs::File::create(dir.join("data/slots").join(format!("{id}.erofs"))).expect("image");
+    file.set_len(4096).expect("image size");
 }

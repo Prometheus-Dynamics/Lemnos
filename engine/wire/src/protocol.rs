@@ -48,6 +48,10 @@ pub mod handles {
 pub use handles::{HANDLE_DESCRIPTORS_BEFORE, MAX_HANDLE_BUFFERS, MAX_PLANES, PLANE_LENGTH_BYTES};
 /// Answers queued for one client before that client is closed.
 pub const MAX_QUEUED_BYTES: usize = 4 << 20;
+/// Bytes a reply frame takes beside its payload. A call's out buffer may be at most
+/// `MAX_FRAME - REPLY_OVERHEAD`. Not one of the layout's constants: it is a limit each side
+/// checks for itself.
+pub const REPLY_OVERHEAD: usize = 32;
 /// What a host can do beyond the core, as bits of `features` in Welcome. A client uses what a bit
 /// stands for only when the host set it; a host that doesn't know a bit leaves it clear. Each bit
 /// is one part of the wire, with its own hash: see [`PART_HASHES`].

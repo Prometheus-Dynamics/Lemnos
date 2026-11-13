@@ -7,7 +7,8 @@ use std::time::Duration;
 use lemnos_client::{Client, DeviceEntry, DeviceHealth, DeviceState, Error, PackageMode, follow};
 use lemnos_core::{ItemKind, Status};
 use lemnos_wire::text::{
-    encode_args, find_item, find_method, method_of, render, render_reply, shape_name,
+    Call, encode_call, find_item, find_method, method_of, render, render_reply, shape_name,
+    too_small, watchable,
 };
 use lemnos_wire::{DeviceDescription, OwnedItem, OwnedMethod, OwnedShape};
 
@@ -49,6 +50,17 @@ type Outcome = Result<(), String>;
 
 fn text(error: Error) -> String {
     error.to_string()
+}
+
+/// A call's error as the tool prints it. A reply that did not fit the out buffer says how to ask
+/// for more ([`too_small`]).
+fn refusal(error: Error, call: &Call) -> String {
+    match &error {
+        Error::Refused { status, .. } if *status == Status::BUFFER_TOO_SMALL => {
+            format!("{error}: {}", too_small(call))
+        }
+        _ => error.to_string(),
+    }
 }
 
 fn line(out: &mut dyn Write, message: core::fmt::Arguments<'_>) -> Outcome {
@@ -520,15 +532,15 @@ impl Tool<'_> {
         description: &DeviceDescription,
         contract: usize,
         method: &OwnedMethod,
-        args: &[u8],
+        call: &Call,
     ) -> Result<Vec<u8>, String> {
         let tag = &description.contracts[contract].tag;
         let mut handle = self.client.open_tag(device, tag).map_err(text)?;
-        let mut reply = vec![0; REPLY_MAX];
+        let mut reply = vec![0; REPLY_MAX.max(call.reply_len())];
         let n = self
             .client
-            .call(&mut handle, method.id, args, &mut reply)
-            .map_err(text)?;
+            .call(&mut handle, method.id, &call.args, &mut reply)
+            .map_err(|error| refusal(error, call))?;
         reply.truncate(n);
         Ok(reply)
     }
@@ -543,7 +555,8 @@ impl Tool<'_> {
         if !method.params.is_empty() {
             return Err(format!("{} takes arguments; use call", item.name));
         }
-        let reply = self.invoke(device, description, contract, method, &[])?;
+        let call = encode_call(method, &[] as &[&str])?;
+        let reply = self.invoke(device, description, contract, method, &call)?;
         self.print_value(item, method, &reply)
     }
 
@@ -586,6 +599,7 @@ impl Tool<'_> {
         let (_, description) = self.description(name)?;
         let item = find_item(&description, wanted)?;
         let (contract, method) = method_of(&description, item)?;
+        watchable(method)?;
         let tag = &description.contracts[contract].tag;
         let mut handle = self.client.open_tag(name, tag).map_err(text)?;
         self.client
@@ -668,22 +682,22 @@ impl Tool<'_> {
             return Err(format!("{wanted} is read-only"));
         }
         let (contract, method) = method_of(&description, item)?;
-        let args = encode_args(&method.params, values)?;
+        let call = encode_call(method, values)?;
         if method.job {
-            return self.job(name, &description, contract, method, &args);
+            return self.job(name, &description, contract, method, &call.args);
         }
-        self.invoke(name, &description, contract, method, &args)?;
+        self.invoke(name, &description, contract, method, &call)?;
         Ok(())
     }
 
     fn call(&mut self, name: &str, wanted: &str, values: &[String]) -> Outcome {
         let (_, description) = self.description(name)?;
         let (contract, method) = find_method(&description, wanted)?;
-        let args = encode_args(&method.params, values)?;
+        let call = encode_call(method, values)?;
         if method.job {
-            return self.job(name, &description, contract, method, &args);
+            return self.job(name, &description, contract, method, &call.args);
         }
-        let reply = self.invoke(name, &description, contract, method, &args)?;
+        let reply = self.invoke(name, &description, contract, method, &call)?;
         if method.returns != OwnedShape::Unit {
             let value = render_reply(method, &reply)?;
             line(self.out, format_args!("{value}"))?;

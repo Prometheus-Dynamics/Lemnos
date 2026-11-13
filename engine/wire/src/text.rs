@@ -5,10 +5,18 @@
 //! bool, a word for a string, hex for bytes, `none` for an absent option, and the words of
 //! each element or field in order for an array or a record. A reply is printed the same way,
 //! a record with its field names.
+//!
+//! A method with an `#[out]` buffer (`has_out_buffer`) takes one more word after its arguments:
+//! the buffer's size in bytes. The device reads it before it writes, so it is sent always. When
+//! the words leave it out, it is [`OUT_LIMIT`], the most a frame carries. Its reply is printed as
+//! text when the bytes are valid UTF-8, and as hex otherwise. See [`encode_call`] and
+//! [`render_reply`], which every client of the text path uses.
 
 use core::fmt::Write;
 
-use crate::{DeviceDescription, OwnedItem, OwnedMethod, OwnedParam, OwnedShape};
+use crate::{
+    DeviceDescription, MAX_FRAME, OwnedItem, OwnedMethod, OwnedParam, OwnedShape, REPLY_OVERHEAD,
+};
 use lemnos_core::ItemKind;
 
 /// A shape as a person reads it: `u8`, `str?`, `[f32; 3]`, `{x: f32, y: f32}`.
@@ -148,6 +156,159 @@ pub fn encode_args<S: AsRef<str>>(params: &[OwnedParam], words: &[S]) -> Result<
         return Err("too many values".to_string());
     }
     Ok(out)
+}
+
+/// The parameters a method names when it reads that many bytes into its out buffer. The check
+/// that the reply can carry them is made before the call (see [`encode_call_within`]).
+pub const LENGTH_PARAMS: [&str; 2] = ["read_len", "max_len"];
+
+/// Whether a method can be watched (subscribed to). The daemon serves a subscription only to a
+/// method with no arguments and no out buffer, so `lemnos-ctl watch` says so before it asks.
+///
+/// # Errors
+///
+/// A method with arguments or an out buffer, named with what to do instead.
+pub fn watchable(method: &OwnedMethod) -> Result<(), String> {
+    if method.params.is_empty() && !method.has_out_buffer {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} takes arguments or an out buffer, and the daemon serves watch only to a method with \
+             neither: call it instead",
+            method.name
+        ))
+    }
+}
+
+/// The most an out buffer can hold: what one frame carries beside the reply's own header. The
+/// default size of a method's `#[out]` buffer, and the largest one a caller may ask for.
+pub const OUT_LIMIT: u32 = (MAX_FRAME - REPLY_OVERHEAD) as u32;
+
+/// A call ready to send: its arguments, and the size of the out buffer when the method has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    pub args: Vec<u8>,
+    /// The out buffer's capacity, sent as the last argument; `None` for a method without one.
+    pub out_capacity: Option<u32>,
+    /// The most the caller allows an out buffer: the size a word may ask for, and the default.
+    pub largest: u32,
+}
+
+impl Call {
+    /// The reply buffer the caller must give: an out-buffer reply can be as large as its
+    /// capacity, so the buffer must hold that. Zero for a method without an out buffer.
+    pub fn reply_len(&self) -> usize {
+        self.out_capacity.map_or(0, |size| size as usize)
+    }
+}
+
+/// The call for a method from `words`: its arguments, then for a method with an `#[out]`
+/// buffer the buffer's size. A size word is optional and comes last; without it the capacity is
+/// [`OUT_LIMIT`]. See [`encode_call_within`] for a caller whose replies must be smaller.
+///
+/// # Errors
+///
+/// As [`encode_call_within`].
+pub fn encode_call<S: AsRef<str>>(method: &OwnedMethod, words: &[S]) -> Result<Call, String> {
+    encode_call_within(method, words, OUT_LIMIT)
+}
+
+/// As [`encode_call`], for a caller that carries at most `largest` bytes of reply (the bridge,
+/// whose transport frame is smaller than a lemnosd frame). The default capacity is `largest`,
+/// and a size word above it is refused.
+///
+/// # Errors
+///
+/// A word that is not what its shape wants, too few words, too many, or a size that is not a
+/// number of at most `largest` bytes.
+pub fn encode_call_within<S: AsRef<str>>(
+    method: &OwnedMethod,
+    words: &[S],
+    largest: u32,
+) -> Result<Call, String> {
+    let largest = largest.min(OUT_LIMIT);
+    let mut words = words.iter().peekable();
+    let mut args = Vec::new();
+    for param in &method.params {
+        // A length the reply must carry is checked before anything is sent: a device call can
+        // have side effects (a bus transfer), so a length the reply cannot hold is refused here.
+        if param.shape == OwnedShape::U32
+            && LENGTH_PARAMS.contains(&param.name.as_str())
+            && let Some(length) = words.peek().and_then(|w| w.as_ref().parse::<u32>().ok())
+            && length > largest
+        {
+            return Err(format!(
+                "{} asks for {length} bytes, more than the {largest} one reply carries: \
+                 ask for less and repeat the call",
+                param.name
+            ));
+        }
+        encode(&param.shape, &mut words, &mut args)?;
+    }
+    let out_capacity = if method.has_out_buffer {
+        let size = match words.next() {
+            None => largest,
+            Some(word) => word
+                .as_ref()
+                .parse::<u32>()
+                .ok()
+                .filter(|size| *size <= largest)
+                .ok_or_else(|| {
+                    format!(
+                        "{:?} isn't a buffer size: a number of bytes, at most {largest}",
+                        word.as_ref()
+                    )
+                })?,
+        };
+        args.extend(size.to_le_bytes());
+        Some(size)
+    } else {
+        None
+    };
+    if words.next().is_some() {
+        return Err(if method.has_out_buffer {
+            "too many values: the buffer's size is the last one".to_string()
+        } else {
+            "too many values".to_string()
+        });
+    }
+    Ok(Call {
+        args,
+        out_capacity,
+        largest,
+    })
+}
+
+/// An out buffer's bytes as text: as they are when they are valid UTF-8, else as hex.
+fn out_text(bytes: &[u8]) -> String {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let mut hex = String::new();
+            push_hex(bytes, &mut hex);
+            hex
+        }
+    }
+}
+
+/// What a caller says when a call's reply did not fit its out buffer (`BUFFER_TOO_SMALL`): how
+/// to ask for more.
+pub fn too_small(call: &Call) -> String {
+    let largest = call.largest;
+    match call.out_capacity {
+        Some(size) if size < largest => format!(
+            "the reply is larger than its {size}-byte buffer; ask for more by giving a larger \
+             size as the last value, up to {largest}"
+        ),
+        Some(_) if largest >= OUT_LIMIT => {
+            format!("the reply is larger than {largest} bytes, the most a frame carries")
+        }
+        Some(_) => format!(
+            "the reply is larger than {largest} bytes, the most this caller carries in one reply; \
+             the method has no paged form"
+        ),
+        None => "the reply is larger than the buffer".to_string(),
+    }
 }
 
 struct Cursor<'a>(&'a [u8]);
@@ -293,11 +454,10 @@ pub fn render(
     reply: &[u8],
     item: &OwnedItem,
 ) -> Result<String, String> {
-    let mut text = String::new();
     if has_out_buffer {
-        push_hex(reply, &mut text);
-        return Ok(text);
+        return Ok(out_text(reply));
     }
+    let mut text = String::new();
     let mut from = Cursor(reply);
     let shape = skip_to(shape, item.field.as_deref(), &mut from)?;
     let scale = Scale(10f64.powi(i32::from(item.exponent)));
@@ -510,11 +670,102 @@ mod tests {
     }
 
     #[test]
-    fn an_out_buffer_prints_as_hex() {
+    fn an_out_buffer_prints_as_text_when_it_is_utf8_and_as_hex_otherwise() {
+        assert_eq!(
+            render(
+                &OwnedShape::Bytes,
+                true,
+                b"{\"slots\":[]}",
+                &item("", 0, None)
+            )
+            .unwrap(),
+            "{\"slots\":[]}"
+        );
         assert_eq!(
             render(&OwnedShape::Bytes, true, &[1, 0xab], &item("", 0, None)).unwrap(),
             "01ab"
         );
+    }
+
+    fn method(params: Vec<OwnedParam>, has_out_buffer: bool) -> OwnedMethod {
+        OwnedMethod {
+            id: 1,
+            name: "m".to_string(),
+            params,
+            returns: OwnedShape::Bytes,
+            has_out_buffer,
+            job: false,
+        }
+    }
+
+    #[test]
+    fn a_length_the_reply_cannot_carry_is_refused_before_the_call() {
+        let read = OwnedMethod {
+            id: 2,
+            name: "i2c_transfer".to_string(),
+            params: vec![
+                OwnedParam {
+                    name: "address".to_string(),
+                    shape: OwnedShape::U16,
+                },
+                OwnedParam {
+                    name: "read_len".to_string(),
+                    shape: OwnedShape::U32,
+                },
+            ],
+            returns: OwnedShape::Bytes,
+            has_out_buffer: true,
+            job: false,
+        };
+        assert!(encode_call_within(&read, &words(&["7", "60"]), 60 * 1024).is_ok());
+        let err = encode_call_within(&read, &words(&["7", "61441"]), 60 * 1024).unwrap_err();
+        assert!(err.contains("read_len asks for 61441 bytes"), "{err}");
+        assert!(err.contains("ask for less and repeat"), "{err}");
+    }
+
+    #[test]
+    fn watch_refuses_a_method_with_arguments_or_an_out_buffer_by_name() {
+        assert!(watchable(&method(vec![], false)).is_ok());
+        let with_args = method(param(OwnedShape::U8), false);
+        assert!(
+            watchable(&with_args)
+                .unwrap_err()
+                .contains("takes arguments or an out buffer")
+        );
+        assert!(watchable(&method(vec![], true)).is_err());
+    }
+
+    #[test]
+    fn an_out_buffer_method_sends_its_size_last_and_the_default_is_the_frame_limit() {
+        let out = method(param(OwnedShape::U8), true);
+        let call = encode_call(&out, &words(&["7"])).unwrap();
+        assert_eq!(call.args, [7, 0xe0, 0xff, 0x0f, 0x00]);
+        assert_eq!(call.out_capacity, Some(OUT_LIMIT));
+        assert_eq!(call.reply_len(), OUT_LIMIT as usize);
+        // A size given as the last word replaces the default.
+        let call = encode_call(&out, &words(&["7", "2048"])).unwrap();
+        assert_eq!(call.args, [7, 0, 8, 0, 0]);
+        assert_eq!(call.reply_len(), 2048);
+        assert!(encode_call(&out, &words(&["7", "2048", "1"])).is_err());
+        let too_big = (OUT_LIMIT + 1).to_string();
+        assert!(encode_call(&out, &words(&["7", too_big.as_str()])).is_err());
+        assert!(encode_call(&out, &words(&["7", "big"])).is_err());
+        // A method with no out buffer takes no size.
+        let plain = method(param(OwnedShape::U8), false);
+        assert_eq!(encode_call(&plain, &words(&["7"])).unwrap().args, [7]);
+        assert!(encode_call(&plain, &words(&["7", "2048"])).is_err());
+        // An out buffer with no arguments: the size is the only word.
+        let bare = encode_call(&method(vec![], true), &words(&[])).unwrap();
+        assert_eq!(bare.args, OUT_LIMIT.to_le_bytes());
+        assert!(
+            too_small(&encode_call(&out, &words(&["7", "8"])).unwrap()).contains("ask for more")
+        );
+        assert!(too_small(&bare).contains("most a frame carries"));
+        // A caller with a smaller reply limit defaults to it and refuses more.
+        let within = encode_call_within(&out, &words(&["7"]), 4096).unwrap();
+        assert_eq!(within.out_capacity, Some(4096));
+        assert!(encode_call_within(&out, &words(&["7", "4097"]), 4096).is_err());
+        assert!(too_small(&within).contains("no paged form"));
     }
 
     #[test]

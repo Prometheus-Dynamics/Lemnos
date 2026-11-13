@@ -231,6 +231,52 @@ written as a number, a bool as `true`, `false`, `on`, `off`, `1` or `0`, bytes a
 optional value that is absent as `none`. A record or an array takes one word per field or element,
 in order.
 
+**Out buffers.** A method that fills a caller's buffer (`#[out]`, shown by `describe`) takes one
+more word after its arguments: the buffer's size in bytes. The word is optional. Without it the size
+is the largest a frame carries, 1048544 bytes, so `lemnos-ctl call slots list` needs no size. Give a
+smaller size to bound the reply, or a larger one (up to 1048544) when the reply does not fit:
+
+```sh needs:a-board-with-a-slots-device
+lemnos-ctl call slots list 65536
+```
+
+A reply that does not fit the size is refused with `BUFFER_TOO_SMALL` and the reason says how to ask
+for more.
+
+**Largest replies.** The bridge carries a reply of at most 61440 bytes (`ORION_REPLY_MAX`). This is
+each out-buffer method's largest reply, from its contract's own bounds:
+
+| contract | method | largest reply | through the bridge |
+|---|---|---|---|
+| `accelerometer/1`, `gyroscope/1` | `read_batch` | the caller's buffer | whole; samples that do not fit wait for the next batch |
+| `camera-frames/1` | `frame_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |
+| `camera-isp/1` | `config_stream`, `statistics_stream`, `input_stream`, `output_stream` | 32 bytes each | whole |
+| `camera-receiver/1` | `frame_stream`, `embedded_stream` | 32 bytes each | whole |
+| `camera-receiver/1` | `feeds`, `source` | 64 bytes (`MAX_FEED_NAME`) | whole |
+| `camera-sensor/1` | `identity` | 64 bytes (`MAX_IDENTITY_NAME`) | whole |
+| `codec-block/1` | `block` | 48 bytes (`MAX_BLOCK_NAME`) | whole |
+| `codec-block/1`, `image-blend/1`, `image-convert/1`, `image-scaler/1`, `npu/1` | `job_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |
+| `fan-control/1` | `curve` | 64 bytes (8 points of 8) | whole |
+| `gpu-lease/1` | `last_hang` | 128 bytes (`DETAIL_MAX`) | whole |
+| `system-identity/1` | `serial`, `family`, `model` | 256 bytes (`MAX_TEXT`) | whole |
+| `system-identity/1` | `facts` | 2048 bytes (`MAX_FACTS_TEXT`) | whole |
+| `system-slots/1` | `list` | unbounded: 1 slot is about 350 bytes, so about 170 fit | refused by name over about 170 slots; paged form in M8b |
+| `raw-bus/1` | `i2c_transfer`, `spi_transfer` (`read_len`), `uart_read` (`max_len`) | the caller's length, up to 4 GiB | a length above 61440 is refused before the transfer; ask for less and repeat |
+| `usb-function/1` | `control_out` | the pending request's `length`, up to 65535 | not checkable up front (no length argument): the bridge refuses a reply too large for its buffer, and the device must refuse before it accepts the request (not yet verified in the USB driver) |
+| `usb-function/1` | `data_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |
+
+A length the caller gives (`read_len`, `max_len`) is checked before the call is made, so a bus
+transfer with a length too large for the reply is never started. `lemnos-ctl`, on the board's own
+socket, carries a 1 MiB frame, so the same calls go through there up to that size.
+
+**Watch.** `lemnos-ctl watch` takes a method with no arguments and no out buffer. The daemon serves a
+subscription only to such a method, so `watch` on a method with arguments or an out buffer is refused
+by name before it is asked: the method takes arguments or an out buffer, so call it instead.
+
+ A reply is printed as text when its bytes are valid UTF-8 (JSON, as `system.slots` writes
+it, prints as JSON), and as hex otherwise. The rule is the same for `lemnos-ctl` and the Orion
+bridge's `.call` action, and is implemented once, in `lemnos_wire::text`.
+
 ### off DEVICE, on DEVICE
 
 Turns a device off, and on again. Off drops the driver and stops the retries. The device stays
@@ -297,6 +343,15 @@ device's entry and its description.
 | its value items | the topic `lemnos.<device>.values`: a field per item that is a number (a float in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes |
 | its events | the topic `lemnos.<device>.status`: `state`, `health` and `reason` as text, as `lemnos-ctl list` names them |
 | `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. Programs on the board and operators granted them may run them |
+
+**Out-buffer replies through `.call`.** An out-buffer method takes the same optional size word as
+`lemnos-ctl call` (see above). The bridge's default size is 61440 bytes, not the frame limit, and a
+size word above 61440 is refused. Orion's client and comm core take frames of 64 KiB, and the action's
+result frame also carries the call, the outcome and the detail, so the reply is held to 60 KiB. A
+reply larger than that is never cut short: the run ends `Failed`, with no output, and its detail says
+that the reply is larger than 61440 bytes and that the method has no paged form. Nothing is sent in
+pieces. `lemnos-ctl`, on the board's own socket, carries a frame of 1 MiB and reads such a reply
+whole. A method whose reply can exceed 60 KiB needs a paged form to be called through the bridge.
 
 A sample's time is the wall clock when the bridge read it, as Orion's own publishers stamp them.
 
