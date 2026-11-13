@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
-    AddressWidth, CallerId, ClocksHandle, Config, ConfigValue, Decode, Description, DmaHandle,
-    Driver, Encode, Health, Hint, HostClock, HostOwned, I2c, InterruptHandle, ItemKind, JobId,
-    JobState, Line, LocalCaller, Manifest, MethodId, NeedKind, Provider, Pwm, RawSpiBus, Reader,
-    RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Spi, Status, StreamHandle, Tag,
-    Uart, UsbDeviceHandle, UsbFunctionHandle,
+    AddressWidth, BoardDevice, BoardView, CallerId, ClocksHandle, Config, ConfigValue, Decode,
+    Description, DmaHandle, Driver, Encode, Health, Hint, HostClock, HostOwned, I2c,
+    InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest, MethodId, NeedKind,
+    Origin, Provider, Pwm, RawSpiBus, Reader, RegistersHandle, Reply, ResetHandle, Resources,
+    Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle, UsbFunctionHandle,
 };
 
 use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner};
@@ -27,6 +27,8 @@ pub trait Instance: Send {
     fn health(&self) -> Health;
     fn dispatch(&mut self, method: MethodId, args: &[u8], reply: &mut Reply<'_>) -> Status;
     fn tick(&mut self, now_ns: u64) -> Option<u64>;
+    /// See [`Driver::board`]. Asked only of a driver whose entry says it watches the board.
+    fn board(&mut self, _view: &dyn BoardView) {}
     fn caller(&mut self, caller: CallerId);
     fn caller_gone(&mut self, caller: CallerId);
     /// See [`Driver::job`]. Asked only of a driver whose entry says it runs jobs.
@@ -52,6 +54,10 @@ impl<D: Driver + Send> Instance for D {
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         Driver::tick(self, now_ns)
+    }
+
+    fn board(&mut self, view: &dyn BoardView) {
+        Driver::board(self, view);
     }
 
     fn caller(&mut self, caller: CallerId) {
@@ -99,6 +105,8 @@ pub struct DriverEntry {
     manifest: Manifest,
     factory: Factory,
     ticks: bool,
+    /// [`Driver::WATCHES_BOARD`]: the host gives the driver the board before each tick.
+    watches: bool,
     tracks_callers: bool,
     jobs: bool,
     host_owned: HostOwned,
@@ -123,6 +131,8 @@ impl DriverEntry {
             manifest,
             factory: Factory::Bound(binder),
             ticks,
+            // A driver built elsewhere sees no board: it gets the empty view it always had.
+            watches: false,
             tracks_callers,
             jobs: false,
             // Nothing says what a driver built elsewhere does to hardware, so it is never
@@ -153,6 +163,7 @@ pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
         manifest: D::MANIFEST,
         factory: Factory::BuiltIn(make::<D>),
         ticks: D::TICKS,
+        watches: D::WATCHES_BOARD,
         tracks_callers: D::TRACKS_CALLERS,
         jobs: D::JOBS,
         host_owned: D::HOST_OWNED,
@@ -217,6 +228,8 @@ struct Slot {
     lane_key: String,
     spec: DeviceSpec,
     config: Vec<(String, OwnedValue)>,
+    /// The board file's arrays of strings, by key.
+    lists: Vec<(String, Vec<String>)>,
     entry: Option<DriverEntry>,
     instance: Mutex<Option<Box<dyn Instance>>>,
     state: Mutex<DeviceState>,
@@ -286,6 +299,7 @@ impl Slot {
                 None => format!("device:{}", spec.id),
             },
             config: spec.owned_config()?,
+            lists: spec.owned_lists()?,
             entry,
             spec,
             instance: Mutex::new(None),
@@ -961,7 +975,7 @@ impl Inner {
         };
         let now = self.clock.now_ns();
         let ticked = catch_unwind(AssertUnwindSafe(|| {
-            let next = instance.tick(now);
+            let next = self.tick_instance(slot, instance.as_mut(), now);
             self.poll_jobs(slot, instance.as_mut());
             (next, asks_rebind(instance.as_ref()))
         }));
@@ -1065,7 +1079,8 @@ impl Inner {
                 };
             }
             if ticks && self.may_tick(slot) {
-                self.set_next_tick(slot, instance.tick(self.clock.now_ns()));
+                let now = self.clock.now_ns();
+                self.set_next_tick(slot, self.tick_instance(slot, instance.as_mut(), now));
             }
             self.poll_jobs(slot, instance.as_mut());
             (status, asks_rebind(instance.as_ref()))
@@ -1146,8 +1161,10 @@ impl Inner {
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 work(instance.as_mut());
-                let next = (target.ticks() && self.may_tick(&target))
-                    .then(|| instance.tick(self.clock.now_ns()));
+                let next = (target.ticks() && self.may_tick(&target)).then(|| {
+                    let now = self.clock.now_ns();
+                    self.tick_instance(&target, instance.as_mut(), now)
+                });
                 self.poll_jobs(&target, instance.as_mut());
                 (next, asks_rebind(instance.as_ref()))
             }));
@@ -1260,7 +1277,17 @@ impl Inner {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_value()))
                 .collect();
+            let lists: Vec<(&str, Vec<&str>)> = target
+                .lists
+                .iter()
+                .map(|(key, items)| (key.as_str(), items.iter().map(String::as_str).collect()))
+                .collect();
+            let borrowed: Vec<(&str, &[&str])> = lists
+                .iter()
+                .map(|(key, items)| (*key, items.as_slice()))
+                .collect();
             let config = Config::new(&entries)
+                .with_lists(&borrowed)
                 .on_board(&self.board)
                 .on_host_version(self.daemon_version);
             let config = if guest {
@@ -1321,6 +1348,14 @@ impl Inner {
         };
         *state = self.next_state(slot, attempts, reason);
         self.moved(slot);
+    }
+
+    /// Ticks a driver: after giving it the board first when it watches the board.
+    fn tick_instance(&self, slot: &Slot, instance: &mut dyn Instance, now_ns: u64) -> Option<u64> {
+        if slot.entry.is_some_and(|entry| entry.watches) {
+            instance.board(&BoardRead { inner: self });
+        }
+        instance.tick(now_ns)
     }
 
     fn device_health(&self, slot: &Slot, depth: u32) -> Health {
@@ -1395,6 +1430,41 @@ impl Inner {
             }
         }
         (combined, settled)
+    }
+}
+
+/// The board as a driver that watches it reads it, from the host's own table. Each device is
+/// read by its index, holding the table's lock only long enough to copy the device's pointer, so
+/// no lock is held across a call back into the host.
+struct BoardRead<'a> {
+    inner: &'a Inner,
+}
+
+impl BoardView for BoardRead<'_> {
+    fn each(&self, f: &mut dyn FnMut(BoardDevice<'_>)) {
+        let count = self
+            .inner
+            .slots
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        for index in 0..count {
+            let Some(slot) = self.inner.slot(index as u32) else {
+                continue;
+            };
+            let bound = matches!(*lock(&slot.state), DeviceState::Running);
+            let (health, _) = self.inner.health_of(&slot, MAX_DEPTH);
+            f(BoardDevice {
+                id: &slot.spec.id,
+                origin: if slot.made.is_some() {
+                    Origin::Hotplug
+                } else {
+                    Origin::BuiltIn
+                },
+                bound,
+                health,
+            });
+        }
     }
 }
 

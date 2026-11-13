@@ -175,6 +175,19 @@ driver can recover from itself. A driver that holds something that can be unplug
 `TICKS` and look at it in `tick`: the host ticks it when the backend hints that its hardware may
 have changed, so it finds out without waiting for a caller.
 
+### Watching the board
+
+A driver that needs to know the rest of the board sets `WATCHES_BOARD` and implements `board(view)`.
+Before each tick the host hands it a `BoardView`: every device the board names, each as a
+`BoardDevice` with its `id`, its `origin` (`Origin::BuiltIn` from the board file's `[[devices]]`, or
+`Origin::Hotplug` for one an `[[each]]` entry made; a device a board file names on a bus is
+`BuiltIn`, whatever the bus), whether it is `bound` (its driver is running),
+and its `health`. A dead device's `Health::Gone` is kept apart from `Health::Failed`. Reading the view
+allocates nothing, and the driver keeps what it needs from it in its own fields: the view is gone
+after the call. A driver built into the host gets this; a driver package gets an empty view, and
+a board-file list of strings (`health = ["device:x"]`) reaches a built-in driver through
+`cfg.list("health")` (other arrays in a device's `config` are refused).
+
 ### Long jobs
 
 A method that runs longer than a call is marked `#[method(N, job)]` in its contract and returns

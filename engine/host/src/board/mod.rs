@@ -509,6 +509,7 @@ impl DeviceSpec {
     pub(crate) fn owned_config(&self) -> Result<Vec<(String, OwnedValue)>, BoardError> {
         self.config
             .iter()
+            .filter(|(_, value)| !matches!(value, toml::Value::Array(_)))
             .map(|(key, value)| {
                 let owned = match value {
                     toml::Value::Integer(v) => OwnedValue::Int(*v),
@@ -518,6 +519,30 @@ impl DeviceSpec {
                     _ => return Err(BoardError::Config(self.id.clone(), key.clone())),
                 };
                 Ok((key.clone(), owned))
+            })
+            .collect()
+    }
+
+    /// The config's arrays, which must all hold strings (`health = ["device:x"]`). A driver built
+    /// into the host reads them with [`lemnos_core::Config::list`]; [`owned_config`] refuses any
+    /// other array.
+    ///
+    /// [`owned_config`]: DeviceSpec::owned_config
+    pub(crate) fn owned_lists(&self) -> Result<Vec<(String, Vec<String>)>, BoardError> {
+        self.config
+            .iter()
+            .filter_map(|(key, value)| match value {
+                toml::Value::Array(items) => Some(
+                    items
+                        .iter()
+                        .map(|item| match item {
+                            toml::Value::String(text) => Ok(text.clone()),
+                            _ => Err(BoardError::Config(self.id.clone(), key.clone())),
+                        })
+                        .collect::<Result<Vec<String>, BoardError>>()
+                        .map(|list| (key.clone(), list)),
+                ),
+                _ => None,
             })
             .collect()
     }
@@ -548,6 +573,7 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
             return Err(BoardError::AutoOff(device.id.clone()));
         }
         device.owned_config()?;
+        device.owned_lists()?;
         check_streams(&device.id, &device.streams)?;
     }
     let mut rules = BTreeSet::new();
@@ -573,6 +599,7 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
         let mut device = each.device(&each.pattern);
         device.id.clone_from(&each.id);
         device.owned_config()?;
+        device.owned_lists()?;
         check_streams(&each.id, &each.streams)?;
     }
     Ok(board)

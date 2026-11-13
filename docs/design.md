@@ -324,6 +324,8 @@ pub trait Lifecycle: Sized {
     fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState { .. } // how a long job stands
     fn job_cancel(&mut self, job: JobId) {} // stop it; `job` then answers Finished(CANCELLED)
     const HOST_OWNED: HostOwned = HostOwned::Refused; // whether it may bind to a host-owned device
+    const WATCHES_BOARD: bool = false; // true to be handed the board (every device, bound, health) before each tick
+    fn board(&mut self, view: &dyn BoardView) {} // reads the board; the view is gone after the call
 }
 
 // A long job: a method marked #[method(N, job)] returns Result<JobId> at once and the work goes

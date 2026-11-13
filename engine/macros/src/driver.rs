@@ -158,6 +158,12 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::tick(self, __now_ns)
             }
 
+            const WATCHES_BOARD: bool = <Self as ::lemnos_core::Lifecycle>::WATCHES_BOARD;
+
+            fn board(&mut self, __view: &dyn ::lemnos_core::BoardView) {
+                <Self as ::lemnos_core::Lifecycle>::board(self, __view)
+            }
+
             const HOST_OWNED: ::lemnos_core::HostOwned =
                 <Self as ::lemnos_core::Lifecycle>::HOST_OWNED;
 
