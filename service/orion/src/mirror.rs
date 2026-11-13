@@ -372,6 +372,15 @@ impl Mirror {
         self.devices.is_empty()
     }
 
+    /// The description generation of the device named `name`: the number its
+    /// `lemnos.<device>.description` topic publishes, taken from the same field.
+    pub fn description_generation(&self, name: &str) -> Option<u64> {
+        self.devices
+            .iter()
+            .find(|d| d.spec.name == name)
+            .map(|d| d.generation)
+    }
+
     /// The device set's generation now: what a session starts from.
     pub fn set_generation(&self) -> u64 {
         self.set_generation

@@ -1339,6 +1339,51 @@ fn tracked_call(orion: &Orion, args: &str) -> String {
     String::from_utf8(finished.output).expect("text")
 }
 
+/// `call describe` answers the device's description as version 1 text: the version line, then the
+/// device's record (with its description generation), its contracts, its methods and its items.
+/// It takes no arguments. The text is read back with the module's reader.
+#[test]
+fn call_describe_answers_the_device_description_as_text() {
+    let dir = dir("describe");
+    let (_board, _logic, _service, _bridge, dashboard) = start_tracked(&dir);
+    let text = tracked_call(&dashboard, "describe");
+    assert!(text.starts_with("describe 1\n"), "the version line: {text}");
+    let records = lemnos_orion::description::parse(&text).expect("the reader reads it");
+    let device = records.iter().find(|r| r.word == "device").expect("device");
+    assert_eq!(device.get("label"), Some("tracked"), "{text}");
+    assert_eq!(device.get("state"), Some("running"), "{text}");
+    assert_eq!(device.get("generation"), Some("1"), "{text}");
+    let contract = records
+        .iter()
+        .find(|r| r.word == "contract")
+        .expect("contract");
+    assert_eq!(contract.get("index"), Some("0"));
+    assert_eq!(contract.get("tag"), Some("tracked/1"));
+    let method = |id: &str| {
+        records
+            .iter()
+            .find(|r| r.word == "method" && r.get("id") == Some(id))
+            .unwrap_or_else(|| panic!("method {id}: {text}"))
+    };
+    assert_eq!(method("1").get("name"), Some("take"));
+    assert_eq!(method("4").get("name"), Some("hold_until_cancelled"));
+    assert_eq!(
+        method("4").get("job"),
+        Some("true"),
+        "the long job is marked"
+    );
+    // A description with arguments is refused, and nothing is sent.
+    let finished = run(
+        &dashboard,
+        "lemnos.tracked.call",
+        "lemnos.tracked",
+        "describe x",
+    );
+    assert_eq!(finished.outcome, Outcome::Rejected, "{finished:?}");
+    assert!(finished.output.is_empty(), "{finished:?}");
+    assert_eq!(finished.detail, "describe takes no arguments");
+}
+
 #[test]
 fn a_plain_cancel_ends_the_run_and_keeps_the_callers_holds() {
     let dir = dir("cancel");

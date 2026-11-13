@@ -443,6 +443,66 @@ fn a_description_generation_moves_once_per_change_and_holds_while_nothing_change
     );
 }
 
+/// The generation `describe` gives a device is the number its description topic publishes: the two
+/// come from one field, so they agree, and a change of the device's state moves both together.
+#[test]
+fn the_describe_generation_is_the_topic_generation_and_moves_with_it() {
+    let dir = dir("describe-generation");
+    std::fs::write(dir.join("cpuinfo"), CPUINFO).expect("cpuinfo");
+    std::fs::create_dir_all(dir.join("data/slots")).expect("slots");
+    std::fs::create_dir_all(dir.join("data/board/slots")).expect("marker");
+    std::fs::create_dir_all(dir.join("boot/slots")).expect("boot slots");
+    let walk = start_walk(&dir, SimBoard::new());
+    let dashboard = &walk.dashboard;
+    let mut described = dashboard
+        .subscribe("lemnos.imu.description")
+        .expect("subscribe");
+    // `describe` answers only while the device runs, so each reading is taken while it does.
+    let described_generation = |dashboard: &Orion| -> Option<i64> {
+        let done = run_once_said(dashboard, "lemnos.imu.call", "lemnos.imu", "describe");
+        if done.outcome != Outcome::Succeeded {
+            return None;
+        }
+        let text = String::from_utf8(done.output).expect("text");
+        let records = lemnos_orion::description::parse(&text).expect("the reader reads it");
+        let device = records.iter().find(|r| r.word == "device").expect("device");
+        Some(
+            device
+                .get("generation")
+                .and_then(|g| g.parse().ok())
+                .expect("a generation"),
+        )
+    };
+    // Running: the reading is the topic's, and both are the same number.
+    let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", "on");
+    assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
+    let running = wait_for("the imu described", || {
+        let reading = described_generation(dashboard)?;
+        (generation(&mut described) == Some(reading)).then_some(reading)
+    });
+    // Off: the topic moves by one, and the device is not described while it is off.
+    let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", "off");
+    assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
+    wait_for("the topic after off", || {
+        (generation(&mut described) == Some(running + 1)).then_some(())
+    });
+    assert_eq!(described_generation(dashboard), None, "described while off");
+    // On again: the topic moves by one more, and the description carries the same number.
+    let done = run_once_said(dashboard, "lemnos.imu.power", "lemnos.imu", "on");
+    assert_eq!(done.outcome, Outcome::Succeeded, "{done:?}");
+    wait_for("the topic after on", || {
+        (generation(&mut described) == Some(running + 2)).then_some(())
+    });
+    let again = wait_for("the imu described again", || {
+        described_generation(dashboard)
+    });
+    assert_eq!(
+        again,
+        running + 2,
+        "describe and topic disagree after the change"
+    );
+}
+
 /// A clock for a host the test runs itself: nanoseconds since it was made.
 struct Elapsed(Instant);
 

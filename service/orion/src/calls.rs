@@ -45,6 +45,8 @@ use crate::{LEMNOSD_CALLS_NAME, Shared};
 
 /// The largest reply read, as `lemnos-ctl` reads it.
 const REPLY_MAX: usize = 64 * 1024;
+/// The word `call` answers with the device's description, as text. No device method takes it.
+pub const DESCRIBE: &str = "describe";
 /// The most reply an action's output carries. Orion's client and comm core take frames of 64 KiB
 /// (`client/connect` `Options::max_frame`, `comm/server` `Limits::max_frame`), and the action result
 /// frame also carries the call, the outcome and the detail, so 4 KiB is kept for those. A reply
@@ -78,7 +80,7 @@ impl Verb {
                 "Drives a control or action item. Arguments: ITEM VALUE..., as lemnos-ctl set takes them"
             }
             Self::Call => {
-                "Calls any method of the device. Arguments: METHOD ARG..., the method as NAME or TAG:NAME, as lemnos-ctl call takes them. The output is the reply as text"
+                "Calls any method of the device. Arguments: METHOD ARG..., the method as NAME or TAG:NAME, as lemnos-ctl call takes them. The output is the reply as text. `describe` with no arguments gives the device description as text"
             }
             Self::Power => "Switches the device. Arguments: on or off",
         }
@@ -249,7 +251,7 @@ fn run_one(
         }
     }
     let mut served = match clients.get(caller) {
-        Some(client) => serve(client, job),
+        Some(client) => serve(client, job, shared),
         None => Err(Failure::Failed("lemnosd is not there".to_owned())),
     };
     // A connection that went quiet with lemnosd is found dead only when used: connect
@@ -258,7 +260,7 @@ fn run_one(
         lost(caller, running, shared);
         clients.remove(caller);
         if let Ok(client) = Client::connect(socket, LEMNOSD_CALLS_NAME) {
-            served = serve(&client, job);
+            served = serve(&client, job, shared);
             clients.insert(caller.to_owned(), client);
         }
     }
@@ -431,7 +433,7 @@ fn refused_reply(error: Error, call: &Call) -> Failure {
 /// # Errors
 ///
 /// Why it did not succeed.
-pub fn serve(client: &Client, job: &Job) -> Result<Served, Failure> {
+pub fn serve(client: &Client, job: &Job, shared: &Shared) -> Result<Served, Failure> {
     let words: Vec<&str> = job.args.split_whitespace().collect();
     let device = client
         .list()
@@ -460,6 +462,21 @@ pub fn serve(client: &Client, job: &Job) -> Result<Served, Failure> {
         )));
     };
     let description = crate::source::describe(client, device.index).map_err(failed)?;
+    if job.verb == Verb::Call && *wanted == DESCRIBE {
+        if !values.is_empty() {
+            return Err(Failure::Refused("describe takes no arguments".to_owned()));
+        }
+        // The generation comes from the mirror, the field the device's topic publishes.
+        let generation = shared.with(|mirror| mirror.description_generation(&device.name));
+        let text = crate::description::render(&description, generation);
+        if text.len() > ORION_REPLY_MAX as usize {
+            return Err(Failure::Failed(format!(
+                "the description is {} bytes; the reply carries at most {ORION_REPLY_MAX}, and a partial one is never sent",
+                text.len()
+            )));
+        }
+        return Ok(Served::Output(text));
+    }
     let (contract, method) = if job.verb == Verb::Set {
         let item = find_item(&description, wanted).map_err(Failure::Refused)?;
         if item.kind == ItemKind::Value {

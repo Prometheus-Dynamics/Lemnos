@@ -418,7 +418,7 @@ connects the offer to these snapshots is not compiled: the marked `ORION-OFFER` 
 | its state and health | the resource's state: `Ready` while it runs, `Failed` while it retries or reports failed health, `Pending` while it is off |
 | its value items | the topic `lemnos.<device>.values`: a field per item that is a number (a float in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes |
 | its events | the topic `lemnos.<device>.status`: `state`, `health` and `reason` as text, as `lemnos-ctl list` names them |
-| `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. Programs on the board and operators granted them may run them |
+| `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. `.call describe` with no arguments gives the device's description (below). Programs on the board and operators granted them may run them |
 
 **Topics and how each is read.** Every topic the bridge publishes is a state: its newest sample is what
 matters, and it is current until the bridge publishes a change or withdraws the topic. None is an
@@ -485,6 +485,32 @@ reply larger than that is never cut short: the run ends `Failed`, with no output
 that the reply is larger than 61440 bytes and that the method has no paged form. Nothing is sent in
 pieces. `lemnos-ctl`, on the board's own socket, carries a frame of 1 MiB and reads such a reply
 whole. A method whose reply can exceed 60 KiB needs a paged form to be called through the bridge.
+
+**The description through `.call`.** `.call describe`, with no arguments, answers the device's
+description as text in format version 1. The format is defined in `service/orion/src/description.rs`,
+and `lemnos_orion::description::parse` reads it back:
+
+- The first line is `describe 1`. A reader refuses any other first line, so a change of format is a new
+  number. A reader ignores a key it does not know and a record whose word it does not know; a version 1
+  record keeps every key listed here.
+- Every other line is a record: a word, then `key=value` pairs separated by single spaces.
+- **One rule for values.** A text value is always in double quotes. Inside them `\\` is a backslash, `\"`
+  a quote, `\n` a newline, `\r` a carriage return and `\t` a tab; every other character, non-ASCII text
+  included, is written as it is. A text value never holds a raw newline. A number is bare, decimal, or hex
+  with `0x` (the address and the hash). An enum word is bare (`running`, `retrying`, `off`, `unknown`,
+  `known`, `dimensionless`, `value`, `control`, `action`, `number`, `range`, `switch`, `text`,
+  `colour_array`, `three_axes`, `true`, `false`). A figure the device does not give is `unknown`; an option
+  that is not set is `none`. The quoted text `"none"` is a value, not the absent option.
+- `device generation label kind bus address location state reason`: `generation` is the device's
+  description generation, the same number as its `lemnos.<device>.description` topic (the two come from one
+  field, so a change moves both), or `unknown` before the device has one.
+- `contract index tag kind hash methods`; `method contract id name params returns out_buffer job`, where
+  `params` is each `name:shape` joined by a space; `item kind name unit unit_state exponent min max real_min
+  real_max real_step step warn_low warn_high contract method field reading group`, where `real_min`,
+  `real_max` and `real_step` are the item's real-valued range (decimal, or `none`).
+
+`describe` is a word of the bridge, not a method: no device has a method of that name. `describe x` is
+refused. The text is held to 60 KiB like any reply.
 
 **Coverage through the bridge.** `service/orion/tests/live_walk.rs` calls, through `.call` on a real
 Orion core and lemnosd, every out-buffer method the simulated board can host, and checks each reply:

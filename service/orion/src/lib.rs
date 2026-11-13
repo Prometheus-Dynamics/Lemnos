@@ -19,6 +19,7 @@
 pub mod backoff;
 pub mod calls;
 pub mod config;
+pub mod description;
 pub mod files;
 pub mod hello;
 pub mod links;
