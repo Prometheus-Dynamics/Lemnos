@@ -57,17 +57,19 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
     `ai2d_kpu` and `python-k230` packages and the K230 AI2D runtime manuals only call the
     runtime's builder. Unknown: every register offset and field of a job (addresses, sizes,
     strides, formats, the start bit).
-  - `drivers/rk-jpeg`: the field layouts are public in Rockchip MPP (`rockchip-linux/mpp` at
-    `9b56348`, Apache-2.0: `mpp/hal/vpu/jpegd/hal_jpegd_rkv_reg.h`, `hal_jpegd_vpu730_reg.h`,
-    `mpp/hal/rkenc/jpege/hal_jpege_vpu720_reg.h`, and how `hal_jpegd_rkv.c` fills them). What
-    no source states is how far the block reaches from each address, which a job's check
-    needs: where the decoder puts its chroma plane after `reg13_dec_out_base` and how large it
-    is in each `yuv_out_format`, tiled and scaled-down mode; the unit of `qtbl_len`,
-    `htbl_mincode_len` and `htbl_value_len` (the table sizes are `RKD_*` constants, not
-    hardware facts); and on the encoder, the extent of the ECS length buffer
-    (`reg021_adr_ecs_len`) and of the chroma source planes per format. Read from MPP's own
-    buffer sizes these would be guesses at the hardware, so JPEG still runs through `rk-mpp`
-    with the caller's registers.
+  - `drivers/rk-jpeg`, the decoder: its field layouts are public in Rockchip MPP (`rockchip-linux/mpp`
+    at `9b56348`, Apache-2.0: `mpp/hal/vpu/jpegd/hal_jpegd_rkv_reg.h`, `hal_jpegd_vpu730_reg.h`, and
+    how `hal_jpegd_rkv.c` fills them). What no source states is how far the decoder reaches from
+    each address, which a job's check needs: where it puts its chroma plane after
+    `reg13_dec_out_base` and how large it is in each `yuv_out_format`, tiled and scaled-down mode;
+    and the unit of `qtbl_len`, `htbl_mincode_len` and `htbl_value_len` (the table sizes are `RKD_*`
+    constants, not hardware facts). Until those are known the decoder builds no job, and JPEG
+    decodes go through `rk-mpp` with the caller's registers. The encoder (`drivers/rkjpege`, the
+    VPU720 class) has its file pinned and its job built; what stays open is how far it reads past
+    the encoded picture (the frame's padding rows, which `hal_jpege_vpu720.c` derives from
+    `ver_stride`) and the extent of the ECS length buffer (`reg021_adr_ecs_len`): the builder checks
+    the encoded picture only and does not place the ECS buffer, which the vendor HAL leaves unset on
+    the frame-by-frame path.
 - [ ] **Frame streams are not on the shared ring** (I2). `lemnosd`'s streams, the client and the
       C API still use their own ring and doorbell (`docs/streams.md`). Move them onto
       `shm-ring`, `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`),
