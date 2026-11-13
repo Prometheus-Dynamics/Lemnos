@@ -1,0 +1,33 @@
+# Device nodes lemnosd opens, given to group lemnos (mode 0660). The daemon runs as user lemnos
+# (lemnos.conf) and reaches hardware only through these groups, never through root. Install as
+# /usr/lib/udev/rules.d/70-lemnos.rules. Each line is for one kind of node the daemon's own
+# backends open (backends/linux, backends/linux-hotplug, backends/usb, backends/v4l2).
+
+# The kernel module's control node, /dev/lemnos, and the CSI-2 receiver's nodes it makes.
+SUBSYSTEM=="misc", KERNEL=="lemnos", GROUP="lemnos", MODE="0660"
+SUBSYSTEM=="misc", KERNEL=="lemnos-*", GROUP="lemnos", MODE="0660"
+
+# DMA heaps: /dev/dma_heap/<name>, for dma-buf streams.
+SUBSYSTEM=="dma_heap", GROUP="lemnos", MODE="0660"
+
+# Buses: /dev/i2c-N, /dev/spidevB.C, GPIO character devices /dev/gpiochipN.
+SUBSYSTEM=="i2c-dev", GROUP="lemnos", MODE="0660"
+SUBSYSTEM=="spidev", GROUP="lemnos", MODE="0660"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="lemnos", MODE="0660"
+
+# Serial ports the daemon opens as a UART. Add a line for any other tty the board uses.
+SUBSYSTEM=="tty", KERNEL=="ttyS*", GROUP="lemnos", MODE="0660"
+SUBSYSTEM=="tty", KERNEL=="ttyAMA*", GROUP="lemnos", MODE="0660"
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", GROUP="lemnos", MODE="0660"
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", GROUP="lemnos", MODE="0660"
+
+# Cameras and their media controllers: /dev/videoN, /dev/mediaN.
+SUBSYSTEM=="video4linux", GROUP="lemnos", MODE="0660"
+SUBSYSTEM=="media", GROUP="lemnos", MODE="0660"
+
+# USB: the usbfs nodes /dev/bus/usb/BBB/DDD, one per device (not per interface).
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", GROUP="lemnos", MODE="0660"
+
+# Vendor nodes a board's compiled-in drivers open, by name, are the image's to add: one line each,
+# SUBSYSTEM=="misc", KERNEL=="<name>", GROUP="lemnos", MODE="0660". Look them up in the driver's
+# source (grep for DEVICE or NODE in drivers/<name>/). Nothing here covers them.

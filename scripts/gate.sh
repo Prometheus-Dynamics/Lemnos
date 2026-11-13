@@ -33,6 +33,8 @@ step "C surface, shared form" cargo test -q -p lemnos-capi --features shared
 # The crates used as plain libraries, alone and without their driver halves.
 step libraries scripts/check-libraries.sh
 step boundaries scripts/check-boundaries.sh
+# The unit, udev and sysusers files; nothing is installed here.
+step packaging scripts/check-packaging.sh
 # Every command in the documents runs against the simulated board, and every link leads somewhere.
 step documents scripts/check-docs.py
 
