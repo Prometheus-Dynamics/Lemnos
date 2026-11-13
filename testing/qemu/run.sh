@@ -48,13 +48,14 @@ source="$KDIR/source/include/uapi/linux/media/raspberrypi"
   "$work/kernel/test/lemnos_pisp_fe_check.c"
 # The real backend, static so the image needs no libraries.
 target=x86_64-unknown-linux-musl
-(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check --target "$target")
+(cd "$repo" && cargo build -q -j"$JOBS" -p lemnos-module-check -p lemnos-gadget-check -p lemnosd -p lemnos-stream-compose-check -p lemnos-shm-ring-check -p lemnos-shm-holds-check -p lemnos-nand-check --target "$target")
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-module-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-gadget-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnosd" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-stream-compose-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-shm-ring-check" "$root/"
 cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-shm-holds-check" "$root/"
+cp "${CARGO_TARGET_DIR:-$repo/target}/$target/debug/lemnos-nand-check" "$root/"
 cp "$work/kernel/lemnos.ko" "$work"/test_block/lemnos_test_*.ko "$work/mock_rp1/rp1_pio_mock.ko" "$root/"
 # The kernel's own test modules: from the built tree, or, for this machine's kernel, installed.
 # gpio-sim and spidev may be built in instead, and then there's no file to bring.
@@ -74,6 +75,14 @@ for module in i2c-stub gpio-sim spidev; do
     *) cp "$found" "$root/$module.ko" ;;
   esac
 done
+# The NAND simulator is a module (testing/qemu/kernel.config): init loads it with its geometry.
+nandsim="$(find -L "$KDIR/drivers" -name 'nandsim.ko*' 2>/dev/null | head -1 || true)"
+if [[ -z "$nandsim" ]]; then echo "qemu: nandsim not found under $KDIR" >&2; exit 1; fi
+case "$nandsim" in
+  *.zst) zstd -q -d -o "$root/nandsim.ko" "$nandsim" ;;
+  *.xz) xz -d -c "$nandsim" >"$root/nandsim.ko" ;;
+  *) cp "$nandsim" "$root/nandsim.ko" ;;
+esac
 (cd "$root" && find . -print0 | cpio --quiet --null -o -H newc | gzip -1) >"$work/initramfs"
 
 accel=tcg
@@ -95,7 +104,8 @@ if ! grep -q 'lemnos-qemu: passed' <<<"$after"; then
   exit 1
 fi
 # dev_warn from the module's test parameters is expected, and says "test_".
-if grep -E 'BUG:|WARNING:|Oops|possible (circular|recursive) locking|UBSAN|KASAN|Call Trace' <<<"$after" >&2; then
+# The kernel's UBI says so on any error it finds (the first-flash check reads what its UBI attaches).
+if grep -E 'BUG:|WARNING:|Oops|possible (circular|recursive) locking|UBSAN|KASAN|Call Trace|UBI error|bad VID header|corrupted' <<<"$after" >&2; then
   echo "qemu: the kernel reported a problem during the checks" >&2
   exit 1
 fi

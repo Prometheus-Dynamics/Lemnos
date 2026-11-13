@@ -87,6 +87,16 @@ that the line is at most 2048 bytes; `lemnos-ctl` itself does not.
 `bus_buffer` and the `test_*` flags are read at start like the rest. The `test_*` flags are for
 the harness only.
 
+## NAND simulator in the harness
+
+The modules-on harness kernel (`testing/qemu/kernel.config`) also has the kernel's raw NAND stack,
+for the first-flash check (`testing/crates/nand-check`): `CONFIG_MTD` and `CONFIG_MTD_RAW_NAND`
+(built in), `CONFIG_MTD_NAND_ECC_SW_HAMMING` (the ECC the simulator's pages are corrected with),
+`CONFIG_MTD_UBI` (built in, so `/dev/ubi_ctrl` exists at boot), and `CONFIG_MTD_NAND_NANDSIM` as a
+module. `init` loads `nandsim.ko` with its chip (ID bytes, six partitions, bad blocks, a weak erase
+block and bit flips as parameters) and unloads it after the check. The module is not a `lemnos.ko`
+requirement: nothing in `kernel/` uses these symbols, and the modules-off kernel has none of them.
+
 ## Symbols of lemnos.ko
 
 The symbol list is from `nm -u` on `lemnos.ko`, built natively against an x86_64 kernel tree. Each
@@ -488,6 +498,10 @@ harness kernel's own `.config`, after the build.
 | `CONFIG_VIDEO_V4L2_SUBDEV_API` | V4L2 capture and media controller | `CONFIG_MEDIA_CONTROLLER` `CONFIG_VIDEO_DEV` |
 | `CONFIG_WATCHDOG` | Watchdog | none |
 | `CONFIG_WATCHDOG_CORE` | Watchdog | none |
+| `CONFIG_MTD` | NAND simulator in the harness | none |
+| `CONFIG_MTD_RAW_NAND` | NAND simulator in the harness | `CONFIG_MTD` |
+| `CONFIG_MTD_NAND_ECC_SW_HAMMING` | NAND simulator in the harness | none (selects `MTD_NAND_ECC`) |
+| `CONFIG_MTD_NAND_NANDSIM` | NAND simulator in the harness | `CONFIG_MTD_RAW_NAND` |
 
 ## Cross-check against the reference SoC's configuration
 

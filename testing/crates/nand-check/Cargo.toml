@@ -1,0 +1,14 @@
+[package]
+name = "lemnos-nand-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Board-check in the QEMU harness: the first-flash NAND writer against the kernel's own NAND simulator, MTD and UBI"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-driver-system-flash = { path = "../../../drivers/system-flash" }
+lemnos-driver-system-flash-sys = { path = "../../../drivers/system-flash-sys" }

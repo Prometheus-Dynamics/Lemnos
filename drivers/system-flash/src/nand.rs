@@ -312,10 +312,27 @@ impl Chip for Device {
 
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<u32> {
         let before = lemnos_driver_system_flash_sys::ecc_stats(self.file.as_fd())?;
-        self.file.read_exact_at(buf, offset)?;
+        // The character device returns the data even when the ECC could not correct it (the kernel's
+        // read reports the failure only in the counters), so the failure is read from them here.
+        let result = self.file.read_exact_at(buf, offset);
         let after = lemnos_driver_system_flash_sys::ecc_stats(self.file.as_fd())?;
-        Ok(after.corrected.wrapping_sub(before.corrected))
+        ecc_read_outcome(before, after, result)
     }
+}
+
+/// What a read through the character device means, from the chip's ECC counters before and after it.
+/// A read the ECC could not correct counts as `EBADMSG` even though the kernel returned data; a read
+/// that failed for another reason keeps its error; otherwise the number of bit flips corrected.
+fn ecc_read_outcome(
+    before: lemnos_driver_system_flash_sys::EccStats,
+    after: lemnos_driver_system_flash_sys::EccStats,
+    result: io::Result<()>,
+) -> io::Result<u32> {
+    result?;
+    if after.failed != before.failed {
+        return Err(io::Error::from_raw_os_error(EBADMSG));
+    }
+    Ok(after.corrected.wrapping_sub(before.corrected))
 }
 
 /// A test target: a temp file standing in for the partition, with the bad blocks the test gives
@@ -1268,6 +1285,40 @@ mod tests {
             verify(&mem, image.len() as u64, digest)
                 .unwrap_or_else(|e| panic!("the rerun after a cut at {cut} doesn't verify: {e:?}"));
         }
+    }
+
+    /// The kernel's character device returns the data for an uncorrectable read and counts it in
+    /// `failed`; the driver must turn that into an error, and count corrected flips otherwise.
+    #[test]
+    fn an_uncorrectable_read_is_an_error_even_though_the_kernel_returned_data() {
+        use lemnos_driver_system_flash_sys::EccStats;
+        let before = EccStats {
+            corrected: 4,
+            failed: 1,
+            ..EccStats::default()
+        };
+        let failed = EccStats {
+            corrected: 4,
+            failed: 2,
+            ..EccStats::default()
+        };
+        let corrected = EccStats {
+            corrected: 6,
+            failed: 1,
+            ..EccStats::default()
+        };
+        let err = ecc_read_outcome(before, failed, Ok(())).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(EBADMSG));
+        assert!(uncorrectable(&err));
+        assert_eq!(ecc_read_outcome(before, corrected, Ok(())).unwrap(), 2);
+        assert_eq!(ecc_read_outcome(before, before, Ok(())).unwrap(), 0);
+        let other = io::Error::from_raw_os_error(5);
+        assert_eq!(
+            ecc_read_outcome(before, before, Err(other))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(5)
+        );
     }
 
     #[test]

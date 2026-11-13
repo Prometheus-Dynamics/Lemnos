@@ -725,6 +725,9 @@ format argument is still the compression (1 xz, 0 raw).
 
 - Geometry (erase block, write unit, sub-page, size) is read from `/sys/class/mtd/mtdN`. Erase
   blocks up to 8 MiB, write units up to 64 KiB.
+- Reads are checked against the chip's ECC counters, not only the data: the character device
+  returns the data of an uncorrectable read and counts the failure, so a read that the ECC could
+  not correct fails the job as an uncorrectable ECC error. Corrected bit flips are counted.
 - Image erase block `i` goes to the `i`-th good erase block; bad blocks come from the chip
   (`MEMGETBADBLOCK`). An image that needs more good blocks than the chip has is refused with
   `NO_SPACE` before any erase.
