@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use lemnos_core::{Contract, Status, Tail};
 use lemnos_wire::ring::Layout;
 use lemnos_wire::{
-    CORE_HASH, DeviceDescription, Frame, LEMNOS, LemnosName, MAX_QUEUED_BYTES, PART_BYTES, Planes,
-    VERSION, WireError, append, decode, decode_description, feature, handle_descriptors, health,
-    package_mode, state,
+    CORE_HASH, DeviceDescription, Frame, LEMNOS, LemnosName, MAX_QUEUED_BYTES, PART_BITS,
+    PART_BYTES, PART_HASHES, PART_NAMES, Parts, Planes, VERSION, WireError, append, check_parts,
+    decode, decode_description, feature, handle_descriptors, health, package_mode, state,
 };
 
 use crate::connection::{Connection, Taker};
@@ -270,6 +270,8 @@ struct Shared {
     host: String,
     /// What the service said it can do, in its Welcome.
     features: u64,
+    /// The parts the service's Welcome was compared with: what is refused, and its hashes.
+    refusal: Parts,
     /// Requests whose answers nobody waits for: giving back a stream that couldn't be set up, and
     /// closing a stream that was dropped.
     unheard: Vec<u32>,
@@ -294,6 +296,23 @@ pub(crate) struct StreamAnswer {
 }
 
 impl Shared {
+    /// The error for a feature bit this connection does not use: the part's name and both hashes
+    /// when the part was refused at the handshake, otherwise the service did not report it.
+    fn unusable(&self, bit: u64, text: &str) -> Error {
+        let index = PART_BITS.iter().position(|&part| part == bit);
+        if let Some(index) = index.filter(|_| self.refusal.refused & bit != 0) {
+            return Error::PartMismatch {
+                part: PART_NAMES[index],
+                ours: PART_HASHES[index],
+                theirs: self.refusal.theirs[index],
+            };
+        }
+        Error::Refused {
+            status: Status::NOT_SUPPORTED,
+            text: text.to_string(),
+        }
+    }
+
     fn id(&mut self) -> u32 {
         self.next_id = self.next_id.wrapping_add(1);
         self.next_id
@@ -359,6 +378,7 @@ impl Shared {
                 version,
                 features,
                 host,
+                parts,
                 ..
             } => {
                 if version != VERSION {
@@ -369,8 +389,15 @@ impl Shared {
                     self.close = true;
                     return false;
                 }
+                let Ok(parts) = check_parts(parts.0) else {
+                    self.rejected = Some(Error::Wire(WireError::Malformed));
+                    self.close = true;
+                    return false;
+                };
                 host.clone_into(&mut self.host);
-                self.features = features;
+                // A part the service and this client disagree on is refused by name; the rest works.
+                self.features = features & !parts.refused;
+                self.refusal = parts;
                 self.ready = true;
                 self.retry_delay = RETRY_FIRST;
                 self.sub_retry = None;
@@ -588,6 +615,7 @@ impl Session {
                 job_events: VecDeque::new(),
                 host: String::new(),
                 features: 0,
+                refusal: Parts::default(),
                 unheard: Vec::new(),
                 holds: Arc::new(Holds::default()),
                 rejected: None,
@@ -686,6 +714,7 @@ impl Session {
         self.connection = None;
         self.shared.ready = false;
         self.shared.features = 0;
+        self.shared.refusal = Parts::default();
         self.shared.unheard.clear();
         self.shared.close = false;
         self.generation += 1;
@@ -756,11 +785,6 @@ impl Session {
                         theirs: peer.core,
                         theirs_lemnos: peer.lemnos().to_string(),
                     });
-                    self.shared.close = true;
-                    return None;
-                }
-                Err(WireError::PartMismatch { part, ours, theirs }) => {
-                    self.shared.rejected = Some(Error::PartMismatch { part, ours, theirs });
                     self.shared.close = true;
                     return None;
                 }
@@ -1020,10 +1044,10 @@ impl Session {
         // Only a service that said so knows the question. To any other it is an unknown kind,
         // which ends the connection.
         if self.shared.features & feature::PACKAGES == 0 {
-            return Err(Error::Refused {
-                status: Status::NOT_SUPPORTED,
-                text: "the service does not report its driver packages".to_string(),
-            });
+            return Err(self.shared.unusable(
+                feature::PACKAGES,
+                "the service does not report its driver packages",
+            ));
         }
         let id = self.shared.id();
         self.queue(&Frame::Packages { id })?;
@@ -1137,10 +1161,9 @@ impl Session {
         // Only a service that said so knows the request. To any other it is an unknown kind,
         // which ends the connection.
         if self.shared.features & feature::JOBS == 0 {
-            return Err(Error::Refused {
-                status: Status::NOT_SUPPORTED,
-                text: "the service does not run long jobs".to_string(),
-            });
+            return Err(self
+                .shared
+                .unusable(feature::JOBS, "the service does not run long jobs"));
         }
         let id = self.shared.id();
         self.queue(&Frame::CallJob {
@@ -1378,10 +1401,9 @@ impl Session {
     ) -> Result<UsbEndpoints, Error> {
         self.settle()?;
         if self.shared.features & feature::ENDPOINTS == 0 {
-            return Err(Error::Refused {
-                status: Status::NOT_SUPPORTED,
-                text: "the service does not lend endpoints".to_string(),
-            });
+            return Err(self
+                .shared
+                .unusable(feature::ENDPOINTS, "the service does not lend endpoints"));
         }
         let id = self.shared.id();
         self.queue(&Frame::EndpointsOpen { id, device })?;
@@ -1426,10 +1448,9 @@ impl Session {
     pub fn usb_endpoints_release(&mut self, device: u32) -> Result<(), Error> {
         self.settle()?;
         if self.shared.features & feature::ENDPOINTS == 0 {
-            return Err(Error::Refused {
-                status: Status::NOT_SUPPORTED,
-                text: "the service does not lend endpoints".to_string(),
-            });
+            return Err(self
+                .shared
+                .unusable(feature::ENDPOINTS, "the service does not lend endpoints"));
         }
         let id = self.shared.id();
         self.queue(&Frame::EndpointsClose { id, device })?;
@@ -1669,10 +1690,10 @@ impl Session {
         // A service without shared rings answers with the older layout, which this build does not
         // read: it is refused here, before anything is asked.
         if self.shared.features & feature::SHARED_RINGS == 0 {
-            return Err(Error::Refused {
-                status: Status::NOT_SUPPORTED,
-                text: "the service's streams are not shared rings".to_string(),
-            });
+            return Err(self.shared.unusable(
+                feature::SHARED_RINGS,
+                "the service's streams are not shared rings",
+            ));
         }
         // Only a service that said so knows the second way of asking. To any other it is an
         // unknown kind, which ends the connection.

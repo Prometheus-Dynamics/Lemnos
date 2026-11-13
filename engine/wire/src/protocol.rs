@@ -52,38 +52,6 @@ pub const MAX_QUEUED_BYTES: usize = 4 << 20;
 /// `MAX_FRAME - REPLY_OVERHEAD`. Not one of the layout's constants: it is a limit each side
 /// checks for itself.
 pub const REPLY_OVERHEAD: usize = 32;
-/// What a host can do beyond the core, as bits of `features` in Welcome. A client uses what a bit
-/// stands for only when the host set it; a host that doesn't know a bit leaves it clear. Each bit
-/// is one part of the wire, with its own hash: see [`PART_HASHES`].
-pub mod feature {
-    constants! {
-        /// The host takes StreamOpenHandles and may answer it with StreamRingHandles: a stream whose
-        /// buffers are one descriptor each.
-        pub const STREAM_HANDLES: u64 = 1;
-        /// The host takes Packages, and answers it with what became of its driver packages.
-        pub const PACKAGES: u64 = 2;
-        /// The host takes CallJob and JobCancel: long jobs, with their progress and end sent to
-        /// whoever started them.
-        pub const JOBS: u64 = 4;
-        /// The host's streams are shared-memory rings (`docs/ring.md`): StreamRings and
-        /// StreamRingHandles are laid out as [`crate::ring::fds`] says. A host without this bit
-        /// answers with the older layout, which this build does not read.
-        pub const SHARED_RINGS: u64 = 8;
-        /// Every bit of the parts that are folded into the core hash, and of the shared-rings part.
-        pub const ALL: u64 = STREAM_HANDLES | PACKAGES | JOBS | SHARED_RINGS;
-    }
-    /// The host takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints: a
-    /// function's two bulk endpoints, borrowed by one connection at a time. Added after the core
-    /// and the parts, so it is not folded into their hashes (`ALL` above is): a build without it
-    /// agrees on all of them, and refuses the three kinds alone with `UnknownKind`.
-    pub const ENDPOINTS: u64 = 16;
-    /// Every bit this build knows: [`ALL`] and [`ENDPOINTS`].
-    pub const EVERY: u64 = ALL | ENDPOINTS;
-}
-
-/// The parts a feature bit stands for, in bit order: part `n` is bit `1 << (n - 1)`. A part is
-/// numbered where its frames are declared in [`frames!`]; 0 is the core.
-pub const PARTS: usize = 4;
 
 const HEADER: usize = LENGTH_BYTES + 2;
 
@@ -125,14 +93,6 @@ pub enum WireError {
     /// one this build speaks. Nothing after the handshake prefix was read. The connection must be
     /// closed. Only the core is compared here; see `docs/writing-a-driver.md`.
     LayoutMismatch(Build),
-    /// A part of the wire differs (see [`PART_HASHES`]). Checked once the core agrees. The
-    /// connection must be closed.
-    PartMismatch {
-        /// The part's name, as `docs/wire.md` names it.
-        part: &'static str,
-        ours: u64,
-        theirs: u64,
-    },
 }
 
 impl core::fmt::Display for WireError {
@@ -148,10 +108,6 @@ impl core::fmt::Display for WireError {
                 CORE_HASH,
                 peer.core,
                 peer.lemnos()
-            ),
-            Self::PartMismatch { part, ours, theirs } => write!(
-                f,
-                "wire part `{part}` differs (hash {ours:#018x} here, {theirs:#018x} there)"
             ),
         }
     }
@@ -236,7 +192,7 @@ macro_rules! is_added {
 /// out of the hash of its frame.
 macro_rules! frames {
     ($(
-        $section:ident = $part:literal {
+        $section:literal = $part:literal $(bit $bit:ident)? $(folds $fold:path)? {
             $(
                 $(#[$doc:meta])*
                 $($added:ident)? $kind:literal $name:ident {
@@ -245,6 +201,68 @@ macro_rules! frames {
             )*
         }
     )*) => {
+        /// What a host can do beyond the core, as bits of `features` in Welcome: one bit for each
+        /// part that has one, declared with `bit` in [`frames!`]. A client uses what a bit stands for
+        /// only when the host set it; a host that doesn't know a bit leaves it clear.
+        pub mod feature {
+            $( $( pub const $bit: u64 = 1 << ($part - 1); )? )*
+            /// Every bit this build knows.
+            pub const EVERY: u64 = 0 $( $( | $bit )? )*;
+        }
+
+        /// The number of parts: every section but the core. A part is numbered where it is declared,
+        /// from 1 in order, and is negotiated by its name.
+        pub const PARTS: usize = [$($part),*].len() - 1;
+
+        /// The name of a section, by its part number (0 is the core).
+        pub(crate) const fn section_name(number: u8) -> &'static str {
+            match number {
+                $( $part => $section, )*
+                _ => "",
+            }
+        }
+
+        /// The feature bit of a section: 0 for the core and for a part without one.
+        pub(crate) const fn section_bit(number: u8) -> u64 {
+            match number {
+                $( $part => 0 $( + feature::$bit )?, )*
+                _ => 0,
+            }
+        }
+
+        /// The hash of a part: its number, name and bit, its constants, and its base frames. The core
+        /// (number 0) is not hashed this way; see `CORE_HASH`.
+        pub(crate) const fn section_hash(number: u8) -> u64 {
+            let mut hash = crate::hash::word(crate::hash::OFFSET, number as u64);
+            hash = crate::hash::text(hash, section_name(number));
+            hash = crate::hash::word(hash, section_bit(number));
+            $( if number == $part { $( hash = $fold(hash); )? } )*
+            Frame::fold_part(hash, number)
+        }
+
+        // Each part is numbered from 1 in declaration order, and each one has its bit, which is
+        // `1 << (number - 1)`. Breaking either fails the build.
+        const _: () = {
+            let numbers = [$($part),*];
+            let mut i = 0;
+            while i < numbers.len() {
+                assert!(numbers[i] as usize == i, "sections must be numbered 0, 1, 2 ... in order");
+                if i > 0 {
+                    assert!(
+                        section_bit(i as u8) == 1u64 << (i - 1),
+                        "a part's feature bit must be 1 << (its number - 1)"
+                    );
+                }
+                i += 1;
+            }
+        };
+
+        // Two frames sharing a kind number would be read as each other.
+        const _: () = assert!(
+            crate::protocol::kinds_are_unique(&[ $( $( $kind, )* )* ]),
+            "two frames share a kind number"
+        );
+
         /// One message, in either direction.
         #[derive(Debug, Clone, Copy, PartialEq)]
         pub enum Frame<'a> {
@@ -310,7 +328,7 @@ macro_rules! frames {
 frames! {
     // The core: the handshake, the call and reply envelopes, devices, the event envelope and
     // stream framing. Its base is the core hash, which Hello and Welcome carry.
-    core = 0 {
+    "core" = 0 {
         /// The handshake, sent first. Its prefix is the core hash, then the Lemnos version, both
         /// fixed in size: a peer checks them before reading anything after. Then the protocol
         /// `version`, and the part hashes (see [`PART_HASHES`]), which are checked once the core
@@ -391,18 +409,10 @@ frames! {
         20 Refusal { id: u32, status: i32, text: &'a str }
         /// Answered with an empty Reply.
         21 StreamClose { id: u32, device: u32, name: &'a str }
-        /// Borrows the bulk endpoints of a device's function for this connection. Sent only to a
-        /// host whose Welcome set [`feature::ENDPOINTS`]. Answered with Endpoints, or Refusal.
-        added 32 EndpointsOpen { id: u32, device: u32 }
-        /// The two bulk endpoints, `[OUT, IN]`: two descriptors with this frame over `SCM_RIGHTS`,
-        /// the OUT endpoint's first. Only the connection that asked holds them.
-        added 33 Endpoints { id: u32 }
-        /// Gives up the endpoints this connection holds. Answered with an empty Reply.
-        added 34 EndpointsClose { id: u32, device: u32 }
     }
     // The stream-handles part: a stream whose buffers are one descriptor each. Its constants are
     // in [`handles`].
-    stream_handles = 1 {
+    "stream-handles" = 1 bit STREAM_HANDLES folds handles::fold_constants {
         /// StreamOpen from a client that can also take StreamRingHandles for an answer. Sent only to a
         /// host whose Welcome set [`feature::STREAM_HANDLES`].
         22 StreamOpenHandles { id: u32, device: u32, name: &'a str }
@@ -425,7 +435,7 @@ frames! {
     }
     // The packages part: driver packages the host runs. Sent only to a host whose Welcome set
     // [`feature::PACKAGES`]. Its constants are the package modes.
-    packages = 2 {
+    "packages" = 2 bit PACKAGES folds package_mode::fold_constants {
         /// Asks what became of the host's driver packages. Answered with one Package for each
         /// file, then PackagesDone.
         24 Packages { id: u32 }
@@ -438,7 +448,7 @@ frames! {
     }
     // The jobs part: long jobs, with their progress and end sent to whoever started them. Sent
     // only to a host whose Welcome set [`feature::JOBS`].
-    jobs = 3 {
+    "jobs" = 3 bit JOBS {
         /// Starts a long job: a method the contract marks as one. Answered with JobStarted, or
         /// Refusal.
         27 CallJob { id: u32, device: u32, contract: u8, method: u16, args: &'a [u8] }
@@ -459,7 +469,19 @@ frames! {
     // StreamRings and StreamRingHandles, which are declared in the core and the stream-handles
     // part; this part states the bit, so a peer can see whether the host's layout is the one
     // this build reads.
-    shared_rings = 4 {
+    "shared-rings" = 4 bit SHARED_RINGS folds crate::ring::fds::fold_constants {
+    }
+    // The endpoints part: a function's two bulk endpoints, lent to one connection at a time. Its
+    // frames are all additions after the base, so its hash is its name, number and bit.
+    "endpoints" = 5 bit ENDPOINTS {
+        /// Borrows the bulk endpoints of a device's function for this connection. Sent only to a
+        /// host whose Welcome set [`feature::ENDPOINTS`]. Answered with Endpoints, or Refusal.
+        added 32 EndpointsOpen { id: u32, device: u32 }
+        /// The two bulk endpoints, `[OUT, IN]`: two descriptors with this frame over `SCM_RIGHTS`,
+        /// the OUT endpoint's first. Only the connection that asked holds them.
+        added 33 Endpoints { id: u32 }
+        /// Gives up the endpoints this connection holds. Answered with an empty Reply.
+        added 34 EndpointsClose { id: u32, device: u32 }
     }
 }
 
@@ -672,9 +694,6 @@ pub fn decode(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, WireError> {
         check_handshake(from)?;
     }
     let decoded = decode_payload(kind, &mut from)?;
-    if let Frame::Hello { parts, .. } | Frame::Welcome { parts, .. } = decoded {
-        check_parts(parts.0)?;
-    }
     Ok(Some((decoded, total)))
 }
 
@@ -691,82 +710,164 @@ fn check_handshake(mut from: Reader<'_>) -> Result<(), WireError> {
     Err(WireError::LayoutMismatch(Build { core, name: bytes }))
 }
 
-/// Checks the part hashes a Hello or a Welcome carries against this build's. A peer that sends
-/// none (empty) is not checked: it is a peer that has no part to check.
-fn check_parts(bytes: &[u8]) -> Result<(), WireError> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-    if bytes.len() != PARTS * 8 {
-        return Err(WireError::Malformed);
-    }
-    for (index, ours) in PART_HASHES.iter().enumerate() {
-        let theirs =
-            u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap_or([0; 8]));
-        if theirs != *ours {
-            return Err(WireError::PartMismatch {
-                part: PART_NAMES[index],
-                ours: *ours,
-                theirs,
-            });
+/// What a peer's parts say about this build's. A part both builds have, with the same hash, is
+/// `agreed`; one both have with different hashes is `refused`, by name, and the rest of the
+/// connection works without it. A part the peer does not list, or names this build does not
+/// know, is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Parts {
+    /// The feature bits of the parts both builds have and agree on.
+    pub agreed: u64,
+    /// The feature bits of the parts both builds have whose hashes differ.
+    pub refused: u64,
+    /// The peer's hash of each refused part, by its index in [`PART_NAMES`]; 0 for the others.
+    pub theirs: [u64; PARTS],
+}
+
+/// Reads a Hello's or a Welcome's parts and compares them with this build's. Malformed records
+/// are an error: the connection must be closed.
+pub fn check_parts(bytes: &[u8]) -> Result<Parts, WireError> {
+    let mut out = Parts {
+        agreed: 0,
+        refused: 0,
+        theirs: [0; PARTS],
+    };
+    let mut at = 0;
+    while at < bytes.len() {
+        let len = *bytes.get(at).ok_or(WireError::Malformed)? as usize;
+        let name = bytes
+            .get(at + 1..at + 1 + len)
+            .ok_or(WireError::Malformed)?;
+        let raw = bytes
+            .get(at + 1 + len..at + 9 + len)
+            .ok_or(WireError::Malformed)?;
+        at += 9 + len;
+        let theirs = u64::from_le_bytes(raw.try_into().map_err(|_| WireError::Malformed)?);
+        let Some(index) = PART_NAMES.iter().position(|known| known.as_bytes() == name) else {
+            continue;
+        };
+        let bit = PART_BITS[index];
+        if (out.agreed | out.refused) & bit != 0 {
+            continue;
+        }
+        if theirs == PART_HASHES[index] {
+            out.agreed |= bit;
+        } else {
+            out.refused |= bit;
+            out.theirs[index] = theirs;
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 /// The names of the parts, in the order [`PART_HASHES`] lists them.
-pub const PART_NAMES: [&str; PARTS] = ["stream-handles", "packages", "jobs", "shared-rings"];
+pub const PART_NAMES: [&str; PARTS] = part_names();
 
-/// The hash of each part: its base frames, and its constants. Index `n` is the part numbered
-/// `n + 1` in [`frames!`]. Each one moves only when that part's base changes.
-pub const PART_HASHES: [u64; PARTS] = [part_hash(1), part_hash(2), part_hash(3), part_hash(4)];
+/// The feature bit of each part, in the order [`PART_NAMES`] lists them.
+pub const PART_BITS: [u64; PARTS] = part_bits();
 
-const fn part_hash(part: u8) -> u64 {
-    let mut hash = hash::OFFSET;
-    hash = Frame::fold_part(hash, part);
-    if part == 1 {
-        hash = handles::fold_constants(hash);
+/// The hash of each part, in the order [`PART_NAMES`] lists them. Each one moves only when that
+/// part's own declaration changes: see `section_hash`.
+pub const PART_HASHES: [u64; PARTS] = part_hashes();
+
+const fn part_names() -> [&'static str; PARTS] {
+    let mut out = [""; PARTS];
+    let mut i = 0;
+    while i < PARTS {
+        out[i] = section_name(i as u8 + 1);
+        i += 1;
     }
-    if part == 2 {
-        hash = package_mode::fold_constants(hash);
-    }
-    if part == 4 {
-        // The descriptors of the shared rings: their order is the layout this part stands for.
-        hash = crate::ring::fds::fold_constants(hash);
-    }
-    hash
+    out
 }
 
+const fn part_bits() -> [u64; PARTS] {
+    let mut out = [0; PARTS];
+    let mut i = 0;
+    while i < PARTS {
+        out[i] = section_bit(i as u8 + 1);
+        i += 1;
+    }
+    out
+}
+
+const fn part_hashes() -> [u64; PARTS] {
+    let mut out = [0; PARTS];
+    let mut i = 0;
+    while i < PARTS {
+        out[i] = section_hash(i as u8 + 1);
+        i += 1;
+    }
+    out
+}
+
+/// Whether no two of `kinds` are the same number.
+pub(crate) const fn kinds_are_unique(kinds: &[u16]) -> bool {
+    let mut i = 0;
+    while i < kinds.len() {
+        let mut j = i + 1;
+        while j < kinds.len() {
+            if kinds[i] == kinds[j] {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Each part as Hello and Welcome carry it: one record per part, `[name length: u8][name][hash:
+/// u64 little-endian]`, in the order of [`PART_NAMES`]. A peer reads the records it knows by name.
+pub const PART_BYTES_LEN: usize = {
+    let mut n = 0;
+    let mut i = 0;
+    while i < PARTS {
+        n += 1 + PART_NAMES[i].len() + 8;
+        i += 1;
+    }
+    n
+};
+
+pub const PART_BYTES: [u8; PART_BYTES_LEN] = {
+    let mut out = [0u8; PART_BYTES_LEN];
+    let mut at = 0;
+    let mut i = 0;
+    while i < PARTS {
+        let name = PART_NAMES[i].as_bytes();
+        out[at] = name.len() as u8;
+        at += 1;
+        let mut j = 0;
+        while j < name.len() {
+            out[at] = name[j];
+            at += 1;
+            j += 1;
+        }
+        let hash = PART_HASHES[i].to_le_bytes();
+        let mut k = 0;
+        while k < 8 {
+            out[at] = hash[k];
+            at += 1;
+            k += 1;
+        }
+        i += 1;
+    }
+    out
+};
+
 /// The core hash of this build: FNV-1a over the core's base frames, the constants of the framing,
-/// the feature and state vocabularies, the ring's layout and the description's framing. It is
+/// the state and health vocabularies, the ring's layout and the description's framing. The parts
+/// are not in it: adding one moves no core hash. It is
 /// computed at compile time from the same definitions the encoder and decoder are generated
 /// from, so it can't be kept by hand. Hello and Welcome carry it first; see `docs/wire.md`.
 pub const CORE_HASH: u64 = {
     let mut hash = hash::OFFSET;
     hash = fold_constants(hash);
-    hash = feature::fold_constants(hash);
     hash = state::fold_constants(hash);
     hash = health::fold_constants(hash);
     hash = Frame::fold_part(hash, 0);
     hash = description::fold_framing(hash);
     hash = crate::ring::fold_constants(hash);
     hash
-};
-
-/// The part hashes as Hello and Welcome carry them: each one little-endian, in order.
-pub const PART_BYTES: [u8; PARTS * 8] = {
-    let mut out = [0u8; PARTS * 8];
-    let mut i = 0;
-    while i < PARTS {
-        let bytes = PART_HASHES[i].to_le_bytes();
-        let mut j = 0;
-        while j < 8 {
-            out[i * 8 + j] = bytes[j];
-            j += 1;
-        }
-        i += 1;
-    }
-    out
 };
 
 #[cfg(test)]

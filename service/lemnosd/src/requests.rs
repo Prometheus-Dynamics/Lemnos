@@ -11,8 +11,8 @@ use lemnos_host::stream::StreamMemory;
 use lemnos_wire::ring::fds;
 use lemnos_wire::{
     CORE_HASH, Frame, Identity, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES,
-    PLANE_LENGTH_BYTES, REPLY_OVERHEAD, Tail, VERSION, WireError, decode, encode_description,
-    feature, handle_descriptors, package_mode,
+    PLANE_LENGTH_BYTES, REPLY_OVERHEAD, Tail, VERSION, WireError, check_parts, decode,
+    encode_description, feature, handle_descriptors, package_mode,
 };
 
 use crate::Core;
@@ -85,10 +85,9 @@ impl Client {
         loop {
             match decode(&buf[self.start..self.end]) {
                 Ok(None) => return true,
-                Err(WireError::LayoutMismatch(_) | WireError::PartMismatch { .. }) => {
-                    // Built from another core, or another part: say which, then close. The peer
-                    // checks our core and then our parts in the Welcome it gets, before anything
-                    // else in it.
+                Err(WireError::LayoutMismatch(_)) => {
+                    // Built from another core: say which, then close. The peer checks our core
+                    // before anything else in the Welcome it gets.
                     self.conn.answer(&Frame::Welcome {
                         core: CORE_HASH,
                         parts: Tail(&PART_BYTES[..]),
@@ -124,10 +123,11 @@ impl Client {
             version,
             name: _,
             events,
+            parts,
             ..
         } = frame
         {
-            return self.hello(version, events);
+            return self.hello(version, events, parts.0);
         }
         if !self.greeted {
             return false;
@@ -175,21 +175,27 @@ impl Client {
         }
     }
 
-    fn hello(&mut self, version: u16, events: bool) -> Keep {
+    fn hello(&mut self, version: u16, events: bool, parts: &[u8]) -> Keep {
         if version != VERSION {
             self.refuse(0, Status::NOT_SUPPORTED, "another protocol version");
             return false;
         }
+        let Ok(theirs) = check_parts(parts) else {
+            self.refuse(0, Status::INVALID_ARGUMENT, "malformed wire parts");
+            return false;
+        };
         if !self.greeted {
             self.greeted = true;
             self.conn.events.store(events, Ordering::Relaxed);
         }
+        // A part the client and this build disagree on is refused by name in the client; here its
+        // bit is cleared, so the client does not send its frames. The rest of the connection works.
         self.conn.answer(&Frame::Welcome {
             core: CORE_HASH,
             parts: Tail(&PART_BYTES[..]),
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
-            features: feature::EVERY,
+            features: feature::EVERY & !theirs.refused,
             host: &self.core.name,
         });
         true

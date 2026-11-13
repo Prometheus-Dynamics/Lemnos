@@ -144,23 +144,32 @@ so cannot move its hash: a frame kind marked `added` in the table, and a field w
 (a trailing value, one a peer from before it does not send). A structure whose field is appended
 therefore keeps its hash. The values this build computes are:
 
-`core hash: 0x7b015eb7597b20bc`
+`core hash: 0x40b5b5290df32c80`
 
-`stream-handles part hash: 0x8b54fb4c60535d2b`
+`stream-handles part hash: 0x5b32fb2ec8dfa5ed`
 
-`packages part hash: 0xb3db2c33449c615d`
+`packages part hash: 0x818f26c404b4f968`
 
-`jobs part hash: 0xe8ed57f23fc18516`
+`jobs part hash: 0x353035866faf89f5`
 
-`shared-rings part hash: 0x756927694c521908`
+`shared-rings part hash: 0xa8c95a7c8c5834e7`
+
+`endpoints part hash: 0x0360342362a7f9d9`
 
 The hashes do not include the Lemnos version string. Two builds with the same core interoperate
 whatever their Lemnos versions. What a client sees when the cores differ: the connection is refused
 at connect with `LayoutMismatch`, whose text is `core protocol differs`, with both core hashes and
-the host's Lemnos version. When a part differs: the connection is refused with `PartMismatch`, whose
-text names the part and both hashes. The C API returns `VERSION_MISMATCH` with the same text. A
-client that connects to a host from before this prefix existed sees a refusal from the host, not a
-core error, because that host reads the first bytes of Hello as its version and refuses them.
+the host's Lemnos version.
+
+**Parts are negotiated by name.** Hello and Welcome carry one record for each part the peer knows:
+its name length (one byte), its name, and its hash (eight bytes, little-endian). A part the peer
+names that this build does not know is ignored. A part both builds know with the same hash is
+agreed, and its feature bit is usable. A part both know with different hashes is refused by name:
+the host clears that bit in Welcome, the client clears it from its own features, and calls that
+need the part answer `PartMismatch`, whose text names the part and both hashes. Every other part
+keeps working on the same connection. A part the peer does not list is neither agreed nor refused.
+Malformed records close the connection. The C API returns `VERSION_MISMATCH` with the same text for
+a refused part.
 
 ## Rules
 
@@ -551,20 +560,20 @@ Each vector is one complete frame.
 
 ### hello
 
-`Hello { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the four part hashes }`
+`Hello { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the five part records }`
 
 <!-- vector: hello -->
 ```hex
-59 00 00 00 01 00 bc 20 7b 59 b7 5e 01 7b 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
+95 00 00 00 01 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 e7 34 58 8c 7c 5a c9 a8 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
 ```
 
 ### welcome
 
-`Welcome { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the four part hashes }`
+`Welcome { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the five part records }`
 
 <!-- vector: welcome -->
 ```hex
-5d 00 00 00 02 00 bc 20 7b 59 b7 5e 01 7b 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
+99 00 00 00 02 00 80 2c f3 0d 29 b5 b5 40 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 5c 00 00 00 0e 73 74 72 65 61 6d 2d 68 61 6e 64 6c 65 73 ed a5 df c8 2e fb 32 5b 08 70 61 63 6b 61 67 65 73 68 f9 b4 04 c4 26 8f 81 04 6a 6f 62 73 f5 89 af 6f 86 35 30 35 0c 73 68 61 72 65 64 2d 72 69 6e 67 73 e7 34 58 8c 7c 5a c9 a8 09 65 6e 64 70 6f 69 6e 74 73 d9 f9 a7 62 23 34 60 03
 ```
 
 ### list
