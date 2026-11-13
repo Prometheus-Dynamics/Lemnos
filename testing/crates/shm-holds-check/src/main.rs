@@ -190,7 +190,7 @@ fn run_with(
     let page_fd = step("read-only marks descriptor", marks.page_fd())?;
     let slot = step(
         "give the module the marks page",
-        stream::add_reader(stream.fd.as_fd(), page_fd.as_fd(), MAX_HELD),
+        stream::add_reader(stream.fd.as_fd(), page_fd.as_fd(), MAX_HELD, 0),
     )?;
     marks.set_slot(slot);
 
@@ -350,17 +350,231 @@ fn run_with(
     Ok(())
 }
 
+/// One cut-off scenario: how many buffers the reader holds, the limits the module is given, and
+/// whether the module must cut it off.
+struct Scenario {
+    name: &'static str,
+    holds: usize,
+    max_held: u32,
+    max_hold: Duration,
+    cut_expected: bool,
+}
+
+/// A buffer the reader holds: its frame's ring sequence and the entry's ticket.
+#[derive(Clone, Copy)]
+struct Hold {
+    buffer: u32,
+    ticket: u32,
+    sequence: u64,
+}
+
+/// Holds buffers under a limit and checks the module's cut-off. A reader that is over its limit
+/// must be cut off, and then its buffers are reused. A reader within its limits is left alone.
+fn scenario(
+    node_path: &str,
+    block_name: &str,
+    heap_path: &str,
+    report: &mut Report,
+    sc: &Scenario,
+) -> Result<(), String> {
+    let node = step(
+        "open the control node",
+        OpenOptions::new().read(true).write(true).open(node_path),
+    )?;
+    let block = step(
+        "find the block",
+        module::find_block(node.as_fd(), block_name),
+    )?
+    .ok_or_else(|| format!("no bound block named {block_name}"))?;
+    let heap = step(
+        "open the heap",
+        OpenOptions::new().read(true).write(true).open(heap_path),
+    )?;
+    let pool_bytes = u64::from(BUFFERS) * STRIDE as u64;
+    let pool = step(
+        "allocate the pool",
+        dma_heap::allocate(heap.as_fd(), pool_bytes),
+    )?;
+    let stream = step(
+        "create the stream",
+        stream::create(
+            node.as_fd(),
+            &stream::Spec {
+                block,
+                flags: CREATE_SHM,
+                buffers: BUFFERS,
+                buffer_bytes: BUFFER_BYTES,
+                frame_slots: FRAME_SLOTS,
+                job_slots: JOB_SLOTS,
+                job_bytes: JOB_BYTES,
+                pool: Some(pool.as_fd()),
+            },
+        ),
+    )?;
+    let ring = step(
+        "map the ring",
+        Mapping::new(stream.fd.as_fd(), stream.ring_bytes, 0, false),
+    )?;
+    let buffers = step(
+        "map the pool",
+        Mapping::new(pool.as_fd(), pool_bytes as usize, 0, false),
+    )?;
+    // The consumer marks without a limit of its own: the module's limits are the ones tested.
+    let marks = step("make the marks page", Marks::create(BUFFERS, 0, 0))?;
+    let page_fd = step("read-only marks descriptor", marks.page_fd())?;
+    let slot = step(
+        "give the module the marks page",
+        stream::add_reader(
+            stream.fd.as_fd(),
+            page_fd.as_fd(),
+            sc.max_held,
+            u64::try_from(sc.max_hold.as_nanos()).unwrap_or(u64::MAX),
+        ),
+    )?;
+    marks.set_slot(slot);
+    step(
+        "start the test source",
+        stream::test_source(stream.fd.as_fd(), 1000, FRAMES),
+    )?;
+
+    let mut reader = step(
+        "attach to the ring",
+        Reader::over_from_start(Words {
+            map: &ring,
+            base: 0,
+        }),
+    )?;
+    let page_words = Words {
+        map: &ring,
+        base: PAGE_AT,
+    };
+    let word_of = |buffer: u32| -> Option<u64> {
+        buffers
+            .load_words()?
+            .load(buffer as usize * STRIDE / 8, Ordering::Acquire)
+    };
+    // Whether a held buffer has been reused: its ticket moved on and a later frame is in it.
+    let reused = |h: &Hold| -> bool {
+        page::ticket(&page_words, BufferIndex(h.buffer)) != u64::from(h.ticket)
+            && word_of(h.buffer).is_some_and(|w| w > h.sequence)
+    };
+
+    let mut held: Vec<Hold> = Vec::new();
+    let mut after = 0_u64;
+    let deadline = Instant::now() + WAIT * 3;
+    let mut cut = false;
+    while Instant::now() < deadline {
+        match reader.next() {
+            Next::Sample(sample) => {
+                let Some(e) = entry::read(sample.payload) else {
+                    continue;
+                };
+                let buffer = e.buffers[0].0.0;
+                let ticket = e.buffers[0].1;
+                if held.len() < sc.holds {
+                    if !held.iter().any(|h| h.buffer == buffer) && marks.mark(BufferIndex(buffer)) {
+                        if page::still(&page_words, BufferIndex(buffer), ticket) {
+                            held.push(Hold {
+                                buffer,
+                                ticket,
+                                sequence: sample.seq,
+                            });
+                        } else {
+                            marks.unmark(BufferIndex(buffer));
+                        }
+                    }
+                } else {
+                    after += 1;
+                }
+                cut = page::is_cut_off(&page_words, BUFFERS, slot);
+                if sc.cut_expected {
+                    if cut && held.len() == sc.holds && held.iter().all(reused) {
+                        break;
+                    }
+                } else if held.len() == sc.holds && after >= 300 {
+                    break;
+                }
+            }
+            Next::Empty => std::thread::sleep(Duration::from_millis(1)),
+            Next::Skipped(_) => {}
+        }
+    }
+    report.check(
+        held.len() == sc.holds,
+        format_args!("{}: {} of {} buffers held", sc.name, held.len(), sc.holds),
+    );
+    if sc.cut_expected {
+        report.check(
+            cut,
+            format_args!("{}: the module cut the reader off", sc.name),
+        );
+        report.check(
+            !held.is_empty() && held.iter().all(reused),
+            format_args!(
+                "{}: the buffers it held were reused after the cut-off",
+                sc.name
+            ),
+        );
+    } else {
+        report.check(
+            !cut,
+            format_args!("{}: a reader within its limits is not cut off", sc.name),
+        );
+        report.check(
+            !held.is_empty() && held.iter().all(|h| !reused(h)),
+            format_args!("{}: its buffers are still its own", sc.name),
+        );
+    }
+    drop(reader);
+    drop(marks);
+    drop(stream);
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [node, block, heap] = args.as_slice() else {
-        let _ = writeln!(
-            std::io::stderr(),
-            "usage: lemnos-shm-holds-check <control node> <block name> <heap node>"
-        );
-        return ExitCode::from(2);
+    let (node, block, heap, cutoff) = match args.as_slice() {
+        [node, block, heap] => (node, block, heap, false),
+        [node, block, heap, mode] if mode == "cutoff" => (node, block, heap, true),
+        _ => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "usage: lemnos-shm-holds-check <control node> <block name> <heap node> [cutoff]"
+            );
+            return ExitCode::from(2);
+        }
     };
     let mut report = Report { failures: 0 };
-    if let Err(error) = run(node, block, heap, &mut report) {
+    let outcome = if cutoff {
+        [
+            Scenario {
+                name: "over the hold count",
+                holds: 2,
+                max_held: 1,
+                max_hold: Duration::ZERO,
+                cut_expected: true,
+            },
+            Scenario {
+                name: "over the hold time",
+                holds: 1,
+                max_held: 0,
+                max_hold: Duration::from_millis(100),
+                cut_expected: true,
+            },
+            Scenario {
+                name: "within its limits",
+                holds: 1,
+                max_held: 1,
+                max_hold: Duration::ZERO,
+                cut_expected: false,
+            },
+        ]
+        .iter()
+        .try_for_each(|sc| scenario(node, block, heap, &mut report, sc))
+    } else {
+        run(node, block, heap, &mut report)
+    };
+    if let Err(error) = outcome {
         report.check(false, error);
     }
     let _ = writeln!(
