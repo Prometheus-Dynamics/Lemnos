@@ -220,6 +220,25 @@ The group `lemnos` gives it a slot device's `.incoming`, which the driver keeps 
 `ReadWritePaths=<dir>`. The bridge writes nothing else, and its unit is hardened to `AF_UNIX` only, with no capability. Widen the address families only if the node is reached
 over TCP.
 
+## The security view (the image's part)
+
+The security switch's view is `/etc/board/security`, and every reader watches the directory `/etc/board/`
+and reads `security` in it (`docs/slots.md`, "The security switch"). The image makes that directory a
+symlink to the tmpfs directory `/run/board/`:
+
+    ln -s /run/board /etc/board
+
+The daemon and the bridge never write `/etc/board` itself: they write `/run/board/security`, by a new
+file renamed over the old one, so the directory watch sees each render. The view is rendered from the
+board's record before the daemon and the comm core start, by the unit that
+`lemnos-ctl tree BOARD --security-unit FILE` writes (`lemnos-board-security.service`, from the board
+file's `[security]` table). It runs `lemnos-ctl security render`, which needs no daemon. Install the unit
+as `/usr/lib/systemd/system/lemnos-board-security.service` and enable it; on a BusyBox init, run the same
+command from the early init script, before `S50lemnosd`. On a board with slots the slot tool renders the
+same view earlier still; that step is part of the slot image (not built here).
+
+On an image without Lemnos, `/etc/board` is a real directory and Orion owns it: not this packaging's concern.
+
 ## Settings
 
 `/etc/lemnos/lemnosd.env` is read by the daemon's unit and script (`EnvironmentFile=-`, so it may be

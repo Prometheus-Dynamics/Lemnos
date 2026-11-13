@@ -16,6 +16,15 @@ retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rul
 dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by name: [] for none
 
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
+# `[security]`: the board's security switch (docs/slots.md, "The security switch"). The record is the
+# switch's truth (an absolute path; on a board with slots it is the boot partition's record), `keys` is the
+# trust root for the switch's own check, and `orion = true` means Orion ships here and answers before a switch
+# goes on. The device below gets these facts as its config; no other device does.
+[security]
+record = "/var/lib/lemnos/security.rec"
+keys = "/etc/lemnos/slot-keys"
+orion = false
+
 [[devices]]
 id = "power0"
 driver = "ina2xx"
@@ -236,3 +245,8 @@ buffer_bytes = 1048576
 id = "selftest"
 driver = "board-self-test"
 config = { members = ["power0", "imu"], include_intrusive = false }
+
+# The security switch: serves system.security/1 and takes its facts from [security] above.
+[[devices]]
+id = "security"
+driver = "system-security"

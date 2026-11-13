@@ -69,6 +69,8 @@ struct Rig {
     keys: Option<PathBuf>,
     allow: bool,
     require_signed: bool,
+    /// The removed per-device key, as an old board file still has it.
+    legacy_key: bool,
     board: &'static str,
     max_dict_mb: Option<i64>,
     /// The NAND settings, when the target is a `mtd` partition (a temp file standing in for it).
@@ -104,6 +106,7 @@ impl Rig {
             keys: None,
             allow: true,
             require_signed: false,
+            legacy_key: false,
             board: BOARD,
             max_dict_mb: None,
             mtd: None,
@@ -140,15 +143,28 @@ impl Rig {
         let target = self.target.to_str().unwrap().to_string();
         let mountinfo = self.mountinfo.to_str().unwrap().to_string();
         let keys = self.keys.as_ref().map(|k| k.to_str().unwrap().to_string());
+        // The security switch's view: `require_signed` on this rig means the switch is on.
+        let view_path = self.dir.path("security");
+        fs::write(
+            &view_path,
+            format!(
+                "{}\ngeneration 1\n",
+                if self.require_signed { "on" } else { "off" }
+            ),
+        )
+        .unwrap();
+        lemnos_slot_store::security::set_view_for_thread(Some(view_path));
         let mut entries: Vec<(&str, ConfigValue<'_>)> = vec![
             ("path", ConfigValue::Str(&target)),
             ("kind", ConfigValue::Str("file")),
             ("allow_first_flash", ConfigValue::Bool(self.allow)),
-            ("require_signed", ConfigValue::Bool(self.require_signed)),
             ("mountinfo", ConfigValue::Str(&mountinfo)),
         ];
         if let Some(keys) = keys.as_ref() {
             entries.push(("keys", ConfigValue::Str(keys)));
+        }
+        if self.legacy_key {
+            entries.push(("require_signed", ConfigValue::Bool(true)));
         }
         if let Some(mb) = self.max_dict_mb {
             entries.push(("max_dict_mb", ConfigValue::Int(mb)));
@@ -1203,5 +1219,15 @@ fn the_nand_write_holds_one_erase_block_and_one_page_beyond_what_it_writes() {
     assert!(
         peak <= NAND_ERASE as usize + NAND_WRITE as usize + 16 * 1024,
         "peak {peak} bytes"
+    );
+}
+
+#[test]
+fn the_per_device_require_signed_key_is_refused_by_the_driver_start() {
+    let mut rig = Rig::new("legacy-key", 4096);
+    rig.legacy_key = true;
+    assert!(
+        rig.try_start_with(None).is_err(),
+        "a board file with require_signed does not start the driver"
     );
 }

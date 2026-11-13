@@ -32,8 +32,8 @@ pub trait Flash {
     /// board's signed message). Nothing is written. The signature policy and its outcome are the
     /// crate's documentation. `NOT_SUPPORTED` for another board's manifest (checked first);
     /// `INVALID_ARGUMENT` for a manifest out of shape or a malformed record, in every policy;
-    /// `NOT_PERMITTED` for a known key whose signature does not verify, and, when `require_signed`
-    /// is set, for an unsigned image or one under an unknown key; `BUSY` while a write runs.
+    /// `NOT_PERMITTED` for a known key whose signature does not verify, and, when the board's
+    /// security switch is on, for an unsigned image or one under an unknown key; `BUSY` while a write runs.
     #[method(2)]
     fn manifest(&mut self, manifest: &[u8], record: &[u8]) -> Result<()>;
     /// Starts writing the image: `size` bytes of stream, in `format`. The job's progress is the

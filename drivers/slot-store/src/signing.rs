@@ -201,7 +201,8 @@ pub fn set_security(layout: &crate::store::Layout, on: bool) -> std::io::Result<
     } else {
         match std::fs::remove_file(&path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
+            Ok(()) => crate::store::sync_dir(&layout.state_dir()),
+            Err(_) => Ok(()),
         }
     }
 }

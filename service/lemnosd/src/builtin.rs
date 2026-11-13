@@ -56,6 +56,7 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_sunxi_vin::SunxiVin>(),
         entry::<lemnos_driver_system_flash::SystemFlash>(),
         entry::<lemnos_driver_system_identity::Identity>(),
+        entry::<lemnos_driver_system_security::SystemSecurity>(),
         entry::<lemnos_driver_system_slots::SystemSlots>(),
         entry::<lemnos_driver_system_slots::SystemReboot>(),
         entry::<lemnos_driver_thermal_zone::ThermalZone>(),

@@ -20,6 +20,7 @@ use crate::store::{self, Layout, Meta, State};
 use crate::tar::tests::archive;
 use crate::trial::{Log, Resolved, Source};
 use crate::{SystemReboot, SystemSlots, TrustedKey};
+use lemnos_slot_store::security;
 use lemnos_slot_store::ubi::{Fake, Ubi, UbiWrite, image_volume};
 
 pub struct TempDir(pub PathBuf);
@@ -471,9 +472,9 @@ fn a_signed_bundle_streams_in_and_is_put_where_the_boot_chain_looks() {
 }
 
 #[test]
-fn with_require_signed_a_bundle_not_signed_by_a_trusted_key_is_refused_and_leaves_nothing() {
+fn with_the_switch_on_a_bundle_not_signed_by_a_trusted_key_is_refused_and_leaves_nothing() {
     let mut board = Board::new("os-1");
-    board.slots.require_signed = true;
+    security::set_view_for_thread(Some(view_file(&board.dir.0, true)));
     let mut bundle = Bundle::new("os-2");
     bundle.signer = SigningKey::from_bytes(&[9; 32]);
     let (status, _, _) = board.stream(1, &bundle.pack(), 4096);
@@ -793,14 +794,25 @@ fn the_list_says_what_is_installed_and_which_is_which() {
     let _ = &board.dir;
 }
 
+/// The security switch's view file in `dir`: `on` or `off`, generation 1.
+fn view_file(dir: &std::path::Path, on: bool) -> std::path::PathBuf {
+    let path = dir.join("security");
+    std::fs::write(
+        &path,
+        format!("{}\ngeneration 1\n", if on { "on" } else { "off" }),
+    )
+    .unwrap();
+    path
+}
+
 #[test]
 fn a_board_that_requires_signing_and_trusts_no_key_installs_nothing() {
     let dir = TempDir::new("nokeys");
     let mut slots = SystemSlots::new(layout(&dir.0), Box::new(Told::default()), Vec::new());
-    slots.require_signed = true;
+    security::set_view_for_thread(Some(view_file(&dir.0, true)));
     assert_eq!(slots.install(10, false, false), Err(Status::NOT_PERMITTED));
     // Off, the default: it installs, and the slot shows as unverified.
-    slots.require_signed = false;
+    security::set_view_for_thread(Some(view_file(&dir.0, false)));
     assert!(slots.install(10, false, false).is_ok());
 }
 
@@ -950,7 +962,7 @@ fn with_require_signed_off_a_bad_signature_under_a_known_key_is_refused_before_a
 #[test]
 fn with_require_signed_on_the_table_refuses_three_rows_and_takes_a_verified_bundle() {
     let mut board = Board::new("os-1");
-    board.slots.require_signed = true;
+    security::set_view_for_thread(Some(view_file(&board.dir.0, true)));
     let mut unsigned = Bundle::new("os-2");
     unsigned.sign = false;
     let (status, _, _) = board.stream(1, &unsigned.pack(), 4096);
@@ -998,7 +1010,7 @@ fn with_require_signed_on_the_table_refuses_three_rows_and_takes_a_verified_bund
 #[test]
 fn a_board_with_require_signed_on_and_no_key_list_refuses_every_bundle() {
     let mut board = Board::new("os-1");
-    board.slots.require_signed = true;
+    security::set_view_for_thread(Some(view_file(&board.dir.0, true)));
     board.slots.keys.clear();
     // Refused when the install starts: no job, nothing staged.
     assert_eq!(
@@ -1052,7 +1064,7 @@ fn a_malformed_signature_is_refused_in_every_row() {
     for require in [false, true] {
         for (what, bundle) in &malformed {
             let mut board = Board::new("os-1");
-            board.slots.require_signed = require;
+            security::set_view_for_thread(Some(view_file(&board.dir.0, require)));
             let (status, _, _) = board.stream(1, &bundle.pack(), 4096);
             assert_eq!(
                 status,
@@ -1095,7 +1107,7 @@ fn a_slot_whose_signature_did_not_verify_is_not_tried_once_signing_is_required()
     unknown.signer = SigningKey::from_bytes(&[9; 32]);
     let (status, _, _) = board.stream(1, &unknown.pack(), 4096);
     assert_eq!(status, Status::OK, "{}", board.state().error);
-    board.slots.require_signed = true;
+    security::set_view_for_thread(Some(view_file(&board.dir.0, true)));
     assert_eq!(
         board.slots.trial("os-2", false, false, false),
         Err(Status::NOT_PERMITTED)
@@ -2883,7 +2895,7 @@ fn with_require_signed_an_unverified_default_is_reported_and_the_driver_keeps_ru
     meta.set("SIGNATURE", "not_checked_unknown_key");
     meta.set("SIGNED", "untrusted");
     meta.save(board.layout(), "os-1").unwrap();
-    board.slots.require_signed = true;
+    security::set_view_for_thread(Some(view_file(&board.dir.0, true)));
     board.slots.report_policy();
     let error = board.state().error;
     assert!(error.contains("default slot os-1"), "{error}");
@@ -3086,4 +3098,27 @@ fn a_trial_is_not_armed_when_the_restart_it_needs_is_refused() {
         "{}",
         board.state().error
     );
+}
+
+/// The never-strand case: the view is malformed, so the switch reads on, on a board with no trust
+/// root. Installs are refused, and `info` reports the switch the readers read (its `require_signed`),
+/// not the record's; a valid view that says off is read as off again.
+#[test]
+fn a_malformed_view_reads_on_on_a_board_with_no_trust_root_and_info_says_so() {
+    let dir = TempDir::new("corrupt-view");
+    let mut slots = SystemSlots::new(layout(&dir.0), Box::new(Told::default()), Vec::new());
+    let path = dir.0.join("security");
+    fs::write(&path, b"on\ngeneration 1\nextra\n").unwrap();
+    security::set_view_for_thread(Some(path.clone()));
+    let mut out = vec![0u8; 4096];
+    let len = slots.info(&mut out).unwrap();
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    assert_eq!(json.get("require_signed"), Some(&Json::Bool(true)));
+    assert_eq!(slots.install(10, false, false), Err(Status::NOT_PERMITTED));
+    // A valid view that says off: the readers read off, and the same board installs.
+    fs::write(&path, b"off\ngeneration 2\n").unwrap();
+    let len = slots.info(&mut out).unwrap();
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    assert_eq!(json.get("require_signed"), Some(&Json::Bool(false)));
+    assert!(slots.install(10, false, false).is_ok());
 }

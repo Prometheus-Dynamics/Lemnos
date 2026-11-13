@@ -26,6 +26,7 @@ pub mod firmware;
 pub mod json;
 pub mod manifest;
 pub mod records;
+pub mod security;
 pub mod signing;
 pub mod store;
 pub mod twocopy;

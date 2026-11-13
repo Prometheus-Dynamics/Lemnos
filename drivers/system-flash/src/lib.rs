@@ -23,8 +23,11 @@
 //! - `max_dict_mb`: 8 by default (1 to 8, the ceiling): the largest xz dictionary a stream may
 //!   declare. A board file may lower it, never raise it.
 //! - `keys`: the trusted keys file (one per line: 64 hex digits, a space, the owner).
-//!   `require_signed`: `false` by default. The signature policy is the table in the brief
-//!   (`manifest::decide`): with it off, unsigned and unknown-key images are accepted and reported
+//!   The security switch (`lemnos_slot_store::security`, `docs/slots.md`) sets the signature
+//!   policy, read at each decision. The view is not a board-file setting: a board file that names
+//!   `security_view` or `require_signed` is refused.
+//!   The board file's `require_signed` is refused by name. The policy is the table in the brief
+//!   (`manifest::decide`): with the switch off, unsigned and unknown-key images are accepted and reported
 //!   as not checked; a bad signature from a known key is refused either way.
 //! - `mountinfo`: the mount table the running-system check reads, `/proc/self/mountinfo` by default.
 //!
@@ -62,6 +65,7 @@ use std::io;
 use std::os::unix::fs::FileExt;
 
 use lemnos_contract_indicator::{Indicator as IndicatorContract, NO_PROGRESS};
+use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_contract_system_flash::{FORMAT_RAW, FORMAT_XZ, Flash};
 use lemnos_core::{
     CallerId, Config, ConfigError, Dev, Health, JobId, JobState, Key, Kind as SettingKind,
@@ -249,7 +253,7 @@ struct Job {
 }
 
 /// The first-flash driver: one target, one job at a time.
-#[driver("system-flash", provides = [Flash])]
+#[driver("system-flash", provides = [Flash, SecurityPrecondition])]
 pub struct SystemFlash {
     /// The board's indicator, when it has one: it shows the write's and the verify's states.
     #[needs(optional)]
@@ -265,7 +269,7 @@ pub struct SystemFlash {
     allow_first_flash: bool,
     max_dict: u64,
     board_id: String,
-    require_signed: bool,
+    /// The security switch's view (`lemnos_slot_store::security`), read at each write's decision.
     keys: Vec<TrustedKey>,
     mountinfo: std::path::PathBuf,
     /// The manifest the next write uses.
@@ -776,6 +780,10 @@ impl Lifecycle for SystemFlash {
     }
 
     fn start(needs: SystemFlashNeeds, cfg: &Config<'_>) -> Result<Self> {
+        // The per-device key is removed: the board's security switch replaces it.
+        if cfg.get("require_signed").is_some() || cfg.get("security_view").is_some() {
+            return Err(Status::INVALID_ARGUMENT);
+        }
         let path = cfg.str("path").ok_or(Status::INVALID_ARGUMENT)?;
         let (kind, mtd) = kind_and_mtd(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         let format = mtd.as_ref().map_or(manifest::DISK, |m| m.image.format());
@@ -796,7 +804,6 @@ impl Lifecycle for SystemFlash {
             allow_first_flash: cfg.bool("allow_first_flash").unwrap_or(false),
             max_dict: (max_mb as u64) << 20,
             board_id: cfg.board().to_string(),
-            require_signed: cfg.bool("require_signed").unwrap_or(false),
             keys,
             mountinfo: cfg
                 .str("mountinfo")
@@ -960,9 +967,9 @@ impl Flash for SystemFlash {
         quoted(&self.last_reason, &mut out);
         out.push('}');
         out.push_str(&format!(
-            ",\"allow_first_flash\":{},\"require_signed\":{},\"max_dict_mb\":{}",
+            ",\"allow_first_flash\":{},\"security\":{},\"max_dict_mb\":{}",
             self.allow_first_flash,
-            self.require_signed,
+            lemnos_slot_store::security::enforced(),
             self.max_dict >> 20
         ));
         if self.kind == Kind::Mtd {
@@ -1002,7 +1009,7 @@ impl Flash for SystemFlash {
             ));
         }
         let decided = manifest::decide(
-            self.require_signed,
+            lemnos_slot_store::security::enforced(),
             &parsed.board,
             &parsed.format,
             parsed.image_size,
@@ -1257,6 +1264,32 @@ impl SystemFlash {
                 "the image is written, but the kernel did not re-read its partition table ({error}): restart the board before using it"
             );
         }
+    }
+}
+
+/// What stops the security switch changing (`docs/slots.md`, "The security switch"): a write or a
+/// verify running, in either direction; and to on, a trust root on this device's key list.
+impl SecurityPrecondition for SystemFlash {
+    fn apply(&mut self, _on: bool) -> Result<()> {
+        // First flash keeps no boot-side mark: nothing to make match the switch.
+        Ok(())
+    }
+
+    fn precondition(&mut self, on: bool, into: &mut [u8]) -> Result<usize> {
+        let mut lines = Vec::new();
+        if self.job.is_some() {
+            lines.push("busy: a write or verify is running".to_string());
+        }
+        if on && self.keys.is_empty() {
+            lines.push("missing: no trust root: the keys list (keys in the system-flash config) has no valid line".to_string());
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        let bytes = text.as_bytes();
+        into.get_mut(..bytes.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(bytes);
+        Ok(bytes.len())
     }
 }
 

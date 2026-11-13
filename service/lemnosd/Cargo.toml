@@ -69,6 +69,7 @@ lemnos-driver-status-light = { path = "../../drivers/status-light" }
 lemnos-driver-sunxi-vin = { path = "../../drivers/sunxi-vin" }
 lemnos-driver-system-flash = { path = "../../drivers/system-flash" }
 lemnos-driver-system-identity = { path = "../../drivers/system-identity" }
+lemnos-driver-system-security = { path = "../../drivers/system-security" }
 lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnos-driver-thermal-zone = { path = "../../drivers/thermal-zone" }
 lemnos-driver-usb-gadget = { path = "../../drivers/usb-gadget" }

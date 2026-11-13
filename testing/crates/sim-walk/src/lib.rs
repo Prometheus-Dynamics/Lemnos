@@ -197,6 +197,10 @@ pub const NOT_WALKED: &[(&str, &str)] = &[
         "the serial and data directory it reads are not faked yet",
     ),
     ("system-slots", "the slot store directory is not faked yet"),
+    (
+        "system-security",
+        "the security switch reads and renders a view under /etc/board and /run/board: not faked yet",
+    ),
     ("usb-gadget", "the USB function it exposes is not faked yet"),
     (
         "vcm",
