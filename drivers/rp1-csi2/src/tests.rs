@@ -1,5 +1,6 @@
 //! The driver against a stand-in for the block: every expected value here is written out by hand.
 
+use lemnos_core::CallerId;
 use std::os::fd::BorrowedFd;
 use std::sync::{Arc, Mutex};
 
@@ -851,4 +852,34 @@ fn an_embedded_line_is_refused_without_a_length_the_channel_takes() {
             "bytes {bytes}"
         );
     }
+}
+
+/// A client that starts the receiver and goes away leaves nothing running: the owner's going away
+/// stops the block; another caller's leaves it running.
+#[test]
+fn a_caller_going_away_stops_the_receiver_it_started() {
+    let (mut d, hw) = driver();
+    d.configure(raw10(), Packing::Packed).unwrap();
+    Lifecycle::caller(&mut d, CallerId(7));
+    d.start().unwrap();
+    let before = hw.with(|m| m.stopped);
+
+    Lifecycle::caller_gone(&mut d, CallerId(8));
+    assert_eq!(
+        hw.with(|m| m.stopped),
+        before,
+        "another caller's going away leaves it running"
+    );
+    Lifecycle::caller_gone(&mut d, CallerId(7));
+    assert_eq!(
+        hw.with(|m| m.stopped),
+        before + 1,
+        "the owner's going away stops the block"
+    );
+    Lifecycle::caller_gone(&mut d, CallerId(7));
+    assert_eq!(
+        hw.with(|m| m.stopped),
+        before + 1,
+        "and nothing more once it is stopped"
+    );
 }

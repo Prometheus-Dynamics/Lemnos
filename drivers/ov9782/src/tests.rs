@@ -1041,6 +1041,37 @@ fn test_pattern_codes_program_register_0x5e00() {
     assert!(writes(&bus).contains(&(0x5e00, 0x80)));
 }
 
+/// A client that starts the sensor and then goes away (an error, a crash, a closed connection)
+/// leaves nothing running: `caller_gone` for the owner stops it; another caller's leaves it alone.
+#[test]
+fn a_caller_going_away_stops_the_sensor_it_started() {
+    let (mut s, bus) = sensor();
+    s.select_mode(0).unwrap();
+    Lifecycle::caller(&mut s, CallerId(7));
+    start_up(&mut s);
+    clear(&bus);
+
+    Lifecycle::caller_gone(&mut s, CallerId(8));
+    assert!(
+        !writes(&bus).contains(&(MODE_SELECT, STANDBY)),
+        "a caller that did not start the sensor leaves it running"
+    );
+    Lifecycle::caller_gone(&mut s, CallerId(7));
+    assert!(
+        writes(&bus).contains(&(MODE_SELECT, STANDBY)),
+        "the owner going away stops the sensor (standby written)"
+    );
+    Lifecycle::caller_gone(&mut s, CallerId(7));
+    assert_eq!(
+        writes(&bus)
+            .iter()
+            .filter(|w| **w == (MODE_SELECT, STANDBY))
+            .count(),
+        1,
+        "a second caller_gone for the same caller stops nothing more"
+    );
+}
+
 #[test]
 fn first_frame_masking_is_programmed_before_streaming_starts() {
     let (mut s, bus) = sensor();

@@ -1,5 +1,6 @@
 //! The driver against a stand-in for the block: every expected value here is written out by hand.
 
+use lemnos_core::CallerId;
 use std::fs::File;
 use std::os::fd::BorrowedFd;
 use std::sync::{Arc, Mutex};
@@ -1186,4 +1187,35 @@ fn stop_gives_every_config_buffer_back_and_each_one_runs_its_rewrite_after_resta
             "job {c} runs with the rewrite"
         );
     }
+}
+
+/// A client that starts the front end and goes away leaves nothing running: the owner's going
+/// away stops the block; another caller's leaves it running.
+#[test]
+fn a_caller_going_away_stops_the_front_end_it_started() {
+    let mut r = rig_with(None, true);
+    r.fill(1, &config(en::AWB_STATS | en::output(1)));
+    r.fill(2, &config(0));
+    Lifecycle::caller(&mut r.fe, CallerId(7));
+    CameraIsp::start(&mut r.fe).unwrap();
+    let before = r.hw.with(|m| m.stopped);
+
+    Lifecycle::caller_gone(&mut r.fe, CallerId(8));
+    assert_eq!(
+        r.hw.with(|m| m.stopped),
+        before,
+        "another caller's going away leaves it running"
+    );
+    Lifecycle::caller_gone(&mut r.fe, CallerId(7));
+    assert_eq!(
+        r.hw.with(|m| m.stopped),
+        before + 1,
+        "the owner's going away stops the block"
+    );
+    Lifecycle::caller_gone(&mut r.fe, CallerId(7));
+    assert_eq!(
+        r.hw.with(|m| m.stopped),
+        before + 1,
+        "and nothing more once it is stopped"
+    );
 }
