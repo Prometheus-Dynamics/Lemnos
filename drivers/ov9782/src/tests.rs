@@ -513,6 +513,7 @@ fn mode_table_reports_the_values_the_registers_program() {
             exposure_delay: 2,
             gain_delay: 2,
             frame_length_delay: 2,
+            readout_ps: 7_650_000_000,
         }
     );
 
@@ -1614,4 +1615,95 @@ fn a_streaming_sensor_with_a_link_watches_its_receiver_each_interval() {
         Lifecycle::tick(&mut s, 1_000 + RECEIVER_WATCH_NS),
         Some(1_000 + 2 * RECEIVER_WATCH_NS)
     );
+}
+
+/// The readout span of every mode: its active lines times the line time, exact in picoseconds.
+/// Checked against the register arithmetic (line length × height over the clock, before any
+/// rounding) and against the rounded line time, which may differ by less than a line's picosecond
+/// count times the height.
+#[test]
+fn every_mode_reports_its_readout_span_exactly() {
+    for (index, entry) in chip::MODES.iter().enumerate() {
+        for continuous in [false, true] {
+            let mode = entry.describe(continuous);
+            let line_length = u64::from(mode.line_length / 2);
+            // 80 MHz for 10-bit, 96 MHz for 8-bit: the two system clocks in chip.rs.
+            let clock = if entry.depth.bit_depth == 10 {
+                80_000_000
+            } else {
+                96_000_000
+            };
+            let exact = line_length * u64::from(entry.window.height) * 1_000_000_000_000 / clock;
+            assert_eq!(
+                mode.readout_ps, exact,
+                "mode {index} continuous {continuous}"
+            );
+            let from_line = u64::from(mode.line_time_ps) * u64::from(entry.window.height);
+            assert!(
+                mode.readout_ps.abs_diff(from_line) < u64::from(entry.window.height),
+                "mode {index}: readout {} vs line time × height {from_line}",
+                mode.readout_ps
+            );
+        }
+    }
+    // Mode 0, gated RAW10: 765 cycles at 80 MHz, 800 lines: 7.65 ms exactly.
+    assert_eq!(chip::MODES[0].describe(false).readout_ps, 7_650_000_000);
+}
+
+/// The board runs of 0aa30510 (other team's raw runs, 9000 frames each), reproduced from the
+/// registers. Per run: the frame length in lines, the rate the runner computed from the frame
+/// length and the line time (`backend`, milli-fps), and the shortest frame interval the timestamps
+/// show (ns). The shortest interval is the frame as programmed; the mean interval of the same runs
+/// is longer, by about one line in two frames (see the last assertion).
+#[test]
+fn the_registers_reproduce_the_board_rates_and_the_shortest_frames() {
+    let rate_line = |depth: u8, continuous: bool| {
+        let entry = chip::MODES
+            .iter()
+            .find(|e| e.depth.bit_depth == depth)
+            .expect("a mode at this depth");
+        let mode = entry.describe(continuous);
+        // The register value (the mode's line length is twice it) over the 96 MHz system clock
+        // of the 8-bit mode: exact in picoseconds.
+        let reg = u128::from(mode.line_length / 2);
+        reg * 1_000_000_000_000 / 96_000_000
+    };
+    let raw8_gated_ps = rate_line(8, false);
+    assert_eq!(raw8_gated_ps, 7_968_750, "765 cycles at 96 MHz");
+    let raw8_cont_ps = rate_line(8, true);
+    assert_eq!(raw8_cont_ps, 7_583_333, "728 cycles at 96 MHz, truncated");
+
+    let fps_milli = |line_ps: u128, lines: u128| 1_000_000_000_000_000 / (line_ps * lines);
+    // (line time ps, lines, backend milli-fps, shortest interval ns).
+    let pairs = [
+        (raw8_gated_ps, 910u128, 137_901u128, 7_251_648u128),
+        (raw8_gated_ps, 1046, 119_972, 8_335_278),
+        (raw8_gated_ps, 2092, 59_986, 16_672_111),
+        (raw8_cont_ps, 1099, 119_989, 8_334_277),
+    ];
+    for (line_ps, lines, backend, shortest_ns) in pairs {
+        let computed = fps_milli(line_ps, lines);
+        assert!(
+            computed.abs_diff(backend) * 10_000 <= backend,
+            "{lines} lines: computed {computed} vs {backend} milli-fps"
+        );
+        // Within 120 parts per million of the programmed frame (the 0.01 % of the four runs; the
+        // continuous-clock run is 113 ppm, the gated ones 4 to 89 ppm).
+        let period_ns = line_ps * lines / 1000;
+        assert!(
+            shortest_ns.abs_diff(period_ns) * 1_000_000 <= period_ns * 120,
+            "{lines} lines: shortest interval {shortest_ns} ns vs {period_ns} ns"
+        );
+    }
+    // The ceiling run (910 lines programmed): the shortest interval is 7 251 648 ns (910 lines), the
+    // longest 7 266 000 ns, and the mean 7 258 821 ns. The mean is the midpoint of the two levels,
+    // so about half the frames are the longer one, 14.35 us (about 1.8 lines) later. Those frames
+    // are not whole lines longer, so the cause is not a frame length in the registers: it is
+    // either the timestamps or the readout, and the per-frame log on the board decides it.
+    let (shortest, longest, mean) = (7_251_648u128, 7_266_000u128, 7_258_821u128);
+    assert!(
+        (2 * mean).abs_diff(shortest + longest) <= 20,
+        "the mean is the midpoint of the two levels"
+    );
+    assert_eq!(longest - shortest, 14_352);
 }

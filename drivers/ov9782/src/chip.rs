@@ -415,6 +415,9 @@ impl ModeEntry {
     pub fn describe(&self, continuous_clock: bool) -> Mode {
         let line_length_reg = u64::from(line_length(continuous_clock));
         let line_time_ps = (line_length_reg * 1_000_000_000_000 / self.depth.sys_clk_hz) as u32;
+        // Exact: the line length times the active lines, over the clock, before any rounding.
+        let readout_ps = line_length_reg * u64::from(self.window.height) * 1_000_000_000_000
+            / self.depth.sys_clk_hz;
         let frame_length_min = self.frame_length_min();
         Mode {
             link: LinkConfig {
@@ -451,6 +454,7 @@ impl ModeEntry {
             exposure_delay: 2,
             gain_delay: 2,
             frame_length_delay: 2,
+            readout_ps,
         }
     }
 }

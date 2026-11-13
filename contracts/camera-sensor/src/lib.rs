@@ -253,6 +253,14 @@ pub struct Mode {
     pub exposure_delay: u8,
     pub gain_delay: u8,
     pub frame_length_delay: u8,
+    /// The readout span of one frame, in picoseconds: `active lines × line time`, computed from the
+    /// sensor's clock without rounding the line time first. The frame's start stamp is the first
+    /// line's readout; the frame ends at `start + readout_ps` (the last line's end, to a line of
+    /// latency at the receiver's frame-end interrupt). The sensor is global shutter (OmniPixel3-GS,
+    /// datasheet section 7.9): the exposure of every row starts together, but the rows are read out
+    /// one line at a time, so the readout span is the rolling one. Zero: the sensor has no readout
+    /// to report (a simulator).
+    pub readout_ps: u64,
 }
 
 /// The frames a post's controls first show on, as [`landing_of`] gives them. A control the post
@@ -458,4 +466,101 @@ pub fn check_link(answer: Result<&[u8]>, identity: Option<&[u8]>) -> Result<Link
         Some(own) if own == name => LinkCheck::Confirmed,
         Some(_) => LinkCheck::Mismatch("the linked receiver is fed by another sensor"),
     })
+}
+
+/// The frame rate, in thousandths of a frame per second, of a frame `lines` long on a sensor whose
+/// line time is `line_time_ps` picoseconds: `1e15 / (line_time_ps × lines)`, rounded to the nearest.
+/// `None` when either is zero.
+pub fn fps_milli_of(line_time_ps: u32, lines: u32) -> Option<u32> {
+    let period = u128::from(line_time_ps) * u128::from(lines);
+    if period == 0 {
+        return None;
+    }
+    let rate = (1_000_000_000_000_000u128 + period / 2) / period;
+    u32::try_from(rate).ok()
+}
+
+/// The frame length in lines, within `min..=max`, whose rate ([`fps_milli_of`]) is nearest to
+/// `asked_milli`, and that rate. A frame is a whole number of lines, so the rate steps by
+/// `fps / lines` at each line: the caller sees the residual in the answer, not a hidden one. A
+/// tie goes to the longer frame (the lower rate). `None` when the asked rate or the line time is
+/// zero, or the range is empty.
+pub fn frame_length_for_fps_milli(
+    line_time_ps: u32,
+    min: u32,
+    max: u32,
+    asked_milli: u32,
+) -> Option<(u32, u32)> {
+    if asked_milli == 0 || line_time_ps == 0 || min == 0 || min > max {
+        return None;
+    }
+    // The continuous frame length for the asked rate, and its two whole neighbours.
+    let exact = 1_000_000_000_000_000u128 / (u128::from(line_time_ps) * u128::from(asked_milli));
+    let near = u32::try_from(exact).unwrap_or(u32::MAX);
+    let mut best: Option<(u32, u32)> = None;
+    for lines in [near, near.saturating_add(1), min, max] {
+        let lines = lines.clamp(min, max);
+        let Some(rate) = fps_milli_of(line_time_ps, lines) else {
+            continue;
+        };
+        let miss = rate.abs_diff(asked_milli);
+        let better = match best {
+            None => true,
+            Some((best_lines, best_rate)) => {
+                let best_miss = best_rate.abs_diff(asked_milli);
+                miss < best_miss || (miss == best_miss && lines > best_lines)
+            }
+        };
+        if better {
+            best = Some((lines, rate));
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+
+    #[test]
+    fn the_rate_of_a_frame_is_rounded_to_the_nearest_milli_fps() {
+        // 765 cycles at 96 MHz, 910 lines (the board's 137.901 fps mode).
+        assert_eq!(fps_milli_of(7_968_750, 910), Some(137_901));
+        // 2092 lines: 59.9858 fps, delivered as 59 986 milli-fps.
+        assert_eq!(fps_milli_of(7_968_750, 2092), Some(59_986));
+        assert_eq!(fps_milli_of(0, 910), None);
+    }
+
+    #[test]
+    fn a_requested_rate_takes_the_nearest_whole_line_count() {
+        // 60 fps at 7968.75 ns a line: 2091 lines is 60.0145, 2092 is 59.9858; 2092 is nearer.
+        assert_eq!(
+            frame_length_for_fps_milli(7_968_750, 800, 4000, 60_000),
+            Some((2092, 59_986))
+        );
+        // 120 fps: 1045 lines is 120.09, 1046 is 119.97; 1046 is nearer.
+        assert_eq!(
+            frame_length_for_fps_milli(7_968_750, 800, 4000, 120_000),
+            Some((1046, 119_972))
+        );
+    }
+
+    #[test]
+    fn the_step_is_the_rate_over_the_lines_and_the_range_is_respected() {
+        // One line at 60 fps is about 29 milli-fps; at 120 fps about 115 milli-fps.
+        let at = |asked| frame_length_for_fps_milli(7_968_750, 800, 4000, asked).unwrap();
+        let (l60, r60) = at(60_000);
+        let (l61, r61) = at(60_000 + 30);
+        assert!(r60.abs_diff(r61) > 0 && l61 < l60);
+        assert!(r60.abs_diff(59_986) <= 1);
+        // A rate above the fastest frame is answered with the shortest frame, and says so.
+        assert_eq!(
+            frame_length_for_fps_milli(7_968_750, 800, 1000, 500_000),
+            Some((800, fps_milli_of(7_968_750, 800).unwrap()))
+        );
+        assert_eq!(
+            frame_length_for_fps_milli(7_968_750, 900, 800, 60_000),
+            None
+        );
+    }
 }

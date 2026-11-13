@@ -158,6 +158,7 @@ fn a_mode_says_what_a_chip_agnostic_caller_needs() {
             "exposure_delay",
             "gain_delay",
             "frame_length_delay",
+            "readout_ps",
         ]
     );
 }
@@ -207,6 +208,7 @@ fn mode() -> Mode {
         exposure_delay: 2,
         gain_delay: 2,
         frame_length_delay: 2,
+        readout_ps: 7_280_000_000,
     }
 }
 

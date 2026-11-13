@@ -54,6 +54,7 @@ F2b) also gave the PIO I2C bus a module route.
 | [`F2e1.md`](../testing/board-runs/F2e1.md) | Not run yet: a receiver unbound mid-stream stops the OV9782 (host tests only: the watch and the check in `select_mode`, two tests fail with the check off); five unbind and rebind cycles on the board are the check |
 | [`F2f2.md`](../testing/board-runs/F2f2.md) | Not run on the board. A client that goes away while its sensor streams stops the sensor (host check only) |
 | [`L1-chain.md`](../testing/board-runs/L1-chain.md) | Not run. The steps of the camera chain run (sensor, receiver, front end, back end, 600+ frames, recovery), for the next board session |
+| [`F2h.md`](../testing/board-runs/F2h.md) | The sensor's frame period: the mean interval is 0.04 % to 0.11 % above the nominal frame (lines × line time); a fixed per-frame line of 1456 sysclk fits all six runs with a common 9 ppm clock term, not established (the datasheet's default for that register is off); the board readback and the `--lines` experiment: not run, untested on board |
 
 ## What has been shown, and how
 
