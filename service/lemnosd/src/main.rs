@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lemnos_host::Options;
-use lemnos_host::board::parse;
+use lemnos_host::board::parse_lenient;
 use lemnos_linux::LinuxBoard;
 use lemnos_linux::hotplug::BoardHints;
 use lemnos_linux_sys::poll::{POLLIN, poll_one};
@@ -150,14 +150,15 @@ fn main() -> ExitCode {
         Ok(text) => text,
         Err(error) => return complain(&format!("{board}: {error}")),
     };
-    let mut board_file = match parse(&text) {
+    // A device whose own entry is wrong is kept, refused with its reason: the file is refused only
+    // for what nothing in it can run without (see `parse_lenient`).
+    let mut board_file = match parse_lenient(&text) {
         Ok(board_file) => board_file,
         Err(error) => return complain(&format!("{board}: {error}")),
     };
-    // Each gadget's board serial is read once, here, so the root phase and the daemon agree on it.
-    if let Err(error) = gadget::resolve(&mut board_file) {
-        return complain(&format!("{board}: {error}"));
-    }
+    // Each gadget's board serial is read once, here, so the root phase and the daemon agree on it. A
+    // gadget whose identity is wrong is refused here, with the reason.
+    gadget::resolve(&mut board_file);
     // Each driver's settings check, before anything is made. A device whose settings a driver
     // refuses is not made: the daemon starts without it, and says so here; its state carries the
     // same reason. `--check` refuses the board instead, as `lemnos-ctl validate` does.
@@ -165,15 +166,12 @@ fn main() -> ExitCode {
     let refused = lemnos_host::settings_refusals(&board_file, &drivers);
     if check {
         return match refused.first() {
-            Some((device, problem)) => complain(&format!("{board}: device {device:?}: {problem}")),
+            Some((_, reason)) => complain(&format!("{board}: {reason}")),
             None => ExitCode::SUCCESS,
         };
     }
-    for (device, problem) in &refused {
-        let _ = writeln!(
-            std::io::stderr(),
-            "lemnosd: {board}: device {device:?} is not started: {problem}"
-        );
+    for (_, reason) in &refused {
+        let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
     }
     // The live device tree against what the board file needs, when the board names a SoC map. A
     // mismatch is reported and the daemon starts anyway: nothing here stops or changes hardware.
@@ -186,10 +184,12 @@ fn main() -> ExitCode {
         Ok(drop) => drop,
         Err(error) => return complain(&error),
     };
+    let mut root = privilege::Started::default();
     match (drop, lemnos_linux_sys::privilege::observe()) {
         (Some(request), Ok(now)) if now.euid == 0 => {
-            if let Err(error) = privilege::start(&request, &board_file, Path::new(&socket)) {
-                return complain(&error);
+            match privilege::start(&request, &board_file, Path::new(&socket)) {
+                Ok(started) => root = started,
+                Err(error) => return complain(&error),
             }
         }
         (None, Ok(now)) if now.euid == 0 => {
@@ -203,6 +203,14 @@ fn main() -> ExitCode {
         }
         (_, Err(error)) => return complain(&format!("reading the credentials: {error}")),
     }
+    // A device the root phase could not set up is refused, and the daemon starts without it.
+    for line in &root.warnings {
+        let _ = writeln!(std::io::stderr(), "lemnosd: {board}: {line}");
+    }
+    for (_, reason) in &root.refused {
+        let _ = writeln!(std::io::stderr(), "lemnosd: {board}: not started: {reason}");
+    }
+    privilege::refuse(&mut board_file, &root.refused);
     // What the board file calls its hardware, for the backend to say which of it comes and goes.
     // An `[[each]]` entry is told of by its pattern.
     let names: Vec<String> = board_file

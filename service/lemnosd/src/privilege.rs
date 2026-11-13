@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 use lemnos_host::board::BoardFile;
 use lemnos_linux_sys::privilege::{self, CAP_SYS_RAWIO, Observed, Plan};
 
+/// The devices a step set aside, by id, with the reason. A step returns these for a device it cannot
+/// set up; the device is refused at start and shows failed, and the others run.
+pub type Refusals = Vec<(String, String)>;
+
 /// The capabilities lemnosd keeps after the drop. Today only `CAP_SYS_RAWIO`, for the kernel module's
 /// register mapping; nothing else is needed by any driver built into the daemon.
 pub const KEEP: &[u32] = &[CAP_SYS_RAWIO];
@@ -39,17 +43,18 @@ pub struct Context<'a> {
     pub gid: u32,
 }
 
-/// One step of the privileged start: runs as root, before the drop. A step that fails stops the
-/// daemon from starting, because a half-set-up board is worse than none.
+/// One step of the privileged start: runs as root, before the drop. A step returns the devices it
+/// cannot set up, each with its reason ([`Refusals`]): those devices are refused and the daemon
+/// starts without them. An `Err` is for the process itself, which cannot run as asked (it cannot
+/// make its socket's directory, say); it stops the daemon from starting.
 ///
 /// Board-file-driven setup belongs here, as a new entry in [`STEPS`] after the built-in ones. The
-/// USB gadget's configfs and FunctionFS setup is planned as the first such step. Do not add
-/// `ExecStartPre=+`.
+/// USB gadget's configfs and FunctionFS setup is the second such step. Do not add `ExecStartPre=+`.
 pub struct Step {
     /// The name, for the error when the step fails.
     pub name: &'static str,
     /// The step itself.
-    pub run: fn(&Context<'_>) -> io::Result<()>,
+    pub run: fn(&Context<'_>) -> io::Result<Refusals>,
 }
 
 /// The privileged start's steps, in order. The first is built in: the socket's directory, owned by
@@ -91,13 +96,41 @@ pub fn resolve(request: &Request) -> Result<(u32, u32), String> {
     privilege::resolve(&request.user, request.group.as_deref())
 }
 
+/// What the privileged start left: the devices a step refused, and what it noticed without
+/// refusing anything.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Started {
+    /// The devices refused by a step, with the reason ([`refuse`] puts them on the board).
+    pub refused: Refusals,
+    /// Lines for the error output: a node the daemon cannot open, say. Devices that need it fail
+    /// at their bind with their own reason.
+    pub warnings: Vec<String>,
+}
+
+/// Runs every step of `steps` in order, as root, and returns the devices they refused.
+///
+/// # Errors
+///
+/// A step that fails for the process itself, with the step's name.
+pub fn run_steps(steps: &[Step], cx: &Context<'_>) -> Result<Refusals, String> {
+    let mut refused = Vec::new();
+    for step in steps {
+        match (step.run)(cx) {
+            Ok(set_aside) => refused.extend(set_aside),
+            Err(error) => return Err(format!("privileged start, {}: {error}", step.name)),
+        }
+    }
+    Ok(refused)
+}
+
 /// Runs the privileged start and the drop, and verifies the result.
 ///
 /// # Errors
 ///
-/// A request that does not resolve, a step that fails, a drop that fails, or a state after the drop
-/// that is not the one asked for. Each is a reason to stop, with the reason in words.
-pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<(), String> {
+/// A request that does not resolve, a process-level step failure, a drop that fails, or a state
+/// after the drop that is not the one asked for. Each is a reason to stop, with the reason in words.
+/// A device a step cannot set up is not one of them: it is in [`Started::refused`].
+pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<Started, String> {
     let (uid, gid) = resolve(request)?;
     let cx = Context {
         board,
@@ -105,9 +138,7 @@ pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<(), 
         uid,
         gid,
     };
-    for step in STEPS {
-        (step.run)(&cx).map_err(|error| format!("privileged start, {}: {error}", step.name))?;
-    }
+    let refused = run_steps(STEPS, &cx)?;
     let plan = Plan {
         uid,
         gid,
@@ -118,14 +149,31 @@ pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<(), 
     let now = privilege::observe().map_err(|error| format!("after the drop: {error}"))?;
     privilege::verify(&plan, &now).map_err(|reason| format!("refusing to run: {reason}"))?;
     // The nodes the daemon opens by name must be reachable by the user it now runs as. Checked here,
-    // after the drop, so a node the group cannot open stops the start with its name.
+    // after the drop. A node it cannot open is a warning: the device that opens it fails at its bind,
+    // with the reason, and every other device runs.
     let group = request
         .group
         .clone()
         .unwrap_or_else(|| request.user.clone());
-    check_nodes(&module_and_heap_nodes(board), now.euid, now.egid, &group)
-        .map_err(|why| format!("refusing to run: {why}"))?;
-    Ok(())
+    let mut warnings = Vec::new();
+    if let Err(why) = check_nodes(&module_and_heap_nodes(board), now.euid, now.egid, &group) {
+        warnings.push(why);
+    }
+    Ok(Started { refused, warnings })
+}
+
+/// Puts the devices a privileged start refused on the board, as refused with their reason. A device
+/// the board already refuses keeps its reason; an id the board does not have is ignored.
+pub fn refuse(board: &mut BoardFile, refused: &Refusals) {
+    for (id, reason) in refused {
+        if let Some(device) = board
+            .devices
+            .iter_mut()
+            .find(|device| device.id == *id && device.refused.is_none())
+        {
+            device.refused = Some(reason.clone());
+        }
+    }
 }
 
 /// The device nodes the daemon opens by name that exist now: the kernel module's `/dev/lemnos` and
@@ -215,14 +263,15 @@ fn cap_name(cap: u32) -> &'static str {
     }
 }
 
-fn runtime_directory(cx: &Context<'_>) -> io::Result<()> {
+fn runtime_directory(cx: &Context<'_>) -> io::Result<Refusals> {
     use std::os::unix::fs::{PermissionsExt, chown};
     let Some(dir) = cx.socket.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     std::fs::create_dir_all(dir)?;
     chown(dir, Some(cx.uid), Some(cx.gid))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

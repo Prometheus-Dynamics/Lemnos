@@ -42,8 +42,9 @@ never lengthened. Nothing is turned off automatically unless a device's own entr
 What it does while it runs:
 
 - **Binds every device**, the ones others use first. A device that cannot bind stays listed, with
-  its reason, and is retried under [the failure rule](concepts.md#the-failure-rule). The daemon
-  starts whatever the board file says: a board with nothing reachable still starts.
+  its reason, and is retried under [the failure rule](concepts.md#the-failure-rule). A device it
+  cannot start at all is refused with its reason, which [Start-up](#start-up) lists. A board with
+  nothing reachable still starts.
 - **Uses the kernel module when it is loaded.** Without `--sim` it opens `/dev/lemnos` if the node
   is there, and says on its error output if it could not. See [The kernel module](kernel-module.md).
 - **Listens for hotplug.** Without `--sim` it watches the kernel's events for the names in the
@@ -72,15 +73,47 @@ For a board, add `--target aarch64-unknown-linux-musl` (after `rustup target add
 statically linked `lemnosd` cannot load driver packages and says so; build for a glibc target to
 use them.
 
+## Start-up
+
+One device's problem never stops the daemon. A device the daemon cannot start is refused with its
+reason: a setting its driver refuses, a device entry that is wrong on its own (a duplicate id, a
+`config` value that is not a number, boolean, string or list of strings, a stream its driver cannot
+take), a loop of `uses` (the device that closes the loop is refused, so the others bind), a gadget
+whose `identity` names no device or the wrong one, or whose root-phase setup fails. It shows failed in
+`lemnos-ctl list` and in its state, with the reason, and the devices that use or are linked to it
+behave as they do when a device fails to bind. Every other device runs, and the daemon starts. A
+refused device is not made, so its retries repeat the same refusal; a refusal that only a board-file
+edit or a restart can change says so in its reason (a gadget's root phase runs as root, once, before
+the drop, so it needs a restart to retry).
+
+The daemon starts, or stops at start, for these reasons only:
+
+- The board file is not TOML, has no `[board]`, has a `format` or `schema_version` this build does not
+  read, or has a `[host]` value out of range. Nothing in such a file can run, so the file is refused
+  whole, by name, on the error output (exit 1). The daemon never listens, so a keep-alive device is not fed
+  and the hardware watchdog resets the board after its timeout, which is the fail-safe.
+- The process cannot run as asked: it cannot create its socket or the socket's directory, cannot
+  listen, cannot start a thread or its signal handler, cannot read its credentials, the user or group
+  it is asked to run as does not exist, the drop to that user fails, or the state after the drop is
+  not the one asked for. Each stops the daemon with the reason on its error output (exit 1).
+- The command line is wrong (an unknown option, `--group` without `--user`).
+
+`lemnosd --check` refuses a board for every device refused above, as `lemnos-ctl validate` does, and
+exits 1. Nothing else is checked at start: a check that needs the hardware is made at bind.
+
 ## The root phase
 
 Started as root with `--user` (or `LEMNOSD_USER`), lemnosd runs its privileged start, then drops to that
-user and group, keeps only `CAP_SYS_RAWIO`, and verifies the result before it listens. A failed step, a
-failed drop, or a state after the drop that is not the one asked for stops it, with the reason on its
-error output. Started without root, it runs as it is and says which capabilities it lacks. The
+user and group, keeps only `CAP_SYS_RAWIO`, and verifies the result before it listens. A step that
+cannot set up one device (a gadget whose configfs setup the kernel refuses) refuses that device with
+the reason, and the daemon starts without it ([Start-up](#start-up)). A step that fails for the process
+itself, a failed drop, or a state after the drop that is not the one asked for stops it, with the
+reason on its error output. A node the daemon cannot open after the drop is a line on the error output,
+and the device that opens it fails at its bind with its own reason. Started without root, it runs as it is and says which capabilities it lacks. The
 privileged start is the list `STEPS` in `service/lemnosd/src/privilege.rs`: each step runs as root, with
 the board file and the socket and ids the daemon will run as, and a step added there (the USB gadget's
-configfs setup is planned as the first) runs before the drop. No unit or script gives the daemon a user, or a
+configfs setup is the second) runs before the drop. A step returns the devices it cannot set up, with
+their reasons, and returns an error only for the process itself. No unit or script gives the daemon a user, or a
 file capability. The steps and the drop are described in
 [`packaging/README.md`](../packaging/README.md#one-privilege-path).
 
