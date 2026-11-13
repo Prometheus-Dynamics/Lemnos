@@ -92,8 +92,8 @@ lemnos`, so it drops to `lemnos` itself. The device nodes are given to group `le
 through `/dev/lemnos`. The unit starts only when the OS has
 supplied the board file at `/etc/lemnos/board.toml`. The OS installs the unit files and supplies the
 `lemnosd` binary and the board file. The unit restarts the daemon after a constant 1 s and sets no
-`WatchdogSec=`: the hardware watchdog escalates, as it does without systemd. [`packaging/README.md`](../packaging/README.md) has the install
-table, what each unit needs and what it does not. The PWM and USB gadget drivers write sysfs and
+`WatchdogSec=`: the hardware watchdog escalates, as it does without systemd. [`packaging/files.txt`](../packaging/files.txt) lists the install
+paths, and [`packaging/README.md`](../packaging/README.md) says what each unit needs and what it does not. The PWM and USB gadget drivers write sysfs and
 configfs, which only root may do, so a board that uses them needs a drop-in that runs the daemon as root.
 
 ## Running under BusyBox init

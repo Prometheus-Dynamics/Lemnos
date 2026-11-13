@@ -48,6 +48,8 @@ step boundaries scripts/check-boundaries.sh
 step orion-copies scripts/check-orion-copies.sh
 # The unit, udev and sysusers files; nothing is installed here.
 step packaging scripts/check-packaging.sh
+# Every file under packaging/ is listed in packaging/files.txt (installed, or marked never), and the list is well formed.
+step packaging-files scripts/check-packaging-files.py
 # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.
 # Also checks that docs/building.md lists each of them.
 step shipped scripts/check-shipped.sh

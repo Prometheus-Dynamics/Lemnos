@@ -1,0 +1,42 @@
+# Every file under packaging/ and what an image does with it. The one list a packager reads for files;
+# the programs are in packaging/shipped.txt. Read and checked by scripts/check-packaging-files.sh (the gate
+# runs it): every file under packaging/ is listed exactly once, every listed source exists, and no
+# install path is taken twice.
+#
+# One line per file, four whitespace-separated fields:
+#   <source>  <install path>  <mode>  <when>
+# source        a path under packaging/, relative to the repository root.
+# install path  where the image puts it: an absolute path, or BOOT/<name> for the root of the boot medium
+#               (the built U-Boot script). `-` only for a file that is never installed.
+# mode          0644 or 0755 for a file copied in with that mode; `append` for a fragment appended to the
+#               install path (an existing file). The header of each source names its install path too.
+# when          one or more words from the fixed vocabulary, joined by commas; all of them must hold:
+#                 always   every image
+#                 systemd  an image that runs systemd
+#                 busybox  an image without systemd (BusyBox init)
+#                 udev     an image with udev (its rules run there)
+#                 orion    an image that ships lemnos-orion
+#                 gadget   a board whose board file has a usb-gadget device (`driver = "usb-gadget"`)
+#                 kmod     an image that ships lemnos.ko
+#                 uboot    a U-Boot board that boots from a boot partition (boot.scr)
+#                 ubi      a U-Boot board that boots from raw NAND with UBI (boot.scr from boot-ubi.cmd)
+#                 never    never installed: documents and this list (no install path; `always` and `never` stand alone)
+#
+# Systemd and BusyBox images both take the same daemon and privilege path (packaging/README.md).
+
+packaging/README.md                              -                                              -     never
+packaging/shipped.txt                            -                                              -     never
+packaging/files.txt                              -                                              -     never
+packaging/systemd/lemnosd.service                /usr/lib/systemd/system/lemnosd.service        0644  systemd
+packaging/systemd/lemnos-orion.service           /usr/lib/systemd/system/lemnos-orion.service   0644  systemd,orion
+packaging/systemd/lemnos.conf                    /usr/lib/sysusers.d/lemnos.conf                0644  systemd
+packaging/systemd/lemnosd.env.example            /etc/lemnos/lemnosd.env                        0644  always
+packaging/systemd/lemnos-orion.env.example       /etc/lemnos/lemnos-orion.env                   0644  orion
+packaging/systemd/lemnos-module.conf             /usr/lib/modules-load.d/lemnos.conf            0644  systemd,kmod
+packaging/systemd/lemnosd.service.d/gadget.conf  /etc/systemd/system/lemnosd.service.d/gadget.conf 0644 systemd,gadget
+packaging/udev/70-lemnos.rules                   /usr/lib/udev/rules.d/70-lemnos.rules          0644  udev
+packaging/init/S50lemnosd                        /etc/init.d/S50lemnosd                         0755  busybox
+packaging/init/S51lemnos-orion                   /etc/init.d/S51lemnos-orion                    0755  busybox,orion
+packaging/init/mdev.conf.fragment                /etc/mdev.conf                                 append busybox
+packaging/uboot/boot.cmd                         BOOT/boot.scr                                  0644  uboot
+packaging/uboot/boot-ubi.cmd                     BOOT/boot.scr                                  0644  ubi

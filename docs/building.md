@@ -1,7 +1,9 @@
 # Building the shipped programs
 
 The programs an OS image ships are listed once, in `packaging/shipped.txt`: `lemnosd`, `lemnos-ctl`
-and `lemnos-orion`. `scripts/check-shipped.sh` reads that list, and this page lists each one in its
+and `lemnos-orion`. The files an image installs from `packaging/` (the units, rules, scripts and drop-ins) are
+listed in `packaging/files.txt`, which is the one place a packager reads for them; see
+[packaging/README.md](../packaging/README.md). `scripts/check-shipped.sh` reads `shipped.txt`, and this page lists each program in its
 table. The image builder builds them `--locked --offline` from vendored sources, with the
 `service` profile, for each target below. The kernel module is built separately:
 [kernel-module.md](kernel-module.md), "For an image builder", and the symbols a board kernel needs, in
