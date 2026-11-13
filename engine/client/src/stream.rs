@@ -20,6 +20,7 @@ use lemnos_wire::handle_descriptors;
 use lemnos_wire::ring::{ByteMemory, Consumer, Layout, RingError, STATE_OPEN, WordMemory};
 
 use crate::error::Error;
+use crate::holds::Hold;
 
 /// How a stream reaches the operating system.
 pub trait StreamPlatform: Debug + Send + Sync {
@@ -130,6 +131,9 @@ pub struct FrameStream {
     writable: bool,
     doorbell: OwnedFd,
     platform: Arc<dyn StreamPlatform>,
+    /// The session's record that this stream is open. Dropping the stream without closing it
+    /// queues the close.
+    hold: Option<Hold>,
 }
 
 /// The buffer memory. Debug-printable so a stream can derive it.
@@ -183,6 +187,7 @@ impl FrameStream {
             writable,
             doorbell,
             platform,
+            hold: None,
         })
     }
 
@@ -232,7 +237,21 @@ impl FrameStream {
             writable,
             doorbell,
             platform,
+            hold: None,
         })
+    }
+
+    /// Ties the stream to the session's record of it, so that dropping it queues its close.
+    pub(crate) fn with_hold(mut self, hold: Hold) -> Self {
+        self.hold = Some(hold);
+        self
+    }
+
+    /// Ends the hold: the stream is being closed explicitly, which the session sends itself.
+    pub(crate) fn release_hold(&self) {
+        if let Some(hold) = &self.hold {
+            hold.release();
+        }
     }
 
     /// Whether each buffer is its own mapping, which is how a stream of dma-bufs arrives.
