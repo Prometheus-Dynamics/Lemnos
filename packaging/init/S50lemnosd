@@ -3,11 +3,11 @@
 # Installed as /etc/init.d/S50lemnosd (mode 0755). rcS runs it with "start" at boot.
 # Usage: S50lemnosd {start|stop|restart|status}
 #
-# The daemon runs as user and group lemnos (packaging/README.md, "Without systemd"). `start` runs as
-# root only to make the runtime directory and the log, then starts a supervisor as lemnos with
-# start-stop-daemon. The supervisor runs lemnosd and starts it again after RESTART_DELAY seconds when
-# it exits. `stop` is for shutdown: it sends TERM, then KILLs after STOP_TIMEOUT seconds.
-# The hardware watchdog is the escalation; this script does not feed it (lemnosd does).
+# lemnosd starts as root and drops to user and group lemnos itself, with `--user lemnos --group lemnos`
+# (packaging/README.md, "One privilege path"). The supervisor runs as root too, so there is one way in
+# on both init systems. It starts lemnosd again after RESTART_DELAY seconds when it exits. `stop` is for
+# shutdown: it sends TERM, then KILLs after STOP_TIMEOUT seconds. The hardware watchdog is the
+# escalation; this script does not feed it (lemnosd does).
 #
 # Plain POSIX sh: it must run under BusyBox ash.
 
@@ -15,7 +15,6 @@ SELF=/etc/init.d/S50lemnosd
 DAEMON=/usr/bin/lemnosd
 BOARD=/etc/lemnos/board.toml
 ENVFILE=/etc/lemnos/lemnosd.env
-RUN_USER=lemnos:lemnos
 STOP_TIMEOUT=10
 # Seconds between a daemon's exit and its next start. Constant, and well inside the hardware watchdog's
 # bound (15 s): a restart that takes longer than that reboots the board.
@@ -34,7 +33,7 @@ PIDFILE=$RUNDIR/supervisor.pid
 CHILDFILE=$RUNDIR/lemnosd.pid
 LOG=/var/log/lemnosd.log
 
-# The supervisor. Runs as lemnos, under start-stop-daemon. It keeps lemnosd running: a daemon that
+# The supervisor. Runs as root, under start-stop-daemon. It keeps lemnosd running: a daemon that
 # exits is started again after RESTART_DELAY seconds, a constant delay, never giving up. The
 # hardware watchdog reboots the board if lemnosd is not back in time, so this delay stays short.
 supervise() {
@@ -44,7 +43,7 @@ supervise() {
   trap on_term TERM INT
   echo $$ >"$PIDFILE"
   while [ "$stopping" = 0 ]; do
-    "$DAEMON" --board "$BOARD" &
+    "$DAEMON" --board "$BOARD" --user lemnos --group lemnos &
     child=$!
     echo "$child" >"$CHILDFILE"
     wait "$child"
@@ -94,12 +93,12 @@ start() {
     echo "lemnosd: needs start-stop-daemon (BusyBox with CONFIG_START_STOP_DAEMON)" >&2
     return 1
   fi
-  # The runtime directory is the socket's, owned by lemnos, as RuntimeDirectory= makes it.
+  # The supervisor runs as root, as the daemon's root phase needs: lemnosd makes the runtime
+  # directory's owner and mode itself, and drops to lemnos before it listens.
   mkdir -p "$RUNDIR" || return 1
-  chown lemnos:lemnos "$RUNDIR" && chmod 0750 "$RUNDIR" || return 1
-  touch "$LOG" && chown lemnos:lemnos "$LOG" || return 1
+  touch "$LOG" || return 1
   rm -f "$PIDFILE" "$CHILDFILE"
-  start-stop-daemon -S -b -c "$RUN_USER" -x "$SELF" -- supervise >>"$LOG" 2>&1 || {
+  start-stop-daemon -S -b -x "$SELF" -- supervise >>"$LOG" 2>&1 || {
     echo "lemnosd: could not start the supervisor" >&2
     return 1
   }

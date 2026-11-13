@@ -1,4 +1,4 @@
-# Device nodes lemnosd opens, given to group lemnos (mode 0660). The daemon runs as user lemnos
+# Device nodes lemnosd opens, given to group lemnos (mode 0660). The daemon drops to user lemnos after its root phase, and
 # (lemnos.conf) and reaches hardware only through these groups, never through root. Install as
 # /usr/lib/udev/rules.d/70-lemnos.rules. Each line is for one kind of node the daemon's own
 # backends open (backends/linux, backends/linux-hotplug, backends/usb, backends/v4l2).

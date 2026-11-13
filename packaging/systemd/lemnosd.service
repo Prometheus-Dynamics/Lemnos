@@ -1,9 +1,10 @@
 # The Lemnos daemon: owns the hardware, serves every program over one Unix socket.
 # Installed as /usr/lib/systemd/system/lemnosd.service. See packaging/README.md.
 #
-# Runs as the lemnos user (lemnos.conf), not root. Device nodes are reached through group
-# `lemnos` (packaging/udev/70-lemnos.rules). The one capability is CAP_SYS_RAWIO, for mapping a
-# block's registers through /dev/lemnos (kernel/lemnos_core.c checks it); nothing else.
+# Starts as root and drops to the lemnos user itself (`--user lemnos --group lemnos`): the root phase
+# runs the privileged start, then lemnosd keeps only CAP_SYS_RAWIO (service/lemnosd/src/privilege.rs).
+# The unit gives it no User= and no AmbientCapabilities=. Device nodes are reached through group
+# `lemnos` (packaging/udev/70-lemnos.rules).
 # Change this unit with a drop-in (/etc/systemd/system/lemnosd.service.d/*.conf), not an edited copy.
 # The hardware watchdog belongs to lemnosd alone (its hw-watchdog driver opens it: one opener). The
 # OS must not set RuntimeWatchdogSec= or ShutdownWatchdogSec= in /etc/systemd/system.conf, which
@@ -20,15 +21,14 @@ StartLimitIntervalSec=0
 # unit has no WatchdogSec=: the hardware watchdog is the escalation (see "Restart" below).
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/bin/lemnosd --board /etc/lemnos/board.toml
+ExecStart=/usr/bin/lemnosd --board /etc/lemnos/board.toml --user lemnos --group lemnos
 # Settings for the daemon's environment: socket, packages, package keys. Optional. A flag in
 # ExecStart (--board here) wins over its environment variable.
 EnvironmentFile=-/etc/lemnos/lemnosd.env
 
-User=lemnos
-Group=lemnos
-# /run/lemnos, owned by lemnos:lemnos. lemnosd makes the socket at start and removes it at stop.
-# Clients in group lemnos may open the directory and connect to the socket.
+# /run/lemnos: systemd makes it (root-owned, as the unit has no User=); the root phase hands it to
+# lemnos:lemnos before the drop. lemnosd makes the socket at start and removes it at stop. Clients in
+# group lemnos may open the directory and connect to the socket.
 RuntimeDirectory=lemnos
 RuntimeDirectoryMode=0750
 
@@ -44,8 +44,9 @@ Restart=always
 RestartSec=1s
 
 # Kept with the daemon: only the one capability, for the module's register mapping.
-CapabilityBoundingSet=CAP_SYS_RAWIO
-AmbientCapabilities=CAP_SYS_RAWIO
+# The root phase needs these five; the daemon drops every other one from its own bounding set after
+# the drop, so this list is only what starts it. CAP_SYS_RAWIO is the one it keeps.
+CapabilityBoundingSet=CAP_CHOWN CAP_SETGID CAP_SETUID CAP_SETPCAP CAP_SYS_RAWIO
 NoNewPrivileges=yes
 
 ProtectSystem=strict
@@ -68,7 +69,9 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 # AF_UNIX: the socket. AF_NETLINK: the kernel's uevent socket for hotplug. Nothing else.
 RestrictAddressFamilies=AF_UNIX AF_NETLINK
-SystemCallFilter=@system-service
+# The root phase's calls on top of @system-service: the id changes (@setuid), the owner of the
+# runtime directory (@chown), and prctl for the capability and no_new_privs settings.
+SystemCallFilter=@system-service @setuid @chown prctl
 SystemCallErrorNumber=EPERM
 
 [Install]

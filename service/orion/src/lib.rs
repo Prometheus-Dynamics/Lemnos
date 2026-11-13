@@ -16,6 +16,7 @@ pub mod backoff;
 pub mod calls;
 pub mod config;
 pub mod mirror;
+pub mod privilege;
 pub mod publish;
 pub mod source;
 pub mod values;

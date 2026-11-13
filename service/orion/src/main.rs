@@ -14,6 +14,22 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // As root, the drop to the identity the environment names, before any thread starts.
+    if let Some(run_as) = &config.run_as {
+        match lemnos_linux_sys::privilege::observe() {
+            Ok(now) if now.euid == 0 => {
+                if let Err(error) = lemnos_orion::privilege::drop_as(run_as) {
+                    log(&error);
+                    return ExitCode::FAILURE;
+                }
+            }
+            Ok(_) => log("not root: running as this user, without a drop"),
+            Err(error) => {
+                log(&format!("reading the credentials: {error}"));
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let shared = match Shared::new() {
         Ok(shared) => Arc::new(shared),
         Err(error) => {

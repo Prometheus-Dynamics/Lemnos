@@ -9,7 +9,7 @@
 
 use std::io::Write;
 use std::os::fd::AsFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lemnos_host::Options;
@@ -20,6 +20,7 @@ use lemnos_linux_sys::poll::{POLLIN, poll_one};
 use lemnos_linux_sys::signal::{SIGINT, SIGTERM, SignalFd};
 use lemnos_sim::SimBoard;
 use lemnosd::packages::{PackageConfig, add_packages};
+use lemnosd::privilege;
 use lemnosd::{Config, DEFAULT_BOARD, DEFAULT_SOCKET, Service};
 
 const USAGE: &str = "lemnosd [--sim] [--board PATH] [--socket PATH] [--check] \
@@ -77,6 +78,8 @@ fn main() -> ExitCode {
     let mut packages = set("LEMNOSD_PACKAGES").map(PathBuf::from);
     let mut package_keys = set("LEMNOSD_PACKAGE_KEYS").map(PathBuf::from);
     let mut package_mode = var("LEMNOSD_PACKAGE_MODE", "signed");
+    let mut user = set("LEMNOSD_USER").and_then(|value| value.into_string().ok());
+    let mut group = set("LEMNOSD_GROUP").and_then(|value| value.into_string().ok());
     let mut sim = false;
     let mut check = false;
     let mut args = std::env::args().skip(1);
@@ -87,6 +90,8 @@ fn main() -> ExitCode {
             "--packages" => packages = args.next().map(PathBuf::from),
             "--package-keys" => package_keys = args.next().map(PathBuf::from),
             "--package-mode" => package_mode = args.next().unwrap_or_default(),
+            "--user" => user = args.next(),
+            "--group" => group = args.next(),
             "--sim" => sim = true,
             "--check" => check = true,
             _ => return complain(USAGE),
@@ -111,6 +116,29 @@ fn main() -> ExitCode {
     };
     if check {
         return ExitCode::SUCCESS;
+    }
+    // The root phase: as root, the privileged start, then the drop to the requested user. Without
+    // root there is nothing to drop, and the daemon says which capabilities it lacks.
+    let drop = match privilege::request(user, group) {
+        Ok(drop) => drop,
+        Err(error) => return complain(&error),
+    };
+    match (drop, lemnos_linux_sys::privilege::observe()) {
+        (Some(request), Ok(now)) if now.euid == 0 => {
+            if let Err(error) = privilege::start(&request, &board_file, Path::new(&socket)) {
+                return complain(&error);
+            }
+        }
+        (None, Ok(now)) if now.euid == 0 => {
+            let _ =
+                complain("running as root; give --user lemnos (LEMNOSD_USER) to drop privileges");
+        }
+        (_, Ok(now)) => {
+            if let Ok(Some(line)) = privilege::lacks(&now) {
+                let _ = complain(&line);
+            }
+        }
+        (_, Err(error)) => return complain(&format!("reading the credentials: {error}")),
     }
     // What the board file calls its hardware, for the backend to say which of it comes and goes.
     // An `[[each]]` entry is told of by its pattern.

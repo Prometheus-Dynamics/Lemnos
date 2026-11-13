@@ -2,9 +2,9 @@
 # an Orion client; it reads and writes no files. Installed as /usr/lib/systemd/system/lemnos-orion.service.
 # Built from service/orion (binary lemnos-orion). See packaging/README.md.
 #
-# Runs as the lemnos user. It needs the lemnosd socket (group lemnos). It also needs the Orion node's
-# socket (group orion, from Orion's own packaging): an image that ships Orion adds
-# `SupplementaryGroups=orion` in a drop-in. Without it the unit starts and cannot reach the node.
+# Starts as root and drops to the identity in /etc/lemnos/lemnos-orion.env (LEMNOS_ORION_USER and
+# its groups): the same root phase as lemnosd (service/orion/src/privilege.rs), keeping no capability. The
+# groups are the daemon's (lemnos, for its socket) and the Orion node's; see that file.
 
 [Unit]
 Description=Lemnos bridge to Orion
@@ -15,15 +15,13 @@ StartLimitIntervalSec=0
 [Service]
 Type=exec
 ExecStart=/usr/bin/lemnos-orion
-EnvironmentFile=-/etc/lemnos/lemnosd.env
-User=lemnos
-Group=lemnos
+EnvironmentFile=-/etc/lemnos/lemnos-orion.env
 TimeoutStopSec=15s
 Restart=always
 RestartSec=1s
 
-CapabilityBoundingSet=
-AmbientCapabilities=
+# The root phase needs the three id-changing capabilities; the bridge drops them all after the drop.
+CapabilityBoundingSet=CAP_SETGID CAP_SETUID CAP_SETPCAP
 NoNewPrivileges=yes
 
 ProtectSystem=strict
@@ -45,7 +43,7 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 # AF_UNIX only: both sockets are local. Widen this only if a node is reached over TCP.
 RestrictAddressFamilies=AF_UNIX
-SystemCallFilter=@system-service
+SystemCallFilter=@system-service @setuid prctl
 SystemCallErrorNumber=EPERM
 
 [Install]

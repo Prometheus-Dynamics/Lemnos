@@ -1,60 +1,94 @@
 # Packaging
 
-How lemnosd runs on a board: a systemd unit, or a BusyBox init script, the user it runs as, the device-node rules it needs, and
-the settings file. This directory ships the files; an OS's image build installs them where the table
-says. Nothing here names a board or an OS. `scripts/check-packaging.sh` checks every file, and the gate
-runs it. It installs nothing, enables nothing, and starts nothing.
+How lemnosd and the Orion bridge run on a board: a systemd unit or a BusyBox init script, one privilege
+path for both, the device-node rules, and the settings files. This directory ships the files; an OS's
+image build installs them where the table says. Nothing here names a board or an OS.
+`scripts/check-packaging.sh` checks every file, and the gate runs it. It installs nothing, enables
+nothing, and starts nothing.
 
 | File | Installed as | What it is | Who installs it |
 |---|---|---|---|
-| `systemd/lemnosd.service` | `/usr/lib/systemd/system/lemnosd.service` | The daemon. | Always |
+| `systemd/lemnosd.service` | `/usr/lib/systemd/system/lemnosd.service` | The daemon. | Always, with systemd |
 | `systemd/lemnos-orion.service` | `/usr/lib/systemd/system/lemnos-orion.service` | The Orion bridge (`lemnos-orion`). | Only an image that ships `lemnos-orion` |
-| `systemd/lemnos.conf` | `/usr/lib/sysusers.d/lemnos.conf` | The `lemnos` user and group. | Always |
-| `systemd/lemnosd.env.example` | `/etc/lemnos/lemnosd.env` | Optional settings both units read. | Always, edited as needed |
+| `systemd/lemnos.conf` | `/usr/lib/sysusers.d/lemnos.conf` | The `lemnos` and `lemnos-orion` users. | With systemd, where sysusers runs |
+| `systemd/lemnosd.env.example` | `/etc/lemnos/lemnosd.env` | Optional settings for the daemon. | Always, edited as needed |
+| `systemd/lemnos-orion.env.example` | `/etc/lemnos/lemnos-orion.env` | The bridge's identity, node and socket settings. | Only an image that ships `lemnos-orion` |
 | `systemd/lemnos-module.conf` | `/usr/lib/modules-load.d/lemnos.conf` | Loads `lemnos.ko` at boot. **Optional.** | Only an image that ships `lemnos.ko` |
-| `udev/70-lemnos.rules` | `/usr/lib/udev/rules.d/70-lemnos.rules` | Gives group `lemnos` the device nodes lemnosd opens. | Always |
-| `init/S50lemnosd` | `/etc/init.d/S50lemnosd` (mode 0755) | BusyBox init script for the daemon, in place of the unit. | Only an image without systemd |
+| `udev/70-lemnos.rules` | `/usr/lib/udev/rules.d/70-lemnos.rules` | Gives group `lemnos` the device nodes lemnosd opens. | With systemd (or any udev) |
+| `init/S50lemnosd` | `/etc/init.d/S50lemnosd` (mode 0755) | BusyBox init script for the daemon, in place of its unit. | Only an image without systemd |
+| `init/S51lemnos-orion` | `/etc/init.d/S51lemnos-orion` (mode 0755) | BusyBox init script for the bridge. | Only an image without systemd that ships `lemnos-orion` |
 | `init/mdev.conf.fragment` | appended to `/etc/mdev.conf` | Device-node rules for mdev, the BusyBox counterpart of the udev rules. | Only an image without systemd |
 
-The OS supplies what is not here: the `lemnosd` and `lemnos-orion` binaries at `/usr/bin`, and the
-board file at `/etc/lemnos/board.toml` (see [docs/boards.md](../docs/boards.md)). The units refuse to
-start without the board file (`ConditionPathExists=`).
+The OS supplies what is not here: the `lemnosd` and `lemnos-orion` binaries at `/usr/bin`, the board file
+at `/etc/lemnos/board.toml` (see [docs/boards.md](../docs/boards.md)), and the Orion node's group name
+for `lemnos-orion`. The daemon's unit and script refuse to start without the board file.
 
-## The daemon
+## One privilege path
 
-`lemnosd.service` runs `lemnosd --board /etc/lemnos/board.toml` as user and group `lemnos`, with
-`Type=notify`, `Restart=always` with a constant `RestartSec=1s` and no start limit, and no `WatchdogSec=`:
-the hardware watchdog is its escalation (see "The hardware watchdog"). It is not root:
+Both init systems start `lemnosd` the same way, and it drops its own privileges. There is no file
+capability, no `setcap`, and no `User=` or `AmbientCapabilities=` in the units: a binary needs no xattr,
+so a read-only or verity-protected root filesystem works.
 
-- **Devices** come through group `lemnos`, from the udev rules. The daemon opens the nodes its drivers
-  name, one by one; the rules list each kind by subsystem. Vendor nodes that a board's drivers open by
-  name are added by the image, one line each (the rules file says how).
-- **One capability**: `CAP_SYS_RAWIO`, ambient and bounding. The kernel allows a register mapping of
-  `/dev/lemnos` only with it (`kernel/lemnos_core.c`, `lem_map_region`). A board with no mapped
-  register block does not use it; the OS may remove it in a drop-in, and the daemon then fails only
-  the drivers that map registers.
-- **The socket** is `/run/lemnos/lemnosd.sock`, mode 0660, group `lemnos`: a program that talks to the
-  daemon must be in group `lemnos`. `RuntimeDirectory=lemnos` makes `/run/lemnos` with mode 0750.
-- **Not root, so some sysfs writes fail.** The PWM driver writes `/sys/class/pwm` (export and
-  attributes), and the USB gadget driver writes configfs under `/sys/kernel/config`; both need root (or
-  an image's own rules). A board that uses them sets that in a drop-in: `User=root` with the
-  capabilities those writes need. The unit does not do this by default.
-- **Hotplug** reads the kernel's uevent socket (`AF_NETLINK`). No capability is needed for that.
-- **No state.** The daemon writes nothing to disk but its socket. It has no state directory, and no `tmpfiles.d` file
-  is needed.
+`lemnosd --board /etc/lemnos/board.toml --user lemnos --group lemnos` (the unit and the script pass
+these; `LEMNOSD_USER` and `LEMNOSD_GROUP` do the same from the environment, and a flag wins) runs as
+follows:
 
-The hardening (`ProtectSystem=strict`, `NoNewPrivileges`, `SystemCallFilter=@system-service`,
-`RestrictAddressFamilies=AF_UNIX AF_NETLINK`) is what the daemon's code needs and no more. The unit does
-not set `PrivateDevices=` (the nodes are its job) or `PrivateNetwork=` (the uevent socket must stay in the
-host network namespace).
+1. **The root phase**, while the process is root. The privileged start runs every step of
+   `STEPS` in `service/lemnosd/src/privilege.rs`, in order, with the board file. The first step is built
+   in: it makes the socket's directory, owned by `lemnos`, mode 0750. A step that fails stops the daemon.
+2. **The drop**, in `lemnos_linux_sys::privilege::drop_to`: the bounding set loses every capability the
+   daemon does not keep; inheritable and ambient are cleared; `PR_SET_KEEPCAPS` keeps the permitted set
+   across the change of ids; the supplementary groups, the group id and the user id are set; then the
+   effective and permitted sets are exactly the kept capabilities (`CAP_SYS_RAWIO` today), and
+   `no_new_privs` is set.
+3. **The verification**, `privilege::verify`: the real and effective ids, the groups, both capability
+   sets, the inheritable and ambient sets, the bounding set outside the kept capabilities, and
+   `no_new_privs` must be what was asked. Any difference is printed and the daemon refuses to run.
 
-## The Orion bridge
+Started as a user that is not root, the daemon runs as it is, with no drop, and says which capabilities it
+lacks (`CAP_SYS_RAWIO`: a block's registers mapped through `/dev/lemnos` are refused). Started as root with
+no `--user`, it runs as root and says so.
 
-`lemnos-orion.service` runs `/usr/bin/lemnos-orion` as the same user. It connects to lemnosd's socket and
-to the Orion node's socket, and writes no files. The node's socket belongs to Orion's group `orion`; an
-image that ships Orion adds `SupplementaryGroups=orion` in a drop-in. The unit is hardened to
-`AF_UNIX` only, with no capabilities and no devices. Widen the address families only if a node is reached
-over TCP.
+**The privileged-start hook, for board-file-driven setup.** It is `STEPS` in
+`service/lemnosd/src/privilege.rs`, a list of `Step { name, run }`. `run` is `fn(&Context) -> io::Result<()>`,
+and the `Context` holds `board: &BoardFile`, `socket: &Path`, `uid` and `gid` (the ids the daemon will run as,
+so a step can `chown` what it creates). A step runs as root, before the drop, and a failure is an error
+that names the step. The USB gadget's configfs and FunctionFS setup (R1) is planned here, as a new entry after the
+built-in one. Do not add an `ExecStartPre=+` for it: that would be a second privileged path.
+
+The bridge uses the same drop, from its environment: `LEMNOS_ORION_USER`, `LEMNOS_ORION_GROUP` and
+`LEMNOS_ORION_GROUPS` (`service/orion/src/privilege.rs`). It keeps no capability.
+
+## The daemon under systemd
+
+`lemnosd.service` runs `lemnosd --board /etc/lemnos/board.toml --user lemnos --group lemnos` as root
+until the drop, with `Type=notify`, `Restart=always` and a constant `RestartSec=1s`. It has no
+`StartLimit`, and no `WatchdogSec=` (see "The hardware watchdog").
+
+The hardening that still applies to a daemon that starts as root: `NoNewPrivileges`, `ProtectSystem=strict`
+(the root phase writes only its runtime directory, which the unit makes), `ProtectHome`, `PrivateTmp`,
+`ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`,
+`ProtectHostname`, `ProtectClock`, `ProtectProc=invisible`, `LockPersonality`, `MemoryDenyWriteExecute`,
+`RestrictRealtime`, `RestrictSUIDSGID`, `RestrictNamespaces`, `SystemCallArchitectures`, and
+`RestrictAddressFamilies=AF_UNIX AF_NETLINK`. Two are changed on purpose:
+
+- `CapabilityBoundingSet=` is the five capabilities the root phase needs (`CAP_CHOWN`, `CAP_SETGID`,
+  `CAP_SETUID`, `CAP_SETPCAP`, `CAP_SYS_RAWIO`). The daemon removes all but `CAP_SYS_RAWIO` itself after the
+  drop, so this list only bounds the root phase. A root-phase step that needs another capability adds it
+  here.
+- `SystemCallFilter=@system-service @setuid @chown prctl`: `@system-service` lacks the id changes, the
+  owner change and `prctl`, which the root phase uses. `capget` and `capset` are already in it.
+
+What no longer applies, and why:
+
+- `User=`, `Group=` and `AmbientCapabilities=` are gone. The daemon's own drop replaces them, and it clears
+  the ambient set itself. The daemon keeps `CAP_SYS_RAWIO` by its own `capset`.
+- The owner of `/run/lemnos`. systemd still makes the directory (`RuntimeDirectory=`), root-owned, and the
+  root phase gives it to `lemnos` before the drop.
+
+`systemd-analyze security --offline=true` now rates `lemnosd.service` 2.5, up from 1.8 before this change.
+Systemd scores `User=` and `AmbientCapabilities=` as hardening, and the unit no longer has them. The gate's
+limit is still 2.5, so the unit is at the limit, not over it.
 
 ## The hardware watchdog
 
@@ -75,24 +109,28 @@ Three rules follow, and the OS must keep them:
   init systems. `Type=notify` stays, for readiness only.
 
 The `lemnos` group can open the watchdog node (`SUBSYSTEM=="watchdog"` in the udev rules, `^watchdog`
-in the mdev fragment) so the daemon can open it as its own user. Nothing else should.
+in the mdev fragment), so the daemon can open it as its own user. Nothing else should.
 
 ## Without systemd (BusyBox init)
 
-A small board (64 to 128 MB) runs BusyBox init instead. The same daemon, the same user, socket, device
-nodes and watchdog escalation, with `packaging/init/` in place of the units. The OS installs the files
-above and does these four things, which the units would otherwise do.
+A small board (64 to 128 MB) runs BusyBox init instead, with the same daemon, the same privilege path,
+the same socket, device nodes and watchdog escalation, and `packaging/init/` in place of the units. The
+OS installs the files above and does these things, which the units would otherwise do.
 
-**The user and group** are made by the image builder, not by sysusers. Add these lines (uid and gid 999,
-or any free system id, the same in both files):
+**The users and groups** are made by the image builder, not by sysusers. Add these lines (ids are any
+free system ids, the same in both files; the example uses 999 for `lemnos` and 998 for `lemnos-orion`):
 
 ```text
 /etc/group:   lemnos:x:999:
+/etc/group:   lemnos-orion:x:998:
 /etc/passwd:  lemnos:x:999:999:Lemnos daemon:/nonexistent:/bin/false
+/etc/passwd:  lemnos-orion:x:998:998:Lemnos bridge to Orion:/nonexistent:/bin/false
 /etc/shadow:  lemnos:!:0:0:99999:7:::
+/etc/shadow:  lemnos-orion:!:0:0:99999:7:::
 ```
 
-Nothing keys on the id, as with the unit. The OS adds program users to group `lemnos` as usual.
+The daemon looks the names up when it starts, so the lines must be in place before first boot. Nothing keys
+on the ids. The OS adds program users to group `lemnos` as usual.
 
 **The device nodes** are given to group `lemnos` by mdev, not udev. Append `init/mdev.conf.fragment` to
 `/etc/mdev.conf`. Each line is the same node as a udev rule: `^lemnos$` is `/dev/lemnos`, `^dma_heap/.*$`
@@ -101,50 +139,55 @@ the dma heaps, `^i2c-[0-9]+$` the I2C buses, `^spidev...$` SPI, `^gpiochip[0-9]+
 `^watchdog[0-9]*$` for the watchdog, and `^bus/usb/.../...$` for usbfs. mdev runs at boot (`mdev -s`) and
 on hotplug only if the image sets `/proc/sys/kernel/hotplug` to `/sbin/mdev`.
 
-**The one capability** is granted to the binary, not to a process: `setcap cap_sys_rawio=ep
-/usr/bin/lemnosd`. The init script starts the daemon as `lemnos` through `start-stop-daemon`, so no
-process runs as root after boot, and no code in the script drops privileges. File capabilities work
-for a non-root process on exec, so the daemon gets `CAP_SYS_RAWIO` where it is needed: the register
-mapping. The rootfs must keep extended attributes (ext4, f2fs and squashfs with xattrs do). Where it
-does not, the daemon runs without the capability and the drivers that map registers report
-`PermissionDenied`; nothing else changes. The other choice, running the daemon as root and dropping
-privileges in the script, was rejected: it adds a root process and privilege-drop code that the file
-capability does without.
+**The script** (`/etc/init.d/S50lemnosd`) runs with `start`, `status`, `restart` and `stop`. `start` creates
+`/run/lemnos` for the pid files, and starts a supervisor as root through `start-stop-daemon`, which it needs. The supervisor runs `lemnosd --board ... --user lemnos --group lemnos`, so the daemon
+does its own root phase and drop. A daemon that exits is started again after 1 s, a constant delay, and
+never given up on. `stop` is for shutdown: it sends TERM, waits up to 10 s, then KILLs. On a live board it
+must not be used, since the hardware watchdog would reboot the board. The script does not feed the
+watchdog, and does not depend on systemd-notify: lemnosd sends nothing when `NOTIFY_SOCKET` and
+`WATCHDOG_USEC` are absent (`service/lemnosd/src/notify.rs`).
 
-**The runtime directory and log.** The script makes `/run/lemnos` (mode 0750, owner `lemnos`) and
-`/var/log/lemnosd.log` at start. Nothing needs a tmpfiles file.
+**The bridge's script** (`/etc/init.d/S51lemnos-orion`) runs after lemnosd. `start` waits up to 30 s for
+lemnosd's socket, and does not start the bridge without it (it says so and returns 1). The supervisor
+then runs `lemnos-orion` as root, which drops to `LEMNOS_ORION_USER` and its groups from
+`/etc/lemnos/lemnos-orion.env`. The restart and the bounded stop are the same as the daemon's.
 
-The script (`/etc/init.d/S50lemnosd`) runs with `start`, `status`, `restart` and `stop`. It needs
-`start-stop-daemon` (BusyBox with `CONFIG_START_STOP_DAEMON`). A daemon that exits is started again
-after 1 s, a constant delay, and never given up on. `stop` is for shutdown: it sends TERM, waits up to
-10 s, then KILLs. On a live board it must not be used, since the hardware watchdog would then reboot
-the board. The script does not feed the watchdog. It does not depend on systemd-notify: lemnosd sends
-nothing when `NOTIFY_SOCKET` and `WATCHDOG_USEC` are absent (`service/lemnosd/src/notify.rs`).
+**What is lost without systemd** is the unit's hardening and bookkeeping, and the privilege path is the
+same on both:
 
-**What is lost without systemd** is the hardening, and the unit's bookkeeping:
-
-- Each hardening option of the unit: `ProtectSystem=strict` (read-only filesystem view), `ProtectHome`,
-  `PrivateTmp`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`,
-  `ProtectControlGroups`, `ProtectHostname`, `ProtectClock`, `ProtectProc=invisible`, `LockPersonality`,
-  `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictSUIDSGID`, `RestrictNamespaces`,
-  `SystemCallArchitectures`, `RestrictAddressFamilies` (the daemon is unconfined in its address
-  families), `SystemCallFilter`, `SystemCallErrorNumber`, and `NoNewPrivileges`. Only `CAP_SYS_RAWIO` is
-  granted, but the capability bounding set is not narrowed to it as the unit does.
-- `sysusers` (the user is made by the image's passwd lines), `tmpfiles` (none needed), and
-  `RuntimeDirectory=` (the script makes the directory and removes the socket at stop).
-- Logging to the journal: the daemon's error output goes to `/var/log/lemnosd.log`.
+- Every hardening option listed under "The daemon under systemd": `ProtectSystem=strict`, `ProtectHome`,
+  `PrivateTmp`, the `Protect*` set, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictRealtime`,
+  `RestrictSUIDSGID`, `RestrictNamespaces`, `SystemCallArchitectures`, `RestrictAddressFamilies`,
+  `SystemCallFilter` and `SystemCallErrorNumber`, and `NoNewPrivileges` from systemd (the daemon sets
+  `no_new_privs` itself). The bounding set is the daemon's own, not the unit's.
+- `sysusers` (the users are made by the passwd lines above), `tmpfiles` (none needed), and `RuntimeDirectory=`
+  (the daemon makes its directory in the root phase, and the script removes the socket at stop).
+- Logging to the journal: the daemon's and the bridge's error output go to `/var/log/lemnosd.log` and
+  `/var/log/lemnos-orion.log`.
 - `ConditionPathExists=` for the board file: `start` checks it instead.
 
-Nothing else changes: the watchdog escalation, the restart and the device groups are the same on both.
-The sanity checks in `scripts/check-packaging.sh` run `sh -n` on the script, `busybox sh -n` when
-BusyBox is installed, and `shellcheck` when it is installed. None of them runs the script. The init
-script and the mdev fragment are untested on board.
+Nothing else changes: the privilege path, the watchdog escalation, the restart and the device groups are
+the same on both. The sanity checks in `scripts/check-packaging.sh` run `sh -n` on every init script,
+`busybox sh -n` when BusyBox is installed, and `shellcheck` when it is installed. None of them runs a
+script. The init scripts and the mdev fragment are untested on board.
+
+## The Orion bridge
+
+`lemnos-orion` is a client of lemnosd and of the Orion node. It starts as root and drops to
+`LEMNOS_ORION_USER` (`lemnos-orion`), with the supplementary groups `LEMNOS_ORION_GROUPS` (`lemnos` for
+lemnosd's socket and the slot's `.incoming` directory, and the Orion node's group, which the image names).
+Its settings are in `/etc/lemnos/lemnos-orion.env`, which both `lemnos-orion.service` and
+`S51lemnos-orion` read. The bridge's code does not open `.incoming` itself: the group is granted for the
+installs the slot driver reads there. The bridge reads and writes no files of its own, and its unit is
+hardened to `AF_UNIX` only, with no capability. Widen the address families only if the node is reached
+over TCP.
 
 ## Settings
 
-`/etc/lemnos/lemnosd.env` is read by both units (`EnvironmentFile=-`, so it may be absent). It takes the
-`LEMNOSD_*` variables of [docs/daemon.md](../docs/daemon.md) and `ORION_NODE_ID`. A flag in the unit's
-`ExecStart` wins over its variable, so `LEMNOSD_BOARD` does nothing while `ExecStart` names `--board`.
+`/etc/lemnos/lemnosd.env` is read by the daemon's unit and script (`EnvironmentFile=-`, so it may be
+absent). It takes the `LEMNOSD_*` variables of [docs/daemon.md](../docs/daemon.md), including
+`LEMNOSD_USER` and `LEMNOSD_GROUP`. A flag in the unit's `ExecStart` wins over its variable, so
+`LEMNOSD_BOARD` does nothing while `ExecStart` names `--board`.
 
 ## Kernel module (optional)
 
@@ -160,6 +203,8 @@ gate fails above an exposure of 2.5.
 
 ## Not verified here
 
-This PC installs nothing, and no board runs these units yet. The checks above read the files; they do
-not start a daemon. Untested on board: the units, rules and sysusers file, end to end on a board image,
-including `NoNewPrivileges` with the driver packages and `MemoryDenyWriteExecute` with them loaded.
+This PC installs nothing, and no board runs these units or scripts yet. The checks above read the files;
+they do not start a daemon, except for the user-namespace test described in
+[testing/board-runs/L3.md](../testing/board-runs/L3.md). Untested on board: the units, rules, scripts and
+sysusers file end to end on a board image, the privilege path as root in the init namespace, and the
+`MemoryDenyWriteExecute` setting with the driver packages loaded.

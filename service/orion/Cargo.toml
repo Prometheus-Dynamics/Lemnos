@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 lemnos-client = { path = "../../engine/client" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }
 lemnos-wire = { path = "../../engine/wire" }
 # Orion is not published: its one client crate, pinned to a revision of its `next` branch.
 orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133", default-features = false, features = ["provider"] }

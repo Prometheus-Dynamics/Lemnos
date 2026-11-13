@@ -1,0 +1,164 @@
+#!/bin/sh
+# /etc/init.d/S51lemnos-orion: runs the Orion bridge (lemnos-orion) under BusyBox init, after lemnosd.
+# Installed as /etc/init.d/S51lemnos-orion (mode 0755). rcS runs it with "start" at boot.
+# Usage: S51lemnos-orion {start|stop|restart|status}
+#
+# The bridge starts as root and drops to the identity in /etc/lemnos/lemnos-orion.env itself
+# (LEMNOS_ORION_USER and its groups), the same root phase as lemnosd (packaging/README.md, "One
+# privilege path"). `start` waits up to SOCKET_WAIT seconds for lemnosd's socket and does not start the
+# bridge without it. The supervisor restarts the bridge after RESTART_DELAY seconds when it exits, never
+# giving up. `stop` is for shutdown: TERM, then KILL after STOP_TIMEOUT seconds.
+#
+# Plain POSIX sh: it must run under BusyBox ash.
+
+SELF=/etc/init.d/S51lemnos-orion
+BRIDGE=/usr/bin/lemnos-orion
+ENVFILE=/etc/lemnos/lemnos-orion.env
+STOP_TIMEOUT=10
+# Seconds between the bridge's exit and its next start. Constant.
+RESTART_DELAY=1
+# Seconds `start` waits for lemnosd's socket before it gives up.
+SOCKET_WAIT=30
+
+# The settings file, as systemd's EnvironmentFile= reads it. Every line is optional.
+if [ -r "$ENVFILE" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "$ENVFILE"
+  set +a
+fi
+SOCKET=${LEMNOSD_SOCKET:-/run/lemnos/lemnosd.sock}
+PIDDIR=/run/lemnos-orion
+PIDFILE=$PIDDIR/supervisor.pid
+CHILDFILE=$PIDDIR/bridge.pid
+LOG=/var/log/lemnos-orion.log
+
+# The supervisor. Runs as root, under start-stop-daemon.
+supervise() {
+  stopping=0
+  child=
+  killer=
+  trap on_term TERM INT
+  echo $$ >"$PIDFILE"
+  while [ "$stopping" = 0 ]; do
+    "$BRIDGE" &
+    child=$!
+    echo "$child" >"$CHILDFILE"
+    wait "$child"
+    rc=$?
+    # wait returns early when TERM arrives: the bridge may still be running until it exits.
+    while kill -0 "$child" 2>/dev/null; do
+      sleep 1
+    done
+    child=
+    rm -f "$CHILDFILE"
+    [ "$stopping" = 0 ] || break
+    echo "$(date): lemnos-orion exited with status $rc; starting again in ${RESTART_DELAY}s"
+    sleep "$RESTART_DELAY" &
+    wait $!
+  done
+  if [ -n "$killer" ]; then kill "$killer" 2>/dev/null; fi
+  rm -f "$PIDFILE" "$CHILDFILE"
+}
+
+on_term() {
+  stopping=1
+  if [ -n "$child" ]; then
+    kill -TERM "$child" 2>/dev/null
+    # Bounded: if the bridge has not gone after STOP_TIMEOUT seconds, it is killed.
+    ( sleep "$STOP_TIMEOUT"; kill -KILL "$child" 2>/dev/null ) &
+    killer=$!
+  fi
+}
+
+# The supervisor's pid, if it is running.
+running_pid() {
+  pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  echo "$pid"
+}
+
+start() {
+  if running_pid >/dev/null; then
+    echo "lemnos-orion already running"
+    return 0
+  fi
+  if [ ! -x "$BRIDGE" ]; then
+    echo "lemnos-orion: no program at $BRIDGE; not starting" >&2
+    return 1
+  fi
+  if ! command -v start-stop-daemon >/dev/null 2>&1; then
+    echo "lemnos-orion: needs start-stop-daemon (BusyBox with CONFIG_START_STOP_DAEMON)" >&2
+    return 1
+  fi
+  # Start after lemnosd: its socket must exist. Wait with a bound, then say so and do not start.
+  i=0
+  while [ ! -S "$SOCKET" ] && [ "$i" -lt "$SOCKET_WAIT" ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ ! -S "$SOCKET" ]; then
+    echo "lemnos-orion: lemnosd's socket $SOCKET is not up after ${SOCKET_WAIT}s; not starting" >&2
+    return 1
+  fi
+  mkdir -p "$PIDDIR" || return 1
+  touch "$LOG" || return 1
+  rm -f "$PIDFILE" "$CHILDFILE"
+  start-stop-daemon -S -b -x "$SELF" -- supervise >>"$LOG" 2>&1 || {
+    echo "lemnos-orion: could not start the supervisor" >&2
+    return 1
+  }
+  echo "lemnos-orion started (log $LOG)"
+  return 0
+}
+
+stop() {
+  pid=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$PIDFILE"
+    child=$(cat "$CHILDFILE" 2>/dev/null)
+    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+      kill -KILL "$child" 2>/dev/null
+    fi
+    rm -f "$CHILDFILE"
+    echo "lemnos-orion not running"
+    return 0
+  fi
+  kill -TERM "$pid" 2>/dev/null
+  i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$i" -ge $((STOP_TIMEOUT + 5)) ]; then
+      kill -KILL "$pid" 2>/dev/null
+      child=$(cat "$CHILDFILE" 2>/dev/null)
+      [ -n "$child" ] && kill -KILL "$child" 2>/dev/null
+      break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  rm -f "$PIDFILE" "$CHILDFILE"
+  echo "lemnos-orion stopped"
+  return 0
+}
+
+status() {
+  pid=$(running_pid) || {
+    echo "lemnos-orion is not running"
+    return 3
+  }
+  child=$(cat "$CHILDFILE" 2>/dev/null)
+  echo "lemnos-orion is running (supervisor $pid, bridge ${child:-none})"
+  return 0
+}
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop && start ;;
+  status) status ;;
+  supervise) supervise ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}" >&2
+    exit 1
+    ;;
+esac

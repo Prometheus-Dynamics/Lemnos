@@ -1508,6 +1508,7 @@ dependencies = [
  "lemnos-driver-thermal-zone",
  "lemnos-fake-devices",
  "lemnos-hal",
+ "lemnos-identity",
  "lemnos-measure",
  "lemnos-sim",
  "lemnos-wire",
@@ -1526,6 +1527,15 @@ dependencies = [
  "lemnos-driver-orientation",
  "lemnos-mcu",
  "lemnos-measure",
+]
+
+[[package]]
+name = "lemnos-identity"
+version = "2.0.1-dev"
+dependencies = [
+ "serde",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -1617,6 +1627,7 @@ dependencies = [
  "lemnos-core",
  "lemnos-fake-devices",
  "lemnos-host",
+ "lemnos-linux-sys",
  "lemnos-sim",
  "lemnos-wire",
  "lemnosd",
