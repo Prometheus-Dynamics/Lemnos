@@ -337,7 +337,15 @@ impl Client {
                 id,
                 bytes: &reply[..n],
             }),
-            Err(status) => return self.refuse(id, status, "the call failed"),
+            Err(status) => {
+                let text = call_refusal(
+                    self.core.host.manifest(device).as_ref(),
+                    contract,
+                    method.method,
+                    status,
+                );
+                return self.refuse(id, status, &text);
+            }
         }
         true
     }
@@ -561,5 +569,31 @@ impl Client {
         if !self.conn.gone.swap(true, Ordering::AcqRel) {
             self.core.host.caller_gone(self.conn.id);
         }
+    }
+}
+
+/// The text a refused call carries. A method the device's contract does not have, or one its
+/// driver does not support, is named by number and, where the contract names it, by name.
+fn call_refusal(
+    manifest: Option<&lemnos_core::Manifest>,
+    contract: u8,
+    method: u16,
+    status: Status,
+) -> String {
+    let named = manifest.and_then(|manifest| {
+        let info = manifest.provides.get(usize::from(contract))?;
+        Some(match info.methods.iter().find(|m| m.id == method) {
+            Some(found) => format!(
+                "the device's driver does not support method {} `{}` of {}",
+                found.id,
+                found.name,
+                info.tag.as_str()
+            ),
+            None => format!("contract {} has no method {method}", info.tag.as_str()),
+        })
+    });
+    match (status, named) {
+        (Status::NOT_SUPPORTED, Some(text)) => text,
+        _ => "the call failed".to_string(),
     }
 }

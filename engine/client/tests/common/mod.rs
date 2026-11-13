@@ -253,11 +253,17 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             &mut out,
                         );
                     } else {
+                        // The contract's index in what Describe answers, as the service has it.
+                        let provided = control.provides.lock().unwrap().unwrap_or(&[]);
+                        let contract = provided
+                            .iter()
+                            .position(|c| c.tag.as_str() == tag)
+                            .unwrap_or(0);
                         send(
                             Frame::Opened {
                                 id,
                                 device,
-                                contract: 0,
+                                contract: contract as u8,
                             },
                             &mut out,
                         );
@@ -276,6 +282,7 @@ fn serve(mut stream: UnixStream, control: Arc<Control>) {
                             has_out_buffer: false,
                             job: false,
                             reading: None,
+                            added: false,
                         }],
                     };
                     let provided: &'static [lemnos_core::ContractInfo] =

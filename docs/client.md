@@ -123,11 +123,56 @@ is refused with `Error::PartMismatch`, which names the part. Both come in every 
 Lemnos version string is not: a client and a service from different revisions interoperate when
 the interface they use is the same. Nothing else is checked for a refused connection.
 
-A typed client (`Client::open::<C>`) also checks the contract's encoding hash, once, when it opens:
-a device whose argument or result types differ from the client's is refused with
-`Error::ContractMismatch`, and nothing is called on it. That read of the description is the only
-extra cost of the check. Calls on the open handle, and every other path, pay nothing for it: the
-steady-state calls allocate nothing, which `engine/client/tests/alloc.rs` measures.
+Every typed open runs the bind check once, when it opens: `Client::open::<C>` on the blocking
+client, `Session::open_typed::<C>` on a session, and `AsyncClient::open_typed::<C>` on the async
+client. The rule, and the refusal texts, are under [The typed bind](#the-typed-bind). That read of
+the description is the only extra cost of the check. Calls on the open handle, and every other path,
+pay nothing for it: the steady-state calls allocate nothing, which `engine/client/tests/alloc.rs`
+measures.
+
+### The typed bind
+
+A typed client was built with a contract `C`: its tag, its base hash and each of its methods, base
+and added. Before it calls anything, the bind check compares them with the device's description, in
+this order:
+
+1. the device provides the contract's tag (else `ContractMissing`: the device does not provide it);
+2. the device's base hash for the contract equals the client's base hash (else
+   `ContractMismatch`, which names the contract and both hashes: a base method is laid out
+   differently);
+3. for every method the client has, the device has a method with the same number and name and the
+   same method hash (else the refusal below); and the device has every added field the client's
+   method uses, by the field's hash (else the field refusal below).
+
+Extra methods and fields on the device are ignored, so a new driver serves an old client. The
+refusal texts, for contract `camera.sensor/1`, method 12 `identity`:
+
+- ``contract camera.sensor/1: this client needs method 12 `identity`; the device's driver does not provide it``
+  (`MethodMissing`, `NOT_SUPPORTED`);
+- ``contract camera.sensor/1: this client needs method 12 `identity`; the device's driver has another shape``
+  (`MethodShape`, `VERSION_MISMATCH`);
+- ``contract camera.sensor/1: this client needs field `embedded_data` of method 1 `info`; the device's driver does not provide it``
+  (`FieldMissing`, `NOT_SUPPORTED`);
+- ``contract camera.sensor/1: a base method is laid out differently (the device's base hash ..., this client's ...)``
+  (`ContractMismatch`, `VERSION_MISMATCH`).
+
+Nothing is called on a contract the check refuses. The wire carries no per-contract additions level:
+the per-method check above gives the same guarantee, and says which method is missing.
+
+### Typed opens and the C API
+
+`lemnos_contract_hash` writes the base hash of the contract an open handle is for, as the device's
+description has it, and its additions level (how many of its methods are additions). A C caller
+compares the hash with the one its header was built with. The C API has no typed open: `lemnos_open`
+takes a tag and checks nothing, so a C caller that needs the bind check compares the hash itself.
+
+### Untyped tools
+
+`lemnos-ctl` and the Orion bridge are untyped by design. They learn each device from its description
+and call by method number and bytes, so they do not run the bind check and do not refuse a contract
+at open: they are built without the contract traits and need not be built from the daemon's Lemnos
+revision. A method the device's driver does not provide is refused by name, as `NOT_SUPPORTED`, the
+same as for any caller.
 
 The connection looks after itself. If the daemon restarts, the client reconnects, subscribes again
 and finds its handles again by name and tag. A call made while the daemon is away fails with
@@ -151,6 +196,7 @@ function, struct and code is there with its rule.
 | `lemnos_client_open`, `lemnos_client_close` | Connect and disconnect |
 | `lemnos_device_count`, `lemnos_device_info`, `lemnos_device_text` | The device list |
 | `lemnos_open` | Open a contract on a device, by tag |
+| `lemnos_contract_hash` | The base hash and additions level of an opened contract, as the device describes it |
 | `lemnos_call` | Call a method by number, with its arguments and reply as bytes |
 | `lemnos_job_start`, `lemnos_job_cancel`, `lemnos_job_next` | Long jobs: start one, cancel it, and read its progress and its end |
 | `lemnos_subscribe`, `lemnos_unsubscribe`, `lemnos_next_value` | Values at a period |

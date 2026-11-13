@@ -633,9 +633,11 @@ fn shape_in(shape: &PackageShape, depth: u32) -> core::result::Result<Shape, &'s
                 .as_slice()
                 .iter()
                 .map(|field| {
+                    // The package ABI carries no additions yet (T1e): its fields are base.
                     Ok(Field {
                         name: field.name.as_str(),
                         shape: shape_in(&field.shape, depth - 1)?,
+                        added: false,
                     })
                 })
                 .collect();
@@ -710,6 +712,7 @@ pub fn manifest_in(
                     shape: shape_in(&param.shape, MAX_SHAPE_DEPTH)?,
                 });
             }
+            // The package ABI carries no additions yet (T1e): its methods are base.
             methods.push(MethodInfo {
                 id: method.id,
                 name: method.name.as_str(),
@@ -726,6 +729,7 @@ pub fn manifest_in(
                             && e.flags & EXTRA_HAS_READING != 0
                     })
                     .and_then(|e| Reading::from_code(e.reading)),
+                added: false,
             });
         }
         provides.push(ContractInfo {

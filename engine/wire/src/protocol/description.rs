@@ -81,6 +81,14 @@ pub struct OwnedMethod {
     pub has_out_buffer: bool,
     /// The method starts a long job (CallJob), and isn't called.
     pub job: bool,
+    /// The method's hash ([`lemnos_core::layout::method_hash`]): its base shape, without its added
+    /// fields. 0 from a device from before method hashes.
+    pub hash: u64,
+    /// The method is an addition after its contract's base shape.
+    pub added: bool,
+    /// The hash of each added field its parameters and result carry
+    /// ([`lemnos_core::layout::added_fields`]).
+    pub added_fields: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,10 +97,17 @@ pub struct OwnedContract {
     /// What the contract is for, such as `sensor`. `other` when it names none; empty from a host
     /// that sends no kinds.
     pub kind: String,
-    /// The contract's encoding hash ([`lemnos_core::layout::contract_hash`]): equal on both sides
-    /// when every argument and result type is laid out the same.
+    /// The contract's base hash ([`lemnos_core::layout::contract_hash`]): equal on both sides when
+    /// the base methods are laid out the same. Additions are not in it.
     pub hash: u64,
     pub methods: Vec<OwnedMethod>,
+}
+
+impl OwnedContract {
+    /// The contract's additions level: how many of its methods are added.
+    pub fn level(&self) -> usize {
+        self.methods.iter().filter(|method| method.added).count()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,13 +176,16 @@ struct DescContract<'a> {
     methods: u16,
 }
 
-/// A method: its number, name, how many parameters follow, and whether it fills a buffer.
+/// A method: its number, name, how many parameters follow, and whether it fills a buffer. Its
+/// hash and whether it is an addition are appended: a host from before them reads 0 and false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 struct DescMethod<'a> {
     id: u16,
     name: &'a str,
     params: u16,
     has_out_buffer: bool,
+    hash: u64,
+    added: bool,
 }
 
 /// A parameter's name. Its shape follows, written with [`encode_shape`].
@@ -226,6 +244,14 @@ struct DescItemExtra<'a> {
     group: Option<&'a str>,
 }
 
+/// One added field of a method, appended after the trailer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+struct DescAdded {
+    contract: u8,
+    method: u16,
+    hash: u64,
+}
+
 /// Folds the description's framing into `hash`: its record names and shapes, its shape codes and
 /// its item kinds. It is part of the core hash, so a change to any of them moves it.
 pub(crate) const fn fold_framing(mut hash: u64) -> u64 {
@@ -241,6 +267,8 @@ pub(crate) const fn fold_framing(mut hash: u64) -> u64 {
     hash = lemnos_core::layout::shape(hash, &<DescItem<'static> as Encode>::SHAPE);
     hash = hash::text(hash, "job");
     hash = lemnos_core::layout::shape(hash, &<DescJob as Encode>::SHAPE);
+    hash = hash::text(hash, "added");
+    hash = lemnos_core::layout::shape(hash, &<DescAdded as Encode>::SHAPE);
     hash
 }
 
@@ -382,6 +410,8 @@ fn encode_contract(contract: &ContractInfo, out: &mut Writer<'_>) -> Result<()> 
             name: method.name,
             params: method.params.len() as u16,
             has_out_buffer: method.has_out_buffer,
+            hash: lemnos_core::layout::method_hash(method),
+            added: method.added,
         }
         .encode(out)?;
         for param in method.params {
@@ -450,6 +480,31 @@ pub fn encode_description(
         }
     }
     encode_trailer(manifest, description, identity, &mut out)?;
+    // Appended after the trailer: the hash of every added field of every method. A host from before
+    // it stops at the trailer.
+    let mut added = 0usize;
+    for contract in manifest.provides {
+        for method in contract.methods {
+            lemnos_core::layout::added_fields(method, &mut |_, _| added += 1);
+        }
+    }
+    (added as u16).encode(&mut out)?;
+    for (index, contract) in manifest.provides.iter().enumerate() {
+        for method in contract.methods {
+            let mut result = Ok(());
+            lemnos_core::layout::added_fields(method, &mut |_, hash| {
+                if result.is_ok() {
+                    result = DescAdded {
+                        contract: index as u8,
+                        method: method.id,
+                        hash,
+                    }
+                    .encode(&mut out);
+                }
+            });
+            result?;
+        }
+    }
     Ok(out.len())
 }
 
@@ -514,6 +569,9 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
                 returns,
                 has_out_buffer: method.has_out_buffer,
                 job: false,
+                hash: method.hash,
+                added: method.added,
+                added_fields: Vec::new(),
             });
         }
         contracts.push(OwnedContract {
@@ -590,6 +648,18 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
                 item.warn_high = extra.warn_high;
                 item.group = extra.group.map(str::to_string);
             }
+        }
+    }
+    // A host from before added fields ends here.
+    if from.remaining() > 0 {
+        for _ in 0..u16::decode(from)? {
+            let added = DescAdded::decode(from)?;
+            let found = out
+                .contracts
+                .get_mut(usize::from(added.contract))
+                .and_then(|c| c.methods.iter_mut().find(|m| m.id == added.method))
+                .ok_or(Status::INVALID_ARGUMENT)?;
+            found.added_fields.push(added.hash);
         }
     }
     Ok(out)

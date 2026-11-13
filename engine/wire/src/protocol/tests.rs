@@ -550,10 +550,12 @@ mod description {
                 returns: Shape::Record(&[Field {
                     name: "x",
                     shape: Shape::Array(&Shape::F32, 2),
+                    added: false,
                 }]),
                 has_out_buffer: true,
                 job: false,
                 reading: None,
+                added: false,
             },
             MethodInfo {
                 id: 5,
@@ -563,6 +565,7 @@ mod description {
                 has_out_buffer: false,
                 job: true,
                 reading: Some(Reading::Switch),
+                added: false,
             },
         ],
     };
@@ -667,15 +670,17 @@ mod description {
         let description = Description::new();
         let mut buf = [0; 512];
         let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
-        // The job list sits just before the identity trailer: a count of one, then one job record,
-        // a block of 3 bytes (contract 0, method 5), its length first.
-        let jobs_end = n - trailer_len(&manifest, &description);
+        // The added fields come last (a count of zero, 2 bytes), then the identity trailer. The job
+        // list sits just before that: a count of one, then one job record, a block of 3 bytes
+        // (contract 0, method 5), its length first.
+        let jobs_end = n - 2 - trailer_len(&manifest, &description);
         assert_eq!(buf[jobs_end - 9..jobs_end], [1, 0, 3, 0, 0, 0, 0, 5, 0]);
         // A reader from before the job list stops at the items.
         let back = decode_description(&buf[..jobs_end - 9]).unwrap();
         assert!(back.contracts[0].methods.iter().all(|m| !m.job));
         // One that names a method the contracts don't have can't be trusted.
         buf[jobs_end - 2] = 9;
+
         assert!(decode_description(&buf[..n]).is_err());
     }
 
@@ -689,7 +694,8 @@ mod description {
         let description = Description::new();
         let mut buf = [0; 512];
         let n = encode_description(&manifest, &description, &identity(), &mut buf).unwrap();
-        let back = decode_description(&buf[..n - trailer_len(&manifest, &description)]).unwrap();
+        let back =
+            decode_description(&buf[..n - 2 - trailer_len(&manifest, &description)]).unwrap();
         assert_eq!(
             (back.label.as_str(), back.state, back.kind.as_str()),
             ("", None, "")

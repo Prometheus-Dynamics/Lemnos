@@ -462,6 +462,47 @@ pub unsafe extern "C" fn lemnos_open(
     })
 }
 
+/// Writes the base hash and the additions level of the contract an open handle is for, as the
+/// device's description has them. The base hash moves when a base method changes; the level is how
+/// many of the contract's methods are additions. A C caller that knows the hash its header was
+/// built with compares the two; the bind check itself is in Rust.
+///
+/// # Safety
+/// `hash` and `level` are null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_contract_hash(
+    client: Handle,
+    opened: u32,
+    hash: *mut u64,
+    level: *mut u32,
+    sink: MessageSink,
+) -> Status {
+    guard(|| {
+        if hash.is_null() || level.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_entry(client, |entry| {
+            let Some(handle) = entry.opened.get(opened as usize) else {
+                return Status::NOT_FOUND;
+            };
+            match entry.session.describe(handle.device()) {
+                Ok(description) => {
+                    let Some(contract) = description.contracts.get(usize::from(handle.contract()))
+                    else {
+                        return Status::NOT_FOUND;
+                    };
+                    // SAFETY: not null, and valid for a write by the contract.
+                    unsafe { hash.write(contract.hash) };
+                    // SAFETY: as for `hash`.
+                    unsafe { level.write(contract.level() as u32) };
+                    Status::OK
+                }
+                Err(error) => fail(error, sink),
+            }
+        })
+    })
+}
+
 /// # Safety
 /// `args` is valid for reads of `args_len` bytes (or null with 0); `reply` is
 /// valid for writes of `reply_capacity` bytes (or null with 0).

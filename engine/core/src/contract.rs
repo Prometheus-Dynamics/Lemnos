@@ -25,6 +25,9 @@ pub struct MethodInfo {
     /// How the value this method reads or sets shows, when the contract says. Not part of the
     /// method's layout: see [`Description`](crate::Description) for how a device's items use it.
     pub reading: Option<Reading>,
+    /// An addition after the base shape: appended after every base method. Set by `#[added]`
+    /// (unless `#[breaking]`). Left out of the contract's base hash.
+    pub added: bool,
 }
 
 /// A contract as data.
@@ -41,8 +44,9 @@ pub struct ContractInfo {
 pub trait Contract {
     const TAG: Tag;
     const INFO: ContractInfo;
-    /// The contract's encoding hash, [`layout::contract_hash`](crate::layout::contract_hash) of
-    /// [`INFO`](Self::INFO). A device says its hash in its description; a typed client checks it.
+    /// The contract's base hash, [`layout::contract_hash`](crate::layout::contract_hash) of
+    /// [`INFO`](Self::INFO): the base methods only. A device says it in its description; a typed
+    /// client checks it, then checks each of its own methods (added ones too) by their hashes.
     const HASH: u64;
 }
 

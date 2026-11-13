@@ -15,6 +15,7 @@
 
 #[cfg(feature = "tokio")]
 mod asynchronous;
+mod bind;
 mod client;
 mod connection;
 mod error;

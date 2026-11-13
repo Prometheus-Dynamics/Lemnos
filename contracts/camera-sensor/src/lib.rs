@@ -122,10 +122,12 @@ const GAIN_LAW_FIELDS: &[Field] = &[
     Field {
         name: "law",
         shape: Shape::U8,
+        added: false,
     },
     Field {
         name: "param",
         shape: Shape::U32,
+        added: false,
     },
 ];
 
@@ -165,7 +167,10 @@ pub struct GainRange {
     pub unity: u32,
     /// The smallest step between two codes.
     pub step: u32,
-    /// How a code becomes a gain.
+    /// How a code becomes a gain. Added after the first form, and breaking: without it a code has
+    /// one meaning (linear), so an older reader would misread a reciprocal or decibel sensor.
+    #[added]
+    #[breaking]
     pub law: GainLaw,
 }
 
@@ -208,7 +213,9 @@ pub struct SensorInfo {
     pub array_height: u32,
     /// Test pattern codes, numbered from 1. 0 is always no pattern.
     pub test_patterns: u16,
-    /// Whether each frame carries the register values in force for it.
+    /// Whether each frame carries the register values in force for it. Added after the first form:
+    /// absent means `None`, which is what a sensor from before it did.
+    #[added]
     pub embedded_data: EmbeddedData,
 }
 
@@ -373,6 +380,7 @@ pub trait CameraSensor {
     /// receiver's `source` answers for this sensor. Written as UTF-8 into `into`, returning its
     /// length; `into` holds at least [`MAX_IDENTITY_NAME`] bytes. `NOT_SUPPORTED` when no kernel
     /// names this sensor, which is unknown and never matches.
+    #[added]
     #[method(12)]
     fn identity(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
     /// Posts values as [`CameraSensor::post_values`] does, and answers where they land: the frame
@@ -380,28 +388,34 @@ pub trait CameraSensor {
     /// anything is written: `NOT_SUPPORTED` with no link to a receiver that counts frame starts,
     /// and `BUSY` while no frame start has been counted since the receiver's `start`. Other
     /// refusals are those of `post_values`.
+    #[added]
     #[method(13)]
     fn post_values_at(&mut self, values: FrameValues) -> Result<Landing>;
     /// The last post accepted by either `post_values` or `post_values_at`, with its values as
     /// posted and where it landed, or `None` before any post. `BUSY` when that post was made before
     /// any frame start had been counted, so its landing is not known. `NOT_SUPPORTED` when there
     /// was no link to a receiver that counts frame starts, so no landing was ever read for it.
+    #[added]
     #[method(14)]
     fn applied_landing(&mut self) -> Result<Option<AppliedLanding>>;
     /// The control values in force, as [`InForce`] says. A zero-argument read, so a caller can
     /// show them without a post.
+    #[added]
     #[method(15)]
     fn in_force(&mut self) -> Result<InForce>;
     /// Sets the exposure to `lines` whole lines, posted as [`CameraSensor::post_values_at`] posts
     /// it: the answer is the frame it lands on, by the landing rule in the module docs. Refused
     /// as `post_values_at` is, and `INVALID_ARGUMENT` when the sensor is not streaming, since a
     /// value set while stopped lands on no frame.
+    #[added]
     #[method(16)]
     fn set_exposure(&mut self, lines: u32) -> Result<Landing>;
     /// Sets the analogue gain to `code`, landing as [`CameraSensor::set_exposure`] does.
+    #[added]
     #[method(17)]
     fn set_analogue_gain(&mut self, code: u32) -> Result<Landing>;
     /// Sets the frame length to `lines`, landing as [`CameraSensor::set_exposure`] does.
+    #[added]
     #[method(18)]
     fn set_frame_length(&mut self, lines: u32) -> Result<Landing>;
 }

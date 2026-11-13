@@ -3,8 +3,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use lemnos_client::Client;
-use lemnos_core::{CallerId, Config as DriverConfig, Lifecycle, Result, contract, driver};
+use lemnos_client::{Client, Error};
+use lemnos_core::{CallerId, Config as DriverConfig, Lifecycle, Result, Status, contract, driver};
 use lemnos_host::board::parse;
 use lemnos_host::{Options, entry};
 use lemnos_sim::SimBoard;
@@ -105,4 +105,20 @@ fn a_closed_connection_gives_up_only_its_own_holds() {
         assert!(Instant::now() < deadline, "the holds were never given up");
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+#[test]
+fn a_method_the_contract_does_not_have_is_refused_by_number() {
+    let (_service, socket) = start();
+    let client = Client::connect(&socket, "t").unwrap();
+    let mut handle = client.open_tag("h", "holder/1").unwrap();
+    let mut reply = [0u8; 16];
+    let error = client.call(&mut handle, 99, &[], &mut reply).unwrap_err();
+    assert_eq!(
+        error,
+        Error::Refused {
+            status: Status::NOT_SUPPORTED,
+            text: "contract holder/1 has no method 99".to_string(),
+        }
+    );
 }

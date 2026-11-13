@@ -25,12 +25,36 @@ pub enum Error {
         ours: u64,
         theirs: u64,
     },
-    /// The device's description gives contract `contract` another encoding hash than this
-    /// client was built with: an argument or result type differs. Nothing was called.
+    /// The device's description gives contract `contract` another base hash than this client was
+    /// built with: a base method's argument or result type differs. Nothing was called.
     ContractMismatch {
         contract: String,
         ours: u64,
         theirs: u64,
+    },
+    /// The device does not provide the contract at all. Nothing was called.
+    ContractMissing { contract: String },
+    /// The device's contract has no method `method` named `name`, which this client needs. The
+    /// device's driver does not provide it. Nothing was called.
+    MethodMissing {
+        contract: String,
+        method: u16,
+        name: String,
+    },
+    /// The device's method `method` (`name`) has another shape than this client's. Nothing was
+    /// called.
+    MethodShape {
+        contract: String,
+        method: u16,
+        name: String,
+    },
+    /// The device's method `method` (`name`) lacks an added field this client's method carries.
+    /// Nothing was called.
+    FieldMissing {
+        contract: String,
+        method: u16,
+        name: String,
+        field: String,
     },
     /// The service sent something that isn't the protocol.
     Wire(WireError),
@@ -82,7 +106,35 @@ impl core::fmt::Display for Error {
                 theirs,
             } => write!(
                 f,
-                "contract {contract} was built with another encoding (the device's hash {theirs:#018x}, this client's {ours:#018x}): the device and this client must come from the same Lemnos revision"
+                "contract {contract}: a base method is laid out differently (the device's base hash {theirs:#018x}, this client's {ours:#018x})"
+            ),
+            Self::ContractMissing { contract } => {
+                write!(f, "the device does not provide contract {contract}")
+            }
+            Self::MethodMissing {
+                contract,
+                method,
+                name,
+            } => write!(
+                f,
+                "contract {contract}: this client needs method {method} `{name}`; the device's driver does not provide it"
+            ),
+            Self::MethodShape {
+                contract,
+                method,
+                name,
+            } => write!(
+                f,
+                "contract {contract}: this client needs method {method} `{name}`; the device's driver has another shape"
+            ),
+            Self::FieldMissing {
+                contract,
+                method,
+                name,
+                field,
+            } => write!(
+                f,
+                "contract {contract}: this client needs field `{field}` of method {method} `{name}`; the device's driver does not provide it"
             ),
             Self::Wire(error) => write!(f, "{error}"),
             Self::Stale => f.write_str("the handle predates a reconnect"),
@@ -116,7 +168,10 @@ impl From<Error> for Status {
             Error::Version { .. } => Status::NOT_SUPPORTED,
             Error::LayoutMismatch { .. }
             | Error::PartMismatch { .. }
-            | Error::ContractMismatch { .. } => Status::VERSION_MISMATCH,
+            | Error::ContractMismatch { .. }
+            | Error::MethodShape { .. } => Status::VERSION_MISMATCH,
+            Error::FieldMissing { .. } | Error::MethodMissing { .. } => Status::NOT_SUPPORTED,
+            Error::ContractMissing { .. } => Status::NOT_FOUND,
             Error::Wire(_) => Status::IO,
             Error::Stale => Status::AGAIN,
             Error::TimedOut => Status::TIMED_OUT,

@@ -416,6 +416,9 @@ mod tests {
             returns,
             has_out_buffer: out,
             job: false,
+            hash: 0,
+            added: false,
+            added_fields: Vec::new(),
         }
     }
 

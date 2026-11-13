@@ -53,12 +53,14 @@ pub trait RawBus {
     fn pwm_set(&mut self, period_ns: u64, duty_ns: u64, enabled: bool) -> Result<()>;
     /// Sends `data` on the UART and returns how many bytes went: fewer than all when the port's
     /// transmit buffer stays full. An empty `data` is `INVALID_ARGUMENT`.
+    #[added]
     #[method(6)]
     fn uart_write(&mut self, data: &[u8]) -> Result<u32>;
     /// Up to `max_len` bytes that arrived on the UART, waiting at most `timeout_ms` for the first
     /// (0 does not wait, and more than [`UART_MAX_WAIT_MS`] is `INVALID_ARGUMENT`). The bytes go
     /// into `into`, which must hold `max_len`, and the number is returned: 0 when nothing came.
     /// A `max_len` of 0 is `INVALID_ARGUMENT`.
+    #[added]
     #[method(7)]
     fn uart_read(&mut self, max_len: u32, timeout_ms: u32, #[out] into: &mut [u8])
     -> Result<usize>;

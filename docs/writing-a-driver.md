@@ -556,9 +556,10 @@ refused with the layout mismatch, before any of its code runs.
 
 ## Compatibility: what must match, and what need not
 
-> **Status:** the core and the wire parts are checked as described here (T1c). The per-contract
-> base shapes and additions, `#[breaking]`, and the package guarantee land in T1d to T1f, in that
-> order. Until T1f lands, a driver package built against another contract or ABI revision is refused.
+> **Status:** T1d has landed. The core and the wire parts are checked at connect (T1c). Each
+> contract's base shape, its additions and `#[breaking]` are checked when a typed client binds it
+> (T1d, below). The ABI tables of a driver package and the package guarantee follow in T1e and T1f.
+> Until T1f lands, a driver package built against another contract or ABI revision is refused.
 
 Nothing unreleased is versioned. Compatibility is structural: each unit of the interface has its own
 hash, and a client, a driver package or the daemon need agree only on the units they actually use.
@@ -567,25 +568,54 @@ A minor Lemnos change does not rebuild every driver and client.
 The units, and what each hash covers:
 
 - **The core**: the handshake, framing, the call and reply envelopes, the event envelope, stream and
-  job framing. One hash, kept small. A connection refused on it says `core protocol differs`, with
-  both hashes.
-- **Each contract**: its tag, and for each method its number, name, parameter and result shapes,
-  and whether it fills a buffer or starts a job. Checked once, when a client binds that contract. A
-  change to one contract never affects a client of another.
+  job framing, and the description's framing. One hash, kept small. A connection refused on it says
+  `core protocol differs`, with both hashes.
+- **Each contract**: its tag, and for each base method its number, name, parameter and result
+  shapes, and whether it fills a buffer or starts a job. Checked once, when a typed client binds that
+  contract. A change to one contract never affects a client of another.
 - **Each ABI table** of a driver package: its layout, checked when the package is loaded.
 - **Each optional part** of the wire (stream handles, packages, jobs), negotiated by the feature
   bits, with its own hash where its layout can change.
 
-Every unit also has a **base shape** (what both sides must agree on) and an **additions level**: the
-number of methods and fields appended to the base. The base shape hash must be equal. Of two
-additions levels, the lower one is what both sides use.
+### Base shape and additions
+
+Every contract has a **base shape**: its tag and its base methods. A method or a struct field that
+was appended after the first form of its contract is an **addition**, and it is marked:
+
+- `#[added]` on an appended method of a `#[contract]` trait. It must come after every base method.
+- `#[added]` on an appended field of a `#[derive(Encode, Decode)]` struct. It must come after every
+  base field. A field of type `Tail<T>` is an addition by its type.
+- `#[breaking]` with `#[added]` makes the item base again: a change that moves the old meaning of an
+  existing field or method is breaking even when it is appended. The base then moves, and both sides
+  are refused at bind.
+- An item with no mark is base. Forgetting a mark moves the base, which is the safe error.
+
+A contract's **base hash** covers its tag and its base methods only. Each method has its own
+**method hash**: its number, name, base parameters and base result, and its flags. An added field
+has its own hash, from its name and shape under the parameter or result it sits in. An addition does
+not move the base hash, and a method whose argument struct gained a field keeps its method hash.
+
+A typed client binds a contract by one rule that gives the same guarantee as an additions level on
+the wire, with a precise message: the device's base hash must equal the client's base hash, and for
+every method the client has, base or added, the device must have a method with the same number, name
+and method hash, and must have every added field the client's method uses. Extra methods and fields
+on the device are ignored. The additions level (how many methods are added) is kept for diagnostics
+and the C API (`lemnos_contract_hash`), not compared at bind. [Client](client.md#the-typed-bind)
+gives the refusal texts.
+
+Structs carry their length. A reader skips the trailing fields it does not know, and a reader that
+expects more fields than it received fills in the declared defaults. A method the device's driver
+does not provide answers `NOT_SUPPORTED`, and its refusal names the method. The daemon's texts are
+`contract holder/1 has no method 99` for a number the contract does not have, and
+``the device's driver does not support method 12 `identity` of camera.sensor/1`` for a method the
+contract has and the driver answers `NOT_SUPPORTED` to.
 
 ### Additive and breaking changes
 
 A change is **additive** when an old reader still reads everything it needs correctly, given the
 rules below. It is **breaking** when it changes what an existing field or method means. An author
 marks a breaking change with `#[breaking]` on the field or method. A breaking change moves the base
-shape, so the old and new sides are refused at bind, and the refusal names the unit.
+shape, so the old and new sides are refused at bind, and the refusal names the contract.
 
 Additive changes, by construction:
 
@@ -593,16 +623,6 @@ Additive changes, by construction:
 - a field appended at the end of a struct, when the field's absence leaves the meaning of the other
   fields unchanged (an absent `Option` is `None`, an absent flag is `false`);
 - a new frame kind, a new feature bit, a function pointer appended to an ABI table.
-
-How the encodings tolerate them:
-
-- Structs carry their length. A reader skips trailing fields it does not know. A reader expecting
-  more fields than it received fills in the declared defaults.
-- A call to a method the device's driver does not provide answers `NOT_SUPPORTED`, and the refusal
-  names the method.
-- An unknown frame kind is refused on its own, not at connect.
-- An ABI table carries its size. A loader ignores entries past what it knows, and treats an entry a
-  package lacks as absent.
 
 Structural compatibility is not semantic compatibility. Appending a field can still change what the
 existing fields mean. For example, a `gain law` added beside gain codes makes an old reader misread
@@ -620,15 +640,20 @@ When you add a method or field, classify it in the PR:
 
 | Change | Class | Reason |
 |---|---|---|
-| `camera.sensor` `GainRange.law` | breaking | without it, gain codes have one meaning (linear); an old reader would misread a reciprocal or decibel sensor's codes |
+| `camera.sensor` `GainRange.law` | breaking (and marked `#[added] #[breaking]`) | without it, gain codes have one meaning (linear); an old reader would misread a reciprocal or decibel sensor's codes |
 | `camera.sensor` `SensorInfo.embedded_data` | additive | absent means `None`, which is what a sensor from before it did |
 | `camera.receiver` methods 9 to 11 (`embedded_stream`, `source`, `layout`) | additive | appended methods; an old driver answers `NOT_SUPPORTED` |
 | `camera.sensor` method 12 (`identity`) | additive | appended method |
 | `camera.sensor` methods 13 and 14 (`post_values_at`, `applied_landing`), `camera.receiver` method 12 (`frame_starts`) | additive | appended methods and their types; an old driver answers `NOT_SUPPORTED` and an old caller never calls them |
 | `camera.sensor` methods 15 to 18 (`in_force`, `set_exposure`, `set_analogue_gain`, `set_frame_length`) and `InForce` | additive | appended methods and their type; the three setters are posts, so a driver without a landing answers `NOT_SUPPORTED` as `post_values_at` does |
 | `Unit::Line` (`"line"`) | additive | a new unit symbol on the description's unit string; an item with it reads as unit-less to a client that does not know it |
+| `camera.isp` methods 13 and 14 (`input_layout`, `output_layout`) | additive | appended methods, marked `#[added]` in T1d (U1b added them without the mark) |
 | `lens/1` methods 4 and 5 (`direction`, `settle_us`) | additive | appended methods |
 | `raw-bus` methods 6 and 7 (`uart_write`, `uart_read`) | additive | appended methods |
+| `camera.sensor` `SensorInfo` delay fields (`Mode.exposure_delay`, `gain_delay`, `frame_length_delay`) | not a change | no delay is redefined: `SensorInfo` has none, and the three delays on `Mode` have the same type, place and timing rule as at T1b |
+| `camera.receiver` `layout` (method 11) against the stream's buffer length | additive | the method is appended, and its meaning did not change: `FrameLayout.size` is the bytes per frame at most, as at T1b, and the stream's buffer length is the stream's own, unchanged |
+| `FrameStream::bytes()` on a multi-plane stream | not a change | it returns plane 0, as at T1b (same code, same doc); the other planes are read with `plane` |
+| The stateless-decode stamp, a whole number of microseconds (`drivers/m2m-decode`) | not a change | the rule and its check are unchanged since T1b; the T1c change to `codec-block` is to byte sizes only |
 | `MethodInfo.job` on a new method | additive | a method that was not a job before is not called differently by a client that doesn't know it is one |
 | `MethodInfo.job` set on an existing method | breaking | a client that calls it as a call would now get `NOT_SUPPORTED` |
 | `system.identity/1` (new contract) | additive | a new contract is only bound by a client that asks for it |
@@ -636,8 +661,13 @@ When you add a method or field, classify it in the PR:
 ### Hashes and versions
 
 Each unit's hash is computed at compile time from its declarations, and nothing writes one by hand.
-Nothing is versioned while unreleased: a contract's `version` stays 1. A change that is additive
-leaves the base shape hash unchanged; a breaking change moves it.
+The `#[contract]` macro computes each contract's base hash and each method's hash, and the derives
+compute each struct's shape. The device's description carries each contract's base hash, each
+method's hash and whether it is an addition, and the hash of each added field; see
+[the wire's description](wire.md#description).
+
+Nothing is versioned while unreleased: a contract's `version` stays 1. An additive change leaves the
+base hash unchanged; a breaking change moves it.
 
 Doc comments, method bodies and the driver's own state don't move any hash.
 

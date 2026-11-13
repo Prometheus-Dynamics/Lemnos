@@ -144,7 +144,7 @@ so cannot move its hash: a frame kind marked `added` in the table, and a field w
 (a trailing value, one a peer from before it does not send). A structure whose field is appended
 therefore keeps its hash. The values this build computes are:
 
-`core hash: 0x9c2eeb86d3c5c928`
+`core hash: 0x7b015eb7597b20bc`
 
 `stream-handles part hash: 0x8b54fb4c60535d2b`
 
@@ -440,16 +440,21 @@ itself: `failed`, with its reason, while the function is down.
 ## Description
 
 The `bytes` of a Description, in order: a `u16` contract count, then for each contract a
-contract record (its tag str, its encoding hash u64, see Contract hashes below, and a `u16` method
-count), then for each method a method record (its id u16, name str, a `u16` parameter count, and a
-has-out-buffer bool), then for each parameter a parameter record (its name str) followed by its
-shape. A method's returned shape follows its parameters. Then a `u16` item count, and for each item
+contract record (its tag str, its base hash u64, see Contract hashes below, and a `u16` method
+count), then for each method a method record (its id u16, name str, a `u16` parameter count, a
+has-out-buffer bool, and, appended to the record, its method hash u64 and an `added` bool), then for
+each parameter a parameter record (its name str) followed by its shape. A method's returned shape
+follows its parameters. Then a `u16` item count, and for each item
 an item record: its kind u8 (0 value, 1 control, 2 action), name str, unit str, exponent i8, min and
 max (each a presence bool, then an i64 when present), contract u8, method u16, and field (a presence
 bool, then a str when present). Then, appended after the first form, a `u16` count of job methods
 and for each a job record: its contract u8 and method u16. Those are started with CallJob. A host
 from before job methods ends at the items, and a reader takes that as no job methods. A job method
-that names no method above makes the description malformed.
+that names no method above makes the description malformed. Then the trailer described below, and last
+the added fields: a `u16` count, and for each a record (contract u8, method u16, the field's hash u64;
+see Contract hashes). A host from before the added fields ends at the trailer, and a reader takes that
+as no added fields. The method hashes, the `added` bools and the added-field records are new in T1d:
+they moved the core hash, which is allowed while nothing is released.
 
 A shape is written as a code u8 (0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 i32,
 9 i64, 10 f32, 11 f64, 12 str, 13 bytes, 14 option, followed by its shape, 15 array, a u32 length
@@ -463,8 +468,8 @@ the block and reads the fields it knows. Bytes left after them are skipped. A fi
 before takes its default, so a field a writer from before it did not send reads as the default.
 Every field type of such a struct implements `Default`.
 
-Then, appended after the job list, three parts. A reader from before them stops at the job list,
-and takes the identity as unknown (an empty label, no state, no kind, no reading for any item).
+Then, appended after the job list, the trailer: three parts. A reader from before them stops at the
+job list, and takes the identity as unknown (an empty label, no state, no kind, no reading for any item).
 
 - The identity, one struct block: `label` str (the board's `label`, or the device id when the board
   names none), `bus` str (the bus or block the board names, empty when none), `state` (a presence
@@ -484,20 +489,33 @@ A reading code this build does not know reads as no reading. Every i64 is in the
 the code), so it is left out of the core hash: a host that adds it does not refuse a client built
 without it.
 
+The added fields come after the trailer, the last bytes of a description. Their count is a `u16`,
+then one record per added field of every method, in order: its contract u8, its method u16, and the
+field's hash u64. The hash is the one in [Contract hashes](#contract-hashes). A host from before them
+ends at the trailer.
+
 ### Contract hashes
 
-Each contract in a Description carries its encoding hash: a 64-bit FNV-1a over the tag, every
-method's number and name, each parameter's name and shape, the result's shape, and whether it fills
-a buffer or starts a job. The shapes are the ones the argument and result types declare, so the
-hash moves when a method is added, renamed or renumbered, or when an argument or result struct
-gains, loses, renames or retypes a field. It is computed, never written by hand: the `#[contract]`
-macro and the `Encode` derive generate it.
+A contract's **base hash** is a 64-bit FNV-1a over its tag and each of its **base** methods'
+hashes, in order. A method's **method hash** is over its number, name, its base parameters (names and
+shapes), its base result shape, and whether it fills a buffer or starts a job. A base item is one
+not marked `added` in the contract, or marked `#[breaking]` as well (see the
+[driver guide](writing-a-driver.md#base-shape-and-additions)). A field marked `added` is left out of
+every shape it sits in: a method whose argument struct gained a field keeps its method hash, and the
+field has a hash of its own, from its name and shape under its path. The description carries the
+base hash of each contract, each method's hash and `added` flag, and the hash of each added field.
+They are computed by the `#[contract]` macro and the `Encode` derive, never written by hand.
 
-A typed client checks it when it opens a contract (`Client::open`), reading the device's
-description once. A device whose hash differs is refused with `ContractMismatch`, which names the
-contract and both hashes; nothing is called on it. Calls after the open are not checked again. A
-device that doesn't list the contract's tag is not refused by the check (the open itself already
-found the tag).
+A typed client checks them when it binds a contract (`Client::open`, `Session::open_typed`,
+`AsyncClient::open_typed`), reading the device's description once. The check is in
+[the client's typed bind](client.md#the-typed-bind): the base hash must be equal, and every method
+the client has (base or added) must be on the device with the same method hash, with every added
+field it uses. A refusal names the contract and the method or field, and nothing is called on it.
+Calls after the open are not checked again.
+
+No per-contract additions level is written: the per-method check gives the same guarantee and names
+the method that is missing. A device that doesn't list the contract's tag is not refused by the
+check (the open itself already found the tag).
 
 A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 i32, 9 i64, 10 f32,
 11 f64, 12 str, 13 bytes, 14 option (followed by its shape), 15 array (a u32 length, then its shape),
@@ -528,20 +546,20 @@ Each vector is one complete frame.
 
 ### hello
 
-`Hello { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the four part hashes }`
+`Hello { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the four part hashes }`
 
 <!-- vector: hello -->
 ```hex
-59 00 00 00 01 00 28 c9 c5 d3 86 eb 2e 9c 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
+59 00 00 00 01 00 bc 20 7b 59 b7 5e 01 7b 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
 ```
 
 ### welcome
 
-`Welcome { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the four part hashes }`
+`Welcome { core: 0x7b015eb7597b20bc, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the four part hashes }`
 
 <!-- vector: welcome -->
 ```hex
-5d 00 00 00 02 00 28 c9 c5 d3 86 eb 2e 9c 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
+5d 00 00 00 02 00 bc 20 7b 59 b7 5e 01 7b 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 20 00 00 00 2b 5d 53 60 4c fb 54 8b 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8 08 19 52 4c 69 27 69 75
 ```
 
 ### list

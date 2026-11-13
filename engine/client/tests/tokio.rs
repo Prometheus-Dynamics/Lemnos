@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::{FakeHost, StreamHost, StreamScript};
 use lemnos_client::{AsyncClient, Error, StreamPlatform};
-use lemnos_core::Status;
+use lemnos_core::{Contract, ContractInfo, Result, Status, contract};
 use lemnos_linux_stream::LinuxStreams;
 use lemnos_wire::feature;
 use lemnos_wire::ring::Layout;
@@ -144,5 +144,45 @@ fn the_async_form_refuses_a_service_from_another_lemnos_revision_at_connect() {
             "{error}"
         );
         assert_eq!(Status::from(error), Status::VERSION_MISMATCH);
+    });
+}
+
+/// The contract as a driver provides it, with its base method only.
+#[contract("example.counter", version = 1)]
+pub trait Plain {
+    #[method(1)]
+    fn add(&mut self, value: u32) -> Result<u32>;
+}
+
+/// The contract as a client needs it: a method the driver may lack.
+#[contract("example.counter", version = 1)]
+pub trait Needs {
+    #[method(1)]
+    fn add(&mut self, value: u32) -> Result<u32>;
+    #[added]
+    #[method(2)]
+    fn twice(&mut self, value: u32) -> Result<u32>;
+}
+
+#[test]
+fn the_async_typed_open_runs_the_same_bind_check() {
+    const PLAIN: ContractInfo = <dyn Plain as Contract>::INFO;
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[PLAIN]);
+    block_on(async {
+        let mut client = AsyncClient::connect(&host.path, "t").await.unwrap();
+        let error = client.open_typed::<dyn Needs>("").await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "contract example.counter/1: this client needs method 2 `twice`; the device's driver does not provide it"
+        );
+        // Nothing was called on the refused device: the typed open that passes still works.
+        let handle = client.open_typed::<dyn Plain>("").await.unwrap();
+        let mut reply = [0; 4];
+        let n = client
+            .call(&handle, 1, &[9, 0, 0, 0], &mut reply)
+            .await
+            .unwrap();
+        assert_eq!(&reply[..n], [9, 0, 0, 0]);
     });
 }
