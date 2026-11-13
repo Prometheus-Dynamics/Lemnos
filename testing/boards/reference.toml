@@ -71,7 +71,7 @@ config = { serial = "device-tree" }
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], keys = "/etc/lemnos/slot-keys", boot_args = "os", require_signed = false, reserve_mb = 2048, keep = 3 }
+config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], keys = "/etc/lemnos/slot-keys", boot_args = "os", reserve_mb = 2048, keep = 3 }
 
 [[devices]]
 id = "reboot"

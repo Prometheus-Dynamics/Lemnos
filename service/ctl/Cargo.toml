@@ -24,6 +24,8 @@ lemnos-host = { path = "../../engine/host" }
 lemnos-devtree = { path = "../devtree" }
 lemnos-linux = { path = "../../backends/linux" }
 lemnos-wire = { path = "../../engine/wire" }
+# For `security render`: the switch record and its view.
+lemnos-slot-store = { path = "../../drivers/slot-store" }
 # For `tree`: the built-in drivers' manifests, which say what each device needs.
 lemnosd = { path = "../lemnosd" }
 
@@ -55,6 +57,8 @@ lemnos-contract-pixels = { path = "../../contracts/pixels" }
 lemnos-contract-power-monitor = { path = "../../contracts/power-monitor" }
 lemnos-contract-power-switch = { path = "../../contracts/power-switch" }
 lemnos-contract-raw-bus = { path = "../../contracts/raw-bus" }
+lemnos-contract-security = { path = "../../contracts/security" }
+lemnos-contract-security-precondition = { path = "../../contracts/security-precondition" }
 lemnos-contract-system-identity = { path = "../../contracts/system-identity" }
 lemnos-contract-system-reboot = { path = "../../contracts/system-reboot" }
 lemnos-contract-system-slots = { path = "../../contracts/system-slots" }

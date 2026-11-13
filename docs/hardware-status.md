@@ -163,6 +163,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 
 | Check | What a board has to show |
 |---|---|
+| [`S2.md`](../testing/board-runs/S2.md) | The board security switch: a change refused by name until its preconditions hold, applied at once with no restart, the view replaced by rename, a power cut between the record and the render, and a corrupt record reading on. Untested on board |
 | [`I5.md`](../testing/board-runs/I5.md) | `system-slots` and `system-reboot`: a streamed install checked against its signed manifest, refused bundles, cancel, kill and restart mid-install, a confirmed trial, an unconfirmed trial falling back on a single-slot board, housekeeping, an install from a file in `.incoming`, the U-Boot record and script, and the board's own slot tool reading the same state |
 | [`I5i3.md`](../testing/board-runs/I5i3.md) | The count-based fallback on the Pi firmware family: `[boot_count&4]` selecting the previous pointer, the kernel watchdog keys, the panicking-kernel case, brown-out and the `rsts` bits. Untested on board |
 | [`I5i4.md`](../testing/board-runs/I5i4.md) | The every-boot boot-file check (raw FAT read, no mount), the bundle's command line (byte for byte), the data partition by its label, and lemnosd's check before a restart and on a slow period. Untested on board |

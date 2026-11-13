@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-security-precondition = { path = "../../contracts/security-precondition" }
 lemnos-contract-system-flash = { path = "../../contracts/system-flash" }
 lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-driver-system-flash-sys = { path = "../system-flash-sys" }
@@ -20,6 +21,7 @@ ed25519-dalek = { version = "2.2", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
+lemnos-slot-store = { path = "../slot-store", features = ["testing"] }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
 [package.metadata.lemnos]

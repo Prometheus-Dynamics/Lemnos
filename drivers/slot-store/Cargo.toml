@@ -14,6 +14,9 @@ workspace = true
 [features]
 linux = ["dep:lemnos-linux-sys"]
 fake = []
+# Test seam: points this thread's security readers at a test view (`security::set_view_for_thread`). A
+# shipped binary never enables it: only the drivers' dev-dependencies do.
+testing = []
 
 # The key id (SHA-256 of a public key) and nothing else of the signing code: verification is the
 # drivers' own (they hold ed25519), so slot-init, which never verifies, does not link it.

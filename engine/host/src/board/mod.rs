@@ -624,6 +624,10 @@ pub struct BoardFile {
     pub format: String,
     pub schema_version: u32,
     pub board: BoardInfo,
+    /// `[security]`: the board's security switch facts. Given to the device whose driver serves
+    /// `system.security/1`, and to no other.
+    #[serde(default)]
+    pub security: Option<SecuritySpec>,
     /// How the host treats every driver. Left out, it keeps what it was started with.
     #[serde(default)]
     pub host: HostSpec,
@@ -638,6 +642,42 @@ pub struct BoardFile {
     /// The GPIO lines the board gives to Lemnos, for the device tree generator.
     #[serde(default)]
     pub lines: Vec<LineSpec>,
+}
+
+/// `[security]`: where the board's security record lives, its trust root, and whether Orion ships.
+/// The host gives these to the device that serves `system.security/1` as its config; no other
+/// device gets them, and a device that sets one of these keys itself is refused.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecuritySpec {
+    /// The record's file: an absolute path. On a board with slots, the boot partition's record.
+    pub record: String,
+    /// The trust root's key file (an absolute path), when the switch checks it itself.
+    #[serde(default)]
+    pub keys: Option<String>,
+    /// Whether Orion ships on this board. Then turning the switch on waits for Orion's answer.
+    #[serde(default)]
+    pub orion: bool,
+}
+
+impl BoardFile {
+    /// The `[security]` facts as the device config they are given as.
+    pub(crate) fn security_config(&self) -> Vec<(String, OwnedValue)> {
+        let Some(security) = &self.security else {
+            return Vec::new();
+        };
+        let mut out = vec![
+            (
+                "record".to_string(),
+                OwnedValue::Str(security.record.clone()),
+            ),
+            ("orion".to_string(), OwnedValue::Bool(security.orion)),
+        ];
+        if let Some(keys) = &security.keys {
+            out.push(("keys".to_string(), OwnedValue::Str(keys.clone())));
+        }
+        out
+    }
 }
 
 /// A config value the host owns.
@@ -740,6 +780,21 @@ fn parse_checked(text: &str) -> Result<(BoardFile, Vec<BoardError>), BoardError>
     }
     board.host.check()?;
     let mut problems = Vec::new();
+    for (key, path) in [
+        ("record", board.security.as_ref().map(|s| s.record.as_str())),
+        (
+            "keys",
+            board.security.as_ref().and_then(|s| s.keys.as_deref()),
+        ),
+    ] {
+        if let Some(path) = path
+            && !path.starts_with('/')
+        {
+            return Err(BoardError::Parse(format!(
+                "[security] {key} {path:?} must be an absolute path"
+            )));
+        }
+    }
     let mut seen = BTreeSet::new();
     for device in &mut board.devices {
         if let Some(error) = device_problem(device, &mut seen) {
@@ -908,6 +963,28 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
+
+    #[test]
+    fn the_security_table_takes_absolute_paths_and_its_facts_reach_only_the_security_device() {
+        let board = parse(&format!(
+            "{HEAD}[security]\nrecord = \"/var/lib/lemnos/security.rec\"\norion = true\n\n[[devices]]\nid = \"sec\"\ndriver = \"system-security\"\n"
+        ))
+        .unwrap();
+        let facts = board.security_config();
+        assert!(facts.contains(&("orion".to_string(), OwnedValue::Bool(true))));
+        assert!(facts.contains(&(
+            "record".to_string(),
+            OwnedValue::Str("/var/lib/lemnos/security.rec".into())
+        )));
+        assert!(
+            !facts.iter().any(|(key, _)| key == "keys"),
+            "keys is optional"
+        );
+        let relative = format!("{HEAD}[security]\nrecord = \"security.rec\"\n");
+        assert!(
+            matches!(parse(&relative), Err(BoardError::Parse(text)) if text.contains("absolute path"))
+        );
+    }
 
     fn with(devices: &str) -> Result<BoardFile, BoardError> {
         parse(&format!("{HEAD}{devices}"))

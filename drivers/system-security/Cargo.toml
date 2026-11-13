@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-driver-system-security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-contract-security = { path = "../../contracts/security" }
+lemnos-contract-security-precondition = { path = "../../contracts/security-precondition" }
+lemnos-slot-store = { path = "../slot-store" }
+
+[dev-dependencies]
+lemnos-slot-store = { path = "../slot-store" }
+
+[package.metadata.lemnos]
+driver = "SystemSecurity"

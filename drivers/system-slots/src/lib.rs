@@ -31,11 +31,11 @@
 //!   the table in [`lemnos_slot_store::signing`], shared with first flash. `list` shows each slot
 //!   as `trusted` (with the owner as `signer`), `untrusted` or `unsigned`, and its `signature`
 //!   word: `verified`, `not_checked_unknown_key` or `not_checked_unsigned`.
-//! - `require_signed`: `true` refuses every bundle the table refuses (unsigned, signed by a key
-//!   the board does not trust, or a bad signature). Off by default: an unsigned bundle or one
-//!   under an unknown key installs and is reported as not checked. With it on, a slot whose
-//!   signature did not verify is never set as the default nor tried, and the boot side does not
-//!   start it either (see `docs/slots.md`).
+//!   key's owner. A bundle's `slot.sig`, when it has one, is always checked against them, and
+//!   `list` shows each slot as `trusted` (with the owner as `signer`), `untrusted` or `unsigned`.
+//! - The security switch (`lemnos_slot_store::security`, `docs/slots.md`, "The security switch"):
+//!   on, a bundle not signed by a trusted key is refused. Read at each install's start. The board
+//!   file's `require_signed` is refused by name (removed).
 //! - `boot_args`: the name the slot's initramfs reads its kernel arguments under: a slot's
 //!   command line gets `<boot_args>.slot=<id> <boot_args>.roothash=<hex>
 //!   <boot_args>.data=PARTUUID=<uuid> panic=5`. Required for an install.
@@ -90,6 +90,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use lemnos_contract_indicator::{Indicator as IndicatorContract, NO_PROGRESS};
+use lemnos_contract_security_precondition::SecurityPrecondition;
 use lemnos_contract_system_reboot::Reboot;
 use lemnos_contract_system_slots::Slots;
 use lemnos_core::{
@@ -103,18 +104,19 @@ pub use install::{SIGNATURE_LEN, TrustedKey, parse_keys};
 use json::quoted;
 use lemnos_slot_store::boots;
 use lemnos_slot_store::disk::{self, Table};
+use lemnos_slot_store::security;
 use lemnos_slot_store::signing::{self, Outcome};
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};
 use uboot::Uboot;
 
-#[driver("system-slots", provides = [Slots])]
+#[driver("system-slots", provides = [Slots, SecurityPrecondition])]
 pub struct SystemSlots {
     layout: Layout,
     record: Box<dyn BootRecord>,
     keys: Vec<TrustedKey>,
-    require_signed: bool,
+    /// The security switch's view (`lemnos_slot_store::security`): read at each install's start.
     partuuid: String,
     boot_args: String,
     /// The board's `boot_sources` entries as given (`source=path`): each slot's command line must
@@ -332,7 +334,6 @@ impl SystemSlots {
             layout,
             record,
             keys,
-            require_signed: false,
             partuuid: String::new(),
             boot_args: String::new(),
             boot_sources: Vec::new(),
@@ -469,7 +470,7 @@ impl SystemSlots {
         let finish = Finish {
             layout: &self.layout,
             keys: &self.keys,
-            require_signed: self.require_signed,
+            require_signed: security::enforced(),
             boot_args: &self.boot_args,
             boot_sources: &self.boot_sources,
             board_id: &self.board_id,
@@ -537,7 +538,7 @@ impl SystemSlots {
     /// With `require_signed`, a slot may be set as the default or tried only when its signature
     /// verified. The reason in the state when not.
     fn fits_signature(&self, id: &str) -> Result<()> {
-        if !self.require_signed {
+        if !security::enforced() {
             return Ok(());
         }
         let meta = Meta::load(&self.layout, id);
@@ -615,7 +616,7 @@ impl SystemSlots {
         if self.install.is_some() {
             return Err(Status::BUSY);
         }
-        if self.require_signed && self.keys.is_empty() {
+        if security::enforced() && self.keys.is_empty() {
             return Err(Status::NOT_PERMITTED);
         }
         self.room(size)?;
@@ -800,7 +801,7 @@ impl SystemSlots {
         };
         let mut out = format!(
             "{{\"require_signed\":{},\"last_install\":{{",
-            self.require_signed
+            security::enforced()
         );
         for (key, value) in [
             ("slot", &slot),
@@ -830,7 +831,7 @@ impl SystemSlots {
     /// Reports, at start and in `info`, a default slot whose signature did not verify while
     /// signing is required: the state's `error` names it and what to install.
     fn report_policy(&mut self) {
-        if !self.require_signed {
+        if !security::enforced() {
             return;
         }
         let state = self.state();
@@ -1314,8 +1315,9 @@ impl Lifecycle for SystemSlots {
             Err(error) => Err(error.to_string()),
         };
         slots.board_id = cfg.board().to_string();
-        slots.require_signed = cfg.bool("require_signed").unwrap_or(false);
-        signing::set_security(&slots.layout, slots.require_signed).map_err(|_| Status::IO)?;
+        if cfg.get("require_signed").is_some() || cfg.get("security_view").is_some() {
+            return Err(Status::INVALID_ARGUMENT);
+        }
         slots.report_policy();
         if let Some(mb) = cfg.int("reserve_mb") {
             slots.reserve = u64::try_from(mb).map_err(|_| Status::INVALID_ARGUMENT)? << 20;
@@ -1378,6 +1380,54 @@ impl Lifecycle for SystemSlots {
             state.progress = 0;
             let _ = state.save(&self.layout);
         }
+    }
+}
+
+/// What stops the security switch changing (`docs/slots.md`, "The security switch"): an install or a
+/// trial in progress, in either direction; and to on, a trust root with the default and the
+/// running slot verified under it.
+impl SecurityPrecondition for SystemSlots {
+    fn apply(&mut self, on: bool) -> Result<()> {
+        // The boot side's mark: written durably (the marker is a file and its directory is synced).
+        signing::set_security(&self.layout, on).map_err(|_| Status::IO)
+    }
+
+    fn precondition(&mut self, on: bool, into: &mut [u8]) -> Result<usize> {
+        let mut lines = Vec::new();
+        let state = self.state();
+        if self.install.is_some() {
+            lines.push("busy: an install is running".to_string());
+        }
+        if valid_id(&state.trial) {
+            lines.push(format!(
+                "busy: slot '{}' is on trial: confirm it, or let it resolve",
+                state.trial
+            ));
+        }
+        if on {
+            if self.keys.is_empty() {
+                lines.push("missing: no trust root: the keys list (keys in the system-slots config) has no valid line".to_string());
+            }
+            for (role, id) in [
+                ("default", state.default.clone()),
+                ("running", self.running()),
+            ] {
+                if !valid_id(&id) {
+                    lines.push(format!("missing: no {role} slot is set"));
+                } else if Meta::load(&self.layout, &id).get("SIGNATURE") != "verified" {
+                    lines.push(format!(
+                        "missing: {role} slot '{id}' is not verified under the board's keys: install a bundle a listed key signed"
+                    ));
+                }
+            }
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        let bytes = text.as_bytes();
+        into.get_mut(..bytes.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(bytes);
+        Ok(bytes.len())
     }
 }
 

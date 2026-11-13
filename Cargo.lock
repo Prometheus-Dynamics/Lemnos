@@ -620,6 +620,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-contract-security"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+]
+
+[[package]]
+name = "lemnos-contract-security-precondition"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+]
+
+[[package]]
 name = "lemnos-contract-self-test"
 version = "2.0.1-dev"
 dependencies = [
@@ -707,6 +721,8 @@ dependencies = [
  "lemnos-contract-power-monitor",
  "lemnos-contract-power-switch",
  "lemnos-contract-raw-bus",
+ "lemnos-contract-security",
+ "lemnos-contract-security-precondition",
  "lemnos-contract-system-identity",
  "lemnos-contract-system-reboot",
  "lemnos-contract-system-slots",
@@ -721,6 +737,7 @@ dependencies = [
  "lemnos-linux",
  "lemnos-sim",
  "lemnos-sim-walk",
+ "lemnos-slot-store",
  "lemnos-wire",
  "lemnosd",
  "syn 3.0.10",
@@ -1511,6 +1528,7 @@ version = "2.0.1-dev"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "lemnos-contract-indicator",
+ "lemnos-contract-security-precondition",
  "lemnos-contract-system-flash",
  "lemnos-core",
  "lemnos-driver-system-flash-sys",
@@ -1537,11 +1555,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-driver-system-security"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-contract-security",
+ "lemnos-contract-security-precondition",
+ "lemnos-core",
+ "lemnos-slot-store",
+]
+
+[[package]]
 name = "lemnos-driver-system-slots"
 version = "2.0.1-dev"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "lemnos-contract-indicator",
+ "lemnos-contract-security-precondition",
  "lemnos-contract-system-reboot",
  "lemnos-contract-system-slots",
  "lemnos-core",
@@ -2072,6 +2101,7 @@ dependencies = [
  "lemnos-driver-sunxi-vin",
  "lemnos-driver-system-flash",
  "lemnos-driver-system-identity",
+ "lemnos-driver-system-security",
  "lemnos-driver-system-slots",
  "lemnos-driver-thermal-zone",
  "lemnos-driver-usb-gadget",

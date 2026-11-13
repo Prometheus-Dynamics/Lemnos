@@ -43,6 +43,8 @@ const CONTRACTS: &[ContractInfo] = &[
     <dyn lemnos_contract_power_monitor::PowerMonitor as Contract>::INFO,
     <dyn lemnos_contract_power_switch::PowerSwitch as Contract>::INFO,
     <dyn lemnos_contract_raw_bus::RawBus as Contract>::INFO,
+    <dyn lemnos_contract_security::Security as Contract>::INFO,
+    <dyn lemnos_contract_security_precondition::SecurityPrecondition as Contract>::INFO,
     <dyn lemnos_contract_system_identity::SystemIdentity as Contract>::INFO,
     <dyn lemnos_contract_system_reboot::Reboot as Contract>::INFO,
     <dyn lemnos_contract_system_slots::Slots as Contract>::INFO,

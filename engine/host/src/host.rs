@@ -510,10 +510,11 @@ impl Slot {
         entry: Option<DriverEntry>,
         made: Option<(usize, String)>,
         refusal: Option<String>,
+        security: &[(String, OwnedValue)],
     ) -> core::result::Result<Self, BoardError> {
         // A refused device is never bound, so the settings it cannot read are not needed.
         let refused = refusal.is_some();
-        let config = spec
+        let mut config = spec
             .owned_config()
             .or_else(|error| if refused { Ok(Vec::new()) } else { Err(error) })?;
         let lists = spec
@@ -528,6 +529,21 @@ impl Slot {
                 reason: "starting".to_string(),
             }
         };
+        // The security facts go to the device that serves `system.security/1`, and to no other.
+        let serves_security = entry.is_some_and(|e| {
+            e.manifest
+                .provides
+                .iter()
+                .any(|c| c.tag.as_str().starts_with("system.security/"))
+        });
+        if serves_security {
+            for (key, value) in security {
+                if config.iter().any(|(own, _)| own == key) {
+                    return Err(BoardError::Config(spec.id.clone(), key.clone()));
+                }
+                config.push((key.clone(), value.clone()));
+            }
+        }
         Ok(Self {
             index,
             lane_key: match &spec.bus {
@@ -671,6 +687,8 @@ struct Inner {
     clock: Arc<dyn HostClock>,
     options: Options,
     drivers: BTreeMap<&'static str, DriverEntry>,
+    /// The board's `[security]` facts, given to the device that serves `system.security/1`.
+    security: Vec<(String, OwnedValue)>,
     /// Called when a device's next tick moves earlier.
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// The daemon's liveness, which gates the ticks of keep-alive devices. Unset, the gate is
@@ -1275,7 +1293,14 @@ impl Inner {
             let index = slots.len() as u32;
             // The board file was checked, so the entry's config is good.
             let refusal = self.rules[at].refusal.clone();
-            let Ok(slot) = Slot::new(index, spec, entry, Some((at, found)), refusal) else {
+            let Ok(slot) = Slot::new(
+                index,
+                spec,
+                entry,
+                Some((at, found)),
+                refusal,
+                &self.security,
+            ) else {
                 return;
             };
             let slot = Arc::new(slot);
@@ -2398,6 +2423,7 @@ impl Host {
             .iter()
             .map(|spec| refusal_for(board, &spec.device(&spec.pattern), drivers))
             .collect();
+        let security = board.security_config();
         let mut slots = Vec::with_capacity(devices.len());
         for (index, spec) in devices.iter().enumerate() {
             let entry = table.get(spec.driver.as_str()).copied();
@@ -2407,6 +2433,7 @@ impl Host {
                 entry,
                 None,
                 refusals[index].clone(),
+                &security,
             )?));
         }
         let rules = each
@@ -2436,6 +2463,7 @@ impl Host {
             clock,
             options,
             drivers: table,
+            security,
             waker: OnceLock::new(),
             liveness: OnceLock::new(),
             streams,

@@ -177,12 +177,10 @@ the board boots.
 
 ### Where the switch comes from, and the rules that keep a board up
 
-`require_signed` is a setting of the `system-slots` device in the base image's board file (its
-`config` table; `docs/boards.md`). The driver reads it when the daemon starts, and writes it for the
-boot side as a marker, `require-signed`, in the state directory on the data partition. Switching it
-on means editing the board file and restarting the daemon. Nothing in a slot image carries it.
-The first-flash driver has its own `require_signed` in its board-file entry, so the two can differ
-today; unifying the source is a follow-up (see the status note below).
+The switch is not a board-file setting of a driver. It is the view `/etc/board/security`, written from the
+record `[security] record` by the `--security-unit` step at boot, and read by every reader through
+`lemnos_slot_store::security::enforced`. Switching it on is the one switch of the security device (see
+"The security switch"); the per-driver `require_signed` is removed.
 
 The rules, so that a board always comes up:
 
@@ -196,17 +194,20 @@ The rules, so that a board always comes up:
   is recorded in `board/slots/boot-unverified` (the slot's id), which `info` shows as
   `boot_unverified`. A verified boot removes the record.
 
-What is open: the switch is read through one function (`signing::security_on`) and written through
-one (`signing::set_security`), so moving its source later is a change in one place. Orion has its
-own security switch (`security`, read by its node's keys service; the Lemnos bridge does not read
-it), and the two are not yet one setting. That is a follow-up.
+The slot driver's readers read the switch through `lemnos_slot_store::security::enforced` (the view).
+The boot side (slot-init, which runs before the daemon) reads the boot mark `board/slots/require-signed`,
+which the change writes itself, in the order given in "The order of a change" below, and which the daemon
+repairs from the record at each start. So a switch changed while the daemon runs is in force at the next
+boot, even if the board restarts before the daemon does. Orion has its own security switch (`security`, read by its
+node's keys service; the Lemnos bridge does not read it), and the two are not yet one setting. That is
+a follow-up.
 
 ### What this protects, and what it doesn't
 
 The root hash on the kernel command line is only as trustworthy as the boot partition that holds
 the kernel, the initramfs and the command line. dm-verity here gives integrity against
 corruption, and against tampering with the data partition alone. It is **not** verified boot,
-unless the SoC's secure boot verifies the boot partition. When `require_signed` is on, the
+unless the SoC's secure boot verifies the boot partition. When the security switch is on, the
 signature on `slot.json` protects what gets installed, not what boots.
 
 Signing is a board setting. The `keys` file lists the keys the board trusts, one per line: 64 hex
@@ -240,16 +241,181 @@ refusal is `NOT_PERMITTED` with the reason in `list`'s `error`, and nothing is i
   `not_checked_unknown_key`, though that install may have been a bad signature under a known key
   (the record kept no key id), so the label cannot say more.
 
-`info` shows the policy and the last install's signature result: `require_signed`, and
+`info` shows the policy and the last install's signature result: `require_signed` (now always the security view's value, see "The security switch"), and
 `last_install` with `slot` (empty when refused), `signature` (the outcome, or `refused`), `signer`
 and `reason`. The install's job result is still the slot's id.
 
-With `require_signed = true`, a slot whose signature did not verify is never set as the default
-nor tried. The boot side enforces the same: the driver keeps a marker, `require-signed`, in the
-state directory while the setting is on, and the boot program does not start a slot whose
-signature did not verify. It falls back to another slot, as for any failed start, and the slot's
-failure names the signature. So a slot installed with signing off stays installed, but it is not
-bootable once signing is required.
+With the security switch on, only bundles signed by a trusted key install. The switch is off by
+default: see "The security switch" below.
+
+## The security switch
+
+One switch per board, off by default, for everything the board gates on security: the slot driver
+and the first-flash driver. The switch is served by its own device, `system-security`, which serves
+`system.security/1`. The board file says where its facts are, in a `[security]` table, and the
+device takes them as its config (the host gives them to the one device that serves the contract):
+
+```toml
+[security]
+record = "/var/lib/lemnos/security.rec"   # absolute: the switch's truth
+keys = "/etc/lemnos/slot-keys"            # absolute, optional: the trust root the switch checks itself
+orion = false                             # true: Orion ships here, and answers before a switch goes on
+
+[[devices]]
+id = "security"
+driver = "system-security"
+uses = { slots = "slots", flash = "flash" }   # the stakeholders that answer for themselves
+```
+
+- `uses` names the stakeholders: the `system-slots` and `system-flash` devices, which serve
+  `system.security-precondition/1`. Each answers only for itself. A board with neither bound judges
+  on its trust root alone.
+- The view is not configurable. It is rendered into `/run/board`, which the image links `/etc/board`
+  to. A board file that names a view or a render directory (`security_view`, `run`) is refused by name
+  or does not start the driver: no board file can point the switch's readers somewhere else.
+  `require_signed` is refused the same way.
+
+**The view** is `/etc/board/security`: exactly two lines, `on` or `off`, then `generation N`. Absent
+is off. A file that is present but unreadable or not exactly those two lines is corrupt, and corrupt
+is on. Every reader calls one function, `lemnos_slot_store::security::enforced_at`, with the view's
+path. The directory `/etc/board/` is what gets watched: the image makes it a symlink to the tmpfs
+directory `/run/board/`, and the view is replaced by writing a new file beside it and renaming it
+over. The inode changes on each render, and a reader never sees a partial file.
+
+**The truth** is a record of two 512-byte copies, each with a CRC and a sequence number (the
+generation), so a power cut leaves the old value or the new one. The first write is a temporary file
+renamed into place, so a cut before the rename leaves no record (absent, off). A record that is
+present but has no valid copy reads as corrupt (on). The record is written before the view is
+rendered; if the render fails the view is `pending`, the record stands, and each later call retries
+the render. The daemon renders the view from the record again at start.
+
+**A change** (`set`, `lemnos-ctl security DEVICE on|off`) runs: the stakeholders' prechecks; Orion's
+answer when Orion is on the board; the record; the render. Refused by name when a fact stops it.
+Refused in either direction while an install or a trial is running, or a write or verify is running
+on first flash. Off has no other precondition. On needs:
+
+- a trust root (a `keys` list with a valid line), in each stakeholder, or in the switch's own `keys`
+  when no stakeholder is bound;
+- on slots, the default slot and the running slot `verified` under that list;
+- Orion's answer, when `orion = true`. Orion's precheck is not at Orion's current revision, so ON is
+  refused with that reason until it is.
+
+`lemnos-ctl security DEVICE precheck on|off` says what would stop a change, with no change made. The
+switch applies at once: the slot and flash drivers read the view at each decision, with no restart.
+
+`lemnos-ctl security render --record FILE [--dir DIR]` renders the view from a record with no
+daemon. `lemnos-ctl tree BOARD --security-unit FILE` writes the systemd unit that runs it before the
+daemon and the comm core start (`packaging/README.md`, "The security view"). Orion reaches the switch
+through the bridge's generic `<resource>.call` action: `precheck on|off` and `set on|off` are methods of
+the device, so the bridge forwards them like any other.
+
+With the switch on, only bundles signed by a trusted key install, and first flash refuses unsigned
+images (the policy table in "Signing" and "First flash" above).
+
+The board file's `require_signed` (the old per-device key on `system-slots` and `system-flash`) is
+removed. A driver whose config still has it does not start, and `lemnos-ctl validate` names it.
+Replace it with the switch.
+
+### A malformed view, and the way back
+
+The readers read the view file, `/etc/board/security` (the image links it to `/run/board/security`).
+Its one form is `on` or `off`, then `generation N`. A file that is absent reads off. A file that is
+present but unreadable, or not exactly those two lines, reads **on**, whatever the record says. The
+record is the truth; the view is its copy for the readers, rendered at each daemon start and each
+change, and by `lemnos-ctl security render` (below).
+
+A board in that state, with no trust root (no valid line in `keys`):
+
+- **What a person sees.** `lemnos-ctl security state` (method `state` of `system.security/1`) says
+  `view corrupt: readers read on, whatever the record says` and names the render command, next to
+  `switch` (the record's value). `info` (`system.slots/1`, method 14) reports `require_signed: true`:
+  it reads the view, as the readers do, so `info` agrees with the installs. A default that did not
+  verify is named in `list`'s `error`. The path writes no separate log line: the state, `info` and
+  `list` are where it shows.
+- **What works.** Boot of the current default: the boot side reads the boot mark, which the change
+  wrote (or the start repair wrote from the record); an unverified default boots, an
+  unverified trial is refused, as the rules above say. Install of any bundle: refused, `NOT_PERMITTED`,
+  because the board holds no trust root (a bundle is never installed unchecked while the switch
+  reads on). Setting an unverified slot as default or trial: refused. Reading `state`, `info`, `list`:
+  works. `set(off)` (`lemnos-ctl security off`): works, see below.
+- **The way back, without editing files by hand.**
+  1. `lemnos-ctl security render --record FILE --dir /run/board` re-renders the view from the record,
+     with no daemon. A valid record renders its switch; an unreadable record renders on, reported.
+     No restart is needed afterwards for the readers (they read the view at each use).
+  2. A restart of `lemnosd` renders the view from the record too (the driver's start).
+  3. `lemnos-ctl security off` (the device's `set(off)`) writes the record as the next generation, then
+     the view, then clears the boot mark (see "The order of a change"). It needs the daemon. It is refused only while a stakeholder reports work in
+     progress (`busy:`). Turning the switch **on** is never done to fix a view: it is refused until the
+     board has a trust root and its default and running slot verify under it.
+- **The protection, stated plainly.** Turning on needs proof: a trust root, and the default and running
+  slots verified under it. Turning off needs no proof beyond what every daemon call needs, access to the
+  daemon's socket, and the stakeholders' "not busy". So anyone who can call the daemon can turn the switch
+  off, as they can install. A process that can write `/etc/board/security` directly (root on the image)
+  can also set the view; the view is what the readers read until the next render, which the daemon does
+  at its next start or change. Whether `set(off)` should need a proof of presence is a decision for the
+  board's owner, not made here.
+- **A corrupt record** (both copies of the two-copy record unreadable) reads on, and the view is
+  rendered on. `set(off)` writes a valid record as the next generation and repairs both.
+
+### The order of a change, and the boot mark
+
+A change to the switch (`set(on)` or `set(off)`) writes three things, each durable (file and directory
+synced) before the change answers success:
+
+1. **The boot mark**, which slot-init reads before the daemon starts. The stakeholders write it through
+   their `apply(on)` (method 2 of `system.security-precondition/1`; `system-slots` writes the marker
+   `board/slots/require-signed`, `system-flash` has none).
+2. **The record**, the two-copy truth (`lemnos_slot_store::security`).
+3. **The view**, which the readers read (`/etc/board/security`).
+
+The order is what keeps the mark never less strict than the record:
+
+- **To on:** the mark, then the record, then the view. A crash after the mark and before the record leaves
+  the mark on and the record off (stricter). A crash after the record and before the view leaves the view
+  stale (off) until the daemon starts, and the daemon renders the view from the record before it serves.
+- **To off:** the record, then the view, then the mark. A crash after the record leaves the mark on (stricter)
+  until the mark is cleared; the next start clears it from the record.
+
+A **failed** mark stops a change to on before the record is written, so the switch does not change. For a
+change to off, a mark that cannot be cleared is reported as an error, and the mark stays on until the next
+start repairs it.
+
+**The start-up repair.** When the security device starts, it makes each stakeholder's mark match the record
+(`apply(record)`), then the view is rendered from the record. A repair that fails is shown as `last:`
+`boot mark not repaired` in `state`. Whatever a crash left, the first start brings the mark and the view to
+the record before the daemon serves a call.
+
+**The crash points, tested** (`drivers/system-security/src/flow/tests.rs`): a simulated power cut before each
+step of a change to on and of a change to off; after each, the mark is checked never weaker than the record,
+and a restart's repair brings the mark and the view to the record. A change with no fault leaves the mark,
+the record and the view agreeing.
+
+### The Orion precheck (designed, not wired)
+
+With `orion = true` on the board, turning the switch on is refused by name, because Orion cannot yet be
+asked (the marker `ORION-R3` in `drivers/system-security/src/flow.rs`). This section is the contact point
+Orion's side builds to. Nothing here is implemented yet.
+
+- **Where.** The Orion bridge's device serves the contract `system.security-precondition/1`, as the
+  slot and first-flash drivers already do. The board binds it in the `system-security` device:
+  `uses = { orion = "<the bridge device's id>" }`. The driver asks it through the same path as the
+  other stakeholders (`ask("orion", …)`), so its lines are named `orion: …` in the refusal.
+- **What the driver calls.** Method 1, `precondition(on: bool, into: &mut [u8])`, with `on` the value
+  the switch would take and a buffer of `TEXT_MAX` (1024) bytes. The method is the same one the slots
+  and flash answer; Orion's `SecurityPrecheck` is its implementation behind the bridge.
+- **Answer shapes.**
+  - *Yes*: the text has no `missing:` or `busy:` line (empty is the usual form). The driver takes it.
+  - *No, with a reason*: one or more `missing: <reason>` lines (a fact that is not in place), or
+    `busy: <reason>` (work in progress, refused in either direction). The reason is shown in `state`.
+  - *Cannot answer*: any status error from the call (no such method, `NOT_SUPPORTED`, `BUSY` as a status,
+    an I/O failure). The driver refuses with `missing: it did not answer (<status>)`.
+- **Timeout and failure.** The call runs under the host's deadline (`call_deadline_ms`, default 2000 ms;
+  `docs/boards.md`). A call that does not return by then is `TIMED_OUT` and is a refusal, as a status
+  error is. The driver does not retry the precheck on a timer and never assumes Orion's answer: a
+  refusal leaves the switch as it was. A change is asked again by the operator. The switch is never
+  turned on by a timeout, and never turned off by one either.
+- **Until it is bound.** With `orion = true` and no `orion` need, ON is refused by name, as now. With the
+  need bound, the answer above replaces that refusal; `orion = false` boards are not asked at all.
 
 ## Two ways to send a bundle
 
@@ -741,7 +907,7 @@ tree the script prepared. A label with an `fdt` line is refused by name at the e
 [[devices]]
 id = "slots"
 driver = "system-slots"
-config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], keys = "/etc/lemnos/slot-keys", boot_args = "os", require_signed = false, reserve_mb = 2048, keep = 3 }
+config = { data = "/data", boot = "/boot/firmware", record = "tryboot", boot_sources = ["rpi-boot-mode-1=/soc@107c000000/mmc@fff000"], keys = "/etc/lemnos/slot-keys", boot_args = "os", reserve_mb = 2048, keep = 3 }
 # On raw NAND: config = { data = "/data", boot = "/boot", ubi = "ubi0", record = "ubi", boot_args = "os" }
 
 [[devices]]
@@ -768,8 +934,7 @@ comes from), `allow_first_flash` (`false` by default: a write is refused unless 
 only a flasher's board file sets), `kind` (`block`, `file` for a regular file in tests, or `mtd`
 for a raw NAND partition: see "Raw NAND" below),
 `max_dict_mb` (8 by default; 1 to 8, the ceiling: a board file may lower it, never raise it),
-`keys` (the trusted keys: one per line, 64 hex digits, a space, then the owner), `require_signed`
-(`false` by default: the policy table below), and `mountinfo` (the mount table the running-system
+`keys` (the trusted keys: one per line, 64 hex digits, a space, then the owner), and `mountinfo` (the mount table the running-system
 check reads, `/proc/self/mountinfo` by default). A board's `[board] id` is given to the driver, and a
 manifest for another board is refused first.
 
@@ -845,7 +1010,7 @@ The board checks, in order, and before the first byte is written:
 3. The record's key id is looked up in `keys`. A board with no key list has no known keys.
 4. The table decides. The size and the raw SHA-256 are enforced during the stream in every row.
 
-| `require_signed` | image | key | result | outcome |
+| security switch | image | key | result | outcome |
 |---|---|---|---|---|
 | off | unsigned | – | accepted | `not_checked_unsigned` |
 | off | signed | key id in the board's list, signature verifies | accepted | `verified` |
