@@ -209,16 +209,26 @@ fn accept<'a>(_: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
 pub fn settings_refusals(board: &BoardFile, drivers: &[DriverEntry]) -> Vec<(String, String)> {
     let mut refused = Vec::new();
     for device in &board.devices {
-        if let Some(problem) = refusal_of(board, device, drivers) {
+        if let Some(problem) = refusal_for(board, device, drivers) {
             refused.push((device.id.clone(), problem));
         }
     }
     for each in &board.each {
-        if let Some(problem) = refusal_of(board, &each.device(&each.pattern), drivers) {
+        if let Some(problem) = refusal_for(board, &each.device(&each.pattern), drivers) {
             refused.push((each.id.clone(), problem));
         }
     }
     refused
+}
+
+/// The whole reason a device is refused, naming the device, or `None`: the reason the board or the
+/// daemon gives it (already whole), else the reason its driver refuses its settings.
+fn refusal_for(board: &BoardFile, spec: &DeviceSpec, drivers: &[DriverEntry]) -> Option<String> {
+    match &spec.refused {
+        Some(reason) => Some(reason.clone()),
+        None => refusal_of(board, spec, drivers)
+            .map(|problem| format!("device {:?}: {problem}", spec.id)),
+    }
 }
 
 /// The first refusal of [`settings_refusals`] as an error, for `lemnos-ctl validate`.
@@ -231,7 +241,7 @@ pub fn check_settings(
     drivers: &[DriverEntry],
 ) -> core::result::Result<(), BoardError> {
     match settings_refusals(board, drivers).into_iter().next() {
-        Some((id, problem)) => Err(BoardError::Setting(id, problem)),
+        Some((id, reason)) => Err(BoardError::Setting(id, reason)),
         None => Ok(()),
     }
 }
@@ -501,6 +511,14 @@ impl Slot {
         made: Option<(usize, String)>,
         refusal: Option<String>,
     ) -> core::result::Result<Self, BoardError> {
+        // A refused device is never bound, so the settings it cannot read are not needed.
+        let refused = refusal.is_some();
+        let config = spec
+            .owned_config()
+            .or_else(|error| if refused { Ok(Vec::new()) } else { Err(error) })?;
+        let lists = spec
+            .owned_lists()
+            .or_else(|error| if refused { Ok(Vec::new()) } else { Err(error) })?;
         let state = if spec.disabled {
             DeviceState::Off(OffReason::Disabled)
         } else {
@@ -516,8 +534,8 @@ impl Slot {
                 Some(bus) => format!("bus:{bus}"),
                 None => format!("device:{}", spec.id),
             },
-            config: spec.owned_config()?,
-            lists: spec.owned_lists()?,
+            config,
+            lists,
             entry,
             refusal,
             spec,
@@ -2275,37 +2293,6 @@ impl Provider for Binding<'_> {
 }
 
 /// Children before parents, by `uses`. A device named by nothing can go anywhere.
-fn bind_order(devices: &[DeviceSpec]) -> core::result::Result<Vec<usize>, HostError> {
-    fn visit(
-        at: usize,
-        devices: &[DeviceSpec],
-        marks: &mut [u8],
-        order: &mut Vec<usize>,
-    ) -> core::result::Result<(), HostError> {
-        match marks[at] {
-            2 => return Ok(()),
-            1 => return Err(HostError::Cycle(devices[at].id.clone())),
-            _ => {}
-        }
-        marks[at] = 1;
-        for used in devices[at].uses.values() {
-            if let Some(child) = devices.iter().position(|d| d.id == *used) {
-                visit(child, devices, marks, order)?;
-            }
-        }
-        marks[at] = 2;
-        order.push(at);
-        Ok(())
-    }
-
-    let mut marks = vec![0; devices.len()];
-    let mut order = Vec::with_capacity(devices.len());
-    for at in 0..devices.len() {
-        visit(at, devices, &mut marks, &mut order)?;
-    }
-    Ok(order)
-}
-
 impl Host {
     /// Starts every device. A device that can't start is left retrying, and
     /// never stops the others; only a board that can't be ordered is refused.
@@ -2353,56 +2340,63 @@ impl Host {
         allocator: Arc<dyn StreamAllocator>,
     ) -> core::result::Result<Self, HostError> {
         let options = board.host.apply(options);
-        let order = bind_order(&board.devices)?;
         let table: BTreeMap<_, _> = drivers
             .iter()
             .map(|driver| (driver.manifest.name, *driver))
             .collect();
-        // Each device's streams take the kinds its driver declares (`resolve_kinds`), so a board
-        // file that contradicts a driver is refused here, by name.
+        // Each device's streams take the kinds its driver declares (`resolve_kinds`). One whose kinds
+        // cannot be resolved is refused by name, and the rest of the board runs.
         let mut devices = board.devices.clone();
         for spec in &mut devices {
             let entry = table.get(spec.driver.as_str()).copied();
-            resolve_kinds(
+            if let Err(error) = resolve_kinds(
                 &spec.driver,
                 entry.as_ref().map(|e| &e.manifest),
                 &mut spec.streams,
-            )?;
+            ) && spec.refused.is_none()
+            {
+                spec.refused = Some(format!("device {:?}: {error}", spec.id));
+            }
         }
-        for each in &board.each {
-            let entry = table.get(each.driver.as_str()).copied();
-            let mut streams = each.streams.clone();
-            resolve_kinds(
-                &each.driver,
+        let mut each = board.each.clone();
+        for spec in &mut each {
+            let entry = table.get(spec.driver.as_str()).copied();
+            let mut streams = spec.streams.clone();
+            if let Err(error) = resolve_kinds(
+                &spec.driver,
                 entry.as_ref().map(|e| &e.manifest),
                 &mut streams,
-            )?;
+            ) && spec.refused.is_none()
+            {
+                spec.refused = Some(format!("device {:?}: {error}", spec.id));
+            }
         }
-        let refusals = settings_refusals(board, drivers);
+        let order = crate::board::bind_order(&devices);
+        let refusals: Vec<Option<String>> = devices
+            .iter()
+            .map(|spec| refusal_for(board, spec, drivers))
+            .collect();
+        let each_refusals: Vec<Option<String>> = each
+            .iter()
+            .map(|spec| refusal_for(board, &spec.device(&spec.pattern), drivers))
+            .collect();
         let mut slots = Vec::with_capacity(devices.len());
         for (index, spec) in devices.iter().enumerate() {
             let entry = table.get(spec.driver.as_str()).copied();
-            let refusal = refusals
-                .iter()
-                .find(|(id, _)| *id == spec.id)
-                .map(|(id, problem)| format!("device {id:?}: {problem}"));
             slots.push(Arc::new(Slot::new(
                 index as u32,
                 spec.clone(),
                 entry,
                 None,
-                refusal,
+                refusals[index].clone(),
             )?));
         }
-        let rules = board
-            .each
+        let rules = each
             .iter()
-            .map(|spec| Rule {
+            .zip(&each_refusals)
+            .map(|(spec, refusal)| Rule {
                 spec: spec.clone(),
-                refusal: refusals
-                    .iter()
-                    .find(|(id, _)| *id == spec.id)
-                    .map(|(id, problem)| format!("device {id:?}: {problem}")),
+                refusal: refusal.clone(),
                 hinted: AtomicBool::new(false),
                 next_look_ns: AtomicU64::new(0),
                 looked_ns: AtomicU64::new(0),

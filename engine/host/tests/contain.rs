@@ -256,22 +256,39 @@ fn an_unknown_driver_stops_only_its_own_device() {
     assert_eq!(host.device("b").unwrap().state, DeviceState::Running);
 }
 
+/// A loop of `uses` refuses the device that closes it, with the loop named. The rest of the board
+/// starts: the other device of the loop is not refused, and it binds.
 #[test]
-fn devices_in_a_circle_are_refused() {
+fn devices_in_a_circle_are_refused_at_the_device_that_closes_it() {
     let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
         [[devices]]\nid = \"a\"\ndriver = \"x\"\nuses = { n = \"b\" }\n\
-        [[devices]]\nid = \"b\"\ndriver = \"x\"\nuses = { n = \"a\" }\n";
-    let board = lemnos_host::board::parse(text).unwrap();
+        [[devices]]\nid = \"b\"\ndriver = \"x\"\nuses = { n = \"a\" }\n\
+        [[devices]]\nid = \"c\"\ndriver = \"fake-counter\"\n";
+    // The strict reader refuses the board by the loop; the lenient one keeps it.
+    let error = lemnos_host::board::parse(text).unwrap_err().to_string();
+    assert!(
+        error.contains("\"a\"") && error.contains("lead back to itself"),
+        "{error}"
+    );
+    let board = lemnos_host::board::parse_lenient(text).unwrap();
     let sim = lemnos_sim::SimBoard::new();
     let clock = sim.clock();
-    let result = lemnos_host::Host::start(
+    let host = lemnos_host::Host::start(
         &board,
         &common::drivers(),
         Box::new(sim),
         std::sync::Arc::new(clock),
         Options::default(),
+    )
+    .expect("the board starts");
+    let DeviceState::Backoff { reason, .. } = host.device("a").unwrap().state else {
+        panic!("a closes the loop and should be refused");
+    };
+    assert!(
+        reason.contains("lead back to itself through device \"b\""),
+        "{reason}"
     );
-    assert!(matches!(result, Err(lemnos_host::HostError::Cycle(_))));
+    assert_eq!(host.device("c").unwrap().state, DeviceState::Running);
 }
 
 #[test]

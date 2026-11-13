@@ -164,6 +164,12 @@ fn validate(path: &str, socs: Option<&str>, live: bool, out: &mut dyn Write) -> 
     // device: a setting a driver refuses is refused here, by device and key.
     lemnos_host::check_settings(&board, &lemnosd::builtin::drivers())
         .map_err(|e| format!("{path}: {e}"))?;
+    // A gadget whose `identity` names no device of this board, or one that is not the identity
+    // device, is refused here by the same check the daemon's start makes: the daemon would start
+    // without that gadget.
+    if let Some((device, reason)) = lemnosd::gadget::link_refusals(&board).into_iter().next() {
+        return Err(format!("{path}: device {device:?}: {reason}"));
+    }
     // A link names a device of this board, and not the device itself. Whether the two ends agree
     // is only known to a running host, which checks it at bind.
     for device in &board.devices {

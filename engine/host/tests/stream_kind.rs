@@ -7,7 +7,7 @@ use lemnos_core::{
     BusKind, Config, Driver, Manifest, Need, NeedKind, Resources, Result as CoreResult, StreamKind,
 };
 use lemnos_host::board::parse;
-use lemnos_host::{Host, Options, entry};
+use lemnos_host::{DeviceState, Host, Options, entry};
 use lemnos_sim::SimBoard;
 
 /// Serves `frames` as a job-driven stream.
@@ -112,16 +112,21 @@ fn a_board_that_states_no_kind_takes_the_drivers() {
     assert!(start(&board("free-source", None), &[entry::<FreeSource>()]).is_ok());
 }
 
+/// A stream a driver package declares no kind for: its device is refused by name, with the reason,
+/// and the board starts.
 #[test]
 fn a_packaged_stream_with_no_declared_kind_is_refused_by_name() {
-    let error = start(
+    let host = start(
         &board("packaged-source", None),
         &[entry::<PackagedSource>()],
     )
-    .err()
-    .expect("refused");
+    .expect("the board starts");
+    let DeviceState::Backoff { reason, .. } = host.device("a").unwrap().state else {
+        panic!("the device should be refused");
+    };
     assert!(
-        error.contains("stream `frames` of driver `packaged-source` declares no kind"),
-        "{error}"
+        reason.starts_with("device \"a\": ")
+            && reason.contains("stream `frames` of driver `packaged-source` declares no kind"),
+        "{reason}"
     );
 }

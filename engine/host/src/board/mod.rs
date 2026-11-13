@@ -26,11 +26,13 @@ pub enum BoardError {
     Duplicate(String),
     #[error("device {0:?} uses itself")]
     SelfUse(String),
+    #[error("device {0:?}: its `uses` lead back to itself through device {1:?}")]
+    Loop(String, String),
     #[error("device {0:?} config key {1:?}: values are numbers, booleans or strings")]
     Config(String, String),
     /// A setting a driver refuses, by device id, with the driver's own words for it (naming the
     /// key). Found by [`check_settings`](crate::check_settings) with no hardware.
-    #[error("device {0:?}: {1}")]
+    #[error("{1}")]
     Setting(String, String),
     #[error("device {0:?} stream {1:?}: its numbers are out of range")]
     Stream(String, String),
@@ -532,6 +534,11 @@ pub struct DeviceSpec {
     /// stops being fed when the daemon is not. Left out, it is an ordinary device.
     #[serde(default)]
     pub keepalive: bool,
+    /// Why the daemon makes nothing of this device, set by [`parse_lenient`] for a problem of the
+    /// device's own, or by the daemon's start for a gadget it cannot set up. The file cannot set
+    /// it (it is not read from the file). A refused device shows failed with this reason.
+    #[serde(skip)]
+    pub refused: Option<String>,
 }
 
 /// One device for each resource the backend finds that fits a pattern: a USB camera of any make
@@ -566,6 +573,10 @@ pub struct EachSpec {
     /// As in a device, for each device made.
     #[serde(default)]
     pub auto_off_after: Option<u32>,
+    /// As in a device: a problem with the entry itself, and the reason. Every device the entry
+    /// would make is refused with it. Not read from the file.
+    #[serde(skip)]
+    pub refused: Option<String>,
 }
 
 /// What joins an `[[each]]` entry's id to the resource a device of it was made for.
@@ -602,6 +613,7 @@ impl EachSpec {
             streams: self.streams.clone(),
             auto_off_after: self.auto_off_after,
             keepalive: false,
+            refused: self.refused.clone(),
         }
     }
 }
@@ -691,9 +703,35 @@ impl DeviceSpec {
     }
 }
 
-/// Parses and checks a board file. Unknown keys are refused by name.
+/// Parses and checks a board file. Unknown keys are refused by name. The first problem with a
+/// device or an `[[each]]` entry is the error; [`parse_lenient`] keeps such a board instead.
 pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
-    let board: BoardFile = toml::from_str(text).map_err(|e| BoardError::Parse(e.to_string()))?;
+    let (board, problems) = parse_checked(text)?;
+    match problems.into_iter().next() {
+        Some(error) => Err(error),
+        None => Ok(board),
+    }
+}
+
+/// [`parse`] for a daemon's start. A device or `[[each]]` entry with a problem of its own (a
+/// duplicate id, a `config` value that is not a number, boolean, string or list of strings, a
+/// stream the driver cannot take, a `uses` loop) is kept, with [`DeviceSpec::refused`] set to the
+/// reason. The host lists it failed and makes nothing of it; the rest of the board runs.
+///
+/// A file that is not TOML, has no `[board]`, or has a format, schema or `[host]` value this build
+/// does not read is still an error: nothing in it can be run.
+///
+/// # Errors
+///
+/// The whole-file problems above.
+pub fn parse_lenient(text: &str) -> Result<BoardFile, BoardError> {
+    parse_checked(text).map(|(board, _)| board)
+}
+
+/// The board, with each device and entry that has a problem marked, and the problems in file order.
+fn parse_checked(text: &str) -> Result<(BoardFile, Vec<BoardError>), BoardError> {
+    let mut board: BoardFile =
+        toml::from_str(text).map_err(|e| BoardError::Parse(e.to_string()))?;
     if board.format != FORMAT {
         return Err(BoardError::Format(board.format));
     }
@@ -701,51 +739,145 @@ pub fn parse(text: &str) -> Result<BoardFile, BoardError> {
         return Err(BoardError::Version(board.schema_version));
     }
     board.host.check()?;
+    let mut problems = Vec::new();
     let mut seen = BTreeSet::new();
-    for device in &board.devices {
-        if !seen.insert(device.id.as_str()) {
-            return Err(BoardError::Duplicate(device.id.clone()));
+    for device in &mut board.devices {
+        if let Some(error) = device_problem(device, &mut seen) {
+            device.refused = Some(error.to_string());
+            problems.push(error);
         }
-        if device.id.contains(EACH_SEPARATOR) {
-            return Err(BoardError::At(device.id.clone()));
-        }
-        if device.uses.values().any(|used| *used == device.id) {
-            return Err(BoardError::SelfUse(device.id.clone()));
-        }
-        if device.auto_off_after == Some(0) {
-            return Err(BoardError::AutoOff(device.id.clone()));
-        }
-        device.owned_config()?;
-        device.owned_lists()?;
-        check_streams(&device.id, &device.driver, &device.streams)?;
     }
     let mut rules = BTreeSet::new();
-    for each in &board.each {
-        if !rules.insert(each.id.as_str()) {
-            return Err(BoardError::Duplicate(each.id.clone()));
+    for each in &mut board.each {
+        if let Some(error) = each_problem(each, &mut rules) {
+            each.refused = Some(error.to_string());
+            problems.push(error);
         }
-        if each.id.contains(EACH_SEPARATOR) {
-            return Err(BoardError::At(each.id.clone()));
-        }
-        if each.pattern.is_empty() {
-            return Err(BoardError::EmptyMatch(each.id.clone()));
-        }
-        if each.auto_off_after == Some(0) {
-            return Err(BoardError::AutoOff(each.id.clone()));
-        }
-        if let Some(need) = &each.need
-            && (each.uses.contains_key(need) || each.streams.contains_key(need))
-        {
-            return Err(BoardError::NeedTwice(each.id.clone(), need.clone()));
-        }
-        // Checked as the entry of a device made for it would be.
-        let mut device = each.device(&each.pattern);
-        device.id.clone_from(&each.id);
-        device.owned_config()?;
-        device.owned_lists()?;
-        check_streams(&each.id, &each.driver, &each.streams)?;
     }
-    Ok(board)
+    // Loops among `uses` come after the entries' own problems, in the order the devices bind.
+    problems.extend(mark_loops(&mut board.devices));
+    Ok((board, problems))
+}
+
+/// The first problem a device has of its own, checked in the order the file has always been read.
+fn device_problem(device: &DeviceSpec, seen: &mut BTreeSet<String>) -> Option<BoardError> {
+    if !seen.insert(device.id.clone()) {
+        return Some(BoardError::Duplicate(device.id.clone()));
+    }
+    if device.id.contains(EACH_SEPARATOR) {
+        return Some(BoardError::At(device.id.clone()));
+    }
+    if device.uses.values().any(|used| *used == device.id) {
+        return Some(BoardError::SelfUse(device.id.clone()));
+    }
+    if device.auto_off_after == Some(0) {
+        return Some(BoardError::AutoOff(device.id.clone()));
+    }
+    if let Err(error) = device.owned_config() {
+        return Some(error);
+    }
+    if let Err(error) = device.owned_lists() {
+        return Some(error);
+    }
+    check_streams(&device.id, &device.driver, &device.streams).err()
+}
+
+/// The first problem an `[[each]]` entry has of its own, as [`device_problem`] for a device.
+fn each_problem(each: &EachSpec, rules: &mut BTreeSet<String>) -> Option<BoardError> {
+    if !rules.insert(each.id.clone()) {
+        return Some(BoardError::Duplicate(each.id.clone()));
+    }
+    if each.id.contains(EACH_SEPARATOR) {
+        return Some(BoardError::At(each.id.clone()));
+    }
+    if each.pattern.is_empty() {
+        return Some(BoardError::EmptyMatch(each.id.clone()));
+    }
+    if each.auto_off_after == Some(0) {
+        return Some(BoardError::AutoOff(each.id.clone()));
+    }
+    if let Some(need) = &each.need
+        && (each.uses.contains_key(need) || each.streams.contains_key(need))
+    {
+        return Some(BoardError::NeedTwice(each.id.clone(), need.clone()));
+    }
+    // Checked as the entry of a device made for it would be.
+    let mut device = each.device(&each.pattern);
+    device.id.clone_from(&each.id);
+    if let Err(error) = device.owned_config() {
+        return Some(error);
+    }
+    if let Err(error) = device.owned_lists() {
+        return Some(error);
+    }
+    check_streams(&each.id, &each.driver, &each.streams).err()
+}
+
+/// Marks the device that closes each loop of `uses`: a device whose `uses` lead back to a device
+/// still on the walk's path. That device is refused, so the loop is broken there and the rest of the
+/// board is ordered. Returns the loops found, as problems, in the order the walk found them.
+fn mark_loops(devices: &mut [DeviceSpec]) -> Vec<BoardError> {
+    fn visit(
+        at: usize,
+        from: Option<usize>,
+        devices: &mut [DeviceSpec],
+        marks: &mut [u8],
+        found: &mut Vec<BoardError>,
+    ) {
+        match marks[at] {
+            2 => return,
+            1 => {
+                let through = from.map(|f| devices[f].id.clone()).unwrap_or_default();
+                let id = devices[at].id.clone();
+                if devices[at].refused.is_none() {
+                    let error = BoardError::Loop(id, through);
+                    devices[at].refused = Some(error.to_string());
+                    found.push(error);
+                }
+                return;
+            }
+            _ => {}
+        }
+        marks[at] = 1;
+        let uses: Vec<String> = devices[at].uses.values().cloned().collect();
+        for used in uses {
+            if let Some(child) = devices.iter().position(|d| d.id == used) {
+                visit(child, Some(at), devices, marks, found);
+            }
+        }
+        marks[at] = 2;
+    }
+    let mut marks = vec![0; devices.len()];
+    let mut found = Vec::new();
+    for at in 0..devices.len() {
+        visit(at, None, devices, &mut marks, &mut found);
+    }
+    found
+}
+
+/// The order the devices bind in: each after the devices its `uses` name, with the loops of
+/// [`mark_loops`] broken at the devices it refused. Every device is in the order once.
+#[must_use]
+pub(crate) fn bind_order(devices: &[DeviceSpec]) -> Vec<usize> {
+    fn visit(at: usize, devices: &[DeviceSpec], marks: &mut [u8], order: &mut Vec<usize>) {
+        if marks[at] != 0 {
+            return;
+        }
+        marks[at] = 1;
+        for used in devices[at].uses.values() {
+            if let Some(child) = devices.iter().position(|d| d.id == *used) {
+                visit(child, devices, marks, order);
+            }
+        }
+        marks[at] = 2;
+        order.push(at);
+    }
+    let mut marks = vec![0; devices.len()];
+    let mut order = Vec::with_capacity(devices.len());
+    for at in 0..devices.len() {
+        visit(at, devices, &mut marks, &mut order);
+    }
+    order
 }
 
 fn check_streams(

@@ -30,7 +30,10 @@ device is listed as failed, with its key and the reason in its state (`lemnos-ct
 `retrying  failed`, with the reason in brackets), the daemon says so at start, and every other device
 runs. A device that uses or is linked to the refused one behaves as it does when that device fails
 to bind. `lemnosd --check` refuses the board, as validate does. Only a file that is not a board at all
-(not TOML, or no `[board]`) stops the daemon from starting. A check that needs the hardware (a
+(not TOML, or no `[board]`) stops the daemon from starting. The same holds for a device whose own
+entry is wrong (a duplicate id, a `config` value in no readable form, a stream its driver cannot take)
+and for a loop of `uses`, which refuses the device that closes it. The full list of what stops the
+daemon at start is in [Start-up](daemon.md#start-up). A check that needs the hardware (a
 register the chip answers, a device node that opens, the board's serial) is not made here: it is
 checked when the driver binds, and a device that fails to bind is listed with the reason.
 
@@ -692,8 +695,9 @@ config = { vendor = 0x1209, product = 0x0001, identity = "identity", interfaces 
 
 - `identity` (optional) names the `system-identity` device. Without it, or with a serial that cannot
   be read, the gadget has no board serial. A board file that names a device that is not there, or
-  one that is not a `system-identity` device, is refused. The board file may not set `board_serial`
-  or `board_serial_error` itself: the daemon writes them.
+  one that is not a `system-identity` device, is refused: `lemnos-ctl validate` refuses the board, and
+  the daemon starts without the gadget, which shows failed with the reason. The board file may not set
+  `board_serial` or `board_serial_error` itself: the daemon writes them.
 - `serial` (optional string) is the USB serial string the host shows. It defaults to the board
   serial. With neither, the device has no serial string and its health is `Degraded` with the
   reason. Nothing is invented.
@@ -759,9 +763,9 @@ read and write. `lemnos-ctl tree BOARD --udev FILE` writes the udev rules for th
 `/dev/lemnos` and `/dev/lemnos-*` (the module's nodes), and each dma-heap the board uses
 (`/dev/dma_heap/<name>`, from `[host] dma_heaps` and the dma-buf streams). Install it as
 `/usr/lib/udev/rules.d/71-lemnos-board.rules`, beside `70-lemnos.rules`. The daemon checks, after its
-drop, each of those nodes that exists, and refuses to start when the group cannot read and write one,
+drop, each of those nodes that exists. One the group cannot read and write is a line on the error output,
 naming it (`/dev/dma_heap/linux,cma: not readable/writable by group lemnos: install the generated udev
-fragment`). The unit (`packaging/systemd/lemnosd.service`) has no `DeviceAllow=` or `DevicePolicy=`,
+fragment`); the devices that open it fail at their bind with their own reason, and the daemon starts. The unit (`packaging/systemd/lemnosd.service`) has no `DeviceAllow=` or `DevicePolicy=`,
 so systemd filters no device and the unit names no heap.
 
 `lemnos-ctl tree BOARD --mdev FILE` writes the same permissions for a BusyBox image, as `/etc/mdev.conf`
