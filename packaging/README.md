@@ -177,9 +177,13 @@ script. The init scripts and the mdev fragment are untested on board.
 `LEMNOS_ORION_USER` (`lemnos-orion`), with the supplementary groups `LEMNOS_ORION_GROUPS` (`lemnos` for
 lemnosd's socket and the slot's `.incoming` directory, and the Orion node's group, which the image names).
 Its settings are in `/etc/lemnos/lemnos-orion.env`, which both `lemnos-orion.service` and
-`S51lemnos-orion` read. The bridge's code does not open `.incoming` itself: the group is granted for the
-installs the slot driver reads there. The bridge reads and writes no files of its own, and its unit is
-hardened to `AF_UNIX` only, with no capability. Widen the address families only if the node is reached
+`S51lemnos-orion` read.
+
+The bridge writes files only into the directories `LEMNOS_ORION_FILES` names (`slots=/data/slots/.incoming`):
+files sent through Orion to a device that takes them (see [docs/daemon.md](../docs/daemon.md#lemnos-orion)).
+The group `lemnos` gives it a slot device's `.incoming`, which the driver keeps mode 0770. Under systemd,
+`ProtectSystem=strict` makes the filesystem read-only, so each directory goes into a drop-in as
+`ReadWritePaths=<dir>`. The bridge writes nothing else, and its unit is hardened to `AF_UNIX` only, with no capability. Widen the address families only if the node is reached
 over TCP.
 
 ## Settings

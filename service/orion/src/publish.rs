@@ -33,7 +33,7 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use lemnos_client::{DeviceHealth, DeviceState};
 
 use crate::backoff::Backoff;
-use crate::calls::{Done, Job, Verb};
+use crate::calls::{Done, Job, Message, Progress, Verb};
 use crate::config::Config;
 use crate::mirror::{Changes, DeviceSpec, Status, health_name, state_name};
 use crate::values::{Plain, Reading};
@@ -71,7 +71,7 @@ const fn text_field(name: &'static str) -> Field<'static> {
 
 /// Publishes what lemnosd has, for as long as the process runs or until `shared` is stopped.
 /// Runs of the devices' actions go to `jobs`, and come back through `shared`.
-pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Job>) {
+pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
     let mut backoff = Backoff::new();
     let mut number = 0u64;
     let mut changes = Changes::default();
@@ -83,6 +83,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Job>) {
             wait_bell(shared, IDLE);
             shared.take_done(&mut done);
             done.clear();
+            shared.take_progress(&mut Vec::new());
             continue;
         }
         number += 1;
@@ -221,17 +222,19 @@ impl Session {
     fn serve(
         &mut self,
         shared: &Shared,
-        jobs: &Sender<Job>,
+        jobs: &Sender<Message>,
         changes: &mut Changes,
         done: &mut Vec<Done>,
     ) -> End {
+        let mut progress = Vec::new();
         loop {
             if shared.stopping() {
                 return End::Stopped;
             }
             shared.take_done(done);
+            shared.take_progress(&mut progress);
             let turned = self
-                .runs(jobs, done)
+                .runs(jobs, done, &mut progress)
                 .and_then(|()| {
                     shared.with(|mirror| mirror.take(changes));
                     if changes.generation == self.generation {
@@ -258,8 +261,26 @@ impl Session {
 
     /// Takes in what the comm core sent, hands new runs to the call thread, and answers the
     /// runs that ended.
-    fn runs(&mut self, jobs: &Sender<Job>, done: &mut Vec<Done>) -> Result<(), Error> {
+    fn runs(
+        &mut self,
+        jobs: &Sender<Message>,
+        done: &mut Vec<Done>,
+        progress: &mut Vec<Progress>,
+    ) -> Result<(), Error> {
         self.orion.client().drain()?;
+        for p in progress.drain(..) {
+            if p.session != self.number || !self.pending.contains(&p.call) {
+                continue;
+            }
+            if let Some(requests) = self.requests() {
+                requests.progress(
+                    p.call,
+                    p.percent(),
+                    &format!("{} of {}", p.done, p.total),
+                    &p.data(),
+                )?;
+            }
+        }
         for finished in done.drain(..) {
             if finished.session != self.number || !self.pending.remove(&finished.call) {
                 continue;
@@ -280,22 +301,30 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
-            // A call to a device cannot be stopped part-way: a cancelled run ends as the
-            // call does.
-            let Request::Run {
-                call,
-                name,
-                target,
-                args,
-                ..
-            } = request
-            else {
-                continue;
+            let (call, name, target, args) = match request {
+                Request::Run {
+                    call,
+                    name,
+                    target,
+                    args,
+                    ..
+                } => (call, name, target, args),
+                // A long job is cancelled; a plain call cannot be stopped part-way, so it ends as
+                // the call does.
+                Request::Cancel { call } => {
+                    if self.pending.contains(&call) {
+                        let _ = jobs.send(Message::Cancel {
+                            session: self.number,
+                            call,
+                        });
+                    }
+                    continue;
+                }
             };
             let job = self.job(call, &name, &target, args);
             match job {
                 Ok(job) => {
-                    if jobs.send(job).is_ok() {
+                    if jobs.send(Message::Run(job)).is_ok() {
                         self.pending.insert(call);
                     } else if let Some(requests) = self.requests() {
                         requests.finish(

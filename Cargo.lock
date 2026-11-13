@@ -1629,6 +1629,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-core",
+ "lemnos-driver-system-slots",
  "lemnos-fake-devices",
  "lemnos-host",
  "lemnos-linux-sys",
@@ -1640,6 +1641,7 @@ dependencies = [
  "orion-node-app",
  "orion-stubs",
  "rustix",
+ "sha2 0.10.9",
  "tokio",
 ]
 
@@ -1852,6 +1854,7 @@ source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=61e95a426a74f
 dependencies = [
  "orion-actions",
  "orion-connect",
+ "orion-files",
  "orion-identity",
  "orion-msg-peers",
  "orion-msg-session",
@@ -2032,6 +2035,18 @@ dependencies = [
  "orion-wire",
  "sha2 0.11.1",
  "tracing",
+]
+
+[[package]]
+name = "orion-files"
+version = "1.0.1-dev"
+source = "git+https://github.com/Prometheus-Dynamics/Orion.git?rev=61e95a426a74fcd129be15a41015c446ea304133#61e95a426a74fcd129be15a41015c446ea304133"
+dependencies = [
+ "orion-connect",
+ "orion-msg-files",
+ "orion-types",
+ "orion-wire",
+ "sha2 0.11.1",
 ]
 
 [[package]]

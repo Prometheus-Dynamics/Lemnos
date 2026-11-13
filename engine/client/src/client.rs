@@ -105,6 +105,12 @@ impl Client {
         self.lock().next_job_event()
     }
 
+    /// See [`Session::wait_job_event`]. Holds the connection while it waits: other threads'
+    /// calls wait too.
+    pub fn wait_job_event(&self, timeout: Duration) -> Option<JobEvent> {
+        self.lock().wait_job_event(timeout)
+    }
+
     pub fn subscribe(
         &self,
         handle: &mut Handle,

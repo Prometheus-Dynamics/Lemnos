@@ -113,19 +113,27 @@ the board boots.
 
 - **The root hash** reaches the initramfs on the kernel command line
   (`<boot_args>.roothash=`). That line is in the slot's boot directory, next to the kernel and
-  initramfs, so it is exactly as trustworthy as the kernel and initramfs: as much as the board's
-  boot chain makes them.
+  initramfs, so it is exactly as trustworthy as the kernel and initramfs, and no more (see
+  [What this protects](#what-this-protects-and-what-it-doesnt)).
 - **The other values** are read at boot from `slots/<id>.json` on the data partition, which
   nothing verifies at boot. Every one of them is bound by the root hash:
   - The salt goes into every hash.
   - The block count sets the tree's shape, and the root covers that shape.
   - The offset only says where to read the tree.
 
-  So a wrong value makes dm-verity fail. It can never make a different filesystem pass.
+  So a wrong value makes dm-verity fail. With the root hash as given, it can never make a different filesystem pass.
   `slot-init` also refuses a manifest whose `root_hash` differs from the command line's.
 - **The fixed parameters** (algorithm, block sizes, format) are in `slot-init` itself.
 - **The image's superblock** sits inside the image. It is covered by `image.sha256` at install,
   but nothing checks it at boot, so nothing at boot relies on it.
+
+### What this protects, and what it doesn't
+
+The root hash on the kernel command line is only as trustworthy as the boot partition that holds
+the kernel, the initramfs and the command line. dm-verity here gives integrity against
+corruption, and against tampering with the data partition alone. It is **not** verified boot,
+unless the SoC's secure boot verifies the boot partition. When `require_signed` is on, the
+signature on `slot.json` protects what gets installed, not what boots.
 
 Signing is a board setting. The `keys` file lists the keys the board trusts, one per line: 64 hex
 digits, a space, then the key's owner. A signature that is present is always checked. `list`
@@ -154,6 +162,22 @@ default.
 
 Both ways feed the same unpacker and the same checks. A job's progress is the bytes taken of the
 size. Its result is the new slot's id. One install runs at a time.
+
+## Over Orion
+
+Orion frames are at most 64 KiB, so a bundle doesn't travel as an action argument. With
+`LEMNOS_ORION_FILES=slots=<data>/slots/.incoming` set for `lemnos-orion`
+([lemnos-orion](daemon.md#lemnos-orion)), a sender does this:
+
+1. Pushes the bundle with Orion's file delivery to `lemnos/slots/<name>`. The bridge asks the
+   driver's `accept` with the size first. A board without room rejects the push before a byte
+   is sent. The bridge checks the SHA-256 and only then renames the file into `.incoming/<name>`.
+2. Runs `lemnos.slots.call` with `install_file <name> <pin> <keep_old>`. The install's progress
+   is the run's progress, its slot id is the run's output, and cancelling the run cancels the
+   install. The driver deletes the file when the job ends.
+
+Tested against a real Orion node and comm core on a PC, in-process
+(`service/orion/tests/files.rs`). There, pushes of up to 258 MiB were committed.
 
 ## Actions
 

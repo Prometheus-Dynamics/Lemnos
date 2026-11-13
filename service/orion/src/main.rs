@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, mpsc};
 
 use lemnos_orion::config::Config;
-use lemnos_orion::{Shared, calls, log, publish, source};
+use lemnos_orion::{Shared, calls, files, log, publish, source};
 
 fn main() -> ExitCode {
     let config = match Config::from_env() {
@@ -52,6 +52,13 @@ fn main() -> ExitCode {
             std::thread::Builder::new()
                 .name("calls".to_owned())
                 .spawn(move || calls::run(&socket, &queue, &shared))
+        },
+        {
+            let config = config.clone();
+            let shared = Arc::clone(&shared);
+            std::thread::Builder::new()
+                .name("files".to_owned())
+                .spawn(move || files::run(&config, &shared))
         },
     ];
     for thread in threads {
