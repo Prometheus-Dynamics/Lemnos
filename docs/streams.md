@@ -553,6 +553,8 @@ by `region` and `buffer_handle`. The shm crates are unchanged, and the stand-ins
 detail: a pool view of an unmapped stream is never asked for a byte, which is what
 `FrameStream::is_mapped()` guards.
 
+**What the stand-ins cost, until they go.** An unmapped stream's view holds one duplicate of the stand-in per pool descriptor: one for a shared pool, one per buffer plane for a stream of dma-bufs. Each is a descriptor in the process, so on a large pool it counts against the process's descriptor limit (`RLIMIT_NOFILE`), on top of the real descriptors. Each is also mapped across the reach of its descriptor's buffers, which takes that much of the process's virtual address space; the pages are never touched, so nothing resident is used. Both costs go when the stand-ins go.
+
 **How `writable` is decided.** Without a mapping, `Region.writable` is read from the descriptor:
 
 - the access mode (`F_GETFL`): a descriptor opened read-only gives `false`;
