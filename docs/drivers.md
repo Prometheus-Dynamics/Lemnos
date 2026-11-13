@@ -84,10 +84,43 @@ python3 scripts/generate-builtins.py --check
 | `rkcif` | `camera.receiver/1` | the vendor kernel's media graph; optional `frames` stream | Serves its contract. Routes a MIPI channel and says which ISP it feeds. Frames only on the raw path, when `frames` and `capture` are set |
 | `rkisp` | `camera.isp/1` | the vendor kernel's ISP nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream: frames come from the receiver |
 | `sunxi-vin` | `camera.receiver/1` | the vendor kernel's capture node; `frames` stream | Serves its contract |
-| `isp600` | `camera.isp/1`, `isp.isp600/1` | the vendor kernel's nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream |
+| `isp600` | `camera.isp/1`, `isp.isp600/1` | the vendor kernel's nodes; `config`, `statistics`, `output0` streams | Serves its contract. No input stream. Tuning is the caller's: only the blocks in [ISP600 tuning](#isp600-tuning-what-is-public) are encoded, and the rest are unsupported |
 | `k230-capture` | `camera.receiver/1` | `lemnos.ko` (`k230_isp`), or the vendor node with `dma`: `dma:BLOCK` from the kernel module; `frames` stream | Serves its contract. On the module's way it holds the ISP's frames role, so `k230isp` can configure the same ISP and read its statistics at once. The register facts it relies on are unconfirmed |
 | `k230isp` | `camera.isp/1` | the vendor node, or `lemnos.ko` (`k230_isp`); `config`, `statistics` streams | Configuration and statistics only: inputs and outputs are refused, and no register that takes an address can be written. On the module's way it holds the ISP's configuration role, beside `k230-capture`'s frames. Frames through one driver go through `k230isp-frames` |
 | `k230isp-frames` | `camera.isp/1` | `lemnos.ko` (`k230_isp`); `config`, `statistics`, `output0` streams | Frames from the sensor into the caller's dma-bufs, NV12 or NV16 at the input's size, with the configuration and statistics of `k230isp`. The module writes every plane's address and the size the block wraps within, and switches buffers only at a frame's end. A frame comes out when the next job takes the path. No input stream. The register facts it relies on are unconfirmed |
+
+### ISP600 tuning: what is public
+
+The ISP600 is `isp600` (`camera.isp/1`, `isp.isp600/1`), with its library in `lemnos-driver-isp600`.
+Its load image is the caller's: the library encodes only the blocks below whose register encodings a
+licensed public source defines (`drivers/isp600/src/tuning.rs`), and refuses the words that name
+memory or set how far the block reads or writes. Nothing here has run on a board (`testing/board-runs/U3.md`).
+
+| Block | Encoding | Where it is defined, and licence |
+|---|---|---|
+| Channel black level and bit depths (`CH0` to `CH2` expand) | Encoded (`tuning::expand`). Black level's value is not | `isp600_reg.h` in `radxa/allwinner-bsp` at `2045a3ca`, GPL-2.0 |
+| Module enables | Encoded (`tuning::Image::set_modules`); reserved bits refused | `isp600_reg_cfg.h`, `isp600_reg.h`, same source, GPL-2.0 |
+| Temporal denoise record enable | Encoded (`tuning::temporal`). Its buffers and the lossless group are kernel-owned | `isp600_reg.h`, same source, GPL-2.0 |
+| Temporal denoise lossless group (`D3D_LBC_CFG0` to `CFG5`) | Not settable: refused as an extent word | `isp600_reg_cfg.c`, `sunxi_isp.c`, same source: derived from frame width |
+| White balance gains, colour correction matrix, gamma, tone, lens shading, DRC, CEM, spatial denoise, sharpen | No encoding. Only table regions and their update bits are public | The kernel's `isp_tuning_priv.h` gives the caller's tuning structure's field types, not the registers. Register writers are in the vendor's user-space library (below), which has no licence |
+| Statistics windows (AE, AF, AWB, histogram, flicker) and every statistics decode | No encoding. The kernel copies the statistics as bytes (`vin_h3a.c`) | Same kernel source. Decodes are only in the vendor's user-space library |
+
+Sources checked for the rest, and why none of them is used:
+
+- `radxa/allwinner-bsp` at `2045a3ca2a01f088c0314dc924bda59d154e363e` (GPL-2.0 kernel). The ISP600 headers
+  and `isp600_reg_cfg.c`, `sunxi_isp.c`, `vin_h3a.c`, `isp_tuning_priv.h`, `isp_comm.h`. Every usable fact above
+  comes from here. Its `drivers/vfe/lib/libisp_32` and `libisp_64` are binaries and are not read.
+- `radxa/allwinner-isp6xx` at `516fd7443810e0807b289829dbae1ae5a62e0cb5` (the `main` branch,
+  2026-11-05). It is the vendor user-space ISP library, with `isp6xx/libisp/isp_tuning/isp_tuning.c`,
+  `isp_manage/isp_manage.c`, `include/isp_module_cfg.h` and `include/isp_comm.h`, which hold the tuning
+  register writers and statistics decodes. The repository has no licence file at its root. Its only
+  `LICENSE` is the MIT licence of the bundled iniparser, under `isp6xx/libisp/iniparser/`, which does
+  not cover the library. Its files carry Allwinner copyright headers without a licence grant. So it is
+  not used. Its `out/` directories hold prebuilt `libAWIspApi` binaries, which are not read either.
+- `radxa/allwinner-isp6xx` `isp520/`, `isp522/` (other chips): the same repository's user-space for
+  other ISPs, not read for the ISP600's encodings.
+- `hutchx86/freewinner` (AGPL-3.0) and other clean-room projects: not vendor sources, so not used as facts.
+
 
 ## Image blocks
 

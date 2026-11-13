@@ -45,6 +45,12 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       serial, is not in the board format yet. It waits for the identity library (P1) to be on `next`,
       and is then a call into it. Until then the NCM addresses are the board file's own `host=` and
       `device=` values.
+- [ ] **ISP600 tuning encodings** (`drivers/isp600`): the channel black level and bit depths, module
+      enables and temporal denoise's record enable are encoded and wait for a board run
+      (`testing/board-runs/U3.md`). No public, licensed source defines the register encodings of white
+      balance, colour matrix, gamma, tone, lens shading, spatial denoise, sharpen, or any statistics
+      window or decode. The sources checked, and why each is not used, are in `docs/drivers.md`
+      ("ISP600 tuning"). Until one is found the driver's tuning for those blocks is unsupported.
 - [ ] **Two libraries with no contract driver**, rechecked against the public sources on
       2026-11-11:
   - `drivers/k230-ai2d`: the block's job registers are in no public source. The SDK kernel's
