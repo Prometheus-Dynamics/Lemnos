@@ -242,3 +242,16 @@ fn a_lease_belongs_to_the_caller_that_took_it() {
     q.set_caller(CallerId(1));
     assert!(q.poll(lease, 0).unwrap().held);
 }
+
+#[test]
+fn an_empty_config_passes_and_any_setting_is_refused_by_name() {
+    use lemnos_core::ConfigValue;
+    assert_eq!(
+        <GpuLeaseDevice as Driver>::check_config(&Config::default()),
+        Ok(())
+    );
+    let entries = [("bogus", ConfigValue::Int(1))];
+    let error = <GpuLeaseDevice as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(error.key, "bogus");
+    assert_eq!(error.suggestion, None, "no key is read, so none is near");
+}

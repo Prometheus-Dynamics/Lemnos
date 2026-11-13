@@ -56,7 +56,9 @@ mod layout_tests;
 mod tests;
 
 use lemnos_contract_codec_block::{BlockInfo, CodecBlock, Counters};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_driver_codec_jobs::{Block as _, Server, name_into};
 use lemnos_driver_rk_mpp::{BoxedDevice, backoff_ns};
 use lemnos_driver_rk_mpp_sys::ServiceNode;
@@ -107,15 +109,23 @@ impl RkIep {
     }
 }
 
+/// The settings a board file gives the block.
+const KEYS: &[Key] = &[Key::optional("node", Kind::Str)];
+
 impl Lifecycle for RkIep {
     type Needs = RkIepNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("node") == Some("") {
+            return Err(ConfigError::new("node", "must not be empty"));
+        }
+        Ok(())
+    }
+
     fn start(needs: RkIepNeeds, cfg: &Config<'_>) -> Result<Self> {
         let node = cfg.str("node").unwrap_or(NODE);
-        if node.is_empty() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         // The block takes a buffer only as a dma-buf: known now, before any consumer comes.
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);

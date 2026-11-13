@@ -87,8 +87,8 @@ use lemnos_contract_isp_isp600::{
     Isp600Info, IspIsp600, LAYOUT_LOAD, LAYOUT_STATISTICS, Region as WireRegion,
 };
 use lemnos_core::{
-    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
-    StreamHandle, driver,
+    Config, ConfigError, Decode, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Reader,
+    Result, Status, StreamHandle, driver,
 };
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_v4l2::FourCc;
@@ -195,16 +195,21 @@ impl Options {
     }
 }
 
+/// The largest `input` index, and the fewest and most image buffers. The ranges are checked by
+/// `check_config`, and `Options::new` keeps the same bounds for any other caller.
+const MAX_INPUT: i64 = i32::MAX as i64;
+const MIN_BUFFERS: i64 = 2;
+const MAX_BUFFERS: i64 = 32;
+
 fn options(cfg: &Config<'_>) -> Result<Options> {
-    let int = |key, max: i64, default: u32| match cfg.int(key) {
-        Some(v) if (0..=max).contains(&v) => u32::try_from(v).map_err(|_| Status::INVALID_ARGUMENT),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+    let int = |key, default: u32| match cfg.int(key) {
+        Some(v) => u32::try_from(v).map_err(|_| Status::INVALID_ARGUMENT),
         None => Ok(default),
     };
-    let settle = int("settle", i64::from(MAX_SETTLE), u32::from(DEFAULT_SETTLE))?;
+    let settle = int("settle", u32::from(DEFAULT_SETTLE))?;
     Options::new(
-        int("input", i64::from(i32::MAX), 0)?,
-        int("buffers", 32, 4)?,
+        int("input", 0)?,
+        int("buffers", 4)?,
         u8::try_from(settle).map_err(|_| Status::INVALID_ARGUMENT)?,
     )
 }
@@ -353,9 +358,50 @@ pub struct Isp600 {
     stats: Box<[u8; STATISTICS_BYTES]>,
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::required("capture", Kind::Str),
+    Key::required("isp", Kind::Str),
+    Key::required("statistics", Kind::Str),
+    Key::optional("input", Kind::Int),
+    Key::optional("buffers", Kind::Int),
+    Key::optional("settle", Kind::Int),
+];
+
 impl Lifecycle for Isp600 {
     type Needs = Isp600Needs;
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        // The node names: the same rule `Settings::new` applies at bind.
+        for key in ["capture", "isp", "statistics"] {
+            if let Some(name) = cfg.str(key)
+                && (name.is_empty() || name.contains('\0'))
+            {
+                return Err(ConfigError::new(
+                    key,
+                    "must be a media entity name, not empty",
+                ));
+            }
+        }
+        if let Some(input) = cfg.int("input")
+            && !(0..=MAX_INPUT).contains(&input)
+        {
+            return Err(ConfigError::new("input", "must be 0 to 2147483647"));
+        }
+        if let Some(buffers) = cfg.int("buffers")
+            && !(MIN_BUFFERS..=MAX_BUFFERS).contains(&buffers)
+        {
+            return Err(ConfigError::new("buffers", "must be 2 to 32"));
+        }
+        if let Some(settle) = cfg.int("settle")
+            && !(0..=i64::from(MAX_SETTLE)).contains(&settle)
+        {
+            return Err(ConfigError::new("settle", "must be 0 to 8"));
+        }
+        Ok(())
+    }
 
     fn start(needs: Isp600Needs, cfg: &Config<'_>) -> Result<Self> {
         let name = |key| cfg.str(key).ok_or(Status::INVALID_ARGUMENT);

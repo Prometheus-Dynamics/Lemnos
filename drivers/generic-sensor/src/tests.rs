@@ -90,10 +90,7 @@ fn close(actual: f32, expected: f32) {
 /// the wait; the next read finishes start-up and measures.
 fn start(mag: &mut GenericMagnetometer) -> Vector3 {
     assert_eq!(mag.read(), Err(Status::AGAIN));
-    let Sensor::Live(live) = &mag.sensor else {
-        panic!("the settings named no chip");
-    };
-    let at = live.now_ns + 2_000_000;
+    let at = mag.sensor.now_ns + 2_000_000;
     assert_eq!(Driver::tick(mag, at), None);
     mag.read().unwrap()
 }
@@ -198,8 +195,16 @@ fn bus_fault_restarts_the_chip_on_the_next_read_and_is_never_given_up() {
     assert_eq!(Driver::health(&mag), Health::Ok);
 }
 
+/// The check the host runs on the device's settings, before any bus is touched.
+fn checked<'e>(
+    entries: &'e [(&'e str, ConfigValue<'e>)],
+) -> core::result::Result<(), (&'e str, &'static str)> {
+    <GenericMagnetometer as Lifecycle>::check_config(&Config::new(entries))
+        .map_err(|error| (error.key, error.reason))
+}
+
 #[test]
-fn a_description_that_does_not_parse_is_refused_at_bind() {
+fn a_description_that_does_not_parse_is_refused_by_the_check_and_at_bind() {
     let (mut board, _sim) = bus();
     let cases = [
         "frobnicate 1",
@@ -212,12 +217,42 @@ fn a_description_that_does_not_parse_is_refused_at_bind() {
         "wait 1 2",
     ];
     for text in cases {
+        let entries = [
+            ("address", ConfigValue::Int(i64::from(ADDRESS))),
+            ("description", ConfigValue::Str(text)),
+        ];
+        assert_eq!(
+            checked(&entries),
+            Err((
+                "description",
+                "is not a chip description: a file's path goes in description_file"
+            )),
+            "{text}"
+        );
         assert_eq!(
             bind(&mut board, i64::from(ADDRESS), text).err(),
             Some(Status::INVALID_ARGUMENT),
             "{text}"
         );
     }
+}
+
+#[test]
+fn a_path_under_description_is_refused_and_names_description_file() {
+    let entries = [
+        ("address", ConfigValue::Int(i64::from(ADDRESS))),
+        (
+            "description",
+            ConfigValue::Str("/etc/lemnos/chips/sim-mag.chip"),
+        ),
+    ];
+    let error =
+        <GenericMagnetometer as Lifecycle>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(error.key, "description");
+    assert_eq!(
+        error.reason,
+        "is not a chip description: a file's path goes in description_file"
+    );
 }
 
 #[test]
@@ -245,9 +280,47 @@ fn settings_are_checked_at_bind() {
             Some(Status::INVALID_ARGUMENT)
         );
     }
+    // A valid config on a board with no bus: the bus is what is missing.
     assert_eq!(
-        bind_with(&mut SimBoard::new(), &[]).err(),
+        bind(&mut SimBoard::new(), i64::from(ADDRESS), DESCRIPTION).err(),
         Some(Status::NOT_FOUND)
+    );
+}
+
+#[test]
+fn settings_are_checked_before_the_device_is_made() {
+    assert_eq!(
+        checked(&[("description", ConfigValue::Str(DESCRIPTION))]),
+        Err(("address", "is required"))
+    );
+    assert_eq!(
+        checked(&[
+            ("address", ConfigValue::Int(0x80)),
+            ("description", ConfigValue::Str(DESCRIPTION)),
+        ]),
+        Err(("address", "must be a 7-bit I2C address, 0x08 to 0x77"))
+    );
+    assert_eq!(
+        checked(&[
+            ("address", ConfigValue::Int(0x2c)),
+            ("descripton", ConfigValue::Str(DESCRIPTION)),
+        ]),
+        Err(("descripton", "is not a setting this driver reads"))
+    );
+    assert_eq!(
+        checked(&[
+            ("address", ConfigValue::Int(0x2c)),
+            ("baud", ConfigValue::Int(9600)),
+            ("description", ConfigValue::Str(DESCRIPTION)),
+        ]),
+        Err(("baud", "is a Modbus setting, and this chip is on I2C"))
+    );
+    assert_eq!(
+        checked(&[
+            ("address", ConfigValue::Int(0x2c)),
+            ("description", ConfigValue::Str(DESCRIPTION)),
+        ]),
+        Ok(())
     );
 }
 
@@ -443,12 +516,20 @@ fn description_file_is_refused_by_name_without_a_filesystem() {
     let (mut board, sim) = bus();
     chip(&sim, 0x48);
     let path = "/etc/lemnos/chips/sim-mag.chip";
-    let mut mag = bind_file(&mut board, path).unwrap();
     assert_eq!(
-        Driver::health(&mag),
-        Health::Failed("description_file needs a build with a filesystem")
+        checked(&[
+            ("address", ConfigValue::Int(i64::from(ADDRESS))),
+            ("description_file", ConfigValue::Str(path)),
+        ]),
+        Err((
+            "description_file",
+            "needs a build with a filesystem: give the chip's text as description"
+        ))
     );
-    assert_eq!(mag.read().err(), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(
+        bind_file(&mut board, path).err(),
+        Some(Status::INVALID_ARGUMENT)
+    );
     assert_eq!(sim.byte(ADDRESS, 0x00), Some(0x48), "the chip is untouched");
 }
 
@@ -470,36 +551,46 @@ fn description_file_reads_the_same_chip_as_its_text() {
 
 #[cfg(feature = "std")]
 #[test]
-fn a_missing_description_file_is_not_found() {
+fn a_missing_description_file_is_refused_by_the_check() {
     let (mut board, _sim) = bus();
     let missing = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/chips/none.chip");
     assert_eq!(
+        checked(&[
+            ("address", ConfigValue::Int(i64::from(ADDRESS))),
+            ("description_file", ConfigValue::Str(missing)),
+        ]),
+        Err(("description_file", "names no file: check the path"))
+    );
+    assert_eq!(
         bind_file(&mut board, missing).err(),
-        Some(Status::NOT_FOUND)
+        Some(Status::INVALID_ARGUMENT)
     );
 }
 
-/// Both keys name the chip twice, so both are refused by name, in every build.
+/// Both keys name the chip twice, so both are refused by name, in every build, before the device
+/// is made.
 #[test]
 fn both_description_keys_are_refused_by_name() {
     let (mut board, _sim) = bus();
-    let mut mag = bind_with(
-        &mut board,
-        &[
-            ("address", ConfigValue::Int(i64::from(ADDRESS))),
-            ("description", ConfigValue::Str(TEXT)),
-            (
-                "description_file",
-                ConfigValue::Str("/etc/lemnos/chips/x.chip"),
-            ),
-        ],
-    )
-    .unwrap();
+    let entries = [
+        ("address", ConfigValue::Int(i64::from(ADDRESS))),
+        ("description", ConfigValue::Str(TEXT)),
+        (
+            "description_file",
+            ConfigValue::Str("/etc/lemnos/chips/x.chip"),
+        ),
+    ];
     assert_eq!(
-        Driver::health(&mag),
-        Health::Failed("give description or description_file, not both")
+        checked(&entries),
+        Err((
+            "description_file",
+            "is given with description: give one of them, not both"
+        ))
     );
-    assert_eq!(mag.read().err(), Some(Status::INVALID_ARGUMENT));
+    assert_eq!(
+        bind_with(&mut board, &entries).err(),
+        Some(Status::INVALID_ARGUMENT)
+    );
 }
 
 #[test]

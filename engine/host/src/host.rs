@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 
 use lemnos_core::{
-    AddressWidth, BoardDevice, BoardView, CallerId, ClocksHandle, Config, ConfigValue, Decode,
-    Description, DmaHandle, Driver, Encode, Health, Hint, HostClock, HostOwned, I2c,
+    AddressWidth, BoardDevice, BoardView, CallerId, ClocksHandle, Config, ConfigError, ConfigValue,
+    Decode, Description, DmaHandle, Driver, Encode, Health, Hint, HostClock, HostOwned, I2c,
     InterruptHandle, ItemKind, JobId, JobState, Line, LocalCaller, Manifest, MethodId, NeedKind,
     Origin, Polled, Provider, Pwm, RawSpiBus, Reader, RegistersHandle, Reply, ResetHandle,
     Resources, Result, Router, Spi, Status, StreamHandle, Tag, Uart, UsbDeviceHandle,
@@ -144,6 +144,8 @@ impl Factory {
 pub struct DriverEntry {
     manifest: Manifest,
     factory: Factory,
+    /// [`Driver::check_config`]: the settings check, run with no hardware before any device is made.
+    check: Check,
     ticks: bool,
     /// [`Driver::WATCHES_BOARD`]: the host gives the driver the board before each tick.
     watches: bool,
@@ -170,6 +172,8 @@ impl DriverEntry {
         Self {
             manifest,
             factory: Factory::Bound(binder),
+            // Nothing says what a driver built elsewhere reads, so it takes every setting.
+            check: accept,
             ticks,
             // A driver built elsewhere sees no board: it gets the empty view it always had.
             watches: false,
@@ -191,6 +195,80 @@ impl DriverEntry {
     }
 }
 
+/// A driver's settings check. See [`Driver::check_config`].
+type Check = for<'a> fn(&Config<'a>) -> core::result::Result<(), ConfigError<'a>>;
+
+fn accept<'a>(_: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+    Ok(())
+}
+
+/// Each device the board file gives, and each `[[each]]` entry, whose settings a driver refuses,
+/// by its id, with the driver's reason (naming the key). Checked with no hardware and no device
+/// made. `lemnos-ctl validate` refuses a board that has one; the daemon starts without that
+/// device, which shows failed with this reason.
+pub fn settings_refusals(board: &BoardFile, drivers: &[DriverEntry]) -> Vec<(String, String)> {
+    let mut refused = Vec::new();
+    for device in &board.devices {
+        if let Some(problem) = refusal_of(board, device, drivers) {
+            refused.push((device.id.clone(), problem));
+        }
+    }
+    for each in &board.each {
+        if let Some(problem) = refusal_of(board, &each.device(&each.pattern), drivers) {
+            refused.push((each.id.clone(), problem));
+        }
+    }
+    refused
+}
+
+/// The first refusal of [`settings_refusals`] as an error, for `lemnos-ctl validate`.
+///
+/// # Errors
+///
+/// The first setting a driver refuses, by the device's id and the key.
+pub fn check_settings(
+    board: &BoardFile,
+    drivers: &[DriverEntry],
+) -> core::result::Result<(), BoardError> {
+    match settings_refusals(board, drivers).into_iter().next() {
+        Some((id, problem)) => Err(BoardError::Setting(id, problem)),
+        None => Ok(()),
+    }
+}
+
+/// The reason the device's driver refuses its settings, or `None` when it takes them, or has no
+/// driver the host knows (that is named at bind).
+fn refusal_of(board: &BoardFile, spec: &DeviceSpec, drivers: &[DriverEntry]) -> Option<String> {
+    let entry = drivers
+        .iter()
+        .rev()
+        .find(|driver| driver.manifest.name == spec.driver)?;
+    let owned = match spec.owned_config() {
+        Ok(owned) => owned,
+        Err(error) => return Some(error.to_string()),
+    };
+    let entries: Vec<(&str, ConfigValue<'_>)> = owned
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_value()))
+        .collect();
+    let lists = match spec.owned_lists() {
+        Ok(lists) => lists,
+        Err(error) => return Some(error.to_string()),
+    };
+    let refs: Vec<(&str, Vec<&str>)> = lists
+        .iter()
+        .map(|(key, items)| (key.as_str(), items.iter().map(String::as_str).collect()))
+        .collect();
+    let borrowed: Vec<(&str, &[&str])> = refs
+        .iter()
+        .map(|(key, items)| (*key, items.as_slice()))
+        .collect();
+    let config = Config::new(&entries)
+        .with_lists(&borrowed)
+        .on_board(&board.board.id);
+    (entry.check)(&config).err().map(|error| error.to_string())
+}
+
 /// The entry for a driver type.
 pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
     fn make<D: Driver + Send + 'static>(
@@ -202,6 +280,7 @@ pub const fn entry<D: Driver + Send + 'static>() -> DriverEntry {
     DriverEntry {
         manifest: D::MANIFEST,
         factory: Factory::BuiltIn(make::<D>),
+        check: D::check_config,
         ticks: D::TICKS,
         watches: D::WATCHES_BOARD,
         tracks_callers: D::TRACKS_CALLERS,
@@ -308,6 +387,9 @@ struct Slot {
     /// The `[[each]]` entry that made this device, by its place in the board file, and the name
     /// of the resource it was made for. `None` for a device of the board file's own.
     made: Option<(usize, String)>,
+    /// Why the driver refuses this device's settings, as its state says. A refused device is
+    /// never made: the host records this as its failed bind, and retries it under the failure rule.
+    refusal: Option<String>,
     /// Long jobs of this device's driver that are still open.
     open_jobs: AtomicU32,
     /// The END descriptor of the hold the caller has, if it was lent with one. See [`EndHold`].
@@ -417,6 +499,7 @@ impl Slot {
         spec: DeviceSpec,
         entry: Option<DriverEntry>,
         made: Option<(usize, String)>,
+        refusal: Option<String>,
     ) -> core::result::Result<Self, BoardError> {
         let state = if spec.disabled {
             DeviceState::Off(OffReason::Disabled)
@@ -436,6 +519,7 @@ impl Slot {
             config: spec.owned_config()?,
             lists: spec.owned_lists()?,
             entry,
+            refusal,
             spec,
             instance: Mutex::new(None),
             state: Mutex::new(state),
@@ -543,6 +627,8 @@ impl Slot {
 /// An `[[each]]` entry of the board file, and when to look for what fits it.
 struct Rule {
     spec: EachSpec,
+    /// The refusal of the entry's settings, which every device it makes carries.
+    refusal: Option<String>,
     /// A hint named the pattern, or couldn't say what changed, since the last look.
     hinted: AtomicBool,
     /// When to look again without a hint.
@@ -1165,7 +1251,8 @@ impl Inner {
             let mut slots = self.slots.write().unwrap_or_else(PoisonError::into_inner);
             let index = slots.len() as u32;
             // The board file was checked, so the entry's config is good.
-            let Ok(slot) = Slot::new(index, spec, entry, Some((at, found))) else {
+            let refusal = self.rules[at].refusal.clone();
+            let Ok(slot) = Slot::new(index, spec, entry, Some((at, found)), refusal) else {
                 return;
             };
             let slot = Arc::new(slot);
@@ -1698,6 +1785,12 @@ impl Inner {
     /// Builds the driver, on its lane, inside the panic boundary.
     fn bind(&'static self, slot: Arc<Slot>) {
         slot.tried_ns.store(self.clock.now_ns(), Ordering::Release);
+        // A device whose settings its driver refuses is never made. It shows failed, with the
+        // reason, and is retried under the failure rule like any device that fails to bind.
+        if let Some(reason) = &slot.refusal {
+            self.record_failed_bind(&slot, reason);
+            return;
+        }
         let Some(entry) = slot.entry else {
             let reason = format!("no driver named {:?}", slot.spec.driver);
             self.record_failed_bind(&slot, &reason);
@@ -2285,14 +2378,20 @@ impl Host {
                 &mut streams,
             )?;
         }
+        let refusals = settings_refusals(board, drivers);
         let mut slots = Vec::with_capacity(devices.len());
         for (index, spec) in devices.iter().enumerate() {
             let entry = table.get(spec.driver.as_str()).copied();
+            let refusal = refusals
+                .iter()
+                .find(|(id, _)| *id == spec.id)
+                .map(|(id, problem)| format!("device {id:?}: {problem}"));
             slots.push(Arc::new(Slot::new(
                 index as u32,
                 spec.clone(),
                 entry,
                 None,
+                refusal,
             )?));
         }
         let rules = board
@@ -2300,6 +2399,10 @@ impl Host {
             .iter()
             .map(|spec| Rule {
                 spec: spec.clone(),
+                refusal: refusals
+                    .iter()
+                    .find(|(id, _)| *id == spec.id)
+                    .map(|(id, problem)| format!("device {id:?}: {problem}")),
                 hinted: AtomicBool::new(false),
                 next_look_ns: AtomicU64::new(0),
                 looked_ns: AtomicU64::new(0),

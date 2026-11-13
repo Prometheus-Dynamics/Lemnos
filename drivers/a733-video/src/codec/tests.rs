@@ -361,14 +361,67 @@ fn a_board_file_binds_it_and_a_node_that_is_not_there_fails_the_job() {
         host.device("engine").unwrap().health,
         Health::Degraded(REOPENING)
     );
-    let bad = host_state(
-        &board("a733-video").replace("device = \"/nonexistent/cedar_dev_ve2\"", "lock = \"both\""),
+    // A bad setting does not stop the board from starting: the device is never made, and is listed
+    // failed with the key and the reason.
+    let bad =
+        board("a733-video").replace("device = \"/nonexistent/cedar_dev_ve2\"", "lock = \"both\"");
+    let host = start_board(&bad);
+    let device = host.device("engine").unwrap();
+    assert!(
+        matches!(&device.state, DeviceState::Backoff { reason, .. } if reason.starts_with("device \"engine\": setting \"")),
+        "{device:?}"
     );
-    assert_ne!(bad, DeviceState::Running);
 }
 
-fn host_state(text: &str) -> DeviceState {
-    let host = host(text);
-    host.tick();
-    host.device("engine").unwrap().state
+/// The host for `text`, started: the board starts whatever a driver refuses in it.
+fn start_board(text: &str) -> Host {
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    Host::start(
+        &parse(text).unwrap(),
+        &[entry::<A733Video>(), entry::<nothing::Nothing>()],
+        Box::new(sim),
+        Arc::new(clock),
+        Options::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_config_check_follows_the_route_and_refuses_bad_settings() {
+    use lemnos_core::{ConfigValue, Driver};
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), lemnos_core::ConfigError<'a>> {
+        <A733Video as Driver>::check_config(&lemnos_core::Config::new(entries))
+    }
+    assert_eq!(check(&[("lock", ConfigValue::Str("jpeg"))]), Ok(()));
+    assert_eq!(
+        check(&[
+            ("route", ConfigValue::Str("module")),
+            ("block", ConfigValue::Str("ve"))
+        ]),
+        Ok(())
+    );
+    let error = check(&[("bogus", ConfigValue::Int(1))]).unwrap_err();
+    assert_eq!(error.key, "bogus");
+    let error = check(&[("devise", ConfigValue::Str("/dev/x"))]).unwrap_err();
+    assert_eq!(error.suggestion, Some("device"));
+    let error = check(&[("lock", ConfigValue::Int(1))]).unwrap_err();
+    assert_eq!(error.key, "lock");
+    let error = check(&[("route", ConfigValue::Str("both"))]).unwrap_err();
+    assert_eq!(error.key, "route");
+    let error = check(&[("device", ConfigValue::Str(""))]).unwrap_err();
+    assert_eq!(error.key, "device");
+    let error = check(&[("route", ConfigValue::Str("module"))]).unwrap_err();
+    assert_eq!(error.key, "block");
+    // On the module route the vendor route's keys are not read, so they are not checked.
+    assert_eq!(
+        check(&[
+            ("route", ConfigValue::Str("module")),
+            ("block", ConfigValue::Str("ve")),
+            ("lock", ConfigValue::Str("bogus")),
+        ]),
+        Ok(())
+    );
 }

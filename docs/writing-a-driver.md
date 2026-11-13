@@ -203,6 +203,39 @@ a board-file list of strings (`health = ["device:x"]`) reaches a built-in driver
 board can't be built into a `lemnos-host-static` table: the table's slot refuses it when it is
 built, because that host gives no view.
 
+### Settings: `check_config`
+
+A driver's settings are the `config` table its device gives in the board file. The driver declares
+the keys it reads, with the kind each takes, and checks them in `check_config`. The check needs no
+hardware and no bind:
+
+```rust
+const KEYS: &[Key] = &[
+    Key::required("address", Kind::Int),
+    Key::optional("device", Kind::Str),
+];
+
+fn check_config<'a>(cfg: &Config<'a>) -> Result<(), ConfigError<'a>> {
+    cfg.check_keys(KEYS)?;
+    // a range, a set of names, a combination: refused with `ConfigError::new(key, reason)`
+    Ok(())
+}
+```
+
+`check_keys` refuses a key the driver does not read (by name, with the nearest key it does read when
+one is close), a key of the wrong kind, and a missing required key. The driver adds what it knows
+only from its own settings: ranges and combinations. A `#[driver]` driver's generated bind runs
+`check_config` before `start`, so a setting that is wrong never reaches `start`; a hand-written
+`Driver` calls it itself at the top of `bind`.
+
+`lemnos-ctl validate` runs the same check on the board file, through `lemnos_host::settings_refusals`,
+and refuses a board with a setting a driver refuses, naming the device and the key. The daemon does
+not refuse the board for it: the refused device is not made, shows as failed with the reason in its
+state, and is retried under the failure rule, while the other devices run. A check that needs the
+hardware, a file the board holds, or the state of the system is not in `check_config`: it stays in
+`start`, and the driver says so in its documentation. A driver built outside this tree that does not
+override `check_config` accepts every setting, as it did before.
+
 ### Long jobs
 
 A method that runs longer than a call is marked `#[method(N, job)]` in its contract and returns
@@ -696,7 +729,8 @@ Doc comments, method bodies and the driver's own state don't move any hash.
 
 - The driver's contract exists in `contracts/`. A driver provides only contracts it can serve.
 - The driver is `no_std` unless the form needs the host (the `std` feature gates it).
-- Settings are checked at bind and a bad one is `INVALID_ARGUMENT`.
+- Settings are checked by `check_config` (see [Settings](#settings-check_config)): the host runs it when it
+  validates the board file and before it makes the device, and the generated bind runs it again.
 - Each failure is reported through health, and a read after it tries again.
 - Tests run on the simulated bus, and a test shows that a wrong register fails.
 - Hardware you could not reach is marked `untested on board` in the crate's documentation, with

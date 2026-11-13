@@ -118,8 +118,8 @@ use lemnos_contract_camera_receiver::{
     MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{
-    Config, Description, DmaHandle, Health, Item, Lifecycle, MethodId, Result, Status,
-    StreamHandle, driver,
+    Config, ConfigError, Description, DmaHandle, Health, Item, Key, Kind, Lifecycle, MethodId,
+    Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_k230_capture_sys::mipi::DevAttr;
 use lemnos_driver_k230_capture_sys::regs::MIS_MP_FRAME_END;
@@ -207,6 +207,7 @@ impl Default for Options {
 
 fn options(cfg: &Config<'_>) -> Result<Options> {
     let defaults = Options::default();
+    // The names are checked by check_config; these read them.
     let format = match cfg.str("format") {
         Some(f) => Format::parse(f).ok_or(Status::INVALID_ARGUMENT)?,
         None => defaults.format,
@@ -280,9 +281,55 @@ pub struct K230Capture {
     chunk: Vec<u8>,
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::optional("block", Kind::Str),
+    Key::optional("isp", Kind::Str),
+    Key::optional("mipi", Kind::Str),
+    Key::optional("node", Kind::Str),
+    Key::optional("format", Kind::Str),
+    Key::optional("order", Kind::Str),
+];
+
 impl Lifecycle for K230Capture {
     type Needs = K230CaptureNeeds;
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("block") == Some("") {
+            return Err(ConfigError::new(
+                "block",
+                "must be a platform device name, not empty",
+            ));
+        }
+        // One way to the ISP, not both. Which way the device has is checked at bind, against its needs.
+        if cfg.str("block").is_some() && cfg.str("isp").is_some() {
+            return Err(ConfigError::new("isp", "cannot be given with block"));
+        }
+        for key in ["isp", "mipi"] {
+            if cfg.str(key) == Some("") {
+                return Err(ConfigError::new(key, "must be a device path, not empty"));
+            }
+        }
+        if let Some(name) = cfg.str("format")
+            && Format::parse(name).is_none()
+        {
+            return Err(ConfigError::new(
+                "format",
+                "must be bayer, nv12, nv16, yuyv, bgr24 or p010",
+            ));
+        }
+        if let Some(name) = cfg.str("order")
+            && parse_order(name).is_none()
+        {
+            return Err(ConfigError::new(
+                "order",
+                "must be rggb, grbg, gbrg or bggr",
+            ));
+        }
+        Ok(())
+    }
 
     #[cfg(target_os = "linux")]
     fn start(needs: K230CaptureNeeds, cfg: &Config<'_>) -> Result<Self> {

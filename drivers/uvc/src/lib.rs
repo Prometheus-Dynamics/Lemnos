@@ -50,7 +50,7 @@ mod tests;
 
 use lemnos_contract_camera_frames::{CameraFrames, Counters, FrameFormat, MAX_STREAM_NAME};
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, Item, Lifecycle, MethodId, Result, Status,
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
     StreamHandle, UsbDeviceHandle, driver,
 };
 
@@ -82,12 +82,26 @@ pub struct Uvc {
     session: Session,
 }
 
+/// Every setting the driver reads. `frame_bytes` is required.
+const KEYS: &[Key] = &[Key::required("frame_bytes", Kind::Int)];
+
 impl Lifecycle for Uvc {
     type Needs = UvcNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        match cfg.int("frame_bytes") {
+            Some(bytes) if bytes > 0 && bytes <= i64::from(MAX_FRAME_BYTES) => Ok(()),
+            _ => Err(ConfigError::new(
+                "frame_bytes",
+                "must be 1 to 67108864 bytes",
+            )),
+        }
+    }
 
     fn start(needs: UvcNeeds, cfg: &Config<'_>) -> Result<Self> {
         let capacity = frame_bytes(cfg)?;
@@ -230,12 +244,9 @@ impl CameraFrames for Uvc {
     }
 }
 
-/// The `frame_bytes` config: the stream's buffer size, within what a frame can be.
+/// The `frame_bytes` config: the stream's buffer size. The range is checked by `check_config`.
 fn frame_bytes(cfg: &Config<'_>) -> Result<usize> {
-    match cfg.get("frame_bytes") {
-        Some(ConfigValue::Int(bytes)) if bytes > 0 && bytes <= i64::from(MAX_FRAME_BYTES) => {
-            usize::try_from(bytes).map_err(|_| Status::INVALID_ARGUMENT)
-        }
-        _ => Err(Status::INVALID_ARGUMENT),
-    }
+    cfg.int("frame_bytes")
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(Status::INVALID_ARGUMENT)
 }

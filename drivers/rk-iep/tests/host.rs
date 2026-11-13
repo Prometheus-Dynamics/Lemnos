@@ -266,22 +266,34 @@ fn a_board_file_binds_it_and_what_it_names_is_checked() {
         Health::Degraded(NOT_THERE)
     );
 
-    // A stream of plain memory, or an empty node: the bind is refused.
-    for (text, dma_buf) in [
-        (board("rk-iep", false), false),
-        (
-            board("rk-iep", true).replace("/nonexistent/mpp_service", ""),
-            true,
-        ),
-    ] {
-        let rig = Rig::start(&text, dma_buf);
-        rig.ticks(1);
-        assert_ne!(
-            rig.host.device("iep").unwrap().state,
-            DeviceState::Running,
-            "{text}"
-        );
-    }
+    // A stream of plain memory: the bind is refused.
+    let text = board("rk-iep", false);
+    let rig = Rig::start(&text, false);
+    rig.ticks(1);
+    assert_ne!(
+        rig.host.device("iep").unwrap().state,
+        DeviceState::Running,
+        "{text}"
+    );
+    // An empty node is refused by its setting: the board starts, and the device is listed failed
+    // with the key. The device is never made.
+    let text = board("rk-iep", true).replace("/nonexistent/mpp_service", "");
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    let host = Host::start_with_streams(
+        &parse(&text).unwrap(),
+        &[entry::<RkIep>(), entry::<nothing::Nothing>()],
+        Box::new(sim),
+        Arc::new(clock),
+        Options::default(),
+        Arc::new(PerBuffer),
+    )
+    .expect("the board starts");
+    let state = host.device("iep").unwrap().state;
+    assert!(
+        matches!(&state, DeviceState::Backoff { reason, .. } if reason.contains("setting \"node\"")),
+        "{state:?}"
+    );
 }
 
 #[test]

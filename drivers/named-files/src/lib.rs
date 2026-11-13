@@ -24,7 +24,7 @@ mod tests;
 use std::path::PathBuf;
 
 use lemnos_contract_named_files::{MAX_OPEN, NamedFiles};
-use lemnos_core::{Config, Lifecycle, Result, Status, driver};
+use lemnos_core::{Config, ConfigError, Key, Kind, Lifecycle, Result, Status, driver};
 
 pub use index::{INDEX, Line, NAMES, Name, parse as parse_index, render as render_index};
 pub use producers::Paths;
@@ -42,8 +42,23 @@ pub struct NamedFilesDriver {
     next: u64,
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::optional("data", Kind::Str),
+    Key::optional("boot", Kind::Str),
+    Key::optional("sys_block", Kind::Str),
+    Key::optional("module", Kind::Str),
+    Key::optional("tree_overlay", Kind::Str),
+    Key::optional("tree_boot", Kind::Str),
+    Key::optional("tree_modprobe", Kind::Str),
+];
+
 impl Lifecycle for NamedFilesDriver {
     type Needs = NamedFilesDriverNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)
+    }
 
     fn start(_needs: NamedFilesDriverNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {

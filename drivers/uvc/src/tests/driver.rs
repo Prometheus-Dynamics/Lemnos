@@ -57,6 +57,54 @@ fn frame_bytes_is_required_and_bounded() {
 }
 
 #[test]
+fn check_config_names_the_bad_setting() {
+    let max = i64::from(MAX_FRAME_BYTES);
+    let full = [("frame_bytes", ConfigValue::Int(4096))];
+    assert!(<crate::Uvc as Lifecycle>::check_config(&Config::new(&full)).is_ok());
+    let edge = [("frame_bytes", ConfigValue::Int(max))];
+    assert!(<crate::Uvc as Lifecycle>::check_config(&Config::new(&edge)).is_ok());
+    let over = [("frame_bytes", ConfigValue::Int(max + 1))];
+    assert_eq!(
+        <crate::Uvc as Lifecycle>::check_config(&Config::new(&over))
+            .unwrap_err()
+            .key,
+        "frame_bytes"
+    );
+
+    let bogus = [
+        ("frame_bytes", ConfigValue::Int(4096)),
+        ("bogus", ConfigValue::Int(1)),
+    ];
+    assert_eq!(
+        <crate::Uvc as Lifecycle>::check_config(&Config::new(&bogus))
+            .unwrap_err()
+            .key,
+        "bogus"
+    );
+    let near = [("frame_byte", ConfigValue::Int(4096))];
+    let err = <crate::Uvc as Lifecycle>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(
+        (err.key, err.suggestion),
+        ("frame_byte", Some("frame_bytes"))
+    );
+
+    let kind = [("frame_bytes", ConfigValue::Bool(true))];
+    assert_eq!(
+        <crate::Uvc as Lifecycle>::check_config(&Config::new(&kind))
+            .unwrap_err()
+            .key,
+        "frame_bytes"
+    );
+    let none: [(&str, ConfigValue); 0] = [];
+    assert_eq!(
+        <crate::Uvc as Lifecycle>::check_config(&Config::new(&none))
+            .unwrap_err()
+            .key,
+        "frame_bytes"
+    );
+}
+
+#[test]
 fn it_needs_a_camera_and_a_stream_and_provides_the_contract() {
     let manifest = <crate::Uvc as Driver>::MANIFEST;
     let needs: Vec<&str> = manifest.needs.iter().map(|need| need.name).collect();

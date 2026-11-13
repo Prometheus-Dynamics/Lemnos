@@ -91,6 +91,54 @@ pub(crate) fn start_up(s: &mut Ov9782) {
     assert_eq!(s.state, State::Streaming);
 }
 
+#[test]
+fn check_config_accepts_a_valid_config_and_names_a_bad_key() {
+    let ok = [
+        ("address", ConfigValue::Int(0x36)),
+        ("continuous_clock", ConfigValue::Bool(true)),
+    ];
+    assert!(<Ov9782 as Lifecycle>::check_config(&Config::new(&ok)).is_ok());
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    let err = <Ov9782 as Lifecycle>::check_config(&Config::new(&bogus)).unwrap_err();
+    assert_eq!(err.key, "bogus");
+    let near = [("addres", ConfigValue::Int(0x36))];
+    let err = <Ov9782 as Lifecycle>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(err.suggestion, Some("address"));
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind_and_an_address_out_of_range() {
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), ConfigError<'a>> {
+        <Ov9782 as Lifecycle>::check_config(&Config::new(entries))
+    }
+    assert_eq!(
+        check(&[("address", ConfigValue::Str("0x36"))])
+            .unwrap_err()
+            .key,
+        "address"
+    );
+    assert_eq!(
+        check(&[("continuous_clock", ConfigValue::Int(1))])
+            .unwrap_err()
+            .key,
+        "continuous_clock"
+    );
+    // The edges of the 7-bit range that is not reserved pass; one step outside does not.
+    for address in [0x08, 0x77] {
+        assert!(check(&[("address", ConfigValue::Int(address))]).is_ok());
+    }
+    for address in [0x07, 0x78] {
+        assert_eq!(
+            check(&[("address", ConfigValue::Int(address))])
+                .unwrap_err()
+                .key,
+            "address"
+        );
+    }
+}
+
 fn sensor_on(bus: &Bus, entries: &[(&str, ConfigValue<'_>)]) -> Ov9782 {
     <Ov9782 as Lifecycle>::start(
         Ov9782Needs {

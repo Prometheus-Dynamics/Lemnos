@@ -36,7 +36,10 @@ use std::path::PathBuf;
 
 use lemnos_contract_codec_block::work::Work;
 use lemnos_contract_codec_block::{BlockInfo, CodecBlock, Counters};
-use lemnos_core::{Config as BoardConfig, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config as BoardConfig, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle,
+    driver,
+};
 use lemnos_driver_a733_di_sys::{
     Config, Field, Format, Frame, Job, Layout, Level, Mode, Tnr, uapi,
 };
@@ -318,15 +321,23 @@ impl A733Di {
     }
 }
 
+/// Every setting the driver reads from the board file. `device` has a default.
+const KEYS: &[Key] = &[Key::optional("device", Kind::Str)];
+
 impl Lifecycle for A733Di {
     type Needs = A733DiNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &BoardConfig<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        match cfg.str("device") {
+            Some("") => Err(ConfigError::new("device", "must not be empty")),
+            _ => Ok(()),
+        }
+    }
+
     fn start(needs: A733DiNeeds, cfg: &BoardConfig<'_>) -> Result<Self> {
         let path = PathBuf::from(cfg.str("device").unwrap_or(uapi::DEVICE));
-        if path.as_os_str().is_empty() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);
         }

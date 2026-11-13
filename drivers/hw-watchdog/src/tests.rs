@@ -392,3 +392,65 @@ fn a_device_that_does_not_answer_fails_the_answers_test_and_is_not_faulted() {
     );
     assert_eq!(lemnos_core::Driver::health(&dog), before);
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn refusal<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<ConfigError<'a>> {
+    <HwWatchdog as lemnos_core::Lifecycle>::check_config(&Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_accepts_a_full_config() {
+    let entries = [
+        ("device", ConfigValue::Str("watchdog0")),
+        ("timeout_s", ConfigValue::Int(15)),
+        ("dev_root", ConfigValue::Str("/dev")),
+        ("sys_root", ConfigValue::Str("/sys")),
+    ];
+    assert_eq!(refusal(&entries), None);
+}
+
+#[test]
+fn check_config_refuses_an_unknown_key_by_name_and_suggests_the_near_one() {
+    let err = refusal(&[("timeout", ConfigValue::Int(15))]).unwrap();
+    assert_eq!(err.key, "timeout");
+    assert_eq!(err.suggestion, Some("timeout_s"));
+    assert_eq!(
+        refusal(&[("bogus", ConfigValue::Int(1))]).unwrap().key,
+        "bogus"
+    );
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind() {
+    let err = refusal(&[("timeout_s", ConfigValue::Str("15"))]).unwrap();
+    assert_eq!(err.key, "timeout_s");
+}
+
+#[test]
+fn check_config_refuses_a_device_that_is_a_path_and_accepts_a_name() {
+    for bad in ["", "../watchdog0", "a/b", ".", ".."] {
+        assert_eq!(
+            refusal(&[("device", ConfigValue::Str(bad))]).unwrap().key,
+            "device"
+        );
+    }
+    assert_eq!(refusal(&[("device", ConfigValue::Str("watchdog0"))]), None);
+}
+
+#[test]
+fn check_config_keeps_the_timeout_to_one_second_or_more() {
+    assert_eq!(
+        refusal(&[("timeout_s", ConfigValue::Int(0))]).unwrap().key,
+        "timeout_s"
+    );
+    assert_eq!(
+        refusal(&[("timeout_s", ConfigValue::Int(-5))]).unwrap().key,
+        "timeout_s"
+    );
+    assert_eq!(refusal(&[("timeout_s", ConfigValue::Int(1))]), None);
+    assert_eq!(
+        refusal(&[("timeout_s", ConfigValue::Int(i64::from(u32::MAX)))]),
+        None
+    );
+    assert!(refusal(&[("timeout_s", ConfigValue::Int(i64::from(u32::MAX) + 1))]).is_some());
+}

@@ -1313,3 +1313,80 @@ fn a_consumer_that_keeps_its_statistics_is_refused_once_per_job_that_has_none() 
     let (refused, jobs, errors) = run_statistics(false, 8);
     assert_eq!((refused, jobs, errors), (4, 4, 4));
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn isp_refusal<'a>(
+    entries: &'a [(&'a str, lemnos_core::ConfigValue<'a>)],
+) -> Option<lemnos_core::ConfigError<'a>> {
+    <Isp600 as lemnos_core::Lifecycle>::check_config(&lemnos_core::Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_accepts_a_full_config_and_refuses_an_unknown_key() {
+    use lemnos_core::ConfigValue::{Int, Str};
+    let full = [
+        ("capture", Str("vin_video0")),
+        ("isp", Str("sunxi_isp.0")),
+        ("statistics", Str("sunxi_h3a.0")),
+        ("input", Int(0)),
+        ("buffers", Int(4)),
+        ("settle", Int(3)),
+    ];
+    assert_eq!(isp_refusal(&full), None);
+    let err = isp_refusal(&[
+        ("capture", Str("vin_video0")),
+        ("isp", Str("sunxi_isp.0")),
+        ("statistics", Str("sunxi_h3a.0")),
+        ("setle", Int(3)),
+    ])
+    .unwrap();
+    assert_eq!(err.key, "setle");
+    assert_eq!(err.suggestion, Some("settle"));
+}
+
+#[test]
+fn check_config_needs_the_three_node_names() {
+    use lemnos_core::ConfigValue::Str;
+    let no_isp = [
+        ("capture", Str("vin_video0")),
+        ("statistics", Str("sunxi_h3a.0")),
+    ];
+    assert_eq!(isp_refusal(&no_isp).unwrap().key, "isp");
+    let empty = [
+        ("capture", Str("")),
+        ("isp", Str("sunxi_isp.0")),
+        ("statistics", Str("sunxi_h3a.0")),
+    ];
+    assert_eq!(isp_refusal(&empty).unwrap().key, "capture");
+}
+
+#[test]
+fn check_config_keeps_buffers_and_settle_to_their_ranges() {
+    use lemnos_core::ConfigValue::{Int, Str};
+    let with = |key: &'static str, value: i64| {
+        [
+            ("capture", Str("vin_video0")),
+            ("isp", Str("sunxi_isp.0")),
+            ("statistics", Str("sunxi_h3a.0")),
+            (key, Int(value)),
+        ]
+    };
+    assert_eq!(isp_refusal(&with("buffers", 1)).unwrap().key, "buffers");
+    assert_eq!(isp_refusal(&with("buffers", 33)).unwrap().key, "buffers");
+    assert_eq!(isp_refusal(&with("buffers", 2)), None);
+    assert_eq!(isp_refusal(&with("buffers", 32)), None);
+    assert_eq!(isp_refusal(&with("settle", 9)).unwrap().key, "settle");
+    assert_eq!(isp_refusal(&with("settle", 8)), None);
+    assert_eq!(isp_refusal(&with("input", -1)).unwrap().key, "input");
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind() {
+    use lemnos_core::ConfigValue::{Int, Str};
+    let entries = [
+        ("capture", Str("vin_video0")),
+        ("isp", Str("sunxi_isp.0")),
+        ("statistics", Int(1)),
+    ];
+    assert_eq!(isp_refusal(&entries).unwrap().key, "statistics");
+}

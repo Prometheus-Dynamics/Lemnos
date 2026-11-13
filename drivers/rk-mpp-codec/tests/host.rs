@@ -221,23 +221,51 @@ fn a_board_file_binds_it_and_what_it_names_is_checked() {
     );
     assert_eq!(device.counters().unwrap().failed, 1);
 
-    // A stream of plain memory, a block nobody knows, no block: the bind is refused.
-    for (text, dma_buf) in [
-        (board("rk-mpp", false), false),
-        (board("rk-mpp", true).replace("vepu2", "vepu9"), true),
+    // A stream of plain memory: the bind is refused.
+    let text = board("rk-mpp", false);
+    let rig = Rig::start(&text, false);
+    rig.ticks(1);
+    assert_ne!(
+        rig.host.device("codec").unwrap().state,
+        lemnos_host::DeviceState::Running,
+        "{text}"
+    );
+    // A block nobody knows, no block, an empty node: the board starts, and the device is listed
+    // failed with the key. The device is never made.
+    for (text, key) in [
+        (board("rk-mpp", true).replace("vepu2", "vepu9"), "block"),
         (
             board("rk-mpp", true).replace("block = \"vepu2\", ", ""),
-            true,
+            "block",
+        ),
+        (
+            board("rk-mpp", true).replace("/nonexistent/mpp_service", ""),
+            "node",
         ),
     ] {
-        let rig = Rig::start(&text, dma_buf);
-        rig.ticks(1);
-        assert_ne!(
-            rig.host.device("codec").unwrap().state,
-            lemnos_host::DeviceState::Running,
-            "{text}"
+        let state = device_state(&text);
+        assert!(
+            matches!(&state, lemnos_host::DeviceState::Backoff { reason, .. } if reason.contains(&format!("setting {key:?}"))),
+            "{text}: {state:?}"
         );
     }
+}
+
+/// The state of the board's `codec` device, after the host starts the board.
+fn device_state(text: &str) -> lemnos_host::DeviceState {
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    let drivers = [entry::<RkMpp>(), entry::<lemnos_fake::Nothing>()];
+    let host = Host::start_with_streams(
+        &parse(text).unwrap(),
+        &drivers,
+        Box::new(sim),
+        Arc::new(clock),
+        Options::default(),
+        Arc::new(PerBuffer),
+    )
+    .expect("the board starts");
+    host.device("codec").unwrap().state
 }
 
 /// The driver on the played kernel, on the stream of a device whose own driver doesn't use

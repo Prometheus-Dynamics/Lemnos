@@ -85,14 +85,25 @@ use chip::{Failure, Frame, Kind, Setting};
 use lemnos_contract_accelerometer::{Accelerometer, Sample as AccelSample};
 use lemnos_contract_gyroscope::{Gyroscope, Sample as GyroSample};
 use lemnos_core::{
-    Config, ConfigValue, Description, Encode, Health, I2c, Item, Lifecycle, MethodId, Result,
-    Status, Unit, Vector3, Writer, driver,
+    Config, ConfigError, ConfigValue, Description, Encode, Health, I2c, Item, Key, Lifecycle,
+    MethodId, Result, Status, Unit, Vector3, Writer, driver,
 };
 
 /// The accelerometer's 7-bit address with SDO1 low.
 pub const DEFAULT_ACCEL_ADDRESS: u8 = 0x18;
 /// The gyroscope's 7-bit address with SDO2 low.
 pub const DEFAULT_GYRO_ADDRESS: u8 = 0x68;
+
+/// Every setting the driver reads from the board file. Each has a default, so none is required.
+const KEYS: &[Key] = &[
+    Key::optional("accel_address", lemnos_core::Kind::Int),
+    Key::optional("accel_range", lemnos_core::Kind::Int),
+    Key::optional("accel_rate", lemnos_core::Kind::Float),
+    Key::optional("gyro_address", lemnos_core::Kind::Int),
+    Key::optional("gyro_range", lemnos_core::Kind::Int),
+    Key::optional("gyro_rate", lemnos_core::Kind::Int),
+    Key::optional("fifo", lemnos_core::Kind::Bool),
+];
 
 /// Bytes of one batch record (see the contract crates).
 const RECORD_LEN: usize = 4 + 8 + (4 + 3 * 4);
@@ -561,6 +572,49 @@ impl Lifecycle for Bmi088 {
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        // Each range is checked at a rate the other setting never refuses (100 Hz for the
+        // accelerometer, 2000 Hz for the gyroscope), so a refusal names the setting that is wrong.
+        if chip::accel_setting(cfg.int("accel_range").unwrap_or(6), 100.0).is_none() {
+            return Err(ConfigError::new("accel_range", "must be 3, 6, 12 or 24"));
+        }
+        if chip::accel_setting(
+            cfg.int("accel_range").unwrap_or(6),
+            cfg.float("accel_rate").unwrap_or(100.0),
+        )
+        .is_none()
+        {
+            return Err(ConfigError::new(
+                "accel_rate",
+                "must be 12.5, 25, 50, 100, 200, 400, 800 or 1600",
+            ));
+        }
+        if chip::gyro_setting(cfg.int("gyro_range").unwrap_or(2000), 2000).is_none() {
+            return Err(ConfigError::new(
+                "gyro_range",
+                "must be 125, 250, 500, 1000 or 2000",
+            ));
+        }
+        if chip::gyro_setting(2000, cfg.int("gyro_rate").unwrap_or(2000)).is_none() {
+            return Err(ConfigError::new(
+                "gyro_rate",
+                "must be 100, 200, 400, 1000 or 2000",
+            ));
+        }
+        for key in ["accel_address", "gyro_address"] {
+            if let Some(address) = cfg.int(key)
+                && !(0x08..=0x77).contains(&address)
+            {
+                return Err(ConfigError::new(
+                    key,
+                    "must be a 7-bit address from 0x08 to 0x77",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn start(needs: Bmi088Needs, cfg: &Config<'_>) -> Result<Self> {
         let mut place = None;
         Self::start_in(&mut place, needs, cfg)?;
@@ -682,12 +736,8 @@ fn number(cfg: &Config<'_>, key: &str, default: f64) -> Result<f64> {
     }
 }
 
-/// A 7-bit address that is not reserved, or `default` when absent.
+/// A 7-bit address, or `default` when absent.
 fn address(cfg: &Config<'_>, key: &str, default: u8) -> Result<u8> {
-    let value = int(cfg, key, i64::from(default))?;
-    if (0x08..=0x77).contains(&value) {
-        Ok(value as u8)
-    } else {
-        Err(Status::INVALID_ARGUMENT)
-    }
+    // The range is checked by the driver's `check_config`, so this only narrows the type.
+    u8::try_from(int(cfg, key, i64::from(default))?).map_err(|_| Status::INVALID_ARGUMENT)
 }

@@ -40,14 +40,24 @@ mod tests;
 use chip::{Chip, DEFAULT_ADDRESS, Format};
 use lemnos_contract_lens::{FocusDirection, Lens, Range};
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, I2c, Item, Lifecycle, MethodId, Result, Status, Unit,
-    driver, status_of,
+    Config, ConfigError, Description, Health, I2c, Item, Key, Kind, Lifecycle, MethodId, Result,
+    Status, Unit, driver, status_of,
 };
 
 const POSITION: MethodId = MethodId {
     contract: 0,
     method: 3,
 };
+
+/// The settings this driver reads from the board file's `config`.
+const KEYS: &[Key] = &[
+    Key::required("chip", Kind::Str),
+    Key::optional("address", Kind::Int),
+    Key::optional("min", Kind::Int),
+    Key::optional("max", Kind::Int),
+    Key::optional("direction", Kind::Str),
+    Key::optional("settle_us", Kind::Int),
+];
 
 /// Where the chip is in its power-up sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,20 +92,72 @@ impl Lifecycle for Vcm {
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        let chip = chip_of(cfg).ok_or(ConfigError::new(
+            "chip",
+            "must be dw9714, dw9807, dw9817 or ak7375",
+        ))?;
+        if cfg
+            .int("address")
+            .is_some_and(|address| !(0x08..=0x77).contains(&address))
+        {
+            return Err(ConfigError::new(
+                "address",
+                "must be a 7-bit address from 0x08 to 0x77",
+            ));
+        }
+        if cfg
+            .str("direction")
+            .is_some_and(|name| direction_named(name).is_none())
+        {
+            return Err(ConfigError::new(
+                "direction",
+                "must be unknown, near or far",
+            ));
+        }
+        if cfg
+            .int("settle_us")
+            .is_some_and(|us| u32::try_from(us).is_err())
+        {
+            return Err(ConfigError::new(
+                "settle_us",
+                "must be from 0 to 4294967295",
+            ));
+        }
+        let highest = i64::from(chip.format().max_position());
+        for key in ["min", "max"] {
+            if cfg
+                .int(key)
+                .is_some_and(|value| !(0..=highest).contains(&value))
+            {
+                return Err(ConfigError::new(
+                    key,
+                    "must be a position within the chip's range",
+                ));
+            }
+        }
+        let min = cfg.int("min").unwrap_or(0);
+        let max = cfg.int("max").unwrap_or(highest);
+        if min > max {
+            return Err(ConfigError::new("min", "must not be above max"));
+        }
+        Ok(())
+    }
+
     fn start(needs: VcmNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let chip = chip_from_config(cfg)?;
+        // The chip has no default; check_config has already refused its absence.
+        let chip = chip_of(cfg).ok_or(Status::INVALID_ARGUMENT)?;
         let format = chip.format();
-        let (min, max) = range_from_config(cfg, &format)?;
-        let direction = direction_from_config(cfg)?;
-        let settle_us = settle_from_config(cfg)?;
+        let (min, max) = range_of(cfg, &format);
         Ok(Self {
             bus: needs.bus,
-            address: address(cfg)?,
+            address: address_of(cfg),
             format,
             min,
             max,
-            direction,
-            settle_us,
+            direction: direction_of(cfg),
+            settle_us: cfg.int("settle_us").and_then(|us| u32::try_from(us).ok()),
             phase: Phase::Off,
             position: None,
             fault: "not powered: powers up on the next move",
@@ -175,69 +237,48 @@ impl Lens for Vcm {
     }
 }
 
-/// The `direction` config: which way focus moves as the position goes up.
-fn direction_from_config(cfg: &Config<'_>) -> Result<FocusDirection> {
-    match cfg.get("direction") {
-        None => Ok(FocusDirection::Unknown),
-        Some(ConfigValue::Str(name)) if name.eq_ignore_ascii_case("unknown") => {
-            Ok(FocusDirection::Unknown)
-        }
-        Some(ConfigValue::Str(name)) if name.eq_ignore_ascii_case("near") => {
-            Ok(FocusDirection::TowardNear)
-        }
-        Some(ConfigValue::Str(name)) if name.eq_ignore_ascii_case("far") => {
-            Ok(FocusDirection::TowardFar)
-        }
-        Some(_) => Err(Status::INVALID_ARGUMENT),
+/// The focus direction a `direction` name gives, in any case.
+fn direction_named(name: &str) -> Option<FocusDirection> {
+    if name.eq_ignore_ascii_case("unknown") {
+        Some(FocusDirection::Unknown)
+    } else if name.eq_ignore_ascii_case("near") {
+        Some(FocusDirection::TowardNear)
+    } else if name.eq_ignore_ascii_case("far") {
+        Some(FocusDirection::TowardFar)
+    } else {
+        None
     }
 }
 
-/// The `settle_us` config: a settle time for every move, if the board has one.
-fn settle_from_config(cfg: &Config<'_>) -> Result<Option<u32>> {
-    match cfg.get("settle_us") {
-        None => Ok(None),
-        Some(ConfigValue::Int(us)) => u32::try_from(us)
-            .map(Some)
-            .map_err(|_| Status::INVALID_ARGUMENT),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
-    }
+/// The `direction` config, `unknown` when the board leaves it out. Checked by `check_config`.
+fn direction_of(cfg: &Config<'_>) -> FocusDirection {
+    cfg.str("direction")
+        .and_then(direction_named)
+        .unwrap_or(FocusDirection::Unknown)
 }
 
 /// The `chip` config: one of the built-in chips.
-fn chip_from_config(cfg: &Config<'_>) -> Result<Chip> {
-    match cfg.get("chip") {
-        Some(ConfigValue::Str(name)) => Chip::from_name(name).ok_or(Status::INVALID_ARGUMENT),
-        _ => Err(Status::INVALID_ARGUMENT),
-    }
+fn chip_of(cfg: &Config<'_>) -> Option<Chip> {
+    cfg.str("chip").and_then(Chip::from_name)
 }
 
-/// The `address` config: a 7-bit address that is not reserved.
-fn address(cfg: &Config<'_>) -> Result<u8> {
-    match cfg.get("address") {
-        None => Ok(DEFAULT_ADDRESS),
-        Some(ConfigValue::Int(address)) if (0x08..=0x77).contains(&address) => Ok(address as u8),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
-    }
+/// The `address` config, or the chip's usual address. Checked by `check_config`.
+fn address_of(cfg: &Config<'_>) -> u8 {
+    cfg.int("address")
+        .and_then(|address| u8::try_from(address).ok())
+        .unwrap_or(DEFAULT_ADDRESS)
 }
 
-/// The `min` and `max` config: positions within the chip's range, `min <= max`.
-fn range_from_config(cfg: &Config<'_>, format: &Format) -> Result<(u16, u16)> {
-    let highest = format.max_position();
-    let min = position_config(cfg, "min", 0, highest)?;
-    let max = position_config(cfg, "max", highest, highest)?;
-    if min > max {
-        return Err(Status::INVALID_ARGUMENT);
-    }
-    Ok((min, max))
-}
-
-fn position_config(cfg: &Config<'_>, key: &str, default: u16, highest: u16) -> Result<u16> {
-    match cfg.get(key) {
-        None => Ok(default),
-        Some(ConfigValue::Int(value)) => u16::try_from(value)
-            .ok()
-            .filter(|value| *value <= highest)
-            .ok_or(Status::INVALID_ARGUMENT),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
-    }
+/// The `min` and `max` config, `min` from 0 and `max` from the chip's highest position when the
+/// board leaves them out. Checked by `check_config`.
+fn range_of(cfg: &Config<'_>, format: &Format) -> (u16, u16) {
+    let min = cfg
+        .int("min")
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(0);
+    let max = cfg
+        .int("max")
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(format.max_position());
+    (min, max)
 }

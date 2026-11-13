@@ -24,7 +24,10 @@
 #[cfg(test)]
 mod tests;
 
-use lemnos_core::{Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, driver};
+use lemnos_core::{
+    Config, ConfigError, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Result, Status,
+    driver,
+};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -51,10 +54,20 @@ pub struct HostClock {
     facts: Facts,
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::optional("sys_root", Kind::Str),
+    Key::optional("rtc", Kind::Str),
+];
+
 impl Lifecycle for HostClock {
     type Needs = HostClockNeeds;
     // Reaches the kernel's files itself, and on a host-owned device only reads them.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ReadsOnly;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)
+    }
 
     fn start(_needs: HostClockNeeds, cfg: &Config<'_>) -> Result<Self> {
         let root = PathBuf::from(cfg.str("sys_root").unwrap_or(DEFAULT_SYS_ROOT));

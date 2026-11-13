@@ -1139,3 +1139,21 @@ fn the_steady_state_allocates_nothing() {
     assert_eq!(rig.counters(), (10, 0, 0));
     assert_eq!(rig.played.log().imports.len(), OUTPUTS as usize);
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn frames_refusal<'a>(
+    entries: &'a [(&'a str, lemnos_core::ConfigValue<'a>)],
+) -> Option<lemnos_core::ConfigError<'a>> {
+    <K230IspFrames as lemnos_core::Lifecycle>::check_config(&lemnos_core::Config::new(entries))
+        .err()
+}
+
+#[test]
+fn check_config_of_the_frames_driver_needs_a_block_name() {
+    use lemnos_core::ConfigValue::Str;
+    assert_eq!(frames_refusal(&[("block", Str("k230_isp"))]), None);
+    assert_eq!(frames_refusal(&[]).unwrap().key, "block");
+    assert_eq!(frames_refusal(&[("block", Str(""))]).unwrap().key, "block");
+    let typo = [("block", Str("k230_isp")), ("nod", Str("/x"))];
+    assert_eq!(frames_refusal(&typo).unwrap().key, "nod");
+}

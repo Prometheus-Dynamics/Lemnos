@@ -41,12 +41,17 @@ pub struct Settings {
     heap: String,
 }
 
+/// Whether `name` can name a device or a heap under its directory: not empty, and with no `/`
+/// or NUL, so it cannot name a path elsewhere.
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\0')
+}
+
 impl Settings {
     /// The block's device name as the module lists it, and a dma-heap's name under
     /// `/dev/dma_heap`. `InvalidInput` for a name that could name a path elsewhere.
     pub fn new(device: &str, heap: &str) -> io::Result<Self> {
-        let ok = |name: &str| !name.is_empty() && !name.contains('/') && !name.contains('\0');
-        if !ok(device) || !ok(heap) {
+        if !valid_name(device) || !valid_name(heap) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         Ok(Self {

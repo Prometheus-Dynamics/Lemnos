@@ -16,8 +16,23 @@ lemnos-ctl validate docs/examples/full-board.toml
 
 `--check` parses the file and exits, 0 when it is well formed. `lemnos-ctl validate` checks it the
 same way with no daemon, and also prints the host settings the file gives, defaults filled in, and
-the devices that opted in to auto-off. Both check the keys on this page. Neither checks a driver's own `config` keys, or that the hardware is there: those are checked when
-the driver binds, and a device that fails to bind is listed with the reason.
+the devices that opted in to auto-off. Both check the keys on this page, and both run every built-in
+driver's check of its own `config` keys, with no hardware and no device made. `lemnos-ctl validate`
+refuses a board file with a setting a driver refuses, and names the device and the key:
+
+```
+board.toml: device "lights": setting "brightnes" is not a setting this driver reads (did you mean "brightness"?)
+board.toml: device "temp": setting "description" is not a chip description: a file's path goes in description_file
+```
+
+The daemon does not refuse the whole board for that. It starts without the refused device: the
+device is listed as failed, with its key and the reason in its state (`lemnos-ctl list` shows it as
+`retrying  failed`, with the reason in brackets), the daemon says so at start, and every other device
+runs. A device that uses or is linked to the refused one behaves as it does when that device fails
+to bind. `lemnosd --check` refuses the board, as validate does. Only a file that is not a board at all
+(not TOML, or no `[board]`) stops the daemon from starting. A check that needs the hardware (a
+register the chip answers, a device node that opens, the board's serial) is not made here: it is
+checked when the driver binds, and a device that fails to bind is listed with the reason.
 
 ## The keys
 

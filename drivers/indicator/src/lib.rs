@@ -55,6 +55,9 @@ extern crate std;
 
 pub mod pattern;
 
+#[cfg(test)]
+mod tests;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -66,8 +69,8 @@ use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
 use lemnos_core::{
-    CallerId, Config, Description, Dev, Health, Item, JobId, JobState, Lifecycle, MethodId, Reply,
-    Result, Status, driver,
+    CallerId, Config, ConfigError, ConfigValue, Description, Dev, Health, Item, JobId, JobState,
+    Key, Kind, Lifecycle, MethodId, Reply, Result, Status, driver,
 };
 use pattern::{Pattern, draw, next_change};
 
@@ -148,6 +151,17 @@ fn key(state: &str) -> String {
     key
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::optional("brightness", Kind::Int),
+    Key::optional("state.idle", Kind::Str),
+    Key::optional("state.receiving", Kind::Str),
+    Key::optional("state.writing", Kind::Str),
+    Key::optional("state.verifying", Kind::Str),
+    Key::optional("state.done", Kind::Str),
+    Key::optional("state.failed", Kind::Str),
+];
+
 impl Lifecycle for Indicator {
     type Needs = IndicatorNeeds;
     // Everything this driver does to hardware goes through its needs.
@@ -158,9 +172,30 @@ impl Lifecycle for Indicator {
     const JOBS: bool = true;
     const TRACKS_CALLERS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if let Some(level) = cfg.int("brightness")
+            && u8::try_from(level).is_err()
+        {
+            return Err(ConfigError::new("brightness", "must be 0 to 255"));
+        }
+        // Each state's pattern text must parse. The brightness it falls back to does not change
+        // whether it parses, so any value will do here.
+        for &(name, value) in cfg.entries() {
+            if let ConfigValue::Str(text) = value
+                && name.starts_with("state.")
+                && let Err(refused) = pattern::parse(text, 255)
+            {
+                return Err(ConfigError::new(name, refused.0));
+            }
+        }
+        Ok(())
+    }
+
     fn start(mut needs: IndicatorNeeds, cfg: &Config<'_>) -> Result<Self> {
         let count = usize::from(needs.pixels.pixel_count()?);
         let brightness = match cfg.int("brightness") {
+            // The range is checked by check_config.
             Some(level) => u8::try_from(level).map_err(|_| Status::INVALID_ARGUMENT)?,
             None => 255,
         };
@@ -168,6 +203,7 @@ impl Lifecycle for Indicator {
         let mut patterns = Vec::with_capacity(STATES.len());
         for (name, default) in STATES.iter().zip(defaults) {
             let text = cfg.str(&key(name)).unwrap_or(default);
+            // The text is checked by check_config; this builds the pattern from it.
             let parsed = pattern::parse(text, brightness).map_err(|_| Status::INVALID_ARGUMENT)?;
             patterns.push(parsed);
         }

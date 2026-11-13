@@ -1,6 +1,6 @@
 use super::*;
 use lemnos_contract_system_identity::MAX_FACTS_TEXT;
-use lemnos_core::ConfigValue;
+use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
 use std::fs;
 
 /// A fake data partition and boot files, in its own directory, removed on drop.
@@ -231,4 +231,107 @@ fn a_slot_file_that_cannot_be_read_now_leaves_only_its_facts_absent() {
     let mut buf = [0u8; MAX_FACTS_TEXT];
     let facts = text(id.facts(&mut buf), &buf);
     assert_eq!(facts, "family=alpha-1\nversion.lemnos=2.0.1\n", "{facts}");
+}
+
+#[test]
+fn check_config_names_the_bad_setting() {
+    fn check(
+        entries: &'static [(&'static str, ConfigValue<'static>)],
+    ) -> core::result::Result<(), ConfigError<'static>> {
+        <Identity as Lifecycle>::check_config(&Config::new(entries))
+    }
+    let nvmem = [
+        ("serial", ConfigValue::Str("nvmem")),
+        ("serial_path", ConfigValue::Str("/otp")),
+        ("serial_offset", ConfigValue::Int(2)),
+        ("serial_length", ConfigValue::Int(6)),
+        ("serial_byte_order", ConfigValue::Str("little")),
+        ("name", ConfigValue::Str("Alpha")),
+    ];
+    assert!(<Identity as Lifecycle>::check_config(&Config::new(&nvmem)).is_ok());
+    assert!(check(&[]).is_ok());
+    // The byte order is read only for nvmem, so another source does not refuse it.
+    assert!(
+        check(&[
+            ("serial", ConfigValue::Str("cpuinfo")),
+            ("serial_byte_order", ConfigValue::Str("x"))
+        ])
+        .is_ok()
+    );
+
+    assert_eq!(
+        check(&[("serial", ConfigValue::Str("usb"))])
+            .unwrap_err()
+            .key,
+        "serial"
+    );
+    assert_eq!(
+        check(&[("serial", ConfigValue::Str("cmdline"))])
+            .unwrap_err()
+            .key,
+        "serial_key"
+    );
+    assert_eq!(
+        check(&[
+            ("serial", ConfigValue::Str("nvmem")),
+            ("serial_length", ConfigValue::Int(6))
+        ])
+        .unwrap_err()
+        .key,
+        "serial_path"
+    );
+    assert_eq!(
+        check(&[
+            ("serial", ConfigValue::Str("nvmem")),
+            ("serial_path", ConfigValue::Str("/otp"))
+        ])
+        .unwrap_err()
+        .key,
+        "serial_length"
+    );
+    assert_eq!(
+        check(&[
+            ("serial", ConfigValue::Str("nvmem")),
+            ("serial_path", ConfigValue::Str("/otp")),
+            ("serial_length", ConfigValue::Int(-1))
+        ])
+        .unwrap_err()
+        .key,
+        "serial_length"
+    );
+    assert_eq!(
+        check(&[
+            ("serial", ConfigValue::Str("nvmem")),
+            ("serial_path", ConfigValue::Str("/otp")),
+            ("serial_length", ConfigValue::Int(6)),
+            ("serial_offset", ConfigValue::Int(-2))
+        ])
+        .unwrap_err()
+        .key,
+        "serial_offset"
+    );
+    let order = check(&[
+        ("serial", ConfigValue::Str("nvmem")),
+        ("serial_path", ConfigValue::Str("/otp")),
+        ("serial_length", ConfigValue::Int(6)),
+        ("serial_byte_order", ConfigValue::Str("middle")),
+    ])
+    .unwrap_err();
+    assert_eq!(
+        (order.key, order.reason),
+        ("serial_byte_order", "must be big or little")
+    );
+    let near = check(&[("serial_lenght", ConfigValue::Int(6))]).unwrap_err();
+    assert_eq!(
+        (near.key, near.suggestion),
+        ("serial_lenght", Some("serial_length"))
+    );
+    assert_eq!(
+        check(&[("serial", ConfigValue::Int(1))]).unwrap_err().key,
+        "serial"
+    );
+    assert_eq!(
+        check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
+        "bogus"
+    );
 }

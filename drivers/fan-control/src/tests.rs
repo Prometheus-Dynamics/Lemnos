@@ -2,7 +2,7 @@
 
 use crate::law::{Control, Curve, DEGRADED, FULL, WRITE_FAILED, check_settings, parse_curve};
 use lemnos_contract_fan_control::{Point, Settings};
-use lemnos_core::{Health, Status};
+use lemnos_core::{Config, ConfigValue, Driver, Health, Status};
 use std::vec::Vec;
 
 /// One second, in nanoseconds.
@@ -393,4 +393,75 @@ fn set_settings_refuses_a_bad_floor() {
 fn a_zero_max_age_is_refused_at_start() {
     let cpu = Curve::new(&CPU).unwrap();
     assert!(Control::new(tuned(), 0, [Some(cpu), None, None, None]).is_err());
+}
+
+#[test]
+fn a_full_valid_config_passes_the_check() {
+    let entries = [
+        ("floor", ConfigValue::Int(300)),
+        ("hysteresis", ConfigValue::Int(2000)),
+        ("slew_per_s", ConfigValue::Int(50)),
+        ("kick_ms", ConfigValue::Int(0)),
+        ("max_age_ms", ConfigValue::Int(3000)),
+        (
+            "curve_t0",
+            ConfigValue::Str("30000:300,60000:600,75000:1000"),
+        ),
+        ("curve_t3", ConfigValue::Str("40000:200")),
+    ];
+    assert_eq!(
+        <crate::FanController as Driver>::check_config(&Config::new(&entries)),
+        Ok(())
+    );
+}
+
+#[test]
+fn an_unknown_key_is_refused_and_a_near_miss_is_suggested() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    let error = <crate::FanController as Driver>::check_config(&Config::new(&bogus)).unwrap_err();
+    assert_eq!(error.key, "bogus");
+    let near = [("flor", ConfigValue::Int(300))];
+    let error = <crate::FanController as Driver>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(error.suggestion, Some("floor"));
+}
+
+#[test]
+fn a_wrong_kind_is_refused_by_name() {
+    let entries = [("floor", ConfigValue::Str("300"))];
+    let error = <crate::FanController as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(error.key, "floor");
+}
+
+#[test]
+fn a_setting_out_of_range_is_refused_and_its_edges_pass() {
+    for (key, value) in [
+        ("floor", 1001),
+        ("slew_per_s", -1),
+        ("hysteresis", -1),
+        ("max_age_ms", 0),
+    ] {
+        let entries = [(key, ConfigValue::Int(value))];
+        let error =
+            <crate::FanController as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+        assert_eq!(error.key, key);
+    }
+    let edges = [
+        ("floor", ConfigValue::Int(1000)),
+        ("max_age_ms", ConfigValue::Int(1)),
+        ("hysteresis", ConfigValue::Int(0)),
+    ];
+    assert_eq!(
+        <crate::FanController as Driver>::check_config(&Config::new(&edges)),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_curve_that_does_not_parse_or_is_not_ascending_is_refused() {
+    for text in ["30000:300,30000:600", "30000"] {
+        let entries = [("curve_t1", ConfigValue::Str(text))];
+        let error =
+            <crate::FanController as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+        assert_eq!(error.key, "curve_t1", "{text}");
+    }
 }

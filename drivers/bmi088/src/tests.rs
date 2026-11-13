@@ -1083,3 +1083,74 @@ fn stamps_stay_within_a_period_and_the_measured_period_tracks_the_die() {
     );
     assert_ne!(measured, NOMINAL);
 }
+
+#[test]
+fn a_full_valid_config_passes_the_check() {
+    let entries = [
+        ("accel_address", ConfigValue::Int(0x19)),
+        ("accel_range", ConfigValue::Int(12)),
+        ("accel_rate", ConfigValue::Float(12.5)),
+        ("gyro_address", ConfigValue::Int(0x69)),
+        ("gyro_range", ConfigValue::Int(500)),
+        ("gyro_rate", ConfigValue::Int(400)),
+        ("fifo", ConfigValue::Bool(true)),
+    ];
+    assert_eq!(
+        <Bmi088 as Driver>::check_config(&Config::new(&entries)),
+        Ok(())
+    );
+}
+
+#[test]
+fn an_unknown_key_is_refused_and_a_near_miss_is_suggested() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    let error = <Bmi088 as Driver>::check_config(&Config::new(&bogus)).unwrap_err();
+    assert_eq!(error.key, "bogus");
+    let near = [("accel_rang", ConfigValue::Int(6))];
+    let error = <Bmi088 as Driver>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(error.suggestion, Some("accel_range"));
+}
+
+#[test]
+fn a_wrong_kind_is_refused_by_name() {
+    let entries = [("fifo", ConfigValue::Int(1))];
+    let error = <Bmi088 as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(error.key, "fifo");
+}
+
+#[test]
+fn a_range_or_rate_the_chip_cannot_set_is_refused_by_its_key() {
+    for (key, value, expect) in [
+        ("accel_range", ConfigValue::Int(5), "accel_range"),
+        ("accel_rate", ConfigValue::Float(13.0), "accel_rate"),
+        ("gyro_range", ConfigValue::Int(4000), "gyro_range"),
+        ("gyro_rate", ConfigValue::Int(150), "gyro_rate"),
+    ] {
+        let entries = [(key, value)];
+        let error = <Bmi088 as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+        assert_eq!(error.key, expect, "{key}");
+    }
+    // The edges the chip does set are accepted.
+    let edges = [
+        ("accel_range", ConfigValue::Int(24)),
+        ("accel_rate", ConfigValue::Float(1600.0)),
+        ("gyro_range", ConfigValue::Int(125)),
+        ("gyro_rate", ConfigValue::Int(100)),
+    ];
+    assert_eq!(
+        <Bmi088 as Driver>::check_config(&Config::new(&edges)),
+        Ok(())
+    );
+}
+
+#[test]
+fn an_address_outside_the_usable_seven_bit_range_is_refused() {
+    for (value, ok) in [(0x07, false), (0x08, true), (0x77, true), (0x78, false)] {
+        let entries = [("accel_address", ConfigValue::Int(value))];
+        assert_eq!(
+            <Bmi088 as Driver>::check_config(&Config::new(&entries)).is_ok(),
+            ok,
+            "{value:#x}"
+        );
+    }
+}

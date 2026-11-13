@@ -57,7 +57,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use lemnos_contract_npu::{Counters, Npu, NpuInfo};
-use lemnos_core::{CallerId, Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    CallerId, Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle,
+    driver,
+};
 use lemnos_driver_rknpu_sys::NpuNode;
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 
@@ -132,17 +135,24 @@ pub struct Rknpu {
     stream_retry_at_ns: u64,
 }
 
+/// Every setting the driver reads. `node` is optional: the node is found when it is not given.
+const KEYS: &[Key] = &[Key::optional("node", Kind::Str)];
+
 impl Lifecycle for Rknpu {
     type Needs = RknpuNeeds;
     const TICKS: bool = true;
     const TRACKS_CALLERS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("node") == Some("") {
+            return Err(ConfigError::new("node", "must not be empty"));
+        }
+        Ok(())
+    }
+
     fn start(needs: RknpuNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let node = match cfg.str("node") {
-            Some("") => return Err(Status::INVALID_ARGUMENT),
-            Some(path) => Some(PathBuf::from(path)),
-            None => None,
-        };
+        let node = cfg.str("node").map(PathBuf::from);
         let open: Opener = Box::new(move || {
             let path = node
                 .clone()

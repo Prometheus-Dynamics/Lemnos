@@ -208,14 +208,31 @@ fn a_board_file_binds_it_and_the_host_reaches_its_contract_and_its_jobs() {
 }
 
 #[test]
-fn a_board_file_without_a_channel_is_refused() {
-    let rig = Rig::start(&board("rkvpss", "", true), Arc::new(PerBuffer));
-    rig.host.tick();
-    assert!(matches!(rig.health(), Health::Failed(_)));
-    for bad in ["channel = 6", "channel = -1", "channel = 0, node = \"\""] {
-        let rig = Rig::start(&board("rkvpss", bad, true), Arc::new(PerBuffer));
-        rig.host.tick();
-        assert!(matches!(rig.health(), Health::Failed(_)), "{bad}");
+fn a_board_file_with_a_missing_or_bad_channel_is_listed_failed_and_never_made() {
+    // The settings check runs when the host starts: the board starts, and the device is listed
+    // failed with the key. The device is never made.
+    for (bad, key) in [
+        ("", "channel"),
+        ("channel = 6", "channel"),
+        ("channel = -1", "channel"),
+        ("channel = 0, node = \"\"", "node"),
+    ] {
+        let sim = SimBoard::new();
+        let clock = sim.clock();
+        let host = Host::start_with_streams(
+            &parse(&board("rkvpss", bad, true)).unwrap(),
+            &[entry::<Rkvpss>(), entry::<FakeCounter>()],
+            Box::new(sim),
+            Arc::new(clock),
+            Options::default(),
+            Arc::new(PerBuffer),
+        )
+        .unwrap_or_else(|error| panic!("{bad}: {error}"));
+        let state = host.device("v").unwrap().state;
+        assert!(
+            matches!(&state, lemnos_host::DeviceState::Backoff { reason, .. } if reason.contains(&format!("setting {key:?}"))),
+            "{bad}: {state:?}"
+        );
     }
 }
 

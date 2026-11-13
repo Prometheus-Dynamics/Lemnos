@@ -70,6 +70,11 @@ struct Rig {
 
 impl Rig {
     fn start(text: &str, dma_buf: bool) -> Self {
+        Self::try_start(text, dma_buf).unwrap()
+    }
+
+    /// The host started on `text`, or the reason it refused the board file.
+    fn try_start(text: &str, dma_buf: bool) -> Result<Self, String> {
         let sim = SimBoard::new();
         let clock = sim.clock();
         let allocator: Arc<dyn lemnos_host::stream::StreamAllocator> = if dma_buf {
@@ -85,8 +90,8 @@ impl Rig {
             Options::default(),
             allocator,
         )
-        .unwrap();
-        Self { host, clock }
+        .map_err(|error| error.to_string())?;
+        Ok(Self { host, clock })
     }
 
     fn ticks(&self, count: u32) {
@@ -292,22 +297,20 @@ fn a_board_file_binds_it_and_what_it_names_is_checked() {
         Health::Degraded(NOT_THERE)
     );
 
-    // A stream of plain memory, or no node: the bind is refused.
-    for (text, dma_buf) in [
-        (board("k230-vpu", false), false),
-        (
-            board("k230-vpu", true).replace("device = \"/nonexistent/video-codec\"", ""),
-            true,
-        ),
-    ] {
-        let rig = Rig::start(&text, dma_buf);
-        rig.ticks(1);
-        assert_ne!(
-            rig.host.device("vpu").unwrap().state,
-            DeviceState::Running,
-            "{text}"
-        );
-    }
+    // A stream of plain memory: the bind is refused.
+    let rig = Rig::start(&board("k230-vpu", false), false);
+    rig.ticks(1);
+    assert_ne!(rig.host.device("vpu").unwrap().state, DeviceState::Running);
+
+    // No device: the board starts, and the device is listed failed by name, with the key and the
+    // reason. The device is never made.
+    let text = board("k230-vpu", true).replace("device = \"/nonexistent/video-codec\"", "");
+    let rig = Rig::try_start(&text, true).unwrap();
+    let state = rig.host.device("vpu").unwrap().state;
+    assert!(
+        matches!(&state, DeviceState::Backoff { reason, .. } if reason.contains("setting \"device\" is required")),
+        "{state:?}"
+    );
 }
 
 #[test]

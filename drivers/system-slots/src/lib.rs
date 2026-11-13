@@ -90,7 +90,8 @@ use lemnos_contract_indicator::{Indicator as IndicatorContract, NO_PROGRESS};
 use lemnos_contract_system_reboot::Reboot;
 use lemnos_contract_system_slots::Slots;
 use lemnos_core::{
-    BoardView, CallerId, Config, Dev, JobId, JobState, Lifecycle, Reply, Result, Status, driver,
+    BoardView, CallerId, Config, ConfigError, Dev, JobId, JobState, Key, Kind, Lifecycle, Reply,
+    Result, Status, driver,
 };
 
 use boot::{BootRecord, FileRecord, Restarter, Tryboot};
@@ -917,8 +918,66 @@ impl SystemSlots {
     }
 }
 
+/// The settings every `system-slots` board file may give, as the driver reads them.
+const KEYS: &[Key] = &[
+    Key::optional("data", Kind::Str),
+    Key::optional("boot", Kind::Str),
+    Key::optional("ubi", Kind::Str),
+    Key::optional("record", Kind::Str),
+    Key::optional("systemctl", Kind::Str),
+    Key::optional("keys", Kind::Str),
+    Key::optional("partuuid", Kind::Str),
+    Key::optional("running", Kind::Str),
+    Key::optional("boot_args", Kind::Str),
+    Key::optional("require_signed", Kind::Bool),
+    Key::optional("reserve_mb", Kind::Int),
+    Key::optional("keep", Kind::Int),
+    Key::optional("boots_keep", Kind::Int),
+    Key::optional("reset_reason", Kind::Str),
+    Key::optional("auto_confirm", Kind::Bool),
+    Key::optional("reboot_at_deadline", Kind::Bool),
+    Key::optional("confirm_uptime_s", Kind::Int),
+    Key::optional("confirm_deadline_s", Kind::Int),
+    Key::optional("trial_attempts", Kind::Int),
+    Key::optional("health", Kind::List),
+];
+
+/// The settings `SystemReboot` reads.
+const REBOOT_KEYS: &[Key] = &[
+    Key::optional("systemctl", Kind::Str),
+    Key::optional("data", Kind::Str),
+];
+
+/// The `record` setting: which boot record the board uses. `ubi` needs a `ubi` device.
+fn record_kind<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+    match cfg.str("record").unwrap_or("tryboot") {
+        "tryboot" | "file" | "uboot" => Ok(()),
+        "ubi" if cfg.str("ubi").is_some() => Ok(()),
+        "ubi" => Err(ConfigError::new("ubi", "is required for record = ubi")),
+        _ => Err(ConfigError::new(
+            "record",
+            "must be tryboot, file, uboot or ubi",
+        )),
+    }
+}
+
+/// The `health` list, each entry a source the trial waits on.
+fn health_sources(texts: &[String]) -> core::result::Result<Vec<Source>, ConfigError<'static>> {
+    texts
+        .iter()
+        .map(|text| {
+            Source::parse(text).map_err(|_| {
+                ConfigError::new(
+                    "health",
+                    "entries must be device:<id>, file:<path> or socket:<path>",
+                )
+            })
+        })
+        .collect()
+}
+
 /// The trial settings the board file gives the `system-slots` driver.
-fn trial_policy(cfg: &Config<'_>) -> Result<Policy> {
+fn trial_policy<'a>(cfg: &Config<'a>) -> core::result::Result<Policy, ConfigError<'a>> {
     let mut policy = Policy::default();
     if let Some(on) = cfg.bool("auto_confirm") {
         policy.auto_confirm = on;
@@ -926,12 +985,12 @@ fn trial_policy(cfg: &Config<'_>) -> Result<Policy> {
     if let Some(on) = cfg.bool("reboot_at_deadline") {
         policy.reboot_at_deadline = on;
     }
-    let seconds = |key: &str| -> Result<Option<Duration>> {
+    let seconds = |key: &'static str| -> core::result::Result<Option<Duration>, ConfigError<'a>> {
         match cfg.int(key) {
             None => Ok(None),
             Some(s) => u64::try_from(s)
                 .map(|s| Some(Duration::from_secs(s)))
-                .map_err(|_| Status::INVALID_ARGUMENT),
+                .map_err(|_| ConfigError::new(key, "must not be negative")),
         }
     };
     if let Some(uptime) = seconds("confirm_uptime_s")? {
@@ -941,13 +1000,16 @@ fn trial_policy(cfg: &Config<'_>) -> Result<Policy> {
         policy.deadline = deadline;
     }
     if policy.deadline < policy.uptime {
-        return Err(Status::INVALID_ARGUMENT);
+        return Err(ConfigError::new(
+            "confirm_deadline_s",
+            "must not be less than confirm_uptime_s",
+        ));
     }
     if let Some(attempts) = cfg.int("trial_attempts") {
         policy.attempts = u8::try_from(attempts)
             .ok()
             .filter(|n| (1..=lemnos_slot_store::records::MAX_ATTEMPTS).contains(n))
-            .ok_or(Status::INVALID_ARGUMENT)?;
+            .ok_or(ConfigError::new("trial_attempts", "must be 1 to 3"))?;
     }
     policy.health = cfg
         .list("health")
@@ -1048,6 +1110,25 @@ impl Lifecycle for SystemSlots {
         }
     }
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        record_kind(cfg)?;
+        let policy = trial_policy(cfg)?;
+        health_sources(&policy.health)?;
+        if let Some(mb) = cfg.int("reserve_mb") {
+            u64::try_from(mb)
+                .map_err(|_| ConfigError::new("reserve_mb", "must not be negative"))?;
+        }
+        if let Some(keep) = cfg.int("keep") {
+            u32::try_from(keep).map_err(|_| ConfigError::new("keep", "must be 0 to 4294967295"))?;
+        }
+        if let Some(keep) = cfg.int("boots_keep") {
+            usize::try_from(keep)
+                .map_err(|_| ConfigError::new("boots_keep", "must not be negative"))?;
+        }
+        Ok(())
+    }
+
     fn start(needs: SystemSlotsNeeds, cfg: &Config<'_>) -> Result<Self> {
         let mut layout = Layout::new(
             PathBuf::from(cfg.str("data").unwrap_or("/data")),
@@ -1094,13 +1175,9 @@ impl Lifecycle for SystemSlots {
             .and_then(|text| parse_keys(&text).ok())
             .unwrap_or_default();
         let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
-        slots.policy = trial_policy(cfg)?;
-        slots.sources = slots
-            .policy
-            .health
-            .iter()
-            .map(|text| Source::parse(text).map_err(|_| Status::INVALID_ARGUMENT))
-            .collect::<Result<Vec<_>>>()?;
+        slots.policy = trial_policy(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+        slots.sources =
+            health_sources(&slots.policy.health).map_err(|_| Status::INVALID_ARGUMENT)?;
         slots.probes = vec![trial::Probe::default(); slots.sources.len()];
         slots.boot = read_boot_id();
         slots.indicator = needs.indicator;
@@ -1365,6 +1442,10 @@ pub struct SystemReboot {
 impl Lifecycle for SystemReboot {
     type Needs = SystemRebootNeeds;
     const TRACKS_CALLERS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(REBOOT_KEYS)
+    }
 
     fn start(_: SystemRebootNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {

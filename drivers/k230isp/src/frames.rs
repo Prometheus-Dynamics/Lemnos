@@ -87,8 +87,8 @@ use lemnos_contract_camera_isp::{
     OutputLayout,
 };
 use lemnos_core::{
-    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
-    StreamHandle, driver,
+    Config, ConfigError, Decode, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Reader,
+    Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_k230isp_sys::regs::{
     ACQ_BAYER_SHIFT, ACQ_INPUT_SHIFT, CTRL_ENABLE, CTRL_GEN_CFG_UPD, CTRL_INFORM_ENABLE,
@@ -322,12 +322,29 @@ pub struct K230IspFrames {
     stats: [u8; STATISTICS_BYTES],
 }
 
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::required("block", Kind::Str),
+    Key::optional("node", Kind::Str),
+];
+
 impl Lifecycle for K230IspFrames {
     type Needs = K230IspFramesNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("block") == Some("") {
+            return Err(ConfigError::new(
+                "block",
+                "must be a platform device name, not empty",
+            ));
+        }
+        Ok(())
+    }
+
     fn start(needs: K230IspFramesNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let Some(block) = cfg.str("block").filter(|block| !block.is_empty()) else {
+        let Some(block) = cfg.str("block") else {
             return Err(Status::INVALID_ARGUMENT);
         };
         let node = PathBuf::from(cfg.str("node").unwrap_or(NODE));

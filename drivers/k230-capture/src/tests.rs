@@ -889,3 +889,54 @@ fn layout_is_what_configure_set_and_nothing_before() {
     let set = d.configure(raw10(), Packing::Unpacked16).unwrap();
     assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
 }
+
+/// The refusal `check_config` gives for `entries`, or `None` when it accepts them.
+fn refusal<'a>(
+    entries: &'a [(&'a str, lemnos_core::ConfigValue<'a>)],
+) -> Option<lemnos_core::ConfigError<'a>> {
+    <K230Capture as lemnos_core::Lifecycle>::check_config(&lemnos_core::Config::new(entries)).err()
+}
+
+#[test]
+fn check_config_accepts_the_module_way_and_the_vendor_way() {
+    use lemnos_core::ConfigValue::Str;
+    let module = [
+        ("block", Str("k230_isp")),
+        ("format", Str("nv12")),
+        ("order", Str("bggr")),
+    ];
+    assert_eq!(refusal(&module), None);
+    let vendor = [
+        ("isp", Str("/dev/vvcam-isp.0")),
+        ("mipi", Str("/dev/vvcam-mipi.0")),
+    ];
+    assert_eq!(refusal(&vendor), None);
+}
+
+#[test]
+fn check_config_refuses_an_unknown_key_by_name_and_suggests_the_near_one() {
+    use lemnos_core::ConfigValue::Str;
+    let err = refusal(&[("forat", Str("nv12"))]).unwrap();
+    assert_eq!(err.key, "forat");
+    assert_eq!(err.suggestion, Some("format"));
+}
+
+#[test]
+fn check_config_refuses_block_with_isp_and_an_empty_block() {
+    use lemnos_core::ConfigValue::Str;
+    assert_eq!(
+        refusal(&[("block", Str("k230_isp")), ("isp", Str("/dev/x"))])
+            .unwrap()
+            .key,
+        "isp"
+    );
+    assert_eq!(refusal(&[("block", Str(""))]).unwrap().key, "block");
+}
+
+#[test]
+fn check_config_refuses_a_wrong_kind_and_an_unknown_format_or_order() {
+    use lemnos_core::ConfigValue::{Int, Str};
+    assert_eq!(refusal(&[("node", Int(1))]).unwrap().key, "node");
+    assert_eq!(refusal(&[("format", Str("rgb"))]).unwrap().key, "format");
+    assert_eq!(refusal(&[("order", Str("rgbg"))]).unwrap().key, "order");
+}

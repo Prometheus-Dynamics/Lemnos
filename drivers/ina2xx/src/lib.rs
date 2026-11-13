@@ -43,10 +43,13 @@ use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
 use lemnos_core::{
-    AddressWidth, CallerId, Config, Description, Health, I2c, Item, JobId, JobState, Lifecycle,
-    MethodId, Reply, Result, Status, Unit, driver, status_of,
+    AddressWidth, CallerId, Config, ConfigError, Description, Health, I2c, Item, JobId, JobState,
+    Key, Kind, Lifecycle, MethodId, Reply, Result, Status, Unit, driver, status_of,
 };
 use lemnos_hal::HalError;
+
+/// The largest 7-bit I2C address.
+const MAX_ADDRESS: u8 = 0x7f;
 
 const READ: MethodId = MethodId {
     contract: 0,
@@ -103,17 +106,29 @@ fn nano_units(value: f64) -> i64 {
 }
 
 fn warnings(cfg: &Config<'_>) -> Result<Warnings> {
-    let nano = |key: &str| match cfg.float(key) {
-        None => Ok(None),
-        Some(value) if value.is_finite() => Ok(Some(nano_units(value))),
-        Some(_) => Err(Status::INVALID_ARGUMENT),
-    };
+    // Finite values only: check_config refuses the rest.
+    let nano = |key: &str| cfg.float(key).map(nano_units);
     Ok(Warnings {
-        bus_below_nv: nano("bus_warn_below_v")?,
-        bus_above_nv: nano("bus_warn_above_v")?,
-        current_above_na: nano("current_warn_above_a")?,
+        bus_below_nv: nano("bus_warn_below_v"),
+        bus_above_nv: nano("bus_warn_above_v"),
+        current_above_na: nano("current_warn_above_a"),
     })
 }
+
+/// The settings this driver reads from its board file config.
+const KEYS: &[Key] = &[
+    Key::required("chip", Kind::Str),
+    Key::optional("address", Kind::Int),
+    Key::optional("shunt_micro_ohms", Kind::Int),
+    Key::optional("shunt_ohms", Kind::Float),
+    Key::optional("max_current_micro_amps", Kind::Int),
+    Key::optional("max_current_a", Kind::Float),
+    Key::optional("bus_warn_below_v", Kind::Float),
+    Key::optional("bus_warn_above_v", Kind::Float),
+    Key::optional("current_warn_above_a", Kind::Float),
+    Key::optional("self_test_bus_min_mv", Kind::Int),
+    Key::optional("self_test_bus_max_mv", Kind::Int),
+];
 
 impl Lifecycle for Ina2xx {
     type Needs = Ina2xxNeeds;
@@ -125,6 +140,53 @@ impl Lifecycle for Ina2xx {
     const TICKS: bool = true;
     const JOBS: bool = true;
     const TRACKS_CALLERS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        let model =
+            model_of(cfg).ok_or(ConfigError::new("chip", "must be ina226, ina238 or ina260"))?;
+        if let Some(address) = cfg.int("address")
+            && !(0..=i64::from(MAX_ADDRESS)).contains(&address)
+        {
+            return Err(ConfigError::new(
+                "address",
+                "must be a 7-bit address, 0 to 127",
+            ));
+        }
+        // The calibration the chip cannot take: the same check the chip makes when it is built.
+        let shunt_key = if cfg.get("shunt_micro_ohms").is_some() {
+            "shunt_micro_ohms"
+        } else {
+            "shunt_ohms"
+        };
+        let address = cfg.int("address").and_then(|a| u8::try_from(a).ok());
+        chip::Ina::new(
+            model,
+            address.unwrap_or(DEFAULT_ADDRESS),
+            calibration_of(cfg),
+        )
+        .map_err(|error| ConfigError::new(shunt_key, error.0))?;
+        for key in [
+            "bus_warn_below_v",
+            "bus_warn_above_v",
+            "current_warn_above_a",
+        ] {
+            if cfg.float(key).is_some_and(|value| !value.is_finite()) {
+                return Err(ConfigError::new(key, "must be a finite number"));
+            }
+        }
+        if let (Some(min), Some(max)) = (
+            cfg.int("self_test_bus_min_mv"),
+            cfg.int("self_test_bus_max_mv"),
+        ) && min > max
+        {
+            return Err(ConfigError::new(
+                "self_test_bus_min_mv",
+                "must not be above self_test_bus_max_mv",
+            ));
+        }
+        Ok(())
+    }
 
     fn start(needs: Ina2xxNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
@@ -274,14 +336,14 @@ impl Bench for BusVoltage<'_> {
     }
 }
 
-/// The `self_test_bus_min_mv` and `self_test_bus_max_mv` config: both or neither.
+/// The `self_test_bus_min_mv` and `self_test_bus_max_mv` config: both or neither. The order of
+/// the two is checked by check_config.
 fn bus_range_from_config(cfg: &Config<'_>) -> Result<Option<(i64, i64)>> {
     match (
         cfg.int("self_test_bus_min_mv"),
         cfg.int("self_test_bus_max_mv"),
     ) {
-        (Some(min), Some(max)) if min <= max => Ok(Some((min, max))),
-        (Some(_), Some(_)) => Err(Status::INVALID_ARGUMENT),
+        (Some(min), Some(max)) => Ok(Some((min, max))),
         _ => Ok(None),
     }
 }
@@ -321,20 +383,31 @@ fn power_reading(raw: chip::ReadingFixed) -> PowerReading {
 /// Builds the chip from the board file's settings. Anything missing or out of
 /// range is `INVALID_ARGUMENT`.
 fn chip_from_config(cfg: &Config<'_>) -> Result<chip::Ina> {
-    let model = match cfg.str("chip") {
-        Some(name) if name.eq_ignore_ascii_case("ina226") => Model::Ina226,
-        Some(name) if name.eq_ignore_ascii_case("ina238") => Model::Ina238,
-        Some(name) if name.eq_ignore_ascii_case("ina260") => Model::Ina260,
-        _ => return Err(Status::INVALID_ARGUMENT),
-    };
+    let model = model_of(cfg).ok_or(Status::INVALID_ARGUMENT)?;
     let address = match cfg.int("address") {
         None => DEFAULT_ADDRESS,
-        Some(address) => u8::try_from(address)
-            .ok()
-            .filter(|address| *address <= 0x7f)
-            .ok_or(Status::INVALID_ARGUMENT)?,
+        Some(address) => u8::try_from(address).map_err(|_| Status::INVALID_ARGUMENT)?,
     };
-    // A missing or unusable value becomes 0, which the chip rejects.
+    chip::Ina::new(model, address, calibration_of(cfg)).map_err(|_| Status::INVALID_ARGUMENT)
+}
+
+/// The chip the board file names, in any case, or `None` when it names none of the three.
+fn model_of(cfg: &Config<'_>) -> Option<Model> {
+    let name = cfg.str("chip")?;
+    if name.eq_ignore_ascii_case("ina226") {
+        Some(Model::Ina226)
+    } else if name.eq_ignore_ascii_case("ina238") {
+        Some(Model::Ina238)
+    } else if name.eq_ignore_ascii_case("ina260") {
+        Some(Model::Ina260)
+    } else {
+        None
+    }
+}
+
+/// The shunt and the largest expected current. A missing or unusable value becomes 0, which the
+/// chip rejects (see check_config).
+fn calibration_of(cfg: &Config<'_>) -> Calibration {
     let shunt_micro_ohms = match cfg.int("shunt_micro_ohms") {
         Some(value) => u32::try_from(value).unwrap_or(0),
         None => micro(cfg.float("shunt_ohms").unwrap_or(0.0)),
@@ -343,12 +416,7 @@ fn chip_from_config(cfg: &Config<'_>) -> Result<chip::Ina> {
         Some(value) => u32::try_from(value).unwrap_or(0),
         None => micro(cfg.float("max_current_a").unwrap_or(0.0)),
     };
-    chip::Ina::new(
-        model,
-        address,
-        Calibration::from_micro(shunt_micro_ohms, max_current_micro_amps),
-    )
-    .map_err(|_| Status::INVALID_ARGUMENT)
+    Calibration::from_micro(shunt_micro_ohms, max_current_micro_amps)
 }
 
 /// A value in its base unit, as millionths. NaN and negative values become 0.

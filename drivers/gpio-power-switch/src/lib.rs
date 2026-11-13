@@ -20,8 +20,8 @@ mod tests;
 
 use lemnos_contract_power_switch::PowerSwitch;
 use lemnos_core::{
-    Config, ConfigValue, Description, Item, Lifecycle, Line, MethodId, Result, Status, driver,
-    status_of,
+    Config, ConfigError, ConfigValue, Description, Item, Key, Kind, Lifecycle, Line, MethodId,
+    Result, Status, driver, status_of,
 };
 use lemnos_hal::raw::LineConfig;
 
@@ -29,6 +29,14 @@ const IS_ON: MethodId = MethodId {
     contract: 0,
     method: 2,
 };
+
+/// Every setting the driver reads from the board file.
+const KEYS: &[Key] = &[
+    Key::optional("default_on", Kind::Bool),
+    Key::optional("active_low", Kind::Bool),
+    Key::optional("fault_active_low", Kind::Bool),
+];
+
 const FAULT: MethodId = MethodId {
     contract: 0,
     method: 3,
@@ -48,6 +56,10 @@ impl Lifecycle for GpioPowerSwitch {
     type Needs = GpioPowerSwitchNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)
+    }
 
     fn start(mut needs: GpioPowerSwitchNeeds, cfg: &Config<'_>) -> Result<Self> {
         let default_on = flag(cfg, "default_on", true)?;

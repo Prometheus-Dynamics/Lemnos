@@ -22,14 +22,21 @@ use lemnos_contract_self_test::{
     write_last_entry, write_test,
 };
 use lemnos_core::{
-    Config, Contract, Description, Dev, Driver, Encode, Item, JobId, JobState, Manifest, MethodId,
-    Polled, Reader, Reply, Resources, Result, Status, Writer,
+    Config, ConfigError, Contract, Description, Dev, Driver, Encode, Item, JobId, JobState, Key,
+    Kind, Manifest, MethodId, Polled, Reader, Reply, Resources, Result, Status, Writer,
 };
 
 /// Most members a board's self-test serves.
 pub const MAX_MEMBERS: usize = 16;
 /// Most steps one run takes: every member's tests, at their most.
 pub const MAX_STEPS: usize = MAX_MEMBERS * lemnos_contract_self_test::MAX_TESTS;
+/// Every setting the driver reads from the board file. `members` is a list or the text `"all"`:
+/// `check_config` accepts the text, which `check_keys` cannot, since it takes one kind per key.
+const KEYS: &[Key] = &[
+    Key::required("members", Kind::List),
+    Key::optional("include_intrusive", Kind::Bool),
+];
+
 /// How often a running step is looked at, in nanoseconds.
 const POLL_NS: u64 = 50_000_000;
 /// The method `run` in this driver's `self-test/1`: the contract is its only one, so contract 0.
@@ -386,7 +393,23 @@ impl Driver for BoardSelfTest {
         provides: &[<dyn SelfTest as Contract>::INFO],
     };
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        match cfg.check_keys(KEYS) {
+            // The text "all" is the one non-list form of `members`, so its kind is not an error.
+            Err(error) if error.key == "members" && cfg.str("members") == Some("all") => {}
+            other => other?,
+        }
+        if let Some(listed) = cfg.list("members")
+            && listed.len() > MAX_MEMBERS
+        {
+            return Err(ConfigError::new("members", "must name at most 16 devices"));
+        }
+        Ok(())
+    }
+
     fn bind(res: &mut Resources<'_>, cfg: &Config<'_>) -> Result<Self> {
+        // Refused here, before any member is looked up, as `#[driver]` refuses its binds.
+        Self::check_config(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
         let include_intrusive = cfg.bool("include_intrusive").unwrap_or(false);
         let mut ids: Vec<String> = Vec::new();
         if let Some(listed) = cfg.list("members") {
@@ -394,8 +417,10 @@ impl Driver for BoardSelfTest {
         } else if cfg.str("members") == Some("all") {
             res.members::<dyn SelfTest>(&mut |id| ids.push(String::from(id)))?;
         } else {
+            // Unreachable after `check_config`: `members` is a list or "all".
             return Err(Status::INVALID_ARGUMENT);
         }
+        // A list is counted by `check_config`; "all" is counted here, from the members the board has.
         if ids.len() > MAX_MEMBERS {
             return Err(Status::INVALID_ARGUMENT);
         }
@@ -487,5 +512,75 @@ impl SelfTest for BoardSelfTest {
 
     fn last(&mut self, into: &mut [u8]) -> Result<usize> {
         self.write_last(into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lemnos_core::ConfigValue;
+
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+        lists: &'a [(&'a str, &'a [&'a str])],
+    ) -> core::result::Result<(), ConfigError<'a>> {
+        <BoardSelfTest as Driver>::check_config(&Config::new(entries).with_lists(lists))
+    }
+
+    #[test]
+    fn the_members_list_or_all_passes_with_the_flag() {
+        let ids: &[&str] = &["a", "b"];
+        assert_eq!(
+            check(
+                &[("include_intrusive", ConfigValue::Bool(true))],
+                &[("members", ids)]
+            ),
+            Ok(())
+        );
+        assert_eq!(check(&[("members", ConfigValue::Str("all"))], &[]), Ok(()));
+    }
+
+    #[test]
+    fn a_missing_or_wrong_members_setting_is_refused_by_name() {
+        assert_eq!(check(&[], &[]).unwrap_err().key, "members");
+        assert_eq!(
+            check(&[("members", ConfigValue::Str("some"))], &[])
+                .unwrap_err()
+                .key,
+            "members"
+        );
+        assert_eq!(
+            check(&[("members", ConfigValue::Int(1))], &[])
+                .unwrap_err()
+                .key,
+            "members"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_is_refused_and_a_near_miss_is_suggested() {
+        let error = check(
+            &[
+                ("bogus", ConfigValue::Int(1)),
+                ("members", ConfigValue::Str("all")),
+            ],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.key, "bogus");
+        let error = check(
+            &[("include_intrusiv", ConfigValue::Bool(true))],
+            &[("members", &["a"])],
+        )
+        .unwrap_err();
+        assert_eq!(error.suggestion, Some("include_intrusive"));
+    }
+
+    #[test]
+    fn a_list_of_more_than_the_most_members_is_refused() {
+        let ids = [""; MAX_MEMBERS + 1];
+        assert_eq!(check(&[], &[("members", &ids)]).unwrap_err().key, "members");
+        let ids = [""; MAX_MEMBERS];
+        assert_eq!(check(&[], &[("members", &ids)]), Ok(()));
     }
 }

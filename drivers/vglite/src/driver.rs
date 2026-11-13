@@ -55,7 +55,9 @@ use std::path::PathBuf;
 
 use lemnos_contract_image_convert::{self as convert, ConversionPair, ConvertInfo, ImageConvert};
 use lemnos_contract_image_scaler::{self as scaler, ImageScaler, ScalerInfo};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_hal::blocks::BufferKind;
 
 use crate::gpu::{State, Vglite, backoff_ns};
@@ -67,6 +69,9 @@ pub const SCALE_STREAM: &str = "scale";
 
 /// The stream `image.convert/1` jobs come on.
 pub const CONVERT_STREAM: &str = "convert";
+
+/// The settings this driver reads from the board file's `config`.
+const KEYS: &[Key] = &[Key::optional("device", Kind::Str)];
 
 /// How often the streams are looked at.
 pub const POLL_NS: u64 = 1_000_000;
@@ -101,13 +106,19 @@ impl Lifecycle for VgliteDriver {
     type Needs = VgliteDriverNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("device") == Some("") {
+            return Err(ConfigError::new("device", "must not be empty"));
+        }
+        Ok(())
+    }
+
     fn start(needs: VgliteDriverNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let path = match (cfg.str("device"), cfg.get("device")) {
-            (Some(""), _) => return Err(Status::INVALID_ARGUMENT),
-            (Some(path), _) => PathBuf::from(path),
-            (None, Some(_)) => return Err(Status::INVALID_ARGUMENT),
-            (None, None) => PathBuf::from(DEVICE),
-        };
+        // The path is checked by check_config; without a `device` the default node is used.
+        let path = cfg
+            .str("device")
+            .map_or_else(|| PathBuf::from(DEVICE), PathBuf::from);
         if needs.scale.is_none() && needs.convert.is_none() {
             return Err(Status::NOT_FOUND);
         }

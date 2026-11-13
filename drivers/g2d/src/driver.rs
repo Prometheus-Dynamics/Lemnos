@@ -53,7 +53,9 @@ use std::path::PathBuf;
 use lemnos_contract_image_convert::{
     ConversionPair, ConvertInfo, Counters, ImageConvert, MAX_STREAM_NAME,
 };
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_hal::blocks::BufferKind;
 
 use crate::convert::{Converter, FORMATS};
@@ -62,6 +64,9 @@ use crate::{DEVICE, Device, MAX_SIZE};
 
 /// The stream jobs come on: the need's name, and the name `job_stream` answers.
 pub const JOB_STREAM: &str = "jobs";
+
+/// Every setting the driver reads from the board file. `device` has a default.
+const KEYS: &[Key] = &[Key::optional("device", Kind::Str)];
 
 /// How often the stream is looked at.
 pub const POLL_NS: u64 = 1_000_000;
@@ -88,11 +93,16 @@ impl Lifecycle for G2dDriver {
     type Needs = G2dDriverNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        match cfg.str("device") {
+            Some("") => Err(ConfigError::new("device", "must not be empty")),
+            _ => Ok(()),
+        }
+    }
+
     fn start(needs: G2dDriverNeeds, cfg: &Config<'_>) -> Result<Self> {
         let path = PathBuf::from(cfg.str("device").unwrap_or(DEVICE));
-        if path.as_os_str().is_empty() {
-            return Err(Status::INVALID_ARGUMENT);
-        }
         // The engine takes an image only as a dma-buf: known now, before any consumer comes.
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);
@@ -184,5 +194,32 @@ impl ImageConvert for G2dDriver {
 
     fn counters(&mut self) -> Result<Counters> {
         Ok(self.converter.counters())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lemnos_core::{ConfigValue, Driver};
+
+    #[test]
+    fn the_config_check_passes_the_default_and_refuses_bad_settings() {
+        let entries = [("device", ConfigValue::Str("/dev/g2d"))];
+        assert_eq!(
+            <G2dDriver as Driver>::check_config(&Config::new(&entries)),
+            Ok(())
+        );
+        let bogus = [("bogus", ConfigValue::Int(1))];
+        let error = <G2dDriver as Driver>::check_config(&Config::new(&bogus)).unwrap_err();
+        assert_eq!(error.key, "bogus");
+        let near = [("devic", ConfigValue::Str("/dev/g2d"))];
+        let error = <G2dDriver as Driver>::check_config(&Config::new(&near)).unwrap_err();
+        assert_eq!(error.suggestion, Some("device"));
+        let wrong = [("device", ConfigValue::Int(2))];
+        let error = <G2dDriver as Driver>::check_config(&Config::new(&wrong)).unwrap_err();
+        assert_eq!(error.key, "device");
+        let empty = [("device", ConfigValue::Str(""))];
+        let error = <G2dDriver as Driver>::check_config(&Config::new(&empty)).unwrap_err();
+        assert_eq!(error.reason, "must not be empty");
     }
 }

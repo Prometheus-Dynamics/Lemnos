@@ -74,8 +74,8 @@ use lemnos_contract_isp_pisp::{
     IspPisp, LAYOUT_BACK_END, OUTPUT_FRONT_END_0, OUTPUT_FRONT_END_1, PispInfo,
 };
 use lemnos_core::{
-    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
-    StreamHandle, driver,
+    Config, ConfigError, Decode, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Reader,
+    Result, Status, StreamHandle, driver,
 };
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
 use lemnos_hal::blocks::{BufferKind, StreamFrame};
@@ -149,13 +149,20 @@ pub struct Options {
     job_slots: u32,
 }
 
+/// The buffers a job may name: two up to the most a job holds.
+fn buffers_ok(buffers: u32) -> bool {
+    (2..=MAX_JOBS as u32).contains(&buffers)
+}
+
+/// Whether a job ring holds a count the block takes: a power of two up to 16.
+fn job_slots_ok(job_slots: u32) -> bool {
+    job_slots.is_power_of_two() && job_slots <= 16
+}
+
 impl Options {
     /// `INVALID_ARGUMENT` for a count out of range.
     pub fn new(buffers: u32, job_slots: u32) -> Result<Self> {
-        if !(2..=MAX_JOBS as u32).contains(&buffers)
-            || !job_slots.is_power_of_two()
-            || job_slots > 16
-        {
+        if !buffers_ok(buffers) || !job_slots_ok(job_slots) {
             return Err(Status::INVALID_ARGUMENT);
         }
         Ok(Self { buffers, job_slots })
@@ -277,9 +284,50 @@ fn handles_only(stream: &StreamHandle) -> Result<()> {
     }
 }
 
+/// The settings a board file gives the back end.
+const KEYS: &[Key] = &[
+    Key::required("device", Kind::Str),
+    Key::optional("heap", Kind::Str),
+    Key::optional("buffers", Kind::Int),
+    Key::optional("job_slots", Kind::Int),
+];
+
 impl Lifecycle for PispBe {
     type Needs = PispBeNeeds;
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        let heap = cfg.str("heap").unwrap_or("linux,cma");
+        if let Some(device) = cfg.str("device")
+            && Settings::new(device, heap).is_err()
+        {
+            // The names are checked together; name the one that is wrong.
+            let key = if Settings::new(device, "linux,cma").is_ok() {
+                "heap"
+            } else {
+                "device"
+            };
+            return Err(ConfigError::new(
+                key,
+                "must be a name: not empty, with no '/' or NUL",
+            ));
+        }
+        if let Some(buffers) = cfg.int("buffers")
+            && !u32::try_from(buffers).is_ok_and(buffers_ok)
+        {
+            return Err(ConfigError::new("buffers", "must be 2 to 32"));
+        }
+        if let Some(job_slots) = cfg.int("job_slots")
+            && !u32::try_from(job_slots).is_ok_and(job_slots_ok)
+        {
+            return Err(ConfigError::new(
+                "job_slots",
+                "must be a power of two, 1 to 16",
+            ));
+        }
+        Ok(())
+    }
 
     fn start(needs: PispBeNeeds, cfg: &Config<'_>) -> Result<Self> {
         let device = cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?;
@@ -1031,3 +1079,84 @@ impl IspPisp for PispBe {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod config_tests {
+    use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+
+    use super::PispBe;
+
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), ConfigError<'a>> {
+        <PispBe as Lifecycle>::check_config(&Config::new(entries))
+    }
+
+    const FULL: [(&str, ConfigValue<'static>); 4] = [
+        ("device", ConfigValue::Str("pisp-be")),
+        ("heap", ConfigValue::Str("linux,cma")),
+        ("buffers", ConfigValue::Int(4)),
+        ("job_slots", ConfigValue::Int(4)),
+    ];
+
+    #[test]
+    fn a_full_config_passes_and_unknown_or_misspelled_keys_are_named() {
+        assert!(check(&FULL).is_ok());
+        assert_eq!(
+            check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
+            "bogus"
+        );
+        let near = check(&[("bufers", ConfigValue::Int(4))]).unwrap_err();
+        assert_eq!(near.suggestion, Some("buffers"));
+    }
+
+    #[test]
+    fn a_missing_device_or_wrong_kind_is_refused() {
+        let missing = check(&[]).unwrap_err();
+        assert_eq!((missing.key, missing.reason), ("device", "is required"));
+        let kind = [
+            ("device", ConfigValue::Str("pisp-be")),
+            ("buffers", ConfigValue::Str("4")),
+        ];
+        assert_eq!(check(&kind).unwrap_err().key, "buffers");
+    }
+
+    #[test]
+    fn the_value_checks_name_the_key_and_pass_their_edges() {
+        let with = |key: &'static str, value: ConfigValue<'static>| {
+            let mut entries = FULL;
+            for entry in entries.iter_mut() {
+                if entry.0 == key {
+                    entry.1 = value;
+                }
+            }
+            entries
+        };
+        assert!(check(&with("buffers", ConfigValue::Int(2))).is_ok());
+        assert!(check(&with("buffers", ConfigValue::Int(32))).is_ok());
+        assert_eq!(
+            check(&with("buffers", ConfigValue::Int(1)))
+                .unwrap_err()
+                .key,
+            "buffers"
+        );
+        assert_eq!(
+            check(&with("buffers", ConfigValue::Int(33)))
+                .unwrap_err()
+                .key,
+            "buffers"
+        );
+        assert_eq!(
+            check(&with("job_slots", ConfigValue::Int(6)))
+                .unwrap_err()
+                .key,
+            "job_slots"
+        );
+        assert_eq!(
+            check(&with("heap", ConfigValue::Str("a/b")))
+                .unwrap_err()
+                .key,
+            "heap"
+        );
+    }
+}

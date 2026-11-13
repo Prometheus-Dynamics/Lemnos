@@ -52,7 +52,9 @@ use std::path::PathBuf;
 use lemnos_contract_image_convert::{
     ConversionPair, ConvertInfo, Counters, ImageConvert, MAX_STREAM_NAME,
 };
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_hal::blocks::BufferKind;
 
 use crate::convert::{CONVERSIONS, Converter, conversion};
@@ -84,17 +86,23 @@ pub struct Nonai2dDriver {
     retry_at_ns: u64,
 }
 
+/// The settings a board file gives the engine.
+const KEYS: &[Key] = &[Key::optional("device", Kind::Str)];
+
 impl Lifecycle for Nonai2dDriver {
     type Needs = Nonai2dDriverNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if cfg.str("device") == Some("") {
+            return Err(ConfigError::new("device", "must not be empty"));
+        }
+        Ok(())
+    }
+
     fn start(needs: Nonai2dDriverNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let path = match cfg.str("device") {
-            Some("") => return Err(Status::INVALID_ARGUMENT),
-            Some(path) => Some(PathBuf::from(path)),
-            None if cfg.get("device").is_some() => return Err(Status::INVALID_ARGUMENT),
-            None => None,
-        };
+        let path = cfg.str("device").map(PathBuf::from);
         // The engine takes a frame only as a dma-buf: known now, before any consumer comes.
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);
@@ -185,5 +193,33 @@ impl ImageConvert for Nonai2dDriver {
 
     fn counters(&mut self) -> Result<Counters> {
         Ok(self.converter.counters())
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+
+    use super::Nonai2dDriver;
+
+    fn check<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Result<(), ConfigError<'a>> {
+        <Nonai2dDriver as Lifecycle>::check_config(&Config::new(entries))
+    }
+
+    #[test]
+    fn a_full_config_passes_and_unknown_or_misspelled_keys_are_named() {
+        assert!(check(&[("device", ConfigValue::Str("/dev/video3"))]).is_ok());
+        let bogus = check(&[("bogus", ConfigValue::Int(1))]).unwrap_err();
+        assert_eq!(bogus.key, "bogus");
+        let near = check(&[("devise", ConfigValue::Str("/dev/video3"))]).unwrap_err();
+        assert_eq!(near.suggestion, Some("device"));
+    }
+
+    #[test]
+    fn a_wrong_kind_and_an_empty_device_are_refused() {
+        let kind = check(&[("device", ConfigValue::Int(3))]).unwrap_err();
+        assert_eq!(kind.key, "device");
+        let empty = check(&[("device", ConfigValue::Str(""))]).unwrap_err();
+        assert_eq!((empty.key, empty.reason), ("device", "must not be empty"));
     }
 }

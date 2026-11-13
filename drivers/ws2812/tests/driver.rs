@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use lemnos_contract_pixels::{MAX_LOCAL_LEDS, Pixels};
 use lemnos_core::{
-    Bound, Caller, Config, ConfigValue, Description, Driver, ErrorKind, Health, LOCAL_ARGS,
-    LocalCaller, MethodId, Provider, Reply, Resources, Spi, Status, Tag,
+    Bound, Caller, Config, ConfigError, ConfigValue, Description, Driver, ErrorKind, Health,
+    LOCAL_ARGS, Lifecycle, LocalCaller, MethodId, Provider, Reply, Resources, Spi, Status, Tag,
 };
 use lemnos_driver_ws2812::{Ws2812, encode_spi_byte};
 use lemnos_hal::spi::{self, Operation, SpiDevice};
@@ -286,5 +286,89 @@ fn bad_config_is_refused() {
             ("brightness", ConfigValue::Int(300)),
         ]),
         Some(Status::INVALID_ARGUMENT)
+    );
+}
+
+/// The verdict of `check_config` on `entries`, with no hardware.
+fn checked<'a>(
+    entries: &'a [(&'a str, ConfigValue<'a>)],
+) -> core::result::Result<(), ConfigError<'a>> {
+    <Ws2812 as Lifecycle>::check_config(&Config::new(entries))
+}
+
+/// The key `entries` are refused under, if they are refused.
+fn refused_key<'a>(entries: &'a [(&'a str, ConfigValue<'a>)]) -> Option<&'a str> {
+    checked(entries).err().map(|err| err.key)
+}
+
+#[test]
+fn a_valid_full_config_passes_check_config() {
+    let entries = [
+        ("count", ConfigValue::Int(4)),
+        ("wire", ConfigValue::Str("rgbw")),
+        ("offset", ConfigValue::Int(1)),
+        ("direction", ConfigValue::Str("ccw")),
+        ("brightness", ConfigValue::Int(255)),
+    ];
+    assert_eq!(checked(&entries), Ok(()));
+}
+
+#[test]
+fn check_config_refuses_unknown_keys_and_wrong_kinds_by_name() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    assert_eq!(checked(&bogus).unwrap_err().key, "bogus");
+    let near = [("cont", ConfigValue::Int(2))];
+    let err = checked(&near).unwrap_err();
+    assert_eq!((err.key, err.suggestion), ("cont", Some("count")));
+    assert_eq!(
+        refused_key(&[("count", ConfigValue::Str("2"))]),
+        Some("count")
+    );
+    assert_eq!(refused_key(&[]), Some("count"));
+}
+
+#[test]
+fn check_config_refuses_each_bad_value_and_accepts_its_edge() {
+    let count = |n: i64| [("count", ConfigValue::Int(n))];
+    assert_eq!(refused_key(&count(0)), Some("count"));
+    assert_eq!(checked(&count(1)), Ok(()));
+    assert_eq!(checked(&count(65_535)), Ok(()));
+    assert_eq!(refused_key(&count(65_536)), Some("count"));
+    let with =
+        |extra: (&'static str, ConfigValue<'static>)| [("count", ConfigValue::Int(2)), extra];
+    assert_eq!(
+        refused_key(&with(("wire", ConfigValue::Str("xyz")))),
+        Some("wire")
+    );
+    assert_eq!(checked(&with(("wire", ConfigValue::Str("grb")))), Ok(()));
+    assert_eq!(
+        refused_key(&with(("offset", ConfigValue::Int(-1)))),
+        Some("offset")
+    );
+    assert_eq!(checked(&with(("offset", ConfigValue::Int(65_535)))), Ok(()));
+    assert_eq!(
+        refused_key(&with(("offset", ConfigValue::Int(65_536)))),
+        Some("offset")
+    );
+    assert_eq!(
+        refused_key(&with(("direction", ConfigValue::Str("sideways")))),
+        Some("direction")
+    );
+    assert_eq!(
+        checked(&with(("direction", ConfigValue::Str("cw")))),
+        Ok(())
+    );
+    assert_eq!(
+        refused_key(&with(("brightness", ConfigValue::Int(-1)))),
+        Some("brightness")
+    );
+    assert_eq!(checked(&with(("brightness", ConfigValue::Int(0)))), Ok(()));
+    assert_eq!(
+        checked(&with(("brightness", ConfigValue::Int(255)))),
+        Ok(())
+    );
+    assert_eq!(
+        refused_key(&with(("brightness", ConfigValue::Int(256)))),
+        Some("brightness")
     );
 }

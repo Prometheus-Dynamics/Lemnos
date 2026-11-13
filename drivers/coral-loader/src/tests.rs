@@ -1034,3 +1034,30 @@ fn an_image_at_the_limit_is_accepted() {
     let driver = bind(&usb, &path).expect("exactly the limit fits");
     assert_eq!(driver.loader.image_len() as u64, MAX_IMAGE_BYTES);
 }
+
+#[test]
+fn the_config_check_passes_an_absolute_firmware_path() {
+    let entries = [("firmware", ConfigValue::Str("/lib/firmware/coral.bin"))];
+    assert_eq!(
+        <CoralLoader as Driver>::check_config(&Config::new(&entries)),
+        Ok(())
+    );
+}
+
+#[test]
+fn the_config_check_refuses_unknown_missing_wrong_kind_and_relative_settings() {
+    let bogus = [("bogus", ConfigValue::Int(1))];
+    let error = <CoralLoader as Driver>::check_config(&Config::new(&bogus)).unwrap_err();
+    assert_eq!(error.key, "bogus");
+    let near = [("firmwar", ConfigValue::Str("/x.bin"))];
+    let error = <CoralLoader as Driver>::check_config(&Config::new(&near)).unwrap_err();
+    assert_eq!(error.suggestion, Some("firmware"));
+    let error = <CoralLoader as Driver>::check_config(&Config::new(&[])).unwrap_err();
+    assert_eq!((error.key, error.reason), ("firmware", "is required"));
+    let entries = [("firmware", ConfigValue::Int(3))];
+    let error = <CoralLoader as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(error.key, "firmware");
+    let entries = [("firmware", ConfigValue::Str("relative/coral.bin"))];
+    let error = <CoralLoader as Driver>::check_config(&Config::new(&entries)).unwrap_err();
+    assert_eq!(error.reason, "must be an absolute path");
+}

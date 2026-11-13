@@ -34,8 +34,8 @@ use lemnos_contract_self_test::{
     Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
 };
 use lemnos_core::{
-    AddressWidth, CallerId, Config, ConfigValue, Description, Health, I2c, Item, JobId, JobState,
-    Lifecycle, MethodId, Reply, Result, Status, Unit, Vector3, driver,
+    AddressWidth, CallerId, Config, ConfigError, ConfigValue, Description, Health, I2c, Item,
+    JobId, JobState, Key, Kind, Lifecycle, MethodId, Reply, Result, Status, Unit, Vector3, driver,
 };
 
 /// The 7-bit address with SDO and CSB2 low; 0x11-0x13 are the alternatives.
@@ -50,6 +50,13 @@ const RUN: MethodId = MethodId {
     contract: 1,
     method: 2,
 };
+/// Every setting the driver reads from the board file. Each has a default, so none is required.
+const KEYS: &[Key] = &[
+    Key::optional("address", Kind::Int),
+    Key::optional("preset", Kind::Str),
+    Key::optional("data_rate", Kind::Int),
+];
+
 /// The checks this driver offers. Its names are stable.
 const SPECS: &[Spec] = &[Spec::read(
     "identity",
@@ -97,6 +104,35 @@ impl Lifecycle for Bmm150 {
     const TICKS: bool = true;
     const JOBS: bool = true;
     const TRACKS_CALLERS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        if let Some(ConfigValue::Int(address)) = cfg.get("address")
+            && !(0x08..=0x77).contains(&address)
+        {
+            return Err(ConfigError::new(
+                "address",
+                "must be a 7-bit address from 0x08 to 0x77",
+            ));
+        }
+        if let Some(ConfigValue::Str(name)) = cfg.get("preset")
+            && Preset::from_name(name).is_none()
+        {
+            return Err(ConfigError::new(
+                "preset",
+                "must be low_power, regular, enhanced or high_accuracy",
+            ));
+        }
+        if let Some(ConfigValue::Int(hz)) = cfg.get("data_rate")
+            && DataRate::from_hz(hz).is_none()
+        {
+            return Err(ConfigError::new(
+                "data_rate",
+                "must be 2, 6, 8, 10, 15, 20, 25 or 30 hertz",
+            ));
+        }
+        Ok(())
+    }
 
     fn start(needs: Bmm150Needs, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
@@ -264,16 +300,19 @@ impl Magnetometer for Bmm150 {
     }
 }
 
-/// The `address` config: a 7-bit address that is not reserved.
+/// The `address` config: a 7-bit address. Its range is checked by `check_config`.
 fn address(cfg: &Config<'_>) -> Result<u8> {
     match cfg.get("address") {
         None => Ok(DEFAULT_ADDRESS),
-        Some(ConfigValue::Int(address)) if (0x08..=0x77).contains(&address) => Ok(address as u8),
+        Some(ConfigValue::Int(address)) => {
+            u8::try_from(address).map_err(|_| Status::INVALID_ARGUMENT)
+        }
         Some(_) => Err(Status::INVALID_ARGUMENT),
     }
 }
 
-/// The `preset` (a name) and `data_rate` (whole hertz) config.
+/// The `preset` (a name) and `data_rate` (whole hertz) config. Their values are checked by
+/// `check_config`; the lookups here cannot fail after it.
 fn settings(cfg: &Config<'_>) -> Result<Settings> {
     let preset = match cfg.get("preset") {
         None => Preset::default(),

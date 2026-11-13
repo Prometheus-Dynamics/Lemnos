@@ -158,8 +158,22 @@ fn main() -> ExitCode {
     if let Err(error) = gadget::resolve(&mut board_file) {
         return complain(&format!("{board}: {error}"));
     }
+    // Each driver's settings check, before anything is made. A device whose settings a driver
+    // refuses is not made: the daemon starts without it, and says so here; its state carries the
+    // same reason. `--check` refuses the board instead, as `lemnos-ctl validate` does.
+    let mut drivers = drivers();
+    let refused = lemnos_host::settings_refusals(&board_file, &drivers);
     if check {
-        return ExitCode::SUCCESS;
+        return match refused.first() {
+            Some((device, problem)) => complain(&format!("{board}: device {device:?}: {problem}")),
+            None => ExitCode::SUCCESS,
+        };
+    }
+    for (device, problem) in &refused {
+        let _ = writeln!(
+            std::io::stderr(),
+            "lemnosd: {board}: device {device:?} is not started: {problem}"
+        );
     }
     // The live device tree against what the board file needs, when the board names a SoC map. A
     // mismatch is reported and the daemon starts anyway: nothing here stops or changes hardware.
@@ -203,7 +217,6 @@ fn main() -> ExitCode {
         Ok(signals) => signals,
         Err(error) => return complain(&format!("signals: {error}")),
     };
-    let mut drivers = drivers();
     let packages = add_packages(&mut drivers, &packages);
     for line in packages.lines() {
         let _ = complain(&line);

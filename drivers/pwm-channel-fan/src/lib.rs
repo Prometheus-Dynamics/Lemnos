@@ -69,8 +69,8 @@ pub mod math;
 
 use lemnos_contract_fan::Fan;
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, Item, Lifecycle, Line, MethodId, Pwm, Result, Status,
-    Unit, driver, status_of,
+    Config, ConfigError, ConfigValue, Description, Health, Item, Key, Kind, Lifecycle, Line,
+    MethodId, Pwm, Result, Status, Unit, driver, status_of,
 };
 use lemnos_hal::raw::{EdgeDetect, LineConfig, Polarity, PwmConfig};
 use math::{FULL, Tach, backoff_ns, duty_ns, hardware_duty, period_ns};
@@ -141,12 +141,34 @@ pub struct PwmChannelFan {
     meter: Tach,
 }
 
+/// The settings a board file gives the fan.
+const KEYS: &[Key] = &[
+    Key::optional("frequency_hz", Kind::Int),
+    Key::optional("inverted", Kind::Bool),
+    Key::optional("min_duty", Kind::Int),
+    Key::optional("kick_ms", Kind::Int),
+    Key::optional("pulses_per_rev", Kind::Int),
+    Key::optional("max_rpm", Kind::Int),
+    Key::optional("warn_below_rpm", Kind::Int),
+];
+
 impl Lifecycle for PwmChannelFan {
     type Needs = PwmChannelFanNeeds;
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        in_range(cfg, "frequency_hz", 1, 1_000_000, "must be 1 to 1000000")?;
+        in_range(cfg, "min_duty", 0, i64::from(FULL), "must be 0 to 1000")?;
+        in_range(cfg, "kick_ms", 0, MAX_KICK_MS, "must be 0 to 10000")?;
+        in_range(cfg, "pulses_per_rev", 1, 64, "must be 1 to 64")?;
+        in_range(cfg, "max_rpm", 0, i64::MAX, "must not be negative")?;
+        in_range(cfg, "warn_below_rpm", 0, i64::MAX, "must not be negative")?;
+        Ok(())
+    }
 
     fn start(needs: PwmChannelFanNeeds, cfg: &Config<'_>) -> Result<Self> {
         let shape = shape(cfg)?;
@@ -344,15 +366,15 @@ impl Drop for PwmChannelFan {
 
 /// The settings, from the device's `config`, with their defaults.
 fn shape(cfg: &Config<'_>) -> Result<Shape> {
-    let frequency = int(cfg, "frequency_hz", 1, 1_000_000, 25_000)? as u32;
+    let frequency = int(cfg, "frequency_hz", 25_000)? as u32;
     let polarity = if flag(cfg, "inverted", false)? {
         Polarity::Inversed
     } else {
         Polarity::Normal
     };
-    let min_duty = int(cfg, "min_duty", 0, i64::from(FULL), 0)? as u16;
-    let kick_ms = int(cfg, "kick_ms", 0, MAX_KICK_MS, 0)? as u64;
-    let pulses_per_rev = int(cfg, "pulses_per_rev", 1, 64, 2)? as u32;
+    let min_duty = int(cfg, "min_duty", 0)? as u16;
+    let kick_ms = int(cfg, "kick_ms", 0)? as u64;
+    let pulses_per_rev = int(cfg, "pulses_per_rev", 2)? as u32;
     let max_rpm = optional_int(cfg, "max_rpm")?;
     let warn_below_rpm = optional_int(cfg, "warn_below_rpm")?;
     Ok(Shape {
@@ -366,21 +388,36 @@ fn shape(cfg: &Config<'_>) -> Result<Shape> {
     })
 }
 
-/// A whole-number setting in `low..=high`, or `default` when it is not set.
-/// A non-negative setting, or `None` when it is not set.
+/// A whole-number setting, or `None` when it is not set. Its range is checked by `check_config`.
 fn optional_int(cfg: &Config<'_>, key: &str) -> Result<Option<i64>> {
     match cfg.get(key) {
         None => Ok(None),
-        Some(ConfigValue::Int(value)) if value >= 0 => Ok(Some(value)),
+        Some(ConfigValue::Int(value)) => Ok(Some(value)),
         Some(_) => Err(Status::INVALID_ARGUMENT),
     }
 }
 
-fn int(cfg: &Config<'_>, key: &str, low: i64, high: i64, default: i64) -> Result<i64> {
+/// A whole-number setting, or `default` when it is not set. Its range is checked by
+/// `check_config`.
+fn int(cfg: &Config<'_>, key: &str, default: i64) -> Result<i64> {
     match cfg.get(key) {
         None => Ok(default),
-        Some(ConfigValue::Int(value)) if (low..=high).contains(&value) => Ok(value),
+        Some(ConfigValue::Int(value)) => Ok(value),
         Some(_) => Err(Status::INVALID_ARGUMENT),
+    }
+}
+
+/// Refuses a whole-number setting that is given outside `low..=high`.
+fn in_range<'a>(
+    cfg: &Config<'a>,
+    key: &'static str,
+    low: i64,
+    high: i64,
+    reason: &'static str,
+) -> core::result::Result<(), ConfigError<'a>> {
+    match cfg.int(key) {
+        Some(value) if !(low..=high).contains(&value) => Err(ConfigError::new(key, reason)),
+        _ => Ok(()),
     }
 }
 

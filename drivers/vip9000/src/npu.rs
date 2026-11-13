@@ -50,13 +50,16 @@
 //! Hardware status: untested on board. The check is `testing/board-runs/H7a.md`.
 
 use lemnos_contract_npu::{Counters, Npu, NpuInfo};
-use lemnos_core::{CallerId, Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    CallerId, Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle,
+    driver,
+};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 
 use crate::claim::{
     Claim, ClaimError, MAX_BUFFERS, MAX_PROGRAMS, Module, Served, Service, Session, backoff_ns,
 };
-use crate::linux::{LinuxModule, Settings};
+use crate::linux::{LinuxModule, Settings, valid_name};
 
 /// The stream jobs come on: the need's name, and the name `job_stream` answers.
 pub const JOB_STREAM: &str = "jobs";
@@ -128,6 +131,14 @@ pub enum Closed {
     Vipcore,
 }
 
+/// The settings this driver reads from the board file's `config`. `device` and `heap` are read
+/// only for the `lemnos` route, and check_config requires them there.
+const KEYS: &[Key] = &[
+    Key::required("route", Kind::Str),
+    Key::optional("device", Kind::Str),
+    Key::optional("heap", Kind::Str),
+];
+
 /// The VIP9000 as `npu/1`.
 #[driver("vip9000", provides = [Npu])]
 pub struct Vip9000Driver {
@@ -151,18 +162,45 @@ impl Lifecycle for Vip9000Driver {
     const TICKS: bool = true;
     const TRACKS_CALLERS: bool = true;
 
-    fn start(needs: Vip9000DriverNeeds, cfg: &Config<'_>) -> Result<Self> {
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
         match cfg.str("route") {
             Some("lemnos") => {}
-            Some("vipcore") => {
-                return Self::with_opener(
-                    needs,
-                    Route::Vipcore,
-                    Box::new(|| Err(std::io::ErrorKind::Unsupported.into())),
-                );
-            }
-            _ => return Err(Status::INVALID_ARGUMENT),
+            // The vendor's node is named by the route alone; no device or heap is read for it.
+            Some("vipcore") => return Ok(()),
+            _ => return Err(ConfigError::new("route", "must be lemnos or vipcore")),
         }
+        let device = cfg
+            .str("device")
+            .ok_or(ConfigError::new("device", "is required for route lemnos"))?;
+        let heap = cfg
+            .str("heap")
+            .ok_or(ConfigError::new("heap", "is required for route lemnos"))?;
+        if !valid_name(device) {
+            return Err(ConfigError::new(
+                "device",
+                "must be a name that is not empty and has no slash or NUL",
+            ));
+        }
+        if !valid_name(heap) {
+            return Err(ConfigError::new(
+                "heap",
+                "must be a name that is not empty and has no slash or NUL",
+            ));
+        }
+        Ok(())
+    }
+
+    fn start(needs: Vip9000DriverNeeds, cfg: &Config<'_>) -> Result<Self> {
+        // check_config has accepted the route: it is `vipcore` or `lemnos`.
+        if cfg.str("route") == Some("vipcore") {
+            return Self::with_opener(
+                needs,
+                Route::Vipcore,
+                Box::new(|| Err(std::io::ErrorKind::Unsupported.into())),
+            );
+        }
+        // The names are checked by check_config, and `Settings::new` applies the same rule.
         let settings = Settings::new(
             cfg.str("device").ok_or(Status::INVALID_ARGUMENT)?,
             cfg.str("heap").ok_or(Status::INVALID_ARGUMENT)?,

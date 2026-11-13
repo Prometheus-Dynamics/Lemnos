@@ -316,8 +316,8 @@ config = {{ chip = \"ina226\", shunt_ohms = 0.01, max_current_a = 8.192 }}\n\
 [[devices]]\nid = \"orientation\"\ndriver = \"orientation\"\nuses = {{ accel = \"imu\", gyro = \"imu\" }}\n\
 [[devices]]\nid = \"switch\"\ndriver = \"gpio-power-switch\"\nbus = \"gpio-power\"\n\
 [[devices]]\nid = \"clock\"\ndriver = \"host-clock\"\nconfig = {{ sys_root = \"{}\" }}\n\
-[[devices]]\nid = \"watchdog\"\ndriver = \"hw-watchdog\"\n\
-config = {{ device = \"watchdog0\", sys_root = \"{}\", dev_root = \"{}\", keepalive = true }}\n\
+[[devices]]\nid = \"watchdog\"\ndriver = \"hw-watchdog\"\nkeepalive = true\n\
+config = {{ device = \"watchdog0\", sys_root = \"{}\", dev_root = \"{}\" }}\n\
 [[devices]]\nid = \"zone\"\ndriver = \"thermal-zone\"\nconfig = {{ path = \"{}\" }}\n\
 [[devices]]\nid = \"fan-hwmon\"\ndriver = \"hwmon-fan\"\nconfig = {{ sys_root = \"{}\", name = \"pwmfan\", max_rpm = 3000 }}\n\
 [[devices]]\nid = \"pwm-fan\"\ndriver = \"pwm-channel-fan\"\nbus = \"pwm-fan\"\nconfig = {{ max_rpm = 3000 }}\n\

@@ -370,17 +370,28 @@ fn the_real_entry_binds_from_the_board_file_and_opens_nothing_it_was_not_given()
         Health::Degraded("the node failed to open: trying it again")
     );
     assert_eq!(rig.info(), Err(Status::NO_DEVICE));
-    // An empty path, and a stream with more buffers than the driver holds, fail to bind.
-    for text in [board("node = \"\"", BUFFERS), board("", MAX_BUFFERS + 1)] {
-        let rig = Rig::start(&text, &[entry::<Rknpu>()]);
-        assert!(
-            matches!(
-                rig.host.device("npu").unwrap().state,
-                DeviceState::Backoff { .. }
-            ),
-            "{text}"
-        );
-    }
+    // An empty path is refused by the settings check: the board starts, and the device is listed
+    // failed with the key. It is never made.
+    let sim = SimBoard::new();
+    let clock = sim.clock();
+    let host = Host::start(
+        &parse(&board("node = \"\"", BUFFERS)).unwrap(),
+        &[entry::<Rknpu>()],
+        Box::new(sim),
+        Arc::new(clock),
+        Options::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        &host.device("npu").unwrap().state,
+        DeviceState::Backoff { reason, .. } if reason.contains("setting \"node\"")
+    ));
+    // A stream with more buffers than the driver holds fails to bind.
+    let rig = Rig::start(&board("", MAX_BUFFERS + 1), &[entry::<Rknpu>()]);
+    assert!(matches!(
+        rig.host.device("npu").unwrap().state,
+        DeviceState::Backoff { .. }
+    ));
 }
 
 #[test]

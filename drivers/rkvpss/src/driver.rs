@@ -44,7 +44,9 @@ use std::io;
 use std::path::PathBuf;
 
 use lemnos_contract_image_scaler::{Counters, ImageScaler, MAX_STREAM_NAME, ScalerInfo};
-use lemnos_core::{Config, Health, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{
+    Config, ConfigError, Health, Key, Kind, Lifecycle, Result, Status, StreamHandle, driver,
+};
 use lemnos_driver_rkvpss_sys::{Channel, MAX_HEIGHT, MAX_WIDTH, Node};
 use lemnos_hal::blocks::BufferKind;
 
@@ -76,6 +78,12 @@ pub struct Rkvpss {
     retry_at_ns: u64,
 }
 
+/// Every setting the driver reads. `channel` is required; `node` is optional.
+const KEYS: &[Key] = &[
+    Key::required("channel", Kind::Int),
+    Key::optional("node", Kind::Str),
+];
+
 /// The `channel` setting.
 fn channel(cfg: &Config<'_>) -> Result<Channel> {
     cfg.int("channel")
@@ -88,17 +96,22 @@ impl Lifecycle for Rkvpss {
     type Needs = RkvpssNeeds;
     const TICKS: bool = true;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        channel(cfg).map_err(|_| ConfigError::new("channel", "must be 0 to 5"))?;
+        if cfg.str("node") == Some("") {
+            return Err(ConfigError::new("node", "must not be empty"));
+        }
+        Ok(())
+    }
+
     fn start(needs: RkvpssNeeds, cfg: &Config<'_>) -> Result<Self> {
         let channel = channel(cfg)?;
         // The block takes an image only as a dma-buf: known now, before any consumer comes.
         if needs.jobs.buffer_kind() != BufferKind::Handles {
             return Err(Status::NOT_SUPPORTED);
         }
-        let node = match cfg.str("node") {
-            Some("") => return Err(Status::INVALID_ARGUMENT),
-            Some(path) => Some(PathBuf::from(path)),
-            None => None,
-        };
+        let node = cfg.str("node").map(PathBuf::from);
         let open: Opener = Box::new(move || {
             let path = node
                 .clone()

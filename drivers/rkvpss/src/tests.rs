@@ -16,6 +16,7 @@ use crate::{
     Channel, Crop, Device, Job, Node, Output, PixelFormat, RunError, Scaler, State, Surface,
     backoff_ns,
 };
+use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -320,5 +321,52 @@ fn a_file_that_is_not_the_node_is_refused() {
     assert_eq!(
         refused.expect_err("a plain file").kind(),
         io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
+fn check_config_names_the_bad_setting() {
+    fn check(
+        entries: &'static [(&'static str, ConfigValue<'static>)],
+    ) -> core::result::Result<(), ConfigError<'static>> {
+        <crate::Rkvpss as Lifecycle>::check_config(&Config::new(entries))
+    }
+    assert!(
+        check(&[
+            ("channel", ConfigValue::Int(5)),
+            ("node", ConfigValue::Str("/dev/v"))
+        ])
+        .is_ok()
+    );
+    assert!(check(&[("channel", ConfigValue::Int(0))]).is_ok());
+    assert_eq!(check(&[]).unwrap_err().key, "channel");
+    assert_eq!(
+        check(&[("channel", ConfigValue::Int(6))]).unwrap_err().key,
+        "channel"
+    );
+    assert_eq!(
+        check(&[("channel", ConfigValue::Int(-1))]).unwrap_err().key,
+        "channel"
+    );
+    assert_eq!(
+        check(&[
+            ("channel", ConfigValue::Int(0)),
+            ("node", ConfigValue::Str(""))
+        ])
+        .unwrap_err()
+        .key,
+        "node"
+    );
+    let bogus = check(&[
+        ("channel", ConfigValue::Int(0)),
+        ("nod", ConfigValue::Str("/dev/v")),
+    ])
+    .unwrap_err();
+    assert_eq!((bogus.key, bogus.suggestion), ("nod", Some("node")));
+    assert_eq!(
+        check(&[("channel", ConfigValue::Str("0"))])
+            .unwrap_err()
+            .key,
+        "channel"
     );
 }

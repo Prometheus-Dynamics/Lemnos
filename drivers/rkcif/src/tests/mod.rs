@@ -832,3 +832,57 @@ fn layout_is_what_configure_set() {
     let set = CameraReceiver::configure(&mut d, raw10(), Packing::Packed).unwrap();
     assert_eq!(CameraReceiver::layout(&mut d), Ok(Some(set)));
 }
+
+#[test]
+fn check_config_names_each_key_and_passes_the_edges() {
+    use lemnos_core::{Config, ConfigValue, Lifecycle};
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), lemnos_core::ConfigError<'a>> {
+        <Rkcif as Lifecycle>::check_config(&Config::new(entries))
+    }
+    let full = [
+        ("device", ConfigValue::Str("rkcif")),
+        ("order", ConfigValue::Str("rggb")),
+        ("buffers", ConfigValue::Int(2)),
+        ("capture", ConfigValue::Str("rkcif_mipi_id0")),
+        ("embedded", ConfigValue::Str("rkcif_meta")),
+        ("embedded_format", ConfigValue::Str("RGGB")),
+        ("embedded_bytes", ConfigValue::Int(64)),
+    ];
+    assert!(check(&full).is_ok());
+    let near = check(&[("bufers", ConfigValue::Int(4))]).unwrap_err();
+    assert_eq!(near.suggestion, Some("buffers"));
+    let kind = check(&[("buffers", ConfigValue::Str("4"))]).unwrap_err();
+    assert_eq!(kind.key, "buffers");
+    assert_eq!(
+        check(&[("buffers", ConfigValue::Int(1))]).unwrap_err().key,
+        "buffers"
+    );
+    assert!(check(&[("buffers", ConfigValue::Int(32))]).is_ok());
+    assert_eq!(
+        check(&[("buffers", ConfigValue::Int(33))]).unwrap_err().key,
+        "buffers"
+    );
+    assert_eq!(
+        check(&[("order", ConfigValue::Str("rgb"))])
+            .unwrap_err()
+            .key,
+        "order"
+    );
+    let no_format = [
+        ("embedded", ConfigValue::Str("rkcif_meta")),
+        ("embedded_bytes", ConfigValue::Int(64)),
+    ];
+    let err = check(&no_format).unwrap_err();
+    assert_eq!(
+        (err.key, err.reason),
+        ("embedded_format", "is required with embedded")
+    );
+    let no_bytes = [
+        ("embedded", ConfigValue::Str("rkcif_meta")),
+        ("embedded_format", ConfigValue::Str("RGGB")),
+        ("embedded_bytes", ConfigValue::Int(0)),
+    ];
+    assert_eq!(check(&no_bytes).unwrap_err().key, "embedded_bytes");
+}

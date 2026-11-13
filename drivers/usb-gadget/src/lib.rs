@@ -30,7 +30,7 @@
 //! - `interfaces` (string, required): the interfaces and their endpoints, as [`description`]
 //!   sets out: the text itself, in every build.
 //! - `interfaces_file` (string, optional, `std` builds only): a path to a file holding that text,
-//!   read once at bind. A build without a filesystem refuses it by name ([`refusal`]). Giving both
+//!   read once at bind. A build without a filesystem refuses it by name ([`check`]). Giving both
 //!   `interfaces` and `interfaces_file` is refused by name too.
 //! - `release` (integer, default [`revision::RELEASE`]): the device's release number
 //!   (`bcdDevice`). See [`revision`].
@@ -121,8 +121,8 @@ use lemnos_contract_usb_function::{
     State, UsbFunction,
 };
 use lemnos_core::{
-    BufferHandle, CallerId, Config, Description, Health, Item, Lifecycle, MethodId, Result, Status,
-    StreamHandle, UsbFunctionHandle, driver, status_of,
+    BufferHandle, CallerId, Config, ConfigError, Description, Health, Item, Key, Kind as KeyKind,
+    Lifecycle, MethodId, Result, Status, StreamHandle, UsbFunctionHandle, driver, status_of,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::blocks::UsbFunctionEvent;
@@ -548,6 +548,10 @@ impl Lifecycle for UsbGadget {
         }
     }
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        check(cfg)
+    }
+
     fn start(needs: UsbGadgetNeeds, cfg: &Config<'_>) -> Result<Self> {
         let (set, _) = settings(cfg)?;
         let note = if cfg.str("serial").is_some() || cfg.str("board_serial").is_some() {
@@ -557,7 +561,8 @@ impl Lifecycle for UsbGadget {
         } else {
             Some(NO_SERIAL)
         };
-        let control_timeout_ms = integer(cfg, "control_timeout_ms", 60_000, Some(1_000))?;
+        let control_timeout_ms = integer(cfg, "control_timeout_ms", 60_000, Some(1_000))
+            .map_err(|_| Status::INVALID_ARGUMENT)?;
         if control_timeout_ms == 0 {
             return Err(Status::INVALID_ARGUMENT);
         }
@@ -622,50 +627,67 @@ impl Drop for UsbGadget {
     }
 }
 
+/// The settings this driver takes, by key and kind. `board_serial` and `board_serial_error` are
+/// written by the daemon from the board's identity device, and `identity` names that device: the
+/// daemon reads them, and a board file that sets the first two is refused by the daemon.
+const KEYS: &[Key] = &[
+    Key::required("vendor", KeyKind::Int),
+    Key::required("product", KeyKind::Int),
+    Key::optional("release", KeyKind::Int),
+    Key::optional("class", KeyKind::Int),
+    Key::optional("subclass", KeyKind::Int),
+    Key::optional("protocol", KeyKind::Int),
+    Key::optional("manufacturer", KeyKind::Str),
+    Key::optional("product_name", KeyKind::Str),
+    Key::optional("serial", KeyKind::Str),
+    Key::optional("max_power_ma", KeyKind::Int),
+    Key::optional("self_powered", KeyKind::Bool),
+    Key::optional("control_timeout_ms", KeyKind::Int),
+    Key::optional("interfaces", KeyKind::Str),
+    Key::optional("interfaces_file", KeyKind::Str),
+    Key::optional("identity", KeyKind::Str),
+    Key::optional("board_serial", KeyKind::Str),
+    Key::optional("board_serial_error", KeyKind::Str),
+];
+
 /// An integer setting within `0..=max`, or `default` when it is not given.
-fn integer(cfg: &Config<'_>, key: &str, max: i64, default: Option<i64>) -> Result<i64> {
+fn integer<'a>(
+    cfg: &Config<'a>,
+    key: &'static str,
+    max: i64,
+    default: Option<i64>,
+) -> core::result::Result<i64, ConfigError<'a>> {
+    let range = || ConfigError::new(key, "is out of range");
     match (cfg.get(key), default) {
         (None, Some(default)) => Ok(default),
-        (None, None) => Err(Status::INVALID_ARGUMENT),
+        (None, None) => Err(ConfigError::new(key, "is required")),
         (Some(_), _) => cfg
             .int(key)
             .filter(|value| (0..=max).contains(value))
-            .ok_or(Status::INVALID_ARGUMENT),
+            .ok_or_else(range),
     }
 }
 
-/// A string setting, if given. A setting of another type is refused.
-fn string<'a>(cfg: &Config<'a>, key: &str) -> Result<Option<&'a str>> {
+/// A string setting, if given.
+fn string<'a>(
+    cfg: &Config<'a>,
+    key: &'static str,
+) -> core::result::Result<Option<&'a str>, ConfigError<'a>> {
     match (cfg.get(key), cfg.str(key)) {
         (None, _) => Ok(None),
         (Some(_), Some(text)) => Ok(Some(text)),
-        (Some(_), None) => Err(Status::INVALID_ARGUMENT),
+        (Some(_), None) => Err(ConfigError::new(key, "must be text")),
     }
 }
 
-/// The reason the interface settings are refused by name, in this build: both `interfaces` and
-/// `interfaces_file` given, or `interfaces_file` in a build without a filesystem. `None` when they
-/// are not refused. The daemon checks a board file's settings with this before it binds, so the
-/// reason is named there; the driver's own bind refuses with `INVALID_ARGUMENT`.
-pub fn refusal(cfg: &Config<'_>) -> Option<&'static str> {
-    match (cfg.get("interfaces"), cfg.get("interfaces_file")) {
-        (Some(_), Some(_)) => Some("give interfaces or interfaces_file, not both"),
-        (None, Some(_)) if !cfg!(feature = "std") => {
-            Some("interfaces_file needs a build with a filesystem")
-        }
-        _ => None,
-    }
-}
-
-/// The descriptor set and the functions the settings describe. The setup that makes the
-/// gadget's configfs tree reads the same settings through this, so the two agree.
-pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
+/// The identity the descriptors carry, from the settings. Checked by [`check`].
+fn identity<'a>(cfg: &Config<'a>) -> core::result::Result<Identity<'a>, ConfigError<'a>> {
     let self_powered = match (cfg.get("self_powered"), cfg.bool("self_powered")) {
         (None, _) => false,
         (Some(_), Some(value)) => value,
-        (Some(_), None) => return Err(Status::INVALID_ARGUMENT),
+        (Some(_), None) => return Err(ConfigError::new("self_powered", "must be true or false")),
     };
-    let identity = Identity {
+    Ok(Identity {
         vendor: integer(cfg, "vendor", 0xffff, Some(i64::from(LINK_VENDOR)))? as u16,
         product: integer(cfg, "product", 0xffff, Some(i64::from(LINK_PRODUCT)))? as u16,
         release: integer(cfg, "release", 0xffff, Some(i64::from(revision::RELEASE)))? as u16,
@@ -677,22 +699,107 @@ pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
         serial: string(cfg, "serial")?.or(cfg.str("board_serial")),
         max_power_ma: integer(cfg, "max_power_ma", 500, Some(100))? as u16,
         self_powered,
-    };
-    if refusal(cfg).is_some() {
-        return Err(Status::INVALID_ARGUMENT);
+    })
+}
+
+/// The reason both `interfaces` and `interfaces_file` are given, and the one a build without a
+/// filesystem gives `interfaces_file`.
+const BOTH_INTERFACES: &str = "is given with interfaces: give one of them, not both";
+#[cfg(not(feature = "std"))]
+const NO_FILESYSTEM: &str = "needs a build with a filesystem: give the interfaces as interfaces";
+
+/// The interfaces text the settings name: the `interfaces` setting, or the file it names. A file
+/// that cannot be read is refused by name; a build without a filesystem refuses the file.
+#[cfg(feature = "std")]
+fn interfaces_text<'a>(
+    cfg: &Config<'a>,
+) -> core::result::Result<alloc_or_str::Text<'a>, ConfigError<'a>> {
+    match (cfg.get("interfaces"), cfg.str("interfaces_file")) {
+        (Some(_), Some(_)) => Err(ConfigError::new("interfaces_file", BOTH_INTERFACES)),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map(alloc_or_str::Text::Owned)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => {
+                    ConfigError::new("interfaces_file", "names no file: check the path")
+                }
+                _ => ConfigError::new("interfaces_file", "cannot be read"),
+            }),
+        _ => string(cfg, "interfaces")?
+            .map(alloc_or_str::Text::Borrowed)
+            .ok_or_else(|| {
+                ConfigError::new(
+                    "interfaces",
+                    "is required: give the interfaces text, or interfaces_file",
+                )
+            }),
     }
-    #[cfg(feature = "std")]
-    let file = match cfg.str("interfaces_file") {
-        Some(path) => Some(std::fs::read_to_string(path).map_err(|_| Status::INVALID_ARGUMENT)?),
-        None => None,
-    };
-    #[cfg(feature = "std")]
-    let interfaces = match &file {
-        Some(text) => text.as_str(),
-        None => string(cfg, "interfaces")?.ok_or(Status::INVALID_ARGUMENT)?,
-    };
-    #[cfg(not(feature = "std"))]
-    let interfaces = string(cfg, "interfaces")?.ok_or(Status::INVALID_ARGUMENT)?;
+}
+
+#[cfg(not(feature = "std"))]
+fn interfaces_text<'a>(
+    cfg: &Config<'a>,
+) -> core::result::Result<alloc_or_str::Text<'a>, ConfigError<'a>> {
+    match (cfg.get("interfaces"), cfg.get("interfaces_file")) {
+        (Some(_), Some(_)) => Err(ConfigError::new("interfaces_file", BOTH_INTERFACES)),
+        (None, Some(_)) => Err(ConfigError::new("interfaces_file", NO_FILESYSTEM)),
+        _ => string(cfg, "interfaces")?
+            .map(alloc_or_str::Text::Borrowed)
+            .ok_or_else(|| ConfigError::new("interfaces", "is required: give the interfaces text")),
+    }
+}
+
+/// The interfaces text, borrowed from the settings or read from the file.
+mod alloc_or_str {
+    pub enum Text<'a> {
+        Borrowed(&'a str),
+        #[cfg(feature = "std")]
+        Owned(std::string::String),
+    }
+
+    impl Text<'_> {
+        pub fn as_str(&self) -> &str {
+            match self {
+                Self::Borrowed(text) => text,
+                #[cfg(feature = "std")]
+                Self::Owned(text) => text,
+            }
+        }
+    }
+}
+
+/// Checks the settings this driver takes, with no hardware: the key names and kinds, the identity,
+/// the control timeout, and the interfaces text, which must parse. What the board's serial gives
+/// (the addresses of a derived NCM function) is not known until the daemon reads it, so it is not
+/// checked here. The host runs this before it makes the device; the daemon runs it before the root
+/// phase makes the gadget.
+///
+/// # Errors
+///
+/// The first setting this driver refuses, by key.
+pub fn check<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+    cfg.check_keys(KEYS)?;
+    identity(cfg)?;
+    if integer(cfg, "control_timeout_ms", 60_000, Some(1_000))? == 0 {
+        return Err(ConfigError::new("control_timeout_ms", "must be 1 to 60000"));
+    }
+    let text = interfaces_text(cfg)?;
+    description::build(&identity(cfg)?, text.as_str())
+        .map(drop)
+        .map_err(|_| ConfigError::new("interfaces", "is not an interfaces description"))
+}
+
+/// The descriptor set and the functions the settings describe. The setup that makes the
+/// gadget's configfs tree reads the same settings through this, so the two agree.
+///
+/// # Errors
+///
+/// The settings [`check`] refuses, and an interfaces description whose derived addresses have no
+/// board serial to come from.
+pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
+    check(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+    let identity = identity(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+    let text = interfaces_text(cfg).map_err(|_| Status::INVALID_ARGUMENT)?;
+    let interfaces = text.as_str();
     let set =
         description::build(&identity, interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
     // The addresses come from the board's serial fact, and only when there is one in the format.

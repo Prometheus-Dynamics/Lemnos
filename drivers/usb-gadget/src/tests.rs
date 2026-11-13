@@ -1115,7 +1115,7 @@ fn a_gadget_without_an_ncm_function_describes_no_interface_name() {
 #[test]
 fn the_interfaces_text_means_the_same_in_every_build() {
     let entries = settings();
-    assert_eq!(crate::refusal(&Config::new(&entries)), None);
+    assert_eq!(crate::check(&Config::new(&entries)), Ok(()));
     let (set, _) = settings_of(&entries, "").expect("the text is accepted");
     assert!(!set.bytes().is_empty());
 }
@@ -1129,8 +1129,11 @@ fn both_interface_keys_are_refused_by_name() {
         ConfigValue::Str("/etc/lemnos/interfaces.txt"),
     ));
     assert_eq!(
-        crate::refusal(&Config::new(&entries)),
-        Some("give interfaces or interfaces_file, not both")
+        crate::check(&Config::new(&entries)).map_err(|error| (error.key, error.reason)),
+        Err((
+            "interfaces_file",
+            "is given with interfaces: give one of them, not both"
+        ))
     );
     assert_eq!(
         settings_of(&entries, "").err(),
@@ -1148,8 +1151,11 @@ fn an_interfaces_file_is_refused_by_name_without_a_filesystem() {
         ("interfaces_file", ConfigValue::Str(INTERFACES)),
     ];
     assert_eq!(
-        crate::refusal(&Config::new(&entries)),
-        Some("interfaces_file needs a build with a filesystem")
+        crate::check(&Config::new(&entries)).map_err(|error| (error.key, error.reason)),
+        Err((
+            "interfaces_file",
+            "needs a build with a filesystem: give the interfaces as interfaces"
+        ))
     );
     assert_eq!(
         settings_of(&entries, "").err(),

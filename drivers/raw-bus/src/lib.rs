@@ -36,8 +36,8 @@ use lemnos_contract_raw_bus::RawBus as RawBusContract;
 
 use lemnos_contract_raw_bus::UART_MAX_WAIT_MS;
 use lemnos_core::{
-    Config, ConfigValue, Health, I2c, Lifecycle, Line, Pwm, Result, Spi, Status, Uart, driver,
-    status_of,
+    Config, ConfigError, ConfigValue, Health, I2c, Key, Kind, Lifecycle, Line, Pwm, Result, Spi,
+    Status, Uart, driver, status_of,
 };
 use lemnos_hal::i2c::{I2c as HalI2c, Operation as I2cOperation};
 use lemnos_hal::raw::{Direction, LineConfig, Polarity, PwmConfig};
@@ -47,6 +47,24 @@ use lemnos_hal::{Parity, StopBits, UartFormat};
 use policy::Policy;
 
 const FAILED: &str = "the last bus call failed; the next call tries again";
+
+/// The settings a board file gives the device. `allow_i2c` is an integer or a string, and a key
+/// takes one kind, so the table is built for the kind the board's value has.
+const fn keys(allow_i2c: Kind) -> [Key; 9] {
+    [
+        Key::optional("writes", Kind::Bool),
+        Key::optional("allow_i2c", allow_i2c),
+        Key::optional("pwm_inverted", Kind::Bool),
+        Key::optional("line_direction", Kind::Str),
+        Key::optional("line_initial", Kind::Bool),
+        Key::optional("line_active_low", Kind::Bool),
+        Key::optional("uart_baud", Kind::Int),
+        Key::optional("uart_parity", Kind::Str),
+        Key::optional("uart_stop_bits", Kind::Int),
+    ]
+}
+const KEYS_TEXT: [Key; 9] = keys(Kind::Str);
+const KEYS_NUMBER: [Key; 9] = keys(Kind::Int);
 
 /// A device with any of an I2C bus, an SPI device, a GPIO line, a PWM channel and a UART.
 #[driver("raw-bus", provides = [RawBusContract])]
@@ -72,6 +90,52 @@ impl Lifecycle for RawBus {
     // Everything this driver does to hardware goes through its needs.
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
 
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        policy::check_allow_i2c(cfg)?;
+        let keys = match cfg.get("allow_i2c") {
+            Some(ConfigValue::Str(_)) => &KEYS_TEXT[..],
+            _ => &KEYS_NUMBER[..],
+        };
+        cfg.check_keys(keys)?;
+        if cfg.str("line_direction") == Some("output") && !cfg.bool("writes").unwrap_or(false) {
+            return Err(ConfigError::new(
+                "line_direction",
+                "is output, which drives the line, so it needs writes = true",
+            ));
+        }
+        if let Some(direction) = cfg.str("line_direction")
+            && !matches!(direction, "input" | "output")
+        {
+            return Err(ConfigError::new(
+                "line_direction",
+                "must be input or output",
+            ));
+        }
+        if let Some(baud) = cfg.int("uart_baud")
+            && !u32::try_from(baud).is_ok_and(|baud| baud > 0)
+        {
+            return Err(ConfigError::new("uart_baud", "must be 1 to 4294967295"));
+        }
+        if cfg.get("uart_baud").is_none() {
+            for key in ["uart_parity", "uart_stop_bits"] {
+                if cfg.get(key).is_some() {
+                    return Err(ConfigError::new(key, "needs uart_baud"));
+                }
+            }
+        }
+        if let Some(parity) = cfg.str("uart_parity")
+            && !matches!(parity, "none" | "even" | "odd")
+        {
+            return Err(ConfigError::new("uart_parity", "must be none, even or odd"));
+        }
+        if let Some(stop_bits) = cfg.int("uart_stop_bits")
+            && !matches!(stop_bits, 1 | 2)
+        {
+            return Err(ConfigError::new("uart_stop_bits", "must be 1 or 2"));
+        }
+        Ok(())
+    }
+
     fn start(needs: RawBusNeeds, cfg: &Config<'_>) -> Result<Self> {
         if needs.i2c.is_none()
             && needs.spi.is_none()
@@ -89,7 +153,6 @@ impl Lifecycle for RawBus {
         };
         let mut line = needs.line;
         if let Some(config) = line_config(cfg)? {
-            policy.admit_line_configure(config.direction == Direction::Output)?;
             let line = line.as_mut().ok_or(Status::NOT_FOUND)?;
             line.configure(&config).map_err(status_of)?;
         }
@@ -232,16 +295,10 @@ impl RawBusContract for RawBus {
 /// The UART's frame the settings ask for, or `None` when the board leaves the port as it opened.
 fn uart_format(cfg: &Config<'_>) -> Result<Option<UartFormat>> {
     let baud = match cfg.get("uart_baud") {
-        None => {
-            if cfg.get("uart_parity").is_some() || cfg.get("uart_stop_bits").is_some() {
-                return Err(Status::INVALID_ARGUMENT);
-            }
-            return Ok(None);
+        None => return Ok(None),
+        Some(ConfigValue::Int(baud)) => {
+            u32::try_from(baud).map_err(|_| Status::INVALID_ARGUMENT)?
         }
-        Some(ConfigValue::Int(baud)) => u32::try_from(baud)
-            .ok()
-            .filter(|baud| *baud > 0)
-            .ok_or(Status::INVALID_ARGUMENT)?,
         Some(_) => return Err(Status::INVALID_ARGUMENT),
     };
     let parity = match cfg.get("uart_parity") {
@@ -296,5 +353,99 @@ fn flag(cfg: &Config<'_>, key: &str) -> Result<bool> {
         None => Ok(false),
         Some(ConfigValue::Bool(value)) => Ok(value),
         Some(_) => Err(Status::INVALID_ARGUMENT),
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use lemnos_core::{Config, ConfigValue, Lifecycle};
+
+    use super::RawBus;
+
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), lemnos_core::ConfigError<'a>> {
+        <RawBus as Lifecycle>::check_config(&Config::new(entries))
+    }
+
+    #[test]
+    fn a_full_valid_config_passes_and_unknown_or_misspelled_keys_are_named() {
+        let full = [
+            ("writes", ConfigValue::Bool(true)),
+            ("allow_i2c", ConfigValue::Str("0x50, 0x68")),
+            ("pwm_inverted", ConfigValue::Bool(false)),
+            ("line_direction", ConfigValue::Str("output")),
+            ("line_initial", ConfigValue::Bool(true)),
+            ("line_active_low", ConfigValue::Bool(false)),
+            ("uart_baud", ConfigValue::Int(115_200)),
+            ("uart_parity", ConfigValue::Str("even")),
+            ("uart_stop_bits", ConfigValue::Int(2)),
+        ];
+        assert!(check(&full).is_ok());
+        assert_eq!(
+            check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
+            "bogus"
+        );
+        let near = check(&[("writs", ConfigValue::Bool(true))]).unwrap_err();
+        assert_eq!(near.suggestion, Some("writes"));
+    }
+
+    #[test]
+    fn a_wrong_kind_is_refused_and_allow_i2c_takes_either_kind() {
+        assert_eq!(
+            check(&[("writes", ConfigValue::Int(1))]).unwrap_err().key,
+            "writes"
+        );
+        assert!(check(&[("allow_i2c", ConfigValue::Int(0x50))]).is_ok());
+        assert_eq!(
+            check(&[("allow_i2c", ConfigValue::Bool(true))])
+                .unwrap_err()
+                .key,
+            "allow_i2c"
+        );
+    }
+
+    #[test]
+    fn the_value_and_combination_checks_refuse_outside_their_edges() {
+        // uart_baud: 1 and u32::MAX pass; 0 and one past u32 do not.
+        assert!(check(&[("uart_baud", ConfigValue::Int(1))]).is_ok());
+        assert!(check(&[("uart_baud", ConfigValue::Int(0xFFFF_FFFF))]).is_ok());
+        assert_eq!(
+            check(&[("uart_baud", ConfigValue::Int(0))])
+                .unwrap_err()
+                .key,
+            "uart_baud"
+        );
+        let past = check(&[("uart_baud", ConfigValue::Int(0x1_0000_0000))]).unwrap_err();
+        assert_eq!(past.key, "uart_baud");
+        // uart_stop_bits: 1 and 2 pass; 3 does not. Parity and stop bits need a baud rate.
+        let stop = [
+            ("uart_baud", ConfigValue::Int(9600)),
+            ("uart_stop_bits", ConfigValue::Int(3)),
+        ];
+        assert_eq!(check(&stop).unwrap_err().key, "uart_stop_bits");
+        let parity = check(&[("uart_parity", ConfigValue::Str("even"))]).unwrap_err();
+        assert_eq!(
+            (parity.key, parity.reason),
+            ("uart_parity", "needs uart_baud")
+        );
+        // allow_i2c: 0x7f passes; 0x80 and an unparseable list do not.
+        assert!(check(&[("allow_i2c", ConfigValue::Str("0x7f"))]).is_ok());
+        assert_eq!(
+            check(&[("allow_i2c", ConfigValue::Str("0x80"))])
+                .unwrap_err()
+                .key,
+            "allow_i2c"
+        );
+        assert_eq!(
+            check(&[("allow_i2c", ConfigValue::Str("zz"))])
+                .unwrap_err()
+                .key,
+            "allow_i2c"
+        );
+        // An output line drives its level, so it needs writes; an input line does not.
+        let out = check(&[("line_direction", ConfigValue::Str("output"))]).unwrap_err();
+        assert_eq!(out.key, "line_direction");
+        assert!(check(&[("line_direction", ConfigValue::Str("input"))]).is_ok());
     }
 }

@@ -78,8 +78,8 @@ use lemnos_contract_camera_isp::{
     MAX_STREAM_NAME, OutputLayout,
 };
 use lemnos_core::{
-    Config, Decode, Description, Health, Item, Lifecycle, MethodId, Reader, Result, Status,
-    StreamHandle, driver,
+    Config, ConfigError, Decode, Description, Health, Item, Key, Kind, Lifecycle, MethodId, Reader,
+    Result, Status, StreamHandle, driver,
 };
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_v4l2::subdev::{MbusCode, MbusFormat};
@@ -170,6 +170,9 @@ fn dimension(v: u32) -> Result<u32> {
     Ok(v)
 }
 
+/// The statistics and image buffers per kernel queue a board file may ask for.
+pub const BUFFER_RANGE: core::ops::RangeInclusive<u32> = 2..=32;
+
 /// The driver's own settings, beside where the ISP is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
@@ -181,9 +184,10 @@ pub struct Options {
 }
 
 impl Options {
-    /// `INVALID_ARGUMENT` for a buffer count out of range or an empty source name.
+    /// `INVALID_ARGUMENT` for a buffer count out of [`BUFFER_RANGE`] or an empty source name.
+    /// `check_config` refuses the same settings before the driver binds.
     pub fn new(generation: Generation, source: Option<&str>, buffers: u32) -> Result<Self> {
-        if !(2..=32).contains(&buffers) || source.is_some_and(str::is_empty) {
+        if !BUFFER_RANGE.contains(&buffers) || source.is_some_and(str::is_empty) {
             return Err(Status::INVALID_ARGUMENT);
         }
         Ok(Self {
@@ -432,9 +436,45 @@ pub struct Rkisp {
     params: Box<[u8]>,
 }
 
+/// The settings a board file gives the ISP.
+const KEYS: &[Key] = &[
+    Key::optional("device", Kind::Str),
+    Key::required("generation", Kind::Str),
+    Key::optional("buffers", Kind::Int),
+    Key::optional("source", Kind::Str),
+];
+
 impl Lifecycle for Rkisp {
     type Needs = RkispNeeds;
     const TICKS: bool = true;
+
+    fn check_config<'a>(cfg: &Config<'a>) -> core::result::Result<(), ConfigError<'a>> {
+        cfg.check_keys(KEYS)?;
+        // The device name rules are `Settings::new`'s own, the same ones `start` builds with.
+        if Settings::new(cfg.str("device")).is_err() {
+            return Err(ConfigError::new(
+                "device",
+                "must be a device name: not empty, short enough, with no NUL",
+            ));
+        }
+        if let Some(name) = cfg.str("generation")
+            && Generation::from_name(name).is_none()
+        {
+            return Err(ConfigError::new(
+                "generation",
+                "must be isp21, isp30, isp35, isp32, isp32lite or isp39",
+            ));
+        }
+        if let Some(buffers) = cfg.int("buffers")
+            && !u32::try_from(buffers).is_ok_and(|n| BUFFER_RANGE.contains(&n))
+        {
+            return Err(ConfigError::new("buffers", "must be 2 to 32"));
+        }
+        if cfg.str("source") == Some("") {
+            return Err(ConfigError::new("source", "must not be empty"));
+        }
+        Ok(())
+    }
 
     fn start(needs: RkispNeeds, cfg: &Config<'_>) -> Result<Self> {
         let settings = Settings::new(cfg.str("device"))?;
@@ -1127,5 +1167,65 @@ mod tests {
         assert_eq!(raw_code(BayerOrder::Mono, 8), Some(MbusCode(0x2001)));
         assert_eq!(raw_code(BayerOrder::Rggb, 14), None);
         assert_eq!(raw_code(BayerOrder::Mono, 16), None);
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use lemnos_core::{Config, ConfigError, ConfigValue, Lifecycle};
+
+    use super::Rkisp;
+
+    fn check<'a>(
+        entries: &'a [(&'a str, ConfigValue<'a>)],
+    ) -> core::result::Result<(), ConfigError<'a>> {
+        <Rkisp as Lifecycle>::check_config(&Config::new(entries))
+    }
+
+    #[test]
+    fn a_full_config_passes_and_unknown_or_misspelled_keys_are_named() {
+        let full = [
+            ("device", ConfigValue::Str("rkisp-vir0")),
+            ("generation", ConfigValue::Str("isp30")),
+            ("buffers", ConfigValue::Int(4)),
+            ("source", ConfigValue::Str("rkcif-mipi")),
+        ];
+        assert!(check(&full).is_ok());
+        assert_eq!(
+            check(&[("bogus", ConfigValue::Int(1))]).unwrap_err().key,
+            "bogus"
+        );
+        let near = check(&[("generaton", ConfigValue::Str("isp30"))]).unwrap_err();
+        assert_eq!(near.suggestion, Some("generation"));
+    }
+
+    #[test]
+    fn a_wrong_kind_a_missing_generation_and_the_value_checks_are_refused() {
+        assert_eq!(
+            check(&[("buffers", ConfigValue::Str("4"))])
+                .unwrap_err()
+                .key,
+            "buffers"
+        );
+        let missing = check(&[]).unwrap_err();
+        assert_eq!((missing.key, missing.reason), ("generation", "is required"));
+        let unknown = [("generation", ConfigValue::Str("isp99"))];
+        assert_eq!(check(&unknown).unwrap_err().key, "generation");
+        // The buffer edges pass; one step outside does not.
+        let at = |n| {
+            [
+                ("generation", ConfigValue::Str("isp30")),
+                ("buffers", ConfigValue::Int(n)),
+            ]
+        };
+        assert!(check(&at(2)).is_ok());
+        assert!(check(&at(32)).is_ok());
+        assert_eq!(check(&at(1)).unwrap_err().key, "buffers");
+        assert_eq!(check(&at(33)).unwrap_err().key, "buffers");
+        let empty = [
+            ("generation", ConfigValue::Str("isp30")),
+            ("source", ConfigValue::Str("")),
+        ];
+        assert_eq!(check(&empty).unwrap_err().key, "source");
     }
 }
