@@ -24,9 +24,12 @@
 //! - a fact that comes is declared once, and one that goes is withdrawn once;
 //! - a value or a state that moves is published as it moves.
 //!
-//! Nothing else on the session is said again. When Orion goes away and comes back, the session
-//! is connected again and every topic, action and resource is said again: the client restores
-//! them, and the values and states are sent again.
+//! Nothing else on the session is said again. When Orion goes away and comes back, a new session
+//! says every topic, action and resource again, and the values and states are sent again. The
+//! bridge opens that session itself rather than with `Orion::reconnect`: that restores resource
+//! records before their actions, so a run in between finds a resource with no action (NotFound).
+//! Here each device's actions are registered before its resource is published, so a resource is
+//! never listed without its actions.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
@@ -64,6 +67,9 @@ const STATUS_MAX: usize = 256;
 const IDLE: Duration = Duration::from_secs(1);
 /// How soon a resource state Orion refused is written again.
 const RETRY: Duration = Duration::from_secs(1);
+/// How soon a session is opened again after the comm core went away, before the retry delays of
+/// a session Orion refuses. The comm core is usually back within this.
+const RECONNECT: Duration = Duration::from_millis(100);
 
 /// The state a status topic says when its device is withdrawn.
 const GONE: &str = "gone";
@@ -125,8 +131,10 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             End::Stopped => session.withdraw("lemnos-orion stopped"),
             End::Lost(message) => {
                 log(&message);
+                // Dropped first: the next session says the same names, which the old one holds
+                // until it is gone.
                 drop(session);
-                wait_bell(shared, backoff.next_delay());
+                wait_bell(shared, RECONNECT);
             }
         }
     }
@@ -281,11 +289,10 @@ impl Session {
                 })
                 .and_then(|()| self.retry_states());
             if let Err(error) = turned {
-                if !error.is_lost() {
-                    log(&format!("Orion refused: {error}"));
-                } else if let Err(end) = self.reconnect(shared, &error) {
-                    return end;
+                if error.is_lost() {
+                    return End::Lost(format!("Orion lost ({error}); connecting again"));
                 }
+                log(&format!("Orion refused: {error}"));
                 continue;
             }
             self.wait(shared);
@@ -345,6 +352,9 @@ impl Session {
                 } => (call, name, target, args, caller),
                 // A long job is cancelled; a plain call cannot be stopped part-way, so it ends as
                 // the call does.
+                // ORION-R2: `Request::Cancel` gains the reason Orion's Cancel carries; it is passed
+                // into `Message::Cancel` (calls.rs), which closes a caller's connection only for
+                // reason 2 (the caller's session ended).
                 Request::Cancel { call } => {
                     if self.pending.contains(&call) {
                         let _ = jobs.send(Message::Cancel {
@@ -565,34 +575,6 @@ impl Session {
         Ok(())
     }
 
-    /// Connects again after the comm core went away. The client says every topic, action and
-    /// resource again; the values and states are sent again here. Gives up when the comm core
-    /// now refuses what it took before.
-    fn reconnect(&mut self, shared: &Shared, error: &Error) -> Result<(), End> {
-        log(&format!("Orion lost ({error}); connecting again"));
-        self.orion
-            .reconnect(|_| !shared.stopping())
-            .map_err(|error| End::Lost(format!("Orion did not come back: {error}")))?;
-        let node = self.orion.welcomed().node.as_str().to_owned();
-        if node != self.node {
-            return Err(End::Lost(format!(
-                "Orion came back as node {node:?}, not {:?}",
-                self.node
-            )));
-        }
-        // What was asked of this service before belongs to the session that is gone.
-        self.pending.clear();
-        self.number += 1;
-        shared.with(|mirror| mirror.mark_all());
-        // The comm core has none of the facts' last values: each is said again.
-        for fact in &mut self.facts {
-            fact.value = None;
-        }
-        shared.with(|mirror| mirror.mark_hello());
-        log(&format!("connected to Orion node {node} again"));
-        Ok(())
-    }
-
     /// Waits for the comm core, a wake-up from the other threads, a ping falling due or a
     /// refused state's retry, whichever is first. The wait is never longer than a quarter of the
     /// idle time, so a comm core that stops answering is found within it: the client then gives
@@ -691,7 +673,8 @@ fn fact_refused(error: Error) -> Refused {
     }
 }
 
-/// Describes one device to Orion: its resource, its topics and its actions.
+/// Describes one device to Orion: its topics and actions, then its resource, which is published
+/// last so that it is never listed before its actions are there (see the module's notes).
 fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Verb>), Refused> {
     let name = format!("{RESOURCE_PREFIX}{}", spec.name);
     let mut describing = provider

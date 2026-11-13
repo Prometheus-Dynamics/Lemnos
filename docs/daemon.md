@@ -360,11 +360,13 @@ nothing. Orion's `orion.time` says how far each board's wall clock is from its m
 whoever wants a wall time.
 
 **Callers.** Each Orion caller has a lemnosd connection of its own, so a driver that tracks callers
-(`TRACKS_CALLERS`) sees each one as its own `CallerId`. Orion does not say when a caller goes away;
-it cancels the runs of one that goes away. When a caller's last long job is cancelled, the bridge
-closes its connection, and lemnosd tells the drivers that caller is gone (`caller_gone`). An explicit
-cancel from a caller that is still there is read the same way, so the driver is told the caller is
-gone; the caller's next run is on a new connection.
+(`TRACKS_CALLERS`) sees each one as its own `CallerId`. A cancel cancels its run and nothing else:
+the job is cancelled on lemnosd, and the caller's connection and the driver's holds for it stay.
+The bridge does not send `caller_gone` yet. At Orion's pinned revision a cancel does not say why it
+was sent, and the same cancel comes when the caller stops the run, when the caller's session ends,
+when a deadline passes and when the node stops, so a caller that is still there cannot be told from
+one that is gone. When Orion says why (its reason 2, the caller's session ended), the bridge will
+close the caller's connection, and lemnosd will tell the drivers that caller is gone.
 
 **Long jobs.** `.call` runs a method that the description marks as a long job, and the run is
 that job:

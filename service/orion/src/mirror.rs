@@ -216,11 +216,6 @@ impl Mirror {
         )
     }
 
-    /// The facts are due again: a new Orion session, or a reconnect, has none of them.
-    pub fn mark_hello(&mut self) {
-        self.hello_dirty = true;
-    }
-
     /// Rebuilds the `hello.*` document from the identity device's facts and the running devices'
     /// contract ids. Marks it due when it has changed.
     fn rebuild_hello(&mut self) {
@@ -573,15 +568,6 @@ mod tests {
             Some(vec![fact("family", "beta"), fact("offers", "imu")])
         );
         mirror.set_identity(None);
-        assert_eq!(take(&mut mirror).hello, Some(vec![fact("offers", "imu")]));
-    }
-
-    #[test]
-    fn mark_hello_makes_the_facts_due_again() {
-        let mut mirror = Mirror::new();
-        mirror.set_devices(vec![spec(0, "a", &[])], None);
-        let _ = take(&mut mirror);
-        mirror.mark_hello();
         assert_eq!(take(&mut mirror).hello, Some(vec![fact("offers", "imu")]));
     }
 }

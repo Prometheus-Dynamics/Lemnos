@@ -123,6 +123,8 @@ fn offer(config: &Config, link: &Link, pair: &UsbEndpoints) -> Result<Comm, Stri
         endpoint_in: 0,
         endpoint_out: 0,
     };
+    // ORION-R2: at R2 the descriptors are `[OUT, IN]` plus an optional END, in that order (END is
+    // R1f's third descriptor, which the bridge keeps); `LinkOffer` takes the same list then.
     let seq = comm
         .send_with_fds(&offer, &[pair.out.as_fd(), pair.input.as_fd()])
         .map_err(|error| format!("offering the endpoints: {error}"))?;
