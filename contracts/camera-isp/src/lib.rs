@@ -38,18 +38,23 @@
 //! 2. The driver reads config buffer `n` once, when it takes the job, copies it into its own memory,
 //!    checks the copy, and programs the block from the copy. It never reads the buffer again and
 //!    never keeps a pointer into it. A write to `n` after the take changes nothing the job runs.
-//! 3. There is no separate return message. The driver holds the config buffers from `start` to
-//!    `stop`. A config buffer is busy from the moment its job is accepted until the job completes,
-//!    and the consumer may write it and post another job naming it once that job has completed.
+//! 3. A config buffer belongs to the driver from the moment a job naming it is accepted until that job
+//!    completes (a frame, a drop or an error is published for it), or until `stop`, whichever is
+//!    first. After that the consumer may rewrite it and post another job naming it. `stop` completes
+//!    or drops every outstanding accepted job and returns every config buffer, so after `stop` returns
+//!    the consumer may rewrite any of them. The completion (or `stop`) is the return: there is no
+//!    message of the driver's own for it.
 //! 4. A job is accepted when the driver takes it off the config stream's ring. When it is accepted,
 //!    a job that names a config buffer an earlier accepted job still holds is dropped and counted in
 //!    [`Counters::dropped`], as for every other buffer, and nothing is published for it. A driver
 //!    that accepts one job at a time, waiting for each to complete before it takes the next, never
 //!    drops a job this way: its jobs wait on the ring instead. Either way the earlier job is not
 //!    disturbed.
-//! 5. A write that overlaps the take (rule 1 broken) is not refused: the copy is checked like any
-//!    other, so the job runs with what the driver copied or is dropped if the copy fails a check.
-//!    It never runs unchecked, and the consumer learns what ran from its completion only.
+//! 5. A write to a config buffer that a job holds cannot change that job. The driver takes its copy at
+//!    accept, before it posts anything, and programs the block from the copy only. A write that
+//!    overlaps the take (rule 1 broken) is not refused: the copy is checked like any other, so the job
+//!    runs with what the driver copied or is dropped if the copy fails a check. It never runs unchecked,
+//!    and the consumer learns what ran from its completion only.
 
 #![no_std]
 

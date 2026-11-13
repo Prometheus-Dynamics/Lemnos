@@ -574,40 +574,31 @@ fn checks(
     ));
     ok &= got.is_none() && after.dropped == before.dropped + 1 && next == Some(reference);
 
-    // Rewritten right after its job was posted. The driver reads it once, when it takes the job,
-    // which the client can't see: before the rewrite gives the first configuration's frame, after
-    // it the zeroed one's (or a drop, if the driver refuses it). Either way nothing breaks.
-    cfg.write(1, 0, good)
-        .map_err(|e| format!("config write: {e:?}"))?;
+    // Rewritten after its job completed (contract rule 3): the next job on that buffer runs the
+    // rewritten configuration, and rewriting it back gives the reference again. The client never
+    // writes a configuration while a job holds it (rule 1); the driver's copy at accept (rule 5)
+    // is what the tests of each driver pin.
     let mut zeroed = good.to_vec();
     zeroed.iter_mut().skip(112).for_each(|b| *b = 0);
-    let before = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
-    post_on(cfg, *identity, 1, 0, 0)?;
-    *identity += 1;
+    cfg.write(1, 0, good)
+        .map_err(|e| format!("config write: {e:?}"))?;
+    let first = one(cfg, output, identity, 1, 0, Duration::from_secs(2))?;
     cfg.write(1, 0, &zeroed)
         .map_err(|e| format!("config write: {e:?}"))?;
-    let frame = output
-        .next_frame(wait)
-        .map_err(|e| format!("output0: {e:?}"))?;
-    let changed_after = match frame {
-        Some(f) => {
-            let h = hash(output.bytes(&f));
-            output.release(f).map_err(|e| format!("release: {e:?}"))?;
-            Some(h)
-        }
-        None => None,
-    };
-    let after = isp.counters().map_err(|s| format!("counters: {s:?}"))?;
-    let next = one(cfg, output, identity, 0, 0, Duration::from_secs(2))?;
+    let zeroed_frame = one(cfg, output, identity, 1, 0, Duration::from_secs(2))?;
+    cfg.write(1, 0, good)
+        .map_err(|e| format!("config write: {e:?}"))?;
+    let back = one(cfg, output, identity, 1, 0, Duration::from_secs(2))?;
     out(format_args!(
-        "configuration zeroed right after its job was posted: a frame {}, equal to the reference: {}; dropped +{}, errors +{}; the next job's frame equal to the reference: {}",
-        changed_after.is_some(),
-        changed_after == Some(reference),
-        after.dropped - before.dropped,
-        after.errors - before.errors,
-        next == Some(reference)
+        "configuration rewritten after its job completed: first job equal to the reference: {}; zeroed one a frame: {}, different from the reference: {}; rewritten back equal to the reference: {}",
+        first == Some(reference),
+        zeroed_frame.is_some(),
+        zeroed_frame.is_some() && zeroed_frame != Some(reference),
+        back == Some(reference)
     ));
-    ok &= after.errors == before.errors && next == Some(reference);
+    ok &= first == Some(reference)
+        && zeroed_frame.is_some_and(|h| h != reference)
+        && back == Some(reference);
     cfg.write(1, 0, good)
         .map_err(|e| format!("config write: {e:?}"))?;
 

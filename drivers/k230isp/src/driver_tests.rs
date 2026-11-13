@@ -709,6 +709,43 @@ fn a_config_buffer_rewritten_after_its_job_completes_is_read_by_the_next_job() {
     );
 }
 
+#[test]
+fn stop_gives_every_config_buffer_back_and_a_restart_runs_each_with_its_new_contents() {
+    let streams = Streams::new();
+    let (mut d, b) = running(&streams);
+    streams.config.fill(0, &list(&[(AE_V_SIZE, 2)]));
+    post(&streams.config, &job(1, 0));
+    d.tick(STRIDE);
+    // Job 1 is with the block when stop comes: it ends as an error and publishes nothing.
+    d.stop().unwrap();
+    assert_eq!(d.counters().unwrap().errors, 1);
+    assert!(streams.statistics.take_frame().is_none());
+    // Every config buffer is the consumer's again: each is rewritten with contents no job ran.
+    for buffer in 0..4 {
+        streams
+            .config
+            .fill(buffer, &list(&[(AE_V_SIZE, 10 + buffer)]));
+    }
+    b.with(|b| b.writes.clear());
+    d.start().unwrap();
+    d.tick(2 * STRIDE);
+    let mut now = 3 * STRIDE;
+    let mut expect = Vec::new();
+    for (identity, buffer) in [(2u64, 0u32), (3, 1), (4, 2), (5, 3)] {
+        post(&streams.config, &job(identity, buffer));
+        d.tick(now);
+        b.frame_out(now);
+        b.frame_out(now + 1);
+        d.tick(now + 2);
+        now += 3 * STRIDE;
+        expect.extend([(AE_V_SIZE, 10 + buffer), (ISP_CTRL, CTRL_GEN_CFG_UPD)]);
+        let frame = streams.statistics.take_frame().unwrap();
+        assert_eq!(frame.identity, identity);
+    }
+    assert_eq!(b.writes(), expect);
+    assert_eq!(d.counters().unwrap().dropped, 0);
+}
+
 // ---- Failures.
 
 #[test]

@@ -28,11 +28,9 @@ bars frame.
 4. Rewrite after completion. Write a different configuration into a buffer after its job's frame has
    been released, post a job naming it. Expect the new configuration's frame.
 
-`lemnos-isp-proof --checks 1` has a check that rewrites a configuration right after its job is
-posted and expects the first configuration's frame. Under the contract that is a write before the
-job completes, which rule 1 forbids; the frame is the first configuration's only because the driver
-takes the job first. Record here whether it still passes; a failure is not a driver fault, and the
-check should move to after completion.
+`lemnos-isp-proof --checks 1` now rewrites a configuration only after its job has completed, and
+checks that the next job runs the rewritten one (contract rule 3). The earlier check wrote while the
+job was in flight, which rule 1 forbids; that check is removed. Record here that the new check passes.
 
 ## Results
 

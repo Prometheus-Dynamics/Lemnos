@@ -982,6 +982,10 @@ fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next_job() {
     run_once(&mut be, 1);
     hw.finish(0, 1, 4096);
     run_once(&mut be, 2);
+    // The consumer reads the completion and gives the output back, then rewrites config 1.
+    let frame = streams.output0.take_frame().expect("job 1's frame");
+    assert_eq!(frame.identity, 1);
+    streams.output0.return_buffer(frame.buffer);
     let mut second = config();
     second.config.wbg.gain_r = 0x2222;
     streams.configure(&second);
@@ -991,4 +995,72 @@ fn a_config_buffer_rewritten_after_its_job_completed_is_used_by_the_next_job() {
     assert_eq!(posted.len(), 2);
     assert_eq!(&posted[0].1[..], &bytes_of(&first)[..]);
     assert_eq!(&posted[1].1[..], &bytes_of(&second)[..]);
+}
+
+#[test]
+fn a_write_to_a_config_buffer_an_accepted_job_holds_does_not_change_that_job() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    let mut first = config();
+    first.config.wbg.gain_r = 0x1111;
+    streams.configure(&first);
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&job(1, 2, 3));
+    run_once(&mut be, 1);
+    assert_eq!(hw.with(|m| m.posted.len()), 1);
+    let mut second = config();
+    second.config.wbg.gain_r = 0x2222;
+    streams.configure(&second);
+    assert_eq!(
+        &streams.config.contents(1)[..CONFIG_BYTES],
+        &bytes_of(&second)[..],
+        "the consumer's write landed while the job holds the buffer"
+    );
+    assert_eq!(
+        &hw.with(|m| m.posted[0].1.clone())[..],
+        &bytes_of(&first)[..],
+        "the posted configuration is the one present at accept"
+    );
+}
+
+#[test]
+fn stop_gives_every_config_buffer_back_and_each_one_runs_its_rewrite_after_restart() {
+    let streams = Streams::new();
+    let (mut be, hw) = setup(&streams);
+    let mut first = config();
+    first.config.wbg.gain_r = 0x1111;
+    for buffer in 0..4 {
+        streams.config.fill(buffer, &bytes_of(&first));
+    }
+    CameraIsp::start(&mut be).unwrap();
+    streams.post(&job(1, 2, 3));
+    run_once(&mut be, 1);
+    assert_eq!(hw.with(|m| m.posted.len()), 1, "job 1 is outstanding");
+    CameraIsp::stop(&mut be).unwrap();
+    assert!(
+        streams.output0.take_frame().is_none(),
+        "stop publishes nothing for the outstanding job"
+    );
+    assert_eq!(CameraIsp::counters(&mut be).unwrap().jobs, 0);
+
+    let mut second = config();
+    second.config.wbg.gain_r = 0x2222;
+    for buffer in 0..4 {
+        streams.config.fill(buffer, &bytes_of(&second));
+    }
+    CameraIsp::start(&mut be).unwrap();
+    for c in 0..4u32 {
+        streams.post(&job_on(10 + u64::from(c), c, c, c));
+    }
+    run_once(&mut be, 2);
+    let posted = hw.with(|m| m.posted.clone());
+    assert_eq!(
+        posted.len(),
+        5,
+        "one job per config buffer after the restart"
+    );
+    for (_, sent) in &posted[1..] {
+        assert_eq!(&sent[..], &bytes_of(&second)[..]);
+    }
+    assert_eq!(dropped(&mut be), 0);
 }
