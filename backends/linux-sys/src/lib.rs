@@ -38,6 +38,7 @@ pub mod statfs;
 pub mod time;
 pub mod ubi;
 pub mod udmabuf;
+pub mod unix;
 pub mod usbfs;
 pub mod user;
 pub mod v4l2;

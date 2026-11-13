@@ -1465,6 +1465,29 @@ impl Inner {
         instance.tick(now_ns)
     }
 
+    /// Whether a device comes and goes: an `[[each]]` entry made it, or it sits on a bus the
+    /// backend says comes and goes, or on a device that does (`uses`), to `depth` levels down.
+    fn hotplug_of(&self, slot: &Slot, depth: u32) -> bool {
+        if slot.made.is_some() {
+            return true;
+        }
+        if slot
+            .spec
+            .bus
+            .as_ref()
+            .is_some_and(|bus| lock(&self.backend).hotplug(bus))
+        {
+            return true;
+        }
+        depth > 0
+            && slot
+                .spec
+                .uses
+                .values()
+                .filter_map(|id| self.slot_by_id(id))
+                .any(|child| self.hotplug_of(&child, depth - 1))
+    }
+
     fn device_health(&self, slot: &Slot, depth: u32) -> Health {
         self.health_of(slot, depth).0
     }
@@ -1561,13 +1584,14 @@ impl BoardView for BoardRead<'_> {
             };
             let bound = matches!(*lock(&slot.state), DeviceState::Running);
             let (health, _) = self.inner.health_of(&slot, MAX_DEPTH);
+            let origin = if self.inner.hotplug_of(&slot, MAX_DEPTH) {
+                Origin::Hotplug
+            } else {
+                Origin::BuiltIn
+            };
             f(BoardDevice {
                 id: &slot.spec.id,
-                origin: if slot.made.is_some() {
-                    Origin::Hotplug
-                } else {
-                    Origin::BuiltIn
-                },
+                origin,
                 bound,
                 health,
             });

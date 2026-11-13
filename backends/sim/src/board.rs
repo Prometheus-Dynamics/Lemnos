@@ -245,6 +245,11 @@ impl Provider for SimBoard {
         self.with(|s| s.parts.contains_key(found) && fits(s, name, found))
     }
 
+    /// As the Linux backend: a USB port comes and goes with what is plugged into it.
+    fn hotplug(&self, bus: &str) -> bool {
+        bus.starts_with("usb:")
+    }
+
     fn device(&mut self, _need: &str, _tag: Tag) -> Result<LocalCaller> {
         // Devices are the host's to wire. A board only has hardware.
         Err(Status::NOT_SUPPORTED)

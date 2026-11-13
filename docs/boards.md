@@ -88,7 +88,7 @@ optional and keeps its default when left out:
 | `confirm_deadline_s` | `600` | at least `confirm_uptime_s` | The time, from the daemon's start, by which every condition must hold |
 | `reboot_at_deadline` | `true` | `true`, `false` | At the deadline with a condition unmet: record why, and restart into the default. Ignored with `auto_confirm = false` |
 | `trial_attempts` | `3` | 1 to 3 | Boots in a row that may fail to reach a running daemon before a trial falls back. A boot that reaches the daemon gives its attempt back |
-| `health` | `[]` | a list of strings | Extra conditions for a trial to confirm. Each is `device:<id>` (that device's health is Ok), `file:<path>` (the file exists and was modified since this boot began) or `socket:<path>` (the Unix socket accepts a connection). A checked path must be absolute |
+| `health` | `[]` | a list of strings | Extra conditions for a trial to confirm. Each is `device:<id>` (that device's health is Ok), `file:<path>` (the file exists and was modified since this boot began) or `socket:<path>` (the Unix socket accepts a connection, checked without waiting: a full backlog is busy, and busy for 2 s is not good). A checked path must be absolute |
 
 `health` is an array of strings in the device's `config` (`health = ["device:x", "file:/run/y"]`).
 Only the built-in drivers see it; other arrays in a device's `config` are refused.
@@ -146,7 +146,7 @@ On Linux (`lemnosd` with no `--sim`):
 | `watchdog:NODE` | The hardware watchdog whose device-tree node is `NODE`, named in a device's `uses` as `watchdog = "watchdog:NODE"`. The stable form; the generator enables the node |
 | `watchdogN` | The hardware watchdog `/dev/watchdogN`, by its number. The number can change on reboot |
 | `ttyNAME` | A serial port, such as `ttyAMA0`. No built-in driver takes one yet; a package can |
-| `usb:BUS-PORT` | The USB device plugged into a port, such as `usb:1-1.4` |
+| `usb:BUS-PORT` | The USB device plugged into a port, such as `usb:1-1.4`. A port comes and goes with what is plugged in, so a device on it is hotplug to a driver that watches the board: absent is not failed |
 | `usb:VVVV:PPPP` | The USB device with this vendor and product, in hex. Refused when more than one fits |
 | `usb:class:CC`, `usb:class:CC:SS`, `usb:class:CC:SS:PP` | The USB device whose device descriptor or one of whose interfaces has this class, subclass and protocol, two hex digits each. A part left out fits any. Refused when more than one fits |
 | `udc:NAME` | This board as a USB device, through the controller of that name under `/sys/class/udc` |

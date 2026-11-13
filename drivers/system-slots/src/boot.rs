@@ -54,6 +54,33 @@ pub trait BootRecord: Send {
     }
 }
 
+/// The boot partition's copy of a trial's reason: `trial-reason`, beside the boot record. The
+/// driver writes it when the state directory can't hold the reason at a deadline restart, and
+/// reads it at the next start, when the state has no reason of its own. The loader never reads
+/// it, so it can't change what boots.
+pub const REASON_FILE: &str = "trial-reason";
+
+/// Keeps `reason` on the boot partition.
+pub fn write_reason(boot: &Path, reason: &str) -> io::Result<()> {
+    replace(
+        &boot.join(REASON_FILE),
+        format!("{}\n", reason.replace(['\n', '\r'], " ")).as_bytes(),
+    )
+}
+
+/// The reason kept on the boot partition, if there is one.
+pub fn read_reason(boot: &Path) -> Option<String> {
+    let text = fs::read_to_string(boot.join(REASON_FILE)).ok()?;
+    let reason = text.trim();
+    (!reason.is_empty()).then(|| reason.to_string())
+}
+
+/// Forgets the reason kept on the boot partition. Never fails: a stale copy is only ever read
+/// when the state has no reason, and it is cleared again at each resolution.
+pub fn clear_reason(boot: &Path) {
+    let _ = fs::remove_file(boot.join(REASON_FILE));
+}
+
 /// Runs the system's restart: `<systemctl> reboot`, with `--reboot-argument=0 tryboot` for a
 /// trial when the firmware takes one.
 #[derive(Debug, Clone)]
