@@ -1,5 +1,6 @@
 use crate::isp35::{__BindgenBitfieldUnit, isp39_rawaf_mean_aehgl};
 use crate::*;
+use crate::{ISP39_PARAMS_BYTES, isp39, module39};
 
 #[test]
 fn the_buffer_sizes_are_the_kernels() {
@@ -103,4 +104,40 @@ fn a_caller_writes_module_bits_at_the_kernels_offsets_through_bytes() {
     assert_eq!({ back.module_cfg_update }, 0);
     assert_eq!(params.as_bytes().len(), ISP35_PARAMS_BYTES);
     assert!(<isp35::isp35_isp_params_cfg as Bytes>::from_bytes(&[0; 10]).is_none());
+}
+
+#[test]
+fn the_module_tables_hold_the_bits_their_headers_name() {
+    use crate::{module, module30, module32, module35, module39};
+    // The counts are the headers' own define counts: ISP2X 44 (rk-isp2 and rk-isp21), ISP3X 38,
+    // ISP32 40, ISP35 46, ISP39 41. A bit missing from a table is a library bug.
+    assert_eq!(module::ALL.count_ones(), 44);
+    assert_eq!(module30::ALL.count_ones(), 38);
+    assert_eq!(module32::ALL.count_ones(), 40);
+    assert_eq!(module35::ALL.count_ones(), 46);
+    assert_eq!(module39::ALL.count_ones(), 41);
+    // Bits that exist only on some generations.
+    assert_eq!(module::FORCE, 1 << 63);
+    assert_eq!(module30::CAC, 1 << 42);
+    assert_eq!(module::ALL & module30::CAC, 0);
+    assert_eq!(module32::VSM, 1 << 45);
+    assert_eq!(module32::RTT_FST, 1 << 62);
+    assert_eq!(module39::LDCV, 1 << 45);
+    assert_eq!(module39::YUVME, 1 << 46);
+    assert_eq!(module39::RGBIR, 1 << 47);
+    assert_eq!(module30::ALL & module::SIHST, 0);
+}
+
+#[test]
+fn an_isp39_module_bit_lands_at_the_kernels_offset_through_bytes() {
+    use crate::bytes::Bytes;
+    use core::mem::offset_of;
+    let zero = [0u8; ISP39_PARAMS_BYTES];
+    let mut params = <isp39::isp39_isp_params_cfg as Bytes>::from_bytes(&zero).unwrap();
+    let mask = module39::RGBIR | module39::LDCV;
+    params.as_bytes_mut()[offset_of!(isp39::isp39_isp_params_cfg, module_ens)..][..8]
+        .copy_from_slice(&mask.to_le_bytes());
+    let back = <isp39::isp39_isp_params_cfg as Bytes>::from_bytes(params.as_bytes()).unwrap();
+    assert_eq!({ back.module_ens }, mask);
+    assert_eq!({ back.module_en_update }, 0);
 }

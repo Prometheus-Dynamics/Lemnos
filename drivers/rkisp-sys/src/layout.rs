@@ -137,4 +137,47 @@ const _: () = {
     assert!(offset_of!(rkisp35_stat_buffer, frame_id) == 14534);
     assert!(offset_of!(rkisp35_stat_buffer, params_id) == 14538);
 };
+// ISP32 (develop-6.1 rk-isp32-config.h, lite statistics included).
+const _: () = {
+    use crate::isp32::*;
+    assert!(size_of::<isp32_isp_params_cfg>() == 11145);
+    assert!(offset_of!(isp32_isp_params_cfg, module_en_update) == 0);
+    assert!(offset_of!(isp32_isp_params_cfg, module_ens) == 8);
+    assert!(offset_of!(isp32_isp_params_cfg, module_cfg_update) == 16);
+    assert!(offset_of!(isp32_isp_params_cfg, frame_id) == 24);
+    assert!(offset_of!(isp32_isp_params_cfg, meas) == 28);
+    assert!(offset_of!(isp32_isp_params_cfg, others) == 1966);
+    assert!(size_of::<isp32_isp_meas_cfg>() == 1938);
+    assert!(size_of::<isp32_isp_other_cfg>() == 9179);
+    assert!(size_of::<isp32_stat>() == 13024);
+    assert!(size_of::<rkisp32_isp_stat_buffer>() == 13036);
+    assert!(offset_of!(rkisp32_isp_stat_buffer, meas_type) == 13024);
+    assert!(offset_of!(rkisp32_isp_stat_buffer, frame_id) == 13028);
+    assert!(offset_of!(rkisp32_isp_stat_buffer, params_id) == 13032);
+    assert!(offset_of!(rkisp32_isp_stat_buffer, params) == 0);
+    assert!(size_of::<isp32_lite_stat>() == 3776);
+    assert!(size_of::<rkisp32_lite_stat_buffer>() == 3788);
+    assert!(offset_of!(rkisp32_lite_stat_buffer, meas_type) == 3776);
+    assert!(offset_of!(rkisp32_lite_stat_buffer, frame_id) == 3780);
+    assert!(offset_of!(rkisp32_lite_stat_buffer, params_id) == 3784);
+    assert!(offset_of!(rkisp32_lite_stat_buffer, params) == 0);
+};
+// ISP39 (develop-6.1 rk-isp39-config.h).
+const _: () = {
+    use crate::isp39::*;
+    assert!(size_of::<isp39_isp_params_cfg>() == 13827);
+    assert!(offset_of!(isp39_isp_params_cfg, module_en_update) == 0);
+    assert!(offset_of!(isp39_isp_params_cfg, module_ens) == 8);
+    assert!(offset_of!(isp39_isp_params_cfg, module_cfg_update) == 16);
+    assert!(offset_of!(isp39_isp_params_cfg, frame_id) == 24);
+    assert!(offset_of!(isp39_isp_params_cfg, meas) == 28);
+    assert!(offset_of!(isp39_isp_params_cfg, others) == 1591);
+    assert!(offset_of!(isp39_isp_params_cfg, exposure) == 13731);
+    assert!(size_of::<isp39_stat>() == 13550);
+    assert!(size_of::<rkisp39_stat_buffer>() == 13562);
+    assert!(offset_of!(rkisp39_stat_buffer, stat) == 0);
+    assert!(offset_of!(rkisp39_stat_buffer, meas_type) == 13550);
+    assert!(offset_of!(rkisp39_stat_buffer, frame_id) == 13554);
+    assert!(offset_of!(rkisp39_stat_buffer, params_id) == 13558);
+};
 // END GENERATED

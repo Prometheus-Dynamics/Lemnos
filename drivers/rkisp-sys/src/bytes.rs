@@ -34,6 +34,12 @@ pub trait Bytes: Copy {
 
 macro_rules! bytes_view {
     ($($t:ty),* $(,)?) => {$(
+        // Alignment 1 means the structure is packed and has no padding, given that every field is
+        // either such a structure or a fixed-width integer (`layout-check/field_types.py` checks
+        // the fields of every generated structure). A regenerated binding that dropped `packed`
+        // fails to compile here.
+        const _: () = assert!(core::mem::align_of::<$t>() == 1);
+
         impl Bytes for $t {
             const SIZE: usize = core::mem::size_of::<$t>();
 
@@ -65,6 +71,11 @@ bytes_view!(
     crate::isp21::rkisp_isp21_stat_buffer,
     crate::isp3x::isp3x_isp_params_cfg,
     crate::isp3x::rkisp3x_isp_stat_buffer,
+    crate::isp32::isp32_isp_params_cfg,
+    crate::isp32::rkisp32_isp_stat_buffer,
+    crate::isp32::rkisp32_lite_stat_buffer,
     crate::isp35::isp35_isp_params_cfg,
     crate::isp35::rkisp35_stat_buffer,
+    crate::isp39::isp39_isp_params_cfg,
+    crate::isp39::rkisp39_stat_buffer,
 );

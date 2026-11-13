@@ -4,7 +4,8 @@
 
 use crate::{
     Generation, LAYOUT_ISP21_PARAMS, LAYOUT_ISP21_STATISTICS, LAYOUT_ISP30_PARAMS,
-    LAYOUT_ISP35_PARAMS, LAYOUT_ISP35_STATISTICS,
+    LAYOUT_ISP32_LITE_STATISTICS, LAYOUT_ISP32_PARAMS, LAYOUT_ISP32_STATISTICS,
+    LAYOUT_ISP35_PARAMS, LAYOUT_ISP35_STATISTICS, LAYOUT_ISP39_PARAMS, LAYOUT_ISP39_STATISTICS,
 };
 
 #[test]
@@ -30,11 +31,16 @@ fn the_soc_names_its_isp() {
         root(&["luckfox,aura", "rockchip,rv1126b"]),
         Some(Generation::Isp35)
     );
-    // Other generations, and chips this crate doesn't know.
-    assert_eq!(root(&["luckfox,pico", "rockchip,rv1106"]), None);
-    assert_eq!(root(&["rockchip,rk3562"]), None);
+    // ISP32 (rv1106), ISP32 lite (rk3562) and ISP39 (rk3576), named by the vendor driver's match
+    // table (ISP_V32, ISP_V32_L, ISP_V39). ISP33 (rv1103b) has no top-level structure in its
+    // header, so it is not a generation here.
+    assert_eq!(
+        root(&["luckfox,pico", "rockchip,rv1106"]),
+        Some(Generation::Isp32)
+    );
+    assert_eq!(root(&["rockchip,rk3562"]), Some(Generation::Isp32Lite));
+    assert_eq!(root(&["rockchip,rk3576"]), Some(Generation::Isp39));
     assert_eq!(root(&["rockchip,rv1103b"]), None);
-    assert_eq!(root(&["rockchip,rk3576"]), None);
     assert_eq!(
         root(&["raspberrypi,5-compute-module", "brcm,bcm2712"]),
         None
@@ -46,7 +52,13 @@ fn a_board_names_its_generation() {
     assert_eq!(Generation::from_name("isp21"), Some(Generation::Isp21));
     assert_eq!(Generation::from_name("isp30"), Some(Generation::Isp30));
     assert_eq!(Generation::from_name("isp35"), Some(Generation::Isp35));
-    assert_eq!(Generation::from_name("isp32"), None);
+    assert_eq!(Generation::from_name("isp32"), Some(Generation::Isp32));
+    assert_eq!(
+        Generation::from_name("isp32lite"),
+        Some(Generation::Isp32Lite)
+    );
+    assert_eq!(Generation::from_name("isp39"), Some(Generation::Isp39));
+    assert_eq!(Generation::from_name("isp33"), None);
     assert_eq!(Generation::from_name(""), None);
 }
 
@@ -269,12 +281,24 @@ mod path {
 
 #[test]
 fn each_generation_names_its_module_bits() {
-    use crate::uapi::{module, module35};
-    // The ISP35 table is the ISP21/30 one plus its own modules: LSC is on both, the RGB-IR bit only
-    // on ISP35, and the force bit is the top bit on both.
+    use crate::uapi::{module, module30, module32, module35, module39};
+    // Each generation's table is the one its headers name: ISP21 has the ISP2X modules, ISP30 the
+    // ISP3X ones (CAC among them, the ISP2X-only modules not), ISP32 and ISP39 their own.
     assert_eq!(Generation::Isp21.module_bits(), module::ALL);
-    assert_eq!(Generation::Isp30.module_bits(), module::ALL);
+    assert_eq!(Generation::Isp30.module_bits(), module30::ALL);
+    assert_eq!(Generation::Isp32.module_bits(), module32::ALL);
+    assert_eq!(Generation::Isp32Lite.module_bits(), module32::ALL);
     assert_eq!(Generation::Isp35.module_bits(), module35::ALL);
+    assert_eq!(Generation::Isp39.module_bits(), module39::ALL);
+    // Bits only ISP21 has, and bits that arrived with ISP30, ISP32, ISP35 and ISP39.
+    assert!(Generation::Isp21.accepts_modules(module::SIHST | module::WDR));
+    assert!(!Generation::Isp30.accepts_modules(module::SIHST));
+    assert!(Generation::Isp30.accepts_modules(module30::CAC));
+    assert!(!Generation::Isp21.accepts_modules(module30::CAC));
+    assert!(Generation::Isp32.accepts_modules(module32::VSM | module32::RTT_FST));
+    assert!(!Generation::Isp35.accepts_modules(module32::VSM));
+    assert!(Generation::Isp39.accepts_modules(module39::RGBIR | module39::LDCV | module39::YUVME));
+    assert!(!Generation::Isp35.accepts_modules(module39::YUVME));
     assert!(Generation::Isp35.accepts_modules(module35::RGBIR | module35::LSC));
     assert!(!Generation::Isp30.accepts_modules(module35::RGBIR));
     assert!(!Generation::Isp21.accepts_modules(module35::HSV));
@@ -282,4 +306,45 @@ fn each_generation_names_its_module_bits() {
     assert!(Generation::Isp30.accepts_modules(module::LSC | module::CGC));
     assert!(!Generation::Isp30.accepts_modules(module::FORCE | (1 << 62)));
     assert!(Generation::Isp35.accepts_modules(module35::FORCE));
+}
+
+#[test]
+fn the_new_generations_name_their_layouts_and_sizes() {
+    use crate::uapi;
+    let p32 = Generation::Isp32.config_layout();
+    assert_eq!(
+        (p32.layout, p32.bytes),
+        (LAYOUT_ISP32_PARAMS, uapi::ISP32_PARAMS_BYTES as u32)
+    );
+    // ISP32 lite (ISP_V32_L) takes the same parameter structure and has its own statistics.
+    assert_eq!(Generation::Isp32Lite.config_layout(), p32);
+    assert_eq!(
+        Generation::Isp32Lite.statistics_layout().layout,
+        LAYOUT_ISP32_LITE_STATISTICS
+    );
+    assert_eq!(
+        Generation::Isp32Lite.statistics_layout().bytes,
+        uapi::ISP32_LITE_STATS_BYTES as u32
+    );
+    assert_eq!(
+        Generation::Isp32.statistics_layout().layout,
+        LAYOUT_ISP32_STATISTICS
+    );
+    assert_eq!(
+        Generation::Isp32.statistics_layout().bytes,
+        uapi::ISP32_STATS_BYTES as u32
+    );
+    let p39 = Generation::Isp39.config_layout();
+    assert_eq!(
+        (p39.layout, p39.bytes),
+        (LAYOUT_ISP39_PARAMS, uapi::ISP39_PARAMS_BYTES as u32)
+    );
+    assert_eq!(
+        Generation::Isp39.statistics_layout().layout,
+        LAYOUT_ISP39_STATISTICS
+    );
+    assert_eq!(
+        Generation::Isp39.statistics_layout().bytes,
+        uapi::ISP39_STATS_BYTES as u32
+    );
 }

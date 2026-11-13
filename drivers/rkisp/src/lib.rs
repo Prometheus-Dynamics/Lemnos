@@ -1,4 +1,5 @@
-//! The vendor kernel's `rkisp` ISP, in three generations (ISP21, ISP30 and ISP35), as
+//! The vendor kernel's `rkisp` ISP, in six generations (ISP21, ISP30, ISP32, ISP32 lite, ISP35 and
+//! ISP39; ISP33 has no parameter structure in its header and is not one), as
 //! `camera.isp/1`: [`Rkisp`] runs the vendor driver's stock nodes through `lemnos-v4l2`, carrying
 //! each job's parameters in and its statistics and images out. See the `driver` module's
 //! documentation (on [`Rkisp`]) for the streams, the job steps, the settings and the failure rule.
@@ -57,7 +58,9 @@ pub use hw::{Hardware, LinuxHardware, Settings};
 
 pub use generation::{
     BufferLayout, Generation, LAYOUT_ISP21_PARAMS, LAYOUT_ISP21_STATISTICS, LAYOUT_ISP30_PARAMS,
-    LAYOUT_ISP30_STATISTICS, LAYOUT_ISP35_PARAMS, LAYOUT_ISP35_STATISTICS, OUTPUTS,
+    LAYOUT_ISP30_STATISTICS, LAYOUT_ISP32_LITE_STATISTICS, LAYOUT_ISP32_PARAMS,
+    LAYOUT_ISP32_STATISTICS, LAYOUT_ISP35_PARAMS, LAYOUT_ISP35_STATISTICS, LAYOUT_ISP39_PARAMS,
+    LAYOUT_ISP39_STATISTICS, OUTPUTS,
 };
 /// The parameter and statistics layouts: the `-sys` crate, where the generated code lives.
 pub use lemnos_driver_rkisp_sys as uapi;
