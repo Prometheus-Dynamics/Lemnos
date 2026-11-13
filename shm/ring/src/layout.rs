@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 
 use crate::{Mem, MemMut, RingError};
 
-/// `ORIONRG1`, little-endian.
-pub(crate) const MAGIC: u64 = u64::from_le_bytes(*b"ORIONRG1");
+/// `SHMRING1`, little-endian.
+pub(crate) const MAGIC: u64 = u64::from_le_bytes(*b"SHMRING1");
 /// The layout this build reads and writes.
 pub(crate) const LAYOUT: u64 = 1;
 /// Words in the header.
@@ -242,7 +242,7 @@ mod tests {
     /// These numbers are the layout. Changing one needs a new layout number.
     #[test]
     fn the_layout_is_pinned() {
-        assert_eq!(MAGIC.to_le_bytes(), *b"ORIONRG1");
+        assert_eq!(MAGIC.to_le_bytes(), *b"SHMRING1");
         assert_eq!((LAYOUT, HEADER_WORDS, SLOT_HEADER_WORDS), (1, 16, 4));
         assert_eq!(
             (W_MAGIC, W_LAYOUT, W_SHAPE, W_SIZES, W_TOTAL),
@@ -278,6 +278,25 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    /// The magic this layout carried before the rename, as its 8 ASCII bytes. Rings written with
+    /// it must not attach.
+    const RETIRED_MAGIC: [u8; 8] = [0x4f, 0x52, 0x49, 0x4f, 0x4e, 0x52, 0x47, 0x31];
+
+    #[test]
+    fn a_ring_with_the_retired_magic_is_refused() {
+        let mem = Heap::new(4096);
+        format(&mem, &spec(3, 4, 100)).expect("format");
+        mem.store(
+            W_MAGIC,
+            u64::from_le_bytes(RETIRED_MAGIC),
+            Ordering::Relaxed,
+        );
+        assert!(matches!(
+            Geometry::read(&mem),
+            Err(RingError::Malformed("wrong magic"))
+        ));
     }
 
     #[test]

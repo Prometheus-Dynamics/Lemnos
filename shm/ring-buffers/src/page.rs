@@ -3,7 +3,7 @@
 //!
 //! | Word | Holds |
 //! | --- | --- |
-//! | 0 | Magic: `ORIONPL1` |
+//! | 0 | Magic: `SHMPOOL1` |
 //! | 1 | Generation (low 32 bits), buffers (high 32 bits) |
 //! | 2 to 7 | Reserved, zero |
 //! | 8 | Tickets: one word per buffer, `uses << 1 | taken back` |
@@ -20,7 +20,7 @@ use shm_ring::{Mem, MemMut, RingError};
 
 use crate::{BufferIndex, MAX_BUFFERS, MAX_READERS};
 
-const MAGIC: u64 = u64::from_le_bytes(*b"ORIONPL1");
+const MAGIC: u64 = u64::from_le_bytes(*b"SHMPOOL1");
 const W_MAGIC: usize = 0;
 const W_SHAPE: usize = 1;
 const TICKETS_AT: usize = 8;
@@ -144,4 +144,29 @@ pub fn is_cut_off(mem: &impl Mem, buffers: u32, slot: u32) -> bool {
             TICKETS_AT + buffers as usize + slot as usize,
             Ordering::Acquire,
         ) != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shm_ring::Heap;
+
+    /// The magic this page carried before the rename, as its 8 ASCII bytes.
+    const RETIRED_MAGIC: [u8; 8] = [0x4f, 0x52, 0x49, 0x4f, 0x4e, 0x50, 0x4c, 0x31];
+
+    #[test]
+    fn a_pool_page_with_the_retired_magic_is_refused() {
+        let mem = Heap::new(bytes(4) / 8);
+        format(&mem, 7, 4).expect("format");
+        assert_eq!(read(&mem).expect("read"), (7, 4));
+        mem.store(
+            W_MAGIC,
+            u64::from_le_bytes(RETIRED_MAGIC),
+            Ordering::Release,
+        );
+        assert!(matches!(
+            read(&mem),
+            Err(RingError::Malformed("not a pool page"))
+        ));
+    }
 }
