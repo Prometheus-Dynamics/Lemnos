@@ -188,6 +188,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`U2c.md`](../testing/board-runs/U2c.md) | Not run yet: `sunxi-vin` selects its input before the format, and the input's name and kind via `VIDIOC_ENUMINPUT` |
 | [`E13.md`](../testing/board-runs/E13.md) | `isp600`: request numbers, statistics size, regions, an address refused |
 | [`U3.md`](../testing/board-runs/U3.md) | `isp600` tuning encodings: channel black level and bit depths, module enables, temporal denoise record, the extent words refused |
+| [`U4.md`](../testing/board-runs/U4.md) | `isp600` tuning: the default word of the record enable's register kept by its setter, the channel expand words, the table and statistics places from the vendor library; untested on board |
 | [`E39.md`](../testing/board-runs/E39.md) | Capture straight into a stream's dma-bufs, and whether the vendor capture drivers take them at all |
 | [`H5a.md`](../testing/board-runs/H5a.md) | `rkcif`'s 16-bit word layout through the vendor memory-mode request, a frame in planes straight into a stream, capture on standby |
 | [`E11.md`](../testing/board-runs/E11.md) | `k230isp`: the register window, the request numbers, refusals, statistics |

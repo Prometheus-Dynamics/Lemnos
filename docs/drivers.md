@@ -94,33 +94,39 @@ python3 scripts/generate-builtins.py --check
 
 The ISP600 is `isp600` (`camera.isp/1`, `isp.isp600/1`), with its library in `lemnos-driver-isp600`.
 Its load image is the caller's: the library encodes only the blocks below whose register encodings a
-licensed public source defines (`drivers/isp600/src/tuning.rs`), and refuses the words that name
-memory or set how far the block reads or writes. Nothing here has run on a board (`testing/board-runs/U3.md`).
+public source defines (`drivers/isp600/src/tuning.rs`), and refuses the words that name memory or set
+how far the block reads or writes. Nothing here has run on a board (`testing/board-runs/U3.md`,
+`testing/board-runs/U4.md`).
 
-| Block | Encoding | Where it is defined, and licence |
+| Block | Encoding | Where it is defined |
 |---|---|---|
-| Channel black level and bit depths (`CH0` to `CH2` expand) | Encoded (`tuning::expand`). Black level's value is not | `isp600_reg.h` in `radxa/allwinner-bsp` at `2045a3ca`, GPL-2.0 |
+| Channel black level and bit depths (`CH0` to `CH2` expand) | Encoded (`tuning::expand`); the setter keeps the word's other bits. Black level's value is not | `isp600_reg.h` in `radxa/allwinner-bsp` at `2045a3ca`, GPL-2.0. The library's default word is 12 bits in and out (`library_tests`) |
 | Module enables | Encoded (`tuning::Image::set_modules`); reserved bits refused | `isp600_reg_cfg.h`, `isp600_reg.h`, same source, GPL-2.0 |
-| Temporal denoise record enable | Encoded (`tuning::temporal`). Its buffers and the lossless group are kernel-owned | `isp600_reg.h`, same source, GPL-2.0 |
+| Temporal denoise record enable | Encoded (`tuning::Image::set_temporal_record`), keeping the word's other bits, which the library's default sets (`library_tests`). Its buffers and the lossless group are kernel-owned | `isp600_reg.h`, same source, GPL-2.0 |
 | Temporal denoise lossless group (`D3D_LBC_CFG0` to `CFG5`) | Not settable: refused as an extent word | `isp600_reg_cfg.c`, `sunxi_isp.c`, same source: derived from frame width |
-| White balance gains, colour correction matrix, gamma, tone, lens shading, DRC, CEM, spatial denoise, sharpen | No encoding. Only table regions and their update bits are public | The kernel's `isp_tuning_priv.h` gives the caller's tuning structure's field types, not the registers. Register writers are in the vendor's user-space library (below), which has no licence |
-| Statistics windows (AE, AF, AWB, histogram, flicker) and every statistics decode | No encoding. The kernel copies the statistics as bytes (`vin_h3a.c`) | Same kernel source. Decodes are only in the vendor's user-space library |
+| White balance gains, colour correction matrix, gamma, tone, lens shading, DRC, CEM, spatial denoise, sharpen | No encoding. The table places and sizes are public; the register words are not | Places and sizes: both sources. The register writers are only in `libisp_algo.so` of the library (below), which is not read |
+| Statistics windows (AE, AF, AWB, histogram, flicker) and every statistics decode | No decode. The part sizes and offsets are public; the decode is not | Sizes and offsets: both sources. The decode (`isp_handle_stats`) is declared in the library but defined only in `libisp_algo.so`. The kernel copies the statistics as bytes (`vin_h3a.c`) |
 
-Sources checked for the rest, and why none of them is used:
+Sources checked:
 
 - `radxa/allwinner-bsp` at `2045a3ca2a01f088c0314dc924bda59d154e363e` (GPL-2.0 kernel). The ISP600 headers
   and `isp600_reg_cfg.c`, `sunxi_isp.c`, `vin_h3a.c`, `isp_tuning_priv.h`, `isp_comm.h`. Every usable fact above
-  comes from here. Its `drivers/vfe/lib/libisp_32` and `libisp_64` are binaries and are not read.
-- `radxa/allwinner-isp6xx` at `516fd7443810e0807b289829dbae1ae5a62e0cb5` (the `main` branch,
-  2026-11-05). It is the vendor user-space ISP library, with `isp6xx/libisp/isp_tuning/isp_tuning.c`,
-  `isp_manage/isp_manage.c`, `include/isp_module_cfg.h` and `include/isp_comm.h`, which hold the tuning
-  register writers and statistics decodes. The repository has no licence file at its root. Its only
-  `LICENSE` is the MIT licence of the bundled iniparser, under `isp6xx/libisp/iniparser/`, which does
-  not cover the library. Its files carry Allwinner copyright headers without a licence grant. So it is
-  not used. Its `out/` directories hold prebuilt `libAWIspApi` binaries, which are not read either.
-- `radxa/allwinner-isp6xx` `isp520/`, `isp522/` (other chips): the same repository's user-space for
-  other ISPs, not read for the ISP600's encodings.
+  comes from here, and the rest of the table from the library. Its `drivers/vfe/lib/libisp_32` and `libisp_64` are
+  binaries and are not read.
+- `radxa/allwinner-isp6xx` at `516fd7443810e0807b289829dbae1ae5a62e0cb5` (the `main` branch, 2026-11-05), the
+  vendor user-space ISP library. Used for these facts, for ISP 602, the version `scripts/mksetup.sh` gives the
+  A733: `isp6xx/libisp/include/isp_comm.h` (every load, table and statistics size and offset), and
+  `isp6xx/libisp/isp_manage/isp_manage.c` (`__isp_alloc_reg_tbl`, the default register words; the vectors are
+  in `drivers/isp600/src/library_tests.rs`). Its register writers, its statistics decode and `isp_map_addr`
+  are declared in its headers but defined only in prebuilt `out/isp602/.../libisp_algo.so`, which is not read.
+  Its `out/` directories hold other prebuilt binaries too, also not read.
+- `radxa/allwinner-isp6xx` `isp520/`, `isp522/` (other chips): not read for the ISP600.
 - `hutchx86/freewinner` (AGPL-3.0) and other clean-room projects: not vendor sources, so not used as facts.
+
+Licence: the library carries no open licence (its only `LICENSE` is the MIT licence of the bundled
+iniparser, under `isp6xx/libisp/iniparser/`, which does not cover the library). On 2026-11-13 the owner ruled
+that its facts may be transcribed here, as for every other layout library in the tree, with nothing copied
+and nothing linked or vendored. The owner will revisit this before anything is distributed.
 
 
 ## Image blocks

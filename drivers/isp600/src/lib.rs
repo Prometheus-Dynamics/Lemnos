@@ -18,7 +18,7 @@
 //! - [`tuning`]: the register encodings the vendor headers define for the blocks a caller may set
 //!   (channel black level and bit depths, module enables, temporal denoise's record enable),
 //!   written into a load image through [`tuning::Image`]. Every other tuning block is not here:
-//!   see "Tuning blocks without public encodings" below.
+//!   see "Tuning blocks without encodings" below.
 //! - [`job`]: the checks a caller's [`IspJob`](lemnos_contract_camera_isp::IspJob) passes before
 //!   any of its numbers is used, and the bounded copy of statistics and images out.
 //! - [`hw`]: the kernel's nodes as the driver sees them ([`Hardware`]), and the Linux
@@ -48,20 +48,20 @@
 //! - Images come from the kernel's own mapped buffers; each plane is bounded by the mapping and
 //!   all of them together by the stream buffer's agreed size.
 //!
-//! # Tuning blocks without public encodings
+//! # Tuning blocks without encodings
 //!
 //! The vendor kernel's headers define the module enables, the channel black level and bit depths,
 //! the temporal denoise's record enable and the lossless group, and nothing else of the tuning
-//! blocks: the register encodings the vendor's own user-space library writes for white balance,
-//! colour correction, gamma, tone mapping, lens shading, spatial denoise, sharpen, and the
-//! statistics windows and decodes (auto exposure, auto focus, auto white balance, flicker,
-//! histograms, tone and denoise statistics) are not in any licensed public source checked. The
-//! sources and what each holds are listed in `docs/drivers.md` (ISP600 section). The driver's
-//! tuning for those blocks is untested and unsupported: a caller that sets them must do so with
-//! the words the caller already has, and the block's output for them is not claimed.
+//! blocks. The vendor user-space library (`radxa/allwinner-isp6xx`, see `docs/drivers.md`) has
+//! the sizes and offsets of every table and statistics part, but the register words it writes for
+//! white balance, colour correction, gamma, tone mapping, lens shading, spatial denoise, sharpen
+//! and the statistics windows are computed in a prebuilt binary (`libisp_algo.so`), whose
+//! source is not in the repository. Its statistics decode is in the same binary. So none of these
+//! is encoded or decoded here, and the driver does not claim their output. A caller that sets them
+//! does so with the words it already has.
 //!
 //! Untested on board: written from the vendor driver's interface facts; the checks are
-//! `testing/board-runs/E13.md` and `testing/board-runs/U3.md`.
+//! `testing/board-runs/E13.md`, `testing/board-runs/U3.md` and `testing/board-runs/U4.md`.
 
 #![forbid(unsafe_code)]
 
@@ -78,6 +78,8 @@ pub mod tuning;
 mod driver_tests;
 #[cfg(all(test, feature = "device"))]
 mod job_tests;
+#[cfg(test)]
+mod library_tests;
 #[cfg(test)]
 mod tests;
 
