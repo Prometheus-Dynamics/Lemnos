@@ -26,6 +26,8 @@ pub enum VbusPlan {
         line: String,
         off: String,
         reason: String,
+        /// The base regulator the line switches, when the base says so: the overlay disables it.
+        regulator: Option<String>,
     },
     /// The board author asserts VBUS is not driven on this port: nothing to hold, and nothing checked
     /// on the line.
@@ -40,6 +42,9 @@ pub struct Output {
     pub overlay: String,
     /// Firmware configuration lines, one `gpio=N=op,dhN` per line the board gives a boot state.
     pub boot: String,
+    /// The U-Boot fragment: `gpio set`/`gpio clear` per held line, the same lines and levels as
+    /// `boot` and the overlay's hogs. Refused by name (`Err`) when the map gives no U-Boot naming.
+    pub uboot: Result<String, String>,
     /// The kernel module's configuration: `options lemnos` for the nodes the board gives to the
     /// module, and a `blacklist` for each stock module that binds one of them.
     pub modprobe: String,
@@ -78,26 +83,46 @@ pub fn generate(board: &BoardFile, map: &SocMap, drivers: &[Manifest]) -> Result
             map.soc
         ));
     }
-    let base = match board.board.base.as_deref() {
-        None => None,
-        Some(name) => Some((
-            name,
-            map.bases
-                .get(name)
-                .ok_or_else(|| format!("[board] base {name:?} is not in the {soc} map"))?,
-        )),
-    };
+    let base = base_of(board, map)?;
     let chosen = choose(board, map, base)?;
     check_lines(board, map)?;
     check_devices(board, map, &chosen, base.map(|(_, b)| b), drivers)?;
-    let overlay = overlay(board, &chosen, base, &board.lines, map.form)?;
-    let boot = boot(board, map, &chosen)?;
+    let holds = holds(board, &chosen)?;
+    let hogs = hogs(board, map, &chosen, &holds)?;
+    let overlay = overlay(board, &chosen, base, &board.lines, &holds, &hogs, map.form)?;
+    let boot = boot(board, &holds, map)?;
+    let uboot = uboot(board, &holds, map);
     let modprobe = modprobe(board, &chosen);
     Ok(Output {
         overlay,
         boot,
+        uboot,
         modprobe,
     })
+}
+
+/// The base tree the board names with `[board] base`, from the map.
+fn base_of<'a>(board: &BoardFile, map: &'a SocMap) -> Result<Option<(&'a str, &'a Base)>, String> {
+    match board.board.base.as_deref() {
+        None => Ok(None),
+        Some(name) => map
+            .bases
+            .get_key_value(name)
+            .map(|(name, base)| Some((name.as_str(), base)))
+            .ok_or_else(|| format!("[board] base {name:?} is not in the {} map", map.soc)),
+    }
+}
+
+/// The lines the overlay hogs, for the start check: a hogged line is read from the kernel's listing,
+/// a line the boot path alone holds is not. `Err` is the refusal `generate` would make.
+pub fn hogged_lines(board: &BoardFile, map: &SocMap) -> Result<Vec<String>, String> {
+    let base = base_of(board, map)?;
+    let chosen = choose(board, map, base)?;
+    let holds = holds(board, &chosen)?;
+    Ok(hogs(board, map, &chosen, &holds)?
+        .iter()
+        .map(|hog| hog.hold.line.clone())
+        .collect())
 }
 
 /// Each `[[hardware]]` entry, resolved against the map, and the GPIOs no two entries share.
@@ -329,6 +354,7 @@ pub fn vbus_plan(
             line: stated,
             off,
             reason,
+            regulator: Some(regulator.clone()),
         }),
         (Some(_), Some(statement @ Statement::Undriven { .. })) => Ok(statement.plan()),
         (Some(line), Some(Statement::Line { line: stated, .. })) => Err(format!(
@@ -370,7 +396,12 @@ enum Statement {
 impl Statement {
     fn plan(self) -> VbusPlan {
         match self {
-            Self::Line { line, off, reason } => VbusPlan::Hold { line, off, reason },
+            Self::Line { line, off, reason } => VbusPlan::Hold {
+                line,
+                off,
+                reason,
+                regulator: None,
+            },
             Self::Undriven { reason } => VbusPlan::Undriven { reason },
         }
     }
@@ -745,12 +776,61 @@ fn is_numbered_watchdog(name: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// The overlay: one fragment per enabled node and per disabled holder, each with its reason.
+/// The base-tree nodes the overlay disables, each with its reason, in the order it writes them: the
+/// holders of each line the board gives to Lemnos or holds at boot, then the VBUS regulator of each
+/// port held by its line. A disabled node owns nothing, so a line it held is free for a hog.
+fn disabled_nodes(
+    name: &str,
+    base: &crate::map::Base,
+    lines: &[LineSpec],
+    holds: &[Hold],
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen = BTreeSet::new();
+    let board_lines = lines.iter().map(|l| l.line.as_str());
+    let hold_lines = holds.iter().map(|h| h.line.as_str());
+    for line in board_lines.chain(hold_lines) {
+        if let Some(holders) = base.lines.get(line) {
+            for holder in &holders.holders {
+                if seen.insert(holder.clone()) {
+                    out.push((
+                        holder.clone(),
+                        format!(
+                            "disabled: base {name:?} {holder}: {}; the board gives {line} to Lemnos",
+                            holders.reason
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    for hold in holds {
+        if let Some(regulator) = &hold.regulator
+            && seen.insert(regulator.clone())
+        {
+            out.push((
+                regulator.clone(),
+                format!(
+                    "disabled: base {name:?} {regulator}: the VBUS regulator of {} is switched by {}; \
+                     its phy-supply is the stand-in, so nothing uses it and the hog holds {} at its off level",
+                    hold.vbus_of.as_deref().unwrap_or_default(),
+                    hold.line,
+                    hold.line
+                ),
+            ));
+        }
+    }
+    out
+}
+
+/// The overlay: one fragment per enabled node, per disabled base node and per hog, each with its reason.
 fn overlay(
     board: &BoardFile,
     chosen: &[Chosen<'_>],
     base: Option<(&str, &crate::map::Base)>,
     lines: &[LineSpec],
+    holds: &[Hold],
+    hogs: &[Hog<'_>],
     form: Form,
 ) -> Result<String, String> {
     let mut out = String::new();
@@ -897,30 +977,46 @@ fn overlay(
         }
     }
     if let Some((name, base)) = base {
-        let mut disabled = BTreeSet::new();
-        for line in lines {
-            if let Some(holders) = base.lines.get(&line.line) {
-                for holder in &holders.holders {
-                    if disabled.insert(holder.clone()) {
-                        push_fragment(
-                            form,
-                            &mut fragments,
-                            &mut fragment,
-                            holder,
-                            &format!(
-                                "disabled: base {name:?} {}: {}; the board gives {} to Lemnos",
-                                holder, holders.reason, line.line
-                            ),
-                            &["status = \"disabled\";".into()],
-                        );
-                    }
-                }
-            }
+        for (node, reason) in disabled_nodes(name, base, lines, holds) {
+            push_fragment(
+                form,
+                &mut fragments,
+                &mut fragment,
+                &node,
+                &reason,
+                &["status = \"disabled\";".into()],
+            );
         }
     } else if !lines.is_empty() {
         let _ = writeln!(
             fragments,
             "\t// No base named: lines the board gives to Lemnos are not checked against the base tree."
+        );
+    }
+    // The hogs: each held line's `gpio-hog`, a child of its chip's node. The kernel asserts the
+    // level when the chip registers (or, for an overlay added later, when the hog node is added).
+    for hog in hogs {
+        let level = if hog.hold.level == "high" {
+            "output-high"
+        } else {
+            "output-low"
+        };
+        let node = format!(
+            "lemnos-hog-{} {{ gpio-hog; gpios = <{} 0>; {level}; line-name = \"{}\"; }};",
+            hog.number,
+            hog.number,
+            line_name(&hog.label)
+        );
+        push_fragment(
+            form,
+            &mut fragments,
+            &mut fragment,
+            hog.chip_path,
+            &format!(
+                "gpio-hog: {} is {} from power-on, until the kernel takes the line",
+                hog.hold.line, hog.hold.level
+            ),
+            std::slice::from_ref(&node),
         );
     }
     out.push_str(&fragments);
@@ -969,19 +1065,187 @@ fn push_fragment(
     *n += 1;
 }
 
-/// The SoC's GPIO number of a stable GPIO name, which the boot fragment writes: the chip's first
-/// number plus the line.
-fn boot_number(name: &str, map: &SocMap) -> Result<u32, String> {
-    let (label, line) = gpio_line(name, map)?;
-    let chip = map
-        .chip_labelled(label)
-        .ok_or_else(|| format!("line {name:?}: no GPIO chip labelled {label:?}"))?;
-    Ok(chip.number_base + u32::from(line))
+/// A line the boot path holds from power-on: a `[[lines]]` entry with a `boot` state, or a device
+/// port's VBUS held at its off level. Each is one `gpio=` line of the boot fragment, one `gpio set`
+/// or `gpio clear` of the U-Boot fragment, and, where a hog is made, one `gpio-hog` of the overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hold {
+    /// The stable GPIO name, `gpio:LABEL:LINE`.
+    pub line: String,
+    /// `"low"` or `"high"`: the pin's level from power-on.
+    pub level: String,
+    /// What the board says about the line.
+    pub reason: String,
+    /// For a device port's VBUS: the port's key in the map. `None` for a board's `[[lines]]` entry.
+    pub vbus_of: Option<String>,
+    /// For a VBUS hold: the base regulator the line switches. The overlay disables it, since the
+    /// port's `phy-supply` is the stand-in and nothing else uses it; left enabled, the regulator
+    /// would own the line and the hog could not take it.
+    pub regulator: Option<String>,
 }
 
-/// The firmware configuration: the state each board line has from power-on until the kernel
-/// takes it. Every `[[lines]]` entry with a `boot` state is written, with its reason.
-fn boot(board: &BoardFile, map: &SocMap, chosen: &[Chosen<'_>]) -> Result<String, String> {
+/// Every line the boot path holds, in the order the boot fragment writes them: each `[[lines]]`
+/// boot state, then each device port's VBUS hold. A line held twice is refused by name.
+fn holds(board: &BoardFile, chosen: &[Chosen<'_>]) -> Result<Vec<Hold>, String> {
+    let mut out: Vec<Hold> = Vec::new();
+    for line in &board.lines {
+        let Some(level) = line.boot.as_deref() else {
+            continue;
+        };
+        if out.iter().any(|h| h.line == line.line) {
+            return Err(format!("[[lines]] {:?} has a boot state twice", line.line));
+        }
+        out.push(Hold {
+            line: line.line.clone(),
+            level: level.to_string(),
+            reason: line.reason.clone().unwrap_or_default(),
+            vbus_of: None,
+            regulator: None,
+        });
+    }
+    for entry in chosen {
+        let Some(VbusPlan::Hold {
+            line,
+            off,
+            reason,
+            regulator,
+        }) = &entry.vbus
+        else {
+            continue;
+        };
+        if out.iter().any(|h| &h.line == line) {
+            return Err(format!(
+                "[[hardware]] controller {:?}: VBUS line {line:?} is also held by another entry",
+                entry.key
+            ));
+        }
+        out.push(Hold {
+            line: line.clone(),
+            level: off.clone(),
+            reason: reason.clone(),
+            vbus_of: Some(entry.key.to_string()),
+            regulator: regulator.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// A `gpio-hog` the overlay makes for a hold: the chip node it is a child of, and the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hog<'a> {
+    pub hold: &'a Hold,
+    /// The chip's controller node in the base tree (the map's `path`).
+    pub chip_path: &'a str,
+    /// The line within the chip.
+    pub number: u16,
+    /// The hog's `line-name` before it is cleaned for the tree.
+    pub label: String,
+}
+
+/// The holds the kernel can own, as `gpio-hog`s. The rule, decided from the board file and the base:
+///
+/// - A line a device of the board names (in `bus` or `uses`) is used at run time: its driver requests
+///   it when it binds, and a hog would make that request fail. Such a board `[[lines]]` hold is not
+///   hogged: the boot path holds it until the driver takes it. A device port's VBUS line used by a
+///   device is refused by name, since no hog or boot path can then hold VBUS alone.
+/// - A line a chosen controller's pin set takes is the pad of that function (a PWM output, say) from
+///   the driver's probe on: no hog is made, and the boot path holds it until then. A device port's
+///   VBUS on such a pad is refused by name.
+/// - Otherwise the hold is hogged, when its chip has a node in the map (`path`); a chip without one is
+///   refused by name, since the overlay cannot hold the line.
+/// - A base node that holds a line the overlay holds is disabled by the overlay (see
+///   [`disabled_nodes`]), so it owns nothing and the hog takes the line. The line's owner is the
+///   driver that binds it, or the hog; a base node is never left to share it.
+fn hogs<'a>(
+    board: &BoardFile,
+    map: &'a SocMap,
+    chosen: &'a [Chosen<'_>],
+    holds: &'a [Hold],
+) -> Result<Vec<Hog<'a>>, String> {
+    let mut users: BTreeMap<&str, &str> = BTreeMap::new();
+    for device in board.devices.iter().filter(|d| !d.disabled) {
+        for name in device
+            .bus
+            .iter()
+            .map(String::as_str)
+            .chain(device.uses.values().map(String::as_str))
+        {
+            users.entry(name).or_insert(device.id.as_str());
+        }
+    }
+    let mut out = Vec::new();
+    for hold in holds {
+        let (label, number) = gpio_line(&hold.line, map)?;
+        let who = match &hold.vbus_of {
+            Some(key) => format!("[[hardware]] controller {key:?}: VBUS line {}", hold.line),
+            None => format!("[[lines]] {:?}", hold.line),
+        };
+        if let Some(device) = users.get(hold.line.as_str()) {
+            if hold.vbus_of.is_some() {
+                return Err(format!(
+                    "{who} is also used by device {device:?}: the VBUS hold is a gpio-hog, which a \
+                     device cannot share with its driver; remove the device's use of the line, or the \
+                     VBUS statement"
+                ));
+            }
+            continue;
+        }
+        let chip = map
+            .chip_labelled(label)
+            .ok_or_else(|| format!("{who}: the map has no GPIO chip labelled {label:?}"))?;
+        let gpio = chip.number_base + u32::from(number);
+        let taken = chosen.iter().find_map(|entry| {
+            let pins = entry.pins?;
+            u16::try_from(gpio)
+                .is_ok_and(|g| pins.gpios.contains(&g))
+                .then_some((entry.key, pins))
+        });
+        if let Some((key, pins)) = taken {
+            if hold.vbus_of.is_some() {
+                return Err(format!(
+                    "{who} is GPIO {gpio}, in the pin set {:?} of controller {key:?}; a hog would take \
+                     the pad from that pin set, and VBUS must be held by the overlay",
+                    pins.label
+                ));
+            }
+            // The pad is the pin set's function (a PWM output, say) from the driver's probe on: the
+            // boot path holds it before that, and no hog is made.
+            continue;
+        }
+        let chip_path = chip.path.as_deref().ok_or_else(|| {
+            format!(
+                "{who}: chip {label:?} has no `path` in the {} map, so the overlay cannot hog the \
+                 line; add the chip's node path to the map",
+                map.soc
+            )
+        })?;
+        out.push(Hog {
+            hold,
+            chip_path,
+            number,
+            label: match &hold.vbus_of {
+                Some(key) => format!("VBUS of {key}, off {}", hold.level),
+                None => hold.reason.clone(),
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// A hog's `line-name`: the text with the characters a device-tree string cannot carry dropped, its
+/// spaces collapsed, cut to 60 characters. The kernel keeps the name as the hog's consumer label.
+fn line_name(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
+        .collect();
+    let joined = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined.chars().take(60).collect()
+}
+
+/// The firmware configuration: the level each held line has from power-on until the kernel takes it.
+/// Every boot hold is written, with its reason. The Raspberry Pi firmware reads this file.
+fn boot(board: &BoardFile, holds: &[Hold], map: &SocMap) -> Result<String, String> {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -993,31 +1257,105 @@ fn boot(board: &BoardFile, map: &SocMap, chosen: &[Chosen<'_>]) -> Result<String
         "# before the kernel runs, so each line holds its level from power-on until the"
     );
     let _ = writeln!(out, "# kernel drives it. Syntax not checked on board.");
-    for line in &board.lines {
-        let Some(level) = line.boot.as_deref() else {
-            continue;
-        };
-        let state = if level == "high" { "dh" } else { "dl" };
-        let gpio = boot_number(&line.line, map)?;
-        let reason = line.reason.as_deref().unwrap_or_default();
-        let _ = writeln!(out, "# {}: boot {level}: {reason}", line.line);
-        let _ = writeln!(out, "gpio={gpio}=op,{state}");
-    }
-    // A device port's VBUS line, held at its off level from power-on: the board's statement.
-    for entry in chosen {
-        let Some(VbusPlan::Hold { line, off, reason }) = &entry.vbus else {
-            continue;
-        };
-        let gpio = boot_number(line, map)?;
-        let state = if off == "high" { "dh" } else { "dl" };
-        let _ = writeln!(
-            out,
-            "# {line}: VBUS of {} held {off} (off) from power-on: {reason}",
-            entry.key
-        );
+    for hold in holds {
+        let state = if hold.level == "high" { "dh" } else { "dl" };
+        let gpio = boot_number(&hold.line, map)?;
+        match &hold.vbus_of {
+            None => {
+                let _ = writeln!(out, "# {}: boot {}: {}", hold.line, hold.level, hold.reason);
+            }
+            Some(key) => {
+                let _ = writeln!(
+                    out,
+                    "# {}: VBUS of {key} held {} (off) from power-on: {}",
+                    hold.line, hold.level, hold.reason
+                );
+            }
+        }
         let _ = writeln!(out, "gpio={gpio}=op,{state}");
     }
     Ok(out)
+}
+
+/// The U-Boot fragment: `gpio set` and `gpio clear` for each hold, for a boot script to run before
+/// `booti` or `sysboot`. The map's `uboot` names the lines (`rockchip-bank`: the bank's letter, `A`
+/// for bank 0, and the line within it, as `gpio set E11`). A map without a naming is refused by name
+/// when there is a hold to write.
+fn uboot(board: &BoardFile, holds: &[Hold], map: &SocMap) -> Result<String, String> {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# Generated by `lemnos-ctl tree` from board {:?}. A boot script runs these before",
+        board.board.id
+    );
+    let _ = writeln!(
+        out,
+        "# booti or sysboot, so each line holds its level until the kernel takes it."
+    );
+    if holds.is_empty() {
+        let _ = writeln!(out, "# No line is held from power-on: nothing to set.");
+        return Ok(out);
+    }
+    let Some(scheme) = map.uboot.as_deref() else {
+        return Err(format!(
+            "the {} map gives no U-Boot GPIO naming, so the {} held line(s) ({}) cannot be written \
+             for U-Boot; the boot fragment (`--boot`) is the firmware's only form for this SoC",
+            map.soc,
+            holds.len(),
+            holds
+                .iter()
+                .map(|h| h.line.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    for hold in holds {
+        let (label, line) = gpio_line(&hold.line, map)?;
+        let chip = map
+            .chip_labelled(label)
+            .ok_or_else(|| format!("line {:?}: no GPIO chip labelled {label:?}", hold.line))?;
+        let name = match scheme {
+            "rockchip-bank" => {
+                if chip.number_base % 32 != 0 || line >= 32 {
+                    return Err(format!(
+                        "line {:?}: U-Boot names it by bank letter and line, and the chip {label:?} is not a 32-line bank",
+                        hold.line
+                    ));
+                }
+                let letter = char::from(b'A' + (chip.number_base / 32) as u8);
+                format!("{letter}{line}")
+            }
+            other => {
+                return Err(format!(
+                    "uboot {other:?} is not a naming the generator knows"
+                ));
+            }
+        };
+        let command = if hold.level == "high" { "set" } else { "clear" };
+        let _ = writeln!(
+            out,
+            "# {}{}: {}",
+            hold.line,
+            if hold.vbus_of.is_some() {
+                " (VBUS)"
+            } else {
+                ""
+            },
+            hold.reason
+        );
+        let _ = writeln!(out, "gpio {command} {name}");
+    }
+    Ok(out)
+}
+
+/// The SoC's GPIO number of a stable GPIO name, which the boot fragment writes: the chip's first
+/// number plus the line.
+fn boot_number(name: &str, map: &SocMap) -> Result<u32, String> {
+    let (label, line) = gpio_line(name, map)?;
+    let chip = map
+        .chip_labelled(label)
+        .ok_or_else(|| format!("line {name:?}: no GPIO chip labelled {label:?}"))?;
+    Ok(chip.number_base + u32::from(line))
 }
 
 /// The kernel module's configuration for the board: the nodes given to it, as `owned=` and the

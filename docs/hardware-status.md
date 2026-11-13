@@ -121,6 +121,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`Q2b.md`](../testing/board-runs/Q2b.md) | the device-tree maps for the RK3566, RK3588, K230 and A733 families; untested on board |
 | [`Q2e.md`](../testing/board-runs/Q2e.md) | USB device ports in the RK3566, RK3588 and RK3576 maps: peripheral mode, the PHYs, the UDC names; untested on board |
 | [`Q2f.md`](../testing/board-runs/Q2f.md) | VBUS of a USB device port: the PHY's host supply replaced by a stand-in, the board's line or undriven statement, and the start check; untested on board |
+| [`Q2g.md`](../testing/board-runs/Q2g.md) | boot holds: the overlay's `gpio-hog`, the boot fragment and the U-Boot fragment; the VBUS regulator disabled under a held line; untested on board |
 | [`B17.md`](../testing/board-runs/B17.md) | `status-light`: looks, layers, frame interval, idle cost |
 | [`B21.md`](../testing/board-runs/B21.md) | `vcm`: move, clamp, settle time |
 | [`E24.md`](../testing/board-runs/E24.md) | `hw-watchdog`: arming, feed cadence, the reset when feeding stops |

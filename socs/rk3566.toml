@@ -15,6 +15,7 @@
 # Not in the map, because the mainline base tree has no node for them: the camera receiver and ISP
 # (VICAP), the NPU, and the video decoder. Their drivers need nodes from a board tree.
 soc = "rk3566"
+uboot = "rockchip-bank"   # how U-Boot names this SoC's GPIO lines (`gpio set E11`)
 # The form the output takes: an overlay, which the loader applies with `fdtoverlays` (the vendor U-Boot's
 # PXE command applies them: cmd/pxe.c in the vendor U-Boot tree).
 form = "overlay"
@@ -25,22 +26,27 @@ form = "overlay"
 label = "gpio0"
 reason = "GPIO bank 0, in the PMU domain"
 number_base = 0
+path = "/pinctrl/gpio@fdd60000"
 [chips.gpio1]
 label = "gpio1"
 reason = "GPIO bank 1"
 number_base = 32
+path = "/pinctrl/gpio@fe740000"
 [chips.gpio2]
 label = "gpio2"
 reason = "GPIO bank 2"
 number_base = 64
+path = "/pinctrl/gpio@fe750000"
 [chips.gpio3]
 label = "gpio3"
 reason = "GPIO bank 3"
 number_base = 96
+path = "/pinctrl/gpio@fe760000"
 [chips.gpio4]
 label = "gpio4"
 reason = "GPIO bank 4"
 number_base = 128
+path = "/pinctrl/gpio@fe770000"
 
 [controllers.i2c0]
 kind = "i2c"

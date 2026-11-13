@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use lemnos_host::board::BoardFile;
 
-use crate::generate::{NO_VBUS_NODE, VbusPlan, vbus_plan};
+use crate::generate::{NO_VBUS_NODE, VbusPlan, hogged_lines, vbus_plan};
 use crate::map::{Base, Controller, Kind, PinSet, SocMap};
 
 /// What the check reads: the live device tree and the platform device directory.
@@ -48,6 +48,17 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Findings {
         .base
         .as_deref()
         .and_then(|name| map.bases.get(name).map(|b| (name, b)));
+    // The lines the overlay hogs: the kernel lists them as requested, from the chip's registration.
+    let hogged = match hogged_lines(board, map) {
+        Ok(lines) => lines,
+        Err(why) => {
+            problems.push(format!(
+                "the board does not generate, so its holds cannot be checked: {why}"
+            ));
+            Vec::new()
+        }
+    };
+    check_boot_holds(board, live, &hogged, &mut problems, &mut notes);
     for hardware in &board.hardware {
         let Some(controller) = map.controllers.get(&hardware.controller) else {
             problems.push(format!(
@@ -77,6 +88,7 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Findings {
                 live,
                 &phandles,
                 base,
+                &hogged,
             );
             problems.extend(findings.problems);
             notes.extend(findings.notes);
@@ -183,6 +195,7 @@ pub fn check(board: &BoardFile, map: &SocMap, live: &Live<'_>) -> Findings {
 /// What a USB device port needs live: its node in peripheral mode, each node it needs enabled, its
 /// VBUS as the board states it, and, for a named port, the UDC the kernel lists under
 /// `/sys/class/udc` for the gadget.
+#[allow(clippy::too_many_arguments)]
 fn usb_port(
     hardware: &lemnos_host::board::HardwareSpec,
     key: &str,
@@ -191,6 +204,7 @@ fn usb_port(
     live: &Live<'_>,
     phandles: &BTreeMap<u32, String>,
     base: Option<(&str, &Base)>,
+    hogged: &[String],
 ) -> Findings {
     let mut problems = Vec::new();
     let mut notes = Vec::new();
@@ -272,6 +286,7 @@ fn usb_port(
         phandles,
         base,
         &who,
+        hogged,
         &mut problems,
         &mut notes,
     );
@@ -291,6 +306,7 @@ fn vbus(
     phandles: &BTreeMap<u32, String>,
     base: Option<(&str, &Base)>,
     who: &str,
+    hogged: &[String],
     problems: &mut Vec<String>,
     notes: &mut Vec<String>,
 ) {
@@ -331,7 +347,7 @@ fn vbus(
         }
     }
     if let VbusPlan::Hold { line, off, .. } = &plan {
-        hold(line, off, who, live, problems, notes);
+        hold(line, off, who, hogged.contains(line), live, problems, notes);
     }
     if let Some(fact) = fact
         && fact.always_on
@@ -347,6 +363,7 @@ fn hold(
     line: &str,
     off: &str,
     who: &str,
+    hogged: bool,
     live: &Live<'_>,
     problems: &mut Vec<String>,
     notes: &mut Vec<String>,
@@ -362,9 +379,13 @@ fn hold(
     let want = if off == "high" { "hi" } else { "lo" };
     match gpio_level(live.gpio_debug, label, number) {
         Err(why) => problems.push(format!("{who}: VBUS line {line}: {why}")),
+        Ok(None) if hogged => problems.push(format!(
+            "{who}: VBUS line {line} is held {off} by a gpio-hog of the overlay, which the kernel lists \
+             as requested; it is not listed, so the overlay is not applied on this boot"
+        )),
         Ok(None) => notes.push(format!(
-            "{who}: VBUS line {line} is held {off} from power-on by the firmware; no driver has \
-             requested it, so its level cannot be read here: measure VBUS in device mode"
+            "{who}: VBUS line {line} is held {off} from power-on by the boot path only (no gpio-hog); no \
+             driver has requested it, so its level cannot be read here: measure VBUS in device mode"
         )),
         Ok(Some(level)) if level == want => {}
         Ok(Some(level)) => problems.push(format!(
@@ -563,4 +584,52 @@ fn gpios_at(map: &SocMap, path: &str) -> Option<Vec<u16>> {
         .flat_map(|c| c.pins.values())
         .find(|set| set.path == path)
         .map(|set| set.gpios.clone())
+}
+
+/// The boot holds of the board's `[[lines]]`, live. A line the overlay hogs is listed by the kernel,
+/// and its level must be the boot level; a line held by the boot path alone is a note: no driver has
+/// requested it yet, so its level is read once a driver does, or by a meter.
+fn check_boot_holds(
+    board: &BoardFile,
+    live: &Live<'_>,
+    hogged: &[String],
+    problems: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) {
+    for line in &board.lines {
+        let Some(level) = line.boot.as_deref() else {
+            continue;
+        };
+        if !hogged.contains(&line.line) {
+            notes.push(format!(
+                "[[lines]] {}: boot {level} by the boot path only (no gpio-hog: a device uses the line, or \
+                 the map gives no node for its chip); the level is read once a driver requests it",
+                line.line
+            ));
+            continue;
+        }
+        let parsed = line
+            .line
+            .strip_prefix("gpio:")
+            .and_then(|rest| rest.rsplit_once(':'))
+            .and_then(|(label, n)| Some((label, n.parse::<u32>().ok()?)));
+        let Some((label, number)) = parsed else {
+            problems.push(format!("[[lines]] {}: not gpio:LABEL:LINE", line.line));
+            continue;
+        };
+        let want = if level == "high" { "hi" } else { "lo" };
+        match gpio_level(live.gpio_debug, label, number) {
+            Err(why) => problems.push(format!("[[lines]] {}: {why}", line.line)),
+            Ok(None) => problems.push(format!(
+                "[[lines]] {}: held {level} by a gpio-hog of the overlay, which the kernel lists as \
+                 requested; it is not listed, so the overlay is not applied on this boot",
+                line.line
+            )),
+            Ok(Some(found)) if found == want => {}
+            Ok(Some(found)) => problems.push(format!(
+                "[[lines]] {}: reads {found}, but the board's boot level is {level}",
+                line.line
+            )),
+        }
+    }
 }

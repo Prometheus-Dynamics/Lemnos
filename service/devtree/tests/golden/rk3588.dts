@@ -105,4 +105,18 @@
 			status = "okay";
 		};
 	};
+	// disabled: base "usb-gpio-vbus" /vcc5v0-otg-vbus: the VBUS regulator of usb-otg0 is switched by gpio:gpio4:11; its phy-supply is the stand-in, so nothing uses it and the hog holds gpio:gpio4:11 at its off level
+	fragment@13 {
+		target-path = "/vcc5v0-otg-vbus";
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+	// gpio-hog: gpio:gpio4:11 is low from power-on, until the kernel takes the line
+	fragment@14 {
+		target-path = "/pinctrl/gpio@fec50000";
+		__overlay__ {
+			lemnos-hog-11 { gpio-hog; gpios = <11 0>; output-low; line-name = "VBUS of usb-otg0, off low"; };
+		};
+	};
 };

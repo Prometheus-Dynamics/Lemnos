@@ -509,6 +509,12 @@ fn a_stable_gpio_name_needs_its_chip_on_the_machine_with_the_line_in_range() {
     let tree = dir.join("tree");
     node(&tree, "/bus/i2c@1000", None, Some("okay"), None);
     node(&tree, "/pins/i2c0a", Some(0x10), None, None);
+    // The board holds line 9 high by a gpio-hog, which the kernel lists: GPIO 9 of the chip, high.
+    fs::write(
+        dir.join("gpio"),
+        "gpiochip0: GPIOs 0-15, parent: platform/fixture.gpio, gpio-test:\n gpio-9   (held) out hi\n",
+    )
+    .unwrap();
     let problems = run_check(&dir, ALL_KINDS_BOARD, ALL_KINDS_MAP);
     assert!(
         !problems.iter().any(|p| p.contains("gpio-test")),
@@ -597,6 +603,11 @@ fn every_family_makes_its_three_outputs_as_its_goldens() {
         let out = generated(board_text, map).unwrap_or_else(|e| panic!("{soc}: {e}"));
         assert_eq!(out.overlay, golden(&format!("{soc}.dts")), "{soc} overlay");
         assert_eq!(out.boot, golden(&format!("{soc}-boot.txt")), "{soc} boot");
+        assert_eq!(
+            out.uboot.as_deref(),
+            Ok(golden(&format!("{soc}-uboot.txt")).as_str()),
+            "{soc} U-Boot"
+        );
         assert_eq!(
             out.modprobe,
             golden(&format!("{soc}-modprobe.conf")),

@@ -25,6 +25,12 @@ pub struct SocMap {
     /// own, as the kernel reports it.
     #[serde(default)]
     pub chips: BTreeMap<String, Chip>,
+    /// How U-Boot names the GPIO lines of this SoC's chips, for the `--uboot` fragment. Only
+    /// `rockchip-bank` is known: a bank named by its letter (`A` for bank 0) and the line within it,
+    /// as `gpio set E11` (U-Boot's `dm_gpio_lookup_name`, drivers/gpio/gpio-uclass.c, v2025.01). A
+    /// family with no entry has no U-Boot GPIO naming the generator knows, and its `--uboot` is refused.
+    #[serde(default)]
+    pub uboot: Option<String>,
 }
 
 /// What the overlay output is: the form a loader applies, which the map says.
@@ -52,6 +58,11 @@ pub struct Chip {
     /// bank number.
     #[serde(default)]
     pub number_base: u32,
+    /// The chip's controller node, as the base tree names it (absolute). A boot hold on a line of
+    /// the chip is a `gpio-hog` child of this node in the overlay, so the kernel asserts the level
+    /// when the chip registers. Left out, the chip cannot hold a line in the overlay.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// The kernel module's options a node may be given, besides `owned`, which every module-owned
@@ -246,6 +257,18 @@ impl SocMap {
                     chip.label
                 ));
             }
+        }
+        for (key, chip) in &map.chips {
+            if chip.path.as_deref().is_some_and(|p| !p.starts_with('/')) {
+                return Err(format!("chip {key:?}: its path must be absolute"));
+            }
+        }
+        if let Some(scheme) = map.uboot.as_deref()
+            && scheme != "rockchip-bank"
+        {
+            return Err(format!(
+                "soc map: uboot {scheme:?} is not a U-Boot GPIO naming the generator knows; it knows \"rockchip-bank\""
+            ));
         }
         for (name, controller) in &map.controllers {
             if !controller.path.starts_with('/') {

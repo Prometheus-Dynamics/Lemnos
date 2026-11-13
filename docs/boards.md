@@ -110,7 +110,7 @@ a board that has none runs as before.
 | `[board] soc` | The name of the SoC map the board is built for (`socs/<soc>.toml`) |
 | `[board] base` | The base tree the board boots, by its name in that map. It says which holders a `[[lines]]` entry frees, and the VBUS supply of each device port |
 | `[[hardware]]` | One piece of hardware a device uses: `controller` (the map's name), `name` (the runtime name a device uses for it, if any), `pins` (the map's pin set, where the controller has several). A device port (a `usb-peripheral` controller) also takes how its VBUS is handled: `vbus` with `vbus_off` (a GPIO line that switches VBUS, and the level that is off), or `vbus_undriven = true` (this port is not driven by the board), each with `vbus_reason` |
-| `[[lines]]` | A GPIO line the board gives to Lemnos, as `chip:N`. `boot` (`"low"` or `"high"`) holds it from power-on, with the `reason` it is held |
+| `[[lines]]` | A GPIO line the board gives to Lemnos, as `gpio:LABEL:LINE`. `boot` (`"low"` or `"high"`) holds it from power-on, with the `reason` it is held: in the overlay as a `gpio-hog` unless a device uses the line or a pin set takes its pad, and in the boot and U-Boot fragments (see [Holds from power-on](device-tree.md#holds-from-power-on)) |
 
 ## `bus` and `uses`
 

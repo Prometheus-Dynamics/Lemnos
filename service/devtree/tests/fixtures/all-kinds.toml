@@ -4,6 +4,8 @@ soc = "test-soc"
 [chips.g]
 label = "gpio-test"
 reason = "the test GPIO chip"
+number_base = 0
+path = "/bus/gpio@9000"
 
 
 [controllers.i2c0]

@@ -10,6 +10,7 @@
 # the NPU, and the video decoder (rkvdec). A board tree adds them. The vendor kernel names the RGA
 # `rockchip,rk3588-rga` here and `rockchip,rga2` in the vendor tree; see the RK3566 map's note.
 soc = "rk3588"
+uboot = "rockchip-bank"   # how U-Boot names this SoC's GPIO lines (`gpio set E11`)
 form = "overlay"
 
 
@@ -17,22 +18,27 @@ form = "overlay"
 label = "gpio0"
 reason = "GPIO bank 0, in the PMU domain"
 number_base = 0
+path = "/pinctrl/gpio@fd8a0000"
 [chips.gpio1]
 label = "gpio1"
 reason = "GPIO bank 1"
 number_base = 32
+path = "/pinctrl/gpio@fec20000"
 [chips.gpio2]
 label = "gpio2"
 reason = "GPIO bank 2"
 number_base = 64
+path = "/pinctrl/gpio@fec30000"
 [chips.gpio3]
 label = "gpio3"
 reason = "GPIO bank 3"
 number_base = 96
+path = "/pinctrl/gpio@fec40000"
 [chips.gpio4]
 label = "gpio4"
 reason = "GPIO bank 4"
 number_base = 128
+path = "/pinctrl/gpio@fec50000"
 
 [controllers.i2c0]
 kind = "i2c"
