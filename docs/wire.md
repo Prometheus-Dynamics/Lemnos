@@ -338,13 +338,17 @@ A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 
 A host sends an Event to a client that said `events: true` in its Hello, from that Hello onward.
 The rules a client can rely on:
 
-- Each change to a device's state or reason is sent as an Event, with its health as it is at
-  send time. The host sends the device's state as it is at send time, so an Event carries every
-  change made before it. A change of health alone is not sent on its own: it goes out with the
-  device's next state change.
-- Changes between two sends may come as one Event, and an Event may repeat a state the client
-  already has (a device that retries sends one per retry). The newest Event for a device is its
-  current state.
+- Each change to a device's state, reason or health is sent as an Event. The Event carries the
+  device's state and health as they are at send time, so it carries every change made before it.
+- A change of health needs no change of state: the daemon looks at every device's health about
+  four times a second, and a device whose health differs from what a client was last sent gets an
+  Event within about a quarter of a second. Health is not sent again while it stays the same.
+- A device whose driver is in a call is not looked at until the call returns, so its Event can
+  come a little later than the change.
+- Changes between two sends may come as one Event. An Event for a state change may repeat health
+  the client already has (a device that retries sends one per retry), and a flapping health is
+  sent at most once per look, so a client that reads Events sees each change once and never a
+  flood. The newest Event for a device is its current state and health.
 - A client that listed the devices and keeps reading gets every later change of state or reason on
   each of them. It does not need to list again to learn of a device that comes up later.
 

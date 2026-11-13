@@ -1,4 +1,4 @@
-//! Keeps devices retrying and tells clients when one changes state.
+//! Keeps devices retrying and tells clients when one changes state, reason or health.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,15 +11,23 @@ use crate::Core;
 use crate::notify::Notifier;
 
 const MAX_SLEEP: Duration = Duration::from_millis(250);
+/// How often every device's health is looked at, when nothing else woke the thread. A change of
+/// health reaches clients within this, and a driver whose health flaps sends at most one event
+/// per look.
+const LOOK_EVERY: Duration = Duration::from_millis(250);
 
-/// A device's state as the wire carries it.
+/// A device's state as the wire carries it: its state, and its health and reason with it.
 pub(crate) fn wire_state(info: &DeviceInfo) -> (u8, u8, String) {
-    let (state, mut reason) = match &info.state {
+    wire_of(&info.state, &info.health)
+}
+
+fn wire_of(device: &DeviceState, health_now: &Health) -> (u8, u8, String) {
+    let (state, mut reason) = match device {
         DeviceState::Running => (state::RUNNING, String::new()),
         DeviceState::Backoff { reason, .. } => (state::BACKOFF, reason.clone()),
         DeviceState::Off(why) => (state::OFF, format!("{why:?}").to_lowercase()),
     };
-    let health = match &info.health {
+    let health = match health_now {
         Health::Ok => health::OK,
         Health::Degraded(text) => {
             if reason.is_empty() {
@@ -37,31 +45,52 @@ pub(crate) fn wire_state(info: &DeviceInfo) -> (u8, u8, String) {
     (state, health, reason)
 }
 
-/// Sends an event for each device whose revision has moved since its last event. The event
-/// carries the state now, which is the state after every change since then. It is not
-/// compared with the state last sent: a device that went down and came back between two
-/// looks is back where it was, but a client that listed it in between holds the state from
-/// that list, so it must be told.
-fn send_changes(core: &Core, sent: &mut Vec<u64>) {
-    let devices = core.host.devices();
-    sent.resize(devices.len(), u64::MAX);
-    for (info, sent) in devices.iter().zip(sent.iter_mut()) {
-        if info.revision == *sent {
+/// What a client was last told about a device: the revision of its state, and its health.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Told {
+    revision: u64,
+    health: Health,
+}
+
+/// Sends an event for each device whose state has moved, or whose health has changed, since the
+/// client was last told about it. An event carries the state now, which is the state after every
+/// change since then. It is not compared with the state last sent: a device that went down and
+/// came back between two looks is back where it was, but a client that listed it in between holds
+/// the state from that list, so it must be told.
+///
+/// A device whose driver is in a call is left for the next look: its health is not known until
+/// the call returns. Reads and sends nothing for a device that has not changed, and allocates
+/// only to send.
+fn send_changes(core: &Core, told: &mut Vec<Option<Told>>) {
+    told.resize(core.host.device_count(), None);
+    for (index, told) in told.iter_mut().enumerate() {
+        let Some((revision, health)) = core.host.look(index as u32) else {
+            continue;
+        };
+        let now = Told { revision, health };
+        if *told == Some(now) {
             continue;
         }
-        let now = wire_state(info);
+        let devices = core.host.devices();
+        let Some(info) = devices.iter().find(|info| info.index == index as u32) else {
+            continue;
+        };
+        let (state, health, reason) = wire_of(&info.state, &health);
         let event = Frame::Event {
             device: info.index,
-            state: now.0,
-            health: now.1,
-            reason: &now.2,
+            state,
+            health,
+            reason: &reason,
         };
         for client in crate::lock(&core.clients).iter() {
             if client.wants_events() {
                 client.event(&event);
             }
         }
-        *sent = info.revision;
+        *told = Some(Told {
+            revision: info.revision,
+            health: now.health,
+        });
     }
 }
 
@@ -94,9 +123,10 @@ fn send_jobs(core: &Core, updates: &mut Vec<JobUpdate>) {
 
 pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
     let mut seen = core.host.changes();
-    let mut sent = Vec::new();
+    let mut told = Vec::new();
     let mut updates = Vec::new();
-    send_changes(core, &mut sent);
+    send_changes(core, &mut told);
+    let mut next_look = Instant::now() + LOOK_EVERY;
     let watchdog = notifier.watchdog_interval();
     let mut next_ping = Instant::now();
     while !core.stopping() {
@@ -108,11 +138,16 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
         } else if core.host.next_tick_ns().is_some_and(|at| at <= now) {
             core.host.run_ticks();
         }
-        // Read again: the tick may itself have changed something.
+        // Read again: the tick may itself have changed something. Health is looked at only on
+        // the look interval, not on every wake, since a driver's health costs a call into it.
         let changes = core.host.changes();
-        if changes != seen {
+        let looking = Instant::now() >= next_look;
+        if changes != seen || looking {
             seen = changes;
-            send_changes(core, &mut sent);
+            if looking {
+                next_look = Instant::now() + LOOK_EVERY;
+            }
+            send_changes(core, &mut told);
         }
         send_jobs(core, &mut updates);
         if let Some(interval) = watchdog

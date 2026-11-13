@@ -160,6 +160,13 @@ rule: it never gives up, it reports the fault, and the next read tries again. Pa
 attempts, capped at 8 s, is the host's job, because the host decides how often it reads. A driver
 never switches the part off on its own.
 
+Health is what `health` returns when the host asks, and the host asks for every device, so a driver
+does not report a change itself. The daemon looks at each device's health about four times a second
+and tells clients of any change, whether or not the device's state changed too. A driver whose
+health flaps is sent at most one event per look, so it can change health as often as its hardware
+does. `health` must be cheap and must not block: it is called from outside the driver's own calls,
+and while a call is running on the driver the host reports it as not yet looked at.
+
 One failure a driver can't get past by trying again: what it was bound with is dead, such as the
 handle of a USB device that was unplugged. Its `health` then returns `Health::Gone(reason)`. The
 host looks after every method and every tick, drops the driver and binds it again under the same
