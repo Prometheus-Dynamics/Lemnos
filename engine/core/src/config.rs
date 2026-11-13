@@ -12,6 +12,7 @@ pub enum ConfigValue<'a> {
 pub struct Config<'a> {
     entries: &'a [(&'a str, ConfigValue<'a>)],
     host_owned: bool,
+    board: &'a str,
 }
 
 impl<'a> Config<'a> {
@@ -19,7 +20,21 @@ impl<'a> Config<'a> {
         Self {
             entries,
             host_owned: false,
+            board: "",
         }
+    }
+
+    /// The same settings, on the board the board file's `[board] id` names.
+    #[must_use]
+    pub const fn on_board(mut self, board: &'a str) -> Self {
+        self.board = board;
+        self
+    }
+
+    /// The board file's `[board] id`: which board this is, as the board file names it. Empty
+    /// where nothing says (a driver package, or a test that sets none).
+    pub const fn board(&self) -> &'a str {
+        self.board
     }
 
     /// The same settings, for a device the board file gives to the host (`owner = "host"`).

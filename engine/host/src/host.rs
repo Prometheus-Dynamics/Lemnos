@@ -354,6 +354,8 @@ struct Rule {
 }
 
 struct Inner {
+    /// The board file's `[board] id`, given to every driver as it binds.
+    board: String,
     /// Devices are only ever added, so a device's index stays its own.
     slots: RwLock<Vec<Arc<Slot>>>,
     rules: Vec<Rule>,
@@ -1223,10 +1225,11 @@ impl Inner {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_value()))
                 .collect();
+            let config = Config::new(&entries).on_board(&self.board);
             let config = if guest {
-                Config::new(&entries).for_host_owned()
+                config.for_host_owned()
             } else {
-                Config::new(&entries)
+                config
             };
             let mut binding = Binding {
                 inner: self,
@@ -1613,6 +1616,7 @@ impl Host {
         // Lives as long as the process: drivers hold plain references to it.
         // `shutdown` lets every device go.
         let inner: &'static Inner = Box::leak(Box::new(Inner {
+            board: board.board.id.clone(),
             slots: RwLock::new(slots),
             rules,
             lanes: Mutex::new(HashMap::new()),

@@ -34,14 +34,98 @@ from the bundle's manifest, and the slot's kernel command line carries it:
 
 A bundle is a tar holding:
 
-- `slot.json`, the manifest. It gives the image's size and SHA-256, the SHA-256 of every boot
-  file, and the dm-verity parameters and root hash.
+- `slot.json`, the manifest (below).
 - `slot.sig`, optional. It is an Ed25519 signature over the manifest's exact bytes.
-- `rootfs.erofs`, the image.
+- `rootfs.erofs`, the image with its dm-verity hash tree appended.
 - `boot/`, the slot's boot files.
 
 The driver checks every byte against the manifest as it arrives. A bundle that differs from its
 manifest is refused, and nothing it wrote is left behind.
+
+### The manifest, schema 3
+
+| Key | Format |
+| --- | --- |
+| `schema` | `3`. Any other schema is refused with a sentence saying so |
+| `id` | the slot id, `[A-Za-z0-9._-]` |
+| `product` | the operating system's product name, lowercase `[a-z0-9-]` |
+| `version` | the operating system's version, text, not empty |
+| `variant` | optional text |
+| `board` | the board the slot is built for, lowercase `[a-z0-9-]` |
+| `kernel`, `display_name` | optional text, shown by `list` |
+| `image.size` | `rootfs.erofs`'s size in bytes, hash tree included |
+| `image.sha256` | `rootfs.erofs`'s SHA-256, 64 lowercase hex digits |
+| `verity.root_hash` | 64 lowercase hex digits |
+| `verity.salt` | lowercase hex, an even number of digits up to 512; `""` for no salt |
+| `verity.data_blocks` | how many 4096-byte data blocks the tree covers |
+| `verity.hash_offset` | the byte offset in `rootfs.erofs` where the hash tree starts |
+| `boot.files` | each file's path under `boot/` to its SHA-256 |
+
+A manifest with a `family` key is refused. That key belonged to schema 2.
+
+**The board.** The driver installs a slot only when its `board` equals the board file's
+`[board] id`. Otherwise the job ends `NOT_SUPPORTED`, and `list`'s `error` names both boards. A
+slot already on disk that names another board, or no board, is still listed. `trial` and
+`set_default` refuse it with `NOT_SUPPORTED`.
+
+**dm-verity.** These are fixed by convention and aren't in the manifest:
+
+- format version 1;
+- SHA-256;
+- 4096-byte data blocks and hash blocks;
+- no verity superblock.
+
+The hash tree comes straight after the data. `verity.hash_offset` must equal
+`verity.data_blocks * 4096`. `image.size` must equal `hash_offset` plus the tree's size. The
+tree's size is every level, each `ceil(blocks below / 128)` hash blocks, down to one block. A
+manifest whose numbers don't fit is refused at install. The EROFS superblock is never read for
+any of this.
+
+An image builder makes a conforming image like this:
+
+```text
+mkfs.erofs -b 4096 rootfs.erofs <rootfs dir>  # 4096-byte blocks: the size is a multiple of 4096
+DATA=$(stat -c %s rootfs.erofs)
+veritysetup format --no-superblock --format=1 --hash=sha256 \
+  --data-block-size=4096 --hash-block-size=4096 --data-blocks=$((DATA / 4096)) \
+  rootfs.erofs tree.bin                         # prints "Salt:" and "Root hash:"
+cat tree.bin >> rootfs.erofs
+```
+
+Its outputs go into the manifest as follows:
+
+- `Root hash` goes to `verity.root_hash`.
+- `Salt` goes to `verity.salt`.
+- `DATA / 4096` goes to `verity.data_blocks`.
+- `DATA` goes to `verity.hash_offset`.
+- The final file's size and SHA-256 go to `image.size` and `image.sha256`.
+
+`lemnos-slot-init` builds the table from the manifest and these conventions alone:
+
+```text
+0 <data_blocks * 8> verity 1 <loop> <loop> 4096 4096 <data_blocks> <hash_offset / 4096> sha256 <root_hash> <salt or ->
+```
+
+It refuses a slot whose values don't fit.
+
+**What is trusted at boot, and why.** The root hash is the only value that has to be trusted when
+the board boots.
+
+- **The root hash** reaches the initramfs on the kernel command line
+  (`<boot_args>.roothash=`). That line is in the slot's boot directory, next to the kernel and
+  initramfs, so it is exactly as trustworthy as the kernel and initramfs: as much as the board's
+  boot chain makes them.
+- **The other values** are read at boot from `slots/<id>.json` on the data partition, which
+  nothing verifies at boot. Every one of them is bound by the root hash:
+  - The salt goes into every hash.
+  - The block count sets the tree's shape, and the root covers that shape.
+  - The offset only says where to read the tree.
+
+  So a wrong value makes dm-verity fail. It can never make a different filesystem pass.
+  `slot-init` also refuses a manifest whose `root_hash` differs from the command line's.
+- **The fixed parameters** (algorithm, block sizes, format) are in `slot-init` itself.
+- **The image's superblock** sits inside the image. It is covered by `image.sha256` at install,
+  but nothing checks it at boot, so nothing at boot relies on it.
 
 Signing is a board setting. The `keys` file lists the keys the board trusts, one per line: 64 hex
 digits, a space, then the key's owner. A signature that is present is always checked. `list`
@@ -75,7 +159,7 @@ size. Its result is the new slot's id. One install runs at a time.
 
 | Method | What it does |
 | --- | --- |
-| `list` | Every slot, the pointers, free space, the reserve, the number kept, the last error |
+| `list` | Every slot (with its `product`, `version` and `board`), the pointers, free space, the reserve, the number kept, the last error |
 | `install`, `write` | A streamed install (a long job) |
 | `accept`, `install_file` | An install from a file in `.incoming` (a long job) |
 | `set_default(id, force)` | The default from the next boot. The slot must have booted well, unless `force` |

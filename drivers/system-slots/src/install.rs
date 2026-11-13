@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::boot::{self, hex};
 use crate::json::Json;
+use crate::manifest::Manifest;
 use crate::store::{Layout, Meta, valid_id};
 use crate::tar::{Kind, Sink, Tar};
 
@@ -99,10 +100,6 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
         .collect()
-}
-
-fn is_hex(text: &str, len: usize) -> bool {
-    text.len() == len && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// What a bundle may hold.
@@ -289,6 +286,8 @@ pub struct Finish<'a> {
     pub require_signed: bool,
     pub partuuid: &'a str,
     pub boot_args: &'a str,
+    /// The board file's `[board] id`: a slot built for another board is refused.
+    pub board_id: &'a str,
     pub guard: Guard,
     /// The board's boot record, which may add its own files to the slot's boot directory.
     pub record: &'a dyn crate::boot::BootRecord,
@@ -502,26 +501,29 @@ impl Install {
             }
         }
         // From here the manifest says what everything else must be.
-        let text = core::str::from_utf8(&unpack.manifest).map_err(|_| bad("slot.json"))?;
-        let manifest = Json::parse(text).ok_or_else(|| bad("slot.json isn't JSON"))?;
-        let field = |path: &str| {
-            manifest
-                .path(path)
-                .ok_or_else(|| bad(format!("slot.json has no {path}")))
-        };
-        let id = field("id")?
-            .text()
-            .ok_or_else(|| bad("slot.json's id isn't text"))?
-            .to_string();
-        board.guard.check(&id)?;
-        let root_hash = field("verity.root_hash")?.text().unwrap_or("");
-        if !is_hex(root_hash, 64) {
-            return Err(bad("slot.json's verity root hash isn't 64 hex digits"));
+        let text =
+            core::str::from_utf8(&unpack.manifest).map_err(|_| bad("slot.json isn't text"))?;
+        let manifest = Manifest::parse(text).map_err(bad)?;
+        if board.board_id.is_empty() {
+            return Err((
+                Status::NO_DEVICE,
+                "the board file has no [board] id to match a slot's board against".into(),
+            ));
         }
-        let image_size = field("image.size")?
-            .u64()
-            .ok_or_else(|| bad("slot.json's image size isn't a number"))?;
-        let image_sha = field("image.sha256")?.text().unwrap_or("");
+        if manifest.board != board.board_id {
+            return Err((
+                Status::NOT_SUPPORTED,
+                format!(
+                    "this slot is built for board {}, and this is board {}",
+                    manifest.board, board.board_id
+                ),
+            ));
+        }
+        let id = manifest.id.clone();
+        board.guard.check(&id)?;
+        let root_hash = manifest.verity.root_hash.as_str();
+        let image_size = manifest.image_size;
+        let image_sha = manifest.image_sha256.as_str();
         let hash_of = |name: &str| {
             unpack
                 .hashes
@@ -539,15 +541,11 @@ impl Install {
         if hash_of("rootfs.erofs") != Some(image_sha) {
             return Err(bad("rootfs.erofs doesn't match slot.json's sha256"));
         }
-        let listed = field("boot.files")?.members();
-        if listed.is_empty() {
-            return Err(bad("slot.json lists no boot files"));
-        }
-        for (name, sha) in listed {
-            let path = format!("boot/{name}");
-            match (hash_of(&path), sha.text()) {
-                (Some(got), Some(want)) if got == want => {}
-                (None, _) => return Err(bad(format!("the bundle has no boot file {name}"))),
+        let listed = &manifest.boot_files;
+        for (name, want) in listed {
+            match hash_of(&format!("boot/{name}")) {
+                Some(got) if got == want => {}
+                None => return Err(bad(format!("the bundle has no boot file {name}"))),
                 _ => return Err(bad(format!("boot file {name} doesn't match slot.json"))),
             }
         }

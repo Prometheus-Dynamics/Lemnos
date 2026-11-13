@@ -61,7 +61,7 @@ python3 scripts/generate-builtins.py --check
 
 | Driver | Provides | Needs | State |
 |---|---|---|---|
-| `system-slots` | `system.slots/1` | nothing; `data` and `boot` partitions, `record`, `keys`, `boot_args` in `config` (`docs/slots.md`) | Serves its contract. Installs a slot bundle as a long job, streamed or from a file in `.incoming`, checked against its manifest; a signature is always checked and shown, and `require_signed` refuses bundles no trusted key signed (off by default). Sets the default, boots a slot on trial, confirms, removes and keeps the last few. Never over the running or the default slot. Untested on board (`I5.md`) |
+| `system-slots` | `system.slots/1` | nothing; `data` and `boot` partitions, `record`, `keys`, `boot_args` in `config` (`docs/slots.md`) | Serves its contract. Installs a slot bundle as a long job, streamed or from a file in `.incoming`, checked against its schema 3 manifest and refused when built for another board (the board file's `[board] id`); a signature is always checked and shown, and `require_signed` refuses bundles no trusted key signed (off by default). Sets the default, boots a slot on trial, confirms, removes and keeps the last few. Never over the running or the default slot. Untested on board (`I5.md`) |
 | `system-reboot` | `system.reboot/1` | nothing | Serves its contract. Runs `systemctl reboot` |
 
 ## USB

@@ -27,6 +27,9 @@
 //! - `boot_args`: the name the slot's initramfs reads its kernel arguments under: a slot's
 //!   command line gets `<boot_args>.slot=<id> <boot_args>.roothash=<hex>
 //!   <boot_args>.data=PARTUUID=<uuid> panic=5`. Required for an install.
+//! - The board file's `[board] id`, which every driver is given: a slot whose manifest names
+//!   another `board` is refused at install, and never set as default or tried
+//!   ([`manifest`] lists the manifest's keys).
 //! - `partuuid`: the data partition's PARTUUID, which a slot's kernel command line names. Found
 //!   from the mount table and `/dev/disk/by-partuuid` when not given.
 //! - `reserve_mb`: free space an install leaves on the data partition, 2048 by default.
@@ -47,6 +50,7 @@
 pub mod boot;
 mod install;
 pub mod json;
+pub mod manifest;
 pub mod store;
 pub mod tar;
 pub mod uboot;
@@ -76,6 +80,8 @@ pub struct SystemSlots {
     require_signed: bool,
     partuuid: String,
     boot_args: String,
+    /// The board file's `[board] id`. A slot built for another board is never booted.
+    board_id: String,
     running: Option<String>,
     reserve: u64,
     keep: u32,
@@ -102,6 +108,7 @@ impl SystemSlots {
             require_signed: false,
             partuuid: String::new(),
             boot_args: String::new(),
+            board_id: String::new(),
             running: None,
             reserve: 2048 << 20,
             keep: DEFAULT_KEEP,
@@ -212,6 +219,7 @@ impl SystemSlots {
             require_signed: self.require_signed,
             partuuid: &self.partuuid,
             boot_args: &self.boot_args,
+            board_id: &self.board_id,
             guard: Guard {
                 running: self.running(),
                 default: state.default.clone(),
@@ -235,6 +243,35 @@ impl SystemSlots {
     }
 
     /// Whether a bundle of `size` bytes fits with the reserve; the reason in the state when not.
+    /// Whether slot `id` was built for this board: a slot for another is listed, never booted.
+    fn fits_board(&self, id: &str) -> Result<()> {
+        let built_for = fs::read_to_string(self.layout.manifest(id))
+            .ok()
+            .and_then(|text| json::Json::parse(&text))
+            .and_then(|m| {
+                m.get("board")
+                    .and_then(json::Json::text)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        if !self.board_id.is_empty() && built_for == self.board_id {
+            return Ok(());
+        }
+        let mut state = self.state();
+        state.error = if self.board_id.is_empty() {
+            "the board file has no [board] id to match a slot's board against".to_string()
+        } else if built_for.is_empty() {
+            format!("slot {id} names no board it was built for, so it isn't booted here")
+        } else {
+            format!(
+                "slot {id} is built for board {built_for}, and this is board {}",
+                self.board_id
+            )
+        };
+        let _ = self.save(&state);
+        Err(Status::NOT_SUPPORTED)
+    }
+
     fn room(&self, size: u64) -> Result<()> {
         fs::create_dir_all(self.layout.images()).map_err(|_| Status::IO)?;
         let free =
@@ -477,7 +514,8 @@ impl SystemSlots {
             out.push('{');
             for (key, value) in [
                 ("id", id.clone()),
-                ("family", text("family")),
+                ("product", text("product")),
+                ("board", text("board")),
                 ("version", text("version")),
                 ("variant", text("variant")),
                 ("kernel", text("kernel")),
@@ -599,6 +637,7 @@ impl Lifecycle for SystemSlots {
             .unwrap_or_default();
         slots.running = cfg.str("running").map(str::to_string);
         slots.boot_args = cfg.str("boot_args").unwrap_or("").to_string();
+        slots.board_id = cfg.board().to_string();
         slots.require_signed = cfg.bool("require_signed").unwrap_or(false);
         if let Some(mb) = cfg.int("reserve_mb") {
             slots.reserve = u64::try_from(mb).map_err(|_| Status::INVALID_ARGUMENT)? << 20;
@@ -701,6 +740,7 @@ impl Slots for SystemSlots {
 
     fn set_default(&mut self, id: &str, force: bool) -> Result<()> {
         self.installed(id)?;
+        self.fits_board(id)?;
         let meta = Meta::load(&self.layout, id);
         if meta.failed() && !force {
             return Err(Status::NOT_PERMITTED);
@@ -724,6 +764,7 @@ impl Slots for SystemSlots {
 
     fn trial(&mut self, id: &str, keep_default: bool, keep_old: bool, force: bool) -> Result<()> {
         self.installed(id)?;
+        self.fits_board(id)?;
         if id == self.running() {
             return Err(Status::BUSY);
         }
