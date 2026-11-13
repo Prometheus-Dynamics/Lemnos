@@ -24,7 +24,6 @@ lists what they showed. Every other check under `testing/board-runs/` has no res
 - [ ] The bench's reference set on the reference board, beside the earlier version's figures
       (`testing/bench/bench.sh --real`). The harness has no step for the camera, light and fan
       rows: their figures come only from the board runs `testing/bench/reference.tsv` names.
-- [ ] `lemnos-orion` against a running node.
 
 ## Blocks that cannot be made safe from user space
 

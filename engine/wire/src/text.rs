@@ -1,11 +1,18 @@
-//! Turns command-line words into arguments and replies into text, using only
-//! the shapes a device reports.
+//! Words into arguments and replies into text, using only the shapes a device reports.
+//! `lemnos-ctl` and `lemnos-orion` share it, so a device is driven the same way from either.
+//!
+//! An argument is one or more words: a number, `true`/`on`/`1` or `false`/`off`/`0` for a
+//! bool, a word for a string, hex for bytes, `none` for an absent option, and the words of
+//! each element or field in order for an array or a record. A reply is printed the same way,
+//! a record with its field names.
 
 use core::fmt::Write;
 
-use lemnos_wire::{OwnedItem, OwnedParam, OwnedShape};
+use crate::{DeviceDescription, OwnedItem, OwnedMethod, OwnedParam, OwnedShape};
+use lemnos_core::ItemKind;
 
-pub(crate) fn shape_name(shape: &OwnedShape) -> String {
+/// A shape as a person reads it: `u8`, `str?`, `[f32; 3]`, `{x: f32, y: f32}`.
+pub fn shape_name(shape: &OwnedShape) -> String {
     match shape {
         OwnedShape::Unit => "()".to_string(),
         OwnedShape::Bool => "bool".to_string(),
@@ -55,15 +62,15 @@ fn hex(word: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Encodes one shape, taking as many words as it needs.
-fn encode(
+fn encode<'w, S: AsRef<str> + 'w>(
     shape: &OwnedShape,
-    words: &mut core::slice::Iter<'_, String>,
+    words: &mut core::iter::Peekable<impl Iterator<Item = &'w S>>,
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
     let mut next = || {
         words
             .next()
-            .map(String::as_str)
+            .map(AsRef::as_ref)
             .ok_or_else(|| "not enough values".to_string())
     };
     match shape {
@@ -96,7 +103,7 @@ fn encode(
             out.extend((bytes.len() as u32).to_le_bytes());
             out.extend(bytes);
         }
-        OwnedShape::Option(inner) => match words.as_slice().first().map(String::as_str) {
+        OwnedShape::Option(inner) => match words.peek().map(|word| word.as_ref()) {
             Some("none") => {
                 words.next();
                 out.push(0);
@@ -120,8 +127,13 @@ fn encode(
     Ok(())
 }
 
-pub(crate) fn encode_args(params: &[OwnedParam], words: &[String]) -> Result<Vec<u8>, String> {
-    let mut words = words.iter();
+/// The arguments of a method with `params`, from `words`. Every word must be used.
+///
+/// # Errors
+///
+/// A word that is not what its shape wants, too few words, or too many.
+pub fn encode_args<S: AsRef<str>>(params: &[OwnedParam], words: &[S]) -> Result<Vec<u8>, String> {
+    let mut words = words.iter().peekable();
     let mut out = Vec::new();
     for param in params {
         encode(&param.shape, &mut words, &mut out)?;
@@ -258,8 +270,13 @@ fn skip_to<'s>(
     Err(format!("the reply has no field {field:?}"))
 }
 
-/// A reply as text, scaled and labelled as its item says.
-pub(crate) fn render(
+/// A reply as text, scaled and labelled as its item says. A method's whole reply, with no
+/// item, is [`render_reply`].
+///
+/// # Errors
+///
+/// A reply shorter than its shape, or with bytes its shape does not allow.
+pub fn render(
     shape: &OwnedShape,
     has_out_buffer: bool,
     reply: &[u8],
@@ -281,6 +298,89 @@ pub(crate) fn render(
     Ok(text)
 }
 
+/// A method's whole reply as text, with no item's scale or unit.
+///
+/// # Errors
+///
+/// As [`render`].
+pub fn render_reply(method: &OwnedMethod, reply: &[u8]) -> Result<String, String> {
+    let bare = OwnedItem {
+        kind: ItemKind::Value,
+        name: String::new(),
+        unit: String::new(),
+        exponent: 0,
+        min: None,
+        max: None,
+        contract: 0,
+        method: 0,
+        field: None,
+    };
+    render(&method.returns, method.has_out_buffer, reply, &bare)
+}
+
+/// The item named `wanted`.
+///
+/// # Errors
+///
+/// When the device has no such item.
+pub fn find_item<'a>(
+    description: &'a DeviceDescription,
+    wanted: &str,
+) -> Result<&'a OwnedItem, String> {
+    description
+        .items
+        .iter()
+        .find(|i| i.name == wanted)
+        .ok_or_else(|| format!("no item {wanted:?}"))
+}
+
+/// The contract position and the method an item reads or drives.
+///
+/// # Errors
+///
+/// When the item names a method the device does not have.
+pub fn method_of<'a>(
+    description: &'a DeviceDescription,
+    item: &OwnedItem,
+) -> Result<(usize, &'a OwnedMethod), String> {
+    let contract = usize::from(item.contract);
+    description
+        .contracts
+        .get(contract)
+        .and_then(|c| c.methods.iter().find(|m| m.id == item.method))
+        .map(|m| (contract, m))
+        .ok_or_else(|| format!("{} names a method the device doesn't have", item.name))
+}
+
+/// A method by `NAME`, or by `TAG:NAME` when more than one contract has that name.
+///
+/// # Errors
+///
+/// When no contract has it, or more than one does and no tag was given.
+pub fn find_method<'a>(
+    description: &'a DeviceDescription,
+    wanted: &str,
+) -> Result<(usize, &'a OwnedMethod), String> {
+    let (tag, name) = wanted
+        .rsplit_once(':')
+        .map_or((None, wanted), |(tag, name)| (Some(tag), name));
+    let mut found = description.contracts.iter().enumerate().flat_map(|(i, c)| {
+        c.methods
+            .iter()
+            .filter(move |m| m.name == name && tag.is_none_or(|t| t == c.tag))
+            .map(move |m| (i, m))
+    });
+    let first = found
+        .next()
+        .ok_or_else(|| format!("no method {wanted:?}"))?;
+    if found.next().is_some() {
+        return Err(format!(
+            "{name:?} is in more than one contract; use TAG:{name}"
+        ));
+    }
+    Ok(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +398,7 @@ mod tests {
 
     fn item(unit: &str, exponent: i8, field: Option<&str>) -> OwnedItem {
         OwnedItem {
-            kind: lemnos_core::ItemKind::Value,
+            kind: ItemKind::Value,
             name: "i".to_string(),
             unit: unit.to_string(),
             exponent,

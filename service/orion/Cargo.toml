@@ -19,17 +19,18 @@ path = "src/main.rs"
 lemnos-client = { path = "../../engine/client" }
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-wire = { path = "../../engine/wire" }
-# Orion is not published: pinned to the revision the board images ship (protocol 1).
-orion-client = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1" }
-orion-control-plane = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1" }
-orion-core = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1" }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+# Orion is not published: its one client crate, pinned to a revision of its `next` branch.
+orion = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133", default-features = false, features = ["provider"] }
+# Already in the tree through Orion's client: waits on the Orion session and the wake-up together.
+rustix = { version = "1", default-features = false, features = ["std", "event"] }
 
 [dev-dependencies]
-# The in-process Orion node for the integration tests: IPC only, so no TLS stack is pulled in.
-orion-node = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "a89ebd5594d723c05bf280212fd66230b9093be1", default-features = false }
+# A real comm core and real node logic, in-process, for the integration tests.
+orion-node-app = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133", default-features = false }
+orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133" }
+orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "61e95a426a74fcd129be15a41015c446ea304133" }
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
 lemnos-host = { path = "../../engine/host" }
 lemnos-sim = { path = "../../backends/sim" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }

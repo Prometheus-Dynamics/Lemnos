@@ -201,9 +201,35 @@ error numbers, and Lemnos's own codes below -4095:
 
 ## lemnos-orion
 
-`service/orion` builds `lemnos-orion`, a bridge that publishes every device the daemon serves, with
-its values, to an Orion node. It is a client like any other and knows no device. It reads
-`LEMNOSD_SOCKET` and `ORION_NODE_ID`. It has not been run against a board.
+`service/orion` builds `lemnos-orion`, a bridge that offers every device the daemon serves to an
+Orion node, through Orion's one client crate, `orion`, pinned to a revision of its `next` branch.
+It is a client of lemnosd like any other and knows no device: everything below comes from a
+device's entry and its description.
+
+| Lemnos | Orion |
+|---|---|
+| a device | the resource `lemnos.<device>`, of the kind `lemnos.device`, with the labels `lemnos.driver`, `lemnos.tag` (one per tag) and `lemnos.control.<item>` (the shapes a control or action item takes) |
+| its state and health | the resource's state: `Ready` while it runs, `Failed` while it retries or reports failed health, `Pending` while it is off |
+| its value items | the topic `lemnos.<device>.values`: a field per item that is a number (a float in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes |
+| its events | the topic `lemnos.<device>.status`: `state`, `health` and `reason` as text, as `lemnos-ctl list` names them |
+| `lemnos-ctl set`, `call`, `on`/`off` | the actions `lemnos.<device>.set` (`ITEM VALUE...`), `.call` (`METHOD ARG...`, the reply is the output, as text) and `.power` (`on` or `off`), with the arguments as text, the words `lemnos-ctl` takes. Programs on the board and operators granted them may run them |
+
+A sample's time is the wall clock when the bridge read it, as Orion's own publishers stamp them.
+
+When lemnosd stops or comes back with another device list, the bridge publishes `state = gone`
+on every status topic, withdraws every resource (their records are deleted) and ends its Orion
+session, which is how Orion tells each subscriber
+of a topic that its publisher is gone: Orion has no way to take back one topic on its own. When
+lemnosd is back, the same topics are declared again and their subscribers carry on. A device
+that is not running when the bridge reads the list has no description yet; the bridge reads the
+devices again when it starts running. When the
+Orion comm core restarts, the bridge connects again and says every topic, action and resource
+again. Both sides retry forever.
+
+It reads `LEMNOSD_SOCKET`, `ORION_ADDRESS` (any address the Orion client takes; the board's own
+`/run/orion/orion.sock` when unset) and `ORION_NODE_ID` (when set, a comm core that is any other
+node gets nothing). It has been run against a real Orion node on a PC
+([`B20.md`](../testing/board-runs/B20.md) has that run); not yet on a board.
 
 ```sh
 kill %1
