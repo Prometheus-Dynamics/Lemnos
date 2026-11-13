@@ -14,7 +14,7 @@ use lemnos_core::{
     contract, driver,
 };
 use lemnos_driver_bmm150::Bmm150;
-use lemnos_driver_generic_sensor::GenericSensor;
+use lemnos_driver_generic_sensor::GenericMagnetometer;
 use lemnos_driver_ina2xx::Ina2xx;
 use lemnos_driver_ina2xx::chip::{Calibration, Ina, Model};
 use lemnos_hal::i2c::{I2c as _, Operation};
@@ -35,7 +35,7 @@ const READ: MethodId = MethodId {
     method: 1,
 };
 
-/// The made-up chip `generic-sensor`'s own tests describe.
+/// The made-up chip the description drivers' own tests describe.
 const SIM_MAG: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../drivers/generic-sensor/tests/chips/sim-mag.chip"
@@ -124,7 +124,7 @@ config = {{ chip = "ina226", shunt_ohms = 0.01, max_current_a = 8.192 }}
 
 [[devices]]
 id = "described"
-driver = "generic-sensor"
+driver = "generic-magnetometer"
 bus = "i2c"
 {owner}
 config = {{ address = {DESCRIBED}, description = "{SIM_MAG}" }}
@@ -136,7 +136,7 @@ config = {{ address = {DESCRIBED}, description = "{SIM_MAG}" }}
         &[
             entry::<Bmm150>(),
             entry::<Ina2xx>(),
-            entry::<GenericSensor>(),
+            entry::<GenericMagnetometer>(),
         ],
     );
     (host, clock, bus)
@@ -332,7 +332,7 @@ impl Configurer {
             .write_sequence(&[RegWrite::word(0x00, 0x4527), RegWrite::word(0x05, 0x0800)])
             .map_err(bus_error);
         record("ina226 register words", outcome);
-        // generic-sensor: the description's start-up writes.
+        // generic-magnetometer: the description's start-up writes.
         for (what, register, value) in [
             ("described soft reset", 0x0a, 0x80),
             ("described mode", 0x09, 0x1d),

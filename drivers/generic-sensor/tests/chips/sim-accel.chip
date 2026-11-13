@@ -1,0 +1,9 @@
+# A made-up three-axis accelerometer for the simulated bus. Each axis is a
+# 12-bit two's-complement count, left-justified in two little-endian bytes.
+
+identity 0x0f 0x33                      # who-am-I reads 0x33
+init 0x20 0x57                          # all axes on, 100 Hz
+
+axis x 0x28 12 little signed 0.0095768 shift 4   # m/s² per count (1 mg)
+axis y 0x2a 12 little signed 0.0095768 shift 4
+axis z 0x2c 12 little signed 0.0095768 shift 4

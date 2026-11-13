@@ -6,7 +6,7 @@ part is: it matches tags, carries calls and values, and runs drivers under its f
 
 | Form | What you write | Use it when |
 |---|---|---|
-| **Description** | A text file that describes the chip's registers. No code. | A register-based sensor with a contract that already exists, and a generic driver (`drivers/generic-sensor`) covers it. |
+| **Description** | A text file that describes the chip's registers. No code. | A register-based magnetometer, accelerometer, gyroscope, temperature sensor or power monitor (`drivers/generic-sensor`). |
 | **Built in** | A crate under `drivers/` with a `#[driver]` type. | The part needs code: a state machine, a block, a protocol. |
 | **Package** | A compiled file that lemnosd loads through `lemnos-abi`. | A part that must be added to a device after the image is built. The driver is written exactly as a built-in one. |
 
@@ -16,8 +16,11 @@ the driver.
 
 ## The description form
 
-The `magnetometer/1` contract is served by `drivers/generic-sensor`. Its contract and value names
-are fixed in code. The file gives only the chip's facts.
+Five contracts can be served from a description: `magnetometer/1`, `accelerometer/1`,
+`gyroscope/1`, `temperature/1` and `power-monitor/1`, by the drivers `generic-magnetometer`,
+`generic-accelerometer`, `generic-gyroscope`, `generic-temperature` and `generic-power-monitor`
+in `drivers/generic-sensor`. Each contract's value names are fixed in code. The file gives only
+the chip's facts.
 
 A whole file, from `drivers/generic-sensor/tests/chips/sim-mag.chip`:
 
@@ -32,22 +35,47 @@ wait 2                                  # ms before the chip takes its next writ
 init 0x09 0x1d                          # continuous measurement
 
 axis x 0x01 16 little signed 0.000001   # tesla per count
-axis y 0x03 16 big signed 0.000001
+axis y 0x03 16 little signed 0.000001
 axis z 0x05 24 little signed 0.000001
+```
+
+And a power monitor's, from `sim-power.chip` beside it, with 16-bit start-up writes:
+
+```text
+identity 0xfe 0x22                      # die ID
+init 0x00 0x4127 16 big                 # configuration: averaging and continuous
+init 0x0a 0x0200 16 big                 # calibration
+
+value shunt_v 0x02 16 big signed 0.0000025      # V per count
+value bus_v 0x04 16 big unsigned 0.00125        # V per count
+value power_w 0x06 16 big unsigned 0.025        # W per count
+value current_a 0x08 16 big signed 0.001        # A per count
 ```
 
 The lines are:
 
 - `identity <register> <value>`: optional. Checked before every start. A wrong value is reported as
   `NOT_SUPPORTED` and health is `Failed("identity mismatch")`, and the next read checks again.
-- `init <register> <value>`: a register write, run in file order when the chip starts.
+- `init <register> <value> [<bits> <little|big>]`: a register write, run in file order when the
+  chip starts. One byte, unless `bits` (8, 16, 24 or 32) and a byte order say wider.
 - `wait <milliseconds>`: holds the start-up here. The driver answers `AGAIN` until the host's clock
   passes the time; nothing sleeps.
-- `axis <x|y|z> <register> <bits> <little|big> <signed|unsigned> <scale>`: one axis of the vector.
-  Each of x, y and z is needed once. `scale` is contract units per count (tesla here).
+- `axis <x|y|z> <register> <bits> <little|big> <signed|unsigned> <scale> [shift <n>] [offset <o>]`:
+  one axis of the vector, for the magnetometer, accelerometer and gyroscope. Each of x, y and z is
+  needed once.
+- `value <name> ...`, with the same words after the name: one value, for the others. Temperature
+  takes `temperature` (°C); a power monitor takes `bus_v` and `shunt_v` (V), `current_a` (A) and
+  `power_w` (W), each needed once.
+
+A channel's number is `bits` wide (1 to 32) and sits `shift` bits above the bottom of the bytes
+read at its register: a 12-bit count left-justified in two bytes is `12 ... shift 4`. As many bytes
+are read as `bits` and `shift` fill, at most four. A signed number is two's complement in its
+`bits`. Its value is `count * scale + offset`, in the contract's unit (tesla, m/s², rad/s, °C, V,
+A, W).
 
 Numbers are decimal or `0x` hex, `#` starts a comment, and there are at most 32 `init` and `wait`
-lines. Registers are 8-bit. An axis is 8, 16, 24 or 32 bits.
+lines. Registers are 8-bit addresses. An accelerometer's or gyroscope's batches need the chip's
+FIFO, which a description does not cover, so `read_batch` answers `NOT_SUPPORTED`.
 
 The chip's I2C address is wiring, so it goes in the board file. The description goes in the same
 entry as one `description` setting. Without `std` it is the text itself; with `std` it is a path to
@@ -56,25 +84,25 @@ the file, read once at bind:
 ```toml
 [[devices]]
 id = "mag1"
-driver = "generic-sensor"
+driver = "generic-magnetometer"
 bus = "<the bus the board names>"
 config = { address = 0x2c, description = "/etc/lemnos/chips/sim-mag.chip" }
 ```
 
-Binding parses the file once into fixed arrays. A file with a bad line is refused at bind with
-`INVALID_ARGUMENT`; the parser's error names the line, and the tests in `src/tests.rs` check each
-refusal.
+Binding parses the file once into fixed arrays. A file with a bad line, or one written for another
+contract, is refused at bind with `INVALID_ARGUMENT`; the parser's error names the line, and the
+tests in `src/tests.rs` and `src/kinds.rs` check each refusal.
 
 To prove a new file, put it under `tests/chips/` and bind it on the simulated bus the way
-`src/tests.rs` does. Then break one register in the file and check that the test fails before you
+`src/kinds.rs` does. Then break one register in the file and check that the test fails before you
 restore it.
 
 ```sh slow
 cargo test -q -p lemnos-driver-generic-sensor
 ```
 
-The generic driver serves `magnetometer/1` only. A chip for another contract needs a built-in
-driver, or a generic driver for that contract.
+A chip for another contract, or one that needs more than register reads (a FIFO, a conversion
+command and a poll, values computed from calibration data), needs a built-in driver.
 
 ## The built-in form
 

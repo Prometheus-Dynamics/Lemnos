@@ -5,58 +5,125 @@
 //! or `0x` hex. The lines are:
 //!
 //! - `identity <register> <value>`: the identity register and the value it must read. Optional.
-//! - `init <register> <value>`: a register write. Writes run in file order when the chip starts.
+//! - `init <register> <value> [<bits> <little|big>]`: a register write, one byte unless `bits` (8,
+//!   16, 24 or 32) and a byte order say wider. Writes run in file order when the chip starts.
 //! - `wait <milliseconds>`: the start-up stops here until that much time has passed.
-//! - `axis <x|y|z> <register> <bits> <little|big> <signed|unsigned> <scale>`: where one axis of the
-//!   vector sits, and its value in the contract's unit per count. Each of x, y and z is needed once.
+//! - `axis <x|y|z> <register> <bits> <little|big> <signed|unsigned> <scale> [shift <n>] [offset <o>]`:
+//!   one axis of a vector, for the vector contracts (magnetometer, accelerometer, gyroscope).
+//! - `value <name> <register> <bits> <little|big> <signed|unsigned> <scale> [shift <n>] [offset <o>]`:
+//!   one named value, for the other contracts. [`Kind::channels`] lists the names each contract
+//!   takes, and every one of them is needed once.
 //!
-//! Registers are 8-bit. An axis is 8, 16, 24 or 32 bits, starting at its register. At most
-//! [`MAX_STEPS`] identity, init and wait lines are allowed.
+//! A channel's number is `bits` wide (1 to 32) and sits `shift` bits up from the bottom of the
+//! bytes read at its register (default 0). As many bytes are read as `bits + shift` fills, at most
+//! four, in the byte order given. A signed number is two's complement in its `bits`. Its value in
+//! the contract's unit is `count * scale + offset` (offset default 0).
+//!
+//! Registers are 8-bit. At most [`MAX_STEPS`] init and wait lines are allowed.
 
 use lemnos_hal::register::Endian;
 
 /// The most `init` and `wait` lines a description may hold.
 pub const MAX_STEPS: usize = 32;
 
+/// The most channels a contract reads.
+pub const MAX_CHANNELS: usize = 4;
+
+/// Which contract a description is read for. Each names the channels the file must give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `magnetometer/1`: axes x, y, z in tesla.
+    Magnetometer,
+    /// `accelerometer/1`: axes x, y, z in m/s².
+    Accelerometer,
+    /// `gyroscope/1`: axes x, y, z in rad/s.
+    Gyroscope,
+    /// `temperature/1`: the value `temperature` in °C.
+    Temperature,
+    /// `power-monitor/1`: the values `bus_v`, `shunt_v` (volts), `current_a` (amps) and `power_w`
+    /// (watts).
+    PowerMonitor,
+}
+
+impl Kind {
+    /// The line key its channels are given with: `axis` for a vector, `value` otherwise.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Magnetometer | Self::Accelerometer | Self::Gyroscope => "axis",
+            Self::Temperature | Self::PowerMonitor => "value",
+        }
+    }
+
+    /// The channels, in the order a read answers them.
+    pub const fn channels(self) -> &'static [&'static str] {
+        match self {
+            Self::Magnetometer | Self::Accelerometer | Self::Gyroscope => &["x", "y", "z"],
+            Self::Temperature => &["temperature"],
+            Self::PowerMonitor => &["bus_v", "shunt_v", "current_a", "power_w"],
+        }
+    }
+}
+
 /// One start-up step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Write one byte.
-    Write { register: u8, value: u8 },
+    /// Write `bytes` bytes of `value` in `endian` order, starting at `register`.
+    Write {
+        register: u8,
+        value: u32,
+        bytes: u8,
+        endian: Endian,
+    },
     /// Stop here until this many milliseconds have passed.
     Wait { millis: u32 },
 }
 
-/// Where one axis of the vector is, and how to turn its counts into the contract's unit.
+/// Where one channel is, and how to turn its counts into the contract's unit.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Axis {
+pub struct Channel {
     pub register: u8,
-    /// Width in bytes: 1 to 4.
+    /// Bytes read: 1 to 4.
     pub bytes: u8,
+    /// Width of the number: 1 to 32.
+    pub bits: u8,
+    /// Bits below the number.
+    pub shift: u8,
     pub endian: Endian,
     pub signed: bool,
     /// Contract units per count.
     pub scale: f32,
+    /// Added after scaling, in contract units.
+    pub offset: f32,
 }
 
-impl Axis {
+impl Channel {
     const ZERO: Self = Self {
         register: 0,
         bytes: 1,
+        bits: 8,
+        shift: 0,
         endian: Endian::Little,
         signed: false,
         scale: 0.0,
+        offset: 0.0,
     };
 
     /// The value of raw register bytes read as one number, in the contract's unit.
     pub fn units(&self, raw: u32) -> f32 {
-        let count = if self.signed {
-            let shift = 32 - 8 * u32::from(self.bytes);
-            (((raw << shift) as i32) >> shift) as f32
+        let bits = u32::from(self.bits);
+        let field = raw >> self.shift;
+        let field = if bits == 32 {
+            field
         } else {
-            raw as f32
+            field & ((1u32 << bits) - 1)
         };
-        count * self.scale
+        let count = if self.signed {
+            let up = 32 - bits;
+            (((field << up) as i32) >> up) as f32
+        } else {
+            field as f32
+        };
+        count * self.scale + self.offset
     }
 }
 
@@ -70,22 +137,25 @@ pub struct ParseError {
 /// A parsed description.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Chip {
+    kind: Kind,
     identity: Option<(u8, u8)>,
     steps: [Step; MAX_STEPS],
     len: usize,
-    axes: [Axis; 3],
+    channels: [Channel; MAX_CHANNELS],
 }
 
 impl Chip {
-    /// Parses a description. Every line is checked, so a description that parses is complete.
-    pub fn parse(text: &str) -> Result<Self, ParseError> {
+    /// Parses a description for `kind`. Every line is checked, so a description that parses is
+    /// complete.
+    pub fn parse(text: &str, kind: Kind) -> Result<Self, ParseError> {
         let mut chip = Self {
+            kind,
             identity: None,
             steps: [Step::Wait { millis: 0 }; MAX_STEPS],
             len: 0,
-            axes: [Axis::ZERO; 3],
+            channels: [Channel::ZERO; MAX_CHANNELS],
         };
-        let mut seen = [false; 3];
+        let mut seen = [false; MAX_CHANNELS];
         for (index, raw) in text.lines().enumerate() {
             let line = raw.split('#').next().unwrap_or("");
             let mut words = line.split_whitespace();
@@ -97,13 +167,21 @@ impl Chip {
                 reason,
             })?;
         }
-        if seen.iter().any(|&axis| !axis) {
+        if seen[..kind.channels().len()].iter().any(|&given| !given) {
             return Err(ParseError {
                 line: 0,
-                reason: "axis x, y and z are each needed",
+                reason: match kind.key() {
+                    "axis" => "axis x, y and z are each needed",
+                    _ => "a value the contract reads is missing",
+                },
             });
         }
         Ok(chip)
+    }
+
+    /// The contract the description was read for.
+    pub fn kind(&self) -> Kind {
+        self.kind
     }
 
     /// The identity register and the value it must read, if the description checks one.
@@ -116,9 +194,9 @@ impl Chip {
         &self.steps[..self.len]
     }
 
-    /// The x, y and z axes.
-    pub fn axes(&self) -> &[Axis; 3] {
-        &self.axes
+    /// The channels, in the order of [`Kind::channels`].
+    pub fn channels(&self) -> &[Channel] {
+        &self.channels[..self.kind.channels().len()]
     }
 
     fn push(&mut self, step: Step) -> Result<(), &'static str> {
@@ -133,7 +211,7 @@ impl Chip {
 
 fn line_into<'a>(
     chip: &mut Chip,
-    seen: &mut [bool; 3],
+    seen: &mut [bool; MAX_CHANNELS],
     key: &str,
     words: &mut impl Iterator<Item = &'a str>,
 ) -> Result<(), &'static str> {
@@ -146,59 +224,62 @@ fn line_into<'a>(
             chip.identity = Some((register, byte(words.next())?));
         }
         "init" => {
-            let step = Step::Write {
-                register: byte(words.next())?,
-                value: byte(words.next())?,
+            let register = byte(words.next())?;
+            let value = number(words.next())?;
+            let (bytes, endian) = match words.next() {
+                None => (1, Endian::Big),
+                Some(bits) => {
+                    let bytes = match number(Some(bits))? {
+                        8 => 1,
+                        16 => 2,
+                        24 => 3,
+                        32 => 4,
+                        _ => return Err("an init's bits is 8, 16, 24 or 32"),
+                    };
+                    (bytes, endian_of(words.next())?)
+                }
             };
-            chip.push(step)?;
+            if bytes < 4 && value >> (8 * u32::from(bytes)) != 0 {
+                return Err("a register or value is wider than its bits");
+            }
+            chip.push(Step::Write {
+                register,
+                value,
+                bytes,
+                endian,
+            })?;
         }
         "wait" => {
             let millis = number(words.next())?;
             chip.push(Step::Wait { millis })?;
         }
-        "axis" => {
-            let slot = match words.next() {
-                Some("x") => 0,
-                Some("y") => 1,
-                Some("z") => 2,
-                _ => return Err("axis is x, y or z"),
-            };
-            if seen[slot] {
-                return Err("axis given twice");
+        "axis" | "value" => {
+            if key != chip.kind.key() {
+                return Err(match key {
+                    "axis" => "this contract takes value lines, not axis lines",
+                    _ => "this contract takes axis lines, not value lines",
+                });
             }
-            let register = byte(words.next())?;
-            let bytes = match number(words.next())? {
-                8 => 1,
-                16 => 2,
-                24 => 3,
-                32 => 4,
-                _ => return Err("bits is 8, 16, 24 or 32"),
-            };
-            let endian = match words.next() {
-                Some("little") => Endian::Little,
-                Some("big") => Endian::Big,
-                _ => return Err("endian is little or big"),
-            };
-            let signed = match words.next() {
-                Some("signed") => true,
-                Some("unsigned") => false,
-                _ => return Err("sign is signed or unsigned"),
-            };
-            let scale = words
-                .next()
-                .ok_or("missing scale")?
-                .parse::<f32>()
-                .ok()
-                .filter(|scale| scale.is_finite())
-                .ok_or("scale is not a finite number")?;
+            let name = words.next().ok_or("missing name")?;
+            let slot = chip
+                .kind
+                .channels()
+                .iter()
+                .position(|known| *known == name)
+                .ok_or(match key {
+                    "axis" => "axis is x, y or z",
+                    _ => "not a value this contract reads",
+                })?;
+            if seen[slot] {
+                return Err(match key {
+                    "axis" => "axis given twice",
+                    _ => "value given twice",
+                });
+            }
+            chip.channels[slot] = channel(words)?;
             seen[slot] = true;
-            chip.axes[slot] = Axis {
-                register,
-                bytes,
-                endian,
-                signed,
-                scale,
-            };
+            // `channel` takes the options to the end of the line.
+            return Ok(());
         }
         _ => return Err("unknown line"),
     }
@@ -206,6 +287,63 @@ fn line_into<'a>(
         return Err("extra text at the end of the line");
     }
     Ok(())
+}
+
+/// The rest of an `axis` or `value` line: where the number is, and its scale.
+fn channel<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<Channel, &'static str> {
+    let register = byte(words.next())?;
+    let bits = number(words.next())?;
+    if !(1..=32).contains(&bits) {
+        return Err("bits is 1 to 32");
+    }
+    let endian = endian_of(words.next())?;
+    let signed = match words.next() {
+        Some("signed") => true,
+        Some("unsigned") => false,
+        _ => return Err("sign is signed or unsigned"),
+    };
+    let scale = finite(words.next(), "missing scale")?;
+    let mut shift = None;
+    let mut offset = None;
+    while let Some(option) = words.next() {
+        match option {
+            "shift" if shift.is_none() => shift = Some(number(words.next())?),
+            "offset" if offset.is_none() => offset = Some(finite(words.next(), "missing offset")?),
+            "shift" | "offset" => return Err("an option is given twice"),
+            _ => return Err("extra text at the end of the line"),
+        }
+    }
+    let shift = shift.unwrap_or(0);
+    let span = bits.checked_add(shift).filter(|span| *span <= 32);
+    let Some(span) = span else {
+        return Err("bits and shift together are more than 32");
+    };
+    Ok(Channel {
+        register,
+        bytes: span.div_ceil(8) as u8,
+        bits: bits as u8,
+        shift: shift as u8,
+        endian,
+        signed,
+        scale,
+        offset: offset.unwrap_or(0.0),
+    })
+}
+
+fn endian_of(word: Option<&str>) -> Result<Endian, &'static str> {
+    match word {
+        Some("little") => Ok(Endian::Little),
+        Some("big") => Ok(Endian::Big),
+        _ => Err("endian is little or big"),
+    }
+}
+
+fn finite(word: Option<&str>, missing: &'static str) -> Result<f32, &'static str> {
+    word.ok_or(missing)?
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or("scale or offset is not a finite number")
 }
 
 fn number(word: Option<&str>) -> Result<u32, &'static str> {

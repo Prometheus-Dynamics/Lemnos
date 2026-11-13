@@ -1,0 +1,6 @@
+# A made-up temperature sensor for the simulated bus: a 12-bit two's-complement
+# count in the top of two big-endian bytes, 1/16 °C each.
+
+init 0x04 0x60a0 16 big                 # configuration: 12 bits, continuous
+
+value temperature 0x00 12 big signed 0.0625 shift 4

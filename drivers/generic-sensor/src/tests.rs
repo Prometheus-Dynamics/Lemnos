@@ -1,7 +1,7 @@
 //! The description driver on a simulated bus, next to the hand-written BMM150 on the same bus.
 
 use super::*;
-use description::{MAX_STEPS, ParseError};
+use description::{Kind, MAX_STEPS, ParseError};
 use lemnos_core::{Description, Driver, Resources};
 use lemnos_driver_bmm150::{Bmm150, DEFAULT_ADDRESS as BMM150_ADDRESS};
 use lemnos_hal::register::Endian;
@@ -43,13 +43,16 @@ fn set_field(sim: &SimI2c, x: i16, y: i16, z: i32) {
 }
 
 /// Binds the description driver to `board` with the given settings.
-fn bind_with(board: &mut SimBoard, entries: &[(&str, ConfigValue<'_>)]) -> Result<GenericSensor> {
+fn bind_with(
+    board: &mut SimBoard,
+    entries: &[(&str, ConfigValue<'_>)],
+) -> Result<GenericMagnetometer> {
     let config = Config::new(entries);
     let mut res = Resources::new(board, None);
-    GenericSensor::bind(&mut res, &config)
+    GenericMagnetometer::bind(&mut res, &config)
 }
 
-fn bind(board: &mut SimBoard, address: i64, description: &str) -> Result<GenericSensor> {
+fn bind(board: &mut SimBoard, address: i64, description: &str) -> Result<GenericMagnetometer> {
     bind_with(
         board,
         &[
@@ -88,9 +91,9 @@ fn close(actual: f32, expected: f32) {
 
 /// Starts the chip: the first read answers AGAIN and runs start-up to its `wait`; the tick passes
 /// the wait; the next read finishes start-up and measures.
-fn start(mag: &mut GenericSensor) -> Vector3 {
+fn start(mag: &mut GenericMagnetometer) -> Vector3 {
     assert_eq!(mag.read(), Err(Status::AGAIN));
-    let at = mag.now_ns + 2_000_000;
+    let at = mag.sensor.now_ns + 2_000_000;
     assert_eq!(Driver::tick(mag, at), None);
     mag.read().unwrap()
 }
@@ -203,7 +206,7 @@ fn a_description_that_does_not_parse_is_refused_at_bind() {
     let cases = [
         "frobnicate 1",
         "axis w 0x01 16 little signed 1",
-        "axis x 0x01 12 little signed 1\naxis y 0 8 little signed 1\naxis z 0 8 little signed 1",
+        "axis x 0x01 33 little signed 1\naxis y 0 8 little signed 1\naxis z 0 8 little signed 1",
         "axis x 0x01 16 middle signed 1\naxis y 0 8 little signed 1\naxis z 0 8 little signed 1",
         "axis x 0x01 16 little signed nan\naxis y 0 8 little signed 1\naxis z 0 8 little signed 1",
         "axis x 0x01 16 little signed 1",
@@ -252,23 +255,27 @@ fn settings_are_checked_at_bind() {
 
 #[test]
 fn the_chip_file_parses_to_its_facts() {
-    let chip = Chip::parse(TEXT).unwrap();
+    let chip = Chip::parse(TEXT, Kind::Magnetometer).unwrap();
     assert_eq!(chip.identity(), Some((0x00, 0x48)));
     assert_eq!(
         chip.steps(),
         &[
             Step::Write {
                 register: 0x0a,
-                value: 0x80
+                value: 0x80,
+                bytes: 1,
+                endian: Endian::Big,
             },
             Step::Wait { millis: 2 },
             Step::Write {
                 register: 0x09,
-                value: 0x1d
+                value: 0x1d,
+                bytes: 1,
+                endian: Endian::Big,
             },
         ]
     );
-    let [x, y, z] = *chip.axes();
+    let [x, y, z] = <[_; 3]>::try_from(chip.channels()).unwrap();
     assert_eq!(
         (x.register, x.bytes, x.endian, x.signed),
         (0x01, 2, Endian::Little, true)
@@ -319,7 +326,7 @@ fn parse_errors_name_the_line() {
             "axis x 0x01 16 little signed nan",
             ParseError {
                 line: 1,
-                reason: "scale is not a finite number",
+                reason: "scale or offset is not a finite number",
             },
         ),
         (
@@ -352,17 +359,25 @@ fn parse_errors_name_the_line() {
         ),
     ];
     for (text, expected) in cases {
-        assert_eq!(Chip::parse(text).err(), Some(expected), "{text}");
+        assert_eq!(
+            Chip::parse(text, Kind::Magnetometer).err(),
+            Some(expected),
+            "{text}"
+        );
     }
     assert_eq!(
-        Chip::parse(&"init 0x01 0x01\n".repeat(MAX_STEPS + 1)).err(),
+        Chip::parse(
+            &"init 0x01 0x01\n".repeat(MAX_STEPS + 1),
+            Kind::Magnetometer
+        )
+        .err(),
         Some(ParseError {
             line: MAX_STEPS + 1,
             reason: "too many init and wait lines",
         })
     );
     assert_eq!(
-        Chip::parse("init 0x01 0x01\n").err(),
+        Chip::parse("init 0x01 0x01\n", Kind::Magnetometer).err(),
         Some(ParseError {
             line: 0,
             reason: "axis x, y and z are each needed",
@@ -374,9 +389,10 @@ fn parse_errors_name_the_line() {
 fn numbers_are_decimal_or_hex_and_axes_decode_their_width() {
     let chip = Chip::parse(
         "axis x 0x10 8 little unsigned 1\naxis y 16 16 little signed 1\naxis z 0 32 big unsigned 1\n",
+        Kind::Magnetometer,
     )
     .unwrap();
-    let [x, y, z] = *chip.axes();
+    let [x, y, z] = <[_; 3]>::try_from(chip.channels()).unwrap();
     assert_eq!(x.register, 0x10);
     assert_eq!(y.register, 16);
     assert_eq!(x.units(0xff), 255.0);
@@ -385,9 +401,10 @@ fn numbers_are_decimal_or_hex_and_axes_decode_their_width() {
 
     let signed24 = Chip::parse(
         "axis x 0 24 little signed 1\naxis y 0 8 little signed 1\naxis z 0 8 little signed 1\n",
+        Kind::Magnetometer,
     )
     .unwrap();
-    assert_eq!(signed24.axes()[0].units(0xff_ff_fe), -2.0);
+    assert_eq!(signed24.channels()[0].units(0xff_ff_fe), -2.0);
 }
 
 #[cfg(feature = "std")]
