@@ -17,7 +17,9 @@ use crate::regs::{
     AE_BASE, AE_MEAN_0, AWB_BASE, BLS_A_FIXED, BLS_BASE, CTRL_CFG_UPD, CTRL_GAMMA_OUT_ENABLE,
     CTRL_GEN_CFG_UPD, HIST_BASE, HIST_BIN_0, HIST_WEIGHTS_0, ISP_AWB_GAIN_G, ISP_AWB_PROP,
     ISP_AWB_WHITE_CNT, ISP_CC_COEFF_0, ISP_CT_OFFSET_R, ISP_CTRL, ISP_GAMMA_OUT_MODE,
-    ISP_GAMMA_OUT_Y_0, LSC_BASE, WINDOW_BYTES,
+    ISP_GAMMA_OUT_Y_0, LSC_ADDR_MASK, LSC_CTRL, LSC_DATA_MASK, LSC_EN, LSC_GRAD_PAIR_MASK,
+    LSC_R_TABLE_ADDR, LSC_R_TABLE_DATA, LSC_SECT_PAIR_MASK, LSC_TABLE_SEL, LSC_XGRAD_0,
+    LSC_XSIZE_0, WINDOW_BYTES,
 };
 
 /// A run of `count` consecutive registers from `first`, each taking the bits in `mask`.
@@ -53,7 +55,7 @@ impl Span {
 const ALL: u32 = u32::MAX;
 
 /// The registers a caller may write: offsets and masks from [`crate::regs`].
-pub const WRITABLE: [Span; 14] = [
+pub const WRITABLE: [Span; 19] = [
     // isp_ctrl: only the gamma-out enable and the two shadow-update strobes. Its other bits
     // (the ISP's enable, the input selection) are kept as they are.
     Span::new(
@@ -71,9 +73,15 @@ pub const WRITABLE: [Span; 14] = [
     Span::new(ISP_GAMMA_OUT_Y_0, 17, ALL),
     // isp_ct_offset_r, _g, _b.
     Span::new(ISP_CT_OFFSET_R, 3, ALL),
-    // Lens shading: control, the table addresses and data, gradients, sector sizes and the
-    // table selection (`LSC_BASE` to `LSC_TABLE_SEL`).
-    Span::new(LSC_BASE, 26, ALL),
+    // Lens shading (`LSC_BASE` to `LSC_TABLE_SEL`), each register with its field bits only: the
+    // enable; the four table address pointers (9 bits); the four sample words (two 12-bit samples
+    // each); the X and Y gradient pairs (8 words) and sector size pairs (8 words); the table select.
+    Span::new(LSC_CTRL, 1, LSC_EN),
+    Span::new(LSC_R_TABLE_ADDR, 4, LSC_ADDR_MASK),
+    Span::new(LSC_R_TABLE_DATA, 4, LSC_DATA_MASK),
+    Span::new(LSC_XGRAD_0, 8, LSC_GRAD_PAIR_MASK),
+    Span::new(LSC_XSIZE_0, 8, LSC_SECT_PAIR_MASK),
+    Span::new(LSC_TABLE_SEL, 1, 1),
     // Histogram: properties and the first sub-window (`HIST_PROP` to `HIST_V_SIZE`).
     Span::new(HIST_BASE, 5, ALL),
     // Histogram weights (`hist_weight_00to30` to `hist_weight_44`).

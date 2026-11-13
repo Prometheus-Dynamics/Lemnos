@@ -180,6 +180,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E39.md`](../testing/board-runs/E39.md) | Capture straight into a stream's dma-bufs, and whether the vendor capture drivers take them at all |
 | [`H5a.md`](../testing/board-runs/H5a.md) | `rkcif`'s 16-bit word layout through the vendor memory-mode request, a frame in planes straight into a stream, capture on standby |
 | [`E11.md`](../testing/board-runs/E11.md) | `k230isp`: the register window, the request numbers, refusals, statistics |
+| [`U2b.md`](../testing/board-runs/U2b.md) | Not run yet: `k230isp` lens shading: the 634-write load, the mapping of samples to sectors, the last sample of each row, the bank readback |
 | [`H8b.md`](../testing/board-runs/H8b.md) | The K230 ISP through `lemnos.ko`: the main path's register map, frames into dma-bufs, the buffer switch at a frame's end, refusals, a stall reset; `k230-capture` and `k230isp` on one ISP at once |
 | [`E30.md`](../testing/board-runs/E30.md) | `k230-capture`: nodes, the link, guard pages, formats, stop and restart |
 | [`H1.md`](../testing/board-runs/H1.md) | The kernel module's `unconfined=`: the K230 ISP's registers mapped though no IOMMU confines it |

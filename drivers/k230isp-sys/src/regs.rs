@@ -161,6 +161,20 @@ pub const LSC_YSIZE_0: u32 = LSC_BASE + 0x54;
 pub const LSC_TABLE_SEL: u32 = LSC_BASE + 0x64;
 /// Bit 0 of [`LSC_CTRL`]: the correction is enabled.
 pub const LSC_EN: u32 = 1;
+/// Bits of a sample word (`LSC_*_TABLE_DATA`): two 12-bit samples, the first at bit 0 and the
+/// second at [`LSC_SAMPLE_1_SHIFT`]. `mrv_all_regs.h` (`MRV_LSC_R_SAMPLE_0` and `_1`); the same
+/// packing as rkisp1's `RKISP1_CIF_ISP_LSC_TABLE_DATA_V10`.
+pub const LSC_DATA_MASK: u32 = 0x00FF_FFFF;
+/// Bits of a gradient pair word (`LSC_XGRAD_0`, `LSC_YGRAD_0`, every 4 bytes): two 12-bit factors
+/// at bit 0 and [`LSC_PAIR_SHIFT`] (`MRV_LSC_XGRAD_0` and `_1`).
+pub const LSC_GRAD_PAIR_MASK: u32 = 0x0FFF_0FFF;
+/// Bits of a sector size pair word (`LSC_XSIZE_0`, `LSC_YSIZE_0`): two 10-bit sizes at bit 0 and
+/// [`LSC_PAIR_SHIFT`] (`MRV_LSC_X_SECT_SIZE_0` and `_1`).
+pub const LSC_SECT_PAIR_MASK: u32 = 0x03FF_03FF;
+/// Words in one table bank: 17 rows of 9 sample words (`MRV_LSC_R_RAM_ADDR_MAX_BANK0` is 0x98,
+/// so bank 0 is addresses 0 to 152). Bank 1 starts at [`LSC_BANK_WORDS`] (address 153, the
+/// `MRV_LSC_R_RAM_ADDR_MIN_BANK1` of `mrv_all_regs.h`, 0x99 = 153 is its first address).
+pub const LSC_BANK_WORDS: u32 = 153;
 /// Mask of a [`LSC_R_TABLE_ADDR`] register.
 pub const LSC_ADDR_MASK: u32 = 0x1FF;
 /// Mask of one sample in a table word.

@@ -67,6 +67,11 @@
 #define MI_MIS 0x16d0
 #define MI_RIS 0x16e0
 #define AE_MEAN_0 0x2614
+#define LSC_CTRL 0x2200
+#define LSC_R_TABLE_ADDR 0x2204
+#define LSC_R_TABLE_DATA 0x2214
+#define LSC_XSIZE_0 0x2244
+#define LSC_TABLE_SEL 0x2264
 
 #define WINDOW 0x9000
 #define PLANES 3	/* Y, Cb, Cr */
@@ -625,6 +630,26 @@ static void test_roles(__u32 block)
 	      "keeps the gamma bit too");
 	write_refused(sess, ISP_AWB_PROP, 1, EPERM, "frames, outside a job: a configuration register");
 	write_refused(sess, MI_MP_Y_BASE, 0, EPERM, "frames, outside a job: a plane's base");
+
+	/*
+	 * Lens shading, the configuration role's: the enable, a table address, two 12-bit samples
+	 * to a word, a sector size, and the table select, each with its field bits (the masks of
+	 * lemnos_regjob_k230isp.c). A value past a field is refused, as the masks say.
+	 */
+	check(write1(cfg, LSC_CTRL, 1) == 0 && reg(LSC_CTRL) == 1,
+	      "lens shading: the enable is written");
+	check(write1(cfg, LSC_R_TABLE_ADDR, 153) == 0 && reg(LSC_R_TABLE_ADDR) == 153,
+	      "lens shading: bank 1's address (153)");
+	check(write1(cfg, LSC_R_TABLE_DATA, 0x00ffffff) == 0 &&
+		      reg(LSC_R_TABLE_DATA) == 0x00ffffff,
+	      "lens shading: two 12-bit samples to a word");
+	check(write1(cfg, LSC_XSIZE_0, 0x03ff03ff) == 0 && reg(LSC_XSIZE_0) == 0x03ff03ff,
+	      "lens shading: two 10-bit sector sizes");
+	write_refused(cfg, LSC_R_TABLE_DATA, 0x01000000, EPERM,
+		      "lens shading: a bit past the sample pair");
+	write_refused(cfg, LSC_XSIZE_0, 0x00000400, EPERM, "lens shading: a sector size past 10 bits");
+	write_refused(cfg, LSC_CTRL, 2, EPERM, "lens shading: a bit past the enable");
+	write_refused(cfg, LSC_TABLE_SEL, 2, EPERM, "lens shading: a table past 1");
 
 	/* Events: the ISP core's interrupt, read and cleared by the module. */
 	check(event(cfg, &e) == EAGAIN, "no event before the interrupt (EAGAIN)");
