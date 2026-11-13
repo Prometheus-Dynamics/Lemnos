@@ -26,8 +26,11 @@
 //!
 //! - `address` (integer, required): the chip's 7-bit I2C address, or its Modbus unit id (1 to
 //!   247). This is wiring, so it is not in the description.
-//! - `description` (string, required): the description text itself. With the `std` feature, a path
-//!   to the description file, read once at bind.
+//! - `description` (string, required): the description text itself, in every build.
+//! - `description_file` (string, `std` builds only): a path to the description file, read once at
+//!   bind instead of `description`. A build without a filesystem refuses it by name, and giving both
+//!   keys is refused by name. A refused driver binds, its health names the setting, and every read
+//!   is `INVALID_ARGUMENT`.
 //! - On Modbus only: `baud` (default 9600), `parity` (`"none"`, `"even"` or `"odd"`, default
 //!   `"even"`, the Modbus serial line's own default), `stop_bits` (1 or 2, default 1) and
 //!   `response_ms` (1 to 500, default 100: how long a reply may take to start, and each pause
@@ -167,16 +170,58 @@ enum Port<'a> {
 }
 
 /// Which of the two a driver type takes.
+/// What a generic driver holds: the sensor its settings name, or the setting that refuses it. A
+/// refused driver still binds. Its health is `Failed` with the setting's name, and every read is
+/// `INVALID_ARGUMENT`, so the operator sees which key is wrong and nothing is guessed.
+#[derive(Debug)]
+// A refused driver holds no chip. Boxing the live one would need an allocator this crate does not have.
+#[allow(clippy::large_enum_variant)]
+enum Sensor {
+    Live(Live),
+    Refused(&'static str),
+}
+
+impl Sensor {
+    /// Reads the settings and the description for `kind`. Nothing touches the bus.
+    fn new(cfg: &Config<'_>, kind: Kind, wire: Wire) -> Result<Self> {
+        match chip(cfg, kind)? {
+            Ok(chip) => Ok(Self::Live(Live::new(cfg, chip, wire)?)),
+            Err(reason) => Ok(Self::Refused(reason)),
+        }
+    }
+
+    fn health(&self) -> Health {
+        match self {
+            Self::Live(live) => live.health(),
+            Self::Refused(reason) => Health::Failed(reason),
+        }
+    }
+
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        match self {
+            Self::Live(live) => live.tick(now_ns),
+            Self::Refused(_) => None,
+        }
+    }
+
+    fn read(&mut self, port: Port<'_>) -> Result<[f32; MAX_CHANNELS]> {
+        match self {
+            Self::Live(live) => live.read(port),
+            Self::Refused(_) => Err(Status::INVALID_ARGUMENT),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Wire {
     I2c,
     Uart,
 }
 
-/// What every generic driver shares: the parsed chip and where its start-up is. The bus stays in
-/// the driver type, which is what the host binds.
+/// A sensor the settings name: the parsed chip and where its start-up is. The bus stays in the
+/// driver type, which is what the host binds.
 #[derive(Debug)]
-pub struct Sensor {
+struct Live {
     link: Link,
     chip: Chip,
     phase: Phase,
@@ -192,11 +237,10 @@ pub struct Sensor {
     host_owned: bool,
 }
 
-impl Sensor {
-    /// Reads the settings and the description for `kind`, and checks that the driver was given
-    /// what the description's transport needs. Nothing touches the bus.
-    fn new(cfg: &Config<'_>, kind: Kind, wire: Wire) -> Result<Self> {
-        let chip = chip(cfg, kind)?;
+impl Live {
+    /// Checks that the driver was given what the description's transport needs. Nothing touches
+    /// the bus.
+    fn new(cfg: &Config<'_>, chip: Chip, wire: Wire) -> Result<Self> {
         let link = match chip.transport() {
             Transport::I2c => {
                 // A `modbus-*` driver with a description of an I2C chip.
@@ -465,8 +509,16 @@ macro_rules! description_driver {
 
 /// The items each contract's drivers describe.
 fn describe(kind: Kind, sensor: &Sensor, out: &mut Description) {
-    if let Link::I2c { address } = sensor.link {
-        out.set_address(address);
+    let live = match sensor {
+        Sensor::Live(live) => Some(live),
+        Sensor::Refused(_) => None,
+    };
+    if let Some(Live {
+        link: Link::I2c { address },
+        ..
+    }) = live
+    {
+        out.set_address(*address);
     }
     // The three axes of a vector are one value: their items share a group.
     let group = match kind {
@@ -501,7 +553,10 @@ fn describe(kind: Kind, sensor: &Sensor, out: &mut Description) {
     };
     // Each channel's span is what its bits can count, in the contract's unit: the number's smallest
     // and largest count, scaled and offset as the description says. The step is one count.
-    let channels = sensor.chip.channels();
+    let channels = match live {
+        Some(live) => live.chip.channels(),
+        None => &[],
+    };
     for (index, (name, field, unit)) in items.iter().enumerate() {
         let mut item = Item::value(name, READ).unit(*unit, 0);
         if let Some(channel) = channels.get(index) {
@@ -854,24 +909,38 @@ fn response(cfg: &Config<'_>) -> Result<Duration> {
     }
 }
 
-/// The `description` setting, parsed for `kind`. A bad file is `INVALID_ARGUMENT`.
-fn chip(cfg: &Config<'_>, kind: Kind) -> Result<Chip> {
-    match cfg.get("description") {
-        Some(ConfigValue::Str(value)) => load(value, kind),
+/// The reason both `description` and `description_file` are given.
+const BOTH_KEYS: &str = "give description or description_file, not both";
+/// The reason `description_file` is given to a build without a filesystem.
+#[cfg(not(feature = "std"))]
+const NO_FILESYSTEM: &str = "description_file needs a build with a filesystem";
+
+/// The chip the settings name, for `kind`. `description` is always the chip's text, in every
+/// build. `description_file` is a path, which only a build with a filesystem can read; a build
+/// without one refuses it by name, never reads it as text. A bad text or file is `INVALID_ARGUMENT`.
+fn chip(cfg: &Config<'_>, kind: Kind) -> Result<core::result::Result<Chip, &'static str>> {
+    match (cfg.get("description"), cfg.get("description_file")) {
+        (Some(_), Some(_)) => Ok(Err(BOTH_KEYS)),
+        (Some(ConfigValue::Str(text)), None) => Chip::parse(text, kind)
+            .map(Ok)
+            .map_err(|_| Status::INVALID_ARGUMENT),
+        (None, Some(ConfigValue::Str(path))) => file(path, kind),
         _ => Err(Status::INVALID_ARGUMENT),
     }
 }
 
 #[cfg(not(feature = "std"))]
-fn load(text: &str, kind: Kind) -> Result<Chip> {
-    Chip::parse(text, kind).map_err(|_| Status::INVALID_ARGUMENT)
+fn file(_path: &str, _kind: Kind) -> Result<core::result::Result<Chip, &'static str>> {
+    Ok(Err(NO_FILESYSTEM))
 }
 
 #[cfg(feature = "std")]
-fn load(path: &str, kind: Kind) -> Result<Chip> {
+fn file(path: &str, kind: Kind) -> Result<core::result::Result<Chip, &'static str>> {
     let text = std::fs::read_to_string(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => Status::NOT_FOUND,
         _ => Status::IO,
     })?;
-    Chip::parse(&text, kind).map_err(|_| Status::INVALID_ARGUMENT)
+    Chip::parse(&text, kind)
+        .map(Ok)
+        .map_err(|_| Status::INVALID_ARGUMENT)
 }

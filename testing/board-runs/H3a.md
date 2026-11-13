@@ -25,7 +25,7 @@ value current_a 0x04 16 big signed 0.001
 id = "rail-generic"
 driver = "generic-power-monitor"
 bus = "<the bus>"
-config = { address = 0x40, description = "/etc/lemnos/chips/ina226.chip" }
+config = { address = 0x40, description_file = "/etc/lemnos/chips/ina226.chip" }
 ```
 
 1. Bind it and read 100 times with the rail under a steady load.

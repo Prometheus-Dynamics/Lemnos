@@ -12,6 +12,10 @@ use lemnos_sim::SimBoard;
 use lemnos_sim_walk::{NOT_SIMULATED, NOT_WALKED, SIMULATED, walk};
 use lemnosd::{Config, Service};
 
+/// How long a test waits for a walked device to bind. A device whose bind fails retries after the
+/// host's first retry (`retry_first`, 1 s by default), so two of those cover one retry.
+const BIND_WAIT: Duration = Duration::from_secs(2);
+
 struct Running {
     _service: Service,
     socket: PathBuf,
@@ -60,7 +64,7 @@ fn show(running: &Running, device: &str) -> Result<String, String> {
         "show".to_string(),
         device.to_string(),
     ];
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + BIND_WAIT;
     loop {
         let mut out = Vec::new();
         match lemnos_ctl::run(&args, &mut out) {
@@ -109,7 +113,7 @@ fn every_built_in_driver_is_walked_or_named_with_its_reason() {
     );
     // Every walked device binds. A device retries its bind with backoff, so wait for it up to a
     // deadline; a device that never binds says why, from the host.
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + BIND_WAIT;
     loop {
         let pending: Vec<_> = host
             .devices()

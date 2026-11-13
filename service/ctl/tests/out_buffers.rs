@@ -229,10 +229,14 @@ fn start_slots() -> Running {
 }
 
 /// Runs the tool, asking again while the device is busy, as the other tool tests do.
+/// How long a test waits for a walked device to bind. A device whose bind fails retries after the
+/// host's first retry (`retry_first`, 1 s by default), so two of those cover one retry.
+const BIND_WAIT: Duration = Duration::from_secs(2);
+
 fn ctl(running: &Running, words: &[&str]) -> Result<String, String> {
     let mut args = vec!["--socket".to_string(), running.socket.display().to_string()];
     args.extend(words.iter().map(ToString::to_string));
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + BIND_WAIT;
     loop {
         let mut out = Vec::new();
         match lemnos_ctl::run(&args, &mut out) {

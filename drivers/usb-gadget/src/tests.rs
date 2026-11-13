@@ -1121,3 +1121,65 @@ fn a_gadget_without_an_ncm_function_describes_no_interface_name() {
     Driver::describe(&driver, &mut described);
     assert!(described.find("ifname").is_none());
 }
+
+/// `interfaces` is the text in every build: the same settings are accepted and give one set.
+#[test]
+fn the_interfaces_text_means_the_same_in_every_build() {
+    let entries = settings();
+    assert_eq!(crate::refusal(&Config::new(&entries)), None);
+    let (set, _) = settings_of(&entries, "").expect("the text is accepted");
+    assert!(!set.bytes().is_empty());
+}
+
+/// Both interface keys name the interfaces twice: refused by name, in every build.
+#[test]
+fn both_interface_keys_are_refused_by_name() {
+    let mut entries = settings();
+    entries.push((
+        "interfaces_file",
+        ConfigValue::Str("/etc/lemnos/interfaces.txt"),
+    ));
+    assert_eq!(
+        crate::refusal(&Config::new(&entries)),
+        Some("give interfaces or interfaces_file, not both")
+    );
+    assert_eq!(
+        settings_of(&entries, "").err(),
+        Some(Status::INVALID_ARGUMENT)
+    );
+}
+
+/// `interfaces_file` is a path: without a filesystem it is refused by name, never read as text.
+#[cfg(not(feature = "std"))]
+#[test]
+fn an_interfaces_file_is_refused_by_name_without_a_filesystem() {
+    let entries = [
+        ("vendor", ConfigValue::Int(0x1209)),
+        ("product", ConfigValue::Int(1)),
+        ("interfaces_file", ConfigValue::Str(INTERFACES)),
+    ];
+    assert_eq!(
+        crate::refusal(&Config::new(&entries)),
+        Some("interfaces_file needs a build with a filesystem")
+    );
+    assert_eq!(
+        settings_of(&entries, "").err(),
+        Some(Status::INVALID_ARGUMENT)
+    );
+}
+
+/// With a filesystem, `interfaces_file` reads the file once, and gives the set the text gives.
+#[cfg(feature = "std")]
+#[test]
+fn an_interfaces_file_gives_the_set_its_text_gives() {
+    let path = std::env::temp_dir().join(std::format!("lemnos-interfaces-{}", std::process::id()));
+    std::fs::write(&path, INTERFACES).unwrap();
+    let text = path.to_str().unwrap();
+    let mut from_file = settings();
+    from_file.retain(|(key, _)| *key != "interfaces");
+    from_file.push(("interfaces_file", ConfigValue::Str(text)));
+    let (file_set, _) = settings_of(&from_file, "").expect("the file is read");
+    let (text_set, _) = settings_of(&settings(), "").expect("the text is accepted");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(file_set.bytes(), text_set.bytes());
+}

@@ -10,16 +10,10 @@ use lemnos_sim::{Layout, SimBoard, SimI2c};
 const ADDRESS: u8 = 0x40;
 
 /// A chip file: its text without `std`, its path with `std`.
-#[cfg(not(feature = "std"))]
+/// A chip file's text: the `description` setting in every build.
 macro_rules! chip_file {
     ($name:literal) => {
         include_str!(concat!("../tests/chips/", $name))
-    };
-}
-#[cfg(feature = "std")]
-macro_rules! chip_file {
-    ($name:literal) => {
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/chips/", $name)
     };
 }
 

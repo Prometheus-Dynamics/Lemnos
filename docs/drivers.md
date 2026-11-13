@@ -27,16 +27,16 @@ python3 scripts/generate-builtins.py --check
 |---|---|---|---|
 | `bmi088` | `accelerometer/1`, `gyroscope/1` | `bus`: I2C | Serves its contract. Batches only with `fifo = true` |
 | `bmm150` | `magnetometer/1`, `self-test/1` | `bus`: I2C | Serves its contract. Reads only on a host-owned device |
-| `generic-magnetometer` | `magnetometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. The [description form](writing-a-driver.md#the-description-form), as are the four below |
-| `generic-accelerometer` | `accelerometer/1` | `bus`: I2C; `description`: a chip file | Serves its contract. `read` only: no batches, a description has no FIFO |
-| `generic-gyroscope` | `gyroscope/1` | `bus`: I2C; `description`: a chip file | Serves its contract. `read` only: no batches, a description has no FIFO |
-| `generic-temperature` | `temperature/1` | `bus`: I2C; `description`: a chip file | Serves its contract |
-| `generic-power-monitor` | `power-monitor/1` | `bus`: I2C; `description`: a chip file | Serves its contract. The chip's own registers give all four values |
-| `modbus-magnetometer` | `magnetometer/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract. The description form for a [Modbus RTU device](writing-a-driver.md#a-chip-on-modbus), as are the four below: each read is a request and its checked reply |
-| `modbus-accelerometer` | `accelerometer/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract. `read` only |
-| `modbus-gyroscope` | `gyroscope/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract. `read` only |
-| `modbus-temperature` | `temperature/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract |
-| `modbus-power-monitor` | `power-monitor/1` | `uart`: a UART; `description`: a chip file starting `modbus` | Serves its contract |
+| `generic-magnetometer` | `magnetometer/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. The [description form](writing-a-driver.md#the-description-form), as are the four below |
+| `generic-accelerometer` | `accelerometer/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. `read` only: no batches, a description has no FIFO |
+| `generic-gyroscope` | `gyroscope/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. `read` only: no batches, a description has no FIFO |
+| `generic-temperature` | `temperature/1` | `bus`: I2C; `description`: the chip's text | Serves its contract |
+| `generic-power-monitor` | `power-monitor/1` | `bus`: I2C; `description`: the chip's text | Serves its contract. The chip's own registers give all four values |
+| `modbus-magnetometer` | `magnetometer/1` | `uart`: a UART; `description`: the chip's text, starting `modbus` | Serves its contract. The description form for a [Modbus RTU device](writing-a-driver.md#a-chip-on-modbus), as are the four below: each read is a request and its checked reply |
+| `modbus-accelerometer` | `accelerometer/1` | `uart`: a UART; `description`: the chip's text, starting `modbus` | Serves its contract. `read` only |
+| `modbus-gyroscope` | `gyroscope/1` | `uart`: a UART; `description`: the chip's text, starting `modbus` | Serves its contract. `read` only |
+| `modbus-temperature` | `temperature/1` | `uart`: a UART; `description`: the chip's text, starting `modbus` | Serves its contract |
+| `modbus-power-monitor` | `power-monitor/1` | `uart`: a UART; `description`: the chip's text, starting `modbus` | Serves its contract |
 | `ina2xx` | `power-monitor/1`, `self-test/1` | `bus`: I2C; `chip`: `ina226`, `ina238` or `ina260` | Serves its contract |
 | `vcm` | `lens/1` | `bus`: I2C; `chip`; optional `direction`, `settle_us` | Serves its contract. The position is unknown until the first move. Direction and settle time are unknown unless the board gives them |
 | `ws2812` | `pixels/1` | `bus`: SPI device, or a `pio-out` name (PIO state machine running the strip's 800 kHz program) | Serves its contract. The PIO program's timing is untested on board (`Q1.md`) |
