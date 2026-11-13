@@ -6,7 +6,9 @@
 //! map. The code is this crate's own. Where this file differs from the `dev` tables on purpose it
 //! says so at the row concerned.
 
-use lemnos_contract_camera_sensor::{BayerOrder, GainRange, LinkConfig, Mode, Rect, SensorInfo};
+use lemnos_contract_camera_sensor::{
+    BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Mode, Rect, SensorInfo,
+};
 use lemnos_core::{Result, Status, status_of};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::i2c::I2c;
@@ -86,13 +88,21 @@ pub const EXPOSURE_MARGIN: u32 = 25;
 pub const EXPOSURE_FRACTION_BITS: u8 = 4;
 /// Shortest exposure: one line.
 pub const EXPOSURE_MIN: u32 = 1 << EXPOSURE_FRACTION_BITS;
-/// Analogue gain codes, with the low four bits the fraction: `0x10` is a gain of one.
+/// Analogue gain codes, with the low four bits the fraction: `0x10` is a gain of one, so the code
+/// is sixteenths of a gain and the law is linear: gain = code / 0x10. Register `0x3509` takes one
+/// byte, so the codes run to `0xff` (just under sixteen). Written in the register's own units; the
+/// same table gives the reference settings' gains.
 pub const ANALOGUE_GAIN_RANGE: GainRange = GainRange {
     min: 0x10,
     max: 0xff,
     unity: 0x10,
     step: 1,
+    law: GainLaw::Linear,
 };
+
+/// The OV9782 has no embedded data lines in its mode table: no register in this file turns them
+/// on, and no frame layout is described. A frame carries no register values.
+pub const EMBEDDED_DATA: EmbeddedData = EmbeddedData::None;
 /// Exposure in lines after `select_mode`, from the reference settings.
 pub const DEFAULT_EXPOSURE_LINES: u32 = 642;
 /// Longest frame beyond the height, in lines.
@@ -436,6 +446,8 @@ impl ModeEntry {
             binning_y: self.window.binning,
             black_level: self.depth.black_level,
             drop_frames: 0,
+            // One group carries all three, so they land on one frame: a group whose launch completes
+            // in frame F is latched at the start of F + 1 and shows on F + 2 (testing/board-runs/D10.md).
             exposure_delay: 2,
             gain_delay: 2,
             frame_length_delay: 2,
@@ -450,6 +462,7 @@ pub fn sensor_info() -> SensorInfo {
         array_width: ARRAY_WIDTH,
         array_height: ARRAY_HEIGHT,
         test_patterns: TEST_PATTERNS.len() as u16,
+        embedded_data: EMBEDDED_DATA,
     }
 }
 

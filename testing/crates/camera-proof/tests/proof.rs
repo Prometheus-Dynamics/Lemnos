@@ -4,8 +4,9 @@ mod sim;
 
 use std::path::PathBuf;
 
-use lemnos_camera_proof::{Bus, DirSink, Error, Options, assemble, capture};
-use lemnos_contract_camera_sensor::Controls;
+use lemnos_camera_proof::{Bus, DirSink, Error, Frames, Options, assemble, capture};
+use lemnos_contract_camera_receiver::{CameraReceiver, MAX_EMBEDDED_STREAM_NAME};
+use lemnos_contract_camera_sensor::{Controls, FrameValues};
 
 fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("camera-proof-{}-{name}", std::process::id()))
@@ -183,4 +184,113 @@ fn refuses_to_capture_before_it_starts() {
     let mut camera = assemble(&bus, &Options::default()).unwrap();
     let mut sink = DirSink::new(scratch("unstarted")).unwrap();
     assert_eq!(capture(&mut camera, 1, &mut sink), Err(Error::NotStarted));
+}
+
+/// The values the schedule test aims at each frame: exposure, gain code, frame length.
+fn intended(control: usize, frame: u64) -> u32 {
+    let f = frame as u32;
+    match control {
+        0 => 200 + (f * 37) % 800,
+        1 => 16 + (f * 5) % 200,
+        _ => 500 + (f * 13) % 1000,
+    }
+}
+
+/// The value a frame shows for a control before any post can have landed on it, from the start.
+const START: [u32; 3] = [100, 16, 1000];
+
+/// Pops every embedded buffer waiting, in order, and checks what each frame shows. `next` is the
+/// sequence the next frame must carry.
+fn check_embedded(stream: &mut dyn Frames, delays: [u64; 3], next: &mut u64) -> Result<(), Error> {
+    while let Some(frame) = stream.pop()? {
+        let mut bytes = [0u8; sim::EMBEDDED_BYTES];
+        stream.read(&frame, &mut bytes[..frame.bytes as usize])?;
+        let shown = sim::decode_embedded(&bytes).expect("the sim's layout");
+        assert_eq!(shown.frame, frame.sequence, "embedded data names its frame");
+        assert_eq!(
+            frame.sequence, *next,
+            "no frame lost between the posts and the check"
+        );
+        let got = [shown.exposure, shown.gain, shown.frame_length];
+        for (control, (&value, &delay)) in got.iter().zip(delays.iter()).enumerate() {
+            let want = if shown.frame + 1 < delay {
+                START[control]
+            } else {
+                intended(control, shown.frame)
+            };
+            assert_eq!(value, want, "control {control} on frame {}", shown.frame);
+        }
+        *next += 1;
+        stream.release(frame)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_consumer_lands_1000_steps_of_unequal_delays_on_the_frames_it_aims_at() {
+    let _serial = sim::serial();
+    // Exposure 3 frames, gain 1, frame length 2: all different, none zero. The first two frames
+    // are masked at the sensor, so the first published frame is number 2.
+    let bus = sim::bus(&sim::board_with(
+        Some("csi0"),
+        "exposure_delay = 3, gain_delay = 1, frame_length_delay = 2, drop_frames = 2, embedded = true",
+        true,
+    ));
+    let mut camera = assemble(&bus, &Options::default()).unwrap();
+    camera.start().unwrap();
+    let delays = {
+        let mode = camera.mode();
+        [
+            mode.exposure_delay,
+            mode.gain_delay,
+            mode.frame_length_delay,
+        ]
+        .map(u64::from)
+    };
+    assert_eq!(delays, [3, 1, 2]);
+    let mut receiver = bus.open::<dyn CameraReceiver>(camera.receiver()).unwrap();
+    let mut name = [0u8; MAX_EMBEDDED_STREAM_NAME];
+    let len = receiver.embedded_stream(&mut name).unwrap();
+    let embedded_name = std::str::from_utf8(&name[..len]).unwrap();
+    let mut embedded = bus.open_frames(camera.receiver(), embedded_name).unwrap();
+    let mut frames = bus.open_frames(camera.receiver(), camera.stream()).unwrap();
+
+    const TOTAL: u64 = 1002;
+    let mut next = 2;
+    while sim::emitted() < TOTAL {
+        // The frame last emitted is `n - 1`, so a post now lands control `c` on `n - 1 + delay`.
+        let n = sim::emitted();
+        for (control, &delay) in delays.iter().enumerate() {
+            let Some(target) = (n + delay).checked_sub(1) else {
+                continue;
+            };
+            if target >= TOTAL {
+                continue;
+            }
+            let mut controls = Controls::default();
+            let value = intended(control, target);
+            match control {
+                0 => controls.exposure = Some(value),
+                1 => controls.analogue_gain = Some(value),
+                _ => controls.frame_length = Some(value),
+            }
+            camera
+                .post_values(FrameValues {
+                    identity: target,
+                    controls,
+                })
+                .unwrap();
+        }
+        // Let the next frame go by, checking and releasing what the streams hold.
+        while sim::emitted() == n {
+            while let Some(frame) = frames.pop().unwrap() {
+                frames.release(frame).unwrap();
+            }
+            check_embedded(&mut *embedded, delays, &mut next).unwrap();
+            bus.wait().unwrap();
+        }
+    }
+    check_embedded(&mut *embedded, delays, &mut next).unwrap();
+    assert_eq!(next, TOTAL, "frames 2 to 1001 published and each checked");
+    camera.stop().unwrap();
 }

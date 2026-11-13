@@ -3,7 +3,9 @@
 
 use super::*;
 use chip::{CHIP_ID, DEFAULT_ADDRESS, OTP_PROGRAM};
-use lemnos_contract_camera_sensor::{BayerOrder, GainRange, LinkConfig, Rect};
+use lemnos_contract_camera_sensor::{
+    BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Rect,
+};
 use lemnos_core::{Contract, Driver};
 use lemnos_hal::ErrorKind;
 use lemnos_hal::i2c::{ErrorType, I2c as HalI2c, Operation};
@@ -461,6 +463,7 @@ fn mode_table_reports_the_values_the_registers_program() {
                 max: 0xff,
                 unity: 0x10,
                 step: 1,
+                law: GainLaw::Linear,
             },
             digital_gain: GainRange::default(),
             crop: Rect {
@@ -1026,4 +1029,13 @@ fn manifest_names_the_driver_and_its_tag() {
         "camera.sensor/1"
     );
     assert_eq!(Ov9782::MANIFEST.provides[0].tag.as_str(), "camera.sensor/1");
+}
+
+#[test]
+fn the_sensor_reports_a_linear_gain_law_and_no_embedded_data() {
+    // Gain is sixteenths: code 0x20 is gain two. The sensor carries no register values per frame.
+    let range = chip::ANALOGUE_GAIN_RANGE;
+    assert_eq!(range.law, GainLaw::Linear);
+    assert_eq!(range.unity, 0x10);
+    assert_eq!(chip::sensor_info().embedded_data, EmbeddedData::None);
 }

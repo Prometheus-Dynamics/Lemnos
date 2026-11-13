@@ -4,7 +4,17 @@
 //! a log, so a test can check the order calls arrived in across devices. The receiver makes frames
 //! on the host's ticks at the rate its link implies, and publishes them on the frame stream the
 //! board gives it. A driver's stream end can't write pixel bytes (on hardware the block's DMA does
-//! that), so simulated frames carry sequence, identity, timestamp and size, and no pixel content.
+//! that), so simulated frames carry sequence, identity (0, as the receivers in the tree publish) and
+//! timestamp, and no pixel content.
+//!
+//! The sensor's controls go through a simulated pipeline shared by the sensor and its receiver, so
+//! a frame shows the values in force for it, with the timing rule of `camera.sensor`: a post made
+//! while frame `F` is the last one emitted lands on frame `F + delay` for each control. Frame `k`
+//! is the `k`th emission since the receiver started; the first `drop_frames` are masked at the
+//! sensor and never published. With `embedded = true` the sensor reports register embedded data,
+//! and the receiver publishes the values in force for each frame on its `embedded` stream, in the
+//! layout `encode_embedded` and `decode_embedded` here define. The board file sets the delays,
+//! masking and embedded data through the sensor's `config`.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -12,12 +22,13 @@ use lemnos_contract_camera_isp::{
     CameraIsp, ConfigLayout, Counters as IspCounters, IspInfo, IspInput, IspOutput, OutputLayout,
 };
 use lemnos_contract_camera_receiver::{
-    BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, MAX_STREAM_NAME, Packing,
+    BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig,
+    MAX_EMBEDDED_STREAM_NAME, MAX_STREAM_NAME, Packing,
 };
 use lemnos_contract_camera_sensor::{
-    CameraSensor, Controls, FrameValues, GainRange, Mode, Rect, SensorInfo,
+    CameraSensor, Controls, EmbeddedData, FrameValues, GainLaw, GainRange, Mode, Rect, SensorInfo,
 };
-use lemnos_core::{Config, Lifecycle, Result, Status, StreamHandle, driver};
+use lemnos_core::{Config, ConfigValue, Lifecycle, Result, Status, StreamHandle, driver};
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
 use lemnos_host::{Host, Options, entry};
@@ -25,8 +36,10 @@ use lemnos_sim::SimBoard;
 
 /// Calls in the order they arrived, across every simulated device.
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
-/// Serialises tests that share the log.
+/// Serialises tests that share the log and the pipeline.
 static SERIAL: Mutex<()> = Mutex::new(());
+/// The pipeline the sensor and receiver share: the schedule of values and the frame count.
+static PIPELINE: Mutex<Pipeline> = Mutex::new(Pipeline::new());
 
 fn log(entry: &str) {
     LOG.lock()
@@ -34,11 +47,157 @@ fn log(entry: &str) {
         .push(entry.to_string());
 }
 
-/// Takes the test lock and clears the log.
+fn pipeline() -> MutexGuard<'static, Pipeline> {
+    PIPELINE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Takes the test lock, clears the log and resets the pipeline.
 pub fn serial() -> MutexGuard<'static, ()> {
     let guard = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     LOG.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    *pipeline() = Pipeline::new();
     guard
+}
+
+/// The sensor's settings, from its board `config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimConfig {
+    /// Exposure, gain and frame length delays, in frames. 0 to 8.
+    pub delays: [u8; 3],
+    /// Frames masked at the sensor after the receiver starts. 0 to 8.
+    pub drop_frames: u8,
+    /// Whether the sensor carries embedded data.
+    pub embedded: bool,
+}
+
+impl SimConfig {
+    /// The delays of the OV9782 (2 for each), no masking, no embedded data.
+    pub const DEFAULT: Self = Self {
+        delays: [2, 2, 2],
+        drop_frames: 0,
+        embedded: false,
+    };
+
+    fn from_config(cfg: &Config<'_>) -> Result<Self> {
+        let int = |key: &str, default: u8| -> Result<u8> {
+            match cfg.get(key) {
+                None => Ok(default),
+                Some(ConfigValue::Int(v)) if (0..=8).contains(&v) => Ok(v as u8),
+                Some(_) => Err(Status::INVALID_ARGUMENT),
+            }
+        };
+        let embedded = match cfg.get("embedded") {
+            None => false,
+            Some(ConfigValue::Bool(on)) => on,
+            Some(_) => return Err(Status::INVALID_ARGUMENT),
+        };
+        Ok(Self {
+            delays: [
+                int("exposure_delay", 2)?,
+                int("gain_delay", 2)?,
+                int("frame_length_delay", 2)?,
+            ],
+            drop_frames: int("drop_frames", 0)?,
+            embedded,
+        })
+    }
+}
+
+/// The values in force before any post: exposure, gain code and frame length.
+const INITIAL: [u32; 3] = [100, 16, 1000];
+/// Exposure is at least one line; gain codes run 16 (unity) to 255; frame lengths 100 to 4000.
+const GAIN_RANGE: GainRange = GainRange {
+    min: 16,
+    max: 255,
+    unity: 16,
+    step: 1,
+    law: GainLaw::Linear,
+};
+const FRAME_LENGTH_RANGE: (u32, u32) = (100, 4000);
+
+/// Bytes of embedded data per frame: the frame count, then exposure, gain and frame length.
+pub const EMBEDDED_BYTES: usize = 8 + 3 * 4;
+
+/// The register values one frame shows, decoded from its embedded data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shown {
+    pub frame: u64,
+    pub exposure: u32,
+    pub gain: u32,
+    pub frame_length: u32,
+}
+
+/// The sim's embedded-data layout, little-endian. Its own decode is [`decode_embedded`].
+pub fn encode_embedded(frame: u64, values: [u32; 3]) -> [u8; EMBEDDED_BYTES] {
+    let mut out = [0u8; EMBEDDED_BYTES];
+    out[..8].copy_from_slice(&frame.to_le_bytes());
+    for (i, value) in values.iter().enumerate() {
+        out[8 + 4 * i..12 + 4 * i].copy_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+/// Decodes one frame's embedded data. `None` for a buffer of the wrong length.
+pub fn decode_embedded(bytes: &[u8]) -> Option<Shown> {
+    let bytes: &[u8; EMBEDDED_BYTES] = bytes.try_into().ok()?;
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    Some(Shown {
+        frame: u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+        exposure: word(8),
+        gain: word(12),
+        frame_length: word(16),
+    })
+}
+
+/// Frames the receiver has emitted since it started, and the schedule of the sensor's controls.
+pub struct Pipeline {
+    config: SimConfig,
+    emitted: u64,
+    /// Per control (exposure, gain, frame length): values waiting for their frame, as (frame,
+    /// value), in the order they were posted.
+    queues: [Vec<(u64, u32)>; 3],
+    in_force: [u32; 3],
+}
+
+impl Pipeline {
+    const fn new() -> Self {
+        Self {
+            config: SimConfig::DEFAULT,
+            emitted: 0,
+            queues: [Vec::new(), Vec::new(), Vec::new()],
+            in_force: INITIAL,
+        }
+    }
+
+    /// Schedules `value` for control `control` to show on frame `emitted - 1 + delay`: the frame
+    /// last emitted, plus the control's delay. Delay 0 shows on the next frame.
+    fn land(&mut self, control: usize, value: u32, delay: u8) {
+        let frame = (self.emitted + u64::from(delay)).saturating_sub(1);
+        self.queues[control].push((frame, value));
+    }
+
+    /// Emits the next frame: applies the values due on it and returns its number with the values
+    /// in force for it.
+    fn emit(&mut self) -> (u64, [u32; 3]) {
+        let frame = self.emitted;
+        self.emitted += 1;
+        for (control, queue) in self.queues.iter_mut().enumerate() {
+            let mut i = 0;
+            while i < queue.len() {
+                if queue[i].0 <= frame {
+                    self.in_force[control] = queue.remove(i).1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        (frame, self.in_force)
+    }
+}
+
+/// Frames the receiver has emitted since it started.
+pub fn emitted() -> u64 {
+    pipeline().emitted
 }
 
 /// The calls logged since [`serial`], in order.
@@ -51,7 +210,7 @@ pub fn calls() -> Vec<String> {
 const MODES: [(u32, u32, u32); 2] = [(320, 40, 120), (640, 40, 60)];
 const PIXEL_RATE_HZ: u64 = 1_536_000;
 
-fn mode(index: usize) -> Option<Mode> {
+fn mode(index: usize, cfg: SimConfig) -> Option<Mode> {
     let (width, height, fps) = *MODES.get(index)?;
     Some(Mode {
         link: LinkConfig {
@@ -73,8 +232,16 @@ fn mode(index: usize) -> Option<Mode> {
             width,
             height,
         },
-        analogue_gain: GainRange::default(),
+        analogue_gain: GAIN_RANGE,
         digital_gain: GainRange::default(),
+        frame_length_min: FRAME_LENGTH_RANGE.0,
+        frame_length_max: FRAME_LENGTH_RANGE.1,
+        exposure_min: 1,
+        exposure_fraction_bits: 0,
+        drop_frames: cfg.drop_frames,
+        exposure_delay: cfg.delays[0],
+        gain_delay: cfg.delays[1],
+        frame_length_delay: cfg.delays[2],
         ..Mode::default()
     })
 }
@@ -93,16 +260,20 @@ pub struct SimSensor {
     selected: Option<u16>,
     streaming: bool,
     applied: Option<FrameValues>,
+    config: SimConfig,
 }
 
 impl Lifecycle for SimSensor {
     type Needs = SimSensorNeeds;
 
-    fn start(_needs: SimSensorNeeds, _cfg: &Config<'_>) -> Result<Self> {
+    fn start(_needs: SimSensorNeeds, cfg: &Config<'_>) -> Result<Self> {
+        let config = SimConfig::from_config(cfg)?;
+        pipeline().config = config;
         Ok(Self {
             selected: None,
             streaming: false,
             applied: None,
+            config,
         })
     }
 }
@@ -114,18 +285,23 @@ impl CameraSensor for SimSensor {
             array_width: 1280,
             array_height: 800,
             test_patterns: 0,
+            embedded_data: if self.config.embedded {
+                EmbeddedData::Registers
+            } else {
+                EmbeddedData::None
+            },
         })
     }
 
     fn mode(&mut self, index: u16) -> Result<Mode> {
-        mode(usize::from(index)).ok_or(Status::NOT_FOUND)
+        mode(usize::from(index), self.config).ok_or(Status::NOT_FOUND)
     }
 
     fn select_mode(&mut self, index: u16) -> Result<()> {
         if self.streaming {
             return Err(Status::BUSY);
         }
-        if mode(usize::from(index)).is_none() {
+        if mode(usize::from(index), self.config).is_none() {
             return Err(Status::NOT_FOUND);
         }
         log("sensor.select_mode");
@@ -152,15 +328,22 @@ impl CameraSensor for SimSensor {
         Ok(())
     }
 
-    fn set_controls(&mut self, _controls: Controls) -> Result<()> {
+    fn set_controls(&mut self, controls: Controls) -> Result<()> {
         if self.selected.is_none() {
             return Err(Status::INVALID_ARGUMENT);
         }
+        check_limits(&controls)?;
         log("sensor.set_controls");
+        schedule(&controls, true);
         Ok(())
     }
 
     fn post_values(&mut self, values: FrameValues) -> Result<()> {
+        if self.selected.is_none() {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        check_limits(&values.controls)?;
+        schedule(&values.controls, false);
         self.applied = Some(values);
         Ok(())
     }
@@ -182,18 +365,58 @@ impl CameraSensor for SimSensor {
     }
 }
 
+/// Applies a post's controls to the pipeline: each lands by its own delay, or at once (on the next
+/// frame) for `set_controls`.
+fn schedule(controls: &Controls, at_once: bool) {
+    let mut p = pipeline();
+    let delays = if at_once { [0; 3] } else { p.config.delays };
+    let wanted = [
+        controls.exposure,
+        controls.analogue_gain,
+        controls.frame_length,
+    ];
+    for (control, value) in wanted.into_iter().enumerate() {
+        if let Some(value) = value {
+            p.land(control, value, delays[control]);
+        }
+    }
+}
+
+/// The limits a control must be inside: exposure of at least a line, gains in the gain range and
+/// frame lengths in the frame length range. Digital gain has none.
+fn check_limits(controls: &Controls) -> Result<()> {
+    if controls.digital_gain.is_some() {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    let fl = FRAME_LENGTH_RANGE;
+    let gain = GAIN_RANGE;
+    if controls.exposure == Some(0)
+        || controls
+            .analogue_gain
+            .is_some_and(|g| !(gain.min..=gain.max).contains(&g))
+        || controls
+            .frame_length
+            .is_some_and(|f| !(fl.0..=fl.1).contains(&f))
+    {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    Ok(())
+}
+
 /// A frame stream's producer, and what it makes: one frame per interval, while running.
 #[derive(Clone, Copy)]
 struct Run {
     interval_ns: u64,
     next_ns: Option<u64>,
-    sequence: u64,
 }
 
 #[driver("sim-receiver", provides = [CameraReceiver])]
 pub struct SimReceiver {
     #[needs]
     frames: StreamHandle,
+    /// The embedded-data stream, when the board gives the receiver one.
+    #[needs(optional)]
+    embedded: Option<StreamHandle>,
     configured: Option<LinkConfig>,
     layout: Option<FrameLayout>,
     run: Option<Run>,
@@ -207,6 +430,7 @@ impl Lifecycle for SimReceiver {
     fn start(needs: SimReceiverNeeds, _cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
             frames: needs.frames,
+            embedded: needs.embedded,
             configured: None,
             layout: None,
             run: None,
@@ -226,25 +450,34 @@ impl Lifecycle for SimReceiver {
             }
         };
         let size = self.layout.map_or(0, |layout| layout.size);
+        let (masked, embedded_on) = {
+            let p = pipeline();
+            (u64::from(p.config.drop_frames), p.config.embedded)
+        };
         while next <= now_ns {
-            match self.frames.next_buffer() {
-                Ok(Some(buffer)) => {
-                    let frame = StreamFrame {
-                        buffer,
-                        bytes: size,
-                        sequence: run.sequence,
-                        identity: run.sequence,
-                        timestamp_ns: next,
-                    };
-                    match self.frames.publish(frame) {
-                        Ok(()) => self.counters.frames += 1,
-                        Err(_) => self.counters.errors += 1,
+            let (sequence, in_force) = pipeline().emit();
+            if sequence >= masked {
+                match self.frames.next_buffer() {
+                    Ok(Some(buffer)) => {
+                        let frame = StreamFrame {
+                            buffer,
+                            bytes: size,
+                            sequence,
+                            identity: 0,
+                            timestamp_ns: next,
+                        };
+                        match self.frames.publish(frame) {
+                            Ok(()) => self.counters.frames += 1,
+                            Err(_) => self.counters.errors += 1,
+                        }
                     }
+                    Ok(None) => self.counters.dropped += 1,
+                    Err(_) => self.counters.errors += 1,
                 }
-                Ok(None) => self.counters.dropped += 1,
-                Err(_) => self.counters.errors += 1,
+                if let (true, Some(embedded)) = (embedded_on, self.embedded.as_mut()) {
+                    publish_embedded(embedded, sequence, in_force, next);
+                }
             }
-            run.sequence += 1;
             next = next.saturating_add(run.interval_ns);
         }
         run.next_ns = Some(next);
@@ -315,10 +548,14 @@ impl CameraReceiver for SimReceiver {
         }
         log("receiver.start");
         self.counters = Counters::default();
+        let config = pipeline().config;
+        *pipeline() = Pipeline {
+            config,
+            ..Pipeline::new()
+        };
         self.run = Some(Run {
             interval_ns: frame_interval_ns(&link),
             next_ns: None,
-            sequence: 0,
         });
         Ok(())
     }
@@ -336,6 +573,38 @@ impl CameraReceiver for SimReceiver {
     fn feeds(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    fn embedded_stream(&mut self, into: &mut [u8]) -> Result<usize> {
+        if self.embedded.is_none() {
+            return Ok(0);
+        }
+        let name = b"embedded";
+        debug_assert!(name.len() <= MAX_EMBEDDED_STREAM_NAME);
+        into.get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
+    }
+}
+
+/// Writes one frame's embedded data into a free buffer and publishes it with the frame's sequence.
+/// A full stream drops it, as the frame stream does.
+fn publish_embedded(stream: &mut StreamHandle, sequence: u64, values: [u32; 3], at_ns: u64) {
+    let Ok(Some(buffer)) = stream.next_buffer() else {
+        return;
+    };
+    let bytes = encode_embedded(sequence, values);
+    if stream.write(buffer, 0, &bytes).is_err() {
+        return;
+    }
+    let frame = StreamFrame {
+        buffer,
+        bytes: EMBEDDED_BYTES as u32,
+        sequence,
+        identity: 0,
+        timestamp_ns: at_ns,
+    };
+    let _ = stream.publish(frame);
 }
 
 #[driver("sim-isp", provides = [CameraIsp])]
@@ -428,9 +697,26 @@ impl CameraIsp for SimIsp {
 /// receiver with no link is listed before the real one, so a tool that takes the first receiver
 /// fails. `sensor_link` replaces the sensor's link when given.
 pub fn board(sensor_link: Option<&str>) -> String {
+    board_with(sensor_link, "", false)
+}
+
+/// A board as [`board`], with the sensor's `config` given as `config`, written inside the braces of
+/// an inline table (for example `exposure_delay = 3`), and the receiver's `embedded` stream when
+/// `embedded_stream` is set.
+pub fn board_with(sensor_link: Option<&str>, config: &str, embedded_stream: bool) -> String {
     let link = match sensor_link {
         Some(target) => format!("link = \"{target}\""),
         None => String::new(),
+    };
+    let config = if config.is_empty() {
+        String::new()
+    } else {
+        format!("config = {{ {config} }}\n")
+    };
+    let embedded = if embedded_stream {
+        "[devices.streams.embedded]\nbuffers = 8\nbuffer_bytes = 64\n"
+    } else {
+        ""
     };
     format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"sim-camera\"\n\
@@ -439,7 +725,8 @@ pub fn board(sensor_link: Option<&str>) -> String {
          [devices.streams.frames]\nbuffers = 8\nbuffer_bytes = 32000\n\
          [[devices]]\nid = \"csi0\"\ndriver = \"sim-receiver\"\nlink = \"isp0\"\n\
          [devices.streams.frames]\nbuffers = 8\nbuffer_bytes = 32000\n\
-         [[devices]]\nid = \"cam0-sensor\"\ndriver = \"sim-sensor\"\n{link}\n"
+         {embedded}\
+         [[devices]]\nid = \"cam0-sensor\"\ndriver = \"sim-sensor\"\n{link}\n{config}"
     )
 }
 

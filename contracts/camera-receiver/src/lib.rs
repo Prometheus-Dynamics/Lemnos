@@ -11,9 +11,14 @@
 //! [`CameraReceiver::feeds`]: on a chip where the receiver hands frames to an ISP inside the
 //! hardware, it names that ISP; on one where the receiver only writes to memory, it names none.
 //!
-//! Each frame a stream publishes has an opaque `u64` identity. The consumer picks it and the
-//! receiver hands it back unchanged. Lemnos never reads it, so the consumer can use it to tie a
-//! frame to the exposure and gain it asked for.
+//! A receiver whose sensor carries embedded data (`camera.sensor` `SensorInfo::embedded_data`) may
+//! publish it on a second stream named by `embedded_stream`, one buffer per frame with that frame's
+//! sequence number.
+//!
+//! Each frame a stream publishes carries a sequence number, counted from the receiver's `start`, a
+//! timestamp and an identity. A receiver takes no jobs, so nothing names its frames: it publishes
+//! identity 0 on every one, and a consumer tells frames apart by sequence. Sequence is the only
+//! per-frame count a consumer can match against the sensor's embedded data.
 //!
 //! Units: sizes in pixels and lines, `pixel_rate_hz` in hertz, `link_rate_mbps` in megabits per
 //! second on each lane, `stride` and `size` in bytes. `data_type` is the CSI-2 data type code
@@ -25,6 +30,9 @@ use lemnos_core::{Decode, Encode, Reader, Result, Shape, Status, Writer, contrac
 
 /// Longest stream name a method answers, in bytes. A name is UTF-8 and at most this long.
 pub const MAX_STREAM_NAME: usize = 32;
+
+/// Longest name [`CameraReceiver::embedded_stream`] answers, in bytes.
+pub const MAX_EMBEDDED_STREAM_NAME: usize = 32;
 
 /// Longest name [`CameraReceiver::feeds`] answers, in bytes: a media entity's name is at most
 /// this long.
@@ -165,4 +173,13 @@ pub trait CameraReceiver {
     /// that stopped it.
     #[method(8)]
     fn feeds(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
+    /// The name of the stream the receiver publishes each frame's embedded data on, as UTF-8 into
+    /// `into`, returning its length. `into` holds at least [`MAX_EMBEDDED_STREAM_NAME`] bytes.
+    ///
+    /// The embedded stream has one buffer per frame, published with that frame's sequence number,
+    /// so a consumer pairs the two by sequence. Its layout is the sensor's (`SensorInfo::embedded_data`).
+    /// Length 0 when the receiver captures none: a receiver that cannot take its sensor's embedded
+    /// lines answers 0 and publishes nothing.
+    #[method(9)]
+    fn embedded_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 }

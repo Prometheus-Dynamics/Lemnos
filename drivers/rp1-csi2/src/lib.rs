@@ -439,4 +439,10 @@ impl CameraReceiver for Rp1Csi2 {
     fn feeds(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
+
+    /// This receiver captures no embedded data: nothing in its driver names where the block writes a
+    /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
+    fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Ok(0)
+    }
 }

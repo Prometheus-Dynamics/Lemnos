@@ -398,4 +398,10 @@ impl CameraReceiver for SunxiVin {
             .copy_from_slice(name);
         Ok(name.len())
     }
+
+    /// This receiver captures no embedded data: nothing in its driver names where the block writes a
+    /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
+    fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
+        Ok(0)
+    }
 }
