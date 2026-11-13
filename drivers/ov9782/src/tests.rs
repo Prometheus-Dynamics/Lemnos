@@ -3,9 +3,9 @@
 
 use super::*;
 use chip::{CHIP_ID, DEFAULT_ADDRESS, OTP_PROGRAM};
-use lemnos_contract_camera_receiver::CameraReceiver;
+use lemnos_contract_camera_receiver::{CameraReceiver, FrameStarts};
 use lemnos_contract_camera_sensor::{
-    BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Rect,
+    AppliedLanding, BayerOrder, EmbeddedData, GainLaw, GainRange, LinkConfig, Rect,
 };
 use lemnos_core::{Config, Contract, Dev, Driver, Health, I2c, Lifecycle, Result, Status};
 use lemnos_hal::ErrorKind;
@@ -1131,4 +1131,172 @@ fn a_receiver_that_cannot_be_asked_fails_the_bind_and_is_retried() {
         start_linked(Some(Err(Status::BUSY))),
         Err(Status::BUSY)
     ));
+}
+
+/// A receiver that answers `frame_starts` from a script, one answer a read, and `source` with
+/// `source`. Once the script is spent, a read answers an unknown count.
+struct Starts {
+    script: std::sync::Mutex<std::collections::VecDeque<Result<Option<FrameStarts>>>>,
+    source: Result<&'static [u8]>,
+}
+
+/// The method number of `frame_starts` in `camera.receiver`.
+const FRAME_STARTS_METHOD: u16 = 12;
+
+impl lemnos_core::Router for Starts {
+    fn call(
+        &self,
+        _device: u32,
+        method: lemnos_core::MethodId,
+        _args: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize> {
+        if method.method == FRAME_STARTS_METHOD {
+            let answer = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(None))?;
+            let mut writer = lemnos_core::Writer::new(reply);
+            lemnos_core::Encode::encode(&answer, &mut writer)?;
+            return Ok(writer.len());
+        }
+        let name = self.source?;
+        reply
+            .get_mut(..name.len())
+            .ok_or(Status::BUFFER_TOO_SMALL)?
+            .copy_from_slice(name);
+        Ok(name.len())
+    }
+
+    fn health(&self, _device: u32) -> Health {
+        Health::Ok
+    }
+}
+
+/// A started sensor, streaming, linked to `receiver` (or with no link).
+fn streaming_sensor(receiver: Option<Dev<dyn CameraReceiver>>) -> (Ov9782, Bus) {
+    let bus = bus_with_id(0x9782);
+    let mut s = <Ov9782 as Lifecycle>::start(
+        Ov9782Needs {
+            bus: I2c(lemnos_core::Held::boxed(Box::new(bus.clone()))),
+            values: None,
+            _receiver: receiver,
+        },
+        &Config::new(&[]),
+    )
+    .unwrap();
+    s.select_mode(0).unwrap();
+    s.start().unwrap();
+    clear(&bus);
+    (s, bus)
+}
+
+/// A receiver linked to a sensor, answering `frame_starts` from `script`.
+fn counting_receiver(script: Vec<Result<Option<FrameStarts>>>) -> Dev<dyn CameraReceiver> {
+    let router: &'static Starts = Box::leak(Box::new(Starts {
+        script: std::sync::Mutex::new(script.into()),
+        source: Ok(b"ov9782 10-0036"),
+    }));
+    lemnos_core::Bound::new(lemnos_core::LocalCaller::new(router, 0, 0))
+}
+
+fn starts(count: u64) -> Result<Option<FrameStarts>> {
+    Ok(Some(FrameStarts {
+        count,
+        latest_ns: count * 8_000_000,
+    }))
+}
+
+fn exposure_post(identity: u64) -> FrameValues {
+    FrameValues {
+        identity,
+        controls: Controls {
+            exposure: Some(800),
+            analogue_gain: Some(0x20),
+            digital_gain: None,
+            frame_length: Some(1000),
+        },
+    }
+}
+
+#[test]
+fn a_group_launched_in_one_frame_lands_two_frames_after_it() {
+    // Before and after the writes the count is 5: the launch is in frame 4, and the delay is 2.
+    let (mut s, _bus) = streaming_sensor(Some(counting_receiver(vec![starts(5), starts(5)])));
+    let landing = s.post_values_at(exposure_post(1)).unwrap();
+    assert_eq!(landing.exposure, Some(6));
+    assert_eq!(landing.analogue_gain, Some(6));
+    assert_eq!(landing.frame_length, Some(6));
+    assert_eq!(landing.latest, 6);
+}
+
+#[test]
+fn a_group_that_straddles_a_frame_start_lands_one_frame_later() {
+    // The count moved from 5 to 6 while the group was written: the launch is the later frame, 5.
+    let (mut s, _bus) = streaming_sensor(Some(counting_receiver(vec![starts(5), starts(6)])));
+    let landing = s.post_values_at(exposure_post(2)).unwrap();
+    assert_eq!(landing.exposure, Some(7));
+    assert_eq!(landing.latest, 7);
+}
+
+#[test]
+fn a_post_with_no_frame_counted_yet_is_refused_before_anything_is_written() {
+    let (mut s, bus) = streaming_sensor(Some(counting_receiver(vec![Ok(None)])));
+    assert_eq!(s.post_values_at(exposure_post(3)), Err(Status::BUSY));
+    assert!(
+        writes(&bus).is_empty(),
+        "nothing written: {:?}",
+        writes(&bus)
+    );
+    // A refused post is not a post: nothing is recorded for applied_landing.
+    assert_eq!(s.applied_landing(), Ok(None));
+}
+
+#[test]
+fn a_sensor_with_no_link_or_a_receiver_that_cannot_count_refuses_before_writing() {
+    let (mut unlinked, bus) = streaming_sensor(None);
+    assert_eq!(
+        unlinked.post_values_at(exposure_post(4)),
+        Err(Status::NOT_SUPPORTED)
+    );
+    assert!(writes(&bus).is_empty());
+    // A plain post still goes through, with no landing to give back.
+    unlinked.post_values(exposure_post(4)).unwrap();
+    assert_eq!(unlinked.applied_landing(), Err(Status::NOT_SUPPORTED));
+    assert_eq!(unlinked.applied().unwrap().unwrap().identity, 4);
+
+    let receiver = counting_receiver(vec![Err(Status::NOT_SUPPORTED)]);
+    let (mut cannot, bus) = streaming_sensor(Some(receiver));
+    assert_eq!(
+        cannot.post_values_at(exposure_post(5)),
+        Err(Status::NOT_SUPPORTED)
+    );
+    assert!(writes(&bus).is_empty());
+}
+
+#[test]
+fn applied_landing_is_the_last_post_and_where_it_landed() {
+    let (mut s, _bus) = streaming_sensor(Some(counting_receiver(vec![
+        starts(9),
+        starts(9),
+        starts(12),
+        starts(12),
+    ])));
+    assert_eq!(s.applied_landing(), Ok(None));
+    let landing = s.post_values_at(exposure_post(6)).unwrap();
+    assert_eq!(
+        s.applied_landing(),
+        Ok(Some(AppliedLanding {
+            values: exposure_post(6),
+            landing,
+        }))
+    );
+    // A later plain post is the last post; its landing is read too.
+    s.post_values(exposure_post(7)).unwrap();
+    let later = s.applied_landing().unwrap().unwrap();
+    assert_eq!(later.values.identity, 7);
+    // The count was 12 at the launch: frame 11, and the delay of 2 lands it on 13.
+    assert_eq!(later.landing.latest, 13);
 }

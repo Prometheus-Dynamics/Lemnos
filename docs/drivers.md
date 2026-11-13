@@ -244,8 +244,8 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `lens/1` | 1 range, 2 set_position, 3 position, 4 direction, 5 settle_us | `vcm` |
 | `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set, 6 uart_write, 7 uart_read | `raw-bus` |
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
-| `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern, 12 identity | `ov9782` |
-| `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds, 9 embedded_stream, 10 source, 11 layout | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |
+| `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern, 12 identity, 13 post_values_at, 14 applied_landing | `ov9782` |
+| `camera.receiver/1` | 1 limits, 2 configure, 3 link, 4 frame_stream, 5 start, 6 stop, 7 counters, 8 feeds, 9 embedded_stream, 10 source, 11 layout, 12 frame_starts | `rp1-csi2`, `rkcif`, `sunxi-vin`, `k230-capture` |
 | `camera.isp/1` | 1 info, 2 config_layout, 3 set_input, 4 set_output, 5 clear_output, 6 config_stream, 7 statistics_stream, 8 input_stream, 9 output_stream, 10 start, 11 stop, 12 counters, 13 input_layout, 14 output_layout | `pisp-be`, `pisp-fe`, `rkisp`, `isp600`, `k230isp`, `k230isp-frames` |
 | `isp.pisp/1` | 1 info, 2 set_front_end_compression, 3 enable_temporal_denoise, 4 reset_temporal_denoise, 5 set_line_event | `pisp-be`, `pisp-fe` |
 | `isp.isp600/1` | 1 info, 2 load_region, 3 statistics_region | `isp600` |

@@ -114,7 +114,8 @@ mod module_tests;
 mod tests;
 
 use lemnos_contract_camera_receiver::{
-    BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, MAX_STREAM_NAME, Packing,
+    BayerOrder, CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig,
+    MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{
     Config, Description, DmaHandle, Health, Item, Lifecycle, MethodId, Result, Status,
@@ -623,6 +624,11 @@ impl CameraReceiver for K230Capture {
 
     /// This receiver captures no embedded data: nothing in its driver names where the block writes a
     /// sensor's embedded lines, and no sensor on a board in the tree carries any. Answers 0.
+    /// Not counted yet: the frame-start count is not wired in this driver.
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }

@@ -3,6 +3,7 @@
 mod sim;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use lemnos_camera_proof::{Bus, DirSink, Error, Frames, Options, assemble, capture};
 use lemnos_contract_camera_receiver::{CameraReceiver, MAX_EMBEDDED_STREAM_NAME};
@@ -293,4 +294,189 @@ fn a_consumer_lands_1000_steps_of_unequal_delays_on_the_frames_it_aims_at() {
     check_embedded(&mut *embedded, delays, &mut next).unwrap();
     assert_eq!(next, TOTAL, "frames 2 to 1001 published and each checked");
     camera.stop().unwrap();
+}
+
+/// A free-running board: a frame every 10 ms, each post written for 3 ms, unequal delays (exposure
+/// 3, gain 1, frame length 2) and two frames masked at the sensor.
+const FREE_RUNNING: &str = "free_running = true, period_us = 10000, write_us = 3000, \
+    exposure_delay = 3, gain_delay = 1, frame_length_delay = 2, drop_frames = 2, embedded = true";
+
+/// A deterministic schedule, the same on every run.
+struct Steps(u64);
+
+impl Steps {
+    fn below(&mut self, bound: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) % bound
+    }
+}
+
+/// What one free-running run found.
+struct FreeRun {
+    /// Per post, in order: the values posted (exposure, gain, frame length) and the frame each
+    /// one landed on, as `post_values_at` answered it.
+    posts: Vec<([u32; 3], [u64; 3])>,
+    /// Per frame sequence, the values its embedded data shows. `None` for a masked frame.
+    shown: Vec<Option<[u32; 3]>>,
+    /// Posts whose group launch fell in a later frame than their write began in.
+    straddles: u64,
+    /// The frame count the receiver reports at the end, and the frames the sim has emitted.
+    counted: (Option<u64>, u64),
+}
+
+/// Pops every embedded buffer waiting and records what each frame shows, by sequence.
+fn drain_embedded(stream: &mut dyn Frames, shown: &mut Vec<Option<[u32; 3]>>) {
+    while let Some(frame) = stream.pop().unwrap() {
+        let mut bytes = [0u8; sim::EMBEDDED_BYTES];
+        stream
+            .read(&frame, &mut bytes[..frame.bytes as usize])
+            .unwrap();
+        let seen = sim::decode_embedded(&bytes).expect("the sim's layout");
+        assert_eq!(seen.frame, frame.sequence, "embedded data names its frame");
+        let at = frame.sequence as usize;
+        if shown.len() <= at {
+            shown.resize(at + 1, None);
+        }
+        shown[at] = Some([seen.exposure, seen.gain, seen.frame_length]);
+        stream.release(frame).unwrap();
+    }
+}
+
+/// Runs `steps` posts on a free-running board. Each post comes at a time of its own: 10 to 40 ms
+/// after the last, so consecutive posts are at least one frame apart, and each is made where the
+/// frame boundaries fall as they fall.
+fn free_run(config: &str, steps: u64) -> FreeRun {
+    let bus = sim::bus(&sim::board_with(Some("csi0"), config, true));
+    let mut camera = assemble(&bus, &Options::default()).unwrap();
+    camera.start().unwrap();
+    let mut receiver = bus.open::<dyn CameraReceiver>(camera.receiver()).unwrap();
+    let mut name = [0u8; MAX_EMBEDDED_STREAM_NAME];
+    let len = receiver.embedded_stream(&mut name).unwrap();
+    let embedded_name = std::str::from_utf8(&name[..len]).unwrap();
+    let mut embedded = bus.open_frames(camera.receiver(), embedded_name).unwrap();
+    let mut frames = bus.open_frames(camera.receiver(), camera.stream()).unwrap();
+
+    let mut shown = Vec::new();
+    let mut posts = Vec::new();
+    let mut steps_taken = Steps(0x5eed_0000_0000_0001);
+    bus.advance(Duration::from_millis(50));
+    drain_embedded(&mut *embedded, &mut shown);
+    while let Some(frame) = frames.pop().unwrap() {
+        frames.release(frame).unwrap();
+    }
+    for step in 0..steps {
+        let gap_us = 10_000 + steps_taken.below(30_000);
+        bus.advance(Duration::from_micros(gap_us));
+        drain_embedded(&mut *embedded, &mut shown);
+        while let Some(frame) = frames.pop().unwrap() {
+            frames.release(frame).unwrap();
+        }
+        // Every value differs from the last post's, so a frame shows the post it is named for.
+        let s = step as u32;
+        let values = [300 + s, 16 + s % 200, 500 + (s * 7) % 1000];
+        let landing = camera
+            .post_values_at(FrameValues {
+                identity: step,
+                controls: Controls {
+                    exposure: Some(values[0]),
+                    analogue_gain: Some(values[1]),
+                    digital_gain: None,
+                    frame_length: Some(values[2]),
+                },
+            })
+            .unwrap();
+        let landed = [
+            landing.exposure,
+            landing.analogue_gain,
+            landing.frame_length,
+        ]
+        .map(|frame| frame.expect("every posted control has a landing"));
+        posts.push((values, landed));
+    }
+    // Let every value land and its frame be published.
+    bus.advance(Duration::from_millis(200));
+    drain_embedded(&mut *embedded, &mut shown);
+    while let Some(frame) = frames.pop().unwrap() {
+        frames.release(frame).unwrap();
+    }
+    let counted = (
+        camera.frame_starts().unwrap().map(|starts| starts.count),
+        sim::emitted(),
+    );
+    camera.stop().unwrap();
+    FreeRun {
+        posts,
+        shown,
+        straddles: sim::straddles(),
+        counted,
+    }
+}
+
+/// Counts the controls of every post whose answered frame does not show the posted value: a frame
+/// the value is not in force on, or the frame before it still showing the value of the post before.
+fn mismatches(run: &FreeRun) -> usize {
+    let mut bad = 0;
+    for (step, (values, landed)) in run.posts.iter().enumerate() {
+        for control in 0..3 {
+            let frame = landed[control] as usize;
+            let shows = |at: usize| run.shown.get(at).copied().flatten().map(|v| v[control]);
+            let now_ok = shows(frame) == Some(values[control]);
+            let before_ok = match step.checked_sub(1) {
+                None => true,
+                Some(prev) => match shows(frame.wrapping_sub(1)) {
+                    // A masked or unpublished frame before the landing says nothing either way.
+                    None => true,
+                    Some(seen) => seen == run.posts[prev].0[control],
+                },
+            };
+            if !(now_ok && before_ok) {
+                bad += 1;
+            }
+        }
+    }
+    bad
+}
+
+#[test]
+fn a_free_running_landing_names_the_frame_its_values_show_on_over_1000_steps() {
+    let _serial = sim::serial();
+    let run = free_run(FREE_RUNNING, 1000);
+    assert_eq!(run.posts.len(), 1000);
+    assert!(
+        run.straddles > 100,
+        "the schedule must straddle often to prove anything: {} straddles",
+        run.straddles
+    );
+    assert_eq!(
+        mismatches(&run),
+        0,
+        "every posted control shows on the frame post_values_at named"
+    );
+    assert_eq!(
+        run.counted,
+        (Some(sim::emitted()), sim::emitted()),
+        "frame_starts counts every frame start the receiver saw"
+    );
+    // Unequal delays (3, 1, 2): every post's three controls land on three different frames.
+    let staggered = run
+        .posts
+        .iter()
+        .filter(|(_, landed)| landed[0] != landed[1] && landed[1] != landed[2])
+        .count();
+    assert_eq!(staggered, 1000, "unequal delays land on unequal frames");
+}
+
+#[test]
+fn without_the_straddle_rule_a_straddling_post_is_named_one_frame_early() {
+    let _serial = sim::serial();
+    let run = free_run(&format!("{FREE_RUNNING}, naive_landing = true"), 1000);
+    assert!(run.straddles > 100, "{} straddles", run.straddles);
+    let bad = mismatches(&run);
+    assert!(
+        bad > 100,
+        "the same check must fail when the answer skips the straddle rule: {bad} mismatches"
+    );
 }

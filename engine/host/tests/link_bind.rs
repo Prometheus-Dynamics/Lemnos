@@ -9,10 +9,12 @@ use std::time::Duration;
 
 use common::quick;
 use lemnos_contract_camera_receiver::{
-    BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig, MAX_FEED_NAME, Packing,
+    BayerOrder, CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig,
+    MAX_FEED_NAME, Packing,
 };
 use lemnos_contract_camera_sensor::{
-    CameraSensor, Controls, FrameValues, LinkCheck, Mode, SensorInfo, check_link,
+    AppliedLanding, CameraSensor, Controls, FrameValues, Landing, LinkCheck, Mode, SensorInfo,
+    check_link,
 };
 use lemnos_core::{Config, Dev, Health, Lifecycle, Result, Status, driver};
 use lemnos_host::board::parse;
@@ -79,6 +81,11 @@ impl CameraReceiver for LinkedProvider {
     fn layout(&mut self) -> Result<Option<FrameLayout>> {
         Ok(None)
     }
+    /// Not counted yet: the frame-start count is not wired in this driver.
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        Err(Status::NOT_SUPPORTED)
+    }
+
     fn embedded_stream(&mut self, _into: &mut [u8]) -> Result<usize> {
         Ok(0)
     }
@@ -121,6 +128,12 @@ impl Lifecycle for LinkedConsumer {
 }
 
 impl CameraSensor for LinkedConsumer {
+    fn post_values_at(&mut self, _values: FrameValues) -> Result<Landing> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    fn applied_landing(&mut self) -> Result<Option<AppliedLanding>> {
+        Err(Status::NOT_SUPPORTED)
+    }
     fn info(&mut self) -> Result<SensorInfo> {
         Err(Status::NOT_SUPPORTED)
     }

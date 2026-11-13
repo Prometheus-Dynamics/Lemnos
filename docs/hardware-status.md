@@ -166,6 +166,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 |---|---|
 | [`D8.md`](../testing/board-runs/D8.md) | `ov9782`: bring-up, mode timing, exposure limits, flips, recovery |
 | [`D10.md`](../testing/board-runs/D10.md) | `ov9782`: which frame a posted exposure lands on |
+| [`J4b.md`](../testing/board-runs/J4b.md) | `ov9782`: which frame a posted exposure lands on, through the receiver's frame-start count (`post_values_at`); every real receiver answers `NOT_SUPPORTED` in this PR |
 | [`J4.md`](../testing/board-runs/J4.md) | `ov9782` gain codes are linear; `rp1-csi2`, `k230-capture` and `sunxi-vin` publish identity 0 on every frame |
 | [`D5.md`](../testing/board-runs/D5.md) | `rp1-csi2`: 60 and 120 frames a second with no drops, stop waits for DMA, a second receiver |
 | [`D7.md`](../testing/board-runs/D7.md) | `pisp-fe`: statistics and output, queue pressure, 200 stop cycles, bad configurations |

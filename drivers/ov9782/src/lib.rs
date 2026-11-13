@@ -24,8 +24,15 @@
 //! launched at the next vertical blanking. A group whose launch completes during frame `F` is
 //! latched at the start of frame `F + 1` and shows on frame `F + 2`: all three controls have a
 //! delay of 2 in every mode, so they show together (see `contracts/camera-sensor`'s timing rule and
-//! `testing/board-runs/D10.md`). The driver does not stagger, and it cannot know `F`: it sees no
-//! frame boundary, only its own registers.
+//! `testing/board-runs/D10.md`). The driver does not stagger.
+//!
+//! Landing frame. The driver can name `F` only through the board's link to its receiver. Every
+//! post reads the receiver's frame-start count (`camera.receiver` `frame_starts`) before the
+//! group's writes and again after them, and `F` is the later count less one, as the landing rule in
+//! `contracts/camera-sensor` states. `post_values_at` answers each posted control's frame, and
+//! `applied_landing` reads back the last post and that answer. With no link, or a receiver that
+//! answers `NOT_SUPPORTED`, `post_values_at` refuses before writing and `applied_landing` answers
+//! `NOT_SUPPORTED`; while no frame start has been counted, the same calls answer `BUSY`.
 //!
 //! Values from a ring. A board that gives the sensor a `values` stream (`[devices.streams.values]`
 //! in its board entry, with `job_bytes` of at least 64) takes values as jobs: the consumer pushes an
@@ -78,9 +85,10 @@ use chip::{
     MODE_SELECT, MODES, ModeEntry, PLL2_MULTIPLIER, STANDBY, STREAMING, TEST_PATTERN,
     TEST_PATTERNS,
 };
-use lemnos_contract_camera_receiver::{CameraReceiver, MAX_FEED_NAME};
+use lemnos_contract_camera_receiver::{CameraReceiver, FrameStarts, MAX_FEED_NAME};
 use lemnos_contract_camera_sensor::{
-    BayerOrder, CameraSensor, Controls, FrameValues, LinkCheck, Mode, SensorInfo, check_link,
+    AppliedLanding, BayerOrder, CameraSensor, Controls, FrameValues, Landing, LinkCheck, Mode,
+    SensorInfo, check_link, landing_of, launch_frame,
 };
 use lemnos_core::{
     Config, ConfigValue, Decode, Description, Dev, Health, I2c, Item, Lifecycle, MethodId, Reader,
@@ -190,6 +198,24 @@ fn link_check(receiver: Option<&mut Dev<dyn CameraReceiver>>) -> Result<LinkChec
     check_link(answer, IDENTITY)
 }
 
+/// What a read of the linked receiver's frame-start count gave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    Count(FrameStarts),
+    /// No frame start counted yet, or the receiver cannot say right now.
+    Unknown,
+    /// The receiver cannot count frame starts, or no receiver is linked.
+    Unsupported,
+}
+
+/// Where a post's landing stands once it is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Known(Landing),
+    Unknown,
+    Unsupported,
+}
+
 /// An OV9782 sensor.
 #[driver("ov9782", provides = [CameraSensor])]
 pub struct Ov9782 {
@@ -213,6 +239,8 @@ pub struct Ov9782 {
     flip_vertical: bool,
     test_pattern: u16,
     applied: Option<FrameValues>,
+    /// The last post accepted, with where it landed.
+    last: Option<(FrameValues, Outcome)>,
 }
 
 impl Lifecycle for Ov9782 {
@@ -237,6 +265,7 @@ impl Lifecycle for Ov9782 {
             flip_vertical: false,
             test_pattern: 0,
             applied: None,
+            last: None,
         })
     }
 
@@ -355,19 +384,71 @@ impl Ov9782 {
     }
 
     /// Writes `values` under group hold, checked against the limits first. A bus error while
-    /// writing starts recovery; nothing is recorded as applied.
+    /// writing starts recovery; nothing is recorded as applied. Values read from the ring make no
+    /// caller to answer to, so their landing is recorded and not returned.
     fn apply(&mut self, values: FrameValues) -> Result<()> {
+        self.post(values, false).map(|_| ())
+    }
+
+    /// Asks the linked receiver for its frame-start count. A read that fails is not a count, so it
+    /// is `Unknown` here; the caller decides whether that refuses a post.
+    fn probe(&mut self) -> Probe {
+        let Some(receiver) = self._receiver.as_mut() else {
+            return Probe::Unsupported;
+        };
+        match receiver.frame_starts() {
+            Ok(Some(count)) => Probe::Count(count),
+            Ok(None) => Probe::Unknown,
+            Err(Status::NOT_SUPPORTED) => Probe::Unsupported,
+            Err(_) => Probe::Unknown,
+        }
+    }
+
+    /// Posts `values` under group hold, and reads where the group lands.
+    ///
+    /// The count is read before the group's writes and again after them, the launch being the last
+    /// write. The landing frame is `launch_frame` of the two reads (the later frame when a frame
+    /// start came during the writes), and each posted control shows `delay` frames after it, with
+    /// the mode's delays. With `must_know`, a post whose landing cannot be read is refused before
+    /// anything is written: `BUSY` when no frame start is counted yet, `NOT_SUPPORTED` when there
+    /// is no link or the receiver cannot count.
+    fn post(&mut self, values: FrameValues, must_know: bool) -> Result<Outcome> {
         let (entry, current) = self.mode_entry()?;
         self.check_not_recovering()?;
         let merged = current.merged(&values.controls, entry)?;
+        let mode = entry.describe(self.continuous_clock);
+        let delays = [
+            mode.exposure_delay,
+            mode.gain_delay,
+            mode.frame_length_delay,
+        ];
+        let before = self.probe();
+        if must_know {
+            match before {
+                Probe::Count(_) => {}
+                Probe::Unknown => return Err(Status::BUSY),
+                Probe::Unsupported => return Err(Status::NOT_SUPPORTED),
+            }
+        }
         match self.write_group(&values.controls) {
             Ok(()) => {
                 self.keep(merged);
                 self.applied = Some(values);
-                Ok(())
             }
-            Err(status) => Err(self.fail(status)),
+            Err(status) => return Err(self.fail(status)),
         }
+        let after = self.probe();
+        let outcome = match (before, after) {
+            (Probe::Count(before), Probe::Count(after)) => Outcome::Known(landing_of(
+                launch_frame(before, after),
+                delays,
+                &values.controls,
+            )),
+            (Probe::Unsupported, _) | (_, Probe::Unsupported) => Outcome::Unsupported,
+            _ => Outcome::Unknown,
+        };
+        self.last = Some((values, outcome));
+        Ok(outcome)
     }
 
     /// Writes one register.
@@ -610,8 +691,30 @@ impl CameraSensor for Ov9782 {
         self.apply(values)
     }
 
+    fn post_values_at(&mut self, values: FrameValues) -> Result<Landing> {
+        self.mode_entry()?;
+        self.check_not_recovering()?;
+        if self.state != State::Streaming {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        match self.post(values, true)? {
+            Outcome::Known(landing) => Ok(landing),
+            Outcome::Unknown => Err(Status::BUSY),
+            Outcome::Unsupported => Err(Status::NOT_SUPPORTED),
+        }
+    }
+
     fn applied(&mut self) -> Result<Option<FrameValues>> {
         Ok(self.applied)
+    }
+
+    fn applied_landing(&mut self) -> Result<Option<AppliedLanding>> {
+        match self.last {
+            None => Ok(None),
+            Some((values, Outcome::Known(landing))) => Ok(Some(AppliedLanding { values, landing })),
+            Some((_, Outcome::Unknown)) => Err(Status::BUSY),
+            Some((_, Outcome::Unsupported)) => Err(Status::NOT_SUPPORTED),
+        }
     }
 
     fn set_flips(&mut self, horizontal: bool, vertical: bool) -> Result<BayerOrder> {

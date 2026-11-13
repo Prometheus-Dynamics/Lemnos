@@ -1,5 +1,5 @@
 use lemnos_contract_camera_receiver::{
-    BayerOrder, CameraReceiver, Counters, FrameLayout, Limits, LinkConfig,
+    BayerOrder, CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig,
     MAX_EMBEDDED_STREAM_NAME, MAX_FEED_NAME, MAX_STREAM_NAME, Packing,
 };
 use lemnos_core::{
@@ -116,8 +116,11 @@ fn the_tag_and_numbers_are_stable() {
             ("embedded_stream", 9),
             ("source", 10),
             ("layout", 11),
+            ("frame_starts", 12),
         ]
     );
+    assert!(!INFO.methods[11].has_out_buffer);
+    assert!(matches!(INFO.methods[11].returns, Shape::Option(_)));
     assert!(INFO.methods[3].has_out_buffer);
     assert_eq!(INFO.methods[1].params[0].name, "link");
     assert_eq!(INFO.methods[1].params[1].shape, Shape::U8);
@@ -167,6 +170,14 @@ fn every_type_round_trips() {
         errors: 2,
     });
     round_trip(Some(link()));
+    round_trip(FrameStarts {
+        count: u64::MAX,
+        latest_ns: 7,
+    });
+    round_trip(Some(FrameStarts {
+        count: 1,
+        latest_ns: u64::MAX,
+    }));
 }
 
 #[test]
@@ -243,6 +254,10 @@ impl CameraReceiver for Mock {
 
     fn layout(&mut self) -> Result<Option<FrameLayout>> {
         Ok(self.layout)
+    }
+
+    fn frame_starts(&mut self) -> Result<Option<FrameStarts>> {
+        Err(Status::NOT_SUPPORTED)
     }
 
     fn source(&mut self, into: &mut [u8]) -> Result<usize> {
