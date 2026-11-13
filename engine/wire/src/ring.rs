@@ -71,6 +71,363 @@ pub mod fds {
     }
 }
 
+/// A reader that is not the stream's consumer: a process the service hands a slot of a stream to
+/// (`StreamTicket`). It reads the frame ring and the buffers read-only, and marks its buffers in
+/// its own page only. See [`TicketReader`].
+pub mod ticket {
+    /// What a reader ticket may do, as bits of `rights` in StreamTicketRings. A reader may always read
+    /// through its CPU mapping (enforced by the kernel). Importing a dma-buf (handing its descriptor
+    /// to a device) lets the importer write the frame for every other reader: it is granted only
+    /// where the policy says so.
+    pub mod rights {
+        constants! {
+        /// The reader may map the buffers and read them.
+        pub const READ: u8 = 1;
+        /// The reader holds the buffers' descriptors and may import them into a device.
+        pub const IMPORT: u8 = 2;
+        }
+    }
+
+    /// The descriptors of a reader ticket, in the order the host passes them with
+    /// `StreamTicketRings`. The ring and the pool are read-only; the marks, the bell and the
+    /// liveness pipe are the reader's own.
+    pub mod fds {
+        constants! {
+        /// The frame ring, read-only.
+        pub const RING: usize = 0;
+        /// The pool page, read-only.
+        pub const POOL_PAGE: usize = 1;
+        /// The reader's bell eventfd: the host rings it, the reader sleeps on it.
+        pub const BELL: usize = 2;
+        /// The reader's bell page: the reader's own.
+        pub const BELL_PAGE: usize = 3;
+        /// The reader's marks page: the reader's own. Its slot is the one the ticket gives.
+        pub const MARKS: usize = 4;
+        /// The write end of the reader's liveness pipe. The reader holds it, and nothing is
+        /// written to it; when every copy of it is closed the host sees the reader is gone.
+        pub const LIVENESS: usize = 5;
+        /// The first buffer descriptor: the pool's buffers, one descriptor each for shared memory or each
+        /// plane of each buffer for dma-bufs, read-only. There is one for a stream of shared memory.
+        pub const BUFFERS: usize = 6;
+        }
+    }
+}
+
+/// What the shared-rings part folds into its hash: the descriptor order of the rings and of a reader
+/// ticket, and the rights bits. The order is the layout the part stands for.
+pub const fn fold_shared_rings(hash: u64) -> u64 {
+    let hash = fds::fold_constants(hash);
+    let hash = ticket::fds::fold_constants(hash);
+    ticket::rights::fold_constants(hash)
+}
+
+/// Why a [`TicketReader`] must stop, or a frame it read can't be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gone {
+    /// The host cut this reader off. The value is its cut-off reason (`shm_ring_buffers::page::cut`):
+    /// 1 held too many, 2 held too long, 3 stuck mid-change, 4 its liveness pipe hung up, 5 the
+    /// service released it. A reader stops and asks for a new ticket.
+    CutOff(u64),
+    /// The buffer was reused while the frame was being read: its ticket changed. The bytes read
+    /// from it can't be trusted, and nothing else from that frame is.
+    Recycled,
+    /// The stream ended: the ring's end code, [`STATE_CLOSED`] or [`STATE_FAULT`].
+    Ended(u32),
+    /// The stream's memory was replaced (a new consumer attached and got new memory). The ticket
+    /// no longer refers to the stream's frames: ask for a new one.
+    PoolChanged,
+}
+
+impl core::fmt::Display for Gone {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CutOff(reason) => write!(f, "cut off by the host (reason {reason})"),
+            Self::Recycled => f.write_str("the buffer was reused while the frame was read"),
+            Self::Ended(state) => write!(f, "the stream ended (state {state})"),
+            Self::PoolChanged => f.write_str("the stream's memory was replaced"),
+        }
+    }
+}
+
+/// What one frame gives a reader: its identity, its capture time and its bytes' length. The service
+/// keys its own record of the frame by `identity`; nothing else pairs frames with records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TicketFrame {
+    /// The buffer, as the stream numbers it (a plane's pool buffers are its buffer's).
+    pub buffer: u32,
+    /// The frame's length, across its planes.
+    pub bytes: u32,
+    pub sequence: u64,
+    /// Means something only to the producer and the consumer.
+    pub identity: u64,
+    /// When the frame was captured, `CLOCK_MONOTONIC` nanoseconds: the ring entry's time, which is the
+    /// frame's timestamp as the producer gives it.
+    pub capture_ns: u64,
+}
+
+/// A reader of a stream's frames that holds a ticket: a slot the service was given by the host, with
+/// the descriptors of [`ticket::fds`]. It reads the frame ring and the buffers read-only, and marks
+/// buffers only through its own marks page. See the procedure in `docs/streams.md`.
+pub struct TicketReader {
+    layout: Layout,
+    planes: u32,
+    slot: u32,
+    frames: shm_ring_buffers::BufferReader<ReadMap, shm_ring_holds::Marks<WriteMap>>,
+    /// The frames this reader holds, by buffer: the frame's pool buffers with the ticket each was
+    /// published with, and the hold of the frame's entry.
+    held: Vec<Option<HeldFrame>>,
+    bell: shm_ring_doorbell::Doorbell,
+    /// Kept open so the host sees this reader go away when it does.
+    _liveness: OwnedFd,
+}
+
+/// A frame a ticket reader holds: its hold, and each pool buffer's entry ticket.
+struct HeldFrame {
+    _held: shm_ring_buffers::Held<shm_ring_holds::Marks<WriteMap>>,
+    tickets: [(u32, u32); shm_ring_buffers::MAX_PER_FRAME],
+    count: usize,
+}
+
+impl core::fmt::Debug for TicketReader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TicketReader")
+            .field("slot", &self.slot)
+            .field("layout", &self.layout)
+            .field("planes", &self.planes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TicketReader {
+    /// Attaches from the descriptors of a ticket, in the order of [`ticket::fds`]: the six fixed ones,
+    /// then the pool's descriptors. `planes` is each plane's length as the ticket gave it (empty for one
+    /// plane of a whole buffer), and `shared` says the pool is one shared memfd. `slot` and `max_held` are
+    /// the ones granted.
+    ///
+    /// # Errors
+    ///
+    /// [`RingError`] if the descriptors are the wrong number or can't be mapped as the layout says, or
+    /// the ring isn't the one the layout describes.
+    pub fn attach(
+        descriptors: Vec<OwnedFd>,
+        layout: Layout,
+        planes: &[u32],
+        shared: bool,
+        slot: u32,
+        max_held: u32,
+    ) -> Result<Self, RingError> {
+        let layout = layout.checked()?;
+        let plane_count = planes.len().max(1) as u32;
+        let descs = layout.pool_descs(shared, planes);
+        let pool_fds = if shared { 1 } else { descs.len() };
+        if descriptors.len() != ticket::fds::BUFFERS + pool_fds {
+            return Err(RingError::BadLayout);
+        }
+        let mut descriptors = descriptors.into_iter();
+        let mut next = || descriptors.next().ok_or(RingError::BadLayout);
+        let ring = next()?;
+        let pool_page = next()?;
+        let bell_fd = next()?;
+        let bell_page = next()?;
+        let marks = next()?;
+        let liveness = next()?;
+        let buffer_fds: Vec<OwnedFd> = descriptors.collect();
+
+        let reader = shm_ring::Reader::attach_from_start(ring)?;
+        if reader.geometry().history() != layout.frame_slots {
+            return Err(RingError::BadLayout);
+        }
+        let view = shm_ring_buffers::PoolView::attach(pool_page, buffer_fds, &descs)?;
+        // Marks are per pool buffer, as the host lays them out.
+        let marks = shm_ring_holds::Marks::over(
+            WriteMap::new(marks)?,
+            layout.buffers * plane_count,
+            slot,
+            max_held,
+        );
+        let frames = shm_ring_buffers::BufferReader::new(reader, FieldId(0), view, marks);
+        let bell = shm_ring_doorbell::Doorbell::attach(bell_fd, bell_page)?;
+        Ok(Self {
+            held: (0..layout.buffers).map(|_| None).collect(),
+            layout,
+            planes: plane_count,
+            slot,
+            frames,
+            bell,
+            _liveness: liveness,
+        })
+    }
+
+    /// The layout the ticket was granted with.
+    #[must_use]
+    pub const fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// The reader's slot: the number the host gave, which its marks are in.
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    /// Takes the next frame and holds its buffers until [`release`](Self::release). `Ok(None)` when no
+    /// frame is waiting, or when this reader is at its granted limit of held buffers.
+    ///
+    /// # Errors
+    ///
+    /// [`Gone`] when the reader must stop: cut off, the stream ended, or its memory was replaced.
+    pub fn pop(&mut self) -> Result<Option<TicketFrame>, Gone> {
+        let reason = self.frames.pool().cut_off_reason(self.slot);
+        if reason != 0 {
+            return Err(Gone::CutOff(reason));
+        }
+        let end = self.frames.end();
+        if end != STATE_OPEN {
+            return Err(Gone::Ended(end));
+        }
+        let planes = self.planes;
+        let buffer_bytes = self.layout.buffer_bytes;
+        match self.frames.next() {
+            shm_ring_buffers::NextBatch::Batch(batch) => {
+                let Some(info) = FrameInfo::decode(batch.meta) else {
+                    return Ok(None);
+                };
+                let Some(first) = batch.held.buffer(0) else {
+                    return Ok(None);
+                };
+                if info.bytes > buffer_bytes * planes {
+                    return Ok(None);
+                }
+                let buffer = first.0 / planes;
+                let mut tickets = [(0, 0); shm_ring_buffers::MAX_PER_FRAME];
+                let mut count = 0;
+                for index in 0..batch.held.len() {
+                    if let (Some(pool), Some(ticket)) =
+                        (batch.held.buffer(index), batch.held.ticket(index))
+                    {
+                        tickets[count] = (pool.0, ticket);
+                        count += 1;
+                    }
+                }
+                let frame = TicketFrame {
+                    buffer,
+                    bytes: info.bytes,
+                    sequence: info.sequence,
+                    identity: info.identity,
+                    capture_ns: batch.time.as_nanos(),
+                };
+                if let Some(place) = self.held.get_mut(buffer as usize) {
+                    *place = Some(HeldFrame {
+                        _held: batch.held,
+                        tickets,
+                        count,
+                    });
+                }
+                Ok(Some(frame))
+            }
+            shm_ring_buffers::NextBatch::Empty
+            | shm_ring_buffers::NextBatch::Skipped(_)
+            | shm_ring_buffers::NextBatch::Limited => Ok(None),
+            shm_ring_buffers::NextBatch::PoolChanged { .. } => Err(Gone::PoolChanged),
+            shm_ring_buffers::NextBatch::CutOff => {
+                let reason = self.frames.pool().cut_off_reason(self.slot);
+                Err(Gone::CutOff(reason.max(1)))
+            }
+        }
+    }
+
+    /// Whether this reader holds frame buffer `buffer`.
+    #[must_use]
+    pub fn holds(&self, buffer: u32) -> bool {
+        matches!(self.held.get(buffer as usize), Some(Some(_)))
+    }
+
+    /// Copies from plane `plane` of buffer `buffer` at `offset` into `out`, for a frame this reader
+    /// holds. `false` if it doesn't hold the buffer or the range isn't in the plane. Call
+    /// [`validate`](Self::validate) after the copy before using `out`.
+    #[must_use]
+    pub fn read_plane(&self, buffer: u32, plane: u32, offset: usize, out: &mut [u8]) -> bool {
+        self.bytes_plane(buffer, plane)
+            .and_then(|bytes| bytes.get(offset..offset.checked_add(out.len())?))
+            .map(|src| out.copy_from_slice(src))
+            .is_some()
+    }
+
+    /// Copies from the first plane (the whole buffer, for a stream of one plane) of `buffer`. See
+    /// [`read_plane`](Self::read_plane).
+    #[must_use]
+    pub fn read(&self, buffer: u32, offset: usize, out: &mut [u8]) -> bool {
+        self.read_plane(buffer, 0, offset, out)
+    }
+
+    /// The bytes of plane `plane` of buffer `buffer` in place, while this reader holds the frame. The same
+    /// rule as [`read_plane`](Self::read_plane): [`validate`](Self::validate) before the bytes are used.
+    #[must_use]
+    pub fn bytes_plane(&self, buffer: u32, plane: u32) -> Option<&[u8]> {
+        if !self.holds(buffer) || plane >= self.planes {
+            return None;
+        }
+        self.frames
+            .pool()
+            .bytes(BufferIndex(buffer * self.planes + plane))
+    }
+
+    /// Step 3 of the procedure: after the bytes of frame buffer `buffer` were read, whether they are the
+    /// frame's. Every pool buffer of the frame must still carry the ticket it was published with, and
+    /// this reader must not have been cut off. Both are checked after the read, behind a fence, so a
+    /// buffer reused during the read can't pass.
+    ///
+    /// # Errors
+    ///
+    /// [`Gone::Recycled`] if a ticket changed, or the buffer isn't held; [`Gone::CutOff`] if this reader
+    /// was cut off.
+    pub fn validate(&self, buffer: u32) -> Result<(), Gone> {
+        // The cut-off reason first: a cut-off reader's buffers go back to the producer, which
+        // reuses them, so a recycled buffer is the effect of a cut-off, and the reason is what
+        // the reader needs to know.
+        let reason = self.frames.pool().cut_off_reason(self.slot);
+        if reason != 0 {
+            return Err(Gone::CutOff(reason));
+        }
+        let Some(Some(frame)) = self.held.get(buffer as usize) else {
+            return Err(Gone::Recycled);
+        };
+        for &(pool, ticket) in &frame.tickets[..frame.count] {
+            if !self.frames.pool().still(BufferIndex(pool), ticket) {
+                return Err(Gone::Recycled);
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives back frame buffer `buffer`, whose frame [`pop`](Self::pop) took. `false` if not held.
+    pub fn release(&mut self, buffer: u32) -> bool {
+        self.held
+            .get_mut(buffer as usize)
+            .and_then(Option::take)
+            .is_some()
+    }
+
+    /// Sleeps until a frame may be ready, the stream ends, or `timeout` passes. As [`Consumer::wait`].
+    ///
+    /// # Errors
+    ///
+    /// If the poll on the doorbell fails.
+    pub fn wait(&mut self, timeout: std::time::Duration) -> std::io::Result<bool> {
+        let frames = &self.frames;
+        let woke = self
+            .bell
+            .wait(Some(timeout), || frames.pending() > 0 || frames.end() != 0)?;
+        Ok(!matches!(woke, shm_ring_doorbell::Wake::TimedOut))
+    }
+
+    /// Why the stream ended, as the ring's end word says: [`STATE_OPEN`] while it runs.
+    #[must_use]
+    pub fn state(&self) -> u32 {
+        self.frames.end()
+    }
+}
+
 /// The error for a ring that doesn't hold what the layout says, a job that doesn't fit, or a
 /// shm operation that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]

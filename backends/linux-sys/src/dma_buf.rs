@@ -123,7 +123,9 @@ pub fn sealed_memfd(name: &CStr, len: u64) -> io::Result<OwnedFd> {
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
     let file = std::fs::File::from(owned);
     file.set_len(len)?;
-    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+    // `F_SEAL_SEAL` is left off so the owner can add `F_SEAL_FUTURE_WRITE` when it hands the memory to
+    // readers (`shm_ring::share_read_only`); a read-only descriptor can't add seals.
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
     // SAFETY: `F_ADD_SEALS` takes an integer of seals, and `file` is open for the call.
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
         return Err(io::Error::last_os_error());

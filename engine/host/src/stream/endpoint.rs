@@ -15,13 +15,18 @@ use lemnos_wire::Planes;
 use lemnos_wire::ring::{
     FrameInfo, JOB_ACK_BYTES, JobCollector, Layout, RingError, STATE_CLOSED, STATE_FAULT, fds,
 };
-use shm_ring::{FieldId, ReadMap, Ring, SampleTime, WriteMap, read_only, sealed_memfd};
+use shm_ring::{
+    FieldId, ReadMap, Ring, SampleTime, WriteMap, liveness_pipe, read_only, sealed_memfd,
+};
 use shm_ring_buffers::{BufferIndex, BufferWriter as Publisher, Holders, MAX_PER_FRAME, Pool};
 use shm_ring_doorbell::{Bell, Doorbell};
 use shm_ring_holds::{HoldTable, Limits, Marks};
 
 use super::pool::{BufferPool, BufferState};
-use super::{Access, Buffers, DmaSync, Lease, StreamAllocator, StreamStats};
+use super::{
+    Access, Buffers, DmaSync, Lease, ReaderTicket, StreamAllocator, StreamStats, TicketRefused,
+    TicketState,
+};
 use crate::board::{StreamMemory, StreamSpec};
 
 /// What one attachment's memory is: the publisher over the frame ring and the pool, the job ring
@@ -45,6 +50,15 @@ struct Attached {
     holds: HoldTable<ReadMap>,
     jobs: JobCollector,
     bell: Bell,
+    /// The bells of the outside readers that hold a slot, by slot: rung with the consumer's.
+    reader_bells: Vec<(u32, Bell)>,
+    /// What each reader slot was granted: its slot and how many buffers it may hold.
+    grants: Vec<(u32, u32)>,
+    /// For each reader slot, why and when it was last cut off (`CLOCK_MONOTONIC` ns), kept until the
+    /// slot is given to a new reader.
+    cut_at: Box<[Option<(u64, u64)>]>,
+    /// How many cut-offs of readers this attachment has seen.
+    cut_total: u64,
 }
 
 /// Counts that aren't buffer states.
@@ -82,6 +96,16 @@ pub(crate) struct StreamCore {
     /// The host is going: no more memory is made.
     closed: bool,
     claimed: bool,
+    /// What an outside reader may be given: how many slots, the most it may be granted, and the
+    /// slack past each dma-buf.
+    readers: u32,
+    /// Whether the dma-bufs are allocated read-only: a stream the hardware fills, with reader slots.
+    read_only_buffers: bool,
+    /// Whether readers may import this stream's dma-bufs, under the daemon's signed mode.
+    reader_import: bool,
+    reader_held_max: u32,
+    reader_hold_ms_max: u32,
+    tail_bytes: u32,
     /// Up by one whenever the memory in place changes (a consumer's, made for it or taken over
     /// from standby, or standby memory made), so a buffer granted before is known to be on
     /// memory it no longer has.
@@ -125,6 +149,12 @@ impl StreamCore {
             name: name.into(),
             allocator,
             standby: spec.standby,
+            readers: spec.readers(),
+            read_only_buffers: spec.read_only_buffers(),
+            reader_import: spec.reader_import,
+            reader_held_max: spec.reader_held_max(),
+            reader_hold_ms_max: spec.reader_hold_ms_max,
+            tail_bytes: spec.tail_bytes,
             attached: None,
             waiting: None,
             kept: None,
@@ -159,11 +189,15 @@ impl StreamCore {
         let planes = self.planes.count();
         let Buffers { fds, dma, sync } = match self.memory {
             StreamMemory::Shared => self.allocator.allocate(&self.name, &self.layout)?,
-            StreamMemory::DmaBuf => self.allocator.allocate_planes(
+            StreamMemory::DmaBuf => self.allocator.allocate_planes_for(
                 &self.name,
                 &self.layout,
                 &self.heap,
                 &self.planes,
+                // Read-only only where nothing maps the buffers writable on the CPU: a stream the
+                // hardware fills, with reader slots (see `StreamSpec::read_only_buffers`).
+                self.read_only_buffers,
+                self.tail_bytes,
             )?,
         };
         // What the board file declared is what a driver was written against, and what its end of
@@ -193,7 +227,13 @@ impl StreamCore {
         };
         // The pool generation: one more than the last memory made, never 0 (a page of 0 reads as no pool).
         self.generation = self.generation.wrapping_add(1).max(1);
-        let pool = Pool::mapped(self.generation, fds, descs).map_err(|_| Status::IO)?;
+        // Read-only dma-bufs can't be mapped writable, and the host never fills a dma-buf on the CPU: the
+        // unmapped pool holds them. Other pools are mapped as they always were.
+        let pool = if dma && self.read_only_buffers {
+            Pool::new(self.generation, fds, descs).map_err(|_| Status::IO)?
+        } else {
+            Pool::mapped(self.generation, fds, descs).map_err(|_| Status::IO)?
+        };
         let ring = Ring::create(&self.layout.frame_spec()).map_err(ring_status)?;
         let jobs = Ring::create(&self.layout.job_spec()).map_err(ring_status)?;
         let acks = sealed_memfd(JOB_ACK_BYTES).map_err(io_status)?;
@@ -277,6 +317,10 @@ impl StreamCore {
             holds,
             jobs,
             bell,
+            reader_bells: Vec::new(),
+            grants: Vec::new(),
+            cut_at: vec![None; shm_ring_buffers::MAX_READERS as usize].into_boxed_slice(),
+            cut_total: 0,
         });
         if let Some(frame) = self.kept.take() {
             self.deliver(frame);
@@ -336,6 +380,277 @@ impl StreamCore {
         Ok((descriptors, holds, jobs, bell))
     }
 
+    /// Gives `caller`, the stream's consumer, a reader slot: a third process's view of the same
+    /// buffers, read-only, with its own marks page, bell and liveness pipe.
+    ///
+    /// `held` and `hold_ms` are asked for; zero asks for 2 buffers and 500 ms. A request is granted
+    /// up to the stream's `reader_held_max` and `reader_hold_ms_max`. A grant is refused when the
+    /// holds granted to all readers, with this one, would leave the producer fewer than two buffers
+    /// after the consumer's one: the refusal says what was asked and what is left.
+    pub(crate) fn ticket(
+        &mut self,
+        caller: CallerId,
+        held: u32,
+        hold_ms: u32,
+        import: bool,
+        signed: bool,
+    ) -> Result<ReaderTicket, TicketRefused> {
+        let stream = self.name.to_string();
+        let refuse = |status: Status, text: String| TicketRefused { status, text };
+        let buffers = self.layout.buffers;
+        let asked_held = if held == 0 { DEFAULT_HELD } else { held };
+        let asked_ms = if hold_ms == 0 {
+            DEFAULT_HOLD_MS
+        } else {
+            hold_ms
+        };
+        let granted_held = asked_held.min(self.reader_held_max);
+        let granted_ms = asked_ms.min(self.reader_hold_ms_max);
+        let shared = self.memory == StreamMemory::Shared;
+        let layout = self.layout;
+        let planes = self.planes;
+        let readers = self.readers;
+        let reader_import = self.reader_import;
+        let tail = self.tail_bytes;
+        let pool_buffers = self.pool_buffers();
+        let attached = self.attached.as_mut().ok_or_else(|| {
+            refuse(
+                Status::NOT_FOUND,
+                format!("stream {stream:?} has no consumer"),
+            )
+        })?;
+        if attached.caller != caller {
+            return Err(refuse(
+                Status::NOT_PERMITTED,
+                format!("the connection is not the consumer of stream {stream:?}"),
+            ));
+        }
+        if readers == 0 {
+            return Err(refuse(
+                Status::NOT_SUPPORTED,
+                format!("stream {stream:?} has no reader slots (readers = 0)"),
+            ));
+        }
+        // The rights. A dma-buf reader can only be handed the buffer's descriptor with the import right:
+        // without it the reader would need a copy from the service, which the daemon never makes.
+        let dma = self.memory == StreamMemory::DmaBuf;
+        if dma && !import {
+            return Err(refuse(
+                Status::NOT_PERMITTED,
+                format!(
+                    "stream {stream:?}'s buffers can only be handed out with the import right; a \
+                     reader without it gets a copy from the service"
+                ),
+            ));
+        }
+        if dma && signed && !reader_import {
+            return Err(refuse(
+                Status::NOT_PERMITTED,
+                format!(
+                    "stream {stream:?} does not let readers import its buffers (the daemon is in \
+                     signed mode): set `reader_import = true` on the stream"
+                ),
+            ));
+        }
+        let rights = if dma {
+            lemnos_wire::ring::ticket::rights::READ | lemnos_wire::ring::ticket::rights::IMPORT
+        } else {
+            lemnos_wire::ring::ticket::rights::READ
+        };
+        let slot = attached.holds.free_reader_slot(readers).ok_or_else(|| {
+            refuse(
+                Status::BUSY,
+                format!("every reader slot of stream {stream:?} is taken (readers = {readers})"),
+            )
+        })?;
+        // The producer keeps two buffers after the consumer's one; the readers share the rest.
+        let sum: u32 = attached.grants.iter().map(|(_, held)| held).sum();
+        let left = buffers.saturating_sub(sum).saturating_sub(CONSUMER_HELD);
+        if left < granted_held || left - granted_held < MIN_PRODUCER_BUFFERS {
+            return Err(refuse(
+                Status::BUSY,
+                format!(
+                    "stream {stream:?}: a reader asked for {granted_held} held buffers, and {left} \
+                     of {buffers} are left after the consumer's and the other readers' holds; the \
+                     producer needs {MIN_PRODUCER_BUFFERS}"
+                ),
+            ));
+        }
+        let limits = Limits {
+            max_held: granted_held,
+            max_hold: Some(std::time::Duration::from_millis(u64::from(granted_ms))),
+        };
+        // Read-only first, so that a refusal leaves nothing made. The ring and the pool page are
+        // sealed; the buffers are sealed (shared memory) or checked to be read-only files (dma-buf).
+        attached
+            .memory
+            .ring
+            .share_read_only()
+            .map_err(ring_refused)?;
+        if let Err(error) = attached.memory.publisher.pool().share_read_only() {
+            return Err(if shared {
+                ring_refused(error)
+            } else {
+                refuse(
+                    Status::NOT_SUPPORTED,
+                    format!(
+                        "stream {stream:?}: its dma-bufs are writable, so readers can't have them \
+                         read-only ({error}); declare readers only on a stream the hardware fills"
+                    ),
+                )
+            });
+        }
+
+        let marks =
+            sealed_memfd(Marks::<WriteMap>::page_bytes(pool_buffers).map_err(ring_refused)?)
+                .map_err(io_refused)?;
+        let marks_ro = read_only(marks.as_fd()).map_err(io_refused)?;
+        let (liveness_read, liveness_write) = liveness_pipe().map_err(ring_refused)?;
+        let doorbell = Doorbell::create().map_err(|_| refuse(Status::IO, "a doorbell".into()))?;
+        let (bell_eventfd, bell_page) = doorbell
+            .subscriber_fds()
+            .map_err(|_| refuse(Status::IO, "a doorbell".into()))?;
+        let (host_eventfd, host_page) = doorbell
+            .bell_fds()
+            .map_err(|_| refuse(Status::IO, "a doorbell".into()))?;
+        let bell = Bell::attach(host_eventfd, host_page)
+            .map_err(|_| refuse(Status::IO, "a doorbell".into()))?;
+
+        let mut descriptors = Vec::with_capacity(lemnos_wire::ring::ticket::fds::BUFFERS + 1);
+        descriptors.push(attached.memory.ring.read_fd().map_err(ring_refused)?);
+        descriptors.push(
+            attached
+                .memory
+                .publisher
+                .pool()
+                .page_fd()
+                .map_err(ring_refused)?,
+        );
+        descriptors.push(bell_eventfd);
+        descriptors.push(bell_page);
+        descriptors.push(marks);
+        descriptors.push(liveness_write);
+        for fd in attached.memory.publisher.pool().descriptors() {
+            descriptors.push(fd.try_clone_to_owned().map_err(io_refused)?);
+        }
+
+        attached
+            .holds
+            .add_reader(slot, marks_ro, limits, liveness_read)
+            .map_err(ring_refused)?;
+        attached.reader_bells.push((slot, bell));
+        attached.grants.push((slot, granted_held));
+        if let Some(record) = attached.cut_at.get_mut(slot as usize) {
+            *record = None;
+        }
+        Ok(ReaderTicket {
+            slot,
+            layout,
+            planes,
+            tail_bytes: tail,
+            descriptors,
+            held: granted_held,
+            hold_ms: granted_ms,
+            rights,
+        })
+    }
+
+    /// Gives back reader `slot`, a ticket `caller` was granted: it is cut off with reason 5, and its
+    /// slot is freed once its liveness pipe hangs up.
+    pub(crate) fn unticket(&mut self, caller: CallerId, slot: u32) -> Result<(), Status> {
+        let attached = self.attached.as_mut().ok_or(Status::NOT_FOUND)?;
+        if attached.caller != caller {
+            return Err(Status::NOT_PERMITTED);
+        }
+        if !attached.holds.is_reader(slot) {
+            return Err(Status::NOT_FOUND);
+        }
+        let pool = attached.memory.publisher.pool();
+        let before =
+            shm_ring_buffers::page::cut_off_reason(pool.page(), pool.buffers().len() as u32, slot);
+        attached
+            .holds
+            .release(slot, attached.memory.publisher.pool().page());
+        // Recorded now, as the tick would: the release is the cut-off, and its time is the answer's.
+        // A reader already cut off for another reason keeps that reason and its time.
+        if let Some(record) = attached.cut_at.get_mut(slot as usize)
+            && record.is_none()
+            && before == 0
+        {
+            *record = Some((
+                shm_ring_buffers::page::cut::RELEASED,
+                SampleTime::now().as_nanos(),
+            ));
+            attached.cut_total += 1;
+        }
+        Ok(())
+    }
+
+    /// Why reader `slot` was cut off, if it was, and when, and how many cut-offs this attachment has
+    /// seen, for `caller`, the consumer. `live` is whether the reader still holds the slot.
+    pub(crate) fn ticket_state(&self, caller: CallerId, slot: u32) -> Result<TicketState, Status> {
+        let attached = self.attached.as_ref().ok_or(Status::NOT_FOUND)?;
+        if attached.caller != caller {
+            return Err(Status::NOT_PERMITTED);
+        }
+        if slot == 0 || slot as usize >= attached.cut_at.len() {
+            return Err(Status::NOT_FOUND);
+        }
+        let live = attached.holds.is_reader(slot);
+        // The pool page is the truth while the reader is live; the record keeps the time it landed.
+        let now_reason = shm_ring_buffers::page::cut_off_reason(
+            attached.memory.publisher.pool().page(),
+            attached.memory.publisher.pool().buffers().len() as u32,
+            slot,
+        );
+        let (reason, cut_at_ns) = match attached.cut_at[slot as usize] {
+            Some((reason, at)) => (reason, at),
+            None if now_reason != 0 => (now_reason, 0),
+            None => (0, 0),
+        };
+        Ok(TicketState {
+            live,
+            reason,
+            cut_at_ns,
+            cuts: attached.cut_total,
+        })
+    }
+
+    /// The host's pass over this stream's readers, on its tick: applies every reader's limits,
+    /// frees the slots of readers that have gone, and records each new cut-off with its time. A
+    /// consumer cut off by its own limits ends the stream as a fault. Reads memory and polls each
+    /// reader's liveness pipe; allocates nothing.
+    pub(crate) fn tick(&mut self) {
+        let now = SampleTime::now().as_nanos();
+        let Some(attached) = self.attached.as_mut() else {
+            return;
+        };
+        attached
+            .holds
+            .tick(now, attached.memory.publisher.pool().page());
+        attached
+            .reader_bells
+            .retain(|(slot, _)| attached.holds.is_reader(*slot));
+        attached
+            .grants
+            .retain(|(slot, _)| attached.holds.is_reader(*slot));
+        // Each reader slot's cut-off, when it first shows in the pool page.
+        for slot in 1..attached.cut_at.len() {
+            let reason = shm_ring_buffers::page::cut_off_reason(
+                attached.memory.publisher.pool().page(),
+                attached.memory.publisher.pool().buffers().len() as u32,
+                slot as u32,
+            );
+            if reason != 0 && attached.cut_at[slot].is_none() {
+                attached.cut_at[slot] = Some((reason, now));
+                attached.cut_total += 1;
+            }
+        }
+        if attached.holds.is_cut_off(0) {
+            self.fault();
+        }
+    }
+
     /// Ends the attachment with `state`, taking back everything the consumer had. Its memory goes
     /// with it: the ring records the end, which a consumer still reading it sees.
     pub(crate) fn detach(&mut self, state: u32) {
@@ -345,6 +660,10 @@ impl StreamCore {
         attached.memory.ring.set_end(state);
         let mut bell = attached.bell;
         bell.ring();
+        // Every outside reader sees the same end, and is woken to see it.
+        for (_, mut bell) in attached.reader_bells {
+            bell.ring();
+        }
         self.epoch += 1;
         self.pool.reclaim_published();
         // Fresh memory for the next consumer, if on standby, when the producer next asks.
@@ -526,6 +845,9 @@ impl StreamCore {
         match published {
             Ok(_) => {
                 attached.bell.ring();
+                for (_, bell) in &mut attached.reader_bells {
+                    bell.ring();
+                }
                 self.counters.delivered += 1;
             }
             Err(_) => {
@@ -903,5 +1225,28 @@ impl Drop for ProducerEndpoint {
         let mut core = lock(&self.core);
         core.claimed = false;
         core.pool.reclaim_producer();
+    }
+}
+
+/// The buffers a reader is granted when it asks for none.
+pub(crate) const DEFAULT_HELD: u32 = 2;
+/// The time a reader is granted to hold a buffer when it asks for none.
+pub(crate) const DEFAULT_HOLD_MS: u32 = 500;
+/// Buffers the consumer may hold: its own, which readers are not granted.
+pub(crate) const CONSUMER_HELD: u32 = 1;
+/// Buffers the producer always keeps free for itself: the newest frame, and one being filled.
+pub const MIN_PRODUCER_BUFFERS: u32 = 2;
+
+fn ring_refused(error: impl std::fmt::Display) -> TicketRefused {
+    TicketRefused {
+        status: Status::IO,
+        text: error.to_string(),
+    }
+}
+
+fn io_refused(error: impl std::fmt::Display) -> TicketRefused {
+    TicketRefused {
+        status: Status::IO,
+        text: error.to_string(),
     }
 }

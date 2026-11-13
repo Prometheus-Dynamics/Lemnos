@@ -61,6 +61,12 @@ In a stream:
 | `heap` | Only with `memory = "dma-buf"`: the dma-heap the buffers come from, by its name under `/dev/dma_heap`. `"system"` when left out |
 | `planes` | Only with `memory = "dma-buf"`: the lengths of a buffer's memory planes, for hardware that writes one frame into several (a node of the multi-plane V4L2 API). Each plane is its own dma-buf, 1 to 8 of them, and they add up to `buffer_bytes`. `buffers` times the plane count is at most 128. Left out, a buffer is one plane |
 | `standby` | `true`: the stream has memory while no consumer is attached, so hardware keeps filling it and a consumer that attaches is handed the newest frame at once, with nothing copied. `false` (the default): memory is made only for a consumer |
+| `readers` | How many outside reader processes a consumer may hand a slot of this stream to, 0 to 63 (see [Reader tickets](streams.md#reader-tickets)). 4 for `memory = "shared"` when left out; 0 for `"dma-buf"`, which has readers only with `writer = "hardware"` and `readers` set. 0 refuses every ticket |
+| `reader_held_max` | The most buffers one reader may hold at once. 4 when left out, at most `buffers` |
+| `reader_hold_ms_max` | The longest one reader may hold one buffer, in milliseconds. 2000 when left out, at most 10000 |
+| `reader_import` | Only with `memory = "dma-buf"`: `true` lets a reader be handed the buffers with the import right, which a device can write through. `false` when left out. Under package mode `open` every ticket gets the import right whatever this says |
+| `tail_bytes` | Only with `memory = "dma-buf"`: slack after each plane this stream allocates, for a reader that imports the buffer. 0 when left out, at most 4096 |
+| `writer` | Only with `memory = "dma-buf"`: `"hardware"` (the default: a device or a driver fills the buffers) or `"consumer"` (the consumer fills them through its own mapping, and such a stream cannot have readers) |
 
 [Frame streams](streams.md) says which to choose.
 

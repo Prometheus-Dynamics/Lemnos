@@ -1,10 +1,11 @@
 //! The publisher's side: every reader's marks, and the limits on them.
 
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use shm_ring::{Mem, MemMut, ReadMap, RingError};
+use shm_ring_buffers::page::cut;
 use shm_ring_buffers::{BufferIndex, Holders, MAX_READERS, page};
 
 use crate::marks::{MARKS_AT, count, marked, taken_at};
@@ -21,6 +22,9 @@ pub struct Limits {
 #[derive(Debug)]
 struct Slot<M> {
     page: M,
+    /// A reader's liveness pipe, read end: it reports a hang-up once the reader has gone. None
+    /// for the stream's own consumer, which goes when its connection does.
+    liveness: Option<OwnedFd>,
     limits: Limits,
     /// For each buffer this reader marks: which use of the buffer it was and the time on the
     /// publisher's clock when the mark was first seen. The reader's own word for how long is
@@ -43,7 +47,7 @@ pub struct HoldTable<M: Mem = ReadMap> {
 }
 
 impl HoldTable<ReadMap> {
-    /// Adds a reader in `slot`: its page of marks, read-only, and its limits.
+    /// Adds the stream's own consumer in `slot`: its page of marks, read-only, and its limits.
     ///
     /// # Errors
     ///
@@ -51,6 +55,22 @@ impl HoldTable<ReadMap> {
     /// too small for the pool.
     pub fn add(&mut self, slot: u32, page: OwnedFd, limits: Limits) -> Result<(), RingError> {
         self.add_over(slot, ReadMap::new(page)?, limits)
+    }
+
+    /// Adds an outside reader in `slot`: its page of marks, read-only, its limits, and the read
+    /// end of its liveness pipe. The reader is gone once the pipe hangs up ([`tick`](Self::tick)).
+    ///
+    /// # Errors
+    ///
+    /// As [`add`](Self::add).
+    pub fn add_reader(
+        &mut self,
+        slot: u32,
+        page: OwnedFd,
+        limits: Limits,
+        liveness: OwnedFd,
+    ) -> Result<(), RingError> {
+        self.insert(slot, ReadMap::new(page)?, limits, Some(liveness))
     }
 }
 
@@ -79,6 +99,16 @@ impl<M: Mem> HoldTable<M> {
     ///
     /// [`RingError`] if the slot is out of range or taken, or the page is too small.
     pub fn add_over(&mut self, slot: u32, page: M, limits: Limits) -> Result<(), RingError> {
+        self.insert(slot, page, limits, None)
+    }
+
+    fn insert(
+        &mut self,
+        slot: u32,
+        page: M,
+        limits: Limits,
+        liveness: Option<OwnedFd>,
+    ) -> Result<(), RingError> {
         if page.words() < MARKS_AT + 2 * self.buffers as usize {
             return Err(RingError::Malformed(
                 "the marks page is smaller than the pool",
@@ -88,6 +118,7 @@ impl<M: Mem> HoldTable<M> {
             Some(place @ None) => {
                 *place = Some(Slot {
                     page,
+                    liveness,
                     limits,
                     seen: vec![None; self.buffers as usize].into_boxed_slice(),
                     uncounted_since: None,
@@ -107,6 +138,59 @@ impl<M: Mem> HoldTable<M> {
             *place = None;
             page::clear_cut_off(pool_page, self.buffers, slot);
         }
+    }
+
+    /// The first free slot among outside readers' slots `1..=readers`, for a ticket. Slot 0 is the
+    /// stream's own consumer and is never handed out this way.
+    #[must_use]
+    pub fn free_reader_slot(&self, readers: u32) -> Option<u32> {
+        (1..=readers.min(MAX_READERS - 1))
+            .find(|slot| matches!(self.slots.get(*slot as usize), Some(None)))
+    }
+
+    /// Cuts the outside reader in `slot` off because the service released it. Its slot is freed
+    /// once its liveness pipe hangs up. `false` if there is no such reader.
+    pub fn release(&mut self, slot: u32, pool_page: &impl MemMut) -> bool {
+        let Some(Some(reader)) = self.slots.get_mut(slot as usize) else {
+            return false;
+        };
+        if slot > 0 && !reader.cut_off {
+            reader.cut_off = true;
+            page::cut_off(pool_page, self.buffers, slot, cut::RELEASED);
+        }
+        true
+    }
+
+    /// Whether `slot` is an outside reader's (not the stream's own consumer's) and in use.
+    #[must_use]
+    pub fn is_reader(&self, slot: u32) -> bool {
+        slot > 0 && matches!(self.slots.get(slot as usize), Some(Some(_)))
+    }
+
+    /// The one pass the host makes on its tick, at `now_ns` on the publisher's clock: applies
+    /// every limit ([`enforce`](Self::enforce)), then frees each outside reader whose liveness
+    /// pipe has hung up, cutting it off first if it was not already. Returns how many readers were
+    /// cut off by this call. Memory reads and one non-blocking poll per outside reader; no
+    /// allocation.
+    pub fn tick(&mut self, now_ns: u64, pool_page: &impl MemMut) -> u32 {
+        let mut cut = self.enforce(now_ns, pool_page);
+        for slot in 1..self.slots.len() {
+            let gone = match self.slots[slot].as_ref().and_then(|r| r.liveness.as_ref()) {
+                Some(liveness) => shm_ring::hung_up(liveness.as_fd()).unwrap_or(false),
+                None => false,
+            };
+            if !gone {
+                continue;
+            }
+            let was_cut = self.slots[slot].as_ref().is_some_and(|r| r.cut_off);
+            if !was_cut {
+                page::cut_off(pool_page, self.buffers, slot as u32, cut::HUNG_UP);
+                cut += 1;
+            }
+            self.slots[slot] = None;
+            page::clear_cut_off(pool_page, self.buffers, slot as u32);
+        }
+        cut
     }
 
     /// How many readers are in the table, cut off or not.
@@ -138,7 +222,8 @@ impl<M: Mem> HoldTable<M> {
             let over = match count(&reader.page, self.buffers) {
                 Some(held) => {
                     reader.uncounted_since = None;
-                    reader.limits.max_held != 0 && held > reader.limits.max_held
+                    (reader.limits.max_held != 0 && held > reader.limits.max_held)
+                        .then_some(cut::HELD)
                 }
                 None => {
                     // It was changing a mark every time it was looked at. A reader that is
@@ -148,7 +233,8 @@ impl<M: Mem> HoldTable<M> {
                     // stopped for that long is stuck by its own limit.
                     let since = *reader.uncounted_since.get_or_insert(now_ns);
                     let allowed = reader.limits.max_hold.unwrap_or(UNCOUNTED_FOR);
-                    u128::from(now_ns.saturating_sub(since)) > allowed.as_nanos()
+                    (u128::from(now_ns.saturating_sub(since)) > allowed.as_nanos())
+                        .then_some(cut::UNCOUNTED)
                 }
             };
             let mut stuck = false;
@@ -170,9 +256,12 @@ impl<M: Mem> HoldTable<M> {
                     _ => *seen = Some((ticket, now_ns)),
                 }
             }
-            if stuck || over {
+            // A count over the limit is the more specific breach, so it is the reason when both
+            // hold in the same pass.
+            let reason = over.or(stuck.then_some(cut::HOLD_TIME));
+            if let Some(reason) = reason {
                 reader.cut_off = true;
-                page::cut_off(pool_page, self.buffers, slot as u32);
+                page::cut_off(pool_page, self.buffers, slot as u32, reason);
                 cut += 1;
             }
         }
@@ -211,6 +300,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use shm_ring::Heap;
+    use std::os::fd::OwnedFd;
 
     use super::*;
     use crate::marks::VERSION_WORD;
@@ -340,5 +430,109 @@ mod tests {
         assert_eq!(table.enforce(0, &pool), 0);
         assert_eq!(table.enforce(9_999 * MS, &pool), 0);
         assert_eq!(table.enforce(10_001 * MS, &pool), 1);
+    }
+
+    fn reader_page() -> OwnedFd {
+        shm_ring::sealed_memfd(
+            crate::Marks::<shm_ring::WriteMap>::page_bytes(BUFFERS).expect("size"),
+        )
+        .expect("page")
+    }
+
+    /// A reader that holds buffer 0 from time zero, with a hold-time limit of 500 ms.
+    fn holding_too_long(marks: &Heap) {
+        set(marks, 0, 1);
+    }
+
+    /// Each cut says why, in its cut-off word: over its count, over its hold time.
+    #[test]
+    fn each_cut_says_why_in_the_pool_page() {
+        let pool = pool_page();
+        let over = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
+        for buffer in 0..3 {
+            set(&over, buffer, 1);
+        }
+        let mut table = HoldTable::new(BUFFERS);
+        table.add_over(0, &over, TWO).expect("reader");
+        assert_eq!(table.enforce(MS, &pool), 1);
+        assert_eq!(page::cut_off_reason(&pool, BUFFERS, 0), page::cut::HELD);
+
+        let slow = Heap::new(MARKS_AT + 2 * BUFFERS as usize);
+        holding_too_long(&slow);
+        let pool = pool_page();
+        let limits = Limits {
+            max_held: 2,
+            max_hold: Some(Duration::from_millis(500)),
+        };
+        let mut table = HoldTable::new(BUFFERS);
+        table.add_over(0, &slow, limits).expect("reader");
+        assert_eq!(table.enforce(0, &pool), 0);
+        assert_eq!(table.enforce(600 * MS, &pool), 1);
+        assert_eq!(
+            page::cut_off_reason(&pool, BUFFERS, 0),
+            page::cut::HOLD_TIME
+        );
+    }
+
+    /// A released reader is cut off at once but keeps its slot until its liveness pipe hangs up.
+    /// A reader that hangs up on its own is freed on the next tick, and its slot is free again.
+    #[test]
+    fn a_released_reader_keeps_its_slot_until_its_pipe_hangs_up() {
+        let pool = pool_page();
+        let mut table = HoldTable::new(BUFFERS);
+        let (liveness, hangup) = shm_ring::liveness_pipe().expect("pipe");
+        table
+            .add_reader(1, reader_page(), TWO, liveness)
+            .expect("reader");
+        assert_eq!(table.free_reader_slot(4), Some(2));
+
+        assert!(table.release(1, &pool));
+        assert_eq!(page::cut_off_reason(&pool, BUFFERS, 1), page::cut::RELEASED);
+        assert_eq!(table.tick(MS, &pool), 0, "cut off already: nothing new");
+        assert!(table.is_reader(1), "still reserved while the reader lives");
+        assert_eq!(table.free_reader_slot(4), Some(2));
+
+        drop(hangup);
+        assert_eq!(table.tick(2 * MS, &pool), 0);
+        assert!(!table.is_reader(1), "freed once the pipe hangs up");
+        assert_eq!(page::cut_off_reason(&pool, BUFFERS, 1), 0);
+        assert_eq!(table.free_reader_slot(4), Some(1));
+    }
+
+    /// A reader that vanishes without a release is cut off as hung up and freed on the same tick.
+    #[test]
+    fn a_reader_that_vanishes_is_cut_off_and_freed_on_the_tick() {
+        let pool = pool_page();
+        let mut table = HoldTable::new(BUFFERS);
+        let (liveness, hangup) = shm_ring::liveness_pipe().expect("pipe");
+        table
+            .add_reader(1, reader_page(), TWO, liveness)
+            .expect("reader");
+        drop(hangup);
+        assert_eq!(table.tick(MS, &pool), 1);
+        assert!(!table.is_reader(1));
+        assert!(table.free_reader_slot(63).is_some());
+    }
+
+    /// A reader's slot is never slot 0, and the slots handed out are `1..=readers`.
+    #[test]
+    fn reader_slots_are_one_to_readers_and_run_out() {
+        let mut table = HoldTable::new(BUFFERS);
+        let mut pipes = Vec::new();
+        for slot in 1..=2 {
+            let (liveness, hangup) = shm_ring::liveness_pipe().expect("pipe");
+            pipes.push(hangup);
+            let free = table.free_reader_slot(2).expect("a free slot");
+            assert_eq!(free, slot);
+            table
+                .add_reader(slot, reader_page(), TWO, liveness)
+                .expect("reader");
+        }
+        assert_eq!(table.free_reader_slot(2), None, "the readers are all taken");
+        assert_eq!(
+            table.free_reader_slot(0),
+            None,
+            "slot 0 is the consumer's, never a reader's"
+        );
     }
 }

@@ -21,9 +21,23 @@ const ALLOC: u32 = iowr::<AllocationData>(b'H', 0);
 /// read-write and close-on-exec descriptor flags and no heap flags. The kernel
 /// rounds the size up to whole pages.
 pub fn allocate(heap: BorrowedFd<'_>, len: u64) -> io::Result<OwnedFd> {
+    allocate_with(heap, len, false)
+}
+
+/// As [`allocate`], but with `read_only` the descriptor is a read-only file: the kernel gives the
+/// buffer no writable mapping through it (`EACCES`), and nothing else can reopen the buffer
+/// read-write (`/proc/self/fd` reopen fails for a dma-buf). The mode is fixed here: a dma-buf
+/// cannot be made writable later. Hardware that fills the buffer doesn't need a writable
+/// descriptor of it.
+pub fn allocate_with(heap: BorrowedFd<'_>, len: u64, read_only: bool) -> io::Result<OwnedFd> {
+    let access = if read_only {
+        libc::O_RDONLY
+    } else {
+        libc::O_RDWR
+    };
     let mut data = AllocationData {
         len,
-        fd_flags: (libc::O_RDWR | libc::O_CLOEXEC) as u32,
+        fd_flags: (access | libc::O_CLOEXEC) as u32,
         ..Default::default()
     };
     // SAFETY: `ALLOC` takes a `dma_heap_allocation_data`, which `data` is. The

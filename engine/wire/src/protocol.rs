@@ -185,6 +185,23 @@ macro_rules! is_added {
     };
 }
 
+/// Whether no two of `kinds` are the same number. A frame kind is the wire's name for a message, so two
+/// frames sharing one would be read as each other.
+pub(crate) const fn kinds_are_unique(kinds: &[u16]) -> bool {
+    let mut i = 0;
+    while i < kinds.len() {
+        let mut j = i + 1;
+        while j < kinds.len() {
+            if kinds[i] == kinds[j] {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// Declares the frames, in sections: one section per part of the wire (see [`PARTS`]), numbered
 /// as the part is. A frame marked `added` is one appended after the part's base, so it is left
 /// out of the part's hash: a reader from before it refuses the kind alone, with
@@ -469,7 +486,45 @@ frames! {
     // StreamRings and StreamRingHandles, which are declared in the core and the stream-handles
     // part; this part states the bit, so a peer can see whether the host's layout is the one
     // this build reads.
-    "shared-rings" = 4 bit SHARED_RINGS folds crate::ring::fds::fold_constants {
+    "shared-rings" = 4 bit SHARED_RINGS folds crate::ring::fold_shared_rings {
+        /// Asks for a reader slot on a stream the connection has open as its consumer: a third process
+        /// that reads the stream's own buffers and ring, with no connection of its own to the host.
+        /// `held` and `hold_ms` are what the reader asks to hold a buffer for, and how long; zero asks
+        /// for the defaults. Answered with StreamTicketRings, or a Refusal that names the stream.
+        /// Sent only to a host whose Welcome set [`feature::SHARED_RINGS`].
+        added 35 StreamTicket { id: u32, device: u32, name: &'a str, held: u32, hold_ms: u32, import: bool }
+        /// The reader slot a StreamTicket was granted, and the descriptors to pass on to the reader:
+        /// those of [`crate::ring::ticket::fds`], in that order, all with this frame over
+        /// `SCM_RIGHTS`. `held` and `hold_ms` are what was granted. `plane_bytes` is each plane's
+        /// length (empty for one plane of a whole buffer), and `tail_bytes` the slack past each
+        /// buffer, both as StreamRingHandles gives them. `slot` is the number the reader marks through.
+        added 36 StreamTicketRings {
+            id: u32,
+            slot: u32,
+            buffers: u32,
+            buffer_bytes: u32,
+            frame_slots: u32,
+            job_slots: u32,
+            job_bytes: u32,
+            held: u32,
+            hold_ms: u32,
+            tail_bytes: u32,
+            /// What was granted: bit 0 read, bit 1 import (see [`ticket::rights`]).
+            rights: u8,
+            descriptors: u8,
+            plane_bytes: &'a [u8],
+        }
+        /// Gives back a reader slot the connection's stream granted: that reader is cut off with reason
+        /// 5 and its slot is freed once its liveness pipe hangs up. Answered with an empty Reply, or a
+        /// Refusal.
+        added 37 StreamUnticket { id: u32, device: u32, name: &'a str, slot: u32 }
+        /// Asks what the host knows of a reader slot: whether it is live, why and when it was cut off.
+        /// Answered with StreamTicketInfo, or a Refusal.
+        added 38 StreamTicketState { id: u32, device: u32, name: &'a str, slot: u32 }
+        /// The answer to StreamTicketState. `reason` is a cut-off reason (0 while not cut off), `cut_at_ns`
+        /// when it was cut off on the host's `CLOCK_MONOTONIC`, and `cuts` how many readers of the stream
+        /// have been cut off since the consumer attached.
+        added 39 StreamTicketInfo { id: u32, slot: u32, live: bool, reason: u64, cut_at_ns: u64, cuts: u64 }
     }
     // The endpoints part: a function's two bulk endpoints, lent to one connection at a time. Its
     // frames are all additions after the base, so its hash is its name, number and bit.
@@ -798,22 +853,6 @@ const fn part_hashes() -> [u64; PARTS] {
         i += 1;
     }
     out
-}
-
-/// Whether no two of `kinds` are the same number.
-pub(crate) const fn kinds_are_unique(kinds: &[u16]) -> bool {
-    let mut i = 0;
-    while i < kinds.len() {
-        let mut j = i + 1;
-        while j < kinds.len() {
-            if kinds[i] == kinds[j] {
-                return false;
-            }
-            j += 1;
-        }
-        i += 1;
-    }
-    true
 }
 
 /// Each part as Hello and Welcome carry it: one record per part, `[name length: u8][name][hash:

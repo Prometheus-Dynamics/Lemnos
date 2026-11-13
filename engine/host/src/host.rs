@@ -17,7 +17,8 @@ use lemnos_core::{
 use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
-    Lease, MemfdAllocator, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
+    Lease, MemfdAllocator, ProducerEndpoint, ReaderTicket, StreamAllocator, StreamMemory,
+    StreamStats, Streams, TicketRefused, TicketState,
 };
 use crate::{Options, guest};
 
@@ -2151,6 +2152,77 @@ impl Host {
         caller: CallerId,
     ) -> core::result::Result<(), Status> {
         self.inner.streams.detach(device, name, caller)
+    }
+
+    /// Gives `caller`, who has a stream of `device` open, a reader slot on it: the descriptors and
+    /// the slot for a third process to read the stream with, read-only (see [`ReaderTicket`]).
+    /// `held` and `hold_ms` are asked for; zero asks for 2 buffers and 500 ms; the stream's maxima
+    /// bound what is granted (the grant is in the answer).
+    ///
+    /// # Errors
+    ///
+    /// [`TicketRefused`] with the status and a text that names the stream: `NOT_FOUND` (no such
+    /// stream, or no consumer), `NOT_PERMITTED` (`caller` is not the consumer), `BUSY` (every reader
+    /// slot is taken, or the holds would leave the producer too few buffers), `NOT_SUPPORTED`
+    /// (`readers` is 0, or the stream's dma-bufs are writable).
+    pub fn stream_ticket(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        held: u32,
+        hold_ms: u32,
+        import: bool,
+    ) -> core::result::Result<ReaderTicket, TicketRefused> {
+        self.inner
+            .streams
+            .ticket(device, name, caller, held, hold_ms, import)
+    }
+
+    /// Sets the daemon's signed mode, which decides whether a reader may import a dma-buf stream's
+    /// buffers unless the stream says so (`reader_import`). A host that is not told stays signed.
+    pub fn set_signed_mode(&self, signed: bool) {
+        self.inner.streams.set_signed(signed);
+    }
+
+    /// What the host knows of reader `slot` of a stream `caller` has open: whether it is live, and
+    /// why and when it was cut off.
+    ///
+    /// # Errors
+    ///
+    /// `NOT_FOUND` (no stream, no consumer, or `slot` is not a reader's), `NOT_PERMITTED`.
+    pub fn stream_ticket_state(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        slot: u32,
+    ) -> core::result::Result<TicketState, Status> {
+        self.inner.streams.ticket_state(device, name, caller, slot)
+    }
+
+    /// Gives back a reader slot `caller` was granted on a stream. The reader is cut off and its
+    /// slot is freed once its liveness pipe hangs up.
+    ///
+    /// # Errors
+    ///
+    /// `NOT_FOUND` if there is no such stream, or `slot` isn't a reader's on it. `NOT_PERMITTED` if
+    /// `caller` isn't the stream's consumer.
+    pub fn stream_unticket(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        slot: u32,
+    ) -> core::result::Result<(), Status> {
+        self.inner.streams.unticket(device, name, caller, slot)
+    }
+
+    /// Applies every stream's reader limits and frees the slots of readers that have gone. Call
+    /// this on each pass of the daemon's loop, which is what bounds how long a dead reader's holds
+    /// last. Allocates nothing and makes no call per frame.
+    pub fn streams_tick(&self) {
+        self.inner.streams.tick();
     }
 
     /// Takes the producer's end of a stream without a driver: a software producer. A stream

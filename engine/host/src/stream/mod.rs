@@ -91,6 +91,24 @@ pub trait StreamAllocator: Send + Sync {
         let _ = (name, layout, heap, planes);
         Err(Status::NOT_SUPPORTED)
     }
+
+    /// As [`allocate_planes`](Self::allocate_planes), but with `read_only` the dma-bufs are
+    /// read-only files: the stream has reader slots (`readers` in the board file), and a reader's
+    /// descriptor must not be writable. An allocator that can't make read-only dma-bufs keeps this
+    /// default and gives writable ones; a ticket on such a stream is then refused, so nothing is
+    /// given to a reader that could write.
+    fn allocate_planes_for(
+        &self,
+        name: &str,
+        layout: &Layout,
+        heap: &str,
+        planes: &Planes,
+        read_only: bool,
+        tail: u32,
+    ) -> Result<Buffers, Status> {
+        let _ = (read_only, tail);
+        self.allocate_planes(name, layout, heap, planes)
+    }
 }
 
 /// Memory from memfds, for a consumer in the same process or a host that has no dma-heap.
@@ -152,6 +170,47 @@ pub struct Lease {
     pub shared: bool,
 }
 
+/// A reader slot the consumer of a stream asked for: a third process's view of the stream, read-only,
+/// with its own marks, bell and liveness pipe. `descriptors` are those of
+/// [`lemnos_wire::ring::ticket::fds`], in that order, for the service to pass to the reader.
+#[derive(Debug)]
+pub struct ReaderTicket {
+    /// The slot the reader marks through, which the host numbers.
+    pub slot: u32,
+    pub layout: Layout,
+    /// Each plane's length, as the stream has them.
+    pub planes: Planes,
+    /// Slack past each buffer, for an importer.
+    pub tail_bytes: u32,
+    pub descriptors: Vec<OwnedFd>,
+    /// What the reader was granted: how many buffers it may hold at once, and for how long.
+    pub held: u32,
+    pub hold_ms: u32,
+    /// What the reader may do: the bits of `lemnos_wire::ring::ticket::rights`.
+    pub rights: u8,
+}
+
+/// Why a reader slot was refused, with what the refusal names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketRefused {
+    pub status: Status,
+    /// Names the stream, and the limit or the amount that refused it.
+    pub text: String,
+}
+
+/// What the host knows of one reader slot: whether it is live, and why and when it was cut off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TicketState {
+    /// Whether the slot is in use by a reader.
+    pub live: bool,
+    /// The cut-off reason (a `shm_ring_buffers::page::cut` value), or 0 while the reader has not been cut off.
+    pub reason: u64,
+    /// When it was cut off, `CLOCK_MONOTONIC` nanoseconds; 0 when it has not been.
+    pub cut_at_ns: u64,
+    /// How many readers of this stream have been cut off since the consumer attached.
+    pub cuts: u64,
+}
+
 impl Lease {
     /// The consumer's end, attached in this process from the descriptors. Used by tests and by a
     /// consumer that shares the host's process.
@@ -191,6 +250,9 @@ impl Lease {
 pub(crate) struct Streams {
     allocator: Arc<dyn StreamAllocator>,
     table: RwLock<Table>,
+    /// The daemon's signed mode: on unless it runs with open packages. Readers may import dma-bufs
+    /// with it off, or with it on where the stream says so. Secure until told otherwise.
+    signed: std::sync::atomic::AtomicBool,
 }
 
 /// Each stream, by its device's index and its name.
@@ -201,6 +263,7 @@ impl Streams {
         let streams = Self {
             allocator,
             table: RwLock::new(BTreeMap::new()),
+            signed: std::sync::atomic::AtomicBool::new(true),
         };
         for (index, device) in devices.iter().enumerate() {
             streams.add(index as u32, device);
@@ -255,6 +318,61 @@ impl Streams {
     pub(crate) fn detach(&self, device: u32, name: &str, caller: CallerId) -> Result<(), Status> {
         let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
         endpoint::lock(&core).detach_if(caller)
+    }
+
+    /// Gives `caller`, the stream's consumer, a reader slot on it. See `StreamCore::ticket`.
+    pub(crate) fn ticket(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        held: u32,
+        hold_ms: u32,
+        import: bool,
+    ) -> Result<ReaderTicket, TicketRefused> {
+        let signed = self.signed.load(std::sync::atomic::Ordering::Relaxed);
+        let Some(core) = self.core(device, name) else {
+            return Err(TicketRefused {
+                status: Status::NOT_FOUND,
+                text: format!("device {device} has no stream {name:?}"),
+            });
+        };
+        endpoint::lock(&core).ticket(caller, held, hold_ms, import, signed)
+    }
+
+    /// Why a reader slot of `caller`'s stream was cut off, and whether it is live.
+    pub(crate) fn ticket_state(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        slot: u32,
+    ) -> Result<TicketState, Status> {
+        let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
+        endpoint::lock(&core).ticket_state(caller, slot)
+    }
+
+    /// Gives back a reader slot `caller` was granted on the stream.
+    pub(crate) fn unticket(
+        &self,
+        device: u32,
+        name: &str,
+        caller: CallerId,
+        slot: u32,
+    ) -> Result<(), Status> {
+        let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
+        endpoint::lock(&core).unticket(caller, slot)
+    }
+
+    /// The pass over every stream's readers, on the daemon's tick. See `StreamCore::tick`.
+    pub(crate) fn tick(&self) {
+        self.each(StreamCore::tick);
+    }
+
+    /// Sets the daemon's signed mode. See the `signed` field.
+    pub(crate) fn set_signed(&self, signed: bool) {
+        self.signed
+            .store(signed, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Gives up everything `caller` held. Runs however the caller went.
