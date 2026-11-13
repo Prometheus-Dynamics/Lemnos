@@ -1,78 +1,29 @@
 //! The udev rules that give the daemon's device nodes to its group, made from the board file.
 //!
-//! The daemon drops to user `lemnos` after its root phase and opens its nodes as that user, so each
-//! node it needs must be readable and writable by group `lemnos`. The packaged rules
-//! (`packaging/udev/70-lemnos.rules`) cover every node of a kind; this fragment is the board's own
-//! list of the nodes it uses by name: the kernel module's nodes, and the dma-heaps the board's
-//! drivers allocate from. It is one more output of `lemnos-ctl tree --udev FILE`, and it is written
-//! the same way on every board. Install it as a rules file of its own, beside `70-lemnos.rules`.
-//!
-//! The rules are kept in sections, one per kind of node. A section names the node it covers and its
-//! source (the board file key, or the module's naming), so another kind of node is one more
-//! section here and nothing else changes. Nothing here knows a kind of hardware beyond the daemon's
-//! own nodes.
+//! The rules are one renderer of the facts in [`crate::permissions`]: `lemnos-ctl tree BOARD --udev
+//! FILE` writes them, and [`crate::mdev`] writes the same facts for a BusyBox image. The fragment
+//! is the board's own list (the kernel module's nodes, and the dma-heaps the board's drivers use).
+//! Install it as a rules file of its own, beside `packaging/udev/70-lemnos.rules`.
 
 use std::fmt::Write as _;
 
 use lemnos_host::board::BoardFile;
 
-/// The group the daemon runs as, and the group its device nodes are given to. It is the group of
-/// the `lemnos` user in `packaging/systemd/lemnos.conf` (`u lemnos`), so the two are one name.
-pub const DAEMON_GROUP: &str = "lemnos";
-/// The mode the daemon's nodes are given: owner and group read and write, nothing for others.
-pub const NODE_MODE: &str = "0660";
+use crate::permissions::{Fact, NODE_OWNER, Name, sections};
 
-/// One kind of node the daemon opens, with the rules that give it to the daemon's group.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Section {
-    /// The heading the fragment prints above the rules, saying what they cover and where it came from.
-    pub title: String,
-    /// One rule per line, without the trailing newline.
-    pub rules: Vec<String>,
-}
-
-/// The sections for a board, in the order the fragment prints them.
+/// One rule for a fact, without the trailing newline. `OWNER` is written only where the owner is not
+/// the kernel's default (root), so a rule reads as it did before the owner was a fact.
 #[must_use]
-pub fn sections(board: &BoardFile) -> Vec<Section> {
-    let mut out = vec![module_nodes()];
-    out.extend(dma_heaps(board));
+pub fn rule(fact: &Fact) -> String {
+    let kernel = match &fact.name {
+        Name::Exact(name) | Name::Glob(name) => name,
+    };
+    let mut out = format!(r#"SUBSYSTEM=="{}", KERNEL=="{kernel}""#, fact.subsystem);
+    if fact.owner != NODE_OWNER {
+        let _ = write!(out, r#", OWNER="{}""#, fact.owner);
+    }
+    let _ = write!(out, r#", GROUP="{}", MODE="{}""#, fact.group, fact.mode);
     out
-}
-
-/// The kernel module's control node and the receiver nodes it makes: `/dev/lemnos` and
-/// `/dev/lemnos-<receiver>`, both misc devices named by the module.
-fn module_nodes() -> Section {
-    Section {
-        title: "The kernel module's nodes: /dev/lemnos, and /dev/lemnos-<receiver> for each receiver the module owns (misc devices named by the module)."
-            .to_owned(),
-        rules: vec![
-            format!(r#"SUBSYSTEM=="misc", KERNEL=="lemnos", GROUP="{DAEMON_GROUP}", MODE="{NODE_MODE}""#),
-            format!(r#"SUBSYSTEM=="misc", KERNEL=="lemnos-*", GROUP="{DAEMON_GROUP}", MODE="{NODE_MODE}""#),
-        ],
-    }
-}
-
-/// The dma-heaps the board's drivers allocate from, one rule each (`BoardFile::dma_heaps`).
-fn dma_heaps(board: &BoardFile) -> Option<Section> {
-    let heaps = board.dma_heaps();
-    if heaps.is_empty() {
-        return None;
-    }
-    let rules = heaps
-        .iter()
-        .map(|heap| {
-            format!(
-                r#"SUBSYSTEM=="dma_heap", KERNEL=="{heap}", GROUP="{DAEMON_GROUP}", MODE="{NODE_MODE}""#
-            )
-        })
-        .collect();
-    Some(Section {
-        title:
-            "The dma-heaps the board's drivers allocate from: the board file's [host] dma_heaps \
-                (default linux,cma), and every dma-buf stream's heap. Each is /dev/dma_heap/<name>."
-                .to_owned(),
-        rules,
-    })
 }
 
 /// The fragment for a board: a header, then each section's title and rules. Ends with a newline.
@@ -91,8 +42,8 @@ pub fn fragment(board: &BoardFile) -> String {
         for line in section.title.split('\n') {
             let _ = writeln!(out, "# {}", line.trim_start());
         }
-        for rule in section.rules {
-            let _ = writeln!(out, "{rule}");
+        for fact in &section.facts {
+            let _ = writeln!(out, "{}", rule(fact));
         }
     }
     out
