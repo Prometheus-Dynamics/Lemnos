@@ -7,7 +7,8 @@
 //! The system's own unit and init script use this one path: neither gives the daemon a user.
 
 use std::io;
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use lemnos_host::board::BoardFile;
 use lemnos_linux_sys::privilege::{self, CAP_SYS_RAWIO, Observed, Plan};
@@ -116,6 +117,69 @@ pub fn start(request: &Request, board: &BoardFile, socket: &Path) -> Result<(), 
     privilege::drop_to(&plan).map_err(|error| format!("dropping to {uid}:{gid}: {error}"))?;
     let now = privilege::observe().map_err(|error| format!("after the drop: {error}"))?;
     privilege::verify(&plan, &now).map_err(|reason| format!("refusing to run: {reason}"))?;
+    // The nodes the daemon opens by name must be reachable by the user it now runs as. Checked here,
+    // after the drop, so a node the group cannot open stops the start with its name.
+    let group = request
+        .group
+        .clone()
+        .unwrap_or_else(|| request.user.clone());
+    check_nodes(&module_and_heap_nodes(board), now.euid, now.egid, &group)
+        .map_err(|why| format!("refusing to run: {why}"))?;
+    Ok(())
+}
+
+/// The device nodes the daemon opens by name that exist now: the kernel module's `/dev/lemnos` and
+/// its `/dev/lemnos-*` nodes, and each of the board's dma-heaps (`BoardFile::dma_heaps`). A node that
+/// is not there is not listed as a failure here: a driver that needs it reports that when it binds.
+#[must_use]
+pub fn module_and_heap_nodes(board: &BoardFile) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/dev") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "lemnos" || name.starts_with("lemnos-") {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.extend(
+        board
+            .dma_heaps()
+            .into_iter()
+            .map(|heap| PathBuf::from("/dev/dma_heap").join(heap)),
+    );
+    paths.sort();
+    paths
+}
+
+/// Checks that each node that exists can be read and written by the user `uid` or the group `gid`,
+/// from its owner, group and mode bits. Only the owner, the group and the other bits are looked at,
+/// which is the daemon's reach after its drop: its groups are emptied by the drop, so the
+/// effective group is its only group. A node that cannot be reached is named, with the fix.
+///
+/// # Errors
+///
+/// A node that exists and that the daemon cannot read and write, named with its group `group`. A
+/// node whose metadata cannot be read is named with the reason.
+pub fn check_nodes(paths: &[PathBuf], uid: u32, gid: u32, group: &str) -> Result<(), String> {
+    for path in paths {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        let (mode, owner, node_group) = (meta.mode(), meta.uid(), meta.gid());
+        let reachable = (owner == uid && mode & 0o600 == 0o600)
+            || (node_group == gid && mode & 0o060 == 0o060)
+            || mode & 0o006 == 0o006;
+        if !reachable {
+            return Err(format!(
+                "{}: not readable/writable by group {group}: install the generated udev fragment",
+                path.display()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -225,5 +289,60 @@ mod tests {
         let mut holds = now;
         holds.effective = 1 << CAP_SYS_RAWIO;
         assert_eq!(lacks(&holds).expect("read"), None);
+    }
+}
+
+#[cfg(test)]
+mod node_tests {
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    use super::check_nodes;
+
+    /// A file of the test's own, in a directory of its own under the test's scratch directory.
+    fn node(name: &str, mode: u32) -> (std::path::PathBuf, u32, u32) {
+        let dir = std::env::temp_dir().join(format!("lemnosd-node-{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node");
+        fs::write(&path, b"").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        (path, meta.uid(), meta.gid())
+    }
+
+    #[test]
+    fn a_node_the_group_can_open_is_accepted() {
+        let (path, _uid, gid) = node("group-rw", 0o660);
+        // A user outside the file's owner but in its group: the group bits are read and written.
+        assert!(check_nodes(std::slice::from_ref(&path), 987_654, gid, "lemnos").is_ok());
+    }
+
+    #[test]
+    fn a_node_only_root_can_open_is_named_with_the_fix() {
+        // The reference board's state before the udev fragment: root:root, mode 600.
+        let (path, _uid, _gid) = node("root-only", 0o600);
+        let error =
+            check_nodes(std::slice::from_ref(&path), 987_654, 987_654, "lemnos").unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "{}: not readable/writable by group lemnos: install the generated udev fragment",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_node_that_is_not_there_is_not_this_checks_failure() {
+        let missing = std::path::PathBuf::from("/nonexistent-lemnos-test/dma_heap/linux,cma");
+        assert!(check_nodes(&[missing], 1, 1, "lemnos").is_ok());
+    }
+
+    #[test]
+    fn a_node_readable_and_writable_by_other_is_accepted_and_one_half_open_is_not() {
+        let (path, _uid, gid) = node("other-rw", 0o606);
+        assert!(check_nodes(std::slice::from_ref(&path), 987_654, gid + 1, "lemnos").is_ok());
+        let (path, _uid, gid) = node("other-r", 0o604);
+        assert!(check_nodes(std::slice::from_ref(&path), 987_654, gid + 1, "lemnos").is_err());
     }
 }

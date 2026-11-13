@@ -15,6 +15,7 @@ nothing, and starts nothing.
 | `systemd/lemnos-orion.env.example` | `/etc/lemnos/lemnos-orion.env` | The bridge's identity, node and socket settings. | Only an image that ships `lemnos-orion` |
 | `systemd/lemnos-module.conf` | `/usr/lib/modules-load.d/lemnos.conf` | Loads `lemnos.ko` at boot. **Optional.** | Only an image that ships `lemnos.ko` |
 | `udev/70-lemnos.rules` | `/usr/lib/udev/rules.d/70-lemnos.rules` | Gives group `lemnos` the device nodes lemnosd opens. | With systemd (or any udev) |
+| `lemnos-ctl tree BOARD --udev FILE` (generated) | `/usr/lib/udev/rules.d/71-lemnos-board.rules` | Gives group `lemnos` the board's own nodes: the module's, and each dma-heap the board uses. | With systemd (or any udev) |
 | `init/S50lemnosd` | `/etc/init.d/S50lemnosd` (mode 0755) | BusyBox init script for the daemon, in place of its unit. | Only an image without systemd |
 | `init/S51lemnos-orion` | `/etc/init.d/S51lemnos-orion` (mode 0755) | BusyBox init script for the bridge. | Only an image without systemd that ships `lemnos-orion` |
 | `init/mdev.conf.fragment` | appended to `/etc/mdev.conf` | Device-node rules for mdev, the BusyBox counterpart of the udev rules. | Only an image without systemd |

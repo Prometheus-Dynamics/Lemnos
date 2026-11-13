@@ -13,6 +13,7 @@ id = "example"                 # the name the service gives itself to clients
 call_deadline_ms = 2000        # how long one driver call may run: 1 to 60000
 retry_first_ms = 1000          # the first wait before a failed device is bound again
 retry_cap_ms = 8000            # the longest wait: at most 8000, the failure rule's cap
+dma_heaps = ["linux,cma"]       # the dma-heaps the drivers allocate from, by name: [] for none
 
 # `bus`: the one resource this device sits on. Here an I2C adapter, by its kernel name.
 [[devices]]

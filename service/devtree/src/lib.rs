@@ -12,6 +12,7 @@
 pub mod check;
 pub mod generate;
 pub mod map;
+pub mod udev;
 
 pub use check::check;
 pub use generate::{Output, generate};
