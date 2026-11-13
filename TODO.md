@@ -108,7 +108,8 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
     flag `LEMNOS_STREAM_CREATE_SHM`, which makes the module write the shared frame ring; the sys
     crates still read the old one until I2b2. I2b1b makes the marks page the returns in that form:
     `LEMNOS_STREAM_IOC_READER` gives the module a reader's marks, and a buffer is reused only when no
-    reader holds it. Cut-off of readers over their limits comes next (I2b1c).
+    reader holds it. I2b1c cuts off readers over their limits. I2b1d frees a registration when its
+    reader file closes (an exit does too) or on `LEMNOS_READER_IOC_UNREGISTER`. The doorbell comes next (I2b1e).
   - I2c: the job ring.
   - I2d: outside readers by ticket. A third process gets a reader slot from the service, and the
     service asks the daemon for a ticket on its own connection. Read and import rights are kept

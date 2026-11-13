@@ -6,7 +6,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
-use crate::ioctl::{Ioctl, iow, iowr, pod, zeroed};
+use crate::ioctl::{Ioctl, ioc, ioctl_ptr, iow, iowr, pod, zeroed};
 
 const TYPE: u8 = b'L';
 
@@ -43,19 +43,22 @@ struct TestSource {
 }
 pod!(TestSource);
 
-/// `struct lemnos_stream_reader`: the marks page and its limits in, the slot out.
+/// `struct lemnos_stream_reader`: the marks page and its limits in, the slot and the registration's
+/// file out.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Reader {
     fd: i32,
     slot: u32,
     max_held: u32,
-    reserved: u32,
+    reader_fd: i32,
     max_hold_ns: u64,
 }
 pod!(Reader);
 
 const READER: Ioctl<Reader> = Ioctl::new(iowr::<Reader>(TYPE, 0x87), "LEMNOS_STREAM_IOC_READER");
+/// `LEMNOS_READER_IOC_UNREGISTER`: `_IO`, no argument.
+const UNREGISTER: u32 = ioc(0, TYPE, 0x88, 0);
 
 const CREATE_REQ: Ioctl<Create> =
     Ioctl::new(iowr::<Create>(TYPE, 0x80), "LEMNOS_IOC_STREAM_CREATE");
@@ -130,26 +133,48 @@ pub fn test_source(stream: BorrowedFd<'_>, period_us: u32, frames: u32) -> io::R
     TEST_SOURCE.call(stream, &mut arg).map(|_| ())
 }
 
+/// A reader the module holds: its slot, and the file that holds the registration. Closing the file
+/// (an exit does too) frees the slot, and [`unregister`] does so at once.
+#[derive(Debug)]
+pub struct Registration {
+    /// The reader slot the module gave the reader, to report with `Marks::set_slot`.
+    pub slot: u32,
+    /// The registration's file.
+    pub file: OwnedFd,
+}
+
 /// Gives a stream's module a reader's marks page: a sealed memfd in the layout of
 /// `shm_ring_holds::Marks` (its read-only descriptor, `Marks::page_fd`). The module holds every
-/// buffer the page marks, and returns the reader's slot, which the reader reports with
-/// `Marks::set_slot`. `max_held` is what the reader may hold at once, and `max_hold_ns` how long
-/// one hold may last; zero for no limit. A reader over either is cut off by the module.
+/// buffer the page marks while the returned registration lives. `max_held` is what the reader may
+/// hold at once, and `max_hold_ns` how long one hold may last; zero for no limit. A reader over
+/// either is cut off by the module.
 pub fn add_reader(
     stream: BorrowedFd<'_>,
     marks: BorrowedFd<'_>,
     max_held: u32,
     max_hold_ns: u64,
-) -> io::Result<u32> {
+) -> io::Result<Registration> {
     let mut arg = Reader {
         fd: marks.as_raw_fd(),
         slot: 0,
         max_held,
-        reserved: 0,
+        reader_fd: -1,
         max_hold_ns,
     };
     READER.call(stream, &mut arg)?;
-    Ok(arg.slot)
+    // SAFETY: a successful registration returns a new close-on-exec descriptor that nothing else owns.
+    let file = unsafe { OwnedFd::from_raw_fd(arg.reader_fd) };
+    Ok(Registration {
+        slot: arg.slot,
+        file,
+    })
+}
+
+/// Frees a registration's slot now, through its file: the reader's marks stop holding at once. Fails
+/// with `ENOENT` once the registration is gone.
+pub fn unregister(registration: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: `_IO` takes no argument, so the kernel reads and writes nothing through the null pointer.
+    unsafe { ioctl_ptr::<u8>(registration, UNREGISTER, std::ptr::null_mut()) }.map(|_| ())
 }
 
 #[cfg(test)]
@@ -161,6 +186,7 @@ mod tests {
     fn the_reader_struct_is_the_modules() {
         assert_eq!(std::mem::size_of::<Reader>(), 24);
         assert_eq!(std::mem::offset_of!(Reader, slot), 4);
+        assert_eq!(std::mem::offset_of!(Reader, reader_fd), 12);
         assert_eq!(std::mem::offset_of!(Reader, max_hold_ns), 16);
     }
 }

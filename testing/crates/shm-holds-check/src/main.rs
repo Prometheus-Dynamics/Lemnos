@@ -18,6 +18,11 @@
 //!
 //! The module's side is pinned by these numbers: a held buffer that the module reuses fails the
 //! check, as does a released one that never comes back.
+//!
+//! `release` mode: a reader's registration is freed when its file closes, and by the explicit
+//! unregister. A reader that holds a buffer and exits without unregistering frees its buffer and
+//! its slot; the same holds for `LEMNOS_READER_IOC_UNREGISTER`; and 200 arrive-and-leave cycles
+//! leave the table with its slots.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -188,11 +193,11 @@ fn run_with(
     // The reader's marks: the module pins the read-only descriptor and gives the slot back.
     let marks = step("make the marks page", Marks::create(BUFFERS, 0, MAX_HELD))?;
     let page_fd = step("read-only marks descriptor", marks.page_fd())?;
-    let slot = step(
+    let registration = step(
         "give the module the marks page",
         stream::add_reader(stream.fd.as_fd(), page_fd.as_fd(), MAX_HELD, 0),
     )?;
-    marks.set_slot(slot);
+    marks.set_slot(registration.slot);
 
     step(
         "start the test source",
@@ -422,7 +427,7 @@ fn scenario(
     // The consumer marks without a limit of its own: the module's limits are the ones tested.
     let marks = step("make the marks page", Marks::create(BUFFERS, 0, 0))?;
     let page_fd = step("read-only marks descriptor", marks.page_fd())?;
-    let slot = step(
+    let registration = step(
         "give the module the marks page",
         stream::add_reader(
             stream.fd.as_fd(),
@@ -431,6 +436,7 @@ fn scenario(
             u64::try_from(sc.max_hold.as_nanos()).unwrap_or(u64::MAX),
         ),
     )?;
+    let slot = registration.slot;
     marks.set_slot(slot);
     step(
         "start the test source",
@@ -531,21 +537,279 @@ fn scenario(
     Ok(())
 }
 
+/// The frames the release scenarios' source makes: a frame a millisecond, enough for every phase.
+const RELEASE_FRAMES: u32 = 20_000;
+/// Arrive-and-leave cycles the reader table must survive (its size is `LEMNOS_STREAM_MAX_READERS`).
+const CYCLES: u32 = 200;
+
+/// A stream on the test block with its ring and pool mapped. Its source stops when it drops.
+struct Fixture {
+    stream: stream::Stream,
+    ring: Mapping,
+    pool: Mapping,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = stream::test_source(self.stream.fd.as_fd(), 0, 0);
+    }
+}
+
+fn fixture(node_path: &str, block_name: &str, heap_path: &str) -> Result<Fixture, String> {
+    let node = step(
+        "open the control node",
+        OpenOptions::new().read(true).write(true).open(node_path),
+    )?;
+    let block = step(
+        "find the block",
+        module::find_block(node.as_fd(), block_name),
+    )?
+    .ok_or_else(|| format!("no bound block named {block_name}"))?;
+    let heap = step(
+        "open the heap",
+        OpenOptions::new().read(true).write(true).open(heap_path),
+    )?;
+    let pool_bytes = u64::from(BUFFERS) * STRIDE as u64;
+    let pool_fd = step(
+        "allocate the pool",
+        dma_heap::allocate(heap.as_fd(), pool_bytes),
+    )?;
+    let stream = step(
+        "create the stream",
+        stream::create(
+            node.as_fd(),
+            &stream::Spec {
+                block,
+                flags: CREATE_SHM,
+                buffers: BUFFERS,
+                buffer_bytes: BUFFER_BYTES,
+                frame_slots: FRAME_SLOTS,
+                job_slots: JOB_SLOTS,
+                job_bytes: JOB_BYTES,
+                pool: Some(pool_fd.as_fd()),
+            },
+        ),
+    )?;
+    let ring = step(
+        "map the ring",
+        Mapping::new(stream.fd.as_fd(), stream.ring_bytes, 0, false),
+    )?;
+    let pool = step(
+        "map the pool",
+        Mapping::new(pool_fd.as_fd(), pool_bytes as usize, 0, false),
+    )?;
+    Ok(Fixture { stream, ring, pool })
+}
+
+/// The first word of `buffer` in the pool: its frame's sequence, once a frame is in it.
+fn first_word(pool: &Mapping, buffer: u32) -> Option<u64> {
+    pool.load_words()?
+        .load(buffer as usize * STRIDE / 8, Ordering::Acquire)
+}
+
+/// Whether `buffer`, which held frame `sequence` under `ticket`, has been reused since.
+fn reused_since(fx: &Fixture, buffer: u32, ticket: u32, sequence: u64) -> bool {
+    let page_words = Words {
+        map: &fx.ring,
+        base: PAGE_AT,
+    };
+    page::ticket(&page_words, BufferIndex(buffer)) != u64::from(ticket)
+        && first_word(&fx.pool, buffer).is_some_and(|w| w > sequence)
+}
+
+/// Marks the first frame the reader can mark and still find in place, within `WAIT`. Returns its
+/// buffer, its ticket and its sequence.
+fn hold_first(fx: &Fixture, marks: &Marks) -> Option<(u32, u32, u64)> {
+    let mut reader = Reader::over_from_start(Words {
+        map: &fx.ring,
+        base: 0,
+    })
+    .ok()?;
+    let page_words = Words {
+        map: &fx.ring,
+        base: PAGE_AT,
+    };
+    let deadline = Instant::now() + WAIT;
+    while Instant::now() < deadline {
+        match reader.next() {
+            Next::Sample(sample) => {
+                let Some(e) = entry::read(sample.payload) else {
+                    continue;
+                };
+                let buffer = e.buffers[0].0.0;
+                let ticket = e.buffers[0].1;
+                if marks.mark(BufferIndex(buffer)) {
+                    if page::still(&page_words, BufferIndex(buffer), ticket) {
+                        return Some((buffer, ticket, sample.seq));
+                    }
+                    marks.unmark(BufferIndex(buffer));
+                }
+            }
+            Next::Empty => std::thread::sleep(Duration::from_millis(1)),
+            Next::Skipped(_) => {}
+        }
+    }
+    None
+}
+
+/// Consumes the ring until `buffer` is reused, within `WAIT`: how long it took, if it did.
+fn wait_reused(fx: &Fixture, buffer: u32, ticket: u32, sequence: u64) -> Option<Duration> {
+    let mut reader = Reader::over_from_start(Words {
+        map: &fx.ring,
+        base: 0,
+    })
+    .ok()?;
+    let start = Instant::now();
+    while start.elapsed() < WAIT {
+        if reused_since(fx, buffer, ticket, sequence) {
+            return Some(start.elapsed());
+        }
+        match reader.next() {
+            Next::Sample(_) | Next::Skipped(_) => {}
+            Next::Empty => std::thread::sleep(Duration::from_micros(200)),
+        }
+    }
+    None
+}
+
+/// Registers a reader on the stream with its own marks page, and the page's marks.
+fn register(fx: &Fixture, marks: &Marks) -> Result<stream::Registration, String> {
+    let page_fd = step("read-only marks descriptor", marks.page_fd())?;
+    let registration = step(
+        "register the reader",
+        stream::add_reader(fx.stream.fd.as_fd(), page_fd.as_fd(), 0, 0),
+    )?;
+    marks.set_slot(registration.slot);
+    Ok(registration)
+}
+
+/// The release scenarios: a registration's file frees its slot and its marks when it closes, or
+/// through the unregister ioctl, and the reader table takes arrive-and-leave cycles.
+fn release(
+    node_path: &str,
+    block_name: &str,
+    heap_path: &str,
+    report: &mut Report,
+) -> Result<(), String> {
+    // 1. A reader holds a buffer and exits without unregistering: its file closes, so the buffer
+    // is reused and its slot is free.
+    {
+        let fx = fixture(node_path, block_name, heap_path)?;
+        let marks = step("make the marks page", Marks::create(BUFFERS, 0, 0))?;
+        let registration = register(&fx, &marks)?;
+        let slot = registration.slot;
+        step(
+            "start the test source",
+            stream::test_source(fx.stream.fd.as_fd(), 1000, RELEASE_FRAMES),
+        )?;
+        let held = hold_first(&fx, &marks);
+        report.check(held.is_some(), "exit: the reader holds a buffer");
+        if let Some((buffer, ticket, sequence)) = held {
+            // The process exits: its file closes, and the marks it left behind hold nothing.
+            drop(registration);
+            let reused = wait_reused(&fx, buffer, ticket, sequence);
+            report.check(
+                reused.is_some(),
+                format_args!(
+                    "exit without unregistering: the buffer is reused ({})",
+                    reused.map_or_else(|| format!("not within {WAIT:?}"), |d| format!("{d:?}")),
+                ),
+            );
+            let spare = step("make the marks page", Marks::create(BUFFERS, 0, 0))?;
+            let again = register(&fx, &spare)?;
+            report.check(
+                again.slot == slot,
+                format_args!(
+                    "exit without unregistering: slot {slot} is free again ({})",
+                    again.slot
+                ),
+            );
+        } else {
+            drop(registration);
+        }
+    }
+
+    // 2. The same, through LEMNOS_READER_IOC_UNREGISTER: at once, and only once.
+    {
+        let fx = fixture(node_path, block_name, heap_path)?;
+        let marks = step("make the marks page", Marks::create(BUFFERS, 0, 0))?;
+        let registration = register(&fx, &marks)?;
+        step(
+            "start the test source",
+            stream::test_source(fx.stream.fd.as_fd(), 1000, RELEASE_FRAMES),
+        )?;
+        if let Some((buffer, ticket, sequence)) = hold_first(&fx, &marks) {
+            let freed = stream::unregister(registration.file.as_fd());
+            report.check(freed.is_ok(), format_args!("unregister: {freed:?}"));
+            let twice = stream::unregister(registration.file.as_fd());
+            report.check(
+                twice
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+                format_args!("unregister again: {twice:?}"),
+            );
+            let reused = wait_reused(&fx, buffer, ticket, sequence);
+            report.check(
+                reused.is_some(),
+                format_args!(
+                    "unregister: the buffer is reused ({})",
+                    reused.map_or_else(|| format!("not within {WAIT:?}"), |d| format!("{d:?}")),
+                ),
+            );
+        } else {
+            report.check(false, "unregister: the reader holds a buffer");
+        }
+        drop(registration);
+    }
+
+    // 3. Arrive and leave, over and over: every registration gets a slot.
+    {
+        let fx = fixture(node_path, block_name, heap_path)?;
+        let marks =
+            Marks::create(BUFFERS, 0, 0).map_err(|e| format!("make the marks page: {e:?}"))?;
+        let page_fd = step("read-only marks descriptor", marks.page_fd())?;
+        let mut granted = 0_u32;
+        let mut refused = None;
+        for _ in 0..CYCLES {
+            match stream::add_reader(fx.stream.fd.as_fd(), page_fd.as_fd(), 0, 0) {
+                Ok(registration) => {
+                    granted += 1;
+                    drop(registration);
+                }
+                Err(e) => {
+                    refused = Some(e);
+                    break;
+                }
+            }
+        }
+        report.check(
+            granted == CYCLES,
+            format_args!("{CYCLES} arrive-and-leave cycles: {granted} granted ({refused:?})"),
+        );
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (node, block, heap, cutoff) = match args.as_slice() {
-        [node, block, heap] => (node, block, heap, false),
-        [node, block, heap, mode] if mode == "cutoff" => (node, block, heap, true),
+    let (node, block, heap, mode) = match args.as_slice() {
+        [node, block, heap] => (node, block, heap, ""),
+        [node, block, heap, m] if m == "cutoff" || m == "release" => {
+            (node, block, heap, m.as_str())
+        }
         _ => {
             let _ = writeln!(
                 std::io::stderr(),
-                "usage: lemnos-shm-holds-check <control node> <block name> <heap node> [cutoff]"
+                "usage: lemnos-shm-holds-check <control node> <block name> <heap node> [cutoff|release]"
             );
             return ExitCode::from(2);
         }
     };
     let mut report = Report { failures: 0 };
-    let outcome = if cutoff {
+    let outcome = if mode == "release" {
+        release(node, block, heap, &mut report)
+    } else if mode == "cutoff" {
         [
             Scenario {
                 name: "over the hold count",
