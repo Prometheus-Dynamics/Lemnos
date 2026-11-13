@@ -7,53 +7,40 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
-
 /// The fewest digits a serial may have.
 pub const MIN_DIGITS: usize = 8;
 /// The most digits a serial may have.
 pub const MAX_DIGITS: usize = 32;
 
-const DEVICE_TREE: &str = "/proc/device-tree/serial-number";
-const CPUINFO: &str = "/proc/cpuinfo";
-const CMDLINE: &str = "/proc/cmdline";
+/// Where the device tree's serial is, unless the driver says otherwise.
+pub const DEVICE_TREE: &str = "/proc/device-tree/serial-number";
+/// Where cpuinfo is, unless the driver says otherwise.
+pub const CPUINFO: &str = "/proc/cpuinfo";
+/// Where the kernel command line is, unless the driver says otherwise.
+pub const CMDLINE: &str = "/proc/cmdline";
 
 /// Where the board's serial is read from. The board file's `[board.serial]` table.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SerialSource {
     /// The device tree's `serial-number` string.
-    DeviceTree {
-        #[serde(default = "device_tree_path")]
-        path: PathBuf,
-    },
+    DeviceTree { path: PathBuf },
     /// The `Serial` line of `/proc/cpuinfo`.
-    Cpuinfo {
-        #[serde(default = "cpuinfo_path")]
-        path: PathBuf,
-    },
+    Cpuinfo { path: PathBuf },
     /// Bytes of an nvmem or sysfs file: fuses, OTP or a SID block. `offset` and `length` are in
     /// bytes; `length` is 4 to 16.
     Nvmem {
         path: PathBuf,
-        #[serde(default)]
         offset: u64,
         length: usize,
-        #[serde(default)]
         byte_order: ByteOrder,
     },
     /// The value of one `key=value` word on the kernel command line.
-    Cmdline {
-        key: String,
-        #[serde(default = "cmdline_path")]
-        path: PathBuf,
-    },
+    Cmdline { key: String, path: PathBuf },
 }
 
 /// The order of an nvmem cell's bytes. `big` (the default) reads the first byte as the most
 /// significant one; `little` reverses them first.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ByteOrder {
     #[default]
     Big,
@@ -197,16 +184,4 @@ pub fn normalise_bytes(bytes: &[u8], order: ByteOrder) -> Result<String, String>
     }
     let hex: String = ordered.iter().map(|b| format!("{b:02x}")).collect();
     normalise(&hex)
-}
-
-fn device_tree_path() -> PathBuf {
-    DEVICE_TREE.into()
-}
-
-fn cpuinfo_path() -> PathBuf {
-    CPUINFO.into()
-}
-
-fn cmdline_path() -> PathBuf {
-    CMDLINE.into()
 }

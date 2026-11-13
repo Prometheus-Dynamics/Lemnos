@@ -601,6 +601,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-contract-system-identity"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+]
+
+[[package]]
 name = "lemnos-contract-system-reboot"
 version = "2.0.1-dev"
 dependencies = [
@@ -1358,6 +1365,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-driver-system-identity"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-contract-system-identity",
+ "lemnos-core",
+ "lemnos-driver-system-slots",
+ "lemnos-identity",
+]
+
+[[package]]
 name = "lemnos-driver-system-slots"
 version = "2.0.1-dev"
 dependencies = [
@@ -1524,7 +1541,6 @@ dependencies = [
  "lemnos-driver-thermal-zone",
  "lemnos-fake-devices",
  "lemnos-hal",
- "lemnos-identity",
  "lemnos-measure",
  "lemnos-sim",
  "lemnos-wire",
@@ -1549,9 +1565,7 @@ dependencies = [
 name = "lemnos-identity"
 version = "2.0.1-dev"
 dependencies = [
- "serde",
  "thiserror",
- "toml",
 ]
 
 [[package]]
@@ -1768,6 +1782,7 @@ dependencies = [
  "lemnos-driver-rp1-csi2",
  "lemnos-driver-status-light",
  "lemnos-driver-sunxi-vin",
+ "lemnos-driver-system-identity",
  "lemnos-driver-system-slots",
  "lemnos-driver-thermal-zone",
  "lemnos-driver-usb-gadget",

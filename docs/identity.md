@@ -3,17 +3,17 @@
 A board names itself to the stack with a set of facts. Each one is published as a topic
 `hello.<fact>` by the Orion bridge: UTF-8, no trailing newline, at most 64 facts of at most 256
 bytes each. The daemon serves them through `system.identity/1` and the bridge publishes them. The
-library `engine/identity` (crate `lemnos-identity`) reads them, and nothing else uses it as a program.
+library `engine/identity` (crate `lemnos-identity`) holds the serial sources and the fact formats.
 
 ## The facts
 
 | Fact | Format | Source |
 |---|---|---|
 | `family` | the board's name: lowercase `[a-z0-9-]`, at most 64 bytes | `[board] id` in the board file |
-| `serial` | lowercase hex, no `0x`, no separators, leading zeros kept, 8 to 32 digits | the board file's `[board.serial]` source |
+| `serial` | lowercase hex, no `0x`, no separators, leading zeros kept, 8 to 32 digits | the `system-identity` device's serial source (see [settings](#serial-source-settings)) |
 | `model` | display name with the revision, free text, at most 64 bytes, never parsed | `[board] name`, then ` ` and `[board] revision` when given |
 | `version.slot` | the running slot's id, as `system.slots/1 list` names it | `board/slots/booted` on the data partition |
-| `version.lemnos` | lemnosd's version | the daemon |
+| `version.lemnos` | lemnosd's package version | the daemon: `Config::host_version()`, given to each driver as it binds |
 | `version.product` | product name: lowercase `[a-z0-9-]` | `product` in the running slot's `slots/<id>.json` |
 | `version.os` | the running slot's version | `version` in the running slot's `slots/<id>.json` |
 | `offers` | space-separated contract ids the node serves, as Lemnos names them, e.g. `system.slots/1 system.reboot/1` | the daemon's devices |
@@ -38,32 +38,41 @@ default) reads the first byte as the most significant. `"little"` reverses the b
 all-zero or all-ones cell is refused: it is unprogrammed or erased.
 
 The serial must be the same in every state (normal running, recovery, a flasher image) and in
-every slot. A recovery or flasher board file must name the same source as the normal one.
+every slot. A recovery or flasher board must use the same source settings as the normal one.
 
-## Board file syntax
+## Serial source settings
+
+The driver `system-identity` (served as `system.identity/1`) reads the serial from its device's
+`config` in the board file. The `family` fact is the board's `[board] id`, which the host hands the
+driver as its board id, so nothing else is needed for it.
 
 ```toml
-[board]
-id = "alpha-1"        # family
-name = "Alpha"        # model, with revision
+[[devices]]
+id = "identity"
+driver = "system-identity"
+[devices.config]
+serial = "device-tree"   # or "cpuinfo", "nvmem", "cmdline"
+name = "Alpha"           # the model fact, with the revision after it
 revision = "r2"
-
-[board.serial]
-kind = "device-tree"  # or "cpuinfo", "nvmem", "cmdline"
 ```
 
-| `kind` | Keys | Reads |
-|---|---|---|
-| `device-tree` | `path` (default `/proc/device-tree/serial-number`) | the device tree's `serial-number` string |
-| `cpuinfo` | `path` (default `/proc/cpuinfo`) | the `Serial` line |
-| `nvmem` | `path` (required), `offset` (default 0), `length` (required, 4 to 16 bytes), `byte_order` (`big` or `little`) | bytes of an nvmem or sysfs file: fuses, OTP or a SID block |
-| `cmdline` | `key` (required), `path` (default `/proc/cmdline`) | the value of the last `key=` word on the kernel command line |
+| Key | Meaning |
+|---|---|
+| `serial` | The source kind. Required for a serial |
+| `serial_path` | The file. Defaults: `/proc/device-tree/serial-number`, `/proc/cpuinfo`, `/proc/cmdline`. Required for `nvmem` |
+| `serial_offset`, `serial_length` | For `nvmem`: byte offset (default 0) and length, 4 to 16 bytes |
+| `serial_byte_order` | For `nvmem`: `"big"` (default) or `"little"` |
+| `serial_key` | For `cmdline`: the command-line key |
+| `name`, `revision` | The `model` fact |
+| `data` | The data partition for the slot facts. Default `/data` |
 
-Unknown keys are refused. The daemon's board parser checks this table too.
+One source per board file: the device names exactly one `serial` kind. A source that cannot be read
+fails the bind and is retried. A value that does not fit the format leaves `serial` absent and the
+device `Degraded`.
 
 ## Serial sources by SoC family
 
-Each board file names one source. A fact that cannot be read is absent. There is no chain of fallbacks, and no MAC address is ever a serial.
+Each board names one source. A fact that cannot be read is absent. There is no chain of fallbacks, and no MAC address is ever a serial.
 
 The table names the generic source kind each SoC family uses. Rows are by family and source
 kind, never by product. "Verified" means read on a board. Everything else is untested on board.

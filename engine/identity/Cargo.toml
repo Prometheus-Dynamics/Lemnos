@@ -12,6 +12,4 @@ description = "A board's identity facts (family, serial, model, running slot) re
 workspace = true
 
 [dependencies]
-serde = { workspace = true, features = ["derive", "std"] }
-toml = { workspace = true, features = ["parse", "serde", "std"] }
 thiserror = { workspace = true, features = ["std"] }

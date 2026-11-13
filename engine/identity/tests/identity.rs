@@ -3,8 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use lemnos_identity::Facts;
 use lemnos_identity::serial::{ByteOrder, SerialError, SerialSource, normalise, normalise_bytes};
-use lemnos_identity::{Facts, gather, parse_board};
 
 /// A fresh directory under the test's target dir, with the given files written into it.
 fn fixture(name: &str, files: &[(&str, &[u8])]) -> PathBuf {
@@ -153,115 +153,6 @@ fn cmdline_key_is_read_and_the_last_repeat_wins() {
         path: dir.join("cmdline"),
     };
     assert!(refused(missing.read()).contains("no androidboot.serialno="));
-}
-
-#[test]
-fn board_file_names_each_source_kind_and_refuses_a_bad_one() {
-    let board = parse_board(
-        "format = \"lemnos.board\"\nschema_version = 1\n\
-         [board]\nid = \"alpha-1\"\nname = \"Alpha\"\nrevision = \"B\"\n\
-         [board.serial]\nkind = \"nvmem\"\npath = \"/sys/x/otp\"\noffset = 16\nlength = 8\nbyte_order = \"little\"\n\
-         [[devices]]\nid = \"d\"\ndriver = \"x\"\n",
-    )
-    .unwrap();
-    assert_eq!(
-        board.board.serial,
-        Some(SerialSource::Nvmem {
-            path: "/sys/x/otp".into(),
-            offset: 16,
-            length: 8,
-            byte_order: ByteOrder::Little,
-        })
-    );
-    let cpu = parse_board(
-        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"a\"\n[board.serial]\nkind = \"cpuinfo\"\n",
-    )
-    .unwrap();
-    assert_eq!(
-        cpu.board.serial,
-        Some(SerialSource::Cpuinfo {
-            path: "/proc/cpuinfo".into()
-        })
-    );
-    let unknown_key = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"a\"\n[board.serial]\nkind = \"cpuinfo\"\nextra = 1\n";
-    assert!(parse_board(unknown_key).is_err());
-    let unknown_kind = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"a\"\n[board.serial]\nkind = \"fuse-box\"\n";
-    assert!(parse_board(unknown_kind).is_err());
-    let wrong_format = "format = \"other\"\nschema_version = 1\n[board]\nid = \"a\"\n";
-    assert!(
-        parse_board(wrong_format)
-            .unwrap_err()
-            .contains("not \"lemnos.board\"")
-    );
-}
-
-#[test]
-fn gather_reads_the_board_and_the_running_slot() {
-    let dt = fixture(
-        "gather",
-        &[
-            ("serial-number", b"10000000abcdef12\0"),
-            ("data/board/slots/booted", b"os-2\n"),
-            (
-                "data/slots/os-2.json",
-                br#"{"id":"os-2","product":"ctl-os","version":"2.0.1","image":{"size":5}}"#,
-            ),
-        ],
-    );
-    let text = format!(
-        "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"alpha-1\"\nname = \"Alpha Board\"\nrevision = \"r2\"\n[board.serial]\nkind = \"device-tree\"\npath = \"{}\"\n",
-        dt.join("serial-number").display()
-    );
-    let board = parse_board(&text).unwrap();
-    let got = gather(&board, Some(&dt.join("data")));
-    let pairs: Vec<(&str, &str)> = got.facts.iter().collect();
-    assert_eq!(
-        pairs,
-        vec![
-            ("family", "alpha-1"),
-            ("serial", "10000000abcdef12"),
-            ("model", "Alpha Board r2"),
-            ("version.slot", "os-2"),
-            ("version.product", "ctl-os"),
-            ("version.os", "2.0.1"),
-        ]
-    );
-    assert!(got.notes.is_empty(), "{:?}", got.notes);
-    assert_eq!(got.facts.get("offers"), None);
-    assert_eq!(got.facts.get("version.lemnos"), None);
-}
-
-#[test]
-fn gather_leaves_out_what_cannot_be_known_and_says_why() {
-    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"Bad Family\"\n";
-    let board = parse_board(text).unwrap();
-    let got = gather(&board, Some(Path::new("/nonexistent-lemnos-data")));
-    assert!(got.facts.iter().next().is_none(), "{:?}", got.facts);
-    assert!(
-        got.notes
-            .iter()
-            .any(|n| n.starts_with("family:") && n.contains("lowercase"))
-    );
-    assert!(
-        got.notes
-            .iter()
-            .any(|n| n.contains("no [board.serial] source"))
-    );
-    assert!(got.notes.iter().any(|n| n.contains("no [board] name")));
-    assert!(
-        got.notes
-            .iter()
-            .any(|n| n.starts_with("version.slot: cannot read"))
-    );
-}
-
-#[test]
-fn gather_without_data_skips_the_slot_facts() {
-    let text = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"alpha\"\nname = \"Alpha\"\n";
-    let got = gather(&parse_board(text).unwrap(), None);
-    assert_eq!(got.facts.get("family"), Some("alpha"));
-    assert_eq!(got.facts.get("model"), Some("Alpha"));
-    assert!(got.notes.iter().all(|n| !n.contains("version")));
 }
 
 #[test]
