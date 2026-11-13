@@ -73,6 +73,10 @@ and board runs.
   comes from a caller is checked against memory the caller really holds, with arithmetic that
   cannot overflow, before hardware sees it. If a kernel interface makes that impossible, the
   driver refuses the work and says why.
+- **The daemon is the kernel.** `lemnosd` is not allowed to go down, and nothing is designed around
+  it being stopped or dead. Do not add code or wording that keeps a path working for an absent daemon,
+  such as a fallback or a hand-back to another controller. A dropped driver leaves its hardware at its
+  safe state, never to a kernel governor. A client, driver or device coming and going is normal.
 - **Steady-state paths allocate nothing.** Prove it with the counting allocator in
   `lemnos-measure`.
 - **Never claim something works without having run it.** Report failures with their output. A test

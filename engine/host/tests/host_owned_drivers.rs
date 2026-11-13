@@ -146,7 +146,7 @@ fn a_host_owned_controller_ticks_and_never_moves_the_fan_it_uses() {
         method: 1,
     };
     assert!(host.call(ctl, state, &[], &mut [0; 128]).is_ok());
-    // Stopping it hands nothing back, because nothing was taken.
+    // Stopping it writes nothing, because nothing was taken.
     host.shutdown();
     assert_eq!(tree.read("class/hwmon/hwmon3/pwm1"), "10");
     assert_eq!(tree.read("class/hwmon/hwmon3/pwm1_enable"), "2");

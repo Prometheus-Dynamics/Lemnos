@@ -163,7 +163,7 @@ impl Lifecycle for FanController {
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         self.control.begin(now_ns);
         if self.control.release_due(now_ns) {
-            self.hand_back(now_ns);
+            self.release_fan(now_ns);
         }
         if self.control.step_due(now_ns) {
             for slot in 0..SLOTS {
@@ -179,7 +179,7 @@ impl Lifecycle for FanController {
                 match written {
                     Ok(()) => self.control.wrote(),
                     Err(_) => {
-                        self.hand_back(now_ns);
+                        self.release_fan(now_ns);
                         self.control.write_failed(now_ns);
                     }
                 }
@@ -202,7 +202,7 @@ impl FanController {
     }
 
     /// Releases the fan (its safe state). If that fails, the control law tries again in a second.
-    fn hand_back(&mut self, now_ns: u64) {
+    fn release_fan(&mut self, now_ns: u64) {
         match self.fan.release() {
             Ok(()) => self.control.released(),
             Err(_) => self.control.release_failed(now_ns),

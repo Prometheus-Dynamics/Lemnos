@@ -51,8 +51,9 @@ What it does while it runs:
   their retries come round.
 - **Ends everything a connection held when the connection closes**: subscriptions, streams and
   whatever a driver was holding for that caller.
-- **Stops on `SIGTERM` or `SIGINT`.** Stopping drops every driver, which is what releases the
-  hardware and lets a driver restore what it took over.
+- **Stops on `SIGTERM` or `SIGINT`.** Stopping drops every driver. Each one leaves its hardware in
+  its safe state (a fan at full duty), and the hardware watchdog then resets the board if the stop
+  is not followed by a start.
 
 It writes nothing to its standard output. Its error output gets what could not be used, what
 became of each driver package, and a driver's panic message.

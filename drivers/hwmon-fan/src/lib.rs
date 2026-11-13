@@ -3,9 +3,8 @@
 //!
 //! Use this for a fan the kernel exposes through a hwmon device, such as one behind an embedded
 //! controller. A fan on a PWM channel of the board is `pwm-channel-fan`, which needs no kernel
-//! driver in between. This driver is not a safety net: the kernel's governor does not keep the fan
-//! safe, and nothing here runs when the daemon stops. The fan's safe state is set by the controller
-//! (`fan-control` runs it at full duty on a stale input).
+//! driver in between. The fan's safe state is full duty, set by the controller (`fan-control` runs it
+//! at full duty on a stale input) and by this driver when it lets the fan go.
 //!
 //! Settings come from the device's `config` in the board file:
 //!
@@ -16,24 +15,21 @@
 //!
 //! A missing fan fails the bind with `NOT_FOUND`, and the host retries the bind later.
 //!
-//! The first `set_duty` takes the fan over. Before its first write it saves `pwm1`, `pwm1_enable`
-//! and, for a fan that the thermal governor drives through a cooling device, the governor's state
-//! (see [`hand_back`]). It then sets manual mode and writes `pwm1`; the kernel applies the duty only
-//! in manual mode. The saved state is put back on `release`, and when the driver is dropped. The
-//! host drops a driver when its device stops or is rebound, and when a call into the driver
-//! panics. Nothing else gives the fan back: a process killed with `SIGKILL` runs no code, so the
-//! fan keeps the duty it was last given.
+//! The first `set_duty` takes the fan over: it sets manual mode and writes `pwm1`. The kernel applies
+//! the duty only in manual mode. `release`, and dropping the driver, put the fan at full duty and
+//! leave it in manual mode. The fan is not handed back to the kernel's thermal governor: a driver
+//! that stops leaves the hardware in its safe state, not under another controller. The host drops a
+//! driver when its device stops or is rebound, and when a call into the driver panics. A process
+//! killed with `SIGKILL` runs no code, so the fan keeps the duty it was last given.
 //!
 //! Failure rule: an attribute that cannot be read or written fails that call and is tried again
 //! on the next one. The driver never switches itself off.
 
-mod hand_back;
 mod sysfs;
 
 #[cfg(test)]
 mod tests;
 
-use hand_back::Saved;
 use lemnos_contract_fan::Fan;
 use lemnos_core::{
     Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, Unit, driver,
@@ -81,13 +77,7 @@ pub struct HwmonFan {
     pwm: PathBuf,
     enable: PathBuf,
     rpm: PathBuf,
-    /// The hwmon directory, and `/sys/class/thermal` for the cooling devices.
-    fan: PathBuf,
-    thermal: PathBuf,
-    /// What the kernel had before the first write. `Some` from the first `set_duty` until the
-    /// fan is handed back.
-    saved: Option<Saved>,
-    /// Whether `pwm1_enable` is known to be manual since the takeover.
+    /// Whether this driver has taken the fan: `pwm1_enable` is manual since its first write.
     manual: bool,
     /// Whether the last call failed.
     failing: bool,
@@ -116,7 +106,7 @@ impl Lifecycle for HwmonFan {
             }
             None => find(&hwmon, cfg.str("name"))?.ok_or(Status::NOT_FOUND)?,
         };
-        let mut driver = Self::new(fan, sys.join("class/thermal"));
+        let mut driver = Self::new(&fan);
         driver.reads_only = cfg.host_owned();
         Ok(driver)
     }
@@ -142,14 +132,11 @@ impl Lifecycle for HwmonFan {
 }
 
 impl HwmonFan {
-    fn new(fan: PathBuf, thermal: PathBuf) -> Self {
+    fn new(fan: &Path) -> Self {
         Self {
             pwm: fan.join("pwm1"),
             enable: fan.join("pwm1_enable"),
             rpm: fan.join("fan1_input"),
-            fan,
-            thermal,
-            saved: None,
             manual: false,
             failing: false,
             reads_only: false,
@@ -163,18 +150,10 @@ impl HwmonFan {
 
     /// Takes the fan over if it is not yet, and sets its duty.
     fn drive(&mut self, per_mille: u16) -> Result<()> {
-        // Every write this driver makes starts here. On a host-owned fan none is made, and
-        // nothing is saved, so there is never anything to hand back either.
+        // Every write this driver makes starts here. On a host-owned fan none is made, so there
+        // is never anything to put at the safe state either.
         if self.reads_only {
             return Err(Status::NOT_PERMITTED);
-        }
-        if self.saved.is_none() {
-            self.saved = Some(Saved::capture(
-                &self.fan,
-                &self.thermal,
-                &self.pwm,
-                &self.enable,
-            )?);
         }
         if !self.manual {
             sysfs::write_number(&self.enable, MODE_MANUAL)?;
@@ -183,16 +162,14 @@ impl HwmonFan {
         sysfs::write_number(&self.pwm, duty_to_pwm(per_mille))
     }
 
-    /// Puts the saved state back. Nothing is kept if this succeeds. On failure the saved state
-    /// stays, so the next attempt tries the same restore again.
-    fn hand_back(&mut self) -> Result<()> {
-        let Some(saved) = &self.saved else {
+    /// Puts the fan at full duty, its safe state, if this driver has taken it. It stays in manual
+    /// mode: nothing is handed to the kernel's governor. A failed write is tried again on the next
+    /// release, or when the driver is dropped.
+    fn put_at_safe_state(&mut self) -> Result<()> {
+        if !self.manual {
             return Ok(());
-        };
-        saved.restore(&self.pwm, &self.enable)?;
-        self.saved = None;
-        self.manual = false;
-        Ok(())
+        }
+        sysfs::write_number(&self.pwm, PWM_MAX)
     }
 }
 
@@ -216,16 +193,15 @@ impl Fan for HwmonFan {
     }
 
     fn release(&mut self) -> Result<()> {
-        let result = self.hand_back();
+        let result = self.put_at_safe_state();
         self.note(result)
     }
 }
 
 impl Drop for HwmonFan {
     fn drop(&mut self) {
-        // Nothing can report an error from here, so a failed restore is dropped. The saved
-        // state is gone with the driver.
-        let _ = self.hand_back();
+        // Nothing can report an error from here, so a failed write is dropped.
+        let _ = self.put_at_safe_state();
     }
 }
 

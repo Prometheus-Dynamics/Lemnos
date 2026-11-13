@@ -115,9 +115,3 @@ pub fn entries(dir: &Path) -> Result<Vec<PathBuf>> {
     entries.sort();
     Ok(entries)
 }
-
-/// Whether a path's last component starts with `prefix`.
-pub fn named(path: &Path, prefix: &str) -> bool {
-    path.file_name()
-        .is_some_and(|n| n.to_string_lossy().starts_with(prefix))
-}
