@@ -32,12 +32,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lemnos_slot_store::manifest::Manifest;
-use lemnos_slot_store::records::{file, tryboot, uboot};
+use lemnos_slot_store::records::{MAX_ATTEMPTS, attempts, file, tryboot, uboot};
 use lemnos_slot_store::store::{self, Layout, Meta, State, read_line, valid_id};
 use lemnos_slot_store::ubi::{self, Ubi};
 
 use crate::cmdline::Args;
-use crate::decide::{Candidate, Failure, Next, after_failure};
+use crate::decide::{
+    Candidate, Failure, FilePick, Next, TryPass, after_failure, file_pick, tryboot_pass,
+};
 use crate::ops::Ops;
 use crate::partition::{self, Part, Spec};
 
@@ -315,7 +317,7 @@ impl Boot<'_> {
             Next::Wait(reason) => self.rescue(&format!("{why}; {reason}")),
             Next::Trial(id) => {
                 let record = Record::on(&self.layout);
-                if let Err(error) = self.write_trial(record, &id) {
+                if let Err(error) = self.write_trial(record, &id, self.trial_attempts()) {
                     return self.rescue(&format!("{why}; couldn't write the trial: {error}"));
                 }
                 self.mark("fallbacks", &format!("{}\n", fallbacks + 1));
@@ -326,30 +328,49 @@ impl Boot<'_> {
                     let _ = state.save(&self.layout);
                 }
                 self.log(&format!("falling back: restarting into slot {id} on trial"));
-                self.restart((record == Record::Tryboot).then_some(tryboot::RESTART_ARG));
+                // A plain restart: the loader takes the trial's attempt, as it does for any trial.
+                self.restart(None);
                 why.to_string()
             }
         }
     }
 
-    /// Points the boot partition's record at `id` for one trial boot.
-    fn write_trial(&self, record: Record, id: &str) -> std::io::Result<()> {
+    /// The attempts a trial gets: the board's `trial_attempts`, as the driver wrote it.
+    fn trial_attempts(&self) -> u8 {
+        store::setting(&self.layout, "TRIAL_ATTEMPTS")
+            .and_then(|text| attempts(&text))
+            .filter(|n| *n >= 1)
+            .unwrap_or(MAX_ATTEMPTS)
+    }
+
+    /// Points the boot partition's record at `id` for a trial with `left` attempts, which the
+    /// loader takes one of before the trial boots.
+    fn write_trial(&self, record: Record, id: &str, left: u8) -> std::io::Result<()> {
         let boot = &self.layout.boot;
         match record {
-            Record::Tryboot => store::replace(
-                &boot.join(tryboot::TRIAL_FILE),
-                tryboot::entry(id).as_bytes(),
-            ),
+            Record::Tryboot => {
+                store::replace(
+                    &boot.join(tryboot::ATTEMPTS_FILE),
+                    format!("{left}\n").as_bytes(),
+                )?;
+                store::replace(
+                    &boot.join(tryboot::TRIAL_FILE),
+                    tryboot::entry(id).as_bytes(),
+                )
+            }
             Record::File => {
-                let (default, _) =
+                let (default, _, _) =
                     file::parse(&fs::read_to_string(boot.join(file::FILE)).unwrap_or_default());
-                store::replace(&boot.join(file::FILE), file::text(&default, id).as_bytes())
+                store::replace(
+                    &boot.join(file::FILE),
+                    file::text(&default, id, left).as_bytes(),
+                )
             }
             Record::Uboot => {
                 let path = boot.join(uboot::RECORD_FILE);
                 let mut record = uboot::Record::parse(&fs::read_to_string(&path)?);
                 record.trial = id.to_string();
-                record.armed = true;
+                record.attempts = left;
                 store::replace(&path, record.text().as_bytes())
             }
             Record::UbiVolume => {
@@ -359,7 +380,7 @@ impl Boot<'_> {
                 let text = String::from_utf8_lossy(&device.read(ubi::RECORD_VOLUME)?).into_owned();
                 let mut record = uboot::Record::parse(&text);
                 record.trial = id.to_string();
-                record.armed = true;
+                record.attempts = left;
                 self.ops
                     .ubi_replace(device, ubi::RECORD_VOLUME, record.text().as_bytes())
                     .map_err(std::io::Error::other)
@@ -415,22 +436,28 @@ impl Boot<'_> {
         })
     }
 
-    /// With a `file` record: the slot it picks, whether that is a trial, and its root hash.
-    /// The trial is cleared on the boot partition before it starts.
+    /// With a `file` record: the slot it picks, whether that is a trial, and its root hash. A
+    /// trial takes one of its attempts here, written back before the trial starts; with none left
+    /// the trial is cleared and the default starts.
     fn file_record(&self, args: &Args) -> Option<(String, bool, String)> {
         let path = self.layout.boot.join(file::FILE);
-        let (default, trial) = file::parse(&fs::read_to_string(&path).ok()?);
-        let (slot, is_trial) = if trial.is_empty() {
-            (
-                if default.is_empty() {
+        let (default, trial, left) = file::parse(&fs::read_to_string(&path).ok()?);
+        let (slot, is_trial) = match file_pick(&trial, left) {
+            FilePick::Trial { slot, left } => {
+                self.write_file_record(&path, &default, &trial, left);
+                (slot, true)
+            }
+            FilePick::Default { clear } => {
+                if clear {
+                    self.write_file_record(&path, &default, "", 0);
+                }
+                let slot = if default.is_empty() {
                     args.slot.clone()
                 } else {
                     default.clone()
-                },
-                false,
-            )
-        } else {
-            (trial, true)
+                };
+                (slot, false)
+            }
         };
         let roothash = if slot == args.slot {
             args.roothash.clone()
@@ -438,19 +465,72 @@ impl Boot<'_> {
             let cmdline = self.layout.boot_dir(&slot).join("cmdline.txt");
             args.roothash_in(&fs::read_to_string(cmdline).unwrap_or_default())
         };
-        if is_trial {
-            let cleared = self.mount_boot(true).and_then(|()| {
-                store::replace(&path, file::text(&default, "").as_bytes())
-                    .map_err(|e| e.to_string())
-            });
-            if let Err(error) = cleared {
-                self.log(&format!(
-                    "couldn't clear the trial in {}: {error}",
-                    file::FILE
-                ));
+        Some((slot, is_trial, roothash))
+    }
+
+    /// Writes the `file` record on the boot partition, mounted read-write for it.
+    fn write_file_record(&self, path: &Path, default: &str, trial: &str, left: u8) {
+        let written = self.mount_boot(true).and_then(|()| {
+            store::replace(path, file::text(default, trial, left).as_bytes())
+                .map_err(|e| e.to_string())
+        });
+        if let Err(error) = written {
+            self.log(&format!("couldn't write {}: {error}", file::FILE));
+        }
+    }
+
+    /// The tryboot pass: a pending trial with attempts left takes one, and the board restarts with
+    /// the tryboot argument so the firmware boots the trial. Only the boot partition is mounted
+    /// for it. Returns the reason when the boot is over here; `None` when the boot carries on.
+    fn tryboot_pass(&self) -> Option<String> {
+        if self.layout.ubi.is_some() {
+            return None;
+        }
+        if self.mount_boot(true).is_err() {
+            return None;
+        }
+        let boot = self.layout.boot.clone();
+        let form_here = boot.join(uboot::RECORD_FILE).is_file() || boot.join(file::FILE).is_file();
+        let mut over = None;
+        if !form_here {
+            let trial_text = fs::read_to_string(boot.join(tryboot::TRIAL_FILE)).unwrap_or_default();
+            let flag = fs::read(self.env.at(tryboot::TRIAL_FLAG)).unwrap_or_default();
+            let counter = fs::read_to_string(boot.join(tryboot::ATTEMPTS_FILE))
+                .ok()
+                .and_then(|text| attempts(&text));
+            match tryboot_pass(
+                tryboot::slot(&trial_text).is_some(),
+                flag == [0, 0, 0, 1],
+                counter,
+            ) {
+                TryPass::Boot => {}
+                TryPass::Spend { left } => {
+                    let slot = tryboot::slot(&trial_text).unwrap_or_default().to_string();
+                    match store::replace(
+                        &boot.join(tryboot::ATTEMPTS_FILE),
+                        format!("{left}\n").as_bytes(),
+                    ) {
+                        Ok(()) => {
+                            self.log(&format!(
+                                "trial {slot} takes an attempt, {left} left; restarting into it"
+                            ));
+                            self.restart(Some(tryboot::RESTART_ARG));
+                            over = Some(format!("restarting into trial {slot}"));
+                        }
+                        Err(error) => self.log(&format!(
+                            "couldn't take an attempt from the trial: {error}; booting the default"
+                        )),
+                    }
+                }
+                TryPass::Out => {
+                    self.log("the trial has no attempts left; booting the default");
+                    let _ = fs::remove_file(boot.join(tryboot::TRIAL_FILE));
+                    let _ = fs::remove_file(boot.join(tryboot::ATTEMPTS_FILE));
+                }
             }
         }
-        Some((slot, is_trial, roothash))
+        self.unmount_boot();
+        over
     }
 
     fn run(&mut self, cmdline: &str) -> String {
@@ -488,6 +568,9 @@ impl Boot<'_> {
             };
             let data_dev = self.env.dev.join(&data.name);
             self.data = Some(data);
+            if let Some(why) = self.tryboot_pass() {
+                return why;
+            }
             let mut opts = "noatime,errors=remount-ro";
             if partition::head(&data_dev).is_some_and(|head| partition::ext_has_errors(&head)) {
                 self.log("the data partition's filesystem records errors; mounting it read-only: repair it off the board");

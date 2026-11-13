@@ -8,14 +8,17 @@ use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::{Signer, SigningKey};
 use lemnos_contract_system_slots::Slots;
-use lemnos_core::{CallerId, JobId, JobState, Lifecycle, Reply, Status};
+use lemnos_core::{
+    BoardDevice, BoardView, CallerId, Health, JobId, JobState, Lifecycle, Origin, Reply, Status,
+};
 use sha2::{Digest, Sha256};
 
 use crate::boot::{BootRecord, hex};
 use crate::json::Json;
 use crate::manifest::BLOCK;
-use crate::store::{Layout, Meta, State};
+use crate::store::{self, Layout, Meta, State};
 use crate::tar::tests::archive;
+use crate::trial::{Log, Resolved, Source};
 use crate::{SystemSlots, TrustedKey};
 use lemnos_slot_store::ubi::{Fake, Ubi, UbiWrite, image_volume};
 
@@ -41,30 +44,76 @@ impl Drop for TempDir {
     }
 }
 
-/// What the boot loader was told, in order.
+/// What the boot loader was told, in order, and what it holds: the default, a trial and the
+/// trial's attempts. [`Told::boot`] starts a boot the way the loader does: a trial with attempts
+/// left takes one before it starts.
 #[derive(Clone, Default)]
-struct Told(Arc<Mutex<Vec<String>>>);
+struct Told(Arc<Mutex<Loader>>);
+
+#[derive(Default)]
+struct Loader {
+    told: Vec<String>,
+    default: String,
+    trial: String,
+    attempts: u8,
+}
 
 impl Told {
     fn take(&self) -> Vec<String> {
-        core::mem::take(&mut *self.0.lock().unwrap())
+        core::mem::take(&mut self.0.lock().unwrap().told)
+    }
+
+    /// The slot the next boot starts. A trial with attempts left takes one.
+    fn boot(&self) -> String {
+        let mut loader = self.0.lock().unwrap();
+        if !loader.trial.is_empty() && loader.attempts > 0 {
+            loader.attempts -= 1;
+            return loader.trial.clone();
+        }
+        loader.default.clone()
+    }
+
+    /// The loader's trial and its attempts left.
+    fn trial(&self) -> (String, u8) {
+        let loader = self.0.lock().unwrap();
+        (loader.trial.clone(), loader.attempts)
     }
 }
 
 impl BootRecord for Told {
     fn set_default(&mut self, id: &str) -> std::io::Result<()> {
-        self.0.lock().unwrap().push(format!("default {id}"));
+        let mut loader = self.0.lock().unwrap();
+        loader.default = id.to_string();
+        loader.told.push(format!("default {id}"));
         Ok(())
     }
-    fn set_trial(&mut self, id: &str) -> std::io::Result<()> {
-        self.0.lock().unwrap().push(format!("trial {id}"));
+    fn set_trial(&mut self, id: &str, attempts: u8) -> std::io::Result<()> {
+        let mut loader = self.0.lock().unwrap();
+        loader.trial = id.to_string();
+        loader.attempts = attempts;
+        loader.told.push(format!("trial {id} {attempts}"));
         Ok(())
     }
-    fn restart(&mut self, trial: bool) -> std::io::Result<()> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(if trial { "restart trial" } else { "restart" }.into());
+    fn pending(&self) -> std::io::Result<Option<(String, u8)>> {
+        let loader = self.0.lock().unwrap();
+        Ok((!loader.trial.is_empty()).then(|| (loader.trial.clone(), loader.attempts)))
+    }
+    fn set_attempts(&mut self, attempts: u8) -> std::io::Result<()> {
+        let mut loader = self.0.lock().unwrap();
+        if !loader.trial.is_empty() {
+            loader.attempts = attempts;
+        }
+        Ok(())
+    }
+    fn clear_trial(&mut self) -> std::io::Result<()> {
+        let mut loader = self.0.lock().unwrap();
+        loader.trial.clear();
+        loader.attempts = 0;
+        loader.told.push("clear trial".into());
+        Ok(())
+    }
+    fn restart(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().told.push("restart".into());
         Ok(())
     }
 }
@@ -221,11 +270,48 @@ impl Board {
         board.boot_into(first);
         board.slots.confirm().unwrap();
         board.told.take();
+        // The loader holds the default the record was given: the first slot.
+        board.told.0.lock().unwrap().default = first.to_string();
         board
     }
 
     fn layout(&self) -> &Layout {
         &self.slots.layout
+    }
+
+    /// Starts the next boot as the loader starts it, with a boot id of its own and the driver
+    /// fresh, as a boot gives it. Returns the slot the loader started.
+    fn next_boot(&mut self, n: u32) -> String {
+        let slot = self.told.boot();
+        self.boot_into(&slot);
+        self.slots.boot = format!("boot-{n}");
+        // The boot began at time 0: `settle_at` counts seconds from there.
+        self.slots.started_ns = Some(0);
+        self.slots.looked = false;
+        self.slots.seen = Vec::new();
+        self.slots.snapshot_written = false;
+        self.slots.resolve_at_start();
+        slot
+    }
+
+    /// The board looked at as `view`, and the driver's time at `secs` into the boot.
+    fn settle_at(&mut self, secs: u64, view: &View) -> Option<u64> {
+        self.slots.watch(view);
+        self.slots.settle(secs * 1_000_000_000)
+    }
+
+    /// Writes slot `id`'s device baseline as a good boot of it would have.
+    fn baseline(&self, id: &str, text: &str) {
+        store::replace(
+            &self.layout().marker(&format!("{id}.devices")),
+            text.as_bytes(),
+        )
+        .unwrap();
+    }
+
+    fn trial_slot(&mut self, id: &str) {
+        self.slots.trial(id, false, false, false).unwrap();
+        self.told.take();
     }
 
     fn boot_into(&mut self, id: &str) {
@@ -504,14 +590,17 @@ fn a_confirmed_trial_becomes_the_default_and_old_slots_past_keep_go() {
         board.slots.trial(id, false, false, false).unwrap();
         assert_eq!(
             board.told.take(),
-            [format!("trial {id}"), "restart trial".to_string()]
+            [format!("trial {id} 3"), "restart".to_string()]
         );
         // Its directory went onto the boot partition before the trial pointer named it.
         assert!(board.layout().boot_dir(id).join("kernel8.img").is_file());
         assert_eq!(board.state().trial, id);
         board.boot_into(id);
         board.slots.confirm().unwrap();
-        assert_eq!(board.told.take(), [format!("default {id}")]);
+        assert_eq!(
+            board.told.take(),
+            [format!("default {id}"), "clear trial".to_string()]
+        );
         assert_eq!(board.meta(id).get("GOOD"), "yes");
     }
     let state = board.state();
@@ -771,7 +860,8 @@ fn the_previous_slot_may_be_removed_and_a_trial_still_falls_back() {
     );
     assert_eq!(state.state, "rolled-back");
     assert!(board.meta("os-3").failed());
-    assert!(board.told.take().is_empty());
+    // The trial is out of the record too, so the loader never starts it again.
+    assert_eq!(board.told.take(), ["clear trial"]);
 }
 
 /// With no setting, housekeeping keeps three slots (pinned ones not counted).
@@ -936,10 +1026,7 @@ config = {{ systemctl = "{ctl}" }}
     );
     let reboot = host.device("reboot").unwrap().index;
     host.call(reboot, method(1), &[], &mut []).unwrap();
-    assert_eq!(
-        fs::read_to_string(&calls).unwrap(),
-        "reboot --reboot-argument=0 tryboot\nreboot\n"
-    );
+    assert_eq!(fs::read_to_string(&calls).unwrap(), "reboot\nreboot\n");
 }
 
 /// With the `uboot` record, an install writes the slot's loader configuration from its own
@@ -974,7 +1061,7 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
     );
     assert_eq!(
         fs::read_to_string(boot.join(crate::uboot::RECORD_FILE)).unwrap(),
-        "default=\ntrial=os-2\ntrial_armed=1\n"
+        "default=\ntrial=os-2\ntrial_attempts=3\n"
     );
     board.boot_into("os-2");
     board.slots.confirm().unwrap();
@@ -987,6 +1074,10 @@ fn with_the_uboot_record_an_install_writes_the_slots_extlinux_and_a_trial_arms_i
 }
 
 impl Board {
+    fn list(&self) -> String {
+        self.slots.list_json()
+    }
+
     fn incoming(&self) -> PathBuf {
         self.layout().images().join(crate::install::INCOMING)
     }
@@ -1497,10 +1588,10 @@ fn on_nand_the_uboot_record_is_a_volume_replaced_whole() {
         volume: Some((fake.ubi.clone(), fake.clone() as Arc<dyn UbiWrite>)),
     };
     record.set_default("os-1").unwrap();
-    record.set_trial("os-2").unwrap();
+    record.set_trial("os-2", 3).unwrap();
     assert_eq!(
         fake.ubi.read("boot-record").unwrap(),
-        b"default=os-1\ntrial=os-2\ntrial_armed=1\n"
+        b"default=os-1\ntrial=os-2\ntrial_attempts=3\n"
     );
     assert_eq!(volumes(&fake), ["boot-record"]);
     assert!(!dir.0.join("boot/boot-record.env").exists());
@@ -1508,4 +1599,363 @@ fn on_nand_the_uboot_record_is_a_volume_replaced_whole() {
     fake.refuse.lock().unwrap().push("rename");
     assert!(record.set_default("os-2").is_err());
     assert_eq!(record.read().default, "os-1");
+}
+
+/// A board view the test sets: each device's id, origin, whether it is bound, and its health.
+#[derive(Default)]
+struct View(Vec<(&'static str, Origin, bool, Health)>);
+
+impl BoardView for View {
+    fn each(&self, f: &mut dyn FnMut(BoardDevice<'_>)) {
+        for (id, origin, bound, health) in &self.0 {
+            f(BoardDevice {
+                id,
+                origin: *origin,
+                bound: *bound,
+                health: *health,
+            });
+        }
+    }
+}
+
+const GOOD: Health = Health::Ok;
+
+/// A board where `a` is the default and `b` is installed, with `b` on trial.
+fn trial_board() -> Board {
+    let mut board = Board::new("a");
+    board.install_ok("b");
+    board.trial_slot("b");
+    board
+}
+
+fn resolved(board: &Board) -> Resolved {
+    Resolved::load(board.layout()).expect("a resolution")
+}
+
+#[test]
+fn a_healthy_trial_confirms_by_itself_and_is_recorded() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    assert_eq!(board.next_boot(1), "b");
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    assert!(board.settle_at(0, &view).is_some(), "waits for the uptime");
+    assert_eq!(board.state().trial, "b", "not before the uptime");
+    assert_eq!(board.settle_at(31, &view), None);
+    let state = board.state();
+    assert_eq!((state.default.as_str(), state.trial.as_str()), ("b", ""));
+    let record = resolved(&board);
+    assert_eq!(
+        (
+            record.slot.as_str(),
+            record.outcome.as_str(),
+            record.by.as_str()
+        ),
+        ("b", "confirmed", "auto")
+    );
+    assert_eq!(record.caller, None);
+    assert!(board.told.take().contains(&"clear trial".to_string()));
+}
+
+#[test]
+fn a_built_in_device_that_worked_before_and_is_failed_now_blocks_the_confirm_and_is_named() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let view = View(vec![(
+        "dev",
+        Origin::BuiltIn,
+        true,
+        Health::Failed("broken"),
+    )]);
+    assert!(board.settle_at(31, &view).is_some());
+    assert_eq!(board.state().trial, "b", "no confirm");
+    // At the deadline the reason names the device, and the board restarts into the default.
+    assert_eq!(board.settle_at(600, &view), None);
+    let record = Log::load(board.layout()).expect("the trial's log");
+    assert!(record.reason.contains("dev"), "{}", record.reason);
+    assert!(record.reason.contains("broken"), "{}", record.reason);
+    assert!(board.told.take().contains(&"restart".to_string()));
+}
+
+#[test]
+fn a_built_in_device_that_didnt_bind_here_blocks_the_confirm() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let view = View(vec![(
+        "dev",
+        Origin::BuiltIn,
+        false,
+        Health::Failed("retrying"),
+    )]);
+    board.settle_at(31, &view);
+    assert_eq!(board.state().trial, "b");
+    assert!(
+        Log::load(board.layout())
+            .unwrap()
+            .reason
+            .contains("didn't bind")
+    );
+}
+
+#[test]
+fn a_built_in_device_that_worked_before_and_is_absent_now_blocks_the_confirm() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    board.settle_at(31, &View(vec![]));
+    assert_eq!(board.state().trial, "b", "no confirm");
+    assert!(Log::load(board.layout()).unwrap().reason.contains("dev"));
+}
+
+#[test]
+fn a_hotplug_device_that_worked_before_and_is_absent_in_the_trial_still_confirms() {
+    let mut board = trial_board();
+    board.baseline("a", "camera@usb:1-1 hotplug\n");
+    board.next_boot(1);
+    let view = View(vec![]);
+    assert_eq!(board.settle_at(31, &view), None);
+    assert_eq!(board.state().default, "b");
+    assert_eq!(resolved(&board).outcome, "confirmed");
+}
+
+#[test]
+fn a_hotplug_device_that_is_gone_is_not_a_regression() {
+    let mut board = trial_board();
+    board.baseline("a", "cam hotplug\n");
+    board.next_boot(1);
+    // Gone is not failed: the device's resource is dead, and nothing failed.
+    let gone = View(vec![(
+        "cam",
+        Origin::Hotplug,
+        false,
+        Health::Gone("unplugged"),
+    )]);
+    assert_eq!(board.settle_at(31, &gone), None);
+    assert_eq!(board.state().default, "b");
+}
+
+#[test]
+fn a_health_source_not_good_by_the_deadline_restarts_the_board_and_names_it() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.slots.policy.health = vec!["device:sensor".into()];
+    board.slots.sources = vec![Source::Device("sensor".into())];
+    board.next_boot(1);
+    let view = View(vec![
+        ("dev", Origin::BuiltIn, true, GOOD),
+        (
+            "sensor",
+            Origin::BuiltIn,
+            true,
+            Health::Degraded("no calibration"),
+        ),
+    ]);
+    board.settle_at(31, &view);
+    assert_eq!(board.state().trial, "b");
+    assert_eq!(board.settle_at(600, &view), None);
+    let reason = Log::load(board.layout()).unwrap().reason;
+    assert!(reason.contains("device:sensor"), "{reason}");
+    assert!(board.told.take().contains(&"restart".to_string()));
+}
+
+#[test]
+fn with_reboot_at_deadline_off_the_reason_is_kept_and_the_board_is_not_restarted() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.slots.policy.reboot_at_deadline = false;
+    board.slots.sources = vec![Source::Device("sensor".into())];
+    board.next_boot(1);
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    board.settle_at(600, &view);
+    assert_eq!(board.state().trial, "b", "still waiting");
+    assert!(Log::load(board.layout()).unwrap().reason.contains("sensor"));
+    assert!(!board.told.take().contains(&"restart".to_string()));
+}
+
+#[test]
+fn with_auto_confirm_off_nothing_confirms_or_restarts_by_itself() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.slots.policy.auto_confirm = false;
+    board.next_boot(1);
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    assert_eq!(board.settle_at(31, &view), None);
+    assert_eq!(board.settle_at(900, &view), None);
+    assert_eq!(board.state().trial, "b");
+    assert!(!board.told.take().contains(&"restart".to_string()));
+}
+
+#[test]
+fn an_explicit_confirm_during_the_wait_is_recorded_with_its_caller() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.slots.policy.auto_confirm = false;
+    board.next_boot(1);
+    board.slots.caller(CallerId(7));
+    board.slots.confirm().unwrap();
+    assert_eq!(board.state().default, "b");
+    let record = resolved(&board);
+    assert_eq!(
+        (record.outcome.as_str(), record.by.as_str()),
+        ("confirmed", "call")
+    );
+    assert_eq!(record.caller, Some(7));
+}
+
+#[test]
+fn a_slot_state_that_cant_be_written_does_not_confirm() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let dir = board.layout().state_dir();
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let waiting = board.settle_at(31, &view);
+    // Still read-only at the deadline: the reason says why, and the board restarts.
+    let restarted = board.settle_at(600, &view);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(waiting.is_some(), "waits while the state can't be written");
+    assert_eq!(restarted, None);
+    // The reason can't be written where nothing can be written; the board still restarts.
+    assert!(board.told.take().contains(&"restart".to_string()));
+}
+
+#[test]
+fn a_power_cut_on_each_of_three_boots_is_still_tried_and_the_fourth_confirms() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    for n in 1..=3 {
+        assert_eq!(board.next_boot(n), "b", "boot {n} is tried");
+        board.settle_at(0, &view);
+        board.settle_at(10, &view); // the power goes here, before the uptime
+        assert_eq!(
+            board.told.trial(),
+            ("b".to_string(), 3),
+            "attempt given back"
+        );
+        assert_eq!(board.state().trial, "b");
+    }
+    // Recorded: each boot is an attempt.
+    let trial = board.slots.trial_json(&board.state());
+    assert!(trial.contains("\"attempts_left\":3"), "{trial}");
+    assert!(
+        trial.contains("\"last\":\"daemon-reached-not-yet-confirmed\""),
+        "{trial}"
+    );
+    assert_eq!(board.next_boot(4), "b");
+    // A second start within the same boot gives nothing back twice.
+    board.slots.resolve_at_start();
+    assert_eq!(
+        board.told.trial(),
+        ("b".to_string(), 3),
+        "the same boot gives nothing more back"
+    );
+    assert_eq!(board.settle_at(31, &view), None);
+    assert_eq!(board.state().default, "b");
+    assert_eq!(resolved(&board).by, "auto");
+}
+
+#[test]
+fn three_boots_that_never_reach_the_daemon_fall_back_with_the_reason_and_it_is_recorded_on_the_next_boot()
+ {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    // Three trial boots, each cut before any driver starts.
+    for _ in 0..3 {
+        board.told.boot();
+    }
+    assert_eq!(board.told.trial().1, 0);
+    assert_eq!(board.next_boot(4), "a", "the default starts");
+    let record = resolved(&board);
+    assert_eq!(
+        (
+            record.slot.as_str(),
+            record.outcome.as_str(),
+            record.by.as_str()
+        ),
+        ("b", "fell-back", "auto")
+    );
+    assert_eq!(
+        record.reason,
+        "slot b did not reach a running daemon in 3 boots"
+    );
+    assert_eq!(board.state().trial, "");
+    assert_eq!(board.told.trial().0, "");
+    // Recorded for the boots after it, too.
+    board.next_boot(5);
+    assert_eq!(resolved(&board).reason, record.reason);
+}
+
+#[test]
+fn the_reason_the_trial_slot_recorded_is_the_one_that_is_given() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.told.boot();
+    let mut meta = Meta::load(board.layout(), "b");
+    meta.set("FAILED", "yes");
+    meta.set("FAILURES", "1");
+    meta.set("FAIL_REASON", "dm-verity refused the image");
+    meta.save(board.layout(), "b").unwrap();
+    for _ in 0..2 {
+        board.told.boot();
+    }
+    board.next_boot(4);
+    assert_eq!(resolved(&board).reason, "dm-verity refused the image");
+}
+
+#[test]
+fn a_single_slot_board_has_no_trial_and_writes_its_baseline_once_it_is_up() {
+    let mut board = Board::new("a");
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    board.next_boot(1);
+    board.settle_at(0, &view);
+    assert_eq!(board.settle_at(31, &view), None);
+    let baseline = fs::read_to_string(board.layout().marker("a.devices")).unwrap();
+    assert_eq!(baseline, "dev builtin\n");
+    let list = board.list();
+    assert!(list.contains("\"trial\":null"), "{list}");
+    assert!(list.contains("\"resolved\":null"), "{list}");
+}
+
+#[test]
+fn a_trial_is_judged_after_the_board_loses_its_previous_slot() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    board.settle_at(31, &view);
+    assert_eq!(board.state().default, "b");
+    // The board's baseline is `b`'s own now; `a` goes, and `c` is tried.
+    board.slots.running = Some("b".into());
+    board.slots.remove("a").unwrap();
+    board.install_ok("c");
+    board.trial_slot("c");
+    board.baseline("b", "dev builtin\n");
+    board.next_boot(2);
+    assert_eq!(board.settle_at(31, &view), None);
+    assert_eq!(board.state().default, "c");
+    assert_eq!(board.state().previous, "b");
+}
+
+#[test]
+fn the_list_has_the_trial_and_the_resolution_as_they_stand() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    let list = board.list();
+    assert!(
+        list.contains("\"trial\":{\"slot\":\"b\",\"attempts_left\":3"),
+        "{list}"
+    );
+    assert!(list.ends_with("\"resolved\":null}"), "{list}");
+    board.next_boot(1);
+    board.settle_at(31, &View(vec![("dev", Origin::BuiltIn, true, GOOD)]));
+    let list = board.list();
+    assert!(list.contains("\"trial\":null"), "{list}");
+    assert!(
+        list.contains("\"outcome\":\"confirmed\",\"by\":\"auto\""),
+        "{list}"
+    );
 }

@@ -210,8 +210,8 @@ Tested against a real Orion node and comm core on a PC, in-process
 | `install`, `write` | A streamed install (a long job) |
 | `accept`, `install_file` | An install from a file in `.incoming` (a long job) |
 | `set_default(id, force)` | The default from the next boot. The slot must have booted well, unless `force` |
-| `trial(id, keep_default, keep_old, force)` | Restarts into `id` once |
-| `confirm` | A running trial becomes the default. A trial that isn't running is recorded as failed |
+| `trial(id, keep_default, keep_old, force)` | Makes `id` the trial, with `trial_attempts` boots allowed to start it, and restarts |
+| `confirm` | A running trial becomes the default, recorded in `resolved` as confirmed by the caller. A trial that isn't running is recorded as failed. A trial also confirms itself, see [How a trial resolves](#how-a-trial-resolves) |
 | `remove(id)` | Removes a slot. The running, default, trial and pinned slots are refused |
 | `pin(id, pinned)` | Keeps a slot from housekeeping and from `remove` |
 | `set_keep(n)` | How many slots housekeeping keeps; 0 keeps every slot |
@@ -234,8 +234,13 @@ This uses the board firmware's one-shot boot:
 
 - `config.txt` includes `default.txt`, and `tryboot.txt` includes `trial.txt`. Each of those is
   one line, `os_prefix=slots/<id>/`.
-- A restart with the argument `0 tryboot` reads `tryboot.txt` once.
+- A restart with the argument `0 tryboot` reads `tryboot.txt` once. The firmware keeps no
+  count, so a trial's attempts are the file `trial-attempts` beside it, `0` to `3`.
 - The initramfs knows a trial boot from `/proc/device-tree/chosen/bootloader/tryboot`.
+- The default slot's `lemnos-slot-init` takes the attempt. When `trial.txt` names a slot, the
+  firmware didn't boot the trial, and `trial-attempts` is above 0, it writes one fewer and
+  restarts with `0 tryboot`, which boots the trial. With 0, it removes `trial.txt` and boots the
+  default. See "The extra pass on tryboot", below.
 
 ### `uboot`
 
@@ -248,13 +253,14 @@ This uses U-Boot's standard boot flow. There is no saved U-Boot environment and 
     directory, it is `fdtdir`.
   - `append` is the slot's command line.
 - The record is `boot-record.env` at the boot partition's root, with three lines: `default=`,
-  `trial=` and `trial_armed=0|1`. The driver writes it atomically: a temporary file, an fsync,
-  a rename, then an fsync of the directory. A trial writes `trial_armed=1`.
+  `trial=` and `trial_attempts=0..3`, the boots that may still start the trial. The driver
+  writes it atomically: a temporary file, an fsync, a rename, then an fsync of the directory. A
+  trial is written with the board's `trial_attempts`.
 - `packaging/uboot/boot.cmd` is a fixed script, built with
   `mkimage -T script -d boot.cmd boot.scr`. It loads the record and then does the following:
-  1. If a trial is armed, it first writes the record back with `trial_armed=0` and then boots
-     the trial's `extlinux.conf`. The trial gets one try: if it doesn't come up, the next boot
-     finds the record disarmed.
+  1. If a trial has attempts (1 to 3), it takes one: the record is written back with one fewer
+     and only then the trial's `extlinux.conf` is booted. A trial that doesn't reach the daemon
+     has used its attempt, and the next boot takes another. At 0, the trial is not started.
   2. Otherwise it boots the default's `extlinux.conf`.
   3. If that fails or there is no record, it boots `/extlinux/extlinux.conf`. The driver keeps
      that file as a copy of the default's.
@@ -270,11 +276,13 @@ U-Boot.** The first board run with `record = "uboot"` is its first real test.
 
 This is for a loader with one fixed kernel that can't pick a slot's kernel.
 
-- The record is one `boot-record` file with a `default=` line and a `trial=` line.
+- The record is one `boot-record` file with a `default=` line, and for a trial a `trial=` line
+  and `trial_attempts=`.
 - The loader always starts the kernel and initramfs at the boot partition's root. The driver
   keeps those as a copy of the default slot's.
-- The slot's initramfs (`slot-init`) picks the slot from the record, and clears `trial=` when it
-  starts a trial.
+- The slot's initramfs (`slot-init`) picks the slot from the record. A trial with attempts takes
+  one and writes the record back before it boots; with none left it clears `trial=` and the
+  default starts.
 
 What this gives up: every slot runs the default's kernel. A slot whose image needs a different
 kernel can't boot until it is the default. Even then the root copy changes only on `confirm` or
@@ -304,7 +312,7 @@ and `record = "ubi"`. The volumes on that UBI device are:
   the volume:
   - `ubi part ${ubi_mtd}` and `ubifsmount ubi0:boot`;
   - `ubi read` the record;
-  - for an armed trial, `ubi write` it back disarmed, then sysboot the trial;
+  - for a trial with attempts, `ubi write` it back with one fewer, then sysboot the trial;
   - then the default;
   - then `/extlinux/extlinux.conf`.
 
@@ -371,7 +379,8 @@ The failure is kept and recorded before anything else happens:
 The next step is a pure function (`service/slot-init/src/decide.rs`). Each rule has a test that
 fails without it:
 
-1. **A trial that fails** restarts plainly, so the boot loader starts the default.
+1. **A trial that fails** restarts plainly, so the boot loader starts the default (on the way it
+   takes the next attempt, if it has one left).
 2. **The default failing** `3` times in a row stops falling back. The count is
    `board/slots/fallbacks`, which a confirmed boot clears. The board then shows the reason on the
    console for 30 s and restarts.
@@ -383,8 +392,9 @@ fails without it:
 
    Only a slot whose boot directory is on the boot partition can be started.
    - The trial goes into the record the boot partition holds: `trial.txt` and a `0 tryboot`
-     restart, `boot-record.env` with `trial_armed=1`, `boot-record`'s `trial=`, or on raw NAND the
-     `boot-record` volume with `trial_armed=1`.
+     restart, `boot-record.env` with `trial_attempts=`, `boot-record`'s `trial=` and
+     `trial_attempts=`, or on raw NAND the `boot-record` volume with `trial_attempts=`. The
+     attempts are the board's `trial_attempts`, read from `board/slots/settings.env`.
    - The board's state gets `TRIAL` set to that slot, so a `confirm` from it makes it the default:
      the board has rolled back.
 4. **With no candidate**, such as a board with one slot, the board waits, then restarts into the
@@ -396,6 +406,57 @@ it, but the trial is still written to the boot partition.
 
 **Untested on board.** The tests run the whole flow over a temporary directory that stands in
 for `/`, with a fake for every system call. `testing/board-runs/I5d.md` is the board run.
+
+## How a trial resolves
+
+A trial is a slot the board starts once, so it can be judged: `trial` makes it the trial and
+restarts. Its fate is decided by the boots that follow, not by a tool calling `confirm`. A board on
+a robot updates, reboots and runs with nobody connected, so a trial confirms itself.
+
+**Attempts.** The record holds `trial_attempts`, 3 by default: the boots that may still start the
+trial. Before each trial boot the loader takes one. The script does that for `uboot` and `ubi`,
+`lemnos-slot-init` for `tryboot` and `file`. A boot that never reaches the daemon has used its
+attempt, and three in a row fall back. When the daemon starts in the trial slot, the driver gives
+the attempt back, once per boot. So a trial survives power cuts while its daemon has come up, and
+keeps its attempts until it confirms or runs out.
+
+**Confirmation.** After a trial boot, the driver confirms on its own once every condition holds:
+
+- the daemon has run for `confirm_uptime_s` (30 s);
+- no device that was running and healthy in the previous good slot is now failed, or missing if it
+  is built into the board file or did not bind. A hotplug device that is simply absent doesn't
+  count, nor does one that is `Gone`. The previous slot's healthy devices are written as
+  `board/slots/<id>.devices` once that slot has run for its uptime, and at each confirm;
+- every `health` source in the board file is good: `device:<id>` is `Ok`, `file:<path>` exists and
+  was written since this boot began, `socket:<path>` accepts a connection;
+- the state and the boot record can be written.
+
+Each of these is looked at each second while the trial waits, and the reason it is still waiting
+is kept in `trial.env` and shown by `list`. The confirm is recorded in `resolved`, by `auto`.
+
+**The deadline.** If `confirm_deadline_s` (600 s) passes from the daemon's start with a condition
+unmet, the reason is kept, the trial's attempts are set to 0 and, with `reboot_at_deadline` (the
+default), the board restarts plainly. The default comes back, and the trial is recorded as fallen
+back with that reason. With `auto_confirm = false`, nothing confirms or restarts by itself, and
+`confirm` works at any time during the wait.
+
+**Fallen back.** A trial that is out of attempts is resolved on the first boot of the default: its
+state is `rolled-back`, the slot is marked failed with a reason (the trial slot's own `FAIL_REASON`
+when it has one, else "did not reach a running daemon in N boots"), and `resolved` says so.
+
+**What `list` shows.** Two fields at the end of the object: `trial` is null, or the trial that is
+pending across boots, `{slot, attempts_left, attempts:[{n,time}], last, last_time, reason}`, with
+`last` one of `power-lost-before-daemon`, `daemon-reached-not-yet-confirmed`, `confirmed` and
+`fell-back` (null before the trial's first boot). `resolved` is null, or the last resolution,
+`{slot, outcome: confirmed|fell-back, by: auto|call, caller, reason, time}`. `caller` is the caller's
+number for a `call` and null for `auto`.
+
+**The extra pass on tryboot.** The firmware keeps no counter, so on the `tryboot` form every trial
+boot runs the default slot's kernel and initramfs first: the initramfs takes the attempt and
+restarts with `0 tryboot`. That is one extra firmware, kernel and initramfs pass on each trial boot.
+It is the price of the guarantee that a trial kernel which can never boot always falls back: the
+attempt is taken before the trial's kernel runs, so a power cut cannot leave the trial without
+its count. `testing/board-runs/I5f.md` measures it. **Untested on board.**
 
 ## Settings
 
@@ -411,6 +472,8 @@ id = "reboot"
 driver = "system-reboot"
 ```
 
+The trial settings (`auto_confirm`, `confirm_uptime_s`, `confirm_deadline_s`,
+`reboot_at_deadline`, `trial_attempts` and `health`) are in [Trials of a slot](boards.md#trials-of-a-slot-system-slots).
 The driver's crate documentation, `drivers/system-slots/src/lib.rs`, lists every setting.
 
 ## Proof

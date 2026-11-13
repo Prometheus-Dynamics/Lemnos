@@ -43,6 +43,11 @@
 //! - `keep`: how many slots housekeeping keeps when the board has no setting of its own, 3 by
 //!   default.
 //! - `running`: the running slot, for a test; read from `board/slots/booted` otherwise.
+//! - The trial settings, which [`trial`] and [`resolve`] apply: `auto_confirm` (true: the board
+//!   confirms a healthy trial itself), `confirm_uptime_s` (30), `confirm_deadline_s` (600),
+//!   `reboot_at_deadline` (true), `trial_attempts` (3, from 1 to 3) and `health`, a list of
+//!   `device:<id>`, `file:<path>` and `socket:<path>` sources the trial must see good. The keys and
+//!   defaults are in `docs/boards.md`; `docs/slots.md`, "How a trial resolves", says how they work.
 //!
 //! A bundle comes in two ways: streamed by its starter (`install`, then `write`), or as a file
 //! a sender put in `<data>/slots/.incoming/` after asking `accept` whether it fits
@@ -56,8 +61,10 @@
 
 pub mod boot;
 mod install;
+mod resolve;
 pub use lemnos_slot_store::{json, manifest, store};
 pub mod tar;
+pub mod trial;
 pub mod uboot;
 
 #[cfg(test)]
@@ -66,10 +73,13 @@ mod tests;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use lemnos_contract_system_reboot::Reboot;
 use lemnos_contract_system_slots::Slots;
-use lemnos_core::{CallerId, Config, JobId, JobState, Lifecycle, Reply, Result, Status, driver};
+use lemnos_core::{
+    BoardView, CallerId, Config, JobId, JobState, Lifecycle, Reply, Result, Status, driver,
+};
 
 use boot::{BootRecord, FileRecord, Restarter, Tryboot};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
@@ -77,6 +87,7 @@ pub use install::{SIGNATURE_LEN, Signed, TrustedKey, parse_keys};
 use json::quoted;
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
+use trial::{Log, Policy, Resolved, Source};
 use uboot::Uboot;
 
 #[driver("system-slots", provides = [Slots])]
@@ -99,6 +110,19 @@ pub struct SystemSlots {
     read_buf: Vec<u8>,
     /// On raw NAND, what changes the UBI device's volumes (`layout.ubi` names the device).
     ubi_write: Option<Arc<dyn UbiWrite>>,
+    /// The trial settings, and the health sources the board file names.
+    policy: Policy,
+    sources: Vec<Source>,
+    /// This boot's id: a trial's attempt is given back once per boot.
+    boot: String,
+    /// When the driver first ticked (monotonic) and when the board's boot began (wall clock).
+    started_ns: Option<u64>,
+    started_wall: SystemTime,
+    /// The board as the host showed it at the last look (see [`resolve`]).
+    seen: Vec<trial::Dev>,
+    looked: bool,
+    /// Whether this boot's device baseline is written.
+    snapshot_written: bool,
 }
 
 fn restarter(cfg: &Config<'_>) -> Restarter {
@@ -138,6 +162,14 @@ impl SystemSlots {
             next_job: 0,
             read_buf: Vec::new(),
             ubi_write: ubi_write.filter(|_| layout_has_ubi),
+            policy: Policy::default(),
+            sources: Vec::new(),
+            boot: String::new(),
+            started_ns: None,
+            started_wall: SystemTime::now(),
+            seen: Vec::new(),
+            looked: false,
+            snapshot_written: false,
         };
         slots.clear_interrupted();
         // What a sender left in `.incoming` belongs to no install now.
@@ -593,8 +625,90 @@ impl SystemSlots {
                 meta.failed(),
             ));
         }
-        out.push_str("]}");
+        out.push_str("],\"trial\":");
+        out.push_str(&self.trial_json(&state));
+        out.push_str(",\"resolved\":");
+        match Resolved::load(&self.layout) {
+            Some(resolved) => out.push_str(&resolved.json()),
+            None => out.push_str("null"),
+        }
+        out.push('}');
         out
+    }
+
+    /// The `trial` field of `list`: null unless a trial is pending across boots.
+    fn trial_json(&self, state: &State) -> String {
+        if state.trial.is_empty() {
+            return "null".to_string();
+        }
+        let left = match self.record.pending() {
+            Ok(Some((id, left))) if id == state.trial => left,
+            _ => 0,
+        };
+        match Log::load(&self.layout).filter(|log| log.slot == state.trial) {
+            Some(log) => log.json(left),
+            None => Log {
+                slot: state.trial.clone(),
+                seen: left,
+                ..Log::default()
+            }
+            .json(left),
+        }
+    }
+}
+
+/// The trial settings the board file gives the `system-slots` driver.
+fn trial_policy(cfg: &Config<'_>) -> Result<Policy> {
+    let mut policy = Policy::default();
+    if let Some(on) = cfg.bool("auto_confirm") {
+        policy.auto_confirm = on;
+    }
+    if let Some(on) = cfg.bool("reboot_at_deadline") {
+        policy.reboot_at_deadline = on;
+    }
+    let seconds = |key: &str| -> Result<Option<Duration>> {
+        match cfg.int(key) {
+            None => Ok(None),
+            Some(s) => u64::try_from(s)
+                .map(|s| Some(Duration::from_secs(s)))
+                .map_err(|_| Status::INVALID_ARGUMENT),
+        }
+    };
+    if let Some(uptime) = seconds("confirm_uptime_s")? {
+        policy.uptime = uptime;
+    }
+    if let Some(deadline) = seconds("confirm_deadline_s")? {
+        policy.deadline = deadline;
+    }
+    if policy.deadline < policy.uptime {
+        return Err(Status::INVALID_ARGUMENT);
+    }
+    if let Some(attempts) = cfg.int("trial_attempts") {
+        policy.attempts = u8::try_from(attempts)
+            .ok()
+            .filter(|n| (1..=lemnos_slot_store::records::MAX_ATTEMPTS).contains(n))
+            .ok_or(Status::INVALID_ARGUMENT)?;
+    }
+    policy.health = cfg
+        .list("health")
+        .unwrap_or(&[])
+        .iter()
+        .map(|item| item.to_string())
+        .collect();
+    Ok(policy)
+}
+
+/// This boot's id, from the kernel. Where the kernel doesn't say, a value unique to this start:
+/// then a boot may give its attempt back more than once, never fewer than once.
+fn read_boot_id() -> String {
+    match fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+        Ok(id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => format!(
+            "start-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ),
     }
 }
 
@@ -644,14 +758,26 @@ impl Lifecycle for SystemSlots {
     const TRACKS_CALLERS: bool = true;
     const JOBS: bool = true;
     const TICKS: bool = true;
+    const WATCHES_BOARD: bool = true;
 
-    /// An install from a file reads a piece each tick, at once again while there is more.
+    fn board(&mut self, view: &dyn BoardView) {
+        self.watch(view);
+    }
+
+    /// An install from a file reads a piece each tick, at once again while there is more. A trial
+    /// that waits is looked at again each second, until it is confirmed or falls back.
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         self.pull();
-        self.install
+        let install = self
+            .install
             .as_ref()
             .filter(|install| install.end.is_none() && install.source.is_some())
-            .map(|_| now_ns)
+            .map(|_| now_ns);
+        let settle = self.settle(now_ns);
+        match (install, settle) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn start(_: SystemSlotsNeeds, cfg: &Config<'_>) -> Result<Self> {
@@ -700,6 +826,14 @@ impl Lifecycle for SystemSlots {
             .and_then(|text| parse_keys(&text).ok())
             .unwrap_or_default();
         let mut slots = Self::with_volumes(layout, record, keys, ubi_write);
+        slots.policy = trial_policy(cfg)?;
+        slots.sources = slots
+            .policy
+            .health
+            .iter()
+            .map(|text| Source::parse(text).map_err(|_| Status::INVALID_ARGUMENT))
+            .collect::<Result<Vec<_>>>()?;
+        slots.boot = read_boot_id();
         slots.partuuid = cfg
             .str("partuuid")
             .map(str::to_string)
@@ -715,6 +849,14 @@ impl Lifecycle for SystemSlots {
         if let Some(keep) = cfg.int("keep") {
             slots.keep = u32::try_from(keep).map_err(|_| Status::INVALID_ARGUMENT)?;
         }
+        // The attempts a fallback trial gets are the board's, so the default slot's loader can
+        // take them from its own settings.
+        let _ = store::write_setting(
+            &slots.layout,
+            "TRIAL_ATTEMPTS",
+            &slots.policy.attempts.to_string(),
+        );
+        slots.resolve_at_start();
         Ok(slots)
     }
 
@@ -847,7 +989,9 @@ impl Slots for SystemSlots {
         self.evict(&state, id)?;
         boot::stage(&self.layout, id, false).map_err(|_| Status::IO)?;
         self.mark_keep_old(id, keep_old)?;
-        self.record.set_trial(id).map_err(|_| Status::IO)?;
+        self.record
+            .set_trial(id, self.policy.attempts)
+            .map_err(|_| Status::IO)?;
         meta.set("RETRIED", "no");
         meta.save(&self.layout, id).map_err(|_| Status::IO)?;
         let marker = self.layout.marker("trial-keeps-default");
@@ -860,84 +1004,19 @@ impl Slots for SystemSlots {
         state.state = "rebooting".into();
         state.error.clear();
         self.save(&state)?;
-        self.record.restart(true).map_err(|_| Status::IO)
+        // The loader takes one attempt before the trial boots, so the record now says how many
+        // there are: the trial starts on a plain restart.
+        let _ = Log {
+            slot: id.to_string(),
+            seen: self.policy.attempts,
+            ..Log::default()
+        }
+        .save(&self.layout);
+        self.record.restart().map_err(|_| Status::IO)
     }
 
     fn confirm(&mut self) -> Result<()> {
-        let running = self.running();
-        if !valid_id(&running) {
-            return Err(Status::NOT_FOUND);
-        }
-        let mut state = self.state();
-        let mut housekeep = false;
-        if !state.trial.is_empty() && running == state.trial {
-            let keeps = read_line(&self.layout.marker("trial-keeps-default"));
-            if keeps == running {
-                // A trial only: it booted well, and the default stays for the next restart.
-                state.trial.clear();
-                state.staged.clear();
-            } else {
-                self.record
-                    .fallback_copy(&self.layout, &running)
-                    .map_err(|_| Status::IO)?;
-                self.record.set_default(&running).map_err(|_| Status::IO)?;
-                if state.default != running {
-                    state.previous = core::mem::replace(&mut state.default, running.clone());
-                }
-                state.trial.clear();
-                state.staged.clear();
-                housekeep = true;
-            }
-            state.state = "confirmed".into();
-            state.error.clear();
-        } else if !state.trial.is_empty() {
-            // The trial didn't come up as the running slot: the board went back.
-            let trial = core::mem::take(&mut state.trial);
-            let reason = format!("slot {trial} didn't confirm its boot; back on {running}");
-            let mut meta = Meta::load(&self.layout, &trial);
-            meta.set("GOOD", "no");
-            if !meta.failed() {
-                let failures = meta.get("FAILURES").parse::<u32>().unwrap_or(0) + 1;
-                meta.set("FAILED", "yes");
-                meta.set("FAILURES", &failures.to_string());
-                meta.set("FAIL_REASON", &reason);
-                meta.set("FAIL_TIME", &store::now_utc());
-            }
-            if self.layout.installed(&trial) {
-                meta.save(&self.layout, &trial).map_err(|_| Status::IO)?;
-            }
-            state.state = "rolled-back".into();
-            state.error = reason;
-        } else if state.state == "rebooting" {
-            state.state = "rolled-back".into();
-        }
-        if state.default.is_empty() {
-            state.default = running.clone();
-        }
-        let mut meta = Meta::load(&self.layout, &running);
-        let now = store::now_utc();
-        meta.set("GOOD", "yes");
-        meta.set("FAILED", "no");
-        meta.set("CONFIRM_TIME", &now);
-        meta.set("LAST_BOOT", &now);
-        if self.layout.installed(&running) {
-            meta.save(&self.layout, &running).map_err(|_| Status::IO)?;
-        }
-        let _ = store::replace(&self.layout.marker("fallbacks"), b"0\n");
-        for marker in ["trial-started", "trial-init", "trial-keeps-default"] {
-            let _ = fs::remove_file(self.layout.marker(marker));
-        }
-        self.save(&state)?;
-        if housekeep {
-            let keep_old = read_line(&self.layout.marker("keep-old"));
-            if keep_old != running {
-                self.housekeep(&mut state)?;
-            }
-            let _ = fs::remove_file(self.layout.marker("keep-old"));
-        }
-        // Boot directories of slots no longer resident come off. Never fails the confirm.
-        let _ = self.evict(&state, "");
-        Ok(())
+        self.confirm_as(resolve::By::Call(self.calling))
     }
 
     fn remove(&mut self, id: &str) -> Result<()> {

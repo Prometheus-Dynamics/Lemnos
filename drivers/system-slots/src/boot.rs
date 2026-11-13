@@ -25,13 +25,23 @@ use lemnos_slot_store::records;
 use crate::store::{Layout, read_line, replace, sync_dir, valid_id};
 
 /// Tells the boot loader which slot to start.
+///
+/// A trial is a slot the loader starts for the boots its attempts allow ([`BootRecord::set_trial`]).
+/// Each trial boot takes one attempt before the trial starts (the loader does it: the script, or
+/// `lemnos-slot-init` for the other forms), so a boot that never reaches the daemon uses one up.
 pub trait BootRecord: Send {
     /// The slot every ordinary boot starts.
     fn set_default(&mut self, id: &str) -> io::Result<()>;
-    /// The slot the next trial restart starts, once.
-    fn set_trial(&mut self, id: &str) -> io::Result<()>;
-    /// Restarts the board; `trial` restarts into the trial slot.
-    fn restart(&mut self, trial: bool) -> io::Result<()>;
+    /// Makes `id` the trial, with `attempts` boots allowed to start it, from the next boot.
+    fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()>;
+    /// The pending trial and its attempts left, `None` when the loader holds no trial.
+    fn pending(&self) -> io::Result<Option<(String, u8)>>;
+    /// Sets the pending trial's attempts left (nothing when none is pending).
+    fn set_attempts(&mut self, attempts: u8) -> io::Result<()>;
+    /// Takes the trial out: the next boot is the default's.
+    fn clear_trial(&mut self) -> io::Result<()>;
+    /// Restarts the board, into whatever the loader starts first.
+    fn restart(&mut self) -> io::Result<()>;
     /// Adds what this boot loader needs to a slot's boot directory `dir` at install, before it
     /// is kept: `cmdline` is the slot's kernel command line.
     fn prepare(&self, _dir: &Path, _id: &str, _cmdline: &str) -> io::Result<()> {
@@ -70,7 +80,9 @@ impl Restarter {
     }
 }
 
-/// The Raspberry Pi firmware's `os_prefix` files and its tryboot restart.
+/// The Raspberry Pi firmware's `os_prefix` files. A trial is `trial.txt` with its attempts in
+/// `trial-attempts` beside it: the firmware has no counter of its own, so the default slot's
+/// `lemnos-slot-init` takes one from it before each trial boot (see `docs/slots.md`).
 #[derive(Debug, Clone)]
 pub struct Tryboot {
     pub boot: PathBuf,
@@ -81,17 +93,61 @@ fn prefix(id: &str) -> String {
     lemnos_slot_store::records::tryboot::entry(id)
 }
 
+impl Tryboot {
+    fn attempts_file(&self) -> PathBuf {
+        self.boot.join(records::tryboot::ATTEMPTS_FILE)
+    }
+
+    fn trial_file(&self) -> PathBuf {
+        self.boot.join(records::tryboot::TRIAL_FILE)
+    }
+}
+
 impl BootRecord for Tryboot {
     fn set_default(&mut self, id: &str) -> io::Result<()> {
         replace(&self.boot.join("default.txt"), prefix(id).as_bytes())
     }
 
-    fn set_trial(&mut self, id: &str) -> io::Result<()> {
-        replace(&self.boot.join("trial.txt"), prefix(id).as_bytes())
+    fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()> {
+        // The counter first: a trial file never names a slot without its attempts beside it.
+        replace(&self.attempts_file(), format!("{attempts}\n").as_bytes())?;
+        replace(&self.trial_file(), prefix(id).as_bytes())
     }
 
-    fn restart(&mut self, trial: bool) -> io::Result<()> {
-        self.restarter.run(trial.then_some("0 tryboot"))
+    fn pending(&self) -> io::Result<Option<(String, u8)>> {
+        let Ok(text) = fs::read_to_string(self.trial_file()) else {
+            return Ok(None);
+        };
+        let Some(id) = records::tryboot::slot(&text) else {
+            return Ok(None);
+        };
+        let attempts = fs::read_to_string(self.attempts_file())
+            .ok()
+            .and_then(|text| records::attempts(&text))
+            .unwrap_or(0);
+        Ok(Some((id.to_string(), attempts)))
+    }
+
+    fn set_attempts(&mut self, attempts: u8) -> io::Result<()> {
+        if self.pending()?.is_some() {
+            replace(&self.attempts_file(), format!("{attempts}\n").as_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn clear_trial(&mut self) -> io::Result<()> {
+        for path in [self.trial_file(), self.attempts_file()] {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        sync_dir(&self.boot)
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
+        self.restarter.run(None)
     }
 }
 
@@ -108,27 +164,49 @@ impl FileRecord {
         self.boot.join(records::file::FILE)
     }
 
-    fn line(&self, key: &str) -> String {
-        let (default, trial) =
-            records::file::parse(&fs::read_to_string(self.path()).unwrap_or_default());
-        if key == "trial" { trial } else { default }
+    fn write(&self, default: &str, trial: &str, attempts: u8) -> io::Result<()> {
+        replace(
+            &self.path(),
+            records::file::text(default, trial, attempts).as_bytes(),
+        )
     }
 
-    fn write(&self, default: &str, trial: &str) -> io::Result<()> {
-        replace(&self.path(), records::file::text(default, trial).as_bytes())
+    /// The record as it reads: default, trial and the trial's attempts.
+    fn read(&self) -> (String, String, u8) {
+        records::file::parse(&fs::read_to_string(self.path()).unwrap_or_default())
     }
 }
 
 impl BootRecord for FileRecord {
     fn set_default(&mut self, id: &str) -> io::Result<()> {
-        self.write(id, &self.line("trial"))
+        let (_, trial, attempts) = self.read();
+        self.write(id, &trial, attempts)
     }
 
-    fn set_trial(&mut self, id: &str) -> io::Result<()> {
-        self.write(&self.line("default"), id)
+    fn set_trial(&mut self, id: &str, attempts: u8) -> io::Result<()> {
+        let (default, _, _) = self.read();
+        self.write(&default, id, attempts)
     }
 
-    fn restart(&mut self, _trial: bool) -> io::Result<()> {
+    fn pending(&self) -> io::Result<Option<(String, u8)>> {
+        let (_, trial, attempts) = self.read();
+        Ok((!trial.is_empty()).then_some((trial, attempts)))
+    }
+
+    fn set_attempts(&mut self, attempts: u8) -> io::Result<()> {
+        let (default, trial, _) = self.read();
+        if trial.is_empty() {
+            return Ok(());
+        }
+        self.write(&default, &trial, attempts)
+    }
+
+    fn clear_trial(&mut self) -> io::Result<()> {
+        let (default, _, _) = self.read();
+        self.write(&default, "", 0)
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
         self.restarter.run(None)
     }
 }
@@ -392,7 +470,7 @@ mod tests {
             },
         };
         record.set_default("a-1").unwrap();
-        record.set_trial("b-2").unwrap();
+        record.set_trial("b-2", 3).unwrap();
         assert_eq!(
             fs::read_to_string(dir.0.join("default.txt")).unwrap(),
             "os_prefix=slots/a-1/\n"
@@ -401,10 +479,37 @@ mod tests {
             fs::read_to_string(dir.0.join("trial.txt")).unwrap(),
             "os_prefix=slots/b-2/\n"
         );
+        assert_eq!(
+            fs::read_to_string(dir.0.join("trial-attempts")).unwrap(),
+            "3\n"
+        );
         assert_eq!(tryboot_default(&dir.0).as_deref(), Some("a-1"));
         // No half-written file is left beside them.
-        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
-        assert!(record.restart(true).is_err());
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 3);
+        assert!(record.restart().is_err());
+    }
+
+    #[test]
+    fn the_tryboot_trial_has_its_attempts_beside_it_and_goes_with_it() {
+        let dir = TempDir::new("tryboot-attempts");
+        let mut record = Tryboot {
+            boot: dir.0.clone(),
+            restarter: Restarter {
+                systemctl: "/nonexistent/systemctl".into(),
+            },
+        };
+        assert_eq!(record.pending().unwrap(), None);
+        record.set_trial("b-2", 2).unwrap();
+        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 2)));
+        record.set_attempts(1).unwrap();
+        assert_eq!(record.pending().unwrap(), Some(("b-2".into(), 1)));
+        record.clear_trial().unwrap();
+        assert_eq!(record.pending().unwrap(), None);
+        assert!(!dir.0.join("trial.txt").exists());
+        assert!(!dir.0.join("trial-attempts").exists());
+        // Setting attempts with no trial pending writes nothing.
+        record.set_attempts(2).unwrap();
+        assert!(!dir.0.join("trial-attempts").exists());
     }
 
     #[test]
@@ -416,12 +521,21 @@ mod tests {
                 systemctl: "/nonexistent/systemctl".into(),
             },
         };
-        record.set_trial("b").unwrap();
+        record.set_trial("b", 2).unwrap();
         record.set_default("a").unwrap();
         assert_eq!(
             fs::read_to_string(dir.0.join("boot-record")).unwrap(),
-            "default=a\ntrial=b\n"
+            "default=a\ntrial=b\ntrial_attempts=2\n"
         );
+        assert_eq!(record.pending().unwrap(), Some(("b".into(), 2)));
+        record.set_attempts(0).unwrap();
+        assert_eq!(record.pending().unwrap(), Some(("b".into(), 0)));
+        record.clear_trial().unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.0.join("boot-record")).unwrap(),
+            "default=a\n"
+        );
+        assert_eq!(record.pending().unwrap(), None);
     }
 
     #[test]

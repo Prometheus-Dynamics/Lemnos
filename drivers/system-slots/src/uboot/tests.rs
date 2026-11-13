@@ -18,10 +18,10 @@ fn the_record_round_trips_in_the_form_env_import_takes() {
     let record = Record {
         default: "os-1".into(),
         trial: "os-2".into(),
-        armed: true,
+        attempts: 3,
     };
     let text = record.text();
-    assert_eq!(text, "default=os-1\ntrial=os-2\ntrial_armed=1\n");
+    assert_eq!(text, "default=os-1\ntrial=os-2\ntrial_attempts=3\n");
     assert_eq!(Record::parse(&text), record);
     // Every line is `name=value` with a key the script imports: what `env import -t` reads.
     for line in text.lines() {
@@ -33,10 +33,10 @@ fn the_record_round_trips_in_the_form_env_import_takes() {
         default: "os-1".into(),
         ..Record::default()
     };
-    assert_eq!(none.text(), "default=os-1\ntrial=\ntrial_armed=0\n");
+    assert_eq!(none.text(), "default=os-1\ntrial=\ntrial_attempts=0\n");
     assert_eq!(Record::parse(&none.text()), none);
     // What `env export -t` writes back has the same lines; an unset trial is left out.
-    assert_eq!(Record::parse("default=os-1\ntrial_armed=0\n"), none);
+    assert_eq!(Record::parse("default=os-1\ntrial_attempts=0\n"), none);
     // A value that isn't a slot id is no slot; a stray line is skipped.
     assert_eq!(
         Record::parse("#c\ndefault=../x\nother=1\ntrial=os-2\n").default,
@@ -46,42 +46,78 @@ fn the_record_round_trips_in_the_form_env_import_takes() {
 
 #[test]
 fn the_decision_table() {
-    let armed = Record {
+    let tried = Record {
         default: "a".into(),
         trial: "b".into(),
-        armed: true,
+        attempts: 3,
     };
+    // Each attempt the record holds takes one before the trial starts; the default follows.
     assert_eq!(
-        steps(Some(&armed)),
+        steps(Some(&tried)),
         [
-            Step::Disarm,
-            Step::Boot("b".into()),
+            Step::Trial {
+                id: "b".into(),
+                attempts: 2
+            },
             Step::Boot("a".into()),
             Step::Root
         ]
     );
-    // The trial's slot missing: its sysboot returns and the default follows, as listed.
-    let not_armed = Record {
-        armed: false,
-        ..armed.clone()
+    let last = Record {
+        attempts: 1,
+        ..tried.clone()
     };
     assert_eq!(
-        steps(Some(&not_armed)),
-        [Step::Boot("a".into()), Step::Root]
+        steps(Some(&last)),
+        [
+            Step::Trial {
+                id: "b".into(),
+                attempts: 0
+            },
+            Step::Boot("a".into()),
+            Step::Root
+        ]
     );
-    let armed_without_trial = Record {
+    // Out of attempts, the trial is not started at all.
+    let out = Record {
+        attempts: 0,
+        ..tried.clone()
+    };
+    assert_eq!(steps(Some(&out)), [Step::Boot("a".into()), Step::Root]);
+    let no_trial = Record {
         trial: String::new(),
-        ..armed.clone()
+        ..tried.clone()
     };
-    assert_eq!(
-        steps(Some(&armed_without_trial)),
-        [Step::Boot("a".into()), Step::Root]
-    );
+    assert_eq!(steps(Some(&no_trial)), [Step::Boot("a".into()), Step::Root]);
     assert_eq!(steps(None), [Step::Root]);
     assert_eq!(steps(Some(&Record::default())), [Step::Root]);
 }
 
-/// The script against [`steps`]: the same keys, the same order, the disarm written before the
+/// Whether `script` takes the rung for `count`: its `if` for that count is followed by setting
+/// `left` as the next step (the first line after it that isn't empty).
+fn rung(script: &str, count: u8, left: u8) -> bool {
+    let want = format!("test \"${{trial_attempts}}\" = \"{count}\"; then");
+    let mut lines = script.lines().skip_while(|l| {
+        !(l.trim().starts_with("if ") || l.trim().starts_with("elif "))
+            || !l.trim().ends_with(&want)
+    });
+    lines.next().is_some() && lines.next().map(str::trim) == Some(&format!("setenv left {left}"))
+}
+
+/// The ladder both scripts share: 3 to 2, 2 to 1, 1 to 0 with `test` and `setenv` only, and
+/// nothing at 0 (the default starts).
+fn ladder_is_there(script: &str) {
+    assert!(rung(script, 3, 2), "3 takes one to 2");
+    assert!(rung(script, 2, 1), "2 takes one to 1");
+    assert!(rung(script, 1, 0), "1 takes one to 0");
+    assert!(
+        !script.contains("setexpr"),
+        "no setexpr: U-Boot builds without it"
+    );
+    assert!(!rung(script, 0, 0), "nothing is taken at 0");
+}
+
+/// The script against [`steps`]: the same keys, the same order, the attempt written before the
 /// trial starts, and no fixed device numbers.
 #[test]
 fn the_script_mirrors_the_decision() {
@@ -98,8 +134,9 @@ fn the_script_mirrors_the_decision() {
     assert!(SCRIPT.contains(&format!(
         "load ${{devtype}} ${{slot_part}} ${{scriptaddr}} {RECORD_FILE}"
     )));
-    let armed_test = at(r#"test "${trial_armed}" = "1" && test -n "${trial}""#);
-    let disarm = at("setenv trial_armed 0");
+    ladder_is_there(SCRIPT);
+    let ladder = at(r#"if test "${trial_attempts}" = "3"; then"#);
+    let take = at("setenv trial_attempts ${left}");
     let export = at("env export -t");
     let save = at(&format!(
         "save ${{devtype}} ${{slot_part}} ${{scriptaddr}} {RECORD_FILE} ${{filesize}}"
@@ -107,7 +144,7 @@ fn the_script_mirrors_the_decision() {
     let trial = at(&format!("/slots/${{trial}}/{EXTLINUX}"));
     let default = at(&format!("/slots/${{default}}/{EXTLINUX}"));
     let root = SCRIPT.rfind("/extlinux/extlinux.conf").unwrap();
-    assert!(armed_test < disarm && disarm < export && export < save && save < trial);
+    assert!(ladder < take && take < export && export < save && save < trial);
     assert!(trial < default && default < root);
     assert!(
         SCRIPT
@@ -210,10 +247,10 @@ fn the_driver_writes_the_record_whole_and_keeps_the_root_copy() {
         volume: None,
     };
     record.set_default("os-1").unwrap();
-    record.set_trial("os-2").unwrap();
+    record.set_trial("os-2", 3).unwrap();
     assert_eq!(
         fs::read_to_string(layout.boot.join(RECORD_FILE)).unwrap(),
-        "default=os-1\ntrial=os-2\ntrial_armed=1\n"
+        "default=os-1\ntrial=os-2\ntrial_attempts=3\n"
     );
     record.set_default("os-2").unwrap();
     assert_eq!(
@@ -221,9 +258,16 @@ fn the_driver_writes_the_record_whole_and_keeps_the_root_copy() {
         Record {
             default: "os-2".into(),
             trial: "os-2".into(),
-            armed: true
+            attempts: 3
         }
     );
+    // The attempts are the trial's own: set, read back, and cleared with it.
+    record.set_attempts(1).unwrap();
+    assert_eq!(record.pending().unwrap(), Some(("os-2".into(), 1)));
+    record.clear_trial().unwrap();
+    assert_eq!(record.pending().unwrap(), None);
+    assert_eq!(record.read().attempts, 0);
+    record.set_trial("os-2", 3).unwrap();
     // Written beside and renamed: nothing else is left in the directory.
     let names: Vec<String> = fs::read_dir(&layout.boot)
         .unwrap()
@@ -260,8 +304,8 @@ fn the_nand_script_mirrors_the_same_decision_over_the_record_volume() {
         "env import -t ${{scriptaddr}} ${{filesize}} {}",
         KEYS.join(" ")
     ));
-    let armed_test = at(r#"test "${trial_armed}" = "1" && test -n "${trial}""#);
-    let disarm = at("setenv trial_armed 0");
+    ladder_is_there(SCRIPT_UBI);
+    let ladder = at(r#"if test "${trial_attempts}" = "3"; then"#);
     let export = at(&format!("env export -t ${{scriptaddr}} {}", KEYS.join(" ")));
     let write = at(&format!(
         "ubi write ${{scriptaddr}} {RECORD_VOLUME} ${{filesize}}"
@@ -269,8 +313,8 @@ fn the_nand_script_mirrors_the_same_decision_over_the_record_volume() {
     let trial = at(&format!("/slots/${{trial}}/{EXTLINUX}"));
     let default = at(&format!("/slots/${{default}}/{EXTLINUX}"));
     let root = SCRIPT_UBI.rfind("/extlinux/extlinux.conf").unwrap();
-    assert!(mount < read && read < import && import < armed_test);
-    assert!(armed_test < disarm && disarm < export && export < write && write < trial);
+    assert!(mount < read && read < import && import < ladder);
+    assert!(ladder < export && export < write && write < trial);
     assert!(trial < default && default < root);
     // Every boot goes through the UBIFS boot volume, and the last resort is the root copy.
     for line in SCRIPT_UBI
@@ -295,7 +339,7 @@ fn the_nand_script_mirrors_the_same_decision_over_the_record_volume() {
     for banned in ["saveenv", "bootcount", "bootlimit", "mmc ", "load "] {
         assert!(!SCRIPT_UBI.contains(banned), "{banned}");
     }
-    // The decision table is the same one the file record's script follows.
+    // The two scripts take the same steps in the same order.
     assert_eq!(
         SCRIPT_UBI.matches("sysboot").count(),
         SCRIPT.matches("sysboot").count()
