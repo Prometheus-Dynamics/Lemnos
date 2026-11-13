@@ -32,8 +32,9 @@ use sha2::{Digest, Sha256};
 /// offset 44 64 bytes  Ed25519 signature over the signed message
 /// ```
 ///
-/// The signed message is the signing format's own (a slot's is its `slot.json` bytes; a
-/// first-flash image's is the message it defines). Only the container is shared.
+/// The signed message is the signing format's own, built by [`signed_message`] from a [`Domain`]
+/// (a slot's is [`slot_bundle_message`]; a first-flash image's is the message it defines). Only
+/// the container is shared.
 pub const RECORD_MAGIC: &[u8; 8] = b"LMNSSIG1";
 /// The algorithm byte of an Ed25519 record.
 pub const ALGORITHM_ED25519: u8 = 1;
@@ -76,6 +77,65 @@ pub fn parse_record(bytes: &[u8]) -> Result<Record, &'static str> {
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&bytes[44..108]);
     Ok(Record { key_id, signature })
+}
+
+/// The kinds of signed message. Each kind's message starts with its own domain tag, so a
+/// signature made for one kind never verifies as another kind under the same key.
+///
+/// To add a kind (for example a signed authorization):
+///
+/// 1. add a variant here, with a doc line naming its driver and its tag;
+/// 2. give it a tag in [`Domain::tag`]: a unique `lemnos-<kind>\0` string, never reused
+///    (a tag is part of every signature made under it, so it cannot change once shipped);
+/// 3. build its message in its own driver with [`signed_message`] over the kind's body bytes,
+///    never by hand and never with the bare body, so the tag cannot be forgotten;
+/// 4. give the kind's body a version and length prefixes, as the existing bodies do, and add a
+///    vector test (a fixed key, body and message in hex) next to the existing ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Domain {
+    /// A first-flash image's message (`system-flash`): tag `lemnos-first-flash\0`.
+    FirstFlash,
+    /// A slot bundle's message (`system-slots`, since I5g2): tag `lemnos-slot-bundle\0`.
+    SlotBundle,
+}
+
+impl Domain {
+    /// The domain tag, with its NUL. Unique per variant; see the enum's docs before adding one.
+    pub fn tag(self) -> &'static [u8] {
+        match self {
+            Self::FirstFlash => b"lemnos-first-flash\0",
+            Self::SlotBundle => b"lemnos-slot-bundle\0",
+        }
+    }
+}
+
+/// The version of the slot bundle's signed message.
+pub const SLOT_BUNDLE_VERSION: u32 = 1;
+
+/// The bytes a signature is made over: the domain tag, then `body`, the kind's own fields. This
+/// is the only builder of a signed message: a driver that adds a kind calls it with its own
+/// [`Domain`] variant (see the enum's docs for the steps).
+pub fn signed_message(domain: Domain, body: &[u8]) -> Vec<u8> {
+    let tag = domain.tag();
+    let mut out = Vec::with_capacity(tag.len() + body.len());
+    out.extend_from_slice(tag);
+    out.extend_from_slice(body);
+    out
+}
+
+/// A slot bundle's signed message over its `slot.json` bytes, exactly as the bundle holds them:
+///
+/// ```text
+/// "lemnos-slot-bundle\0"   19 bytes: the domain tag, with its NUL
+/// u32 LE version = 1
+/// u32 LE length, then the manifest's exact bytes
+/// ```
+pub fn slot_bundle_message(manifest: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(8 + manifest.len());
+    body.extend_from_slice(&SLOT_BUNDLE_VERSION.to_le_bytes());
+    body.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
+    body.extend_from_slice(manifest);
+    signed_message(Domain::SlotBundle, &body)
 }
 
 /// A key id: the SHA-256 of a public key's bytes. Records and the board's key lists name keys by it.
@@ -275,6 +335,33 @@ pub fn recorded(signature: &str, signed: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The vector in `docs/slots.md`: the test seed `0x07` repeated, and this manifest.
+    const VECTOR_MANIFEST: &[u8] = b"{\"id\":\"vector\"}";
+
+    #[test]
+    fn the_slot_bundle_message_is_tagged_and_length_prefixed() {
+        let message = slot_bundle_message(VECTOR_MANIFEST);
+        assert_eq!(
+            hex(&message),
+            "6c656d6e6f732d736c6f742d62756e646c6500010000000f0000007b226964223a22766563746f72227d"
+        );
+    }
+
+    #[test]
+    fn the_domain_tags_differ_so_no_kind_verifies_as_another() {
+        assert_ne!(Domain::FirstFlash.tag(), Domain::SlotBundle.tag());
+        assert!(slot_bundle_message(VECTOR_MANIFEST).starts_with(b"lemnos-slot-bundle\0"));
+        assert_ne!(
+            slot_bundle_message(VECTOR_MANIFEST),
+            VECTOR_MANIFEST.to_vec(),
+            "a bare manifest is not the signed message"
+        );
+    }
 
     fn policy(require: bool, check: Check<'_>) -> Result<Outcome, Refusal> {
         decide(require, "the image", check)

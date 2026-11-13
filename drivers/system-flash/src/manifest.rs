@@ -27,8 +27,6 @@ pub fn key_id(key: &VerifyingKey) -> [u8; 32] {
     lemnos_slot_store::signing::key_id(key.as_bytes())
 }
 
-/// The domain tag of the signed message, with its NUL.
-pub const DOMAIN: &[u8] = b"lemnos-first-flash\0";
 /// The signed message's version.
 pub const MESSAGE_VERSION: u32 = 1;
 /// The raw image kind a block target takes.
@@ -47,24 +45,23 @@ pub struct Manifest {
     pub sha256: [u8; 32],
 }
 
-/// The signed message: the fixed binary record over the board's own facts and the image's.
+/// The signed message: the fixed binary record over the board's own facts and the image's, built
+/// by the shared [`signing::signed_message`] under the first-flash domain tag.
 ///
 /// ```text
 /// "lemnos-first-flash\0" | u32 LE version | u32 LE len + board | u32 LE len + format
 /// | u64 LE size | 32-byte SHA-256
 /// ```
 pub fn signed_message(board: &str, format: &str, size: u64, sha256: &[u8; 32]) -> Vec<u8> {
-    let mut out =
-        Vec::with_capacity(DOMAIN.len() + 4 + 4 + board.len() + 4 + format.len() + 8 + 32);
-    out.extend_from_slice(DOMAIN);
-    out.extend_from_slice(&MESSAGE_VERSION.to_le_bytes());
-    out.extend_from_slice(&(board.len() as u32).to_le_bytes());
-    out.extend_from_slice(board.as_bytes());
-    out.extend_from_slice(&(format.len() as u32).to_le_bytes());
-    out.extend_from_slice(format.as_bytes());
-    out.extend_from_slice(&size.to_le_bytes());
-    out.extend_from_slice(sha256);
-    out
+    let mut body = Vec::with_capacity(4 + 4 + board.len() + 4 + format.len() + 8 + 32);
+    body.extend_from_slice(&MESSAGE_VERSION.to_le_bytes());
+    body.extend_from_slice(&(board.len() as u32).to_le_bytes());
+    body.extend_from_slice(board.as_bytes());
+    body.extend_from_slice(&(format.len() as u32).to_le_bytes());
+    body.extend_from_slice(format.as_bytes());
+    body.extend_from_slice(&size.to_le_bytes());
+    body.extend_from_slice(sha256);
+    signing::signed_message(signing::Domain::FirstFlash, &body)
 }
 
 /// A key the board trusts, its key id, and whose it is.

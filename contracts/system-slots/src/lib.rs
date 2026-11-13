@@ -9,7 +9,8 @@
 //!
 //! A slot arrives as a bundle: a tar of `slot.json` (its manifest), `slot.sig` (a 108-byte
 //! signature record, the shared container first flash uses: the key id and an Ed25519 signature
-//! over the manifest's bytes), `rootfs.erofs` and `boot/`. The record names its key, and the
+//! over the domain-tagged slot bundle message of the manifest's bytes), `rootfs.erofs` and `boot/`.
+//! `slot.json` is the first member and `slot.sig`, when present, the second (`docs/slots.md`). The record names its key, and the
 //! signature is checked against that key when the board holds it. The board's
 //! policy (`require_signed`) is the table in `lemnos_slot_store::signing`, the same one first
 //! flash applies: an unsigned bundle or one under a key the board does not hold installs and is
@@ -42,7 +43,8 @@
 //! {"require_signed":false,"last_install":{"slot":"<id, or \"\" when refused>",
 //!  "signature":"verified|not_checked_unknown_key|not_checked_unsigned|refused","signer":"<owner>",
 //!  "reason":"<the reason in words>"},"default_signature":"<the default's signature word>",
-//!  "boot_unverified":"<the slot the boot side started unverified, or \"\">"}
+//!  "boot_unverified":"<the slot the boot side started unverified, or \"\">",
+//!  "key_ids":[{"id":"<64 hex: SHA-256 of a held public key>","owner":"<owner>"}]}
 //! ```
 //!
 //! An empty id is `""`.

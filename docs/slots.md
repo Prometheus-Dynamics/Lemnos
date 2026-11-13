@@ -39,33 +39,99 @@ name. The data partition is not on the command line (see `lemnos-slot-init`, bel
 
 ## A bundle
 
-A bundle is a tar holding:
+A bundle is a tar holding, in this order and no other:
 
-- `slot.json`, the manifest (below).
-- `slot.sig`, optional. When present it is the shared signature record (`lemnos_slot_store::signing`,
-  the same container first flash uses), exactly 108 bytes:
+1. `slot.json`, the manifest (below). It is the **first** member.
+2. `slot.sig`, optional. When present it is the **second** member, right after `slot.json`. It is the
+   shared signature record (`lemnos_slot_store::signing`, the same container first flash uses),
+   exactly 108 bytes:
 
-  | offset | bytes | content |
-  |---|---|---|
-  | 0 | 8 | `LMNSSIG1` |
-  | 8 | 1 | algorithm: `1` (Ed25519) |
-  | 9 | 3 | zero |
-  | 12 | 32 | key id: SHA-256 of the signing key's 32-byte public key |
-  | 44 | 64 | Ed25519 signature over the signed message |
+   | offset | bytes | content |
+   |---|---|---|
+   | 0 | 8 | `LMNSSIG1` |
+   | 8 | 1 | algorithm: `1` (Ed25519) |
+   | 9 | 3 | zero |
+   | 12 | 32 | key id: SHA-256 of the signing key's 32-byte public key |
+   | 44 | 64 | Ed25519 signature over the signed message (below) |
 
-  The signed message is the manifest's exact bytes (`slot.json` as it is in the bundle): no domain
-  tag, no added fields. Vector: the test key is the 32-byte seed of `0x07` repeated (public key
-  `ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c`, key id
-  `fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889`). The test
-  `the_signature_member_is_the_shared_record_and_names_the_key_by_its_id` builds this record for a
-  bundle and checks its header, key id and signature.
+   A bare 64-byte signature (the first version's form) is malformed: refused, `INVALID_ARGUMENT`.
+3. `rootfs.erofs`, the image with its dm-verity hash tree appended, and `boot/`, the slot's boot files
+   (the `boot/` directory entry and each file under it). These come **in any order** after the
+   signature, and each member at most once.
 
-  A bare 64-byte signature (the first version's form) is malformed: refused, `INVALID_ARGUMENT`.
-- `rootfs.erofs`, the image with its dm-verity hash tree appended.
-- `boot/`, the slot's boot files.
+Any other member is refused by name. A bundle whose order differs from these rules is refused with a
+sentence that names the rule it breaks: `slot.json` not first, `slot.sig` not second, a member
+repeated.
 
-The driver checks every byte against the manifest as it arrives. A bundle that differs from its
-manifest is refused, and nothing it wrote is left behind.
+### The signed message
+
+The signature is Ed25519 over a domain-separated message, built by
+`lemnos_slot_store::signing::slot_bundle_message` (one builder for every signed kind: a `Domain` enum
+gives each kind its tag, so a signature for one kind never verifies as another under the same key;
+first flash's tag is `lemnos-first-flash\0`, and its message is unchanged):
+
+```text
+"lemnos-slot-bundle\0"    19 bytes: the domain tag, with its NUL
+u32 LE version = 1
+u32 LE length, then the manifest's exact bytes (slot.json as the bundle holds them)
+```
+
+Vector: the test key is the 32-byte seed `0x07` repeated (public key
+`ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c`, key id
+`fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889`). For the manifest `{"id":"vector"}`
+(15 bytes):
+
+```text
+message (42 bytes):
+6c656d6e6f732d736c6f742d62756e646c6500 01000000 0f000000 7b226964223a22766563746f72227d
+record (108 bytes):
+4c4d4e535349473101000000fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff552263889
+56be579db020703eb207da579036a89f0321fcd8ce2bac78a9aa939a58217e265ad27a7e1fc05829b0db05d37ac4d8dba35263c7a1b2644322b45ada4a101402
+```
+
+The record's signature is over those 42 bytes. A signature over the bare manifest (no tag) does not
+verify. Tests: `the_slot_bundle_vector_is_the_documented_record` (system-slots),
+`the_slot_bundle_message_is_tagged_and_length_prefixed` and `the_domain_tags_differ_so_no_kind_verifies_as_another`
+(slot-store), `a_signature_over_the_bare_manifest_is_refused_as_a_bad_signature_under_a_known_key`.
+
+### When the signature is decided
+
+The signature policy is decided while the bundle comes, before any payload byte is written:
+
+- at the end of `slot.sig`, when the bundle is signed; or
+- at the first payload member (`rootfs.erofs` or a `boot/` entry), when it is not.
+
+So a bundle the policy refuses writes nothing: its work directory is empty and its root image is not
+begun. The board's own checks run at the same point (the manifest's `board` against the board id, and
+the slot id's form at `slot.json`). Tests: `a_refused_bundle_writes_nothing_and_the_root_image_is_not_consumed`,
+`slot_json_must_be_the_first_member`, `slot_sig_must_be_the_second_member`,
+`a_repeated_member_or_an_unknown_one_is_refused_by_name`.
+
+### What the signature binds
+
+The signature covers `slot.json`, so everything the bundle's other members are checked against is
+bound through it. Nothing else is trusted:
+
+| item | bound by | checked |
+|---|---|---|
+| the board | `board` | against the board file's `[board] id`, at the decision (before payload) |
+| the slot id | `id` | its form (`valid_id`) at `slot.json`; not already running or default |
+| the root image | `image.size`, `image.sha256` | its size and SHA-256 at `finish`, before the slot is put in place |
+| dm-verity | `verity.root_hash`, `salt`, `data_blocks`, `hash_offset` | the image size is the data plus its tree; the root hash goes in the command line |
+| each boot file | `boot.files`: path to SHA-256 | the file's SHA-256 (so its length too) at `finish`; a file the manifest does not list is refused at its header, before its bytes are written |
+| a listed member | `boot.files`, `image` | a listed member the bundle lacks is refused at `finish`, before the slot is put in place |
+| the kernel command line | `boot/cmdline.txt` (a listed file, so digested), `verity.root_hash`, `id`, the board's `boot_args` and PARTUUID | built only from those; no member outside the list reaches it |
+
+No member is installed unsigned: with the security switch off, an unsigned bundle installs as
+`not_checked_unsigned`, and then nothing in it is authenticated, its manifest included.
+
+### Manifest and members
+
+The manifest is checked in full at `slot.json` (`Manifest::parse`, `slot-store/src/manifest.rs`); a
+malformed one is refused before anything else arrives. Then each member is checked against it as above.
+Each member's bytes are hashed as they arrive; `finish` compares them with the digests before
+`boot::put` and the rename that puts the slot in place, and a bundle that differs is refused with
+nothing left behind.
 
 ### The manifest, schema 3
 
@@ -244,6 +310,12 @@ refusal is `NOT_PERMITTED` with the reason in `list`'s `error`, and nothing is i
 `info` shows the policy and the last install's signature result: `require_signed` (now always the security view's value, see "The security switch"), and
 `last_install` with `slot` (empty when refused), `signature` (the outcome, or `refused`), `signer`
 and `reason`. The install's job result is still the slot's id.
+
+A client learns the board's state from `info` before it sends a bundle: `require_signed` (the security switch's value, the
+policy), and `key_ids`, the keys the board holds, each as `{"id":"<64 hex: SHA-256 of the public key>",
+"owner":"<the key file's owner>"}`. A client picks the key it signs with by its id, and never sees a
+key. `key_ids` is appended last, so the fields before it are unchanged (additive; `info` stays within
+its 4 KiB buffer for a board with a few keys).
 
 With the security switch on, only bundles signed by a trusted key install. The switch is off by
 default: see "The security switch" below.

@@ -13,7 +13,6 @@ use lemnos_slot_store::signing::{self, Check, Outcome, Refusal};
 use sha2::{Digest, Sha256};
 
 use crate::boot::{self, hex};
-use crate::json::Json;
 use crate::manifest::Manifest;
 use crate::store::{Layout, Meta, valid_id};
 use crate::tar::{Kind, Sink, Tar};
@@ -148,8 +147,19 @@ struct Unpack {
     work: PathBuf,
     volume: Option<WorkVolume>,
     guard: Guard,
+    /// The board's keys and policy, given when the install started.
+    admit: Admit,
     manifest: Vec<u8>,
     signature: Vec<u8>,
+    /// slot.json as it parses, once it has come.
+    parsed: Option<Manifest>,
+    /// Every member begun, in order (directories included).
+    entries: Vec<String>,
+    /// The signature decision and the board's checks: made once, when the bundle first needs
+    /// it (the end of slot.sig, or the first payload member), and the same answer after.
+    decided: Option<Result<Outcome, Failure>>,
+    /// The decision's words for `info`: the outcome, or the refusal's text.
+    signed: Option<Result<Outcome, String>>,
     current: Option<(Member, Option<Writing>)>,
     /// Each file written, with its SHA-256.
     hashes: Vec<(String, String)>,
@@ -162,22 +172,103 @@ impl Unpack {
         self.failure.get_or_insert(failure);
         Err(text)
     }
+
+    /// The member's place in the bundle's order, refused by a sentence naming the rule.
+    fn order(&mut self, name: &str, kind: Kind) -> Result<Member, Failure> {
+        let what = if name == "boot" && kind == Kind::Dir {
+            Member::Boot
+        } else {
+            member(name).ok_or_else(|| {
+                bad(format!(
+                    "the bundle has {name}: only slot.json, slot.sig, rootfs.erofs and boot/"
+                ))
+            })?
+        };
+        if self.entries.is_empty() && what != Member::Manifest {
+            return Err(bad(format!(
+                "the bundle starts with {name}, and slot.json must be its first member: the order is slot.json, then slot.sig when the bundle is signed, then rootfs.erofs and boot/ in any order"
+            )));
+        }
+        if self.entries.iter().any(|seen| seen == name) {
+            return Err(bad(format!("the bundle has {name} twice")));
+        }
+        match what {
+            Member::Signature if self.entries.len() != 1 => Err(bad(
+                "slot.sig must be the bundle's second member, right after slot.json: the signature is decided before any payload is written",
+            )),
+            Member::Root | Member::Boot => {
+                // The first payload member: the signature and the board are decided now, so a
+                // refused bundle has written nothing and the root image is not consumed.
+                self.settle()?;
+                if what == Member::Boot && kind == Kind::File {
+                    let file = name.strip_prefix("boot/").unwrap_or(name);
+                    let listed = self
+                        .parsed
+                        .as_ref()
+                        .is_some_and(|m| m.boot_files.iter().any(|(l, _)| l == file));
+                    if !listed {
+                        return Err(bad(format!(
+                            "boot file {file} isn't in slot.json: a file the manifest does not list is refused"
+                        )));
+                    }
+                }
+                Ok(what)
+            }
+            _ => Ok(what),
+        }
+    }
+
+    /// The signature decision and the board's checks, made once.
+    fn settle(&mut self) -> Result<Outcome, Failure> {
+        if self.decided.is_none() {
+            let result = self.decide();
+            self.signed = Some(match &result {
+                Ok(outcome) => Ok(outcome.clone()),
+                Err((_, text)) => Err(text.clone()),
+            });
+            self.decided = Some(result);
+        }
+        self.decided
+            .clone()
+            .unwrap_or_else(|| Err(bad("the signature was not decided")))
+    }
+
+    fn decide(&self) -> Result<Outcome, Failure> {
+        let check = signature_check(&self.admit.keys, &self.manifest, &self.signature);
+        let outcome = match signing::decide(self.admit.require_signed, "the bundle", check) {
+            Ok(outcome) => outcome,
+            Err(Refusal::Malformed(text)) => return Err(bad(text)),
+            Err(Refusal::Policy(text)) => return Err((Status::NOT_PERMITTED, text)),
+        };
+        if self.admit.board_id.is_empty() {
+            return Err((
+                Status::NO_DEVICE,
+                "the board file has no [board] id to match a slot's board against".into(),
+            ));
+        }
+        let Some(parsed) = &self.parsed else {
+            return Err(bad("slot.json isn't a slot manifest"));
+        };
+        if parsed.board != self.admit.board_id {
+            return Err((
+                Status::NOT_SUPPORTED,
+                format!(
+                    "this slot is built for board {}, and this is board {}",
+                    parsed.board, self.admit.board_id
+                ),
+            ));
+        }
+        Ok(outcome)
+    }
 }
 
 impl Sink for Unpack {
     fn begin(&mut self, name: &str, kind: Kind, size: u64) -> Result<(), String> {
-        if name == "boot" && kind == Kind::Dir {
-            self.current = Some((Member::Boot, None));
-            return fs::create_dir_all(self.work.join("boot")).map_err(|e| e.to_string());
-        }
-        let Some(what) = member(name) else {
-            return self.fail(bad(format!(
-                "the bundle has {name}: only slot.json, slot.sig, rootfs.erofs and boot/"
-            )));
+        let what = match self.order(name, kind) {
+            Ok(what) => what,
+            Err(failure) => return self.fail(failure),
         };
-        if self.hashes.iter().any(|(n, _)| n == name) {
-            return self.fail(bad(format!("the bundle has {name} twice")));
-        }
+        self.entries.push(name.to_string());
         match (what, kind) {
             (Member::Boot, Kind::Dir) => {
                 self.current = Some((what, None));
@@ -269,15 +360,22 @@ impl Sink for Unpack {
     fn end(&mut self) -> Result<(), String> {
         match self.current.take() {
             Some((Member::Manifest, _)) => {
-                // Refused as soon as it says what it is, not after the image has come.
-                let id = core::str::from_utf8(&self.manifest)
-                    .ok()
-                    .and_then(Json::parse)
-                    .and_then(|json| json.get("id").and_then(Json::text).map(str::to_string));
-                let Some(id) = id else {
-                    return self.fail(bad("slot.json isn't a slot manifest"));
+                let parsed = match core::str::from_utf8(&self.manifest) {
+                    Ok(text) => Manifest::parse(text).map_err(bad),
+                    Err(_) => Err(bad("slot.json isn't text")),
                 };
-                if let Err(failure) = self.guard.check(&id) {
+                let parsed = match parsed {
+                    Ok(parsed) => parsed,
+                    Err(failure) => return self.fail(failure),
+                };
+                if let Err(failure) = self.guard.check(&parsed.id) {
+                    return self.fail(failure);
+                }
+                self.parsed = Some(parsed);
+            }
+            Some((Member::Signature, _)) => {
+                // The signature is complete: decided now, before any payload member begins.
+                if let Err(failure) = self.settle() {
                     return self.fail(failure);
                 }
             }
@@ -296,7 +394,7 @@ impl Sink for Unpack {
 
 /// What `slot.sig` shows, as the shared policy takes it: the signature record names its key by
 /// id (SHA-256 of the public key). A key the board holds is checked; any other is unknown. The
-/// signed message is the manifest's exact bytes.
+/// signed message is `lemnos_slot_store::signing::slot_bundle_message` over the manifest's bytes.
 fn signature_check<'a>(keys: &'a [TrustedKey], manifest: &[u8], signature: &[u8]) -> Check<'a> {
     if signature.is_empty() {
         return Check::Unsigned;
@@ -312,7 +410,8 @@ fn signature_check<'a>(keys: &'a [TrustedKey], manifest: &[u8], signature: &[u8]
         return Check::UnknownKey;
     };
     let signature = Signature::from_bytes(&record.signature);
-    if trusted.key.verify_strict(manifest, &signature).is_ok() {
+    let message = signing::slot_bundle_message(manifest);
+    if trusted.key.verify_strict(&message, &signature).is_ok() {
         Check::Verified {
             owner: &trusted.owner,
         }
@@ -323,19 +422,26 @@ fn signature_check<'a>(keys: &'a [TrustedKey], manifest: &[u8], signature: &[u8]
     }
 }
 
+/// The board's keys and policy an install is admitted by. Given when the install starts, so the
+/// signature is decided as the bundle comes, before any payload byte is written.
+#[derive(Debug, Clone, Default)]
+pub struct Admit {
+    /// The keys the board trusts.
+    pub keys: Vec<TrustedKey>,
+    /// Refuse a bundle the signature table refuses (unsigned, or signed by a key the board does
+    /// not trust). Off, such a bundle installs and its slot shows as untrusted or unsigned.
+    pub require_signed: bool,
+    /// The board file's `[board] id`: a slot built for another board is refused.
+    pub board_id: String,
+}
+
 /// What finishing needs from the board.
 pub struct Finish<'a> {
     pub layout: &'a Layout,
-    pub keys: &'a [TrustedKey],
-    /// Refuse a bundle not signed by a trusted key. Off, such a bundle installs and its slot
-    /// shows as untrusted or unsigned.
-    pub require_signed: bool,
     pub boot_args: &'a str,
     /// The board's `boot_sources` entries (`source=path`): the bundle's command line must carry
     /// `<boot_args>.src.<entry>` for each.
     pub boot_sources: &'a [String],
-    /// The board file's `[board] id`: a slot built for another board is refused.
-    pub board_id: &'a str,
     pub guard: Guard,
     /// The board's boot record, which may add its own files to the slot's boot directory.
     pub record: &'a dyn crate::boot::BootRecord,
@@ -353,8 +459,8 @@ pub struct Install {
     unpack: Unpack,
     /// How it ended: the slot's id, or why not.
     pub end: Option<Result<String, Failure>>,
-    /// The signature policy's result for this bundle, once `finish` reached it: the outcome, or
-    /// the refusal's text.
+    /// The signature policy's result for this bundle, once it was decided (at the end of slot.sig,
+    /// or at the first payload member, or at `finish`): the outcome, or the refusal's text.
     pub signed: Option<Result<Outcome, String>>,
     /// The bundle's file in `.incoming`, for an install from a file: read on the driver's ticks,
     /// and deleted when the install ends.
@@ -454,6 +560,7 @@ impl Install {
         pin: bool,
         keep_old: bool,
         guard: Guard,
+        admit: Admit,
         writer: Option<Arc<dyn UbiWrite>>,
     ) -> Result<Self, Failure> {
         let work = layout.images().join(format!("{WORK_PREFIX}{}", job.0));
@@ -483,8 +590,13 @@ impl Install {
                 work,
                 volume,
                 guard,
+                admit,
                 manifest: Vec::new(),
                 signature: Vec::new(),
+                parsed: None,
+                entries: Vec::new(),
+                decided: None,
+                signed: None,
                 current: None,
                 hashes: Vec::new(),
                 failure: None,
@@ -507,7 +619,9 @@ impl Install {
         if after > self.size {
             return Err(bad(format!("more than the {} bytes announced", self.size)));
         }
-        if let Err(text) = self.tar.feed(bytes, &mut self.unpack) {
+        let fed = self.tar.feed(bytes, &mut self.unpack);
+        self.signed = self.unpack.signed.clone();
+        if let Err(text) = fed {
             return Err(self.unpack.failure.take().unwrap_or_else(|| bad(text)));
         }
         self.got = after;
@@ -527,38 +641,16 @@ impl Install {
         if self.unpack.manifest.is_empty() {
             return Err(bad("not a slot bundle: no slot.json"));
         }
-        // The signature is decided before anything else is looked at, and before anything is
-        // written to the slot's place. The policy is the shared table in `lemnos_slot_store`.
-        let check = signature_check(board.keys, &self.unpack.manifest, &self.unpack.signature);
-        let decided = signing::decide(board.require_signed, "the bundle", check);
-        self.signed = Some(match &decided {
-            Ok(outcome) => Ok(outcome.clone()),
-            Err(refusal) => Err(refusal.to_string()),
-        });
-        let outcome = decided.map_err(|refusal| match refusal {
-            Refusal::Malformed(text) => bad(text),
-            Refusal::Policy(text) => (Status::NOT_PERMITTED, text),
-        })?;
+        // The signature and the board were decided as the bundle came (before any payload byte);
+        // a bundle with no payload is decided here, as unsigned or by its slot.sig.
+        let decided = self.unpack.settle();
+        self.signed = self.unpack.signed.clone();
+        let outcome = decided?;
         let unpack = &self.unpack;
-        // From here the manifest says what everything else must be.
-        let text =
-            core::str::from_utf8(&unpack.manifest).map_err(|_| bad("slot.json isn't text"))?;
-        let manifest = Manifest::parse(text).map_err(bad)?;
-        if board.board_id.is_empty() {
-            return Err((
-                Status::NO_DEVICE,
-                "the board file has no [board] id to match a slot's board against".into(),
-            ));
-        }
-        if manifest.board != board.board_id {
-            return Err((
-                Status::NOT_SUPPORTED,
-                format!(
-                    "this slot is built for board {}, and this is board {}",
-                    manifest.board, board.board_id
-                ),
-            ));
-        }
+        let manifest = unpack
+            .parsed
+            .clone()
+            .ok_or_else(|| bad("slot.json isn't a slot manifest"))?;
         let id = manifest.id.clone();
         board.guard.check(&id)?;
         let root_hash = manifest.verity.root_hash.as_str();
