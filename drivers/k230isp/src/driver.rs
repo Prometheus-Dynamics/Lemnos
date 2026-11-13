@@ -211,9 +211,9 @@ pub(crate) fn take_returned(stream: &mut StreamHandle, mask: &mut u64) -> Result
 /// The ISP, behind `vvcam-isp` or through `lemnos.ko`'s configuration role, as `camera.isp/1`.
 #[driver("k230isp", provides = [CameraIsp])]
 pub struct K230Isp {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs]
+    #[needs(job)]
     statistics: StreamHandle,
     hw: Box<dyn Hardware>,
     state: State,

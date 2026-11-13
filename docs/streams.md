@@ -113,15 +113,39 @@ reader gets it from the batch's `time`, and `lemnos-client` from the frame.
 The consumer reads the buffer, then releases it (dropping the frame it took). A buffer the
 consumer holds is not written by anyone else.
 
-**The kind of stream.** Who makes the frames is declared by the board author with `kind` in
-`[devices.streams.NAME]`, and the reclaim rule below is a function of it:
+**The kind of stream.** Who makes the frames is declared by the driver that serves the stream,
+with its need (`#[needs(free)]` or `#[needs(job)]` in the driver's `#[driver]` struct, where a
+stream need without one does not compile). The host takes the kind from there, and the reclaim
+rule below is a function of it. A board file does not choose it: a `kind` key in
+`[devices.streams.NAME]` is accepted only when it agrees with the driver, and one that contradicts
+it refuses the board by name (`stream `statistics` of driver `pisp-fe` is job-driven; the board file says free-running``).
 
-- `kind = "free-running"` (the default): the frames arrive whether or not anyone reads them (a
-  camera, a receiver, a front end's statistics). The rule for these is the replacement rule and
+- **free-running** (`#[needs(free)]`): the frames arrive whether or not anyone reads them (a
+  camera, a receiver, a USB or UVC frame stream). The rule for these is the replacement rule and
   the margin below.
-- `kind = "job"`: each frame is the result of a job the consumer posted (a memory-to-memory
-  device's output, an encoder, a scaler, the config and input of a job-driven block). See
-  "Job-driven streams" below.
+- **job** (`#[needs(job)]`): each frame is the result of a job the consumer posted, or a job's
+  input (a memory-to-memory device's output, an encoder, a scaler, an ISP's config, statistics and
+  output, a front end's or back end's config, input and output, a USB transfer's result, sensor
+  values). See "Job-driven streams" below.
+
+Each in-tree driver's streams, and the kind its write path gives them:
+
+| driver | stream | kind | why |
+|---|---|---|---|
+| `k230-capture` | `frames` | free | the module's frames, published as the block fills them |
+| `rkcif` | `frames`, `embedded` | free | the vendor capture's frames and their embedded lines, per frame |
+| `rp1-csi2` | `frames`, `embedded` | free | the kernel module's frames and embedded lines, per frame |
+| `sunxi-vin` | `frames` | free | the stock capture node's frames, through the shared pump |
+| `uvc` | `frames` | free | the camera's frames, as the device sends them |
+| `pisp-fe` | `config`, `statistics`, `output0`, `output1` | job | a job's config; each statistics and output is lent per job and published with its identity |
+| `pisp-be` | `config`, `input`, `output0`, `output1` | job | a job's config and input; each output is the job's result |
+| `isp600`, `rkisp`, `k230isp` | `config`, `statistics`, `output0`, `output1` (where present) | job | each frame is a job's result, published with that job's identity |
+| `g2d`, `nonai2d`, `rkvpss`, `rga`, `vglite` | `jobs` (and `scale`, `convert`, `blend`) | job | jobs are posted on the stream and each result is published on its completion |
+| `a733-di`, `a733-video`, `m2m-decode`, `k230-vpu`, `rk-iep`, `rknpu`, `rk-mpp-codec`, `vip9000` | `jobs` | job | codec and NPU jobs served by the shared job server; a result per job |
+| `usb-gadget` | `data` | job | each received transfer or event is published with the job it answers |
+| `ov9782` | `values` | job | the consumer posts values as jobs; the driver applies each one |
+
+A stream with a `kind` in its board file is refused unless it agrees with this table.
 
 **The replacement rule, for a free-running stream.** A buffer the consumer has read and let go goes back to the driver as
 soon as the driver asks for one: nothing is lost. A frame the consumer has not read yet stays in
@@ -137,7 +161,7 @@ a frame the consumer has read and let go counts as taken, and one it has not rea
 unread, whatever the consumer holds of other buffers. Nothing else makes an unread frame
 reclaimable.
 
-**Job-driven streams.** On a `kind = "job"` stream an unread frame is never replaced, whatever the
+**Job-driven streams.** On a job stream an unread frame is never replaced, whatever the
 driver's working set. Each frame is a result the consumer posted a job for, so replacing it loses
 the consumer's work. The pressure goes the other way: a job whose output has no free buffer is not
 started. The driver's ask finds none and the refusal is counted in `refused` (the stream's stats).

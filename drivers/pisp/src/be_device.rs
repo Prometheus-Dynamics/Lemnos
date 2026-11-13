@@ -227,13 +227,13 @@ enum Image {
 /// The PiSP back end.
 #[driver("pisp-be", provides = [CameraIsp, IspPisp])]
 pub struct PispBe {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs]
+    #[needs(job)]
     input: StreamHandle,
-    #[needs]
+    #[needs(job)]
     output0: StreamHandle,
-    #[needs(optional)]
+    #[needs(optional, job)]
     output1: Option<StreamHandle>,
     hw: Box<dyn Hardware>,
     options: Options,

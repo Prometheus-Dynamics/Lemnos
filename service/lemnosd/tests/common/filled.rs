@@ -38,11 +38,11 @@ pub trait Filled {
 
 #[driver("filled", provides = [Filled])]
 pub struct FilledDriver {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs]
+    #[needs(job)]
     input: StreamHandle,
-    #[needs]
+    #[needs(job)]
     output: StreamHandle,
     key: [u8; KEY],
     image: Box<[u8; IMAGE]>,

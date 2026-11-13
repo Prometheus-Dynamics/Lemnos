@@ -29,7 +29,8 @@ pub trait Emitting {
 
 #[driver("emitter", provides = [Emitting])]
 pub struct Emitter {
-    #[needs]
+    /// Publishes a frame each time `emit` is called, with no job behind it: free-running.
+    #[needs(free)]
     frames: StreamHandle,
 }
 

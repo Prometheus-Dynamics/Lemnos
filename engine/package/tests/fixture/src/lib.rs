@@ -124,7 +124,8 @@ pub struct Fixture {
     clocks: Option<ClocksHandle>,
     #[needs(optional)]
     reset: Option<ResetHandle>,
-    #[needs(optional)]
+    /// Its exercise publishes frames with no job behind them (step 4): free-running.
+    #[needs(optional, free)]
     stream: Option<StreamHandle>,
     /// The DMA buffer and the stream buffer `exercise` took last.
     dma_buffer: u32,

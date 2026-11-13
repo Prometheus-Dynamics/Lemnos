@@ -137,7 +137,7 @@ The streams a consumer opens, by device, with who writes each one:
 |---|---|---|---|---|
 | receiver (`rp1-csi2`) | `frames` | out | the receiver: packed RAW10 or RAW8 frames | 8 of 1280000 bytes, dma-buf (CMA) |
 | front end (`pisp-fe`) | `config` | in | the consumer: one configuration per job | 8 of 632 bytes, the job names one |
-| front end | `statistics` | out | the front end: AWB, AGC and focus statistics per frame | 8 of 23200 bytes, dma-buf |
+| front end | `statistics` | out | the front end: AWB, AGC and focus statistics, a job's result (declared `job` by the driver) | 8 of 23200 bytes, dma-buf |
 | front end | `output0` | out | the front end: the frame, 16-bit Bayer, from the job | 4 of 2052096 bytes, dma-buf |
 | front end | `output1` | out | the front end: a half-size Bayer frame, when the job turns it on | 4 of 516096 bytes, dma-buf |
 | back end (`pisp-be`) | `config` | in | the consumer: one configuration per job | 2 of 16720 bytes (`job_slots` 8) |

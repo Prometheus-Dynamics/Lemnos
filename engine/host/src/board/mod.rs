@@ -170,15 +170,30 @@ pub enum StreamMemory {
 /// A job-driven stream's frames are the results of jobs the consumer posted (a memory-to-memory
 /// device's outputs, an encoder, a scaler). An unread result is never replaced: a producer with no
 /// free buffer does not start the next job, and that is counted in `refused`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-pub enum StreamKind {
-    /// The frames arrive on their own. The default.
-    #[default]
+pub use lemnos_core::StreamKind;
+
+/// A `kind` a board file states for a stream. It must agree with the kind the driver declares
+/// (`resolve_kinds`); the board file does not choose the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum KindKey {
     #[serde(rename = "free-running")]
     FreeRunning,
-    /// Each frame is the result of a job the consumer posted.
     #[serde(rename = "job")]
     JobDriven,
+}
+
+fn kind_word(kind: StreamKind) -> &'static str {
+    match kind {
+        StreamKind::FreeRunning => "free-running",
+        StreamKind::JobDriven => "job-driven",
+    }
+}
+
+fn key_word(key: KindKey) -> &'static str {
+    match key {
+        KindKey::FreeRunning => "free-running",
+        KindKey::JobDriven => "job-driven",
+    }
 }
 
 /// The heap a stream of dma-bufs comes from when its board file names none.
@@ -218,10 +233,63 @@ pub struct StreamSpec {
     /// is `buffers - 1 - working` frames (`docs/streams.md`, "The margin"). Less than `buffers`.
     #[serde(default)]
     pub working: u32,
-    /// Who makes the frames: `"free-running"` when left out, or `"job"` for the results of jobs
-    /// the consumer posted. It decides what the producer may take back (see [`StreamKind`]).
-    #[serde(default)]
-    pub kind: StreamKind,
+    /// A `kind` the board file states, which must agree with the driver's declaration. Left
+    /// out is the usual case: the driver says who makes the frames.
+    #[serde(default, rename = "kind")]
+    pub declared_kind: Option<KindKey>,
+    /// Who makes the frames, as the driver that serves the stream declares it. Set when the board
+    /// is resolved against its drivers (`resolve_kinds`); `None` for a stream no driver serves.
+    #[serde(skip)]
+    pub kind: Option<StreamKind>,
+}
+
+/// Sets each stream's kind from the driver that serves it. A stream a driver names takes that
+/// driver's declared kind, and a `kind` the board states must agree with it, or the board is
+/// refused by name. A stream whose driver declares no kind (a packaged driver's) is refused too.
+pub(crate) fn resolve_kinds(
+    driver: &str,
+    manifest: Option<&lemnos_core::Manifest>,
+    streams: &mut BTreeMap<String, StreamSpec>,
+) -> Result<(), BoardError> {
+    for (name, stream) in streams.iter_mut() {
+        let need = manifest.and_then(|m| {
+            m.needs.iter().find(|n| {
+                n.name == name
+                    && matches!(
+                        n.kind,
+                        lemnos_core::NeedKind::Bus(lemnos_core::BusKind::Stream)
+                    )
+            })
+        });
+        let Some(need) = need else {
+            // No driver here serves this stream: nothing produces it, so no kind is needed.
+            continue;
+        };
+        let Some(declared) = need.stream else {
+            return Err(BoardError::Host(
+                "streams",
+                format!("stream `{name}` of driver `{driver}` declares no kind in its package"),
+            ));
+        };
+        if let Some(key) = stream.declared_kind {
+            let key_kind = match key {
+                KindKey::FreeRunning => StreamKind::FreeRunning,
+                KindKey::JobDriven => StreamKind::JobDriven,
+            };
+            if key_kind != declared {
+                return Err(BoardError::Host(
+                    "streams",
+                    format!(
+                        "stream `{name}` of driver `{driver}` is {}; the board file says {}",
+                        kind_word(declared),
+                        key_word(key)
+                    ),
+                ));
+            }
+        }
+        stream.kind = Some(declared);
+    }
+    Ok(())
 }
 
 const fn default_job_slots() -> u32 {

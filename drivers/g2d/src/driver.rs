@@ -75,7 +75,7 @@ pub type Opener = Box<dyn FnMut() -> io::Result<BoxedEngine> + Send>;
 /// The G2D engine as `image.convert/1`.
 #[driver("g2d", provides = [ImageConvert])]
 pub struct G2dDriver {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     converter: Converter<BoxedEngine, Opener>,
     /// Stream errors in a row.

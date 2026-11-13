@@ -3,8 +3,9 @@
 
 use std::sync::Arc;
 
-use lemnos_core::CallerId;
-use lemnos_fake_devices::FakeCounter;
+use lemnos_core::{
+    BusKind, CallerId, Config, Driver, Manifest, Need, NeedKind, Resources, Result, StreamKind,
+};
 use lemnos_hal::StreamEndpoint;
 use lemnos_hal::blocks::StreamFrame;
 use lemnos_host::board::parse;
@@ -12,21 +13,52 @@ use lemnos_host::{Host, Options, entry};
 use lemnos_sim::SimBoard;
 
 const CONSUMER: CallerId = CallerId(7);
+
+/// A driver that serves `frames` as a job-driven stream: the kind is its declaration, which the
+/// board file does not state.
+struct JobSource;
+
+impl Driver for JobSource {
+    const MANIFEST: Manifest = Manifest {
+        name: "job-source",
+        needs: &[Need {
+            name: "frames",
+            kind: NeedKind::Bus(BusKind::Stream),
+            optional: true,
+            stream: Some(StreamKind::JobDriven),
+        }],
+        provides: &[],
+    };
+
+    fn bind(_: &mut Resources<'_>, _: &Config<'_>) -> Result<Self> {
+        Ok(Self)
+    }
+
+    fn describe(&self, _: &mut lemnos_core::Description) {}
+
+    fn dispatch(
+        &mut self,
+        _: lemnos_core::MethodId,
+        _: &[u8],
+        _: &mut lemnos_core::Reply<'_>,
+    ) -> lemnos_core::Status {
+        lemnos_core::Status::NOT_SUPPORTED
+    }
+}
 const FRAME: usize = 64;
 const PERIODS: u64 = 3000;
 
 fn start(buffers: u32) -> Host {
     let text = format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
-         [[devices]]\nid = \"a\"\ndriver = \"fake-counter\"\n\
-         [devices.streams.frames]\nbuffers = {buffers}\nbuffer_bytes = {FRAME}\njob_slots = 2\njob_bytes = 16\n\
-         kind = \"job\"\n"
+         [[devices]]\nid = \"a\"\ndriver = \"job-source\"\n\
+         [devices.streams.frames]\nbuffers = {buffers}\nbuffer_bytes = {FRAME}\njob_slots = 2\njob_bytes = 16\n"
     );
     let sim = SimBoard::new();
     let clock = sim.clock();
     Host::start(
         &parse(&text).unwrap(),
-        &[entry::<FakeCounter>()],
+        &[entry::<JobSource>()],
         Box::new(sim),
         Arc::new(clock),
         Options::default(),

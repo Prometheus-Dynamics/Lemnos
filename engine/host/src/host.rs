@@ -14,7 +14,7 @@ use lemnos_core::{
     UsbFunctionHandle, Watchdog,
 };
 
-use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner};
+use crate::board::{BoardError, BoardFile, DeviceSpec, EachSpec, OwnedValue, Owner, resolve_kinds};
 use crate::contain::{Lane, LaneError, Work};
 use crate::stream::{
     Lease, MemfdAllocator, ProducerEndpoint, StreamAllocator, StreamMemory, StreamStats, Streams,
@@ -1121,8 +1121,18 @@ impl Inner {
 
     /// Makes the device `rule` has for `found`, and binds it.
     fn make(&'static self, at: usize, rule: &Rule, found: String) {
-        let spec = rule.spec.device(&found);
+        let mut spec = rule.spec.device(&found);
         let entry = self.drivers.get(spec.driver.as_str()).copied();
+        // Checked at start for the template; a made device takes the same kinds.
+        if resolve_kinds(
+            &spec.driver,
+            entry.as_ref().map(|e| &e.manifest),
+            &mut spec.streams,
+        )
+        .is_err()
+        {
+            return;
+        }
         let slot = {
             let mut slots = self.slots.write().unwrap_or_else(PoisonError::into_inner);
             let index = slots.len() as u32;
@@ -2167,8 +2177,28 @@ impl Host {
             .iter()
             .map(|driver| (driver.manifest.name, *driver))
             .collect();
-        let mut slots = Vec::with_capacity(board.devices.len());
-        for (index, spec) in board.devices.iter().enumerate() {
+        // Each device's streams take the kinds its driver declares (`resolve_kinds`), so a board
+        // file that contradicts a driver is refused here, by name.
+        let mut devices = board.devices.clone();
+        for spec in &mut devices {
+            let entry = table.get(spec.driver.as_str()).copied();
+            resolve_kinds(
+                &spec.driver,
+                entry.as_ref().map(|e| &e.manifest),
+                &mut spec.streams,
+            )?;
+        }
+        for each in &board.each {
+            let entry = table.get(each.driver.as_str()).copied();
+            let mut streams = each.streams.clone();
+            resolve_kinds(
+                &each.driver,
+                entry.as_ref().map(|e| &e.manifest),
+                &mut streams,
+            )?;
+        }
+        let mut slots = Vec::with_capacity(devices.len());
+        for (index, spec) in devices.iter().enumerate() {
             let entry = table.get(spec.driver.as_str()).copied();
             slots.push(Arc::new(Slot::new(
                 index as u32,
@@ -2188,7 +2218,7 @@ impl Host {
             })
             .collect();
 
-        let streams = Streams::new(allocator, &board.devices);
+        let streams = Streams::new(allocator, &devices);
 
         // Lives as long as the process: drivers hold plain references to it.
         // `shutdown` lets every device go.

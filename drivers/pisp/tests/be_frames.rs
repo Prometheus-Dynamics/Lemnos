@@ -26,7 +26,6 @@ use lemnos_driver_pisp::format::{compute_stride_align, formats};
 use lemnos_driver_pisp::uapi::{BayerOrder as Order, BeTilesConfig, ImageFormatConfig, Wire};
 use lemnos_driver_pisp::{BeOptions as Options, PispBe, PispBeNeeds};
 use lemnos_driver_pisp_sys::CONFIG_BYTES;
-use lemnos_fake_devices::FakeCounter;
 use lemnos_host::board::parse;
 use lemnos_host::stream::{Buffers, MemfdAllocator, StreamAllocator};
 use lemnos_host::{DeviceState, Host, Options as HostOptions, entry};
@@ -35,6 +34,26 @@ use lemnos_measure::test_alloc::allocations;
 use lemnos_sim::SimBoard;
 use lemnos_wire::Planes;
 use lemnos_wire::ring::{Consumer, Layout, STATE_FAULT};
+
+/// The driver's entry with its real manifest, so each stream's kind is the one the driver declares.
+/// The device is never bound (this binder refuses), so the test drives the driver itself.
+struct NeverBinds;
+
+impl lemnos_host::Binder for NeverBinds {
+    fn bind(
+        &self,
+        _: &mut lemnos_core::Resources<'_>,
+        _: &lemnos_core::Config<'_>,
+    ) -> lemnos_core::Result<Box<dyn lemnos_host::Instance>> {
+        Err(lemnos_core::Status::NOT_SUPPORTED)
+    }
+}
+
+static NEVER_BINDS: NeverBinds = NeverBinds;
+
+fn declared<D: lemnos_core::Driver>() -> lemnos_host::DriverEntry {
+    lemnos_host::DriverEntry::bound_by(D::MANIFEST, false, false, &NEVER_BINDS)
+}
 
 #[global_allocator]
 static ALLOCATOR: lemnos_measure::test_alloc::Counting = lemnos_measure::test_alloc::Counting;
@@ -101,11 +120,11 @@ impl StreamAllocator for Handles {
 fn board(input_memory: &str, output_memory: &str) -> String {
     format!(
         "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
-         [[devices]]\nid = \"isp\"\ndriver = \"fake-counter\"\n\
+         [[devices]]\nid = \"isp\"\ndriver = \"pisp-be\"\nconfig = {{ device = \"none\" }}\n\
          [devices.streams.config]\nbuffers = 2\nbuffer_bytes = {CONFIG_BYTES}\n\
          job_slots = 8\njob_bytes = 128\n\
          [devices.streams.input]\nbuffers = {BUFFERS}\nbuffer_bytes = {INPUT_BYTES}\n{input_memory}\n\
-         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\nkind = \"job\"\n\
+         [devices.streams.output0]\nbuffers = {BUFFERS}\nbuffer_bytes = {OUTPUT_BYTES}\n\
          {output_memory}\n"
     )
 }
@@ -115,7 +134,7 @@ fn host_with(text: &str) -> Host {
     let clock = sim.clock();
     Host::start_with_streams(
         &parse(text).unwrap(),
-        &[entry::<FakeCounter>()],
+        &[declared::<PispBe>()],
         Box::new(sim),
         Arc::new(clock),
         HostOptions::default(),

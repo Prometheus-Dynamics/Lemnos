@@ -262,7 +262,7 @@ pub struct Ov9782 {
     #[needs]
     bus: I2c,
     /// Jobs carrying `FrameValues`, from the consumer. Absent when the board gives no stream.
-    #[needs(optional)]
+    #[needs(optional, job)]
     values: Option<StreamHandle>,
     /// The receiver the board links this sensor to. Asked once, at bind, whether it is wired to
     /// this sensor ([`LinkCheck`]); kept so the link stays in the board's hands.

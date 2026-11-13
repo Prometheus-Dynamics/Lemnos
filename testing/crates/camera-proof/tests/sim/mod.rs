@@ -620,10 +620,10 @@ struct Run {
 
 #[driver("sim-receiver", provides = [CameraReceiver])]
 pub struct SimReceiver {
-    #[needs]
+    #[needs(free)]
     frames: StreamHandle,
     /// The embedded-data stream, when the board gives the receiver one.
-    #[needs(optional)]
+    #[needs(optional, free)]
     embedded: Option<StreamHandle>,
     configured: Option<LinkConfig>,
     layout: Option<FrameLayout>,

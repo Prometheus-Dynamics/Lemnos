@@ -279,13 +279,13 @@ struct InFlight {
 /// The PiSP front end.
 #[driver("pisp-fe", provides = [CameraIsp, IspPisp])]
 pub struct PispFe {
-    #[needs]
+    #[needs(job)]
     config: StreamHandle,
-    #[needs(optional)]
+    #[needs(optional, job)]
     statistics: Option<StreamHandle>,
-    #[needs(optional)]
+    #[needs(optional, job)]
     output0: Option<StreamHandle>,
-    #[needs(optional)]
+    #[needs(optional, job)]
     output1: Option<StreamHandle>,
     /// The ISP the board feeds this front end to (`link` on the front end): the back end.
     #[link]

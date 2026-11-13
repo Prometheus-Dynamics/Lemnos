@@ -126,7 +126,9 @@ impl StreamCore {
             pool: BufferPool::new(layout.buffers),
             layout,
             working: spec.working,
-            kind: spec.kind,
+            // Set from the driver that serves the stream (`board::resolve_kinds`); a stream no
+            // driver serves has no producer, so its kind does not matter.
+            kind: spec.kind.unwrap_or(StreamKind::FreeRunning),
             memory: spec.memory,
             heap: spec.heap_name().into(),
             planes,

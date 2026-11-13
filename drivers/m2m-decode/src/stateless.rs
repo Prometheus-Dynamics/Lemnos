@@ -590,7 +590,7 @@ pub type BoxedBlock = Box<dyn Block + Send>;
 /// Nothing is opened at bind.
 #[driver("v4l2-stateless", provides = [CodecBlock])]
 pub struct M2mCodec {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     block: BoxedBlock,
     server: Server,

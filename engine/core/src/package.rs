@@ -690,10 +690,13 @@ pub fn manifest_in(
         if need.name.as_str().is_empty() {
             return Err("a need has no name");
         }
+        // A packaged driver's stream kind is not in its package table yet: a stream it serves
+        // without one is refused by name when the board file is checked (`engine/host`).
         needs.push(Need {
             name: need.name.as_str(),
             kind,
             optional: need.optional != 0,
+            stream: None,
         });
     }
     if manifest.provides.as_slice().len() > usize::from(u8::MAX) {

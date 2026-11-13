@@ -294,7 +294,7 @@ pub type BoxedBlock = Box<dyn Block + Send>;
 /// opened at bind.
 #[driver("a733-di", provides = [CodecBlock])]
 pub struct A733Di {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     block: BoxedBlock,
     server: Server,

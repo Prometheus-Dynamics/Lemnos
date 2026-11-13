@@ -82,7 +82,7 @@ pub const STREAM_FAILED: &str = "the job stream failed: trying it again";
 /// The IEP2 deinterlacer as `codec.block/1`.
 #[driver("rk-iep", provides = [CodecBlock])]
 pub struct RkIep {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     block: IepBlock<BoxedDevice>,
     server: Server,

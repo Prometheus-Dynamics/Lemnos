@@ -150,14 +150,14 @@ enum State {
 #[driver("rp1-csi2", provides = [CameraReceiver])]
 pub struct Rp1Csi2 {
     /// Where frames go: the board's `frames` stream on this device.
-    #[needs(optional)]
+    #[needs(optional, free)]
     frames: Option<StreamHandle>,
     /// The ISP the board feeds this receiver to (`link` on the receiver): the front end on a
     /// PiSP block. Resolved at bind, where the host checks it serves `camera.isp/1`.
     #[link]
     _isp: Option<Dev<dyn CameraIsp>>,
     /// Where the embedded data goes, when the board declares an `embedded` stream on the device.
-    #[needs(optional)]
+    #[needs(optional, free)]
     embedded: Option<StreamHandle>,
     /// The bytes of each embedded line (`config.embedded_bytes`), with `embedded`.
     embedded_bytes: u32,

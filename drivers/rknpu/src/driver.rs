@@ -108,7 +108,7 @@ pub enum Closed {
 /// The Rockchip NPU as `npu/1`.
 #[driver("rknpu", provides = [Npu])]
 pub struct Rknpu {
-    #[needs]
+    #[needs(job)]
     jobs: StreamHandle,
     service: Service<Node>,
     claim: Option<Claim<Node>>,

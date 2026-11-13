@@ -199,13 +199,13 @@ fn nth<T>(mut items: impl Iterator<Item = T>, index: u16) -> Result<T> {
 #[driver("rga", provides = [ImageScaler, ImageConvert, ImageBlend])]
 pub struct Rga {
     /// `image.scaler/1` jobs.
-    #[needs(optional)]
+    #[needs(optional, job)]
     scale: Option<StreamHandle>,
     /// `image.convert/1` jobs.
-    #[needs(optional)]
+    #[needs(optional, job)]
     convert: Option<StreamHandle>,
     /// `image.blend/1` jobs.
-    #[needs(optional)]
+    #[needs(optional, job)]
     blend: Option<StreamHandle>,
     soc: caps::Soc,
     lanes: [Lane; 3],
