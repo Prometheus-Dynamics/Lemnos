@@ -10,8 +10,11 @@ workspace = true
 
 [dependencies]
 lemnos-core = { path = "../../engine/core" }
+lemnos-driver-hw-watchdog-sys = { path = "../hw-watchdog-sys" }
 
 [dev-dependencies]
+lemnos-host = { path = "../../engine/host" }
+lemnos-sim = { path = "../../backends/sim" }
 lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
 
 [package.metadata.lemnos]

@@ -372,6 +372,11 @@ pub struct DeviceSpec {
     /// out, it is retried forever, which is the failure rule.
     #[serde(default)]
     pub auto_off_after: Option<u32>,
+    /// Makes this device the daemon's keep-alive, such as a hardware watchdog. Its ticks run only
+    /// while the host's [`Liveness`](crate::Liveness) says the daemon is healthy, so the device
+    /// stops being fed when the daemon is not. Left out, it is an ordinary device.
+    #[serde(default)]
+    pub keepalive: bool,
 }
 
 /// One device for each resource the backend finds that fits a pattern: a USB camera of any make
@@ -440,6 +445,7 @@ impl EachSpec {
             owner: self.owner,
             streams: self.streams.clone(),
             auto_off_after: self.auto_off_after,
+            keepalive: false,
         }
     }
 }

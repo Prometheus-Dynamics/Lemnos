@@ -11,6 +11,7 @@ mod clock;
 mod conn;
 mod events;
 pub mod gadget;
+mod liveness;
 mod notify;
 pub mod packages;
 pub mod privilege;
@@ -31,10 +32,11 @@ use std::time::Duration;
 
 use lemnos_core::{HintSource, Provider};
 use lemnos_host::board::BoardFile;
-use lemnos_host::{DriverEntry, Host, HostError, Options};
+use lemnos_host::{DriverEntry, Host, HostError, Liveness as HostLiveness, Options};
 
 use clock::MonotonicClock;
 use conn::{Conn, Waker};
+use liveness::DaemonLiveness;
 use notify::Notifier;
 use packages::PackageReport;
 use readers::Readers;
@@ -87,6 +89,8 @@ pub(crate) struct Core {
     /// What became of the driver packages, for a client that asks.
     pub(crate) packages: PackageReport,
     pub(crate) host: Host,
+    /// The daemon's liveness: the loop stamps it, and the host asks it (see [`liveness`]).
+    pub(crate) liveness: Arc<DaemonLiveness>,
     pub(crate) clock: Arc<MonotonicClock>,
     pub(crate) name: String,
     pub(crate) readers: Readers,
@@ -180,6 +184,10 @@ impl Service {
         packages: PackageReport,
     ) -> Result<Self, StartError> {
         let listener = bind(&config.socket).map_err(StartError::Socket)?;
+        // A board with a keep-alive device (a hardware watchdog) needs the daemon's liveness.
+        let keeps_alive = config.board.devices.iter().any(|device| device.keepalive);
+        let liveness = Arc::new(DaemonLiveness::new());
+        let socket = config.socket.clone();
         let (wake_tx, wake_rx) = UnixStream::pair().map_err(StartError::Socket)?;
         for socket in [&wake_tx, &wake_rx] {
             socket.set_nonblocking(true).map_err(StartError::Socket)?;
@@ -196,9 +204,13 @@ impl Service {
             Arc::new(ServiceStreams { source: buffers }),
         )
         .map_err(StartError::Host)?;
+        if keeps_alive {
+            host.set_liveness(Arc::clone(&liveness) as Arc<dyn HostLiveness>);
+        }
         let core = Arc::new(Core {
             packages,
             host,
+            liveness: Arc::clone(&liveness),
             clock,
             name: config.name,
             readers: Readers::new(),
@@ -234,6 +246,14 @@ impl Service {
             "lemnosd-readers",
             Box::new(move || reading.readers.run(&reading.host, &reading.clock)),
         )?);
+        if keeps_alive {
+            let probing = Arc::clone(&core);
+            let probed = Arc::clone(&liveness);
+            threads.push(spawn(
+                "lemnosd-liveness",
+                Box::new(move || liveness::probe(&probing, &probed, &socket)),
+            )?);
+        }
         let keeping = Arc::clone(&core);
         let watching = Arc::clone(&notifier);
         threads.push(spawn(

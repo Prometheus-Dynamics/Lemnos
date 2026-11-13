@@ -156,6 +156,8 @@ pub(crate) fn run(core: &Arc<Core>, notifier: &Notifier) {
             notifier.ping();
             next_ping = Instant::now() + interval;
         }
+        // The pass is finished: the loop is turning, as far as the liveness is concerned.
+        core.liveness.turned();
         // Read after the ticks, which is when a driver says when it wants the next one.
         let wake = match (retry, core.host.next_tick_ns()) {
             (Some(a), Some(b)) => Some(a.min(b)),

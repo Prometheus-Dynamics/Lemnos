@@ -248,6 +248,16 @@ struct Slot {
 
 const NO_TICK: u64 = u64::MAX;
 
+/// How long a keep-alive device waits before it is asked again while the daemon is not healthy.
+const GATED_POLL_NS: u64 = 100_000_000;
+
+/// The daemon's own liveness: whether it is healthy now. Keep-alive devices are ticked only while
+/// it is true, so a daemon that is not healthy stops feeding them.
+pub trait Liveness: Send + Sync {
+    /// Whether the daemon is healthy now.
+    fn alive(&self) -> bool;
+}
+
 fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -369,6 +379,9 @@ struct Inner {
     drivers: BTreeMap<&'static str, DriverEntry>,
     /// Called when a device's next tick moves earlier.
     waker: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// The daemon's liveness, which gates the ticks of keep-alive devices. Unset, the gate is
+    /// closed: nothing is kept alive until the daemon says it is healthy.
+    liveness: OnceLock<Arc<dyn Liveness>>,
     streams: Streams,
     /// How a host-owned device's driver calls the devices it uses: reads only.
     reading: OnceLock<&'static Reading>,
@@ -917,9 +930,29 @@ impl Inner {
         }
     }
 
+    /// Whether the daemon is healthy, by the liveness the host was given. Closed without one.
+    fn alive(&self) -> bool {
+        self.liveness.get().is_some_and(|liveness| liveness.alive())
+    }
+
+    /// Whether a device may be ticked now: any device, or a keep-alive one while the daemon is
+    /// healthy. Every tick goes through here, so a keep-alive device is never fed by a call.
+    fn may_tick(&self, slot: &Slot) -> bool {
+        !slot.spec.keepalive || self.alive()
+    }
+
     /// Ticks a device on this thread, inside the panic boundary.
     fn tick_here(&self, slot: &Slot) {
         if slot.hung.load(Ordering::Acquire) {
+            return;
+        }
+        // A keep-alive device is not ticked while the daemon is not healthy. It is asked again in
+        // a short while, so it resumes as soon as the daemon is.
+        if !self.may_tick(slot) {
+            self.set_next_tick(
+                slot,
+                Some(self.clock.now_ns().saturating_add(GATED_POLL_NS)),
+            );
             return;
         }
         let mut guard = lock(&slot.instance);
@@ -1031,7 +1064,7 @@ impl Inner {
                     _ => Status::IO,
                 };
             }
-            if ticks {
+            if ticks && self.may_tick(slot) {
                 self.set_next_tick(slot, instance.tick(self.clock.now_ns()));
             }
             self.poll_jobs(slot, instance.as_mut());
@@ -1113,7 +1146,8 @@ impl Inner {
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 work(instance.as_mut());
-                let next = target.ticks().then(|| instance.tick(self.clock.now_ns()));
+                let next = (target.ticks() && self.may_tick(&target))
+                    .then(|| instance.tick(self.clock.now_ns()));
                 self.poll_jobs(&target, instance.as_mut());
                 (next, asks_rebind(instance.as_ref()))
             }));
@@ -1661,6 +1695,7 @@ impl Host {
             options,
             drivers: table,
             waker: OnceLock::new(),
+            liveness: OnceLock::new(),
             streams,
             reading: OnceLock::new(),
             jobs: Mutex::new(Jobs::new()),
@@ -1992,6 +2027,13 @@ impl Host {
     /// sleeping until [`Host::next_tick_ns`] can look again. Only the first call takes effect.
     pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
         drop(self.inner.waker.set(Box::new(waker)));
+    }
+
+    /// Gives the host the daemon's liveness. Keep-alive devices (see
+    /// [`DeviceSpec::keepalive`](crate::board::DeviceSpec::keepalive)) are ticked only while it
+    /// says the daemon is healthy. Set once; a second call is ignored.
+    pub fn set_liveness(&self, liveness: Arc<dyn Liveness>) {
+        drop(self.inner.liveness.set(liveness));
     }
 
     fn an_optional_part_arrived(&self, slot: &Slot) -> bool {
