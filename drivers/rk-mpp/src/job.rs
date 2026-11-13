@@ -419,7 +419,21 @@ pub(crate) fn plan(
             });
         }
         debug_assert!((1..=FD_MASK).contains(&buffer.fd));
-        staging.registers[staged..staged + 4].copy_from_slice(&buffer.fd.to_ne_bytes());
+        // The descriptor: the fd, and where the block takes the offset from the word's bits 10 and
+        // up, the offset (below 2^22, so it fits above the fd).
+        let word = if facts.offset_in_descriptor {
+            if address.offset >= 1 << 22 {
+                return Err(JobError::OffsetOutside {
+                    register,
+                    offset: address.offset,
+                    size: buffer.size,
+                });
+            }
+            buffer.fd | (address.offset << 10)
+        } else {
+            buffer.fd
+        };
+        staging.registers[staged..staged + 4].copy_from_slice(&word.to_ne_bytes());
         buffers |= 1 << buffer.slot;
     }
     plan.buffers = buffers;
@@ -441,14 +455,17 @@ pub(crate) fn plan(
         }
     }
 
+    // The table's indices are relative to the translated window, the array the kernel translates.
+    let base = facts.table_window().map_or(0, |w| w.first);
     let mut table = 0;
     let mut offsets = 0;
     for address in job.addresses {
         if Some(address.register) != direct {
-            staging.table[table..table + 2].copy_from_slice(&address.register.to_ne_bytes());
+            let index = address.register - base;
+            staging.table[table..table + 2].copy_from_slice(&index.to_ne_bytes());
             table += 2;
         }
-        if address.offset != 0 {
+        if address.offset != 0 && !facts.offset_in_descriptor {
             let elem = RegOffsetElem {
                 index: u32::from(address.register),
                 offset: address.offset,

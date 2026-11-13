@@ -41,7 +41,8 @@ impl Device for PlayedDevice {
         Ok(Played(Arc::clone(&self.0)))
     }
 
-    fn confined(&mut self, _: Block) -> io::Result<bool> {
+    fn confined(&mut self, block: Block) -> io::Result<bool> {
+        self.0.lock().unwrap().bound = Some(block);
         Ok(true)
     }
 

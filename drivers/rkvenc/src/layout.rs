@@ -11,6 +11,23 @@ pub enum Region {
     Ret,
     /// The second window, which the write side's job does not reach.
     L2,
+    /// A register class of a block that numbers its registers absolutely (the VEPU580 block). The
+    /// index is the kernel's `RKVENC_CLASS_TYPE` value: 0 BASE, 1 PIC, 2 RC, 3 PAR, 4 SQI, 5 SCL,
+    /// 6 OSD, 7 ST, 8 DEBUG.
+    Class(u8),
+}
+
+/// A register class: the words it spans in its block, and whether a caller may write them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Class {
+    /// The window its registers are in.
+    pub region: Region,
+    /// Its first word in the block.
+    pub first: u16,
+    /// How many words it spans, from `first`.
+    pub words: u16,
+    /// Whether the registers in it may be written.
+    pub writable: bool,
 }
 
 /// What the header says a register does on access.

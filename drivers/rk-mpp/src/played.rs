@@ -68,6 +68,8 @@ pub struct Kernel {
     pub output: [u8; IEP2_OUTPUT],
     /// The flags of the last call's messages, ORed, as `mpp_collect_msgs` gathers them.
     pub last_flags: u32,
+    /// The block the claim named (see [`Self::block`]).
+    pub bound: Option<Block>,
 }
 
 #[allow(missing_docs)]
@@ -101,10 +103,16 @@ impl Kernel {
             released_len: 0,
             output: [0; IEP2_OUTPUT],
             last_flags: 0,
+            bound: None,
         }
     }
 
+    /// The block this session is bound to: named by the claim's `confined` call, which every claim
+    /// makes before a job (the client type alone does not tell the two rkvenc generations apart).
     pub fn block(&self) -> Block {
+        if let Some(block) = self.bound {
+            return block;
+        }
         let client = self.client.expect("session bound");
         Block::ALL
             .into_iter()
@@ -261,13 +269,17 @@ impl Kernel {
                 .expect("a mode register in a window");
             (d, d.applies(regs[at]))
         });
+        // A table entry is an index into the translated window: the kernel's array for it.
+        let table_window = facts.table_window().expect("a translated window");
         for i in 0..self.table_len {
             let index = usize::from(self.table[i]);
             assert!(
-                translated(index),
-                "a table entry outside a translated window"
+                index < usize::from(table_window.words),
+                "a table entry outside the array"
             );
-            let at = facts.flat(index).expect("inside a window");
+            let at = facts
+                .flat(usize::from(table_window.first) + index)
+                .expect("inside a window");
             let fd = regs[at] & uapi::FD_MASK;
             let offset = regs[at] >> 10;
             if fd == 0 {
