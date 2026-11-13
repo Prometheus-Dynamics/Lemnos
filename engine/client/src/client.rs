@@ -54,9 +54,9 @@ impl Client {
     /// A typed client for contract `C` on the device called `name`, or on any
     /// device providing it when `name` is empty.
     ///
-    /// The device's description is read once, here, and its hash for this contract is compared
-    /// with `C::HASH`: a device whose argument or result types were laid out differently is
-    /// refused, and nothing is called on it.
+    /// The device's description is read once, here, and checked against `C` (see
+    /// [`bind`](crate::bind)): a device whose base methods differ, or that lacks a method or
+    /// field `C` uses, is refused, and nothing is called on it.
     pub fn open<C: Contract + ?Sized>(&self, name: &str) -> Result<Bound<C, RemoteCaller>, Error> {
         let (handle, description) = {
             let mut session = self.lock();
@@ -64,19 +64,7 @@ impl Client {
             let description = session.describe(handle.device())?;
             (handle, description)
         };
-        if let Some(theirs) = description
-            .contracts
-            .iter()
-            .find(|contract| contract.tag == C::TAG.as_str())
-            .map(|contract| contract.hash)
-            .filter(|theirs| *theirs != C::HASH)
-        {
-            return Err(Error::ContractMismatch {
-                contract: C::TAG.as_str().to_string(),
-                ours: C::HASH,
-                theirs,
-            });
-        }
+        crate::bind::verify::<C>(&description)?;
         Ok(Bound::new(RemoteCaller {
             session: Arc::clone(&self.session),
             handle,

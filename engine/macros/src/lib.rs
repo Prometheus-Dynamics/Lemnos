@@ -47,16 +47,17 @@ pub fn driver(args: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Encodes a struct's named fields in order.
-#[proc_macro_derive(Encode)]
+/// Encodes a struct's named fields in order. A field marked `#[added]` is an addition after the
+/// base shape (it must come after every base field); `#[breaking]` makes it base again.
+#[proc_macro_derive(Encode, attributes(added, breaking))]
 pub fn derive_encode(item: TokenStream) -> TokenStream {
     codec::encode(item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
 
-/// Decodes a struct's named fields in order.
-#[proc_macro_derive(Decode)]
+/// Decodes a struct's named fields in order. See [`derive@Encode`] for `#[added]` and `#[breaking]`.
+#[proc_macro_derive(Decode, attributes(added, breaking))]
 pub fn derive_decode(item: TokenStream) -> TokenStream {
     codec::decode(item.into())
         .unwrap_or_else(syn::Error::into_compile_error)

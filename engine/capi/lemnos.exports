@@ -8,6 +8,7 @@ lemnos_device_count
 lemnos_device_info
 lemnos_device_text
 lemnos_open
+lemnos_contract_hash
 lemnos_call
 lemnos_job_start
 lemnos_job_cancel

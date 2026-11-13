@@ -160,6 +160,10 @@ LemnosStatus lemnos_device_text(LemnosHandle client, uint32_t device, uint32_t f
 /* Opens a contract on the named device, or on any device with it when device is "". */
 LemnosStatus lemnos_open(LemnosHandle client, const char *device, const char *tag, uint32_t *opened,
                          LemnosMessageSink sink);
+/* Writes the base hash of the opened contract as the device describes it, and its additions level
+ * (how many of its methods are additions). The bind check that a typed client runs is in Rust. */
+LemnosStatus lemnos_contract_hash(LemnosHandle client, uint32_t opened, uint64_t *hash,
+                                  uint32_t *level, LemnosMessageSink sink);
 /* Returns the reply's length. */
 LemnosStatus lemnos_call(LemnosHandle client, uint32_t opened, uint16_t method, const uint8_t *args,
                          size_t args_len, uint8_t *reply, size_t reply_capacity,

@@ -59,10 +59,12 @@ pub trait Lens {
     #[method(3, reading = number)]
     fn position(&mut self) -> Result<u16>;
     /// Which way focus moves as the position goes up. `Unknown` until the board or the driver says.
+    #[added]
     #[method(4)]
     fn direction(&mut self) -> Result<FocusDirection>;
     /// Microseconds after a move of `distance` codes before the lens is still. `None` when the
     /// driver and the board have no figure for it.
+    #[added]
     #[method(5)]
     fn settle_us(&mut self, distance: u16) -> Result<Option<u32>>;
 }

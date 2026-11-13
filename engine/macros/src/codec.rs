@@ -35,6 +35,28 @@ fn plain_struct(input: &DeriveInput) -> Result<&FieldsNamed> {
     }
 }
 
+/// Whether a field carries `#[name]`.
+fn marked(field: &syn::Field, name: &str) -> bool {
+    field.attrs.iter().any(|attr| attr.path().is_ident(name))
+}
+
+/// Whether each field is an addition, as a const expression: `#[added]`, or a type that is an
+/// addition on its own (`Tail`), unless `#[breaking]`, which makes any field base.
+fn added_flags(fields: &FieldsNamed) -> Vec<TokenStream> {
+    fields
+        .named
+        .iter()
+        .map(|field| {
+            let ty = &field.ty;
+            let added = marked(field, "added");
+            let breaking = marked(field, "breaking");
+            quote! {
+                ((<#ty as ::lemnos_core::Encode>::ADDED || #added) && !#breaking)
+            }
+        })
+        .collect()
+}
+
 pub fn encode(item: TokenStream) -> Result<TokenStream> {
     let input: DeriveInput = parse2(item)?;
     let fields = plain_struct(&input)?;
@@ -47,14 +69,34 @@ pub fn encode(item: TokenStream) -> Result<TokenStream> {
         .iter()
         .filter_map(|f| f.ident.as_ref().map(ToString::to_string))
         .collect();
+    let added = added_flags(fields);
     Ok(quote! {
         impl #impl_generics ::lemnos_core::Encode for #name #ty_generics #where_clause {
-            const SHAPE: ::lemnos_core::Shape = ::lemnos_core::Shape::Record(&[
-                #(::lemnos_core::Field {
-                    name: #labels,
-                    shape: <#types as ::lemnos_core::Encode>::SHAPE,
-                }),*
-            ]);
+            const SHAPE: ::lemnos_core::Shape = {
+                // An addition comes after every base field: a base field after an addition
+                // would sit where an old reader's fields end.
+                let added: &[bool] = &[#(#added),*];
+                let mut i = 0;
+                while i < added.len() {
+                    if added[i] {
+                        let mut j = i + 1;
+                        while j < added.len() {
+                            if !added[j] {
+                                panic!("a base field comes after an added field: additions go last");
+                            }
+                            j += 1;
+                        }
+                    }
+                    i += 1;
+                }
+                ::lemnos_core::Shape::Record(&[
+                    #(::lemnos_core::Field {
+                        name: #labels,
+                        shape: <#types as ::lemnos_core::Encode>::SHAPE,
+                        added: #added,
+                    }),*
+                ])
+            };
             fn encode(&self, out: &mut ::lemnos_core::Writer<'_>) -> ::lemnos_core::Result<()> {
                 let at = out.begin_block()?;
                 #(::lemnos_core::Encode::encode(&self.#idents, out)?;)*

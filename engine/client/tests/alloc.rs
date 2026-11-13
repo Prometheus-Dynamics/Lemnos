@@ -68,6 +68,7 @@ fn a_thousand_blocking_calls_allocate_nothing() {
 #[test]
 fn after_a_typed_open_a_thousand_calls_allocate_nothing() {
     let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[<dyn Counter as lemnos_core::Contract>::INFO]);
     let client = Client::connect(&host.path, "t").unwrap();
     let mut counter = client.open::<dyn Counter>("").unwrap();
     for _ in 0..10 {

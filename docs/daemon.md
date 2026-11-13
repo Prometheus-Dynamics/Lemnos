@@ -148,6 +148,12 @@ lemnos-ctl [--socket PATH] COMMAND
 The socket is `--socket`, else `LEMNOSD_SOCKET`, else `/run/lemnos/lemnosd.sock`. A command exits 0
 on success. On failure it prints the reason on its error output and exits 1.
 
+`lemnos-ctl` is untyped by design. It has no contract traits: it reads each device's description
+and calls methods by number and by name, with arguments and replies as text it encodes and decodes
+from the description. So it does not run the typed bind check, and it need not be built from the
+daemon's Lemnos revision. A method the device's driver does not provide is refused with the method
+named, as any caller is (see [the client's typed bind](client.md#the-typed-bind)).
+
 ### list
 
 Every device and how it stands: name, driver, state, health, tags, then `-> NAME` when the board
@@ -335,6 +341,10 @@ error numbers, and Lemnos's own codes below -4095:
 Orion node, through Orion's one client crate, `orion`, pinned to a revision of its `next` branch.
 It is a client of lemnosd like any other and knows no device: everything below comes from a
 device's entry and its description.
+The bridge is untyped by design, like `lemnos-ctl`: it holds no contract traits and runs no bind
+check. Its connection is checked at connect like any client's (the core and the parts, see
+[the wire](wire.md#core-and-parts)); beyond that it checks no contract, and calls the methods the
+device describes.
 
 | Lemnos | Orion |
 |---|---|

@@ -197,6 +197,7 @@ pub trait CameraReceiver {
     /// so a consumer pairs the two by sequence. Its layout is the sensor's (`SensorInfo::embedded_data`).
     /// Length 0 when the receiver captures none: a receiver that cannot take its sensor's embedded
     /// lines answers 0 and publishes nothing.
+    #[added]
     #[method(9)]
     fn embedded_stream(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
 
@@ -208,12 +209,14 @@ pub trait CameraReceiver {
     /// Length 0 is nothing wired to the input. `NOT_SUPPORTED` is unknown: the receiver's kernel
     /// does not describe its input, so it cannot say what is wired to it, and a consumer must not
     /// take that for a match. Any other error is a read that failed now.
+    #[added]
     #[method(10)]
     fn source(&mut self, #[out] into: &mut [u8]) -> Result<usize>;
     /// The layout `configure` set, or `None` before one is set: the same `FrameLayout`. Its `size`
     /// is the most bytes one frame takes in a buffer of the `frames` stream, so a consumer checks
     /// it against the stream's buffer length (`FrameStream::buffer_len` in the client) before or
     /// after opening the stream.
+    #[added]
     #[method(11)]
     fn layout(&mut self) -> Result<Option<FrameLayout>>;
     /// The frame-start count since `start`, as [`FrameStarts`]. `None` is unknown, and a consumer
@@ -221,6 +224,7 @@ pub trait CameraReceiver {
     /// frame starts right now. `NOT_SUPPORTED` where the receiver cannot count frame starts at all,
     /// which is a fact about the receiver and not a read that failed. Any other error is a read
     /// that failed now.
+    #[added]
     #[method(12)]
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>>;
 }

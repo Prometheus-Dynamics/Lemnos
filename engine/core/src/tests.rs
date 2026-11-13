@@ -24,6 +24,7 @@ const INFO: ContractInfo = ContractInfo {
         has_out_buffer: false,
         job: false,
         reading: None,
+        added: false,
     }],
 };
 
@@ -220,10 +221,12 @@ mod package {
         Field {
             name: "when",
             shape: Shape::U64,
+            added: false,
         },
         Field {
             name: "values",
             shape: Shape::Array(&Shape::Option(&Shape::F32), 3),
+            added: false,
         },
     ]);
 
@@ -263,6 +266,7 @@ mod package {
                     has_out_buffer: true,
                     job: false,
                     reading: None,
+                    added: false,
                 }],
             },
         ],

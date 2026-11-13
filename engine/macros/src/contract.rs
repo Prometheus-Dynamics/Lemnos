@@ -67,6 +67,9 @@ struct Method {
     id: u16,
     job: bool,
     reading: Option<Ident>,
+    /// An addition after the base shape: `#[added]`, unless `#[breaking]`.
+    added: bool,
+
     ident: Ident,
     params: Vec<Param>,
     out: Option<Ident>,
@@ -118,6 +121,13 @@ fn remove_method_id(method: &mut TraitItemFn) -> Result<(u16, bool, Option<Ident
     let attr = method.attrs.remove(position);
     let args = attr.parse_args::<MethodArgs>()?;
     Ok((args.id.base10_parse()?, args.job, args.reading))
+}
+
+/// Removes `#[name]` from `attrs` and says whether it was there.
+pub(crate) fn take_flag(attrs: &mut Vec<syn::Attribute>, name: &str) -> bool {
+    let before = attrs.len();
+    attrs.retain(|attr| !attr.path().is_ident(name));
+    attrs.len() != before
 }
 
 fn is_job_id(ty: &Type) -> bool {
@@ -173,6 +183,10 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
         ));
     }
     let (id, job, reading) = remove_method_id(method)?;
+    let marked_added = take_flag(&mut method.attrs, "added");
+    let breaking = take_flag(&mut method.attrs, "breaking");
+    let added = marked_added && !breaking;
+
     let returns = ok_type(&method.sig.output)?;
     if job && !is_job_id(&returns) {
         return Err(Error::new(
@@ -251,6 +265,8 @@ fn parse_method(method: &mut TraitItemFn) -> Result<Method> {
         id,
         job,
         reading,
+        added,
+
         ident: method.sig.ident.clone(),
         params,
         out,
@@ -334,6 +350,8 @@ fn method_info(method: &Method) -> TokenStream {
         Some(variant) => quote! { ::core::option::Option::Some(::lemnos_core::Reading::#variant) },
         None => quote! { ::core::option::Option::None },
     };
+    let added = method.added;
+
     // The reply to an #[out] method is the bytes themselves.
     let returns = if has_out {
         quote! { ::lemnos_core::Shape::Bytes }
@@ -352,6 +370,8 @@ fn method_info(method: &Method) -> TokenStream {
             has_out_buffer: #has_out,
             job: #job,
             reading: #reading,
+            added: #added,
+
         }
     }
 }
@@ -381,6 +401,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut methods = Vec::new();
     let mut signatures = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut last_added: Option<Ident> = None;
     for item in &mut input.items {
         let TraitItem::Fn(function) = item else {
             return Err(Error::new(item.span(), "a contract only has methods"));
@@ -390,6 +411,17 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
             return Err(Error::new(
                 method.ident.span(),
                 format!("method number {} is used twice", method.id),
+            ));
+        }
+        // Additions go last: a base method after an added one would sit inside the additions.
+        if method.added {
+            last_added.get_or_insert_with(|| method.ident.clone());
+        } else if let Some(added) = &last_added {
+            return Err(Error::new(
+                method.ident.span(),
+                format!(
+                    "a base method can't come after the added method `{added}`: additions go last"
+                ),
             ));
         }
         signatures.push(function.sig.clone());

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::{Status, Tail};
+use lemnos_core::{Contract, Status, Tail};
 use lemnos_wire::ring::Layout;
 use lemnos_wire::{
     CORE_HASH, DeviceDescription, Frame, LEMNOS, LemnosName, MAX_QUEUED_BYTES, PART_BYTES, Planes,
@@ -1267,6 +1267,16 @@ impl Session {
         self.settle()?;
         let (id, pick) = self.op_open(name, tag)?;
         self.wait(id, pick)
+    }
+
+    /// Opens contract `C` on the device called `name`, checked against `C` before the handle is
+    /// returned: the same bind check as [`Client::open`](crate::Client::open). Nothing is called on
+    /// a device the check refuses.
+    pub fn open_typed<C: Contract + ?Sized>(&mut self, name: &str) -> Result<Handle, Error> {
+        let handle = self.open(name, C::TAG.as_str())?;
+        let description = self.describe(handle.device())?;
+        crate::bind::verify::<C>(&description)?;
+        Ok(handle)
     }
 
     /// What a device provides and how it presents itself.

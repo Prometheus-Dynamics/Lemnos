@@ -31,6 +31,10 @@ pub enum Shape {
 pub struct Field {
     pub name: &'static str,
     pub shape: Shape,
+    /// An addition: a field after the base shape, which a reader from before it does not know.
+    /// Set by `#[added]` on the field (and never by `#[breaking]`, which makes it base). Left out
+    /// of the base hash; see [`layout`](crate::layout).
+    pub added: bool,
 }
 
 /// Writes into a buffer the caller owns.
@@ -307,14 +311,17 @@ impl Encode for Vector3 {
         Field {
             name: "x",
             shape: Shape::F32,
+            added: false,
         },
         Field {
             name: "y",
             shape: Shape::F32,
+            added: false,
         },
         Field {
             name: "z",
             shape: Shape::F32,
+            added: false,
         },
     ]);
     fn encode(&self, out: &mut Writer<'_>) -> Result<()> {

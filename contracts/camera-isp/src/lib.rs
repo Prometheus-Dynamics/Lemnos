@@ -187,10 +187,12 @@ pub trait CameraIsp {
     /// The layout a raw frame takes in an input buffer, from `set_input`: `stride` and `size`. `None`
     /// before `set_input`. `NOT_SUPPORTED` when the frame comes straight from the receiver, which
     /// owns its layout (see `input_stream`).
+    #[added]
     #[method(13)]
     fn input_layout(&mut self) -> Result<Option<OutputLayout>>;
     /// The layout of one output's image, from `set_output`: `stride` and `size`. `None` before the
     /// output is set and after `clear_output`. `NOT_FOUND` past the last output.
+    #[added]
     #[method(14)]
     fn output_layout(&mut self, output: u8) -> Result<Option<OutputLayout>>;
 }

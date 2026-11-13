@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lemnos_core::Contract;
 use lemnos_wire::Frame;
 use tokio::io::Interest;
 use tokio::net::UnixStream as TokioStream;
@@ -124,6 +125,15 @@ impl AsyncClient {
         self.settle().await?;
         let (id, pick) = self.session.op_open(name, tag)?;
         self.wait(id, pick).await
+    }
+
+    /// [`Session::open_typed`]: opens contract `C` on the device called `name`, checked against `C`
+    /// before the handle is returned.
+    pub async fn open_typed<C: Contract + ?Sized>(&mut self, name: &str) -> Result<Handle, Error> {
+        let handle = self.open(name, C::TAG.as_str()).await?;
+        let description = self.describe(handle.device()).await?;
+        crate::bind::verify::<C>(&description)?;
+        Ok(handle)
     }
 
     pub async fn describe(&mut self, device: u32) -> Result<DeviceDescription, Error> {

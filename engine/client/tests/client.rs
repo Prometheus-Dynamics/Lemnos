@@ -9,7 +9,7 @@ use lemnos_client::{
     Session, follow,
 };
 use lemnos_core::{
-    Contract, ContractInfo, MethodInfo, Param, Result, Shape, Status, Tag, contract,
+    Contract, ContractInfo, Decode, Encode, MethodInfo, Param, Result, Shape, Status, Tag, contract,
 };
 
 #[contract("example.counter", version = 1)]
@@ -216,6 +216,7 @@ fn a_typed_contract_whose_encoding_differs_on_the_device_is_refused() {
             has_out_buffer: false,
             job: false,
             reading: None,
+            added: false,
         }],
     };
     let host = FakeHost::start();
@@ -255,6 +256,7 @@ fn another_protocol_version_is_refused() {
 #[test]
 fn a_typed_contract_works_over_the_socket() {
     let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[<dyn Echo as Contract>::INFO]);
     let client = Client::connect(&host.path, "t").unwrap();
     let mut echo = client.open::<dyn Echo>("").unwrap();
     // The stand-in echoes its arguments, and the reply decodes the same way.
@@ -370,6 +372,7 @@ fn eventually(mut done: impl FnMut() -> bool) {
 #[test]
 fn a_handle_finds_its_device_again_after_a_restart() {
     let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[<dyn Echo as Contract>::INFO]);
     let client = Client::connect(&host.path, "t").unwrap();
     let mut echo = client.open::<dyn Echo>("").unwrap();
     assert_eq!(echo.add(1).unwrap(), 1);
@@ -455,6 +458,7 @@ pub trait Jobbing {
 
 fn jobs_host() -> FakeHost {
     let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[<dyn Jobbing as Contract>::INFO]);
     host.control
         .features
         .store(lemnos_wire::feature::JOBS, Ordering::SeqCst);
@@ -514,6 +518,7 @@ fn an_open_job_ends_as_interrupted_when_the_connection_goes() {
 #[test]
 fn a_service_without_jobs_is_never_sent_one() {
     let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[<dyn Jobbing as Contract>::INFO]);
     let client = Client::connect(&host.path, "t").unwrap();
     let err = client
         .open::<dyn Jobbing>("one")
@@ -558,4 +563,209 @@ fn a_polled_job_is_started_and_followed_by_poll() {
             },
         ]
     );
+}
+
+/// The argument and result of the counter as an older client has it: one field.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Encode, Decode)]
+pub struct Sum0 {
+    pub value: u32,
+}
+
+/// The same struct as a newer driver has it: a field appended after the base.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Encode, Decode)]
+pub struct Sum {
+    pub value: u32,
+    #[added]
+    pub scale: u32,
+}
+
+/// The counter as an older client was built with it.
+#[contract("example.counter", version = 1)]
+pub trait OldCounter {
+    #[method(1)]
+    fn add(&mut self, args: Sum0) -> Result<Sum0>;
+}
+
+/// The counter as a newer driver provides it: the field and a method appended.
+#[contract("example.counter", version = 1)]
+pub trait NewCounter {
+    #[method(1)]
+    fn add(&mut self, args: Sum) -> Result<Sum0>;
+    #[added]
+    #[method(2)]
+    fn twice(&mut self, args: Sum0) -> Result<Sum0>;
+}
+
+/// A client that needs a method marked breaking: a change to the base, not an addition.
+#[contract("example.counter", version = 1)]
+pub trait BreakingCounter {
+    #[method(1)]
+    fn add(&mut self, args: Sum0) -> Result<Sum0>;
+    #[added]
+    #[breaking]
+    #[method(2)]
+    fn twice(&mut self, args: Sum0) -> Result<Sum0>;
+}
+
+/// Another contract, changed in its base.
+#[contract("example.other", version = 1)]
+pub trait Other {
+    #[method(1)]
+    fn read(&mut self, args: u32) -> Result<u32>;
+}
+
+#[contract("example.other", version = 1)]
+pub trait OtherChanged {
+    #[method(1)]
+    fn read(&mut self, args: u64) -> Result<u64>;
+}
+
+const OLD: ContractInfo = <dyn OldCounter as Contract>::INFO;
+const NEW: ContractInfo = <dyn NewCounter as Contract>::INFO;
+const OTHER: ContractInfo = <dyn Other as Contract>::INFO;
+const OTHER_CHANGED: ContractInfo = <dyn OtherChanged as Contract>::INFO;
+
+#[test]
+fn an_old_client_works_with_a_driver_that_gained_a_method_and_a_field() {
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[NEW]);
+    let client = Client::connect(&host.path, "t").unwrap();
+    // Same base shape: the old client binds, and its call goes through with its own argument.
+    let mut counter = client.open::<dyn OldCounter>("").unwrap();
+    assert_eq!(counter.add(Sum0 { value: 7 }).unwrap(), Sum0 { value: 7 });
+}
+
+#[test]
+fn a_new_client_is_refused_by_an_old_driver_that_lacks_the_added_method() {
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[OLD]);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let Err(error) = client.open::<dyn NewCounter>("") else {
+        panic!("a client needing a method the driver lacks must not open");
+    };
+    assert_eq!(
+        error,
+        Error::MethodMissing {
+            contract: TAG.to_string(),
+            method: 2,
+            name: "twice".to_string(),
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "contract example.counter/1: this client needs method 2 `twice`; the device's driver does not provide it"
+    );
+    assert_eq!(lemnos_core::Status::from(error), Status::NOT_SUPPORTED);
+}
+
+#[test]
+fn a_device_missing_an_added_field_refuses_the_method_that_uses_it() {
+    // The device's method 1 takes `Sum0`, with no `scale`; the client's method 1 takes `Sum`.
+    const OLD_METHOD_ONLY: ContractInfo = ContractInfo {
+        tag: Tag::new(TAG),
+        kind: "other",
+        methods: &[OLD.methods[0], NEW.methods[1]],
+    };
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[OLD_METHOD_ONLY]);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let Err(error) = client.open::<dyn NewCounter>("") else {
+        panic!("a field the device lacks must refuse the open");
+    };
+    assert_eq!(
+        error,
+        Error::FieldMissing {
+            contract: TAG.to_string(),
+            method: 1,
+            name: "add".to_string(),
+            field: "scale".to_string(),
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "contract example.counter/1: this client needs field `scale` of method 1 `add`; the device's driver does not provide it"
+    );
+}
+
+/// The counter's added method 2 as a driver with another shape provides it: same number and name,
+/// different argument.
+#[contract("example.counter", version = 1)]
+pub trait Reshaped {
+    #[method(1)]
+    fn add(&mut self, args: Sum) -> Result<Sum0>;
+    #[added]
+    #[method(2)]
+    fn twice(&mut self, args: u32) -> Result<Sum0>;
+}
+
+#[test]
+fn a_method_of_another_shape_is_refused_at_bind() {
+    const RESHAPED: ContractInfo = <dyn Reshaped as Contract>::INFO;
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[RESHAPED]);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let Err(error) = client.open::<dyn NewCounter>("") else {
+        panic!("a method of another shape must not open");
+    };
+    assert_eq!(
+        error,
+        Error::MethodShape {
+            contract: TAG.to_string(),
+            method: 2,
+            name: "twice".to_string(),
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "contract example.counter/1: this client needs method 2 `twice`; the device's driver has another shape"
+    );
+}
+
+#[test]
+fn a_breaking_addition_is_refused_at_bind() {
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[OLD]);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let Err(error) = client.open::<dyn BreakingCounter>("") else {
+        panic!("a breaking addition must not open against a driver without it");
+    };
+    assert_eq!(
+        error,
+        Error::ContractMismatch {
+            contract: TAG.to_string(),
+            ours: <dyn BreakingCounter as Contract>::HASH,
+            theirs: lemnos_core::layout::contract_hash(&OLD),
+        }
+    );
+}
+
+#[test]
+fn a_client_of_one_contract_is_unaffected_by_a_change_in_another() {
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[OTHER_CHANGED, OLD]);
+    let client = Client::connect(&host.path, "t").unwrap();
+    // The counter binds and calls, though `example.other` changed in its base.
+    let mut counter = client.open::<dyn OldCounter>("").unwrap();
+    assert_eq!(counter.add(Sum0 { value: 11 }).unwrap(), Sum0 { value: 11 });
+    // And the changed contract refuses its own old client.
+    let Err(error) = client.open::<dyn Other>("") else {
+        panic!("the changed contract must refuse the old client");
+    };
+    assert!(matches!(error, Error::ContractMismatch { .. }), "{error:?}");
+    // Unchanged on its own, the same contract opens.
+    *host.control.provides.lock().unwrap() = Some(&[OTHER, OLD]);
+    let mut other = client.open::<dyn Other>("").unwrap();
+    assert_eq!(other.read(5).unwrap(), 5);
+}
+
+#[test]
+fn the_session_open_runs_the_same_check() {
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[OLD]);
+    let mut session = Session::connect(&host.path, "t").unwrap();
+    assert!(matches!(
+        session.open_typed::<dyn NewCounter>(""),
+        Err(Error::MethodMissing { method: 2, .. })
+    ));
+    session.open_typed::<dyn OldCounter>("").unwrap();
 }

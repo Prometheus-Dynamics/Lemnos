@@ -695,6 +695,9 @@ mod tests {
             returns: OwnedShape::Bytes,
             has_out_buffer,
             job: false,
+            hash: 0,
+            added: false,
+            added_fields: Vec::new(),
         }
     }
 
@@ -716,6 +719,9 @@ mod tests {
             returns: OwnedShape::Bytes,
             has_out_buffer: true,
             job: false,
+            hash: 0,
+            added: false,
+            added_fields: Vec::new(),
         };
         assert!(encode_call_within(&read, &words(&["7", "60"]), 60 * 1024).is_ok());
         let err = encode_call_within(&read, &words(&["7", "61441"]), 60 * 1024).unwrap_err();
