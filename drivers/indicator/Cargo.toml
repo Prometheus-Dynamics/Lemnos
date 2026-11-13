@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-driver-indicator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-core = { path = "../../engine/core" }
+lemnos-contract-indicator = { path = "../../contracts/indicator" }
+lemnos-contract-pixels = { path = "../../contracts/pixels" }
+
+[dev-dependencies]
+lemnos-core = { path = "../../engine/core", features = ["std"] }
+lemnos-measure = { path = "../../engine/measure", features = ["alloc-count"] }
+
+[package.metadata.lemnos]
+driver = "Indicator"

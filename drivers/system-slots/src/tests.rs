@@ -1959,3 +1959,84 @@ fn the_list_has_the_trial_and_the_resolution_as_they_stand() {
         "{list}"
     );
 }
+
+/// A `indicator/1` device that records every state it is set to.
+struct Recorder(std::sync::Mutex<Vec<(String, u16)>>);
+
+impl lemnos_core::Router for Recorder {
+    fn call(
+        &self,
+        _device: u32,
+        method: lemnos_core::MethodId,
+        args: &[u8],
+        _reply: &mut [u8],
+    ) -> Result<usize, Status> {
+        use lemnos_core::Decode;
+        assert_eq!(method.method, 1, "only set is called");
+        let mut from = lemnos_core::Reader::new(args);
+        let state = <&str>::decode(&mut from)?.to_string();
+        let progress = u16::decode(&mut from)?;
+        self.0.lock().unwrap().push((state, progress));
+        Ok(0)
+    }
+
+    fn health(&self, _device: u32) -> lemnos_core::Health {
+        lemnos_core::Health::Ok
+    }
+}
+
+#[test]
+fn the_indicator_shows_each_phase_of_an_install_and_only_changes() {
+    use lemnos_contract_indicator::NO_PROGRESS;
+    use lemnos_core::{Dev, LocalCaller};
+
+    let recorder: &'static Recorder = Box::leak(Box::new(Recorder(Default::default())));
+    let mut board = Board::new("os-1");
+    board.slots.indicator = Some(Dev::new(LocalCaller::new(recorder, 0, 0)));
+    let bundle = Bundle::new("os-2").pack();
+    let (status, _, _) = board.stream(1, &bundle, 1000);
+    assert_eq!(status, Status::OK);
+    // A tick after the last method call shows the end; the phases came in order, once each.
+    let shown = recorder.0.lock().unwrap().clone();
+    let states: Vec<&str> = shown.iter().map(|(s, _)| s.as_str()).collect();
+    // The phases come in order: receiving while the bytes arrive, verifying while `finish` checks the
+    // hash, verity and signature (even within the one call that delivers the last bytes), then done.
+    let verify = states
+        .iter()
+        .position(|s| *s == "verifying")
+        .expect("the verify phase is shown");
+    assert_eq!(states.first(), Some(&"receiving"));
+    assert!(states[..verify].iter().all(|s| *s == "receiving"));
+    assert_eq!(states.last(), Some(&"done"));
+    assert_eq!(states.iter().filter(|s| **s == "done").count(), 1);
+    assert_eq!(shown.last().unwrap().1, NO_PROGRESS);
+    // Receiving is sent with progress that rises.
+    let progress: Vec<u16> = shown
+        .iter()
+        .filter(|(s, _)| s == "receiving")
+        .map(|(_, p)| *p)
+        .collect();
+    assert!(progress.windows(2).all(|w| w[0] <= w[1]), "{progress:?}");
+    assert!(progress.iter().all(|p| *p <= 1000));
+}
+
+#[test]
+fn a_cancelled_install_shows_failed() {
+    use lemnos_core::{Dev, LocalCaller};
+
+    let recorder: &'static Recorder = Box::leak(Box::new(Recorder(Default::default())));
+    let mut board = Board::new("os-1");
+    board.slots.indicator = Some(Dev::new(LocalCaller::new(recorder, 0, 0)));
+    let bundle = Bundle::new("os-2").pack();
+    board.slots.caller(CallerId(1));
+    let job = board
+        .slots
+        .install(bundle.len() as u64, false, false)
+        .unwrap();
+    board.slots.write(0, &bundle[..3000]).unwrap();
+    board.slots.tick(0);
+    board.slots.job_cancel(job);
+    board.slots.tick(0);
+    let shown = recorder.0.lock().unwrap().clone();
+    assert_eq!(shown.last().map(|(s, _)| s.as_str()), Some("failed"));
+}
