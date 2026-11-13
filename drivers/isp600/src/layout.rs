@@ -50,6 +50,15 @@
 //! (`isp_stat_buf_get`). The chip is the one built without `CONFIG_ARCH_SUN55IW6` and
 //! `CONFIG_ARCH_SUN55IW3`. `layout-check/run.sh <allwinner-bsp checkout>` compiles a C program
 //! against the two headers and diffs what it prints against the block below.
+//!
+//! The vendor user-space library, `radxa/allwinner-isp6xx` at
+//! `516fd7443810e0807b289829dbae1ae5a62e0cb5` (`isp6xx/libisp/include/isp_comm.h`, the
+//! `ISP_LOAD_*`, `ISP_*_TBL_SIZE`, `ISP_*_MEM_OFS` and `ISP_STAT_*` defines for ISP 602, the
+//! version `scripts/mksetup.sh` gives the A733), agrees with every size and offset here. It gives
+//! the places the kernel headers leave out: [`D3D_DK_TABLE`], [`PLTM_TM_TABLE`],
+//! [`PLTM_LM_TABLE`], [`DRC_TABLE`], [`GAMMA_TABLE`] and [`FRONT_END_MSC_TABLES`]. Its default
+//! register words are the vectors in `library_tests`. The repository has no licence; see
+//! `docs/drivers.md`.
 
 pub use lemnos_driver_isp600_sys::{
     LOAD_BYTES, SAVE_BYTES, SAVE_LOAD_STATISTICS_BYTES, STATISTICS_BYTES,
@@ -119,16 +128,61 @@ pub const LENS_SHADING_TABLE: Region = Region {
 pub const MSC_TABLE: Region = after(LENS_SHADING_TABLE, 0x800);
 /// The noise reduction shading table (`ISP_MSC_NR_TBL_SIZE`).
 pub const NR_MSC_TABLE: Region = after(MSC_TABLE, 0x3c8);
+/// The front end's per-channel MSC tables (`ISP_CH0_MSC_FE_MEM_OFS` and `ISP_CH1` and `ISP_CH2`,
+/// each `ISP_CHn_MSC_FE_TBL_SIZE`), which fill it, in channel order.
+pub const FRONT_END_MSC_TABLES: [Region; 3] = [
+    Region {
+        offset: FRONT_END_TABLE.offset,
+        bytes: 0x800,
+    },
+    Region {
+        offset: FRONT_END_TABLE.offset + 0x800,
+        bytes: 0x800,
+    },
+    Region {
+        offset: FRONT_END_TABLE.offset + 0x1000,
+        bytes: 0x800,
+    },
+];
+/// `ISP_TDNF_DK_MEM_OFS`: the temporal denoise's `DK` table in the Bayer table,
+/// `ISP_D3D_DK_TBL_SIZE` bytes.
+pub const D3D_DK_TABLE: Region = Region {
+    offset: BAYER_TABLE.offset + 0x1400,
+    bytes: D3D_DK_TABLE_BYTES,
+};
+/// `ISP_PLTM_TM_MEM_OFS`: PLTM's tone map table, `ISP_PLTM_TM_TBL_SIZE` bytes.
+pub const PLTM_TM_TABLE: Region = Region {
+    offset: BAYER_TABLE.offset + 0x1c00,
+    bytes: PLTM_TM_TABLE_BYTES,
+};
+/// `ISP_PLTM_LM_MEM_OFS`: PLTM's luminance table, `ISP_PLTM_LM_TBL_SIZE` bytes. It ends the
+/// Bayer table.
+pub const PLTM_LM_TABLE: Region = Region {
+    offset: BAYER_TABLE.offset + 0x2400,
+    bytes: PLTM_LM_TABLE_BYTES,
+};
 /// Sizes of the Bayer table's other tables (`ISP_D3D_DK_TBL_SIZE`, `ISP_PLTM_TM_TBL_SIZE`,
-/// `ISP_PLTM_LM_TBL_SIZE`), whose places the source does not give.
+/// `ISP_PLTM_LM_TBL_SIZE`). Their places are [`D3D_DK_TABLE`], [`PLTM_TM_TABLE`] and
+/// [`PLTM_LM_TABLE`].
 pub const D3D_DK_TABLE_BYTES: usize = 0x800;
 pub const PLTM_TM_TABLE_BYTES: usize = 0x800;
 pub const PLTM_LM_TABLE_BYTES: usize = 0x200;
+/// `ISP_DRC_MEM_OFS`: the RGB table's DRC table, at its start, `ISP_RGB_DRC_TBL_SIZE` bytes.
+pub const DRC_TABLE: Region = Region {
+    offset: RGB_TABLE.offset,
+    bytes: DRC_TABLE_BYTES,
+};
+/// `ISP_GAMMA_MEM_OFS`: the RGB table's gamma table, after DRC, `ISP_GAMMA_TBL_SIZE` bytes.
+pub const GAMMA_TABLE: Region = Region {
+    offset: RGB_TABLE.offset + 0x200,
+    bytes: GAMMA_TABLE_BYTES,
+};
 /// Sizes of the RGB table's two tables (`ISP_RGB_DRC_TBL_SIZE`, `ISP_RGB_GAMMA_TBL_SIZE`), which
-/// fill it.
+/// fill it. Their places are [`DRC_TABLE`] and [`GAMMA_TABLE`].
 pub const DRC_TABLE_BYTES: usize = 0x200;
 pub const GAMMA_TABLE_BYTES: usize = 0x1000;
 /// Sizes of the YUV table's two tables (`ISP_CEM_TBL0_SIZE`, `ISP_CEM_TBL1_SIZE`), which fill it.
+/// The source gives no place for the second, so none is named here.
 pub const CEM_TABLE0_BYTES: usize = 0xcc0;
 pub const CEM_TABLE1_BYTES: usize = 0xa40;
 

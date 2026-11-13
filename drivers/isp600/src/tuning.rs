@@ -13,15 +13,22 @@
 //!
 //! What is not here, and why, is in the crate's documentation and `docs/drivers.md`: no
 //! white balance, colour matrix, gamma, tone, lens shading, spatial denoise, sharpen, or
-//! statistics encodings, because the public sources do not define them.
+//! statistics encodings. The library source that might define them (`radxa/allwinner-isp6xx`)
+//! computes their register words in a prebuilt binary that is not read, so they are not in it.
 //!
 //! Every value is written little-endian, the way the block reads its register image on the
 //! A733-class chip. Each field's range is the width the header gives it; the headers state no
 //! narrower valid range, so none is checked here. Nothing here writes an address word, an extent
 //! word ([`layout::EXTENT_WORDS`]) or a word the kernel owns, because no setter names one.
 //!
-//! Source: the same kernel headers as [`layout`] (`drivers/vin/vin-isp/isp600/isp600_reg.h`, GPL-2.0),
-//! from `radxa/allwinner-bsp` at `2045a3ca2a01f088c0314dc924bda59d154e363e`.
+//! A setter changes only the bits of its own fields and keeps the rest of the word, so an image
+//! that starts from the library's default words (which set bits the headers name for other
+//! fields, as the crate's `library_tests` vectors record) keeps them.
+//! [`Image::set_modules`] is the one whole word: every bit of it is a module enable.
+//!
+//! Source: the same kernel headers as [`layout`]
+//! (`drivers/vin/vin-isp/isp600/isp600_reg.h`, GPL-2.0), from `radxa/allwinner-bsp` at
+//! `2045a3ca2a01f088c0314dc924bda59d154e363e`.
 
 use crate::layout::{self, Checked, LOAD_BYTES, LOAD_REGISTERS_OFFSET, Refusal, module, reg};
 
@@ -66,6 +73,11 @@ pub mod expand {
     pub const OUTPUT_BIT_SHIFT: u32 = 16;
     /// The largest value a five-bit bit-depth field holds.
     pub const BITS_MAX: u8 = 0x1f;
+    /// The bits this module's setter owns. Every other bit of the word is kept.
+    pub const MASK: u32 = BLC
+        | INVERSE_BLC
+        | ((BITS_MAX as u32) << INPUT_BIT_SHIFT)
+        | ((BITS_MAX as u32) << OUTPUT_BIT_SHIFT);
 }
 
 /// One channel's black level and bit depths, as [`expand`] lays them out.
@@ -127,7 +139,7 @@ impl<'a> Image<'a> {
         Self(image)
     }
 
-    /// Writes the black level and bit depths of `channel`.
+    /// Writes the black level and bit depths of `channel`, keeping the word's other bits.
     pub fn set_channel_expand(
         &mut self,
         channel: usize,
@@ -137,7 +149,8 @@ impl<'a> Image<'a> {
             return Err(Error::Channel(channel));
         };
         let word = value.encode().map_err(Error::Range)?;
-        self.put(register, word);
+        let kept = self.get(register) & !expand::MASK;
+        self.put(register, kept | word);
         Ok(())
     }
 
@@ -151,14 +164,21 @@ impl<'a> Image<'a> {
         Ok(())
     }
 
-    /// Sets or clears the temporal denoise's record enable.
+    /// Sets or clears the temporal denoise's record enable, keeping the word's other bits.
     pub fn set_temporal_record(&mut self, on: bool) {
-        self.put(reg::D3D_CFG0, if on { temporal::RECORD } else { 0 });
+        let kept = self.get(reg::D3D_CFG0) & !temporal::RECORD;
+        let bit = if on { temporal::RECORD } else { 0 };
+        self.put(reg::D3D_CFG0, kept | bit);
     }
 
     /// The image, if it may go to the kernel. See [`layout::check_load`].
     pub fn check(&self) -> Result<Checked<'_>, Refusal> {
         layout::check_load(&self.0[..])
+    }
+
+    fn get(&self, register: usize) -> u32 {
+        let at = LOAD_REGISTERS_OFFSET + register;
+        u32::from_le_bytes([self.0[at], self.0[at + 1], self.0[at + 2], self.0[at + 3]])
     }
 
     fn put(&mut self, register: usize, word: u32) {
