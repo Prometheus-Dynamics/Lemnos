@@ -161,6 +161,49 @@ int main(void)
 	OFF(rkisp35_stat_buffer, frame_id);
 	OFF(rkisp35_stat_buffer, params_id);
 	END();
+
+	printf("// ISP32 (develop-6.1 rk-isp32-config.h, lite statistics included).\n");
+	BEGIN("isp32");
+	SIZE(isp32_isp_params_cfg);
+	OFF(isp32_isp_params_cfg, module_en_update);
+	OFF(isp32_isp_params_cfg, module_ens);
+	OFF(isp32_isp_params_cfg, module_cfg_update);
+	OFF(isp32_isp_params_cfg, frame_id);
+	OFF(isp32_isp_params_cfg, meas);
+	OFF(isp32_isp_params_cfg, others);
+	SIZE(isp32_isp_meas_cfg);
+	SIZE(isp32_isp_other_cfg);
+	SIZE(isp32_stat);
+	SIZE(rkisp32_isp_stat_buffer);
+	OFF(rkisp32_isp_stat_buffer, meas_type);
+	OFF(rkisp32_isp_stat_buffer, frame_id);
+	OFF(rkisp32_isp_stat_buffer, params_id);
+	OFF(rkisp32_isp_stat_buffer, params);
+	SIZE(isp32_lite_stat);
+	SIZE(rkisp32_lite_stat_buffer);
+	OFF(rkisp32_lite_stat_buffer, meas_type);
+	OFF(rkisp32_lite_stat_buffer, frame_id);
+	OFF(rkisp32_lite_stat_buffer, params_id);
+	OFF(rkisp32_lite_stat_buffer, params);
+	END();
+
+	printf("// ISP39 (develop-6.1 rk-isp39-config.h).\n");
+	BEGIN("isp39");
+	SIZE(isp39_isp_params_cfg);
+	OFF(isp39_isp_params_cfg, module_en_update);
+	OFF(isp39_isp_params_cfg, module_ens);
+	OFF(isp39_isp_params_cfg, module_cfg_update);
+	OFF(isp39_isp_params_cfg, frame_id);
+	OFF(isp39_isp_params_cfg, meas);
+	OFF(isp39_isp_params_cfg, others);
+	OFF(isp39_isp_params_cfg, exposure);
+	SIZE(isp39_stat);
+	SIZE(rkisp39_stat_buffer);
+	OFF(rkisp39_stat_buffer, stat);
+	OFF(rkisp39_stat_buffer, meas_type);
+	OFF(rkisp39_stat_buffer, frame_id);
+	OFF(rkisp39_stat_buffer, params_id);
+	END();
 	return 0;
 }
 #endif
