@@ -45,6 +45,7 @@ mod driver;
 pub mod frames;
 #[cfg(feature = "device")]
 pub mod hw;
+pub mod lens;
 pub mod stats;
 
 #[cfg(all(test, feature = "device", target_os = "linux"))]

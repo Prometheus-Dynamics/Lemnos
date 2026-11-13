@@ -112,6 +112,11 @@
 #define ISP_GAMMA_OUT_Y_0	0x05f8
 #define ISP_CT_OFFSET_R		0x0648	/* then g and b */
 #define LSC_CTRL		0x2200
+#define LSC_R_TABLE_ADDR	0x2204	/* then gr, b and gb */
+#define LSC_R_TABLE_DATA	0x2214	/* then gr, b and gb */
+#define LSC_XGRAD_0		0x2224	/* then the x gradients 1 to 3 and y gradients 0 to 3 */
+#define LSC_XSIZE_0		0x2244	/* then the x sizes 1 to 3 and y sizes 0 to 3 */
+#define LSC_TABLE_SEL		0x2264
 #define HIST_PROP		0x2400
 #define HIST_WEIGHTS_0		0x2454
 #define AE_CTRL			0x2600
@@ -120,6 +125,11 @@
 #define AWB_MEAS_MODE		0x2c00
 
 #define CTRL_ENABLE		BIT(0)
+#define LSC_EN			BIT(0)
+#define LSC_ADDR_MASK		0x000001ffu	/* mrv_all_regs.h: MRV_LSC_R_RAM_ADDR */
+#define LSC_DATA_MASK		0x00ffffffu	/* two 12-bit samples: 0 and 12 */
+#define LSC_GRAD_PAIR_MASK	0x0fff0fffu	/* two 12-bit gradients: 0 and 16 */
+#define LSC_SECT_PAIR_MASK	0x03ff03ffu	/* two 10-bit sector sizes: 0 and 16 */
 #define CTRL_MODE		(BIT(3) | BIT(2) | BIT(1))
 #define CTRL_INFORM_ENABLE	BIT(4)
 #define CTRL_CFG_UPD		BIT(9)
@@ -202,8 +212,17 @@ static const struct lrj_plain isp_config[] = {
 	{ ISP_GAMMA_OUT_MODE, 1, ALL },
 	{ ISP_GAMMA_OUT_Y_0, 17, ALL },
 	{ ISP_CT_OFFSET_R, 3, ALL },
-	/* Lens shading: its control, the table addresses (into its own memory) and data. */
-	{ LSC_CTRL, 26, ALL },
+	/*
+	 * Lens shading, each register with its field bits (mrv_all_regs.h): the enable; the four
+	 * table address pointers and the four sample words; the gradient and size pairs; the table
+	 * select. The tables are the ISP's own memory, two banks of 153 words.
+	 */
+	{ LSC_CTRL, 1, LSC_EN },
+	{ LSC_R_TABLE_ADDR, 4, LSC_ADDR_MASK },
+	{ LSC_R_TABLE_DATA, 4, LSC_DATA_MASK },
+	{ LSC_XGRAD_0, 8, LSC_GRAD_PAIR_MASK },
+	{ LSC_XSIZE_0, 8, LSC_SECT_PAIR_MASK },
+	{ LSC_TABLE_SEL, 1, BIT(0) },
 	{ HIST_PROP, 5, ALL },
 	{ HIST_WEIGHTS_0, 7, ALL },
 	{ AE_CTRL, 5, ALL },

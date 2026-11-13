@@ -6,7 +6,7 @@ use crate::access::{STATISTICS, STATISTICS_REGISTERS, WRITABLE, allowed, readabl
 use crate::regs::{
     ADDRESS_REGISTERS, AE_MEAN_0, AE_V_SIZE, AWB_V_SIZE, CTRL_GAMMA_OUT_ENABLE, CTRL_GEN_CFG_UPD,
     HIST_BIN_0, HIST_V_SIZE, HIST_WEIGHT_44, ISP_AWB_MEAN, ISP_AWB_WHITE_CNT, ISP_CTRL, ISP_ICR,
-    ISP_IMSC, ISP_MIS, LSC_TABLE_SEL, MI_BASE, WINDOW_BYTES,
+    ISP_IMSC, ISP_MIS, MI_BASE, WINDOW_BYTES,
 };
 use crate::uapi::{
     DQEVENT, Event, READ_REG, RESET, RegPair, SUBSCRIBE_EVENT, Subscription, UNSUBSCRIBE_EVENT,
@@ -113,14 +113,41 @@ fn isp_ctrl_takes_only_its_gamma_and_update_bits() {
 }
 
 #[test]
+fn the_lens_shading_registers_take_their_field_bits_and_no_more() {
+    use crate::regs::{
+        LSC_ADDR_MASK, LSC_BASE, LSC_CTRL, LSC_DATA_MASK, LSC_EN, LSC_GRAD_PAIR_MASK,
+        LSC_R_TABLE_ADDR, LSC_R_TABLE_DATA, LSC_SECT_PAIR_MASK, LSC_TABLE_SEL, LSC_XGRAD_0,
+        LSC_XSIZE_0, LSC_YGRAD_0, LSC_YSIZE_0,
+    };
+    assert_eq!(writable(LSC_CTRL), Some(LSC_EN));
+    // The four table address pointers, the four sample words, the table select.
+    assert_eq!(writable(LSC_R_TABLE_ADDR), Some(LSC_ADDR_MASK));
+    assert_eq!(writable(LSC_R_TABLE_ADDR + 12), Some(LSC_ADDR_MASK));
+    assert_eq!(writable(LSC_R_TABLE_DATA), Some(LSC_DATA_MASK));
+    assert_eq!(writable(LSC_R_TABLE_DATA + 12), Some(LSC_DATA_MASK));
+    assert_eq!(writable(LSC_TABLE_SEL), Some(1));
+    // Gradients: X 0..3 and Y 0..3 are one run of eight words, the same mask throughout.
+    assert_eq!(writable(LSC_XGRAD_0), Some(LSC_GRAD_PAIR_MASK));
+    assert_eq!(writable(LSC_YGRAD_0 + 12), Some(LSC_GRAD_PAIR_MASK));
+    // Sector sizes: X then Y, also one run of eight words.
+    assert_eq!(writable(LSC_XSIZE_0), Some(LSC_SECT_PAIR_MASK));
+    assert_eq!(writable(LSC_YSIZE_0 + 12), Some(LSC_SECT_PAIR_MASK));
+    // The status is read only; the word after the select is outside the lens block's runs.
+    // `LSC_STATUS` (`LSC_BASE + 0x68`) is read only.
+    assert_eq!(writable(LSC_BASE + 0x68), None);
+    assert_eq!(writable(LSC_TABLE_SEL + 4), None);
+    // A value past a field is refused; the field's own bits are allowed.
+    assert!(allowed(LSC_TABLE_SEL, 1));
+    assert!(!allowed(LSC_TABLE_SEL, 2));
+    assert!(allowed(LSC_XSIZE_0, 0x03FF_03FF));
+    assert!(!allowed(LSC_XSIZE_0, 0x0400));
+    assert!(allowed(LSC_R_TABLE_DATA, 0x00FF_FFFF));
+    assert!(!allowed(LSC_R_TABLE_DATA, 0x0100_0000));
+}
+
+#[test]
 fn the_tuning_registers_are_writable_and_the_measurements_readable() {
-    for addr in [
-        LSC_TABLE_SEL,
-        HIST_V_SIZE,
-        HIST_WEIGHT_44,
-        AE_V_SIZE,
-        AWB_V_SIZE,
-    ] {
+    for addr in [HIST_V_SIZE, HIST_WEIGHT_44, AE_V_SIZE, AWB_V_SIZE] {
         assert_eq!(writable(addr), Some(u32::MAX), "{addr:#x}");
     }
     for addr in [
