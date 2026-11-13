@@ -2349,3 +2349,125 @@ fn the_boots_contract_method_writes_the_history_or_refuses_a_buffer_that_is_too_
         Err(Status::BUFFER_TOO_SMALL)
     );
 }
+
+/// One page of `list_page`: its slots' ids, whether more follow, and the cursor for them.
+fn page(board: &mut Board, after: &str, cap: usize) -> Result<(Vec<String>, bool, String), Status> {
+    let mut out = vec![0u8; cap];
+    let len = board.slots.list_page(after, &mut out)?;
+    assert!(
+        len <= cap,
+        "a page of {len} bytes is over its {cap}-byte buffer"
+    );
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    let Some(Json::List(slots)) = json.get("slots") else {
+        panic!("no slots in the page")
+    };
+    let ids = slots
+        .iter()
+        .map(|s| s.get("id").unwrap().text().unwrap().to_string())
+        .collect();
+    let more = json.get("more") == Some(&Json::Bool(true));
+    let next = json.get("next").unwrap().text().unwrap().to_string();
+    Ok((ids, more, next))
+}
+
+/// Every page from the first, at `cap` bytes each, and the number of pages.
+fn walk(board: &mut Board, cap: usize) -> (Vec<String>, usize) {
+    let mut ids = Vec::new();
+    let mut after = "-".to_string();
+    let mut pages = 0;
+    loop {
+        let (more_ids, more, next) = page(board, &after, cap).unwrap();
+        pages += 1;
+        ids.extend(more_ids);
+        if !more {
+            return (ids, pages);
+        }
+        assert!(pages < 1000, "the walk never ends");
+        after = next;
+    }
+}
+
+/// The unpaged `list`'s slot ids, newest first.
+fn listed(board: &Board) -> Vec<String> {
+    let json = Json::parse(&board.list()).unwrap();
+    let Some(Json::List(slots)) = json.get("slots") else {
+        panic!("no slots")
+    };
+    slots
+        .iter()
+        .map(|s| s.get("id").unwrap().text().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn the_paged_list_walks_every_slot_once_in_the_order_of_the_list() {
+    let mut board = Board::new("os-1");
+    board.slots.set_keep(0).unwrap();
+    for n in 2..=9 {
+        board.install_ok(&format!("os-{n}"));
+    }
+    let all = listed(&board);
+    assert_eq!(all.len(), 9);
+    // A page of about two slots, so the walk takes several.
+    let (ids, pages) = walk(&mut board, 1100);
+    assert_eq!(ids, all, "the pages, in order, are the list");
+    assert!(pages >= 4, "{pages} pages");
+    // A buffer that holds every slot: one page, no cursor.
+    let (ids, more, next) = page(&mut board, "-", 64 * 1024).unwrap();
+    assert_eq!(ids, all);
+    assert!(!more);
+    assert_eq!(next, "");
+}
+
+#[test]
+fn a_slot_installed_between_pages_is_neither_lost_nor_repeated() {
+    let mut board = Board::new("os-1");
+    board.slots.set_keep(0).unwrap();
+    for n in 2..=9 {
+        board.install_ok(&format!("os-{n}"));
+    }
+    let before = listed(&board);
+    let (first, more, next) = page(&mut board, "-", 1100).unwrap();
+    assert!(more);
+    // Installed between the first and the second page: it is the newest, so it is not on a later
+    // page, and nothing already there moves.
+    board.install_ok("os-10");
+    let mut after = next;
+    let mut rest = Vec::new();
+    loop {
+        let (ids, more, next) = page(&mut board, &after, 1100).unwrap();
+        rest.extend(ids);
+        if !more {
+            break;
+        }
+        after = next;
+    }
+    let mut seen = first.clone();
+    seen.extend(rest);
+    assert_eq!(seen, before, "every slot that existed once, in order");
+    assert!(!seen.contains(&"os-10".to_string()));
+    assert_eq!(listed(&board).len(), 10);
+    // A walk that starts again sees the new slot first.
+    let (again, _) = walk(&mut board, 1100);
+    assert_eq!(again[0], "os-10");
+}
+
+#[test]
+fn a_bad_cursor_is_refused_and_a_buffer_too_small_for_a_slot_is_too_small() {
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    for bad in ["x", "x:os-2", "1x:os-2"] {
+        assert_eq!(
+            page(&mut board, bad, 64 * 1024),
+            Err(Status::INVALID_ARGUMENT),
+            "{bad}"
+        );
+    }
+    assert_eq!(page(&mut board, "-", 100), Err(Status::BUFFER_TOO_SMALL));
+    // The smallest cursor comes after every slot: an empty last page.
+    let (ids, more, next) = page(&mut board, "0:", 64 * 1024).unwrap();
+    assert!(ids.is_empty());
+    assert!(!more);
+    assert_eq!(next, "");
+}

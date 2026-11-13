@@ -207,6 +207,7 @@ Tested against a real Orion node and comm core on a PC, in-process
 | Method | What it does |
 | --- | --- |
 | `list` | Every slot (with its `product`, `version` and `board`), the pointers, free space, the reserve, the number kept, the last error |
+| `list_page(after, size)` | The same object with one page of the slots: as many whole slots as fit the buffer, newest first, then `more` and `next`. `after` is `-` for the first page and the previous page's `next` after it (see below) |
 | `install`, `write` | A streamed install (a long job) |
 | `accept`, `install_file` | An install from a file in `.incoming` (a long job) |
 | `set_default(id, force)` | The default from the next boot. The slot must have booted well, unless `force` |
@@ -486,6 +487,16 @@ the failure as `trial.record_error`, and it is null once the reason is kept.
 **Fallen back.** A trial that is out of attempts is resolved on the first boot of the default: its
 state is `rolled-back`, the slot is marked failed with a reason (the trial slot's own `FAIL_REASON`
 when it has one, else "did not reach a running daemon in N boots"), and `resolved` says so.
+
+**Paging `list`.** `list` is one reply, so a board whose slots do not fit one reply (about 170 slots
+in the bridge's 60 KiB; a slot is about 350 bytes of JSON) uses `list_page`. Its page is the slots
+after a cursor, in the order of their install numbers, newest first and ties by id. The first page's
+cursor is `-`; each page says `"more":true|false` and `"next":"<seq>:<id>"` (empty when no page
+follows), and the next call passes that `next`. Guarantee: the pages are cuts of one order, so every
+slot that exists for the whole walk is on exactly one page, and nothing is repeated. A slot installed
+during the walk has a larger install number than any listed, so it sorts before the cursor and is on
+no later page; a slot removed before its page is simply absent. A cursor that is not `-` or
+`<seq>:<id>` is `INVALID_ARGUMENT`; a buffer too small for one slot is `BUFFER_TOO_SMALL`.
 
 **What `list` shows.** Two fields at the end of the object: `trial` is null, or the trial that is
 pending across boots, `{slot, attempts_left, attempts:[{n,time}], last, last_time, reason,

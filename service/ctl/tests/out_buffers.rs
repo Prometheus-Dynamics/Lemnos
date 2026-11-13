@@ -115,7 +115,7 @@ fn every_out_buffer_method_of_every_contract_is_callable_through_the_text_path()
 }
 
 /// The out-buffer methods in `contracts/` (`has_out_buffer`), counted when the test was written.
-const OUT_METHODS: usize = 32;
+const OUT_METHODS: usize = 33;
 
 fn check(method: &OwnedMethod) {
     let mut words = Vec::new();
@@ -205,9 +205,26 @@ fn start_slots() -> Running {
         options: Options::default(),
     })
     .unwrap();
-    Running {
+    let running = Running {
         _service: service,
         socket,
+    };
+    // The device starts after the service does: a call before it is running is refused as not
+    // running. Wait for the state the daemon reports, as `lemnos-ctl list` shows it.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let listed = ctl(&running, &["list"]).unwrap();
+        if listed
+            .lines()
+            .any(|row| row.contains("slots") && row.contains("running"))
+        {
+            break running;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the slots device never ran: {listed}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 

@@ -605,15 +605,88 @@ impl SystemSlots {
     fn list_json(&self) -> String {
         let state = self.state();
         let running = self.running();
+        let mut out = self.list_head(&state, &running);
+        for (at, id) in self.by_age().iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            out.push_str(&self.slot_json(id, &running, &state));
+        }
+        out.push_str("],");
+        out.push_str(&self.list_rest(&state));
+        out
+    }
+
+    /// `list_page`: the slots after the cursor `after`, as many as fit in `cap` bytes. `-` is the
+    /// first page; any other cursor is `<seq>:<id>`, the last slot of the page before. Slots are
+    /// taken in the order of their install number, newest first, ties by id; a page is the slots
+    /// whose key comes after the cursor's, so no slot is repeated, and a slot installed between
+    /// two pages has a larger number and is never in a later one.
+    ///
+    /// # Errors
+    ///
+    /// `INVALID_ARGUMENT` for a cursor that is not one, `BUFFER_TOO_SMALL` when the page's
+    /// fixed fields and one slot do not fit in `cap`.
+    fn list_page_json(&self, after: &str, cap: usize) -> Result<String> {
+        let cursor = match after {
+            "-" => None,
+            _ => {
+                let (seq, id) = after.split_once(':').ok_or(Status::INVALID_ARGUMENT)?;
+                let seq = seq.parse::<u64>().map_err(|_| Status::INVALID_ARGUMENT)?;
+                Some((seq, id))
+            }
+        };
+        let state = self.state();
+        let running = self.running();
+        let pending: Vec<(u64, String)> = self
+            .by_seq()
+            .into_iter()
+            .filter(|(seq, id)| match cursor {
+                None => true,
+                Some((at, last)) => *seq < at || (*seq == at && id.as_str() < last),
+            })
+            .collect();
+        let head = self.list_head(&state, &running);
+        let rest = self.list_rest(&state);
+        let tail = |more: bool, next: &str| format!("],\"more\":{more},\"next\":{next},{rest}");
+        let mut body = String::new();
+        let mut last = String::new();
+        let mut count = 0usize;
+        for (seq, id) in &pending {
+            let mut key = String::new();
+            quoted(&format!("{seq}:{id}"), &mut key);
+            let entry = self.slot_json(id, &running, &state);
+            let sep = if count == 0 { "" } else { "," };
+            // Sized for the longest tail this entry could leave (`more` false).
+            let need = head.len() + body.len() + sep.len() + entry.len() + tail(false, &key).len();
+            if need > cap {
+                break;
+            }
+            body.push_str(sep);
+            body.push_str(&entry);
+            count += 1;
+            last = key;
+        }
+        if count == 0 && (!pending.is_empty() || head.len() + tail(false, "\"\"").len() > cap) {
+            return Err(Status::BUFFER_TOO_SMALL);
+        }
+        let more = count < pending.len();
+        let next = if more { last } else { "\"\"".to_string() };
+        Ok(format!("{head}{body}{}", tail(more, &next)))
+    }
+
+    /// The fields of `list` before its slots: the pointers, the free space and the settings. It
+    /// ends where the slots' array begins.
+    fn list_head(&self, state: &State, running: &str) -> String {
         let mut out = String::from("{");
         for (key, value) in [
-            ("slot_active", &running),
-            ("slot_default", &state.default),
-            ("slot_previous", &state.previous),
-            ("slot_trial", &state.trial),
-            ("slot_staged", &state.staged),
-            ("state", &state.state),
-            ("error", &state.error),
+            ("slot_active", running),
+            ("slot_default", state.default.as_str()),
+            ("slot_previous", state.previous.as_str()),
+            ("slot_trial", state.trial.as_str()),
+            ("slot_staged", state.staged.as_str()),
+            ("state", state.state.as_str()),
+            ("error", state.error.as_str()),
         ] {
             quoted(key, &mut out);
             out.push(':');
@@ -626,71 +699,13 @@ impl SystemSlots {
             self.reserve,
             store::keep_count(&self.layout, self.keep)
         ));
-        for (at, id) in self.by_age().iter().enumerate() {
-            if at > 0 {
-                out.push(',');
-            }
-            let manifest = fs::read_to_string(self.layout.manifest(id))
-                .ok()
-                .and_then(|text| json::Json::parse(&text));
-            let text = |key: &str| {
-                manifest
-                    .as_ref()
-                    .and_then(|m| m.path(key))
-                    .and_then(json::Json::text)
-                    .unwrap_or("")
-                    .to_string()
-            };
-            let meta = Meta::load(&self.layout, id);
-            let size = self.layout.image_size(id).unwrap_or(0);
-            let want = manifest
-                .as_ref()
-                .and_then(|m| m.path("image.size"))
-                .and_then(json::Json::u64);
-            let mut flags = Vec::new();
-            for (flag, slot) in [
-                ("running", &running),
-                ("default", &state.default),
-                ("previous", &state.previous),
-                ("trial", &state.trial),
-                ("staged", &state.staged),
-            ] {
-                if slot == id {
-                    flags.push(format!("\"{flag}\""));
-                }
-            }
-            out.push('{');
-            for (key, value) in [
-                ("id", id.clone()),
-                ("product", text("product")),
-                ("board", text("board")),
-                ("version", text("version")),
-                ("variant", text("variant")),
-                ("kernel", text("kernel")),
-                ("display_name", text("display_name")),
-                ("good", meta.get("GOOD").to_string()),
-                ("signed", signed_word(&meta)),
-                ("signer", meta.get("SIGNER").to_string()),
-                ("installed", meta.get("INSTALLED").to_string()),
-                ("last_boot", meta.get("LAST_BOOT").to_string()),
-            ] {
-                quoted(key, &mut out);
-                out.push(':');
-                quoted(&value, &mut out);
-                out.push(',');
-            }
-            out.push_str(&format!(
-                "\"size\":{size},\"verity\":{},\"intact\":{},\"flags\":[{}],\"pinned\":{},\"failures\":{},\"failed\":{}}}",
-                !text("verity.root_hash").is_empty(),
-                want == Some(size),
-                flags.join(","),
-                meta.pinned(),
-                meta.get("FAILURES").parse::<u32>().unwrap_or(0),
-                meta.failed(),
-            ));
-        }
-        out.push_str("],\"trial\":");
-        out.push_str(&self.trial_json(&state));
+        out
+    }
+
+    /// The fields of `list` after its slots: the trial and the resolved boot, and the object's end.
+    fn list_rest(&self, state: &State) -> String {
+        let mut out = String::from("\"trial\":");
+        out.push_str(&self.trial_json(state));
         out.push_str(",\"resolved\":");
         match Resolved::load(&self.layout) {
             Some(resolved) => out.push_str(&resolved.json()),
@@ -698,6 +713,81 @@ impl SystemSlots {
         }
         out.push('}');
         out
+    }
+
+    /// One slot as `list` shows it: an object.
+    fn slot_json(&self, id: &str, running: &str, state: &State) -> String {
+        let manifest = fs::read_to_string(self.layout.manifest(id))
+            .ok()
+            .and_then(|text| json::Json::parse(&text));
+        let text = |key: &str| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.path(key))
+                .and_then(json::Json::text)
+                .unwrap_or("")
+                .to_string()
+        };
+        let meta = Meta::load(&self.layout, id);
+        let size = self.layout.image_size(id).unwrap_or(0);
+        let want = manifest
+            .as_ref()
+            .and_then(|m| m.path("image.size"))
+            .and_then(json::Json::u64);
+        let mut flags = Vec::new();
+        for (flag, slot) in [
+            ("running", running),
+            ("default", state.default.as_str()),
+            ("previous", state.previous.as_str()),
+            ("trial", state.trial.as_str()),
+            ("staged", state.staged.as_str()),
+        ] {
+            if slot == id {
+                flags.push(format!("\"{flag}\""));
+            }
+        }
+        let mut out = String::from("{");
+        for (key, value) in [
+            ("id", id.to_string()),
+            ("product", text("product")),
+            ("board", text("board")),
+            ("version", text("version")),
+            ("variant", text("variant")),
+            ("kernel", text("kernel")),
+            ("display_name", text("display_name")),
+            ("good", meta.get("GOOD").to_string()),
+            ("signed", signed_word(&meta)),
+            ("signer", meta.get("SIGNER").to_string()),
+            ("installed", meta.get("INSTALLED").to_string()),
+            ("last_boot", meta.get("LAST_BOOT").to_string()),
+        ] {
+            quoted(key, &mut out);
+            out.push(':');
+            quoted(&value, &mut out);
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "\"size\":{size},\"verity\":{},\"intact\":{},\"flags\":[{}],\"pinned\":{},\"failures\":{},\"failed\":{}}}",
+            !text("verity.root_hash").is_empty(),
+            want == Some(size),
+            flags.join(","),
+            meta.pinned(),
+            meta.get("FAILURES").parse::<u32>().unwrap_or(0),
+            meta.failed(),
+        ));
+        out
+    }
+
+    /// Every slot by its install number, newest first, ties by id: the order `list_page` pages.
+    fn by_seq(&self) -> Vec<(u64, String)> {
+        let mut slots: Vec<(u64, String)> = self
+            .layout
+            .slots()
+            .into_iter()
+            .map(|id| (Meta::load(&self.layout, &id).seq(), id))
+            .collect();
+        slots.sort_by(|a, b| b.cmp(a));
+        slots
     }
 
     /// The `trial` field of `list`: null unless a trial is pending across boots.
@@ -987,6 +1077,13 @@ impl Lifecycle for SystemSlots {
 impl Slots for SystemSlots {
     fn list(&mut self, into: &mut [u8]) -> Result<usize> {
         let json = self.list_json();
+        let out = into.get_mut(..json.len()).ok_or(Status::BUFFER_TOO_SMALL)?;
+        out.copy_from_slice(json.as_bytes());
+        Ok(json.len())
+    }
+
+    fn list_page(&mut self, after: &str, into: &mut [u8]) -> Result<usize> {
+        let json = self.list_page_json(after, into.len())?;
         let out = into.get_mut(..json.len()).ok_or(Status::BUFFER_TOO_SMALL)?;
         out.copy_from_slice(json.as_bytes());
         Ok(json.len())
