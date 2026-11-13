@@ -573,3 +573,17 @@ mod held {
         assert_eq!(from.len(), 1);
     }
 }
+
+#[test]
+fn a_location_is_kept_whole_or_cut_at_a_character_boundary() {
+    let mut out = Description::new();
+    assert_eq!(out.location(), "");
+    out.set_location("/sys/class/hwmon/hwmon2");
+    assert_eq!(out.location(), "/sys/class/hwmon/hwmon2");
+    // Past the bound, it is cut where a character ends: 127 ASCII bytes and a 2-byte letter.
+    let long = std::format!("{}é{}", "a".repeat(127), "b".repeat(10));
+    out.set_location(&long);
+    assert_eq!(out.location(), "a".repeat(127));
+    out.set_location("");
+    assert_eq!(out.location(), "");
+}

@@ -67,9 +67,9 @@ impl Lifecycle for GpioPowerSwitch {
     }
 
     fn describe(&self, out: &mut Description) {
-        out.add(Item::value("power.on", IS_ON));
+        out.add(Item::value("power.on", IS_ON).dimensionless());
         if self.fault.is_some() {
-            out.add(Item::value("power.fault", FAULT));
+            out.add(Item::value("power.fault", FAULT).dimensionless());
         }
     }
 }

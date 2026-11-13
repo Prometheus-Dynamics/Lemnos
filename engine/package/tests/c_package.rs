@@ -244,6 +244,8 @@ config = { base = 40 }
         kind: ItemKind::Value,
         name: "level",
         unit: Unit::One,
+        // The package's table carries no unit state yet (V1c): the unit string decides.
+        unit_state: lemnos_core::UnitState::Unknown,
         exponent: 0,
         min: Some(0),
         max: Some(100),

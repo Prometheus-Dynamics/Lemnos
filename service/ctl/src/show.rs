@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use lemnos_core::ItemKind;
+use lemnos_core::{ItemKind, UnitState};
 use lemnos_wire::{DeviceDescription, OwnedItem};
 
 /// The panel for a described device, one line each.
@@ -25,6 +25,9 @@ pub fn panel(description: &DeviceDescription) -> Vec<String> {
             .address
             .map_or_else(|| "unknown".to_string(), |a| format!("{a:#04x}"))
     ));
+    if !description.location.is_empty() {
+        lines.push(format!("  location {}", description.location));
+    }
     lines.push(format!("  state    {}", state_text(description)));
     if !description.contracts.is_empty() {
         lines.push(format!("  provides {}", contract_list(description)));
@@ -89,12 +92,13 @@ fn contract_list(description: &DeviceDescription) -> String {
 /// A figure the device does not give is written `unknown`, never guessed.
 fn item_row(item: &OwnedItem) -> String {
     let mut row = format!("  {}", item.name);
-    let unit = if item.unit.is_empty() {
-        ""
-    } else {
-        item.unit.as_str()
+    // Three states: a unit, a dimensionless count or switch, and a unit the driver did not say.
+    let unit = match item.unit_state {
+        UnitState::Known => item.unit.clone(),
+        UnitState::Dimensionless => "dimensionless".to_string(),
+        UnitState::Unknown => "unknown".to_string(),
     };
-    let _ = write!(row, "  unit {}", if unit.is_empty() { "-" } else { unit });
+    let _ = write!(row, "  unit {unit}");
     let range = match (item.min, item.max) {
         (Some(min), Some(max)) => format!(
             "{}..{}",
@@ -175,5 +179,65 @@ mod tests {
         assert_eq!(scaled(7, -3), "0.007");
         assert_eq!(scaled(42, 0), "42");
         assert_eq!(scaled(3, 2), "300");
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::panel;
+    use lemnos_wire::DeviceDescription;
+
+    #[test]
+    fn the_panel_gives_a_location_only_when_the_driver_names_one() {
+        let mut description = DeviceDescription {
+            label: "fan".into(),
+            ..DeviceDescription::default()
+        };
+        assert!(
+            !panel(&description)
+                .iter()
+                .any(|line| line.contains("location"))
+        );
+        description.location = "/sys/class/hwmon/hwmon2".into();
+        assert!(
+            panel(&description)
+                .iter()
+                .any(|line| line == "  location /sys/class/hwmon/hwmon2")
+        );
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::item_row;
+    use lemnos_core::{ItemKind, UnitState};
+    use lemnos_wire::OwnedItem;
+
+    fn row(unit: &str, state: UnitState) -> String {
+        let item = OwnedItem {
+            kind: ItemKind::Value,
+            name: "x".into(),
+            unit: unit.into(),
+            unit_state: state,
+            exponent: 0,
+            min: None,
+            max: None,
+            contract: 0,
+            method: 0,
+            field: None,
+            reading: None,
+            step: None,
+            warn_low: None,
+            warn_high: None,
+            group: None,
+        };
+        item_row(&item)
+    }
+
+    #[test]
+    fn the_three_unit_states_render_three_ways() {
+        assert!(row("V", UnitState::Known).contains("unit V"));
+        assert!(row("", UnitState::Dimensionless).contains("unit dimensionless"));
+        assert!(row("", UnitState::Unknown).contains("unit unknown"));
     }
 }

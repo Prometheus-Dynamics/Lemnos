@@ -251,3 +251,16 @@ fn the_board_gives_the_speed_range_and_the_stall_limit() {
         Err(Status::INVALID_ARGUMENT)
     ));
 }
+
+#[test]
+fn the_fan_names_its_hwmon_directory_as_its_location() {
+    let tree = Tree::new("location");
+    let fan = pwm_fan(tree.root());
+    let mut out = Description::new();
+    Driver::describe(&fan, &mut out);
+    assert!(
+        out.location().ends_with("class/hwmon/hwmon2"),
+        "{}",
+        out.location()
+    );
+}

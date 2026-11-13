@@ -7,7 +7,7 @@
 
 use lemnos_core::{
     ContractInfo, Decode, Description, Encode, Item, ItemKind, Manifest, MethodId, MethodInfo,
-    Reader, Reading, Result, Shape, Status, Tail, Writer,
+    Reader, Reading, Result, Shape, Status, Tail, UnitState, Writer,
 };
 
 use crate::hash;
@@ -100,6 +100,9 @@ pub struct OwnedItem {
     pub kind: ItemKind,
     pub name: String,
     pub unit: String,
+    /// Whether the unit is known, dimensionless or not said. From a host before the state, it is
+    /// unknown when `unit` is empty and known otherwise.
+    pub unit_state: UnitState,
     pub exponent: i8,
     pub min: Option<i64>,
     pub max: Option<i64>,
@@ -131,6 +134,9 @@ pub struct DeviceDescription {
     pub bus: String,
     /// The 7-bit I2C address the driver named, if it named one.
     pub address: Option<u8>,
+    /// Where the driver says the device is, in words, for what an address cannot say (a sysfs
+    /// directory, a chip select, a port path). Empty when the driver names none.
+    pub location: String,
     /// The device's state, as [`crate::state`] numbers it, and why it is in that state (empty
     /// when it is running). `None` from a host that sends no identity.
     pub state: Option<u8>,
@@ -208,6 +214,9 @@ struct DescIdentity<'a> {
     reason: &'a str,
     address: Option<u8>,
     kind: &'a str,
+    /// Appended after the fields above (the identity's struct block grew by it): a reader from
+    /// before it skips it.
+    location: &'a str,
 }
 
 /// One contract's kind, appended after the identity: one per contract, in order.
@@ -224,6 +233,9 @@ struct DescItemExtra<'a> {
     warn_low: Option<i64>,
     warn_high: Option<i64>,
     group: Option<&'a str>,
+    /// Appended after the fields above: its absence (a host from before it) reads as `None`, and
+    /// the unit's state is then decided by the unit string.
+    unit_state: Option<u8>,
 }
 
 /// Folds the description's framing into `hash`: its record names and shapes, its shape codes and
@@ -468,6 +480,7 @@ pub(crate) fn encode_trailer(
         reason: identity.reason,
         address: description.address(),
         kind: device_kind(manifest),
+        location: description.location(),
     }
     .encode(out)?;
     (manifest.provides.len() as u16).encode(out)?;
@@ -485,6 +498,7 @@ pub(crate) fn encode_trailer(
             warn_low: item.warn_low,
             warn_high: item.warn_high,
             group: item.group,
+            unit_state: Some(item.unit_state.code()),
         }
         .encode(out)?;
     }
@@ -536,6 +550,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
             kind,
             name: item.name.to_string(),
             unit: item.unit.to_string(),
+            unit_state: UnitState::from_unit(item.unit),
             exponent: item.exponent,
             min: item.min,
             max: item.max,
@@ -574,6 +589,7 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
         out.reason = identity.reason.to_string();
         out.address = identity.address;
         out.kind = identity.kind.to_string();
+        out.location = identity.location.to_string();
         for index in 0..usize::from(u16::decode(from)?) {
             let kind = DescContractKind::decode(from)?.kind.to_string();
             if let Some(contract) = out.contracts.get_mut(index) {
@@ -589,6 +605,9 @@ pub fn decode_description(bytes: &[u8]) -> Result<DeviceDescription> {
                 item.warn_low = extra.warn_low;
                 item.warn_high = extra.warn_high;
                 item.group = extra.group.map(str::to_string);
+                if let Some(state) = extra.unit_state.and_then(UnitState::from_code) {
+                    item.unit_state = state;
+                }
             }
         }
     }

@@ -110,15 +110,15 @@ impl Lifecycle for Identity {
 
     fn describe(&self, out: &mut Description) {
         if self.facts.get("serial").is_some() {
-            out.add(Item::value("serial", SERIAL));
+            out.add(Item::value("serial", SERIAL).dimensionless());
         }
         if self.facts.get("family").is_some() {
-            out.add(Item::value("family", FAMILY));
+            out.add(Item::value("family", FAMILY).dimensionless());
         }
         if self.facts.get("model").is_some() {
-            out.add(Item::value("model", MODEL));
+            out.add(Item::value("model", MODEL).dimensionless());
         }
-        out.add(Item::value("facts", FACTS));
+        out.add(Item::value("facts", FACTS).dimensionless());
     }
 
     fn health(&self) -> Health {

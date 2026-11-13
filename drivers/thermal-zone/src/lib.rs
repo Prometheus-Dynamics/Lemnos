@@ -76,6 +76,9 @@ impl Lifecycle for ThermalZone {
     }
 
     fn describe(&self, out: &mut Description) {
+        if let Some(dir) = self.temp.parent().and_then(Path::to_str) {
+            out.set_location(dir);
+        }
         let mut temperature = Item::value("temperature", READ).unit(Unit::DegreeCelsius, 0);
         if let (Some(min), Some(max)) = (self.limits.min, self.limits.max) {
             temperature = temperature.range(min, max);

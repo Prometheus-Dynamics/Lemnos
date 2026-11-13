@@ -477,6 +477,7 @@ pub fn render(
 pub fn render_reply(method: &OwnedMethod, reply: &[u8]) -> Result<String, String> {
     let bare = OwnedItem {
         kind: ItemKind::Value,
+        unit_state: lemnos_core::UnitState::Unknown,
         name: String::new(),
         unit: String::new(),
         exponent: 0,
@@ -575,6 +576,7 @@ mod tests {
     fn item(unit: &str, exponent: i8, field: Option<&str>) -> OwnedItem {
         OwnedItem {
             kind: ItemKind::Value,
+            unit_state: lemnos_core::UnitState::from_unit(unit),
             name: "i".to_string(),
             unit: unit.to_string(),
             exponent,

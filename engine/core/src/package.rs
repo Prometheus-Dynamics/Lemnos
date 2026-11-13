@@ -54,7 +54,7 @@ use crate::{
     Driver, ErrorKind, Field, Health, I2c, InterruptHandle, Item, ItemKind, JobId, JobState, Line,
     LocalCaller, Manifest, MethodId, MethodInfo, Need, NeedKind, Param, Provider, Pwm, RawSpiBus,
     Reading, RegistersHandle, Reply, ResetHandle, Resources, Result, Router, Shape, Spi, Status,
-    StreamHandle, Tag, Uart, Unit, UsbDeviceHandle, UsbFunctionHandle,
+    StreamHandle, Tag, Uart, Unit, UnitState, UsbDeviceHandle, UsbFunctionHandle,
 };
 
 /// The boundary's own types, for [`export_package!`](crate::export_package) and the loader.
@@ -765,13 +765,17 @@ pub fn item_in(item: &PackageItem) -> Option<Item> {
 pub fn item_with(item: &PackageItem, extra: Option<&PackageExtra>) -> Option<Item> {
     let extra = extra.filter(|extra| extra.what == EXTRA_ITEM);
     let has = |flag: u8| extra.is_some_and(|extra| extra.flags & flag != 0);
+    // A package states no unit state yet (V1c adds its table): the unit string decides, as it does
+    // for a host from before the state.
+    let unit = UNITS
+        .get(usize::from(item.unit))
+        .copied()
+        .unwrap_or(Unit::One);
     Some(Item {
         kind: *ITEM_KINDS.get(usize::from(item.kind))?,
         name: item.name.as_str(),
-        unit: UNITS
-            .get(usize::from(item.unit))
-            .copied()
-            .unwrap_or(Unit::One),
+        unit,
+        unit_state: UnitState::from_unit(unit.symbol()),
         exponent: item.exponent,
         min: (item.flags & ITEM_HAS_MIN != 0).then_some(item.min),
         max: (item.flags & ITEM_HAS_MAX != 0).then_some(item.max),

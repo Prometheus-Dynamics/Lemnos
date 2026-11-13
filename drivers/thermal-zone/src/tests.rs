@@ -168,3 +168,12 @@ fn the_board_gives_the_zones_range_and_warning_limits() {
     ];
     assert!(ThermalZone::start(ThermalZoneNeeds {}, &Config::new(&backwards)).is_err());
 }
+
+#[test]
+fn the_zone_names_its_directory_as_its_location() {
+    let tree = Tree::new("location");
+    let dev = zone(&tree.path());
+    let mut out = Description::default();
+    dev.describe(&mut out);
+    assert_eq!(out.location(), tree.path());
+}

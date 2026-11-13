@@ -110,6 +110,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`S1a.md`](../testing/board-runs/S1a.md) | `pwm-channel-fan`: bind at full, duty mapping, polarity, minimum and kick, tachometer, failure, release and stop |
 | [`S1c.md`](../testing/board-runs/S1c.md) | `hwmon-fan`: take-over, release to full duty with the mode left manual, drop, a fan never taken |
 | [`V1b3.md`](../testing/board-runs/V1b3.md) | The ranges, steps and warning limits of the fan, power monitor, thermal zone and watchdog items, from the board file and sysfs |
+| [`V1b4.md`](../testing/board-runs/V1b4.md) | The `location` line of the thermal zone and the hwmon fan, and the three unit states in `lemnos-ctl show` |
 | [`B13.md`](../testing/board-runs/B13.md) | `thermal-zone`: reads against the kernel's value, a missing zone |
 | [`H3a.md`](../testing/board-runs/H3a.md) | The description form: a power monitor described by a file beside `ina2xx` on the same chip, identity refusal, an outage; a temperature or inertial chip from a file |
 | [`H3b.md`](../testing/board-runs/H3b.md) | Drivers on a UART: `raw-bus` loopback and its frame settings, a Modbus sensor from a description, an outage, a wrong unit id |
