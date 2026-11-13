@@ -235,6 +235,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E19.md`](../testing/board-runs/E19.md) | `a733-video`: the register window, the claim, a second claimant |
 | [`H8a.md`](../testing/board-runs/H8a.md) | `a733-video` through `lemnos.ko`: the encoder's register map, an encode, tight extents, refusals, a timeout reset |
 | [`K1a.md`](../testing/board-runs/K1a.md) | The VEPU541 H.264 encoder through `rk-mpp`: the identity register, the read-back window, the stream length, the address alignments |
+| [`K1d.md`](../testing/board-runs/K1d.md) | The A733 encoder's QP map and CTU info records and header values: nothing runs on an engine; untested on board |
 | [`K1a2.md`](../testing/board-runs/K1a2.md) | The VEPU541 H.264 encoder's second window (L2) and multi-run jobs through `rk-mpp`: the L2 words read back, the write runs, the refusals |
 | [`K1a2b.md`](../testing/board-runs/K1a2b.md) | The VEPU580 H.264 encoder through `rk-mpp:rkvenc2`: the classes, the picture-class translation with its offset in the descriptor word, the status read-back |
 | [`K1a3.md`](../testing/board-runs/K1a3.md) | The VEPU541 H.265 encoder through `rk-mpp:rkvenc`: the identity word, the read-back, one encode and the L2 words |

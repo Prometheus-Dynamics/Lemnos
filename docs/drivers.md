@@ -144,6 +144,16 @@ Sources checked for the rest, and why none of them is used:
 | `k230-vpu` | `codec.block/1` | `jobs` stream of dma-bufs | Serves its contract. Some of the node's private requests are refused |
 | `a733-video` | `codec.block/1` | `jobs` stream | With `route = "module"`, encode jobs as register writes and dma-bufs, which `lemnos.ko` checks and runs: it writes every address register itself and refuses a range that doesn't cover what the job's own geometry makes the engine reach. On the vendor route (the default) register reads only, because an address written into a register cannot be bounded from user space. A decode job is refused: the module allows the H.264 encoder's registers only |
 
+The A733 encoder's records and values (`drivers/a733-video/src/encoder`, `lemnos-
+driver-a733-video`'s `encoder` module) are the per-macroblock QP map, the per-CTU info word and the
+codec, rate-control, pixel, H.264 profile and level, buffer flag and slice values, from the header
+files of `mashiqi/A733-Cedarc` at `2e07a43cff96903e962e6ff2f83da6def6cb3d9c` (`vendor/headers/`).
+The headers define no register offset or bit position for the encoder, so the encoder builds no job
+from them. The H.264 register facts the kernel module uses come from the open sources
+`kernel/README.md` names. Those files carry no open licence (that repository's `vendor/README.md`
+states it has no written redistribution grant), and the user will revisit that before anything is
+distributed. This note is the only place it is recorded, and it is not a gate.
+
 ## Neural accelerators
 
 | Driver | Provides | Needs | State |
