@@ -33,7 +33,7 @@ use lemnos_core::{Decode, Encode, Result, contract};
 pub const MAX_STREAM_NAME: usize = 32;
 
 /// The largest result a run completes with, in bytes.
-pub const RESULT_BYTES: usize = 1;
+pub const RESULT_BYTES: usize = 4 + 1;
 
 macro_rules! wire_enum {
     ($name:ident { $($variant:ident = $value:literal),* $(,)? }) => {
@@ -100,7 +100,7 @@ pub struct RunJob {
 }
 
 /// Encoded size of a [`RunJob`], in bytes. The job queue must hold jobs this large.
-pub const JOB_BYTES: usize = 8 + 4 + 4;
+pub const JOB_BYTES: usize = 4 + 8 + 4 + 4;
 
 /// Counted since the job stream was opened.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -76,7 +76,7 @@ pub const MAX_BLOCK_NAME: usize = 48;
 
 /// Where a job's read-back starts in its result buffer. The bytes before are the completion's
 /// record.
-pub const DATA_OFFSET: usize = 8;
+pub const DATA_OFFSET: usize = 12;
 
 /// One job, posted on the job stream.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,7 +92,7 @@ pub struct Job {
 }
 
 /// Encoded size of a [`Job`], in bytes. The job queue must hold jobs this large.
-pub const JOB_BYTES: usize = 8 + 4 + 4 + 4;
+pub const JOB_BYTES: usize = 4 + 8 + 4 + 4 + 4;
 
 /// The start of a job's work.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -104,7 +104,7 @@ pub struct WorkHeader {
 }
 
 /// Encoded size of a [`WorkHeader`], in bytes.
-pub const WORK_HEADER_BYTES: usize = 2 + 2;
+pub const WORK_HEADER_BYTES: usize = 4 + 2 + 2;
 
 /// Part of a stream buffer, in one of the block's slots.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -121,7 +121,7 @@ pub struct BufferRef {
 }
 
 /// Encoded size of a [`BufferRef`], in bytes.
-pub const BUFFER_REF_BYTES: usize = 4 * 4;
+pub const BUFFER_REF_BYTES: usize = 4 + 4 * 4;
 
 /// What comes before an item's bytes.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -133,7 +133,7 @@ pub struct ItemHeader {
 }
 
 /// Encoded size of an [`ItemHeader`], in bytes.
-pub const ITEM_HEADER_BYTES: usize = 4 + 4;
+pub const ITEM_HEADER_BYTES: usize = 4 + 4 + 4;
 
 macro_rules! wire_enum {
     ($name:ident { $($variant:ident = $value:literal),* $(,)? }) => {
@@ -180,7 +180,7 @@ pub struct Completion {
 }
 
 /// Encoded size of a [`Completion`], in bytes. It fits in [`DATA_OFFSET`].
-pub const COMPLETION_BYTES: usize = 1 + 4;
+pub const COMPLETION_BYTES: usize = 4 + 1 + 4;
 
 /// What the block takes.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -52,7 +52,7 @@ fn max_len(shape: &Shape) -> Option<usize> {
         Shape::Option(inner) => 1 + max_len(inner)?,
         Shape::Array(inner, count) => max_len(inner)? * *count as usize,
         Shape::Record(fields) => {
-            let mut total = 0;
+            let mut total = 4;
             for field in *fields {
                 total += max_len(&field.shape)?;
             }
@@ -178,14 +178,16 @@ fn every_type_round_trips() {
 fn a_job_is_a_fixed_small_record() {
     assert_eq!(
         max_len(&IspJob::SHAPE),
-        Some(8 + 4 + 4 + 4 + 4 * MAX_OUTPUTS)
+        Some(4 + 8 + 4 + 4 + 4 + 4 * MAX_OUTPUTS)
     );
 }
 
 #[test]
 fn a_bad_bayer_in_an_input_is_refused() {
-    let mut bytes = [0u8; 10];
-    bytes[9] = 200;
+    // A block: its u32 length (10 body bytes), then width, height, bit depth and the bayer byte.
+    let mut bytes = [0u8; 14];
+    bytes[..4].copy_from_slice(&10u32.to_le_bytes());
+    bytes[13] = 200;
     assert_eq!(
         IspInput::decode(&mut Reader::new(&bytes)).err(),
         Some(Status::INVALID_ARGUMENT)

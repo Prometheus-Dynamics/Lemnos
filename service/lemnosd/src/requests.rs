@@ -9,8 +9,9 @@ use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::{
-    Appended, Frame, LAYOUT_HASH, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PLANE_LENGTH_BYTES,
-    VERSION, WireError, decode, encode_description, feature, handle_descriptors, package_mode,
+    CORE_HASH, Frame, LEMNOS, LemnosName, MAX_FRAME, MAX_PLANES, PART_BYTES, PLANE_LENGTH_BYTES,
+    Tail, VERSION, WireError, decode, encode_description, feature, handle_descriptors,
+    package_mode,
 };
 
 use crate::Core;
@@ -86,11 +87,13 @@ impl Client {
         loop {
             match decode(&buf[self.start..self.end]) {
                 Ok(None) => return true,
-                Err(WireError::LayoutMismatch(_)) => {
-                    // Built from another Lemnos revision: say which, then close. The peer checks
-                    // our layout in the Welcome it gets, before anything else in it.
+                Err(WireError::LayoutMismatch(_) | WireError::PartMismatch { .. }) => {
+                    // Built from another core, or another part: say which, then close. The peer
+                    // checks our core and then our parts in the Welcome it gets, before anything
+                    // else in it.
                     self.conn.answer(&Frame::Welcome {
-                        layout: LAYOUT_HASH,
+                        core: CORE_HASH,
+                        parts: Tail(&PART_BYTES[..]),
                         lemnos: LemnosName(LEMNOS),
                         version: VERSION,
                         features: 0,
@@ -182,7 +185,8 @@ impl Client {
             self.conn.events.store(events, Ordering::Relaxed);
         }
         self.conn.answer(&Frame::Welcome {
-            layout: LAYOUT_HASH,
+            core: CORE_HASH,
+            parts: Tail(&PART_BYTES[..]),
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
             features: feature::STREAM_HANDLES | feature::PACKAGES | feature::JOBS,
@@ -209,7 +213,7 @@ impl Client {
                 state,
                 health,
                 reason: &reason,
-                link: Appended(info.link.as_deref().unwrap_or("")),
+                link: Tail(info.link.as_deref().unwrap_or("")),
             });
         }
         self.conn.answer(&Frame::ListDone { id });

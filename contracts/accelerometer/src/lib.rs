@@ -22,8 +22,9 @@ pub struct Sample {
     pub value: Vector3,
 }
 
-/// Bytes of one record of a batch: the stamp (8), then X, Y and Z (4 each).
-pub const RECORD_LEN: usize = 20;
+/// Bytes of one record of a batch: a block length (4), the stamp (8), then X, Y and Z as their
+/// own block (4 + 3 × 4).
+pub const RECORD_LEN: usize = 4 + 8 + (4 + 3 * 4);
 
 #[contract("accelerometer", version = 1)]
 pub trait Accelerometer {

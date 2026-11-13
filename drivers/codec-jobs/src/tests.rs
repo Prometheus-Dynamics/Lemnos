@@ -507,7 +507,7 @@ impl StreamEndpoint for Loop {
         let job = Job {
             identity: self.posted,
             work: 0,
-            work_bytes: (WORK_HEADER_BYTES + 16 + 8 + 4) as u32,
+            work_bytes: (WORK_HEADER_BYTES + (4 + 4 * 4) + (4 + 4 + 4) + 4) as u32,
             result: 1,
         };
         let mut writer = Writer::new(out);
@@ -562,7 +562,7 @@ fn serving_jobs_allocates_nothing() {
         work.item(3, &[1, 2, 3, 4]).unwrap();
         work.finish()
     };
-    assert_eq!(len, WORK_HEADER_BYTES + 16 + 8 + 4);
+    assert_eq!(len, WORK_HEADER_BYTES + (4 + 4 * 4) + (4 + 4 + 4) + 4);
     let mut server = Server::new();
     let mut block = Quick;
     for now in 0..4 {

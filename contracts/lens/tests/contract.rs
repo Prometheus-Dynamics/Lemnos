@@ -23,10 +23,11 @@ fn the_tag_and_numbers_are_stable() {
 #[test]
 fn a_range_round_trips() {
     let range = Range { min: 0, max: 1023 };
-    let mut buffer = [0; 4];
+    let mut buffer = [0; 8];
     let mut writer = Writer::new(&mut buffer);
     range.encode(&mut writer).unwrap();
     let used = writer.len();
+    assert_eq!(used, 4 + 2 + 2);
     assert_eq!(
         Range::decode(&mut Reader::new(&buffer[..used])).unwrap(),
         range

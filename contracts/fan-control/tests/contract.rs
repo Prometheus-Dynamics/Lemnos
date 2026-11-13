@@ -35,7 +35,7 @@ fn a_curve_round_trips() {
             duty: 1000,
         },
     ];
-    let mut bytes = [0; 16];
+    let mut bytes = [0; 2 * POINT_BYTES];
     assert_eq!(Point::write_all(&points, &mut bytes), Ok(2 * POINT_BYTES));
     let back: Vec<_> = Point::read_all(&bytes).unwrap().collect();
     assert_eq!(back, points);

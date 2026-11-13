@@ -92,6 +92,8 @@ pub fn read(
             let OwnedShape::Record(fields) = shape else {
                 return Err(ReadError::NoField);
             };
+            // A record is a block: its length, then its fields.
+            cursor.take::<4>()?;
             let mut found = None;
             for (name, inner) in fields {
                 if name == wanted {
@@ -149,11 +151,10 @@ fn skip(shape: &OwnedShape, cursor: &mut Cursor<'_>) -> Result<(), ReadError> {
             }
             Ok(())
         }
-        OwnedShape::Record(fields) => {
-            for (_, inner) in fields {
-                skip(inner, cursor)?;
-            }
-            Ok(())
+        OwnedShape::Record(_) => {
+            // A record is a block: its length, then its fields, which are stepped over whole.
+            let len = u32::from_le_bytes(cursor.take()?) as usize;
+            cursor.run(len).map(drop)
         }
     }
 }
@@ -220,7 +221,9 @@ mod tests {
             ("count", OwnedShape::U16),
             ("ok", OwnedShape::Bool),
         ]);
+        // The block's length (10), then the fields.
         let mut reply = Vec::new();
+        reply.extend_from_slice(&10u32.to_le_bytes());
         reply.extend_from_slice(&3u32.to_le_bytes());
         reply.extend_from_slice(b"abc");
         reply.extend_from_slice(&500u16.to_le_bytes());

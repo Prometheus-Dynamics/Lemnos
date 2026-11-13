@@ -96,7 +96,7 @@ use lemnos_core::{Decode, Encode, Result, contract};
 pub const MAX_STREAM_NAME: usize = 32;
 
 /// Where a job's bytes start in its buffer. The bytes before are the completion's record.
-pub const DATA_OFFSET: usize = 8;
+pub const DATA_OFFSET: usize = 12;
 
 macro_rules! wire_enum {
     ($name:ident { $($variant:ident = $value:literal),* $(,)? }) => {
@@ -156,7 +156,7 @@ pub struct Job {
 }
 
 /// Encoded size of a [`Job`], in bytes. The job queue must hold jobs this large.
-pub const JOB_BYTES: usize = 8 + 1 + 1 + 4 + 4;
+pub const JOB_BYTES: usize = 4 + 8 + 1 + 1 + 4 + 4;
 
 /// How a job ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -188,7 +188,7 @@ pub struct Completion {
 }
 
 /// Encoded size of a [`Completion`], in bytes. It fits in [`DATA_OFFSET`].
-pub const COMPLETION_BYTES: usize = 1 + 4;
+pub const COMPLETION_BYTES: usize = 4 + 1 + 4;
 
 /// What happened on the bus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -239,7 +239,7 @@ pub struct Request {
 
 /// Encoded size of an [`Event`], in bytes. An event job's buffer holds this after
 /// [`DATA_OFFSET`].
-pub const EVENT_BYTES: usize = 1 + 8;
+pub const EVENT_BYTES: usize = 4 + 1 + (4 + 1 + 1 + 2 + 2 + 2);
 
 /// What the block takes.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]

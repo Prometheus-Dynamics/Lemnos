@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lemnos_core::Status;
+use lemnos_core::{Status, Tail};
 use lemnos_wire::ring::Layout;
 use lemnos_wire::{
-    DeviceDescription, Frame, LAYOUT_HASH, LEMNOS, LemnosName, MAX_QUEUED_BYTES, Planes, VERSION,
-    WireError, append, decode, decode_description, feature, handle_descriptors, health,
+    CORE_HASH, DeviceDescription, Frame, LEMNOS, LemnosName, MAX_QUEUED_BYTES, PART_BYTES, Planes,
+    VERSION, WireError, append, decode, decode_description, feature, handle_descriptors, health,
     package_mode, state,
 };
 
@@ -702,11 +702,12 @@ impl Session {
         }
         let mut connection = Connection::new(stream);
         let hello = Frame::Hello {
-            layout: LAYOUT_HASH,
+            core: CORE_HASH,
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
             name: &self.name,
             events: self.events_wanted,
+            parts: Tail(&PART_BYTES),
         };
         if append(&hello, &mut connection.tx).is_err() {
             self.arm_retry();
@@ -739,10 +740,15 @@ impl Session {
                 Ok(None) => return Some(count),
                 Err(WireError::LayoutMismatch(peer)) => {
                     self.shared.rejected = Some(Error::LayoutMismatch {
-                        ours: LAYOUT_HASH,
-                        theirs: peer.layout,
+                        ours: CORE_HASH,
+                        theirs: peer.core,
                         theirs_lemnos: peer.lemnos().to_string(),
                     });
+                    self.shared.close = true;
+                    return None;
+                }
+                Err(WireError::PartMismatch { part, ours, theirs }) => {
+                    self.shared.rejected = Some(Error::PartMismatch { part, ours, theirs });
                     self.shared.close = true;
                     return None;
                 }

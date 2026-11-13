@@ -30,8 +30,8 @@ closes the connection on a larger length, without reading it.
 
 | Kind | Name | Fields | Direction |
 |---|---|---|---|
-| 1 | Hello | layout u64, lemnos name (32 bytes), version u16, name str, events bool | to host |
-| 2 | Welcome | layout u64, lemnos name (32 bytes), version u16, features u64, host str | to client |
+| 1 | Hello | core u64, lemnos name (32 bytes), version u16, name str, events bool, parts (tail) | to host |
+| 2 | Welcome | core u64, lemnos name (32 bytes), version u16, features u64, host str, parts (tail) | to client |
 | 3 | List | id u32 | to host |
 | 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str | to client |
 | 5 | ListDone | id u32 | to client |
@@ -98,47 +98,70 @@ with the same fixed-size prefix, 42 bytes, and nothing else:
 
 ```text
 offset  size  field
-6       8     layout: the layout hash of the sender's build (see below)
+6       8     core: the core hash of the sender's build (see below)
 14      32    lemnos: the sender's Lemnos version, UTF-8, NUL-padded
 46      2     version: the protocol version (1)
 ```
 
-A reader checks `layout` first, then reads `lemnos`, and compares nothing else until both have
-been read. A `layout` that is not its own is an error at once: the reader closes the connection,
+A reader checks `core` first, then reads `lemnos`, and compares nothing else until both have
+been read. A `core` that is not its own is an error at once: the reader closes the connection,
 whatever follows the prefix, and never decodes the rest. It can read the peer's Lemnos version
 from the same prefix to say which revision it is. Only the prefix's place is fixed for every
 version, so a later change to the rest of Hello or Welcome can't make this check misread a peer.
 
-A host that refuses a Hello for its layout still answers with its own Welcome, with the same
-prefix, and then closes. So the client learns the host's layout and Lemnos version and can name
+A host that refuses a Hello for its core still answers with its own Welcome, with the same
+prefix, and then closes. So the client learns the host's core and Lemnos version and can name
 both.
 
-**The layout hash** is a 64-bit FNV-1a computed at compile time, not a number kept by hand. It
-folds the frame table (every kind, name, field name and field shape, in order), the constants this
-document names (`MAX_FRAME`, the handle and plane limits, the feature bits, the state, health and
-package-mode values, the length prefix), and the stream ring's layout constants. Each is declared
-once, and the encoder, decoder and hash are generated from that one declaration, so a change to
-the layout moves the hash. The value this build computes is:
+## Core and parts
 
-`layout hash: 0xf16439dd434fb7c8`
+The wire is split into units, and each has its own hash. A client, a host and a driver package
+need agree only on the units they use. A minor change to one unit does not refuse a peer that uses
+another. Each hash is a 64-bit FNV-1a computed at compile time, not a number kept by hand, and each
+is folded from one declaration: the frame table, the constants and the description's framing are
+generated from the same tokens as the encoder and decoder, so a change to any of them moves the
+hash.
 
-The hash does not include the Lemnos version string. Two builds with the same layout interoperate
-whatever their Lemnos versions; a build with another layout is refused.
+- **The core** is the handshake, framing, the call and reply envelopes, devices, the event envelope,
+  stream framing (StreamOpen, StreamReady, StreamClose), the description's framing, the stream ring's
+  layout and the constants of all of these. Its hash is `CORE_HASH`, and Hello and Welcome carry it
+  in the prefix. It is compared at once.
+- **The parts** are the optional wire, each behind its feature bit in Welcome: stream handles
+  (StreamOpenHandles and StreamHandles, with their limits), packages (Packages, Package and
+  PackagesDone, with the package modes) and jobs (CallJob, JobStarted, JobProgress, JobDone and
+  JobCancel). A part has its own hash, `PART_HASHES`. Hello and Welcome carry all of them in their
+  tail, `parts`, as three 8-byte little-endian hashes in the order the parts are numbered (stream
+  handles, packages, jobs). They are compared once the core agrees. A peer whose tail is empty has
+  none to compare.
 
-What a client sees when the layouts differ: the connection is refused at connect with
-`LayoutMismatch`, which names both layout hashes and both Lemnos versions and says the client and
-the service must come from the same Lemnos revision. The C API returns `VERSION_MISMATCH` with that
-text. A client that connects to a host from before this prefix existed sees a refusal from the host,
-not a layout error, because that host reads the first bytes of Hello as its version and refuses
-them.
+A **base** is the part of a unit both sides must agree on. Two things are left out of a base, and
+so cannot move its hash: a frame kind marked `added` in the table, and a field whose type is `Tail`
+(a trailing value, one a peer from before it does not send). A structure whose field is appended
+therefore keeps its hash. The values this build computes are:
+
+`core hash: 0xa2b3f48271c1f428`
+
+`stream-handles part hash: 0x0f65b93219892e68`
+
+`packages part hash: 0xb3db2c33449c615d`
+
+`jobs part hash: 0xe8ed57f23fc18516`
+
+The hashes do not include the Lemnos version string. Two builds with the same core interoperate
+whatever their Lemnos versions. What a client sees when the cores differ: the connection is refused
+at connect with `LayoutMismatch`, whose text is `core protocol differs`, with both core hashes and
+the host's Lemnos version. When a part differs: the connection is refused with `PartMismatch`, whose
+text names the part and both hashes. The C API returns `VERSION_MISMATCH` with the same text. A
+client that connects to a host from before this prefix existed sees a refusal from the host, not a
+core error, because that host reads the first bytes of Hello as its version and refuses them.
 
 ## Rules
 
 Each of these closes a way the earlier protocol could go wrong.
 
 1. **The version is checked.** The first frame is Hello. A host answers a different version with
-   Refusal and closes. A client refuses a different version in Welcome. The layout is checked
-   before the version: see The handshake.
+   Refusal and closes. A client refuses a different version in Welcome. The core is checked
+   before the version, then the parts: see The handshake.
 2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Unsubscribe,
    SetPower, StreamClose and JobCancel have no reply of their own and are answered with an empty Reply. Nothing is ignored in
    silence. `id` 0 is allowed and is not special.
@@ -153,7 +176,9 @@ Each of these closes a way the earlier protocol could go wrong.
    subscriptions, claims and streams.
 7. **A repeated Hello changes nothing** and is answered with Welcome.
 8. **Trailing bytes after the known fields are ignored.** This is how a field is appended
-   compatibly: an older reader stops before it.
+   compatibly: an older reader stops before it. A struct is a block (see Structs below), so the same
+   holds inside one: its extra fields are skipped, and a field its writer did not send takes its
+   default.
 9. **The socket is mode 0660** after binding, whatever the umask.
 10. **An addition is announced before it is used.** A kind added to version 1 is sent to a host
     only when its bit is set in Welcome's `features`, and to a client only in answer to a kind
@@ -361,15 +386,29 @@ as its contract says, and the stream stays open.
 
 ## Description
 
-The `bytes` of a Description, in order: a `u16` contract count, then for each its tag (str), its
-encoding hash (u64, see Contract hashes below), a `u16` method count, and for each method its id u16, name str, a `u16` parameter count with each parameter's
-name str and shape, its returned shape and a has-out-buffer bool. Then a `u16` item count, and for
-each item its kind u8 (0 value, 1 control, 2 action), name str, unit str, exponent i8, min and max
-(each a presence bool, then an i64 when present), contract u8, method u16, and field (a presence
+The `bytes` of a Description, in order: a `u16` contract count, then for each contract a
+contract record (its tag str, its encoding hash u64, see Contract hashes below, and a `u16` method
+count), then for each method a method record (its id u16, name str, a `u16` parameter count, and a
+has-out-buffer bool), then for each parameter a parameter record (its name str) followed by its
+shape. A method's returned shape follows its parameters. Then a `u16` item count, and for each item
+an item record: its kind u8 (0 value, 1 control, 2 action), name str, unit str, exponent i8, min and
+max (each a presence bool, then an i64 when present), contract u8, method u16, and field (a presence
 bool, then a str when present). Then, appended after the first form, a `u16` count of job methods
-and for each its contract u8 and method u16: those are started with CallJob. A host from before
-job methods ends at the items, and a reader takes that as no job methods. A job method that names
-no method above makes the description malformed.
+and for each a job record: its contract u8 and method u16. Those are started with CallJob. A host
+from before job methods ends at the items, and a reader takes that as no job methods. A job method
+that names no method above makes the description malformed.
+
+A shape is written as a code u8 (0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 i32,
+9 i64, 10 f32, 11 f64, 12 str, 13 bytes, 14 option, followed by its shape, 15 array, a u32 length
+then its shape, 16 record, a u16 field count, then each field's name str and shape). The codes and
+the records are declared where the code is written, and the core hash folds them, so a change to
+either moves the core.
+
+**Structs.** A value of a struct type (`#[derive(Encode, Decode)]`, which every argument, result and
+record of a contract is) is a block: a u32 byte length, then its fields in order. A reader takes
+the block and reads the fields it knows. Bytes left after them are skipped. A field the block ends
+before takes its default, so a field a writer from before it did not send reads as the default.
+Every field type of such a struct implements `Default`.
 
 ### Contract hashes
 
@@ -415,20 +454,20 @@ Each vector is one complete frame.
 
 ### hello
 
-`Hello { layout: 0xf16439dd434fb7c8, lemnos: "1.0.0", version: 1, name: "tool", events: true }`
+`Hello { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, name: "tool", events: true, parts: the three part hashes }`
 
 <!-- vector: hello -->
 ```hex
-35 00 00 00 01 00 c8 b7 4f 43 dd 39 64 f1 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01
+51 00 00 00 01 00 28 f4 c1 71 82 f4 b3 a2 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01 18 00 00 00 68 2e 89 19 32 b9 65 0f 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8
 ```
 
 ### welcome
 
-`Welcome { layout: 0xf16439dd434fb7c8, lemnos: "1.0.0", version: 1, features: 0, host: "h" }`
+`Welcome { core: 0xa2b3f48271c1f428, lemnos: "1.0.0", version: 1, features: 0, host: "h", parts: the three part hashes }`
 
 <!-- vector: welcome -->
 ```hex
-39 00 00 00 02 00 c8 b7 4f 43 dd 39 64 f1 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68
+55 00 00 00 02 00 28 f4 c1 71 82 f4 b3 a2 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68 18 00 00 00 68 2e 89 19 32 b9 65 0f 5d 61 9c 44 33 2c db b3 16 85 c1 3f f2 57 ed e8
 ```
 
 ### list

@@ -497,10 +497,9 @@ runs one driver both ways.
 
 ## Compatibility: what must match, and what need not
 
-> **Status:** these are the rules the code is being brought to. Nothing enforces them yet: the
-> current build still checks one whole-wire hash and one hash per contract, and refuses on any change.
-> The core hash, base shapes, additions levels, `#[breaking]` and the package guarantee land in T1c to
-> T1f, in that order. Until T1f lands, a package or client built from another revision is refused.
+> **Status:** the core and the wire parts are checked as described here (T1c). The per-contract
+> base shapes and additions, `#[breaking]`, and the package guarantee land in T1d to T1f, in that
+> order. Until T1f lands, a driver package built against another contract or ABI revision is refused.
 
 Nothing unreleased is versioned. Compatibility is structural: each unit of the interface has its own
 hash, and a client, a driver package or the daemon need agree only on the units they actually use.

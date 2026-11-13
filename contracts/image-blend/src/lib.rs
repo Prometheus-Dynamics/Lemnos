@@ -59,7 +59,7 @@ pub struct ImageRef {
 }
 
 /// Encoded size of an [`ImageRef`].
-const IMAGE_BYTES: usize = 4 * 5;
+const IMAGE_BYTES: usize = 4 + 4 * 5;
 
 /// How the foreground is combined with the background (Porter-Duff, premultiplied).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,7 +88,7 @@ pub struct BlendJob {
 }
 
 /// Largest encoded [`BlendJob`], in bytes. The job queue must hold jobs this large.
-pub const JOB_BYTES: usize = 8 + 1 + 3 * IMAGE_BYTES;
+pub const JOB_BYTES: usize = 4 + 8 + 1 + 3 * IMAGE_BYTES;
 
 /// What the block takes.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -28,7 +28,7 @@ config = { vendor = 0x1209, product = 1, interfaces = "interface 0xff 0 0 pipe\n
 buffers = 4
 buffer_bytes = 8192
 job_slots = 8
-job_bytes = 18
+job_bytes = 22
 "#;
 
 fn until(mut done: impl FnMut() -> bool) -> bool {

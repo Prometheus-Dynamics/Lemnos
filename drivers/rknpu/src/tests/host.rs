@@ -5,7 +5,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lemnos_contract_npu::{Counters, NpuInfo, RunJob, RunResult, RunStatus};
+use lemnos_contract_npu::{
+    Counters, JOB_BYTES, NpuInfo, RESULT_BYTES, RunJob, RunResult, RunStatus,
+};
 use lemnos_core::{
     CallerId, Decode, Driver, Encode, Health, MethodId, Reader, Result, Status, Writer,
 };
@@ -182,8 +184,8 @@ fn post(consumer: &mut Consumer, run: RunJob) {
 /// The next completion's identity and status; its buffer goes back.
 fn completion(consumer: &mut Consumer, lease: &Lease) -> (u64, RunStatus) {
     let frame = consumer.pop_frame().unwrap().expect("a completion");
-    assert_eq!(frame.bytes, 1);
-    let status = RunResult::decode(&mut Reader::new(&read(lease, frame.buffer, 1)))
+    assert_eq!(frame.bytes, RESULT_BYTES as u32);
+    let status = RunResult::decode(&mut Reader::new(&read(lease, frame.buffer, RESULT_BYTES)))
         .unwrap()
         .status;
     assert!(consumer.release(frame.buffer, frame.fence).unwrap());
@@ -388,7 +390,7 @@ fn ticks_with_a_claim_held_allocate_nothing() {
     lemnos_contract_npu::Npu::attach(&mut driver, program, 0, 1, 4).unwrap();
     lemnos_contract_npu::Npu::attach(&mut driver, program, 1, 2, 4).unwrap();
     kernel.lock().unwrap().record = false;
-    let mut encoded = [0u8; 16];
+    let mut encoded = [0u8; JOB_BYTES];
     let mut count = 0;
     let mut now = POLL_NS;
     for n in 0..200u64 {

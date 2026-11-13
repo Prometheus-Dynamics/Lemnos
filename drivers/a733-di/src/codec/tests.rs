@@ -75,7 +75,7 @@ fn board(driver: &str, memory: &str) -> String {
          [[devices]]\nid = \"di\"\ndriver = \"{driver}\"\n\
          config = {{ device = \"/nonexistent/deinterlace\" }}\n\
          [devices.streams.jobs]\n{memory}buffers = 8\nbuffer_bytes = {BYTES}\n\
-         job_slots = 8\njob_bytes = 20\n"
+         job_slots = 8\njob_bytes = 24\n"
     )
 }
 

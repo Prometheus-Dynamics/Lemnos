@@ -10,6 +10,8 @@ pub use description::{
 
 use lemnos_core::{Decode, Encode, Reader, Shape, Status, Writer};
 
+pub use lemnos_core::Tail;
+
 use crate::hash;
 
 /// The Lemnos version this build was compiled from, as its handshake carries it.
@@ -23,24 +25,32 @@ constants! {
     pub const MAX_FRAME: usize = 1 << 20;
     /// Bytes of a Lemnos version string in a handshake, NUL-padded.
     pub const NAME_BYTES: usize = 32;
-    /// The most buffer descriptors a stream may have when each buffer, or each plane of a buffer,
-    /// is its own descriptor. They, and the ring's and the doorbell's, travel in one `SCM_RIGHTS`
-    /// message, which holds 253.
-    pub const MAX_HANDLE_BUFFERS: u32 = 128;
-    /// The most planes a buffer may have (`VIDEO_MAX_PLANES` of V4L2).
-    pub const MAX_PLANES: u32 = 8;
-    /// Bytes one plane's length takes in StreamHandles' `plane_bytes`.
-    pub const PLANE_LENGTH_BYTES: usize = 4;
-    /// The descriptors that come before the buffers' in StreamHandles: the ring and the doorbell.
-    pub const HANDLE_DESCRIPTORS_BEFORE: u32 = 2;
     /// Bytes before a frame's kind that say how long it is.
     pub const LENGTH_BYTES: usize = 4;
 }
+
+/// The constants of the stream-handles part: its limits and its lengths. They fold into that
+/// part's hash, not the core's.
+pub mod handles {
+    constants! {
+        /// The most buffer descriptors a stream may have when each buffer, or each plane of a
+        /// buffer, is its own descriptor. They, and the ring's and the doorbell's, travel in one
+        /// `SCM_RIGHTS` message, which holds 253.
+        pub const MAX_HANDLE_BUFFERS: u32 = 128;
+        /// The most planes a buffer may have (`VIDEO_MAX_PLANES` of V4L2).
+        pub const MAX_PLANES: u32 = 8;
+        /// Bytes one plane's length takes in StreamHandles' `plane_bytes`.
+        pub const PLANE_LENGTH_BYTES: usize = 4;
+        /// The descriptors that come before the buffers' in StreamHandles: the ring and the doorbell.
+        pub const HANDLE_DESCRIPTORS_BEFORE: u32 = 2;
+    }
+}
+pub use handles::{HANDLE_DESCRIPTORS_BEFORE, MAX_HANDLE_BUFFERS, MAX_PLANES, PLANE_LENGTH_BYTES};
 /// Answers queued for one client before that client is closed.
 pub const MAX_QUEUED_BYTES: usize = 4 << 20;
-/// What a host can do beyond the first form of this version, as bits of `features` in Welcome.
-/// A client uses what a bit stands for only when the host set it; a host that doesn't know a bit
-/// leaves it clear.
+/// What a host can do beyond the core, as bits of `features` in Welcome. A client uses what a bit
+/// stands for only when the host set it; a host that doesn't know a bit leaves it clear. Each bit
+/// is one part of the wire, with its own hash: see [`PART_HASHES`].
 pub mod feature {
     constants! {
         /// The host takes StreamOpenHandles and may answer it with StreamHandles: a stream whose
@@ -56,6 +66,10 @@ pub mod feature {
     }
 }
 
+/// The parts a feature bit stands for, in bit order: part `n` is bit `1 << (n - 1)`. A part is
+/// numbered where its frames are declared in [`frames!`]; 0 is the core.
+pub const PARTS: usize = 3;
+
 const HEADER: usize = LENGTH_BYTES + 2;
 
 /// The kinds of the two handshake frames. Their first fields keep their place in every version:
@@ -63,13 +77,13 @@ const HEADER: usize = LENGTH_BYTES + 2;
 const HELLO: u16 = 1;
 const WELCOME: u16 = 2;
 
-/// The build a handshake frame came from: its layout hash and its Lemnos version. A Hello and a
+/// The build a handshake frame came from: its core hash and its Lemnos version. A Hello and a
 /// Welcome begin with these, in the same place in every version, and they are checked before
 /// anything else in the frame is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Build {
-    /// The layout hash the peer was built with.
-    pub layout: u64,
+    /// The core hash the peer was built with.
+    pub core: u64,
     name: [u8; NAME_BYTES],
 }
 
@@ -91,9 +105,19 @@ pub enum WireError {
     UnknownKind(u16),
     /// The value doesn't fit in a frame. Nothing was sent.
     TooLarge,
-    /// The peer's handshake carries another layout hash, so it was built from another Lemnos
-    /// revision. Nothing after the handshake prefix was read. The connection must be closed.
+    /// The peer's core hash differs: its core protocol (handshake, framing, call and reply
+    /// envelopes, the event envelope, stream framing and the description's framing) is not the
+    /// one this build speaks. Nothing after the handshake prefix was read. The connection must be
+    /// closed. Only the core is compared here; see `docs/writing-a-driver.md`.
     LayoutMismatch(Build),
+    /// A part of the wire differs (see [`PART_HASHES`]). Checked once the core agrees. The
+    /// connection must be closed.
+    PartMismatch {
+        /// The part's name, as `docs/wire.md` names it.
+        part: &'static str,
+        ours: u64,
+        theirs: u64,
+    },
 }
 
 impl core::fmt::Display for WireError {
@@ -105,9 +129,14 @@ impl core::fmt::Display for WireError {
             Self::TooLarge => f.write_str("too large for one frame"),
             Self::LayoutMismatch(peer) => write!(
                 f,
-                "the other side was built from another Lemnos revision (Lemnos {}, wire layout {:#018x})",
-                peer.lemnos(),
-                peer.layout
+                "core protocol differs (hash {:#018x} here, {:#018x} there; the other side is Lemnos {})",
+                CORE_HASH,
+                peer.core,
+                peer.lemnos()
+            ),
+            Self::PartMismatch { part, ours, theirs } => write!(
+                f,
+                "wire part `{part}` differs (hash {ours:#018x} here, {theirs:#018x} there)"
             ),
         }
     }
@@ -133,27 +162,9 @@ pub mod health {
     }
 }
 
-/// Text appended to a frame after the frame's first form. A peer from before the addition
-/// doesn't send it, and then it reads as empty: rule 8 of `docs/wire.md` from the reader's
-/// side. It can only be a frame's last field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Appended<'a>(pub &'a str);
-
-impl Encode for Appended<'_> {
-    const SHAPE: lemnos_core::Shape = lemnos_core::Shape::Str;
-    fn encode(&self, out: &mut Writer<'_>) -> lemnos_core::Result<()> {
-        self.0.encode(out)
-    }
-}
-
-impl<'a> Decode<'a> for Appended<'a> {
-    fn decode(from: &mut Reader<'a>) -> lemnos_core::Result<Self> {
-        if from.remaining() == 0 {
-            return Ok(Self(""));
-        }
-        <&str>::decode(from).map(Self)
-    }
-}
+/// Text appended to a frame after the frame's first form: a [`Tail`] of text. A peer from before
+/// the addition doesn't send it, and then it reads as empty. It can only be a frame's last field.
+pub type Appended<'a> = Tail<&'a str>;
 
 /// The Lemnos version string in a handshake: [`NAME_BYTES`] bytes, NUL-padded, so the handshake's
 /// prefix is the same size in every version.
@@ -193,45 +204,78 @@ pub mod package_mode {
     }
 }
 
+/// Which kind of value an added frame or field is: `added` marks one appended after the base.
+macro_rules! is_added {
+    () => {
+        false
+    };
+    (added) => {
+        true
+    };
+}
+
+/// Declares the frames, in sections: one section per part of the wire (see [`PARTS`]), numbered
+/// as the part is. A frame marked `added` is one appended after the part's base, so it is left
+/// out of the part's hash: a reader from before it refuses the kind alone, with
+/// [`WireError::UnknownKind`]. A field whose type is [`Tail`] is likewise an addition, and is left
+/// out of the hash of its frame.
 macro_rules! frames {
-    ($($(#[$doc:meta])* $kind:literal $name:ident { $($(#[$field_doc:meta])* $field:ident: $ty:ty),* $(,)? })*) => {
+    ($(
+        $section:ident = $part:literal {
+            $(
+                $(#[$doc:meta])*
+                $($added:ident)? $kind:literal $name:ident {
+                    $($(#[$field_doc:meta])* $field:ident: $ty:ty),* $(,)?
+                }
+            )*
+        }
+    )*) => {
         /// One message, in either direction.
         #[derive(Debug, Clone, Copy, PartialEq)]
         pub enum Frame<'a> {
-            $($(#[$doc])* $name { $($(#[$field_doc])* $field: $ty),* },)*
+            $($($(#[$doc])* $name { $($(#[$field_doc])* $field: $ty),* },)*)*
         }
 
         impl Frame<'_> {
             /// The frame's kind number.
             pub const fn kind(&self) -> u16 {
                 match self {
-                    $(Self::$name { .. } => $kind,)*
+                    $($(Self::$name { .. } => $kind,)*)*
                 }
             }
 
             fn encode_payload(&self, out: &mut Writer<'_>) -> lemnos_core::Result<()> {
                 match self {
-                    $(Self::$name { $($field),* } => {
+                    $($(Self::$name { $($field),* } => {
                         $(Encode::encode($field, out)?;)*
                         Ok(())
-                    })*
+                    })*)*
                 }
             }
         }
 
         impl<'a> Frame<'a> {
-            /// Folds the frame table into a layout hash: each kind, name, field name and field
-            /// shape, in the order the table declares them. The encoder and decoder above come
-            /// from the same tokens, so a change to any of them moves the hash.
-            pub(crate) const fn fold_frames(mut hash: u64) -> u64 {
+            /// Folds the base of one part into `hash`: each kind, name, field name and field shape
+            /// of its frames, in the order the table declares them, leaving out the additions.
+            /// The encoder and decoder above come from the same tokens, so a change to any of
+            /// them moves the hash.
+            pub(crate) const fn fold_part(mut hash: u64, part: u8) -> u64 {
                 $(
-                    hash = crate::hash::word(hash, $kind);
-                    hash = crate::hash::text(hash, stringify!($name));
-                    $(
-                        hash = crate::hash::text(hash, stringify!($field));
-                        hash = lemnos_core::layout::shape(hash, &<$ty as Encode>::SHAPE);
-                    )*
-                    hash = crate::hash::word(hash, u64::MAX);
+                    if part == $part {
+                        $(
+                            if !is_added!($($added)?) {
+                                hash = crate::hash::word(hash, $kind);
+                                hash = crate::hash::text(hash, stringify!($name));
+                                $(
+                                    if !<$ty as Encode>::ADDED {
+                                        hash = crate::hash::text(hash, stringify!($field));
+                                        hash = lemnos_core::layout::shape(hash, &<$ty as Encode>::SHAPE);
+                                    }
+                                )*
+                                hash = crate::hash::word(hash, u64::MAX);
+                            }
+                        )*
+                    }
                 )*
                 hash
             }
@@ -239,9 +283,9 @@ macro_rules! frames {
 
         fn decode_payload<'a>(kind: u16, from: &mut Reader<'a>) -> Result<Frame<'a>, WireError> {
             match kind {
-                $($kind => Ok(Frame::$name {
+                $($($kind => Ok(Frame::$name {
                     $($field: Decode::decode(from).map_err(|_| WireError::Malformed)?,)*
-                }),)*
+                }),)*)*
                 other => Err(WireError::UnknownKind(other)),
             }
         }
@@ -249,114 +293,145 @@ macro_rules! frames {
 }
 
 frames! {
-    /// The handshake, sent first. Its prefix is the layout hash, then the Lemnos version, both
-    /// fixed in size: a peer checks them before reading anything after. Then the protocol
-    /// `version`, which is compared only once the layouts agree.
-    1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool }
-    /// The host's answer to Hello, with the same prefix. A host that refuses a Hello for its
-    /// layout still answers with this, so the client can say which revisions differ, and closes.
-    2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
-    3 List { id: u32 }
-    4 Device {
-        id: u32,
-        device: u32,
-        name: &'a str,
-        driver: &'a str,
-        /// Comma-separated.
-        tags: &'a str,
-        state: u8,
-        health: u8,
-        reason: &'a str,
-        /// The name of the device this one is wired to, from the board file's `link`. Empty
-        /// when it names none, and from a host older than this field.
-        link: Appended<'a>,
+    // The core: the handshake, the call and reply envelopes, devices, the event envelope and
+    // stream framing. Its base is the core hash, which Hello and Welcome carry.
+    core = 0 {
+        /// The handshake, sent first. Its prefix is the core hash, then the Lemnos version, both
+        /// fixed in size: a peer checks them before reading anything after. Then the protocol
+        /// `version`, and the part hashes (see [`PART_HASHES`]), which are checked once the core
+        /// agrees.
+        1 Hello {
+            core: u64,
+            lemnos: LemnosName<'a>,
+            version: u16,
+            name: &'a str,
+            events: bool,
+            parts: Tail<&'a [u8]>,
+        }
+        /// The host's answer to Hello, with the same prefix. A host that refuses a Hello for its
+        /// core still answers with this, so the client can say which revisions differ, and closes.
+        2 Welcome {
+            core: u64,
+            lemnos: LemnosName<'a>,
+            version: u16,
+            features: u64,
+            host: &'a str,
+            parts: Tail<&'a [u8]>,
+        }
+        3 List { id: u32 }
+        4 Device {
+            id: u32,
+            device: u32,
+            name: &'a str,
+            driver: &'a str,
+            /// Comma-separated.
+            tags: &'a str,
+            state: u8,
+            health: u8,
+            reason: &'a str,
+            /// The name of the device this one is wired to, from the board file's `link`. Empty
+            /// when it names none, and from a host older than this field.
+            link: Appended<'a>,
+        }
+        5 ListDone { id: u32 }
+        /// An empty `device` means any device providing `tag`.
+        6 Open { id: u32, device: &'a str, tag: &'a str }
+        7 Opened { id: u32, device: u32, contract: u8 }
+        8 Describe { id: u32, device: u32 }
+        9 Description { id: u32, bytes: &'a [u8] }
+        10 Call {
+            id: u32,
+            device: u32,
+            contract: u8,
+            method: u16,
+            reply_capacity: u32,
+            args: &'a [u8],
+        }
+        11 Reply { id: u32, bytes: &'a [u8] }
+        12 Subscribe {
+            id: u32,
+            device: u32,
+            contract: u8,
+            method: u16,
+            period_us: u64,
+            only_changes: bool,
+        }
+        13 Subscribed { id: u32, subscription: u64, period_us: u64 }
+        14 Unsubscribe { id: u32, subscription: u64 }
+        15 Value { subscription: u64, stamp_ns: u64, bytes: &'a [u8] }
+        16 SetPower { id: u32, device: u32, on: bool }
+        17 StreamOpen { id: u32, device: u32, name: &'a str }
+        /// `descriptors` file descriptors travel with this frame over `SCM_RIGHTS`.
+        18 StreamReady {
+            id: u32,
+            buffers: u32,
+            descriptors: u8,
+            buffer_bytes: u32,
+            frame_slots: u32,
+            job_slots: u32,
+            job_bytes: u32,
+        }
+        19 Event { device: u32, state: u8, health: u8, reason: &'a str }
+        /// The answer to any request that could not be done.
+        20 Refusal { id: u32, status: i32, text: &'a str }
+        /// Answered with an empty Reply.
+        21 StreamClose { id: u32, device: u32, name: &'a str }
     }
-    5 ListDone { id: u32 }
-    /// An empty `device` means any device providing `tag`.
-    6 Open { id: u32, device: &'a str, tag: &'a str }
-    7 Opened { id: u32, device: u32, contract: u8 }
-    8 Describe { id: u32, device: u32 }
-    9 Description { id: u32, bytes: &'a [u8] }
-    10 Call {
-        id: u32,
-        device: u32,
-        contract: u8,
-        method: u16,
-        reply_capacity: u32,
-        args: &'a [u8],
+    // The stream-handles part: a stream whose buffers are one descriptor each. Its constants are
+    // in [`handles`].
+    stream_handles = 1 {
+        /// StreamOpen from a client that can also take StreamHandles for an answer. Sent only to a
+        /// host whose Welcome set [`feature::STREAM_HANDLES`].
+        22 StreamOpenHandles { id: u32, device: u32, name: &'a str }
+        /// StreamReady for a stream whose buffers are one descriptor each, or one per plane.
+        /// `plane_bytes` is each plane's length, [`PLANE_LENGTH_BYTES`] little-endian bytes each,
+        /// adding up to `buffer_bytes`; empty when a buffer is one plane. `descriptors` is 2 plus
+        /// `buffers` times the planes, all with this frame over `SCM_RIGHTS`: the ring, the
+        /// doorbell, then buffer 0's planes in order, buffer 1's, and so on. At most
+        /// [`MAX_HANDLE_BUFFERS`] buffer descriptors.
+        23 StreamHandles {
+            id: u32,
+            buffers: u32,
+            descriptors: u8,
+            buffer_bytes: u32,
+            frame_slots: u32,
+            job_slots: u32,
+            job_bytes: u32,
+            plane_bytes: &'a [u8],
+        }
     }
-    11 Reply { id: u32, bytes: &'a [u8] }
-    12 Subscribe {
-        id: u32,
-        device: u32,
-        contract: u8,
-        method: u16,
-        period_us: u64,
-        only_changes: bool,
+    // The packages part: driver packages the host runs. Sent only to a host whose Welcome set
+    // [`feature::PACKAGES`]. Its constants are the package modes.
+    packages = 2 {
+        /// Asks what became of the host's driver packages. Answered with one Package for each
+        /// file, then PackagesDone.
+        24 Packages { id: u32 }
+        /// One package file. Loaded: `driver` is its driver's name and `reason` is empty. Refused:
+        /// `driver` is empty and `reason` says why.
+        25 Package { id: u32, path: &'a str, driver: &'a str, reason: &'a str }
+        /// `mode` is one of [`package_mode`]. `note` is empty, or says why the package directory
+        /// could not be used at all.
+        26 PackagesDone { id: u32, mode: u8, note: &'a str }
     }
-    13 Subscribed { id: u32, subscription: u64, period_us: u64 }
-    14 Unsubscribe { id: u32, subscription: u64 }
-    15 Value { subscription: u64, stamp_ns: u64, bytes: &'a [u8] }
-    16 SetPower { id: u32, device: u32, on: bool }
-    17 StreamOpen { id: u32, device: u32, name: &'a str }
-    /// `descriptors` file descriptors travel with this frame over `SCM_RIGHTS`.
-    18 StreamReady {
-        id: u32,
-        buffers: u32,
-        descriptors: u8,
-        buffer_bytes: u32,
-        frame_slots: u32,
-        job_slots: u32,
-        job_bytes: u32,
+    // The jobs part: long jobs, with their progress and end sent to whoever started them. Sent
+    // only to a host whose Welcome set [`feature::JOBS`].
+    jobs = 3 {
+        /// Starts a long job: a method the contract marks as one. Answered with JobStarted, or
+        /// Refusal.
+        27 CallJob { id: u32, device: u32, contract: u8, method: u16, args: &'a [u8] }
+        /// The job is running, under this number. JobProgress and JobDone for it go to this
+        /// connection alone.
+        28 JobStarted { id: u32, job: u64 }
+        /// How far a job has come: `done` of `total` (0 when not known), in the contract's unit.
+        /// Only the latest matters: a host may drop one a client hasn't read yet.
+        29 JobProgress { job: u64, done: u64, total: u64 }
+        /// A job is over. `bytes` is its result when `status` is 0, and empty otherwise. Never
+        /// dropped.
+        30 JobDone { job: u64, status: i32, bytes: &'a [u8] }
+        /// Cancels a job this connection started. Answered with an empty Reply, and the job's
+        /// JobDone follows.
+        31 JobCancel { id: u32, job: u64 }
     }
-    19 Event { device: u32, state: u8, health: u8, reason: &'a str }
-    /// The answer to any request that could not be done.
-    20 Refusal { id: u32, status: i32, text: &'a str }
-    /// Answered with an empty Reply.
-    21 StreamClose { id: u32, device: u32, name: &'a str }
-    /// StreamOpen from a client that can also take StreamHandles for an answer. Sent only to a
-    /// host whose Welcome set [`feature::STREAM_HANDLES`].
-    22 StreamOpenHandles { id: u32, device: u32, name: &'a str }
-    /// StreamReady for a stream whose buffers are one descriptor each, or one per plane.
-    /// `plane_bytes` is each plane's length, [`PLANE_LENGTH_BYTES`] little-endian bytes each,
-    /// adding up to `buffer_bytes`; empty when a buffer is one plane. `descriptors` is 2 plus
-    /// `buffers` times the planes, all with this frame over `SCM_RIGHTS`: the ring, the
-    /// doorbell, then buffer 0's planes in order, buffer 1's, and so on. At most
-    /// [`MAX_HANDLE_BUFFERS`] buffer descriptors.
-    23 StreamHandles {
-        id: u32,
-        buffers: u32,
-        descriptors: u8,
-        buffer_bytes: u32,
-        frame_slots: u32,
-        job_slots: u32,
-        job_bytes: u32,
-        plane_bytes: &'a [u8],
-    }
-    /// Asks what became of the host's driver packages. Sent only to a host whose Welcome set
-    /// [`feature::PACKAGES`]. Answered with one Package for each file, then PackagesDone.
-    24 Packages { id: u32 }
-    /// One package file. Loaded: `driver` is its driver's name and `reason` is empty. Refused:
-    /// `driver` is empty and `reason` says why.
-    25 Package { id: u32, path: &'a str, driver: &'a str, reason: &'a str }
-    /// `mode` is one of [`package_mode`]. `note` is empty, or says why the package directory
-    /// could not be used at all.
-    26 PackagesDone { id: u32, mode: u8, note: &'a str }
-    /// Starts a long job: a method the contract marks as one. Sent only to a host whose
-    /// Welcome set [`feature::JOBS`]. Answered with JobStarted, or Refusal.
-    27 CallJob { id: u32, device: u32, contract: u8, method: u16, args: &'a [u8] }
-    /// The job is running, under this number. JobProgress and JobDone for it go to this
-    /// connection alone.
-    28 JobStarted { id: u32, job: u64 }
-    /// How far a job has come: `done` of `total` (0 when not known), in the contract's unit.
-    /// Only the latest matters: a host may drop one a client hasn't read yet.
-    29 JobProgress { job: u64, done: u64, total: u64 }
-    /// A job is over. `bytes` is its result when `status` is 0, and empty otherwise. Never
-    /// dropped.
-    30 JobDone { job: u64, status: i32, bytes: &'a [u8] }
-    /// Cancels a job this connection started. Answered with an empty Reply, and the job's
-    /// JobDone follows.
-    31 JobCancel { id: u32, job: u64 }
 }
 
 /// How many descriptors StreamHandles carries for a stream of `buffers` buffers of `planes`
@@ -567,41 +642,99 @@ pub fn decode(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, WireError> {
     if kind == HELLO || kind == WELCOME {
         check_handshake(from)?;
     }
-    Ok(Some((decode_payload(kind, &mut from)?, total)))
+    let decoded = decode_payload(kind, &mut from)?;
+    if let Frame::Hello { parts, .. } | Frame::Welcome { parts, .. } = decoded {
+        check_parts(parts.0)?;
+    }
+    Ok(Some((decoded, total)))
 }
 
-/// Checks a handshake's prefix, the layout hash and the Lemnos version, before anything after it
-/// is read. A peer built from another revision is refused here whatever it sends after.
+/// Checks a handshake's prefix, the core hash and the Lemnos version, before anything after it
+/// is read. A peer whose core differs is refused here whatever it sends after.
 fn check_handshake(mut from: Reader<'_>) -> Result<(), WireError> {
-    let layout = u64::decode(&mut from).map_err(|_| WireError::Malformed)?;
+    let core = u64::decode(&mut from).map_err(|_| WireError::Malformed)?;
     let name = LemnosName::decode(&mut from).map_err(|_| WireError::Malformed)?;
-    if layout == LAYOUT_HASH {
+    if core == CORE_HASH {
         return Ok(());
     }
     let mut bytes = [0u8; NAME_BYTES];
     bytes[..name.0.len()].copy_from_slice(name.0.as_bytes());
-    Err(WireError::LayoutMismatch(Build {
-        layout,
-        name: bytes,
-    }))
+    Err(WireError::LayoutMismatch(Build { core, name: bytes }))
 }
 
-/// The layout hash of this build: FNV-1a over the frame table (kinds, names, field names and
-/// shapes), the constants of the protocol, its features and states, and the ring's layout. It is
+/// Checks the part hashes a Hello or a Welcome carries against this build's. A peer that sends
+/// none (empty) is not checked: it is a peer that has no part to check.
+fn check_parts(bytes: &[u8]) -> Result<(), WireError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if bytes.len() != PARTS * 8 {
+        return Err(WireError::Malformed);
+    }
+    for (index, ours) in PART_HASHES.iter().enumerate() {
+        let theirs =
+            u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().unwrap_or([0; 8]));
+        if theirs != *ours {
+            return Err(WireError::PartMismatch {
+                part: PART_NAMES[index],
+                ours: *ours,
+                theirs,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The names of the parts, in the order [`PART_HASHES`] lists them.
+pub const PART_NAMES: [&str; PARTS] = ["stream-handles", "packages", "jobs"];
+
+/// The hash of each part: its base frames, and its constants. Index `n` is the part numbered
+/// `n + 1` in [`frames!`]. Each one moves only when that part's base changes.
+pub const PART_HASHES: [u64; PARTS] = [part_hash(1), part_hash(2), part_hash(3)];
+
+const fn part_hash(part: u8) -> u64 {
+    let mut hash = hash::OFFSET;
+    hash = Frame::fold_part(hash, part);
+    if part == 1 {
+        hash = handles::fold_constants(hash);
+    }
+    if part == 2 {
+        hash = package_mode::fold_constants(hash);
+    }
+    hash
+}
+
+/// The core hash of this build: FNV-1a over the core's base frames, the constants of the framing,
+/// the feature and state vocabularies, the ring's layout and the description's framing. It is
 /// computed at compile time from the same definitions the encoder and decoder are generated
-/// from, so it can't be kept by hand and a layout change can't leave it where it was. Hello and
-/// Welcome carry it first; see `docs/wire.md`.
-pub const LAYOUT_HASH: u64 = {
+/// from, so it can't be kept by hand. Hello and Welcome carry it first; see `docs/wire.md`.
+pub const CORE_HASH: u64 = {
     let mut hash = hash::OFFSET;
     hash = fold_constants(hash);
     hash = feature::fold_constants(hash);
     hash = state::fold_constants(hash);
     hash = health::fold_constants(hash);
-    hash = package_mode::fold_constants(hash);
-    hash = Frame::fold_frames(hash);
+    hash = Frame::fold_part(hash, 0);
+    hash = description::fold_framing(hash);
     hash = crate::ring::fold_constants(hash);
     hash = crate::ring::offsets::fold_constants(hash);
     hash
+};
+
+/// The part hashes as Hello and Welcome carry them: each one little-endian, in order.
+pub const PART_BYTES: [u8; PARTS * 8] = {
+    let mut out = [0u8; PARTS * 8];
+    let mut i = 0;
+    while i < PARTS {
+        let bytes = PART_HASHES[i].to_le_bytes();
+        let mut j = 0;
+        while j < 8 {
+            out[i * 8 + j] = bytes[j];
+            j += 1;
+        }
+        i += 1;
+    }
+    out
 };
 
 #[cfg(test)]

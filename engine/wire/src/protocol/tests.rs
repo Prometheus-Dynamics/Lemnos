@@ -16,7 +16,8 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
         (
             "hello",
             Frame::Hello {
-                layout: LAYOUT_HASH,
+                core: CORE_HASH,
+                parts: Tail(&PART_BYTES),
                 lemnos: LemnosName("1.0.0"),
                 version: 1,
                 name: "tool",
@@ -26,7 +27,8 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
         (
             "welcome",
             Frame::Welcome {
-                layout: LAYOUT_HASH,
+                core: CORE_HASH,
+                parts: Tail(&PART_BYTES),
                 lemnos: LemnosName("1.0.0"),
                 version: 1,
                 features: 0,
@@ -85,7 +87,7 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 state: state::BACKOFF,
                 health: health::FAILED,
                 reason: "r",
-                link: Appended("d"),
+                link: Tail("d"),
             },
         ),
         ("list-done", Frame::ListDone { id: 1 }),
@@ -451,7 +453,7 @@ fn a_device_from_before_its_link_reads_as_having_none() {
         state: state::BACKOFF,
         health: health::FAILED,
         reason: "r",
-        link: Appended("d"),
+        link: Tail("d"),
     };
     let mut buf = [0; 64];
     let n = encode(&with, &mut buf).unwrap();
@@ -463,7 +465,7 @@ fn a_device_from_before_its_link_reads_as_having_none() {
     let Frame::Device { link, reason, .. } = frame else {
         panic!("{frame:?}");
     };
-    assert_eq!((reason, link), ("r", Appended("")));
+    assert_eq!((reason, link), ("r", Tail("")));
     // A link that is there but cut short is malformed, not empty.
     buf[..4].copy_from_slice(&((older - 4 + 2) as u32).to_le_bytes());
     assert_eq!(decode(&buf[..older + 2]), Err(WireError::Malformed));
@@ -614,9 +616,9 @@ mod description {
         };
         let mut buf = [0; 512];
         let n = encode_description(&manifest, &Description::new(), &mut buf).unwrap();
-        // The appended part: a count of one, then contract 0, method 5.
-        assert_eq!(buf[n - 5..n], [1, 0, 0, 5, 0]);
-        let back = decode_description(&buf[..n - 5]).unwrap();
+        // The appended part: a count of one, then contract 0, method 5, as a block of three bytes.
+        assert_eq!(buf[n - 9..n], [1, 0, 3, 0, 0, 0, 0, 5, 0]);
+        let back = decode_description(&buf[..n - 9]).unwrap();
         assert!(back.contracts[0].methods.iter().all(|m| !m.job));
         // One that names a method the contracts don't have can't be trusted.
         buf[n - 2] = 9;
@@ -636,51 +638,75 @@ mod description {
     }
 }
 
-/// The layout hash has to move when any layout moves, and the spec has to state the hash this
-/// build computes. Copies of the frame table and of the constants, each with one change, show the
-/// hash reads every part of a definition.
+/// The hashes have to move when a part of the definition moves, and not otherwise. Copies of the
+/// frame table, each with one change, show which changes a part's hash reads and which it does
+/// not: an added field or an added frame kind is left out, a changed base is not.
 #[allow(dead_code, unused_imports)]
 mod layout {
     use super::*;
 
+    /// A copy of the table with a jobs part of `$jobs` and a Hello of `$hello` fields.
     macro_rules! copy_of_table {
-        ($name:ident { $($extra:tt)* }) => {
+        ($name:ident { hello: [$($hello:tt)*], jobs: [$($jobs:tt)*] }) => {
             mod $name {
-                use lemnos_core::{Decode, Encode, Reader, Writer};
+                use lemnos_core::{Decode, Encode, Reader, Tail, Writer};
 
                 use super::super::super::{Build, LemnosName, WireError};
                 use super::super::super::hash;
 
                 frames! {
-                    1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool $($extra)* }
-                    2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
+                    core = 0 {
+                        1 Hello { core: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool, parts: Tail<&'a [u8]> $($hello)* }
+                        2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
+                    }
+                    jobs = 3 {
+                        40 Probe { id: u32 }
+                        $($jobs)*
+                    }
                 }
             }
         };
     }
 
-    copy_of_table!(same {});
-    copy_of_table!(added { , extra: u8 });
+    copy_of_table!(same {
+        hello: [],
+        jobs: []
+    });
+    // An appended field of an existing frame is an addition: it is not in the hash.
+    copy_of_table!(tail_added { hello: [, more: Tail<u8>], jobs: [] });
+    // An appended frame kind is an addition too: the part's hash is unchanged.
+    copy_of_table!(kind_added { hello: [], jobs: [added 41 Extra { id: u32 }] });
+    // A field that is not appended changes what the frame means to an old reader.
+    copy_of_table!(field_added { hello: [, more: u8], jobs: [] });
+    copy_of_table!(kind_base { hello: [], jobs: [41 Extra { id: u32 }] });
 
     mod renamed {
-        use lemnos_core::{Decode, Encode, Reader, Writer};
+        use lemnos_core::{Decode, Encode, Reader, Tail, Writer};
 
+        use super::super::super::hash;
         use super::super::super::{Build, LemnosName, WireError};
 
         frames! {
-            1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u16, title: &'a str, events: bool }
-            2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
+            core = 0 {
+                1 Hello { core: u64, lemnos: LemnosName<'a>, version: u16, title: &'a str, events: bool, parts: Tail<&'a [u8]> }
+                2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
+            }
+            jobs = 3 { 40 Probe { id: u32 } }
         }
     }
 
     mod retyped {
-        use lemnos_core::{Decode, Encode, Reader, Writer};
+        use lemnos_core::{Decode, Encode, Reader, Tail, Writer};
 
+        use super::super::super::hash;
         use super::super::super::{Build, LemnosName, WireError};
 
         frames! {
-            1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u32, name: &'a str, events: bool }
-            2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
+            core = 0 {
+                1 Hello { core: u64, lemnos: LemnosName<'a>, version: u32, name: &'a str, events: bool, parts: Tail<&'a [u8]> }
+                2 Welcome { core: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str, parts: Tail<&'a [u8]> }
+            }
+            jobs = 3 { 40 Probe { id: u32 } }
         }
     }
 
@@ -697,24 +723,45 @@ mod layout {
     }
 
     #[test]
-    fn the_table_hash_is_the_same_for_the_same_definition() {
+    fn the_same_table_hashes_the_same_for_the_same_definition() {
         assert_eq!(
-            same::Frame::fold_frames(hash::OFFSET),
-            same::Frame::fold_frames(hash::OFFSET)
+            same::Frame::fold_part(hash::OFFSET, 0),
+            same::Frame::fold_part(hash::OFFSET, 0)
         );
         assert_ne!(
-            same::Frame::fold_frames(hash::OFFSET),
-            Frame::fold_frames(hash::OFFSET),
-            "the copy is smaller than the real table, so it must hash differently"
+            same::Frame::fold_part(hash::OFFSET, 0),
+            Frame::fold_part(hash::OFFSET, 0),
+            "the copy is smaller than the real core, so it must hash differently"
         );
     }
 
     #[test]
-    fn a_field_added_renamed_or_retyped_moves_the_hash() {
-        let before = same::Frame::fold_frames(hash::OFFSET);
-        assert_ne!(before, added::Frame::fold_frames(hash::OFFSET));
-        assert_ne!(before, renamed::Frame::fold_frames(hash::OFFSET));
-        assert_ne!(before, retyped::Frame::fold_frames(hash::OFFSET));
+    fn a_changed_base_moves_the_core_it_belongs_to() {
+        let base = same::Frame::fold_part(hash::OFFSET, 0);
+        assert_ne!(base, renamed::Frame::fold_part(hash::OFFSET, 0));
+        assert_ne!(base, retyped::Frame::fold_part(hash::OFFSET, 0));
+        assert_ne!(base, field_added::Frame::fold_part(hash::OFFSET, 0));
+    }
+
+    #[test]
+    fn an_appended_field_or_frame_kind_leaves_the_hash_alone() {
+        let core = same::Frame::fold_part(hash::OFFSET, 0);
+        let jobs = same::Frame::fold_part(hash::OFFSET, 3);
+        assert_eq!(core, tail_added::Frame::fold_part(hash::OFFSET, 0));
+        assert_eq!(jobs, kind_added::Frame::fold_part(hash::OFFSET, 3));
+    }
+
+    #[test]
+    fn a_frame_kind_in_a_part_moves_only_that_part() {
+        assert_eq!(
+            same::Frame::fold_part(hash::OFFSET, 0),
+            kind_base::Frame::fold_part(hash::OFFSET, 0),
+            "a base frame in the jobs part is not in the core"
+        );
+        assert_ne!(
+            same::Frame::fold_part(hash::OFFSET, 3),
+            kind_base::Frame::fold_part(hash::OFFSET, 3)
+        );
     }
 
     #[test]
@@ -726,18 +773,38 @@ mod layout {
     }
 
     #[test]
-    fn the_real_hash_is_built_from_every_table_and_constant() {
-        // Each part alone, folded in the order LAYOUT_HASH uses, must agree with it.
+    fn the_core_hash_is_built_from_the_core_frames_and_constants() {
         let mut hash = hash::OFFSET;
         hash = fold_constants(hash);
         hash = feature::fold_constants(hash);
         hash = state::fold_constants(hash);
         hash = health::fold_constants(hash);
-        hash = package_mode::fold_constants(hash);
-        hash = Frame::fold_frames(hash);
+        hash = Frame::fold_part(hash, 0);
+        hash = crate::protocol::description::fold_framing(hash);
         hash = crate::ring::fold_constants(hash);
         hash = crate::ring::offsets::fold_constants(hash);
-        assert_eq!(hash, LAYOUT_HASH);
+        assert_eq!(hash, CORE_HASH);
+    }
+
+    #[test]
+    fn each_part_hash_is_built_from_its_frames_and_constants() {
+        let mut hash = Frame::fold_part(hash::OFFSET, 1);
+        hash = handles::fold_constants(hash);
+        assert_eq!(PART_HASHES[0], hash);
+        let mut hash = Frame::fold_part(hash::OFFSET, 2);
+        hash = package_mode::fold_constants(hash);
+        assert_eq!(PART_HASHES[1], hash);
+        assert_eq!(PART_HASHES[2], Frame::fold_part(hash::OFFSET, 3));
+    }
+
+    #[test]
+    fn the_parts_and_the_core_are_different_hashes() {
+        let all = [CORE_HASH, PART_HASHES[0], PART_HASHES[1], PART_HASHES[2]];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
     }
 
     #[test]
@@ -755,18 +822,26 @@ mod layout {
     }
 
     #[test]
-    fn the_spec_states_this_builds_layout_hash() {
+    fn the_spec_states_this_builds_the_core_and_part_hashes() {
         let text = include_str!("../../../../docs/wire.md");
-        let hash = format!("{LAYOUT_HASH:#018x}");
+        let core = format!("{CORE_HASH:#018x}");
         assert!(
-            text.contains(&hash),
-            "docs/wire.md must state the layout hash {hash}, the one this build computes"
+            text.contains(&core),
+            "docs/wire.md must state the core hash {core}, the one this build computes"
         );
+        for (name, hash) in PART_NAMES.iter().zip(PART_HASHES) {
+            let hash = format!("{hash:#018x}");
+            assert!(
+                text.contains(&hash),
+                "docs/wire.md must state the hash {hash} of part `{name}`"
+            );
+        }
     }
 }
 
-/// A handshake is read in one order, whatever the peer is: its layout hash and Lemnos version
-/// first, then the rest. A peer from another revision is refused on the prefix alone.
+/// A handshake is read in one order, whatever the peer is: its core hash and Lemnos version
+/// first, then the rest, then the part hashes. A peer from another core is refused on the prefix
+/// alone; a peer whose part differs is refused by name.
 mod handshake {
     use super::*;
 
@@ -786,7 +861,7 @@ mod handshake {
     }
 
     #[test]
-    fn another_layout_is_refused_whatever_follows_its_prefix() {
+    fn another_core_is_refused_whatever_follows_its_prefix() {
         let other = 0x1122_3344_5566_7788u64;
         let mut prefix = other.to_le_bytes().to_vec();
         prefix.extend_from_slice(&name("9.9.9"));
@@ -795,7 +870,7 @@ mod handshake {
         assert_eq!(
             decode(&bytes),
             Err(WireError::LayoutMismatch(Build {
-                layout: other,
+                core: other,
                 name: name("9.9.9"),
             }))
         );
@@ -808,40 +883,66 @@ mod handshake {
             text.contains("9.9.9") && text.contains("0x1122334455667788"),
             "{text}"
         );
-        assert!(text.contains("another Lemnos revision"), "{text}");
+        assert!(text.starts_with("core protocol differs"), "{text}");
+        assert!(!text.contains("revision"), "{text}");
     }
 
     #[test]
-    fn a_welcome_from_another_layout_is_refused_the_same_way() {
+    fn a_welcome_from_another_core_is_refused_the_same_way() {
         let mut prefix = 7u64.to_le_bytes().to_vec();
         prefix.extend_from_slice(&name("old"));
         let bytes = frame(2, &prefix, &[]);
         assert!(matches!(
             decode(&bytes),
-            Err(WireError::LayoutMismatch(peer)) if peer.layout == 7 && peer.lemnos() == "old"
+            Err(WireError::LayoutMismatch(peer)) if peer.core == 7 && peer.lemnos() == "old"
         ));
     }
 
+    fn hello_tail(parts: &[u8]) -> Vec<u8> {
+        // A Hello's name, events flag and then its parts (length, then bytes).
+        let mut tail = vec![4, 0, 0, 0, b'a', b'b', b'c', b'd', 1];
+        tail.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+        tail.extend_from_slice(parts);
+        tail
+    }
+
     #[test]
-    fn the_same_layout_reads_on() {
-        let mut prefix = LAYOUT_HASH.to_le_bytes().to_vec();
+    fn the_same_core_and_parts_read_on() {
+        let mut prefix = CORE_HASH.to_le_bytes().to_vec();
         prefix.extend_from_slice(&name(LEMNOS));
         prefix.extend_from_slice(&VERSION.to_le_bytes());
-        // A Hello's name and events flag follow the prefix.
-        let tail = [4, 0, 0, 0, b'a', b'b', b'c', b'd', 1];
-        let bytes = frame(1, &prefix, &tail);
+        let bytes = frame(1, &prefix, &hello_tail(&PART_BYTES));
         let (back, used) = decode(&bytes).unwrap().unwrap();
         assert_eq!(used, bytes.len());
         assert_eq!(
             back,
             Frame::Hello {
-                layout: LAYOUT_HASH,
+                core: CORE_HASH,
                 lemnos: LemnosName(LEMNOS),
                 version: VERSION,
                 name: "abcd",
                 events: true,
+                parts: Tail(&PART_BYTES),
             }
         );
+    }
+
+    #[test]
+    fn a_part_that_differs_is_refused_by_name() {
+        let mut parts = PART_BYTES;
+        parts[8] ^= 1;
+        let mut prefix = CORE_HASH.to_le_bytes().to_vec();
+        prefix.extend_from_slice(&name(LEMNOS));
+        prefix.extend_from_slice(&VERSION.to_le_bytes());
+        let bytes = frame(1, &prefix, &hello_tail(&parts));
+        let Err(WireError::PartMismatch { part, ours, theirs }) = decode(&bytes) else {
+            panic!("a differing part must be refused");
+        };
+        assert_eq!(part, "packages");
+        assert_eq!(ours, PART_HASHES[1]);
+        assert_eq!(theirs, PART_HASHES[1] ^ 1);
+        let text = WireError::PartMismatch { part, ours, theirs }.to_string();
+        assert!(text.contains("`packages`"), "{text}");
     }
 
     #[test]

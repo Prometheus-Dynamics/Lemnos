@@ -51,7 +51,7 @@ fn max_len(shape: &Shape) -> Option<usize> {
         Shape::Option(inner) => 1 + max_len(inner)?,
         Shape::Array(inner, count) => max_len(inner)? * *count as usize,
         Shape::Record(fields) => {
-            let mut total = 0;
+            let mut total = 4;
             for field in *fields {
                 total += max_len(&field.shape)?;
             }
@@ -150,12 +150,16 @@ fn every_type_round_trips() {
 #[test]
 fn a_job_is_a_fixed_small_record() {
     assert_eq!(max_len(&ScaleJob::SHAPE), Some(JOB_BYTES));
-    assert_eq!(JOB_BYTES, 49);
+    assert_eq!(JOB_BYTES, 61);
 }
 
 #[test]
 fn an_unknown_filter_is_refused() {
+    // A default job, with its filter, the last byte, set to an undefined code.
     let mut bytes = [0u8; JOB_BYTES];
+    ScaleJob::default()
+        .encode(&mut Writer::new(&mut bytes))
+        .unwrap();
     bytes[JOB_BYTES - 1] = 200;
     assert_eq!(
         ScaleJob::decode(&mut Reader::new(&bytes)).err(),

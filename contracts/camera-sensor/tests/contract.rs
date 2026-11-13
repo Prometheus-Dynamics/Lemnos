@@ -46,7 +46,7 @@ fn max_len(shape: &Shape) -> Option<usize> {
         Shape::Option(inner) => 1 + max_len(inner)?,
         Shape::Array(inner, count) => max_len(inner)? * *count as usize,
         Shape::Record(fields) => {
-            let mut total = 0;
+            let mut total = 4;
             for field in *fields {
                 total += max_len(&field.shape)?;
             }
@@ -260,8 +260,9 @@ fn absent_controls_stay_absent() {
         );
         used
     };
-    // Identity (8) and four present-flags plus the three values present.
-    assert_eq!(bytes, 8 + 4 + 3 * 4);
+    // The block (4), identity (8), the controls' block (4), four present-flags and the three
+    // values present.
+    assert_eq!(bytes, 4 + 8 + 4 + 4 + 3 * 4);
     // At the limit, every value present: the most a post can take.
     let full = FrameValues {
         identity: u64::MAX,
@@ -272,7 +273,7 @@ fn absent_controls_stay_absent() {
             frame_length: Some(u32::MAX),
         },
     };
-    let mut buffer = [0; 28];
+    let mut buffer = [0; 36];
     let mut writer = Writer::new(&mut buffer);
     full.encode(&mut writer).unwrap();
     assert_eq!(writer.len(), max_len(&FrameValues::SHAPE).unwrap());
@@ -281,8 +282,11 @@ fn absent_controls_stay_absent() {
 #[test]
 fn a_bad_present_flag_or_order_is_refused() {
     // A control's flag must be 0 or 1.
-    let mut bytes = [0u8; 8 + 4];
-    bytes[8] = 7;
+    // The block (length 16), identity (8), the controls' block (length 4), then the flags.
+    let mut bytes = [0u8; 4 + 8 + 4 + 4];
+    bytes[..4].copy_from_slice(&16u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&4u32.to_le_bytes());
+    bytes[16] = 7;
     assert_eq!(
         FrameValues::decode(&mut Reader::new(&bytes)).err(),
         Some(Status::INVALID_ARGUMENT)
@@ -291,7 +295,8 @@ fn a_bad_present_flag_or_order_is_refused() {
     let mut writer = Writer::new(&mut buffer);
     mode().encode(&mut writer).unwrap();
     let used = writer.len();
-    let at = max_len(&LinkConfig::SHAPE).unwrap();
+    // The bayer byte follows Mode's block length and the link's whole block.
+    let at = 4 + max_len(&LinkConfig::SHAPE).unwrap();
     buffer[at] = 9;
     assert_eq!(
         Mode::decode(&mut Reader::new(&buffer[..used])).err(),
@@ -304,9 +309,11 @@ fn a_gain_law_or_embedded_flag_that_is_not_defined_is_refused() {
     // The law's tag is 0 linear, 1 reciprocal, 2 decibel; a linear law has no parameter and the
     // other two need a non-zero one.
     let refused = |tag: u8, param: u32| {
-        let mut bytes = [0u8; 5];
-        bytes[0] = tag;
-        bytes[1..].copy_from_slice(&param.to_le_bytes());
+        // A block of 5 body bytes: the tag, then the parameter.
+        let mut bytes = [0u8; 9];
+        bytes[..4].copy_from_slice(&5u32.to_le_bytes());
+        bytes[4] = tag;
+        bytes[5..].copy_from_slice(&param.to_le_bytes());
         GainLaw::decode(&mut Reader::new(&bytes)).err()
     };
     assert_eq!(refused(0, 0), None);

@@ -108,7 +108,7 @@ fn board(driver: &str, config: &str) -> String {
          [[devices]]\nid = \"engine\"\ndriver = \"{driver}\"\n\
          config = {{ {config} }}\n\
          [devices.streams.jobs]\nmemory = \"dma-buf\"\nbuffers = 8\nbuffer_bytes = {BYTES}\n\
-         job_slots = 8\njob_bytes = 20\n"
+         job_slots = 8\njob_bytes = 24\n"
     )
 }
 

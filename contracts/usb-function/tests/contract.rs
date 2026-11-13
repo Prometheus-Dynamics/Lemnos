@@ -55,7 +55,9 @@ fn a_job_and_an_event_are_the_sizes_the_contract_names() {
     assert_eq!(round_trip(job), JOB_BYTES);
     assert_eq!(
         encoded(&job),
-        [8, 7, 6, 5, 4, 3, 2, 1, 2, 0x02, 7, 0, 0, 0, 0, 2, 0, 0]
+        [
+            18, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 2, 0x02, 7, 0, 0, 0, 0, 2, 0, 0
+        ]
     );
     let event = Event {
         kind: EventKind::Setup,
@@ -68,7 +70,10 @@ fn a_job_and_an_event_are_the_sizes_the_contract_names() {
         },
     };
     assert_eq!(round_trip(event), EVENT_BYTES);
-    assert_eq!(encoded(&event), [5, 0xc0, 9, 0x34, 0x12, 2, 0, 64, 0]);
+    assert_eq!(
+        encoded(&event),
+        [13, 0, 0, 0, 5, 8, 0, 0, 0, 0xc0, 9, 0x34, 0x12, 2, 0, 64, 0]
+    );
     round_trip(FunctionInfo::default());
     round_trip(EndpointInfo::default());
     round_trip(State::default());
@@ -96,7 +101,7 @@ fn a_completion_record_fits_before_the_data() {
         count: 0x0102_0304,
     };
     assert_eq!(round_trip(done), COMPLETION_BYTES);
-    assert_eq!(encoded(&done), [0, 4, 3, 2, 1]);
+    assert_eq!(encoded(&done), [5, 0, 0, 0, 0, 4, 3, 2, 1]);
     const { assert!(COMPLETION_BYTES <= DATA_OFFSET) };
     for (status, byte) in [
         (JobStatus::Refused, 1),
@@ -104,10 +109,10 @@ fn a_completion_record_fits_before_the_data() {
         (JobStatus::Cancelled, 3),
         (JobStatus::Failed, 4),
     ] {
-        assert_eq!(encoded(&Completion { status, count: 0 })[0], byte);
+        assert_eq!(encoded(&Completion { status, count: 0 })[4], byte);
     }
     assert_eq!(
-        Completion::decode(&mut Reader::new(&[5, 0, 0, 0, 0])),
+        Completion::decode(&mut Reader::new(&[5, 0, 0, 0, 5, 0, 0, 0, 0])),
         Err(Status::INVALID_ARGUMENT)
     );
 }

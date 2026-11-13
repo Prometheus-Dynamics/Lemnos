@@ -50,7 +50,9 @@ fn every_record_is_the_size_the_contract_names() {
     assert_eq!(round_trip(job), JOB_BYTES);
     assert_eq!(
         encoded(&job),
-        [8, 7, 6, 5, 4, 3, 2, 1, 3, 0, 0, 0, 0, 2, 0, 0, 4, 0, 0, 0]
+        [
+            20, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 3, 0, 0, 0, 0, 2, 0, 0, 4, 0, 0, 0
+        ]
     );
     assert_eq!(
         round_trip(WorkHeader { refs: 2, items: 3 }),
@@ -72,10 +74,10 @@ fn every_record_is_the_size_the_contract_names() {
         count: 0x0102_0304,
     };
     assert_eq!(round_trip(done), COMPLETION_BYTES);
-    assert_eq!(encoded(&done), [2, 4, 3, 2, 1]);
+    assert_eq!(encoded(&done), [5, 0, 0, 0, 2, 4, 3, 2, 1]);
     const { assert!(COMPLETION_BYTES <= DATA_OFFSET) };
     assert_eq!(
-        Completion::decode(&mut Reader::new(&[3, 0, 0, 0, 0])),
+        Completion::decode(&mut Reader::new(&[5, 0, 0, 0, 3, 0, 0, 0, 0])),
         Err(Status::INVALID_ARGUMENT)
     );
     round_trip(BlockInfo::default());
@@ -140,22 +142,25 @@ fn bytes_that_are_not_work_are_refused_whole() {
         assert!(Work::parse(&bytes[..cut]).is_none(), "cut at {cut}");
     }
     assert!(Work::parse(&bytes[..len + 1]).is_none());
-    // A count that claims more than is there.
+    // A count that claims more than is there. The counts follow the header's block length.
     let mut more = bytes;
-    more[0] = 3;
+    more[4] = 3;
     assert!(Work::parse(&more[..len]).is_none());
     let mut more = bytes;
-    more[2] = 4;
+    more[6] = 4;
     assert!(Work::parse(&more[..len]).is_none());
     // An item length that runs past the end, up to the largest there is.
     let first_item = WORK_HEADER_BYTES + 2 * BUFFER_REF_BYTES;
     for size in [4u32, 100, u32::MAX] {
         let mut long = bytes;
-        long[first_item + 4..first_item + 8].copy_from_slice(&size.to_le_bytes());
+        // An item header is its block length, its tag, then its bytes' length.
+        long[first_item + 8..first_item + 12].copy_from_slice(&size.to_le_bytes());
         assert!(Work::parse(&long[..len]).is_none(), "{size}");
     }
     // The largest counts, with nothing behind them.
-    assert!(Work::parse(&[0xff, 0xff, 0xff, 0xff]).is_none());
+    let mut top = [0xff; WORK_HEADER_BYTES];
+    top[..4].copy_from_slice(&4u32.to_le_bytes());
+    assert!(Work::parse(&top).is_none());
 }
 
 #[test]

@@ -26,7 +26,7 @@ fn a_reading_round_trips() {
     let mut writer = Writer::new(&mut buffer);
     reading.encode(&mut writer).unwrap();
     let used = writer.len();
-    assert_eq!(used, 16);
+    assert_eq!(used, 4 + 4 * 4);
     let decoded = PowerReading::decode(&mut Reader::new(&buffer[..used])).unwrap();
     assert_eq!(decoded, reading);
 }

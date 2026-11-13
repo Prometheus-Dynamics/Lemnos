@@ -43,7 +43,7 @@ config = { vendor = 0x1209, product = 1, serial = "S0", interfaces = "interface 
 buffers = 8
 buffer_bytes = 1024
 job_slots = 16
-job_bytes = 18
+job_bytes = 22
 "#;
 
 /// The contract's calls, carried by the host to the device.

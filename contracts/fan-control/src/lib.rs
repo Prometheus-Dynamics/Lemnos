@@ -3,12 +3,12 @@
 
 #![no_std]
 
-use lemnos_core::{Decode, Encode, Result, Status, contract};
+use lemnos_core::{Decode, Encode, Reader, Result, Writer, contract};
 
 /// Most points in one curve.
 pub const MAX_POINTS: usize = 8;
 /// Bytes one [`Point`] takes in a curve.
-pub const POINT_BYTES: usize = 8;
+pub const POINT_BYTES: usize = 4 + 4 + 4;
 
 /// One point of a curve: at `value`, in the input's unit, the input asks for `duty`.
 #[derive(Encode, Decode, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,31 +20,25 @@ pub struct Point {
 impl Point {
     /// Encodes `points` the way [`FanControl::set_curve`] takes them.
     pub fn write_all(points: &[Point], out: &mut [u8]) -> Result<usize> {
-        let bytes = points.len() * POINT_BYTES;
-        let out = out.get_mut(..bytes).ok_or(Status::BUFFER_TOO_SMALL)?;
-        let (slots, _) = out.as_chunks_mut::<POINT_BYTES>();
-        for (point, slot) in points.iter().zip(slots) {
-            slot[..4].copy_from_slice(&point.value.to_le_bytes());
-            slot[4..].copy_from_slice(&point.duty.to_le_bytes());
+        let mut writer = Writer::new(out);
+        for point in points {
+            point.encode(&mut writer)?;
         }
-        Ok(bytes)
+        Ok(writer.len())
     }
 
     /// The points in `bytes`, which must be a whole number of them.
     pub fn read_all(bytes: &[u8]) -> Result<impl Iterator<Item = Point> + '_> {
-        if !bytes.len().is_multiple_of(POINT_BYTES) {
-            return Err(Status::INVALID_ARGUMENT);
+        // Checked first, so the iterator below can't meet a point it cannot read.
+        let mut check = Reader::new(bytes);
+        while check.remaining() > 0 {
+            Point::decode(&mut check)?;
         }
-        Ok(bytes.as_chunks::<POINT_BYTES>().0.iter().map(|chunk| {
-            let word = |at: usize| {
-                let mut four = [0; 4];
-                four.copy_from_slice(&chunk[at..at + 4]);
-                i32::from_le_bytes(four)
-            };
-            Point {
-                value: word(0),
-                duty: word(4),
-            }
+        let mut from = Reader::new(bytes);
+        Ok(core::iter::from_fn(move || {
+            (from.remaining() > 0)
+                .then(|| Point::decode(&mut from).ok())
+                .flatten()
         }))
     }
 }
