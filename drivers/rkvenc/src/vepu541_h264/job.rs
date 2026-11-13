@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use lemnos_driver_rk_mpp::{Address, BufferId, Job, MAX_ADDRESSES, ReadBack};
+use lemnos_driver_rk_mpp::{Address, BufferId, Job, MAX_ADDRESSES, ReadBack, Run};
 
 use crate::layout::{AddressReg, Field, Region};
 
@@ -17,6 +17,14 @@ use crate::layout::{AddressReg, Field, Region};
 /// status and are read back, never written. The kernel's own write window ends at the same word
 /// (`reg_end` 131 in `mpp_rkvenc.c`).
 pub const WRITE_WORDS: usize = 132;
+
+/// The words of the second window (the L2 registers), as the kernel bounds them: 320 words from
+/// `RKVENC_L2_OFFSET`. The header's L2 struct uses words 0 to 195 of them.
+pub const L2_WORDS: usize = 320;
+
+/// The first word of the second window in the block's register numbering: 0x10000 bytes
+/// (`RKVENC_L2_OFFSET` of `mpp_rkvenc.c`), word 0x4000.
+pub const L2_FIRST: u16 = 0x4000;
 
 /// The read-back window: from `hw_status` (word 7) to the end of the read-back registers (word
 /// 209). A job asks for all of it, so every status register is copied back.
@@ -59,6 +67,8 @@ pub enum SetError {
     StreamBuffers,
     /// The job names a claim's buffer, which only a claim job can carry: use [`RegisterSet::job`].
     ClaimBuffers,
+    /// The field is in the second window, which [`RegisterSet::set_l2`] sets.
+    L2Window,
 }
 
 impl fmt::Display for SetError {
@@ -81,6 +91,7 @@ impl fmt::Display for SetError {
             Self::TooManyAddresses => write!(f, "more than {MAX_ADDRESSES} address registers"),
             Self::StreamBuffers => write!(f, "the job names a stream buffer: use codec_job"),
             Self::ClaimBuffers => write!(f, "the job names a claim's buffer: use job"),
+            Self::L2Window => write!(f, "the field is in the second window: use set_l2"),
         }
     }
 }
@@ -101,12 +112,15 @@ pub struct StreamRef {
     pub offset: u32,
 }
 
-/// An encoder job in `codec.block/1`'s form: the write side's words from word 0, the stream
-/// references of its address registers, and the read-back window.
+/// An encoder job in `codec.block/1`'s form: the write side's words from word 0, the second
+/// window's words when the job sets any, the stream references of its address registers, and the
+/// read-back window. Each run is one `TAG_WRITE` item.
 #[derive(Clone, Copy, Debug)]
 pub struct CodecJob<'a> {
     /// The register values of the write side, from word 0.
     pub write: &'a [u32],
+    /// The second window's values, from [`L2_FIRST`], when the job sets any.
+    pub l2: Option<Run<'a>>,
     /// The address registers, each a stream buffer and an offset.
     pub refs: &'a [StreamRef],
     /// The read-back window.
@@ -123,6 +137,9 @@ pub struct CodecJob<'a> {
 #[derive(Debug)]
 pub struct RegisterSet {
     words: [u32; WRITE_WORDS],
+    l2: [u32; L2_WORDS],
+    /// The words of `l2` the job writes: up to the last one a field set.
+    l2_len: usize,
     addresses: Vec<Address>,
     streams: Vec<StreamRef>,
 }
@@ -139,6 +156,8 @@ impl RegisterSet {
     pub fn new() -> Self {
         Self {
             words: [0; WRITE_WORDS],
+            l2: [0; L2_WORDS],
+            l2_len: 0,
             addresses: Vec::with_capacity(MAX_ADDRESSES),
             streams: Vec::with_capacity(MAX_ADDRESSES),
         }
@@ -147,12 +166,15 @@ impl RegisterSet {
     /// Empties the set for the next job.
     pub fn clear(&mut self) {
         self.words = [0; WRITE_WORDS];
+        self.l2 = [0; L2_WORDS];
+        self.l2_len = 0;
         self.addresses.clear();
         self.streams.clear();
     }
 
-    /// Sets a field. `value` is unsigned for an unsigned field and signed for a signed one; it
-    /// must fit the field's width and be one of the field's encodings, when it has them.
+    /// Sets a field of the write side. `value` is unsigned for an unsigned field and signed for a
+    /// signed one; it must fit the field's width and be one of the field's encodings, when it has
+    /// them.
     ///
     /// # Errors
     ///
@@ -166,26 +188,29 @@ impl RegisterSet {
         if !field.writable {
             return Err(SetError::ReadOnly);
         }
-        let width = u32::from(field.width);
-        let (low, high) = if field.signed {
-            (-(1i64 << (width - 1)), (1i64 << (width - 1)) - 1)
-        } else {
-            (0, (1i64 << width) - 1)
-        };
-        if value < low || value > high {
-            return Err(SetError::Range {
-                value,
-                width: field.width,
-                signed: field.signed,
-            });
-        }
-        if !field.values.is_empty() && !field.values.iter().any(|&v| i64::from(v) == value) {
-            return Err(SetError::Reserved { value });
-        }
-        let bits = (value as u32) & field.mask();
+        let bits = encode(field, value)?;
         let slot = &mut self.words[usize::from(field.word)];
-        let shifted = field.mask() << field.lsb;
-        *slot = (*slot & !shifted) | (bits << field.lsb);
+        *slot = merge(*slot, field, bits);
+        Ok(())
+    }
+
+    /// Sets a field of the second window, which the job writes from [`L2_FIRST`] on. The same
+    /// checks as [`Self::set`]; the words up to the last one set are written, the rest are not.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::set`], with [`SetError::OutsideWrite`] for a field of another window.
+    pub fn set_l2(&mut self, field: Field, value: i64) -> Result<(), SetError> {
+        if field.region != Region::L2 || usize::from(field.word) >= L2_WORDS {
+            return Err(SetError::OutsideWrite);
+        }
+        if !field.writable {
+            return Err(SetError::ReadOnly);
+        }
+        let bits = encode(field, value)?;
+        let at = usize::from(field.word);
+        self.l2[at] = merge(self.l2[at], field, bits);
+        self.l2_len = self.l2_len.max(at + 1);
         Ok(())
     }
 
@@ -264,20 +289,38 @@ impl RegisterSet {
         &self.streams
     }
 
-    /// The job for a claim holder: all of the write side from word 0, its claim addresses, and the
-    /// read-back window. The identity is carried to the completion, never read.
+    /// The job for a claim holder: all of the write side from word 0, the second window's words
+    /// when the set has any, its claim addresses, and the read-back window. The identity is carried
+    /// to the completion, never read.
+    ///
+    /// `spare` holds the second window's run: a job borrows it, so the caller keeps it for as long
+    /// as the job is used. It is written only when the set has second-window words.
     ///
     /// # Errors
     ///
     /// [`SetError::StreamBuffers`] when the set names stream buffers.
-    pub fn job(&self, identity: u64) -> Result<Job<'_>, SetError> {
+    pub fn job<'a>(
+        &'a self,
+        identity: u64,
+        spare: &'a mut [Run<'a>; 1],
+    ) -> Result<Job<'a>, SetError> {
         if !self.streams.is_empty() {
             return Err(SetError::StreamBuffers);
         }
+        let more: &'a [Run<'a>] = if self.l2_len > 0 {
+            spare[0] = Run {
+                first: L2_FIRST,
+                registers: &self.l2[..self.l2_len],
+            };
+            &spare[..]
+        } else {
+            &[]
+        };
         Ok(Job {
             identity,
             first: 0,
             registers: &self.words,
+            more,
             addresses: &self.addresses,
             read: Some(READ_BACK),
         })
@@ -296,8 +339,39 @@ impl RegisterSet {
         }
         Ok(CodecJob {
             write: &self.words,
+            l2: (self.l2_len > 0).then(|| Run {
+                first: L2_FIRST,
+                registers: &self.l2[..self.l2_len],
+            }),
             refs: &self.streams,
             read: READ_BACK,
         })
     }
+}
+
+/// The field's bits in place for `value`, checked against its width, sign and encodings.
+fn encode(field: Field, value: i64) -> Result<u32, SetError> {
+    let width = u32::from(field.width);
+    let (low, high) = if field.signed {
+        (-(1i64 << (width - 1)), (1i64 << (width - 1)) - 1)
+    } else {
+        (0, (1i64 << width) - 1)
+    };
+    if value < low || value > high {
+        return Err(SetError::Range {
+            value,
+            width: field.width,
+            signed: field.signed,
+        });
+    }
+    if !field.values.is_empty() && !field.values.iter().any(|&v| i64::from(v) == value) {
+        return Err(SetError::Reserved { value });
+    }
+    Ok(((value as u32) & field.mask()) << field.lsb)
+}
+
+/// `word` with the field's bits replaced by `bits` (from [`encode`]).
+fn merge(word: u32, field: Field, bits: u32) -> u32 {
+    let shifted = field.mask() << field.lsb;
+    (word & !shifted) | bits
 }

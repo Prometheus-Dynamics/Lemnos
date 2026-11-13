@@ -6,7 +6,7 @@ use std::os::fd::BorrowedFd;
 use std::sync::{Arc, Mutex};
 
 use lemnos_driver_rk_mpp::played::{Kernel, iova};
-use lemnos_driver_rk_mpp::{Block, Device, Message, Service, Session};
+use lemnos_driver_rk_mpp::{Block, Device, Message, Run, Service, Session};
 use lemnos_driver_rkvenc::layout::{AddressReg, Region};
 use lemnos_driver_rkvenc::vepu541_h264::{READ_BACK, RegisterSet, SetError, StreamRef, ret, set};
 use lemnos_linux_sys::dma_buf;
@@ -136,7 +136,11 @@ fn an_address_takes_a_buffer_at_an_aligned_offset() {
     let id = buffer();
     let mut regs = RegisterSet::new();
     regs.set_address(set::reg078::CMVW_ADDR, id, 2048).unwrap();
-    let job = regs.job(1).unwrap();
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    let job = regs.job(1, &mut spare).unwrap();
     assert_eq!(job.addresses.len(), 1);
     assert_eq!(
         (job.addresses[0].register, job.addresses[0].offset),
@@ -153,7 +157,11 @@ fn a_misaligned_offset_is_refused_by_the_headers_alignment() {
         Err(SetError::Misaligned { align: 1024 })
     );
     assert!(regs.stream_refs().is_empty());
-    assert!(regs.job(0).unwrap().addresses.is_empty());
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    assert!(regs.job(0, &mut spare).unwrap().addresses.is_empty());
 }
 
 #[test]
@@ -187,7 +195,11 @@ fn a_job_carries_the_whole_write_side_and_the_read_back() {
     let mut regs = RegisterSet::new();
     regs.set(set::reg001::LKT_NUM, 9).unwrap();
     regs.set_address(set::reg070::ADR_SRC0, id, 4096).unwrap();
-    let job = regs.job(7).unwrap();
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    let job = regs.job(7, &mut spare).unwrap();
     assert_eq!(job.identity, 7);
     assert_eq!(job.first, 0);
     assert_eq!(job.registers.len(), 132);
@@ -212,7 +224,14 @@ fn a_set_names_one_kind_of_buffer() {
     );
     // A second kind of buffer in the same set: neither form takes it whole.
     regs.set_address(set::reg078::CMVW_ADDR, id, 1024).unwrap();
-    assert!(matches!(regs.job(1), Err(SetError::StreamBuffers)));
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    assert!(matches!(
+        regs.job(1, &mut spare),
+        Err(SetError::StreamBuffers)
+    ));
     assert!(matches!(regs.codec_job(), Err(SetError::ClaimBuffers)));
     let mut claims = RegisterSet::new();
     claims.set_address(set::reg070::ADR_SRC0, id, 0).unwrap();
@@ -257,7 +276,11 @@ fn clear_empties_the_set_for_the_next_job() {
     regs.clear();
     assert!(regs.words().iter().all(|&w| w == 0));
     assert!(regs.stream_refs().is_empty());
-    assert!(regs.job(0).unwrap().addresses.is_empty());
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    assert!(regs.job(0, &mut spare).unwrap().addresses.is_empty());
 }
 
 #[test]
@@ -272,7 +295,11 @@ fn the_steady_state_allocates_nothing() {
             regs.set(set::reg053::QP_ADJ0, i64::from(i % 16)).unwrap();
             regs.set(set::reg001::LKT_NUM, i64::from(i)).unwrap();
             regs.set_address(set::reg070::ADR_SRC0, id, 0).unwrap();
-            let job = regs.job(u64::from(i)).unwrap();
+            let mut spare = [Run {
+                first: 0,
+                registers: &[],
+            }];
+            let job = regs.job(u64::from(i), &mut spare).unwrap();
             std::hint::black_box(job.registers.len());
             regs.clear();
         }
@@ -323,7 +350,11 @@ fn an_encoder_job_runs_end_to_end_on_the_rkvenc_block() {
     regs.set_address(set::reg070::ADR_SRC0, source, 0).unwrap();
     regs.set_address(set::reg078::CMVW_ADDR, recon, 1024)
         .unwrap();
-    claim.submit(&regs.job(1).unwrap()).unwrap();
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    claim.submit(&regs.job(1, &mut spare).unwrap()).unwrap();
     let mut back = vec![0u32; 780];
     let done = claim.complete(&mut back).unwrap();
     assert_eq!(
@@ -337,4 +368,94 @@ fn an_encoder_job_runs_end_to_end_on_the_rkvenc_block() {
     let fds: Vec<u32> = kernel.lock().unwrap().translated[..2].to_vec();
     assert_eq!(back[70 - 7], iova(fds[0]));
     assert_eq!(back[78 - 7], iova(fds[1]).wrapping_add(1024));
+}
+
+#[test]
+fn a_second_window_field_takes_its_bits_in_the_l2_words_only() {
+    use lemnos_driver_rkvenc::vepu541_h264::{L2_FIRST, l2};
+    let mut regs = RegisterSet::new();
+    // IPRD_TTHDY4[1] is the upper half of word 1 of the second window.
+    let field = l2::iprd_tthdy4::IPRD_TTHDY4[1];
+    regs.set_l2(field, 0x1234).unwrap();
+    // The write side's fields and the second window's do not cross.
+    assert_eq!(
+        regs.set_l2(set::reg001::LKT_NUM, 1),
+        Err(SetError::OutsideWrite)
+    );
+    assert_eq!(regs.set(field, 1), Err(SetError::OutsideWrite));
+    assert_eq!(regs.words()[1], 0);
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    let job = regs.job(1, &mut spare).unwrap();
+    assert_eq!(job.more.len(), 1);
+    assert_eq!(job.more[0].first, L2_FIRST);
+    // Words 0 to 1 of the window: the job writes up to the last word a field set.
+    assert_eq!(job.more[0].registers, &[0, 0x1234_0000]);
+    // And a set with no second-window field writes none.
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    let plain = RegisterSet::new();
+    assert!(plain.job(2, &mut spare).unwrap().more.is_empty());
+}
+
+#[test]
+fn a_second_window_job_runs_end_to_end_on_the_first_generation_block() {
+    use lemnos_driver_rkvenc::vepu541_h264::l2;
+    let (device, kernel) = PlayedDevice::new();
+    let mut service = Service::new(device);
+    let mut claim = service.claim(Block::Rkvenc, 0).unwrap();
+    let source = claim
+        .add_buffer(dma_buf::sealed_memfd(c"rkvenc-src", 1 << 20).unwrap())
+        .unwrap();
+    let mut regs = RegisterSet::new();
+    regs.set(set::reg017::SRC_CFMT, 4).unwrap();
+    regs.set_address(set::reg070::ADR_SRC0, source, 0).unwrap();
+    regs.set_l2(l2::iprd_tthdy4::IPRD_TTHDY4[1], 0x1234)
+        .unwrap();
+    regs.set_l2(l2::iprd_tthdy4::IPRD_TTHDY4[2], 0x5678)
+        .unwrap();
+    let mut spare = [Run {
+        first: 0,
+        registers: &[],
+    }];
+    claim.submit(&regs.job(3, &mut spare).unwrap()).unwrap();
+    {
+        // The kernel's task: the first window (780 words) then the second; the L2 words sit at
+        // the start of the second, after the first window's words.
+        let k = kernel.lock().unwrap();
+        let task = &k.tasks[k.head];
+        assert_eq!(task.regs[780 + 1], 0x1234_0000);
+        assert_eq!(task.regs[780 + 2], 0x0000_5678);
+        // The first window's address was translated; the second window was not.
+        assert_eq!(k.translated_len, 1);
+        let cmds: Vec<u32> = k.last[..k.last_len].iter().map(|c| c.0).collect();
+        assert_eq!(cmds.len(), 4, "table, write, second window, read");
+        assert_eq!(k.table[..k.table_len], [70]);
+    }
+    let mut back = vec![0u32; 780];
+    let done = claim.complete(&mut back).unwrap();
+    assert_eq!(
+        (done.identity, done.registers),
+        (3, usize::from(READ_BACK.count))
+    );
+    assert_eq!(back[17 - 7], 4 << 2);
+}
+
+#[test]
+fn a_codec_job_names_the_second_window_as_its_own_run() {
+    use lemnos_driver_rkvenc::vepu541_h264::{L2_FIRST, l2};
+    let mut regs = RegisterSet::new();
+    assert!(regs.codec_job().unwrap().l2.is_none());
+    regs.set_l2(l2::iprd_tthdy4::IPRD_TTHDY4[1], 0x1234)
+        .unwrap();
+    let job = regs.codec_job().unwrap();
+    let run = job.l2.expect("the second window's run");
+    assert_eq!(
+        (run.first, run.registers),
+        (L2_FIRST, &[0, 0x1234_0000][..])
+    );
 }

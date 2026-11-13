@@ -15,7 +15,7 @@ use lemnos_core::{Bound, Caller as CoreCaller, Health, MethodId, Result, Status}
 use lemnos_driver_codec_jobs::testing::{Caller, PerBuffer, reference};
 use lemnos_driver_rk_mpp::codec::{NOT_THERE, TAG_READ, TAG_WRITE};
 use lemnos_driver_rk_mpp::played::{Kernel, iova};
-use lemnos_driver_rk_mpp::{Block, BoxedDevice, Device, Message, Session};
+use lemnos_driver_rk_mpp::{Block, BoxedDevice, Device, MAX_RUNS, Message, Session};
 use lemnos_driver_rk_mpp_codec::{RkMpp, RkMppNeeds};
 use lemnos_host::board::parse;
 use lemnos_host::stream::HeapAllocator;
@@ -199,7 +199,8 @@ fn a_board_file_binds_it_and_what_it_names_is_checked() {
     let info = device.info().unwrap();
     assert_eq!(
         (info.max_refs, info.max_items, info.max_buffers),
-        (64, 2, 32)
+        // One item per run (at most MAX_RUNS) and one read-back.
+        (64, MAX_RUNS as u16 + 1, 32)
     );
     let mut caller = Caller::attach(&rig.host, 0, "jobs", 1);
     rig.ticks(1);

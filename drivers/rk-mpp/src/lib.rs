@@ -55,7 +55,9 @@ pub mod uapi;
 #[cfg(all(test, feature = "device"))]
 mod tests;
 
-pub use block::{Block, Check, Descriptor, Direct, Facts, MAX_REGISTERS, ParamFacts, Word};
+pub use block::{
+    Block, Check, Descriptor, Direct, Facts, MAX_JOB_WORDS, MAX_REGISTERS, ParamFacts, Window, Word,
+};
 #[cfg(feature = "device")]
 pub use claim::{
     BufferError, Claim, ClaimError, ClaimOf, CompleteError, Completion, Device, MAX_BUFFERS,
@@ -63,7 +65,10 @@ pub use claim::{
 };
 #[cfg(feature = "device")]
 pub use codec::{BlockClaim, BoxedDevice, MppBlock};
-pub use job::{Address, BufferId, Job, JobError, MAX_ADDRESSES, ParamAddress, ParamJob, ReadBack};
+pub use job::{
+    Address, BufferId, Job, JobError, MAX_ADDRESSES, MAX_RUNS, ParamAddress, ParamJob, ReadBack,
+    Run,
+};
 #[cfg(any(test, feature = "device", feature = "played"))]
 pub use message::{Message, Payload};
 pub use message::{READ_BACK_BYTES, READ_BACK_SLOTS};

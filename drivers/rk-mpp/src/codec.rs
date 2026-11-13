@@ -44,9 +44,9 @@ use lemnos_contract_codec_block::work::Work;
 use lemnos_core::Health;
 use lemnos_driver_codec_jobs::{Block, Buffers, Start};
 
-use crate::block::MAX_REGISTERS;
+use crate::block::{MAX_JOB_WORDS, MAX_REGISTERS};
 use crate::claim::{ClaimError, Device, MAX_BUFFERS, OwnedClaim, Service, Session, SubmitError};
-use crate::job::{Address, BufferId, Job, MAX_ADDRESSES, ReadBack};
+use crate::job::{Address, BufferId, Job, MAX_ADDRESSES, MAX_RUNS, ReadBack, Run};
 use crate::message::Message;
 
 /// The item that carries the register values: the first register, then the values.
@@ -285,7 +285,7 @@ pub struct MppBlock<D: Device> {
     claim: BlockClaim<D>,
     /// A job's addresses and read-back, built here.
     addresses: [Address; MAX_ADDRESSES],
-    registers: Box<[u32; MAX_REGISTERS]>,
+    registers: Box<[u32; MAX_JOB_WORDS]>,
     identity: u64,
 }
 
@@ -303,7 +303,7 @@ impl<D: Device> MppBlock<D> {
         Self {
             claim: BlockClaim::new(device, block),
             addresses: [nowhere; MAX_ADDRESSES],
-            registers: Box::new([0; MAX_REGISTERS]),
+            registers: Box::new([0; MAX_JOB_WORDS]),
             identity: 0,
         }
     }
@@ -327,9 +327,9 @@ impl<D: Device> Block for MppBlock<D> {
 
     fn limits(&self) -> BlockInfo {
         BlockInfo {
-            max_work_bytes: 4096,
+            max_work_bytes: (4 * MAX_JOB_WORDS + 8 * MAX_RUNS + 8) as u32,
             max_refs: MAX_ADDRESSES as u16,
-            max_items: 2,
+            max_items: (MAX_RUNS + 1) as u16,
             max_read_back: (4 * MAX_REGISTERS) as u32,
             max_buffers: MAX_BUFFERS as u32,
         }
@@ -342,28 +342,37 @@ impl<D: Device> Block for MppBlock<D> {
         read_back: &mut [u8],
         now_ns: u64,
     ) -> Start {
-        // The work's shape first: nothing is opened for work that is refused anyway.
-        let mut write = None;
+        // The work's shape first: nothing is opened for work that is refused anyway. Each write
+        // item is one run: its first register, then its values, copied to the block's staging
+        // area one after another.
+        let mut runs = [(0u16, 0usize, 0usize); MAX_RUNS];
+        let mut count_runs = 0;
+        let mut words = 0;
         let mut read = None;
         for (tag, bytes) in work.items() {
             match tag {
-                TAG_WRITE if write.is_none() && bytes.len() >= 8 && bytes.len() % 4 == 0 => {
-                    write = Some(bytes);
+                TAG_WRITE if count_runs < MAX_RUNS && bytes.len() >= 8 && bytes.len() % 4 == 0 => {
+                    let count = bytes.len() / 4 - 1;
+                    let first = word(bytes, 0).and_then(|first| u16::try_from(first).ok());
+                    let Some(first) = first else {
+                        return Start::Refused;
+                    };
+                    if words + count > MAX_JOB_WORDS {
+                        return Start::Refused;
+                    }
+                    for (at, value) in self.registers[words..words + count].iter_mut().enumerate() {
+                        *value = word(bytes, 4 + 4 * at).unwrap_or(0);
+                    }
+                    runs[count_runs] = (first, words, count);
+                    count_runs += 1;
+                    words += count;
                 }
                 TAG_READ if read.is_none() && bytes.len() == 8 => read = Some(bytes),
                 _ => return Start::Refused,
             }
         }
-        let Some(write) = write else {
+        if count_runs == 0 {
             return Start::Refused;
-        };
-        let count = write.len() / 4 - 1;
-        let first = word(write, 0).and_then(|first| u16::try_from(first).ok());
-        let (Some(first), true) = (first, count <= MAX_REGISTERS) else {
-            return Start::Refused;
-        };
-        for (at, register) in self.registers.iter_mut().take(count).enumerate() {
-            *register = word(write, 4 + 4 * at).unwrap_or(0);
         }
         let read = match read {
             None => None,
@@ -410,10 +419,24 @@ impl<D: Device> Block for MppBlock<D> {
         }
 
         self.identity = self.identity.wrapping_add(1);
+        let runs = &runs[..count_runs];
+        let registers = &self.registers[..];
+        let mut more = [Run {
+            first: 0,
+            registers: &[],
+        }; MAX_RUNS];
+        for (slot, &(first, from, count)) in more.iter_mut().zip(&runs[1..]) {
+            *slot = Run {
+                first,
+                registers: &registers[from..from + count],
+            };
+        }
+        let (first, from, count) = runs[0];
         let job = Job {
             identity: self.identity,
             first,
-            registers: &self.registers[..count],
+            registers: &registers[from..from + count],
+            more: &more[..runs.len() - 1],
             addresses: &self.addresses[..named],
             read,
         };

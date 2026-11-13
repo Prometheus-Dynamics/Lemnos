@@ -286,25 +286,111 @@ impl Direct {
     }
 }
 
+/// A run of the block's register file the kernel takes a read or write in: words `first` to
+/// `first + words`, and whether the kernel translates an address register inside it.
+///
+/// A job's write or read lies wholly inside one window (the kernel's `mpp_check_req` bounds it
+/// by one task array). The kernel translates a register only in the window its translation
+/// table reaches, which is the first window of every block here: a second window is written raw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    /// The first word, in the block's register numbering (byte offset / 4).
+    pub first: u16,
+    /// The words the window holds.
+    pub words: u16,
+    /// Whether the kernel translates address registers that sit in this window.
+    pub translated: bool,
+}
+
+impl Window {
+    /// The first window of a block: from word 0, translated.
+    #[must_use]
+    pub const fn main(words: u16) -> Self {
+        Self {
+            first: 0,
+            words,
+            translated: true,
+        }
+    }
+
+    /// Whether the window holds the run `first..first + count`.
+    #[must_use]
+    pub fn holds(&self, first: u16, count: usize) -> bool {
+        let end = usize::from(first) + count;
+        usize::from(first) >= usize::from(self.first)
+            && end <= usize::from(self.first) + usize::from(self.words)
+    }
+}
+
 /// What the kernel does with one block's registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Facts {
     /// The client type sent with `MPP_CMD_INIT_CLIENT_TYPE`.
     pub client: u32,
-    /// Registers a job may name: the smallest `reg_num` among the block's variants, which is never
-    /// more than its task's register array. Reads and writes, translated registers and offsets
-    /// stay below it.
-    pub registers: u16,
+    /// The windows of the register file a job may name, in word numbering. A write or read lies
+    /// wholly inside one of them. Their words, in order, are the block's flat register array.
+    pub windows: &'static [Window],
     /// `reg_start`: the kernel skips a read or write that ends before this register.
     pub first: u16,
     /// A register translated outside the table, if any.
     pub direct: Option<Direct>,
 }
 
-/// The most registers of any block here: [`Block::Rkvenc`]'s task array. A job's registers are
-/// copied only as far as the job reaches, so the size of the largest block costs a claim its
-/// staging memory once and no job anything.
+impl Facts {
+    /// The index in the block's flat register array of word `word`, or `None` when no window
+    /// holds it. The flat array is the windows' words, in the order the windows are listed.
+    #[must_use]
+    pub fn flat(&self, word: usize) -> Option<usize> {
+        let mut base = 0;
+        for window in self.windows {
+            let first = usize::from(window.first);
+            if word >= first && word < first + usize::from(window.words) {
+                return Some(base + word - first);
+            }
+            base += usize::from(window.words);
+        }
+        None
+    }
+
+    /// The index of the window that holds the run `first..first + count`, when one does.
+    #[must_use]
+    pub fn window_of(&self, first: u16, count: usize) -> Option<usize> {
+        self.windows.iter().position(|w| w.holds(first, count))
+    }
+
+    /// The words of every window: the flat array's length.
+    #[must_use]
+    pub fn words(&self) -> usize {
+        self.windows.iter().map(|w| usize::from(w.words)).sum()
+    }
+}
+
+const VDPU1_WINDOWS: &[Window] = &[Window::main(60)];
+const VDPU2_WINDOWS: &[Window] = &[Window::main(159)];
+const VEPU1_WINDOWS: &[Window] = &[Window::main(164)];
+const VEPU2_WINDOWS: &[Window] = &[Window::main(184)];
+const JPEG_DECODER_WINDOWS: &[Window] = &[Window::main(42)];
+const JPEG_ENCODER_WINDOWS: &[Window] = &[Window::main(79)];
+/// `mpp_rkvenc.c`: `reg[RKVENC_REG_L1_NUM]` (780 words) and `reg_l2[RKVENC_REG_L2_NUM]` (320
+/// words) at `RKVENC_L2_OFFSET` (0x10000). The second window is written raw: the kernel does not
+/// translate it.
+const RKVENC_WINDOWS: &[Window] = &[
+    Window::main(780),
+    Window {
+        first: 0x4000,
+        words: 320,
+        translated: false,
+    },
+];
+const NO_WINDOWS: &[Window] = &[];
+
+/// The most registers in one window of any block here: [`Block::Rkvenc`]'s first window. A
+/// read is inside one window, so this sizes a read-back area.
 pub const MAX_REGISTERS: usize = 780;
+
+/// The most words a job writes, in all its runs, on any block here: the flat register array of
+/// [`Block::Rkvenc`] (its two windows, 780 and 320 words).
+pub const MAX_JOB_WORDS: usize = 780 + 320;
 
 impl Block {
     /// Every block a claim may bind to.
@@ -339,7 +425,7 @@ impl Block {
             // VDPU1_FMT_H264D 0.
             Self::Vdpu1 => Facts {
                 client: client::VDPU1,
-                registers: 60,
+                windows: VDPU1_WINDOWS,
                 first: 0,
                 direct: Some(Direct {
                     register: 41,
@@ -354,7 +440,7 @@ impl Block {
             // VDPU2_FMT_H264D 0.
             Self::Vdpu2 => Facts {
                 client: client::VDPU2,
-                registers: 159,
+                windows: VDPU2_WINDOWS,
                 first: 50,
                 direct: Some(Direct {
                     register: 62,
@@ -367,7 +453,7 @@ impl Block {
             // VEPU1_REG_NUM 164, reg_start 0.
             Self::Vepu1 => Facts {
                 client: client::VEPU1,
-                registers: 164,
+                windows: VEPU1_WINDOWS,
                 first: 0,
                 direct: None,
             },
@@ -376,21 +462,21 @@ impl Block {
             // to that register's offset; it maps nothing there.
             Self::Vepu2 => Facts {
                 client: client::VEPU2,
-                registers: 184,
+                windows: VEPU2_WINDOWS,
                 first: 0,
                 direct: None,
             },
             // JPGDEC_REG_NUM 42 (JPGDEC_VPU730_REG_NUM 70 on the newer variant), reg_start 0.
             Self::JpegDecoder => Facts {
                 client: client::RKJPEGD,
-                registers: 42,
+                windows: JPEG_DECODER_WINDOWS,
                 first: 0,
                 direct: None,
             },
             // JPGENC_REG_NUM 79 (JPGENC_VPU730_REG_NUM 241 on the newer variant), reg_start 0.
             Self::JpegEncoder => Facts {
                 client: client::RKJPEGE,
-                registers: 79,
+                windows: JPEG_ENCODER_WINDOWS,
                 first: 0,
                 direct: None,
             },
@@ -398,10 +484,10 @@ impl Block {
             // and every register read and write is checked against its size (`mpp_check_req`),
             // so a job may name up to there. The driver's own `reg_num` (112) and `reg_end`
             // (131) describe its normal write window, not a bound on what the kernel accepts. The
-            // second register window at 0x10000 is a separate array the job cannot name.
+            // second window (0x10000, `reg_l2`) is a separate array of 320 words, written raw.
             Self::Rkvenc => Facts {
                 client: client::RKVENC,
-                registers: 780,
+                windows: RKVENC_WINDOWS,
                 first: 0,
                 direct: None,
             },
@@ -409,7 +495,7 @@ impl Block {
             // registers. Its jobs are parameter blocks ([`Block::params`]).
             Self::Iep2 => Facts {
                 client: client::IEP2,
-                registers: 0,
+                windows: NO_WINDOWS,
                 first: 0,
                 direct: None,
             },

@@ -17,8 +17,8 @@ use crate::uapi::{
 };
 use crate::{
     Address, Block, BufferError, BufferId, ClaimError, CompleteError, Completion, Device, Job,
-    JobError, MAX_ADDRESSES, MAX_BUFFERS, MAX_REGISTERS, Message, READ_BACK_BYTES, READ_BACK_SLOTS,
-    ReadBack, Service, Session, SubmitError, backoff_ns,
+    JobError, MAX_ADDRESSES, MAX_BUFFERS, MAX_JOB_WORDS, MAX_REGISTERS, MAX_RUNS, Message,
+    READ_BACK_BYTES, READ_BACK_SLOTS, ReadBack, Run, Service, Session, SubmitError, backoff_ns,
 };
 
 mod codec;
@@ -139,26 +139,35 @@ fn block_facts_stay_inside_the_kernel_limits() {
         assert!(facts.client < client::END, "{block:?}");
         if block.params().is_some() {
             // A parameter block has no register file: every register-file job runs past it.
-            assert_eq!(facts.registers, 0, "{block:?}");
+            assert!(facts.windows.is_empty(), "{block:?}");
             continue;
         }
-        assert!(usize::from(facts.registers) <= MAX_REGISTERS, "{block:?}");
-        assert!(facts.first < facts.registers, "{block:?}");
-        assert!(facts.client < client::END, "{block:?}");
-        if let Some(d) = facts.direct {
-            assert!(d.register < facts.registers && d.mode_register < facts.registers);
+        for window in facts.windows {
+            assert!(usize::from(window.words) <= MAX_REGISTERS, "{block:?}");
         }
-        most = most.max(usize::from(facts.registers));
+        assert!(facts.words() <= MAX_JOB_WORDS, "{block:?}");
+        assert!(
+            facts.windows.iter().any(|w| w.holds(facts.first, 1)),
+            "{block:?}"
+        );
+        if let Some(d) = facts.direct {
+            assert!(facts.flat(usize::from(d.register)).is_some(), "{block:?}");
+            assert!(
+                facts.flat(usize::from(d.mode_register)).is_some(),
+                "{block:?}"
+            );
+        }
+        most = most.max(facts.words());
     }
-    assert_eq!(most, MAX_REGISTERS);
+    assert_eq!(most, MAX_JOB_WORDS);
     assert_eq!(READ_BACK_BYTES, 4 * MAX_REGISTERS);
     // Addresses, plus one for a direct register, stay below the kernel's region array, whose
     // bound check is off by one.
     const { assert!(MAX_ADDRESSES + 1 < MAX_REG_TRANS_NUM) };
-    // A job is at most four messages.
-    const { assert!(4 <= MAX_MSG_NUM) };
+    // A job is at most the table, its writes, the offsets and the read-back.
+    const { assert!(MAX_RUNS + 3 <= MAX_MSG_NUM) };
     assert_eq!(
-        (Block::Vdpu2.facts().registers, Block::Vdpu2.facts().first),
+        (Block::Vdpu2.facts().words(), Block::Vdpu2.facts().first),
         (159, 50)
     );
 }
@@ -370,6 +379,7 @@ fn a_job_reaches_the_block_with_its_buffers_translated() {
         identity: 77,
         first: 0,
         registers: &regs,
+        more: &[],
         addresses: &addresses,
         read: Some(ReadBack {
             first: 0,
@@ -429,6 +439,7 @@ fn a_raw_value_in_an_address_register_never_reaches_the_kernel() {
             identity: 1,
             first: 0,
             registers: &regs,
+            more: &[],
             addresses: &addresses,
             read: None,
         })
@@ -454,6 +465,7 @@ fn submit_one(
         identity: 0,
         first,
         registers,
+        more: &[],
         addresses: &addresses,
         read,
     });
@@ -505,7 +517,7 @@ fn an_offset_must_be_inside_its_buffer() {
 #[test]
 fn writes_and_reads_stay_inside_the_block() {
     let regs = regs();
-    let vepu2 = Block::Vepu2.facts().registers; // 184
+    let vepu2 = Block::Vepu2.facts().words() as u16; // 184
     // The last 32 registers: fine; one further: refused.
     assert!(submit_one(Block::Vepu2, vepu2 - 32, &regs, at(vepu2 - 1, 0), None).is_ok());
     assert_eq!(
@@ -661,6 +673,7 @@ fn a_direct_register_must_be_an_address_in_its_mode_and_leaves_the_table() {
             identity: 9,
             first: 50,
             registers: &regs,
+            more: &[],
             addresses: &addresses,
             read: Some(ReadBack {
                 first: 50,
@@ -694,6 +707,7 @@ fn completions_come_in_order_with_their_read_back() {
                 identity,
                 first: 0,
                 registers: &regs,
+                more: &[],
                 addresses: &[Address {
                     register: 3,
                     buffer,
@@ -708,6 +722,7 @@ fn completions_come_in_order_with_their_read_back() {
         identity: 99,
         first: 0,
         registers: &regs,
+        more: &[],
         addresses: &[],
         read: None,
     });
@@ -747,6 +762,7 @@ fn a_refused_job_leaves_nothing_in_flight() {
         identity: 1,
         first: 0,
         registers: &regs,
+        more: &[],
         addresses: &addresses,
         read: None,
     };
@@ -771,6 +787,7 @@ fn dropping_a_claim_waits_for_its_jobs_then_unmaps() {
                     identity: 1,
                     first: 0,
                     registers: &regs,
+                    more: &[],
                     addresses: &[Address {
                         register: 2,
                         buffer,
@@ -809,6 +826,7 @@ fn submitting_and_completing_allocate_nothing() {
         identity: 0,
         first: 0,
         registers: &regs,
+        more: &[],
         addresses: &addresses,
         read: Some(ReadBack {
             first: 0,
@@ -823,4 +841,166 @@ fn submitting_and_completing_allocate_nothing() {
         }
     });
     assert_eq!(n, 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Several windows
+
+/// The first window of the first-generation encoder: 780 words, and the second at word 0x4000.
+const RKVENC_L2_FIRST: u16 = 0x4000;
+
+#[test]
+fn a_job_writes_its_second_window_raw_and_reads_it_back() {
+    let (mut service, kernel) = service();
+    let mut claim = service.claim(Block::Rkvenc, 0).unwrap();
+    let input = claim.add_buffer(memfd(4096)).unwrap();
+    let regs = regs();
+    let l2: [u32; 8] = std::array::from_fn(|i| 0x5a00_0000 | i as u32);
+    let addresses = [Address {
+        register: 8,
+        buffer: input,
+        offset: 0,
+    }];
+    let more = [Run {
+        first: RKVENC_L2_FIRST,
+        registers: &l2,
+    }];
+    claim
+        .submit(&Job {
+            identity: 5,
+            first: 0,
+            registers: &regs,
+            more: &more,
+            addresses: &addresses,
+            read: Some(ReadBack {
+                first: RKVENC_L2_FIRST,
+                count: 8,
+            }),
+        })
+        .unwrap();
+    {
+        // The table, the two writes, the read: one message per run, each at its own offset.
+        let k = kernel.borrow();
+        let cmds: Vec<u32> = k.last[..k.last_len].iter().map(|c| c.0).collect();
+        assert_eq!(
+            cmds,
+            [
+                Command::InitTransTable.code(),
+                Command::SetRegWrite.code(),
+                Command::SetRegWrite.code(),
+                Command::SetRegRead.code(),
+            ]
+        );
+        assert_eq!(k.table[..k.table_len], [8]);
+    }
+    let mut back = [0u32; 8];
+    claim.complete(&mut back).unwrap();
+    assert_eq!(back, l2);
+    // The second window's words were written raw: nothing translated there.
+    assert_eq!(kernel.borrow().translated_len, 1);
+}
+
+#[test]
+fn a_write_must_lie_inside_one_window_and_runs_must_not_overlap() {
+    let regs = regs();
+    // The first window ends at word 780; a write from 779 for two words crosses it.
+    let crossing = [0u32; 2];
+    assert!(matches!(
+        refused(submit_runs(
+            Block::Rkvenc,
+            779,
+            &crossing,
+            &[],
+            at(8, 0),
+            None
+        )),
+        JobError::WriteOutside
+    ));
+    // A write that starts in the first window and runs into the second is refused too.
+    let past = [0u32; 2];
+    assert!(matches!(
+        refused(submit_runs(
+            Block::Rkvenc,
+            0x4000 - 1,
+            &past,
+            &[],
+            at(8, 0),
+            None
+        )),
+        JobError::WriteOutside
+    ));
+    // Two runs that name the same register.
+    let two = [1u32, 2];
+    let more = [Run {
+        first: 1,
+        registers: &two,
+    }];
+    assert!(matches!(
+        refused(submit_runs(Block::Rkvenc, 0, &regs, &more, at(8, 0), None)),
+        JobError::WriteOverlap { register: 1 }
+    ));
+    // An address in the second window: the kernel does not translate it.
+    let l2 = [0u32; 4];
+    let more = [Run {
+        first: RKVENC_L2_FIRST,
+        registers: &l2,
+    }];
+    assert!(matches!(
+        refused(submit_runs(
+            Block::Rkvenc,
+            0,
+            &regs,
+            &more,
+            at(RKVENC_L2_FIRST, 0),
+            None
+        )),
+        JobError::NotTranslated { .. }
+    ));
+    // An address outside every run.
+    assert!(matches!(
+        refused(submit_runs(Block::Rkvenc, 0, &regs, &[], at(40, 0), None)),
+        JobError::AddressOutsideWrite { register: 40 }
+    ));
+    // Nine runs: past MAX_RUNS.
+    let one = [0u32; 1];
+    let many: Vec<Run<'_>> = (0..8)
+        .map(|i| Run {
+            first: 200 + 2 * i,
+            registers: &one,
+        })
+        .collect();
+    assert!(matches!(
+        refused(submit_runs(Block::Rkvenc, 0, &regs, &many, at(8, 0), None)),
+        JobError::TooManyRuns
+    ));
+}
+
+/// [`submit_one`] with more runs after the first.
+fn submit_runs(
+    block: Block,
+    first: u16,
+    registers: &[u32],
+    more: &[Run<'_>],
+    addresses: impl Fn(BufferId) -> Vec<Address>,
+    read: Option<ReadBack>,
+) -> Result<(), SubmitError> {
+    let (mut service, kernel) = service();
+    let mut claim = service.claim(block, 0).unwrap();
+    let buffer = claim.add_buffer(memfd(4096)).unwrap();
+    let calls = kernel.borrow().calls;
+    let addresses = addresses(buffer);
+    let result = claim.submit(&Job {
+        identity: 0,
+        first,
+        registers,
+        more,
+        addresses: &addresses,
+        read,
+    });
+    assert_eq!(
+        kernel.borrow().calls,
+        calls,
+        "a refused job touches nothing"
+    );
+    result
 }

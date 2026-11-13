@@ -126,7 +126,7 @@ A board file cannot name these.
 | `k230-gsdma` | Job checks, descriptors, and a Linux device on the engine's node in `lemnos.ko` | No contract driver wraps it. Untested on board |
 | `rkaiisp` | The AI-ISP's layouts, parameter checks and ring | Never run on the block. No contract |
 | `rk-jpeg` | The JPEG block's register and address model | Builds no job: no public source says how far the block reaches from each address. JPEG jobs go through `rk-mpp` with the caller's registers |
-| `rk-mpp` | The MPP service's checked jobs | Used by `rk-mpp-codec` and `rk-iep` |
+| `rk-mpp` | The MPP service's checked jobs: a job writes up to 8 runs, each inside one register window of the block (the first generation's encoder has two: 780 words translated, and 320 raw at word 0x4000) | Used by `rk-mpp-codec` and `rk-iep` |
 | `codec-jobs` | The job server every `codec.block/1` driver shares | A building block |
 | `v4l2-capture` | A capture node that fills a stream's own buffers | Used by `rkcif` and `sunxi-vin` |
 | `soc` | Chip description tables | Data |
@@ -178,7 +178,7 @@ that way and checks its tree with `cargo tree -e normal`.
 | `lemnos-driver-isp600` | The load image's and statistics buffer's layouts, and the load image's check | No driver and no job checks: `device` adds them |
 | `lemnos-driver-isp600-sys` | The ISP and statistics subdevice requests | Everything |
 | `lemnos-driver-rk-mpp` (`drivers/rk-mpp`) | The `/dev/mpp_service` uAPI, the message and job layouts and their checks: `Job`, `Address`, `BufferId`, the request numbers and client types | The uAPI and the job checks. `device` (on by default) adds the claim on the service and the `codec.block/1` block |
-| `lemnos-driver-rkvenc` (`drivers/rkvenc`) | The Rockchip H.264 and H.265 encoder register layouts (the VEPU541 H.264 write side, read-back and second window so far), and a builder that makes rk-mpp's `Job` from the caller's values, with each address register checked for the header's alignment | Everything; the builder takes rk-mpp's job types, and nothing else is linked |
+| `lemnos-driver-rkvenc` (`drivers/rkvenc`) | The Rockchip H.264 and H.265 encoder register layouts (the VEPU541 H.264 write side, read-back and second window so far), and a builder that makes rk-mpp's `Job` from the caller's values, with each address register checked for the header's alignment. The second window (L2, word 0x4000, 320 words) is set with `set_l2` and goes out as its own write run | Everything; the builder takes rk-mpp's job types, and nothing else is linked |
 | `lemnos-linux-hotplug` (`backends/linux-hotplug`) | Devices appearing and going away: netlink uevents, inotify or rescans, in the kernel's uevent shape | Everything. `lemnos-linux` re-exports it as `hotplug` and adds the host's board hints |
 | `lemnos-linux-stream` (`backends/linux-stream`) | A frame stream's ring and buffers mapped (shared memory or dma-bufs, with `DMA_BUF_IOCTL_SYNC` around each access), lengths and seals checked first | The mappings alone. `client` (on by default) adds the `StreamPlatform` `lemnos-client` takes |
 | `lemnos-wire` (`engine/wire`) | The frame stream's shared ring | Only `ring`. `protocol` (on by default) adds the socket protocol |

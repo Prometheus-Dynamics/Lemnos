@@ -309,6 +309,7 @@ fn a_parameter_job_is_exactly_the_structure_and_only_on_a_parameter_block() {
         identity: 0,
         first: 0,
         registers: &regs,
+        more: &[],
         addresses: &[],
         read: None,
     };

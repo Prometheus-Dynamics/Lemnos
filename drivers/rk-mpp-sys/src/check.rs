@@ -5,8 +5,8 @@ use std::io;
 
 use lemnos_driver_rk_mpp::uapi::{Command, FD_MASK, MAX_REG_TRANS_NUM, flags};
 use lemnos_driver_rk_mpp::{
-    Block, Facts, MAX_ADDRESSES, MAX_BUFFERS, Message, ParamFacts, Payload, READ_BACK_BYTES,
-    READ_BACK_SLOTS,
+    Block, Facts, MAX_ADDRESSES, MAX_BUFFERS, MAX_RUNS, Message, ParamFacts, Payload,
+    READ_BACK_BYTES, READ_BACK_SLOTS,
 };
 
 use crate::session::DATA_BYTES;
@@ -37,15 +37,17 @@ pub(crate) fn footprint(len: usize) -> usize {
     len.div_ceil(8) * 8
 }
 
-/// A run of whole registers inside `facts`' registers and reaching its first: what the driver's
-/// job checks promise, checked again here.
+/// A run of whole registers inside one of `facts`' windows and reaching its first: what the
+/// driver's job checks promise, checked again here.
 fn run(facts: &Facts, offset: u32, size: u32) -> Option<(usize, usize)> {
     if size == 0 || !offset.is_multiple_of(4) || !size.is_multiple_of(4) {
         return None;
     }
     let first = (offset / 4) as usize;
-    let end = first.checked_add((size / 4) as usize)?;
-    (end <= usize::from(facts.registers) && end >= usize::from(facts.first)).then_some((first, end))
+    let count = (size / 4) as usize;
+    let end = first.checked_add(count)?;
+    facts.window_of(u16::try_from(first).ok()?, count)?;
+    (end >= usize::from(facts.first)).then_some((first, end))
 }
 
 /// The block whose client type `value` is, if the session may bind to it.
@@ -222,20 +224,42 @@ fn single(m: &Message<'_>, bound: Option<Block>, allowed: u32) -> io::Result<Che
     }
 }
 
-/// A job: the translation table, the register write, then optionally the offsets, then optionally
-/// the read-back, on a bound session. Each table and offset index is a register inside the write.
+/// A job: the translation table, then one register write per run (at most [`MAX_RUNS`]), then
+/// optionally the offsets, then optionally the read-back, on a bound session. Each table and
+/// offset index is a register inside one of the writes, in a window the kernel translates.
 fn job(messages: &[Message<'_>], bound: Option<Block>) -> io::Result<()> {
     let facts = bound.ok_or_else(refused)?.facts();
-    let [table, write, rest @ ..] = messages else {
+    let [table, rest @ ..] = messages else {
         return Err(refused());
     };
-
-    if !matches!(write.cmd(), Command::SetRegWrite) || !matches!(write.payload(), Payload::In(_)) {
+    let writes = rest
+        .iter()
+        .take_while(|m| matches!(m.cmd(), Command::SetRegWrite))
+        .count();
+    if writes == 0 || writes > MAX_RUNS {
         return Err(refused());
     }
-    exact(write).ok_or_else(refused)?;
-    let written = run(&facts, write.offset(), write.size()).ok_or_else(refused)?;
-    let inside = |index: usize| (written.0..written.1).contains(&index);
+    let (writes, rest) = rest.split_at(writes);
+    let mut runs = [(0usize, 0usize); MAX_RUNS];
+    for (i, write) in writes.iter().enumerate() {
+        if !matches!(write.payload(), Payload::In(_)) {
+            return Err(refused());
+        }
+        exact(write).ok_or_else(refused)?;
+        let range = run(&facts, write.offset(), write.size()).ok_or_else(refused)?;
+        if runs[..i].iter().any(|r| range.0 < r.1 && r.0 < range.1) {
+            return Err(refused());
+        }
+        runs[i] = range;
+    }
+    let inside = |index: usize| {
+        runs[..writes.len()]
+            .iter()
+            .any(|r| (r.0..r.1).contains(&index))
+            && facts
+                .window_of(u16::try_from(index).unwrap_or(u16::MAX), 1)
+                .is_some_and(|w| facts.windows[w].translated)
+    };
 
     if !matches!(table.cmd(), Command::InitTransTable)
         || !matches!(table.payload(), Payload::In(_))

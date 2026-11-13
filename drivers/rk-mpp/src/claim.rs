@@ -26,7 +26,9 @@ use std::ops::DerefMut;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::block::{Block, Facts};
-use crate::job::{BufferId, Held, Job, JobError, ParamJob, Plan, Staging, plan, plan_params};
+use crate::job::{
+    BufferId, Held, Job, JobError, MAX_RUNS, ParamJob, Plan, Staging, plan, plan_params,
+};
 use crate::message::{Message, READ_BACK_SLOTS};
 use crate::uapi::{Command, FD_MASK};
 
@@ -480,7 +482,7 @@ fn send_param_job<S: Session>(
     plan: &Plan,
     slot: usize,
 ) -> io::Result<()> {
-    let (_, from, len) = plan.write;
+    let (_, from, len) = plan.writes[0];
     let (_, results) = plan.read.unwrap_or((0, 0));
     let mut messages = [
         Message::input(
@@ -507,25 +509,27 @@ fn send_param_job<S: Session>(
     session.send(messages)
 }
 
-/// One job as one call: the session's translation table, the write, the offsets, the read-back.
+/// One job as one call: the session's translation table, each write, the offsets, the read-back.
 fn send_job<S: Session>(
     session: &mut S,
     staging: &Staging,
     plan: &Plan,
     slot: usize,
 ) -> io::Result<()> {
-    let (write_at, from, len) = plan.write;
-    let mut messages = [
-        Message::input(Command::InitTransTable, 0, &staging.table[..plan.table]),
-        Message::input(
+    // The table, one message per write, the offsets and the read-back: at most `MAX_RUNS + 3`.
+    let mut messages: [Message<'_>; MAX_RUNS + 3] =
+        std::array::from_fn(|_| Message::bare(Command::PollHwFinish));
+    let mut n = 0;
+    messages[n] = Message::input(Command::InitTransTable, 0, &staging.table[..plan.table]);
+    n += 1;
+    for &(at, from, len) in &plan.writes[..plan.runs] {
+        messages[n] = Message::input(
             Command::SetRegWrite,
-            write_at,
+            at,
             &staging.registers[from..from + len],
-        ),
-        Message::bare(Command::PollHwFinish),
-        Message::bare(Command::PollHwFinish),
-    ];
-    let mut n = 2;
+        );
+        n += 1;
+    }
     if plan.offsets > 0 {
         messages[n] = Message::input(
             Command::SetRegAddrOffset,
