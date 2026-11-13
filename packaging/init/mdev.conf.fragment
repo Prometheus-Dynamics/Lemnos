@@ -1,0 +1,36 @@
+# Device nodes lemnosd opens, given to group lemnos (mode 0660). The BusyBox counterpart of
+# packaging/udev/70-lemnos.rules: each line names the same nodes the udev rule names. Append this to
+# /etc/mdev.conf, before any catch-all line. mdev matches the device name (relative to /dev) with a
+# regular expression, so each pattern is anchored. Needs mdev to run on hotplug: the image's rcS
+# runs `mdev -s` at boot and sets /proc/sys/kernel/hotplug to /sbin/mdev.
+
+# The kernel module's control node, /dev/lemnos, and the CSI-2 receiver's nodes it makes.
+^lemnos$                root:lemnos 0660
+^lemnos-.*$             root:lemnos 0660
+
+# DMA heaps: /dev/dma_heap/<name>, for dma-buf streams (udev: SUBSYSTEM=="dma_heap").
+^dma_heap/.*$           root:lemnos 0660
+
+# Buses: /dev/i2c-N, /dev/spidevB.C, GPIO character devices /dev/gpiochipN.
+^i2c-[0-9]+$            root:lemnos 0660
+^spidev[0-9]+\.[0-9]+$  root:lemnos 0660
+^gpiochip[0-9]+$        root:lemnos 0660
+
+# Serial ports the daemon opens as a UART. Add a line for any other tty the board uses.
+^ttyS[0-9]+$            root:lemnos 0660
+^ttyAMA[0-9]+$          root:lemnos 0660
+^ttyUSB[0-9]+$          root:lemnos 0660
+^ttyACM[0-9]+$          root:lemnos 0660
+
+# Cameras and their media controllers: /dev/videoN, /dev/mediaN.
+^video[0-9]+$           root:lemnos 0660
+^media[0-9]+$           root:lemnos 0660
+
+# The hardware watchdog, /dev/watchdog0 (or /dev/watchdog): the hw-watchdog driver's node.
+^watchdog[0-9]*$        root:lemnos 0660
+
+# USB: the usbfs nodes /dev/bus/usb/BBB/DDD, one per device (not per interface).
+^bus/usb/[0-9]+/[0-9]+$ root:lemnos 0660
+
+# Vendor nodes a board's compiled-in drivers open by name are the image's to add: one line each,
+# "^<name>$ root:lemnos 0660". Look the name up in the driver's source (DEVICE or NODE in drivers/<name>/).

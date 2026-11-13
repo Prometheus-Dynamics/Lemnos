@@ -5,6 +5,9 @@
 # `lemnos` (packaging/udev/70-lemnos.rules). The one capability is CAP_SYS_RAWIO, for mapping a
 # block's registers through /dev/lemnos (kernel/lemnos_core.c checks it); nothing else.
 # Change this unit with a drop-in (/etc/systemd/system/lemnosd.service.d/*.conf), not an edited copy.
+# The hardware watchdog belongs to lemnosd alone (its hw-watchdog driver opens it: one opener). The
+# OS must not set RuntimeWatchdogSec= or ShutdownWatchdogSec= in /etc/systemd/system.conf, which
+# would have systemd open the same device.
 
 [Unit]
 Description=Lemnos hardware daemon
@@ -13,8 +16,8 @@ ConditionPathExists=/etc/lemnos/board.toml
 StartLimitIntervalSec=0
 
 [Service]
-# Type=notify: lemnosd sends READY=1 once every driver is started and the socket listens, and
-# WATCHDOG=1 from its event loop (service/lemnosd/src/notify.rs).
+# Type=notify: lemnosd sends READY=1 once every driver is started and the socket listens. The
+# unit has no WatchdogSec=: the hardware watchdog is the escalation (see "Restart" below).
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/bin/lemnosd --board /etc/lemnos/board.toml
@@ -29,13 +32,16 @@ Group=lemnos
 RuntimeDirectory=lemnos
 RuntimeDirectoryMode=0750
 
-# Stopping drops every driver, which releases the hardware. Give that time.
+# Stop is for shutdown only. It drops every driver; the hardware watchdog then reboots a board that
+# is still running, so the unit is never stopped on a live board.
 TimeoutStopSec=30s
-WatchdogSec=30s
+
+# lemnosd must not stay down. It is restarted at once, with a constant delay: no growing delay, no
+# start limit. 1 s is the shortest delay that cannot spin on a daemon that dies at start. The
+# hardware watchdog (hw-watchdog, on by default on a managed board, 15 s) reboots the board if the
+# daemon is not back in time. So the restart, including startup, must come well inside 15 s.
 Restart=always
 RestartSec=1s
-RestartSteps=5
-RestartMaxDelaySec=30s
 
 # Kept with the daemon: only the one capability, for the module's register mapping.
 CapabilityBoundingSet=CAP_SYS_RAWIO

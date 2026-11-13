@@ -67,4 +67,38 @@ else
   echo "==> units: skipped, systemd-analyze is not installed"
 fi
 
+# The hardware watchdog belongs to lemnosd alone, and a restart delay is constant: no unit may set
+# a systemd watchdog, or a restart delay that grows (packaging/README.md, "The hardware watchdog").
+echo "==> watchdog and restart"
+for unit in packaging/systemd/*.service; do
+  if grep -Eq '^(RuntimeWatchdogSec|ShutdownWatchdogSec|WatchdogSec|RestartSteps|RestartMaxDelaySec)=' "$unit"; then
+    echo "packaging: $unit sets a watchdog or a growing restart delay" >&2
+    exit 1
+  fi
+done
+
+# The BusyBox init script: parsed, never run. sh is always here; busybox and shellcheck are optional.
+echo "==> init script"
+sh -n packaging/init/S50lemnosd
+if command -v busybox >/dev/null; then
+  busybox sh -n packaging/init/S50lemnosd
+else
+  echo "    busybox sh -n: skipped, busybox is not installed"
+fi
+if command -v shellcheck >/dev/null; then
+  shellcheck --shell=sh packaging/init/S50lemnosd
+else
+  echo "    shellcheck: skipped, shellcheck is not installed"
+fi
+
+# The mdev fragment: every rule is an anchored pattern, owner:group and a four-digit mode.
+echo "==> mdev fragment"
+awk '
+  /^[[:space:]]*(#|$)/ { next }
+  NF != 3 || $1 !~ /^\^.*\$$/ || $2 !~ /^[a-z0-9]+:[a-z0-9]+$/ || $3 !~ /^[0-7]{4}$/ {
+    printf "packaging/init/mdev.conf.fragment:%d: not a rule: %s\n", NR, $0; bad = 1
+  }
+  END { exit bad }
+' packaging/init/mdev.conf.fragment
+
 echo "    packaging: ok"
