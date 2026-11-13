@@ -353,7 +353,18 @@ that the reply is larger than 61440 bytes and that the method has no paged form.
 pieces. `lemnos-ctl`, on the board's own socket, carries a frame of 1 MiB and reads such a reply
 whole. A method whose reply can exceed 60 KiB needs a paged form to be called through the bridge.
 
-A sample's time is the wall clock when the bridge read it, as Orion's own publishers stamp them.
+**Time.** A sample's time is `CLOCK_MONOTONIC` nanoseconds, the clock Orion's samples are on. A
+value carries the time the driver read it, as lemnosd stamped it, and the bridge passes that on
+unchanged; a status change, or a fact, is stamped when the bridge sees it. The bridge converts
+nothing. Orion's `orion.time` says how far each board's wall clock is from its monotonic one, for
+whoever wants a wall time.
+
+**Callers.** Each Orion caller has a lemnosd connection of its own, so a driver that tracks callers
+(`TRACKS_CALLERS`) sees each one as its own `CallerId`. Orion does not say when a caller goes away;
+it cancels the runs of one that goes away. When a caller's last long job is cancelled, the bridge
+closes its connection, and lemnosd tells the drivers that caller is gone (`caller_gone`). An explicit
+cancel from a caller that is still there is read the same way, so the driver is told the caller is
+gone; the caller's next run is on a new connection.
 
 **Long jobs.** `.call` runs a method that the description marks as a long job, and the run is
 that job:
@@ -388,19 +399,37 @@ resumes from where it stopped.
 
 The bridge needs to be able to write into the directory. See `packaging/README.md`.
 
-When lemnosd stops or comes back with another device list, the bridge publishes `state = gone`
-on every status topic, withdraws every resource (their records are deleted) and ends its Orion
-session, which is how Orion tells each subscriber
-of a topic that its publisher is gone: Orion has no way to take back one topic on its own. When
-lemnosd is back, the same topics are declared again and their subscribers carry on. A device
-that is not running when the bridge reads the list has no description yet; the bridge reads the
-device again when lemnosd's event says it is running (see [Events](wire.md#events)). When the
-Orion comm core restarts, the bridge connects again and says every topic, action and resource
-again. Both sides retry forever.
+**Changes are said one at a time.** The Orion session is kept while the board runs; only what
+changed is said, and nothing else on the session moves:
+
+- a device that comes is described once: its resource, topics and actions;
+- a device that goes has its status topic say `gone`, then its resource is withdrawn once. Its
+  topics go with it, so their subscribers are told the publisher is gone;
+- a fact (`hello.<fact>`) that appears is declared once, and one that goes is withdrawn once;
+- a value or a state that moves is published as it moves.
+
+A device that is not running when the bridge reads the list has no description yet; the bridge
+reads the device again when lemnosd's event says it is running (see [Events](wire.md#events)).
+
+When lemnosd stops, every device is taken away the same way (its status says `gone`, its resource
+is withdrawn), and the board's facts go with the identity device. When lemnosd is back, the devices
+are described again, and so are the facts. The Orion session itself is kept while the board runs, so
+
+
+When the Orion comm core restarts, the bridge connects again and says every topic, action and
+resource again, and each value and state again. Both sides retry forever, and the bridge never
+gives up on an idle Orion session: it keeps its own session pinging and notices a comm core that
+stops answering within the session's idle time (`comm.idle_ms`), then connects again.
 
 The board's identity facts are topics too, `hello.<fact>`, from the identity device and the
 bridge's own `offers`; [Identity](identity.md#how-the-bridge-publishes-them) says which, when each
 is republished, and what is absent when.
+
+**Orion's shared-memory crates.** Orion pulls the `shm-*` crates from this repository at a pinned
+revision. The root `Cargo.toml` patches that source to the workspace paths, so the bridge and Orion
+are built from one copy of each (`shm-sample-time`, `shm-ring`, `shm-ring-time`, `shm-ring-doorbell`,
+`shm-fdpass`). `scripts/check-orion-copies.sh` runs in the gate and fails on a second copy, or on one
+that is not the workspace's.
 
 It reads:
 

@@ -66,3 +66,16 @@ lto = "fat"
 codegen-units = 1
 panic = "unwind"
 strip = true
+
+# Orion (service/orion's client) pulls the shared-memory ring family from this repository at a
+# pinned revision. This patch points those crates at the workspace copies, so the bridge and Orion
+# share one copy of each (scripts/check-orion-copies.sh enforces it).
+[patch."https://github.com/Prometheus-Dynamics/Lemnos.git"]
+shm-sample-time = { path = "shm/sample-time" }
+shm-ring = { path = "shm/ring" }
+shm-ring-latest = { path = "shm/ring-latest" }
+shm-ring-time = { path = "shm/ring-time" }
+shm-ring-doorbell = { path = "shm/ring-doorbell" }
+shm-ring-buffers = { path = "shm/ring-buffers" }
+shm-ring-holds = { path = "shm/ring-holds" }
+shm-fdpass = { path = "shm/fdpass" }

@@ -2,10 +2,18 @@
 //!
 //! The source thread writes it; the publisher takes what is due. Nothing here knows what a
 //! device is, or what Orion is: a device is its entry, its value items and its controls, and
-//! a change is a state or a value.
+//! a change is a device that came or went, a state, or a value.
+//!
+//! Each device has a slot: a number the mirror gives it when it first appears and never reuses.
+//! A new device list is compared with the one held. A device that is still there, with the same
+//! driver, tags, items and controls, keeps its slot, and only its state and values can change. A
+//! device that is gone is removed; one that is new is added; one whose description changed is
+//! removed and added again. Nothing else in the list moves, so the publisher can say each change
+//! on its own.
 //!
 //! Changes are coalesced: a value that moves twice before a publish goes out once, with its
-//! latest value, and a value equal to the one held is not a change. There is no rate.
+//! latest value and the stamp it was read at, and a value equal to the one held is not a change.
+//! There is no rate.
 //!
 //! The board's identity facts (`hello.*`, see [`crate::hello`]) are held here too: the identity
 //! device's facts as the source last read them, and `offers` from the devices that run. Their
@@ -55,27 +63,38 @@ pub struct Status {
     pub reason: String,
 }
 
+/// The devices with their slots, and the facts, as [`Mirror::snapshot`] gives them.
+pub type Snapshot = (Vec<(u64, DeviceSpec)>, Vec<(String, String)>);
+
 /// What is due to go to Orion. Kept and reused by the publisher, so a steady flow of values
 /// allocates nothing once its lists have grown.
 #[derive(Debug, Default, PartialEq)]
 pub struct Changes {
-    /// The device list these changes belong to. A publisher holding another list must
-    /// describe the devices again first.
-    pub generation: u64,
-    /// Device positions whose status moved, with the status now.
-    pub status: Vec<(usize, Status)>,
-    /// `(device, item, value)`, by positions in the list.
-    pub readings: Vec<(usize, usize, Reading)>,
+    /// Slots of devices that left, in the order they left.
+    pub removed: Vec<u64>,
+    /// Devices that came, with their slot and what they carry.
+    pub added: Vec<(u64, DeviceSpec)>,
+    /// Slots whose status moved, with the status now.
+    pub status: Vec<(u64, Status)>,
+    /// `(slot, item, value, stamp)`: the item's index in the device's items, the value, and the
+    /// time the driver read it (its `CLOCK_MONOTONIC` nanoseconds, passed on unchanged).
+    pub readings: Vec<(u64, usize, Reading, u64)>,
     /// The board's facts now, when they changed: each `hello.<name>` and its value, in order.
     pub hello: Option<Vec<(String, String)>>,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.status.is_empty() && self.readings.is_empty() && self.hello.is_none()
+        self.removed.is_empty()
+            && self.added.is_empty()
+            && self.status.is_empty()
+            && self.readings.is_empty()
+            && self.hello.is_none()
     }
 
     fn clear(&mut self) {
+        self.removed.clear();
+        self.added.clear();
         self.status.clear();
         self.readings.clear();
         self.hello = None;
@@ -85,11 +104,13 @@ impl Changes {
 #[derive(Debug)]
 struct Item {
     value: Option<Reading>,
+    stamp: u64,
     dirty: bool,
 }
 
 #[derive(Debug)]
 struct Device {
+    slot: u64,
     spec: DeviceSpec,
     items: Vec<Item>,
     status_dirty: bool,
@@ -97,8 +118,12 @@ struct Device {
 
 #[derive(Debug, Default)]
 pub struct Mirror {
-    generation: u64,
+    /// The next slot to give. Slots are never reused.
+    next_slot: u64,
     devices: Vec<Device>,
+    /// Slots that left since the last take, and slots that came: announced by the next take.
+    removed: Vec<u64>,
+    added: Vec<u64>,
     /// The identity device's facts, as last read. `None` when it could not be read.
     identity: Option<Vec<(String, String)>>,
     /// The `hello.*` facts now, as [`hello::document`] leaves them.
@@ -106,30 +131,63 @@ pub struct Mirror {
     hello_dirty: bool,
 }
 
+/// Whether two specs describe the same device, apart from its index and its status: what its
+/// resource, topics and actions are made from.
+fn same_shape(held: &DeviceSpec, new: &DeviceSpec) -> bool {
+    held.name == new.name
+        && held.driver == new.driver
+        && held.tags == new.tags
+        && held.items == new.items
+        && held.controls == new.controls
+}
+
 impl Mirror {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Replaces the device list, with the identity device's facts as read for it. It is a new
-    /// list, so everything about it is due.
+    /// Makes the device list `specs`, with the identity device's facts as read for it. Devices
+    /// that are still there keep their slots; the others are removed or added.
     pub fn set_devices(&mut self, specs: Vec<DeviceSpec>, identity: Option<Vec<(String, String)>>) {
-        self.generation += 1;
-        self.devices = specs
-            .into_iter()
-            .map(|spec| Device {
-                items: spec
-                    .items
-                    .iter()
-                    .map(|_| Item {
-                        value: None,
-                        dirty: false,
-                    })
-                    .collect(),
-                spec,
-                status_dirty: true,
-            })
-            .collect();
+        let mut held = std::mem::take(&mut self.devices);
+        let mut kept = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let same = held
+                .iter()
+                .position(|d| d.spec.name == spec.name && same_shape(&d.spec, &spec));
+            match same {
+                Some(at) => {
+                    let mut device = held.swap_remove(at);
+                    if device.spec.status != spec.status {
+                        device.status_dirty = true;
+                    }
+                    device.spec.index = spec.index;
+                    device.spec.status = spec.status;
+                    kept.push(device);
+                }
+                None => {
+                    let slot = self.next_slot;
+                    self.next_slot += 1;
+                    self.added.push(slot);
+                    kept.push(Device {
+                        slot,
+                        items: spec
+                            .items
+                            .iter()
+                            .map(|_| Item {
+                                value: None,
+                                stamp: 0,
+                                dirty: false,
+                            })
+                            .collect(),
+                        spec,
+                        status_dirty: true,
+                    });
+                }
+            }
+        }
+        self.removed.extend(held.iter().map(|d| d.slot));
+        self.devices = kept;
         self.identity = identity;
         self.rebuild_hello();
     }
@@ -143,11 +201,17 @@ impl Mirror {
         }
     }
 
-    /// The device list now, its generation, and the facts to publish.
-    pub fn snapshot(&self) -> (u64, Vec<DeviceSpec>, Vec<(String, String)>) {
+    /// The devices now, with their slots, and the facts to publish. The changes so far are the
+    /// ones this list already holds, so they are dropped: a session published from this list
+    /// starts from it.
+    pub fn snapshot(&mut self) -> Snapshot {
+        self.removed.clear();
+        self.added.clear();
         (
-            self.generation,
-            self.devices.iter().map(|d| d.spec.clone()).collect(),
+            self.devices
+                .iter()
+                .map(|d| (d.slot, d.spec.clone()))
+                .collect(),
             self.hello.clone(),
         )
     }
@@ -171,10 +235,6 @@ impl Mirror {
             self.hello = document;
             self.hello_dirty = true;
         }
-    }
-
-    pub const fn generation(&self) -> u64 {
-        self.generation
     }
 
     /// A device's state, by lemnosd's index. An unknown index is ignored, and so is a state
@@ -204,18 +264,20 @@ impl Mirror {
         }
     }
 
-    /// A value read for item `item` of the device at `device` (positions in the list the
-    /// last [`Mirror::set_devices`] gave). A value equal to the held one is not a change.
-    pub fn set_reading(&mut self, device: usize, item: usize, reading: Reading) {
+    /// A value read at `stamp` for item `item` of the device with lemnosd's index `index`. A
+    /// value equal to the held one is not a change.
+    pub fn set_reading(&mut self, index: u32, item: usize, reading: Reading, stamp: u64) {
         let Some(item) = self
             .devices
-            .get_mut(device)
+            .iter_mut()
+            .find(|d| d.spec.index == index)
             .and_then(|d| d.items.get_mut(item))
         else {
             return;
         };
         if item.value != Some(reading) {
             item.value = Some(reading);
+            item.stamp = stamp;
             item.dirty = true;
         }
     }
@@ -233,19 +295,26 @@ impl Mirror {
     /// Takes what is due into `into`, which is cleared first, and clears it here.
     pub fn take(&mut self, into: &mut Changes) {
         into.clear();
-        into.generation = self.generation;
+        into.removed.append(&mut self.removed);
+        for slot in self.added.drain(..) {
+            // A device that came and went before this take is not announced at all: its removal
+            // is what the publisher is told, and it has nothing to undo.
+            if let Some(device) = self.devices.iter().find(|d| d.slot == slot) {
+                into.added.push((slot, device.spec.clone()));
+            }
+        }
         if std::mem::take(&mut self.hello_dirty) {
             into.hello = Some(self.hello.clone());
         }
-        for (position, device) in self.devices.iter_mut().enumerate() {
+        for device in &mut self.devices {
             if std::mem::take(&mut device.status_dirty) {
-                into.status.push((position, device.spec.status.clone()));
+                into.status.push((device.slot, device.spec.status.clone()));
             }
             for (index, item) in device.items.iter_mut().enumerate() {
                 if std::mem::take(&mut item.dirty)
                     && let Some(value) = item.value
                 {
-                    into.readings.push((position, index, value));
+                    into.readings.push((device.slot, index, value, item.stamp));
                 }
             }
         }
@@ -284,11 +353,7 @@ mod tests {
             name: name.to_owned(),
             driver: "fake-counter".to_owned(),
             tags: vec!["imu".to_owned()],
-            status: Status {
-                state: DeviceState::Running,
-                health: DeviceHealth::Ok,
-                reason: String::new(),
-            },
+            status: running(),
             items: items
                 .iter()
                 .map(|name| ItemSpec {
@@ -315,31 +380,87 @@ mod tests {
         }
     }
 
+    fn fact(name: &str, value: &str) -> (String, String) {
+        (name.to_owned(), value.to_owned())
+    }
+
     #[test]
-    fn a_new_list_is_a_new_generation_with_every_status_due() {
+    fn a_new_device_is_added_once_with_its_status_due() {
         let mut mirror = Mirror::new();
         mirror.set_devices(vec![spec(0, "a", &[]), spec(1, "b", &[])], None);
         let first = take(&mut mirror);
-        assert_eq!(first.generation, 1);
+        assert_eq!(
+            first
+                .added
+                .iter()
+                .map(|(slot, s)| (*slot, s.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "a"), (1, "b")]
+        );
         assert_eq!(first.status, [(0, running()), (1, running())]);
         assert!(
             take(&mut mirror).is_empty(),
             "nothing changed, nothing goes out"
         );
-        mirror.set_devices(Vec::new(), None);
-        assert_eq!(take(&mut mirror).generation, 2);
-        assert_eq!(mirror.snapshot(), (2, Vec::new(), Vec::new()));
     }
 
     #[test]
-    fn a_value_goes_out_when_it_changes_and_not_when_it_repeats() {
+    fn a_device_that_stays_keeps_its_slot_and_nothing_else_moves() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &[]), spec(1, "b", &[])], None);
+        let _ = take(&mut mirror);
+        // The list comes again with `a` gone: only `a` is removed, `b` keeps slot 1 and is not
+        // described again, though its lemnosd index changed.
+        mirror.set_devices(vec![spec(5, "b", &[])], None);
+        let changes = take(&mut mirror);
+        assert_eq!(changes.removed, [0]);
+        assert!(changes.added.is_empty());
+        assert!(changes.status.is_empty(), "b's status did not move");
+        // A new device after that gets a slot never given before.
+        mirror.set_devices(vec![spec(5, "b", &[]), spec(6, "c", &[])], None);
+        let changes = take(&mut mirror);
+        assert_eq!(changes.added.len(), 1);
+        assert_eq!(changes.added[0].0, 2);
+        assert!(changes.removed.is_empty());
+    }
+
+    #[test]
+    fn a_device_whose_description_changed_is_removed_and_added() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &["count"])], None);
+        let _ = take(&mut mirror);
+        mirror.set_devices(vec![spec(0, "a", &["count", "more"])], None);
+        let changes = take(&mut mirror);
+        assert_eq!(changes.removed, [0]);
+        assert_eq!(changes.added.len(), 1);
+        assert_eq!(changes.added[0].0, 1);
+    }
+
+    #[test]
+    fn a_device_added_and_removed_before_a_take_is_not_announced() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        mirror.set_devices(Vec::new(), None);
+        let changes = take(&mut mirror);
+        assert_eq!(changes.removed, [0]);
+        assert!(changes.added.is_empty());
+    }
+
+    #[test]
+    fn a_value_goes_out_when_it_changes_with_the_stamp_it_was_read_at() {
         let mut mirror = Mirror::new();
         mirror.set_devices(vec![spec(0, "thing", &["count"])], None);
         let _ = take(&mut mirror);
-        mirror.set_reading(0, 0, Reading::Number(1.5));
-        assert_eq!(take(&mut mirror).readings, [(0, 0, Reading::Number(1.5))]);
-        mirror.set_reading(0, 0, Reading::Number(1.5));
-        assert!(take(&mut mirror).is_empty());
+        mirror.set_reading(0, 0, Reading::Number(1.5), 42);
+        assert_eq!(
+            take(&mut mirror).readings,
+            [(0, 0, Reading::Number(1.5), 42)]
+        );
+        mirror.set_reading(0, 0, Reading::Number(1.5), 43);
+        assert!(
+            take(&mut mirror).is_empty(),
+            "the same value is not a change"
+        );
     }
 
     #[test]
@@ -347,9 +468,12 @@ mod tests {
         let mut mirror = Mirror::new();
         mirror.set_devices(vec![spec(0, "thing", &["ok"])], None);
         let _ = take(&mut mirror);
-        mirror.set_reading(0, 0, Reading::Flag(true));
-        mirror.set_reading(0, 0, Reading::Flag(false));
-        assert_eq!(take(&mut mirror).readings, [(0, 0, Reading::Flag(false))]);
+        mirror.set_reading(0, 0, Reading::Flag(true), 1);
+        mirror.set_reading(0, 0, Reading::Flag(false), 2);
+        assert_eq!(
+            take(&mut mirror).readings,
+            [(0, 0, Reading::Flag(false), 2)]
+        );
     }
 
     #[test]
@@ -389,8 +513,8 @@ mod tests {
         mirror.set_devices(vec![spec(0, "thing", &["count"])], None);
         let _ = take(&mut mirror);
         mirror.set_status(99, DeviceState::Off, DeviceHealth::Ok, "");
-        mirror.set_reading(5, 0, Reading::Number(1.0));
-        mirror.set_reading(0, 5, Reading::Number(1.0));
+        mirror.set_reading(5, 0, Reading::Number(1.0), 1);
+        mirror.set_reading(0, 5, Reading::Number(1.0), 1);
         assert!(take(&mut mirror).is_empty());
     }
 
@@ -399,20 +523,21 @@ mod tests {
         let mut mirror = Mirror::new();
         mirror.set_devices(vec![spec(0, "thing", &["count", "unread"])], None);
         let _ = take(&mut mirror);
-        mirror.set_reading(0, 0, Reading::Number(2.0));
+        mirror.set_reading(0, 0, Reading::Number(2.0), 9);
         let _ = take(&mut mirror);
         mirror.mark_all();
         let changes = take(&mut mirror);
         assert_eq!(changes.status, [(0, running())]);
-        assert_eq!(
-            changes.readings,
-            [(0, 0, Reading::Number(2.0))],
-            "an item never read has nothing to send"
-        );
+        assert_eq!(changes.readings, [(0, 0, Reading::Number(2.0), 9)]);
     }
 
-    fn fact(name: &str, value: &str) -> (String, String) {
-        (name.to_owned(), value.to_owned())
+    #[test]
+    fn snapshot_is_the_list_held_and_drops_the_changes_it_already_has() {
+        let mut mirror = Mirror::new();
+        mirror.set_devices(vec![spec(0, "a", &[])], None);
+        let (devices, _) = mirror.snapshot();
+        assert_eq!(devices.len(), 1);
+        assert!(take(&mut mirror).added.is_empty());
     }
 
     #[test]
@@ -420,17 +545,13 @@ mod tests {
         let mut mirror = Mirror::new();
         mirror.set_devices(vec![spec(0, "a", &[]), spec(1, "b", &[])], None);
         let _ = take(&mut mirror);
-        // Both devices carry the same contract tag here, so offers lists it once.
-        assert_eq!(mirror.snapshot().2, [fact("offers", "imu")]);
-        // The other device still offers the tag, so one device going off changes nothing.
+        assert_eq!(mirror.snapshot().1, [fact("offers", "imu")]);
         mirror.set_status(0, DeviceState::Off, DeviceHealth::Ok, "");
         assert!(take(&mut mirror).hello.is_none());
-        // With none running, nothing is offered; a device running again offers its contracts.
         mirror.set_status(1, DeviceState::Off, DeviceHealth::Ok, "");
         assert_eq!(take(&mut mirror).hello, Some(Vec::new()));
         mirror.set_status(0, DeviceState::Running, DeviceHealth::Ok, "");
         assert_eq!(take(&mut mirror).hello, Some(vec![fact("offers", "imu")]));
-        // A change of health alone does not change what is offered.
         mirror.set_status(0, DeviceState::Running, DeviceHealth::Failed, "read");
         assert!(take(&mut mirror).hello.is_none());
     }
@@ -444,16 +565,13 @@ mod tests {
             first.hello,
             Some(vec![fact("family", "alpha"), fact("offers", "imu")])
         );
-        // The same facts again are not a change.
         mirror.set_identity(Some(vec![fact("family", "alpha")]));
         assert!(take(&mut mirror).hello.is_none());
-        // A value that moves is due, with the whole document.
         mirror.set_identity(Some(vec![fact("family", "beta")]));
         assert_eq!(
             take(&mut mirror).hello,
             Some(vec![fact("family", "beta"), fact("offers", "imu")])
         );
-        // The device that answers the facts is gone: none of its facts is published, offers is.
         mirror.set_identity(None);
         assert_eq!(take(&mut mirror).hello, Some(vec![fact("offers", "imu")]));
     }

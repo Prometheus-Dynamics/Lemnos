@@ -7,28 +7,32 @@
 //! - its state is `Ready` while it runs, `Failed` while it retries or reports failed health,
 //!   and `Pending` while it is switched off;
 //! - the topic `lemnos.<device>.values` has a field per value item that is a number (a float,
-//!   in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes;
+//!   in the item's unit, scaled by its exponent) or a flag (a bool), published as it changes,
+//!   each sample at the time the driver read it;
 //! - the topic `lemnos.<device>.status` has the fields `state`, `health` and `reason`, as
 //!   `lemnos-ctl list` names them, published as they change;
 //! - the actions `set`, `call` and `power` (see [`crate::calls`]) drive it.
 //!
 //! The board's facts (`hello.<fact>`, see [`crate::hello`]) are topics of the same session, one
-//! each, with a text field `value`. A changed value is published as it changes; a fact that
-//! appears or goes away changes the set of topics, which only a new session can do, so the
-//! session is published again then.
+//! each, with a text field `value`.
 //!
-//! The session lives as long as one lemnosd device list. When lemnosd goes away or its list
-//! changes, every status topic says `gone`, every resource is withdrawn (its record deleted)
-//! and the session ends, which is how
-//! Orion tells every subscriber of its topics that their publisher is gone; Orion has no way
-//! to take back a single topic. When Orion goes away, the session is connected again, and
-//! every topic, action and resource is said again.
+//! The session is one for as long as Orion keeps it, and every change is said on its own:
+//!
+//! - a device that comes is described once: its resource, topics and actions, and its state;
+//! - a device that goes has its status said `gone` and its resource withdrawn, once. Its
+//!   topics are withdrawn with it, so their subscribers hear the publisher is gone;
+//! - a fact that comes is declared once, and one that goes is withdrawn once;
+//! - a value or a state that moves is published as it moves.
+//!
+//! Nothing else on the session is said again. When Orion goes away and comes back, the session
+//! is connected again and every topic, action and resource is said again: the client restores
+//! them, and the values and states are sent again.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use orion::actions::{Admits, Outcome, Policy, Request, Target};
+use orion::actions::{ActionDecl, Admits, Outcome, Policy, Registration, Request, Target};
 use orion::provider::{Provider, Resource, ResourceState};
 use orion::topics::{Field, FieldId, FieldType, Publisher, SampleTime, TopicDecl, TopicError};
 use orion::types::Error as Refusal;
@@ -47,17 +51,24 @@ use crate::{CLIENT_NAME, RESOURCE_KIND, RESOURCE_PREFIX, Shared, log};
 
 /// Who may run a device's actions: programs on this board, and operators granted it.
 const POLICY: Policy = Policy::new(Admits::LOCAL.and(Admits::OPERATOR));
+/// The session's anchor action: registered once, and never run (nobody is admitted). Its
+/// registration is where every run of this session's actions arrives, so the queue is polled
+/// whichever devices are published, and a run for a device that has gone is answered.
+const ANCHOR: &str = "lemnos-orion.requests";
+const ANCHOR_POLICY: Policy = Policy::new(Admits::NOBODY);
 /// Samples of each field a topic keeps.
 const HISTORY: u32 = 16;
 /// The longest status text published. A longer reason is cut at a character boundary.
 const STATUS_MAX: usize = 256;
-/// How long to wait with no session for lemnosd to have devices.
+/// How long to wait with no devices and no facts for lemnosd to have some.
 const IDLE: Duration = Duration::from_secs(1);
 /// How soon a resource state Orion refused is written again.
 const RETRY: Duration = Duration::from_secs(1);
 
 /// The state a status topic says when its device is withdrawn.
 const GONE: &str = "gone";
+/// Why a status topic says its device is gone, when lemnosd no longer lists it.
+const DEVICE_GONE: &str = "the device is no longer listed by lemnosd";
 /// Samples of a fact's topic that are kept: its newest value is what the hello document carries.
 const FACT_HISTORY: u32 = 2;
 
@@ -85,8 +96,8 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
     let mut changes = Changes::default();
     let mut done = Vec::new();
     while !shared.stopping() {
-        let (generation, specs, facts) = shared.with(|mirror| mirror.snapshot());
-        if specs.is_empty() {
+        let (devices, facts) = shared.with(|mirror| mirror.snapshot());
+        if devices.is_empty() && facts.is_empty() {
             // Nothing to publish, so no session: wait for lemnosd's devices.
             wait_bell(shared, IDLE);
             shared.take_done(&mut done);
@@ -95,7 +106,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             continue;
         }
         number += 1;
-        let mut session = match Session::open(config, number, generation, &specs, &facts) {
+        let mut session = match Session::open(config, number, &devices, &facts) {
             Ok(session) => session,
             Err(message) => {
                 log(&message);
@@ -106,25 +117,11 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
         log(&format!(
             "connected to Orion node {}; {} devices published",
             session.node,
-            session.devices.iter().flatten().count()
+            session.devices.len()
         ));
         backoff.reset();
         shared.with(|mirror| mirror.mark_all());
         match session.serve(shared, jobs, &mut changes, &mut done) {
-            End::NewList => {
-                let why = if shared.with(|mirror| mirror.is_empty()) {
-                    "lemnosd is not there"
-                } else {
-                    "lemnosd's device list changed"
-                };
-                session.withdraw(why);
-                log(&format!("{why}; withdrew the devices from Orion"));
-            }
-            // The board's facts changed in a way a session cannot say: its topics are said again.
-            End::Facts => {
-                session.withdraw("the board's facts changed");
-                log("the board's facts changed; the session is published again");
-            }
             End::Stopped => session.withdraw("lemnos-orion stopped"),
             End::Lost(message) => {
                 log(&message);
@@ -137,10 +134,6 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
 
 /// Why a session ended.
 enum End {
-    /// lemnosd went away, or came back with a list of its own.
-    NewList,
-    /// The set of the board's `hello.*` topics changed, which only a new session can do.
-    Facts,
     /// Orion went away and did not come back, or refused what it took before.
     Lost(String),
     Stopped,
@@ -157,7 +150,6 @@ struct Fact {
 /// One device as published.
 struct Published {
     resource: Resource,
-    name: String,
     values: Option<Publisher>,
     status: Publisher,
     /// The state the record says, and the one it should say.
@@ -168,38 +160,37 @@ struct Published {
 struct Session {
     orion: Orion,
     node: String,
+    /// Where runs of every action of this session arrive. See [`ANCHOR`].
+    anchor: Registration,
     number: u64,
-    generation: u64,
-    /// By position in the device list. `None` for a device Orion would not take.
-    devices: Vec<Option<Published>>,
-    /// Full action name to the device's position and what the action does.
-    actions: HashMap<String, (usize, Verb)>,
+    /// By the mirror's slot. Only devices Orion took are here.
+    devices: HashMap<u64, Published>,
+    /// Full action name to the device's slot and what the action does.
+    actions: HashMap<String, (u64, Verb)>,
     /// Runs handed to the call thread and not yet answered.
     pending: HashSet<u64>,
     /// When a refused resource state is written again.
     retry_at: Option<Instant>,
-    /// The board's `hello.*` topics, in the order the facts came.
+    /// The board's `hello.*` topics.
     facts: Vec<Fact>,
-    /// The set of facts changed: the session is published again.
-    facts_stale: bool,
 }
 
-/// Why a device could not be described.
+/// Why a device or fact could not be described.
 enum Refused {
     /// Orion will not take this device: its name, or a name another program holds.
     Device(String),
-    /// The session cannot go on.
-    Session(String),
+    /// The session cannot go on: a lost connection, or a refusal of the session.
+    Session(Error),
 }
 
 impl Session {
-    /// Connects to the comm core and describes every device. It works only when the node the
-    /// comm core welcomes this session from is the one `ORION_NODE_ID` names, if it names one.
+    /// Connects to the comm core and describes every device and fact. It works only when the
+    /// node the comm core welcomes this session from is the one `ORION_NODE_ID` names, if it
+    /// names one.
     fn open(
         config: &Config,
         number: u64,
-        generation: u64,
-        specs: &[DeviceSpec],
+        devices: &[(u64, DeviceSpec)],
         facts: &[(String, String)],
     ) -> Result<Self, String> {
         let options = Options {
@@ -210,46 +201,64 @@ impl Session {
             .map_err(|error| format!("Orion not available at {}: {error}", config.orion))?;
         let node = orion.welcomed().node.as_str().to_owned();
         check_node(&node, config.node_id.as_deref())?;
-        let provider = orion.provider();
-        let mut devices = Vec::with_capacity(specs.len());
-        let mut actions = HashMap::new();
-        for (position, spec) in specs.iter().enumerate() {
-            match describe(&provider, spec) {
-                Ok((published, verbs)) => {
-                    for verb in verbs {
-                        actions.insert(
-                            format!("{}.{}", published.resource.name().as_str(), verb.name()),
-                            (position, verb),
-                        );
-                    }
-                    devices.push(Some(published));
-                }
-                Err(Refused::Device(why)) => {
-                    log(&format!("{}: not published: {why}", spec.name));
-                    devices.push(None);
-                }
-                Err(Refused::Session(why)) => {
-                    return Err(format!("Orion did not take {}: {why}", spec.name));
-                }
-            }
-        }
-        let facts = declare_facts(&orion, facts)?;
-        Ok(Self {
+        let anchor = orion
+            .register_action(
+                &ActionDecl {
+                    name: ANCHOR,
+                    target: Target::Node(orion.welcomed().node),
+                    description: "Where lemnos-orion's runs arrive; nothing runs here",
+                },
+                ANCHOR_POLICY,
+            )
+            .map_err(|error| format!("Orion did not take {ANCHOR}: {error}"))?;
+        let mut session = Self {
             orion,
             node,
+            anchor,
             number,
-            generation,
-            devices,
-            actions,
+            devices: HashMap::new(),
+            actions: HashMap::new(),
             pending: HashSet::new(),
             retry_at: None,
-            facts,
-            facts_stale: false,
-        })
+            facts: Vec::new(),
+        };
+        for (slot, spec) in devices {
+            session
+                .adopt(*slot, spec)
+                .map_err(|error| format!("Orion did not take {}: {error}", spec.name))?;
+        }
+        for (name, value) in facts {
+            let fact = declare_fact(&session.orion, name, value)
+                .map_err(|error| format!("Orion did not take hello.{name}: {error}"))?;
+            session.facts.push(fact);
+        }
+        Ok(session)
     }
 
-    /// Serves the session until the device list changes, Orion is lost for good, or the
-    /// service stops.
+    /// Describes a device Orion has not seen: its resource, topics and actions. One Orion will
+    /// not take is logged and left out. Only a lost connection, or a session Orion refuses,
+    /// is an error.
+    fn adopt(&mut self, slot: u64, spec: &DeviceSpec) -> Result<(), Error> {
+        match describe(&self.orion.provider(), spec) {
+            Ok((published, verbs)) => {
+                for verb in verbs {
+                    self.actions.insert(
+                        format!("{}.{}", published.resource.name().as_str(), verb.name()),
+                        (slot, verb),
+                    );
+                }
+                self.devices.insert(slot, published);
+                Ok(())
+            }
+            Err(Refused::Device(why)) => {
+                log(&format!("{}: not published: {why}", spec.name));
+                Ok(())
+            }
+            Err(Refused::Session(error)) => Err(error),
+        }
+    }
+
+    /// Serves the session until Orion is lost for good, or the service stops.
     fn serve(
         &mut self,
         shared: &Shared,
@@ -268,16 +277,9 @@ impl Session {
                 .runs(jobs, done, &mut progress)
                 .and_then(|()| {
                     shared.with(|mirror| mirror.take(changes));
-                    if changes.generation == self.generation {
-                        self.publish(changes)
-                    } else {
-                        Ok(())
-                    }
+                    self.publish(changes)
                 })
                 .and_then(|()| self.retry_states());
-            if changes.generation != self.generation {
-                return End::NewList;
-            }
             if let Err(error) = turned {
                 if !error.is_lost() {
                     log(&format!("Orion refused: {error}"));
@@ -285,9 +287,6 @@ impl Session {
                     return end;
                 }
                 continue;
-            }
-            if self.facts_stale {
-                return End::Facts;
             }
             self.wait(shared);
         }
@@ -335,14 +334,15 @@ impl Session {
             let Some(request) = requests.poll()? else {
                 return Ok(());
             };
-            let (call, name, target, args) = match request {
+            let (call, name, target, args, caller) = match request {
                 Request::Run {
                     call,
                     name,
                     target,
                     args,
+                    caller,
                     ..
-                } => (call, name, target, args),
+                } => (call, name, target, args, caller),
                 // A long job is cancelled; a plain call cannot be stopped part-way, so it ends as
                 // the call does.
                 Request::Cancel { call } => {
@@ -355,7 +355,7 @@ impl Session {
                     continue;
                 }
             };
-            let job = self.job(call, &name, &target, args);
+            let job = self.job(call, &name, &target, args, caller);
             match job {
                 Ok(job) => {
                     if jobs.send(Message::Run(job)).is_ok() {
@@ -378,23 +378,28 @@ impl Session {
         }
     }
 
-    /// Where runs of every action of this session arrive: one queue, whichever resource
-    /// registered the action.
-    fn requests(&mut self) -> Option<&mut orion::actions::Registration> {
-        self.devices
-            .iter_mut()
-            .flatten()
-            .find_map(|device| device.resource.requests())
+    /// Where runs of every action of this session arrive: the anchor's queue, which every
+    /// device's registration shares.
+    fn requests(&mut self) -> Option<&mut Registration> {
+        Some(&mut self.anchor)
     }
 
     /// The job for a run, or why it is refused.
-    fn job(&self, call: u64, name: &str, target: &Target, args: Vec<u8>) -> Result<Job, String> {
-        let &(position, verb) = self
+    fn job(
+        &self,
+        call: u64,
+        name: &str,
+        target: &Target,
+        args: Vec<u8>,
+        caller: String,
+    ) -> Result<Job, String> {
+        let &(slot, verb) = self
             .actions
             .get(name)
             .ok_or_else(|| format!("no action {name:?} here"))?;
-        let device = self.devices[position]
-            .as_ref()
+        let device = self
+            .devices
+            .get(&slot)
             .ok_or_else(|| format!("no action {name:?} here"))?;
         let resource = device.resource.name();
         if *target != Target::Resource(resource.clone()) {
@@ -407,23 +412,28 @@ impl Session {
         Ok(Job {
             session: self.number,
             call,
-            device: device.name.clone(),
+            device: device_name(device),
             verb,
             args,
+            caller,
         })
     }
 
-    /// Publishes what changed.
+    /// Publishes what changed, in order: devices that went, devices that came, facts, then
+    /// states and values.
     fn publish(&mut self, changes: &Changes) -> Result<(), Error> {
+        for &slot in &changes.removed {
+            self.remove(slot)?;
+        }
+        for (slot, spec) in &changes.added {
+            self.adopt(*slot, spec)?;
+        }
         if let Some(facts) = &changes.hello {
             self.publish_facts(facts)?;
-            if self.facts_stale {
-                return Ok(());
-            }
         }
         let time = now();
-        for (position, status) in &changes.status {
-            let Some(Some(device)) = self.devices.get_mut(*position) else {
+        for (slot, status) in &changes.status {
+            let Some(device) = self.devices.get_mut(slot) else {
                 continue;
             };
             let texts = [
@@ -440,14 +450,17 @@ impl Session {
                     Ok(()) => device.written = device.wanted,
                     Err(error) if error.is_lost() => return Err(error.into()),
                     Err(error) => {
-                        log(&format!("{}: state not written: {error}", device.name));
+                        log(&format!(
+                            "{}: state not written: {error}",
+                            device_name(device)
+                        ));
                         self.retry_at.get_or_insert_with(|| Instant::now() + RETRY);
                     }
                 }
             }
         }
-        for &(position, item, reading) in &changes.readings {
-            let Some(Some(device)) = self.devices.get_mut(position) else {
+        for &(slot, item, reading, stamp) in &changes.readings {
+            let Some(device) = self.devices.get_mut(&slot) else {
                 continue;
             };
             let Some(values) = device.values.as_mut() else {
@@ -461,35 +474,36 @@ impl Session {
                 }
                 Reading::Flag(flag) => &[u8::from(flag)],
             };
-            sample(values, item, time, payload)?;
+            sample(values, item, SampleTime::from_nanos(stamp), payload)?;
         }
         Ok(())
     }
 
-    /// Publishes each fact whose value changed. A fact that appeared or went away changes the set
-    /// of topics: the session is published again instead.
-    fn publish_facts(&mut self, facts: &[(String, String)]) -> Result<(), Error> {
-        let same_set = facts.len() == self.facts.len()
-            && facts
-                .iter()
-                .all(|(name, _)| self.facts.iter().any(|fact| fact.name == *name));
-        if !same_set {
-            self.facts_stale = true;
+    /// Takes a device away: its status says it is gone, and its resource is withdrawn with its
+    /// topics. Its actions stop being offered here; the run of one that arrives after is refused.
+    fn remove(&mut self, slot: u64) -> Result<(), Error> {
+        let Some(mut device) = self.devices.remove(&slot) else {
             return Ok(());
-        }
-        for (name, value) in facts {
-            let Some(fact) = self.facts.iter_mut().find(|fact| fact.name == *name) else {
-                continue;
-            };
-            if fact.value.as_deref() == Some(value.as_str()) {
-                continue;
+        };
+        let time = now();
+        for (field, text) in [GONE, "", DEVICE_GONE].iter().enumerate() {
+            if sample(&mut device.status, field, time, text.as_bytes()).is_err() {
+                break;
             }
-            if let Some(publisher) = fact.publisher.as_mut() {
-                sample(publisher, 0, now(), value.as_bytes())?;
-            }
-            fact.value = Some(value.clone());
         }
-        Ok(())
+        self.actions.retain(|_, (owner, _)| *owner != slot);
+        let name = device_name(&device);
+        match device.resource.withdraw() {
+            Ok(()) => {
+                log(&format!("{name}: withdrawn from Orion"));
+                Ok(())
+            }
+            Err(error) if error.is_lost() => Err(error.into()),
+            Err(error) => {
+                log(&format!("{name}: not withdrawn: {error}"));
+                Ok(())
+            }
+        }
     }
 
     /// Writes again the resource states Orion refused, once their time has come.
@@ -498,7 +512,7 @@ impl Session {
             return Ok(());
         }
         self.retry_at = None;
-        for device in self.devices.iter_mut().flatten() {
+        for device in self.devices.values_mut() {
             if device.wanted == device.written {
                 continue;
             }
@@ -513,14 +527,51 @@ impl Session {
         Ok(())
     }
 
-    /// Connects again after the comm core went away, saying every topic, action and resource
-    /// again. Gives up when the device list changes meanwhile, or the comm core now refuses
-    /// what it took before.
+    /// Declares each fact that came, withdraws each that went, and says each value that moved.
+    fn publish_facts(&mut self, facts: &[(String, String)]) -> Result<(), Error> {
+        let mut index = 0;
+        while index < self.facts.len() {
+            if facts
+                .iter()
+                .any(|(name, _)| *name == self.facts[index].name)
+            {
+                index += 1;
+                continue;
+            }
+            let fact = self.facts.remove(index);
+            if let Some(publisher) = fact.publisher {
+                match publisher.withdraw() {
+                    Ok(()) => {}
+                    Err(error) if error.is_lost() => return Err(error.into()),
+                    Err(error) => log(&format!("hello.{}: not withdrawn: {error}", fact.name)),
+                }
+            }
+        }
+        for (name, value) in facts {
+            let Some(at) = self.facts.iter().position(|fact| fact.name == *name) else {
+                let fact = declare_fact(&self.orion, name, value)?;
+                self.facts.push(fact);
+                continue;
+            };
+            let fact = &mut self.facts[at];
+            if fact.value.as_deref() == Some(value.as_str()) {
+                continue;
+            }
+            if let Some(publisher) = fact.publisher.as_mut() {
+                sample(publisher, 0, now(), value.as_bytes())?;
+            }
+            fact.value = Some(value.clone());
+        }
+        Ok(())
+    }
+
+    /// Connects again after the comm core went away. The client says every topic, action and
+    /// resource again; the values and states are sent again here. Gives up when the comm core
+    /// now refuses what it took before.
     fn reconnect(&mut self, shared: &Shared, error: &Error) -> Result<(), End> {
         log(&format!("Orion lost ({error}); connecting again"));
-        let generation = self.generation;
         self.orion
-            .reconnect(|_| !shared.stopping() && shared.with(|m| m.generation()) == generation)
+            .reconnect(|_| !shared.stopping())
             .map_err(|error| End::Lost(format!("Orion did not come back: {error}")))?;
         let node = self.orion.welcomed().node.as_str().to_owned();
         if node != self.node {
@@ -543,10 +594,14 @@ impl Session {
     }
 
     /// Waits for the comm core, a wake-up from the other threads, a ping falling due or a
-    /// refused state's retry, whichever is first.
+    /// refused state's retry, whichever is first. The wait is never longer than a quarter of the
+    /// idle time, so a comm core that stops answering is found within it: the client then gives
+    /// the session up as lost.
     fn wait(&self, shared: &Shared) {
-        let heartbeat = self.orion.welcomed().heartbeat;
-        let mut wait = (heartbeat / 2).max(Duration::from_millis(10));
+        let welcomed = self.orion.welcomed();
+        let mut wait = (welcomed.heartbeat / 2)
+            .min(welcomed.idle / 4)
+            .max(Duration::from_millis(10));
         if let Some(at) = self.retry_at {
             wait = wait.min(at.saturating_duration_since(Instant::now()));
         }
@@ -562,65 +617,71 @@ impl Session {
         shared.quiet();
     }
 
-    /// Takes every resource away: their records are deleted. Each status topic says `gone`
-    /// first, with `why`, so a reader that still holds its ring never reads a state from
-    /// before. The session ends when this is dropped, and with it the topics and actions:
-    /// their subscribers are told the publisher is gone.
+    /// Takes every device away, each with its status said `gone`, and ends the session. The
+    /// facts' topics end with it: their subscribers are told the publisher is gone.
     fn withdraw(mut self, why: &str) {
         let time = now();
-        for device in self.devices.iter_mut().flatten() {
+        for device in self.devices.values_mut() {
             for (field, text) in [GONE, "", why].iter().enumerate() {
                 if sample(&mut device.status, field, time, text.as_bytes()).is_err() {
                     break;
                 }
             }
         }
-        for device in self.devices.into_iter().flatten() {
+        for (_, device) in self.devices.drain() {
+            let name = device_name(&device);
             if let Err(error) = device.resource.withdraw() {
-                log(&format!("{}: not withdrawn: {error}", device.name));
+                log(&format!("{name}: not withdrawn: {error}"));
             }
         }
     }
 }
 
-/// Declares each `hello.<fact>` topic and says its value. A fact another program already
-/// publishes, or one Orion will not take, is logged and left out; a lost connection ends the
-/// session.
-fn declare_facts(orion: &Orion, facts: &[(String, String)]) -> Result<Vec<Fact>, String> {
-    let mut declared = Vec::with_capacity(facts.len());
-    for (name, value) in facts {
-        let topic = format!("{}{name}", hello::TOPIC_PREFIX);
-        let fields = [text_field("value")];
-        let decl = TopicDecl {
-            name: &topic,
-            fields: &fields,
-            history: FACT_HISTORY,
-            expiry_ms: 0,
-            max_payload: hello::MAX_VALUE_BYTES as u32,
-        };
-        match orion.declare(&decl).map_err(fact_refused) {
-            Ok(mut publisher) => {
-                sample(&mut publisher, 0, now(), value.as_bytes()).map_err(|e| e.to_string())?;
-                declared.push(Fact {
-                    name: name.clone(),
-                    publisher: Some(publisher),
-                    value: Some(value.clone()),
-                });
-            }
-            Err(Refused::Device(why)) => {
+/// The device's name, from its resource's: `lemnos.<device>` without the prefix.
+fn device_name(device: &Published) -> String {
+    device
+        .resource
+        .name()
+        .as_str()
+        .strip_prefix(RESOURCE_PREFIX)
+        .unwrap_or_else(|| device.resource.name().as_str())
+        .to_owned()
+}
+
+/// Declares the `hello.<fact>` topic and says its value. A fact another program already
+/// publishes, or one Orion will not take, is logged and held as not published; a lost
+/// connection is an error.
+fn declare_fact(orion: &Orion, name: &str, value: &str) -> Result<Fact, Error> {
+    let topic = format!("{}{name}", hello::TOPIC_PREFIX);
+    let fields = [text_field("value")];
+    let decl = TopicDecl {
+        name: &topic,
+        fields: &fields,
+        history: FACT_HISTORY,
+        expiry_ms: 0,
+        max_payload: hello::MAX_VALUE_BYTES as u32,
+    };
+    match orion.declare(&decl) {
+        Ok(mut publisher) => {
+            sample(&mut publisher, 0, now(), value.as_bytes())?;
+            Ok(Fact {
+                name: name.to_owned(),
+                publisher: Some(publisher),
+                value: Some(value.to_owned()),
+            })
+        }
+        Err(error) => match fact_refused(error) {
+            Refused::Device(why) => {
                 log(&format!("{topic}: not published: {why}"));
-                declared.push(Fact {
-                    name: name.clone(),
+                Ok(Fact {
+                    name: name.to_owned(),
                     publisher: None,
                     value: None,
-                });
+                })
             }
-            Err(Refused::Session(why)) => {
-                return Err(format!("Orion did not take {topic}: {why}"));
-            }
-        }
+            Refused::Session(error) => Err(error),
+        },
     }
-    Ok(declared)
 }
 
 fn fact_refused(error: Error) -> Refused {
@@ -682,7 +743,6 @@ fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Ve
     Ok((
         Published {
             resource,
-            name: spec.name.clone(),
             values,
             status,
             written: state,
@@ -696,7 +756,7 @@ fn topic_refused(error: TopicError) -> Refused {
     match error {
         TopicError::Invalid(why) => Refused::Device(why),
         TopicError::Client(error) => client_refused(error),
-        other => Refused::Session(other.to_string()),
+        other => Refused::Session(Error::Topic(other)),
     }
 }
 
@@ -711,7 +771,7 @@ fn client_refused(error: ClientError) -> Refused {
             | Refusal::EmptyName),
         ) => Refused::Device(why.as_str().to_owned()),
         ClientError::Protocol(why) => Refused::Device(why.to_owned()),
-        other => Refused::Session(other.to_string()),
+        other => Refused::Session(Error::Client(other)),
     }
 }
 
@@ -748,12 +808,10 @@ pub const fn resource_state(status: &Status) -> ResourceState {
     }
 }
 
-/// The time a sample belongs to: now, on the wall clock, as Orion's own publishers stamp them.
+/// The time a sample belongs to: `CLOCK_MONOTONIC` now, as Orion's samples are stamped. A
+/// sample a driver read keeps the time the driver read it, unchanged.
 fn now() -> SampleTime {
-    let since = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    SampleTime::from_nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
+    SampleTime::now()
 }
 
 /// `text` cut to at most `max` bytes, at a character boundary.

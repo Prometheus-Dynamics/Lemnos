@@ -44,6 +44,8 @@ step "C surface, shared form" cargo test -q -p lemnos-capi --features shared
 # The crates used as plain libraries, alone and without their driver halves.
 step libraries scripts/check-libraries.sh
 step boundaries scripts/check-boundaries.sh
+# The bridge and Orion share one copy of each shm-* crate (the root Cargo.toml's patch of the Orion source).
+step orion-copies scripts/check-orion-copies.sh
 # The unit, udev and sysusers files; nothing is installed here.
 step packaging scripts/check-packaging.sh
 # The shipped programs (packaging/shipped.txt) pull in no C: no C compiler crate, no foreign -sys crate.

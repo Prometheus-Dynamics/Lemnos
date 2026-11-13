@@ -2,16 +2,19 @@
 //!
 //! Four threads share one [`Shared`]. [`source`] keeps one lemnosd connection: it reads the
 //! device list and each device's description, subscribes to its value items and writes what
-//! arrives into the mirror. [`calls`] keeps a second lemnosd connection and runs what Orion's
-//! actions ask of a device. [`publish`] owns the Orion session: it describes each device as a
-//! resource with its topics and actions, publishes what the mirror says has changed, and hands
-//! the runs of its actions to [`calls`]. [`files`] keeps an Orion session of its own and receives
-//! files sent to a device that takes them, into the directory the board gives for it. None of them knows what a device is: the resource, its
-//! labels, its topics' fields and its actions come from the device's entry and description.
+//! arrives into the mirror, with the time the driver read it. [`calls`] keeps one lemnosd
+//! connection per Orion caller and runs what Orion's actions ask of a device. [`publish`] owns
+//! the Orion session: it describes each device as a resource with its topics and actions, says
+//! each change as it happens (a device that comes or goes, a fact that appears or goes, a state or
+//! a value that moves), and hands the runs of its actions to [`calls`]. [`files`] keeps an Orion
+//! session of its own and receives files sent to a device that takes them, into the directory the
+//! board gives for it. None of them knows what a device is: the resource, its labels, its topics'
+//! fields and its actions come from the device's entry and description.
 //!
-//! Each half retries forever with the same backoff. Losing lemnosd withdraws its devices from
-//! Orion and ends the Orion session, so their topics say their publisher is gone, until it comes
-//! back. Losing Orion connects again and says everything again.
+//! Each half retries forever with the same backoff. Losing lemnosd withdraws each of its devices
+//! from Orion (its topics say their publisher is gone) and the board's facts go with the session;
+//! the devices come back as they are listed again. Losing Orion connects again and says everything
+//! again.
 
 pub mod backoff;
 pub mod calls;

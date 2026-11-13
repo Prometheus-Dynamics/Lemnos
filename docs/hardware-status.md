@@ -269,6 +269,7 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 | [`E28.md`](../testing/board-runs/E28.md) | The microcontroller host on a microcontroller: boot, a bus outage, USB, flash and RAM |
 | [`L3.md`](../testing/board-runs/L3.md) | The root phase on a board image: lemnosd and `lemnos-orion` start as root, drop to `lemnos`, keep `CAP_SYS_RAWIO`, and their device groups, socket and restart time |
 | [`B20.md`](../testing/board-runs/B20.md) | `lemnos-orion` against a node on a board: every device a resource, with its topics and actions |
+| [`I6b.md`](../testing/board-runs/I6b.md) | `lemnos-orion` on Orion `6dfb990`: sample times on the monotonic clock, facts and devices coming and going with no gap on unrelated topics, caller identity and `caller_gone`, idle sessions, a comm core restart |
 | [`B22.md`](../testing/board-runs/B22.md) | The bench's reference set, measured for real |
 | [`A17.md`](../testing/board-runs/A17.md) | The hardware performance counters on the reference board's cores |
 | [`P1.md`](../testing/board-runs/P1.md) | The identity facts on the reference board: the serial from the device tree equals cpuinfo's `Serial`, and the daemon serves the same serial |
