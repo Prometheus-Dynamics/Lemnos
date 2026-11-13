@@ -13,6 +13,8 @@
 //!   waits for the engine's interrupt. Reopened after a failure with a backoff doubling from
 //!   250 ms, capped at 8 s, never giving up and never turning itself off.
 //! - [`Device`]: the kernel operations the block runs on, one per request.
+//! - [`encoder`]: the encoder's QP map and CTU info records and the values the vendor header names.
+//!   The header gives no register layout, so no job is built from them (see that module).
 //!
 //! # Register writes go through the kernel module
 //!
@@ -50,6 +52,7 @@
 mod block;
 #[cfg(target_os = "linux")]
 pub mod codec;
+pub mod encoder;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
