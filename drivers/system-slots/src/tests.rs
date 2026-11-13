@@ -218,7 +218,12 @@ impl Bundle {
     /// The signature record this bundle's manifest gets: the named key's id and the signature.
     fn pack_record(&self) -> Vec<u8> {
         let manifest = self.manifest();
-        let signature = self.signer.sign(manifest.as_bytes()).to_bytes();
+        let signature = self
+            .signer
+            .sign(&lemnos_slot_store::signing::slot_bundle_message(
+                manifest.as_bytes(),
+            ))
+            .to_bytes();
         let named = self.named.as_ref().unwrap_or(&self.signer);
         let key_id: [u8; 32] = Sha256::digest(named.verifying_key().as_bytes()).into();
         lemnos_slot_store::signing::record_bytes(&key_id, &signature)
@@ -227,7 +232,12 @@ impl Bundle {
     /// The bundle with `manifest` as its slot.json, signed as it is.
     fn pack_with(&self, manifest: &str) -> Vec<u8> {
         let manifest = manifest.to_string();
-        let signature = self.signer.sign(manifest.as_bytes()).to_bytes();
+        let signature = self
+            .signer
+            .sign(&lemnos_slot_store::signing::slot_bundle_message(
+                manifest.as_bytes(),
+            ))
+            .to_bytes();
         let mut files: Vec<(String, Vec<u8>)> = vec![("slot.json".into(), manifest.into_bytes())];
         if self.sign {
             let named = self.named.as_ref().unwrap_or(&self.signer);
@@ -2857,7 +2867,7 @@ fn a_bad_cursor_is_refused_and_a_buffer_too_small_for_a_slot_is_too_small() {
 }
 
 /// The signature member of a signed bundle is the shared 108-byte record: magic, algorithm 1,
-/// zeros, the SHA-256 of the signing public key, then the signature over the manifest's bytes.
+/// zeros, the SHA-256 of the signing public key, then the signature over the slot bundle message of the manifest's bytes.
 #[test]
 fn the_signature_member_is_the_shared_record_and_names_the_key_by_its_id() {
     let bundle = Bundle::new("os-2");
@@ -2876,9 +2886,12 @@ fn the_signature_member_is_the_shared_record_and_names_the_key_by_its_id() {
     assert!(
         key()
             .verifying_key()
-            .verify_strict(bundle.manifest().as_bytes(), &signature)
+            .verify_strict(
+                &lemnos_slot_store::signing::slot_bundle_message(bundle.manifest().as_bytes()),
+                &signature
+            )
             .is_ok(),
-        "the signed message is the slot.json bytes"
+        "the signed message is the domain-tagged slot.json bytes"
     );
 }
 
@@ -3035,6 +3048,439 @@ fn check_config_names_the_bad_setting() {
         .unwrap_err()
         .key,
         "record"
+    );
+}
+
+// ---- I5g2: the signed message, the member order, and what the manifest binds ----
+
+/// The record for `manifest` under the test key, signed over the slot bundle message.
+fn record_for(manifest: &str) -> Vec<u8> {
+    let key_id: [u8; 32] = Sha256::digest(key().verifying_key().as_bytes()).into();
+    let signature = key()
+        .sign(&lemnos_slot_store::signing::slot_bundle_message(
+            manifest.as_bytes(),
+        ))
+        .to_bytes();
+    lemnos_slot_store::signing::record_bytes(&key_id, &signature)
+}
+
+/// The record a first version signed: the bare manifest bytes, with no domain tag.
+fn record_over_bare_manifest(manifest: &str) -> Vec<u8> {
+    let key_id: [u8; 32] = Sha256::digest(key().verifying_key().as_bytes()).into();
+    let signature = key().sign(manifest.as_bytes()).to_bytes();
+    lemnos_slot_store::signing::record_bytes(&key_id, &signature)
+}
+
+/// The bundle's members in the order the rules give (slot.json, slot.sig, the root, boot/ and the
+/// boot files), with `skip` left out and `boot_files` replacing the bundle's own boot files.
+fn members(
+    b: &Bundle,
+    sig: Option<Vec<u8>>,
+    skip: &[&str],
+    boot_files: &[(&str, Vec<u8>)],
+) -> Vec<u8> {
+    let manifest = b.manifest();
+    let mut files: Vec<(String, Vec<u8>)> =
+        vec![("slot.json".into(), manifest.clone().into_bytes())];
+    if let Some(sig) = sig {
+        files.push(("slot.sig".into(), sig));
+    }
+    if !skip.contains(&"rootfs.erofs") {
+        files.push(("rootfs.erofs".into(), b.image.clone()));
+    }
+    files.push(("boot/".into(), Vec::new()));
+    for (name, bytes) in boot_files {
+        if !skip.contains(name) {
+            files.push((format!("boot/{name}"), bytes.clone()));
+        }
+    }
+    let borrowed: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.as_slice()))
+        .collect();
+    archive(&borrowed)
+}
+
+/// The bundle's boot files as the bundle holds them.
+fn boot_of(b: &Bundle) -> Vec<(&str, Vec<u8>)> {
+    b.boot
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.clone()))
+        .collect()
+}
+
+/// The bytes of the archive up to the end of the header of the member `name`: a stream fed only
+/// this far has given the install every chance to write that member, and none of its data.
+fn up_to_header_of(bytes: &[u8], name: &str) -> Vec<u8> {
+    let at = bytes
+        .windows(name.len() + 1)
+        .position(|w| w[..name.len()] == *name.as_bytes() && w[name.len()] == 0)
+        .expect("the member is in the archive");
+    bytes[..at + 512].to_vec()
+}
+
+/// An install fed `bytes` in one piece, as a board's stream would, and its outcome. The work
+/// directory is returned as the install left it: nothing is discarded here.
+fn feed_raw(board: &Board, bytes: &[u8], require: bool) -> (Result<(), (Status, String)>, PathBuf) {
+    let guard = crate::install::Guard {
+        running: "os-1".into(),
+        default: "os-1".into(),
+    };
+    let admit = crate::install::Admit {
+        keys: vec![TrustedKey {
+            key: key().verifying_key(),
+            owner: "the build key".into(),
+        }],
+        require_signed: require,
+        board_id: BOARD.into(),
+    };
+    let job = JobId(77);
+    let mut install = crate::install::Install::start(
+        board.layout(),
+        CallerId(1),
+        job,
+        bytes.len() as u64,
+        false,
+        false,
+        guard,
+        admit,
+        None,
+    )
+    .unwrap_or_else(|f| panic!("{}", f.1));
+    let got = install.take(0, bytes).map_err(|f| (f.0, f.1));
+    (
+        got,
+        board.layout().images().join(format!(".install.{}", job.0)),
+    )
+}
+
+/// The signed message: the record for a bundle's manifest verifies over the domain-tagged message
+/// and not over the bare manifest, and the documented vector is what the code makes.
+#[test]
+fn the_slot_bundle_vector_is_the_documented_record() {
+    let manifest = "{\"id\":\"vector\"}";
+    let record = record_for(manifest);
+    let expect = "4c4d4e535349473101000000fe812c12f3ab4ce6ac5db69ac352f906cb1b11ef43fb33e252ef7ff55226388956be579db020703eb207da579036a89f0321fcd8ce2bac78a9aa939a58217e265ad27a7e1fc05829b0db05d37ac4d8dba35263c7a1b2644322b45ada4a101402";
+    assert_eq!(hex(record.as_slice()), expect);
+    assert_eq!(
+        hex(&lemnos_slot_store::signing::slot_bundle_message(
+            manifest.as_bytes()
+        )),
+        "6c656d6e6f732d736c6f742d62756e646c6500010000000f0000007b226964223a22766563746f72227d"
+    );
+}
+
+/// A slot signature is not a first-flash signature: the same key's signature over the bare
+/// manifest is a known key with a bad signature, refused with the board holding that key.
+#[test]
+fn a_signature_over_the_bare_manifest_is_refused_as_a_bad_signature_under_a_known_key() {
+    let mut board = Board::new("os-1");
+    for require in [false, true] {
+        security::set_view_for_thread(Some(view_file(&board.dir.0, require)));
+        let mut b = Bundle::new("os-2");
+        b.sig_file = Some(record_over_bare_manifest(&b.manifest()));
+        let (status, _, _) = board.stream(1, &b.pack(), 4096);
+        assert_eq!(status, Status::NOT_PERMITTED, "require_signed={require}");
+        assert!(
+            board.state().error.contains("does not verify"),
+            "{}",
+            board.state().error
+        );
+        assert!(!board.layout().installed("os-2"));
+        assert!(!board.work_left());
+        assert_eq!(last_install(&mut board).1, "refused");
+    }
+}
+
+/// The policy table with `require_signed` off, through the record: a bundle with no key list
+/// installs as not checked, a known good one as verified, and a malformed record is refused.
+#[test]
+fn one_bundle_installs_on_a_board_that_requires_signing_and_on_one_that_does_not() {
+    let bundle = Bundle::new("os-2").pack();
+    let mut off = Board::new("os-1");
+    assert_eq!(
+        off.stream(1, &bundle, 4096).0,
+        Status::OK,
+        "{}",
+        off.state().error
+    );
+    assert_eq!(last_install(&mut off).1, "verified");
+    let mut on = Board::new("os-1");
+    security::set_view_for_thread(Some(view_file(&on.dir.0, true)));
+    assert_eq!(
+        on.stream(1, &bundle, 4096).0,
+        Status::OK,
+        "{}",
+        on.state().error
+    );
+    assert_eq!(last_install(&mut on).1, "verified");
+}
+
+/// `slot.json` is the first member: a bundle that starts with anything else is refused by that
+/// rule, and the root image is never written.
+#[test]
+fn slot_json_must_be_the_first_member() {
+    let mut board = Board::new("os-1");
+    let b = Bundle::new("os-2");
+    let manifest = b.manifest();
+    let bytes = archive(&[
+        ("rootfs.erofs", b.image.as_slice()),
+        ("slot.json", manifest.as_bytes()),
+    ]);
+    let (status, _, _) = board.stream(1, &bytes, 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert!(
+        board
+            .state()
+            .error
+            .contains("slot.json must be its first member"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.work_left());
+}
+
+/// `slot.sig`, when present, is the second member; a signature that comes later is refused by
+/// that rule, before any payload is written.
+#[test]
+fn slot_sig_must_be_the_second_member() {
+    let mut board = Board::new("os-1");
+    let b = Bundle::new("os-2");
+    let manifest = b.manifest();
+    let record = record_for(&manifest);
+    let bytes = archive(&[
+        ("slot.json", manifest.as_bytes()),
+        ("rootfs.erofs", b.image.as_slice()),
+        ("slot.sig", record.as_slice()),
+    ]);
+    let (status, _, _) = board.stream(1, &bytes, 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert!(
+        board
+            .state()
+            .error
+            .contains("slot.sig must be the bundle's second member"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.work_left());
+}
+
+/// Each member at most once, and anything else refused by name.
+#[test]
+fn a_repeated_member_or_an_unknown_one_is_refused_by_name() {
+    let mut board = Board::new("os-1");
+    let b = Bundle::new("os-2");
+    let manifest = b.manifest();
+    let record = record_for(&manifest);
+    let twice = archive(&[
+        ("slot.json", manifest.as_bytes()),
+        ("slot.sig", record.as_slice()),
+        ("rootfs.erofs", b.image.as_slice()),
+        ("rootfs.erofs", b.image.as_slice()),
+    ]);
+    assert_eq!(board.stream(1, &twice, 4096).0, Status::INVALID_ARGUMENT);
+    assert!(
+        board.state().error.contains("rootfs.erofs twice"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.work_left());
+    let unknown = archive(&[
+        ("slot.json", manifest.as_bytes()),
+        ("slot.sig", record.as_slice()),
+        ("evil.bin", &b"x"[..]),
+    ]);
+    assert_eq!(board.stream(1, &unknown, 4096).0, Status::INVALID_ARGUMENT);
+    assert!(
+        board.state().error.contains("evil.bin"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.work_left());
+}
+
+/// A bundle the policy refuses writes nothing: fed up to the header of its root image, the
+/// install has the signature decided and refused, with nothing in its work directory and the root
+/// image never begun. Covers an unsigned bundle on a board that requires signing, a bad
+/// signature under a known key, and a bundle for another board.
+#[test]
+fn a_refused_bundle_writes_nothing_and_the_root_image_is_not_consumed() {
+    let board = Board::new("os-1");
+    let unsigned = Bundle::new("os-2");
+    let mut bad_sig = Bundle::new("os-3");
+    let mut record = record_for(&bad_sig.manifest());
+    record[60] ^= 1;
+    bad_sig.sig_file = Some(record);
+    let mut other = Bundle::new("os-4");
+    other.board = "another-board".into();
+    let cases = [
+        (
+            "unsigned",
+            members(&unsigned, None, &[], &boot_of(&unsigned)),
+            true,
+        ),
+        (
+            "bad signature",
+            members(&bad_sig, bad_sig.sig_file.clone(), &[], &boot_of(&bad_sig)),
+            false,
+        ),
+        (
+            "another board",
+            members(
+                &other,
+                Some(record_for(&other.manifest())),
+                &[],
+                &boot_of(&other),
+            ),
+            false,
+        ),
+    ];
+    for (what, bytes, require) in cases {
+        let prefix = up_to_header_of(&bytes, "rootfs.erofs");
+        let (got, work) = feed_raw(&board, &prefix, require);
+        assert!(got.is_err(), "{what}: refused");
+        assert!(
+            !work.exists() || fs::read_dir(&work).unwrap().next().is_none(),
+            "{what}: the work directory is empty"
+        );
+        assert!(
+            !work.join("rootfs.erofs").exists(),
+            "{what}: the root image was not begun"
+        );
+    }
+}
+
+/// A boot file the manifest does not list is refused before its bytes are written, by name.
+#[test]
+fn an_unlisted_boot_file_is_refused_before_it_is_written() {
+    let board = Board::new("os-1");
+    let mut b = Bundle::new("os-2");
+    b.extra.push(("evil.dtbo".into(), b"x".to_vec()));
+    let bytes = members(&b, Some(b.pack_record()), &[], &{
+        let mut files = boot_of(&b);
+        files.push(("evil.dtbo", b"x".to_vec()));
+        files
+    });
+    let prefix = up_to_header_of(&bytes, "boot/evil.dtbo");
+    let (got, work) = feed_raw(&board, &prefix, false);
+    let (status, text) = got.unwrap_err();
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert!(
+        text.contains("boot file evil.dtbo isn't in slot.json"),
+        "{text}"
+    );
+    assert!(!work.join("boot/evil.dtbo").exists());
+}
+
+/// A listed member that is missing is refused before the slot is put in place, and nothing is
+/// left behind. Covers the root image and a boot file.
+#[test]
+fn a_listed_member_that_is_missing_is_refused() {
+    for (skip, text) in [
+        ("rootfs.erofs", "no rootfs.erofs"),
+        ("initramfs", "no boot file initramfs"),
+    ] {
+        let mut board = Board::new("os-1");
+        let b = Bundle::new("os-2");
+        let bytes = members(&b, Some(b.pack_record()), &[skip], &boot_of(&b));
+        let (status, _, _) = board.stream(1, &bytes, 4096);
+        assert_eq!(status, Status::INVALID_ARGUMENT, "skipping {skip}");
+        assert!(
+            board.state().error.contains(text),
+            "{}",
+            board.state().error
+        );
+        assert!(!board.layout().installed("os-2"));
+        assert!(!board.work_left());
+    }
+}
+
+/// The root image's digest is the manifest's: an image that differs with the same length is
+/// refused, under a valid signature, and nothing is installed.
+#[test]
+fn a_root_image_that_differs_from_the_manifest_digest_is_refused() {
+    let mut board = Board::new("os-1");
+    let mut b = Bundle::new("os-2");
+    let good_sha = sha(b.image.as_slice());
+    b.manifest_image_sha = Some(good_sha);
+    b.image[100] ^= 0xff;
+    let (status, _, _) = board.stream(1, &b.pack(), 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert!(
+        board
+            .state()
+            .error
+            .contains("doesn't match slot.json's sha256"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.layout().installed("os-2"));
+    assert!(!board.work_left());
+}
+
+/// A boot file whose bytes differ from the manifest's digest is refused, under a valid signature.
+/// The command line is one of those files, so a changed command line is refused the same way.
+#[test]
+fn a_boot_file_that_differs_from_the_manifest_digest_is_refused() {
+    let mut board = Board::new("os-1");
+    let b = Bundle::new("os-2");
+    let mut files = boot_of(&b);
+    for (name, bytes) in &mut files {
+        if *name == "cmdline.txt" {
+            *bytes = b"console=tty1 init=/bin/sh\n".to_vec();
+        }
+    }
+    let bytes = members(&b, Some(b.pack_record()), &[], &files);
+    let (status, _, _) = board.stream(1, &bytes, 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert!(
+        board
+            .state()
+            .error
+            .contains("boot file cmdline.txt doesn't match slot.json"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.layout().installed("os-2"));
+    assert!(!board.work_left());
+}
+
+/// A slot id that is not a slot id is refused at slot.json, before any payload: it would name a
+/// path, so the form is checked, not only the words.
+#[test]
+fn a_slot_id_of_the_wrong_form_is_refused_at_the_manifest() {
+    let mut board = Board::new("os-1");
+    for id in ["bad/id", "..", "has space"] {
+        let mut b = Bundle::new("os-2");
+        b.id = id.into();
+        let (status, _, _) = board.stream(1, &b.pack(), 4096);
+        assert_eq!(status, Status::INVALID_ARGUMENT, "{id}");
+        assert!(
+            board.state().error.contains("isn't a slot id"),
+            "{}",
+            board.state().error
+        );
+        assert!(!board.work_left());
+    }
+}
+
+/// `info` gives the ids (SHA-256 of the public key) of the keys the board holds, with their owners.
+#[test]
+fn info_names_the_held_keys_by_id_and_owner() {
+    let mut board = Board::new("os-1");
+    let mut out = vec![0u8; 4096];
+    let len = board.slots.info(&mut out).unwrap();
+    let json = Json::parse(core::str::from_utf8(&out[..len]).unwrap()).unwrap();
+    let Some(Json::List(keys)) = json.get("key_ids") else {
+        panic!("no key_ids")
+    };
+    assert_eq!(keys.len(), 1);
+    let id = keys[0].get("id").and_then(Json::text).unwrap();
+    assert_eq!(id, hex(&Sha256::digest(key().verifying_key().as_bytes())));
+    assert_eq!(
+        keys[0].get("owner").and_then(Json::text),
+        Some("the build key")
     );
 }
 

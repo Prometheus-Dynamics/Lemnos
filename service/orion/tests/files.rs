@@ -109,9 +109,16 @@ fn bundle(id: &str, data_blocks: usize) -> Vec<u8> {
     for (name, bytes) in boot {
         members.push((format!("boot/{name}"), bytes.to_vec()));
     }
+    // The order the rules give: slot.json, then rootfs.erofs, then boot/ and its files.
     let mut out = Vec::new();
-    out.extend(header("boot/", b'5', 0));
     for (name, bytes) in &members {
+        if name == "rootfs.erofs" {
+            out.extend(header(name, b'0', bytes.len()));
+            out.extend(bytes);
+            out.resize(out.len().div_ceil(512) * 512, 0);
+            out.extend(header("boot/", b'5', 0));
+            continue;
+        }
         out.extend(header(name, b'0', bytes.len()));
         out.extend(bytes);
         out.resize(out.len().div_ceil(512) * 512, 0);

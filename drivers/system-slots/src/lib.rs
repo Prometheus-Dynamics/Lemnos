@@ -99,8 +99,8 @@ use lemnos_core::{
 };
 
 use boot::{BootRecord, Check, FileRecord, Restarter, Tryboot};
+pub use install::{Admit, SIGNATURE_LEN, TrustedKey, parse_keys};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
-pub use install::{SIGNATURE_LEN, TrustedKey, parse_keys};
 use json::quoted;
 use lemnos_slot_store::boots;
 use lemnos_slot_store::disk::{self, Table};
@@ -457,6 +457,10 @@ impl SystemSlots {
             if offset != install.got {
                 return Err(failure.0);
             }
+            // A refusal the bundle's members made (its signature, its order) is kept for `info`.
+            if let Some(signed) = install.signed.clone() {
+                self.last_signed = Some((String::new(), signed));
+            }
             return Err(self.fail_install(install, failure));
         }
         if !install.complete() {
@@ -469,11 +473,8 @@ impl SystemSlots {
         let mut state = self.state();
         let finish = Finish {
             layout: &self.layout,
-            keys: &self.keys,
-            require_signed: security::enforced(),
             boot_args: &self.boot_args,
             boot_sources: &self.boot_sources,
-            board_id: &self.board_id,
             guard: Guard {
                 running: self.running(),
                 default: state.default.clone(),
@@ -627,6 +628,11 @@ impl SystemSlots {
         };
         self.next_job += 1;
         let job = JobId(self.next_job);
+        let admit = Admit {
+            keys: self.keys.clone(),
+            require_signed: security::enforced(),
+            board_id: self.board_id.clone(),
+        };
         let mut install = Install::start(
             &self.layout,
             self.calling,
@@ -635,6 +641,7 @@ impl SystemSlots {
             pin,
             keep_old,
             guard,
+            admit,
             self.ubi_write.clone(),
         )
         .map_err(|failure| failure.0)?;
@@ -824,7 +831,20 @@ impl SystemSlots {
             signature_word(&Meta::load(&self.layout, &self.state().default))
         ));
         quoted(&signing::boot_unverified(&self.layout), &mut out);
-        out.push('}');
+        // Appended last: the ids of the keys the board holds, so a client can choose the key it
+        // signs with without learning the keys. Each id is the SHA-256 of the public key.
+        out.push_str(",\"key_ids\":[");
+        for (at, key) in self.keys.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"id\":\"");
+            out.push_str(&boot::hex(&signing::key_id(key.key.as_bytes())));
+            out.push_str("\",\"owner\":");
+            quoted(&key.owner, &mut out);
+            out.push('}');
+        }
+        out.push_str("]}");
         out
     }
 
