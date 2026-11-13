@@ -5,7 +5,9 @@
  * - I2C adapter 40, plain transfers only: address 0x50 behaves as a 256-byte
  *   memory with a one-byte address, and 0x51 is held by a kernel driver.
  * - SPI controller 40, with its data output wired to its input. Chip select 0
- *   is for the module; 1 is for the kernel's spi-loopback-test.
+ *   is for the module; 1 is left unbound (the harness does not run the kernel's
+ *   spi-loopback-test: it tests the kernel's SPI core, not this code, and its
+ *   timing check fails under host load).
  * - A two-channel PWM chip that stores what it is told, under the platform
  *   device lemnos-test-parent.
  * - For the block lemnos-test-block: a supply "vdd" that can be made to report
