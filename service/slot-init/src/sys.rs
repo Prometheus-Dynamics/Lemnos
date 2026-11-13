@@ -13,10 +13,9 @@ use lemnos_slot_store::ubi::{self, Ubi};
 use crate::boot::INIT;
 use crate::ops::Ops;
 
-/// The system calls, with the device nodes in `dev` and the modules in `modules`.
+/// The system calls, with the device nodes in `dev`.
 pub struct System {
     pub dev: PathBuf,
-    pub modules: PathBuf,
     /// The loop devices under the verity devices, held until `switch_root` closes them.
     loops: RefCell<Vec<Loop>>,
 }
@@ -25,7 +24,6 @@ impl System {
     pub fn new() -> Self {
         Self {
             dev: PathBuf::from("/dev"),
-            modules: PathBuf::from("/lib/modules"),
             loops: RefCell::new(Vec::new()),
         }
     }
@@ -38,28 +36,6 @@ fn libc_major(rdev: u64) -> u64 {
 
 fn libc_minor(rdev: u64) -> u64 {
     ((rdev >> 12) & 0xffff_ff00) | (rdev & 0x00ff)
-}
-
-/// A module's name as the kernel compares it: `-` and `_` are the same.
-fn module_name(path: &str) -> String {
-    let file = path.rsplit('/').next().unwrap_or(path);
-    let stem = file.split(".ko").next().unwrap_or(file);
-    stem.replace('-', "_")
-}
-
-/// The files to load for `name`, dependencies first, from `modules.dep`'s text.
-pub fn load_order(dep: &str, name: &str) -> Option<Vec<String>> {
-    let want = module_name(name);
-    dep.lines().find_map(|line| {
-        let (module, deps) = line.split_once(':')?;
-        (module_name(module) == want).then(|| {
-            // modules.dep lists what a module needs nearest first: load the farthest first.
-            let mut files: Vec<String> =
-                deps.split_whitespace().rev().map(str::to_string).collect();
-            files.push(module.to_string());
-            files
-        })
-    })
 }
 
 /// The flags and the filesystem's own options in a `mount -o` string.
@@ -107,20 +83,8 @@ impl Ops for System {
         }
     }
 
-    fn load_module(&self, name: &str, release: &str) -> Result<(), String> {
-        let base = self.modules.join(release);
-        let dep = fs::read_to_string(base.join("modules.dep"))
-            .map_err(|e| format!("{}: {e}", base.join("modules.dep").display()))?;
-        let files = load_order(&dep, name)
-            .ok_or("not in modules.dep: built into the kernel, or missing")?;
-        for file in files {
-            match rootfs::load_module(&base.join(&file), "") {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(format!("{file}: {e}")),
-            }
-        }
-        Ok(())
+    fn dm_targets(&self) -> Result<Vec<String>, String> {
+        rootfs::dm_targets(&self.dev).map_err(|e| e.to_string())
     }
 
     fn open_verity(&self, image: &Path, name: &str, verity: &Verity) -> Result<String, String> {
@@ -191,25 +155,6 @@ impl Ops for System {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn modules_load_dependencies_first() {
-        let dep = "kernel/drivers/md/dm-mod.ko.xz:\n\
-                   kernel/drivers/md/dm-verity.ko: kernel/drivers/md/dm-bufio.ko kernel/drivers/md/dm-mod.ko.xz\n";
-        assert_eq!(
-            load_order(dep, "dm_verity").unwrap(),
-            [
-                "kernel/drivers/md/dm-mod.ko.xz",
-                "kernel/drivers/md/dm-bufio.ko",
-                "kernel/drivers/md/dm-verity.ko"
-            ]
-        );
-        assert_eq!(
-            load_order(dep, "dm-mod").unwrap(),
-            ["kernel/drivers/md/dm-mod.ko.xz"]
-        );
-        assert_eq!(load_order(dep, "dm-crypt"), None);
-    }
 
     #[test]
     fn a_device_number_splits_as_libc_does() {

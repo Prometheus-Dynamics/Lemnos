@@ -289,8 +289,8 @@ Stock route: `/sys/class/hwmon` and `/sys/class/thermal/thermal_zoneN`. Module r
 
 Stock route: the boot partition (`vfat`), the data partition (`ext4`), the root image (`erofs`
 on a loop device, with dm-verity). On raw NAND, UBI volumes in place of partitions. Module
-route: none. The slot-init program loads the device-mapper modules itself, so an image with no
-modules needs them built in.
+route: none. The slot-init program loads no modules: every piece below must be built in, and
+slot-init names any it finds missing (`docs/slots.md`, "The kernel self-check").
 
 | Symbol | Stock | Module | Built in | Reference | Feature |
 | --- | --- | --- | --- | --- | --- |

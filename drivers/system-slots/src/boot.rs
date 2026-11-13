@@ -54,11 +54,11 @@ pub trait BootRecord: Send {
     }
 }
 
-/// The boot partition's copy of a trial's reason: `trial-reason`, beside the boot record. The
-/// driver writes it when the state directory can't hold the reason at a deadline restart, and
-/// reads it at the next start, when the state has no reason of its own. The loader never reads
-/// it, so it can't change what boots.
-pub const REASON_FILE: &str = "trial-reason";
+/// The boot partition's copy of a trial's reason (`records::REASON_FILE`). The driver writes it
+/// when the state directory can't hold the reason at a deadline restart, and reads it at the next
+/// start, when the state has no reason of its own. The loader never reads it, so it can't change
+/// what boots.
+pub use lemnos_slot_store::records::REASON_FILE;
 
 /// Keeps `reason` on the boot partition.
 pub fn write_reason(boot: &Path, reason: &str) -> io::Result<()> {

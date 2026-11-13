@@ -32,7 +32,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lemnos_slot_store::manifest::Manifest;
-use lemnos_slot_store::records::{MAX_ATTEMPTS, attempts, file, tryboot, uboot};
+use lemnos_slot_store::records::{
+    KERNEL_GAP, MAX_ATTEMPTS, REASON_FILE, attempts, file, tryboot, uboot,
+};
 use lemnos_slot_store::store::{self, Layout, Meta, State, read_line, valid_id};
 use lemnos_slot_store::ubi::{self, Ubi};
 
@@ -40,13 +42,12 @@ use crate::cmdline::Args;
 use crate::decide::{
     Candidate, Failure, FilePick, Next, TryPass, after_failure, file_pick, tryboot_pass,
 };
+use crate::kernel::{self, Route};
 use crate::ops::Ops;
 use crate::partition::{self, Part, Spec};
 
 /// The program the slot's own system starts with.
 pub const INIT: &str = "/sbin/init";
-/// The modules dm-verity needs, in load order. Built-in ones fail to load, which is fine.
-const MODULES: [&str; 3] = ["dm-mod", "dm-bufio", "dm-verity"];
 /// The kernel log kept on the boot partition after a failure.
 pub const BOOT_LOG: &str = "slot-init.log";
 /// The kernel log kept on the data partition after a failure.
@@ -442,7 +443,12 @@ impl Boot<'_> {
     fn file_record(&self, args: &Args) -> Option<(String, bool, String)> {
         let path = self.layout.boot.join(file::FILE);
         let (default, trial, left) = file::parse(&fs::read_to_string(&path).ok()?);
-        let (slot, is_trial) = match file_pick(&trial, left) {
+        let pick = if self.held() {
+            FilePick::Default { clear: false }
+        } else {
+            file_pick(&trial, left)
+        };
+        let (slot, is_trial) = match pick {
             FilePick::Trial { slot, left } => {
                 self.write_file_record(&path, &default, &trial, left);
                 (slot, true)
@@ -492,7 +498,8 @@ impl Boot<'_> {
         let boot = self.layout.boot.clone();
         let form_here = boot.join(uboot::RECORD_FILE).is_file() || boot.join(file::FILE).is_file();
         let mut over = None;
-        if !form_here {
+        // A trial held back for a kernel gap takes no attempt until the daemon resolves it.
+        if !form_here && !self.held() {
             let trial_text = fs::read_to_string(boot.join(tryboot::TRIAL_FILE)).unwrap_or_default();
             let flag = fs::read(self.env.at(tryboot::TRIAL_FLAG)).unwrap_or_default();
             let counter = fs::read_to_string(boot.join(tryboot::ATTEMPTS_FILE))
@@ -533,6 +540,172 @@ impl Boot<'_> {
         over
     }
 
+    /// The kernel's release, from `/proc`.
+    fn release(&self) -> String {
+        fs::read_to_string(self.env.at("proc/sys/kernel/osrelease"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Whether sysfs shows a block device that is not a loop, RAM, UBI or device-mapper one: the
+    /// storage the data partition is on.
+    fn storage_present(&self) -> bool {
+        fs::read_dir(self.env.sys.join("class/block")).is_ok_and(|dir| {
+            dir.flatten().any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                !["loop", "ram", "zram", "ubiblock", "dm-", "mtd"]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+            })
+        })
+    }
+
+    /// What the kernel offers, read now.
+    fn facts(&self, route: Route) -> kernel::Facts {
+        let read = |path: &str| fs::read_to_string(self.env.at(path)).unwrap_or_default();
+        let misc = kernel::misc(&read("proc/misc"));
+        let dm_targets = if misc.iter().any(|name| name == "device-mapper") {
+            match self.ops.dm_targets() {
+                Ok(targets) => Some(targets),
+                Err(error) => {
+                    self.log(&format!("device-mapper's targets: {error}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        kernel::Facts {
+            filesystems: kernel::filesystems(&read("proc/filesystems")),
+            misc,
+            drivers: kernel::drivers(&read("proc/devices")),
+            crypto: kernel::crypto(&read("proc/crypto")),
+            dm_targets,
+            ubi: route == Route::Nand && self.layout.ubi.as_ref().is_some_and(|ubi| ubi.present()),
+        }
+    }
+
+    /// The kernel check, before any attempt is taken or any record written. Every absent piece
+    /// is named on the console. When a required one is absent the boot can't carry on, and the
+    /// reason is returned: see [`Boot::kernel_gap`].
+    fn check_kernel(&self, route: Route) -> Option<String> {
+        let gaps = kernel::missing(route, &self.facts(route));
+        for piece in &gaps {
+            self.log(&piece.message());
+        }
+        let why: Vec<String> = gaps
+            .iter()
+            .filter(|piece| piece.required)
+            .map(|piece| piece.message())
+            .collect();
+        if why.is_empty() {
+            None
+        } else {
+            Some(self.kernel_gap(&why.join("; ")))
+        }
+    }
+
+    /// The boot can't carry on for the kernel. Nothing is spent and no slot is failed: the kernel
+    /// is the board's, and the slot isn't at fault. A trial's boot gives back the attempt the
+    /// boot that started it took, and holds the trial (its reason is kept on the boot partition,
+    /// where the daemon reads it). The default slot is opened through the same chain, so the
+    /// boot waits and restarts as it does when nothing can start.
+    fn kernel_gap(&self, why: &str) -> String {
+        let Some(form) = self.trial_in_effect() else {
+            return self.rescue(why);
+        };
+        self.hold_trial(form, why);
+        self.save_log();
+        self.log("the trial can't start on this kernel; restarting into the default slot");
+        self.restart(None);
+        why.to_string()
+    }
+
+    /// The trial this boot is, and which boot record holds it, when there is one: the firmware's
+    /// tryboot flag, a `file` record's trial with attempts left, or a U-Boot or UBI record's trial
+    /// with attempts.
+    fn trial_in_effect(&self) -> Option<Record> {
+        let flag = fs::read(self.env.at(tryboot::TRIAL_FLAG)).unwrap_or_default();
+        if flag == [0, 0, 0, 1] {
+            return Some(Record::Tryboot);
+        }
+        let mounted = self.mount_boot(false).is_ok();
+        let form = Record::on(&self.layout);
+        let trial = if !mounted {
+            None
+        } else {
+            match form {
+                Record::File => {
+                    let text = fs::read_to_string(self.layout.boot.join(file::FILE));
+                    let (_, trial, left) = file::parse(&text.unwrap_or_default());
+                    (!trial.is_empty() && left > 0).then_some(Record::File)
+                }
+                Record::Uboot | Record::UbiVolume => self
+                    .record_now(form)
+                    .filter(|(trial, left)| !trial.is_empty() && *left > 0)
+                    .map(|_| form),
+                Record::Tryboot => None,
+            }
+        };
+        self.unmount_boot();
+        trial
+    }
+
+    /// The trial and attempts a U-Boot or UBI record holds now.
+    fn record_now(&self, form: Record) -> Option<(String, u8)> {
+        let text = match form {
+            Record::Uboot => fs::read_to_string(self.layout.boot.join(uboot::RECORD_FILE)).ok()?,
+            Record::UbiVolume => {
+                let device = self.layout.ubi.as_ref()?;
+                String::from_utf8_lossy(&device.read(ubi::RECORD_VOLUME).ok()?).into_owned()
+            }
+            Record::Tryboot | Record::File => return None,
+        };
+        let record = uboot::Record::parse(&text);
+        Some((record.trial, record.attempts))
+    }
+
+    /// Gives back the attempt a trial's boot took and keeps the reason on the boot partition. A
+    /// `tryboot` or `file` trial stays in its record, held. A U-Boot or UBI record is withdrawn
+    /// instead (its trial cleared): the loader takes an attempt for every trial start, and can't
+    /// be told to wait.
+    fn hold_trial(&self, form: Record, why: &str) {
+        if let Err(error) = self.mount_boot(true) {
+            self.log(&format!("couldn't hold the trial: {error}"));
+            return;
+        }
+        match form {
+            Record::Tryboot => {
+                let path = self.layout.boot.join(tryboot::ATTEMPTS_FILE);
+                if let Some(left) = fs::read_to_string(&path).ok().and_then(|t| attempts(&t)) {
+                    let left = (left + 1).min(self.trial_attempts());
+                    let _ = store::replace(&path, format!("{left}\n").as_bytes());
+                }
+            }
+            Record::File => {}
+            Record::Uboot | Record::UbiVolume => {
+                if let Some((_, left)) = self.record_now(form) {
+                    let left = (left + 1).min(self.trial_attempts());
+                    if let Err(error) = self.write_trial(form, "", left) {
+                        self.log(&format!("couldn't withdraw the trial: {error}"));
+                    }
+                }
+            }
+        }
+        if let Err(error) = store::replace(
+            &self.layout.boot.join(REASON_FILE),
+            format!("{why}\n").as_bytes(),
+        ) {
+            self.log(&format!("couldn't keep the reason: {error}"));
+        }
+    }
+
+    /// Whether the boot partition holds a kernel-gap reason: a held trial takes no attempt.
+    fn held(&self) -> bool {
+        fs::read_to_string(self.layout.boot.join(REASON_FILE))
+            .is_ok_and(|text| text.trim_start().starts_with(KERNEL_GAP))
+    }
+
     fn run(&mut self, cmdline: &str) -> String {
         let args = match Args::parse(cmdline) {
             Ok(args) => args,
@@ -547,6 +720,9 @@ impl Boot<'_> {
             match self.find_volume(device, volume) {
                 Ok(ubi) => {
                     self.layout.ubi = Some(ubi);
+                    if let Some(why) = self.check_kernel(Route::Nand) {
+                        return why;
+                    }
                     (
                         "ubifs",
                         "noatime",
@@ -562,12 +738,20 @@ impl Boot<'_> {
             let data = match self.find_data(&spec) {
                 Ok(part) => part,
                 Err(seen) => {
+                    let seen = if self.storage_present() {
+                        seen
+                    } else {
+                        kernel::storage_message()
+                    };
                     self.log(&seen);
                     return self.rescue(&format!("no data partition {}", args.data));
                 }
             };
             let data_dev = self.env.dev.join(&data.name);
             self.data = Some(data);
+            if let Some(why) = self.check_kernel(Route::Stock) {
+                return why;
+            }
             if let Some(why) = self.tryboot_pass() {
                 return why;
             }
@@ -645,19 +829,12 @@ impl Boot<'_> {
             }
             Some(_) => {}
         }
-        let release = fs::read_to_string(self.env.at("proc/sys/kernel/osrelease"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+        let release = self.release();
         if !manifest.kernel.is_empty() && manifest.kernel != release {
             return self.fail(&format!(
                 "it was built for kernel {}, and this is {release}",
                 manifest.kernel
             ));
-        }
-        for module in MODULES {
-            if let Err(error) = self.ops.load_module(module, &release) {
-                self.log(&format!("{module}: {error}"));
-            }
         }
         let image = match &self.layout.ubi {
             Some(ubi) => match self.ops.ubi_block(ubi, &ubi::image_volume(&slot)) {

@@ -363,10 +363,20 @@ wrappers (`rootfs`). It reads and writes the same files as the driver through th
 
 ### The initramfs
 
-The initramfs holds `lemnos-slot-init` as `/init` and, when they are modules, `dm-mod`,
-`dm-bufio` and `dm-verity` under `/lib/modules/<release>/` with that kernel's `modules.dep`. They
-must be uncompressed. A module that is built in fails to load, which is logged and harmless. The
-kernel needs devtmpfs, ext4, vfat, EROFS, loop and dm-verity.
+The initramfs holds `lemnos-slot-init` as `/init` and nothing else: no kernel modules, and no
+`/lib/modules`.
+
+**Rule: the whole chain is built into the kernel.** Every piece below must be `=y` (built in) in
+the kernel that boots a slot; `docs/kernel-config.md` ("Slot path") has the table. The slot-init
+program does not load modules. A board whose kernel has one of these as a module does not boot a
+slot until that kernel is rebuilt with it built in.
+
+**Pairing (this revision).** This revision's `lemnos-slot-init` needs a kernel with the slot
+chain built in: `BLK_DEV_DM`, `CRYPTO_SHA256`, `DM_VERITY`, `EROFS_FS`, `EXT4_FS` (or `UBIFS_FS` on
+raw NAND), `BLK_DEV_LOOP` (stock route), `MTD_UBI` (raw NAND), plus the storage host driver.
+Paired with a kernel that has any of them as modules, it does not start a slot: the self-check
+below names the option, and the board boots as described under "A kernel missing a piece".
+Nothing in the initramfs makes up for it.
 
 ### What it does
 
@@ -388,10 +398,48 @@ kernel needs devtmpfs, ext4, vfat, EROFS, loop and dm-verity.
    - the manifest's root hash isn't the command line's;
    - the image isn't exactly `image.size` bytes;
    - `kernel` names a kernel other than the running one.
-6. It loads the device-mapper modules, opens the image through a read-only loop device and
-   dm-verity with the table above, and mounts it read-only as EROFS.
+6. It opens the image through a read-only loop device and dm-verity with the table above, and
+   mounts it read-only as EROFS.
 7. It moves `/data` into the new root and writes `board/slots/booted`, plus `trial-started` on a
    trial. Then it `switch_root`s into `/sbin/init`.
+
+### The kernel self-check
+
+Before anything is spent, written or mounted past the data partition, slot-init checks each piece
+of the chain (`service/slot-init/src/kernel.rs`): device-mapper (`misc` has `device-mapper`),
+SHA-256 (`/proc/crypto` has `sha256`), the verity target (`DM_LIST_VERSIONS` lists `verity`),
+EROFS (`/proc/filesystems`), the loop device (`/proc/devices` has `loop`, stock route), the data
+partition's filesystem (`ext4`, or `ubifs` on raw NAND), and `MTD_UBI` (raw NAND). Each absent
+piece is logged by its kernel option, for example:
+
+    slot-init: the kernel lacks CONFIG_DM_VERITY: the verity target over the slot's image
+
+When no block device other than loop, RAM, UBI or device-mapper exists, the message names
+`CONFIG_MMC_BLOCK` (or `CONFIG_BLK_DEV_NVME`) instead of a bare "no data partition".
+`vfat` for the boot partition is optional: its absence is logged and the boot goes on.
+
+**A kernel missing a piece is not a failed slot.** Nothing is marked: no `FAILED`, no `FAILURES`,
+no `FAIL_REASON`, no fallback count, no trial on another slot. The check runs before any attempt
+is taken, so an absent piece never uses up trial attempts.
+
+Then, per boot:
+
+- **Default boot, nothing else pending:** the boot keeps the kernel log (`slot-init.log` on the
+  boot partition), prints `no slot can start: the kernel lacks CONFIG_...` and waits 30 s, then
+  restarts. That is the last resort the boot had before, when no slot can be opened, with the
+  reason named. It starts no slot and switches no root, so the board stays here until the kernel
+  is fixed.
+- **Trial boot** (the firmware's tryboot flag, a `file` record's trial with attempts, or a
+  U-Boot or UBI record's trial): the attempt the boot that started the trial took is given back
+  (`tryboot` counter and the U-Boot or UBI record count, up to the board's `trial_attempts`), the
+  reason is written to `trial-reason` on the boot partition, and the board restarts plainly.
+  - A `tryboot` or `file` trial stays in its record, held: the default boot takes no attempt for
+    it while `trial-reason` holds a kernel-gap reason, and the default slot starts. The daemon
+    reads `trial-reason` when it resolves the trial, so `list` shows the kernel option, not a bare
+    mount error. A trial whose kernel was rebuilt is resolved by the daemon, which clears the
+    reason.
+  - A U-Boot or UBI record's trial is withdrawn (its trial cleared), because the loader takes an
+    attempt on every trial start and can't be told to wait.
 
 ### When the slot can't come up
 
