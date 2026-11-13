@@ -31,7 +31,7 @@ mod tag;
 pub use codec::{Decode, Encode, Field, Reader, Shape, Tail, Vector3, Writer};
 pub use config::{Config, ConfigValue};
 pub use contract::{
-    Bound, Caller, Contract, ContractInfo, Dev, LOCAL_ARGS, LocalCaller, MethodInfo, Param,
+    Bound, Caller, Contract, ContractInfo, Dev, LOCAL_ARGS, LocalCaller, MethodInfo, Param, Polled,
     REPLY_INLINE, Router,
 };
 pub use description::{

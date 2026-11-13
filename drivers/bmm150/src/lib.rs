@@ -30,9 +30,12 @@ pub use chip::{DataRate, Preset};
 
 use chip::{Fault, Settings, Trim};
 use lemnos_contract_magnetometer::Magnetometer;
+use lemnos_contract_self_test::{
+    Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
+};
 use lemnos_core::{
-    AddressWidth, Config, ConfigValue, Description, Health, I2c, Item, Lifecycle, MethodId, Result,
-    Status, Unit, Vector3, driver,
+    AddressWidth, CallerId, Config, ConfigValue, Description, Health, I2c, Item, JobId, JobState,
+    Lifecycle, MethodId, Reply, Result, Status, Unit, Vector3, driver,
 };
 
 /// The 7-bit address with SDO and CSB2 low; 0x11-0x13 are the alternatives.
@@ -42,6 +45,17 @@ const READ: MethodId = MethodId {
     contract: 0,
     method: 1,
 };
+/// `self-test/1`'s `run`, the second contract the driver serves.
+const RUN: MethodId = MethodId {
+    contract: 1,
+    method: 2,
+};
+/// The checks this driver offers. Its names are stable.
+const SPECS: &[Spec] = &[Spec::read(
+    "identity",
+    "the chip ID register reads 0x32",
+    20,
+)];
 
 /// Where the chip is in its power-up sequence.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,7 +68,7 @@ enum Phase {
     Ready(Trim),
 }
 
-#[driver("bmm150", provides = [Magnetometer])]
+#[driver("bmm150", provides = [Magnetometer, SelfTest])]
 pub struct Bmm150 {
     #[needs]
     bus: I2c,
@@ -67,6 +81,10 @@ pub struct Bmm150 {
     fault: &'static str,
     /// The operating system's driver runs the chip: read it, never set it up.
     host_owned: bool,
+    /// The self-test checks: their runs and the last result of each.
+    runner: Runner,
+    /// Who the method being run is for (see [`Lifecycle::caller`]).
+    calling: CallerId,
 }
 
 impl Lifecycle for Bmm150 {
@@ -75,6 +93,10 @@ impl Lifecycle for Bmm150 {
     const HOST_OWNED: lemnos_core::HostOwned = lemnos_core::HostOwned::ThroughNeeds;
     // A one-byte register address moves the chip's pointer and nothing else.
     const I2C_REGISTER_ADDRESS: Option<AddressWidth> = Some(AddressWidth::Bits8);
+    // The self-test runs its steps from the tick, and tracks who uses the chip.
+    const TICKS: bool = true;
+    const JOBS: bool = true;
+    const TRACKS_CALLERS: bool = true;
 
     fn start(needs: Bmm150Needs, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
@@ -85,7 +107,38 @@ impl Lifecycle for Bmm150 {
             last: None,
             fault: "not started",
             host_owned: cfg.host_owned(),
+            runner: Runner::new(SPECS),
+            calling: CallerId::LOCAL,
         })
+    }
+
+    fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let mut bench = Identity {
+            bus: &mut self.bus,
+            address: self.address,
+        };
+        self.runner.tick(now_ns, &mut bench)
+    }
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+        self.runner.caller(caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        self.runner.caller_gone(caller);
+    }
+
+    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
+        self.runner.job(job, result)
+    }
+
+    fn job_cancel(&mut self, job: JobId) {
+        let mut bench = Identity {
+            bus: &mut self.bus,
+            address: self.address,
+        };
+        self.runner.cancel(job, &mut bench);
     }
 
     fn describe(&self, out: &mut Description) {
@@ -102,14 +155,59 @@ impl Lifecycle for Bmm150 {
                     .group("magnetic_field"),
             );
         }
+        out.add(Item::action("self_test", RUN));
     }
 
     fn health(&self) -> Health {
         match self.phase {
-            Phase::Ready(_) => Health::Ok,
+            Phase::Ready(_) => match self.runner.health() {
+                Some(why) => Health::Degraded(why),
+                None => Health::Ok,
+            },
             Phase::Starting => Health::Degraded("powering up"),
             Phase::Off => Health::Failed(self.fault),
         }
+    }
+}
+
+impl SelfTest for Bmm150 {
+    fn tests(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.runner.write_tests(into)
+    }
+
+    fn run(&mut self, name: &str, confirmed: bool) -> Result<JobId> {
+        self.runner.start(name, confirmed, self.calling)
+    }
+
+    fn last(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.runner.write_last(into)
+    }
+}
+
+/// The identity test's steps. It reads the chip ID and writes nothing, so it restores nothing.
+struct Identity<'a> {
+    bus: &'a mut I2c,
+    address: u8,
+}
+
+impl Bench for Identity<'_> {
+    fn step(&mut self, _test: usize, _now_ns: u64, _scratch: &mut Scratch) -> Flow {
+        Flow::Done(match chip::chip_id(self.bus, self.address) {
+            Ok(chip::CHIP_ID) => Record::pass(reason::OK)
+                .said("the chip ID is 0x32")
+                .measure(
+                    Measure::new("chip_id", i64::from(chip::CHIP_ID), 0, "")
+                        .within(i64::from(chip::CHIP_ID), i64::from(chip::CHIP_ID)),
+                ),
+            Ok(found) => Record::fail(reason::IDENTITY)
+                .said("the chip ID is not 0x32")
+                .measure(Measure::new("chip_id", i64::from(found), 0, "")),
+            Err(_) => Record::fail(reason::NO_RESPONSE).said("the chip ID register did not read"),
+        })
+    }
+
+    fn restore(&mut self, _scratch: &mut Scratch) -> core::result::Result<(), Status> {
+        Ok(())
     }
 }
 

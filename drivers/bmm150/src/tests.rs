@@ -5,7 +5,10 @@ use crate::chip::{
     CHIP_ID, REG_CHIP_ID, REG_DATA, REG_OP_MODE, REG_POWER, REG_REP_XY, REG_REP_Z, REG_TRIM_X1,
     REG_TRIM_Z2, REG_TRIM_Z4, RawSample, Trim,
 };
-use lemnos_core::{Description, Driver, Resources};
+use lemnos_contract_self_test::{Outcome, Record, SelfTest, read_tests, reason};
+use lemnos_core::{
+    Description, Driver, ItemKind, JobState, Lifecycle, Reader, Resources, Status, Writer,
+};
 use lemnos_sim::{Layout, SimBoard, SimI2c};
 
 const ADDRESS: u8 = DEFAULT_ADDRESS;
@@ -241,7 +244,9 @@ fn describes_three_axes_in_tesla() {
     let mag = bind(&mut board, &[]).unwrap();
     let mut out = Description::new();
     Driver::describe(&mag, &mut out);
-    assert_eq!(out.items().count(), 3);
+    // Three axes, and the self-test's action.
+    assert_eq!(out.items().count(), 4);
+    assert_eq!(out.find("self_test").unwrap().kind, ItemKind::Action);
     let item = out.find("magnetic_field.y").unwrap();
     assert_eq!(item.unit, Unit::Tesla);
     assert_eq!(item.field, Some("y"));
@@ -309,4 +314,65 @@ fn compensation_does_not_overflow_over_trim_ranges() {
             assert!(axis.is_nan() || axis.is_finite());
         }
     }
+}
+
+/// Runs the identity test to its answer on the driver's own tick, and reads the answer back.
+fn run_identity(mag: &mut Bmm150) -> (JobState, Option<Record>) {
+    let job = SelfTest::run(mag, "identity", false).unwrap();
+    Driver::tick(mag, 0);
+    let mut buffer = [0u8; lemnos_contract_self_test::RECORD_BYTES + 8];
+    let mut writer = Writer::new(&mut buffer);
+    let state = Lifecycle::job(mag, job, &mut writer);
+    let used = writer.len();
+    let record = match state {
+        JobState::Finished(Status::OK) => {
+            Some(Record::read(&mut Reader::new(&buffer[..used])).unwrap())
+        }
+        _ => None,
+    };
+    (state, record)
+}
+
+#[test]
+fn the_identity_test_is_listed_and_passes_on_the_chip() {
+    let (mut board, _sim) = chip();
+    let mut mag = bind(&mut board, &[]).unwrap();
+    let mut listed = [0u8; 512];
+    let used = SelfTest::tests(&mut mag, &mut listed).unwrap();
+    let mut names = read_tests(&listed[..used]).unwrap();
+    assert_eq!(names.next().unwrap().name.as_str(), "identity");
+    assert!(names.next().is_none(), "one test");
+    let (state, record) = run_identity(&mut mag);
+    assert_eq!(state, JobState::Finished(Status::OK));
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Pass);
+    assert_eq!(record.reason, reason::OK);
+}
+
+#[test]
+fn the_identity_test_reports_another_chip_as_a_failure_with_what_it_read() {
+    let (mut board, sim) = chip();
+    let mut mag = bind(&mut board, &[]).unwrap();
+    sim.set_bytes(ADDRESS, reg(REG_CHIP_ID), &[0x40]);
+    let (_, record) = run_identity(&mut mag);
+    let record = record.unwrap();
+    assert_eq!(record.outcome, Outcome::Fail);
+    assert_eq!(record.reason, reason::IDENTITY);
+    assert_eq!(record.measures().next().unwrap().value, 0x40);
+}
+
+#[test]
+fn the_identity_test_reports_a_dead_chip_as_no_response_and_leaves_the_driver_alone() {
+    let (mut board, sim) = chip();
+    let mut mag = bind(&mut board, &[]).unwrap();
+    let before = Driver::health(&mag);
+    sim.set_dead(ADDRESS, true);
+    let (_, record) = run_identity(&mut mag);
+    let record = record.unwrap();
+    assert_eq!(record.reason, reason::NO_RESPONSE);
+    assert_eq!(
+        Driver::health(&mag),
+        before,
+        "a failed test read is not a fault of the driver"
+    );
 }

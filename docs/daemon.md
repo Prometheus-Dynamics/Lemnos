@@ -267,6 +267,8 @@ each out-buffer method's largest reply, from its contract's own bounds:
 | `system-identity/1` | `serial`, `family`, `model` | 256 bytes (`MAX_TEXT`) | whole |
 | `system-identity/1` | `facts` | 2048 bytes (`MAX_FACTS_TEXT`) | whole |
 | `system-slots/1` | `list` | unbounded: 1 slot is about 350 bytes, so about 170 fit | refused by name over about 170 slots; paged form in M8b |
+| `self-test/1` | `tests` | a device: 1 + 8 tests of 249 bytes, 1993 bytes; a board: 1 + 129 entries, 32122 bytes | whole |
+| `self-test/1` | `last` | a device: 1 + 8 results of 454 bytes, 3633 bytes; a board: 1 + 129 entries, 58567 bytes | whole, under 61440 |
 | `raw-bus/1` | `i2c_transfer`, `spi_transfer` (`read_len`), `uart_read` (`max_len`) | the caller's length, up to 4 GiB | a length above 61440 is refused before the transfer; ask for less and repeat |
 | `usb-function/1` | `control_out` | the pending request's `length`, up to 65535 | not checkable up front (no length argument): the bridge refuses a reply too large for its buffer, and the device must refuse before it accepts the request (not yet verified in the USB driver) |
 | `usb-function/1` | `data_stream` | 32 bytes (`MAX_STREAM_NAME`) | whole |

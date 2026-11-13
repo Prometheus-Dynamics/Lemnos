@@ -229,3 +229,10 @@ config = { frame_bytes = 1048576 }
 [each.streams.frames]
 buffers = 4
 buffer_bytes = 1048576
+
+# The board's self-test: its members run in the order named. `include_intrusive = false` leaves
+# the intrusive tests out of `all`, which runs the rest.
+[[devices]]
+id = "selftest"
+driver = "board-self-test"
+config = { members = ["power0", "imu"], include_intrusive = false }

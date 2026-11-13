@@ -12,6 +12,7 @@ workspace = true
 lemnos-core = { path = "../../engine/core" }
 lemnos-hal = { path = "../../engine/hal" }
 lemnos-contract-magnetometer = { path = "../../contracts/magnetometer" }
+lemnos-contract-self-test = { path = "../../contracts/self-test" }
 
 [dev-dependencies]
 lemnos-sim = { path = "../../backends/sim" }

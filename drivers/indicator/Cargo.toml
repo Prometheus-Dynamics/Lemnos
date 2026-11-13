@@ -12,6 +12,7 @@ workspace = true
 lemnos-core = { path = "../../engine/core" }
 lemnos-contract-indicator = { path = "../../contracts/indicator" }
 lemnos-contract-pixels = { path = "../../contracts/pixels" }
+lemnos-contract-self-test = { path = "../../contracts/self-test" }
 
 [dev-dependencies]
 lemnos-core = { path = "../../engine/core", features = ["std"] }

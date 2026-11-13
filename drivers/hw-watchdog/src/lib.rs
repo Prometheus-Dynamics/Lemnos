@@ -74,9 +74,12 @@
 #[cfg(test)]
 mod tests;
 
+use lemnos_contract_self_test::{
+    Bench, Flow, Measure, Record, Runner, Scratch, SelfTest, Spec, reason,
+};
 use lemnos_core::{
-    Config, ConfigValue, Description, Health, Held, Item, Lifecycle, MethodId, Result, Status,
-    Unit, Watchdog, driver,
+    CallerId, Config, ConfigValue, Description, Health, Held, Item, JobId, JobState, Lifecycle,
+    MethodId, Reply, Result, Status, Unit, Watchdog, driver,
 };
 use lemnos_hal::ErrorKind;
 use lemnos_hal::raw::RawWatchdog;
@@ -85,10 +88,22 @@ use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
-/// The method the items point at. No contract is provided, so nothing answers it.
+/// `self-test/1`'s `run`: the contract the driver serves (its only one, so contract 0).
+const RUN: MethodId = MethodId {
+    contract: 0,
+    method: 2,
+};
+/// The checks this driver offers. Its names are stable. The test only reads.
+const SPECS: &[Spec] = &[Spec::read(
+    "answers",
+    "the device answers and reports its timeout (nothing is fed or changed)",
+    20,
+)];
+
+/// The method the items point at. `self-test/1` has no method 0, so nothing answers it.
 const FACT: MethodId = MethodId {
     contract: 0,
-    method: 1,
+    method: 0,
 };
 
 /// The byte written to feed the watchdog. Any byte but the magic close character `V` feeds it;
@@ -192,7 +207,7 @@ impl RawWatchdog for OpenNode {
     }
 }
 
-#[driver("hw-watchdog", provides = [])]
+#[driver("hw-watchdog", provides = [SelfTest])]
 pub struct HwWatchdog {
     /// The node: the board's watchdog, named in `uses` (`watchdog:<node>`, or the numbered
     /// `watchdogN`), or the one the `device` setting names. Always set once the driver is
@@ -219,12 +234,78 @@ pub struct HwWatchdog {
     deadline_ns: Option<u64>,
     /// Feeds that have failed in a row. Zero when the last feed was good.
     feed_attempts: u32,
+    /// The self-test checks: their runs and the last result of each.
+    runner: Runner,
+    /// Who the method being run is for (see [`Lifecycle::caller`]).
+    calling: CallerId,
+}
+
+/// The `answers` test's steps: it reads the device's timeout, and nothing else.
+struct Answers<'a> {
+    node: &'a mut Option<Watchdog>,
+}
+
+impl Bench for Answers<'_> {
+    fn step(&mut self, _test: usize, _now_ns: u64, _scratch: &mut Scratch) -> Flow {
+        let Some(node) = self.node.as_mut() else {
+            return Flow::Done(Record::skipped(reason::ABSENT).said("no watchdog device"));
+        };
+        Flow::Done(match node.timeout() {
+            Ok(seconds) if seconds > 0 => Record::pass(reason::OK)
+                .said("the device answers with its timeout")
+                .measure(Measure::new("timeout", i64::from(seconds), 0, "s")),
+            Ok(seconds) => Record::fail(reason::OUT_OF_RANGE)
+                .said("the device reports no timeout")
+                .measure(Measure::new("timeout", i64::from(seconds), 0, "s")),
+            Err(_) => Record::fail(reason::NO_RESPONSE).said("the device did not answer"),
+        })
+    }
+
+    fn restore(&mut self, _scratch: &mut Scratch) -> core::result::Result<(), Status> {
+        Ok(())
+    }
+}
+
+impl SelfTest for HwWatchdog {
+    fn tests(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.runner.write_tests(into)
+    }
+
+    fn run(&mut self, name: &str, confirmed: bool) -> Result<JobId> {
+        self.runner.start(name, confirmed, self.calling)
+    }
+
+    fn last(&mut self, into: &mut [u8]) -> Result<usize> {
+        self.runner.write_last(into)
+    }
 }
 
 impl Lifecycle for HwWatchdog {
     type Needs = HwWatchdogNeeds;
 
     const TICKS: bool = true;
+    const JOBS: bool = true;
+    const TRACKS_CALLERS: bool = true;
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
+        self.runner.caller(caller);
+    }
+
+    fn caller_gone(&mut self, caller: CallerId) {
+        self.runner.caller_gone(caller);
+    }
+
+    fn job(&mut self, job: JobId, result: &mut Reply<'_>) -> JobState {
+        self.runner.job(job, result)
+    }
+
+    fn job_cancel(&mut self, job: JobId) {
+        let mut bench = Answers {
+            node: &mut self.watchdog,
+        };
+        self.runner.cancel(job, &mut bench);
+    }
 
     fn start(needs: HwWatchdogNeeds, cfg: &Config<'_>) -> Result<Self> {
         let requested = match cfg.get("timeout_s") {
@@ -259,6 +340,7 @@ impl Lifecycle for HwWatchdog {
             }
             out.add(item);
         }
+        out.add(Item::action("self_test", RUN));
     }
 
     fn health(&self) -> Health {
@@ -278,6 +360,24 @@ impl Lifecycle for HwWatchdog {
     }
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
+        let test = {
+            let mut bench = Answers {
+                node: &mut self.watchdog,
+            };
+            self.runner.tick(now_ns, &mut bench)
+        };
+        let feed = self.tick_feed(now_ns);
+        match (test, feed) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
+impl HwWatchdog {
+    /// Asks for the timeout when it is due, and feeds when a feed is due. Returns when either
+    /// is next due.
+    fn tick_feed(&mut self, now_ns: u64) -> Option<u64> {
         if self.unset && self.set_retry_ns.is_none_or(|at| now_ns >= at) {
             self.request_timeout(now_ns);
         }
@@ -290,9 +390,7 @@ impl Lifecycle for HwWatchdog {
         }
         due
     }
-}
 
-impl HwWatchdog {
     /// The node the driver feeds and asks. A driver with none is refused.
     fn node(&mut self) -> std::result::Result<&mut Watchdog, ErrorKind> {
         self.watchdog.as_mut().ok_or(ErrorKind::Failed)
@@ -316,6 +414,8 @@ impl HwWatchdog {
             due_ns: 0,
             deadline_ns: None,
             feed_attempts: 0,
+            runner: Runner::new(SPECS),
+            calling: CallerId::LOCAL,
         }
     }
 

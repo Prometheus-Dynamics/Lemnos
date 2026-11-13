@@ -537,7 +537,15 @@ config = { frame_bytes = 1048576 }
 [each.streams.frames]
 buffers = 4
 buffer_bytes = 1048576
+
+# The board's self-test: its members run in the order named. `include_intrusive = false` leaves
+# the intrusive tests out of `all`, which runs the rest.
+[[devices]]
+id = "selftest"
+driver = "board-self-test"
+config = { members = ["power0", "imu"], include_intrusive = false }
 ```
+
 
 The `ffs` function is the vendor interface a program uses, and its two bulk endpoints can be lent to
 one client at a time: the client reads the OUT endpoint and writes the IN endpoint itself, with the
@@ -660,3 +668,16 @@ drop, each of those nodes that exists, and refuses to start when the group canno
 naming it (`/dev/dma_heap/linux,cma: not readable/writable by group lemnos: install the generated udev
 fragment`). The unit (`packaging/systemd/lemnosd.service`) has no `DeviceAllow=` or `DevicePolicy=`,
 so systemd filters no device and the unit names no heap.
+
+## The self-test of a board
+
+`board-self-test` serves [`self-test/1`](drivers.md#self-tests) for the board. Its `config` names the
+members, in the order they run:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `members` | a list of device ids, or the string `"all"` | the members to run; `"all"` takes every device whose driver serves `self-test/1`, in board order. At most 16 |
+| `include_intrusive` | bool, default `false` | whether `all` runs the members' intrusive tests too |
+
+Its tests are each member's, named `member:test`, and `all`. A member that is not running is skipped
+as `ABSENT`. The board needs no member to be running to start.

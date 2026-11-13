@@ -619,6 +619,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemnos-contract-self-test"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-core",
+]
+
+[[package]]
 name = "lemnos-contract-system-flash"
 version = "2.0.1-dev"
 dependencies = [
@@ -794,8 +801,21 @@ name = "lemnos-driver-bmm150"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-contract-magnetometer",
+ "lemnos-contract-self-test",
  "lemnos-core",
  "lemnos-hal",
+ "lemnos-sim",
+]
+
+[[package]]
+name = "lemnos-driver-board-self-test"
+version = "2.0.1-dev"
+dependencies = [
+ "lemnos-contract-self-test",
+ "lemnos-core",
+ "lemnos-fake-devices",
+ "lemnos-host",
+ "lemnos-measure",
  "lemnos-sim",
 ]
 
@@ -907,6 +927,7 @@ dependencies = [
 name = "lemnos-driver-hw-watchdog"
 version = "2.0.1-dev"
 dependencies = [
+ "lemnos-contract-self-test",
  "lemnos-core",
  "lemnos-driver-hw-watchdog-sys",
  "lemnos-hal",
@@ -928,7 +949,9 @@ name = "lemnos-driver-hwmon-fan"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-contract-fan",
+ "lemnos-contract-self-test",
  "lemnos-core",
+ "lemnos-measure",
 ]
 
 [[package]]
@@ -936,6 +959,7 @@ name = "lemnos-driver-ina2xx"
 version = "2.0.1-dev"
 dependencies = [
  "lemnos-contract-power-monitor",
+ "lemnos-contract-self-test",
  "lemnos-core",
  "lemnos-hal",
  "lemnos-sim",
@@ -947,6 +971,7 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-contract-indicator",
  "lemnos-contract-pixels",
+ "lemnos-contract-self-test",
  "lemnos-core",
  "lemnos-measure",
 ]
@@ -1645,6 +1670,7 @@ dependencies = [
  "lemnos-contract-accelerometer",
  "lemnos-contract-gyroscope",
  "lemnos-contract-magnetometer",
+ "lemnos-contract-self-test",
  "lemnos-core",
 ]
 
@@ -1817,7 +1843,9 @@ version = "2.0.1-dev"
 dependencies = [
  "lemnos-client",
  "lemnos-contract-indicator",
+ "lemnos-contract-self-test",
  "lemnos-core",
+ "lemnos-driver-board-self-test",
  "lemnos-driver-indicator",
  "lemnos-driver-raw-bus",
  "lemnos-driver-system-flash",
@@ -1981,6 +2009,7 @@ dependencies = [
  "lemnos-driver-a733-video",
  "lemnos-driver-bmi088",
  "lemnos-driver-bmm150",
+ "lemnos-driver-board-self-test",
  "lemnos-driver-coral-loader",
  "lemnos-driver-fan-control",
  "lemnos-driver-g2d",

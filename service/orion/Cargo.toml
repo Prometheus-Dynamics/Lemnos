@@ -40,6 +40,8 @@ orion-config = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev =
 orion-stubs = { git = "https://github.com/Prometheus-Dynamics/Orion.git", rev = "455a956e13e62c97081d66e0e8f3bf2aced1eac8" }
 lemnosd = { path = "../lemnosd" }
 lemnos-fake-devices = { path = "../../testing/crates/fake-devices" }
+lemnos-driver-board-self-test = { path = "../../drivers/board-self-test" }
+lemnos-contract-self-test = { path = "../../contracts/self-test" }
 lemnos-driver-system-slots = { path = "../../drivers/system-slots" }
 lemnos-driver-system-flash = { path = "../../drivers/system-flash" }
 lemnos-driver-system-identity = { path = "../../drivers/system-identity" }

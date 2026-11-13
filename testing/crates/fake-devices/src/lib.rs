@@ -7,9 +7,12 @@ use std::time::Duration;
 use lemnos_contract_accelerometer::Accelerometer;
 use lemnos_contract_gyroscope::Gyroscope;
 use lemnos_contract_magnetometer::Magnetometer;
+
+pub mod probe;
 use lemnos_core::{
     Config, Description, Item, Lifecycle, MethodId, Result, Status, Unit, Vector3, contract, driver,
 };
+pub use probe::FakeProbe;
 
 /// `example.counter/1`: a contract the tools have no code for.
 #[contract("example.counter", version = 1)]

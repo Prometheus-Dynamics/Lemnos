@@ -336,6 +336,12 @@ fn identify(regs: &mut I2cRegisters<&mut I2c>) -> Result<Trim, Fault> {
     Ok(Trim::from_registers(x1y1, z4x2y2, rest))
 }
 
+/// The chip ID, read with nothing written. A self-test reads it this way, so a failed read
+/// leaves the driver's own power-up state as it was.
+pub fn chip_id(bus: &mut I2c, address: u8) -> Result<u8, Fault> {
+    Ok(I2cRegisters::new(bus, address, AddressWidth::Bits8).read8(REG_CHIP_ID)?)
+}
+
 /// Reads the data registers without compensation.
 pub fn read_raw(bus: &mut I2c, address: u8) -> Result<RawSample, Fault> {
     let mut bytes = [0u8; 8];
