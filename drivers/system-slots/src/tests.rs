@@ -291,6 +291,7 @@ impl Board {
         self.slots.seen = Vec::new();
         self.slots.snapshot_written = false;
         self.slots.resolve_at_start();
+        self.slots.record_boot();
         slot
     }
 
@@ -2240,5 +2241,111 @@ fn a_socket_whose_backlog_is_full_is_busy_and_never_blocks_a_look() {
     assert_eq!(
         trial::source_unmet(&sources, &mut probes, &[], SystemTime::now(), at(3)),
         None
+    );
+}
+
+/// The boot history's entries as `lemnos/boots` reads them.
+fn history(board: &Board) -> Vec<lemnos_slot_store::boots::Entry> {
+    lemnos_slot_store::boots::load(board.layout())
+}
+
+#[test]
+fn the_boot_history_records_a_trial_as_on_trial_and_resolves_its_entry_once() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let last = history(&board).last().cloned().unwrap();
+    assert_eq!(
+        (last.slot.as_str(), last.outcome.as_str()),
+        ("b", "on-trial")
+    );
+    let view = View(vec![("dev", Origin::BuiltIn, true, GOOD)]);
+    board.settle_at(0, &view);
+    assert_eq!(board.settle_at(31, &view), None, "confirmed");
+    let last = history(&board).last().cloned().unwrap();
+    assert_eq!(last.outcome, "confirmed");
+}
+
+#[test]
+fn a_boot_writes_one_history_entry_even_when_the_driver_starts_again_within_it() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    board.next_boot(1);
+    let before = history(&board).len();
+    board.slots.record_boot();
+    assert_eq!(history(&board).len(), before, "same boot: no second entry");
+}
+
+#[test]
+fn a_fallen_back_trial_is_recorded_in_the_boot_history_with_its_reason() {
+    let mut board = trial_board();
+    board.baseline("a", "dev builtin\n");
+    // The trial boots and its daemon starts (recorded on trial), then three boots cut before any
+    // driver starts.
+    board.next_boot(1);
+    for _ in 0..3 {
+        board.told.boot();
+    }
+    board.next_boot(4);
+    let entries = history(&board);
+    let trial = entries.iter().find(|e| e.slot == "b").unwrap();
+    assert_eq!(trial.outcome, "fell-back");
+    assert_eq!(
+        entries.last().unwrap().outcome,
+        "unknown",
+        "the default's boot"
+    );
+}
+
+#[test]
+fn the_boot_history_carries_the_reset_reason_the_board_reports_and_the_request_before_it() {
+    let mut board = trial_board();
+    let reset = board.layout().boot.join("reset-reason");
+    fs::write(&reset, "32\n").unwrap();
+    board.slots.reset_reason = Some(reset);
+    lemnos_slot_store::store::replace(
+        &board.layout().state_dir().join("reboot-request"),
+        b"by:7\n",
+    )
+    .unwrap();
+    board.next_boot(1);
+    let last = history(&board).last().cloned().unwrap();
+    assert_eq!(
+        (last.reset.as_str(), last.requested.as_str()),
+        ("32", "by:7")
+    );
+    assert!(
+        !board.layout().state_dir().join("reboot-request").exists(),
+        "the request is taken by the boot it was for"
+    );
+}
+
+#[test]
+fn the_boot_history_keeps_only_the_newest_boots_kept() {
+    let mut board = Board::new("a");
+    board.slots.boots_keep = 2;
+    for n in 1..=4 {
+        board.next_boot(n);
+    }
+    let kept: Vec<u64> = history(&board).iter().map(|e| e.n).collect();
+    assert_eq!(kept.len(), 2, "only the newest two are kept: {kept:?}");
+    assert_eq!(
+        kept.last().copied(),
+        Some(4),
+        "numbered across the trimming: {kept:?}"
+    );
+}
+
+#[test]
+fn the_boots_contract_method_writes_the_history_or_refuses_a_buffer_that_is_too_small() {
+    let mut board = Board::new("a");
+    board.next_boot(1);
+    let mut big = vec![0u8; 4096];
+    let len = board.slots.boots(&mut big).unwrap();
+    let text = std::str::from_utf8(&big[..len]).unwrap();
+    assert!(text.starts_with("1 "), "{text}");
+    assert_eq!(
+        board.slots.boots(&mut [0u8; 1]),
+        Err(Status::BUFFER_TOO_SMALL)
     );
 }

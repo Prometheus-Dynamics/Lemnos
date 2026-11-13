@@ -43,6 +43,11 @@
 //! - `keep`: how many slots housekeeping keeps when the board has no setting of its own, 3 by
 //!   default.
 //! - `running`: the running slot, for a test; read from `board/slots/booted` otherwise.
+//! - `boots_keep`: how many boots the boot history keeps (`lemnos/boots`), 16 by default.
+//! - `reset_reason`: a file holding the board's reset reason, read at each boot for the history;
+//!   unset, the first watchdog's `bootstatus` is read.
+//!   The `system-reboot` driver's `data` (`/data` by default) is where it leaves the request
+//!   the next boot's history names as `requested`.
 //! - The trial settings, which [`trial`] and [`resolve`] apply: `auto_confirm` (true: the board
 //!   confirms a healthy trial itself), `confirm_uptime_s` (30), `confirm_deadline_s` (600),
 //!   `reboot_at_deadline` (true), `trial_attempts` (3, from 1 to 3) and `health`, a list of
@@ -86,6 +91,7 @@ use boot::{BootRecord, FileRecord, Restarter, Tryboot};
 use install::{Failure, Finish, Guard, INCOMING, Install, NO_SPACE};
 pub use install::{SIGNATURE_LEN, Signed, TrustedKey, parse_keys};
 use json::quoted;
+use lemnos_slot_store::boots;
 use lemnos_slot_store::ubi::{self, Ubi, UbiWrite};
 use store::{DEFAULT_KEEP, Layout, Meta, State, read_line, valid_id};
 use trial::{Log, Policy, Resolved, Source};
@@ -135,6 +141,10 @@ pub struct SystemSlots {
     looked: bool,
     /// Whether this boot's device baseline is written.
     snapshot_written: bool,
+    /// How many boots the history keeps (`boots_keep`).
+    boots_keep: usize,
+    /// Where the board's reset reason is read from, when the board file names a file for it.
+    reset_reason: Option<PathBuf>,
 }
 
 fn restarter(cfg: &Config<'_>) -> Restarter {
@@ -187,6 +197,8 @@ impl SystemSlots {
             seen: Vec::new(),
             looked: false,
             snapshot_written: false,
+            boots_keep: boots::DEFAULT_KEEP,
+            reset_reason: None,
         };
         slots.clear_interrupted();
         // What a sender left in `.incoming` belongs to no install now.
@@ -922,6 +934,11 @@ impl Lifecycle for SystemSlots {
             &slots.policy.attempts.to_string(),
         );
         slots.resolve_at_start();
+        if let Some(keep) = cfg.int("boots_keep") {
+            slots.boots_keep = usize::try_from(keep).map_err(|_| Status::INVALID_ARGUMENT)?;
+        }
+        slots.reset_reason = cfg.str("reset_reason").map(PathBuf::from);
+        slots.record_boot();
         Ok(slots)
     }
 
@@ -984,6 +1001,13 @@ impl Slots for SystemSlots {
             return Err(Status::BUSY);
         }
         self.room(size)
+    }
+
+    fn boots(&mut self, into: &mut [u8]) -> Result<usize> {
+        let text = boots::render(&boots::load(&self.layout));
+        let out = into.get_mut(..text.len()).ok_or(Status::BUFFER_TOO_SMALL)?;
+        out.copy_from_slice(text.as_bytes());
+        Ok(text.len())
     }
 
     fn install_file(&mut self, name: &str, pin: bool, keep_old: bool) -> Result<JobId> {
@@ -1122,20 +1146,68 @@ impl Slots for SystemSlots {
 #[driver("system-reboot", provides = [Reboot])]
 pub struct SystemReboot {
     restarter: Restarter,
+    /// The state directory's parent: the data partition, where the boot history reads the request.
+    data: PathBuf,
+    calling: CallerId,
 }
 
 impl Lifecycle for SystemReboot {
     type Needs = SystemRebootNeeds;
+    const TRACKS_CALLERS: bool = true;
 
     fn start(_: SystemRebootNeeds, cfg: &Config<'_>) -> Result<Self> {
         Ok(Self {
             restarter: restarter(cfg),
+            data: PathBuf::from(cfg.str("data").unwrap_or("/data")),
+            calling: CallerId::LOCAL,
         })
+    }
+
+    fn caller(&mut self, caller: CallerId) {
+        self.calling = caller;
     }
 }
 
 impl Reboot for SystemReboot {
     fn reboot(&mut self) -> Result<()> {
+        // The boot history names who asked; the restart goes on either way.
+        let state_dir = self.data.join("board/slots");
+        boot::note_request(&state_dir, self.calling.0);
         self.restarter.run(None).map_err(|_| Status::IO)
+    }
+}
+
+impl SystemSlots {
+    /// Records this boot in the boot history, once per boot: its slot (on trial, when a trial is
+    /// running), the reset reason, and the restart `system.reboot` requested, which is then
+    /// taken away. Called once at start, after the trial's accounting.
+    fn record_boot(&mut self) {
+        let state = self.state();
+        let running = self.running();
+        let slot = if valid_id(&running) {
+            running
+        } else {
+            String::new()
+        };
+        let outcome = if !slot.is_empty() && slot == state.trial {
+            boots::ON_TRIAL
+        } else {
+            "unknown"
+        };
+        let requested = boot::read_request(&self.layout.state_dir());
+        let reset = boot::reset_reason(self.reset_reason.as_deref());
+        if boots::append(
+            &self.layout,
+            &self.boot,
+            &slot,
+            outcome,
+            &reset,
+            &requested,
+            self.boots_keep,
+        )
+        .is_ok()
+        {
+            let _ = fs::remove_file(self.layout.marker(boot::REQUEST_FILE));
+        }
     }
 }
