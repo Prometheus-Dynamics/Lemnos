@@ -17,6 +17,7 @@ pub mod gpio;
 pub mod i2c;
 pub mod inotify;
 pub mod media;
+pub mod mount;
 // Its table macros and checked requests serve uAPI layouts that arrive with later crates.
 #[allow(dead_code, unused_imports, unused_macros)]
 mod ioctl;
@@ -36,6 +37,7 @@ pub mod statfs;
 pub mod time;
 pub mod udmabuf;
 pub mod usbfs;
+pub mod user;
 pub mod v4l2;
 
 pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};

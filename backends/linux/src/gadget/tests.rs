@@ -3,6 +3,7 @@
 //! configfs, a controller or a FunctionFS mount.
 
 use std::collections::VecDeque;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lemnos_core::{Provider, Status};
@@ -67,6 +68,9 @@ fn set() -> Vec<u8> {
 /// A stand-in for configfs, a FunctionFS mount and `/sys/class/udc`, as the image leaves them.
 struct Tree {
     root: PathBuf,
+    config_root: PathBuf,
+    mounts_root: PathBuf,
+    udc_root: PathBuf,
 }
 
 impl Tree {
@@ -77,7 +81,12 @@ impl Tree {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let tree = Self { root };
+        let tree = Self {
+            config_root: root.join("config"),
+            mounts_root: root.join("ffs"),
+            udc_root: root.join("udc"),
+            root,
+        };
         fs::create_dir_all(tree.gadget_dir().join("functions/ffs.udc0")).unwrap();
         fs::create_dir_all(tree.gadget_dir().join("configs")).unwrap();
         fs::create_dir_all(tree.gadget_dir().join("strings")).unwrap();
@@ -97,6 +106,15 @@ impl Tree {
 
     fn mount(&self) -> PathBuf {
         self.root.join("ffs").join(UDC)
+    }
+
+    /// The three roots the setup takes, in this tree.
+    fn roots(&self) -> Roots<'_> {
+        Roots {
+            configfs: &self.config_root,
+            mounts: &self.mounts_root,
+            udc_class: &self.udc_root,
+        }
     }
 
     fn gadget(&self) -> FunctionFsGadget {
@@ -156,11 +174,61 @@ const BIND: u8 = 0;
 const UNBIND: u8 = 1;
 const ENABLE: u8 = 2;
 
+/// Records what the setup asked of the mounts.
+#[derive(Debug, Default)]
+struct Recorder {
+    mounts: Vec<(PathBuf, String)>,
+    unmounts: Vec<PathBuf>,
+}
+
+impl Mounts for Recorder {
+    fn functionfs(&mut self, target: &Path, options: &str) -> io::Result<()> {
+        self.mounts
+            .push((target.to_path_buf(), options.to_string()));
+        Ok(())
+    }
+
+    fn unmount(&mut self, target: &Path) -> io::Result<()> {
+        self.unmounts.push(target.to_path_buf());
+        Ok(())
+    }
+}
+
+/// The owner the tree's own files have, so `chown` can be checked without root.
+fn own() -> Owner {
+    // A directory this test makes, so its owner is the test's own user, whatever owns the
+    // system's temporary directory (root, in CI).
+    let dir = std::env::temp_dir().join(format!("lemnos-gadget-owner-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let meta = fs::metadata(&dir).unwrap();
+    Owner {
+        uid: meta.uid(),
+        gid: meta.gid(),
+    }
+}
+
+fn ncm() -> GadgetFunction {
+    GadgetFunction::Ncm {
+        host: [0x02, 0, 0, 0, 0, 0x01],
+        device: [0x02, 0, 0, 0, 0, 0x02],
+    }
+}
+
+/// The setup, with the functions given, as root would run it.
+fn setup_with(tree: &Tree, owner: Owner, functions: &[GadgetFunction]) -> io::Result<Recorder> {
+    let mut recorder = Recorder::default();
+    prepare(&tree.roots(), UDC, owner, &set(), functions, &mut recorder)?;
+    Ok(recorder)
+}
+
+fn setup(tree: &Tree) -> Recorder {
+    setup_with(tree, own(), &[GadgetFunction::Ffs]).unwrap()
+}
+
 #[test]
-fn enable_writes_the_identity_the_configuration_and_the_function_then_binds() {
+fn setup_writes_the_identity_the_configuration_and_the_function_and_leaves_udc_unbound() {
     let tree = Tree::new();
-    let mut gadget = tree.gadget();
-    gadget.enable(&set()).unwrap();
+    let recorder = setup(&tree);
 
     let expected = [
         ("idVendor", "0x1209\n"),
@@ -178,7 +246,7 @@ fn enable_writes_the_identity_the_configuration_and_the_function_then_binds() {
         ("configs/c.1/MaxPower", "250\n"),
         ("configs/c.1/bmAttributes", "0xc0\n"),
         ("configs/c.1/strings/0x409/configuration", "main\n"),
-        ("UDC", "udc0\n"),
+        ("UDC", "\n"),
     ];
     for (file, value) in expected {
         assert_eq!(tree.attribute(file), value, "{file}");
@@ -187,6 +255,77 @@ fn enable_writes_the_identity_the_configuration_and_the_function_then_binds() {
         fs::read_link(tree.gadget_dir().join("configs/c.1/ffs.udc0")).unwrap(),
         tree.gadget_dir().join("functions/ffs.udc0")
     );
+    assert_eq!(
+        recorder.mounts,
+        [(
+            tree.mount(),
+            format!("uid={},gid={},rmode=0500,fmode=0600", own().uid, own().gid)
+        )],
+        "FunctionFS is mounted once, for the daemon's owner"
+    );
+}
+
+#[test]
+fn setup_makes_the_network_and_console_functions_in_the_order_listed() {
+    let tree = Tree::new();
+    let functions = [GadgetFunction::Acm, ncm(), GadgetFunction::Ffs];
+    setup_with(&tree, own(), &functions).unwrap();
+
+    assert_eq!(
+        tree.entries("configs/c.1"),
+        [
+            "MaxPower",
+            "acm.GS0",
+            "bmAttributes",
+            "ffs.udc0",
+            "ncm.usb0",
+            "strings"
+        ],
+        "every link and attribute of the configuration is there"
+    );
+    assert_eq!(
+        tree.attribute("functions/ncm.usb0/host_addr"),
+        "02:00:00:00:00:01\n"
+    );
+    assert_eq!(
+        tree.attribute("functions/ncm.usb0/dev_addr"),
+        "02:00:00:00:00:02\n"
+    );
+    assert!(tree.gadget_dir().join("functions/acm.GS0").is_dir());
+    assert!(tree.gadget_dir().join("functions/ffs.udc0").is_dir());
+    assert!(
+        fs::read_link(tree.gadget_dir().join("configs/c.1/acm.GS0")).is_ok(),
+        "the serial function is linked in"
+    );
+}
+
+#[test]
+fn setup_hands_udc_to_the_owner_at_mode_0600_and_nothing_else_to_anyone() {
+    let tree = Tree::new();
+    setup(&tree);
+    let meta = fs::metadata(tree.gadget_dir().join("UDC")).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(meta.uid(), own().uid);
+    assert_eq!(meta.gid(), own().gid);
+}
+
+#[test]
+fn setup_refuses_a_controller_that_is_not_there_and_makes_nothing() {
+    let tree = Tree::new();
+    fs::remove_dir_all(tree.root.join("udc").join(UDC)).unwrap();
+    let error = setup_with(&tree, own(), &[GadgetFunction::Ffs]).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+    assert!(tree.entries("configs").is_empty());
+    assert!(!tree.gadget_dir().join("idVendor").exists());
+}
+
+#[test]
+fn enable_writes_descriptors_to_ep0_then_binds_and_touches_no_configfs_directory() {
+    let tree = Tree::new();
+    setup(&tree);
+    let configs_before = tree.entries("configs");
+    let mut gadget = tree.gadget();
+    gadget.enable(&set()).unwrap();
 
     // `ep0` got the descriptors of both speeds without their configuration headers, then
     // every string of the table.
@@ -205,28 +344,44 @@ fn enable_writes_the_identity_the_configuration_and_the_function_then_binds() {
     blob.extend(0x0409u16.to_le_bytes());
     blob.extend(b"Maker\0Thing\x000001\0data\0main\0");
     assert_eq!(fs::read(tree.mount().join("ep0")).unwrap(), blob);
+    assert_eq!(
+        tree.attribute("UDC"),
+        "udc0\n",
+        "bound after the descriptors"
+    );
+    assert_eq!(tree.entries("configs"), configs_before);
 
     assert_eq!(gadget.enable(&set()), Err(ErrorKind::Busy));
 }
 
 #[test]
-fn disable_and_drop_take_the_gadget_apart_and_leave_what_the_image_made() {
+fn enable_before_setup_is_not_found_and_touches_nothing() {
     let tree = Tree::new();
     let mut gadget = tree.gadget();
+    assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound));
+    assert_eq!(tree.attribute("UDC"), "", "not even an unbind");
+    assert!(tree.entries("configs").is_empty());
+}
+
+#[test]
+fn disable_and_drop_unbind_and_leave_the_setup_as_it_made_it() {
+    let tree = Tree::new();
+    setup(&tree);
+    let mut gadget = tree.gadget();
     assert_eq!(gadget.disable(), Ok(()), "never enabled");
-    assert_eq!(tree.attribute("UDC"), "", "and nothing was touched");
+    assert_eq!(tree.attribute("UDC"), "\n", "as the setup left it: unbound");
     gadget.enable(&set()).unwrap();
-    assert!(!tree.is_bare());
+    assert_eq!(tree.attribute("UDC"), "udc0\n");
     gadget.disable().unwrap();
-    assert!(tree.is_bare());
     assert_eq!(tree.attribute("UDC"), "\n", "unbound");
+    assert_eq!(tree.entries("configs"), ["c.1"], "the configuration stays");
     assert_eq!(gadget.next_event(), Err(ErrorKind::Unavailable));
     assert_eq!(gadget.disable(), Ok(()));
 
     gadget.enable(&set()).unwrap();
-    assert_eq!(tree.entries("configs"), ["c.1"]);
     drop(gadget);
-    assert!(tree.is_bare());
+    assert_eq!(tree.attribute("UDC"), "\n", "drop unbinds");
+    assert_eq!(tree.entries("configs"), ["c.1"]);
 }
 
 #[test]
@@ -284,11 +439,17 @@ fn a_missing_piece_is_not_found_and_nothing_is_made() {
 #[test]
 fn a_failure_part_way_undoes_the_steps_before_it() {
     let tree = Tree::new();
+    setup(&tree);
     // The second endpoint file is not there: everything up to it has been done by then.
     fs::remove_file(tree.mount().join("ep02")).unwrap();
     let mut gadget = tree.gadget();
     assert_eq!(gadget.enable(&set()), Err(ErrorKind::NotFound));
-    assert!(tree.is_bare(), "no half-built gadget");
+    assert_eq!(tree.attribute("UDC"), "\n", "no half-built gadget: unbound");
+    assert_eq!(
+        tree.entries("configs"),
+        ["c.1"],
+        "and the setup's configuration as it was"
+    );
     assert_eq!(gadget.next_event(), Err(ErrorKind::Unavailable));
 
     // Once the piece is there the same call goes through.
@@ -298,7 +459,7 @@ fn a_failure_part_way_undoes_the_steps_before_it() {
 }
 
 #[test]
-fn what_an_earlier_run_left_is_removed_before_the_gadget_is_made() {
+fn what_an_earlier_setup_left_is_removed_before_the_gadget_is_made() {
     let tree = Tree::new();
     let dir = tree.gadget_dir();
     fs::create_dir_all(dir.join("configs/c.7/strings/0x407")).unwrap();
@@ -311,15 +472,25 @@ fn what_an_earlier_run_left_is_removed_before_the_gadget_is_made() {
     .unwrap();
     fs::create_dir_all(dir.join("strings/0x407")).unwrap();
     fs::write(dir.join("strings/0x407/product"), "old\n").unwrap();
+    fs::create_dir_all(dir.join("functions/ncm.usb0")).unwrap();
     fs::write(dir.join("UDC"), "udc0\n").unwrap();
 
-    let mut gadget = tree.gadget();
-    gadget.enable(&set()).unwrap();
+    let recorder = setup(&tree);
     assert_eq!(tree.entries("configs"), ["c.1"]);
     assert_eq!(tree.entries("strings"), ["0x409"]);
     assert!(
         dir.join("functions/ffs.udc0").is_dir(),
         "the link went, not what it led to"
+    );
+    assert!(
+        !dir.join("functions/ncm.usb0").exists(),
+        "a function left by an earlier run"
+    );
+    assert_eq!(tree.attribute("UDC"), "\n", "unbound before it was remade");
+    assert_eq!(
+        recorder.unmounts,
+        [tree.mount()],
+        "the old mount is taken down first"
     );
 }
 
@@ -388,6 +559,7 @@ fn streaming(full: u16, high: u16) -> Vec<u8> {
 #[test]
 fn alternate_settings_and_isochronous_endpoints_are_carried() {
     let tree = Tree::new();
+    setup(&tree);
     for file in ["ep83", "ep84", "ep05"] {
         fs::write(tree.mount().join(file), "").unwrap();
     }
@@ -430,6 +602,7 @@ fn alternate_settings_and_isochronous_endpoints_are_carried() {
 #[test]
 fn an_isochronous_out_endpoint_reads_one_interval_at_a_time() {
     let tree = Tree::new();
+    setup(&tree);
     let mut set = streaming(64, 64);
     // Make the isochronous endpoint an OUT one, at both speeds.
     let at: Vec<usize> = set
@@ -471,8 +644,17 @@ fn one_speed_and_no_strings_writes_only_what_the_set_has() {
     body[8] = 0;
     let mut config = configuration(&body);
     config[6] = 0;
-    let mut gadget = tree.gadget();
-    gadget.enable(&[&device[..], &config].concat()).unwrap();
+    let descriptors = [&device[..], &config].concat();
+    let mut recorder = Recorder::default();
+    prepare(
+        &tree.roots(),
+        UDC,
+        own(),
+        &descriptors,
+        &[GadgetFunction::Ffs],
+        &mut recorder,
+    )
+    .unwrap();
     assert!(tree.entries("strings").is_empty());
     assert_eq!(
         tree.entries("configs/c.1"),
@@ -482,19 +664,14 @@ fn one_speed_and_no_strings_writes_only_what_the_set_has() {
         !tree.gadget_dir().join("max_speed").exists(),
         "an attribute the kernel lacks is not made"
     );
+    let mut gadget = tree.gadget();
+    gadget.enable(&descriptors).unwrap();
     let ep0 = fs::read(tree.mount().join("ep0")).unwrap();
     assert_eq!(ep0[8..16], [81, 0, 0, 0, 3, 0, 0, 0], "full speed only");
     assert_eq!(
         ep0[ep0.len() - 16..],
         [2, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     );
-
-    drop(gadget);
-    fs::write(tree.gadget_dir().join("max_speed"), "").unwrap();
-    tree.gadget()
-        .enable(&[&device[..], &config].concat())
-        .unwrap();
-    assert_eq!(tree.attribute("max_speed"), "full-speed\n");
 }
 
 #[test]
@@ -532,6 +709,7 @@ fn a_controller_name_is_one_directory_name_and_nothing_else() {
 #[test]
 fn the_board_provides_a_controller_that_is_there_to_one_owner() {
     let tree = Tree::new();
+    setup(&tree);
     // `/sys/class/udc` and `/sys/kernel/config` under one root, `/dev/usb-ffs` under another.
     let sys = tree.root.join("sys");
     fs::create_dir_all(sys.join("class/udc").join(UDC)).unwrap();
@@ -565,6 +743,7 @@ fn the_board_provides_a_controller_that_is_there_to_one_owner() {
 #[test]
 fn events_requests_and_endpoint_bytes_go_through_the_files() {
     let tree = Tree::new();
+    setup(&tree);
     let mut gadget = tree.gadget();
     gadget.enable(&set()).unwrap();
     let mut data = [0u8; 8];
@@ -638,6 +817,7 @@ fn events_requests_and_endpoint_bytes_go_through_the_files() {
 #[test]
 fn nothing_allocates_once_the_function_is_enabled() {
     let tree = Tree::new();
+    setup(&tree);
     let mut gadget = tree.gadget();
     gadget.enable(&set()).unwrap();
     tree.event(ENABLE);

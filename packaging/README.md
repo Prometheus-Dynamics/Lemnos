@@ -53,8 +53,12 @@ no `--user`, it runs as root and says so.
 `service/lemnosd/src/privilege.rs`, a list of `Step { name, run }`. `run` is `fn(&Context) -> io::Result<()>`,
 and the `Context` holds `board: &BoardFile`, `socket: &Path`, `uid` and `gid` (the ids the daemon will run as,
 so a step can `chown` what it creates). A step runs as root, before the drop, and a failure is an error
-that names the step. The USB gadget's configfs and FunctionFS setup (R1) is planned here, as a new entry after the
-built-in one. Do not add an `ExecStartPre=+` for it: that would be a second privileged path.
+that names the step. The USB gadget's configfs and FunctionFS setup is the second entry, `usb gadget`
+(`service/lemnosd/src/gadget.rs`): it makes each gadget's configfs tree and mounts its FunctionFS with
+the daemon's uid and gid, and chowns each `UDC` attribute to it. The daemon then writes `UDC` and ep0
+after the drop. Do not add an `ExecStartPre=+` for it: that would be a second privileged path.
+`ReadWritePaths=-/sys/kernel/config/usb_gadget` in the unit keeps `UDC` writable under the sandbox; that
+is not verified on a board yet (`testing/board-runs/R1.md`).
 
 The bridge uses the same drop, from its environment: `LEMNOS_ORION_USER`, `LEMNOS_ORION_GROUP` and
 `LEMNOS_ORION_GROUPS` (`service/orion/src/privilege.rs`). It keeps no capability.

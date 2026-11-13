@@ -33,7 +33,7 @@ use lemnos_core::{
 };
 use lemnos_hal::ErrorKind;
 
-pub use gadget::FunctionFsGadget;
+pub use gadget::{FunctionFsGadget, Mounts, Owner, Roots, SystemMounts, prepare as prepare_gadget};
 pub use gpio::GpioLine;
 pub use i2c::I2cBus;
 pub use module::{ModuleClocks, ModuleDma, ModuleInterrupt, ModuleRegisters, ModuleReset};

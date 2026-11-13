@@ -628,3 +628,105 @@ fn keeping_the_gadget_up_allocates_nothing() {
     assert_eq!(count, 0);
     assert_eq!(rig.health(), Health::Ok);
 }
+
+#[test]
+fn the_functions_are_listed_in_order_with_ffs_first_unless_a_line_places_it() {
+    use crate::description::functions;
+    use lemnos_hal::usb_descriptors::GadgetFunction::{Acm, Ffs, Ncm};
+
+    let ncm = "function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02\n";
+    let interfaces = "interface 0xff 0 0 orion-link\nendpoint in bulk\nendpoint out bulk\n";
+    let listed = |text: &str| functions(text).map(|f| f.as_slice().to_vec());
+
+    // No `function` line: FunctionFS alone, as before.
+    assert_eq!(listed(interfaces), Ok(std::vec![Ffs]));
+    // Lines in the order given; `ffs` anywhere it is listed.
+    assert_eq!(
+        listed(&std::format!(
+            "function acm\n{ncm}function ffs\n{interfaces}"
+        )),
+        Ok(std::vec![
+            Acm,
+            Ncm {
+                host: [2, 0, 0, 0, 0, 1],
+                device: [2, 0, 0, 0, 0, 2],
+            },
+            Ffs,
+        ])
+    );
+    // `ffs` not listed but the others are: FunctionFS still comes first.
+    assert_eq!(
+        listed(&std::format!("{ncm}function acm\n{interfaces}")),
+        Ok(std::vec![
+            Ffs,
+            Ncm {
+                host: [2, 0, 0, 0, 0, 1],
+                device: [2, 0, 0, 0, 0, 2],
+            },
+            Acm,
+        ])
+    );
+    // The MAC words may come in either order.
+    assert!(
+        listed(&std::format!(
+            "function ncm device=02:00:00:00:00:02 host=02:00:00:00:00:01\n{interfaces}"
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_function_line_that_is_not_one_of_the_three_is_refused_by_its_line() {
+    use crate::description::functions;
+    let interfaces = "interface 0xff 0 0\nendpoint in bulk\nendpoint out bulk\n";
+    let fault = |line: &str| functions(&std::format!("{line}\n{interfaces}")).err();
+    let good_ncm = "ncm host=02:00:00:00:00:01 device=02:00:00:00:00:02";
+    assert_eq!(fault("function"), Some(Fault::Function(1)));
+    assert_eq!(fault("function rndis"), Some(Fault::Function(1)));
+    assert_eq!(fault("function ffs extra"), Some(Fault::Function(1)));
+    assert_eq!(fault("function acm 1"), Some(Fault::Function(1)));
+    assert_eq!(fault("function ncm"), Some(Fault::Function(1)));
+    assert_eq!(
+        fault("function ncm host=02:00:00:00:00:01"),
+        Some(Fault::Function(1))
+    );
+    assert_eq!(
+        fault("function ncm host=02:00:00:00:00:01 device=02:00:00:00:00:01"),
+        Some(Fault::Function(1)),
+        "one address for both sides"
+    );
+    // A multicast address (low bit of the first octet set) is refused.
+    assert_eq!(
+        fault("function ncm host=03:00:00:00:00:01 device=02:00:00:00:00:02"),
+        Some(Fault::Function(1))
+    );
+    assert_eq!(
+        fault("function ncm host=02:00:00:00:00 device=02:00:00:00:00:02"),
+        Some(Fault::Function(1))
+    );
+    assert_eq!(
+        fault("function ncm host=2:0:0:0:0:1 device=02:00:00:00:00:02"),
+        Some(Fault::Function(1))
+    );
+    assert_eq!(
+        fault("function ncm host=02:00:00:00:00:01 host=02:00:00:00:00:03"),
+        Some(Fault::Function(1))
+    );
+    assert_eq!(
+        fault("function ncm device=02:00:00:00:00:02 derive"),
+        Some(Fault::Function(1))
+    );
+    assert_eq!(
+        fault("function acm\nfunction acm"),
+        Some(Fault::Function(2))
+    );
+    assert_eq!(
+        fault(&std::format!("function {good_ncm}\nfunction {good_ncm}")),
+        Some(Fault::Function(2)),
+        "one NCM"
+    );
+    assert_eq!(
+        functions(&std::format!("function {good_ncm}\n{interfaces}")).map(|f| f.as_slice().len()),
+        Ok(2)
+    );
+}

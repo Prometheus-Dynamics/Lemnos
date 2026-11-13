@@ -405,7 +405,7 @@ impl Lifecycle for UsbGadget {
     const TICKS: bool = true;
 
     fn start(needs: UsbGadgetNeeds, cfg: &Config<'_>) -> Result<Self> {
-        let set = set(cfg)?;
+        let (set, _) = settings(cfg)?;
         let control_timeout_ms = integer(cfg, "control_timeout_ms", 60_000, Some(1_000))?;
         if control_timeout_ms == 0 {
             return Err(Status::INVALID_ARGUMENT);
@@ -488,8 +488,9 @@ fn string<'a>(cfg: &Config<'a>, key: &str) -> Result<Option<&'a str>> {
     }
 }
 
-/// The descriptor set the settings describe.
-fn set(cfg: &Config<'_>) -> Result<Set> {
+/// The descriptor set and the functions the settings describe. The setup that makes the
+/// gadget's configfs tree reads the same settings through this, so the two agree.
+pub fn settings(cfg: &Config<'_>) -> Result<(Set, description::Functions)> {
     let self_powered = match (cfg.get("self_powered"), cfg.bool("self_powered")) {
         (None, _) => false,
         (Some(_), Some(value)) => value,
@@ -513,5 +514,9 @@ fn set(cfg: &Config<'_>) -> Result<Set> {
     let text = std::fs::read_to_string(interfaces).map_err(|_| Status::INVALID_ARGUMENT)?;
     #[cfg(feature = "std")]
     let interfaces = text.as_str();
-    description::build(&identity, interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)
+    let set =
+        description::build(&identity, interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
+    let functions =
+        description::functions(interfaces).map_err(|_: Fault| Status::INVALID_ARGUMENT)?;
+    Ok((set, functions))
 }

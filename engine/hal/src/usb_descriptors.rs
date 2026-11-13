@@ -60,6 +60,21 @@ pub const ENDPOINT_LEN: usize = 7;
 
 const BAD: ErrorKind = ErrorKind::InvalidInput;
 
+/// One function of a gadget's configuration, in the order the board file lists them, which is
+/// the order the configuration links them in. The FunctionFS function is the one whose
+/// descriptors [`UsbDescriptors`] carries. The others are kernel functions the board's
+/// privileged setup makes in configfs, and nothing the daemon writes to ep0 describes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GadgetFunction {
+    /// The FunctionFS function: the link the daemon serves through `ep0` and its endpoint files.
+    Ffs,
+    /// A CDC network function (`ncm.usb0`). `host` is the host side's address, `device` the
+    /// gadget's, each a unicast 6-byte MAC.
+    Ncm { host: [u8; 6], device: [u8; 6] },
+    /// A CDC ACM serial function (`acm.GS0`, the console).
+    Acm,
+}
+
 /// What the device descriptor says, in the host's byte order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsbIdentity {
