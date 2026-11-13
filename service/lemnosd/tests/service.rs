@@ -50,6 +50,8 @@ impl Raw {
 
     fn greet(&mut self) {
         self.send(Frame::Hello {
+            layout: lemnos_wire::LAYOUT_HASH,
+            lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
             version: VERSION,
             name: "raw",
             events: false,
@@ -329,6 +331,8 @@ fn another_protocol_version_is_refused_and_closed() {
     let running = start();
     let mut raw = Raw::connect(&running);
     raw.send(Frame::Hello {
+        layout: lemnos_wire::LAYOUT_HASH,
+        lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
         version: VERSION + 1,
         name: "future",
         events: false,
@@ -569,4 +573,26 @@ fn the_board_files_host_settings_reach_the_service_and_the_rest_keep_its_own() {
     assert_eq!(options.retry_cap, Duration::from_secs(5));
     // Not set in the board file: what the service was started with.
     assert_eq!(options.call_deadline, Duration::from_millis(200));
+}
+
+#[test]
+fn a_client_from_another_lemnos_revision_is_answered_with_the_hosts_layout_and_closed() {
+    let running = start();
+    let mut raw = Raw::connect(&running);
+    raw.send(Frame::Hello {
+        layout: 0x1122_3344_5566_7788,
+        lemnos: lemnos_wire::LemnosName("0.0.1"),
+        // A complete Hello from another revision: the daemon refuses on its layout alone.
+        version: VERSION,
+        name: "old",
+        events: false,
+    });
+    raw.with_next(|frame| {
+        assert!(matches!(
+            frame,
+            Some(Frame::Welcome { layout, lemnos, .. })
+                if layout == lemnos_wire::LAYOUT_HASH && lemnos.0 == lemnos_wire::LEMNOS
+        ));
+    });
+    raw.closes();
 }

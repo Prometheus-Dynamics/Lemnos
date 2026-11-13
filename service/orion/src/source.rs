@@ -296,6 +296,7 @@ mod tests {
         DeviceDescription {
             contracts: vec![OwnedContract {
                 tag: "example.thing/1".to_owned(),
+                hash: 0,
                 methods: vec![
                     method(1, 0, OwnedShape::U32, false),
                     method(2, 1, OwnedShape::U32, false),

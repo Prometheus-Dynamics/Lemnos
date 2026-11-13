@@ -35,6 +35,9 @@ pub struct ContractInfo {
 pub trait Contract {
     const TAG: Tag;
     const INFO: ContractInfo;
+    /// The contract's encoding hash, [`layout::contract_hash`](crate::layout::contract_hash) of
+    /// [`INFO`](Self::INFO). A device says its hash in its description; a typed client checks it.
+    const HASH: u64;
 }
 
 /// Carries a contract's calls to wherever the device is.

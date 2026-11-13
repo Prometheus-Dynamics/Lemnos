@@ -495,6 +495,24 @@ it as a package, do what `engine/package/tests` does: build the `cdylib`, load i
 every kind of resource from a package against the simulated board, and `tests/merged_driver.rs`
 runs one driver both ways.
 
+## What moves a contract's hash
+
+Every `#[contract]` has an encoding hash, `Contract::HASH`, computed at compile time from the
+contract's tag, its method numbers and names, and each method's parameter and result shapes. A
+device says its contracts' hashes in its description, and a typed client refuses a device whose
+hash differs from its own (see [`client.md`](client.md#versions-at-connect)). The hash is generated,
+so you never update it by hand, but you should know what changes it:
+
+- adding, renaming or renumbering a method, or changing whether it fills a buffer or starts a job;
+- a parameter or result type whose shape changes. For an `Encode` derive, that is a field added,
+  removed, renamed or retyped, in any struct the method takes or returns, however deeply nested.
+
+A change in either means a client built from the old contract is refused, not misread. Bump the
+contract's `version` when the change is one an old client must not be used for, as the contract
+macro's `version` says; the hash is the check that a client was built against the same encoding.
+
+Nothing else moves it: doc comments, method bodies, and the driver's own state don't.
+
 ## Checklist
 
 - The driver's contract exists in `contracts/`. A driver provides only contracts it can serve.

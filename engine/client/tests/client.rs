@@ -8,7 +8,9 @@ use lemnos_client::{
     Client, DeviceEntry, DeviceHealth, DeviceState, Error, Incoming, PackageEntry, PackageMode,
     Session, follow,
 };
-use lemnos_core::{Result, Status, contract};
+use lemnos_core::{
+    Contract, ContractInfo, MethodInfo, Param, Result, Shape, Status, Tag, contract,
+};
 
 #[contract("example.counter", version = 1)]
 pub trait Echo {
@@ -168,6 +170,71 @@ fn no_service_is_an_error_from_connect() {
         Client::connect(dir.0.join("sock"), "t").unwrap_err(),
         Error::Disconnected
     );
+}
+
+#[test]
+fn a_service_from_another_lemnos_revision_is_refused_at_connect() {
+    let host = FakeHost::start();
+    host.control
+        .welcome_layout
+        .store(0xdead_beef_0bad_f00d, Ordering::SeqCst);
+    let error = Client::connect(&host.path, "t").unwrap_err();
+    assert_eq!(
+        error,
+        Error::LayoutMismatch {
+            ours: lemnos_wire::LAYOUT_HASH,
+            theirs: 0xdead_beef_0bad_f00d,
+            theirs_lemnos: lemnos_wire::LEMNOS.to_string(),
+        }
+    );
+    let text = error.to_string();
+    assert!(text.contains("0xdeadbeef0badf00d"), "{text}");
+    assert!(
+        text.contains(&format!("{:#018x}", lemnos_wire::LAYOUT_HASH)),
+        "{text}"
+    );
+    assert!(text.contains("same Lemnos revision"), "{text}");
+    assert_eq!(lemnos_core::Status::from(error), Status::VERSION_MISMATCH);
+}
+
+#[test]
+fn a_typed_contract_whose_encoding_differs_on_the_device_is_refused() {
+    const ECHO: ContractInfo = <dyn Echo as Contract>::INFO;
+    // The same contract with `add` taking a u64: the device's hash moves, and the typed client
+    // must refuse it before anything is called.
+    const WIDER: ContractInfo = ContractInfo {
+        tag: Tag::new(TAG),
+        methods: &[MethodInfo {
+            id: 1,
+            name: "add",
+            params: &[Param {
+                name: "value",
+                shape: Shape::U64,
+            }],
+            returns: Shape::U32,
+            has_out_buffer: false,
+            job: false,
+        }],
+    };
+    let host = FakeHost::start();
+    *host.control.provides.lock().unwrap() = Some(&[WIDER]);
+    let client = Client::connect(&host.path, "t").unwrap();
+    let Err(error) = client.open::<dyn Echo>("") else {
+        panic!("a contract laid out differently must not open");
+    };
+    assert_eq!(
+        error,
+        Error::ContractMismatch {
+            contract: TAG.to_string(),
+            ours: <dyn Echo as Contract>::HASH,
+            theirs: lemnos_core::layout::contract_hash(&WIDER),
+        }
+    );
+    assert!(error.to_string().contains(TAG), "{error}");
+    // The same contract, laid out the same, opens.
+    *host.control.provides.lock().unwrap() = Some(&[ECHO]);
+    let mut echo = client.open::<dyn Echo>("").unwrap();
+    assert_eq!(echo.add(7).unwrap(), 7);
 }
 
 #[test]

@@ -331,6 +331,8 @@ impl RawClient {
             features: 0,
         };
         client.send(&Frame::Hello {
+            layout: lemnos_wire::LAYOUT_HASH,
+            lemnos: lemnos_wire::LemnosName(lemnos_wire::LEMNOS),
             version: VERSION,
             name: "raw",
             events: false,

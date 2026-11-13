@@ -48,58 +48,60 @@ impl WordMemory for Box<[AtomicU64]> {
     }
 }
 
-/// `b"LMNSRING"`, stored in the first word.
-pub const MAGIC: u64 = u64::from_le_bytes(*b"LMNSRING");
-/// The ring's layout version, stored in the second word.
-pub const LAYOUT_VERSION: u64 = 1;
-/// The most buffers one stream has.
-pub const MAX_BUFFERS: u32 = 4096;
-/// The largest buffer.
-pub const MAX_BUFFER_BYTES: u32 = 1 << 28;
-/// The most buffer memory one stream maps.
-pub const MAX_POOL_BYTES: u64 = 1 << 34;
-/// The most jobs waiting at once.
-pub const MAX_JOB_SLOTS: u32 = 64;
-/// The largest job.
-pub const MAX_JOB_BYTES: u32 = 4096;
-/// Buffers start on multiples of this inside the buffer descriptor.
-pub const BUFFER_ALIGN: u64 = 4096;
-/// Words in one frame slot.
-pub const FRAME_WORDS: usize = 5;
-
+constants! {
+    /// `b"LMNSRING"`, stored in the first word.
+    pub const MAGIC: u64 = u64::from_le_bytes(*b"LMNSRING");
+    /// The ring's layout version, stored in the second word.
+    pub const LAYOUT_VERSION: u64 = 1;
+    /// The most buffers one stream has.
+    pub const MAX_BUFFERS: u32 = 4096;
+    /// The largest buffer.
+    pub const MAX_BUFFER_BYTES: u32 = 1 << 28;
+    /// The most buffer memory one stream maps.
+    pub const MAX_POOL_BYTES: u64 = 1 << 34;
+    /// The most jobs waiting at once.
+    pub const MAX_JOB_SLOTS: u32 = 64;
+    /// The largest job.
+    pub const MAX_JOB_BYTES: u32 = 4096;
+    /// Buffers start on multiples of this inside the buffer descriptor.
+    pub const BUFFER_ALIGN: u64 = 4096;
+    /// Words in one frame slot.
+    pub const FRAME_WORDS: usize = 5;
+    /// The stream is running.
+    pub const STATE_OPEN: u64 = 0;
+    /// The stream ended normally.
+    pub const STATE_CLOSED: u64 = 1;
+    /// The stream ended because the consumer broke the rules.
+    pub const STATE_FAULT: u64 = 2;
+}
 /// Where things are, in words from the start of the ring.
 pub mod offsets {
-    pub const MAGIC: usize = 0;
-    pub const VERSION: usize = 1;
-    pub const BUFFERS: usize = 2;
-    pub const BUFFER_BYTES: usize = 3;
-    pub const FRAME_SLOTS: usize = 4;
-    pub const JOB_SLOTS: usize = 5;
-    pub const JOB_BYTES: usize = 6;
-    /// [`super::STATE_OPEN`], [`super::STATE_CLOSED`] or [`super::STATE_FAULT`]. Host writes.
-    pub const STATE: usize = 8;
-    /// Frames published. Producer writes.
-    pub const FRAMES_HEAD: usize = 16;
-    /// Frames taken. Consumer writes.
-    pub const FRAMES_TAIL: usize = 24;
-    /// Buffers returned. Consumer writes.
-    pub const RETURNS_HEAD: usize = 32;
-    /// Returned buffers collected. Producer writes.
-    pub const RETURNS_TAIL: usize = 40;
-    /// Jobs posted. Consumer writes.
-    pub const JOBS_HEAD: usize = 48;
-    /// Jobs collected. Producer writes.
-    pub const JOBS_TAIL: usize = 56;
-    /// The frame slots start here.
-    pub const FRAMES: usize = 64;
+    constants! {
+        pub const MAGIC: usize = 0;
+        pub const VERSION: usize = 1;
+        pub const BUFFERS: usize = 2;
+        pub const BUFFER_BYTES: usize = 3;
+        pub const FRAME_SLOTS: usize = 4;
+        pub const JOB_SLOTS: usize = 5;
+        pub const JOB_BYTES: usize = 6;
+        /// [`super::STATE_OPEN`], [`super::STATE_CLOSED`] or [`super::STATE_FAULT`]. Host writes.
+        pub const STATE: usize = 8;
+        /// Frames published. Producer writes.
+        pub const FRAMES_HEAD: usize = 16;
+        /// Frames taken. Consumer writes.
+        pub const FRAMES_TAIL: usize = 24;
+        /// Buffers returned. Consumer writes.
+        pub const RETURNS_HEAD: usize = 32;
+        /// Returned buffers collected. Producer writes.
+        pub const RETURNS_TAIL: usize = 40;
+        /// Jobs posted. Consumer writes.
+        pub const JOBS_HEAD: usize = 48;
+        /// Jobs collected. Producer writes.
+        pub const JOBS_TAIL: usize = 56;
+        /// The frame slots start here.
+        pub const FRAMES: usize = 64;
+    }
 }
-
-/// The stream is running.
-pub const STATE_OPEN: u64 = 0;
-/// The stream ended normally.
-pub const STATE_CLOSED: u64 = 1;
-/// The stream ended because the consumer broke the rules.
-pub const STATE_FAULT: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RingError {

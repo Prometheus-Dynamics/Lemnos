@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use lemnos_core::Status;
 use lemnos_wire::ring::Layout;
 use lemnos_wire::{
-    DeviceDescription, Frame, MAX_QUEUED_BYTES, Planes, VERSION, append, decode,
-    decode_description, feature, handle_descriptors, health, package_mode, state,
+    DeviceDescription, Frame, LAYOUT_HASH, LEMNOS, LemnosName, MAX_QUEUED_BYTES, Planes, VERSION,
+    WireError, append, decode, decode_description, feature, handle_descriptors, health,
+    package_mode, state,
 };
 
 use crate::connection::{Connection, Taker};
@@ -357,6 +358,7 @@ impl Shared {
                 version,
                 features,
                 host,
+                ..
             } => {
                 if version != VERSION {
                     self.rejected = Some(Error::Version {
@@ -700,6 +702,8 @@ impl Session {
         }
         let mut connection = Connection::new(stream);
         let hello = Frame::Hello {
+            layout: LAYOUT_HASH,
+            lemnos: LemnosName(LEMNOS),
             version: VERSION,
             name: &self.name,
             events: self.events_wanted,
@@ -733,6 +737,15 @@ impl Session {
         loop {
             match decode(&rx[*start..*end]) {
                 Ok(None) => return Some(count),
+                Err(WireError::LayoutMismatch(peer)) => {
+                    self.shared.rejected = Some(Error::LayoutMismatch {
+                        ours: LAYOUT_HASH,
+                        theirs: peer.layout,
+                        theirs_lemnos: peer.lemnos().to_string(),
+                    });
+                    self.shared.close = true;
+                    return None;
+                }
                 Err(_) => return None,
                 Ok(Some((frame, used))) => {
                     *start += used;

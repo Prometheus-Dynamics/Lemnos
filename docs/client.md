@@ -95,6 +95,22 @@ What a client can do:
   list. An event may repeat a state the client has; the newest one is current. Up to 64 events
   queue. Past that the oldest go, so a client that stops reading should list the devices again.
 
+### Versions at connect
+
+The first frame each side sends carries the build's layout hash and its Lemnos version (see
+[`wire.md`](wire.md#the-handshake)). A client that finds the service's hash different from its own
+refuses at once with `Error::LayoutMismatch`, in every form: `Client::connect`, `Session::connect`,
+`AsyncClient::connect`, and the C API, which returns `VERSION_MISMATCH` with the same text. The text
+names both layout hashes and both Lemnos versions. The client and the service must come from the
+same Lemnos revision: a client built from one revision can't talk to a daemon built from another,
+and that is what the refusal is for. Nothing else is checked for a refused connection.
+
+A typed client (`Client::open::<C>`) also checks the contract's encoding hash, once, when it opens:
+a device whose argument or result types differ from the client's is refused with
+`Error::ContractMismatch`, and nothing is called on it. That read of the description is the only
+extra cost of the check. Calls on the open handle, and every other path, pay nothing for it: the
+steady-state calls allocate nothing, which `engine/client/tests/alloc.rs` measures.
+
 The connection looks after itself. If the daemon restarts, the client reconnects, subscribes again
 and finds its handles again by name and tag. A call made while the daemon is away fails with
 `Disconnected`; the next one after it is back works. `Client::connecting` returns at once and
@@ -113,7 +129,7 @@ function, struct and code is there with its rule.
 
 | Function | What it does |
 |---|---|
-| `lemnos_version`, `lemnos_check_version` | The handshake. Call `lemnos_check_version` first |
+| `lemnos_version`, `lemnos_check_version` | The ABI handshake. Call `lemnos_check_version` first |
 | `lemnos_client_open`, `lemnos_client_close` | Connect and disconnect |
 | `lemnos_device_count`, `lemnos_device_info`, `lemnos_device_text` | The device list |
 | `lemnos_open` | Open a contract on a device, by tag |

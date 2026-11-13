@@ -30,8 +30,8 @@ closes the connection on a larger length, without reading it.
 
 | Kind | Name | Fields | Direction |
 |---|---|---|---|
-| 1 | Hello | version u16, name str, events bool | to host |
-| 2 | Welcome | version u16, features u64, host str | to client |
+| 1 | Hello | layout u64, lemnos name (32 bytes), version u16, name str, events bool | to host |
+| 2 | Welcome | layout u64, lemnos name (32 bytes), version u16, features u64, host str | to client |
 | 3 | List | id u32 | to host |
 | 4 | Device | id u32, device u32, name str, driver str, tags str, state u8, health u8, reason str, link str | to client |
 | 5 | ListDone | id u32 | to client |
@@ -91,12 +91,54 @@ reads them, and no field names a kind of device.
 clock: `CLOCK_MONOTONIC` on Linux, the same clock as the kernel's `ktime_get_ns()`, so it compares
 directly with a client's own `clock_gettime(CLOCK_MONOTONIC)`.
 
+## The handshake
+
+The first frame each side sends is Hello from the client and Welcome from the host. Both begin
+with the same fixed-size prefix, 42 bytes, and nothing else:
+
+```text
+offset  size  field
+6       8     layout: the layout hash of the sender's build (see below)
+14      32    lemnos: the sender's Lemnos version, UTF-8, NUL-padded
+46      2     version: the protocol version (1)
+```
+
+A reader checks `layout` first, then reads `lemnos`, and compares nothing else until both have
+been read. A `layout` that is not its own is an error at once: the reader closes the connection,
+whatever follows the prefix, and never decodes the rest. It can read the peer's Lemnos version
+from the same prefix to say which revision it is. Only the prefix's place is fixed for every
+version, so a later change to the rest of Hello or Welcome can't make this check misread a peer.
+
+A host that refuses a Hello for its layout still answers with its own Welcome, with the same
+prefix, and then closes. So the client learns the host's layout and Lemnos version and can name
+both.
+
+**The layout hash** is a 64-bit FNV-1a computed at compile time, not a number kept by hand. It
+folds the frame table (every kind, name, field name and field shape, in order), the constants this
+document names (`MAX_FRAME`, the handle and plane limits, the feature bits, the state, health and
+package-mode values, the length prefix), and the stream ring's layout constants. Each is declared
+once, and the encoder, decoder and hash are generated from that one declaration, so a change to
+the layout moves the hash. The value this build computes is:
+
+`layout hash: 0xf16439dd434fb7c8`
+
+The hash does not include the Lemnos version string. Two builds with the same layout interoperate
+whatever their Lemnos versions; a build with another layout is refused.
+
+What a client sees when the layouts differ: the connection is refused at connect with
+`LayoutMismatch`, which names both layout hashes and both Lemnos versions and says the client and
+the service must come from the same Lemnos revision. The C API returns `VERSION_MISMATCH` with that
+text. A client that connects to a host from before this prefix existed sees a refusal from the host,
+not a layout error, because that host reads the first bytes of Hello as its version and refuses
+them.
+
 ## Rules
 
 Each of these closes a way the earlier protocol could go wrong.
 
 1. **The version is checked.** The first frame is Hello. A host answers a different version with
-   Refusal and closes. A client refuses a different version in Welcome.
+   Refusal and closes. A client refuses a different version in Welcome. The layout is checked
+   before the version: see The handshake.
 2. **Every request gets an answer**, matched by `id`: its own reply or a Refusal. Unsubscribe,
    SetPower, StreamClose and JobCancel have no reply of their own and are answered with an empty Reply. Nothing is ignored in
    silence. `id` 0 is allowed and is not special.
@@ -319,8 +361,8 @@ as its contract says, and the stream stays open.
 
 ## Description
 
-The `bytes` of a Description, in order: a `u16` contract count, then for each its tag (str), a `u16`
-method count, and for each method its id u16, name str, a `u16` parameter count with each parameter's
+The `bytes` of a Description, in order: a `u16` contract count, then for each its tag (str), its
+encoding hash (u64, see Contract hashes below), a `u16` method count, and for each method its id u16, name str, a `u16` parameter count with each parameter's
 name str and shape, its returned shape and a has-out-buffer bool. Then a `u16` item count, and for
 each item its kind u8 (0 value, 1 control, 2 action), name str, unit str, exponent i8, min and max
 (each a presence bool, then an i64 when present), contract u8, method u16, and field (a presence
@@ -328,6 +370,21 @@ bool, then a str when present). Then, appended after the first form, a `u16` cou
 and for each its contract u8 and method u16: those are started with CallJob. A host from before
 job methods ends at the items, and a reader takes that as no job methods. A job method that names
 no method above makes the description malformed.
+
+### Contract hashes
+
+Each contract in a Description carries its encoding hash: a 64-bit FNV-1a over the tag, every
+method's number and name, each parameter's name and shape, the result's shape, and whether it fills
+a buffer or starts a job. The shapes are the ones the argument and result types declare, so the
+hash moves when a method is added, renamed or renumbered, or when an argument or result struct
+gains, loses, renames or retypes a field. It is computed, never written by hand: the `#[contract]`
+macro and the `Encode` derive generate it.
+
+A typed client checks it when it opens a contract (`Client::open`), reading the device's
+description once. A device whose hash differs is refused with `ContractMismatch`, which names the
+contract and both hashes; nothing is called on it. Calls after the open are not checked again. A
+device that doesn't list the contract's tag is not refused by the check (the open itself already
+found the tag).
 
 A shape is a u8 code: 0 unit, 1 bool, 2 u8, 3 u16, 4 u32, 5 u64, 6 i8, 7 i16, 8 i32, 9 i64, 10 f32,
 11 f64, 12 str, 13 bytes, 14 option (followed by its shape), 15 array (a u32 length, then its shape),
@@ -358,20 +415,20 @@ Each vector is one complete frame.
 
 ### hello
 
-`Hello { version: 1, name: "tool", events: true }`
+`Hello { layout: 0xf16439dd434fb7c8, lemnos: "1.0.0", version: 1, name: "tool", events: true }`
 
 <!-- vector: hello -->
 ```hex
-0d 00 00 00 01 00 01 00 04 00 00 00 74 6f 6f 6c 01
+35 00 00 00 01 00 c8 b7 4f 43 dd 39 64 f1 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 04 00 00 00 74 6f 6f 6c 01
 ```
 
 ### welcome
 
-`Welcome { version: 1, features: 0, host: "h" }`
+`Welcome { layout: 0xf16439dd434fb7c8, lemnos: "1.0.0", version: 1, features: 0, host: "h" }`
 
 <!-- vector: welcome -->
 ```hex
-11 00 00 00 02 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68
+39 00 00 00 02 00 c8 b7 4f 43 dd 39 64 f1 31 2e 30 2e 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 00 68
 ```
 
 ### list

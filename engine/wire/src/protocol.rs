@@ -8,44 +8,79 @@ pub use description::{
     decode_description, encode_description,
 };
 
-use lemnos_core::{Decode, Encode, Reader, Writer};
+use lemnos_core::{Decode, Encode, Reader, Shape, Status, Writer};
 
-pub const VERSION: u16 = 1;
-/// The largest frame, header included. A sender refuses to build a larger one
-/// and a receiver closes the connection on one.
-pub const MAX_FRAME: usize = 1 << 20;
+use crate::hash;
+
+/// The Lemnos version this build was compiled from, as its handshake carries it.
+pub const LEMNOS: &str = env!("CARGO_PKG_VERSION");
+
+constants! {
+    /// The protocol's version. A host answers any other version with a refusal.
+    pub const VERSION: u16 = 1;
+    /// The largest frame, header included. A sender refuses to build a larger one and a receiver
+    /// closes the connection on one.
+    pub const MAX_FRAME: usize = 1 << 20;
+    /// Bytes of a Lemnos version string in a handshake, NUL-padded.
+    pub const NAME_BYTES: usize = 32;
+    /// The most buffer descriptors a stream may have when each buffer, or each plane of a buffer,
+    /// is its own descriptor. They, and the ring's and the doorbell's, travel in one `SCM_RIGHTS`
+    /// message, which holds 253.
+    pub const MAX_HANDLE_BUFFERS: u32 = 128;
+    /// The most planes a buffer may have (`VIDEO_MAX_PLANES` of V4L2).
+    pub const MAX_PLANES: u32 = 8;
+    /// Bytes one plane's length takes in StreamHandles' `plane_bytes`.
+    pub const PLANE_LENGTH_BYTES: usize = 4;
+    /// The descriptors that come before the buffers' in StreamHandles: the ring and the doorbell.
+    pub const HANDLE_DESCRIPTORS_BEFORE: u32 = 2;
+    /// Bytes before a frame's kind that say how long it is.
+    pub const LENGTH_BYTES: usize = 4;
+}
 /// Answers queued for one client before that client is closed.
 pub const MAX_QUEUED_BYTES: usize = 4 << 20;
 /// What a host can do beyond the first form of this version, as bits of `features` in Welcome.
 /// A client uses what a bit stands for only when the host set it; a host that doesn't know a bit
 /// leaves it clear.
 pub mod feature {
-    /// The host takes StreamOpenHandles and may answer it with StreamHandles: a stream whose
-    /// buffers are one descriptor each.
-    pub const STREAM_HANDLES: u64 = 1;
-    /// The host takes Packages, and answers it with what became of its driver packages.
-    pub const PACKAGES: u64 = 2;
-    /// The host takes CallJob and JobCancel: long jobs, with their progress and end sent to
-    /// whoever started them.
-    pub const JOBS: u64 = 4;
-    /// Every bit this build knows.
-    pub const ALL: u64 = STREAM_HANDLES | PACKAGES | JOBS;
+    constants! {
+        /// The host takes StreamOpenHandles and may answer it with StreamHandles: a stream whose
+        /// buffers are one descriptor each.
+        pub const STREAM_HANDLES: u64 = 1;
+        /// The host takes Packages, and answers it with what became of its driver packages.
+        pub const PACKAGES: u64 = 2;
+        /// The host takes CallJob and JobCancel: long jobs, with their progress and end sent to
+        /// whoever started them.
+        pub const JOBS: u64 = 4;
+        /// Every bit this build knows.
+        pub const ALL: u64 = STREAM_HANDLES | PACKAGES | JOBS;
+    }
 }
 
-/// The most buffer descriptors a stream may have when each buffer, or each plane of a buffer,
-/// is its own descriptor. They, and the ring's and the doorbell's, travel in one `SCM_RIGHTS`
-/// message, which holds 253.
-pub const MAX_HANDLE_BUFFERS: u32 = 128;
-/// The most planes a buffer may have (`VIDEO_MAX_PLANES` of V4L2).
-pub const MAX_PLANES: u32 = 8;
-/// Bytes one plane's length takes in StreamHandles' `plane_bytes`.
-pub const PLANE_LENGTH_BYTES: usize = 4;
-/// The descriptors that come before the buffers' in StreamHandles: the ring and the doorbell.
-pub const HANDLE_DESCRIPTORS_BEFORE: u32 = 2;
-
-/// Bytes before a frame's kind that say how long it is.
-const LENGTH_BYTES: usize = 4;
 const HEADER: usize = LENGTH_BYTES + 2;
+
+/// The kinds of the two handshake frames. Their first fields keep their place in every version:
+/// see [`Build`].
+const HELLO: u16 = 1;
+const WELCOME: u16 = 2;
+
+/// The build a handshake frame came from: its layout hash and its Lemnos version. A Hello and a
+/// Welcome begin with these, in the same place in every version, and they are checked before
+/// anything else in the frame is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Build {
+    /// The layout hash the peer was built with.
+    pub layout: u64,
+    name: [u8; NAME_BYTES],
+}
+
+impl Build {
+    /// The peer's Lemnos version, as it wrote it. Empty when it wrote none it could read.
+    #[must_use]
+    pub fn lemnos(&self) -> &str {
+        let end = self.name.iter().position(|&b| b == 0).unwrap_or(NAME_BYTES);
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireError {
@@ -56,6 +91,9 @@ pub enum WireError {
     UnknownKind(u16),
     /// The value doesn't fit in a frame. Nothing was sent.
     TooLarge,
+    /// The peer's handshake carries another layout hash, so it was built from another Lemnos
+    /// revision. Nothing after the handshake prefix was read. The connection must be closed.
+    LayoutMismatch(Build),
 }
 
 impl core::fmt::Display for WireError {
@@ -65,6 +103,12 @@ impl core::fmt::Display for WireError {
             Self::Malformed => f.write_str("malformed frame"),
             Self::UnknownKind(kind) => write!(f, "unknown frame kind {kind}"),
             Self::TooLarge => f.write_str("too large for one frame"),
+            Self::LayoutMismatch(peer) => write!(
+                f,
+                "the other side was built from another Lemnos revision (Lemnos {}, wire layout {:#018x})",
+                peer.lemnos(),
+                peer.layout
+            ),
         }
     }
 }
@@ -73,16 +117,20 @@ impl std::error::Error for WireError {}
 
 /// How a device stands, as carried on the wire.
 pub mod state {
-    pub const RUNNING: u8 = 0;
-    pub const BACKOFF: u8 = 1;
-    pub const OFF: u8 = 2;
+    constants! {
+        pub const RUNNING: u8 = 0;
+        pub const BACKOFF: u8 = 1;
+        pub const OFF: u8 = 2;
+    }
 }
 
 /// How a device's health is carried on the wire.
 pub mod health {
-    pub const OK: u8 = 0;
-    pub const DEGRADED: u8 = 1;
-    pub const FAILED: u8 = 2;
+    constants! {
+        pub const OK: u8 = 0;
+        pub const DEGRADED: u8 = 1;
+        pub const FAILED: u8 = 2;
+    }
 }
 
 /// Text appended to a frame after the frame's first form. A peer from before the addition
@@ -107,14 +155,42 @@ impl<'a> Decode<'a> for Appended<'a> {
     }
 }
 
+/// The Lemnos version string in a handshake: [`NAME_BYTES`] bytes, NUL-padded, so the handshake's
+/// prefix is the same size in every version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LemnosName<'a>(pub &'a str);
+
+impl Encode for LemnosName<'_> {
+    const SHAPE: Shape = Shape::Array(&Shape::U8, NAME_BYTES as u32);
+    fn encode(&self, out: &mut Writer<'_>) -> lemnos_core::Result<()> {
+        if self.0.len() > NAME_BYTES {
+            return Err(Status::INVALID_ARGUMENT);
+        }
+        let mut padded = [0u8; NAME_BYTES];
+        padded[..self.0.len()].copy_from_slice(self.0.as_bytes());
+        out.write(&padded)
+    }
+}
+
+impl<'a> Decode<'a> for LemnosName<'a> {
+    fn decode(from: &mut Reader<'a>) -> lemnos_core::Result<Self> {
+        let bytes = from.take(NAME_BYTES)?;
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(NAME_BYTES);
+        let name = core::str::from_utf8(&bytes[..end]).map_err(|_| Status::INVALID_ARGUMENT)?;
+        Ok(Self(name))
+    }
+}
+
 /// Which driver packages a host runs, as carried on the wire.
 pub mod package_mode {
-    /// None: no package directory is configured.
-    pub const OFF: u8 = 0;
-    /// Only packages signed by a key the host trusts.
-    pub const SIGNED: u8 = 1;
-    /// Any package in its directory.
-    pub const OPEN: u8 = 2;
+    constants! {
+        /// None: no package directory is configured.
+        pub const OFF: u8 = 0;
+        /// Only packages signed by a key the host trusts.
+        pub const SIGNED: u8 = 1;
+        /// Any package in its directory.
+        pub const OPEN: u8 = 2;
+    }
 }
 
 macro_rules! frames {
@@ -143,6 +219,24 @@ macro_rules! frames {
             }
         }
 
+        impl<'a> Frame<'a> {
+            /// Folds the frame table into a layout hash: each kind, name, field name and field
+            /// shape, in the order the table declares them. The encoder and decoder above come
+            /// from the same tokens, so a change to any of them moves the hash.
+            pub(crate) const fn fold_frames(mut hash: u64) -> u64 {
+                $(
+                    hash = crate::hash::word(hash, $kind);
+                    hash = crate::hash::text(hash, stringify!($name));
+                    $(
+                        hash = crate::hash::text(hash, stringify!($field));
+                        hash = lemnos_core::layout::shape(hash, &<$ty as Encode>::SHAPE);
+                    )*
+                    hash = crate::hash::word(hash, u64::MAX);
+                )*
+                hash
+            }
+        }
+
         fn decode_payload<'a>(kind: u16, from: &mut Reader<'a>) -> Result<Frame<'a>, WireError> {
             match kind {
                 $($kind => Ok(Frame::$name {
@@ -155,8 +249,13 @@ macro_rules! frames {
 }
 
 frames! {
-    1 Hello { version: u16, name: &'a str, events: bool }
-    2 Welcome { version: u16, features: u64, host: &'a str }
+    /// The handshake, sent first. Its prefix is the layout hash, then the Lemnos version, both
+    /// fixed in size: a peer checks them before reading anything after. Then the protocol
+    /// `version`, which is compared only once the layouts agree.
+    1 Hello { layout: u64, lemnos: LemnosName<'a>, version: u16, name: &'a str, events: bool }
+    /// The host's answer to Hello, with the same prefix. A host that refuses a Hello for its
+    /// layout still answers with this, so the client can say which revisions differ, and closes.
+    2 Welcome { layout: u64, lemnos: LemnosName<'a>, version: u16, features: u64, host: &'a str }
     3 List { id: u32 }
     4 Device {
         id: u32,
@@ -465,8 +564,45 @@ pub fn decode(buf: &[u8]) -> Result<Option<(Frame<'_>, usize)>, WireError> {
     };
     let mut from = Reader::new(frame);
     let kind = u16::decode(&mut from).map_err(|_| WireError::Malformed)?;
+    if kind == HELLO || kind == WELCOME {
+        check_handshake(from)?;
+    }
     Ok(Some((decode_payload(kind, &mut from)?, total)))
 }
+
+/// Checks a handshake's prefix, the layout hash and the Lemnos version, before anything after it
+/// is read. A peer built from another revision is refused here whatever it sends after.
+fn check_handshake(mut from: Reader<'_>) -> Result<(), WireError> {
+    let layout = u64::decode(&mut from).map_err(|_| WireError::Malformed)?;
+    let name = LemnosName::decode(&mut from).map_err(|_| WireError::Malformed)?;
+    if layout == LAYOUT_HASH {
+        return Ok(());
+    }
+    let mut bytes = [0u8; NAME_BYTES];
+    bytes[..name.0.len()].copy_from_slice(name.0.as_bytes());
+    Err(WireError::LayoutMismatch(Build {
+        layout,
+        name: bytes,
+    }))
+}
+
+/// The layout hash of this build: FNV-1a over the frame table (kinds, names, field names and
+/// shapes), the constants of the protocol, its features and states, and the ring's layout. It is
+/// computed at compile time from the same definitions the encoder and decoder are generated
+/// from, so it can't be kept by hand and a layout change can't leave it where it was. Hello and
+/// Welcome carry it first; see `docs/wire.md`.
+pub const LAYOUT_HASH: u64 = {
+    let mut hash = hash::OFFSET;
+    hash = fold_constants(hash);
+    hash = feature::fold_constants(hash);
+    hash = state::fold_constants(hash);
+    hash = health::fold_constants(hash);
+    hash = package_mode::fold_constants(hash);
+    hash = Frame::fold_frames(hash);
+    hash = crate::ring::fold_constants(hash);
+    hash = crate::ring::offsets::fold_constants(hash);
+    hash
+};
 
 #[cfg(test)]
 mod tests;
