@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::boot::{BootRecord, hex};
 use crate::json::Json;
+use crate::manifest::BLOCK;
 use crate::store::{Layout, Meta, State};
 use crate::tar::tests::archive;
 use crate::{SystemSlots, TrustedKey};
@@ -80,6 +81,10 @@ const ROOT_HASH: &str = "5d6f2c1f0f4b3c9a8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5
 /// A bundle's parts, to be changed by a test before it is packed.
 struct Bundle {
     id: String,
+    /// The board it is built for.
+    board: String,
+    /// Data blocks the image's hash tree covers.
+    data_blocks: u64,
     image: Vec<u8>,
     boot: Vec<(String, Vec<u8>)>,
     /// Files in boot/ the manifest doesn't list.
@@ -89,11 +94,23 @@ struct Bundle {
     sign: bool,
 }
 
+/// The board the test boards are.
+const BOARD: &str = "slots-test";
+
+/// An image of `data_blocks` blocks of data and room for their hash tree after them.
+fn image_of(id: &str, data_blocks: u64) -> Vec<u8> {
+    let seed = format!("erofs image of {id} ");
+    let len = data_blocks * BLOCK + crate::manifest::tree_bytes(data_blocks);
+    seed.bytes().cycle().take(len as usize).collect()
+}
+
 impl Bundle {
     fn new(id: &str) -> Self {
         Self {
             id: id.into(),
-            image: format!("erofs image of {id}").repeat(300).into_bytes(),
+            board: BOARD.into(),
+            data_blocks: 2,
+            image: image_of(id, 2),
             boot: vec![
                 ("kernel8.img".into(), format!("kernel of {id}").into_bytes()),
                 ("cmdline.txt".into(), b"console=tty1  rootwait\n".to_vec()),
@@ -114,11 +131,14 @@ impl Bundle {
             .map(|(n, b)| format!("\"{n}\":\"{}\"", sha(b)))
             .collect();
         format!(
-            "{{\"schema\":1,\"id\":\"{}\",\"family\":\"os\",\"version\":\"1.0\",\"variant\":\"v\",\
-             \"kernel\":\"6.12\",\"display_name\":\"An OS\",\
-             \"verity\":{{\"root_hash\":\"{ROOT_HASH}\",\"data_block_size\":4096}},\
+            "{{\"schema\":3,\"id\":\"{}\",\"product\":\"an-os\",\"version\":\"1.0\",\"variant\":\"v\",\
+             \"board\":\"{}\",\"kernel\":\"6.12\",\"display_name\":\"An OS\",\
+             \"verity\":{{\"root_hash\":\"{ROOT_HASH}\",\"salt\":\"\",\"data_blocks\":{},\"hash_offset\":{}}},\
              \"image\":{{\"size\":{},\"sha256\":\"{}\"}},\"boot\":{{\"files\":{{{}}}}}}}",
             self.id,
+            self.board,
+            self.data_blocks,
+            self.data_blocks * BLOCK,
             self.image.len(),
             self.manifest_image_sha
                 .clone()
@@ -128,7 +148,12 @@ impl Bundle {
     }
 
     fn pack(&self) -> Vec<u8> {
-        let manifest = self.manifest();
+        self.pack_with(&self.manifest())
+    }
+
+    /// The bundle with `manifest` as its slot.json, signed as it is.
+    fn pack_with(&self, manifest: &str) -> Vec<u8> {
+        let manifest = manifest.to_string();
         let signature = self.signer.sign(manifest.as_bytes()).to_bytes();
         let mut files: Vec<(String, Vec<u8>)> = vec![("slot.json".into(), manifest.into_bytes())];
         if self.sign {
@@ -175,6 +200,7 @@ impl Board {
         };
         board.slots.partuuid = "1234abcd-02".into();
         board.slots.boot_args = "board".into();
+        board.slots.board_id = BOARD.into();
         board.slots.reserve = 0;
         // Put in place as a first image would be, with nothing running yet.
         board.slots.running = Some(String::new());
@@ -979,9 +1005,9 @@ impl Board {
 /// A bundle big enough to take several ticks.
 fn big_bundle(id: &str) -> Vec<u8> {
     let mut bundle = Bundle::new(id);
-    bundle.image = (0..3 * crate::install::READ_EVERY_TICK + 77)
-        .map(|i| (i % 251) as u8)
-        .collect();
+    bundle.data_blocks = 800;
+    bundle.image = image_of(id, 800);
+    assert!(bundle.image.len() > 3 * crate::install::READ_EVERY_TICK);
     bundle.pack()
 }
 
@@ -1142,4 +1168,90 @@ fn incoming_is_emptied_and_group_writable_when_the_driver_starts() {
     );
     assert_eq!(crate::install::group_id("root:x:0:\n", "lemnos"), None);
     drop(again);
+}
+
+#[test]
+fn a_slot_built_for_this_board_installs_and_one_for_another_is_refused() {
+    let mut board = Board::new("os-1");
+    // Match.
+    board.install_ok("os-2");
+    assert!(
+        board
+            .slots
+            .list_json()
+            .contains("\"product\":\"an-os\",\"board\":\"slots-test\"")
+    );
+    // Mismatch: the job ends NOT_SUPPORTED, with the reason, and leaves nothing.
+    let mut other = Bundle::new("os-3");
+    other.board = "another-board".into();
+    let (status, _, _) = board.stream(1, &other.pack(), 4096);
+    assert_eq!(status, Status::NOT_SUPPORTED);
+    assert!(
+        board
+            .state()
+            .error
+            .contains("built for board another-board, and this is board slots-test"),
+        "{}",
+        board.state().error
+    );
+    assert!(!board.layout().installed("os-3"));
+    assert!(!board.work_left());
+    // No board in the manifest: refused as malformed.
+    let missing = Bundle::new("os-4");
+    let manifest = missing.manifest().replace("\"board\":\"slots-test\",", "");
+    let (status, _, _) = board.stream(1, &missing.pack_with(&manifest), 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert_eq!(board.state().error, "slot.json has no board");
+    assert!(!board.layout().installed("os-4"));
+    // A schema 2 manifest, with its family key: refused with a reason that says so.
+    let old = Bundle::new("os-5");
+    let manifest = old.manifest().replace("\"schema\":3", "\"schema\":2");
+    let (status, _, _) = board.stream(1, &old.pack_with(&manifest), 4096);
+    assert_eq!(status, Status::INVALID_ARGUMENT);
+    assert!(
+        board.state().error.contains("schema 2"),
+        "{}",
+        board.state().error
+    );
+}
+
+#[test]
+fn a_slot_on_disk_for_another_board_is_listed_but_never_booted() {
+    let mut board = Board::new("os-1");
+    board.install_ok("os-2");
+    // As if the disk came from another board: its manifest names that one.
+    let path = board.layout().manifest("os-2");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("slots-test", "another-board");
+    fs::write(&path, text).unwrap();
+    assert!(board.slots.list_json().contains("\"id\":\"os-2\""));
+    assert_eq!(
+        board.slots.trial("os-2", false, false, true),
+        Err(Status::NOT_SUPPORTED)
+    );
+    assert!(
+        board.state().error.contains("another-board"),
+        "{}",
+        board.state().error
+    );
+    assert_eq!(
+        board.slots.set_default("os-2", true),
+        Err(Status::NOT_SUPPORTED)
+    );
+    assert!(board.told.take().is_empty());
+    // One whose manifest names no board at all is refused the same way.
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"board\":\"another-board\",", "");
+    fs::write(&path, text).unwrap();
+    assert_eq!(
+        board.slots.trial("os-2", false, false, true),
+        Err(Status::NOT_SUPPORTED)
+    );
+    assert!(
+        board.state().error.contains("names no board"),
+        "{}",
+        board.state().error
+    );
 }

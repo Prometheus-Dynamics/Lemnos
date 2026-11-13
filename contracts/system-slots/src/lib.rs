@@ -20,7 +20,7 @@
 //! ```text
 //! {"slot_active":"<id>","slot_default":"<id>","slot_previous":"<id>","slot_trial":"<id>",
 //!  "state":"idle","error":"","free_bytes":N,"reserve_bytes":N,"keep":N,
-//!  "slots":[{"id":"<id>","family":"..","version":"..","variant":"..","kernel":"..",
+//!  "slots":[{"id":"<id>","product":"..","board":"..","version":"..","variant":"..","kernel":"..",
 //!            "display_name":"..","size":N,"verity":true,"intact":true,
 //!            "flags":["running","default","previous","trial","staged"],"pinned":false,
 //!            "good":"yes|no|untried","signed":"trusted|untrusted|unsigned","signer":"<owner>",
