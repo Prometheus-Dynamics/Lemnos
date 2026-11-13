@@ -1,7 +1,7 @@
 //! The driver against a stand-in for the block: every expected value here is written out by hand.
 
 use lemnos_core::CallerId;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use lemnos_contract_camera_receiver::{
@@ -61,7 +61,7 @@ impl Mock {
 }
 
 #[derive(Clone, Default)]
-struct Hw(Arc<Mutex<Mock>>);
+struct Hw(Arc<Mutex<Mock>>, Option<Arc<OwnedFd>>);
 
 impl Hw {
     fn with<R>(&self, f: impl FnOnce(&mut Mock) -> R) -> R {
@@ -70,6 +70,10 @@ impl Hw {
 }
 
 impl Hardware for Hw {
+    fn doorbell(&self) -> Option<BorrowedFd<'_>> {
+        self.1.as_deref().map(AsFd::as_fd)
+    }
+
     fn max_lanes(&mut self) -> Result<u8> {
         Ok(self.with(|m| m.max_lanes))
     }
@@ -184,6 +188,22 @@ fn driver_on(frames: &MockStream) -> (Rp1Csi2, Hw) {
 
 fn driver() -> (Rp1Csi2, Hw) {
     driver_on(&stream(8))
+}
+
+/// The same driver, with a doorbell: an eventfd-like descriptor the block's streams ring. The
+/// peer end is kept by nothing, so the descriptor is only ever the driver's to wait on.
+fn driver_with_bell(frames: &MockStream) -> (Rp1Csi2, Hw) {
+    let (bell, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let hw = Hw(Arc::default(), Some(Arc::new(OwnedFd::from(bell))));
+    hw.with(|m| {
+        m.max_lanes = 2;
+        m.finished.reserve(64);
+        m.given_back.reserve(4096);
+        m.set.reserve(4096);
+    });
+    let frames: StreamHandle = lemnos_core::Held::boxed(Box::new(frames.clone()));
+    let driver = Rp1Csi2::with_hardware(Box::new(hw.clone()), Some(frames));
+    (driver, hw)
 }
 
 fn frame(buffer: u32, sequence: u64, fence: u32) -> Finished {
@@ -417,6 +437,52 @@ fn memory_the_module_refuses_is_a_refused_start() {
     d.configure(raw10(), Packing::Packed).unwrap();
     assert_eq!(d.start().unwrap_err(), Status::INVALID_ARGUMENT);
     assert_eq!(hw.with(|m| m.started), 0);
+}
+
+#[test]
+fn with_a_doorbell_a_streaming_driver_ticks_at_the_fallback_period_not_each_millisecond() {
+    let frames = stream(4);
+    let (mut d, _hw) = driver_with_bell(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    assert_eq!(
+        d.tick(0).unwrap(),
+        33_000_000,
+        "one frame period: the bell wakes the driver for each frame"
+    );
+    assert_eq!(
+        d.tick(5_000_000).unwrap(),
+        38_000_000,
+        "a wake in between is ticked at once; the next deadline is a period from it"
+    );
+    assert_eq!(d.lost_wakes(), 0);
+}
+
+#[test]
+fn a_deadline_tick_that_finds_frames_counts_them_as_lost_wakes_and_a_wake_does_not() {
+    let frames = stream(4);
+    let (mut d, hw) = driver_with_bell(&frames);
+    d.configure(raw10(), Packing::Packed).unwrap();
+    d.start().unwrap();
+    assert_eq!(d.tick(0).unwrap(), 33_000_000);
+
+    // The bell rang for this frame: a tick before the deadline finds it, and that is no lost wake.
+    hw.with(|m| m.finished.push(frame(1, 0, 5)));
+    assert_eq!(d.tick(4_000_000).unwrap(), 37_000_000);
+    assert_eq!(d.lost_wakes(), 0, "a wake brought this tick");
+
+    // Two frames arrive with no wake: the tick at the deadline finds them, and counts them.
+    hw.with(|m| {
+        m.finished.push(frame(2, 1, 6));
+        m.finished.push(frame(3, 2, 7));
+    });
+    assert_eq!(d.tick(37_000_000).unwrap(), 70_000_000);
+    assert_eq!(
+        d.lost_wakes(),
+        2,
+        "the doorbell should have woken the driver for them"
+    );
+    assert_eq!(frames.take_frame().map(|f| f.sequence), Some(0));
 }
 
 #[test]

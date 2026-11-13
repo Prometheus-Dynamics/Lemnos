@@ -1,8 +1,9 @@
 //! The block as the driver sees it, and the Linux implementation over the kernel node.
 
 use std::io;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use lemnos_contract_camera_receiver::{Counters, FrameStarts};
 use lemnos_core::{Result, Status};
@@ -85,6 +86,11 @@ pub trait Hardware: Send {
     /// The frame-start count since the last start, or `None` while nothing is streaming (not
     /// started, or stopped): unknown, and not a count of zero.
     fn frame_starts(&mut self) -> Result<Option<FrameStarts>>;
+    /// The doorbell the block's streams ring at each finished frame: an eventfd the driver waits
+    /// on in place of a poll. `None` where there is none (the driver then polls).
+    fn doorbell(&self) -> Option<BorrowedFd<'_>> {
+        None
+    }
 }
 
 /// Where the block is.
@@ -137,6 +143,8 @@ pub struct LinuxHardware {
     running: Option<(Stream, StartParams)>,
     /// The embedded data's module stream, when the board asks for it, held as `running` is.
     running_embedded: Option<Stream>,
+    /// The eventfd both streams ring, made once and kept for the driver's life.
+    doorbell: Option<Arc<OwnedFd>>,
 }
 
 impl LinuxHardware {
@@ -148,7 +156,13 @@ impl LinuxHardware {
             claimed: false,
             running: None,
             running_embedded: None,
+            doorbell: crate::sys::doorbell().ok().map(Arc::new),
         }
+    }
+
+    /// The eventfd the streams ring, for [`Hardware::doorbell`].
+    fn doorbell_fd(&self) -> Option<BorrowedFd<'_>> {
+        self.doorbell.as_deref().map(AsFd::as_fd)
     }
 
     /// The module's stream of `channel`, while it runs.
@@ -216,22 +230,33 @@ impl Hardware for LinuxHardware {
         u8::try_from(info.max_lanes).map_err(|_| Status::IO)
     }
 
+    fn doorbell(&self) -> Option<BorrowedFd<'_>> {
+        self.doorbell_fd()
+    }
+
     fn make(&mut self, params: &StartParams) -> Result<()> {
         let _ = self.stop();
-        let made = self.driving()?.stream_create(&StreamParams {
-            buffers: params.buffers,
-            buffer_bytes: params.size,
-            frame_slots: params.frame_slots,
-            job_slots: 8,
-        });
+        let doorbell = self.doorbell.clone();
+        let made = self.driving()?.stream_create(
+            &StreamParams {
+                buffers: params.buffers,
+                buffer_bytes: params.size,
+                frame_slots: params.frame_slots,
+                job_slots: 8,
+            },
+            doorbell.as_deref().map(AsFd::as_fd),
+        );
         let stream = made.map_err(|e| self.node_error(e))?;
         let embedded = if params.embedded_buffers > 0 {
-            let made = self.driving()?.stream_create(&StreamParams {
-                buffers: params.embedded_buffers,
-                buffer_bytes: params.embedded_bytes,
-                frame_slots: params.embedded_frame_slots,
-                job_slots: 8,
-            });
+            let made = self.driving()?.stream_create(
+                &StreamParams {
+                    buffers: params.embedded_buffers,
+                    buffer_bytes: params.embedded_bytes,
+                    frame_slots: params.embedded_frame_slots,
+                    job_slots: 8,
+                },
+                doorbell.as_deref().map(AsFd::as_fd),
+            );
             Some(made.map_err(|e| self.node_error(e))?)
         } else {
             None

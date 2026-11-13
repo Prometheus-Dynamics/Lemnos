@@ -142,6 +142,10 @@ pub trait Driver: Sized {
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
         None
     }
+    /// See [`Lifecycle::wait_fd`].
+    fn wait_fd(&self) -> Option<BufferHandle<'_>> {
+        None
+    }
     /// What the driver does on a host-owned device. See [`Lifecycle::HOST_OWNED`].
     const HOST_OWNED: HostOwned = HostOwned::Refused;
     /// See [`Lifecycle::WATCHES_BOARD`].
@@ -207,6 +211,14 @@ pub trait Lifecycle: Sized {
     /// next `tick` returns. A tick can therefore come early: check what is actually due. It runs
     /// on the driver's lane, one call at a time with its methods, and must not block.
     fn tick(&mut self, _now_ns: u64) -> Option<u64> {
+        None
+    }
+    /// A descriptor the host waits on in place of a tick deadline. When it becomes readable the host
+    /// calls [`Lifecycle::tick`] at once, as if the driver's next tick were due, so a driver whose
+    /// hardware raises a doorbell for each piece of work needs no poll. The host keeps a duplicate
+    /// and reads it to clear each wake, before the tick runs; the driver keeps the descriptor for as
+    /// long as it runs. A tick may find nothing: check what is due. `None` by default.
+    fn wait_fd(&self) -> Option<BufferHandle<'_>> {
         None
     }
     /// Set this to `true` for a driver that needs to know the rest of the board: which devices

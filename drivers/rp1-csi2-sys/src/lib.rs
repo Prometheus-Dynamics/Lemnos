@@ -129,6 +129,12 @@ pub struct Start {
     pub reserved: [u32; 2],
 }
 
+/// A blocking eventfd for a stream's doorbell: the module adds to it at each finished frame, and the
+/// driver's wait descriptor reads it, blocking, in place of a poll. Given to [`stream_create`] as its doorbell.
+pub fn doorbell() -> io::Result<OwnedFd> {
+    lemnos_linux_sys::eventfd::create_blocking()
+}
+
 /// `struct lemnos_stream_create`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -274,7 +280,11 @@ impl Node {
 
     /// Makes a frame stream on this block with no pool: each buffer is a dma-buf of its own,
     /// given with [`Stream::set_buffer`], and one without memory is never filled.
-    pub fn stream_create(&self, params: &StreamParams) -> io::Result<Stream> {
+    pub fn stream_create(
+        &self,
+        params: &StreamParams,
+        doorbell: Option<BorrowedFd<'_>>,
+    ) -> io::Result<Stream> {
         let mut create = StreamCreate {
             block: 0,
             flags: CREATE_BUFFERS,
@@ -284,7 +294,7 @@ impl Node {
             job_slots: params.job_slots,
             job_bytes: JOB_BYTES,
             pool_fd: -1,
-            doorbell_fd: -1,
+            doorbell_fd: doorbell.map_or(-1, |fd| fd.as_raw_fd()),
             fd: -1,
             ring_bytes: 0,
             pool_addr: 0,

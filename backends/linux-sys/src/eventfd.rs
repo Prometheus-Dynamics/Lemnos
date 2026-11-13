@@ -5,8 +5,18 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 /// A new non-blocking, close-on-exec eventfd counting from zero.
 pub fn create() -> io::Result<OwnedFd> {
+    make(libc::EFD_NONBLOCK)
+}
+
+/// A new blocking, close-on-exec eventfd counting from zero: a read waits until it counts. The
+/// flag is on the open file, so every duplicate of it blocks too.
+pub fn create_blocking() -> io::Result<OwnedFd> {
+    make(0)
+}
+
+fn make(flags: libc::c_int) -> io::Result<OwnedFd> {
     // SAFETY: `eventfd` takes only integers.
-    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | flags) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }

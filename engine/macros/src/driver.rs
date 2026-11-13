@@ -193,6 +193,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
                 <Self as ::lemnos_core::Lifecycle>::tick(self, __now_ns)
             }
 
+            fn wait_fd(&self) -> ::core::option::Option<::lemnos_core::BufferHandle<'_>> {
+                <Self as ::lemnos_core::Lifecycle>::wait_fd(self)
+            }
+
             const WATCHES_BOARD: bool = <Self as ::lemnos_core::Lifecycle>::WATCHES_BOARD;
 
             fn board(&mut self, __view: &dyn ::lemnos_core::BoardView) {

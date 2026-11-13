@@ -87,8 +87,8 @@ use lemnos_contract_camera_receiver::{
     CameraReceiver, Counters, FrameLayout, FrameStarts, Limits, LinkConfig, Packing,
 };
 use lemnos_core::{
-    CallerId, Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result, Status,
-    StreamHandle, driver,
+    BufferHandle, CallerId, Config, Description, Dev, Health, Item, Lifecycle, MethodId, Result,
+    Status, StreamHandle, driver,
 };
 
 use lemnos_hal::blocks::BufferKind;
@@ -121,6 +121,10 @@ const BACKOFF_FIRST_NS: u64 = 250_000_000;
 const CHECK_NS: u64 = 1_000_000_000;
 /// How often finished frames and returned buffers are looked for.
 const POLL_NS: u64 = 1_000_000;
+/// How long the driver may go without a tick while streaming, when the block's doorbell is there:
+/// one frame period at 30 fps. A frame the doorbell failed to announce is found by the tick after
+/// this, and counted (see [`Rp1Csi2::lost_wakes`]).
+const FALLBACK_NS: u64 = 33_000_000;
 /// The stream the board declares on the device, and the name its consumer opens it by.
 const STREAM: &str = "frames";
 /// The stream of the embedded data, when the board declares one on the device.
@@ -172,6 +176,14 @@ pub struct Rp1Csi2 {
     caller: Option<CallerId>,
     /// The caller whose START started the receiver: its going away stops it (`caller_gone`).
     owner: Option<CallerId>,
+    /// When the last tick asked to be called again. A tick at or after it is a deadline tick, not a
+    /// wake of the doorbell.
+    wake_at: Option<u64>,
+    /// Frames the block finished that the driver has moved, on the image stream.
+    frames_moved: u64,
+    /// Frames a deadline tick found: the doorbell should have woken the driver for them. Counted,
+    /// so a lost bell is visible.
+    lost_wakes: u64,
 }
 
 /// The smallest ring holding `buffers` frames, a power of two.
@@ -281,6 +293,10 @@ impl Lifecycle for Rp1Csi2 {
         })
     }
 
+    fn wait_fd(&self) -> Option<BufferHandle<'_>> {
+        self.hw.doorbell().map(BufferHandle::from)
+    }
+
     fn describe(&self, out: &mut Description) {
         out.add(Item::action("start", START));
         out.add(Item::action("stop", STOP));
@@ -306,6 +322,10 @@ impl Lifecycle for Rp1Csi2 {
             State::Stopped => None,
             State::Streaming { next_check } => {
                 let due = next_check.is_some_and(|at| now_ns >= at);
+                // A tick at or after the time the last one asked for came from its deadline: no
+                // wake of the doorbell brought it, so whatever it finds is a lost bell.
+                let at_deadline = self.wake_at.is_some_and(|at| now_ns >= at);
+                let moved = self.frames_moved;
                 if self.pump().is_err() || (due && self.hw.check().is_err()) {
                     self.state = State::Recovering {
                         attempt: 0,
@@ -320,7 +340,19 @@ impl Lifecycle for Rp1Csi2 {
                 self.state = State::Streaming {
                     next_check: Some(check_at),
                 };
-                Some(now_ns.saturating_add(POLL_NS).min(check_at))
+                if at_deadline {
+                    self.lost_wakes = self
+                        .lost_wakes
+                        .saturating_add(self.frames_moved.saturating_sub(moved));
+                }
+                let period = if self.hw.doorbell().is_some() {
+                    FALLBACK_NS
+                } else {
+                    POLL_NS
+                };
+                let next = now_ns.saturating_add(period).min(check_at);
+                self.wake_at = Some(next);
+                Some(next)
             }
             State::Recovering { attempt, due: None } => {
                 let at = now_ns.saturating_add(backoff_ns(attempt));
@@ -370,7 +402,17 @@ impl Rp1Csi2 {
             state: State::Stopped,
             caller: None,
             owner: None,
+            wake_at: None,
+            frames_moved: 0,
+            lost_wakes: 0,
         }
+    }
+
+    /// Frames a deadline tick found, since the driver was made: a wake the doorbell should have
+    /// made. Zero while the doorbell works.
+    #[must_use]
+    pub fn lost_wakes(&self) -> u64 {
+        self.lost_wakes
     }
 
     /// Gives the receiver its `embedded` stream and the bytes of each embedded line. Without
@@ -398,6 +440,7 @@ impl Rp1Csi2 {
             return Ok(());
         };
         while let Some(done) = self.hw.next_frame(Channel::Image)? {
+            self.frames_moved += 1;
             self.relay.finished(&done, &mut **frames, &mut *self.hw)?;
         }
         self.relay.sweep(&mut **frames);

@@ -177,6 +177,15 @@ driver can recover from itself. A driver that holds something that can be unplug
 `TICKS` and look at it in `tick`: the host ticks it when the backend hints that its hardware may
 have changed, so it finds out without waiting for a caller.
 
+A driver whose hardware raises a doorbell when there is work (a descriptor that becomes readable) returns it
+from `wait_fd`, and the host waits on that descriptor instead of ticking on a deadline. When it becomes readable
+the host ticks the driver at once. The host reads the descriptor to clear each wake before the tick runs, so the
+tick finds nothing left to clear; a wake that comes while the tick runs is not lost and ticks the driver again.
+The driver keeps the descriptor for as long as it runs. It still returns a deadline from `tick`: that is the
+fallback for a wake that never came, and the rp1 receiver uses one frame period for it (`FALLBACK_NS`), counting
+the frames a deadline tick finds (`lost_wakes`). `tick` must still not block: the host waits on the descriptor,
+not the driver.
+
 ### Watching the board
 
 A driver that needs to know the rest of the board sets `WATCHES_BOARD` and implements `board(view)`.

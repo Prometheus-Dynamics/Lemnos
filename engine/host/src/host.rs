@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -51,6 +53,10 @@ pub trait Instance: Send {
     }
     /// See [`Driver::job_cancel`].
     fn job_cancel(&mut self, _job: JobId) {}
+    /// See [`Driver::wait_fd`]: a duplicate of it, for the host to wait on.
+    fn wait_fd(&self) -> Option<OwnedFd> {
+        None
+    }
 }
 
 impl<D: Driver + Send> Instance for D {
@@ -68,6 +74,10 @@ impl<D: Driver + Send> Instance for D {
 
     fn tick(&mut self, now_ns: u64) -> Option<u64> {
         Driver::tick(self, now_ns)
+    }
+
+    fn wait_fd(&self) -> Option<OwnedFd> {
+        Driver::wait_fd(self).and_then(|handle| handle.as_fd().try_clone_to_owned().ok())
     }
 
     fn board(&mut self, view: &dyn BoardView) {
@@ -289,6 +299,12 @@ struct Slot {
     short_runs: AtomicU32,
     /// A hint has named this running device and its driver has not been ticked since.
     hinted: AtomicBool,
+    /// The driver's wait descriptor, as the watcher reads it. See [`Inner::watch_wait`].
+    wait: Mutex<Option<Arc<File>>>,
+    /// Goes up when the watcher must end: its descriptor was replaced, or the driver went.
+    wait_gen: AtomicU64,
+    /// A wake of the wait descriptor came in: a tick that is running sets its next tick to now as well.
+    kicked: AtomicBool,
     /// The `[[each]]` entry that made this device, by its place in the board file, and the name
     /// of the resource it was made for. `None` for a device of the board file's own.
     made: Option<(usize, String)>,
@@ -332,6 +348,15 @@ fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 const MAX_USERS: usize = 16;
 
 impl Slot {
+    /// Ends the watcher of the wait descriptor, if any: its file is written so the watcher's read
+    /// returns, and it sees its generation is gone. Called whenever the driver goes.
+    fn stop_wait(&self) {
+        self.wait_gen.fetch_add(1, Ordering::AcqRel);
+        if let Some(file) = lock(&self.wait).take() {
+            let _ = (&*file).write(&1u64.to_ne_bytes());
+        }
+    }
+
     /// `caller` has called this device, so it is a user until it goes.
     fn note_user(&self, caller: CallerId) {
         let mut users = lock(&self.users);
@@ -425,6 +450,9 @@ impl Slot {
             bound_ns: AtomicU64::new(0),
             short_runs: AtomicU32::new(0),
             hinted: AtomicBool::new(false),
+            wait: Mutex::new(None),
+            wait_gen: AtomicU64::new(0),
+            kicked: AtomicBool::new(false),
             made,
             open_jobs: AtomicU32::new(0),
             users: Mutex::new([None; MAX_USERS]),
@@ -1156,6 +1184,7 @@ impl Inner {
     /// retry cap. One that fails sooner than that after each bind waits twice as long each time,
     /// up to the cap, so no driver can keep the host binding it.
     fn fault(&self, slot: &Slot, reason: &str) {
+        slot.stop_wait();
         // Whatever the driver was doing for its callers went with it.
         self.end_jobs(slot, Status::INTERRUPTED);
         let mut state = lock(&slot.state);
@@ -1190,6 +1219,55 @@ impl Inner {
     fn wake(&self) {
         if let Some(waker) = self.waker.get() {
             waker();
+        }
+    }
+
+    /// Watches a driver's wait descriptor: each wake of it makes the driver's next tick due now.
+    /// One thread per descriptor. It reads the descriptor to clear each wake, so a driver's tick
+    /// that runs after it finds nothing left to clear. It ends when its generation goes stale
+    /// (see [`Slot::stop_wait`]) or the slot is gone.
+    fn watch_wait(&'static self, slot: &Arc<Slot>, fd: OwnedFd) {
+        let file = Arc::new(File::from(fd));
+        let generation = slot.wait_gen.load(Ordering::Acquire);
+        *lock(&slot.wait) = Some(Arc::clone(&file));
+        let weak = Arc::downgrade(slot);
+        let spawned = std::thread::Builder::new()
+            .name("lemnos-wait".into())
+            .spawn(move || {
+                let mut buf = [0u8; 8];
+                loop {
+                    match (&*file).read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                    let Some(slot) = weak.upgrade() else {
+                        break;
+                    };
+                    if slot.wait_gen.load(Ordering::Acquire) != generation {
+                        break;
+                    }
+                    self.kick(&slot);
+                }
+            });
+        // Without a thread the driver still ticks at its deadlines: a fallback, not a failure.
+        drop(spawned);
+    }
+
+    /// Makes a driver's next tick due now, from its wait descriptor's watcher. Marks the wake, so a
+    /// tick that is running at the time sets its next tick to now as well (see [`Inner::settle`]).
+    fn kick(&self, slot: &Slot) {
+        slot.kicked.store(true, Ordering::SeqCst);
+        self.set_next_tick(slot, Some(self.clock.now_ns()));
+    }
+
+    /// Records a tick's next time. A wake that came while the tick ran is not lost: it is checked
+    /// after the write, and the tick is due at once.
+    fn settle(&self, slot: &Slot, next: Option<u64>) {
+        self.set_next_tick(slot, next);
+        if slot.kicked.swap(false, Ordering::SeqCst) {
+            self.set_next_tick(slot, Some(self.clock.now_ns()));
         }
     }
 
@@ -1315,7 +1393,7 @@ impl Inner {
         match ticked {
             Ok((next, None)) => {
                 slot.hinted.store(false, Ordering::Release);
-                self.set_next_tick(slot, next);
+                self.settle(slot, next);
             }
             Ok((_, Some(reason))) => self.rebind(slot, guard, reason),
             Err(_) => {
@@ -1414,7 +1492,7 @@ impl Inner {
             }
             if ticks && self.may_tick(slot) {
                 let now = self.clock.now_ns();
-                self.set_next_tick(slot, self.tick_instance(slot, instance.as_mut(), now));
+                self.settle(slot, self.tick_instance(slot, instance.as_mut(), now));
             }
             self.poll_jobs(slot, instance.as_mut());
             (status, asks_rebind(instance.as_ref()))
@@ -1647,6 +1725,7 @@ impl Inner {
         let dead = old.take();
         drop(old);
         slot.end_close();
+        slot.stop_wait();
         drop(catch_unwind(AssertUnwindSafe(move || drop(dead))));
         slot.hung.store(false, Ordering::Release);
 
@@ -1707,6 +1786,12 @@ impl Inner {
                 *lock(&slot.state) = DeviceState::Running;
                 if slot.ticks() {
                     self.set_next_tick(&slot, Some(0));
+                    let wait = lock(&slot.instance)
+                        .as_ref()
+                        .and_then(|instance| instance.wait_fd());
+                    if let Some(fd) = wait {
+                        self.watch_wait(&slot, fd);
+                    }
                 }
                 self.moved(&slot);
                 self.bring_users_forward(&slot.spec.id);
@@ -1738,6 +1823,9 @@ impl Inner {
 
     /// Ticks a driver: after giving it the board first when it watches the board.
     fn tick_instance(&self, slot: &Slot, instance: &mut dyn Instance, now_ns: u64) -> Option<u64> {
+        // A wake that came before this tick is what the tick is about to find: only a wake that
+        // comes while it runs needs another (see `settle`).
+        slot.kicked.store(false, Ordering::SeqCst);
         if slot.entry.is_some_and(|entry| entry.watches) {
             instance.board(&BoardRead { inner: self });
         }
@@ -2719,6 +2807,7 @@ impl Host {
         self.inner.moved(&slot);
         self.inner.end_jobs(&slot, Status::INTERRUPTED);
         slot.end_close();
+        slot.stop_wait();
         if let Ok(mut guard) = slot.instance.try_lock() {
             let dead = guard.take();
             drop(guard);
@@ -2750,6 +2839,7 @@ impl Host {
             self.inner.moved(slot);
             self.inner.end_jobs(slot, Status::INTERRUPTED);
             slot.end_close();
+            slot.stop_wait();
             if let Ok(mut guard) = slot.instance.try_lock() {
                 let dead = guard.take();
                 drop(guard);

@@ -274,6 +274,15 @@ fn run(lemnosd: &Path, receiver: &str, heap: &str, report: &mut Report) -> Resul
             most as f64 / 1000.0,
             latency.len()
         );
+        // A regression bound, not a board figure: a relay woken by the doorbell measures well under
+        // a millisecond in QEMU; a median near the driver's 33 ms fallback means no wake came.
+        report.check(
+            median < 5_000_000,
+            format_args!(
+                "the relay's median latency is under 5 ms ({:.1} us; the fallback is 33 ms)",
+                median as f64 / 1000.0
+            ),
+        );
     }
     report.check(
         frames.iter().all(|f| f.uniform),
