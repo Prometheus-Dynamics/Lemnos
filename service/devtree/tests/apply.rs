@@ -102,7 +102,7 @@ fn fdtoverlay_leaves_the_port_with_the_stand_in_and_no_vbus_supply() {
     );
 
     // Before: the base's OTG port names the regulator, which is a host 5 V supply.
-    let regulator = cell(&base_dtb, "/regulator-vcc5v0-otg-vbus", "phandle");
+    let regulator = cell(&base_dtb, "/vcc5v0-otg-vbus", "phandle");
     assert_eq!(
         cell(
             &base_dtb,
@@ -153,10 +153,7 @@ fn fdtoverlay_leaves_the_port_with_the_stand_in_and_no_vbus_supply() {
         stand_in
     );
     assert_ne!(stand_in, regulator);
-    assert_eq!(
-        cell(&applied, "/regulator-vcc5v0-otg-vbus", "phandle"),
-        regulator
-    );
+    assert_eq!(cell(&applied, "/vcc5v0-otg-vbus", "phandle"), regulator);
     assert_eq!(
         run(
             "fdtget",
@@ -262,6 +259,9 @@ use lemnos_devtree::map::Kind;
 #[derive(Default)]
 struct Node {
     label: Option<String>,
+    /// Enabled in the base, as a base tree has a live regulator or a live GPIO bank: a node the overlay
+    /// disables is then seen to be disabled, not merely absent of a status.
+    okay: bool,
     children: BTreeMap<String, Node>,
 }
 
@@ -275,6 +275,15 @@ fn insert(root: &mut Node, path: &str, label: Option<&str>) {
     }
 }
 
+/// A node the base has enabled, at `path`.
+fn insert_enabled(root: &mut Node, path: &str) {
+    let mut node = root;
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        node = node.children.entry(part.to_string()).or_default();
+    }
+    node.okay = true;
+}
+
 fn write_node(node: &Node, name: &str, depth: usize, out: &mut String) {
     let pad = "\t".repeat(depth);
     let label = node
@@ -283,7 +292,8 @@ fn write_node(node: &Node, name: &str, depth: usize, out: &mut String) {
         .map(|l| format!("{l}: "))
         .unwrap_or_default();
     let _ = writeln!(out, "{pad}{label}{name} {{");
-    let _ = writeln!(out, "{pad}\tstatus = \"disabled\";");
+    let status = if node.okay { "okay" } else { "disabled" };
+    let _ = writeln!(out, "{pad}\tstatus = \"{status}\";");
     for (child, child_node) in &node.children {
         write_node(child_node, child, depth + 1, out);
     }
@@ -302,6 +312,11 @@ fn base_from_map(map: &SocMap) -> String {
             insert(&mut root, &set.path, Some(&set.label));
         }
     }
+    for chip in map.chips.values() {
+        if let Some(path) = &chip.path {
+            insert_enabled(&mut root, path);
+        }
+    }
     for base in map.bases.values() {
         for holders in base.lines.values() {
             for holder in &holders.holders {
@@ -310,7 +325,7 @@ fn base_from_map(map: &SocMap) -> String {
         }
         for vbus in base.vbus.values() {
             if let Some(regulator) = &vbus.regulator {
-                insert(&mut root, regulator, None);
+                insert_enabled(&mut root, regulator);
             }
         }
     }
@@ -331,6 +346,36 @@ fn prop(tool_dtb: &Path, node: &str, name: &str, kind: &str) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The properties a node has in a compiled tree, or `None` when the node is not there.
+fn node_props(tree: &Path, node: &str) -> Option<Vec<String>> {
+    let out = Command::new("fdtget")
+        .args(["-p", tree.to_str().unwrap(), node])
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .collect()
+    })
+}
+
+/// Each hold the board makes, as the line and its level: a `[[lines]]` boot state, and each device
+/// port's VBUS line at its off level.
+fn holds_of(board: &lemnos_host::board::BoardFile) -> Vec<(String, String)> {
+    let mut holds: Vec<(String, String)> = board
+        .lines
+        .iter()
+        .filter_map(|l| Some((l.line.clone(), l.boot.clone()?)))
+        .collect();
+    for entry in &board.hardware {
+        if let (Some(line), Some(off)) = (&entry.vbus, &entry.vbus_off) {
+            holds.push((line.clone(), off.clone()));
+        }
+    }
+    holds
 }
 
 fn board_fixtures() -> Vec<(String, String)> {
@@ -462,6 +507,54 @@ fn every_fixture_overlay_applies_to_a_base_built_from_its_map() {
                     "{path}: the PHY of {} names the stand-in",
                     entry.controller
                 );
+            }
+        }
+        // Each hold the overlay hogs is a `gpio-hog` child of its chip, with its cells and its level;
+        // a hold the boot path alone holds has no hog node. A hogged VBUS port's base regulator is
+        // disabled, so it cannot own the line.
+        let hogged = lemnos_devtree::generate::hogged_lines(&board, &map).unwrap();
+        for (line, level) in holds_of(&board) {
+            let name = line.strip_prefix("gpio:").unwrap();
+            let (label, number) = name.rsplit_once(':').unwrap();
+            let chip = map.chip_labelled(label).unwrap();
+            let node = format!("{}/lemnos-hog-{number}", chip.path.as_deref().unwrap());
+            if hogged.contains(&line) {
+                let props = node_props(result, &node)
+                    .unwrap_or_else(|| panic!("{path}: no hog node {node} for {line}"));
+                assert!(props.iter().any(|p| p == "gpio-hog"), "{path}: {node}");
+                assert!(
+                    props.iter().any(|p| p == &format!("output-{level}")),
+                    "{path}: {node} holds {line} {level}, props {props:?}"
+                );
+                let cells = prop(result, &node, "gpios", "u");
+                assert_eq!(
+                    cells.as_deref(),
+                    Some(format!("{number} 0").as_str()),
+                    "{path}: {node}"
+                );
+            } else {
+                assert!(
+                    node_props(result, &node).is_none(),
+                    "{path}: {node} is not hogged"
+                );
+            }
+        }
+        for entry in &board.hardware {
+            if let (Some(_), Some(_)) = (&entry.vbus, &entry.vbus_off) {
+                let controller = &map.controllers[&entry.controller];
+                let base_name = board.board.base.as_deref().unwrap();
+                let fact = map.bases[base_name].vbus.get(&entry.controller);
+                if let Some(regulator) = fact.and_then(|f| f.regulator.as_deref()) {
+                    assert_eq!(
+                        run(
+                            "fdtget",
+                            &["-t", "s", result.to_str().unwrap(), regulator, "status"]
+                        ),
+                        "disabled",
+                        "{path}: the VBUS regulator of {} is disabled",
+                        controller.path
+                    );
+                }
             }
         }
         applied += 1;

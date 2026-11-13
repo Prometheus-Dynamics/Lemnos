@@ -10,6 +10,7 @@ soc = "bcm2712-rp1"
 # reports it: the RP1 GPIO chip's label is a constant of its driver (`pinctrl-rp1`, drivers/pinctrl/
 # pinctrl-rp1.c in raspberrypi/linux rpi-7.2.y, `MODULE_NAME`), not something the tree sets.
 [chips.rp1]
+path = "/axi/pcie@1000120000/rp1/gpio@d0000"
 label = "pinctrl-rp1"
 reason = "the RP1 GPIO chip, on the IO board's RP1"
 

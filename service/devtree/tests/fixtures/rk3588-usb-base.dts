@@ -8,11 +8,21 @@
 	#size-cells = <1>;
 	model = "fixture: RK3588 device-port base";
 
-	vcc5v0_otg_vbus: regulator-vcc5v0-otg-vbus {
+	vcc5v0_otg_vbus: vcc5v0-otg-vbus {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc5v0_otg";
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
+		enable-gpios = <&gpio4 11 0>;
+	};
+
+	pinctrl: pinctrl {
+		gpio4: gpio@fec50000 {
+			compatible = "rockchip,gpio-bank";
+			reg = <0xfec50000 0x100>;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
 	};
 
 	usb@fc000000 {

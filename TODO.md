@@ -135,8 +135,6 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       per-board addresses, the gadget end to end in QEMU).
 - [ ] **What an endpoint holder sees on teardown** (R1f): open; the gadget's bulk endpoints are
       lent to one client (R1b), and the teardown case is not yet settled.
-- [ ] **VBUS supply on device-mode ports** (Q2f): open; the USB device ports are in the maps
-      (Q2e), but the VBUS supply is not.
 
 ## Camera and sensors
 

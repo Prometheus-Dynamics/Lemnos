@@ -18,6 +18,9 @@ lemnos-ctl validate --no-live --socs socs testing/boards/reference.toml
   runs, such as a line's level from power-on. It is written as the firmware reads it, and each
   line has its reason. Every `[[lines]]` entry with a `boot` state is in it. The syntax is not
   verified on every board: see the board run that names it.
+- **the U-Boot fragment** (`--uboot`): `gpio set` and `gpio clear` for each held line, for a boot
+  script to run before `booti` or `sysboot`. The same lines and levels as the boot fragment; written
+  only for a SoC whose U-Boot line names the map knows (see [Holds from power-on](#holds-from-power-on)).
 - **the module configuration** (`--modprobe`): a modprobe.d fragment. `options lemnos` gives the
   kernel module the nodes the board gives to it (`owned=`, and the role and confinement options:
   `pisp_be=`, `unconfined=`, `confined=`, `gsdma=`, `a733_ve=`, `k230_isp=`, `vip9000=`), and a
@@ -126,6 +129,111 @@ Each rule has a refusal that names the entry:
 - A `boot` state is `"low"` or `"high"`, and needs a `reason`.
 - The board's `soc` must be the map's `soc`.
 
+## Holds from power-on
+
+A line the board holds from power-on is a `[[lines]]` entry with `boot`, or a device port's VBUS
+held at its off level (see [VBUS of a device port](#vbus-of-a-device-port)). Each such hold is written
+to up to three outputs, from the same list, and a test checks that they agree line for line
+(`service/devtree/tests/holds.rs`):
+
+- **the boot fragment** (`--boot`): `gpio=N=op,dh` or `dl`. This is the Raspberry Pi firmware's file,
+  applied before the kernel. Its format is unchanged.
+- **the U-Boot fragment** (`--uboot`): `gpio set NAME` for a high level, `gpio clear NAME` for a low
+  one, for a boot script to run before `booti` or `sysboot`. It is written only for a map that names
+  how U-Boot names its lines (`uboot` in the map, see below). A map without one, with a hold to write,
+  is refused by name: `--uboot` names no line it cannot apply.
+- **the overlay's `gpio-hog`** (in the overlay, under the chip's node): the kernel asserts the level when
+  the chip registers, with no loader step. A hold is hogged by the rule below.
+
+**The hog rule.** A hold gets a `gpio-hog` when no run-time user needs the line. A hogged line is owned
+by the kernel, so a driver that requests it would fail, which is why the rule is decided from the board
+file and the map:
+
+- A line a device names in `bus` or `uses` is used at run time: its driver requests it when it binds.
+  Such a `[[lines]]` hold is not hogged. The boot path holds it until the driver takes it (the RK3566's
+  power-switch line is this case). A device port's VBUS line that a device also uses is refused by name:
+  VBUS must be held by the overlay, and a device cannot share the line with that hog.
+- A line a chosen controller's pin set takes is the pad of that function (a PWM output, say). No hog is
+  made: the boot path holds the pad until the driver's pinctrl takes it at probe. The reference board's
+  fan line is this case, so the reference board has no hog. A device port's VBUS on such a pad is
+  refused by name.
+- Otherwise the hold is hogged. Its chip must have a `path` in the map (the chip's node); a chip without
+  one is refused by name, since the overlay could not hold the line.
+
+Each base-tree node that holds a line the overlay holds is disabled by the overlay (`status = "disabled"`,
+with the reason). A base node that owns the line therefore owns nothing, and the hog takes it. The
+VBUS regulator of a port held by its line is disabled the same way: its `phy-supply` is the stand-in, so
+nothing uses it, and left enabled it would request the line itself.
+
+Two refusals are made where a hold cannot be written in every output: a line with a boot state twice
+(`[[lines]] ... has a boot state twice`), and a VBUS line that is also a `[[lines]]` boot entry (see the
+VBUS rules).
+
+**The kernel side, read from source (v6.12 unless noted).** `drivers/gpio/gpiolib-of.c`:
+`of_gpiochip_add()` calls `of_gpiochip_scan_gpios()`, which calls `of_gpiochip_add_hog()` for each
+available child with `gpio-hog`, so a hog in the base tree is applied as the chip registers. An overlay
+applied after the chip registered is also handled: `of_gpio_notify()` takes the
+`OF_RECONFIG_CHANGE_ADD` of a `gpio-hog` node and adds its hog to the registered chip (the chip is found
+by the node's parent). The Raspberry Pi kernel (raspberrypi/linux `rpi-7.2.y`) differs in its code path
+(`gpiochip_add_hog` from `of_gpio_notify`; its hog scan is at `drivers/gpio/gpiolib-of.c:1085`), and
+its hog handling was not compared line by line. A hog's `line-name` is the consumer label the kernel
+keeps for it (`of_gpiochip_add_hog`: the name is `line-name`, or the node's name when it is absent).
+A requested line is listed in `/sys/kernel/debug/gpio` as `gpio-N (line-name) out hi` (`gpiolib.c`,
+`gpiolib_dbg_show`), which is how the start check reads a hog.
+
+**Why the VBUS regulator is disabled.** `drivers/regulator/fixed.c` (v6.12) requests a regulator's
+`enable-gpios` with `gpiod_get_optional()` and a non-exclusive flag, and a line a hog owns is refused a
+second request (`gpiod_request_commit` tests `FLAG_REQUESTED`). The base's regulator would therefore
+fail its probe with the hog's line, so the overlay disables it. Not run on a board: the request's error
+is read from source only.
+
+**The pad's mux.** A GPIO request reaches the pinctrl core (`pinctrl_gpio_request`, `pinmux_request_gpio`),
+which calls the pinctrl driver's gpio hook. Whether the Rockchip and RP1 drivers switch the pad to its GPIO
+function there was not verified. A hog on a pad whose reset function is not GPIO is therefore not known to
+move the pad: the board run checks the pad with a meter (`testing/board-runs/Q2g.md`).
+
+### The window before the controller probes
+
+From power-on until the GPIO controller probes, the line is at its reset state, and the map does not give
+it. What the map knows about the reset state:
+
+| SoC family | Reset direction and pull | Reset function (mux) | What holds the line before the kernel |
+|---|---|---|---|
+| BCM2712 with RP1 (`socs/bcm2712-rp1.toml`) | unknown: the map has none | unknown | the firmware, from `boot.txt`, before the kernel; the RP1 pad before the firmware writes it is unknown |
+| RK3566, RK3576, RK3588 (`socs/rk35*.toml`, `socs/rk3588.toml`) | unknown: the map has none | unknown | the U-Boot fragment, if the boot script runs it before `booti`; before that, the reset state |
+| K230, A733 | no GPIO chip in the map: no line can be held | n/a | n/a |
+
+After the controller probes, a hogged line is held from the chip's registration (the hog is applied
+inside it). A line held by the boot path only is held from the boot path's write until a driver requests
+it, so a driver's own probe is not covered: that is the case the device-tree and board-run note name.
+
+Which boards this matters for: a VBUS regulator that is on by default. The map does not know whether the
+base's regulator is enabled at boot (`regulator-boot-on`, or the enable pin's reset level), so the window
+of an RK3588 or RK3576 port's VBUS is the U-Boot fragment's, not the overlay's. The image team runs the
+U-Boot fragment before `booti`; the window before that is the reset state above.
+
+### U-Boot naming
+
+`uboot` in the map names how U-Boot writes a line. Only `rockchip-bank` is known: a bank is its letter
+(`A` for bank 0, `E` for bank 4), and the line is the line within the bank (`group * 8 + pin`), so
+`GPIO4_B3` is `E11`. This is the form U-Boot's lookup takes by bank name (`dm_gpio_lookup_name` in
+`drivers/gpio/gpio-uclass.c`, v2025.01: a name that starts with the bank's letter, then a decimal offset
+within the bank). The global number form (`gpio set 139`) depends on the order the banks probe in, so it
+is not written.
+
+| Family | U-Boot form | Source | Verified |
+|---|---|---|---|
+| Rockchip RK3566 | `gpio set B4` (GPIO 36) | `rk_gpio.c` `rockchip_gpio_probe` (bank from `gpio-ranges`, letter `'A' + bank`); `gpio-uclass.c` `dm_gpio_lookup_name`; `cmd/gpio.c` (`set`, `clear`) | the naming in code, v2025.01; not run on a board |
+| Rockchip RK3588 | `gpio clear E11` (GPIO 139) | the same driver; the RK3588 device tree and its banks were not read in U-Boot | not verified: the same driver is assumed |
+| Rockchip RK3576 | none written: no hold in its board file | not read | not verified |
+| Allwinner A733 | refused: no `sun60i` device tree or compatible in U-Boot v2025.01 (`drivers/gpio/sunxi_gpio.c` has none) | `arch/arm/dts` and `drivers/gpio/` listings | verified absent in v2025.01 |
+| RP1 (BCM2712) | refused: U-Boot v2025.01 has no RP1 GPIO driver | `drivers/gpio/` listing | verified absent in v2025.01 |
+
+The U-Boot `gpio` command sets the pad's data and direction registers (`rk_gpio.c` `set_value`,
+`direction_output`). It does not switch the pad's mux to GPIO: the Rockchip pinctrl sets a mux from the
+device tree's pin states only (`pinctrl-rockchip-core.c`, `rockchip_set_mux`). A pad whose reset function is
+not GPIO therefore does not move; the board run reads it.
+
 ## What each kind of resource becomes
 
 Every enabled node gets `status = "okay"`. What a kind adds:
@@ -230,11 +338,12 @@ Both need `vbus_reason`. `vbus_off` or `vbus_reason` without a statement is refu
 
 Every refusal names the entry, the base, the regulator and the two statements the board may make.
 
-**The boot hold.** `gpio=N=op,dl` (or `dh`) in the boot fragment, where `N` is the SoC's GPIO number:
-the chip's `number_base` in the map plus the line. A Rockchip bank is 32 times its number (`gpio4`
-line 11 is GPIO 139). The boot fragment is the file the Raspberry Pi firmware reads. No loader in this
-repository reads it on a Rockchip board, so there the image team applies the same hold in U-Boot,
-before the kernel runs; the numbers are in the board-run note.
+**The boot hold.** The port's VBUS line is held at its off level from power-on in three outputs (see
+[Holds from power-on](#holds-from-power-on)): `gpio=N=op,dl` in the boot fragment, where `N` is the SoC's
+GPIO number (the chip's `number_base` plus the line; a Rockchip bank is 32 times its number, so `gpio4`
+line 11 is GPIO 139); `gpio clear E11` in the U-Boot fragment; and a `gpio-hog` in the overlay, which the
+kernel applies with no step of the boot script. The overlay also disables the base regulator that the
+line switches, so that nothing else requests the line.
 
 **The start check** (`lemnos-ctl validate`, live) repeats the rule against the running system. For each
 device port, with its PHY's live `phy-supply`:
@@ -259,7 +368,9 @@ throttling and critical shutdown stay, since they are the kernel's.
 
 The fan's line must be safe from power-on until the kernel runs and Lemnos's driver takes it.
 That is the `[[lines]]` entry with `boot`: the boot fragment holds the line at that level from
-power-on. The same mechanism covers a line that must be on at boot, such as a USB port's power.
+power-on. The reference board's fan line is the PWM output's pad, so no `gpio-hog` is made for it (see
+the hog rule): the pad is held by the boot fragment until the PWM's pin set takes it. The same
+mechanism covers a line that must be on at boot, such as a USB port's power.
 
 ## What the generator cannot make come out as written
 
@@ -312,7 +423,10 @@ base tree's source (for example `raspberrypi,rp1-cfe`). `module_roles` are the m
 can take besides `owned`: `pisp_be`, `gsdma`, `a733_ve`, `k230_isp`, `vip9000`.
 
 GPIO chips are in `[chips.KEY]`: `label` is the chip's label as the kernel reports it (for the RP1
-GPIO chip, `pinctrl-rp1`, a constant in `drivers/pinctrl/pinctrl-rp1.c`). The drivers' needs are not in the map: the tool reads them from the built-in drivers' manifests.
+GPIO chip, `pinctrl-rp1`, a constant in `drivers/pinctrl/pinctrl-rp1.c`). `number_base` is the SoC's GPIO
+number of the chip's line 0, and `path` is the chip's controller node in the base tree: the node a hog is
+a child of (see [Holds from power-on](#holds-from-power-on)). A chip without `path` cannot hog a line. A
+map's top-level `uboot` names how U-Boot writes the chips' lines (`rockchip-bank`). The drivers' needs are not in the map: the tool reads them from the built-in drivers' manifests.
 
 The parser refuses a map whose paths are not absolute, whose alias is not `i2cN` or `spiN` for an
 I2C or SPI controller, or whose pin sets share a GPIO.

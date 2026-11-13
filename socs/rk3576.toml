@@ -19,6 +19,7 @@
 # controller's USB 2 PHY `phy-supply` is kept: the generator replaces it with the stand-in, so the port
 # drives no VBUS (docs/device-tree.md, VBUS of a device port). The base's supplies are at the end.
 soc = "rk3576"
+uboot = "rockchip-bank"   # how U-Boot names this SoC's GPIO lines (`gpio set E11`)
 form = "overlay"
 
 
@@ -26,22 +27,27 @@ form = "overlay"
 label = "gpio0"
 reason = "GPIO bank 0"
 number_base = 0
+path = "/soc/pinctrl/gpio@27320000"
 [chips.gpio1]
 label = "gpio1"
 reason = "GPIO bank 1"
 number_base = 32
+path = "/soc/pinctrl/gpio@2ae10000"
 [chips.gpio2]
 label = "gpio2"
 reason = "GPIO bank 2"
 number_base = 64
+path = "/soc/pinctrl/gpio@2ae20000"
 [chips.gpio3]
 label = "gpio3"
 reason = "GPIO bank 3"
 number_base = 96
+path = "/soc/pinctrl/gpio@2ae30000"
 [chips.gpio4]
 label = "gpio4"
 reason = "GPIO bank 4"
 number_base = 128
+path = "/soc/pinctrl/gpio@2ae40000"
 
 [controllers.i2c1]
 kind = "i2c"

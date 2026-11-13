@@ -95,4 +95,11 @@
 			status = "disabled";
 		};
 	};
+	// gpio-hog: gpio:gpio-test:9 is high from power-on, until the kernel takes the line
+	fragment@12 {
+		target-path = "/bus/gpio@9000";
+		__overlay__ {
+			lemnos-hog-9 { gpio-hog; gpios = <9 0>; output-high; line-name = "held high from power-on until the fan driver takes it"; };
+		};
+	};
 };

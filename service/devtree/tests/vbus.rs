@@ -459,7 +459,9 @@ fn an_unreadable_gpio_listing_is_named_for_a_switched_line() {
 }
 
 #[test]
-fn an_unrequested_switched_line_is_a_note_for_a_meter() {
+fn an_unlisted_hogged_switched_line_is_named_because_the_hog_did_not_apply() {
+    // The overlay hogs a switched line the board holds, so the kernel lists it as requested. A line
+    // that is not listed means the overlay is not applied on this boot.
     let dir = fixture("unrequested");
     rk3576_live(&dir, Some(42));
     let board_text = RK3576_BOARD.replace(
@@ -468,12 +470,37 @@ fn an_unrequested_switched_line_is_a_note_for_a_meter() {
     );
     let listing = "gpiochip4: GPIOs 128-159, parent: platform/fec50000.gpio, gpio4:\n";
     let findings = live_check(&dir, &board_text, RK3576_MAP, Some(listing));
-    assert!(vbus_problems(&findings).is_empty(), "{findings:?}");
+    assert!(
+        vbus_problems(&findings).iter().any(|p| p
+            .contains("held low by a gpio-hog of the overlay")
+            && p.contains("not listed")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn a_line_the_boot_path_alone_holds_is_a_note_until_a_driver_requests_it() {
+    // A device uses the line, so no hog is made: the boot path holds it, and the line is read once
+    // the driver requests it. Nothing is listed yet, which is no problem.
+    let dir = fixture("boot-only");
+    rk3576_live(&dir, Some(42));
+    let board_text = format!(
+        "{RK3576_BOARD}\n[[lines]]\nline = \"gpio:gpio4:11\"\nboot = \"low\"\nreason = \"fixture: off until the switch takes it\"\n\n[[devices]]\nid = \"switch\"\ndriver = \"gpio-power-switch\"\nuses = {{ line = \"gpio:gpio4:11\" }}\n"
+    );
+    let listing = "gpiochip4: GPIOs 128-159, parent: platform/fec50000.gpio, gpio4:\n";
+    let findings = live_check(&dir, &board_text, RK3576_MAP, Some(listing));
+    assert!(
+        !findings
+            .problems
+            .iter()
+            .any(|p| p.contains("gpio:gpio4:11")),
+        "{findings:?}"
+    );
     assert!(
         findings
             .notes
             .iter()
-            .any(|n| n.contains("cannot be read here: measure VBUS")),
+            .any(|n| n.contains("gpio:gpio4:11: boot low by the boot path only")),
         "{findings:?}"
     );
 }
