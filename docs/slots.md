@@ -56,7 +56,7 @@ manifest is refused, and nothing it wrote is left behind.
 | `image.size` | `rootfs.erofs`'s size in bytes, hash tree included |
 | `image.sha256` | `rootfs.erofs`'s SHA-256, 64 lowercase hex digits |
 | `verity.root_hash` | 64 lowercase hex digits |
-| `verity.salt` | lowercase hex, an even number of digits up to 512; `""` for no salt |
+| `verity.salt` | exactly 64 lowercase hex digits (32 bytes), random per image; required |
 | `verity.data_blocks` | how many 4096-byte data blocks the tree covers |
 | `verity.hash_offset` | the byte offset in `rootfs.erofs` where the hash tree starts |
 | `boot.files` | each file's path under `boot/` to its SHA-256 |
@@ -76,26 +76,49 @@ slot already on disk that names another board, or no board, is still listed. `tr
 - no verity superblock.
 
 The hash tree comes straight after the data. `verity.hash_offset` must equal
-`verity.data_blocks * 4096`. `image.size` must equal `hash_offset` plus the tree's size. The
-tree's size is every level, each `ceil(blocks below / 128)` hash blocks, down to one block. A
-manifest whose numbers don't fit is refused at install. The EROFS superblock is never read for
+`verity.data_blocks * 4096`. `image.size` must equal `hash_offset` plus the tree's size. A
+manifest whose numbers don't fit, or whose salt isn't 64 hex digits, is refused at install and
+at boot. The EROFS superblock is never read for
 any of this.
+
+The tree's size: with 128 SHA-256 digests to a 4096-byte hash block, each level is
+`ceil(n / 128)` blocks, repeated **while the count being hashed is more than 1**, and the levels
+are summed. A single data block has no tree at all: its root hash is the hash of that block.
+Inside the tree the levels are stored **top level first**, down to the level over the data. That
+is the order dm-verity computes each level's start in, from the table's hash start block
+(`hash_offset / 4096`), and the order `veritysetup` writes.
+
+These vectors come from a real `veritysetup` 2.8.7 run (`format --no-superblock
+--data-block-size=4096 --hash-block-size=4096 --hash=sha256 --salt=<64 hex> --data-blocks=N`).
+The driver's tests hold all of them, with a tree built in the test that checks the size, the
+top-first order and the root hash:
+
+| data blocks | hash tree bytes | root hash (salt `000102…1f`, block i filled with byte i mod 251) |
+|---|---|---|
+| 1 | 0 | `4ce3ecf32c133bf6321901b6092219474b6ac91a19d0304621d629e6bb9987dc` |
+| 2 | 4096 | `bd780675f50010ed023fd1f07e98f029a6aaf25a8f6ee33ec94b4b4e847e4b2e` |
+| 128 | 4096 | `acb37719c99f3ac554ecbbccb8910616915a08e5a67bd3b9778694c60e673da4` |
+| 129 | 12288 | `6093a2333523050b628581510028976d3d3e9c62458642a83727e6df641397a4` |
+| 16384 | 528384 | `234a6801a6840c2defdf3a7c08060cf9874f5773c6360f4172b08ae891a611d5` |
+| 16385 | 540672 | `f1acccee31dcae56f612342ed838ba4c1f375de2d0341ae0cddecd0b28ff8732` |
+| 38400 | 1245184 | `a73f8f9623fc3e3298871b6ef9de8ae4ba8867f23f5d8a92b87d97b0b5ddfa18` |
 
 An image builder makes a conforming image like this:
 
 ```text
 mkfs.erofs -b 4096 rootfs.erofs <rootfs dir>  # 4096-byte blocks: the size is a multiple of 4096
 DATA=$(stat -c %s rootfs.erofs)
-veritysetup format --no-superblock --format=1 --hash=sha256 \
+SALT=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')   # a new random salt per image
+veritysetup format --no-superblock --format=1 --hash=sha256 --salt=$SALT \
   --data-block-size=4096 --hash-block-size=4096 --data-blocks=$((DATA / 4096)) \
-  rootfs.erofs tree.bin                         # prints "Salt:" and "Root hash:"
+  rootfs.erofs tree.bin                         # prints "Root hash:"
 cat tree.bin >> rootfs.erofs
 ```
 
 Its outputs go into the manifest as follows:
 
 - `Root hash` goes to `verity.root_hash`.
-- `Salt` goes to `verity.salt`.
+- `$SALT` goes to `verity.salt`.
 - `DATA / 4096` goes to `verity.data_blocks`.
 - `DATA` goes to `verity.hash_offset`.
 - The final file's size and SHA-256 go to `image.size` and `image.sha256`.
@@ -103,7 +126,7 @@ Its outputs go into the manifest as follows:
 `lemnos-slot-init` builds the table from the manifest and these conventions alone:
 
 ```text
-0 <data_blocks * 8> verity 1 <loop> <loop> 4096 4096 <data_blocks> <hash_offset / 4096> sha256 <root_hash> <salt or ->
+0 <data_blocks * 8> verity 1 <loop> <loop> 4096 4096 <data_blocks> <hash_offset / 4096> sha256 <root_hash> <salt>
 ```
 
 It refuses a slot whose values don't fit.
@@ -262,6 +285,82 @@ kernel can't boot until it is the default. Even then the root copy changes only 
 On raw NAND, the same contract works over UBI volumes, and the record is a tiny static UBI
 volume. That backend is a later PR. It isn't in the tree yet.
 
+## Booting a slot: `lemnos-slot-init`
+
+`service/slot-init` builds `lemnos-slot-init`, the `/init` of a slot's initramfs. It is a static
+program of plain `std`: no serde, no async, and its system calls are `lemnos-linux-sys`'s safe
+wrappers (`rootfs`). It reads and writes the same files as the driver through the shared crate
+`drivers/slot-store` (the layout, the board's state, the manifest and the boot records).
+`docs/building.md` has the static builds for aarch64, armv7 and riscv64.
+
+### The initramfs
+
+The initramfs holds `lemnos-slot-init` as `/init` and, when they are modules, `dm-mod`,
+`dm-bufio` and `dm-verity` under `/lib/modules/<release>/` with that kernel's `modules.dep`. They
+must be uncompressed. A module that is built in fails to load, which is logged and harmless. The
+kernel needs devtmpfs, ext4, vfat, EROFS, loop and dm-verity.
+
+### What it does
+
+1. It mounts `/proc`, `/sys` and `/dev`, and reads the slot arguments from the kernel command
+   line. The prefix is whatever stands before `.slot=` (the driver's `boot_args`).
+2. It finds the data partition from `<prefix>.data=`, `PARTUUID=` (MBR or GPT) or `LABEL=` (ext4),
+   from `/sys/class/block` and the disks themselves. It waits up to 10 s, and if nothing answers it
+   takes the partition labelled `data`. A filesystem whose superblock records errors is mounted
+   read-only. There is no fsck here.
+3. It reads the boot partition (partition 1 of the same disk) read-only. If a `boot-record` file
+   is there, the record picks the slot: its `trial=`, which is cleared before the slot starts,
+   else its `default=`. The root hash is then the one on that slot's own
+   `slots/<id>/cmdline.txt`.
+4. A boot is a trial when the firmware's tryboot flag is set, when the `file` record gave the
+   trial, or when the slot isn't the board's default. A trial writes `board/slots/trial-init`.
+5. It refuses the slot if:
+   - its manifest is missing, isn't schema 3 or is for another slot;
+   - the manifest's root hash isn't the command line's;
+   - the image isn't exactly `image.size` bytes;
+   - `kernel` names a kernel other than the running one.
+6. It loads the device-mapper modules, opens the image through a read-only loop device and
+   dm-verity with the table above, and mounts it read-only as EROFS.
+7. It moves `/data` into the new root and writes `board/slots/booted`, plus `trial-started` on a
+   trial. Then it `switch_root`s into `/sbin/init`.
+
+### When the slot can't come up
+
+The failure is kept and recorded before anything else happens:
+
+- The kernel log goes to `board/slots/last-failure.log` on the data partition and to
+  `slot-init.log` on the boot partition.
+- The slot's `.meta` gets `FAILED=yes`, `FAILURES` plus one and `FAIL_REASON`. A refusal by
+  dm-verity reads `dm-verity refused the image: ...`.
+
+The next step is a pure function (`service/slot-init/src/decide.rs`). Each rule has a test that
+fails without it:
+
+1. **A trial that fails** restarts plainly, so the boot loader starts the default.
+2. **The default failing** `3` times in a row stops falling back. The count is
+   `board/slots/fallbacks`, which a confirmed boot clears. The board then shows the reason on the
+   console for 30 s and restarts.
+3. **Otherwise** the board restarts into another slot, on trial. The candidates, best first:
+   - the previous slot, if it hasn't failed since it was confirmed;
+   - any other slot that booted well and hasn't failed, newest first;
+   - the previous slot even though it failed;
+   - any other slot, newest first.
+
+   Only a slot whose boot directory is on the boot partition can be started.
+   - The trial goes into the record the boot partition holds: `trial.txt` and a `0 tryboot`
+     restart, `boot-record.env` with `trial_armed=1`, or `boot-record`'s `trial=`.
+   - The board's state gets `TRIAL` set to that slot, so a `confirm` from it makes it the default:
+     the board has rolled back.
+4. **With no candidate**, such as a board with one slot, the board waits, then restarts into the
+   same default.
+
+It never writes the default. The worst it does is start one other slot once, on trial, so a plain
+restart always returns to the default. With the data partition read-only, nothing is recorded on
+it, but the trial is still written to the boot partition.
+
+**Untested on board.** The tests run the whole flow over a temporary directory that stands in
+for `/`, with a fake for every system call. `testing/board-runs/I5d.md` is the board run.
+
 ## Settings
 
 ```toml
@@ -280,7 +379,7 @@ The driver's crate documentation, `drivers/system-slots/src/lib.rs`, lists every
 ## Proof
 
 ```sh slow
-cargo test -q -p lemnos-driver-system-slots -p lemnos-contract-system-slots -p lemnos-contract-system-reboot
+cargo test -q -p lemnos-driver-system-slots -p lemnos-contract-system-slots -p lemnos-contract-system-reboot -p lemnos-slot-store -p lemnos-slot-init
 ```
 
 Every test runs over temporary directories that stand in for the two partitions, with a record

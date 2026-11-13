@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 
 use lemnos_contract_system_identity::SystemIdentity;
 use lemnos_core::{Config, Description, Health, Item, Lifecycle, MethodId, Result, Status, driver};
-use lemnos_driver_system_slots::manifest::Manifest;
 use lemnos_identity::{ByteOrder, Facts, SerialError, SerialSource};
+use lemnos_slot_store::manifest::Manifest;
 
 const SERIAL: MethodId = MethodId {
     contract: 0,

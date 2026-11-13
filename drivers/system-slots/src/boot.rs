@@ -20,6 +20,8 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use lemnos_slot_store::records;
+
 use crate::store::{Layout, read_line, replace, sync_dir, valid_id};
 
 /// Tells the boot loader which slot to start.
@@ -76,7 +78,7 @@ pub struct Tryboot {
 }
 
 fn prefix(id: &str) -> String {
-    format!("os_prefix=slots/{id}/\n")
+    lemnos_slot_store::records::tryboot::entry(id)
 }
 
 impl BootRecord for Tryboot {
@@ -103,23 +105,17 @@ pub struct FileRecord {
 
 impl FileRecord {
     fn path(&self) -> PathBuf {
-        self.boot.join("boot-record")
+        self.boot.join(records::file::FILE)
     }
 
     fn line(&self, key: &str) -> String {
-        fs::read_to_string(self.path())
-            .unwrap_or_default()
-            .lines()
-            .find_map(|l| l.strip_prefix(key)?.strip_prefix('=').map(str::to_string))
-            .unwrap_or_default()
+        let (default, trial) =
+            records::file::parse(&fs::read_to_string(self.path()).unwrap_or_default());
+        if key == "trial" { trial } else { default }
     }
 
     fn write(&self, default: &str, trial: &str) -> io::Result<()> {
-        let mut text = format!("default={default}\n");
-        if !trial.is_empty() {
-            text.push_str(&format!("trial={trial}\n"));
-        }
-        replace(&self.path(), text.as_bytes())
+        replace(&self.path(), records::file::text(default, trial).as_bytes())
     }
 }
 

@@ -59,7 +59,7 @@ lemnos-ctl 699048 to 692992, lemnos-orion 789552 to 775912).
 | `lemnosd` (`lemnosd`)           | `lemnosd`         | none (`fake-devices` is for the simulated board only)         | `aarch64-unknown-linux-musl`, `armv7-unknown-linux-musleabihf`, `riscv64gc-unknown-linux-musl` |
 | `lemnos-ctl` (`lemnos-ctl`)     | `lemnos-ctl`      | none                                                          | the same three                                                  |
 | `lemnos-orion` (`lemnos-orion`) | `lemnos-orion`    | none (Orion is pinned by its git `rev`)                       | the same three                                                  |
-| `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | planned, not merged, not built                                |
+| `lemnos-slot-init` (`service/slot-init`) | `lemnos-slot-init` | none | the same three (the initramfs's `/init`, static)                |
 
 Stripped sizes, from the vendored builds of this table (bytes):
 
@@ -68,6 +68,11 @@ Stripped sizes, from the vendored builds of this table (bytes):
 | `lemnosd`       | 2018968      | 2021444          | 2017376      |
 | `lemnos-ctl`    | 732632       | 714820           | 728928       |
 | `lemnos-orion`  | 775368       | 768908           | 772048       |
+| `lemnos-slot-init` | 470128   | 442568           | 462144       |
+
+`lemnos-slot-init` was measured from a worktree build (`cargo build -p lemnos-slot-init --profile
+service --target <triple>`, the repo's rust-lld config) on the I5d branch, not from the vendored
+tree. It is plain `std` with no serde and no async.
 
 The worktree build of the same commit gave `lemnos-ctl` 733224 and `lemnos-orion` 775912 on
 aarch64: the same to within 0.1 percent. The sizes move with the base; these are measured on this
@@ -79,7 +84,7 @@ Verified: each of the nine (program, target) pairs built with `cargo build --loc
 the host toolchain, because rustc needs the host linker for them; the target links did not use any C
 tool. Each result is `stripped` and of the right word size (`file`).
 
-Not run: the glibc targets; `lemnos-slot-init`; a board.
+Not run: the glibc targets; the vendored build of `lemnos-slot-init`; a board.
 
 ## No C in the shipped programs
 

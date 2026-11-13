@@ -34,11 +34,12 @@ impl Drop for Tree {
 
 const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// A schema 3 manifest for slot `os-2`, one data block (so the image is two blocks).
+/// A schema 3 manifest for slot `os-2`, one data block: one block has no hash tree, so the image
+/// is that block alone.
 fn manifest() -> String {
     format!(
         "{{\"schema\":3,\"id\":\"os-2\",\"product\":\"an-os\",\"version\":\"2.0\",\"board\":\"alpha-1\",\
-         \"image\":{{\"size\":8192,\"sha256\":\"{HASH}\"}},\
+         \"image\":{{\"size\":4096,\"sha256\":\"{HASH}\"}},\
          \"verity\":{{\"root_hash\":\"{HASH}\",\"salt\":\"{HASH}\",\"data_blocks\":1,\"hash_offset\":4096}},\
          \"boot\":{{\"files\":{{\"cmdline.txt\":\"{HASH}\"}}}}}}"
     )

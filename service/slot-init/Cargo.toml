@@ -1,0 +1,21 @@
+[package]
+name = "lemnos-slot-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The initramfs program that boots a board's slot: finds the data partition, opens the slot's image through dm-verity and switches into it, and falls back when it can't"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lemnos-slot-init"
+path = "src/main.rs"
+
+# Lean on purpose: a static initramfs program. No serde, no async; the system calls are
+# lemnos-linux-sys's safe wrappers.
+[dependencies]
+lemnos-slot-store = { path = "../../drivers/slot-store" }
+lemnos-linux-sys = { path = "../../backends/linux-sys" }

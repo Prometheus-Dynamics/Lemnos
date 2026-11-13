@@ -13,6 +13,8 @@ lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-contract-system-slots = { path = "../../contracts/system-slots" }
 lemnos-contract-system-reboot = { path = "../../contracts/system-reboot" }
 lemnos-linux-sys = { path = "../../backends/linux-sys" }
+# The slot files, shared with lemnos-slot-init.
+lemnos-slot-store = { path = "../slot-store" }
 # Both already in the tree through lemnos-package: the signature check and the hashes.
 ed25519-dalek = { version = "2.2", default-features = false }
 sha2 = { version = "0.10", default-features = false }

@@ -60,16 +60,15 @@ fn header(name: &str, typeflag: u8, size: usize) -> [u8; 512] {
     h
 }
 
-/// The hash tree's size over `blocks` data blocks, as dm-verity lays it out.
+/// The hash tree's size over `blocks` data blocks, as `veritysetup` writes it: a level of
+/// `ceil(n / 128)` blocks while the count being hashed is more than 1.
 fn tree_bytes(blocks: usize) -> usize {
-    let (mut level, mut total) = (blocks, 0);
-    loop {
-        level = level.div_ceil(128);
-        total += level;
-        if level <= 1 {
-            return total * BLOCK;
-        }
+    let (mut count, mut total) = (blocks, 0);
+    while count > 1 {
+        count = count.div_ceil(128);
+        total += count;
     }
+    total * BLOCK
 }
 
 /// An unsigned schema 3 slot bundle for board `t`, its image `data_blocks` blocks of data and
@@ -89,10 +88,11 @@ fn bundle(id: &str, data_blocks: usize) -> Vec<u8> {
     let manifest = format!(
         "{{\"schema\":3,\"id\":\"{id}\",\"product\":\"an-os\",\"version\":\"1\",\"board\":\"t\",\
          \"image\":{{\"size\":{len},\"sha256\":\"{}\"}},\
-         \"verity\":{{\"root_hash\":\"{}\",\"salt\":\"\",\"data_blocks\":{data_blocks},\"hash_offset\":{}}},\
+         \"verity\":{{\"root_hash\":\"{}\",\"salt\":\"{}\",\"data_blocks\":{data_blocks},\"hash_offset\":{}}},\
          \"boot\":{{\"files\":{{{}}}}}}}",
         sha(&image),
         "ab".repeat(32),
+        "cd".repeat(32),
         data_blocks * BLOCK,
         files.join(",")
     );

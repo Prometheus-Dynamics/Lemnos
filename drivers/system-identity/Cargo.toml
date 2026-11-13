@@ -12,8 +12,8 @@ workspace = true
 lemnos-core = { path = "../../engine/core", features = ["std"] }
 lemnos-identity = { path = "../../engine/identity" }
 lemnos-contract-system-identity = { path = "../../contracts/system-identity" }
-# The slot manifest parser (schema 3). Moves to lemnos-slot-store with I5d, same API.
-lemnos-driver-system-slots = { path = "../system-slots" }
+# The slot manifest parser (schema 3), shared with the slots driver and the initramfs.
+lemnos-slot-store = { path = "../slot-store" }
 
 [package.metadata.lemnos]
 driver = "Identity"

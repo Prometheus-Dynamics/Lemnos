@@ -34,7 +34,7 @@ board still has to show.
 ```text
 engine/      the driver model, the host, the wire protocol, the client, the C API, packages
 backends/    how the engine reaches hardware: Linux, USB, V4L2, a microcontroller, a simulation
-service/     lemnosd, lemnos-ctl, lemnos-orion
+service/     lemnosd, lemnos-ctl, lemnos-orion, lemnos-slot-init (a slot's initramfs)
 contracts/   one small crate per contract
 drivers/     one crate per driver; drivers/<name>-sys holds a driver's unsafe kernel interface
 kernel/      lemnos.ko
