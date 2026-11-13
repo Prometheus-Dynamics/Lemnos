@@ -14,8 +14,9 @@ use crate::log;
 
 /// The most facts one node publishes. Orion's hello document carries at most this many too.
 pub const MAX_FACTS: usize = 64;
-/// The longest value of one fact, in bytes. Orion's hello document leaves a longer one out.
-pub const MAX_VALUE_BYTES: usize = 256;
+/// The most a fact's value may be. `offers` is the longest: every contract id the bridge serves,
+/// as the shipped contracts name them, is about 425 bytes, so this leaves room for more.
+pub const MAX_VALUE_BYTES: usize = 1024;
 /// What every fact's topic name starts with: `hello.<fact>`.
 pub const TOPIC_PREFIX: &str = "hello.";
 /// The fact that lists the contract ids the node serves.
@@ -162,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn a_value_of_more_than_256_bytes_is_left_out_and_one_of_256_is_kept() {
+    fn a_value_of_more_than_the_limit_is_left_out_and_one_of_the_limit_is_kept() {
         let longest = "a".repeat(MAX_VALUE_BYTES);
         let too_long = "a".repeat(MAX_VALUE_BYTES + 1);
         let identity = [pair("fits", &longest), pair("too-long", &too_long)];
@@ -187,8 +188,49 @@ mod tests {
     }
 
     #[test]
+    fn the_offers_of_every_shipped_contract_are_kept() {
+        let shipped = [
+            "accelerometer/1",
+            "camera.frames/1",
+            "camera.isp/1",
+            "camera.receiver/1",
+            "camera.sensor/1",
+            "codec.block/1",
+            "fan-control/1",
+            "fan/1",
+            "gpu-lease/1",
+            "gyroscope/1",
+            "image.blend/1",
+            "image.convert/1",
+            "image.scaler/1",
+            "indicator/1",
+            "isp.isp600/1",
+            "isp.pisp/1",
+            "lemnos.files/1",
+            "lens/1",
+            "light/1",
+            "magnetometer/1",
+            "npu/1",
+            "orientation/1",
+            "pixels/1",
+            "power-monitor/1",
+            "power-switch/1",
+            "raw-bus/1",
+            "system.flash/1",
+            "system.identity/1",
+            "system.reboot/1",
+            "system.slots/1",
+            "temperature/1",
+            "usb.function/1",
+        ];
+        let list = offers(shipped.into_iter());
+        assert!(list.len() <= MAX_VALUE_BYTES, "{} bytes", list.len());
+        assert_eq!(document(None, &list).len(), 1, "kept whole");
+    }
+
+    #[test]
     fn a_long_offers_list_is_left_out_as_a_whole() {
-        let tags: Vec<String> = (0..40).map(|n| format!("contract{n:02}/1")).collect();
+        let tags: Vec<String> = (0..120).map(|n| format!("contract{n:03}/1")).collect();
         let list = offers(tags.iter().map(String::as_str));
         assert!(list.len() > MAX_VALUE_BYTES);
         assert!(document(None, &list).is_empty());

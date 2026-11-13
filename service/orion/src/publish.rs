@@ -60,7 +60,7 @@ const POLICY: Policy = Policy::new(Admits::LOCAL.and(Admits::OPERATOR));
 const ANCHOR: &str = "lemnos-orion.requests";
 const ANCHOR_POLICY: Policy = Policy::new(Admits::NOBODY);
 /// Samples of each field a topic keeps.
-const HISTORY: u32 = 16;
+const LATEST: u32 = 2;
 /// The longest status text published. A longer reason is cut at a character boundary.
 const STATUS_MAX: usize = 256;
 /// How long to wait with no devices and no facts for lemnosd to have some.
@@ -75,8 +75,79 @@ const RECONNECT: Duration = Duration::from_millis(100);
 const GONE: &str = "gone";
 /// Why a status topic says its device is gone, when lemnosd no longer lists it.
 const DEVICE_GONE: &str = "the device is no longer listed by lemnosd";
-/// Samples of a fact's topic that are kept: its newest value is what the hello document carries.
-const FACT_HISTORY: u32 = 2;
+
+/// How a topic's samples are read. A **state** is a value that is current until it changes: its
+/// newest sample is what matters. An **event** is a sample each of which matters. Every topic the
+/// bridge publishes is a state today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    State,
+    Event,
+}
+
+/// What the bridge says of one of its topics: its name (a device's topics are named within its
+/// resource, a fact's with `hello.`), its kind, and `expiry_ms`, how long a sample stays valid
+/// after it is sent: zero for always, that is until the bridge changes it or withdraws the topic.
+/// Orion's device topics are declared with an expiry of zero whatever is given, so the device
+/// classes say zero: a device's state is served as current until the bridge publishes a change
+/// or withdraws the device's topics. The table is documented in `docs/daemon.md`.
+#[derive(Clone, Copy, Debug)]
+pub struct Class {
+    pub name: &'static str,
+    pub kind: Kind,
+    pub expiry_ms: u32,
+    /// Samples Orion keeps per field: 2 for a latest-value topic (a state), which is all a state
+    /// needs, since the newest sample is the value.
+    pub history: u32,
+}
+
+/// A device's readings: the last reading is the value, published as the driver reads a change.
+pub const VALUES: Class = Class {
+    name: "values",
+    kind: Kind::State,
+    expiry_ms: 0,
+    history: LATEST,
+};
+/// A device's state, health and reason: current until it changes; the bridge says `gone` when
+/// lemnosd stops listing the device.
+pub const STATUS: Class = Class {
+    name: "status",
+    kind: Kind::State,
+    expiry_ms: 0,
+    history: LATEST,
+};
+/// A device's description generation: a counter that moves each time what `describe` says of the
+/// device changes (its state or reason). A client that sees it move asks `describe` again.
+pub const DESCRIPTION: Class = Class {
+    name: "description",
+    kind: Kind::State,
+    expiry_ms: 0,
+    history: LATEST,
+};
+/// The device set's generation: a counter that moves when a device comes or goes.
+pub const DEVICE_SET: Class = Class {
+    name: "lemnos.devices",
+    kind: Kind::State,
+    expiry_ms: 0,
+    history: LATEST,
+};
+/// A board fact (`hello.<fact>`): current until the fact changes or the session ends.
+pub const FACT: Class = Class {
+    name: "hello.<fact>",
+    kind: Kind::State,
+    expiry_ms: 0,
+    history: LATEST,
+};
+/// Every topic the bridge publishes, and how it is classified.
+pub const CLASSES: [Class; 5] = [VALUES, STATUS, DESCRIPTION, DEVICE_SET, FACT];
+
+/// A generation counter's one field.
+const GENERATION_FIELDS: [Field<'static>; 1] = [Field {
+    name: "generation",
+    ty: FieldType::Int,
+    unit: "",
+    type_name: "",
+}];
 
 /// The status topic's fields.
 const STATUS_FIELDS: [Field<'static>; 3] = [
@@ -102,7 +173,10 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
     let mut changes = Changes::default();
     let mut done = Vec::new();
     while !shared.stopping() {
-        let (devices, facts) = shared.with(|mirror| mirror.snapshot());
+        let (devices, facts, set) = shared.with(|mirror| {
+            let (devices, facts) = mirror.snapshot();
+            (devices, facts, mirror.set_generation())
+        });
         if devices.is_empty() && facts.is_empty() {
             // Nothing to publish, so no session: wait for lemnosd's devices.
             wait_bell(shared, IDLE);
@@ -112,7 +186,7 @@ pub fn run(config: &Config, shared: &Shared, jobs: &Sender<Message>) {
             continue;
         }
         number += 1;
-        let mut session = match Session::open(config, number, &devices, &facts) {
+        let mut session = match Session::open(config, number, &devices, &facts, set) {
             Ok(session) => session,
             Err(message) => {
                 log(&message);
@@ -160,6 +234,7 @@ struct Published {
     resource: Resource,
     values: Option<Publisher>,
     status: Publisher,
+    description: Publisher,
     /// The state the record says, and the one it should say.
     written: ResourceState,
     wanted: ResourceState,
@@ -181,6 +256,8 @@ struct Session {
     retry_at: Option<Instant>,
     /// The board's `hello.*` topics.
     facts: Vec<Fact>,
+    /// `lemnos.devices`: the device set's generation.
+    device_set: Publisher,
 }
 
 /// Why a device or fact could not be described.
@@ -200,6 +277,7 @@ impl Session {
         number: u64,
         devices: &[(u64, DeviceSpec)],
         facts: &[(String, String)],
+        set: u64,
     ) -> Result<Self, String> {
         let options = Options {
             roles: Roles::CLIENT.and(Roles::PROVIDER),
@@ -219,6 +297,17 @@ impl Session {
                 ANCHOR_POLICY,
             )
             .map_err(|error| format!("Orion did not take {ANCHOR}: {error}"))?;
+        let mut device_set = orion
+            .declare(&TopicDecl {
+                name: DEVICE_SET.name,
+                fields: &GENERATION_FIELDS,
+                history: DEVICE_SET.history,
+                expiry_ms: DEVICE_SET.expiry_ms,
+                max_payload: 8,
+            })
+            .map_err(|error| format!("Orion did not take {}: {error}", DEVICE_SET.name))?;
+        sample(&mut device_set, 0, now(), &generation_bytes(set))
+            .map_err(|error| format!("{}: not written: {error}", DEVICE_SET.name))?;
         let mut session = Self {
             orion,
             node,
@@ -229,6 +318,7 @@ impl Session {
             pending: HashSet::new(),
             retry_at: None,
             facts: Vec::new(),
+            device_set,
         };
         for (slot, spec) in devices {
             session
@@ -442,6 +532,20 @@ impl Session {
             self.publish_facts(facts)?;
         }
         let time = now();
+        if let Some(set) = changes.set {
+            sample(&mut self.device_set, 0, time, &generation_bytes(set))?;
+        }
+        for &(slot, generation) in &changes.described {
+            let Some(device) = self.devices.get_mut(&slot) else {
+                continue;
+            };
+            sample(
+                &mut device.description,
+                0,
+                time,
+                &generation_bytes(generation),
+            )?;
+        }
         for (slot, status) in &changes.status {
             let Some(device) = self.devices.get_mut(slot) else {
                 continue;
@@ -639,8 +743,8 @@ fn declare_fact(orion: &Orion, name: &str, value: &str) -> Result<Fact, Error> {
     let decl = TopicDecl {
         name: &topic,
         fields: &fields,
-        history: FACT_HISTORY,
-        expiry_ms: 0,
+        history: FACT.history,
+        expiry_ms: FACT.expiry_ms,
         max_payload: hello::MAX_VALUE_BYTES as u32,
     };
     match orion.declare(&decl) {
@@ -705,12 +809,20 @@ fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Ve
             .collect();
         Some(
             describing
-                .topic("values", &fields, HISTORY, 8)
+                .topic(VALUES.name, &fields, VALUES.history, 8)
                 .map_err(topic_refused)?,
         )
     };
     let status = describing
-        .topic("status", &STATUS_FIELDS, HISTORY, STATUS_MAX as u32)
+        .topic(
+            STATUS.name,
+            &STATUS_FIELDS,
+            STATUS.history,
+            STATUS_MAX as u32,
+        )
+        .map_err(topic_refused)?;
+    let description = describing
+        .topic(DESCRIPTION.name, &GENERATION_FIELDS, DESCRIPTION.history, 8)
         .map_err(topic_refused)?;
     let verbs: Vec<Verb> = Verb::ALL
         .into_iter()
@@ -728,6 +840,7 @@ fn describe(provider: &Provider, spec: &DeviceSpec) -> Result<(Published, Vec<Ve
             resource,
             values,
             status,
+            description,
             written: state,
             wanted: state,
         },
@@ -759,6 +872,11 @@ fn client_refused(error: ClientError) -> Refused {
 }
 
 /// One sample of field `field`.
+/// A generation counter's payload: an `Int` field, little-endian.
+fn generation_bytes(generation: u64) -> [u8; 8] {
+    (generation as i64).to_le_bytes()
+}
+
 fn sample(
     publisher: &mut Publisher,
     field: usize,
@@ -839,6 +957,28 @@ pub fn check_node(welcomed: &str, expected: Option<&str>) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every topic the bridge publishes is classified, by name, and each is a state with an
+    /// expiry of zero (current until changed or withdrawn), as the docs say.
+    #[test]
+    fn every_topic_is_classified_as_a_state_valid_until_changed() {
+        let names: Vec<&str> = CLASSES.iter().map(|class| class.name).collect();
+        assert_eq!(
+            names,
+            [
+                "values",
+                "status",
+                "description",
+                "lemnos.devices",
+                "hello.<fact>"
+            ]
+        );
+        for class in CLASSES {
+            assert_eq!(class.kind, Kind::State, "{}", class.name);
+            assert_eq!(class.expiry_ms, 0, "{}", class.name);
+            assert_eq!(class.history, 2, "{}: a latest-value topic", class.name);
+        }
+    }
 
     fn status(state: DeviceState, health: DeviceHealth) -> Status {
         Status {
