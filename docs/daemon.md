@@ -396,6 +396,19 @@ check. Its connection is checked at connect like any client's (the core and the 
 [the wire](wire.md#core-and-parts)); beyond that it checks no contract, and calls the methods the
 device describes.
 
+### Named files over Orion
+
+The bridge serves the node's `lemnos/` names as files (the "Named files" section above) through
+`service/orion/src/named.rs`. A file Orion sends is a snapshot: a `Read + Seek` over the bytes the node
+held when the transfer opened, read from the node in pieces and closed when dropped; a resumed transfer
+seeks to its offset. The node is named by `LEMNOS_ORION_NAMED_FILES` (the device running
+`named-files`); unset, nothing is served. A name without the `lemnos/` prefix is refused and nothing is
+opened.
+
+Orion's offer for a prefix (`Files::offer`) is not in the pinned Orion revision yet, so the loop that
+connects the offer to these snapshots is not compiled: the marked `ORION-OFFER` comment in
+`named.rs` gives it. Until that switch is on, the bridge serves no `lemnos/` names over Orion.
+
 | Lemnos | Orion |
 |---|---|
 | a device | the resource `lemnos.<device>`, of the kind `lemnos.device`, with the labels `lemnos.driver`, `lemnos.tag` (one per tag) and `lemnos.control.<item>` (the shapes a control or action item takes) |

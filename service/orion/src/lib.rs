@@ -23,6 +23,7 @@ pub mod files;
 pub mod hello;
 pub mod links;
 pub mod mirror;
+pub mod named;
 pub mod privilege;
 pub mod publish;
 pub mod source;
