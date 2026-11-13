@@ -343,7 +343,7 @@ not a claim.
 | reference SoC: `bcm2712-rp1` | PWM | `CONFIG_PWM_RP1` | `drivers/pwm/pwm-rp1.c` | `raspberrypi,rp1-pwm` | verified (reference tree source) |
 | reference SoC: `bcm2712-rp1` | USB device | `CONFIG_USB_DWC2` | `drivers/usb/dwc2/` | `brcm,bcm2835-usb` (`params.c`) | verified (reference tree source); dual-role, `USB_DWC2_PERIPHERAL` unset |
 | reference SoC: `bcm2712-rp1` | watchdog | `CONFIG_BCM2835_WDT` | `drivers/watchdog/bcm2835_wdt.c` | not read | verified (reference `.config`) |
-| reference SoC: `bcm2712-rp1` | RP1 MFD (the bus the RP1 blocks hang on) | `CONFIG_MFD_RP1` | `drivers/mfd/Kconfig` | the RP1 endpoint | verified (reference tree source). Depends on `CONFIG_PCI_MSI`, which `bcm2712_defconfig` does not state: the whole RP1 chain drops out without it (see Dependencies) |
+| reference SoC: `bcm2712-rp1` | RP1 MFD (the bus the RP1 blocks hang on) | `CONFIG_MFD_RP1` | `drivers/mfd/Kconfig` | the RP1 endpoint | verified (reference tree source). Depends on `CONFIG_PCI_MSI`, which `bcm2712_defconfig` does not state. On the board's tree (53679a5, see Dependencies) `PCI_MSI` resolves to `y`, so the board is not affected; a fragment merge that does not resolve the configuration would lose `MFD_RP1` and the chain behind it |
 | reference SoC: `bcm2712-rp1` | PCIe host (the root port the RP1 sits behind) | `CONFIG_PCIE_BRCMSTB` | `drivers/pci/controller/pcie-brcmstb.c` | the SoC's PCIe root port | verified (reference `.config`, and its Kconfig depends on `PCI_MSI`). Not a Kconfig dependency of `MFD_RP1`, but the RP1 is not reached without it: state it in the board's fragment |
 | reference SoC: `bcm2712-rp1` | PIO | `CONFIG_RP1_PIO` | `drivers/misc/rp1-pio.c`, `include/linux/pio_rp1.h` | the RP1 PIO node | verified (reference tree source); needs `FIRMWARE_RP1` and `MBOX_RP1` |
 | reference SoC: `bcm2712-rp1` | SPI | none | none | no SPI controller in the map | not applicable |
@@ -372,6 +372,17 @@ The rows that need a board, or a kernel that is not mainline, are candidates unt
 confirms them. See [Hardware status](hardware-status.md).
 
 ## Dependencies
+
+Tree these rows were resolved against: the reference board's kernel, raspberrypi/linux at commit
+`53679a5788f7912272b412fd78029bccae6f2b1a` (the commit in the board build's buildroot configuration,
+`BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION`; the build tree has no git metadata, so the commit is the
+buildroot record, not a git check). Its `kernelversion` is 7.2.9 with local version `-v8-16k`. Its
+`bcm2712_defconfig` is the file the rows were computed from. Rows for other SoCs were resolved against
+this same tree's Kconfig, not against their own trees: they are not resolved against mainline here.
+
+The earlier statement that this chain "drops out" on the board was wrong: on this tree `PCI_MSI`
+resolves to `y`, and the board's real `.config` has it set. What the table records is the explicit
+statement a fragment needs, not a fault on the board.
 
 Each symbol this document names, with the Kconfig symbols it depends on that a board's
 `bcm2712_defconfig` does not state (the reference SoC's defconfig, read from its tree). The rule is
@@ -481,7 +492,8 @@ harness kernel's own `.config`, after the build.
 ## Cross-check against the reference SoC's configuration
 
 The reference SoC's real `.config` (read-only, from its tree) was checked against every symbol this
-document names, with the same closure as the Dependencies table, on the real configuration (which
+document names, with the same closure as the Dependencies table, on the real configuration of the tree
+`53679a5` (identified in Dependencies above; which
 is complete, so nothing is implied by a default). Result:
 
 - Every required symbol of the `lemnos.ko` table is set, except `CONFIG_CPU_BIG_ENDIAN`, which is
