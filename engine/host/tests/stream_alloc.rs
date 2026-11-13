@@ -40,7 +40,7 @@ fn a_thousand_frames_through_the_host_allocate_nothing() {
         assert!(source.produce(&mut producer, &mut write).unwrap());
         let got = consumer.pop_frame().unwrap().unwrap();
         assert_eq!(got.sequence, sequence);
-        assert_eq!(got.identity, SimFrameSource::identity(sequence));
+        assert_eq!(got.identity, 0);
         assert!(consumer.release(got.buffer));
     };
     for sequence in 0..10 {

@@ -6,9 +6,11 @@ use lemnos_hal::{ErrorKind, StreamEndpoint};
 /// Puts a frame's bytes into a buffer, as a device would.
 pub type FrameWriter<'a> = dyn FnMut(u32, &[u8]) -> Result<bool, ErrorKind> + 'a;
 
-/// Produces frames onto any [`StreamEndpoint`]. Each frame's contents, identity and timestamp come
-/// from its sequence number, so a consumer can check all of them. It uses one scratch buffer, so
-/// after the first frame it allocates nothing.
+/// Produces frames onto any [`StreamEndpoint`]. Each frame's contents and timestamp come from its
+/// sequence number, so a consumer can check them. The sequence is the frame counter from this
+/// source's start. The identity is what the caller names: 0 for a camera receiver, which takes no
+/// job (as on hardware), or the job's identity for a producer that answers one. It uses one
+/// scratch buffer, so after the first frame it allocates nothing.
 #[derive(Debug)]
 pub struct SimFrameSource {
     bytes: usize,
@@ -34,23 +36,29 @@ impl SimFrameSource {
         }
     }
 
-    /// What frame `sequence` carries as its identity. Means nothing to anyone but the test.
-    #[must_use]
-    pub const fn identity(sequence: u64) -> u64 {
-        sequence ^ 0xFEED_0000_0000_0000
-    }
-
     /// The next sequence number this source will produce.
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
     }
 
-    /// Takes a free buffer, fills it through `write` and publishes it. `false` when no buffer is
-    /// free, which isn't an error and uses up no sequence number.
+    /// Takes a free buffer, fills it through `write` and publishes it with identity 0, as a
+    /// camera receiver publishes. `false` when no buffer is free, which isn't an error and uses up
+    /// no sequence number.
     pub fn produce(
         &mut self,
         stream: &mut impl StreamEndpoint<Error = ErrorKind>,
+        write: &mut FrameWriter<'_>,
+    ) -> Result<bool, ErrorKind> {
+        self.produce_with_identity(stream, 0, write)
+    }
+
+    /// [`Self::produce`], publishing `identity` (the job the frame answers, for a producer that
+    /// takes jobs).
+    pub fn produce_with_identity(
+        &mut self,
+        stream: &mut impl StreamEndpoint<Error = ErrorKind>,
+        identity: u64,
         write: &mut FrameWriter<'_>,
     ) -> Result<bool, ErrorKind> {
         let Some(buffer) = stream.next_buffer()? else {
@@ -64,7 +72,7 @@ impl SimFrameSource {
             buffer,
             bytes: self.bytes as u32,
             sequence,
-            identity: Self::identity(sequence),
+            identity,
             timestamp_ns: sequence * 1000,
         })?;
         Ok(true)
@@ -94,7 +102,7 @@ mod tests {
         assert_eq!(source.sequence(), 2);
         let first = consumer.take_frame().unwrap();
         assert_eq!(first.sequence, 0);
-        assert_eq!(first.identity, SimFrameSource::identity(0));
+        assert_eq!(first.identity, 0, "a receiver's frames carry identity 0");
         assert_eq!(first.bytes, 8);
         assert_eq!(written[0].1, [0, 1, 2, 3, 4, 5, 6, 7]);
         let second = consumer.take_frame().unwrap();

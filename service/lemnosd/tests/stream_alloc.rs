@@ -34,7 +34,7 @@ fn frames_allocate_nothing_anywhere_in_the_process() {
         assert!(source.produce(&mut producer, &mut write).unwrap());
         let got = stream.next_frame(Duration::from_secs(5)).unwrap().unwrap();
         assert_eq!(got.sequence(), sequence);
-        assert_eq!(got.identity(), SimFrameSource::identity(sequence));
+        assert_eq!(got.identity(), 0);
         assert_eq!(stream.bytes(&got).len(), 4096);
         stream.release(got).unwrap();
     };

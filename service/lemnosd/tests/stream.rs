@@ -72,7 +72,7 @@ fn poll_until(mut done: impl FnMut() -> bool) -> bool {
 }
 
 #[test]
-fn frames_cross_from_a_producer_thread_with_contents_order_and_identity_intact() {
+fn frames_cross_from_a_producer_thread_with_contents_and_order_intact() {
     let running = service();
     let (mut session, mut stream) = open(&running);
     let mut producing = producer(&running);
@@ -106,7 +106,7 @@ fn frames_cross_from_a_producer_thread_with_contents_order_and_identity_intact()
         );
         last = Some(sequence);
         seen += 1;
-        assert_eq!(frame.identity(), SimFrameSource::identity(sequence));
+        assert_eq!(frame.identity(), 0);
         assert_eq!(frame.timestamp_ns(), sequence * 1000);
         assert_eq!(frame.len(), FRAME_BYTES);
         SimFrameSource::fill(sequence, &mut expected);

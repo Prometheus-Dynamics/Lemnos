@@ -106,7 +106,16 @@ checks the copy, because the consumer shares the memory and can change it at any
 ## Frames
 
 The driver publishes a frame: a buffer number, a length, a sequence number, a timestamp in
-nanoseconds and an identity. The identity is 64 bits the producer chose. Lemnos never reads it.
+nanoseconds and an identity.
+
+Which field counts frames: `sequence` is the frame counter. It counts every frame the producer
+publishes, from the producer's start, and it is the frame's number (a consumer numbers and checks frames
+by it). `identity` is 64 bits the producer chose, and it means something only when the producer names
+the frame by a job it answers: a block that takes jobs (the ISP's job identity, which the job posted
+carries back). A producer that takes no job publishes identity 0: a camera receiver does, on hardware and
+in the simulator. Lemnos never reads `identity`; a consumer must not use it as a frame number. The
+simulated producer (`SimFrameSource::produce`) publishes identity 0, as a receiver does;
+`produce_with_identity` names one for a simulated job.
 Every published frame carries its capture time, the driver's timestamp (`CLOCK_MONOTONIC` ns), as
 the time of its ring batch (the shm sample time of the entry): not the time of publishing. A foreign
 reader gets it from the batch's `time`, and `lemnos-client` from the frame.
