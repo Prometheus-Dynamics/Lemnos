@@ -428,7 +428,7 @@ fn the_service_says_it_has_streams_of_handles() {
         feature::STREAM_HANDLES
     );
     assert_eq!(
-        raw.features & !feature::ALL,
+        raw.features & !feature::EVERY,
         0,
         "and no bit this build doesn't know"
     );

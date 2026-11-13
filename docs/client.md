@@ -82,6 +82,7 @@ What a client can do:
   status and result when it ends. Progress may skip steps: only the latest is kept. A `Session`
   starts one with `send_job` and sees `Incoming::JobStarted` and `Incoming::Job` from `poll`. A job
   open when the connection is lost ends as `INTERRUPTED`.
+- **`usb_endpoints`, `usb_endpoints_release`**: a USB function's two bulk endpoints (`usb.function/1`), lent to this connection as `out` and `input` descriptors that the caller reads and writes itself. One connection holds them at a time; another gets `BUSY`. The caller passes the stream platform that takes descriptors off the socket (`lemnos-linux-stream`'s `LinuxStreams` on Linux), as for a stream. See [the wire's Endpoints section](wire.md#endpoints).
 - **`open_stream`, `open_stream_writable`**: a device's [frame stream](streams.md). The stream says its buffer length (`buffer_len`) and count (`buffer_count`).
   `close_stream`
   gives it back; dropping it does the same, with the close sent on the client's next request. Closing

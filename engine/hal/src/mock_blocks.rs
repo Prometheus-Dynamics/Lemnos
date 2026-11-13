@@ -1219,11 +1219,29 @@ impl UsbFunctionState {
 #[derive(Debug, Clone, Default)]
 pub struct MockUsbFunction {
     state: Shared<UsbFunctionState>,
+    /// What [`UsbFunction::endpoint_handles`] lends: the OUT endpoint's file, then the IN's.
+    /// Outside the state, so a borrow of it can outlive the lock.
+    #[cfg(all(feature = "std", unix))]
+    endpoint_files: Option<super::std::sync::Arc<[super::std::os::fd::OwnedFd; 2]>>,
 }
 
 impl MockUsbFunction {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A function that lends `out` and `input` as its bulk endpoints: the OUT endpoint's file
+    /// first, as [`UsbFunction::endpoint_handles`] orders them. A test plays the other end of
+    /// each.
+    #[cfg(all(feature = "std", unix))]
+    pub fn with_endpoint_files(
+        out: super::std::os::fd::OwnedFd,
+        input: super::std::os::fd::OwnedFd,
+    ) -> Self {
+        Self {
+            endpoint_files: Some(super::std::sync::Arc::new([out, input])),
+            ..Self::default()
+        }
     }
 
     /// The descriptors the function is enabled with.
@@ -1313,6 +1331,28 @@ impl UsbFunction for MockUsbFunction {
             s.enables += 1;
             Ok(())
         })
+    }
+
+    #[cfg(all(feature = "std", unix))]
+    fn endpoint_handles(&self) -> Result<[crate::blocks::BufferHandle<'_>; 2], ErrorKind> {
+        use super::std::os::fd::AsFd;
+        if !with(&self.state, |s| s.descriptors.is_some()) {
+            return Err(ErrorKind::Unavailable);
+        }
+        let files = self
+            .endpoint_files
+            .as_deref()
+            .ok_or(ErrorKind::Unsupported)?;
+        Ok([
+            crate::blocks::BufferHandle::from(files[0].as_fd()),
+            crate::blocks::BufferHandle::from(files[1].as_fd()),
+        ])
+    }
+
+    /// Without descriptors there is nothing to lend.
+    #[cfg(not(all(feature = "std", unix)))]
+    fn endpoint_handles(&self) -> Result<[crate::blocks::BufferHandle<'_>; 2], ErrorKind> {
+        Err(ErrorKind::Unsupported)
     }
 
     fn disable(&mut self) -> Result<(), ErrorKind> {

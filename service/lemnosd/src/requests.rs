@@ -170,6 +170,8 @@ impl Client {
                 args,
             } => self.call_job(id, device, contract, method, args),
             Frame::JobCancel { id, job } => self.cancel_job(id, job),
+            Frame::EndpointsOpen { id, device } => self.endpoints_open(id, device),
+            Frame::EndpointsClose { id, device } => self.endpoints_close(id, device),
             // Only the service sends the rest.
             _ => false,
         }
@@ -189,7 +191,7 @@ impl Client {
             parts: Tail(&PART_BYTES[..]),
             lemnos: LemnosName(LEMNOS),
             version: VERSION,
-            features: feature::STREAM_HANDLES | feature::PACKAGES | feature::JOBS,
+            features: feature::EVERY,
             host: &self.core.name,
         });
         true
@@ -498,6 +500,29 @@ impl Client {
             lease.descriptors,
         );
         true
+    }
+
+    /// Lends this connection the bulk pair of a device's function. The descriptors close here if
+    /// the connection has already gone, and the host's hold on them goes with it.
+    fn endpoints_open(&self, id: u32, device: u32) -> Keep {
+        match self.core.host.usb_endpoints(self.conn.id, device) {
+            Ok([out, input]) => {
+                self.conn
+                    .answer_with_descriptors(&Frame::Endpoints { id }, vec![out, input]);
+                true
+            }
+            Err(status) => self.refuse(id, status, "can't open the endpoints"),
+        }
+    }
+
+    fn endpoints_close(&self, id: u32, device: u32) -> Keep {
+        match self.core.host.usb_endpoints_release(self.conn.id, device) {
+            Ok(()) => {
+                self.conn.answer(&Frame::Reply { id, bytes: &[] });
+                true
+            }
+            Err(status) => self.refuse(id, status, "can't close the endpoints"),
+        }
     }
 
     fn stream_close(&self, id: u32, device: u32, name: &str) -> Keep {

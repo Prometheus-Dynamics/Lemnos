@@ -18,6 +18,7 @@ pub mod calls;
 pub mod config;
 pub mod files;
 pub mod hello;
+pub mod links;
 pub mod mirror;
 pub mod privilege;
 pub mod publish;

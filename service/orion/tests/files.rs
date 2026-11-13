@@ -195,6 +195,7 @@ fn start_bridge(lemnosd: &Path, orion: &Path, incoming: &Path) -> Bridge {
         node_id: None,
         run_as: None,
         files: vec![("slots".to_owned(), incoming.to_path_buf())],
+        links: Vec::new(),
     };
     let (jobs, queue) = mpsc::channel();
     let threads = vec![
@@ -281,12 +282,24 @@ impl Setup {
     /// Pushes `bytes` to `lemnos/slots/<name>`, trying again until the bridge is the receiver.
     fn push(&self, name: &str, bytes: &[u8]) -> orion::files::Transfer {
         let destination = format!("lemnos/slots/{name}");
-        wait_for("a push the bridge answers", || {
-            self.dashboard
-                .files()
-                .push(&destination, &mut Cursor::new(bytes), |_, _| {})
-                .ok()
-        })
+        // Retried until the bridge answers. The last error is in the message if it never does.
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let last =
+                match self
+                    .dashboard
+                    .files()
+                    .push(&destination, &mut Cursor::new(bytes), |_, _| {})
+                {
+                    Ok(transfer) => return transfer,
+                    Err(error) => format!("{error}"),
+                };
+            assert!(
+                Instant::now() < deadline,
+                "timed out: a push the bridge answers (last error: {last})"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn start(&self, args: &str) -> Run {

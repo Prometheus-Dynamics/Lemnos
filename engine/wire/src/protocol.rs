@@ -61,9 +61,16 @@ pub mod feature {
         /// The host takes CallJob and JobCancel: long jobs, with their progress and end sent to
         /// whoever started them.
         pub const JOBS: u64 = 4;
-        /// Every bit this build knows.
+        /// Every bit of the parts that are folded into the core hash.
         pub const ALL: u64 = STREAM_HANDLES | PACKAGES | JOBS;
     }
+    /// The host takes EndpointsOpen and EndpointsClose, and answers the first with Endpoints: a
+    /// function's two bulk endpoints, borrowed by one connection at a time. Added after the core
+    /// and the parts, so it is not folded into their hashes (`ALL` above is): a build without it
+    /// agrees on all of them, and refuses the three kinds alone with `UnknownKind`.
+    pub const ENDPOINTS: u64 = 16;
+    /// Every bit this build knows: [`ALL`] and [`ENDPOINTS`].
+    pub const EVERY: u64 = ALL | ENDPOINTS;
 }
 
 /// The parts a feature bit stands for, in bit order: part `n` is bit `1 << (n - 1)`. A part is
@@ -376,6 +383,14 @@ frames! {
         20 Refusal { id: u32, status: i32, text: &'a str }
         /// Answered with an empty Reply.
         21 StreamClose { id: u32, device: u32, name: &'a str }
+        /// Borrows the bulk endpoints of a device's function for this connection. Sent only to a
+        /// host whose Welcome set [`feature::ENDPOINTS`]. Answered with Endpoints, or Refusal.
+        added 32 EndpointsOpen { id: u32, device: u32 }
+        /// The two bulk endpoints, `[OUT, IN]`: two descriptors with this frame over `SCM_RIGHTS`,
+        /// the OUT endpoint's first. Only the connection that asked holds them.
+        added 33 Endpoints { id: u32 }
+        /// Gives up the endpoints this connection holds. Answered with an empty Reply.
+        added 34 EndpointsClose { id: u32, device: u32 }
     }
     // The stream-handles part: a stream whose buffers are one descriptor each. Its constants are
     // in [`handles`].

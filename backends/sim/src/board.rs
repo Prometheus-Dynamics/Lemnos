@@ -168,6 +168,13 @@ impl SimBoard {
         stream
     }
 
+    /// Adds a USB function the test made itself, such as
+    /// [`MockUsbFunction::with_endpoint_files`].
+    pub fn add_usb_function_of(&self, name: &str, function: MockUsbFunction) -> MockUsbFunction {
+        self.insert(name, Part::UsbFunction(function.clone()));
+        function
+    }
+
     /// Adds DMA memory the test made itself, such as [`MockDma::at`].
     pub fn add_dma_of(&self, name: &str, dma: MockDma) -> MockDma {
         self.insert(name, Part::Dma(dma.clone()));

@@ -20,6 +20,18 @@ pub struct Config {
     pub run_as: Option<RunAs>,
     /// Devices that take files sent through Orion, and the directory each one's go into.
     pub files: Vec<(String, PathBuf)>,
+    /// USB function devices whose bulk endpoints are offered to the comm core, each as the link
+    /// it is for: `LEMNOS_ORION_LINKS`.
+    pub links: Vec<Link>,
+}
+
+/// A device's bulk endpoints offered to the comm core as a link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// The device's name in the board file.
+    pub device: String,
+    /// The link the comm core knows it by.
+    pub link: String,
 }
 
 /// The unprivileged identity the service drops to: a user, a primary group, and the supplementary
@@ -54,6 +66,7 @@ impl Config {
                 std::env::var("LEMNOS_ORION_GROUPS").ok().as_deref(),
             ),
             files: files(std::env::var("LEMNOS_ORION_FILES").ok().as_deref())?,
+            links: links(std::env::var("LEMNOS_ORION_LINKS").ok().as_deref())?,
         })
     }
 }
@@ -119,9 +132,50 @@ pub fn files(value: Option<&str>) -> Result<Vec<(String, PathBuf)>, String> {
         .collect()
 }
 
+/// `device=link` pairs, comma-separated, from `LEMNOS_ORION_LINKS`.
+pub fn links(value: Option<&str>) -> Result<Vec<Link>, String> {
+    let Some(text) = value.filter(|text| !text.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    text.split(',')
+        .map(str::trim)
+        .map(|entry| {
+            let (device, link) = entry
+                .split_once('=')
+                .filter(|(device, link)| !device.is_empty() && !link.is_empty())
+                .ok_or_else(|| format!("LEMNOS_ORION_LINKS {entry:?}: want device=link"))?;
+            Ok(Link {
+                device: device.to_owned(),
+                link: link.to_owned(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_name_each_usb_device_and_its_link() {
+        assert_eq!(links(None), Ok(Vec::new()));
+        assert_eq!(
+            links(Some("gadget=serial, other=link2")),
+            Ok(vec![
+                Link {
+                    device: "gadget".to_owned(),
+                    link: "serial".to_owned(),
+                },
+                Link {
+                    device: "other".to_owned(),
+                    link: "link2".to_owned(),
+                },
+            ])
+        );
+        assert!(links(Some("gadget")).is_err());
+        assert!(links(Some("=serial")).is_err());
+        assert!(links(Some("gadget=")).is_err());
+    }
 
     #[test]
     fn files_name_each_device_and_its_directory() {

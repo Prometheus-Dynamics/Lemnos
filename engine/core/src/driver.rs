@@ -2,6 +2,7 @@ use crate::{
     Config, ContractInfo, Decode, Description, Encode, Need, Reader, Resources, Result, Shape,
     Status, Writer,
 };
+use lemnos_hal::blocks::BufferHandle;
 use lemnos_hal::register::AddressWidth;
 
 /// A driver's reply buffer.
@@ -142,6 +143,14 @@ pub trait Driver: Sized {
     fn caller(&mut self, _caller: CallerId) {}
     /// See [`Lifecycle::caller_gone`].
     fn caller_gone(&mut self, _caller: CallerId) {}
+    /// See [`Lifecycle::endpoints`].
+    fn endpoints(&mut self, _caller: CallerId) -> Result<[BufferHandle<'_>; 2]> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// See [`Lifecycle::release_endpoints`].
+    fn release_endpoints(&mut self, _caller: CallerId) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
     /// Whether the driver runs long jobs. See [`Lifecycle::JOBS`].
     const JOBS: bool = false;
     /// See [`Lifecycle::job`].
@@ -224,6 +233,21 @@ pub trait Lifecycle: Sized {
     /// `caller` has gone, by closing its connection or by dying. Give up what it held. Runs on
     /// the driver's lane, one call at a time with its methods, and must not block.
     fn caller_gone(&mut self, _caller: CallerId) {}
+    /// Lends `caller` the two bulk endpoints of the driver's function, as descriptors it can
+    /// read and write itself, `[OUT, IN]`. Only one caller holds them at a time: a driver
+    /// answers `BUSY` for another while one holds them, and `Unavailable` while the function
+    /// is not enabled. The borrow is good for the caller to dup, and is taken on the driver's
+    /// lane, so it must not block. Set [`TRACKS_CALLERS`](Self::TRACKS_CALLERS) for a driver
+    /// that lends, so [`caller_gone`](Self::caller_gone) ends the hold. `NOT_SUPPORTED` by
+    /// default.
+    fn endpoints(&mut self, _caller: CallerId) -> Result<[BufferHandle<'_>; 2]> {
+        Err(Status::NOT_SUPPORTED)
+    }
+    /// `caller` gives up the endpoints [`endpoints`](Self::endpoints) lent it. `NOT_FOUND`
+    /// when it holds none.
+    fn release_endpoints(&mut self, _caller: CallerId) -> Result<()> {
+        Err(Status::NOT_SUPPORTED)
+    }
     /// Set this to `true` for a driver with long jobs: methods its contracts mark
     /// `#[method(N, job)]`, which start work and return a [`JobId`] at once. The work itself is
     /// done a step at a time from [`Lifecycle::tick`], so such a driver ticks too.

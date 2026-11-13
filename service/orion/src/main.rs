@@ -67,6 +67,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    // One thread per USB function whose endpoints are offered as a link.
+    for link in config.links.clone() {
+        let config = config.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("link-{}", link.link))
+            .spawn(move || lemnos_orion::links::run(&config, &link));
+        if let Err(error) = spawned {
+            log(&format!("cannot start a link thread: {error}"));
+            return ExitCode::FAILURE;
+        }
+    }
     publish::run(&config, &shared, &jobs);
     ExitCode::SUCCESS
 }
