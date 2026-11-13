@@ -5,7 +5,9 @@
    `IS_ENABLED(CONFIG_X)`, `$(CONFIG_X)`) has a row in the "lemnos.ko" table of
    docs/kernel-config.md.
 2. Every row marked `required` is enabled (`=y`) in testing/qemu/kernel.config, the
-   harness's configuration, and every row marked `must be unset` is not enabled there.
+   harness's configuration, and in testing/qemu/kernel-modules-off.config, the configuration of
+   the kernel with no modules; every row marked `must be unset` is not enabled in either. The
+   modules-off configuration also says CONFIG_MODULES is not set and CONFIG_LEMNOS=y.
 
 Exits 1 and says what is wrong; 0 when both hold.
 """
@@ -17,6 +19,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "kernel-config.md"
 KERNEL = ROOT / "kernel"
 HARNESS = ROOT / "testing" / "qemu" / "kernel.config"
+# The configuration of the kernel with no modules (build-kernel.sh --modules-off): the same
+# required symbols, and module support off.
+MODULES_OFF = ROOT / "testing" / "qemu" / "kernel-modules-off.config"
 SECTION = "## Symbols of lemnos.ko"
 SYMBOL = re.compile(r"(?<![A-Za-z0-9_])(CONFIG_[A-Z0-9_]+)")
 ROW = re.compile(r"^\|\s*`(CONFIG_[A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|]+?)\s*\|")
@@ -50,12 +55,15 @@ def table():
     return rows
 
 
-def harness():
+def harness(path=HARNESS):
     values = {}
-    for line in HARNESS.read_text().splitlines():
+    for line in path.read_text().splitlines():
         match = re.match(r"^(CONFIG_[A-Z0-9_]+)=(\S+)$", line.strip())
         if match:
             values[match.group(1)] = match.group(2)
+        match = re.match(r"^# (CONFIG_[A-Z0-9_]+) is not set$", line.strip())
+        if match:
+            values[match.group(1)] = "unset"
     return values
 
 
@@ -65,12 +73,17 @@ def main():
     for name, where in referenced().items():
         if name not in rows:
             problems.append(f"{where}: {name} is not in the lemnos.ko table of {DOC.relative_to(ROOT)}")
-    enabled = harness()
-    for name, requirement in rows.items():
-        if requirement == "required" and enabled.get(name) != "y":
-            problems.append(f"{name} is required for lemnos.ko but {HARNESS.relative_to(ROOT)} does not set it to y")
-        if requirement == "must be unset" and enabled.get(name) in ("y", "m"):
-            problems.append(f"{name} must be unset for lemnos.ko but {HARNESS.relative_to(ROOT)} sets it")
+    for path in (HARNESS, MODULES_OFF):
+        enabled = harness(path)
+        for name, requirement in rows.items():
+            if requirement == "required" and enabled.get(name) != "y":
+                problems.append(f"{name} is required for lemnos.ko but {path.relative_to(ROOT)} does not set it to y")
+            if requirement == "must be unset" and enabled.get(name) in ("y", "m"):
+                problems.append(f"{name} must be unset for lemnos.ko but {path.relative_to(ROOT)} sets it")
+    if harness(MODULES_OFF).get("CONFIG_MODULES") != "unset":
+        problems.append(f"{MODULES_OFF.relative_to(ROOT)} must say # CONFIG_MODULES is not set")
+    if harness(MODULES_OFF).get("CONFIG_LEMNOS") != "y":
+        problems.append(f"{MODULES_OFF.relative_to(ROOT)} must set CONFIG_LEMNOS=y")
     for problem in problems:
         print(f"kernel-config: {problem}", file=sys.stderr)
     if problems:

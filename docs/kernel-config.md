@@ -32,36 +32,42 @@ An image with no loadable modules needs every symbol it uses at `=y`. Two routes
   Status: the out-of-tree build produces `lemnos.ko`, run here. The in-tree route is built and
   booted in QEMU (below), **untested on board**.
 
-### In-tree build, checked in QEMU
+### The kernel with no loadable modules, checked in QEMU
 
-The harness kernel (`testing/qemu/build-kernel.sh`, pinned 7.3.3, the configuration in
-`testing/qemu/kernel.config`) was built again with `lemnos` built in and modules still on, then
-booted with no `lemnos.ko` in the image. Commands, in order (`<work>` is a scratch directory,
-`<src>` the unpacked tree, `<out>` its build directory):
+This is the configuration a flasher image depends on: module support off, and `lemnos` built into
+the kernel. It is built and booted in CI (job `qemu-modules-off` in
+`.github/workflows/next-kernel.yml`, on every change), and by hand with these commands:
 
 ```text
-cp -r kernel <src>/drivers/misc/lemnos
-# drivers/misc/Kconfig:   source "drivers/misc/lemnos/Kconfig"
-# drivers/misc/Makefile:  obj-$(CONFIG_LEMNOS) += lemnos/
-echo CONFIG_LEMNOS=y >> <out>/.config
-make -C <src> O=<out> ARCH=x86_64 olddefconfig
-make -C <src> O=<out> ARCH=x86_64 -j6 bzImage modules
-KERNEL=<out>/arch/x86/boot/bzImage testing/qemu/run-builtin.sh
+testing/qemu/build-kernel.sh <dir> --modules-off   # CONFIG_MODULES unset, CONFIG_LEMNOS=y
+KERNEL=<dir>/build/arch/x86/boot/bzImage CC="zig cc -target x86_64-linux-musl" testing/qemu/run-builtin.sh
 ```
 
-`run-builtin.sh` boots with `lemnos.owned=lemnos,test-block,lemnos,test-spi lemnos.bus_buffer=8192`
-on the command line. Its guest (`testing/qemu/init-builtin.c`) checks that the module is built in
-(`/sys/module/lemnos` exists) and no `lemnos.ko` is in the image, that the control node exists
-before any daemon starts, that both command-line parameters read back from
-`/sys/module/lemnos/parameters`, and that `lemnos_claim_check` passes. Result, KVM, one run:
-`lemnos-builtin: passed (0 failed)`, with no kernel warnings.
+`build-kernel.sh --modules-off` uses `testing/qemu/kernel-modules-off.config`. It copies `kernel/`
+into the tree as `drivers/misc/lemnos`, adds the Kconfig source and the `obj-$(CONFIG_LEMNOS)` line
+(the two lines an image builder adds), and builds only `bzImage`: there are no modules to build.
+The copy is made each time, so with a warm cache only `kernel/` recompiles.
 
-The guest suite (`testing/qemu/init.c`) is not run on the built-in kernel: it loads `lemnos.ko`
-many times with different parameters, which a built-in module cannot do. Its parameters come from
-the command line instead (below).
+`run-builtin.sh` boots that image three times, each with a different command line, and each boot
+must pass the guest's checks (`testing/qemu/init-builtin.c`):
 
-Not in CI: the in-tree build needs a second kernel build, a full harness-kernel build each run.
-It is run by hand as above, and the `run-builtin.sh` check is for this kernel only.
+| Boot | Command line (`lemnos.` parameters) |
+|---|---|
+| 1 | `owned=lemnos,test-block,lemnos,test-spi bus_buffer=8192` |
+| 2 | `owned=lemnos,test-csi2 confined=lemnos,test-csi2 unconfined=lemnos,test-vip bus_buffer=4096` |
+| 3 | none: every parameter takes its default |
+
+The guest checks: the module is built in (`/sys/module/lemnos`), no `lemnos.ko` is in the image,
+`init_module` answers ENOSYS (no module support), the control node exists at boot before any
+daemon, every parameter reads back what its command line gave (or its default), and
+`lemnos_claim_check` passes. Result, KVM, the three boots:
+`lemnos-builtin: passed (0 failed)` three times, then `qemu: built-in passed on kvm, 3 parameter sets`.
+
+What this proves: the module builds into a kernel with no modules, initialises at boot, takes its
+parameters from the command line, and gives its control node and claims. It does not prove
+anything that needs a device: no fake block is in this kernel, so nothing here reaches a bus,
+a stream, a DMA engine or an interrupt. Those are covered only by the guest suite with the
+modules-on kernel (`testing/qemu/run.sh`), which loads `lemnos.ko` with parameters at load time.
 
 ### Parameters from the command line
 

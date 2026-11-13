@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Boots a kernel with lemnos built in (CONFIG_LEMNOS=y, no lemnos.ko in the image) and checks
-# that the module takes its parameters from the kernel command line and passes the claim checks.
+# Boots a kernel with no loadable modules and lemnos built in (build-kernel.sh --modules-off),
+# once per parameter set, each set on the kernel command line. Each boot must pass the guest's
+# checks (testing/qemu/init-builtin.c): the parameters read back as given, the claims work, and
+# the kernel reports nothing wrong.
 #
-#   KERNEL  the bootable image of such a kernel (required)
+#   KERNEL  the bootable image of such a kernel (required: set KERNEL to its bzImage)
 #   CC      a compiler that can link static binaries (default: gcc)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-KERNEL="${KERNEL:?set KERNEL to the bzImage of the built-in kernel}"
+KERNEL="${KERNEL:?set KERNEL to the bzImage of the modules-off kernel}"
 CC="${CC:-gcc}"
 
 work="$(mktemp -d)"
@@ -24,24 +26,35 @@ read -r -a compiler <<<"$CC"
 
 accel=tcg
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then accel=kvm; fi
-log="$work/console.log"
-status=0
-# The module's parameters on the command line, as a built-in module takes them.
-timeout 600 qemu-system-x86_64 -accel "$accel" -cpu max -smp 2 -m 768 -nographic -no-reboot \
-  -kernel "$KERNEL" -initrd "$work/initramfs" \
-  -append "console=ttyS0 panic=-1 oops=panic loglevel=4 lemnos.owned=lemnos,test-block,lemnos,test-spi lemnos.bus_buffer=8192" \
-  | tee "$log" || status=$?
-after="$(sed -n '/lemnos-builtin: start/,$p' "$log")"
-if [[ $status -ne 0 ]]; then
-  echo "qemu: exited with status $status" >&2
-  exit 1
-fi
-if ! grep -q 'lemnos-builtin: passed' <<<"$after"; then
-  echo "qemu: the built-in checks did not pass" >&2
-  exit 1
-fi
-if grep -E 'BUG:|WARNING:|Oops|possible (circular|recursive) locking|UBSAN|KASAN|Call Trace' <<<"$after" >&2; then
-  echo "qemu: the kernel reported a problem during the checks" >&2
-  exit 1
-fi
-echo "qemu: built-in passed on $accel"
+
+# One boot per set: each gives the module different parameters, and the guest checks each one
+# against the line it was booted with. The last set gives none, so every default is checked.
+sets=(
+  "lemnos.owned=lemnos,test-block,lemnos,test-spi lemnos.bus_buffer=8192"
+  "lemnos.owned=lemnos,test-csi2 lemnos.confined=lemnos,test-csi2 lemnos.unconfined=lemnos,test-vip lemnos.bus_buffer=4096"
+  ""
+)
+for set in "${sets[@]}"; do
+  log="$work/console.log"
+  status=0
+  # shellcheck disable=SC2086 # the words of the set are separate kernel parameters
+  timeout 600 qemu-system-x86_64 -accel "$accel" -cpu max -smp 2 -m 768 -nographic -no-reboot \
+    -kernel "$KERNEL" -initrd "$work/initramfs" \
+    -append "console=ttyS0 panic=-1 oops=panic loglevel=4 $set" \
+    | tee "$log" || status=$?
+  echo "qemu: boot with [${set:-no parameters}] exited with status $status" >&2
+  after="$(sed -n '/lemnos-builtin: start/,$p' "$log")"
+  if [[ $status -ne 0 ]]; then
+    echo "qemu: exited with status $status" >&2
+    exit 1
+  fi
+  if ! grep -q 'lemnos-builtin: passed' <<<"$after"; then
+    echo "qemu: the built-in checks did not pass with [$set]" >&2
+    exit 1
+  fi
+  if grep -E 'BUG:|WARNING:|Oops|possible (circular|recursive) locking|UBSAN|KASAN|Call Trace' <<<"$after" >&2; then
+    echo "qemu: the kernel reported a problem with [$set]" >&2
+    exit 1
+  fi
+done
+echo "qemu: built-in passed on $accel, ${#sets[@]} parameter sets"
