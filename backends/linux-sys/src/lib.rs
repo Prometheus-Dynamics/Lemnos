@@ -47,5 +47,7 @@ pub use ioctl::{Ioctl, Pod, from_bytes, ioc, ior, iow, iowr, zeroed};
 
 #[cfg(any(test, feature = "alloc-count"))]
 pub mod test_alloc;
+#[cfg(any(test, feature = "test-csi2"))]
+pub mod test_csi2;
 #[cfg(any(test, feature = "test-pty"))]
 pub mod test_pty;

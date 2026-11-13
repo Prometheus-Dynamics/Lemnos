@@ -1,0 +1,16 @@
+[package]
+name = "lemnos-stream-compose-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Composition check in the QEMU harness: the fake receiver's frames through the module, the rp1-csi2 driver, the host's endpoint and the shm ring, read by a client through lemnosd"
+
+[lints]
+workspace = true
+
+[dependencies]
+lemnos-client = { path = "../../../engine/client" }
+lemnos-contract-camera-receiver = { path = "../../../contracts/camera-receiver" }
+lemnos-linux-stream = { path = "../../../backends/linux-stream" }
+lemnos-linux-sys = { path = "../../../backends/linux-sys", features = ["test-csi2"] }

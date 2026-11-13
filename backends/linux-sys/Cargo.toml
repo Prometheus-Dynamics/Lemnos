@@ -33,6 +33,8 @@ alloc-count = []
 test-pty = []
 # A recording stand-in for usbdevfs, for tests of USB code in other crates.
 test-usbfs = []
+# The fake camera receiver of the QEMU harness (`testing/qemu/test_block`): firing its status word.
+test-csi2 = []
 
 [dependencies]
 libc.workspace = true
