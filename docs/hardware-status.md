@@ -3,7 +3,7 @@
 **Most of this repository has not been run on hardware in its present form.** The drivers, the
 backends and the kernel module were written and tested against simulations, mocks and models of
 the kernel's behaviour, and each has a written check waiting under `testing/board-runs/`.
-Of those 91 files, the ones listed under [The first board run](#the-first-board-run) record what
+Of those 90 files, the ones listed under [The first board run](#the-first-board-run) record what
 two runs on the reference board showed; everything else is still *untested on board*.
 
 This page lists what a board still has to show. [Testing](testing.md#board-runs) says how to do a
@@ -188,7 +188,6 @@ listed in [Drivers and contracts](drivers.md#library-crates) and in [`TODO.md`](
 
 | Check | What a board has to show |
 |---|---|
-| [`E15.md`](../testing/board-runs/E15.md) | Stateless decode: an intra picture byte-equal to a reference, timings |
 | [`E16.md`](../testing/board-runs/E16.md) | The MPP service: hardware ID, layouts, a claim, IOMMU confinement |
 | [`E37.md`](../testing/board-runs/E37.md) | `codec.block/1` on each block that serves it: job checks, refusals, clocks off after a kill |
 | [`E17.md`](../testing/board-runs/E17.md) | The IEP deinterlacer: strides, scratch size, results, a dropped job |

@@ -1,7 +1,7 @@
 //! A stateless V4L2 decoder given to a caller as `codec.block/1`: each job is one media
 //! request, made of the caller's controls, its bitstream buffer and its picture buffers. No
 //! bitstream is parsed here and no codec is named: which controls a codec takes and what goes
-//! in them is the caller's (`lemnos-driver-hevc` is a parser a caller may use for one).
+//! in them is the caller's.
 //!
 //! The block's name is `v4l2-stateless`. Its work is:
 //!
@@ -71,7 +71,6 @@ use lemnos_linux_sys::v4l2::{
     QueuePlane,
 };
 
-use crate::decoder::backoff_ns;
 use crate::node::{LinuxNode, Node};
 use crate::session::{M2mSession, QueueSetup, Ready};
 
@@ -95,6 +94,14 @@ pub const MAX_CONTROLS: usize = 12;
 pub const MAX_PAYLOAD_BYTES: usize = 8192;
 /// Picture buffers asked of the device: the stream buffers a picture's first plane may be in.
 pub const PICTURE_BUFFERS: u32 = 32;
+
+/// First delay before a reopen after a device failure.
+const BACKOFF_FIRST_NS: u64 = 250_000_000;
+
+/// The delay before reopen attempt `attempt` (from 0), doubling to the 8 s cap.
+pub(crate) const fn backoff_ns(attempt: u32) -> u64 {
+    BACKOFF_FIRST_NS << if attempt > 5 { 5 } else { attempt }
+}
 
 /// What health says while the device is closed after a failure.
 pub const REOPENING: &str = "the decoder failed: it is opened again by a later job";

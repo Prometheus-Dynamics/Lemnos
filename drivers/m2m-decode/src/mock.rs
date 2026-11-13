@@ -1,6 +1,6 @@
 //! A node that plays a stateless memory-to-memory device back, for the tests: queues, buffers,
 //! requests and events, with failures to order. Its steady-state calls allocate nothing, so a
-//! test can count the session's and the decoder's allocations through it.
+//! test can count the session's and the block's allocations through it.
 
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
