@@ -525,9 +525,43 @@ fn configure_refuses_what_the_receiver_cannot_take() {
     bad(&|l| l.height = 8193, Packing::Packed);
     bad(&|l| l.bit_depth = 14, Packing::Packed);
     bad(&|l| l.bit_depth = 9, Packing::Packed);
-    // Unpacked needs the vendor driver's private call.
-    bad(&|_| {}, Packing::Unpacked16);
+    // One sample per word is for 10 and 12 bits.
+    bad(&|l| l.bit_depth = 8, Packing::Unpacked16);
+    bad(&|l| l.bit_depth = 14, Packing::Unpacked16);
     assert_eq!(d.link().unwrap(), None, "nothing refused is kept");
+    // Without a capture node of its own, the words have nowhere to be written.
+    assert_eq!(
+        d.configure(raw10(), Packing::Unpacked16).unwrap_err(),
+        Status::NOT_SUPPORTED
+    );
+    assert_eq!(d.link().unwrap(), None);
+}
+
+#[test]
+fn the_memory_mode_goes_to_the_node_before_its_format_through_the_vendor_call() {
+    use lemnos_driver_v4l2_capture::Wanted;
+    use lemnos_v4l2::FourCc;
+    use std::os::fd::AsFd;
+    let wanted = |mode| Wanted {
+        input: None,
+        fourcc: FourCc::new(b"RG10"),
+        width: 64,
+        height: 4,
+        stride: 128,
+        size: 512,
+        mode,
+    };
+    // A node with no such call: the kernel answers it, so the call was made.
+    let file = std::fs::File::open("/dev/null").unwrap();
+    assert_eq!(
+        crate::prepare_node(file.as_fd(), &wanted(crate::MODE_COMPACT)),
+        Ok(())
+    );
+    assert_eq!(
+        crate::prepare_node(file.as_fd(), &wanted(crate::MODE_WORDS)),
+        Err(Status::NOT_SUPPORTED),
+        "words need the call"
+    );
 }
 
 #[test]

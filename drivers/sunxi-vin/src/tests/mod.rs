@@ -38,8 +38,11 @@ struct Node {
     /// kernel sees it.
     handles: u32,
     last_handle: Option<(u32, u64)>,
-    /// What the node holds of them, by slot: its own hold on the memory, as the kernel takes.
-    held: Vec<Option<std::fs::File>>,
+    /// What the node holds of them, by slot: its own hold on each plane's memory, as the
+    /// kernel takes.
+    held: Vec<Option<Held>>,
+    /// The planes the node writes a frame in, by size, when more than one.
+    planes: Option<Vec<u32>>,
     stopped: u32,
     /// Frames the node will fill: buffer index, sequence, bad, and each plane's bytes.
     filled: VecDeque<(u32, u32, bool, Vec<Vec<u8>>)>,
@@ -49,6 +52,17 @@ struct Node {
     /// What `open` answers instead of what was asked.
     answer: Option<Granted>,
     graph: Option<Graph>,
+}
+
+/// The node's own hold on each plane's memory of one slot, in plane order.
+#[derive(Default)]
+struct Held([Option<std::fs::File>; lemnos_driver_v4l2_capture::MAX_PLANES]);
+
+impl Held {
+    /// The planes held, in order.
+    fn files(&self) -> impl Iterator<Item = &std::fs::File> {
+        self.0.iter().map_while(Option::as_ref)
+    }
 }
 
 /// The node: the test's handle on it, and the bytes of the buffer dequeued last, held here so
@@ -80,12 +94,17 @@ impl Hardware for Hw {
             return Err(status);
         }
         n.opened.push(*wanted);
+        let mut plane_sizes = [0; 8];
+        let sizes = n.planes.clone().unwrap_or_else(|| vec![wanted.size]);
+        plane_sizes[..sizes.len()].copy_from_slice(&sizes);
         Ok(n.answer.unwrap_or(Granted {
             fourcc: wanted.fourcc,
             width: wanted.width,
             height: wanted.height,
             stride: wanted.stride,
-            size: wanted.size,
+            size: sizes[0],
+            planes: sizes.len(),
+            plane_sizes,
         }))
     }
 
@@ -104,17 +123,32 @@ impl Hardware for Hw {
         Ok(())
     }
 
-    fn queue_handle(&mut self, index: u32, handle: BufferHandle<'_>) -> Result<()> {
-        let file = std::fs::File::from(handle.fd().try_clone_to_owned().map_err(|_| Status::IO)?);
-        let size = file.metadata().map_err(|_| Status::IO)?.len();
+    fn queue_handles(&mut self, index: u32, planes: &[BufferHandle<'_>]) -> Result<()> {
+        // Fixed room, as the kernel's own: queueing allocates nothing here either.
+        let mut files = Held::default();
+        for (slot, handle) in files.0.iter_mut().zip(planes) {
+            *slot = Some(std::fs::File::from(
+                handle.fd().try_clone_to_owned().map_err(|_| Status::IO)?,
+            ));
+        }
+        let size = files.0[0]
+            .as_ref()
+            .ok_or(Status::INVALID_ARGUMENT)?
+            .metadata()
+            .map_err(|_| Status::IO)?
+            .len();
         let mut n = self.node.lock().unwrap();
+        let wanted = n.planes.as_ref().map_or(1, Vec::len);
+        if planes.len() != wanted || wanted > lemnos_driver_v4l2_capture::MAX_PLANES {
+            return Err(Status::INVALID_ARGUMENT);
+        }
         n.handles += 1;
         n.last_handle = Some((index, size));
         let slot = n
             .held
             .get_mut(index as usize)
             .ok_or(Status::INVALID_ARGUMENT)?;
-        *slot = Some(file);
+        *slot = Some(files);
         Ok(())
     }
 
@@ -351,6 +385,7 @@ fn start_requires_configure_and_asks_the_node_for_the_layout() {
             height: 32,
             stride: 128,
             size: 4096,
+            mode: 0,
         }]
     );
     assert_eq!(node.with(|n| n.streamed.clone()), vec![4]);
@@ -368,6 +403,8 @@ fn a_node_that_answers_another_format_is_refused_and_closed() {
         height: 32,
         stride: 128,
         size: 4096,
+        planes: 1,
+        plane_sizes: [4096, 0, 0, 0, 0, 0, 0, 0],
     };
     for answer in [
         Granted {
@@ -381,18 +418,30 @@ fn a_node_that_answers_another_format_is_refused_and_closed() {
         },
         Granted {
             size: 4095,
+            plane_sizes: [4095, 0, 0, 0, 0, 0, 0, 0],
             ..asked
         },
+        // Two planes that together hold less than a frame.
+        Granted {
+            size: 2048,
+            planes: 2,
+            plane_sizes: [2048, 2047, 0, 0, 0, 0, 0, 0],
+            ..asked
+        },
+        // No planes at all, and more than a buffer has.
+        Granted { planes: 0, ..asked },
+        Granted { planes: 9, ..asked },
     ] {
         node.with(|n| n.answer = Some(answer));
         assert_eq!(d.start().unwrap_err(), Status::NOT_SUPPORTED);
     }
     assert!(node.with(|n| n.streamed.is_empty()));
-    assert_eq!(node.with(|n| n.stopped), 8, "each closed again");
+    assert_eq!(node.with(|n| n.stopped), 14, "each closed again");
     // A node that pads the buffer past the frame is fine.
     node.with(|n| {
         n.answer = Some(Granted {
             size: 8192,
+            plane_sizes: [8192, 0, 0, 0, 0, 0, 0, 0],
             ..asked
         })
     });

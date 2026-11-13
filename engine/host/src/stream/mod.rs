@@ -19,6 +19,17 @@
 //! stream declared as dma-bufs is never quietly made of anything else. The checks are the same
 //! either way, and so is the memory's life: it is made for one attachment and never reaches the
 //! next consumer.
+//!
+//! A buffer of dma-bufs can be several planes (`planes` in the board file), each its own
+//! dma-buf, for hardware that writes a frame to several places of its own. The allocator makes
+//! them with [`allocate_planes`](StreamAllocator::allocate_planes), and the driver borrows each
+//! with `StreamEndpoint::plane_handle`. `write` and `read` address a buffer's planes end to end.
+//!
+//! A stream kept on standby (`standby = true`) has memory in place while no consumer is
+//! attached: it is made when the producer next asks for a buffer, the producer fills it as it
+//! would a consumer's, and the newest frame published is kept. The next consumer to attach is
+//! given that memory, and the kept frame is on its ring the moment it attaches. When it leaves,
+//! its memory goes with it and fresh memory is made, so no consumer ever sees another's.
 
 mod endpoint;
 mod pool;
@@ -28,6 +39,7 @@ use std::os::fd::OwnedFd;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use lemnos_core::{CallerId, Status};
+use lemnos_wire::Planes;
 use lemnos_wire::ring::{Layout, STATE_CLOSED, WordMemory, heap_words};
 
 use endpoint::StreamCore;
@@ -57,11 +69,12 @@ pub struct Backing {
     /// Handed to the consumer as they are: the ring, the doorbell and the buffers. Empty for a
     /// consumer in this process.
     pub descriptors: Vec<OwnedFd>,
-    /// The buffers as hardware takes them, when they are dma-bufs: one descriptor per buffer,
-    /// in order, each holding that buffer from its first byte and at least the layout's
-    /// `buffer_bytes` long. `buffers` must reach the same memory, so that what a producer
-    /// writes and what its hardware writes land in one place. `None` when the buffers are
-    /// plain memory. An attachment whose count differs from the layout's is refused.
+    /// The buffers as hardware takes them, when they are dma-bufs: one descriptor per plane of
+    /// each buffer, buffer 0's planes first, each holding that plane from its first byte and
+    /// at least as long as the plane (a buffer of one plane: the layout's `buffer_bytes`).
+    /// `buffers` must reach the same memory, a buffer's planes end to end, so that what a
+    /// producer writes and what its hardware writes land in one place. `None` when the buffers
+    /// are plain memory. An attachment whose count differs from the layout's is refused.
     pub handles: Option<Arc<[OwnedFd]>>,
 }
 
@@ -78,6 +91,24 @@ pub trait StreamAllocator: Send + Sync {
     fn allocate_handles(&self, name: &str, layout: &Layout, heap: &str) -> Result<Backing, Status> {
         let _ = (name, layout, heap);
         Err(Status::NOT_SUPPORTED)
+    }
+
+    /// Memory for a stream of dma-bufs whose buffers are `planes`: the backing's
+    /// [`handles`](Backing::handles) must be one per plane of each buffer, buffer 0's planes
+    /// first. An allocator that makes only whole buffers keeps this, which answers a buffer of
+    /// one plane with [`allocate_handles`](Self::allocate_handles) and refuses more.
+    fn allocate_planes(
+        &self,
+        name: &str,
+        layout: &Layout,
+        heap: &str,
+        planes: &Planes,
+    ) -> Result<Backing, Status> {
+        if planes.count() == 1 {
+            self.allocate_handles(name, layout, heap)
+        } else {
+            Err(Status::NOT_SUPPORTED)
+        }
     }
 }
 
@@ -160,6 +191,10 @@ pub struct StreamStats {
     pub free: u32,
     pub producer_held: u32,
     pub consumer_held: u32,
+    /// Holding the newest frame for the next consumer, on a stream kept on standby: 0 or 1.
+    pub kept: u32,
+    /// Whether memory is waiting for the next consumer, on a stream kept on standby.
+    pub standby: bool,
 }
 
 /// What a consumer gets when it attaches.
@@ -171,6 +206,8 @@ pub struct Lease {
     pub doorbell: Arc<dyn Doorbell>,
     /// The buffers as dma-bufs, when they are: see [`Backing::handles`].
     pub handles: Option<Arc<[OwnedFd]>>,
+    /// Each buffer's planes. One plane of the whole buffer unless the board file gives more.
+    pub planes: Planes,
 }
 
 /// Every declared stream: those of the board file's devices, and of each device an `[[each]]`
@@ -199,7 +236,7 @@ impl Streams {
     pub(crate) fn add(&self, index: u32, device: &DeviceSpec) {
         let mut table = self.table.write().unwrap_or_else(PoisonError::into_inner);
         for (name, spec) in &device.streams {
-            let core = StreamCore::new(spec);
+            let core = StreamCore::new(spec, name, Arc::clone(&self.allocator));
             table.insert((index, name.clone()), Arc::new(Mutex::new(core)));
         }
     }
@@ -226,7 +263,8 @@ impl Streams {
         ProducerEndpoint::claim(core)
     }
 
-    /// Takes the consumer's end, for `caller`, on memory no earlier consumer has seen.
+    /// Takes the consumer's end, for `caller`, on memory no earlier consumer has seen: the
+    /// memory kept on standby for it, or memory made now.
     pub(crate) fn attach(
         &self,
         device: u32,
@@ -234,52 +272,7 @@ impl Streams {
         caller: CallerId,
     ) -> Result<Lease, Status> {
         let core = self.core(device, name).ok_or(Status::NOT_FOUND)?;
-        let mut core = lock(&core);
-        let layout = core.layout();
-        if core.is_attached() {
-            return Err(Status::BUSY);
-        }
-        let memory = core.memory();
-        let backing = match memory {
-            StreamMemory::Shared => self.allocator.allocate(name, &layout)?,
-            StreamMemory::DmaBuf => self
-                .allocator
-                .allocate_handles(name, &layout, core.heap())?,
-        };
-        let Backing {
-            ring,
-            buffers,
-            doorbell,
-            descriptors,
-            handles,
-        } = backing;
-        if handles
-            .as_ref()
-            .is_some_and(|handles| handles.len() != layout.buffers as usize)
-        {
-            return Err(Status::IO);
-        }
-        // What the board file declared is what a driver was written against, and what its end
-        // of the stream told it when it bound.
-        if memory == StreamMemory::DmaBuf && handles.is_none() {
-            return Err(Status::IO);
-        }
-        let handles = handles.filter(|_| memory == StreamMemory::DmaBuf);
-        core.attach(
-            caller,
-            Arc::clone(&ring),
-            Arc::clone(&buffers),
-            Arc::clone(&doorbell),
-            handles.clone(),
-        )?;
-        Ok(Lease {
-            layout,
-            descriptors,
-            ring,
-            buffers,
-            doorbell,
-            handles,
-        })
+        lock(&core).attach(caller)
     }
 
     /// Gives up a stream `caller` holds.
@@ -304,8 +297,8 @@ impl Streams {
         self.core(device, name).map(|core| lock(&core).stats())
     }
 
-    /// Tells every consumer the host is going.
+    /// Tells every consumer the host is going, and makes no more memory.
     pub(crate) fn close_all(&self) {
-        self.each(|core| core.detach(STATE_CLOSED));
+        self.each(|core| core.close(STATE_CLOSED));
     }
 }

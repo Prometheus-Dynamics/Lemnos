@@ -328,6 +328,25 @@ mod tests {
     }
 
     #[test]
+    fn each_plane_of_a_buffer_maps_from_its_own_descriptor_at_its_own_length() {
+        // A buffer of two planes, 128 and 64 bytes: a descriptor each, each mapped at its
+        // plane's length, and writes to one never reach the other.
+        let streams = LinuxStreams;
+        let luma = sealed_memfd(c"plane0", 128).unwrap();
+        let chroma = sealed_memfd(c"plane1", 64).unwrap();
+        let first = streams.map_buffer(luma.as_fd(), 128, true).unwrap();
+        let second = streams.map_buffer(chroma.as_fd(), 64, true).unwrap();
+        assert_eq!((first.bytes().len(), second.bytes().len()), (128, 64));
+        assert!(first.write(126, &[1, 2]));
+        assert!(!first.write(127, &[0; 2]), "past its plane, into nothing");
+        assert!(second.write(0, &[3, 4]));
+        assert_eq!(seen(&luma, 126, 2), [1, 2]);
+        assert_eq!(seen(&chroma, 0, 2), [3, 4]);
+        // A descriptor shorter than its plane is refused before mapping.
+        assert!(streams.map_buffer(chroma.as_fd(), 128, false).is_err());
+    }
+
+    #[test]
     fn one_buffer_maps_when_it_is_long_enough_and_cant_shrink() {
         let streams = LinuxStreams;
         // A heap rounds up, so a buffer may be longer than asked.

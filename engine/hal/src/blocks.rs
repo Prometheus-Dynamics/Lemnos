@@ -222,13 +222,21 @@ pub enum BufferKind {
 /// The producer's end of a stream of buffers. Whoever opened the stream reads
 /// the other end.
 pub trait StreamEndpoint {
-    type Error: HalError;
+    /// Every stream's errors have the kinds' meaning, so a default here can refuse.
+    type Error: HalError + From<crate::ErrorKind>;
 
     fn buffer_count(&self) -> u32;
-    /// Whether `buffer` was taken under the consumer attached now. `false` when no consumer is
-    /// attached, and when the one that was attached when the buffer was taken with
-    /// `next_buffer` has gone, whether or not another has come: publishing the buffer then
-    /// reaches no one, and that is how to give it up. One taken afterwards is current again.
+    /// Whether `buffer` was taken on the memory in place now: the attached consumer's, or, on a
+    /// stream kept on standby, the memory waiting for the next consumer. `false` when there is
+    /// no memory in place, and when the memory the buffer was taken on has gone (its consumer
+    /// left), whether or not other memory has come: publishing the buffer then reaches no one,
+    /// and that is how to give it up. One taken afterwards is current again.
+    ///
+    /// On a stream kept on standby (`standby = true` in the board file) memory is in place while
+    /// no consumer is attached, so a producer fills buffers then as at any other time. A frame
+    /// published with nobody attached is kept, the newest only, and goes to the next consumer
+    /// the moment it attaches, on that same memory: nothing is copied. The memory a consumer
+    /// leaves goes with it, and fresh memory takes its place.
     ///
     /// This is how a producer that holds buffers for a consumer (a job's buffers, named by
     /// number) sees that the consumer it held them for is no longer the one there, on any kind
@@ -259,13 +267,14 @@ pub trait StreamEndpoint {
     /// check the copy, never the buffer. Allocates nothing.
     fn read(&mut self, buffer: u32, offset: usize, out: &mut [u8]) -> Result<bool, Self::Error>;
     /// Borrows `buffer`'s memory in the form hardware takes it, for a producer whose hardware
-    /// reads or fills the buffer itself. Allocates nothing.
+    /// reads or fills the buffer itself. On a stream whose buffers are several planes, this is
+    /// plane 0's: see [`plane_handle`](Self::plane_handle). Allocates nothing.
     ///
-    /// - `Ok(Some(handle))`: the buffer is behind `handle`, and a consumer is attached to it.
-    /// - `Ok(None)`: nothing is behind the buffer now. No consumer is attached, or the consumer
-    ///   that was attached when the buffer was taken with `next_buffer` has gone. Publishing the
-    ///   buffer reaches no one, and that is how to give it up; one taken afterwards has a handle
-    ///   again.
+    /// - `Ok(Some(handle))`: the buffer is behind `handle`, on the memory in place now: a
+    ///   consumer's, or the memory a stream kept on standby holds for the next one.
+    /// - `Ok(None)`: nothing is behind the buffer now. No memory is in place, or the memory the
+    ///   buffer was taken on has gone with its consumer. Publishing the buffer reaches no one,
+    ///   and that is how to give it up; one taken afterwards has a handle again.
     /// - An error of kind [`Unsupported`](crate::ErrorKind::Unsupported): this stream's buffers
     ///   have no handles (plain shared memory, a microcontroller). `write` and `read` are the
     ///   only way into them.
@@ -292,6 +301,33 @@ pub trait StreamEndpoint {
     /// - The consumer shares the memory and can change it at any time, as with `read`: hardware
     ///   given a consumer's image must take nothing in it on trust.
     fn buffer_handle(&self, buffer: u32) -> Result<Option<BufferHandle<'_>>, Self::Error>;
+    /// How many memory planes each buffer is: 1 unless the board file gives the stream
+    /// `planes`, for hardware that writes one frame to several places of its own (a V4L2
+    /// format with several memory planes). Never changes for a stream.
+    fn planes(&self) -> u32 {
+        1
+    }
+    /// Where plane `plane` starts in a buffer as `write` and `read` address it: the planes
+    /// before it, end to end. `None` for a plane the buffers don't have. Allocates nothing.
+    fn plane_offset(&self, plane: u32) -> Option<usize> {
+        (plane == 0).then_some(0)
+    }
+    /// Borrows plane `plane` of `buffer` in the form hardware takes it, with everything
+    /// [`buffer_handle`](Self::buffer_handle) says: each plane is its own dma-buf, holding
+    /// that plane from its first byte, at least as long as the board file gives it (a heap
+    /// rounds up). Plane 0 is what `buffer_handle` lends. Refused for a plane the buffers
+    /// don't have. Allocates nothing.
+    fn plane_handle(
+        &self,
+        buffer: u32,
+        plane: u32,
+    ) -> Result<Option<BufferHandle<'_>>, Self::Error> {
+        if plane == 0 {
+            self.buffer_handle(buffer)
+        } else {
+            Err(crate::ErrorKind::InvalidInput.into())
+        }
+    }
     /// Ends the attached consumer's stream as faulted, for a consumer that broke the rules of
     /// what it posts: bytes on the job queue that are no job of the driver's contract. It is the
     /// same end a consumer that corrupts the ring gets. The consumer sees its stream faulted

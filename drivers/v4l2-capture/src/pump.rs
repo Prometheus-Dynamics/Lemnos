@@ -2,11 +2,11 @@
 
 use lemnos_contract_camera_receiver::Counters;
 use lemnos_core::{Result, Status};
-use lemnos_hal::blocks::{BufferKind, StreamFrame};
+use lemnos_hal::blocks::{BufferHandle, BufferKind, StreamFrame};
 use lemnos_hal::{ErrorKind, StreamEndpoint};
 use lemnos_linux_sys::dma_buf;
 
-use crate::hw::{Frame, Hardware, Wanted};
+use crate::hw::{Frame, Granted, Hardware, MAX_PLANES, Wanted};
 
 /// The most slots a node is asked for when it fills the stream's buffers. A stream with more
 /// buffers than this is served by copy.
@@ -38,6 +38,17 @@ impl Sequence {
     }
 }
 
+/// What a buffer's planes turned out to be, when they were looked for.
+#[derive(Clone, Copy)]
+enum Found {
+    /// Every plane has a handle long enough.
+    All,
+    /// A plane's dma-buf is shorter than the node writes.
+    TooSmall,
+    /// Nothing is behind the buffer now.
+    Nothing,
+}
+
 /// What became of one frame.
 enum Delivery {
     Published,
@@ -59,8 +70,13 @@ pub struct Pump {
     held: Option<u32>,
     /// Direct: the slots the node holds, one bit each.
     queued: u32,
-    /// Bytes of one frame, as the node was asked for: what a stream buffer must hold.
-    frame_bytes: u32,
+    /// Each memory plane's size as the node chose it: what a stream buffer's plane must hold.
+    plane_sizes: [u32; MAX_PLANES],
+    /// Memory planes of the node's frames.
+    planes: usize,
+    /// By copy: each of the node's planes lands at its own plane of the stream's buffer,
+    /// rather than all of them end to end.
+    by_plane: bool,
     /// Direct: stream buffers too small for a frame, kept here so that they are neither
     /// handed to the node nor shown to the consumer as frames.
     parked: u32,
@@ -77,7 +93,9 @@ impl Pump {
             sequence: Sequence::default(),
             held: None,
             queued: 0,
-            frame_bytes: 0,
+            plane_sizes: [0; MAX_PLANES],
+            planes: 0,
+            by_plane: false,
             parked: 0,
         }
     }
@@ -95,8 +113,9 @@ impl Pump {
     }
 
     /// Opens the node for `wanted`, checks it kept what was asked, and starts it: filling the
-    /// stream's own buffers when `stream` has handles and the node takes them, by copy with
-    /// `buffers` buffers of its own otherwise. Whatever ran before is stopped first.
+    /// stream's own buffers when `stream` has handles, as many planes as the node's frames
+    /// have, and the node takes them; by copy with `buffers` buffers of its own otherwise.
+    /// Whatever ran before is stopped first.
     pub fn begin(
         &mut self,
         hw: &mut dyn Hardware,
@@ -106,22 +125,33 @@ impl Pump {
     ) -> Result<()> {
         // Whatever was running ends first; a failure here is not a reason to not try the start.
         let _ = hw.stop();
-        let open = |hw: &mut dyn Hardware| -> Result<()> {
+        let open = |hw: &mut dyn Hardware| -> Result<Granted> {
             let granted = hw.open(wanted)?;
+            // A frame in several planes holds what was asked over all of them.
+            let held: u64 = granted
+                .plane_sizes()
+                .iter()
+                .map(|size| u64::from(*size))
+                .sum();
             let as_asked = granted.fourcc == wanted.fourcc
                 && granted.width == wanted.width
                 && granted.height == wanted.height
                 && granted.stride == wanted.stride
-                && granted.size >= wanted.size;
+                && (1..=MAX_PLANES).contains(&granted.planes)
+                && granted.size == granted.plane_sizes[0]
+                && held >= u64::from(wanted.size);
             if !as_asked {
                 let _ = hw.stop();
                 return Err(Status::NOT_SUPPORTED);
             }
-            Ok(())
+            Ok(granted)
         };
-        open(hw)?;
+        let mut granted = open(hw)?;
         let slots = stream.buffer_count();
-        let direct = stream.buffer_kind() == BufferKind::Handles && slots <= MAX_SLOTS;
+        // The stream's buffers must be the node's planes, one for one.
+        let direct = stream.buffer_kind() == BufferKind::Handles
+            && slots <= MAX_SLOTS
+            && stream.planes() as usize == granted.planes;
         self.mode = Mode::Copy;
         if direct {
             match hw.stream_on_importing(slots) {
@@ -129,7 +159,7 @@ impl Pump {
                 // The node takes no dma-bufs: by copy, on a node opened afresh.
                 Err(Status::NOT_SUPPORTED) => {
                     let _ = hw.stop();
-                    open(hw)?;
+                    granted = open(hw)?;
                 }
                 Err(status) => return Err(status),
             }
@@ -146,7 +176,13 @@ impl Pump {
         self.sequence = Sequence::default();
         self.queued = 0;
         self.parked = 0;
-        self.frame_bytes = wanted.size;
+        self.planes = granted.planes;
+        self.plane_sizes = granted.plane_sizes;
+        // A frame of one plane is at least what was asked: a stream buffer must hold that.
+        if self.planes == 1 {
+            self.plane_sizes[0] = self.plane_sizes[0].max(wanted.size);
+        }
+        self.by_plane = granted.planes > 1 && stream.planes() as usize == granted.planes;
         Ok(())
     }
 
@@ -212,6 +248,18 @@ impl Pump {
                 self.held = Some(buffer);
                 return Delivery::Bad;
             };
+            // Into the stream's plane of the same number, when its buffers are the node's
+            // planes; end to end otherwise.
+            if self.by_plane {
+                let place = u32::try_from(plane)
+                    .ok()
+                    .and_then(|plane| stream.plane_offset(plane));
+                let Some(place) = place else {
+                    self.held = Some(buffer);
+                    return Delivery::Bad;
+                };
+                offset = place;
+            }
             match stream.write(buffer, offset, bytes) {
                 Ok(true) => offset = offset.saturating_add(bytes.len()),
                 // Nobody to land on: hand the buffer back empty, which the stream drops.
@@ -276,21 +324,54 @@ impl Pump {
             Self::give_up(stream, buffer);
             return Ok(false);
         }
-        let queued = match stream.buffer_handle(buffer) {
-            Ok(Some(handle)) => {
-                // The node writes a whole frame: the dma-buf's real size, asked of the
-                // kernel, must hold one. A stream whose buffers are too small is the board
-                // file's mistake, not the node's: counted, and nothing is queued.
-                let holds = dma_buf::size(handle.fd())
-                    .is_ok_and(|size| size >= u64::from(self.frame_bytes));
-                if !holds {
-                    self.counters.errors = self.counters.errors.saturating_add(1);
-                    self.parked |= 1 << buffer;
-                    return Ok(true);
+        // Every plane's handle, each checked: the node writes a whole plane, so the dma-buf's
+        // real size, asked of the kernel, must hold it. A stream whose buffers are too small
+        // is the board file's mistake, not the node's: counted, and nothing is queued.
+        let queued = {
+            let mut planes: [Option<BufferHandle<'_>>; MAX_PLANES] = [None; MAX_PLANES];
+            let mut found = Found::All;
+            for (plane, (slot, need)) in planes
+                .iter_mut()
+                .zip(self.plane_sizes)
+                .take(self.planes)
+                .enumerate()
+            {
+                match stream.plane_handle(buffer, plane as u32) {
+                    Ok(Some(handle)) => {
+                        if !dma_buf::size(handle.fd()).is_ok_and(|size| size >= u64::from(need)) {
+                            found = Found::TooSmall;
+                            break;
+                        }
+                        *slot = Some(handle);
+                    }
+                    Ok(None) | Err(_) => {
+                        found = Found::Nothing;
+                        break;
+                    }
                 }
-                hw.queue_handle(buffer, handle)
             }
-            Ok(None) | Err(_) => {
+            match (found, planes[0]) {
+                (Found::All, Some(first)) => {
+                    let mut handles = [first; MAX_PLANES];
+                    for (into, from) in handles.iter_mut().zip(planes) {
+                        if let Some(handle) = from {
+                            *into = handle;
+                        }
+                    }
+                    Ok(hw.queue_handles(buffer, handles.get(..self.planes).unwrap_or(&[])))
+                }
+                (Found::TooSmall, _) => Err(true),
+                _ => Err(false),
+            }
+        };
+        let queued = match queued {
+            Ok(queued) => queued,
+            Err(true) => {
+                self.counters.errors = self.counters.errors.saturating_add(1);
+                self.parked |= 1 << buffer;
+                return Ok(true);
+            }
+            Err(false) => {
                 Self::give_up(stream, buffer);
                 return Ok(false);
             }

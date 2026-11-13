@@ -83,7 +83,7 @@ pub const LAYOUT: u64 = layout_hash(&[
     offset_of!(PackageInfo, loaded) as u64,
     size_of::<StreamInfo>() as u64,
     align_of::<StreamInfo>() as u64,
-    offset_of!(StreamInfo, reserved) as u64,
+    offset_of!(StreamInfo, planes) as u64,
     size_of::<Frame>() as u64,
     align_of::<Frame>() as u64,
     offset_of!(Frame, timestamp_ns) as u64,
@@ -97,8 +97,8 @@ const _: () = assert!(
     "update LEMNOS_LAYOUT_HASH in lemnos.h"
 );
 
-/// This surface's version: 1.1.
-pub const VERSION: AbiVersion = AbiVersion::new(1, 1, LAYOUT);
+/// This surface's version: 1.2.
+pub const VERSION: AbiVersion = AbiVersion::new(1, 2, LAYOUT);
 
 struct Entry {
     session: Session,

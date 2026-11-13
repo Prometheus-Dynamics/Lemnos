@@ -181,6 +181,20 @@ fn vectors() -> BTreeMap<&'static str, Frame<'static>> {
                 frame_slots: 4,
                 job_slots: 2,
                 job_bytes: 8,
+                plane_bytes: &[],
+            },
+        ),
+        (
+            "stream-handles-planes",
+            Frame::StreamHandles {
+                id: 14,
+                buffers: 2,
+                descriptors: 6,
+                buffer_bytes: 256,
+                frame_slots: 2,
+                job_slots: 1,
+                job_bytes: 0,
+                plane_bytes: &[0xc0, 0, 0, 0, 0x40, 0, 0, 0],
             },
         ),
         (
@@ -247,11 +261,50 @@ fn every_vector_in_the_spec_matches_byte_for_byte() {
 
 #[test]
 fn a_stream_of_handles_has_two_descriptors_more_than_buffers_and_at_most_128_buffers() {
-    assert_eq!(handle_descriptors(0), None);
-    assert_eq!(handle_descriptors(1), Some(3));
-    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS), Some(130));
-    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS + 1), None);
-    assert_eq!(handle_descriptors(u32::MAX), None);
+    assert_eq!(handle_descriptors(0, 1), None);
+    assert_eq!(handle_descriptors(1, 1), Some(3));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS, 1), Some(130));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS + 1, 1), None);
+    assert_eq!(handle_descriptors(u32::MAX, 1), None);
+    // A descriptor per plane: the same limit over every plane of every buffer.
+    assert_eq!(handle_descriptors(4, 2), Some(10));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS / 2, 2), Some(130));
+    assert_eq!(handle_descriptors(MAX_HANDLE_BUFFERS / 2 + 1, 2), None);
+    assert_eq!(handle_descriptors(1, 0), None);
+    assert_eq!(handle_descriptors(1, MAX_PLANES + 1), None);
+    assert_eq!(handle_descriptors(u32::MAX, u32::MAX), None);
+}
+
+#[test]
+fn planes_are_checked_against_the_buffer_and_travel_as_lengths() {
+    let planes = Planes::new(&[192, 64], 256).unwrap();
+    assert_eq!(planes.count(), 2);
+    assert_eq!(planes.offset(0), Some(0));
+    assert_eq!(planes.offset(1), Some(192));
+    assert_eq!(planes.offset(2), None);
+    assert_eq!(planes.locate(0), Some((0, 0, 192)));
+    assert_eq!(planes.locate(191), Some((0, 191, 1)));
+    assert_eq!(planes.locate(192), Some((1, 0, 64)));
+    assert_eq!(planes.locate(256), None);
+    let mut out = [0; PLANE_LENGTH_BYTES * MAX_PLANES as usize];
+    let n = planes.encode(&mut out);
+    assert_eq!(&out[..n], &[0xc0, 0, 0, 0, 0x40, 0, 0, 0]);
+    assert_eq!(Planes::decode(&out[..n], 256), Some(planes));
+    // One plane travels as nothing, and nothing reads back as one plane.
+    assert_eq!(Planes::one(256).encode(&mut out), 0);
+    assert_eq!(Planes::decode(&[], 256), Some(Planes::one(256)));
+    assert_eq!(Planes::decode(&[], 0), None);
+    for (bytes, total) in [
+        (&[0xc0, 0, 0, 0, 0x40, 0, 0, 0][..], 255),
+        (&[0xc0, 0, 0, 0, 0x40, 0, 0][..], 256),
+        (&[0, 0, 0, 0, 0, 1, 0, 0][..], 256),
+        (&[0xff, 0xff, 0xff, 0xff, 1, 1, 0, 0][..], 256),
+        (&[1, 0, 0, 0][..].repeat(9)[..], 9),
+    ] {
+        assert_eq!(Planes::decode(bytes, total), None, "{bytes:?} of {total}");
+    }
+    assert_eq!(Planes::new(&[], 0), None);
+    assert_eq!(Planes::new(&[1; 9], 9), None);
 }
 
 #[test]

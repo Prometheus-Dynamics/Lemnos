@@ -69,6 +69,18 @@ impl StreamEndpoint for Counted {
         self.inner.buffer_current(buffer)
     }
 
+    fn planes(&self) -> u32 {
+        self.inner.planes()
+    }
+
+    fn plane_offset(&self, plane: u32) -> Option<usize> {
+        self.inner.plane_offset(plane)
+    }
+
+    fn plane_handle(&self, buffer: u32, plane: u32) -> Result<Option<BufferHandle<'_>>, ErrorKind> {
+        self.inner.plane_handle(buffer, plane)
+    }
+
     fn fault_consumer(&mut self) -> Result<(), ErrorKind> {
         self.inner.fault_consumer()
     }
@@ -139,11 +151,23 @@ impl Rig {
 
     /// As [`Self::with`], for the mode `link`.
     fn on(bytes: u32, link: lemnos_contract_camera_receiver::LinkConfig) -> Self {
+        Self::planar(bytes, link, "", None, false)
+    }
+
+    /// As [`Self::on`], with `keys` added to the stream, the node writing a frame in `planes`
+    /// of those sizes when given, and refusing dma-bufs when `copy`.
+    fn planar(
+        bytes: u32,
+        link: lemnos_contract_camera_receiver::LinkConfig,
+        keys: &str,
+        planes: Option<Vec<u32>>,
+        copy: bool,
+    ) -> Self {
         let text = format!(
             "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
              [[devices]]\nid = \"csi\"\ndriver = \"nothing\"\n\
              [devices.streams.frames]\nmemory = \"dma-buf\"\nbuffers = {BUFFERS}\n\
-             buffer_bytes = {bytes}\n"
+             buffer_bytes = {bytes}\n{keys}"
         );
         let sim = SimBoard::new();
         let clock = sim.clock();
@@ -162,6 +186,10 @@ impl Rig {
             writes: Arc::clone(&writes),
         };
         let node = Handle::default();
+        node.with(|n| {
+            n.planes = planes;
+            n.refuse_import = copy;
+        });
         let hw = Hw {
             node: Arc::clone(&node.0),
             planes: (0..3).map(|_| Vec::with_capacity(FRAME)).collect(),
@@ -192,9 +220,26 @@ impl Rig {
     fn node_fills(&self, slot: u32, sequence: u32, byte: u8) {
         self.node.with(|n| {
             let held = n.held[slot as usize].take().expect("a queued slot");
-            held.write_all_at(&[byte; FRAME], 0).unwrap();
+            let first = held.files().next().expect("a plane");
+            first.write_all_at(&[byte; FRAME], 0).unwrap();
             n.filled
                 .push_back((slot, sequence, false, vec![vec![byte; FRAME]]));
+        });
+    }
+
+    /// The node fills slot `slot` with one frame in planes, plane `p` of `sizes[p]` bytes of
+    /// `byte + p`, through its own holds, and reports it.
+    fn node_fills_planes(&self, slot: u32, sequence: u32, byte: u8, sizes: &[usize]) {
+        self.node.with(|n| {
+            let held = n.held[slot as usize].take().expect("a queued slot");
+            assert_eq!(held.files().count(), sizes.len(), "a dma-buf per plane");
+            let mut planes = Vec::new();
+            for (plane, (file, size)) in held.files().zip(sizes).enumerate() {
+                let bytes = vec![byte + plane as u8; *size];
+                file.write_all_at(&bytes, 0).unwrap();
+                planes.push(bytes);
+            }
+            n.filled.push_back((slot, sequence, false, planes));
         });
     }
 }
@@ -400,4 +445,131 @@ fn frames_through_the_streams_own_buffers_allocate_nothing() {
     assert_eq!(rig.driver.counters().unwrap().frames, 500);
     assert_eq!(rig.writes.load(Ordering::Relaxed), 0);
     let _ = Status::OK;
+}
+
+/// A frame in two memory planes: three quarters, then a quarter.
+const PLANES: [u32; 2] = [FRAME as u32 * 3 / 4, FRAME as u32 / 4];
+
+fn plane_keys() -> String {
+    format!("planes = [{}, {}]\n", PLANES[0], PLANES[1])
+}
+
+#[test]
+fn a_frame_in_two_planes_lands_in_the_streams_planes_and_nothing_is_copied() {
+    let mut rig = Rig::planar(
+        FRAME as u32,
+        raw10(),
+        &plane_keys(),
+        Some(PLANES.to_vec()),
+        false,
+    );
+    assert_eq!(rig.driver.mode(), Mode::Direct);
+    let mut client = Client::attach(&rig, 1);
+    assert_eq!(client.lease.planes.lengths(), PLANES);
+    rig.tick();
+    assert_eq!(
+        rig.node.with(|n| n.handles),
+        BUFFERS,
+        "every buffer, every plane"
+    );
+    let sizes = [PLANES[0] as usize, PLANES[1] as usize];
+    let at = |buffer: u32, offset: usize, len: usize| {
+        let mut out = vec![0u8; len];
+        let start = client.lease.layout.buffer_offset(buffer).unwrap() + offset;
+        assert!(client.lease.buffers.read(start, &mut out));
+        out
+    };
+    rig.node_fills_planes(2, 0, 0x40, &sizes);
+    rig.tick();
+    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    assert_eq!((frame.buffer, frame.bytes), (2, FRAME as u32));
+    // Each plane is where the stream's planes put it: the second after the first.
+    assert_eq!(at(2, 0, sizes[0]), vec![0x40; sizes[0]]);
+    assert_eq!(at(2, sizes[0], sizes[1]), vec![0x41; sizes[1]]);
+    assert_eq!(
+        rig.writes.load(Ordering::Relaxed),
+        0,
+        "the driver copied nothing"
+    );
+    assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+    // Round after round, nothing allocated.
+    rig.tick();
+    let mut allocated = 0;
+    for round in 0..200u32 {
+        let slot = rig
+            .node
+            .with(|n| n.held.iter().position(Option::is_some))
+            .expect("a slot the node holds") as u32;
+        rig.node_fills_planes(slot, round + 1, round as u8, &sizes);
+        let ((), count) = allocations(|| rig.tick());
+        allocated += count;
+        let frame = client.ring.pop_frame().unwrap().expect("a frame");
+        assert!(client.ring.release(frame.buffer, frame.fence).unwrap());
+        let ((), count) = allocations(|| rig.tick());
+        allocated += count;
+    }
+    assert_eq!(allocated, 0);
+    assert_eq!(rig.driver.counters().unwrap().frames, 201);
+}
+
+#[test]
+fn a_frame_in_two_planes_goes_by_copy_when_the_stream_is_one_plane() {
+    // The node's two planes, a stream of whole buffers: each frame copied end to end.
+    let mut rig = Rig::planar(FRAME as u32, raw10(), "", Some(PLANES.to_vec()), false);
+    assert_eq!(rig.driver.mode(), Mode::Copy);
+    let mut client = Client::attach(&rig, 1);
+    let sizes = [PLANES[0] as usize, PLANES[1] as usize];
+    rig.node.with(|n| {
+        n.filled
+            .push_back((0, 0, false, vec![vec![1; sizes[0]], vec![2; sizes[1]]]))
+    });
+    rig.tick();
+    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    assert_eq!(frame.bytes, FRAME as u32);
+    let mut whole = vec![1; sizes[0]];
+    whole.extend(vec![2; sizes[1]]);
+    assert_eq!(client.bytes(frame.buffer, FRAME), whole);
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 2, "one copy per plane");
+}
+
+#[test]
+fn a_node_that_takes_no_dma_bufs_copies_each_plane_into_its_plane_of_the_stream() {
+    let mut rig = Rig::planar(
+        FRAME as u32,
+        raw10(),
+        &plane_keys(),
+        Some(PLANES.to_vec()),
+        true,
+    );
+    assert_eq!(rig.driver.mode(), Mode::Copy);
+    let mut client = Client::attach(&rig, 1);
+    // A short first plane still puts the second at the second plane's start.
+    rig.node.with(|n| {
+        n.filled
+            .push_back((0, 0, false, vec![vec![7; 16], vec![8; 32]]))
+    });
+    rig.tick();
+    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    assert_eq!(frame.bytes, PLANES[0] + 32);
+    let mut out = vec![0u8; 32];
+    let start = client.lease.layout.buffer_offset(frame.buffer).unwrap() + PLANES[0] as usize;
+    assert!(client.lease.buffers.read(start, &mut out));
+    assert_eq!(out, vec![8; 32]);
+    let mut first = vec![0u8; 16];
+    let start = client.lease.layout.buffer_offset(frame.buffer).unwrap();
+    assert!(client.lease.buffers.read(start, &mut first));
+    assert_eq!(first, vec![7; 16]);
+}
+
+#[test]
+fn a_plane_too_small_for_the_nodes_is_never_handed_to_it() {
+    // The stream's second plane is a byte short of the node's.
+    let keys = format!("planes = [{}, {}]\n", PLANES[0] + 1, PLANES[1] - 1);
+    let mut rig = Rig::planar(FRAME as u32, raw10(), &keys, Some(PLANES.to_vec()), false);
+    assert_eq!(rig.driver.mode(), Mode::Direct);
+    let _client = Client::attach(&rig, 1);
+    rig.tick();
+    rig.tick();
+    assert_eq!(rig.node.with(|n| n.handles), 0);
+    assert_eq!(rig.driver.counters().unwrap().errors, u64::from(BUFFERS));
 }

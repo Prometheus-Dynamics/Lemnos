@@ -300,3 +300,75 @@ fn the_rust_wrapper_takes_streams_and_the_package_list_through_the_surface() {
     let list = client.packages().unwrap();
     assert_eq!(list, common::package_list());
 }
+
+#[test]
+fn a_stream_in_planes_gives_each_plane_and_its_descriptor_through_the_surface() {
+    use lemnos_hal::StreamEndpoint;
+    use lemnos_hal::blocks::StreamFrame;
+
+    let streams = stream_service();
+    let client = Client::connect(
+        streams.socket.to_str().unwrap(),
+        "w",
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let mut stream = client.open_stream(0, "planar", false).unwrap();
+    let info = stream.info().unwrap();
+    assert_eq!((info.buffers, info.buffer_bytes, info.planes), (2, 300, 2));
+    let mut producer = streams
+        .service()
+        .host()
+        .stream_producer(0, "planar")
+        .unwrap();
+    let buffer = producer.next_buffer().unwrap().unwrap();
+    // Each plane's dma-buf as the producer holds it, before it is published.
+    let theirs: Vec<(u64, u64)> = (0..2)
+        .map(|plane| {
+            let handle = producer
+                .plane_handle(buffer, plane)
+                .unwrap()
+                .expect("memory behind it");
+            dma_buf::identity(handle.fd()).unwrap()
+        })
+        .collect();
+    let pattern: Vec<u8> = (0..300).map(|at| at as u8).collect();
+    assert_eq!(producer.write(buffer, 0, &pattern), Ok(true));
+    producer
+        .publish(StreamFrame {
+            buffer,
+            bytes: 250,
+            sequence: 1,
+            identity: 0,
+            timestamp_ns: 0,
+        })
+        .unwrap();
+    let frame = stream
+        .next_frame(Duration::from_secs(5))
+        .unwrap()
+        .expect("a frame");
+    // A frame in planes is not one piece of memory: no bytes in place.
+    assert!(frame.bytes.is_empty());
+    assert_eq!(frame.buffer, buffer);
+    // The frame is 250 bytes: all of the first plane, half of the second.
+    assert_eq!(stream.plane(buffer, 0).unwrap(), &pattern[..200]);
+    assert_eq!(stream.plane(buffer, 1).unwrap(), &pattern[200..250]);
+    assert!(stream.plane(buffer, 2).is_err(), "no third plane");
+    assert!(stream.plane(1 - buffer, 0).is_err(), "a buffer not held");
+    // Each plane's own dma-buf, the producer's.
+    for plane in 0..2u32 {
+        let ours = stream.plane_handle(buffer, plane).unwrap();
+        assert_eq!(
+            dma_buf::identity(ours.as_fd()).unwrap(),
+            theirs[plane as usize]
+        );
+    }
+    assert_ne!(theirs[0], theirs[1], "each plane is its own memory");
+    assert!(stream.plane_handle(buffer, 2).is_err());
+    // By copy, across the seam.
+    let mut seam = [0; 4];
+    stream.read(buffer, 198, &mut seam).unwrap();
+    assert_eq!(seam[..], pattern[198..202]);
+    stream.release(buffer).unwrap();
+    stream.close().unwrap();
+}

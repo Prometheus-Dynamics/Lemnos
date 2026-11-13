@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use lemnos_core::ConfigValue;
-use lemnos_wire::MAX_HANDLE_BUFFERS;
 use lemnos_wire::ring::Layout;
+use lemnos_wire::{MAX_HANDLE_BUFFERS, MAX_PLANES};
 use serde::Deserialize;
 
 use crate::contain::{MAX_RETRY_CAP, Options};
@@ -39,6 +39,12 @@ pub enum BoardError {
     StreamHeap(String, String, String),
     #[error("device {0:?} stream {1:?}: `heap` is only for `memory = \"dma-buf\"`")]
     StreamHeapUnused(String, String),
+    #[error(
+        "device {0:?} stream {1:?}: `planes` are only for `memory = \"dma-buf\"`, 1 to \
+         {MAX_PLANES} of them, none empty, adding up to `buffer_bytes`, and at most \
+         {MAX_HANDLE_BUFFERS} descriptors over every buffer's planes"
+    )]
+    StreamPlanes(String, String),
     #[error("[host] {0}: {1}")]
     Host(&'static str, String),
     #[error(
@@ -160,6 +166,16 @@ pub struct StreamSpec {
     /// `memory = "dma-buf"`, where it is [`DEFAULT_HEAP`] when left out.
     #[serde(default)]
     pub heap: Option<String>,
+    /// A buffer's memory planes, by length: each its own dma-buf, for hardware that writes a
+    /// frame in several planes at addresses of their own. Only with `memory = "dma-buf"`, and
+    /// `buffer_bytes` is their sum. Left out, a buffer is one plane.
+    #[serde(default)]
+    pub planes: Option<Vec<u32>>,
+    /// Memory is kept ready while no consumer is attached, so the producer can fill buffers
+    /// then and the next consumer gets the newest frame the moment it attaches, with nothing
+    /// copied. The memory is still made anew after each consumer leaves.
+    #[serde(default)]
+    pub standby: bool,
 }
 
 const fn default_job_slots() -> u32 {
@@ -187,8 +203,46 @@ impl StreamSpec {
         self.heap.as_deref().unwrap_or(DEFAULT_HEAP)
     }
 
+    /// The length of each plane of a buffer, in order: the board file's `planes`, or the whole
+    /// buffer as one.
+    #[must_use]
+    pub fn plane_bytes(&self) -> Box<[u32]> {
+        match &self.planes {
+            Some(planes) => planes.as_slice().into(),
+            None => Box::new([self.buffer_bytes]),
+        }
+    }
+
+    /// Checks `planes`: dma-bufs only, within the limits, and adding up to the buffer.
+    fn check_planes(&self, device: &str, name: &str) -> Result<(), BoardError> {
+        let Some(planes) = &self.planes else {
+            return Ok(());
+        };
+        let sum = planes
+            .iter()
+            .try_fold(0u32, |sum, plane| sum.checked_add(*plane));
+        let count = u32::try_from(planes.len()).unwrap_or(u32::MAX);
+        let fits = self.memory == StreamMemory::DmaBuf
+            && (1..=MAX_PLANES).contains(&count)
+            && planes.iter().all(|plane| *plane > 0)
+            && sum == Some(self.buffer_bytes)
+            && self
+                .buffers
+                .checked_mul(count)
+                .is_some_and(|descriptors| descriptors <= MAX_HANDLE_BUFFERS);
+        if fits {
+            Ok(())
+        } else {
+            Err(BoardError::StreamPlanes(
+                device.to_string(),
+                name.to_string(),
+            ))
+        }
+    }
+
     /// Checks what [`Layout`] doesn't: the memory the stream asks for.
     fn check_memory(&self, device: &str, name: &str) -> Result<(), BoardError> {
+        self.check_planes(device, name)?;
         let (device, name) = (device.to_string(), name.to_string());
         match (self.memory, &self.heap) {
             (StreamMemory::Shared, None) => Ok(()),
@@ -654,6 +708,40 @@ mod tests {
         );
         // Shared memory keeps the limit it had.
         assert!(board(MAX_HANDLE_BUFFERS + 1, "").is_ok());
+    }
+
+    #[test]
+    fn a_stream_of_planes_adds_up_to_its_buffer_and_is_dma_bufs() {
+        let dma = "memory = \"dma-buf\"\n";
+        let planar = stream(&format!("{dma}planes = [768, 256]\n")).unwrap();
+        assert_eq!(&*planar.plane_bytes(), &[768, 256]);
+        assert_eq!(&*stream(dma).unwrap().plane_bytes(), &[1024], "one plane");
+        assert!(!planar.standby, "off unless asked for");
+        assert!(stream("standby = true\n").unwrap().standby);
+        let refused = Err(BoardError::StreamPlanes("a".to_string(), "out".to_string()));
+        for bad in [
+            format!("{dma}planes = [768, 255]\n"),
+            format!("{dma}planes = [1024, 0]\n"),
+            format!("{dma}planes = []\n"),
+            format!("{dma}planes = [128, 128, 128, 128, 128, 128, 128, 64, 64]\n"),
+            format!("{dma}planes = [4294967295, 1025]\n"),
+            "planes = [768, 256]\n".to_string(),
+        ] {
+            assert_eq!(stream(&bad), refused, "{bad}");
+        }
+        // Every buffer's planes travel in one message.
+        let board = |buffers: u32| {
+            with(&format!(
+                "[[devices]]\nid = \"a\"\ndriver = \"x\"\n\
+                 [devices.streams.out]\nbuffers = {buffers}\nbuffer_bytes = 64\n{dma}\
+                 planes = [32, 32]\n"
+            ))
+        };
+        assert!(board(MAX_HANDLE_BUFFERS / 2).is_ok());
+        assert_eq!(
+            board(MAX_HANDLE_BUFFERS / 2 + 1),
+            Err(BoardError::StreamPlanes("a".to_string(), "out".to_string()))
+        );
     }
 
     #[test]

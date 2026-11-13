@@ -51,6 +51,35 @@ points at the board file.
 If the heap is missing or refuses, the open is refused with the reason. The daemon never makes
 such a stream out of shared memory instead. A stream of dma-bufs has at most 128 buffers.
 
+### Planes
+
+Some hardware writes one frame into several pieces of memory, a plane each: a V4L2 node of the
+multi-plane API writing luma to one and chroma to another. A board gives such a stream
+`planes = [..]`, the length of each plane, adding up to `buffer_bytes`. Each plane of each buffer
+is then its own dma-buf, 1 to 8 planes per buffer and at most 128 dma-bufs in all. The consumer
+is given the descriptors buffer by buffer, each buffer's planes in order, with the plane lengths.
+
+The driver hands each plane to its hardware by its own descriptor, so a multi-plane frame lands
+in the consumer's memory with no copy. A frame's length counts its planes end to end, and so do
+`write` and `read`: an offset past the first plane is in the second. The client reads one plane
+of a frame with `FrameStream::plane`. A driver whose hardware writes more planes than the stream
+has copies each frame in instead, once.
+
+### Standby
+
+A stream's memory is made for each consumer and goes with it, so a consumer never sees what the
+one before it left. That leaves hardware with nothing to fill while nobody is attached, and a
+consumer that attaches waits for the next whole frame.
+
+`standby = true` changes that. While no consumer is attached, the daemon makes the stream's
+memory and the driver fills it as if one were. The newest frame is kept, and the rest go back to
+be filled again. A consumer that attaches takes that memory over, nothing copied, and the kept
+frame is the first it reads. When it leaves, its memory goes with it and fresh memory is made for
+the next stretch with nobody attached, so the rule above still holds: the next consumer reads
+only frames made after the last one left. Standby holds a stream's memory for as long as the
+daemon runs, and keeps hardware busy that would otherwise idle, so a board turns it on only for
+streams that must answer at once.
+
 ## Who fills what
 
 Either side may be the one that puts bytes in a buffer. The contract decides:

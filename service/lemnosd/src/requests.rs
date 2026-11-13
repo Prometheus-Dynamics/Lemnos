@@ -9,8 +9,8 @@ use lemnos_core::{MethodId, Status};
 use lemnos_host::DeviceInfo;
 use lemnos_host::stream::StreamMemory;
 use lemnos_wire::{
-    Appended, Frame, MAX_FRAME, VERSION, decode, encode_description, feature, handle_descriptors,
-    package_mode,
+    Appended, Frame, MAX_FRAME, MAX_PLANES, PLANE_LENGTH_BYTES, VERSION, decode,
+    encode_description, feature, handle_descriptors, package_mode,
 };
 
 use crate::Core;
@@ -400,11 +400,14 @@ impl Client {
         };
         let layout = lease.layout;
         if let Some(handles) = lease.handles {
-            let descriptors = handle_descriptors(layout.buffers).filter(|_| {
+            let planes = lease.planes.count();
+            let descriptors = handle_descriptors(layout.buffers, planes).filter(|_| {
                 takes_handles
                     && lease.descriptors.len() == 2
-                    && handles.len() == layout.buffers as usize
+                    && handles.len() == layout.buffers as usize * planes as usize
             });
+            let mut plane_bytes = [0; PLANE_LENGTH_BYTES * MAX_PLANES as usize];
+            let plane_len = lease.planes.encode(&mut plane_bytes);
             let Some(descriptors) = descriptors else {
                 let _ = self.core.host.stream_detach(device, name, self.conn.id);
                 return self.refuse(id, Status::IO, "the stream's descriptors can't be sent");
@@ -420,6 +423,7 @@ impl Client {
                     frame_slots: layout.frame_slots,
                     job_slots: layout.job_slots,
                     job_bytes: layout.job_bytes,
+                    plane_bytes: plane_bytes.get(..plane_len).unwrap_or(&[]),
                 },
                 lease.descriptors,
                 Some(handles),

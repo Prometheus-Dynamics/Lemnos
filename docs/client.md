@@ -114,6 +114,7 @@ function, struct and code is there with its rule.
 | `lemnos_stream_next_frame`, `lemnos_stream_release` | Take the next frame, read in place, and give its buffer back |
 | `lemnos_stream_read`, `lemnos_stream_write`, `lemnos_stream_post_job` | Copy out of a buffer or into one, and post a job |
 | `lemnos_stream_buffer_handle` | A new descriptor of a buffer's own dma-buf, to hand to a GPU or an encoder |
+| `lemnos_stream_plane`, `lemnos_stream_plane_handle` | On a stream whose buffers are in planes: a held frame's part in one plane, read in place, and a new descriptor of one plane's dma-buf |
 
 Every call returns a status: 0 for success, a negative number for an error, and a positive count
 where the call says so. Output structs start with their own size. Text comes back through a
@@ -125,7 +126,11 @@ A stream works as it does in the Rust client. The Rust wrapper's stream is close
 in place, valid until the frame is released, and allocates nothing. On a stream of dma-bufs
 (`LEMNOS_STREAM_BUFFER_HANDLES` in its info) each buffer has its own descriptor, and
 `lemnos_stream_buffer_handle` gives the caller a new one to close when done. A stream of shared
-memory has none and answers `-EOPNOTSUPP`. Calls on one stream wait for each other, never for the
+memory has none and answers `-EOPNOTSUPP`. When the buffers are in planes (`planes` in the info is
+above 1, from the board file's `planes`), each plane is a dma-buf of its own: a frame has no one
+place in memory, so `lemnos_stream_next_frame` gives its data as `NULL`, `lemnos_stream_plane`
+gives each plane's part, `lemnos_stream_plane_handle` each plane's descriptor, and
+`lemnos_stream_read` and `lemnos_stream_write` address the planes end to end. Calls on one stream wait for each other, never for the
 client's other calls, so one thread can wait for frames while another calls methods. The C tests
 (`engine/capi/tests/c/`) run each of these against the daemon on the simulated board.
 

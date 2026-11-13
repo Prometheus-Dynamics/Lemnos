@@ -781,3 +781,114 @@ fn a_stream_taken_to_be_read_is_mapped_read_only() {
         .unwrap();
     assert_eq!(*telling.writable.lock().unwrap(), [false]);
 }
+
+/// A good stream of `buffers` buffers of two planes, 128 and 64 bytes, each plane its own
+/// descriptor as long as the plane: the host's ring, the descriptors in the order they travel
+/// (buffer 0's planes first), and the host's mapping of each plane.
+fn good_planes(buffers: u32) -> (Layout, Producer, Vec<OwnedFd>, Vec<Mapping>) {
+    let layout = Layout::new(buffers, 192, 1, 8).unwrap();
+    let ring_fd = sealed_memfd(c"ring", layout.ring_bytes() as u64).unwrap();
+    let ring = Mapping::new(ring_fd.as_fd(), layout.ring_bytes(), 0, true).unwrap();
+    let producer = Producer::new(Arc::new(Ring(ring)), layout).unwrap();
+    let mut fds = vec![ring_fd, eventfd::create().unwrap()];
+    let mut maps = Vec::new();
+    for _ in 0..buffers {
+        for len in [128, 64] {
+            let fd = sealed_memfd(c"plane", len as u64).unwrap();
+            maps.push(Mapping::new(fd.as_fd(), len, 0, true).unwrap());
+            fds.push(fd);
+        }
+    }
+    (layout, producer, fds, maps)
+}
+
+/// `plane_bytes` for planes of 128 and 64 bytes.
+fn two_planes() -> Vec<u8> {
+    [128u32, 64]
+        .iter()
+        .flat_map(|len| len.to_le_bytes())
+        .collect()
+}
+
+#[test]
+fn a_stream_of_planes_reads_each_plane_of_a_frame_from_its_own_memory() {
+    let (layout, mut producer, fds, maps) = good_planes(2);
+    let (host, mut session) = handles_host(layout, 6, fds);
+    *host.control.plane_bytes.lock().unwrap() = two_planes();
+    let mut stream = session.open_stream_writable(7, "s", platform()).unwrap();
+    assert_eq!(stream.planes().lengths(), &[128, 64]);
+    // Buffer 1's planes are the third and fourth descriptors.
+    maps[2].write_bytes(0, &[1; 128]).unwrap();
+    maps[3].write_bytes(0, &[2; 64]).unwrap();
+    assert!(producer.push_frame(slot(1, 192)).unwrap());
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(stream.plane(&frame, 0), [1; 128]);
+    assert_eq!(stream.plane(&frame, 1), [2; 64]);
+    assert_eq!(stream.bytes(&frame), [1; 128], "the first plane");
+    assert!(stream.plane(&frame, 2).is_empty(), "no such plane");
+    stream.release(frame).unwrap();
+    // A frame shorter than its buffer ends in the plane it ends in.
+    assert!(producer.push_frame(slot(0, 130)).unwrap());
+    let frame = stream.try_next().unwrap().unwrap();
+    assert_eq!(stream.plane(&frame, 0).len(), 128);
+    assert_eq!(stream.plane(&frame, 1).len(), 2);
+    stream.release(frame).unwrap();
+    // `write` and `read` address the planes end to end, across the seam too.
+    stream.write(0, 126, &[7, 7, 8, 8]).unwrap();
+    assert_eq!(&maps[0].as_slice()[126..], [7, 7]);
+    assert_eq!(&maps[1].as_slice()[..2], [8, 8]);
+    let mut out = [0; 4];
+    stream.read(0, 126, &mut out).unwrap();
+    assert_eq!(out, [7, 7, 8, 8]);
+    assert_eq!(
+        stream.write(0, 190, &[0; 3]).unwrap_err(),
+        Error::Stream(RingError::BadLength),
+        "past the last plane"
+    );
+}
+
+#[test]
+fn planes_that_dont_add_up_to_the_buffer_or_descriptors_that_dont_match_them_are_refused() {
+    // Planes of 128 and 63 for a buffer of 192.
+    let (layout, _producer, fds, _maps) = good_planes(2);
+    let (host, mut session) = handles_host(layout, 6, fds);
+    *host.control.plane_bytes.lock().unwrap() = [128u32, 63]
+        .iter()
+        .flat_map(|len| len.to_le_bytes())
+        .collect();
+    assert_eq!(
+        session.open_stream(1, "s", platform()).unwrap_err(),
+        MALFORMED
+    );
+    // Planes that do, with a descriptor for one plane per buffer only.
+    let (layout, _producer, fds, _maps) = good_planes(2);
+    let fds: Vec<OwnedFd> = fds.into_iter().take(4).collect();
+    let (host, mut session) = handles_host(layout, 4, fds);
+    *host.control.plane_bytes.lock().unwrap() = two_planes();
+    assert_eq!(
+        session.open_stream(1, "s", platform()).unwrap_err(),
+        MALFORMED
+    );
+    // A length cut short.
+    let (layout, _producer, fds, _maps) = good_planes(2);
+    let (host, mut session) = handles_host(layout, 6, fds);
+    *host.control.plane_bytes.lock().unwrap() = vec![128, 0, 0, 0, 64];
+    assert_eq!(
+        session.open_stream(1, "s", platform()).unwrap_err(),
+        MALFORMED
+    );
+}
+
+#[test]
+fn a_plane_descriptor_shorter_than_its_plane_is_refused_before_mapping() {
+    let (layout, _producer, mut fds, _maps) = good_planes(2);
+    // Buffer 1's second plane, a byte short.
+    fds[5] = sealed_memfd(c"short", 63).unwrap();
+    let (host, mut session) = handles_host(layout, 6, fds);
+    *host.control.plane_bytes.lock().unwrap() = two_planes();
+    assert_eq!(
+        session.open_stream(1, "s", platform()).unwrap_err(),
+        Error::Stream(RingError::TooSmall)
+    );
+    assert_eq!(closes(&host), 1, "given back");
+}

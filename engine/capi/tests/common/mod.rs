@@ -94,8 +94,9 @@ impl BufferSource for StandIn {
     }
 }
 
-/// A device with three streams: `frames` (dma-bufs the producer fills),
-/// `input` (dma-bufs the consumer fills, for jobs) and `plain` (shared memory).
+/// A device with four streams: `frames` (dma-bufs the producer fills),
+/// `input` (dma-bufs the consumer fills, for jobs), `plain` (shared memory)
+/// and `planar` (dma-bufs of two planes, 200 and 100 bytes, a test fills).
 pub fn stream_service() -> Running {
     let (socket, dir) = place();
     let devices = format!(
@@ -104,7 +105,9 @@ pub fn stream_service() -> Running {
          memory = \"dma-buf\"\n\
          [devices.streams.input]\nbuffers = 2\nbuffer_bytes = {INPUT_BYTES}\n\
          memory = \"dma-buf\"\n\
-         [devices.streams.plain]\nbuffers = 2\nbuffer_bytes = 128\n"
+         [devices.streams.plain]\nbuffers = 2\nbuffer_bytes = 128\n\
+         [devices.streams.planar]\nbuffers = 2\nbuffer_bytes = 300\n\
+         memory = \"dma-buf\"\nplanes = [200, 100]\n"
     );
     let service =
         Service::start_with_buffers(config(socket.clone(), &devices), Arc::new(StandIn)).unwrap();

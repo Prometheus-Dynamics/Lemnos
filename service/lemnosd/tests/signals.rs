@@ -2,7 +2,7 @@
 
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const BOARD: &str = "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n";
@@ -26,15 +26,17 @@ fn stops_on(signal: &str, backend: &[&str]) {
     let board = dir.join("board.toml");
     std::fs::write(&board, BOARD).unwrap();
     let socket = dir.join("sock");
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lemnosd"))
-        .args(backend)
-        .arg("--board")
-        .arg(&board)
-        .arg("--socket")
-        .arg(&socket)
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut daemon = Reaped(
+        Command::new(env!("CARGO_BIN_EXE_lemnosd"))
+            .args(backend)
+            .arg("--board")
+            .arg(&board)
+            .arg("--socket")
+            .arg(&socket)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let mut client = None;
     eventually(
         || {
@@ -45,14 +47,14 @@ fn stops_on(signal: &str, backend: &[&str]) {
     );
     let sent = Command::new("kill")
         .arg(format!("-{signal}"))
-        .arg(daemon.id().to_string())
+        .arg(daemon.0.id().to_string())
         .status()
         .unwrap();
     assert!(sent.success());
     let mut status = None;
     eventually(
         || {
-            status = daemon.try_wait().unwrap();
+            status = daemon.0.try_wait().unwrap();
             status.is_some()
         },
         "the daemon ignored the signal",
@@ -61,6 +63,19 @@ fn stops_on(signal: &str, backend: &[&str]) {
     assert!(status.success(), "{signal}: {status}");
     assert!(!Path::new(&socket).exists(), "{signal} left the socket");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A daemon process that is always reaped: a test that fails before the daemon stops still
+/// takes it down, so no daemon outlives the test binary.
+struct Reaped(Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
 }
 
 #[test]

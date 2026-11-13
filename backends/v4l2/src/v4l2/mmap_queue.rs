@@ -305,7 +305,7 @@ fn added_range(first: u32, added: u32, held: usize, name: &'static str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v4l2::{BufferFlags, test_device};
+    use crate::v4l2::{BufferFlags, MAX_PLANES, test_device};
     use lemnos_measure::test_alloc::allocations;
     use std::os::fd::AsFd;
 
@@ -440,6 +440,46 @@ mod tests {
     fn dequeuing_allocates_nothing() {
         let (queue, _file) = queue_of(2, 4096, true);
         let (result, n) = allocations(|| queue.try_dequeue());
+        assert_eq!(result.unwrap_err().errno(), Some(libc::ENOTTY));
+        assert_eq!(n, 0);
+    }
+
+    /// A queue of `slots` multi-planar slots importing dma-bufs, on a test device.
+    fn importing_of(slots: usize) -> (MmapQueue, std::fs::File) {
+        let (dev, file) = test_device();
+        let queue = MmapQueue {
+            dev,
+            buf_type: BufType::VideoCaptureMplane,
+            maps: (0..slots).map(|_| Vec::new()).collect(),
+            memory: Memory::DmaBuf,
+            name: "test",
+            writable: false,
+            timer: None,
+        };
+        (queue, file)
+    }
+
+    #[test]
+    fn an_importing_queue_takes_a_dma_buf_per_plane_up_to_the_most_a_buffer_has() {
+        let (queue, file) = importing_of(2);
+        let fd = file.as_fd();
+        // Two planes reach the kernel (a test device answers `ENOTTY`).
+        let error = queue.queue_dmabuf(1, &[fd, fd]).unwrap_err();
+        assert_eq!(error.errno(), Some(libc::ENOTTY), "{error:?}");
+        // As many as a buffer can have still do.
+        let error = queue.queue_dmabuf(0, &[fd; MAX_PLANES]).unwrap_err();
+        assert_eq!(error.errno(), Some(libc::ENOTTY), "{error:?}");
+        // One more is refused here, before the kernel.
+        let error = queue.queue_dmabuf(0, &[fd; MAX_PLANES + 1]).unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+        assert_eq!(error.errno(), None);
+    }
+
+    #[test]
+    fn queueing_a_dma_buf_per_plane_allocates_nothing() {
+        let (queue, file) = importing_of(2);
+        let fd = file.as_fd();
+        let (result, n) = allocations(|| queue.queue_dmabuf(1, &[fd, fd]));
         assert_eq!(result.unwrap_err().errno(), Some(libc::ENOTTY));
         assert_eq!(n, 0);
     }

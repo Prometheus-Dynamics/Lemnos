@@ -80,6 +80,8 @@ impl Capture for NodeEnd {
             height: wanted.height,
             stride: wanted.stride,
             size: wanted.size,
+            planes: 1,
+            plane_sizes: [wanted.size, 0, 0, 0, 0, 0, 0, 0],
         })
     }
 
@@ -96,7 +98,10 @@ impl Capture for NodeEnd {
         Ok(())
     }
 
-    fn queue_handle(&mut self, index: u32, handle: BufferHandle<'_>) -> Result<()> {
+    fn queue_handles(&mut self, index: u32, planes: &[BufferHandle<'_>]) -> Result<()> {
+        let [handle] = planes else {
+            return Err(Status::INVALID_ARGUMENT);
+        };
         let file = std::fs::File::from(handle.fd().try_clone_to_owned().map_err(|_| Status::IO)?);
         self.node.with(|n| {
             n.handles += 1;
@@ -207,6 +212,22 @@ impl StreamEndpoint for Counted {
         self.inner.buffer_current(buffer)
     }
 
+    fn planes(&self) -> u32 {
+        self.inner.planes()
+    }
+
+    fn plane_offset(&self, plane: u32) -> Option<usize> {
+        self.inner.plane_offset(plane)
+    }
+
+    fn plane_handle(
+        &self,
+        buffer: u32,
+        plane: u32,
+    ) -> core::result::Result<Option<BufferHandle<'_>>, ErrorKind> {
+        self.inner.plane_handle(buffer, plane)
+    }
+
     fn fault_consumer(&mut self) -> core::result::Result<(), ErrorKind> {
         self.inner.fault_consumer()
     }
@@ -264,10 +285,16 @@ impl Rig {
     /// The driver with its raw path on a host's `frames` stream, of dma-bufs when `dma_buf`,
     /// configured and started.
     fn start(dma_buf: bool) -> Self {
+        Self::start_with(dma_buf, "", Packing::Packed)
+    }
+
+    /// As [`start`](Self::start), with `keys` added to the stream and the link configured with
+    /// `packing`.
+    fn start_with(dma_buf: bool, keys: &str, packing: Packing) -> Self {
         let memory = if dma_buf {
-            "memory = \"dma-buf\"\n"
+            format!("memory = \"dma-buf\"\n{keys}")
         } else {
-            ""
+            keys.to_string()
         };
         let text = format!(
             "format = \"lemnos.board\"\nschema_version = 1\n[board]\nid = \"t\"\n\
@@ -311,7 +338,7 @@ impl Rig {
             lemnos_core::Held::boxed(Box::new(stream)),
             raw,
         );
-        driver.configure(link(), Packing::Packed).unwrap();
+        driver.configure(link(), packing).unwrap();
         CameraReceiver::start(&mut driver).unwrap();
         Self {
             host,
@@ -356,6 +383,7 @@ fn the_capture_node_fills_the_streams_own_buffers_and_nothing_is_copied() {
                 height: 4,
                 stride: 256,
                 size: FRAME as u32,
+                mode: 0,
             }]
         );
         assert_eq!(n.importing, [BUFFERS]);
@@ -475,4 +503,85 @@ fn without_the_stream_and_the_node_there_is_no_raw_path() {
         Err(Status::NOT_SUPPORTED)
     );
     assert_eq!(driver.counters(), Err(Status::NOT_SUPPORTED));
+}
+
+#[test]
+fn sixteen_bit_words_ask_the_node_for_the_uapi_format_in_word_mode() {
+    let rig = Rig::start_with(true, "", Packing::Unpacked16);
+    rig.node.with(|n| {
+        assert_eq!(
+            n.opened,
+            [Wanted {
+                input: None,
+                // `V4L2_PIX_FMT_SRGGB10`: ten bits expanded to sixteen, as the uAPI defines it.
+                fourcc: FourCc::new(b"RG10"),
+                width: 64,
+                height: 4,
+                // 64 words of 2 bytes, rounded up to 8.
+                stride: 128,
+                size: 512,
+                mode: crate::MODE_WORDS,
+            }]
+        );
+    });
+    let mut twelve = link();
+    twelve.bit_depth = 12;
+    twelve.width = 61;
+    let layout = crate::layout(&twelve, Packing::Unpacked16).unwrap();
+    assert_eq!(
+        (layout.packing, layout.stride, layout.size),
+        (Packing::Unpacked16, 128, 512),
+        "61 words of 2 bytes, rounded up to 8"
+    );
+}
+
+#[test]
+fn on_standby_the_node_captures_with_nobody_attached_and_a_consumer_gets_the_newest_at_once() {
+    let mut rig = Rig::start_with(true, "standby = true\n", Packing::Packed);
+    assert_eq!(rig.driver.mode(), Mode::Direct);
+    // Nobody is attached, and the node is fed the stream's buffers all the same.
+    rig.tick();
+    assert_eq!(rig.node.with(|n| n.handles), BUFFERS);
+    rig.node_fills(0, 0, 0x11);
+    rig.tick();
+    rig.node_fills(1, 1, 0x22);
+    rig.tick();
+    let counters = rig.driver.counters().unwrap();
+    assert_eq!((counters.frames, counters.dropped), (2, 0));
+    let stats = rig.host.stream_stats(0, "frames").unwrap();
+    assert_eq!((stats.kept, stats.delivered), (1, 0));
+    // The consumer gets the newest frame the moment it attaches, in the memory the node wrote.
+    let mut client = Client::attach(&rig, 1);
+    let frame = client
+        .ring
+        .pop_frame()
+        .unwrap()
+        .expect("the newest frame, at once");
+    assert_eq!((frame.buffer, frame.sequence), (1, 1));
+    assert_eq!(client.bytes(1), vec![0x22; FRAME]);
+    assert_eq!(rig.writes.load(Ordering::Relaxed), 0, "nothing was copied");
+    // Buffers the node holds from before it came are still the consumer's memory.
+    rig.node_fills(2, 2, 0x33);
+    rig.tick();
+    let frame = client.ring.pop_frame().unwrap().expect("a frame");
+    assert_eq!(frame.buffer, 2);
+    assert_eq!(client.bytes(2), vec![0x33; FRAME]);
+    // Steady state with nobody attached allocates nothing either.
+    rig.host.stream_detach(0, "frames", CallerId(1)).unwrap();
+    rig.tick();
+    rig.tick();
+    let mut allocated = 0;
+    for round in 0..200u32 {
+        let slot = rig.node.with(|n| n.held.iter().position(Option::is_some));
+        let Some(slot) = slot else {
+            let ((), count) = allocations(|| rig.tick());
+            allocated += count;
+            continue;
+        };
+        rig.node_fills(slot as u32, 10 + round, round as u8);
+        let ((), count) = allocations(|| rig.tick());
+        allocated += count;
+    }
+    assert_eq!(allocated, 0);
+    assert_eq!(rig.host.stream_stats(0, "frames").unwrap().kept, 1);
 }

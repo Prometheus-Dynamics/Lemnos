@@ -1,6 +1,6 @@
 //! A device's frame streams: taking one, frames read in place, buffers read and
 //! written by copy, jobs, and a buffer's own descriptor on a stream of
-//! dma-bufs.
+//! dma-bufs, each plane's when the buffers are in planes.
 //!
 //! Each stream has its own lock, so waiting for a frame holds up neither the
 //! client's other calls nor its other streams. Nothing on the way to a frame or
@@ -35,7 +35,8 @@ pub struct StreamInfo {
     pub frame_slots: u32,
     pub job_slots: u32,
     pub job_bytes: u32,
-    pub reserved: u32,
+    /// The memory planes of each buffer: 1 unless the board file gives more.
+    pub planes: u32,
 }
 
 #[repr(C)]
@@ -182,6 +183,7 @@ pub unsafe extern "C" fn lemnos_stream_info(
             info.frame_slots = layout.frame_slots;
             info.job_slots = layout.job_slots;
             info.job_bytes = layout.job_bytes;
+            info.planes = s.stream.planes().count();
             info.flags = [
                 (s.stream.is_writable(), STREAM_WRITABLE),
                 (s.stream.has_buffer_handles(), STREAM_BUFFER_HANDLES),
@@ -226,7 +228,13 @@ pub unsafe extern "C" fn lemnos_stream_next_frame(
             frame.identity = got.identity();
             frame.timestamp_ns = got.timestamp_ns();
             if !data.is_null() {
-                let bytes = s.stream.bytes(&got).as_ptr();
+                // A frame in planes is not one piece of memory: `lemnos_stream_plane` reads
+                // each, and `data` says so with NULL rather than point at less than `len`.
+                let bytes = if s.stream.planes().count() > 1 {
+                    core::ptr::null()
+                } else {
+                    s.stream.bytes(&got).as_ptr()
+                };
                 // SAFETY: not null, and valid for a write by the contract.
                 unsafe { data.write(bytes) };
             }
@@ -363,6 +371,78 @@ pub unsafe extern "C" fn lemnos_stream_buffer_handle(
         }
         with_stream(client, stream, |s| {
             let Some(handle) = s.stream.buffer_handle(buffer) else {
+                if s.stream.has_buffer_handles() {
+                    return Status::INVALID_ARGUMENT;
+                }
+                sink.write_fmt(format_args!(
+                    "the stream's buffers are one piece of shared memory, with no handle each"
+                ));
+                return Status::NOT_SUPPORTED;
+            };
+            match handle.try_clone_to_owned() {
+                Ok(owned) => {
+                    // SAFETY: not null, and valid for a write by the contract.
+                    unsafe { fd.write(owned.into_raw_fd()) };
+                    Status::OK
+                }
+                Err(error) => {
+                    sink.write_fmt(format_args!("{error}"));
+                    Status::from_io_error(&error)
+                }
+            }
+        })
+    })
+}
+
+/// # Safety
+/// `data` and `len` are each null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_plane(
+    client: Handle,
+    stream: Handle,
+    buffer: u32,
+    plane: u32,
+    data: *mut *const u8,
+    len: *mut usize,
+) -> Status {
+    guard(|| {
+        if data.is_null() || len.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| {
+            if plane >= s.stream.planes().count() {
+                return Status::INVALID_ARGUMENT;
+            }
+            let Some(Some(frame)) = s.held.get(buffer as usize) else {
+                return Status::INVALID_ARGUMENT;
+            };
+            let bytes = s.stream.plane(frame, plane);
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { data.write(bytes.as_ptr()) };
+            // SAFETY: not null, and valid for a write by the contract.
+            unsafe { len.write(bytes.len()) };
+            Status::OK
+        })
+    })
+}
+
+/// # Safety
+/// `fd` is null or valid for a write.
+#[cfg_attr(not(feature = "shared"), unsafe(no_mangle))]
+pub unsafe extern "C" fn lemnos_stream_plane_handle(
+    client: Handle,
+    stream: Handle,
+    buffer: u32,
+    plane: u32,
+    fd: *mut i32,
+    sink: MessageSink,
+) -> Status {
+    guard(|| {
+        if fd.is_null() {
+            return Status::INVALID_ARGUMENT;
+        }
+        with_stream(client, stream, |s| {
+            let Some(handle) = s.stream.plane_handle(buffer, plane) else {
                 if s.stream.has_buffer_handles() {
                     return Status::INVALID_ARGUMENT;
                 }

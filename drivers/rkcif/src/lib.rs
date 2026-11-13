@@ -41,8 +41,25 @@
 //!   pixel format asked of the node carries it; there is no monochrome format past 8 bits.
 //! - `buffers`: buffers the node fills when frames are copied, 2 to 32, default 4.
 //!
-//! `Unpacked16` needs the vendor driver's private memory-mode call, which `lemnos-v4l2`
-//! doesn't carry, so it is refused: frames are the receiver's compact layout.
+//! # Layouts
+//!
+//! `configure` takes either packing, for the raw path:
+//!
+//! - `Packed`, at 8, 10 or 12 bits: the receiver's compact layout, samples end to end and
+//!   lines of `width * depth / 8` bytes rounded up to 256.
+//! - `Unpacked16`, at 10 or 12 bits: one sample per 16-bit little-endian word, in its low
+//!   bits, lines of `width * 2` bytes rounded up to 8. This is exactly what the kernel uAPI's
+//!   own formats for those depths name (`V4L2_PIX_FMT_SRGGB10`, `V4L2_PIX_FMT_Y12` and the
+//!   rest are "expanded to 16 bits"), and the node is asked for that format.
+//!
+//! The vendor driver writes its compact layout under the same format names unless told
+//! otherwise, so before each format is set the driver sets the node's memory mode with the
+//! vendor driver's own call (`lemnos-driver-rkcif-sys`): compact for `Packed`, the low-aligned
+//! word for `Unpacked16`. A kernel without the call can only be compact: `Packed` carries on
+//! there, `Unpacked16` fails its start, and either way the stride the node answers the format
+//! with must be the one the layout says, or the start is refused with `NOT_SUPPORTED`.
+//! Without a raw path frames reach only the ISP, inside the kernel, and `Unpacked16` is
+//! refused with `NOT_SUPPORTED`.
 //!
 //! Failures. While routed, every second the driver reads the receiver's graph without allocating
 //! and checks the channel's link is still on. A link someone turned off, or a graph that can't be
@@ -52,8 +69,8 @@
 //! recovering, health is degraded and `start` is refused with `BUSY`. A failed `start` is reported
 //! to its caller, who retries it.
 //!
-//! Untested on board: written from the vendor driver's source; the check is
-//! `testing/board-runs/E8.md`.
+//! Untested on board: written from the vendor driver's source; the checks are
+//! `testing/board-runs/E8.md` and, for `Unpacked16`, `testing/board-runs/H5a.md`.
 
 mod hw;
 pub mod route;
@@ -95,6 +112,14 @@ pub const MAX_DIMENSION: u32 = 8192;
 pub const CHANNELS: u8 = 4;
 /// Compact raw lines are aligned to this many bytes (`capture.c`, `ALIGN(width * bpp / 8, 256)`).
 pub const COMPACT_LINE_ALIGN: u64 = 256;
+/// Lines of one sample per 16-bit word are aligned to this many bytes (`capture.c`,
+/// `rkcif_set_fmt`, `ALIGN(width * bpp / CIF_YUV_STORED_BIT_WIDTH, 8)` with `bpp` 16).
+pub const WORD_LINE_ALIGN: u64 = 8;
+
+/// [`Wanted::mode`] for the compact layout.
+const MODE_COMPACT: u32 = 0;
+/// [`Wanted::mode`] for one sample per 16-bit word, low-aligned.
+const MODE_WORDS: u32 = 1;
 
 /// First delay between recovery attempts.
 const BACKOFF_FIRST_NS: u64 = 250_000_000;
@@ -134,6 +159,7 @@ pub struct Rkcif {
     pump: Pump,
     raw: Raw,
     link: Option<LinkConfig>,
+    packing: Packing,
     state: State,
 }
 
@@ -160,23 +186,51 @@ impl Default for Raw {
     }
 }
 
-/// How a compact raw frame is laid out: lines of `width * depth / 8` bytes, rounded down as the
-/// vendor driver does, then up to [`COMPACT_LINE_ALIGN`].
-fn layout(link: &LinkConfig) -> Result<FrameLayout> {
-    if !matches!(link.bit_depth, 8 | 10 | 12) {
-        return Err(Status::INVALID_ARGUMENT);
-    }
-    let line = u64::from(link.width) * u64::from(link.bit_depth) / 8;
-    let stride = line.div_ceil(COMPACT_LINE_ALIGN) * COMPACT_LINE_ALIGN;
+/// How a raw frame is laid out. Compact: lines of `width * depth / 8` bytes, rounded down as
+/// the vendor driver does, then up to [`COMPACT_LINE_ALIGN`]. One sample per 16-bit word: lines
+/// of `width * 2` bytes rounded up to [`WORD_LINE_ALIGN`].
+fn layout(link: &LinkConfig, packing: Packing) -> Result<FrameLayout> {
+    let (line, align) = match packing {
+        Packing::Packed if matches!(link.bit_depth, 8 | 10 | 12) => (
+            u64::from(link.width) * u64::from(link.bit_depth) / 8,
+            COMPACT_LINE_ALIGN,
+        ),
+        Packing::Unpacked16 if matches!(link.bit_depth, 10 | 12) => {
+            (u64::from(link.width) * 2, WORD_LINE_ALIGN)
+        }
+        _ => return Err(Status::INVALID_ARGUMENT),
+    };
+    let stride = line.div_ceil(align) * align;
     let size = stride * u64::from(link.height);
     Ok(FrameLayout {
         width: link.width,
         height: link.height,
         bit_depth: link.bit_depth,
-        packing: Packing::Packed,
+        packing,
         stride: u32::try_from(stride).map_err(|_| Status::INVALID_ARGUMENT)?,
         size: u32::try_from(size).map_err(|_| Status::INVALID_ARGUMENT)?,
     })
+}
+
+/// Before the node's format: the memory mode `wanted` needs, through the vendor driver's own
+/// call. A kernel without the call can only write its compact layout, so that is no failure
+/// for compact; the stride the node answers the format with is checked after either way.
+fn prepare_node(fd: std::os::fd::BorrowedFd<'_>, wanted: &Wanted) -> Result<()> {
+    use lemnos_driver_rkcif_sys::{MemoryMode, set_memory_mode};
+    let mode = match wanted.mode {
+        MODE_WORDS => MemoryMode::WordLowAlign,
+        _ => MemoryMode::Compact,
+    };
+    match set_memory_mode(fd, mode) {
+        Ok(()) => Ok(()),
+        Err(e) if mode == MemoryMode::Compact && e.raw_os_error() == Some(libc::ENOTTY) => Ok(()),
+        Err(e) => Err(match e.raw_os_error() {
+            Some(libc::ENOTTY | libc::EINVAL) => Status::NOT_SUPPORTED,
+            Some(libc::EBUSY) => Status::BUSY,
+            Some(libc::ENODEV) => Status::NO_DEVICE,
+            _ => Status::IO,
+        }),
+    }
 }
 
 impl Lifecycle for Rkcif {
@@ -198,9 +252,10 @@ impl Lifecycle for Rkcif {
         }
         let node: Option<Box<dyn capture::Hardware>> = match cfg.str("capture") {
             None => None,
-            Some(name) => Some(Box::new(capture::LinuxHardware::new(
-                capture::Settings::new(name)?,
-            ))),
+            Some(name) => Some(Box::new(
+                capture::LinuxHardware::new(capture::Settings::new(name)?)
+                    .with_prepare(Box::new(prepare_node)),
+            )),
         };
         let mut driver = Self::with_hardware(Box::new(LinuxHardware::new(settings)));
         driver.frames = needs.frames;
@@ -319,6 +374,7 @@ impl Rkcif {
             pump: Pump::new(),
             raw: Raw::default(),
             link: None,
+            packing: Packing::Packed,
             state: State::Stopped,
         }
     }
@@ -355,7 +411,7 @@ impl Rkcif {
             return Ok(());
         };
         let link = self.link.ok_or(Status::INVALID_ARGUMENT)?;
-        let layout = layout(&link)?;
+        let layout = layout(&link, self.packing)?;
         let wanted = Wanted {
             // The vendor driver takes its input from the route, not from an input index.
             input: None,
@@ -364,6 +420,10 @@ impl Rkcif {
             height: layout.height,
             stride: layout.stride,
             size: layout.size,
+            mode: match self.packing {
+                Packing::Packed => MODE_COMPACT,
+                Packing::Unpacked16 => MODE_WORDS,
+            },
         };
         self.pump.begin(node, frames, &wanted, self.raw.buffers)
     }
@@ -415,8 +475,7 @@ impl CameraReceiver for Rkcif {
         if self.state != State::Stopped {
             return Err(Status::BUSY);
         }
-        if packing != Packing::Packed
-            || link.lanes == 0
+        if link.lanes == 0
             || link.lanes > MAX_LANES
             || link.virtual_channel >= CHANNELS
             || !(1..=63).contains(&link.data_type)
@@ -428,8 +487,13 @@ impl CameraReceiver for Rkcif {
         {
             return Err(Status::INVALID_ARGUMENT);
         }
-        let layout = layout(&link)?;
+        let layout = layout(&link, packing)?;
+        // The words are the capture node's to write; without it frames reach only the ISP.
+        if packing == Packing::Unpacked16 && !self.raw_path() {
+            return Err(Status::NOT_SUPPORTED);
+        }
         self.link = Some(link);
+        self.packing = packing;
         Ok(layout)
     }
 
