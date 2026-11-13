@@ -275,6 +275,15 @@ struct lemnos_claim {
  * given with LEMNOS_STREAM_IOC_BUFFER; pool_fd must be -1 and pool_addr reads 0.
  */
 #define LEMNOS_STREAM_CREATE_BUFFERS	(1u << 0)
+/*
+ * The frame ring is the shared-memory ring of shm/README.md (layout 1), not the
+ * LEMNOS_RING_* layout: one field, one sample per frame, each sample's entry
+ * naming its buffer and ticket (shm/ring-buffers/src/entry.rs). The pool page
+ * (shm/ring-buffers/src/page.rs) follows the ring in the mapping, then the
+ * returns and jobs words. Returns and jobs are still the old words for now.
+ * Needs frame_slots of at least 2.
+ */
+#define LEMNOS_STREAM_CREATE_SHM	(1u << 1)
 
 struct lemnos_stream_create {
 	__u32 block;		/* in */

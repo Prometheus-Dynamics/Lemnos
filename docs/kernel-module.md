@@ -69,10 +69,15 @@ backend hands those two to no driver.
 
 ## The module's own streams
 
-A stream the module makes (`LEMNOS_STREAM_*`) has its own ring, in the layout `kernel/lemnos.h`
-gives (`LEMNOS_RING_*`), which is not yet the shm ring a consumer reads. The driver that runs the
-block reads it, with its fences and job ranges. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module)
-says how it fits, and [`TODO.md`](../TODO.md) lists the port.
+A stream the module makes (`LEMNOS_STREAM_*`) has its own ring. By default it is the module's own
+layout (`LEMNOS_RING_*`), which the four sys crates read; the driver that runs the block reads it,
+with its fences and job ranges. With `LEMNOS_STREAM_CREATE_SHM` the frame ring is the shared-memory
+ring of [`shm/README.md`](../shm/README.md) instead: one field, one sample per frame, each sample's
+entry naming its buffer and ticket, and the pool page after the ring. A reader maps it read-only and
+reads it with the shm crates alone (`testing/crates/shm-ring-check` does, in the QEMU harness). The
+returns and jobs words still follow the old layout in this form; the consumer's returns move to the
+shm holds next. [`docs/streams.md`](streams.md#streams-made-by-the-kernel-module) says how it fits,
+and [`TODO.md`](../TODO.md) lists the port.
 
 ## What it never does
 

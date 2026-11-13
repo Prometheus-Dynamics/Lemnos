@@ -101,8 +101,12 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       shared ring (I2a). Still open:
   - I2b: the kernel module's own stream ring (`kernel/lemnos.h`, `LEMNOS_RING_*`, read by
     `drivers/pisp-fe-sys`, `drivers/pisp-sys`, `drivers/rp1-csi2-sys` and `drivers/k230-gsdma-sys`)
-    moves onto the shared layout. Until it does, kernel-backed streams are not expected to work on
-    a board.
+    moves onto the shared layout. Kernel-backed streams work through the daemon's ring today:
+    I2b0 checks the whole path in QEMU (a receiver's frames, through the module, the driver and
+    the host's ring, to a client over the socket). What the rest of I2b does is remove the driver's
+    1 ms poll and let a foreign reader attach to a kernel-made ring directly. I2b1a adds the create
+    flag `LEMNOS_STREAM_CREATE_SHM`, which makes the module write the shared frame ring; the sys
+    crates still read the old one until I2b2.
   - I2c: the job ring.
   - I2d: outside readers by ticket. A third process gets a reader slot from the service, and the
     service asks the daemon for a ticket on its own connection. Read and import rights are kept

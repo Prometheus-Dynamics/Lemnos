@@ -311,6 +311,9 @@ int main(void)
 	check(!load("/lemnos.ko", OWNED " test_stream_source=1"),
 	      "module loaded with the test stream source");
 	check(!bind_block(BLOCK), "block bound");
+	check(!run((char *const[]){ "/lemnos-shm-ring-check", "/dev/lemnos", BLOCK,
+				    (char *)cma_heap(), NULL }),
+	      "lemnos-shm-ring-check");
 	check(!run((char *const[]){ "/lemnos_stream_check", "/dev/lemnos", BLOCK, UNBIND,
 				    (char *)cma_heap(), NULL }),
 	      "lemnos_stream_check");
