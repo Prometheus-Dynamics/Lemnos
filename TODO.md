@@ -24,6 +24,15 @@ lists what they showed. Every other check under `testing/board-runs/` has no res
 - [ ] The bench's reference set on the reference board, beside the earlier version's figures
       (`testing/bench/bench.sh --real`). The harness has no step for the camera, light and fan
       rows: their figures come only from the board runs `testing/bench/reference.tsv` names.
+- [ ] The PiSP camera chain, a chain of links at `3324fec4` (F2c3): no board run has checked it.
+      The earlier board records need correcting against it, and the PiSP sections of the runbook
+      follow.
+- [ ] The reference board's board file, two read-only re-checks, then a small correction to
+      `testing/boards/reference.toml` from what the board says: the magnetometer's bus (the file
+      says the PIO bus; an earlier run saw `i2c-1` at `0x10`), and the power monitor's chip and
+      shunt values.
+- [ ] The whole-system comparison on the board (F2), after the runs above. The hand-off to other
+      repositories (F3) waits on it.
 
 ## Blocks that cannot be made safe from user space
 
@@ -35,27 +44,33 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
       chip offers something.
 - [ ] **Rockchip NPU** (`drivers/rknpu`): confined only while the daemon is the node's sole
       opener. If a board run shows a program can reach the IOMMU's own registers
-      (`testing/board-runs/E32.md`), it needs a kernel path too.
+      (`testing/board-runs/E32.md`), it needs a kernel path too. The NPU address wrapper is parked
+      for the owner's decision.
 - [ ] **Rockchip AI-ISP** (`drivers/rkaiisp`): the layouts and checks exist; running the block is
       left out until its kernel driver's unchecked fields are bounded on a board.
-- [ ] **A733 video engine encoder** (`drivers/a733-video`, K1c): the encoder's register layouts
-      and builder are not written. Checked 2026-11-13, no open-source source with the encoder's
-      register facts: `mashiqi/A733-Cedarc` (MIT for its own code) wraps a vendor library, and its
-      `vendor/` headers say "All rights reserved" with no redistribution grant; `aodzip/cedar`
-      (GPL-2.0) is the H3/sun8i-v3 generation; `hanetzer/H6-CedarC` (LGPL-2.1+) is H6;
-      `aodzip/libcedarc`, `linux-sunxi/cedarx-libs` and `leviathanch/sunxi-cedarx-blobs` have no
-      licence file, and the last is binary blobs (not read). Licence question for the user: may the
-      `vendor/` material of `mashiqi/A733-Cedarc`, or the unlicensed repositories, be used for the
-      register facts? Until a licensed source is found, the encoder stays out.
+- [ ] **A733 video engine encoder** (`drivers/a733-video`, K1c): the header side is written
+      (K1d, PR #224: the QP map, the CTU info word and the codec, rate-control, pixel, profile and
+      slice values, in `drivers/a733-video/src/encoder/`). What is missing is in the vendor
+      library's binary, which is not read: the encoder's register offsets and encodings, the job
+      structure, the register each record's address is written to, the QP map's stride and
+      macroblock order, the encodings of the H.264 parameters, the bitstream's header and trailer,
+      and how the engine reports a picture's length. No builder and no encoder job until those
+      are known. The register facts need either the vendor's, or a register trace on a real board,
+      which is the owner's decision. The licence question is settled (owner's ruling 2026-11-13: the
+      facts may be transcribed, and are noted in `docs/drivers.md`).
 
 ## Unfinished in the code
 
-- [ ] **ISP600 tuning encodings** (`drivers/isp600`): the channel black level and bit depths, module
-      enables and temporal denoise's record enable are encoded and wait for a board run
-      (`testing/board-runs/U3.md`). No public, licensed source defines the register encodings of white
-      balance, colour matrix, gamma, tone, lens shading, spatial denoise, sharpen, or any statistics
-      window or decode. The sources checked, and why each is not used, are in `docs/drivers.md`
-      ("ISP600 tuning"). Until one is found the driver's tuning for those blocks is unsupported.
+- [ ] **ISP600 tuning encodings** (`drivers/isp600`, U4, PR #227): the channel black level and bit
+      depths, module enables, and temporal denoise's record enable are encoded, and their sizes,
+      places and default words are cross-checked against the vendor library at `516fd744`. They wait
+      for a board run (`testing/board-runs/U3.md`, `U4.md`). Still missing, because they are defined
+      only in the library's binary `libisp_algo.so` (not read): the register encodings of white
+      balance, colour matrix, gamma, tone, lens shading, DRC, CEM, spatial denoise and sharpen, and
+      the statistics decode. Also open in the layouts: the element layouts of the gamma and lens
+      shading regions, no place for CEM's second table, and an LDCI buffer the layout does not
+      hold. Until these are known the driver's tuning for those blocks is unsupported. The sources
+      checked are in `docs/drivers.md` ("ISP600 tuning").
 - [ ] **Two libraries with no contract driver**, rechecked against the public sources on
       2026-11-11:
   - `drivers/k230-ai2d`: the block's job registers are in no public source. The SDK kernel's
@@ -79,7 +94,70 @@ memory that is not the caller's. They need a path through `lemnos.ko`, or cannot
     `ver_stride`) and the extent of the ECS length buffer (`reg021_adr_ecs_len`): the builder checks
     the encoded picture only and does not place the ECS buffer, which the vendor HAL leaves unset on
     the frame-by-frame path.
-- [ ] **Frame streams are not on the shared ring** (I2). `lemnosd`'s streams, the client and the
-      C API still use their own ring and doorbell (`docs/streams.md`). Move them onto
-      `shm-ring`, `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`),
-      and pass descriptors with `shm-fdpass`.
+
+## Frame streams and the shared ring
+
+- [ ] **Frame streams on the shared ring** (I2). `lemnosd`'s streams, the client and the C API still
+      use their own ring and doorbell (`docs/streams.md`), and move onto `shm-ring`,
+      `shm-ring-buffers`, `shm-ring-holds` and `shm-ring-doorbell` (`docs/ring.md`), with
+      descriptors passed by `shm-fdpass`. Open:
+  - I2a (PR #221, in CI): the streams on the shared ring. Until it merges, the entry above stands.
+  - I2b: the kernel module's stream ring onto the shared layout.
+  - I2c: the job ring.
+  - I2d: outside readers by ticket. A third process gets a reader slot from the service, and the
+    service asks the daemon for a ticket on its own connection. Read and import rights are kept
+    apart: a read-only mapping is enforced by the kernel, but an importer of a dma-buf can write
+    through its device, so an importing reader is trusted with the frame's content. Additive
+    wire frames only.
+
+## Contracts and the wire
+
+- [ ] **Per-contract hashes, bind checks and feature parts** (T1d to T1f). T1, T1b and T1c have
+      merged: the wire layout hash, the compatibility rules and the core hash, struct blocks and
+      wire parts. Still open: the hash per contract, the checks at bind against it, and the feature
+      parts, including `ENDPOINTS` and `SHARED_RINGS`, in one form.
+
+## Orion bridge and the daemon
+
+- [ ] **Bridge to the Orion lock** (I6b): the bridge builds against the Orion lock at `455a956e`,
+      keeps one copy of the shm crates, and withdraws per fact. Not merged.
+- [ ] **Bridge replies and the paged slots list** (M8a, PR #223, open: the out-buffer size in the
+      text path, and the bridge refusing oversize replies by name; M8b: the paged slots list and a
+      live bridge walk, not started).
+- [ ] **Flaky tests, unexplained** (M9): the bridge restart's `NO_DEVICE`, the `orion_bridge.rs`
+      restart test, `closing_ends_what_the_connection_held`
+      (`service/lemnosd/tests/service.rs`), and `health_quiet`. No cause is found yet.
+- [ ] **Shm family in its own repository**: owner's decision pending. Nothing moves until it is made.
+
+## USB gadget
+
+- [ ] **NCM interface name** (R1e): open; R1a to R1d have merged (the NCM and ACM functions, the
+      per-board addresses, the gadget end to end in QEMU).
+- [ ] **What an endpoint holder sees on teardown** (R1f): open; the gadget's bulk endpoints are
+      lent to one client (R1b), and the teardown case is not yet settled.
+- [ ] **VBUS supply on device-mode ports** (Q2f): open; the USB device ports are in the maps
+      (Q2e), but the VBUS supply is not.
+
+## Camera and sensors
+
+- [ ] **Embedded data lines from the receivers** (J4b3, PR #225, open): embedded data lines, the
+      metadata mode, and the sunxi-vin answer.
+- [ ] **Descriptions through the package ABI** (V1b): open. V1a has merged (label, kind, bus,
+      address, reading, range and limits, and `lemnos-ctl show`); the package ABI side and the
+      sensor exposure and gain items are not.
+
+## Firmware, slots and the first flash
+
+- [ ] **First-flash write** (W1): the raw first-flash write, with the bridge's streaming sink. W2
+      (indicator states) has merged.
+- [ ] **Raw NAND first flash** (W1b).
+- [ ] **Modules-off kernel boot in CI** (W3b): the kernel built with modules off is not yet booted
+      in CI. W3 has merged (the configuration, and the built-in module booted in QEMU).
+- [ ] **Trial health and hotplug origin** (I5f3, PR #226, open): trial health without blocking, the
+      reason kept when the state fails, the hotplug origin taken from the bus, and the static host
+      refusing board watchers.
+
+## Follow-ups
+
+- [ ] A mutation test for the watchdog driver (`drivers/hw-watchdog`).
+- [ ] The deprecated `libc::time_t` in `backends/linux-sys/src/aio.rs` (lines 101 and 757).
