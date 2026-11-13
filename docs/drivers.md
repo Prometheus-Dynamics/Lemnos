@@ -33,7 +33,7 @@ python3 scripts/generate-builtins.py --check
 | `generic-temperature` | `temperature/1` | `bus`: I2C; `description`: a chip file | Serves its contract |
 | `generic-power-monitor` | `power-monitor/1` | `bus`: I2C; `description`: a chip file | Serves its contract. The chip's own registers give all four values |
 | `ina2xx` | `power-monitor/1` | `bus`: I2C; `chip`: `ina226`, `ina238` or `ina260` | Serves its contract |
-| `vcm` | `lens/1` | `bus`: I2C; `chip` | Serves its contract. The position is unknown until the first move |
+| `vcm` | `lens/1` | `bus`: I2C; `chip`; optional `direction`, `settle_us` | Serves its contract. The position is unknown until the first move. Direction and settle time are unknown unless the board gives them |
 | `ws2812` | `pixels/1` | `spi`: SPI | Serves its contract |
 | `gpio-power-switch` | `power-switch/1` | `line`: GPIO; optional `fault`: GPIO | Serves its contract. On and off only |
 | `raw-bus` | `raw-bus/1` | any of `i2c`, `spi`, `line`, `pwm` | Serves its contract. Closed by default: writes and each bus are allowed only by `config` |
@@ -182,7 +182,7 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `fan-control/1` | 1 state, 2 settings, 3 set_settings, 4 curve, 5 set_curve, 6 hold, 7 release_hold, 8 set_enabled | `fan-control` |
 | `pixels/1` | 1 pixel_count, 2 set, 3 show | `ws2812` |
 | `light/1` | 1 layout, 2 show, 3 clear, 4 clear_all, 5 set_brightness | `status-light` |
-| `lens/1` | 1 range, 2 set_position, 3 position | `vcm` |
+| `lens/1` | 1 range, 2 set_position, 3 position, 4 direction, 5 settle_us | `vcm` |
 | `raw-bus/1` | 1 i2c_transfer, 2 spi_transfer, 3 line_get, 4 line_set, 5 pwm_set | `raw-bus` |
 | `gpu-lease/1` | 1 acquire, 2 poll, 3 release, 4 hang, 5 state, 6 last_hang | `gpu-lease` |
 | `camera.sensor/1` | 1 info, 2 mode, 3 select_mode, 4 selected, 5 start, 6 stop, 7 set_controls, 8 post_values, 9 applied, 10 set_flips, 11 set_test_pattern | `ov9782` |

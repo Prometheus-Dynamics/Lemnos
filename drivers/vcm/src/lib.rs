@@ -8,6 +8,13 @@
 //! - `address`: the 7-bit I2C address, default `0x0c`.
 //! - `min` and `max`: the positions the lens may move to, default `0` and the
 //!   chip's highest position. They must lie within the chip's range.
+//! - `direction`: which way focus moves as the position goes up, `"near"`,
+//!   `"far"` or `"unknown"` (the default). Mounting decides it, and no chip's
+//!   datasheet fixes it, so the driver never guesses: the board says it.
+//! - `settle_us`: microseconds after a move before the lens is still, for any
+//!   move size. Unset (the default) the driver answers `None`. It knows no
+//!   settle figure for these chips and sets no slew or ringing-control mode, so
+//!   the board supplies the figure the module's datasheet or measurement gives.
 //!
 //! Binding does not touch the bus. The first move powers the chip up and
 //! returns `AGAIN`; the next move writes the position. The chip needs its
@@ -19,6 +26,9 @@
 //!
 //! VCMs report no position, so [`Lens::position`] returns the last position
 //! written, or `NOT_SUPPORTED` before the first move.
+//!
+//! Power-up time (`power_up_us` in [`chip`]) is not the settle time: it is the
+//! wait before the first move, and [`Lens::settle_us`] never reports it.
 
 #![no_std]
 
@@ -28,7 +38,7 @@ pub mod chip;
 mod tests;
 
 use chip::{Chip, DEFAULT_ADDRESS, Format};
-use lemnos_contract_lens::{Lens, Range};
+use lemnos_contract_lens::{FocusDirection, Lens, Range};
 use lemnos_core::{
     Config, ConfigValue, Description, Health, I2c, Item, Lifecycle, MethodId, Result, Status, Unit,
     driver, status_of,
@@ -58,6 +68,8 @@ pub struct Vcm {
     format: Format,
     min: u16,
     max: u16,
+    direction: FocusDirection,
+    settle_us: Option<u32>,
     phase: Phase,
     /// The last position written, kept across faults.
     position: Option<u16>,
@@ -74,12 +86,16 @@ impl Lifecycle for Vcm {
         let chip = chip_from_config(cfg)?;
         let format = chip.format();
         let (min, max) = range_from_config(cfg, &format)?;
+        let direction = direction_from_config(cfg)?;
+        let settle_us = settle_from_config(cfg)?;
         Ok(Self {
             bus: needs.bus,
             address: address(cfg)?,
             format,
             min,
             max,
+            direction,
+            settle_us,
             phase: Phase::Off,
             position: None,
             fault: "not powered: powers up on the next move",
@@ -141,6 +157,42 @@ impl Lens for Vcm {
 
     fn position(&mut self) -> Result<u16> {
         self.position.ok_or(Status::NOT_SUPPORTED)
+    }
+
+    fn direction(&mut self) -> Result<FocusDirection> {
+        Ok(self.direction)
+    }
+
+    fn settle_us(&mut self, _distance: u16) -> Result<Option<u32>> {
+        Ok(self.settle_us)
+    }
+}
+
+/// The `direction` config: which way focus moves as the position goes up.
+fn direction_from_config(cfg: &Config<'_>) -> Result<FocusDirection> {
+    match cfg.get("direction") {
+        None => Ok(FocusDirection::Unknown),
+        Some(ConfigValue::Str(name)) if name.eq_ignore_ascii_case("unknown") => {
+            Ok(FocusDirection::Unknown)
+        }
+        Some(ConfigValue::Str(name)) if name.eq_ignore_ascii_case("near") => {
+            Ok(FocusDirection::TowardNear)
+        }
+        Some(ConfigValue::Str(name)) if name.eq_ignore_ascii_case("far") => {
+            Ok(FocusDirection::TowardFar)
+        }
+        Some(_) => Err(Status::INVALID_ARGUMENT),
+    }
+}
+
+/// The `settle_us` config: a settle time for every move, if the board has one.
+fn settle_from_config(cfg: &Config<'_>) -> Result<Option<u32>> {
+    match cfg.get("settle_us") {
+        None => Ok(None),
+        Some(ConfigValue::Int(us)) => u32::try_from(us)
+            .map(Some)
+            .map_err(|_| Status::INVALID_ARGUMENT),
+        Some(_) => Err(Status::INVALID_ARGUMENT),
     }
 }
 
