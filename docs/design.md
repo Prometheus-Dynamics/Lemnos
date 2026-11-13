@@ -408,3 +408,10 @@ The reference set (`testing/bench` is its harness):
   Lemnos's own driver packages.
 - Hardware's work is never done in software in its place. A job a block cannot do fails.
 - No sensor bridge. No look catalogue in Lemnos.
+- Slots, not A/B: each slot's root filesystem is an EROFS image file on one ext4 data partition,
+  checked by dm-verity with the root hash from the signed bundle manifest, and its kernel, device
+  tree and initramfs sit on the FAT boot partition. Any number of slots side by side. The
+  operating system's own tooling leads slot management (boot chain, bundle builder, updater and
+  command line); the `system-slots` driver is the board side and writes the same files and boot
+  record, so either can read what the other wrote. A trial that is never confirmed falls back to
+  the default, so a board with a single slot needs no backup.

@@ -57,6 +57,13 @@ python3 scripts/generate-builtins.py --check
 | `host-clock` | no contract | nothing | Runs. Shows the kernel's clock source and whether an RTC set the clock, as values |
 | `hw-watchdog` | no contract | `device`: a watchdog node | Runs. Opening the node arms the watchdog; the driver feeds it. It never sets the timeout |
 
+## The board's own system
+
+| Driver | Provides | Needs | State |
+|---|---|---|---|
+| `system-slots` | `system.slots/1` | nothing; `data` and `boot` partitions, `record`, `keys`, `boot_args` in `config` (`docs/slots.md`) | Serves its contract. Installs a slot bundle as a long job, streamed or from a file in `.incoming`, checked against its manifest; a signature is always checked and shown, and `require_signed` refuses bundles no trusted key signed (off by default). Sets the default, boots a slot on trial, confirms, removes and keeps the last few. Never over the running or the default slot. Untested on board (`I5.md`) |
+| `system-reboot` | `system.reboot/1` | nothing | Serves its contract. Runs `systemctl reboot` |
+
 ## USB
 
 | Driver | Provides | Needs | State |
@@ -204,6 +211,8 @@ One crate each under `contracts/`. The numbers are the method numbers on the wir
 | `codec.block/1` | 1 info, 2 block, 3 job_stream, 4 counters | `rk-mpp`, `rk-iep`, `v4l2-stateless`, `a733-di`, `k230-vpu`, `a733-video` |
 | `npu/1` | 1 info, 2 job_stream, 3 load, 4 unload, 5 attach, 6 detach, 7 counters | `rknpu` |
 | `usb.function/1` | 1 info, 2 endpoint, 3 data_stream, 4 state, 5 control_in, 6 control_out, 7 control_stall, 8 set_halt, 9 cancel, 10 counters | `usb-gadget` |
+| `system.slots/1` | 1 list, 2 install (a long job), 3 write, 4 set_default, 5 trial, 6 confirm, 7 remove, 8 pin, 9 set_keep, 10 accept, 11 install_file (a long job) | `system-slots` |
+| `system.reboot/1` | 1 reboot | `system-reboot` |
 
 A camera is not one contract. A consumer finds a `camera.sensor/1` device and follows the board
 file's `link` to its receiver and from there to its ISP. A USB camera is one device with

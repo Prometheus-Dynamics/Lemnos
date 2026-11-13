@@ -49,6 +49,8 @@ pub fn drivers() -> Vec<DriverEntry> {
         entry::<lemnos_driver_rp1_csi2::Rp1Csi2>(),
         entry::<lemnos_driver_status_light::StatusLight>(),
         entry::<lemnos_driver_sunxi_vin::SunxiVin>(),
+        entry::<lemnos_driver_system_slots::SystemSlots>(),
+        entry::<lemnos_driver_system_slots::SystemReboot>(),
         entry::<lemnos_driver_thermal_zone::ThermalZone>(),
         entry::<lemnos_driver_usb_gadget::UsbGadget>(),
         entry::<lemnos_driver_uvc::Uvc>(),
